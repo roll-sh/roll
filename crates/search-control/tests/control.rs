@@ -595,7 +595,8 @@ async fn parallel_ngram_documents_are_held_to_the_node_analysis_budget() {
     assert_eq!(e.es(&user, &pw, Method::PUT, "/grams", Some(index)).await.0, 200);
     // About 3 GB of grams each, were they indexed.
     let text: String = (0..60_000u32).map(|i| char::from(b'a' + (i.wrapping_mul(2_654_435_761) >> 27) as u8 % 26)).collect();
-    let results = futures_util::future::join_all((0..4).map(|i| e.es(&user, &pw, Method::PUT, &format!("/grams/_doc/{i}"), Some(json!({ "body": text }))))).await;
+    let paths: Vec<String> = (0..4).map(|i| format!("/grams/_doc/{i}")).collect();
+    let results = futures_util::future::join_all(paths.iter().map(|p| e.es(&user, &pw, Method::PUT, p, Some(json!({ "body": text }))))).await;
     for (s, v) in &results {
         assert!(*s == 429 && v["error"]["type"] == "circuit_breaking_exception", "{s} {v}");
     }

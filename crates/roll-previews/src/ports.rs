@@ -818,6 +818,13 @@ pub trait Apps: Send + Sync {
 /// no. It may read a database: it's called off the async workers.
 pub trait Visitors: Send + Sync {
     fn may_open(&self, user: &str, session: &str, project: &str) -> bool;
+    /// Whether `user` (`usr_…`), who made a share link, may still open `project`'s previews: the
+    /// link works only while they do (an account that still signs in, with a role that reveals a
+    /// preview). Unlike [`Visitors::may_open`], no session: the link is theirs, not a visit of
+    /// theirs. A failed lookup is a no. It may read a database: called off the async workers.
+    fn maker_reaches(&self, _user: &str, _project: &str) -> bool {
+        true
+    }
     /// Every name a person goes by where a change's author is written (their roll handle, and the
     /// login of each GitHub account linked to them): how an author is told apart, whichever name
     /// their change carries. It may read a database: it's called off the async workers. An error

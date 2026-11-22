@@ -17,9 +17,11 @@
 //! - pauses every SLM policy (`_roll.inherited`; `last_failure` says why): it doesn't run or
 //!   apply its retention until the branch puts the policy again.
 //! - deactivates every watch, as `_watcher/watch/{id}/_deactivate` does; activating one is the
-//!   branch owner's decision.
+//!   branch owner's decision. Its passwords and `Authorization` headers are sealed to the parent
+//!   (`xpack::watcher::http`), so they don't open on the branch until it gives them again.
 //! - records the connectors, so syncs that read a source with stored credentials stay paused
-//!   on the branch ([`inherited_connector`]).
+//!   on the branch ([`inherited_connector`]): no job of theirs becomes due or starts there until
+//!   the branch puts the connector again or writes its configuration ([`adopt_connector`]).
 //!
 //! Inference endpoints come with the branch and keep working there, their sealed keys included: a
 //! branch is where people try changes on real data, `semantic_text` fields included. Nothing
@@ -56,6 +58,12 @@ fn marker<'a>(cluster: &Cluster, st: &'a ClusterState) -> Option<&'a Value> {
 }
 
 fn me(cluster: &Cluster) -> String {
+    cluster_id(cluster)
+}
+
+/// The cluster's id in roll's catalog (its name without one): what a branch's marker names, and
+/// what connectors' sealed credentials are bound to.
+pub fn cluster_id(cluster: &Cluster) -> String {
     cluster.config.catalog_id.clone().unwrap_or_else(|| cluster.name.clone())
 }
 
@@ -78,6 +86,19 @@ pub fn inherited_repository(cluster: &Cluster, st: &ClusterState, name: &str) ->
 /// Whether connector `id` came with the branch (its syncs stay paused there).
 pub fn inherited_connector(cluster: &Cluster, st: &ClusterState, id: &str) -> bool {
     marker(cluster, st).is_some_and(|m| listed(m, "connectors", id))
+}
+
+/// Makes connector `id` the branch's own (it was put again, or its configuration written): its
+/// syncs run on the branch from now on.
+pub fn adopt_connector(st: &mut ClusterState, id: &str, now_ms: i64) -> EsResult<()> {
+    let Some(Value::Obj(mut m)) = st.metadata.xpack.get(FAMILY, ID).cloned() else { return Ok(()) };
+    let Some(Value::Arr(list)) = m.get_mut("connectors") else { return Ok(()) };
+    let before = list.len();
+    list.retain(|x| x.as_str() != Some(id));
+    if list.len() == before {
+        return Ok(());
+    }
+    store::put(st, FAMILY, ID, Value::Obj(m), now_ms).map(|_| ())
 }
 
 /// Marks what a branch inherited, once (see the module docs). Call it before the cluster's

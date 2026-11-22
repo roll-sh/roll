@@ -428,7 +428,14 @@ async fn query(
         // Dropping objects needs `delete` on the endpoint (an event trigger refuses it otherwise).
         crate::control::SqlAs::Writer { may_drop: may(Action::Delete) }
     };
-    let results = c.query(&id, &body.sql, as_).await?;
+    // Its session names who sent it (`postgres_activity`'s `app`): a token's or a person's id,
+    // never a name someone chose.
+    let app = match grant.as_ref().map(|axum::Extension(g)| g) {
+        Some(g) if g.kind == roll_auth::GrantKind::Session => format!("roll {}", g.user.as_deref().unwrap_or(&g.id)),
+        Some(g) => format!("roll {}", g.id),
+        None => "roll-console".into(),
+    };
+    let results = c.query_tagged(&id, &body.sql, as_, &app).await?;
     Ok(Json(json!({ "results": results, "took_ms": started.elapsed().as_millis() as u64 })))
 }
 

@@ -61,6 +61,13 @@ impl Engine {
         !session.is_empty() && self.visitors.get().is_some_and(|v| v.may_open(user, session, project))
     }
 
+    /// Whether the maker of a share link (`usr_…`) may still open `project`'s previews, as a
+    /// link's maker must: yes while nothing says ([`Engine::visitors`] unset: no accounts, only the
+    /// operator makes links). It reads roll's accounts: call it off the async workers.
+    pub fn maker_reaches(&self, user: &str, project: &str) -> bool {
+        self.visitors.get().is_none_or(|v| v.maker_reaches(user, project))
+    }
+
     /// `POST /v1/previews/{id}/visit {to}`, as a person signed in to roll (`session`, their roll
     /// session): a one-use ticket to `to` (a URL at one of the preview's own hosts), as the URL
     /// that opens it. Only a preview whose project has team access gives one. The URL is the
@@ -155,6 +162,9 @@ mod tests {
     impl Visitors for Ada {
         fn may_open(&self, user: &str, session: &str, _project: &str) -> bool {
             user == "usr_ada" && session == "ses_1" && self.signed_in.load(Ordering::SeqCst) && self.project.load(Ordering::SeqCst)
+        }
+        fn maker_reaches(&self, user: &str, _project: &str) -> bool {
+            user == "usr_ada" && self.project.load(Ordering::SeqCst)
         }
     }
 
@@ -339,7 +349,7 @@ mod tests {
         assert_eq!(visit("/hello", "application/json", Some(&session)).await.0, 401);
         assert_ne!(store.access(&id).unwrap().unwrap().token, token, "leaving link access replaces the link's token");
         // Share links and the CI bypass still open it.
-        let (_, link) = engine.share(&id, 1, "ada").unwrap();
+        let (_, link) = engine.share(&id, 1, "ada", Some("usr_ada")).unwrap();
         let link = link.strip_prefix(&format!("http://{host}")).unwrap();
         let (status, _, cookie, _) = visit(link, "text/html", None).await;
         assert_eq!(status, 302);
@@ -356,5 +366,11 @@ mod tests {
         let (_, _, _, body) = visit("/__roll/feedback.js", "*/*", Some(&shared)).await;
         assert!(body.starts_with("service saw /__roll/feedback.js "), "{body}");
         assert_eq!(send(bypass("/__roll/feedback.js")).await.3, "service saw /__roll/feedback.js with cookies []");
+        // A share link works only while its maker may still open the project's previews: Ada
+        // losing the project ends hers (said), whoever holds it.
+        ada.project.store(false, Ordering::SeqCst);
+        assert_eq!(visit("/hello", "application/json", Some(&shared)).await.0, 401);
+        assert!(store.shares(&id).unwrap().iter().all(|s| s.revoked), "ended for good");
+        assert_eq!(opened("ada's share link ended: they may no longer open the project's previews"), 1);
     }
 }

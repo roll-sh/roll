@@ -130,7 +130,15 @@ fn deny(status: StatusCode, code: &str, message: String, extra: Value) -> Respon
 }
 
 fn invalid_token(access: &Access) -> Response {
-    let mut r = deny(StatusCode::UNAUTHORIZED, "invalid_token", "the token isn't valid: it was revoked, expired, or never existed".into(), json!({}));
+    invalid_token_because(access, "the token isn't valid: it was revoked, expired, or never existed")
+}
+
+/// What an OAuth client gets once roll's policy (`oauth_clients`) leaves it out: its connection
+/// isn't revoked (the policy may allow it again), it just doesn't work.
+pub(crate) const CLIENT_NOT_ALLOWED: &str = "roll's policy doesn't let this client connect: an admin lists the clients that may (the access page's policy, OAuth clients)";
+
+fn invalid_token_because(access: &Access, why: &str) -> Response {
+    let mut r = deny(StatusCode::UNAUTHORIZED, "invalid_token", why.into(), json!({}));
     let meta = format!("Bearer error=\"invalid_token\", resource_metadata=\"{}/.well-known/oauth-protected-resource/v1/mcp\"", access.config.api_url.trim_end_matches('/'));
     if let Ok(v) = HeaderValue::from_str(&meta) {
         r.headers_mut().insert(header::WWW_AUTHENTICATE, v);
@@ -326,6 +334,7 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         // Unused longer than the operator's policy allows: it stops (making it again is a person's
         // choice, not an agent's).
         Ok(Some(g)) if access.policy_now().idle(&g, code_sql::now_ms()) => return invalid_token(&access),
+        Ok(Some(g)) if !access.policy_now().allows_grant(&g) => return invalid_token_because(&access, CLIENT_NOT_ALLOWED),
         Ok(Some(g)) => g,
         // One that waits for an admin, or starts later, says so: its holder isn't left guessing.
         Ok(None) => {
@@ -705,6 +714,17 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
     let resource = lent.as_ref().map(|(_, id)| id.clone()).or_else(|| describe(&target));
     let about = lent.as_ref().map_or(row.product, |(p, _)| p);
     ctx.about = lent.as_ref().map(|(p, _)| *p);
+    // An agent (a call through roll's MCP server) asks a person first for what the policy says
+    // agents always ask about, whatever its token allows (a session is a person, never an agent).
+    if outcome == Outcome::Allow && !session && ctx.mcp.as_ref().is_some_and(|m| !m.quiet) {
+        let env = match &target {
+            Target::One(r) => r.environment.clone(),
+            _ => None,
+        };
+        if policy.agent_asks(about, action, env.as_deref()) {
+            outcome = Outcome::Ask;
+        }
+    }
     let mut approved: Option<roll_auth::Approved> = None;
     match outcome {
         Outcome::Deny => {

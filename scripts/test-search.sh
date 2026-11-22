@@ -32,7 +32,7 @@ for d in crates/search-*/; do
   CRATES+=(-p "$(basename "$d")")
 done
 PATHS=(crates/search-* crates/snowball crates/pg-storage crates/roll-cluster crates/code-sql crates/rolld crates/roll-cli
-       Cargo.toml Cargo.lock scripts/test-search.sh scripts/search-yaml-suites.sh scripts/search-repo-emulators.sh
+       Cargo.toml Cargo.lock scripts/test-search.sh scripts/search-yaml-suites.sh scripts/search-repo-emulators.sh scripts/search-connectors-e2e.sh
        docs/search/compatibility.md .github/workflows/search.yml tests/search
        apps/dashboard/src/lib/search-console.ts apps/dashboard/src/lib/search-docs.ts
        apps/dashboard/src/lib/search-console.test.ts apps/dashboard/src/lib/search-docs.test.ts
@@ -130,6 +130,8 @@ if [[ $unit_only == 0 ]]; then
   yaml_suite roll-os target/search-yaml/roll-opensearch.json
   yaml_suite roll-os-sql target/search-yaml/roll-opensearch-sql.json
   extended_suites
+  # Connector syncs against real Postgres and MinIO.
+  scripts/search-connectors-e2e.sh
   # The gcs and azure snapshot repositories against fake-gcs-server and Azurite.
   scripts/search-repo-emulators.sh
   if [[ -f crates/search-server/tests/differential.rs ]]; then

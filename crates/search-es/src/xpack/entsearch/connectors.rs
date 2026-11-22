@@ -14,6 +14,7 @@ use crate::obj;
 use crate::rest::{Ctx, Reply};
 use crate::json::locate::{Seg, Target, locate};
 use crate::xpack::{store, unknown_field};
+use super::sync;
 
 pub const CONNECTORS: &str = "connector";
 pub const SYNC_JOBS: &str = "connector.sync_job";
@@ -116,12 +117,17 @@ async fn create(ctx: &Ctx<'_>, id: String) -> EsResult<(bool, String)> {
         return Err(EsError::action_request_validation(&errors));
     }
     let now = ctx.now_ms;
+    let user = crate::xpack::internal::stored_user(crate::xpack::security::principal(ctx));
     let created = ctx
         .cluster
         .update(move |st| {
             check_index_name(st, &id, body.get("index_name"))?;
-            let c = new_connector(&id, &body);
-            store::put(st, CONNECTORS, &id, c, now)
+            let Value::Obj(mut c) = new_connector(&id, &body) else { return Err(not_found(&id)) };
+            sync::config::fill_schema(&mut c);
+            remember_user(st, &id, &c, user, now)?;
+            // Put again (on a branch, or from before roll ran syncs): the cluster's own now.
+            sync::adopt(st, &id, now)?;
+            store::put(st, CONNECTORS, &id, Value::Obj(c), now)
         })
         .await?;
     Ok((created, String::new()))
@@ -150,7 +156,9 @@ fn live(st: &crate::meta::ClusterState, id: &str, include_deleted: bool) -> EsRe
 pub fn get(ctx: &Ctx) -> EsResult<Reply> {
     let id = ctx.path_param("connector_id").unwrap_or_default();
     let include_deleted = ctx.bool_param("include_deleted", false)?;
-    Reply::ok(live(&ctx.state(), id, include_deleted)?)
+    let mut c = live(&ctx.state(), id, include_deleted)?;
+    sync::config::redact(&mut c);
+    Reply::ok(c)
 }
 
 pub fn list(ctx: &Ctx) -> EsResult<Reply> {
@@ -191,7 +199,16 @@ pub fn list(ctx: &Ctx) -> EsResult<Reply> {
         k(a).cmp(&k(b))
     });
     let count = all.len();
-    let results: Vec<Value> = all.into_iter().skip(from as usize).take(size as usize).cloned().collect();
+    let results: Vec<Value> = all
+        .into_iter()
+        .skip(from as usize)
+        .take(size as usize)
+        .map(|c| {
+            let mut c = c.clone();
+            sync::config::redact(&mut c);
+            c
+        })
+        .collect();
     Reply::ok(obj! { "count" => count, "results" => Value::Arr(results) })
 }
 
@@ -205,6 +222,7 @@ pub async fn delete(ctx: &Ctx<'_>) -> EsResult<Reply> {
             let c = live(st, &id, hard)?;
             if hard {
                 store::remove(st, CONNECTORS, &id);
+                store::remove(st, sync::RECORDS, &id);
             } else {
                 let mut c = c;
                 if let Value::Obj(m) = &mut c {
@@ -835,6 +853,10 @@ pub async fn update(ctx: &Ctx<'_>) -> EsResult<Reply> {
     }
     let id = ctx.path_param("connector_id").unwrap_or_default().to_string();
     let now_ms = ctx.now_ms;
+    let (sealer, unsealed) = (ctx.cluster.config.sealer.clone(), ctx.cluster.config.unsealed_secrets);
+    let user = crate::xpack::internal::stored_user(crate::xpack::security::principal(ctx));
+    let cluster = ctx.cluster;
+    let me = crate::branch::cluster_id(cluster);
     let noop = ctx
         .cluster
         .update(move |st| {
@@ -970,6 +992,35 @@ pub async fn update(ctx: &Ctx<'_>) -> EsResult<Reply> {
                 }
                 _ => {}
             }
+            let mut adopting: Option<Vec<String>> = None;
+            match api {
+                // The service now runs on roll (or another service does): its schema.
+                Api::ConnectorUpdateServiceType | Api::ConnectorUpdateNative => sync::config::fill_schema(&mut m),
+                // The sync runs as whoever configured the connector last; a waiting connector
+                // whose configuration is written is the cluster's own (with only the
+                // credentials this write gives: `protect`).
+                Api::ConnectorUpdateConfiguration => {
+                    if sync::waits_for_adoption(cluster, st, &id) {
+                        // The fields this write gives: only their credentials are kept.
+                        // As the write itself chose them: a `configuration` object, else `values`.
+                        let given = match (body.get("configuration"), body.get("values")) {
+                            (Some(Value::Obj(c)), _) => Some(c),
+                            (_, Some(Value::Obj(v))) => Some(v),
+                            _ => None,
+                        };
+                        adopting = Some(given.map(|g| g.keys().cloned().collect()).unwrap_or_default());
+                    }
+                    remember_user(st, &id, &m, user, now_ms)?;
+                    sync::adopt(st, &id, now_ms)?;
+                }
+                _ => {}
+            }
+            sync::config::protect(&mut m, &before, sealer.as_deref(), unsealed, &me, adopting.as_deref()).map_err(|field| {
+                EsError::illegal_argument(format!(
+                    "[{field}] is a sensitive value, and this node has no key to seal it with: set ROLL_SECRET_KEY on the node to store a connector's credentials (roll never stores them in the clear)"
+                ))
+            })?;
+            sync::mark_current(st, now_ms)?;
             store::put(st, CONNECTORS, &id, updated_doc(m), now_ms).map(|_| false)
         })
         .await?;
@@ -1087,37 +1138,59 @@ pub async fn sync_job_post(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let id = crate::meta::names::time_based_id();
     let out = id.clone();
     let now_ms = ctx.now_ms;
-    ctx.cluster
-        .update(move |st| {
-            let Some(c) = st.metadata.xpack.get(CONNECTORS, &cid).filter(|c| c.get("deleted") != Some(&Value::Bool(true))).cloned() else {
-                return Err(EsError::resource_not_found(format!("Connector with id '{cid}' does not exist.")));
-            };
-            let now = now_nanos_string();
-            let mut snap = Map::new();
-            snap.insert("id".into(), cid.clone().into());
-            let filtering = c.get("filtering").and_then(Value::as_array).and_then(|f| f.first()).and_then(|f| f.get("active")).cloned().unwrap_or(Value::Null);
-            snap.insert("filtering".into(), filtering);
-            for k in ["index_name", "language", "pipeline", "service_type"] {
-                if let Some(v) = c.get(k) {
-                    snap.insert(k.into(), v.clone());
-                }
-            }
-            // Access control syncs write the connector's ACL index.
-            if job_type == "access_control"
-                && let Some(Value::Str(i)) = snap.get_mut("index_name")
-            {
-                *i = format!(".search-acl-filter-{i}");
-            }
-            snap.insert("configuration".into(), c.get("configuration").cloned().unwrap_or_else(Value::object));
-            let job = obj! {
-                "id" => id.clone(), "connector" => Value::Obj(snap), "created_at" => now.clone(), "deleted_document_count" => 0,
-                "indexed_document_count" => 0, "indexed_document_volume" => 0, "job_type" => job_type, "last_seen" => now,
-                "metadata" => obj! {}, "status" => "pending", "total_document_count" => 0, "trigger_method" => trigger,
-            };
-            store::put(st, SYNC_JOBS, &id, job, now_ms).map(|_| ())
-        })
-        .await?;
+    ctx.cluster.update(move |st| insert_job(st, &cid, &job_type, &trigger, &id, now_ms)).await?;
     Ok(Reply::Body(201, obj! { "id" => out }))
+}
+
+/// Stores a new `pending` job of connector `cid`, with its snapshot of the connector (the
+/// sensitive configuration values of a connector roll runs left out).
+pub(crate) fn insert_job(st: &mut crate::meta::ClusterState, cid: &str, job_type: &str, trigger: &str, id: &str, now_ms: i64) -> EsResult<()> {
+    let Some(c) = st.metadata.xpack.get(CONNECTORS, cid).filter(|c| c.get("deleted") != Some(&Value::Bool(true))).cloned() else {
+        return Err(EsError::resource_not_found(format!("Connector with id '{cid}' does not exist.")));
+    };
+    let now = now_nanos_string();
+    let mut snap = Map::new();
+    snap.insert("id".into(), cid.into());
+    let filtering = c.get("filtering").and_then(Value::as_array).and_then(|f| f.first()).and_then(|f| f.get("active")).cloned().unwrap_or(Value::Null);
+    snap.insert("filtering".into(), filtering);
+    for k in ["index_name", "language", "pipeline", "service_type"] {
+        if let Some(v) = c.get(k) {
+            snap.insert(k.into(), v.clone());
+        }
+    }
+    // Access control syncs write the connector's ACL index.
+    if job_type == "access_control"
+        && let Some(Value::Str(i)) = snap.get_mut("index_name")
+    {
+        *i = format!(".search-acl-filter-{i}");
+    }
+    snap.insert("configuration".into(), c.get("configuration").cloned().unwrap_or_else(Value::object));
+    let mut snap = Value::Obj(snap);
+    if sync::config::runs(&c) {
+        sync::config::redact_configuration(&mut snap);
+    } else {
+        // Only a sealed value, which means nothing to a client.
+        sync::config::redact(&mut snap);
+    }
+    let job = obj! {
+        "id" => id, "connector" => snap, "created_at" => now.clone(), "deleted_document_count" => 0,
+        "indexed_document_count" => 0, "indexed_document_volume" => 0, "job_type" => job_type, "last_seen" => now,
+        "metadata" => obj! {}, "status" => "pending", "total_document_count" => 0, "trigger_method" => trigger,
+    };
+    store::put(st, SYNC_JOBS, id, job, now_ms).map(|_| ())
+}
+
+/// Keeps who configured a connector roll runs ([`sync::RECORDS`]): its syncs run as them.
+fn remember_user(st: &mut crate::meta::ClusterState, id: &str, c: &Map, user: Option<Value>, now_ms: i64) -> EsResult<()> {
+    if !sync::config::runs(&Value::Obj(c.clone())) {
+        return Ok(());
+    }
+    let mut rec = st.metadata.xpack.get(sync::RECORDS, id).and_then(Value::as_object).cloned().unwrap_or_default();
+    match user {
+        Some(u) => rec.insert("user".into(), u),
+        None => rec.shift_remove("user"),
+    };
+    store::put(st, sync::RECORDS, id, Value::Obj(rec), now_ms).map(|_| ())
 }
 
 pub fn sync_job_get(ctx: &Ctx) -> EsResult<Reply> {

@@ -132,6 +132,45 @@ const PASSWORD: &str = "watch password";
 pub(crate) const PASSWORD_KIND: &str = PASSWORD;
 const AUTH_HEADER: &str = "watch authorization header";
 
+/// A kind of sealed value bound to this cluster (`<kind>:<cluster id>`, as connectors' are): a
+/// sealed value carried to another cluster's state doesn't open there.
+fn bound(cluster: &Cluster, kind: &str) -> String {
+    format!("{kind}:{}", crate::branch::cluster_id(cluster))
+}
+
+/// A stored template with its secrets sealed under this node's key and bound to this cluster
+/// ([`bound`]): a value in the clear (kept by a node without a key) is sealed, and one sealed
+/// before the binding, under the bare kind, is opened and sealed again ([`crate::seal::seal_leftovers`]).
+pub fn rebind(cluster: &Cluster, stored: &Value, sealer: &crate::seal::Sealer) -> Value {
+    let one = |kind: &str, s: &str| -> String {
+        let to = bound(cluster, kind);
+        if !crate::seal::is_sealed(s) {
+            return sealer.seal_text(&to, s);
+        }
+        if sealer.open_text(&to, s).is_some() {
+            return s.to_string();
+        }
+        match sealer.open_text(kind, s) {
+            Some(plain) => sealer.seal_text(&to, &plain),
+            None => s.to_string(),
+        }
+    };
+    let mut v = stored.clone();
+    if let Some(Value::Obj(a)) = v.as_object_mut().and_then(|m| m.get_mut("auth")).and_then(|a| a.as_object_mut()).and_then(|a| a.get_mut("basic"))
+        && let Some(p) = a.get("password").map(Value::to_es_string)
+    {
+        a.insert("password".into(), one(PASSWORD, &p).into());
+    }
+    if let Some(Value::Obj(h)) = v.as_object_mut().and_then(|m| m.get_mut("headers")) {
+        for (k, val) in h.iter_mut() {
+            if k.eq_ignore_ascii_case("authorization") && let Value::Str(s) = val {
+                *val = Value::from(one(AUTH_HEADER, s));
+            }
+        }
+    }
+    v
+}
+
 /// A normalized template as the cluster stores it: its password and `Authorization` headers
 /// sealed ([`crate::seal`]; refused in the clear on a node without a key). A value that looks
 /// sealed is kept only when `trusted` says it's the cluster's own (the stored watch's, kept by
@@ -139,7 +178,7 @@ const AUTH_HEADER: &str = "watch authorization header";
 /// elsewhere for the node to open and send to its URL.
 pub fn seal(cluster: &Cluster, stored: &Value, trusted: &dyn Fn(&str) -> bool) -> EsResult<Value> {
     let seal_one = |kind: &str, s: &str| -> EsResult<String> {
-        if crate::seal::is_sealed(s) && trusted(s) { Ok(s.to_string()) } else { crate::seal::seal_given(cluster, kind, s) }
+        if crate::seal::is_sealed(s) && trusted(s) { Ok(s.to_string()) } else { crate::seal::seal_given(cluster, &bound(cluster, kind), s) }
     };
     let mut v = stored.clone();
     if let Some(Value::Obj(a)) = v.as_object_mut().and_then(|m| m.get_mut("auth")).and_then(|a| a.as_object_mut()).and_then(|a| a.get_mut("basic"))
@@ -203,7 +242,7 @@ pub fn render(cluster: &Cluster, stored: &Map, render: &dyn Fn(&Value) -> EsResu
     let mut headers = Vec::new();
     for (k, v) in stored.get("headers").and_then(Value::as_object).into_iter().flatten() {
         let v = match v {
-            Value::Str(t) if k.eq_ignore_ascii_case("authorization") => Value::from(crate::seal::open(cluster, AUTH_HEADER, t)?),
+            Value::Str(t) if k.eq_ignore_ascii_case("authorization") => Value::from(crate::seal::open(cluster, &bound(cluster, AUTH_HEADER), t)?),
             other => other.clone(),
         };
         headers.push((k.clone(), render(&v)?.0));
@@ -224,7 +263,7 @@ pub fn render(cluster: &Cluster, stored: &Map, render: &dyn Fn(&Value) -> EsResu
         }
     };
     let auth = match stored.get("auth").and_then(|a| a.get("basic")) {
-        Some(b) => Some((b.get("username").map(Value::to_es_string).unwrap_or_default(), crate::seal::open(cluster, PASSWORD, &b.get("password").map(Value::to_es_string).unwrap_or_default())?)),
+        Some(b) => Some((b.get("username").map(Value::to_es_string).unwrap_or_default(), crate::seal::open(cluster, &bound(cluster, PASSWORD), &b.get("password").map(Value::to_es_string).unwrap_or_default())?)),
         None => None,
     };
     Ok(Request {

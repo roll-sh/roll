@@ -296,8 +296,9 @@ impl Loaded {
     fn pinned(&self) -> bool {
         // Open contexts' searchers live only in memory: pinned exactly until the last one is
         // closed or expires.
-        // Running OpenSearch jobs (ISM steps) write through the cluster like requests do.
-        self.cluster.contexts.latest_expiry().is_some() || !self.cluster.tasks.is_empty() || self.cluster.jobs.busy()
+        // Running OpenSearch jobs (ISM steps) and connector syncs write through the cluster like
+        // requests do.
+        self.cluster.contexts.latest_expiry().is_some() || !self.cluster.tasks.is_empty() || self.cluster.jobs.busy() || self.cluster.xpack.connector_syncs.busy()
     }
 }
 
@@ -1265,6 +1266,7 @@ impl Node {
         cfg.unsealed_secrets = self.cfg.unsealed_secrets;
         cfg.links = self.cfg.links.clone();
         cfg.catalog_id = spec.catalog_id.clone();
+        cfg.owner = spec.owner.clone();
         cfg.secret_refs = self.cfg.secret_refs.clone();
         cfg.branch_of = spec.branch_of.clone();
         // Snapshot contents are durable only with object storage behind the cluster.
@@ -1288,6 +1290,7 @@ impl Node {
             Ok(n) => tracing::info!(cluster = spec.name, records = n, "sealed secrets stored in the clear"),
             Err(e) => tracing::warn!(cluster = spec.name, error = %e.reason(), "sealing secrets stored in the clear failed"),
         }
+        Box::pin(search_es::xpack::entsearch::sync::adopt_existing(&cluster)).await.map_err(|e| anyhow::anyhow!("pausing the connectors from before roll ran syncs: {}", e.reason()))?;
         let mut stats = persist::RecoveryStats::default();
         let data = match data_store {
             Some(ds) => {

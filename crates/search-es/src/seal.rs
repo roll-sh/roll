@@ -97,9 +97,16 @@ pub fn may_store(cluster: &Cluster) -> bool {
 /// client must not plant one (copied from a snapshot, or another cluster on the node) for the
 /// node to open and send where the client chooses. Refused on a node without a key ([`keyless`]).
 pub fn seal_given(cluster: &Cluster, kind: &str, plain: &str) -> EsResult<String> {
-    match &cluster.config.sealer {
+    seal_given_with(cluster.config.sealer.as_deref(), cluster.config.unsealed_secrets, kind, plain)
+}
+
+/// [`seal_given`] with the node's sealer and its opt-in in hand (inside a state update): the one
+/// place a secret a client gives is sealed, kept as given on a node that opted in
+/// ([`crate::ClusterConfig::unsealed_secrets`]), or refused ([`keyless`]).
+pub fn seal_given_with(sealer: Option<&Sealer>, unsealed: bool, kind: &str, plain: &str) -> EsResult<String> {
+    match sealer {
         Some(s) => Ok(s.seal(kind, plain)),
-        None if cluster.config.unsealed_secrets => Ok(plain.to_string()),
+        None if unsealed => Ok(plain.to_string()),
         None => Err(keyless(kind)),
     }
 }
@@ -145,7 +152,11 @@ pub fn seal_value(cluster: &Cluster, kind: &str, value: crate::json::Value) -> E
 
 /// Seals every secret a cluster keeps in the clear (stored on a node without a key), with this
 /// node's key, and persists it at once: inference endpoints' keys, watches' passwords and
-/// `Authorization` headers, connector and Fleet secrets, snapshot repositories' credentials.
+/// `Authorization` headers (and binds those sealed before watches' were bound to the cluster),
+/// the connector and Fleet secret stores (`_connector/_secret`, `_fleet/secret`), snapshot
+/// repositories' credentials. A connector's own configuration values are the connectors' to seal
+/// (`xpack::entsearch::sync::adopt_existing`, bound to the cluster and the connector): this never
+/// touches them.
 /// Run as the cluster opens; a record changed meanwhile is left for the next open. Returns how
 /// many records it sealed.
 pub async fn seal_leftovers(cluster: &Cluster) -> EsResult<usize> {
@@ -175,8 +186,8 @@ pub async fn seal_leftovers(cluster: &Cluster) -> EsResult<usize> {
     }
     for (id, rec) in st.metadata.xpack.iter(crate::xpack::watcher::WATCHES) {
         let Some(Value::Obj(w)) = rec.get("watch") else { continue };
-        // Already in the cluster's state: its sealed values are its own.
-        let sealed = crate::xpack::watcher::parse::sealed_watch(cluster, w, &|_| true)?;
+        // Sealed, and bound to this cluster (values sealed before the binding sealed again).
+        let sealed = crate::xpack::watcher::parse::rebound_watch(cluster, w, &sealer);
         if &sealed != w {
             let mut r = rec.clone();
             if let Value::Obj(m) = &mut r {
@@ -258,11 +269,12 @@ mod tests {
         assert!(String::from_utf8_lossy(&got.body).contains("conn-3"));
         let shown = call("GET", "/_watcher/watch/w", "").await;
         assert!(!String::from_utf8_lossy(&shown.body).contains(PREFIX), "redacted, not sealed text");
-        // A sealed value copied from elsewhere (another cluster under the same key) isn't kept
-        // as the password: it's sealed again as given, so the node never opens the other's.
+        // A sealed value copied from elsewhere (another cluster under the same key) is never
+        // taken as the password: the watch is refused, and nothing of it stored.
         let planted = Sealer::from_secret("0123456789abcdef0123456789abcdef-k").unwrap().seal(super::super::xpack::watcher::http::PASSWORD_KIND, "victim-pw");
         let watch2 = watch.replace("pw-1", &planted);
-        assert_eq!(call("PUT", "/_watcher/watch/w2?active=false", &watch2).await.status, 201);
+        let r = call("PUT", "/_watcher/watch/w2?active=false", &watch2).await;
+        assert!(r.status == 400 && String::from_utf8_lossy(&r.body).contains("found a sealed value"), "{}", String::from_utf8_lossy(&r.body));
         let state = format!("{:?}", c.state().metadata.xpack);
         assert!(!state.contains(&planted), "the planted sealed value is not stored as it was");
     }

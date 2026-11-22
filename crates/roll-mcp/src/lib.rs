@@ -366,6 +366,15 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
         None if roll_auth::Operator::on(&ext) || !m.config.locked => Principal::Operator,
         None => return unauthorized(&m.config),
     };
+    // The operator's policy can hold every token's and OAuth connection's MCP to lockdown or to
+    // reading, whatever the client's URL asks (roll-access's `mcp_lockdown`, `mcp_read_only`).
+    let (lockdown, readonly) = match (&principal, &m.config.access) {
+        (Principal::Grant(_), Some(a)) => {
+            let p = a.policy_now();
+            (lockdown || p.mcp_lockdown, readonly || p.mcp_read_only)
+        }
+        _ => (lockdown, readonly),
+    };
     let msg: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => return (StatusCode::BAD_REQUEST, Json(rpc_error(Value::Null, -32700, format!("parse error: {e}")))).into_response(),

@@ -409,6 +409,14 @@ pub fn sealed_watch(cluster: &Cluster, w: &Map, trusted: &dyn Fn(&str) -> bool) 
     })
 }
 
+/// A stored watch with its secrets sealed and bound to this cluster ([`http::rebind`]).
+pub fn rebound_watch(cluster: &Cluster, w: &Map, sealer: &crate::seal::Sealer) -> Map {
+    match map_requests(&Value::Obj(w.clone()), &|r| http::rebind(cluster, r, sealer)) {
+        Value::Obj(m) => m,
+        _ => w.clone(),
+    }
+}
+
 /// The sealed values a stored watch holds: what an update may keep as they are.
 pub fn sealed_values(v: &Value, out: &mut std::collections::HashSet<String>) {
     match v {
