@@ -234,12 +234,15 @@ client's `whsec_` secret (24-64 bytes; sealed to the subscription, never shown a
 reads the feed once as the agent, unattended, so what would refuse or ask a person (the token's
 rules, the policy's `agents_ask`) refuses there, before anything is kept, and nobody is asked. Then the callback proves it wants that
 connection's deliveries: a signed `{"type":"verification","challenge"}` it echoes in a 2xx answer,
-good for a day per connection and URL, at most 5 a connection a minute on a node, each refusal in
+good for a day per connection and URL, at most 5 a connection a minute across every node (counted
+in the shared store, on the database's clock), each refusal in
 the audit log; a callback under a path its https origin's `/.well-known/mcp-webhook-receiver.json`
 names (`{"receivers": ["/hooks/"]}`, read through the same guard) is proved without a challenge (else `-32027 CallbackEndpointError` with a category, never what the endpoint said). A subscription is
 keyed by its connection, URL, event and arguments (canonical JSON), so subscribing again refreshes
 it (the same `sub_…` id, its cursor kept, `deliveryStatus` answered); it lives at most an hour
-unless refreshed, 20 a connection. Every 15 seconds each node claims up to 16 due subscriptions to
+unless refreshed, 20 a connection and 100 a person across all their connections (the operator's
+own tokens have only the per-connection limit; `-32025` says which, `scope`). Every 15 seconds each
+node claims, on the database's clock (nodes' own clocks never decide a claim), up to 16 due subscriptions to
 events whose products it runs, again while each claim finds 16 (for up to a minute), one node
 delivering each (only the claim's holder writes back, so a slow round never moves a cursor back),
 8 at a time in tasks of their own, 40 seconds each, and reads each one's feed once a minute (at
@@ -1309,13 +1312,11 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **MCP Events: fair shares and one clock.** From #703's review, still open: a subscriber gets
-   20 subscriptions a connection, so one person (or one owner's tokens) multiplies that by
-   opening connections; the challenge-verification limit is counted per node, so a fleet of N
-   allows N times as many; and delivery claims compare each node's own clock (a node more than 2
-   minutes ahead can deliver beside another; the fenced cursor and a stable `webhook-id` keep it
-   to duplicates). Next: a cap per person or owner across their connections, the verification
-   count in the shared store, and claims on the database's clock as roll-cluster's leases are.
+1. **MCP Events: fair shares and one clock (this PR).** From #703's review: a person's connections
+   now share one allowance (100 subscriptions across their tokens and OAuth connections, beside 20
+   a connection), the challenge-verification limit is counted in the shared store across nodes,
+   and delivery claims and their next-due times use the database's clock, so a node whose clock
+   runs ahead can't take a subscription another node still holds.
 2. **MCP Events: more feeds.** All three delivery modes are on main (poll #692, webhook #703,
    push #710) with `apps.event`, `access.approval` (#708), `previews.event` (#719), `code.landed`
    (#739) and `secrets.event` (#751). Next as products add a log after a cursor: storage's event

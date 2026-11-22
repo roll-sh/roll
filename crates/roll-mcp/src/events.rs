@@ -371,7 +371,11 @@ async fn blocking<T: Send + 'static>(access: &Arc<roll_access::Access>, f: impl 
         Ok(Ok(v)) => Ok(v),
         Ok(Err(roll_access::Error::Forbidden(why))) => Err((-32024, "Forbidden".into(), json!({ "reason": why }))),
         Ok(Err(roll_access::Error::BadRequest(why))) => Err(invalid(why)),
-        Ok(Err(roll_access::Error::TooMany(why))) => Err((-32025, why, json!({ "limit": "subscriptions", "max": roll_access::event_subs::PER_GRANT }))),
+        Ok(Err(roll_access::Error::TooMany(why))) => {
+            // A connection's allowance, or its person's across all their connections.
+            let (scope, max) = if why.contains("person") { ("person", roll_access::event_subs::PER_PERSON) } else { ("connection", roll_access::event_subs::PER_GRANT) };
+            Err((-32025, why, json!({ "limit": "subscriptions", "scope": scope, "max": max })))
+        }
         Ok(Err(e)) => Err(internal(e)),
         Err(e) => Err(internal(e)),
     }
