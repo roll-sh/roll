@@ -394,7 +394,9 @@ every deployment is immutable with instant rollback.
   each, `truncated` past it), killed in the container at `timeout_s` (`roll apps sandbox exec`
   exits with the command's code); `GET` and `PUT …/files?path=` read and write one file of up to
   1 MiB (`roll apps sandbox cp`). At most ten an environment, 0.25–4 vCPUs and 256–8192 MB, metered
-  as a console for as long as each ran, refused at the spend limit or paused. Everything but
+  as a console for as long as each ran; refused at the spend limit or paused, and stopped by the
+  minute's sweep once either happens. A command reaches the container on stdin, never in the
+  host's process list. Everything but
   listing is admin, as a shell is; a command is audited by its length and exit code, never its
   text. The MCP tools are `apps_create_sandbox`, `apps_sandbox_exec`, `apps_list_sandboxes`,
   `apps_get_sandbox` and `apps_delete_sandbox`.
@@ -3243,7 +3245,7 @@ Cloud Run's Direct VPC egress, Fly's WireGuard peering and Heroku's Private Spac
 reach a database or an API that only answers inside the customer's own network. In roll, an
 environment's private network is a WireGuard peer into that network, and routes the app reaches
 through it (`PUT …/environments/{env}/private-network`, `roll apps private-network --secret
-roll://production/WG --route db.corp.internal=10.0.3.4:5432`, `apps_set_private_network`):
+roll://production/WG --route db.acme.corp=10.0.3.4:5432`, `apps_set_private_network`):
 
 - **The config stays in roll secrets.** `secret` is a `roll://` reference to the environment's
   own secret holding the WireGuard config. It's bound to the person who sets it and read as them
@@ -3255,17 +3257,26 @@ roll://production/WG --route db.corp.internal=10.0.3.4:5432`, `apps_set_private_
   `Table` and `FwMark` change how it resolves and routes, and a full tunnel (`0.0.0.0/0`) would
   send the peer's own traffic in: each is refused, said without the config's text, and every key
   must be a WireGuard key (so `wg` never echoes one into a log).
-- **The app changes nothing.** Each route is a name (`db.corp.internal`, with a dot so it never
+- **The app changes nothing.** Each route is a name (`db.acme.corp`, with a dot so it never
   shadows a service) and a `host:port` in the customer's network. A peer container
   (`roll-apps-peer-<service>-<env>`) holds the tunnel in a network namespace of its own, with
   `NET_ADMIN` there and nothing else, a read-only root and its config only in memory (written
   through stdin, never argv, an env or a disk). One forwarder a route (the link relays' pinned
   `socat`, no capabilities but binding its port) shares that namespace and answers the route's
-  name on the project network, so `postgres://db.corp.internal:5432/…` works as it does inside the
+  name on the project network, so `postgres://db.acme.corp:5432/…` works as it does inside the
   customer's network. Each route's port is its own; each name is one service's in the project
-  environment.
+  environment, and never under `.internal` (the project's services' own names there, any of
+  which can be made later).
+- **A route goes into the tunnel, never past it.** A WireGuard route's target is an address
+  inside the config's `AllowedIPs` (not a name, nor a loopback, link-local or broadcast address);
+  a Tailscale route's is a tailnet address (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`) or a MagicDNS
+  name (`….ts.net`), never the node's own port 1055. The forwarders connect only to those, so a
+  closed environment's code can't use the peer's way out to reach anything else.
 - **It's kept running.** It's made before a deploy's instances start, when it's set, and checked
-  each minute on the owner: a peer stopped, a forwarder gone or a config changed is made again.
+  each minute on the owner, each environment on its own and never holding up the minute's other
+  work: a peer stopped, a forwarder gone or a config changed is made again, and one that keeps
+  failing is tried again after 1, 2, 4… minutes (30 at most). One change to a peer runs at a
+  time, and deleting the environment or the service waits for one in flight, then removes it.
   `GET …/private-network` says `running`, `failed: why` or `waiting for a deploy`. Deleting the
   environment or the service takes it, and a takeover keeps it.
 - **Closed environments too.** A closed environment's peer answers on its closed network and
@@ -3277,8 +3288,12 @@ roll://production/WG --route db.corp.internal=10.0.3.4:5432`, `apps_set_private_
   image in userspace with no capability at all, no tun, and its key and state only in memory (an
   ephemeral node; `tailscale up` reads the key from a tmpfs file); it accepts the tailnet's subnet
   routes, and each route's forwarder connects through the node's SOCKS5 server, so a target can be
-  a tailnet address, a subnet router's range or a MagicDNS name. `roll apps private-network
-  --tailscale --secret roll://production/TS_KEY --route api.corp.internal=api.tail1234.ts.net:443`.
+  a tailnet address or a MagicDNS name. The node runs with `--shields-up`: nothing in the tailnet
+  can connect in to it (and through it to the project network). Its key must be reusable and
+  ephemeral: each start is a new node, gone from the tailnet when it stops. `login_server` is a URL
+  the tenant chose, so it must be a public one (refused if it names or resolves to a private
+  address). `roll apps private-network --tailscale --secret roll://production/TS_KEY --route
+  api.acme.corp=api.tail1234.ts.net:443`.
 - **Who may.** Setting or removing it is admin, as a shell is (it reaches into the customer's
   network); its routes and reference are read.
 
@@ -3397,7 +3412,10 @@ roll and nothing else, so a fork's preview can't send its branched data anywhere
     closed network whose proxies serve one CA, so the move is the network's. While any service
     there runs instances, each service's new instances and templates trust both CAs, and the
     proxies switch only once every service on the network trusts the new one
-    (`api.rs::closed_services_on_one_network_move_to_a_new_ca_together`).
+    (`api.rs::closed_services_on_one_network_move_to_a_new_ca_together`). One-off containers
+    (a job, a cron run, a sandbox with the variables, a deployment's own URL's instance) keep the
+    bundle they started with; the switch waits for the environments' live instances only, so one
+    still running past it (a long job) meets a CA it doesn't trust until it ends.
   - **While instances run:** they move to the live image again (a rollback to the active
     deployment, keeping its variables), with a bundle that trusts both the CA its proxies serve
     and the new one, so no running instance meets a CA it doesn't trust. This happens at most

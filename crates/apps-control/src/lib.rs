@@ -323,6 +323,8 @@ pub struct Apps {
     /// One change to an environment's peer at a time (a PUT, a deploy and the minute's check
     /// would otherwise take down each other's half-made peer).
     pub(crate) peer_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// A failing peer's tries so far and when the minute's check may try it again.
+    pub(crate) peer_backoff: Mutex<HashMap<String, (u32, i64)>>,
     /// When closed environments' CAs were last checked (each minute).
     intercepts_checked: std::sync::atomic::AtomicI64,
     /// Private environments' token hashes, by environment, as the owner last read or set them.
@@ -677,6 +679,7 @@ impl Apps {
             viewed_templates: Mutex::new(HashMap::new()),
             peer_status: Mutex::new(HashMap::new()),
             peer_locks: Mutex::new(HashMap::new()),
+            peer_backoff: Mutex::new(HashMap::new()),
             intercepts_checked: std::sync::atomic::AtomicI64::new(0),
             access: Mutex::new(HashMap::new()),
             access_gen: std::sync::atomic::AtomicU64::new(0),
@@ -1452,6 +1455,7 @@ impl Apps {
         let sid = id.to_string();
         for e in self.db(move |s| s.environments(&sid)).await? {
             self.teardown_live(id, &e.name).await;
+            self.drop_peer(id, &e.name).await;
         }
         self.drop_sandboxes(id, None).await;
         for name in self.deps.runtime.list(Some(id)).await {
@@ -1534,6 +1538,7 @@ impl Apps {
         for e in &envs {
             self.teardown_live(id, &e.name).await;
             self.drop_branches(id, &e.name, None).await;
+            self.drop_peer(id, &e.name).await;
         }
         self.drop_sandboxes(id, None).await;
         // Each environment's volume goes with it (a last backup first, kept a week).
@@ -2751,6 +2756,8 @@ impl Apps {
         self.drop_sandboxes(service, Some(env)).await;
         let (sid, e) = (service.to_string(), env.to_string());
         self.db(move |s| s.delete_environment(&sid, &e)).await?;
+        // Its peer after the row (a check in flight finishes first; none starts again).
+        self.drop_peer(service, env).await;
         self.hosts_changed();
         // Its interception's state here goes with it (the network's, and the CA itself, with the
         // project environment's last closed service: `drop_network_if_unused`).

@@ -1373,11 +1373,11 @@ static TOOLS: &[Tool] = &[
     t(
         "apps_set_private_network",
         "Connect a private network",
-        "Reach hosts in your own network (Cloud Run's VPC egress, Fly's WireGuard, a Tailscale tailnet): a WireGuard config, or a Tailscale auth key (kind: tailscale; login_server for Headscale), kept in roll secrets as this environment's secret (secret: roll://ENV/KEY, read as you at each use; PostUp, DNS, Table and full tunnels are refused) and routes, each a name the app connects to (db.corp.internal) and a host:port in your network (a MagicDNS name on a tailnet); a peer answers each name on the project network. Each route has its own port; a closed environment reaches these and still nothing else (admin).",
+        "Reach hosts in your own network (Cloud Run's VPC egress, Fly's WireGuard, a Tailscale tailnet): a WireGuard config, or a Tailscale auth key (kind: tailscale; login_server for Headscale), kept in roll secrets as this environment's secret (secret: roll://ENV/KEY, read as you at each use; PostUp, DNS, Table and full tunnels are refused) and routes, each a name the app connects to (db.acme.corp) and a host:port in your network (a MagicDNS name on a tailnet); a peer answers each name on the project network. Each route has its own port; a closed environment reaches these and still nothing else (admin).",
         "apps",
         "PUT",
         "/v1/apps/services/{service}/environments/{env}/private-network",
-        &[SERVICE, ENV, breq("secret", Ty::Str, "roll://ENV/KEY: the WireGuard config ([Interface] with Address, [Peer]s)"), breq("routes", Ty::Arr, "[{name: db.corp.internal, target: 10.0.3.4:5432}], 1-20, each port its own"), b("kind", Ty::Str, "wireguard (the default) or tailscale"), b("login_server", Ty::Str, "With tailscale: the control server's URL when it isn't Tailscale's (Headscale)")],
+        &[SERVICE, ENV, breq("secret", Ty::Str, "roll://ENV/KEY: the WireGuard config ([Interface] with Address, [Peer]s)"), breq("routes", Ty::Arr, "[{name: db.acme.corp, target: 10.0.3.4:5432}], 1-20, each port its own"), b("kind", Ty::Str, "wireguard (the default) or tailscale"), b("login_server", Ty::Str, "With tailscale: the control server's URL when it isn't Tailscale's (Headscale)")],
     )
     .open_world(),
     t("apps_get_private_network", "Get the private network", "An environment's private network: its secret's reference (never the config), routes, and whether its peer runs (running, failed: why, waiting for a deploy).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/private-network", &[SERVICE, ENV]),
