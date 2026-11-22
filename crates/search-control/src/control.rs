@@ -1638,7 +1638,7 @@ impl Control {
                 // Live documents from shard statistics (no search runs) once every index is
                 // open; the metered `docs` lags until the next sample.
                 let f = crate::meter::engine_figures(&l.cluster);
-                if f.complete() {
+                if f.complete_for_display() {
                     v["docs"] = json!(f.docs);
                 }
                 if let Some(l) = self.cluster_leases() {
@@ -2273,7 +2273,7 @@ impl Control {
         // writes included); otherwise the commit points do. Stored bytes are always the object
         // store's: they are what is billed.
         let docs = match loaded.as_ref().map(|l| engine_figures(&l.cluster)) {
-            Some(f) if f.complete() => f.docs as i64,
+            Some(f) if f.complete_for_display() => f.docs as i64,
             _ => u.docs as i64,
         };
         let indices = match &loaded {

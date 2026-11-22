@@ -273,7 +273,7 @@ async fn view(c: &Control, caller: &Caller, mut d: SearchCluster, with_password:
     if let Some(l) = c.node.get_loaded(&d.name) {
         let f = crate::meter::engine_figures(&l.cluster);
         d.indices = f.indices as i64;
-        if f.complete() {
+        if f.complete_for_display() {
             d.docs = f.docs as i64;
         }
     }
