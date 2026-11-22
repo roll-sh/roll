@@ -174,7 +174,7 @@ export interface Preview {
   /** Its error groups main's preview doesn't have, as its holder last read them. */
   new_errors?: { branch: string; total: number; errors: { service: string; title: string }[] } | null;
   slower_routes?: { branch: string; routes: { name: string; count: number; p50_ms: number; main_p50_ms: number; grew?: GrewSpan | null; /** Its budget, when it's over it. */ budget_ms?: number | null }[] } | null;
-  /** Earlier pushes of the change's services, still reachable on the same data (newest first). */
+  /** Earlier pushes of the change's services, still reachable (newest first), each on its own copy of the data where `own_data` names products. */
   earlier?: { service: string; revision: string; url: string; share_url: string | null; at: number; own_data?: string[] }[];
   /** When its screenshot was taken (`screenshot` below), if it has one. */
   screenshot_at?: number | null;
