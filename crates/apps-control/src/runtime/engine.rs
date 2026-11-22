@@ -313,6 +313,9 @@ fn parse_inspect(body: &[u8]) -> anyhow::Result<Inspect> {
     struct NetSettings {
         #[serde(rename = "Networks", default)]
         networks: Option<std::collections::BTreeMap<String, Endpoint>>,
+        /// The ports as Docker bound them (a port asked for as any free one has its number here).
+        #[serde(rename = "Ports", default)]
+        ports: Option<std::collections::BTreeMap<String, Option<Vec<Binding>>>>,
     }
     #[derive(Deserialize)]
     struct Endpoint {
@@ -356,7 +359,16 @@ fn parse_inspect(body: &[u8]) -> anyhow::Result<Inspect> {
     let bound = |proto: &str| -> std::collections::BTreeMap<u16, u16> {
         c.host.ports.iter().flatten().filter_map(|(k, b)| Some((k.strip_suffix(proto)?.parse().ok()?, b.iter().flatten().find_map(|b| b.port.parse().ok())?))).collect()
     };
-    let (published, published_udp) = (bound("/tcp"), bound("/udp"));
+    let published = bound("/tcp");
+    // UDP's are asked for as any free port: their numbers are where Docker bound them.
+    let published_udp: std::collections::BTreeMap<u16, u16> = c
+        .net
+        .as_ref()
+        .and_then(|n| n.ports.as_ref())
+        .into_iter()
+        .flatten()
+        .filter_map(|(k, b)| Some((k.strip_suffix("/udp")?.parse().ok()?, b.iter().flatten().find_map(|b| b.port.parse().ok())?)))
+        .collect();
     let host_port = main.and_then(|m| published.get(&m).copied()).or_else(|| published.values().next().copied());
     let exposed = main.or_else(|| c.config.as_ref().and_then(|c| c.exposed.as_ref()).and_then(|e| e.keys().find_map(|k| k.strip_suffix("/tcp")?.parse().ok())));
     let cpu_nanos = labels.get("sh.roll.apps.cpu").and_then(|v| v.parse().ok());

@@ -153,10 +153,9 @@ impl Apps {
         }
         let began = Instant::now();
         let Ok(lease) = live.acquire_tpl(tpl).await else { return };
-        let Some(addr) = self.deps.runtime.udp_address(&lease.inst.name, port).await else {
-            live.connect_failed(&lease.inst);
-            return;
-        };
+        // Not published over UDP (an instance from before `udp` was set): the flow ends, and the
+        // instance is left as it is (it isn't broken, and the next deploy publishes it).
+        let Some(addr) = self.deps.runtime.udp_address(&lease.inst.name, port).await else { return };
         let Ok(up) = UdpSocket::bind(SocketAddr::new(if addr.is_ipv4() { IpAddr::from([127, 0, 0, 1]) } else { IpAddr::from([0u16; 8]) }, 0)).await else { return };
         if up.connect(addr).await.is_err() {
             return;

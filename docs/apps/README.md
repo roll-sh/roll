@@ -2953,7 +2953,12 @@ A service whose port speaks UDP (a game server, DNS, WebRTC's media, QUIC of its
   own sockets. One node for now: the fleet's edge doesn't carry UDP.
 
 `api.rs::a_udp_service_answers_on_its_own_port` covers a sleeping instance woken by a datagram,
-with its answer coming back from the port.
+with its answer coming back from the port. On real Docker, `docker.rs::a_udp_service_answers_from_asleep_on_its_port`
+(`pnpm test:apps --docker`) runs socat, asleep, and measures the first answer: 289 ms (2026-11-22).
+That test found what the fake couldn't: an instance without a sandbox published no UDP, and a
+port asked for as any free one has its number only where Docker bound it (`NetworkSettings.Ports`),
+never in the container's settings. Both are fixed. An instance not published over UDP (from
+before `udp` was set) ends the flow and is left alone, rather than replaced as broken.
 
 ## Reaching a service from your machine
 
