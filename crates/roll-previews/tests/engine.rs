@@ -900,6 +900,26 @@ async fn the_release_runs_at_each_new_head_before_services_and_its_schema_change
 }
 
 #[tokio::test]
+async fn a_search_branch_masked_again_in_place_keeps_the_schema_it_was_made_with() {
+    let e = env_with_search(json!({ "enabled": true, "release": { "image": "node:22", "run": "npm run migrate" }, "masking": { "search:srch_logs": { "logs.ip": "redact" } } }));
+    *e.search.schema.lock() = Some((vec!["index logs".into()], vec!["index logs".into(), "field logs.price float".into()]));
+    e.code.open(change("chg_sm", 8));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_sm").unwrap().unwrap();
+    let shown = |e: &Env| e.engine.store.view(e.engine.store.row(&p.id).unwrap()).unwrap().schema_changes;
+    assert_eq!(shown(&e).as_deref(), Some(&["+ field logs.price float".to_string()][..]));
+    // The rules change: the branch is masked again in place, after the change's release wrote its
+    // field there. That's no base: the next head still shows the field as the change's.
+    *e.search.branch_now.lock() = Some(vec!["index logs".into(), "field logs.price float".into()]);
+    let s = e.engine.store.settings(&e.project).unwrap().patched(&json!({ "masking": { "search:srch_logs": { "logs.ip": "email" } } })).unwrap();
+    e.engine.store.put_settings(&e.project, &s).unwrap();
+    e.code.edit("chg_sm", |c| c.head = "cs_8b".into());
+    e.engine.pass().await.unwrap();
+    assert!(e.search.masks.lock().len() >= 2, "masked again: {:?}", e.search.masks.lock());
+    assert_eq!(shown(&e).as_deref(), Some(&["+ field logs.price float".to_string()][..]));
+}
+
+#[tokio::test]
 async fn a_delete_during_a_converge_and_an_unrecorded_branch_leave_nothing_behind() {
     let e = env(json!({ "enabled": true }));
     e.code.open(change("chg_d", 4));
