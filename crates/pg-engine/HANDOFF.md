@@ -18263,3 +18263,120 @@ Found, not fixed (repros in `~/.cache/a278/probe`):
   evaluated (`myleast(10, 1, 20, 33)`: the array is an ARRAY[] expression, not folded to a
   constant before evaluate_function), SQL/JSON constructors' and `age(timestamp ...)`
   costs.
+
+## EXPLAIN plans against PostgreSQL 18.6's, round 4 (agent 285, 2026-11-21)
+
+Harness: agent 278's `~/.cache/a278/rx`, copied to `~/.cache/a285/rx` (`run.sh <port> <label>`,
+`cmp.py`, `classify.py`, `lst.py`, `show.py`; `sub.py <pg> <a> <b>` lists the blocks fixed and
+newly differing between two engine runs over the files of run b). PostgreSQL 18.6 ran in
+`a285-pg` (the pinned reference image, autovacuum off, run by uid 1000 on a data directory in
+`~/.cache/a285/pgdata`). Base `79806dd6c`: 2,431 of 17,654 differ (catalog 989, errors 43, cost
+627, width 228, rows 217, extra-node 121, display 121, other shapes 38, sort-agg 22, join-order 20,
+scan 4, join-method 1). Both sides ran on 2026-11-21 in America/Los_Angeles.
+
+### First candidate (`cand/a285`)
+
+Plan choice:
+- **ORDER BY matches an index by collation identity** (278's find). A pathkey now carries the
+  collation it sorts under by name (`PathKey::ident`: an index column's COLLATE, else what its
+  key derives; an ORDER BY key's derived collation, `derived_collation`), and two keys whose
+  collations are both known match only when they are the same one, a COLLATE on top naming it
+  not part of the expression (a RelabelType to PostgreSQL). In a C database an index on
+  `t COLLATE "C"` no longer orders `ORDER BY t` (PostgreSQL sorts), and orders
+  `ORDER BY t COLLATE "C"` (it was sorted). Keys made elsewhere (merge joins, a join's query
+  keys, Merge Append members, catalogs' indexes) carry no collation and match as before.
+  EXPLAIN names an index scan's order with the index column's collation when it isn't the
+  type's (show_sortorder_options' form), so an Incremental Sort over it is found
+  (`order by u, t` over an index on a "C" column was a full Sort, also on the base), and a
+  presorted key's name drops the collation (show_sort_group_keys); a COLLATE over a column in a
+  scan's target list keeps the column's statistics (an incremental sort's groups).
+- **IN over a FROM subquery planned as a level of its own** (subselect:38, :40, :41; :39 has
+  PostgreSQL's plan, its Subquery Scan's width left, below): `IN (SELECT x
+  FROM (SELECT DISTINCT ON ... | ... GROUP BY ... | ... UNION ...) s)` was a hashed SubPlan
+  (UNION) or a semi join with an extra `ANY_subquery` level over `s` (DISTINCT ON); now the semi
+  join's right side is `s` itself (`any_join`), as pull_up_simple_subquery leaves it after
+  convert_ANY_sublink_to_join, and query_is_distinct_for knows DISTINCT ON and UNION /
+  INTERSECT / EXCEPT (`joinpath::distinct_for`, a set operation leaf of the join search), so a
+  semi join over a subquery distinct on its keys is an inner join (reduce_unique_semijoins). A
+  join side unique-ified over a subquery's columns asks it for an exact target list in EXPLAIN
+  (create_unique_plan), so its Subquery Scan shows; so does a WindowAgg's input
+  (create_windowagg_plan's CP_SMALL_TLIST: window:27's Subquery Scan over a sorted subquery
+  now shows, its widths left, below).
+- **An IN whose select list reads the outer row** (subselect:19, `f3 IN (SELECT upper.f1 + f2
+  ...)`): a LATERAL subquery to convert_ANY_sublink_to_join (PostgreSQL 17+), pulled up, the
+  expression in the semi join's clause; it was a SubPlan run per row.
+- **A one-row VALUES with an uncorrelated sub-select is pulled up** (select:17;
+  pull_up_simple_values takes any expression neither volatile nor set-returning): the
+  sub-select is copied into each place reading the column (an InitPlan each, the join clause's
+  copy planned after the target list's), so `onek.unique1 = bar.i` is an index condition.
+- **A set operation's leaf whose column needs another type is a query level of its own**
+  (union:9-25, :59, :60, select:20; generate_setop_tlist over the leaf's subquery scan): its
+  Subquery Scan computes the coercion (`(2)::numeric` over a Result of width 4), costed as one;
+  unknown literals and typmod-only differences are coerced in the leaf as before.
+
+Estimates:
+- **A SQL function in FROM that isn't inlined (WITH ORDINALITY) is estimated by its ROWS and
+  COST** (rangefuncs, plpgsql, misc_functions: 46 blocks; cost_functionscan): it was 1 row and
+  0.01; a call returning a row, or WITH ORDINALITY, has a width per column (a Nested Loop over
+  it was one byte short).
+- **An aggregation without grouping over a one-row VALUES** reads none of its columns
+  (aggregates:4-213, multirangetypes:432-447): the constants put in for them in the
+  aggregates' arguments, FILTERs and ORDER BYs, then folded, the Result returning nothing
+  (width 0), as the pulled-up VALUES' Vars are replaced. A FROM subquery whose VALUES list has
+  a WITH stays a level of its own (is_simple_subquery's cteList test), as before for other
+  bodies.
+- **A VARIADIC array of constants is a constant** (polymorphism:70-72, :94, :215-217,
+  plpgsql:166-169): eval_const_expressions simplifies the ArrayExpr before the call, so an
+  immutable SQL function over it is evaluated; it was a call costing 0.25.
+- **A FROM-less WHERE costs its qual once** (subselect:1-3, :91; create_group_result_path):
+  a hashed sub-select's table and the comparison, at startup.
+- Golden `a285_plans` (recorded from 18.6).
+
+Regression files' EXPLAINs (full pass, `~/.cache/a285/rx/out-c11`, against `out-base`): 94 more
+match, none newly differ (2,337 differ: catalog 986, errors 43, cost 606, width 232, rows 175,
+display 120, extra-node 101, other shapes 35, sort-agg 22, join-order 12, scan 4, join-method 1).
+TPC-H: base against new on one copied SF 0.05 data directory (`~/.cache/a285/tpch-one.sh`),
+22 of 22 plans identical in text, costs x1.000.
+Verification: quick-check with `QC_CHECKED=1` on `83cae0118` (this commit on `79806dd6c`):
+build, clippy (16 warnings, none new), tests 146 passed in 10 binaries, the same 146 with
+`--profile verify-checked`, regress 51,148 / 51,150 with 0 newly differing, isolation
+1,647 / 1,648, pg_dump 14,609 passed. (The first quick-check failed golden `gsw_minmax_order`,
+the enum change dropped below, and `a5_lifted_merge`: the one-row pull-up had taken a SQL
+function's call, which the engine binds as a sub-select, ahead of `lift`'s handling; it now
+takes real sub-selects only.) No performance gate: the changes are in planning (a collation
+name per index key and ORDER BY key compared when both are known, a few more cases tried per
+IN sub-select and per one-row FROM item); not measured, as a change of that size isn't
+measurable against the lanes' noise.
+
+Dropped:
+- **Enum keys reading btree indexes in order** (enum:34, :35: PostgreSQL's max(col) over an
+  enum's index is a MIN / MAX InitPlan). `key_order` refuses an enum's `<` because the index's
+  entries are in the labels' text order, not the enum's sort order (golden
+  `gsw_minmax_order` returned 'blue' for min; a probe whose labels sort the same both ways had
+  passed). Needs the index key of an enum to be its sort order (storage).
+- generate_setop_tlist's copy-up of a leaf's constants (hack_constants): the Group Key over a
+  UNION showed `('x'::text)` as PostgreSQL's, but the leaf's scan lost the column's width (36
+  against 4: PostgreSQL's leaf keeps computing it) and the cast of a constant folded
+  (`'1'::numeric` for `((1)::numeric)`).
+
+Left (repros in `~/.cache/a285/probe`):
+- join:67 runs with `geqo = on`, `geqo_threshold = 2`: PostgreSQL's genetic search keeps the
+  other of two equal-cost nestings of the semi joins; not the exhaustive search's order.
+- A FROM call that folds to a constant (pull_up_constant_function; tsearch:280-295,
+  polymorphism:181-184; `fc.sql`): `select * from abs(-3) u` stays a Function Scan because
+  `pull_up_consts` replaces a constant item only under a projection all of whose outputs fold
+  (or in a join); PostgreSQL makes the item an RTE_RESULT and substitutes the value either way
+  (`ts_rewrite(query, ...)` over it stays a volatile call over the constant).
+- Subquery Scan widths: a FROM subquery planned apart keeps its whole target list in
+  PostgreSQL (remove_unused_subquery_outputs leaves NULLs of the columns' types), so the nodes
+  under a shown Subquery Scan have the subquery's full width (window:27: 244, the engine 8);
+  a DISTINCT ON subquery's Subquery Scan above a hash join is 4 wide in PostgreSQL (only the
+  key read), 8 in the engine (`s39c.sql`).
+- subselect:19's semi join rows (83 against 9) after the pull-up: eqjoinsel_semi over
+  `upper.f3 = (upper.f1 + f2)::float8`.
+- Set operations' output names above a coerced leaf: `Group Key: (("*SELECT* 1".f1)::double
+  precision)`, the engine `("*SELECT* 1".f1)` (the leaf's cast not in the name).
+- A Merge Append / Merge Join's keys and a join's query keys carry no collation identity yet
+  (`PathKey::ident` None: matched by sort behaviour as before).
+- `count(*)` over `(WITH ... VALUES (true)) s` costs its Aggregate 0.01 less than PostgreSQL
+  (base too).
