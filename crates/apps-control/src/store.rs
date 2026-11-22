@@ -338,6 +338,14 @@ CREATE TABLE IF NOT EXISTS error_groups (
     first_seen INTEGER NOT NULL,
     PRIMARY KEY (service, env, fingerprint)
 ) WITHOUT ROWID;
+-- A no-traffic deployment's own values for some of its environment's variables (an earlier
+-- push on its own copy of the data, roll previews'): sealed, never listed; when its URL was last
+-- visited (it's pruned a day after).
+CREATE TABLE IF NOT EXISTS deploy_overrides (
+    deployment TEXT PRIMARY KEY,
+    vars TEXT NOT NULL,
+    seen_at INTEGER NOT NULL
+) WITHOUT ROWID;
 -- A project's image signing keys (PEM) and whether its image services must meet them
 -- (`signing.rs`).
 CREATE TABLE IF NOT EXISTS project_signing (
@@ -1195,6 +1203,7 @@ impl Store {
             )?;
             c.execute("DELETE FROM deploy_steps WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
             c.execute("DELETE FROM deploy_closed WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
+            c.execute("DELETE FROM deploy_overrides WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
             c.execute("DELETE FROM state WHERE key LIKE ?", [format!("%:{id}/%")])?;
             c.execute("DELETE FROM status_days WHERE key LIKE ?", [format!("%:{id}/%")])?;
             for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans", "env_data", "env_branches", "udp_ports", "env_unscheduled", "sandboxes", "env_peering"] {
@@ -1759,9 +1768,21 @@ impl Store {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )?;
             let live: Vec<String> = c.query("SELECT active FROM environments WHERE service = ? AND active IS NOT NULL", [service], |r| r.get(0))?;
+            // Deployments with their own values (earlier pushes' views): never counted toward
+            // what's kept, pruned a day after their URL was last visited.
+            let views: HashMap<String, i64> = c.query("SELECT o.deployment, o.seen_at FROM deploy_overrides o JOIN deployments d ON d.id = o.deployment WHERE d.service = ?", [service], |r| Ok((r.get(0)?, r.get(1)?)))?.into_iter().collect();
             let mut built: HashMap<String, usize> = HashMap::new();
             let mut out = Vec::new();
             for (id, env, status, image, ended) in rows {
+                if let Some(seen) = views.get(&id) {
+                    if live.contains(&id) || ended >= recent || *seen >= now - 86_400_000 || matches!(status.as_str(), "queued" | "building" | "deploying") {
+                        continue;
+                    }
+                    c.execute("UPDATE deployments SET pruned_at = ?, status = 'removed' WHERE id = ?", params![now, id])?;
+                    c.execute("DELETE FROM deploy_overrides WHERE deployment = ?", [&id])?;
+                    out.push(Pruned { id, image });
+                    continue;
+                }
                 let removed = status == "removed";
                 if image.is_some() && matches!(status.as_str(), "active" | "inactive") {
                     let n = built.entry(env).or_default();
@@ -3540,6 +3561,32 @@ impl Store {
 
     pub fn delete_peering(&self, service: &str, env: &str) -> Result<bool> {
         Ok(self.db.execute("DELETE FROM env_peering WHERE service = ? AND env = ?", [service, env])? > 0)
+    }
+
+    pub fn set_deploy_overrides(&self, deployment: &str, vars: &std::collections::BTreeMap<String, String>) -> Result<()> {
+        let sealed = self.sealer.seal(&format!("deploy-overrides:{deployment}"), &serde_json::to_string(vars).map_err(|e| Error::Internal(e.to_string()))?);
+        self.db.execute("INSERT INTO deploy_overrides (deployment, vars, seen_at) VALUES (?, ?, ?) ON CONFLICT (deployment) DO NOTHING", params![deployment, sealed, self.now()?])?;
+        Ok(())
+    }
+
+    /// A deployment's own variable values, if it has any.
+    pub fn deploy_overrides(&self, deployment: &str) -> Result<Option<std::collections::BTreeMap<String, String>>> {
+        let Some(sealed) = self.db.query_row("SELECT vars FROM deploy_overrides WHERE deployment = ?", [deployment], |r| r.get::<_, String>(0)).optional()? else { return Ok(None) };
+        let json = self.sealer.open(&format!("deploy-overrides:{deployment}"), &sealed)?;
+        Ok(Some(serde_json::from_str(&json).map_err(|e| Error::Internal(e.to_string()))?))
+    }
+
+    /// Its URL was visited now (what keeps it from the prune).
+    pub fn touch_deploy_overrides(&self, deployment: &str) -> Result<()> {
+        self.db.execute("UPDATE deploy_overrides SET seen_at = ? WHERE deployment = ?", params![self.now()?, deployment])?;
+        Ok(())
+    }
+
+    /// [`Store::set_ready`] without the `deploy.ready` event: a deployment with its own values is
+    /// a view (an earlier push), never something to put live.
+    pub fn set_ready_quiet(&self, id: &str) -> Result<bool> {
+        let now = self.now()?;
+        Ok(self.db.execute("UPDATE deployments SET status = ?, finished_at = COALESCE(finished_at, ?) WHERE id = ? AND status = ?", params![DeployStatus::Ready.as_str(), now, id, DeployStatus::Deploying.as_str()])? > 0)
     }
 
     pub fn project_signing(&self, project: &str) -> Result<Option<(Vec<String>, bool)>> {
