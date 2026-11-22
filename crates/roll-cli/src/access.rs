@@ -680,6 +680,29 @@ pub enum Mcp {
         #[arg(long)]
         all_tools: bool,
     },
+    /// Add roll's server to the agents installed here (Claude Code, Cursor, VS Code, Codex), each
+    /// with OAuth (it asks you to sign in; no token is written). Merges, never replaces: a server
+    /// already named roll is left alone.
+    Install {
+        /// Only these clients (default: every one found here).
+        #[arg(long = "client", value_enum)]
+        clients: Vec<Client>,
+        /// Say what would change without changing it.
+        #[arg(long)]
+        dry_run: bool,
+        /// Only these products' tools, or an area of one (as for `roll mcp config`).
+        #[arg(long, value_delimiter = ',')]
+        toolsets: Vec<String>,
+        /// Only tools that read are listed and run.
+        #[arg(long)]
+        readonly: bool,
+        /// What people who can't push to a repo wrote never reaches the agent.
+        #[arg(long)]
+        lockdown: bool,
+        /// Every tool, even for a client with a tool limit (which get search mode otherwise).
+        #[arg(long)]
+        all_tools: bool,
+    },
     /// Requests waiting for your approval (--all: decided ones too).
     Approvals {
         #[arg(long)]
@@ -744,7 +767,7 @@ pub enum Mcp {
     },
 }
 
-#[derive(Clone, Copy, ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum Client {
     ClaudeCode,
     Cursor,
@@ -1442,6 +1465,24 @@ pub async fn mcp(api: &Api, json_out: bool, cmd: Mcp) -> anyhow::Result<()> {
             }
             check_toolsets(&toolsets)?;
             println!("{}", config(client, &with_mode(&server(&api.base), &toolsets, readonly, search, lockdown), with_token.as_deref()));
+        }
+        Mcp::Install { clients, dry_run, toolsets, readonly, lockdown, all_tools } => {
+            check_toolsets(&toolsets)?;
+            let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(std::path::PathBuf::from).ok_or_else(|| anyhow::anyhow!("no home directory (HOME)"))?;
+            let claude = |args: &[&str]| std::process::Command::new("claude").args(args).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success());
+            let here = crate::mcp_install::Here { home, on_path: &crate::mcp_install::on_path, claude: &claude };
+            let clients = if clients.is_empty() { crate::mcp_install::found(&here) } else { clients };
+            if clients.is_empty() {
+                println!("no MCP client found here (Claude Code, Cursor, VS Code, Codex): roll mcp config <client> prints a config to add by hand");
+            }
+            for client in clients {
+                let search = tool_limit(client).is_some() && !all_tools;
+                let url = with_mode(&server(&api.base), &toolsets, readonly, search, lockdown);
+                match crate::mcp_install::install(&here, client, &url, dry_run) {
+                    Ok(o) => println!("{}{o}", if dry_run { "would be " } else { "" }),
+                    Err(e) => eprintln!("{client:?}: {e}"),
+                }
+            }
         }
         Mcp::Approvals { all } => {
             let path = if all { "/v1/access/approvals" } else { "/v1/access/approvals?state=pending" };

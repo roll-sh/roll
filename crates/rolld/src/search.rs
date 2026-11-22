@@ -58,6 +58,16 @@ pub struct SearchArgs {
     /// recently used idle clusters unload.
     #[arg(long = "search-memory-mb", env = "ROLL_SEARCH_MEMORY_MB", default_value_t = 0)]
     pub search_memory_mb: u64,
+    /// Request body bytes all clusters together may have in flight on this node, in MiB (0: no
+    /// node budget). Each cluster's own budget (twice its `max_body_mb`) is charged to it too;
+    /// past it, requests get 429.
+    #[arg(long = "search-max-in-flight-body-mb", env = "ROLL_SEARCH_MAX_IN_FLIGHT_BODY_MB", default_value_t = 4096)]
+    pub search_max_in_flight_body_mb: u64,
+    /// Without ROLL_SECRET_KEY, keep the secrets clients give search clusters (inference keys,
+    /// watch passwords, connector secrets, repository credentials) in the clear instead of
+    /// refusing them. Local development only.
+    #[arg(long = "search-allow-unsealed-secrets", env = "ROLL_SEARCH_ALLOW_UNSEALED_SECRETS", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
+    pub search_allow_unsealed_secrets: bool,
     /// Acknowledge writes once the WAL is in object storage (for nodes with ephemeral disks;
     /// always on in a cluster).
     #[arg(long = "search-sync-objects", env = "ROLL_SEARCH_SYNC_OBJECTS", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
@@ -196,6 +206,7 @@ impl Search {
         cfg.defaults.idle_timeout_s = args.search_idle_unload_s as i64;
         cfg.cache_bytes = args.search_cache_bytes;
         cfg.memory_budget = (args.search_memory_mb > 0).then_some(args.search_memory_mb << 20);
+        cfg.max_in_flight_bytes = (args.search_max_in_flight_body_mb > 0).then(|| usize::try_from(args.search_max_in_flight_body_mb << 20).unwrap_or(usize::MAX));
         cfg.sync_objects |= args.search_sync_objects;
         cfg.history_retention = Duration::from_secs(args.search_history_s);
         cfg.test_features = args.search_test_features;
@@ -230,6 +241,7 @@ impl Search {
         // deployment's key. Without one, watch and Fleet secrets are stored as given (as on
         // Elasticsearch), and a connector roll runs refuses its credentials.
         cfg.sealer = secret_key.and_then(search_control::Sealer::from_secret);
+        cfg.unsealed_secrets = args.search_allow_unsealed_secrets;
         // Behind the edge, cluster URLs name `<cluster>.search.<region>.<domain>` over HTTPS.
         if let Some(p) = public {
             p.search(&mut cfg);

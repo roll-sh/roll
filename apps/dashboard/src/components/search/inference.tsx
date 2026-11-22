@@ -1,6 +1,6 @@
 import { KeyRound, Play, Plus, RefreshCw, Sparkles, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { esJson, searchApi, type InferenceBinding, type InferenceSecrets, type SearchCluster } from "@/lib/search-api";
+import { esJson, searchApi, type BranchRef, type InferenceBinding, type InferenceSecrets, type SearchCluster } from "@/lib/search-api";
 import { secretsApi, type Environment, type Secret } from "@/lib/secrets-api";
 import { Field, Segmented } from "../redis/shared";
 import { btn, ErrorNote, input, Panel, primary } from "../ui";
@@ -131,6 +131,14 @@ export function endpointBody(service: string, task: string, model: string, value
 const TASK_LABELS: Record<string, string> = { text_embedding: "embeddings", sparse_embedding: "sparse", completion: "completion", rerank: "rerank" };
 
 const ID_RE = /^[a-z0-9][a-z0-9._-]{0,99}$/;
+
+/**
+ * The branches (by name) copied from the cluster at or after `boundAt` (Unix ms): each holds the
+ * bound endpoint with the key as it was then, and the secret's sync doesn't follow them.
+ */
+export function branchesHoldingKey(branches: BranchRef[], boundAt: number): string[] {
+  return branches.filter((b) => (b.parent_at ?? b.created_at) >= Math.floor(boundAt / 1000)).map((b) => b.name);
+}
 
 function message(e: unknown) {
   return e instanceof Error ? e.message : String(e);
@@ -309,6 +317,9 @@ export function InferenceTab({ cluster, onOpenConsole }: { cluster: SearchCluste
       setAnswer(summarize(e.task_type, r));
     });
 
+  /** The branches that copied a bound endpoint, key and all: deleting it here leaves theirs. */
+  const holders = (b: InferenceBinding | undefined) => (b ? branchesHoldingKey(cluster.branches, b.bound_at) : []);
+
   const remove = (e: Endpoint) =>
     act("delete", async () => {
       await esJson(cluster.id, "DELETE", `/_inference/${e.task_type}/${encodeURIComponent(e.inference_id)}`);
@@ -388,7 +399,10 @@ export function InferenceTab({ cluster, onOpenConsole }: { cluster: SearchCluste
                         <td className="whitespace-nowrap px-3 py-2 text-right">
                           {deleting === e.inference_id ? (
                             <span className="inline-flex items-center gap-2">
-                              <span className="text-[12px] text-muted">Fields using it stop embedding.</span>
+                              <span className="text-[12px] text-muted">
+                                Fields using it stop embedding.
+                                {holders(b).length > 0 && ` Branches ${holders(b).join(", ")} keep their copy and its key: delete it there too, or rotate ${b?.key}.`}
+                              </span>
                               <button disabled={busy !== null} onClick={() => remove(e)} className={`${btn} hover:border-danger/50 hover:text-danger`}>
                                 {busy === "delete" ? <span className="shimmer">Deleting…</span> : "Delete"}
                               </button>

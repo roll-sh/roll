@@ -16,6 +16,10 @@
 //! go to the catalog's rings with the same pass ([`Meter::observe`]): nothing per cluster runs for them
 //! either, and a cluster's history stays in the catalog wherever it loads next.
 //!
+//! Everything here is keyed by the cluster's catalog id ([`id_of`]), never its name: a deleted
+//! cluster's name may be taken again before the next pass, and the new cluster must not be billed
+//! for, or shown, what the old one did.
+//!
 //! The resident size of a loaded cluster is measured from its engine ([`resident_bytes`]): the
 //! heap its shards hold (segments still in memory, segment readers' heap and caches, indexing
 //! buffers, the version map) plus [`LOADED_BASE_BYTES`] for the cluster itself (state, analysis
@@ -113,6 +117,12 @@ fn shard_heap(st: &search_index::ShardStats) -> u64 {
     st.segment_memory_bytes + st.segment_heap_bytes + st.buffer_bytes + st.version_map_bytes
 }
 
+/// The catalog id the meter keys a cluster by (`search_server::Loaded::id`: its name only on a
+/// node without a catalog).
+pub fn id_of(cluster: &Cluster) -> &str {
+    cluster.config.catalog_id.as_deref().unwrap_or(&cluster.name)
+}
+
 /// A loaded cluster as the meter tracks it.
 struct Resident {
     /// The time up to which its loaded time is accounted (ms).
@@ -125,9 +135,9 @@ struct Resident {
 
 #[derive(Default)]
 struct State {
-    /// Loaded clusters by name.
+    /// Loaded clusters by catalog id.
     loaded: HashMap<String, Resident>,
-    /// Requests counted since the last sample, by cluster name.
+    /// Requests counted since the last sample, by catalog id.
     requests: HashMap<String, i64>,
     /// Clusters whose figures (indices, docs, stored bytes) should be refreshed.
     dirty: HashSet<String>,
@@ -226,13 +236,13 @@ impl Meter {
         Ok(refresh)
     }
 
-    /// Stores what the node observed of cluster `name` since the last pass: its minutes of
+    /// Stores what the node observed of cluster `id` since the last pass: its minutes of
     /// request metrics and its slow log entries. A cluster deleted meanwhile is skipped.
-    pub async fn observe(&self, name: &str, o: search_server::Observed) -> anyhow::Result<()> {
+    pub async fn observe(&self, id: &str, o: search_server::Observed) -> anyhow::Result<()> {
         if o.is_empty() {
             return Ok(());
         }
-        let Some(c) = self.store.by_name(name).await? else { return Ok(()) };
+        let Some(c) = self.store.get(id).await? else { return Ok(()) };
         self.store.record_metrics(&c.id, &o.minutes).await?;
         let entries: Vec<(i64, String)> = o.slow.iter().map(|e| (e.at_ms, e.to_json().to_string())).collect();
         self.store.record_slowlog(&c.id, &entries).await?;
@@ -252,12 +262,12 @@ impl Meter {
 
     /// `resident`: the measured size over the interval; without a measurement (a cluster the
     /// meter can't see), its base plus stored bytes.
-    async fn record(&self, name: &str, at_ms: i64, seconds: i64, requests: i64, resident: Option<i64>) -> anyhow::Result<()> {
+    async fn record(&self, id: &str, at_ms: i64, seconds: i64, requests: i64, resident: Option<i64>) -> anyhow::Result<()> {
         if seconds == 0 && requests == 0 {
             return Ok(());
         }
         // Deleted meanwhile: nothing to bill.
-        let Some(c) = self.store.by_name(name).await? else { return Ok(()) };
+        let Some(c) = self.store.get(id).await? else { return Ok(()) };
         let loaded_bytes = if seconds == 0 { 0 } else { resident.unwrap_or_else(|| LOADED_BASE_BYTES.saturating_add(c.stored_bytes)) };
         let sample = UsageSample { at: at_ms / 1000, seconds, loaded_bytes, requests };
         self.store.record_usage(&c.id, &sample).await
@@ -277,12 +287,12 @@ pub struct MeterHooks(pub Arc<Meter>);
 #[async_trait]
 impl LifecycleHooks for MeterHooks {
     async fn loaded(&self, cluster: &Arc<Cluster>) {
-        self.0.on_loaded(&cluster.name, now_ms(), Some(cluster));
+        self.0.on_loaded(id_of(cluster), now_ms(), Some(cluster));
     }
 
     async fn unloading(&self, cluster: &Arc<Cluster>) {
         let indices = cluster.state().metadata.indices.len() as i64;
-        if let Err(e) = self.0.on_unloading(&cluster.name, now_ms(), Some(indices), Some(resident_bytes(cluster))).await {
+        if let Err(e) = self.0.on_unloading(id_of(cluster), now_ms(), Some(indices), Some(resident_bytes(cluster))).await {
             tracing::warn!(cluster = cluster.name, error = %e, "search metering failed");
         }
     }
@@ -335,23 +345,23 @@ mod tests {
     #[tokio::test]
     async fn loaded_time_is_exact() {
         let (m, s) = meter().await;
-        m.on_loaded("app", 10_000, None);
-        m.count_request("app");
-        m.count_requests("app", 2);
-        assert_eq!(m.sample(70_500).await.unwrap(), vec![("app".to_string(), true)]);
+        m.on_loaded("srch_a", 10_000, None);
+        m.count_request("srch_a");
+        m.count_requests("srch_a", 2);
+        assert_eq!(m.sample(70_500).await.unwrap(), vec![("srch_a".to_string(), true)]);
         // Loaded and refreshed already: listed, not forced.
-        assert_eq!(m.sample(70_600).await.unwrap(), vec![("app".to_string(), false)]);
+        assert_eq!(m.sample(70_600).await.unwrap(), vec![("srch_a".to_string(), false)]);
         // 60 whole seconds now; the 500 ms carry over.
         let t = s.usage_since("srch_a", 0, 100).await.unwrap();
         assert_eq!((t.loaded_seconds, t.requests), (60, 3));
         // Unloading rounds the remainder up: 70.0 s → 71.7 s is 1.7 s → 2 s.
-        m.on_unloading("app", 71_700, Some(4), None).await.unwrap();
+        m.on_unloading("srch_a", 71_700, Some(4), None).await.unwrap();
         let t = s.usage_since("srch_a", 0, 100).await.unwrap();
         assert_eq!(t.loaded_seconds, 62);
-        assert!(!m.is_loaded("app"));
-        assert_eq!(m.take_indices("app"), Some(4));
+        assert!(!m.is_loaded("srch_a"));
+        assert_eq!(m.take_indices("srch_a"), Some(4));
         // Asleep: no rows; the refresh still comes once.
-        assert_eq!(m.sample(200_000).await.unwrap(), vec![("app".to_string(), true)]);
+        assert_eq!(m.sample(200_000).await.unwrap(), vec![("srch_a".to_string(), true)]);
         assert!(m.sample(260_000).await.unwrap().is_empty());
         assert_eq!(s.usage_since("srch_a", 0, 300).await.unwrap().loaded_seconds, 62);
         // Not measurable (no instance): base + stored bytes.
@@ -361,14 +371,14 @@ mod tests {
     #[tokio::test]
     async fn measured_sizes_bill_the_larger_end() {
         let (m, s) = meter().await;
-        m.on_loaded("app", 0, None);
+        m.on_loaded("srch_a", 0, None);
         // Measured only at unload: the whole stay at that size.
-        m.on_unloading("app", 10_000, None, Some(5 << 20)).await.unwrap();
+        m.on_unloading("srch_a", 10_000, None, Some(5 << 20)).await.unwrap();
         let t = s.usage_since("srch_a", 0, 100).await.unwrap();
         assert_eq!((t.loaded_seconds, t.peak_loaded_bytes), (10, 5 << 20));
         assert!((t.loaded_gib_hours - 10.0 * (5 << 20) as f64 / (1u64 << 30) as f64 / 3600.0).abs() < 1e-12);
         // Request-only rows carry no size, so they don't move the peak.
-        m.count_requests("app", 3);
+        m.count_requests("srch_a", 3);
         m.sample(20_000).await.unwrap();
         let t = s.usage_since("srch_a", 0, 100).await.unwrap();
         assert_eq!((t.requests, t.peak_loaded_bytes, t.loaded_seconds), (3, 5 << 20, 10));
@@ -420,7 +430,7 @@ mod tests {
         assert_eq!(index_figures(&c, "nope"), None);
         // The meter measures a cluster it was given.
         let (m, s) = meter().await;
-        m.on_loaded("app", 0, Some(&c));
+        m.on_loaded("srch_a", 0, Some(&c));
         m.sample(60_000).await.unwrap();
         let t = s.usage_since("srch_a", 0, 100).await.unwrap();
         assert_eq!((t.loaded_seconds, t.peak_loaded_bytes), (60, resident_bytes(&c)));
@@ -446,7 +456,7 @@ mod tests {
     #[tokio::test]
     async fn requests_after_unload_are_kept() {
         let (m, s) = meter().await;
-        m.count_request("app");
+        m.count_request("srch_a");
         m.sample(1_000).await.unwrap();
         assert_eq!(s.usage_since("srch_a", 0, 10).await.unwrap().requests, 1);
         // Unknown clusters (deleted) are ignored.

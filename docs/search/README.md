@@ -429,7 +429,9 @@ Elasticsearch-flavor.
   `seeds`) naming a cluster (its name, or its endpoint `<name>.<domain>[:port]`) works too, held
   to the same owner rule, but connects only once the remote has credentials.
 - **Credentials** are a secure setting: sealed under `ROLL_SECRET_KEY` and bound to their row
-  (cluster, alias, remote) in the catalog (`search_remotes`), never returned (`_remote/info`
+  (cluster, alias, remote) in the catalog (`search_remotes`). A node without the key refuses an
+  `api_key` someone pasted (it would be stored in the clear) and keeps one roll made as made
+  (local development); a node that gains the key seals those rows as it starts. Never returned (`_remote/info`
   shows `cluster_credentials: "::es_redacted::"`). The remote authorizes each request with the
   key's access intersected with the local user's `remote_indices` privileges for the alias (the
   cluster's own password is a superuser: everything the key allows), as Elasticsearch does.

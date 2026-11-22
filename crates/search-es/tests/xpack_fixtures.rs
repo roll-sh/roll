@@ -151,6 +151,7 @@ async fn responses_match_elasticsearch() {
     let mut checked = 0;
     for (file, scenario) in scenarios() {
         let mut cfg = ClusterConfig::new("docker-cluster");
+        cfg.unsealed_secrets = true;
         cfg.node_name = "es-node".into();
         // The reference node registers `/tmp` as `path.repo`; each scenario gets its own.
         let repo = std::env::temp_dir().join(format!("roll-xpack-fixtures-{}-{file}", std::process::id()));
