@@ -332,6 +332,27 @@ async fn a_visual_change_waits_for_someone_to_accept_it_at_each_head() {
     assert!(b.api_unread && b.api.is_none(), "{b:?}");
 }
 
+/// What happened to previews, for followers: made, up, gone, in the order it happened, from any
+/// point (`latest`: from now on).
+#[tokio::test]
+async fn previews_events_follow_a_preview_from_made_to_gone() {
+    let e = env(json!({ "enabled": true }));
+    let from = e.engine.store.latest_event().unwrap();
+    e.code.open(change("chg_ev", 4));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_ev").unwrap().unwrap();
+    e.code.edit("chg_ev", |c| c.open = false);
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    let got = e.engine.store.events(from, 100).unwrap();
+    let mine: Vec<(&str, &str)> = got.iter().filter(|x| x.preview == p.id).map(|x| (x.kind.as_str(), x.data["head"].as_str().unwrap_or(""))).collect();
+    assert_eq!(mine, [("created", "cs_4a"), ("ready", "cs_4a"), ("deleted", "cs_4a")]);
+    assert!(got.windows(2).all(|w| w[0].seq < w[1].seq) && got.iter().all(|x| x.project == e.project && x.change.as_deref() == Some("chg_ev")));
+    let second = got[1].seq;
+    assert_eq!(e.engine.store.events(got[0].seq, 100).unwrap().first().map(|x| x.seq), Some(second), "from any point");
+    assert_eq!(e.engine.store.latest_event().unwrap(), got.last().unwrap().seq);
+}
+
 /// What a preview's services use right now (Render's metrics): the running ones, with the memory
 /// each runs with; a service that isn't running has none.
 #[tokio::test]

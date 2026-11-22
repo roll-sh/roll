@@ -727,6 +727,20 @@ impl PageA11y {
     }
 }
 
+/// Something that happened to a preview, for followers (`GET /v1/previews/events`, roll MCP's
+/// event feeds): `created`, `ready` (up after a push or its first deploy; never a sleeping one
+/// waking), `failed` or `deleted`. Ids and kinds only: `data` holds the head.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Event {
+    pub seq: i64,
+    pub at: i64,
+    pub kind: String,
+    pub project: String,
+    pub preview: String,
+    pub change: Option<String>,
+    pub data: serde_json::Value,
+}
+
 /// What a preview's service uses right now (Render's and Railway's metrics): cores of CPU and
 /// resident memory, against the memory it runs with. Only a running service has any.
 #[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
