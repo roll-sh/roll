@@ -621,6 +621,13 @@ pub enum AppsCmd {
         target: Target,
         #[arg(long, requires = "route", conflicts_with = "remove")]
         secret: Option<String>,
+        /// The secret is a Tailscale auth key (the node joins your tailnet) instead of a
+        /// WireGuard config.
+        #[arg(long, requires = "secret")]
+        tailscale: bool,
+        /// With --tailscale: the control server when it isn't Tailscale's (Headscale's URL).
+        #[arg(long, requires = "tailscale")]
+        login_server: Option<String>,
         /// NAME=HOST:PORT, repeated (each port its own).
         #[arg(long, value_name = "NAME=HOST:PORT", requires = "secret")]
         route: Vec<String>,
@@ -3019,7 +3026,7 @@ async fn sandbox(api: &Api, json_out: bool, cmd: SandboxCmd) -> anyhow::Result<(
 pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> {
     let out = match cmd {
         AppsCmd::Sandbox { cmd } => return sandbox(api, json_out, cmd).await,
-        AppsCmd::PrivateNetwork { target, secret, route, remove } => {
+        AppsCmd::PrivateNetwork { target, secret, tailscale, login_server, route, remove } => {
             let svc = service(api, &target).await?;
             let path = format!("{}/private-network", env_path(&svc, &target.env));
             let v = if remove {
@@ -3030,7 +3037,11 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                     .iter()
                     .map(|r| r.split_once('=').map(|(n, t)| json!({ "name": n, "target": t })).ok_or_else(|| anyhow::anyhow!("--route is NAME=HOST:PORT ({r})")))
                     .collect::<anyhow::Result<Vec<_>>>()?;
-                api.call(reqwest::Method::PUT, &path, Some(json!({ "secret": secret, "routes": routes }))).await?
+                let mut body = json!({ "secret": secret, "routes": routes, "kind": if tailscale { "tailscale" } else { "wireguard" } });
+                if let Some(u) = login_server {
+                    body["login_server"] = json!(u);
+                }
+                api.call(reqwest::Method::PUT, &path, Some(body)).await?
             } else {
                 api.get(&path).await?
             };
@@ -3038,7 +3049,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 if v["removed"] == true {
                     println!("its private network is removed");
                 } else {
-                    println!("WireGuard from {} ({})", s(&v["secret"]), s(&v["status"]));
+                    println!("{} from {} ({})", if v["kind"] == "tailscale" { "Tailscale" } else { "WireGuard" }, s(&v["secret"]), s(&v["status"]));
                     for r in v["routes"].as_array().into_iter().flatten() {
                         println!("  {} → {}", s(&r["name"]), s(&r["target"]));
                     }
