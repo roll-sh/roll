@@ -40,8 +40,9 @@ use serde_json::{json, Value};
 pub const MAX_INDICES: usize = 100;
 /// The most indices `inspect` lists (it says how many more there are).
 pub const MAX_LISTED: usize = 10_000;
-/// What one listed index costs in the answer `inspect` builds, besides its strings.
-const LISTED_ROW_BYTES: u64 = 512;
+/// What one listed index costs in the answer `inspect` builds, besides its strings: a map of a
+/// dozen entries (keys, values and the map's own nodes come to about 2 KiB).
+const LISTED_ROW_BYTES: u64 = 2048;
 /// What one string in that answer costs besides its bytes.
 const STRING_BYTES: u64 = 48;
 /// The most alias names one listed index carries (the row says how many more it has).
@@ -216,10 +217,53 @@ fn small(v: &EsValue) -> Value {
     serde_json::from_str(&text).unwrap_or(Value::Null)
 }
 
-/// `inspect`'s answer, serialized, and the charge for it: hold `held` until `body` is sent.
+/// `inspect`'s answer, serialized, and the charge for it, sent with [`Inspected::into_stream`].
 pub struct Inspected {
-    pub body: bytes::Bytes,
-    pub held: search_es::breaker::Reservation,
+    body: bytes::Bytes,
+    held: search_es::breaker::Reservation,
+}
+
+/// How much of `inspect`'s answer one poll hands the connection.
+const SEND_CHUNK: usize = 64 * 1024;
+/// How long a client has to take `inspect`'s answer: past it the answer and its charge are given
+/// back and the connection is closed.
+const SEND_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+
+impl Inspected {
+    /// The answer as a body stream that owns it and its charge: each poll hands on a copy of the
+    /// next [`SEND_CHUNK`] (a slice would keep the whole answer alive), and the answer and its
+    /// charge go once the last chunk is taken, the stream is dropped (the connection closed), or
+    /// [`SEND_DEADLINE`] passes. A client that stops reading holds about one chunk past the
+    /// charge, and the charge only until the deadline.
+    pub fn into_stream(self) -> impl futures::Stream<Item = std::io::Result<bytes::Bytes>> + Send + 'static {
+        let left = std::sync::Arc::new(parking_lot::Mutex::new(Some((self.body, self.held))));
+        let reaper = std::sync::Arc::downgrade(&left);
+        tokio::spawn(async move {
+            tokio::time::sleep(SEND_DEADLINE).await;
+            if let Some(left) = reaper.upgrade() {
+                left.lock().take();
+            }
+        });
+        let (mut off, mut ended) = (0, false);
+        futures::stream::poll_fn(move |_| {
+            if ended {
+                return std::task::Poll::Ready(None);
+            }
+            let mut g = left.lock();
+            let Some((body, _)) = g.as_ref() else {
+                ended = true;
+                return std::task::Poll::Ready(Some(Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "the answer wasn't read in time"))));
+            };
+            let end = (off + SEND_CHUNK).min(body.len());
+            let chunk = bytes::Bytes::copy_from_slice(&body[off..end]);
+            off = end;
+            if off == body.len() {
+                g.take();
+                ended = true;
+            }
+            std::task::Poll::Ready(Some(Ok(chunk)))
+        })
+    }
 }
 
 /// The rows `inspect` answers with, from the remote's `_cat/indices` rows and `/_alias` answer:
@@ -371,8 +415,8 @@ impl Control {
         let aliases = client.get("/_alias").await.ok();
         let streams = client.get("/_data_stream").await.ok();
         let existing = self.roll_names(c).await?;
-        // Everything the answer holds is charged as it's built, and stays charged until the body
-        // is handed to the connection ([`Inspected`]).
+        // Everything the answer holds is charged as it's built, and stays charged while it's sent
+        // ([`Inspected::into_stream`]).
         let mut held = search_es::breaker::Reservation::new(self.node.reindex().control_budget.clone());
         let rows = listing(&cat.rows, aliases.as_ref().map(|a| &a.value), &existing, &mut held).map_err(err)?;
         let mut names = Vec::new();
@@ -844,6 +888,37 @@ mod tests {
         assert!(during > 0 && during < 8 * 1024, "{during}");
         drop((rows, held));
         assert_eq!(budget.used(), 0);
+    }
+
+    /// `inspect`'s answer stays charged while the client doesn't read it, and is given back when
+    /// the connection closes, when the send deadline passes (the connection is then closed), or
+    /// with its last chunk; one poll hands on one chunk.
+    #[tokio::test(start_paused = true)]
+    async fn an_unread_answer_stays_charged_until_the_connection_goes() {
+        use futures::StreamExt;
+        let node = remote::RemoteNode::from_settings(&[]);
+        let budget = node.control_budget.clone();
+        let answer = || {
+            let mut held = search_es::breaker::Reservation::new(budget.clone());
+            held.add(1 << 20, "migrate_listing").unwrap();
+            Inspected { body: vec![b'x'; 1 << 20].into(), held }
+        };
+
+        let mut s = Box::pin(answer().into_stream());
+        assert_eq!(s.next().await.unwrap().unwrap().len(), SEND_CHUNK);
+        tokio::time::sleep(SEND_DEADLINE / 2).await;
+        assert_eq!(budget.used(), 1 << 20);
+        drop(s);
+        assert_eq!(budget.used(), 0);
+
+        let mut s = Box::pin(answer().into_stream());
+        tokio::time::sleep(SEND_DEADLINE + std::time::Duration::from_secs(1)).await;
+        assert_eq!(budget.used(), 0);
+        assert!(s.next().await.unwrap().is_err());
+        assert!(s.next().await.is_none());
+
+        let sent = answer().into_stream().fold(0, |n, c| async move { n + c.unwrap().len() }).await;
+        assert_eq!((sent, budget.used()), (1 << 20, 0));
     }
 
     #[test]

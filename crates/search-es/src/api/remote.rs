@@ -390,7 +390,7 @@ async fn denied_now(names: &[String]) -> Result<Arc<Vec<IpAddr>>, String> {
     if let Some(e) = deny_cache().lock().get(&key)
         && e.at.elapsed() < DENY_NAMES_TTL
     {
-        return if complete(e) { Ok(e.addrs.clone()) } else { Err(unknown(names, e)) };
+        return if complete(e) { Ok(e.addrs.clone()) } else { Err(unknown()) };
     }
     let mut out = Vec::new();
     let mut answered = std::collections::HashSet::new();
@@ -406,9 +406,12 @@ async fn denied_now(names: &[String]) -> Result<Arc<Vec<IpAddr>>, String> {
                 out.extend(addrs.map(|a| unwrap_v4(a.ip())).filter(|ip| !roll_net::private_ip(*ip)));
                 answered.insert(n.clone());
             }
-            // The resolver answered: no such name (nothing to deny for it), or it failed.
+            // No such name (nothing to deny for it) is an answer; a resolver that failed
+            // (SERVFAIL, a timeout, no network) isn't.
             Ok(Err(_)) => {
-                answered.insert(n.clone());
+                if no_such_name(n).await {
+                    answered.insert(n.clone());
+                }
                 failed = true;
             }
             // No answer at all.
@@ -433,15 +436,31 @@ async fn denied_now(names: &[String]) -> Result<Arc<Vec<IpAddr>>, String> {
     out.sort();
     out.dedup();
     let entry = DenyEntry { at, addrs: Arc::new(out), ..entry };
-    let r = if complete(&entry) { Ok(entry.addrs.clone()) } else { Err(unknown(names, &entry)) };
+    let r = if complete(&entry) { Ok(entry.addrs.clone()) } else { Err(unknown()) };
     cache.insert(key, entry);
     r
 }
 
-/// Why a connection is refused while some of the node's own names haven't answered yet.
-fn unknown(names: &[String], e: &DenyEntry) -> String {
-    let missing: Vec<&str> = names.iter().filter(|n| !e.answered.contains(*n)).map(String::as_str).collect();
-    format!("roll hasn't resolved its own addresses yet ({}): try again in a few seconds", missing.join(", "))
+/// Whether the resolver answered that `name` has no addresses: NXDOMAIN, or a name without A
+/// or AAAA records (NODATA). `lookup_host`'s error doesn't tell that from a resolver that failed,
+/// so the name is asked again through hickory; anything but those two answers is a failure.
+async fn no_such_name(name: &str) -> bool {
+    use hickory_resolver::net::{DnsError, NetError, NoRecords};
+    use hickory_resolver::proto::op::ResponseCode;
+    static R: std::sync::OnceLock<Option<hickory_resolver::TokioResolver>> = std::sync::OnceLock::new();
+    let Some(r) = R.get_or_init(|| hickory_resolver::TokioResolver::builder_tokio().ok().and_then(|b| b.build().ok())) else {
+        return false;
+    };
+    matches!(
+        tokio::time::timeout(Duration::from_secs(2), r.lookup_ip(name)).await,
+        Ok(Err(NetError::Dns(DnsError::NoRecordsFound(NoRecords { response_code: ResponseCode::NXDomain | ResponseCode::NoError, .. }))))
+    )
+}
+
+/// Why a connection is refused while some of the node's own names haven't answered yet (the
+/// names aren't said: they're roll's, not the caller's).
+fn unknown() -> String {
+    "roll hasn't resolved its own addresses yet; try again shortly".to_string()
 }
 
 impl reqwest::dns::Resolve for Guarded {
