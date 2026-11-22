@@ -1216,6 +1216,53 @@ pub struct Policy {
     /// request is a gate it must pass.
     #[serde(default)]
     pub approval_rules: Vec<ApprovalRule>,
+    /// What an agent asks a person for first, whatever its token allows: requests made through
+    /// roll's MCP server that one of these covers (Stripe asks before refunds and money movement
+    /// whatever the key may do). CI and scripts calling the API aren't agents here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents_ask: Vec<AskRule>,
+    /// Every MCP connection made with a token or OAuth is in lockdown (`?lockdown=1`, whatever the
+    /// client asks): what people who can't push wrote never reaches the model.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mcp_lockdown: bool,
+    /// Every MCP connection made with a token or OAuth sees and runs only tools that read
+    /// (`?readonly=1`, whatever the client asks).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mcp_read_only: bool,
+}
+
+/// One of the policy's `agents_ask`: a product (or `*`), its actions (all when left out) and
+/// environments (`prod*`; all when left out). A request about no one environment is covered.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AskRule {
+    pub product: String,
+    #[serde(default, skip_serializing_if = "no_actions")]
+    pub actions: Actions,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environments: Option<Vec<String>>,
+}
+
+impl AskRule {
+    /// Whether it covers a request: this product, action and environment.
+    pub fn covers(&self, product: &str, action: Action, environment: Option<&str>) -> bool {
+        (self.product == "*" || self.product == product)
+            && (self.actions.is_empty() || self.actions.has(action))
+            && match (&self.environments, environment) {
+                (Some(list), Some(env)) => list.iter().any(|p| roll_auth::scope::env_covers(p, env)),
+                _ => true,
+            }
+    }
+
+    fn problems(&self, at: &str) -> Option<String> {
+        if self.product != "*" && !roll_auth::scope::PRODUCTS.contains(&self.product.as_str()) {
+            Some(format!("{at}: no product {:?}", self.product))
+        } else if self.environments.as_ref().is_some_and(|l| l.is_empty() || l.len() > 20 || l.iter().any(|s| s.trim().is_empty() || s.len() > 100)) {
+            Some(format!("{at}: environments are 1 to 20 names (or left out)"))
+        } else {
+            None
+        }
+    }
 }
 
 /// A rule of the policy's `approval_rules`, as roll secrets' protected environments name theirs:
@@ -1334,15 +1381,24 @@ impl Policy {
         if self.max_days == Some(0) || self.max_idle_days == Some(0) {
             return Some("max_days and max_idle_days are at least 1 (or null for no limit)".into());
         }
-        if self.approval_rules.len() > 50 {
-            return Some("at most 50 approval rules".into());
+        if self.approval_rules.len() > 50 || self.agents_ask.len() > 50 {
+            return Some("at most 50 approval rules and 50 agent rules".into());
         }
-        self.approval_rules.iter().enumerate().find_map(|(i, r)| r.problems(&format!("approval_rules[{i}]")))
+        self.approval_rules
+            .iter()
+            .enumerate()
+            .find_map(|(i, r)| r.problems(&format!("approval_rules[{i}]")))
+            .or_else(|| self.agents_ask.iter().enumerate().find_map(|(i, r)| r.problems(&format!("agents_ask[{i}]"))))
     }
 
     /// The approval rules covering a request: each is a gate its approvers must pass.
     pub fn gates(&self, a: &store::Approval) -> Vec<ApprovalRule> {
         self.approval_rules.iter().filter(|r| r.covers(a)).cloned().collect()
+    }
+
+    /// Whether an agent's request about this product, action and environment asks a person first.
+    pub fn agent_asks(&self, product: &str, action: Action, environment: Option<&str>) -> bool {
+        self.agents_ask.iter().any(|r| r.covers(product, action, environment))
     }
 
     /// Whether a person's token with these rules waits for an admin.
