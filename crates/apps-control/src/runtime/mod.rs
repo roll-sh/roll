@@ -322,6 +322,14 @@ pub trait Runtime: Send + Sync {
     /// A project environment's network nothing uses any more (its last service there went):
     /// best effort, left if anything is still attached.
     async fn remove_network(&self, _name: &str) {}
+    /// An environment's private network into the customer's own running as `spec` asks
+    /// ([`crate::peering`]): made, or made again when it differs or stopped; nothing when it's
+    /// already so.
+    async fn ensure_peer(&self, _spec: &PeerSpec) -> anyhow::Result<()> {
+        anyhow::bail!("this runtime can't run a private network")
+    }
+    /// A private network's peer and forwarders gone (`name` is [`PeerSpec::name`]).
+    async fn remove_peer(&self, _name: &str) {}
     /// Remove a volume (an environment's teardown).
     async fn remove_volume(&self, name: &str);
     /// The files under `dir` in `image`, as a tar stream (a static site's, to serve without an
@@ -372,6 +380,63 @@ pub trait Runtime: Send + Sync {
 /// A shell's terminal stream.
 pub trait ShellStream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
 impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> ShellStream for T {}
+
+/// What a private network's peer runs ([`crate::peering`]).
+pub mod peering_image {
+    /// WireGuard's tools (`wg`, `ip`), pinned; its own init is never run (`--entrypoint sh`).
+    pub const WIREGUARD: &str = "linuxserver/wireguard@sha256:10db56ad834f94541307d5dfdbe87370e26d155bb341a5bf65789f970f24ab5c";
+    /// Waits for its config (written into its tmpfs after it starts), makes the interface, its
+    /// addresses (`ADDRS`), MTU and routes (`ROUTES`, CIDRs roll checked), then holds the
+    /// namespace. `replace`: a route its address already covers isn't an error.
+    pub const SCRIPT: &str = r#"set -e
+while [ ! -s /run/wg/wg0.conf ]; do sleep 0.1; done
+ip link add wg0 type wireguard
+wg setconf wg0 /run/wg/wg0.conf
+for a in $ADDRS; do ip addr add "$a" dev wg0; done
+[ -z "$MTU" ] || ip link set wg0 mtu "$MTU"
+ip link set wg0 up
+for r in $ROUTES; do ip route replace "$r" dev wg0; done
+exec sleep 2147483647"#;
+}
+
+/// A private network's peer ([`Runtime::ensure_peer`]): a WireGuard interface in a namespace of
+/// its own, and a forwarder a route answering its name on `network`.
+#[derive(Clone, PartialEq)]
+pub struct PeerSpec {
+    /// `roll-apps-peer-<service>-<env>`; its forwarders are `<name>-<port>`.
+    pub name: String,
+    pub service: String,
+    pub env: String,
+    /// The project network the environment's instances are on.
+    pub network: String,
+    /// `wg setconf`'s config (keys, peers). Never in `Debug`.
+    pub config: String,
+    /// The interface's addresses and the routes into the customer's network (CIDRs, checked).
+    pub addresses: Vec<String>,
+    pub routes: Vec<String>,
+    pub mtu: Option<u16>,
+    /// Each route: the name it answers on `network`, its port, and its target there.
+    pub forwards: Vec<(String, u16, String)>,
+}
+
+impl PeerSpec {
+    /// What it runs, as a digest (the config's too): one that changed is made again.
+    pub fn digest(&self) -> String {
+        use sha2::Digest;
+        let mut h = sha2::Sha256::new();
+        for part in [&self.network, &self.config, &self.addresses.join(","), &self.routes.join(","), &format!("{:?}", self.mtu), &format!("{:?}", self.forwards)] {
+            h.update(part.as_bytes());
+            h.update([0]);
+        }
+        hex::encode(&h.finalize()[..16])
+    }
+}
+
+impl std::fmt::Debug for PeerSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PeerSpec").field("name", &self.name).field("network", &self.network).field("addresses", &self.addresses).field("routes", &self.routes).field("forwards", &self.forwards).finish_non_exhaustive()
+    }
+}
 
 /// What [`Runtime::exec_output`] ran to.
 #[derive(Clone, Debug, Default, PartialEq)]

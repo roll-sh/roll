@@ -1620,6 +1620,11 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/apps/services/{id}/environments/{env}/pending", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
     // A job is a command run with the environment's variables: its output can be them.
     row("GET", "/v1/apps/services/{id}/environments/{env}/jobs/{job}/logs", "apps", REVEAL, one(PG, "service")).env(EnvFrom::Param("env")),
+    // A private network reaches into the customer's own (its WireGuard config read as whoever
+    // set it): admin to set or remove, as a shell is; its routes and reference are read.
+    row("GET", "/v1/apps/services/{id}/environments/{env}/private-network", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("PUT", "/v1/apps/services/{id}/environments/{env}/private-network", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("DELETE", "/v1/apps/services/{id}/environments/{env}/private-network", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
     // A sandbox runs any command, with the environment's variables when asked, and reads back
     // any file: admin, as a shell is (seeing which there are is read).
     row("GET", "/v1/apps/services/{id}/environments/{env}/sandboxes", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),

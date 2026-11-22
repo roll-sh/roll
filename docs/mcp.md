@@ -1058,6 +1058,9 @@ previews are listed once those products are on.
 | `apps_list_jobs` | An environment's one-off jobs, newest first. | `GET /v1/apps/services/{service}/environments/{env}/jobs` |
 | `apps_get_job` | One job: status, exit code, timing. | `GET /v1/apps/services/{service}/environments/{env}/jobs/{job}` |
 | `apps_wait_job` | A job once it ends: a task that waits as long as it takes for a client that runs tasks, its status now for any other. | `GET /v1/apps/services/{service}/environments/{env}/jobs/{job}` |
+| `apps_set_private_network` | Reach hosts in your own network over WireGuard: the config as this environment's `roll://` secret (read as you), routes as names on the project network and `host:port` targets; admin. | `PUT /v1/apps/services/{service}/environments/{env}/private-network` |
+| `apps_get_private_network` | An environment's private network: reference, routes, whether its peer runs. | `GET /v1/apps/services/{service}/environments/{env}/private-network` |
+| `apps_delete_private_network` | Remove an environment's private network; admin. | `DELETE /v1/apps/services/{service}/environments/{env}/private-network` |
 | `apps_create_sandbox` | A short-lived container to run commands in: the live image or a public one, without the environment's variables or network unless asked (a closed environment's on its network); admin. | `POST /v1/apps/services/{service}/environments/{env}/sandboxes` |
 | `apps_list_sandboxes` | An environment's sandboxes and when each ends. | `GET /v1/apps/services/{service}/environments/{env}/sandboxes` |
 | `apps_get_sandbox` | One sandbox. | `GET /v1/apps/services/{service}/environments/{env}/sandboxes/{sandbox}` |
