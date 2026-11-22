@@ -3649,6 +3649,329 @@
         "x-roll-action": "read (they're the environment's log's lines)"
       }
     },
+    "/v1/apps/services/{id}/environments/{env}/sandboxes": {
+      "get": {
+        "description": "Answers `Sandbox[]`, oldest first.",
+        "operationId": "getServicesIdEnvironmentsEnvSandboxes",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`Sandbox[]`, oldest first"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List sandboxes",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "read"
+      },
+      "post": {
+        "description": "Answers 201 `Sandbox`.",
+        "operationId": "postServicesIdEnvironmentsEnvSandboxes",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "description": "`{ image?, ttl_s?, cpu?, memory_mb?, variables?, network? }` (a short-lived container to run commands in, Vercel Sandbox's and Fly Machines': the live deployment's image, or `image` (a public one); up for `ttl_s` (60–86400, default 600) then removed by the owner's minute sweep; `cpu` 0.25–4 (0.5), `memory_mb` 256–8192 (512), metered as a console for as long as it ran; `variables` (false): the live deployment's variables and files, as a console has them, its links reached through them; `network`: `none` (default: a network of its own, the internet and nothing of the project) or `environment` (its private network); a closed environment's are always on its network (`none` asked is a 400). At most 10 per environment (409); 409 with nothing deployed; 402 at the spend limit, 409 paused)"
+        },
+        "responses": {
+          "201": {
+            "description": "201 `Sandbox`"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Create sandboxe",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "admin (it runs anything, with the variables when asked, as a shell)"
+      }
+    },
+    "/v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}": {
+      "delete": {
+        "description": "Answers 204 (stopped and removed now).",
+        "operationId": "deleteServicesIdEnvironmentsEnvSandboxesSbx",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "sbx",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "204 (stopped and removed now)"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Delete sandboxe",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "admin"
+      },
+      "get": {
+        "description": "Answers `Sandbox`.",
+        "operationId": "getServicesIdEnvironmentsEnvSandboxesSbx",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "sbx",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`Sandbox`"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Get sandboxe",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "read"
+      }
+    },
+    "/v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}/exec": {
+      "post": {
+        "description": "Answers `{ exit_code: number | null, timed_out, stdout, stderr, truncated }` (each stream's first 1 MiB as text, `truncated` when more was dropped; `exit_code` null when it was killed at its timeout). 409 once the sandbox ended. Audited without its text (`sandbox.command`, its length and exit code).",
+        "operationId": "postServicesIdEnvironmentsEnvSandboxesSbxExec",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "sbx",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "description": "`{ command, timeout_s? }` (`sh -c <command>`, at most 64 KiB; killed after `timeout_s`, 1–600, default 60)"
+        },
+        "responses": {
+          "200": {
+            "description": "`{ exit_code: number | null, timed_out, stdout, stderr, truncated }` (each stream's first 1 MiB as text, `truncated` when more was dropped; `exit_code` null when it was killed at its timeout). 409 once the sandbox ended. Audited without its text (`sandbox.command`, its length and exit code)"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Exec sandboxe",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "admin"
+      }
+    },
+    "/v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}/files": {
+      "get": {
+        "description": "Answers the file's bytes (`application/octet-stream`, at most 1 MiB; 404 none, 400 a directory or more).",
+        "operationId": "getServicesIdEnvironmentsEnvSandboxesSbxFiles",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "sbx",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the file's bytes (`application/octet-stream`, at most 1 MiB; 404 none, 400 a directory or more)"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List files",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "admin (a file can be anything the sandbox holds)"
+      },
+      "put": {
+        "description": "Answers `{ path, bytes }` (written at `path`, an absolute path without `..`, its directory made).",
+        "operationId": "putServicesIdEnvironmentsEnvSandboxesSbxFiles",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "sbx",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "description": "the file's bytes (at most 1 MiB)"
+        },
+        "responses": {
+          "200": {
+            "description": "`{ path, bytes }` (written at `path`, an absolute path without `..`, its directory made)"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Set files",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "admin"
+      }
+    },
     "/v1/apps/services/{id}/environments/{env}/shell": {
       "get": {
         "description": "Answers a terminal: binary both ways, text `{\"resize\":[cols,rows]}`; `console=true` makes it a fresh container of the live deployment running `command` (a login shell without one), sized by `cpu` (0.25–8) and `memory_mb` (256–16384), removed when it closes (`command`, `cpu`, `memory_mb` without `console`: 400).",

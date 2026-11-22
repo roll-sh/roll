@@ -148,6 +148,13 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/environments/{env}/jobs/{job}` | | `Job` | read |
 | `GET /v1/apps/services/{id}/environments/{env}/jobs/{job}/logs?follow=&tail=` | | `LogLine[]` or SSE (ends with the job, then `end`) | reveal (a job's output can be the variables) |
 | `POST /v1/apps/services/{id}/environments/{env}/jobs/{job}/cancel` | | `Job` | deploy* |
+| `GET /v1/apps/services/{id}/environments/{env}/sandboxes` | | `Sandbox[]`, oldest first | read |
+| `POST /v1/apps/services/{id}/environments/{env}/sandboxes` | `{ image?, ttl_s?, cpu?, memory_mb?, variables?, network? }` (a short-lived container to run commands in, Vercel Sandbox's and Fly Machines': the live deployment's image, or `image` (a public one); up for `ttl_s` (60–86400, default 600) then removed by the owner's minute sweep; `cpu` 0.25–4 (0.5), `memory_mb` 256–8192 (512), metered as a console for as long as it ran; `variables` (false): the live deployment's variables and files, as a console has them, its links reached through them; `network`: `none` (default: a network of its own, the internet and nothing of the project) or `environment` (its private network); a closed environment's are always on its network (`none` asked is a 400). At most 10 per environment (409); 409 with nothing deployed; 402 at the spend limit, 409 paused) | 201 `Sandbox` | admin (it runs anything, with the variables when asked, as a shell) |
+| `GET /v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}` | | `Sandbox` | read |
+| `DELETE /v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}` | | 204 (stopped and removed now) | admin |
+| `POST /v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}/exec` | `{ command, timeout_s? }` (`sh -c <command>`, at most 64 KiB; killed after `timeout_s`, 1–600, default 60) | `{ exit_code: number \| null, timed_out, stdout, stderr, truncated }` (each stream's first 1 MiB as text, `truncated` when more was dropped; `exit_code` null when it was killed at its timeout). 409 once the sandbox ended. Audited without its text (`sandbox.command`, its length and exit code) | admin |
+| `GET /v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}/files?path=` | | the file's bytes (`application/octet-stream`, at most 1 MiB; 404 none, 400 a directory or more) | admin (a file can be anything the sandbox holds) |
+| `PUT /v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}/files?path=` | the file's bytes (at most 1 MiB) | `{ path, bytes }` (written at `path`, an absolute path without `..`, its directory made) | admin |
 | `GET /v1/apps/services/{id}/environments/{env}/domains` | | `Domain[]` | read |
 | `POST /v1/apps/services/{id}/environments/{env}/domains` | `{hostname}` | 201 `Domain` | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/domains/{host}/verify` | | `Domain` | read |
@@ -800,6 +807,7 @@ type RunStatus = "running" | "succeeded" | "failed" | "skipped" | "timed_out" | 
 type CronRun = { id: string; deployment: string; status: RunStatus; exit_code: number | null; started_at: number; finished_at: number | null; attempt: number /* which try of its due time: 1, then up to run.retries more after a failure */ };
 /** A one-off command in a fresh container of the active deployment: its variables and project
  *  network, no port, no volume. timeout_s 1–86400 (default 3600). */
+type Sandbox = { id: string /* sbx_… */; service: string; environment: string; image: string; cpu: number; memory_mb: number; variables: boolean; network: "none" | "environment"; created_at: number; expires_at: number };
 type Job = { id: string; deployment: string; command: string; tasks: number; retries?: number /* tries after a task's failure */; parallelism: number /* tasks at once */; status: RunStatus; exit_code: number | null; started_at: number; finished_at: number | null };
 
 type Domain = {

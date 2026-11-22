@@ -338,8 +338,20 @@ CREATE TABLE IF NOT EXISTS error_groups (
     first_seen INTEGER NOT NULL,
     PRIMARY KEY (service, env, fingerprint)
 ) WITHOUT ROWID;
--- Who started a deployment, as a person (their session's, their own token's, the operator's): what
--- an approval is compared with.
+-- Sandboxes (short-lived containers made by API, `sandboxes.rs`): each one's container and its end.
+CREATE TABLE IF NOT EXISTS sandboxes (
+    id TEXT PRIMARY KEY,
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    name TEXT NOT NULL,
+    image TEXT NOT NULL,
+    cpu REAL NOT NULL,
+    memory_mb INTEGER NOT NULL,
+    variables INTEGER NOT NULL,
+    network TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL
+) WITHOUT ROWID;
 -- Branches whose delete failed, tried again each minute until it works.
 CREATE TABLE IF NOT EXISTS orphan_branches (
     kind TEXT NOT NULL,
@@ -383,6 +395,8 @@ CREATE TABLE IF NOT EXISTS deploy_edge (
     deployment TEXT PRIMARY KEY,
     file TEXT NOT NULL
 ) WITHOUT ROWID;
+-- Who started a deployment, as a person (their session's, their own token's, the operator's): what
+-- an approval is compared with.
 CREATE TABLE IF NOT EXISTS deploy_people (
     deployment TEXT PRIMARY KEY,
     person TEXT NOT NULL
@@ -1155,7 +1169,7 @@ impl Store {
             c.execute("DELETE FROM deploy_steps WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
             c.execute("DELETE FROM state WHERE key LIKE ?", [format!("%:{id}/%")])?;
             c.execute("DELETE FROM status_days WHERE key LIKE ?", [format!("%:{id}/%")])?;
-            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans", "env_data", "env_branches", "udp_ports", "env_unscheduled"] {
+            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans", "env_data", "env_branches", "udp_ports", "env_unscheduled", "sandboxes"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
             match c.execute("DELETE FROM services WHERE id = ?", [id])? {
@@ -1295,7 +1309,7 @@ impl Store {
             if n == 0 {
                 return Err(Error::NotFound(format!("service {service} has no environment {env}")));
             }
-            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "form_submissions", "env_data", "udp_ports", "env_unscheduled"] {
+            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "form_submissions", "env_data", "udp_ports", "env_unscheduled", "sandboxes"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ? AND env = ?"), [service, env])?;
             }
             // Its schedules', challenge's and base images' state goes with it.
@@ -3406,6 +3420,54 @@ impl Store {
             let counted = all.iter().filter(|a| Some(a.as_str()) != author).count() as u32;
             Ok((all, fresh && counted == needed))
         })
+    }
+
+    /// A sandbox made, if its environment has fewer than `max` (one write: two at once can't
+    /// both take the last place).
+    pub fn add_sandbox(&self, s: &crate::sandboxes::Sandbox, name: &str, max: usize) -> Result<bool> {
+        self.db.write(|c| {
+            let n: i64 = c.query_row("SELECT COUNT(*) FROM sandboxes WHERE service = ? AND env = ?", [&s.service, &s.environment], |r| r.get(0))?;
+            if n as usize >= max {
+                return Ok(false);
+            }
+            c.execute(
+                "INSERT INTO sandboxes (id, service, env, name, image, cpu, memory_mb, variables, network, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![s.id, s.service, s.environment, name, s.image, s.cpu, s.memory_mb, s.variables as i64, s.network, s.created_at, s.expires_at],
+            )?;
+            Ok::<_, Error>(true)
+        })
+    }
+
+    /// An environment's sandboxes (every owned one past `expired_before` with None), and each one's container.
+    pub fn sandboxes(&self, service: Option<&str>, env: Option<&str>, expired_before: Option<i64>) -> Result<Vec<(crate::sandboxes::Sandbox, String)>> {
+        let row = |r: &code_sql::Row<'_>| -> code_sql::Result<(crate::sandboxes::Sandbox, String)> {
+            Ok((
+                crate::sandboxes::Sandbox {
+                    id: r.get(0)?,
+                    service: r.get(1)?,
+                    environment: r.get(2)?,
+                    image: r.get(4)?,
+                    cpu: r.get(5)?,
+                    memory_mb: r.get::<_, i64>(6)? as u32,
+                    variables: r.get::<_, i64>(7)? != 0,
+                    network: r.get(8)?,
+                    created_at: r.get(9)?,
+                    expires_at: r.get(10)?,
+                },
+                r.get(3)?,
+            ))
+        };
+        const COLS: &str = "id, service, env, name, image, cpu, memory_mb, variables, network, created_at, expires_at";
+        Ok(match (service, env, expired_before) {
+            (Some(s), Some(e), _) => self.db.query(&format!("SELECT {COLS} FROM sandboxes WHERE service = ? AND env = ? ORDER BY created_at"), [s, e], row)?,
+            (Some(s), None, _) => self.db.query(&format!("SELECT {COLS} FROM sandboxes WHERE service = ? ORDER BY created_at"), [s], row)?,
+            (None, _, Some(t)) => self.db.query(&format!("SELECT {COLS} FROM sandboxes WHERE expires_at <= ? ORDER BY expires_at"), [t], row)?,
+            (None, _, None) => self.db.query(&format!("SELECT {COLS} FROM sandboxes ORDER BY created_at"), (), row)?,
+        })
+    }
+
+    pub fn delete_sandbox(&self, id: &str) -> Result<bool> {
+        Ok(self.db.execute("DELETE FROM sandboxes WHERE id = ?", [id])? > 0)
     }
 
     pub fn add_orphan_branch(&self, kind: LinkKind, r#ref: &str, kept: &str) -> Result<()> {

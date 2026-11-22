@@ -1949,7 +1949,9 @@ impl Apps {
         }
         // The database's now: what started before is a previous owner's (or nobody's).
         let Ok(took) = self.db(|s| s.now()).await else { return };
-        let known: Vec<String> = self.lives().iter().filter(|l| l.service == service).flat_map(|l| l.instances().into_iter().map(|i| i.name.clone())).collect();
+        let mut known: Vec<String> = self.lives().iter().filter(|l| l.service == service).flat_map(|l| l.instances().into_iter().map(|i| i.name.clone())).collect();
+        // Its sandboxes run on until their end (the minute sweep's).
+        known.extend(self.sandbox_names(service).await);
         // The live deployments' instances still running (the previous owner died, they didn't)
         // stay, for `EnvLive::adopt` to keep; the rest (jobs, older deployments') go.
         let sid = service.to_string();
@@ -2882,6 +2884,7 @@ impl Apps {
             self.intercepts_checked.store(now, std::sync::atomic::Ordering::Relaxed);
             self.refresh_intercepts(&services, now).await;
             self.retry_orphan_branches().await;
+            self.reap_sandboxes(now).await;
         }
         if now - self.status_swept.load(std::sync::atomic::Ordering::Relaxed) >= 60_000 {
             self.status_swept.store(now, std::sync::atomic::Ordering::Relaxed);

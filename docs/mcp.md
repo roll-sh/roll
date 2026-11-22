@@ -1019,6 +1019,11 @@ previews are listed once those products are on.
 | `apps_list_jobs` | An environment's one-off jobs, newest first. | `GET /v1/apps/services/{service}/environments/{env}/jobs` |
 | `apps_get_job` | One job: status, exit code, timing. | `GET /v1/apps/services/{service}/environments/{env}/jobs/{job}` |
 | `apps_wait_job` | A job once it ends: a task that waits as long as it takes for a client that runs tasks, its status now for any other. | `GET /v1/apps/services/{service}/environments/{env}/jobs/{job}` |
+| `apps_create_sandbox` | A short-lived container to run commands in: the live image or a public one, without the environment's variables or network unless asked (a closed environment's on its network); admin. | `POST /v1/apps/services/{service}/environments/{env}/sandboxes` |
+| `apps_list_sandboxes` | An environment's sandboxes and when each ends. | `GET /v1/apps/services/{service}/environments/{env}/sandboxes` |
+| `apps_get_sandbox` | One sandbox. | `GET /v1/apps/services/{service}/environments/{env}/sandboxes/{sandbox}` |
+| `apps_sandbox_exec` | A command run in a sandbox: exit code, stdout, stderr (1 MiB each), killed at its timeout; admin. | `POST /v1/apps/services/{service}/environments/{env}/sandboxes/{sandbox}/exec` |
+| `apps_delete_sandbox` | Stop and remove a sandbox now; admin. | `DELETE /v1/apps/services/{service}/environments/{env}/sandboxes/{sandbox}` |
 | `apps_cancel_job` | Stop a running job (production: deploy). | `POST /v1/apps/services/{service}/environments/{env}/jobs/{job}/cancel` |
 | `apps_events` | What happened to services, in order after a cursor. | `GET /v1/apps/events` |
 | `apps_list_variables` | An environment's variables, values masked. | `GET /v1/apps/services/{service}/environments/{env}/variables` |
