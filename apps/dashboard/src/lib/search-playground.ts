@@ -336,7 +336,7 @@ export type Language = "curl" | "python" | "javascript";
 export const LANGUAGES: Language[] = ["curl", "python", "javascript"];
 
 /** The environment variable copied code reads the key from: never a real key. */
-export const KEY_ENV = "ROLL_SEARCH_API_KEY";
+export const KEY_ENV = "ELASTICSEARCH_API_KEY";
 
 const IDENT = /^[A-Za-z_$][\w$]*$/;
 const PY_KEYWORDS = new Set(["from", "and", "as", "class", "def", "global", "import", "in", "is", "lambda", "not", "or", "pass", "return", "with", "yield"]);
@@ -380,7 +380,7 @@ export interface Target {
 }
 
 /**
- * The request as code. Elasticsearch-flavor clusters get an API key from `$ROLL_SEARCH_API_KEY`
+ * The request as code. Elasticsearch-flavor clusters get an API key from `$ELASTICSEARCH_API_KEY` (as the guides export it)
  * and Elastic's clients; OpenSearch-flavor ones (whose keys are internal users) get basic auth
  * from `$OPENSEARCH_USERNAME`/`$OPENSEARCH_PASSWORD` and OpenSearch's clients, which Elastic's
  * clients refuse to talk to.
