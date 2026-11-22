@@ -289,6 +289,9 @@ pub async fn authorize(State(a): S, ext: Extensions, body: axum::body::Bytes) ->
     if !client.redirect_uris.contains(&c.redirect_uri) {
         return Err(Error::BadRequest("redirect_uri isn't one the client registered".into()));
     }
+    if !a.policy_now().allows_client(&client) {
+        return Err(Error::Forbidden(crate::evaluate::CLIENT_NOT_ALLOWED.into()));
+    }
     // The resource the client asked for (RFC 8707; MCP clients always name the MCP server): its
     // tokens are for that server only. One that named none (`roll login`) gets API tokens.
     let res = c.resource.as_ref().map(|_| resource(&a));
@@ -526,6 +529,16 @@ async fn token(State(a): S, req: axum::extract::Request) -> Response {
         };
     }
     let Some(client_id) = get("client_id") else { return Error::OAuth("invalid_client", "client_id is required".into()).into_response() };
+    // roll's policy may list the clients that connect: checked before a code or refresh token is
+    // spent (the store holds the grant to this client id), from what roll keeps (no fetch).
+    let policy = a.policy_now();
+    if !policy.oauth_clients.is_empty() {
+        let (a2, id) = (a.clone(), client_id.clone());
+        let known = tokio::task::spawn_blocking(move || a2.store.client(&id)).await;
+        if !matches!(&known, Ok(Ok(Some(c))) if policy.allows_client(c)) {
+            return Error::OAuth("unauthorized_client", crate::evaluate::CLIENT_NOT_ALLOWED.into()).into_response();
+        }
+    }
     let r = match get("grant_type").as_deref() {
         Some("authorization_code") => {
             let (Some(code), Some(redirect), Some(verifier)) = (get("code"), get("redirect_uri"), get("code_verifier")) else {
@@ -617,6 +630,9 @@ async fn device_authorization(State(a): S, req: axum::extract::Request) -> Respo
     match known_client(&a, &client_id).await {
         // Only a client registered to sign devices in (no redirect): one registered with a
         // redirect is bound to it, and doesn't get tokens around it.
+        Ok(Some(c)) if c.redirect_uris.is_empty() && !a.policy_now().allows_client(&c) => {
+            return Error::OAuth("unauthorized_client", crate::evaluate::CLIENT_NOT_ALLOWED.into()).into_response();
+        }
         Ok(Some(c)) if c.redirect_uris.is_empty() => {}
         Ok(Some(_)) => return Error::OAuth("unauthorized_client", "this client signs in with a redirect: register one without redirect_uris for the device flow".into()).into_response(),
         Ok(None) => return Error::OAuth("invalid_client", "unknown client_id: register first".into()).into_response(),
@@ -679,6 +695,7 @@ pub async fn device_view(State(a): S, ext: Extensions, axum::extract::Path(code)
     Ok(Json(json!({
         "user_code": crate::store::show_user_code(&r.user_code),
         "client": { "id": client.id, "name": client.name, "uri": client.uri },
+        "not_allowed": (!a.policy_now().allows_client(&client)).then_some(crate::evaluate::CLIENT_NOT_ALLOWED),
         "scope": r.scope,
         "network": r.network,
         // Asked from another network than this browser's: someone may have sent the code.
@@ -694,6 +711,9 @@ pub async fn device_approve(State(a): S, ext: Extensions, axum::extract::Path(co
     let allowed: Allowed = serde_json::from_slice(&body).map_err(|e| Error::BadRequest(format!("invalid body: {e}")))?;
     let r = device_lookup(&a, &ext, &code).await?;
     let client = known_client(&a, &r.client_id).await?.ok_or_else(|| Error::NotFound("the device's client is gone".into()))?;
+    if !a.policy_now().allows_client(&client) {
+        return Err(Error::Forbidden(crate::evaluate::CLIENT_NOT_ALLOWED.into()));
+    }
     let Consented { new, by, user, asker } = consented(&a, &ext, &client, &allowed)?;
     let waits = asker.is_some();
     let (client_name, asked_from) = (client.name.clone(), r.network.clone());

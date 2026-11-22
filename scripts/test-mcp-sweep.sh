@@ -8,20 +8,23 @@
 # Only runs when something it covers changed since the last green run. `--force` runs regardless;
 # `--reads` skips the write tools. Needs nothing outside this machine. Postgres computes run in
 # Docker when it's there (removed on exit: the containers that mount the throwaway home); without it
-# their tools answer refusals the sweep counts as fine.
+# their tools answer refusals the sweep counts as fine. An answer that no longer fits the output
+# schema its tool publishes fails it; `--record` widens those schemas with what this run saw
+# (crates/roll-mcp/src/output-schemas.json, scripts/mcp_output_schemas.py).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-PATHS=(crates Cargo.toml Cargo.lock scripts/test-mcp-sweep.sh scripts/mcp-sweep.py)
+PATHS=(crates Cargo.toml Cargo.lock scripts/test-mcp-sweep.sh scripts/mcp-sweep.py scripts/mcp_output_schemas.py)
 STAMP=target/.test-mcp-sweep.hash
 
-force=0 writes=--writes verbose=
+force=0 writes=--writes verbose= record=()
 for a in "$@"; do
   case "$a" in
     --force) force=1 ;;
     --reads) writes= ;;
     --verbose) verbose=-v ;;
-    *) echo "unknown argument $a (--force, --reads, --verbose)" >&2; exit 2 ;;
+    --record) force=1 record=(--record target/mcp-sweep-samples.json) ;;
+    *) echo "unknown argument $a (--force, --reads, --verbose, --record)" >&2; exit 2 ;;
   esac
 done
 
@@ -96,8 +99,13 @@ for _ in $(seq 120); do
   sleep 1
 done
 
-if python3 -I scripts/mcp-sweep.py "$api" "$home/token" $writes $verbose; then
-  mkdir -p target && echo "$hash" > "$STAMP"
+mkdir -p target
+if python3 -I scripts/mcp-sweep.py "$api" "$home/token" $writes $verbose ${record[@]+"${record[@]}"}; then
+  if [[ ${#record[@]} -gt 0 ]]; then
+    python3 -I scripts/mcp_output_schemas.py target/mcp-sweep-samples.json
+  else
+    echo "$hash" > "$STAMP"
+  fi
 else
   mkdir -p target && cp "$home/rolld.log" target/mcp-sweep-rolld.log
   echo "mcp sweep: failures above (rolld's log kept in target/mcp-sweep-rolld.log)" >&2

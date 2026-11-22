@@ -94,8 +94,12 @@ pub struct Fake {
     pub build_files: Mutex<Vec<std::collections::HashMap<String, String>>>,
     /// Each instance made with its own command (a job, a run): the command, its CPUs and memory.
     pub commands_made: Mutex<Vec<(String, f64, u32)>>,
+    /// Each command run in a container without a terminal (`exec_output`): the container, the command.
+    pub commands_run: Mutex<Vec<(String, String)>>,
     /// Each closed network's interception: whether its egress proxies have one.
     pub intercepted: Mutex<std::collections::HashMap<String, bool>>,
+    /// Each closed network's interception as its proxies have it now (which CA they serve).
+    pub interceptions: Mutex<std::collections::HashMap<String, std::sync::Arc<dyn roll_intercept::Interception>>>,
     /// The manifests of the image archives it loaded.
     pub loaded: Mutex<Vec<String>>,
     /// Images removed ([`Builder::remove_image`]).
@@ -382,6 +386,10 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
 impl Runtime for Fake {
     fn set_interception(&self, network: &str, i: Option<std::sync::Arc<dyn roll_intercept::Interception>>) {
         self.intercepted.lock().insert(network.to_string(), i.is_some());
+        match i {
+            Some(i) => self.interceptions.lock().insert(network.to_string(), i),
+            None => self.interceptions.lock().remove(network),
+        };
     }
 
     fn intercepted(&self, network: &str) -> Option<super::egress::Intercepted> {
@@ -533,6 +541,21 @@ impl Runtime for Fake {
         (i.state == FakeState::Running).then(|| i.extra.get(&port).copied()).flatten()
     }
 
+    /// A command as a shell would take the two the tests use: `echo <words>` (its stdout) and
+    /// `exit <n>`; anything else answers its own text.
+    async fn exec_output(&self, name: &str, command: &str, _timeout: std::time::Duration, max: usize) -> anyhow::Result<super::ExecOutput> {
+        anyhow::ensure!(self.instances.lock().get(name).is_some_and(|i| i.state == FakeState::Running), "{name} isn't running");
+        self.commands_run.lock().push((name.to_string(), command.to_string()));
+        let (code, mut stdout) = match command.split_once(' ') {
+            Some(("echo", words)) => (0, format!("{words}\n").into_bytes()),
+            Some(("exit", n)) => (n.trim().parse().unwrap_or(1), Vec::new()),
+            _ => (0, command.as_bytes().to_vec()),
+        };
+        let truncated = stdout.len() > max;
+        stdout.truncate(max);
+        Ok(super::ExecOutput { code: Some(code), stdout, stderr: Vec::new(), truncated })
+    }
+
     async fn udp_address(&self, name: &str, _port: u16) -> Option<SocketAddr> {
         let m = self.instances.lock();
         let i = m.get(name)?;
@@ -651,7 +674,13 @@ impl Runtime for Fake {
 
     async fn copy_from(&self, name: &str, path: &str) -> anyhow::Result<super::VolumeStream> {
         anyhow::ensure!(self.state(name) == Some(FakeState::Running), "{name} isn't running");
-        let got = self.copied.lock().get(&(name.to_string(), path.to_string())).cloned();
+        let copied = self.copied.lock();
+        // A path copied in itself, or a file in a tar copied into its directory (as `docker cp`
+        // reads it back out).
+        let (dir, file) = path.rsplit_once('/').map(|(d, f)| (if d.is_empty() { "/" } else { d }, f)).unwrap_or(("", path));
+        let within = copied.get(&(name.to_string(), dir.to_string())).filter(|t| tar::Archive::new(&t[..]).entries().is_ok_and(|mut es| es.any(|e| e.is_ok_and(|e| e.path().is_ok_and(|p| p.to_str() == Some(file))))));
+        let got = copied.get(&(name.to_string(), path.to_string())).or(within).cloned();
+        drop(copied);
         let bytes = got.ok_or_else(|| anyhow::anyhow!("no such file or directory: {path}"))?;
         Ok(Box::new(std::io::Cursor::new(bytes)))
     }

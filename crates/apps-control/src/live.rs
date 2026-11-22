@@ -758,7 +758,7 @@ impl EnvLive {
 
     /// `deployment`'s template while it still serves (the active one, the canary, or one asked
     /// for by its own URL).
-    fn serving(&self, deployment: &str) -> Option<Arc<Template>> {
+    pub(crate) fn serving(&self, deployment: &str) -> Option<Arc<Template>> {
         if let Some((c, _)) = self.canary.lock().as_ref()
             && c.deployment == deployment
         {
@@ -2680,6 +2680,18 @@ impl EnvLive {
         let secs = c.began.elapsed().as_secs_f64();
         self.meter.lock().sample(now_ms(), secs * c.cpu * 0.5, (c.memory_mb as u64) << 20, secs, 1);
         self.runtime.remove(&c.name).await;
+    }
+
+    /// A sandbox's container ([`crate::sandboxes`]) made from `tpl` as `name` and started; gone
+    /// again if it didn't start.
+    pub(crate) async fn start_sandbox(&self, tpl: &Template, name: String) -> anyhow::Result<()> {
+        let inst = self.make_run(tpl, Some(name)).await?;
+        if let Err(e) = self.runtime.start(&inst.name, self.log.instance(&inst.name, &inst.deployment)).await {
+            self.runtime.remove(&inst.name).await;
+            return Err(e);
+        }
+        self.runtime.settle(&inst.name).await;
+        Ok(())
     }
 }
 

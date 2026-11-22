@@ -893,6 +893,12 @@ async fn run_write_counted(
             let e = EsError::illegal_state(format!("final pipeline [{pid}] can't change the target index (from [{original}] to [{new_index}]) for document [{doc_id}]"));
             return Err(fail(e, vec![pid.clone()]));
         }
+        // A connector's sync writes only its own index: refused before the new target is
+        // resolved, so nothing is created or written there.
+        if let Some(only) = &args.index_only {
+            let e = EsError::illegal_argument(format!("pipeline [{pid}] can't move document [{doc_id}] of a connector's sync out of [{only}] (to [{new_index}])"));
+            return Err(fail(e, vec![pid.clone()]));
+        }
         if let Some(e) = crate::xpack::streams::check_reroute(&cluster.state(), &pid, &original, &new_index, &history) {
             return Err(fail(e, vec![pid.clone()]).with_hidden("item_index", Value::Str(new_index)));
         }

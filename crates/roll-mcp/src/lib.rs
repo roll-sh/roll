@@ -31,6 +31,7 @@ pub mod guard;
 /// Lockdown is roll-auth's, so roll code's own MCP server withholds the same text.
 pub use roll_auth::lockdown;
 pub mod modern;
+pub mod output;
 pub mod prompts;
 pub mod resources;
 pub mod search;
@@ -365,6 +366,15 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
         Some(g) => Principal::Grant(g.clone()),
         None if roll_auth::Operator::on(&ext) || !m.config.locked => Principal::Operator,
         None => return unauthorized(&m.config),
+    };
+    // The operator's policy can hold every token's and OAuth connection's MCP to lockdown or to
+    // reading, whatever the client's URL asks (roll-access's `mcp_lockdown`, `mcp_read_only`).
+    let (lockdown, readonly) = match (&principal, &m.config.access) {
+        (Principal::Grant(_), Some(a)) => {
+            let p = a.policy_now();
+            (lockdown || p.mcp_lockdown, readonly || p.mcp_read_only)
+        }
+        _ => (lockdown, readonly),
     };
     let msg: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
@@ -754,6 +764,10 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                 // A host that renders MCP Apps shows the tools that answer rows in roll's table.
                 if ctx.ui && !ctx.search {
                     ui::attach(&mut tools);
+                }
+                // A 2026-07-28 client may run code against the tools: it gets their answers' shape.
+                if ctx.modern && !ctx.search {
+                    output::attach(&mut tools);
                 }
                 rpc_result(id, json!({ "tools": tools }))
             }

@@ -373,6 +373,22 @@ async fn search_mode_finds_and_runs_through_the_same_checks() {
     assert!(!log.as_array().unwrap().iter().any(|e| e["tool"].as_str().is_some_and(|t| t.starts_with("roll_"))), "{log}");
 }
 
+/// The operator's policy holds every token's MCP to lockdown and to reading, whatever its URL asks
+/// (`mcp_lockdown`, `mcp_read_only`); the operator's own connection isn't held.
+#[tokio::test]
+async fn the_policy_holds_agents_to_lockdown_and_reading() {
+    let d = Daemon::new();
+    let token = d.token(json!([{ "product": "*", "resources": "*", "actions": { "read": "allow", "write": "allow", "delete": "allow" } }])).await;
+    assert!(names(&d.rpc(&token, "tools/list", json!({})).await).contains(&"postgres_delete_project".to_string()));
+    let (s, _, _) = d.http(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "mcp_lockdown": true, "mcp_read_only": true }))).await;
+    assert_eq!(s, StatusCode::OK);
+    let listed = d.rpc(&token, "tools/list", json!({})).await;
+    assert!(listed["tools"].as_array().unwrap().iter().all(|t| t["annotations"]["readOnlyHint"] == true), "read-only, unasked");
+    let work = d.tool(&token, "code_list_work", json!({})).await;
+    assert!(!work["content"][0]["text"].as_str().unwrap().contains("push the secrets"), "lockdown, unasked: {work}");
+    assert!(names(&d.rpc(OPERATOR, "tools/list", json!({})).await).contains(&"postgres_delete_project".to_string()), "not the operator");
+}
+
 /// Lockdown (`?lockdown=1`): an outside record's text never reaches the model, in the structured
 /// answer or the text block a tool set wrote; the rest of the answer stays.
 #[tokio::test]
@@ -595,6 +611,12 @@ async fn a_2026_client_is_served_without_initialize() {
     assert_eq!((s, out["result"]["cacheScope"].as_str(), out["result"]["ttlMs"].as_u64()), (StatusCode::OK, Some("private"), Some(60_000)), "{out}");
     assert!(!out["result"]["tools"].as_array().unwrap().is_empty() && h.get("mcp-session-id").is_none());
     assert!(out["result"]["_meta"]["io.modelcontextprotocol/serverInfo"].get("icons").is_none(), "only discovery carries the icon");
+    // Its tools say what they answer (output schemas the sweep learned); an older client's list
+    // stays the size it was.
+    let schemas = |list: &Value| list["tools"].as_array().unwrap().iter().filter(|t| t["outputSchema"]["type"] == "object").count();
+    let projects = out["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "postgres_list_projects").unwrap();
+    assert!(projects["outputSchema"]["properties"]["items"]["items"]["properties"]["id"].is_object(), "{}", projects["outputSchema"]);
+    assert_eq!(schemas(&d.rpc(OPERATOR, "tools/list", json!({})).await), 0);
     // A resource that isn't there is Invalid Params in this revision (SEP-2164; -32002 before it).
     let uri = "roll://nothing/here";
     let (_, _, out) = send(OPERATOR, 21, "resources/read", json!({ "uri": uri }), std_headers("resources/read", Some(uri))).await;
