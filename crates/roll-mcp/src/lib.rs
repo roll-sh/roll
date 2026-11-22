@@ -27,10 +27,12 @@
 
 pub mod ask;
 pub mod card;
+pub mod events;
 pub mod guard;
 /// Lockdown is roll-auth's, so roll code's own MCP server withholds the same text.
 pub use roll_auth::lockdown;
 pub mod modern;
+pub mod output;
 pub mod prompts;
 pub mod resources;
 pub mod search;
@@ -756,13 +758,27 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
         let params = msg.get("params").cloned().unwrap_or(Value::Null);
         let resp = match method {
             "initialize" => rpc_result(id, initialize(ctx, &params)),
-            "server/discover" => rpc_result(id, modern::discover(&PROTOCOL_VERSIONS, capabilities(tasks_available(ctx)), instructions(ctx))),
+            "server/discover" => {
+                // Events (SEP-3415) are this revision's: only discovery offers them.
+                let mut caps = capabilities(tasks_available(ctx));
+                caps["extensions"][events::EXT] = json!({});
+                rpc_result(id, modern::discover(&PROTOCOL_VERSIONS, caps, instructions(ctx)))
+            }
             "ping" => rpc_result(id, json!({})),
+            "events/list" if ctx.modern => rpc_result(id, events::list(ctx)),
+            "events/poll" if ctx.modern => match events::poll(ctx, &params).await {
+                Ok(r) => rpc_result(id, r),
+                Err((code, message, data)) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message, "data": data } }),
+            },
             "tools/list" => {
                 let mut tools = if ctx.search { search::listed(&ctx.tools()) } else { ctx.tools() };
                 // A host that renders MCP Apps shows the tools that answer rows in roll's table.
                 if ctx.ui && !ctx.search {
                     ui::attach(&mut tools);
+                }
+                // A 2026-07-28 client may run code against the tools: it gets their answers' shape.
+                if ctx.modern && !ctx.search {
+                    output::attach(&mut tools);
                 }
                 rpc_result(id, json!({ "tools": tools }))
             }
@@ -1428,13 +1444,18 @@ async fn read_me(ctx: &Arc<Ctx>) -> Result<Value, (String, Value)> {
 
 /// A resource's route read through the gated router with the caller's token, like a tool.
 async fn read_route(ctx: &Arc<Ctx>, route: &str, uri: &str) -> Result<Value, (String, Value)> {
+    read_route_as(ctx, route, "resources/read", json!({ "uri": uri })).await
+}
+
+/// A route read through the gated router with the caller's token, audited as `what` with `args`.
+async fn read_route_as(ctx: &Arc<Ctx>, route: &str, what: &str, args: Value) -> Result<Value, (String, Value)> {
     let fail = |e: String| (e, json!({}));
     let mut req = Request::builder().method("GET").uri(route);
     for (k, v) in forward_headers(&ctx.headers, &Value::Null).iter() {
         req = req.header(k, v);
     }
     let mut req = req.body(Body::empty()).map_err(|e| fail(e.to_string()))?;
-    req.extensions_mut().insert(McpCall { tool: "resources/read".into(), args: Arc::new(json!({ "uri": uri })), ip: ctx.ip, elicits: false, client: ctx.client.clone(), quiet: false });
+    req.extensions_mut().insert(McpCall { tool: what.into(), args: Arc::new(args), ip: ctx.ip, elicits: false, client: ctx.client.clone(), quiet: false });
     let resp = match ctx.m.api.clone().oneshot(req).await {
         Ok(r) => r,
         Err(e) => match e {},

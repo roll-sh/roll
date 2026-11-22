@@ -2187,6 +2187,43 @@ async fn a_shared_value_opens_as_many_times_as_allowed_and_the_server_never_hold
     assert_eq!(audit.as_array().unwrap().len(), 3, "created and opened twice");
 }
 
+/// docs/accounts.md, "Offboarding": a disabled person (an admin, SCIM) keeps their memberships,
+/// but what they handed out ends anyway. Their one-time share refuses to open (it checks its
+/// maker), and rolld's offboarding hook revokes their dynamic credential now, not at its TTL.
+/// Enabled again, they get nothing back.
+#[tokio::test]
+async fn a_disabled_persons_share_refuses_to_open_and_their_leases_are_revoked() {
+    use base64::Engine as _;
+    let api = Api::new().await;
+    let p = api.project.clone();
+    let (_, inv) = api.call(Method::POST, &format!("/v1/workspace/projects/{p}/invites"), Some(json!({ "email": "ada@example.com", "role": "admin" }))).await;
+    let token = inv["url"].as_str().unwrap().split("token=").nth(1).unwrap().to_string();
+    assert_eq!(api.as_ada(Method::POST, &format!("/v1/workspace/invites/{token}/accept"), None).await.0, StatusCode::OK);
+    api.ok(Method::PUT, &format!("/v1/workspace/projects/{p}/resources/bucket/assets"), Some(json!({ "x": 0, "y": 0 }))).await;
+    api.ok(Method::PUT, "/environments/staging/secrets/TEMP_KEY", Some(json!({ "link": { "kind": "bucket", "ref": "assets", "field": "access_key_id", "mode": "dynamic" } }))).await;
+    let at = |rest: &str| format!("/v1/secrets/projects/{p}{rest}");
+    let (s, got) = api.as_ada(Method::POST, &at("/environments/staging/resolve"), Some(json!({ "consumer": "app:laptop" }))).await;
+    assert_eq!(s, StatusCode::OK, "{got}");
+    let key = got["values"]["TEMP_KEY"].as_str().unwrap().to_string();
+    let blob = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7u8; 40]);
+    let (s, share) = api.as_ada(Method::POST, &at("/shares"), Some(json!({ "ciphertext": blob, "note": "for the contractor" }))).await;
+    assert_eq!(s, StatusCode::CREATED, "{share}");
+    let open = format!("/v1/secrets/shares/{}/open", share["id"].as_str().unwrap());
+
+    *api.people.disabled.lock().unwrap() = true;
+    assert_eq!(api.call(Method::POST, &open, None).await.0, StatusCode::NOT_FOUND, "a disabled maker's share ends unopened");
+    assert!(api.fake.live_keys.lock().unwrap().contains(&key), "until the hook runs, the credential is live");
+    api.secrets.person_offboarded("usr_ada").unwrap();
+    assert!(!api.fake.live_keys.lock().unwrap().contains(&key), "revoked now, not at its TTL");
+    let leases = api.ok(Method::GET, "/leases", None).await;
+    assert!(leases.as_array().unwrap().iter().all(|l| !l["revoked_at"].is_null()), "{leases}");
+
+    *api.people.disabled.lock().unwrap() = false;
+    api.secrets.person_offboarded("usr_ada").unwrap();
+    assert_eq!(api.call(Method::POST, &open, None).await.0, StatusCode::NOT_FOUND, "nothing comes back");
+    assert!(!api.fake.live_keys.lock().unwrap().contains(&key));
+}
+
 #[tokio::test]
 async fn a_sync_pushes_each_change_once_removes_deleted_keys_and_is_audited() {
     let api = Api::new().await;

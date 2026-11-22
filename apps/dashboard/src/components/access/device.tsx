@@ -77,6 +77,7 @@ function Ask({ code, again }: { code: string; again: () => void }) {
   }
   if (loaded.state !== "ready") return <LoadState loaded={loaded} what="sign this device in" />;
   const { me, catalog, value: request } = loaded;
+  if (request.not_allowed) return <Problem title={`${request.client.name} can't sign in`} text={`${request.not_allowed}.`} next="" />;
   const asked = ago(request.created_at / 1000, Date.now() / 1000);
   return (
     <AllowForm

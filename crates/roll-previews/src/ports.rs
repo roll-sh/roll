@@ -134,6 +134,13 @@ pub trait Brancher: Send + Sync {
     async fn schema(&self, _parent: &str, _branch: &str) -> anyhow::Result<Option<(Vec<String>, Vec<String>)>> {
         Ok(None)
     }
+
+    /// The branch's schema alone, as [`Brancher::schema`] reads it: kept as the branch is made, so
+    /// the changes shown later are the change's ([`crate::schema::diff_since`]). Never reads the
+    /// parent (no compute of production's started for it).
+    async fn branch_schema(&self, _parent: &str, _branch: &str) -> anyhow::Result<Option<Vec<String>>> {
+        Ok(None)
+    }
 }
 
 /// A change (or branch) as previews see it.
@@ -818,6 +825,13 @@ pub trait Apps: Send + Sync {
 /// no. It may read a database: it's called off the async workers.
 pub trait Visitors: Send + Sync {
     fn may_open(&self, user: &str, session: &str, project: &str) -> bool;
+    /// Whether `user` (`usr_…`), who made a share link, may still open `project`'s previews: the
+    /// link works only while they do (an account that still signs in, with a role that reveals a
+    /// preview). Unlike [`Visitors::may_open`], no session: the link is theirs, not a visit of
+    /// theirs. A failed lookup is a no. It may read a database: called off the async workers.
+    fn maker_reaches(&self, _user: &str, _project: &str) -> bool {
+        true
+    }
     /// Every name a person goes by where a change's author is written (their roll handle, and the
     /// login of each GitHub account linked to them): how an author is told apart, whichever name
     /// their change carries. It may read a database: it's called off the async workers. An error

@@ -201,8 +201,34 @@ impl Secrets {
     }
 
     /// Open a share (public): its ciphertext, one open used up; the last one drops it.
+    /// A share acts at its maker's rights now (`registration_reaches`, as when it was made: reveal
+    /// in the project, and where it came from): one whose maker may no longer reveal there ends
+    /// instead of opening.
     pub fn open_share(&self, id: &str, ip: Option<String>) -> Result<String> {
         let now = self.db.now_ms()?;
+        let made: Option<(String, String, Option<String>, Option<String>)> = self.db.read(|c| {
+            c.query_row(
+                "SELECT s.project_id, s.created_by, e.slug, s.path FROM shares s LEFT JOIN environments e ON e.id = s.env_id WHERE s.id = ? AND s.ciphertext IS NOT NULL AND s.expires_at > ?",
+                params![id, now],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()
+        })?;
+        let (project, by, env, path) = made.ok_or_else(gone)?;
+        let mut needs = vec![(Action::Reveal, Scope::project(&project))];
+        if let (Some(env), Some(path)) = (&env, &path) {
+            needs.push((Action::Reveal, Scope::at(&project, env, path)));
+        }
+        if !self.registration_reaches(&by, &needs)? {
+            self.db.write(|c| {
+                if c.execute("UPDATE shares SET ciphertext = NULL, views_left = 0 WHERE id = ? AND ciphertext IS NOT NULL", [id])? > 0 {
+                    let roll = Caller::consumer("roll:members");
+                    audit::record(c, self.keys()?, &project, &roll, "share.revoke", None, None, &[], &format!("share {} ended unopened: {by} may no longer reveal it", &id[..12.min(id.len())]), now)?;
+                }
+                Ok::<_, Error>(())
+            })?;
+            return Err(gone());
+        }
         self.db.write(|c| {
             let row: Option<(String, Vec<u8>, i64)> = c
                 .query_row("SELECT project_id, ciphertext, views_left FROM shares WHERE id = ? AND ciphertext IS NOT NULL AND expires_at > ?", params![id, now], |r| {
