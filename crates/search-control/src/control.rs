@@ -422,6 +422,7 @@ pub fn spec_for(c: &SearchCluster) -> ClusterSpec {
         }
     });
     spec.catalog_id = Some(c.id.clone());
+    spec.owner = c.owner.clone();
     // Only until its first load has marked what it inherited: a branch made before marking
     // existed, or one already marked, runs its jobs as its own.
     spec.branch_of = c.parent_id.clone().filter(|_| c.inherit_pending);

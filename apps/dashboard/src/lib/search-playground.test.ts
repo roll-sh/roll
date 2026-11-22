@@ -151,7 +151,7 @@ test("copy as curl, Python and JavaScript emits the exact request without a key"
   assert.equal(
     copyAs("curl", b.request, target),
     `curl -X POST 'https://shop.search.roll.sh/docs/_search' \\
-  -H "Authorization: ApiKey $ROLL_SEARCH_API_KEY" \\
+  -H "Authorization: ApiKey $ELASTICSEARCH_API_KEY" \\
   -H 'content-type: application/json' \\
   -d '{
   "size": 5,
@@ -171,10 +171,10 @@ test("copy as curl, Python and JavaScript emits the exact request without a key"
 }'`,
   );
   const py = copyAs("python", b.request, target);
-  assert.match(py, /client = Elasticsearch\("https:\/\/shop.search.roll.sh", api_key=os.environ\["ROLL_SEARCH_API_KEY"\]\)/);
+  assert.match(py, /client = Elasticsearch\("https:\/\/shop.search.roll.sh", api_key=os.environ\["ELASTICSEARCH_API_KEY"\]\)/);
   assert.match(py, /resp = client.search\(\n {4}index="docs",\n {4}size=5,\n {4}query=\{\n {8}"multi_match": \{/);
   const js = copyAs("javascript", b.request, target);
-  assert.match(js, /auth: \{ apiKey: process.env.ROLL_SEARCH_API_KEY \}/);
+  assert.match(js, /auth: \{ apiKey: process.env.ELASTICSEARCH_API_KEY \}/);
   assert.match(js, /client.search\(\{\n {2}index: "docs",\n {2}size: 5,\n {2}query: \{\n {4}multi_match: \{/);
 
   // Python literals, `from` as the client's keyword, and a raw body's numbers as typed in curl.

@@ -149,7 +149,7 @@ test("view code composes the search and the streamed chat completion", () => {
   assert.ok(py.includes('vector = requests.post(URL + "/_inference/text_embedding/e5", headers=HEADERS, json={"input": question})'));
   assert.ok(py.includes('requests.post(URL + "/help/_search"'));
   assert.ok(py.includes('requests.post(URL + "/_inference/chat_completion/gpt/_stream"'));
-  assert.ok(py.includes('os.environ["ROLL_SEARCH_API_KEY"]'));
+  assert.ok(py.includes('os.environ["ELASTICSEARCH_API_KEY"]'));
   assert.ok(py.includes(`FRAME = ${JSON.stringify(FRAME)}`));
   assert.ok(py.includes('INSTRUCTIONS = "Be brief."'));
   assert.ok(py.includes('replace("<", "&lt;")') && py.includes('replace(boundary, "[boundary]")'));
@@ -158,12 +158,12 @@ test("view code composes the search and the streamed chat completion", () => {
   assert.ok(js.includes('const URL = "https://c.search.roll.sh";'));
   assert.ok(js.includes("query: question") && js.includes("query_vector: vector"));
   assert.ok(js.includes('fetch(URL + "/_inference/chat_completion/gpt/_stream"'));
-  assert.ok(js.includes("process.env.ROLL_SEARCH_API_KEY"));
+  assert.ok(js.includes("process.env.ELASTICSEARCH_API_KEY"));
 
   // curl sends the last turn's messages as they were.
   const prompt = buildPrompt({ instructions: "Be brief.", history: [], sources: [], question: "reset it", boundary: BOUNDARY });
   const curl = chatCode("curl", { ...plan, prompt }, target);
-  assert.ok(curl.startsWith("# 1. Retrieve\ncurl -sS -X POST 'https://c.search.roll.sh/help/_search' \\\n  -H \"Authorization: ApiKey $ROLL_SEARCH_API_KEY\""));
+  assert.ok(curl.startsWith("# 1. Retrieve\ncurl -sS -X POST 'https://c.search.roll.sh/help/_search' \\\n  -H \"Authorization: ApiKey $ELASTICSEARCH_API_KEY\""));
   assert.ok(curl.includes("curl -sSN -X POST 'https://c.search.roll.sh/_inference/chat_completion/gpt/_stream'"));
   const body = curl.slice(curl.lastIndexOf("-d '") + 4, curl.lastIndexOf("'")).split("'\\''").join("'");
   assert.deepEqual(JSON.parse(body), { messages: prompt, max_completion_tokens: 1024 });

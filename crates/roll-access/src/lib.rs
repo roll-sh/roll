@@ -16,6 +16,7 @@ pub mod checkup;
 pub mod evaluate;
 pub mod leaks;
 pub mod members;
+pub mod event_subs;
 pub mod oauth;
 pub mod rate;
 pub mod sinks;
@@ -152,6 +153,40 @@ mod policy_tests {
         assert!(p.idle(&g(0, None), now), "made 100 days ago, never used");
         assert!(!p.idle(&g(0, Some(now - 2 * day)), now), "used two days ago");
         assert!(!super::Policy::default().idle(&g(0, None), now), "no limit");
+    }
+
+    /// `oauth_clients`: a metadata document by its URL or host, a registered client by where all
+    /// its redirects go (its name proves nothing), a device client only by `device`.
+    #[test]
+    fn the_policy_names_the_clients_that_connect() {
+        let p = |list: &[&str]| super::Policy { oauth_clients: list.iter().map(|s| s.to_string()).collect(), ..Default::default() };
+        let c = |id: &str, redirects: &[&str]| crate::store::Client {
+            id: id.into(),
+            name: "Claude".into(),
+            uri: None,
+            redirect_uris: redirects.iter().map(|s| s.to_string()).collect(),
+            created_at: 0,
+            last_used_at: None,
+        };
+        let doc = c("https://claude.ai/oauth/mcp-client.json", &["https://claude.ai/api/mcp/auth_callback"]);
+        let local = c("rlc_x.sig", &["http://127.0.0.1:43111/callback"]);
+        let mixed = c("rlc_y.sig", &["https://claude.ai/cb", "https://evil.example/cb"]);
+        let app = c("rlc_z.sig", &["cursor://anysphere.cursor-mcp/oauth/callback"]);
+        let device = c("rlc_d.sig", &[]);
+        assert!(super::Policy::default().allows_client(&mixed), "no list: any client");
+        assert!(p(&["claude.ai"]).allows_client(&doc) && p(&["*.claude.ai"]).allows_client(&c("https://x.claude.ai/m.json", &["http://localhost:1/cb"])));
+        assert!(!p(&["*.claude.ai"]).allows_client(&doc), "a wildcard is subdomains only");
+        assert!(p(&["https://claude.ai/oauth/mcp-client.json"]).allows_client(&doc) && !p(&["https://claude.ai/other.json"]).allows_client(&c("rlc_q.sig", &["https://claude.ai/cb"])));
+        assert!(!p(&["claude.ai"]).allows_client(&mixed), "every redirect, not one of them");
+        assert!(p(&["claude.ai", "evil.example"]).allows_client(&mixed));
+        assert!(!p(&["claude.ai"]).allows_client(&local) && p(&["localhost"]).allows_client(&local));
+        assert!(p(&["Cursor:"]).allows_client(&app) && !p(&["localhost"]).allows_client(&app));
+        assert!(!p(&["localhost"]).allows_client(&device) && p(&["device"]).allows_client(&device));
+        assert!(p(&["claude.ai"]).allows_client(&c("mcl_ci", &[])), "a machine client is an admin's, not held to it");
+        for bad in ["", "claude", "http:", "javascript:", "https://", "a b.com", "*.", "-x.com"] {
+            assert!(p(&[bad]).problems().is_some(), "{bad:?} is refused");
+        }
+        assert!(p(&["claude.ai", "*.example.com", "localhost", "device", "cursor:", "vscode://", "https://chatgpt.com/cb"]).problems().is_none());
     }
 }
 
@@ -548,6 +583,9 @@ pub struct Access {
     pub limiter: rate::Limiter,
     /// Delivers audit sinks, when rolld can (it needs `ROLL_SECRET_KEY`).
     pub sinks: std::sync::OnceLock<Arc<dyn sinks::SinkTransport>>,
+    /// MCP Events' webhook callbacks: their own transport (an agent chooses these URLs, an admin
+    /// a sink's), with its own private-address switch and sealing.
+    pub event_hooks: std::sync::OnceLock<Arc<dyn sinks::SinkTransport>>,
     /// Users as they are now, for their own tokens (rolld: roll-accounts' sessions).
     pub people: std::sync::OnceLock<Arc<dyn roll_auth::Sessions>>,
     /// The workspace: people's memberships, for their sessions' grants (docs/members.md), and what
@@ -559,6 +597,8 @@ pub struct Access {
     pub(crate) github_keys: leaks::GithubKeys,
     /// OAuth registrations lately, per network (open registration's limit).
     pub(crate) registrations: std::sync::Mutex<Window>,
+    /// Callback URLs each connection asked roll to verify lately (MCP Events' webhooks).
+    pub(crate) event_verifies: std::sync::Mutex<Window>,
     /// How OIDC issuers' keys are fetched for trusted machine clients: rolld's guarded client.
     /// Unset: only clients with pinned keys sign in that way.
     pub oidc_fetch: std::sync::OnceLock<Arc<dyn roll_oidc::Fetch + Send + Sync>>,
@@ -590,7 +630,7 @@ impl Access {
 
     /// On a database already open (tests: `code_sql::Db::open_or_test`, so they run on Postgres too).
     pub fn with_db(db: code_sql::Db, config: Config, resolvers: Resolvers) -> Result<Arc<Access>> {
-        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), nodes: Default::default(), revokers: Default::default(), decoy_hooks: Default::default(), limiter: Default::default(), sinks: Default::default(), people: Default::default(), workspace: Default::default(), mail_gate: Default::default(), github_keys: Default::default(), registrations: Default::default(), oidc_fetch: Default::default(), oidc_keys: Default::default(), sign_ins: Default::default(), device_starts: Default::default(), device_guesses: Default::default(), policy_cache: Default::default() }))
+        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), nodes: Default::default(), revokers: Default::default(), decoy_hooks: Default::default(), limiter: Default::default(), sinks: Default::default(), event_hooks: Default::default(), people: Default::default(), workspace: Default::default(), mail_gate: Default::default(), github_keys: Default::default(), registrations: Default::default(), event_verifies: Default::default(), oidc_fetch: Default::default(), oidc_keys: Default::default(), sign_ins: Default::default(), device_starts: Default::default(), device_guesses: Default::default(), policy_cache: Default::default() }))
     }
 
     /// The resource of `kind` named `id`, with its project and environment filled in.
@@ -1229,6 +1269,58 @@ pub struct Policy {
     /// (`?readonly=1`, whatever the client asks).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub mcp_read_only: bool,
+    /// The OAuth clients that may connect (empty: any), as Atlassian's admins list the AI clients
+    /// their site allows. Each is a host (`claude.ai`, `*.example.com`: a client whose metadata
+    /// document is there, or whose redirects all go there), an exact `https://` URL (a metadata
+    /// document or a redirect), `localhost` (apps on a person's computer: their redirect is
+    /// loopback, `roll login` too), an app's scheme (`cursor:`), or `device` (clients that sign in
+    /// with a code). Checked at consent, at every token and on every request, so a connection
+    /// made before stops at once and comes back if the list allows it again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub oauth_clients: Vec<String>,
+}
+
+/// Whether an `oauth_clients` host entry (`claude.ai`, `*.example.com`) names `host`.
+fn host_entry_covers(entry: &str, host: &str) -> bool {
+    let (host, entry) = (host.trim_end_matches('.').to_ascii_lowercase(), entry.to_ascii_lowercase());
+    match entry.strip_prefix("*.") {
+        // A subdomain of it, never the base itself.
+        Some(base) => host.strip_suffix(base).is_some_and(|sub| sub.len() > 1 && sub.ends_with('.')),
+        None => entry == host,
+    }
+}
+
+/// Whether an `oauth_clients` entry covers a redirect URI (one `oauth::redirect_ok` let through).
+fn entry_covers_redirect(entry: &str, redirect: &str) -> bool {
+    let Ok(u) = url::Url::parse(redirect) else { return false };
+    match u.scheme() {
+        "https" if entry.starts_with("https://") => entry == redirect,
+        "https" => u.host_str().is_some_and(|h| host_entry_covers(entry, h)),
+        // Only loopback is let through over http (RFC 8252).
+        "http" => entry == "localhost",
+        scheme => entry.trim_end_matches("//").strip_suffix(':').is_some_and(|s| s.eq_ignore_ascii_case(scheme)),
+    }
+}
+
+/// What's wrong with one `oauth_clients` entry, if anything.
+fn client_entry_problem(e: &str) -> Option<&'static str> {
+    let label = |l: &str| !l.is_empty() && l.len() <= 63 && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') && !l.starts_with('-') && !l.ends_with('-');
+    let domain = |d: &str| d.contains('.') && d.split('.').all(label);
+    if e.is_empty() || e.len() > 200 || e.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        Some("each is 1-200 characters with no spaces")
+    } else if e == "localhost" || e == "device" {
+        None
+    } else if e.starts_with("https://") {
+        url::Url::parse(e).ok().filter(|u| u.host_str().is_some() && u.fragment().is_none()).map_or(Some("an https URL needs a host and no fragment"), |_| None)
+    } else if let Some(s) = e.trim_end_matches("//").strip_suffix(':') {
+        let ok = s.len() >= 3 && s.starts_with(|c: char| c.is_ascii_alphabetic()) && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'));
+        let browser = matches!(s.to_ascii_lowercase().as_str(), "http" | "https" | "javascript" | "data" | "file" | "blob" | "about" | "vbscript" | "ftp" | "ws" | "wss");
+        (!ok || browser).then_some("an app scheme is like cursor: (not http, https or one a browser runs)")
+    } else if domain(e.strip_prefix("*.").unwrap_or(e)) {
+        None
+    } else {
+        Some("each is a host (claude.ai, *.example.com), an https:// URL, localhost, device, or an app scheme (cursor:)")
+    }
 }
 
 /// One of the policy's `agents_ask`: a product (or `*`), its actions (all when left out) and
@@ -1381,8 +1473,11 @@ impl Policy {
         if self.max_days == Some(0) || self.max_idle_days == Some(0) {
             return Some("max_days and max_idle_days are at least 1 (or null for no limit)".into());
         }
-        if self.approval_rules.len() > 50 || self.agents_ask.len() > 50 {
-            return Some("at most 50 approval rules and 50 agent rules".into());
+        if self.approval_rules.len() > 50 || self.agents_ask.len() > 50 || self.oauth_clients.len() > 50 {
+            return Some("at most 50 approval rules, 50 agent rules and 50 OAuth clients".into());
+        }
+        if let Some((e, why)) = self.oauth_clients.iter().find_map(|e| client_entry_problem(e).map(|w| (e, w))) {
+            return Some(format!("oauth_clients: {e:?}: {why}"));
         }
         self.approval_rules
             .iter()
@@ -1409,6 +1504,33 @@ impl Policy {
     /// Whether `g` has gone unused too long: since its last use, or since it was made.
     pub fn idle(&self, g: &store::Grant, now: i64) -> bool {
         self.max_idle_days.is_some_and(|d| now - g.last_used_at.unwrap_or(g.created_at) > i64::from(d) * 86_400_000)
+    }
+
+    /// Whether `oauth_clients` lets this client connect: by its metadata document's URL or host,
+    /// or (a registered client, whose name anyone may choose) by where every one of its redirects
+    /// goes, since that's where its codes go; one with no redirect signs in with a code.
+    pub fn allows_client(&self, c: &store::Client) -> bool {
+        let list = &self.oauth_clients;
+        // Machine clients (`mcl_`, store/machine.rs) and enterprise apps (`ent_`, enterprise.rs)
+        // are an admin's own setup, never a client a person consents to.
+        if list.is_empty() || c.id.starts_with("mcl_") || c.id.starts_with("ent_") {
+            return true;
+        }
+        let document = url::Url::parse(&c.id).ok().filter(|u| matches!(u.scheme(), "https" | "http"));
+        if let Some(u) = document
+            && list.iter().any(|e| *e == c.id || (!e.contains(':') && u.host_str().is_some_and(|h| host_entry_covers(e, h))))
+        {
+            return true;
+        }
+        if c.redirect_uris.is_empty() {
+            return list.iter().any(|e| e == "device");
+        }
+        c.redirect_uris.iter().all(|r| list.iter().any(|e| entry_covers_redirect(e, r)))
+    }
+
+    /// `allows_client` for a grant: only an OAuth connection has a client to hold to the list.
+    pub fn allows_grant(&self, g: &store::Grant) -> bool {
+        g.kind != "oauth" || g.client.as_ref().is_none_or(|c| self.allows_client(c))
     }
 }
 
@@ -1457,8 +1579,9 @@ impl roll_auth::Grants for Access {
         if g.decoy {
             return None;
         }
-        // Stopped for being idle (the token policy), as the evaluator answers its requests.
-        if self.policy_now().idle(&g, code_sql::now_ms()) {
+        // Stopped for being idle (the token policy), or an OAuth client the policy no longer lists,
+        // as the evaluator answers its requests.
+        if self.policy_now().idle(&g, code_sql::now_ms()) || !self.policy_now().allows_grant(&g) {
             return None;
         }
         if let Some(user) = g.user.as_deref() {

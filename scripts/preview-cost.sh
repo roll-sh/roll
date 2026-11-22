@@ -107,6 +107,8 @@ curl -sf -XPUT "$SEARCH_URL_PARENT/products/_doc/3?refresh=true" -H 'content-typ
 # An index whose name has dots (logs.2024): its mask is split off at the whole name.
 curl -sf -XPUT "$SEARCH_URL_PARENT/logs.2024/_doc/1?refresh=true" -H 'content-type: application/json' -d '{"user":{"email":"eve@corp.example"}}' >/dev/null
 curl -sf -XPUT "$SEARCH_URL_PARENT/products/_doc/4?refresh=true" -H 'content-type: application/json' -d '{"name":"dotted","owner.email":"bob@corp.example","stock":3}' >/dev/null
+# A connector on the parent (roll search's native syncs, #318): its branches inherit it, waiting.
+curl -sf -XPUT "$SEARCH_URL_PARENT/_connector/catalog-sync" -H 'content-type: application/json' -d '{"index_name":"content-synced","is_native":true,"service_type":"s3"}' >/dev/null || { echo "a connector on the parent search cluster"; exit 1; }
 PG=$(api POST /v1/projects '{"name":"shop-db"}' | jq_ "d['id']")
 # A real-looking row in the parent, which previews mask.
 PG_PARENT_EP=$(api GET "/v1/projects/$PG" | jq_ "[b['endpoint']['id'] for b in d['branches'] if b['parent_id'] is None][0]")
@@ -347,6 +349,22 @@ TERMS() { curl -sf -XPOST "${@:2}" "$1/products/_terms_enum" -H 'content-type: a
 [ "$(TERMS "$SEARCH_URL_PARENT")" = "['parent']" ] || { echo "the parent's term dictionary should have the value (the check's premise): $(TERMS "$SEARCH_URL_PARENT")"; exit 1; }
 ES_TERMS=$(TERMS "$APP_ES" -H "Authorization: ApiKey $APP_KEY")
 [ "$ES_TERMS" = "[]" ] || { echo "the masked value is still in the branch's term dictionary: $ES_TERMS"; exit 1; }
+# The parent's connector is inherited waiting for adoption (roll search's #318): a sync asked of the
+# branch never runs (it would read production's source into the preview, past its masks), while
+# the parent's does (the premise), and the branch stays masked.
+console() { api POST "/v1/search/clusters/$1/request" "{\"method\":\"$2\",\"path\":\"$3\"${4:+,\"body\":$4}}"; }
+answer() { jq_ "__import__('json').loads(d.get('body') or '{}').get('$1', '')"; }
+PJOB=$(console "$SEARCH" POST /_connector/_sync_job '{"id":"catalog-sync"}' | answer id)
+BJOB=$(console "$BRANCH_SEARCH" POST /_connector/_sync_job '{"id":"catalog-sync"}' | answer id)
+[ -n "$PJOB" ] && [ -n "$BJOB" ] || { echo "a sync job of the connector on the parent and on the branch: '$PJOB' / '$BJOB'"; exit 1; }
+for _ in $(seq 1 120); do
+  PSTATE=$(console "$SEARCH" GET "/_connector/_sync_job/$PJOB" | answer status)
+  [ "$PSTATE" != pending ] && break
+  sleep 1
+done
+BSTATE=$(console "$BRANCH_SEARCH" GET "/_connector/_sync_job/$BJOB" | answer status)
+case "$PSTATE" in in_progress|error|completed) [ "$BSTATE" = pending ] ;; *) false ;; esac || { echo "the parent's sync should run (it did: $PSTATE) and the branch's wait for adoption (pending, not $BSTATE)"; exit 1; }
+[ "$(es "$APP_ES/products/_doc/1" | jq_ "d['_source']['name']")" = "[masked]" ] || { echo "the search branch should stay masked beside its inherited connector"; exit 1; }
 # A field only the branch's documents have (price): its mapping gains it, and the next head's
 # schema changes say so.
 es -XPUT "$APP_ES/products/_doc/2?refresh=true" -H 'content-type: application/json' -d '{"name":"branch","price":9.5}' >/dev/null
@@ -554,6 +572,9 @@ say "migrate the preview's Postgres branch, push: the next head's schema changes
 if [ -n "$PG_BRANCH" ]; then
   PG_EP=$(api GET "/v1/projects/$PG" | jq_ "[b['endpoint']['id'] for b in d['branches'] if b['id']=='$PG_BRANCH'][0]")
   api POST "/v1/endpoints/$PG_EP/query" '{"sql":"CREATE TABLE preview_only (id int PRIMARY KEY, note text NOT NULL DEFAULT '"'"'x'"'"'); ALTER TABLE users ALTER COLUMN email SET NOT NULL"}' >/dev/null
+  # Another change's migration lands on production first: a table the preview's branch doesn't
+  # have, which isn't this change dropping it (neither a change nor a risk).
+  api POST "/v1/endpoints/$PG_PARENT_EP/query" '{"sql":"CREATE TABLE landed_first (id int PRIMARY KEY)"}' >/dev/null
   # The preview's code tries to get the superuser to run it (a function shadowing one the schema
   # diff calls, pg_get_indexdef(oid), the database's search_path pointed at it): the diff runs as the branch's role
   # with only the catalog's names, so the role stays what it is.
@@ -578,6 +599,7 @@ if [ -n "$PG_BRANCH" ]; then
   done
   case "$SCHEMA" in *"+ table public.preview_only"*) ;; *) echo "the schema changes should name the new table: $SCHEMA"; exit 1;; esac
   case "$SCHEMA" in *"+ field products.price "*) ;; *) echo "the schema changes should name the search branch's new field: $SCHEMA"; exit 1;; esac
+  case "$SCHEMA" in *landed_first*) echo "a table production made after the branch isn't this change's: $SCHEMA"; exit 1;; esac
   # A column made NOT NULL is named as a migration risk; the new table isn't one.
   RISKS=$(api GET "/v1/previews/$PV" | jq_ "' | '.join(d.get('schema_risks') or [])")
   case "$RISKS" in "makes public.users.email (postgres:$PG) NOT NULL: "*) ;; *) echo "the schema's risks should name the NOT NULL column (and its database), and only it: $RISKS"; exit 1;; esac
@@ -1030,6 +1052,7 @@ cat <<EOF
 | Change opened → preview ready ($(echo "$P" | jq_ "len(d['resources'])") branches made, the service deployed) | $((T1 - T0)) ms |
 | The preview's bucket key: its branch / production's bucket | $OWN_LS / $PARENT_LS |
 | … step by step (its timeline: data, setup, deploy, checks) | $STEPS |
+| Search: a sync of the parent's connector on the parent / asked of the branch (inherited, waits for adoption) | $PSTATE / $BSTATE |
 | Parent bucket bytes / the branch's own bytes after writing 1 MiB / objects the branch sees | $PARENT_OBJECTS / $BRANCH_OBJECTS / $BRANCH_SEES |
 | NoSQL branch's mask on app.users.email / masks on the parent | $MASKED / $PARENT_MASKED |
 | NoSQL: app.users.email in the branch / a filter on the real address there | $NOSQL_READ / $NOSQL_FILTER |
