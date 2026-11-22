@@ -7,6 +7,7 @@ GET /v1/access/catalog                                                         t
 GET /v1/access/oauth/clients                                                   the dashboard's (the OAuth clients a person registered)
 GET /v1/access/oauth/clients/{id}                                              the dashboard's (one registered OAuth client)
 GET /v1/access/oauth/step-ups/{id}                                             the consent screen's (a step-up its person decides; a client never reads it)
+GET /v1/previews/events                                                        an MCP Events feed (previews.event): events/poll and webhooks read it; previews_list and previews_get are the tools
 POST /v1/access/tokens                                                         answers or sets a credential
 DELETE /v1/access/tokens/{id}                                                  a person's call (a token's revoke is the person's; security_checkup names them)
 PATCH /v1/access/tokens/{id}                                                   a person's call (a token's rules)
