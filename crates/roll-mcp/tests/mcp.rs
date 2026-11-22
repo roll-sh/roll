@@ -1057,7 +1057,7 @@ async fn an_agent_polls_what_happened() {
     let found = send(OPERATOR, "server/discover", json!({})).await;
     assert!(found["result"]["capabilities"]["extensions"]["io.modelcontextprotocol/events"].is_object(), "{found}");
     let list = send(OPERATOR, "events/list", json!({})).await;
-    assert_eq!((list["result"]["events"][0]["name"].as_str(), &list["result"]["events"][0]["delivery"]), (Some("apps.event"), &json!(["poll"])), "{list}");
+    assert_eq!((list["result"]["events"][0]["name"].as_str(), &list["result"]["events"][0]["delivery"]), (Some("apps.event"), &json!(["poll", "push"])), "{list}");
 
     let poll = |token: &str, cursor: Value, args: Value| send(token, "events/poll", json!({ "name": "apps.event", "cursor": cursor, "arguments": args }));
     let now = poll(OPERATOR, Value::Null, json!({})).await["result"].clone();
@@ -1127,7 +1127,7 @@ async fn an_agent_subscribes_a_webhook() {
     };
     let secret = "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw";
     let sub = |token: &str, url: &str, secret: &str| send(token, "events/subscribe", json!({ "name": "apps.event", "arguments": { "kinds": ["deploy.failed"] }, "delivery": { "mode": "webhook", "url": url, "secret": secret } }));
-    assert_eq!(send(&token, "events/list", json!({})).await["result"]["events"][0]["delivery"], json!(["poll", "webhook"]));
+    assert_eq!(send(&token, "events/list", json!({})).await["result"]["events"][0]["delivery"], json!(["poll", "push", "webhook"]));
     assert_eq!(sub(OPERATOR, "https://hooks.example.com/good", secret).await["error"]["code"], -32024, "the operator's connection");
 
     let made = sub(&token, "https://hooks.example.com/good", secret).await;
@@ -1191,4 +1191,56 @@ async fn an_agent_subscribes_a_webhook() {
     // the feed once as the agent, and that asks, so nothing is kept.
     assert_eq!(d.http(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "agents_ask": [{ "product": "apps" }] }))).await.0, StatusCode::OK);
     assert_eq!(sub(&token, "https://hooks.example.com/good", secret).await["error"]["code"], -32024);
+}
+
+/// MCP Events' push mode: `events/stream` answers a bad subscription with an error and no stream;
+/// a good one opens with `active` (its cursor and heartbeat), then what the filter keeps, each event
+/// with its cursor, every frame tagged with the request's id.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_streams_what_happens() {
+    let d = Daemon::with_products(vec!["postgres".into(), "apps".into()]);
+    let meta = json!({ "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": { "name": "t", "version": "1" }, "io.modelcontextprotocol/clientCapabilities": { "extensions": { "io.modelcontextprotocol/events": {} } } });
+    let call = |name: &str, params: Value| {
+        let mut params = params;
+        params["_meta"] = meta.clone();
+        params["name"] = json!(name);
+        let body = json!({ "jsonrpc": "2.0", "id": "s1", "method": "events/stream", "params": params });
+        Request::builder()
+            .method(Method::POST)
+            .uri("/v1/mcp")
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .header("mcp-protocol-version", "2026-07-28")
+            .header("mcp-method", "events/stream")
+            .header("mcp-name", name)
+            .header("authorization", format!("Bearer {OPERATOR}"))
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+    let refused = d.router.clone().oneshot(call("nope.event", json!({}))).await.unwrap().into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(serde_json::from_slice::<Value>(&refused).unwrap()["error"]["code"], -32023, "no stream for an event roll doesn't have");
+    let mut body = d.router.clone().oneshot(call("apps.event", json!({ "cursor": "a1:0", "arguments": { "kinds": ["deploy.*"] }, "heartbeatMs": 20000 }))).await.unwrap().into_body();
+    let mut buf = String::new();
+    let mut next = async move || -> Value {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            if let Some(i) = buf.find("\n\n") {
+                let event: String = buf.drain(..i + 2).collect();
+                if let Some(data) = event.lines().find_map(|l| l.strip_prefix("data: ").or_else(|| l.strip_prefix("data:"))) {
+                    return serde_json::from_str(data).unwrap();
+                }
+                continue;
+            }
+            let frame = tokio::time::timeout_at(deadline, body.frame()).await.expect("a message within 15 s").unwrap_or_else(|| panic!("the stream ended: {buf}")).unwrap();
+            if let Ok(data) = frame.into_data() {
+                buf.push_str(&String::from_utf8_lossy(&data));
+            }
+        }
+    };
+    let active = next().await;
+    assert_eq!((active["method"].as_str(), active["params"]["heartbeatMs"].as_u64(), &active["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"]), (Some("notifications/events/active"), Some(20000), &json!("s1")), "{active}");
+    let (one, two) = (next().await, next().await);
+    let seen: Vec<(&str, &str)> = [&one, &two].iter().map(|e| (e["params"]["data"]["kind"].as_str().unwrap(), e["params"]["cursor"].as_str().unwrap())).collect();
+    assert_eq!(seen, [("deploy.active", "a1:1"), ("deploy.failed", "a1:2")], "{one} {two}");
+    assert_eq!(two["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"], "s1");
 }
