@@ -20,7 +20,8 @@ environments that inherit from a base environment instead of copying it.
 - CLI: `roll secrets …` and `roll run` in `crates/roll-cli/src/secrets.rs`.
 - Tests: `crates/roll-secrets/tests/api.rs` (the router in process, on SQLite or Postgres),
   `crates/roll-secrets/tests/nodes.rs` (two stores racing on one database),
-  `crates/roll-cli/tests/secrets.rs` (`roll run`, with `--watch`, against roll secrets in process),
+  `crates/roll-cli/tests/secrets.rs` (`roll run`, with `--watch`, and `roll secrets agent` against
+  roll secrets in process),
   `crates/rolld/tests/secrets.rs` (each product's link against the real rolld, and a sealed start),
   `apps/dashboard/src/lib/secrets-*.test.ts`. `pnpm test:secrets` runs them (`--docker`: on
   Postgres, and the Postgres link).
@@ -476,6 +477,117 @@ dynamic credential is kept only within its lease. It logs in as a workload ident
 signs for the function's own role (`GetWebIdentityToken`, IAM's outbound identity federation: the
 account's own issuer, `sub` the role's ARN), so neither the function nor its configuration holds a
 roll token; `ROLL_TOKEN` otherwise. Not yet run against a real account (its README, "Gaps").
+## A local agent
+`roll secrets agent` is the Lambda extension's surface for every other machine (EC2, ECS, a
+Kubernetes pod's sidecar, a VM, a laptop), as AWS's Secrets Manager Agent is for Secrets Manager.
+It's a subcommand of the `roll` binary (`crates/roll-cli/src/secrets/local_agent.rs`): nothing else
+to install. An app moves between it and the Lambda extension unchanged:
+
+- It listens on **127.0.0.1 only** (`--port`, 2773 by default as the extension's; `0` picks one and
+  prints it). There's no flag for another address: values never leave the machine (or the pod).
+- `GET /secrets?env=production&path=/` answers the folder's values as a JSON object, `GET
+  /secrets/{KEY}?env=…&path=…` one value as text, and `GET /health` 200 while the agent's login
+  works (503 otherwise). `env` defaults to the agent's `-e` (or `ROLL_ENV`, or the directory's
+  setup), `path` to its `--path`, else `/`. Errors are `{"error", "code"}`, naming keys and folders,
+  never a value: 404 `not_found`, 409 `unresolved` (`/secrets` answers a folder only when every key
+  resolves), 403 `withheld` for a key this login isn't given (sensitive, or an untrusted
+  caller's), roll's own 403, 404, 409, 423 and 429, and 502 for anything else. Every answer is
+  `Cache-Control: no-store`.
+- **The request token.** Every request but `/health` carries `X-Roll-Token` (the extension's header)
+  with the contents of `--token-file` (`ROLL_AGENT_TOKEN_FILE`; by default
+  `$XDG_RUNTIME_DIR/roll/agent-token`), which the agent makes with 32 random bytes, 0600, when it
+  doesn't exist (`ROLL_AGENT_TOKEN` gives the value itself instead). Without it, or with another,
+  the answer is a 401 that says nothing more. A server-side request forgery in the app (a URL it
+  fetches for a user) can make it ask `127.0.0.1:2773` but can't add the header, so it reads
+  nothing; a request that came through a proxy (`Forwarded`, `X-Forwarded-For`) is refused too, as
+  AWS's agent refuses it. `/health` needs no token, so a probe can ask it, and says only `ok` and the version.
+- **Logging in.** As every `roll secrets` command does: a workload identity (`ROLL_IDENTITY`) with
+  the platform's OIDC token in a file it refreshes (`ROLL_OIDC_TOKEN_FILE`: Kubernetes' projected
+  service account token, ECS's or EC2's web identity token, GitHub's), read again at each login. The
+  login renews itself a quarter of its life before it ends, and logs in again at once on a 401;
+  a login that fails leaves the current one in use while it lasts. `ROLL_TOKEN` (a scoped token)
+  works too, for development. An identity that's a preview's or a sandbox's reads as untrusted:
+  roll decides that from the login, and the agent asks for nothing more.
+- **The cache.** The first read of a folder goes to roll (`…/values?digest=1`); after that the
+  agent follows the folder's digest (`…/digest?since=&wait=25`, the long poll the Kubernetes
+  operator uses, which decrypts, issues and audits nothing) and reads the values again only when it
+  moved, so a change reaches the agent within a second or so and an app's read is answered from
+  memory. Each answered poll confirms the folder for another `--ttl` (`ROLL_CACHE_TTL`, 300 s); a
+  folder roll hasn't confirmed for that long (roll unreachable) is read from roll again on its next
+  request, and `--ttl 0` turns the cache off. `--cache-size` (`ROLL_CACHE_SIZE`, 1000) caps the
+  folders kept; past it, the one read longest ago goes. `--prefetch production:/,staging:/api`
+  (`ROLL_PREFETCH`) reads folders before the agent answers. A folder with a key that doesn't
+  resolve is never kept. A folder holding a dynamic credential is kept only within its leases: the
+  agent renews each lease when it keeps the folder (that's when it learns when the lease ends), then
+  every 10 minutes or at half its life, as `roll run --watch` does, and stops keeping the folder
+  when a renewal fails or a fifth of the soonest lease's life is left. Nothing is written to disk
+  but the token file.
+- **Logs** go to stderr: a line per request without its query string (`GET /secrets/DATABASE_URL 200
+  1ms`), folders that changed, lease ids and roll's error messages, never a value.
+
+The token file is 0600, so the agent runs as the app's own user (or both get one `ROLL_AGENT_TOKEN`).
+A systemd unit, with the token file under `/run/roll`:
+
+```ini
+[Unit]
+Description=roll secrets agent
+After=network-online.target
+
+[Service]
+Environment=ROLL_API_URL=https://api.roll.example ROLL_IDENTITY=idn_… ROLL_OIDC_TOKEN_FILE=/run/roll/oidc-token
+ExecStart=/usr/local/bin/roll secrets -p shop -e production agent --token-file /run/roll/agent-token --prefetch production:/
+User=shop
+RuntimeDirectory=roll
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+
+A Kubernetes sidecar (the identity is the pod's service account, `system:serviceaccount:shop:web`,
+made as in "Workload identities"; the token file sits in a volume only the pod's two containers
+share, and both run as one user so the app can read it). The kubelet's `httpGet` probes come from
+the node and can't reach the pod's 127.0.0.1: probe with `exec` if the image has a client.
+
+```yaml
+spec:
+  serviceAccountName: web
+  securityContext: { runAsUser: 10001, runAsGroup: 10001 }
+  volumes:
+    - name: roll-oidc
+      projected:
+        sources:
+          - serviceAccountToken: { audience: roll, expirationSeconds: 3600, path: token }
+    - name: roll-agent
+      emptyDir: { medium: Memory }
+  initContainers:
+    - name: roll-secrets-agent
+      image: ghcr.io/roll-sh/roll:latest       # any image with the roll binary
+      restartPolicy: Always                    # a native sidecar: up before the app starts
+      args: [secrets, -p, shop, -e, production, agent, --token-file, /run/roll/agent-token, --prefetch, "production:/"]
+      env:
+        - { name: ROLL_API_URL, value: https://api.roll.example }
+        - { name: ROLL_IDENTITY, value: idn_… }
+        - { name: ROLL_OIDC_TOKEN_FILE, value: /var/run/secrets/roll/token }
+      volumeMounts:
+        - { name: roll-oidc, mountPath: /var/run/secrets/roll, readOnly: true }
+        - { name: roll-agent, mountPath: /run/roll }
+  containers:
+    - name: web
+      image: shop/web
+      volumeMounts:
+        - { name: roll-agent, mountPath: /run/roll, readOnly: true }
+```
+
+The app reads as on Lambda, with the header from the file:
+
+```sh
+curl -sH "X-Roll-Token: $(cat /run/roll/agent-token)" http://127.0.0.1:2773/secrets/DATABASE_URL
+```
+
+Tests: `crates/roll-cli/tests/secrets.rs` (`the_local_agent_answers_only_requests_that_carry_its_token`,
+`a_change_reaches_the_local_agents_cache_through_the_digest`); the identity login's renewal is
+`relogin_tests` in `crates/roll-cli/src/secrets.rs`, which the agent shares.
 ## Customer-managed keys
 A project's data key can be wrapped once more by a KMS key in the customer's own AWS account, as
 Infisical's external KMS does (`PUT …/kms {key: "arn:aws:kms:…"}`, `roll secrets kms set ARN`;
