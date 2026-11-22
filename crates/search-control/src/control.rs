@@ -276,6 +276,13 @@ pub struct ConsoleResponse {
 /// Longest response body the console returns.
 pub const CONSOLE_MAX_BODY: usize = 4 << 20;
 
+/// What a console request answers: the cluster's answer in the console's envelope, or, for an
+/// answer the cluster streams (`_inference/…/_stream`), that stream as it comes.
+pub enum ConsoleAnswer {
+    Whole(ConsoleResponse),
+    Stream { status: u16, headers: Vec<(String, String)>, body: search_es::rest::Streamed },
+}
+
 /// What an "always on" idle timeout becomes on the node (a century).
 const ALWAYS_ON: Duration = Duration::from_secs(100 * 365 * 86_400);
 
@@ -1965,7 +1972,7 @@ impl Control {
 
     /// Runs one REST request (the dashboard console, `roll search request`). The node counts it
     /// for metering like any client's.
-    pub async fn request(&self, id: &str, r: ConsoleRequest) -> Result<ConsoleResponse> {
+    pub async fn request(&self, id: &str, r: ConsoleRequest) -> Result<ConsoleAnswer> {
         let c = self.get(id).await?;
         let method = r.method.trim().to_ascii_uppercase();
         if !matches!(method.as_str(), "GET" | "POST" | "PUT" | "DELETE" | "HEAD" | "PATCH") {
@@ -1985,6 +1992,9 @@ impl Control {
         req.body = body;
         let started = std::time::Instant::now();
         let resp = self.call(&c, req).await;
+        if let Some(body) = resp.stream.clone() {
+            return Ok(ConsoleAnswer::Stream { status: resp.status, headers: resp.headers, body });
+        }
         let took_ms = started.elapsed().as_millis() as u64;
         let is_json = resp.headers.iter().any(|(k, v)| k.eq_ignore_ascii_case("content-type") && v.contains("json"));
         let truncated = !resp.head && method != "HEAD" && resp.body.len() > CONSOLE_MAX_BODY;
@@ -1999,7 +2009,7 @@ impl Control {
             }
             String::from_utf8_lossy(&resp.body[..end]).into_owned()
         };
-        Ok(ConsoleResponse { status: resp.status, headers: resp.headers, body, json: is_json && !truncated, took_ms, truncated })
+        Ok(ConsoleAnswer::Whole(ConsoleResponse { status: resp.status, headers: resp.headers, body, json: is_json && !truncated, took_ms, truncated }))
     }
 
     // --- metering ---------------------------------------------------------------------------

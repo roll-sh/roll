@@ -17,7 +17,7 @@
 //! check is made from the catalog before the call is forwarded and again on the owner, behind
 //! its own gate.
 
-use crate::control::{ClusterOptions, ConsoleRequest, ConsoleResponse, Control, ControlError, Usage};
+use crate::control::{ClusterOptions, ConsoleAnswer, ConsoleRequest, Control, ControlError, Usage};
 use crate::store::{Caps, SearchCluster};
 use axum::body::Body;
 use axum::extract::{FromRequestParts, Path, Query, Request, State};
@@ -449,8 +449,22 @@ async fn request(State(c): State<AppState>, Path(id): Path<String>, method: Meth
     if let Some(resp) = forward(&c, &cluster.name, method, &format!("/v1/search/clusters/{id}/request"), &headers, bytes.clone()).await {
         return Ok(resp);
     }
-    let out: ConsoleResponse = c.request(&cluster.id, r).await?;
-    Ok(Json(out).into_response())
+    match c.request(&cluster.id, r).await? {
+        ConsoleAnswer::Whole(out) => Ok(Json(out).into_response()),
+        // A streamed answer (server-sent events) goes on as the cluster sends it, with its status
+        // and content type: the console's envelope would have to wait for its end.
+        ConsoleAnswer::Stream { status, headers, body } => {
+            use futures::StreamExt;
+            let body = body.take().map_or_else(Body::empty, |s| Body::from_stream(s.map(Ok::<_, std::convert::Infallible>)));
+            let mut resp = Response::new(body);
+            *resp.status_mut() = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
+            if let Some(v) = headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("content-type")).and_then(|(_, v)| axum::http::HeaderValue::from_str(v).ok()) {
+                resp.headers_mut().insert(axum::http::header::CONTENT_TYPE, v);
+            }
+            resp.headers_mut().insert(axum::http::header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
+            Ok(resp)
+        }
+    }
 }
 
 /// Bytes past the limit read (and dropped) before answering 413, and for how long.

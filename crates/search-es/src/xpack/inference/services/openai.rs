@@ -6,13 +6,14 @@
 //! Not supported: OAuth2 client credentials (`client_secret`, `token_url`; an API key is
 //! required) and the multimodal `embedding` task type.
 
-use super::{Config, answer_json, json_headers, missing_field, sse_data};
+use super::{Config, answer_json, json_headers, missing_field};
 use crate::cluster::Cluster;
 use crate::error::{EsError, EsResult};
 use crate::json::{Map, Value};
 use crate::obj;
 use crate::xpack::inference::http::{self, Call};
 use crate::xpack::inference::results::Results;
+use crate::xpack::inference::stream::Streaming;
 use crate::xpack::inference::settings::{Reader, validation};
 use crate::xpack::inference::{Endpoint, Request, TaskType};
 use base64::Engine;
@@ -184,9 +185,9 @@ fn url(ep: &Endpoint, default: &str) -> String {
     ep.service_settings.get("url").and_then(Value::as_str).unwrap_or(default).to_string()
 }
 
-async fn send(cluster: &Cluster, ep: &Endpoint, url: String, headers: Vec<(String, String)>, body: Value, timeout: Duration) -> EsResult<http::Answer> {
+async fn send(cluster: &Cluster, ep: &Endpoint, url: String, headers: Vec<(String, String)>, body: Value, timeout: Duration, stream: bool) -> EsResult<http::Answer> {
     let call = Call { inference_id: &ep.id, url: url.clone(), headers, body: body.to_json().into_bytes(), timeout, retry: http::retry_server_errors, per_minute: ep.requests_per_minute() };
-    let answer = http::post(cluster, &call).await?;
+    let answer = if stream { http::post_stream(cluster, &call).await? } else { http::post(cluster, &call).await? };
     http::check(&ep.id, &url, &answer)?;
     Ok(answer)
 }
@@ -208,7 +209,7 @@ pub async fn infer(cluster: &Cluster, ep: &Endpoint, req: &Request) -> EsResult<
                 body.insert("dimensions".into(), d.clone());
             }
             body.insert("encoding_format".into(), "base64".into());
-            let answer = send(cluster, ep, url(ep, EMBEDDINGS_URL), headers, Value::Obj(body), req.timeout).await?;
+            let answer = send(cluster, ep, url(ep, EMBEDDINGS_URL), headers, Value::Obj(body), req.timeout, false).await?;
             embeddings(&answer_json("openai", &answer)?, req.input.len())
         }
         TaskType::Completion => {
@@ -216,7 +217,7 @@ pub async fn infer(cluster: &Cluster, ep: &Endpoint, req: &Request) -> EsResult<
                 return Err(EsError::status(400, "OpenAI chat completions only accepts 1 input"));
             }
             let body = chat_body(&ts, messages_of(&req.input[0]), &Map::new(), ep, false);
-            let answer = send(cluster, ep, url(ep, CHAT_URL), headers, body, req.timeout).await?;
+            let answer = send(cluster, ep, url(ep, CHAT_URL), headers, body, req.timeout, false).await?;
             let v = answer_json("openai", &answer)?;
             let content = v
                 .get("choices")
@@ -286,25 +287,15 @@ fn chat_body(ts: &Map, messages: Value, extra: &Map, ep: &Endpoint, stream: bool
     Value::Obj(body)
 }
 
-/// A streamed completion: the deltas of the answer's chunks, in one event (roll reads the
-/// stream whole before answering).
-pub async fn stream_completion(cluster: &Cluster, ep: &Endpoint, req: &Request) -> EsResult<Vec<Value>> {
+/// A streamed completion: the text deltas of each read of the answer's chunks, one event each.
+pub async fn stream_completion(cluster: &Cluster, ep: &Endpoint, req: &Request) -> EsResult<Streaming> {
     if req.input.len() != 1 {
         return Err(EsError::status(400, "OpenAI chat completions only accepts 1 input"));
     }
     let ts = effective_task_settings(ep, req)?;
     let body = chat_body(&ts, messages_of(&req.input[0]), &Map::new(), ep, true);
-    let answer = send(cluster, ep, url(ep, CHAT_URL), headers(cluster, ep, &ts)?, body, req.timeout).await?;
-    let mut deltas = Vec::new();
-    for (_, data) in sse_data(&answer.body) {
-        let Some(chunk) = crate::json::parse(data.as_bytes()).ok().flatten() else { continue };
-        for c in chunk.get("choices").and_then(Value::as_array).into_iter().flatten() {
-            if let Some(t) = c.pointer(&["delta", "content"]).and_then(Value::as_str).filter(|t| !t.is_empty()) {
-                deltas.push(obj! { "delta" => t });
-            }
-        }
-    }
-    Ok(if deltas.is_empty() { vec![] } else { vec![obj! { "completion" => Value::Arr(deltas) }] })
+    let answer = send(cluster, ep, url(ep, CHAT_URL), headers(cluster, ep, &ts)?, body, req.timeout, true).await?;
+    Streaming::open(answer, super::oai::completion_decoder("OpenAI chat completions"))
 }
 
 /// The unified chat completion request's fields (`UnifiedCompletionRequest`).
@@ -339,19 +330,13 @@ pub fn message(v: &Value) -> Value {
 
 /// A streamed chat completion (`_inference/chat_completion/{id}/_stream`): the upstream's
 /// chunks as `StreamingUnifiedChatCompletionResults` prints them.
-pub async fn stream_chat(cluster: &Cluster, ep: &Endpoint, body: &Value, timeout: Duration) -> EsResult<Vec<Value>> {
+pub async fn stream_chat(cluster: &Cluster, ep: &Endpoint, body: &Value, timeout: Duration) -> EsResult<Streaming> {
     let req = unified_request(body)?;
     let messages = Value::Arr(req.get("messages").and_then(Value::as_array).into_iter().flatten().map(message).collect());
     let ts = ep.task_settings.clone();
     let body = chat_body(&ts, messages, &req, ep, true);
-    let answer = send(cluster, ep, url(ep, CHAT_URL), headers(cluster, ep, &ts)?, body, timeout).await?;
-    let mut out = Vec::new();
-    for (_, data) in sse_data(&answer.body) {
-        if let Some(chunk) = crate::json::parse(data.as_bytes()).ok().flatten() {
-            out.push(unified_chunk(&chunk));
-        }
-    }
-    Ok(out)
+    let answer = send(cluster, ep, url(ep, CHAT_URL), headers(cluster, ep, &ts)?, body, timeout, true).await?;
+    Streaming::open(answer, super::oai::chat_decoder(&ep.id))
 }
 
 /// One chunk in `ChatCompletionChunk.toXContent`'s shape.

@@ -24,6 +24,7 @@ pub mod voyageai;
 
 use super::chunking::Chunking;
 use super::results::Results;
+use super::stream::Streaming;
 use super::settings::{check_empty, java_string};
 use super::{Endpoint, Request, TaskType, unsupported_task};
 use crate::cluster::Cluster;
@@ -361,6 +362,8 @@ impl Service {
             }
             TaskType::ChatCompletion => {
                 let body = obj! { "messages" => crate::arr![obj! { "content" => "how big", "role" => "user" }] };
+                // Elasticsearch's validation passes once the stream opened (recorded: an endpoint
+                // whose stream fails midway is created); dropping it closes the upstream request.
                 self.stream_chat(cluster, ep, &body, timeout).await.map(|_| Results::Completion(vec![]))
             }
             _ => self.infer(cluster, ep, &req).await,
@@ -431,8 +434,8 @@ impl Service {
         }
     }
 
-    /// A streamed completion's events (`{"completion":[{"delta":…}]}` each).
-    pub async fn stream_completion(self, cluster: &Cluster, ep: &Endpoint, req: &Request) -> EsResult<Vec<Value>> {
+    /// A streamed completion (`{"completion":[{"delta":…}]}` events), its upstream answer open.
+    pub async fn stream_completion(self, cluster: &Cluster, ep: &Endpoint, req: &Request) -> EsResult<Streaming> {
         match self {
             Service::OpenAi => openai::stream_completion(cluster, ep, req).await,
             Service::Anthropic => anthropic::stream_completion(cluster, ep, req).await,
@@ -447,8 +450,8 @@ impl Service {
         }
     }
 
-    /// A streamed chat completion (the unified API)'s chunks.
-    pub async fn stream_chat(self, cluster: &Cluster, ep: &Endpoint, body: &Value, timeout: Duration) -> EsResult<Vec<Value>> {
+    /// A streamed chat completion (the unified API's chunks), its upstream answer open.
+    pub async fn stream_chat(self, cluster: &Cluster, ep: &Endpoint, body: &Value, timeout: Duration) -> EsResult<Streaming> {
         match self {
             Service::OpenAi => openai::stream_chat(cluster, ep, body, timeout).await,
             Service::Anthropic => anthropic::stream_chat(cluster, ep, body, timeout).await,

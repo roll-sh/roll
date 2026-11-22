@@ -327,6 +327,13 @@ enum BodyError {
 
 /// The service's error: hyper closes the connection without answering (Netty's behaviour when
 /// a request body can't be decoded).
+/// A REST answer's body: whole, or sent as it is made (server-sent events, `EsResponse::stream`).
+pub type RestBody = http_body_util::combinators::UnsyncBoxBody<Bytes, std::convert::Infallible>;
+
+fn full(b: Bytes) -> RestBody {
+    Full::new(b).boxed_unsync()
+}
+
 #[derive(Debug)]
 pub struct DropConnection(String);
 
@@ -345,8 +352,8 @@ impl std::error::Error for DropConnection {}
 
 /// Elasticsearch's answer to a body over `http.max_content_length`: an empty
 /// `413 Request Entity Too Large` (the old reason phrase), then the connection closes.
-fn too_large() -> Response<Full<Bytes>> {
-    let mut r = Response::new(Full::new(Bytes::new()));
+fn too_large() -> Response<RestBody> {
+    let mut r = Response::new(full(Bytes::new()));
     *r.status_mut() = StatusCode::PAYLOAD_TOO_LARGE;
     r.extensions_mut().insert(hyper::ext::ReasonPhrase::from_static(b"Request Entity Too Large"));
     r.headers_mut().insert(hyper::header::CONTENT_LENGTH, HeaderValue::from_static("0"));
@@ -354,15 +361,15 @@ fn too_large() -> Response<Full<Bytes>> {
     r
 }
 
-fn closing(mut r: Response<Full<Bytes>>) -> Response<Full<Bytes>> {
+fn closing(mut r: Response<RestBody>) -> Response<RestBody> {
     r.headers_mut().insert(hyper::header::CONNECTION, HeaderValue::from_static("close"));
     r
 }
 
 /// Netty's `HttpObjectAggregator` answer to an `Expect` it can't meet: an empty
 /// `417 Expectation Failed`, then the connection closes.
-fn expectation_failed() -> Response<Full<Bytes>> {
-    let mut r = Response::new(Full::new(Bytes::new()));
+fn expectation_failed() -> Response<RestBody> {
+    let mut r = Response::new(full(Bytes::new()));
     *r.status_mut() = StatusCode::EXPECTATION_FAILED;
     r.headers_mut().insert(hyper::header::CONTENT_LENGTH, HeaderValue::from_static("0"));
     r.headers_mut().insert(hyper::header::CONNECTION, HeaderValue::from_static("close"));
@@ -429,21 +436,21 @@ async fn read_body<B: RequestBody>(
 /// (a fleet node's front, which runs it on its cluster's owner): the same limits, decoding and
 /// answers. `origin`: who the request comes from, as that server decided (the cluster's IP
 /// allowlist checks it). `Err`: close the connection without answering.
-pub async fn serve_request<B: RequestBody>(node: Arc<Node>, req: Request<B>, origin: Origin) -> Result<Response<Full<Bytes>>, DropConnection> {
+pub async fn serve_request<B: RequestBody>(node: Arc<Node>, req: Request<B>, origin: Origin) -> Result<Response<RestBody>, DropConnection> {
     respond(node, req, None, origin, (BODY_IDLE_TIMEOUT, BODY_TIMEOUT)).await
 }
 
 /// The answer to a request a cluster's IP allowlist refuses: Elastic Cloud's traffic filter's
 /// 403, the same for every cluster and dialect.
-pub fn filtered() -> Response<Full<Bytes>> {
-    let mut r = Response::new(Full::new(Bytes::from_static(crate::allow::REFUSED_BODY.as_bytes())));
+pub fn filtered() -> Response<RestBody> {
+    let mut r = Response::new(full(Bytes::from_static(crate::allow::REFUSED_BODY.as_bytes())));
     *r.status_mut() = StatusCode::FORBIDDEN;
     r.headers_mut().insert(hyper::header::CONTENT_TYPE, HeaderValue::from_static("application/json; charset=UTF-8"));
     r.headers_mut().insert(hyper::header::CONTENT_LENGTH, HeaderValue::from(crate::allow::REFUSED_BODY.len()));
     r
 }
 
-async fn respond<B: RequestBody>(node: Arc<Node>, req: Request<B>, sni: Option<&str>, origin: Origin, timeouts: (Duration, Duration)) -> Result<Response<Full<Bytes>>, DropConnection> {
+async fn respond<B: RequestBody>(node: Arc<Node>, req: Request<B>, sni: Option<&str>, origin: Origin, timeouts: (Duration, Duration)) -> Result<Response<RestBody>, DropConnection> {
     let mut es = head_of(&req);
     // The client's address for audit entries is the one the allowlist checks: only the node
     // says it, never a client.
@@ -660,8 +667,23 @@ fn deflate_part(data: &[u8], last: bool) -> Option<Vec<u8>> {
 
 /// The HTTP response; `accepts_gzip` (never for `HEAD`, whose length is the identity body's,
 /// as Elasticsearch answers) compresses the body, on the blocking pool when it is large.
-async fn to_hyper(resp: EsResponse, accepts_gzip: bool) -> Response<Full<Bytes>> {
-    let EsResponse { status, headers, body, head } = resp;
+async fn to_hyper(resp: EsResponse, accepts_gzip: bool) -> Response<RestBody> {
+    let EsResponse { status, headers, body, head, stream } = resp;
+    // A streamed body goes out as it comes, chunked and uncompressed (each piece must reach the
+    // client when it's made); dropping it when the client goes away stops what makes it.
+    if let Some(s) = stream.and_then(|s| s.take()) {
+        use futures::StreamExt;
+        let frames = s.map(|piece| Ok::<_, std::convert::Infallible>(hyper::body::Frame::data(piece)));
+        let mut out = Response::new(if head { full(Bytes::new()) } else { http_body_util::StreamBody::new(frames).boxed_unsync() });
+        *out.status_mut() = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let h = out.headers_mut();
+        for (k, v) in headers {
+            if let (Ok(name), Ok(value)) = (HeaderName::try_from(k.as_str()), HeaderValue::try_from(v.as_str())) {
+                h.append(name, value);
+            }
+        }
+        return out;
+    }
     let (body, gzipped) = if accepts_gzip && !head && !body.is_empty() {
         let z = if body.len() > INLINE_CODEC_BYTES {
             let b = body.clone();
@@ -677,7 +699,7 @@ async fn to_hyper(resp: EsResponse, accepts_gzip: bool) -> Response<Full<Bytes>>
         (body, false)
     };
     let len = body.len();
-    let mut out = Response::new(if head { Full::new(Bytes::new()) } else { Full::new(body) });
+    let mut out = Response::new(if head { full(Bytes::new()) } else { full(body) });
     *out.status_mut() = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let h = out.headers_mut();
     for (k, v) in headers {

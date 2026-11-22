@@ -389,9 +389,16 @@ pub(crate) async fn to_owner(c: &crate::Control, name: &str, req: &search_es::Es
     r.extensions_mut().insert(roll_cluster::ClientAddr(INTERNAL_CLIENT.into()));
     let resp = cluster.forward(&owner, r, 0).await;
     let status = resp.status().as_u16();
-    let headers = resp.headers().iter().filter_map(|(k, v)| Some((k.to_string(), v.to_str().ok()?.to_string()))).collect();
+    let headers: Vec<(String, String)> = resp.headers().iter().filter_map(|(k, v)| Some((k.to_string(), v.to_str().ok()?.to_string()))).collect();
+    // A streamed answer stays one (server-sent events, as the owner sends them).
+    if headers.iter().any(|(k, v)| k.eq_ignore_ascii_case("content-type") && v.starts_with("text/event-stream")) {
+        use futures::StreamExt;
+        let pieces = resp.into_body().into_data_stream().take_while(|r| std::future::ready(r.is_ok())).filter_map(|r| std::future::ready(r.ok()));
+        let stream = search_es::rest::Streamed::new(Box::pin(pieces));
+        return Some(search_es::EsResponse { status, headers, body: bytes::Bytes::new(), head: false, stream: Some(stream) });
+    }
     let body = axum::body::to_bytes(resp.into_body(), ANSWER_BYTES).await.unwrap_or_default();
-    Some(search_es::EsResponse { status, headers, body, head: false })
+    Some(search_es::EsResponse { status, headers, body, head: false, stream: None })
 }
 
 async fn send(cluster: &Cluster, key: &str, mut req: axum::extract::Request, forwarded: axum::http::Uri, original: axum::http::Uri, node: Arc<search_server::Node>) -> axum::response::Response {

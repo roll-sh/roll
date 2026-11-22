@@ -57,6 +57,30 @@ impl EsRequest {
     }
 }
 
+/// A body sent as it is made (server-sent events): its pieces, then its end. Dropping it (the
+/// client went away) drops whatever produces it, which closes an upstream connection it reads.
+pub type ByteStream = std::pin::Pin<Box<dyn futures::Stream<Item = Bytes> + Send>>;
+
+/// A streamed body that clones of a response share: the first to take it sends it.
+#[derive(Clone)]
+pub struct Streamed(std::sync::Arc<Mutex<Option<ByteStream>>>);
+
+impl Streamed {
+    pub fn new(s: ByteStream) -> Streamed {
+        Streamed(std::sync::Arc::new(Mutex::new(Some(s))))
+    }
+
+    pub fn take(&self) -> Option<ByteStream> {
+        self.0.lock().take()
+    }
+}
+
+impl std::fmt::Debug for Streamed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Streamed")
+    }
+}
+
 /// The response to send.
 #[derive(Clone, Debug)]
 pub struct EsResponse {
@@ -65,6 +89,9 @@ pub struct EsResponse {
     pub body: Bytes,
     /// A `HEAD` response: send `Content-Length` of `body` but not the body.
     pub head: bool,
+    /// A body sent as it is made instead of `body` (which is then empty): no `Content-Length`,
+    /// never compressed.
+    pub stream: Option<Streamed>,
 }
 
 impl EsResponse {
@@ -79,6 +106,23 @@ impl EsResponse {
     pub fn body_json(&self) -> Value {
         crate::json::parse(&self.body).ok().flatten().unwrap_or(Value::Null)
     }
+
+    /// The response with a streamed body read into `body`, at most `max` bytes of it (for
+    /// callers that want the whole answer: tests, roll's own calls).
+    pub async fn collect(mut self, max: usize) -> EsResponse {
+        use futures::StreamExt;
+        if let Some(mut s) = self.stream.take().and_then(|s| s.take()) {
+            let mut body = bytes::BytesMut::new();
+            while let Some(piece) = s.next().await {
+                if body.len() + piece.len() > max {
+                    break;
+                }
+                body.extend_from_slice(&piece);
+            }
+            self.body = body.freeze();
+        }
+        self
+    }
 }
 
 /// What a handler produces.
@@ -91,6 +135,8 @@ pub enum Reply {
     Table(crate::api::cat::Table),
     /// Pre-rendered bytes with a content type.
     Raw(u16, String, Bytes),
+    /// A body sent as it is made, with a content type (`_inference/…/_stream`).
+    Stream(u16, String, ByteStream),
 }
 
 impl Reply {
@@ -331,7 +377,7 @@ fn simple_error(status: u16, msg: &str) -> Value {
 fn render_simple(status: u16, body: Value, extra: Vec<(String, String)>, head: bool) -> EsResponse {
     let mut headers = vec![("content-type".to_string(), "application/json".to_string())];
     headers.extend(extra);
-    EsResponse { status, headers, body: Bytes::from(body.to_json()), head }
+    EsResponse { status, headers, body: Bytes::from(body.to_json()), head, stream: None }
 }
 
 /// `MediaTypeHeaderException`. Elasticsearch reports it as its own root cause even when caused by
@@ -529,6 +575,7 @@ async fn handle_inner(cluster: &Cluster, req: &EsRequest, admitted: Option<Admit
                     headers: vec![("Allow".into(), list.join(",")), ("content-type".into(), "text/plain; charset=UTF-8".into())],
                     body: Bytes::new(),
                     head: false,
+                    stream: None,
                 };
             }
             let msg = format!("Incorrect HTTP method for uri [{}] and method [{method}], allowed: [{}]", req.uri, list.join(", "));
@@ -536,7 +583,7 @@ async fn handle_inner(cluster: &Cluster, req: &EsRequest, admitted: Option<Admit
         }
         Routed::NotFound => {
             if method == Method::Options {
-                return EsResponse { status: 200, headers: vec![("content-type".into(), "text/plain; charset=UTF-8".into())], body: Bytes::new(), head: false };
+                return EsResponse { status: 200, headers: vec![("content-type".into(), "text/plain; charset=UTF-8".into())], body: Bytes::new(), head: false, stream: None };
             }
             let msg = format!("no handler found for uri [{}] and method [{method}]", req.uri);
             return render_simple(400, crate::obj! { "error" => msg }, Vec::new(), head_req);
@@ -850,7 +897,7 @@ fn render_error(e: &EsError, neg: Option<&Negotiated>, pretty: bool, trace: bool
     if let Some(Value::Str(text)) = e.hidden("plain_body") {
         let mut headers = vec![("content-type".to_string(), "text/plain; charset=UTF-8".to_string())];
         headers.extend(e.headers().iter().flat_map(|(k, vs)| vs.iter().map(move |v| (k.clone(), v.clone()))));
-        return EsResponse { status: e.status, headers, body: Bytes::from(text.clone()), head };
+        return EsResponse { status: e.status, headers, body: Bytes::from(text.clone()), head, stream: None };
     }
     let ty = response_type(None, neg);
     let ty = if ty == XContentType::Smile { XContentType::Json } else { ty };
@@ -866,11 +913,12 @@ fn render_error(e: &EsError, neg: Option<&Negotiated>, pretty: bool, trace: bool
         }
     }
     headers.extend(warnings);
-    EsResponse { status: e.status, headers, body: Bytes::from(body), head }
+    EsResponse { status: e.status, headers, body: Bytes::from(body), head, stream: None }
 }
 
 fn render_reply(ctx: &Ctx, neg: &Negotiated, reply: Reply, pretty: bool, warnings: Vec<(String, String)>, head: bool) -> EsResponse {
     let mut headers = Vec::new();
+    let mut stream = None;
     let (status, body) = match reply {
         Reply::Empty(status) => {
             headers.push(("content-type".to_string(), "text/plain; charset=UTF-8".to_string()));
@@ -879,6 +927,11 @@ fn render_reply(ctx: &Ctx, neg: &Negotiated, reply: Reply, pretty: bool, warning
         Reply::Raw(status, ct, bytes) => {
             headers.push(("content-type".to_string(), ct));
             (status, bytes)
+        }
+        Reply::Stream(status, ct, s) => {
+            headers.push(("content-type".to_string(), ct));
+            stream = Some(Streamed::new(s));
+            (status, Bytes::new())
         }
         Reply::Table(table) => match crate::api::cat::render(ctx, &table, neg.accept.as_ref()) {
             Ok((ct, bytes)) => {
@@ -905,7 +958,7 @@ fn render_reply(ctx: &Ctx, neg: &Negotiated, reply: Reply, pretty: bool, warning
         }
     };
     headers.extend(warnings);
-    EsResponse { status, headers, body, head }
+    EsResponse { status, headers, body, head, stream }
 }
 
 #[cfg(test)]
