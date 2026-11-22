@@ -132,6 +132,9 @@ struct Registration {
     token_endpoint_auth_method: Option<String>,
     #[serde(default)]
     grant_types: Option<Vec<String>>,
+    /// `native` or `web` (OpenID Connect's; MCP 2026-07-28 has clients send it, SEP-837).
+    #[serde(default)]
+    application_type: Option<String>,
 }
 
 fn too_many(desc: &str) -> Response {
@@ -165,6 +168,14 @@ async fn register(State(a): S, req: axum::extract::Request) -> Response {
     if (r.redirect_uris.is_empty() && !device_only) || r.redirect_uris.len() > 10 || !r.redirect_uris.iter().all(|u| redirect_ok(u)) {
         return reg_error("invalid_redirect_uri", "redirect_uris: 1-10 URIs, each https, http on localhost, or an app scheme");
     }
+    // A web client's redirects are https (OpenID Connect's rule); a native one may use loopback or
+    // its own scheme. Left out, roll takes either (clients before 2026-07-28 don't send it).
+    match r.application_type.as_deref() {
+        None | Some("native") => {}
+        Some("web") if r.redirect_uris.iter().all(|u| u.starts_with("https://")) => {}
+        Some("web") => return reg_error("invalid_redirect_uri", "a web client's redirect_uris are https (loopback and app schemes are a native client's)"),
+        Some(_) => return reg_error("invalid_client_metadata", "application_type is native or web"),
+    }
     if r.token_endpoint_auth_method.as_deref().is_some_and(|m| m != "none") {
         return reg_error("invalid_client_metadata", "only public clients (token_endpoint_auth_method \"none\", with PKCE) can register");
     }
@@ -194,6 +205,9 @@ async fn register(State(a): S, req: axum::extract::Request) -> Response {
     // RFC 7591: a field the client didn't set is left out, never null (clients' schemas refuse it).
     if let Some(uri) = client.uri {
         out["client_uri"] = Value::String(uri);
+    }
+    if let Some(t) = r.application_type {
+        out["application_type"] = Value::String(t);
     }
     (StatusCode::CREATED, Json(out)).into_response()
 }
