@@ -483,7 +483,7 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
     // ACME's http-01 and dns-01 checks: public addresses only, as webhooks.
     secrets.set_acme_checks(Arc::new(acme::Checks::new(allow_private)));
     // A member removed, demoted or gone (docs/members.md), or narrowed by a group change (one
-    // `group.lost` per person and project, docs/members-v1-1.md): their shared folders, one-time
+    // `group.lost` per person, naming the projects, docs/members-v1-1.md): their shared folders, one-time
     // shares and leases end once they no longer hold what those need.
     let s = secrets.clone();
     workspace.on_event(Box::new(move |e| match (e.action.as_str(), &e.subject) {
