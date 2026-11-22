@@ -939,6 +939,21 @@ async fn step_up_widens_the_connection() {
     assert_eq!(s, StatusCode::BAD_REQUEST, "{e}");
 }
 
+/// The policy's `agents_ask`: what an agent does through roll's MCP server asks a person first,
+/// whatever its token allows; the same token calling the API itself doesn't (CI isn't an agent).
+#[tokio::test]
+async fn agents_ask_what_the_policy_says() {
+    let d = Daemon::new(0);
+    let (token, _) = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow", "delete": "allow" } }]), json!({})).await;
+    let (s, e) = d.call(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "agents_ask": [{ "product": "nope" }] }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{e}");
+    assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "agents_ask": [{ "product": "postgres", "actions": ["delete"] }] }))).await.0, StatusCode::OK);
+    let (s, pending) = d.via_mcp_body(&token, Method::DELETE, "/v1/projects/pa").await;
+    assert_eq!((s, pending["code"].as_str()), (StatusCode::FORBIDDEN, Some("approval_pending")), "{pending}");
+    assert_ne!(d.via_mcp(&token, Method::GET, "/v1/projects").await, StatusCode::FORBIDDEN, "reads go on");
+    assert_ne!(d.call(&token, Method::DELETE, "/v1/projects/pb", None).await.0, StatusCode::FORBIDDEN, "the API itself: not an agent");
+}
+
 /// A device signs in with a code (RFC 8628, `roll login` over SSH): it registers without a
 /// redirect, gets a short code, polls (too fast is `slow_down`), a person enters the code and
 /// allows it, and its next poll takes the tokens, once. A token never looks a code up, wrong codes
