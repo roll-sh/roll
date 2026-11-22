@@ -76,8 +76,14 @@ impl Apps {
     /// this once.
     pub async fn add_drain(self: &Arc<Self>, project: &str, body: Value) -> Result<Value> {
         let o = body.as_object().cloned().unwrap_or_default();
-        if let Some(k) = o.keys().find(|k| !["url", "sources", "environments", "services", "previews", "headers", "format", "bucket", "prefix"].contains(&k.as_str())) {
+        if let Some(k) = o.keys().find(|k| !["url", "sources", "environments", "services", "previews", "headers", "format", "bucket", "prefix", "search", "namespace", "retention_days"].contains(&k.as_str())) {
             return Err(Error::BadRequest(format!("unknown field {k}")));
+        }
+        // A roll search cluster of the project's: its own data stream, appended to with a key
+        // minted for the drain.
+        if let Some(cluster) = o.get("search").filter(|v| !v.is_null()) {
+            let cluster = cluster.as_str().filter(|c| !c.is_empty() && o.get("url").is_none() && o.get("headers").is_none() && o.get("format").is_none() && o.get("bucket").is_none()).ok_or_else(|| Error::BadRequest("search is a roll search cluster of the project's, without url, headers, format or bucket (its key is minted for the drain)".into()))?.to_string();
+            return self.add_search_drain(project, &cluster, &o).await;
         }
         // A roll storage bucket of the project's: an `s3` drain with a key minted for it.
         let bucket = match o.get("bucket") {
@@ -294,14 +300,77 @@ impl Apps {
 
     pub async fn delete_drain(self: &Arc<Self>, project: &str, id: &str) -> Result<()> {
         let (p, i) = (project.to_string(), id.to_string());
-        // A bucket drain's key goes with it (a failure is logged: the drain is gone either way).
-        if let Some((_, r, kept)) = self.db(move |s| s.delete_drain(&p, &i)).await?
-            && let Err(e) = self.deps.resources.unlink(crate::model::LinkKind::Bucket, &r, &kept).await
+        // A bucket's or a search cluster's drain's key goes with it (a failure is logged: the
+        // drain is gone either way). A search drain's data stream stays until its retention ends.
+        if let Some((kind, r, kept)) = self.db(move |s| s.delete_drain(&p, &i)).await?
+            && let Ok(kind) = crate::model::LinkKind::parse(&kind)
+            && let Err(e) = self.deps.resources.unlink(kind, &r, &kept).await
         {
-            tracing::warn!(drain = id, bucket = %r, error = %e, "apps: a bucket drain's key couldn't be revoked");
+            tracing::warn!(drain = id, resource = %r, error = %e, "apps: a drain's key couldn't be revoked");
         }
         self.drains_changed(project).await;
         Ok(())
+    }
+
+    /// A search drain (Elastic's and OpenSearch's ingestion): lines as ECS documents in
+    /// `logs-roll.apps-<namespace>` on a roll search cluster of the project's, through its `_bulk`
+    /// (`create` actions only) with a key minted for the drain that may only append to that exact
+    /// data stream (a leaked one never reads, overwrites or deletes), revoked with the drain. The
+    /// stream, roll apps' template for it and its retention are made first, as the operator.
+    async fn add_search_drain(self: &Arc<Self>, project: &str, cluster: &str, o: &serde_json::Map<String, Value>) -> Result<Value> {
+        let namespace = match o.get("namespace") {
+            None | Some(Value::Null) => format!("d{}", crate::model::random(10)),
+            Some(Value::String(n)) if (1..=40).contains(&n.len()) && n.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_') => n.clone(),
+            Some(_) => return Err(Error::BadRequest("namespace is 1–40 of lower-case letters, digits and _ (the data stream is logs-roll.apps-<namespace>)".into())),
+        };
+        let retention = match o.get("retention_days") {
+            None | Some(Value::Null) => 30,
+            Some(v) => v.as_u64().filter(|d| (1..=3650).contains(d)).ok_or_else(|| Error::BadRequest("retention_days is 1–3650".into()))? as u32,
+        };
+        let stream = format!("logs-roll.apps-{namespace}");
+        let mut settings = self.drain_settings(project, o, None).await?;
+        let p = self.deps.workspace.as_ref().and_then(|ws| ws.get(roll_workspace::Scope::All, project).ok());
+        if !p.as_ref().is_some_and(|p| p.resources.iter().any(|r| r.kind == roll_workspace::Kind::Search && r.r#ref == cluster)) {
+            return Err(Error::BadRequest(format!("search cluster {cluster} isn't on this project")));
+        }
+        if !p.is_some_and(|p| p.owner.is_empty()) {
+            return Err(Error::BadRequest("a person's project can't drain into a search cluster until clusters know their owners".into()));
+        }
+        let pr = project.to_string();
+        if self.db(move |s| s.drains(&pr)).await?.len() >= MAX_DRAINS {
+            return Err(Error::Conflict(format!("a project has at most {MAX_DRAINS} log drains")));
+        }
+        let kind = crate::model::LinkKind::Search;
+        let vars: HashMap<String, String> = self.deps.resources.link_vars(kind, cluster).await.map_err(|e| Error::BadRequest(format!("search cluster {cluster}: {e:#}")))?.into_iter().collect();
+        let Some(endpoint) = vars.get("ELASTICSEARCH_URL").cloned() else {
+            return Err(Error::Conflict("an OpenSearch-flavor cluster has no append-only key: a drain needs an Elasticsearch-flavor cluster".into()));
+        };
+        self.deps.resources.log_stream(cluster, &stream, retention).await.map_err(|e| Error::Conflict(format!("the drain's data stream {stream}: {e:#}")))?;
+        let mut options = crate::integrations::LinkOptions::new();
+        options.insert("names".into(), json!([stream]));
+        options.insert("permission".into(), json!("append"));
+        let m = self.deps.resources.link(kind, cluster, &format!("drain:{project}"), &options).await.map_err(|e| Error::Conflict(format!("a key for {stream}: {e:#}")))?.ok_or_else(|| Error::Conflict("roll search made no key for the drain".into()))?;
+        let Some(key) = m.vars.iter().find(|(n, _)| n == "ELASTICSEARCH_API_KEY").map(|(_, v)| v.clone()) else {
+            let _ = self.deps.resources.unlink(kind, cluster, &m.kept).await;
+            return Err(Error::Conflict("roll search's key for the drain had no API key".into()));
+        };
+        settings.headers = vec![("authorization".into(), format!("ApiKey {key}")), (OWN.into(), "1".into())];
+        let url = format!("{}/{stream}/_bulk", endpoint.trim_end_matches('/'));
+        let secret = format!("whsec_{}", crate::model::random(32));
+        let host = url::Url::parse(&url).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
+        let (pr, s2, u2, c2, k2) = (project.to_string(), secret.clone(), url.clone(), cluster.to_string(), m.kept.clone());
+        let d = match self.db(move |s| s.add_drain_linked(&pr, &host, &u2, &s2, "search", &settings, Some(("search", &c2, &k2)))).await {
+            Ok(d) => d,
+            Err(e) => {
+                let _ = self.deps.resources.unlink(kind, cluster, &m.kept).await;
+                return Err(e);
+            }
+        };
+        self.drains_changed(project).await;
+        let mut v = serde_json::to_value(&d).expect("JSON");
+        v["secret"] = json!(secret);
+        v["stream"] = json!(stream);
+        Ok(v)
     }
 
     /// A bucket drain's target and key: the bucket on the project's canvas (the operator's
@@ -528,6 +597,7 @@ impl Apps {
         let (body, content_type) = match o.drain.format.as_str() {
             "syslog" => return self.send_syslog(&o.url, batch).await.map(|()| None),
             "s3" => return self.put_s3(o, batch, delivery).await.map(Some),
+            "search" => return self.post_bulk(o, batch).await.map(Some),
             "otlp" => {
                 url = signal_url(&o.url, signal);
                 let v = match signal {
@@ -569,6 +639,29 @@ impl Apps {
             Ok(r) => Ok(Some(r.status().as_u16())),
             Err(e) => Err(e.without_url().to_string()),
         }
+    }
+
+    /// A search drain's batch: `create` actions of ECS documents to its data stream's `_bulk`,
+    /// with its key, through the client for roll's own endpoints (the cluster's is roll's). A
+    /// document the cluster refused is counted in the log, never retried alone.
+    async fn post_bulk(&self, o: &OpenedDrain, batch: &[Value]) -> std::result::Result<u16, String> {
+        let mut body = Vec::new();
+        for l in batch {
+            body.extend_from_slice(b"{\"create\":{}}\n");
+            serde_json::to_writer(&mut body, &ecs_doc(l)).expect("JSON");
+            body.push(b'\n');
+        }
+        let mut req = self.scrape_client.post(&o.url).header("content-type", "application/x-ndjson");
+        for (k, v) in o.headers.iter().filter(|(k, _)| k != OWN) {
+            req = req.header(k.as_str(), v.as_str());
+        }
+        let r = req.body(body).send().await.map_err(|e| e.without_url().to_string())?;
+        let status = r.status().as_u16();
+        if status == 200 && let Ok(v) = r.json::<Value>().await && v["errors"] == true {
+            let refused = v["items"].as_array().map_or(0, |i| i.iter().filter(|i| i["create"]["status"].as_u64().is_some_and(|s| s >= 300)).count());
+            tracing::warn!(drain = %o.drain.id, refused, "apps: a search drain's cluster refused documents");
+        }
+        Ok(status)
     }
 
     /// An `s3` drain's batch: one NDJSON object, `<prefix>/YYYY/MM/DD/HH/<time>-<delivery>.ndjson`,
@@ -707,6 +800,29 @@ fn syslog_tls() -> Arc<tokio_rustls::rustls::ClientConfig> {
 /// A drain's line as an RFC 5424 message: facility user, `err` for stderr and `info` otherwise;
 /// the service as HOSTNAME, its environment as APP-NAME, the instance as PROCID, the source
 /// (`runtime`, `http`, `build`) as MSGID.
+/// A drained line as an ECS document (Elastic Common Schema: `@timestamp`, `message`,
+/// `service.*`, `log.*`, `data_stream.*`), what Kibana's Logs and Discover read.
+fn ecs_doc(l: &Value) -> Value {
+    let at = l["t"].as_i64().and_then(chrono::DateTime::from_timestamp_millis).unwrap_or_else(chrono::Utc::now);
+    let mut doc = json!({
+        "@timestamp": at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        "message": l["text"],
+        "event": { "dataset": "roll.apps" },
+        "service": { "name": l["service_name"], "environment": l["environment"] },
+        "log": { "logger": l["source"] },
+        "roll": { "source": l["source"], "stream": l["stream"] },
+    });
+    for (k, v) in [("service_id", &l["service"]), ("instance", &l["instance"]), ("deployment", &l["deployment"])] {
+        if !v.is_null() {
+            doc["roll"][k] = v.clone();
+        }
+    }
+    if let Some(s) = l["stream"].as_str() {
+        doc["log"]["level"] = json!(if s == "stderr" { "error" } else { "info" });
+    }
+    doc
+}
+
 fn syslog_message(l: &Value) -> String {
     // A header field: printable ASCII without spaces, at most `max` characters, `-` when empty.
     let field = |v: &Value, max: usize| -> String {

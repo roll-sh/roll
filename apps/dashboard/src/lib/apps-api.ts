@@ -1362,7 +1362,8 @@ export interface FormSubmission {
   fields: { name: string; value: string }[];
 }
 
-export type DrainFormat = "ndjson" | "otlp" | "syslog" | "s3";
+/** `search`: a drain into a roll search cluster (made with `search`, never asked for as a format). */
+export type DrainFormat = "ndjson" | "otlp" | "syslog" | "s3" | "search";
 
 /** A project's monthly spend limits (US dollars at roll's prices, the calendar month in UTC). */
 export interface SpendLimits {
@@ -1520,7 +1521,7 @@ export const appsApi = {
   notifyTargets: (project: string) => call<NotifyTarget[]>("GET", `/v1/apps/projects/${enc(project)}/notifications`),
   drains: (project: string) => call<LogDrain[]>("GET", `/v1/apps/projects/${enc(project)}/drains`),
   /** A drain to a URL, or (`bucket`) into a roll storage bucket on the project, an `s3` drain with a key roll mints for it. */
-  addDrain: (project: string, body: ({ url: string; format?: DrainFormat } | { bucket: string; prefix?: string }) & DrainSettings) => call<LogDrain>("POST", `/v1/apps/projects/${enc(project)}/drains`, body),
+  addDrain: (project: string, body: ({ url: string; format?: DrainFormat } | { bucket: string; prefix?: string } | { search: string; namespace?: string; retention_days?: number }) & DrainSettings) => call<LogDrain>("POST", `/v1/apps/projects/${enc(project)}/drains`, body),
   /** Its sources, filters and headers (given ones replace; `headers` replaces them all); its URL and secret stay. */
   updateDrain: (project: string, id: string, body: DrainSettings) => call<LogDrain>("PATCH", `/v1/apps/projects/${enc(project)}/drains/${enc(id)}`, body),
   testDrain: (project: string, id: string) => call<{ ok: boolean; code: number | null; error: string | null }>("POST", `/v1/apps/projects/${enc(project)}/drains/${enc(id)}/test`),

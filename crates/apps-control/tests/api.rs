@@ -3729,6 +3729,85 @@ async fn a_drain_into_the_projects_bucket_has_a_key_of_its_own() {
     assert_eq!(*fake.seen.lock(), [format!("key drain:{} logs", w.project), "revoked AKIAMINTED".to_string()]);
 }
 
+/// roll search as a drain sees it: a cluster at `endpoint`, its data stream made as asked, a key
+/// minted with the link's options (what was asked and revoked, kept).
+struct FakeSearch {
+    endpoint: String,
+    seen: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl apps_control::integrations::Resources for FakeSearch {
+    async fn link_vars(&self, _kind: apps_control::model::LinkKind, _ref: &str) -> anyhow::Result<Vec<(String, String)>> {
+        Ok(vec![("ELASTICSEARCH_URL".into(), self.endpoint.clone())])
+    }
+    async fn link(&self, _kind: apps_control::model::LinkKind, r#ref: &str, to: &str, options: &apps_control::integrations::LinkOptions) -> anyhow::Result<Option<apps_control::integrations::Minted>> {
+        self.seen.lock().push(format!("key {to} {ref} {}", Value::Object(options.clone())));
+        Ok(Some(apps_control::integrations::Minted { vars: vec![("ELASTICSEARCH_API_KEY".into(), "sk_append".into())], kept: "key_1".into() }))
+    }
+    async fn log_stream(&self, cluster: &str, stream: &str, retention_days: u32) -> anyhow::Result<()> {
+        self.seen.lock().push(format!("stream {cluster} {stream} {retention_days}d"));
+        Ok(())
+    }
+    async fn unlink(&self, _kind: apps_control::model::LinkKind, _ref: &str, kept: &str) -> anyhow::Result<()> {
+        self.seen.lock().push(format!("revoked {kept}"));
+        Ok(())
+    }
+}
+
+/// A drain into the project's roll search cluster (Elastic's and OpenSearch's ingestion): its
+/// own data stream made with its retention, a key minted for it that only appends there, lines
+/// as ECS documents through `_bulk` (`create` actions), the key revoked with the drain.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_drain_into_a_search_cluster_appends_ecs_documents() {
+    let got: Arc<parking_lot::Mutex<Vec<(String, String, String)>>> = Default::default();
+    let g = got.clone();
+    let app = axum::Router::new().fallback(move |uri: axum::http::Uri, h: axum::http::HeaderMap, b: bytes::Bytes| {
+        let g = g.clone();
+        async move {
+            g.lock().push((uri.path().to_string(), h.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string(), String::from_utf8_lossy(&b).to_string()));
+            axum::Json(json!({"errors": false, "items": []}))
+        }
+    });
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", l.local_addr().unwrap());
+    tokio::spawn(axum::serve(l, app).into_future());
+    let fake = Arc::new(FakeSearch { endpoint, seen: Mutex::new(Vec::new()) });
+    let f2 = fake.clone();
+    let w = world_full(|_| {}, false, move |d| d.resources = f2).await;
+    let base = format!("/v1/apps/projects/{}/drains", w.project);
+    assert_eq!(call(&w.api, "POST", &base, Some(json!({"search": "logs"}))).await.0, StatusCode::BAD_REQUEST, "not on the project");
+    let ws = w.apps.deps.workspace.clone().unwrap();
+    ws.place(roll_workspace::Scope::All, &w.project, roll_workspace::Kind::Search, "logs", 0.0, 0.0).unwrap();
+    assert_eq!(call(&w.api, "POST", &base, Some(json!({"search": "logs", "url": "https://x.example"}))).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(call(&w.api, "POST", &base, Some(json!({"search": "logs", "namespace": "Web-1"}))).await.0, StatusCode::BAD_REQUEST);
+    let (st, d) = call(&w.api, "POST", &base, Some(json!({"search": "logs", "namespace": "web", "retention_days": 7}))).await;
+    assert_eq!((st, d["format"].as_str(), d["stream"].as_str()), (StatusCode::CREATED, Some("search"), Some("logs-roll.apps-web")), "{d}");
+    assert!(!d.to_string().contains("sk_append"), "its key isn't shown");
+    assert_eq!(fake.seen.lock()[..2], ["stream logs logs-roll.apps-web 7d".to_string(), format!("key drain:{} logs {}", w.project, json!({"names": ["logs-roll.apps-web"], "permission": "append"}))]);
+    let id = d["id"].as_str().unwrap().to_string();
+    assert_eq!(call(&w.api, "POST", &format!("{base}/{id}/test"), None).await.1["ok"], true);
+    // A runtime line, as an ECS document appended to the stream with the drain's key.
+    let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
+    visit(&w, &host(&svc["environments"][0]["url"]), "/").await;
+    let mut bulk = String::new();
+    for _ in 0..200 {
+        if let Some((_, _, b)) = got.lock().iter().find(|(_, _, b)| b.contains("listening on")) {
+            bulk = b.clone();
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let (path, auth, _) = got.lock().last().cloned().unwrap();
+    assert_eq!((path.as_str(), auth.as_str()), ("/logs-roll.apps-web/_bulk", "ApiKey sk_append"));
+    let lines: Vec<&str> = bulk.lines().collect();
+    assert!(!lines.is_empty() && lines.chunks(2).all(|c| c[0] == r#"{"create":{}}"#), "create actions only: {bulk}");
+    let doc: Value = serde_json::from_str(lines.iter().find(|l| l.contains("listening on")).unwrap()).unwrap();
+    assert!(doc["@timestamp"].is_string() && doc["service"]["name"] == "api" && doc["service"]["environment"] == "production" && doc["event"]["dataset"] == "roll.apps", "{doc}");
+    assert!(call(&w.api, "DELETE", &format!("{base}/{id}"), None).await.0.is_success());
+    assert_eq!(fake.seen.lock().last().map(String::as_str), Some("revoked key_1"));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_log_drain_speaks_syslog_or_otlp() {
     use tokio::io::AsyncReadExt;
