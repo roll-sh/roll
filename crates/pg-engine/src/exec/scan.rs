@@ -6025,6 +6025,7 @@ impl ScanNode {
             let t = self.plan.table.oid;
             if let Some(f) = self.fetcher.get_or_insert_with(|| super::sizing::Fetcher::new(t, ctx)) {
                 f.fetched_at(key, tid);
+                super::pgstat::count_reclaimed(ctx, t, f.take_reclaimed());
             }
         }
     }

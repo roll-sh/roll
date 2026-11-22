@@ -2034,13 +2034,17 @@ impl Heap {
         }
     }
 
-    /// heap_page_prune_opt: what a scan reading the page does.
-    pub fn prune_opt(&mut self, blk: u32, v: &Vis) {
+    /// heap_page_prune_opt: what a scan reading the page does. Returns the dead tuples it
+    /// reclaimed, for pgstat_update_heap_dead_tuples: those pruned less the line pointers it
+    /// left dead (VACUUM still counts and frees those).
+    pub fn prune_opt(&mut self, blk: u32, v: &Vis) -> u64 {
         if self.prune_wanted(blk, v) {
-            self.prune_page(blk, v, false);
-        } else if let Some(p) = self.pages.get_mut(blk as usize) {
+            return self.prune_page(blk, v, false);
+        }
+        if let Some(p) = self.pages.get_mut(blk as usize) {
             p.settle(v);
         }
+        0
     }
 
     /// Settle a few of the pages new versions went on (`left`), the first queued first,
@@ -2082,11 +2086,9 @@ impl Heap {
         p.full || p.heap_free() < minfree
     }
 
-    /// A sequential scan reads (and may prune) every page.
-    pub fn prune_all(&mut self, v: &Vis) {
-        for b in 0..self.pages.len() as u32 {
-            self.prune_opt(b, v);
-        }
+    /// A sequential scan reads (and may prune) every page (`prune_opt`'s count, summed).
+    pub fn prune_all(&mut self, v: &Vis) -> u64 {
+        (0..self.pages.len() as u32).map(|b| self.prune_opt(b, v)).sum()
     }
 
     /// heap_page_prune_and_freeze: dead versions lose their storage; a dead HOT chain's
@@ -2128,8 +2130,8 @@ impl Heap {
 
     /// heap_page_prune_and_freeze's pruning of page `blk` (`prune` with what VACUUM reads of
     /// the page after it; heap_page_prune_opt needs only this). The per-page vectors are a
-    /// thread's, reused.
-    fn prune_page(&mut self, blk: u32, v: &Vis, unused_now: bool) {
+    /// thread's, reused. Returns ndeleted less nnewlpdead (`prune_opt`).
+    fn prune_page(&mut self, blk: u32, v: &Vis, unused_now: bool) -> u64 {
         thread_local! {
             static SCRATCH: std::cell::RefCell<PruneScratch> = Default::default();
         }
@@ -2139,7 +2141,7 @@ impl Heap {
         })
     }
 
-    fn prune_with(&mut self, blk: u32, v: &Vis, unused_now: bool, sc: &mut PruneScratch) {
+    fn prune_with(&mut self, blk: u32, v: &Vis, unused_now: bool, sc: &mut PruneScratch) -> u64 {
         self.settle(v);
         let PruneScratch { htsv, processed, changes, heaponly, chain, freed } = sc;
         // (Read in place, a version made only where pruning looks at it: most of a page's
@@ -2276,6 +2278,9 @@ impl Heap {
             p.prune_xid = prune_xid;
             p.full = false;
         }
+        // (heap_prune_record_*: ndeleted counts the tuples whose items change, nnewlpdead the
+        // items set dead, tuples or redirects.)
+        let (mut ndeleted, mut nnewlpdead) = (0u64, 0u64);
         if !changes.is_empty() {
             // (In line pointer order.)
             changes.sort_unstable_by_key(|c| c.0);
@@ -2283,7 +2288,9 @@ impl Heap {
                 if let Some(Lp::Normal(t)) = p.lps.get(off - 1) {
                     p.used -= maxalign(t.len as usize);
                     self.versions -= 1;
+                    ndeleted += 1;
                 }
+                nnewlpdead += matches!(st, Lp::Dead) as u64;
                 if matches!(st, Lp::Unused) {
                     freed.push((blk, off as u16));
                 }
@@ -2295,6 +2302,7 @@ impl Heap {
         let p = &mut self.pages[blk as usize];
         p.settle(v);
         self.publish_page(blk);
+        ndeleted.saturating_sub(nnewlpdead)
     }
 
     /// Lazy VACUUM: prune every page, then (when there were dead tuples and `nindexes`
@@ -3114,7 +3122,9 @@ mod tests {
                     let k = keys.swap_remove((x >> 20) as usize % keys.len());
                     h.delete(&k, 2, &v);
                 }
-                8 => h.prune_opt((x >> 24) as u32 % h.nblocks().max(1), &v),
+                8 => {
+                    h.prune_opt((x >> 24) as u32 % h.nblocks().max(1), &v);
+                }
                 _ if i % 500 == 0 => {
                     h.vacuum(&v, 1, false, Skip::AllVisible, false);
                     // (VACUUM publishes what it leaves: a reader without the lock sees it.)
@@ -3167,7 +3177,9 @@ mod tests {
                     h.update(&key(k), &key(k), len, 2, hot, v);
                 }
                 Op::Delete(k) => h.delete(&key(k), 2, v),
-                Op::Prune(b) => h.prune_opt(b % h.nblocks().max(1), v),
+                Op::Prune(b) => {
+                    h.prune_opt(b % h.nblocks().max(1), v);
+                }
                 Op::Vacuum => {
                     h.vacuum(v, 1, true, Skip::AllVisible, false);
                 }

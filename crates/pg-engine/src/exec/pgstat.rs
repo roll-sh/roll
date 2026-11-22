@@ -880,6 +880,15 @@ pub fn count_update(ctx: &ExecCtx, rel: u32, hot: bool, newpage: bool) {
     }
 }
 
+/// Dead tuples of `rel` an on-access prune reclaimed (pgstat_update_heap_dead_tuples, from
+/// heap_page_prune_opt): not transactional, like PostgreSQL's.
+pub fn count_reclaimed(ctx: &ExecCtx, rel: u32, n: u64) {
+    if n > 0 && counting(ctx) {
+        ensure(ctx, rel);
+        ctx.sess.pgstat.borrow_mut().tab(rel).delta_dead_tuples -= n as i64;
+    }
+}
+
 pub fn count_delete(ctx: &ExecCtx, rel: u32, n: i64) {
     if counting(ctx) {
         ensure(ctx, rel);

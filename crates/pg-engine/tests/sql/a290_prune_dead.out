@@ -1,0 +1,50 @@
+> CREATE TABLE a290_prune (id int PRIMARY KEY, v int, pad text) WITH (autovacuum_enabled = off, fillfactor = 100)
+-- CREATE TABLE
+
+> INSERT INTO a290_prune SELECT i, 0, repeat('x', 100) FROM generate_series(1, 200) i
+-- INSERT 0 200
+
+> UPDATE a290_prune SET v = v + 1 WHERE id = 1
+-- UPDATE 1
+
+> SELECT count(*) FROM a290_prune
+count:int8
+200
+-- SELECT 1
+
+> UPDATE a290_prune SET v = v + 1 WHERE id = 2
+-- UPDATE 1
+
+> SELECT count(*) FROM a290_prune
+count:int8
+200
+-- SELECT 1
+
+> UPDATE a290_prune SET v = v + 1 WHERE id = 3
+-- UPDATE 1
+
+> SELECT count(*) FROM a290_prune
+count:int8
+200
+-- SELECT 1
+
+> SELECT pg_stat_force_next_flush()
+pg_stat_force_next_flush:void
+
+-- SELECT 1
+
+> SELECT n_tup_upd, n_tup_hot_upd, n_dead_tup FROM pg_stat_user_tables WHERE relname = 'a290_prune'
+n_tup_upd:int8 | n_tup_hot_upd:int8 | n_dead_tup:int8
+3 | 2 | 1
+-- SELECT 1
+
+> SELECT ctid, id FROM a290_prune WHERE id <= 3 ORDER BY id
+ctid:27 | id:int4
+(3,27) | 1
+(0,59) | 2
+(0,60) | 3
+-- SELECT 3
+
+> DROP TABLE a290_prune
+-- DROP TABLE
+

@@ -3447,13 +3447,16 @@ pub fn scanned_pages(table: u32, from: u32, to: Option<u32>, ctx: &ExecCtx) {
     }
     // (Not while someone holds the lock: heap_page_prune_opt's conditional cleanup lock.)
     let Some(mut rf) = db.relfiles.of(table).try_write() else { return };
+    let mut reclaimed = 0;
     if let Some(heap) = rf.heaps.get_mut(&table) {
         let v = vis_for(xids, table, ctx);
         let end = to.unwrap_or(heap.nblocks()).min(heap.nblocks());
         for b in from..end {
-            heap.prune_opt(b, &v);
+            reclaimed += heap.prune_opt(b, &v);
         }
     }
+    drop(rf);
+    super::pgstat::count_reclaimed(ctx, table, reclaimed);
 }
 
 /// Whether index scans fetching rows of `table` can't change the models
@@ -3477,6 +3480,8 @@ pub struct Fetcher {
     /// The heap's prune hints, and whether rows' stored TIDs are the model's.
     hints: (Arc<heapsim::PruneHints>, bool),
     last: Option<u32>,
+    /// Dead tuples its prunes reclaimed, not counted yet (`take_reclaimed`).
+    reclaimed: u64,
 }
 
 impl Fetcher {
@@ -3485,7 +3490,7 @@ impl Fetcher {
         let db = ctx.sess.db.clone();
         let (visible, hints) = with_read_side(&db, table, true, |r, _| (r.watch(), r.prune_hints()))?;
         let temp = temp_rel(table, ctx).then(|| ctx.txn.borrow().xid_if_assigned());
-        Some(Fetcher { table, db, temp, visible, hints, last: None })
+        Some(Fetcher { table, db, temp, visible, hints, last: None, reclaimed: 0 })
     }
 
     fn vis(&self) -> Vis<'_> {
@@ -3507,6 +3512,12 @@ impl Fetcher {
     /// The scan starts over (a nested loop's rescan): the next fetch reaches its page anew.
     pub fn restart(&mut self) {
         self.last = None;
+    }
+
+    /// The dead tuples its fetches' prunes reclaimed since the last call
+    /// (pgstat_update_heap_dead_tuples, `pgstat::count_reclaimed`).
+    pub fn take_reclaimed(&mut self) -> u64 {
+        std::mem::take(&mut self.reclaimed)
     }
 
     /// The row under `key` was fetched (heap_page_prune_opt on reaching another page).
@@ -3539,7 +3550,7 @@ impl Fetcher {
                 if let Some(mut rf) = self.db.relfiles.of(self.table).try_write()
                     && let Some(heap) = rf.heaps.get_mut(&self.table)
                 {
-                    heap.prune_opt(blk, &v);
+                    self.reclaimed += heap.prune_opt(blk, &v);
                 }
                 self.last = Some(blk);
             }
@@ -3588,7 +3599,7 @@ impl Fetcher {
         let heap = rf.heaps.get_mut(&self.table)?;
         let blk = heap.locate(key, &v)?.0;
         if self.last != Some(blk) {
-            heap.prune_opt(blk, &v);
+            self.reclaimed += heap.prune_opt(blk, &v);
         }
         Some(blk)
     }
@@ -3673,7 +3684,9 @@ pub fn fetched(table: u32, key: &[u8], last: Option<u32>, ctx: &ExecCtx) -> Opti
     let heap = rf.heaps.get_mut(&table)?;
     let blk = heap.locate(key, &v)?.0;
     if last != Some(blk) {
-        heap.prune_opt(blk, &v);
+        let reclaimed = heap.prune_opt(blk, &v);
+        drop(rf);
+        super::pgstat::count_reclaimed(ctx, table, reclaimed);
     }
     Some(blk)
 }
