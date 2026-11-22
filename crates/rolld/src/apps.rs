@@ -8,7 +8,7 @@
 //! certificates from the edge (`ROLL_APPS_TLS`: Cloudflare for SaaS, or the active domains
 //! handed to the edge's HTTP-01 orders and their state handed back).
 
-use apps_control::integrations::{DomainTls, Doh, EdgeTls, Landing, NoTls, Resources, Revision, Sources};
+use apps_control::integrations::{DomainTls, Doh, EdgeTls, Landing, Minted, NoTls, Resources, Revision, Sources};
 use apps_control::model::{LinkKind, TlsStatus};
 use apps_control::store::{Sealer, Store};
 use apps_control::{Apps, AppsConfig, Deps};
@@ -571,6 +571,44 @@ impl Resources for RollResources {
         Ok(())
     }
 
+    /// An environment's own branch of a linked database: roll Postgres' branch `apps/<env>` of
+    /// the project (an environment's services share it), or roll Redis' `<db>-<env>`, made from
+    /// its main (or the one there by that name), as roll previews branches its data.
+    async fn branch(&self, kind: LinkKind, r#ref: &str, env: &str) -> anyhow::Result<Option<Minted>> {
+        match kind {
+            LinkKind::Postgres => {
+                let pg = self.postgres.clone().ok_or_else(|| anyhow::anyhow!("roll postgres isn't on this node"))?;
+                let name = format!("apps/{env}");
+                let project = pg.store.project(r#ref)?.ok_or_else(|| anyhow::anyhow!("no Postgres project {}", r#ref))?;
+                let branch = match pg.store.branch_by_name(r#ref, &name)? {
+                    Some(b) => b,
+                    None => pg.create_branch(r#ref, &name, None, None).await.map_err(|e| anyhow::anyhow!("branching Postgres: {e}"))?,
+                };
+                let ep = pg.store.endpoint_for_branch(&branch.id)?.ok_or_else(|| anyhow::anyhow!("Postgres branch {} has no endpoint", branch.id))?;
+                Ok(Some(Minted { vars: vec![("DATABASE_URL".into(), pg.connection_uri(&project, &ep.id))], kept: branch.id }))
+            }
+            LinkKind::Redis => {
+                let redis = self.redis.clone().ok_or_else(|| anyhow::anyhow!("roll redis isn't on this node"))?;
+                let name = format!("{}-{env}", r#ref);
+                let d = match redis.store.db_by_name(&name)? {
+                    Some(d) => d,
+                    None => redis.branch(r#ref, &name, None).await.map_err(|e| anyhow::anyhow!("branching Redis: {e}"))?,
+                };
+                let conn = redis.connection(&d.id, &d.password);
+                Ok(Some(Minted { vars: vec![("REDIS_URL".into(), conn["redis_url"].as_str().unwrap_or_default().to_string())], kept: d.id }))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    async fn unbranch(&self, kind: LinkKind, r#ref: &str, kept: &str) -> anyhow::Result<()> {
+        match kind {
+            LinkKind::Postgres => self.postgres.clone().ok_or_else(|| anyhow::anyhow!("roll postgres isn't on this node"))?.delete_branch(r#ref, kept).await.map_err(|e| anyhow::anyhow!("deleting a Postgres branch: {e}")),
+            LinkKind::Redis => self.redis.clone().ok_or_else(|| anyhow::anyhow!("roll redis isn't on this node"))?.delete(kept).await.map_err(|e| anyhow::anyhow!("deleting a Redis branch: {e}")),
+            _ => Ok(()),
+        }
+    }
+
     async fn link_vars(&self, kind: LinkKind, r#ref: &str) -> anyhow::Result<Vec<(String, String)>> {
         match kind {
             LinkKind::Postgres => {
@@ -823,7 +861,7 @@ impl AppsNode {
 
     /// The apps listener, and each environment's own port as environments appear.
     pub async fn serve(&self) -> anyhow::Result<()> {
-        let listener = tokio::net::TcpListener::bind(self.listen).await?;
+        let listener = crate::listen::bind(self.listen)?;
         let public = apps_control::public::router(self.apps.clone());
         let main = axum::serve(listener, public.into_make_service_with_connect_info::<SocketAddr>()).into_future();
         let ports = self.serve_ports();

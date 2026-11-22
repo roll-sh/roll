@@ -175,13 +175,17 @@ The gate (`roll_auth::check`) resolves the cookie, then:
 | --- | --- | --- | --- | --- | --- |
 | operator token | admin | all projects | all clusters | everything | everything |
 | admin user | admin (the gate adds `Operator`) | all projects | all clusters | everything | everything |
-| other user | their own owner (`Caller::Owner`, token name `session`) | the projects they're members of, as their role allows (docs/members.md); roll secrets too | their own clusters | their own account | `403` |
+| other user | their own owner (`Caller::Owner`, token name `session`) | the projects they're members of, as their role allows (docs/members.md); roll secrets and roll previews too | their own clusters | their own account | `403` |
 | anonymous | public repos | `401` | `401` | sign-in routes | `401` |
+
+A person's own tokens, and the MCP clients they connect, reach the same products
+(`roll_access::USER_REACH`, held to the gate's rules by rolld's `auth::tests`): `/v1/mcp` lists
+only those products' tools for them.
 
 The 403 is:
 
 ```
-403 {"error": "your account can use roll code, agents, projects and search; this API is for roll's admins for now", "code": "operator_only"}
+403 {"error": "your account can use roll code, agents, projects, secrets, previews and search; this API is for roll's admins for now", "code": "operator_only"}
 ```
 
 A route that takes a product's own credential (storage console sessions, tasks and stream API

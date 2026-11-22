@@ -645,7 +645,7 @@ pub async fn check(State(gate): State<Arc<Gate>>, mut req: Request, next: Next) 
         Access::UserOrCredential(_) if authorization || signed_in.is_some() => next.run(req).await,
         _ if signed_in.is_some() => error(
             StatusCode::FORBIDDEN,
-            "your account can use roll code, agents, projects and search; this API is for roll's admins for now",
+            "your account can use roll code, agents, projects, secrets, previews and search; this API is for roll's admins for now",
             "operator_only",
         ),
         _ => unauthorized(),

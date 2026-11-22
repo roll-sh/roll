@@ -400,6 +400,10 @@ pub enum AppsCmd {
         /// A Git URL service's Git LFS objects fetched in place of their pointers (`true`).
         #[arg(long)]
         lfs: Option<bool>,
+        /// The language's OpenTelemetry agent in its image (Node, Python), started while its
+        /// traces are on (`true`), or none (`false`).
+        #[arg(long)]
+        otel: Option<bool>,
         /// A gradual rollout: the shares of requests a new deployment takes in turn (`10,50`);
         /// `none` switches at once.
         #[arg(long, value_name = "PERCENTS")]
@@ -1229,6 +1233,10 @@ pub enum AppsCmd {
         no_branch: bool,
         #[arg(long)]
         variables_from: Option<String>,
+        /// Data of its own (`branch`): a branch of each Postgres and Redis database it links, in
+        /// place of the databases themselves; `none` goes back to them (the branches are deleted).
+        #[arg(long, value_name = "MODE", value_parser = ["branch", "none"])]
+        data: Option<String>,
         /// Deploy a push only once its commit's checks pass (`true`), or at once (`false`).
         #[arg(long)]
         wait_for_ci: Option<bool>,
@@ -2885,7 +2893,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, alert_cpu, alert_metric, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, build_timeout, build_size, submodules, submodule_repos, lfs, rollout, rollout_step, rollout_errors, rollout_manual, overlap, h2c, health_grpc, scale, public, drain, cpu_target, busy_cpu, memory_target, latency_target, oidc_audience, push, restart, restart_tries, affinity, tcp, rollback_on_crash, rebuild_on_base, block_on } => {
+        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, alert_cpu, alert_metric, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, build_timeout, build_size, submodules, submodule_repos, lfs, otel, rollout, rollout_step, rollout_errors, rollout_manual, overlap, h2c, health_grpc, scale, public, drain, cpu_target, busy_cpu, memory_target, latency_target, oidc_audience, push, restart, restart_tries, affinity, tcp, rollback_on_crash, rebuild_on_base, block_on } => {
             let svc = service(api, &target).await?;
             // The service's rollout with what was given replaced (the API takes it whole).
             let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() || rollout_manual.is_some() || overlap.is_some() {
@@ -2963,6 +2971,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             if let Some(on) = lfs {
                 build.insert("lfs".into(), if on { json!(true) } else { Value::Null });
+            }
+            if let Some(on) = otel {
+                build.insert("otel".into(), if on { json!(true) } else { Value::Null });
             }
             match build_timeout.as_deref() {
                 None => {}
@@ -4657,7 +4668,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, redeploy_on_secrets, vitals, egress, egress_host, private, open, signed_in, maintenance, serve, pause, resume, resume_deploys, hold, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, route, no_routes, error_page, maintenance_page, roll_pages, freeze, unfreeze, rotate_config, set } => {
+        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, data, wait_for_ci, run, follow_tag, redeploy_on_secrets, vitals, egress, egress_host, private, open, signed_in, maintenance, serve, pause, resume, resume_deploys, hold, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, route, no_routes, error_page, maintenance_page, roll_pages, freeze, unfreeze, rotate_config, set } => {
             let svc = service(api, &target).await?;
             if rotate_config {
                 let e = api.post(&format!("{}/config/rotate", env_path(&svc, &target.env)), json!({})).await?;
@@ -4687,6 +4698,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             if let Some(f) = variables_from {
                 body.insert("variables_from".into(), json!(f));
+            }
+            if let Some(d) = &data {
+                body.insert("data".into(), if d == "none" { Value::Null } else { json!(d) });
             }
             if let Some(w) = wait_for_ci {
                 body.insert("wait_for_ci".into(), json!(w));

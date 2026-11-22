@@ -1011,6 +1011,12 @@ async fn every_event_is_the_same_on_the_stream_and_in_webhooks() {
     }
     a.ok("DELETE", &format!("/v1/code/changes/{id}/preview"), None).await;
     assert_eq!(ev.next("preview").await, json!({ "change": id, "preview": null }));
+    // A preview environment torn down (roll previews' teardown), on a daemon without roll's
+    // GitHub App: the change's preview is cleared and said all the same.
+    a.code.report_environment(&id, Some(&at("ready", "cs_5"))).unwrap();
+    let _ = ev.next("preview").await;
+    a.code.report_environment_gone(&id, Some("ran the teardown")).unwrap();
+    assert_eq!(ev.next("preview").await, json!({ "change": id, "preview": null, "teardown": "ran the teardown" }));
 
     // budget = {budget: {project, project_name, percent, spent_usd_month, max_usd_month}, dashboard_url}
     let budget = json!({ "budget": { "project": "prj_1", "project_name": "shop", "percent": 80, "spent_usd_month": 8.1, "max_usd_month": 10.0 }, "dashboard_url": null });

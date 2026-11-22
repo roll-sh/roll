@@ -1039,7 +1039,10 @@ deterministic (#396).
    authorization path, and secrets or keys a branch inherits from its parent. Only the code those
    reviews read has been checked. Every decoder, cache, context store, credential field and branch
    copy in search gets the same questions, with a test per real finding.
-5. **Cross-cluster search: what's left** (ES|QL across clusters is #504, in its third review; landed in #347, after its security review's fixes: an alias wildcard matching a link and a
+5. **Cross-cluster search: what's left** (ES|QL across clusters landed in #504 after five reviews: each
+   cluster's part on its owner, `_remote`/`_coordinator`/`_any` enrich modes, LOOKUP JOIN across clusters
+   with union types refused as Elasticsearch refuses them; still different: a command inside a part after
+   an `ENRICH` reads a field the clusters type differently, where Elasticsearch refuses any use; landed in #347, after its security review's fixes: an alias wildcard matching a link and a
    loopback remote skipped the local index check, and merges were quadratic and unbounded;
    same owner only,
    checked at link time and on every request, `cross_cluster` keys issued on the remote and kept
@@ -1419,7 +1422,12 @@ deterministic (#396).
    rotated first);
    a cluster's admin password can't be kept as a project secret from roll's API or CLI; and only a
    unit test covers previews' search branch, and one MCP test search (no create → bulk → query
-   flow with a person's scoped token).
+   flow with a person's scoped token). Project members (roll secrets' #501, on main since
+   991d98225): search's API serves a signed-in person only the clusters they own (`SignedIn` is
+   the cluster's `owner`), so a member of a project whose canvas holds a cluster gets nothing from
+   `/v1/search` or the dashboard's Search pages, and `remotes::may_link` compares owners; clusters
+   on a project should follow the member's role through `Workspace::trusts`, as secrets and apps
+   do (roll secrets is moving its own search link check onto `trusts`, #621).
 27. **Fleet takeover after a SIGKILL**: the fleet test's longest search stall (11.1 s at a
    SIGKILL) is the shared lease TTL (`ClusterConfig::lease_ttl`, 10 s: redis 10.4, nosql 10.6 in
    the same run) plus ~1 s to load the cluster from S3 and replay its WAL. Search's part is the
@@ -1451,7 +1459,7 @@ deterministic (#396).
    take over a second, and the test still lost 1 run in 10 (at host loads 63-81; the old build
    passed 10 of 10 there, but at loads 18-50). The suite's minimum (108) holds on a rerun, and
    that load is much harsher than CI's.
-29. **Security**: a fix to main is in progress for a bypass a #358 review found: a role's document level
+29. **Security**: a fix to main is gating (#632, merged with #358's owner filters) for a bypass a #358 review found: a role's document level
    security filter was evaluated with the request's own `runtime_mappings` in scope, so a runtime
    field could shadow the field the filter tests. #601 (in review) carries the whole-product
    review's fixes. A third, whole-product review on 2026-11-20 (main at 21708aef1) found no

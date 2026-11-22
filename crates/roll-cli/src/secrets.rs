@@ -589,6 +589,9 @@ pub enum Secrets {
     Tokens(Tokens),
     /// Where a key is set, in every project you can read (`STRIPE_*` for a prefix). Never values.
     Find { key: String },
+    /// Deleted projects whose secrets are still recoverable, or bring one back with its
+    /// workspace project (its name or `prj_…` id).
+    Recover { project: Option<String> },
     /// Encryption keys (encryption as a service): encrypt stdin, decrypt stdin, rotate, list.
     #[command(subcommand)]
     Transit(TransitCmd),
@@ -1974,6 +1977,40 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
         }
         return Ok(());
     }
+    // A deleted project isn't in the workspace: it's found among the recoverable ones.
+    if let Secrets::Recover { project } = &cmd {
+        let deleted = api.get("/v1/secrets/deleted").await?;
+        let rows = deleted.as_array().cloned().unwrap_or_default();
+        let Some(given) = project else {
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&deleted)?);
+            } else if rows.is_empty() {
+                println!("no deleted project you can recover");
+            }
+            if !json_out {
+                for p in &rows {
+                    println!("{:<20} {:<18} recoverable until {}", s(&p["name"]), s(&p["project"]), chrono::DateTime::from_timestamp_millis(p["purge_at"].as_i64().unwrap_or(0)).map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default());
+                }
+            }
+            return Ok(());
+        };
+        let found: Vec<&Value> = rows.iter().filter(|p| p["project"] == given.as_str() || p["name"] == given.as_str()).collect();
+        let id = match found.as_slice() {
+            [one] => s(&one["project"]),
+            [] => bail!("no deleted project {given} you can recover (`roll secrets recover` lists them)"),
+            _ => bail!("{} deleted projects are named {given}: give its prj_… id", found.len()),
+        };
+        let back = api.post(&format!("/v1/secrets/projects/{}/recover", enc(&id)), json!({})).await?;
+        if json_out {
+            println!("{}", serde_json::to_string_pretty(&back)?);
+            return Ok(());
+        }
+        eprintln!("Recovered {} ({id}) with its secrets.", s(&back["name"]));
+        if let Some(failed) = back["rotation_failed"].as_array().filter(|f| !f.is_empty()) {
+            eprintln!("warning: these managed links didn't get a new credential; rotate them: {}", failed.iter().map(s).collect::<Vec<_>>().join(", "));
+        }
+        return Ok(());
+    }
     // A gateway runs with its own credential, in no project's name.
     if let Secrets::Gateways(GatewaysCmd::Up { gateway, allow, allow_file, token_file, identity, oidc_token_file }) = &cmd {
         return gateway_up(api, gateway.clone(), allow.clone(), allow_file.clone(), token_file.clone(), identity.clone(), oidc_token_file.clone()).await;
@@ -3348,7 +3385,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("Revoked {id}");
             }
         },
-        Secrets::Keygen { .. } | Secrets::Key(_) | Secrets::Unseal { .. } | Secrets::Find { .. } | Secrets::Doctor | Secrets::Health { all: true, .. } | Secrets::Issuer { .. } => unreachable!("handled before a project is picked"),
+        Secrets::Keygen { .. } | Secrets::Key(_) | Secrets::Unseal { .. } | Secrets::Find { .. } | Secrets::Recover { .. } | Secrets::Doctor | Secrets::Health { all: true, .. } | Secrets::Issuer { .. } => unreachable!("handled before a project is picked"),
         Secrets::Backup { to, out } => {
             let v = c.call(Method::POST, &format!("{}/backup", c.base()), Some(json!({ "recipient": to }))).await?;
             let text = serde_json::to_string_pretty(&v)?;

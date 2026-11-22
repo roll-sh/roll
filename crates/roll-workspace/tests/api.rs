@@ -463,3 +463,57 @@ async fn invites_follow_their_inviter_and_admin_owners_add_nothing() {
     assert!(log.contains(&"member.remove usr_root".to_string()) && log.contains(&"member.invite_revoke usr_root".to_string()), "{log:?}");
     assert!(log.contains(&"member.invite_revoke usr_cat".to_string()), "cat's demotion revoked hers: {log:?}");
 }
+
+#[tokio::test]
+async fn a_product_may_refuse_a_delete_and_a_deleted_project_comes_back_with_its_canvas_and_members() {
+    let api = Api::new();
+    let (_, p) = api.call_as(Some("usr_ada"), Method::POST, "/v1/workspace/projects", Some(json!({ "name": "shop" }))).await;
+    let id = p["id"].as_str().unwrap().to_string();
+    let at = |rest: &str| format!("/v1/workspace/projects/{id}{rest}");
+    let (s, _) = api.call(Method::PUT, &at("/resources/bucket/assets"), Some(json!({ "x": 1, "y": 2 }))).await;
+    assert_eq!(s, StatusCode::OK);
+    // Bob a member, carol still invited.
+    async fn invite(api: &Api, path: &str, email: &str, role: &str) -> String {
+        let (_, inv) = api.call_as(Some("usr_ada"), Method::POST, path, Some(json!({ "email": email, "role": role }))).await;
+        inv["url"].as_str().unwrap().split("token=").nth(1).unwrap().to_string()
+    }
+    let bob = invite(&api, &at("/invites"), "bob@example.com", "developer").await;
+    assert_eq!(api.call_as(Some("usr_bob"), Method::POST, &format!("/v1/workspace/invites/{bob}/accept"), None).await.0, StatusCode::OK);
+    let carol = invite(&api, &at("/invites"), "carol@example.com", "viewer").await;
+
+    // A product's no, answered as it gave it, until the request carries what it asks for.
+    api.ws.before_delete(Box::new(|d| match d.request.uri.query() {
+        Some("confirm=shop") => Ok(()),
+        _ => Err(roll_workspace::Refusal { status: 409, code: "holds_things".into(), message: format!("{} holds things", d.project.name) }),
+    }));
+    let told = Arc::new(std::sync::Mutex::new(vec![]));
+    let t = told.clone();
+    api.ws.on_delete(Box::new(move |d| t.lock().unwrap().push(d.project.id.clone())));
+    let (s, e) = api.call_as(Some("usr_ada"), Method::DELETE, &at(""), None).await;
+    assert_eq!((s, e["code"].as_str(), e["error"].as_str()), (StatusCode::CONFLICT, Some("holds_things"), Some("shop holds things")));
+    assert!(told.lock().unwrap().is_empty());
+    assert_eq!(api.call(Method::GET, &at(""), None).await.0, StatusCode::OK);
+    assert_eq!(api.call_as(Some("usr_ada"), Method::DELETE, &at("?confirm=shop"), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(*told.lock().unwrap(), vec![id.clone()]);
+    assert_eq!(api.call(Method::GET, &at(""), None).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(api.ws.deleted(&id).unwrap().unwrap().resources.len(), 1);
+    // Its members reach nothing while it's deleted, and its invites ended.
+    assert!(api.ws.memberships_of("usr_bob").unwrap().is_empty());
+    assert_eq!(api.call_as(Some("usr_carol"), Method::POST, &format!("/v1/workspace/invites/{carol}/accept"), None).await.0, StatusCode::NOT_FOUND);
+
+    // Its name taken meanwhile: not restored over another project.
+    let (_, other) = api.call_as(Some("usr_ada"), Method::POST, "/v1/workspace/projects", Some(json!({ "name": "shop" }))).await;
+    assert!(matches!(api.ws.restore(&id), Err(roll_workspace::Error::Conflict(_))));
+    let (s, _) = api.call_as(Some("usr_ada"), Method::PATCH, &format!("/v1/workspace/projects/{}", other["id"].as_str().unwrap()), Some(json!({ "name": "shop-2" }))).await;
+    assert_eq!(s, StatusCode::OK);
+    let back = api.ws.restore(&id).unwrap();
+    assert_eq!((back.name.as_str(), back.resources.len(), back.resources[0].x), ("shop", 1, 1.0));
+    assert!(api.ws.deleted(&id).unwrap().is_none());
+    // Back with its members, as they were.
+    let (s, p) = api.call_as(Some("usr_bob"), Method::GET, &at(""), None).await;
+    assert_eq!((s, p["role"].as_str()), (StatusCode::OK, Some("developer")));
+    // Once a product purged it, it's gone for good.
+    assert_eq!(api.call(Method::DELETE, &at("?confirm=shop"), None).await.0, StatusCode::NO_CONTENT);
+    api.ws.forget_deleted(&id).unwrap();
+    assert!(matches!(api.ws.restore(&id), Err(roll_workspace::Error::NotFound(_))));
+}

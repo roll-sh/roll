@@ -400,6 +400,11 @@ pub struct Build {
     /// service's repo can't build a repo it can't read into its code by pinning it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub submodule_repos: Option<Vec<String>>,
+    /// The language's OpenTelemetry agent in a generated Dockerfile (Heroku's Telemetry,
+    /// `@vercel/otel`): Node's and Python's, pinned, started while the environment's traces are
+    /// on (`apps_build::otel`); none in the tree's own Dockerfile.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub otel: Option<bool>,
     /// A Git URL service's Git LFS objects fetched in place of their pointers (Vercel's,
     /// Netlify's), from the repository's LFS server; off, the pointers are built as they are.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -489,6 +494,7 @@ impl Build {
             start: self.start.clone(),
             spa: self.spa,
             packages: self.packages.clone().unwrap_or_default(),
+            otel: self.otel.unwrap_or(false),
             build_env: Vec::new(),
             build_files: Vec::new(),
             process: None,
@@ -1889,6 +1895,10 @@ pub struct Environment {
     /// before that was kept.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub closed_by: Option<serde_json::Value>,
+    /// `"branch"`: data of its own, a branch of each database it links (its view lists them by
+    /// kind and ref, never their credentials); absent: its links reach the databases themselves.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
     /// A closed environment's interception on its owner (roll secrets' placeholders): requests
     /// filtered, placeholders swapped, the latest refusals; none until it has done something.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2962,6 +2972,12 @@ pub enum LinkKind {
 }
 
 impl LinkKind {
+    /// Whether an environment with data of its own (`data: "branch"`) gets a branch of it:
+    /// a database's, roll Postgres' and Redis' (each kind's product branches it).
+    pub fn branches(self) -> bool {
+        matches!(self, LinkKind::Postgres | LinkKind::Redis)
+    }
+
     pub const ALL: [LinkKind; 8] = [LinkKind::Postgres, LinkKind::Redis, LinkKind::Bucket, LinkKind::Stream, LinkKind::Queue, LinkKind::Nosql, LinkKind::Search, LinkKind::Service];
 
     pub fn as_str(self) -> &'static str {

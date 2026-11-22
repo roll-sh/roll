@@ -341,7 +341,10 @@ homes(kind TEXT NOT NULL, ref TEXT NOT NULL, project_id TEXT NOT NULL,
       set_by TEXT NOT NULL, set_at INTEGER NOT NULL, PRIMARY KEY (kind, ref)) WITHOUT ROWID;
 ```
 
-Deleting a project deletes its members, invites and homes in the same write.
+Deleting a project ends its invites and keeps its members and homes apart (`deleted_members`,
+`deleted_homes`) in the same write, with the project itself (docs/workspace.md): nobody's grant
+names it while it's deleted, and restoring it (roll secrets' recovery window, docs/secrets.md)
+brings them back as they were.
 
 ## API and UI
 
