@@ -344,6 +344,10 @@ mod finds {
             ("ask a person for an api key", "secrets_request_value"),
             ("who changed this secret and when", "secrets_audit"),
             ("one-time code", "secrets_totp"),
+            ("what's blocking my queries", "postgres_activity"),
+            ("is my database healthy", "postgres_health_checks"),
+            ("archive my logs to an s3 bucket", "apps_add_drain"),
+            ("which placeholders has my sandbox got", "secrets_list_placeholders"),
             ("vulnerabilities in my image", "apps_deploy_vulnerabilities"),
             ("slo error budget", "apps_environment_slo"),
             ("contact form submissions", "apps_form_submissions"),
@@ -376,6 +380,7 @@ mod finds {
             ("redis memory usage", "redis_usage"),
             ("which service costs the most this month", "apps_project_usage"),
             ("is the leaked key in my code still live", "secrets_credential_check"),
+            ("browser keys for search on my site", "search_list_browser_keys"),
         ]
         .iter()
         .filter_map(|(q, want)| {

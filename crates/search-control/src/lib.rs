@@ -48,3 +48,5 @@ pub fn reindex_deny_net_ok(n: &str) -> bool {
 pub fn check_time_value(v: &str, flag: &str) -> anyhow::Result<()> {
     search_es::units::TimeValue::parse(v, flag).map(|_| ()).map_err(|e| anyhow::anyhow!("{flag}: {}", e.reason()))
 }
+/// The node setting capping one search's time (`roll.search.max_time`).
+pub use search_es::search::MAX_TIME as SEARCH_MAX_TIME;

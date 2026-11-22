@@ -284,6 +284,25 @@ impl Sources for CodeSources {
         blocking(move || this.0.store.land_log_head()).await
     }
 
+    async fn gitlink(&self, repo: &str, revision: &str, path: &str) -> anyhow::Result<Option<String>> {
+        let (this, repo_s, rev, path) = (self.clone(), repo.to_string(), revision.to_string(), path.to_string());
+        blocking(move || {
+            let r = this.repo(&repo_s)?;
+            let cs = this.0.store.resolve(&r.id, &rev)?.ok_or_else(|| anyhow::anyhow!("no revision {rev}"))?;
+            Ok(this.0.store.entry(&r.id, &cs, &path)?.filter(|e| e.file_mode() == Some(code_store::Mode::Gitlink)).map(|e| e.oid.to_string()))
+        })
+        .await
+    }
+
+    fn git_base(&self) -> Option<String> {
+        Some(self.0.config.git_url.trim_end_matches('/').to_string())
+    }
+
+    async fn public(&self, repo: &str) -> anyhow::Result<bool> {
+        let (this, repo) = (self.clone(), repo.to_string());
+        blocking(move || Ok(this.repo(&repo).is_ok_and(|r| r.visibility == code_control::model::Visibility::Public))).await
+    }
+
     async fn read_file(&self, repo: &str, revision: &str, path: &str) -> anyhow::Result<Option<Vec<u8>>> {
         let (this, repo_s, rev) = (self.clone(), repo.to_string(), revision.to_string());
         let (r, cs) = blocking(move || {
@@ -660,6 +679,7 @@ pub async fn start(
     redis: Option<Arc<redis_control::Control>>,
     secrets: crate::secrets::ForApps,
     products: crate::secrets::Api,
+    open: bool,
 ) -> anyhow::Result<AppsNode> {
     let a = &args.apps;
     let single = cluster.backend_name() == "memory";
@@ -687,6 +707,7 @@ pub async fn start(
     });
     // Local development only: notification targets on this machine or a private network.
     cfg.allow_private = std::env::var("ROLL_APPS_ALLOW_PRIVATE").is_ok_and(|v| v == "1" || v == "true");
+    cfg.open = open;
     // Built deployments each environment keeps to roll back to (older ones' images go).
     if let Some(n) = std::env::var("ROLL_APPS_KEEP_DEPLOYMENTS").ok().and_then(|v| v.parse::<usize>().ok()).filter(|n| *n > 0) {
         cfg.keep_deployments = n;
@@ -802,7 +823,7 @@ impl AppsNode {
 
     /// The apps listener, and each environment's own port as environments appear.
     pub async fn serve(&self) -> anyhow::Result<()> {
-        let listener = tokio::net::TcpListener::bind(self.listen).await?;
+        let listener = crate::listen::bind(self.listen)?;
         let public = apps_control::public::router(self.apps.clone());
         let main = axum::serve(listener, public.into_make_service_with_connect_info::<SocketAddr>()).into_future();
         let ports = self.serve_ports();

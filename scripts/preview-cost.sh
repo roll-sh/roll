@@ -309,37 +309,40 @@ role() { echo "$1" | sed 's#^postgres://\([^:@]*\)[:@].*#\1#'; }
 [ "$(role "$CONNECT")" = "$(role "$APP_DB")" ] || { echo "the connection's role should be the service's: $(role "$CONNECT") / $(role "$APP_DB")"; exit 1; }
 # The service's ELASTICSEARCH_URL is the branch's: it reads the parent's document; a write stays in
 # the branch.
-APP_ES=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/env.txt" | sed -n 's/^ELASTICSEARCH_URL=//p' | sed 's#host.docker.internal#127.0.0.1#')
-[ -n "$APP_ES" ] || { echo "the service has no ELASTICSEARCH_URL"; exit 1; }
+# Only the branch's data-only credential (#607): the URL carries no login, the key goes beside it.
+APP_ENV=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/env.txt")
+APP_ES=$(echo "$APP_ENV" | sed -n 's/^ELASTICSEARCH_URL=//p' | sed 's#host.docker.internal#127.0.0.1#')
+APP_KEY=$(echo "$APP_ENV" | sed -n 's/^ELASTICSEARCH_API_KEY=//p')
+[ -n "$APP_ES" ] && [ -n "$APP_KEY" ] || { echo "the service should have ELASTICSEARCH_URL and ELASTICSEARCH_API_KEY"; exit 1; }
+case "$APP_ES" in *://*@*) echo "the service's ELASTICSEARCH_URL should carry no login (the branch's own login stays roll's)"; exit 1;; esac
+es() { curl -sf -H "Authorization: ApiKey $APP_KEY" "$@"; }
 # products.name is masked in the branch (the project's masking), and only there.
-ES_READ=$(curl -sf "$APP_ES/products/_doc/1" | jq_ "d['_source']['name']")
+ES_READ=$(es "$APP_ES/products/_doc/1" | jq_ "d['_source']['name']")
 [ "$ES_READ" = "[masked]" ] || { echo "the search branch should read the parent's document with products.name masked, not $ES_READ"; exit 1; }
 ES_PARENT=$(curl -sf "$SEARCH_URL_PARENT/products/_doc/1" | jq_ "d['_source']['name']")
 [ "$ES_PARENT" = "parent" ] || { echo "masking the branch shouldn't touch the parent's document: $ES_PARENT"; exit 1; }
-ES_DEEP=$( (curl -sf "$APP_ES/products/_doc/3" | jq_ "d['_source']['owner'][0]['email']"; curl -sf "$APP_ES/products/_doc/4" | jq_ "d['_source']['owner.email']") | paste -sd/)
+ES_DEEP=$( (es "$APP_ES/products/_doc/3" | jq_ "d['_source']['owner'][0]['email']"; es "$APP_ES/products/_doc/4" | jq_ "d['_source']['owner.email']") | paste -sd/)
 [ "$ES_DEEP" = "[masked]/[masked]" ] || { echo "a mask should reach a field in an array of objects and under a dotted key: $ES_DEEP"; exit 1; }
 [ "$(curl -sf "$SEARCH_URL_PARENT/products/_doc/3" | jq_ "d['_source']['owner'][0]['email']")" = "ada@corp.example" ] || { echo "the parent's address should stay (the check's premise)"; exit 1; }
-ES_DOTTED=$(curl -sf "$APP_ES/logs.2024/_doc/1" | jq_ "d['_source']['user']['email']")
+ES_DOTTED=$(es "$APP_ES/logs.2024/_doc/1" | jq_ "d['_source']['user']['email']")
 [ "$ES_DOTTED" = "[masked]" ] || { echo "a mask on an index whose name has dots (logs.2024) should reach it: $ES_DOTTED"; exit 1; }
 [ "$(curl -sf "$SEARCH_URL_PARENT/logs.2024/_doc/1" | jq_ "d['_source']['user']['email']")" = "eve@corp.example" ] || { echo "the parent's logs.2024 should keep its address"; exit 1; }
 # Nor can the preview's code read the masked value back out of the segments the branch shares
 # with its parent (a term dictionary keeps a replaced document's terms): the parent's has it,
 # the branch's doesn't.
-TERMS() { curl -sf -XPOST "$1/products/_terms_enum" -H 'content-type: application/json' -d '{"field":"name.keyword","string":"par"}' | jq_ "d.get('terms')"; }
+TERMS() { curl -sf -XPOST "${@:2}" "$1/products/_terms_enum" -H 'content-type: application/json' -d '{"field":"name.keyword","string":"par"}' | jq_ "d.get('terms')"; }
 [ "$(TERMS "$SEARCH_URL_PARENT")" = "['parent']" ] || { echo "the parent's term dictionary should have the value (the check's premise): $(TERMS "$SEARCH_URL_PARENT")"; exit 1; }
-ES_TERMS=$(TERMS "$APP_ES")
+ES_TERMS=$(TERMS "$APP_ES" -H "Authorization: ApiKey $APP_KEY")
 [ "$ES_TERMS" = "[]" ] || { echo "the masked value is still in the branch's term dictionary: $ES_TERMS"; exit 1; }
 # A field only the branch's documents have (price): its mapping gains it, and the next head's
 # schema changes say so.
-curl -sf -XPUT "$APP_ES/products/_doc/2?refresh=true" -H 'content-type: application/json' -d '{"name":"branch","price":9.5}' >/dev/null
+es -XPUT "$APP_ES/products/_doc/2?refresh=true" -H 'content-type: application/json' -d '{"name":"branch","price":9.5}' >/dev/null
 ES_PARENT_SEES=$(curl -s -o /dev/null -w '%{http_code}' "$SEARCH_URL_PARENT/products/_doc/2")
 [ "$ES_PARENT_SEES" = 404 ] || { echo "a write to the search branch reached the parent ($ES_PARENT_SEES)"; exit 1; }
-# The branch's data-only key, as production's link gets: it reads and writes documents, and is
-# refused making keys (the branch's own login in ELASTICSEARCH_URL stays for roll's runtime).
-APP_KEY=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/env.txt" | sed -n 's/^ELASTICSEARCH_API_KEY=//p')
-ES_PLAIN=$(echo "$APP_ES" | sed -E 's#://[^@/]*@#://#')
-KEY_READ=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: ApiKey $APP_KEY" "$ES_PLAIN/products/_doc/1")
-KEY_MINT=$(curl -s -o /dev/null -w '%{http_code}' -XPOST -H "Authorization: ApiKey $APP_KEY" -H 'content-type: application/json' "$ES_PLAIN/_security/api_key" -d '{"name":"more"}')
+# The branch's data-only key, as production's link gets: it reads and writes documents (above),
+# and is refused making keys.
+KEY_READ=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: ApiKey $APP_KEY" "$APP_ES/products/_doc/1")
+KEY_MINT=$(curl -s -o /dev/null -w '%{http_code}' -XPOST -H "Authorization: ApiKey $APP_KEY" -H 'content-type: application/json' "$APP_ES/_security/api_key" -d '{"name":"more"}')
 [ -n "$APP_KEY" ] && [ "$KEY_READ" = 200 ] && [ "$KEY_MINT" = 403 ] || { echo "the search branch's ELASTICSEARCH_API_KEY should read (200, got $KEY_READ) and be refused making keys (403, got $KEY_MINT); key set: $([ -n "$APP_KEY" ] && echo yes || echo no)"; exit 1; }
 APP_WAL=$(docker run --rm --name roll-previews-psqltest --network host postgres:18-alpine psql "$APP_DB" -Atc "SELECT length(pg_read_binary_file('pg_wal/' || pg_walfile_name(pg_current_wal_lsn())))" 2>&1 | head -1 || true)
 case "$APP_WAL" in *"permission denied"*) ;; *) echo "the branch's role should be refused the WAL: $APP_WAL"; exit 1;; esac

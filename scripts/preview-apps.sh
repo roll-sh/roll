@@ -61,6 +61,8 @@ export ROLL_HOME=$H ROLL_API=$API ROLL_PROXY=127.0.0.1:${PORTS}432 ROLL_REDIS=12
   ROLL_APPS_LISTEN=127.0.0.1:${PORTS}080 ROLL_APPS_DOMAIN=apps.localhost ROLL_CODE_PREVIEW_DOMAIN=preview.localhost \
   ROLL_PRODUCTS=code,redis,streams,apps ROLL_APPS_ALLOW_PRIVATE=1 RUST_LOG=${RUST_LOG:-info}
 unset ROLL_ADMIN_TOKEN ROLL_CODE_TOKEN
+# A deployment key, as a real node has: a preview's own variables are kept sealed with it.
+export ROLL_SECRET_KEY=${PREVIEW_APPS_SECRET_KEY:-$(python3 -c 'import secrets; print(secrets.token_hex(32))')}
 nice -n 10 "$BIN" >"$H/rolld.log" 2>&1 &
 PID=$!
 for _ in $(seq 1 120); do kill -0 "$PID" 2>/dev/null || { tail -20 "$H/rolld.log"; exit 1; }; curl -sf "http://$API/v1/info" >/dev/null 2>&1 && break; sleep 0.5; done
@@ -154,6 +156,10 @@ done
 [ "$(echo "$E" | jq_ "(d.get('egress') or {}).get('mode')")" = roll ] || { echo "the pv- environment should be closed: $(echo "$E" | jq_ "d.get('egress')")"; exit 1; }
 # One voice on the pull request: previews reports the pv- environment, roll apps doesn't (#249).
 [ "$(echo "$E" | jq_ "d.get('report')")" = False ] || { echo "the pv- environment should leave reporting to previews (report: false): $(echo "$E" | jq_ "d.get('report')")"; exit 1; }
+# Its keys bound to hosts are used as the rules' writer (closed_by, apps' #610): the operator
+# saved these rules, so no one, and they're withheld (without previews' field, roll apps would
+# name whoever set the egress: the operator).
+[ "$(echo "$E" | jq_ "d.get('closed_by', 'absent')")" = None ] || { echo "the closed pv- environment should name no one as its placeholders' maker (closed_by: null): $(echo "$E" | jq_ "d.get('closed_by', 'absent')")"; exit 1; }
 curl -sS -o /dev/null -H "Host: $HOSTPART" "http://127.0.0.1:${PORTS}080/" --max-time 120
 INST=""
 # The closed deployment's instance (its id's first six characters are in the name).

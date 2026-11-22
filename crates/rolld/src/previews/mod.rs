@@ -21,7 +21,7 @@ mod services;
 pub mod fleet;
 
 pub use data::*;
-pub use secrets::{Secrets, SecretsReveal};
+pub use secrets::{Secrets, SecretsIntercepts, SecretsReveal};
 pub use services::{RollApps, Services};
 
 /// Which products run here (an adapter for each).
@@ -63,15 +63,50 @@ impl roll_previews::ports::Visitors for AccountsVisitors {
             return false;
         }
         match self.accounts.user(user) {
-            Ok(u) if !u.disabled => u.admin || self.workspace.get(roll_workspace::Scope::All, project).is_ok_and(|p| !p.owner.is_empty() && p.owner == user),
+            Ok(u) if !u.disabled => u.admin || self.workspace.memberships_of(user).is_ok_and(|m| opens_team_previews(&m, project)),
             _ => false,
         }
+    }
+}
+
+/// Whether a person's roles (docs/members.md) let them open a team-access preview of `project`:
+/// its running app is what a share link gives, and minting one is `reveal` on the preview, so it's
+/// what the catalogue asks for that (a developer whose environments take in `preview`, an admin or
+/// owner; never a viewer, who sees no values).
+fn opens_team_previews(memberships: &[roll_auth::roles::Membership], project: &str) -> bool {
+    use roll_auth::scope::{Action, Outcome, Resource, Target};
+    let preview = Resource { project: Some(project.into()), environment: Some("preview".into()), protected: Some(false), ..Resource::new("previews", "") };
+    roll_auth::roles::session_scope(memberships).outcome(&Target::One(preview), Action::Reveal) == Outcome::Allow
+}
+
+#[cfg(test)]
+mod team_access_tests {
+    use roll_auth::roles::{Membership, Role};
+
+    #[test]
+    fn a_role_that_reveals_a_preview_opens_its_team_access() {
+        let m = |role, environments: Option<&[&str]>| vec![Membership { project: "prj_a".into(), role, environments: environments.map(|e| e.iter().map(|x| x.to_string()).collect()) }];
+        let opens = |ms: Vec<Membership>| super::opens_team_previews(&ms, "prj_a");
+        assert!(!opens(m(Role::Viewer, None)), "a viewer sees no values");
+        assert!(opens(m(Role::Developer, None)), "a developer's default takes in what isn't protected");
+        assert!(!opens(m(Role::Developer, Some(&["staging"]))), "named environments without preview");
+        assert!(opens(m(Role::Developer, Some(&["preview"]))));
+        assert!(opens(m(Role::Admin, None)) && opens(m(Role::Owner, None)));
+        assert!(!super::opens_team_previews(&m(Role::Owner, None), "prj_b"), "another project");
     }
 }
 
 /// Open the store and start the engine: branches through this node's API, services as
 /// containers through roll code's isolation (Docker or Fargate), roll code's changes as the
 /// source, and roll code's preview backend in front of its own single-container previews.
+/// `ROLL_PREVIEWS_INTERCEPT_ALLOW_PRIVATE=<root.pem>`: intercepted connections may dial private
+/// addresses and trust that root too. Local development only; said loudly when on.
+fn intercept_private() -> Option<std::path::PathBuf> {
+    let root = std::env::var("ROLL_PREVIEWS_INTERCEPT_ALLOW_PRIVATE").ok().filter(|v| !v.trim().is_empty())?;
+    tracing::warn!(root = %root, "ROLL_PREVIEWS_INTERCEPT_ALLOW_PRIVATE is set: previews' intercepted connections may reach private addresses and trust this root (local development only)");
+    Some(std::path::PathBuf::from(root))
+}
+
 pub fn start(
     args: &crate::Args,
     home: &Path,
@@ -87,7 +122,7 @@ pub fn start(
     if let Some(key) = args.secret_key() {
         match code_review::secret::Sealer::new(&key) {
             Ok(s) => {
-                let _ = store.sealer.set(Arc::new(VarsSealer(s)));
+                store.set_sealer(Arc::new(VarsSealer(s)))?;
             }
             Err(e) => tracing::warn!(error = %e, "previews: a preview's own variables aren't sealed"),
         }
@@ -128,6 +163,10 @@ pub fn start(
             // this many on the node.
             warm_for: std::time::Duration::from_secs(60 * std::env::var("ROLL_PREVIEWS_WARM_MINUTES").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(8 * 60).min(24 * 60)),
             warm_max: std::env::var("ROLL_PREVIEWS_WARM_MAX").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(32).min(1000),
+            // Each preview's interception socket (keys a fork's preview never holds).
+            intercept_dir: Some(home.join("previews").join("intercept")),
+            // Local development only: a private TLS echo host for the live check.
+            intercept_private: intercept_private(),
             ..Default::default()
         },
         code.isolation.clone(),
@@ -187,11 +226,7 @@ pub fn start(
     backend.attach(&engine);
     code.code.set_preview_backend(backend);
     // The mail catcher: previews' mail is kept with them, never sent on.
-    let bound = std::net::TcpListener::bind(args.previews_smtp).and_then(|l| {
-        l.set_nonblocking(true)?;
-        tokio::net::TcpListener::from_std(l)
-    });
-    match bound {
+    match crate::listen::bind(args.previews_smtp) {
         Ok(l) => {
             tracing::info!(addr = %args.previews_smtp, "roll previews: catching previews' mail");
             tokio::spawn(roll_previews::mail::serve(l, Arc::new(roll_previews::mail::Store(store))));

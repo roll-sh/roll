@@ -211,6 +211,8 @@ pub struct Loaded {
     permit_debt: AtomicUsize,
     closed: AtomicBool,
     rate: Mutex<Option<Arc<RateLimiter>>>,
+    /// Browser keys' rate limits ([`crate::browser`]), counted here on the cluster's owner.
+    browser: crate::browser::Limiter,
     bytes: Arc<ByteBudget>,
     requests: AtomicU64,
     /// `requests` as last reported by [`Node::take_request_counts`].
@@ -399,6 +401,16 @@ pub struct Lease {
     link: Option<String>,
     /// When it started waiting for its permits: its latency is measured from here.
     since: Option<Instant>,
+    /// A browser key's request: its running slot ([`crate::browser`]), given back when the
+    /// lease ends.
+    browser: Option<BrowserCharge>,
+}
+
+/// A browser key's request, admitted with one token and a running slot.
+struct BrowserCharge {
+    id: String,
+    /// The key's body cap (`limits.max_body_bytes`, 1 MiB by default).
+    max_body: usize,
 }
 
 /// Counts a request in the cluster's queue for as long as it waits, however the wait ends
@@ -421,12 +433,20 @@ impl Drop for Lease {
             }
         }
         self.loaded.in_flight.fetch_sub(1, Ordering::SeqCst);
+        if let Some(b) = &self.browser {
+            self.loaded.browser.leave(&b.id);
+        }
     }
 }
 
 impl Lease {
     pub fn max_body_bytes(&self, node: &Node) -> usize {
-        self.loaded.spec().max_body_bytes.unwrap_or(node.cfg.max_body_bytes)
+        let cluster = self.loaded.spec().max_body_bytes.unwrap_or(node.cfg.max_body_bytes);
+        // A browser key's own cap, under the cluster's.
+        match &self.browser {
+            Some(b) => cluster.min(b.max_body),
+            None => cluster,
+        }
     }
 
     /// Reserves `bytes` of the cluster's in-flight body budget (from `Content-Length`, before
@@ -702,6 +722,68 @@ pub enum Refused {
     /// [`crate::allow::REFUSED_BODY`], before its credentials are looked at.
     Filtered,
     Rejected(Rejected),
+    /// A browser key's rate limit ([`crate::browser`]): answered 429 with `Retry-After`.
+    Throttled(Rejected, u64),
+}
+
+/// What a browser key `p` authenticated as may do on `loaded` (`Ok(None)`: not a browser key):
+/// its id and rate limit. `Err`: a browser key of another cluster, which a branch (or a
+/// point-in-time branch from before a revoke) copied with its security: refused as an unknown key.
+fn browser_key(loaded: &Loaded, p: &search_es::xpack::security::Principal) -> Result<Option<(String, crate::browser::KeyLimit)>, ()> {
+    let search_es::xpack::security::AuthKind::ApiKey(k) = &p.kind else { return Ok(None) };
+    let Some(meta) = search_es::xpack::security::api_keys::metadata(&loaded.cluster, &k.id) else { return Ok(None) };
+    let Some(b) = meta.get(crate::browser::METADATA) else { return Ok(None) };
+    let spec = loaded.spec();
+    match (b.get("cluster").and_then(|v| v.as_str()), spec.catalog_id.as_deref()) {
+        (Some(made_for), Some(id)) if made_for == id => {}
+        _ => return Err(()),
+    }
+    Ok(key_limit(loaded, &k.id).map(|limit| (k.id.clone(), limit)))
+}
+
+/// Browser key `key_id`'s body cap: its `limits.max_body_bytes`, else
+/// [`crate::browser::DEFAULT_MAX_BODY_BYTES`].
+fn browser_body_cap(loaded: &Loaded, key_id: &str) -> usize {
+    let meta = search_es::xpack::security::api_keys::metadata(&loaded.cluster, key_id);
+    let n = meta.as_ref().and_then(|m| m.get(crate::browser::METADATA)).and_then(|b| b.get("limits")).and_then(|l| l.get("max_body_bytes")).and_then(|v| v.as_i64());
+    let n = n.and_then(|n| u64::try_from(n).ok()).filter(|n| (1..=crate::browser::MAX_BODY_BYTES).contains(n)).unwrap_or(crate::browser::DEFAULT_MAX_BODY_BYTES);
+    usize::try_from(n).unwrap_or(usize::MAX)
+}
+
+/// Browser key `key_id`'s limits, from its `metadata.roll_browser` (`None`: not a browser key).
+fn key_limit(loaded: &Loaded, key_id: &str) -> Option<crate::browser::KeyLimit> {
+    let meta = search_es::xpack::security::api_keys::metadata(&loaded.cluster, key_id)?;
+    let b = meta.get(crate::browser::METADATA)?;
+    let n = |section: &str, f: &str| b.get(section).and_then(|r| r.get(f)).and_then(|v| v.as_i64());
+    Some(crate::browser::KeyLimit::new(n("rate_limit", "per_minute"), n("rate_limit", "per_ip_per_minute"), n("limits", "max_concurrent")))
+}
+
+/// Charges browser keys' items ([`search_es::xpack::security::browser::charge_items`]) to the
+/// loaded cluster's limiter.
+struct Charger {
+    node: std::sync::Weak<Node>,
+    name: String,
+}
+
+impl search_es::xpack::security::browser::ItemCharge for Charger {
+    fn charge(&self, key_id: &str, client: Option<std::net::IpAddr>, n: u64) -> Result<(), u64> {
+        let Some(l) = self.node.upgrade().and_then(|node| node.get_loaded(&self.name)) else { return Ok(()) };
+        let Some(limit) = key_limit(&l, key_id) else { return Ok(()) };
+        let ceiling = l.spec().browser_per_minute.unwrap_or(crate::browser::DEFAULT_CLUSTER_PER_MINUTE);
+        l.browser.check(key_id, client, limit, ceiling, n)
+    }
+
+    fn refund(&self, key_id: &str, client: Option<std::net::IpAddr>) {
+        let Some(l) = self.node.upgrade().and_then(|node| node.get_loaded(&self.name)) else { return };
+        if let Some(limit) = key_limit(&l, key_id) {
+            l.browser.refund(key_id, client, limit, 1);
+        }
+    }
+}
+
+/// The `http.cors.*` node settings a cluster shows for its spec (none with CORS off).
+fn http_settings(spec: &ClusterSpec) -> Vec<(String, String)> {
+    spec.cors.as_ref().map(|c| c.settings()).unwrap_or_default()
 }
 
 impl From<Rejected> for Refused {
@@ -1073,6 +1155,7 @@ impl Node {
             }
         };
         self.hooks.loaded(&cluster).await;
+        *cluster.config.http_settings.write() = http_settings(&spec);
         let permits = spec.max_in_flight.max(1);
         let max_body = spec.max_body_bytes.unwrap_or(self.cfg.max_body_bytes);
         let bytes = ByteBudget::new(spec.max_in_flight_bytes.unwrap_or(max_body.saturating_mul(2)));
@@ -1093,6 +1176,7 @@ impl Node {
             permit_debt: AtomicUsize::new(0),
             closed: AtomicBool::new(false),
             rate: Mutex::new(rate),
+            browser: Default::default(),
             bytes,
             requests: AtomicU64::new(0),
             metered: AtomicU64::new(0),
@@ -1107,7 +1191,7 @@ impl Node {
     }
 
     async fn load_inner(
-        &self,
+        self: &Arc<Self>,
         spec: &ClusterSpec,
         data_store: Option<search_store::Store>,
         deadline: Option<Instant>,
@@ -1132,6 +1216,8 @@ impl Node {
         cfg.node_name = self.cfg.node_name.clone();
         cfg.destructive_requires_name = spec.destructive_requires_name;
         cfg.node_settings = self.cfg.node_settings.clone();
+        // Browser keys' `_msearch`/`_mget` items are charged where search-es parses them.
+        cfg.item_charge = Some(Arc::new(Charger { node: Arc::downgrade(self), name: spec.name.clone() }));
         cfg.test_features = self.cfg.test_features;
         cfg.host_metrics = self.cfg.host_metrics;
         cfg.sealer = self.cfg.sealer.clone();
@@ -1406,6 +1492,7 @@ impl Node {
         }
         let max_body = spec.max_body_bytes.unwrap_or(l.default_max_body);
         l.bytes.set_limit(spec.max_in_flight_bytes.unwrap_or(max_body.saturating_mul(2)));
+        *l.cluster.config.http_settings.write() = http_settings(&spec);
         *l.spec.write() = Arc::new(spec);
     }
 
@@ -1768,10 +1855,42 @@ impl Node {
     /// so no IP allowlist applies) and pins its cluster, as [`Node::enter_from`] does.
     pub async fn enter(self: &Arc<Self>, req: &EsRequest, sni: Option<&str>) -> Result<Lease, Rejected> {
         self.enter_from(req, sni, Origin::Internal).await.map_err(|r| match r {
-            Refused::Rejected(r) => r,
+            Refused::Rejected(r) | Refused::Throttled(r, _) => r,
             // An in-process request is admitted by every allowlist.
             Refused::Filtered => Rejected { error: EsError::new(403, "security_exception", "forbidden"), dialect: Dialect::Elasticsearch },
         })
+    }
+
+    /// The CORS settings of the cluster a request with an `Origin` names, read as
+    /// [`Node::enter_from`] names it, without authenticating it or waking the cluster (a
+    /// preflight carries no credentials: it names its cluster by the `Host` label under the
+    /// node's domain). `Ok(None)`: no such cluster, or its CORS is off. `Err`: the cluster's IP
+    /// allowlist refuses `origin` ([`Refused::Filtered`]), which is answered first.
+    pub async fn cors_of(self: &Arc<Self>, req: &EsRequest, sni: Option<&str>, origin: Origin) -> Result<Option<Arc<crate::cors::Cors>>, Refused> {
+        let name = match &self.cfg.default_cluster {
+            Some(n) => n.clone(),
+            None => {
+                let host = sni
+                    .and_then(|s| auth::host_label(s, self.cfg.domain.as_deref()))
+                    .or_else(|| req.header("host").and_then(|h| auth::host_label(h, self.cfg.domain.as_deref())));
+                let presented = auth::parse_authorization(req.header("authorization")).unwrap_or(Presented::None);
+                match auth::claim(&presented, host) {
+                    Some(c) => c.cluster,
+                    None => return Ok(None),
+                }
+            }
+        };
+        let spec = match self.get_loaded(&name) {
+            Some(l) => l.spec(),
+            None => match Box::pin(self.catalog.lookup(&name)).await {
+                Some(s) => Arc::new(s),
+                None => return Ok(None),
+            },
+        };
+        if !spec.ip_allowlist.admits(origin) {
+            return Err(Refused::Filtered);
+        }
+        Ok(spec.cors.clone())
     }
 
     /// Finds and authenticates a request and pins its cluster (loading it if needed), without
@@ -1782,6 +1901,13 @@ impl Node {
     /// and costs nothing ([`Refused::Filtered`]). A request that names no cluster that exists is
     /// refused (401) as before.
     pub async fn enter_from(self: &Arc<Self>, req: &EsRequest, sni: Option<&str>, origin: Origin) -> Result<Lease, Refused> {
+        self.enter_seeing(req, sni, origin, &mut None).await
+    }
+
+    /// [`Node::enter_from`], also handing back the CORS settings of the cluster it found
+    /// (`seen`, once its IP allowlist admitted `origin`), so a refusal can carry CORS headers
+    /// without reading the catalog again.
+    pub async fn enter_seeing(self: &Arc<Self>, req: &EsRequest, sni: Option<&str>, origin: Origin, seen: &mut Option<Arc<crate::cors::Cors>>) -> Result<Lease, Refused> {
         crate::process::note_activity();
         let reject = |error: EsError| Rejected { error, dialect: Dialect::Elasticsearch };
         let presented;
@@ -1831,10 +1957,11 @@ impl Node {
             Origin::Internal => req.header(search_es::remote::links::REMOTE_ACCESS_HEADER).map(str::to_string),
             _ => None,
         };
-        let native_ok = |loaded: &Loaded| {
-            native.as_deref().is_some_and(|h| match &link {
-                Some(access) => search_es::xpack::security::authenticate_native_link(&loaded.cluster, h, access).is_some(),
-                None => search_es::xpack::security::authenticate_native(&loaded.cluster, h).is_some(),
+        // A principal of the cluster's security, and with it the rate limit of a browser key.
+        let native_principal = |loaded: &Loaded| {
+            native.as_deref().and_then(|h| match &link {
+                Some(access) => search_es::xpack::security::authenticate_native_link(&loaded.cluster, h, access),
+                None => search_es::xpack::security::authenticate_native(&loaded.cluster, h),
             })
         };
         // Fast path: a loaded cluster checks against its shared description, no catalog read.
@@ -1843,14 +1970,17 @@ impl Node {
             if !spec.ip_allowlist.admits(origin) {
                 return Err(Refused::Filtered);
             }
+            *seen = spec.cors.clone();
             let mut via_native = false;
+            let mut key_limit = None;
             if let Some(c) = &claim
                 && !auth::verify(&spec, c)
             {
-                if !native_ok(&loaded) {
+                let Some(Ok(k)) = native_principal(&loaded).map(|p| browser_key(&loaded, &p)) else {
                     self.audit_refusal(name, spec.dialect, Some(&*loaded), req, &presented, Some(c));
                     return Err(failed().into());
-                }
+                };
+                key_limit = k;
                 via_native = true;
             }
             // Draining (SIGTERM): nothing new starts, so the requests in flight finish and the
@@ -1867,7 +1997,7 @@ impl Node {
                 } else {
                     lease.user = claim.as_ref().map(authenticated_user);
                 }
-                return self.admitted(lease, req).map_err(Refused::Rejected);
+                return self.admitted(lease, req, key_limit, origin);
             }
         }
         let spec = match self.catalog.lookup(name).await {
@@ -1878,6 +2008,7 @@ impl Node {
         if !spec.ip_allowlist.admits(origin) {
             return Err(Refused::Filtered);
         }
+        *seen = spec.cors.clone();
         let mut via_native = false;
         if let Some(c) = &claim
             && !auth::verify(&spec, c)
@@ -1900,9 +2031,13 @@ impl Node {
                 };
                 Refused::Rejected(Rejected { error, dialect })
             })?;
-            if via_native && !native_ok(&loaded) {
-                self.audit_refusal(name, dialect, Some(&*loaded), req, &presented, claim.as_ref());
-                return Err(failed().into());
+            let mut key_limit = None;
+            if via_native {
+                let Some(Ok(k)) = native_principal(&loaded).map(|p| browser_key(&loaded, &p)) else {
+                    self.audit_refusal(name, dialect, Some(&*loaded), req, &presented, claim.as_ref());
+                    return Err(failed().into());
+                };
+                key_limit = k;
             }
             match self.pin(loaded, dialect) {
                 Ok(mut lease) => {
@@ -1912,7 +2047,7 @@ impl Node {
                     } else {
                         lease.user = claim.as_ref().map(authenticated_user);
                     }
-                    return self.admitted(lease, req).map_err(Refused::Rejected);
+                    return self.admitted(lease, req, key_limit, origin);
                 }
                 Err(()) => tokio::task::yield_now().await,
             }
@@ -1951,6 +2086,7 @@ impl Node {
             native_auth: None,
             link: None,
             since: None,
+            browser: None,
         };
         if lease.loaded.closed.load(Ordering::SeqCst) {
             // Unloaded (or being unloaded) under us: the lease's drop uncounts it.
@@ -1965,14 +2101,15 @@ impl Node {
         Ok(lease)
     }
 
-    /// Applies the cluster's request rate to a pinned request.
-    fn admitted(&self, lease: Lease, req: &EsRequest) -> Result<Lease, Rejected> {
+    /// Applies the cluster's request rate to a pinned request, then a browser key's own
+    /// (`key`, per key and per client address; roll's own requests aren't counted).
+    fn admitted(&self, mut lease: Lease, req: &EsRequest, key: Option<(String, crate::browser::KeyLimit)>, origin: Origin) -> Result<Lease, Refused> {
         let rate = lease.loaded.rate.lock();
         if let Some(r) = &*rate
             && !r.try_take()
         {
             Lease::refused(&lease.loaded, req);
-            return Err(Rejected {
+            return Err(Refused::Rejected(Rejected {
                 error: EsError::too_many_requests(format!(
                     "rejected execution of REST request [{} {}]: cluster [{}] exceeds its rate of [{}] requests per second",
                     req.method,
@@ -1981,9 +2118,45 @@ impl Node {
                     r.rate()
                 )),
                 dialect: lease.dialect,
-            });
+            }));
         }
         drop(rate);
+        if let Some((id, limit)) = key {
+            let ip = match origin {
+                Origin::Client(ip) => Some(ip),
+                Origin::Internal => return Ok(lease),
+                Origin::Unknown => None,
+            };
+            let ceiling = lease.loaded.spec().browser_per_minute.unwrap_or(crate::browser::DEFAULT_CLUSTER_PER_MINUTE);
+            if let Err(retry_after) = lease.loaded.browser.check(&id, ip, limit, ceiling, 1) {
+                Lease::refused(&lease.loaded, req);
+                let error = EsError::too_many_requests(format!(
+                    "rejected execution of REST request [{} {}]: API key [{id}] exceeds its rate of [{}] requests per minute{}",
+                    req.method,
+                    req.uri,
+                    limit.per_minute,
+                    limit.per_ip_per_minute.map(|n| format!(" and [{n}] per client address")).unwrap_or_default()
+                ));
+                return Err(Refused::Throttled(Rejected { error, dialect: lease.dialect }, retry_after));
+            }
+            // Browser requests running at once: the key's own cap, and a quarter of the cluster's
+            // permits (at least 4) but never more than half, so the owner's clients always find
+            // one (a cluster of one permit runs no browser request).
+            let mif = lease.loaded.spec().max_in_flight as u64;
+            let per_cluster = (mif / 4).max(4).min(mif / 2);
+            if !lease.loaded.browser.enter(&id, limit.max_concurrent, per_cluster) {
+                // Refused: the token its admission took goes back.
+                lease.loaded.browser.refund(&id, ip, limit, 1);
+                Lease::refused(&lease.loaded, req);
+                let error = EsError::too_many_requests(format!(
+                    "rejected execution of REST request [{} {}]: API key [{id}] already runs [{}] requests at once, or the cluster's browser keys [{per_cluster}]",
+                    req.method, req.uri, limit.max_concurrent
+                ));
+                return Err(Refused::Throttled(Rejected { error, dialect: lease.dialect }, 1));
+            }
+            let max_body = browser_body_cap(&lease.loaded, &id);
+            lease.browser = Some(BrowserCharge { id, max_body });
+        }
         Ok(lease)
     }
 

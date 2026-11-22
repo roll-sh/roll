@@ -37,7 +37,7 @@ import { PreviewsOverlay } from "./previews-overlay";
 const btn =
   "flex h-7 items-center gap-1.5 rounded-md border border-line-2 bg-raised px-2.5 text-[12px] font-medium inset-shadow-highlight transition-colors hover:border-line-3";
 
-export type ProjectTab = "canvas" | "previews" | "logs" | "metrics";
+export type ProjectTab = "canvas" | "previews" | "logs" | "metrics" | "members";
 
 /**
  * `/dashboard/projects/$id`: the project's resources on a canvas, or (`children`, the route's
@@ -165,14 +165,14 @@ function Project({ ws, project, tab, children }: { ws: WorkspaceState; project: 
             </span>
           )}
           <nav aria-label="Project views" className="flex h-7 items-center rounded-md border border-line-2 bg-canvas p-0.5">
-            {(["canvas", "previews", "logs", "metrics"] as const).map((t) => (
+            {(["canvas", "previews", "logs", "metrics", "members"] as const).map((t) => (
               <Link
                 key={t}
                 href={`/dashboard/projects/${encodeURIComponent(project.id)}${t === "canvas" ? "" : `/${t}`}`}
                 aria-current={tab === t ? "page" : undefined}
                 className={`flex h-full items-center rounded-[5px] px-2 text-[12px] font-medium transition-colors ${tab === t ? "bg-panel-3 text-fg" : "text-muted hover:text-fg"}`}
               >
-                {t === "canvas" ? "Canvas" : t === "previews" ? "Previews" : t === "logs" ? "Logs" : "Metrics"}
+                {t === "canvas" ? "Canvas" : t === "previews" ? "Previews" : t === "logs" ? "Logs" : t === "metrics" ? "Metrics" : "Members"}
               </Link>
             ))}
           </nav>
@@ -310,7 +310,7 @@ function Project({ ws, project, tab, children }: { ws: WorkspaceState; project: 
           ) : null}
         </Inspector>
       </div>
-      <footer className="absolute inset-x-0 bottom-0 flex h-7 items-center gap-4 border-t border-line bg-canvas px-3 font-mono text-[10.5px] text-subtle">
+      <footer className="absolute inset-x-0 bottom-0 flex h-7 items-center gap-4 overflow-hidden border-t border-line bg-canvas px-3 font-mono text-[10.5px] whitespace-nowrap text-subtle">
         <span>
           {project.resources.length} {project.resources.length === 1 ? "resource" : "resources"}
         </span>
@@ -325,7 +325,7 @@ function Project({ ws, project, tab, children }: { ws: WorkspaceState; project: 
           only you
         </span>
         <span className="ml-auto">
-          {usd(spend.usd)} this month · ≈ {usd(projectMonth(spend.usd, month))} by {month.end}
+          {usd(spend.usd)} this month<span className="max-sm:hidden"> · ≈ {usd(projectMonth(spend.usd, month))} by {month.end}</span>
         </span>
       </footer>
       <DeployChanges ws={ws} project={project} open={reviewing} onClose={() => setReviewing(false)} />

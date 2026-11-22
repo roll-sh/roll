@@ -93,6 +93,11 @@ impl XpackState {
         self.families.values().all(|f| f.is_empty())
     }
 
+    /// The names of the families it holds.
+    pub fn family_names(&self) -> impl Iterator<Item = &String> {
+        self.families.keys()
+    }
+
     /// The form stored with the cluster state.
     pub fn to_stored(&self) -> Value {
         let mut m = Map::new();
