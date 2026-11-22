@@ -791,7 +791,7 @@ or a raw body with `{{query}}`. Each hit shows its rank, score, `_id`, highlight
 `semantic` highlighter's chunks for `semantic_text`), how it moved between A and B, and an Explain
 tree (`_explain`; a `semantic` query, which `_explain` can't rewrite, is explained by a `_search`
 limited to that id; a hybrid hit shows each part). Either side copies as curl, Python or JavaScript
-with the key from `$ROLL_SEARCH_API_KEY` (OpenSearch-flavor clusters: OpenSearch's clients and
+with the key from `$ELASTICSEARCH_API_KEY`, as the guides export it (OpenSearch-flavor clusters: OpenSearch's clients and
 `$OPENSEARCH_USERNAME`/`$OPENSEARCH_PASSWORD`).
 
 ## Audit log
@@ -1302,12 +1302,11 @@ deterministic (#396).
    compares retrieval only. Chat over hits with citations, the code for a RAG app, and a chat API
    (OpenSearch's processor shape on OpenSearch-flavor clusters). Design: [rag.md](rag.md).
 12. **The first query in a minute** (the guides landed in #604; sample data and a guided first
-   query landed (feature/search-first-query): one click loads 1,000 generated products or 2,000 ECS log lines on the
+   query landed (#658): one click loads 1,000 generated products or 2,000 ECS log lines on the
    Overview of a cluster with no indices or from the Indices tab, then three queries run in place
-   with Open in Console, copy as curl, JavaScript or Python, and a link to the keys panel). Left: a
-   key made inline in that panel (today it links to Settings → API keys, and the snippets read
-   `$ROLL_SEARCH_API_KEY` while the guides export `ELASTICSEARCH_API_KEY`); a sample dataset for
-   RAG (passages with `semantic_text` on E5); and what writing the guides found: an API key's
+   with Open in Console, copy as curl, JavaScript or Python reading `$ELASTICSEARCH_API_KEY` as the
+   guides do, and a link to the keys panel). Left: a key made inline in that panel (today it links
+   to Settings → API keys); a sample dataset for RAG (passages with `semantic_text` on E5); and what writing the guides found: an API key's
    `encoded` value works only at the cluster's own host, so clients behind a shared address
    re-encode it as `<id>@<cluster>:<key>`; a `data` key can't post click events, so an app tracking
    clicks needs a second key; a `semantic_text` field with no `inference_id` fails, because its
