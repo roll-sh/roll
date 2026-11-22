@@ -613,7 +613,7 @@ pub enum AppsCmd {
         instance: Option<String>,
     },
     /// The environment's private network into your own (Cloud Run's VPC egress, Fly's
-    /// WireGuard): `--secret roll://production/WG --route db.corp.internal=10.0.3.4:5432` sets it
+    /// WireGuard): `--secret roll://production/WG --route db.acme.corp=10.0.3.4:5432` sets it
     /// (the WireGuard config is the secret, read as you; each route a name the app connects to
     /// and a host:port in your network), `--remove` takes it away; alone, it shows it. Admin.
     PrivateNetwork {

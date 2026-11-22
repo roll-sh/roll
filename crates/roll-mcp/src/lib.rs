@@ -104,7 +104,32 @@ pub struct Config {
     pub products: Vec<String>,
     /// Where the operator's tool calls are audited (a grant's are audited by the gate).
     pub access: Option<Arc<roll_access::Access>>,
+    /// The operator's inspector, if one is set (docs/mcp.md, "Inspector"): every tool call and its
+    /// result go past it.
+    pub inspector: Option<Arc<dyn Inspector>>,
 }
+
+/// The operator's inspector (docs/mcp.md, "Inspector"), as Google Cloud's MCP servers send calls
+/// and results through Model Armor: a scanner of the operator's own that sees each tool call before
+/// it runs and its result before the model does, and says to let it through, to block it, or to
+/// add a note. rolld's is an HTTP endpoint (`ROLL_MCP_INSPECTOR_URL`); a timeout or a failure
+/// answers as the operator chose (open or closed).
+pub trait Inspector: Send + Sync {
+    fn inspect(&self, look: Value) -> Pin<Box<dyn Future<Output = Verdict> + Send>>;
+}
+
+/// What the inspector says.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Verdict {
+    Allow,
+    /// Not run (a call), or not shown (a result), with why.
+    Block(String),
+    /// Shown with this note first (a result), or run with it in the audit (a call).
+    Note(String),
+}
+
+/// What of a result the inspector reads: its text and structured answer, at most this much.
+const INSPECT_MAX: usize = 256 << 10;
 
 #[derive(Clone)]
 struct Mcp {
@@ -517,6 +542,7 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
             // A method the revision doesn't have is a 404 (with its JSON-RPC error), so a client
             // tells it from a server that has no MCP endpoint here.
             Some(r) if modern && r["error"]["code"] == -32601 => (StatusCode::NOT_FOUND, Json(r)).into_response(),
+            Some(r) if modern && r["error"]["code"] == modern::HEADER_MISMATCH => (StatusCode::BAD_REQUEST, Json(r)).into_response(),
             Some(r) if !batch => Json(r).into_response(),
             last => {
                 responses.extend(last);
@@ -814,6 +840,7 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                 // A 2026-07-28 client may run code against the tools: it gets their answers' shape.
                 if ctx.modern && !ctx.search {
                     output::attach(&mut tools);
+                    modern::annotate(&mut tools);
                 }
                 rpc_result(id, json!({ "tools": tools }))
             }
@@ -835,6 +862,8 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                     rpc_result(id, search::find(&ctx.tools(), &args))
                 } else if !args.is_object() {
                     rpc_error(id, -32602, "arguments must be an object")
+                } else if let Some(Err(why)) = (ctx.modern && !ctx.search).then(|| ctx.usable_tools().into_iter().find(|t| t["name"] == name.as_str()).map_or(Ok(()), |t| modern::check_params(&t, &args, &ctx.headers))) {
+                    rpc_error(id, modern::HEADER_MISMATCH, format!("Header mismatch: {why}"))
                 } else if ctx.readonly && !tool_names(ctx).contains(&name) {
                     rpc_result(id, json!({ "content": [{ "type": "text", "text": format!("{name} isn't read-only, and this connection is (?readonly=1): connect without it to change things") }], "isError": true }))
                 } else if ctx.pick.picks() && !ctx.pick.keeps(&name) {
@@ -1275,6 +1304,19 @@ async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: bool) -> Option
     }
     // The gate decides (and audits) every call a grant makes; the MCP layer refuses nothing itself.
     let mut outside: &[&str] = &[];
+    // The operator's inspector sees the call before it runs (a completion's quiet probe excepted).
+    let inspector = ctx.m.config.inspector.clone().filter(|_| !quiet);
+    if let Some(i) = &inspector {
+        let who = match &ctx.principal {
+            Principal::Grant(g) => json!({ "grant": g.id.to_string(), "name": g.name.to_string() }),
+            Principal::Operator => json!({ "operator": true }),
+        };
+        let look = json!({ "phase": "call", "tool": name, "arguments": roll_access::redact::value(&args, name.split('_').next().unwrap_or("")), "connection": who, "client": ctx.client.as_deref() });
+        if let Verdict::Block(why) = i.inspect(look).await {
+            tracing::info!(tool = name, "the operator's inspector refused a call");
+            return Some(tool_error(format!("not run: the operator's inspector refused this call ({why})"), json!({ "refused": "inspector", "reason": why })));
+        }
+    }
     let (mut result, route) = if let Some(t) = tools::all().iter().find(|t| t.name == name) {
         outside = t.outside;
         (run(ctx, t, &args, ext).await, format!("{} {}", t.method, t.path))
@@ -1304,6 +1346,31 @@ async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: bool) -> Option
         for c in content.iter_mut().filter(|c| c["type"] == "text") {
             if let Some(t) = c["text"].as_str() {
                 c["text"] = Value::String(visible(t));
+            }
+        }
+    }
+    // And the result before the model reads it: withheld, or shown with its note first.
+    if let Some(i) = &inspector {
+        let text: String = result["content"].as_array().into_iter().flatten().filter_map(|c| c["text"].as_str()).collect::<Vec<_>>().join("\n");
+        let structured = serde_json::to_string(&result["structuredContent"]).unwrap_or_default();
+        // A credential a tool reveals never leaves roll for the scanner: what it answered isn't sent.
+        let reveals = tools::all().iter().find(|t| t.name == name).is_some_and(|t| t.actions().contains(&Action::Reveal));
+        let look = if reveals {
+            json!({ "phase": "result", "tool": name, "isError": result["isError"] == true, "text": Value::Null, "structuredContent": Value::Null, "withheld": "a revealed credential" })
+        } else {
+            json!({ "phase": "result", "tool": name, "isError": result["isError"] == true, "text": cut(text, false), "structuredContent": if structured.len() <= INSPECT_MAX { result["structuredContent"].clone() } else { Value::Null } })
+        };
+        match i.inspect(look).await {
+            Verdict::Allow => {}
+            Verdict::Block(why) => {
+                tracing::info!(tool = name, "the operator's inspector withheld a result");
+                result = tool_error(format!("withheld: the operator's inspector found this result unsafe to show ({why})"), json!({ "withheld": "inspector", "reason": why }));
+            }
+            Verdict::Note(note) => {
+                result["_meta"]["roll/inspector"] = json!(note);
+                if let Some(content) = result["content"].as_array_mut() {
+                    content.insert(0, json!({ "type": "text", "text": format!("Note from the operator's inspector: {note}") }));
+                }
             }
         }
     }

