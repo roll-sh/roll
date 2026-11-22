@@ -1444,9 +1444,10 @@ impl apps_control::integrations::SecretSource for ForApps {
             let ask = roll_secrets::placeholders::Ask { minutes: None, maker: Some(&maker) };
             let v = match secrets.values_with_placeholders(&project, &env, "/", &closed_consumer(&project, &env), false, ask, &caller) {
                 Ok(v) => v,
-                // Its maker can't reveal here now: the keys bound to hosts are withheld (never
-                // their values instead), the rest read as they would be, and said.
-                Err(roll_secrets::Error::Forbidden(why)) => {
+                // Its maker can't reveal here now (`maker_unreachable`: demoted, removed, a token
+                // revoked or narrowed): the keys bound to hosts are withheld (never their values
+                // instead), the rest read as they would be, and said. Any other refusal surfaces.
+                Err(roll_secrets::Error::MakerUnreachable(why)) => {
                     let bound: std::collections::HashSet<String> = secrets.secrets(&project, &env, "/", &caller)?.into_iter().filter(|s| s.hosts.is_some()).map(|s| s.key).collect();
                     let v = secrets.values_for(&project, &env, "/", true, Some(&format!("app:{service}")), false, &caller)?;
                     let sensitive: std::collections::HashSet<String> = v.sensitive.into_iter().collect();

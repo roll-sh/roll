@@ -951,6 +951,8 @@ impl Apps {
         if let Ok(stored) = self.db(move |s| s.deployment(&did)).await {
             dep.plan = stored.plan;
         }
+        // An environment with data of its own: a branch of each database linked since.
+        self.ensure_branches(&svc, &env.name).await.map_err(|e| anyhow::anyhow!("data: {e:#}"))?;
         // A static site: its files out of the image, so they're served without an instance.
         if dep.plan.as_ref().is_some_and(|p| p["start"] == apps_build::STATIC_START)
             && dep.run.kind == RunType::Web
