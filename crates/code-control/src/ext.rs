@@ -104,6 +104,14 @@ pub trait SecretEnv: Send + Sync {
         let _ = (by, source);
         Err(Refused("roll secrets can't tell whether its copier still may".into()).into())
     }
+    /// `environment` of `project` (a [`Revealed`]'s) read again as `by` (its copier) may now, for
+    /// `consumer` (`sandbox:<id>`), as code nobody vetted reads it: asked at each create and start
+    /// of a sandbox, so a rotated value reaches it. [`Refused`] when they may no longer reveal it;
+    /// the check and the read are one call.
+    async fn reveal_as(&self, by: &str, project: &str, environment: &str, consumer: &str) -> anyhow::Result<Vec<(String, String)>> {
+        let _ = (by, project, environment, consumer);
+        Err(Refused("roll secrets can't read as its copier".into()).into())
+    }
     /// (candidate index, key, environment, folder) for every secret, in any environment of the
     /// projects that have repo `owner/name` on their canvas, whose value is one of `candidates`
     /// (matched by fingerprint; values never come back). Empty for a repo on no project's canvas.

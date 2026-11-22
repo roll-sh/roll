@@ -2059,6 +2059,25 @@ impl code_control::SecretEnv for ForCode {
         .await?
     }
 
+    /// As roll secrets reads for `by` now (`values_as_maker`: the check and the read in one), what a
+    /// sandbox it copied into starts with. Never a protected environment or an unresolved reference.
+    async fn reveal_as(&self, by: &str, project: &str, environment: &str, consumer: &str) -> anyhow::Result<Vec<(String, String)>> {
+        let (secrets, _) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting"))?;
+        let (by, project, environment, consumer) = (by.to_string(), project.to_string(), environment.to_string(), consumer.to_string());
+        tokio::task::spawn_blocking(move || {
+            let (slug, path) = environment.split_once(':').unwrap_or((&environment, "/"));
+            let v = secrets.values_as_maker(&by, &project, slug, path, &consumer).map_err(|e| match e {
+                roll_secrets::Error::Forbidden(m) | roll_secrets::Error::NotFound(m) | roll_secrets::Error::MakerUnreachable(m) => code_control::Refused(m).into(),
+                e => anyhow::Error::from(e),
+            })?;
+            if let Some(p) = v.problems.first() {
+                anyhow::bail!("{} of {slug} didn't resolve ({}: {})", v.problems.len(), p.key, p.problem);
+            }
+            Ok(v.values.into_iter().map(|(k, v)| (k, v.expose().to_string())).collect())
+        })
+        .await?
+    }
+
     /// The first project with the repo on its canvas that may reach it and has validity checks on
     /// asks (and keeps, and audits, as `roll:code`); none: nothing is asked.
     async fn validity(&self, repo: &str, found: Vec<(String, Option<String>)>) -> anyhow::Result<Vec<code_control::model::CredentialValidity>> {

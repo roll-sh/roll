@@ -947,13 +947,18 @@ no command for it and no terminal output. "starting" is a stopped sandbox on its
 or start); its machine comes online once its daemon connects. Asleep, it isn't billed.
 
 Copied secrets go to its code only while `secrets_by` may reveal them. Only where they came from
-(project, environment and which variables) is kept, and roll secrets is asked again before each
-create and start (a wake too). Once the copier can't reach the project or reveal the environment
+(project, environment and which variables) is kept, never the values: they're read again from roll
+secrets as `secrets_by` may now at its create and at each start (a wake too), so a value rotated
+since reaches it at its next start (the variables it was made with; one deleted from the
+environment since is unset). Once the copier can't reach the project or reveal the environment
 (removed, demoted, a token revoked), the sandbox starts without those variables, its home and the
-rest of its env kept (`secrets_dropped` says why), on backends that can (docker: a new container on
-the same home volume; fargate: what it starts with is kept without them). agent37 can't change an
-instance's env, and a sandbox made before the source was kept doesn't say which variables they
-are, so either one isn't started at all: its `error` says so, and it's deleted and made again.
+rest of its env kept (`secrets_dropped` says why, and they stay out). Every backend changes what it
+starts with in place of what it made: docker a new container on the same home volume (or the same
+one when nothing changed), fargate what it keeps for its next task, agent37 the instance's env
+(`PATCH`, a `null` for each variable taken out) before it starts it, its disk kept. A sandbox made
+before the source was kept doesn't say which variables they are: it keeps what it was made with
+while its copier can still act, isn't started once they can't (its `error` says so), and gets
+fresh reads once it's deleted and made again.
 
 ### Automations
 

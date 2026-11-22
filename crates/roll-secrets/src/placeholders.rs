@@ -546,6 +546,25 @@ impl Secrets {
         }
     }
 
+    /// `slug:path` of `project` read again as `maker` (who copied it into code nobody vetted: a
+    /// sandbox's env) may now, for `consumer` (`sandbox:<id>`): the check of
+    /// [`Secrets::maker_may_reveal`] and the read in one call, so a rotated value reaches it and a
+    /// revoked one doesn't. Read untrusted and not as a runtime (no protected environment, no
+    /// sensitive key, no dynamic credential), audited as `<consumer> for <maker>`. A maker who
+    /// can't any more is `MakerUnreachable`; one who may not reveal it, `Forbidden`.
+    pub fn values_as_maker(&self, maker: &str, project: &str, slug: &str, path: &str, consumer: &str) -> Result<crate::Values> {
+        let at = names::path(path)?;
+        match self.maker_may(maker, project, slug, &at, true) {
+            Ok(()) => {}
+            Err(Refusal::Failed(e)) => return Err(Error::Internal(e)),
+            Err(Refusal::MakerUnreachable(m)) => return Err(Error::MakerUnreachable(m)),
+            Err(r) => return Err(Error::Forbidden(r.to_string())),
+        }
+        let audited = format!("{consumer} for {maker}");
+        let caller = self.untrusted(project, &self.maker_caller(maker, &audited)?.not_runtime())?;
+        self.values(project, slug, &at, true, Some(&audited), &caller)
+    }
+
     /// Whether `maker` can still act at all (a person who can sign in, a token that lives, the
     /// operator), for what was copied before roll kept where it came from; a no is `Forbidden`.
     pub fn maker_acts(&self, maker: &str) -> Result<()> {
