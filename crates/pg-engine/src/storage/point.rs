@@ -602,7 +602,7 @@ fn newest_above_l1(view: &View, key: &[u8], seek: &[u8], held: &mut [Held], pos:
 }
 
 fn mem_get(m: &Memtable, key: &[u8], seek: &[u8]) -> Option<Version> {
-    if m.is_empty() || !m.may_hold(key) {
+    if m.is_empty() || !m.may_hold_key(key) {
         return None;
     }
     m.map

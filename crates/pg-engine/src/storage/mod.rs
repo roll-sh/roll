@@ -252,17 +252,61 @@ pub struct Memtable {
     /// keys leaves the skip list alone (an index join's lookups of the tables a load or
     /// ANALYZE wrote nothing to, with the catalog's writes in the memtable).
     prefixes: hot::PrefixBits,
+    /// The user keys it holds (`KeyFilter`): a point read of a key it has no version of
+    /// leaves the skip list alone.
+    keys: KeyFilter,
     /// WAL file holding this memtable's commits.
     wal_seq: u64,
 }
 
+/// A memtable's user keys as a filter: a 64-bit word a key, three of its bits set. A big
+/// table's one-row UPDATE reads its row twice (the scan, the recheck after the row lock),
+/// each a search through the skip list's levels, a key compare at each node it passes, for a
+/// key the memtable almost never holds (a few thousand rows written of millions). It never
+/// says no for a key inserted: set before the entry goes in, so a reader that can see the
+/// entry sees its bits. Made at the first insert (an idle database's memtable holds none).
+struct KeyFilter {
+    words: std::sync::OnceLock<Box<[AtomicU64]>>,
+    mask: usize,
+}
+
+impl KeyFilter {
+    /// For a memtable of `bytes`: about 8 bits a key at its most entries (~64 bytes each, a
+    /// deletion's), 30 at a one-row UPDATE's.
+    fn new(bytes: usize) -> Self {
+        let n = (bytes / 512).next_power_of_two().clamp(64, 1 << 20);
+        KeyFilter { words: std::sync::OnceLock::new(), mask: n - 1 }
+    }
+
+    /// The word's bits for hash `h` (its word from the low bits).
+    #[inline]
+    fn bits(h: u64) -> u64 {
+        1 << (h >> 58) | 1 << ((h >> 52) & 63) | 1 << ((h >> 46) & 63)
+    }
+
+    fn add(&self, h: u64) {
+        let words = self.words.get_or_init(|| (0..=self.mask).map(|_| AtomicU64::new(0)).collect());
+        words[h as usize & self.mask].fetch_or(Self::bits(h), Ordering::Relaxed);
+    }
+
+    #[inline]
+    fn may_hold(&self, h: u64) -> bool {
+        self.words.get().is_none_or(|w| {
+            let b = Self::bits(h);
+            w[h as usize & self.mask].load(Ordering::Relaxed) & b == b
+        })
+    }
+}
+
 impl Memtable {
-    fn new(wal_seq: u64) -> Self {
+    /// A memtable taking `bytes` before it is frozen (its key filter's size).
+    fn new(wal_seq: u64, bytes: usize) -> Self {
         Memtable {
             map: SkipMap::new(),
             size: AtomicUsize::new(0),
             max_ts: AtomicU64::new(0),
             prefixes: hot::PrefixBits::default(),
+            keys: KeyFilter::new(bytes),
             wal_seq,
         }
     }
@@ -273,8 +317,10 @@ impl Memtable {
         key.extend_from_slice(user);
         key.extend_from_slice(&(!ts).to_be_bytes());
         let n = key.len() + value.as_ref().map(|v| v.len()).unwrap_or(0) + 48;
-        // (Before the entry: a reader whose snapshot sees the commit sees its relation.)
+        // (Before the entry: a reader whose snapshot sees the commit sees its relation, and
+        // its key.)
         self.prefixes.add(user);
+        self.keys.add(sst::hash64_2(user));
         self.map.insert(key, value);
         self.size.fetch_add(n, Ordering::Relaxed);
         self.max_ts.fetch_max(ts, Ordering::Relaxed);
@@ -288,10 +334,11 @@ impl Memtable {
         self.map.is_empty()
     }
 
-    /// Whether it may hold a version of `key` (of its relation, `prefixes`).
+    /// Whether it may hold a version of `key`: of its relation (`prefixes`), then by its key
+    /// filter.
     #[inline]
-    pub(super) fn may_hold(&self, key: &[u8]) -> bool {
-        self.prefixes.may_hold(key)
+    pub(super) fn may_hold_key(&self, key: &[u8]) -> bool {
+        self.prefixes.may_hold(key) && self.keys.may_hold(sst::hash64_2(key))
     }
 
     /// Whether it may hold a key in [start, end): false when the range lies in one relation
@@ -672,7 +719,7 @@ impl Store {
             .collect();
         barriers.sort_unstable();
         barriers.dedup();
-        let groups: Vec<Memtable> = (0..=barriers.len()).map(|_| Memtable::new(replay_seq)).collect();
+        let groups: Vec<Memtable> = (0..=barriers.len()).map(|_| Memtable::new(replay_seq, opts.memtable_bytes)).collect();
         let mut last_ts = manifest.last_ts.max(manifest.flushed_ts);
         last_ts = last_ts.max(barriers.last().copied().unwrap_or(0));
         let mut replayed = 0usize;
@@ -689,7 +736,7 @@ impl Store {
             })?;
             last_ts = last_ts.max(max);
         }
-        let mem = Arc::new(Memtable::new(replay_seq));
+        let mem = Arc::new(Memtable::new(replay_seq, opts.memtable_bytes));
         // (Frozen sources go newest first; flushing takes them oldest first.)
         let imm: Vec<Frozen> = groups
             .into_iter()
@@ -1064,7 +1111,7 @@ impl View {
     /// `of_files`, with range deletions (a transaction's own, at their journal places).
     pub fn of_files_with(files: Vec<Arc<SstReader>>, rdels: Vec<rdel::RangeDel>) -> Arc<View> {
         Arc::new(View {
-            mem: Arc::new(Memtable::new(0)),
+            mem: Arc::new(Memtable::new(0, 0)),
             imm: Vec::new(),
             l0: files,
             l1: Vec::new(),
@@ -1939,7 +1986,7 @@ impl Store {
         let mut v = self.view.write();
         if v.mem.is_empty() {
             // Nothing to freeze; just switch WAL files.
-            let mem = Arc::new(Memtable::new(seq));
+            let mem = Arc::new(Memtable::new(seq, self.opts.memtable_bytes));
             *v = Arc::new(View {
                 mem,
                 imm: v.imm.clone(),
@@ -1952,7 +1999,7 @@ impl Store {
         let mut imm = vec![Frozen::Mem(v.mem.clone())];
         imm.extend(v.imm.iter().cloned());
         *v = Arc::new(View {
-            mem: Arc::new(Memtable::new(seq)),
+            mem: Arc::new(Memtable::new(seq, self.opts.memtable_bytes)),
             imm,
             l0: v.l0.clone(),
             l1: v.l1.clone(),
