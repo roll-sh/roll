@@ -34,6 +34,7 @@
 //! everywhere. It sends allowed requests on with [`Operator`] and a [`Grant`] in their extensions.
 
 pub mod credentials;
+pub mod lockdown;
 pub mod roles;
 pub mod scope;
 pub mod totp;

@@ -26,7 +26,8 @@ export function ConnectAgent({
   const [name, setName] = useState("agent");
   const [making, setMaking] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const url = codeApi.mcpUrl();
+  const [lockdown, setLockdown] = useState(false);
+  const url = lockdown ? `${codeApi.mcpUrl()}?lockdown=1` : codeApi.mcpUrl();
   // An open local daemon needs no token at all; otherwise the snippet carries one (or a placeholder).
   const open = info ? !info.auth.required : false;
   const shown = token ?? (open ? null : undefined);
@@ -56,6 +57,10 @@ export function ConnectAgent({
         <p className="text-[12px] text-subtle">
           roll code is an MCP server: agents search and read code, claim work, open changes, review and land, without a checkout.
         </p>
+        <label className="flex items-center gap-2 text-[12px] text-muted">
+          <input type="checkbox" checked={lockdown} onChange={(e) => setLockdown(e.target.checked)} className="accent-accent" />
+          Lockdown: what people who can't push to a repo wrote (issues anyone opened, pull requests from forks, their comments) never reaches the agent
+        </label>
         <div className="relative rounded-lg border border-line bg-bg">
           <pre className="overflow-x-auto px-3 py-2 pr-9 font-mono text-[11px] leading-5">{snippet}</pre>
           <span className="absolute top-1.5 right-1.5">

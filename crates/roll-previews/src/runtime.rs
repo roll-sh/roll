@@ -746,6 +746,10 @@ impl Runtime {
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
         info!(%preview, %service, %addr, "preview service running");
+        // A preview waiting on this start (its health check) goes on now, not at its next poll.
+        if let Some(e) = self.engine.get().and_then(Weak::upgrade) {
+            e.service_up(preview);
+        }
         Ok(addr)
     }
 

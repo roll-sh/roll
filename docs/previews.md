@@ -2366,13 +2366,23 @@ Ranked by what a person notices first. Done so far:
 1. **Roll secrets' response scrub wired into `roll-intercept`, in review** (stacked on roll
    secrets' #628): a response that echoes a swapped key is stopped (a 502, or the connection cut
    before those bytes), the placeholder ended and the echo in the activity; roll apps' closed
-   environments get it through the same port. Live-checked by `scripts/preview-intercept.sh`.
-2. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+   environments get it through the same port. Live-checked by `scripts/preview-intercept.sh`, which also gets a step for roll secrets' `maker_unreachable`
+   (#582, landed): the rules' saver loses access, the preview says "placeholders off" and its old
+   placeholder is refused.
+2. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
+   longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
+   0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
+   (3.3 s in its log) and its masking, which needs that compute up: pg-control's to shorten.
+3. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-3. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+4. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-4. **Watch: pg-control's recovery to a time seconds old** (unowned).
+5. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-22: how each head came up, step by step (#641: the preview's timeline on its record, sheet and every live run), and a preview waiting on a starting service going on as soon as it's up (#646: the health checks went from 20.2 s to 6.1 s in the live run; 13 s had been a poll's wait).
+
+Checked 2026-11-22: every credential a preview's code holds is its branch's own. The live run now proves it for the bucket (the preview's key lists its branch and is refused on production's bucket), beside search's data-only key (#607); Postgres gets a role of its own, Redis, NoSQL and queues their branch's own login, streams and tasks a key of their own.
 
 Dropped 2026-11-21: reusing main's build for a service a change's first deploy doesn't touch. A cached rebuild of an untouched service costs a few seconds of CPU and runs at once with the changed service's build, which sets the wall time (two roll apps services, a push with cached builds: live in 4.2 s, see step 6 above), so a person would see no difference.
 

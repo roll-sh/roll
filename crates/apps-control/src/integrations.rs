@@ -141,10 +141,12 @@ pub trait SecretSource: Send + Sync {
     async fn end_intercept(&self, _project: &str, _env: &str) -> anyhow::Result<()> {
         Ok(())
     }
-    /// Whether `who` may see the project's secrets in `env` in the clear, by roll secrets' own
-    /// rules (protected environments, a token's scope): `…/variables/values` answers them only
-    /// then. No: the safe default.
-    async fn may_reveal(&self, _who: Asker<'_>, _project: &str, _env: &str) -> bool {
+    /// Whether `who` may see what `ask` names of `service`'s variables from roll secrets in `env`
+    /// in the clear: each key resolves for them read as roll secrets' own reveal would read it
+    /// (the environment's base, imports and references only as far as they may reveal; a token's
+    /// scope; protected environments), and so does each `roll://` reference. `…/variables/values`,
+    /// a shell and a job's output answer only then, never in part. No: the safe default.
+    async fn may_reveal(&self, _who: Asker<'_>, _project: &str, _env: &str, _service: &str, _ask: Reveal<'_>) -> bool {
         false
     }
     /// What the project's secrets in `env` are, as a digest with no value in it (roll secrets'
@@ -387,6 +389,17 @@ pub struct Asker<'a> {
     pub grant: Option<&'a roll_auth::Grant>,
 }
 
+/// What a reveal would show of the variables roll secrets gave ([`SecretSource::may_reveal`]).
+#[derive(Clone, Copy, Default)]
+pub struct Reveal<'a> {
+    /// Keys of the environment's secrets (at its root, as the service reads them).
+    pub keys: &'a [String],
+    /// `roll://` references the service's own variables hold.
+    pub refs: &'a [String],
+    /// Sensitive values too: a shell or a job's output shows the container's environment.
+    pub sensitive: bool,
+}
+
 /// No project secrets (until roll secrets is on this node): services use their own variables.
 pub struct NoSecrets;
 
@@ -419,11 +432,11 @@ pub trait Resources: Send + Sync {
         Ok(())
     }
     /// A branch of the linked resource for one environment (`data: "branch"`; Railway's
-    /// environments' own databases): its own copy of the resource's data, made from its main (or
-    /// the one already there by that name: an environment's services share it), its variables
-    /// as the link's (`DATABASE_URL`…) and `kept` what [`Resources::unbranch`] deletes. None:
-    /// this kind has no branches.
-    async fn branch(&self, _kind: LinkKind, _ref: &str, _env: &str) -> anyhow::Result<Option<Minted>> {
+    /// environments' own databases), named `name` (apps' own, unguessable): its own copy of the
+    /// resource's data with credentials of its own (never the resource's own login), its
+    /// variables as the link's (`DATABASE_URL`…) and `kept` what [`Resources::unbranch`] deletes.
+    /// None: this kind has no branches.
+    async fn branch(&self, _kind: LinkKind, _ref: &str, _name: &str) -> anyhow::Result<Option<Minted>> {
         Ok(None)
     }
     /// Delete what [`Resources::branch`] made, once no environment uses it.

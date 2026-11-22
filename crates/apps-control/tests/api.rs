@@ -211,13 +211,13 @@ impl apps_control::integrations::Resources for FakeResources {
         Ok(())
     }
 
-    /// A Postgres project's branch for an environment, by name (one an environment's services share).
-    async fn branch(&self, kind: apps_control::model::LinkKind, r#ref: &str, env: &str) -> anyhow::Result<Option<apps_control::integrations::Minted>> {
+    /// A Postgres project's branch named `name`, with a login of its own.
+    async fn branch(&self, kind: apps_control::model::LinkKind, r#ref: &str, name: &str) -> anyhow::Result<Option<apps_control::integrations::Minted>> {
         if kind != apps_control::model::LinkKind::Postgres {
             return Ok(None);
         }
-        BRANCHED.lock().push(format!("branch {ref} {env}"));
-        Ok(Some(apps_control::integrations::Minted { vars: vec![("DATABASE_URL".into(), format!("postgres://app:pw@db.roll.test:5432/{ref}-{env}"))], kept: format!("br_{ref}_{env}") }))
+        BRANCHED.lock().push(format!("branch {ref} {name}"));
+        Ok(Some(apps_control::integrations::Minted { vars: vec![("DATABASE_URL".into(), format!("postgres://branch:own@db.roll.test:5432/{ref}?branch={name}"))], kept: name.to_string() }))
     }
 
     async fn unbranch(&self, _kind: apps_control::model::LinkKind, _ref: &str, kept: &str) -> anyhow::Result<()> {
@@ -1689,11 +1689,23 @@ async fn an_environment_with_its_own_data_gets_a_branch_of_each_database() {
     assert_eq!(st, StatusCode::OK, "{e}");
     assert_eq!(e["data"], json!({"mode": "branch", "branches": [{"kind": "postgres", "ref": "main"}]}), "{e}");
     let (_, v) = call(&w.api, "GET", &format!("{base}/staging/variables/values"), None).await;
-    assert_eq!(v["DATABASE_URL"], "postgres://app:pw@db.roll.test:5432/main-staging", "{v}");
+    let url = v["DATABASE_URL"].as_str().unwrap_or_default().to_string();
+    assert!(url.starts_with("postgres://branch:own@db.roll.test:5432/main?branch=roll-apps-"), "its branch's own login: {v}");
     let (_, v) = call(&w.api, "GET", &format!("{base}/production/variables/values"), None).await;
     assert_eq!(v["DATABASE_URL"], "postgres://app:pw@db.roll.test:5432/main", "production keeps its own");
+    // Another service of the project in the same environment shares that branch.
+    let (other, _) = image_service(&w, "worker", json!({"port": 80})).await;
+    let oid = other["id"].as_str().unwrap().to_string();
+    call(&w.api, "PUT", &format!("/v1/apps/services/{oid}/links/postgres/main"), Some(json!({}))).await;
+    assert_eq!(call(&w.api, "PUT", &format!("/v1/apps/services/{oid}/environments/staging"), Some(json!({"data": "branch"}))).await.0, StatusCode::OK);
+    let (_, v) = call(&w.api, "GET", &format!("/v1/apps/services/{oid}/environments/staging/variables/values"), None).await;
+    assert_eq!(v["DATABASE_URL"].as_str(), Some(url.as_str()), "shared");
+    let name = url.rsplit_once("branch=").unwrap().1.to_string();
+    // Deleted only once neither environment uses it.
     assert_eq!(call(&w.api, "DELETE", &format!("{base}/staging"), None).await.0, StatusCode::NO_CONTENT);
-    assert_eq!(*BRANCHED.lock(), ["branch main staging", "unbranch br_main_staging"]);
+    assert_eq!(*BRANCHED.lock(), [format!("branch main {name}")]);
+    assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{oid}/environments/staging"), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(*BRANCHED.lock(), [format!("branch main {name}"), format!("unbranch {name}")]);
 }
 
 /// Requests that pile up past an instance's concurrency start more instances, up to
@@ -5535,7 +5547,7 @@ async fn secret_values_are_revealed_only_as_roll_secrets_allows() {
                 apps_control::integrations::SecretVar { name: "SIGNING_KEY".into(), value: "only-for-runtimes".into(), linked: false, sensitive: true, plain: false },
             ])
         }
-        async fn may_reveal(&self, who: apps_control::integrations::Asker<'_>, _: &str, _: &str) -> bool {
+        async fn may_reveal(&self, who: apps_control::integrations::Asker<'_>, _: &str, _: &str, _: &str, _: apps_control::integrations::Reveal<'_>) -> bool {
             who.operator
         }
         async fn ensure(&self, _: &str, env: &str) -> anyhow::Result<()> {
@@ -5897,6 +5909,42 @@ async fn affinity_keeps_a_visitor_on_one_instance() {
     let (inst, _, set) = get(Some(key)).await;
     assert_ne!(inst, second);
     assert!(set.is_some_and(|s| s.starts_with(&format!("roll_instance={};", apps_control::live::affinity_key(&inst)))), "the cookie follows the instance that answered");
+}
+
+/// A UDP service (`run.udp`, Fly's): its environment answers on a UDP port of its own, a
+/// client's first datagram waking an instance and its answer coming back from that port; a UDP
+/// service has no HTTP and isn't a TCP one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_udp_service_answers_on_its_own_port() {
+    let free = std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let w = world_with(|c| {
+        c.udp_ports = Some((free, free));
+        c.tcp_host = "127.0.0.1".into();
+    })
+    .await;
+    let bad = json!({ "project": w.project, "name": "bad", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 80, "udp": true, "tcp": true} });
+    assert_eq!(call(&w.api, "POST", "/v1/apps/services", Some(bad)).await.0, StatusCode::BAD_REQUEST);
+    let (svc, _) = image_service(&w, "game", json!({"port": 7777, "udp": true})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    w.apps.live(&id, "production").sleep().await;
+    tokio::spawn(w.apps.clone().serve_udp_ports("127.0.0.1".parse().unwrap()));
+    let env = get_until(&w.api, &format!("/v1/apps/services/{id}/environments/production"), |e| e["udp"].is_string()).await;
+    assert_eq!(env["udp"], format!("127.0.0.1:{free}"), "{env}");
+    let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    client.connect(("127.0.0.1", free)).await.unwrap();
+    let mut buf = [0u8; 512];
+    let mut got = None;
+    // Sent until it's answered: the port is bound a moment after its address shows, and the
+    // first datagram wakes the instance.
+    for _ in 0..100 {
+        let _ = client.send(b"ping").await;
+        if let Ok(Ok(n)) = tokio::time::timeout(Duration::from_millis(100), client.recv(&mut buf)).await {
+            got = Some(String::from_utf8_lossy(&buf[..n]).into_owned());
+            break;
+        }
+    }
+    let got = got.expect("an answer");
+    assert!(got.starts_with("roll-apps-") && got.ends_with(" ping"), "{got}");
 }
 
 /// A TCP service answers each environment on a port of its own, woken and spliced per
