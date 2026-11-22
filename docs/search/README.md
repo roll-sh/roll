@@ -1427,7 +1427,9 @@ deterministic (#396).
    the cluster's `owner`), so a member of a project whose canvas holds a cluster gets nothing from
    `/v1/search` or the dashboard's Search pages, and `remotes::may_link` compares owners; clusters
    on a project should follow the member's role through `Workspace::trusts`, as secrets and apps
-   do (roll secrets is moving its own search link check onto `trusts`, #621).
+   do. A member already gets trust in a cluster through its project home (search is one of
+   roll-workspace's home kinds, and a cluster made through a project gets that project as its home),
+   so roll secrets' links work for members; search's own API is what's left.
 27. **Fleet takeover after a SIGKILL**: the fleet test's longest search stall (11.1 s at a
    SIGKILL) is the shared lease TTL (`ClusterConfig::lease_ttl`, 10 s: redis 10.4, nosql 10.6 in
    the same run) plus ~1 s to load the cluster from S3 and replay its WAL. Search's part is the
@@ -1459,9 +1461,12 @@ deterministic (#396).
    take over a second, and the test still lost 1 run in 10 (at host loads 63-81; the old build
    passed 10 of 10 there, but at loads 18-50). The suite's minimum (108) holds on a rerun, and
    that load is much harsher than CI's.
-29. **Security**: a fix to main is gating (#632, merged with #358's owner filters) for a bypass a #358 review found: a role's document level
+29. **Security**: landed in #632 (53a45bd36), a fix for a bypass a #358 review found: a role's document level
    security filter was evaluated with the request's own `runtime_mappings` in scope, so a runtime
-   field could shadow the field the filter tests. #601 (in review) carries the whole-product
+   field could shadow the field the filter tests. Security filters (roles, API keys' role
+   descriptors, OpenSearch Security's `dls`, a browser key's `filter`) are now built without the
+   request's runtime fields on every read path, and a runtime field without a script reads only the
+   `_source` its reader may see. #601 (in review) carries the whole-product
    review's fixes. A third, whole-product review on 2026-11-20 (main at 21708aef1) found no
    cross-tenant reach through branches, links or internal calls. Being fixed: Painless memory per
    execution, aggregation memory across the node (#549), observations keyed by name (a reused

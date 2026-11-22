@@ -284,6 +284,49 @@ const PROMPTS: &[Prompt] = &[
         },
     },
     Prompt {
+        name: "ship_a_service",
+        title: "Ship a new service",
+        description: "A new app service from a repo, a Git URL or an image: what its project file would make, the service with its links and variables, a deploy outside production first, checked, and production only when you say.",
+        args: &[Arg { name: "project", description: "Workspace project to put it in", required: true }],
+        needs: &["apps_create_service", "apps_deploy", "apps_wait_deploy", "apps_get_environment", "apps_logs"],
+        text: |a| {
+            format!(
+                "Ship a new service in project {} from the code I point you at (a roll code repo, a public Git URL or \
+                 an image). If it has a roll.toml, a docker-compose file or another platform's file, apps_import \
+                 first: what it would make and what isn't carried over. Then apps_create_service with that source. \
+                 Give it what it needs: apps_link for roll resources (a database's DATABASE_URL and the like), \
+                 apps_set_variables for the rest; a credential stays in roll secrets, never pasted into a variable \
+                 here. If it has an environment besides production (apps_list_environments), deploy there first \
+                 with apps_deploy and follow it with apps_wait_deploy; then apps_get_environment and apps_logs, \
+                 apps_deploy_logs for a failed build and apps_errors for a failing one. Tell me its URL and what \
+                 you saw. Deploy to production only when I say: it may wait for a person's approval, and \
+                 apps_wait_deploy says when it does.",
+                a("project")
+            )
+        },
+    },
+    Prompt {
+        name: "tune_slow_search",
+        title: "Tune a slow search",
+        description: "Why a search cluster answers slowly: its slowest requests, where their time goes, the usual causes in mapping and query, and a fix tried on a branch before the cluster.",
+        args: &[Arg { name: "cluster", description: "Search cluster", required: true }],
+        needs: &["search_slowlog", "search_cluster_metrics", "search_get_mapping", "search_query"],
+        text: |a| {
+            format!(
+                "Search cluster {} answers slowly. Start with search_slowlog for its slowest requests (which index, \
+                 how long) and search_cluster_metrics for load. For the worst, read its index's mapping \
+                 (search_get_mapping) and settings (search_index_settings), and run its body again with \
+                 search_query adding \"profile\": true to see where the time goes. Look for the usual causes: \
+                 wildcards or regexes on text fields, deep pagination (a large from), aggregations on \
+                 high-cardinality text, scripts, scoring queries where a filter would do (filters are cached), \
+                 large _source. Propose a change with what it should save. To try a mapping or settings change, \
+                 branch the cluster first (search_branch_cluster) and measure there; change the cluster itself \
+                 only when I say.",
+                a("cluster")
+            )
+        },
+    },
+    Prompt {
         name: "review_preview",
         title: "Review a preview",
         description: "Whether a change's preview is ready to land: its schema changes, new errors, routes slower than main, its pages against the base, and people's notes.",
@@ -301,6 +344,64 @@ const PROMPTS: &[Prompt] = &[
                  its pages. Tell me whether it's ready to land, with the evidence for each problem. Don't resolve \
                  notes, refresh, reset or delete the preview without asking me.",
                 a("preview")
+            )
+        },
+    },
+    Prompt {
+        name: "recover_deleted_objects",
+        title: "Recover deleted objects",
+        description: "Objects deleted from a bucket by mistake: which ones are still in its trash, and each brought back once you say.",
+        args: &[Arg { name: "bucket", description: "Bucket", required: true }],
+        needs: &["storage_list_trash", "storage_restore_object", "storage_head_object"],
+        text: |a| {
+            format!(
+                "Objects were deleted from bucket {} by mistake. Call storage_list_trash and narrow it to what I \
+                 describe (a prefix, a time window, a name), newest deletions first: each key, when it was deleted \
+                 and its size. Tell me what you found and what isn't there (an object deleted before the trash \
+                 was emptied is gone). Only when I say, restore each with storage_restore_object (its key and \
+                 deleted_at from the list), then check it's back with storage_head_object. Restore nothing I \
+                 didn't name, and never overwrite an object that exists now without asking me first.",
+                a("bucket")
+            )
+        },
+    },
+    Prompt {
+        name: "try_cql_change_on_branch",
+        title: "Try a CQL change on a branch",
+        description: "A NoSQL schema or data change tried on a branch first: applied there, checked against its parent, then on the database only when you say.",
+        args: &[Arg { name: "database", description: "NoSQL database", required: true }],
+        needs: &["nosql_schema", "nosql_create_branch", "nosql_cql", "nosql_diff"],
+        text: |a| {
+            format!(
+                "I want to change NoSQL database {} (a table, a column, an index, a data fix). Read nosql_schema \
+                 first. Then nosql_create_branch for a branch to try it on, and run the statements there with \
+                 nosql_cql against the branch, never the database. Check the result: nosql_schema of the branch, \
+                 nosql_diff for what changed against its parent (tables and rows added, changed and removed), and a \
+                 SELECT or two the change is for. Tell me what it did and what could break (queries that name a \
+                 dropped column, a table rewritten). Run the same statements on the database itself only when I \
+                 say. Then offer to delete the branch; nosql_reset puts it back to its parent if I want to try \
+                 again.",
+                a("database")
+            )
+        },
+    },
+    Prompt {
+        name: "find_redis_memory_hogs",
+        title: "Find what fills a Redis database",
+        description: "What uses a Redis database's memory: its totals, a sample of keys by size, type and TTL grouped by prefix, and what to change, reading only.",
+        args: &[Arg { name: "database", description: "Redis database", required: true }],
+        needs: &["redis_usage", "redis_command"],
+        text: |a| {
+            format!(
+                "Find what fills Redis database {}. Use only commands that read. Start with redis_usage, then \
+                 redis_command with [\"INFO\", \"memory\"], [\"MEMORY\", \"STATS\"] and [\"DBSIZE\"]. \
+                 Sample keys with [\"SCAN\", cursor, \"COUNT\", \"500\"] a few rounds, and for each \
+                 sampled key [\"MEMORY\", \"USAGE\", key], [\"TYPE\", key] and [\"TTL\", key]. Group them \
+                 by prefix (the part before the first : or /) and tell me the biggest prefixes by memory, the keys \
+                 over 1 MB, and how much has no expiry. Suggest what to change: a TTL for keys that are caches, \
+                 an eviction policy or memory limit (redis_update_database), splitting a big hash or list. \
+                 Change nothing and delete nothing unless I say.",
+                a("database")
             )
         },
     },
@@ -422,6 +523,11 @@ pub fn source(prompt: &str, arg: &str) -> Option<Source> {
         "preview" => crate::ask::source("previews", "id"),
         "vhost" | "queue" => crate::ask::source("queues", arg),
         "stream" | "group" => crate::ask::source("streams", arg),
+        "cluster" => crate::ask::source("search", "cluster"),
+        "bucket" => crate::ask::source("storage", "bucket"),
+        // A NoSQL workflow's database is NoSQL's, a Redis one's is Redis's.
+        "database" if p.needs.iter().any(|n| n.starts_with("nosql_")) => crate::ask::source("nosql", "database"),
+        "database" if p.needs.iter().any(|n| n.starts_with("redis_")) => crate::ask::source("redis", "database"),
         // roll code's: an owner of a repo the caller reads, then that owner's repos by name.
         "owner" => crate::ask::source("code", "owner"),
         "repo" => Some(Source { tool: "code_list_repos", args: |ctx| json!({ "owner": ctx["owner"] }), fields: &["name"] }),
