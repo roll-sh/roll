@@ -668,9 +668,13 @@ pub enum AppsCmd {
     Proxy {
         #[command(flatten)]
         target: Target,
-        /// The port here (default: the service's own).
+        /// The port here (default: the service's own, or `--port`).
         #[arg(long)]
         local_port: Option<u16>,
+        /// Another port of the app than its own, reached inside its instance (a debugger's 9229,
+        /// JMX, pprof), as Fly's `fly proxy` and Heroku's `ps:forward`.
+        #[arg(long)]
+        port: Option<u16>,
     },
     /// A shell in a running instance (a web service asleep is woken and kept up while it's
     /// open); leave with `exit` or Ctrl-D.
@@ -713,6 +717,10 @@ pub enum AppsCmd {
         /// Tasks running at once (1–10; default ten, or fewer tasks).
         #[arg(long)]
         parallelism: Option<u32>,
+        /// With `-i`: a console in another kept deployment's image (one that won't come up, to see
+        /// why), as Fly's `fly console --image`.
+        #[arg(long, requires = "interactive")]
+        deployment: Option<String>,
         #[arg(trailing_var_arg = true, required_unless_present = "interactive", allow_hyphen_values = true)]
         command: Vec<String>,
     },
@@ -1608,10 +1616,13 @@ fn secret_env_file(name: &str) -> bool {
 }
 
 /// `…/tunnel` for each connection to `127.0.0.1:local`: its bytes copied both ways.
-async fn proxy(api: &Api, env: &str, what: &str, port: u16, local: u16) -> anyhow::Result<()> {
+async fn proxy(api: &Api, env: &str, what: &str, port: u16, local: u16, other: bool) -> anyhow::Result<()> {
     let l = tokio::net::TcpListener::bind(("127.0.0.1", local)).await.map_err(|e| anyhow::anyhow!("127.0.0.1:{local} is taken ({e}): pick another with --local-port"))?;
     eprintln!("127.0.0.1:{local} → {what}:{port} (Ctrl-C ends it)");
-    let (url, headers) = tunnel_to(api, env);
+    let (mut url, headers) = tunnel_to(api, env);
+    if other {
+        url.push_str(&format!("?port={port}"));
+    }
     tokio::select! {
         r = tunnels(url, headers, l) => r,
         _ = tokio::signal::ctrl_c() => Ok(()),
@@ -4044,14 +4055,17 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             let query = instance.map(|i| format!("&instance={}", enc(&i))).unwrap_or_default();
             return ssh(api, &env_path(&svc, &target.env), &query).await;
         }
-        AppsCmd::Proxy { target, local_port } => {
+        AppsCmd::Proxy { target, local_port, port: other } => {
             let svc = service(api, &target).await?;
-            let port = svc["run"]["port"].as_u64().unwrap_or(8080) as u16;
-            return proxy(api, &env_path(&svc, &target.env), &format!("{}/{}", s(&svc["name"]), target.env), port, local_port.unwrap_or(port)).await;
+            let port = other.unwrap_or(svc["run"]["port"].as_u64().unwrap_or(8080) as u16);
+            return proxy(api, &env_path(&svc, &target.env), &format!("{}/{}", s(&svc["name"]), target.env), port, local_port.unwrap_or(port), other.is_some()).await;
         }
-        AppsCmd::Run { target, interactive: true, cpu, memory, command, .. } => {
+        AppsCmd::Run { target, interactive: true, cpu, memory, command, deployment, .. } => {
             let svc = service(api, &target).await?;
             let mut query = "&console=true".to_string();
+            if let Some(d) = deployment {
+                query.push_str(&format!("&deployment={}", enc(&d)));
+            }
             if !command.is_empty() {
                 query.push_str(&format!("&command={}", enc(&shell_join(&command))));
             }

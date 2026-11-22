@@ -39,6 +39,9 @@ pub struct ConsoleAsk {
     pub command: Option<String>,
     pub cpu: Option<f64>,
     pub memory_mb: Option<u32>,
+    /// Another kept deployment's image and settings instead of the live one's (one that won't
+    /// come up, to see why: Fly's `fly console --image`).
+    pub deployment: Option<String>,
 }
 
 impl ConsoleAsk {
@@ -68,10 +71,23 @@ impl Apps {
         if live.paused() {
             return Err(Error::Conflict("this environment is paused: resume it to open a console".into()));
         }
-        if live.template().is_none() {
-            return Err(Error::Conflict(format!("nothing is deployed in {env} yet")));
-        }
-        let c = live.start_console(ask.cpu, ask.memory_mb).await.map_err(|e| Error::Conflict(format!("the console didn't start: {e:#}")))?;
+        // Another kept deployment's: its image and settings, the environment's variables now.
+        let of = match &ask.deployment {
+            Some(dep) => {
+                let (sid, e, d) = (service.to_string(), env.to_string(), dep.clone());
+                let (svc, row, d) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?, s.deployment(&d)?))).await?;
+                if d.service != service || d.environment != env {
+                    return Err(Error::NotFound(format!("no deployment {dep} in {env}")));
+                }
+                if d.image.is_none() || d.pruned_at.is_some() || d.status == crate::model::DeployStatus::Removed {
+                    return Err(Error::Conflict(format!("{dep} has no image to open a console in (never built, or cleaned up)")));
+                }
+                Some(Arc::new(self.template(&svc.for_env(&row)?, &row, &d).await?))
+            }
+            None if live.template().is_none() => return Err(Error::Conflict(format!("nothing is deployed in {env} yet"))),
+            None => None,
+        };
+        let c = live.start_console(of, ask.cpu, ask.memory_mb).await.map_err(|e| Error::Conflict(format!("the console didn't start: {e:#}")))?;
         Ok(Target { instance: c.name.clone(), command: ask.command, _lease: None, console: Some((live, Some(c))) })
     }
 
