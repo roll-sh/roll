@@ -147,6 +147,12 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   pattern that doesn't parse, a deploy hook's rebuild or a fork's change (its approval is for one
   head) rebuilds it as before. Like an earlier push, the kept build runs on data the new head's
   release may have migrated. Empty (the default): every push rebuilds it.
+- **How it came up** (Vercel's and Render's deploy steps): each head's timeline is on the
+  preview's record (`timeline`: when converging it started, and when each step first finished:
+  `data`, its branches made or kept and masked; `setup`, seed, release and schema read; `deploy`,
+  every service live; `checks`, health paths answered; `ready`) and the sheet ("Up in 9.4 s: data
+  4.1 s · setup 1.2 s · deploy 3.0 s · checks 0.4 s", the steps so far while it's on its way). A
+  push starts a new one; a push that keeps the services shows how little it took.
 - **Warm after a push**: once a new head is deployed, the change's own services are woken (after
   the pass, a few at a time), so the first visit, usually the pull request comment's link,
   doesn't wait for a cold start; they sleep again after `sleep_after` unused. Not a preview

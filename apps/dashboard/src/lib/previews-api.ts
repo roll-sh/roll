@@ -158,6 +158,9 @@ export interface Preview {
   regressions_accepted?: { head: string; by: string; at: number } | null;
   /** The keys it holds as placeholders (its egress proxy swaps each in for its hosts only), and
    * how many requests had one swapped in or were refused. Never a value. */
+  /** How its head came up: when converging it started, and when each step first finished
+   * (`data`, `setup`, `deploy`, `checks`, `ready`, in order). */
+  timeline?: { head: string; started_at: number; steps: { step: string; at: number }[] } | null;
   intercepted?: {
     keys: { key: string; hosts: string[] }[];
     swapped: number;
