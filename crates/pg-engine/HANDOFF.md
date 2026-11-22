@@ -14424,6 +14424,136 @@ failed: all passed.
 Not this round's: roll's `VACUUM (VERBOSE)` sends none of PostgreSQL's INFO lines (agent 205's
 note, still open).
 
+## Short write transactions, round 12: where a big table's one-row UPDATE goes, its recheck, the memtable's key filter, pruning's dead tuples (agent 290)
+
+BENCH.md "Short write transactions, round 12" has the pairs. Base `2c98eac94` (cand/a289-2 landed;
+the pairs of the first two items ran against `85a6b4203`, cand/a289-2 itself, before it landed:
+the same write path, agent 288's planner commits aside; the candidate rebased onto `086bf22fa`). Plain dist builds, lane A through
+`tools/lane.sh`, one pair a hold, harness `~/.cache/a290/bench` (289's, with two fixes, below).
+The lane carried 3.5-7 foreign cores on its 8 CPUs in every hold; the pairs counted are the ones
+with both runs at or near 1.0 foreign core on the server CPUs.
+
+**Where the UPDATE's instructions go (pgbench scale 32, `UPDATE pgbench_accounts` alone, 8
+clients).** Not where the earlier profiles put them: about three quarters are the background
+flush thread's, a quarter the statement's.
+
+- Per-thread counts without inheritance (`perf stat --per-thread --no-inherit`): the 8 connection
+  threads 80-91k user instructions an UPDATE together (PostgreSQL's whole backend: 93k), the one
+  long-lived `roll-flush` thread ~270-350k (22.5 G in 8 s: a full core at IPC 1.14). The old
+  per-thread split (`conn_iu` / `bg_iu`) counted with inheritance, which folds each exited flush
+  thread's counts into the connection thread that spawned it: those columns in rounds 10-11 are
+  not a connection / background split.
+- A flat profile of the server's cgroup on its CPUs (`perf record -a -C -G`, no call graph, period
+  2,000,003): `roll-flush` 75.7% of the user instructions, `roll-conn` 24.3%. In the flush
+  thread, as shares of all: zstd compression ~27.6% (`ZSTD_compressBlock_fast_dictMatchState`
+  17.2%), zstd decompression ~8%, `SstWriter::add` 11.7%, `bloom_set` 5.3%, the merge loop
+  (`compact_within`'s closure, `Cursor`, `Merge::min`) ~10%, `Block::read` 3.4%.
+- What it is: a compaction every ~2.5 s (~36k UPDATEs at 14k tps), each writing the accounts
+  table's whole L1 file again (31.8 MB compressed, 3.2 M rows): ~89 rows decoded, merged,
+  encoded, compressed and hashed into a new bloom filter per UPDATE, while one UPDATE's own
+  bytes are one row version. The 36k UPDATEs change ~1.1% of the rows and about a third of the
+  file's blocks; the other two thirds are rewritten unchanged.
+- One UPDATE's commit (the WAL's records, `bench/walstat.py`): 399 bytes, the row version (171
+  memtable bytes) and the estimate's change record (`estkeep`, 0.75 a commit, 291 memtable
+  bytes with the full records' folds). The estimate's records are 63% of the memtable bytes an
+  UPDATE adds, so they bring each compaction that much sooner.
+- The "8.5 KB of disk writes an UPDATE": the cgroup's io.stat counts `md2` and both NVMe members
+  of the RAID 0 under it, so every byte twice: ~4.3 KB, mostly the WAL's fsynced pages (0.46
+  fdatasync an UPDATE, a 4 KB page each at least), then compaction (~0.9 KB) and flushes.
+  (The WAL is zero-filled ahead already, as PostgreSQL's segments.)
+- Profiling on this host: `kernel.perf_event_max_sample_rate` has been lowered to 2,500, so a
+  sampled profile at period 100,003 (the LBR profiles of rounds 8-11) keeps a fraction of the
+  samples, unevenly: this round's first LBR profile held 14% of the instructions and put the
+  flush thread at 12.7%. Sample at 2,000,003 or more.
+
+Kept, three commits (handed in as `cand/a290`):
+
+1. *A row's recheck after its lock reads only the sources that may hold a version after the
+   snapshot* (`Store::changed_after`, `point::newest_after`; `TxnState::changed_since_snapshot`).
+   The recheck (heap_update's TM_Updated test: did the row change after our snapshot) was a
+   whole point lookup at the newest timestamp: the memtable, every L0 file's bloom, the row's L1
+   file's bloom and block. A version committed after the snapshot can only be in a source whose
+   newest version is after it: the memtable, a frozen memtable or file with `max_ts` (a linked
+   run's `commit_ts`) past the snapshot. A recent snapshot leaves out every file. The answer is
+   the same: the first version found in the sources kept is the key's newest when it is after
+   the snapshot (sources are newest first), and none or an older one means none is after it; a
+   range deletion after the snapshot (which turns an older version into a deletion) reads
+   everything as before. Measured (`ua8`, 2 pairs against `85a6b4203`, 0.93-1.28 foreign cores):
+   connection threads' user instructions -9.1% and -7.4% (91.1k -> 82.8k, 86.1k -> 79.8k);
+   all user instructions -10.3% and -3.9% (the compactions' timing moves these by ±10%).
+2. *A memtable keeps a filter of its user keys* (`KeyFilter`: a 64-bit word a key from its hash's
+   low bits, three bits from its high bits; `Memtable::may_hold_key`). A big table's rows are
+   almost never in the memtable (a few thousand written of millions), and the UPDATE's scan and
+   its recheck each searched the skip list for the key (crossbeam's `search_bound`, a key compare
+   at each node through ~15 levels). Set before the entry goes in (a reader that can see the
+   entry sees its bits), made at the first insert (an idle database's memtable allocates none),
+   128 KB for the default 8 MB memtable (about 8 bits a key at its most entries, ~30 at a
+   one-row UPDATE's). Measured against item 1 (`ua8`): connection threads -0.5% and -4.0% in
+   the two clean pairs, -8.0% and -6.6% in two 20-s pairs at 1.0-2.2 foreign cores (one more
+   loaded pair -0.8%, one -22% with an odd base run): median about -5%, small and not resolved
+   in tps. It is a separate commit: drop it if the batch train finds it costs anything.
+3. *An on-access prune takes the dead tuples it reclaimed off `n_dead_tup`*
+   (pgstat_update_heap_dead_tuples from heap_page_prune_opt; `Heap::prune_opt` returns ndeleted
+   less nnewlpdead as heap_prune_record_* count them; `pgstat::count_reclaimed` from the
+   sequential scan's pages, the index fetches' `Fetcher` and logical apply's identity fetch).
+   Not from VACUUM's prune (PostgreSQL's VACUUM counts on its own), not transactional. Roll kept
+   counting every dead version until VACUUM: agent 289's three-update case read 3 where
+   PostgreSQL reads 1. Golden `a290_prune_dead` (recorded from PostgreSQL 18.6): a full page,
+   one non-HOT update and two HOT ones with a sequential scan after each: 3 updates, 2 HOT, 1
+   dead.
+
+Verification: `tools/quick-check.sh` with `QC_CHECKED=1` `QC_TESTS="crash_ctids big_tables"` on
+`635730d1a` (on `2c98eac94`): 31 test binaries, clippy 16 warnings, none new in a changed file,
+450 tests in 27 binaries (and again built `--profile verify-checked`: 450, `wire`'s
+`info_schema_rows` among them passing), `crash_random` seeds 1-3 x 2 rounds and
+`power_cut_at_every_point`, regress 51,148 / 51,150 (0 newly differing), isolation 1647 / 1648,
+pg_dump_tap 14,609. Again on the rebased head (`785d030df` and this docs commit, on `086bf22fa`):
+build, clippy (none new), 451 tests in 27 binaries, crash (seeds 1-3 x 2, the power cut), regress
+0 newly differing, isolation 1647 / 1648, pg_dump_tap 14,609; the checked stage failed only on
+`wire`'s `protocol_cases` case `info_schema_rows` (roll quiet where PostgreSQL gives DROP SCHEMA's
+cascade NOTICE; it fails on the plain head too, agent 291 is fixing it), and the one checked binary
+it left, `wire_waits`, passed run by hand. All three commits against `2c98eac94` (`ua8`, 2 pairs at
+1.25-1.67 foreign cores): connection threads -16.5% and -10.0% (94.1k -> 78.6k, 88.3k -> 79.5k),
+all user instructions -3.1% and -17.6%. Select-only (8 clients) level: the path isn't touched (the
+memtable's relation check turns the key away before its hash), and the four runs read 39.6-44.4k
+user instructions a read (base 39,525, base2 44,377 / 40,839, c2 40,031 / 39,638 / 41,479). TPC-B
+pairs don't resolve it (each run's compactions move its count by a third).
+
+Measured and not kept: none built. Considered and left (below): the compaction's block
+passthrough, the HOT count past the model.
+
+What is left, by size:
+
+- **The compaction of a big table's random updates is three quarters of its UPDATE** (above).
+  The lever: a compaction that copies the input L1 file's blocks no L0 key falls in as they are
+  (their compressed bytes and index entries), so only the third of the blocks an UPDATE batch
+  touches is decoded, merged, encoded and compressed. What it needs: the output file keeps the
+  input's zstd dictionary (format 4 blocks are compressed against their file's; one output per
+  input file, or a dictionary per block run), the output's bloom filter from the input's (the
+  same size, ORed with the new keys' bits: a superset, no false negatives; made anew when the
+  key count moves past it), the passed blocks' entries counted for the meta (entries,
+  deletions, min/max ts) without decoding (the index has the counts; the ts range of a passed
+  block is within the input file's), and no block passed whose entries a dead-entry set marks
+  or whose versions the horizon now drops (an L1 block after a compaction holds one version a
+  key: the common case). Expected: the flush thread's ~270-350k to roughly a third, the UPDATE's
+  ~350k user instructions to ~170k. Second, cheaper: the estimate's change records (63% of
+  the memtable bytes an UPDATE adds) smaller (`BtEst::encode`'s changed leaf is 76 bytes of
+  f64s and u128s; the heap scalars ~50 bytes a commit) would space the compactions out by up
+  to 1.6x. Raising `l0_compaction_trigger` past 4 does the same at once, for every table, with
+  more L0 files for every point read and scan: not tried.
+- Past the model, `n_tup_hot_upd` stays 0: `sizing::untracked_write` computes the estimate's
+  `hot` and drops it (`updated` returns None for an estimated table), and the estimate has no
+  page-level dead versions to make an update heap-only where PostgreSQL prunes one (PostgreSQL
+  at one client: 220 of 5,000 at scale 32: an update whose page an earlier update left a dead
+  version on; ~4.8% expected of 5,000 random updates over 52k pages). To count them the
+  estimate would keep the pages that got a non-HOT update (a bit a page) and the old row's page
+  (`moved`, `runs`), durable in `estkeep`'s records: a format change of those records.
+- Branches (32 rows, 8 clients, 323k against 161-194k) and the transaction's fixed costs: not
+  reached.
+- Harness: `~/.cache/a290/bench` (289's): `pair.sh` / `pairs.sh` with per-thread counts
+  `--no-inherit`, `flat.sh` (the flat cgroup profile), `diag.sh` (storage log, the data
+  directory's files before and after, the WAL), `walstat.py` (a WAL's commits by key kind).
+
 ## Short write transactions, round 11: the standing table, a big table's estimate records (agent 289)
 
 BENCH.md "Short write transactions, round 11" has the tables (the PGO row measured five hours

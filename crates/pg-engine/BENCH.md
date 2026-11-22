@@ -1712,6 +1712,155 @@ session thread's user instructions by `perf stat --per-thread` over a 14 s run l
 the difference in selects; CPUs 4 and 22): base (`c4ad9402d`) 38,025 / 38,948 / 37,578, the stack
 (`e974a84e1`) 37,624 / 39,504 / 37,995 user instructions a select, alternated.
 
+## Short write transactions, round 12: a big table's one-row UPDATE, its recheck, the memtable's key filter (2026-11-22, agent 290)
+
+Lane A (servers on CPUs 6,7,24,25, pgbench on 8,9,26,27), one pair a `tools/lane.sh` hold, harness
+`~/.cache/a290/bench` (agent 289's): a fresh server and `pgbench -i -I dtGvp -s 32` for every run,
+`-M prepared`, 2 s warm-up, then 10 s (20 s where said); counts are the server cgroup's (`perf stat
+-a -C <server CPUs> -G <cgroup>`, 8 s from +1 s) divided by tps x 8 s. `conn_iu` / `conn_cu`: the
+connection threads' own user instructions and cycles (`perf stat --per-thread --no-inherit`; the
+rounds before counted with inheritance, which folds every exited flush thread into the connection
+thread that started it), `bg_iu` the rest of the cgroup's (the flush thread: flushes and
+compactions). For a TPC-B transaction the split means nothing (its connection threads compact
+inline). `wbytes_per_txn` is io.stat's, which counts `md2` and both NVMe members under it: twice the
+bytes written. The lane carried 3.5-7 foreign cores on its 8 CPUs in every hold; foreign is the
+server CPUs' in each run. Plain dist builds: `base` = `85a6b4203` (cand/a289-2), `base2` =
+`2c98eac94` (it landed, with agent 288's planner commits), `c1` = `base` + the recheck from the
+sources that may hold a newer version, `c2` = `2c98eac94` + c1 + the memtable's key filter + the
+prune's dead tuples (`635730d1a`, the candidate before its rebase onto `086bf22fa`).
+
+Where `UPDATE pgbench_accounts` (alone, 8 clients, c1) spends its user instructions: a flat profile
+of the cgroup on its CPUs (`perf record -a -C -G`, period 2,000,003, no call graph; the host's
+`perf_event_max_sample_rate` is 2,500, which a period of 100,003 exceeds): `roll-flush` 75.7%,
+`roll-conn` 24.3%. In the flush thread (shares of all): zstd compression ~27.6%
+(`ZSTD_compressBlock_fast_dictMatchState` 17.2%), zstd decompression ~8%, `SstWriter::add` 11.7%,
+`bloom_set` 5.3%, the merge (`compact_within`, `Cursor`, `Merge::min`) ~10%, `Block::read` 3.4%. A
+compaction every ~2.5 s rewrites the table's whole L1 file (31.8 MB, 3.2 M rows) for ~36k UPDATEs.
+One UPDATE's WAL record: 399 bytes (the row version, 171 memtable bytes; the estimate's change
+record, 291 with its folds).
+
+`UPDATE pgbench_accounts` alone, 8 clients, c1 against base, 2 pairs:
+
+| count | pair 1 | pair 2 | median Δ |
+|---|---:|---:|---:|
+| tps | 12,002 / 14,023 | 13,119 / 11,627 | +2.7% |
+| p99_ms | 4.631 / 3.405 | 4.921 / 4.083 | -21.8% |
+| instructions_u | 349,571 / 313,584 | 322,641 / 309,969 | -7.1% |
+| conn_iu | 91,080 / 82,771 | 86,106 / 79,751 | -8.3% |
+| bg_iu | 258,491 / 230,813 | 236,535 / 230,218 | -6.7% |
+| cycles_u | 498,615 / 454,973 | 439,057 / 426,488 | -5.8% |
+| conn_cu | 261,142 / 249,347 | 245,922 / 237,445 | -4.0% |
+| instructions_k | 92,719 / 87,436 | 88,419 / 86,563 | -3.9% |
+| cycles_k | 202,426 / 193,137 | 193,188 / 190,084 | -3.1% |
+| sc_sched_yield | 0.889 / 1.002 | 1.078 / 0.858 | -3.8% |
+| switch_voluntary | 2.407 / 2.374 | 2.43 / 2.315 | -3.1% |
+| switch_involuntary | 1.267 / 1.239 | 1.211 / 1.119 | -4.9% |
+| sc_futex | 1.983 / 2.054 | 2.177 / 1.972 | -2.9% |
+| syscalls | 7.341 / 7.193 | 7.426 / 6.952 | -4.2% |
+| wbytes_per_txn | 9,375 / 8,772 | 8,732 / 8,753 | -3.1% |
+| foreign_cores | 1.21 / 0.93 | 0.96 / 1.28 |  |
+
+c2 against c1, 4 pairs (pairs 3 and 4 at 1.2-2.5 foreign cores):
+
+| count | pair 1 | pair 2 | pair 3 | pair 4 | median Δ |
+|---|---:|---:|---:|---:|---:|
+| tps | 10,113 / 13,234 | 14,956 / 16,545 | 12,594 / 8,282 | 6,764 / 7,682 | +12.1% |
+| p99_ms | 5.572 / 4.381 | 3.515 / 2.684 | 4.643 / 7.26 | 8.843 / 8.373 | -13.3% |
+| instructions_u | 348,565 / 349,435 | 341,461 / 272,466 | 363,320 / 422,690 | 432,216 / 450,815 | +2.3% |
+| conn_iu | 80,080 / 79,679 | 84,569 / 81,208 | 97,289 / 75,748 | 79,682 / 79,030 | -2.4% |
+| bg_iu | 268,485 / 269,756 | 256,892 / 191,258 | 266,031 / 346,942 | 352,534 / 371,785 | +3.0% |
+| cycles_u | 462,949 / 451,092 | 458,715 / 405,175 | 514,092 / 532,388 | 572,907 / 603,802 | +0.5% |
+| conn_cu | 238,104 / 238,407 | 251,613 / 239,898 | 282,271 / 231,859 | 247,205 / 248,145 | -2.3% |
+| instructions_k | 86,932 / 90,190 | 88,724 / 87,505 | 103,312 / 92,053 | 93,142 / 93,055 | -0.7% |
+| cycles_k | 189,811 / 195,258 | 190,614 / 188,944 | 220,315 / 201,605 | 206,056 / 208,193 | +0.1% |
+| sc_sched_yield | 1.076 / 1.165 | 1.023 / 1.249 | 1.212 / 0.707 | 0.627 / 0.65 | +6.0% |
+| switch_voluntary | 2.332 / 2.445 | 2.389 / 2.469 | 2.756 / 2.266 | 2.29 / 2.37 | +3.4% |
+| switch_involuntary | 1.236 / 1.325 | 1.257 / 1.34 | 1.426 / 1.097 | 1.011 / 0.984 | +2.0% |
+| sc_futex | 2.088 / 2.194 | 2.118 / 2.245 | 2.433 / 1.802 | 1.815 / 1.914 | +5.3% |
+| syscalls | 7.456 / 7.785 | 7.455 / 7.409 | 8.414 / 7.443 | 7.368 / 7.714 | +1.9% |
+| wbytes_per_txn | 8,935 / 8,678 | 8,498 / 8,089 | 8,937 / 9,404 | 9,905 / 10,256 | +0.3% |
+| foreign_cores | 1.22 / 0.9 | 0.74 / 0.79 | 1.18 / 2.21 | 2.49 / 2.07 |  |
+
+c2 against c1, 2 pairs of 20 s runs:
+
+| count | pair 1 | pair 2 | median Δ |
+|---|---:|---:|---:|
+| tps | 7,745 / 8,369 | 10,483 / 13,486 | +18.4% |
+| p99_ms | 7.965 / 7.082 | 5.416 / 3.617 | -22.2% |
+| instructions_u | 374,233 / 387,816 | 384,851 / 319,042 | -6.7% |
+| conn_iu | 85,739 / 78,879 | 85,952 / 80,237 | -7.3% |
+| bg_iu | 288,494 / 308,937 | 298,899 / 238,805 | -6.5% |
+| cycles_u | 537,133 / 529,239 | 509,883 / 442,566 | -7.3% |
+| conn_cu | 259,043 / 243,102 | 253,340 / 238,863 | -5.9% |
+| instructions_k | 93,997 / 92,373 | 93,680 / 89,319 | -3.2% |
+| cycles_k | 208,042 / 205,653 | 204,125 / 192,505 | -3.4% |
+| sc_sched_yield | 0.664 / 0.745 | 0.874 / 1.077 | +17.7% |
+| switch_voluntary | 2.404 / 2.364 | 2.416 / 2.414 | -0.9% |
+| switch_involuntary | 1.055 / 1.094 | 1.183 / 1.298 | +6.7% |
+| sc_futex | 1.882 / 1.897 | 2.028 / 2.1 | +2.2% |
+| syscalls | 7.271 / 7.419 | 7.605 / 7.435 | -0.1% |
+| wbytes_per_txn | 9,735 / 9,587 | 9,515 / 8,723 | -4.9% |
+| foreign_cores | 2.19 / 2 | 1.34 / 0.97 |  |
+
+c2 against base2, 2 pairs:
+
+| count | pair 1 | pair 2 | median Δ |
+|---|---:|---:|---:|
+| tps | 12,015 / 11,029 | 8,841 / 11,237 | +9.4% |
+| p99_ms | 6.281 / 5.565 | 7.426 / 4.987 | -22.1% |
+| instructions_u | 364,237 / 353,013 | 422,334 / 347,981 | -10.3% |
+| conn_iu | 94,145 / 78,635 | 88,314 / 79,516 | -13.2% |
+| bg_iu | 270,092 / 274,378 | 334,020 / 268,465 | -9.0% |
+| cycles_u | 503,848 / 491,937 | 548,005 / 485,351 | -6.9% |
+| conn_cu | 267,519 / 240,403 | 264,954 / 239,701 | -9.8% |
+| instructions_k | 92,750 / 89,817 | 94,822 / 90,311 | -4.0% |
+| cycles_k | 203,902 / 197,744 | 214,632 / 199,405 | -5.1% |
+| sc_sched_yield | 1.005 / 0.799 | 0.685 / 0.863 | +2.7% |
+| switch_voluntary | 2.519 / 2.35 | 2.405 / 2.358 | -4.3% |
+| switch_involuntary | 1.231 / 1.135 | 1.024 / 1.193 | +4.4% |
+| sc_futex | 2.211 / 1.925 | 1.949 / 1.936 | -6.8% |
+| syscalls | 7.73 / 7.235 | 7.612 / 7.274 | -5.4% |
+| wbytes_per_txn | 9,080 / 9,351 | 9,875 / 9,083 | -2.5% |
+| foreign_cores | 1.25 / 1.44 | 1.67 / 1.48 |  |
+
+Select-only, 8 clients (c2 against base, one pair; against base2, two): the path is not touched (the memtable's relation check turns the key away before its hash); run to run the user instructions moved 39.5-44.4k on this lane today.
+
+| count | pair 1 | median Δ |
+|---|---:|---:|
+| tps | 46,779 / 45,663 | -2.4% |
+| instructions_u | 39,525 / 40,031 | +1.3% |
+| cycles_u | 101,584 / 103,565 | +2.0% |
+| instructions_k | 39,681 / 40,191 | +1.3% |
+| syscalls | 2.094 / 2.119 | +1.2% |
+| foreign_cores | 1.4 / 1.55 |  |
+
+| count | pair 1 | pair 2 | median Δ |
+|---|---:|---:|---:|
+| tps | 63,065 / 62,917 | 49,551 / 44,017 | -5.7% |
+| instructions_u | 44,377 / 39,638 | 40,839 / 41,479 | -4.6% |
+| cycles_u | 105,550 / 96,346 | 102,801 / 104,136 | -3.7% |
+| instructions_k | 39,941 / 38,870 | 40,146 / 41,511 | +0.4% |
+| syscalls | 2.132 / 2.092 | 2.133 / 2.249 | +1.8% |
+| foreign_cores | 1.1 / 0.54 | 1.13 / 1.55 |  |
+
+TPC-B-like, 8 clients, c2 against base, 2 pairs: not resolved (each run's compactions move its count by a third; pair 1's per-thread counts did not parse):
+
+| count | pair 1 | pair 2 | median Δ |
+|---|---:|---:|---:|
+| tps | 5,581 / 4,025 | 2,563 / 2,311 | -18.9% |
+| p99_ms | 5.496 / 8.168 | 14.246 / 16.164 | +31.0% |
+| instructions_u | 619,077 / 690,186 | 539,095 / 878,512 | +37.2% |
+| cycles_u | 1,161,744 / 1,343,425 | 1,341,109 / 1,633,352 | +18.7% |
+| instructions_k | 318,511 / 370,842 | 369,925 / 357,816 | +6.6% |
+| cycles_k | 609,644 / 759,804 | 806,172 / 766,289 | +9.8% |
+| sc_sched_yield | 2.384 / 2.415 | 1.616 / 1.148 | -13.8% |
+| switch_voluntary | 7.65 / 8.729 | 8.762 / 7.978 | +2.6% |
+| switch_involuntary | 3.194 / 3.828 | 2.916 / 2.231 | -1.8% |
+| sc_futex | 1.715 / 1.936 | 1.589 / 1.385 | +0.0% |
+| syscalls | 19.51 / 21.814 | 20.909 / 20.23 | +4.3% |
+| wbytes_per_txn | 10,178 / 10,672 | 10,605 / 12,263 | +10.2% |
+| foreign_cores | 0.91 / 1.2 | 2.35 / 2.31 |  |
+
 ## Short write transactions, round 11: the standing table, a big table's estimate records (2026-11-22, agent 289)
 
 Lane A (servers on CPUs 6,7,24,25, pgbench on 8,9,26,27), one server or one pair a
