@@ -132,9 +132,12 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   branches'. A copy goes with its push, and with the data it copied (a reset, or masking rules
   that changed: never served less masked than the rules say). Products that can't branch a
   branch share the preview's. A NoSQL copy inherits its branch's masking policy (a read policy,
-  not a rewrite). roll apps services share the preview's data too,
-  whose builds keep the variables they were deployed with. A roll apps service's earlier push is that build's own
-  deployment URL (`<deployment>--<slug>` on roll apps' domain, never a project's preview domain;
+  not a rewrite). A roll apps service's earlier push is that build started again, taking no
+  traffic, with its copy's variables (roll apps' `POST …/deploys/{dep}/rollback {no_traffic,
+  variables}`: names the environment has, sealed with that deployment); if that fails, the build
+  itself on the preview's data (said in its activity, its copies dropped), and when a reset or
+  changed masks drop its copy, the push goes with it (its variables can't fall back). Either way
+  it's at a deployment's own URL (`<deployment>--<slug>` on roll apps' domain, never a project's preview domain;
   roll apps' `Deployment.url`), behind the same link (the token once, a cookie for that host) or
   sign-in: asked before the new head deploys, and kept only while the running build is the head
   it ran. roll apps keeps an environment's last 10 builds, so the 3 kept here stay; one it pruned
@@ -2421,12 +2424,9 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Earlier pushes on their own data**: each kept
-   push's own copy of the preview's Postgres branch (#726) and its bytes in the cost (#731),
-   Redis's and search's copies (#740), landed; each earlier push saying which data is its own (the
-   sheet, `roll preview show`, the PR comment), in review. Next: roll apps' earlier builds on
-   their copy, once roll apps' `POST …/deploys/{dep}/rollback {no_traffic, variables}` lands
-   (it's building it). Buckets', streams' and NoSQL's copies in review.
+1. **Earlier pushes on their own data**: each kept push's own copy of every branch the preview
+   makes (Postgres #726, its cost #731, Redis and search #740, buckets, streams and NoSQL #752),
+   landed; roll apps services' earlier builds on their copy (roll apps' #750), in review.
 2. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start

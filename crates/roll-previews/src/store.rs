@@ -2656,6 +2656,14 @@ impl Store {
         self.pin_at(id, service, revision, None, url)
     }
 
+    /// The earlier pushes of `revision` kept at their backend's own URL ([`Store::pin_build`]).
+    pub fn unpin_builds(&self, id: &str, revision: &str) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("DELETE FROM pinned WHERE preview_id = ? AND revision = ? AND host LIKE 'apps:%'", params![id, revision])?;
+            Ok::<_, Error>(())
+        })
+    }
+
     /// [`Store::pin`] for a build its backend keeps at a URL of its own (roll apps' deployment
     /// URL): nothing of roll previews' answers for it. Its host is kept as `apps:<host>`, which no
     /// DNS label can be, so roll previews' proxy never takes a request as its.

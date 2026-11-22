@@ -1316,8 +1316,9 @@ async fn earlier_pushes_stay_reachable_at_their_own_urls() {
     assert!(e.apps.removed.lock().contains(&(p.id.clone(), "web@cs_8d".into())));
 }
 
-/// On roll apps, an earlier push is that build's own deployment URL, behind the preview's link;
-/// kept only when the running build is the head it ran.
+/// On roll apps, an earlier push is that build started again on its own copy of the data (a
+/// no-traffic rollback with the copy's variables), behind the preview's link; kept only when the
+/// running build is the head it ran.
 #[tokio::test]
 async fn a_roll_apps_services_earlier_push_is_its_builds_own_url() {
     let e = env(json!({ "enabled": true }));
@@ -1333,13 +1334,18 @@ async fn a_roll_apps_services_earlier_push_is_its_builds_own_url() {
     let token = e.engine.store.access(&p.id).unwrap().unwrap().link_token().unwrap().to_string();
     assert_eq!(view.earlier.len(), 1, "{:?}", view.earlier);
     let x = &view.earlier[0];
-    assert_eq!((x.service.as_str(), x.revision.as_str(), x.url.as_str()), ("web", "cs_9a", "https://0123456789ab--pv-x.apps.test"));
-    assert_eq!(x.share_url.as_deref(), Some(format!("https://0123456789ab--pv-x.apps.test/?roll_access={token}").as_str()));
+    // The same build again, taking no traffic, on its own copy of the data.
+    let views = e.apps.views.lock().clone();
+    assert!(views.len() == 1 && views[0].1 == "dep_aaa" && views[0].2.iter().any(|(k, v)| k == "DATABASE_URL" && v.contains("-9a")), "{views:?}");
+    assert_eq!((x.service.as_str(), x.revision.as_str(), x.url.as_str()), ("web", "cs_9a", "https://view-dep_aaa--pv-x.apps.test"));
+    assert_eq!(x.share_url.as_deref(), Some(format!("https://view-dep_aaa--pv-x.apps.test/?roll_access={token}").as_str()));
+    assert!(x.own_data.contains(&roll_previews::Kind::Postgres));
     // A running build that isn't the head it ran (the new one live already) isn't kept as it.
     e.apps.live.lock().insert("web".into(), ("ccc".into(), "https://fedcba987654--pv-x.apps.test".into()));
     e.code.edit("chg_ae", |c| c.head = "cs_9c".into());
     e.engine.pass().await.unwrap();
     assert_eq!(e.engine.store.preview(&p.id).unwrap().earlier.len(), 1, "only cs_9a's");
+    assert!(!e.engine.store.pinned_data(&p.id).unwrap().iter().any(|d| d.revision == "cs_9b"), "cs_9b's copies go: nothing uses them");
 }
 
 /// An earlier push runs on its own copy of the data, taken before the next head's release, so a
