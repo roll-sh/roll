@@ -1067,6 +1067,10 @@ impl Runtime for Docker {
         args.extend(["--cap-drop", "ALL", "--cap-add", "NET_ADMIN", "--security-opt", "no-new-privileges", "--read-only", "--tmpfs", "/run/wg:size=64k,mode=0700"]);
         args.extend(["--memory", "64m", "--pids-limit", "64", "-e", &addrs, "-e", &routes, "-e", &mtu, "--entrypoint", "sh", super::peering_image::WIREGUARD, "-c", super::peering_image::SCRIPT]);
         docker_within(&args, Some(Duration::from_secs(300))).await.context("the private network's peer")?;
+        if let Some(out) = &spec.out_network {
+            self.ensure_network(out, &spec.service, false).await?;
+            docker(&["network", "connect", out, &spec.name]).await.context("the peer's way out")?;
+        }
         docker(&["start", &spec.name]).await?;
         // Its config through stdin into its tmpfs: never on disk, in argv or in an env.
         let mut child = Command::new("docker")
@@ -1117,6 +1121,8 @@ impl Runtime for Docker {
         for n in listed.lines().map(str::trim).filter(|n| *n == name || n.strip_prefix(name).and_then(|r| r.strip_prefix('-')).is_some_and(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))) {
             let _ = docker(&["rm", "-f", n]).await;
         }
+        // A closed environment's peer's way out goes with it.
+        self.remove_network(&format!("{name}-out")).await;
     }
 
     async fn remove_network(&self, name: &str) {
