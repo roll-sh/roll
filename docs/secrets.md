@@ -6131,6 +6131,44 @@ and webhooks' and review apps' signing secrets sealed. Still open:
   compute of that image (about 2 s per image, never waking a suspended endpoint). Its full gate is
   running.
 
+**Ranked, 2026-11-22 05:45** (after the thirty-fourth review's items landed; built from a review of
+roll apps' #603 and what gating found). The thirty-fifth cold review is running and will replace this
+list. In order:
+
+1. **A placeholder swaps only for its own consumer** (security, high; fixing in
+   `fix/secrets-placeholder-consumer`). `Secrets::substitute` checked a placeholder's maker, binding,
+   host and liveness, but not who was asking, so a leaked `rlph_` could be swapped through another
+   tenant's proxy (apps' closed environments, fork previews). The proxy passes its interception CA's
+   consumer and a mismatch is refused with an alert (`WrongConsumer`).
+2. **A reference never smuggles a bound key's value** (security, medium; same PR). In a placeholders
+   read, `AUTH="Bearer ${STRIPE_KEY}"` resolved the real value. Such a key is withheld with a problem
+   naming the bound key.
+3. **The maker-refusal fallback reads bound keys** (security, low; same PR). rolld's apps fallback
+   decrypted and audited the host-bound keys it then withheld, and a binding added in between leaked
+   once. A read mode that leaves bound keys out before decrypting.
+4. **The stampede after a change** (performance, M; measuring in `perf/secrets-change-stampede`). The
+   first digest after a write per polling identity times 1,000 pods; a fix only if it spikes.
+5. **Members v1.1** (completeness, L). The design is `docs/members-v1-1.md` (#662).
+   - Phase 1: groups and SCIM `Groups`, building on option (a) in `feature/members-groups`.
+   - Phase 2: time-boxed elevation, waiting on the user's D13, D14 and D16.
+6. **Sandbox copies are frozen at create** (UX/security, M). A rotated value doesn't reach an agents
+   sandbox until it's recreated, and agent37 can't drop keys, so it refuses to start once its copier
+   loses access. Deliver env over the relay link at each start.
+7. **A `kind` on Values' linked fields** (integration, S). roll apps' branch environments drop every
+   linked variable, failing closed, because a linked field doesn't say which resource it came from.
+   With a `kind`, they'd drop only Postgres and Redis.
+8. **Test-infrastructure leftovers** (S):
+   - `scripts/agents-e2e.mjs` still picks a port and releases it before rolld binds (roll MCP owns
+     `test-mcp-sweep.sh`'s);
+   - agent-host's `pi_compaction` fails in the shared gate package set, because search's crates turn
+     on serde_json's `float_roundtrip` through rolld.
+9. **A local agent outside Lambda** (UX, S–M): the Lambda extension's surface as a sidecar.
+10. **The root of trust beyond AWS KMS, and FIPS** (L; the user's call).
+
+Other threads, from the #603 review: roll apps' renewal and restart fixes (H1–H4, M1) in
+`feature/roll-apps-closed-renewal`; search's sealing without a key (item 5) in
+`fix/search-security-1120`.
+
 **State, 2026-11-22 05:05.** Every item of the thirty-fourth review that roll secrets owns is on main, with batch 7 (members) and its follow-ups:
 - **Items 1 and 3: landed**, #621 (658cecf0e). apps' reveal and shell read roll secrets as the asker
   (any `from_secrets` key that doesn't resolve for them is a 403, no partial answer; a bound `roll://`
