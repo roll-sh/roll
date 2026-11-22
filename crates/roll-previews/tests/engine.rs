@@ -884,13 +884,40 @@ async fn the_release_runs_at_each_new_head_before_services_and_its_schema_change
     // Before the services at that head; not again at the same head; again at a new one.
     e.engine.store.update(&p.id, |r| r.next_at = 0).unwrap();
     e.engine.pass().await.unwrap();
+    // Another change's migration lands first: production gains a table the preview's branch
+    // doesn't have. Not this change's doing, so neither a change nor a risk ("drops table").
+    *e.pg.schema.lock() = Some((vec!["table public.users".into(), "table public.orders".into()], vec!["table public.users".into(), "column public.users.nick text".into()]));
     e.code.edit("chg_r", |c| c.head = "cs_3b".into());
     e.engine.pass().await.unwrap();
+    let v = e.engine.store.view(e.engine.store.row(&p.id).unwrap()).unwrap();
+    assert_eq!(v.schema_changes.as_deref(), Some(&["+ column public.users.nick text".to_string()][..]));
+    assert!(v.schema_risks.is_empty(), "{:?}", v.schema_risks);
     let runs = e.apps.runs.lock().clone();
     let heads: Vec<_> = runs.iter().map(|(_, rev, deployed)| (rev.as_str(), *deployed)).collect();
     assert_eq!(heads, [("cs_3a", 0), ("cs_3a", 0), ("cs_3b", 0)], "{runs:?}");
     let v = e.engine.store.view(e.engine.store.row(&p.id).unwrap()).unwrap();
     assert!(v.release.is_some_and(|x| x.head == "cs_3b" && x.before_ms.is_some()), "a new head's run, with the one before's time");
+}
+
+#[tokio::test]
+async fn a_search_branch_masked_again_in_place_keeps_the_schema_it_was_made_with() {
+    let e = env_with_search(json!({ "enabled": true, "release": { "image": "node:22", "run": "npm run migrate" }, "masking": { "search:srch_logs": { "logs.ip": "redact" } } }));
+    *e.search.schema.lock() = Some((vec!["index logs".into()], vec!["index logs".into(), "field logs.price float".into()]));
+    e.code.open(change("chg_sm", 8));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_sm").unwrap().unwrap();
+    // (Headed: the project's Postgres has a schema too.)
+    let shown = |e: &Env| e.engine.store.view(e.engine.store.row(&p.id).unwrap()).unwrap().schema_changes;
+    assert_eq!(shown(&e).as_deref(), Some(&["# search:srch_logs".to_string(), "+ field logs.price float".to_string()][..]));
+    // The rules change: the branch is masked again in place, after the change's release wrote its
+    // field there. That's no base: the next head still shows the field as the change's.
+    *e.search.branch_now.lock() = Some(vec!["index logs".into(), "field logs.price float".into()]);
+    let s = e.engine.store.settings(&e.project).unwrap().patched(&json!({ "masking": { "search:srch_logs": { "logs.ip": "email" } } })).unwrap();
+    e.engine.store.put_settings(&e.project, &s).unwrap();
+    e.code.edit("chg_sm", |c| c.head = "cs_8b".into());
+    e.engine.pass().await.unwrap();
+    assert!(e.search.masks.lock().len() >= 2, "masked again: {:?}", e.search.masks.lock());
+    assert_eq!(shown(&e).as_deref(), Some(&["# search:srch_logs".to_string(), "+ field logs.price float".to_string()][..]));
 }
 
 #[tokio::test]

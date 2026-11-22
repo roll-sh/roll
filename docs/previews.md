@@ -653,7 +653,13 @@ migrations (a fork's too), so each line is made printable once, where the diff i
 control characters escaped (a newline in a name can't fake a line, an escape sequence can't reach
 a terminal), lines cut at 300 characters, 200 lines at most; the comment keeps them inside a fence
 they can't close. A failure to read is
-logged and read again on the next converge; it never fails the preview.
+logged and read again on the next converge; it never fails the preview. Only what the change made is
+named: each branch's own lines are kept as it's made (masked, before any seed or release runs;
+`base_schema` on its resource row, read from the branch alone), and a line counts only when the
+branch also differs in it from that base (`schema::diff_since`). Another change's migration that
+lands on production while the preview is open isn't read as this one dropping its table, in the
+lines or the risks. A branch made before bases were kept, or whose base couldn't be read (said in
+its activity), is compared with its parent alone.
 
 What in those lines would hurt production when the change lands is named above them
 (`schema_risks`, `roll_previews::schema::risks`; PlanetScale's deploy request warnings, Atlas's
@@ -675,8 +681,11 @@ Search branches the same way: each one's `_mapping` and its parent's, read throu
 operator console request (no cluster password), become `index <name>` and `field <index>.<path>
 <type>` lines (nested fields and multi-fields by path, system indices left out), so a change
 whose code adds or retypes a field says so (live: `+ field products.price float` after the
-preview wrote a document with a price). With several such resources, each one's lines follow a
-`# <kind>:<ref>` heading.
+preview wrote a document with a price). An index the parent made after the branch started (the
+cluster's `parent_at`: a connector's first sync, a rollover, a day's `logs-…` index) that the
+branch doesn't have is left out: production's new index, not one the change drops (live: a
+connector's index the parent's sync makes after the preview is no risk). With several such
+resources, each one's lines follow a `# <kind>:<ref>` heading.
 
 ## Egress
 
@@ -864,10 +873,11 @@ through its proxy ("Roll only", a fork's default) resolves with placeholders for
 operator is no one, so rules it saved make none). When that person may no longer reveal there,
 it resolves as without placeholders and says "placeholders off: …; a writer saving the rules
 again turns them back on" in its activity, never with anyone else's rights. rolld's
-`SecretsIntercepts` asks `intercept_ca` for the consumer (reused while it's live and more than
-3 h from its end: a new CA restarts the preview's services, and roll secrets ends one that no
-longer fits its bound hosts; none while the preview holds no placeholder),
-`intercept_ca_live` on every connection, and roll secrets' `proxy::filter` for each request; the
+`SecretsIntercepts` asks `intercept_ca` for the consumer (reused while `intercept_ca_live` says
+so and it's more than 3 h from its end: a new CA restarts the preview's services, and roll secrets
+says a CA is no longer live once its consumer's bound hosts gain one it doesn't name; none while
+the preview holds no placeholder), `intercept_ca_stands` on every connection (a stale CA keeps
+serving the hosts it names until it's swapped), and roll secrets' `proxy::filter` for each request; the
 preview's teardown calls `end_consumer`, ending its placeholders and CAs at once. Each preview's
 socket lives under `<home>/previews/intercept`. `a_roll_only_preview_takes_placeholders_made_by_who_saved_its_rules`.
 Only roll secrets' `maker_unreachable` refusal falls back without placeholders; any other 403 is

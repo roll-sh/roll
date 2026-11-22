@@ -58,7 +58,9 @@ fn trim_cr(b: &[u8]) -> &[u8] {
 }
 
 /// Parses a bulk body with the request-level defaults.
-pub fn parse(data: &Bytes, defaults: &WriteArgs, default_index: Option<&str>, default_source: Option<&FetchSource>, allow_explicit_index: bool) -> EsResult<Vec<Item>> {
+/// `only_id`: a connector sync's bulk ([`crate::xpack::internal::index_only`]), whose action
+/// lines may name nothing but `_id`.
+pub fn parse(data: &Bytes, defaults: &WriteArgs, default_index: Option<&str>, default_source: Option<&FetchSource>, allow_explicit_index: bool, only_id: bool) -> EsResult<Vec<Item>> {
     let mut items = Vec::new();
     let mut from = 0usize;
     let mut line = 0usize;
@@ -109,6 +111,9 @@ pub fn parse(data: &Bytes, defaults: &WriteArgs, default_index: Option<&str>, de
         match meta {
             Value::Obj(meta) => {
                 for (k, x) in meta {
+                    if only_id && k != "_id" {
+                        return Err(EsError::illegal_argument(format!("this bulk request's action lines may only name [_id], not [{k}]")));
+                    }
                     if let Value::Arr(_) = x {
                         return Err(EsError::illegal_argument(format!("Malformed action/metadata line [{line}], expected a simple value for field [{k}] but found [START_ARRAY]")));
                     }
@@ -210,7 +215,23 @@ pub async fn bulk(ctx: &Ctx<'_>) -> EsResult<Reply> {
     };
     let default_source = FetchSource::from_params(ctx.query("_source"), ctx.query("_source_includes"), ctx.query("_source_excludes"))?;
     let default_index = ctx.path_param("index").map(str::to_string);
-    let items = parse(&ctx.body, &defaults, default_index.as_deref(), default_source.as_ref(), true)?;
+    // A connector's sync ([`crate::xpack::internal::index_only`]): `index` actions into its own
+    // index only, or nothing runs.
+    let only = crate::xpack::internal::bulk_index_only();
+    if let Some(target) = &only
+        && default_index.as_ref() != Some(target)
+    {
+        return Err(EsError::illegal_argument(format!("this bulk request may only write to [{target}]")));
+    }
+    let mut items = parse(&ctx.body, &defaults, default_index.as_deref(), default_source.as_ref(), only.is_none(), only.is_some())?;
+    if only.is_some() && items.iter().any(|it| it.action != Action::Index) {
+        return Err(EsError::illegal_argument("this bulk request may only index documents"));
+    }
+    // Item work runs on other threads, where the task-local isn't seen: each item carries it,
+    // so no pipeline moves a document out of the index ([`WriteArgs::index_only`]).
+    for it in &mut items {
+        it.args.index_only = only.clone();
+    }
     // `BulkRequest.validate`.
     let mut errs = Vec::new();
     if items.is_empty() {
