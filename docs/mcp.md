@@ -158,7 +158,9 @@ A 2026-07-28 client can ask what happened instead of being asked (MCP Events, SE
 `io.modelcontextprotocol/events`, offered in `server/discover`): an agent watching a deploy polls
 `apps.event` and hears that it failed, a crash loop or an alert, and one waiting on a person polls
 `access.approval` (its own approvals as they're decided, `GET /v1/access/approvals/decided`, tied to
-`access_wait_approval`, so every connection has it) instead of holding a call open. All three of the SEP's delivery modes:
+`access_wait_approval`, so every connection has it) instead of holding a call open. Previews: `previews.event`
+(created, ready, failed, a visual change waiting, deleted; `GET /v1/previews/events`, tied to
+`previews_list`, its project's events only, as the gate filters the list). All three of the SEP's delivery modes:
 poll (`events/poll`), push (`events/stream`) and webhook (`events/subscribe`, `events/unsubscribe`), below. An event type is a
 feed route read through the gated router with the caller's token, as a tool is, and it's the tool
 for that route's to list and allow (`apps.event` is `apps_events`'s: `GET /v1/apps/events`): a
@@ -168,7 +170,8 @@ answer would. roll keeps nothing per client: the cursor (`a1:<seq>`) is the feed
 No cursor starts from now (`?latest=1`: no events, the newest cursor); one roll can't read answers
 a fresh cursor and `truncated: true`, never an error, as the SEP says. `arguments` filter as each
 type's `inputSchema` says: `apps.event` by `kinds` (`deploy.failed`, or a family as `alert.*`),
-`service` and `environment`, `access.approval` by `kinds` (`approved`, `denied`) and `tool`; `maxEvents` (at
+`service` and `environment`, `access.approval` by `kinds` (`approved`, `denied`) and `tool`,
+`previews.event` by `kinds` and `project`; `maxEvents` (at
 most 100) and `maxAgeMs` are honoured, events older than `maxAgeMs` skipped and marked `truncated`.
 A full page (`hasMore`) means poll again at once; otherwise after `nextPollMs` (15 s).
 
@@ -1251,11 +1254,10 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Agents only with scoped credentials (this PR).** Stripe's MCP server refuses full-access secret keys
-   from 2027-01-11 (401 with an OAuth challenge). roll's operator token gets every tool and skips
-   every agent control (lockdown, read-only, `agents_ask`, approvals); the policy switch
-   `mcp_require_grant` answers it 401 at `/v1/mcp` with the OAuth challenge, so pasting
-   `ROLL_ADMIN_TOKEN` into a client stops being the easy path.
+1. **Previews' events as an MCP Events feed (this PR).** Previews' #713 landed `GET
+   /v1/previews/events`: `previews.event` (created, ready, failed, visual_change, deleted; filters
+   kinds and project) in every delivery mode, so an agent hears "the preview is ready" instead of
+   polling `previews_get`.
 2. **Pick or drop single tools on a connection.** GitHub's server takes `X-MCP-Tools` as a list of
    tools and `X-MCP-Exclude-Tools` (exclusion wins); roll's `X-MCP-Tools` takes only `search`/`all`,
    so a copied GitHub config 400s. Take a list of names there and `?tools=a,b`, plus
@@ -1277,8 +1279,7 @@ waits on a sibling PR reaching main is last.
    an environment; SEP-2243), and reading and echoing `application_type` at registration (SEP-837).
 7. **MCP Events: more feeds.** All three delivery modes are on main (poll #692, webhook #703,
    push #710) with `apps.event` and `access.approval` (#708), and the receiver document (#712). Next: more feeds as their products have
-   a log after a cursor (roll code's durable land log, `Store::land_log`, has no route yet; previews
-   becoming ready, agreed with previews; secrets' events, agreed with secrets: a `project` argument
+   a log after a cursor (roll code's durable land log, `Store::land_log`, has no route yet; secrets' events, agreed with secrets: a `project` argument
    filling the feed's path). From the review: a feed
    whose route runs on its owner node needs `ActAs` carried across the forward (today's isn't
    forwarded); claims use each node's clock (a node more than 2 minutes ahead can deliver beside
@@ -1301,7 +1302,7 @@ waits on a sibling PR reaching main is last.
 10. **As siblings land** (`sibling-check.py`, 2026-11-22 13:45, over every open PR): members'
    groups (#681: `GET /v1/workspace/projects/{id}/groups`, `PUT` and `DELETE …/groups/{group}`;
    tools `workspace_list_groups`, `workspace_set_group`, `workspace_delete_group` once it lands);
-   previews' and secrets' event feeds (agreed; see item 9). #485's migration landed with both
+   secrets' event feed (agreed; previews' is item 1). #485's migration landed with both
    routes kept tool-less on purpose (the remote's credentials go in their bodies). #524 (previews on members) adds no routes
    beyond #501's; #627, #629, #596 and #504 add none. Not a tool: making a search browser key
    (#358's create answers the key; `limits.max_body_bytes` has no schema to join).
@@ -1334,7 +1335,7 @@ waits on a sibling PR reaching main is last.
 13. **Landed 2026-11-22 morning:** operator policy for agent connections: `agents_ask` and
    `mcp_lockdown` / `mcp_read_only` (#678), and `oauth_clients`, the OAuth clients that may connect,
    checked at consent, at every token and on every request, nothing revoked (#680). SQL sessions name who sent them (`application_name`: `roll tok_…`, so `postgres_activity` tells
-   an agent's queries apart; #683), and apps' sandbox tools marked open-world (#684). Output schemas for 2026-07-28 clients, learned from the sweep's real answers (#687). MCP Events in poll mode, starting with apps' event log (#692). VS Code's config to its 1.146 files (#694). Client ID metadata documents checked against draft -03, loopback redirects on any port (#696). MCP Events' webhook mode: verified callbacks, Standard Webhooks signing, deliveries read through the gate as the subscriber's grant (`roll_auth::ActAs`), two security reviews (#703); `access.approval`, a connection's approvals as they're decided (#708). Push mode (`events/stream`, #710) and the receiver document in place of the challenge (#712). How long a request waits for a person is the policy's (`approval_wait_minutes`, an approval rule's `wait_minutes`; up to a day, #716). Search's 14 relevance tools (#677) and `secrets_reach`'s new lists in `respond_to_leaked_secret` (#714), both in #717. **Landed 2026-11-21:** step-up authorization for OAuth clients (#673: a refusal of a connection's own
+   an agent's queries apart; #683), and apps' sandbox tools marked open-world (#684). Output schemas for 2026-07-28 clients, learned from the sweep's real answers (#687). MCP Events in poll mode, starting with apps' event log (#692). VS Code's config to its 1.146 files (#694). Client ID metadata documents checked against draft -03, loopback redirects on any port (#696). MCP Events' webhook mode: verified callbacks, Standard Webhooks signing, deliveries read through the gate as the subscriber's grant (`roll_auth::ActAs`), two security reviews (#703); `access.approval`, a connection's approvals as they're decided (#708). Push mode (`events/stream`, #710) and the receiver document in place of the challenge (#712). How long a request waits for a person is the policy's (`approval_wait_minutes`, an approval rule's `wait_minutes`; up to a day, #716). Search's 14 relevance tools (#677) and `secrets_reach`'s new lists in `respond_to_leaked_secret` (#714), both in #717. Agents only as grants when the policy says (`mcp_require_grant`: the admin token gets OAuth's challenge at `/v1/mcp`, #718). **Landed 2026-11-21:** step-up authorization for OAuth clients (#673: a refusal of a connection's own
    rules records the one rule it needed, `roll:step-up:<id>` in-band and as a 403 to Claude Code
    from 2.1.288, the consent screen adds roll's record to that connection; two security reviews); the instructions name every product by its tool prefix, search mode's tools
    always load, the 48 KiB cut's reason corrected, and Next ranked from the 2026-11-22 comparison
