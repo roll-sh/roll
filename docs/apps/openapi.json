@@ -56,11 +56,11 @@
     },
     "/v1/apps/events": {
       "get": {
-        "description": "Answers `{ events: Event[], next }`: what happened to services, in order, after a cursor.",
+        "description": "Answers `{ events: Event[], next }`: what happened to services, in order, after a cursor; `latest=1` (never with `after`: 400) answers no events and the newest cursor, for a reader that starts from now.",
         "operationId": "getEvents",
         "responses": {
           "200": {
-            "description": "`{ events: Event[], next }`: what happened to services, in order, after a cursor"
+            "description": "`{ events: Event[], next }`: what happened to services, in order, after a cursor; `latest=1` (never with `after`: 400) answers no events and the newest cursor, for a reader that starts from now"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
