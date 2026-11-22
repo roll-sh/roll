@@ -1917,6 +1917,10 @@ pub struct Environment {
     /// kind and ref, never their credentials); absent: its links reach the databases themselves.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
+    /// `false`: its schedules don't run (a cron's, `run.schedules`; deploys and runs still do);
+    /// absent: they do.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheduled: Option<bool>,
     /// A closed environment's interception on its owner (roll secrets' placeholders): requests
     /// filtered, placeholders swapped, the latest refusals; none until it has done something.
     #[serde(skip_serializing_if = "Option::is_none")]
