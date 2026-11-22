@@ -6,6 +6,8 @@
 //! every route that isn't theirs; CORS answers only the dashboard's origin; and rolld refuses to
 //! listen off loopback without a token.
 
+mod common;
+
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -17,19 +19,6 @@ use tokio_rustls::rustls::{self, ClientConfig, RootCertStore};
 
 const TOKEN: &str = "test-operator-token-0123456789abcdef";
 const DASHBOARD: &str = "https://roll.sh";
-
-/// A port nothing listens on, never handed out twice in this process.
-fn free_port() -> u16 {
-    static GIVEN: Mutex<Vec<u16>> = Mutex::new(Vec::new());
-    loop {
-        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        let mut given = GIVEN.lock().unwrap();
-        if !given.contains(&port) {
-            given.push(port);
-            return port;
-        }
-    }
-}
 
 struct Rolld(Child);
 
@@ -47,19 +36,9 @@ fn rolld(home: &std::path::Path, args: &[String], env: &[(&str, String)]) -> Com
     c
 }
 
-/// Every listener on its own loopback port.
-fn loopback_args(api: u16) -> Vec<String> {
-    let mut args = vec!["--api".to_string(), format!("127.0.0.1:{api}")];
-    for flag in [
-        "--proxy", "--redis", "--redis-http", "--kafka", "--s3", "--storage-api",
-        "--queues-amqp", "--queues-management", "--queues-stomp", "--queues-web-stomp", "--queues-mqtt", "--queues-web-mqtt", "--queues-stream", "--queues-http",
-        "--nosql-cql", "--nosql-cql-shard-aware", "--nosql-rest", "--nosql-alternator", "--search-http",
-        // The apps listener too: a local rolld on its default 7080 would fail the test otherwise.
-        "--apps-listen",
-    ] {
-        args.extend([flag.to_string(), format!("127.0.0.1:{}", free_port())]);
-    }
-    args
+/// Every listener on a loopback port the OS picks.
+fn loopback_args() -> Vec<String> {
+    common::LISTENERS.iter().flat_map(|name| [format!("--{name}"), "127.0.0.1:0".to_string()]).collect()
 }
 
 fn concrete(pattern: &str) -> String {
@@ -104,9 +83,7 @@ async fn https(port: u16, roots: &RootCertStore, host: &str, path: &str, auth: O
 async fn every_control_plane_route_needs_the_operator_token() {
     let home = tempfile::tempdir().unwrap();
     let certs = home.path().join("certs");
-    let (api_port, https_port) = (free_port(), free_port());
-    let local = |p: u16| format!("127.0.0.1:{p}");
-    let mut env = vec![
+    let env = vec![
         ("ROLL_ADMIN_TOKEN", TOKEN.to_string()),
         ("ROLL_DASHBOARD_ORIGIN", DASHBOARD.to_string()),
         ("RUST_LOG", "warn,rolld::auth=debug".to_string()),
@@ -115,17 +92,16 @@ async fn every_control_plane_route_needs_the_operator_token() {
         ("ROLL_EDGE_SITE_DOMAIN", "rollsite.test".to_string()),
         ("ROLL_EDGE_REGION", "r1".to_string()),
         ("ROLL_EDGE_CERT_DIR", certs.display().to_string()),
-        ("ROLL_EDGE_HTTPS", local(https_port)),
         // The edge's queues listeners need a real login (guest/guest is refused behind it).
         ("ROLL_QUEUES_USER", "auth-test".to_string()),
         ("ROLL_QUEUES_PASSWORD", "auth-test-password".to_string()),
         // Sign-in codes land here (docs/accounts.md).
         ("ROLL_ACCOUNTS_OUTBOX", home.path().join("outbox").display().to_string()),
     ];
-    for var in ["ROLL_EDGE_REDIS", "ROLL_EDGE_PG", "ROLL_EDGE_KAFKA", "ROLL_EDGE_NOSQL", "ROLL_EDGE_AMQPS", "ROLL_EDGE_MQTTS", "ROLL_EDGE_STOMPS", "ROLL_EDGE_MQ_STREAM"] {
-        env.push((var, local(free_port())));
-    }
-    let mut child = rolld(home.path(), &loopback_args(api_port), &env).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().expect("rolld starts");
+    let mut cmd = rolld(home.path(), &[], &env);
+    let listeners: Vec<&str> = common::LISTENERS.iter().chain(common::EDGE).copied().collect();
+    let started = common::on_any_port(&mut cmd, &listeners, home.path());
+    let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().expect("rolld starts");
     // Startup lists every route with its access: `host=api route=/v1/projects access=operator`.
     let routes = Arc::new(Mutex::new(Vec::<(String, String, String)>::new()));
     // And how the permission catalogue classifies it for scoped tokens: `scoped=postgres`.
@@ -152,8 +128,9 @@ async fn every_control_plane_route_needs_the_operator_token() {
             }
         });
     }
+    let addrs = started.addrs_or(&mut child, || output.lock().unwrap().clone()).await;
     let _d = Rolld(child);
-    let api = format!("http://127.0.0.1:{api_port}");
+    let (api, https_port) = (addrs.url("api"), addrs.port("edge-https"));
     let http = reqwest::Client::builder().timeout(Duration::from_secs(20)).redirect(reqwest::redirect::Policy::none()).build().unwrap();
     let mut up = false;
     for _ in 0..600 {
@@ -544,9 +521,9 @@ async fn sign_in(http: &reqwest::Client, api: &str, outbox: &std::path::Path) ->
 #[test]
 fn refuses_to_listen_off_loopback_without_a_token() {
     let home = tempfile::tempdir().unwrap();
-    let mut off = loopback_args(free_port());
-    off[1] = format!("0.0.0.0:{}", free_port());
-    let local = loopback_args(free_port());
+    let mut off = loopback_args();
+    off[1] = "0.0.0.0:0".to_string();
+    let local = loopback_args();
     for (args, env, why) in [
         (&off, vec![], "rolld listens on 0.0.0.0"),
         (&local, vec![("ROLL_EDGE", "1".to_string())], "ROLL_EDGE is on"),

@@ -44,6 +44,7 @@ interface Form {
   /** Private roll code repos submodules may come from, comma-separated. */
   submoduleRepos: string;
   lfs: boolean;
+  otel: boolean;
   type: Run["type"];
   port: string;
   start: string;
@@ -161,6 +162,7 @@ export function formOf(s: Service): Form {
     submodules: !!s.build.submodules,
     submoduleRepos: (s.build.submodule_repos ?? []).join(", "),
     lfs: !!s.build.lfs,
+    otel: !!s.build.otel,
     type: s.run.type,
     port: str(s.run.port),
     start: str(s.run.start),
@@ -278,6 +280,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
     build.submodule_repos = repos.length ? repos : null;
   }
   if (f.lfs !== before.lfs) build.lfs = f.lfs ? true : null;
+  if (f.otel !== before.otel) build.otel = f.otel ? true : null;
   if (Object.keys(build).length) patch.build = build;
   const run: Reset<Run> = {};
   if (f.type !== before.type) run.type = f.type;
@@ -578,6 +581,14 @@ export function SettingsTab({
               {form.sourceKind === "repo" && form.submodules && (
                 <Field label="Private submodule repos" hint="roll code repos you can read that its submodules may come from">
                   {t("submoduleRepos", "acme/lib, acme/ui")}
+                </Field>
+              )}
+              {(form.sourceKind === "git" || form.sourceKind === "repo" || form.sourceKind === "upload") && (
+                <Field label="OpenTelemetry agent" hint="Node's or Python's, in its image; started while its traces are on">
+                  <select value={form.otel ? "on" : "off"} onChange={(e) => set("otel", e.target.value === "on")} className={`${input} w-full`}>
+                    <option value="off">None (an SDK of its own)</option>
+                    <option value="on">Added at build</option>
+                  </select>
                 </Field>
               )}
               {form.sourceKind === "git" && (

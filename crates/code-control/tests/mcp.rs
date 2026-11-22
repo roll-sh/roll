@@ -148,6 +148,9 @@ async fn transport_sessions_and_protocol() {
         // What can't be undone asks a person first: a closed change, a preview's data.
         let destructive = ["close_change", "stop_preview"].contains(&t["name"].as_str().unwrap());
         assert_eq!(t["annotations"]["destructiveHint"], destructive, "{}", t["name"]);
+        // A read, or only PUTs and DELETEs: retrying it is safe.
+        let idempotent = read_only || ["dequeue_change", "stop_preview", "release_agent_work"].contains(&t["name"].as_str().unwrap());
+        assert_eq!(t["annotations"]["idempotentHint"], idempotent, "{}", t["name"]);
         if open || ["read_file", "land", "comment"].contains(&t["name"].as_str().unwrap()) {
             assert_eq!(t["annotations"]["openWorldHint"], open, "{}", t["name"]);
         }
@@ -1095,9 +1098,10 @@ async fn agent_tools_drive_a_machine_like_their_routes() {
         "body": { "type": "approval", "action": "command", "title": "Run `cargo test`", "decisions": ["accept", "decline"] }
     });
     let items = vec![
-        Stamped { seq: 1, entity: entity(json!({ "kind": "project", "id": "prj_1", "name": "api", "path": "/x", "created_at": 1, "updated_at": 1 })) },
+        Stamped { seq: 1, entity: entity(json!({ "kind": "project", "id": "prj_1", "name": "api", "path": "/x", "repo": { "owner": "acme", "repo": "api" }, "created_at": 1, "updated_at": 1 })) },
         Stamped { seq: 2, entity: entity(thread) },
         Stamped { seq: 3, entity: entity(request) },
+        Stamped { seq: 4, entity: entity(json!({ "kind": "project", "id": "prj_2", "name": "web", "path": "/y", "created_at": 1, "updated_at": 1 })) },
     ];
     d.upsert(items).await;
     // The daemon: records each command, answers interrupts with `conflict`, the rest `created`.
@@ -1123,6 +1127,10 @@ async fn agent_tools_drive_a_machine_like_their_routes() {
     let listed = c.tool("list_agent_threads", json!({ "owner": "acme", "machine": "box" })).await;
     assert_eq!((listed["threads"][0]["id"].as_str(), listed["threads"][0]["project_name"].as_str()), (Some("thr_a"), Some("api")), "{listed}");
     assert_eq!((listed["threads"][0]["machine"].as_str(), listed["requests"][0]["id"].as_str()), (Some(mid.as_str()), Some("req_1")), "{listed}");
+    // Projects, threads or not, with the repo each clones: where a new thread can start.
+    let projects: Vec<(&str, &Value)> = listed["projects"].as_array().unwrap().iter().map(|p| (p["id"].as_str().unwrap(), &p["repo"])).collect();
+    assert_eq!(projects, [("prj_1", &json!({ "owner": "acme", "repo": "api" })), ("prj_2", &Value::Null)], "{listed}");
+    assert_eq!(listed["projects"][1]["machine"], mid.as_str());
 
     // An agent starts threads in ask or auto_edit only (the default is full_access).
     let err = c.tool_err("create_agent_thread", json!({ "owner": "acme", "machine": mid, "project": "prj_1", "provider": "claude", "id": "k0" })).await;
