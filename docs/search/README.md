@@ -755,7 +755,11 @@ roll generates in the browser from a seeded PRNG (`lib/search-samples.ts`: 1,000
 through the console's `_bulk` in pages under the body limit, then runs three ready queries on it in
 place (search as you type, facets, a filtered sort; errors in the last hour, top paths, ES|QL on
 Elasticsearch-flavor clusters), each with Open in Console and copy as curl, JavaScript or Python.
-Remove deletes the index, or the data stream and its template.
+The copied code reads `$ELASTICSEARCH_API_KEY` (or `$OPENSEARCH_USERNAME`/`$OPENSEARCH_PASSWORD`)
+until **Make a key** in the panel creates a `data` key for 30 days: shown once, then written into
+the copied code while the panel stays open (never stored in the browser). Remove deletes the index,
+or the data stream and its template. The Overview's figures refetch as soon as a load or remove
+finishes.
 
 The dashboard (`/dashboard/search/<cluster>`) lists indices; selecting one opens its documents
 (paged `_search` with a query string, as rows or as a table: the most common fields by default,
@@ -1321,8 +1325,10 @@ deterministic (#396).
    query landed (#658): one click loads 1,000 generated products or 2,000 ECS log lines on the
    Overview of a cluster with no indices or from the Indices tab, then three queries run in place
    with Open in Console, copy as curl, JavaScript or Python reading `$ELASTICSEARCH_API_KEY` as the
-   guides do, and a link to the keys panel). Left: a key made inline in that panel (today it links
-   to Settings → API keys); a sample dataset for RAG (passages with `semantic_text` on E5); and
+   guides do; a 30-day `data` key made in the panel goes into the copied code, shown once). Left:
+   a sample dataset for RAG (passages with `semantic_text` on E5); the Overview's document count
+   falls back to the metered figure while any index is closed (a key's security index right after
+   it's made), so it can read 0 until metering's next sample; and
    what writing the guides found: an API key's `encoded` value works only at the cluster's own
    host, so clients behind a shared address re-encode it as `<id>@<cluster>:<key>`; a `data` key
    can't post click events, so an app tracking clicks needs a second key; a `semantic_text` field
