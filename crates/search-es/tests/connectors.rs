@@ -252,7 +252,7 @@ async fn s3_bucket_objects_and_text() {
     };
     use search_es::s3::{Client, Credentials, Location};
     let at_ = Location { endpoint: reqwest::Url::parse(&endpoint).unwrap(), bucket: "docs".into(), region: "us-east-1".into(), path_style: true };
-    let bucket = Client::new(at_, Some(Credentials { access_key: S3_KEY.into(), secret_key: S3_SECRET.into(), session_token: None }), true).unwrap();
+    let bucket = Client::new(at_, Some(Credentials { access_key: S3_KEY.into(), secret_key: S3_SECRET.into(), session_token: None }), &search_es::egress::Egress::of(|_| None, true).unwrap()).unwrap();
     for (key, body) in [
         ("notes/hello.txt", "hello from a text file"),
         ("data/item.json", r#"{"title":"blue kettle","tags":["kitchen"]}"#),
