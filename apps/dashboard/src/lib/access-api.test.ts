@@ -15,7 +15,7 @@ describe("access", () => {
     expect(mcpConfig("claude-code", `${url}?tools=search&lockdown=1`).text).toBe(`claude mcp add --transport http roll '${url}?tools=search&lockdown=1'`);
     expect(mcpConfig("cursor", url).text).not.toContain("Authorization");
     expect(mcpConfig("claude-code", url, "rlt_x").text).toContain('--header "Authorization: Bearer rlt_x"');
-    expect(JSON.parse(mcpConfig("vscode", url, "rlt_x").text).servers.roll).toEqual({ type: "http", url, headers: { Authorization: "Bearer rlt_x" } });
+    expect(JSON.parse(mcpConfig("vscode", url, "rlt_x").text).mcpServers.roll).toEqual({ type: "http", url, headers: { Authorization: "Bearer rlt_x" } });
   });
 
   it("reads the consent request, starts from the asked preset, and fills in the project", () => {
