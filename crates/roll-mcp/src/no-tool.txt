@@ -2,9 +2,11 @@
 # is neither a tool's nor here). `no tool yet` is a gap to close, everything else a decision.
 # One `METHOD route  reason` a line, as the catalogue spells the route; `*` for a row of every method.
 # A line may name a route an open PR is about to add, so that PR's gate passes when it lands.
+GET /v1/access/approvals/decided                                               an MCP Events feed (access.approval): events/poll and webhooks read it, access_wait_approval waits on one
 GET /v1/access/catalog                                                         the dashboard's (the permission catalogue; tools carry their own actions)
 GET /v1/access/oauth/clients                                                   the dashboard's (the OAuth clients a person registered)
 GET /v1/access/oauth/clients/{id}                                              the dashboard's (one registered OAuth client)
+GET /v1/access/oauth/step-ups/{id}                                             the consent screen's (a step-up its person decides; a client never reads it)
 POST /v1/access/tokens                                                         answers or sets a credential
 DELETE /v1/access/tokens/{id}                                                  a person's call (a token's revoke is the person's; security_checkup names them)
 PATCH /v1/access/tokens/{id}                                                   a person's call (a token's rules)
@@ -90,6 +92,20 @@ PUT /v1/search/clusters/{id}/remotes/{alias}                                   a
 PUT /v1/search/clusters/{id}/repositories/{name}                               an outside integration's setup: an admin's, with its credentials (#361)
 POST /v1/search/clusters/{id}/request                                          the operator's (any Elasticsearch request, unscoped)
 POST /v1/search/clusters/{id}/unload                                           the operator's (health, migrations, process control)
+POST /v1/search/clusters/{id}/indices/{index}/explain/{doc}                    no tool yet: maps after search-relevance-api lands
+PUT /v1/search/clusters/{id}/indices/{index}/settings                          no tool yet: maps after search-relevance-api lands
+GET /v1/search/clusters/{id}/query_rules                                       no tool yet: maps after search-relevance-api lands
+DELETE /v1/search/clusters/{id}/query_rules/{ruleset}                          no tool yet: maps after search-relevance-api lands
+GET /v1/search/clusters/{id}/query_rules/{ruleset}                             no tool yet: maps after search-relevance-api lands
+PUT /v1/search/clusters/{id}/query_rules/{ruleset}                             no tool yet: maps after search-relevance-api lands
+POST /v1/search/clusters/{id}/query_rules/{ruleset}/test                       no tool yet: maps after search-relevance-api lands
+GET /v1/search/clusters/{id}/synonyms                                          no tool yet: maps after search-relevance-api lands
+DELETE /v1/search/clusters/{id}/synonyms/{set}                                 no tool yet: maps after search-relevance-api lands
+GET /v1/search/clusters/{id}/synonyms/{set}                                    no tool yet: maps after search-relevance-api lands
+PUT /v1/search/clusters/{id}/synonyms/{set}                                    no tool yet: maps after search-relevance-api lands
+DELETE /v1/search/clusters/{id}/synonyms/{set}/{rule}                          no tool yet: maps after search-relevance-api lands
+GET /v1/search/clusters/{id}/synonyms/{set}/{rule}                             no tool yet: maps after search-relevance-api lands
+PUT /v1/search/clusters/{id}/synonyms/{set}/{rule}                             no tool yet: maps after search-relevance-api lands
 GET /v1/secrets/gateways/{id}/connect                                          interactive (a shell, files, a forward): an admin's, live
 GET /v1/secrets/health                                                         the operator's (health, migrations, process control)
 PATCH /v1/secrets/projects/{project}                                           a person's call: how long old versions are kept (shortening it deletes history)
@@ -201,3 +217,5 @@ PUT /v1/workspace/projects/{id}/homes/{product}/{ref}                          a
 GET /v1/workspace/projects/{id}/invites                                        a person's call: invites are a signed-in person's (#501)
 DELETE /v1/workspace/projects/{id}/invites/{invite}                            a person's call: invites are a signed-in person's (#501)
 DELETE /v1/workspace/projects/{id}/members/me                                  a person's call: leaving a project is the person's own (#501)
+GET /v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}/files            raw bytes, not JSON: apps_sandbox_exec reads and writes files (cat, a heredoc)
+PUT /v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}/files            raw bytes, not JSON: apps_sandbox_exec reads and writes files (cat, a heredoc)

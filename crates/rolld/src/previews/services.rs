@@ -166,6 +166,10 @@ impl roll_previews::ports::Apps for RollApps {
         // One voice on a pull request: previews posts `roll/preview` and its comment for the
         // environment, so roll apps posts no commit status or GitHub Deployment of its own (apps' #249).
         let mut body = json!({ "branch": null, "ephemeral": true, "access": access, "egress": egress, "report": false });
+        // Its schedule (a cron's, a service's scheduled commands and calls) runs in a preview only
+        // when the project says so: deployed and runnable on demand either way (roll apps'
+        // `scheduled`).
+        body["scheduled"] = json!(t.crons);
         // Who its keys bound to hosts are used as (roll apps resolves them): the rules' maker, or
         // nobody (withheld), never whoever made the call (the operator: rolld in process).
         if closed {
@@ -183,12 +187,13 @@ impl roll_previews::ports::Apps for RollApps {
         body["preview_host"] = json!(t.host);
         // A roll apps that predates a field refuses it (a node not yet upgraded, on a fleet):
         // `report` (#249; then its deploys report as well as previews), `preview_host` (its
-        // rolld preview URL still works) or `closed_by` (its maker is who set the egress, as
-        // before). The environment is made without the fields it doesn't know.
+        // rolld preview URL still works), `closed_by` (its maker is who set the egress, as
+        // before) or `scheduled` (a preview's cron runs its schedule, as before). The environment
+        // is made without the fields it doesn't know.
         let mut made = self.api.call(Method::PUT, &path, Some(body.clone())).await;
-        for _ in 0..3 {
+        for _ in 0..4 {
             let unknown = match &made {
-                Err(e) => e.downcast_ref::<super::Refused>().filter(|r| r.status.as_u16() == 400).and_then(|r| r.error.strip_prefix("unknown field ")).filter(|f| matches!(*f, "report" | "preview_host" | "closed_by")).map(str::to_string),
+                Err(e) => e.downcast_ref::<super::Refused>().filter(|r| r.status.as_u16() == 400).and_then(|r| r.error.strip_prefix("unknown field ")).filter(|f| matches!(*f, "report" | "preview_host" | "closed_by" | "scheduled")).map(str::to_string),
                 Ok(_) => None,
             };
             let Some(field) = unknown else { break };
@@ -242,7 +247,7 @@ impl roll_previews::ports::Apps for RollApps {
             t.git.as_deref().unwrap_or("image"),
             if t.access_token.is_some() { "p" } else if t.signed_in { "s" } else { "" },
             if self.feedback && t.feedback { "f" } else { "" },
-            if closed { format!("e{}{}", t.egress_hosts.join(","), t.maker.as_deref().map(|m| format!("m{m}")).unwrap_or_default()) } else { String::new() },
+            (if closed { format!("e{}{}", t.egress_hosts.join(","), t.maker.as_deref().map(|m| format!("m{m}")).unwrap_or_default()) } else { String::new() }) + if t.crons { "k" } else { "" },
             t.rebuild.map(|n| format!("#r{n}")).unwrap_or_default()
         );
         // The deployment previews last started for exactly this, still under way or live: wait on
@@ -343,6 +348,16 @@ impl roll_previews::ports::Apps for RollApps {
         self.ids.lock().unwrap_or_else(|p| p.into_inner()).remove(&(preview.to_string(), service.to_string()));
         self.started.lock().unwrap_or_else(|p| p.into_inner()).remove(&(preview.to_string(), service.to_string()));
         Ok(())
+    }
+
+    /// The `pv-` environment's live deployment: its git commit and its own URL (roll apps'
+    /// deployment URL; none for a worker, a service with a volume, or a roll apps without `url`).
+    async fn live_build(&self, preview: &str, service: &str) -> Option<(String, String)> {
+        let (id, env) = self.find(preview, service).await.ok()??;
+        let path = Self::env_path(&id, &env);
+        let dep = s(&self.api.get(&path).await.ok()?["active"]["id"])?;
+        let d = self.api.get(&format!("{path}/deploys/{}", seg(&dep))).await.ok()?;
+        Some((s(&d["revision"])?, s(&d["url"])?))
     }
 
     /// The `pv-` environment's latest minute (roll apps' metrics): cores, and resident bytes.
@@ -749,6 +764,10 @@ impl roll_previews::ports::Apps for Services {
 
     async fn metrics(&self, preview: &str, service: &str) -> Option<(f64, u64)> {
         if matches!(self.apps.find(preview, service).await, Ok(Some(_))) { self.apps.metrics(preview, service).await } else { self.runtime.metrics(preview, service).await }
+    }
+
+    async fn live_build(&self, preview: &str, service: &str) -> Option<(String, String)> {
+        if matches!(self.apps.find(preview, service).await, Ok(Some(_))) { self.apps.live_build(preview, service).await } else { None }
     }
 
     /// roll apps groups its own; a `roll.toml` service's are grouped here, from its last

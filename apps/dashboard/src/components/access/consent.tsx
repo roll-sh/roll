@@ -3,6 +3,7 @@ import { ExternalLink, LucideProvider } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 import {
   accessApi,
+  broadRule,
   catalogFor,
   denyRedirect,
   describeRule,
@@ -11,11 +12,14 @@ import {
   presetFor,
   parseRate,
   presetRules,
+  redirectRegistered,
+  stepUpId,
   type Allowed,
   type AuthorizeRequest,
   type Catalog,
   type Me,
   type Rule,
+  type StepUp,
   waitsForAdmin,
 } from "@/lib/access-api";
 import { requestSignIn, subscribeToken } from "@/lib/code-token";
@@ -71,11 +75,45 @@ export function Problem({ text, title = "This connection request can't be used",
 }
 
 function Ask({ req }: { req: AuthorizeRequest }) {
-  const loaded = useSignedInLoad(() => accessApi.client(req.client_id), [req.client_id]);
+  const stepUp = stepUpId(req.scope);
+  // A step-up roll recorded for one of this person's connections (else: none, and a plain consent).
+  const loaded = useSignedInLoad(
+    () => Promise.all([accessApi.client(req.client_id), stepUp ? accessApi.stepUp(stepUp).catch(() => null) : Promise.resolve(null)]),
+    [req.client_id, stepUp],
+  );
+  const [fresh, setFresh] = useState(false);
   if (loaded.state !== "ready") return <LoadState loaded={loaded} what="connect this client" />;
-  const { me, catalog, value: client } = loaded;
-  if (!client.redirect_uris.includes(req.redirect_uri)) return <Problem text="The redirect isn't one this client registered." />;
+  const {
+    me,
+    catalog,
+    value: [client, proposal],
+  } = loaded;
+  if (!redirectRegistered(client.redirect_uris, req.redirect_uri)) return <Problem text="The redirect isn't one this client registered." />;
+  if (client.not_allowed) return <Problem title={`${client.name} can't connect`} text={`${client.not_allowed}.`} next="" />;
   const back = new URL(req.redirect_uri);
+  if (proposal && proposal.connection.client_id === client.id && !fresh) {
+    return (
+      <StepUpConfirm
+        clientName={client.name}
+        proposal={proposal}
+        onAdd={async () => {
+          const { redirect } = await accessApi.authorize({
+            rules: [],
+            step_up: proposal.id,
+            client_id: req.client_id,
+            redirect_uri: req.redirect_uri,
+            code_challenge: req.code_challenge,
+            code_challenge_method: req.code_challenge_method,
+            state: req.state,
+            resource: req.resource,
+          });
+          window.location.assign(redirect);
+        }}
+        onDeny={() => window.location.assign(denyRedirect(req.redirect_uri, req.state))}
+        onFresh={() => setFresh(true)}
+      />
+    );
+  }
   return (
     <AllowForm
       me={me}
@@ -113,6 +151,65 @@ function Ask({ req }: { req: AuthorizeRequest }) {
         </section>
       )}
     />
+  );
+}
+
+/**
+ * Step-up's consent: a refused call of one of the person's connections asks for one rule. They see
+ * the rule (said plainly when it reaches far) and which connection it joins, and add it, deny it, or
+ * set up a new connection instead. What's added is roll's record of the refusal, never the client's.
+ */
+export function StepUpConfirm({
+  clientName,
+  proposal,
+  onAdd,
+  onDeny,
+  onFresh,
+}: {
+  clientName: string;
+  proposal: StepUp;
+  onAdd: () => Promise<void>;
+  onDeny: () => void;
+  onFresh: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const add = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await onAdd();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setBusy(false);
+    }
+  };
+  return (
+    <section className="rise space-y-4 rounded-xl border border-line bg-panel p-6">
+      <HorizonMark state={busy ? "thinking" : "idle"} size={28} />
+      <h1 className="text-xl font-semibold tracking-[-0.04em]">
+        {clientName} asks for one more permission on &ldquo;{proposal.connection.name}&rdquo;
+      </h1>
+      <p className="text-[13px] text-muted">A call it made was refused by this connection&apos;s rules. Adding this lets it make that call:</p>
+      <p className="rounded-lg border border-line bg-bg px-3 py-2 font-mono text-[12px]">{describeRule(proposal.rule)}</p>
+      {broadRule(proposal.rule) && (
+        <p className="text-[12px] text-danger">This reaches far: it applies to every resource of the product, or lets it reveal or administer. Add it only if you meant to.</p>
+      )}
+      {proposal.waits_for_admin && <p className="text-[12px] text-muted">Your organization&apos;s policy has an admin approve this: the connection waits until they do.</p>}
+      <p className="text-[12px] text-subtle">Its other rules and settings stay as they are, and every session of this connection gets it.</p>
+      <ErrorNote error={error} />
+      <div className="flex flex-wrap items-center gap-2">
+        <button onClick={add} disabled={busy} className={primary}>
+          {busy ? <span className="shimmer">Adding…</span> : "Add it"}
+        </button>
+        <button onClick={onDeny} disabled={busy} className={btn}>
+          Deny
+        </button>
+        <button onClick={onFresh} disabled={busy} className="text-[12px] text-subtle underline-offset-2 hover:underline">
+          Set up a new connection instead
+        </button>
+      </div>
+    </section>
   );
 }
 

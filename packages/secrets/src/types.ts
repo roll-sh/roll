@@ -193,8 +193,21 @@ export type Reach = {
   key: string | null;
   protected: boolean;
   untrusted: boolean;
+  /** roll-access tokens (`rlt_…`) whose rules reach it. */
   tokens: Holder[];
   identities: Holder[];
+  /** The project's members whose role reveals it now (`admin`: an admin account, which reveals everything). */
+  people: { user: string; handle: string; role: string; actions: Action[]; admin?: boolean }[];
+  /** How many accounts are the operator's admins (null: nothing tells). */
+  admins: number | null;
+  /** Live OAuth connections (`rlo_…`: a person's MCP client or app) that reach it, by person (`created_by`). A cut-off's `tokens` revokes them too. */
+  clients: Holder[];
+  /** roll apps services that read it: `through` the folder they deploy with (`env:/path`) or a `roll://` variable. */
+  services: { service: string; name: string; environment: string; through: string; last_deployed_at: number | null }[];
+  /** Live agents sandboxes holding a copy of its values (`from`: `env` or `env:/path`). */
+  sandboxes: { id: string; name: string; owner: string; by: string; from: string; keys: string[] }[];
+  /** People who read it in 30 days and may no longer reveal it (`why`): they still know it. */
+  knew: { user: string; last_at: number; reads: number; why: "left" | "role" | "gone" }[];
   syncs: { id: string; kind: string; target: unknown; last_synced_at: number | null; paused_at: number | null }[];
   /** Live dynamic credentials issued for its keys. */
   leases: { id: string; key: string; consumer: string; issued_at: number; expires_at: number }[];
@@ -415,7 +428,7 @@ export type DeletedProject = { project: string; name: string; deleted_at: number
 export type Recovered = { project: string; name: string; recovered_at: number; rotated: number; rotation_failed: string[] };
 export type Place = { project: string; project_name: string; environment: string; path: string; key: string; version: number; updated_at: number; linked: boolean };
 /** One thing to fix (`GET …/health`), worst first: where, never a value. */
-export type Finding = { issue: "decoy_used" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "unplaced" | "operator_made" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string; decoy?: Decoy };
+export type Finding = { issue: "decoy_used" | "production_unprotected" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "unplaced" | "operator_made" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string; decoy?: Decoy };
 /** One project's findings (`GET /v1/secrets/findings`). */
 export type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
 /** A URL roll calls to issue and revoke a value that lives outside roll (`rotator` links). */

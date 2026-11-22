@@ -134,6 +134,13 @@ pub trait Brancher: Send + Sync {
     async fn schema(&self, _parent: &str, _branch: &str) -> anyhow::Result<Option<(Vec<String>, Vec<String>)>> {
         Ok(None)
     }
+
+    /// The branch's schema alone, as [`Brancher::schema`] reads it: kept as the branch is made, so
+    /// the changes shown later are the change's ([`crate::schema::diff_since`]). Never reads the
+    /// parent (no compute of production's started for it).
+    async fn branch_schema(&self, _parent: &str, _branch: &str) -> anyhow::Result<Option<Vec<String>>> {
+        Ok(None)
+    }
 }
 
 /// A change (or branch) as previews see it.
@@ -468,6 +475,9 @@ pub struct Target {
     /// With `egress` `roll`: the hosts outside roll it may still reach, through the preview's
     /// egress proxy.
     pub egress_hosts: Vec<String>,
+    /// The project's `crons`: a backend's scheduled work (roll apps' crons, scheduled commands and
+    /// calls) runs in the preview too; off, it's deployed with its schedule off.
+    pub crons: bool,
     /// With `egress` `roll`, for a backend that resolves the environment's secrets itself (roll
     /// apps' `closed_by`): who its keys bound to hosts are used as, the person who last saved
     /// the project's preview rules, or their token. None: nobody (the operator saved them), and
@@ -709,6 +719,12 @@ pub trait Apps: Send + Sync {
     async fn metrics(&self, _preview: &str, _service: &str) -> Option<(f64, u64)> {
         None
     }
+    /// The build the service runs now, `(its git commit, its own URL)`, where the backend keeps
+    /// each build reachable at a URL of its own (roll apps' deployment URLs): kept as an earlier
+    /// push when a new head replaces it. None where it doesn't (the runtime keeps its own).
+    async fn live_build(&self, _preview: &str, _service: &str) -> Option<(String, String)> {
+        None
+    }
     /// Its errors in the last `minutes`, grouped (none where the backend can't tell when a line
     /// was written). Text the backend cuts before grouping it is masked first with `masks`' values
     /// (`crate::mask_cut`), read only when there's an error; the engine masks every title and
@@ -815,6 +831,13 @@ pub trait Apps: Send + Sync {
 /// no. It may read a database: it's called off the async workers.
 pub trait Visitors: Send + Sync {
     fn may_open(&self, user: &str, session: &str, project: &str) -> bool;
+    /// Whether `user` (`usr_…`), who made a share link, may still open `project`'s previews: the
+    /// link works only while they do (an account that still signs in, with a role that reveals a
+    /// preview). Unlike [`Visitors::may_open`], no session: the link is theirs, not a visit of
+    /// theirs. A failed lookup is a no. It may read a database: called off the async workers.
+    fn maker_reaches(&self, _user: &str, _project: &str) -> bool {
+        true
+    }
     /// Every name a person goes by where a change's author is written (their roll handle, and the
     /// login of each GitHub account linked to them): how an author is told apart, whichever name
     /// their change carries. It may read a database: it's called off the async workers. An error

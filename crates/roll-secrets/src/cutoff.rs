@@ -205,8 +205,9 @@ impl Secrets {
 
         // 1. Tokens first: they're what an attacker holding one uses now. Reach marked those this
         // caller may not revoke (they reach other projects too): they're listed, not revoked.
-        if req.tokens && !reach.tokens.is_empty() {
-            let (named, skipped): (Vec<_>, Vec<_>) = reach.tokens.iter().partition(|h| h.skipped.is_none());
+        // OAuth connections (`clients`) are roll-access grants too: cut with the tokens.
+        if req.tokens && !(reach.tokens.is_empty() && reach.clients.is_empty()) {
+            let (named, skipped): (Vec<_>, Vec<_>) = reach.tokens.iter().chain(&reach.clients).partition(|h| h.skipped.is_none());
             out.skipped = skipped.into_iter().map(|h| Skipped { id: h.id.clone(), name: h.name.clone(), why: h.skipped.unwrap_or(crate::reach::BEYOND) }).collect();
             let named: Vec<(String, String)> = named.into_iter().map(|h| (h.id.clone(), h.name.clone())).collect();
             let (done, failed) = if named.is_empty() { (vec![], vec![]) } else { self.revoke_grants(&named, &reason, &by, &mut out.batches) };
@@ -266,7 +267,7 @@ impl Secrets {
             Ok((disabled, logins, expired, unshared, paused, ended)) => {
                 out.placeholders = ended.iter().map(|id| Cut { id: id.clone(), name: reach.placeholders.iter().find(|p| &p.id == id).map(|p| format!("{} for {}", p.key, p.consumer)).unwrap_or_default() }).collect();
                 // Their consumers' interception CAs naming a host they no longer have end.
-                self.hosts_shrank(reach.placeholders.iter().filter(|p| ended.contains(&p.id)).map(|p| p.consumer.as_str()));
+                self.hosts_changed(reach.placeholders.iter().filter(|p| ended.contains(&p.id)).map(|p| p.consumer.as_str()));
                 let name = |list: &[crate::reach::Holder], id: &str| list.iter().find(|h| h.id == id).map(|h| h.name.clone()).unwrap_or_default();
                 out.identities = disabled.iter().map(|id| Cut { id: id.clone(), name: name(&reach.identities, id) }).collect();
                 out.shares = expired.iter().map(|id| Cut { id: id.clone(), name: reach.shares.iter().find(|s| &s.id == id).map(|s| s.note.clone()).unwrap_or_default() }).collect();

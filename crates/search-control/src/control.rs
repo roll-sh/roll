@@ -62,6 +62,9 @@ pub enum ControlError {
     /// Refused to this caller (HTTP 403): roll secrets wouldn't let them reveal a reference.
     #[error("{0}")]
     Forbidden(String),
+    /// Too much of something runs at once (HTTP 429): try again later.
+    #[error("{0}")]
+    Busy(String),
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
 }
@@ -211,6 +214,34 @@ pub struct ClusterOptions {
     /// Requests per minute all its browser keys may make together; `null`: the node's default.
     #[serde(default, deserialize_with = "present")]
     pub browser_per_minute: Option<Option<i64>>,
+    /// The cluster's `reindex.remote.whitelist`: `host:port` patterns (`*` matches any run of
+    /// characters) reindex from remote may read, at most [`MAX_WHITELIST`]; `[]`: none.
+    pub reindex_whitelist: Option<Vec<String>>,
+}
+
+/// The most patterns a cluster's reindex whitelist holds.
+pub const MAX_WHITELIST: usize = 64;
+
+/// A reindex whitelist as given, checked: `host:port` patterns of letters, digits, `.`, `-`,
+/// `_`, `*` and an IPv6 literal's brackets and colons, each at most 260 characters.
+pub fn whitelist_patterns(given: Vec<String>) -> Result<Vec<String>> {
+    if given.len() > MAX_WHITELIST {
+        return Err(ControlError::Invalid(format!("reindex_whitelist: at most {MAX_WHITELIST} entries")));
+    }
+    let mut out: Vec<String> = Vec::with_capacity(given.len());
+    for g in given {
+        let p = g.trim().to_ascii_lowercase();
+        let ok = p.len() <= 260
+            && p.rsplit_once(':').is_some_and(|(h, port)| !h.is_empty() && !port.is_empty() && (port == "*" || port.parse::<u16>().is_ok()))
+            && p.chars().all(|c| c.is_ascii_alphanumeric() || ".-_*:[]".contains(c));
+        if !ok {
+            return Err(ControlError::Invalid(format!("reindex_whitelist: [{}] isn't a host:port pattern", g.chars().take(80).collect::<String>())));
+        }
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    Ok(out)
 }
 
 /// A field that was given, `null` included (`Some(None)`), apart from one left out (`None`).
@@ -372,6 +403,8 @@ pub fn spec_for(c: &SearchCluster) -> ClusterSpec {
     spec.max_body_bytes = Some((c.max_body_mb.max(1) as usize) << 20);
     spec.destructive_requires_name = c.destructive_requires_name;
     spec.ip_allowlist = allowlist_of(&c.ip_allowlist);
+    // The cluster's own, even empty (`[]`: no remote), never the node setting's.
+    spec.reindex_whitelist = Some(c.reindex_whitelist.clone());
     spec.browser_per_minute = c.browser_per_minute.and_then(|n| u64::try_from(n).ok());
     spec.cors = c.cors.as_ref().and_then(|g| match search_server::cors::Cors::new(&g.allow_origin, g.allow_methods.as_deref(), g.allow_headers.as_deref(), g.max_age) {
         Ok(c) => Some(Arc::new(c)),
@@ -382,6 +415,7 @@ pub fn spec_for(c: &SearchCluster) -> ClusterSpec {
         }
     });
     spec.catalog_id = Some(c.id.clone());
+    spec.owner = c.owner.clone();
     // Only until its first load has marked what it inherited: a branch made before marking
     // existed, or one already marked, runs its jobs as its own.
     spec.branch_of = c.parent_id.clone().filter(|_| c.inherit_pending);
@@ -432,30 +466,138 @@ fn connection_of(cfg: &SearchConfig, name: &str) -> Value {
     json!({ "url": format!("{scheme}://{host}{port_part}"), "host": host, "port": port, "username": name })
 }
 
-/// What a link's credential may do: all of the indices' data and their templates, pipelines
-/// and lifecycle policies, as an app uses a cluster; no security (users, roles, keys).
-fn link_role() -> Value {
-    json!({
-        "cluster": ["monitor", "manage_index_templates", "manage_ingest_pipelines", "manage_ilm"],
-        "indices": [{ "names": ["*"], "privileges": ["all"] }]
-    })
+/// What a link's credential may do (`None`): every index's data and the cluster's templates,
+/// pipelines and lifecycle policies, as an app uses a cluster; no security (users, roles, keys).
+/// Named indices (`Some`) get their data only: templates, pipelines and lifecycle policies are
+/// the whole cluster's (a template for `tenant-a-*` could match `tenant-b-*`), so they go.
+fn link_role(indices: Option<&[String]>) -> Value {
+    match indices {
+        None => json!({
+            "cluster": ["monitor", "manage_index_templates", "manage_ingest_pipelines", "manage_ilm"],
+            "indices": [{ "names": ["*"], "privileges": ["all"] }]
+        }),
+        Some(names) => json!({ "cluster": ["monitor"], "indices": [{ "names": names, "privileges": ["all"] }] }),
+    }
 }
 
 /// [`link_role`] in OpenSearch Security's terms (the opensearch dialect): the same action
-/// groups and actions (ISM for ILM), no `restapi:` permission.
-fn os_link_role() -> Value {
+/// groups and actions (ISM for ILM), no `restapi:` permission. Named indices keep the composite
+/// and scroll actions, which OpenSearch checks as the cluster's (`_bulk`, `_mget`, `_msearch`).
+fn os_link_role(indices: Option<&[String]>) -> Value {
+    let mut cluster = vec!["cluster_monitor", "cluster_composite_ops", "indices:data/read/scroll*"];
+    if indices.is_none() {
+        cluster.extend(["cluster_manage_index_templates", "cluster_manage_pipelines", "cluster:admin/opendistro/ism/*"]);
+    }
+    let all = ["*".to_string()];
     json!({
-        "description": "roll: an app's link (data, templates, pipelines, ISM; no security)",
-        "cluster_permissions": [
-            "cluster_monitor",
-            "cluster_composite_ops",
-            "indices:data/read/scroll*",
-            "cluster_manage_index_templates",
-            "cluster_manage_pipelines",
-            "cluster:admin/opendistro/ism/*"
-        ],
-        "index_permissions": [{ "index_patterns": ["*"], "allowed_actions": ["indices_all"] }]
+        "description": if indices.is_none() { "roll: an app's link (data, templates, pipelines, ISM; no security)" } else { "roll: a key's data on its indices" },
+        "cluster_permissions": cluster,
+        "index_permissions": [{ "index_patterns": indices.unwrap_or(&all[..]), "allowed_actions": ["indices_all"] }]
     })
+}
+
+/// What an API key from the keys route may do ([`Control::create_key`]'s `access`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyAccess {
+    /// Everything the cluster's own user may do (whole-cluster: no `indices`).
+    Admin,
+    /// [`link_role`]: every index's data plus templates, pipelines and lifecycle policies, or
+    /// with named `indices` their data only.
+    Data,
+    /// `read` and `view_index_metadata` on `indices`, no cluster privilege: a frontend's key.
+    Read,
+    /// `create_doc` and `auto_configure` on exactly the named `indices` (data streams), no
+    /// cluster privilege: an append-only log drain, which can't read what it wrote.
+    Append,
+}
+
+impl KeyAccess {
+    pub fn parse(s: &str) -> Result<KeyAccess> {
+        Ok(match s {
+            "admin" => KeyAccess::Admin,
+            "data" => KeyAccess::Data,
+            "read" => KeyAccess::Read,
+            "append" => KeyAccess::Append,
+            a => return Err(ControlError::Invalid(format!("access must be admin, data, read or append, not {a:?}"))),
+        })
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            KeyAccess::Admin => "admin",
+            KeyAccess::Data => "data",
+            KeyAccess::Read => "read",
+            KeyAccess::Append => "append",
+        }
+    }
+
+    /// The key's role descriptor on an Elasticsearch-flavor cluster (`None`: the owner's own).
+    /// `named`: the caller gave `indices` (else they're the default, every index).
+    fn es_role(self, indices: &[String], named: bool) -> Option<Value> {
+        match self {
+            KeyAccess::Admin => None,
+            KeyAccess::Data => Some(link_role(named.then_some(indices))),
+            KeyAccess::Read => Some(json!({ "cluster": [], "indices": [{ "names": indices, "privileges": ["read", "view_index_metadata"] }] })),
+            KeyAccess::Append => Some(json!({ "cluster": [], "indices": [{ "names": indices, "privileges": ["create_doc", "auto_configure"] }] })),
+        }
+    }
+
+    /// The key user's role on an OpenSearch-flavor cluster (`None`: `all_access`). `read` holds
+    /// `cluster_composite_ops_ro` too: OpenSearch checks `_msearch`, `_mget` and scrolls as
+    /// cluster actions. `append` has no OpenSearch equivalent (its index action also overwrites).
+    fn os_role(self, indices: &[String], named: bool) -> Result<Option<Value>> {
+        Ok(match self {
+            KeyAccess::Admin => None,
+            KeyAccess::Data => Some(os_link_role(named.then_some(indices))),
+            KeyAccess::Read => Some(json!({
+                "description": "roll: a read-only key",
+                "cluster_permissions": ["cluster_composite_ops_ro"],
+                "index_permissions": [{ "index_patterns": indices, "allowed_actions": ["read", "indices:admin/get", "indices:admin/mappings/get*"] }]
+            })),
+            KeyAccess::Append => {
+                return Err(ControlError::Invalid(
+                    "append keys need Elasticsearch's create_doc privilege, which an OpenSearch-flavor cluster doesn't have: use data with indices".into(),
+                ));
+            }
+        })
+    }
+}
+
+/// Most index patterns one key may name.
+const MAX_KEY_INDICES: usize = 100;
+
+/// A key's `indices` (default every index, `["*"]`): Elasticsearch index names or wildcards of
+/// them, never a remote cluster's (`alias:…`), a hidden or system index (`.…`), an exclusion
+/// (`-…`) or `_all`. `concrete`: names only, no wildcards (`append`).
+fn key_indices(indices: Option<Vec<String>>, concrete: bool) -> Result<Vec<String>> {
+    let Some(list) = indices else {
+        if concrete {
+            return Err(ControlError::Invalid("an append key names its indices (data streams): indices".into()));
+        }
+        return Ok(vec!["*".into()]);
+    };
+    if list.is_empty() || list.len() > MAX_KEY_INDICES {
+        return Err(ControlError::Invalid(format!("indices: 1 to {MAX_KEY_INDICES} index names or patterns")));
+    }
+    for i in &list {
+        let bad = |why: &str| ControlError::Invalid(format!("indices: [{i}] {why}"));
+        if i.is_empty() || i.len() > 255 {
+            return Err(bad("must be 1 to 255 bytes"));
+        }
+        if i.contains(':') {
+            return Err(bad("names a remote cluster's indices, which a key of this cluster can't"));
+        }
+        if i.starts_with(['.', '-', '_', '+']) {
+            return Err(bad("must not start with '.', '-', '_' or '+'"));
+        }
+        if i.chars().any(|c| c.is_uppercase() || matches!(c, '\\' | '/' | '"' | '<' | '>' | '|' | ' ' | ',' | '#')) {
+            return Err(bad("isn't an index name or pattern (lowercase, no \\ / \" < > | , # or spaces)"));
+        }
+        if concrete && i.contains(['*', '?']) {
+            return Err(bad("is a pattern: an append key names its data streams exactly"));
+        }
+    }
+    Ok(list)
 }
 
 /// The name prefix of the internal users the keys route makes on OpenSearch-flavor clusters.
@@ -822,6 +964,9 @@ impl Control {
         if let Some(v) = o.ip_allowlist {
             c.ip_allowlist = ip_rules(v)?;
         }
+        if let Some(v) = o.reindex_whitelist {
+            c.reindex_whitelist = whitelist_patterns(v)?;
+        }
         if let Some(v) = o.cors {
             c.cors = cors_settings(v)?;
         }
@@ -901,6 +1046,7 @@ impl Control {
             cors: None,
             browser_per_minute: None,
             inherit_pending: false,
+            reindex_whitelist: Vec::new(),
         }
     }
 
@@ -1083,9 +1229,21 @@ impl Control {
     /// request runs, or as soon as none does; until then it keeps its current ones. Making the
     /// cluster always-on past the owner's `caps.always_on` is refused (409).
     pub async fn update(&self, id: &str, o: ClusterOptions, caps: Caps) -> Result<SearchCluster> {
+        self.update_with(id, caps, move |c| {
+            *c = Self::apply(c.clone(), o)?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Changes cluster `id` with `f`, which reads and writes the row as it stands under the
+    /// settings lock (a read-modify-write no concurrent update is lost to), then saves and
+    /// applies it as [`Control::update`] does.
+    pub async fn update_with(&self, id: &str, caps: Caps, f: impl FnOnce(&mut SearchCluster) -> Result<()>) -> Result<SearchCluster> {
         let c = {
             let _g = self.specs.lock().await;
-            let c = Self::apply(self.get(id).await?, o)?;
+            let mut c = self.get(id).await?;
+            f(&mut c)?;
             self.check(&c)?;
             self.save(&c, caps).await?;
             self.apply_spec(&c.name).await;
@@ -1695,12 +1853,15 @@ impl Control {
 
     /// One Elasticsearch request on cluster `id` as its owner narrowed to the index names of
     /// `scope` (the per-index routes of the API: the request reaches no other index, also through
-    /// a bulk line's `_index` or an expression): the answer's status, content type and body,
-    /// unchanged. Wakes the cluster.
-    pub async fn es(&self, id: &str, method: &str, uri: &str, scope: &str, content_type: Option<&str>, body: bytes::Bytes) -> Result<(u16, String, bytes::Bytes)> {
+    /// a bulk line's `_index` or an expression), or as the owner (`None`: the routes of one
+    /// cluster-wide API, synonyms sets and query rulesets, whose path the route builds): the
+    /// answer's status, content type and body, unchanged. Wakes the cluster.
+    pub async fn es(&self, id: &str, method: &str, uri: &str, scope: Option<&str>, content_type: Option<&str>, body: bytes::Bytes) -> Result<(u16, String, bytes::Bytes)> {
         let c = self.get(id).await?;
         let mut req = EsRequest::new(method, uri);
-        req.headers.push((search_es::xpack::security::INDEX_SCOPE_HEADER.into(), scope.to_string()));
+        if let Some(scope) = scope {
+            req.headers.push((search_es::xpack::security::INDEX_SCOPE_HEADER.into(), scope.to_string()));
+        }
         if let Some(ct) = content_type.filter(|_| !body.is_empty()) {
             req.headers.push(("Content-Type".into(), ct.to_string()));
         }
@@ -1724,7 +1885,7 @@ impl Control {
         if c.flavor == "opensearch" {
             return self.mint_os_link(&c, &url).await;
         }
-        let body = serde_json::to_vec(&json!({ "name": format!("link {owner}"), "role_descriptors": { "roll_link": link_role() } })).unwrap_or_default();
+        let body = serde_json::to_vec(&json!({ "name": format!("link {owner}"), "role_descriptors": { "roll_link": link_role(None) } })).unwrap_or_default();
         let resp = self.call(&c, EsRequest::json("POST", "/_security/api_key", body)).await;
         let v: Value = serde_json::from_slice(&resp.body).unwrap_or(Value::Null);
         let (200, Some(key_id), Some(key)) = (resp.status, v["id"].as_str(), v["api_key"].as_str()) else {
@@ -1737,7 +1898,7 @@ impl Control {
     /// An OpenSearch-flavor cluster's link: a role and an internal user named
     /// `roll-link-<random>`, the user holding only that role.
     async fn mint_os_link(&self, c: &SearchCluster, url: &str) -> Result<LinkCredential> {
-        let (name, password) = self.os_user(c, "roll-link-", true, "roll: an app's link", None).await?;
+        let (name, password) = self.os_user(c, "roll-link-", Some(os_link_role(None)), "roll: an app's link", None).await?;
         let mut u = reqwest::Url::parse(url).map_err(|e| ControlError::Internal(anyhow::anyhow!("cluster {} has no URL: {e}", c.name)))?;
         let userinfo = (u.set_username(&format!("{name}@{}", c.name)), u.set_password(Some(&password)));
         if userinfo != (Ok(()), Ok(())) {
@@ -1747,17 +1908,18 @@ impl Control {
     }
 
     /// A new internal user of an OpenSearch-flavor cluster named `<prefix><random>`, with a random
-    /// password: a role of its own with [`os_link_role`]'s permissions (`data`: no security REST
-    /// API, the security index restricted), else `all_access`, which can use the security REST
+    /// password: a role of its own, `role` (one of [`KeyAccess::os_role`]'s: no security REST
+    /// API, the security index restricted), else (`None`) `all_access`, which can use the security REST
     /// API like the cluster's own admin (an `admin` key is the cluster's password by another
     /// name, so it could also make a user without an expiry). `expires_ms`: it can't sign in from then on
     /// (`EXPIRES_ATTRIBUTE`, checked by the cluster). Returns its name and password.
-    async fn os_user(&self, c: &SearchCluster, prefix: &str, data: bool, description: &str, expires_ms: Option<i64>) -> Result<(String, String)> {
+    async fn os_user(&self, c: &SearchCluster, prefix: &str, role: Option<Value>, description: &str, expires_ms: Option<i64>) -> Result<(String, String)> {
         let name = format!("{prefix}{}", random_string(12));
         let password = random_string(40);
         let api = "/_plugins/_security/api";
-        if data {
-            let role = self.call(c, EsRequest::json("PUT", &format!("{api}/roles/{name}"), serde_json::to_vec(&os_link_role()).unwrap_or_default())).await;
+        let data = role.is_some();
+        if let Some(role) = role {
+            let role = self.call(c, EsRequest::json("PUT", &format!("{api}/roles/{name}"), serde_json::to_vec(&role).unwrap_or_default())).await;
             if role.status >= 300 {
                 return Err(ControlError::Internal(anyhow::anyhow!("making a role of cluster {} failed ({})", c.name, role.status)));
             }
@@ -1874,34 +2036,41 @@ impl Control {
     /// mustn't share the cluster's password: `api_key` is `base64(<key id>@<cluster>:<key>)`,
     /// sent as `Authorization: ApiKey …`, and works on any host (the `@<cluster>` names the
     /// cluster). The key is in this answer only. `expires_in_s`: it stops working after that.
-    /// `access`: `admin` (the default: everything the cluster's own user may do) or `data` (a
-    /// link's role: data, templates, pipelines and lifecycle policies, no security).
-    pub async fn create_key(&self, id: &str, name: &str, expires_in_s: Option<i64>, access: Option<&str>) -> Result<Value> {
+    /// `access` ([`KeyAccess`], default `admin`) on `indices` (default every index; `admin`
+    /// takes none, it's the whole cluster's).
+    pub async fn create_key(&self, id: &str, name: &str, expires_in_s: Option<i64>, access: Option<&str>, indices: Option<Vec<String>>) -> Result<Value> {
         let c = self.get(id).await?;
         if name.trim().is_empty() || name.len() > 1024 {
             return Err(ControlError::Invalid("name: 1 to 1024 characters".into()));
         }
-        let data = match access.unwrap_or("admin") {
-            "admin" => false,
-            "data" => true,
-            a => return Err(ControlError::Invalid(format!("access must be admin or data, not {a:?}"))),
-        };
+        let access = KeyAccess::parse(access.unwrap_or("admin"))?;
+        if access == KeyAccess::Admin && indices.is_some() {
+            return Err(ControlError::Invalid("an admin key is the whole cluster's: indices goes with data, read or append".into()));
+        }
+        let named = indices.is_some();
+        let indices = key_indices(indices, access == KeyAccess::Append)?;
         if expires_in_s.is_some_and(|s| s <= 0) {
             return Err(ControlError::Invalid("expires_in_s must be positive".into()));
         }
         // OpenSearch clients sign in with a user: the key is an internal user of its own.
         if c.flavor == "opensearch" {
+            let role = access.os_role(&indices, named)?;
             let expires_ms = expires_in_s.map(|s| crate::meter::now_ms().saturating_add(s.saturating_mul(1000)));
-            let (user, password) = self.os_user(&c, OS_KEY_PREFIX, data, &format!("roll key: {name}"), expires_ms).await?;
-            let mut out = json!({ "id": user, "name": name, "access": if data { "data" } else { "admin" }, "username": format!("{user}@{}", c.name), "password": password, "url": connection_of(&self.cfg, &c.name)["url"] });
+            let (user, password) = self.os_user(&c, OS_KEY_PREFIX, role, &format!("roll key: {name}"), expires_ms).await?;
+            let mut out = json!({ "id": user, "name": name, "access": access.as_str(), "username": format!("{user}@{}", c.name), "password": password, "url": connection_of(&self.cfg, &c.name)["url"] });
+            if access != KeyAccess::Admin {
+                out["indices"] = json!(indices);
+            }
             if let Some(ms) = expires_ms {
                 out["expires_at"] = json!(ms / 1000);
             }
             return Ok(out);
         }
         let mut body = json!({ "name": name });
-        if data {
-            body["role_descriptors"] = json!({ "roll_link": link_role() });
+        if let Some(role) = access.es_role(&indices, named) {
+            // Named by access, a data key's as it always was (the dashboard and the CLI read it).
+            let named = if access == KeyAccess::Data { "roll_link".to_string() } else { format!("roll_{}", access.as_str()) };
+            body["role_descriptors"] = json!({ named: role });
         }
         if let Some(s) = expires_in_s {
             body["expiration"] = json!(format!("{s}s"));
@@ -1916,7 +2085,10 @@ impl Control {
         };
         let api_key = base64::engine::general_purpose::STANDARD.encode(format!("{key_id}@{}:{key}", c.name));
         // The access the key was made with: a client (roll secrets) checks it got what it asked.
-        let mut out = json!({ "id": key_id, "name": name, "access": if data { "data" } else { "admin" }, "api_key": api_key, "url": connection_of(&self.cfg, &c.name)["url"] });
+        let mut out = json!({ "id": key_id, "name": name, "access": access.as_str(), "api_key": api_key, "url": connection_of(&self.cfg, &c.name)["url"] });
+        if access != KeyAccess::Admin {
+            out["indices"] = json!(indices);
+        }
         if let Some(ms) = v["expiration"].as_i64() {
             out["expires_at"] = json!(ms / 1000);
         }
@@ -2359,9 +2531,11 @@ mod tests {
             cors: None,
             browser_per_minute: None,
             inherit_pending: false,
+            reindex_whitelist: vec!["es.example.com:443".into()],
         };
         let s = spec_for(&c);
         assert!(s.ip_allowlist.contains("::ffff:203.0.113.9".parse().unwrap()) && !s.ip_allowlist.is_open());
+        assert_eq!(s.reindex_whitelist, Some(vec!["es.example.com:443".to_string()]));
         assert_eq!(s.name, "app");
         assert_eq!(s.dialect, Dialect::OpenSearch);
         assert_eq!(s.credentials.len(), 1);

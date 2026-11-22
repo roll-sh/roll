@@ -631,14 +631,22 @@ impl Control {
     /// refuses its writes, whatever the SQL does (`SET`, `COMMIT; …`, procedures). A standby can't
     /// make the role, and its only user is the superuser: read-only SQL runs on the primary.
     pub async fn query(self: &Arc<Self>, endpoint_id: &str, sql: &str, as_: SqlAs) -> Result<Vec<QueryResult>> {
+        self.query_tagged(endpoint_id, sql, as_, "roll-console").await
+    }
+
+    /// [`Control::query`] whose session shows `app` as its `application_name` (`pg_stat_activity`):
+    /// the API names who sent it (`roll tok_…`), so an agent's queries can be told from others'.
+    /// `app` is an id roll made (letters, digits, `_`, `-`, spaces).
+    pub async fn query_tagged(self: &Arc<Self>, endpoint_id: &str, sql: &str, as_: SqlAs, app: &str) -> Result<Vec<QueryResult>> {
         let ep = self.endpoint_or_404(endpoint_id)?;
         let project = self.project_or_404(&ep.project_id)?;
         let addr = self.ensure_running(endpoint_id).await?;
         self.connection_opened(endpoint_id);
         // Detached: the role made for a read-only query is dropped even if this request isn't
         // awaited to the end.
+        let app: String = app.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ' ')).take(63).collect();
         let (sql, password) = (sql.to_string(), project.password.clone());
-        let out = tokio::spawn(async move { run_sql(addr, &password, &sql, as_).await }).await;
+        let out = tokio::spawn(async move { run_sql(addr, &password, &sql, as_, &app).await }).await;
         self.connection_closed(endpoint_id);
         let out = out.map_err(|e| ControlError::Internal(anyhow::anyhow!("the query task failed: {e}")))?;
         let messages = out?;
@@ -913,9 +921,9 @@ pub enum SqlAs {
     Owner,
 }
 
-async fn run_sql(addr: SocketAddr, password: &str, sql: &str, as_: SqlAs) -> Result<Vec<tokio_postgres::SimpleQueryMessage>> {
+async fn run_sql(addr: SocketAddr, password: &str, sql: &str, as_: SqlAs, app: &str) -> Result<Vec<tokio_postgres::SimpleQueryMessage>> {
     let conn = |user: &str, password: &str| {
-        format!("host={} port={} user={user} password={password} dbname=main connect_timeout=10 application_name=roll-console", addr.ip(), addr.port())
+        format!("host={} port={} user={user} password={password} dbname=main connect_timeout=10 application_name='{app}'", addr.ip(), addr.port())
     };
     let connect = |info: String| async move {
         let (client, connection) = tokio_postgres::connect(&info, tokio_postgres::NoTls).await.map_err(|e| ControlError::Internal(e.into()))?;

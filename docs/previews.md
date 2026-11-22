@@ -125,7 +125,12 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   head, the head it ran stays reachable at `<service>-<head>-<slug>`, on the preview's same data,
   behind the same link, asleep until opened; the last 3 per service (an older one's container
   goes). For comparing before and after. A trusted change's only (an approval is for one head),
-  `roll.toml` services only (roll apps runs its own), and old code on migrated data can break.
+  and old code on migrated data can break. A roll apps service's earlier push is that build's own
+  deployment URL (`<deployment>--<slug>` on roll apps' domain, never a project's preview domain;
+  roll apps' `Deployment.url`), behind the same link (the token once, a cookie for that host) or
+  sign-in: asked before the new head deploys, and kept only while the running build is the head
+  it ran. roll apps keeps an environment's last 10 builds, so the 3 kept here stay; one it pruned
+  answers roll apps' 404, not previews' 410 page.
   They're on the sheet, `roll preview show`, the change and the pull request comment.
   A link to one that's no longer kept says so: its host answers 410 with a page naming the
   service and the push and linking the service's latest (on roll's preview domain and on a
@@ -147,6 +152,12 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   pattern that doesn't parse, a deploy hook's rebuild or a fork's change (its approval is for one
   head) rebuilds it as before. Like an earlier push, the kept build runs on data the new head's
   release may have migrated. Empty (the default): every push rebuilds it.
+- **Crons**: a roll apps cron service, and a service's scheduled commands and calls, are deployed
+  in a preview like anything else, but the schedule doesn't fire unless the project's `crons` says
+  so (roll apps' `scheduled: false` on each `pv-` environment): a preview nobody looks at runs no jobs, and a nightly digest doesn't mail anyone
+  from its copy of the data (Heroku's review apps leave the scheduler out too). A roll apps
+  without the field refuses it as unknown and the environment is made without it (its schedule
+  runs, as before).
 - **How it came up** (Vercel's and Render's deploy steps): each head's timeline is on the
   preview's record (`timeline`: when converging it started, and when each step first finished:
   `data`, its branches made or kept and masked; `setup`, seed, release and schema read; `deploy`,
@@ -647,7 +658,13 @@ migrations (a fork's too), so each line is made printable once, where the diff i
 control characters escaped (a newline in a name can't fake a line, an escape sequence can't reach
 a terminal), lines cut at 300 characters, 200 lines at most; the comment keeps them inside a fence
 they can't close. A failure to read is
-logged and read again on the next converge; it never fails the preview.
+logged and read again on the next converge; it never fails the preview. Only what the change made is
+named: each branch's own lines are kept as it's made (masked, before any seed or release runs;
+`base_schema` on its resource row, read from the branch alone), and a line counts only when the
+branch also differs in it from that base (`schema::diff_since`). Another change's migration that
+lands on production while the preview is open isn't read as this one dropping its table, in the
+lines or the risks. A branch made before bases were kept, or whose base couldn't be read (said in
+its activity), is compared with its parent alone.
 
 What in those lines would hurt production when the change lands is named above them
 (`schema_risks`, `roll_previews::schema::risks`; PlanetScale's deploy request warnings, Atlas's
@@ -669,8 +686,11 @@ Search branches the same way: each one's `_mapping` and its parent's, read throu
 operator console request (no cluster password), become `index <name>` and `field <index>.<path>
 <type>` lines (nested fields and multi-fields by path, system indices left out), so a change
 whose code adds or retypes a field says so (live: `+ field products.price float` after the
-preview wrote a document with a price). With several such resources, each one's lines follow a
-`# <kind>:<ref>` heading.
+preview wrote a document with a price). An index the parent made after the branch started (the
+cluster's `parent_at`: a connector's first sync, a rollover, a day's `logs-…` index) that the
+branch doesn't have is left out: production's new index, not one the change drops (live: a
+connector's index the parent's sync makes after the preview is no risk). With several such
+resources, each one's lines follow a `# <kind>:<ref>` heading.
 
 ## Egress
 
@@ -858,9 +878,11 @@ through its proxy ("Roll only", a fork's default) resolves with placeholders for
 operator is no one, so rules it saved make none). When that person may no longer reveal there,
 it resolves as without placeholders and says "placeholders off: …; a writer saving the rules
 again turns them back on" in its activity, never with anyone else's rights. rolld's
-`SecretsIntercepts` asks `intercept_ca` for the consumer (reused while it lives, asked again
-after an hour so newly bound hosts are covered; none while the preview holds no placeholder),
-`intercept_ca_live` on every connection, and roll secrets' `proxy::filter` for each request; the
+`SecretsIntercepts` asks `intercept_ca` for the consumer (reused while `intercept_ca_live` says
+so and it's more than 3 h from its end: a new CA restarts the preview's services, and roll secrets
+says a CA is no longer live once its consumer's bound hosts gain one it doesn't name; none while
+the preview holds no placeholder), `intercept_ca_stands` on every connection (a stale CA keeps
+serving the hosts it names until it's swapped), and roll secrets' `proxy::filter` for each request; the
 preview's teardown calls `end_consumer`, ending its placeholders and CAs at once. Each preview's
 socket lives under `<home>/previews/intercept`. `a_roll_only_preview_takes_placeholders_made_by_who_saved_its_rules`.
 Only roll secrets' `maker_unreachable` refusal falls back without placeholders; any other 403 is
@@ -1602,7 +1624,7 @@ previews in it), the operator and admins see every project.
 | `POST /v1/previews/{id}/reset` | `{resources?: ["postgres:prj_…"]}` | `Preview`: re-branch from the parents |
 | `GET /v1/previews/{id}/screenshot` | | `image/png`: the first service's page at the preview's head (404 when it has none); `?previous=1` the one before, `?view=phone` at a phone's width, `?base=1` the default branch's preview's, `?page=/pricing` another of `github.pages`, `?diff=base` or `?diff=previous` where it differs from that one or the one before (the page faded, changed pixels marked red) |
 | `GET /v1/previews/{id}/screenshot.png?exp=&sig=` | | `image/png` behind a signed, expiring link, without credentials (403 otherwise): the pull request comment's image; `&diff=base` under its own signature, the diff against main |
-| `GET`/`POST /v1/previews/{id}/shares` | `{hours}` (1–720) for a new one | `Share[]` (never a token), or 201 `Share` with `url`, the only time the link is shown; 409 for a public preview or past 20 live ones |
+| `GET`/`POST /v1/previews/{id}/shares` | `{hours}` (1–720) for a new one | `Share[]` (never a token), or 201 `Share` with `url`, the only time the link is shown; 409 for a public preview or past 20 live ones. A link works only while its maker (the person, or the person behind the token, that made it; not the operator's) may still open the project's previews: an account that still signs in, with a role that reveals a preview. Asked again at most every few minutes while it's used; one whose maker may not ends at once ("ada's share link ended: …" in the activity). `visit::tests::a_signed_in_person_gets_into_a_team_preview` |
 | `DELETE /v1/previews/{id}/shares/{share}` | | 204: the link stops at the visitor's next request |
 | `GET`/`PUT /v1/previews/{id}/env` | `{vars: {NAME: value \| null}}` (`null` removes; at most 100, 32 KiB each; a value may be `roll://ENV[/folder]/KEY`) | `{vars}`: the preview's own variables; its services redeploy with them. 403 for a reference to an environment other than the base without the caller's reveal on its folder; 400 for a malformed one or a look-alike |
 | `POST /v1/previews/{id}/approve` | `{head}` (the head looked at) | `Preview`: that head of a fork's pull request on a Git URL service runs (`pull.approved_head`); the next push waits again. 409 when the preview moved on to another head or isn't a fork's pull request. Admin in the permissions catalogue, and no MCP tool: letting outside code run with the project's data is a person's call |
@@ -1679,6 +1701,28 @@ type Preview = {
   last_reset_at: number | null; last_active_at: number; expires_at: number | null;
   created_by: string; created_at: number; updated_at: number;
   baseline: boolean;                  // roll keeps it to compare the project's changes with (github.baseline)
+  // Checks against main's preview (types as in apps/dashboard/src/lib/previews-api.ts):
+  release?: { head: string; ms: number; before_ms: number | null } | null;
+  reaches?: "open" | "roll";
+  visual_change?: { since: string; percent: number; phone_percent?: number | null } | null;
+  phone_screenshot?: boolean;
+  base_change?: { branch: string; percent: number; phone_percent: number | null; head?: string | null; load_ms?: number | null; lcp_ms?: number | null; a11y_added?: number | null; errors_added?: number | null; text?: TextDiff | null; links_added?: number | null; seo_added?: number | null; api?: TextDiff | null; api_breaking?: string[]; api_unread?: boolean; endpoints?: EndpointTime[] } | null;
+  pages?: PageCheck[];
+  visual_review?: { state: "unchanged" | "changed" | "accepted"; branch: string; percent: number; by: string | null; at: number | null; required: boolean; head: string; pages: { path: string; percent: number; by: string | null; at: number | null; unstable?: boolean }[]; } | null;
+  page_speed?: { now: PageSpeed; before: PageSpeed | null } | null;
+  page_health?: { errors: number; first_error: string | null; failed: number; first_failed: string | null } | null;
+  page_a11y?: { issues: A11yIssue[]; lang: boolean; title: boolean; seo?: PageSeo | null } | null;
+  page_links?: { checked: number; broken: { path: string; status: number }[] } | null;
+  slower_routes?: { branch: string; routes: { name: string; count: number; p50_ms: number; main_p50_ms: number; grew?: GrewSpan | null; budget_ms?: number | null }[] } | null;
+  new_errors?: { branch: string; total: number; errors: { service: string; title: string }[] } | null;
+  regressions?: "check" | "required" | null;
+  regressions_accepted?: { head: string; by: string; at: number } | null;
+  regressions_compared?: boolean;     // compared with main's preview at its head (errors; routes too with traces)
+  timeline?: { head: string; started_at: number; steps: { step: "data" | "setup" | "deploy" | "checks" | "ready"; at: number }[] };
+                                      // how its head came up: each step once, when it first finished
+  intercepted?: { keys: { key: string; hosts: string[] }[]; swapped: number; refused: number;
+                  on_apps?: { requests: number; swapped: number; refused?: string[] } };
+                                      // keys it holds as placeholders, and what egress proxies swapped or refused
 };
 type Service = { name: string; repo: string; url: string; share_url: string | null; revision: string | null; deployed: string | null;
                  state: "pending" | "deploying" | "running" | "sleeping" | "failed"; error: string | null };
@@ -1713,6 +1757,11 @@ type Settings = {
   egress_hosts?: string[];            // with "roll" (or egress_forks "roll", for forks): hosts outside roll still reachable through its egress proxy (api.stripe.com, *.sentry.io; at most 20)
   egress_forks: "roll" | "open";      // what a fork's preview reaches when egress is "open" (default "roll")
   warm: boolean;                      // wake the change's services as soon as a new head is deployed (true)
+  crons: boolean;                     // roll apps' crons and scheduled commands run on their schedule in previews (false)
+  regressions: "off" | "check" | "required";   // roll/regressions against main's preview: posted (check), or a blocker (required) ("off")
+  mail: "catch" | "deliver";          // services' mail to roll's catcher, never delivered ("catch")
+  traces: boolean;                    // roll.toml services get the OpenTelemetry SDK's variables (false)
+  data_at: string | null;             // branch the data as of then: "-24h", "-30m", "-7d" or an RFC 3339 time (null: now)
   env_for: Record<string, Record<string, string>>; // branch glob → variables, over env, under a preview's own ({})
   seed: Job | null;                   // once on fresh data
   release: Job | null;                // at each new head, before services deploy (migrations)
@@ -2363,12 +2412,11 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Roll secrets' response scrub wired into `roll-intercept`, in review** (stacked on roll
-   secrets' #628): a response that echoes a swapped key is stopped (a 502, or the connection cut
-   before those bytes), the placeholder ended and the echo in the activity; roll apps' closed
-   environments get it through the same port. Live-checked by `scripts/preview-intercept.sh`, which also gets a step for roll secrets' `maker_unreachable`
-   (#582, landed): the rules' saver loses access, the preview says "placeholders off" and its old
-   placeholder is refused.
+1. **A preview event feed for roll MCP, in review** (feat/roll-previews-events, roll MCP's ask):
+   `GET /v1/previews/events` (created, ready, failed, deleted; each seq taken in the write that
+   made it so), which roll MCP's Events follow, so an agent hears "ready" instead of polling.
+   Next after it: `visual_change` (a visual change waits) as an event, once the view's derived
+   review state has a stored transition.
 2. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
@@ -2379,6 +2427,16 @@ Ranked by what a person notices first. Done so far:
 4. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
 5. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-22, afternoon: a preview's interception CA kept until its hosts change or it nears its end (#686, on roll secrets' #705: no more hourly restarts of an intercepted preview's services), and a roll apps service's earlier pushes at each build's own deployment URL (#709, on roll apps' #711: they had been `roll.toml` services' only).
+
+Landed 2026-11-22, late morning: a search branch's inherited connector checked live, its sync waiting for adoption while the parent's runs (#690, roll search's #318), and an index production makes after the branch (a connector's first sync, a rollover) no longer read as a drop; schema changes that name only what the change made (#695: each branch's own schema kept as it's made, so another change's migration landing on production first isn't read as this one dropping its table); and a search branch masked again in place keeping the schema it was made with, #702).
+
+Landed 2026-11-22, mid-morning: a share link works only while its maker may still open the project's previews (#679: someone who left the project no longer keeps a working link), and the live run checks that another consumer's placeholder is refused on a preview's socket (#685, roll secrets' #665).
+
+Landed 2026-11-22, later that morning: roll secrets' response scrub wired into `roll-intercept` (#630: an echoed key stopped, its placeholder ended; and the `maker_unreachable` fallback checked live), a preview's crons and scheduled commands off unless the project says so (#656, on roll apps' `scheduled`), the API contract's `Preview` and `Settings` complete again with a test that keeps them so (#656: 23 fields had fallen out), and a leaf's private key zeroized in memory with `preview-apps.sh` no longer leaking Docker networks (#671: 23 had used up the address pools).
+
+Landed 2026-11-22 morning: a preview's bucket key checked live against production's bucket (#643), and `roll preview show`/`wait` printing the timeline (#651).
 
 Landed 2026-11-22: how each head came up, step by step (#641: the preview's timeline on its record, sheet and every live run), and a preview waiting on a starting service going on as soon as it's up (#646: the health checks went from 20.2 s to 6.1 s in the live run; 13 s had been a poll's wait).
 

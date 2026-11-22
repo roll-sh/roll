@@ -15,14 +15,19 @@
 //! - **Hosts come from the bindings**, never from the proxy: [`BoundHosts`] answers, per project, the
 //!   hosts of the keys the consumer holds live placeholders for. [`Secrets`] answers it from
 //!   placeholders' `placeholders` and `key_hosts` tables, and [`Secrets::end_consumer`] calls
-//!   [`Secrets::end_intercept_cas`]. When a consumer's hosts shrink (a placeholder revoked, cut off
-//!   or ended in one project, a binding cleared or narrowed), the write that shrank them, once
-//!   committed, ends every CA of the consumer naming a host it no longer has
-//!   ([`Secrets::end_unbound_intercept_cas`]); [`Secrets::intercept_ca_live`] ends one that a shrink
-//!   nothing called it for left behind (a placeholder expiring, a key or environment deleted).
+//!   [`Secrets::end_intercept_cas`]. Each write that changes a consumer's hosts, once committed,
+//!   checks its CAs again ([`Secrets::recheck_intercept_cas`]): one naming a host it no longer has
+//!   ends (a placeholder revoked, cut off or ended, a binding cleared or narrowed, its project
+//!   deleted); one missing a host it has now (a placeholder issued for another key, a binding
+//!   widened) is stale: it still stands for the hosts it names, but isn't
+//!   [live](Secrets::intercept_ca_live), so its consumer asks for a new one. A write that can't
+//!   name the consumers (a key or environment deleted, a member's rights changed) marks theirs to
+//!   be checked at their next ask ([`RECHECK_HOLDERS`]); so does a placeholder ending on its own,
+//!   and any check a minute old (a binder's rights changed in roll-access).
 //! - **Short-lived**: [`DEFAULT_TTL`] and at most [`MAX_TTL`]. Each call mints a new key and
-//!   certificate; one ends at its expiry, with its consumer or its hosts (a revocation row), and the proxy
-//!   asks [`Secrets::intercept_ca_live`] before each connection it terminates, never caching it.
+//!   certificate; one ends at its expiry, with its consumer or its hosts (a revocation row). The
+//!   proxy asks [`Secrets::intercept_ca_stands`] before each connection it terminates, never
+//!   caching it: one row read, and the bindings at most once a minute.
 //! - Audited as `secrets.intercept_ca` (consumer, that project's hosts, expiry) in each project the
 //!   hosts come from, and `secrets.intercept_ca.end`; never the key.
 
@@ -222,9 +227,57 @@ fn unbound(hosts: &str, bound: &BTreeSet<String>) -> Option<String> {
     (!gone.is_empty()).then(|| gone.join(", "))
 }
 
+/// Whether `bound` has a host a CA (`hosts`, as stored) doesn't name: it's stale.
+fn lacks(hosts: &str, bound: &BTreeSet<String>) -> bool {
+    match serde_json::from_str::<BTreeSet<String>>(hosts) {
+        Ok(named) => !bound.is_subset(&named),
+        Err(_) => true,
+    }
+}
+
 fn when(ms: i64) -> String {
     at(ms).map(|t| format!("{}-{:02}-{:02} {:02}:{:02} UTC", t.year(), u8::from(t.month()), t.day(), t.hour(), t.minute())).unwrap_or_default()
 }
+
+/// How long a CA's last check against the bindings counts: past it, the next ask about the CA
+/// checks again. It covers what changes a consumer's hosts without calling in (a binder's rights
+/// changing in roll-access, a token revoked there).
+const RECHECK_MS: i64 = 60_000;
+
+/// A CA's state, read from its row ([`Secrets::intercept_ca_live`], [`Secrets::intercept_ca_stands`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Standing {
+    /// Revoked, expired or unknown: the proxy terminates nothing with it.
+    Ended,
+    /// It stands, but its consumer should ask for a new one: its consumer has a host it doesn't
+    /// name, or it is in the last eighth of its life.
+    Stale,
+    Live,
+}
+
+/// What [`Secrets::settle_cas`] does with one live CA, given its hosts as stored.
+enum Verdict {
+    End(String),
+    Stale,
+    Keep,
+}
+
+/// One CA's row, as [`Secrets::intercept_ca_live`] reads it.
+struct CaRow {
+    consumer: String,
+    issued_at: i64,
+    expires_at: i64,
+    revoked_at: Option<i64>,
+    stale_at: Option<i64>,
+    checked_at: Option<i64>,
+    bound_until: Option<i64>,
+}
+
+/// Run inside a write that takes bindings away without knowing whose CAs name them (a key or an
+/// environment deleted, a member's rights changed), with a condition on `placeholders` and a
+/// closing `)`: the CAs of the consumers holding matching live placeholders are checked again at
+/// their next ask, which ends one naming a host that went.
+pub(crate) const RECHECK_HOLDERS: &str = "UPDATE intercept_cas SET checked_at = NULL WHERE revoked_at IS NULL AND consumer IN (SELECT consumer FROM placeholders WHERE revoked_at IS NULL AND ";
 
 impl Secrets {
     /// Another source of interception CAs' hosts than placeholders' own bindings (once). `false`
@@ -240,7 +293,10 @@ impl Secrets {
         if consumer.is_empty() || consumer.len() > 256 || consumer.chars().any(char::is_control) {
             return Err(Error::BadRequest("a consumer is 1 to 256 printable characters".into()));
         }
+        // Checked as of before the bindings are read: a change in between is checked again.
+        let checked_at = self.db.now_ms()?;
         let by_project = self.hosts_now(consumer)?;
+        let bound_until = self.bound_until(consumer, checked_at)?;
         let mut all = BTreeSet::new();
         for h in by_project.values().flatten() {
             checked(h).map_err(|why| Error::BadRequest(format!("a binding can't be intercepted: {why}")))?;
@@ -262,8 +318,8 @@ impl Secrets {
         let caller = Caller::consumer(consumer);
         self.db.write(|c| {
             c.execute(
-                "INSERT INTO intercept_cas (id, consumer, serial, hosts, projects, issued_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                params![id, consumer, serial, serde_json::to_string(&hosts).expect("JSON"), serde_json::to_string(&projects).expect("JSON"), now, expires_at],
+                "INSERT INTO intercept_cas (id, consumer, serial, hosts, projects, issued_at, expires_at, checked_at, bound_until) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![id, consumer, serial, serde_json::to_string(&hosts).expect("JSON"), serde_json::to_string(&projects).expect("JSON"), now, expires_at, checked_at, bound_until],
             )?;
             for (project, hs) in &by_project {
                 let hs: Vec<&str> = hs.iter().map(String::as_str).collect();
@@ -289,65 +345,121 @@ impl Secrets {
         Ok(by_project)
     }
 
-    /// Whether the proxy may still terminate TLS with CA `id`: it exists, hasn't expired, its
-    /// consumer hasn't ended, and every host it names is still bound for that consumer (one that
-    /// isn't ends it here, as [`Secrets::end_unbound_intercept_cas`] would have). Asked per
-    /// connection; never cache it.
-    pub fn intercept_ca_live(&self, id: &str) -> Result<bool> {
+    /// When the first of `consumer`'s live placeholders ends: its hosts may shrink then, with
+    /// nothing calling in, so a CA's next ask after it checks them again.
+    fn bound_until(&self, consumer: &str, now: i64) -> Result<Option<i64>> {
+        Ok(self.db.read(|c| c.query_row("SELECT MIN(expires_at) FROM placeholders WHERE consumer = ? AND revoked_at IS NULL AND expires_at > ?", params![consumer, now], |r| r.get::<_, Option<i64>>(0)))?)
+    }
+
+    fn ca_row(&self, id: &str) -> Result<Option<CaRow>> {
+        Ok(self.db.read(|c| {
+            c.query_row("SELECT consumer, issued_at, expires_at, revoked_at, stale_at, checked_at, bound_until FROM intercept_cas WHERE id = ?", [id], |r| {
+                Ok(CaRow { consumer: r.get(0)?, issued_at: r.get(1)?, expires_at: r.get(2)?, revoked_at: r.get(3)?, stale_at: r.get(4)?, checked_at: r.get(5)?, bound_until: r.get(6)? })
+            })
+            .optional()
+        })?)
+    }
+
+    /// CA `id` as its row says: one read. The bindings are read again only when its last check
+    /// is a minute old ([`RECHECK_MS`]), one of the placeholders its hosts come from has ended
+    /// since, or a write marked it ([`RECHECK_HOLDERS`]).
+    fn ca_standing(&self, id: &str) -> Result<Standing> {
         let now = self.db.now_ms()?;
-        let row: Option<(String, String, i64, Option<i64>)> =
-            self.db.read(|c| c.query_row("SELECT consumer, hosts, expires_at, revoked_at FROM intercept_cas WHERE id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional())?;
-        let Some((consumer, hosts, end, None)) = row else { return Ok(false) };
-        if end <= now {
-            return Ok(false);
+        let Some(mut row) = self.ca_row(id)? else { return Ok(Standing::Ended) };
+        let open = |r: &CaRow| r.revoked_at.is_none() && r.expires_at > now;
+        if open(&row) && (row.checked_at.is_none_or(|t| now - t >= RECHECK_MS) || row.bound_until.is_some_and(|t| t <= now)) {
+            self.recheck_intercept_cas(&row.consumer)?;
+            let Some(again) = self.ca_row(id)? else { return Ok(Standing::Ended) };
+            row = again;
         }
-        let bound: BTreeSet<String> = self.hosts_now(&consumer)?.into_values().flatten().collect();
-        if unbound(&hosts, &bound).is_none() {
-            return Ok(true);
-        }
-        self.end_unbound_intercept_cas(&consumer)?;
-        Ok(false)
+        Ok(if !open(&row) {
+            Standing::Ended
+        } else if row.stale_at.is_some() || row.expires_at - now <= (row.expires_at - row.issued_at) / 8 {
+            Standing::Stale
+        } else {
+            Standing::Live
+        })
+    }
+
+    /// Whether CA `id` is the one for its consumer to use: not ended (expired, revoked, its
+    /// consumer ended, a host it names no longer bound), its consumer bound to no host it doesn't
+    /// name, and not in the last eighth of its life. When it isn't, ask [`Secrets::intercept_ca`]
+    /// again. One row read, but don't cache it.
+    pub fn intercept_ca_live(&self, id: &str) -> Result<bool> {
+        Ok(self.ca_standing(id)? == Standing::Live)
+    }
+
+    /// Whether the proxy may still terminate TLS with CA `id`: it hasn't ended, though it may not
+    /// be [live](Secrets::intercept_ca_live) (a CA whose consumer gained a host still serves the
+    /// hosts it names until its consumer swaps it). Asked per connection: one row read, and the
+    /// bindings once a minute at most.
+    pub fn intercept_ca_stands(&self, id: &str) -> Result<bool> {
+        Ok(self.ca_standing(id)? != Standing::Ended)
     }
 
     /// Ends every live interception CA of `consumer` (its sandbox stopped, its preview torn down),
-    /// with a revocation row and `why`; the proxy drops them at its next [`Secrets::intercept_ca_live`].
+    /// with a revocation row and `why`; the proxy drops them at its next [`Secrets::intercept_ca_stands`].
     /// [`Secrets::end_consumer`] calls it. How many ended.
     pub fn end_intercept_cas(&self, consumer: &str, why: &str) -> Result<usize> {
-        self.end_cas(consumer, |_| Some(why.to_string()))
+        let now = self.db.now_ms()?;
+        self.settle_cas(consumer, now, None, |_| Verdict::End(why.to_string()))
     }
 
-    /// Ends every live interception CA of `consumer` naming a host it's no longer bound to, after
-    /// the write that shrank its hosts committed (a placeholder revoked, cut off or ended in a
-    /// project, a binding cleared or narrowed). The proxy's next [`Secrets::intercept_ca`] gets a
-    /// fresh one for the hosts it still has. How many ended.
-    pub fn end_unbound_intercept_cas(&self, consumer: &str) -> Result<usize> {
+    /// Checks `consumer`'s live interception CAs against its bindings now: each naming a host it's
+    /// no longer bound to ends, each missing a host it's bound to now is stale (no longer
+    /// [live](Secrets::intercept_ca_live), still standing), and the rest are checked as of now.
+    /// The proxy's next [`Secrets::intercept_ca`] gets one for the hosts it has. How many ended.
+    pub fn recheck_intercept_cas(&self, consumer: &str) -> Result<usize> {
+        let now = self.db.now_ms()?;
+        let any: Option<i64> = self.db.read(|c| c.query_row("SELECT 1 FROM intercept_cas WHERE consumer = ? AND revoked_at IS NULL AND expires_at > ? LIMIT 1", params![consumer, now], |r| r.get(0)).optional())?;
+        if any.is_none() {
+            return Ok(0);
+        }
         let bound: BTreeSet<String> = self.hosts_now(consumer)?.into_values().flatten().collect();
-        self.end_cas(consumer, |hosts| unbound(hosts, &bound).map(|gone| format!("{gone} no longer bound")))
+        let until = self.bound_until(consumer, now)?;
+        self.settle_cas(consumer, now, Some(until), |hosts| match unbound(hosts, &bound) {
+            Some(gone) => Verdict::End(format!("{gone} no longer bound")),
+            None if lacks(hosts, &bound) => Verdict::Stale,
+            None => Verdict::Keep,
+        })
     }
 
-    /// [`Secrets::end_unbound_intercept_cas`] for each of `consumers`, after a write committed:
-    /// a failure is logged, not answered (the write stands, and [`Secrets::intercept_ca_live`]
-    /// ends the CA at its next connection).
-    pub(crate) fn hosts_shrank<'a>(&self, consumers: impl IntoIterator<Item = &'a str>) {
+    /// [`Secrets::recheck_intercept_cas`] for each of `consumers`, after a write that changed
+    /// their bound hosts committed (a placeholder issued, revoked, cut off or ended, a binding set
+    /// or cleared, a project deleted): a failure is logged, not answered (the write stands, and
+    /// the CA's next ask within [`RECHECK_MS`] checks again).
+    pub(crate) fn hosts_changed<'a>(&self, consumers: impl IntoIterator<Item = &'a str>) {
         let consumers: BTreeSet<&str> = consumers.into_iter().collect();
         for consumer in consumers {
-            if let Err(e) = self.end_unbound_intercept_cas(consumer) {
-                tracing::warn!("ending interception CAs whose hosts were unbound failed (their next connection ends them): {e}");
+            if let Err(e) = self.recheck_intercept_cas(consumer) {
+                tracing::warn!("checking interception CAs after their hosts changed failed (their next connection within a minute does): {e}");
             }
         }
     }
 
-    /// Ends the live CAs of `consumer` that `why` (given a CA's hosts, as stored) answers a reason
-    /// for, each with a revocation row and an audit row in its projects. How many ended.
-    fn end_cas(&self, consumer: &str, why: impl Fn(&str) -> Option<String>) -> Result<usize> {
-        let now = self.db.now_ms()?;
+    /// Settles the live CAs of `consumer` as `verdict` (given a CA's hosts, as stored) says, in one
+    /// write: an ended one gets a revocation row and an audit row in its projects, a stale one its
+    /// `stale_at`; with `checked` (the check's time and [`Secrets::bound_until`]), those that stay
+    /// are checked as of it. How many ended.
+    fn settle_cas(&self, consumer: &str, now: i64, checked: Option<Option<i64>>, verdict: impl Fn(&str) -> Verdict) -> Result<usize> {
         let caller = Caller::consumer(consumer);
         self.db.write(|c| {
             let live: Vec<(String, String, String)> =
                 c.query("SELECT id, hosts, projects FROM intercept_cas WHERE consumer = ? AND revoked_at IS NULL AND expires_at > ?", params![consumer, now], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
             let mut ended = 0;
             for (id, hosts, projects) in &live {
-                let Some(why) = why(hosts) else { continue };
+                let why = match verdict(hosts) {
+                    Verdict::End(why) => why,
+                    v => {
+                        if matches!(v, Verdict::Stale) {
+                            c.execute("UPDATE intercept_cas SET stale_at = ? WHERE id = ? AND stale_at IS NULL", params![now, id])?;
+                        }
+                        if let Some(until) = checked {
+                            c.execute("UPDATE intercept_cas SET checked_at = ?, bound_until = ? WHERE id = ?", params![now, until, id])?;
+                        }
+                        continue;
+                    }
+                };
                 c.execute("UPDATE intercept_cas SET revoked_at = ?, revoked_why = ? WHERE id = ?", params![now, why, id])?;
                 for project in serde_json::from_str::<Vec<String>>(projects).unwrap_or_default() {
                     // A purged project has no log to note it in, a closed one takes nothing more.

@@ -383,21 +383,34 @@ pub(crate) struct Digested {
     unvouched: Unvouched,
     /// Every permission asked of the caller (action, environment, folder), with its answer.
     asked: BTreeMap<(Action, String, String), bool>,
+    /// Every frozen folder it read past (project, environment, folder): the caller passed each
+    /// freeze ([`Caller::passes_freeze`]).
+    passed: BTreeSet<(String, String, String)>,
     /// Every live link stamped, with its generation and its value's fingerprint then.
     live: Vec<(Link, i64, String)>,
     /// Whether it may be reused: nothing it read failed.
     keep: bool,
 }
 
-/// By project, environment, folder, principal and whether the caller is untrusted.
-type DigestKey = (String, String, String, String, bool);
+/// What a digest is of, as far as callers differ before their answers to [`Digested::asked`]:
+/// project, environment, folder, the person whose own values it holds (`""` for anyone else: a
+/// token, a workload, a service) and whether the caller is untrusted.
+type View = (String, String, String, String, bool);
+
+/// A reader's digest: by its view and the reader (the principal).
+type DigestKey = (View, String);
 
 /// Digests as last computed on this node, each with the [`digest_state`] it was computed from:
 /// what turns a poll of 9,900 keys that finds nothing changed into one read. Only ever reused
 /// while the database says the same (every node's writes move it at once) and `still` holds, so
 /// no node's memory decides whether a folder changed.
 #[derive(Default)]
-pub(crate) struct Digests(std::sync::Mutex<DigestCache>);
+pub(crate) struct Digests {
+    cache: std::sync::Mutex<DigestCache>,
+    /// Each view being computed on this node, by whoever has no digest of its state to take: the
+    /// readers after a change wait for one computation rather than all computing it.
+    flights: std::sync::Mutex<HashMap<View, std::sync::Arc<std::sync::Mutex<()>>>>,
+}
 
 /// The most digests a node keeps. Past it the least recently used one goes, so readers polling
 /// many folders only push out what nobody polled since, never every poller's at once.
@@ -408,14 +421,29 @@ const DIGESTS_MAX: usize = 10_000;
 /// another poller's interval only ever pushes out its own.
 const READER_MAX: usize = 500;
 
-/// Digests by key, each with when it was last used, the keys in that order (an LRU), and each
-/// reader's uses (its own LRU).
+/// The most digests of one view's newest state a node offers its other readers, one for each set
+/// of answers. Past it the oldest goes: a reader whose answers match none computes its own.
+const VIEW_ANSWERS_MAX: usize = 8;
+
+/// Digests by key, each with when it was last used, the keys in that order (an LRU), each
+/// reader's uses (its own LRU), and each view's digests of its newest state for its other readers.
 #[derive(Default)]
 pub(crate) struct DigestCache {
     by_key: HashMap<DigestKey, (u64, String, std::sync::Arc<Digested>)>,
     by_use: BTreeMap<u64, DigestKey>,
     by_reader: HashMap<String, BTreeSet<u64>>,
+    by_view: HashMap<View, Shared>,
     next: u64,
+}
+
+/// A view's digests of one state (the newest kept), each computed for some reader, while any
+/// reader keeps a digest of the view (`readers`): another reader takes one only where it gets the
+/// same answers ([`Secrets::still`]), so different permissions never share a digest.
+#[derive(Default)]
+struct Shared {
+    state: String,
+    digests: Vec<std::sync::Arc<Digested>>,
+    readers: usize,
 }
 
 impl DigestCache {
@@ -423,7 +451,7 @@ impl DigestCache {
     fn stamp(&mut self, key: &DigestKey, was: Option<u64>) -> u64 {
         let now = self.next;
         self.next += 1;
-        let uses = self.by_reader.entry(key.3.clone()).or_default();
+        let uses = self.by_reader.entry(key.1.clone()).or_default();
         if let Some(was) = was {
             self.by_use.remove(&was);
             uses.remove(&was);
@@ -445,28 +473,60 @@ impl DigestCache {
     /// Drop the entry last used at `used`.
     fn evict(&mut self, used: u64) {
         let Some(key) = self.by_use.remove(&used) else { return };
-        if let Some(uses) = self.by_reader.get_mut(&key.3) {
+        if let Some(uses) = self.by_reader.get_mut(&key.1) {
             uses.remove(&used);
             if uses.is_empty() {
-                self.by_reader.remove(&key.3);
+                self.by_reader.remove(&key.1);
             }
         }
         self.by_key.remove(&key);
+        if let Some(shared) = self.by_view.get_mut(&key.0) {
+            shared.readers -= 1;
+            if shared.readers == 0 {
+                self.by_view.remove(&key.0);
+            }
+        }
     }
 }
 
 impl Digests {
     fn get(&self, key: &DigestKey, state: &str) -> Option<std::sync::Arc<Digested>> {
-        let mut m = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut m = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         m.touch(key).filter(|(_, s, _)| s == state).map(|(_, _, d)| d.clone())
     }
 
-    fn put(&self, key: DigestKey, state: String, d: Digested) {
-        let mut m = self.0.lock().unwrap_or_else(|e| e.into_inner());
+    /// The view's digests of `state` that other readers computed (each for its own answers).
+    fn shared(&self, view: &View, state: &str) -> Vec<std::sync::Arc<Digested>> {
+        let m = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        m.by_view.get(view).filter(|s| s.state == state).map(|s| s.digests.clone()).unwrap_or_default()
+    }
+
+    /// The lock of `view`'s computation on this node, as [`Flight`]: held while computing it.
+    fn flight(&self, view: &View) -> Flight<'_> {
+        let lock = self.flights.lock().unwrap_or_else(|e| e.into_inner()).entry(view.clone()).or_default().clone();
+        Flight { digests: self, view: view.clone(), lock }
+    }
+
+    fn put(&self, key: DigestKey, state: String, d: std::sync::Arc<Digested>) {
+        let mut m = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         let was = m.by_key.get(&key).map(|e| e.0);
         let used = m.stamp(&key, was);
-        let reader = key.3.clone();
-        m.by_key.insert(key, (used, state, std::sync::Arc::new(d)));
+        let reader = key.1.clone();
+        let shared = m.by_view.entry(key.0.clone()).or_default();
+        if was.is_none() {
+            shared.readers += 1;
+        }
+        if shared.state != state {
+            shared.state = state.clone();
+            shared.digests.clear();
+        }
+        if !shared.digests.iter().any(|s| std::sync::Arc::ptr_eq(s, &d)) {
+            shared.digests.push(d.clone());
+            if shared.digests.len() > VIEW_ANSWERS_MAX {
+                shared.digests.remove(0);
+            }
+        }
+        m.by_key.insert(key, (used, state, d));
         // The reader's own oldest first, then the node's.
         while let Some(oldest) = m.by_reader.get(&reader).filter(|u| u.len() > READER_MAX).and_then(|u| u.first().copied()) {
             m.evict(oldest);
@@ -476,6 +536,40 @@ impl Digests {
             m.evict(oldest);
         }
     }
+}
+
+/// A view's computation lock ([`Digests::flight`]), dropped from the node's map once nobody holds
+/// or waits on it.
+struct Flight<'a> {
+    digests: &'a Digests,
+    view: View,
+    lock: std::sync::Arc<std::sync::Mutex<()>>,
+}
+
+impl Flight<'_> {
+    fn hold(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.lock.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+impl Drop for Flight<'_> {
+    fn drop(&mut self) {
+        let mut flights = self.digests.flights.lock().unwrap_or_else(|e| e.into_inner());
+        // The map's and this one's: nobody else holds or waits on it.
+        if std::sync::Arc::strong_count(&self.lock) == 2 {
+            flights.remove(&self.view);
+        }
+    }
+}
+
+/// What another reader's digest of the same view and state is to a caller ([`Secrets::reuse`]).
+enum Reuse {
+    /// One it gets the same answers for, now its own too.
+    Took((String, Unvouched)),
+    /// None of this state yet.
+    Nothing,
+    /// Only digests of other answers than this caller's.
+    Others,
 }
 
 /// What every digest of `project`'s folders is computed from in the database, as one hash: its
@@ -846,8 +940,13 @@ impl Secrets {
         let dek = self.project(project)?;
         let mut r = Resolver::new(self, project, slug, &dek, &narrowed, true, consumer)?;
         r.no_dynamic = true;
+        r.withhold_bound = resource.wants_placeholders();
         let (value, problem) = r.entry(&e);
+        let through = r.through_bound(&e).map(str::to_string);
         r.finish(slug)?;
+        if let Some(b) = through {
+            return Err(Refusal::Unusable(format!("{key} references {b}, which is bound to hosts: bind {key} to them too, or reference it differently")));
+        }
         if let Some(p) = problem {
             return Err(Refusal::Unusable(format!("{key} doesn't resolve: {p}")));
         }
@@ -866,7 +965,15 @@ impl Secrets {
     /// issuing a fresh credential each read.
     #[allow(clippy::too_many_arguments)]
     pub fn values_for(&self, project: &str, slug: &str, path: &str, resolve: bool, consumer: Option<&str>, dynamic: bool, caller: &Caller) -> Result<Values> {
-        self.values_inner(project, slug, path, resolve, consumer, dynamic, None, caller)
+        self.values_inner(project, slug, path, resolve, consumer, dynamic, Bound::Values, caller)
+    }
+
+    /// [`Secrets::values_for`] (resolved) for `consumer`, with every key bound to hosts left out
+    /// before anything of it is decrypted or audited, and so is any key whose value references one
+    /// (a problem naming both): a consumer whose placeholders can't be issued (its maker can't
+    /// reveal there any more) still never gets a bound key's value.
+    pub fn values_without_bound(&self, project: &str, slug: &str, path: &str, consumer: &str, dynamic: bool, caller: &Caller) -> Result<Values> {
+        self.values_inner(project, slug, path, true, Some(consumer), dynamic, Bound::Withheld, caller)
     }
 
     /// A folder as `consumer`'s runtime reads it (shared values only, never the caller's personal
@@ -879,14 +986,16 @@ impl Secrets {
         // Named for both, with a `:` so it reads no person's own overrides (`Caller::personal`).
         let mut seen = caller.clone().acting_as(format!("{consumer} (shown to {})", caller.made_by()));
         seen.runtime = runtime;
-        self.values_inner(project, slug, path, true, None, false, None, &seen)
+        self.values_inner(project, slug, path, true, None, false, Bound::Values, &seen)
     }
 
     /// [`Secrets::values_for`] (resolved) for `consumer`, with every key bound to hosts answered
     /// as a placeholder (docs/secrets.md, "Using a key without seeing it"). Not a sensitive key's
     /// for a reader that couldn't read it, unless its binding opts in; not a key whose value holds
-    /// a reference (left out, as a problem). An in-process consumer (`sandbox:…`, `preview:…`)
-    /// names who made it in `ask.maker`: its placeholders swap only while they may reveal here.
+    /// a reference (left out, as a problem). A key whose value references a bound key is left out
+    /// too, as a problem naming both: a reference never carries a bound key's value. An in-process
+    /// consumer (`sandbox:…`, `preview:…`) names who made it in `ask.maker`: its placeholders swap
+    /// only while they may reveal here.
     #[allow(clippy::too_many_arguments)]
     pub fn values_with_placeholders(&self, project: &str, slug: &str, path: &str, consumer: &str, dynamic: bool, ask: crate::placeholders::Ask<'_>, caller: &Caller) -> Result<Values> {
         if caller.principal.starts_with("identity:") {
@@ -904,11 +1013,15 @@ impl Secrets {
             }
             None => {}
         }
-        self.values_inner(project, slug, path, true, Some(consumer), dynamic, Some(ask), caller)
+        self.values_inner(project, slug, path, true, Some(consumer), dynamic, Bound::Placeholders(ask), caller)
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn values_inner(&self, project: &str, slug: &str, path: &str, resolve: bool, consumer: Option<&str>, dynamic: bool, ph: Option<crate::placeholders::Ask<'_>>, caller: &Caller) -> Result<Values> {
+    fn values_inner(&self, project: &str, slug: &str, path: &str, resolve: bool, consumer: Option<&str>, dynamic: bool, how: Bound<'_>, caller: &Caller) -> Result<Values> {
+        let ph = match how {
+            Bound::Placeholders(ask) => Some(ask),
+            _ => None,
+        };
         let path = names::path(path)?;
         caller.need(Action::Reveal, &Scope::at(project, slug, &path))?;
         self.read_quota(caller)?;
@@ -925,6 +1038,8 @@ impl Secrets {
         // Left out and named in `dynamic` (not a problem) for code nobody vetted too.
         let dynamic = dynamic && !caller.grants.untrusted();
         r.no_dynamic = r.no_dynamic || !dynamic;
+        // A bound key's value never leaves through a reference to it either.
+        r.withhold_bound = !matches!(how, Bound::Values);
         let mut values = BTreeMap::new();
         let mut problems = vec![];
         let mut withheld = vec![];
@@ -932,15 +1047,20 @@ impl Secrets {
         // Set, but not in this answer (withheld, or dynamic under `dynamic=false`): not missing.
         let mut left_out = vec![];
         let mut followed = vec![];
-        let bound = match &ph {
-            Some(_) => self.bindings(project)?,
-            None => HashMap::new(),
+        let bound = match how {
+            Bound::Values => HashMap::new(),
+            _ => self.bindings(project)?,
         };
         let mut to_issue = vec![];
         for e in &entries {
             // First: nothing of the parent's is read, issued or decrypted for it.
             if let Some(l) = r.followed(e) {
                 followed.push(Followed { name: e.row.key.clone(), kind: l.kind, parent: l.r#ref, field: l.field });
+                left_out.push(e.row.key.clone());
+                continue;
+            }
+            // A sharing project's key has its binding there.
+            if matches!(how, Bound::Withheld) && (bound.contains_key(&e.row.id) || (e.row.project_id != project && !matches!(self.binding(&e.row.id), Ok(None)))) {
                 left_out.push(e.row.key.clone());
                 continue;
             }
@@ -967,6 +1087,11 @@ impl Secrets {
                 continue;
             }
             let (v, problem) = r.entry(e);
+            if let Some(b) = r.through_bound(e) {
+                problems.push(Problem { key: e.row.key.clone(), problem: format!("references {b}, which is bound to hosts: bind {} to them too, or reference it differently", e.row.key) });
+                left_out.push(e.row.key.clone());
+                continue;
+            }
             if r.tainted(e) {
                 sensitive.push(e.row.key.clone());
             }
@@ -1109,25 +1234,65 @@ impl Secrets {
         // is never newer than what it vouches for.
         let dead = self.dead_exports("x.to_project = ?", project)?;
         let state = self.db.read(|c| digest_state(c, project, &dead))?;
-        let key = (project.to_string(), slug.to_string(), path.clone(), caller.principal.clone(), caller.grants.untrusted());
+        let person = if caller.personal() { caller.principal.clone() } else { String::new() };
+        let key = ((project.to_string(), slug.to_string(), path.clone(), person, caller.grants.untrusted()), caller.principal.clone());
         if let Some(d) = self.digests.get(&key, &state)
             && self.still(project, &dek, &d, caller)?
         {
             return Ok((d.digest.clone(), d.unvouched));
         }
-        let d = self.compute_digest(project, slug, &path, &dek, caller)?;
+        // The first digest after a change: computed once for every reader of the view who gets
+        // the same answers (a rollout's pods), one at a time while none of this state is kept.
+        let flight = self.digests.flight(&key.0);
+        let mut held = None;
+        loop {
+            match self.reuse(project, &dek, &key, &state, caller)? {
+                Reuse::Took(out) => return Ok(out),
+                Reuse::Nothing if held.is_none() => held = Some(flight.hold()),
+                // The one computing it kept nothing: this one computes it, still holding.
+                Reuse::Nothing => break,
+                // Others' answers only: computed beside theirs, not after them.
+                Reuse::Others => {
+                    held = None;
+                    break;
+                }
+            }
+        }
+        let d = std::sync::Arc::new(self.compute_digest(project, slug, &path, &dek, caller)?);
         let out = (d.digest.clone(), d.unvouched);
         if d.keep {
             self.digests.put(key, state, d);
         }
+        drop(held);
         Ok(out)
     }
 
-    /// Whether a digest computed earlier from the same [`digest_state`] would come out the same
-    /// now: every permission it asked answers the same for `caller`, and every live link's
+    /// Another reader's digest of `key`'s view at `state`, taken where `caller` gets the same
+    /// answers to everything it depended on ([`Secrets::still`]).
+    fn reuse(&self, project: &str, dek: &Dek, key: &DigestKey, state: &str, caller: &Caller) -> Result<Reuse> {
+        let shared = self.digests.shared(&key.0, state);
+        if shared.is_empty() {
+            return Ok(Reuse::Nothing);
+        }
+        for d in shared {
+            if self.still(project, dek, &d, caller)? {
+                let out = (d.digest.clone(), d.unvouched);
+                self.digests.put(key.clone(), state.to_string(), d);
+                return Ok(Reuse::Took(out));
+            }
+        }
+        Ok(Reuse::Others)
+    }
+
+    /// Whether a digest computed earlier from the same [`digest_state`] (for this caller or
+    /// another of its view) would come out the same now: every permission it asked answers the
+    /// same for `caller`, `caller` passes every freeze it read past, and every live link's
     /// generation and fingerprint are as they were (the fingerprint read as a digest reads it).
     fn still(&self, project: &str, dek: &Dek, d: &Digested, caller: &Caller) -> Result<bool> {
         if !d.asked.iter().all(|((action, env, path), ok)| caller.allows(*action, &Scope::at(project, env, path)) == *ok) {
+            return Ok(false);
+        }
+        if !d.passed.iter().all(|(p, env, path)| caller.passes_freeze(p, env, path)) {
             return Ok(false);
         }
         if d.live.is_empty() {
@@ -1161,7 +1326,15 @@ impl Secrets {
             reveal
         };
         let read = |env: &str, path: &str| ask(Action::Read, env, path);
-        let passes = |p: &str, e: &str, at: &str| caller.passes_freeze(p, e, at);
+        // A frozen folder read past counts too: a digest is shared only with callers who pass it.
+        let passed: RefCell<BTreeSet<(String, String, String)>> = RefCell::default();
+        let passes = |p: &str, e: &str, at: &str| {
+            let ok = caller.passes_freeze(p, e, at);
+            if ok {
+                passed.borrow_mut().insert((p.to_string(), e.to_string(), at.to_string()));
+            }
+            ok
+        };
         let (branches, entries) = self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
             let entries = view_in(c, &env, path, principal, &reveal, Some(&passes), untrusted, DIGEST_COLUMNS, None, 0, &mut HashSet::new(), &dead)?;
@@ -1256,7 +1429,7 @@ impl Secrets {
             h.update(format!("required\0{}\n", m.key));
         }
         let digest = h.finalize()[..16].iter().map(|b| format!("{b:02x}")).collect();
-        Ok(Digested { digest, unvouched: Unvouched { dynamic }, asked: asked.into_inner(), live, keep })
+        Ok(Digested { digest, unvouched: Unvouched { dynamic }, asked: asked.into_inner(), passed: passed.into_inner(), live, keep })
     }
 
     /// A conditional read (`If-None-Match`): `Some(digest)` when the folder's values are as they
@@ -1578,6 +1751,22 @@ pub(crate) struct Resolver<'a> {
     /// The read environment's branched resources: a link to one is never followed, however it's
     /// reached (asked for, by reference, through an import or the base).
     branches: Vec<Branch>,
+    /// A read whose bound keys never leave as values (placeholders, or left out): a reference to
+    /// one doesn't resolve, and every entry it was reached through is [`Resolver::through_bound`].
+    pub withhold_bound: bool,
+    /// Entries whose value references a key bound to hosts, by id: that key's name.
+    through_bound: HashMap<String, String>,
+}
+
+/// How a read answers keys bound to hosts.
+#[derive(Clone, Copy)]
+enum Bound<'a> {
+    /// As values (an export, a trusted runtime's read).
+    Values,
+    /// As placeholders.
+    Placeholders(crate::placeholders::Ask<'a>),
+    /// Left out.
+    Withheld,
 }
 
 impl<'a> Resolver<'a> {
@@ -1588,7 +1777,7 @@ impl<'a> Resolver<'a> {
         // resolve, one key's reveal).
         let no_dynamic = caller.grants.untrusted();
         let branches = s.db.read(|c| envs::by_slug(c, project, slug))?.branches;
-        Ok(Resolver { s, project, dek, caller, resolve, consumer: consumer.into(), envs: HashMap::new(), views: HashMap::new(), done: HashMap::new(), stack: vec![], tainted: Default::default(), members: None, issued: BTreeMap::new(), no_dynamic, deks: HashMap::new(), branches })
+        Ok(Resolver { s, project, dek, caller, resolve, consumer: consumer.into(), envs: HashMap::new(), views: HashMap::new(), done: HashMap::new(), stack: vec![], tainted: Default::default(), members: None, issued: BTreeMap::new(), no_dynamic, deks: HashMap::new(), branches, withhold_bound: false, through_bound: HashMap::new() })
     }
 
     /// `e`'s link, when it names a resource the read environment branched.
@@ -1618,6 +1807,12 @@ impl<'a> Resolver<'a> {
         self.tainted.contains(&format!("{}:{}:{}", e.row.env_id, e.row.path, e.row.key))
     }
 
+    /// The key bound to hosts that `e`'s value references, itself or through others (after
+    /// [`Resolver::entry`], with `withhold_bound`).
+    pub(crate) fn through_bound(&self, e: &Entry) -> Option<&str> {
+        self.through_bound.get(&format!("{}:{}:{}", e.row.env_id, e.row.path, e.row.key)).map(String::as_str)
+    }
+
     /// An entry's value and the first problem resolving it (the value then keeps the
     /// unresolved reference's text).
     pub fn entry(&mut self, e: &Entry) -> (Value, Option<String>) {
@@ -1632,6 +1827,24 @@ impl<'a> Resolver<'a> {
         if names::sensitive(&e.row.tags) || self.tainted.contains(&id) {
             let chain: Vec<String> = self.stack.iter().cloned().chain([id.clone()]).collect();
             self.tainted.extend(chain);
+        }
+        // Reached through a reference in a read that never gives out a bound key's value: never
+        // decrypted, and whatever references it (now or from the cache) says so. A binding that
+        // can't be read counts as one.
+        if self.withhold_bound {
+            let bound = match self.through_bound.get(&id) {
+                Some(b) => Some(b.clone()),
+                None if !self.stack.is_empty() && !matches!(self.s.binding(&e.row.id), Ok(None)) => Some(e.row.key.clone()),
+                None => None,
+            };
+            if let Some(b) = bound {
+                for s in &self.stack {
+                    self.through_bound.entry(s.clone()).or_insert_with(|| b.clone());
+                }
+                if !self.stack.is_empty() {
+                    return (Value::default(), Some(format!("{b} is bound to hosts: a reference never carries its value")));
+                }
+            }
         }
         if let Some(d) = self.done.get(&id) {
             return d.clone();
@@ -1798,8 +2011,8 @@ mod tests {
 
     #[test]
     fn a_full_digest_cache_drops_only_what_nobody_polled_lately() {
-        let key = |who: &str, i: usize| ("prj".to_string(), "env".to_string(), format!("/f{i}"), who.to_string(), false);
-        let digested = || Digested { digest: String::new(), unvouched: Unvouched::default(), asked: BTreeMap::new(), live: Vec::new(), keep: true };
+        let key = |who: &str, i: usize| (("prj".to_string(), "env".to_string(), format!("/f{i}"), String::new(), false), who.to_string());
+        let digested = || std::sync::Arc::new(Digested { digest: String::new(), unvouched: Unvouched::default(), asked: BTreeMap::new(), passed: BTreeSet::new(), live: Vec::new(), keep: true });
         let cache = Digests::default();
         cache.put(key("poller", 0), "s".into(), digested());
         // One reader cycles through more folders than the node keeps, all between two of the
@@ -1810,7 +2023,7 @@ mod tests {
         }
         assert!(cache.get(&key("poller", 0), "s").is_some(), "the poller's digest went");
         {
-            let m = cache.0.lock().unwrap();
+            let m = cache.cache.lock().unwrap();
             assert_eq!((m.by_key.len(), m.by_use.len(), m.by_reader["cycler"].len()), (READER_MAX + 1, READER_MAX + 1, READER_MAX));
             assert!(!m.by_key.contains_key(&key("cycler", last - READER_MAX)) && m.by_key.contains_key(&key("cycler", last - READER_MAX + 1)));
         }
@@ -1822,8 +2035,11 @@ mod tests {
             }
             assert!(cache.get(&key("poller", 0), "s").is_some(), "the poller's digest went at reader {r}");
         }
-        let m = cache.0.lock().unwrap();
+        let m = cache.cache.lock().unwrap();
         assert_eq!((m.by_key.len(), m.by_use.len(), m.by_reader.values().map(BTreeSet::len).sum::<usize>()), (DIGESTS_MAX, DIGESTS_MAX, DIGESTS_MAX));
+        // Each folder offered to its other readers only while one of them keeps a digest of it.
+        assert_eq!(m.by_view.values().map(|s| s.readers).sum::<usize>(), DIGESTS_MAX);
+        assert_eq!(m.by_view.len(), READER_MAX);
         assert!(!m.by_reader.contains_key("cycler"), "the least recently used went first");
     }
 }

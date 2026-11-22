@@ -54,6 +54,8 @@ pub mod public;
 pub mod push;
 pub mod resp_cache;
 pub mod runtime;
+pub mod sandboxes;
+pub mod peering;
 pub mod shell;
 pub mod spend;
 pub mod store;
@@ -299,16 +301,28 @@ pub struct Apps {
     status_swept: std::sync::atomic::AtomicI64,
     /// When owned environments' logs were last expired (hourly, [`Apps::expire_logs_pass`]).
     logs_expired: std::sync::atomic::AtomicI64,
-    /// The interception CA each closed environment's proxy serves and its instances trust: when
-    /// roll secrets answers another (near its end, ended early, a host bound since), instances
-    /// are moved to a bundle trusting both before the proxy switches.
+    /// The interception CA each closed network's proxy serves, by network: one CA a project
+    /// environment (roll secrets' consumer), shared by every closed service there. When roll
+    /// secrets answers another (near its end, ended early, a host bound since), the services'
+    /// instances are moved to bundles trusting both before the proxy switches.
     pub(crate) intercept_cas: Mutex<HashMap<String, crate::deploy::Serving>>,
-    /// The next CA a closed environment's proxy switches to once the deployment whose instances
-    /// trust it is live (its network, and the CA).
-    pub(crate) intercept_pending: Mutex<HashMap<String, (String, crate::deploy::Serving)>>,
+    /// The next CA a closed network's proxy switches to once every service on it trusts it.
+    pub(crate) intercept_pending: Mutex<HashMap<String, crate::deploy::Serving>>,
     /// When each closed environment's instances were last moved to a new CA (at most every ten
-    /// minutes, whatever answers in between).
+    /// minutes, an hour after a move that failed, whatever answers in between).
     pub(crate) intercept_renewing: Mutex<HashMap<String, i64>>,
+    /// Closed environments whose running instances may trust a CA their proxy doesn't serve
+    /// (adopted after a takeover, woken while their template was made again): moved again until
+    /// a deploy of theirs is live.
+    pub(crate) intercept_stale: Mutex<std::collections::HashSet<String>>,
+    /// Templates made for deployment URLs (`deployment_template`), kept a minute: each would make
+    /// a closed environment's placeholders again.
+    viewed_templates: Mutex<HashMap<String, (Arc<live::Template>, std::time::Instant)>>,
+    /// Each private network's peer as it last went (`running`, `failed: …`), by environment.
+    pub(crate) peer_status: Mutex<HashMap<String, String>>,
+    /// One change to an environment's peer at a time (a PUT, a deploy and the minute's check
+    /// would otherwise take down each other's half-made peer).
+    pub(crate) peer_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// When closed environments' CAs were last checked (each minute).
     intercepts_checked: std::sync::atomic::AtomicI64,
     /// Private environments' token hashes, by environment, as the owner last read or set them.
@@ -659,6 +673,10 @@ impl Apps {
             intercept_cas: Mutex::new(HashMap::new()),
             intercept_pending: Mutex::new(HashMap::new()),
             intercept_renewing: Mutex::new(HashMap::new()),
+            intercept_stale: Mutex::new(Default::default()),
+            viewed_templates: Mutex::new(HashMap::new()),
+            peer_status: Mutex::new(HashMap::new()),
+            peer_locks: Mutex::new(HashMap::new()),
             intercepts_checked: std::sync::atomic::AtomicI64::new(0),
             access: Mutex::new(HashMap::new()),
             access_gen: std::sync::atomic::AtomicU64::new(0),
@@ -1435,6 +1453,7 @@ impl Apps {
         for e in self.db(move |s| s.environments(&sid)).await? {
             self.teardown_live(id, &e.name).await;
         }
+        self.drop_sandboxes(id, None).await;
         for name in self.deps.runtime.list(Some(id)).await {
             self.deps.runtime.remove(&name).await;
         }
@@ -1516,6 +1535,7 @@ impl Apps {
             self.teardown_live(id, &e.name).await;
             self.drop_branches(id, &e.name, None).await;
         }
+        self.drop_sandboxes(id, None).await;
         // Each environment's volume goes with it (a last backup first, kept a week).
         for e in &envs {
             let had = row.for_env(e).map(|s| s.run.volume.is_some()).unwrap_or(row.run.volume.is_some());
@@ -2728,9 +2748,15 @@ impl Apps {
         // Its branches first (deleted once no other environment uses them): the rows naming them
         // would go with it.
         self.drop_branches(service, env, None).await;
+        self.drop_sandboxes(service, Some(env)).await;
         let (sid, e) = (service.to_string(), env.to_string());
         self.db(move |s| s.delete_environment(&sid, &e)).await?;
         self.hosts_changed();
+        // Its interception's state here goes with it (the network's, and the CA itself, with the
+        // project environment's last closed service: `drop_network_if_unused`).
+        let key = env_key(service, env);
+        self.intercept_renewing.lock().remove(&key);
+        self.intercept_stale.lock().remove(&key);
         self.release_domains(&domains).await;
         self.teardown_live(service, env).await;
         self.set_access_cache(service, env, None);
@@ -2761,6 +2787,8 @@ impl Apps {
         if let Ok(false) = self.db(move |s| s.env_in_use(&p, &e, &l)).await {
             self.deps.runtime.remove_network(&network_name(project, env)).await;
             self.deps.runtime.remove_network(&closed_network_name(project, env)).await;
+            self.intercept_cas.lock().remove(&closed_network_name(project, env));
+            self.intercept_pending.lock().remove(&closed_network_name(project, env));
             // Its build caches too: no service of the project builds there any more; and its
             // placeholders and interception end.
             let (p, e) = (project.to_string(), env.to_string());
@@ -2879,11 +2907,13 @@ impl Apps {
         let svc = self.db(move |s| s.service(&sid)).await?;
         // No CA kept for it here (a restart, a takeover): its interception CA's key lived only in
         // the node that made it, so the instances this adopts trust one no proxy can serve.
-        let unknown_ca = row.egress.closed() && !self.intercept_cas.lock().contains_key(&env_key(service, env));
+        let unknown_ca = row.egress.closed() && !self.intercept_cas.lock().contains_key(&closed_network_name(&svc.project, env));
         let tpl = self.template(&svc, &row, &dep).await?;
         live.adopt(Arc::new(tpl)).await;
-        // So they're moved to the CA its proxy serves now (the same image, a new deployment).
+        // So they're moved to the CA its proxy serves now (the same image, a new deployment);
+        // marked, so the minute's check moves them again if this doesn't go live.
         if unknown_ca && live.awake() > 0 {
+            self.intercept_stale.lock().insert(env_key(service, env));
             let (this, sid, en, active) = (self.clone(), service.to_string(), env.to_string(), row.active.clone().unwrap_or_default());
             tokio::spawn(async move {
                 let log = this.logs.sink(format!("env:{sid}/{en}"), crate::logs::Stream::System);
@@ -4203,7 +4233,21 @@ impl Apps {
         if row.approvals > 0 && d.status == DeployStatus::Ready {
             return Err(Error::Conflict(format!("{dep} waits for {} approval(s): it runs once approved", row.approvals)));
         }
-        self.template(&svc.for_env(&row)?, &row, &d).await
+        // What the live state serves of it (the active one, a canary, one viewed by its URL), or
+        // one made a minute ago: each made again would make a closed environment's placeholders.
+        if let Some(t) = self.live(service, env).serving(dep) {
+            return Ok((*t).clone());
+        }
+        if let Some((t, _)) = self.viewed_templates.lock().get(dep).filter(|(_, at)| at.elapsed() < Duration::from_secs(60)) {
+            return Ok((**t).clone());
+        }
+        let t = self.template(&svc.for_env(&row)?, &row, &d).await?;
+        let mut kept = self.viewed_templates.lock();
+        kept.retain(|_, (_, at)| at.elapsed() < Duration::from_secs(60));
+        if kept.len() < 256 {
+            kept.insert(dep.to_string(), (Arc::new(t.clone()), std::time::Instant::now()));
+        }
+        Ok(t)
     }
 
     // ── logs, metrics, usage ──

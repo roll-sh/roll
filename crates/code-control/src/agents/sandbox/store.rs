@@ -183,6 +183,19 @@ pub fn live_count(db: &code_sql::Db, owner_id: &str) -> code_sql::Result<i64> {
     db.query_row("SELECT COUNT(*) FROM agent_sandboxes WHERE owner_id = ? AND deleted_at IS NULL", [owner_id], |r| r.get(0))
 }
 
+/// Sandboxes that aren't deleted and still hold values copied from roll secrets' `project` (roll
+/// secrets' reach lists them). Names and where they came from only.
+pub fn holding_secrets_of(db: &code_sql::Db, project: &str) -> code_sql::Result<Vec<SandboxRow>> {
+    let rows = db.query(&format!("SELECT {COLS} FROM agent_sandboxes WHERE deleted_at IS NULL AND secrets_from IS NOT NULL AND secrets_dropped IS NULL ORDER BY created_at, id"), (), row)?;
+    Ok(rows.into_iter().filter(|r| r.secrets_from.as_ref().is_some_and(|f| f.project == project)).collect())
+}
+
+/// Sandboxes asked to run that still hold values copied from roll secrets (their copier's say
+/// is checked when one is offboarded).
+pub fn running_with_copies(db: &code_sql::Db) -> code_sql::Result<Vec<SandboxRow>> {
+    db.query(&format!("SELECT {COLS} FROM agent_sandboxes WHERE secrets_by IS NOT NULL AND secrets_dropped IS NULL AND deleted_at IS NULL AND desired = 'running' ORDER BY created_at, id"), (), row)
+}
+
 /// Owners with a sandbox that isn't deleted (a single node resumes their reconcilers at start).
 pub fn owners_with_live(db: &code_sql::Db) -> code_sql::Result<Vec<String>> {
     db.query("SELECT DISTINCT owner_id FROM agent_sandboxes WHERE deleted_at IS NULL", (), |r| r.get(0))

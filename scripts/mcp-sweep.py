@@ -9,9 +9,23 @@ A failure is a mapping bug: a 5xx, an argument the route rejects (unknown, missi
 or an empty 404 (no route answers the path). "Not found" for a missing resource, a refusal about a
 made-up value and a product that's off are fine.
 
-    mcp-sweep.py <api> <operator token file> [--writes] [-v] [--tool NAME]
+Every answer must also fit the output schema its tool publishes (crates/roll-mcp/src/output-schemas.json);
+with --record FILE, the answers are kept there for scripts/mcp_output_schemas.py to widen them.
+
+    mcp-sweep.py <api> <operator token file> [--writes] [-v] [--tool NAME] [--record FILE]
 """
-import json, re, sys, urllib.error, urllib.request
+import importlib.util, json, os, re, sys, urllib.error, urllib.request
+
+# Loaded by path: `python3 -I` leaves this directory off the import path.
+_spec = importlib.util.spec_from_file_location("mcp_output_schemas", os.path.join(os.path.dirname(os.path.abspath(__file__)), "mcp_output_schemas.py"))
+schemas_mod = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(schemas_mod)
+try:
+    published = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", schemas_mod.SCHEMAS)))
+except FileNotFoundError:
+    published = {}
+record = sys.argv[sys.argv.index("--record") + 1] if "--record" in sys.argv else None
+samples, unfit = {}, []
 
 api, tok = sys.argv[1], open(sys.argv[2]).read().strip()
 only = sys.argv[sys.argv.index("--tool") + 1] if "--tool" in sys.argv else None
@@ -24,7 +38,19 @@ def rpc(method, params, token=None):
     req = urllib.request.Request(f"{api}/v1/mcp", data=json.dumps({"jsonrpc": "2.0", "id": n, "method": method, "params": params}).encode(),
                                  headers={"authorization": f"Bearer {token or tok}", "content-type": "application/json", "accept": "application/json"})
     with urllib.request.urlopen(req, timeout=60) as r:
-        return json.load(r)
+        out = json.load(r)
+    # What a tool answers, against the output schema it publishes (and kept, with --record).
+    res = out.get("result") if isinstance(out, dict) else None
+    if method == "tools/call" and isinstance(res, dict) and not res.get("isError") and isinstance(res.get("structuredContent"), dict):
+        name, sc = params.get("name", ""), res["structuredContent"]
+        if name in published:
+            bad = schemas_mod.check(sc, published[name])
+            if bad and len(unfit) < 50:
+                unfit.append(f"{name}: {bad} (its outputSchema; rerun with --record if the new shape is right)")
+        if record and len(samples.setdefault(name, [])) < 8:
+            words = sorted({v for v in params.get("arguments", {}).values() if isinstance(v, str)})
+            samples[name].append({"answer": sc, "words": words})
+    return out
 
 
 listed = rpc("tools/list", {})["result"]
@@ -461,6 +487,36 @@ for sk in rpc("skills/list", {}).get("result", {}).get("skills", []):
 bad = [f"{what}: {json.dumps(r.get('error'))[:200]}" for what, r in surface if "error" in r]
 print(f"surfaces: {len(surface)} prompts, completions, resources and skills read, {len(bad)} failed")
 fails += bad
+# MCP Events (poll mode, 2026-07-28): every type listed, polled from now, from its cursor, and from
+# the feed's start, through the real feed routes.
+def modern(method, params):
+    global n
+    n += 1
+    params = dict(params, _meta={"io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": {"name": "sweep", "version": "1"},
+                                 "io.modelcontextprotocol/clientCapabilities": {"extensions": {"io.modelcontextprotocol/events": {}}}})
+    h = {"authorization": f"Bearer {tok}", "content-type": "application/json", "accept": "application/json", "mcp-protocol-version": "2026-07-28", "mcp-method": method}
+    if "name" in params:
+        h["mcp-name"] = params["name"]
+    req = urllib.request.Request(f"{api}/v1/mcp", data=json.dumps({"jsonrpc": "2.0", "id": n, "method": method, "params": params}).encode(), headers=h)
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        return {"error": {"http": e.code, "body": e.read().decode(errors="replace")[:200]}}
+types = modern("events/list", {}).get("result", {}).get("events", [])
+ebad, seen_events = [], 0
+for t in types:
+    first = modern("events/poll", {"name": t["name"], "cursor": None})
+    later = modern("events/poll", {"name": t["name"], "cursor": first.get("result", {}).get("cursor")})
+    start = modern("events/poll", {"name": t["name"], "cursor": "a1:0", "maxEvents": 20})
+    for what, r in (("from now", first), ("from its cursor", later), ("from the start", start)):
+        if "error" in r or not isinstance(r.get("result", {}).get("cursor"), str):
+            ebad.append(f"events/poll {t['name']} {what}: {json.dumps(r.get('error') or r.get('result'))[:200]}")
+    seen_events += len(start.get("result", {}).get("events", []))
+print(f"events: {len(types)} types polled, {seen_events} events read from the start, {len(ebad)} failed")
+fails += ebad
+if not types:
+    fails.append("events/list listed no event types for the operator")
 if "--writes" in sys.argv:
     def fake(name, schema, prod):
         if (prod, name) in seen:
@@ -506,6 +562,11 @@ if "--writes" in sys.argv:
     for f in wslow:
         print("SLOW", f)
     fails += wfails
+if record:
+    with open(record, "w") as f:
+        json.dump(samples, f)
+    print(f"recorded answers of {len(samples)} tools in {record}")
+fails += unfit
 for f in fails:
     print("FAIL", f)
 if "-v" in sys.argv:

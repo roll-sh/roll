@@ -198,9 +198,11 @@ impl Engine {
                     x.state = ResourceState::Pending;
                     x.error = None;
                 })?;
+                self.store.set_base_schema(&r.id, res.kind, &res.parent, None)?;
                 self.store.log(&r.id, &format!("branched {key} as {}", made.r#ref))?;
                 self.store.set_seed_needed(&r.id, true)?;
                 self.mask(&r.id, &b, &key, &made.r#ref, s).await?;
+                self.keep_base(&r.id, &b, &res, &made.r#ref, s).await?;
                 self.store.set_resource(&r.id, res.kind, &res.parent, |x| x.state = ResourceState::Ready)?;
             }
             Some(branch) if reset_due || asked.iter().any(|a| a == "*" || *a == key) => {
@@ -221,13 +223,18 @@ impl Engine {
                     x.error = None;
                     x.bytes = 0;
                 })?;
+                self.store.set_base_schema(&r.id, res.kind, &res.parent, None)?;
                 self.store.log(&r.id, &format!("reset {key} from its parent"))?;
                 self.store.set_seed_needed(&r.id, true)?;
                 self.mask(&r.id, &b, &key, &fresh.r#ref, s).await?;
+                self.keep_base(&r.id, &b, &res, &fresh.r#ref, s).await?;
                 self.store.set_resource(&r.id, res.kind, &res.parent, |x| x.state = ResourceState::Ready)?;
                 reset = true;
             }
-            // Made (or reset) but not finished: masks again, then Ready.
+            // Made (or reset) but not finished: masks again, then Ready. No base is kept here: a
+            // branch masked again in place (changed rules, not Postgres) holds what the change's
+            // seed and release wrote, and one made just before a crash has none (compared with
+            // its parent alone).
             Some(branch) if res.state != ResourceState::Ready => {
                 self.mask(&r.id, &b, &key, branch, s).await?;
                 self.store.set_resource(&r.id, res.kind, &res.parent, |x| {
@@ -592,6 +599,8 @@ impl Engine {
                 + if s.traces { "o" } else { "" }
                 + &ca.as_deref().filter(|_| !on_apps).map(|id| format!("i{id}")).unwrap_or_default()
                 + &maker.as_deref().filter(|_| on_apps).map(|m| format!("m{m}")).unwrap_or_default()
+                // Crons on their schedule or not: roll apps' environment is told again.
+                + if s.crons && on_apps { "k" } else { "" }
                 + &rebuilt;
             let was = self.store.service_config(&r.id, &spec.name)?;
             let config_moved = was.as_deref() != Some(fingerprint.as_str());
@@ -606,6 +615,22 @@ impl Engine {
             {
                 for gone in self.store.pin(&r.id, &spec.name, old, &|h| self.cfg.url_in(domain.as_ref(), h))? {
                     self.apps.remove(&r.id, &gone).await.map_err(|e| anyhow::anyhow!("removing {gone}: {e:#}"))?;
+                }
+            }
+            // On roll apps, the head it ran stays reachable at that build's own URL (roll apps
+            // keeps its last builds, each at a deployment URL): asked before the new head deploys,
+            // and kept only while the running build is that head's commit (a later pass may find
+            // the new one live already). roll apps prunes its own builds: nothing to remove.
+            if on_apps
+                && repo == r.repo
+                && r.trusted
+                && let Some(old) = svc.deployed.as_deref().filter(|d| *d != rev && !d.is_empty())
+                && !self.store.pinned(&r.id)?.iter().any(|p| p.service == spec.name && p.revision == old)
+                && let Some((git, url)) = self.apps.live_build(&r.id, &spec.name).await
+            {
+                let ran = if repo.starts_with("git:") { Some(old.to_string()) } else { self.source.git_commit(&repo, old).await.ok().flatten() };
+                if ran.as_deref() == Some(git.as_str()) {
+                    self.store.pin_build(&r.id, &spec.name, old, &url)?;
                 }
             }
             // A deploy the backend is still on is asked about again (until it's live or fails).
@@ -638,6 +663,7 @@ impl Engine {
                     feedback,
                     egress: s.egress_for(r.trusted),
                     egress_hosts: s.egress_hosts.clone(),
+                    crons: s.crons,
                     maker: maker.clone(),
                     rebuild: fresh.then_some(rebuilds),
                     traces: s.traces,
@@ -1214,8 +1240,28 @@ impl Engine {
         Ok(())
     }
 
+    /// A branch's own schema as it was made (masked, before any seed or release ran), so its
+    /// schema changes later name what the change did, not what production did since
+    /// (`schema::diff_since`). Only where a seed or release runs: nothing reads it otherwise. A
+    /// failed read keeps none (said): its changes are compared with the parent alone, as before.
+    async fn keep_base(&self, id: &str, b: &Arc<dyn Brancher>, res: &ResourceRow, branch: &str, s: &Settings) -> anyhow::Result<()> {
+        if !matches!(res.kind, Kind::Postgres | Kind::Search) || (s.seed.is_none() && s.release.is_none()) {
+            return Ok(());
+        }
+        let lines = match b.branch_schema(&res.parent, branch).await {
+            Ok(l) => l,
+            Err(e) => {
+                self.store.log(id, &format!("couldn't read {}:{}'s schema as it was made: its changes are compared with the parent alone: {e:#}", res.kind.as_str(), res.parent))?;
+                None
+            }
+        };
+        self.store.set_base_schema(id, res.kind, &res.parent, lines.as_deref())?;
+        Ok(())
+    }
+
     /// The Postgres branches' schema, and the search branches' mappings, against their parents'
-    /// (`schema::diff`), kept for `head`. A failure is logged and read again on the next converge.
+    /// (`schema::diff_since`: only what the change made), kept for `head`. A failure is logged and
+    /// read again on the next converge.
     async fn read_schema(&self, r: &Row) {
         let read = async {
             let mut all: Option<Vec<String>> = None;
@@ -1227,7 +1273,8 @@ impl Engine {
             for res in resources.iter().filter(|x| has_schema(x.kind)) {
                 let Some(branch) = &res.r#ref else { continue };
                 let Some((parent, mine)) = self.brancher(res.kind)?.schema(&res.parent, branch).await? else { continue };
-                let lines = crate::schema::diff_all(&parent, &mine);
+                let base = self.store.base_schema(&r.id, res.kind, &res.parent)?;
+                let lines = crate::schema::diff_since(&parent, base.as_deref(), &mine);
                 let header = format!("# {}:{}", res.kind.as_str(), res.parent);
                 if several && !lines.is_empty() {
                     every.push(header.clone());

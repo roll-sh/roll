@@ -4,13 +4,15 @@
 //!
 //! All of them are stored objects (in Elasticsearch, documents of the `.elastic-connectors*`,
 //! `.search-app-1` and `.query-rules-2` system indices); roll keeps them in the cluster
-//! metadata with the same shapes, defaults, validation and state machines. Connectors are only
-//! the control-plane records an external connector service polls — roll runs no connector
-//! service, so sync jobs move only through the API calls a connector makes.
+//! metadata with the same shapes, defaults, validation and state machines. roll is the
+//! connector service of the Elastic-managed connectors of the services it implements
+//! ([`sync`]: `postgresql` and `s3`); every other connector's jobs move only through the API
+//! calls the tenant's own connector service makes.
 
 pub mod connectors;
 pub mod query_rules;
 pub mod search_application;
+pub mod sync;
 
 /// The current time with nanoseconds, as Elasticsearch prints `Instant`s in these documents.
 pub fn now_nanos_string() -> String {

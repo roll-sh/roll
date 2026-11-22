@@ -19,8 +19,10 @@ import {
   APPROVABLE,
   ACTIONS,
   describeApprovalRule,
+  describeAskRule,
   PRODUCTS,
   type ApprovalRule,
+  type AskRule,
   type Action,
   KEEP_OLD,
   startsLater,
@@ -703,6 +705,7 @@ function PolicyPanel() {
   const [p, setP] = useState<Policy | null>(null);
   const [days, setDays] = useState("");
   const [idle, setIdle] = useState("");
+  const [wait, setWait] = useState("");
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     accessApi
@@ -711,6 +714,7 @@ function PolicyPanel() {
         setP(v);
         setDays(v.max_days ? String(v.max_days) : "");
         setIdle(v.max_idle_days ? String(v.max_idle_days) : "");
+        setWait(v.approval_wait_minutes ? String(v.approval_wait_minutes) : "");
       })
       .catch(() => setP(null));
   }, []);
@@ -774,8 +778,34 @@ function PolicyPanel() {
           />
           days unused
         </label>
+        <label className="flex items-center gap-1.5">
+          people have
+          <input
+            value={wait}
+            onChange={(e) => setWait(e.target.value.replace(/\D/g, ""))}
+            onBlur={() => void save({ ...p, approval_wait_minutes: wait ? Number(wait) : null })}
+            placeholder="10"
+            inputMode="numeric"
+            className={`${input} w-16 text-center font-mono text-[12px]`}
+            aria-label="Minutes a request waits for a person"
+          />
+          minutes to decide
+        </label>
       </div>
       <ApprovalRules rules={p.approval_rules ?? []} save={(approval_rules) => save({ ...p, approval_rules })} />
+      <div className="flex flex-wrap items-center gap-3 text-[12px] text-muted">
+        <span>Agents (through MCP):</span>
+        <label className="flex items-center gap-1.5">
+          <input type="checkbox" checked={Boolean(p.mcp_lockdown)} onChange={(e) => void save({ ...p, mcp_lockdown: e.target.checked })} />
+          always in lockdown
+        </label>
+        <label className="flex items-center gap-1.5">
+          <input type="checkbox" checked={Boolean(p.mcp_read_only)} onChange={(e) => void save({ ...p, mcp_read_only: e.target.checked })} />
+          only read
+        </label>
+      </div>
+      <AgentAsks rules={p.agents_ask ?? []} save={(agents_ask) => save({ ...p, agents_ask })} />
+      <OAuthClients list={p.oauth_clients ?? []} save={(oauth_clients) => save({ ...p, oauth_clients })} />
       <ErrorNote error={error} />
     </div>
   );
@@ -785,6 +815,115 @@ function PolicyPanel() {
  * What needs more than one approver (the policy's approval rules): Teleport's and Infisical's
  * two-person rule. Each rule covering a request is a gate; the token's own person never counts.
  */
+/**
+ * What an agent asks a person for first, whatever its token allows (the policy's agents_ask):
+ * Stripe's confirmation before refunds. Only calls through roll's MCP server; CI calling the API
+ * isn't an agent.
+ */
+function AgentAsks({ rules, save }: { rules: AskRule[]; save: (next: AskRule[]) => Promise<void> }) {
+  const [adding, setAdding] = useState(false);
+  const [product, setProduct] = useState("apps");
+  const [action, setAction] = useState("deploy");
+  const [env, setEnv] = useState("production");
+  const add = async () => {
+    const list = env.split(",").map((x) => x.trim()).filter(Boolean);
+    const rule: AskRule = { product };
+    if (action !== "any") rule.actions = [action as Action];
+    if (list.length) rule.environments = list;
+    await save([...rules, rule]);
+    setAdding(false);
+  };
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-[12px] text-muted">
+      <span>Agents always ask before:</span>
+      {rules.length === 0 && !adding && <span className="text-subtle">nothing beyond their token&apos;s rules</span>}
+      {rules.map((r, i) => (
+        <span key={i} className="flex items-center gap-1 rounded-md border border-line px-2 py-0.5">
+          {describeAskRule(r)}
+          <button onClick={() => void save(rules.filter((_, j) => j !== i))} className="text-subtle hover:text-fg" aria-label={`Remove ${describeAskRule(r)}`}>
+            ×
+          </button>
+        </span>
+      ))}
+      {adding ? (
+        <span className="flex flex-wrap items-center gap-1.5">
+          <select value={product} onChange={(e) => setProduct(e.target.value)} className={input} aria-label="Product">
+            {PRODUCTS.map((p) => (
+              <option key={p} value={p}>
+                {productName(p)}
+              </option>
+            ))}
+          </select>
+          <select value={action} onChange={(e) => setAction(e.target.value)} className={input} aria-label="Action">
+            <option value="any">any action</option>
+            {ACTIONS.map((a) => (
+              <option key={a} value={a}>
+                {a}
+              </option>
+            ))}
+          </select>
+          in
+          <input value={env} onChange={(e) => setEnv(e.target.value)} placeholder="every environment" className={`${input} w-32`} aria-label="Environments" />
+          <button onClick={() => void add()} className={primary}>
+            Add
+          </button>
+          <button onClick={() => setAdding(false)} className="text-subtle hover:text-fg">
+            Cancel
+          </button>
+        </span>
+      ) : (
+        <button onClick={() => setAdding(true)} className="text-accent hover:underline">
+          Make agents ask before…
+        </button>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The OAuth clients that may connect (the policy's oauth_clients): Atlassian's allowlist of AI
+ * clients. Empty: any client a person consents to.
+ */
+function OAuthClients({ list, save }: { list: string[]; save: (next: string[]) => Promise<void> }) {
+  const [entry, setEntry] = useState("");
+  const add = async () => {
+    const e = entry.trim();
+    if (!e || list.includes(e)) return;
+    await save([...list, e]);
+    setEntry("");
+  };
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-[12px] text-muted">
+      <span>OAuth clients that may connect:</span>
+      {list.length === 0 && <span className="text-subtle">any a person allows</span>}
+      {list.map((e) => (
+        <span key={e} className="flex items-center gap-1 rounded-md border border-line px-2 py-0.5 font-mono">
+          {e}
+          <button onClick={() => void save(list.filter((x) => x !== e))} className="text-subtle hover:text-fg" aria-label={`Remove ${e}`}>
+            ×
+          </button>
+        </span>
+      ))}
+      <input
+        value={entry}
+        onChange={(e) => setEntry(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && void add()}
+        placeholder="claude.ai, localhost, device, cursor:"
+        className={`${input} w-56 font-mono text-[12px]`}
+        aria-label="An OAuth client that may connect"
+      />
+      {entry.trim() && (
+        <button onClick={() => void add()} className={primary}>
+          Add
+        </button>
+      )}
+      {list.length > 0 && !list.includes("localhost") && (
+        <span className="w-full text-subtle">Without localhost, apps on people&apos;s computers can&apos;t connect: roll login, Claude Code, Cursor.</span>
+      )}
+    </div>
+  );
+}
+
 function ApprovalRules({ rules, save }: { rules: ApprovalRule[]; save: (next: ApprovalRule[]) => Promise<void> }) {
   const [adding, setAdding] = useState(false);
   const [product, setProduct] = useState("secrets");

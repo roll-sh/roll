@@ -121,6 +121,12 @@ pub struct ClusterConfig {
     /// The cluster's id in roll's catalog (`srch_…`), when it has one: how it names itself to
     /// `links` and to [`Self::secret_refs`] (a name can be reused after a delete).
     pub catalog_id: Option<String>,
+    /// Who the cluster belongs to, when the host knows: what node-wide fairness counts by
+    /// (connector syncs: [`crate::xpack::entsearch::sync`]). `None`: the cluster counts alone.
+    pub owner: Option<String>,
+    /// The pool of connector sync slots this cluster takes from (`None`: the process's, shared by
+    /// every cluster on the node; tests give clusters a pool of their own).
+    pub connector_slots: Option<std::sync::Arc<crate::xpack::entsearch::sync::slots::Slots>>,
     /// The parent's catalog id, on a new branch's first load only: what it inherited from the
     /// parent is marked then, so its jobs don't act on the parent's outside storage or run twice
     /// ([`crate::branch`]). Later loads, and branches made before marking existed, have none:
@@ -137,6 +143,10 @@ pub struct ClusterConfig {
     /// Resolves credentials given as references (`roll://ENV/KEY`, [`crate::secret_refs`]);
     /// `None`: references are refused.
     pub secret_refs: Option<crate::secret_refs::Resolver>,
+    /// What reindex from remote may use on the node, shared by every cluster it serves
+    /// ([`crate::api::remote::RemoteNode`]); `None`: the cluster gets limits of its own, from
+    /// its node settings.
+    pub reindex_node: Option<Arc<crate::api::remote::RemoteNode>>,
 }
 
 impl ClusterConfig {
@@ -155,10 +165,13 @@ impl ClusterConfig {
             links: None,
             item_charge: None,
             catalog_id: None,
+            owner: None,
+            connector_slots: None,
             branch_of: None,
             file_service_tokens: false,
             audit: None,
             secret_refs: None,
+            reindex_node: None,
         }
     }
 
@@ -212,6 +225,13 @@ pub struct Cluster {
     pub xpack: crate::xpack::Runtime,
     /// The circuit breakers (`indices.breaker.*`).
     pub breakers: crate::breaker::Breakers,
+    /// The node's reindex from remote limits ([`ClusterConfig::reindex_node`]).
+    pub remote: Arc<crate::api::remote::RemoteNode>,
+    /// This cluster's running reindex from remote tasks (counted against `remote`).
+    pub remote_running: Arc<std::sync::atomic::AtomicUsize>,
+    /// The cluster's own `reindex.remote.whitelist` (roll's API sets it, as Elastic Cloud's user
+    /// settings set it); `None`: the node setting's.
+    pub reindex_whitelist: RwLock<Option<Vec<String>>>,
     /// The request thread pools (`search`, `write`, `get`, `analyze`): admission and stats.
     pub thread_pools: crate::thread_pool::ThreadPools,
     /// Shard contents of the snapshots this process took.
@@ -581,6 +601,7 @@ impl Cluster {
         crate::api::snapshots::install_default_repository(&mut state.metadata, config.default_repository.as_deref());
         let (changes, _) = tokio::sync::watch::channel(state.version);
         let thread_pools = crate::thread_pool::ThreadPools::new(&config);
+        let remote_node = config.reindex_node.clone().unwrap_or_else(|| crate::api::remote::RemoteNode::from_settings(&config.node_settings));
         // Runtime-field grok runs inside Painless, which reads the static node setting from here.
         if config.node_setting("runtime_fields.grok.watchdog.max_execution_time").is_some() {
             let ms = config
@@ -621,6 +642,9 @@ impl Cluster {
             ingest: Default::default(),
             xpack: Default::default(),
             breakers: Default::default(),
+            remote: remote_node,
+            remote_running: Default::default(),
+            reindex_whitelist: RwLock::new(None),
             thread_pools,
             snapshot_data: Default::default(),
             ccs: Default::default(),
