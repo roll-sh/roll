@@ -873,6 +873,8 @@ export interface Deployment {
   vulnerabilities?: ScanSummary;
   /** Who approved putting it live, where its environment asks for approvals (single GET only). */
   approved_by?: string[];
+  /** Its own URL (`<id>--<env slug>`), where one answers: null for a worker, a volume, one never built, pruned or waiting for approvals. */
+  url?: string | null;
 }
 
 export interface Slo {
