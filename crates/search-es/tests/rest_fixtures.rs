@@ -208,6 +208,7 @@ async fn responses_match_elasticsearch() {
     let mut checked = 0;
     for (file, scenario) in scenarios() {
         let mut cfg = ClusterConfig::new("docker-cluster");
+        cfg.unsealed_secrets = true;
         cfg.node_name = "es-node".into();
         // Scenarios captured from OpenSearch run against the opensearch dialect.
         if scenario.get("dialect").and_then(Value::as_str) == Some("opensearch") {

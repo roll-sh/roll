@@ -343,6 +343,8 @@ export interface InferenceBinding {
   status: "pending" | "ok" | "error";
   error: string | null;
   last_synced_at: number | null;
+  /** When the sync was made (Unix ms): branches copied since hold the key, and no sync follows them. */
+  bound_at: number;
 }
 
 export interface InferenceSecrets {

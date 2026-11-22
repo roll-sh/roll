@@ -169,6 +169,7 @@ async fn responses_match_elasticsearch() {
     let mut checked = 0;
     for (file, scenario) in scenarios() {
         let mut cfg = ClusterConfig::new("docker-cluster");
+        cfg.unsealed_secrets = true;
         cfg.node_name = "es-node".into();
         // Elasticsearch's default (an empty whitelist refuses every remote), which the
         // recordings were made with; unset, roll lets public remotes through.

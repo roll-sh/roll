@@ -74,7 +74,7 @@ fn no_target(name: &str) -> ControlError {
 pub const MAX_REMOTES: usize = 20;
 
 /// What a remote's credentials are sealed for: their row.
-fn kind(cluster_id: &str, alias: &str, target_id: &str) -> String {
+pub(crate) fn kind(cluster_id: &str, alias: &str, target_id: &str) -> String {
     format!("search remote credentials {cluster_id} {alias} {target_id}")
 }
 
@@ -196,6 +196,11 @@ impl Control {
         if !valid_alias(alias) {
             return Err(ControlError::Invalid("alias: 1 to 64 letters, digits, - and _".into()));
         }
+        if api_key.is_some() && self.cfg.sealer.is_none() {
+            return Err(ControlError::Invalid(
+                "api_key would be stored in the clear: this node has no sealing key (ROLL_SECRET_KEY). Have the operator set it, or link without api_key and roll makes the cross-cluster key".into(),
+            ));
+        }
         let c = self.get(id).await?;
         let held = self.store.remotes(&c.id).await?;
         if held.len() >= MAX_REMOTES && !held.iter().any(|r| r.alias == alias) {
@@ -233,8 +238,10 @@ impl Control {
             }
         };
         let k = kind(&c.id, alias, &t.id);
-        // Sealed under the deployment's key; a node without one (`ROLL_SECRET_KEY` unset: local
-        // development only, as for every secret search keeps) stores it as given.
+        // Sealed under the deployment's key. A node without one (`ROLL_SECRET_KEY` unset: local
+        // development only) refuses a key someone pasted (above) and keeps the one roll made, a
+        // cross-cluster key between two of its own clusters, as made; it's sealed once the node
+        // has a key (`Store::seal_remote_credentials`, as the node starts).
         let credentials = match &self.cfg.sealer {
             Some(s) => s.seal_text(&k, &encoded),
             None => encoded,

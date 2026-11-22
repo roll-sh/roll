@@ -155,7 +155,7 @@ fn postgres() -> Router {
         .route("/v1/search/clusters/{id}/indices/{index}/search", post(|| async { axum::Json(json!({ "hits": [] })) }))
         .route("/v1/search/clusters", post(|| async { axum::Json(json!({ "id": "cl_new", "password": "fresh" })) }))
         .route("/v1/search/clusters/{id}/indices", get(|| async { axum::Json(json!([])) }))
-        .route("/v1/search/clusters/{id}/request", post(|| async { axum::Json(json!({})) }))
+        .route("/v1/search/clusters/{id}/request", post(|ext: axum::http::Extensions| async move { axum::Json(json!({ "reveal": ext.get::<roll_auth::Capable>().is_some_and(|c| c.has(roll_auth::scope::Action::Reveal)) })) }))
         .route("/v1/search/clusters/{id}/indices/{index}/bulk", post(|body: String| async move { axum::Json(json!({ "lines": body.lines().count() })) }))
         .route("/v1/search/clusters/{id}/indices/{index}/settings", axum::routing::put(|| async { axum::Json(json!({ "acknowledged": true })) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/secrets", get(|| async { axum::Json(json!([])) }))
@@ -2065,6 +2065,21 @@ async fn a_rule_can_grant_one_encryption_key() {
     // A rule on the whole project still reaches every key.
     let (all, _) = d.token(json!([{ "product": "secrets", "resources": [{ "id": "prj_a" }], "actions": { "write": "allow" } }]), json!({})).await;
     assert_eq!(d.call(&all, Method::POST, "/v1/secrets/projects/prj_a/transit/billing/encrypt", Some(json!({ "plaintext": "aGk=" }))).await.0, StatusCode::OK);
+}
+
+/// The search console is decided from its route alone: the gate reads no body (a large `_bulk`
+/// through it isn't refused as too large), and tells search whether the grant may also reveal
+/// (`capable`), for a request search finds answers a credential.
+#[tokio::test]
+async fn the_console_is_decided_without_its_body() {
+    let d = Daemon::new(50);
+    let (admin, _) = d.token(json!([{ "product": "search", "resources": [{ "id": "cl_1" }], "actions": { "admin": "allow" } }]), json!({})).await;
+    let (both, _) = d.token(json!([{ "product": "search", "resources": [{ "id": "cl_1" }], "actions": { "admin": "allow", "reveal": "allow" } }]), json!({})).await;
+    let big = json!({ "method": "POST", "path": "/_bulk", "body": "x".repeat(6 << 20) });
+    let (s, v) = d.call(&admin, Method::POST, "/v1/search/clusters/cl_1/request", Some(big)).await;
+    assert_eq!((s, v["reveal"].as_bool()), (StatusCode::OK, Some(false)), "{v}");
+    let (s, v) = d.call(&both, Method::POST, "/v1/search/clusters/cl_1/request", Some(json!({ "method": "GET", "path": "/" }))).await;
+    assert_eq!((s, v["reveal"].as_bool()), (StatusCode::OK, Some(true)), "{v}");
 }
 
 /// A rule can grant some indices of a search cluster: index routes are decided name by name, the

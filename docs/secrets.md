@@ -3022,6 +3022,13 @@ cluster, instead of a key pasted into it: the Inference tab's "A roll secret", o
   no sync is made; the tab offers "A roll secret" only for the others.
 - Deleting the endpoint from the tab deletes its sync; one deleted another way leaves the sync,
   whose next push says the endpoint is gone. Deleting the key leaves the endpoint its last value.
+- A branch of the cluster (`POST …/branches`, or a create with `parent`) copies its endpoints,
+  sealed keys included, and keeps them working there (its `semantic_text` fields go on embedding).
+  The sync follows the cluster it names, never its branches: rotating the key leaves each branch
+  the value it copied, and deleting the endpoint and its sync leaves theirs. The tab's delete names
+  the branches copied since the endpoint was bound (`bound_at` in `GET …/inference/secrets`); delete
+  the endpoint there too, or rotate the key at its provider. Pausing them on the branch instead
+  (as inherited SLM policies are) would stop a branch's embedding, its main use.
 - The sync names the cluster by its id (`srch_…`, never a name: a name has no `_`) and pushes
   through roll search's control plane (`/v1/search/clusters/{id}/request`, on the cluster's owner
   on a fleet), not the cluster's endpoint, so its Basic auth user and IP allowlist don't apply. A
