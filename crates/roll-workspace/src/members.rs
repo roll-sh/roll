@@ -56,6 +56,23 @@ CREATE TABLE IF NOT EXISTS homes (
     PRIMARY KEY (kind, ref)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS homes_project ON homes (project_id);
+CREATE TABLE IF NOT EXISTS deleted_members (
+    project_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    environments TEXT,
+    added_by TEXT NOT NULL,
+    added_at INTEGER NOT NULL,
+    PRIMARY KEY (project_id, user_id)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS deleted_homes (
+    kind TEXT NOT NULL,
+    ref TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    set_by TEXT NOT NULL,
+    set_at INTEGER NOT NULL,
+    PRIMARY KEY (project_id, kind, ref)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS member_events (
     id TEXT PRIMARY KEY,
     at INTEGER NOT NULL,
@@ -371,6 +388,29 @@ impl Workspace {
     }
 
     /// The owners of `project` (`usr_…`), whether or not they can sign in.
+    /// A deleted project's members and their roles as they were when it was deleted. Never who may
+    /// bring it back (that's asked of grants as they are now): only what a product keeps doing for
+    /// it through its recovery window (roll secrets' audit sinks).
+    pub fn deleted_members(&self, project: &str) -> Result<Vec<(String, Role)>> {
+        Ok(self.db.read(|c| {
+            c.query("SELECT user_id, role FROM deleted_members WHERE project_id = ? ORDER BY user_id", [project], |r| {
+                let role: String = r.get(1)?;
+                Ok((r.get(0)?, Role::parse(&role).unwrap_or(Role::Viewer)))
+            })
+        })?)
+    }
+
+    /// As [`Workspace::trusted_by_members`], from a deleted project's kept homes and owners.
+    pub(crate) fn trusted_when_deleted(&self, project: &str, namespace: &str, kind: Kind, r#ref: &str) -> bool {
+        let home = self.db.read(|c| c.query_row("SELECT 1 FROM deleted_homes WHERE project_id = ? AND kind = ? AND ref = ?", [project, kind.as_str(), r#ref], |r| r.get::<_, i64>(0)).optional());
+        if roles::decisions::HOMES && HOME_KINDS.contains(&kind) && home.ok().flatten().is_some() {
+            return true;
+        }
+        let Some(owners) = self.owners.get() else { return false };
+        let kept = self.deleted_members(project).unwrap_or_default();
+        kept.iter().filter(|(_, r)| *r == Role::Owner).any(|(o, _)| if o == namespace { owners.trusts(o, kind, r#ref) } else { owners.owns(o, kind, r#ref) })
+    }
+
     pub fn owners_of(&self, project: &str) -> Result<Vec<String>> {
         Ok(self.db.read(|c| c.query("SELECT user_id FROM members WHERE project_id = ? AND role = 'owner' ORDER BY user_id", [project], |r| r.get(0)))?)
     }
@@ -823,10 +863,31 @@ pub(crate) fn first_owner(c: &Conn<'_>, project: &str, owner: &str, now: i64) ->
     Ok(())
 }
 
-/// A deleted project's members, invites and homes, in its write.
-pub(crate) fn forget(c: &Conn<'_>, project: &str) -> Result<()> {
+/// A deleted project's members and homes, kept apart in its write (they come back with it:
+/// [`bring_back`]); its invites end, so no `rlv_` link of it is accepted again.
+pub(crate) fn put_aside(c: &Conn<'_>, project: &str) -> Result<()> {
+    c.execute("INSERT INTO deleted_members (project_id, user_id, role, environments, added_by, added_at) SELECT project_id, user_id, role, environments, added_by, added_at FROM members WHERE project_id = ?", [project])?;
+    c.execute("INSERT INTO deleted_homes (kind, ref, project_id, set_by, set_at) SELECT kind, ref, project_id, set_by, set_at FROM homes WHERE project_id = ?", [project])?;
     for t in ["members", "project_invites", "homes"] {
         c.execute(&format!("DELETE FROM {t} WHERE project_id = ?"), [project])?;
     }
+    Ok(())
+}
+
+/// A restored project's members and homes, back as they were (a home another project took since
+/// stays there).
+pub(crate) fn bring_back(c: &Conn<'_>, project: &str) -> Result<()> {
+    c.execute(
+        "INSERT INTO members (project_id, user_id, role, environments, added_by, added_at) SELECT project_id, user_id, role, environments, added_by, added_at FROM deleted_members WHERE project_id = ? ON CONFLICT (project_id, user_id) DO NOTHING",
+        [project],
+    )?;
+    c.execute("INSERT INTO homes (kind, ref, project_id, set_by, set_at) SELECT kind, ref, project_id, set_by, set_at FROM deleted_homes WHERE project_id = ? ON CONFLICT (kind, ref) DO NOTHING", [project])?;
+    Ok(())
+}
+
+/// A kept deleted project's members and homes go.
+pub(crate) fn forget_aside(c: &Conn<'_>, project: &str) -> Result<()> {
+    c.execute("DELETE FROM deleted_members WHERE project_id = ?", [project])?;
+    c.execute("DELETE FROM deleted_homes WHERE project_id = ?", [project])?;
     Ok(())
 }

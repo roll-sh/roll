@@ -109,7 +109,7 @@ it's done.
 
 ## Routes
 
-Bodies are JSON. Every error is `{"error": string}`.
+Bodies are JSON. Every error is `{"error": string}`, plus a `code` when a product refused a delete.
 
 | Route | Body | Answer |
 | --- | --- | --- |
@@ -117,7 +117,7 @@ Bodies are JSON. Every error is `{"error": string}`.
 | `POST /v1/workspace/projects` | `{name, description?, icon?}` | 201 `Project` |
 | `GET /v1/workspace/projects/{id}` | | `Project` |
 | `PATCH /v1/workspace/projects/{id}` | `{name?, description?, icon?}` | `Project` |
-| `DELETE /v1/workspace/projects/{id}` | | 204 |
+| `DELETE /v1/workspace/projects/{id}?confirm=` | | 204 |
 | `PUT /v1/workspace/projects/{id}/resources/{kind}/{ref}` | `{x, y}` | `Resource` |
 | `DELETE /v1/workspace/projects/{id}/resources/{kind}/{ref}` | | 204 |
 | `GET /v1/workspace/projects/{id}/members` | | `Member[]` (emails only for its admins) |
@@ -136,7 +136,17 @@ Bodies are JSON. Every error is `{"error": string}`.
 - `PUT` adds the resource, moves it on the canvas, or moves it from another project of the same
   owner, in one write.
   `added_at` changes only when the resource joins a project.
-- `DELETE` of a project removes the project and its membership rows.
+- `DELETE` of a project removes the project and its membership rows, once every product that
+  registered a veto (`Workspace::before_delete`) agrees; a refusal is answered as the product gave
+  it, `{"error", "code"}`. roll secrets refuses while the project holds secrets: 403 for anyone
+  who isn't an admin of them, 409 `project_holds_secrets` until `?confirm=` repeats the project's
+  name or id (docs/secrets.md, "Deleting the workspace project").
+- A deleted project and its canvas, members and homes are kept apart (`deleted_projects`,
+  `deleted_resources`, `deleted_members`, `deleted_homes`) for at most 91 days, so a product's
+  recovery can bring them back (`Workspace::restore`: not over another project of the same name; a
+  resource since placed elsewhere, or a home set elsewhere since, stays there). Its pending
+  invites end at the delete. A product that purged what it kept drops them
+  (`Workspace::forget_deleted`).
 - `PATCH` changes only the fields it has; `"icon": null` goes back to the default.
 - 400: a bad name, description, icon, kind, ref or body (`x` and `y` must be finite numbers).
 - 404: no such project (or another owner's), or (`DELETE` of a resource) the resource isn't in

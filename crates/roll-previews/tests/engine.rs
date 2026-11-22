@@ -26,6 +26,11 @@ async fn a_change_gets_a_full_preview_that_follows_pushes_and_goes_when_it_lands
     assert!(urls.contains(&("web", "http://web-pr107-shop.preview.test", "cs_7a")), "{urls:?}");
     assert!(urls.contains(&("api", "http://api-pr107-shop.preview.test", "cs_api0")), "{urls:?}");
     assert!(p.cost.sleeping_usd_month > 0.0 && p.cost.active_usd_hour > 0.0, "{:?}", p.cost);
+    // How its head came up, step by step, in order.
+    let tl = e.engine.store.preview(&p.id).unwrap().timeline.expect("its timeline");
+    let steps: Vec<&str> = tl.steps.iter().map(|x| x.step.as_str()).collect();
+    assert_eq!((tl.head.as_str(), steps), ("cs_7a", vec!["data", "setup", "deploy", "checks", "ready"]));
+    assert!(tl.steps.windows(2).all(|w| w[0].at <= w[1].at) && tl.started_at <= tl.steps[0].at);
 
     // Converging again changes nothing: branching is idempotent.
     e.engine.pass().await.unwrap();

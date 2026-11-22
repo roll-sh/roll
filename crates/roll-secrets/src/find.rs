@@ -46,9 +46,10 @@ impl Secrets {
             // Keys are [A-Za-z0-9_]: `_` is LIKE's one-character wildcard, so escape it.
             None => ("s.key LIKE ? ESCAPE '\\'", format!("{}%", probe.replace('_', "\\_"))),
         };
+        let live = crate::deleted::live("s.project_id");
         let sql = format!(
             "SELECT s.project_id, e.slug, s.path, s.key, s.version, s.updated_at, s.link FROM secrets s JOIN environments e ON e.id = s.env_id
-             WHERE s.owner = '' AND {matching} AND (CAST(? AS TEXT) IS NULL OR s.project_id = ?) ORDER BY s.project_id, e.position, s.path, s.key LIMIT ? OFFSET ?"
+             WHERE s.owner = '' AND {matching} AND {live} AND (CAST(? AS TEXT) IS NULL OR s.project_id = ?) ORDER BY s.project_id, e.position, s.path, s.key LIMIT ? OFFSET ?"
         );
         let mut names_of = std::collections::HashMap::new();
         let mut out = vec![];

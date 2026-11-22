@@ -322,11 +322,15 @@ impl Secrets {
                 continue;
             }
             // A bucket must still be on the project's canvas: one moved to another project, or
-            // removed, gets nothing more.
-            let gone = roll_target(&url).is_some_and(|(kind, name)| !self.members(&project).map(|m| m.contains(&(kind.to_string(), name.to_string()))).unwrap_or(false));
+            // removed, gets nothing more. A deleted project's sinks keep delivering through its
+            // recovery window, and its closing digest, from the canvas it had (deleted.rs).
+            let deleted = self.is_deleted(&project)?;
+            let canvas = || if deleted { self.deleted_canvas(&project) } else { self.members(&project) };
+            let gone = roll_target(&url).is_some_and(|(kind, name)| !canvas().map(|m| m.contains(&(kind.to_string(), name.to_string()))).unwrap_or(false));
             // The project's audit log goes out only while whoever set the sink up may still manage
-            // the project: a removed or demoted admin's URL stops getting it.
-            let maker_ok = self.registration_reaches(&by, &[(crate::access::Action::Admin, crate::access::Scope::whole(&project))])?;
+            // the project: a removed or demoted admin's URL stops getting it. A deleted project's
+            // members are kept apart, so there it's whether they managed it when it was deleted.
+            let maker_ok = if deleted { self.managed_when_deleted(&by, &project)? } else { self.registration_reaches(&by, &[(crate::access::Action::Admin, crate::access::Scope::whole(&project))])? };
             let sent = if gone {
                 Err(Error::BadRequest(format!("{url} isn't on this project's canvas any more")))
             } else if !maker_ok {
@@ -334,7 +338,7 @@ impl Secrets {
             } else {
                 Ok(())
             };
-            let sent = sent.and_then(|_| self.project(&project)).and_then(|dek| {
+            let sent = sent.and_then(|_| self.stored_key(&project)).and_then(|dek| {
                 let secret = dek.open(&sink_aad(&project, &id), &sealed)?;
                 let token = sealed_token.as_ref().map(|t| dek.open(&token_aad(&project, &id), t)).transpose()?;
                 let body = json!({ "sink": id, "project": project, "events": rows });
