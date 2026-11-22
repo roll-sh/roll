@@ -481,7 +481,9 @@ all of it (round 9's seeds too with `GUARD_SEEDS`).
    `sg docker`), one at a time (mkdir lock in `~/.cache/pg-engine-train`). It cherry-picks the
    candidates onto origin's head (a conflicting one is left out), runs the full train once,
    pushes the combination with `tools/push.sh` when green, and keeps its clippy warnings for
-   quick-check. Red, it re-runs the failing stages (and test binaries) on the same combination
+   quick-check. Red, it re-runs the failing stages (and only the failing tests: `lib::<path>` as
+   `--lib`, `<target>::<name>` as `--test <target>`, each `--exact`; `TRAIN_PLAN=1` on
+   verification-train.sh prints that mapping, agent 293) on the same combination
    (passing then: a flake, everything lands), else on halving prefixes to name the candidate at
    fault, leaves it out, re-runs the failing stages on the rest and lands them. Result in
    `<run>/result`. Since 2026-11-18 (agent 252) the result says why each failing stage failed

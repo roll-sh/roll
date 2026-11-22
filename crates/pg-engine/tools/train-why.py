@@ -7,6 +7,10 @@
     train-why.py dump <log> <TAP.md> <fails out>
     train-why.py libtest <binary name> <log> <fails out>   (appends)
     train-why.py panic <log> <name> <fails out>            (appends)
+    train-why.py retry <status>     the tests and checked stages' failing tests, as TRAIN_TESTS
+                                    entries for the batch train's re-run: <binary>::<test> for a
+                                    failed test (lib::server::tests::x), <binary> when it died
+                                    without one or was not built
 
 A fails file has one "<name>\\t<message>" line per failing test (a regress unit as file:unit, an
 isolation spec, a pg_dump TAP check as file: description, a crate test as binary::test): the
@@ -134,6 +138,22 @@ def libtest(binary, log, out):
     write_fails(out, rows, append=True)
 
 
+def retry(status):
+    specs = []
+    for l in read(status).splitlines():
+        f = l.split()
+        if len(f) < 4 or f[0] not in ('tests', 'checked') or f[1] == '0':
+            continue
+        # "<stage> <exit> <seconds>s <binary>::<test> ... <binary>:exit|:not-built ... <time>"
+        for tok in f[3:]:
+            m = re.fullmatch(r'([a-z][a-z_0-9]*)(::\S+|:[a-z-]+)', tok)
+            if m:
+                specs.append(tok if m.group(2).startswith('::') else m.group(1))
+    whole = set(s for s in specs if '::' not in s)
+    keep = [s for s in specs if s in whole or s.split('::')[0] not in whole]
+    print(' '.join(dict.fromkeys(keep)))
+
+
 def panic(log, name, out):
     p = panic_message(read(log)) or (read(log).strip().splitlines() or [''])[-1][:200]
     write_fails(out, [(name, p)], append=True)
@@ -144,5 +164,5 @@ if __name__ == '__main__':
     kind, args = sys.argv[1], sys.argv[2:]
     if kind == 'start':
         sys.exit(start(*args))
-    {'regress': regress, 'iso': iso, 'dump': dump, 'libtest': libtest, 'panic': panic}[kind](*args)
+    {'regress': regress, 'iso': iso, 'dump': dump, 'libtest': libtest, 'panic': panic, 'retry': retry}[kind](*args)
     sys.exit(0)

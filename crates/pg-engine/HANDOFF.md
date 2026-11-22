@@ -16872,6 +16872,38 @@ foreign load counts a command's own work off the lane's CPUs as not there (it re
 can't see work of the command's own that lives outside its scope (a container not named in
 `LANE_CONTAINERS`).
 
+## Verification tooling, round 3: the retry of one failed test (agent 293, 2026-11-22)
+
+Tooling only; no engine change, nothing to measure for speed.
+
+**The batch train's retry could not re-run a lib unit test.** Run `20261122-174432` (cand/a290)
+failed one test in pass 0, `lib::server::tests::wait_spin_polls_only_for_a_quick_client` (a
+timing test, below). The retry's test list came from `fail_bins`, which grepped every `word::`
+out of the status line: `lib::server::tests::...` became three binaries, `lib server tests`; pass
+1 built `--lib --test server --test tests`, cargo stopped at "no test target named `server`", and
+the one-test flake rejected the candidate ("failed build,tests (lib server tests)"). Any failing
+test inside a module (`wire::cases::x`, `lib::a::b`) had the same fault.
+
+Now the retry runs exactly the tests that failed:
+- `tools/train-why.py retry <status>` reads the tests and checked stages' status lines and prints
+  `TRAIN_TESTS` entries: `<binary>::<test>` for a failed test, the bare binary when it died without
+  a failed test (`<binary>:exit`) or was not built (then it runs whole; its single tests drop out).
+- `tools/verification-train.sh` takes such entries in `TRAIN_TESTS`: `lib::server::tests::x` builds
+  `--lib` and runs the lib binary with `--exact server::tests::x`, `wire::protocol_cases` builds
+  `--test wire` and runs `--exact protocol_cases`; several tests of one binary run in one call
+  (libtest takes several exact filters). Plain binary names work as before, and the checked stage
+  uses the same list, so its retry is covered the same way. The result's `(...)` now names the
+  failing tests rather than binaries.
+- `TRAIN_PLAN=1 TRAIN_TESTS="..." tools/verification-train.sh` prints the cargo targets and each
+  binary's filters and exits (no build, no ports, no TRAIN_DIR needed): the cheap check of the
+  mapping. Checked on the real pass-0 status of `20261122-174432` (`build: --lib`, `run: lib
+  --exact server::tests::wait_spin_polls_only_for_a_quick_client`) and on a made-up status with
+  module paths, `:exit` and `:not-built` entries in both stages.
+
+Caveat: the batch train reads `train-why.py` from its own checkout (`$SELF`'s directory) and
+runs the combination's `verification-train.sh`; both need this change, so the first batch that
+carries it should be started from a checkout that has it.
+
 ## Starting prompt for the next agent
 
 Paste this into the new agent, from the repository root on branch

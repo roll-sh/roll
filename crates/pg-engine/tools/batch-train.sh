@@ -14,7 +14,7 @@
 #   2. tools/verification-train.sh once on the combination
 #   3. green: the combination pushed with tools/push.sh (a guarded fast-forward), and its clippy
 #      warnings kept for quick-check ($BT_HOME/clippy/<head>.txt)
-#   4. red: the failing stages (and the failing test binaries) run again on the whole combination
+#   4. red: the failing stages (and only the failing tests) run again on the whole combination
 #      (a failure that doesn't come back is a flake: everything lands); otherwise on prefixes of
 #      it, halving, to find the first candidate at fault; that one is left out, the rest run the
 #      failing stages again and land when green (repeated for a second culprit)
@@ -163,17 +163,14 @@ flakes() {
   done
 }
 # The failing stages of the last train, as TRAIN_STAGES names ("" when green), and the failing
-# test binaries.
+# tests as TRAIN_TESTS entries (<binary>::<test>, or a whole binary that died; train-why.py retry).
 failing() {
   f=$(awk '$2 ~ /^[0-9]+$/ && $2 != 0 && $1 != "head" && $1 != "done" && $1 != "engine-bin" {print $1}' "$TD/status" |
     sed 's/^power-cut$/power/; s/^crash-power.*/power/; s/^isolation$/iso/' | sort -u | paste -sd, -)
   grep -q '^done ' "$TD/status" || f="${f:+$f,}unfinished"
   echo "$f"
 }
-fail_bins() {
-  awk '($1 == "tests" || $1 == "checked") && $2 != 0' "$TD/status" |
-    grep -o '[a-z][a-z_0-9]*::\|[a-z][a-z_0-9]*:[a-z-][a-z-]*' | sed 's/:.*//' | sort -u | paste -sd' ' -
-}
+fail_bins() { python3 -I "$(dirname "$SELF")/train-why.py" retry "$TD/status"; }
 green() { [ -z "$(failing)" ]; }
 
 CANDS=$(apply "$@")

@@ -35,7 +35,12 @@
 #                  has the ones used.
 #   TRAIN_STAGES   the stages to run (default all: build,clippy,tests,checked,crash,power,regress,iso,dump);
 #                  build always runs for what the others need
-#   TRAIN_TESTS    test binaries for tests and checked (default all; space-separated names)
+#   TRAIN_TESTS    what tests and checked run (default every test binary; space-separated): a
+#                  binary (lib for the library's unit tests, else a tests/*.rs target) or one test
+#                  in it as the status lines name it, <binary>::<test> (lib::server::tests::x
+#                  builds --lib and runs server::tests::x --exact; wire::protocol_cases builds
+#                  --test wire and runs protocol_cases --exact)
+#   TRAIN_PLAN=1   print the cargo targets and each binary's tests for TRAIN_TESTS, run nothing
 #   TRAIN_THREADS  each test binary's threads (default heavy.sh's cap, else 6: two crate-test
 #                  lanes on 12 CPUs)
 #   TRAIN_NO_CHECKOUT=1  test the checkout as it is; otherwise it checks out origin's head when
@@ -45,13 +50,27 @@
 #                  crash_random for crash and power with `--profile dist`, -Cprofile-use of it
 #                  and tools/dist-flags.sh's flags (as the shipped binary is built)
 set -u
+ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
+TOOLS=$ROOT/crates/pg-engine/tools
+cd "$ROOT" || exit 1
+ALL=$(ls crates/pg-engine/tests/*.rs | sed 's,.*/,,; s,\.rs$,,')
+SEL=${TRAIN_TESTS:-lib $ALL}
+BINS=$(for s in $SEL; do echo "${s%%::*}"; done | awk '!seen[$0]++')
+TARGETS=$(for s in $BINS; do [ "$s" = lib ] && echo --lib || echo "--test $s"; done)
+# The tests TRAIN_TESTS names in binary $1 (none: all of it).
+filters() {
+  for s in $SEL; do [ "$s" = "$1" ] && return; done
+  for s in $SEL; do case $s in "$1"::*) echo "${s#*::}" ;; esac; done
+}
+if [ -n "${TRAIN_PLAN:-}" ]; then
+  echo "build:" $TARGETS
+  for s in $BINS; do f=$(filters "$s"); echo "run: $s" ${f:+--exact $f}; done
+  exit 0
+fi
 D=${TRAIN_DIR:?TRAIN_DIR: a scratch directory on disk}
 P=${TRAIN_PREFIX:?TRAIN_PREFIX: the prefix of your containers}
 STAGES=",${TRAIN_STAGES:-build,clippy,tests,checked,crash,power,regress,iso,dump},"
 THREADS=${TRAIN_THREADS:-${RUST_TEST_THREADS:-6}}
-ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
-TOOLS=$ROOT/crates/pg-engine/tools
-cd "$ROOT" || exit 1
 mkdir -p "$D"
 # Ports, held while this train runs (tools/ports.sh); the isolation reference keeps the port its
 # container runs on when that one is safe.
@@ -91,9 +110,6 @@ for l in sys.stdin:
     if m.get("reason") == "compiler-artifact" and m.get("executable") and m["profile"]["test"]:
         print("lib" if m["target"]["kind"][0] == "lib" else m["target"]["name"], m["executable"])
 '; }
-ALL=$(ls crates/pg-engine/tests/*.rs | sed 's,.*/,,; s,\.rs$,,')
-SEL=${TRAIN_TESTS:-lib $ALL}
-TARGETS=$(for s in $SEL; do [ "$s" = lib ] && echo --lib || echo "--test $s"; done)
 REFT="--test pg_regress --test pg_isolation --test pg_dump"
 NEED=
 want tests && NEED="$NEED $TARGETS"
@@ -150,9 +166,10 @@ bin() { awk -v n="$1" '$1 == n {print $2}' "$2"; }
 # fail: "<stage> <exit> <failed binary::test ...> <seconds>s".
 crate_tests() {
   stage=$1 bins=$2 t=$(date +%s) bad=
-  for s in $SEL; do
+  for s in $BINS; do
     b=$(bin "$s" "$bins"); [ -n "$b" ] || { bad="$bad $s:not-built"; continue; }
-    (cd crates/pg-engine && RUST_TEST_THREADS=$THREADS "$b") >"$D/tests/$stage-$s.log" 2>&1 || {
+    f=$(filters "$s")
+    (cd crates/pg-engine && RUST_TEST_THREADS=$THREADS "$b" ${f:+--exact $f}) >"$D/tests/$stage-$s.log" 2>&1 || {
       python3 -I "$TOOLS/train-why.py" libtest "$s" "$D/tests/$stage-$s.log" "$D/$stage.fails"
       bad="$bad $(grep -E '^test .* FAILED$' "$D/tests/$stage-$s.log" | awk -v s="$s" '{printf "%s::%s ", s, $2}')$(grep -q '^test .* FAILED$' "$D/tests/$stage-$s.log" || echo "$s:exit")"
     }
