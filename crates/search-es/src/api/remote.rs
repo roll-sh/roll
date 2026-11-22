@@ -20,9 +20,9 @@
 //! user settings set it, and which roll's migration adds its host to), else the node setting.
 //! The node's operator rules apply on top: `reindex.remote.blocklist` refuses what it matches.
 //!
-//! The remote is a URL a tenant chose, so roll's rule for those applies (AGENTS.md): names
-//! resolve to public addresses only ([`roll_net::PublicOnly`]), private IP literals and
-//! `localhost` are refused ([`roll_net::literal_private_host`]), no redirect is followed, no
+//! The remote is a URL a tenant chose, so roll's rule for those applies (AGENTS.md), through the
+//! node's egress check ([`crate::egress`]): names resolve to public addresses only, private IP
+//! literals and `localhost` are refused, no redirect is followed, no
 //! proxy is used, each read times out and a request's whole exchange is capped at 10 minutes. The
 //! node setting [`ALLOW_PRIVATE`] lifts the address check (local development, tests). HTTPS is
 //! verified against the platform's roots plus `reindex.ssl.certificate_authorities` (PEM files),
