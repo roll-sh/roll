@@ -2397,10 +2397,9 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **A placeholder swaps only for its own consumer, checked live** (after roll secrets' #665, H5):
-   roll secrets refuses a placeholder through another consumer's proxy (`Refusal::WrongConsumer`);
-   `scripts/preview-intercept.sh` then shows another preview's placeholder refused on this one's
-   socket.
+1. **A preview's interception CA kept until its hosts change or it nears its end, in review**
+   (fix/roll-previews-ca-reuse, after roll secrets' fix/secrets-ca-live-fit): today a new CA every
+   hour restarts an intercepted preview's services, about 24 times a day.
 2. **Search connectors on a branch, checked live** (after roll search's #318): a branch's
    inherited connectors start paused and its parent's secrets don't open there; the live run makes
    a cluster with a connector, branches it into a preview, and expects no sync and its masks kept.
@@ -2414,6 +2413,8 @@ Ranked by what a person notices first. Done so far:
 5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
 6. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-22, mid-morning: a share link works only while its maker may still open the project's previews (#679: someone who left the project no longer keeps a working link), and the live run checks that another consumer's placeholder is refused on a preview's socket (#685, roll secrets' #665).
 
 Landed 2026-11-22, later that morning: roll secrets' response scrub wired into `roll-intercept` (#630: an echoed key stopped, its placeholder ended; and the `maker_unreachable` fallback checked live), a preview's crons and scheduled commands off unless the project says so (#656, on roll apps' `scheduled`), the API contract's `Preview` and `Settings` complete again with a test that keeps them so (#656: 23 fields had fallen out), and a leaf's private key zeroized in memory with `preview-apps.sh` no longer leaking Docker networks (#671: 23 had used up the address pools).
 
