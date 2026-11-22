@@ -361,6 +361,8 @@ function Form({
         <Field label="Monthly budget" note="USD the project's previews may cost in a month; once reached, new previews wait. 0 is no cap.">
           <Num value={s.max_usd_month ?? 0} step="any" onChange={(v) => set("max_usd_month", v)} />
         </Field>
+        <Toggle label="Warm after each push" note="Its services start as soon as a push is deployed, so the pull request's link opens at once." checked={s.warm} onChange={(v) => set("warm", v)} />
+        <Toggle label="Run crons on their schedule" note="Off: a preview's crons and scheduled commands are deployed, but their schedule doesn't fire, so a preview nobody looks at runs no jobs and mails no one." checked={!!s.crons} onChange={(v) => set("crons", v)} />
       </Section>
 
       <Section title="Secrets">
@@ -530,7 +532,6 @@ function Form({
         <Toggle label="A comment with the URLs and cost" checked={s.github.comment} onChange={(v) => set("github", { ...s.github, comment: v })} />
         <Toggle label="A commit status (roll/preview)" checked={s.github.status} onChange={(v) => set("github", { ...s.github, status: v })} />
         <Toggle label="A deployment" checked={s.github.deployment} onChange={(v) => set("github", { ...s.github, deployment: v })} />
-        <Toggle label="Warm after each push" note="Its services start as soon as a push is deployed, so the pull request's link opens at once." checked={s.warm} onChange={(v) => set("warm", v)} />
         <Toggle label="A feedback button on its pages" note="For people who open it through roll: a note pinned to the page posts on the change." checked={s.feedback} onChange={(v) => set("feedback", v)} />
       </Section>
 

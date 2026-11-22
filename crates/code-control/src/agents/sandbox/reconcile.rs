@@ -23,6 +23,16 @@ pub(crate) fn seal_scope(sandbox_id: &str) -> String {
     format!("sandbox:{sandbox_id}")
 }
 
+/// Whether a sandbox may still start with the values copied into it from roll secrets.
+enum Copied {
+    /// Nothing copied, already taken out, or the copier still may.
+    Keep,
+    /// The copier may no longer reveal them (why, without a value).
+    TakeOut(String),
+    /// roll secrets didn't say: don't start it with them this look.
+    Unsure(String),
+}
+
 /// What a backend state means for the sandbox: its status and error. A state in transition
 /// keeps what it was.
 fn observed(s: &SandboxRow, state: BackendState) -> (SandboxStatus, Option<String>) {
@@ -241,7 +251,7 @@ impl Code {
         // Make it what the owner asked for: an always-on sandbox that stopped (a crash, a host
         // move) starts again; a stopped or sleeping one stops.
         let acted = match (s.desired, status) {
-            (Desired::Running, SandboxStatus::Stopped) => Some(b.start(&backend_id).await),
+            (Desired::Running, SandboxStatus::Stopped) => Some(self.start_sandbox(b, &s, &backend_id).await),
             (desired, SandboxStatus::Running | SandboxStatus::Creating | SandboxStatus::Starting) if desired.is_stopped() => {
                 // The daemon on that link is on its way down: a wake waits for the next one.
                 self.sandboxes.stopped_links.lock().insert(s.machine_id.clone(), self.agents.link_conn(&s.machine_id));
@@ -283,13 +293,34 @@ impl Code {
             self.note(s, SandboxStatus::Failed, Some(why), None, true).await;
             return None;
         }
-        let spec = match self.sandbox_spec(s) {
+        let mut spec = match self.sandbox_spec(s) {
             Ok(spec) => spec,
             Err(why) => {
                 self.note(s, SandboxStatus::Failed, Some(why), None, true).await;
                 return None;
             }
         };
+        // Taken out now, or already by an earlier try whose create didn't get through (what's
+        // sealed still has them).
+        let take_out = match self.copied(s).await {
+            Copied::Keep => s.secrets_dropped.as_ref().map(|_| None),
+            Copied::Unsure(why) => {
+                self.note(s, SandboxStatus::Creating, Some(why), None, false).await;
+                return None;
+            }
+            Copied::TakeOut(why) => Some(Some(why)),
+        };
+        if let Some(why) = take_out {
+            let Some(from) = &s.secrets_from else {
+                let why = why.unwrap_or_else(|| "its copied secrets were taken out".into());
+                self.note(s, SandboxStatus::Failed, Some(why), None, true).await;
+                return None;
+            };
+            spec.env.retain(|k, _| !from.keys.contains(k));
+            if let Some(why) = why {
+                self.secrets_taken_out(s, &why);
+            }
+        }
         match b.create(&spec).await {
             Ok(id) => {
                 tracing::info!(sandbox = %s.id, backend = %s.backend, id = %id, "created a sandbox");
@@ -305,6 +336,49 @@ impl Code {
                 self.note(s, SandboxStatus::Creating, Some(why), None, false).await;
                 None
             }
+        }
+    }
+
+    /// Whether the values copied into `s` from roll secrets may still go to its code: asked of roll
+    /// secrets as their copier now (removed from the project, demoted, a token revoked: no).
+    async fn copied(&self, s: &SandboxRow) -> Copied {
+        let Some(by) = s.secrets_by.as_deref().filter(|_| s.secrets_dropped.is_none()) else { return Copied::Keep };
+        let Some(secrets) = self.secret_env.get() else { return Copied::Unsure("roll secrets isn't on this server yet".into()) };
+        let source = s.secrets_from.as_ref().map(|f| (f.project.as_str(), f.environment.as_str()));
+        match secrets.still_reveals(by, source).await {
+            Ok(()) => Copied::Keep,
+            Err(e) => match e.downcast::<crate::Refused>() {
+                Ok(r) => Copied::TakeOut(format!("its copied secrets were taken out: {r}")),
+                Err(e) => Copied::Unsure(format!("roll secrets didn't say whether its copied secrets may stay: {e:#}")),
+            },
+        }
+    }
+
+    /// Start it, without its copied secrets when their copier may no longer reveal them. A
+    /// sandbox whose backend can't take them out (or that doesn't say which they are, from before
+    /// that was kept) isn't started.
+    async fn start_sandbox(&self, b: &dyn SandboxBackend, s: &SandboxRow, backend_id: &str) -> Result<(), BackendError> {
+        let why = match self.copied(s).await {
+            Copied::Keep => return b.start(backend_id).await,
+            Copied::Unsure(why) => return Err(BackendError::Transient(why)),
+            Copied::TakeOut(why) => why,
+        };
+        let Some(from) = &s.secrets_from else {
+            return Err(BackendError::Permanent(format!("{why}; it was made before roll kept which variables they are, so it isn't started: delete it and make another")));
+        };
+        let spec = SandboxSpec { id: s.id.clone(), name: s.name.clone(), size: s.size.clone(), env: BTreeMap::new() };
+        if !b.start_without(backend_id, &spec, &from.keys).await? {
+            return Err(BackendError::Permanent(format!("{why}; {} can't take them out of what it made, so it isn't started: delete it and make another", s.backend)));
+        }
+        self.secrets_taken_out(s, &why);
+        Ok(())
+    }
+
+    /// Record that the sandbox's copied secrets were taken out, and why (no value in it).
+    fn secrets_taken_out(&self, s: &SandboxRow, why: &str) {
+        tracing::info!(sandbox = %s.id, by = s.secrets_by.as_deref().unwrap_or_default(), "{why}");
+        if let Err(e) = store::secrets_dropped(self.db.sql(), &s.id, why) {
+            tracing::warn!(sandbox = %s.id, error = %e, "recording that a sandbox's copied secrets were taken out");
         }
     }
 

@@ -105,7 +105,7 @@ fn main() {
     // A sandbox's outgoing request swapping a placeholder (docs/secrets.md, "Using a key without
     // seeing it"): what roll's egress proxy calls per request, over 1,000 calls.
     use roll_secrets::proxy::{Place, Position};
-    let hosts = roll_secrets::placeholders::Hosts { hosts: vec!["api.example.com".into()], header: None, query: None, untrusted: false };
+    let hosts = roll_secrets::placeholders::Hosts { hosts: vec!["api.example.com".into()], header: Some("Authorization: Bearer {}".into()), query: None, untrusted: false };
     s.set_hosts(&project, "production", "/", "K00001", hosts, &c).unwrap();
     let sandbox = s.untrusted(&project, &Caller::consumer("sandbox:bench")).unwrap();
     let ask = roll_secrets::placeholders::Ask { minutes: None, maker: Some("operator") };

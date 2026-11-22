@@ -37,6 +37,18 @@ Any MCP client that takes a JSON config:
 `X-Roll-Agent` (optional) is the name the agent reviews and comments as. It works as it does on the
 HTTP API.
 
+Lockdown (`?lockdown=1` on the URL, or `X-MCP-Lockdown: 1`), as GitHub's MCP server and roll's own
+`/v1/mcp` have it: text written by someone who can't push to the repo (an issue anyone opened, a
+fork's pull request, a stranger's comment on a review thread) comes back as a notice instead, while
+ids and states stay. Use it for an agent that holds write tools and reads public repos; the owner
+page's "Connect an agent" panel puts it in the snippet it gives (the URL quoted for the shell). The
+function is `roll_auth::lockdown`, shared with `/v1/mcp`. Lockdown or not, characters a person
+can't see and a model reads (tag characters, zero-width and bidi controls, variation selectors) are
+written as escapes in every text block (`roll_auth::lockdown::visible`); `structuredContent` stays
+exact. A text block is cut at 48 KiB and says so (past 50,000 characters Claude Code moves an answer to a file); the
+structured content keeps all of it. This runs in `mcp::call`, so roll's `/v1/mcp` fronting these
+tools cuts them too.
+
 ## Tools
 
 Repos are `"owner/repo"`. Changes are `"chg_…"` or `"owner/repo#N"`, and work items are `"wi_…"` or
@@ -116,6 +128,10 @@ Agent tokens may use them to orchestrate agents, within what an agent's commands
 
 ### Results
 
+- Each tool says whether it only reads (`readOnlyHint`), can't be undone (`destructiveHint`:
+  `close_change`, `stop_preview`), reaches outside roll (`openWorldHint`: a model provider or a
+  branch's remote) and is safe to retry (`idempotentHint`: reads, and tools whose every route is a
+  `PUT` or `DELETE`, from `ROUTES`).
 - Results come back twice: as `structuredContent`, which is the API's JSON (arrays are wrapped as
   `{items: […]}`), and as a `text` content block. `read_file`'s text block is the file content itself.
 - **`land` outcomes are results, not errors.** `status` is one of:

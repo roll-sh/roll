@@ -96,7 +96,7 @@ PATCH /v1/code/repos/{owner}/{repo}                                             
 POST /v1/code/repos/{owner}/{repo}/changesets                                   create_change and revise_change write files as a change; a bare changeset is git's (a push)
 GET /v1/code/repos/{owner}/{repo}/events                                        a stream: MCP answers results (get_change, queue_status; webhooks for the rest)
 GET /v1/code/repos/{owner}/{repo}/leaks                                         an admin's: where secrets sit in the default branch
-GET /v1/code/repos/{owner}/{repo}/learnings                                     no tool yet: learnings can hold an outsider's words with no `outside` mark, so lockdown couldn't withhold them
+GET /v1/code/repos/{owner}/{repo}/learnings                                     no tool yet: learnings made before outsiders' replies stopped becoming them can hold such words, unmarked
 POST /v1/code/repos/{owner}/{repo}/learnings                                    a person's: learnings steer roll's reviewer, whose approval can count toward landing
 DELETE /v1/code/repos/{owner}/{repo}/learnings/{id}                             a person's: learnings steer roll's reviewer, whose approval can count toward landing
 GET /v1/code/repos/{owner}/{repo}/paths/{rev}                                   the dashboard's file finder: list_tree and search_code cover it

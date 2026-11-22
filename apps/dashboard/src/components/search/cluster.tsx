@@ -1,5 +1,5 @@
 import { HorizonMark } from "@roll/brand";
-import { ArrowLeft, Database, FileUp, GitBranch, KeyRound, Moon, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { ArrowLeft, CloudDownload, Database, FileUp, GitBranch, KeyRound, Moon, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { Link } from "@/components/link";
 import { useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useState } from "react";
@@ -24,6 +24,7 @@ import { ago, btn, Confirm, Connecting, CopyButton, EmptyPanel, ErrorNote, input
 import { AnalyzeTab } from "./analyze";
 import { DataStreams } from "./data-streams";
 import { ImportPanel } from "./import";
+import { MigratePanel } from "./migrate";
 import { NewIndexPanel } from "./new-index";
 import { Templates } from "./templates";
 import { InferenceTab } from "./inference";
@@ -514,6 +515,7 @@ function IndicesTab({ cluster, samples, onSamples, onOpenConsole, onMakeKey }: {
   const [loading, setLoading] = useState(false);
   const [importing, setImporting] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [migrating, setMigrating] = useState(false);
   const [sampling, setSampling] = useState(false);
 
   const load = useCallback(async () => {
@@ -554,14 +556,17 @@ function IndicesTab({ cluster, samples, onSamples, onOpenConsole, onMakeKey }: {
         title="Indices"
         aside={
           <span className="flex gap-2">
-            <button onClick={() => setSampling(true)} disabled={sampling} className={btn} title="Load a generated dataset and try queries on it" aria-label="Sample data">
-              <Database className="size-3.5" /> <span className="hidden sm:inline">Sample data</span>
-            </button>
             <button onClick={() => setCreating(true)} disabled={creating} className={btn} title="Create an index with its fields mapped" aria-label="New index">
               <Plus className="size-3.5" /> <span className="hidden sm:inline">New index</span>
             </button>
             <button onClick={() => setImporting(true)} disabled={importing} className={btn} title="Index a JSON, NDJSON or CSV file" aria-label="Import">
               <FileUp className="size-3.5" /> <span className="hidden sm:inline">Import</span>
+            </button>
+            <button onClick={() => setMigrating(true)} disabled={migrating} className={btn} title="Migrate from Elasticsearch / OpenSearch" aria-label="Migrate from Elasticsearch / OpenSearch">
+              <CloudDownload className="size-3.5" /> <span className="hidden sm:inline">Migrate</span>
+            </button>
+            <button onClick={() => setSampling(true)} disabled={sampling} className={btn} title="Load a generated dataset and try queries on it" aria-label="Sample data">
+              <Database className="size-3.5" /> <span className="hidden sm:inline">Sample data</span>
             </button>
             <button onClick={load} disabled={loading} className={btn}>
               <RefreshCw className={`size-3.5 ${loading ? "animate-spin motion-reduce:animate-none" : ""}`} /> Refresh
@@ -579,6 +584,10 @@ function IndicesTab({ cluster, samples, onSamples, onOpenConsole, onMakeKey }: {
             No indices yet.{" "}
             <button onClick={() => setImporting(true)} className="text-accent hover:underline">
               Import a file
+            </button>
+            ,{" "}
+            <button onClick={() => setMigrating(true)} className="text-accent hover:underline">
+              migrate from Elasticsearch or OpenSearch
             </button>
             ,{" "}
             <button onClick={() => setCreating(true)} className="text-accent hover:underline">
@@ -667,6 +676,7 @@ function IndicesTab({ cluster, samples, onSamples, onOpenConsole, onMakeKey }: {
           }}
         />
       )}
+      {migrating && <MigratePanel cluster={cluster} existing={rows?.map((r) => r.index) ?? []} onClose={() => setMigrating(false)} onChanged={load} />}
       {importing && (
         <ImportPanel
           cluster={cluster}

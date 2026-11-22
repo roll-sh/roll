@@ -548,7 +548,9 @@ pub struct Lookup<'a> {
     shard: (u32, u32),
     idx: Arc<crate::meta::IndexMeta>,
     searcher: Searcher,
-    alias_filter: Option<crate::query::Query>,
+    filter: super::query::DocFilter,
+    /// The request's `runtime_mappings`: they apply to the alias filter, as to its query.
+    runtime_mappings: Option<crate::json::Map>,
     parent_fields: Arc<Vec<crate::search_source::FieldAndFormat>>,
     rescore: Option<Arc<Vec<super::PreparedRescore>>>,
     security: Option<crate::xpack::security::dls::ReadSecurity>,
@@ -558,6 +560,12 @@ impl<'a> Lookup<'a> {
     /// The search's rescorers, which `top_hits` sorted by score applies to its buckets.
     pub(crate) fn with_rescore(mut self, rescore: Vec<super::PreparedRescore>) -> Self {
         self.rescore = (!rescore.is_empty()).then(|| Arc::new(rescore));
+        self
+    }
+
+    /// The search's `runtime_mappings`.
+    pub fn with_runtime_mappings(mut self, runtime_mappings: Option<crate::json::Map>) -> Self {
+        self.runtime_mappings = runtime_mappings;
         self
     }
 
@@ -578,7 +586,8 @@ impl<'a> Lookup<'a> {
             shard: (t.shard.id, t.idx.number_of_shards()),
             idx: t.idx.clone(),
             searcher: searcher.clone(),
-            alias_filter: t.alias_filter.clone(),
+            filter: t.filter.clone(),
+            runtime_mappings: None,
             parent_fields: Arc::new(Vec::new()),
             rescore: None,
             security: t.security.clone(),
@@ -830,10 +839,13 @@ impl FieldLookup for Lookup<'_> {
             // with nested fields.
             Arc::new(search_index::query::MatchAllQuery)
         };
-        let Some(af) = &self.alias_filter else { return root };
-        let ctx = QueryCtx::new(self.cluster, self.st, &self.idx, &self.table, &self.searcher, self.now, crate::search::query::Reader::of(self.security.clone()));
-        match ctx.owner_filter(af) {
-            Ok(f) => Arc::new(search_index::query::BooleanQuery::new().add(search_index::query::Occur::Filter, f).add(search_index::query::Occur::Filter, root)),
+        let mut ctx = QueryCtx::new(self.cluster, self.st, &self.idx, &self.table, &self.searcher, self.now, crate::search::query::Reader::of(self.security.clone()));
+        ctx.runtime_mappings = self.runtime_mappings.clone();
+        match self.filter.build(&ctx) {
+            Ok(Some(f)) => Arc::new(search_index::query::BooleanQuery::new().add(search_index::query::Occur::Filter, f).add(search_index::query::Occur::Filter, root)),
+            Ok(None) => root,
+            // Document level security that doesn't build hides every document.
+            Err(_) if self.filter.security.is_some() => crate::search::query::match_none("document level security"),
             Err(_) => root,
         }
     }
