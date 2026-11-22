@@ -949,6 +949,7 @@ previews are listed once those products are on.
 | `secrets_list_rotations` | A project's secret rotations: what rotated and what's due. | `GET /v1/secrets/projects/{project}/rotations` |
 | `secrets_ca_certificates` | The certificates a project's CA has issued (never a key). | `GET /v1/secrets/projects/{project}/cas/{ca}/certificates` |
 | `secrets_list_placeholders` | Placeholders handed out for a project's host-bound keys (key, consumer, expiry; never the placeholder or the value). | `GET /v1/secrets/projects/{project}/placeholders` |
+| `secrets_list_deleted` | Deleted workspace projects still in their recovery window that you may recover: who deleted each, when, and when it's purged (recovering stays a person's). | `GET /v1/secrets/deleted` |
 | `secrets_end_placeholder` | End one placeholder now. | `DELETE /v1/secrets/projects/{project}/placeholders/{id}` |
 | `secrets_end_consumer_placeholders` | End every live placeholder a consumer holds. | `DELETE /v1/secrets/projects/{project}/placeholders?consumer=` |
 | `secrets_list_leases` | A project's live leases on dynamic credentials, never a credential. | `GET /v1/secrets/projects/{project}/leases` |
@@ -1108,7 +1109,11 @@ waits on a sibling PR reaching main is last.
    only a live run sees every tool. `pnpm test:mcp-sweep` now signs a person in (email code from
    rolld's outbox), makes them a viewer in its project with a token that names every action, and
    calls every read tool of secrets, previews and workspace their client lists: one refused by
-   their role means the listing and the gate drifted apart.
+   their role means the listing and the gate drifted apart (first run: 196 tools listed for a
+   viewer, 74 member-product reads called, none refused). Also here: `secrets_list_deleted`, the
+   deleted projects a person may recover (#585; recovering stays a person's). Next for the sweep:
+   start rolld on port 0 with `--addr-file` (#596) instead of picking free ports, which ends its
+   occasional "rolld exited" on a port someone took meanwhile.
 2. **Decision for the user: a sandboxed "code mode"** (Cloudflare's Code Mode, Anthropic's code
    execution with MCP). A model writes a short script against typed tool functions; roll runs it
    and each call still goes through the gate and the audit log as if made one by one. It cuts
@@ -1118,10 +1123,8 @@ waits on a sibling PR reaching main is last.
    model-written code on fleet nodes, which roll apps' rule keeps customer code off. Options: (a)
    build it in rolld behind a flag; (b) run scripts in a preview-style container, slower to start;
    (c) not now, search mode is enough. Not started until the user picks.
-3. **As siblings land** (`sibling-check.py`, 2026-11-21 21:30, over every open PR): secrets'
-   deleted projects (#585: `GET /v1/secrets/deleted` a read; recovering one stays a person's, an
-   admin row that undoes a confirmed delete, and #585 lists it in `no-tool.txt`); search's migration from a remote cluster (#485: `migrate` and
-   `migrate/inspect`, open-world, since roll fetches an address the caller chose); search's
+3. **As siblings land** (`sibling-check.py`, 2026-11-21 21:30, over every open PR): search's
+   migration from a remote cluster (#485: `migrate` and `migrate/inspect`, open-world, since roll fetches an address the caller chose); search's
    relevance tuning (search-relevance-api, not yet open). #524 (previews on members) adds no routes
    beyond #501's; #627, #629, #596 and #504 add none. Not a tool: making a search browser key
    (#358's create answers the key; `limits.max_body_bytes` has no schema to join).
