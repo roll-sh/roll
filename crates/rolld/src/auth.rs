@@ -311,3 +311,30 @@ pub fn route_patterns(router: &axum::Router) -> Vec<String> {
     out.sort();
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use roll_auth::Access;
+
+    /// What a person's own token can reach (`roll_access::USER_REACH`: the tools their MCP client is
+    /// shown, the token builder's products) is what the gate lets their session call: every
+    /// `/v1/<product>` a rule serves to people, plus roll code and agents (their own owners). A
+    /// product that becomes a member product (previews in #524) can't be left out of either.
+    #[test]
+    fn a_persons_reach_is_what_the_gate_serves_people() {
+        let served: Vec<&str> = super::RULES
+            .iter()
+            .filter(|r| matches!(r.access, Access::User(_) | Access::UserOrCredential(_)))
+            .filter_map(|r| r.route.strip_prefix("/v1/").filter(|p| !p.contains('/')))
+            .filter(|p| *p != "access")
+            .collect();
+        let mut want: Vec<&str> = served.iter().copied().chain(["code", "agents"]).collect();
+        let mut reach = roll_access::USER_REACH.to_vec();
+        want.sort_unstable();
+        reach.sort_unstable();
+        assert_eq!(reach, want, "roll_access::USER_REACH against the gate's rules for people");
+        for p in roll_auth::roles::MEMBER_PRODUCTS {
+            assert!(roll_access::USER_REACH.contains(p), "member product {p} isn't in USER_REACH");
+        }
+    }
+}

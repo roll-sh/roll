@@ -575,8 +575,9 @@ pub struct Access {
 }
 
 /// What a user who isn't an admin reaches, and so what their tokens can (docs/accounts.md, "What a
-/// session can reach").
-pub const USER_REACH: [&str; 5] = ["code", "agents", "workspace", "search", "secrets"];
+/// session can reach"): roll code and agents through their own owners, and every product whose
+/// routes rolld's gate lets a person's session call (rolld's `auth::tests` holds the two together).
+pub const USER_REACH: [&str; 6] = ["code", "agents", "workspace", "search", "secrets", "previews"];
 
 impl Access {
     pub fn open(target: &code_sql::Target, pg: code_sql::PgOptions, config: Config, resolvers: Resolvers) -> Result<Arc<Access>> {

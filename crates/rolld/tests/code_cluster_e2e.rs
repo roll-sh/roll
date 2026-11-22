@@ -156,8 +156,11 @@ fn docker_logs(name: &str, tail: Option<usize>) -> String {
     }
 }
 
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+/// The host port Docker published `port` of `container` on (`-p 127.0.0.1::<port>`: Docker
+/// picks it, so nothing else can take it first).
+fn published(container: &str, port: &str) -> u16 {
+    let out = docker(&["port", container, port]);
+    out.lines().next().and_then(|l| l.rsplit(':').next()).and_then(|p| p.trim().parse().ok()).unwrap_or_else(|| panic!("docker port {container} {port}: {out}"))
 }
 
 fn now_ms() -> i64 {
@@ -841,17 +844,16 @@ async fn code_cluster_keeps_every_landing_through_kill_rolling_restart_and_postg
     eprintln!("image built in {:.1}s", built.elapsed().as_secs_f64());
 
     let tag = format!("{:x}{:05x}", std::process::id(), now_ms() % 0xfffff);
-    let env = Env { tag, addrs: Mutex::default(), hooks_port: free_port(), s3_port: free_port(), dir: tempfile::tempdir().unwrap() };
+    let mut env = Env { tag, addrs: Mutex::default(), hooks_port: 0, s3_port: 0, dir: tempfile::tempdir().unwrap() };
     docker(&["network", "create", &env.net()]);
     let (pg, s3, hooks, net) = (env.name("pg"), env.name("s3"), env.name("hooks"), env.net());
     docker(&[
         "run", "-d", "--name", &pg, "--network", &net, "-e", "POSTGRES_USER=roll", "-e", "POSTGRES_PASSWORD=roll", "-e", "POSTGRES_DB=roll",
         POSTGRES_IMAGE, "-c", "max_connections=300",
     ]);
-    let s3_port = format!("127.0.0.1:{}:8333", env.s3_port);
-    docker(&["run", "-d", "--name", &s3, "--network", &net, "-p", &s3_port, SEAWEEDFS_IMAGE, "server", "-s3"]);
-    let hooks_port = format!("127.0.0.1:{}:8080", env.hooks_port);
-    docker(&["run", "-d", "--name", &hooks, "--network", &net, "-p", &hooks_port, PYTHON_IMAGE, "python", "-u", "-c", RECEIVER, HOOK_SECRET]);
+    docker(&["run", "-d", "--name", &s3, "--network", &net, "-p", "127.0.0.1::8333", SEAWEEDFS_IMAGE, "server", "-s3"]);
+    docker(&["run", "-d", "--name", &hooks, "--network", &net, "-p", "127.0.0.1::8080", PYTHON_IMAGE, "python", "-u", "-c", RECEIVER, HOOK_SECRET]);
+    (env.s3_port, env.hooks_port) = (published(&s3, "8333/tcp"), published(&hooks, "8080/tcp"));
     let http = reqwest::Client::builder().no_proxy().connect_timeout(Duration::from_secs(3)).redirect(reqwest::redirect::Policy::none()).build().unwrap();
 
     let t = Instant::now();

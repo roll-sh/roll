@@ -158,11 +158,23 @@ async fn seen_by(State(m): State<Mcp>, axum::extract::Path(id): axum::extract::P
     let as_user = grant.user.as_deref().is_some_and(|u| {
         m.config.access.as_ref().and_then(|a| a.people.get()).and_then(|p| p.person_now(u).ok().flatten()).is_some_and(|p| !p.admin)
     });
+    // As the gate would decide them: unreadable roles show nothing rather than everything.
+    let session = match (&m.config.access, grant.user.clone()) {
+        (Some(a), Some(u)) if as_user => {
+            let a = a.clone();
+            match tokio::task::spawn_blocking(move || a.session_grant(&u, None).ok()).await.ok().flatten() {
+                Some(s) => Some(s),
+                None => return Json(json!({ "tools": [], "prompts": [], "live": false })).into_response(),
+            }
+        }
+        _ => None,
+    };
     let ctx = Ctx {
         m,
         headers: HeaderMap::new(),
         principal: Principal::Grant(grant),
         as_user,
+        session,
         ip: None,
         url_elicitation: false,
         form_elicitation: false,
@@ -203,7 +215,7 @@ async fn toolset_costs(State(m): State<Mcp>, ext: Extensions) -> Response {
     if !caller {
         return unauthorized(&m.config);
     }
-    let ctx = Ctx { m, headers: HeaderMap::new(), principal: Principal::Operator, ip: None, url_elicitation: false, form_elicitation: false, modern: false, toolsets: None, readonly: false, search: false, lockdown: false, tasks: false, ui: false, client: None, as_user: false, names: Default::default() };
+    let ctx = Ctx { m, headers: HeaderMap::new(), principal: Principal::Operator, ip: None, session: None, url_elicitation: false, form_elicitation: false, modern: false, toolsets: None, readonly: false, search: false, lockdown: false, tasks: false, ui: false, client: None, as_user: false, names: Default::default() };
     let mut by: std::collections::BTreeMap<String, (usize, usize, usize)> = Default::default();
     for t in ctx.tools() {
         let e = by.entry(t["_meta"]["roll/product"].as_str().unwrap_or("code").to_string()).or_default();
@@ -426,7 +438,8 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
         .or_else(|| headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).and_then(roll_access::evaluate::client_name))
         .map(Arc::from);
     let form_elicitation = modern && modern::form_elicitation(&messages[0]);
-    let ctx = Arc::new(Ctx { m, headers, principal, ip, as_user, url_elicitation, form_elicitation, modern, toolsets, readonly, search, lockdown, tasks, ui, client, names: Default::default() });
+    let session = roll_auth::SessionGrant::on(&ext).cloned();
+    let ctx = Arc::new(Ctx { m, headers, principal, ip, as_user, session, url_elicitation, form_elicitation, modern, toolsets, readonly, search, lockdown, tasks, ui, client, names: Default::default() });
     // A call that asked for progress, from a client that takes a stream: answered as one, with
     // progress until the answer (MCP's `notifications/progress`).
     // 2026-07-28's long-lived channel for list changes (SEP-2575): an open stream of its own.
@@ -559,6 +572,9 @@ struct Ctx {
     ip: Option<std::net::IpAddr>,
     /// A signed-in user's own token: tools only for what their account reaches.
     as_user: bool,
+    /// That person's session grant (their roles in their projects, now): a member product's tool
+    /// is listed only when their role allows it too, as the gate decides its calls.
+    session: Option<roll_auth::Grant>,
     /// The client opens URLs for elicitation: an approval comes back as one to open, then retry.
     url_elicitation: bool,
     /// A 2026-07-28 client that fills in forms: a call missing an id asks for it (`ask`).
@@ -586,13 +602,14 @@ struct Ctx {
 
 impl Ctx {
     /// The same request's view, as a grant is now (a subscription looks again while it's open).
-    fn as_now(&self, g: roll_auth::Grant) -> Ctx {
+    fn as_now(&self, g: roll_auth::Grant, session: Option<roll_auth::Grant>) -> Ctx {
         Ctx {
             m: self.m.clone(),
             headers: self.headers.clone(),
             principal: Principal::Grant(g),
             ip: self.ip,
             as_user: self.as_user,
+            session,
             url_elicitation: self.url_elicitation,
             form_elicitation: self.form_elicitation,
             modern: self.modern,
@@ -662,6 +679,14 @@ impl Ctx {
         // One any token may call is still its product's: listed only where the product runs.
         if t.open() {
             return self.on(t.product) && self.reaches(t.product);
+        }
+        // A person's token on one resource of a member product: their role decides too (a session
+        // never asks), so a viewer's client isn't shown writes the gate would refuse.
+        // A write's candidate actions can include read (a body-decided row): it never counts.
+        if let Some(w) = self.session.as_ref().filter(|_| t.within_session())
+            && !t.actions().iter().filter(|a| t.method == "GET" || **a != Action::Read).any(|a| w.scope.may(t.product, *a))
+        {
+            return false;
         }
         self.may(t.product, &t.actions())
     }
@@ -981,8 +1006,14 @@ async fn listen(ctx: Arc<Ctx>, msg: &Value) -> Response {
     // The tools it's offered as the grant is now (`None`: it no longer works).
     let now = move |ctx: Arc<Ctx>, grant: String, access: Option<Arc<roll_access::Access>>| async move {
         let a = access?;
+        let a2 = a.clone();
         let g = tokio::task::spawn_blocking(move || roll_auth::Grants::grant(&*a, &grant)).await.ok()??;
-        Some(tool_names(&ctx.as_now(g)))
+        // A person's roles as they are now too: a role changed while it listens changes its tools.
+        let session = match (&ctx.session, g.user.clone()) {
+            (Some(_), Some(u)) => Some(tokio::task::spawn_blocking(move || a2.session_grant(&u, None).ok()).await.ok()??),
+            _ => None,
+        };
+        Some(tool_names(&ctx.as_now(g, session)))
     };
     struct State {
         ctx: Arc<Ctx>,

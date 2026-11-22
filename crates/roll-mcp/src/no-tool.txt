@@ -90,6 +90,7 @@ PUT /v1/search/clusters/{id}/remotes/{alias}                                   a
 PUT /v1/search/clusters/{id}/repositories/{name}                               an outside integration's setup: an admin's, with its credentials (#361)
 POST /v1/search/clusters/{id}/request                                          the operator's (any Elasticsearch request, unscoped)
 POST /v1/search/clusters/{id}/unload                                           the operator's (health, migrations, process control)
+GET /v1/secrets/deleted                                                        a person's call: deleted projects in their recovery window, only for recovering one
 GET /v1/secrets/gateways/{id}/connect                                          interactive (a shell, files, a forward): an admin's, live
 GET /v1/secrets/health                                                         the operator's (health, migrations, process control)
 PATCH /v1/secrets/projects/{project}                                           a person's call: how long old versions are kept (shortening it deletes history)
@@ -146,6 +147,7 @@ POST /v1/secrets/projects/{project}/outside-databases                          a
 DELETE /v1/secrets/projects/{project}/outside-databases/{id}                   an outside integration's setup: an admin's, with its credentials
 PATCH /v1/secrets/projects/{project}/outside-databases/{id}                    an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/outside-databases/{id}/rotate-admin        an outside integration's setup: an admin's, with its credentials
+POST /v1/secrets/projects/{project}/recover                                    a person's call: it brings a deleted project and its secrets back
 POST /v1/secrets/projects/{project}/restore                                    a person's call (a project's secrets put back from a backup)
 POST /v1/secrets/projects/{project}/rotators                                   an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/rotators/{id}                            an outside integration's setup: an admin's, with its credentials

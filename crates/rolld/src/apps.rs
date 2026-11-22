@@ -861,7 +861,7 @@ impl AppsNode {
 
     /// The apps listener, and each environment's own port as environments appear.
     pub async fn serve(&self) -> anyhow::Result<()> {
-        let listener = tokio::net::TcpListener::bind(self.listen).await?;
+        let listener = crate::listen::bind(self.listen)?;
         let public = apps_control::public::router(self.apps.clone());
         let main = axum::serve(listener, public.into_make_service_with_connect_info::<SocketAddr>()).into_future();
         let ports = self.serve_ports();

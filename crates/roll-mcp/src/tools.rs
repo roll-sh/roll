@@ -146,6 +146,13 @@ impl Tool {
         PREPARED.get(self.name).map_or_else(|| self.find_open(), |p| p.open)
     }
 
+    /// Whether a person's role decides it too, on top of their token's rules: one resource of a
+    /// member product, as roll-access's gate asks a person's token `within` their session (a list,
+    /// a create or the product as a whole goes on the token's rules alone).
+    pub fn within_session(&self) -> bool {
+        PREPARED.get(self.name).map_or_else(|| self.find_within(), |p| p.within)
+    }
+
     /// Its MCP definition, as `tools/list` shows it.
     pub fn definition(&self) -> Value {
         self.definition_ref().clone()
@@ -167,6 +174,11 @@ impl Tool {
             catalog::Act::Raw(_) => vec![Action::Write, Action::Delete],
             _ => vec![found.row.action(self.method, &[], None)],
         }
+    }
+
+    fn find_within(&self) -> bool {
+        roll_auth::roles::MEMBER_PRODUCTS.contains(&self.product)
+            && catalog::by_path(self.method, &self.sample_path()).is_some_and(|f| !matches!(f.row.target, catalog::Tgt::AnyGrant | catalog::Tgt::List { .. } | catalog::Tgt::Product | catalog::Tgt::Create { .. }))
     }
 
     /// A route any connection may call (its own identity, its own approvals).
@@ -692,7 +704,7 @@ static TOOLS: &[Tool] = &[
     t("workspace_get_project", "Get a project", "A workspace project and its resources.", "workspace", "GET", "/v1/workspace/projects/{id}", &[WS]),
     t("workspace_create_project", "Create a project", "A new workspace project to group resources.", "workspace", "POST", "/v1/workspace/projects", &[breq("name", Ty::Str, "1-48 of a-z, 0-9 and -"), b("description", Ty::Str, "At most 280 characters"), b("icon", Ty::Obj, ICON)]),
     t("workspace_update_project", "Update a project", "Rename a project, or change its description or icon.", "workspace", "PATCH", "/v1/workspace/projects/{id}", &[WS, b("name", Ty::Str, "New name"), b("description", Ty::Str, "New description"), bnull("icon", Ty::Obj, ICON)]),
-    t("workspace_delete_project", "Delete a project", "Delete a workspace project. Its resources stay; only the grouping goes.", "workspace", "DELETE", "/v1/workspace/projects/{id}", &[WS]),
+    t("workspace_delete_project", "Delete a project", "Delete a workspace project. Its resources stay. A project that holds secrets needs a secrets admin's confirmation in the dashboard.", "workspace", "DELETE", "/v1/workspace/projects/{id}", &[WS]),
     t("workspace_list_roles", "List member roles", "The roles a project member can have (viewer, developer, admin, owner), the rules each one grants, the products those rules cover, and which environments a developer reaches when none are named.", "workspace", "GET", "/v1/workspace/roles", &[]),
     t(
         "workspace_place_resource",
@@ -1574,11 +1586,12 @@ pub fn all() -> &'static [Tool] {
 struct Prepared {
     actions: Vec<Action>,
     open: bool,
+    within: bool,
     definition: Value,
 }
 
 static PREPARED: std::sync::LazyLock<std::collections::HashMap<&'static str, Prepared>> = std::sync::LazyLock::new(|| {
-    TOOLS.iter().map(|t| (t.name, Prepared { actions: t.find_actions(), open: t.find_open(), definition: t.build_definition() })).collect()
+    TOOLS.iter().map(|t| (t.name, Prepared { actions: t.find_actions(), open: t.find_open(), within: t.find_within(), definition: t.build_definition() })).collect()
 });
 
 #[cfg(test)]

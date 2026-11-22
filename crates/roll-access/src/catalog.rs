@@ -1279,6 +1279,11 @@ static ROWS: &[Row] = &[
     // (`Grant::allows`, one check per project inside the request).
     row("GET", "/v1/secrets/search", "secrets", R, Tgt::AnyGrant),
     row("GET", "/v1/secrets/findings", "secrets", R, Tgt::AnyGrant),
+    // Deleted projects in their recovery window: secrets keeps those the caller may recover (an
+    // admin of their secrets, asked of the grant per project, or the person whose project it was).
+    row("GET", "/v1/secrets/deleted", "secrets", R, Tgt::AnyGrant),
+    // Recovering one is its secrets admin's, as deleting it was.
+    row("POST", "/v1/secrets/projects/{project}/recover", "secrets", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/secrets/projects/{project}/", "secrets", R, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("GET", "/v1/secrets/projects/{project}", "secrets", R, one(&["project"], "project")),
     // How long a project keeps old values (history_days): purging is the project admin's.
