@@ -6131,7 +6131,7 @@ and webhooks' and review apps' signing secrets sealed. Still open:
   compute of that image (about 2 s per image, never waking a suspended endpoint). Its full gate is
   running.
 
-**State, 2026-11-21 05:10.** The thirty-fourth review's items, where they are:
+**State, 2026-11-22 05:05.** Every item of the thirty-fourth review that roll secrets owns is on main, with batch 7 (members) and its follow-ups:
 - **Items 1 and 3: landed**, #621 (658cecf0e). apps' reveal and shell read roll secrets as the asker
   (any `from_secrets` key that doesn't resolve for them is a 403, no partial answer; a bound `roll://`
   needs reveal on its own folder), and an agents sandbox re-checks its copier's reach on each start,
@@ -6162,8 +6162,7 @@ and webhooks' and review apps' signing secrets sealed. Still open:
   decoy login waits and none answers with bytes the compute wouldn't.
 - **Members (#501): landed** as 991d98225 (batch 7, 2026-11-21 22:06), carrying #445's design docs.
   Projects now have members with four roles, session grants and invites, and what a member made runs
-  at their current rights, scoped to what it does. #582 is being re-levelled on it (one conflict in
-  `placeholders.rs`), then lands; #585 follows its review fixes.
+  at their current rights, scoped to what it does.
 - **Item 8** (placeholders had no consumer on main): done. Previews' #535 (a06876bd1) swaps them in
   `crates/roll-intercept`, shared with apps, and is checked end to end against a TLS echo host
   (`scripts/preview-intercept.sh`). The echo step flips to expect a 502 once item 4's scrub lands.
