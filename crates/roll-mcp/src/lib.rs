@@ -181,6 +181,7 @@ async fn seen_by(State(m): State<Mcp>, axum::extract::Path(id): axum::extract::P
         readonly: false,
         search: false,
         lockdown: false,
+        pick: Default::default(),
         tasks: false,
         ui: false,
         client: None,
@@ -213,7 +214,7 @@ async fn toolset_costs(State(m): State<Mcp>, ext: Extensions) -> Response {
     if !caller {
         return unauthorized(&m.config);
     }
-    let ctx = Ctx { m, headers: HeaderMap::new(), principal: Principal::Operator, ip: None, session: None, url_elicitation: false, form_elicitation: false, modern: false, toolsets: None, readonly: false, search: false, lockdown: false, tasks: false, ui: false, client: None, as_user: false, names: Default::default() };
+    let ctx = Ctx { m, headers: HeaderMap::new(), principal: Principal::Operator, ip: None, session: None, url_elicitation: false, form_elicitation: false, modern: false, toolsets: None, readonly: false, search: false, lockdown: false, pick: Default::default(), tasks: false, ui: false, client: None, as_user: false, names: Default::default() };
     let mut by: std::collections::BTreeMap<String, (usize, usize, usize)> = Default::default();
     for t in ctx.tools() {
         let e = by.entry(t["_meta"]["roll/product"].as_str().unwrap_or("code").to_string()).or_default();
@@ -364,10 +365,18 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
         Ok(l) => l,
         Err(e) => return http_error(StatusCode::BAD_REQUEST, &e),
     };
-    let search = match search::asked(&uri, &headers) {
+    let (search, pick) = match search::asked(&uri, &headers) {
         Ok(s) => s,
         Err(e) => return http_error(StatusCode::BAD_REQUEST, &e),
     };
+    if pick.picks() {
+        let mut known: Vec<String> = tools::all().iter().map(|t| t.name.to_string()).collect();
+        known.extend(m.sets.iter().flat_map(|s| s.tools()).filter_map(|t| t["name"].as_str().map(str::to_string)));
+        let unknown = pick.unknown(&known);
+        if !unknown.is_empty() {
+            return http_error(StatusCode::BAD_REQUEST, &format!("no tool named {}: tools/list says which there are", unknown.join(", ")));
+        }
+    }
     let principal = match roll_auth::Grant::on(&ext) {
         Some(g) => Principal::Grant(g.clone()),
         None if roll_auth::Operator::on(&ext) || !m.config.locked => Principal::Operator,
@@ -458,7 +467,7 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
         .map(Arc::from);
     let form_elicitation = modern && modern::form_elicitation(&messages[0]);
     let session = roll_auth::SessionGrant::on(&ext).cloned();
-    let ctx = Arc::new(Ctx { m, headers, principal, ip, as_user, session, url_elicitation, form_elicitation, modern, toolsets, readonly, search, lockdown, tasks, ui, client, names: Default::default() });
+    let ctx = Arc::new(Ctx { m, headers, principal, ip, as_user, session, url_elicitation, form_elicitation, modern, toolsets, readonly, search, lockdown, pick, tasks, ui, client, names: Default::default() });
     // A call that asked for progress, from a client that takes a stream: answered as one, with
     // progress until the answer (MCP's `notifications/progress`).
     // 2026-07-28's long-lived channel for list changes (SEP-2575): an open stream of its own.
@@ -624,6 +633,8 @@ struct Ctx {
     search: bool,
     /// Text written by people who can't push to the repo is withheld from results (`?lockdown=1`).
     lockdown: bool,
+    /// The tools it picks or drops by name (`?tools=a,b`, `?exclude_tools=`).
+    pick: search::Pick,
     /// The request declares 2026-07-28's tasks extension: a long call may answer with a task.
     tasks: bool,
     /// The host renders MCP Apps (`ui`): tools that show rows point at roll's table view.
@@ -652,6 +663,7 @@ impl Ctx {
             readonly: self.readonly,
             search: self.search,
             lockdown: self.lockdown,
+            pick: self.pick.clone(),
             tasks: self.tasks,
             ui: self.ui,
             client: self.client.clone(),
@@ -708,7 +720,7 @@ impl Ctx {
     }
 
     fn usable(&self, t: &tools::Tool) -> bool {
-        if !self.asked_area(t.product, t.area()) {
+        if !self.pick.keeps(t.name) || !self.asked_area(t.product, t.area()) {
             return false;
         }
         // One any token may call is still its product's: listed only where the product runs.
@@ -735,7 +747,7 @@ impl Ctx {
                 let product = t["_meta"]["roll/product"].as_str().unwrap_or("code").to_string();
                 let read_only = t["annotations"]["readOnlyHint"].as_bool() == Some(true);
                 let actions: &[Action] = if read_only { &[Action::Read] } else { &[Action::Write, Action::Deploy, Action::Admin] };
-                if self.may(&product, actions) {
+                if self.may(&product, actions) && t["name"].as_str().is_some_and(|n| self.pick.keeps(n)) {
                     out.push(std::borrow::Cow::Owned(t));
                 }
             }
@@ -825,6 +837,8 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                     rpc_error(id, -32602, "arguments must be an object")
                 } else if ctx.readonly && !tool_names(ctx).contains(&name) {
                     rpc_result(id, json!({ "content": [{ "type": "text", "text": format!("{name} isn't read-only, and this connection is (?readonly=1): connect without it to change things") }], "isError": true }))
+                } else if ctx.pick.picks() && !ctx.pick.keeps(&name) {
+                    rpc_result(id, json!({ "content": [{ "type": "text", "text": format!("{name} isn't on this connection (it picks its tools with tools= or drops some with exclude_tools=): connect with it listed") }], "isError": true }))
                 } else if let Some(r) = ask_for_missing(ctx, &name, &mut args, &params).await {
                     rpc_result(id, r)
                 } else {
