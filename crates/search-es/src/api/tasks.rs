@@ -210,6 +210,35 @@ pub async fn get(ctx: &Ctx<'_>) -> EsResult<Reply> {
     }
 }
 
+/// Cancels every cancellable running task of `cluster` (the node unloads it: a task's work
+/// would be lost with it, so it ends now as cancelled rather than vanish). The ids it cancelled,
+/// for [`wait_for`].
+pub fn cancel_all(cluster: &crate::Cluster) -> Vec<u64> {
+    let mut ids = Vec::new();
+    for t in cluster.tasks.list().into_iter().filter(|t| t.cancellable) {
+        t.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(l) = &t.live {
+            l.wake();
+        }
+        ids.push(t.id);
+    }
+    ids
+}
+
+/// Waits until tasks `ids` of `cluster` have ended, at most `bound`; whether they all did.
+pub async fn wait_for(cluster: &crate::Cluster, ids: &[u64], bound: std::time::Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + bound;
+    loop {
+        if ids.iter().all(|id| cluster.tasks.get(*id).is_none()) {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+
 /// `POST _tasks[/<task_id>]/_cancel`.
 pub fn cancel(ctx: &Ctx) -> EsResult<Reply> {
     let actions: Vec<String> = ctx.list_param("actions").unwrap_or_default();
@@ -224,6 +253,9 @@ pub fn cancel(ctx: &Ctx) -> EsResult<Reply> {
             Some(t) if !t.cancellable => Reply::ok(failure(&node, EsError::illegal_argument(format!("task [{raw}] doesn't support cancellation")))),
             Some(t) => {
                 t.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+                if let Some(l) = &t.live {
+                    l.wake();
+                }
                 // The cancelled task as it now stands (`CancelTasksResponse`).
                 Reply::ok(by_node(ctx, &[t], false))
             }
@@ -242,6 +274,9 @@ pub fn cancel(ctx: &Ctx) -> EsResult<Reply> {
     let matched: Vec<TaskInfo> = matched.into_iter().filter(|t| t.cancellable).collect();
     for t in &matched {
         t.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(l) = &t.live {
+            l.wake();
+        }
     }
     Reply::ok(by_node(ctx, &matched, false))
 }

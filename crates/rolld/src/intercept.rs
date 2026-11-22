@@ -20,7 +20,7 @@ impl roll_intercept::Interception for CaInterception {
     }
     fn leaf(&self, host: &str) -> anyhow::Result<roll_intercept::Leaf> {
         let l = self.ca.leaf(host).map_err(|e| anyhow::anyhow!("{e}"))?;
-        Ok(roll_intercept::Leaf { cert_pem: l.cert_pem, key_pem: l.key.expose().to_string() })
+        Ok(roll_intercept::Leaf { cert_pem: l.cert_pem, key_pem: l.key.expose().to_string().into() })
     }
     fn filter(&self, req: roll_intercept::Outgoing<'_>) -> Result<roll_intercept::Filtered, String> {
         let mut out = roll_secrets::proxy::Outgoing { host: req.host, path: req.path, headers: req.headers, query: req.query };
