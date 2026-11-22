@@ -273,8 +273,14 @@ CREATE TABLE IF NOT EXISTS required (
 ) WITHOUT ROWID;
 ";
 
-/// The environments a project starts with, in order.
+/// The environments a project starts with, in order. `production` starts protected with no
+/// approvals ([`PRODUCTION`]).
 pub const DEFAULT_ENVIRONMENTS: [(&str, &str); 3] = [("development", "Development"), ("staging", "Staging"), ("production", "Production")];
+
+/// The slug of the environment a new project protects (with `approvals: 0`: whoever may write
+/// still writes directly), and that a rule's `unprotected` never reaches (roll-auth's
+/// `scope::PRODUCTION`, docs/members.md D3).
+pub const PRODUCTION: &str = roll_auth::scope::PRODUCTION;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -749,7 +755,13 @@ impl Secrets {
                     )?;
                     if n == 1 {
                         for (i, (slug, name)) in DEFAULT_ENVIRONMENTS.iter().enumerate() {
-                            envs::insert(c, project, slug, name, i as i64, envs::Kind::Standard, None, &Default::default(), None, now)?;
+                            let e = envs::insert(c, project, slug, name, i as i64, envs::Kind::Standard, None, &Default::default(), None, now)?;
+                            // Protected from the start, so developers' default, checks, sandboxes
+                            // and untrusted previews never reach it; no approvals, so writes stay
+                            // direct for whoever may write until someone asks for them.
+                            if *slug == PRODUCTION {
+                                c.execute("UPDATE environments SET protected = 1, approvals = 0 WHERE id = ?", [&e.id])?;
+                            }
                         }
                     }
                     Ok::<_, Error>(c.query_row("SELECT dek FROM projects WHERE project_id = ?", [project], |r| r.get::<_, String>(0))?)

@@ -962,7 +962,7 @@ impl Secrets {
             // Stale before protected: a writer whose read is out of date learns that, rather than
             // opening a request for it.
             check_versions(c, &env.id, &items, expect)?;
-            if env.protected && !force {
+            if env.needs_request() && !force {
                 return Err(Error::Conflict("approval_required", format!("{} is protected: open a change request", env.slug)));
             }
             if !force {
@@ -1142,7 +1142,7 @@ impl Secrets {
         let guarded = self.db.read(|c| {
             let env = envs::by_slug(c, project, to)?;
             let paths: Vec<&str> = items.iter().map(|i| i.path.as_str()).collect();
-            Ok::<_, Error>(env.protected || !crate::folder_policy::covering(c, &env.id, &paths)?.is_empty())
+            Ok::<_, Error>(env.needs_request() || !crate::folder_policy::covering(c, &env.id, &paths)?.is_empty())
         })?;
         if guarded {
             if items.is_empty() {

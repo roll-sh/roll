@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Member, Role } from "./workspace-api";
-import { controlsFor, describeEnvironments, grantable, parseEnvironments } from "./workspace-members";
+import { controlsFor, describeEnvironments, developerReach, grantable, parseEnvironments } from "./workspace-members";
 
 const member = (user: string, role: Role): Member => ({ project: "prj_a", user, handle: user.slice(4), role, environments: null, added_by: "usr_ada", added_at: 0 });
 
@@ -31,5 +31,14 @@ describe("the members page offers what each role may do", () => {
     expect(describeEnvironments({ role: "developer", environments: null })).toBe("unprotected");
     expect(describeEnvironments({ role: "developer", environments: ["production"] })).toBe("production");
     expect(describeEnvironments({ role: "admin", environments: null })).toBe("all");
+  });
+
+  it("says which environments a developer will reach: never production unless named", () => {
+    const env = (slug: string, p = false) => ({ slug, kind: "standard" as const, protected: p });
+    // A project made before production started protected: still left out.
+    const envs = [env("development"), env("staging"), env("production"), env("qa", true), { slug: "pv-1", kind: "ephemeral" as const, protected: false }];
+    expect(developerReach(envs, null)).toEqual(["development", "staging"]);
+    expect(developerReach(envs, ["production", "q*"])).toEqual(["production", "qa"]);
+    expect(developerReach(envs, null, "none")).toEqual([]);
   });
 });

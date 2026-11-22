@@ -1,7 +1,7 @@
 //! A deleted workspace project's secrets (docs/secrets.md, "When a secret, an environment or the
 //! project goes"). The workspace asks first ([`Secrets::may_forget_project`]): a project that
-//! holds values, a protected environment or an encryption key goes only when a secrets admin
-//! confirms. Then what it issued is revoked and the rest is kept for a recovery window, read by
+//! holds values, a protected environment (other than production as a project starts) or an
+//! encryption key goes only when a secrets admin confirms. Then what it issued is revoked and the rest is kept for a recovery window, read by
 //! nobody ([`Secrets::forget_project`]), and recoverable ([`Secrets::recover_project`]). After
 //! the window the sweeper closes the audit chain with a final row and a signed digest, lets the
 //! sinks have them, and purges every row; the project's data key and registries go once nothing
@@ -76,7 +76,13 @@ impl Held {
         let n = |sql: &str| c.query_row(sql, [project], |r| r.get::<_, i64>(0));
         Ok(Held {
             values: n("SELECT COUNT(*) FROM secrets WHERE project_id = ?")?,
-            protected: c.query("SELECT slug FROM environments WHERE project_id = ? AND protected = 1 ORDER BY position", [project], |r| r.get(0))?,
+            // A protection someone set; not the one a new project's production starts with
+            // (no approvals, no approvers), which every project has.
+            protected: c.query(
+                "SELECT slug FROM environments WHERE project_id = ? AND protected = 1 AND NOT (slug = ? AND approvals = 0 AND approvers = '[]') ORDER BY position",
+                code_sql::params![project, crate::PRODUCTION],
+                |r| r.get(0),
+            )?,
             keys: n("SELECT COUNT(*) FROM transit_keys WHERE project_id = ?")?,
             cas: n("SELECT COUNT(*) FROM cas WHERE project_id = ?")? + n("SELECT COUNT(*) FROM ssh_cas WHERE project_id = ?")?,
             identities: n("SELECT COUNT(*) FROM identities WHERE project_id = ?")?,

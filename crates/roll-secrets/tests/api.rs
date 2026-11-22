@@ -1321,7 +1321,9 @@ async fn environments_start_as_three_and_can_be_added_renamed_reordered_and_dele
     for slug in ["development", "preprod"] {
         api.call(Method::DELETE, &format!("/environments/{slug}"), None).await;
     }
-    let (s, e) = api.call(Method::DELETE, "/environments/production", None).await;
+    // Production starts protected: deleting it names it.
+    assert_eq!(api.call(Method::DELETE, "/environments/production", None).await.0, StatusCode::BAD_REQUEST);
+    let (s, e) = api.call(Method::DELETE, "/environments/production?confirm=production", None).await;
     assert_eq!((s, e["code"].as_str()), (StatusCode::CONFLICT, Some("last_environment")));
 }
 
@@ -5005,7 +5007,8 @@ async fn reach_names_who_and_what_can_read_a_folder() {
     // The production token reaches it (with what it may do), staging's doesn't.
     assert_eq!(names("tokens"), ["deploy"]);
     assert_eq!(r["tokens"][0]["actions"], json!(["read", "reveal"]));
-    assert_eq!((r["untrusted"].as_bool(), r["imported_by"].clone()), (Some(true), json!(["staging:/", "development:/"])));
+    // Production starts protected: no untrusted reader reaches it.
+    assert_eq!((r["untrusted"].as_bool(), r["imported_by"].clone()), (Some(false), json!(["staging:/", "development:/"])));
     let readers: Vec<&str> = r["readers"].as_array().unwrap().iter().map(|x| x["actor"].as_str().unwrap()).collect();
     assert!(readers.iter().any(|a| a.starts_with("token:")) && readers.contains(&"operator (through staging:/)") && readers.contains(&"operator (through development:/)"), "{readers:?}");
     // Another project it's shared with is named only as a project, never its environments.
@@ -6112,6 +6115,8 @@ async fn the_maker_losing_reveal_stops_the_swaps() {
 async fn a_cut_off_ends_the_folders_placeholders() {
     use roll_secrets::proxy::{Place, Position, Refusal};
     let api = Api::new().await;
+    // An untrusted preview reads its base only where that isn't protected.
+    api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": false }))).await;
     api.set("production", "STRIPE_KEY", "sk_test_fake_cut").await;
     api.ok(Method::PUT, "/environments/production/secrets/STRIPE_KEY/hosts", Some(json!({ "hosts": ["api.stripe.com"] }))).await;
     // Resolved through an environment based on production: still production's key's.
@@ -6187,10 +6192,12 @@ impl Api {
     }
 }
 
-/// docs/members.md, "secrets by role": a viewer sees names, never a value; a developer reveals and
-/// writes where the role applies, never a protected environment unless it's named, and a write there
-/// is a change request; an admin reviews it, and an approval stops counting once its approver is
-/// removed. A project they aren't in doesn't exist for them.
+/// docs/members.md, "secrets by role", on a project as it's made (nothing protected by hand): a
+/// viewer sees names, never a value; a developer reveals and writes where the role applies, never
+/// production unless it's named (it starts protected with no approvals, so its owner still writes
+/// directly); once it asks for an approval, a developer's write there is a change request; an admin
+/// reviews it, and an approval stops counting once its approver is removed. A project they aren't
+/// in doesn't exist for them.
 #[tokio::test]
 async fn members_reach_secrets_by_their_role() {
     let api = Api::new().await;
@@ -6201,8 +6208,8 @@ async fn members_reach_secrets_by_their_role() {
         let (s, e) = api.as_ada(Method::PUT, &at(&format!("/environments/{env}/secrets/KEY")), Some(json!({ "value": value }))).await;
         assert!(s.is_success(), "{e}");
     }
-    let (s, e) = api.as_ada(Method::PUT, &at("/environments/production/policy"), Some(json!({ "protected": true, "approvals": 1 }))).await;
-    assert!(s.is_success(), "{e}");
+    let (s, e) = api.as_ada(Method::GET, &at("/environments/production"), None).await;
+    assert_eq!((s, e["protected"].as_bool(), e["approvals"].as_i64()), (StatusCode::OK, Some(true), Some(0)), "{e}");
     api.join(&team, "bob", "developer", None).await;
     api.join(&team, "vic", "viewer", None).await;
     api.join(&team, "cat", "admin", None).await;
@@ -6216,10 +6223,11 @@ async fn members_reach_secrets_by_their_role() {
     assert_eq!(s, StatusCode::OK);
     assert!(names.to_string().contains("KEY") && !names.to_string().contains("\"dev\""), "{names}");
     assert_eq!(get("vic", at("/environments/development/secrets/KEY/value")).await.0, StatusCode::FORBIDDEN);
-    // A developer: every environment that isn't protected (D3), and never deletes.
+    // A developer: every environment that isn't protected (D3), never production, and never deletes.
     let (s, v) = get("bob", at("/environments/development/secrets/KEY/value")).await;
     assert_eq!((s, v["value"].as_str()), (StatusCode::OK, Some("dev")), "{v}");
     assert_eq!(get("bob", at("/environments/production/secrets/KEY/value")).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(api.signed_in("bob", false, Method::PUT, &at("/environments/production/secrets/KEY"), Some(json!({ "value": "mine" }))).await.0, StatusCode::FORBIDDEN);
     assert_eq!(api.signed_in("bob", false, Method::DELETE, &at("/environments/development/secrets/KEY"), None).await.0, StatusCode::FORBIDDEN);
     // Production once it's named; then only where it's named.
     let (s, e) = api.as_ada(Method::PATCH, &format!("/v1/workspace/projects/{team}/members/usr_bob"), Some(json!({ "environments": ["production"] }))).await;
@@ -6227,7 +6235,10 @@ async fn members_reach_secrets_by_their_role() {
     let (s, v) = get("bob", at("/environments/production/secrets/KEY/value")).await;
     assert_eq!((s, v["value"].as_str()), (StatusCode::OK, Some("prod")), "{v}");
     assert_eq!(get("bob", at("/environments/development/secrets/KEY/value")).await.0, StatusCode::FORBIDDEN);
-    // His write to the protected environment is a change request, which an admin approves.
+    // Once production asks for an approval, his write there is a change request, which an admin
+    // approves.
+    let (s, e) = api.as_ada(Method::PUT, &at("/environments/production/policy"), Some(json!({ "protected": true, "approvals": 1 }))).await;
+    assert!(s.is_success(), "{e}");
     let (s, e) = api.signed_in("bob", false, Method::PUT, &at("/environments/production/secrets/KEY"), Some(json!({ "value": "new" }))).await;
     assert_eq!((s, e["code"].as_str()), (StatusCode::CONFLICT, Some("approval_required")), "{e}");
     let (s, r) = api.signed_in("bob", false, Method::POST, &at("/environments/production/requests"), Some(json!({ "ops": [{ "op": "set", "key": "KEY", "value": "new" }] }))).await;
@@ -6242,6 +6253,36 @@ async fn members_reach_secrets_by_their_role() {
     assert_eq!((s, e["code"].as_str()), (StatusCode::CONFLICT, Some("approval_required")), "{e}");
     // A project bob isn't in is a 404 for him, as the workspace answers.
     assert_eq!(get("bob", format!("/v1/secrets/projects/{}/environments/development/secrets", api.project)).await.0, StatusCode::NOT_FOUND);
+}
+
+/// A project whose production isn't protected (made before new ones started with it protected) is
+/// never changed silently: Health says so and names what reaches it (owners and admins, a developer
+/// who names it, a check that read it), a developer's default still leaves it out, and protecting it
+/// as a new project's is (no approvals) clears the finding with writes still direct.
+#[tokio::test]
+async fn an_unprotected_production_is_a_health_finding_until_protected() {
+    let api = Api::new().await;
+    let (_, p) = api.as_ada(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "old" }))).await;
+    let old = p["id"].as_str().unwrap().to_string();
+    let at = |rest: &str| format!("/v1/secrets/projects/{old}{rest}");
+    let (s, e) = api.as_ada(Method::PUT, &at("/environments/production/policy"), Some(json!({ "protected": false }))).await;
+    assert!(s.is_success(), "{e}");
+    api.as_ada(Method::PUT, &at("/environments/production/secrets/KEY"), Some(json!({ "value": "prod" }))).await;
+    api.join(&old, "bob", "developer", None).await;
+    api.join(&old, "cat", "developer", Some(vec!["production"])).await;
+    assert_eq!(api.signed_in("bob", false, Method::GET, &at("/environments/production/secrets/KEY/value"), None).await.0, StatusCode::FORBIDDEN, "D3 without protection too");
+    let caller = roll_secrets::Caller::consumer("check:acme/web#deploy");
+    api.secrets.values(&old, "production", "/", true, Some("check:acme/web#deploy"), &caller).unwrap();
+    let flagged = |found: &Value| found.as_array().unwrap().iter().find(|f| f["issue"] == "production_unprotected").map(|f| f["detail"].as_str().unwrap().to_string());
+    let (_, found) = api.as_ada(Method::GET, &at("/health"), None).await;
+    let detail = flagged(&found).expect("flagged");
+    assert!(detail.contains("owners") && detail.contains("ada") && detail.contains("developers who name it") && detail.contains("cat") && !detail.contains("bob") && detail.contains("checks acme/web#deploy"), "{detail}");
+    let (s, e) = api.as_ada(Method::PUT, &at("/environments/production/policy"), Some(json!({ "protected": true, "approvals": 0 }))).await;
+    assert!(s.is_success(), "{e}");
+    let (_, found) = api.as_ada(Method::GET, &at("/health"), None).await;
+    assert_eq!(flagged(&found), None);
+    let (s, e) = api.as_ada(Method::PUT, &at("/environments/production/secrets/KEY"), Some(json!({ "value": "new" }))).await;
+    assert!(s.is_success(), "no approvals asked: a direct write {e}");
 }
 
 /// docs/members.md, "Remove, and leave": once a member is removed, their own token stops reaching
