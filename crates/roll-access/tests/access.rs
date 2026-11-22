@@ -281,7 +281,7 @@ impl Daemon {
     /// [`Daemon::via_mcp`] with the answer's body.
     async fn via_mcp_body(&self, token: &str, method: Method, path: &str) -> (StatusCode, Value) {
         let mut req = Request::builder().method(method).uri(path).header("authorization", format!("Bearer {token}")).body(Body::empty()).unwrap();
-        req.extensions_mut().insert(roll_access::evaluate::McpCall { tool: "test_tool".into(), args: Arc::new(json!({})), ip: None, elicits: false, client: None, quiet: false });
+        req.extensions_mut().insert(roll_access::evaluate::McpCall { tool: "test_tool".into(), args: Arc::new(json!({})), ip: None, elicits: false, client: None, quiet: false, unattended: false });
         let resp = self.router.clone().oneshot(req).await.unwrap();
         let status = resp.status();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
@@ -291,7 +291,7 @@ impl Daemon {
     /// A request roll's MCP server makes for a tool call (its `McpCall` extension), with `token`.
     async fn via_mcp(&self, token: &str, method: Method, path: &str) -> StatusCode {
         let mut req = Request::builder().method(method).uri(path).header("authorization", format!("Bearer {token}")).body(Body::empty()).unwrap();
-        req.extensions_mut().insert(roll_access::evaluate::McpCall { tool: "test_tool".into(), args: Arc::new(json!({})), ip: None, elicits: false, client: None, quiet: false });
+        req.extensions_mut().insert(roll_access::evaluate::McpCall { tool: "test_tool".into(), args: Arc::new(json!({})), ip: None, elicits: false, client: None, quiet: false, unattended: false });
         self.router.clone().oneshot(req).await.unwrap().status()
     }
 
@@ -957,8 +957,17 @@ async fn agents_ask_what_the_policy_says() {
     let (s, e) = d.call(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "agents_ask": [{ "product": "nope" }] }))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "{e}");
     assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "agents_ask": [{ "product": "postgres", "actions": ["delete"] }] }))).await.0, StatusCode::OK);
+    let (_, now) = d.call(&token, Method::GET, "/v1/access/approvals/decided?latest=1", None).await;
     let (s, pending) = d.via_mcp_body(&token, Method::DELETE, "/v1/projects/pa").await;
     assert_eq!((s, pending["code"].as_str()), (StatusCode::FORBIDDEN, Some("approval_pending")), "{pending}");
+    // Decided, it's in the connection's feed of decisions (MCP Events' access.approval), after the
+    // place it started from; another connection's feed hasn't it.
+    let id = pending["approval"].as_str().unwrap();
+    assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{id}/approve"), None).await.0, StatusCode::OK);
+    let (_, feed) = d.call(&token, Method::GET, &format!("/v1/access/approvals/decided?after={}", now["next"]), None).await;
+    assert_eq!((feed["events"][0]["id"].as_str(), feed["events"][0]["state"].as_str()), (Some(id), Some("approved")), "{feed}");
+    let (other, _) = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }]), json!({})).await;
+    assert_eq!(d.call(&other, Method::GET, "/v1/access/approvals/decided?after=0", None).await.1["events"], json!([]));
     assert_ne!(d.via_mcp(&token, Method::GET, "/v1/projects").await, StatusCode::FORBIDDEN, "reads go on");
     assert_ne!(d.call(&token, Method::DELETE, "/v1/projects/pb", None).await.0, StatusCode::FORBIDDEN, "the API itself: not an agent");
 }

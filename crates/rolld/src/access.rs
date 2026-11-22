@@ -187,7 +187,7 @@ pub fn sinks(access: &Arc<Access>, secret_key: Option<&str>) {
         b = b.dns_resolver(roll_net::PublicOnly);
     }
     let Ok(client) = b.build() else { return };
-    let _ = access.sinks.set(Arc::new(SinkPost { client, sealer, allow_private }));
+    let _ = access.sinks.set(Arc::new(SinkPost { client, sealer, allow_private, aad: "roll-access:sink" }));
     let a = access.clone();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(10));
@@ -204,11 +204,31 @@ struct SinkPost {
     client: reqwest::Client,
     sealer: code_review::secret::Sealer,
     allow_private: bool,
+    /// What each secret is sealed to, with its row's id: an audit sink's or an MCP Events
+    /// subscription's, so one can't be opened as the other.
+    aad: &'static str,
 }
 
-/// What a sink's secret is sealed to: it opens only as that sink's.
-fn sink_aad(id: &str) -> String {
-    format!("roll-access:sink:{id}")
+/// What a secret is sealed to: it opens only as its own row's.
+fn sink_aad(prefix: &str, id: &str) -> String {
+    format!("{prefix}:{id}")
+}
+
+/// MCP Events' webhook callbacks (roll_access::event_subs): a transport of their own, as audit
+/// sinks' is, since an agent chooses these URLs and an admin a sink's. `ROLL_MCP_EVENTS_ALLOW_PRIVATE`
+/// lets a callback be plain http on a private address (local development only).
+pub fn event_hooks(access: &Arc<Access>, secret_key: Option<&str>) {
+    let Some(sealer) = secret_key.and_then(|k| code_review::secret::Sealer::new(k).ok()) else {
+        tracing::info!("MCP Events' webhooks are off: they need ROLL_SECRET_KEY");
+        return;
+    };
+    let allow_private = std::env::var("ROLL_MCP_EVENTS_ALLOW_PRIVATE").is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes"));
+    let mut b = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(std::time::Duration::from_secs(10)).no_proxy();
+    if !allow_private {
+        b = b.dns_resolver(roll_net::PublicOnly);
+    }
+    let Ok(client) = b.build() else { return };
+    let _ = access.event_hooks.set(Arc::new(SinkPost { client, sealer, allow_private, aad: "roll-access:mcp-event-sub" }));
 }
 
 impl roll_access::sinks::SinkTransport for SinkPost {
@@ -225,11 +245,11 @@ impl roll_access::sinks::SinkTransport for SinkPost {
     }
 
     fn seal(&self, id: &str, secret: &str) -> Result<String, String> {
-        Ok(self.sealer.seal(&sink_aad(id), secret))
+        Ok(self.sealer.seal(&sink_aad(self.aad, id), secret))
     }
 
     fn open(&self, id: &str, sealed: &str) -> Result<String, String> {
-        self.sealer.open(&sink_aad(id), sealed).map_err(|e| e.to_string())
+        self.sealer.open(&sink_aad(self.aad, id), sealed).map_err(|e| e.to_string())
     }
 
     fn post(&self, url: String, headers: Vec<(String, String)>, body: Vec<u8>) -> futures::future::BoxFuture<'static, Result<(), String>> {
@@ -253,6 +273,38 @@ impl roll_access::sinks::SinkTransport for SinkPost {
                 }
             }
             if status.is_success() { Ok(()) } else { Err(format!("{host} answered {status}")) }
+        })
+    }
+
+    fn post_answer(&self, url: String, headers: Vec<(String, String)>, body: Vec<u8>) -> futures::future::BoxFuture<'static, Result<(u16, Vec<u8>), String>> {
+        let client = self.client.clone();
+        let check = self.check(&url);
+        Box::pin(async move {
+            check.map_err(|_| "connection_refused".to_string())?;
+            let mut req = client.post(&url).body(body);
+            for (k, v) in headers {
+                req = req.header(k, v);
+            }
+            // A category only (MCP Events' `lastError`): never the endpoint's words or the URL.
+            let category = |e: &reqwest::Error| {
+                if e.is_timeout() {
+                    "timeout"
+                } else if format!("{e:?}").to_ascii_lowercase().contains("certificate") || format!("{e:?}").to_ascii_lowercase().contains("tls") {
+                    "tls_error"
+                } else {
+                    "connection_refused"
+                }
+            };
+            let mut resp = req.send().await.map_err(|e| category(&e).to_string())?;
+            let status = resp.status().as_u16();
+            let mut answer = Vec::new();
+            while answer.len() < 4 << 10 {
+                match resp.chunk().await {
+                    Ok(Some(c)) => answer.extend_from_slice(&c[..c.len().min((4 << 10) - answer.len())]),
+                    _ => break,
+                }
+            }
+            Ok((status, answer))
         })
     }
 }

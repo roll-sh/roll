@@ -54,6 +54,12 @@ pub trait SinkTransport: Send + Sync {
     fn open(&self, id: &str, sealed: &str) -> std::result::Result<String, String>;
     /// POST `body` with `headers` (no redirects, a bounded read of the answer); `Err` unless 2xx.
     fn post(&self, url: String, headers: Vec<(String, String)>, body: Vec<u8>) -> BoxFuture<'static, std::result::Result<(), String>>;
+    /// POST and read the answer (its status and at most 4 KiB): an MCP Events callback echoing its
+    /// challenge. `Err` is a category only: `timeout`, `tls_error` or `connection_refused`.
+    fn post_answer(&self, url: String, headers: Vec<(String, String)>, body: Vec<u8>) -> BoxFuture<'static, std::result::Result<(u16, Vec<u8>), String>> {
+        let _ = (url, headers, body);
+        Box::pin(async { Err("connection_refused".to_string()) })
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]

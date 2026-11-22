@@ -390,6 +390,7 @@ fn apps_area(method: &str, path: &str) -> Area {
         ["services", "environments", s, ..] => match *s {
             "analytics" | "app-metrics" | "errors" | "logs" | "metrics" | "routes" | "slo" | "traces" | "usage" | "vitals" | "push" => "observe",
             "deploys" | "promote" | "redeploy" | "rollback" | "pending" | "diff" | "jobs" | "runs" | "restart" | "sleep" | "wake" | "instances" | "cache" | "sandboxes" => "deploy",
+            "private-network" => "configure",
             "variables" | "domains" | "forms" | "volume" | "config" => "configure",
             _ => return Area::Unplaced,
         },
@@ -1355,6 +1356,18 @@ static TOOLS: &[Tool] = &[
         &[SERVICE, ENV, req("job", "Job id")],
     )
     .until(job_over),
+    t(
+        "apps_set_private_network",
+        "Connect a private network",
+        "Reach hosts in your own network (Cloud Run's VPC egress, Fly's WireGuard): a WireGuard config kept in roll secrets as this environment's secret (secret: roll://ENV/KEY, read as you at each use; PostUp, DNS, Table and full tunnels are refused) and routes, each a name the app connects to (db.corp.internal) and a host:port in your network; a peer answers each name on the project network. Each route has its own port; a closed environment reaches these and still nothing else (admin).",
+        "apps",
+        "PUT",
+        "/v1/apps/services/{service}/environments/{env}/private-network",
+        &[SERVICE, ENV, breq("secret", Ty::Str, "roll://ENV/KEY: the WireGuard config ([Interface] with Address, [Peer]s)"), breq("routes", Ty::Arr, "[{name: db.corp.internal, target: 10.0.3.4:5432}], 1-20, each port its own"), b("kind", Ty::Str, "wireguard (the default)")],
+    )
+    .open_world(),
+    t("apps_get_private_network", "Get the private network", "An environment's private network: its secret's reference (never the config), routes, and whether its peer runs (running, failed: why, waiting for a deploy).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/private-network", &[SERVICE, ENV]),
+    t("apps_delete_private_network", "Disconnect the private network", "Remove an environment's private network: its peer and routes stop now (admin).", "apps", "DELETE", "/v1/apps/services/{service}/environments/{env}/private-network", &[SERVICE, ENV]).destructive(),
     t(
         "apps_create_sandbox",
         "Start a sandbox",

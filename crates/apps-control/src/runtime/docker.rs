@@ -130,6 +130,15 @@ pub fn sandbox_name(instance: &str) -> String {
     format!("{instance}-net")
 }
 
+/// A container's last log lines, for an error: what looks like a key (44 characters of base64)
+/// is left out.
+async fn docker_logs_tail(name: &str) -> String {
+    let out = Command::new("docker").args(["logs", "--tail", "5", name]).stdin(Stdio::null()).output().await.map(|o| format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))).unwrap_or_default();
+    let words: Vec<String> = out.split_whitespace().map(|w| if w.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '+' && c != '/' && c != '=').len() >= 43 { "[redacted]".to_string() } else { w.to_string() }).collect();
+    let line = words.join(" ");
+    line.chars().take(300).collect()
+}
+
 /// The waker in `instance`'s sandbox: it listens on the app's port while the app is stopped,
 /// takes the first private caller, and hands that connection to the app once it listens.
 pub fn waker_name(instance: &str) -> String {
@@ -1022,6 +1031,98 @@ impl Runtime for Docker {
 
     async fn remove_volume(&self, name: &str) {
         let _ = docker(&["volume", "rm", "-f", name]).await;
+    }
+
+    async fn ensure_peer(&self, spec: &super::PeerSpec) -> anyhow::Result<()> {
+        anyhow::ensure!(spec.name.starts_with(super::PREFIX), "{} isn't a roll apps peer", spec.name);
+        let digest = spec.digest();
+        let forwarders: Vec<String> = spec.forwards.iter().map(|(_, port, _)| format!("{}-{port}", spec.name)).collect();
+        // As asked, running, its config in place (a restart of Docker loses its tmpfs) and every
+        // forwarder up: nothing to do.
+        let running = |name: &str, want: String| {
+            let name = name.to_string();
+            async move { docker(&["inspect", "-f", &format!("{{{{.State.Running}}}} {{{{index .Config.Labels \"{LABEL}.peer\"}}}}"), &name]).await.is_ok_and(|o| o.trim() == want) }
+        };
+        if running(&spec.name, format!("true {digest}")).await && docker(&["exec", &spec.name, "test", "-s", "/run/wg/wg0.conf"]).await.is_ok() {
+            let mut all = true;
+            for f in &forwarders {
+                all &= running(f, format!("true {digest}")).await;
+            }
+            if all {
+                return Ok(());
+            }
+        }
+        self.remove_peer(&spec.name).await;
+        let labels = [format!("{LABEL}={}", spec.service), format!("{LABEL}.env={}", spec.env), format!("{LABEL}.role=peer"), format!("{LABEL}.peer={digest}")];
+        let (addrs, routes, mtu) = (format!("ADDRS={}", spec.addresses.join(" ")), format!("ROUTES={}", spec.routes.join(" ")), format!("MTU={}", spec.mtu.map(|m| m.to_string()).unwrap_or_default()));
+        let mut args: Vec<&str> = vec!["create", "--name", &spec.name, "--network", &spec.network];
+        for (alias, _, _) in &spec.forwards {
+            args.extend(["--network-alias", alias]);
+        }
+        for l in &labels {
+            args.extend(["--label", l]);
+        }
+        // The tunnel in a namespace of its own: NET_ADMIN there and nothing else, no root
+        // filesystem to write, its config only in memory.
+        args.extend(["--cap-drop", "ALL", "--cap-add", "NET_ADMIN", "--security-opt", "no-new-privileges", "--read-only", "--tmpfs", "/run/wg:size=64k,mode=0700"]);
+        args.extend(["--memory", "64m", "--pids-limit", "64", "-e", &addrs, "-e", &routes, "-e", &mtu, "--entrypoint", "sh", super::peering_image::WIREGUARD, "-c", super::peering_image::SCRIPT]);
+        docker_within(&args, Some(Duration::from_secs(300))).await.context("the private network's peer")?;
+        if let Some(out) = &spec.out_network {
+            self.ensure_network(out, &spec.service, false).await?;
+            docker(&["network", "connect", out, &spec.name]).await.context("the peer's way out")?;
+        }
+        docker(&["start", &spec.name]).await?;
+        // Its config through stdin into its tmpfs: never on disk, in argv or in an env.
+        let mut child = Command::new("docker")
+            .args(["exec", "-i", &spec.name, "sh", "-c", "umask 077; cat > /run/wg/.c && mv /run/wg/.c /run/wg/wg0.conf"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()?;
+        {
+            use tokio::io::AsyncWriteExt;
+            let mut stdin = child.stdin.take().context("no stdin")?;
+            stdin.write_all(spec.config.as_bytes()).await?;
+        }
+        let out = tokio::time::timeout(Duration::from_secs(30), child.wait_with_output()).await.context("writing the peer's config")??;
+        anyhow::ensure!(out.status.success(), "the peer's config wasn't written");
+        // Up once its interface is (or it says why it stopped).
+        let began = std::time::Instant::now();
+        loop {
+            if docker(&["exec", &spec.name, "ip", "link", "show", "wg0", "up"]).await.is_ok_and(|o| !o.trim().is_empty()) {
+                break;
+            }
+            if !running(&spec.name, format!("true {digest}")).await || began.elapsed() > Duration::from_secs(15) {
+                let why = docker_logs_tail(&spec.name).await;
+                self.remove_peer(&spec.name).await;
+                anyhow::bail!("the private network's peer didn't come up: {why}");
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        for ((_, port, target), name) in spec.forwards.iter().zip(&forwarders) {
+            let (listen, connect, net) = (format!("TCP-LISTEN:{port},fork,reuseaddr"), format!("TCP:{target}"), format!("container:{}", spec.name));
+            let mut args: Vec<&str> = vec!["run", "-d", "--name", name, "--network", &net];
+            for l in &labels {
+                args.extend(["--label", l]);
+            }
+            args.extend(["--cap-drop", "ALL", "--cap-add", "NET_BIND_SERVICE", "--security-opt", "no-new-privileges", "--read-only", "--memory", "32m", "--pids-limit", "64", super::links::IMAGE, &listen, &connect]);
+            docker_within(&args, Some(Duration::from_secs(300))).await.context("a private network route's forwarder")?;
+        }
+        Ok(())
+    }
+
+    async fn remove_peer(&self, name: &str) {
+        if !name.starts_with(super::PREFIX) {
+            return;
+        }
+        let Ok(listed) = docker(&["ps", "-a", "--filter", &format!("name={name}"), "--format", "{{.Names}}"]).await else { return };
+        // The peer and its forwarders (`<name>-<port>`), never another name holding it.
+        for n in listed.lines().map(str::trim).filter(|n| *n == name || n.strip_prefix(name).and_then(|r| r.strip_prefix('-')).is_some_and(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))) {
+            let _ = docker(&["rm", "-f", n]).await;
+        }
+        // A closed environment's peer's way out goes with it.
+        self.remove_network(&format!("{name}-out")).await;
     }
 
     async fn remove_network(&self, name: &str) {
