@@ -413,6 +413,37 @@ Foreign cores per arm: b2v 3.46 2.81, b2 2.67 2.42.
 (b2v's first point-select run was starved by other tenants; b1 read 38,292-38,330 in its three
 runs.)
 
+### PGO: one `tools/dist-pgo.sh` build of cand/a283-2's head against the plain build of it (b2v; one pass, 1 run a query)
+
+| query | b2v | pgo | instructions % per pair | cycles % per pair |
+|---|---|---|---|---|
+| q01 | 7.600 | 7.806 | +2.71 | +12.5 |
+| q02 | 2.637 | 2.249 | -14.68 | -22.9 |
+| q03 | 4.198 | 3.822 | -8.95 | -12.1 |
+| q04 | 1.731 | 1.619 | -6.42 | -7.3 |
+| q05 | 3.301 | 3.011 | -8.80 | -8.7 |
+| q06 | 5.249 | 5.329 | +1.52 | +9.8 |
+| q07 | 3.822 | 3.392 | -11.25 | -7.7 |
+| q08 | 1.462 | 1.278 | -12.57 | +1.0 |
+| q09 | 8.597 | 7.906 | -8.04 | -14.6 |
+| q10 | 7.536 | 7.223 | -4.16 | -11.8 |
+| q11 | 0.846 | 0.742 | -12.32 | -4.6 |
+| q12 | 5.970 | 6.055 | +1.42 | -3.6 |
+| q13 | 4.143 | 3.592 | -13.29 | -5.8 |
+| q14 | 1.416 | 1.229 | -13.20 | -19.6 |
+| q15 | 4.776 | 4.889 | +2.36 | -2.7 |
+| q16 | 2.903 | 2.448 | -15.69 | -21.5 |
+| q17 | 5.316 | 4.764 | -10.39 | -24.4 |
+| q18 | 16.296 | 14.785 | -9.27 | -7.5 |
+| q19 | 0.477 | 0.443 | -7.07 | -0.1 |
+| q20 | 1.368 | 1.105 | -19.25 | -7.0 |
+| q21 | 6.927 | 6.546 | -5.49 | -6.4 |
+| q22 | 0.628 | 0.557 | -11.23 | -0.5 |
+
+97.20 -> 90.79 G user instructions (-6.6%); every hash equal; VmHWM 1,683,052 -> 1,677,160 kB;
+foreign cores 1.71 / 2.03. Two PGO builds of one commit differ by ~0.9%: 90.0-91.6 G, against
+pgrust's PGO-built 90.4 G 0.996-1.013x.
+
 ### q03 / q09 with the decoders' uops (h0 against b1, 2 pairs, `tpch/pairm.sh`; G a run)
 
 | arm, pair | q03 cycles | q03 MITE uops | q03 DSB uops | q09 cycles | q09 MITE uops |

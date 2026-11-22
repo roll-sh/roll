@@ -12201,6 +12201,21 @@ repeated within 0.2% from pair to pair. Every result hash equal to h0's (and so 
   clippy 16 warnings, none new in a changed file; 430 tests in 25 binaries, and again `--profile
   verify-checked`; crash_random seeds 1-3 x 2, power_cut_at_every_point; regress 51,148 / 51,150,
   0 newly differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed.
+- **PGO (item 4)**: one `tools/dist-pgo.sh` build of cand/a283-2's head (`dbb7053a0`, default
+  training: client 2,173 s, instrumented build 2,455 s, training 650 s, then the optimised build;
+  `--out ~/.cache/a283/bin/pgo`) and one pass of the 22 beside the plain build of the same code
+  (b2v), one `lane.sh` hold: **97.20 G plain -> 90.79 G PGO** user instructions (-6.6%), every
+  hash PostgreSQL's, VmHWM 1,683,052 -> 1,677,160 kB, foreign cores 1.71 / 2.03. Two PGO builds of
+  one commit differ by ~0.9%, so the PGO figure is 90.0-91.6 G; **against pgrust's PGO-built
+  90.4 G (round 6's) 0.996-1.013x: level, not a clear win**. 280's PGO build had every query down
+  against plain; this one has the scans up: **q01 +2.71%, q15 +2.36, q06 +1.52, q12 +1.42** (23.6 G
+  of the 22: ~0.45 G), the rest -4.2 to -19.3% (q20 -19.3, q16 -15.7, q02 -14.7, q13 -13.3, q14
+  -13.2, q08 -12.6, q11 -12.3, q07 -11.3, q22 -11.2, q17 -10.4, q18 -9.3, q03 -9.0, q05 -8.8, q09
+  -8.0, q19 -7.1, q04 -6.4, q21 -5.5, q10 -4.2). 280's PGO figure, three changes earlier: 93.65 G. A single-run profile of q01 and q06 on both (`tpch/prof.sh`) has more of them
+  in `Pre::decode` (the scans' row decoding) and `parscan::partial_chunk` (`Lanes::eval` inlined
+  into it) under PGO (the training weighs every class to the same total count, `dist-pgo: profile
+  counts`, so TPC-H isn't under-weighted). Not looked at further: those scans are the next PGO
+  lead.
 - **Left** (largest first, q09 on b2): the unique probes are still 10.9% of q09 (one seek each in
   a new block: `Block::seek` 4.2%, `find_block` 0.9%, `block_with` 0.5%, `Hot::scan`'s lock and map
   per probe 0.7%; a derived value copied into a `Bytes` and the key into a `Vec` for each, which
