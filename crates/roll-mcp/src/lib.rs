@@ -28,7 +28,8 @@
 pub mod ask;
 pub mod card;
 pub mod guard;
-pub mod lockdown;
+/// Lockdown is roll-auth's, so roll code's own MCP server withholds the same text.
+pub use roll_auth::lockdown;
 pub mod modern;
 pub mod prompts;
 pub mod resources;
