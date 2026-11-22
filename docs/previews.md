@@ -124,8 +124,14 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
 - **Earlier pushes** (Vercel's per-push URLs): when a change's own service is redeployed at a new
   head, the head it ran stays reachable at `<service>-<head>-<slug>`, on the preview's same data,
   behind the same link, asleep until opened; the last 3 per service (an older one's container
-  goes). For comparing before and after. A trusted change's only (an approval is for one head),
-  and old code on migrated data can break. A roll apps service's earlier push is that build's own
+  goes). For comparing before and after. A trusted change's only (an approval is for one head).
+  Each runs on its own data: before the next head's seed or release, each Postgres branch is
+  branched again (copy-on-write, masked as the preview's is) as that head left it, and the
+  earlier push connects there, so a migration that renamed a column doesn't break the code
+  before it. A copy goes with its push, and with the data it copied (a reset, or masking rules
+  that changed: never served less masked than the rules say). Products that can't branch a
+  branch share the preview's (for now everything but Postgres), and so do roll apps services,
+  whose builds keep the variables they were deployed with. A roll apps service's earlier push is that build's own
   deployment URL (`<deployment>--<slug>` on roll apps' domain, never a project's preview domain;
   roll apps' `Deployment.url`), behind the same link (the token once, a cookie for that host) or
   sign-in: asked before the new head deploys, and kept only while the running build is the head

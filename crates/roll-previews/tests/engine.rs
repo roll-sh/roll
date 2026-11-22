@@ -1342,6 +1342,38 @@ async fn a_roll_apps_services_earlier_push_is_its_builds_own_url() {
     assert_eq!(e.engine.store.preview(&p.id).unwrap().earlier.len(), 1, "only cs_9a's");
 }
 
+/// An earlier push runs on its own copy of the data, taken before the next head's release, so a
+/// migration that renamed a column doesn't break it; copies go with their push, and with the data
+/// they copied (a reset).
+#[tokio::test]
+async fn an_earlier_push_runs_on_its_own_copy_of_the_data() {
+    use roll_previews::ports::EnvSource;
+    let e = env(json!({ "enabled": true, "release": { "image": "node:22", "run": "npm run migrate" } }));
+    e.code.open(change("chg_od", 7));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_od").unwrap().unwrap();
+    let db = |env: &[(String, String)]| env.iter().find(|(k, _)| k == "DATABASE_URL").map(|(_, v)| v.clone()).unwrap();
+    e.code.edit("chg_od", |c| c.head = "cs_7b".into());
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    let (_, live) = e.engine.env(&p.id, "web").await.unwrap();
+    let (_, earlier) = e.engine.env(&p.id, "web@cs_7a").await.unwrap();
+    assert!(db(&earlier).contains("-7a") && db(&earlier) != db(&live), "{} / {}", db(&earlier), db(&live));
+    // Kept with its push: the fourth push since evicts cs_7a, and its copy goes.
+    for head in ["cs_7c", "cs_7d", "cs_7e"] {
+        e.code.edit("chg_od", |c| c.head = head.into());
+        e.engine.pass().await.unwrap();
+        e.engine.pass().await.unwrap();
+    }
+    let copies = |e: &Env| e.engine.store.pinned_data(&p.id).unwrap().into_iter().map(|d| d.revision).collect::<Vec<_>>();
+    assert_eq!(copies(&e), ["cs_7b", "cs_7c", "cs_7d"]);
+    assert!(!e.pg.branches.lock().iter().any(|b| b.ends_with("-7a")), "{:?}", e.pg.branches.lock());
+    // A reset replaces the data: the copies of the old go with it.
+    e.engine.reset(&p.id, Vec::new()).unwrap();
+    e.engine.pass().await.unwrap();
+    assert!(copies(&e).is_empty());
+}
+
 /// A preview whose egress goes through its proxy ("Roll only") gets the keys bound to hosts as
 /// placeholders, made by whoever last saved the project's rules (roll secrets checks them); with
 /// no one recorded (the operator saved them) or open egress, it resolves as before.
