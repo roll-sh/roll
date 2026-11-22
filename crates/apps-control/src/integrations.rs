@@ -419,11 +419,11 @@ pub trait Resources: Send + Sync {
         Ok(())
     }
     /// A branch of the linked resource for one environment (`data: "branch"`; Railway's
-    /// environments' own databases): its own copy of the resource's data, made from its main (or
-    /// the one already there by that name: an environment's services share it), its variables
-    /// as the link's (`DATABASE_URL`…) and `kept` what [`Resources::unbranch`] deletes. None:
-    /// this kind has no branches.
-    async fn branch(&self, _kind: LinkKind, _ref: &str, _env: &str) -> anyhow::Result<Option<Minted>> {
+    /// environments' own databases), named `name` (apps' own, unguessable): its own copy of the
+    /// resource's data with credentials of its own (never the resource's own login), its
+    /// variables as the link's (`DATABASE_URL`…) and `kept` what [`Resources::unbranch`] deletes.
+    /// None: this kind has no branches.
+    async fn branch(&self, _kind: LinkKind, _ref: &str, _name: &str) -> anyhow::Result<Option<Minted>> {
         Ok(None)
     }
     /// Delete what [`Resources::branch`] made, once no environment uses it.

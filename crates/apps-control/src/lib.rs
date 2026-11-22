@@ -24,6 +24,7 @@ pub mod skew;
 pub mod site_rules;
 pub mod tunnel;
 pub mod tcp;
+pub mod udp;
 pub mod refs;
 pub mod feedback;
 pub mod scale;
@@ -144,6 +145,8 @@ pub struct AppsConfig {
     pub ports: Option<(u16, u16)>,
     /// TCP services' ports (`run.tcp`), and the host clients reach them at (one node only).
     pub tcp_ports: Option<(u16, u16)>,
+    /// UDP services' ports (`run.udp`), at `tcp_host` too (one node only).
+    pub udp_ports: Option<(u16, u16)>,
     pub tcp_host: String,
     /// Domains users can't add as custom domains (roll's own).
     pub reserved: Vec<String>,
@@ -198,6 +201,7 @@ impl AppsConfig {
             url_port: Some(7080),
             ports: None,
             tcp_ports: None,
+            udp_ports: None,
             tcp_host: "127.0.0.1".into(),
             reserved: Vec::new(),
             cname_target: None,
@@ -1730,6 +1734,8 @@ impl Apps {
         let (sid, e) = (r.service.clone(), r.name.clone());
         let config = self.db(move |s| s.runtime_config(&sid, &e)).await?;
         let (sid, e) = (r.service.clone(), r.name.clone());
+        let udp_port = self.db(move |s| s.udp_port(&sid, &e)).await?;
+        let (sid, e) = (r.service.clone(), r.name.clone());
         let data = match self.db(move |s| Ok((s.env_data(&sid, &e)?, s.env_branches(&sid, &e)?))).await? {
             (true, branches) => Some(serde_json::json!({ "mode": "branch", "branches": branches.iter().map(|(k, rr, _)| serde_json::json!({ "kind": k.as_str(), "ref": rr })).collect::<Vec<_>>() })),
             (false, _) => None,
@@ -1744,6 +1750,7 @@ impl Apps {
             domains,
             port: r.port,
             tcp: r.tcp_port.filter(|_| svc.run.tcp && svc.run.public && !private).map(|p| format!("{}:{p}", self.cfg.tcp_host)),
+            udp: udp_port.filter(|_| svc.run.udp && svc.run.public && !private && !r.egress.closed()).map(|p| format!("{}:{p}", self.cfg.tcp_host)),
             private,
             signed_in,
             password,
@@ -2624,7 +2631,15 @@ impl Apps {
             if have.iter().any(|(k, rr, _)| *k == kind && *rr == r) {
                 continue;
             }
-            let made = self.deps.resources.branch(kind, &r, env).await?.ok_or_else(|| anyhow::anyhow!("{} {r} can't be branched on this node", kind.as_str()))?;
+            // Another service of the project made it for this environment: theirs is ours.
+            let (sid, p, e, rr) = (svc.id.clone(), svc.project.clone(), env.to_string(), r.clone());
+            if self.db(move |s| s.share_env_branch(&sid, &p, &e, kind, &rr)).await? {
+                continue;
+            }
+            // A name nobody can guess: names may be global (Redis'), and one someone made first
+            // would be refused, never adopted.
+            let name = format!("roll-apps-{}", crate::model::random(12));
+            let made = self.deps.resources.branch(kind, &r, &name).await?.ok_or_else(|| anyhow::anyhow!("{} {r} can't be branched on this node", kind.as_str()))?;
             let (sid, e, rr) = (svc.id.clone(), env.to_string(), r.clone());
             self.db(move |s| s.put_env_branch(&sid, &e, kind, &rr, &made)).await?;
         }
@@ -2937,7 +2952,12 @@ impl Apps {
             if env.ephemeral && kind != LinkKind::Service {
                 continue;
             }
-            // Nor does an environment with data of its own: its branch's, or none yet.
+            // Nor does an environment with data of its own: its branch's, or none yet; a kind
+            // with no branches (search) is left out of it.
+            if own_data && kind != LinkKind::Service && !kind.branches() {
+                branch_notices.push(format!("{} {r} is left out of {}: it has data of its own, and a {} can't be branched", kind.as_str(), env.name, kind.as_str()));
+                continue;
+            }
             let read = if own_data && kind.branches() {
                 match branches.iter().find(|(k, rr, _)| *k == kind && *rr == r) {
                     Some((_, _, m)) => Ok(m.vars.clone()),
@@ -3835,7 +3855,7 @@ impl Apps {
         if let Some(Some(_)) = port {
             let (sid, e) = (service.to_string(), env.to_string());
             let (svc, row) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?))).await?;
-            if svc.run.tcp || svc.run.kind != crate::model::RunType::Web {
+            if svc.run.tcp || svc.run.udp || svc.run.kind != crate::model::RunType::Web {
                 return Err(Error::BadRequest("port is for a web service's custom domain".into()));
             }
             // Its instances answer rolld through their sandbox's socket, on their own port.
@@ -3961,8 +3981,8 @@ impl Apps {
         // A private service has no public names: the same 404 as an address nobody has, read
         // from its settings now (making it private takes effect at once, not with a deploy).
         let sid = found.0.clone();
-        // A TCP service's port isn't HTTP: its names don't serve it.
-        self.db(move |s| s.service(&sid)).await.ok().is_some_and(|svc| svc.run.public && !svc.run.tcp).then_some(found)
+        // A TCP or UDP service's port isn't HTTP: its names don't serve it.
+        self.db(move |s| s.service(&sid)).await.ok().is_some_and(|svc| svc.run.public && !svc.run.tcp && !svc.run.udp).then_some(found)
     }
 
     async fn host_target(self: &Arc<Self>, host: &str) -> Option<HostTarget> {

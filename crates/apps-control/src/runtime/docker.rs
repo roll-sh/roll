@@ -742,6 +742,19 @@ impl Runtime for Docker {
         }
         Ok(())
     }
+    async fn udp_address(&self, name: &str, port: u16) -> Option<SocketAddr> {
+        for c in [sandbox_name(name), name.to_string()] {
+            let hp = match &self.engine {
+                Some(e) => e.inspect(&c).await.ok().and_then(|i| i.published_udp.get(&port).copied()),
+                None => docker(&["port", &c, &format!("{port}/udp")]).await.ok().and_then(|o| o.lines().next()?.rsplit_once(':')?.1.trim().parse().ok()),
+            };
+            if let Some(hp) = hp {
+                return Some(SocketAddr::from(([127, 0, 0, 1], hp)));
+            }
+        }
+        None
+    }
+
     async fn port_address(&self, name: &str, port: u16) -> Option<SocketAddr> {
         // Published on the sandbox when it has one, else on the instance.
         for c in [sandbox_name(name), name.to_string()] {
@@ -1282,6 +1295,12 @@ fn sandbox_config(spec: &InstanceSpec, host_port: Option<u16>, extra: &[(u16, u1
                 config["ExposedPorts"][&k] = json!({});
                 host["PortBindings"][&k] = json!([{"HostIp": "127.0.0.1", "HostPort": hp.to_string()}]);
             }
+            // A UDP service's port over UDP too, on loopback (any free port: the relay reads it).
+            if spec.udp {
+                let k = format!("{p}/udp");
+                config["ExposedPorts"][&k] = json!({});
+                host["PortBindings"][&k] = json!([{"HostIp": "127.0.0.1", "HostPort": ""}]);
+            }
         }
         if spec.closed {
             config["Labels"][format!("{LABEL}.closed")] = json!(p.to_string());
@@ -1730,6 +1749,7 @@ mod tests {
             vars: vec![("TLS_KEY".into(), pem.into())],
             port: Some(8080),
             ports: vec![9000],
+            udp: false,
             cpu: 0.5,
             memory_mb: 512,
             network: Some("roll-apps-net-p-production".into()),

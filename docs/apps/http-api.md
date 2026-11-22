@@ -325,6 +325,13 @@ type Run = {
    *  connection, its allow list and maintenance applied; its HTTP names are 404s. A web
    *  service; no health_path, h2c, affinity or gradual rollout (its health is its port). */
   tcp?: boolean;
+  /** Its port speaks UDP (Fly's UDP: a game server, DNS): each environment answers on a UDP port
+   *  of its own from the node's ROLL_APPS_UDP_PORTS (Environment.udp), each client a flow whose
+   *  first datagram wakes an instance, relayed both ways and ended after 60 s idle (1024 flows
+   *  at most), its allow list, maintenance and rate limit (flows per client) applied. A web
+   *  service, not a TCP one; no health_path, health_grpc, h2c, affinity, gradual rollout or
+   *  sidecars (it's up once it runs); not in a closed environment. One node. */
+  udp?: boolean;
   /** A deployment that enters a crash loop within ten minutes of going live is replaced by the
    *  one before it (a rollback: its image, no build, actor "crash loop"); a rollback's own
    *  deployment never is, so there are no two in a row. */
@@ -575,6 +582,7 @@ type Environment = EnvironmentSummary & {
   pages?: { error?: string; maintenance?: string }; // its own pages (absent: roll's): error for the 502/503/504 while it can't answer or wake, maintenance while in maintenance
   allow_ips: { cidr: string; description?: string }[]; // only these networks get in through its public names ([]: anyone)
   tcp: string | null; // a TCP service's address, host:port (null until it has its port)
+  udp?: string; // a UDP service's address, host:port (absent until it has its port)
   rate_limit: { per_minute: number; burst: number | null } | null; // each client's requests a minute (null: no limit)
   firewall: { action: "allow" | "deny" | "limit" | "challenge"; path?: string; methods?: string[]; user_agent?: string; per_minute?: number; burst?: number }[]; // its rules, in order
   headers?: { path?: string; set: Record<string, string>; replace?: boolean }[]; // headers its answers carry (names lower case)
