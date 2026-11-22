@@ -284,7 +284,7 @@ async fn writes_running_when_a_cluster_is_dropped_are_never_acknowledged() {
             let r = req("c1", method, uri, body);
             let lease = n.admit(&r, None).await.unwrap();
             assert!(n.force_unload("c1").await);
-            let resp = lease.handle(r).await;
+            let resp = lease.serve(r).await;
             (resp.status, String::from_utf8_lossy(&resp.body).into_owned())
         }
     };

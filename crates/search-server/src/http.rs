@@ -644,8 +644,8 @@ async fn answer<B: RequestBody>(
     if let Err(r) = lease.acquire(&es).await {
         return Ok(to_hyper(search_es::rest::error_response(&r.error, &es, r.dialect), gzip_ok).await);
     }
-    let resp = lease.handle(es).await;
-    drop(lease);
+    // The lease goes back once answered, or with a streamed body when that ends.
+    let resp = lease.serve(es).await;
     Ok(to_hyper(resp, gzip_ok).await)
 }
 

@@ -1290,10 +1290,13 @@ API's for chat completions. Checked against a recording of a private Elasticsear
 mock answered piece by piece, failed with an error chunk and cut its connection
 (`tests/inference_services/streams.rs`). A client that goes away closes the upstream request.
 
-Differences: a stream may hold at most 16 MiB, one event at most 1 MiB, and it must end within
-the node's `roll.inference.max_timeout` (the request's `timeout`, as in Elasticsearch, covers only
+Differences: a stream may hold at most 16 MiB, one event at most 1 MiB, each read must come
+within the request's `timeout` of the one before, and the stream must end within the node's
+`roll.inference.max_timeout` (the request's `timeout`, as in Elasticsearch, otherwise covers only
 the wait for the upstream's status); past any of these it ends with `event: error`, where
-Elasticsearch reads on without a bound. A connection cut inside a body with a `Content-Length`
+Elasticsearch reads on without a bound. While it streams, the request keeps its cluster's
+concurrency permit (and a browser key's slot), 1 MiB of the cluster's in-flight bytes for its
+buffer, and its latency in the metrics runs to the stream's end. A connection cut inside a body with a `Content-Length`
 reports roll's HTTP client's message. `rate_limit.requests_per_minute` is enforced per node as Elasticsearch enforces it (a
 one-token bucket per cluster and endpoint, requests waiting their turn, timing out when the wait
 would outlast them; a cluster runs on one node at a time, so it is the cluster's limit), and the

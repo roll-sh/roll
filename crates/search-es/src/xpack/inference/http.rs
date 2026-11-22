@@ -99,6 +99,8 @@ pub struct Opened {
     pub response: reqwest::Response,
     /// When the whole stream must have ended (the node's [`max_timeout`] after it was sent).
     pub deadline: Instant,
+    /// The longest wait for its next piece: the request's `timeout` (within the node's cap).
+    pub idle: Duration,
 }
 
 /// The most of an unsuccessful streamed answer read (its error message).
@@ -201,7 +203,7 @@ async fn exchange(cluster: &Cluster, call: &Call<'_>, max: usize, stream: bool) 
                 let status = resp.status().as_u16();
                 let headers: Vec<(String, String)> = resp.headers().iter().filter_map(|(k, v)| Some((k.as_str().to_string(), v.to_str().ok()?.to_string()))).collect();
                 if stream && (200..300).contains(&status) {
-                    return Ok(Answer { status, headers, body: Vec::new(), open: Some(Opened { response: resp, deadline: stream_deadline }) });
+                    return Ok(Answer { status, headers, body: Vec::new(), open: Some(Opened { response: resp, deadline: stream_deadline, idle: timeout }) });
                 }
                 let mut body = Vec::new();
                 loop {

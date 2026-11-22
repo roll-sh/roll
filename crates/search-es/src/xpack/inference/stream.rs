@@ -10,8 +10,11 @@
 //! Elasticsearch 9.5.5 calling a mock that failed mid-stream (an error chunk, a cut connection).
 //!
 //! Bounds: the stream may hold at most [`MAX_STREAM_BYTES`], one event at most
-//! [`MAX_EVENT_BYTES`], and it must end by the node's `roll.inference.max_timeout` after it was
-//! sent; past any of them it ends with an error event. Elasticsearch has no such bounds.
+//! [`MAX_EVENT_BYTES`], each read must come within the request's `timeout` of the last, and the
+//! stream must end by the node's `roll.inference.max_timeout` after it was sent; past any of them
+//! it ends with an error event. Elasticsearch has no such bounds. One read's events are split in
+//! one pass over it (a read of many tiny events costs its length, not its length per event), and
+//! the node charges [`MAX_EVENT_BYTES`] to the cluster's in-flight bytes for the stream's life.
 //! Dropping the body (the client went away) drops the upstream response, which closes its
 //! connection: the provider stops generating.
 
@@ -127,9 +130,14 @@ impl Live {
     }
 }
 
-/// The next piece of the upstream's body, within the stream's deadline.
+/// The next piece of the upstream's body, within the stream's deadline and its idle limit.
 async fn next(opened: &mut Opened, id: &str) -> EsResult<Option<Bytes>> {
-    match tokio::time::timeout_at(tokio::time::Instant::from_std(opened.deadline), opened.response.chunk()).await {
+    let idle_until = std::time::Instant::now() + opened.idle;
+    let until = opened.deadline.min(idle_until);
+    match tokio::time::timeout_at(tokio::time::Instant::from_std(until), opened.response.chunk()).await {
+        Err(_) if idle_until < opened.deadline => {
+            Err(EsError::status(504, format!("Inference endpoint [{id}]: the stream sent nothing for [{}ms]", opened.idle.as_millis())))
+        }
         Err(_) => Err(super::http::timed_out(id)),
         Ok(Ok(piece)) => Ok(piece),
         // A chunked body that stopped before its last chunk reads as Elasticsearch's HTTP client
@@ -210,12 +218,16 @@ impl Reader {
         }
         self.buf.extend_from_slice(piece);
         let mut out = Vec::new();
+        // One pass with a cursor, and one shift of what's left at the end: shifting the buffer
+        // per event would cost a read of many tiny events its length times their number.
+        let mut start = 0;
         let mut from = self.scanned.saturating_sub(3);
         while let Some(end) = event_end(&self.buf, from) {
-            out.extend(super::services::sse_data(&self.buf[..end]));
-            self.buf.drain(..end);
-            from = 0;
+            out.extend(super::services::sse_data(&self.buf[start..end]));
+            start = end;
+            from = end;
         }
+        self.buf.drain(..start);
         self.scanned = self.buf.len();
         if self.buf.len() > MAX_EVENT_BYTES {
             return Err(EsError::status(400, format!("an event in the streamed answer of inference endpoint [{id}] exceeds [{MAX_EVENT_BYTES}] bytes")));
@@ -272,6 +284,17 @@ mod tests {
             }
         }
         assert!(cut.unwrap().reason().contains("exceeds [16777216] bytes"));
+    }
+
+    #[test]
+    fn a_read_of_many_tiny_events_costs_its_length() {
+        // 100,000 events in one read (800 KB): split in one pass, not one shift per event.
+        let read = "data:x\n\n".repeat(100_000);
+        let started = std::time::Instant::now();
+        let mut r = Reader::default();
+        let events = r.feed(read.as_bytes(), "x").unwrap();
+        assert_eq!(events.len(), 100_000);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1), "took {:?}", started.elapsed());
     }
 
     #[test]

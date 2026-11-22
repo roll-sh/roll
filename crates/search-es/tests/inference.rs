@@ -513,3 +513,31 @@ async fn an_upstream_event_past_the_cap_ends_the_stream() {
     // Cut, not drained: the upstream's connection closes.
     tokio::time::timeout(std::time::Duration::from_secs(10), closed).await.expect("the upstream connection stayed open").unwrap();
 }
+
+/// A browser key (#358) never reaches a model: `browser::check` refuses every `_inference` API
+/// after routing, before the handler opens anything, even for a superuser's key that lists the
+/// endpoints in `inference_endpoints` (which only lets its searches embed with them).
+#[tokio::test]
+async fn a_browser_key_cannot_stream_inference() {
+    let (m, log) = mock().await;
+    let c = cluster(&m, &[("xpack.inference.skip_validate_and_start", "true")]).await;
+    let put = format!(r#"{{"service":"openai","service_settings":{{"api_key":"k","model_id":"m","url":"{m}/v1/chat/completions"}}}}"#);
+    assert_eq!(call(&c, "PUT", "/_inference/completion/live-c", &put).await.0, 200);
+    assert_eq!(call(&c, "PUT", "/_inference/chat_completion/live-cc", &put).await.0, 200);
+    assert_eq!(call(&c, "PUT", "/_security/user/o", r#"{"password":"o-password-1","roles":["superuser"]}"#).await.0, 200);
+    let key = r#"{"name":"page","metadata":{"roll_browser":{"limits":{"inference_endpoints":["live-c","live-cc"]}}}}"#;
+    let (s, k, _) = call_as(&c, "o:o-password-1", "POST", "/_security/api_key", key).await;
+    assert_eq!(s, 200, "{}", k.to_json());
+    let field = |f: &str| k.get(f).and_then(Value::as_str).unwrap_or_default().to_string();
+    let auth = format!("ApiKey {}", base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", field("id"), field("api_key"))));
+    for (path, body) in [("/_inference/completion/live-c/_stream", r#"{"input":"hi"}"#), ("/_inference/chat_completion/live-cc/_stream", r#"{"messages":[{"role":"user","content":"hi"}]}"#)] {
+        let mut r = EsRequest::json("POST", path, body.to_string());
+        r.headers.push(("authorization".into(), auth.clone()));
+        let resp = search_es::handle(&c, r).await;
+        let v = resp.body_json();
+        assert_eq!(resp.status, 400, "{}", v.to_json());
+        assert!(resp.stream.is_none());
+        assert!(v.pointer(&["error", "reason"]).and_then(Value::as_str).unwrap_or_default().contains("isn't available to a browser key"), "{}", v.to_json());
+    }
+    assert!(seen(&log).is_empty(), "a browser key's request reached the model");
+}

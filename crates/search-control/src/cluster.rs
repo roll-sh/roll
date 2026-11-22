@@ -390,10 +390,22 @@ pub(crate) async fn to_owner(c: &crate::Control, name: &str, req: &search_es::Es
     let resp = cluster.forward(&owner, r, 0).await;
     let status = resp.status().as_u16();
     let headers: Vec<(String, String)> = resp.headers().iter().filter_map(|(k, v)| Some((k.to_string(), v.to_str().ok()?.to_string()))).collect();
-    // A streamed answer stays one (server-sent events, as the owner sends them).
+    // A streamed answer stays one (server-sent events, as the owner sends them). If the link to
+    // the owner breaks, the stream ends as a broken upstream does: with an error event.
     if headers.iter().any(|(k, v)| k.eq_ignore_ascii_case("content-type") && v.starts_with("text/event-stream")) {
         use futures::StreamExt;
-        let pieces = resp.into_body().into_data_stream().take_while(|r| std::future::ready(r.is_ok())).filter_map(|r| std::future::ready(r.ok()));
+        use search_es::xpack::inference::{TaskType, stream::error_event};
+        let task = if req.uri.contains("/chat_completion/") { TaskType::ChatCompletion } else { TaskType::Completion };
+        let pieces = futures::stream::unfold(Some(resp.into_body().into_data_stream()), move |body| async move {
+            let mut body = body?;
+            match body.next().await? {
+                Ok(piece) => Some((piece, Some(body))),
+                Err(e) => {
+                    let e = search_es::EsError::java(500, "connection_closed_exception", format!("the stream from the cluster's owner node broke: {e}"));
+                    Some((bytes::Bytes::from(error_event(task, &e)), None))
+                }
+            }
+        });
         let stream = search_es::rest::Streamed::new(Box::pin(pieces));
         return Some(search_es::EsResponse { status, headers, body: bytes::Bytes::new(), head: false, stream: Some(stream) });
     }
