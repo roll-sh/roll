@@ -80,5 +80,6 @@ both.
   skipped, and no node built an index for a repo it doesn't own.
 - `code-control/tests/mcp.rs::search_and_fetch_read_your_own_repos`: `search` with `kinds=files`
   and `fetch` of a file id. Another owner can't fetch it.
-- Not yet: a stopped node's repos in `skipped` (the per-repo and overall timeouts aren't tested;
-  `to_owner`'s unavailable answer is, in `cluster.rs`).
+- The same cluster test kills a repo's owner (no goodbye): the search through another node
+  answers in time, the dead owner's repo is in `skipped` (`unavailable`), and every repo is found
+  or skipped.
