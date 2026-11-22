@@ -551,14 +551,13 @@ async fn escalation_paths_are_shut() {
     let (_, out) = d.raw(&fleet, Method::DELETE, "/v1/projects/pa", Body::empty(), &[], stranger).await;
     assert_eq!(out["code"], "ip_not_allowed", "{out}");
 
-    // roll's own work for a grant (ActAs: an MCP Events delivery, no token) is marked for a forward
-    // to carry signed; the owner, which acts for the hop's grant again, decides it as this node did
-    // (no second approval). A token's request is never marked.
-    let (reader, reader_id) = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow", "delete": "ask" } }]), json!({})).await;
-    let acting = |path: &'static str, method: Method, hop: Option<roll_cluster::Forwarded>| {
-        let (d, id) = (&d, reader_id.clone());
+    // roll's own work for a grant (ActAs: an MCP Events delivery reading a feed, no token) is marked
+    // for a forward to carry signed, and the owner, acting for the hop's grant again, serves it as
+    // that grant. A token's own request is never marked.
+    let acting = |id: String, hop: Option<roll_cluster::Forwarded>| {
+        let d = &d;
         async move {
-            let mut req = Request::builder().method(method).uri(path).body(Body::empty()).unwrap();
+            let mut req = Request::builder().method(Method::GET).uri("/v1/previews/pv1").body(Body::empty()).unwrap();
             req.extensions_mut().insert(roll_auth::ActAs(id.as_str().into()));
             if let Some(f) = hop {
                 req.extensions_mut().insert(f);
@@ -568,13 +567,14 @@ async fn escalation_paths_are_shut() {
             (status, serde_json::from_slice::<Value>(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap_or(Value::Null))
         }
     };
-    let (s, out) = acting("/v1/projects", Method::GET, None).await;
-    assert_eq!((s, out["grant"].as_str(), out["acting"].as_str()), (StatusCode::OK, Some(reader_id.as_str()), Some(reader_id.as_str())), "{out}");
-    let (_, out) = d.raw(&reader, Method::GET, "/v1/projects", Body::empty(), &[], None).await;
-    assert!(out["acting"].is_null(), "{out}");
-    let owner_hop = Some(roll_cluster::Forwarded { node: "n1".into(), hops: 1, client: None, decided: Some(reader_id.clone()), acting: Some(reader_id.clone()) });
-    let (s, out) = acting("/v1/projects/pa", Method::DELETE, owner_hop).await;
-    assert_eq!((s, out["grant"].as_str()), (StatusCode::OK, Some(reader_id.as_str())), "decided on the first node: {out}");
+    let (viewer, viewer_id) = d.token(json!([{ "product": "previews", "resources": "*", "actions": { "read": "allow" } }]), json!({})).await;
+    let (s, out) = acting(viewer_id.clone(), None).await;
+    assert_eq!((s, out["grant"].as_str(), out["acting"].as_str()), (StatusCode::OK, Some(viewer_id.as_str()), Some(viewer_id.as_str())), "{out}");
+    let (_, out) = d.raw(&viewer, Method::GET, "/v1/previews/pv1", Body::empty(), &[], None).await;
+    assert!(out["grant"].is_string() && out["acting"].is_null(), "{out}");
+    let owner_hop = Some(roll_cluster::Forwarded { node: "n1".into(), hops: 1, client: None, decided: Some(viewer_id.clone()), acting: Some(viewer_id.clone()) });
+    let (s, out) = acting(viewer_id.clone(), owner_hop).await;
+    assert_eq!((s, out["grant"].as_str(), out["acting"].as_str()), (StatusCode::OK, Some(viewer_id.as_str()), Some(viewer_id.as_str())), "on the owner: {out}");
 }
 
 /// An `ask` action waits for a person: approved, the request runs as sent (once); denied, it's
