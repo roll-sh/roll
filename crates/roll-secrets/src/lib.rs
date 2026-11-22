@@ -38,6 +38,7 @@ pub mod backup;
 pub mod crypto;
 pub mod dotenv;
 mod envs;
+pub mod deleted_envs;
 pub mod events;
 pub mod exports;
 pub mod find;
@@ -575,6 +576,13 @@ impl Secrets {
         db.add_column("projects", "purge_at", "INTEGER")?;
         db.add_column("projects", "closed_at", "INTEGER")?;
         db.add_column("projects", "purged_at", "INTEGER")?;
+        // A deleted standard environment (envs.rs, `forget_environment`): when, by whom, and its
+        // recovery window's end. Its slug stays taken until the purge.
+        db.add_column("environments", "forgotten_at", "INTEGER")?;
+        db.add_column("environments", "forgotten_by", "TEXT")?;
+        db.add_column("environments", "purge_at", "INTEGER")?;
+        // What a change request does besides changing keys: `delete_environment` (requests.rs).
+        db.add_column("requests", "action", "TEXT")?;
         // Deleted before the window: already erased, waiting only for revocations.
         db.migrate("secrets-deleted-before-the-window", |c| {
             c.execute("UPDATE projects SET closed_at = forgotten_at, purged_at = forgotten_at WHERE forgotten_at IS NOT NULL AND purge_at IS NULL", ())?;

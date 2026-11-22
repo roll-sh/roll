@@ -1114,12 +1114,16 @@ export interface ReviewProvider {
   base_url: string | null;
   model: string | null;
   secondary_model: string | null;
-  key_last4: string;
+  /** A key pasted here (sealed): its last four characters. */
+  key_last4: string | null;
+  /** A key in roll secrets: `roll://ENV[/folder]/KEY`, read as whoever set it on every review. */
+  key_ref: string | null;
   updated_at: number;
 }
 
 export interface ReviewProviderInput {
   provider?: AiProvider;
+  /** The key, or a `roll://ENV[/folder]/KEY` reference you may reveal. */
   api_key: string;
   base_url?: string;
   model?: string;

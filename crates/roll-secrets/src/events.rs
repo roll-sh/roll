@@ -45,7 +45,9 @@ pub enum Kind {
     PlaceholderWrongConsumer,
     PlaceholderWrongHost,
     ProductionUnprotected,
+    /// A standard environment deleted (kept for the recovery window), or recovered within it.
     EnvDeleted,
+    EnvRecovered,
     ProjectDeleted,
     ProjectRecovered,
 }
@@ -64,6 +66,7 @@ pub const KINDS: &[Kind] = &[
     Kind::PlaceholderWrongHost,
     Kind::ProductionUnprotected,
     Kind::EnvDeleted,
+    Kind::EnvRecovered,
     Kind::ProjectDeleted,
     Kind::ProjectRecovered,
 ];
@@ -84,6 +87,7 @@ impl Kind {
             Kind::PlaceholderWrongHost => "placeholder.wrong_host",
             Kind::ProductionUnprotected => "production.unprotected",
             Kind::EnvDeleted => "env.deleted",
+            Kind::EnvRecovered => "env.recovered",
             Kind::ProjectDeleted => "project.deleted",
             Kind::ProjectRecovered => "project.recovered",
         }

@@ -794,6 +794,12 @@ impl Store {
             db.add_column("resources", "mask_digest", "TEXT")?;
         }
         // The branch's own schema lines as it was made (JSON), for `schema::diff_since`.
+        // What an earlier push's copy of the data holds and costs (read with the branches').
+        for (col, ty) in [("bytes", "INTEGER NOT NULL DEFAULT 0"), ("usd_month", "REAL NOT NULL DEFAULT 0"), ("spent_usd", "REAL NOT NULL DEFAULT 0")] {
+            if !db.has_column("pinned_data", col)? {
+                db.add_column("pinned_data", col, ty)?;
+            }
+        }
         if !db.has_column("resources", "base_schema")? {
             db.add_column("resources", "base_schema", "TEXT")?;
         }
@@ -2617,6 +2623,22 @@ impl Store {
         })
     }
 
+    /// What an earlier push's copy holds and costs, as its product last said.
+    pub fn set_pinned_usage(&self, id: &str, d: &PinnedData, u: &crate::ports::Usage) -> Result<()> {
+        self.db.write(|c| {
+            c.execute(
+                "UPDATE pinned_data SET bytes = ?, usd_month = ?, spent_usd = ? WHERE preview_id = ? AND revision = ? AND kind = ? AND parent = ?",
+                params![u.bytes, u.storage_usd_month, u.month_to_date_usd, id, d.revision, d.kind.as_str(), d.parent],
+            )?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// The earlier pushes' copies' `(bytes, usd a month kept, billed this month)`.
+    pub fn pinned_usage(&self, id: &str) -> Result<Vec<(i64, f64, f64)>> {
+        Ok(self.db.read(|c| c.query("SELECT bytes, usd_month, spent_usd FROM pinned_data WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))))?)
+    }
+
     pub fn drop_pinned_data(&self, id: &str, d: &PinnedData) -> Result<()> {
         self.db.write(|c| {
             c.execute("DELETE FROM pinned_data WHERE preview_id = ? AND revision = ? AND kind = ? AND parent = ?", params![id, d.revision, d.kind.as_str(), d.parent])?;
@@ -3100,6 +3122,13 @@ impl Store {
             // metered for compute.
             cost.month_to_date_usd += res.usd_month * held_hours / MONTH_HOURS + res.spent_usd;
         }
+        // Earlier pushes' copies of the data: kept like the branches (storage only; their compute
+        // runs as the preview's does, when someone opens one).
+        for (bytes, usd_month, spent) in self.pinned_usage(&r.id)? {
+            cost.bytes += bytes;
+            cost.sleeping_usd_month += usd_month;
+            cost.month_to_date_usd += usd_month * held_hours / MONTH_HOURS + spent;
+        }
         for (s, active_ms) in services {
             let gib = s.memory_mb as f64 / 1024.0;
             cost.active_usd_hour += gib * self.rates.usd_per_container_gib_hour;
@@ -3545,6 +3574,22 @@ mod tests {
         let sealed: String = store.db.read(|c| c.query_row("SELECT vars FROM previews WHERE id = ?", [a.id.as_str()], |r| r.get(0))).unwrap();
         store.db.write(|c| c.execute("UPDATE previews SET vars = ? WHERE id = ?", params![sealed, b.id]).map(drop)).unwrap();
         assert!(store.vars(&b.id).is_err());
+    }
+
+    /// An earlier push's copy of the data costs what it holds, in the preview's cost (and its
+    /// budget and size cap with it).
+    #[test]
+    fn an_earlier_pushs_copy_of_the_data_counts_in_the_previews_cost() {
+        let (_dir, store) = store();
+        let (row, _) = store.create(&new("chg_copy")).unwrap();
+        let before = store.cost(&row).unwrap();
+        let d = PinnedData { revision: "cs_1".into(), kind: Kind::Postgres, parent: "prj_db".into(), name: "pv-x-1".into(), r#ref: "br_1".into(), kept: None };
+        store.add_pinned_data(&row.id, &d).unwrap();
+        store.set_pinned_usage(&row.id, &d, &crate::ports::Usage { bytes: 3 << 20, storage_usd_month: 0.5, active_usd_hour: 0.0, month_to_date_usd: 0.25 }).unwrap();
+        let after = store.cost(&row).unwrap();
+        assert_eq!(after.bytes - before.bytes, 3 << 20);
+        assert!((after.sleeping_usd_month - before.sleeping_usd_month - 0.5).abs() < 1e-9);
+        assert!(after.month_to_date_usd - before.month_to_date_usd >= 0.25);
     }
 
     fn store() -> (tempfile::TempDir, Store) {

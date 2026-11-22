@@ -7,7 +7,7 @@
  * revealed value for as long as it's shown and no longer.
  */
 
-import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Hosts, PlaceholderRecord, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Totp, Share, NewShare, ValueRequest, NewValueRequest, NewToken, AuditEntry, AuditFilter, AuditVerification, AuditFormat, EventsQuery, EventPage, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, SaasRotator, NewSaasRotator, AwsRole, Finding, ProjectFindings, SyncPreview, FileDiff, OutsideDatabase, Directory, NewDirectory, SnowflakeAccount, NewSnowflakeAccount, AtlasProject, NewAtlasProject, AwsUser, CloudAccount, NewCloudAccount, KubernetesCluster, NewKubernetesCluster, SignedCertificate, CaCertificate, Ca, AcmeSettings, NewAcmeKey, SshCa, HostCertificate, UserCertificate, TransitKey, TransitPublicKey, Rotation, FolderPolicy, Reach, GitHubApp, SinkFormat, Gateway, MadeGateway, NewDecoy, CutOff, CutOffRequest, ValidityProbe, CheckedCredential, DeletedProject, Recovered } from "@roll/secrets/types";
+import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Hosts, PlaceholderRecord, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Totp, Share, NewShare, ValueRequest, NewValueRequest, NewToken, AuditEntry, AuditFilter, AuditVerification, AuditFormat, EventsQuery, EventPage, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, SaasRotator, NewSaasRotator, AwsRole, Finding, ProjectFindings, SyncPreview, FileDiff, OutsideDatabase, Directory, NewDirectory, SnowflakeAccount, NewSnowflakeAccount, AtlasProject, NewAtlasProject, AwsUser, CloudAccount, NewCloudAccount, KubernetesCluster, NewKubernetesCluster, SignedCertificate, CaCertificate, Ca, AcmeSettings, NewAcmeKey, SshCa, HostCertificate, UserCertificate, TransitKey, TransitPublicKey, Rotation, FolderPolicy, Reach, GitHubApp, SinkFormat, Gateway, MadeGateway, NewDecoy, CutOff, CutOffRequest, ValidityProbe, CheckedCredential, DeletedProject, Recovered, EnvironmentDeletion, EnvironmentDeleted, RecoveredEnvironment } from "@roll/secrets/types";
 import type { Grant } from "./access-api";
 import { withSession } from "./code-token";
 import { grantFor, tokenOf } from "./secrets-tokens";
@@ -104,7 +104,10 @@ export function secretsApi(project: string) {
     order: (order: string[]) => req<Environment[]>("PUT", `${P}/environments/order`, { order }),
     environment: (env: string) => req<Environment>("GET", E(env)),
     updateEnvironment: (env: string, patch: { slug?: string; name?: string; expires_at?: number | null; max_age_days?: number | null }) => req<Environment>("PATCH", E(env), patch),
-    deleteEnvironment: (env: string, confirm?: string) => req<null>("DELETE", `${E(env)}${qs({ confirm })}`),
+    /** A standard environment is kept for the recovery window; `confirm` repeats the slug when it's protected or something reads it (409 `confirm_required`, naming what breaks); a protected one with approvals answers 202 with the change request that deletes it. */
+    deleteEnvironment: (env: string, confirm?: string) => req<EnvironmentDeleted>("DELETE", `${E(env)}${qs({ confirm })}`),
+    /** What deleting `env` would do: its secrets, the window, whether it needs a confirm or a change request, and what breaks. */
+    environmentDeletion: (env: string) => req<EnvironmentDeletion>("GET", `${E(env)}/deletion`),
     /** `notify_url`: where opened change requests are announced (null stops it, absent keeps it). */
     policy: (env: string, p: { protected: boolean; approvals?: number; approvers?: string[]; notify_url?: string | null }) => req<Environment>("PUT", `${E(env)}/policy`, p),
     folderPolicies: (env: string) => req<FolderPolicy[]>("GET", `${E(env)}/folder-policies`),
@@ -355,6 +358,8 @@ export const findSecret = (key: string) => req<Place[]>("GET", `/v1/secrets/sear
 export const deletedProjects = () => req<DeletedProject[]>("GET", "/v1/secrets/deleted");
 /** Brings a deleted project back (its workspace project and canvas too): 410 `gone` once its window ended, 409 `name_taken` if another project has its name now. */
 export const recoverProject = (project: string) => req<Recovered>("POST", `/v1/secrets/projects/${enc(project)}/recover`);
+/** Brings a deleted environment back within its window (`admin` there): 404 once it was purged. */
+export const recoverEnvironment = (project: string, env: string) => req<RecoveredEnvironment>("POST", `/v1/secrets/projects/${enc(project)}/environments/${enc(env)}/recover`);
 
 /** The rule for keys (docs/secrets.md, "Secrets"). */
 export const SECRET_KEY = /^[A-Za-z_][A-Za-z0-9_]{0,255}$/;

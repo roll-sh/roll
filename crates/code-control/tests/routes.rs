@@ -129,6 +129,7 @@ fn reads() -> Vec<(&'static str, String)> {
     vec![
         repo(""),
         repo("/refs"),
+        repo("/landings"),
         repo("/tree/main"),
         repo("/tree/main/"),
         repo("/tree/main/docs"),

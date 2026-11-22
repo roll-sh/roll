@@ -451,6 +451,9 @@ const COLUMNS: &[(&str, &str, &str)] = &[
     ("review_apps", "secret_sealed", "INTEGER NOT NULL DEFAULT 0"),
     ("repo_webhooks", "url_sealed", "INTEGER NOT NULL DEFAULT 0"),
     ("review_apps", "url_sealed", "INTEGER NOT NULL DEFAULT 0"),
+    // Databases from before an owner's provider key could be a roll secrets reference.
+    ("owner_review_providers", "key_ref", "TEXT"),
+    ("owner_review_providers", "key_maker", "TEXT"),
 ];
 
 impl Db {

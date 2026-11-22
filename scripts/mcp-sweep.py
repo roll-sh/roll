@@ -509,10 +509,14 @@ def modern(method, params):
         return {"error": {"http": e.code, "body": e.read().decode(errors="replace")[:200]}}
 types = modern("events/list", {}).get("result", {}).get("events", [])
 ebad, seen_events = [], 0
+# A feed's path arguments (a repo's owner and name, a project) come from the fixtures above.
+feed_args = {"owner": "sweep", "repo": "app", "project": ws}
 for t in types:
-    first = modern("events/poll", {"name": t["name"], "cursor": None})
-    later = modern("events/poll", {"name": t["name"], "cursor": first.get("result", {}).get("cursor")})
-    start = modern("events/poll", {"name": t["name"], "cursor": "a1:0", "maxEvents": 20})
+    args = {k: feed_args.get(k) for k in t.get("inputSchema", {}).get("required", [])}
+    poll = {"name": t["name"], **({"arguments": args} if args else {})}
+    first = modern("events/poll", dict(poll, cursor=None))
+    later = modern("events/poll", dict(poll, cursor=first.get("result", {}).get("cursor")))
+    start = modern("events/poll", dict(poll, cursor="a1:0", maxEvents=20))
     for what, r in (("from now", first), ("from its cursor", later), ("from the start", start)):
         if "error" in r or not isinstance(r.get("result", {}).get("cursor"), str):
             ebad.append(f"events/poll {t['name']} {what}: {json.dumps(r.get('error') or r.get('result'))[:200]}")

@@ -808,6 +808,35 @@ impl Code {
 
     /// The `landed` event's data. The change it came from is known to the node that landed it;
     /// when that's another node, it's looked up.
+    /// A repo's landings after `after` in the land log (each a `landed` event's data, with its place
+    /// `seq`, `at` and `kind`), at most `limit`, read a page at a time from the one log every repo's
+    /// landings go to; `next` is past everything read, this repo's or not. MCP Events' `code.landed`.
+    pub fn landings_after(&self, repo_id: &str, after: i64, limit: usize) -> Result<(Vec<Value>, i64)> {
+        let (mut out, mut cursor) = (Vec::new(), after);
+        // At most ten pages a call: a quiet repo in a busy deployment answers fewer, `next` moving on.
+        for _ in 0..10 {
+            let page = self.store.land_log(cursor, LAND_PAGE)?;
+            let full = page.len() >= LAND_PAGE;
+            for (seq, l) in page {
+                if out.len() >= limit {
+                    return Ok((out, cursor));
+                }
+                cursor = seq;
+                if l.repo == repo_id && !l.already {
+                    let mut data = self.landed_payload_data(&l)?;
+                    data["seq"] = json!(seq);
+                    data["at"] = json!(l.at_ms);
+                    data["kind"] = json!("landed");
+                    out.push(data);
+                }
+            }
+            if !full {
+                break;
+            }
+        }
+        Ok((out, cursor))
+    }
+
     fn landed_payload_data(&self, l: &code_store::Landed) -> Result<Value> {
         let mut data = self.landed_json(l);
         if data["change"].is_null()

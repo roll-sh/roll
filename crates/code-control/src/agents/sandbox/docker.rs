@@ -9,7 +9,7 @@
 //! The env (the machine token, the owner's provider keys) goes in through an env file only this
 //! user can read, removed once `docker run` returns: never on a command line.
 
-use super::{BackendError, BackendState, SandboxBackend, SandboxSpec, Tagged};
+use super::{BackendError, BackendState, EnvChange, SandboxBackend, SandboxSpec, Tagged};
 use async_trait::async_trait;
 use std::process::Stdio;
 use std::time::Duration;
@@ -302,15 +302,22 @@ impl SandboxBackend for Docker {
         docker(&["start", check_name(backend_id)?], TIMEOUT).await.map(drop).map_err(|e| if missing(&e) { BackendError::Permanent(e) } else { BackendError::Transient(e) })
     }
 
-    /// A new container in its place from the old one's env less `without`, on the same home volume.
-    /// The old one is set aside first and put back if the new one doesn't run.
-    async fn start_without(&self, backend_id: &str, spec: &SandboxSpec, without: &[String]) -> Result<bool, BackendError> {
+    /// Its container as it is when `change` changes nothing; else a new container in its place
+    /// from the old one's env with `change` made, on the same home volume. The old one is set aside
+    /// first and put back if the new one doesn't run.
+    async fn start_with(&self, backend_id: &str, spec: &SandboxSpec, change: &EnvChange) -> Result<bool, BackendError> {
         let name = check_name(backend_id)?;
         let fail = |e: String| if missing(&e) { BackendError::Permanent(e) } else { BackendError::Transient(e) };
         let out = docker(&["inspect", "-f", "{{json .Config.Env}}", name], TIMEOUT).await.map_err(fail)?;
         let had: Vec<String> = serde_json::from_str(&out).map_err(|_| BackendError::Transient("docker's answer for the container's env isn't a list".into()))?;
         // The image's own variables come back with the image; giving them again changes nothing.
-        let env: std::collections::BTreeMap<String, String> = had.iter().filter_map(|l| l.split_once('=')).filter(|(k, _)| !without.iter().any(|d| d == k)).map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let had: std::collections::BTreeMap<String, String> = had.iter().filter_map(|l| l.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let mut env = had.clone();
+        change.apply(&mut env);
+        if env == had {
+            self.start(name).await?;
+            return Ok(true);
+        }
         let file = EnvFile::write(&env)?;
         let aside = format!("{name}-old");
         let _ = docker(&["rm", "-f", check_name(&aside)?], TIMEOUT).await;

@@ -714,7 +714,7 @@ async fn pricing_caps_allowances_and_byok() {
     // Cleared (hosted): the owner reads nulls, not a 404; outsiders still get the 404.
     let (s, v) = call(&t.a, "GET", "/v1/code/owners/acme/review-provider", None, Some(ROOT)).await;
     assert_eq!(s, StatusCode::OK);
-    assert_eq!(v, json!({ "owner": "acme", "provider": null, "base_url": null, "model": null, "secondary_model": null, "key_last4": null, "updated_at": null }));
+    assert_eq!(v, json!({ "owner": "acme", "provider": null, "base_url": null, "model": null, "secondary_model": null, "key_last4": null, "key_ref": null, "updated_at": null }));
     let (s, _) = call(&t.a, "GET", "/v1/code/owners/acme/review-provider", None, Some(&t.mallory)).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
     // standard_only: a deep review over the cap is downgraded.
@@ -906,6 +906,76 @@ async fn byok_openai_compatible_end_to_end() {
     assert_eq!(j["progress"]["groups_done"].as_u64(), Some(total));
 }
 
+/// roll secrets as far as an owner's `roll://` provider key goes: one reference, bound to whoever
+/// set it, readable while they may still reveal it (`gone`: they can't any more).
+#[derive(Default)]
+struct OwnerKeys {
+    gone: std::sync::atomic::AtomicBool,
+    reads: AtomicU32,
+}
+
+#[async_trait::async_trait]
+impl code_control::SecretEnv for OwnerKeys {
+    async fn for_repo(&self, _: &str, _: &str, _: &str) -> anyhow::Result<Vec<(String, String)>> {
+        anyhow::bail!("not in this test")
+    }
+    async fn for_owner(&self, _: &str, _: &str, _: &str, _: &str, _: code_control::Asker<'_>) -> anyhow::Result<code_control::Revealed> {
+        anyhow::bail!("not in this test")
+    }
+    async fn leaks(&self, _: &str, _: Vec<String>) -> anyhow::Result<Vec<(usize, String, String, String)>> {
+        Ok(Vec::new())
+    }
+    async fn bind_owner_key(&self, owner: &str, reference: &str, _: &code_control::SecretsAsker) -> code_control::Result<String> {
+        match (owner, reference) {
+            ("acme", "roll://production/ANTHROPIC_KEY") => Ok("usr_ada".into()),
+            _ => Err(code_control::Error::Forbidden(format!("usr_ada may not reveal {reference}"))),
+        }
+    }
+    async fn owner_key(&self, owner: &str, reference: &str, maker: &str) -> anyhow::Result<code_control::CredentialValue> {
+        assert_eq!((owner, reference, maker), ("acme", "roll://production/ANTHROPIC_KEY", "usr_ada"));
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        if self.gone.load(Ordering::SeqCst) {
+            anyhow::bail!("maker unreachable: usr_ada, who chose it, can no longer reveal production:/ or can no longer sign in");
+        }
+        Ok(code_control::CredentialValue("sk-ant-from-roll-secrets-4321".into()))
+    }
+}
+
+/// An owner's provider key can be a roll secrets reference: it's bound to whoever sets it, every
+/// review reads it from roll secrets as them (never stored here), and once they can't reveal it
+/// any more the review says why instead of calling the model.
+#[tokio::test]
+async fn an_owners_key_from_roll_secrets_reads_as_whoever_set_it() {
+    let t = setup(|_, _| {}).await;
+    let secrets = Arc::new(OwnerKeys::default());
+    t.a.code.set_secret_env(secrets.clone());
+    let provider = "/v1/code/owners/acme/review-provider";
+    for bad in [" roll://production/ANTHROPIC_KEY", "roll://production"] {
+        let (s, v) = call(&t.a, "PUT", provider, Some(json!({ "api_key": bad })), Some(ROOT)).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{bad}: {v}");
+    }
+    let (s, _) = call(&t.a, "PUT", provider, Some(json!({ "api_key": "roll://production/OTHER" })), Some(ROOT)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "roll secrets says who may choose it");
+    let set = ok(&t.a, "PUT", provider, Some(json!({ "api_key": "roll://production/ANTHROPIC_KEY" }))).await;
+    assert_eq!((set["key_ref"].as_str(), set["key_last4"].as_str()), (Some("roll://production/ANTHROPIC_KEY"), None), "{set}");
+    // The settings page names the provider without reading the key.
+    enable(&t, json!({ "mode": "standard" })).await;
+    assert_eq!(secrets.reads.load(Ordering::SeqCst), 0);
+
+    let c = change(&t, "from roll secrets", json!({ "src/parse.rs": { "content": "pub fn parse_header(input: &str) -> usize {\n    input.len() * 2\n}\n" } })).await;
+    let r = roll_reviews(&t, c["id"].as_str().unwrap(), 1).await;
+    assert_eq!(r[0]["ai"]["key"], "byok", "{}", r[0]);
+    assert_eq!(t.m.messages().last().unwrap().headers["x-api-key"], "sk-ant-from-roll-secrets-4321");
+
+    secrets.gone.store(true, Ordering::SeqCst);
+    let before = t.m.messages().len();
+    let c = change(&t, "maker gone", json!({ "src/parse.rs": { "content": "pub fn parse_header(input: &str) -> usize {\n    input.len() * 3\n}\n" } })).await;
+    let r = roll_reviews(&t, c["id"].as_str().unwrap(), 1).await;
+    let body = r[0]["body"].as_str().unwrap();
+    assert!(body.contains("couldn't review") && body.contains("can no longer reveal") && body.contains("roll://production/ANTHROPIC_KEY"), "{body}");
+    assert_eq!(t.m.messages().len(), before, "no model call without the key");
+}
+
 /// An owner's own provider can't point at this server's private network: a private `base_url`
 /// is refused when it's set, and one stored before (or under another setting) is refused when
 /// it would be used, with no request sent. Nothing about the endpoint leaks into the job.
@@ -941,8 +1011,7 @@ async fn byok_endpoints_on_private_addresses_are_refused() {
         base_url: Some(format!("{}/v1", t.m.url)),
         model: Some("m".into()),
         secondary_model: None,
-        key_sealed: sealer.seal(&owner.id, "sk-x-1234"),
-        key_last4: "1234".into(),
+        key: code_control::ai::store::OwnerKey::Sealed { sealed: sealer.seal(&owner.id, "sk-x-1234"), last4: "1234".into() },
         updated_at: 0,
     };
     t.a.code.db.set_owner_provider(&owner.id, Some(&row)).unwrap();
@@ -1862,8 +1931,7 @@ async fn config_and_key_errors_give_up_without_retrying() {
             base_url: None,
             model: None,
             secondary_model: None,
-            key_sealed: code_review::secret::Sealer::new(SECRET).unwrap().seal(&owner.id, "sk-ant-sealed-5555"),
-            key_last4: "5555".into(),
+            key: code_control::ai::store::OwnerKey::Sealed { sealed: code_review::secret::Sealer::new(SECRET).unwrap().seal(&owner.id, "sk-ant-sealed-5555"), last4: "5555".into() },
             updated_at: 0,
         };
         t.a.code.db.set_owner_provider(&owner.id, Some(&row)).unwrap();
