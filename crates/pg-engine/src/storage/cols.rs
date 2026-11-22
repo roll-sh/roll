@@ -521,13 +521,30 @@ fn walk_row(steps: &mut [Step<'_>], r: usize, bytes: &[u8], buf: Option<(u32, us
                 }
                 _ => null_or!(v, nulls, Default::default()),
             },
-            Step::Num { v, nulls } => match data.get(pos..pos + 3) {
-                Some(&[tag::NUMERIC, sc, n]) if (sc | n) < 0x80 && pos + 3 + n as usize <= data.len() => {
-                    let Some(x) = num_bytes(data, pos + 3, n as usize) else { return false };
-                    v[r] = (x, sc as u32);
+            // (Its tag, scale and length and the 8 bytes after them under one bounds check, which
+            // doesn't check `pos + 11` for overflow: up to 8 bytes are one word load,
+            // sign-extended. Checked apart, `data.get(pos..pos + 3)`, the value's end and the
+            // word's, the PGO build merged the checks into setcc pairs, +4% of q06's walk.)
+            Step::Num { v, nulls } => match data.get(pos..).and_then(|x| x.first_chunk::<11>()) {
+                Some(&[tag::NUMERIC, sc, n, ref w @ ..]) if (sc | n) < 0x80 && n <= 8 => {
+                    v[r] = match n {
+                        0 => (0, sc as u32),
+                        n => {
+                            let sh = 64 - 8 * n as u32;
+                            (((u64::from_le_bytes(*w) << sh) as i64 >> sh) as i128, sc as u32)
+                        }
+                    };
                     pos += 3 + n as usize;
                 }
-                _ => null_or!(v, nulls, Default::default()),
+                // (Near the row's end, or longer.)
+                _ => match data.get(pos..pos + 3) {
+                    Some(&[tag::NUMERIC, sc, n]) if (sc | n) < 0x80 && pos + 3 + n as usize <= data.len() => {
+                        let Some(x) = num_bytes(data, pos + 3, n as usize) else { return false };
+                        v[r] = (x, sc as u32);
+                        pos += 3 + n as usize;
+                    }
+                    _ => null_or!(v, nulls, Default::default()),
+                },
             },
             Step::Bytes { tag, v, nulls } => match (data.get(pos..pos + 2), buf) {
                 (Some(&[t, l]), Some((b, at))) if t == *tag && l < 0x80 && pos + 2 + l as usize <= data.len() => {
