@@ -3589,6 +3589,17 @@ impl Store {
         Ok(self.db.execute("UPDATE deployments SET status = ?, finished_at = COALESCE(finished_at, ?) WHERE id = ? AND status = ?", params![DeployStatus::Ready.as_str(), now, id, DeployStatus::Deploying.as_str()])? > 0)
     }
 
+    /// An environment's hours (`metrics_hourly`): requests, errors and p95, for those it has.
+    pub fn hours_of(&self, service: &str, env: &str, hours: &[i64]) -> Result<Vec<(i64, i64, f64)>> {
+        let mut out = Vec::new();
+        for h in hours {
+            if let Some(r) = self.db.query_row("SELECT requests, errors, p95_ms FROM metrics_hourly WHERE service = ? AND env = ? AND hour = ?", params![service, env, h], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, f64>(2)?))).optional()? {
+                out.push(r);
+            }
+        }
+        Ok(out)
+    }
+
     pub fn project_signing(&self, project: &str) -> Result<Option<(Vec<String>, bool)>> {
         Ok(self.db.query_row("SELECT keys, required FROM project_signing WHERE project = ?", [project], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))).optional()?.map(|(k, r)| (serde_json::from_str(&k).unwrap_or_default(), r != 0)))
     }

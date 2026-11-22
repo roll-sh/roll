@@ -1725,10 +1725,41 @@ async fn an_environment_with_its_own_data_gets_a_branch_of_each_database() {
     assert_eq!(v["DATABASE_URL"].as_str(), Some(url.as_str()), "shared");
     let name = url.rsplit_once("branch=").unwrap().1.to_string();
     // Deleted only once neither environment uses it.
+    // (Other tests branch too: only this branch's lines.)
+    let ours = || BRANCHED.lock().iter().filter(|l| l.ends_with(&name)).cloned().collect::<Vec<_>>();
     assert_eq!(call(&w.api, "DELETE", &format!("{base}/staging"), None).await.0, StatusCode::NO_CONTENT);
-    assert_eq!(*BRANCHED.lock(), [format!("branch main {name}")]);
+    assert_eq!(ours(), [format!("branch main {name}")]);
     assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{oid}/environments/staging"), None).await.0, StatusCode::NO_CONTENT);
-    assert_eq!(*BRANCHED.lock(), [format!("branch main {name}"), format!("unbranch {name}")]);
+    assert_eq!(ours(), [format!("branch main {name}"), format!("unbranch {name}")]);
+}
+
+/// In an environment with data of its own, roll secrets' links to a resource the service links
+/// itself (its branch's) are left out; links to anything else (a bucket it doesn't link) stay.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_branch_environment_keeps_roll_secrets_links_to_what_it_didnt_branch() {
+    struct Linked;
+    #[async_trait]
+    impl apps_control::integrations::SecretSource for Linked {
+        fn name(&self) -> &'static str {
+            "fake"
+        }
+        async fn resolve(&self, _: &str, _: &str, _: &str) -> anyhow::Result<Vec<apps_control::integrations::SecretVar>> {
+            let var = |name: &str, value: &str, kind: &str, r: &str| apps_control::integrations::SecretVar { binding: None, name: name.into(), value: value.into(), link: Some((kind.into(), r.into())), sensitive: false, plain: false };
+            Ok(vec![var("PG_URL", "postgres://app:pw@db.roll.test:5432/main", "postgres", "main"), var("BUCKET_URL", "s3://assets", "bucket", "assets")])
+        }
+        async fn may_reveal(&self, _: apps_control::integrations::Asker<'_>, _: &str, _: &str, _: &str, _: apps_control::integrations::Reveal<'_>) -> bool {
+            true
+        }
+    }
+    let w = world_full(|_| {}, false, |d| d.secrets = Arc::new(Linked)).await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
+    let base = format!("/v1/apps/services/{}/environments", svc["id"].as_str().unwrap());
+    call(&w.api, "PUT", &format!("/v1/apps/services/{}/links/postgres/main", svc["id"].as_str().unwrap()), Some(json!({}))).await;
+    assert_eq!(call(&w.api, "PUT", &format!("{base}/staging"), Some(json!({"data": "branch"}))).await.0, StatusCode::OK);
+    let (_, v) = call(&w.api, "GET", &format!("{base}/staging/variables/values"), None).await;
+    assert_eq!((v.get("PG_URL"), v["BUCKET_URL"].as_str()), (None, Some("s3://assets")), "{v}");
+    let (_, v) = call(&w.api, "GET", &format!("{base}/production/variables/values"), None).await;
+    assert!(v["PG_URL"].is_string(), "production's own: {v}");
 }
 
 /// Requests that pile up past an instance's concurrency start more instances, up to
@@ -2228,6 +2259,40 @@ async fn requests_are_access_lines_filtered_by_status() {
     assert_eq!(call(&w.api, "GET", &format!("{base}&by=any"), None).await.1.as_array().unwrap().len(), 1, "the app's own answers have no `by`");
     let (_, m) = call(&w.api, "GET", &format!("{env}/metrics?minutes=5"), None).await;
     assert_eq!(m["requests"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).sum::<f64>(), 3.0, "{m}");
+}
+
+/// Anomaly alerts: the last hour against the same hour of the week before (Vercel's anomaly
+/// alerts): traffic gone where there's usually plenty fires `alert.anomaly`, usual traffic
+/// resolves it; with no past to compare with, nothing fires.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn traffic_unusual_for_the_hour_is_an_anomaly() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80, "alerts": {"anomaly": true}})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let live = w.apps.live(&id, "production");
+    let events = |kind: &'static str| {
+        let api = w.api.clone();
+        async move { call(&api, "GET", "/v1/apps/events?after=0", None).await.1["events"].as_array().unwrap().iter().filter(|e| e["kind"] == kind).cloned().collect::<Vec<_>>() }
+    };
+    let minute = |m: i64, requests: i64| apps_control::store::MinuteRow { minute: m, requests, instances: 1, ..Default::default() };
+    w.apps.judge_alerts(&live).await;
+    assert!(events("alert.anomaly").await.is_empty(), "no past: nothing to compare with");
+    // This hour of the week had a thousand requests in each of the last four weeks.
+    let now = code_sql::now_ms() / 60_000;
+    for k in 1..=4 {
+        let hour = now / 60 - k * 168;
+        w.apps.store.put_minutes(&id, "production", &(0..10).map(|j| minute(hour * 60 + j, 100)).collect::<Vec<_>>()).unwrap();
+    }
+    // Past a week, minutes are hours (as the hourly pass rolls them up).
+    w.apps.store.prune_metrics(now - 7 * 24 * 60).unwrap();
+    w.apps.judge_alerts(&live).await;
+    let fired = events("alert.anomaly").await;
+    assert!(fired.len() == 1 && fired[0]["data"]["kind"] == "traffic" && fired[0]["data"]["usual"] == 1000.0, "{fired:?}");
+    // Usual traffic again: resolved.
+    let now = code_sql::now_ms() / 60_000;
+    w.apps.store.put_minutes(&id, "production", &(1..=10).map(|i| minute(now - i, 100)).collect::<Vec<_>>()).unwrap();
+    w.apps.judge_alerts(&live).await;
+    assert!(events("alert.resolved").await.iter().any(|e| e["data"]["alert"] == "alert.anomaly"));
 }
 
 /// Five minutes of 5xx answers past the alert's share make one `alert.errors` event; more of the
@@ -3502,6 +3567,13 @@ async fn a_shell_wakes_the_service_and_carries_the_terminal_both_ways() {
     let console = w.fake.instances(&id).into_iter().map(|(n, _, _)| n).find(|n| n.contains("console")).expect("its own container");
     assert_eq!(w.fake.spec(&console).map(|s| (s.memory_mb, s.port)), Some((1024, None)), "its size, no port");
     assert!(before.iter().all(|n| w.fake.instances(&id).iter().any(|(m, _, _)| m == n)), "the serving instances are untouched");
+    // A console on another kept deployment (one that won't come up): its image, not the live one's.
+    assert_eq!(call(&w.api, "POST", &base, Some(json!({"console": true, "deployment": "dep_nonesuchaaa"}))).await.0, StatusCode::NOT_FOUND);
+    let live = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await.1["active"]["id"].as_str().unwrap().to_string();
+    let (st, other) = call(&w.api, "POST", &base, Some(json!({"console": true, "deployment": live}))).await;
+    assert_eq!(st, StatusCode::CREATED, "{other}");
+    assert!(w.fake.instances(&id).iter().any(|(n, d, _)| n.contains("console") && *d == live));
+    call(&w.api, "DELETE", &format!("{base}/{}", other["id"].as_str().unwrap()), None).await;
     assert_eq!(call(&w.api, "DELETE", &format!("{base}/{sh}"), None).await.0, StatusCode::NO_CONTENT);
     let mut gone = false;
     for _ in 0..100 {
@@ -4267,7 +4339,7 @@ async fn a_failed_deploy_is_sent_to_the_projects_targets_signed_and_retried() {
     let (st, hook) = call(&w.api, "POST", &base, Some(json!({"url": format!("http://{ok_at}/hook")}))).await;
     assert_eq!(st, StatusCode::CREATED, "{hook}");
     let secret = hook["secret"].as_str().unwrap().to_string();
-    assert_eq!(hook["events"], json!(["check.down", "heartbeat.missed", "alert.slo", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "error.regressed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.cpu", "alert.metric", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]), "the default events");
+    assert_eq!(hook["events"], json!(["check.down", "heartbeat.missed", "alert.slo", "alert.anomaly", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "error.regressed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.cpu", "alert.metric", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]), "the default events");
     let (_, down) = call(&w.api, "POST", &base, Some(json!({"kind": "webhook", "url": format!("http://{bad_at}/x"), "events": ["deploy.failed"]}))).await;
     let (_, list) = call(&w.api, "GET", &base, None).await;
     assert!(!list.to_string().contains(&secret) && !list.to_string().contains("/hook"), "neither the secret nor the URL comes back: {list}");
@@ -5774,8 +5846,8 @@ async fn secret_values_are_revealed_only_as_roll_secrets_allows() {
                 n => format!("s3cret-{n}"),
             };
             Ok(vec![
-                apps_control::integrations::SecretVar { binding: None, name: "DB_PASSWORD".into(), value: pw, linked: false, sensitive: false, plain: false },
-                apps_control::integrations::SecretVar { binding: None, name: "SIGNING_KEY".into(), value: "only-for-runtimes".into(), linked: false, sensitive: true, plain: false },
+                apps_control::integrations::SecretVar { binding: None, name: "DB_PASSWORD".into(), value: pw, link: None, sensitive: false, plain: false },
+                apps_control::integrations::SecretVar { binding: None, name: "SIGNING_KEY".into(), value: "only-for-runtimes".into(), link: None, sensitive: true, plain: false },
             ])
         }
         async fn may_reveal(&self, who: apps_control::integrations::Asker<'_>, _: &str, _: &str, _: &str, _: apps_control::integrations::Reveal<'_>) -> bool {
@@ -6016,6 +6088,18 @@ async fn a_tunnel_reaches_a_private_services_port() {
     assert!(text.starts_with("HTTP/1.1 200") && text.contains(r#""path":"/through""#), "{text}");
     let (_, act) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/activity"), None).await;
     assert!(act.to_string().contains("audit.tunnel.opened"), "{act}");
+    // Another port of the app (a debugger's): reached inside its instance, whatever it publishes.
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{at}/v1/apps/services/{id}/environments/production/tunnel?port=9229")).await.unwrap();
+    ws.send(Message::Binary(b"debugger hello".to_vec().into())).await.unwrap();
+    let mut got = Vec::new();
+    while got.len() < 14 {
+        match tokio::time::timeout(Duration::from_secs(5), ws.next()).await {
+            Ok(Some(Ok(Message::Binary(b)))) => got.extend_from_slice(&b),
+            other => panic!("{other:?}"),
+        }
+    }
+    assert_eq!(got, b"debugger hello");
+    assert!(w.fake.dialed.lock().iter().any(|(_, p)| *p == 9229));
 }
 
 /// A rate limit lets each client make so many requests (a burst, then its rate) and tells the
@@ -7828,7 +7912,7 @@ async fn a_git_login_reads_its_token_from_roll_secrets() {
         }
         async fn resolve(&self, _: &str, env: &str, _: &str) -> anyhow::Result<Vec<apps_control::integrations::SecretVar>> {
             assert_eq!(env, "production");
-            Ok(vec![apps_control::integrations::SecretVar { binding: None, name: "GIT_TOKEN".into(), value: TOKEN.lock().clone(), linked: false, sensitive: true, plain: false }])
+            Ok(vec![apps_control::integrations::SecretVar { binding: None, name: "GIT_TOKEN".into(), value: TOKEN.lock().clone(), link: None, sensitive: true, plain: false }])
         }
         async fn bind_ref_runtime(&self, _: apps_control::integrations::Asker<'_>, _: &str, _: &str, reference: &str, runtime_env: &str) -> anyhow::Result<String> {
             assert_eq!(runtime_env, "production");
@@ -8665,7 +8749,7 @@ impl apps_control::integrations::SecretSource for FakeVault {
         "fake vault"
     }
     async fn resolve(&self, _project: &str, _env: &str, _service: &str) -> anyhow::Result<Vec<apps_control::integrations::SecretVar>> {
-        Ok(vec![apps_control::integrations::SecretVar { binding: None, name: "STRIPE_KEY".into(), value: "sk_live_real".into(), sensitive: true, linked: false, plain: false }])
+        Ok(vec![apps_control::integrations::SecretVar { binding: None, name: "STRIPE_KEY".into(), value: "sk_live_real".into(), sensitive: true, link: None, plain: false }])
     }
     /// As roll secrets does: each placeholder made is new random text (and a record), made only
     /// when asked to mint; otherwise a marker with its binding.
@@ -8679,7 +8763,7 @@ impl apps_control::integrations::SecretSource for FakeVault {
             }
             false => "rlph_(made at deploy)".to_string(),
         };
-        Ok(apps_control::integrations::ClosedSecrets { vars: vec![apps_control::integrations::SecretVar { binding: Some("api.stripe.com".into()), name: "STRIPE_KEY".into(), value, sensitive: false, linked: false, plain: false }], notice: None })
+        Ok(apps_control::integrations::ClosedSecrets { vars: vec![apps_control::integrations::SecretVar { binding: Some("api.stripe.com".into()), name: "STRIPE_KEY".into(), value, sensitive: false, link: None, plain: false }], notice: None })
     }
     async fn intercept(&self, project: &str, env: &str, _hosts: &[String]) -> anyhow::Result<Option<apps_control::integrations::Intercept>> {
         self.0.lock().push(format!("intercept {project}/{env}"));

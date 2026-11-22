@@ -347,6 +347,10 @@ pub enum AppsCmd {
         /// 3) and ` sum` after it; repeat for more, `none` clears them.
         #[arg(long, value_name = "RULE")]
         alert_metric: Vec<String>,
+        /// `on`: alert when traffic drops or errors or p95 rise against the same hour over the
+        /// last four weeks; `off`.
+        #[arg(long, value_name = "on|off")]
+        alert_anomaly: Option<String>,
         #[arg(long)]
         schedule: Option<String>,
         /// The zone a cron schedule's fields are in (IANA: `Europe/Budapest`).
@@ -668,9 +672,13 @@ pub enum AppsCmd {
     Proxy {
         #[command(flatten)]
         target: Target,
-        /// The port here (default: the service's own).
+        /// The port here (default: the service's own, or `--port`).
         #[arg(long)]
         local_port: Option<u16>,
+        /// Another port of the app than its own, reached inside its instance (a debugger's 9229,
+        /// JMX, pprof), as Fly's `fly proxy` and Heroku's `ps:forward`.
+        #[arg(long)]
+        port: Option<u16>,
     },
     /// A shell in a running instance (a web service asleep is woken and kept up while it's
     /// open); leave with `exit` or Ctrl-D.
@@ -713,6 +721,10 @@ pub enum AppsCmd {
         /// Tasks running at once (1–10; default ten, or fewer tasks).
         #[arg(long)]
         parallelism: Option<u32>,
+        /// With `-i`: a console in another kept deployment's image (one that won't come up, to see
+        /// why), as Fly's `fly console --image`.
+        #[arg(long, requires = "interactive")]
+        deployment: Option<String>,
         #[arg(trailing_var_arg = true, required_unless_present = "interactive", allow_hyphen_values = true)]
         command: Vec<String>,
     },
@@ -1608,10 +1620,13 @@ fn secret_env_file(name: &str) -> bool {
 }
 
 /// `…/tunnel` for each connection to `127.0.0.1:local`: its bytes copied both ways.
-async fn proxy(api: &Api, env: &str, what: &str, port: u16, local: u16) -> anyhow::Result<()> {
+async fn proxy(api: &Api, env: &str, what: &str, port: u16, local: u16, other: bool) -> anyhow::Result<()> {
     let l = tokio::net::TcpListener::bind(("127.0.0.1", local)).await.map_err(|e| anyhow::anyhow!("127.0.0.1:{local} is taken ({e}): pick another with --local-port"))?;
     eprintln!("127.0.0.1:{local} → {what}:{port} (Ctrl-C ends it)");
-    let (url, headers) = tunnel_to(api, env);
+    let (mut url, headers) = tunnel_to(api, env);
+    if other {
+        url.push_str(&format!("?port={port}"));
+    }
     tokio::select! {
         r = tunnels(url, headers, l) => r,
         _ = tokio::signal::ctrl_c() => Ok(()),
@@ -3152,7 +3167,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, alert_cpu, alert_metric, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, build_timeout, build_size, submodules, submodule_repos, lfs, otel, rollout, rollout_step, rollout_errors, rollout_manual, overlap, h2c, health_grpc, scale, public, drain, cpu_target, busy_cpu, memory_target, latency_target, oidc_audience, push, restart, restart_tries, affinity, tcp, udp, rollback_on_crash, rebuild_on_base, block_on } => {
+        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, alert_cpu, alert_metric, alert_anomaly, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, build_timeout, build_size, submodules, submodule_repos, lfs, otel, rollout, rollout_step, rollout_errors, rollout_manual, overlap, h2c, health_grpc, scale, public, drain, cpu_target, busy_cpu, memory_target, latency_target, oidc_audience, push, restart, restart_tries, affinity, tcp, udp, rollback_on_crash, rebuild_on_base, block_on } => {
             let svc = service(api, &target).await?;
             // The service's rollout with what was given replaced (the API takes it whole).
             let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() || rollout_manual.is_some() || overlap.is_some() {
@@ -3262,7 +3277,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 body.insert("build".into(), Value::Object(build));
             }
             // The service's alerts with what was given replaced (the API takes them whole).
-            let alerts = if alert_memory.is_some() || alert_errors.is_some() || alert_p95.is_some() || alert_log.is_some() || alert_log_count.is_some() || alert_cpu.is_some() || !alert_metric.is_empty() {
+            let alerts = if alert_memory.is_some() || alert_errors.is_some() || alert_p95.is_some() || alert_log.is_some() || alert_log_count.is_some() || alert_cpu.is_some() || !alert_metric.is_empty() || alert_anomaly.is_some() {
                 let mut a = svc["run"]["alerts"].as_object().cloned().unwrap_or_default();
                 if !alert_metric.is_empty() {
                     let rules = alert_metric.iter().filter(|r| *r != "none").map(|r| metric_alert(r)).collect::<anyhow::Result<Vec<_>>>()?;
@@ -3272,6 +3287,16 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                     if let Some(v) = v {
                         a.insert(k.into(), v);
                     }
+                }
+                match alert_anomaly.as_deref() {
+                    None => {}
+                    Some("on") => {
+                        a.insert("anomaly".into(), json!(true));
+                    }
+                    Some("off") => {
+                        a.remove("anomaly");
+                    }
+                    Some(o) => anyhow::bail!("--alert-anomaly is on or off: {o}"),
                 }
                 match alert_log.as_deref() {
                     None => {}
@@ -4044,14 +4069,17 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             let query = instance.map(|i| format!("&instance={}", enc(&i))).unwrap_or_default();
             return ssh(api, &env_path(&svc, &target.env), &query).await;
         }
-        AppsCmd::Proxy { target, local_port } => {
+        AppsCmd::Proxy { target, local_port, port: other } => {
             let svc = service(api, &target).await?;
-            let port = svc["run"]["port"].as_u64().unwrap_or(8080) as u16;
-            return proxy(api, &env_path(&svc, &target.env), &format!("{}/{}", s(&svc["name"]), target.env), port, local_port.unwrap_or(port)).await;
+            let port = other.unwrap_or(svc["run"]["port"].as_u64().unwrap_or(8080) as u16);
+            return proxy(api, &env_path(&svc, &target.env), &format!("{}/{}", s(&svc["name"]), target.env), port, local_port.unwrap_or(port), other.is_some()).await;
         }
-        AppsCmd::Run { target, interactive: true, cpu, memory, command, .. } => {
+        AppsCmd::Run { target, interactive: true, cpu, memory, command, deployment, .. } => {
             let svc = service(api, &target).await?;
             let mut query = "&console=true".to_string();
+            if let Some(d) = deployment {
+                query.push_str(&format!("&deployment={}", enc(&d)));
+            }
             if !command.is_empty() {
                 query.push_str(&format!("&command={}", enc(&shell_join(&command))));
             }

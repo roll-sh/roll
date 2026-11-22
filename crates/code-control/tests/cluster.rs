@@ -931,7 +931,8 @@ async fn search_ready(net: &Net, node: usize) {
 
 /// A file search across repos (`GET /v1/code/search?kinds=files`, roll MCP's `search`) through
 /// one node finds a match in every repo, each repo's part run on its owner from the owner's own
-/// index: no node builds an index for a repo it doesn't own, and nothing is skipped.
+/// index: no node builds an index for a repo it doesn't own, and nothing is skipped. With an owner
+/// killed, it still answers in time and every repo is found or said to be skipped.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn a_file_search_runs_each_repo_on_its_owner() {
     let net = net_with("files", 3, Arc::new(|c: &mut Config| c.review.index = true)).await;
@@ -963,6 +964,20 @@ async fn a_file_search_runs_each_repo_on_its_owner() {
             assert_eq!(index_file(n, id).exists(), i == o, "{id}'s index on node {i} (owner {o})");
         }
     }
+    // A killed owner (no goodbye): the search still answers within its budget, and every repo is
+    // in the results or in `skipped`, never left out.
+    let victim = net.owner(&ids[0]).unwrap();
+    let via = (0..3).find(|i| *i != victim).unwrap();
+    net.nodes[victim].kill();
+    let started = Instant::now();
+    let v = net.ok(via, "GET", ask, None).await;
+    assert!(started.elapsed() < Duration::from_secs(10), "answered in {:?}", started.elapsed());
+    let listed = |key: &str, repo: &str| v[key].as_array().unwrap().iter().any(|r| r["repo"] == repo);
+    for name in names {
+        let repo = format!("acme/{name}");
+        assert!(listed("results", &repo) || listed("skipped", &repo), "{repo} left out: {v}");
+    }
+    assert!(v["skipped"].as_array().unwrap().iter().all(|s| ["timeout", "unavailable", "indexing"].contains(&s["why"].as_str().unwrap())), "{v}");
 }
 
 /// A node that loses a repo removes its code index; deleting a repo (through a node that

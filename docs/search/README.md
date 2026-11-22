@@ -1400,8 +1400,8 @@ deterministic (#396).
    with no `inference_id` fails, because its default (`.elser-2-elasticsearch`) answers as a
    cluster without ML nodes, the first error anyone copying Elasticsearch's docs hits; and no
    screen is named Discover.
-13. **A web crawler for site search** (design in [crawler.md](crawler.md), ready to build now that
-   #318's runner is on main; Elastic Open Crawler,
+13. **A web crawler for site search** (phase 1 in progress on `feat/search-crawler`: the
+   `roll_web_crawler` connector on #318's runner, in its gate; design in [crawler.md](crawler.md); Elastic Open Crawler,
    Algolia Crawler, DocSearch, Meilisearch's docs-scraper): connectors (#318) sync Postgres and S3;
    getting a website in is the customer's job. A native connector roll runs (`roll_web_crawler`,
    on #318's runner) taking Open Crawler's config, fields and ids, fetching through
@@ -1626,19 +1626,17 @@ deterministic (#396).
    it, a prefix applies); on a fleet `Control::call` sends search's own in-process requests to the
    cluster's owner (`cluster::to_owner`). Next: an inference endpoint's key from a roll secret (#134, landed), credentials as `roll://ENV/KEY` references read through roll
    secrets' `resolve_for` (#329) for snapshot repositories and connectors, rebuilt when the
-   secret's digest moves, roll.toml declaring a search link (apps' side), and checking search's routes through
-   MCP's search mode (#80) end to end. A flavor switch doesn't carry keys across (an API key isn't
+   secret's digest moves, and checking search's routes through MCP's search mode (#80) end to end.
+   roll.toml declares a search link (`[databases]`, `kind = "search"`), but its entry takes no
+   `indices` or `access` yet (the CLI's `roll apps link search --index --access` does). A flavor switch doesn't carry keys across (an API key isn't
    an OpenSearch user): links made before one are reissued. The fleet test with every product on
    passed (2026-11-13: search 8,077 writes acknowledged and verified, no errors, longest stall
    1.2 s in the rolling restart).
-   Joins the 2026-11-21 category review found, not yet built: an apps link can't be narrowed to
-   index patterns or read-only (`[databases] kind = "search"` takes neither; the keys route does);
-   apps' log drains can't yet land in a roll search data stream (apps is building a drain that writes
-   ECS documents through `_bulk` with a key limited to `create_doc` on its stream: no OTLP needed); previews
-   put a branch's superuser login in `ELASTICSEARCH_URL` beside the data key (fixed in #607: only the
-   data credential, no fallback, and old branches remade with the key revoked and the password
-   rotated first);
-   a cluster's admin password can't be kept as a project secret from roll's API or CLI; and only a
+   Joins the 2026-11-21 category review found: landed since, an apps link narrowed to indices and
+   `read` or `append` (#721, through secrets' `names` and `permission` link options), apps' log
+   drains into a roll search data stream (#735: ECS documents through `_bulk` with an `append` key
+   on `logs-roll.apps-*`), and previews giving a branch only its data credential (#607). Not yet
+   built: a cluster's admin password can't be kept as a project secret from roll's API or CLI; and only a
    unit test covers previews' search branch, and one MCP test search (no create → bulk → query
    flow with a person's scoped token). Project members (roll secrets' #501, on main since
    991d98225): search's API serves a signed-in person only the clusters they own (`SignedIn` is
@@ -1654,7 +1652,10 @@ deterministic (#396).
    load; the TTL is roll cloud's fleet-wide choice.
 28. **CI**: the merge gate runs `search-codec`'s lib tests (`rust (search)`, 54 s on PR #29 with
    main's cache: under the minute, no room for another crate). Test gaps a read-only analysis found on 2026-11-22
-   (main at d9aecc990), ranked; each test goes in `test:search`, not the merge gate:
+   (main at d9aecc990), ranked; each test goes in `test:search`, not the merge gate (in progress:
+   (2), (3), (4), (7) and (8) on `test/search-gaps-a`, (5), (6), (9), (10), (11) and the e2e
+   file on `test/search-gaps-b`, both in their gates; `persist.rs`'s memory-budget flake on
+   `fix/search-persist-membudget-flake`):
    (1) connectors refusing private addresses: every `connectors.rs` cluster sets
    `allow_private_hosts`, so deleting the check fails nothing (being added with the egress fix,
    `a_connector_never_reaches_a_private_address`); (2) a search link refusing and deleting a key
