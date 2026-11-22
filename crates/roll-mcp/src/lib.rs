@@ -766,6 +766,13 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
             }
             "ping" => rpc_result(id, json!({})),
             "events/list" if ctx.modern => rpc_result(id, events::list(ctx)),
+            "events/subscribe" | "events/unsubscribe" if ctx.modern => {
+                let r = if method == "events/subscribe" { events::subscribe(ctx, &params).await } else { events::unsubscribe(ctx, &params).await };
+                match r {
+                    Ok(r) => rpc_result(id, r),
+                    Err((code, message, data)) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message, "data": data } }),
+                }
+            }
             "events/poll" if ctx.modern => match events::poll(ctx, &params).await {
                 Ok(r) => rpc_result(id, r),
                 Err((code, message, data)) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message, "data": data } }),

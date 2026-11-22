@@ -75,12 +75,19 @@ fn payload_schema() -> Value {
     })
 }
 
+/// How this connection can have events: polled, and POSTed to a webhook where roll delivers them
+/// (a server with a sealing key) and the connection can be looked up later (a token or OAuth).
+fn delivery(ctx: &Ctx) -> Value {
+    let hooks = ctx.m.config.access.as_ref().is_some_and(|a| a.sinks.get().is_some()) && subscriber(ctx).is_ok();
+    if hooks { json!(["poll", "webhook"]) } else { json!(["poll"]) }
+}
+
 /// `events/list`: the types this connection may poll (its tool is listed for it).
 pub(crate) fn list(ctx: &Ctx) -> Value {
     let events: Vec<Value> = FEEDS
         .iter()
         .filter(|f| tool(f).is_some_and(|t| ctx.usable(t)))
-        .map(|f| json!({ "name": f.name, "description": f.description, "delivery": ["poll"], "inputSchema": input_schema(), "payloadSchema": payload_schema() }))
+        .map(|f| json!({ "name": f.name, "description": f.description, "delivery": delivery(ctx), "inputSchema": input_schema(), "payloadSchema": payload_schema() }))
         .collect();
     json!({ "events": events })
 }
@@ -211,6 +218,111 @@ pub(crate) async fn poll(ctx: &Arc<Ctx>, params: &Value) -> Result<Value, Refuse
         cursor = page["next"].as_i64().unwrap_or(cursor).max(cursor);
     }
     Ok(json!({ "events": events, "cursor": format!("{CURSOR}{cursor}"), "truncated": aged, "hasMore": more, "nextPollMs": POLL_MS }))
+}
+
+/// The connection a webhook subscription is for: a token's or an OAuth connection's grant (the
+/// SEP needs an authenticated principal; roll needs one it can look up as it is now, so never the
+/// operator's own or a person's session, which is made per request).
+fn subscriber(ctx: &Ctx) -> Result<(&roll_access::Access, String), Refused> {
+    let forbidden = |why: &str| (-32024, "Forbidden".to_string(), json!({ "reason": why }));
+    let access = ctx.m.config.access.as_deref().ok_or_else(|| (-32026, "Unsupported".to_string(), json!({ "feature": "deliveryMode", "value": "webhook" })))?;
+    match &ctx.principal {
+        crate::Principal::Grant(g) if matches!(g.kind, roll_auth::GrantKind::Token | roll_auth::GrantKind::Oauth) => Ok((access, g.id.to_string())),
+        _ => Err(forbidden("webhook subscriptions are a token's or an OAuth connection's: connect with one")),
+    }
+}
+
+/// The parts of a subscribe or unsubscribe every check needs: its feed, arguments and callback URL.
+fn keyed<'a>(ctx: &Ctx, params: &'a Value) -> Result<(&'static Feed, Value, &'a str), Refused> {
+    let name = params["name"].as_str().unwrap_or("");
+    let Some(f) = feed(name) else {
+        return Err((-32023, format!("no event {name:?}: events/list says which there are"), json!({ "kind": "event" })));
+    };
+    if !tool(f).is_some_and(|t| ctx.usable(t)) {
+        return Err((-32024, "Forbidden".into(), json!({ "reason": format!("this connection can't use {}", f.tool) })));
+    }
+    Filter::parse(&params["arguments"])?;
+    let args = if params["arguments"].is_null() { json!({}) } else { params["arguments"].clone() };
+    let url = params["delivery"]["url"].as_str().filter(|u| !u.is_empty() && u.len() <= 2048).ok_or_else(|| invalid("delivery.url is the callback's https URL"))?;
+    Ok((f, args, url))
+}
+
+/// `events/subscribe` (webhook mode): roll POSTs what happens to the callback, signed with the
+/// client's secret, until the subscription isn't refreshed. A callback proves once per connection
+/// that it wants deliveries (it echoes a signed challenge) before the subscription is kept.
+pub(crate) async fn subscribe(ctx: &Arc<Ctx>, params: &Value) -> Result<Value, Refused> {
+    let (access, grant) = subscriber(ctx)?;
+    let (f, args, url) = keyed(ctx, params)?;
+    match params["delivery"]["mode"].as_str() {
+        Some("webhook") => {}
+        Some(m) => return Err((-32026, "Unsupported".into(), json!({ "feature": "deliveryMode", "value": m }))),
+        None => return Err(invalid("delivery.mode is webhook")),
+    }
+    // https and a public host (the SEP's rule and roll's guard); a dev server may allow http.
+    access.event_url_ok(url).map_err(|e| invalid(format!("delivery.url: {e}")))?;
+    let secret = params["delivery"]["secret"].as_str().unwrap_or("");
+    if roll_access::event_subs::secret_key(secret).is_none() {
+        return Err(invalid("delivery.secret is whsec_ and the base64 of 24 to 64 random bytes"));
+    }
+    let ttl = match &params["ttlMs"] {
+        Value::Null => roll_access::event_subs::MAX_TTL_MS,
+        v => v.as_i64().filter(|n| *n > 0).ok_or_else(|| invalid("ttlMs is a number of milliseconds"))?,
+    };
+    let existing = access.event_sub(&grant, url, f.name, &args).map_err(internal)?;
+    // A new one starts where the client says, or now; a refresh keeps the cursor roll delivered to.
+    let (cursor, truncated) = match (&existing, &params["cursor"]) {
+        (Some(e), _) => (e.cursor.clone(), false),
+        (None, Value::String(c)) if c.strip_prefix(CURSOR).is_some_and(|n| n.parse::<i64>().is_ok_and(|n| n >= 0)) => (c.clone(), false),
+        (None, c) => {
+            let page = crate::read_route_as(ctx, f.latest, &format!("events/subscribe:{}", f.name), json!({ "name": f.name, "arguments": args })).await.map_err(|e| refused(f, e))?;
+            (format!("{CURSOR}{}", page["next"].as_i64().unwrap_or(0)), c.is_string())
+        }
+    };
+    let id = roll_access::event_subs::sub_id(&grant, url, f.name, &args);
+    if !access.event_receiver_verified(&grant, url).map_err(internal)? {
+        let a = ctx.m.config.access.clone().expect("checked above");
+        if let Err(reason) = a.verify_event_receiver(&grant, url, secret, &id).await {
+            if reason == "rate" {
+                return Err((-32025, "ResourceExhausted".into(), json!({ "limit": "verifications" })));
+            }
+            return Err((-32027, "CallbackEndpointError".into(), json!({ "reason": reason })));
+        }
+    }
+    let new = roll_access::event_subs::NewEventSub { grant_id: &grant, name: f.name, arguments: &args, url, secret, cursor: &cursor, lockdown: ctx.lockdown, ttl_ms: ttl };
+    let sub = access.put_event_sub(&new).map_err(|e| match e {
+        roll_access::Error::TooMany(m) => (-32025, m, json!({ "limit": "subscriptions", "max": roll_access::event_subs::PER_GRANT })),
+        e => internal(e),
+    })?;
+    access.audit_event_sub(&grant, "subscribe", f.name, url, if existing.is_some() { "refresh" } else { "allow" });
+    let mut out = json!({ "id": sub.id, "refreshBefore": iso8601(sub.expires_at), "cursor": sub.cursor, "truncated": truncated });
+    if existing.is_some() {
+        out["deliveryStatus"] = json!({
+            "active": sub.last_error.is_none(),
+            "lastDeliveryAt": sub.last_delivery_at.map(iso8601),
+            "lastError": sub.last_error,
+            "failedSince": sub.failed_since.map(iso8601),
+        });
+    }
+    Ok(out)
+}
+
+/// `events/unsubscribe`: this connection's subscription with that key ends now.
+pub(crate) async fn unsubscribe(ctx: &Arc<Ctx>, params: &Value) -> Result<Value, Refused> {
+    let (access, grant) = subscriber(ctx)?;
+    let name = params["name"].as_str().unwrap_or("");
+    let f = feed(name).ok_or_else(|| (-32023, format!("no event {name:?}"), json!({ "kind": "event" })))?;
+    let args = if params["arguments"].is_null() { json!({}) } else { params["arguments"].clone() };
+    let url = params["delivery"]["url"].as_str().ok_or_else(|| invalid("delivery.url names the subscription"))?;
+    if access.delete_event_sub(&grant, url, f.name, &args).map_err(internal)? {
+        access.audit_event_sub(&grant, "unsubscribe", f.name, url, "allow");
+        Ok(json!({}))
+    } else {
+        Err((-32023, "no such subscription of this connection's".into(), json!({ "kind": "subscription" })))
+    }
+}
+
+fn internal(e: roll_access::Error) -> Refused {
+    (-32603, e.to_string(), json!({}))
 }
 
 /// Unix milliseconds as ISO 8601 in UTC (`2026-11-22T09:30:00.123Z`).

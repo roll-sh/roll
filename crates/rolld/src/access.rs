@@ -255,6 +255,38 @@ impl roll_access::sinks::SinkTransport for SinkPost {
             if status.is_success() { Ok(()) } else { Err(format!("{host} answered {status}")) }
         })
     }
+
+    fn post_answer(&self, url: String, headers: Vec<(String, String)>, body: Vec<u8>) -> futures::future::BoxFuture<'static, Result<(u16, Vec<u8>), String>> {
+        let client = self.client.clone();
+        let check = self.check(&url);
+        Box::pin(async move {
+            check.map_err(|_| "connection_refused".to_string())?;
+            let mut req = client.post(&url).body(body);
+            for (k, v) in headers {
+                req = req.header(k, v);
+            }
+            // A category only (MCP Events' `lastError`): never the endpoint's words or the URL.
+            let category = |e: &reqwest::Error| {
+                if e.is_timeout() {
+                    "timeout"
+                } else if format!("{e:?}").to_ascii_lowercase().contains("certificate") || format!("{e:?}").to_ascii_lowercase().contains("tls") {
+                    "tls_error"
+                } else {
+                    "connection_refused"
+                }
+            };
+            let mut resp = req.send().await.map_err(|e| category(&e).to_string())?;
+            let status = resp.status().as_u16();
+            let mut answer = Vec::new();
+            while answer.len() < 4 << 10 {
+                match resp.chunk().await {
+                    Ok(Some(c)) => answer.extend_from_slice(&c[..c.len().min((4 << 10) - answer.len())]),
+                    _ => break,
+                }
+            }
+            Ok((status, answer))
+        })
+    }
 }
 
 /// Approvals in chat: roll code's chat ops post and edit the cards, and send presses back to
