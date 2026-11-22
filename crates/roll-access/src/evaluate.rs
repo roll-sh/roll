@@ -43,6 +43,10 @@ pub struct McpCall {
     /// Asked for nobody's sake (an argument's completions): what would ask a person is refused at
     /// once instead, so typing never opens an approval.
     pub quiet: bool,
+    /// roll's own work for the grant, nobody waiting on it (MCP Events' webhook deliveries, and the
+    /// read a subscribe makes to check them): what would ask a person is refused (`would_ask`), and
+    /// the policy's `agents_ask` holds it as it holds an agent's calls.
+    pub unattended: bool,
 }
 
 /// What a client calls itself, fit for a log line: one line, no control characters, at most 120
@@ -733,9 +737,9 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
     ctx.about = lent.as_ref().map(|(p, _)| *p);
     // An agent (a call through roll's MCP server) asks a person first for what the policy says
     // agents always ask about, whatever its token allows (a session is a person, never an agent).
-    // A quiet call (a completion, a webhook delivery reading for its grant) asks nobody: it's
-    // refused instead (`would_ask`), never let through.
-    if outcome == Outcome::Allow && !session && ctx.mcp.is_some() {
+    // roll's unattended work for the grant (a webhook delivery) is held too, and refused rather
+    // than asked; a quiet probe of roll's own (a completion, the credential guard's scan) isn't.
+    if outcome == Outcome::Allow && !session && ctx.mcp.as_ref().is_some_and(|m| !m.quiet || m.unattended) {
         let env = match &target {
             Target::One(r) => r.environment.clone(),
             _ => None,
@@ -1150,8 +1154,8 @@ struct Asked<'a> {
 /// Wait for a person: an approval sent with the request (`X-Roll-Approval`), or a new one.
 async fn ask(ctx: &Ctx, row: &Row, action: Action, resource: Option<String>, req: Asked<'_>) -> Result<crate::store::Approval, Box<Response>> {
     // A completion never asks a person, nor waits on (or uses up) an approval an agent's call opened.
-    if ctx.mcp.as_ref().is_some_and(|m| m.quiet) {
-        return Err(Box::new(deny(StatusCode::FORBIDDEN, "would_ask", "this would ask a person, and a completion never does".into(), json!({}))));
+    if ctx.mcp.as_ref().is_some_and(|m| m.quiet || m.unattended) {
+        return Err(Box::new(deny(StatusCode::FORBIDDEN, "would_ask", "this would ask a person, and roll's own work for a connection never does".into(), json!({}))));
     }
     let Asked { headers, path, body, request_hash, args, environment, scope_path, scope_index, product: about } = req;
     let access = &ctx.access;

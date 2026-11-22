@@ -302,12 +302,15 @@ impl Access {
         if !roll_auth::constant_eq(echoed.as_bytes(), challenge.as_bytes()) {
             return Err("challenge_failed".into());
         }
-        let (g, u, now) = (grant_id.to_string(), url.to_string(), code_sql::now_ms());
-        self.store
-            .db
-            .write(|c| Ok::<_, Error>(c.execute("INSERT INTO mcp_event_receivers (grant_id, url, verified_at) VALUES (?, ?, ?) ON CONFLICT (grant_id, url) DO UPDATE SET verified_at = excluded.verified_at", params![g, u, now])?))
-            .map_err(|_| "connection_refused".to_string())?;
-        Ok(())
+        let (a, g, u, now) = (self.clone(), grant_id.to_string(), url.to_string(), code_sql::now_ms());
+        let kept = tokio::task::spawn_blocking(move || {
+            a.store.db.write(|c| Ok::<_, Error>(c.execute("INSERT INTO mcp_event_receivers (grant_id, url, verified_at) VALUES (?, ?, ?) ON CONFLICT (grant_id, url) DO UPDATE SET verified_at = excluded.verified_at", params![g, u, now])?))
+        })
+        .await;
+        match kept {
+            Ok(Ok(_)) => Ok(()),
+            _ => Err("connection_refused".to_string()),
+        }
     }
 }
 
@@ -366,13 +369,16 @@ impl Access {
     /// A claimed subscription's round: where it got to, and whether a delivery failed (`error`, a
     /// category). A success clears the failure; one failing a day is dropped. Written only while
     /// this round still holds the claim (a slower node's round never moves a cursor back).
-    pub fn event_sub_done(&self, c: &Claimed, cursor: &str, delivered: bool, error: Option<&str>) -> Result<()> {
+    /// `more`: the round stopped with events still waiting (a full page, its share used): it's due
+    /// again at once, so a backlog catches up.
+    pub fn event_sub_done(&self, c: &Claimed, cursor: &str, delivered: bool, error: Option<&str>, more: bool) -> Result<()> {
         let (id, claim, now) = (&c.sub.id, c.claim, code_sql::now_ms());
+        let next = if more { now } else { now + READ_EVERY_MS };
         self.store.db.write(|c| {
             match error {
                 None => c.execute(
                     "UPDATE mcp_event_subs SET cursor = ?, running_until = 0, next_at = ?, last_error = NULL, failed_since = NULL, last_delivery_at = CASE WHEN ? THEN ? ELSE last_delivery_at END WHERE id = ? AND running_until = ?",
-                    params![cursor, now + READ_EVERY_MS, delivered, now, id, claim],
+                    params![cursor, next, delivered, now, id, claim],
                 )?,
                 Some(e) => {
                     c.execute("DELETE FROM mcp_event_subs WHERE id = ? AND running_until = ? AND failed_since IS NOT NULL AND failed_since < ?", params![id, claim, now - GIVE_UP_MS])?;

@@ -281,7 +281,7 @@ impl Daemon {
     /// [`Daemon::via_mcp`] with the answer's body.
     async fn via_mcp_body(&self, token: &str, method: Method, path: &str) -> (StatusCode, Value) {
         let mut req = Request::builder().method(method).uri(path).header("authorization", format!("Bearer {token}")).body(Body::empty()).unwrap();
-        req.extensions_mut().insert(roll_access::evaluate::McpCall { tool: "test_tool".into(), args: Arc::new(json!({})), ip: None, elicits: false, client: None, quiet: false });
+        req.extensions_mut().insert(roll_access::evaluate::McpCall { tool: "test_tool".into(), args: Arc::new(json!({})), ip: None, elicits: false, client: None, quiet: false, unattended: false });
         let resp = self.router.clone().oneshot(req).await.unwrap();
         let status = resp.status();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
@@ -291,7 +291,7 @@ impl Daemon {
     /// A request roll's MCP server makes for a tool call (its `McpCall` extension), with `token`.
     async fn via_mcp(&self, token: &str, method: Method, path: &str) -> StatusCode {
         let mut req = Request::builder().method(method).uri(path).header("authorization", format!("Bearer {token}")).body(Body::empty()).unwrap();
-        req.extensions_mut().insert(roll_access::evaluate::McpCall { tool: "test_tool".into(), args: Arc::new(json!({})), ip: None, elicits: false, client: None, quiet: false });
+        req.extensions_mut().insert(roll_access::evaluate::McpCall { tool: "test_tool".into(), args: Arc::new(json!({})), ip: None, elicits: false, client: None, quiet: false, unattended: false });
         self.router.clone().oneshot(req).await.unwrap().status()
     }
 

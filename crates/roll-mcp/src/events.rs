@@ -182,11 +182,11 @@ pub(crate) async fn poll(ctx: &Arc<Ctx>, params: &Value) -> Result<Value, Refuse
     // version's, made up): a fresh one, and a possible gap.
     let truncated = after == Some(-1);
     let Some(after) = after.filter(|n| *n >= 0) else {
-        let page = crate::read_route_as(ctx, f.latest, &what, audit).await.map_err(|e| refused(f, e))?;
+        let page = crate::read_route_as(ctx, f.latest, &what, audit, false).await.map_err(|e| refused(f, e))?;
         let next = page["next"].as_i64().unwrap_or(0);
         return Ok(json!({ "events": [], "cursor": format!("{CURSOR}{next}"), "truncated": truncated, "hasMore": false, "nextPollMs": POLL_MS }));
     };
-    let page = crate::read_route_as(ctx, &format!("{}{after}", f.after), &what, audit).await.map_err(|e| refused(f, e))?;
+    let page = crate::read_route_as(ctx, &format!("{}{after}", f.after), &what, audit, false).await.map_err(|e| refused(f, e))?;
     let read = page["events"].as_array().cloned().unwrap_or_default();
     let outside = tool(f).map_or(&[][..], |t| t.outside);
     let (mut events, mut cursor, mut aged) = (Vec::new(), after, false);
@@ -241,7 +241,7 @@ async fn blocking<T: Send + 'static>(access: &Arc<roll_access::Access>, f: impl 
         Ok(Err(roll_access::Error::BadRequest(why))) => Err(invalid(why)),
         Ok(Err(roll_access::Error::TooMany(why))) => Err((-32025, why, json!({ "limit": "subscriptions", "max": roll_access::event_subs::PER_GRANT }))),
         Ok(Err(e)) => Err(internal(e)),
-        Err(e) => Err((-32603, e.to_string(), json!({}))),
+        Err(e) => Err(internal(e)),
     }
 }
 
@@ -285,7 +285,7 @@ pub(crate) async fn subscribe(ctx: &Arc<Ctx>, params: &Value) -> Result<Value, R
     // Its grant may have them (not one held to some addresses), and the feed answers it now.
     let g = grant.clone();
     blocking(&access, move |a| a.event_subscriber_ok(&g)).await?;
-    let probe = crate::read_route_as(ctx, f.latest, &format!("events/subscribe:{}", f.name), json!({ "name": f.name, "arguments": args })).await.map_err(|e| refused(f, e))?;
+    let probe = crate::read_route_as(ctx, f.latest, &format!("events/subscribe:{}", f.name), json!({ "name": f.name, "arguments": args }), true).await.map_err(|e| refused(f, e))?;
     let (g, u, n, a2) = (grant.clone(), url.to_string(), f.name, args.clone());
     let existing = blocking(&access, move |a| a.event_sub(&g, &u, n, &a2)).await?;
     // A new one starts where the client says, or now; a refresh keeps the cursor roll delivered to.
@@ -362,9 +362,11 @@ const AT_ONCE: usize = 8;
 /// One subscription's time in a round: past it, what's delivered so far is kept and the rest waits.
 const BUDGET: std::time::Duration = std::time::Duration::from_secs(40);
 
-/// What a delivery round did: events delivered, deliveries that failed, subscriptions ended.
+/// What a delivery round did: subscriptions claimed, events delivered, deliveries that failed,
+/// subscriptions ended.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Delivered {
+    pub claimed: usize,
     pub delivered: usize,
     pub failed: usize,
     pub ended: usize,
@@ -382,8 +384,10 @@ pub async fn deliver(api: axum::Router, access: Arc<roll_access::Access>, produc
     let names: Vec<&'static str> = FEEDS.iter().filter(|f| tool(f).is_some_and(|t| products.iter().any(|p| p == t.product))).map(|f| f.name).collect();
     let a = access.clone();
     let Ok(Ok(claimed)) = tokio::task::spawn_blocking(move || a.claim_event_subs(CLAIM_MAX, &names)).await else { return Delivered::default() };
-    let rounds = futures::stream::iter(claimed.into_iter().map(|c| one(api.clone(), access.clone(), c))).buffer_unordered(AT_ONCE).collect::<Vec<Delivered>>().await;
-    rounds.into_iter().fold(Delivered::default(), |t, d| Delivered { delivered: t.delivered + d.delivered, failed: t.failed + d.failed, ended: t.ended + d.ended })
+    let n = claimed.len();
+    // Each in a task of its own: a handler that panics ends that subscription's round, not the loop.
+    let rounds = futures::stream::iter(claimed.into_iter().map(|c| tokio::spawn(one(api.clone(), access.clone(), c)))).buffer_unordered(AT_ONCE).collect::<Vec<_>>().await;
+    rounds.into_iter().flatten().fold(Delivered { claimed: n, ..Default::default() }, |t, d| Delivered { claimed: t.claimed, delivered: t.delivered + d.delivered, failed: t.failed + d.failed, ended: t.ended + d.ended })
 }
 
 /// A round's write about its subscription, off the async threads.
@@ -414,7 +418,7 @@ async fn one(api: axum::Router, access: Arc<roll_access::Access>, c: roll_access
     let mut req = axum::http::Request::builder().method("GET").uri(format!("{}{after}", f.after)).body(axum::body::Body::empty()).expect("a feed route is a URI");
     req.extensions_mut().insert(roll_auth::ActAs(sub.grant_id.as_str().into()));
     let label: Arc<str> = format!("events/deliver:{}", f.name).into();
-    req.extensions_mut().insert(roll_access::evaluate::McpCall { tool: label, args: Arc::new(json!({ "name": f.name, "arguments": sub.arguments })), ip: None, elicits: false, client: None, quiet: true });
+    req.extensions_mut().insert(roll_access::evaluate::McpCall { tool: label, args: Arc::new(json!({ "name": f.name, "arguments": sub.arguments })), ip: None, elicits: false, client: None, quiet: true, unattended: true });
     let resp = match tower::ServiceExt::oneshot(api, req).await {
         Ok(r) => r,
         Err(e) => match e {},
@@ -438,7 +442,8 @@ async fn one(api: axum::Router, access: Arc<roll_access::Access>, c: roll_access
     let filter = Filter::parse(&sub.arguments).unwrap_or(Filter { kinds: Vec::new(), service: None, environment: None });
     let outside = tool(f).map_or(&[][..], |t| t.outside);
     // Lockdown as the subscription asked, or as the policy holds every connection now.
-    let lockdown = sub.lockdown || access.policy_now().mcp_lockdown;
+    let a = access.clone();
+    let lockdown = sub.lockdown || tokio::task::spawn_blocking(move || a.policy_now().mcp_lockdown).await.unwrap_or(true);
     let read = page["events"].as_array().cloned().unwrap_or_default();
     let (mut cursor, mut sent, mut error, mut gone, mut cut) = (after, 0, None, false, false);
     let full = read.len() >= PAGE;
@@ -491,7 +496,8 @@ async fn one(api: axum::Router, access: Arc<roll_access::Access>, c: roll_access
     }
     out.failed = usize::from(error.is_some());
     let at = format!("{CURSOR}{cursor}");
-    write(Box::new(move |a| a.event_sub_done(&c, &at, sent > 0, error.as_deref()))).await;
+    let more = error.is_none() && (full || cut);
+    write(Box::new(move |a| a.event_sub_done(&c, &at, sent > 0, error.as_deref(), more))).await;
     out
 }
 
@@ -514,16 +520,26 @@ pub fn spawn_deliveries(api: axum::Router, access: Arc<roll_access::Access>, pro
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tick.tick().await;
-            let d = deliver(api.clone(), access.clone(), &products).await;
-            if d.failed > 0 {
-                tracing::info!(delivered = d.delivered, failed = d.failed, ended = d.ended, "MCP event webhooks");
+            // Claims again while every claim found more due, for up to a minute: a busy node keeps
+            // up instead of waiting a tick per 16.
+            let started = std::time::Instant::now();
+            loop {
+                let d = deliver(api.clone(), access.clone(), &products).await;
+                if d.failed > 0 {
+                    tracing::info!(delivered = d.delivered, failed = d.failed, ended = d.ended, "MCP event webhooks");
+                }
+                if d.claimed < CLAIM_MAX as usize || started.elapsed() > std::time::Duration::from_secs(60) {
+                    break;
+                }
             }
         }
     });
 }
 
-fn internal(e: roll_access::Error) -> Refused {
-    (-32603, e.to_string(), json!({}))
+/// An error of roll's own: the client hears that much, the log the rest.
+fn internal(e: impl std::fmt::Display) -> Refused {
+    tracing::warn!(error = %e, "MCP events");
+    (-32603, "internal error".into(), json!({}))
 }
 
 /// Unix milliseconds as ISO 8601 in UTC (`2026-11-22T09:30:00.123Z`).

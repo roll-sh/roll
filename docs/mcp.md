@@ -175,20 +175,22 @@ connection held to some addresses, since its deliveries go elsewhere) names a ca
 public host, through roll-net's guard with no redirects, on a transport of its own:
 `ROLL_MCP_EVENTS_ALLOW_PRIVATE` is for local development, apart from audit sinks' switch) and the
 client's `whsec_` secret (24-64 bytes; sealed to the subscription, never shown again). Subscribing
-reads the feed once as the agent, so what would refuse or ask a person (the token's rules, the
-policy's `agents_ask`) refuses there, before anything is kept. Then the callback proves it wants that
+reads the feed once as the agent, unattended, so what would refuse or ask a person (the token's
+rules, the policy's `agents_ask`) refuses there, before anything is kept, and nobody is asked. Then the callback proves it wants that
 connection's deliveries: a signed `{"type":"verification","challenge"}` it echoes in a 2xx answer,
 good for a day per connection and URL, at most 5 a connection a minute on a node, each refusal in
 the audit log (else `-32027 CallbackEndpointError` with a category, never what the endpoint said). A subscription is
 keyed by its connection, URL, event and arguments (canonical JSON), so subscribing again refreshes
 it (the same `sub_…` id, its cursor kept, `deliveryStatus` answered); it lives at most an hour
 unless refreshed, 20 a connection. Every 15 seconds each node claims up to 16 due subscriptions to
-events whose products it runs (one node delivers each; only the claim's holder writes back, so a
-slow round never moves a cursor back), 8 at a time, 40 seconds each, and reads each one's feed once
-a minute through the gated router as its grant (`roll_auth::ActAs`: an in-process request, never
+events whose products it runs, again while each claim finds 16 (for up to a minute), one node
+delivering each (only the claim's holder writes back, so a slow round never moves a cursor back),
+8 at a time in tasks of their own, 40 seconds each, and reads each one's feed once a minute (at
+once again while a backlog waits) through the gated router as its grant (`roll_auth::ActAs`: an in-process request, never
 one off the network, that the evaluator resolves by the grant's id with every check its token would
 get, narrowed to reading as a read-only secret's grant is, audited as `events/deliver:<name>`, and
-quiet: what would ask a person, the policy's `agents_ask` included, is refused, never let through; a
+unattended: what would ask a person, the policy's `agents_ask` included, is refused, never let
+through (roll's quiet probes, a completion or the credential guard's scan, aren't held by it); a
 read for it isn't the token's use, so a subscription never keeps a token from idling). Lockdown is
 the subscription's or the policy's now. What its
 filter keeps is POSTed in order, one event a request, signed as Standard Webhooks (`webhook-id`
@@ -1218,7 +1220,11 @@ waits on a sibling PR reaching main is last.
    Next in this item: more feeds as their products have a log after a cursor (roll code's durable
    land log, `Store::land_log`, has no route yet; previews becoming ready; approvals decided,
    roll-access's own; secrets' leaks), and a well-known receiver document
-   (`/.well-known/mcp-webhook-receiver.json`) in place of the challenge.
+   (`/.well-known/mcp-webhook-receiver.json`) in place of the challenge. From the review: a feed
+   whose route runs on its owner node needs `ActAs` carried across the forward (today's isn't
+   forwarded); claims use each node's clock (a node more than 2 minutes ahead can deliver beside
+   another; the fenced cursor and a stable `webhook-id` keep it to duplicates); fairness is 20
+   subscriptions a connection, not a person or owner, and the verification limit is per node.
 2. **Decision for the user: list roll's server in the MCP Registry.** GitHub Copilot's "Registry
    only" policy blocks servers missing from the configured registry. Listing needs the `sh.roll`
    namespace proved by DNS or HTTP on roll.sh (`mcp-publisher login dns --domain roll.sh`) and
