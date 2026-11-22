@@ -865,7 +865,7 @@ impl Lookup {
     /// The join's rows for outer row `l` and its inner `rows` (`width` values a row), in
     /// order, to `f` (`own_last`: `Probe::emit`'s; the last row's values are moved into the
     /// joined row, not copied).
-    pub fn emit(&self, l: Row, rows: &mut [Value], own_last: bool, f: &mut dyn FnMut(Joined)) {
+    pub fn emit(&self, l: Row, rows: &mut [Value], own_last: bool, cp: Option<&super::pipe::Copies>, f: &mut dyn FnMut(Joined)) {
         match self.kind {
             JoinKind::Semi if !rows.is_empty() => f(Joined::Row(l)),
             JoinKind::Anti if rows.is_empty() => f(Joined::Row(l)),
@@ -889,7 +889,7 @@ impl Lookup {
                 for r in rest.chunks_exact(self.width) {
                     f(Joined::Pair { l: &l, r: super::pipe::Inner::plain(r), keep });
                 }
-                f(Joined::Row(super::pipe::joined_from_taken(l, last, keep)));
+                f(Joined::Row(super::pipe::joined_from_taken_by(cp, l, last, keep)));
             }
         }
     }
@@ -977,11 +977,20 @@ fn entry_spans(
         ekeys.extend_from_slice(k);
         espans.push((at, ekeys.len() as u32));
     };
-    let end = prefix_end(start);
+    // (The range's end in the worker's buffer: none made a key.)
+    let mut end = std::mem::take(&mut sc.end);
+    prefix_end_into(start, &mut end);
+    let r = entry_spans_to(store, ts, unique, start, &end, sc, &mut push);
+    sc.end = end;
+    r
+}
+
+/// `entry_spans` of the range [start, end), each row key to `push`.
+fn entry_spans_to(store: &Arc<Store>, ts: u64, unique: bool, start: &[u8], end: &[u8], sc: &mut LookupScratch, push: &mut dyn FnMut(&[u8])) -> Option<bool> {
     if unique {
         use crate::storage::point::First;
         let r = sc.reader.get_or_insert_with(|| store.point_reader(ts, false));
-        match store.first_with(r, start, &end, false).ok()? {
+        match store.first_with(r, start, end, false).ok()? {
             First::Row(_, v) => {
                 push(&v);
                 return Some(true);
@@ -990,11 +999,11 @@ fn entry_spans(
             First::Unknown => {}
         }
     }
-    if !sc.entries.as_mut().is_some_and(|s| s.reseek(start, &end, ts)) {
-        sc.entries = Some(store.scan(start, &end, ts));
+    if !sc.entries.as_mut().is_some_and(|s| s.reseek(start, end, ts)) {
+        sc.entries = Some(store.scan(start, end, ts));
     }
     let it = sc.entries.as_mut().expect("made above");
-    while let Some(r) = it.next_value(&mut push) {
+    while let Some(r) = it.next_value(&mut *push) {
         r.ok()?;
     }
     Some(false)

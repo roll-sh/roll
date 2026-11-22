@@ -70,8 +70,8 @@ pub struct SumNum {
 /// `acc` (at scale `s`) plus `v` (at scale `vs`), at the larger scale; None: overflow.
 fn add_small(acc: i128, s: u32, v: i64, vs: u32) -> Option<(i128, u32)> {
     let ns = s.max(vs);
-    let a = acc.checked_mul(10i128.checked_pow(ns - s)?)?;
-    let b = (v as i128).checked_mul(10i128.checked_pow(ns - vs)?)?;
+    let a = super::kernel::scale_up(acc, ns - s)?;
+    let b = super::kernel::scale_up(v as i128, ns - vs)?;
     Some((a.checked_add(b)?, ns))
 }
 
@@ -125,11 +125,7 @@ impl SumNum {
             None => self.small = Some((v, vs)),
             Some((acc, s)) => {
                 let ns = s.max(vs);
-                let r = (|| {
-                    let a = acc.checked_mul(10i128.checked_pow(ns - s)?)?;
-                    let b = v.checked_mul(10i128.checked_pow(ns - vs)?)?;
-                    a.checked_add(b)
-                })();
+                let r = (|| super::kernel::scale_up(acc, ns - s)?.checked_add(super::kernel::scale_up(v, ns - vs)?))();
                 match r {
                     Some(r) => self.small = Some((r, ns)),
                     None => self.add_big(Numeric::from_parts(crate::types::decint::DecInt::from(v), vs)),
@@ -1009,11 +1005,7 @@ impl<'a> Partials<'a> {
                     } else {
                         let (acc, s) = (wide(w[0], w[1]), w[2] as u32);
                         let ns = s.max(sc);
-                        let r = (|| {
-                            let a = acc.checked_mul(10i128.checked_pow(ns - s)?)?;
-                            let b = x.checked_mul(10i128.checked_pow(ns - sc)?)?;
-                            a.checked_add(b)
-                        })();
+                        let r = (|| super::kernel::scale_up(acc, ns - s)?.checked_add(super::kernel::scale_up(x, ns - sc)?))();
                         match r {
                             Some(t) => (t, ns),
                             None => return false,
@@ -1590,11 +1582,7 @@ impl<'a> Partials<'a> {
                         } else {
                             let (acc, s) = (wide(w[0], w[1]), w[2] as u32);
                             let ns = s.max(sc);
-                            let r = (|| {
-                                let a = acc.checked_mul(10i128.checked_pow(ns - s)?)?;
-                                let b = x.checked_mul(10i128.checked_pow(ns - sc)?)?;
-                                a.checked_add(b)
-                            })();
+                            let r = (|| super::kernel::scale_up(acc, ns - s)?.checked_add(super::kernel::scale_up(x, ns - sc)?))();
                             match r {
                                 Some(t) => (t, ns),
                                 None => return false,

@@ -8,7 +8,7 @@
 //! fallback, `eval`, its error) still happens at that row. Kernels are pure, so evaluating
 //! one over a batch's rows before the next kernel changes nothing observable.
 
-use super::kernel::{K, NumOp};
+use super::kernel::{K, NumOp, num_op};
 use crate::sql::func::ops::PureFn;
 use crate::storage::cols::{Col, ColBatch, ColData};
 use crate::types::{DataType, Value};
@@ -213,26 +213,6 @@ impl Inst {
             }
         }
     }
-}
-
-/// `K::num`'s + − × of two exact numbers (None: past an i128, or past numeric's scale).
-#[inline]
-fn num_op(op: NumOp, x: i128, sx: u32, y: i128, sy: u32) -> Option<(i128, u32)> {
-    let pow = |n: u32| 10i128.checked_pow(n);
-    Some(match op {
-        NumOp::Add | NumOp::Sub => {
-            let s = sx.max(sy);
-            let (x, y) = if sx == sy { (x, y) } else { (x.checked_mul(pow(s - sx)?)?, y.checked_mul(pow(s - sy)?)?) };
-            (if op == NumOp::Add { x.checked_add(y)? } else { x.checked_sub(y)? }, s)
-        }
-        NumOp::Mul => {
-            let s = sx + sy;
-            if s as i64 > crate::types::numeric::DSCALE_MAX {
-                return None;
-            }
-            (x.checked_mul(y)?, s)
-        }
-    })
 }
 
 /// Table column `i` of the batch (None: not decoded).

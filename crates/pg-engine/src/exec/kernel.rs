@@ -135,6 +135,57 @@ fn int_value(r: i128, ret: &DataType) -> Value {
 
 /// A numeric (or integer) value as an exact unscaled i128 and its scale (None: another
 /// value, or one past an i128).
+/// 10^n for n <= 38 (10^39 is past an i128).
+const POW10: [i128; 39] = {
+    let mut t = [1i128; 39];
+    let mut i = 1;
+    while i < 39 {
+        t[i] = t[i - 1] * 10;
+        i += 1;
+    }
+    t
+};
+
+/// `x * y` exactly (None: past an i128): one widening multiply when both fit an i64 (their
+/// product can't leave an i128), else `checked_mul` (a call to the 128-bit overflow
+/// multiply).
+#[inline]
+pub(super) fn mul_exact(x: i128, y: i128) -> Option<i128> {
+    match (i64::try_from(x), i64::try_from(y)) {
+        (Ok(a), Ok(b)) => Some(a as i128 * b as i128),
+        _ => x.checked_mul(y),
+    }
+}
+
+/// `x * 10^n` exactly (None: past an i128), as `x.checked_mul(10i128.checked_pow(n)?)`.
+#[inline]
+pub(super) fn scale_up(x: i128, n: u32) -> Option<i128> {
+    match n {
+        0 => Some(x),
+        _ => mul_exact(x, *POW10.get(n as usize)?),
+    }
+}
+
+/// `K::num`'s + − × of two exact numbers at their scales (None: past an i128, or a product
+/// past numeric's scale).
+#[inline]
+pub(super) fn num_op(op: NumOp, x: i128, sx: u32, y: i128, sy: u32) -> Option<(i128, u32)> {
+    Some(match op {
+        NumOp::Add | NumOp::Sub => {
+            let s = sx.max(sy);
+            let (x, y) = (scale_up(x, s - sx)?, scale_up(y, s - sy)?);
+            (if op == NumOp::Add { x.checked_add(y)? } else { x.checked_sub(y)? }, s)
+        }
+        NumOp::Mul => {
+            let s = sx + sy;
+            if s as i64 > crate::types::numeric::DSCALE_MAX {
+                return None;
+            }
+            (mul_exact(x, y)?, s)
+        }
+    })
+}
+
 pub(super) fn small_num(v: &Value) -> Option<(i128, u32)> {
     match v {
         Value::Numeric(n) => match &**n {
@@ -887,21 +938,7 @@ impl K {
                 let (Some((x, sx)), Some((y, sy))) = (a, b) else {
                     return Some(None);
                 };
-                let pow = |n: u32| 10i128.checked_pow(n);
-                Some(Some(match op {
-                    NumOp::Add | NumOp::Sub => {
-                        let s = sx.max(sy);
-                        let (x, y) = (x.checked_mul(pow(s - sx)?)?, y.checked_mul(pow(s - sy)?)?);
-                        (if *op == NumOp::Add { x.checked_add(y)? } else { x.checked_sub(y)? }, s)
-                    }
-                    NumOp::Mul => {
-                        let s = sx + sy;
-                        if s as i64 > crate::types::numeric::DSCALE_MAX {
-                            return None;
-                        }
-                        (x.checked_mul(y)?, s)
-                    }
-                }))
+                Some(Some(num_op(*op, x, sx, y, sy)?))
             }
             _ => None,
         }

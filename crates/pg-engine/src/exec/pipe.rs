@@ -427,6 +427,132 @@ pub fn joined_from_taken(mut l: Row, r: &mut [Value], keep: Option<&[bool]>) -> 
     l
 }
 
+/// A stage's `keep` as lists, for the copies its joined rows make (`Copies::joined` and
+/// the rest): the outer row's columns it keeps, those it doesn't keep that may hold a value
+/// (an inner join's rows hold only the columns its `keep` keeps: NULL in the others), and
+/// the inner row's columns it keeps. A joined row of 40 to 50 columns of which a few are
+/// read was copied a test of `keep` and of the value per column, at every stage.
+pub struct Copies {
+    /// The outer rows' width the lists are for (another: the copy by `keep`).
+    nleft: usize,
+    lkeep: Box<[u32]>,
+    ldrop: Box<[u32]>,
+    rkeep: Box<[u32]>,
+}
+
+/// `n` NULLs appended to `out` (a store of the variant each: no clone).
+#[inline]
+fn nulls(out: &mut Row, n: usize) {
+    out.resize_with(out.len() + n, || Value::Null);
+}
+
+/// `v` into slot `at` of `out`, which holds a NULL (nothing to drop).
+#[inline]
+fn put(out: &mut [Value], at: usize, v: Value) {
+    std::mem::forget(std::mem::replace(&mut out[at], v));
+}
+
+impl Copies {
+    /// Each stage's lists (None: a stage without `keep`, or one longer than its row).
+    fn of(stages: &[Arc<Stage>]) -> Vec<Option<Copies>> {
+        // (The columns of a stage's outer rows that may hold a value; None: any. The scan's
+        // rows: any.)
+        let mut maybe: Option<Box<[bool]>> = None;
+        let mut out = Vec::with_capacity(stages.len());
+        for st in stages {
+            let (keep, nright, kind) = match &**st {
+                Stage::Hash(p) => (p.keep.as_deref(), p.nright, p.kind),
+                Stage::Lookup(l) => (l.keep.as_deref(), l.nright, l.kind),
+            };
+            let idx = |r: std::ops::Range<usize>, f: &dyn Fn(usize) -> bool| r.filter(|&i| f(i)).map(|i| i as u32).collect::<Box<[u32]>>();
+            out.push(keep.filter(|k| k.len() >= nright).map(|k| {
+                let nleft = k.len() - nright;
+                let may = |i: usize| maybe.as_deref().is_none_or(|m| m.get(i).copied().unwrap_or(true));
+                Copies {
+                    nleft,
+                    lkeep: idx(0..nleft, &|i| k[i]),
+                    ldrop: idx(0..nleft, &|i| !k[i] && may(i)),
+                    rkeep: idx(0..nright, &|i| k[nleft + i]),
+                }
+            }));
+            // (An inner join's rows are all made by `keep`; another's may be the outer row as
+            // it came, or it with NULLs.)
+            maybe = match (kind, keep) {
+                (JoinKind::Inner, Some(k)) => Some(k.into()),
+                _ => None,
+            };
+        }
+        out
+    }
+
+    /// The lists for outer row `l` (None: another width).
+    #[inline]
+    fn fits<'a>(c: Option<&'a Copies>, l: &[Value]) -> Option<&'a Copies> {
+        c.filter(|c| c.nleft == l.len())
+    }
+
+    /// `joined` by the lists.
+    fn joined(&self, l: &[Value], r: Inner, spare: usize) -> Row {
+        let (n, w) = (l.len(), r.width());
+        let mut out = Vec::with_capacity(n + w + spare);
+        nulls(&mut out, n + w);
+        for &i in &self.lkeep {
+            put(&mut out, i as usize, l[i as usize].clone());
+        }
+        for &i in &self.rkeep {
+            if let Some(v) = r.get(i as usize).filter(|_| (i as usize) < w) {
+                put(&mut out, n + i as usize, v.clone());
+            }
+        }
+        out
+    }
+
+    /// The outer row's columns not kept made NULL, and room for `w` inner ones (NULL).
+    #[inline]
+    fn outer(&self, l: &mut Row, w: usize) {
+        for &i in &self.ldrop {
+            let v = &mut l[i as usize];
+            if !v.is_null() {
+                *v = Value::Null;
+            }
+        }
+        l.reserve(w);
+        nulls(l, w);
+    }
+
+    /// `joined_from` by the lists.
+    fn joined_from(&self, mut l: Row, r: Inner) -> Row {
+        let (n, w) = (l.len(), r.width());
+        self.outer(&mut l, w);
+        for &i in &self.rkeep {
+            if let Some(v) = r.get(i as usize).filter(|_| (i as usize) < w) {
+                put(&mut l, n + i as usize, v.clone());
+            }
+        }
+        l
+    }
+
+    /// `joined_from_taken` by the lists.
+    fn joined_from_taken(&self, mut l: Row, r: &mut [Value]) -> Row {
+        let (n, w) = (l.len(), r.len());
+        self.outer(&mut l, w);
+        for &i in &self.rkeep {
+            if let Some(v) = r.get_mut(i as usize) {
+                put(&mut l, n + i as usize, std::mem::replace(v, Value::Null));
+            }
+        }
+        l
+    }
+}
+
+/// `joined_from_taken`, by the stage's lists `c` when they fit.
+pub fn joined_from_taken_by(c: Option<&Copies>, l: Row, r: &mut [Value], keep: Option<&[bool]>) -> Row {
+    match Copies::fits(c, &l) {
+        Some(c) => c.joined_from_taken(l, r),
+        None => joined_from_taken(l, r, keep),
+    }
+}
+
 /// A row of `l`'s columns then `r`'s, copying only the columns in `keep` (None: all;
 /// the others are NULL: nothing above reads them), with room for `spare` more values (the
 /// stages after it: `spare`).
@@ -569,7 +695,7 @@ impl Probe {
     /// The join's rows for outer row `l` and its `matches`, in order, to `f`. `own_last`: the
     /// next stage makes each a row of its own, so the last match's is made now by moving `l`'s
     /// values (`joined_from`), not by copying them.
-    pub fn emit(&self, l: Row, matches: &[u32], own_last: bool, f: &mut dyn FnMut(Joined)) {
+    pub fn emit(&self, l: Row, matches: &[u32], own_last: bool, cp: Option<&Copies>, f: &mut dyn FnMut(Joined)) {
         let t = &*self.built;
         match self.kind {
             JoinKind::Semi if !matches.is_empty() => f(Joined::Row(l)),
@@ -591,7 +717,11 @@ impl Probe {
                 for &j in rest {
                     f(Joined::Pair { l: &l, r: t.inner(j as usize), keep: self.keep.as_deref() });
                 }
-                f(Joined::Row(joined_from(l, t.inner(last as usize), self.keep.as_deref())));
+                let r = t.inner(last as usize);
+                f(Joined::Row(match Copies::fits(cp, &l) {
+                    Some(c) => c.joined_from(l, r),
+                    None => joined_from(l, r, self.keep.as_deref()),
+                }));
             }
         }
     }
@@ -640,6 +770,8 @@ pub struct Scratch {
     got: Vec<Vec<super::lookup::Got>>,
     key: Vec<Value>,
     lookups: Vec<super::lookup::LookupScratch>,
+    /// Each stage's lists (`Copies::of`), made at the first row.
+    copies: Vec<Option<Copies>>,
 }
 
 impl Scratch {
@@ -659,7 +791,11 @@ impl Scratch {
         }
     }
 
-    fn size(&mut self, n: usize) {
+    fn size(&mut self, stages: &[Arc<Stage>]) {
+        let n = stages.len();
+        if self.copies.len() != n {
+            self.copies = Copies::of(stages);
+        }
         if self.matches.len() < n {
             self.matches.resize_with(n, Vec::new);
             self.rows.resize_with(n, Vec::new);
@@ -680,34 +816,47 @@ pub fn run_stages(stages: &[Arc<Stage>], from: usize, row: Row, s: &mut Scratch,
         emit(Joined::Row(row), from as u8);
         return;
     }
-    s.size(stages.len());
+    s.size(stages);
+    // (Out of the scratch while the stages run: each stage's joined rows read them.)
+    let cp = std::mem::take(&mut s.copies);
+    run(stages, &cp, from, row, s, emit);
+    s.copies = cp;
+}
+
+/// `run_stages` with the stages' lists `cp`.
+fn run(stages: &[Arc<Stage>], cp: &[Option<Copies>], from: usize, row: Row, s: &mut Scratch, emit: &mut dyn FnMut(Joined, u8)) {
+    if from == stages.len() {
+        emit(Joined::Row(row), from as u8);
+        return;
+    }
+    let c = cp.get(from).and_then(Option::as_ref);
     match &*stages[from] {
         Stage::Hash(p) => {
             let mut matches = std::mem::take(&mut s.matches[from]);
             match p.matches(&row, &mut s.key, &mut matches) {
                 false => {
                     // (The rows the stages after hold came before this one.)
-                    drain_from(stages, from + 1, s, emit);
+                    drain_from(stages, cp, from + 1, s, emit);
                     emit(Joined::Row(row), from as u8)
                 }
-                true => p.emit(row, &matches, from + 1 < stages.len(), &mut |j| onward(stages, from, j, s, emit)),
+                true => p.emit(row, &matches, from + 1 < stages.len(), c, &mut |j| onward(stages, cp, from, j, s, emit)),
             }
             s.matches[from] = matches;
         }
         Stage::Lookup(lk) if lk.batches() => {
             s.held[from].push(row);
             if s.held[from].len() >= LOOKUP_BATCH {
-                lookup_batch(stages, from, s, emit);
+                lookup_batch(stages, cp, from, s, emit);
             }
         }
         Stage::Lookup(lk) => {
             let mut rows = std::mem::take(&mut s.rows[from]);
             match lk.rows(&row, &mut rows, &mut s.lookups[from]) {
                 false => {
-                    drain_from(stages, from + 1, s, emit);
+                    drain_from(stages, cp, from + 1, s, emit);
                     emit(Joined::Row(row), from as u8)
                 }
-                true => lk.emit(row, &mut rows, from + 1 < stages.len(), &mut |j| onward(stages, from, j, s, emit)),
+                true => lk.emit(row, &mut rows, from + 1 < stages.len(), c, &mut |j| onward(stages, cp, from, j, s, emit)),
             }
             s.rows[from] = rows;
         }
@@ -717,22 +866,29 @@ pub fn run_stages(stages: &[Arc<Stage>], from: usize, row: Row, s: &mut Scratch,
 /// Every row the stages hold, through the stages after them, to `emit` (before a row
 /// that skips them goes, and as a chunk ends).
 pub fn drain(stages: &[Arc<Stage>], s: &mut Scratch, emit: &mut dyn FnMut(Joined, u8)) {
-    drain_from(stages, 0, s, emit);
+    if stages.is_empty() {
+        return;
+    }
+    s.size(stages);
+    let cp = std::mem::take(&mut s.copies);
+    drain_from(stages, &cp, 0, s, emit);
+    s.copies = cp;
 }
 
 /// `drain` of stages `from..` (the rows a stage holds came after those of the stages
 /// above it, which go first).
-fn drain_from(stages: &[Arc<Stage>], from: usize, s: &mut Scratch, emit: &mut dyn FnMut(Joined, u8)) {
+fn drain_from(stages: &[Arc<Stage>], cp: &[Option<Copies>], from: usize, s: &mut Scratch, emit: &mut dyn FnMut(Joined, u8)) {
     for st in from..stages.len().min(s.held.len()) {
         if !s.held[st].is_empty() {
-            lookup_batch(stages, st, s, emit);
+            lookup_batch(stages, cp, st, s, emit);
         }
     }
 }
 
 /// Lookup stage `from`'s held outer rows, their inner rows read together, joined in order.
-fn lookup_batch(stages: &[Arc<Stage>], from: usize, s: &mut Scratch, emit: &mut dyn FnMut(Joined, u8)) {
+fn lookup_batch(stages: &[Arc<Stage>], cp: &[Option<Copies>], from: usize, s: &mut Scratch, emit: &mut dyn FnMut(Joined, u8)) {
     let Stage::Lookup(lk) = &*stages[from] else { return };
+    let c = cp.get(from).and_then(Option::as_ref);
     let mut ls = std::mem::take(&mut s.held[from]);
     let mut got = std::mem::take(&mut s.got[from]);
     let mut rows = std::mem::take(&mut s.rows[from]);
@@ -740,10 +896,10 @@ fn lookup_batch(stages: &[Arc<Stage>], from: usize, s: &mut Scratch, emit: &mut 
     for (l, g) in ls.drain(..).zip(got.iter()) {
         match *g {
             super::lookup::Got::Left => {
-                drain_from(stages, from + 1, s, emit);
+                drain_from(stages, cp, from + 1, s, emit);
                 emit(Joined::Row(l), from as u8)
             }
-            super::lookup::Got::Rows(a, b) => lk.emit(l, &mut rows[a as usize..b as usize], from + 1 < stages.len(), &mut |j| onward(stages, from, j, s, emit)),
+            super::lookup::Got::Rows(a, b) => lk.emit(l, &mut rows[a as usize..b as usize], from + 1 < stages.len(), c, &mut |j| onward(stages, cp, from, j, s, emit)),
         }
     }
     s.held[from] = ls;
@@ -752,12 +908,20 @@ fn lookup_batch(stages: &[Arc<Stage>], from: usize, s: &mut Scratch, emit: &mut 
 }
 
 /// A row stage `from` made, to the stage after it (or out, after the last).
-fn onward(stages: &[Arc<Stage>], from: usize, j: Joined, s: &mut Scratch, emit: &mut dyn FnMut(Joined, u8)) {
+fn onward(stages: &[Arc<Stage>], cp: &[Option<Copies>], from: usize, j: Joined, s: &mut Scratch, emit: &mut dyn FnMut(Joined, u8)) {
     if from + 1 == stages.len() {
         emit(j, from as u8 + 1);
-    } else {
-        run_stages(stages, from + 1, j.into_row_spare(spare(stages, from + 1)), s, emit);
+        return;
     }
+    let spare = spare(stages, from + 1);
+    let row = match j {
+        Joined::Pair { l, r, keep } => match Copies::fits(cp.get(from).and_then(Option::as_ref), l) {
+            Some(c) => c.joined(l, r, spare),
+            None => joined(l, r, keep, spare),
+        },
+        j => j.into_row_spare(spare),
+    };
+    run(stages, cp, from + 1, row, s, emit);
 }
 
 #[cfg(test)]
