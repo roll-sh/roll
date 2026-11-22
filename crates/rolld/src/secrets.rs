@@ -2163,7 +2163,7 @@ mod tests {
     fn only_roll_mcps_guard_keeps_the_guard_header() {
         let req = || super::Request::builder().uri("/v1/secrets/projects/p/leaks").header("x-roll-guard", "1").body(super::Body::empty()).unwrap();
         assert!(super::keep_guard_header(req()).headers().get("x-roll-guard").is_none(), "a caller's own header is dropped");
-        let call = |tool: &str| roll_access::evaluate::McpCall { tool: tool.into(), args: Arc::new(json!({})), ip: None, elicits: false, client: None, quiet: false };
+        let call = |tool: &str| roll_access::evaluate::McpCall { tool: tool.into(), args: Arc::new(json!({})), ip: None, elicits: false, client: None, quiet: false, unattended: false };
         let mut other = req();
         other.extensions_mut().insert(call("secrets_scan"));
         assert!(super::keep_guard_header(other).headers().get("x-roll-guard").is_none(), "another tool's isn't the guard");
