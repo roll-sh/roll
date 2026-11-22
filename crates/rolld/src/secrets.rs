@@ -1398,7 +1398,7 @@ impl apps_control::integrations::SecretSource for ForApps {
             let sensitive: std::collections::HashSet<String> = v.sensitive.into_iter().collect();
             // Link fields that aren't credentials (a host, a port): apps' logs may show these.
             let plain: std::collections::HashSet<String> = v.plain.into_iter().collect();
-            Ok(v.values.into_iter().map(|(name, value)| apps_control::integrations::SecretVar { linked: linked.contains(&name), sensitive: sensitive.contains(&name), plain: plain.contains(&name), value: value.expose().to_string(), name }).collect())
+            Ok(v.values.into_iter().map(|(name, value)| apps_control::integrations::SecretVar { binding: None, linked: linked.contains(&name), sensitive: sensitive.contains(&name), plain: plain.contains(&name), value: value.expose().to_string(), name }).collect())
         })
         .await?
     }
@@ -1407,7 +1407,7 @@ impl apps_control::integrations::SecretSource for ForApps {
     /// a placeholder for the project environment's consumer ([`closed_consumer`]), made by the
     /// project's owner (the operator for the operator's projects): it swaps only while they may
     /// reveal there.
-    async fn resolve_closed(&self, project: &str, env: &str, service: &str, maker: Option<&str>) -> anyhow::Result<apps_control::integrations::ClosedSecrets> {
+    async fn resolve_closed(&self, project: &str, env: &str, service: &str, maker: Option<&str>, mint: bool) -> anyhow::Result<apps_control::integrations::ClosedSecrets> {
         let (secrets, ws) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting: deploy again in a moment"))?;
         let (project, env, service, asked) = (project.to_string(), env.to_string(), service.to_string(), maker.map(str::to_string));
         tokio::task::spawn_blocking(move || {
@@ -1424,7 +1424,7 @@ impl apps_control::integrations::SecretSource for ForApps {
                 let v = secrets.values_for(&project, &env, "/", true, Some(&format!("app:{service}")), false, &roll_secrets::Caller::consumer(&format!("app:{service}")))?;
                 let bound: std::collections::HashSet<String> = secrets.secrets(&project, &env, "/", &roll_secrets::Caller::consumer(&format!("app:{service}")))?.into_iter().filter(|s| s.hosts.is_some()).map(|s| s.key).collect();
                 let sensitive: std::collections::HashSet<String> = v.sensitive.into_iter().collect();
-                let vars = v.values.into_iter().filter(|(k, _)| !bound.contains(k)).map(|(name, value)| apps_control::integrations::SecretVar { linked: false, sensitive: sensitive.contains(&name), plain: false, value: value.expose().to_string(), name }).collect();
+                let vars = v.values.into_iter().filter(|(k, _)| !bound.contains(k)).map(|(name, value)| apps_control::integrations::SecretVar { binding: None, linked: false, sensitive: sensitive.contains(&name), plain: false, value: value.expose().to_string(), name }).collect();
                 return Ok(apps_control::integrations::ClosedSecrets { vars, notice: Some(format!("keys bound to hosts withheld: no one who may reveal {env} closed it")) });
             }
             let maker = match asked {
@@ -1441,6 +1441,30 @@ impl apps_control::integrations::SecretSource for ForApps {
             // An untrusted preview (a fork's) reads as code nobody vetted: no protected
             // environment, and placeholders only where a binding opts in.
             let caller = if untrusted { secrets.untrusted(&project, &consumer_caller)? } else { consumer_caller };
+            // A listing or a staleness check: no placeholder made (each is a record, an audit row
+            // and a new random text), a key bound to hosts a marker with its binding.
+            if !mint {
+                let bound: std::collections::HashMap<String, String> = secrets
+                    .secrets(&project, &env, "/", &caller)?
+                    .into_iter()
+                    .filter_map(|s| {
+                        // The hosts as its placeholder's record names them (what a deploy's binding is).
+                        let mut h = s.hosts?.hosts;
+                        h.sort();
+                        Some((s.key, h.join(",")))
+                    })
+                    .collect();
+                let v = secrets.values_for(&project, &env, "/", true, Some(&format!("app:{service}")), false, &caller)?;
+                let (linked, sensitive, plain): (std::collections::HashSet<String>, std::collections::HashSet<String>, std::collections::HashSet<String>) = (v.linked.into_iter().collect(), v.sensitive.into_iter().collect(), v.plain.into_iter().collect());
+                let mut vars: Vec<apps_control::integrations::SecretVar> = v
+                    .values
+                    .into_iter()
+                    .filter(|(k, _)| !bound.contains_key(k))
+                    .map(|(name, value)| apps_control::integrations::SecretVar { binding: None, linked: linked.contains(&name), sensitive: sensitive.contains(&name), plain: plain.contains(&name), value: value.expose().to_string(), name })
+                    .collect();
+                vars.extend(bound.into_iter().map(|(name, hosts)| apps_control::integrations::SecretVar { binding: Some(hosts), linked: false, sensitive: false, plain: false, value: "rlph_(made at deploy)".into(), name }));
+                return Ok(apps_control::integrations::ClosedSecrets { vars, notice: None });
+            }
             let ask = roll_secrets::placeholders::Ask { minutes: None, maker: Some(&maker) };
             let v = match secrets.values_with_placeholders(&project, &env, "/", &closed_consumer(&project, &env), false, ask, &caller) {
                 Ok(v) => v,
@@ -1451,7 +1475,7 @@ impl apps_control::integrations::SecretSource for ForApps {
                     let bound: std::collections::HashSet<String> = secrets.secrets(&project, &env, "/", &caller)?.into_iter().filter(|s| s.hosts.is_some()).map(|s| s.key).collect();
                     let v = secrets.values_for(&project, &env, "/", true, Some(&format!("app:{service}")), false, &caller)?;
                     let sensitive: std::collections::HashSet<String> = v.sensitive.into_iter().collect();
-                    let vars = v.values.into_iter().filter(|(k, _)| !bound.contains(k)).map(|(name, value)| apps_control::integrations::SecretVar { linked: false, sensitive: sensitive.contains(&name), plain: false, value: value.expose().to_string(), name }).collect();
+                    let vars = v.values.into_iter().filter(|(k, _)| !bound.contains(k)).map(|(name, value)| apps_control::integrations::SecretVar { binding: None, linked: false, sensitive: sensitive.contains(&name), plain: false, value: value.expose().to_string(), name }).collect();
                     let notice = format!("keys bound to hosts withheld: {maker}, who closed {env}, can no longer reveal it ({why}); whoever may sets its egress again to turn them back on");
                     return Ok(apps_control::integrations::ClosedSecrets { vars, notice: Some(notice) });
                 }
@@ -1464,10 +1488,24 @@ impl apps_control::integrations::SecretSource for ForApps {
             } else if let Some(p) = v.problems.first() {
                 anyhow::bail!("{} of {env}'s secrets didn't resolve ({}: {})", v.problems.len(), p.key, p.problem);
             }
+            // A dynamic credential ends with its lease: refused as the open path refuses it.
+            if let Some(k) = v.dynamic.first().filter(|_| !untrusted) {
+                anyhow::bail!("{k} in {env} is a dynamic credential, which ends with its lease: link it as managed or live for a service");
+            }
             let linked: std::collections::HashSet<String> = v.linked.into_iter().collect();
             let sensitive: std::collections::HashSet<String> = v.sensitive.into_iter().collect();
             let plain: std::collections::HashSet<String> = v.plain.into_iter().collect();
-            Ok(apps_control::integrations::ClosedSecrets { vars: v.values.into_iter().map(|(name, value)| apps_control::integrations::SecretVar { linked: linked.contains(&name), sensitive: sensitive.contains(&name), plain: plain.contains(&name), value: value.expose().to_string(), name }).collect(), notice: None })
+            // Each placeholder's binding: what its staleness is judged by.
+            let bindings: std::collections::HashMap<String, String> = v
+                .placeholders
+                .iter()
+                .map(|p| {
+                    let mut h = p.hosts.clone();
+                    h.sort();
+                    (p.key.clone(), h.join(","))
+                })
+                .collect();
+            Ok(apps_control::integrations::ClosedSecrets { vars: v.values.into_iter().map(|(name, value)| apps_control::integrations::SecretVar { binding: bindings.get(&name).cloned(), linked: linked.contains(&name), sensitive: sensitive.contains(&name), plain: plain.contains(&name), value: value.expose().to_string(), name }).collect(), notice: None })
         })
         .await?
     }
@@ -2212,7 +2250,7 @@ mod tests {
         assert!(send(&router, "PUT", &format!("{at}/hosts"), Some(json!({ "hosts": ["api.stripe.com"] }))).await.0 < 300);
         let open = apps.resolve(&project, "production", "svc_web").await.unwrap();
         assert_eq!(open.iter().find(|v| v.name == "STRIPE_KEY").map(|v| v.value.as_str()), Some("sk_test_apps_closed"), "open: the value");
-        let closed = apps.resolve_closed(&project, "production", "svc_web", Some("operator")).await.unwrap();
+        let closed = apps.resolve_closed(&project, "production", "svc_web", Some("operator"), true).await.unwrap();
         let v = closed.vars.iter().find(|v| v.name == "STRIPE_KEY").map(|v| v.value.clone()).unwrap();
         assert!(v.starts_with("rlph_") && !v.contains("sk_test"), "closed: a placeholder: {v}");
         let i = apps.intercept(&project, "production").await.unwrap().expect("a CA for its bound host");

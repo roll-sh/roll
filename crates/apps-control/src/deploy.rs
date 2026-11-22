@@ -961,8 +961,8 @@ impl Apps {
         {
             // Its files hold no secret value (Netlify's secrets scan): one that does fails the
             // deploy (a container would serve the same file).
-            let r = self.resolve_vars(&svc, &env, &dep.id).await?;
-            let secrets: Vec<(String, String)> = r.vars.iter().filter(|(k, _)| r.is_secret(k)).cloned().collect();
+            let r = self.checked_vars(&svc, &env, &dep.id).await?;
+            let secrets: Vec<(String, String)> = r.vars.iter().filter(|(k, _)| r.is_secret(k) && !r.placeholders.contains_key(k)).cloned().collect();
             let checks_secrets = !secrets.is_empty();
             match self.export_site_checked(&img, secrets).await {
                 Ok(Some(n)) => log.stream(Stream::System).line(format!("static site: {} KiB of files, served without an instance", n.div_ceil(1024))),
@@ -981,7 +981,7 @@ impl Apps {
         let (sid, e, did) = (svc.id.clone(), env.name.clone(), d.id.clone());
         let snapshot = self.db(move |s| s.seal_snapshot(&did, &sid, &e)).await?;
         let vars_hash = {
-            let r = self.resolve_vars(&svc, &env, &dep.id).await?;
+            let r = self.checked_vars(&svc, &env, &dep.id).await?;
             r.check_refs()?;
             fingerprint(&r.vars_for_hash(), &svc, &env.egress)
         };
@@ -2729,6 +2729,23 @@ impl Apps {
             let Some(svc) = services.iter().find(|s| s.id == sid).filter(|s| self.owns(&s.id)) else { continue };
             let network = crate::closed_network_name(&svc.project, &env);
             let log = self.logs.sink(format!("env:{sid}/{env}"), Stream::System);
+            // Opened, and what runs was deployed open: its placeholders and interception end once
+            // no service of the project is closed in that environment any more.
+            let (s2, e2) = (sid.clone(), env.clone());
+            let open_now = self.db(move |s| s.environment(&s2, &e2)).await.is_ok_and(|r| !r.egress.closed());
+            if open_now && !self.live(&sid, &env).template().is_some_and(|t| t.spec.closed) {
+                self.intercept_cas.lock().remove(&key);
+                let (p, e2) = (svc.project.clone(), env.clone());
+                let still_closed = self.db(move |s| Ok(s.services(Some(&p))?.into_iter().any(|o| s.environment(&o.id, &e2).is_ok_and(|r| r.egress.closed())))).await.unwrap_or(true);
+                if !still_closed {
+                    self.deps.runtime.set_interception(&network, None);
+                    match self.deps.secrets.end_intercept(&svc.project, &env).await {
+                        Ok(()) => log.line("open again: its placeholders and interception ended"),
+                        Err(e) => log.line(format!("open again, and its placeholders couldn't be ended: {e}")),
+                    }
+                }
+                continue;
+            }
             match self.deps.secrets.intercept(&svc.project, &env).await {
                 Ok(Some(i)) if ca_digest(&i.ca_pem) != trusted => {
                     self.deps.runtime.set_interception(&network, Some(i.interception.clone()));
