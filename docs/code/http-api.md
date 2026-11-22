@@ -90,12 +90,25 @@ POST   /v1/code/repos {owner, name, description?, visibility?, default_branch?, 
 GET    /v1/code/repos/{owner}/{repo} → Repo     an old name answers 301 with Location and {redirect: "owner/new"} (404 to callers who can't read the repo)
 PATCH  /v1/code/repos/{owner}/{repo} {name?, description?, visibility?, land_policy?, required_checks?, default_branch?} → Repo
 DELETE /v1/code/repos/{owner}/{repo} → 204
+GET    /v1/code/search?q=&limit= → {results: [{id /* chg_… | wi_… */, title, url, kind: "change" | "work_item", repo, number, state,
+                                               text /* a snippet */, outside, updated_at}]}
+       changes and work items whose title or text holds `q` (1-200 characters, any case), in the caller's own
+       repos only (an owner's token: its owner's; a review app's: where it's installed; admin: every repo), most
+       recently updated first (`limit` 1-50, default 20); a scoped token keeps only its repos' results.
+       roll's `search` tool (ChatGPT's deep research)
+GET    /v1/code/documents/{id} → {id, title, text, url, metadata: {kind, repo, number, state, author?, branch?,
+                                   work_item?, labels?, priority?, changes?, github_url?}, repo, outside}
+       one change or work item of the caller's own repos, in full; 404 for anything else. roll's `fetch` tool
 ```
 
 ## Reading code
 
 ```
 GET /refs → [{name /* "main" */, changeset, git: sha | null}]
+GET /landings?after=&limit=&latest= → {events: [/* a `landed` event's data */ & {seq, at, kind: "landed"}], next}
+     what landed on the repo after a place in the land log, oldest first (`limit` 1-500, default 100);
+     `next` is past everything read (other repos' landings too); `latest=1` answers no events and the
+     newest place (400 with `after`). MCP Events' `code.landed` reads it.
 GET /tree/{rev}/{*path} → {rev, changeset, path,
       entries: [{name, path, kind: "file" | "dir" | "symlink" | "submodule", mode /* "100644" */, size: number | null,
                  last_change: null | {changeset, message, time}}]}
@@ -153,7 +166,7 @@ Preview = {state: "creating" | "running" | "sleeping" | "failed", url: string | 
                           screenshot_url?: string /* a public preview's screenshot, signed and expiring */,
                           diff_url?: string /* the same for where it differs from the default branch's, when it does */,
                           expires_at?: number /* ms: when it goes (its TTL, or a keep, running out), once a day away */,
-                          earlier?: [{service, head, url}] /* earlier pushes still reachable on the same data, newest first */,
+                          earlier?: [{service, head, url, own_data}] /* earlier pushes still reachable, newest first; own_data: on its own copy of the data, as its head left it (else the preview's) */,
                           visual_change?: {since, percent, phone_percent?} /* how much the first service's page changed since the screenshot at an earlier head */,
                           page_speed?: {ttfb_ms, fcp_ms: number | null, load_ms, bytes, before_load_ms: number | null} /* how fast that page loaded, timed with its screenshot */,
                           page_health?: {errors, first_error: string | null, failed, first_failed: string | null} /* what went wrong while it loaded: the page's own words, untrusted */,

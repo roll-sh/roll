@@ -187,7 +187,7 @@ impl Brancher for FakeData {
         self.branch(parent, name, mode).await.map(Some)
     }
     async fn snapshot(&self, parent: &str, branch: &str, name: &str) -> anyhow::Result<Option<Branched>> {
-        if self.kind != Kind::Postgres {
+        if !matches!(self.kind, Kind::Postgres | Kind::Redis) {
             return Ok(None);
         }
         anyhow::ensure!(self.branches.lock().contains(branch), "no branch {branch} to copy");

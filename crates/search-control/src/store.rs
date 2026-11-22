@@ -226,6 +226,8 @@ pub struct UsageSample {
     /// Estimated resident bytes while loaded.
     pub loaded_bytes: i64,
     pub requests: i64,
+    /// CPU milliseconds the node's embedding pool spent on the cluster's inputs.
+    pub inference_ms: i64,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -238,6 +240,8 @@ pub struct UsageTotals {
     pub peak_loaded_bytes: i64,
     /// Integral of the stored size over the window.
     pub stored_gib_months: f64,
+    /// CPU seconds the node's embedding pool spent on the cluster's inputs (E5).
+    pub inference_cpu_seconds: f64,
 }
 
 /// A deleted cluster kept for restoring until `purge_at`.
@@ -528,6 +532,8 @@ impl Store {
     fn with_db(db: Db) -> anyhow::Result<Self> {
         db.ensure_schema(SCHEMA)?;
         db.add_column("search_clusters", "loaded_on", "TEXT")?;
+        // Intervals before inference was metered had none.
+        db.add_column("search_usage", "inference_ms", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("search_clusters", "own_bytes", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("search_clusters", "wake_at", "INTEGER")?;
         // Clusters made before owners stay the operator's (none).
@@ -1210,8 +1216,8 @@ impl Store {
     pub async fn record_usage(&self, id: &str, u: &UsageSample) -> anyhow::Result<()> {
         self.db.write(|x| {
             x.execute(
-                "INSERT INTO search_usage (cluster_id, at, seconds, loaded_bytes, requests) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![id, u.at, u.seconds, u.loaded_bytes, u.requests],
+                "INSERT INTO search_usage (cluster_id, at, seconds, loaded_bytes, requests, inference_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![id, u.at, u.seconds, u.loaded_bytes, u.requests, u.inference_ms],
             )
         })?;
         Ok(())
@@ -1296,13 +1302,13 @@ impl Store {
 
     /// Totals over `[since, now]`.
     pub async fn usage_since(&self, id: &str, since: i64, now: i64) -> anyhow::Result<UsageTotals> {
-        let (seconds, byte_seconds, requests, peak): (i64, f64, i64, i64) = self.db.read(|x| {
+        let (seconds, byte_seconds, requests, peak, inference_ms): (i64, f64, i64, i64, i64) = self.db.read(|x| {
             x.query_row(
                 "SELECT COALESCE(SUM(seconds), 0), COALESCE(SUM(CAST(seconds AS REAL) * loaded_bytes), 0.0), COALESCE(SUM(requests), 0),
-                        COALESCE(MAX(loaded_bytes), 0)
+                        COALESCE(MAX(loaded_bytes), 0), COALESCE(SUM(inference_ms), 0)
                  FROM search_usage WHERE cluster_id = ?1 AND at >= ?2",
                 params![id, since],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
         })?;
         Ok(UsageTotals {
@@ -1310,6 +1316,7 @@ impl Store {
             loaded_gib_hours: byte_seconds / GIB / 3600.0,
             requests,
             peak_loaded_bytes: peak,
+            inference_cpu_seconds: inference_ms as f64 / 1000.0,
             stored_gib_months: self.storage_byte_seconds(id, since, now).await? / GIB / MONTH_SECONDS,
         })
     }
@@ -1450,10 +1457,10 @@ mod tests {
 
     async fn usage_totals(s: &Store) {
         assert_eq!(s.insert(&cluster("srch_u", "usage"), Caps::NONE).await.unwrap(), Inserted::Yes);
-        s.record_usage("srch_u", &UsageSample { at: 100, seconds: 60, loaded_bytes: 1 << 30, requests: 10 }).await.unwrap();
-        s.record_usage("srch_u", &UsageSample { at: 160, seconds: 30, loaded_bytes: 2 << 30, requests: 5 }).await.unwrap();
+        s.record_usage("srch_u", &UsageSample { at: 100, seconds: 60, loaded_bytes: 1 << 30, requests: 10, inference_ms: 1500 }).await.unwrap();
+        s.record_usage("srch_u", &UsageSample { at: 160, seconds: 30, loaded_bytes: 2 << 30, requests: 5, inference_ms: 0 }).await.unwrap();
         let t = s.usage_since("srch_u", 0, 200).await.unwrap();
-        assert_eq!((t.loaded_seconds, t.requests, t.peak_loaded_bytes), (90, 15, 2 << 30));
+        assert_eq!((t.loaded_seconds, t.requests, t.peak_loaded_bytes, t.inference_cpu_seconds), (90, 15, 2 << 30, 1.5));
         assert!((t.loaded_gib_hours - (60.0 + 60.0) / 3600.0).abs() < 1e-12);
         assert_eq!(s.usage_since("srch_u", 150, 200).await.unwrap().requests, 5);
         s.delete("srch_u").await.unwrap();

@@ -62,7 +62,7 @@ fn resolvers(p: Products<'_>, workspace: Arc<roll_workspace::Workspace>) -> Reso
     if let Some(code) = p.code {
         let c = code.clone();
         r.by_fn("default-branch", move |repo: &str| c.default_branch_of(repo));
-        for kind in ["change", "thread", "work"] {
+        for kind in ["change", "thread", "work", "document"] {
             let code = code.clone();
             r.by_fn(kind, move |id: &str| code.repo_of(kind, id));
         }
@@ -483,6 +483,8 @@ fn rename(name: &str) -> String {
     }
     match name {
         "search_code" => "code_search".into(),
+        // ChatGPT's deep research and company knowledge ask for these two names exactly.
+        "search" | "fetch" => name.into(),
         n => format!("code_{n}"),
     }
 }

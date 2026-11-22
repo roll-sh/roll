@@ -7,9 +7,10 @@
 //! - `x-roll-code-sig`: hex HMAC-SHA256, keyed with the cluster secret, over
 //!   `roll-code-sig-v1\n{node}\n{ts}\n{METHOD}\n{path_and_query}\n{hop}\n{client}`, where `hop`
 //!   and `client` are the values of `x-roll-code-hop` and `x-roll-code-client` (empty when
-//!   absent), followed by `\n{decided}` when `x-roll-code-decided` is set. Signing those means a
-//!   forwarded request's hop count, client address and access decision can't be altered or added
-//!   in transit (and a request without a decision signs as it always has).
+//!   absent), followed by `\n{decided}` when `x-roll-code-decided` is set and `\nacting\n{grant}`
+//!   when `x-roll-code-acting` is. Signing those means a forwarded request's hop count, client
+//!   address, access decision and the grant roll acts for can't be altered or added in transit
+//!   (and a request without them signs as it always has).
 //!
 //! The receiver recomputes the MAC and compares it in constant time, and refuses timestamps
 //! more than [`MAX_SKEW`] away from its own clock, so node clocks must agree to within a minute
@@ -31,12 +32,15 @@ pub const CLIENT_HEADER: &str = "x-roll-code-client";
 /// The grant whose access decision the first node made for this request (roll-access): the
 /// owner doesn't ask a person a second time.
 pub const DECIDED_HEADER: &str = "x-roll-code-decided";
+/// The grant roll's own work acts for (`roll_auth::ActAs`: an MCP Events webhook delivery reading
+/// its feed), which has no token to forward: the owner acts for the same grant.
+pub const ACTING_HEADER: &str = "x-roll-code-acting";
 /// Set on a 503 that means "this node can't serve that key right now; route again", as opposed
 /// to a 503 from the application. Forwarders retry on it.
 pub const UNAVAILABLE_HEADER: &str = "x-roll-code-unavailable";
 
 /// Every header this crate owns. A request carrying any of them must be signed.
-pub const HEADERS: [&str; 6] = [NODE_HEADER, TS_HEADER, SIG_HEADER, HOP_HEADER, CLIENT_HEADER, DECIDED_HEADER];
+pub const HEADERS: [&str; 7] = [NODE_HEADER, TS_HEADER, SIG_HEADER, HOP_HEADER, CLIENT_HEADER, DECIDED_HEADER, ACTING_HEADER];
 
 /// The largest difference between the sender's and the receiver's clocks that's accepted.
 pub const MAX_SKEW: Duration = Duration::from_secs(60);
@@ -53,16 +57,17 @@ pub enum VerifyError {
     BadSignature,
 }
 
-/// What a forward carries past the first node, signed: the client's address and the grant whose
-/// access decision was made there.
+/// What a forward carries past the first node, signed: the client's address, the grant whose
+/// access decision was made there, and the grant roll acts for.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Carried<'a> {
     pub client: Option<&'a str>,
     pub decided: Option<&'a str>,
+    pub acting: Option<&'a str>,
 }
 
 #[allow(clippy::too_many_arguments)]
-fn mac(secret: &[u8], node: &str, ts: i64, method: &Method, path_and_query: &str, hop: &str, client: &str, decided: &str) -> Hmac<Sha256> {
+fn mac(secret: &[u8], node: &str, ts: i64, method: &Method, path_and_query: &str, hop: &str, client: &str, decided: &str, acting: &str) -> Hmac<Sha256> {
     let mut m = <Hmac<Sha256> as Mac>::new_from_slice(secret).expect("HMAC takes keys of any length");
     for (i, part) in ["roll-code-sig-v1", node, &ts.to_string(), method.as_str(), path_and_query, hop, client].iter().enumerate() {
         if i > 0 {
@@ -74,6 +79,11 @@ fn mac(secret: &[u8], node: &str, ts: i64, method: &Method, path_and_query: &str
         m.update(b"\n");
         m.update(decided.as_bytes());
     }
+    // Tagged, so a grant acted for never signs like a decision (neither holds a newline).
+    if !acting.is_empty() {
+        m.update(b"\nacting\n");
+        m.update(acting.as_bytes());
+    }
     m
 }
 
@@ -84,9 +94,9 @@ pub(crate) fn sign(secret: &[u8], node: &str, method: &Method, path_and_query: &
     let hop_s = hop.map(|h| h.to_string()).unwrap_or_default();
     // A value that isn't a valid header value is dropped rather than sent mangled.
     let valid = |v: Option<&'_ str>| v.filter(|c| !c.contains('\n') && HeaderValue::from_str(c).is_ok()).unwrap_or("").to_string();
-    let (client, decided) = (valid(carried.client), valid(carried.decided));
-    let (client, decided) = (client.as_str(), decided.as_str());
-    let sig = mac(secret, node, ts, method, path_and_query, &hop_s, client, decided).finalize().into_bytes();
+    let (client, decided, acting) = (valid(carried.client), valid(carried.decided), valid(carried.acting));
+    let (client, decided, acting) = (client.as_str(), decided.as_str(), acting.as_str());
+    let sig = mac(secret, node, ts, method, path_and_query, &hop_s, client, decided, acting).finalize().into_bytes();
     let mut h = HeaderMap::new();
     h.insert(NODE_HEADER, HeaderValue::from_str(node).expect("node ids are validated header values"));
     h.insert(TS_HEADER, HeaderValue::from(ts));
@@ -99,6 +109,9 @@ pub(crate) fn sign(secret: &[u8], node: &str, method: &Method, path_and_query: &
     }
     if !decided.is_empty() {
         h.insert(DECIDED_HEADER, HeaderValue::from_str(decided).expect("checked above"));
+    }
+    if !acting.is_empty() {
+        h.insert(ACTING_HEADER, HeaderValue::from_str(acting).expect("checked above"));
     }
     h
 }
@@ -120,13 +133,14 @@ pub(crate) fn verify(secret: &[u8], headers: &HeaderMap, method: &Method, path_a
     let hop = one(headers, HOP_HEADER)?.unwrap_or("");
     let client = one(headers, CLIENT_HEADER)?.unwrap_or("");
     let decided = one(headers, DECIDED_HEADER)?.unwrap_or("");
+    let acting = one(headers, ACTING_HEADER)?.unwrap_or("");
     let ts: i64 = ts.parse().map_err(|_| VerifyError::Malformed(TS_HEADER))?;
     if !hop.is_empty() && hop.parse::<u8>().is_err() {
         return Err(VerifyError::Malformed(HOP_HEADER));
     }
     let sig = hex::decode(sig).map_err(|_| VerifyError::Malformed(SIG_HEADER))?;
     // Check the MAC before the clock, so a forged request learns nothing about our clock.
-    mac(secret, node, ts, method, path_and_query, hop, client, decided).verify_slice(&sig).map_err(|_| VerifyError::BadSignature)?;
+    mac(secret, node, ts, method, path_and_query, hop, client, decided, acting).verify_slice(&sig).map_err(|_| VerifyError::BadSignature)?;
     let off = code_sql::now_ms().saturating_sub(ts);
     if off.unsigned_abs() > MAX_SKEW.as_millis() as u64 {
         return Err(VerifyError::Stale(off));
@@ -141,12 +155,12 @@ mod tests {
     #[test]
     fn round_trip_and_tampering() {
         let s = b"0123456789abcdef0123456789abcdef";
-        let h = sign(s, "n1", &Method::POST, "/a?b=c", Some(1), Carried { client: Some("10.0.0.1"), decided: Some("grt_a") });
+        let h = sign(s, "n1", &Method::POST, "/a?b=c", Some(1), Carried { client: Some("10.0.0.1"), decided: Some("grt_a"), acting: Some("grt_a") });
         assert_eq!(verify(s, &h, &Method::POST, "/a?b=c").unwrap(), "n1");
         assert_eq!(verify(s, &h, &Method::GET, "/a?b=c"), Err(VerifyError::BadSignature));
         assert_eq!(verify(s, &h, &Method::POST, "/a?b=d"), Err(VerifyError::BadSignature));
         assert_eq!(verify(b"another secret, same length.....", &h, &Method::POST, "/a?b=c"), Err(VerifyError::BadSignature));
-        for (name, value) in [(HOP_HEADER, "2"), (CLIENT_HEADER, "10.0.0.2"), (DECIDED_HEADER, "grt_b"), (NODE_HEADER, "n2"), (TS_HEADER, "1")] {
+        for (name, value) in [(HOP_HEADER, "2"), (CLIENT_HEADER, "10.0.0.2"), (DECIDED_HEADER, "grt_b"), (ACTING_HEADER, "grt_b"), (NODE_HEADER, "n2"), (TS_HEADER, "1")] {
             let mut t = h.clone();
             t.insert(name, HeaderValue::from_static(value));
             assert!(verify(s, &t, &Method::POST, "/a?b=c").is_err(), "{name}");
@@ -163,6 +177,15 @@ mod tests {
         let mut t = plain.clone();
         t.insert(HOP_HEADER, HeaderValue::from_static("1"));
         assert_eq!(verify(s, &t, &Method::GET, "/p"), Err(VerifyError::BadSignature));
+        // A grant acted for can't be added to a decision, nor a decision passed off as one.
+        let decided = sign(s, "n1", &Method::GET, "/p", Some(1), Carried { decided: Some("grt_a"), ..Carried::default() });
+        let mut t = decided.clone();
+        t.insert(ACTING_HEADER, HeaderValue::from_static("grt_a"));
+        assert_eq!(verify(s, &t, &Method::GET, "/p"), Err(VerifyError::BadSignature));
+        let mut t = decided.clone();
+        let v = t.remove(DECIDED_HEADER).unwrap();
+        t.insert(ACTING_HEADER, v);
+        assert_eq!(verify(s, &t, &Method::GET, "/p"), Err(VerifyError::BadSignature));
     }
 
     #[test]
@@ -170,7 +193,7 @@ mod tests {
         let s = b"0123456789abcdef0123456789abcdef";
         for off in [-61_000i64, 61_000] {
             let ts = code_sql::now_ms() + off;
-            let sig = mac(s, "n1", ts, &Method::GET, "/p", "", "", "").finalize().into_bytes();
+            let sig = mac(s, "n1", ts, &Method::GET, "/p", "", "", "", "").finalize().into_bytes();
             let mut h = HeaderMap::new();
             h.insert(NODE_HEADER, HeaderValue::from_static("n1"));
             h.insert(TS_HEADER, HeaderValue::from(ts));

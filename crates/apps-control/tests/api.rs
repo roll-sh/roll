@@ -3310,6 +3310,36 @@ async fn a_sandbox_runs_commands_apart_from_the_environment_until_its_end() {
     assert!(w.fake.state(&name).is_none() && !w.fake.networks().contains(&net));
 }
 
+/// Signed images (Cloud Run's Binary Authorization): with a project's signing keys required, an
+/// image service's deploy needs its pinned digest's cosign signature by one of them, or it fails
+/// before anything switches; removing the rule lets unsigned images deploy again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_project_that_requires_signed_images_refuses_unsigned_ones() {
+    use p256::pkcs8::EncodePublicKey;
+    let w = world().await;
+    let (svc, d1) = image_service(&w, "api", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let deploys = format!("/v1/apps/services/{id}/environments/production/deploys");
+    let signing = format!("/v1/apps/projects/{}/signing", w.project);
+    assert_eq!(call(&w.api, "PUT", &signing, Some(json!({"keys": ["not a key"]}))).await.0, StatusCode::BAD_REQUEST);
+    let pem = p256::ecdsa::SigningKey::from_bytes(&[7u8; 32].into()).unwrap().verifying_key().to_public_key_pem(Default::default()).unwrap();
+    let (st, v) = call(&w.api, "PUT", &signing, Some(json!({"keys": [pem]}))).await;
+    assert_eq!((st, &v["required"]), (StatusCode::OK, &json!(true)), "{v}");
+    let (_, d) = call(&w.api, "POST", &deploys, Some(json!({}))).await;
+    let d = settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
+    assert!(d["status"] == "failed" && d["error"].as_str().unwrap_or_default().contains("requires signed images"), "{d}");
+    assert_eq!(call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await.1["active"]["id"], d1["id"], "nothing switched");
+    // Signed by the project's key: it deploys, and its log says so.
+    w.fake.signatures.lock().insert("nginx:1.27".into(), 0);
+    let (_, d) = call(&w.api, "POST", &deploys, Some(json!({}))).await;
+    let dep = d["id"].as_str().unwrap().to_string();
+    assert_eq!(settled(&w, &id, "production", &dep).await["status"], "active");
+    let (_, logs) = call(&w.api, "GET", &format!("{deploys}/{dep}/logs"), None).await;
+    assert!(logs.to_string().contains("cosign signature verifies"), "{logs}");
+    assert_eq!(call(&w.api, "DELETE", &signing, None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(call(&w.api, "GET", &signing, None).await.1, json!({"keys": [], "required": false}));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_one_off_job_runs_the_live_image_to_its_exit_and_can_be_canceled() {
     let w = world_with(|c| c.cron_retry_after = Duration::from_millis(20)).await;

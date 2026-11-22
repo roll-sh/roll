@@ -168,10 +168,71 @@ pub struct SearchArgs {
     /// MiB of audit entries kept per search cluster (compressed); past it the oldest go.
     #[arg(long = "search-audit-max-mb", env = "ROLL_SEARCH_AUDIT_MAX_MB", default_value_t = 32)]
     pub search_audit_max_mb: u64,
+    /// The embedding model behind the `.multilingual-e5-small-elasticsearch` inference endpoint
+    /// (and endpoints of the `elasticsearch` service with that model): `e5` runs
+    /// multilingual-e5-small on this node's CPUs; `off` answers as Elasticsearch without ML
+    /// nodes.
+    #[arg(long = "search-embed-model", env = "ROLL_SEARCH_EMBED_MODEL", default_value = "e5", value_parser = ["e5", "off"])]
+    pub search_embed_model: String,
+    /// Where the model's files are fetched from, once, into `<home>/search/models` (each file at
+    /// `<url>/<file>`, checked against the pinned SHA-256 digests). Default: the pinned revision
+    /// on Hugging Face.
+    #[arg(long = "search-embed-url", env = "ROLL_SEARCH_EMBED_URL")]
+    pub search_embed_url: Option<String>,
+    /// Read the model's files (`model.safetensors`, `tokenizer.json` of the pinned revision)
+    /// from this directory instead of fetching them (air-gapped nodes).
+    #[arg(long = "search-embed-dir", env = "ROLL_SEARCH_EMBED_DIR")]
+    pub search_embed_dir: Option<PathBuf>,
+    /// Embedding worker threads (0: a third of the CPUs, or of --search-embed-cpus).
+    #[arg(long = "search-embed-workers", env = "ROLL_SEARCH_EMBED_WORKERS", default_value_t = 0)]
+    pub search_embed_workers: usize,
+    /// CPUs the embedding workers are pinned to (`0-5,18-23`; empty: not pinned).
+    #[arg(long = "search-embed-cpus", env = "ROLL_SEARCH_EMBED_CPUS", default_value = "")]
+    pub search_embed_cpus: String,
+    /// Drop the model from memory after this many seconds without inputs.
+    #[arg(long = "search-embed-idle", env = "ROLL_SEARCH_EMBED_IDLE", default_value_t = 300)]
+    pub search_embed_idle_s: u64,
+    /// Inputs, and MiB of them, one cluster may have queued for the model; past either a call
+    /// gets 429.
+    #[arg(long = "search-embed-queue", env = "ROLL_SEARCH_EMBED_QUEUE", default_value_t = 4096)]
+    pub search_embed_queue: usize,
+    #[arg(long = "search-embed-queue-mb", env = "ROLL_SEARCH_EMBED_QUEUE_MB", default_value_t = 64)]
+    pub search_embed_queue_mb: usize,
+    /// MiB of inputs every cluster's queues may hold together on the node; past it a call gets
+    /// 429.
+    #[arg(long = "search-embed-node-queue-mb", env = "ROLL_SEARCH_EMBED_NODE_QUEUE_MB", default_value_t = 512)]
+    pub search_embed_node_queue_mb: usize,
+    /// Inputs one inference call may carry (each input is cut to the start its 512 tokens come
+    /// from, so its length isn't capped).
+    #[arg(long = "search-embed-max-inputs", env = "ROLL_SEARCH_EMBED_MAX_INPUTS", default_value_t = 2048)]
+    pub search_embed_max_inputs: usize,
     /// Publish Elasticsearch's test cluster features (to run the YAML REST suites against
     /// clusters created through the API). Test deployments only.
     #[arg(long = "search-test-features", env = "ROLL_SEARCH_TEST_FEATURES", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
     pub search_test_features: bool,
+}
+
+/// The node's embedding pool from the `--search-embed-*` flags (`None`: the model is off).
+fn embed_config(home: &Path, args: &SearchArgs) -> anyhow::Result<Option<search_server::embed::EmbedConfig>> {
+    use search_server::embed::{EmbedConfig, ModelSource};
+    if args.search_embed_model == "off" {
+        return Ok(None);
+    }
+    let source = match (&args.search_embed_dir, args.search_embed_url.as_deref().filter(|u| !u.is_empty())) {
+        (Some(_), Some(_)) => anyhow::bail!("--search-embed-dir and --search-embed-url exclude each other"),
+        (Some(d), None) => ModelSource::Dir(d.clone()),
+        (None, Some(u)) => ModelSource::Fetch { base: u.trim_end_matches('/').to_string() },
+        (None, None) => ModelSource::default_fetch(),
+    };
+    let mut cfg = EmbedConfig::new(source, home.join("search").join("models"));
+    cfg.workers = args.search_embed_workers;
+    cfg.cpus = search_server::embed::parse_cpus(&args.search_embed_cpus)?;
+    cfg.idle_unload = Duration::from_secs(args.search_embed_idle_s.max(1));
+    cfg.queue_inputs = args.search_embed_queue.max(1);
+    cfg.max_inputs = args.search_embed_max_inputs.max(1);
+    cfg.queue_bytes = args.search_embed_queue_mb.max(1) << 20;
+    cfg.node_queue_bytes = args.search_embed_node_queue_mb.max(1) << 20;
+    Ok(Some(cfg))
 }
 
 pub struct Search {
@@ -233,6 +294,7 @@ impl Search {
         cfg.audit.retention = Duration::from_secs(args.search_audit_retention_days.max(1) * 86_400);
         cfg.audit.max_bytes = args.search_audit_max_mb.max(1) << 20;
         cfg.node_settings.push((search_control::SEARCH_REQUEST_MAX_LIMIT.to_string(), args.search_request_memory_max.trim().to_string()));
+        cfg.embed = embed_config(home, args)?;
         if args.search_repository_allow_private {
             cfg.node_settings.push((search_control::S3_ALLOW_PRIVATE.to_string(), "true".to_string()));
         }

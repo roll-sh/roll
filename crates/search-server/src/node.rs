@@ -164,6 +164,10 @@ pub struct NodeConfig {
     pub links: Option<Arc<dyn search_es::remote::links::Links>>,
     /// How long and how much each cluster's audit log keeps ([`crate::audit`]).
     pub audit: crate::audit::AuditConfig,
+    /// The embedding pool every cluster's E5 inference endpoints run on ([`crate::embed`]);
+    /// `None`: they answer as on a cluster without ML nodes. Its memory counts against
+    /// `memory_budget`.
+    pub embedder: Option<Arc<crate::embed::EmbedPool>>,
     /// Resolves the credential references clusters' snapshot repositories name
     /// (`search_es::secret_refs`); `None`: they're refused.
     pub secret_refs: Option<search_es::secret_refs::Resolver>,
@@ -200,6 +204,7 @@ impl Default for NodeConfig {
             default_repository: None,
             links: None,
             audit: crate::audit::AuditConfig::default(),
+            embedder: None,
             secret_refs: None,
         }
     }
@@ -1280,6 +1285,7 @@ impl Node {
         cfg.sealer = self.cfg.sealer.clone();
         cfg.unsealed_secrets = self.cfg.unsealed_secrets;
         cfg.links = self.cfg.links.clone();
+        cfg.embedder = self.cfg.embedder.clone().map(|p| p as Arc<dyn search_es::xpack::inference::local::Embedder>);
         cfg.catalog_id = spec.catalog_id.clone();
         cfg.owner = spec.owner.clone();
         cfg.secret_refs = self.cfg.secret_refs.clone();
@@ -1651,6 +1657,12 @@ impl Node {
         v
     }
 
+    /// The CPU time each cluster's inputs took on the embedding pool since the previous call,
+    /// keyed by [`Loaded::id`] like the other observations (metered as inference).
+    pub fn take_inference_cpu(&self) -> Vec<(String, Duration)> {
+        self.cfg.embedder.as_ref().map(|e| e.take_cpu()).unwrap_or_default()
+    }
+
     /// Every cluster's request metrics and slow log entries since the previous call (loaded
     /// clusters and those unloaded meanwhile), each handed on once. Keyed by [`Loaded::id`].
     pub fn take_observations(&self) -> Vec<(String, Observed)> {
@@ -1713,7 +1725,7 @@ impl Node {
     async fn enforce_memory_with(&self, room: u64, commit: bool) -> Vec<String> {
         let loaded: Vec<Arc<Loaded>> = self.clusters.read().values().filter_map(|s| s.get().cloned()).collect();
         if loaded.is_empty() {
-            self.request_memory.set_held_elsewhere(0);
+            self.request_memory.set_held_elsewhere(self.cfg.embedder.as_ref().map_or(0, |e| e.resident_bytes()));
             return Vec::new();
         }
         // Kept async results past their keep-alive go (and give their memory back) even on a
@@ -1737,8 +1749,9 @@ impl Node {
             }
         }
         let mut evicted = Vec::new();
-        let mut total: u64 = sizes.iter().map(|(_, r)| *r).sum();
-        // One budget: what clusters hold resident leaves the rest to requests.
+        // One budget: what the clusters and the node's embedding model (its batches included)
+        // hold resident leaves the rest to requests.
+        let mut total: u64 = sizes.iter().map(|(_, r)| *r).sum::<u64>() + self.cfg.embedder.as_ref().map_or(0, |e| e.resident_bytes());
         self.request_memory.set_held_elsewhere(total);
         let Some(budget) = self.cfg.memory_budget else { return evicted };
         // Residents and requests share the budget, and requests can't be evicted: idle clusters

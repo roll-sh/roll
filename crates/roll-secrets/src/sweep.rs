@@ -95,7 +95,7 @@ impl Secrets {
         type Row = (String, String, String, String, String, Option<String>, Option<i64>);
         let rows: Vec<Row> = self.db.read(|c| {
             c.query(
-                "SELECT e.slug, s.path, s.key, s.link, s.link_state, s.rotation_error, s.rotation_failed_at FROM secrets s JOIN environments e ON e.id = s.env_id
+                "SELECT e.slug, s.path, s.key, s.link, s.link_state, s.rotation_error, s.rotation_failed_at FROM secrets s JOIN environments e ON e.id = s.env_id AND e.forgotten_at IS NULL
                  WHERE s.project_id = ? AND s.owner = '' AND s.link_state IS NOT NULL AND s.link LIKE '%\"mode\":\"managed\"%' ORDER BY e.position, s.path, s.key",
                 [project],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
@@ -331,10 +331,20 @@ impl Secrets {
         let failure = failure.map(|f| f.chars().take(300).collect::<String>());
         let at = failure.as_ref().map(|_| now);
         let done = self.db.write(|c| {
+            let was: Option<Option<String>> = c
+                .query_row("SELECT rotation_error FROM secrets WHERE project_id = ? AND path = ? AND key = ? AND owner = '' AND env_id = (SELECT id FROM environments WHERE project_id = ? AND slug = ?)", params![project, path, key, project, slug], |r| r.get(0))
+                .optional()?;
             c.execute(
-                "UPDATE secrets SET rotation_error = ?, rotation_failed_at = ? WHERE project_id = ? AND path = ? AND key = ? AND owner = '' AND env_id = (SELECT id FROM environments WHERE project_id = ? AND slug = ?)",
+                "UPDATE secrets SET rotation_error = ?, rotation_failed_at = ? WHERE project_id = ? AND path = ? AND key = ? AND owner = '' AND env_id = (SELECT id FROM environments WHERE project_id = ? AND slug = ? AND forgotten_at IS NULL)",
                 params![failure, at, project, path, key, project, slug],
-            )
+            )?;
+            // The feed hears of a failing run once, as it starts (health lists it until one works).
+            if let (Some(why), Some(None)) = (&failure, was) {
+                let event = crate::events::Event::new(crate::events::Kind::RotationFailed, serde_json::json!({ "reason": why }));
+                let keys = [key.to_string()];
+                crate::audit::record_event(c, self.keys()?, project, &Caller::consumer("roll:rotations"), "secrets.rotation_failed", Some(slug), Some(path), &keys, &format!("{key}'s scheduled rotation failed: {why}"), now, event)?;
+            }
+            Ok::<_, Error>(())
         });
         if let Err(e) = done {
             tracing::warn!(%project, env = %slug, %key, "keeping a rotation's outcome failed: {e}");
@@ -467,7 +477,7 @@ impl Secrets {
         let sweeper = Caller::consumer("roll:sweeper");
         for (project, slug) in expired {
             match self.delete_environment(&project, &slug, None, &sweeper) {
-                Ok(()) | Err(Error::NotFound(_)) => out.expired += 1,
+                Ok(_) | Err(Error::NotFound(_)) => out.expired += 1,
                 Err(e) => {
                     out.failed += 1;
                     tracing::warn!(%project, env = %slug, "deleting an expired environment failed: {e}");
@@ -477,7 +487,7 @@ impl Secrets {
         // Managed links due for rotation (one per credential).
         let managed: Vec<(String, String, String, String, String, String)> = self.db.read(|c| {
             c.query(
-                &format!("SELECT s.project_id, e.slug, s.path, s.key, s.link, s.link_state FROM secrets s JOIN environments e ON e.id = s.env_id WHERE s.link LIKE '%\"mode\":\"managed\"%' AND s.link LIKE '%rotate_days%' AND s.link_state IS NOT NULL AND {}", crate::deleted::live("s.project_id")),
+                &format!("SELECT s.project_id, e.slug, s.path, s.key, s.link, s.link_state FROM secrets s JOIN environments e ON e.id = s.env_id AND e.forgotten_at IS NULL WHERE s.link LIKE '%\"mode\":\"managed\"%' AND s.link LIKE '%rotate_days%' AND s.link_state IS NOT NULL AND {}", crate::deleted::live("s.project_id")),
                 (),
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
             )

@@ -1,6 +1,10 @@
 //! The node over HTTP: framing, keep-alive and pipelining, compression, HEAD, limits, auth and
 //! tenant routing, TLS with SNI, idle unload.
 
+// Spawned tasks hold the node's request futures, which hold reqwest's HTTP/2 client state (h2,
+// on in builds with crates that enable it); their `Send` proof nests past the default 128.
+#![recursion_limit = "256"]
+
 mod common;
 
 use common::*;

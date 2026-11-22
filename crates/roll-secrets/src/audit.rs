@@ -5,6 +5,7 @@
 use crate::access::{Action, Caller, Scope};
 use crate::chain::{self, Digest, Gap, Verification, Walk};
 use crate::crypto::Keyring;
+use crate::events::Event;
 use crate::{Error, Result, Secrets, from_json, json};
 use code_sql::{Conn, OptionalExtension, params};
 use std::sync::Arc;
@@ -88,7 +89,13 @@ pub struct AuditFilter {
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn record(c: &Conn<'_>, mac: &Keyring, project: &str, caller: &Caller, action: &str, env: Option<&str>, path: Option<&str>, keys: &[String], summary: &str, now: i64) -> Result<()> {
-    append(c, mac, project, &[entry(caller, action, env, path, keys, summary, now)], None).map(|_| ())
+    append(c, mac, project, &[(entry(caller, action, env, path, keys, summary, now), None)], None).map(|_| ())
+}
+
+/// [`record`] a row the events feed carries as `event` (events.rs): the feed's `seq` is the row's.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn record_event(c: &Conn<'_>, mac: &Keyring, project: &str, caller: &Caller, action: &str, env: Option<&str>, path: Option<&str>, keys: &[String], summary: &str, now: i64, event: Event) -> Result<()> {
+    append(c, mac, project, &[(entry(caller, action, env, path, keys, summary, now), Some(event))], None).map(|_| ())
 }
 
 fn entry(caller: &Caller, action: &str, env: Option<&str>, path: Option<&str>, keys: &[String], summary: &str, now: i64) -> AuditEntry {
@@ -115,14 +122,16 @@ fn entry(caller: &Caller, action: &str, env: Option<&str>, path: Option<&str>, k
 /// reads can't starve a change. The head carries a MAC ([`head_msg`]), checked before it moves:
 /// a head changed outside roll isn't MACed again, so it stays visibly broken and the sweeper won't
 /// sign it. `start` moves where the log starts (retention's cut). Returns the last row's `seq`.
-fn append(c: &Conn<'_>, mac: &Keyring, project: &str, entries: &[AuditEntry], start: Option<i64>) -> Result<i64> {
+/// A row's event (events.rs) goes in the same INSERT: its feed position is the row's `seq`, taken
+/// here from the head, so the feed's order is the chain's commit order.
+fn append(c: &Conn<'_>, mac: &Keyring, project: &str, entries: &[(AuditEntry, Option<Event>)], start: Option<i64>) -> Result<i64> {
     type Head = (i64, String, i64, Option<String>);
     // A deleted project's log ends at its closing digest (deleted.rs): nothing goes after it, and
     // no fresh head starts. 410: a caller that only takes notes lets it pass.
     if c.query_row("SELECT closed_at FROM projects WHERE project_id = ?", [project], |r| r.get::<_, Option<i64>>(0)).optional()?.flatten().is_some() {
         return Err(Error::Gone(format!("{project}'s audit log is closed: the project was deleted")));
     }
-    let (n, at) = (entries.len() as i64, entries.last().map_or(0, |e| e.at));
+    let (n, at) = (entries.len() as i64, entries.last().map_or(0, |(e, _)| e.at));
     c.claim(&format!("audit:{project}"))?;
     let take = |c: &Conn<'_>| -> Result<Option<Head>> {
         Ok(c.query("UPDATE audit_heads SET seq = seq + ?, at = ? WHERE project_id = ? RETURNING seq, hash, start_seq, mac", params![n, at, project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.pop())
@@ -144,14 +153,15 @@ fn append(c: &Conn<'_>, mac: &Keyring, project: &str, entries: &[AuditEntry], st
     let start = start.unwrap_or(was_start);
     // Each row hashed onto the one before it.
     let mut hash = prev;
-    let linked: Vec<(AuditEntry, String, String, Option<String>)> = entries
+    type Linked = (AuditEntry, String, String, Option<String>, Option<&'static str>, Option<String>);
+    let linked: Vec<Linked> = entries
         .iter()
         .zip(first..)
-        .map(|(e, seq)| {
+        .map(|((e, event), seq)| {
             let e = AuditEntry { seq: Some(seq), ..e.clone() };
             hash = chain::link(&hash, project, &e);
             let (keys, approval) = (json(&e.keys), e.approval.as_ref().map(json));
-            (e, hash.clone(), keys, approval)
+            (e, hash.clone(), keys, approval, event.as_ref().map(|v| v.kind.as_str()), event.as_ref().map(|v| v.data.to_string()))
         })
         .collect();
     // The rows and the head's new hash in one round trip on Postgres.
@@ -162,10 +172,13 @@ fn append(c: &Conn<'_>, mac: &Keyring, project: &str, entries: &[AuditEntry], st
     let tag = intact.then(|| mac.audit_mac(&head_msg(project, last, &hash, start)));
     let rows = linked
         .iter()
-        .map(|(e, hash, keys, approval)| vec![Text(project), Int(e.seq.unwrap_or(0)), Text(hash), Int(e.at), Text(&e.actor), Text(&e.action), opt(&e.environment), opt(&e.path), Text(keys), Text(&e.summary), opt(&e.ip), opt(approval), opt(&e.digest)])
+        .map(|(e, hash, keys, approval, kind, data)| {
+            let kind = kind.map_or(Null, Text);
+            vec![Text(project), Int(e.seq.unwrap_or(0)), Text(hash), Int(e.at), Text(&e.actor), Text(&e.action), opt(&e.environment), opt(&e.path), Text(keys), Text(&e.summary), opt(&e.ip), opt(approval), opt(&e.digest), kind, opt(data)]
+        })
         .collect();
     c.execute_pipeline(&[
-        ("INSERT INTO audit (project_id, seq, hash, at, actor, action, env, path, keys, summary, ip, approval, digest) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows),
+        ("INSERT INTO audit (project_id, seq, hash, at, actor, action, env, path, keys, summary, ip, approval, digest, event, event_data) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows),
         ("UPDATE audit_heads SET hash = ?, start_seq = ?, mac = ? WHERE project_id = ?", vec![vec![Text(&hash), Int(start), opt(&tag), Text(project)]]),
     ])?;
     Ok(last)
@@ -185,6 +198,7 @@ pub(crate) struct Recorder(std::sync::Mutex<std::collections::HashMap<String, Ve
 
 struct Waiting {
     entry: AuditEntry,
+    event: Option<Event>,
     turn: Arc<Turn>,
 }
 
@@ -222,8 +236,14 @@ impl Secrets {
     /// failure is logged): the database that would hold the row is the one that's failing.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn audit_now(&self, project: &str, caller: &Caller, action: &str, env: Option<&str>, path: Option<&str>, keys: &[String], summary: &str) {
+        self.audit_now_event(project, caller, action, env, path, keys, summary, None)
+    }
+
+    /// [`Secrets::audit_now`] with the row's event for the feed (events.rs).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn audit_now_event(&self, project: &str, caller: &Caller, action: &str, env: Option<&str>, path: Option<&str>, keys: &[String], summary: &str, event: Option<Event>) {
         let res = self.db.now_ms().map_err(crate::Error::from).and_then(|now| self.keys().map(|mac| (now, mac)));
-        let res = res.map_err(|e| e.to_string()).and_then(|(now, mac)| self.record_batched(project, mac, entry(caller, action, env, path, keys, summary, now)));
+        let res = res.map_err(|e| e.to_string()).and_then(|(now, mac)| self.record_batched(project, mac, entry(caller, action, env, path, keys, summary, now), event));
         if let Err(e) = res {
             tracing::error!(project, action, "recording an audit row failed: {e}");
         }
@@ -231,9 +251,9 @@ impl Secrets {
 
     /// Record `entry` with whatever else is waiting for `project` ([`Recorder`]): written by this
     /// reader, or by another one, before this returns.
-    fn record_batched(&self, project: &str, mac: &Keyring, entry: AuditEntry) -> std::result::Result<(), String> {
+    fn record_batched(&self, project: &str, mac: &Keyring, entry: AuditEntry, event: Option<Event>) -> std::result::Result<(), String> {
         let turn = Arc::new(Turn::default());
-        let me = Waiting { entry, turn: turn.clone() };
+        let me = Waiting { entry, event, turn: turn.clone() };
         {
             let mut waiting = self.recorder.0.lock().unwrap_or_else(|e| e.into_inner());
             match waiting.get_mut(project) {
@@ -280,7 +300,7 @@ impl Secrets {
             }
         }
         let mut f = Finish { s: self, project, batch, res: None };
-        let entries: Vec<AuditEntry> = f.batch.iter().map(|w| w.entry.clone()).collect();
+        let entries: Vec<(AuditEntry, Option<Event>)> = f.batch.iter().map(|w| (w.entry.clone(), w.event.clone())).collect();
         // Read committed: the transaction's first statements claim the chain and take the head's
         // row lock, reading the head as committed once they have them, and the rest runs holding
         // them, so batches on other nodes queue rather than fail and re-run (serializable would,
@@ -551,7 +571,7 @@ pub(crate) fn write_digest(c: &Conn<'_>, mac: &Keyring, project: &str, now: i64,
         digest: Some(sign(&d)?),
         ..AuditEntry::default()
     };
-    let own = append(c, mac, project, std::slice::from_ref(&e), Some(start))?;
+    let own = append(c, mac, project, &[(e, None)], Some(start))?;
     c.execute("UPDATE audit_heads SET digest_seq = ?, digest_at = ? WHERE project_id = ?", params![own, now, project])?;
     Ok(true)
 }

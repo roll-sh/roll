@@ -425,6 +425,8 @@ const OPEN_WORLD: [&str; 9] = ["request_ai_review", "create_agent_thread", "send
 /// the routers declare to a row here or a line in `no-tool.txt` saying why it has no tool.
 pub const ROUTES: &[(&str, &str, &str)] = &[
     ("list_repos", "GET", "/v1/code/repos"),
+    ("search", "GET", "/v1/code/search"),
+    ("fetch", "GET", "/v1/code/documents/{id}"),
     ("search_code", "GET", "/v1/code/repos/{owner}/{repo}/search"),
     ("read_file", "GET", "/v1/code/repos/{owner}/{repo}/blob/{rev}/{*path}"),
     ("read_file", "GET", "/v1/code/repos/{owner}/{repo}"),
@@ -546,6 +548,22 @@ fn every_tool() -> Vec<Value> {
             "The repositories this caller can read, as `owner/repo` (`full_name`) with each one's default branch and description: where to start before naming a repo.",
             json!({ "owner": s("Only this owner's repositories") }),
             &[],
+            true,
+        ),
+        tool(
+            "search",
+            "Search changes and work items",
+            "Changes and work items in your own repos whose title or text mentions the query (any case), most recently updated first: each with an id for fetch, a title, a URL and a snippet. For a repo's code, use search_code.",
+            json!({ "query": s("Words to look for (1-200 characters)") }),
+            &["query"],
+            true,
+        ),
+        tool(
+            "fetch",
+            "Fetch a change or work item",
+            "One search result in full: its title, whole text, URL and metadata (repo, number, state, author or labels).",
+            json!({ "id": s("An id from search (chg_… or wi_…)") }),
+            &["id"],
             true,
         ),
         tool(
@@ -1353,6 +1371,14 @@ async fn run(c: &Call<'_>, name: &str, args: &Value) -> std::result::Result<Outc
             pass(c.get(&format!("{base}/tree/{}/{path}", seg(&rev))).await)
         }
         "list_repos" => pass(c.get(&format!("/v1/code/repos{}", query(&[("owner", opt(args, "owner"))]))).await),
+        "search" => {
+            let q = str_arg(args, "query").ok_or_else(|| fail("query is required"))?;
+            pass(c.get(&format!("/v1/code/search{}", query(&[("q", Some(q.to_string()))]))).await)
+        }
+        "fetch" => {
+            let id = str_arg(args, "id").ok_or_else(|| fail("id is required"))?;
+            pass(c.get(&format!("/v1/code/documents/{}", seg(id))).await)
+        }
         "log" => {
             let base = c.repo(args)?;
             let limit = opt(args, "limit").or(Some("30".into()));
