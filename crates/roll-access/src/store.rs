@@ -1951,6 +1951,21 @@ impl Store {
         Ok((code, grant_id))
     }
 
+    /// A code for an existing connection (step-up: the person widened it on the consent screen),
+    /// so the client's next tokens are that connection's and nothing new is made.
+    pub fn issue_code_for(&self, client_id: &str, grant_id: &str, redirect_uri: &str, challenge: &str, resource: Option<&str>) -> Result<String> {
+        let code = new_secret("rlz_");
+        let now = code_sql::now_ms();
+        self.db.write(|c| {
+            c.execute(
+                "INSERT INTO oauth_codes (hash, client_id, grant_id, redirect_uri, challenge, resource, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                params![hash(&code), client_id, grant_id, redirect_uri, challenge, resource, now + CODE_TTL_MS],
+            )?;
+            Ok::<_, Error>(())
+        })?;
+        Ok(code)
+    }
+
     /// Exchange a code (once) for an access and a refresh token. `verify(challenge)` checks PKCE.
     pub fn exchange_code(
         &self,

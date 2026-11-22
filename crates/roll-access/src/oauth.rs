@@ -193,6 +193,10 @@ pub struct Consent {
     pub state: Option<String>,
     #[serde(default)]
     pub resource: Option<String>,
+    /// Step-up: the person's existing connection of this client (`tok_…`) to give these rules,
+    /// instead of making a new one (MCP's `insufficient_scope` challenge sent the client here).
+    #[serde(default)]
+    pub widen: Option<String>,
     #[serde(flatten)]
     pub allowed: Allowed,
 }
@@ -288,6 +292,9 @@ pub async fn authorize(State(a): S, ext: Extensions, body: axum::body::Bytes) ->
     // The resource the client asked for (RFC 8707; MCP clients always name the MCP server): its
     // tokens are for that server only. One that named none (`roll login`) gets API tokens.
     let res = c.resource.as_ref().map(|_| resource(&a));
+    if let Some(id) = c.widen.clone() {
+        return widen(&a, &c, &client, id, new, user, asker, res).await;
+    }
     let (a2, cl, uri, ch) = (a.clone(), client.clone(), c.redirect_uri.clone(), c.code_challenge.clone());
     let (code, grant_id) = tokio::task::spawn_blocking(move || a2.store.issue_code(&cl, &new, crate::store::Issuer { created_by: &by, user: user.as_deref() }, &uri, &ch, res.as_deref()))
         .await
@@ -305,6 +312,54 @@ pub async fn authorize(State(a): S, ext: Extensions, body: axum::body::Bytes) ->
     let mut res = Json(json!({ "redirect": redirect.to_string() })).into_response();
     res.extensions_mut().insert(crate::api::Changed(grant_id));
     Ok(res)
+}
+
+/// Step-up's consent: the person's existing connection of this client takes the rules they allowed
+/// now (the same checks as editing it: the policy, and an admin's approval when a person widens
+/// past it), and the client gets a code for that connection, so its other sessions widen too and
+/// nothing new is made. Only a live connection of this client, this person's, not waiting on an
+/// admin.
+#[allow(clippy::too_many_arguments)]
+async fn widen(
+    a: &Arc<Access>,
+    c: &Consent,
+    client: &crate::store::Client,
+    id: String,
+    new: NewGrant,
+    user: Option<String>,
+    asker: Option<String>,
+    res: Option<String>,
+) -> crate::Result<Response> {
+    let (a2, id2) = (a.clone(), id.clone());
+    let g = tokio::task::spawn_blocking(move || a2.store.get(&id2)).await.map_err(|e| Error::Internal(e.to_string()))??;
+    let theirs = g.kind == "oauth" && g.client.as_ref().is_some_and(|cl| cl.id == client.id) && g.user == user && g.revoked_at.is_none();
+    if !theirs {
+        return Err(Error::BadRequest("widen must name your own live connection of this client".into()));
+    }
+    if g.pending {
+        return Err(Error::Conflict("that connection waits for an admin's approval: its rules can't change until they decide".into()));
+    }
+    a.check_policy(g.expires_at)?;
+    let change = crate::store::GrantChange { rules: Some(new.rules.clone()), ask_otherwise: Some(new.ask_otherwise), pending: asker.as_ref().map(|_| true), ..Default::default() };
+    let (a2, id2) = (a.clone(), id.clone());
+    let updated = tokio::task::spawn_blocking(move || a2.store.update(&id2, &change)).await.map_err(|e| Error::Internal(e.to_string()))??;
+    if let Some(h) = &asker {
+        a.tell_admins_waiting(&updated, h);
+    }
+    let (a2, cid, gid, uri, ch) = (a.clone(), client.id.clone(), id.clone(), c.redirect_uri.clone(), c.code_challenge.clone());
+    let code = tokio::task::spawn_blocking(move || a2.store.issue_code_for(&cid, &gid, &uri, &ch, res.as_deref())).await.map_err(|e| Error::Internal(e.to_string()))??;
+    let mut redirect = url::Url::parse(&c.redirect_uri).map_err(|_| Error::BadRequest("redirect_uri isn't a URL".into()))?;
+    {
+        let mut q = redirect.query_pairs_mut();
+        q.append_pair("code", &code);
+        if let Some(s) = &c.state {
+            q.append_pair("state", s);
+        }
+        q.append_pair("iss", &api(a));
+    }
+    let mut out = Json(json!({ "redirect": redirect.to_string() })).into_response();
+    out.extensions_mut().insert(crate::api::Changed(id));
+    Ok(out)
 }
 
 /// A metadata document is fetched at most this often (it's kept between).

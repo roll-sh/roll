@@ -4,6 +4,7 @@ import { type ReactNode, useEffect, useState } from "react";
 import {
   accessApi,
   catalogFor,
+  connectionToWiden,
   denyRedirect,
   describeRule,
   EXPIRIES,
@@ -11,7 +12,9 @@ import {
   presetFor,
   parseRate,
   presetRules,
+  stepUpRules,
   type Allowed,
+  type Grant,
   type AuthorizeRequest,
   type Catalog,
   type Me,
@@ -71,9 +74,17 @@ export function Problem({ text, title = "This connection request can't be used",
 }
 
 function Ask({ req }: { req: AuthorizeRequest }) {
-  const loaded = useSignedInLoad(() => accessApi.client(req.client_id), [req.client_id]);
+  const loaded = useSignedInLoad(() => Promise.all([accessApi.client(req.client_id), accessApi.tokens()]), [req.client_id]);
   if (loaded.state !== "ready") return <LoadState loaded={loaded} what="connect this client" />;
-  const { me, catalog, value: client } = loaded;
+  const {
+    me,
+    catalog,
+    value: [client, grants],
+  } = loaded;
+  // Step-up: what a refused call asked for, and the person's connection of this client to add it to.
+  const add = stepUpRules(req.scope, catalog.products);
+  const user = me.kind === "user" ? me.user.id : me.kind === "operator" ? (me.user?.id ?? null) : null;
+  const existing = add.length > 0 ? connectionToWiden(grants, req.client_id, user) : undefined;
   if (!client.redirect_uris.includes(req.redirect_uri)) return <Problem text="The redirect isn't one this client registered." />;
   const back = new URL(req.redirect_uri);
   return (
@@ -82,6 +93,8 @@ function Ask({ req }: { req: AuthorizeRequest }) {
       catalog={catalog}
       clientName={client.name}
       scope={req.scope}
+      add={add}
+      existing={existing}
       onAllow={async (a) => {
         const { redirect } = await accessApi.authorize({
           ...a,
@@ -172,6 +185,8 @@ export function AllowForm({
   catalog,
   clientName,
   scope,
+  add = [],
+  existing,
   onAllow,
   onDeny,
   head,
@@ -180,14 +195,20 @@ export function AllowForm({
   catalog: Catalog;
   clientName: string;
   scope?: string | null;
-  onAllow: (a: Allowed) => Promise<void>;
+  /** Rules a refused call asked for (step-up), proposed on top of the rest. */
+  add?: Rule[];
+  /** The person's connection of this client a step-up adds them to. */
+  existing?: Grant;
+  onAllow: (a: Allowed & { widen?: string }) => Promise<void>;
   onDeny: () => void | Promise<void>;
   head: (busy: boolean) => ReactNode;
 }) {
   const [rules, setRules] = useState<Rule[]>(() => {
+    if (existing) return [...existing.rules, ...add];
     const preset = presetFor(scope ?? undefined, catalog.presets);
-    return preset ? presetRules(preset) : [];
+    return [...(preset ? presetRules(preset) : []), ...add];
   });
+  const [widen, setWiden] = useState(existing !== undefined);
   const [name, setName] = useState(clientName);
   const [expiry, setExpiry] = useState(2);
   const [rateText, setRateText] = useState("");
@@ -202,7 +223,14 @@ export function AllowForm({
     setError(null);
     try {
       const ms = EXPIRIES[expiry].ms;
-      await onAllow({ name: name.trim() || clientName, rules, expires_at: ms === null ? null : Date.now() + ms, rate_per_minute: rate.rate, ask_otherwise: askOtherwise });
+      await onAllow({
+        name: name.trim() || clientName,
+        rules,
+        expires_at: ms === null ? null : Date.now() + ms,
+        rate_per_minute: rate.rate,
+        ask_otherwise: askOtherwise,
+        widen: widen && existing ? existing.id : undefined,
+      });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setBusy(false);
@@ -221,6 +249,26 @@ export function AllowForm({
   return (
     <div className="rise space-y-6">
       {head(busy)}
+
+      {add.length > 0 && (
+        <section className="space-y-2 rounded-xl border border-line bg-panel p-5">
+          <p className="text-[13px]">{clientName} was refused and asks to be allowed:</p>
+          <ul className="space-y-1 font-mono text-[12px] text-muted">
+            {add.map((r, i) => (
+              <li key={i}>{describeRule(r)}</li>
+            ))}
+          </ul>
+          {existing && (
+            <label className="flex items-start gap-2 pt-1 text-[13px]">
+              <input type="checkbox" checked={widen} onChange={(e) => setWiden(e.target.checked)} className="mt-0.5" />
+              <span>
+                Add it to your connection &ldquo;{existing.name}&rdquo;
+                <span className="block text-[12px] text-muted">Its sessions keep working with the rules below. Unticked, this makes a new connection.</span>
+              </span>
+            </label>
+          )}
+        </section>
+      )}
 
       <section className="rounded-xl border border-line bg-panel p-5">
         <Builder catalog={catalog} rules={rules} onChange={(r) => setRules(r)} />

@@ -867,6 +867,54 @@ async fn oauth_connects_an_mcp_client() {
     assert!(g["revoked_why"].as_str().is_some_and(|w| w.contains("used again")), "{g}");
 }
 
+/// Step-up (MCP's `insufficient_scope` challenge): consenting again with `widen` gives the existing
+/// connection the new rules and a code for it, so the client's tokens, old and new, are that
+/// connection's and nothing new is made. Only one's own live connection of the same client.
+#[tokio::test]
+async fn step_up_widens_the_connection() {
+    let d = Daemon::new(0);
+    d.people.add("usr_bob", "bob");
+    let redirect = "http://127.0.0.1:33418/callback";
+    let (_, client) = d.call("", Method::POST, "/v1/access/oauth/register", Some(json!({ "client_name": "Claude Code", "redirect_uris": [redirect] }))).await;
+    let client_id = client["client_id"].as_str().unwrap();
+    let (verifier, challenge) = ("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk", "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
+    let consent = |rules: Value, widen: Option<&str>| {
+        let mut c = json!({ "client_id": client_id, "redirect_uri": redirect, "code_challenge": challenge, "resource": "http://127.0.0.1:7070/v1/mcp", "rules": rules });
+        if let Some(w) = widen {
+            c["widen"] = json!(w);
+        }
+        c
+    };
+    let d = &d;
+    let tokens = |out: Value| async move {
+        let url = url::Url::parse(out["redirect"].as_str().unwrap()).unwrap();
+        let code = url.query_pairs().find(|(k, _)| k == "code").unwrap().1.to_string();
+        d.form("/v1/access/oauth/token", &[("grant_type", "authorization_code"), ("code", &code), ("redirect_uri", redirect), ("client_id", client_id), ("code_verifier", verifier), ("resource", "http://127.0.0.1:7070/v1/mcp")]).await.1
+    };
+    let read = json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }]);
+    let (s, out) = d.call(OPERATOR, Method::POST, "/v1/access/oauth/authorize", Some(consent(read, None))).await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    let first = tokens(out).await;
+    let (old, grant) = (first["access_token"].as_str().unwrap().to_string(), first["grant_id"].as_str().unwrap().to_string());
+    assert_eq!(d.via_mcp(&old, Method::DELETE, "/v1/projects/pa").await, StatusCode::FORBIDDEN);
+
+    let more = json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow", "delete": "allow" } }]);
+    let (s, out) = d.call(OPERATOR, Method::POST, "/v1/access/oauth/authorize", Some(consent(more.clone(), Some(&grant)))).await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    let second = tokens(out).await;
+    assert_eq!(second["grant_id"], grant.as_str(), "the same connection: {second}");
+    assert_ne!(d.via_mcp(&old, Method::DELETE, "/v1/projects/pa").await, StatusCode::FORBIDDEN, "its old token widened too");
+    let (_, list) = d.call(OPERATOR, Method::GET, "/v1/access/tokens", None).await;
+    assert_eq!(list.as_array().unwrap().iter().filter(|g| g["kind"] == "oauth").count(), 1, "nothing new made: {list}");
+
+    // Someone else's connection, and a revoked one, aren't widened.
+    let (s, e) = d.as_user("usr_bob", Method::POST, "/v1/access/oauth/authorize", Some(consent(json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }]), Some(&grant)))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{e}");
+    d.call(OPERATOR, Method::DELETE, &format!("/v1/access/tokens/{grant}"), None).await;
+    let (s, e) = d.call(OPERATOR, Method::POST, "/v1/access/oauth/authorize", Some(consent(more, Some(&grant)))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{e}");
+}
+
 /// A device signs in with a code (RFC 8628, `roll login` over SSH): it registers without a
 /// redirect, gets a short code, polls (too fast is `slow_down`), a person enters the code and
 /// allows it, and its next poll takes the tokens, once. A token never looks a code up, wrong codes

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { installLink, accessRequest, approversText, parseApprovers, deciderName, describeApprovalRule, gateProgress, rememberable, proposedRule, approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, githubIdentity, githubStep, presetFor, presetRules, publicJwk, rulesOf, trustedLabel, statusOf, toolsetCost, pickArea, waitsForAdmin, withToolsets, type Approval, type Preset, idpFromForm, tieForAgents, untieForAgents } from "./access-api";
+import { type Grant, stepUpRules, connectionToWiden, installLink, accessRequest, approversText, parseApprovers, deciderName, describeApprovalRule, gateProgress, rememberable, proposedRule, approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, githubIdentity, githubStep, presetFor, presetRules, publicJwk, rulesOf, trustedLabel, statusOf, toolsetCost, pickArea, waitsForAdmin, withToolsets, type Approval, type Preset, idpFromForm, tieForAgents, untieForAgents } from "./access-api";
 
 const presets: Preset[] = [
   { id: "read-only", name: "Read only", description: "", rules: [{ product: "*", resources: "*", actions: { read: "allow" } }] },
@@ -250,5 +250,21 @@ describe("an SSO connection for agents too", () => {
     expect(tied).toEqual([{ issuer: "https://other.example", domains: ["x.com"] }, { issuer: "https://acme.okta.com", name: "Okta", matching: "email", sso: "sso_okta" }]);
     expect(tieForAgents(tied, c)).toBe(tied);
     expect(untieForAgents(tied, "sso_okta")).toEqual([{ issuer: "https://other.example", domains: ["x.com"] }]);
+  });
+});
+
+describe("step-up scope", () => {
+  it("reads roll:add items as rules, ignoring what isn't one", () => {
+    expect(stepUpRules("agent roll:add:postgres:delete:pa roll:add:apps:deploy roll:add:nope:read roll:add:postgres:fly roll:add:postgres:read:a/b", ["postgres", "apps"])).toEqual([
+      { product: "postgres", resources: [{ id: "pa" }], actions: { delete: "allow" } },
+      { product: "apps", resources: "*", actions: { deploy: "allow" } },
+    ]);
+    expect(stepUpRules(undefined, ["postgres"])).toEqual([]);
+  });
+
+  it("finds the person's own live connection of the client", () => {
+    const g = (over: Partial<Grant>) => ({ id: "tok_a", kind: "oauth", client: { id: "c1" }, user: "usr_a", revoked_at: null, ...over }) as Grant;
+    expect(connectionToWiden([g({})], "c1", "usr_a")?.id).toBe("tok_a");
+    expect(connectionToWiden([g({ user: "usr_b" }), g({ revoked_at: 1 }), g({ pending: true }), g({ kind: "token" }), g({ client: { id: "c2" } as Grant["client"] })], "c1", "usr_a")).toBeUndefined();
   });
 });

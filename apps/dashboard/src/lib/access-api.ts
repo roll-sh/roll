@@ -52,6 +52,26 @@ export function proposedRule(search: string, effect: Effect): Rule | null {
   return { product, resources, actions: { [action as Action]: effect } };
 }
 
+/**
+ * The rules an MCP client's step-up asks for: `scope` items `roll:add:<product>:<action>[:<resource>]`
+ * (roll's `insufficient_scope` challenge on a refused call), each one action allowed, on that
+ * resource or every one. The consent screen proposes them; the person decides.
+ */
+export function stepUpRules(scope: string | undefined | null, products: string[]): Rule[] {
+  return (scope ?? "").split(/\s+/).flatMap((item) => {
+    const [ns, verb, product, action, ...rest] = item.split(":");
+    if (ns !== "roll" || verb !== "add" || !products.includes(product) || !(ACTIONS as readonly string[]).includes(action) || rest.length > 1) return [];
+    const id = rest[0];
+    if (id !== undefined && !/^[A-Za-z0-9_.-]{1,64}$/.test(id)) return [];
+    return [{ product, resources: id ? [{ id }] : "*", actions: { [action as Action]: "allow" as Effect } }];
+  });
+}
+
+/** The person's live connection of this client that a step-up widens (theirs, not waiting on an admin). */
+export function connectionToWiden(grants: Grant[], clientId: string, user: string | null): Grant | undefined {
+  return grants.find((g) => g.kind === "oauth" && g.client?.id === clientId && !g.revoked_at && !g.pending && (g.user ?? null) === user);
+}
+
 export interface OAuthClient {
   id: string;
   name: string;
@@ -388,6 +408,8 @@ export interface Allowed {
 }
 
 export interface Consent extends Allowed {
+  /** Step-up: the person's existing connection of this client to give these rules (`tok_…`). */
+  widen?: string;
   client_id: string;
   redirect_uri: string;
   code_challenge: string;
