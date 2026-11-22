@@ -1089,6 +1089,8 @@ SEARCH_BRANCH_GONE=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: B
 # Nor an earlier push's copy of it.
 BUCKETS_LEFT=$(api GET /v1/storage/buckets | jq_ "len([b for b in (d if isinstance(d, list) else d.get('buckets', [])) if b['name'].startswith('assets-')])")
 [ "$BUCKETS_LEFT" = 0 ] || { echo "no bucket branch of the preview's (nor an earlier push's copy) should outlive it: $BUCKETS_LEFT"; exit 1; }
+NOSQL_LEFT=$(api GET /v1/nosql/databases | jq_ "len([x for x in (d if isinstance(d, list) else d.get('databases', [])) if x['name'].startswith('pv-')])")
+[ "$NOSQL_LEFT" = 0 ] || { echo "no NoSQL database of the preview's (nor an earlier push's copy) should outlive it: $NOSQL_LEFT"; exit 1; }
 STREAMS_LEFT=$(api GET /v1/streams | jq_ "len([x for x in (d if isinstance(d, list) else d.get('streams', [])) if x['name'].startswith('pv-')])")
 [ "$STREAMS_LEFT" = 0 ] || { echo "no stream of the preview's (nor an earlier push's copy) should outlive it: $STREAMS_LEFT"; exit 1; }
 SEARCH_LEFT=$(api GET /v1/search/clusters | jq_ "len([c for c in (d if isinstance(d, list) else d.get('clusters', [])) if c['name'].startswith('pv-')])")
@@ -1163,5 +1165,5 @@ cat <<EOF
 | Search: products.name in the branch / in the parent / the branch's term dictionary | $ES_READ / $ES_PARENT / $ES_TERMS |
 | Search: the branch's data-only ELASTICSEARCH_API_KEY reads / makes a key | $KEY_READ / $KEY_MINT |
 | Search: an address in an array of objects / under a dotted key / in an index named logs.2024, in the branch | $ES_DEEP / $ES_DOTTED |
-| After landing: parents present / preview Redis branches left / Postgres branches left / search clusters left / bucket branches left / streams left (earlier pushes' copies too) | $PARENTS_OK of 4 / $BRANCHES_LEFT / $PG_LEFT / $SEARCH_LEFT / $BUCKETS_LEFT / $STREAMS_LEFT |
+| After landing: parents present / preview Redis branches left / Postgres branches left / search clusters left / bucket branches left / streams left / NoSQL left (earlier pushes' copies too) | $PARENTS_OK of 4 / $BRANCHES_LEFT / $PG_LEFT / $SEARCH_LEFT / $BUCKETS_LEFT / $STREAMS_LEFT / $NOSQL_LEFT |
 EOF
