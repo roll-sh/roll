@@ -496,11 +496,11 @@ async fn clusters_over_their_memory_budget_are_committed() {
     let objects = search_store::test_objects("server-membudget");
     let store = open_store(objects, "n1", &cache_dir("membudget"), false).await;
     let catalog = Arc::new(StaticCatalog::new());
-    let mut spec = ClusterSpec::new("c1").with_password("pw");
-    // 3000 small documents take about 60 KiB in indexing buffers.
-    spec.max_resident_bytes = Some(16 << 10);
-    catalog.insert(spec);
-    let n = Node::new(catalog, Arc::new(ObjectStores::new(store.clone())), NodeConfig::default());
+    catalog.insert(ClusterSpec::new("c1").with_password("pw"));
+    // No reaper: a budget from the load on would have the node's own check (every 2 s) commit
+    // during the bulk, racing the one below. That check is
+    // `a_budgeted_cluster_is_checked_soon_even_when_the_reaper_idles_slowly`'s.
+    let n = Node::new(catalog, Arc::new(ObjectStores::new(store.clone())), NodeConfig { idle_unload: None, ..NodeConfig::default() });
     // Writes stay in indexing buffers (only the WAL record is durable) until a commit.
     ok(&n, "c1", "PUT", "/m", r#"{"settings":{"number_of_shards":1,"index.translog.durability":"async","index.translog.sync_interval":"60s"}}"#).await;
     let mut body = String::new();
@@ -508,8 +508,13 @@ async fn clusters_over_their_memory_budget_are_committed() {
         body.push_str(&format!("{{\"index\":{{\"_id\":\"{i}\"}}}}\n{{\"title\":\"some words for document {i}\",\"n\":{i}}}\n"));
     }
     ok(&n, "c1", "POST", "/m/_bulk", &body).await;
+    // 3000 small documents take about 2.7 MB in indexing buffers.
     let before = n.usage("c1").await.unwrap();
     assert!(before.resident_bytes > 16 << 10, "{before:?}");
+    // The budget reaches the loaded cluster, and applies at the next check.
+    let mut spec = ClusterSpec::new("c1").with_password("pw");
+    spec.max_resident_bytes = Some(16 << 10);
+    n.update_spec(spec);
     let commits = n.get_loaded("c1").unwrap().data.as_ref().unwrap().full_commits.load(Ordering::Relaxed);
     assert!(n.enforce_memory(0).await.is_empty(), "no node budget: nothing unloaded");
     let after = n.usage("c1").await.unwrap();
