@@ -400,6 +400,10 @@ pub enum AppsCmd {
         /// A Git URL service's Git LFS objects fetched in place of their pointers (`true`).
         #[arg(long)]
         lfs: Option<bool>,
+        /// The language's OpenTelemetry agent in its image (Node, Python), started while its
+        /// traces are on (`true`), or none (`false`).
+        #[arg(long)]
+        otel: Option<bool>,
         /// A gradual rollout: the shares of requests a new deployment takes in turn (`10,50`);
         /// `none` switches at once.
         #[arg(long, value_name = "PERCENTS")]
@@ -421,6 +425,10 @@ pub enum AppsCmd {
         /// The app speaks HTTP/2 without TLS (a gRPC server): `true` or `false`.
         #[arg(long)]
         h2c: Option<bool>,
+        /// With `--h2c true`: its health is grpc.health.v1's check for this service (`.` for the
+        /// whole server), in place of `--health`; `none` turns it off.
+        #[arg(long, value_name = "SERVICE")]
+        health_grpc: Option<String>,
         /// A worker follows a stream group's lag: `<stream>:<group>[:<per instance>]`, or `none`.
         #[arg(long, value_name = "STREAM:GROUP[:PER]")]
         scale: Option<String>,
@@ -470,6 +478,9 @@ pub enum AppsCmd {
         /// Its port speaks TCP, not HTTP (`true`): a port of its own per environment.
         #[arg(long)]
         tcp: Option<bool>,
+        /// Its port speaks UDP (`true`): a UDP port of its own per environment (one node).
+        #[arg(long)]
+        udp: Option<bool>,
         /// A deployment that crash-loops within ten minutes of going live is replaced by the one
         /// before it (`true`), or stays (`false`).
         #[arg(long)]
@@ -538,6 +549,43 @@ pub enum AppsCmd {
         again: bool,
         #[arg(long, requires = "vulnerabilities", value_parser = ["critical", "high", "medium", "low", "unknown"])]
         severity: Option<String>,
+        /// A deployment's SBOM (CycloneDX JSON, from its image scan): printed, or written with `-o`.
+        #[arg(long, value_name = "DEPLOYMENT", conflicts_with_all = ["commits", "vulnerabilities", "explain"])]
+        sbom: Option<String>,
+        #[arg(long, short = 'o', requires = "sbom")]
+        output: Option<PathBuf>,
+    },
+    /// Its objective (`run.slo`) against its window: what met it, the error budget left, and
+    /// whether it's burning fast.
+    Slo {
+        #[command(flatten)]
+        target: Target,
+    },
+    /// A static site's forms and what was sent: its forms, a form's submissions (`--form`), or
+    /// `--delete` one.
+    Forms {
+        #[command(flatten)]
+        target: Target,
+        #[arg(long)]
+        form: Option<String>,
+        /// With `--form`: at most this many, the newest first (1–200).
+        #[arg(long, requires = "form")]
+        limit: Option<u32>,
+        /// With `--form`: delete this submission.
+        #[arg(long, value_name = "SUBMISSION", requires = "form")]
+        delete: Option<String>,
+    },
+    /// The service's project's own preview domain (a wildcard its previews answer under): shown,
+    /// `--set '*.preview.acme.dev'`, `--verify` once its DNS is in, or `--remove`.
+    PreviewDomain {
+        #[command(flatten)]
+        target: Target,
+        #[arg(long, value_name = "WILDCARD", conflicts_with_all = ["verify", "remove"])]
+        set: Option<String>,
+        #[arg(long, conflicts_with = "remove")]
+        verify: bool,
+        #[arg(long)]
+        remove: bool,
     },
     /// Its streams pushed to it (`run.push`) as they stand: how far each group is behind, what was
     /// delivered and dead-lettered, and whether one is failing or off.
@@ -563,6 +611,13 @@ pub enum AppsCmd {
         dst: String,
         #[arg(long)]
         instance: Option<String>,
+    },
+    /// Short-lived containers to run commands in (Vercel Sandbox, Fly Machines): the live image
+    /// or a public one, without the environment's variables or network unless asked; removed at
+    /// their end (`--ttl`, default 10 minutes). Admin.
+    Sandbox {
+        #[command(subcommand)]
+        cmd: SandboxCmd,
     },
     /// Open the environment's address in a browser (and print it); `--print` only prints it.
     Open {
@@ -984,11 +1039,17 @@ pub enum AppsCmd {
         #[arg(long, requires = "output")]
         force: bool,
     },
-    /// A Compose file as roll.toml's `[apps]` and `[databases]` (Railway's Compose import):
-    /// printed, or appended to ./roll.toml with `--write`; `roll up --all` applies it.
-    ImportCompose {
-        /// The Compose file (default: compose.yaml, compose.yml, docker-compose.yml here).
+    /// Another platform's file as roll.toml's `[apps]` and `[databases]`: a Compose file,
+    /// render.yaml, fly.toml, railway.json or railway.toml, or Heroku's app.json (with the Procfile
+    /// beside it), each known by its name; printed with what isn't carried over, or appended to
+    /// ./roll.toml with `--write`; `roll up --all` applies it.
+    #[command(alias = "import-compose")]
+    Import {
+        /// The file (default: the one of those here).
         file: Option<PathBuf>,
+        /// What it is, when its name doesn't say.
+        #[arg(long, value_parser = ["compose", "render", "fly", "railway", "heroku"])]
+        from: Option<String>,
         #[arg(long)]
         write: bool,
     },
@@ -1182,6 +1243,10 @@ pub enum AppsCmd {
         no_branch: bool,
         #[arg(long)]
         variables_from: Option<String>,
+        /// Data of its own (`branch`): a branch of each Postgres and Redis database it links, in
+        /// place of the databases themselves; `none` goes back to them (the branches are deleted).
+        #[arg(long, value_name = "MODE", value_parser = ["branch", "none"])]
+        data: Option<String>,
         /// Deploy a push only once its commit's checks pass (`true`), or at once (`false`).
         #[arg(long)]
         wait_for_ci: Option<bool>,
@@ -1796,6 +1861,25 @@ fn parse_env(text: &str) -> (Vec<(String, String)>, Vec<usize>) {
         vars.push((k.to_string(), v));
     }
     (vars, bad)
+}
+
+/// The files `roll apps import` knows by name, and what each is.
+const IMPORTABLE: [(&str, &str); 9] = [
+    ("compose.yaml", "compose"),
+    ("compose.yml", "compose"),
+    ("docker-compose.yml", "compose"),
+    ("docker-compose.yaml", "compose"),
+    ("render.yaml", "render"),
+    ("fly.toml", "fly"),
+    ("railway.json", "railway"),
+    ("railway.toml", "railway"),
+    ("app.json", "heroku"),
+];
+
+/// What a file is, by its name.
+fn import_kind(path: &Path) -> Option<&'static str> {
+    let name = path.file_name()?.to_str()?;
+    IMPORTABLE.iter().find(|(n, _)| *n == name).map(|(_, k)| *k)
 }
 
 /// A double-quoted `.env` value's escapes (`\n`, `\r`, `\t`, `\"`, `\\`), as Compose's env files and
@@ -2754,8 +2838,172 @@ fn print_service(v: &Value) {
     }
 }
 
+#[derive(Subcommand)]
+pub enum SandboxCmd {
+    /// An environment's sandboxes and when each ends.
+    Ls {
+        #[command(flatten)]
+        target: Target,
+    },
+    /// Start one; prints its id.
+    Create {
+        #[command(flatten)]
+        target: Target,
+        /// A public image instead of the live deployment's (`python:3.13-slim`).
+        #[arg(long)]
+        image: Option<String>,
+        /// Seconds it stays up (60–86400; default 600).
+        #[arg(long)]
+        ttl: Option<u32>,
+        /// CPUs (0.25–4; default 0.5).
+        #[arg(long)]
+        cpu: Option<f64>,
+        /// Memory in MB (256–8192; default 512).
+        #[arg(long)]
+        memory: Option<u32>,
+        /// The live deployment's variables and files (default: none of them).
+        #[arg(long)]
+        variables: bool,
+        /// On the environment's private network (default: one of its own, the internet only).
+        #[arg(long)]
+        private_network: bool,
+    },
+    /// Run a command in it: its output here, and its exit code as this command's.
+    Exec {
+        #[command(flatten)]
+        target: Target,
+        id: String,
+        /// Seconds before it's killed (1–600; default 60).
+        #[arg(long)]
+        timeout: Option<u32>,
+        #[arg(trailing_var_arg = true, required = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
+    /// Copy one file to or from it (at most 1 MiB): `:` marks the sandbox's side
+    /// (`roll apps sandbox cp sbx_… ./input.json :/tmp/input.json`).
+    Cp {
+        #[command(flatten)]
+        target: Target,
+        id: String,
+        src: String,
+        dst: String,
+    },
+    /// Stop and remove it now.
+    Rm {
+        #[command(flatten)]
+        target: Target,
+        id: String,
+    },
+}
+
+async fn sandbox(api: &Api, json_out: bool, cmd: SandboxCmd) -> anyhow::Result<()> {
+    let target = match &cmd {
+        SandboxCmd::Ls { target } | SandboxCmd::Create { target, .. } | SandboxCmd::Exec { target, .. } | SandboxCmd::Cp { target, .. } | SandboxCmd::Rm { target, .. } => target,
+    };
+    let svc = service(api, target).await?;
+    let base = format!("{}/sandboxes", env_path(&svc, &target.env));
+    let v = match cmd {
+        SandboxCmd::Ls { .. } => {
+            let v = api.get(&base).await?;
+            if !json_out {
+                let now = chrono::Utc::now().timestamp_millis();
+                for b in v.as_array().into_iter().flatten() {
+                    let left = ago(b["expires_at"].as_i64().unwrap_or(now) - now);
+                    let with = if b["variables"] == true { ", its variables" } else { "" };
+                    println!("{}  {:<32} {} vCPU {} MB, network {}{with}, ends in {}", s(&b["id"]), s(&b["image"]), b["cpu"], b["memory_mb"], s(&b["network"]), left.trim_end_matches(" ago"));
+                }
+                return Ok(());
+            }
+            v
+        }
+        SandboxCmd::Create { image, ttl, cpu, memory, variables, private_network, .. } => {
+            let mut body = json!({ "variables": variables, "network": if private_network { "environment" } else { "none" } });
+            for (k, x) in [("image", image.map(Value::from)), ("ttl_s", ttl.map(Value::from)), ("cpu", cpu.map(Value::from)), ("memory_mb", memory.map(Value::from))] {
+                if let Some(x) = x {
+                    body[k] = x;
+                }
+            }
+            let v = api.post(&base, body).await?;
+            if !json_out {
+                println!("{}", s(&v["id"]));
+                return Ok(());
+            }
+            v
+        }
+        SandboxCmd::Exec { id, timeout, command, .. } => {
+            let mut body = json!({ "command": command.join(" ") });
+            if let Some(t) = timeout {
+                body["timeout_s"] = json!(t);
+            }
+            let v = api.post(&format!("{base}/{}/exec", enc(&id)), body).await?;
+            if !json_out {
+                use std::io::Write;
+                let _ = std::io::stdout().write_all(s(&v["stdout"]).as_bytes());
+                let _ = std::io::stderr().write_all(s(&v["stderr"]).as_bytes());
+                if v["truncated"] == true {
+                    eprintln!("(more than 1 MiB of output: the rest was dropped)");
+                }
+                // A timeout is `timeout`'s 124, as a shell would say.
+                let code = match v["exit_code"].as_i64() {
+                    Some(c) => c as i32,
+                    None => {
+                        eprintln!("killed at its timeout");
+                        124
+                    }
+                };
+                if code != 0 {
+                    std::process::exit(code);
+                }
+                return Ok(());
+            }
+            v
+        }
+        SandboxCmd::Cp { id, src, dst, .. } => {
+            let url = |path: &str| format!("{}{base}/{}/files?path={}", api.base, enc(&id), enc(path));
+            let auth = |req: reqwest::RequestBuilder| match &api.key {
+                Some(k) => req.bearer_auth(k),
+                None => req,
+            };
+            let check = |res: reqwest::Response| async {
+                if !res.status().is_success() {
+                    let code = res.status();
+                    let body: Value = res.json().await.unwrap_or(Value::Null);
+                    bail!("{}", body["error"].as_str().map(str::to_string).unwrap_or_else(|| code.to_string()));
+                }
+                Ok(res)
+            };
+            match (src.strip_prefix(':'), dst.strip_prefix(':')) {
+                (Some(remote), None) => {
+                    let res = check(auth(api.http.get(url(remote))).send().await?).await?;
+                    let bytes = res.bytes().await?;
+                    std::fs::write(&dst, &bytes).with_context(|| format!("writing {dst}"))?;
+                    json!({ "from": remote, "to": dst, "bytes": bytes.len() })
+                }
+                (None, Some(remote)) => {
+                    let data = std::fs::read(&src).with_context(|| format!("reading {src}"))?;
+                    anyhow::ensure!(data.len() <= 1 << 20, "{src} is more than 1 MiB");
+                    let res = check(auth(api.http.put(url(remote))).header("content-type", "application/octet-stream").body(data).send().await?).await?;
+                    res.json().await.unwrap_or(Value::Null)
+                }
+                _ => bail!("one side is the sandbox's, marked with `:` (roll apps sandbox cp sbx_… ./file :/tmp/file)"),
+            }
+        }
+        SandboxCmd::Rm { id, .. } => {
+            api.call(reqwest::Method::DELETE, &format!("{base}/{}", enc(&id)), None).await?;
+            if !json_out {
+                println!("removed {id}");
+                return Ok(());
+            }
+            json!({ "removed": id })
+        }
+    };
+    println!("{}", serde_json::to_string_pretty(&v)?);
+    Ok(())
+}
+
 pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> {
     let out = match cmd {
+        AppsCmd::Sandbox { cmd } => return sandbox(api, json_out, cmd).await,
         AppsCmd::List { project } => {
             let path = match project {
                 Some(p) => format!("/v1/apps/services?project={}", enc(&project_id(api, &p).await?)),
@@ -2819,7 +3067,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, alert_cpu, alert_metric, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, build_timeout, build_size, submodules, submodule_repos, lfs, rollout, rollout_step, rollout_errors, rollout_manual, overlap, h2c, scale, public, drain, cpu_target, busy_cpu, memory_target, latency_target, oidc_audience, push, restart, restart_tries, affinity, tcp, rollback_on_crash, rebuild_on_base, block_on } => {
+        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, alert_cpu, alert_metric, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, build_timeout, build_size, submodules, submodule_repos, lfs, otel, rollout, rollout_step, rollout_errors, rollout_manual, overlap, h2c, health_grpc, scale, public, drain, cpu_target, busy_cpu, memory_target, latency_target, oidc_audience, push, restart, restart_tries, affinity, tcp, udp, rollback_on_crash, rebuild_on_base, block_on } => {
             let svc = service(api, &target).await?;
             // The service's rollout with what was given replaced (the API takes it whole).
             let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() || rollout_manual.is_some() || overlap.is_some() {
@@ -2897,6 +3145,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             if let Some(on) = lfs {
                 build.insert("lfs".into(), if on { json!(true) } else { Value::Null });
+            }
+            if let Some(on) = otel {
+                build.insert("otel".into(), if on { json!(true) } else { Value::Null });
             }
             match build_timeout.as_deref() {
                 None => {}
@@ -2976,6 +3227,11 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 ("volume", volume),
                 ("rollout", rollout),
                 ("h2c", h2c.map(Value::from)),
+                ("health_grpc", health_grpc.as_deref().map(|g| match g {
+                    "none" => Value::Null,
+                    "." => json!(""),
+                    g => json!(g),
+                })),
                 ("public", public.map(Value::from)),
                 ("drain_s", drain.map(|d| if d == 0 { Value::Null } else { Value::from(d) })),
                 ("cpu_target", cpu_target.map(|t| if t == 0 { Value::Null } else { Value::from(t) })),
@@ -2992,6 +3248,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 ("restart_tries", restart_tries.map(Value::from)),
                 ("affinity", affinity.map(Value::from)),
                 ("tcp", tcp.map(Value::from)),
+                ("udp", udp.map(Value::from)),
                 ("rollback_on_crash", rollback_on_crash.map(Value::from)),
                 ("rebuild_on_base", rebuild_on_base.map(Value::from)),
                 ("block_on", block_on.map(|b| if b == "none" { Value::Null } else { Value::from(b) })),
@@ -3246,6 +3503,92 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 bail!("no deleted service named {} (`roll apps restore --list` lists them)", target.service.as_deref().unwrap_or("that"));
             };
             api.post(&format!("/v1/apps/services/{}/restore", enc(&s(&d["id"]))), json!({})).await?
+        }
+        AppsCmd::Deploys { target, sbom: Some(dep), output, .. } => {
+            let svc = service(api, &target).await?;
+            let b = api.get(&format!("{}/deploys/{}/sbom", env_path(&svc, &target.env), enc(&dep))).await?;
+            let text = serde_json::to_string_pretty(&b)?;
+            match output {
+                Some(p) => {
+                    std::fs::write(&p, text + "\n").with_context(|| format!("{}", p.display()))?;
+                    eprintln!("wrote {} ({} components)", p.display(), b["components"].as_array().map_or(0, Vec::len));
+                }
+                None => println!("{text}"),
+            }
+            return Ok(());
+        }
+        AppsCmd::Slo { target } => {
+            let svc = service(api, &target).await?;
+            let r = api.get(&format!("{}/slo", env_path(&svc, &target.env))).await?;
+            if !json_out {
+                if r["slo"].is_null() {
+                    println!("no objective: set one with `roll apps set` (run.slo) or roll.toml [app.run.slo]");
+                    return Ok(());
+                }
+                let burning = r["burning"].as_object().map(|b| format!(": its {} budget is burning {}× as fast as it lasts ({})", s(&b["indicator"]), b["burn_rate"], s(&b["window"]))).unwrap_or_default();
+                println!("objective {}% over {} days{burning}", r["slo"]["objective"], r["slo"]["window_days"]);
+                for k in ["availability", "latency"] {
+                    let i = &r[k];
+                    if i.is_object() {
+                        let pct = |v: &Value| v.as_f64().map(|f| format!("{f:.3}%")).unwrap_or_else(|| "-".into());
+                        let left = i["budget_left"].as_f64().map(|f| format!("{:.0}%", f * 100.0)).unwrap_or_else(|| "-".into());
+                        println!("{k:<13} {} met ({} of {} failed), budget left {left}", pct(&i["sli"]), i["bad"], i["total"]);
+                    }
+                }
+                return Ok(());
+            }
+            r
+        }
+        AppsCmd::Forms { target, form, limit, delete } => {
+            let svc = service(api, &target).await?;
+            let base = format!("{}/forms", env_path(&svc, &target.env));
+            match (form, delete) {
+                (Some(f), Some(sub)) => {
+                    api.call(reqwest::Method::DELETE, &format!("{base}/{}/submissions/{}", enc(&f), enc(&sub)), None).await?;
+                    json!({ "deleted": sub })
+                }
+                (Some(f), None) => {
+                    let q = limit.map(|l| format!("?limit={l}")).unwrap_or_default();
+                    let subs = api.get(&format!("{base}/{}/submissions{q}", enc(&f))).await?;
+                    if !json_out {
+                        for x in subs.as_array().into_iter().flatten() {
+                            let fields: Vec<String> = x["fields"].as_array().into_iter().flatten().map(|f| format!("{}={}", s(&f["name"]), s(&f["value"]))).collect();
+                            println!("{}  {}  {}", s(&x["id"]), x["created_at"], fields.join("  "));
+                        }
+                        return Ok(());
+                    }
+                    subs
+                }
+                (None, _) => {
+                    let forms = api.get(&base).await?;
+                    if !json_out {
+                        for x in forms.as_array().into_iter().flatten() {
+                            println!("{:<24} {:>6} submissions", s(&x["name"]), x["submissions"]);
+                        }
+                        return Ok(());
+                    }
+                    forms
+                }
+            }
+        }
+        AppsCmd::PreviewDomain { target, set, verify, remove } => {
+            let svc = service(api, &target).await?;
+            let path = format!("/v1/apps/projects/{}/preview-domain", enc(&s(&svc["project"])));
+            let d = if let Some(h) = set {
+                api.post(&path, json!({ "hostname": h })).await?
+            } else if verify {
+                api.post(&format!("{path}/verify"), json!({})).await?
+            } else if remove {
+                api.call(reqwest::Method::DELETE, &path, None).await?;
+                json!({ "removed": true })
+            } else {
+                api.get(&path).await?
+            };
+            if !json_out && d.get("hostname").is_some() {
+                println!("{} {}{}", s(&d["hostname"]), s(&d["status"]), d["target"].as_str().map(|t| format!(" (CNAME to {t})")).unwrap_or_default());
+                return Ok(());
+            }
+            d
         }
         AppsCmd::Deploys { target, explain: Some(dep), again, .. } => {
             let svc = service(api, &target).await?;
@@ -4029,13 +4372,33 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::ImportCompose { file, write } => {
+        AppsCmd::Import { file, from, write } => {
             let path = match file {
                 Some(f) => f,
-                None => ["compose.yaml", "compose.yml", "docker-compose.yml", "docker-compose.yaml"].iter().map(PathBuf::from).find(|p| p.exists()).ok_or_else(|| anyhow::anyhow!("no compose.yaml here: name the file"))?,
+                None => {
+                    let here: Vec<PathBuf> = IMPORTABLE.iter().map(|(n, _)| PathBuf::from(n)).filter(|p| p.exists()).collect();
+                    match here.as_slice() {
+                        [one] => one.clone(),
+                        [] => bail!("no compose.yaml, render.yaml, fly.toml, railway.json or app.json here: name the file"),
+                        many => bail!("{} are here: name the one to import", many.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")),
+                    }
+                }
+            };
+            let kind = match from.as_deref() {
+                Some(k) => k,
+                None => import_kind(&path).ok_or_else(|| anyhow::anyhow!("{} isn't a file roll knows by its name: say what it is with --from", path.display()))?,
             };
             let text = std::fs::read_to_string(&path).with_context(|| format!("{}", path.display()))?;
-            let (mut toml_text, notes) = compose_to_toml(&text)?;
+            let (mut toml_text, notes) = match kind {
+                "compose" => compose_to_toml(&text)?,
+                "render" => apps_build::imports::render_to_toml(&text)?,
+                "fly" => apps_build::imports::fly_to_toml(&text)?,
+                "railway" => apps_build::imports::railway_to_toml(&text)?,
+                _ => {
+                    let procfile = std::fs::read_to_string(path.with_file_name("Procfile")).ok();
+                    apps_build::imports::heroku_to_toml(&text, procfile.as_deref())?
+                }
+            };
             // Roots are the Compose file's: relative to where roll.toml is written (here).
             if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty() && *d != Path::new(".")) {
                 let d = dir.to_string_lossy().trim_end_matches('/').to_string();
@@ -4480,7 +4843,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, redeploy_on_secrets, vitals, egress, egress_host, private, open, signed_in, maintenance, serve, pause, resume, resume_deploys, hold, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, route, no_routes, error_page, maintenance_page, roll_pages, freeze, unfreeze, rotate_config, set } => {
+        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, data, wait_for_ci, run, follow_tag, redeploy_on_secrets, vitals, egress, egress_host, private, open, signed_in, maintenance, serve, pause, resume, resume_deploys, hold, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, route, no_routes, error_page, maintenance_page, roll_pages, freeze, unfreeze, rotate_config, set } => {
             let svc = service(api, &target).await?;
             if rotate_config {
                 let e = api.post(&format!("{}/config/rotate", env_path(&svc, &target.env)), json!({})).await?;
@@ -4510,6 +4873,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             if let Some(f) = variables_from {
                 body.insert("variables_from".into(), json!(f));
+            }
+            if let Some(d) = &data {
+                body.insert("data".into(), if d == "none" { Value::Null } else { json!(d) });
             }
             if let Some(w) = wait_for_ci {
                 body.insert("wait_for_ci".into(), json!(w));
@@ -4845,6 +5211,17 @@ fn metric_alert(rule: &str) -> anyhow::Result<Value> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn imports_know_files_by_name_and_metric_alerts_read_as_rules() {
+        use std::path::Path;
+        assert_eq!(super::import_kind(Path::new("deploy/render.yaml")), Some("render"));
+        assert_eq!(super::import_kind(Path::new("app.json")), Some("heroku"));
+        assert_eq!(super::import_kind(Path::new("package.json")), None);
+        assert_eq!(super::metric_alert("queue_depth>1000 for 5m sum").unwrap(), serde_json::json!({ "name": "queue_depth", "above": 1000.0, "minutes": 5, "sum": true }));
+        assert_eq!(super::metric_alert("workers<1").unwrap(), serde_json::json!({ "name": "workers", "below": 1.0 }));
+        assert!(super::metric_alert("queue_depth=3").is_err());
+    }
+
     #[test]
     fn push_rules_read_as_run_push_takes_them() {
         let r = super::push_rules(&["st_aaaaaaaaaaaa/orders/web:/events,dead_letter=orders-dead,max_attempts=3".into()]).unwrap().unwrap();

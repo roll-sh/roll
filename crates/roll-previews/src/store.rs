@@ -428,6 +428,16 @@ fn hook_row(r: &code_sql::Row<'_>) -> code_sql::Result<Hook> {
 /// How many people [`Store::visitors`] names.
 pub const VISITORS: usize = 8;
 
+/// A live share link, as [`Store::share_live`] finds it.
+pub struct LiveShare {
+    pub id: String,
+    pub ends: i64,
+    /// Who made it (`usr_…`: a person, or the person behind their token); none for the operator.
+    pub maker: Option<String>,
+    /// When its maker was last asked whether they still may.
+    pub maker_checked: i64,
+}
+
 /// The SHA-256 (hex) a bypass secret is kept as.
 pub fn bypass_hash(secret: &str) -> String {
     use sha2::Digest;
@@ -722,6 +732,14 @@ impl Store {
                 db.add_column("services", col, "TEXT")?;
             }
         }
+        // Who made a share link (`usr_…`: a person, or the person behind their token; none for the
+        // operator), and when it was last asked whether they still may.
+        if !db.has_column("shares", "maker")? {
+            db.add_column("shares", "maker", "TEXT")?;
+        }
+        if !db.has_column("shares", "maker_checked")? {
+            db.add_column("shares", "maker_checked", "INTEGER NOT NULL DEFAULT 0")?;
+        }
         if !db.has_column("previews", "idled")? {
             db.add_column("previews", "idled", "INTEGER NOT NULL DEFAULT 0")?;
         }
@@ -740,6 +758,10 @@ impl Store {
         }
         if !db.has_column("resources", "mask_digest")? {
             db.add_column("resources", "mask_digest", "TEXT")?;
+        }
+        // The branch's own schema lines as it was made (JSON), for `schema::diff_since`.
+        if !db.has_column("resources", "base_schema")? {
+            db.add_column("resources", "base_schema", "TEXT")?;
         }
         for col in ["text", "links", "page_reports", "api"] {
             if !db.has_column("base_history", col)? {
@@ -1392,6 +1414,25 @@ impl Store {
             .db
             .read(|c| c.query_row("SELECT mask_digest FROM resources WHERE preview_id = ? AND kind = ? AND parent = ?", [id, kind.as_str(), parent], |r| r.get(0)).optional())?
             .flatten())
+    }
+
+    /// A branch's schema lines as it was made, if kept ([`crate::schema::diff_since`]).
+    pub fn base_schema(&self, id: &str, kind: Kind, parent: &str) -> Result<Option<Vec<String>>> {
+        let json: Option<String> = self
+            .db
+            .read(|c| c.query_row("SELECT base_schema FROM resources WHERE preview_id = ? AND kind = ? AND parent = ?", [id, kind.as_str(), parent], |r| r.get(0)).optional())?
+            .flatten();
+        Ok(json.and_then(|j| serde_json::from_str(&j).ok()))
+    }
+
+    /// Keep a branch's schema lines as it was made, or none (a new branch whose read failed: its
+    /// changes are then compared with the parent alone, never with an older branch's lines).
+    pub fn set_base_schema(&self, id: &str, kind: Kind, parent: &str, lines: Option<&[String]>) -> Result<()> {
+        let json = lines.map(|l| serde_json::to_string(l).unwrap_or_default());
+        self.db.write(|c| {
+            c.execute("UPDATE resources SET base_schema = ? WHERE preview_id = ? AND kind = ? AND parent = ?", params![json, id, kind.as_str(), parent])?;
+            Ok::<_, Error>(())
+        })
     }
 
     pub fn set_mask_digest(&self, id: &str, kind: Kind, parent: &str, digest: &str) -> Result<()> {
@@ -2597,6 +2638,29 @@ impl Store {
     }
 
     /// Keep what its holder read (`None`: nothing to say); whether that changed what was kept.
+    /// A step of the timeline of `head` (`start` begins it): once each; a new head starts a new one.
+    pub fn mark_step(&self, id: &str, head: &str, step: &str) -> Result<()> {
+        let now = self.now_ms()?;
+        self.db.write(|c| {
+            let json: Option<String> = c.query_row("SELECT json FROM runtime_facts WHERE preview_id = ? AND kind = 'timeline'", [id], |r| r.get(0)).optional()?;
+            let was: Option<crate::Timeline> = json.and_then(|j| serde_json::from_str(&j).ok()).filter(|t: &crate::Timeline| t.head == head);
+            let mut t = match was {
+                Some(t) if step == "start" || t.steps.iter().any(|x| x.step == step) => return Ok::<_, Error>(()),
+                Some(t) => t,
+                None => crate::Timeline { head: head.to_string(), started_at: now, steps: Vec::new() },
+            };
+            if step != "start" {
+                t.steps.push(crate::TimelineStep { step: step.to_string(), at: now });
+            }
+            let json = serde_json::to_string(&t).map_err(|e| Error::Internal(e.to_string()))?;
+            c.execute(
+                "INSERT INTO runtime_facts (preview_id, kind, json) VALUES (?, 'timeline', ?) ON CONFLICT (preview_id, kind) DO UPDATE SET json = excluded.json",
+                params![id, json],
+            )?;
+            Ok(())
+        })
+    }
+
     /// Change a preview's interception record in one write (`f` may run again).
     pub fn update_intercepted(&self, id: &str, f: impl Fn(&mut crate::Intercepted)) -> Result<()> {
         self.db.write(|c| {
@@ -2696,7 +2760,7 @@ impl Store {
     /// A link that opens the preview until `expires_at` (Vercel's shareable links), on a token of
     /// its own: only its SHA-256 is kept, so the token is in the answer once. At most
     /// [`SHARES_MAX`] live ones.
-    pub fn create_share(&self, id: &str, expires_at: i64, by: &str) -> Result<(crate::Share, String)> {
+    pub fn create_share(&self, id: &str, expires_at: i64, by: &str, maker: Option<&str>) -> Result<(crate::Share, String)> {
         let now = self.now_ms()?;
         let token = format!("rps_{}", new_token());
         let sid = format!("shr_{}", &new_token()[..12]);
@@ -2706,7 +2770,7 @@ impl Store {
             if live as usize >= SHARES_MAX {
                 return Err(Error::Conflict(format!("the preview has {SHARES_MAX} live share links: revoke one first")));
             }
-            c.execute("INSERT INTO shares (id, preview_id, hash, expires_at, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)", params![sid, id, hash, expires_at, by, now])?;
+            c.execute("INSERT INTO shares (id, preview_id, hash, expires_at, created_by, created_at, maker, maker_checked) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", params![sid, id, hash, expires_at, by, now, maker, now])?;
             Ok::<_, Error>(())
         })?;
         Ok((crate::Share { id: sid, expires_at, created_by: by.to_string(), created_at: now, revoked: false }, token))
@@ -2726,6 +2790,25 @@ impl Store {
         if n == 0 {
             return Err(Error::NotFound(format!("no share link {share}")));
         }
+        Ok(())
+    }
+
+    /// A live share link `token` of preview `id` (not revoked, not past).
+    pub fn share_live(&self, id: &str, token: &str) -> Result<Option<LiveShare>> {
+        let now = self.now_ms()?;
+        Ok(self.db.read(|c| {
+            c.query_row(
+                "SELECT id, expires_at, maker, maker_checked FROM shares WHERE preview_id = ? AND hash = ? AND revoked = 0 AND expires_at > ?",
+                params![id, bypass_hash(token), now],
+                |r| Ok(LiveShare { id: r.get(0)?, ends: r.get(1)?, maker: r.get(2)?, maker_checked: r.get(3)? }),
+            )
+            .optional()
+        })?)
+    }
+
+    /// A share link's maker was just asked about (and still may).
+    pub fn share_maker_checked(&self, share: &str, now: i64) -> Result<()> {
+        self.db.write(|c| c.execute("UPDATE shares SET maker_checked = ? WHERE id = ?", params![now, share]).map(drop))?;
         Ok(())
     }
 
@@ -2961,6 +3044,7 @@ impl Store {
         // Its own proxy's record (with the keys it holds), and roll apps' counts for its services there.
         let closed = settings.egress_for(r.trusted) == crate::settings::EgressRule::Roll;
         let on_apps = self.runtime_fact::<crate::AppsIntercepted>(&r.id, "intercepted_apps")?.filter(|_| closed);
+        let timeline = self.runtime_fact::<crate::Timeline>(&r.id, "timeline")?.filter(|t| t.head == r.head);
         let intercepted = match (self.runtime_fact::<crate::Intercepted>(&r.id, "intercepted")?.filter(|x| !x.keys.is_empty()), on_apps) {
             (Some(x), on_apps) => Some(crate::Intercepted { on_apps, ..x }),
             (None, Some(a)) => Some(crate::Intercepted { on_apps: Some(a), ..Default::default() }),
@@ -3044,6 +3128,7 @@ impl Store {
             regressions_accepted,
             regressions_compared,
             intercepted,
+            timeline,
             page_speed,
             page_health,
             page_a11y,
@@ -3207,12 +3292,12 @@ mod tests {
         let (row, _) = store.create(&new("chg_share")).unwrap();
         let id = row.id.as_str();
         let now = store.now_ms().unwrap();
-        let (share, token) = store.create_share(id, now + 3_600_000, "ada").unwrap();
+        let (share, token) = store.create_share(id, now + 3_600_000, "ada", None).unwrap();
         assert!(token.starts_with("rps_") && share.id.starts_with("shr_"));
         assert_eq!(store.share_ends(id, &token).unwrap(), Some(now + 3_600_000));
         assert_eq!(store.share_ends("pv_other", &token).unwrap(), None, "another preview");
         assert_eq!(store.share_ends(id, "rps_guess").unwrap(), None);
-        let (_, ended) = store.create_share(id, now - 1, "ada").unwrap();
+        let (_, ended) = store.create_share(id, now - 1, "ada", None).unwrap();
         assert_eq!(store.share_ends(id, &ended).unwrap(), None, "past its end");
         store.revoke_share(id, &share.id).unwrap();
         assert_eq!(store.share_ends(id, &token).unwrap(), None, "revoked");

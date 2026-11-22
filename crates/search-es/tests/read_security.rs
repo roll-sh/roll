@@ -7,9 +7,14 @@ use search_es::json::{Value, parse};
 use search_es::{Cluster, EsRequest};
 
 async fn call(c: &Cluster, method: &str, uri: &str, body: &str, user: Option<&str>) -> (u16, Value) {
+    let auth = user.map(|u| format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{u}:{u}-password-1"))));
+    call_as(c, method, uri, body, auth).await
+}
+
+async fn call_as(c: &Cluster, method: &str, uri: &str, body: &str, auth: Option<String>) -> (u16, Value) {
     let mut req = if body.is_empty() { EsRequest::new(method, uri) } else { EsRequest::json(method, uri, body.to_string()) };
-    if let Some(u) = user {
-        req.headers.push(("Authorization".into(), format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{u}:{u}-password-1")))));
+    if let Some(a) = auth {
+        req.headers.push(("Authorization".into(), a));
     }
     let r = search_es::handle(c, req).await;
     (r.status, parse(&r.body).ok().flatten().unwrap_or(Value::Null))
@@ -134,4 +139,83 @@ async fn validate_and_aggregations_read_as_their_reader() {
     let keys = |v: &Value| v.pointer(&["aggregations", "t", "buckets"]).and_then(Value::as_array).map(|b| b.iter().filter_map(|x| x.get("key").and_then(Value::as_str).map(str::to_string)).collect::<Vec<_>>());
     assert_eq!(keys(&call(&c, "POST", "/p/_search", terms, None).await.1), Some(vec!["blue".into(), "red".into()]));
     assert_eq!(keys(&call(&c, "POST", "/p/_search", terms, Some("r")).await.1), Some(vec!["red".to_string()]));
+}
+
+/// A runtime field named like the field `team` the role query reads: the request sees it, the
+/// reader's document level security doesn't (Elasticsearch applies it to the shard's reader).
+const SHADOW: &str = r#""runtime_mappings":{"team":{"type":"keyword","script":"emit('red')"}}"#;
+
+fn global_count(v: &Value) -> Option<i64> {
+    v.pointer(&["aggregations", "all", "doc_count"]).and_then(Value::as_i64)
+}
+
+/// A request's runtime fields don't reach its reader's document and field level security: one
+/// shadowing the role query's field lets no hidden document through a search or its `global`
+/// aggregation, and one without a script named like a hidden field reads nothing of it.
+#[tokio::test]
+async fn request_runtime_fields_dont_reach_read_security() {
+    let c = cluster(r#""none""#).await;
+    let search = format!(r#"{{{SHADOW},"query":{{"match_all":{{}}}},"aggs":{{"all":{{"global":{{}}}}}}}}"#);
+    let (s, v) = call(&c, "POST", "/p/_search", &search, Some("r")).await;
+    assert_eq!((s, hits(&v), global_count(&v)), (200, 1, Some(1)), "{}", v.to_json());
+    let hidden = r#"{"runtime_mappings":{"secret":{"type":"keyword"}},"query":{"term":{"secret":"s1"}},"fields":["secret"]}"#;
+    let (s, v) = call(&c, "POST", "/p/_search", hidden, None).await;
+    assert_eq!((s, hits(&v)), (200, 1), "{}", v.to_json());
+    let (s, v) = call(&c, "POST", "/p/_search", hidden, Some("r")).await;
+    assert_eq!((s, hits(&v)), (200, 0), "a runtime field read a hidden field: {}", v.to_json());
+}
+
+/// An API key's role descriptors (what a browser or roll secrets is handed) are document level
+/// security too: a request's runtime field doesn't shadow them, in a search, its `global`
+/// aggregation or a top-level `knn` (the key's vectors aren't hidden).
+#[tokio::test]
+async fn request_runtime_fields_dont_reach_an_api_keys_role_descriptors() {
+    let c = cluster(r#""none""#).await;
+    assert_eq!(call(&c, "PUT", "/_security/user/o", r#"{"password":"o-password-1","roles":["superuser"]}"#, None).await.0, 200);
+    let key = r#"{"name":"k","role_descriptors":{"red":{"indices":[{"names":["p"],"privileges":["read"],"query":{"term":{"team":"red"}}}]}}}"#;
+    let (s, k) = call(&c, "POST", "/_security/api_key", key, Some("o")).await;
+    assert_eq!(s, 200, "{}", k.to_json());
+    let field = |f: &str| k.get(f).and_then(Value::as_str).unwrap_or_default().to_string();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", field("id"), field("api_key")));
+    let search = format!(r#"{{{SHADOW},"query":{{"match_all":{{}}}},"aggs":{{"all":{{"global":{{}}}}}}}}"#);
+    let (s, v) = call_as(&c, "POST", "/p/_search", &search, Some(format!("ApiKey {encoded}"))).await;
+    assert_eq!((s, hits(&v), global_count(&v)), (200, 1, Some(1)), "{}", v.to_json());
+    let knn = format!(r#"{{{SHADOW},"knn":{{"field":"v","query_vector":[2,2],"k":2,"num_candidates":5}}}}"#);
+    let (s, v) = call_as(&c, "POST", "/p/_search", &knn, Some(format!("ApiKey {encoded}"))).await;
+    assert_eq!((s, hits(&v)), (200, 1), "{}", v.to_json());
+}
+
+/// A browser key's `filter` is its owner's document level security: the key's own bans
+/// (expensive queries such as this `prefix`, scripts) don't refuse it, and a request runtime
+/// field shadowing its field doesn't widen it.
+#[tokio::test]
+async fn a_browser_keys_filter_ignores_request_runtime_fields() {
+    let c = cluster(r#""none""#).await;
+    assert_eq!(call(&c, "PUT", "/_security/user/o", r#"{"password":"o-password-1","roles":["superuser"]}"#, None).await.0, 200);
+    let key = r#"{"name":"page","metadata":{"roll_browser":{"limits":{"allow_scripts":true}}},"role_descriptors":{"roll_browser":{"indices":[{"names":["p"],"privileges":["read"],"query":{"prefix":{"team":"re"}}}]}}}"#;
+    let (s, k) = call(&c, "POST", "/_security/api_key", key, Some("o")).await;
+    assert_eq!(s, 200, "{}", k.to_json());
+    let field = |f: &str| k.get(f).and_then(Value::as_str).unwrap_or_default().to_string();
+    let auth = format!("ApiKey {}", base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", field("id"), field("api_key"))));
+    // The key is a browser key: the same query in its request is refused.
+    let (s, v) = call_as(&c, "POST", "/p/_search", r#"{"query":{"prefix":{"team":"re"}}}"#, Some(auth.clone())).await;
+    assert_eq!(s, 400, "{}", v.to_json());
+    let search = format!(r#"{{{SHADOW},"query":{{"match_all":{{}}}},"aggs":{{"all":{{"global":{{}}}}}}}}"#);
+    let (s, v) = call_as(&c, "POST", "/p/_search", &search, Some(auth)).await;
+    assert_eq!((s, hits(&v), global_count(&v)), (200, 1, Some(1)), "{}", v.to_json());
+}
+
+/// A filtered alias's filter is not security: a request's runtime fields apply to it, as
+/// Elasticsearch 9.5.5 applies them (a search through the alias with a runtime field shadowing
+/// its filter's field reads every document).
+#[tokio::test]
+async fn request_runtime_fields_apply_to_alias_filters() {
+    let c = cluster(r#""none""#).await;
+    let alias = r#"{"actions":[{"add":{"index":"p","alias":"reds","filter":{"term":{"team":"red"}}}}]}"#;
+    assert_eq!(call(&c, "POST", "/_aliases", alias, None).await.0, 200);
+    let (s, v) = call(&c, "POST", "/reds/_search", r#"{"query":{"match_all":{}}}"#, None).await;
+    assert_eq!((s, hits(&v)), (200, 1), "{}", v.to_json());
+    let search = format!(r#"{{{SHADOW},"query":{{"match_all":{{}}}},"aggs":{{"all":{{"global":{{}}}}}}}}"#);
+    let (s, v) = call(&c, "POST", "/reds/_search", &search, None).await;
+    assert_eq!((s, hits(&v), global_count(&v)), (200, 2, Some(2)), "{}", v.to_json());
 }

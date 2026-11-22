@@ -3,8 +3,9 @@
 //! ([`crate::xpack::transform`]), of active watches ([`crate::xpack::watcher`]) and of started
 //! rollup jobs ([`crate::xpack::rollup`]), Elasticsearch's index lifecycle management
 //! ([`crate::xpack::ilm_run`]) and data stream lifecycle
-//! ([`crate::api::data_stream_lifecycle`]), and snapshot lifecycle policies and their retention
-//! ([`crate::xpack::slm`]).
+//! ([`crate::api::data_stream_lifecycle`]), snapshot lifecycle policies and their retention
+//! ([`crate::xpack::slm`]), and connector syncs ([`crate::xpack::entsearch::sync`]: started here,
+//! each running as a task of its own).
 //!
 //! One task per cluster, started when the cluster may run background work
 //! ([`Cluster::enable_background_tasks`]) and has a job. It sleeps until the earliest due
@@ -63,7 +64,7 @@ impl Jobs {
             self.shared.wake.notify_one();
             return;
         }
-        if !has_work(&cluster.state()) {
+        if !has_work(cluster) {
             return;
         }
         let Some(strong) = cluster.handle() else { return };
@@ -83,14 +84,14 @@ impl Jobs {
                     break;
                 }
                 let due = match weak.upgrade() {
-                    Some(c) => loaded_due(&c.state(), &shared).map(|(t, _, _)| t),
+                    Some(c) => loaded_due(&c, &shared).map(|(t, _, _)| t),
                     None => break,
                 };
                 let Some(due) = due else {
                     // No job left: end; the next managed index starts a new task. Recheck
                     // after clearing the flag, so a job added meanwhile isn't missed.
                     shared.started.store(false, Ordering::SeqCst);
-                    let again = weak.upgrade().is_some_and(|c| has_work(&c.state()));
+                    let again = weak.upgrade().is_some_and(|c| has_work(&c));
                     if again && !shared.started.swap(true, Ordering::SeqCst) {
                         continue;
                     }
@@ -112,7 +113,8 @@ impl Jobs {
                 crate::xpack::watcher::run_due(&c, now).await;
                 crate::xpack::rollup::run_due(&c, now).await;
                 crate::xpack::slm::run_due(&c, now).await;
-                if let Some((_, ilm, dsl)) = loaded_due(&c.state(), &shared) {
+                crate::xpack::entsearch::sync::run_due(&c, now).await;
+                if let Some((_, ilm, dsl)) = loaded_due(&c, &shared) {
                     if ilm.is_some_and(|t| t <= now) {
                         shared.ilm_polled.store(now, Ordering::SeqCst);
                         crate::xpack::ilm_run::run(&c, now).await;
@@ -125,7 +127,7 @@ impl Jobs {
                 shared.running.fetch_sub(1, Ordering::SeqCst);
                 // A run whose writes failed (a store refusing) leaves its jobs due: retry them
                 // a little later instead of spinning.
-                let stuck = loaded_due(&c.state(), &shared).is_some_and(|(t, _, _)| t <= now);
+                let stuck = loaded_due(&c, &shared).is_some_and(|(t, _, _)| t <= now);
                 drop(c);
                 if stuck {
                     tokio::select! {
@@ -146,13 +148,20 @@ impl Jobs {
 
 /// The earliest due time of any job (Unix ms): what the host records when the cluster unloads,
 /// to wake it then. The lifecycles' polls aren't in it (see the module docs).
-pub fn next_due(st: &crate::meta::ClusterState) -> Option<i64> {
+pub fn next_due(cluster: &Cluster, st: &crate::meta::ClusterState) -> Option<i64> {
+    due(cluster, st, None)
+}
+
+/// The earliest due time; `syncs` is a loaded cluster's running connector syncs (a sync already
+/// starting isn't due again).
+fn due(cluster: &Cluster, st: &crate::meta::ClusterState, syncs: Option<&crate::xpack::entsearch::sync::Syncs>) -> Option<i64> {
     [
         super::ism_run::next_due(st),
         crate::xpack::transform::next_due(st),
         crate::xpack::watcher::next_due(st),
         crate::xpack::rollup::next_due(st),
         crate::xpack::slm::next_due(st),
+        crate::xpack::entsearch::sync::next_due(cluster, st, syncs),
         crate::xpack::ilm_run::next_due(st),
         crate::api::data_stream_lifecycle::next_due(st),
     ]
@@ -161,20 +170,26 @@ pub fn next_due(st: &crate::meta::ClusterState) -> Option<i64> {
     .min()
 }
 
-/// Whether the scheduler has anything to run or poll.
-fn has_work(st: &crate::meta::ClusterState) -> bool {
-    next_due(st).is_some() || crate::xpack::ilm_run::polls(st) || crate::api::data_stream_lifecycle::polls(st)
+/// Whether a loaded cluster's scheduler has anything to run or poll. It must agree with
+/// [`loaded_due`] (the loaded view: a connector sync already starting isn't due again), or the
+/// task's "nothing left, but there is work" recheck would loop without ever waiting.
+fn has_work(c: &Cluster) -> bool {
+    let state = c.state();
+    let st = &*state;
+    due(c, st, Some(&c.xpack.connector_syncs)).is_some() || crate::xpack::ilm_run::polls(st) || crate::api::data_stream_lifecycle::polls(st)
 }
 
 /// When a loaded cluster's scheduler runs next: [`next_due`] or a lifecycle's poll; with when
 /// the ILM and the data stream lifecycle passes are due.
-fn loaded_due(st: &crate::meta::ClusterState, shared: &Shared) -> Option<(i64, Option<i64>, Option<i64>)> {
+fn loaded_due(c: &Cluster, shared: &Shared) -> Option<(i64, Option<i64>, Option<i64>)> {
+    let state = c.state();
+    let st = &*state;
     use crate::api::data_stream_lifecycle as dsl;
     use crate::xpack::ilm_run as ilm;
     let poll = |polls: bool, last: &std::sync::atomic::AtomicI64, interval: i64| polls.then(|| last.load(Ordering::SeqCst).saturating_add(interval));
     let ilm_due = [ilm::next_due(st), poll(ilm::polls(st), &shared.ilm_polled, ilm::poll_interval(st))].into_iter().flatten().min();
     let dsl_due = [dsl::next_due(st), poll(dsl::polls(st), &shared.dsl_polled, dsl::poll_interval(st))].into_iter().flatten().min();
-    let others = [super::ism_run::next_due(st), crate::xpack::transform::next_due(st), crate::xpack::watcher::next_due(st), crate::xpack::rollup::next_due(st), crate::xpack::slm::next_due(st)];
+    let others = [super::ism_run::next_due(st), crate::xpack::transform::next_due(st), crate::xpack::watcher::next_due(st), crate::xpack::rollup::next_due(st), crate::xpack::slm::next_due(st), crate::xpack::entsearch::sync::next_due(c, st, Some(&c.xpack.connector_syncs))];
     let due = others.into_iter().chain([ilm_due, dsl_due]).flatten().min()?;
     Some((due, ilm_due, dsl_due))
 }

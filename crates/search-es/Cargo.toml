@@ -8,6 +8,8 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+# Streaming a connector's Postgres rows (`xpack::entsearch::sync::postgres`).
+futures-util.workspace = true
 async-trait.workspace = true
 futures.workspace = true
 aes-gcm.workspace = true
@@ -34,6 +36,8 @@ jsonwebtoken.workspace = true
 itoa.workspace = true
 # The `gcs` snapshot repository's service account tokens (RS256 JWTs).
 libc.workspace = true
+# The `s3` connector's document ids (Elastic's: the MD5 of `bucket/key`).
+md-5.workspace = true
 memchr.workspace = true
 parking_lot.workspace = true
 zeroize.workspace = true
@@ -58,7 +62,15 @@ serde_yaml_ng.workspace = true
 sha1.workspace = true
 sha2.workspace = true
 hkdf.workspace = true
+# Telling "no such name" from a resolver that failed (the reindex deny names).
+hickory-resolver.workspace = true
 tokio.workspace = true
+# The `postgresql` connector (`xpack::entsearch::sync::postgres`): TLS through rustls with ring.
+tokio-postgres.workspace = true
+tokio-postgres-rustls.workspace = true
+tokio-rustls.workspace = true
+rustls-native-certs.workspace = true
+socket2.workspace = true
 # Word and sentence boundaries of inference chunking (`xpack::inference::chunking`).
 unicode-segmentation.workspace = true
 zxcvbn.workspace = true

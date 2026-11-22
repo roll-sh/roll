@@ -185,6 +185,10 @@ impl Brancher for FakeData {
     async fn schema(&self, _parent: &str, _branch: &str) -> anyhow::Result<Option<(Vec<String>, Vec<String>)>> {
         Ok(self.schema.lock().clone())
     }
+    async fn branch_schema(&self, _parent: &str, _branch: &str) -> anyhow::Result<Option<Vec<String>>> {
+        // As it's made, a branch is its parent.
+        Ok(self.schema.lock().clone().map(|(parent, _)| parent))
+    }
     async fn columns(&self, parent: &str, max: usize) -> anyhow::Result<Vec<roll_previews::mask::Column>> {
         match self.columns.lock().get(parent) {
             Some(Err(_)) => Err(roll_previews::ports::Asleep.into()),
@@ -236,6 +240,8 @@ pub struct FakeApps {
     pub woken: Mutex<Vec<(String, String)>>,
     /// What a service answers on its health path (unset: the backend can't tell).
     pub answers: Mutex<Option<(u16, String)>>,
+    /// How many health checks find the service still starting (asked again later).
+    pub starting: std::sync::atomic::AtomicUsize,
     /// The variables each service was last deployed with.
     pub vars: Mutex<HashMap<(String, String), Vars>>,
     pub removed: Mutex<Vec<(String, String)>>,
@@ -335,6 +341,10 @@ impl Apps for FakeApps {
         *self.memory.lock()
     }
     async fn probe(&self, _: &str, _: &str, _path: &str) -> anyhow::Result<Option<(u16, String)>> {
+        if self.starting.load(Ordering::SeqCst) > 0 {
+            self.starting.fetch_sub(1, Ordering::SeqCst);
+            return Err(roll_previews::ports::StillDeploying("starting".into()).into());
+        }
         Ok(self.answers.lock().clone())
     }
     async fn wake(&self, preview: &str, service: &str) -> anyhow::Result<()> {

@@ -746,6 +746,10 @@ impl Runtime {
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
         info!(%preview, %service, %addr, "preview service running");
+        // A preview waiting on this start (its health check) goes on now, not at its next poll.
+        if let Some(e) = self.engine.get().and_then(Weak::upgrade) {
+            e.service_up(preview);
+        }
         Ok(addr)
     }
 
@@ -899,15 +903,18 @@ impl Runtime {
         // A share link (someone outside the team, until it ends), checked again at every request
         // so a revoked or ended one stops at once.
         let share_cookie = format!("roll_share_{preview}");
-        if cookie_value(req, &share_cookie).is_some_and(|t| self.store.share_ends(preview, t).ok().flatten().is_some()) {
+        if let Some(t) = cookie_value(req, &share_cookie).map(str::to_string)
+            && self.share_live(preview, &t).await.is_some()
+        {
             return None;
         }
         if !token.is_empty() && given("roll_access").is_some_and(|v| same(v, &token)) {
             return Some(self.enter(req, "roll_access", &cookie, &token, 2_592_000));
         }
-        if let Some(t) = given("roll_share")
-            && let Ok(Some(ends)) = self.store.share_ends(preview, t)
+        if let Some(t) = given("roll_share").map(str::to_string)
+            && let Some(ends) = self.share_live(preview, &t).await
         {
+            let t = t.as_str();
             let now = self.store.now_ms().unwrap_or(ends);
             // Who followed it isn't known (nobody signed in): that it was, once a day.
             let _ = self.store.share_opened(preview, t, now.div_euclid(86_400_000), now);
@@ -983,6 +990,32 @@ impl Runtime {
         r.headers_mut().insert(header::SET_COOKIE, c);
         r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
         r
+    }
+
+    /// When share link `token` of `preview` ends, if it's live: not revoked or past, and its maker
+    /// may still open the project's previews, asked again (off the async workers: it reads roll's
+    /// accounts) once last asked `visitor_recheck` ago. One whose maker may not ends now, said in
+    /// the preview's activity.
+    async fn share_live(&self, preview: &str, token: &str) -> Option<i64> {
+        let crate::store::LiveShare { id: share, ends, maker, maker_checked } = self.store.share_live(preview, token).ok().flatten()?;
+        let Some(maker) = maker else { return Some(ends) };
+        let now = self.store.now_ms().ok()?;
+        if maker_checked > now - self.cfg.visitor_recheck.as_millis() as i64 {
+            return Some(ends);
+        }
+        let engine = self.engine().ok()?;
+        let project = self.store.row(preview).ok()?.project_id;
+        let e = engine.clone();
+        let reaches = tokio::task::spawn_blocking(move || e.maker_reaches(&maker, &project)).await.unwrap_or(false);
+        if reaches {
+            let _ = self.store.share_maker_checked(&share, now);
+            return Some(ends);
+        }
+        let by = self.store.shares(preview).ok().and_then(|all| all.into_iter().find(|s| s.id == share)).map(|s| s.created_by).unwrap_or_default();
+        if self.store.revoke_share(preview, &share).is_ok() {
+            let _ = self.store.log(preview, &format!("{by}'s share link ended: they may no longer open the project's previews"));
+        }
+        None
     }
 
     /// Whether `token` is a live session in `preview` whose person may still open the project
@@ -2365,7 +2398,7 @@ mod tests {
         assert!(raw("GET /__roll/feedback.js HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nConnection: close\r\n\r\n".into()).await.starts_with("HTTP/1.1 401"));
         // A share link: in through its token (a cookie of its own, only for its life), out once
         // it's revoked.
-        let (share, stoken) = rt.store.create_share(&row.id, rt.store.now_ms().unwrap() + 3_600_000, "ada").unwrap();
+        let (share, stoken) = rt.store.create_share(&row.id, rt.store.now_ms().unwrap() + 3_600_000, "ada", None).unwrap();
         let entered = raw(format!("GET /hello?roll_share={stoken} HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nConnection: close\r\n\r\n")).await;
         assert!(entered.starts_with("HTTP/1.1 302") && entered.contains(&format!("roll_share_{}={stoken}", row.id)) && entered.contains("Max-Age=3"), "{entered}");
         let with_share = format!("GET /hello HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nCookie: roll_share_{}={stoken}\r\nConnection: close\r\n\r\n", row.id);

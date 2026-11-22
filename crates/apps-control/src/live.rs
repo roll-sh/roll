@@ -53,6 +53,8 @@ pub struct Template {
     /// That site's edge functions ([`crate::edge`]), and the service that runs them.
     pub edge: Vec<apps_build::edge::EdgeFn>,
     pub edge_service: String,
+    /// A closed environment's: the hosts its placeholders are bound to (its CA names them all).
+    pub intercept_hosts: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -412,6 +414,50 @@ pub struct Gate {
     pub snippets: Option<(bytes::Bytes, bytes::Bytes)>,
 }
 
+/// What a gRPC health check is called in the log (`run.health_grpc`).
+const GRPC_HEALTH: &str = "grpc.health.v1.Health/Check";
+
+/// Whether a gRPC frame holds a HealthCheckResponse whose `status` (field 1) is SERVING (1).
+fn grpc_serving(frame: &[u8]) -> bool {
+    let Some(len) = frame.get(1..5).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize) else { return false };
+    let Some(msg) = frame.get(5..5 + len).filter(|_| frame[0] == 0) else { return false };
+    // Fields in order: a varint `status` is tag 0x08; anything else (unknown fields) is skipped.
+    let mut i = 0;
+    let mut serving = false;
+    while i < msg.len() {
+        let tag = msg[i];
+        i += 1;
+        let mut varint = || {
+            let (mut v, mut shift) = (0u64, 0);
+            while let Some(b) = msg.get(i) {
+                i += 1;
+                v |= u64::from(b & 0x7f) << shift;
+                if b & 0x80 == 0 {
+                    return Some(v);
+                }
+                shift += 7;
+                if shift > 63 {
+                    return None;
+                }
+            }
+            None
+        };
+        match tag & 7 {
+            0 => match varint() {
+                Some(v) if tag >> 3 == 1 => serving = v == 1,
+                Some(_) => {}
+                None => return false,
+            },
+            2 => match varint() {
+                Some(n) => i = i.saturating_add(n as usize),
+                None => return false,
+            },
+            _ => return false,
+        }
+    }
+    serving
+}
+
 /// A rate-limit bucket: which (0 the environment's, 1 + i firewall rule i's, [`FILE_BUCKETS`] + i
 /// the live deployment's roll.toml rule i's) and whose.
 type BucketKey = (u16, Option<std::net::IpAddr>);
@@ -579,6 +625,8 @@ pub struct EnvLive {
     /// Deployments asked for by their own URL (not the active one): their templates, one
     /// instance each at most, gone a minute after their last request.
     viewed: Mutex<HashMap<String, (Arc<Template>, Instant)>>,
+    /// Instances out of rotation still finishing their requests, and each one's deployment.
+    draining: Arc<Mutex<HashMap<String, String>>>,
     /// Requests waiting on a wake.
     waiters: AtomicU32,
     /// A lease ended: a request queued at the hard limit ([`crate::model::Run::queue_s`]) looks again.
@@ -654,6 +702,7 @@ impl EnvLive {
             routed: AtomicU64::new(0),
             served: Mutex::new(HashMap::new()),
             viewed: Mutex::new(HashMap::new()),
+            draining: Default::default(),
             waiters: AtomicU32::new(0),
             freed: Arc::new(tokio::sync::Notify::new()),
             failed: Mutex::new(None),
@@ -712,7 +761,7 @@ impl EnvLive {
 
     /// `deployment`'s template while it still serves (the active one, the canary, or one asked
     /// for by its own URL).
-    fn serving(&self, deployment: &str) -> Option<Arc<Template>> {
+    pub(crate) fn serving(&self, deployment: &str) -> Option<Arc<Template>> {
         if let Some((c, _)) = self.canary.lock().as_ref()
             && c.deployment == deployment
         {
@@ -828,6 +877,44 @@ impl EnvLive {
         }
     }
 
+    /// A gRPC server's health (`run.health_grpc`): a unary `grpc.health.v1.Health/Check` for
+    /// `service` over h2c that answers 200, `grpc-status` 0 and SERVING (its body read to 1 KiB).
+    async fn answers_grpc(&self, addr: SocketAddr, service: &str) -> bool {
+        use http_body_util::BodyExt;
+        // HealthCheckRequest { service = 1 }, in gRPC's length-prefixed frame (names are short:
+        // one length byte).
+        let mut msg = Vec::with_capacity(service.len() + 2);
+        if !service.is_empty() {
+            msg.extend([0x0a, service.len() as u8]);
+            msg.extend(service.as_bytes());
+        }
+        let mut body = vec![0u8];
+        body.extend((msg.len() as u32).to_be_bytes());
+        body.extend(msg);
+        let Ok(req) = axum::http::Request::post(format!("http://{addr}/grpc.health.v1.Health/Check"))
+            .version(axum::http::Version::HTTP_2)
+            .header("content-type", "application/grpc")
+            .header("te", "trailers")
+            .header("user-agent", "roll-apps-health")
+            .body(axum::body::Body::from(body))
+        else {
+            return false;
+        };
+        let answer = async {
+            let resp = self.client_h2.request(req).await.ok()?;
+            if resp.status() != axum::http::StatusCode::OK {
+                return None;
+            }
+            // Trailers-only (an error) puts the status in the headers.
+            let early = resp.headers().get("grpc-status").cloned();
+            let got = http_body_util::Limited::new(resp.into_body(), 1024).collect().await.ok()?;
+            let status = got.trailers().and_then(|t| t.get("grpc-status").cloned()).or(early)?;
+            Some((status, got.to_bytes()))
+        };
+        let Ok(Some((status, bytes))) = tokio::time::timeout(Duration::from_secs(5), answer).await else { return false };
+        status == "0" && grpc_serving(&bytes)
+    }
+
     /// Start `inst` and wait until it answers (web) or has kept running (worker).
     async fn start(&self, inst: &Arc<Inst>, run: &Run, health: Option<&str>, deadline: Instant) -> Result<Option<SocketAddr>, WakeError> {
         let crash_stop = inst.stopping.lock().take();
@@ -849,9 +936,14 @@ impl EnvLive {
         let (mut looked, mut hint) = (Instant::now(), None);
         match (run.kind, addr) {
             (RunType::Web, Some(a)) => loop {
-                // A TCP service is up when its port accepts; anything else answers HTTP.
-                let up = if run.tcp {
+                // A TCP service is up when its port accepts; a UDP one once it runs (nothing to
+                // ask over UDP); anything else answers HTTP.
+                let up = if run.udp {
+                    true
+                } else if run.tcp {
                     tcp_answers(a).await
+                } else if let Some(svc) = run.health_grpc.as_deref() {
+                    self.answers_grpc(a, svc).await
                 } else {
                     self.answers(a, health, run.h2c).await
                 };
@@ -1578,7 +1670,8 @@ impl EnvLive {
     /// doesn't use up another's time.
     fn drain(&self, old: Vec<Arc<Inst>>, window: Duration) {
         for i in old {
-            let (runtime, released) = (self.runtime.clone(), self.released.clone());
+            let (runtime, released, draining) = (self.runtime.clone(), self.released.clone(), self.draining.clone());
+            draining.lock().insert(i.name.clone(), i.deployment.clone());
             tokio::spawn(async move {
                 let until = Instant::now() + window;
                 while i.in_flight() > 0 && Instant::now() < until {
@@ -1587,13 +1680,19 @@ impl EnvLive {
                 if released.load(Ordering::SeqCst) {
                     // The next owner's to stop: this node only forgets it.
                     runtime.release(&i.name).await;
-                    return;
+                } else {
+                    let grace = until.saturating_duration_since(Instant::now()).max(Duration::from_secs(1));
+                    let _ = runtime.stop(&i.name, grace).await;
+                    runtime.remove(&i.name).await;
                 }
-                let grace = until.saturating_duration_since(Instant::now()).max(Duration::from_secs(1));
-                let _ = runtime.stop(&i.name, grace).await;
-                runtime.remove(&i.name).await;
+                draining.lock().remove(&i.name);
             });
         }
+    }
+
+    /// The deployments whose instances are still draining here.
+    pub fn draining(&self) -> Vec<String> {
+        self.draining.lock().values().cloned().collect()
     }
 
     /// A gradual rollout begins: the new deployment's healthy instances join the active one's,
@@ -1699,7 +1798,7 @@ impl EnvLive {
                 // Asleep and frozen: kept so, nothing asked of it (a frozen process answers nothing).
                 (_, Some(a)) if a.paused => Some(Phase::Suspended(a.addr)),
                 (RunType::Web, Some(Adopted { addr: Some(a), .. })) => {
-                    let up = if tpl.run.tcp { tcp_answers(a).await } else { self.answers(a, None, tpl.run.h2c).await };
+                    let up = if tpl.run.udp { true } else if tpl.run.tcp { tcp_answers(a).await } else { self.answers(a, None, tpl.run.h2c).await };
                     up.then_some(Phase::Running(Some(a)))
                 }
                 (RunType::Web, Some(_)) => None,
@@ -1899,6 +1998,12 @@ impl EnvLive {
 
     /// A file instances made from now on get (`path`, its contents), in place of one there: a
     /// closed environment's trust bundle when its interception CA changes while it sleeps.
+    /// Its template made again while nothing runs (a closed environment's new CA and placeholders
+    /// while it slept): its next start uses it.
+    pub fn set_template(&self, tpl: Arc<Template>) {
+        *self.template.lock() = Some(tpl);
+    }
+
     pub fn set_file(&self, path: &str, contents: &str) {
         let with = |t: &Arc<Template>| {
             let mut t = (**t).clone();
@@ -1992,7 +2097,7 @@ impl EnvLive {
         };
         for tpl in due {
             if tpl.run.kind == RunType::Web
-                && let Some(path) = tpl.run.health_path.as_deref()
+                && let Some(path) = tpl.run.health_path.as_deref().or(tpl.run.health_grpc.as_ref().map(|_| GRPC_HEALTH))
             {
                 let mine: Vec<Arc<Inst>> = insts.iter().filter(|i| i.deployment == tpl.deployment).cloned().collect();
                 self.check_health(&mine, path, &tpl.run).await;
@@ -2178,7 +2283,14 @@ impl EnvLive {
                 _ => None,
             })
             .collect();
-        let probes = running.iter().map(|(i, a)| async move { (*i, *a, self.answers(*a, Some(path), h2c).await) });
+        let grpc = run.health_grpc.as_deref();
+        let probes = running.iter().map(|(i, a)| async move {
+            let ok = match grpc {
+                Some(svc) => self.answers_grpc(*a, svc).await,
+                None => self.answers(*a, Some(path), h2c).await,
+            };
+            (*i, *a, ok)
+        });
         for (i, addr, ok) in futures::future::join_all(probes).await {
             if ok {
                 i.health_fails.store(0, Ordering::SeqCst);
@@ -2579,6 +2691,18 @@ impl EnvLive {
         self.meter.lock().sample(now_ms(), secs * c.cpu * 0.5, (c.memory_mb as u64) << 20, secs, 1);
         self.runtime.remove(&c.name).await;
     }
+
+    /// A sandbox's container ([`crate::sandboxes`]) made from `tpl` as `name` and started; gone
+    /// again if it didn't start.
+    pub(crate) async fn start_sandbox(&self, tpl: &Template, name: String) -> anyhow::Result<()> {
+        let inst = self.make_run(tpl, Some(name)).await?;
+        if let Err(e) = self.runtime.start(&inst.name, self.log.instance(&inst.name, &inst.deployment)).await {
+            self.runtime.remove(&inst.name).await;
+            return Err(e);
+        }
+        self.runtime.settle(&inst.name).await;
+        Ok(())
+    }
 }
 
 /// How a run ended.
@@ -2614,6 +2738,7 @@ mod tests {
                 vars: vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
                 port: Some(8080),
                 ports: vec![],
+                udp: false,
                 cpu: 0.5,
                 memory_mb: 512,
                 network: None,
@@ -2631,6 +2756,7 @@ mod tests {
             site: None,
             edge: Vec::new(),
             edge_service: String::new(),
+            intercept_hosts: Vec::new(),
         })
     }
 

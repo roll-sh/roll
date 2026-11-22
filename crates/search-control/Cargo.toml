@@ -48,3 +48,5 @@ tracing-subscriber.workspace = true
 tempfile.workspace = true
 futures-util.workspace = true
 rusqlite.workspace = true
+# `inspect`'s send deadline, on a paused clock.
+tokio = { workspace = true, features = ["test-util"] }

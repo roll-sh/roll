@@ -15,7 +15,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-mod data;
+pub(crate) mod data;
 mod secrets;
 mod services;
 pub mod fleet;
@@ -59,13 +59,43 @@ impl roll_previews::ports::Visitors for AccountsVisitors {
     }
 
     fn may_open(&self, user: &str, session: &str, project: &str) -> bool {
-        if !self.accounts.session_live(user, session).unwrap_or(false) {
-            return false;
-        }
+        self.accounts.session_live(user, session).unwrap_or(false) && self.maker_reaches(user, project)
+    }
+
+    /// A share link's maker: an account that still signs in (not disabled or deleted) and is an
+    /// admin or still has a role that reveals the project's previews.
+    fn maker_reaches(&self, user: &str, project: &str) -> bool {
         match self.accounts.user(user) {
-            Ok(u) if !u.disabled => u.admin || self.workspace.get(roll_workspace::Scope::All, project).is_ok_and(|p| !p.owner.is_empty() && p.owner == user),
+            Ok(u) if !u.disabled => u.admin || self.workspace.memberships_of(user).is_ok_and(|m| opens_team_previews(&m, project)),
             _ => false,
         }
+    }
+}
+
+/// Whether a person's roles (docs/members.md) let them open a team-access preview of `project`:
+/// its running app is what a share link gives, and minting one is `reveal` on the preview, so it's
+/// what the catalogue asks for that (a developer whose environments take in `preview`, an admin or
+/// owner; never a viewer, who sees no values).
+fn opens_team_previews(memberships: &[roll_auth::roles::Membership], project: &str) -> bool {
+    use roll_auth::scope::{Action, Outcome, Resource, Target};
+    let preview = Resource { project: Some(project.into()), environment: Some("preview".into()), protected: Some(false), ..Resource::new("previews", "") };
+    roll_auth::roles::session_scope(memberships).outcome(&Target::One(preview), Action::Reveal) == Outcome::Allow
+}
+
+#[cfg(test)]
+mod team_access_tests {
+    use roll_auth::roles::{Membership, Role};
+
+    #[test]
+    fn a_role_that_reveals_a_preview_opens_its_team_access() {
+        let m = |role, environments: Option<&[&str]>| vec![Membership { project: "prj_a".into(), role, environments: environments.map(|e| e.iter().map(|x| x.to_string()).collect()) }];
+        let opens = |ms: Vec<Membership>| super::opens_team_previews(&ms, "prj_a");
+        assert!(!opens(m(Role::Viewer, None)), "a viewer sees no values");
+        assert!(opens(m(Role::Developer, None)), "a developer's default takes in what isn't protected");
+        assert!(!opens(m(Role::Developer, Some(&["staging"]))), "named environments without preview");
+        assert!(opens(m(Role::Developer, Some(&["preview"]))));
+        assert!(opens(m(Role::Admin, None)) && opens(m(Role::Owner, None)));
+        assert!(!super::opens_team_previews(&m(Role::Owner, None), "prj_b"), "another project");
     }
 }
 
@@ -199,11 +229,7 @@ pub fn start(
     backend.attach(&engine);
     code.code.set_preview_backend(backend);
     // The mail catcher: previews' mail is kept with them, never sent on.
-    let bound = std::net::TcpListener::bind(args.previews_smtp).and_then(|l| {
-        l.set_nonblocking(true)?;
-        tokio::net::TcpListener::from_std(l)
-    });
-    match bound {
+    match crate::listen::bind(args.previews_smtp) {
         Ok(l) => {
             tracing::info!(addr = %args.previews_smtp, "roll previews: catching previews' mail");
             tokio::spawn(roll_previews::mail::serve(l, Arc::new(roll_previews::mail::Store(store))));

@@ -44,6 +44,7 @@ interface Form {
   /** Private roll code repos submodules may come from, comma-separated. */
   submoduleRepos: string;
   lfs: boolean;
+  otel: boolean;
   type: Run["type"];
   port: string;
   start: string;
@@ -94,11 +95,15 @@ interface Form {
   /** The new instances start beside the old ones (false: the old ones stop first). */
   rolloutOverlap: boolean;
   h2c: boolean;
+  /** With h2c: a gRPC health check, the service's name (empty: the server); off when unchecked. */
+  healthGrpc: boolean;
+  healthGrpcService: string;
   public: boolean;
   restart: "always" | "on_failure" | "never";
   restartTries: string;
   affinity: boolean;
   tcp: boolean;
+  udp: boolean;
   rollbackOnCrash: boolean;
   rebuildOnBase: boolean;
   skewProtection: boolean;
@@ -158,6 +163,7 @@ export function formOf(s: Service): Form {
     submodules: !!s.build.submodules,
     submoduleRepos: (s.build.submodule_repos ?? []).join(", "),
     lfs: !!s.build.lfs,
+    otel: !!s.build.otel,
     type: s.run.type,
     port: str(s.run.port),
     start: str(s.run.start),
@@ -203,11 +209,14 @@ export function formOf(s: Service): Form {
     rolloutManual: !!s.run.rollout?.manual,
     rolloutOverlap: s.run.rollout?.overlap !== false,
     h2c: !!s.run.h2c,
+    healthGrpc: s.run.health_grpc != null,
+    healthGrpcService: s.run.health_grpc ?? "",
     public: s.run.public !== false,
     restart: s.run.restart ?? "always",
     restartTries: str(s.run.restart_tries),
     affinity: !!s.run.affinity,
     tcp: !!s.run.tcp,
+    udp: !!s.run.udp,
     rollbackOnCrash: !!s.run.rollback_on_crash,
     rebuildOnBase: !!s.run.rebuild_on_base,
     skewProtection: !!s.run.skew_protection,
@@ -273,6 +282,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
     build.submodule_repos = repos.length ? repos : null;
   }
   if (f.lfs !== before.lfs) build.lfs = f.lfs ? true : null;
+  if (f.otel !== before.otel) build.otel = f.otel ? true : null;
   if (Object.keys(build).length) patch.build = build;
   const run: Reset<Run> = {};
   if (f.type !== before.type) run.type = f.type;
@@ -330,9 +340,11 @@ export function patchOf(s: Service, f: Form): ServicePatch {
       ...(f.rolloutOverlap ? {} : { overlap: false }),
     };
   if (f.h2c !== before.h2c) run.h2c = f.h2c ? true : null;
+  if (f.healthGrpc !== before.healthGrpc || f.healthGrpcService !== before.healthGrpcService) run.health_grpc = f.healthGrpc && f.h2c ? f.healthGrpcService.trim() : null;
   if (f.public !== before.public) run.public = f.public ? null : false;
   if (f.affinity !== before.affinity) run.affinity = f.affinity ? true : null;
   if (f.tcp !== before.tcp) run.tcp = f.tcp ? true : null;
+  if (f.udp !== before.udp) run.udp = f.udp ? true : null;
   if (f.rollbackOnCrash !== before.rollbackOnCrash) run.rollback_on_crash = f.rollbackOnCrash ? true : null;
   if (f.rebuildOnBase !== before.rebuildOnBase) run.rebuild_on_base = f.rebuildOnBase ? true : null;
   if (f.skewProtection !== before.skewProtection) run.skew_protection = f.skewProtection ? true : null;
@@ -572,6 +584,14 @@ export function SettingsTab({
               {form.sourceKind === "repo" && form.submodules && (
                 <Field label="Private submodule repos" hint="roll code repos you can read that its submodules may come from">
                   {t("submoduleRepos", "acme/lib, acme/ui")}
+                </Field>
+              )}
+              {(form.sourceKind === "git" || form.sourceKind === "repo" || form.sourceKind === "upload") && (
+                <Field label="OpenTelemetry agent" hint="Node's or Python's, in its image; started while its traces are on">
+                  <select value={form.otel ? "on" : "off"} onChange={(e) => set("otel", e.target.value === "on")} className={`${input} w-full`}>
+                    <option value="off">None (an SDK of its own)</option>
+                    <option value="on">Added at build</option>
+                  </select>
                 </Field>
               )}
               {form.sourceKind === "git" && (
@@ -920,10 +940,31 @@ export function SettingsTab({
                   <option value="h2c">HTTP/2 (h2c)</option>
                 </select>
               </Field>
-              <Field label="HTTP or TCP" hint="TCP: a port of its own per environment, no HTTP names (a game server, MQTT)">
-                <select value={form.tcp ? "tcp" : "http"} onChange={(e) => set("tcp", e.target.value === "tcp")} className={`${input} w-full`}>
+              {form.h2c && (
+                <Field label="Health check" hint="gRPC: grpc.health.v1's check must answer SERVING, in place of the health path">
+                  <select value={form.healthGrpc ? "grpc" : "http"} onChange={(e) => set("healthGrpc", e.target.value === "grpc")} className={`${input} w-full`}>
+                    <option value="http">Its health path</option>
+                    <option value="grpc">gRPC health service</option>
+                  </select>
+                </Field>
+              )}
+              {form.h2c && form.healthGrpc && (
+                <Field label="gRPC service checked" hint="its full name; empty: the server as a whole">
+                  {t("healthGrpcService", "acme.Orders")}
+                </Field>
+              )}
+              <Field label="HTTP, TCP or UDP" hint="TCP or UDP: a port of its own per environment, no HTTP names (a game server, MQTT, DNS)">
+                <select
+                  value={form.udp ? "udp" : form.tcp ? "tcp" : "http"}
+                  onChange={(e) => {
+                    set("tcp", e.target.value === "tcp");
+                    set("udp", e.target.value === "udp");
+                  }}
+                  className={`${input} w-full`}
+                >
                   <option value="http">HTTP</option>
                   <option value="tcp">TCP</option>
+                  <option value="udp">UDP</option>
                 </select>
               </Field>
               <Field label="Session affinity" hint="each visitor stays on one instance while it's up (a cookie)">

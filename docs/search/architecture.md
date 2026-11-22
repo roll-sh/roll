@@ -56,7 +56,7 @@ branch instantly and keep their data on object storage.
 | `search-painless` | the Painless scripting language: parser, type checker, compiler to a compact bytecode, VM, and the script contexts Elasticsearch exposes |
 | `search-store`    | durability and storage: the write-ahead log (group commit to object storage), segment upload, per-shard manifests, the local cache, branching and garbage collection |
 | `search-es`       | Elasticsearch semantics: mappings, settings, index templates, aliases, the Query DSL, the document and search APIs, `_cat`, cluster and node APIs, errors with Elasticsearch's types and texts |
-| `search-embed`    | the built-in embedding model, multilingual-e5-small: XLM-RoBERTa tokenizer, BERT encoder, mean pooling and normalization on the CPU (candle), reading two files; no other I/O |
+| `search-embed`    | the built-in embedding model, multilingual-e5-small: XLM-RoBERTa tokenizer, BERT encoder, mean pooling and normalization on the CPU (`gemm`, one thread per worker), reading two files; no other I/O |
 | `search-server`   | the node: HTTP listener, tenants (clusters), authentication, wake-on-request, idle unload, request limits, TLS, the embedding pool (`embed.rs`: weights fetched once and checked, fair turns per cluster, CPU metered) |
 | `search-control`  | the roll API (`/v1/search/...`) for the dashboard and CLI: clusters, credentials, branches, usage, metering and pricing |
 | `search-yaml`     | a runner for Elasticsearch's YAML REST test format, usable against any URL (roll or a real Elasticsearch) |
@@ -353,7 +353,10 @@ only for a cross-cluster key's request): the remote answers `search-aggs`' `wire
 `Aggs` tree in an internal field, and the local cluster does the final reduce. The encoding names
 its layout version, and a part of another layout fails that cluster's part rather than being
 misread. Scrolls and points in time over linked clusters live on the local cluster's owner
-(`Cluster::ccs_contexts`), with each part's own context on its cluster's owner.
+(`Cluster::ccs_contexts`), with each part's own context on its cluster's owner. An ES|QL query's
+part on a linked remote is a `_query` whose `x-roll-esql-part` header (honored only for a
+cross-cluster key's request, like `x-roll-partial-aggs`) makes the remote answer its typed rows
+or `STATS` states in an internal field for the local cluster's merge.
 
 **The client address** is decided by the node that accepted the connection, by one rule
 (`ClientAddresses`, rolld's flags):
@@ -545,6 +548,257 @@ allowlist (a preview's branch included); change it like any setting.
     reason; it never falls back to anonymous requests or to values held from before, and no error
     carries a value. Resolved values are wiped when dropped, and unregistering a repository drops
     them. A branch is told the same thing whether a key is protected or missing.
+
+## Connectors
+
+Elastic's connectors are how a database or a bucket gets into a search index: a `_connector`
+document holds the source (`service_type`, `configuration` with its field schema, `scheduling`,
+`filtering`, `pipeline`), and each run is a `_connector/_sync_job` document that moves through
+`pending → in_progress → completed | error | canceling → canceled` with its counters. roll keeps
+both with Elasticsearch 9.5.5's shapes, validation and state machines
+(`search-es` `xpack/entsearch/connectors.rs`), and runs the syncs itself
+(`xpack/entsearch/sync/`), so the API, the dashboard and existing tools see real jobs.
+
+- **Which connectors roll runs.** Elastic-managed ones (`is_native: true`, so their index starts
+  with `content-`) whose `service_type` roll implements: `postgresql` and `s3` for now. A
+  self-managed connector (`is_native: false`) is left to the connector service the tenant runs,
+  which claims its jobs through the API exactly as on Elasticsearch; roll never claims them.
+  When a connector becomes one roll runs (created that way, or its `service_type` or
+  `is_native` changes), roll fills its `configuration` with the service's field schema, as
+  Elastic's connector service does, and the connector needs configuration until the values
+  are set (`_connector/{id}/_configuration` `{"values": …}` → `configured`). The first
+  successful sync marks it `connected`; a failed one `error`, with the reason.
+- **Where syncs run.** On the cluster's owner node, on the cluster's job scheduler
+  (`opensearch/jobs.rs`) like ILM, transforms and watches. Its `next_due` includes: a pending
+  job of a connector roll runs with no job in progress (due now), a schedule's next cron time
+  (`scheduling.full` / `.incremental`, Quartz cron in UTC, counted from the last time it fired,
+  kept in the private `connector.roll` record so the connector document keeps Elastic's
+  shape), a draft filtering waiting for validation, and a job roll claimed that stopped
+  checking in (a node that died mid-sync; marked `error` after 5 minutes without a heartbeat).
+  A sleeping cluster records that earliest time as its `wake_at`, so it is loaded only when a
+  scheduled sync is due; between syncs it costs nothing. A sync is a task of its own
+  (one per connector at a time; others wait as `pending`): the scheduler starts it and goes
+  back to sleep. At most two run at once per cluster, four per node, and two per owner on a node
+  (the person a cluster belongs to; `sync/slots.rs`). A cluster that can't get one of the
+  node's slots waits in a FIFO queue: a slot that frees wakes the first waiter whose owner is
+  under its cap, and nobody behind it (the cluster that freed it included) takes the slot first.
+  A waiter counts only while its cluster is loaded and still has a job it could start (checked
+  whenever the queue is looked at, against a few of its own jobs, so a canceled job or a
+  removed connector never holds it up), a woken waiter that doesn't take its slot within 30
+  seconds loses its place, and a successful take, or a waiter dropped for no longer counting,
+  wakes the next waiter, so slots that free together all find a taker. While every slot of its own is taken a
+  pending job isn't due (a slot freeing wakes the scheduler), and a sync running here isn't
+  due again for its stale time (a long statement can outlast it). While
+  one runs the cluster is pinned loaded (`Syncs::busy`), and every write it makes goes through
+  the cluster, so a node that lost the cluster fails its next write and the sync stops there. A
+  supervisor task runs each sync as a task of its own: however it ends (a panic included) the
+  slot and the node's permit are freed, a job it left unfinished is settled (`error`, or
+  `canceled` when it was canceling), and the scheduler is woken, so no bug can pin a cluster or
+  strand a job.
+- **On a branch, and connectors from before.** Some connectors wait to be made the cluster's
+  own (`sync::waits_for_adoption`): none of their jobs becomes due or starts, and their
+  schedules make none. They are the connectors a branch inherited (`branch::inherited_connector`,
+  the marker its first load records), so a branch never reads the parent's source with the
+  parent's credentials; and, once per cluster, the native connectors it held when roll began
+  running syncs (`sync::adopt_existing`, on the first load after the upgrade, before the
+  scheduler starts: their credentials, stored in the clear until then, are sealed where they
+  lie). That one rule also covers branches made before branches recorded what they inherited,
+  and native connectors whose credentials a tenant stored expecting nothing to run them. Putting
+  a connector, or updating one through any `_connector/{id}/_…` endpoint, records that the
+  cluster's connectors are made under roll's syncs (`sync::mark_current`; a branch has its
+  parent's record), so no connector made since ever waits, and a cluster with nothing to pause
+  isn't written to on load. Putting a connector again or
+  writing its configuration makes it the cluster's own (`sync::adopt`), and that write is
+  treated as roll starting to run it: only the credentials given in it are kept (sealed);
+  every other sensitive value, sealed or in the clear, and `********` are cleared, and the
+  connector needs configuration until they are given. An empty configuration write adopts a connector without any password.
+- **A run.** Claim the job (`in_progress`, `worker_hostname: roll`, `started_at`), read the
+  source a page at a time, apply the active sync rules, and bulk-index each page into
+  `index_name` through the connector's `pipeline` when that pipeline exists, as the user who
+  last configured the connector (`connector.roll`'s stored user, as transforms keep theirs: a
+  user or key gone or disabled fails the job). Every 10 seconds the job's counters
+  (`indexed_document_count`, `indexed_document_volume` in MiB, `deleted_document_count`) and
+  `last_seen` are written, and the job is re-read: `_cancel` (`canceling`) stops the run at the
+  next page, which then records `canceled`. A full sync then deletes every document of the index
+  it didn't see (ids of documents seen are kept as 64-bit hashes, 8 bytes each, at most
+  20 million per run). The job ends `completed` with `total_document_count` (the index's count)
+  and the connector's `last_sync_status`, `last_synced`, `last_indexed_document_count`,
+  `last_deleted_document_count` and `sync_cursor`; or `error` with the reason in both. A
+  document that fails to index is counted (`metadata.failed_document_count`), and so is one
+  whose source isn't exactly one JSON object (`metadata.last_failed_document` says which and
+  why); more than 100 failures that are also over a tenth of the documents fail the job.
+- **What a sync can write.** Only documents into the connector's own index: its `_bulk` goes
+  to `/{index_name}/_bulk` inside `internal::index_only`, where bulk refuses any action but
+  `index` and any action-line key but `_id` (no `_index`, `pipeline`, `routing`, versioning or
+  `dynamic_templates`), whatever the body holds. Each item carries the restriction
+  (`WriteArgs::index_only`, since items run on other threads): a pipeline that would move a
+  document elsewhere (the connector's `pipeline`, the index's default pipeline; a `reroute`, or
+  `set` on `_index`, even to an index a row's data names) fails that document before its new
+  target is resolved, so nothing is created or written there. A document's text from
+  a source is checked to be exactly one JSON object (`sync::json_scan::one_object`, a scan, no
+  tree) and put on one line (line breaks between tokens become spaces; a string can't hold a
+  raw one), so it can't add a line to the body: a server's text can't delete or write
+  anything, and a pretty-printed `json` column syncs as it is.
+- **Limits.** A sync reads at most `roll.connectors.max_docs_per_second` documents (1,000) and
+  `roll.connectors.max_bytes_per_second` bytes (10 MiB) per second (node settings), sleeping
+  between pages to stay under them. The bytes are everything read from the source: the
+  Postgres connection's every byte (rows the sync rules exclude and the server's messages
+  included), an S3 listing's and objects' bytes. A page is at most 500 rows or objects and is
+  held in memory only while it is indexed, as the `_bulk` body itself (`sync::Page`): each
+  document's source is text the source gave (Postgres) or built from an object's text (S3),
+  never a tree of the document, and the sync rules read only the fields they name from it with
+  a token scan (`rules::pick`). The body is charged to the cluster's request circuit breaker as
+  it grows, so while the sync builds a page it holds the page's bytes and no more, and a node
+  under memory pressure fails the sync rather than the node. Sending it charges the body to
+  `inflight_requests`; the bulk handler then prepares it as it prepares any `_bulk`, which
+  isn't charged beyond that (docs/search/README.md, "Next"):
+  - A table is read in one `REPEATABLE READ READ ONLY` transaction, a keyset page at a time
+    (`WHERE (key) > (last key) ORDER BY key LIMIT n`). The query builds each row's document as
+    JSON text (`json_object_agg`: roll's fields, then the columns renamed) and its `_id`. The
+    server cuts each page once its documents' UTF-8 sizes pass 20 MiB (a running sum in the
+    query), and a document over 10 MiB comes back as NULL (skipped and counted, as is one over
+    10 MiB as received), so an honest page is at most 30 MiB of documents; a page past that, or
+    past `n` rows, fails the sync. `n` follows the largest document seen, starting from 10 MiB.
+    A page's rows are streamed: each document's text goes into the body and the row is dropped
+    as it arrives (the client library reads no further ahead than the row being taken).
+  - The connection counts the bytes it reads: a page's answer past 64 MiB (twice the page, plus
+    framing) fails the sync, and a catalog query's (the table list, keys) past 8 MiB, so a
+    server ignoring the cut can't grow memory. A schema lists at most 10,000 tables (past it,
+    name them in `tables`). Every message's header is read on the plaintext
+    side (after TLS) before the client library sees it, and a length over 64 MiB fails the
+    connection: the library reserves a message's whole length from its header. So does a row
+    or row description of more than 64 columns (roll's queries answer a document, its id and
+    its primary key, at most 32 columns in Postgres), since the library keeps 24 bytes per
+    column of a row. `ParameterStatus` messages, which the library keeps for the connection's
+    life, and notices before the connection is ready, which it keeps until then, are capped at
+    256 and 64 KiB per connection. Later notices are dropped as they arrive (their bytes count
+    in the window); none reaches the node's logs.
+  - A bucket is listed a page at a time (4 MiB of listing and the keys asked for at most; a
+    listing answering more keys fails) and a page is indexed once
+    its body passes 20 MiB; an object over 10 MiB is indexed without its text (Elastic's
+    default extraction limit). An object's text can be larger than the object (invalid UTF-8
+    becomes replacement characters, and control characters are escaped in JSON), so a page is
+    20 MiB plus its last document, which is charged as it's built: the object, then its text
+    (JSON objects' values are read with the same scan, never a tree). Listings' bytes count against the sync's rate like
+    objects' do, and 100 listing pages in a row with no key at all fail the sync, so an
+    endpoint can't keep one listing nothing. Pages of keys the sync skips (folder markers,
+    other extensions, objects unchanged since the last sync) are progress and never count.
+  - An error a job or a connector records is cut to 4 KiB, after every configured secret is
+    scrubbed from it. Finished jobs are kept, as on
+    Elasticsearch, until deleted (`DELETE _connector/_sync_job/{id}`); they're small (counters
+    and a redacted snapshot of the connector).
+  - Postgres sessions get `statement_timeout` (5 min) and `idle_in_transaction_session_timeout`
+    so a stuck sync can't hold a transaction open; on the client every statement times out a
+    little after that, the socket has TCP keepalives, and every wait on a database or a bucket
+    races the job's cancel, so a silent server or a dead network can't hold a slot.
+  - A full sync keeps the ids it saw as 64-bit hashes (at most 20 million, 160 MB, per sync;
+    four syncs per node at most).
+  - Any sync reads at most `roll.connectors.max_docs_per_sync` documents (20 million) and runs
+    at most `roll.connectors.max_sync_duration` (`6h`); past either the job fails, so no sync
+    holds a node slot indefinitely.
+- **`postgresql`** (Elastic's configuration fields: `host`, `port`, `username`, `password`,
+  `database`, `schema`, `tables` (`*` or a comma list), `ssl_enabled`, `ssl_ca`, `fetch_size`,
+  `retry_count`; plus roll's `incremental_column`). Each table with a primary key is read in
+  primary-key order; tables without one are skipped, as Elastic's are (the job's
+  `metadata.skipped_table_count`, and the first 100 named in `metadata.skipped_tables`). A
+  row's `_id` is `{database}_{schema}_{table}_{key values joined by _}` and its columns are
+  fields `{schema}_{table}_{column}`, with `database`, `schema`, `table` and `_timestamp`. **Incremental syncs** (which Elastic's PostgreSQL connector doesn't
+  have) read only rows whose `incremental_column` (a timestamp or an ever-increasing number) is
+  at or after the cursor of the last sync; the cursor is the column's maximum seen at that
+  sync's snapshot, per table, in the connector's `sync_cursor`. Without the column, an
+  incremental sync reads every row and upserts. Incremental syncs never delete; the next full
+  sync removes what was deleted. A timestamp cursor can miss a row: one whose transaction
+  commits after the sync's snapshot with an `incremental_column` value below the recorded
+  maximum (`now()` taken early in a long transaction) is never read by an incremental sync.
+  That's inherent to timestamp cursors; use a column set at commit time (a trigger on a sequence,
+  for example) or schedule a periodic full sync, which reads everything. Not yet: advanced sync
+  rules (custom SQL with `id_columns`).
+- **`s3`** (Elastic's fields: `buckets`, `aws_access_key_id`, `aws_secret_access_key`,
+  `read_timeout`, `connect_timeout`, `max_attempts`, `page_size`; plus roll's `endpoint` and
+  `region`, so any S3-compatible store works, path-style when an endpoint is given). Objects are
+  listed a page at a time; each becomes a document with `_id` the MD5 of `{bucket}/{key}`,
+  `filename`, `bucket`, `size_in_bytes`, `_timestamp` (its `LastModified`) and `body`: the text
+  of plain text, Markdown, CSV and logs, the string values of JSON, and the visible text of HTML
+  (scripts and styles dropped, entities decoded). An object whose key has a `.` or `..` segment
+  can't be fetched by its signed path: it is indexed without its text and counted in the job's
+  `metadata.unreadable_object_count`. roll has no `attachment` processor yet, so
+  other formats (PDF, Office) are indexed by their metadata only. Advanced sync rules follow
+  Elastic's (`[{"bucket", "prefix", "extension"}]`, naming only buckets of `buckets`). Incremental syncs
+  fetch only objects modified at or after the last sync's newest `LastModified`: listings give
+  whole seconds on AWS, so objects in the cursor's own second are read again rather than an
+  object written later in that second being missed.
+- **Sync rules.** Basic rules (`field`, `policy`, `rule`, `value`, in `order`, the first match
+  deciding, the default rule including the rest) are applied to each document before it is
+  indexed, as Elastic's framework does; a full sync deletes what they exclude. roll validates a
+  draft of a connector it runs (rules parse, regexes compile, an advanced snippet has the
+  service's shape) and sets its `validation` to `valid` or `invalid`, which
+  `_filtering/_activate` requires, as Elastic's connector service does.
+- **Reaching sources.** Host, port and endpoint are the tenant's choice, so connections go to
+  public addresses only: Postgres hosts are resolved and refused when any address is private,
+  and S3 goes through `search-es` `s3.rs` (`roll_net::PublicOnly`, private literals refused, no
+  redirects, bounded reads). `roll.connectors.allow_private_hosts`
+  (`ROLL_SEARCH_CONNECTORS_ALLOW_PRIVATE`) lifts that for local development only.
+- **Credentials.** Fields roll's schema marks `sensitive` (`password`, `aws_secret_access_key`)
+  of a connector roll runs are sealed when written (`seal.rs`, under `ROLL_SECRET_KEY`), opened
+  only by the sync, and never returned:
+  - The schema decides, not the writer: a configuration that marks such a field
+    `sensitive: false` (or sets a number there) gets the flag put back and its value guarded
+    all the same, and redaction and the sync read the schema too. The sync uses a sensitive
+    value only sealed; one in the clear is refused (`give it again`).
+  - A node without `ROLL_SECRET_KEY` has no key to seal with, so it refuses any write that would
+    store one (`illegal_argument_exception` naming the field and `ROLL_SECRET_KEY`) instead of
+    keeping it in the clear; nothing of that write is stored. A sensitive value still stored in
+    the clear (from before roll ran syncs, or an earlier build that let a writer mark a password
+    not sensitive) is sealed in place on the next load (`sync::adopt_existing`, which writes
+    only when there is one) and when a write leaves it unchanged (`********` or the same text);
+    with no key it's cleared instead, and the connector needs configuration.
+  - `GET _connector`, its list and job documents' connector snapshots show `********`, and
+    writing `********` back keeps the stored value, so a client can round-trip a
+    configuration. A sealed value shows as `********` on every connector, self-managed ones
+    included.
+  - A value's associated data is `connector configuration:<cluster id>:<connector id>:<field>`
+    (the cluster's id in roll's catalog), so a sealed value copied into another connector or
+    field, or carried to another cluster (a branch's copy of its parent's state), doesn't
+    open. A branch adopting an inherited connector gives its credentials again (above).
+    Snapshots don't hold connectors (they live in the cluster's state, not in an index), so a
+    restore carries none.
+  - When roll stops running a connector (made self-managed, given a service roll doesn't run)
+    the values it sealed are cleared. Deleting a connector marks it deleted, as Elasticsearch
+    does (`?hard=true` removes it), its sealed values staying unreadable in the cluster's
+    state; putting one again under its id replaces its configuration, sealed values included,
+    with the service's empty schema. When roll starts running one (created native, made
+    native, or given a service roll runs) every sensitive value it holds is sealed as given, and
+    a sealed box is cleared instead: roll cleared its own, so a sealed box then was written by a
+    client. A value written back keeps the stored one only when the stored entry was sensitive
+    too, so a value stored in the clear under a non-sensitive entry is never taken for it.
+  - Changing where a credential goes (Postgres `host`, `port`, `username`, `database`,
+    `ssl_enabled`, `ssl_ca`; S3 `endpoint`, `region`, `aws_access_key_id`, `buckets`), filling
+    in an empty one included, without giving it again in the same write clears it and puts the
+    connector back to `needs_configuration`, as Elastic's UI asks for the password again: a
+    stored password is never sent to a host its owner didn't pair it with. A change of
+    `service_type` starts from the new service's schema, so no configuration (credentials
+    included) carries across services, and fields one service doesn't guard can't be set
+    aside for another. An `s3` connector's advanced rules may only name its `buckets`.
+  - Errors never carry them (a source's message is scrubbed of every configured secret before
+    it is recorded).
+
+  Self-managed connectors otherwise keep Elasticsearch's behaviour: their values are stored as
+  given, since their service reads them through the API.
+- **roll's own Postgres and storage** (next step; not in the first slice). A person points a
+  connector at their own roll Postgres project or roll storage bucket without copying a
+  credential: `POST /v1/search/clusters/{id}/connectors/{connector}/link`
+  (`{"kind": "postgres" | "bucket", "ref": …, "branch"?}`), rolld glue like apps' links. It
+  checks the caller manages the cluster and reaches the resource (`Workspace::trusts`, as roll
+  secrets' `members` and apps' links do), issues a read-only credential of the connector's own
+  through roll secrets' `LinkProvider`s (`rolld` `secrets.rs`: a Postgres role with
+  `pg_read_all_data`, a storage key with `read` on that bucket; never the project's password),
+  writes host, port, user and the sealed secret into the connector's configuration through the
+  cluster's API, and records the link in `connector.roll` (the issued handle, and the exact
+  `host:port` it names). Only that `host:port` is then exempt from the private-address rule for
+  that connector, so a tenant can't point a linked connector elsewhere and keep the exemption;
+  deleting the connector or the link revokes the credential. Credentials kept in roll secrets
+  bind the same way as inference keys (#134): the value is revealed as the caller, written
+  sealed, and a `search-connector` sync of roll secrets pushes it again on rotation.
 
 ## On the fleet (roll cloud)
 

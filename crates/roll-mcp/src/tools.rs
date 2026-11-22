@@ -146,6 +146,13 @@ impl Tool {
         PREPARED.get(self.name).map_or_else(|| self.find_open(), |p| p.open)
     }
 
+    /// Whether a person's role decides it too, on top of their token's rules: one resource of a
+    /// member product, as roll-access's gate asks a person's token `within` their session (a list,
+    /// a create or the product as a whole goes on the token's rules alone).
+    pub fn within_session(&self) -> bool {
+        PREPARED.get(self.name).map_or_else(|| self.find_within(), |p| p.within)
+    }
+
     /// Its MCP definition, as `tools/list` shows it.
     pub fn definition(&self) -> Value {
         self.definition_ref().clone()
@@ -167,6 +174,11 @@ impl Tool {
             catalog::Act::Raw(_) => vec![Action::Write, Action::Delete],
             _ => vec![found.row.action(self.method, &[], None)],
         }
+    }
+
+    fn find_within(&self) -> bool {
+        roll_auth::roles::MEMBER_PRODUCTS.contains(&self.product)
+            && catalog::by_path(self.method, &self.sample_path()).is_some_and(|f| !matches!(f.row.target, catalog::Tgt::AnyGrant | catalog::Tgt::List { .. } | catalog::Tgt::Product | catalog::Tgt::Create { .. }))
     }
 
     /// A route any connection may call (its own identity, its own approvals).
@@ -343,7 +355,7 @@ fn secrets_area(method: &str, path: &str) -> Area {
     let area = match parts.as_slice() {
         // A project and its environments: every area starts there.
         ["projects"] | ["projects", "environments"] if read => return Area::Every,
-        ["findings", ..] => "security",
+        ["findings", ..] | ["deleted"] => "security",
         ["search", ..] => "values",
         ["projects", "environments", s, ..] => match *s {
             "secrets" | "changes" | "diff" | "folders" | "import" | "imports" | "exports" | "order" | "promote" | "rollback" | "requests" | "value-requests" | "values" => "values",
@@ -377,7 +389,7 @@ fn apps_area(method: &str, path: &str) -> Area {
         ["services"] | ["services", "environments"] | ["projects", "services"] => "configure",
         ["services", "environments", s, ..] => match *s {
             "analytics" | "app-metrics" | "errors" | "logs" | "metrics" | "routes" | "slo" | "traces" | "usage" | "vitals" | "push" => "observe",
-            "deploys" | "promote" | "redeploy" | "rollback" | "pending" | "diff" | "jobs" | "runs" | "restart" | "sleep" | "wake" | "instances" | "cache" => "deploy",
+            "deploys" | "promote" | "redeploy" | "rollback" | "pending" | "diff" | "jobs" | "runs" | "restart" | "sleep" | "wake" | "instances" | "cache" | "sandboxes" => "deploy",
             "variables" | "domains" | "forms" | "volume" | "config" => "configure",
             _ => return Area::Unplaced,
         },
@@ -692,7 +704,8 @@ static TOOLS: &[Tool] = &[
     t("workspace_get_project", "Get a project", "A workspace project and its resources.", "workspace", "GET", "/v1/workspace/projects/{id}", &[WS]),
     t("workspace_create_project", "Create a project", "A new workspace project to group resources.", "workspace", "POST", "/v1/workspace/projects", &[breq("name", Ty::Str, "1-48 of a-z, 0-9 and -"), b("description", Ty::Str, "At most 280 characters"), b("icon", Ty::Obj, ICON)]),
     t("workspace_update_project", "Update a project", "Rename a project, or change its description or icon.", "workspace", "PATCH", "/v1/workspace/projects/{id}", &[WS, b("name", Ty::Str, "New name"), b("description", Ty::Str, "New description"), bnull("icon", Ty::Obj, ICON)]),
-    t("workspace_delete_project", "Delete a project", "Delete a workspace project. Its resources stay; only the grouping goes.", "workspace", "DELETE", "/v1/workspace/projects/{id}", &[WS]),
+    t("workspace_delete_project", "Delete a project", "Delete a workspace project. Its resources stay. A project that holds secrets needs a secrets admin's confirmation in the dashboard.", "workspace", "DELETE", "/v1/workspace/projects/{id}", &[WS]),
+    t("workspace_list_roles", "List member roles", "The roles a project member can have (viewer, developer, admin, owner), the rules each one grants, the products those rules cover, and which environments a developer reaches when none are named.", "workspace", "GET", "/v1/workspace/roles", &[]),
     t(
         "workspace_place_resource",
         "Place a resource",
@@ -703,6 +716,28 @@ static TOOLS: &[Tool] = &[
         &[WS, req("kind", "postgres, redis, stream, bucket, nosql or repo"), req("ref", "The resource's id (owner/name for a repo)"), breq("x", Ty::Num, "Canvas x"), breq("y", Ty::Num, "Canvas y")],
     ),
     t("workspace_remove_resource", "Remove a resource from a project", "Take a resource off a project's canvas (the resource itself stays).", "workspace", "DELETE", "/v1/workspace/projects/{id}/resources/{kind}/{ref}", &[WS, req("kind", "Resource kind"), req("ref", "The resource's id")]).undoable(),
+    // Members (docs/members.md): accepting an invite is a person's own, so it's no tool.
+    t("workspace_list_members", "List a project's members", "Who is in a workspace project: handle, role (viewer, developer, admin, owner), a developer's environments, who added them and when. Emails only for the project's admins.", "workspace", "GET", "/v1/workspace/projects/{id}/members", &[WS]),
+    t(
+        "workspace_invite_member",
+        "Invite a member",
+        "Invite an email address to a project with a role (never more than the caller's own). The answer has the invite link once; the person accepts it by signing in as that address.",
+        "workspace",
+        "POST",
+        "/v1/workspace/projects/{id}/invites",
+        &[WS, breq("email", Ty::Str, "Their email address"), breq("role", Ty::Str, "viewer, developer, admin or owner"), b("environments", Ty::Arr, "A developer's environments, where the role applies in full (default: every environment that isn't protected)")],
+    ),
+    t(
+        "workspace_set_member_role",
+        "Change a member's role",
+        "Change a member's role or a developer's environments. Both the old and the new role must be within the caller's own; the last owner can't be demoted.",
+        "workspace",
+        "PATCH",
+        "/v1/workspace/projects/{id}/members/{user}",
+        &[WS, req("user", "The member (usr_…)"), b("role", Ty::Str, "viewer, developer, admin or owner"), b("environments", Ty::Arr, "A developer's environments (null: the default)")],
+    )
+    .destructive(),
+    t("workspace_remove_member", "Remove a member", "Take a person out of a project: their session and tokens stop reaching it at once, and their tokens confined to it are revoked. The last owner can't be removed.", "workspace", "DELETE", "/v1/workspace/projects/{id}/members/{user}", &[WS, req("user", "The member (usr_…)")]).destructive(),
     // ── Postgres ──
     t("postgres_list_projects", "List Postgres projects", "Postgres projects with their branches and endpoints.", "postgres", "GET", "/v1/projects", &[]),
     t("postgres_get_project", "Get a Postgres project", "A Postgres project with its branches and endpoints (connection strings need reveal).", "postgres", "GET", "/v1/projects/{project}", &[PROJECT]),
@@ -728,7 +763,7 @@ static TOOLS: &[Tool] = &[
     t("postgres_execute", "Execute SQL", "Run SQL that may change data or schema (INSERT, UPDATE, DDL) on an endpoint. Without admin on the endpoint it runs as a role that owns the database's objects but isn't the superuser: making roles, untrusted extensions, COPY … PROGRAM and the server's files need admin, and dropping a table, column or schema needs delete.", "postgres", "POST", "/v1/endpoints/{endpoint}/query", &[ENDPOINT, breq("sql", Ty::Str, "SQL to run")]).fixed(writes).destructive(),
     t("postgres_describe_schema", "Describe the schema", "Every table's columns and types on an endpoint (read-only).", "postgres", "POST", "/v1/endpoints/{endpoint}/query", &[ENDPOINT]).fixed(describe_schema),
     t("postgres_explain", "Explain a query", "A statement's plan as JSON (EXPLAIN, FORMAT JSON), without running it: which indexes it uses, its estimated cost and rows. For real timings, postgres_query with EXPLAIN ANALYZE.", "postgres", "POST", "/v1/endpoints/{endpoint}/query", &[ENDPOINT, breq("sql", Ty::Str, "The statement")]).fixed(read_only).wraps(explain),
-    t("postgres_activity", "What's running and blocking queries", "Every client session on an endpoint now: user, application, state, what it waits on, which sessions block it (blocked_by), how long its transaction and query have run, and its query (300 characters). Blocked sessions first. Start here when queries hang or time out.", "postgres", "POST", "/v1/endpoints/{endpoint}/query", &[ENDPOINT]).fixed(activity),
+    t("postgres_activity", "What's running and blocking queries", "Every client session on an endpoint now: user, application (`roll tok_…` or `roll usr_…`: SQL that token or person sent through roll), state, what it waits on, which sessions block it (blocked_by), how long its transaction and query have run, and its query (300 characters). Blocked sessions first. Start here when queries hang or time out.", "postgres", "POST", "/v1/endpoints/{endpoint}/query", &[ENDPOINT]).fixed(activity),
     t("postgres_health_checks", "Database health checks", "A database's health in one read, each check ok or warn with what it means: cache and index hit rates, tables bloated with dead rows, the oldest open transaction, sessions idle in a transaction, connections against the limit, transaction ID age, and size.", "postgres", "POST", "/v1/endpoints/{endpoint}/query", &[ENDPOINT]).fixed(health_checks),
     t("postgres_slow_queries", "Slowest queries", "The 20 slowest statements by mean time, with calls, rows and cache hit rate (pg_stat_statements; if it's missing, CREATE EXTENSION pg_stat_statements once with postgres_execute, which takes admin on the endpoint).", "postgres", "POST", "/v1/endpoints/{endpoint}/query", &[ENDPOINT]).fixed(slow_queries),
     t("postgres_advisors", "Database advice", "What's worth fixing: unused indexes, foreign keys without an index, tables without a primary key, large tables read by sequential scans.", "postgres", "POST", "/v1/endpoints/{endpoint}/query", &[ENDPOINT]).fixed(advisors),
@@ -1174,6 +1209,7 @@ static TOOLS: &[Tool] = &[
     t("secrets_ca_certificates", "A CA's certificates", "The certificates a project's CA has issued (public, with their expiry; never a key).", "secrets", "GET", "/v1/secrets/projects/{project}/cas/{ca}/certificates", &[req("project", "Workspace project"), req("ca", "CA id")]),
     t("secrets_get_values", "Reveal an environment's values", "All of an environment's values (a folder's, with path) at once, resolved (references and imports), as one reveal instead of one per key; what can't be resolved is named, never guessed. dynamic=false leaves dynamic keys out instead of minting fresh credentials. Needs reveal.", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/values", &[SECRET_PROJECT, ENV, q("path", Ty::Str, "Folder"), q("dynamic", Ty::Bool, "false: leave dynamic keys out (named in dynamic)"), q("seq", Ty::Int, "As stored after this change (from secrets_changes): what the folder had then; audited as an export"), q("at", Ty::Int, "As stored at this time (unix seconds), as seq does"), q("strict", Ty::Bool, "Any problem is a 409 naming the keys, instead of values with problems"), q("resolve", Ty::Bool, "false: values as stored, references as written")]),
     t("secrets_list_placeholders", "List placeholders", "The placeholders a project's host-bound keys were handed out as (a sandbox or an agent uses the key without seeing it: the value is swapped in only on the way to the key's hosts), newest first: key, environment, consumer, who issued it, when it expires or was ended. Never the placeholder or the value.", "secrets", "GET", "/v1/secrets/projects/{project}/placeholders", &[SECRET_PROJECT]),
+    t("secrets_list_recoverable", "List deleted projects you can recover", "Workspace projects deleted lately whose secrets are kept for a recovery window, as far as you may recover them: who deleted each, when, and when it goes for good (soonest first). Recovering one is a person's, in the dashboard or roll secrets recover.", "secrets", "GET", "/v1/secrets/deleted", &[]),
     t("secrets_end_placeholder", "End a placeholder", "End one placeholder now: its value is no longer swapped in for anyone holding it (409 when it already ended).", "secrets", "DELETE", "/v1/secrets/projects/{project}/placeholders/{id}", &[SECRET_PROJECT, req("id", "Placeholder id (from secrets_list_placeholders)")]),
     t("secrets_end_consumer_placeholders", "End a consumer's placeholders", "End every live placeholder one consumer (a sandbox, a preview, an agent's run) holds that you may end, at once; answers how many ended.", "secrets", "DELETE", "/v1/secrets/projects/{project}/placeholders", &[SECRET_PROJECT, qreq("consumer", "The consumer, as secrets_list_placeholders names it")]),
     t("secrets_list_leases", "List leases", "A project's live leases on dynamic credentials (a database user, a cloud key made for a reader): who holds each, for what, and when it ends. Never a credential.", "secrets", "GET", "/v1/secrets/projects/{project}/leases", &[SECRET_PROJECT]),
@@ -1231,6 +1267,8 @@ static TOOLS: &[Tool] = &[
         b("held", Ty::Bool, "false: resume deploys a rollback held (held_after shows since when)"),
         b("hostname", Ty::Str, "Its new name on the roll domain (<hostname>.<domain>); the old one stops answering"),
         b("report", Ty::Bool, "false: its deploys post no commit status and no GitHub Deployment (something else reports them)"),
+        b("scheduled", Ty::Bool, "false: its schedules (a cron's, run.schedules) don't run; deploys and runs still go"),
+        bnull("data", Ty::Str, "\"branch\": data of its own, a branch of each Postgres and Redis database it links in place of the databases (admin; not production or a preview); clear it to go back, deleting the branches"),
     ]),
     t("apps_update_service", "Update a service", "Change a service's name, source, build or run settings (fields given are changed; run takes alerts {memory_pct, error_pct, p95_ms} for metric alerts).", "apps", "PATCH", "/v1/apps/services/{service}", &[
         SERVICE,
@@ -1317,6 +1355,27 @@ static TOOLS: &[Tool] = &[
         &[SERVICE, ENV, req("job", "Job id")],
     )
     .until(job_over),
+    t(
+        "apps_create_sandbox",
+        "Start a sandbox",
+        "A short-lived container to run commands in (Vercel Sandbox, Fly Machines): the environment's live image or a public one, up for ttl_s (60-86400, default 600), at most 10 per environment. By default it gets none of the environment's variables or files and a network of its own (the internet, nothing of the project); variables: true gives it the live deployment's, network: \"environment\" the environment's network. A closed environment's are always on its network. Run commands with apps_sandbox_exec; it's removed at its end or with apps_delete_sandbox (admin).",
+        "apps",
+        "POST",
+        "/v1/apps/services/{service}/environments/{env}/sandboxes",
+        &[SERVICE, ENV, b("image", Ty::Str, "A public image instead of the live one (python:3.13-slim)"), b("ttl_s", Ty::Int, "Seconds it stays up, 60-86400"), b("cpu", Ty::Num, "vCPUs, 0.25-4 (default 0.5)"), b("memory_mb", Ty::Int, "MiB, 256-8192 (default 512)"), b("variables", Ty::Bool, "The live deployment's variables and files"), b("network", Ty::Str, "none (its own: the internet) or environment")],
+    ).open_world(),
+    t("apps_list_sandboxes", "List sandboxes", "An environment's sandboxes: image, size, whether they have its variables, when each ends.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/sandboxes", &[SERVICE, ENV]),
+    t("apps_get_sandbox", "Get a sandbox", "One sandbox: image, size, network, when it ends.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/sandboxes/{sandbox}", &[SERVICE, ENV, req("sandbox", "Sandbox id (sbx_…)")]),
+    t(
+        "apps_sandbox_exec",
+        "Run a command in a sandbox",
+        "sh -c <command> in a sandbox: its exit code, stdout and stderr (each up to 1 MiB, truncated says when more was dropped); timed_out when it ran past timeout_s and was killed. Files are written and read with commands too (cat, a heredoc). Admin.",
+        "apps",
+        "POST",
+        "/v1/apps/services/{service}/environments/{env}/sandboxes/{sandbox}/exec",
+        &[SERVICE, ENV, req("sandbox", "Sandbox id (sbx_…)"), breq("command", Ty::Str, "A shell command line"), b("timeout_s", Ty::Int, "Seconds before it's killed, 1-600 (default 60)")],
+    ).open_world(),
+    t("apps_delete_sandbox", "Delete a sandbox", "Stop and remove a sandbox now (admin).", "apps", "DELETE", "/v1/apps/services/{service}/environments/{env}/sandboxes/{sandbox}", &[SERVICE, ENV, req("sandbox", "Sandbox id (sbx_…)")]).destructive(),
     t("apps_cancel_job", "Cancel a job", "Stop a running job (production is a \"deploy\" action).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/jobs/{job}/cancel", &[SERVICE, ENV, req("job", "Job id")]),
     t("apps_events", "App events", "What happened to services (deploys going live or failing, crash loops, failed cron runs and jobs, memory, error and latency alerts, and audit.* changes to settings, variables, domains and links), in order after a cursor.", "apps", "GET", "/v1/apps/events", &[q("after", Ty::Int, "The last answer's next"), q("limit", Ty::Int, "At most this many")]).outside(&["fields"]),
     t("apps_list_variables", "List variables", "An environment's variables, values masked. A sealed variable is never readable again by anyone (only the running service gets it): set a new value or delete it, never look for the old one.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/variables", &[SERVICE, ENV]),
@@ -1533,6 +1592,7 @@ static TOOLS: &[Tool] = &[
             b("max_usd_month", Ty::Num, "New previews wait once the month's cost reaches it (0: no cap)"),
             b("feedback", Ty::Bool, "A feedback button on its pages for people who came in through roll"),
             b("warm", Ty::Bool, "Wake the services as soon as a new head is deployed"),
+            b("crons", Ty::Bool, "Scheduled work (roll apps' crons, scheduled commands and calls) runs in previews too; off by default: deployed, schedule off"),
         ],
     ),
     t("previews_visitors", "Who opened a preview", "The last 8 people signed in to roll who opened a preview (team access), by handle, latest first. Share links and the CI bypass aren't people and aren't listed.", "previews", "GET", "/v1/previews/{id}/visitors", &[req("id", "Preview id")]),
@@ -1550,11 +1610,12 @@ pub fn all() -> &'static [Tool] {
 struct Prepared {
     actions: Vec<Action>,
     open: bool,
+    within: bool,
     definition: Value,
 }
 
 static PREPARED: std::sync::LazyLock<std::collections::HashMap<&'static str, Prepared>> = std::sync::LazyLock::new(|| {
-    TOOLS.iter().map(|t| (t.name, Prepared { actions: t.find_actions(), open: t.find_open(), definition: t.build_definition() })).collect()
+    TOOLS.iter().map(|t| (t.name, Prepared { actions: t.find_actions(), open: t.find_open(), within: t.find_within(), definition: t.build_definition() })).collect()
 });
 
 #[cfg(test)]
@@ -1850,8 +1911,10 @@ mod tests {
         assert!(missing.is_empty(), "docs/mcp.md doesn't list {missing:?}");
         // A tool a description or a workflow tells the agent to call is one roll has: a renamed
         // tool would otherwise send agents after a name that answers "unknown tool".
-        let names: Vec<String> = all().iter().map(|t| t.name.to_string()).chain([crate::search::FIND, crate::search::RUN_READ, crate::search::RUN].map(String::from)).collect();
-        let products = ["access", "workspace", "postgres", "redis", "storage", "streams", "tasks", "queues", "nosql", "search", "secrets", "apps", "previews", "roll"];
+        // roll code's are another crate's: the ones roll-mcp names are in prompts::FRONTED (rolld's
+        // tests hold each to one roll code fronts).
+        let names: Vec<String> = all().iter().map(|t| t.name.to_string()).chain([crate::search::FIND, crate::search::RUN_READ, crate::search::RUN].map(String::from)).chain(crate::prompts::FRONTED.iter().map(|n| n.to_string())).collect();
+        let products = ["access", "workspace", "postgres", "redis", "storage", "streams", "tasks", "queues", "nosql", "search", "secrets", "apps", "previews", "roll", "code", "agents"];
         // Words that look like a tool and aren't one: Elasticsearch's audit event names.
         let not_tools = ["access_denied"];
         let mut texts: Vec<(String, String)> = all().iter().map(|t| (t.name.to_string(), std::iter::once(t.title).chain([t.description]).chain(t.params.iter().map(|p| p.desc)).collect::<Vec<_>>().join(" "))).collect();

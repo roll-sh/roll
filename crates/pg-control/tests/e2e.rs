@@ -477,6 +477,10 @@ async fn read_only_sql_cannot_write() {
     // It sees what other sessions run (slow-query and health tools read it), not "<insufficient privilege>".
     let rows = h.control.query(&db.ep.id, "SELECT count(*) FROM pg_stat_activity WHERE query = '<insufficient privilege>'", SqlAs::ReadOnly).await.unwrap();
     assert_eq!(rows[0].rows[0][0].as_deref(), Some("0"));
+    // Its session names who sent it (an agent's queries in `postgres_activity`), whatever else
+    // the tag held.
+    let rows = h.control.query_tagged(&db.ep.id, "SELECT current_setting('application_name')", SqlAs::ReadOnly, "roll tok_a1' x=y").await.unwrap();
+    assert_eq!(rows[0].rows[0][0].as_deref(), Some("roll tok_a1 xy"));
     for sql in [
         "INSERT INTO t VALUES (99, 'x')",
         "SET default_transaction_read_only = off; DELETE FROM t",

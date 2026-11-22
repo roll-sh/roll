@@ -68,7 +68,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/projects/{project}/limits` | | `SpendLimits` | read |
 | `GET /v1/apps/projects/{project}/usage?month=` | | `ProjectUsage`: a month's use (`YYYY-MM`, this one by default; 400 for a month to come) by service and environment at roll's prices, each service's previews as one row (`previews: true`), deleted services as one (`deleted: true`), most costly first; this month's projected to its end at the pace so far | read |
 | `PUT /v1/apps/projects/{project}/limits` | `{ alert_usd: number \| null, hard_usd: number \| null }` | `SpendLimits` (this month's alert and cap are decided again within 30 s) | admin (the hard limit pauses the whole project) |
-| `GET /v1/apps/events?after=&limit=` | | `{ events: Event[], next }`: what happened to services, in order, after a cursor | read |
+| `GET /v1/apps/events?after=&limit=&latest=` | | `{ events: Event[], next }`: what happened to services, in order, after a cursor; `latest=1` (never with `after`: 400) answers no events and the newest cursor, for a reader that starts from now | read |
 | `GET /v1/apps/services/{id}/changes` | | server-sent events: `ready`, then a `changed` (data `{}`) whenever a deploy moves, an instance wakes, sleeps or crashes, or someone changes the service; the page reads it again (on the owner, in memory; it carries nothing itself) | read |
 | `PUT /v1/apps/services/{id}/registry` | `{ username, password, server? }`, or for an image on ECR `{ kind: "ecr", access_key_id, secret_access_key, region? }` (region defaults to the registry's; another is a 400) | `Service` (a private registry's login for an image source; sealed, never returned; an ECR key is exchanged for ECR's 12-hour token at a pull, user `AWS`, kept until it has an hour left and then fetched again for what runs) | write |
 | `DELETE /v1/apps/services/{id}/registry` | | `Service` | write |
@@ -110,7 +110,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `POST /v1/apps/services/{id}/environments/{env}/wake` | | `Environment` | write (it starts compute someone pays for; a visitor's request wakes a public environment through the proxy, not this route) |
 | `GET /v1/apps/services/{id}/environments/{env}/variables` | | `Variables` (values masked) | read |
 | `GET /v1/apps/services/{id}/environments/{env}/pending` | | `{ variables: { added, removed, changed } \| null, run: string[], secrets: boolean \| null }` (secrets: the project's secrets changed since, by roll secrets' digest; null without one): what the next deploy changes (names, never values; variables against the snapshot kept at the live deployment's switch, null without one; run: fields the service sets that the live deployment doesn't run with). Links and project secrets move `needs_deploy` too, unnamed | read |
-| `GET /v1/apps/services/{id}/environments/{env}/variables/values` | | `{[name]: value}`, never a sealed variable (nor a reference that reads one); 403 naming them when some come from roll secrets and roll secrets wouldn't show them to the caller (`SecretSource::may_reveal`) | reveal |
+| `GET /v1/apps/services/{id}/environments/{env}/variables/values` | | `{[name]: value}`, never a sealed variable (nor a reference that reads one); 403 naming them when some come from roll secrets and roll secrets wouldn't show them to the caller (`SecretSource::may_reveal`: each key read as the caller, its base, imports and `${env.KEY}` references only as far as they may reveal), never a partial answer | reveal |
 | `PATCH /v1/apps/services/{id}/environments/{env}/variables` | `{set?: {[name]: value}, unset?: string[], seal?: string[], files?: {[name]: path \| null}, runtime_only?: {[name]: boolean}, copy_from?: string, copy?: string[]}` (`copy_from` with `copy`: those names' values from another environment's own variables, set here as `set` sets them; 400 for a sealed one or one it lacks; reveal on `copy_from` too. set, then unset, then seal: names set here or already set; 400 for another; nothing unseals, a new value stays sealed. `files`: kept as a file at an absolute path in its instances, not in their environment, from the next deploy (0444; at most 20; not under `/proc`, `/sys` or `/dev`, no `..`; two can't share a path; null puts it back; unsetting a variable drops its file; 400 otherwise; on Fargate the deploy fails for now). `runtime_only`: true gives it to its instances only, never a build's steps (from the next deploy; one of its own variables, else 400); false gives it to builds again; unsetting drops it. A value `roll://ENV[/folder…]/KEY` is read from roll secrets at each deploy: its own environment's as the service, another environment's as whoever set it (bound to them when it's set; a 403 unless they may reveal it for the service now) | `Variables` | deploy* |
 | `GET /v1/apps/services/{id}/environments/{env}/diff?from=` | | `{from, to, variables: {missing: {name, sealed}[], extra: string[], differ: string[] \| null}, settings: {field, from, to, put}[]}`: how `env` differs from `from` (Railway's environment sync), never a value. `variables`: its own variables' names, `differ` null for a token without reveal on both; `settings`: `run.*`, `wait_for_ci`, `follow_tag`, `redeploy_on_secrets`, `traces`, `vitals`, `report`, `egress`, `allow_ips`, `rate_limit`, `firewall`, `headers`, `routes`, `pages.*` (whether each has its own), each with the `PUT …/environments/{env}` body that makes it `from`'s. A token needs read on `from` too (403) | read |
 | `GET /v1/apps/services/{id}/environments/{env}/logs?follow=&tail=&since=&before=&instance=&deployment=&stream=&level=&where=&q=&http=&status=&min_ms=&by=` | | `LogLine[]` or SSE; `before` (unix ms) reads back to a time (not followed), `instance`/`deployment`/`stream` narrow it (followed too), `level` keeps lines at that level or worse (a line that says none isn't; 400 for another word), `where` keeps lines whose JSON or logfmt fields say all its terms (`level:error user_id:42`, `key:*`, `-key:value`, `a.b:x`, quoted values; at most 10; 400 for one that isn't `key:value`), `X-Roll-Search-Truncated: 1` when a read back stopped short; `http=1`: the proxy's access log (`stream: "http"`, text `AccessLine`), `status` (`500`, `5xx`, `400-499`), `min_ms` and `by` (one reason, or `any`: every answer roll gave itself) filtering it | read |
@@ -148,6 +148,13 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/environments/{env}/jobs/{job}` | | `Job` | read |
 | `GET /v1/apps/services/{id}/environments/{env}/jobs/{job}/logs?follow=&tail=` | | `LogLine[]` or SSE (ends with the job, then `end`) | reveal (a job's output can be the variables) |
 | `POST /v1/apps/services/{id}/environments/{env}/jobs/{job}/cancel` | | `Job` | deploy* |
+| `GET /v1/apps/services/{id}/environments/{env}/sandboxes` | | `Sandbox[]`, oldest first | read |
+| `POST /v1/apps/services/{id}/environments/{env}/sandboxes` | `{ image?, ttl_s?, cpu?, memory_mb?, variables?, network? }` (a short-lived container to run commands in, Vercel Sandbox's and Fly Machines': the live deployment's image, or `image` (a public one); up for `ttl_s` (60–86400, default 600) then removed by the owner's minute sweep; `cpu` 0.25–4 (0.5), `memory_mb` 256–8192 (512), metered as a console for as long as it ran; `variables` (false): the live deployment's variables and files, as a console has them, its links reached through them; `network`: `none` (default: a network of its own, the internet and nothing of the project) or `environment` (its private network); a closed environment's are always on its network (`none` asked is a 400). At most 10 per environment (409); 409 with nothing deployed; 402 at the spend limit, 409 paused) | 201 `Sandbox` | admin (it runs anything, with the variables when asked, as a shell) |
+| `GET /v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}` | | `Sandbox` | read |
+| `DELETE /v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}` | | 204 (stopped and removed now) | admin |
+| `POST /v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}/exec` | `{ command, timeout_s? }` (`sh -c <command>`, at most 64 KiB; killed after `timeout_s`, 1–600, default 60) | `{ exit_code: number \| null, timed_out, stdout, stderr, truncated }` (each stream's first 1 MiB as text, `truncated` when more was dropped; `exit_code` null when it was killed at its timeout). 409 once the sandbox ended. Audited without its text (`sandbox.command`, its length and exit code) | admin |
+| `GET /v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}/files?path=` | | the file's bytes (`application/octet-stream`, at most 1 MiB; 404 none, 400 a directory or more) | admin (a file can be anything the sandbox holds) |
+| `PUT /v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}/files?path=` | the file's bytes (at most 1 MiB) | `{ path, bytes }` (written at `path`, an absolute path without `..`, its directory made) | admin |
 | `GET /v1/apps/services/{id}/environments/{env}/domains` | | `Domain[]` | read |
 | `POST /v1/apps/services/{id}/environments/{env}/domains` | `{hostname}` | 201 `Domain` | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/domains/{host}/verify` | | `Domain` | read |
@@ -236,6 +243,12 @@ type Build = {
    *  come from. A token that sets it needs read on each (the catalogue lends it), so a writer to
    *  the service's repo can't build a repo it can't read by pinning it. */
   submodule_repos?: string[];
+  /** The language's OpenTelemetry agent in a generated Dockerfile (default false): Node's
+   *  (`@opentelemetry/auto-instrumentations-node`, by NODE_OPTIONS' --require) and Python's
+   *  (`opentelemetry-distro`, bootstrapped, by PYTHONPATH's sitecustomize), pinned; started only
+   *  while the environment's traces are on, joined to the app's own value; the plan's `otel`
+   *  says which. None in the tree's own Dockerfile or another language (a note says so). */
+  otel?: boolean;
   /** A Git URL service's Git LFS objects in place of their pointers (default false): from the
    *  repository's LFS batch API, checked against each pointer's sha256 and size, 2 GiB in all. */
   lfs?: boolean;
@@ -277,6 +290,10 @@ type Run = {
   /** The app speaks HTTP/2 without TLS (a gRPC server): the proxy and health checks use h2c,
    *  `te: trailers` passes, trailers come back. A WebSocket upgrade stays HTTP/1.1. Default false. */
   h2c?: boolean;
+  /** With h2c (a web service): its health is gRPC's, a unary `grpc.health.v1.Health/Check` for
+   *  this service ("" the whole server; at most 100 characters) that must answer SERVING, at
+   *  start and every health_every_s, in place of health_path (Cloud Run's gRPC probes). */
+  health_grpc?: string;
   /** A worker only: its instances follow `group`'s lag on `stream` (a roll stream on the
    *  service's project; another's is never read), one per `per_instance` (default 1000) behind,
    *  within min_instances–max_instances; read every 10 s on the owner, scaled in one at a time. */
@@ -315,6 +332,13 @@ type Run = {
    *  connection, its allow list and maintenance applied; its HTTP names are 404s. A web
    *  service; no health_path, h2c, affinity or gradual rollout (its health is its port). */
   tcp?: boolean;
+  /** Its port speaks UDP (Fly's UDP: a game server, DNS): each environment answers on a UDP port
+   *  of its own from the node's ROLL_APPS_UDP_PORTS (Environment.udp), each client a flow whose
+   *  first datagram wakes an instance, relayed both ways and ended after 60 s idle (1024 flows
+   *  at most), its allow list, maintenance and rate limit (flows per client) applied. A web
+   *  service, not a TCP one; no health_path, health_grpc, h2c, affinity, gradual rollout or
+   *  sidecars (it's up once it runs); not in a closed environment. One node. */
+  udp?: boolean;
   /** A deployment that enters a crash loop within ten minutes of going live is replaced by the
    *  one before it (a rollback: its image, no build, actor "crash loop"); a rollback's own
    *  deployment never is, so there are no two in a row. */
@@ -452,6 +476,8 @@ type EnvironmentPut = {
    *  the app's. */
   vitals?: boolean;
   log_retention_days?: 7 | 30 | 90 | null; // how long its logs are kept (null: 7); a preview's stay 7 (400)
+  scheduled?: boolean; // false: its schedules don't run (a cron service's, run.schedules' commands and calls), skipped and not made up when turned back on; deploys and POST …/runs still go; default true (roll previews turns pv- environments' off)
+  data?: "branch" | null; // admin: data of its own, a branch of each Postgres and Redis database it links (made now and at each deploy for links made since; an environment's services share one), its link variables the branch's, never the database's; null goes back to them, deleting the branches no other environment uses; 400 for production and previews (roll previews branches theirs)
   closed_by?: string | null; // with egress, the operator's only (roll previews in process, or any caller on an open daemon; a token needs admin; 403 for a user's token or a signed-in person): who a closed environment's placeholders are made by (usr_… or token:…); null, no one (its keys bound to hosts withheld); unset, whoever set the egress
   badge?: boolean; // a deploy status badge at GET /_roll/badge/<service>/<env>.svg on the apps listener, answered to anyone (Netlify's): live, deploying, waiting, failed, paused or not deployed; false: 404
   approvals?: 0 | 1 | 2 | 3 | null; // admin (as freeze): people other than a deployment's author (the person behind it: their session, their own token, the operator) who approve it (`…/approve`) before it goes live; a waiting build doesn't run (no instance, its own URL 409) until then: deploys, redeploys, promotions and automation's build to ready and wait (a service that can't wait beside the live one: 409, or skipped), putting one live without them is a 409 unless an admin's `X-Roll-Override: 1` (audited `approvals.bypassed`); rolling back to what was live needs none; never a preview's (400)
@@ -553,6 +579,8 @@ type Environment = EnvironmentSummary & {
   preview_host?: string; // its label under the project's preview domain
   egress: { mode: "roll" | "open"; hosts: string[] }; // what its code may reach (roll: roll and the hosts)
   egress_refused?: { host: string; private?: true }[]; // hosts its egress proxy refused lately, oldest first, at most 20: not listed, or (private) listed but resolving only to private addresses
+  scheduled?: false; // its schedules don't run (absent: they do)
+  data?: { mode: "branch"; branches: { kind: "postgres" | "redis"; ref: string }[] }; // data of its own: the branches made for it (never their credentials); absent: its links reach the databases themselves
   closed_by?: string | null; // a closed environment's placeholders' maker (usr_…, token:…, operator); null: no one (its keys bound to hosts withheld); absent when open or closed before it was kept
   intercepted?: { requests: number; swapped: number; refused?: string[] }; // a closed environment's interception on its owner (roll secrets' placeholders) since that node started: requests filtered, placeholders swapped, the latest refusals' reasons (at most 20; never a value or a placeholder)
   feedback: boolean;          // a preview's pages carry roll previews' feedback button
@@ -563,6 +591,7 @@ type Environment = EnvironmentSummary & {
   pages?: { error?: string; maintenance?: string }; // its own pages (absent: roll's): error for the 502/503/504 while it can't answer or wake, maintenance while in maintenance
   allow_ips: { cidr: string; description?: string }[]; // only these networks get in through its public names ([]: anyone)
   tcp: string | null; // a TCP service's address, host:port (null until it has its port)
+  udp?: string; // a UDP service's address, host:port (absent until it has its port)
   rate_limit: { per_minute: number; burst: number | null } | null; // each client's requests a minute (null: no limit)
   firewall: { action: "allow" | "deny" | "limit" | "challenge"; path?: string; methods?: string[]; user_agent?: string; per_minute?: number; burst?: number }[]; // its rules, in order
   headers?: { path?: string; set: Record<string, string>; replace?: boolean }[]; // headers its answers carry (names lower case)
@@ -778,6 +807,7 @@ type RunStatus = "running" | "succeeded" | "failed" | "skipped" | "timed_out" | 
 type CronRun = { id: string; deployment: string; status: RunStatus; exit_code: number | null; started_at: number; finished_at: number | null; attempt: number /* which try of its due time: 1, then up to run.retries more after a failure */ };
 /** A one-off command in a fresh container of the active deployment: its variables and project
  *  network, no port, no volume. timeout_s 1–86400 (default 3600). */
+type Sandbox = { id: string /* sbx_… */; service: string; environment: string; image: string; cpu: number; memory_mb: number; variables: boolean; network: "none" | "environment"; created_at: number; expires_at: number };
 type Job = { id: string; deployment: string; command: string; tasks: number; retries?: number /* tries after a task's failure */; parallelism: number /* tasks at once */; status: RunStatus; exit_code: number | null; started_at: number; finished_at: number | null };
 
 type Domain = {

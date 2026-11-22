@@ -951,6 +951,8 @@ impl Apps {
         if let Ok(stored) = self.db(move |s| s.deployment(&did)).await {
             dep.plan = stored.plan;
         }
+        // An environment with data of its own: a branch of each database linked since.
+        self.ensure_branches(&svc, &env.name).await.map_err(|e| anyhow::anyhow!("data: {e:#}"))?;
         // A static site: its files out of the image, so they're served without an instance.
         if dep.plan.as_ref().is_some_and(|p| p["start"] == apps_build::STATIC_START)
             && dep.run.kind == RunType::Web
@@ -959,12 +961,15 @@ impl Apps {
         {
             // Its files hold no secret value (Netlify's secrets scan): one that does fails the
             // deploy (a container would serve the same file).
-            let r = self.resolve_vars(&svc, &env, &dep.id).await?;
-            let secrets: Vec<(String, String)> = r.vars.iter().filter(|(k, _)| r.is_secret(k)).cloned().collect();
+            let r = self.checked_vars(&svc, &env, &dep.id).await?;
+            let secrets: Vec<(String, String)> = r.vars.iter().filter(|(k, _)| r.is_secret(k) && !r.placeholders.contains_key(k)).cloned().collect();
+            let checks_secrets = !secrets.is_empty();
             match self.export_site_checked(&img, secrets).await {
                 Ok(Some(n)) => log.stream(Stream::System).line(format!("static site: {} KiB of files, served without an instance", n.div_ceil(1024))),
                 Ok(None) => {}
                 Err(e) if e.downcast_ref::<crate::sites::SecretInSite>().is_some() => return Err(e),
+                // Unchecked files aren't served either: a container would serve the same ones.
+                Err(e) if checks_secrets => anyhow::bail!("its files couldn't be checked for its secrets' values ({e:#}), so they aren't served: make the site smaller, or keep secret values out of its environment"),
                 Err(e) => log.stream(Stream::System).line(format!("static site: its files couldn't be exported ({e:#}); a container serves it")),
             }
         }
@@ -976,11 +981,17 @@ impl Apps {
         let (sid, e, did) = (svc.id.clone(), env.name.clone(), d.id.clone());
         let snapshot = self.db(move |s| s.seal_snapshot(&did, &sid, &e)).await?;
         let vars_hash = {
-            let r = self.resolve_vars(&svc, &env, &dep.id).await?;
+            let r = self.checked_vars(&svc, &env, &dep.id).await?;
             r.check_refs()?;
             fingerprint(&r.vars_for_hash(), &svc, &env.egress)
         };
         let tpl = Arc::new(self.template(&svc, &env, &dep).await?);
+        // Whether it runs closed, for any node to read (a project environment's placeholders end
+        // only once nothing live ran closed there).
+        if tpl.spec.closed {
+            let did = d.id.clone();
+            self.db(move |s| s.mark_deploy_closed(&did)).await?;
+        }
         let did = d.id.clone();
         let no_traffic = self.db(move |s| s.no_traffic(&did)).await?;
         // What was built decides: a roll.toml can make it a worker, or give it a volume.
@@ -1120,6 +1131,7 @@ impl Apps {
             }
             return Err(e);
         }
+        let closed_on = tpl.spec.network.clone().filter(|_| tpl.spec.closed);
         match prepared {
             Some(p) => live.commit(tpl, p).await,
             None => {
@@ -1127,7 +1139,31 @@ impl Apps {
                 log.stream(Stream::System).line("the new deployment takes every request");
             }
         }
+        // Its instances trust the CA its proxy serves: its proxy moves to the next one once
+        // every service on the network trusts that too.
+        if let Some(network) = closed_on {
+            self.intercept_stale.lock().remove(&crate::env_key(&svc.id, &env.name));
+            self.apply_intercept_pending(&network);
+        }
         Ok(())
+    }
+
+    /// The closed services on `network` this node runs (their live templates are on it).
+    pub(crate) fn on_network(&self, network: &str) -> Vec<Arc<EnvLive>> {
+        self.lives().into_iter().filter(|l| l.template().is_some_and(|t| t.spec.closed && t.spec.network.as_deref() == Some(network))).collect()
+    }
+
+    /// A closed network's next CA, kept until every service on it trusts it (their templates'
+    /// bundles name it, and none of them runs instances that may not): now its proxy serves it.
+    pub(crate) fn apply_intercept_pending(&self, network: &str) {
+        let Some(next) = self.intercept_pending.lock().get(network).cloned() else { return };
+        let stale = self.intercept_stale.lock().clone();
+        let ready = self.on_network(network).iter().all(|l| l.template().is_some_and(|t| trusts(&t, &next.pem)) && !stale.contains(&crate::env_key(&l.service, &l.env)));
+        if ready {
+            self.deps.runtime.set_interception(network, Some(next.interception.clone()));
+            self.intercept_pending.lock().remove(network);
+            self.intercept_cas.lock().insert(network.to_string(), next);
+        }
     }
 
     /// A gradual rollout's steps (docs/apps/README.md, "Gradual rollouts"): each share of
@@ -1444,7 +1480,9 @@ impl Apps {
         // The variables the build's steps see: the environment's, as its instances will.
         let (sid, e) = (svc.id.clone(), d.environment.clone());
         let env_row = self.db(move |s| s.environment(&sid, &e)).await?;
-        let resolved = self.resolve_vars(svc, &env_row, &d.id).await?;
+        // (A closed environment's keys as markers: a build has no interception, so a placeholder
+        // made for it would only wait out its two days.)
+        let resolved = self.checked_vars(svc, &env_row, &d.id).await?;
         resolved.check_refs()?;
         // The environment's remote build cache (Turborepo, Nx), unless its variables name another
         // (Vercel's, a team's own). Never a closed build's: a fork's code would fill a cache the
@@ -1567,7 +1605,7 @@ impl Apps {
         }
         // vercel.json's crons: schedules that call their paths, unless the service already
         // calls that path (its own schedules win).
-        if run.kind == RunType::Web && !run.tcp {
+        if run.kind == RunType::Web && !run.tcp && !run.udp {
             for (i, c) in plan.crons.iter().enumerate() {
                 let name = format!("vercel-{}", i + 1);
                 if run.schedules.len() < 20 && !run.schedules.iter().any(|s| s.path.as_deref() == Some(c.path.as_str()) || s.name == name) {
@@ -1629,6 +1667,7 @@ impl Apps {
             target: svc.build.target.clone().filter(|_| plan.provider == apps_build::Provider::Dockerfile),
             layers,
             egress: build_egress,
+            priority: !ephemeral,
         };
         // The same inputs built before in this project (Railway's skipped builds): the same tree,
         // Dockerfile, target and build variables, and its image still kept. Never with `no_cache`.
@@ -1732,6 +1771,7 @@ impl Apps {
         }
         let network = if closed { closed_network_name(&svc.project, &env.name) } else { network_name(&svc.project, &env.name) };
         self.deps.runtime.ensure_network(&network, &svc.id, closed).await.map_err(|e| Error::Internal(e.to_string()))?;
+        let mut intercept_hosts = Vec::new();
         if closed && !env.egress.hosts.is_empty() {
             let proxy = self.deps.runtime.egress_proxy(&network, &svc.id, &env.egress.hosts).await.map_err(|e| Error::Internal(e.to_string()))?;
             let sid = svc.project.clone();
@@ -1744,16 +1784,34 @@ impl Apps {
             // Keys used without being seen (roll secrets' placeholders): its proxies swap them for
             // the hosts the keys are bound to, and its instances trust the interception CA (with
             // the host's roots, one file every runtime reads).
-            match self.deps.secrets.intercept(&svc.project, &env.name).await {
+            intercept_hosts = resolved.placeholders.values().flat_map(|b| b.split(',')).filter(|h| !h.is_empty()).map(str::to_string).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+            match self.deps.secrets.intercept(&svc.project, &env.name, &intercept_hosts).await {
                 Ok(Some(i)) => {
-                    self.deps.runtime.set_interception(&network, Some(i.interception.clone()));
-                    files.push((INTERCEPT_CA.to_string(), trust_bundle(&i.ca_pem)));
+                    let next = Serving { digest: ca_digest(&i.ca_pem), pem: i.ca_pem.clone(), interception: i.interception.clone() };
+                    let serving = self.intercept_cas.lock().get(&network).cloned();
+                    // The proxy is the network's, shared by the project environment's closed
+                    // services: while any of them runs instances, those may trust only the CA it
+                    // serves now. These trust both, and the proxy moves to the new one once every
+                    // service there does (`apply_intercept_pending`; never before: the running
+                    // ones would fail). A CA that's ended has nothing to keep.
+                    let keep = serving.filter(|s| s.digest != next.digest && self.on_network(&network).iter().any(|l| l.awake() > 0) && s.interception.live().unwrap_or(false));
+                    match keep {
+                        Some(s) => {
+                            files.push((INTERCEPT_CA.to_string(), trust_bundle(&format!("{}\n{}", s.pem.trim(), next.pem.trim()))));
+                            self.intercept_pending.lock().insert(network.clone(), next);
+                        }
+                        None => {
+                            files.push((INTERCEPT_CA.to_string(), trust_bundle(&next.pem)));
+                            self.deps.runtime.set_interception(&network, Some(next.interception.clone()));
+                            self.intercept_pending.lock().remove(&network);
+                            self.intercept_cas.lock().insert(network.clone(), next);
+                        }
+                    }
                     for k in ["NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"] {
                         if !vars.iter().any(|(n, _)| n == k) {
                             vars.push((k.to_string(), INTERCEPT_CA.to_string()));
                         }
                     }
-                    self.intercept_cas.lock().insert(crate::env_key(&svc.id, &env.name), ca_digest(&i.ca_pem));
                 }
                 Ok(None) => self.deps.runtime.set_interception(&network, None),
                 Err(e) => {
@@ -1810,6 +1868,7 @@ impl Apps {
                 }
                 p
             },
+            udp: run.udp && run.kind == RunType::Web,
             cpu: run.cpu,
             memory_mb: run.memory_mb,
             network: Some(network),
@@ -1844,7 +1903,7 @@ impl Apps {
             None => Vec::new(),
         };
         let edge_service: String = format!("{}-fn", svc.name).chars().take(40).collect();
-        Ok(Template { deployment: dep.id.clone(), spec, run, spa, site, edge, edge_service })
+        Ok(Template { deployment: dep.id.clone(), spec, run, spa, site, edge, edge_service, intercept_hosts })
     }
 
     // ── the owner's background work ──
@@ -1911,7 +1970,9 @@ impl Apps {
         }
         // The database's now: what started before is a previous owner's (or nobody's).
         let Ok(took) = self.db(|s| s.now()).await else { return };
-        let known: Vec<String> = self.lives().iter().filter(|l| l.service == service).flat_map(|l| l.instances().into_iter().map(|i| i.name.clone())).collect();
+        let mut known: Vec<String> = self.lives().iter().filter(|l| l.service == service).flat_map(|l| l.instances().into_iter().map(|i| i.name.clone())).collect();
+        // Its sandboxes run on until their end (the minute sweep's).
+        known.extend(self.sandbox_names(service).await);
         // The live deployments' instances still running (the previous owner died, they didn't)
         // stay, for `EnvLive::adopt` to keep; the rest (jobs, older deployments') go.
         let sid = service.to_string();
@@ -2715,35 +2776,120 @@ impl Apps {
     /// take the new one at once; running instances are redeployed (the live image again, rolled)
     /// to trust it, and a sleeping environment's next start does (its template's bundle swapped),
     /// with no redeploy. Each minute, on the owner.
-    async fn refresh_intercepts(self: &Arc<Self>, services: &[crate::store::ServiceRow]) {
-        let kept: Vec<(String, String)> = self.intercept_cas.lock().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        for (key, trusted) in kept {
-            let Some((sid, env)) = key.split_once('/').map(|(s, e)| (s.to_string(), e.to_string())) else { continue };
-            let Some(svc) = services.iter().find(|s| s.id == sid).filter(|s| self.owns(&s.id)) else { continue };
-            let network = crate::closed_network_name(&svc.project, &env);
-            let log = self.logs.sink(format!("env:{sid}/{env}"), Stream::System);
-            match self.deps.secrets.intercept(&svc.project, &env).await {
-                Ok(Some(i)) if ca_digest(&i.ca_pem) != trusted => {
-                    self.deps.runtime.set_interception(&network, Some(i.interception.clone()));
-                    let live = self.live(&sid, &env);
-                    if live.awake() > 0 {
-                        match self.redeploy(&sid, &env, json!({ "message": "roll's interception CA renewed" }), Some("roll".into()), None).await {
-                            Ok(d) => log.line(format!("the interception CA changed (near its end, or a key's binding moved): redeploying ({}) to trust the next", d.id)),
-                            Err(e) => log.line(format!("the interception CA changed, and the redeploy that hands the instances the next didn't start: {e}")),
-                        }
-                    } else {
-                        live.set_file(INTERCEPT_CA, &trust_bundle(&i.ca_pem));
-                        self.intercept_cas.lock().insert(key.clone(), ca_digest(&i.ca_pem));
-                        log.line("the interception CA changed while it slept: its next start trusts the new one");
+    async fn refresh_intercepts(self: &Arc<Self>, services: &[crate::store::ServiceRow], now: i64) {
+        // Networks whose proxy this node set, or that one of its services is closed on.
+        let mut networks: Vec<String> = self.intercept_cas.lock().keys().cloned().collect();
+        for l in self.lives() {
+            if let Some(n) = l.template().filter(|t| t.spec.closed).and_then(|t| t.spec.network.clone())
+                && !networks.contains(&n)
+            {
+                networks.push(n);
+            }
+        }
+        for network in networks {
+            let lives: Vec<Arc<EnvLive>> = self.on_network(&network).into_iter().filter(|l| self.owns(&l.service)).collect();
+            let Some((svc, env)) = lives.first().and_then(|l| services.iter().find(|s| s.id == l.service).map(|s| (s.clone(), l.env.clone()))).or_else(|| {
+                // None of its services closed here any more: the network's project and environment.
+                services.iter().filter(|s| self.owns(&s.id)).find_map(|s| self.lives().into_iter().find(|l| l.service == s.id && crate::closed_network_name(&s.project, &l.env) == network).map(|l| (s.clone(), l.env.clone())))
+            }) else {
+                continue;
+            };
+            let log = |sid: &str, env: &str| self.logs.sink(format!("env:{sid}/{env}"), Stream::System);
+            if lives.is_empty() {
+                // Opened, and nothing runs what was deployed closed: its placeholders and
+                // interception end once no service of the project is closed in that environment
+                // (its row, or a live deployment that ran closed, on any node).
+                self.intercept_cas.lock().remove(&network);
+                self.intercept_pending.lock().remove(&network);
+                let (p, e2) = (svc.project.clone(), env.clone());
+                // (Instances of a closed deployment still draining here use them too.)
+                let draining: Vec<String> = self.lives().iter().filter(|l| l.env == env && services.iter().any(|s| s.id == l.service && s.project == svc.project)).flat_map(|l| l.draining()).collect();
+                let still_closed = self.db(move |s| s.closed_in_use(&p, &e2, &draining)).await.unwrap_or(true);
+                if !still_closed {
+                    self.deps.runtime.set_interception(&network, None);
+                    match self.deps.secrets.end_intercept(&svc.project, &env).await {
+                        Ok(()) => log(&svc.id, &env).line("open again: its placeholders and interception ended"),
+                        Err(e) => log(&svc.id, &env).line(format!("open again, and its placeholders couldn't be ended: {e}")),
                     }
                 }
-                Ok(None) => {
-                    self.deps.runtime.set_interception(&network, None);
-                    self.intercept_cas.lock().remove(&key);
-                    log.line("no key of its is bound to hosts now: its proxies tunnel everything again");
-                }
-                _ => {}
+                continue;
             }
+            // The CA roll secrets has for the hosts the network's live placeholders are bound to
+            // (one that names fewer is made again).
+            let mut hosts: Vec<String> = lives.iter().filter_map(|l| l.template()).flat_map(|t| t.intercept_hosts.clone()).collect();
+            hosts.sort();
+            hosts.dedup();
+            let current = match self.deps.secrets.intercept(&svc.project, &env, &hosts).await {
+                Ok(i) => i.map(|i| i.ca_pem),
+                Err(e) => {
+                    log(&svc.id, &env).line(format!("its interception CA couldn't be checked: {e:#}"));
+                    continue;
+                }
+            };
+            let stale = self.intercept_stale.lock().clone();
+            for l in &lives {
+                let Some(row_svc) = services.iter().find(|s| s.id == l.service) else { continue };
+                let key = crate::env_key(&l.service, &l.env);
+                let tpl = l.template();
+                // No live placeholder (they ended: their two days, a revoke) while it still has
+                // keys bound to hosts: made again, never taken for "nothing bound". A template that
+                // doesn't trust the CA roll secrets has now, or instances that may not trust the
+                // one served: moved.
+                let moved = match &current {
+                    None => true,
+                    Some(pem) => !tpl.as_ref().is_some_and(|t| trusts(t, pem)) || stale.contains(&key),
+                };
+                if moved {
+                    let (s2, e2) = (l.service.clone(), l.env.clone());
+                    let Ok(row) = self.db(move |s| s.environment(&s2, &e2)).await else { continue };
+                    self.renew_intercept(row_svc, &row, &key, &log(&l.service, &l.env), now).await;
+                }
+            }
+            self.apply_intercept_pending(&network);
+        }
+    }
+
+    /// A closed environment's CA changed, its placeholders are gone, or its instances may trust
+    /// one its proxy doesn't serve: awake, its instances move to a deployment of the same image
+    /// whose bundle trusts both CAs (the proxy switches once every service on the network
+    /// trusts the new one); asleep or paused, its template is made again now (new placeholders
+    /// and the new CA, nothing started). At most every ten minutes; an hour after a move that
+    /// didn't start.
+    async fn renew_intercept(self: &Arc<Self>, svc: &crate::store::ServiceRow, row: &crate::store::EnvRow, key: &str, log: &crate::logs::LogSink, now: i64) {
+        if self.intercept_renewing.lock().get(key).is_some_and(|t| now < *t) {
+            return;
+        }
+        self.intercept_renewing.lock().insert(key.to_string(), now + 10 * 60_000);
+        let Some(active) = row.active.clone() else { return };
+        let live = self.live(&svc.id, &row.name);
+        let roll = async |why: &str| match self.rollback(&svc.id, &row.name, &active, Some("roll".into()), true, false).await {
+            Ok(d) => log.line(format!("{why}: moving its instances ({}) to trust the next before its proxy serves it", d.id)),
+            Err(e) => {
+                self.intercept_renewing.lock().insert(key.to_string(), now + 60 * 60_000);
+                log.line(format!("{why}, and moving its instances to the next didn't start (tried again in an hour): {e}"));
+            }
+        };
+        if live.awake() > 0 && !live.paused() {
+            roll("its interception CA changed (near its end, ended, a host bound since) or its instances may trust another").await;
+            return;
+        }
+        let made = async {
+            let active = active.clone();
+            let dep = self.db(move |s| s.deployment(&active)).await?;
+            self.template(svc, row, &dep).await
+        };
+        match made.await {
+            Ok(t) => {
+                live.set_template(Arc::new(t));
+                // Woken while it was made: those instances are the old template's.
+                if live.awake() > 0 && !live.paused() {
+                    roll("woken while its interception CA changed").await;
+                    return;
+                }
+                self.intercept_stale.lock().remove(key);
+                log.line("its interception CA or its placeholders changed while it slept: its next start has the new ones");
+            }
+            Err(e) => log.line(format!("its interception CA changed while it slept, and its template couldn't be made again: {e}")),
         }
     }
 
@@ -2801,20 +2947,24 @@ impl Apps {
         }
         if now - self.intercepts_checked.load(std::sync::atomic::Ordering::Relaxed) >= 60_000 {
             self.intercepts_checked.store(now, std::sync::atomic::Ordering::Relaxed);
-            self.refresh_intercepts(&services).await;
+            self.refresh_intercepts(&services, now).await;
+            self.retry_orphan_branches().await;
+            self.reap_sandboxes(now).await;
         }
         if now - self.status_swept.load(std::sync::atomic::Ordering::Relaxed) >= 60_000 {
             self.status_swept.store(now, std::sync::atomic::Ordering::Relaxed);
             self.status_sweep(&services).await;
         }
+        let unscheduled = self.db(|s| s.unscheduled()).await.unwrap_or_default();
         for svc in services.into_iter().filter(|s| s.run.kind == RunType::Cron && self.owns(&s.id) && !self.capped(&s.id)) {
             let Some(schedule) = svc.run.schedule.as_deref().and_then(|s| crate::cron::Schedule::parse(s, svc.run.timezone.as_deref()).ok()) else { continue };
             let sid = svc.id.clone();
             let Ok(envs) = self.db(move |s| s.environments(&sid)).await else { continue };
             for e in envs.into_iter().filter(|e| e.active.is_some()) {
                 let key = format!("cron:{}/{}", svc.id, e.name);
-                // Paused: skipped, and its schedule moves on, so resuming doesn't make up the runs.
-                if e.paused {
+                // Paused, or its schedule turned off (`scheduled: false`, a preview's): skipped,
+                // and its schedule moves on, so turning it back on doesn't make up the runs.
+                if e.paused || unscheduled.contains(&(svc.id.clone(), e.name.clone())) {
                     let (k, v) = (key.clone(), now.to_string());
                     let _ = self.db(move |s| s.set_state(&k, &v)).await;
                     continue;
@@ -2845,7 +2995,7 @@ impl Apps {
     /// starts a job, unless the last it started still runs; a paused environment's move on.
     async fn schedules_pass(self: &Arc<Self>, services: &[crate::store::ServiceRow], now: i64) {
         // One read of every environment a pass, not one per service.
-        let Ok(all_envs) = self.db(|s| s.all_environments()).await else { return };
+        let Ok((all_envs, unscheduled)) = self.db(|s| Ok((s.all_environments()?, s.unscheduled()?))).await else { return };
         for svc in services.iter().filter(|s| self.owns(&s.id) && !self.capped(&s.id)) {
             // A preview environment never runs production's schedules (one per open pull request).
             // In maintenance, nothing is called on a schedule (it would be answered roll's page).
@@ -2861,8 +3011,8 @@ impl Apps {
                     let key = format!("sched:{}/{}/{}", svc.id, e.name, sc.name);
                     let k = key.clone();
                     let last: Option<i64> = self.db(move |s| s.get_state(&k)).await.ok().flatten().and_then(|v| v.parse().ok());
-                    // New (or paused): counted from now, so nothing is made up.
-                    let Some(last) = last.filter(|_| !e.paused) else {
+                    // New (or paused, or its schedules off): counted from now, so nothing is made up.
+                    let Some(last) = last.filter(|_| !e.paused && !unscheduled.contains(&(e.service.clone(), e.name.clone()))) else {
                         let (k, v) = (key.clone(), now.to_string());
                         let _ = self.db(move |s| s.set_state(&k, &v)).await;
                         continue;
@@ -3196,12 +3346,26 @@ fn build_timeout(own: Option<u32>, node: Duration, log: &LogSink) -> Duration {
 pub const INTERCEPT_CA: &str = "/etc/roll/intercept-ca.pem";
 
 /// A CA's PEM, as which one instances trust is kept.
+/// A closed environment's CA as its proxy serves it: its PEM's digest, the PEM, and roll secrets'
+/// interception for it.
+#[derive(Clone)]
+pub(crate) struct Serving {
+    pub digest: String,
+    pub pem: String,
+    pub interception: Arc<dyn roll_intercept::Interception>,
+}
+
 fn ca_digest(pem: &str) -> String {
     use sha2::Digest;
     hex::encode(&sha2::Sha256::digest(pem.as_bytes())[..12])
 }
 
 /// The host's roots (the instance's own may be older or missing) and the interception CA.
+/// Whether a template's instances trust `ca_pem` (their bundle names it).
+fn trusts(t: &Template, ca_pem: &str) -> bool {
+    t.spec.files.iter().any(|(p, c)| p == INTERCEPT_CA && c.contains(ca_pem.trim()))
+}
+
 fn trust_bundle(ca_pem: &str) -> String {
     let roots = ["/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-bundle.crt", "/etc/ssl/cert.pem"].iter().find_map(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
     format!("{}\n{}\n", roots.trim_end(), ca_pem.trim())

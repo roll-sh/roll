@@ -46,6 +46,9 @@ pub struct InstanceSpec {
     /// Other ports of the app a custom domain sends to (published as `port` is; never a closed
     /// instance's), each reached through [`Runtime::port_address`].
     pub ports: Vec<u16>,
+    /// `port` speaks UDP (`run.udp`): published over UDP too, reached through
+    /// [`Runtime::udp_address`].
+    pub udp: bool,
     pub cpu: f64,
     pub memory_mb: u32,
     /// The project's private network for this environment, and the names it answers to there.
@@ -207,6 +210,11 @@ pub trait Runtime: Send + Sync {
     async fn port_address(&self, _name: &str, _port: u16) -> Option<SocketAddr> {
         None
     }
+    /// Where a UDP service's instance takes its datagrams on this host (its port published over
+    /// UDP on loopback). None: not published so (a runtime without UDP).
+    async fn udp_address(&self, _name: &str, _port: u16) -> Option<SocketAddr> {
+        None
+    }
     /// The instance is up: it runs within its CPU limit from here.
     async fn settle(&self, _name: &str) {}
     /// Freeze a running instance (memory kept). Only called when [`Runtime::can_suspend`].
@@ -351,6 +359,11 @@ pub trait Runtime: Send + Sync {
     async fn shell(&self, _name: &str, _command: Option<&str>, _cols: u16, _rows: u16) -> anyhow::Result<Shell> {
         anyhow::bail!("this runtime has no shells")
     }
+    /// `sh -c <command>` in a running container, without a terminal: its exit code and output,
+    /// each stream kept to `max` bytes (the rest read and dropped), killed after `timeout`.
+    async fn exec_output(&self, _name: &str, _command: &str, _timeout: std::time::Duration, _max: usize) -> anyhow::Result<ExecOutput> {
+        anyhow::bail!("this runtime can't run a command in a container")
+    }
     async fn resize_shell(&self, _shell: &str, _cols: u16, _rows: u16) -> anyhow::Result<()> {
         Ok(())
     }
@@ -359,6 +372,17 @@ pub trait Runtime: Send + Sync {
 /// A shell's terminal stream.
 pub trait ShellStream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
 impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> ShellStream for T {}
+
+/// What [`Runtime::exec_output`] ran to.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ExecOutput {
+    /// None: killed at its timeout.
+    pub code: Option<i32>,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    /// More than `max` bytes on a stream: the rest was dropped.
+    pub truncated: bool,
+}
 
 pub struct Shell {
     /// What [`Runtime::resize_shell`] takes.
@@ -410,6 +434,9 @@ pub struct BuildJob {
     pub layers: Option<String>,
     /// A closed environment's build: on this network, through its proxy, not the default one.
     pub egress: Option<BuildEgress>,
+    /// Not a preview's (Vercel's prioritized production builds): a builder with a queue lets it
+    /// past a burst of previews' builds.
+    pub priority: bool,
 }
 
 impl std::fmt::Debug for BuildJob {
@@ -539,6 +566,7 @@ mod tests {
             target: None,
             layers: None,
             egress: None,
+            priority: true,
         };
         assert_eq!(build_args(&job), ["NPM_TOKEN", "A"]);
         job.own_dockerfile = false;

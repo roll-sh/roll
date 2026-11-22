@@ -834,7 +834,10 @@ impl Code {
         if self.db.learning_for_thread(&th.id).unwrap_or(true) {
             return;
         }
-        let Some(reason) = th.comments.iter().rev().find(|x| x.author.kind != ReviewerKind::Roll && commands::parse(&x.body).is_none()) else { return };
+        // The reason is someone's who may decide on the repo: a learning steers every later review,
+        // and roll's approval can count toward landing, so a reply from outside (a fork's author, a
+        // GitHub commenter who can't push, a signed-in reader) never becomes one.
+        let Some(reason) = th.comments.iter().rev().find(|x| x.author.kind != ReviewerKind::Roll && !x.outside && commands::parse(&x.body).is_none()) else { return };
         let finding = th.comments[0].body.lines().next().unwrap_or_default().trim_start_matches("**").to_string();
         let text = format!("A finding like \"{}\" in {} was dismissed: {}", finding.replace("** ·", ":").trim(), th.path, reason.body.trim());
         let text: String = text.chars().take(1000).collect();

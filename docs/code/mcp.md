@@ -37,6 +37,18 @@ Any MCP client that takes a JSON config:
 `X-Roll-Agent` (optional) is the name the agent reviews and comments as. It works as it does on the
 HTTP API.
 
+Lockdown (`?lockdown=1` on the URL, or `X-MCP-Lockdown: 1`), as GitHub's MCP server and roll's own
+`/v1/mcp` have it: text written by someone who can't push to the repo (an issue anyone opened, a
+fork's pull request, a stranger's comment on a review thread) comes back as a notice instead, while
+ids and states stay. Use it for an agent that holds write tools and reads public repos; the owner
+page's "Connect an agent" panel puts it in the snippet it gives (the URL quoted for the shell). The
+function is `roll_auth::lockdown`, shared with `/v1/mcp`. Lockdown or not, characters a person
+can't see and a model reads (tag characters, zero-width and bidi controls, variation selectors) are
+written as escapes in every text block (`roll_auth::lockdown::visible`); `structuredContent` stays
+exact. A text block is cut at 48 KiB and says so (past 50,000 characters Claude Code moves an answer to a file); the
+structured content keeps all of it. This runs in `mcp::call`, so roll's `/v1/mcp` fronting these
+tools cuts them too.
+
 ## Tools
 
 Repos are `"owner/repo"`. Changes are `"chg_…"` or `"owner/repo#N"`, and work items are `"wi_…"` or
@@ -54,24 +66,36 @@ Repos are `"owner/repo"`. Changes are `"chg_…"` or `"owner/repo#N"`, and work 
 | `compare` | changesets and file diffs between two revisions | `GET /repos/{r}/compare/{a}...{b}` |
 | `create_change` | open a change from file edits on a base | `POST /repos/{r}/changes` |
 | `revise_change` | a new revision of a change | `POST /changes/{id}/revise` |
+| `update_change` | a change's title, description, labels or work item; mark a draft ready (back to draft would dequeue it: `dequeue_change`) | `PATCH /changes/{id}` |
 | `land` | land a change, or edits directly | `POST /changes/{id}/land`, `POST /repos/{r}/land` |
-| `get_change` | a change with its blockers, checks, review status and threads | `GET /changes/{id}` + `/review-status` + `/threads` |
+| `get_change` | a change with its blockers, checks, review status, reviews (with what each reviewer wrote), threads and review requests | `GET /changes/{id}` + `/review-status` + `/reviews` + `/threads` + `/review-requests` |
 | `list_changes` | a repo's changes | `GET /repos/{r}/changes` |
 | `claim_work` | claim the highest-priority open work item (a lease) | `POST /repos/{r}/work/claim` |
 | `heartbeat_work`, `release_work`, `complete_work` | keep, give back or finish a claimed item | `POST /work/{id}/…` |
 | `list_work`, `create_work` | work items | `GET`/`POST /repos/{r}/work` |
+| `get_work`, `update_work` | one work item; change its title, body, labels or priority (its state moves through claim, release and complete) | `GET`/`PATCH /work/{id}` |
 | `comment` | reply in a thread, or start one on a line of a change | `POST /threads/{id}/comments`, `POST /changes/{id}/threads` |
 | `review` | approve, request changes or comment, with inline comments | `POST /changes/{id}/reviews` |
+| `resolve_thread`, `reopen_thread` | mark a review thread resolved, or open again | `POST /threads/{id}/resolve`, `/unresolve` |
+| `apply_suggestion` | apply a comment's ```` ```suggestion ```` as a new revision and resolve its thread | `POST /threads/{id}/apply` |
+| `request_review` | ask a person, an agent, a review app or roll to review a change (`required`: it can't land until they've reviewed its head) | `POST /changes/{id}/review-requests` |
 | `queue_status` | the merge queue | `GET /repos/{r}/queue` |
 | `enqueue_change`, `dequeue_change` | put a change in the merge queue (a lane; blocked is an outcome, as with `land`), or take it out | `POST`/`DELETE /changes/{id}/enqueue` |
+| `set_change_lane` | move a queued change to the other lane, keeping its place in time | `PATCH /changes/{id}/enqueue` |
 | `close_change` | close a change without landing it (it can't be reopened: `destructiveHint`) | `POST /changes/{id}/close` |
 | `report_check` | a check's result on a change, from CI outside roll | `POST /changes/{id}/checks` |
 | `set_commit_status` | a commit status on a revision (GitHub's statuses) | `POST /repos/{r}/statuses/{rev}` |
+| `get_commit_statuses` | a revision's combined state and each context's latest status | `GET /repos/{r}/statuses/{rev}` |
 | `list_refs` | the repo's branches and tags | `GET /repos/{r}/refs` |
 | `create_repo` | a new, empty repository under an owner you manage | `POST /repos` |
 | `request_ai_review` | ask roll's reviewer for a review | `POST /changes/{id}/ai-review` |
+| `list_ai_reviews` | roll's review jobs for a change, oldest first (state, stage, progress, the review made) | `GET /changes/{id}/ai-jobs` |
+| `get_ai_review_pricing`, `get_review_usage` | what an AI review costs by mode; an owner's spend in a month (by repo, mode, key; the cap left) | `GET /pricing`, `GET /owners/{owner}/usage` |
+| `get_reviewer`, `get_review_rules` | how roll reviews a repo (effective settings, model, jobs, index); what a change needs to land | `GET /repos/{r}/reviewer`, `/review-settings` |
+| `get_repo_audit` | what changed in the queue and settings (bypasses, pauses, lanes, approved runs, webhooks, review settings, dismissals, stored credentials), newest first (writers) | `GET /repos/{r}/audit` |
+| `start_preview`, `stop_preview` | make a change's preview (it starts on its first visit), or remove it with its database (`destructiveHint`) | `POST`/`DELETE /changes/{id}/preview` |
 | `list_agent_machines` | the owner's machines running `roll agent up` (online, providers) | `GET /agents/{owner}/machines` |
-| `list_agent_threads` | agent threads (with their machine and project name) and the requests waiting for an answer | `GET /agents/{owner}/state` |
+| `list_agent_threads` | agent threads (with their machine and project name), each machine's projects (with the repo each clones) and the requests waiting for an answer | `GET /agents/{owner}/state` |
 | `create_agent_thread` | start a coding agent in a project on a machine | `POST /agents/{owner}/machines/{m}/commands` (`thread.create`) |
 | `send_agent_message` | message a thread: start a run, queue after it, or steer it | `POST …/commands` (`message.send`) |
 | `respond_agent_request` | answer an approval (`decision`) or questions (`answers`) | `POST …/commands` (`request.respond`) |
@@ -79,12 +103,18 @@ Repos are `"owner/repo"`. Changes are `"chg_…"` or `"owner/repo#N"`, and work 
 | `publish_agent_thread` | commit and push a thread's branch; in a roll code repo it becomes a change, and `land` sends it to landing (the answer's `landing` says landed, queued, blocked or conflict) | `POST …/commands` (`thread.publish`) |
 | `create_agent_project` | create a roll code repo and clone it onto a machine as a project | `POST /agents/{owner}/machines/{m}/projects` |
 | `claim_agent_work` | give a thread a work item: a given one, or the next one claimed from a repo (`work: null` when none) | `POST /agents/{owner}/threads/{t}/work` |
+| `release_agent_work` | a thread lets go of its work item (the claim runs out on its lease) | `DELETE /agents/{owner}/threads/{t}/work` |
 | `list_agent_automations` | the owner's automations (docs/code/automations.md) | `GET /agents/{owner}/automations` |
 | `save_agent_automation` | create an automation, or replace one's definition (by id, over a `revision`) | `POST /agents/{owner}/automations`, `PUT …/automations/{id}` |
 | `run_agent_automation` | run one now (by id or name) with `input` and an idempotency `key`; agents only when it allows agents | `POST …/automations/{id}/run` |
 | `list_agent_automation_runs` | runs, newest first (of one automation, by status) | `GET …/automations/runs` |
 | `get_agent_automation_run` | a run's steps (status, output, log) and its event | `GET …/automations/runs/{run}` |
 | `cancel_agent_automation_run` | cancel a run going on (the owner's) | `POST …/automations/runs/{run}/cancel` |
+| `retry_agent_automation_run` | a failed or cancelled run goes on from where it stopped (the owner's; `openWorldHint`, as `run_agent_automation`) | `POST …/automations/runs/{run}/retry` |
+| `enable_agent_automation`, `disable_agent_automation` | turn an automation on or off (by id or name; runs going on go on) | `POST …/automations/{id}/enable`, `/disable` |
+| `get_agent_automation_catalog` | every trigger and step kind, with each config's JSON Schema | `GET …/automations/catalog` |
+| `test_agent_automation` | what a spec would do with an event, saving and running nothing | `POST …/automations/test` |
+| `list_agent_sandboxes`, `stop_agent_sandbox`, `get_agent_sandbox_usage` | the owner's sandboxes; stop one (its billing stops); a month's running hours and price | `GET /agents/{owner}/sandboxes`, `POST …/{id}/stop`, `GET …/usage` |
 
 The agents tools (docs/code/agents.md) take `owner`, and a `machine` by id (`mch_…`) or name.
 Commands take an optional `id`, the idempotency key (a fresh one by default). Whatever the
@@ -98,6 +128,10 @@ Agent tokens may use them to orchestrate agents, within what an agent's commands
 
 ### Results
 
+- Each tool says whether it only reads (`readOnlyHint`), can't be undone (`destructiveHint`:
+  `close_change`, `stop_preview`), reaches outside roll (`openWorldHint`: a model provider or a
+  branch's remote) and is safe to retry (`idempotentHint`: reads, and tools whose every route is a
+  `PUT` or `DELETE`, from `ROUTES`).
 - Results come back twice: as `structuredContent`, which is the API's JSON (arrays are wrapped as
   `{items: […]}`), and as a `text` content block. `read_file`'s text block is the file content itself.
 - **`land` outcomes are results, not errors.** `status` is one of:
@@ -109,6 +143,12 @@ Agent tokens may use them to orchestrate agents, within what an agent's commands
   found", "not allowed", or "this needs a token". Protocol problems, such as an unknown method or tool,
   or arguments that aren't an object, are JSON-RPC errors.
 - `claim_work` returns `{work: null}` when nothing matches.
+- Every `/v1/code` route the routers declare is a tool's or has a reason, method by method.
+  `ROUTES` in `src/mcp.rs` lists the routes each tool calls; `src/no-tool.txt` lists every other
+  route with why it has no tool (a person's, an admin's, a credential, an outside service's
+  delivery, a stream, covered by another tool, or `no tool yet` for a gap). A new route fails
+  `coverage_map.rs::every_route_has_an_mcp_tool_or_a_reason` until it has one or the other, as
+  roll's other products do in `crates/roll-mcp`.
 
 ## Protocol
 

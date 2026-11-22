@@ -114,6 +114,10 @@ pub struct SearchCluster {
     /// Branches made before marking existed never have it, so their own jobs are left alone.
     #[serde(skip)]
     pub inherit_pending: bool,
+    /// Its `reindex.remote.whitelist` (Elastic Cloud's user setting): the `host:port` patterns
+    /// reindex from remote may read; empty: none. roll's migration adds the host it reads.
+    /// Branches start with their parent's.
+    pub reindex_whitelist: Vec<String>,
 }
 
 impl std::fmt::Debug for SearchCluster {
@@ -143,6 +147,7 @@ impl std::fmt::Debug for SearchCluster {
             .field("ip_allowlist", &self.ip_allowlist)
             .field("cors", &self.cors)
             .field("browser_per_minute", &self.browser_per_minute)
+            .field("reindex_whitelist", &self.reindex_whitelist)
             .finish()
     }
 }
@@ -370,10 +375,10 @@ CREATE INDEX IF NOT EXISTS search_suggestions_due ON search_suggestions (due_at)
 "#;
 
 const COLS: &str = "id, name, region, flavor, password, idle_timeout_s, max_in_flight, max_body_mb, destructive_requires_name, \
-                    parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, ip_allowlist, cors, browser_per_minute, inherit_pending";
+                    parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, ip_allowlist, cors, browser_per_minute, inherit_pending, reindex_whitelist";
 /// What lookups read: [`COLS`] and where the cluster is loaded.
 const READ_COLS: &str = "id, name, region, flavor, password, idle_timeout_s, max_in_flight, max_body_mb, destructive_requires_name, \
-                         parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, loaded_on, own_bytes, wake_at, restored_at, ip_allowlist, cors, browser_per_minute, inherit_pending";
+                         parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, loaded_on, own_bytes, wake_at, restored_at, ip_allowlist, cors, browser_per_minute, inherit_pending, reindex_whitelist";
 /// What deleted clusters' reads add to [`READ_COLS`].
 const DELETED_COLS: &str = "deleted_name, deleted_at, purge_at, stored_as, name";
 
@@ -408,15 +413,18 @@ fn row(r: &Row) -> code_sql::Result<SearchCluster> {
         },
         browser_per_minute: r.get(23)?,
         inherit_pending: r.get(24)?,
+        // Unreadable, nothing is whitelisted (reindex from remote refuses every host).
+        reindex_whitelist: serde_json::from_str(&r.get::<_, String>(25)?).unwrap_or_default(),
     })
 }
 
 fn deleted_row(r: &Row) -> code_sql::Result<DeletedCluster> {
     let mut c = row(r)?;
-    c.name = r.get(25)?;
+    // [`DELETED_COLS`] follow [`READ_COLS`]' 26 (0-25).
+    c.name = r.get(26)?;
     c.loaded_on = None;
     c.wake_at = None;
-    Ok(DeletedCluster { cluster: c, deleted_at: r.get(26)?, purge_at: r.get(27)?, stored_as: r.get(28)?, reserved: r.get(29)? })
+    Ok(DeletedCluster { cluster: c, deleted_at: r.get(27)?, purge_at: r.get(28)?, stored_as: r.get(29)?, reserved: r.get(30)? })
 }
 
 /// What the catalog keeps of an index's query suggestions (`crate::suggestions`): its settings
@@ -491,6 +499,10 @@ fn allowlist_json(rules: &[IpRule]) -> String {
     serde_json::to_string(rules).expect("rules serialize")
 }
 
+fn whitelist_json(patterns: &[String]) -> String {
+    serde_json::to_string(patterns).expect("patterns serialize")
+}
+
 /// Seconds in the 30-day month the GB-month figures use (AWS bills storage per 730-hour month;
 /// a 30-day month keeps `days / 30` exact in the dashboard).
 pub const MONTH_SECONDS: f64 = 30.0 * 86_400.0;
@@ -533,6 +545,8 @@ impl Store {
         db.add_column("search_clusters", "browser_per_minute", "INTEGER")?;
         // Branches made before marking aren't marked (`SearchCluster::inherit_pending`).
         db.add_column("search_clusters", "inherit_pending", "INTEGER NOT NULL DEFAULT 0")?;
+        // Clusters made before it whitelist no remote, as Elasticsearch's default.
+        db.add_column("search_clusters", "reindex_whitelist", "TEXT NOT NULL DEFAULT '[]'")?;
         db.ensure_schema("CREATE INDEX IF NOT EXISTS search_clusters_owner ON search_clusters (owner, created_at)")?;
         // Deleted clusters kept for restoring.
         db.add_column("search_clusters", "deleted_at", "INTEGER")?;
@@ -614,7 +628,7 @@ impl Store {
                 return Ok(Inserted::Over(over));
             }
             x.execute(
-                &format!("INSERT INTO search_clusters ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)"),
+                &format!("INSERT INTO search_clusters ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)"),
                 params![
                     c.id,
                     c.name,
@@ -636,7 +650,8 @@ impl Store {
                     allowlist_json(&c.ip_allowlist),
                     cors_json(&c.cors),
                     c.browser_per_minute,
-                    c.inherit_pending
+                    c.inherit_pending,
+                    whitelist_json(&c.reindex_whitelist)
                 ],
             )
             .map(|_| Inserted::Yes)
@@ -666,7 +681,7 @@ impl Store {
             }
             x.execute(
                 "UPDATE search_clusters SET flavor = ?2, password = ?3, idle_timeout_s = ?4, max_in_flight = ?5, max_body_mb = ?6,
-                 destructive_requires_name = ?7, password_rotated_at = ?8, ip_allowlist = ?9, cors = ?10, browser_per_minute = ?11 WHERE id = ?1",
+                 destructive_requires_name = ?7, password_rotated_at = ?8, ip_allowlist = ?9, cors = ?10, browser_per_minute = ?11, reindex_whitelist = ?12 WHERE id = ?1",
                 params![
                     c.id,
                     c.flavor,
@@ -678,7 +693,8 @@ impl Store {
                     c.password_rotated_at,
                     allowlist_json(&c.ip_allowlist),
                     cors_json(&c.cors),
-                    c.browser_per_minute
+                    c.browser_per_minute,
+                    whitelist_json(&c.reindex_whitelist)
                 ],
             )?;
             Ok::<_, code_sql::Error>(Ok(()))
@@ -1372,6 +1388,7 @@ mod tests {
             cors: None,
             browser_per_minute: None,
             inherit_pending: false,
+            reindex_whitelist: Vec::new(),
         }
     }
 

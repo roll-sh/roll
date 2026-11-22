@@ -377,7 +377,7 @@ pub(crate) fn rejection_reply(ctx: &crate::rest::Ctx<'_>, r: &Rejected) -> crate
         }
         Api::Bulk => {
             let defaults = crate::write::WriteArgs::default();
-            let items = crate::api::bulk::parse(&ctx.body, &defaults, ctx.path_param("index"), None, true)?;
+            let items = crate::api::bulk::parse(&ctx.body, &defaults, ctx.path_param("index"), None, true, false)?;
             let out = items.iter().map(|it| {
                 let id = it.args.id.clone().unwrap_or_else(crate::meta::names::time_based_id);
                 let mut m = crate::json::Map::new();

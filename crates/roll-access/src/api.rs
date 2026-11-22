@@ -54,6 +54,7 @@ pub fn router(access: Arc<Access>) -> Router {
         .route("/v1/access/oauth/clients", get(clients))
         .route("/v1/access/oauth/clients/{id}", get(client))
         .route("/v1/access/oauth/authorize", post(crate::oauth::authorize))
+        .route("/v1/access/oauth/step-ups/{id}", get(crate::oauth::step_up_view))
         .route("/v1/access/oauth/devices/{code}", get(crate::oauth::device_view).post(crate::oauth::device_approve).delete(crate::oauth::device_deny))
         .route_layer(axum::middleware::from_fn_with_state(access.clone(), audit_changes))
         .with_state(access)
@@ -1099,6 +1100,7 @@ pub(crate) fn rule_of(found: &crate::store::Approval) -> crate::Result<roll_auth
         // Only where the request was: an approval in development never reaches production.
         environments: found.environment.clone().map(|e| vec![e]),
         paths: found.scope_path.clone().map(|p| vec![p]),
+        unprotected: false,
         actions: [(action, roll_auth::scope::Effect::Allow)].into_iter().collect(),
     })
 }
@@ -1470,7 +1472,12 @@ async fn client(State(a): S, ext: Extensions, Path(id): Path<String>) -> crate::
         }
     };
     let c = c.ok_or_else(|| Error::NotFound("no such client".into()))?;
-    Ok(Json(json!(c)))
+    let mut out = json!(c);
+    // The consent screen says so before a person fills it in.
+    if !a.policy_now().allows_client(&c) {
+        out["not_allowed"] = json!(crate::evaluate::CLIENT_NOT_ALLOWED);
+    }
+    Ok(Json(out))
 }
 
 #[cfg(test)]
