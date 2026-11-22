@@ -83,6 +83,17 @@ struct Args {
     /// S3 region (default: the AWS environment's).
     #[arg(long, requires = "s3_bucket")]
     s3_region: Option<String>,
+    /// Run the `.multilingual-e5-small-elasticsearch` inference endpoint on this machine, with
+    /// the model's files (`model.safetensors`, `tokenizer.json` of the pinned revision) from
+    /// this directory (no fetching).
+    #[arg(long)]
+    embed_dir: Option<std::path::PathBuf>,
+    /// Embedding worker threads (0: a third of the CPUs, or of `--embed-cpus`).
+    #[arg(long, default_value_t = 0)]
+    embed_workers: usize,
+    /// CPUs the embedding workers are pinned to (`0-5,18-23`).
+    #[arg(long, default_value = "")]
+    embed_cpus: String,
     /// PEM certificate chain for HTTPS.
     #[arg(long, requires = "tls_key")]
     tls_cert: Option<std::path::PathBuf>,
@@ -164,6 +175,15 @@ async fn run() -> anyhow::Result<()> {
         host_metrics: true,
         // As rolld does: stored secrets sealed under ROLL_SECRET_KEY when it's set.
         sealer: std::env::var("ROLL_SECRET_KEY").ok().and_then(|k| search_es::seal::Sealer::from_secret(&k)),
+        embedder: match &args.embed_dir {
+            Some(dir) => {
+                let mut e = search_server::embed::EmbedConfig::new(search_server::embed::ModelSource::Dir(dir.clone()), dir.clone());
+                e.workers = args.embed_workers;
+                e.cpus = search_server::embed::parse_cpus(&args.embed_cpus)?;
+                Some(search_server::embed::EmbedPool::new(e))
+            }
+            None => None,
+        },
         // The dev server (and the YAML suites run against it) keeps secrets as given without a key.
         unsealed_secrets: true,
         ..NodeConfig::default()

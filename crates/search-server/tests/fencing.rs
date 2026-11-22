@@ -3,6 +3,10 @@
 //! lease can pass, the next owner recovers everything acknowledged, and a deposed node that
 //! still believes it owns the cluster can't commit (epoch fencing in search-store).
 
+// Spawned tasks hold the node's request futures, which hold reqwest's HTTP/2 client state (h2,
+// on in builds with crates that enable it); their `Send` proof nests past the default 128.
+#![recursion_limit = "256"]
+
 mod common;
 
 use async_trait::async_trait;

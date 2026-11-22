@@ -143,6 +143,7 @@ GET /v1/code/repos/{owner}/{repo}/paths/{rev}
 GET /v1/code/repos/{owner}/{repo}/queue
 GET /v1/code/repos/{owner}/{repo}/readme/{rev}
 GET /v1/code/repos/{owner}/{repo}/refs
+GET /v1/code/repos/{owner}/{repo}/landings
 GET /v1/code/repos/{owner}/{repo}/review-settings
 GET /v1/code/repos/{owner}/{repo}/reviewer
 GET /v1/code/repos/{owner}/{repo}/search
@@ -232,6 +233,7 @@ PUT /v1/secrets/projects/{project}/environments/{env}
 GET /v1/secrets/projects/{project}/environments/{env}/changes
 POST /v1/secrets/projects/{project}/environments/{env}/changes
 GET /v1/secrets/projects/{project}/environments/{env}/changes/{seq}
+GET /v1/secrets/projects/{project}/environments/{env}/deletion
 GET /v1/secrets/projects/{project}/environments/{env}/digest
 GET /v1/secrets/projects/{project}/environments/{env}/exports
 DELETE /v1/secrets/projects/{project}/environments/{env}/folders

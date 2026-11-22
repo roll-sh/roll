@@ -217,6 +217,10 @@ if repo_made:
         seen[k] = "sweep/app"
     seen[("agents", "owner")] = "sweep"
     seen[("code", "owner")] = "sweep"
+    # A work item for `search` to find and `fetch` to read.
+    wi = rest("POST", "/v1/code/repos/sweep/app/work", {"title": "sweep work item", "body": "made by the sweep"})
+    if wi and wi.get("id"):
+        seen[("code", "id")] = wi["id"]
 if msg_id:
     seen[("tasks", "id")] = msg_id
 if pv_id:
@@ -281,7 +285,7 @@ for pass_ in (0, 1):
                 if isinstance(it, dict) and isinstance(it.get("id"), str):
                     prod = t.get("_meta", {}).get("roll/product", "")
                     key = {"postgres": "project", "redis": "database", "nosql": "database", "search": "cluster", "streams": "stream", "apps": "service", "previews": "id", "workspace": "id", "secrets": "project"}.get(prod)
-                    if key and (prod, key) not in seen and t["name"].split("_")[1] == "list":
+                    if key and (prod, key) not in seen and t["name"].split("_")[1:2] == ["list"]:
                         seen[(prod, key)] = it["id"]
 print(f"{len(reads)} read-only tools, {ran} called ({len(stood_in)} with a stand-in for what no fixture made), {len(fails)} failed")
 
@@ -417,7 +421,8 @@ fails += [f"member {f}" for f in member_fails]
 # (`roll_mcp::ask`). For every kind of id the fixtures made, the form must offer the fixture's,
 # or the kind is below with why it has none: a list answer of another shape offers nothing
 # without failing anything, and a new kind of id with no choices fails here until it has some.
-NO_CHOICES = {("postgres", "endpoint"): "an endpoint sits inside its branch, and no tool lists every project's"}
+NO_CHOICES = {("postgres", "endpoint"): "an endpoint sits inside its branch, and no tool lists every project's",
+              ("code", "id"): "fetch's id is a search result's (a query first), not a list to pick from"}
 # Where a name means different things by tool, the one the fixture's id is: tasks' `id` is a
 # message's in the fixture (a run's, a schedule's… by their own tools' routes).
 CHOICE_TOOL = {("tasks", "id"): "tasks_get_message"}
@@ -509,10 +514,14 @@ def modern(method, params):
         return {"error": {"http": e.code, "body": e.read().decode(errors="replace")[:200]}}
 types = modern("events/list", {}).get("result", {}).get("events", [])
 ebad, seen_events = [], 0
+# A feed's path arguments (a repo's owner and name, a project) come from the fixtures above.
+feed_args = {"owner": "sweep", "repo": "app", "project": ws}
 for t in types:
-    first = modern("events/poll", {"name": t["name"], "cursor": None})
-    later = modern("events/poll", {"name": t["name"], "cursor": first.get("result", {}).get("cursor")})
-    start = modern("events/poll", {"name": t["name"], "cursor": "a1:0", "maxEvents": 20})
+    args = {k: feed_args.get(k) for k in t.get("inputSchema", {}).get("required", [])}
+    poll = {"name": t["name"], **({"arguments": args} if args else {})}
+    first = modern("events/poll", dict(poll, cursor=None))
+    later = modern("events/poll", dict(poll, cursor=first.get("result", {}).get("cursor")))
+    start = modern("events/poll", dict(poll, cursor="a1:0", maxEvents=20))
     for what, r in (("from now", first), ("from its cursor", later), ("from the start", start)):
         if "error" in r or not isinstance(r.get("result", {}).get("cursor"), str):
             ebad.append(f"events/poll {t['name']} {what}: {json.dumps(r.get('error') or r.get('result'))[:200]}")

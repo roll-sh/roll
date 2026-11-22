@@ -1,7 +1,7 @@
 import { ArrowUpRight, KeyRound } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Link } from "@/components/link";
-import { allFindings, deletedProjects, recoverProject, type DeletedProject, type ProjectFindings } from "@/lib/secrets-api";
+import { allFindings, deletedProjects, recoverEnvironment, recoverProject, type DeletedProject, type ProjectFindings } from "@/lib/secrets-api";
 import { KIND_LABEL, monthOf, projectMonth, resourceKey, usd } from "@/lib/workspace-resources";
 import { loadWorkspace, spendOf, useWorkspace } from "@/lib/workspace-store";
 import { AppShell } from "../app-shell";
@@ -188,7 +188,10 @@ function SecretsToFix() {
   );
 }
 
-/** Deleted projects whose secrets are still recoverable (roll secrets' window): nothing when none. */
+/** One row of "Recently deleted": a project, or an environment of one. */
+const deletedKey = (d: DeletedProject) => (d.environment ? `${d.project}/${d.environment}` : d.project);
+
+/** Deleted projects and environments whose secrets are still recoverable (roll secrets' window): nothing when none. */
 function RecentlyDeleted() {
   const [deleted, setDeleted] = useState<DeletedProject[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
@@ -205,12 +208,13 @@ function RecentlyDeleted() {
   }, []);
   if (!deleted.length) return null;
   const recover = async (p: DeletedProject) => {
-    setBusy(p.project);
+    setBusy(deletedKey(p));
     setError(null);
     try {
-      await recoverProject(p.project);
-      setDeleted((all) => all.filter((d) => d.project !== p.project));
-      await loadWorkspace();
+      if (p.environment) await recoverEnvironment(p.project, p.environment);
+      else await recoverProject(p.project);
+      setDeleted((all) => all.filter((d) => deletedKey(d) !== deletedKey(p)));
+      if (!p.environment) await loadWorkspace();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -220,20 +224,23 @@ function RecentlyDeleted() {
   return (
     <section className="rise mt-10">
       <h2 className="text-[15px] font-semibold tracking-[-0.03em]">Recently deleted</h2>
-      <p className="mt-0.5 text-[12.5px] text-muted">Their secrets are kept until the date shown; restoring brings the project and its canvas back.</p>
+      <p className="mt-0.5 text-[12.5px] text-muted">Their secrets are kept until the date shown; restoring a project brings its canvas back, and restoring an environment makes its secrets and references work again.</p>
       {error && <p className="mt-2 rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-[12px] text-danger">{error}</p>}
       <div className="mt-3 divide-y divide-line rounded-xl border border-line-2 bg-panel">
         {deleted.map((p) => (
-          <div key={p.project} className="flex items-center gap-3 px-3 py-2 text-[12.5px]">
-            <span className="text-fg">{p.name}</span>
-            <span className="font-mono text-[11px] text-subtle">{p.project}</span>
+          <div key={deletedKey(p)} className="flex items-center gap-3 px-3 py-2 text-[12.5px]">
+            <span className="text-fg">
+              {p.name}
+              {p.environment && <span className="text-muted"> · {p.environment}</span>}
+            </span>
+            <span className="font-mono text-[11px] text-subtle">{p.environment ? "environment" : p.project}</span>
             <span className="ml-auto text-[11.5px] text-muted">until {new Date(p.purge_at).toLocaleDateString()}</span>
             <button
               disabled={busy !== null}
               onClick={() => void recover(p)}
               className="h-7 rounded-lg border border-line-2 px-2.5 text-[12px] text-fg transition-colors hover:bg-fg/[0.04] disabled:opacity-40"
             >
-              {busy === p.project ? "Restoring…" : "Restore"}
+              {busy === deletedKey(p) ? "Restoring…" : "Restore"}
             </button>
           </div>
         ))}

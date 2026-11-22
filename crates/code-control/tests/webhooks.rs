@@ -1604,3 +1604,22 @@ async fn landed_files_are_scanned_for_roll_tokens() {
     assert!(seen.iter().any(|(text, at)| text.contains("ROLL_TOKEN=rlt_") && at.starts_with("acme/api .env at ")), "{seen:?}");
     assert!(seen.iter().all(|(_, at)| !at.contains("b.txt") && !at.contains("a.txt")), "{seen:?}");
 }
+
+/// A repo's landings after a place in the land log (MCP Events' `code.landed`): each its `landed`
+/// event's data, oldest first; another repo's aren't there; `latest=1` starts from now.
+#[tokio::test]
+async fn landings_read_after_a_place() {
+    let a = app(None);
+    a.repo("acme", "x").await;
+    a.repo("acme", "y").await;
+    let x = "/v1/code/repos/acme/x";
+    a.ok("POST", &format!("{x}/land"), Some(json!({ "message": "init", "files": { "a.txt": { "content": "a\n" } } }))).await;
+    let now = a.ok("GET", &format!("{x}/landings?latest=1"), None).await;
+    a.ok("POST", &format!("{x}/land"), Some(json!({ "message": "two", "files": { "b.txt": { "content": "b\n" } } }))).await;
+    a.ok("POST", "/v1/code/repos/acme/y/land", Some(json!({ "message": "elsewhere", "files": { "c.txt": { "content": "c\n" } } }))).await;
+    let feed = a.ok("GET", &format!("{x}/landings?after={}", now["next"]), None).await;
+    let events = feed["events"].as_array().unwrap();
+    assert_eq!(events.len(), 1, "this repo's one landing since: {feed}");
+    assert!(events[0]["kind"] == "landed" && events[0]["seq"].as_i64() > now["next"].as_i64() && feed["next"].as_i64() >= events[0]["seq"].as_i64(), "{feed}");
+    assert_eq!(a.req("GET", &format!("{x}/landings?latest=1&after=0"), None, None).await.0, StatusCode::BAD_REQUEST);
+}

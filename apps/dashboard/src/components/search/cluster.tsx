@@ -923,6 +923,11 @@ function UsageTab({ cluster, info }: { cluster: SearchCluster; info: SearchInfo 
                   {[
                     { label: "Memory", detail: `${p.usd_per_gib_hour} USD / GiB-hour loaded`, v: c.memory_usd },
                     { label: "Requests", detail: `${p.usd_per_million_requests} USD / million`, v: c.requests_usd },
+                    {
+                      label: "Inference",
+                      detail: `${(u?.inference_cpu_seconds ?? 0).toFixed(1)} CPU-s of the built-in model at ${p.usd_per_vcpu_hour} USD / vCPU-hour`,
+                      v: c.inference_usd,
+                    },
                     { label: "Storage", detail: `S3 at ${p.usd_per_gb_month_s3} USD / GB-month`, v: c.storage_usd },
                   ].map((r) => (
                     <tr key={r.label} className="border-b border-line">

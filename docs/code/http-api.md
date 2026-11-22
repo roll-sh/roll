@@ -90,12 +90,25 @@ POST   /v1/code/repos {owner, name, description?, visibility?, default_branch?, 
 GET    /v1/code/repos/{owner}/{repo} → Repo     an old name answers 301 with Location and {redirect: "owner/new"} (404 to callers who can't read the repo)
 PATCH  /v1/code/repos/{owner}/{repo} {name?, description?, visibility?, land_policy?, required_checks?, default_branch?} → Repo
 DELETE /v1/code/repos/{owner}/{repo} → 204
+GET    /v1/code/search?q=&limit= → {results: [{id /* chg_… | wi_… */, title, url, kind: "change" | "work_item", repo, number, state,
+                                               text /* a snippet */, outside, updated_at}]}
+       changes and work items whose title or text holds `q` (1-200 characters, any case), in the caller's own
+       repos only (an owner's token: its owner's; a review app's: where it's installed; admin: every repo), most
+       recently updated first (`limit` 1-50, default 20); a scoped token keeps only its repos' results.
+       roll's `search` tool (ChatGPT's deep research)
+GET    /v1/code/documents/{id} → {id, title, text, url, metadata: {kind, repo, number, state, author?, branch?,
+                                   work_item?, labels?, priority?, changes?, github_url?}, repo, outside}
+       one change or work item of the caller's own repos, in full; 404 for anything else. roll's `fetch` tool
 ```
 
 ## Reading code
 
 ```
 GET /refs → [{name /* "main" */, changeset, git: sha | null}]
+GET /landings?after=&limit=&latest= → {events: [/* a `landed` event's data */ & {seq, at, kind: "landed"}], next}
+     what landed on the repo after a place in the land log, oldest first (`limit` 1-500, default 100);
+     `next` is past everything read (other repos' landings too); `latest=1` answers no events and the
+     newest place (400 with `after`). MCP Events' `code.landed` reads it.
 GET /tree/{rev}/{*path} → {rev, changeset, path,
       entries: [{name, path, kind: "file" | "dir" | "symlink" | "submodule", mode /* "100644" */, size: number | null,
                  last_change: null | {changeset, message, time}}]}
