@@ -1641,7 +1641,9 @@ static ROWS: &[Row] = &[
     // ones'): the link is a credential, as its QR code is.
     row("GET", "/v1/previews", "previews", R, list("id")).reveals(&["share_url"]),
     row("POST", "/v1/previews", "previews", W, Tgt::Create { project: None, place: None, id_field: "id" }).env(EnvFrom::Fixed("preview")),
-    row("GET", "/v1/previews/events", "previews", R, Tgt::Product),
+    // Each event is its project's: a member, or a token held to some projects, follows theirs
+    // (a deleted preview's event too: its project still resolves).
+    row("GET", "/v1/previews/events", "previews", R, Tgt::List { items: Some("events"), id_field: "project", kind: Some("project") }),
     row("*", "/v1/previews/projects/{project}/", "previews", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/previews/projects/{project}/", "previews", R, one(&["project"], "project")),
     // A project's preview settings carry the variable values every preview's services get
