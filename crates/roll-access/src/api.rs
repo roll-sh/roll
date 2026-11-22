@@ -34,6 +34,7 @@ pub fn router(access: Arc<Access>) -> Router {
         .route("/v1/access/tokens/{id}/temporary/{approval}", axum::routing::delete(forget))
         .route("/v1/access/requests", post(request_access))
         .route("/v1/access/approvals", get(approvals))
+        .route("/v1/access/approvals/decided", get(decided))
         .route("/v1/access/approvals/{id}", get(approval))
         .route("/v1/access/approvals/{id}/approve", post(approve))
         .route("/v1/access/approvals/{id}/deny", post(deny))
@@ -958,6 +959,45 @@ async fn approvals(State(a): S, ext: Extensions, Query(q): Query<ApprovalsQuery>
     Ok(Json(json!(list)))
 }
 
+#[derive(Deserialize)]
+struct DecidedQuery {
+    after: Option<i64>,
+    limit: Option<usize>,
+    /// `1`: no decisions, only the newest place (a reader starting from now).
+    latest: Option<u8>,
+}
+
+/// `GET /v1/access/approvals/decided?after=&limit=&latest=1`: approvals decided after a place, in
+/// the order they were decided (MCP Events' `access.approval`): a connection's own, a person's
+/// tokens', or (the operator) everyone's. `next` is the place for the following call.
+async fn decided(State(a): S, ext: Extensions, Query(q): Query<DecidedQuery>) -> crate::Result<Json<Value>> {
+    let grants: Option<Vec<String>> = match who(&a, &ext)? {
+        Who::Operator => None,
+        Who::Grant(g) => Some(vec![g.id.to_string()]),
+        Who::User(u) => Some(grants_of(&a, &u.user).await?.into_iter().collect()),
+    };
+    match (q.latest, q.after) {
+        (Some(1), None) => {
+            let next = blocking(a, |a| a.store.latest_decided()).await?;
+            return Ok(Json(json!({ "events": [], "next": next })));
+        }
+        (Some(1), Some(_)) => return Err(Error::BadRequest("latest=1 starts from now: leave out after".into())),
+        (Some(_), _) => return Err(Error::BadRequest("latest is 1 or left out".into())),
+        (None, _) => {}
+    }
+    let (after, limit) = (q.after.unwrap_or(0), q.limit.unwrap_or(100));
+    let rows = blocking(a, move |a| a.store.decided_after(after, limit, grants.as_deref())).await?;
+    let next = rows.last().map_or(after, |(seq, _)| *seq);
+    // What a decision says, and nothing a request carried (its arguments stay on the approval).
+    let events: Vec<Value> = rows
+        .into_iter()
+        .map(|(seq, x)| {
+            json!({ "seq": seq, "at": x.decided_at, "id": x.id, "state": x.state, "grant_id": x.grant_id, "product": x.product, "action": x.action, "resource": x.resource, "tool": x.tool, "summary": x.summary, "decided_by": x.decided_by, "reason": x.reason })
+        })
+        .collect();
+    Ok(Json(json!({ "events": events, "next": next })))
+}
+
 /// Who may decide an approval: the operator (or an admin), and a user for their own tokens'. A
 /// token never decides one, not even its own.
 async fn may_decide(a: &Arc<Access>, ext: &Extensions, id: &str) -> crate::Result<String> {
@@ -1472,7 +1512,12 @@ async fn client(State(a): S, ext: Extensions, Path(id): Path<String>) -> crate::
         }
     };
     let c = c.ok_or_else(|| Error::NotFound("no such client".into()))?;
-    Ok(Json(json!(c)))
+    let mut out = json!(c);
+    // The consent screen says so before a person fills it in.
+    if !a.policy_now().allows_client(&c) {
+        out["not_allowed"] = json!(crate::evaluate::CLIENT_NOT_ALLOWED);
+    }
+    Ok(Json(out))
 }
 
 #[cfg(test)]

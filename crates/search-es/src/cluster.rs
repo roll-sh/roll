@@ -121,6 +121,12 @@ pub struct ClusterConfig {
     /// The cluster's id in roll's catalog (`srch_…`), when it has one: how it names itself to
     /// `links` and to [`Self::secret_refs`] (a name can be reused after a delete).
     pub catalog_id: Option<String>,
+    /// Who the cluster belongs to, when the host knows: what node-wide fairness counts by
+    /// (connector syncs: [`crate::xpack::entsearch::sync`]). `None`: the cluster counts alone.
+    pub owner: Option<String>,
+    /// The pool of connector sync slots this cluster takes from (`None`: the process's, shared by
+    /// every cluster on the node; tests give clusters a pool of their own).
+    pub connector_slots: Option<std::sync::Arc<crate::xpack::entsearch::sync::slots::Slots>>,
     /// The parent's catalog id, on a new branch's first load only: what it inherited from the
     /// parent is marked then, so its jobs don't act on the parent's outside storage or run twice
     /// ([`crate::branch`]). Later loads, and branches made before marking existed, have none:
@@ -159,6 +165,8 @@ impl ClusterConfig {
             links: None,
             item_charge: None,
             catalog_id: None,
+            owner: None,
+            connector_slots: None,
             branch_of: None,
             file_service_tokens: false,
             audit: None,

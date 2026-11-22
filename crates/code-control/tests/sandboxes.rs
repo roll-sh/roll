@@ -986,7 +986,8 @@ impl SandboxBackend for Instances {
 
 /// Values copied from roll secrets go to a sandbox's code only while their copier may reveal
 /// them: once they're taken off the project, the next start is without them, says so, and keeps
-/// the rest of what the sandbox was made with.
+/// the rest of what the sandbox was made with. Once their account is disabled, a running sandbox
+/// stops at once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_removed_copiers_sandbox_starts_without_the_values() {
     let instances = Arc::new(Instances::default());
@@ -1014,10 +1015,13 @@ async fn a_removed_copiers_sandbox_starts_without_the_values() {
     w.until(&id, "running", status_is("running")).await;
     assert_eq!(env("DATABASE_URL").as_deref(), Some("postgres://dev-only"));
 
-    // Ada is taken off the project: the owner's next start is without what she copied.
+    // Ada's account is disabled: rolld's offboarding hook stops the sandbox at once (only the
+    // running ones she copied into, once), and the owner's next start is without what she copied.
     secrets.removed.store(true, std::sync::atomic::Ordering::SeqCst);
-    w.req("POST", &stop, None).await;
+    assert_eq!(w.a.code.stop_sandboxes_copied_by(|by| Ok(by == "usr_bob")).await.unwrap(), 0);
+    assert_eq!(w.a.code.stop_sandboxes_copied_by(|by| Ok(by == "usr_ada")).await.unwrap(), 1);
     w.until(&id, "stopped", status_is("stopped")).await;
+    assert_eq!(w.a.code.stop_sandboxes_copied_by(|by| Ok(by == "usr_ada")).await.unwrap(), 0, "already stopping");
     let (s, v) = w.req("POST", &start, None).await;
     assert_eq!(s, StatusCode::OK, "{v}");
     let s = w.until(&id, "running without them", |s| s["status"] == "running" && s["secrets_dropped"].is_string()).await;

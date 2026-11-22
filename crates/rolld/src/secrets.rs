@@ -1460,12 +1460,12 @@ impl apps_control::integrations::SecretSource for ForApps {
             // Who closed it, else (before that was kept) the project's owner; the operator only
             // for the operator's own projects, never as the maker of a person's.
             // Named as no one (`closed_by: null`, roll previews' rules saved by the operator): the
-            // keys bound to hosts are withheld.
+            // keys bound to hosts are withheld before anything of them is decrypted
+            // (`values_without_bound`), and so is a key whose value references one.
             if asked.as_deref() == Some("") {
-                let v = secrets.values_for(&project, &env, "/", true, Some(&format!("app:{service}")), false, &roll_secrets::Caller::consumer(&format!("app:{service}")))?;
-                let bound: std::collections::HashSet<String> = secrets.secrets(&project, &env, "/", &roll_secrets::Caller::consumer(&format!("app:{service}")))?.into_iter().filter(|s| s.hosts.is_some()).map(|s| s.key).collect();
+                let v = secrets.values_without_bound(&project, &env, "/", &format!("app:{service}"), false, &roll_secrets::Caller::consumer(&format!("app:{service}")))?;
                 let sensitive: std::collections::HashSet<String> = v.sensitive.into_iter().collect();
-                let vars = v.values.into_iter().filter(|(k, _)| !bound.contains(k)).map(|(name, value)| apps_control::integrations::SecretVar { binding: None, linked: false, sensitive: sensitive.contains(&name), plain: false, value: value.expose().to_string(), name }).collect();
+                let vars = v.values.into_iter().map(|(name, value)| apps_control::integrations::SecretVar { binding: None, linked: false, sensitive: sensitive.contains(&name), plain: false, value: value.expose().to_string(), name }).collect();
                 return Ok(apps_control::integrations::ClosedSecrets { vars, notice: Some(format!("keys bound to hosts withheld: no one who may reveal {env} closed it")) });
             }
             let maker = match asked {
@@ -1495,12 +1495,12 @@ impl apps_control::integrations::SecretSource for ForApps {
                         Some((s.key, h.join(",")))
                     })
                     .collect();
-                let v = secrets.values_for(&project, &env, "/", true, Some(&format!("app:{service}")), false, &caller)?;
+                // The rest without decrypting a bound key, or resolving a reference to one.
+                let v = secrets.values_without_bound(&project, &env, "/", &format!("app:{service}"), false, &caller)?;
                 let (linked, sensitive, plain): (std::collections::HashSet<String>, std::collections::HashSet<String>, std::collections::HashSet<String>) = (v.linked.into_iter().collect(), v.sensitive.into_iter().collect(), v.plain.into_iter().collect());
                 let mut vars: Vec<apps_control::integrations::SecretVar> = v
                     .values
                     .into_iter()
-                    .filter(|(k, _)| !bound.contains_key(k))
                     .map(|(name, value)| apps_control::integrations::SecretVar { binding: None, linked: linked.contains(&name), sensitive: sensitive.contains(&name), plain: plain.contains(&name), value: value.expose().to_string(), name })
                     .collect();
                 vars.extend(bound.into_iter().map(|(name, hosts)| apps_control::integrations::SecretVar { binding: Some(hosts), linked: false, sensitive: false, plain: false, value: "rlph_(made at deploy)".into(), name }));
@@ -1515,10 +1515,9 @@ impl apps_control::integrations::SecretSource for ForApps {
                 // revoked or narrowed): the keys bound to hosts are withheld (never their values
                 // instead), the rest read as they would be, and said. Any other refusal surfaces.
                 Err(roll_secrets::Error::MakerUnreachable(why)) => {
-                    let bound: std::collections::HashSet<String> = secrets.secrets(&project, &env, "/", &caller)?.into_iter().filter(|s| s.hosts.is_some()).map(|s| s.key).collect();
-                    let v = secrets.values_for(&project, &env, "/", true, Some(&format!("app:{service}")), false, &caller)?;
+                    let v = secrets.values_without_bound(&project, &env, "/", &format!("app:{service}"), false, &caller)?;
                     let sensitive: std::collections::HashSet<String> = v.sensitive.into_iter().collect();
-                    let vars = v.values.into_iter().filter(|(k, _)| !bound.contains(k)).map(|(name, value)| apps_control::integrations::SecretVar { binding: None, linked: false, sensitive: sensitive.contains(&name), plain: false, value: value.expose().to_string(), name }).collect();
+                    let vars = v.values.into_iter().map(|(name, value)| apps_control::integrations::SecretVar { binding: None, linked: false, sensitive: sensitive.contains(&name), plain: false, value: value.expose().to_string(), name }).collect();
                     let notice = format!("keys bound to hosts withheld: {maker}, who closed {env}, can no longer reveal it ({why}); whoever may sets its egress again to turn them back on");
                     return Ok(apps_control::integrations::ClosedSecrets { vars, notice: Some(notice) });
                 }
@@ -2205,7 +2204,7 @@ mod tests {
     fn only_roll_mcps_guard_keeps_the_guard_header() {
         let req = || super::Request::builder().uri("/v1/secrets/projects/p/leaks").header("x-roll-guard", "1").body(super::Body::empty()).unwrap();
         assert!(super::keep_guard_header(req()).headers().get("x-roll-guard").is_none(), "a caller's own header is dropped");
-        let call = |tool: &str| roll_access::evaluate::McpCall { tool: tool.into(), args: Arc::new(json!({})), ip: None, elicits: false, client: None, quiet: false };
+        let call = |tool: &str| roll_access::evaluate::McpCall { tool: tool.into(), args: Arc::new(json!({})), ip: None, elicits: false, client: None, quiet: false, unattended: false };
         let mut other = req();
         other.extensions_mut().insert(call("secrets_scan"));
         assert!(super::keep_guard_header(other).headers().get("x-roll-guard").is_none(), "another tool's isn't the guard");
@@ -2756,7 +2755,8 @@ mod tests {
     }
 
     /// A sandbox gets a project's environment only as far as whoever creates it may reveal it in
-    /// roll secrets: managing the code owner isn't enough, and the audit row names them.
+    /// roll secrets: managing the code owner isn't enough, and the audit row names them. Neither a
+    /// sandbox nor a check gets a new project's production.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_sandbox_gets_an_environment_only_for_someone_who_may_reveal_it() {
         use code_control::SecretEnv;
@@ -2814,6 +2814,11 @@ mod tests {
         assert_eq!((got.by.as_str(), got.values), ("token:tok_mine", vec![("DB_URL".to_string(), "postgres://dev".to_string())]));
         let got = code.for_owner("acme", "shop", "development", "sandbox:sbx_3", code_control::Asker { operator: true, user: None, grant: None }).await.unwrap();
         assert_eq!(got.by, "operator");
+        // Never production as a project starts (protected, nobody set it so), not even the
+        // operator's copy, and not for a check naming it.
+        let protected = |e: Option<anyhow::Error>| e.is_some_and(|e| e.to_string().contains("production is protected"));
+        assert!(protected(code.for_owner("acme", "shop", "production", "sandbox:sbx_4", code_control::Asker { operator: true, user: None, grant: None }).await.err()));
+        assert!(protected(code.resolve(project.clone(), "production", "check:acme/api#deploy", None).await.err()));
         let audit = secrets.audit(&project, roll_secrets::AuditFilter::default(), &roll_secrets::Caller::operator()).unwrap();
         // The read is the person's or token's own, for the sandbox.
         let reads: Vec<(&str, &str)> = audit.iter().filter(|a| a.summary.contains("sandbox:")).map(|a| (a.actor.as_str(), a.summary.as_str())).collect();

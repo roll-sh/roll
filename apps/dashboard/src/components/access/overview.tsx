@@ -790,6 +790,7 @@ function PolicyPanel() {
         </label>
       </div>
       <AgentAsks rules={p.agents_ask ?? []} save={(agents_ask) => save({ ...p, agents_ask })} />
+      <OAuthClients list={p.oauth_clients ?? []} save={(oauth_clients) => save({ ...p, oauth_clients })} />
       <ErrorNote error={error} />
     </div>
   );
@@ -859,6 +860,50 @@ function AgentAsks({ rules, save }: { rules: AskRule[]; save: (next: AskRule[]) 
         <button onClick={() => setAdding(true)} className="text-accent hover:underline">
           Make agents ask before…
         </button>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The OAuth clients that may connect (the policy's oauth_clients): Atlassian's allowlist of AI
+ * clients. Empty: any client a person consents to.
+ */
+function OAuthClients({ list, save }: { list: string[]; save: (next: string[]) => Promise<void> }) {
+  const [entry, setEntry] = useState("");
+  const add = async () => {
+    const e = entry.trim();
+    if (!e || list.includes(e)) return;
+    await save([...list, e]);
+    setEntry("");
+  };
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-[12px] text-muted">
+      <span>OAuth clients that may connect:</span>
+      {list.length === 0 && <span className="text-subtle">any a person allows</span>}
+      {list.map((e) => (
+        <span key={e} className="flex items-center gap-1 rounded-md border border-line px-2 py-0.5 font-mono">
+          {e}
+          <button onClick={() => void save(list.filter((x) => x !== e))} className="text-subtle hover:text-fg" aria-label={`Remove ${e}`}>
+            ×
+          </button>
+        </span>
+      ))}
+      <input
+        value={entry}
+        onChange={(e) => setEntry(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && void add()}
+        placeholder="claude.ai, localhost, device, cursor:"
+        className={`${input} w-56 font-mono text-[12px]`}
+        aria-label="An OAuth client that may connect"
+      />
+      {entry.trim() && (
+        <button onClick={() => void add()} className={primary}>
+          Add
+        </button>
+      )}
+      {list.length > 0 && !list.includes("localhost") && (
+        <span className="w-full text-subtle">Without localhost, apps on people&apos;s computers can&apos;t connect: roll login, Claude Code, Cursor.</span>
       )}
     </div>
   );

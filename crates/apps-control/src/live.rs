@@ -625,6 +625,8 @@ pub struct EnvLive {
     /// Deployments asked for by their own URL (not the active one): their templates, one
     /// instance each at most, gone a minute after their last request.
     viewed: Mutex<HashMap<String, (Arc<Template>, Instant)>>,
+    /// Instances out of rotation still finishing their requests, and each one's deployment.
+    draining: Arc<Mutex<HashMap<String, String>>>,
     /// Requests waiting on a wake.
     waiters: AtomicU32,
     /// A lease ended: a request queued at the hard limit ([`crate::model::Run::queue_s`]) looks again.
@@ -700,6 +702,7 @@ impl EnvLive {
             routed: AtomicU64::new(0),
             served: Mutex::new(HashMap::new()),
             viewed: Mutex::new(HashMap::new()),
+            draining: Default::default(),
             waiters: AtomicU32::new(0),
             freed: Arc::new(tokio::sync::Notify::new()),
             failed: Mutex::new(None),
@@ -758,7 +761,7 @@ impl EnvLive {
 
     /// `deployment`'s template while it still serves (the active one, the canary, or one asked
     /// for by its own URL).
-    fn serving(&self, deployment: &str) -> Option<Arc<Template>> {
+    pub(crate) fn serving(&self, deployment: &str) -> Option<Arc<Template>> {
         if let Some((c, _)) = self.canary.lock().as_ref()
             && c.deployment == deployment
         {
@@ -1667,7 +1670,8 @@ impl EnvLive {
     /// doesn't use up another's time.
     fn drain(&self, old: Vec<Arc<Inst>>, window: Duration) {
         for i in old {
-            let (runtime, released) = (self.runtime.clone(), self.released.clone());
+            let (runtime, released, draining) = (self.runtime.clone(), self.released.clone(), self.draining.clone());
+            draining.lock().insert(i.name.clone(), i.deployment.clone());
             tokio::spawn(async move {
                 let until = Instant::now() + window;
                 while i.in_flight() > 0 && Instant::now() < until {
@@ -1676,13 +1680,19 @@ impl EnvLive {
                 if released.load(Ordering::SeqCst) {
                     // The next owner's to stop: this node only forgets it.
                     runtime.release(&i.name).await;
-                    return;
+                } else {
+                    let grace = until.saturating_duration_since(Instant::now()).max(Duration::from_secs(1));
+                    let _ = runtime.stop(&i.name, grace).await;
+                    runtime.remove(&i.name).await;
                 }
-                let grace = until.saturating_duration_since(Instant::now()).max(Duration::from_secs(1));
-                let _ = runtime.stop(&i.name, grace).await;
-                runtime.remove(&i.name).await;
+                draining.lock().remove(&i.name);
             });
         }
+    }
+
+    /// The deployments whose instances are still draining here.
+    pub fn draining(&self) -> Vec<String> {
+        self.draining.lock().values().cloned().collect()
     }
 
     /// A gradual rollout begins: the new deployment's healthy instances join the active one's,
@@ -2680,6 +2690,18 @@ impl EnvLive {
         let secs = c.began.elapsed().as_secs_f64();
         self.meter.lock().sample(now_ms(), secs * c.cpu * 0.5, (c.memory_mb as u64) << 20, secs, 1);
         self.runtime.remove(&c.name).await;
+    }
+
+    /// A sandbox's container ([`crate::sandboxes`]) made from `tpl` as `name` and started; gone
+    /// again if it didn't start.
+    pub(crate) async fn start_sandbox(&self, tpl: &Template, name: String) -> anyhow::Result<()> {
+        let inst = self.make_run(tpl, Some(name)).await?;
+        if let Err(e) = self.runtime.start(&inst.name, self.log.instance(&inst.name, &inst.deployment)).await {
+            self.runtime.remove(&inst.name).await;
+            return Err(e);
+        }
+        self.runtime.settle(&inst.name).await;
+        Ok(())
     }
 }
 
