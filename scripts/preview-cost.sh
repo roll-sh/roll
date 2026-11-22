@@ -164,6 +164,8 @@ NUM_MASK=$(curl -s -o /tmp/roll-previews-nummask.json -w '%{http_code}' -X PUT "
 # preview's service gets the branch's under that name.
 LINKED=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "http://$API/v1/secrets/projects/$PRJ/environments/development/secrets/STAGING_PGPASS" -H 'content-type: application/json' -d "{\"link\":{\"kind\":\"postgres\",\"ref\":\"$PG\",\"field\":\"password\",\"mode\":\"live\"}}")
 case "$LINKED" in 200|201) ;; *) echo "linking development's STAGING_PGPASS to $PG's password: HTTP $LINKED"; exit 1;; esac
+# Where a follower of previews' events (roll MCP's Events) starts: what comes from now on.
+EV0=$(api GET "/v1/previews/events?latest=1" | jq_ "d['next']")
 say "open a change"
 T0=$(now_ms)
 CHG=$(api POST /v1/code/repos/acme/web/changes '{"title":"New page","message":"New page","base":"main","files":{"index.html":{"content":"preview of change 1"},'"$OPENAPI_CHG"'}}' | jq_ "d['id']")
@@ -193,6 +195,9 @@ say "preview $PV ready in $((T1 - T0)) ms: $(echo "$P" | jq_ "[(r['kind'], r['re
 STEPS=$(echo "$P" | jq_ "(lambda t: ' · '.join('%s %d ms' % (s['step'], s['at'] - (t['steps'][i - 1]['at'] if i else t['started_at'])) for i, s in enumerate(t['steps']) if s['step'] != 'ready'))(d['timeline']) if d.get('timeline') else ''")
 case "$STEPS" in "data "*" · setup "*" · deploy "*" · checks "*) ;; *) echo "the preview's timeline should name each step in order: '$STEPS'"; exit 1;; esac
 say "its timeline: $STEPS"
+# A follower hears it made, then up, in order.
+EVENTS=$(api GET "/v1/previews/events?after=$EV0" | jq_ "' → '.join(e['kind'] for e in d['events'] if e['preview'] == '$PV')")
+case "$EVENTS" in "created → ready"*) ;; *) echo "a follower of the events should hear the preview made, then up: '$EVENTS'"; exit 1;; esac
 
 say "write into the preview's branches: 1 MiB of objects, 1,000 keys"
 BRANCH_BUCKET=$(echo "$P" | jq_ "[r['ref'] for r in d['resources'] if r['kind']=='bucket'][0]")
@@ -1052,6 +1057,7 @@ cat <<EOF
 | Change opened → preview ready ($(echo "$P" | jq_ "len(d['resources'])") branches made, the service deployed) | $((T1 - T0)) ms |
 | The preview's bucket key: its branch / production's bucket | $OWN_LS / $PARENT_LS |
 | … step by step (its timeline: data, setup, deploy, checks) | $STEPS |
+| What a follower of the events hears (\`GET /v1/previews/events\`, roll MCP's Events) | $EVENTS |
 | Search: a sync of the parent's connector on the parent / asked of the branch (inherited, waits for adoption) | $PSTATE / $BSTATE |
 | Parent bucket bytes / the branch's own bytes after writing 1 MiB / objects the branch sees | $PARENT_OBJECTS / $BRANCH_OBJECTS / $BRANCH_SEES |
 | NoSQL branch's mask on app.users.email / masks on the parent | $MASKED / $PARENT_MASKED |
@@ -1068,7 +1074,7 @@ cat <<EOF
 | Visual review under a 5% visual threshold | $UNDER |
 | X-Robots-Tag on the service's page / on the 401 without the link | $ROBOTS / $ROBOTS_LOCKED |
 | Its request log through roll (count; newest; any query kept) | $REQS |
-| What its running services use (`…/metrics`) | $METRICS |
+| What its running services use (\`…/metrics\`) | $METRICS |
 | The release's time on the preview's data (at its head) / on the change | $RELEASE / $CHG_RELEASE ms |
 | The preview's link as a QR code (PNG, no-store) | $QR |
 | Mail: the provider's key in the service / sent as the preview, caught | gone / $MAIL |

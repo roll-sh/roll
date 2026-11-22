@@ -429,7 +429,9 @@ Elasticsearch-flavor.
   `seeds`) naming a cluster (its name, or its endpoint `<name>.<domain>[:port]`) works too, held
   to the same owner rule, but connects only once the remote has credentials.
 - **Credentials** are a secure setting: sealed under `ROLL_SECRET_KEY` and bound to their row
-  (cluster, alias, remote) in the catalog (`search_remotes`), never returned (`_remote/info`
+  (cluster, alias, remote) in the catalog (`search_remotes`). A node without the key refuses an
+  `api_key` someone pasted (it would be stored in the clear) and keeps one roll made as made
+  (local development); a node that gains the key seals those rows as it starts. Never returned (`_remote/info`
   shows `cluster_credentials: "::es_redacted::"`). The remote authorizes each request with the
   key's access intersected with the local user's `remote_indices` privileges for the alias (the
   cluster's own password is a superuser: everything the key allows), as Elasticsearch does.
@@ -1353,9 +1355,7 @@ deterministic (#396).
    Overview of a cluster with no indices or from the Indices tab, then three queries run in place
    with Open in Console, copy as curl, JavaScript or Python reading `$ELASTICSEARCH_API_KEY` as the
    guides do; a 30-day `data` key made in the panel goes into the copied code, shown once). Left:
-   a sample dataset for RAG (passages with `semantic_text` on E5); the Overview's document count
-   falls back to the metered figure while any index is closed (a key's security index right after
-   it's made), so it can read 0 until metering's next sample; and
+   a sample dataset for RAG (passages with `semantic_text` on E5); and
    what writing the guides found: an API key's `encoded` value works only at the cluster's own
    host, so clients behind a shared address re-encode it as `<id>@<cluster>:<key>`; a `data` key
    can't post click events, so an app tracking clicks needs a second key; a `semantic_text` field

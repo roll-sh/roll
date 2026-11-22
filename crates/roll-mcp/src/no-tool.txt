@@ -46,7 +46,7 @@ POST /v1/nosql/databases/{id}/flush                                            t
 POST /v1/nosql/databases/{id}/imports                                          the operator's (an SSTable backup import from storage the operator holds)
 POST /v1/nosql/databases/{id}/password                                         answers or sets a credential
 POST /v1/nosql/databases/{id}/unload                                           the operator's (health, migrations, process control)
-GET /v1/previews/events                                                        an MCP Events feed (previews.event): events/poll and webhooks read it; previews_list and previews_get are the tools
+GET /v1/previews/events                                                        an MCP Events feed (previews.event): events/poll, events/stream and webhooks read it; a tool answers once
 DELETE /v1/previews/projects/{project}/bypass                                  answers or sets a credential
 GET /v1/previews/projects/{project}/bypass                                     answers or sets a credential
 POST /v1/previews/projects/{project}/bypass                                    answers or sets a credential

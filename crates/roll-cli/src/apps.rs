@@ -613,7 +613,7 @@ pub enum AppsCmd {
         instance: Option<String>,
     },
     /// The environment's private network into your own (Cloud Run's VPC egress, Fly's
-    /// WireGuard): `--secret roll://production/WG --route db.corp.internal=10.0.3.4:5432` sets it
+    /// WireGuard): `--secret roll://production/WG --route db.acme.corp=10.0.3.4:5432` sets it
     /// (the WireGuard config is the secret, read as you; each route a name the app connects to
     /// and a host:port in your network), `--remove` takes it away; alone, it shows it. Admin.
     PrivateNetwork {
@@ -882,6 +882,12 @@ pub enum AppsCmd {
         /// Prefix the variables (`ORDERS` → `ORDERS_DATABASE_URL`).
         #[arg(long)]
         prefix: Option<String>,
+        /// A search link's key only for these indices (names or patterns, repeated).
+        #[arg(long = "index", value_name = "NAME")]
+        indices: Vec<String>,
+        /// A search link's key: `read`, or `append` (create documents on exact names).
+        #[arg(long)]
+        access: Option<String>,
         #[command(flatten)]
         target: Target,
     },
@@ -4162,10 +4168,17 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Link { kind, r#ref, prefix, target } => {
+        AppsCmd::Link { kind, r#ref, prefix, indices, access, target } => {
             let svc = service(api, &target).await?;
             let path = format!("/v1/apps/services/{}/links/{}/{}", enc(&s(&svc["id"])), enc(&kind), enc(&r#ref));
-            api.call(reqwest::Method::PUT, &path, Some(json!({ "prefix": prefix }))).await?
+            let mut body = json!({ "prefix": prefix });
+            if !indices.is_empty() {
+                body["indices"] = json!(indices);
+            }
+            if let Some(a) = access {
+                body["access"] = json!(a);
+            }
+            api.call(reqwest::Method::PUT, &path, Some(body)).await?
         }
         AppsCmd::Unlink { kind, r#ref, target } => {
             let svc = service(api, &target).await?;

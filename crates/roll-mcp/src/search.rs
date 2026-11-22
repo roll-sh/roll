@@ -20,14 +20,54 @@ const DEFAULT_FOUND: usize = 8;
 
 /// The connection's `?tools=` (or `X-MCP-Tools`): `search`, or `all` (the default). Anything else
 /// is an error, as `?readonly=` is.
-pub fn asked(uri: &axum::http::Uri, headers: &axum::http::HeaderMap) -> Result<bool, String> {
-    let from_query = uri.query().and_then(|q| url::form_urlencoded::parse(q.as_bytes()).find(|(k, _)| k == "tools").map(|(_, v)| v.into_owned()));
-    let Some(v) = from_query.or_else(|| headers.get("x-mcp-tools").and_then(|v| v.to_str().ok()).map(str::to_string)) else { return Ok(false) };
+pub fn asked(uri: &axum::http::Uri, headers: &axum::http::HeaderMap) -> Result<(bool, Pick), String> {
+    let param = |key: &str, header: &str| {
+        uri.query().and_then(|q| url::form_urlencoded::parse(q.as_bytes()).find(|(k, _)| k == key).map(|(_, v)| v.into_owned())).or_else(|| headers.get(header).and_then(|v| v.to_str().ok()).map(str::to_string))
+    };
+    let exclude = match param("exclude_tools", "x-mcp-exclude-tools") {
+        Some(v) => names(&v, "exclude_tools")?,
+        None => Vec::new(),
+    };
+    let Some(v) = param("tools", "x-mcp-tools") else { return Ok((false, Pick { only: None, exclude })) };
     match v.trim().to_ascii_lowercase().as_str() {
-        "search" => Ok(true),
-        "all" | "" => Ok(false),
-        other => Err(format!("tools={other:?}: search (list a search tool instead of every tool) or all")),
+        "search" => Ok((true, Pick { only: None, exclude })),
+        "all" | "" => Ok((false, Pick { only: None, exclude })),
+        _ => Ok((false, Pick { only: Some(names(&v, "tools")?), exclude })),
     }
+}
+
+/// The tools a connection picks or drops by name (GitHub's `X-MCP-Tools` list and
+/// `X-MCP-Exclude-Tools`; dropping wins): what it's shown and may call, for context size, never
+/// for permission (its token's rules decide every call).
+#[derive(Clone, Debug, Default)]
+pub struct Pick {
+    pub only: Option<Vec<String>>,
+    pub exclude: Vec<String>,
+}
+
+impl Pick {
+    pub fn keeps(&self, name: &str) -> bool {
+        !self.exclude.iter().any(|e| e == name) && self.only.as_ref().is_none_or(|o| o.iter().any(|x| x == name))
+    }
+
+    /// Whether it picks or drops any.
+    pub fn picks(&self) -> bool {
+        self.only.is_some() || !self.exclude.is_empty()
+    }
+
+    /// The names it gives that aren't tools (a typo would hide a tool silently otherwise).
+    pub fn unknown<'a>(&'a self, known: &[String]) -> Vec<&'a str> {
+        self.only.iter().flatten().chain(&self.exclude).filter(|n| !known.contains(n)).map(String::as_str).collect()
+    }
+}
+
+/// A comma list of tool names, at most 100.
+fn names(v: &str, what: &str) -> Result<Vec<String>, String> {
+    let list: Vec<String> = v.split(',').map(str::trim).filter(|n| !n.is_empty()).map(str::to_string).collect();
+    if list.len() > 100 || list.iter().any(|n| n.len() > 64 || !n.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')) {
+        return Err(format!("{what}: search, all, or a comma list of tool names (at most 100)"));
+    }
+    Ok(list)
 }
 
 fn is_read_only(t: &Value) -> bool {

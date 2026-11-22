@@ -22,7 +22,7 @@ use bytes::Bytes;
 use search_codec::points::encode;
 use search_codec::stored::OwnedStoredValue;
 use search_codec::vectors::multi::MultiElement;
-use search_index::doc::{DocValue, IndexableDoc, IndexableField, PreToken, StoredField};
+use search_index::doc::{DocValue, IndexableDoc, IndexableField, StoredField};
 use std::sync::Arc;
 
 /// What a document carries besides its fields.
@@ -173,32 +173,8 @@ impl<'t> Writer<'t> {
             if !f.index {
                 continue;
             }
-            match f.position_gap {
-                Some(gap) if values.len() > 1 => {
-                    // A field-level gap: analyze value by value, then join with the field's gap.
-                    let mut tokens: Vec<PreToken> = Vec::new();
-                    let mut offset_base = 0u32;
-                    let mut first = true;
-                    for v in &values {
-                        let mut at_start = true;
-                        let mut last_end = 0;
-                        a.analyze(v, &mut |t| {
-                            let mut inc = t.position_increment;
-                            if at_start && !first {
-                                inc = inc.saturating_add(gap.max(0) as u32);
-                            }
-                            at_start = false;
-                            tokens.push(PreToken::new(Bytes::copy_from_slice(t.term.as_bytes()), inc, offset_base + t.start_offset, offset_base + t.end_offset));
-                            last_end = t.end_offset;
-                        });
-                        let len16 = v.encode_utf16().count() as u32;
-                        offset_base += len16.max(last_end) + a.offset_gap();
-                        first = false;
-                    }
-                    d.fields.push(IndexableField::Tokens { field: n, tokens });
-                }
-                _ => d.fields.push(IndexableField::Text { field: n, analyzer: a, values }),
-            }
+            // A field's own `position_increment_gap` is in its analyzer (`fields.rs`).
+            d.fields.push(IndexableField::Text { field: n, analyzer: a, values });
         }
     }
 
