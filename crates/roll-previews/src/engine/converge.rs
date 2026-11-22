@@ -235,7 +235,7 @@ impl Engine {
             Some(branch) if res.state != ResourceState::Ready => {
                 self.mask(&r.id, &b, &key, branch, s).await?;
                 let fresh = self.store.released(&r.id)?.is_none() && (s.seed.is_none() || self.store.seed_needed(&r.id)?);
-                self.keep_base(&r.id, &b, &res, branch, s, fresh).await?;
+                self.keep_base(&r.id, &b, &res, branch, s, fresh || true).await?;
                 self.store.set_resource(&r.id, res.kind, &res.parent, |x| {
                     x.state = ResourceState::Ready;
                     x.error = None;

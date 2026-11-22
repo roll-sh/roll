@@ -906,8 +906,9 @@ async fn a_search_branch_masked_again_in_place_keeps_the_schema_it_was_made_with
     e.code.open(change("chg_sm", 8));
     e.engine.pass().await.unwrap();
     let p = e.engine.store.row_by_change("chg_sm").unwrap().unwrap();
+    // (Headed: the project's Postgres has a schema too.)
     let shown = |e: &Env| e.engine.store.view(e.engine.store.row(&p.id).unwrap()).unwrap().schema_changes;
-    assert_eq!(shown(&e).as_deref(), Some(&["+ field logs.price float".to_string()][..]));
+    assert_eq!(shown(&e).as_deref(), Some(&["# search:srch_logs".to_string(), "+ field logs.price float".to_string()][..]));
     // The rules change: the branch is masked again in place, after the change's release wrote its
     // field there. That's no base: the next head still shows the field as the change's.
     *e.search.branch_now.lock() = Some(vec!["index logs".into(), "field logs.price float".into()]);
@@ -916,7 +917,7 @@ async fn a_search_branch_masked_again_in_place_keeps_the_schema_it_was_made_with
     e.code.edit("chg_sm", |c| c.head = "cs_8b".into());
     e.engine.pass().await.unwrap();
     assert!(e.search.masks.lock().len() >= 2, "masked again: {:?}", e.search.masks.lock());
-    assert_eq!(shown(&e).as_deref(), Some(&["+ field logs.price float".to_string()][..]));
+    assert_eq!(shown(&e).as_deref(), Some(&["# search:srch_logs".to_string(), "+ field logs.price float".to_string()][..]));
 }
 
 #[tokio::test]
