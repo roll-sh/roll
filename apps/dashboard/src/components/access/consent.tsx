@@ -88,6 +88,7 @@ function Ask({ req }: { req: AuthorizeRequest }) {
     value: [client, proposal],
   } = loaded;
   if (!client.redirect_uris.includes(req.redirect_uri)) return <Problem text="The redirect isn't one this client registered." />;
+  if (client.not_allowed) return <Problem title={`${client.name} can't connect`} text={`${client.not_allowed}.`} next="" />;
   const back = new URL(req.redirect_uri);
   if (proposal && proposal.connection.client_id === client.id && !fresh) {
     return (

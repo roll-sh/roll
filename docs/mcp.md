@@ -381,6 +381,16 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
   (2025-11-25: the `client_id` is an https URL whose JSON names it). A document is fetched through
   roll's private-address guard (`roll-net`), without redirects, in 5 seconds, at most 64 KiB, and
   at most once an hour; it must name itself, list valid redirect URIs, and be a public client.
+- roll's policy may list the clients that connect (`oauth_clients`; Atlassian's admins allowlist AI
+  clients): a host (`claude.ai`, `*.example.com`), an exact `https://` URL, `localhost`, an app's
+  scheme (`cursor:`) or `device`. A metadata-document client matches by its URL or host; a
+  registered one only by where every one of its redirects goes (its name is anyone's to choose,
+  its redirects are where its codes go); a device client only by `device`. A client the list leaves
+  out isn't offered consent (the screen says why), can't start a device sign-in, trade a code or a
+  refresh token (refused before either is spent), or use the connection it has (`401
+  invalid_token` saying so): nothing is revoked, so allowing it again brings the connection back.
+  Machine clients (client credentials, workload identity, ID-JAG) are an admin's own setup and
+  aren't held to it.
 
 **A person's own connection.** A token or OAuth client of a person who isn't an admin reaches
 what their account does (`roll_access::USER_REACH`, held to rolld's gate by its `auth::tests`):
@@ -1128,13 +1138,15 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Operator policy for agent connections (this PR: forced modes and always-ask; allowed clients
-   next).** Stripe asks a person before refunds whatever the key allows, PlanetScale sets MCP query
-   access org-wide, Atlassian allowlists OAuth clients. roll's policy now has `agents_ask` (requests
-   an agent makes through roll's MCP server that ask a person first, whatever its token allows; CI
-   calling the API isn't held) and `mcp_lockdown` / `mcp_read_only` (every token's and OAuth
-   connection's MCP held to lockdown or reading, whatever its URL asks), in the access page's
-   policy panel. Next in this item: allowed OAuth clients (redirect hosts or metadata-document URLs).
+1. **Operator policy for agent connections (#678 landed forced modes and always-ask; this PR:
+   allowed OAuth clients).** Stripe asks a person before refunds whatever the key allows,
+   PlanetScale sets MCP query access org-wide, Atlassian allowlists OAuth clients. roll's policy has
+   `agents_ask` (requests an agent makes through roll's MCP server that ask a person first,
+   whatever its token allows; CI calling the API isn't held) and `mcp_lockdown` / `mcp_read_only`
+   (every token's and OAuth connection's MCP held to lockdown or reading, whatever its URL asks)
+   since #678, and now `oauth_clients` (the clients that may connect, by metadata-document host or
+   URL, by where every redirect goes, `localhost`, an app scheme or `device`; checked at consent,
+   at every token and on every request, nothing revoked), all in the access page's policy panel.
 2. **SQL that touches every row asks.** PlanetScale refuses `UPDATE`/`DELETE` without `WHERE` and
    `TRUNCATE`; Supabase asks before destructive SQL. `postgres_execute` runs `DELETE FROM t` as a
    plain write. Decide on the parsed statement in pg-control (never a text pre-check): a statement
@@ -1166,9 +1178,11 @@ waits on a sibling PR reaching main is last.
    model-written code on fleet nodes, which roll apps' rule keeps customer code off. Options: (a)
    build it in rolld behind a flag; (b) run scripts in a preview-style container, slower to start;
    (c) not now, search mode is enough. Not started until the user picks.
-7. **As siblings land** (`sibling-check.py`, 2026-11-21 21:30, over every open PR): search's
-   migration from a remote cluster (#485: `migrate` and `migrate/inspect`, open-world, since roll fetches an address the caller chose); search's
-   relevance tuning (search-relevance-api, not yet open). Secrets' Next item 3 (reach naming people, OAuth clients,
+7. **As siblings land** (`sibling-check.py`, 2026-11-22 09:00, over every open PR): search's
+   relevance tuning (#677: synonyms sets, query rulesets and their test, an index's settings and
+   `_explain`; its rows checked, mapped once it lands, the settings route's action perhaps from its
+   body). #485's migration landed with both routes kept tool-less on purpose (the remote's
+   credentials go in their bodies). Secrets' Next item 3 (reach naming people, OAuth clients,
    services and sandboxes): `respond_to_leaked_secret` then names the services to redeploy from
    `secrets_reach` instead of asking which read the key. #524 (previews on members) adds no routes
    beyond #501's; #627, #629, #596 and #504 add none. Not a tool: making a search browser key
