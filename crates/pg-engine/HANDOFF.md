@@ -18906,3 +18906,115 @@ Left: the first-use cost of the system parts (+10% on a first pull; precomputing
 static rows from the reference server would remove it, per role kind); planning a large view's
 definition itself (join search and estimates through EXPLAIN's Builder, ~50 M for
 information_schema.columns) if those views are to be expanded again.
+
+## EXPLAIN plans against PostgreSQL 18.6's, round 5 (agent 288, 2026-11-22)
+
+Harness: agent 285's `~/.cache/a285/rx`, copied to `~/.cache/a288/rx` (`run.sh <port> <label>`,
+`cmp.py`, `classify.py`, `lst.py`, `show.py`, `sub.py <pg> <a> <b>`). PostgreSQL 18.6 ran in
+`a288-pg` (the pinned reference image, uid 1000, data in `~/.cache/a288/pgdata`, autovacuum off,
+max_prepared_transactions 10). Base `2a0f67b0d` (cand/a279-3 landed): 2,020 of 17,654 differ
+(catalog 700, errors 39, cost 605, width 219, rows 175, display 120, extra-node 101, other
+shapes 23, sort-agg 22, join-order 11, scan 4, join-method 1). On `621de3f17` (before a279-3)
+the same harness gave 2,306. Both sides ran on 2026-11-22 in America/Los_Angeles.
+
+### First candidate (`cand/a288`)
+
+Plan choice:
+- **reconsider_outer_join_clauses until nothing changes** (join:95): a WHERE constant pushed
+  through a left join gives its nullable side's key the constant (`f2 = 53` makes `f3 = 53`),
+  but the next left join's key on that column (`f3 = f1`) got none: `add_filter` derived the
+  nullable side's constants from the clauses it pushed only, before the join inside the
+  preserved side had made its own. It now derives them again from the preserved side's
+  restrictions once those are pushed (`binder/optimize.rs`, as `join` does for restrictions
+  already there). The join search drops the clause as the constant-TRUE one
+  (`oj_const_redundant`) also when the nullable side is a pulled-up view's projection over
+  its table (`zt1` through `zv1`), reading the table's restrictions through the projection.
+- **`(a, b) < ANY (SELECT x, y ...)` is a semi join** (rowtypes:42): convert_ANY_sublink_to_join
+  takes any test expression; the engine took `=` only. An ordering operator makes the join's
+  clause a RowCompareExpr (`row_tests`); the one-row form (`one_row_to_ops`) builds the same,
+  and `<>` an OR (it built an AND of the pairs for both: a wrong answer for
+  `(1, 2) <> ANY (SELECT 1, 3)`).
+- **One grouping set is a plain GROUP BY** (groupingsets:46; parseCheckAggregates drops a
+  single non-empty set): `GROUP BY a, b, GROUPING SETS (a)` was hashed as grouping sets
+  (`Hash Key`); now a Group / GroupAggregate or HashAggregate by costs, HAVING pushed down.
+- **Grouping sets all unsortable are a HashAggregate** (groupingsets:78): the rollup list kept
+  an empty rollup for the sorted part, so EXPLAIN made a MixedAggregate, startup 0.
+- **A CTE's or a planned-apart subquery's columns are never unique** (conversion:3-6):
+  examine_simple_variable recurses into the subquery for statistics but leaves isunique false
+  (the subquery may duplicate rows); the engine passed the base table's unique index through
+  (`VarRef::sub`), so a join of two CTE scans over a primary key was 876 rows (PostgreSQL
+  3,853 by the default distinct count) and a hash join for PostgreSQL's merge join.
+
+Estimates and display:
+- **A FROM call of a SQL function folding to a constant, WITH ORDINALITY or in ROWS FROM, is
+  the constant** (rangefuncs:31, :33): eval_const_expressions inlines it in the function
+  RTE; pull_up_constant_function takes neither form, so the scan stays, over the value
+  (`Function Scan on t1`, cost 0.00..0.01). An expression in a function's place (`coalesce(b)
+  AS c(...)`) shows only the alias and costs no call (rangefuncs:218-220).
+- **text to bool / inet / cidr is a CoerceViaIO** (inet:14-17): `costs::io_cast` took a text
+  source cast to them for one with a function (one operator); it is two.
+- **A sort key shows the collation its expression derives when it isn't its type's**
+  (show_sortorder_options; collate, collate.icu.utf8: 33 blocks): a computed key over a "C" /
+  "POSIX" column, a set operation's column, an aggregate's ORDER BY argument; not a domain
+  column's own collation (a domain with a COLLATE gives its values that one).
+- **A table's whole-row Var is a tuple header and its columns wide** (set_rel_width;
+  create_view:76, :78, privileges:97, :100): it was a record's 32. A view's or subquery's
+  whole row (a RowExpr) keeps the type's width.
+- **`x = ANY (constant array)` is evaluated** (arrays:137, :141): eval_const_expressions folds
+  a ScalarArrayOpExpr of constants with an immutable operator (`33 = ANY (NULL::int[])` is
+  NULL); the engine folded IN lists only.
+- **Built-ins the engine runs as one-row set-returning functions but pg_proc has returning no
+  set** (json_populate_record, jsonb_populate_record, pg_stat_get_replication_slot,
+  pg_stat_get_subscription_stats: json:282-287, :313, jsonb:437-442, :486, stats:145, :146):
+  EXPLAIN shows their calls as target-list expressions, no ProjectSet; `(f(x)).*` is computed
+  in the scan, a call per field. (The executor still runs them as one-row SRFs.)
+- **TABLESAMPLE scans are sized by their sampled pages and tuples** (tablesample, rowsecurity:
+  20 blocks; set_tablesample_rel_size, cost_samplescan): bernoulli and system take a constant
+  percentage (else 10%), bernoulli reads every page sequentially, system that share of them at
+  random_page_cost; the rows were the whole table's.
+- **CTEs inside a CTE are named first** (with:27's and with:113's scans: setrefs flattens a
+  CTE's range table after the CTEs inside it). with:27 still differs by PostgreSQL's JIT
+  lines, with:113 by 0.01 of a Recursive Union's cost.
+- **A set operation with a WITH of its own is a leaf** (with:15, :114;
+  transformSetOperationTree): its CTEs inlined, it was merged into the outer UNION's arms; now
+  it dedups apart (the shape is PostgreSQL's; 0.01 of the trivial Subquery Scan's cost is
+  left, below).
+- Golden `a288_plans` (recorded from 18.6).
+
+Regression files' EXPLAINs (full pass, `~/.cache/a288/rx/out-c12`, against `out-base2`): 93 more
+of the 17,654 match, none newly differ (2,020 -> 1,927: catalog 700, errors 39, cost 596, width
+216, rows 160, display 88, extra-node 85, other shapes 15, sort-agg 15, join-order 9, scan 4,
+join-method 1). TPC-H: base against new on one copied SF 0.05 data directory
+(`~/.cache/a288/tpch-one.sh`), 22 of 22 plans identical in text, costs x1.000.
+No performance gate: planning only (a constant test per left join's keys after a push, a
+collation lookup per collatable sort key in EXPLAIN, a percentage per sample scan); not
+measured, as a change of that size isn't measurable against the lanes' noise.
+
+Not done, found (repros in `~/.cache/a288/probe`):
+- **GiST tsvector index pages are not deterministic in PostgreSQL** (tsearch, 51 of the 85
+  Bitmap Index Scan cost blocks): two PostgreSQL runs of the harness give wowidx's scan
+  25.34 and 29.34 (gistchoose breaks ties at random); no model can match every run. The
+  SP-GiST quad-box index (box, create_index_spgist: ~25 blocks) is deterministic: 112 pages
+  in PostgreSQL, the engine's estimate 69; matching it needs an spgdoinsert model of the
+  box quad tree (picksplit, allTheSame, page chains).
+- **JIT lines** (about 70 blocks over jit_above_cost, in display and elsewhere): PostgreSQL
+  prints `JIT: Functions: n` for plans costing over 100,000; the count is per expression and
+  deform function compiled.
+- **CTE scans' and pulled-up subqueries' reference names follow range-table order**
+  (PostgreSQL names the main query's relations before a pulled-up subquery's: `CTE Scan on b`
+  in the main query, `b b_1` in the inlined CTE `p`); the engine names by plan position.
+- **Subquery Scan widths** (window:27, select:13): remove_unused_subquery_outputs keeps
+  unused outputs as NULLs of their types, so the nodes under a shown Subquery Scan are the
+  subquery's full width (244 against 8); a phony relation's whole row counts only the widths
+  set_subquery_size_estimates found (`select foo from (select 1 offset 0) foo`: 24). Needs
+  widths at type width for unread outputs without marking them read (which would change
+  index-only scans).
+- A whole-row Var an aggregate reads (`json_agg(q ORDER BY x, y)`): the scan's width should
+  add 24 plus its columns; the engine counts the columns read.
+- memoize:8: a LATERAL subquery's output over the outer row is a PlaceHolderVar evaluated at
+  the subquery's relation, so `(t1.two + 1) = unique1` has both sides of t2 for eqsel
+  (DEFAULT_EQ_SEL, 50 rows); the engine 1.
+- A trivial Subquery Scan PostgreSQL removes keeps its cost in the Append above
+  (cost_subqueryscan's cpu_tuple_cost per row: with:114's 0.08 against 0.07).
+- `SELECT * FROM seq` is a Seq Scan on the sequence in PostgreSQL (cost 0..1.01, width 17);
+  the engine's one-row VALUES is pulled up to a Result (sequence:22, :25).
