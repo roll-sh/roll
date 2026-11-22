@@ -2069,7 +2069,7 @@
     },
     "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/rollback": {
       "post": {
-        "description": "Answers 202 `Deployment`.",
+        "description": "Answers 202 `Deployment` (a view's `url` is its own).",
         "operationId": "postServicesIdEnvironmentsEnvDeploysDepRollback",
         "parameters": [
           {
@@ -2105,11 +2105,11 @@
               }
             }
           },
-          "description": "`{ keep_variables? }` (default false: the variables come back as they were when it was live); `X-Roll-Override: 1` puts a never-live `ready` build live during a freeze, audited"
+          "description": "`{ keep_variables? }` (default false: the variables come back as they were when it was live); `X-Roll-Override: 1` puts a never-live `ready` build live during a freeze, audited; or `{ no_traffic: true, variables: {NAME: value} }`: a view of `dep` at its own URL with some of the environment's variables given values of its own (1–50 of its names, each ≤ 64 KiB; `variables` without `no_traffic`, or `no_traffic` without `variables`, is a 400): sealed, never listed, never put live (no `deploy.ready`), not counted toward what's kept, pruned a day after its URL was last visited"
         },
         "responses": {
           "202": {
-            "description": "202 `Deployment`"
+            "description": "202 `Deployment` (a view's `url` is its own)"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"

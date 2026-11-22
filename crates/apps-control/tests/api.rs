@@ -3310,6 +3310,38 @@ async fn a_sandbox_runs_commands_apart_from_the_environment_until_its_end() {
     assert!(w.fake.state(&name).is_none() && !w.fake.networks().contains(&net));
 }
 
+/// A view of a deployment with values of its own (roll previews' earlier pushes on their own
+/// copy of the data): its image again at its own URL with some of the environment's variables
+/// given other values, never live, never listed, no one told to put it live.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_view_of_a_deployment_runs_its_image_with_values_of_its_own() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    assert!(call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"DATABASE_URL": "postgres://live", "FAKE_ECHO": "DATABASE_URL"}}))).await.0.is_success());
+    let (_, d) = call(&w.api, "POST", &format!("{base}/deploys"), Some(json!({}))).await;
+    let live = d["id"].as_str().unwrap().to_string();
+    settled(&w, &id, "production", &live).await;
+    let rollback = format!("{base}/deploys/{live}/rollback");
+    assert_eq!(call(&w.api, "POST", &rollback, Some(json!({"variables": {"DATABASE_URL": "postgres://copy"}}))).await.0, StatusCode::BAD_REQUEST, "never live");
+    assert_eq!(call(&w.api, "POST", &rollback, Some(json!({"no_traffic": true, "variables": {"NEW_ONE": "x"}}))).await.0, StatusCode::BAD_REQUEST, "only the environment's own names");
+    assert_eq!(call(&w.api, "POST", &rollback, Some(json!({"no_traffic": true}))).await.0, StatusCode::BAD_REQUEST);
+    let (st, v) = call(&w.api, "POST", &rollback, Some(json!({"no_traffic": true, "variables": {"DATABASE_URL": "postgres://copy"}}))).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{v}");
+    let view = v["id"].as_str().unwrap().to_string();
+    let done = settled(&w, &id, "production", &view).await;
+    assert_eq!(done["status"], "ready", "{done}");
+    let events = call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1;
+    assert!(!events["events"].as_array().unwrap().iter().any(|e| e["kind"] == "deploy.ready" && e["deployment"] == view.as_str()), "no one is told to put a view live");
+    // Its URL runs it with the copy's value; the environment's keeps its own.
+    let h = host(&call(&w.api, "GET", &base, None).await.1["url"]);
+    let (st, at_view) = visit(&w, &host(&done["url"]), "/").await;
+    assert_eq!((st, &at_view["vars"]["DATABASE_URL"]), (StatusCode::OK, &json!("postgres://copy")), "{at_view}");
+    assert_eq!(visit(&w, &h, "/").await.1["vars"]["DATABASE_URL"], "postgres://live");
+    assert!(!call(&w.api, "GET", &format!("{base}/variables"), None).await.1.to_string().contains("postgres://copy"), "never listed");
+}
+
 /// Signed images (Cloud Run's Binary Authorization): with a project's signing keys required, an
 /// image service's deploy needs its pinned digest's cosign signature by one of them, or it fails
 /// before anything switches; removing the rule lets unsigned images deploy again.
@@ -8821,7 +8853,14 @@ async fn closed_services_on_one_network_move_to_a_new_ca_together() {
     assert!(!ended(), "web still uses them: {:?}", vault.0.lock());
     let (_, d) = call(&w.api, "POST", &format!("/v1/apps/services/{web}/environments/staging/deploys"), Some(json!({}))).await;
     settled(&w, &web, "staging", d["id"].as_str().unwrap()).await;
-    w.apps.cron_pass(code_sql::now_ms() + 60 * 60_000).await;
+    // (web's closed instances still draining keep them until they're gone: checked each minute.)
+    for i in 0..100 {
+        w.apps.cron_pass(code_sql::now_ms() + (60 + i) * 61_000).await;
+        if ended() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert!(ended(), "{:?}", vault.0.lock());
 }
 

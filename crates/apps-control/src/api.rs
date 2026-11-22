@@ -1271,6 +1271,20 @@ async fn promote(State(apps): S, Path((id, env)): Path<(String, String)>, ext: E
 
 async fn rollback(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>, ext: Extensions, headers: HeaderMap, b: Bytes) -> R {
     let o = with_override(body(&b)?, &headers)?;
+    // A view with values of its own (roll previews' earlier pushes): never live.
+    if let Some(vars) = o.get("variables").filter(|v| !v.is_null()) {
+        if o.get("no_traffic") != Some(&Value::Bool(true)) {
+            return Err(Error::BadRequest("variables go with no_traffic: true (a view at its own URL; nothing live runs with them)".into()));
+        }
+        let vars: std::collections::BTreeMap<String, String> = serde_json::from_value(vars.clone()).map_err(|_| Error::BadRequest("variables is {NAME: value}".into()))?;
+        let names: Vec<String> = vars.keys().cloned().collect();
+        let d = apps.rollback_view(&id, &env, &dep, actor(&ext), vars).await?;
+        apps.audit("deploy.view", &id, &env, actor(&ext), json!({ "of": dep, "deployment": d.id, "variables": names })).await;
+        return Ok((StatusCode::ACCEPTED, Json(d)).into_response());
+    }
+    if o.get("no_traffic").is_some() {
+        return Err(Error::BadRequest("no_traffic on a rollback makes a view, with variables of its own".into()));
+    }
     let (keep, over) = (o.get("keep_variables").and_then(Value::as_bool).unwrap_or(false), o.get("override").and_then(Value::as_bool).unwrap_or(false));
     let d = apps.rollback(&id, &env, &dep, actor(&ext), keep, over).await?;
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
