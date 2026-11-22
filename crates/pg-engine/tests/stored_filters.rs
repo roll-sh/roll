@@ -104,6 +104,18 @@ fn stored_comparisons_match_evaluation() {
         ("ts <= date '2000-01-02'", true),
         ("ts < 'infinity' AND d IS NOT NULL", false),
         ("ts < 'infinity' AND d > '1999-12-31'", true),
+        // (Two columns of the row: numbers, strings, dates with timestamps as instants; an
+        // int compared with a numeric goes through a cast, which isn't a column.)
+        ("a > m", false),
+        ("m > m", true),
+        ("m * 4 >= a % 9", false),
+        ("a % 4 = m", false),
+        ("d < ts", true),
+        ("ts <= d AND a > 50", true),
+        ("d > d", true),
+        ("c = c", true),
+        ("n >= n AND e = 'x7'", true),
+        ("e = 'x7' AND d < ts AND m > a % 3", false),
     ];
     let mut paths = Vec::new();
     for (f, fast) in filters {

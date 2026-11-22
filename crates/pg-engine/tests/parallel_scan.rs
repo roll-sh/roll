@@ -400,6 +400,10 @@ const LOOKUP_QUERIES: &[&str] = &[
     "SELECT b.id, c.id, c.v FROM big b LEFT JOIN big2 c ON c.k = b.id WHERE b.id < 300 OR b.id > 419800",
     "SELECT count(*), sum(b.id) FROM big b WHERE b.id > 410000 AND EXISTS (SELECT 1 FROM big2 c WHERE c.k = b.id - 300000 AND c.v LIKE '%a%')",
     "SELECT count(*), sum(b.id) FROM big b WHERE (b.id < 2000 OR b.id > 418000) AND NOT EXISTS (SELECT 1 FROM big2 c WHERE c.k = b.id)",
+    // (A semi and an anti join's inner filter comparing with the outer row's columns and with
+    // the inner row's own, over the stored values: TPC-H q21's.)
+    "SELECT count(*), sum(b.id) FROM big b WHERE b.id > 405000 AND EXISTS (SELECT 1 FROM big2 c WHERE c.k = b.id - 300000 AND c.id <> b.id)",
+    "SELECT count(*), sum(b.id) FROM big b WHERE b.id > 405000 AND NOT EXISTS (SELECT 1 FROM big2 c WHERE c.k = b.id - 300000 AND c.id % 3 = 1 AND c.id <> b.id AND c.v <> b.s AND c.id > c.k)",
     // Aggregated above, in parts; a unique index of a modelled table; two loops stacked.
     "SELECT b.g, count(*), sum(c.id) FROM big b JOIN big2 c ON c.k = b.id WHERE b.id < 8000 GROUP BY b.g ORDER BY 1",
     "SELECT d.name, count(*) FROM big b JOIN dim d ON d.k = b.g WHERE b.x > 50 AND b.id > 400000 GROUP BY d.name ORDER BY 1",
@@ -505,7 +509,7 @@ fn parallel_lookups_match_serial_inner() {
     let (a, b) = (n(&stat_serial), n(&stat_parallel));
     assert!(!a.is_empty(), "{stat_serial}");
     assert_eq!(b, a.iter().map(|x| 2 * x).collect::<Vec<_>>(), "{stat_serial} {stat_parallel}");
-    assert!(serial[10][0].starts_with("ERROR: integer out of range"), "{:?}", serial[10]);
+    assert!(serial[12][0].starts_with("ERROR: integer out of range"), "{:?}", serial[12]);
     assert!(serial[0].len() > 1000, "{}", serial[0].len());
     assert!(serial[2].len() > 100, "{}", serial[2].len());
     assert!(serial[4].iter().any(|r| r.contains("Null")), "{:?}", &serial[4][..3]);

@@ -164,9 +164,9 @@ pub struct Lookup {
     /// those `need` marks (`decode`'s).
     width: usize,
     last: usize,
-    /// The inner scan's filter's comparisons with constants over the stored values
-    /// (`StoredCmps`): a row they turn away isn't decoded; one they pass skips `filter` when
-    /// they are the whole of it (true).
+    /// The inner scan's filter's first comparisons over the stored values (`StoredCmps`:
+    /// with constants, the row's other columns and the outer row's): a row they turn away
+    /// isn't decoded; one they pass skips `filter` when they are the whole of it (true).
     stored: Option<(StoredCmps, bool)>,
     /// The inner scan's filter and the join condition, over the joined row's two sides.
     filter: Option<K>,
@@ -269,24 +269,19 @@ impl Lookup {
         if width == 0 {
             return Ok(None);
         }
-        // (The filter over the inner row alone: constants and its own columns.)
-        // (The filter's first conjuncts over the inner row alone, its columns and constants:
-        // an inner scan's filter holds the join's equalities over the outer row too, `^1#k`.
-        // Only the first ones: a row they turn away is one whose filter stops there, as
-        // ExecQual stops at its first false qual, before a later one that may raise an error.)
+        // (The filter's first conjuncts over the stored inner row: comparisons of its columns
+        // with constants, with each other and with the outer row's columns (an inner scan's
+        // filter holds the join's equalities over the outer row too, `^1#k`). Only the first
+        // ones: a row they turn away is one whose filter stops there, as ExecQual stops at its
+        // first false qual, before a later one that may raise an error.)
         let stored = s.filter.as_ref().and_then(|f| {
             let parts: Vec<&Expr> = match f {
                 Expr::And(a) => a.iter().collect(),
                 e => vec![e],
             };
-            let mut ks: Vec<K> = parts.iter().map_while(|e| compile(e)).collect();
-            let whole = ks.len() == parts.len();
-            let k = match ks.len() {
-                0 => return None,
-                1 => ks.pop()?,
-                _ => K::And(ks),
-            };
-            StoredCmps::of(&k).map(|c| (c, whole))
+            let ks: Vec<K> = parts.iter().map_while(|e| bind(e, params, nleft, true).as_ref().and_then(compile)).collect();
+            let ks: Vec<&K> = ks.iter().collect();
+            StoredCmps::of_joined(&ks, nleft).map(|(c, n)| (c, n == parts.len()))
         });
         // (Equal index keys' rows in the model's heap order: only a unique index's single
         // row, or a table not modelled, whose entries are in storage order.)
@@ -507,7 +502,7 @@ impl Lookup {
         let mut checked = false;
         if let Some((c, whole)) = &self.stored
             && !crate::storage::toast::has_external(bytes)
-            && let Some(pass) = super::scan::row_data(bytes).ok().and_then(|d| c.passes(d))
+            && let Some(pass) = super::scan::row_data(bytes).ok().and_then(|d| c.passes_with(d, l))
         {
             if !pass {
                 return Add::Out;

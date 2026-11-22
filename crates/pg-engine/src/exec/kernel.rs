@@ -242,25 +242,60 @@ fn collated_bytes(def: &crate::sql::func::FuncDef, args: &[Expr]) -> Option<Pure
     (c.bytewise() || (c.deterministic && crate::sql::func::ops::str_eq_op(def.imp))).then_some(f)
 }
 
-/// A filter of comparisons of columns with constants, one or ANDed, run over a stored row's
-/// encoded values in place: the columns walked once, nothing decoded, made or cached.
+/// A filter of comparisons, one or ANDed, of a column with a constant, with a column of the
+/// outer row of a nested loop (an inner scan's `^1#k`, `of_joined`) or with another column of
+/// the row, run over a stored row's encoded values in place: the columns walked once, nothing
+/// decoded, made or cached.
 /// Numeric columns (`K::NumCmp`) compare as exact numbers (`row::peek_num`), string ones
 /// (`K::Call` of a string comparison that compares bytes: `ops::str_cmp`, `collated_bytes`)
 /// as their stored bytes (`row::peek_text`), bpchar's without trailing spaces, dates and
 /// timestamps (`row::peek_dt`) as their numbers or, for a date / timestamp comparison
 /// (`ops::dt_cmp`), as instants. What a row's
 /// values don't decide this way (a column added since it was stored, a number past an
-/// i128, a value stored out of line) is left to the kernel.
+/// i128, a value stored out of line, an outer value of another type) is left to the kernel.
 pub struct StoredCmps {
-    /// (column, the constant, the operator's test, whether the column is its first
-    /// argument).
-    cmps: Vec<(usize, Against, fn(std::cmp::Ordering) -> bool, bool)>,
-    /// Per comparison, the integer operator its column goes through first (`id % 4 = 1`):
-    /// the operator, its constant operand, whether the column is that one's first operand,
-    /// the result type.
-    ops: Vec<Option<(IntOp, (i128, u32), bool, DataType)>>,
+    cmps: Vec<StoredCmp>,
     /// The columns walked: up to the last one compared.
     upto: usize,
+    /// A comparison of two of the row's columns: the walk keeps the columns' places.
+    pairs: bool,
+    /// No integer operator: no comparison can raise an error, so the first false one
+    /// decides the row.
+    exact: bool,
+}
+
+/// One comparison of `StoredCmps`.
+struct StoredCmp {
+    col: usize,
+    /// The integer operator the column goes through first (`id % 4 = 1`): the operator, its
+    /// constant operand, whether the column is that one's first operand, the result type.
+    op: Option<(IntOp, (i128, u32), bool, DataType)>,
+    how: How,
+    other: Other,
+    test: fn(std::cmp::Ordering) -> bool,
+    /// Whether the column is the comparison's first argument.
+    col_first: bool,
+}
+
+/// How a comparison's operands compare.
+#[derive(Clone, Copy)]
+enum How {
+    /// As exact numbers (`K::NumCmp`).
+    Num,
+    /// As strings' bytes (bpchar's without trailing spaces when true), or dates and
+    /// timestamps of one type as their numbers (`ops::str_cmp`).
+    Str(bool),
+    /// As instants (`ops::dt_cmp`).
+    Instant,
+}
+
+/// What a stored value is compared with.
+enum Other {
+    Const(Against),
+    /// The outer row's column.
+    Outer(usize),
+    /// Another column of the stored row.
+    Col(usize),
 }
 
 /// The constant a stored value is compared with.
@@ -278,138 +313,316 @@ enum Against {
     Instant(i64),
 }
 
+/// A value read for a comparison with the outer row's or another column (`How`'s: a
+/// timestamp of `How::Instant` an instant; a stored string in place).
+#[derive(Clone, Copy)]
+enum Got<'a> {
+    Num((i128, u32)),
+    Text(&'a [u8]),
+    Date(i32),
+    Ts(i64),
+}
+
+impl How {
+    /// Value `v` as this comparison reads it (Some(None): NULL; None: a value it doesn't take).
+    fn of_value(self, v: &Value) -> Option<Option<Got<'_>>> {
+        if v.is_null() {
+            return Some(None);
+        }
+        Some(Some(match (self, v) {
+            (How::Num, v) => Got::Num(small_num(v)?),
+            (How::Str(true), Value::Text(s)) => Got::Text(crate::types::text::bpchar_trim(s).as_bytes()),
+            (How::Str(false), Value::Text(s)) => Got::Text(s.as_bytes()),
+            (How::Str(false), Value::Date(d)) => Got::Date(*d),
+            (How::Str(false), Value::Timestamp(t)) => Got::Ts(*t),
+            (How::Instant, Value::Date(d)) => Got::Ts(crate::sql::func::ops::date_instant(*d)),
+            (How::Instant, Value::Timestamp(t)) => Got::Ts(*t),
+            _ => return None,
+        }))
+    }
+
+    /// The stored value at `pos` of `data` as this comparison reads it (as `of_value`).
+    #[inline]
+    fn peek(self, data: &[u8], pos: usize) -> Option<Option<Got<'_>>> {
+        use crate::storage::row::{Dt, peek_dt, peek_num, peek_text};
+        Some(Some(match self {
+            How::Num => Got::Num(peek_num(data, pos)??),
+            How::Str(bp) if data.get(pos) == Some(&crate::storage::row::tag::TEXT) || bp => {
+                let x = peek_text(data, pos)??;
+                Got::Text(if bp { crate::storage::cols::trim_spaces(x) } else { x })
+            }
+            How::Str(_) => match peek_dt(data, pos)?? {
+                Dt::Date(d) => Got::Date(d),
+                Dt::Ts(t) => Got::Ts(t),
+            },
+            How::Instant => match peek_dt(data, pos)?? {
+                Dt::Date(d) => Got::Ts(crate::sql::func::ops::date_instant(d)),
+                Dt::Ts(t) => Got::Ts(t),
+            },
+        }))
+    }
+}
+
+/// `x` against `y` (None: values of kinds that don't compare this way, or numbers that don't
+/// scale to one scale in an i128).
+#[inline]
+fn cmp_got(x: Got<'_>, y: Got<'_>) -> Option<std::cmp::Ordering> {
+    Some(match (x, y) {
+        (Got::Num((x, sx)), Got::Num((y, sy))) => {
+            if sx == sy {
+                x.cmp(&y)
+            } else {
+                let s = sx.max(sy);
+                let pow = |n: u32| 10i128.checked_pow(n);
+                x.checked_mul(pow(s - sx)?)?.cmp(&y.checked_mul(pow(s - sy)?)?)
+            }
+        }
+        (Got::Text(x), Got::Text(y)) => x.cmp(y),
+        (Got::Date(x), Got::Date(y)) => x.cmp(&y),
+        (Got::Ts(x), Got::Ts(y)) => x.cmp(&y),
+        _ => return None,
+    })
+}
+
 /// Scans that made a `StoredCmps` (tests: which filters run over stored bytes).
 pub static STORED_CMPS_SCANS: crate::counter::Counter = crate::counter::Counter::new();
 
 impl StoredCmps {
+    /// Over a scan's own row: column `i` is the table's.
     pub fn of(k: &K) -> Option<StoredCmps> {
+        let ks: Vec<&K> = match k {
+            K::And(ks) => ks.iter().collect(),
+            k => vec![k],
+        };
+        let (c, _) = Self::make(&ks, None).filter(|(_, n)| *n == ks.len())?;
+        STORED_CMPS_SCANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Some(c)
+    }
+
+    /// Over a nested loop's joined row (outer row `0..nleft`, the inner scan's row after it),
+    /// the first of conjuncts `ks` that run over the inner row's stored values, and how many:
+    /// an outer column's value is taken from the outer row `passes_with` is given.
+    pub fn of_joined(ks: &[&K], nleft: usize) -> Option<(StoredCmps, usize)> {
+        let r = Self::make(ks, Some(nleft))?;
+        STORED_CMPS_SCANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Some(r)
+    }
+
+    fn make(ks: &[&K], nleft: Option<usize>) -> Option<(StoredCmps, usize)> {
+        // (A column of the stored row; None: of the outer row, or not one.)
+        let inner = |i: usize| match nleft {
+            None => Some(i),
+            Some(n) => i.checked_sub(n),
+        };
+        let outer = |i: usize| nleft.filter(|n| i < *n).map(|_| i);
         // (A column, or an integer operator over a column and a constant.)
         let col = |k: &K| match k {
-            K::Col(i) => Some((*i, None)),
+            K::Col(i) => Some((inner(*i)?, None)),
             K::Int { op, args, ret, .. } => match &**args {
-                [K::Col(i), K::Const(c)] => Some((*i, Some((*op, small_num(c)?, true, ret.clone())))),
-                [K::Const(c), K::Col(i)] => Some((*i, Some((*op, small_num(c)?, false, ret.clone())))),
+                [K::Col(i), K::Const(c)] => Some((inner(*i)?, Some((*op, small_num(c)?, true, ret.clone())))),
+                [K::Const(c), K::Col(i)] => Some((inner(*i)?, Some((*op, small_num(c)?, false, ret.clone())))),
                 _ => None,
             },
             _ => None,
         };
-        let one = |k: &K| match k {
-            K::NumCmp { test, args, .. } => match &**args {
-                [c, K::Const(v)] => {
-                    let (i, op) = col(c)?;
-                    Some(((i, Against::Num(small_num(v)?), *test, true), op))
-                }
-                [K::Const(v), c] => {
-                    let (i, op) = col(c)?;
-                    Some(((i, Against::Num(small_num(v)?), *test, false), op))
-                }
+        // (The other operand: a constant as `how` reads it, the outer row's column, or a
+        // plain column of the stored row.)
+        let other = |k: &K, how: How| -> Option<Other> {
+            match k {
+                K::Const(v) => Some(Other::Const(match (how, v) {
+                    (How::Num, v) => Against::Num(small_num(v)?),
+                    (How::Str(true), Value::Text(s)) => Against::Text(crate::types::text::bpchar_trim(s).as_bytes().into(), true),
+                    (How::Str(false), Value::Text(s)) => Against::Text(s.as_bytes().into(), false),
+                    (How::Str(false), Value::Date(d)) => Against::Date(*d),
+                    (How::Str(false), Value::Timestamp(t)) => Against::Ts(*t),
+                    (How::Instant, Value::Date(d)) => Against::Instant(crate::sql::func::ops::date_instant(*d)),
+                    (How::Instant, Value::Timestamp(t)) => Against::Instant(*t),
+                    _ => return None,
+                })),
+                K::Col(i) => match outer(*i) {
+                    Some(j) => Some(Other::Outer(j)),
+                    None => Some(Other::Col(inner(*i)?)),
+                },
                 _ => None,
-            },
-            K::Call { f, args, .. } => {
-                use crate::sql::func::ops;
-                let against = |c: &Value| -> Option<(fn(std::cmp::Ordering) -> bool, Against)> {
-                    if let Some((test, bp)) = ops::str_cmp(*f) {
-                        return Some((test, match c {
-                            Value::Text(s) if bp => Against::Text(crate::types::text::bpchar_trim(s).as_bytes().into(), true),
-                            Value::Text(s) => Against::Text(s.as_bytes().into(), false),
-                            Value::Date(d) if !bp => Against::Date(*d),
-                            Value::Timestamp(t) if !bp => Against::Ts(*t),
-                            _ => return None,
-                        }));
-                    }
-                    let test = ops::dt_cmp(*f)?;
-                    Some((test, Against::Instant(match c {
-                        Value::Date(d) => ops::date_instant(*d),
-                        Value::Timestamp(t) => *t,
-                        _ => return None,
-                    })))
-                };
-                match &**args {
-                    [K::Col(i), K::Const(c)] => against(c).map(|(test, a)| ((*i, a, test, true), None)),
-                    [K::Const(c), K::Col(i)] => against(c).map(|(test, a)| ((*i, a, test, false), None)),
-                    _ => None,
-                }
             }
-            _ => None,
         };
-        let mut both: Vec<_> = match k {
-            K::And(ks) => ks.iter().map(one).collect::<Option<_>>()?,
-            k => vec![one(k)?],
+        let one = |k: &K| -> Option<StoredCmp> {
+            let (how, test, args) = match k {
+                K::NumCmp { test, args, .. } => (How::Num, *test, &**args),
+                K::Call { f, args, .. } => {
+                    use crate::sql::func::ops;
+                    match ops::str_cmp(*f) {
+                        Some((test, bp)) => (How::Str(bp), test, &**args),
+                        None => (How::Instant, ops::dt_cmp(*f)?, &**args),
+                    }
+                }
+                _ => return None,
+            };
+            // (The stored column first where both are; an integer operator only over a
+            // stored column, and not of a comparison of two of them.)
+            let [a, b] = args;
+            let (c, o, col_first) = match (col(a), col(b)) {
+                (Some(c), _) => (c, b, true),
+                (None, Some(c)) => (c, a, false),
+                (None, None) => return None,
+            };
+            let ((col, op), other) = (c, other(o, how)?);
+            if op.is_some() && !matches!(how, How::Num) || op.is_some() && matches!(other, Other::Col(_)) {
+                return None;
+            }
+            Some(StoredCmp { col, op, how, other, test, col_first })
         };
+        let mut cmps: Vec<StoredCmp> = ks.iter().map_while(|k| one(k)).collect();
+        let used = cmps.len();
         // (Pure comparisons: their order changes nothing.)
-        both.sort_by_key(|c| c.0.0);
-        let (cmps, ops): (Vec<_>, Vec<_>) = both.into_iter().unzip();
-        let upto = cmps.iter().map(|c| c.0 + 1).max()?;
-        STORED_CMPS_SCANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Some(StoredCmps { cmps, ops, upto })
+        cmps.sort_by_key(|c| c.col);
+        let upto = cmps
+            .iter()
+            .map(|c| match c.other {
+                Other::Col(o) => c.col.max(o) + 1,
+                _ => c.col + 1,
+            })
+            .max()?;
+        // (A comparison of two of the row's columns reads them where the walk found them.)
+        if upto > MAX_STORED_COLS && cmps.iter().any(|c| matches!(c.other, Other::Col(_))) {
+            return None;
+        }
+        let pairs = cmps.iter().any(|c| matches!(c.other, Other::Col(_)));
+        let exact = cmps.iter().all(|c| c.op.is_none());
+        Some((StoredCmps { cmps, upto, pairs, exact }, used))
     }
 
     /// Whether the stored row's values `data` (after its header) pass (None: leave it to
     /// the kernel).
     pub fn passes(&self, data: &[u8]) -> Option<bool> {
-        use crate::storage::{row::{Dt, peek_dt, peek_num, peek_text, skip_value_fast}, sst::get_varint};
+        self.passes_with(data, &[])
+    }
+
+    /// `passes` with outer row `outer` (`of_joined`'s).
+    pub fn passes_with(&self, data: &[u8], outer: &[Value]) -> Option<bool> {
+        use crate::storage::{cols::skip, row::{Dt, peek_dt, peek_num, peek_text}, sst::get_varint};
         let mut pos = 0;
         let n = get_varint(data, &mut pos).ok()? as usize;
         if n < self.upto {
             return None;
         }
-        // (The comparisons in column order: the columns walked once.)
+        // (The comparisons in column order: the columns walked once, each one's place kept
+        // for a comparison with another column.)
+        let mut at = [0u32; MAX_STORED_COLS];
         let (mut col, mut pass) = (0, true);
-        for ((i, against, test, col_first), op) in self.cmps.iter().zip(&self.ops) {
-            while col < *i {
-                skip_value_fast(data, &mut pos).ok()?;
+        for c in &self.cmps {
+            // (Without errors to raise, a comparison not true ends it: the AND isn't.)
+            if !pass && self.exact {
+                return Some(false);
+            }
+            while col < c.col {
+                if self.pairs {
+                    at[col] = pos as u32;
+                }
+                skip(data, &mut pos).ok()?;
                 col += 1;
+            }
+            if self.pairs {
+                at[col] = pos as u32;
             }
             // (NULL: the comparison is NULL, and the AND not true; the others still read, as
             // a value one of them can't decide leaves the row to the kernel.)
-            let o = match against {
-                Against::Num((y, sy)) => {
-                    let Some(mut v) = peek_num(data, pos)? else {
-                        pass = false;
-                        continue;
-                    };
-                    if let Some((op, c, first, ret)) = op {
-                        let (a, b) = if *first { (v, *c) } else { (*c, v) };
-                        v = (op.apply(a, b, ret)?, 0);
+            if let Other::Const(against) = &c.other {
+                // (A constant: its kind known, the stored value read as that.)
+                let o = match against {
+                    Against::Num((y, sy)) => {
+                        let Some(mut v) = peek_num(data, pos)? else {
+                            pass = false;
+                            continue;
+                        };
+                        if let Some((op, k, first, ret)) = &c.op {
+                            let (a, b) = if *first { (v, *k) } else { (*k, v) };
+                            v = (op.apply(a, b, ret)?, 0);
+                        }
+                        let (x, sx) = v;
+                        if sx == *sy {
+                            x.cmp(y)
+                        } else {
+                            let s = sx.max(*sy);
+                            let pow = |n: u32| 10i128.checked_pow(n);
+                            x.checked_mul(pow(s - sx)?)?.cmp(&y.checked_mul(pow(s - sy)?)?)
+                        }
                     }
-                    let (x, sx) = v;
-                    if sx == *sy {
+                    Against::Text(y, bp) => {
+                        let Some(mut x) = peek_text(data, pos)? else {
+                            pass = false;
+                            continue;
+                        };
+                        if *bp {
+                            x = crate::storage::cols::trim_spaces(x);
+                        }
                         x.cmp(y)
+                    }
+                    Against::Date(_) | Against::Ts(_) | Against::Instant(_) => {
+                        let Some(x) = peek_dt(data, pos)? else {
+                            pass = false;
+                            continue;
+                        };
+                        match (against, x) {
+                            (Against::Date(y), Dt::Date(x)) => x.cmp(y),
+                            (Against::Ts(y), Dt::Ts(x)) => x.cmp(y),
+                            (Against::Instant(y), Dt::Date(x)) => crate::sql::func::ops::date_instant(x).cmp(y),
+                            (Against::Instant(y), Dt::Ts(x)) => x.cmp(y),
+                            _ => return None,
+                        }
+                    }
+                };
+                pass &= (c.test)(if c.col_first { o } else { o.reverse() });
+                continue;
+            }
+            let Some(mut x) = c.how.peek(data, pos)? else {
+                pass = false;
+                continue;
+            };
+            if let (Some((op, k, first, ret)), Got::Num(v)) = (&c.op, x) {
+                let (a, b) = if *first { (v, *k) } else { (*k, v) };
+                x = Got::Num((op.apply(a, b, ret)?, 0));
+            }
+            let y = match &c.other {
+                Other::Const(_) => return None,
+                Other::Outer(j) => match c.how.of_value(outer.get(*j)?)? {
+                    Some(y) => y,
+                    None => {
+                        pass = false;
+                        continue;
+                    }
+                },
+                Other::Col(o) => {
+                    // (A column before this one: where the walk found it; after: walked to.)
+                    let p = if *o <= c.col {
+                        at[*o] as usize
                     } else {
-                        let s = sx.max(*sy);
-                        let pow = |n: u32| 10i128.checked_pow(n);
-                        x.checked_mul(pow(s - sx)?)?.cmp(&y.checked_mul(pow(s - sy)?)?)
-                    }
-                }
-                Against::Text(y, bp) => {
-                    let Some(mut x) = peek_text(data, pos)? else {
-                        pass = false;
-                        continue;
+                        let mut q = pos;
+                        let mut k = c.col;
+                        while k < *o {
+                            skip(data, &mut q).ok()?;
+                            k += 1;
+                        }
+                        q
                     };
-                    if *bp {
-                        x = crate::storage::cols::trim_spaces(x);
-                    }
-                    x.cmp(y)
-                }
-                Against::Date(_) | Against::Ts(_) | Against::Instant(_) => {
-                    let Some(x) = peek_dt(data, pos)? else {
-                        pass = false;
-                        continue;
-                    };
-                    match (against, x) {
-                        (Against::Date(y), Dt::Date(x)) => x.cmp(y),
-                        (Against::Ts(y), Dt::Ts(x)) => x.cmp(y),
-                        (Against::Instant(y), Dt::Date(x)) => crate::sql::func::ops::date_instant(x).cmp(y),
-                        (Against::Instant(y), Dt::Ts(x)) => x.cmp(y),
-                        _ => return None,
+                    match c.how.peek(data, p)? {
+                        Some(y) => y,
+                        None => {
+                            pass = false;
+                            continue;
+                        }
                     }
                 }
             };
-            pass &= test(if *col_first { o } else { o.reverse() });
+            let o = cmp_got(x, y)?;
+            pass &= (c.test)(if c.col_first { o } else { o.reverse() });
         }
         Some(pass)
     }
 }
+
+/// The columns a comparison of two of a stored row's columns may reach (`StoredCmps`).
+const MAX_STORED_COLS: usize = 32;
 
 /// How deep a kernel may nest: compiling and running one recurse as deep as it goes, with no
 /// stack check, so a deeper expression (an UPDATE through a view whose WHERE is 2,000 terms
