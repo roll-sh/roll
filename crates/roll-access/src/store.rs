@@ -872,6 +872,7 @@ impl Store {
     pub fn new(db: Db) -> Result<Store> {
         db.ensure_schema(SCHEMA)?;
         db.ensure_schema(crate::sinks::SCHEMA)?;
+        db.ensure_schema(crate::event_subs::SCHEMA)?;
         // Machine clients (client credentials): a confidential client's secret hash or key.
         // `add_column` checks for itself, so every database gets them, however old.
         db.add_column("oauth_clients", "confidential", "INTEGER NOT NULL DEFAULT 0")?;

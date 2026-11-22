@@ -1,14 +1,25 @@
 import { KeyRound, Play, SquareTerminal, Trash2, X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
-import { esRaw, esReason, formatCount, searchApi, type SearchCluster } from "@/lib/search-api";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { esRaw, esReason, formatCount, searchApi, type NewSearchKey, type SearchCluster } from "@/lib/search-api";
 import { bulkFailures } from "@/lib/search-import";
-import { copyAs, KEY_ENV } from "@/lib/search-playground";
+import { copyAs, KEY_ENV, type SnippetKey } from "@/lib/search-playground";
 import { bulkPages, esqlSnippet, pageLimit, sample, SAMPLES, SNIPPET_LANGUAGES, type SampleDataset, type SampleId, type SampleQuery } from "@/lib/search-samples";
-import { btn, Panel, primary, useCopy } from "../ui";
+import { btn, Panel, primary, SecretField, useCopy } from "../ui";
+import { day } from "./api-keys";
 import { JsonText } from "./json-view";
 import { consoleText } from "./request-preview";
 
 type Job = { id: SampleId; step: string; sent: number; error?: string };
+
+/** The key the first queries' code carries: made here, kept only while the panel is open. */
+type MadeKey = { key: NewSearchKey; open: boolean } | { making: true } | { error: string };
+
+/** What a key fills into the copied code (OpenSearch-flavor keys are a user and password). */
+function snippetKey(k: NewSearchKey): SnippetKey | undefined {
+  if (k.api_key) return { apiKey: k.api_key };
+  if (k.username && k.password) return { username: k.username, password: k.password };
+  return undefined;
+}
 
 /**
  * Sample data in one click, then three ready queries on it (Kibana's sample data, Meilisearch's
@@ -19,7 +30,7 @@ export function SampleData({
   present,
   onChanged,
   onOpenConsole,
-  onMakeKey,
+  onManageKeys,
   onClose,
 }: {
   cluster: SearchCluster;
@@ -27,10 +38,12 @@ export function SampleData({
   present: ReadonlySet<SampleId>;
   onChanged: (id: SampleId, loaded: boolean) => void;
   onOpenConsole: (text: string) => void;
-  onMakeKey: () => void;
+  /** Settings → API keys. */
+  onManageKeys: () => void;
   onClose?: () => void;
 }) {
   const [job, setJob] = useState<Job | null>(null);
+  const [key, setKey] = useState<MadeKey | null>(null);
   const [selected, setSelected] = useState<SampleId | null>(() => SAMPLES.find((s) => present.has(s.id))?.id ?? null);
   // A load in flight stops when the panel goes (closed, or the page left).
   const alive = useRef(true);
@@ -68,6 +81,17 @@ export function SampleData({
       onChanged(set.id, true);
     } catch (e) {
       update({ error: e instanceof Error ? e.message : String(e) });
+    }
+  };
+
+  // A data key for 30 days: enough to try the copied code, never the cluster's password.
+  const makeKey = async () => {
+    setKey({ making: true });
+    try {
+      const k = await searchApi.createKey(cluster.id, "first queries", "data", 30 * 86_400);
+      if (alive.current) setKey({ key: k, open: true });
+    } catch (e) {
+      if (alive.current) setKey({ error: e instanceof Error ? e.message : String(e) });
     }
   };
 
@@ -149,7 +173,16 @@ export function SampleData({
           );
         })}
       </div>
-      {shown && <FirstQueries key={shown.id} cluster={cluster} set={shown} onOpenConsole={onOpenConsole} onMakeKey={onMakeKey} />}
+      {shown && (
+        <FirstQueries
+          key={shown.id}
+          cluster={cluster}
+          set={shown}
+          onOpenConsole={onOpenConsole}
+          keyLine={<KeyLine cluster={cluster} made={key} onMake={makeKey} onSaved={() => key && "key" in key && setKey({ ...key, open: false })} onManage={onManageKeys} />}
+          snippetKey={key && "key" in key ? snippetKey(key.key) : undefined}
+        />
+      )}
       <p className="border-t border-line px-5 py-3 text-[12px] text-subtle">
         Remove deletes the index (products) or the data stream and its template (logs). Nothing else on the cluster changes.
       </p>
@@ -174,8 +207,83 @@ async function removeAll(id: string, set: SampleDataset) {
 
 type Outcome = { ok: true; took: number | null; value: unknown } | { ok: false; error: string };
 
+/** Where the copied code's credentials come from: a key made in place, shown once. */
+function KeyLine({ cluster, made, onMake, onSaved, onManage }: { cluster: SearchCluster; made: MadeKey | null; onMake: () => void; onSaved: () => void; onManage: () => void }) {
+  const { copied, copy } = useCopy();
+  const manage = (
+    <button onClick={onManage} className="text-subtle transition hover:text-fg">
+      manage keys
+    </button>
+  );
+  if (made && "key" in made) {
+    const k = made.key;
+    const expires = k.expires_at ? ` · expires ${day(k.expires_at * 1000)}` : "";
+    if (!made.open) {
+      return (
+        <p className="text-[11px] text-subtle">
+          The code carries the data key <span className="font-mono">{k.name}</span>
+          {expires}. {manage}
+        </p>
+      );
+    }
+    return (
+      <div className="rise space-y-2.5 rounded-lg border border-line bg-bg p-3" role="group" aria-label="New key">
+        <div className="flex items-center justify-between gap-3">
+          <span className="flex items-center gap-2 text-[12px] font-medium">
+            <KeyRound className="size-3.5 text-accent" /> A data key for {k.name}
+          </span>
+          <span className="text-[11px] text-subtle">shown once</span>
+        </div>
+        {k.api_key ? (
+          <SecretField id="key" value={k.api_key} masked="••••••••••••••••••••••••" copied={copied} onCopy={copy} />
+        ) : (
+          <div className="grid gap-2 sm:grid-cols-2">
+            <SecretField id="user" value={k.username ?? ""} masked={k.username ?? ""} copied={copied} onCopy={copy} />
+            <SecretField id="pw" value={k.password ?? ""} masked="••••••••••••••••••••••••" copied={copied} onCopy={copy} />
+          </div>
+        )}
+        <p className="text-[11px] text-muted">
+          Copied code now carries it{expires}. roll can&apos;t show it again: save it, or revoke it in Settings.
+        </p>
+        <div className="flex items-center gap-3 text-[11px]">
+          {manage}
+          <button onClick={onSaved} className={`${btn} ml-auto`}>
+            I&apos;ve saved it
+          </button>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <p className="text-[11px] text-subtle">
+      The code reads {cluster.flavor === "opensearch" ? "$OPENSEARCH_USERNAME and $OPENSEARCH_PASSWORD" : `$${KEY_ENV}`}, never a real key.{" "}
+      {made && "making" in made ? (
+        <span className="shimmer">Making a key…</span>
+      ) : (
+        <button onClick={onMake} className="inline-flex items-center gap-1 text-accent hover:underline">
+          <KeyRound className="size-3" /> Make a key
+        </button>
+      )}{" "}
+      · {manage}
+      {made && "error" in made && <span className="block text-danger">{made.error}</span>}
+    </p>
+  );
+}
+
 /** Three ready queries on a loaded dataset, each runnable in place. */
-function FirstQueries({ cluster, set, onOpenConsole, onMakeKey }: { cluster: SearchCluster; set: SampleDataset; onOpenConsole: (text: string) => void; onMakeKey: () => void }) {
+function FirstQueries({
+  cluster,
+  set,
+  onOpenConsole,
+  keyLine,
+  snippetKey,
+}: {
+  cluster: SearchCluster;
+  set: SampleDataset;
+  onOpenConsole: (text: string) => void;
+  keyLine: ReactNode;
+  snippetKey: SnippetKey | undefined;
+}) {
   const queries = set.queries(cluster.flavor);
   const [at, setAt] = useState(queries[0].id);
   const [results, setResults] = useState<Record<string, Outcome | "running">>({});
@@ -207,8 +315,8 @@ function FirstQueries({ cluster, set, onOpenConsole, onMakeKey }: { cluster: Sea
   const esql = q.request.path === "/_query";
   const snippet = (lang: (typeof SNIPPET_LANGUAGES)[number]) =>
     esql
-      ? esqlSnippet(lang, (q.request.body as { query: string }).query, cluster.url, KEY_ENV)
-      : copyAs(lang, { method: q.request.method, path: q.request.path, body: JSON.stringify(q.request.body) }, { url: cluster.url, flavor: cluster.flavor });
+      ? esqlSnippet(lang, (q.request.body as { query: string }).query, cluster.url, snippetKey && "apiKey" in snippetKey ? snippetKey.apiKey : undefined)
+      : copyAs(lang, { method: q.request.method, path: q.request.path, body: JSON.stringify(q.request.body) }, { url: cluster.url, flavor: cluster.flavor, key: snippetKey });
 
   return (
     <div className="rise border-t border-line">
@@ -252,12 +360,7 @@ function FirstQueries({ cluster, set, onOpenConsole, onMakeKey }: { cluster: Sea
               ))}
             </span>
           </div>
-          <p className="text-[11px] text-subtle">
-            The code reads {cluster.flavor === "opensearch" ? "$OPENSEARCH_USERNAME and $OPENSEARCH_PASSWORD" : `$${KEY_ENV}`}, never a real key.{" "}
-            <button onClick={onMakeKey} className="inline-flex items-center gap-1 text-accent hover:underline">
-              <KeyRound className="size-3" /> Make a key
-            </button>
-          </p>
+          {keyLine}
         </div>
         <div className="min-w-0" aria-live="polite">
           {result === undefined || result === "running" ? (

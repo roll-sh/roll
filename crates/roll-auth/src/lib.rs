@@ -113,6 +113,13 @@ pub fn grant_credential(headers: &HeaderMap) -> Option<String> {
 #[derive(Clone, Copy, Debug)]
 pub struct Operator;
 
+/// Work roll does later for a grant (MCP Events' webhook deliveries read their feed as it): set
+/// only by roll's own code on a request it makes in process (a request off the network never has
+/// extensions), never with an `Authorization` header. The gate hands it to the authorizer, which
+/// looks the grant up by id, as it is now, and decides and audits as for the grant's own token.
+#[derive(Clone, Debug)]
+pub struct ActAs(pub Arc<str>);
+
 impl Operator {
     pub fn on(extensions: &axum::http::Extensions) -> bool {
         extensions.get::<Operator>().is_some()
@@ -542,6 +549,18 @@ pub async fn check(State(gate): State<Arc<Gate>>, mut req: Request, next: Next) 
     }
     // A public route is public whatever a request carries (a grant holder opening a shared link).
     let public = req.extensions().get::<MatchedPath>().is_some_and(|m| matches!(gate.access(m.as_str()), Access::Public(_)));
+    // roll's own work for a grant (in process only): judged as that grant, by the authorizer.
+    if !public
+        && presented.is_none()
+        && !req.headers().contains_key(header::AUTHORIZATION)
+        && req.extensions().get::<ActAs>().is_some()
+        && let Some(a) = gate.authorizer.get()
+    {
+        let access = req.extensions().get::<MatchedPath>().map_or(Access::Operator, |m| gate.access(m.as_str()));
+        req.extensions_mut().insert(RouteAccess(access));
+        req.extensions_mut().insert(RouteRules(gate.clone()));
+        return a.handle(req, next).await;
+    }
     // A grant, or something that looks like one, never passes as anything else (nor with a cookie).
     if !public
         && let (Some(a), Some(p)) = (gate.authorizer.get(), grant_credential(req.headers()))
