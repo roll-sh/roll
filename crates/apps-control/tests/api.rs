@@ -6398,6 +6398,27 @@ async fn a_paused_cron_skips_its_runs_and_pausing_stops_one() {
     assert_eq!(ended[0]["status"], "canceled", "{ended}");
 }
 
+/// An environment's schedules turned off (`scheduled: false`, roll previews' pv- ones): what
+/// falls due is skipped, while a run asked for and a deploy still go.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unscheduled_environment_runs_only_what_is_asked() {
+    let w = world().await;
+    let (_, cron) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "every-minute", "source": {"kind": "image", "image": "busybox"}, "run": {"type": "cron", "schedule": "* * * * *"} }))).await;
+    let cid = cron["id"].as_str().unwrap().to_string();
+    assert_eq!(settled(&w, &cid, "production", cron["environments"][0]["latest"]["id"].as_str().unwrap()).await["status"], "active");
+    let (env, runs) = (format!("/v1/apps/services/{cid}/environments/production"), format!("/v1/apps/services/{cid}/environments/production/runs"));
+    let (st, e) = call(&w.api, "PUT", &env, Some(json!({ "scheduled": false }))).await;
+    assert_eq!((st, &e["scheduled"]), (StatusCode::OK, &json!(false)), "{e}");
+    let t = (code_sql::now_ms() / 60_000 + 60) * 60_000 + 30_000;
+    for m in 0..=10 {
+        w.apps.cron_pass(t + m * 60_000).await;
+    }
+    assert_eq!(call(&w.api, "GET", &runs, None).await.1, json!([]), "nothing on its schedule");
+    assert_eq!(call(&w.api, "POST", &runs, Some(json!({}))).await.0, StatusCode::ACCEPTED, "a run asked for still goes");
+    let (_, e) = call(&w.api, "PUT", &env, Some(json!({ "scheduled": true }))).await;
+    assert!(e.get("scheduled").is_none(), "{e}");
+}
+
 /// A failed cron run is tried again as `run.retries` allows (Cloud Run Jobs' retries), each try
 /// its own run; only the last failure is a `cron.failed`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -7979,12 +8000,13 @@ async fn a_stream_is_pushed_to_a_web_service() {
     assert_eq!(st, StatusCode::CREATED, "{svc}");
     let id = svc["id"].as_str().unwrap().to_string();
     assert_eq!(settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await["status"], "active");
-    // Not on its project: off, and said why.
+    // Not on its project: off, and said why (the push loop says so a moment later: waited for).
     w.apps.cron_pass(code_sql::now_ms()).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let logs = format!("/v1/apps/services/{id}/environments/production/logs");
+    let said = |l: &Value| l.as_array().is_some_and(|a| a.iter().any(|l| l["text"].as_str().is_some_and(|t| t.contains("isn't on this service's project"))));
+    let log = get_until(&w.api, &logs, said).await;
+    assert!(said(&log), "{log}");
     assert!(stream.committed.lock().is_empty());
-    let (_, log) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/logs"), None).await;
-    assert!(log.as_array().unwrap().iter().any(|l| l["text"].as_str().unwrap().contains("isn't on this service's project")), "{log}");
     let ws = w.apps.deps.workspace.clone().unwrap();
     ws.place(roll_workspace::Scope::All, &w.project, roll_workspace::Kind::Stream, "st_ag2345678abc", 0.0, 0.0).unwrap();
     let done = || {

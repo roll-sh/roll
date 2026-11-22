@@ -1747,7 +1747,7 @@ impl Apps {
         let (sid, e) = (r.service.clone(), r.name.clone());
         let config = self.db(move |s| s.runtime_config(&sid, &e)).await?;
         let (sid, e) = (r.service.clone(), r.name.clone());
-        let udp_port = self.db(move |s| s.udp_port(&sid, &e)).await?;
+        let (udp_port, scheduled) = self.db(move |s| Ok((s.udp_port(&sid, &e)?, s.scheduled(&sid, &e)?))).await?;
         let (sid, e) = (r.service.clone(), r.name.clone());
         let data = match self.db(move |s| Ok((s.env_data(&sid, &e)?, s.env_branches(&sid, &e)?))).await? {
             (true, branches) => Some(serde_json::json!({ "mode": "branch", "branches": branches.iter().map(|(k, rr, _)| serde_json::json!({ "kind": k.as_str(), "ref": rr })).collect::<Vec<_>>() })),
@@ -1821,6 +1821,7 @@ impl Apps {
             egress_refused: if r.egress.closed() { self.deps.runtime.egress_refused(&closed_network_name(&svc.project, &r.name), &r.egress.hosts) } else { Vec::new() },
             intercepted: r.egress.closed().then(|| self.deps.runtime.intercepted(&closed_network_name(&svc.project, &r.name))).flatten(),
             data,
+            scheduled: (!scheduled).then_some(false),
             closed_by: r.egress_by.as_ref().filter(|_| r.egress.closed()).map(|m| if m.is_empty() { Value::Null } else { Value::String(m.clone()) }),
             egress: r.egress.clone(),
             scaling,
@@ -1944,7 +1945,7 @@ impl Apps {
     pub async fn put_environment_by(self: &Arc<Self>, service: &str, env: &str, body: Value, by: Option<String>) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "checks", "heartbeats", "split", "mirror", "snippets", "config", "freeze", "pause_schedule", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host", "log_retention_days", "approvals", "badge", "closed_by", "data"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "checks", "heartbeats", "split", "mirror", "snippets", "config", "freeze", "pause_schedule", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host", "log_retention_days", "approvals", "badge", "closed_by", "data", "scheduled"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -2609,6 +2610,15 @@ impl Apps {
             new_urls = tokens.into_iter().map(|(name, token)| (name, format!("{}{}{token}", self.url(&slug), crate::heartbeats::PATH))).collect();
             self.changed(service);
         }
+        // Its schedules (a cron's, run.schedules) off or on; deploys and runs go on either way.
+        match o.get("scheduled") {
+            None => {}
+            Some(Value::Bool(on)) => {
+                let (sid, e, on) = (service.to_string(), env.to_string(), *on);
+                self.db(move |s| s.set_scheduled(&sid, &e, on)).await?;
+            }
+            Some(_) => return Err(Error::BadRequest("scheduled is a boolean".into())),
+        }
         if let Some(on) = data {
             let (sid, e) = (service.to_string(), env.to_string());
             let ephemeral = self.db(move |s| s.environment(&sid, &e)).await?.ephemeral;
@@ -2670,7 +2680,21 @@ impl Apps {
         for (kind, r, kept, used) in taken.into_iter().filter(|(.., used)| !used) {
             let _ = used;
             if let Err(e) = self.deps.resources.unbranch(kind, &r, &kept).await {
-                tracing::warn!(service, env, kind = kind.as_str(), r#ref = %r, error = %e, "apps: a branch couldn't be deleted");
+                tracing::warn!(service, env, kind = kind.as_str(), r#ref = %r, error = %e, "apps: a branch couldn't be deleted: tried again each minute");
+                let rr = r.clone();
+                let _ = self.db(move |s| s.add_orphan_branch(kind, &rr, &kept)).await;
+            }
+        }
+    }
+
+    /// Branches whose delete failed (the product away, a fleet's owner moving), tried again:
+    /// each one deleted is forgotten, the rest wait for the next minute.
+    pub(crate) async fn retry_orphan_branches(self: &Arc<Self>) {
+        let Ok(orphans) = self.db(|s| s.orphan_branches(50)).await else { return };
+        for (kind, r, kept) in orphans {
+            if self.deps.resources.unbranch(kind, &r, &kept).await.is_ok() {
+                let rr = r.clone();
+                let _ = self.db(move |s| s.forget_orphan_branch(kind, &rr, &kept)).await;
             }
         }
     }
@@ -3126,7 +3150,6 @@ impl Apps {
         sealed.extend(sensitive.into_iter().filter(|k| vars.get(k).is_some_and(|(_, s)| *s == "secret")));
         // Reference variables, one level deep: against what resolved above, and other services'.
         let unresolved = self.fill_references(svc, &env.name, &mut vars, &mut sealed).await;
-        let sources = vars.iter().map(|(k, (_, s))| (k.clone(), *s)).collect();
         // The build's OpenTelemetry agent (`build.otel`), started only while its traces go to
         // roll: last, joined to the app's own value of the same variable.
         if trace_endpoint && !deployment.is_empty() {
@@ -3149,6 +3172,8 @@ impl Apps {
                 _ => {}
             }
         }
+        // After the agent's join: a value roll composed says so.
+        let sources = vars.iter().map(|(k, (_, s))| (k.clone(), *s)).collect();
         Ok(ResolvedVars { vars: vars.into_iter().map(|(k, (v, _))| (k, v)).collect(), sources, unresolved, refused, ref_texts, sealed, from_secrets, plain_secrets, notices })
     }
 
