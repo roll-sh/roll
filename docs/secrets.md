@@ -3057,12 +3057,16 @@ cluster, instead of a key pasted into it: the Inference tab's "A roll secret", o
   for) themselves, as roll secrets answers them (`Secrets::caller_of`: their session, a roll token's
   rules, or the operator). Their rules also decide references and imports. Anyone else gets a 403
   and nothing is copied. A roll code owner token isn't anyone to roll secrets, so it can't copy
-  secrets, and an agent token never manages the owner. The values are sealed with the rest of the
-  sandbox's env until the backend has them. The sandbox records who copied them (`secrets_by`, the
-  maker: an admin's session is the person), and the read is theirs in the audit log (its actor),
-  resolved for `sandbox:<id> for <principal>`. Only where they came from is kept: before each
-  start roll code asks `Secrets::maker_may_reveal` (they still reach the project and may reveal the
-  environment, read untrusted), and once they may not the sandbox starts without those variables
+  secrets, and an agent token never manages the owner. The sandbox records who copied them
+  (`secrets_by`, the maker: an admin's session is the person), and the read is theirs in the audit
+  log (its actor), resolved for `sandbox:<id> for <principal>`. Only where they came from is kept
+  (`secrets_from`: project, environment, the variables' names), never the values: at the sandbox's
+  create and at each start roll code reads them again as the maker may now
+  (`Secrets::values_as_maker`: the check and the read in one call, untrusted, not a runtime), so a
+  rotated value reaches it at its next start. Once the maker may not (`maker_unreachable` or not
+  allowed), the sandbox starts without those variables (`secrets_dropped`). A sandbox made before
+  `secrets_from` was kept only has its maker asked whether they can still act (`maker_acts`), and
+  keeps what it was made with; delete it and make another to get fresh reads
   (docs/code/http-api.md, "Sandboxes").
 - **Previews**: roll previews (docs/previews.md) makes an ephemeral environment per change (see
   "Ephemeral environments") and resolves it as `preview:<slug>`. A preview runs a change's code, so
@@ -6070,9 +6074,10 @@ Newest entries first; older State and Ranked entries follow further down, as his
    roll-accounts' disable writes an outbox event, and rolld treats a disabled person as no member
    (fixing in `fix/secrets-offboarding`, with item 5's "a disable stops the copier's running
    sandboxes").
-5. **Sandbox copies are frozen at create** (S–M). Resolve `secrets_from` afresh at each start as the
-   maker. agent37 recreates the instance on its home. A member event or a disable stops the copier's
-   running sandboxes.
+5. **Sandbox copies are frozen at create** (S–M; fixing in `fix/sandbox-fresh-values`). Resolve
+   `secrets_from` afresh at each start as the maker (`values_as_maker`). agent37 edits the
+   instance's env (`PATCH`, merged; `null` unsets) before its start, on the same disk. A member event
+   or a disable stops the copier's running sandboxes (#697).
 6. **roll's own AI and chat credentials can't be `roll://` references** (integration, M):
    - reviewer provider keys (code-control's own table);
    - agents' endpoints (pasted or `op://`);
