@@ -42,7 +42,9 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    The consent screen starts from the `development` preset, where revealing a value asks you first:
    the first `roll run` prints where to approve it and waits.
 2. **Pick a project and its environments.** A workspace project has `development`, `staging` and
-   `production` the first time you open its secrets. Add your own environments (`roll secrets envs
+   `production` the first time you open its secrets. `production` is protected from the start: you
+   still write it directly, but developers see it only when you name it for them, and checks,
+   sandboxes and untrusted previews never get it. Add your own environments (`roll secrets envs
    add qa`) and remember the project for this directory. A project that doesn't exist yet is offered
    to you to create (in a script, `--create` makes it; in the dashboard, Projects → New project):
 
@@ -702,7 +704,8 @@ project (a workspace project, prj_…)
 ### Environments
 
 A project starts with `development`, `staging` and `production`, in that order, the first time
-anything touches its secrets. Teams add, rename, reorder and delete their own environments.
+anything touches its secrets; `production` starts protected with `approvals: 0` (see "Protected
+environments and approvals"). Teams add, rename, reorder and delete their own environments.
 
 - **Slug**: 1–32 characters of `[a-z0-9-]`, not starting or ending with `-`, unique in the project.
   References, the CLI and the URLs use the slug. **Renaming** an environment's slug rewrites every
@@ -1089,7 +1092,12 @@ is one click.
 `GET …/health` (`roll secrets health`, the dashboard's Health view) is every finding above in
 every standard environment and folder at once, worst first, so none waits on someone opening the
 right folder: `decoy_used` (a decoy key's credential was used; only the project's admins see it, signed in or
-the operator, see Decoys), `expired`, `rotation_failing` (a managed key's scheduled rotation fails: the
+the operator, see Decoys), `production_unprotected` (the project's `production` has no protection
+policy, as projects made before new ones started with it protected: checks, sandboxes and
+untrusted previews may read it and nothing there needs approval; the detail names what reaches it,
+owners, admins and developers who name it by handle, and the checks and sandboxes that resolved it
+in the last 90 days from the audit log; `key` is empty; nothing changes it but an admin, the
+dashboard's "Protect production" setting `{"protected": true, "approvals": 0}`), `expired`, `rotation_failing` (a managed key's scheduled rotation fails: the
 database, vendor, product or rotator refused or didn't answer; the detail says why, the old
 credential keeps working, and the sweeper tries again; cleared by the next rotation that works),
 `revoke_failing` (a credential roll retired, or a lease that ended, that it couldn't revoke yet: it
@@ -1226,7 +1234,8 @@ A link is `{kind, ref, field, mode, options}`:
   tombstone version.
 - **Deleting the workspace project** (`DELETE /v1/workspace/projects/{id}`) can't destroy secrets
   by accident, as AWS Secrets Manager's and Azure Key Vault's waits can't:
-  - while the project holds any value, a protected environment, an encryption key, a certificate
+  - while the project holds any value, a protected environment (other than `production` with the
+    policy every project starts with: no approvals, no approvers), an encryption key, a certificate
     authority or a workload identity, roll secrets refuses it
     (`roll_workspace::Workspace::before_delete`): 403 for anyone who may not `admin` the project's
     secrets (asked of the caller's grant, as every secrets route does; the 403 says nothing about
@@ -4553,8 +4562,8 @@ deployment key's state (`GET /v1/secrets/health`) is the operator's.
 | | viewer | developer | admin and owner |
 | --- | --- | --- | --- |
 | names, versions, history, audit log | yes | yes | yes |
-| values (`reveal`) | no (D2) | in its environments: by default every one without a protection policy, production only when named (D3) | everywhere (D4) |
-| set, change, rollback, promote into | no | in its environments; a protected one takes a change request | yes |
+| values (`reveal`) | no (D2) | in its environments: by default every one without a protection policy and never `production` (protected or not), production only when named (D3) | everywhere (D4) |
+| set, change, rollback, promote into | no | in its environments; a protected one that asks for approvals takes a change request | yes; the same change request where approvals are asked |
 | delete; protection, approvals, syncs, links, tokens, identities, sinks | no | no | yes |
 | review a change request | no | no | yes, or when named as an approver |
 
@@ -5136,8 +5145,27 @@ as `{text, content, project, environment, request: {id, by, message, keys}, link
 never values; Slack markup in `text` is escaped and Discord mentions are off, since the message is
 the requester's). Notices aren't signed: an incoming webhook's URL is its own credential, and the
 notice carries nothing a receiver should act on without opening the request in roll.
-A write to a protected environment doesn't apply. It answers 409 `approval_required`, and the
-client opens a **change request** with the same operations (`POST …/requests`). A request:
+**A new project's `production` starts protected with `approvals: 0`.** Protected means developers'
+default, checks, sandboxes and untrusted previews never reach it, and deleting it takes
+`?confirm=production`. With `approvals: 0`, whoever may write there (an owner, an admin, a
+developer who names it, a token) still writes directly, so a project with one owner never waits on
+a request for its own changes; `PUT …/policy {"protected": true, "approvals": 1}` turns on the
+two-person rule. `approvals` is 0–10; `{"protected": true}` without it means 1. Before #688 a
+protected environment with `approvals: 0` still took change requests (0 counted as 1), so an
+upgraded server's store migrates each such environment to `approvals: 1` once, when it opens and
+before it serves anything (`secrets-protected-approvals-zero-kept`; one `environment.policy` row
+per environment in its project's audit log, "approvals 0 → 1: kept requests as before (#688)",
+or a logged warning on a sealed start): nothing loosens without someone deciding it. A project made
+before this keeps whatever it had (nothing changes it silently): Health flags an unprotected
+`production` (`production_unprotected`, naming what reaches it), and the dashboard's "Protect
+production" there sets `{"protected": true, "approvals": 0}`. Whether or not it's protected, no
+`unprotected` rule (a developer's default, a CI token's) reaches an environment named `production`
+(docs/members.md, D3).
+
+A write to a protected environment that asks for approvals (`approvals` 1 or more) doesn't apply.
+It answers 409 `approval_required`, and the client opens a **change request** with the same
+operations (`POST …/requests`; one can be opened where `approvals` is 0 too, and needs one
+approval). A request:
 
 - holds its operations with values encrypted, and shows a diff without values; an approver who may
   reveal them sees each value now beside the one proposed (`…/requests/{id}/values`, audited);
@@ -5671,7 +5699,7 @@ type Insights = { path: string; max_age_days: number | null; reads_since: number
 type Required = { key: string; path: string; comment: string; type?: "url" | "int" | "port" | "bool" | "json" | "email"; pattern?: string; owner?: string /* who supplies it */; password?: { length: number; classes?: ("lower" | "upper" | "digit" | "symbol")[]; symbols?: string } };
 type Sink = { id: string; url: string; status: "new" | "ok" | "error"; error: string | null; cursor: number; delivered_at: number | null; created_at: number; created_by: string };
 type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
-type Finding = { issue: "decoy_used" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "operator_made" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string; decoy?: Decoy }; // decoy: on decoy_used only (an admin's session's or the operator's), the key's Decoy
+type Finding = { issue: "decoy_used" | "production_unprotected" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "unplaced" | "operator_made" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string; decoy?: Decoy }; // decoy: on decoy_used only (an admin's session's or the operator's), the key's Decoy
 type Rotation = { environment: string; path: string; keys: string[]; kind: string; ref: string; name: string; rotate_days: number | null; rotate_window: string | null; grace_minutes: number; issued_at: number | null; next_due: number | null; last_error: string | null; failed_at: number | null };
 type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
 type SaasRotator = { id: string; name: string; vendor: "sendgrid" | "twilio" | "okta" | "entra" | "auth0"; target: Record<string, unknown>; created_at: number; created_by: string };

@@ -666,8 +666,9 @@ route goes on as it did.
 - The roles are fixed rule templates (`crates/roll-auth/src/roles.rs`, one module holding the open
   decisions D1–D9). A rule may carry `unprotected: true`: it matches only a resource whose
   environment the product says isn't protected (`Resource::protected`: secrets, an environment
-  with a protection policy; a resource whose protection isn't known matches no such rule). It only
-  narrows, so a token can carry it too.
+  with a protection policy; a resource whose protection isn't known matches no such rule), and
+  never an environment named `production`, protected or not. It only narrows, so a token can
+  carry it too.
 - A project the session's rules don't name is a 404 (as the workspace answers); one they do is a
   403 that names what the role lacks. A list it can't see whole is filtered; a session never asks.
 - Session requests aren't access-log rows (they aren't a token's), allowed or refused: a refused
