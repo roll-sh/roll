@@ -213,6 +213,12 @@ writes a new generation and the other keeps reading its own. Point-in-time
 branches (`at`) replay the parent's WAL up to that time into new segments for the child. Garbage
 collection deletes a segment object only when no manifest of any cluster references it.
 
+Branches nest: a branch of a branch is the same manifest copy, its `parent_id` the middle branch,
+and deleting any cluster in the line leaves the others working (their manifests and pins are their
+own). A point-in-time branch replays its parent's WAL, so an `at` before a change the parent made
+to itself (roll previews' masking, which rewrites masked documents and expunges the originals)
+rebuilds the state before it: copy a masked branch without `at`, after the masking finished.
+
 ## Deleting and restoring
 
 A cluster's storage is keyed by its name (`search/c/<name>/`), and a deleted cluster's name is

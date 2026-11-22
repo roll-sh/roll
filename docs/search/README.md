@@ -1375,7 +1375,8 @@ deterministic (#396).
    (`_plugins/_ml/connectors`, `models/_register`) and the `text_embedding`/`ml_inference` processors
    aren't served, so OpenSearch customers' neural setups (Bedrock or OpenAI connectors) fail on
    arrival. Map them onto roll's `_inference` services and E5 (#563).
-15. **Relevance evaluation, A/B tests and merchandising** (Algolia A/B Testing, rules that
+15. **Relevance evaluation, A/B tests and merchandising** (design in
+   [relevance-experiments.md](relevance-experiments.md); Algolia A/B Testing, rules that
    boost, bury, filter and redirect, conversion analytics, dynamic re-ranking): `_rank_eval` is served
    without a UI or judgment lists, the Playground's A/B is offline, analytics records clicks only, and
    rules stop at pin and exclude. Live traffic splits through search applications (#358), conversion
