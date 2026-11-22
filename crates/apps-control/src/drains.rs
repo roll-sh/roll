@@ -106,8 +106,8 @@ impl Apps {
             let (url, kept) = self.mint_bucket_drain(project, b, &prefix, &mut settings).await?;
             let secret = format!("whsec_{}", crate::model::random(32));
             let host = url::Url::parse(&url).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
-            let (p, s2, u2) = (project.to_string(), secret.clone(), url.clone());
-            let made = self.db(move |s| s.add_drain(&p, &host, &u2, &s2, "s3", &settings)).await;
+            let (p, s2, u2, b2, k2) = (project.to_string(), secret.clone(), url.clone(), b.clone(), kept.clone());
+            let made = self.db(move |s| s.add_drain_linked(&p, &host, &u2, &s2, "s3", &settings, Some(("bucket", &b2, &k2)))).await;
             let d = match made {
                 Ok(d) => d,
                 Err(e) => {
@@ -115,8 +115,6 @@ impl Apps {
                     return Err(e);
                 }
             };
-            let (id, b2) = (d.id.clone(), b.clone());
-            self.db(move |s| s.add_drain_link(&id, "bucket", &b2, &kept)).await?;
             self.drains_changed(project).await;
             let mut v = serde_json::to_value(&d).expect("JSON");
             v["secret"] = json!(secret);
@@ -296,10 +294,8 @@ impl Apps {
 
     pub async fn delete_drain(self: &Arc<Self>, project: &str, id: &str) -> Result<()> {
         let (p, i) = (project.to_string(), id.to_string());
-        self.db(move |s| s.delete_drain(&p, &i)).await?;
         // A bucket drain's key goes with it (a failure is logged: the drain is gone either way).
-        let i = id.to_string();
-        if let Ok(Some((_, r, kept))) = self.db(move |s| s.take_drain_link(&i)).await
+        if let Some((_, r, kept)) = self.db(move |s| s.delete_drain(&p, &i)).await?
             && let Err(e) = self.deps.resources.unlink(crate::model::LinkKind::Bucket, &r, &kept).await
         {
             tracing::warn!(drain = id, bucket = %r, error = %e, "apps: a bucket drain's key couldn't be revoked");

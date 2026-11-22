@@ -75,6 +75,7 @@ pub mod totp;
 pub mod window;
 pub mod syncs;
 mod caller;
+mod members;
 pub mod consumers;
 pub mod kms;
 mod write;
@@ -288,6 +289,11 @@ pub enum Error {
     Unauthorized(String),
     #[error("{0}")]
     Forbidden(String),
+    /// 403 `maker_unreachable`: whoever set up placeholders or chose a reference can no longer
+    /// reveal there, or sign in. A product falls back on it (a preview resolves without
+    /// placeholders); any other 403 is `forbidden`.
+    #[error("{0}")]
+    MakerUnreachable(String),
     #[error("{0}")]
     NotFound(String),
     /// 409 with a code: `conflict`, `approval_required`, `stale`, `last_environment`.
@@ -491,6 +497,8 @@ impl Secrets {
         // Approval notifications (notices.rs): the sealed URL, its host to show, and the outbox.
         db.add_column("environments", "notify_url", "BLOB")?;
         db.add_column("environments", "notify_host", "TEXT")?;
+        // Who set the notify URL: it's announced to only while they may manage the project.
+        db.add_column("environments", "notify_by", "TEXT")?;
         db.add_column("syncs", "checked_at", "INTEGER")?;
         // Syncs a change marked due (checked_at NULL), found every couple of seconds (syncs.rs).
         db.ensure_schema("CREATE INDEX IF NOT EXISTS syncs_due ON syncs (retry_at) WHERE checked_at IS NULL;")?;

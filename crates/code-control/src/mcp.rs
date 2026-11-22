@@ -406,7 +406,102 @@ fn files_schema() -> Value {
 
 /// Tools that reach outside roll (MCP's `openWorldHint`): a model provider (an AI review, a coding
 /// agent's turns and automations) or a branch's remote (publishing an agent's work).
-const OPEN_WORLD: [&str; 7] = ["request_ai_review", "create_agent_thread", "send_agent_message", "respond_agent_request", "claim_agent_work", "run_agent_automation", "publish_agent_thread"];
+/// Tools whose effect can't be undone: clients ask a person first.
+const DESTRUCTIVE: [&str; 2] = ["close_change", "stop_preview"];
+const OPEN_WORLD: [&str; 9] = ["request_ai_review", "create_agent_thread", "send_agent_message", "respond_agent_request", "claim_agent_work", "run_agent_automation", "retry_agent_automation_run", "enable_agent_automation", "publish_agent_thread"];
+
+/// The routes each tool calls, as `(tool, method, route)` in the router's pattern: a lookup it
+/// makes on the way (a repo's default branch, `owner/repo#N`, a machine's or automation's name) is
+/// listed under one of the tools that make it. `tests/coverage_map.rs` holds every `/v1/code` route
+/// the routers declare to a row here or a line in `no-tool.txt` saying why it has no tool.
+pub const ROUTES: &[(&str, &str, &str)] = &[
+    ("list_repos", "GET", "/v1/code/repos"),
+    ("search_code", "GET", "/v1/code/repos/{owner}/{repo}/search"),
+    ("read_file", "GET", "/v1/code/repos/{owner}/{repo}/blob/{rev}/{*path}"),
+    ("read_file", "GET", "/v1/code/repos/{owner}/{repo}"),
+    ("list_tree", "GET", "/v1/code/repos/{owner}/{repo}/tree/{rev}/{*path}"),
+    ("list_tree", "GET", "/v1/code/repos/{owner}/{repo}/tree/{rev}/"),
+    ("list_tree", "GET", "/v1/code/repos/{owner}/{repo}"),
+    ("log", "GET", "/v1/code/repos/{owner}/{repo}/log"),
+    ("blame", "GET", "/v1/code/repos/{owner}/{repo}/blame/{rev}/{*path}"),
+    ("blame", "GET", "/v1/code/repos/{owner}/{repo}"),
+    ("get_changeset", "GET", "/v1/code/repos/{owner}/{repo}/changesets/{id}"),
+    ("compare", "GET", "/v1/code/repos/{owner}/{repo}/compare/{spec}"),
+    ("create_change", "POST", "/v1/code/repos/{owner}/{repo}/changes"),
+    ("create_change", "GET", "/v1/code/repos/{owner}/{repo}/work/{number}"),
+    ("revise_change", "POST", "/v1/code/changes/{id}/revise"),
+    ("land", "POST", "/v1/code/changes/{id}/land"),
+    ("land", "POST", "/v1/code/repos/{owner}/{repo}/land"),
+    ("get_change", "GET", "/v1/code/changes/{id}"),
+    ("get_change", "GET", "/v1/code/changes/{id}/review-status"),
+    ("get_change", "GET", "/v1/code/changes/{id}/threads"),
+    ("get_change", "GET", "/v1/code/repos/{owner}/{repo}/changes/{number}"),
+    ("list_changes", "GET", "/v1/code/repos/{owner}/{repo}/changes"),
+    ("claim_work", "POST", "/v1/code/repos/{owner}/{repo}/work/claim"),
+    ("heartbeat_work", "POST", "/v1/code/work/{id}/heartbeat"),
+    ("heartbeat_work", "GET", "/v1/code/repos/{owner}/{repo}/work/{number}"),
+    ("complete_work", "POST", "/v1/code/work/{id}/complete"),
+    ("release_work", "POST", "/v1/code/work/{id}/release"),
+    ("list_work", "GET", "/v1/code/repos/{owner}/{repo}/work"),
+    ("create_work", "POST", "/v1/code/repos/{owner}/{repo}/work"),
+    ("comment", "POST", "/v1/code/threads/{id}/comments"),
+    ("comment", "POST", "/v1/code/changes/{id}/threads"),
+    ("review", "POST", "/v1/code/changes/{id}/reviews"),
+    ("queue_status", "GET", "/v1/code/repos/{owner}/{repo}/queue"),
+    ("enqueue_change", "POST", "/v1/code/changes/{id}/enqueue"),
+    ("dequeue_change", "DELETE", "/v1/code/changes/{id}/enqueue"),
+    ("set_change_lane", "PATCH", "/v1/code/changes/{id}/enqueue"),
+    ("update_change", "PATCH", "/v1/code/changes/{id}"),
+    ("close_change", "POST", "/v1/code/changes/{id}/close"),
+    ("report_check", "POST", "/v1/code/changes/{id}/checks"),
+    ("set_commit_status", "POST", "/v1/code/repos/{owner}/{repo}/statuses/{rev}"),
+    ("list_refs", "GET", "/v1/code/repos/{owner}/{repo}/refs"),
+    ("create_repo", "POST", "/v1/code/repos"),
+    ("request_ai_review", "POST", "/v1/code/changes/{id}/ai-review"),
+    ("get_change", "GET", "/v1/code/changes/{id}/review-requests"),
+    ("get_change", "GET", "/v1/code/changes/{id}/reviews"),
+    ("resolve_thread", "POST", "/v1/code/threads/{id}/resolve"),
+    ("reopen_thread", "POST", "/v1/code/threads/{id}/unresolve"),
+    ("apply_suggestion", "POST", "/v1/code/threads/{id}/apply"),
+    ("request_review", "POST", "/v1/code/changes/{id}/review-requests"),
+    ("get_commit_statuses", "GET", "/v1/code/repos/{owner}/{repo}/statuses/{rev}"),
+    ("get_work", "GET", "/v1/code/work/{id}"),
+    ("update_work", "PATCH", "/v1/code/work/{id}"),
+    ("release_agent_work", "DELETE", "/v1/code/agents/{owner}/threads/{thread}/work"),
+    ("get_ai_review_pricing", "GET", "/v1/code/pricing"),
+    ("get_review_usage", "GET", "/v1/code/owners/{owner}/usage"),
+    ("list_ai_reviews", "GET", "/v1/code/changes/{id}/ai-jobs"),
+    ("get_reviewer", "GET", "/v1/code/repos/{owner}/{repo}/reviewer"),
+    ("get_review_rules", "GET", "/v1/code/repos/{owner}/{repo}/review-settings"),
+    ("get_repo_audit", "GET", "/v1/code/repos/{owner}/{repo}/audit"),
+    ("start_preview", "POST", "/v1/code/changes/{id}/preview"),
+    ("stop_preview", "DELETE", "/v1/code/changes/{id}/preview"),
+    ("retry_agent_automation_run", "POST", "/v1/code/agents/{owner}/automations/runs/{run}/retry"),
+    ("enable_agent_automation", "POST", "/v1/code/agents/{owner}/automations/{id}/enable"),
+    ("disable_agent_automation", "POST", "/v1/code/agents/{owner}/automations/{id}/disable"),
+    ("get_agent_automation_catalog", "GET", "/v1/code/agents/{owner}/automations/catalog"),
+    ("test_agent_automation", "POST", "/v1/code/agents/{owner}/automations/test"),
+    ("list_agent_sandboxes", "GET", "/v1/code/agents/{owner}/sandboxes"),
+    ("stop_agent_sandbox", "POST", "/v1/code/agents/{owner}/sandboxes/{id}/stop"),
+    ("get_agent_sandbox_usage", "GET", "/v1/code/agents/{owner}/sandboxes/usage"),
+    ("list_agent_machines", "GET", "/v1/code/agents/{owner}/machines"),
+    ("list_agent_threads", "GET", "/v1/code/agents/{owner}/state"),
+    ("list_agent_threads", "GET", "/v1/code/agents/{owner}/machines"),
+    ("create_agent_thread", "POST", "/v1/code/agents/{owner}/machines/{machine}/commands"),
+    ("send_agent_message", "POST", "/v1/code/agents/{owner}/machines/{machine}/commands"),
+    ("respond_agent_request", "POST", "/v1/code/agents/{owner}/machines/{machine}/commands"),
+    ("interrupt_agent_thread", "POST", "/v1/code/agents/{owner}/machines/{machine}/commands"),
+    ("publish_agent_thread", "POST", "/v1/code/agents/{owner}/machines/{machine}/commands"),
+    ("create_agent_project", "POST", "/v1/code/agents/{owner}/machines/{machine}/projects"),
+    ("claim_agent_work", "POST", "/v1/code/agents/{owner}/threads/{thread}/work"),
+    ("list_agent_automations", "GET", "/v1/code/agents/{owner}/automations"),
+    ("save_agent_automation", "POST", "/v1/code/agents/{owner}/automations"),
+    ("save_agent_automation", "PUT", "/v1/code/agents/{owner}/automations/{id}"),
+    ("run_agent_automation", "POST", "/v1/code/agents/{owner}/automations/{id}/run"),
+    ("list_agent_automation_runs", "GET", "/v1/code/agents/{owner}/automations/runs"),
+    ("get_agent_automation_run", "GET", "/v1/code/agents/{owner}/automations/runs/{run}"),
+    ("cancel_agent_automation_run", "POST", "/v1/code/agents/{owner}/automations/runs/{run}/cancel"),
+];
 
 /// Every tool, with its JSON Schema.
 pub fn tools() -> Vec<Value> {
@@ -414,6 +509,9 @@ pub fn tools() -> Vec<Value> {
     for t in &mut all {
         if t["name"].as_str().is_some_and(|n| OPEN_WORLD.contains(&n)) {
             t["annotations"]["openWorldHint"] = Value::Bool(true);
+        }
+        if t["name"].as_str().is_some_and(|n| DESTRUCTIVE.contains(&n)) {
+            t["annotations"]["destructiveHint"] = Value::Bool(true);
         }
     }
     all
@@ -509,6 +607,14 @@ fn every_tool() -> Vec<Value> {
             false,
         ),
         tool(
+            "update_change",
+            "Update a change",
+            "Change a change's title, description, labels or work item, or mark a draft ready for review (ready: true). Only what's given changes. Taking a change out of the queue is dequeue_change's.",
+            json!({ "change": change.clone(), "title": s("New title"), "body": s("New description (markdown)"), "ready": boolean("true: a draft becomes ready for review"), "labels": json!({ "type": "array", "items": { "type": "string" }, "description": "The labels it should have (replaces them; at most 20, 50 characters each)" }), "work_item": s("The work item it does: \"wi_…\" or \"owner/repo#N\" of the change's repo") }),
+            &["change"],
+            false,
+        ),
+        tool(
             "land",
             "Land",
             "Land a change, or edits directly. Returns status landed, queued (merge queue), blocked (with blockers) or conflict (with paths).",
@@ -519,7 +625,7 @@ fn every_tool() -> Vec<Value> {
         tool(
             "get_change",
             "Get a change",
-            "A change with its blockers, checks, review status and inline threads, and any notices: `secret_missing` means it reads an environment variable some roll secrets environment doesn't set (secrets_health says which); set it with secrets_set before merging, unless it comes from elsewhere.",
+            "A change with its blockers, checks, review status, reviews (with what each reviewer wrote), inline threads and review requests, and any notices: `secret_missing` means it reads an environment variable some roll secrets environment doesn't set (secrets_health says which); set it with secrets_set before merging, unless it comes from elsewhere.",
             json!({ "change": change }),
             &["change"],
             true,
@@ -559,6 +665,15 @@ fn every_tool() -> Vec<Value> {
             &["repo", "title"],
             false,
         ),
+        tool("get_work", "Get a work item", "A work item: its state, labels, priority, who claimed it and until when, and the change it led to.", json!({ "work": work.clone() }), &["work"], true),
+        tool(
+            "update_work",
+            "Update a work item",
+            "Change a work item's title, body, labels or priority. Only what's given changes. Its state moves through claim_work, release_work and complete_work, which hold to who claimed it.",
+            json!({ "work": work.clone(), "title": s("New title"), "body": s("New body (markdown)"), "labels": json!({ "type": "array", "items": { "type": "string" }, "description": "The labels it should have (replaces them)" }), "priority": int("0 (P0, most urgent) to 3") }),
+            &["work"],
+            false,
+        ),
         tool(
             "comment",
             "Comment",
@@ -580,7 +695,103 @@ fn every_tool() -> Vec<Value> {
             &["change", "verdict"],
             false,
         ),
+        tool(
+            "resolve_thread",
+            "Resolve a review thread",
+            "Mark a review thread resolved, once what it asked for is done. Writers, or whoever started the thread.",
+            json!({ "thread": s("Thread id (th_…), from get_change's threads") }),
+            &["thread"],
+            false,
+        ),
+        tool("reopen_thread", "Reopen a review thread", "Mark a resolved review thread open again. Writers, or whoever started the thread.", json!({ "thread": s("Thread id (th_…)") }), &["thread"], false),
+        tool(
+            "apply_suggestion",
+            "Apply a suggested edit",
+            "Apply a review comment's ```suggestion block to the change as a new revision, and resolve its thread. The thread's latest suggestion unless comment names another. Returns the change and the thread.",
+            json!({ "thread": s("Thread id (th_…)"), "comment": s("The comment (cm_…) whose suggestion to apply; default the thread's latest with one") }),
+            &["thread"],
+            false,
+        ),
+        tool(
+            "request_review",
+            "Request a review",
+            "Ask a person (@name), an agent (agent:name), a review app (app:name) or roll's own reviewer (roll) to review a change. With required, the change can't land until they've reviewed its current head (any verdict; a new revision asks again). Returns the change's review requests.",
+            json!({ "change": change.clone(), "reviewer": s("@name, agent:name, app:name or roll"), "required": boolean("They must review the current head before it lands (default false)") }),
+            &["change", "reviewer"],
+            false,
+        ),
         tool("queue_status", "Merge queue", "The merge queue: the batch being tested and who's waiting.", json!({ "repo": repo }), &["repo"], true),
+        tool(
+            "enqueue_change",
+            "Queue a change to land",
+            "Put a change in its repo's merge queue (a queue repo lands only tested trees): its position and queue entry. A change something blocks answers status \"blocked\" with its blockers, not an error; queueing a queued change answers its entry.",
+            json!({ "change": change, "lane": json!({ "type": "string", "enum": ["urgent", "normal"], "description": "urgent goes before normal (default normal)" }) }),
+            &["change"],
+            false,
+        ),
+        tool("dequeue_change", "Take a change out of the queue", "Take a queued change out of the merge queue: it's open again.", json!({ "change": change.clone() }), &["change"], false),
+        tool(
+            "set_change_lane",
+            "Move a queued change's lane",
+            "Move a queued change to the other lane (urgent goes before normal), keeping its place in time. A change that isn't queued is a 409: enqueue_change picks a lane when queuing.",
+            json!({ "change": change.clone(), "lane": json!({ "type": "string", "enum": ["urgent", "normal"] }) }),
+            &["change", "lane"],
+            false,
+        ),
+        tool("close_change", "Close a change", "Close a change without landing it. It can't be reopened: make a new change to try again.", json!({ "change": change }), &["change"], false),
+        tool(
+            "report_check",
+            "Report a check on a change",
+            "Record a check's result on a change, as a CI job outside roll does: name, status, a link and a summary. head names the changeset it ran on (409 once the change has moved past it). A repo's required checks gate the queue on these.",
+            json!({
+                "change": change,
+                "name": s("The check's name, e.g. \"tests\""),
+                "status": json!({ "type": "string", "enum": ["queued", "running", "success", "failure", "cancelled", "skipped"] }),
+                "url": s("Where its output is (http or https)"),
+                "summary": s("One line on what it found"),
+                "head": s("The changeset it ran on (any unique prefix)"),
+            }),
+            &["change", "name", "status"],
+            false,
+        ),
+        tool(
+            "set_commit_status",
+            "Set a commit status",
+            "A status on a revision, as GitHub's commit statuses work: CI that knows a git commit reports success, failure, error or pending under a context; it becomes a check on the changes it heads.",
+            json!({
+                "repo": repo,
+                "rev": s("A git commit, a changeset or a branch"),
+                "state": json!({ "type": "string", "enum": ["pending", "success", "failure", "error"] }),
+                "context": s("What reported it, e.g. \"ci/tests\" (default \"default\", at most 100 characters)"),
+                "target_url": s("Where its output is (http or https)"),
+                "description": s("One line on it"),
+            }),
+            &["repo", "rev", "state"],
+            false,
+        ),
+        tool(
+            "get_commit_statuses",
+            "Read commit statuses",
+            "The commit statuses on a revision, as GitHub's combined status reads: the combined state (failure, pending or success; an error counts as failure) and each context's latest.",
+            json!({ "repo": repo.clone(), "rev": s("A git commit, a changeset or a branch") }),
+            &["repo", "rev"],
+            true,
+        ),
+        tool("list_refs", "List branches and tags", "A repository's refs: each branch's and tag's name, the changeset it points at and its git commit.", json!({ "repo": repo }), &["repo"], true),
+        tool(
+            "create_repo",
+            "Create a repository",
+            "A new, empty repository under an owner you manage, to land into: `owner/name`, its default branch and visibility (409 if the name is taken). Connecting a GitHub repository is an admin's call.",
+            json!({
+                "owner": s("The owner it goes under"),
+                "name": s("Its name: letters, digits, - and _"),
+                "description": s("One line on it"),
+                "visibility": json!({ "type": "string", "enum": ["private", "public"], "description": "default private" }),
+                "default_branch": s("Default \"main\""),
+            }),
+            &["owner", "name"],
+            false,
+        ),
         tool(
             "request_ai_review",
             "Request an AI review",
@@ -589,6 +800,49 @@ fn every_tool() -> Vec<Value> {
             &["change"],
             false,
         ),
+        tool(
+            "get_ai_review_pricing",
+            "Read AI review prices",
+            "What roll's AI review costs: hosted per file and per review by mode (standard, deep, max), the price with the owner's own key, free reviews on public repos, and how spending caps work.",
+            json!({}),
+            &[],
+            true,
+        ),
+        tool(
+            "get_review_usage",
+            "Read an owner's AI review spend",
+            "An owner's AI reviews and chats in a month (default this UTC month): counts, price, free and capped reviews and tokens; by repo, mode and key; and what's left under the spending cap.",
+            json!({ "owner": s("An owner you manage"), "month": s("YYYY-MM") }),
+            &["owner"],
+            true,
+        ),
+        tool("list_ai_reviews", "List a change's AI reviews", "roll's review jobs for a change, oldest first: each one's kind, mode, state and stage, who asked, its progress, any error, and the review it made (get_change reads the review itself).", json!({ "change": change.clone() }), &["change"], true),
+        tool(
+            "get_reviewer",
+            "Read a repo's reviewer",
+            "How roll reviews a repo: the effective settings (mode, paths, when it reviews), what's stored and what .roll/review.yaml sets, any errors in that file, the model it uses, its queued and running jobs, and its code index.",
+            json!({ "repo": repo.clone() }),
+            &["repo"],
+            true,
+        ),
+        tool(
+            "get_review_rules",
+            "Read a repo's review rules",
+            "What a change needs to land: approvals, code owners, resolved threads, self-approval, auto-approval; as stored and as .roll/review.yaml tightens them.",
+            json!({ "repo": repo.clone() }),
+            &["repo"],
+            true,
+        ),
+        tool("get_repo_audit", "Read a repo's audit log", "What changed in a repo's queue and settings, newest first (200 at most): bypasses, pauses, lane moves, approved runs of outside code, webhooks, review and reviewer settings, dismissed reviews, credentials stored in roll secrets. Writers only.", json!({ "repo": repo.clone() }), &["repo"], true),
+        tool(
+            "start_preview",
+            "Start a change's preview",
+            "Make a change's preview from its roll.toml: it builds and starts on its first visit, and a change from outside the repo starts only after a writer's approve-run. Returns the change with its preview's url.",
+            json!({ "change": change.clone() }),
+            &["change"],
+            false,
+        ),
+        tool("stop_preview", "Stop a change's preview", "Remove a change's preview, and its database branch and Redis with it: start_preview makes a fresh one, not the same data.", json!({ "change": change.clone() }), &["change"], false),
         // roll code agents (docs/code/agents.md): drive agent threads on the owner's machines.
         tool(
             "list_agent_machines",
@@ -679,6 +933,14 @@ fn every_tool() -> Vec<Value> {
             &["owner", "thread"],
             false,
         ),
+        tool(
+            "release_agent_work",
+            "Take work off an agent",
+            "An agent thread lets go of the work item it holds: the thread no longer works on it, and the item's claim runs out on its own lease.",
+            json!({ "owner": owner.clone(), "thread": s("Thread (thr_…)") }),
+            &["owner", "thread"],
+            false,
+        ),
         // Automations (docs/code/automations.md): mapped onto /v1/code/agents/{owner}/automations.
         tool("list_agent_automations", "List automations", "The owner's automations: triggers, filters, steps, enabled, the last run.", json!({ "owner": owner.clone() }), &["owner"], true),
         tool(
@@ -707,6 +969,35 @@ fn every_tool() -> Vec<Value> {
         ),
         tool("get_agent_automation_run", "Read an automation run", "A run with its steps (status, output, log) and the event it ran for.", json!({ "owner": owner.clone(), "run": s("A run id (arn_…)") }), &["owner", "run"], true),
         tool("cancel_agent_automation_run", "Cancel an automation run", "Cancel a run going on. The owner's.", json!({ "owner": owner, "run": s("A run id (arn_…)") }), &["owner", "run"], false),
+        tool("retry_agent_automation_run", "Retry an automation run", "Run a failed or cancelled run again from where it stopped. The owner's.", json!({ "owner": owner.clone(), "run": s("A run id (arn_…)") }), &["owner", "run"], false),
+        tool("enable_agent_automation", "Turn an automation on", "Turn an automation on: new events start runs again. The owner's.", json!({ "owner": owner.clone(), "automation": s("An automation id (aut_…) or name") }), &["owner", "automation"], false),
+        tool("disable_agent_automation", "Turn an automation off", "Turn an automation off: new events start nothing; runs going on go on. The owner's.", json!({ "owner": owner.clone(), "automation": s("An automation id (aut_…) or name") }), &["owner", "automation"], false),
+        tool(
+            "get_agent_automation_catalog",
+            "List automation triggers and steps",
+            "Every trigger source and step kind an automation's spec can use, with each config's JSON Schema; an integration not connected yet says needs_setup.",
+            json!({ "owner": owner.clone() }),
+            &["owner"],
+            true,
+        ),
+        tool(
+            "test_agent_automation",
+            "Try an automation",
+            "What an automation's spec would do with an event, without saving or running it: whether the trigger and each filter take it, and each step's config with its templates filled in (secrets never are).",
+            json!({ "owner": owner.clone(), "spec": json!({ "type": "object", "description": "An AutomationSpec, as save_agent_automation takes" }), "event": json!({ "type": "object", "description": "{source, kind, data?}: the event to try, as its trigger would send it", "properties": { "source": { "type": "string" }, "kind": { "type": "string" }, "data": { "description": "Any JSON" } }, "required": ["source", "kind"] }) }),
+            &["owner", "spec", "event"],
+            false,
+        ),
+        tool("list_agent_sandboxes", "List sandboxes", "The owner's sandboxes (machines roll runs for agents): each one's status, size and machine, the sizes there are, and how many an owner may have.", json!({ "owner": owner.clone() }), &["owner"], true),
+        tool("stop_agent_sandbox", "Stop a sandbox", "Stop a sandbox: its running time stops being billed, and a command to it starts it again.", json!({ "owner": owner.clone(), "sandbox": s("A sandbox id (sbx_…)") }), &["owner", "sandbox"], false),
+        tool(
+            "get_agent_sandbox_usage",
+            "Read sandbox usage",
+            "Each sandbox's running hours and price in a month (default this UTC month), with totals.",
+            json!({ "owner": owner.clone(), "month": s("YYYY-MM") }),
+            &["owner"],
+            true,
+        ),
     ]
 }
 
@@ -826,6 +1117,10 @@ impl Call<'_> {
 
     async fn post(&self, path: &str, body: Value) -> Api {
         self.api(Method::POST, path, Some(body)).await
+    }
+
+    async fn delete(&self, path: &str) -> Api {
+        self.api(Method::DELETE, path, None).await
     }
 
     /// `/v1/code/repos/{owner}/{repo}` for "owner/repo".
@@ -1063,10 +1358,14 @@ async fn run(c: &Call<'_>, name: &str, args: &Value) -> std::result::Result<Outc
             }
             let status = c.get(&format!("/v1/code/changes/{}/review-status", seg(&id))).await;
             let threads = c.get(&format!("/v1/code/changes/{}/threads", seg(&id))).await;
+            let requests = c.get(&format!("/v1/code/changes/{}/review-requests", seg(&id))).await;
+            let reviews = c.get(&format!("/v1/code/changes/{}/reviews", seg(&id))).await;
             ok(json!({
                 "change": ch.body,
                 "review_status": if status.ok() { status.body } else { Value::Null },
                 "threads": if threads.ok() { threads.body } else { json!([]) },
+                "review_requests": if requests.ok() { requests.body } else { json!([]) },
+                "reviews": if reviews.ok() { reviews.body } else { json!([]) },
             }))
         }
         "list_changes" => {
@@ -1112,10 +1411,105 @@ async fn run(c: &Call<'_>, name: &str, args: &Value) -> std::result::Result<Outc
             let id = c.change_id(args).await?;
             pass(c.post(&format!("/v1/code/changes/{}/reviews", seg(&id)), body_of(args, &["change"])).await)
         }
+        "update_change" => {
+            let id = c.change_id(args).await?;
+            let mut body = body_of(args, &["change", "ready"]);
+            // Only ready: marking a change draft would take a queued one out of the queue, which
+            // needs delete (dequeue_change), not this tool's write.
+            match args.get("ready").and_then(Value::as_bool) {
+                Some(true) => body["draft"] = json!(false),
+                Some(false) => return Err(fail("ready: false isn't something this tool does: dequeue_change takes a change out of the queue")),
+                None => {}
+            }
+            // The route takes the item's id; the tool also takes "owner/repo#N".
+            if let Some(w) = opt(args, "work_item").filter(|w| w.contains('#')) {
+                body["work_item"] = json!(c.by_number(&w, "work").await?);
+            }
+            pass(c.api(Method::PATCH, &format!("/v1/code/changes/{}", seg(&id)), Some(body)).await)
+        }
+        "set_change_lane" => {
+            let id = c.change_id(args).await?;
+            pass(c.api(Method::PATCH, &format!("/v1/code/changes/{}/enqueue", seg(&id)), Some(body_of(args, &["change"]))).await)
+        }
+        "get_ai_review_pricing" => pass(c.get("/v1/code/pricing").await),
+        "get_review_usage" => {
+            let owner = str_arg(args, "owner").ok_or_else(|| fail("owner is required"))?;
+            pass(c.get(&format!("/v1/code/owners/{}/usage{}", seg(owner), query(&[("month", opt(args, "month"))]))).await)
+        }
+        "list_ai_reviews" => {
+            let id = c.change_id(args).await?;
+            pass(c.get(&format!("/v1/code/changes/{}/ai-jobs", seg(&id))).await)
+        }
+        "get_reviewer" | "get_review_rules" | "get_repo_audit" => {
+            let base = c.repo(args)?;
+            let tail = match name {
+                "get_reviewer" => "reviewer",
+                "get_review_rules" => "review-settings",
+                _ => "audit",
+            };
+            pass(c.get(&format!("{base}/{tail}")).await)
+        }
+        "start_preview" | "stop_preview" => {
+            let id = c.change_id(args).await?;
+            let path = format!("/v1/code/changes/{}/preview", seg(&id));
+            pass(if name == "start_preview" { c.post(&path, json!({})).await } else { c.delete(&path).await })
+        }
+        "resolve_thread" | "reopen_thread" => {
+            let th = str_arg(args, "thread").ok_or_else(|| fail("thread is required (th_…)"))?;
+            let action = if name == "resolve_thread" { "resolve" } else { "unresolve" };
+            pass(c.post(&format!("/v1/code/threads/{}/{action}", seg(th)), json!({})).await)
+        }
+        "apply_suggestion" => {
+            let th = str_arg(args, "thread").ok_or_else(|| fail("thread is required (th_…)"))?;
+            pass(c.post(&format!("/v1/code/threads/{}/apply", seg(th)), body_of(args, &["thread"])).await)
+        }
+        "request_review" => {
+            let id = c.change_id(args).await?;
+            pass(c.post(&format!("/v1/code/changes/{}/review-requests", seg(&id)), body_of(args, &["change"])).await)
+        }
+        "get_commit_statuses" => {
+            let base = c.repo(args)?;
+            let rev = str_arg(args, "rev").ok_or_else(|| fail("rev is required"))?;
+            pass(c.get(&format!("{base}/statuses/{}", seg(rev))).await)
+        }
+        "get_work" => {
+            let id = c.work_id(args).await?;
+            pass(c.get(&format!("/v1/code/work/{}", seg(&id))).await)
+        }
+        "update_work" => {
+            let id = c.work_id(args).await?;
+            pass(c.api(Method::PATCH, &format!("/v1/code/work/{}", seg(&id)), Some(body_of(args, &["work"]))).await)
+        }
         "queue_status" => {
             let base = c.repo(args)?;
             pass(c.get(&format!("{base}/queue")).await)
         }
+        "enqueue_change" => {
+            let id = c.change_id(args).await?;
+            land_outcome(c.post(&format!("/v1/code/changes/{}/enqueue", seg(&id)), body_of(args, &["change"])).await)
+        }
+        "dequeue_change" => {
+            let id = c.change_id(args).await?;
+            pass(c.delete(&format!("/v1/code/changes/{}/enqueue", seg(&id))).await)
+        }
+        "close_change" => {
+            let id = c.change_id(args).await?;
+            pass(c.post(&format!("/v1/code/changes/{}/close", seg(&id)), json!({})).await)
+        }
+        "report_check" => {
+            let id = c.change_id(args).await?;
+            pass(c.post(&format!("/v1/code/changes/{}/checks", seg(&id)), body_of(args, &["change"])).await)
+        }
+        "set_commit_status" => {
+            let base = c.repo(args)?;
+            let rev = str_arg(args, "rev").ok_or_else(|| fail("rev is required"))?;
+            pass(c.post(&format!("{base}/statuses/{}", seg(rev)), body_of(args, &["repo", "rev"])).await)
+        }
+        "list_refs" => {
+            let base = c.repo(args)?;
+            pass(c.get(&format!("{base}/refs")).await)
+        }
+        "create_repo" => pass(c.post("/v1/code/repos", body_of(args, &[])).await),
         "request_ai_review" => {
             let id = c.change_id(args).await?;
             pass(c.post(&format!("/v1/code/changes/{}/ai-review", seg(&id)), body_of(args, &["change"])).await)
@@ -1172,6 +1566,12 @@ async fn run(c: &Call<'_>, name: &str, args: &Value) -> std::result::Result<Outc
                 r.error()
             }
         }
+        "release_agent_work" => {
+            let owner = c.owner(args)?;
+            let thread = str_arg(args, "thread").ok_or_else(|| fail("thread is required (thr_…)"))?;
+            let r = c.delete(&format!("/v1/code/agents/{}/threads/{}/work", seg(owner), seg(thread))).await;
+            if r.ok() { ok(json!({ "released": true })) } else { r.error() }
+        }
         "list_agent_automations" => {
             let owner = c.owner(args)?;
             pass(c.get(&format!("/v1/code/agents/{}/automations", seg(owner))).await)
@@ -1212,6 +1612,42 @@ async fn run(c: &Call<'_>, name: &str, args: &Value) -> std::result::Result<Outc
             let run = str_arg(args, "run").ok_or_else(|| fail("run is required (arn_…)"))?;
             let path = format!("/v1/code/agents/{}/automations/runs/{}", seg(owner), seg(run));
             pass(if name == "get_agent_automation_run" { c.get(&path).await } else { c.post(&format!("{path}/cancel"), json!({})).await })
+        }
+        "retry_agent_automation_run" => {
+            let owner = c.owner(args)?;
+            let run = str_arg(args, "run").ok_or_else(|| fail("run is required (arn_…)"))?;
+            pass(c.post(&format!("/v1/code/agents/{}/automations/runs/{}/retry", seg(owner), seg(run)), json!({})).await)
+        }
+        "enable_agent_automation" | "disable_agent_automation" => {
+            let owner = c.owner(args)?;
+            let a = str_arg(args, "automation").ok_or_else(|| fail("automation is required (aut_… or its name)"))?;
+            let id = c.automation_id(owner, a).await?;
+            let action = if name == "enable_agent_automation" { "enable" } else { "disable" };
+            pass(c.post(&format!("/v1/code/agents/{}/automations/{}/{action}", seg(owner), seg(&id)), json!({})).await)
+        }
+        "get_agent_automation_catalog" => {
+            let owner = c.owner(args)?;
+            pass(c.get(&format!("/v1/code/agents/{}/automations/catalog", seg(owner))).await)
+        }
+        "test_agent_automation" => {
+            let owner = c.owner(args)?;
+            let spec = args.get("spec").filter(|v| v.is_object()).ok_or_else(|| fail("spec must be an object (an AutomationSpec)"))?;
+            let event = args.get("event").filter(|v| v.is_object()).ok_or_else(|| fail("event must be an object ({source, kind, data?})"))?;
+            let body = json!({ "automation": spec, "event": event });
+            pass(c.post(&format!("/v1/code/agents/{}/automations/test", seg(owner)), body).await)
+        }
+        "list_agent_sandboxes" => {
+            let owner = c.owner(args)?;
+            pass(c.get(&format!("/v1/code/agents/{}/sandboxes", seg(owner))).await)
+        }
+        "stop_agent_sandbox" => {
+            let owner = c.owner(args)?;
+            let sbx = str_arg(args, "sandbox").ok_or_else(|| fail("sandbox is required (sbx_…)"))?;
+            pass(c.post(&format!("/v1/code/agents/{}/sandboxes/{}/stop", seg(owner), seg(sbx)), json!({})).await)
+        }
+        "get_agent_sandbox_usage" => {
+            let owner = c.owner(args)?;
+            pass(c.get(&format!("/v1/code/agents/{}/sandboxes/usage{}", seg(owner), query(&[("month", opt(args, "month"))]))).await)
         }
         other => fail(format!("unknown tool {other}")),
     })

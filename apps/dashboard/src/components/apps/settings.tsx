@@ -1,7 +1,7 @@
 import { Trash2 } from "lucide-react";
 import { useReducedMotion } from "@roll/brand";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { appsApi, SERVICE_NAME, type Build, type Environment, type Prices, type PushState, type Reset, type Run, type Service, type ServicePatch, type Source } from "@/lib/apps-api";
+import { appsApi, SERVICE_NAME, type Build, type Environment, type MetricAlert, type Prices, type PushState, type Reset, type Run, type Service, type ServicePatch, type Source } from "@/lib/apps-api";
 import { Field, Segmented } from "../redis/shared";
 import { btn, Confirm, danger, input, Panel, panel, primary } from "../ui";
 import { Link } from "@/components/link";
@@ -40,6 +40,10 @@ interface Form {
   /** The build's timeout, minutes. */
   buildTimeout: string;
   buildSize: string;
+  submodules: boolean;
+  /** Private roll code repos submodules may come from, comma-separated. */
+  submoduleRepos: string;
+  lfs: boolean;
   type: Run["type"];
   port: string;
   start: string;
@@ -79,6 +83,10 @@ interface Form {
   alertCapacity: string;
   alertLog: string;
   alertLogCount: string;
+  /** CPU alert, a share of each instance's cpu. */
+  alertCpu: string;
+  /** Alerts on its own gauges, one a line (`queue_depth > 100 for 5m`). */
+  alertMetrics: string;
   rolloutSteps: string;
   rolloutStep: string;
   rolloutErrors: string;
@@ -86,6 +94,9 @@ interface Form {
   /** The new instances start beside the old ones (false: the old ones stop first). */
   rolloutOverlap: boolean;
   h2c: boolean;
+  /** With h2c: a gRPC health check, the service's name (empty: the server); off when unchecked. */
+  healthGrpc: boolean;
+  healthGrpcService: string;
   public: boolean;
   restart: "always" | "on_failure" | "never";
   restartTries: string;
@@ -147,6 +158,9 @@ export function formOf(s: Service): Form {
     packages: (s.build.packages ?? []).join(" "),
     buildTimeout: s.build.timeout_s ? String(Math.round(s.build.timeout_s / 60)) : "",
     buildSize: s.build.size ?? "small",
+    submodules: !!s.build.submodules,
+    submoduleRepos: (s.build.submodule_repos ?? []).join(", "),
+    lfs: !!s.build.lfs,
     type: s.run.type,
     port: str(s.run.port),
     start: str(s.run.start),
@@ -184,12 +198,16 @@ export function formOf(s: Service): Form {
     alertCapacity: str(s.run.alerts?.capacity_pct),
     alertLog: s.run.alerts?.log_match ?? "",
     alertLogCount: str(s.run.alerts?.log_count ?? 10),
+    alertCpu: str(s.run.alerts?.cpu_pct ?? 0),
+    alertMetrics: (s.run.alerts?.metrics ?? []).map(metricAlertLine).join("\n"),
     rolloutSteps: (s.run.rollout?.steps ?? []).join(", "),
     rolloutStep: str(s.run.rollout?.step_s),
     rolloutErrors: str(s.run.rollout?.error_pct),
     rolloutManual: !!s.run.rollout?.manual,
     rolloutOverlap: s.run.rollout?.overlap !== false,
     h2c: !!s.run.h2c,
+    healthGrpc: s.run.health_grpc != null,
+    healthGrpcService: s.run.health_grpc ?? "",
     public: s.run.public !== false,
     restart: s.run.restart ?? "always",
     restartTries: str(s.run.restart_tries),
@@ -254,6 +272,12 @@ export function patchOf(s: Service, f: Form): ServicePatch {
     build.timeout_s = m === null ? null : m * 60;
   }
   if (f.buildSize !== before.buildSize) build.size = f.buildSize === "small" ? null : (f.buildSize as "medium" | "large");
+  if (f.submodules !== before.submodules) build.submodules = f.submodules ? true : null;
+  if (f.submoduleRepos !== before.submoduleRepos) {
+    const repos = f.submoduleRepos.split(/[\s,]+/).filter(Boolean);
+    build.submodule_repos = repos.length ? repos : null;
+  }
+  if (f.lfs !== before.lfs) build.lfs = f.lfs ? true : null;
   if (Object.keys(build).length) patch.build = build;
   const run: Reset<Run> = {};
   if (f.type !== before.type) run.type = f.type;
@@ -284,8 +308,10 @@ export function patchOf(s: Service, f: Form): ServicePatch {
     run.oidc_audiences = list.length ? list : null;
   }
   if (f.memoryTarget !== before.memoryTarget) run.memory_target = num(f.memoryTarget);
-  if (f.alertMemory !== before.alertMemory || f.alertErrors !== before.alertErrors || f.alertP95 !== before.alertP95 || f.alertCapacity !== before.alertCapacity || f.alertLog !== before.alertLog || f.alertLogCount !== before.alertLogCount)
+  if (f.alertMemory !== before.alertMemory || f.alertErrors !== before.alertErrors || f.alertP95 !== before.alertP95 || f.alertCapacity !== before.alertCapacity || f.alertLog !== before.alertLog || f.alertLogCount !== before.alertLogCount || f.alertCpu !== before.alertCpu || f.alertMetrics !== before.alertMetrics)
     run.alerts = {
+      cpu_pct: Number(f.alertCpu) || 0,
+      metrics: metricAlerts(f.alertMetrics),
       memory_pct: Number(f.alertMemory) || 0,
       error_pct: Number(f.alertErrors) || 0,
       p95_ms: Number(f.alertP95) || 0,
@@ -309,6 +335,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
       ...(f.rolloutOverlap ? {} : { overlap: false }),
     };
   if (f.h2c !== before.h2c) run.h2c = f.h2c ? true : null;
+  if (f.healthGrpc !== before.healthGrpc || f.healthGrpcService !== before.healthGrpcService) run.health_grpc = f.healthGrpc && f.h2c ? f.healthGrpcService.trim() : null;
   if (f.public !== before.public) run.public = f.public ? null : false;
   if (f.affinity !== before.affinity) run.affinity = f.affinity ? true : null;
   if (f.tcp !== before.tcp) run.tcp = f.tcp ? true : null;
@@ -342,6 +369,27 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   return patch;
 }
 
+/** A metric alert as Settings writes it: `queue_depth > 100 for 5m` (`sum` after it for their sum). */
+export function metricAlertLine(m: MetricAlert): string {
+  const op = m.above != null ? `> ${m.above}` : `< ${m.below ?? 0}`;
+  return `${m.name} ${op}${m.minutes && m.minutes !== 3 ? ` for ${m.minutes}m` : ""}${m.sum ? " sum" : ""}`;
+}
+
+/** Lines of `name > n` or `name < n`, each with an optional `for Nm` and `sum`, as `alerts.metrics`
+ *  (a line it can't read is left for the API to refuse whole, never dropped). */
+export function metricAlerts(text: string): MetricAlert[] {
+  return text
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .map((l) => {
+      const m = /^(\S+)\s*([<>])\s*(-?[\d.]+)(?:\s+for\s+(\d+)m)?(\s+sum)?$/.exec(l);
+      if (!m) return { name: l };
+      const value = Number(m[3]);
+      return { name: m[1], ...(m[2] === ">" ? { above: value } : { below: value }), ...(m[4] ? { minutes: Number(m[4]) } : {}), ...(m[5] ? { sum: true } : {}) };
+    });
+}
+
 /** `name: pattern` lines as `run.log_metrics` (a line with no name is its own pattern's). */
 export function logMetrics(text: string): { name: string; pattern: string }[] {
   return text
@@ -354,7 +402,7 @@ export function logMetrics(text: string): { name: string; pattern: string }[] {
     });
 }
 
-const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "retries", "min", "max", "concurrency", "queue", "healthTimeout", "healthEvery", "healthFailures", "drain", "cpuTarget", "busyCpu", "latencyTarget", "memoryTarget", "suspendAfter", "sleepAfter", "volumeSize", "backupEvery", "backupKeep", "alertMemory", "alertErrors", "alertP95", "sloObjective", "sloLatency", "sloWindow", "metricsPort", "alertCapacity", "alertLogCount", "rolloutStep", "rolloutErrors", "restartTries"];
+const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "retries", "min", "max", "concurrency", "queue", "healthTimeout", "healthEvery", "healthFailures", "drain", "cpuTarget", "busyCpu", "latencyTarget", "memoryTarget", "suspendAfter", "sleepAfter", "volumeSize", "backupEvery", "backupKeep", "alertMemory", "alertErrors", "alertP95", "sloObjective", "sloLatency", "sloWindow", "metricsPort", "alertCapacity", "alertLogCount", "alertCpu", "rolloutStep", "rolloutErrors", "restartTries"];
 
 /** A rollout's steps as typed (`10, 50`): increasing percents 1–99, at most five; null when they aren't. */
 export function rolloutSteps(v: string): number[] | null {
@@ -517,6 +565,27 @@ export function SettingsTab({
               {(form.sourceKind === "repo" || form.sourceKind === "git") && (
                 <Field label="Watch paths" hint="a push deploys only when it changes one">
                   {t("watch", "apps/web/**, packages/ui/**")}
+                </Field>
+              )}
+              {(form.sourceKind === "git" || form.sourceKind === "repo") && (
+                <Field label="Submodules" hint={form.sourceKind === "repo" ? "fetched at the commits the repo pins: public URLs, public roll code repos and the private ones named below" : "fetched at the commits the repository pins, from their own public URLs"}>
+                  <select value={form.submodules ? "on" : "off"} onChange={(e) => set("submodules", e.target.value === "on")} className={`${input} w-full`}>
+                    <option value="off">Left out</option>
+                    <option value="on">Fetched into the build</option>
+                  </select>
+                </Field>
+              )}
+              {form.sourceKind === "repo" && form.submodules && (
+                <Field label="Private submodule repos" hint="roll code repos you can read that its submodules may come from">
+                  {t("submoduleRepos", "acme/lib, acme/ui")}
+                </Field>
+              )}
+              {form.sourceKind === "git" && (
+                <Field label="Git LFS" hint="objects fetched in place of their pointers, checked against them">
+                  <select value={form.lfs ? "on" : "off"} onChange={(e) => set("lfs", e.target.value === "on")} className={`${input} w-full`}>
+                    <option value="off">Pointers as they are</option>
+                    <option value="on">Objects fetched</option>
+                  </select>
                 </Field>
               )}
             </Grid>
@@ -767,6 +836,9 @@ export function SettingsTab({
                 <Field label="Metrics from its log" hint="name: pattern, one a line; each minute, the lines holding it (any case) as a gauge">
                   <textarea value={form.logMetrics} onChange={(e) => set("logMetrics", e.target.value)} rows={2} placeholder="payments_failed: payment failed" className={`${input} w-full font-mono text-[12px]`} spellCheck={false} />
                 </Field>
+                <Field label="Alerts on its own gauges" hint="name > n or name < n, one a line; for 1–5m running (default 3), sum to add their series">
+                  <textarea value={form.alertMetrics} onChange={(e) => set("alertMetrics", e.target.value)} rows={2} placeholder="queue_depth > 1000 for 5m" className={`${input} w-full font-mono text-[12px]`} spellCheck={false} />
+                </Field>
                 <Field label="Metrics endpoint" hint="its Prometheus path, scraped every 15 s while it runs; empty: none">
                   {t("metricsPath", "/metrics")}
                 </Field>
@@ -795,6 +867,9 @@ export function SettingsTab({
             )}
             <Field label="Alert: memory (%)" hint="of its limit, five minutes; 0 off">
               {t("alertMemory", "90")}
+            </Field>
+            <Field label="Alert: CPU (%)" hint="of each instance's vCPU, five minutes; 0 off">
+              {t("alertCpu", "0")}
             </Field>
             <Field label="A crash loop after a deploy" hint="within ten minutes of going live">
               <select value={form.rollbackOnCrash ? "back" : "stay"} onChange={(e) => set("rollbackOnCrash", e.target.value === "back")} className={`${input} w-full`}>
@@ -851,6 +926,19 @@ export function SettingsTab({
                   <option value="h2c">HTTP/2 (h2c)</option>
                 </select>
               </Field>
+              {form.h2c && (
+                <Field label="Health check" hint="gRPC: grpc.health.v1's check must answer SERVING, in place of the health path">
+                  <select value={form.healthGrpc ? "grpc" : "http"} onChange={(e) => set("healthGrpc", e.target.value === "grpc")} className={`${input} w-full`}>
+                    <option value="http">Its health path</option>
+                    <option value="grpc">gRPC health service</option>
+                  </select>
+                </Field>
+              )}
+              {form.h2c && form.healthGrpc && (
+                <Field label="gRPC service checked" hint="its full name; empty: the server as a whole">
+                  {t("healthGrpcService", "acme.Orders")}
+                </Field>
+              )}
               <Field label="HTTP or TCP" hint="TCP: a port of its own per environment, no HTTP names (a game server, MQTT)">
                 <select value={form.tcp ? "tcp" : "http"} onChange={(e) => set("tcp", e.target.value === "tcp")} className={`${input} w-full`}>
                   <option value="http">HTTP</option>

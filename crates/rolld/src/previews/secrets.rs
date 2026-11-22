@@ -124,7 +124,14 @@ impl Secrets {
                 }
             }
         }
+        let placeholders = v["placeholders"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|p| Some((p["key"].as_str()?.to_string(), p["hosts"].as_array()?.iter().filter_map(|h| h.as_str().map(str::to_string)).collect())))
+            .collect();
         Ok(roll_previews::ports::Resolved {
+            placeholders,
             values,
             problems: v["problems"]
                 .as_array()

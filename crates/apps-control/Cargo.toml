@@ -16,6 +16,7 @@ aws-config.workspace = true
 aws-credential-types.workspace = true
 aws-sigv4.workspace = true
 aws-smithy-runtime-api.workspace = true
+roll-intercept.workspace = true
 aws-sdk-cloudwatchlogs.workspace = true
 aws-sdk-codebuild.workspace = true
 aws-sdk-ecr.workspace = true

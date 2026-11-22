@@ -25,15 +25,19 @@ pub struct Products<'a> {
     pub secrets: SecretsEnvs,
     pub apps: Option<Arc<apps_control::Apps>>,
     pub search: Option<Arc<search_control::Control>>,
+    pub previews: Option<Arc<roll_previews::Engine>>,
 }
 
 fn resolvers(p: Products<'_>, workspace: Arc<roll_workspace::Workspace>) -> Resolvers {
     let mut r = Resolvers { workspace: Some(Arc::new(WorkspaceResolver(workspace))), ..Default::default() };
-    let slot = p.secrets.0;
+    let slot = p.secrets.0.clone();
     r.environment_fn("secrets", move |project, env| {
         let e = slot.get()?.environment(project, env, &roll_secrets::Caller::operator()).ok()?;
         (e.kind == roll_secrets::EnvironmentKind::Ephemeral).then(|| "preview".to_string())
     });
+    // A developer's default reaches every environment that isn't protected (docs/members.md, D3).
+    let slot = p.secrets.0;
+    r.protected_fn("secrets", move |project, env| slot.get()?.environment(project, env, &roll_secrets::Caller::operator()).ok().map(|e| e.protected));
     if let Some(pg) = p.postgres {
         // A project by its id; an endpoint is in its project.
         r.by_fn("endpoint", move |id: &str| pg.endpoint_or_404(id).ok().map(|e| e.project_id));
@@ -62,6 +66,13 @@ fn resolvers(p: Products<'_>, workspace: Arc<roll_workspace::Workspace>) -> Reso
             let code = code.clone();
             r.by_fn(kind, move |id: &str| code.repo_of(kind, id));
         }
+    }
+    if let Some(previews) = p.previews {
+        // A preview is in its project (it's on no canvas): a member's role there reaches it.
+        r.project_fn("previews", move |id: &str| previews.store.row(id).ok().map(|r| r.project_id));
+        // A preview's own environment is never protected (docs/members.md): a developer's default
+        // reaches it.
+        r.protected_fn("previews", |_, _| Some(false));
     }
     if let Some(apps) = p.apps {
         // A preview's own (ephemeral) environment is what rules call `preview`, so the "previews
@@ -109,8 +120,25 @@ pub fn open(args: &crate::Args, home: &std::path::Path, auth: &crate::auth::Auth
         products: on.to_vec(),
         ..Default::default()
     };
-    let resolvers = resolvers(products, workspace);
+    let resolvers = resolvers(products, workspace.clone());
     let access = tokio::task::block_in_place(|| Access::open(&target, pg, config, resolvers))?;
+    // People's sessions are their memberships' grants (docs/members.md); a membership change goes
+    // in the audit log, and a removal revokes the person's tokens confined to the project (D7).
+    let _ = access.workspace.set(workspace.clone());
+    // An invite made with a token is checked against that token as it is when it's accepted.
+    workspace.set_grants(access.clone() as Arc<dyn roll_auth::Grants>);
+    let a = access.clone();
+    workspace.on_event(Box::new(move |e| a.member_event(e).map_err(|e| e.to_string())));
+    // What a crash left between a change and its event's effects, now and then.
+    let ws = workspace.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+        loop {
+            tick.tick().await;
+            let ws = ws.clone();
+            let _ = tokio::task::spawn_blocking(move || ws.run_events()).await;
+        }
+    });
     auth.set_authorizer(Arc::new(roll_access::evaluate::Evaluator(access.clone())));
     // People's sessions from allowed networks only: the same client address the evaluator reads.
     let a = access.clone();

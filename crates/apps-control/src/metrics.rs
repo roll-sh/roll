@@ -156,7 +156,8 @@ pub struct Prices {
     pub gb_second: f64,
     pub egress_gb: f64,
     pub build_minute: f64,
-    /// A GB-month of logs kept past the first week (an environment's 30 or 90 days).
+    /// A GB-month stored: logs kept past the first week (an environment's 30 or 90 days) and
+    /// build caches.
     pub stored_gb_month: f64,
 }
 
