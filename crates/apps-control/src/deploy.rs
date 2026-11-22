@@ -519,7 +519,9 @@ impl Apps {
 
     /// A deployment's own URL, where one answers ([`Apps::deployment_template`]'s rules).
     fn deployment_url(&self, svc: &crate::store::ServiceRow, row: &crate::store::EnvRow, d: &Deployment) -> Option<String> {
-        let serves = svc.run.public && !svc.run.tcp && !svc.run.udp && d.image.is_some() && d.pruned_at.is_none() && d.status != DeployStatus::Removed && d.run.kind == RunType::Web && d.run.volume.is_none();
+        // The environment's own run settings (its overrides), as `deployment_template` reads them.
+        let run = svc.for_env(row).map_or_else(|_| svc.run.clone(), |s| s.run);
+        let serves = run.public && !run.tcp && !run.udp && d.image.is_some() && d.pruned_at.is_none() && d.status != DeployStatus::Removed && d.run.kind == RunType::Web && d.run.volume.is_none();
         let waiting = row.approvals > 0 && d.status == DeployStatus::Ready;
         (serves && !waiting).then(|| self.url(&format!("{}--{}", d.id.trim_start_matches("dep_"), row.slug)))
     }

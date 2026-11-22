@@ -206,6 +206,8 @@ impl Engine {
                 self.store.set_resource(&r.id, res.kind, &res.parent, |x| x.state = ResourceState::Ready)?;
             }
             Some(branch) if reset_due || asked.iter().any(|a| a == "*" || *a == key) => {
+                // Earlier pushes' copies of the data being replaced go with it.
+                self.drop_pinned_data(&r.id, |d| d.kind == res.kind && d.parent == res.parent).await?;
                 self.store.set_resource(&r.id, res.kind, &res.parent, |x| x.state = ResourceState::Resetting)?;
                 let at = s.data_at.as_deref().filter(|_| res.mode == Mode::Branch).and_then(|a| crate::settings::data_at_secs(a, self.store.now_ms().unwrap_or(0) / 1000));
                 let past = match at {
@@ -341,6 +343,9 @@ impl Engine {
             let masked = mask_digest(&s, &res) != mask_digest(&Settings::default(), &res);
             let rules_moved = res.r#ref.is_some() && res.state == ResourceState::Ready && self.store.mask_digest(&r.id, res.kind, &res.parent)?.unwrap_or_default() != mask_digest(&s, &res);
             if res.kind == Kind::Postgres && ((masked && reset_of(&res)) || rules_moved) {
+                // Earlier pushes' copies were masked by the old rules: they go too, never served
+                // with less masked than the rules say.
+                self.drop_pinned_data(&r.id, |d| d.kind == res.kind && d.parent == res.parent).await?;
                 self.delete_branch(&r.id, &res, &name).await?;
                 self.store.drop_resource(&r.id, res.kind, &res.parent)?;
                 self.store.log(&r.id, &format!("postgres:{} is masked: branched again", res.parent))?;
@@ -408,9 +413,17 @@ impl Engine {
                     Err(e) => warn!(preview = %r.id, kind = res.kind.as_str(), error = %e, "previews: reading usage"),
                 }
             }
+            // And the earlier pushes' copies, which count in its cost and size cap too.
+            for d in self.store.pinned_data(&r.id)? {
+                let Ok(b) = self.brancher(d.kind) else { continue };
+                match b.usage(&d.parent, &d.r#ref).await {
+                    Ok(u) => self.store.set_pinned_usage(&r.id, &d, &u)?,
+                    Err(e) => warn!(preview = %r.id, kind = d.kind.as_str(), error = %e, "previews: reading an earlier push's copy's usage"),
+                }
+            }
             self.usage_read.lock().insert(r.id.clone(), now);
         }
-        let bytes: i64 = self.store.resources(&r.id)?.iter().map(|x| x.bytes).sum();
+        let bytes: i64 = self.store.resources(&r.id)?.iter().map(|x| x.bytes).sum::<i64>() + self.store.pinned_usage(&r.id)?.iter().map(|x| x.0).sum::<i64>();
         if bytes as u64 > s.max_bytes {
             for svc in self.store.services(&r.id)? {
                 self.apps.sleep(&r.id, &svc.name).await;
@@ -477,6 +490,10 @@ impl Engine {
         let own: Vec<(String, String)> = project_env(&s, r.branch.as_deref()).into_iter().chain(self.store.vars(&r.id)?).collect();
         self.add_masks(&r.id, super::masks::secret_values(&[], &[], &own, &vars));
         self.stale_masks(&r.id);
+
+        // 3a'. The data as the head the services ran left it, kept for that head's earlier push,
+        // before this head's seed or release changes it.
+        self.snapshot_for_earlier(r).await?;
 
         // 3b. The project's seed, once on fresh data, before anything serves it.
         if let Some(seed) = &s.seed
@@ -613,8 +630,13 @@ impl Engine {
                 && r.trusted
                 && let Some(old) = svc.deployed.as_deref().filter(|d| *d != rev && !d.is_empty())
             {
-                for gone in self.store.pin(&r.id, &spec.name, old, &|h| self.cfg.url_in(domain.as_ref(), h))? {
-                    self.apps.remove(&r.id, &gone).await.map_err(|e| anyhow::anyhow!("removing {gone}: {e:#}"))?;
+                let gone = self.store.pin(&r.id, &spec.name, old, &|h| self.cfg.url_in(domain.as_ref(), h))?;
+                for gone in &gone {
+                    self.apps.remove(&r.id, gone).await.map_err(|e| anyhow::anyhow!("removing {gone}: {e:#}"))?;
+                }
+                if !gone.is_empty() {
+                    let still: std::collections::BTreeSet<String> = self.store.pinned(&r.id)?.into_iter().map(|p| p.revision).collect();
+                    self.drop_pinned_data(&r.id, |d| !still.contains(&d.revision)).await?;
                 }
             }
             // On roll apps, the head it ran stays reachable at that build's own URL (roll apps
@@ -1317,9 +1339,13 @@ impl Engine {
 
     /// The variables every service of the preview gets for its branches.
     pub(super) async fn resource_env(&self, id: &str) -> anyhow::Result<Vec<(String, String)>> {
+        self.resource_env_at(id, None).await
+    }
+
+    pub(super) async fn resource_env_at(&self, id: &str, at: Option<&str>) -> anyhow::Result<Vec<(String, String)>> {
         let mut seen: BTreeMap<Kind, usize> = BTreeMap::new();
         let mut env = Vec::new();
-        for (kind, parent, vars) in self.branch_vars(id).await? {
+        for (kind, parent, vars) in self.branch_vars_at(id, at).await? {
             let n = seen.entry(kind).or_default();
             let suffix = (*n > 0).then(|| env_suffix(&parent));
             *n += 1;
@@ -1334,13 +1360,73 @@ impl Engine {
 
     /// Every branch's own variables, unprefixed, with its kind and parent.
     pub(super) async fn branch_vars(&self, id: &str) -> anyhow::Result<Vec<crate::ports::BranchVars>> {
+        self.branch_vars_at(id, None).await
+    }
+
+    /// [`Self::branch_vars`] for an earlier push of `at` (a revision): its own copy of a branch
+    /// where one was kept ([`Self::snapshot_for_earlier`]), else the preview's.
+    pub(super) async fn branch_vars_at(&self, id: &str, at: Option<&str>) -> anyhow::Result<Vec<crate::ports::BranchVars>> {
+        let kept = match at {
+            Some(_) => self.store.pinned_data(id)?,
+            None => Vec::new(),
+        };
         let mut out = Vec::new();
         for res in self.store.resources(id)? {
             let (Some(branch), Ok(b)) = (&res.r#ref, self.brancher(res.kind)) else { continue };
-            let vars = b.connect(&res.parent, branch, res.kept.as_deref()).await.map_err(|e| anyhow::anyhow!("connecting to the {} branch: {e:#}", res.kind.as_str()))?;
+            let own = kept.iter().find(|d| Some(d.revision.as_str()) == at && d.kind == res.kind && d.parent == res.parent);
+            let (branch, creds) = match own {
+                Some(d) => (&d.r#ref, d.kept.as_deref()),
+                None => (branch, res.kept.as_deref()),
+            };
+            let vars = b.connect(&res.parent, branch, creds).await.map_err(|e| anyhow::anyhow!("connecting to the {} branch: {e:#}", res.kind.as_str()))?;
             out.push((res.kind, res.parent.clone(), vars));
         }
         Ok(out)
+    }
+
+    /// The data as the head its services ran left it, kept for that head's earlier push before
+    /// the next head's seed or release changes it: a copy-on-write branch of each branch whose
+    /// product can branch one ([`crate::ports::Brancher::snapshot`]), so old code never runs on
+    /// what a newer migration made of its data. Only where the head will be kept (a trusted
+    /// change's own services on the runtime: roll apps' earlier builds keep the variables they
+    /// were deployed with), once a head.
+    async fn snapshot_for_earlier(&self, r: &Row) -> anyhow::Result<()> {
+        if !r.trusted || self.apps.catalog(&r.project_id).await.ok().flatten().is_some_and(|c| !c.is_empty()) {
+            return Ok(());
+        }
+        let olds: std::collections::BTreeSet<String> = self.store.services(&r.id)?.into_iter().filter(|s| s.repo == r.repo).filter_map(|s| s.deployed).filter(|d| !d.is_empty() && d != r.build()).collect();
+        if olds.is_empty() {
+            return Ok(());
+        }
+        let kept = self.store.pinned_data(&r.id)?;
+        let name = branch_name(&r.id);
+        for old in &olds {
+            for res in self.store.resources(&r.id)? {
+                let (Some(branch), Ok(b)) = (&res.r#ref, self.brancher(res.kind)) else { continue };
+                if kept.iter().any(|d| &d.revision == old && d.kind == res.kind && d.parent == res.parent) {
+                    continue;
+                }
+                let snap = format!("{name}-{}", crate::label_part(old.strip_prefix("cs_").unwrap_or(old), 10));
+                let key = format!("{}:{}", res.kind.as_str(), res.parent);
+                if let Some(made) = b.snapshot(&res.parent, branch, &snap).await.map_err(|e| anyhow::anyhow!("keeping {key}'s data for its earlier push: {e:#}"))? {
+                    self.store.add_pinned_data(&r.id, &crate::store::PinnedData { revision: old.clone(), kind: res.kind, parent: res.parent.clone(), name: snap, r#ref: made.r#ref, kept: made.kept })?;
+                    self.store.log(&r.id, &format!("kept {key}'s data as {} left it, for its earlier push", short(old)))?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Delete the earlier pushes' data `which` picks (the branch first, then its record, so a
+    /// failure leaves nothing unrecorded).
+    async fn drop_pinned_data(&self, id: &str, which: impl Fn(&crate::store::PinnedData) -> bool) -> anyhow::Result<()> {
+        for d in self.store.pinned_data(id)?.into_iter().filter(|d| which(d)) {
+            if let Ok(b) = self.brancher(d.kind) {
+                b.delete(&d.parent, &d.r#ref, &d.name).await.map_err(|e| anyhow::anyhow!("deleting an earlier push's copy of {}:{}: {e:#}", d.kind.as_str(), d.parent))?;
+            }
+            self.store.drop_pinned_data(id, &d)?;
+        }
+        Ok(())
     }
 
     pub(super) async fn delete_branch(&self, id: &str, res: &ResourceRow, name: &str) -> anyhow::Result<()> {
@@ -1403,6 +1489,7 @@ impl Engine {
             let name = format!("{}@{}", p.service, p.revision);
             self.apps.remove(&r.id, &name).await.map_err(|e| anyhow::anyhow!("removing {name}: {e:#}"))?;
         }
+        self.drop_pinned_data(&r.id, |_| true).await?;
         for svc in self.store.services(&r.id)? {
             self.apps.remove(&r.id, &svc.name).await.map_err(|e| anyhow::anyhow!("removing {}: {e:#}", svc.name))?;
             self.store.drop_service(&r.id, &svc.name)?;

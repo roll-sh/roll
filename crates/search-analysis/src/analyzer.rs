@@ -357,6 +357,15 @@ impl Analyzer {
         &self.inner.name
     }
 
+    /// This analyzer with another position increment gap between a field's values (a text
+    /// field's own `position_increment_gap`, as Elasticsearch's field mappers wrap it).
+    pub fn with_position_increment_gap(&self, position_increment_gap: i32) -> Analyzer {
+        if position_increment_gap == self.inner.pos_gap {
+            return self.clone();
+        }
+        self.wrapped(Vec::new(), position_increment_gap)
+    }
+
     /// This analyzer with more filters after its own (Elasticsearch's `AnalyzerWrapper`s that
     /// field mappers build), with its own position increment gap.
     fn wrapped(&self, extra: Vec<NamedFilter>, pos_gap: i32) -> Analyzer {
@@ -591,6 +600,23 @@ impl Analyzer {
         values: &[&str],
         sink: &mut dyn FnMut(&Token),
     ) -> Result<(), AnalysisError> {
+        self.try_analyze_field_until(field, values, &mut |t| {
+            sink(t);
+            std::ops::ControlFlow::Continue(())
+        })
+        .map(|_| ())
+    }
+
+    /// [`Analyzer::try_analyze_field`] with a sink that may stop the analysis
+    /// (`ControlFlow::Break`): no further token is produced, of this value or the next, and the
+    /// result says it stopped. Indexing stops a document past its budget this way, before an
+    /// `ngram` chain produces the rest of its terms.
+    pub fn try_analyze_field_until(
+        &self,
+        field: &str,
+        values: &[&str],
+        sink: &mut dyn FnMut(&Token) -> std::ops::ControlFlow<()>,
+    ) -> Result<std::ops::ControlFlow<()>, AnalysisError> {
         let inner = &*self.inner;
         with_pool(
             &inner.pool,
@@ -603,31 +629,37 @@ impl Analyzer {
                         inv.gap(inner.pos_gap, inner.offset_gap);
                     }
                     let mut failed: Option<AnalysisError> = None;
-                    let end = chain.run(text, n, &mut |_, _| {}, &mut |t| {
-                        if failed.is_some() {
-                            return;
-                        }
+                    let mut stopped = false;
+                    let end = chain.run_until(text, n, &mut |_, _| {}, &mut |t| {
                         match inv.token(t.pos_inc, field) {
-                            Ok(position) => sink(&Token {
-                                term: &t.term,
-                                start_offset: clamp(inv.offset + t.start as i64),
-                                end_offset: clamp(inv.offset + t.end as i64),
-                                position,
-                                position_increment: t.pos_inc,
-                                position_length: t.pos_len,
-                                kind: t.kind,
-                                keyword: t.keyword,
-                                payload: t.payload(),
-                            }),
-                            Err(e) => failed = Some(e),
+                            Ok(position) => {
+                                let flow = sink(&Token {
+                                    term: &t.term,
+                                    start_offset: clamp(inv.offset + t.start as i64),
+                                    end_offset: clamp(inv.offset + t.end as i64),
+                                    position,
+                                    position_increment: t.pos_inc,
+                                    position_length: t.pos_len,
+                                    kind: t.kind,
+                                    keyword: t.keyword,
+                                    payload: t.payload(),
+                                });
+                                stopped = flow.is_break();
+                                !stopped
+                            }
+                            Err(e) => {
+                                failed = Some(e);
+                                false
+                            }
                         }
                     })?;
                     if let Some(e) = failed {
                         return Err(e);
                     }
+                    let Some(end) = end.filter(|_| !stopped) else { return Ok(std::ops::ControlFlow::Break(())) };
                     inv.end(end);
                 }
-                Ok(())
+                Ok(std::ops::ControlFlow::Continue(()))
             },
         )
     }

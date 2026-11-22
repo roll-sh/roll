@@ -213,6 +213,12 @@ writes a new generation and the other keeps reading its own. Point-in-time
 branches (`at`) replay the parent's WAL up to that time into new segments for the child. Garbage
 collection deletes a segment object only when no manifest of any cluster references it.
 
+Branches nest: a branch of a branch is the same manifest copy, its `parent_id` the middle branch,
+and deleting any cluster in the line leaves the others working (their manifests and pins are their
+own). A point-in-time branch replays its parent's WAL, so an `at` before a change the parent made
+to itself (roll previews' masking, which rewrites masked documents and expunges the originals)
+rebuilds the state before it: copy a masked branch without `at`, after the masking finished.
+
 ## Deleting and restoring
 
 A cluster's storage is keyed by its name (`search/c/<name>/`), and a deleted cluster's name is
@@ -265,7 +271,10 @@ A request finds its cluster by, in order: Basic auth username (`<cluster>` with 
 password, or `<user>@<cluster>`), `Authorization: ApiKey base64(id:secret)` where the id names the
 cluster, `Authorization: Bearer <cluster>_<secret>`, or the TLS SNI/`Host` label under the node's
 domain (`<cluster>.search.<domain>`). Secrets are compared in constant time. Each cluster has
-request-rate and in-flight byte budgets so one tenant can't starve the node.
+request-rate and in-flight byte budgets so one tenant can't starve the node. Every cluster's
+in-flight body bytes are charged to the node's budget too (`--search-max-in-flight-body-mb`,
+4 GiB by default), so one person's many clusters can't hold more bodies than the node allows all
+of them; a body past either budget gets Elasticsearch's indexing-pressure 429.
 
 One memory account per request: what a request holds is charged as it is built to the
 cluster's `request` breaker, and through it (a parent budget, `search_aggs::memory`) to the
@@ -500,7 +509,13 @@ allowlist (a preview's branch included); change it like any setting.
   to carry it (a SAS token), never returned by `GET _snapshot` or the cluster state, and never
   logged or put in an error (clients drop URLs from transport errors: a SAS token or a GCS
   upload session is in them). A credential given as an object is refused rather than kept
-  flattened in the settings. GCS access tokens are cached in memory until five minutes before
+  flattened in the settings. A node without `ROLL_SECRET_KEY` refuses a pasted credential (a 400
+  pointing at a `roll://` reference through roll's API, or at the key) rather than keep it in the
+  clear, as it refuses every secret a client gives a cluster (inference keys, watch passwords and
+  `Authorization` headers, connector and Fleet secrets: `search_es::seal`), unless the node opts
+  in for local development (`--search-allow-unsealed-secrets`, the dev server). A node that gains
+  the key seals what a keyless one kept in the clear as each cluster opens, and saves it at once
+  (`seal::seal_leftovers`). GCS access tokens are cached in memory until five minutes before
   they expire, keyed by a digest of the account. Without credentials requests are anonymous:
   roll's own credentials are never used for a tenant's bucket. Endpoints, a key file's
   `token_uri` and a GCS session URL (which must be on the endpoint's origin) are URLs the

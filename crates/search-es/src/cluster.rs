@@ -148,6 +148,9 @@ pub struct ClusterConfig {
     /// limit is held to [`crate::breaker::REQUEST_MAX_LIMIT`] of it ([`crate::breaker::Breakers::node`]).
     /// `None`: the `request` breaker alone.
     pub request_memory: Option<std::sync::Arc<search_aggs::memory::MemoryBudget>>,
+    /// Without a [`ClusterConfig::sealer`], store the secrets clients give in the clear rather
+    /// than refuse them ([`crate::seal`]): local development and tests only.
+    pub unsealed_secrets: bool,
     /// What reindex from remote may use on the node, shared by every cluster it serves
     /// ([`crate::api::remote::RemoteNode`]); `None`: the cluster gets limits of its own, from
     /// its node settings.
@@ -177,6 +180,7 @@ impl ClusterConfig {
             audit: None,
             secret_refs: None,
             request_memory: None,
+            unsealed_secrets: false,
             reindex_node: None,
         }
     }
@@ -679,9 +683,11 @@ impl Cluster {
         self.background.get()?.upgrade()
     }
 
-    /// A cluster with an in-memory store (tests, the dev server).
+    /// A cluster with an in-memory store (tests, the dev server), which keeps the secrets
+    /// clients give in the clear ([`ClusterConfig::unsealed_secrets`]).
     pub async fn in_memory(name: &str) -> Cluster {
-        Cluster::open(ClusterConfig::new(name), Arc::new(MemoryStore::new())).await.expect("memory store can't fail")
+        let cfg = ClusterConfig { unsealed_secrets: true, ..ClusterConfig::new(name) };
+        Cluster::open(cfg, Arc::new(MemoryStore::new())).await.expect("memory store can't fail")
     }
 
     pub fn uuid(&self) -> String {

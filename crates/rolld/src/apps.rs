@@ -671,6 +671,37 @@ impl Resources for RollResources {
         Ok(Some(apps_control::integrations::Minted { vars, kept: p.handles.to_string() }))
     }
 
+    /// A log drain's data stream on a roll search cluster, through search's console as the
+    /// operator (its owner node on a fleet): roll apps' template for `logs-roll.apps-*` (ECS
+    /// mappings without Elastic's `logs@settings`, so no ILM policy keeps them forever), the
+    /// stream (there already is fine) and its retention.
+    async fn log_stream(&self, cluster: &str, stream: &str, retention_days: u32) -> anyhow::Result<()> {
+        let (api, path, stream) = (self.products.clone(), format!("/v1/search/clusters/{cluster}/request"), stream.to_string());
+        blocking(move || {
+            let console = |method: &str, at: &str, body: serde_json::Value| -> anyhow::Result<(u64, String)> {
+                let (st, v) = api.call_status(axum::http::Method::POST, &path, Some(serde_json::json!({ "method": method, "path": at, "body": body }))).map_err(|e| anyhow::anyhow!("{e}"))?;
+                anyhow::ensure!(st.is_success(), "roll search answered {st}: {}", v["error"].as_str().unwrap_or_default());
+                Ok((v["status"].as_u64().unwrap_or(0), v["body"].as_str().unwrap_or_default().chars().take(300).collect()))
+            };
+            let template = serde_json::json!({
+                "index_patterns": ["logs-roll.apps-*"],
+                "priority": 200,
+                "data_stream": {},
+                "composed_of": ["logs@mappings", "ecs@mappings"],
+                "template": { "settings": { "index.codec": "best_compression", "index.mapping.ignore_malformed": true }, "lifecycle": { "data_retention": "30d" } },
+                "_meta": { "managed_by": "roll apps" },
+            });
+            let (s, b) = console("PUT", "/_index_template/roll-apps-logs", template)?;
+            anyhow::ensure!(s == 200, "its index template: {s} {b}");
+            let (s, b) = console("PUT", &format!("/_data_stream/{stream}"), serde_json::Value::Null)?;
+            anyhow::ensure!(s == 200 || b.contains("resource_already_exists_exception"), "the data stream: {s} {b}");
+            let (s, b) = console("PUT", &format!("/_data_stream/{stream}/_lifecycle"), serde_json::json!({ "data_retention": format!("{retention_days}d") }))?;
+            anyhow::ensure!(s == 200, "its retention: {s} {b}");
+            Ok(())
+        })
+        .await
+    }
+
     async fn unlink(&self, kind: LinkKind, r#ref: &str, kept: &str) -> anyhow::Result<()> {
         let Some(p) = crate::secrets::link_provider(&self.products, kind.as_str()) else { return Ok(()) };
         let handles: Vec<serde_json::Value> = serde_json::from_str(kept).unwrap_or_default();

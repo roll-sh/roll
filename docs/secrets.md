@@ -3022,6 +3022,13 @@ cluster, instead of a key pasted into it: the Inference tab's "A roll secret", o
   no sync is made; the tab offers "A roll secret" only for the others.
 - Deleting the endpoint from the tab deletes its sync; one deleted another way leaves the sync,
   whose next push says the endpoint is gone. Deleting the key leaves the endpoint its last value.
+- A branch of the cluster (`POST …/branches`, or a create with `parent`) copies its endpoints,
+  sealed keys included, and keeps them working there (its `semantic_text` fields go on embedding).
+  The sync follows the cluster it names, never its branches: rotating the key leaves each branch
+  the value it copied, and deleting the endpoint and its sync leaves theirs. The tab's delete names
+  the branches copied since the endpoint was bound (`bound_at` in `GET …/inference/secrets`); delete
+  the endpoint there too, or rotate the key at its provider. Pausing them on the branch instead
+  (as inherited SLM policies are) would stop a branch's embedding, its main use.
 - The sync names the cluster by its id (`srch_…`, never a name: a name has no `_`) and pushes
   through roll search's control plane (`/v1/search/clusters/{id}/request`, on the cluster's owner
   on a fleet), not the cluster's endpoint, so its Basic auth user and IP allowlist don't apply. A
@@ -3050,12 +3057,16 @@ cluster, instead of a key pasted into it: the Inference tab's "A roll secret", o
   for) themselves, as roll secrets answers them (`Secrets::caller_of`: their session, a roll token's
   rules, or the operator). Their rules also decide references and imports. Anyone else gets a 403
   and nothing is copied. A roll code owner token isn't anyone to roll secrets, so it can't copy
-  secrets, and an agent token never manages the owner. The values are sealed with the rest of the
-  sandbox's env until the backend has them. The sandbox records who copied them (`secrets_by`, the
-  maker: an admin's session is the person), and the read is theirs in the audit log (its actor),
-  resolved for `sandbox:<id> for <principal>`. Only where they came from is kept: before each
-  start roll code asks `Secrets::maker_may_reveal` (they still reach the project and may reveal the
-  environment, read untrusted), and once they may not the sandbox starts without those variables
+  secrets, and an agent token never manages the owner. The sandbox records who copied them
+  (`secrets_by`, the maker: an admin's session is the person), and the read is theirs in the audit
+  log (its actor), resolved for `sandbox:<id> for <principal>`. Only where they came from is kept
+  (`secrets_from`: project, environment, the variables' names), never the values: at the sandbox's
+  create and at each start roll code reads them again as the maker may now
+  (`Secrets::values_as_maker`: the check and the read in one call, untrusted, not a runtime), so a
+  rotated value reaches it at its next start. Once the maker may not (`maker_unreachable` or not
+  allowed), the sandbox starts without those variables (`secrets_dropped`). A sandbox made before
+  `secrets_from` was kept only has its maker asked whether they can still act (`maker_acts`), and
+  keeps what it was made with; delete it and make another to get fresh reads
   (docs/code/http-api.md, "Sandboxes").
 - **Previews**: roll previews (docs/previews.md) makes an ephemeral environment per change (see
   "Ephemeral environments") and resolves it as `preview:<slug>`. A preview runs a change's code, so
@@ -3882,9 +3893,15 @@ Agent's templates do).
   `"secret_access_key": "roll://prj_…@production/AWS_SECRET_ACCESS_KEY"`). A target's references
   name their project by its `prj_…` id: the bucket replicating only proves which projects stand
   for it, so without one, anyone who may set another bucket's replication could point it at the
-  target and have roll sign for the target's endpoint with that bucket's project's credential. Search snapshot
-  repositories, roll code's reviewer provider keys and the agents' gateway upstreams still keep
-  sealed copies. roll search's snapshot repositories take them through `bind_ref` (#361).
+  target and have roll sign for the target's endpoint with that bucket's project's credential. roll search's
+  snapshot repositories take them through `bind_ref` (#361). roll code's reviewer provider keys
+  do too (`PUT /v1/code/owners/{owner}/review-provider` with `"api_key": "roll://production/ANTHROPIC_API_KEY"`):
+  bound to whoever sets it for `code:review:<owner>`, read as them on every review, and a review
+  that can't read it any more says why instead of running. No canvas holds a roll code owner, so
+  its project is the one whose canvas holds one of the owner's repositories and stands for it,
+  named in the reference when there are several. Pasted keys are still sealed in roll code's own
+  table. The agents' endpoints and gateway upstreams still keep their own copies (`op://`,
+  `env:`, a file).
 - **Who reads it.** The product asks rolld in process (`resolve_as` or `resolve_for`), naming the workspace resource that needs the value: a replication target
   resolves for the source bucket that replicates through it. The project is the one whose canvas
   holds that resource *and* that stands for it (`Workspace::trusts`): a person's canvas only
@@ -6008,6 +6025,29 @@ adds roll-access's grant lookup or the accounts' and workspace's.
 
 ## Next
 
+**State, 2026-11-22 19:25.** Landed since 07:55, each with main's CI green:
+- #665 (57deeb0d1): a placeholder swaps only for its own consumer; references never smuggle a bound key's value; fallbacks skip bound keys before decrypting.
+- #697 (a74036a64): item 4, an offboarded person's leases, shares and sandboxes end with them.
+- #688 (03e1d9520): item 1, a new project's production is protected (`approvals: 0` writes directly; existing 0-approval environments kept their requests by migration), and the default developer rule never matches production unless named.
+- #705 (9d5032147): an interception CA stays live until its consumer's hosts change; the per-connection check (`intercept_ca_stands`) is one row read.
+- #707 (01199a351): the first digest after a change is shared per permission view on a node. At 1,000 watchers that's 74.6 → 0.4 CPU-s on SQLite and 72.6 → 1.8 on Postgres.
+- #714 (054e6edb7): item 3, reach names people, OAuth clients, services, sandboxes and who knew.
+- #734 (bfebaa3fc): item 5, agents sandboxes read their copied values fresh as the copier at every start (agent37 edits env in place).
+- #733 (055ab1adb): item 6 part A, reviewer provider keys as `roll://` references (`code:review:<owner>` in reach).
+
+Other threads: previews #686 (CA reuse until hosts change), apps #689 (CA state per network).
+
+In flight:
+- item 2, environment deletes recoverable and a protected one's delete as a change request (#720);
+- item 7, linked fields carry their kind;
+- the event feed (`GET …/projects/{project}/events` for roll MCP's Events; the cursor taken in each row's own write);
+- members v1.1 phase 1 (#681, review fixes done, merging main);
+- agent-host's `pi_compaction` in the shared gate set (item 10).
+
+New since the ranking:
+- **Delta reads for watchers** (performance, M). After a change each pod still reads all its values: about 190 CPU-s per change at 1,000 pods, bound by the database connections. A watcher holding digest X asks for what changed since X and gets only the changed keys.
+- **Item 6, parts B and C** (agents' endpoints and the model gateway's upstreams as `roll://`): a relay-side maker table, an `agent:<machine>` resource, the value sealed to the daemon after each `hello`, `EndpointSpec::check` taking `roll://`.
+
 **State, 2026-11-22 07:55.** The thirty-fifth review's ranking below still stands. Since it:
 - **roll apps' #603 review is closed on apps' side:**
   - #667 (listings and staleness mint nothing, the hash by binding, dynamic keys refused, an opened
@@ -6063,16 +6103,23 @@ Newest entries first; older State and Ranked entries follow further down, as his
    roll-accounts' disable writes an outbox event, and rolld treats a disabled person as no member
    (fixing in `fix/secrets-offboarding`, with item 5's "a disable stops the copier's running
    sandboxes").
-5. **Sandbox copies are frozen at create** (S–M). Resolve `secrets_from` afresh at each start as the
-   maker. agent37 recreates the instance on its home. A member event or a disable stops the copier's
-   running sandboxes.
+5. **Sandbox copies are frozen at create** (S–M; fixing in `fix/sandbox-fresh-values`). Resolve
+   `secrets_from` afresh at each start as the maker (`values_as_maker`). agent37 edits the
+   instance's env (`PATCH`, merged; `null` unsets) before its start, on the same disk. A member event
+   or a disable stops the copier's running sandboxes (#697).
 6. **roll's own AI and chat credentials can't be `roll://` references** (integration, M):
-   - reviewer provider keys (code-control's own table);
+   - reviewer provider keys (code-control's own table): **done**, `bind_ref` for `code:review:<owner>`;
    - agents' endpoints (pasted or `op://`);
    - the model gateway's upstreams (`env:`/file).
 
    A leaked model key, the commonest leak, gets no reach, health, validity check or rotation.
    Bind with `bind_ref` and read with `resolve_as`. The daemon resolves over its machine link.
+   Left for the endpoints and upstreams: the relay binds a `roll://` `key_ref` at `endpoint.set`
+   (and `gateway.key`) to the sender, for `agent:<machine>` (a `ResourceRef` like
+   `code_owner`'s, through the machine owner's project), keeps the maker in its own table, and
+   after each `hello` sends the value sealed to the daemon's `seal_key` (`open_with`'s context
+   names the endpoint); the daemon keeps it in memory, as `op://`. `EndpointSpec::check` then
+   takes `roll://` too (fixtures, `agents-api.ts`).
 7. **apps' environments with their own data drop every linked key** (S). `Values.linked` gains
    `{name, kind, ref}`, so apps drops only what it branched.
 8. **A local agent outside Lambda** (S–M): the Lambda extension's surface as a sidecar.
