@@ -169,6 +169,8 @@ export interface Run {
   affinity?: boolean;
   /** Its port speaks TCP, not HTTP: each environment answers on a port of its own. */
   tcp?: boolean;
+  /** Its port speaks UDP: a UDP port of its own per environment (one node). */
+  udp?: boolean;
   /** A deployment that crash-loops within ten minutes of going live is replaced by the one before it. */
   rollback_on_crash?: boolean;
   /** Build the same revision again, without the cache, when one of its base images moves. */
@@ -686,6 +688,8 @@ export interface Environment extends EnvironmentSummary {
   port: number | null;
   /** A TCP service's address (`host:port`), once it has its port. */
   tcp?: string | null;
+  /** A UDP service's address (host:port). */
+  udp?: string;
   /** Its hostnames answer only visitors with its access token (a preview). */
   private: boolean;
   /** A cron service's next scheduled run, once deployed. */
