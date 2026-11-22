@@ -540,6 +540,8 @@ pub struct ResolvedVars {
     /// What roll secrets said about the resolve (a closed environment's keys withheld): said in
     /// the environment's log at each deploy.
     pub notices: Vec<String>,
+    /// A closed environment's placeholders: each variable's binding (the hosts it's for).
+    pub placeholders: BTreeMap<String, String>,
 }
 
 impl ResolvedVars {
@@ -2875,16 +2877,24 @@ impl Apps {
 
     /// An instance's variables, `roll://` references read (a deploy).
     pub async fn resolve_vars(self: &Arc<Self>, svc: &ServiceRow, env: &EnvRow, deployment: &str) -> Result<ResolvedVars> {
-        self.resolve_vars_as(svc, env, deployment, true).await
+        self.resolve_vars_as(svc, env, deployment, true, true).await
+    }
+
+    /// A deploy's variables for its hash and its checks (`roll://` read, a closed environment's
+    /// placeholders not made: the instances' are, once, with their template).
+    pub async fn checked_vars(self: &Arc<Self>, svc: &ServiceRow, env: &EnvRow, deployment: &str) -> Result<ResolvedVars> {
+        self.resolve_vars_as(svc, env, deployment, true, false).await
     }
 
     /// The same for a listing or a staleness check: a `roll://` reference is its text, never read
     /// (no secret decrypted, no read audited as the service for a person's page view).
     pub async fn listed_vars(self: &Arc<Self>, svc: &ServiceRow, env: &EnvRow, deployment: &str) -> Result<ResolvedVars> {
-        self.resolve_vars_as(svc, env, deployment, false).await
+        self.resolve_vars_as(svc, env, deployment, false, false).await
     }
 
-    async fn resolve_vars_as(self: &Arc<Self>, svc: &ServiceRow, env: &EnvRow, deployment: &str, read_refs: bool) -> Result<ResolvedVars> {
+    /// `mint`: a closed environment's placeholders made (an instance's variables); else its keys
+    /// bound to hosts are markers with their binding, nothing made.
+    async fn resolve_vars_as(self: &Arc<Self>, svc: &ServiceRow, env: &EnvRow, deployment: &str, read_refs: bool, mint: bool) -> Result<ResolvedVars> {
         let mut vars: BTreeMap<String, (String, &'static str)> = BTreeMap::new();
         let port = svc.run.port.unwrap_or(8080);
         let roll = [
@@ -3021,8 +3031,9 @@ impl Apps {
         let (mut from_secrets, mut plain_secrets) = (BTreeSet::new(), BTreeSet::new());
         // A closed environment's keys bound to hosts come as placeholders its egress proxy swaps.
         let mut notices = branch_notices;
+        let mut placeholders = BTreeMap::new();
         let resolved = match env.egress.closed() {
-            true => self.deps.secrets.resolve_closed(&svc.project, &env.name, &svc.id, env.egress_by.as_deref()).await.map(|c| {
+            true => self.deps.secrets.resolve_closed(&svc.project, &env.name, &svc.id, env.egress_by.as_deref(), mint).await.map(|c| {
                 notices.extend(c.notice);
                 c.vars
             }),
@@ -3032,6 +3043,9 @@ impl Apps {
             Ok(secrets) => {
                 let mut parents = Vec::new();
                 for s in secrets {
+                    if let Some(b) = &s.binding {
+                        placeholders.insert(s.name.clone(), b.clone());
+                    }
                     // An environment with data of its own never gets a linked resource's
                     // credentials or address through roll secrets: they name the resource itself
                     // (production's database), and its branches come through its own links.
@@ -3174,7 +3188,9 @@ impl Apps {
         }
         // After the agent's join: a value roll composed says so.
         let sources = vars.iter().map(|(k, (_, s))| (k.clone(), *s)).collect();
-        Ok(ResolvedVars { vars: vars.into_iter().map(|(k, (v, _))| (k, v)).collect(), sources, unresolved, refused, ref_texts, sealed, from_secrets, plain_secrets, notices })
+        // A placeholder the service's own variable of the same name replaced isn't one.
+        placeholders.retain(|k, _| vars.get(k).is_some_and(|(_, s)| *s == "secret"));
+        Ok(ResolvedVars { vars: vars.into_iter().map(|(k, (v, _))| (k, v)).collect(), sources, unresolved, refused, ref_texts, sealed, from_secrets, plain_secrets, notices, placeholders })
     }
 
     /// Fill the `${{ … }}` in the service's own variables ([`refs`]); what named nothing. A
@@ -4400,7 +4416,8 @@ impl ResolvedVars {
             // `ROLL_AWAKE_URL` is roll's own on every web service: its arrival isn't a change of
             // the service's to deploy (each deployment gets it).
             .filter(|(k, _)| !matches!(k.as_str(), "ROLL_DEPLOYMENT" | "ROLL_GIT_COMMIT" | "ROLL_GIT_BRANCH" | "ROLL_AWAKE_URL"))
-            .map(|(k, v)| (k.clone(), self.ref_texts.get(k).cloned().unwrap_or_else(|| v.clone())))
+            // A placeholder is new random text each time it's made: its binding decides.
+            .map(|(k, v)| (k.clone(), self.placeholders.get(k).map(|b| format!("placeholder:{b}")).or_else(|| self.ref_texts.get(k).cloned()).unwrap_or_else(|| v.clone())))
             .collect()
     }
 }
