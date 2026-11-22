@@ -1444,9 +1444,10 @@ impl apps_control::integrations::SecretSource for ForApps {
             let ask = roll_secrets::placeholders::Ask { minutes: None, maker: Some(&maker) };
             let v = match secrets.values_with_placeholders(&project, &env, "/", &closed_consumer(&project, &env), false, ask, &caller) {
                 Ok(v) => v,
-                // Its maker can't reveal here now: the keys bound to hosts are withheld (never
-                // their values instead), the rest read as they would be, and said.
-                Err(roll_secrets::Error::Forbidden(why)) => {
+                // Its maker can't reveal here now (`maker_unreachable`: demoted, removed, a token
+                // revoked or narrowed): the keys bound to hosts are withheld (never their values
+                // instead), the rest read as they would be, and said. Any other refusal surfaces.
+                Err(roll_secrets::Error::MakerUnreachable(why)) => {
                     let bound: std::collections::HashSet<String> = secrets.secrets(&project, &env, "/", &caller)?.into_iter().filter(|s| s.hosts.is_some()).map(|s| s.key).collect();
                     let v = secrets.values_for(&project, &env, "/", true, Some(&format!("app:{service}")), false, &caller)?;
                     let sensitive: std::collections::HashSet<String> = v.sensitive.into_iter().collect();
@@ -1657,12 +1658,33 @@ impl apps_control::integrations::SecretSource for ForApps {
         .await?
     }
 
-    async fn may_reveal(&self, who: apps_control::integrations::Asker<'_>, project: &str, env: &str) -> bool {
+    /// Read as the asker (`Secrets::values_seen_by`: the service's read, with their rights), not
+    /// as the service: the service follows the environment's base, imports and references into
+    /// folders the asker may not reveal (production's, a protected environment's). Every key must
+    /// resolve for them, and every `roll://` reference's key in its own folder; a shell's ask
+    /// counts sensitive values too.
+    async fn may_reveal(&self, who: apps_control::integrations::Asker<'_>, project: &str, env: &str, service: &str, ask: apps_control::integrations::Reveal<'_>) -> bool {
         let Some((secrets, _)) = self.0.get().cloned() else { return false };
-        match secrets.caller_of(who.operator, who.user, who.grant) {
-            Ok(caller) => caller.allows(roll_secrets::Action::Reveal, &roll_secrets::Scope::at(project, env, "/")),
-            Err(_) => false,
+        let Ok(caller) = secrets.caller_of(who.operator, who.user, who.grant) else { return false };
+        let mut folders: Vec<(String, String, Vec<String>)> = Vec::new();
+        if !ask.keys.is_empty() {
+            folders.push((env.to_string(), "/".to_string(), ask.keys.to_vec()));
         }
+        for r in ask.refs {
+            match roll_secrets::Reference::parse(r) {
+                Ok(Some(r)) if r.project.is_none() => folders.push((r.env, r.path, vec![r.key])),
+                _ => return false,
+            }
+        }
+        let (project, consumer, sensitive) = (project.to_string(), format!("app:{service}"), ask.sensitive);
+        tokio::task::spawn_blocking(move || {
+            folders.iter().all(|(env, path, keys)| match secrets.values_seen_by(&project, env, path, &consumer, sensitive, &caller) {
+                Ok(v) => keys.iter().all(|k| v.values.contains_key(k) && !v.problems.iter().any(|p| &p.key == k)),
+                Err(_) => false,
+            })
+        })
+        .await
+        .unwrap_or(false)
     }
 }
 
@@ -1880,7 +1902,8 @@ impl ForCode {
             // Never a protected environment: not asked for, nor through a reference, an import or
             // an ephemeral environment's base.
             // Not a runtime: a sandbox is a terminal, so sensitive keys stay out (checks too).
-            let principal = base.principal.clone();
+            // Who made the copy: the person behind an admin's session, so it stops with them.
+            let principal = base.made_by().to_string();
             let caller = secrets.untrusted(&project, &base.not_runtime())?;
             if !caller.allows(roll_secrets::Action::Reveal, &roll_secrets::Scope::at(&project, &slug, &path)) {
                 anyhow::bail!("{slug} is protected: protected environments never go to checks or sandboxes");
@@ -1968,8 +1991,30 @@ impl code_control::SecretEnv for ForCode {
             anyhow::bail!("no project {project}");
         }
         let p = named.iter().find(|p| has_repo(p)).cloned().ok_or_else(|| anyhow::anyhow!("project {project} has none of {owner}'s repos on its canvas"))?;
-        let (by, values) = self.resolve(p.id, environment, consumer, Some(asker)).await?;
-        Ok(code_control::Revealed { by, values })
+        let (by, values) = self.resolve(p.id.clone(), environment, consumer, Some(asker)).await?;
+        Ok(code_control::Revealed { by, project: p.id, values })
+    }
+
+    /// As roll secrets answers `by` now (`maker_may_reveal`: they reach the project and may reveal
+    /// the environment as an untrusted reader), or for a copy whose source wasn't kept, whether
+    /// they can act at all.
+    async fn still_reveals(&self, by: &str, source: Option<(&str, &str)>) -> anyhow::Result<()> {
+        let (secrets, _) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting"))?;
+        let (by, source) = (by.to_string(), source.map(|(p, e)| (p.to_string(), e.to_string())));
+        tokio::task::spawn_blocking(move || {
+            let r = match &source {
+                Some((project, environment)) => {
+                    let (slug, path) = environment.split_once(':').unwrap_or((environment, "/"));
+                    secrets.maker_may_reveal(&by, project, slug, path)
+                }
+                None => secrets.maker_acts(&by),
+            };
+            r.map_err(|e| match e {
+                roll_secrets::Error::Forbidden(m) | roll_secrets::Error::NotFound(m) => code_control::Refused(m).into(),
+                e => anyhow::Error::from(e),
+            })
+        })
+        .await?
     }
 
     /// The first project with the repo on its canvas that may reach it and has validity checks on
@@ -2430,10 +2475,12 @@ mod tests {
         // Seeing them in the clear in apps is roll secrets' call: the operator may, a stranger's
         // token for another project may not.
         let operator = apps_control::integrations::Asker { operator: true, user: None, grant: None };
-        assert!(apps.may_reveal(operator, &project, "production").await);
+        let keys = ["DB_URL".to_string()];
+        let ask = apps_control::integrations::Reveal { keys: &keys, refs: &[], sensitive: false };
+        assert!(apps.may_reveal(operator, &project, "production", "svc_web", ask).await);
         let rule = roll_auth::scope::Rule { product: "secrets".into(), resources: roll_auth::scope::Resources::Some(vec![roll_auth::scope::Selector::Project { project: "prj_other".into() }]), environments: None, paths: None, unprotected: false, actions: std::collections::BTreeMap::from([(roll_auth::scope::Action::Reveal, roll_auth::scope::Effect::Allow)]) };
         let grant = roll_auth::Grant { user: None, ask_otherwise: false, id: "tok_x".into(), name: "x".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(roll_auth::scope::Scope(vec![rule])) };
-        assert!(!apps.may_reveal(apps_control::integrations::Asker { operator: true, user: None, grant: Some(&grant) }, &project, "production").await);
+        assert!(!apps.may_reveal(apps_control::integrations::Asker { operator: true, user: None, grant: Some(&grant) }, &project, "production", "svc_web", ask).await);
         // The read is the service's in the audit log.
         let audit = secrets.audit(&project, roll_secrets::AuditFilter::default(), &roll_secrets::Caller::operator()).unwrap();
         assert!(audit.iter().any(|a| a.actor == "app:svc_web"), "{audit:?}");

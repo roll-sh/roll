@@ -213,6 +213,22 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
           </button>
         </div>
 
+        {env.name !== "production" && !env.ephemeral && (
+          <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+            <div>
+              <p className="text-[13px] font-medium">Its own data</p>
+              <p className="mt-1 text-[12px] text-muted">
+                {env.data
+                  ? `Its links reach branches made for it, never production's databases: ${env.data.branches.map((b) => `${b.kind} ${b.ref}`).join(", ") || "none linked yet"}.`
+                  : "Its links reach the databases themselves, production's data. Turn this on for a branch of each Postgres and Redis database it links."}
+              </p>
+            </div>
+            <button className={btn} disabled={busy} aria-pressed={!!env.data} onClick={() => runner.run("data", () => appsApi.putEnvironment(service.id, env.name, { data: env.data ? null : "branch" }))}>
+              {env.data ? "Use production's (deletes the branches)" : "Branch its data"}
+            </button>
+          </div>
+        )}
+
         <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
           <div>
             <p className="text-[13px] font-medium">Traces</p>

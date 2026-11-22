@@ -847,6 +847,58 @@ async fn a_private_caller_wakes_a_sleeping_service() {
     w.apps.shutdown().await;
 }
 
+/// A UDP service on real Docker (its port published over UDP from the sandbox): socat, asleep,
+/// answers a datagram to its environment's port, and the first answer's time is measured.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_udp_service_answers_from_asleep_on_its_port() {
+    let free = std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let Some(w) = docker_world_with(None, |c| {
+        c.udp_ports = Some((free, free));
+        c.tcp_host = "127.0.0.1".into();
+    })
+    .await
+    else {
+        return;
+    };
+    // socat answers each datagram with "pong", then the datagram back (two datagrams).
+    let run = json!({"port": 9000, "udp": true, "start": "socat UDP4-RECVFROM:9000,fork SYSTEM:'printf pong; cat'", "memory_mb": 256, "cpu": 0.25});
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "dns", "source": {"kind": "image", "image": apps_control::runtime::links::IMAGE}, "run": run })), "application/json", None).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    tokio::spawn(w.apps.clone().serve_udp_ports("127.0.0.1".parse().unwrap()));
+    for _ in 0..1200 {
+        let (_, e) = call(&w.api, "GET", &base, None, "application/json", None).await;
+        if e["active"].is_object() && e["udp"].is_string() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    w.apps.live(&id, "production").sleep().await;
+    let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    client.connect(("127.0.0.1", free)).await.unwrap();
+    let began = std::time::Instant::now();
+    let (mut buf, mut got) = ([0u8; 512], None);
+    for _ in 0..200 {
+        let _ = client.send(b"ping").await;
+        if let Ok(Ok(n)) = tokio::time::timeout(Duration::from_millis(100), client.recv(&mut buf)).await {
+            got = Some(String::from_utf8_lossy(&buf[..n]).into_owned());
+            break;
+        }
+    }
+    if got.is_none() {
+        let ps = apps_control::runtime::docker::docker(&["ps", "-a", "--filter", &format!("label=sh.roll.apps={id}"), "--format", "{{.Names}} {{.Status}} {{.Ports}}"]).await.unwrap_or_default();
+        let (_, log) = call(&w.api, "GET", &format!("{base}/logs"), None, "application/json", None).await;
+        let lines: Vec<&str> = log.as_array().into_iter().flatten().filter_map(|l| l["text"].as_str()).collect();
+        eprintln!("DEBUG ps:\n{ps}\nDEBUG log:\n{}", lines.join("\n"));
+    }
+    assert_eq!(got.as_deref(), Some("pong"), "an answer from its port");
+    eprintln!("MEASURED a UDP service's first answer from asleep: {} ms", began.elapsed().as_millis());
+    assert_eq!(delete_for_good(&w.api, &id).await.0, StatusCode::NO_CONTENT);
+    let _ = apps_control::runtime::docker::docker(&["network", "rm", &apps_control::network_name(&w.project, "production")]).await;
+    w.apps.shutdown().await;
+}
+
 /// A TCP service and a tunnel on real Docker: a busybox echo server, asleep each time, answers
 /// a raw connection to its own port and a tunnel's bytes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

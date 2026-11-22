@@ -169,6 +169,8 @@ export interface Run {
   affinity?: boolean;
   /** Its port speaks TCP, not HTTP: each environment answers on a port of its own. */
   tcp?: boolean;
+  /** Its port speaks UDP: a UDP port of its own per environment (one node). */
+  udp?: boolean;
   /** A deployment that crash-loops within ten minutes of going live is replaced by the one before it. */
   rollback_on_crash?: boolean;
   /** Build the same revision again, without the cache, when one of its base images moves. */
@@ -570,6 +572,8 @@ export interface EnvironmentDiff {
 }
 
 export interface EnvironmentPut {
+  /** Data of its own: a branch of each Postgres and Redis database it links (admin); null goes back. */
+  data?: "branch" | null;
   branch?: string | null;
   /** Its name on the roll domain (`<hostname>.<domain>`): the old one stops answering. */
   hostname?: string;
@@ -684,6 +688,8 @@ export interface Environment extends EnvironmentSummary {
   port: number | null;
   /** A TCP service's address (`host:port`), once it has its port. */
   tcp?: string | null;
+  /** A UDP service's address (host:port). */
+  udp?: string;
   /** Its hostnames answer only visitors with its access token (a preview). */
   private: boolean;
   /** A cron service's next scheduled run, once deployed. */
@@ -729,6 +735,8 @@ export interface Environment extends EnvironmentSummary {
   egress_refused?: { host: string; private?: true }[];
   /** Who a closed environment's placeholders are made by; null: no one (its bound keys withheld). */
   closed_by?: string | null;
+  /** Data of its own: a branch of each Postgres and Redis database it links. */
+  data?: { mode: "branch"; branches: { kind: "postgres" | "redis"; ref: string }[] };
   /** A closed environment's interception (roll secrets' placeholders): requests filtered, placeholders swapped, the latest refusals. */
   intercepted?: { requests: number; swapped: number; refused?: string[] };
   /** A push deploys only once its commit's checks pass. */

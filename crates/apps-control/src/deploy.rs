@@ -951,6 +951,8 @@ impl Apps {
         if let Ok(stored) = self.db(move |s| s.deployment(&did)).await {
             dep.plan = stored.plan;
         }
+        // An environment with data of its own: a branch of each database linked since.
+        self.ensure_branches(&svc, &env.name).await.map_err(|e| anyhow::anyhow!("data: {e:#}"))?;
         // A static site: its files out of the image, so they're served without an instance.
         if dep.plan.as_ref().is_some_and(|p| p["start"] == apps_build::STATIC_START)
             && dep.run.kind == RunType::Web
@@ -1570,7 +1572,7 @@ impl Apps {
         }
         // vercel.json's crons: schedules that call their paths, unless the service already
         // calls that path (its own schedules win).
-        if run.kind == RunType::Web && !run.tcp {
+        if run.kind == RunType::Web && !run.tcp && !run.udp {
             for (i, c) in plan.crons.iter().enumerate() {
                 let name = format!("vercel-{}", i + 1);
                 if run.schedules.len() < 20 && !run.schedules.iter().any(|s| s.path.as_deref() == Some(c.path.as_str()) || s.name == name) {
@@ -1814,6 +1816,7 @@ impl Apps {
                 }
                 p
             },
+            udp: run.udp && run.kind == RunType::Web,
             cpu: run.cpu,
             memory_mb: run.memory_mb,
             network: Some(network),

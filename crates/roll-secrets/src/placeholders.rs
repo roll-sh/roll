@@ -513,6 +513,29 @@ impl Secrets {
         if c.allows(Action::Reveal, &Scope::at(project, slug, path)) { Ok(()) } else { Err(gone()) }
     }
 
+    /// Whether what `maker` copied out of `slug:path` of `project` into code nobody vetted (a
+    /// sandbox's env) may still be used there: they still reach the project and may reveal it, as
+    /// an untrusted reader does (no protected environment). Asked again before each use; a no is
+    /// `Forbidden`.
+    pub fn maker_may_reveal(&self, maker: &str, project: &str, slug: &str, path: &str) -> Result<()> {
+        match self.maker_may(maker, project, slug, path, true) {
+            Ok(()) => Ok(()),
+            Err(Refusal::Failed(e)) => Err(Error::Internal(e)),
+            Err(r) => Err(Error::Forbidden(r.to_string())),
+        }
+    }
+
+    /// Whether `maker` can still act at all (a person who can sign in, a token that lives, the
+    /// operator), for what was copied before roll kept where it came from; a no is `Forbidden`.
+    pub fn maker_acts(&self, maker: &str) -> Result<()> {
+        let gone = || Error::Forbidden(format!("{maker}, who copied them, can't reach roll secrets any more"));
+        match self.maker_caller(maker, "check") {
+            Ok(_) if !matches!(self.maker(maker)?, crate::caller::Origin::Gone) => Ok(()),
+            Ok(_) | Err(Error::Forbidden(_)) => Err(gone()),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Who reads for a placeholder now: the resource it was issued for, if its project still
     /// stands for it, or whoever asked, as roll-access and the accounts answer now.
     fn placeholder_reader(&self, row: &Row) -> std::result::Result<Caller, Refusal> {
