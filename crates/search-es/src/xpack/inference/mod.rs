@@ -604,10 +604,45 @@ fn sse(events: &[Value]) -> bytes::Bytes {
     bytes::Bytes::from(out)
 }
 
-/// Runs an endpoint from inside roll (semantic text, the `semantic` query, retrievers).
-pub async fn run(cluster: &Cluster, id: &str, req: &Request) -> EsResult<(Endpoint, Results)> {
+/// What roll runs an endpoint for from inside a search.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Use {
+    /// Tokens for a `sparse_vector` query.
+    Sparse,
+    /// A vector for `knn` (`text_embedding` or `embedding` endpoints).
+    Dense,
+    /// The scores of a `text_similarity_reranker`.
+    Rerank,
+}
+
+impl Use {
+    /// Whether an endpoint of task `t` serves it.
+    pub(crate) fn served_by(self, t: TaskType) -> bool {
+        match self {
+            Use::Sparse => t == TaskType::SparseEmbedding,
+            Use::Dense => matches!(t, TaskType::TextEmbedding | TaskType::Embedding),
+            Use::Rerank => t == TaskType::Rerank,
+        }
+    }
+
+    fn task(self) -> TaskType {
+        match self {
+            Use::Sparse => TaskType::SparseEmbedding,
+            Use::Dense => TaskType::TextEmbedding,
+            Use::Rerank => TaskType::Rerank,
+        }
+    }
+}
+
+/// Runs an endpoint from inside roll (the `semantic` query, queries on `semantic_text` fields,
+/// rerankers) for `what`: an endpoint whose task type can't serve it is refused before any call
+/// (a paid call whose answer would be thrown away).
+pub async fn run(cluster: &Cluster, id: &str, what: Use, req: &Request) -> EsResult<(Endpoint, Results)> {
     let st = cluster.state();
     let ep = endpoint(cluster, &st, id).ok_or_else(|| not_found(id))?;
+    if !what.served_by(ep.task) {
+        return Err(EsError::status(400, format!("Requested task type [{}] does not match the inference endpoint's task type [{}]", what.task().name(), ep.task.name())));
+    }
     let s = Service::find(cluster, &ep.service).ok_or_else(|| EsError::status(400, format!("Unknown service [{}]", ep.service)))?;
     let r = s.infer(cluster, &ep, req).await?;
     Ok((ep, r))

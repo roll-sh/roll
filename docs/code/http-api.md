@@ -189,7 +189,9 @@ Blocker   = {kind: "state" | "draft" | "untrusted" | "checks" | "needs_approval"
                    /* more may come: show unknown kinds by message */,
              message,
              key?: string, environments?: string[] /* secret_leak, secret_missing: the roll secrets key and where */,
-             path?: string, line?: number, fingerprint?: string /* secret_unstored: where (1-based line) and what .roll/secrets-allow names to keep it */}
+             path?: string, line?: number, fingerprint?: string /* secret_unstored: where (1-based line) and what .roll/secrets-allow names to keep it */,
+             validity?: {fingerprint, result: "live" | "invalid" | "unknown", account?: string, checked_at?: number, rotator?: "aws-iam" | "github-app"}
+               /* secret_unstored, with the project's roll secrets validity checks on: whether it works, as its provider answered (a live one is listed first); docs/secrets.md "Is it live?" */}
 QueueInfo = {id /* qe_… */, position: number | null /* 1-based while queued; null once it left */,
              lane: "urgent" | "normal", state: EntryState, error: string | null /* why it was ejected: one line */,
              output: string | null /* the failing checks' log tail behind `error`, "<check>:\n<tail>" per check */,
@@ -350,7 +352,8 @@ PATCH /v1/code/repos/{owner}/{repo}/review-settings {…Rules fields} → same; 
 ### Review apps
 
 ```
-ReviewApp = {id /* app_… */, owner, name, webhook_url, events: string[], repos: string[] /* full names */,
+ReviewApp = {id /* app_… */, owner, name, webhook_url /* scheme and host only, e.g. "https://hooks.example.com" */,
+             events: string[], repos: string[] /* full names */,
              all_repos: bool, required: bool, active: bool, created_at, updated_at}
 Delivery  = {id /* dl_… */, event, state: "pending" | "delivered" | "failed", attempts, last_status: number | null,
              last_error: string | null, last_response: string | null /* the start of the last attempt's
@@ -359,7 +362,8 @@ Delivery  = {id /* dl_… */, event, state: "pending" | "delivered" | "failed", 
 
 GET    /v1/code/owners/{owner}/review-apps → ReviewApp[]                 the owner (or admin)
 POST   /v1/code/owners/{owner}/review-apps {name, webhook_url, events?, repos?, required?}
-       → 201 {app: ReviewApp, token /* rla_…, shown once */, secret /* rls_…, shown once */}   409 name taken
+       → 201 {app: ReviewApp, token /* rla_…, shown once */, secret /* rls_…, shown once */}   409 name taken;
+       400 without ROLL_SECRET_KEY on the server (also for PATCH and rotate)
 GET    /v1/code/review-apps/{id} → ReviewApp · PATCH {name?, webhook_url?, events?, repos?, required?, active?} → ReviewApp
 DELETE /v1/code/review-apps/{id} → 204
 POST   /v1/code/review-apps/{id}/rotate → {token, secret}               the old ones stop working
@@ -381,6 +385,21 @@ reviews, threads, web}}` with headers `X-Roll-Event`, `X-Roll-Delivery`, `X-Roll
 `X-Roll-Signature-256: sha256=<hex HMAC-SHA256(secret, "{timestamp}.{body}")>`. Non-2xx answers
 are retried with backoff (8 attempts), then the delivery is `failed`. `urls.diff` is
 `GET …/compare/{base}...{head}?format=diff` (text/plain unified diffs).
+
+Review apps' and repo webhooks' URLs and signing secrets are credentials (a Slack or Discord
+incoming-webhook URL is enough to post), so they're kept only sealed with `ROLL_SECRET_KEY`, each
+bound to its app or webhook. Without the key on the server, making, changing or rotating one is a
+400 naming `ROLL_SECRET_KEY` (deleting one, its deliveries and redeliveries still work). The secret is
+shown once, when made or rotated; answers, pings, audit rows and delivery errors show a URL's scheme
+and host only (`"(sealed)"` on a server that can't open it). URLs and secrets an older server kept in
+the clear are sealed when a server with the key starts, and the URLs it wrote whole into
+`webhook_create` audit rows, pings and delivery errors are cut to their scheme and host, in one write
+that erases what it overwrote: on SQLite nothing of the old values is left in `control.db` or its
+`-wal` (`secure_delete`, then the WAL checkpointed and truncated). On Postgres the old row versions
+stay as dead tuples until autovacuum reuses their pages, and backups and WAL archives taken before
+still hold the clear values: rotate those URLs and secrets at their receivers if that matters. Once
+sealed, a server started without the key (or with another one) can't send: its deliveries fail with
+that error until the key is back.
 
 ## roll's reviewer
 
@@ -543,7 +562,8 @@ push    = {ref /* refs/heads/… */, before: sha | null /* null: created */, aft
 ## Webhooks and commit statuses
 
 ```
-Webhook = {id /* wh_… */, url, events: string[], active, created_by, created_at, updated_at}
+Webhook = {id /* wh_… */, url /* scheme and host only, e.g. "https://hooks.example.com" */, events: string[], active,
+           created_by, created_at, updated_at}
 Status  = {context, state: "pending" | "success" | "failure" | "error", target_url: string | null,
            description: string | null, creator, created_at, updated_at}
 
@@ -556,8 +576,8 @@ GET    /v1/code/repos/{owner}/{repo}/webhooks → Webhook[]                     
 POST   /v1/code/repos/{owner}/{repo}/webhooks {url, events?, secret?, active?}
        → 201 {webhook: Webhook, ping: delivery id, secret? /* only when roll generated it: shown once */}
        events: any of landed, change, review, thread, check, queue, work, preview, push, budget, or ["*"] (default
-       ["landed"]); secret: 16-200 characters (default: generated, rlw_…); 400 bad url/events/secret;
-       at most 20 per repo (422)
+       ["landed"]); secret: 16-200 characters (default: generated, rlw_…); 400 bad url/events/secret, or
+       no ROLL_SECRET_KEY on the server (also for PATCH); at most 20 per repo (422)
 GET    /v1/code/repos/{owner}/{repo}/webhooks/{id} → Webhook · PATCH {url?, events?, secret?, active?} → Webhook
 DELETE /v1/code/repos/{owner}/{repo}/webhooks/{id} → 204
 POST   /v1/code/repos/{owner}/{repo}/webhooks/{id}/ping → 202 Delivery
@@ -577,7 +597,8 @@ GET    /v1/code/repos/{owner}/{repo}/statuses/{rev} → {changeset, git_commit, 
   `X-Roll-Delivery`, `X-Roll-Timestamp` and `X-Roll-Signature-256: sha256=<hex HMAC-SHA256(secret,
   "{timestamp}.{body}")>`; anything but a 2xx is retried with backoff (8 attempts), then `failed`.
   The body is `{event, delivery, webhook, repo: {id, full_name, default_branch, visibility},
-  data /* the event's data, as on /events */}`; `ping` is sent on creation and on request.
+  data /* the event's data, as on /events */}`; `ping` is sent on creation and on request. The
+  URL and the secret are kept as review apps' are (sealed with `ROLL_SECRET_KEY`, "Review apps").
 - **`landed` never drops one.** Landings are read from the store's land log (written in each
   landing's own transaction) after a cursor kept in the control database, not from the in-memory
   broadcast: a burst larger than the broadcast channel, or a daemon that stopped between a landing
@@ -911,7 +932,8 @@ Sandbox = {id /* sbx_… */, name, machine /* mch_… */, backend, size: Size,
            stopped_reason?: "idle" | "owner" /* while stopped: asleep, or the owner's stop */,
            error?: string /* the backend's last complaint */,
            created_at, updated_at, last_active_at? /* its machine last did something; it sleeps a window after */,
-           secrets_by? /* who copied secrets into its env: roll secrets' principal (usr_…, token:…, operator) */}
+           secrets_by? /* who copied secrets into its env: roll secrets' maker (usr_…, token:…, operator; an admin's session is the person) */,
+           secrets_dropped? /* why the copied secrets were taken out: secrets_by may no longer reveal them */}
 SandboxInfo = {backend, size /* a Size name */, status /* as Sandbox.status */, hourly_cents,
                stopped_reason? /* as Sandbox.stopped_reason */}   (Machine.sandbox)
 Size = {name /* "standard" */, cpu, memory_gb, disk_gb, hourly_cents /* price per running hour, US cents */}
@@ -923,6 +945,15 @@ its own while it should run is started again. A running one goes to sleep (desir
 `0` keeps sandboxes up): no thread on it starting or running (a thread waiting on its user is idle),
 no command for it and no terminal output. "starting" is a stopped sandbox on its way up again (a wake,
 or start); its machine comes online once its daemon connects. Asleep, it isn't billed.
+
+Copied secrets go to its code only while `secrets_by` may reveal them. Only where they came from
+(project, environment and which variables) is kept, and roll secrets is asked again before each
+create and start (a wake too). Once the copier can't reach the project or reveal the environment
+(removed, demoted, a token revoked), the sandbox starts without those variables, its home and the
+rest of its env kept (`secrets_dropped` says why), on backends that can (docker: a new container on
+the same home volume; fargate: what it starts with is kept without them). agent37 can't change an
+instance's env, and a sandbox made before the source was kept doesn't say which variables they
+are, so either one isn't started at all: its `error` says so, and it's deleted and made again.
 
 ### Automations
 

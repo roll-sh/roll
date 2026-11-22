@@ -8,10 +8,10 @@ use crate::links::{Link, Mode};
 use crate::{Error, Result, Secrets, Value, audit, from_json, json, names};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use code_sql::{Conn, OptionalExtension, params};
+use code_sql::{Conn, OptionalExtension, ValueRef, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// One operation of a batch, as the API takes it.
 #[derive(Clone, Debug, Deserialize)]
@@ -94,10 +94,13 @@ pub(crate) fn expectations(ops: &[Op]) -> Result<Vec<(usize, i64)>> {
 
 /// Check-and-set, inside a write: each expected key is still at the version its writer read.
 pub(crate) fn check_versions(c: &Conn<'_>, env_id: &str, items: &[Item], expect: &[(usize, i64)]) -> Result<()> {
+    if expect.is_empty() {
+        return Ok(());
+    }
+    let now_at = currents(c, env_id, expect.iter().map(|(i, _)| &items[*i]))?;
     for (i, want) in expect {
         let item = &items[*i];
-        let now_at: Option<i64> = c.query_row("SELECT version FROM secrets WHERE env_id = ? AND path = ? AND key = ? AND owner = ?", params![env_id, item.path, item.key, item.owner], |r| r.get(0)).optional()?;
-        let have = now_at.unwrap_or(0);
+        let have = now_at.get(&item.slot()).map_or(0, |c| c.version);
         if have != *want {
             let now_is = if have == 0 { "it doesn't exist".to_string() } else { format!("it's at version {have}") };
             return Err(Error::Conflict("stale", format!("{} changed since version {want}: {now_is}; read it again and reapply", item.key)));
@@ -113,6 +116,15 @@ pub(crate) struct Item {
     pub key: String,
     pub owner: String,
     pub action: ItemAction,
+}
+
+/// Where a key lives in an environment: (path, key, owner), `secrets`' unique columns.
+type Slot = (String, String, String);
+
+impl Item {
+    fn slot(&self) -> Slot {
+        (self.path.clone(), self.key.clone(), self.owner.clone())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -247,25 +259,180 @@ pub(crate) struct Current {
     pub expires_at: Option<i64>,
 }
 
+const CURRENT_COLUMNS: &str = "id, version, value, fp, comment, tags, link, link_state, expires_at";
+
+/// [`CURRENT_COLUMNS`], from column `at` on.
+fn current_row(r: &code_sql::Row<'_>, at: usize) -> code_sql::Result<Current> {
+    Ok(Current {
+        id: r.get(at)?,
+        version: r.get(at + 1)?,
+        value: r.get(at + 2)?,
+        fp: r.get(at + 3)?,
+        comment: r.get(at + 4)?,
+        tags: from_json(&r.get::<_, String>(at + 5)?),
+        link: r.get::<_, Option<String>>(at + 6)?.and_then(|s| serde_json::from_str(&s).ok()),
+        link_state: r.get::<_, Option<String>>(at + 7)?.and_then(|s| serde_json::from_str(&s).ok()),
+        expires_at: r.get(at + 8)?,
+    })
+}
+
 pub(crate) fn current(c: &Conn<'_>, env_id: &str, path: &str, key: &str, owner: &str) -> Result<Option<Current>> {
-    Ok(c.query_row(
-        "SELECT id, version, value, fp, comment, tags, link, link_state, expires_at FROM secrets WHERE env_id = ? AND path = ? AND key = ? AND owner = ?",
-        [env_id, path, key, owner],
-        |r| {
-            Ok(Current {
-                id: r.get(0)?,
-                version: r.get(1)?,
-                value: r.get(2)?,
-                fp: r.get(3)?,
-                comment: r.get(4)?,
-                tags: from_json(&r.get::<_, String>(5)?),
-                link: r.get::<_, Option<String>>(6)?.and_then(|s| serde_json::from_str(&s).ok()),
-                link_state: r.get::<_, Option<String>>(7)?.and_then(|s| serde_json::from_str(&s).ok()),
-                expires_at: r.get(8)?,
-            })
-        },
-    )
-    .optional()?)
+    Ok(c.query_row(&format!("SELECT {CURRENT_COLUMNS} FROM secrets WHERE env_id = ? AND path = ? AND key = ? AND owner = ?"), [env_id, path, key, owner], |r| current_row(r, 0)).optional()?)
+}
+
+/// The rows of `items`' keys that exist, by slot: a few statements however many keys.
+fn currents<'i>(c: &Conn<'_>, env_id: &str, items: impl Iterator<Item = &'i Item>) -> Result<HashMap<Slot, Current>> {
+    let wanted: BTreeSet<Slot> = items.map(Item::slot).collect();
+    let rows = by_keys(c, &format!("SELECT path, key, owner, {CURRENT_COLUMNS} FROM secrets WHERE env_id = ? AND path = ? AND key"), env_id, "", &wanted, |r| {
+        Ok(((r.get(0)?, r.get(1)?, r.get(2)?), current_row(r, 3)?))
+    })?;
+    Ok(rows.into_iter().filter(|(slot, _)| wanted.contains(slot)).collect())
+}
+
+/// The id and next version of each of `slots` that has versions but no row: a deleted key that
+/// comes back keeps its id and numbering (the id last used, when it had several).
+fn earlier_ids(c: &Conn<'_>, env_id: &str, slots: &BTreeSet<Slot>) -> Result<HashMap<Slot, (String, i64)>> {
+    let rows = by_keys(c, "SELECT path, key, owner, secret_id, MAX(version), MAX(seq) FROM versions WHERE env_id = ? AND path = ? AND key", env_id, " GROUP BY path, key, owner, secret_id", slots, |r| {
+        Ok(((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?), r.get::<_, String>(3)?, r.get::<_, i64>(4)?, r.get::<_, i64>(5)?))
+    })?;
+    let mut out: HashMap<Slot, (String, i64, i64)> = HashMap::new();
+    for (slot, id, version, seq) in rows {
+        if !slots.contains(&slot) {
+            continue;
+        }
+        match out.get(&slot) {
+            Some((_, _, last)) if *last >= seq => {}
+            _ => {
+                out.insert(slot, (id, version + 1, seq));
+            }
+        }
+    }
+    Ok(out.into_iter().map(|(slot, (id, version, _))| (slot, (id, version))).collect())
+}
+
+/// Keys one lookup names at most.
+const KEYS_PER_READ: usize = 512;
+/// Rows one statement of a change writes at most on Postgres (19 columns: 2,432 parameters, far
+/// under its 65,535), where each statement costs far more than a row, even pipelined.
+const ROWS_PER_WRITE: usize = 128;
+
+/// `rest` in chunks of `max`, then powers of two: a few statement shapes, each prepared once per
+/// connection, whatever the count.
+fn chunks<T>(mut rest: &[T], max: usize) -> impl Iterator<Item = &[T]> {
+    std::iter::from_fn(move || {
+        let k = match rest.len() {
+            0 => return None,
+            n if n >= max => max,
+            n => 1 << n.ilog2(),
+        };
+        let (chunk, r) = rest.split_at(k);
+        rest = r;
+        Some(chunk)
+    })
+}
+
+fn marks(n: usize) -> String {
+    vec!["?"; n].join(", ")
+}
+
+/// `{head} IN (keys…){tail}` for every folder of `slots`, after the environment's id and the
+/// folder: lookups in `(env_id, path, key, owner)`, never a scan of the environment.
+fn by_keys<T>(c: &Conn<'_>, head: &str, env_id: &str, tail: &str, slots: &BTreeSet<Slot>, mut f: impl FnMut(&code_sql::Row<'_>) -> code_sql::Result<T>) -> Result<Vec<T>> {
+    let mut by_path: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for (path, key, _) in slots {
+        by_path.entry(path.as_str()).or_default().insert(key.as_str());
+    }
+    let mut out = vec![];
+    for (path, keys) in by_path {
+        let keys: Vec<&str> = keys.into_iter().collect();
+        for chunk in chunks(&keys, KEYS_PER_READ) {
+            let values: Vec<&str> = [env_id, path].into_iter().chain(chunk.iter().copied()).collect();
+            out.extend(c.query(&format!("{head} IN ({}){tail}", marks(chunk.len())), values, &mut f)?);
+        }
+    }
+    Ok(out)
+}
+
+/// The statements of one change, run in order: on Postgres several rows each, in one round
+/// trip. SQLite runs in process, so a statement costs it no round trip, and one that writes
+/// several rows inside a transaction needs a statement journal (a temporary file past 64 KiB):
+/// it gets a row per statement. Values are borrowed from what the change computed.
+struct Steps<'a> {
+    rows: usize,
+    steps: Vec<(String, Vec<Vec<ValueRef<'a>>>)>,
+}
+
+impl<'a> Steps<'a> {
+    fn new(c: &Conn<'_>) -> Self {
+        let rows = match c.backend() {
+            code_sql::Backend::Postgres => ROWS_PER_WRITE,
+            code_sql::Backend::Sqlite => 1,
+        };
+        Steps { rows, steps: vec![] }
+    }
+
+    fn push(&mut self, sql: String, values: Vec<ValueRef<'a>>) {
+        match self.steps.last_mut() {
+            // The same shape again: one more parameter list.
+            Some((last, lists)) if *last == sql => lists.push(values),
+            _ => self.steps.push((sql, vec![values])),
+        }
+    }
+
+    /// `{head} VALUES (…), (…)…{tail}`, a chunk of `rows` at a time, each row's `cols` values
+    /// from `row`.
+    fn insert<T>(&mut self, head: &str, tail: &str, cols: usize, rows: &'a [T], row: impl Fn(&'a T, &mut Vec<ValueRef<'a>>)) {
+        let group = format!("({})", marks(cols));
+        for chunk in chunks(rows, self.rows) {
+            let mut values = Vec::with_capacity(chunk.len() * cols);
+            for r in chunk {
+                row(r, &mut values);
+            }
+            debug_assert_eq!(values.len(), chunk.len() * cols);
+            self.push(format!("{head} VALUES {}{tail}", vec![group.as_str(); chunk.len()].join(", ")), values);
+        }
+    }
+
+    /// `{head} IN (ids…)`, after `lead`'s parameters.
+    fn in_list(&mut self, head: &str, lead: &[ValueRef<'a>], ids: &'a [&'a str]) {
+        for chunk in chunks(ids, self.rows) {
+            self.push(format!("{head} IN ({})", marks(chunk.len())), lead.iter().copied().chain(chunk.iter().map(|id| ValueRef::Text(id))).collect());
+        }
+    }
+
+    fn run(self, c: &Conn<'_>) -> Result<()> {
+        let (sqls, lists): (Vec<String>, Vec<Vec<Vec<ValueRef<'a>>>>) = self.steps.into_iter().unzip();
+        let steps: Vec<(&str, Vec<Vec<ValueRef<'a>>>)> = sqls.iter().map(String::as_str).zip(lists).collect();
+        c.execute_pipeline(&steps)?;
+        Ok(())
+    }
+}
+
+/// What a change writes for one key: its version, and (for a set) its new row.
+struct Write<'i> {
+    item: &'i Item,
+    id: String,
+    version: i64,
+    set: bool,
+    what: String,
+    value: Option<Vec<u8>>,
+    fp: Option<String>,
+    comment: String,
+    tags: String,
+    link: Option<String>,
+    link_state: Option<String>,
+    refs: String,
+    expires_at: Option<i64>,
+    weak: Option<&'static str>,
+    public: Option<String>,
+}
+
+fn text(s: &Option<String>) -> ValueRef<'_> {
+    s.as_deref().map_or(ValueRef::Null, ValueRef::Text)
+}
+
+fn int(i: Option<i64>) -> ValueRef<'static> {
+    i.map_or(ValueRef::Null, ValueRef::Int)
 }
 
 /// The earliest `notAfter` (ms) of the PEM certificates in a value (a chain's leaf, usually).
@@ -297,22 +464,41 @@ pub(crate) fn apply(c: &Conn<'_>, dek: &Dek, mac: &crate::Keyring, env: &EnvRow,
     // The project's syncs check their digests next, within seconds, ahead of their turn.
     c.execute("UPDATE syncs SET checked_at = NULL WHERE project_id = ? AND checked_at IS NOT NULL", [project])?;
     let seq: i64 = c.query_row("SELECT seq FROM projects WHERE project_id = ?", [project], |r| r.get(0))?;
+    // Every key's row first, and a returning key's old id: a few reads, however large the change.
+    let mut now_at = currents(c, &env.id, items.iter())?;
+    let returning: BTreeSet<Slot> = items.iter().filter(|i| matches!(i.action, ItemAction::Set { .. })).map(Item::slot).filter(|s| !now_at.contains_key(s)).collect();
+    let earlier = if returning.is_empty() { HashMap::new() } else { earlier_ids(c, &env.id, &returning)? };
+    // What the change writes, run together after the loop: the keys are distinct, so no row
+    // depends on another's write.
+    let (mut ended, mut gone, mut folders, mut writes): (Vec<String>, Vec<String>, BTreeSet<String>, Vec<Write<'_>>) = (vec![], vec![], BTreeSet::new(), vec![]);
     let mut diffs = vec![];
     let mut dropped_credentials: BTreeMap<String, (Link, Json)> = BTreeMap::new();
     for item in items {
-        let cur = current(c, &env.id, &item.path, &item.key, &item.owner)?;
+        let cur = now_at.remove(&item.slot());
         let kind_of = if item.owner.is_empty() { SecretType::Shared } else { SecretType::Personal };
         match &item.action {
             ItemAction::Delete => {
                 let cur = cur.ok_or_else(|| Error::NotFound(format!("no secret {} in {}:{}", item.key, env.slug, item.path)))?;
-                c.execute(
-                    "INSERT INTO versions (secret_id, version, seq, project_id, env_id, path, key, owner, op, what, value, fp, comment, tags, link, at, by, expires_at)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'delete', 'deleted', NULL, NULL, ?, ?, ?, ?, ?, ?)",
-                    params![cur.id, cur.version + 1, seq, project, env.id, item.path, item.key, item.owner, cur.comment, json(&cur.tags), cur.link.as_ref().map(json), now, caller.principal, cur.expires_at],
-                )?;
-                c.execute("DELETE FROM secrets WHERE id = ?", [&cur.id])?;
+                writes.push(Write {
+                    item,
+                    id: cur.id.clone(),
+                    version: cur.version + 1,
+                    set: false,
+                    what: "deleted".into(),
+                    value: None,
+                    fp: None,
+                    comment: cur.comment.clone(),
+                    tags: json(&cur.tags),
+                    link: cur.link.as_ref().map(json),
+                    link_state: None,
+                    refs: String::new(),
+                    expires_at: cur.expires_at,
+                    weak: None,
+                    public: None,
+                });
+                gone.push(cur.id.clone());
                 // A decoy ends with its key (its token is revoked after the write: `end_decoys`).
-                c.execute("UPDATE decoys SET ended_at = ? WHERE secret_id = ? AND ended_at IS NULL", params![now, cur.id])?;
+                ended.push(cur.id.clone());
                 if let (Some(l), Some(id)) = (&cur.link, credential_id(&cur.link_state)) {
                     dropped_credentials.insert(id, (l.clone(), cur.link_state.clone().unwrap_or_default()));
                 }
@@ -387,7 +573,7 @@ pub(crate) fn apply(c: &Conn<'_>, dek: &Dek, mac: &crate::Keyring, env: &EnvRow,
                 if let Some(cur) = &cur
                     && what.iter().any(|w| w == "changed" || w == "link")
                 {
-                    c.execute("UPDATE decoys SET ended_at = ? WHERE secret_id = ? AND ended_at IS NULL", params![now, cur.id])?;
+                    ended.push(cur.id.clone());
                 }
                 if let Some(cur) = &cur
                     && let Some(old) = credential_id(&cur.link_state)
@@ -398,44 +584,74 @@ pub(crate) fn apply(c: &Conn<'_>, dek: &Dek, mac: &crate::Keyring, env: &EnvRow,
                 }
                 let (id, version) = match &cur {
                     Some(cur) => (cur.id.clone(), cur.version + 1),
-                    None => c
-                        .query_row(
-                            "SELECT secret_id, MAX(version) FROM versions WHERE env_id = ? AND path = ? AND key = ? AND owner = ? GROUP BY secret_id ORDER BY MAX(seq) DESC LIMIT 1",
-                            [&env.id, &item.path, &item.key, &item.owner],
-                            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? + 1)),
-                        )
-                        .optional()?
-                        .unwrap_or_else(|| (names::new_id("sec", 16), 1)),
+                    None => earlier.get(&item.slot()).cloned().unwrap_or_else(|| (names::new_id("sec", 16), 1)),
                 };
                 let ct = stored_value.as_ref().map(|v| dek.seal(&value_aad(project, &id, version), v));
                 let link_json = link_now.as_ref().map(json);
                 let tags_json = json(&tags_now);
                 let state_json = state.as_ref().map(json);
                 let refs_json = json(&stored_value.as_ref().map(|v| crate::refs::refs(v.expose()).iter().map(crate::refs::Ref::display).collect::<Vec<_>>()).unwrap_or_default());
-                match &cur {
-                    Some(_) => {
-                        c.execute(
-                            "UPDATE secrets SET version = ?, value = ?, fp = ?, comment = ?, tags = ?, link = ?, link_state = ?, refs = ?, updated_at = ?, updated_by = ?, expires_at = ?, weak = ?, public = ? WHERE id = ?",
-                            params![version, ct, fp, comment_now, tags_json, link_json, state_json, refs_json, now, caller.principal, expires_now, weak, public, id],
-                        )?;
-                    }
-                    None => {
-                        c.execute(
-                            "INSERT INTO secrets (id, project_id, env_id, path, key, owner, version, value, fp, comment, tags, link, link_state, refs, updated_at, updated_by, expires_at, weak, public)
-                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                            params![id, project, env.id, item.path, item.key, item.owner, version, ct, fp, comment_now, tags_json, link_json, state_json, refs_json, now, caller.principal, expires_now, weak, public],
-                        )?;
-                        envs::ensure_folders(c, &env.id, &item.path, now)?;
-                    }
+                if cur.is_none() {
+                    folders.extend(names::parents(&item.path).into_iter().chain([item.path.clone()]));
                 }
-                c.execute(
-                    "INSERT INTO versions (secret_id, version, seq, project_id, env_id, path, key, owner, op, what, value, fp, comment, tags, link, at, by, expires_at)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'set', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    params![id, version, seq, project, env.id, item.path, item.key, item.owner, what.join(","), ct, fp, comment_now, tags_json, link_json, now, caller.principal, expires_now],
-                )?;
+                writes.push(Write {
+                    item,
+                    id,
+                    version,
+                    set: true,
+                    what: what.join(","),
+                    value: ct,
+                    fp: Some(fp.clone()),
+                    comment: comment_now,
+                    tags: tags_json,
+                    link: link_json,
+                    link_state: state_json,
+                    refs: refs_json,
+                    expires_at: expires_now,
+                    weak,
+                    public,
+                });
                 diffs.push(ItemDiff { key: item.key.clone(), path: item.path.clone(), kind: kind_of, what, from_fp: cur.map(|c| c.fp), to_fp: Some(fp) });
             }
         }
+    }
+    {
+        use ValueRef::{Blob, Int, Null, Text};
+        let (ended, gone): (Vec<&str>, Vec<&str>) = (ended.iter().map(String::as_str).collect(), gone.iter().map(String::as_str).collect());
+        let sets: Vec<&Write<'_>> = writes.iter().filter(|w| w.set).collect();
+        let folders: Vec<&str> = folders.iter().map(String::as_str).collect();
+        let (project, env_id, by) = (project.as_str(), env.id.as_str(), caller.principal.as_str());
+        let mut steps = Steps::new(c);
+        steps.in_list("UPDATE decoys SET ended_at = ? WHERE ended_at IS NULL AND secret_id", &[Int(now)], &ended);
+        steps.in_list("DELETE FROM secrets WHERE id", &[], &gone);
+        // Its hosts go with it: set again, a key is bound again only by an admin.
+        steps.in_list("DELETE FROM key_hosts WHERE secret_id", &[], &gone);
+        // A key's row keeps its id: an existing one is updated in place.
+        steps.insert(
+            "INSERT INTO secrets (id, project_id, env_id, path, key, owner, version, value, fp, comment, tags, link, link_state, refs, updated_at, updated_by, expires_at, weak, public)",
+            " ON CONFLICT (id) DO UPDATE SET version = excluded.version, value = excluded.value, fp = excluded.fp, comment = excluded.comment, tags = excluded.tags, link = excluded.link,
+               link_state = excluded.link_state, refs = excluded.refs, updated_at = excluded.updated_at, updated_by = excluded.updated_by, expires_at = excluded.expires_at, weak = excluded.weak, public = excluded.public",
+            19,
+            &sets,
+            |w, v| {
+                let i = w.item;
+                v.extend([Text(&w.id), Text(project), Text(env_id), Text(&i.path), Text(&i.key), Text(&i.owner), Int(w.version), w.value.as_deref().map_or(Null, Blob), text(&w.fp)]);
+                v.extend([Text(&w.comment), Text(&w.tags), text(&w.link), text(&w.link_state), Text(&w.refs), Int(now), Text(by), int(w.expires_at), w.weak.map_or(Null, Text), text(&w.public)]);
+            },
+        );
+        steps.insert("INSERT INTO folders (env_id, path, created_at)", " ON CONFLICT (env_id, path) DO NOTHING", 3, &folders, |p, v| v.extend([Text(env_id), Text(p), Int(now)]));
+        steps.insert(
+            "INSERT INTO versions (secret_id, version, seq, project_id, env_id, path, key, owner, op, what, value, fp, comment, tags, link, at, by, expires_at)",
+            "",
+            18,
+            &writes,
+            |w, v| {
+                let i = w.item;
+                v.extend([Text(&w.id), Int(w.version), Int(seq), Text(project), Text(env_id), Text(&i.path), Text(&i.key), Text(&i.owner), Text(if w.set { "set" } else { "delete" })]);
+                v.extend([Text(&w.what), w.value.as_deref().map_or(Null, Blob), text(&w.fp), Text(&w.comment), Text(&w.tags), text(&w.link), Int(now), Text(by), int(w.expires_at)]);
+            },
+        );
+        steps.run(c)?;
     }
     // A managed credential no secret uses any more keeps working for its grace period, then
     // the sweeper revokes it.
@@ -589,7 +805,7 @@ impl Secrets {
                 let entry = match shared {
                     Some((_, state)) => (open_parts(&dek, project, state)?, state.clone()),
                     None => {
-                        if let Ok(p) = self.links.get(&link.kind)
+                        if let Ok(p) = self.provider_for(&link.kind, &link.r#ref)
                             && p.exclusive_for(&link.r#ref)
                             && let Some(other) = self.holder(project, env_slug, &link, items)?
                         {
@@ -597,7 +813,7 @@ impl Secrets {
                             break;
                         }
                         let label = format!("roll secrets {env_slug} {}", item.key);
-                        match self.links.get(&link.kind).and_then(|p| p.issue(&link.r#ref, &cred, &link, &label, None)) {
+                        match self.provider_for(&link.kind, &link.r#ref).and_then(|p| p.issue(&link.r#ref, &cred, &link, &label, None)) {
                             Ok(i) => {
                                 out.fresh.push(Fresh { kind: link.kind.clone(), r#ref: link.r#ref.clone(), handle: i.handle.clone() });
                                 let state = seal_parts(&dek, project, &i.parts, i.handle, self.db.now_ms()?);
@@ -783,16 +999,24 @@ impl Secrets {
 
     /// Each item's own check: write or delete in its folder, and `admin` to set a link
     /// (a link reaches a resource's credentials as the operator, so who links what into which
-    /// environment is an admin's choice).
+    /// environment is an admin's choice). A value's reference to another folder needs `reveal`
+    /// there, as an import or a base does: every reader of this folder (its runtimes too) would
+    /// read it.
     pub(crate) fn check_items(&self, project: &str, env: &str, items: &[Item], caller: &Caller) -> Result<()> {
         for i in items {
             let at = Scope::at(project, env, &i.path);
             match &i.action {
                 ItemAction::Delete => caller.need(Action::Delete, &at)?,
-                ItemAction::Set { link, .. } => {
+                ItemAction::Set { link, value, .. } => {
                     caller.need(Action::Write, &at)?;
                     if matches!(link, Some(Some(_))) {
                         caller.need(Action::Admin, &at)?;
+                    }
+                    for r in value.as_ref().map(|v| crate::refs::refs(v.expose())).unwrap_or_default() {
+                        let Some(e) = r.env.as_deref().filter(|e| *e != env || r.path != i.path) else { continue };
+                        if !caller.allows(Action::Reveal, &Scope::at(project, e, &r.path)) {
+                            return Err(Error::Forbidden(format!("{} references {}, which you may not reveal: everyone who reads {env} would read it", i.key, r.display())));
+                        }
                     }
                 }
             }

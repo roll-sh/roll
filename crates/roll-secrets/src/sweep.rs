@@ -189,7 +189,7 @@ impl Secrets {
         }
         let handle: Json = handle.and_then(|h| serde_json::from_str(&h).ok()).unwrap_or_default();
         // The product first: if recording fails, the old expiry stands and the sweeper revokes then.
-        self.links.get(&link.kind)?.renew(&link.r#ref, &handle, until)?;
+        self.provider_for(&link.kind, &link.r#ref)?.renew(&link.r#ref, &handle, until)?;
         let n = self.db.write(|c| c.execute("UPDATE leases SET expires_at = ? WHERE id = ? AND revoked_at IS NULL AND expires_at = ?", params![until, id, expires_at]))?;
         if n == 0 {
             return Err(Error::Conflict("conflict", format!("{id} changed meanwhile: try again")));
@@ -356,7 +356,7 @@ impl Secrets {
         if !self.members(project)?.contains(&(link.kind.clone(), link.r#ref.clone())) {
             return Err(Error::BadRequest(format!("{} {} isn't in this project any more", link.kind, link.r#ref)));
         }
-        let provider = self.links.get(&link.kind)?;
+        let provider = self.provider_for(&link.kind, &link.r#ref)?;
         match link.mode {
             Mode::Live => {
                 // Resetting the resource's own credential affects every environment that links it.
@@ -451,9 +451,10 @@ impl Secrets {
                 }
             }
         }
-        // Deleted projects whose last credential is revoked now.
-        if let Err(e) = self.sweep_forgotten() {
-            tracing::warn!("cleaning up deleted projects failed: {e}");
+        // Deleted projects: past their recovery window, the audit chain closed, then purged; their
+        // key and registries once their last credential is revoked (deleted.rs).
+        if let Err(e) = self.sweep_deleted() {
+            tracing::warn!("purging deleted projects failed: {e}");
         }
         // ACME's used nonces, old orders and expired certificates' rows.
         if let Err(e) = self.sweep_acme() {
@@ -461,7 +462,7 @@ impl Secrets {
         }
         // Expired ephemeral environments.
         let expired: Vec<(String, String)> = self.db.read(|c| {
-            c.query("SELECT project_id, slug FROM environments WHERE kind = 'ephemeral' AND expires_at IS NOT NULL AND expires_at <= ? LIMIT 100", [now], |r| Ok((r.get(0)?, r.get(1)?)))
+            c.query(&format!("SELECT project_id, slug FROM environments WHERE kind = 'ephemeral' AND expires_at IS NOT NULL AND expires_at <= ? AND {} LIMIT 100", crate::deleted::live("environments.project_id")), [now], |r| Ok((r.get(0)?, r.get(1)?)))
         })?;
         let sweeper = Caller::consumer("roll:sweeper");
         for (project, slug) in expired {
@@ -476,7 +477,7 @@ impl Secrets {
         // Managed links due for rotation (one per credential).
         let managed: Vec<(String, String, String, String, String, String)> = self.db.read(|c| {
             c.query(
-                "SELECT s.project_id, e.slug, s.path, s.key, s.link, s.link_state FROM secrets s JOIN environments e ON e.id = s.env_id WHERE s.link LIKE '%\"mode\":\"managed\"%' AND s.link LIKE '%rotate_days%' AND s.link_state IS NOT NULL",
+                &format!("SELECT s.project_id, e.slug, s.path, s.key, s.link, s.link_state FROM secrets s JOIN environments e ON e.id = s.env_id WHERE s.link LIKE '%\"mode\":\"managed\"%' AND s.link LIKE '%rotate_days%' AND s.link_state IS NOT NULL AND {}", crate::deleted::live("s.project_id")),
                 (),
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
             )
@@ -506,6 +507,13 @@ impl Secrets {
         self.sweep_retention()?;
         self.sweep_reminders()?;
         self.sweep_alerts()?;
+        if let Err(e) = self.sweep_intercept_cas() {
+            tracing::warn!("sweeping interception CAs failed: {e}");
+        }
+        // Placeholders' quiet counts, and their rows a day past their end.
+        if let Err(e) = self.sweep_placeholders() {
+            tracing::warn!("sweeping placeholders failed: {e}");
+        }
         if let Err(e) = self.end_decoys() {
             tracing::warn!("revoking ended decoys failed: {e}");
         }
@@ -549,8 +557,10 @@ impl Secrets {
         let Ok(keys) = self.keys() else { return };
         let current = keys.current_id().to_string();
         let rows: Vec<(String, String)> = self.db.read(|c| c.query("SELECT project_id, dek FROM projects WHERE dek LIKE 'kms:%' LIMIT 500", (), |r| Ok((r.get(0)?, r.get(1)?)))).unwrap_or_default();
+        // Through the stored key, not the workspace: a deleted project's key is resealed too (and
+        // never sits in the batch failing, ahead of live ones).
         for (project, _) in rows.into_iter().filter(|(_, d)| crate::kms::sealed_by(d).is_some_and(|id| id != current)).take(50) {
-            if let Err(e) = self.project(&project) {
+            if let Err(e) = self.stored_key(&project) {
                 tracing::warn!(%project, "resealing a customer-wrapped data key after a rotation: {e}");
             }
         }

@@ -127,6 +127,32 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   goes). For comparing before and after. A trusted change's only (an approval is for one head),
   `roll.toml` services only (roll apps runs its own), and old code on migrated data can break.
   They're on the sheet, `roll preview show`, the change and the pull request comment.
+  A link to one that's no longer kept says so: its host answers 410 with a page naming the
+  service and the push and linking the service's latest (on roll's preview domain and on a
+  project's own, there only for that project's previews; the latest 30 a preview evicted, gone
+  with the preview), not a 404 that reads as a broken preview.
+- **From the pull request or roll's change** (Bunnyshell's and Uffizzi's comment commands):
+  someone who can write to the repo comments, in the pull request's conversation, an inline
+  review comment or any of the change's threads in roll, `@roll preview redeploy` (build and deploy it again), `reset` (its
+  data branched again from the parents), `wake`, `sleep` or `keep [hours]` (past its TTL, 24 when
+  not said, at most 720); roll answers where it was asked with what it did, and the preview's
+  activity names who asked ("@octo asked for its data reset from the pull request"). Readers and
+  strangers get nothing, as with every `@roll` command (roll code's GitHub permission check).
+- **Watch paths** (Railway's watch paths, Render's per-service build filters): a `roll.toml`
+  service lists the paths whose change rebuilds it (`[preview] watch = ["web/**",
+  "package.json"]`, gitignore-style as `paths` reads them; at most 50, no `!negation`). A push to
+  the change that touches none of them, nor `roll.toml`, keeps the build the service runs: no
+  build, no redeploy, and a start at the new head runs it ("kept web's build at 3f2a…: the push
+  to 9c1d… touched none of what it watches", in the activity). A path list that can't be read, a
+  pattern that doesn't parse, a deploy hook's rebuild or a fork's change (its approval is for one
+  head) rebuilds it as before. Like an earlier push, the kept build runs on data the new head's
+  release may have migrated. Empty (the default): every push rebuilds it.
+- **How it came up** (Vercel's and Render's deploy steps): each head's timeline is on the
+  preview's record (`timeline`: when converging it started, and when each step first finished:
+  `data`, its branches made or kept and masked; `setup`, seed, release and schema read; `deploy`,
+  every service live; `checks`, health paths answered; `ready`) and the sheet ("Up in 9.4 s: data
+  4.1 s · setup 1.2 s · deploy 3.0 s · checks 0.4 s", the steps so far while it's on its way). A
+  push starts a new one; a push that keeps the services shows how little it took.
 - **Warm after a push**: once a new head is deployed, the change's own services are woken (after
   the pass, a few at a time), so the first visit, usually the pull request comment's link,
   doesn't wait for a cold start; they sleep again after `sleep_after` unused. Not a preview
@@ -419,7 +445,11 @@ behind the `Apps` trait:
   sign in, lost the project or its reveal, a revoked token, a key made sensitive since or a
   protected environment for an untrusted preview leaves it out, said once in the preview's
   activity ("references left out (who chose them can't now): K: …"). Saving the rules again as
-  someone who may brings it back. A reference to the base needs none of this, but changing the base needs its writer's
+  someone who may brings it back. A service start asks too: one whose reference lost its writer
+  since the last converge waits for the converge that leaves it out (`refs_still_allowed`), so it
+  never reaches a service in between. A Git URL service's preview is read as that service (its
+  place on the canvas), every other preview as its repo. A deleted preview's own references'
+  setters go with it. A reference to the base needs none of this, but changing the base needs its writer's
   reveal on the new one (every preview's code then reads it). The rules are written only as they
   were checked: another request's change in between is a 409.
   Moving the base checks the references that named the old one as new. A value that reads as a
@@ -433,12 +463,13 @@ behind the `Apps` trait:
   the rule, saved with the rest. The value then lives in roll secrets only. A protected base refuses
   the write (`approval_required`): the button opens a change request with it instead (as roll
   secrets' Find does), and the rule keeps its value and says so until it's approved.
-  Only the rules' own references (checked when saved) go to roll secrets as references, as their
-  own input to rolld's ensure; every other value previews write, a preview's own variables and
-  anything stored before included, is plain text: its `${` is escaped, so it's never a reference
-  by accident and reads back as written. A
-  preview's own variables refuse a reference (400) until roll secrets' maker-checked binding for
-  references a person chooses (`bind_ref`, its #407). Renaming an environment rewrites roll
+  Only references someone was checked for go to roll secrets as references, as their own input
+  to rolld's ensure: the rules' (when saved) and a preview's own variables' (`PUT …/{id}/env`:
+  its setter's reveal on that folder, 403 otherwise; the base needs none; kept as its writer
+  under `preview:<id>` in `env_refs`, which saving the rules leaves alone). Both are read as their
+  writer at every converge (`digest_as`, above). Every other value previews write, anything
+  stored before included, is plain text: its `${` is escaped, so it's never a reference by
+  accident and reads back as written. A look-alike (` roll://…`, `ROLL://…`) is refused (400). Renaming an environment rewrites roll
   secrets' references, not these rules: the next converge logs the old name as one that doesn't
   resolve. `a_roll_reference_becomes_roll_secrets_own_and_a_plain_value_stays_plain`,
   `a_rules_reference_to_another_environment_needs_its_writers_reveal_there`;
@@ -455,7 +486,7 @@ behind the `Apps` trait:
      | Stream | `KAFKA_BOOTSTRAP_SERVERS`, `KAFKA_SASL_USERNAME`, `KAFKA_SASL_PASSWORD` |
      | Queue | `AMQP_URL` |
      | Tasks | `ROLL_TASKS_URL`, `ROLL_TASKS_TOKEN` |
-     | Search | `ELASTICSEARCH_URL` (the branch's own login in it), and a data-only credential of the branch as production's link gets: `ELASTICSEARCH_API_KEY`, or `OPENSEARCH_USERNAME`/`OPENSEARCH_PASSWORD` on OpenSearch |
+     | Search | Only a data-only credential of the branch, as production's link gets (roll search's keys route, `access: data`): `ELASTICSEARCH_URL` with no login and `ELASTICSEARCH_API_KEY`, or on OpenSearch the data user in the URL and `OPENSEARCH_USERNAME`/`OPENSEARCH_PASSWORD`. Never the branch's own login: no data credential, no link (the branch fails and is made again). A branch whose link held that login (made before 2026-11-21) is branched again at the next converge. roll search keeps a deleted cluster restorable with its keys and password, so before a search branch is deleted or reset its data key is revoked (`Brancher::retire`) and its password changed (no change, no delete). `a_search_branch_gives_only_a_data_credential` |
 
      A search branch starts with its parent's IP allowlist (`ip_allowlist`, search's #243). Masking
      a branch goes through roll search's own console route, so it works whatever the list says.
@@ -728,6 +759,143 @@ services, and the proxy goes with the preview's last service. Live: github.com r
 it, example.com refused and said in the activity, and a listed `169.254.169.254.nip.io` refused
 as a private address.
 
+### Keys a preview never holds
+
+A fork's preview runs code nobody in the project wrote, so roll secrets never gives it a
+sensitive value. With roll secrets' host bindings (#520) it can still call an outside API with a
+key: its environment gets an `rlph_` placeholder where the key would be, and only roll's egress
+proxy swaps it for the value, only in a request to a host the key is bound to (Infisical's Agent
+Vault, Akeyless's SecretlessAI). Neither Vercel's, Netlify's nor Render's fork previews can do
+this: they get no secrets, or all of them.
+
+- `egress_hosts` decides first. A key's bound hosts never open egress by themselves: a fork's
+  preview reaches a bound host only when the project lists it too (agreed with roll secrets), and
+  its activity names a key bound to a host its egress doesn't allow ("keys bound to hosts its
+  egress doesn't allow (add them to egress_hosts, or calls there fail): STRIPE_KEY →
+  api.stripe.com", once until it changes), so a call that fails says why.
+- What it holds is on its record (`intercepted`: each key with the hosts it's bound to, and how
+  many requests through its egress proxy had a key swapped in or were refused; never a value or
+  a placeholder) and the sheet ("Keys it never holds: STRIPE_KEY → api.stripe.com · 12 swapped
+  in, 1 refused"). Its services on roll apps are counted by roll apps' proxies (their `pv-`
+  environments' `intercepted`, apps' #612: since each proxy came up, not kept across its
+  restarts), which previews reads with the egress refusals and adds as `on_apps` (requests,
+  swapped, the latest refusals' reasons, masked as its logs are): "on roll apps, 3 swapped in".
+- For a host the preview's interception CA (#517) covers, `egress.js` hands the client's
+  connection to rolld over a unix socket in the preview's own directory, mounted into the egress
+  container (containers can't reach the host's TCP ports on ai-server, and no port is opened).
+  Every other allowed host is tunnelled untouched, as now.
+- rolld serves it with `roll_previews::intercept::serve`: it checks the CA is live (on every
+  connection), terminates TLS with a certificate for exactly that host, runs each HTTP/1.1
+  request's headers and query through roll secrets' filter (`proxy::filter` →
+  `Secrets::substitute`, which checks the placeholder, the host, the place and its maker again),
+  answers 403 to a request it refuses (nothing of it is sent), and re-dials the host over TLS
+  verified against the system's roots, never the interception CA. The `Host` header is the host
+  connected to, whatever the request said. No upgrades (WebSockets) through a bound host.
+- The CA's certificate is trusted by the preview's services without touching their image's own
+  store (not `update-ca-certificates`: a service runs as whatever user its image says): a copy of
+  the system's bundle plus it, named by `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE` and
+  `CURL_CA_BUNDLE`, and `NODE_EXTRA_CA_CERTS` naming the CA alone; its key stays in
+  rolld's memory. Tearing the preview down ends its consumer (`end_consumer`): its placeholders and
+  CAs stop at once.
+- The preview resolves as the rule's writer (`Ask { maker }`, from `env_refs`), so a placeholder
+  works only while that person still may reveal the key.
+- Services on roll apps: roll apps resolves the `pv-` environment's secrets itself, and its
+  closed environments swap placeholders with the same step (`roll-intercept`, consumer
+  `apps:<project>/pv-…`, apps' #603). Previews names the maker there too: the environment's PUT
+  carries `closed_by` (the rules' writer, or `null` for none, when keys bound to hosts are
+  withheld), which only the operator may send, so a fork's preview on roll apps uses a key only
+  while the person who wrote the rules may reveal it, not whoever owns the project. A roll apps
+  without the field refuses it as unknown and the environment is made without it (its maker is
+  who set the egress, as before). A change of writer deploys it again.
+- A host that echoes a key back (an echo service, a debug endpoint) never hands it to the
+  preview: a request a key was swapped into goes with `Accept-Encoding: identity`, and its response
+  goes through roll secrets' scrub (`proxy::Scrub`, the values in any form it looks for, never
+  leaving roll secrets) before it reaches the preview. In a header: a 502. In the body: the
+  connection is cut before those bytes. An encoded body (which can't be checked): a 502. An echo
+  ends the placeholder (`Secrets::echoed`: an alert audited, the environment's notice queued) and
+  says so in the activity ("echo.localhost echoed STRIPE_KEY back in its response: stopped, and its
+  placeholder ended"). `roll-intercept`'s port: `Interception::filter` answers a `Filtered` with a
+  `ResponseScrub`, so roll apps' closed environments get the same. Swapped requests and refusals
+  are counted in the preview's activity, never their values or placeholders.
+
+The intercepting step is its own crate, `crates/roll-intercept` (product-neutral: roll apps'
+closed environments use it too), with roll secrets as its `Interception` in rolld's
+`src/intercept.rs` (`CaInterception`). Built so far: `intercept::serve` and its port (`intercept::Interception`), tested with a fake CA,
+a fake filter and a TLS host of its own
+(`intercept::tests::a_placeholder_becomes_its_key_only_on_the_way_to_its_host`: swapped only on the
+way out, a refused placeholder never reaches the host, an uncovered host or an ended CA is never
+terminated, an upstream the real roots don't vouch for gets nothing); `egress.js`'s handoff
+(`INTERCEPT`: a CONNECT to a covered host, once allowed, goes to `/roll/intercept.sock` as
+`host:port` then the client's bytes; plain HTTP to one is refused, a key goes over TLS only;
+unset, nothing changes) and rolld's side of the socket (`intercept::listen`, `read_handoff`,
+bounded and refusing anything but a name and a port; `public_dial`, public addresses only).
+The runtime serves it too (`ports::Intercepts`, set by rolld once it can answer; unset, and with
+no `intercept_dir`, nothing changes): a preview with an interception gets
+`<intercept_dir>/<preview>/` (0700, its CA's `ca.pem` and `intercept.sock`), the listener on it,
+and its egress container running as the directory's owner with it mounted at `/roll` and
+`INTERCEPT` set; each connection's swaps and refusals go in the activity ("egress to
+api.stripe.com: 3 request(s), 3 key(s) swapped in"), never a value. A dead listener's socket is
+made again in place (a running container keeps its mount); a change of hosts makes the egress
+container again; dropping the proxy ends the listener and the directory. The test's first
+connection goes through a real socket. A service of an intercepted preview trusts its CA: the
+CA's PEM comes as `ROLL_INTERCEPT_CA`, and before its command runs it's written to a file and
+added to a copy of the system's bundle (Debian's, Red Hat's or Alpine's path, whichever is
+there), which `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE` and `CURL_CA_BUNDLE` name, with
+`NODE_EXTRA_CA_CERTS` naming the CA alone: every other host verifies as before (checked in
+Alpine and Debian images). A runtime with a trust store of its own (Java's keystore) doesn't read
+these. After an independent review: each preview's interception is bounded (16 connections at
+once, a 10 s handshake, 30 s for a request's headers, each host's leaf made once for the CA's
+life, `live` still asked every connection), a connection the host closed is made again (verified
+as the first), the socket is made under the preview's egress turn (two starts make one), only
+the socket's own directory is mounted, read-only (the CA's file stays out), and the activity
+names only connections that swapped or refused something; hop-by-hop headers stay with their hop both ways (the host closing its connection doesn't close the client's). HTTP/1.1 only: a client offering
+nothing but h2 can't connect. Next: rolld's adapter once roll secrets' batch 6 lands, then the
+live check.
+
+Wired to roll secrets (batch 6: #520 placeholders, #517 the CA): a preview whose egress goes
+through its proxy ("Roll only", a fork's default) resolves with placeholders for its consumer
+(`preview:pv-…`), made by whoever last saved the project's preview rules (recorded with them; the
+operator is no one, so rules it saved make none). When that person may no longer reveal there,
+it resolves as without placeholders and says "placeholders off: …; a writer saving the rules
+again turns them back on" in its activity, never with anyone else's rights. rolld's
+`SecretsIntercepts` asks `intercept_ca` for the consumer (reused while it lives, asked again
+after an hour so newly bound hosts are covered; none while the preview holds no placeholder),
+`intercept_ca_live` on every connection, and roll secrets' `proxy::filter` for each request; the
+preview's teardown calls `end_consumer`, ending its placeholders and CAs at once. Each preview's
+socket lives under `<home>/previews/intercept`. `a_roll_only_preview_takes_placeholders_made_by_who_saved_its_rules`.
+Only roll secrets' `maker_unreachable` refusal falls back without placeholders; any other 403 is
+what it says. A CA that ended (a key's bound hosts shrank: a revoked placeholder, a cleared
+binding, a cut-off) refuses the connection with "a key's bound hosts changed; restarting with a
+new interception certificate" and kicks a converge, which mints the new CA and restarts the
+preview's services (the CA's id is in their deploy fingerprint), since they trust its certificate.
+Live: `scripts/preview-intercept.sh` (rolld with `ROLL_PREVIEWS_INTERCEPT_ALLOW_PRIVATE`
+trusting a CA of its own, a TLS echo host `echo.localhost`): a key bound to it, a token saving the
+rules (the maker), a "Roll only" preview. Its service holds `rlph_…`, never the key; a request
+through the preview's socket, as its egress proxy hands one over, reaches the host with the key
+swapped in; a placeholder that isn't live is refused (403); the activity says a key was swapped
+in and never shows it. (The egress proxy only lets ports 443 and 80 through, and 443 isn't the
+script's on a shared machine, so it goes to the socket directly: what `egress.js` would send.)
+Until roll secrets' #582 gives the maker refusal its own code, a maker who can't reveal there
+fails the start with the reason rather than falling back.
+
+### Credentials at rest
+
+What previews keeps that's a credential is sealed with the deployment key (`ROLL_SECRET_KEY`,
+AES-256-GCM, as roll's reviewer keys are), each bound to its row: a preview's own variables (to
+the preview), the rules' pasted `env`/`env_for` values (to the project, scope and name; a
+`roll://` reference isn't a secret and stays as it is) and the screenshot links' signing key. They
+open inside the store as they're read. With no key, a pasted value is refused (400, naming
+`ROLL_SECRET_KEY`), never written in the clear; the signing key is then this process's own, kept
+in memory only (its links stop at a restart: local development). A database from before is sealed
+the moment the key comes (`Store::set_sealer`), in one write with SQLite's `secure_delete` on and
+the WAL checkpointed and truncated after it, so nothing of the old values stays readable in the
+file, its free pages or its `-wal` (`credentials_are_sealed_at_rest_and_nothing_stays_in_the_file`,
+on an upgraded database). On Postgres (a fleet's control database) the rewrite is an ordinary
+write: the old row versions stay as dead tuples until autovacuum reuses their pages (`VACUUM FULL`
+on `settings`, `previews` and `keys` removes them at once). Either way, backups and WAL archives
+taken before the key came still hold the clear values: rotate or expire them. Roll secrets'
+thirty-fourth review found them in the clear.
+
 ## Safety
 
 - **Forks.** A change with `trusted: false` (a PR from a fork) gets a preview only for a head a
@@ -954,12 +1122,14 @@ as a private address.
       sessions are kept by their SHA-256, and only while the project has team access: the write
       that keeps one reads the project's access, so a change of access can't miss it.
     - *Who.* rolld's `AccountsVisitors` (`crates/rolld/src/previews/mod.rs`) is the one place
-      that says for services roll runs itself: an account that still signs in and is an admin or
-      owns the project now, through the same roll session that asked for the ticket. rolld's
-      gate lets only admins into `/v1/previews` today, so today it's an admin. A ticket is only
-      given to them, and each session asks again every 5 minutes (`visitor_recheck`, off the
-      async workers): a roll session signed out, revoked or expired, or an account disabled,
-      deleted or that lost the project, is turned away at its next request after that, and its
+      that says for services roll runs itself: an account that still signs in and is an admin, or
+      whose role in the project now may reveal a preview there (docs/members.md: a developer
+      whose environments take in `preview`, an admin or owner; never a viewer, who sees no values:
+      the running app is what a share link gives, and minting one is `reveal`), through the same
+      roll session that asked for the ticket. A ticket is only given to them, and each session
+      asks again every 5 minutes (`visitor_recheck`, off the async workers): a roll session signed
+      out, revoked or expired, an account disabled or deleted, or a member removed or made a
+      viewer, is turned away at its next request after that, and its
       session is gone. Changing the project's access ends every session.
     - *The link's token lets nobody in.* The links roll hands out (`share_url`) are the plain
       URLs, as the change's and the pull request's are. A URL that still carries
@@ -1405,15 +1575,25 @@ activity(preview_id TEXT NOT NULL, at INTEGER NOT NULL, seq INTEGER NOT NULL, me
 
 ## HTTP contract
 
-Bodies are JSON. Every error is `{"error": string}`. A signed-in person who isn't an admin sees
-only the previews of their own workspace projects (as the workspace scopes them): another
-owner's preview or project is a 404. Tokens (their scopes are roll MCP's catalog), the operator
-and admins see every project.
+Bodies are JSON. Every error is `{"error": string}`. Previews are a member product
+(docs/members.md): a signed-in person who isn't an admin reaches the previews of the projects
+they're a member of, each route as their role there allows, by roll-access's catalogue (a preview
+is in its project, and its environment, `preview`, is never protected): a viewer reads a preview,
+its logs, traces and screenshots; a developer also reveals what holds credentials (`…/env`,
+`…/connect`, mail, share links) and writes (sleep, wake, refresh, its variables); an admin or owner
+also opens shells, files and ports, deletes and resets, accepts reviews and manages the project's
+rules, bypass secret and hooks. Another project's preview, or a project they aren't in, is a 404;
+what their role lacks is a 403 naming it. Starting a preview by hand (`POST /v1/previews`, `roll
+preview up`) makes something in the project: an admin's, the request naming the project in
+`X-Roll-Project` (as roll-access reads every create; the dashboard and the CLI send it). The handlers see the person
+(their session's grant isn't a token): their name on an accept, a person's accept for a required
+rule. Tokens (their scopes are roll MCP's catalog, and a rule naming a project reaches the
+previews in it), the operator and admins see every project.
 
 | Route | Body | Answer |
 | --- | --- | --- |
 | `GET /v1/previews?project=&state=` | | `Preview[]`, newest first, light (`Preview::light`): every count and state a row reads, without each page's accessibility issues, links and comparison, the first page's issues' markup and axe-core's words, or the words against main (by the bounds, about 130 KB a preview whose pages have the most violations, down to a few KB); `GET …/{id}` has all of it |
-| `POST /v1/previews` | `{project, repo, branch? , change?}` | 201 `Preview` (or 200 with the project's existing one). 404 unless the repo is on the project's canvas and the project stands for it (`Workspace::trusts`, as for the previews it makes itself: a preview builds and runs the repo). 409 when the change's preview is another project's (a change has one; it's never handed to another project) |
+| `POST /v1/previews` | `{project, repo, branch? , change?}` | 201 `Preview` (or 200 with the project's existing one). 404 unless the repo is on the project's canvas and the project stands for it (`Workspace::trusts`, as for the previews it makes itself: a preview builds and runs the repo). 409 when the change's preview is another project's (a change has one; it's never handed to another project); 400 when `X-Roll-Project` (the project roll-access decided the create on) names another project than the body |
 | `GET /v1/previews/{id}` | | `Preview` |
 | `DELETE /v1/previews/{id}` | | 202 `Preview` (`desired: "deleted"`) |
 | `POST /v1/previews/{id}/refresh` | | `Preview`: redeploy now |
@@ -1424,7 +1604,7 @@ and admins see every project.
 | `GET /v1/previews/{id}/screenshot.png?exp=&sig=` | | `image/png` behind a signed, expiring link, without credentials (403 otherwise): the pull request comment's image; `&diff=base` under its own signature, the diff against main |
 | `GET`/`POST /v1/previews/{id}/shares` | `{hours}` (1–720) for a new one | `Share[]` (never a token), or 201 `Share` with `url`, the only time the link is shown; 409 for a public preview or past 20 live ones |
 | `DELETE /v1/previews/{id}/shares/{share}` | | 204: the link stops at the visitor's next request |
-| `GET`/`PUT /v1/previews/{id}/env` | `{vars: {NAME: value \| null}}` (`null` removes; at most 100, 32 KiB each) | `{vars}`: the preview's own variables; its services redeploy with them |
+| `GET`/`PUT /v1/previews/{id}/env` | `{vars: {NAME: value \| null}}` (`null` removes; at most 100, 32 KiB each; a value may be `roll://ENV[/folder]/KEY`) | `{vars}`: the preview's own variables; its services redeploy with them. 403 for a reference to an environment other than the base without the caller's reveal on its folder; 400 for a malformed one or a look-alike |
 | `POST /v1/previews/{id}/approve` | `{head}` (the head looked at) | `Preview`: that head of a fork's pull request on a Git URL service runs (`pull.approved_head`); the next push waits again. 409 when the preview moved on to another head or isn't a fork's pull request. Admin in the permissions catalogue, and no MCP tool: letting outside code run with the project's data is a person's call |
 | `POST /v1/previews/{id}/visit` | `{to}` (a URL at one of the preview's service hosts) | `{url}`: a one-use way into a team-access preview (`access: "team"`) at `to`, good for a minute, for a person signed in to roll (a session; a token is a 403). 400 when the project's previews aren't `team` or `to` isn't the preview's; 403 for a person who may not open the project. Operator-only in the permissions catalogue: no grant ever gives one |
 | `POST /v1/previews/{id}/keep` | `{hours}` (0–720; 0 releases) | `Preview`: kept past its TTL until then (`kept_until`); a landed or closed change still ends it |
@@ -2183,25 +2363,72 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Previews on members, in review** (#524, stacked on roll's members #501): a member's role
-   decides each previews route by roll-access's catalogue (viewer reads, developer reveals and
-   writes, admin opens shells and manages the rules); roll-access learns a preview's project, so a
-   token confined to a project reaches its previews too. Left on it once #501's owner-only fix is
-   pushed: any member passes previews' own check, and team access opens to any member.
-2. **Keys a fork's preview never holds** (roll secrets' #520 placeholders and #517 interception
-   CA, after its batch 6): a fork's preview resolves as the rule's writer and gets `rlph_`
-   placeholders for keys bound to hosts; the egress proxy terminates TLS only for hosts the
-   preview's CA covers, swaps placeholders in headers and query for the host it dialled
-   (`roll_secrets::proxy::filter`), re-dials with real verification, checks the CA is live on
-   every connection, and ends the consumer with the preview. `egress_hosts` still decides first:
-   a key's hosts never open egress by themselves, and the preview's status says when a key is
-   bound to a host its egress doesn't allow. What GitHub's and Vercel's fork previews can't do:
-   run a fork's code against a real API without handing it the key.
-3. **References a person chooses** (after roll secrets' #407, `bind_ref`/`resolve_as`): a
-   preview's own variables take `roll://` too, and the rules' references move to bindings.
+1. **Roll secrets' response scrub wired into `roll-intercept`, in review** (stacked on roll
+   secrets' #628): a response that echoes a swapped key is stopped (a 502, or the connection cut
+   before those bytes), the placeholder ended and the echo in the activity; roll apps' closed
+   environments get it through the same port. Live-checked by `scripts/preview-intercept.sh`, which also gets a step for roll secrets' `maker_unreachable`
+   (#582, landed): the rules' saver loses access, the preview says "placeholders off" and its old
+   placeholder is refused.
+2. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
+   longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
+   0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
+   (3.3 s in its log) and its masking, which needs that compute up: pg-control's to shorten.
+3. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+   become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
+   follow the same roles, checked live against a member's session.
 4. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
 5. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-22: how each head came up, step by step (#641: the preview's timeline on its record, sheet and every live run), and a preview waiting on a starting service going on as soon as it's up (#646: the health checks went from 20.2 s to 6.1 s in the live run; 13 s had been a poll's wait).
+
+Checked 2026-11-22: every credential a preview's code holds is its branch's own. The live run now proves it for the bucket (the preview's key lists its branch and is refused on production's bucket), beside search's data-only key (#607); Postgres gets a role of its own, Redis, NoSQL and queues their branch's own login, streams and tasks a key of their own.
+
+Dropped 2026-11-21: reusing main's build for a service a change's first deploy doesn't touch. A cached rebuild of an untouched service costs a few seconds of CPU and runs at once with the changed service's build, which sets the wall time (two roll apps services, a push with cached builds: live in 4.2 s, see step 6 above), so a person would see no difference.
+
+Landed 2026-11-21 night: previews on members (#524, after members v1 #501): a member's role decides each previews route by roll-access's catalogue, team access by role, a create only in the project roll-access decided it on.
+
+Landed 2026-11-21 evening: keys on roll apps used as the rules' writer (#608, after apps' #610,
+#612 and #617), and the sheet looked at with real data at desktop and phone widths, dark and
+light: on a phone the sheet takes the width (a sliver of the list showed beside it), earlier
+pushes' links truncate instead of running off it, a wrapped line of details never starts with
+"·", the project's footer stays one line, and the screenshot's choices are grouped (pages, views,
+states).
+
+Landed 2026-11-21 midday: a search branch's link holds only its data-only credential (#607,
+roll search's report: never the branch's own login; old links branched again; its data key revoked
+and its password changed before a delete, since roll search's deletes are restorable), the keys a
+preview never holds on its record and sheet (#599), roll apps' closed environments on
+`roll-intercept` (apps' #603), roll apps' interception counts for a preview's services there on
+its record and sheet (#613), and an erasing write's checkpoint tried again until the WAL is empty
+(#615: a busy checkpoint had left what #581 rewrote sealed in the WAL).
+
+Landed 2026-11-21 morning: credentials sealed at rest (#581: the rules' pasted values, a
+preview's own variables and the screenshot links' key, refused in the clear without a key, an
+upgraded database left with nothing in its file or WAL), keys a fork's preview never holds (#535:
+placeholders swapped by its egress proxy over roll secrets' batch 6, the intercepting step its own
+crate `roll-intercept` shared with roll apps, live-checked by `scripts/preview-intercept.sh`), and
+a key bound to a host its egress doesn't allow said in the activity (#593).
+
+Landed 2026-11-21 (main c4b6561c9; turn 15): the gone page tested at the edge (#559), the live
+check's leaked build networks fixed (#567), `@roll preview` in any of a change's threads (#568)
+and watch paths per service (#570: a push outside them keeps the service's build).
+
+Landed 2026-11-21 (main e947ac207, ca30f77f1; turn 14): an independent review's fixes to
+references (#557: a Git URL service's preview read as its service, starts waiting for the
+converge that leaves out a reference whose writer lost it, a deleted preview's rows) and
+`@roll preview redeploy|reset|wake|sleep|keep` from a pull request (#558).
+
+Landed 2026-11-20 night (main b820c8883, c80a3fb99): a link to an earlier push no longer kept
+answers 410 naming the push and linking the service's latest (#545), on a project's own preview
+domain too (#553).
+
+Landed 2026-11-20 evening, later (main 089b7fa80): a preview's own variables take `roll://`
+references, each read as its setter at every converge (#544).
+
+Landed 2026-11-20 evening (main ed1868373, gated green with both live checks): a rule's reference
+to another environment reaches a preview only while its writer still may (#537: roll secrets'
+`digest_as` as them at every converge; left out otherwise, said in the activity).
 
 Landed in previews' lock turn 13 of 2026-11-20 (main c256b2f0d, exactly its gated tree): route
 budgets (#512: a route held to a p50 of its own, failing `roll/regressions` and blocking without

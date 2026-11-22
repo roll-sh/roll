@@ -11,7 +11,7 @@ made-up value and a product that's off are fine.
 
     mcp-sweep.py <api> <operator token file> [--writes] [-v] [--tool NAME]
 """
-import json, sys, urllib.error, urllib.request
+import json, re, sys, urllib.error, urllib.request
 
 api, tok = sys.argv[1], open(sys.argv[2]).read().strip()
 only = sys.argv[sys.argv.index("--tool") + 1] if "--tool" in sys.argv else None
@@ -122,8 +122,9 @@ except Exception:
     grant = None
 call("search_create_index", {"cluster": "sweep", "index": "sweep-idx"})
 call("streams_create_topic", {"stream": "sweep", "name": "t1"})
+call("streams_reset_group", {"stream": "sweep", "group": "g1", "topic": "t1", "to": "earliest"})  # committed offsets make a group
 call("queues_declare_queue", {"vhost": "sweep", "name": "q1"})
-seen = {("storage", "bucket"): "sweep-bkt", ("streams", "stream"): "sweep", ("streams", "topic"): "t1", ("nosql", "database"): "sweep",
+seen = {("storage", "bucket"): "sweep-bkt", ("streams", "stream"): "sweep", ("streams", "topic"): "t1", ("streams", "group"): "g1", ("nosql", "database"): "sweep",
         ("redis", "database"): "sweep", ("search", "cluster"): "sweep", ("search", "index"): "sweep-idx", ("queues", "vhost"): "sweep",
         ("queues", "queue"): "q1", ("secrets", "env"): "development", ("apps", "env"): "production"}
 if ws:
@@ -239,6 +240,14 @@ for pass_ in (0, 1):
             sc = res.get("result", {}).get("structuredContent")
             stood_in[-1] += f" -> {sc.get('http_status', 200) if isinstance(sc, dict) and res['result'].get('isError') else 200}: {json.dumps(sc)[:120] if res.get('result', {}).get('isError') else 'ok'}"
         bad = judge(t["name"], res)
+        # A Postgres tool whose SQL is its own (no sql argument) failing with a class-42 error
+        # (syntax, an unknown column, function or table) is the tool's SQL that's wrong: a 400
+        # would otherwise pass as a fresh rolld's.
+        if not bad and t.get("_meta", {}).get("roll/product") == "postgres" and "sql" not in t["inputSchema"].get("properties", {}) and res.get("result", {}).get("isError"):
+            text = json.dumps(res["result"].get("structuredContent")) + " ".join(c.get("text", "") for c in res["result"].get("content", []))
+            # (pg_stat_statements is made once by the caller, as postgres_slow_queries says.)
+            if re.search(r"\b42[0-9A-Z]{3}: ", text) and "pg_stat_statements" not in text:
+                bad = f"its own SQL fails: {text[:200]}"
         if bad:
             fails.append(f"{t['name']} {json.dumps(args)}: {bad}")
         else:
@@ -289,7 +298,93 @@ for l in leaks:
     print("LEAK", l)
 if reader and shown == 0:
     leaks.append("no tool showed even the operator a known credential: the check sees nothing (are the fixtures' secrets collected?)")
+
+# A member's own client (docs/mcp.md, "A person's own connection"): a person signed in by email
+# code, a viewer in the sweep's project, with a token that names every action. Their client lists
+# a member product's tools as their role allows (within their session, as the gate decides calls),
+# so none it lists is refused by their role, and a write their role can't make isn't listed.
+import os, glob, time
+def http(method, path, body=None, headers=None):
+    req = urllib.request.Request(f"{api}{path}", data=json.dumps(body).encode() if body is not None else None, method=method,
+                                 headers={"content-type": "application/json", **(headers or {})})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            raw = r.read()
+            return r.status, (json.loads(raw) if raw else None), r.headers
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        try:
+            return e.code, json.loads(raw), e.headers
+        except ValueError:
+            return e.code, raw.decode(errors="replace"), e.headers
+member_fails = []
+outbox = os.environ.get("MCP_SWEEP_OUTBOX")
+def member_token():
+    op = {"authorization": f"Bearer {tok}"}
+    s, inv, _ = http("POST", "/v1/accounts/invites", {"email": "viewer@example.com"}, op)
+    if s >= 300:
+        return f"inviting a person: {s} {inv}"
+    s, start, _ = http("POST", "/v1/accounts/email/start", {"email": "viewer@example.com", "invite": inv["token"]})
+    if s >= 300:
+        return f"starting a sign-in: {s} {start}"
+    code = None
+    for _ in range(100):
+        for f in glob.glob(os.path.join(outbox, "*")):
+            try:
+                subject = json.load(open(f)).get("subject", "")
+            except (ValueError, OSError):
+                continue
+            if "sign-in code" in subject:
+                code = subject[:6]
+        if code:
+            break
+        time.sleep(0.1)
+    if not code:
+        return "no sign-in mail in the outbox"
+    s, _, h = http("POST", "/v1/accounts/email/verify", {"challenge": start["challenge"], "code": code})
+    if s != 200:
+        return f"verifying the code: {s}"
+    cookie = h.get("set-cookie", "").split(";")[0]
+    s, session, _ = http("GET", "/v1/accounts/session", headers={"cookie": cookie})
+    me = {"cookie": cookie, "origin": api, "x-roll-csrf": (session or {}).get("csrf", "")}
+    s, pinv, _ = http("POST", f"/v1/workspace/projects/{ws}/invites", {"email": "viewer@example.com", "role": "viewer"}, op)
+    if s >= 300:
+        return f"inviting them to the project: {s} {pinv}"
+    s, acc, _ = http("POST", f"/v1/workspace/invites/{pinv['url'].split('token=')[1]}/accept", None, me)
+    if s >= 300:
+        return f"accepting: {s} {acc}"
+    every = [{"product": "*", "resources": "*", "actions": {a: "allow" for a in ("read", "write", "delete", "reveal", "deploy", "admin")}}]
+    s, made, _ = http("POST", "/v1/access/tokens", {"name": "sweep-viewer", "rules": every}, me)
+    if s >= 300:
+        return f"minting their token: {s} {made}"
+    secrets.discard(made["token"])
+    return made
+viewer = member_token() if outbox and ws else "no outbox or project"
+if isinstance(viewer, dict):
+    vt = viewer["token"]
+    vtools = rpc("tools/list", {}, token=vt).get("result", {}).get("tools", [])
+    names = {t["name"] for t in vtools}
+    if "secrets_list" not in names or names & {"secrets_set", "secrets_get_values"}:
+        member_fails.append(f"a viewer's client should list secrets_list and not secrets_set or secrets_get_values: {sorted(n for n in names if n.startswith('secrets_'))[:20]}")
+    called = 0
+    for t in vtools:
+        prod = t.get("_meta", {}).get("roll/product", "")
+        if prod not in ("secrets", "previews", "workspace") or not t.get("annotations", {}).get("readOnlyHint"):
+            continue
+        req = t["inputSchema"].get("required", [])
+        args = {a: seen[(prod, a)] if (prod, a) in seen else stand_in(t, prod, a) for a in req}
+        res = rpc("tools/call", {"name": t["name"], "arguments": args}, token=vt).get("result", {})
+        called += 1
+        text = json.dumps(res.get("structuredContent")) + " ".join(c.get("text", "") for c in res.get("content", []))
+        if res.get("isError") and ("your role in project" in text or "your roles can't" in text):
+            member_fails.append(f"{t['name']} is listed for a viewer but refused by their role: {text[:160]}")
+    print(f"member: a viewer's client lists {len(vtools)} tools; {called} read tools of member products called, {len(member_fails)} refused by the role that listed them")
+else:
+    member_fails.append(f"the member pass couldn't start: {viewer}")
+for f in member_fails:
+    print("MFAIL", f)
 fails += [f"leak {l}" for l in leaks]
+fails += [f"member {f}" for f in member_fails]
 
 # Choices: a tool called without an id it needs, by a client that fills in forms (2026-07-28 with
 # form elicitation), answers a form whose choices are what the connection may read
@@ -335,7 +430,9 @@ fails += [f"choices {c}" for c in no_form]
 # The rest of what a client reads: every prompt (its arguments from the fixtures), every resource
 # listed, a project's page, every skill. An error is a failure: they're all read-only.
 surface = []
-PROMPT_ARGS = {"project": seen.get(("workspace", "id")), "service": seen.get(("apps", "service")), "env": "production", "branch": seen.get(("postgres", "branch"))}
+PROMPT_ARGS = {"project": seen.get(("workspace", "id")), "service": seen.get(("apps", "service")), "env": "production", "branch": seen.get(("postgres", "branch")),
+               "preview": seen.get(("previews", "id")), "vhost": seen.get(("queues", "vhost")), "queue": seen.get(("queues", "queue")),
+               "stream": seen.get(("streams", "stream")), "group": seen.get(("streams", "group"))}
 for p in rpc("prompts/list", {}).get("result", {}).get("prompts", []):
     args = {a["name"]: (seen.get(("postgres", "project")) if a["name"] == "project" and "Postgres" in a.get("description", "") else PROMPT_ARGS.get(a["name"]) or "sweep")
             for a in p.get("arguments", [])}
@@ -380,13 +477,17 @@ if "--writes" in sys.argv:
         if any(w in name for w in ("url", "endpoint", "webhook", "target")):
             return "https://example.invalid/sweep"
         return f"sweep-{name}"
+    # Arguments a tool can't require because only some of another's values need them, which its
+    # default does: a notification's url (a webhook's; email, PagerDuty and Opsgenie take none), a
+    # drain's (a bucket drain takes none).
+    REQUIRED_BY_DEFAULT = {"apps_add_notification": ["url"], "apps_add_drain": ["url"]}
     writes = [t for t in tools if not t.get("annotations", {}).get("readOnlyHint") and "wait" not in t["name"] and (only is None or t["name"] == only)]
     writes.sort(key=lambda t: bool(t.get("annotations", {}).get("destructiveHint")))
     wran, wfails, wslow = 0, [], []
     for t in writes:
         prod = t.get("_meta", {}).get("roll/product", "")
         props = t["inputSchema"].get("properties", {})
-        args = {a: fake(a, props.get(a, {}), prod) for a in t["inputSchema"].get("required", [])}
+        args = {a: fake(a, props.get(a, {}), prod) for a in t["inputSchema"].get("required", []) + REQUIRED_BY_DEFAULT.get(t["name"], [])}
         try:
             res = rpc("tools/call", {"name": t["name"], "arguments": args})
         except Exception as e:

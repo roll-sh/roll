@@ -14,6 +14,8 @@ export interface Prices {
   gb_second: number;
   egress_gb: number;
   build_minute: number;
+  /** A GB-month stored: logs kept past the first week, build caches. */
+  stored_gb_month: number;
 }
 
 export interface Overview {
@@ -47,6 +49,16 @@ export interface Build {
   packages?: string[];
   /** The longest its build may take, seconds (60–21600, held to the node's own limit); unset: the node's. */
   timeout_s?: number;
+  /** Its builder: small (2 vCPU, 4 GiB; default), medium (4, 8 GiB) or large (8, 16 GiB), minutes metered by size on the fleet. */
+  size?: "small" | "medium" | "large";
+  /** Submodules fetched into the tree (default: left out): a Git URL's, or a roll code repo's. */
+  submodules?: boolean;
+  /** The private roll code repos (owner/name) a roll code repo's submodules may come from. */
+  submodule_repos?: string[];
+  /** The language's OpenTelemetry agent (Node, Python), started while traces are on. */
+  otel?: boolean;
+  /** A Git URL service's Git LFS objects in place of their pointers (default: pointers as text). */
+  lfs?: boolean;
 }
 
 export type ServiceType = "web" | "worker" | "cron";
@@ -65,6 +77,8 @@ export interface Push {
   timeout_s?: number;
   /** Records POSTed at once, each from its own partitions (1–32, default 4). */
   max_in_flight?: number;
+  /** `oidc`: each POST carries roll's OIDC token for the service instead of `CRON_SECRET`. */
+  auth?: "oidc";
 }
 
 /** A push rule as it stands (`…/environments/{env}/push`), on the service's owner since it began delivering. */
@@ -78,6 +92,15 @@ export interface PushState extends Push {
   last_delivered_at?: number;
   failing_since?: number;
   last_error?: string;
+}
+
+/** An alert on one of the app's own gauges: above or below a threshold for 1–5 minutes running. */
+export interface MetricAlert {
+  name: string;
+  above?: number;
+  below?: number;
+  minutes?: number;
+  sum?: boolean;
 }
 
 export interface Run {
@@ -109,8 +132,12 @@ export interface Run {
   drain_s?: number;
   /** A web service also scales on CPU: another instance while they average over this percent for a minute (10–100). */
   cpu_target?: number;
+  /** 1–100: an instance over this percent of its CPU counts as busy and isn't put to sleep or scaled in. */
+  busy_cpu?: number;
   /** A web service also scaled on its answers' p95 (50–60,000 ms). */
   latency_target_ms?: number;
+  /** Audiences its instances may ask roll's OIDC issuer for, at ROLL_OIDC_URL (`?aud=`, the first by default). */
+  oidc_audiences?: string[];
   /** And on memory: another while they average over this percent of their memory for a minute (10–100). */
   memory_target?: number;
   suspend_after_s: number;
@@ -119,7 +146,7 @@ export interface Run {
   volume?: { mount: string; size_gb: number; backups?: { every_hours: number; keep: number } };
   /** Metric alerts (`alert.*` events), over five minutes; each 0 is off. */
   /** log_match: text its output holds log_count times in five minutes (alert.log). */
-  alerts?: { memory_pct: number; error_pct: number; p95_ms: number; capacity_pct?: number; log_match?: string; log_count?: number };
+  alerts?: { memory_pct: number; error_pct: number; p95_ms: number; capacity_pct?: number; log_match?: string; log_count?: number; cpu_pct?: number; metrics?: MetricAlert[] };
   /** Its service level objective: `objective`% of requests not 5xx (and of minutes under `latency_ms` at p95) over `window_days`; `alert.slo` when its budget burns fast. */
   slo?: Slo;
   /** Its own Prometheus endpoint, scraped every 15 s on each running instance (port: the app's own by default). */
@@ -131,6 +158,8 @@ export interface Run {
   rollout?: { steps: number[]; step_s: number; error_pct: number; /** Each step waits for a person once it passes. */ manual?: boolean; /** With run.slo: a step fails past this burn rate (default 14.4). */ slo_burn?: number; /** A step fails when the new deployment's p95 is this many percent above the old one's. */ p95_pct?: number; /** false: the old instances stop before the new ones start (two never run at once). */ overlap?: boolean };
   /** The app speaks HTTP/2 without TLS (a gRPC server). */
   h2c?: boolean;
+  /** With h2c: the gRPC service whose grpc.health.v1 check must answer SERVING ("" the whole server). */
+  health_grpc?: string;
   /** false: no public URL, only the project's private network (absent: public). */
   public?: boolean;
   /** A worker that stops: started again always (default), on failure (up to restart_tries in a row), or never. */
@@ -140,6 +169,8 @@ export interface Run {
   affinity?: boolean;
   /** Its port speaks TCP, not HTTP: each environment answers on a port of its own. */
   tcp?: boolean;
+  /** Its port speaks UDP: a UDP port of its own per environment (one node). */
+  udp?: boolean;
   /** A deployment that crash-loops within ten minutes of going live is replaced by the one before it. */
   rollback_on_crash?: boolean;
   /** Build the same revision again, without the cache, when one of its base images moves. */
@@ -187,6 +218,8 @@ export interface Scheduled {
   path?: string;
   timezone?: string;
   timeout_s?: number;
+  /** `oidc`: a path's call carries roll's OIDC token for the service instead of `CRON_SECRET`. */
+  auth?: "oidc";
 }
 
 export type InstanceState = "none" | "stopped" | "suspended" | "waking" | "running" | "crashed" | "deploying";
@@ -539,6 +572,10 @@ export interface EnvironmentDiff {
 }
 
 export interface EnvironmentPut {
+  /** false: its schedules don't run (deploys and runs still do). */
+  scheduled?: boolean;
+  /** Data of its own: a branch of each Postgres and Redis database it links (admin); null goes back. */
+  data?: "branch" | null;
   branch?: string | null;
   /** Its name on the roll domain (`<hostname>.<domain>`): the old one stops answering. */
   hostname?: string;
@@ -558,6 +595,12 @@ export interface EnvironmentPut {
   traces?: boolean;
   /** Its pages measure their Web Vitals (a tag roll adds). */
   vitals?: boolean;
+  /** How long its logs are kept (null: 7 days). */
+  log_retention_days?: 7 | 30 | 90 | null;
+  /** Approvals a deployment needs before it goes live (0 or null: none). */
+  approvals?: number | null;
+  /** A deploy status badge anyone may load. */
+  badge?: boolean;
   /** Its deploys post commit statuses and GitHub Deployments (false: someone else reports them). */
   report?: boolean;
   /** What its code may reach from the next deploy: roll and `hosts` only, or anything. null: open. */
@@ -647,6 +690,8 @@ export interface Environment extends EnvironmentSummary {
   port: number | null;
   /** A TCP service's address (`host:port`), once it has its port. */
   tcp?: string | null;
+  /** A UDP service's address (host:port). */
+  udp?: string;
   /** Its hostnames answer only visitors with its access token (a preview). */
   private: boolean;
   /** A cron service's next scheduled run, once deployed. */
@@ -673,6 +718,12 @@ export interface Environment extends EnvironmentSummary {
   traces?: boolean;
   /** Its pages measure their Web Vitals for roll. */
   vitals?: boolean;
+  /** Days its logs are kept: 7 (default), 30 or 90; a preview's are 7. */
+  log_retention_days?: number;
+  /** People other than a deployment's author who approve it before it goes live (0–3). */
+  approvals?: number;
+  /** Its deploy status badge (an SVG for a README), when it has one. */
+  badge_url?: string;
   /** Its deploys are reported to the Git host (commit statuses, GitHub Deployments); false:
    *  someone else reports them (roll previews' `pv-` environments). */
   report?: boolean;
@@ -684,6 +735,14 @@ export interface Environment extends EnvironmentSummary {
   egress?: Egress;
   /** Hosts its egress proxy refused lately: not listed, or (`private`) resolving only to private addresses. */
   egress_refused?: { host: string; private?: true }[];
+  /** Who a closed environment's placeholders are made by; null: no one (its bound keys withheld). */
+  closed_by?: string | null;
+  /** Data of its own: a branch of each Postgres and Redis database it links. */
+  data?: { mode: "branch"; branches: { kind: "postgres" | "redis"; ref: string }[] };
+  /** false: its schedules don't run. */
+  scheduled?: false;
+  /** A closed environment's interception (roll secrets' placeholders): requests filtered, placeholders swapped, the latest refusals. */
+  intercepted?: { requests: number; swapped: number; refused?: string[] };
   /** A push deploys only once its commit's checks pass. */
   wait_for_ci?: boolean;
   /** The push (sha) waiting for its checks, if one is. */
@@ -812,6 +871,8 @@ export interface Deployment {
   steps?: { step: string; at: number }[];
   /** Its image's last scan for known vulnerabilities, once one ran. */
   vulnerabilities?: ScanSummary;
+  /** Who approved putting it live, where its environment asks for approvals (single GET only). */
+  approved_by?: string[];
 }
 
 export interface Slo {
@@ -851,6 +912,30 @@ export interface ScanSummary {
   error?: string;
   /** Its SBOM (CycloneDX) is kept: `…/sbom`. */
   sbom?: boolean;
+}
+
+/** One row of a project's month: a service's environment, its previews (`previews`), or deleted services (`deleted`). */
+export interface UsageRow {
+  service: string | null;
+  name: string | null;
+  environment: string | null;
+  previews?: boolean;
+  deleted?: boolean;
+  usd: number;
+  cpu_seconds: number;
+  gb_seconds: number;
+  requests: number;
+  egress_bytes: number;
+  build_seconds: number;
+}
+
+/** A project's month (`…/projects/{project}/usage`). */
+export interface ProjectUsage {
+  month: string;
+  total_usd: number;
+  /** This month at the pace so far (the current month only). */
+  projected_usd: number | null;
+  rows: UsageRow[];
 }
 
 /** Why a failed deployment failed, from the repo owner's model (`…/explain`). The model's words: shown as text. */
@@ -900,7 +985,7 @@ export interface Variables {
    * reference: a reference variable's template (names, never a value). sealed: run with, never
    * shown again (not by `reveal` either); a reference that reads a sealed value is sealed too.
    */
-  vars: { name: string; masked: string; source: VariableSource; reference?: string; sealed?: boolean; /** Kept as a file at this path in its instances (not in their environment). */ file?: string }[];
+  vars: { name: string; masked: string; source: VariableSource; reference?: string; sealed?: boolean; /** Kept as a file at this path in its instances (not in their environment). */ file?: string; /** Only its instances get it, never a build's steps. */ runtime_only?: boolean }[];
 }
 
 export interface LogLine {
@@ -988,7 +1073,7 @@ export interface Span {
 /** An environment's errors, grouped from its log: a trace joined from its lines, or an error line. */
 export interface ErrorGroup {
   fingerprint: string;
-  kind: "python" | "java" | "node" | "go" | "line";
+  kind: "python" | "java" | "node" | "go" | "ruby" | "php" | "dotnet" | "rust" | "elixir" | "line";
   title: string;
   count: number;
   first_seen: number;
@@ -1149,7 +1234,7 @@ export interface InstanceSeries {
 
 export interface Usage {
   /** `day` is a unix day (days since 1970-01-01, UTC); every day of the window is there. */
-  days: { day: number; cpu_seconds: number; gb_seconds: number; requests: number; egress_bytes: number; build_seconds: number; usd: number }[];
+  days: { day: number; cpu_seconds: number; gb_seconds: number; requests: number; egress_bytes: number; build_seconds: number; stored_gb_hours: number; usd: number }[];
   total_usd: number;
 }
 
@@ -1183,6 +1268,8 @@ export type NotifyEvent =
   | "spend.alert"
   | "spend.limit"
   | "alert.memory"
+  | "alert.cpu"
+  | "alert.metric"
   | "alert.errors"
   | "alert.latency"
   | "alert.capacity"
@@ -1249,7 +1336,7 @@ export interface LogDrain {
   previews: boolean;
   /** The names of the headers it's sent with; their values are sealed, never shown. */
   headers: string[];
-  /** How its lines go: roll's signed NDJSON, OpenTelemetry logs (OTLP/HTTP JSON), or syslog (RFC 5424 over TLS). */
+  /** How its lines go: roll's signed NDJSON, OpenTelemetry logs (OTLP/HTTP JSON), syslog (RFC 5424 over TLS), or NDJSON objects in an S3 bucket. */
   format: DrainFormat;
   /** Only in the answer that made it. */
   secret?: string;
@@ -1269,7 +1356,7 @@ export interface FormSubmission {
   fields: { name: string; value: string }[];
 }
 
-export type DrainFormat = "ndjson" | "otlp" | "syslog";
+export type DrainFormat = "ndjson" | "otlp" | "syslog" | "s3";
 
 /** A project's monthly spend limits (US dollars at roll's prices, the calendar month in UTC). */
 export interface SpendLimits {
@@ -1388,7 +1475,8 @@ export const appsApi = {
   environment: (id: string, e: string) => call<Environment>("GET", env(id, e)),
   notifyTargets: (project: string) => call<NotifyTarget[]>("GET", `/v1/apps/projects/${enc(project)}/notifications`),
   drains: (project: string) => call<LogDrain[]>("GET", `/v1/apps/projects/${enc(project)}/drains`),
-  addDrain: (project: string, body: { url: string; format?: DrainFormat } & DrainSettings) => call<LogDrain>("POST", `/v1/apps/projects/${enc(project)}/drains`, body),
+  /** A drain to a URL, or (`bucket`) into a roll storage bucket on the project, an `s3` drain with a key roll mints for it. */
+  addDrain: (project: string, body: ({ url: string; format?: DrainFormat } | { bucket: string; prefix?: string }) & DrainSettings) => call<LogDrain>("POST", `/v1/apps/projects/${enc(project)}/drains`, body),
   /** Its sources, filters and headers (given ones replace; `headers` replaces them all); its URL and secret stay. */
   updateDrain: (project: string, id: string, body: DrainSettings) => call<LogDrain>("PATCH", `/v1/apps/projects/${enc(project)}/drains/${enc(id)}`, body),
   testDrain: (project: string, id: string) => call<{ ok: boolean; code: number | null; error: string | null }>("POST", `/v1/apps/projects/${enc(project)}/drains/${enc(id)}/test`),
@@ -1399,6 +1487,8 @@ export const appsApi = {
   deleteFormSubmission: (id: string, e: string, form: string, sub: string) => call<null>("DELETE", `${env(id, e)}/forms/${encodeURIComponent(form)}/submissions/${encodeURIComponent(sub)}`),
   removeDrain: (project: string, id: string) => call<null>("DELETE", `/v1/apps/projects/${enc(project)}/drains/${enc(id)}`),
   limits: (project: string) => call<SpendLimits>("GET", `/v1/apps/projects/${enc(project)}/limits`),
+  /** A month's use by service and environment (this one by default), most costly first. */
+  projectUsage: (project: string, month?: string) => call<ProjectUsage>("GET", `/v1/apps/projects/${enc(project)}/usage${qs({ month })}`),
   setLimits: (project: string, body: { alert_usd: number | null; hard_usd: number | null }) => call<SpendLimits>("PUT", `/v1/apps/projects/${enc(project)}/limits`, body),
   /** PagerDuty takes its integration's `routing_key`, Opsgenie its `api_key` (sealed, never returned), each with a `region`. */
   addNotifyTarget: (project: string, body: { kind: NotifyTarget["kind"]; url?: string; routing_key?: string; api_key?: string; region?: "us" | "eu"; events?: NotifyEvent[]; environments?: string[]; services?: string[]; previews?: boolean }) => call<NotifyTarget>("POST", `/v1/apps/projects/${enc(project)}/notifications`, body),
@@ -1435,6 +1525,8 @@ export const appsApi = {
   rollback: (id: string, e: string, d: string, keepVariables = false) => call<Deployment>("POST", `${dep(id, e, d)}/rollback`, keepVariables ? { keep_variables: true } : undefined),
   /** Back to the one live before what runs (the server walks back through rollbacks). */
   rollbackPrevious: (id: string, e: string) => call<Deployment>("POST", `${env(id, e)}/rollback`),
+  /** A person's approval of a deployment waiting at ready; the last one needed puts it live. */
+  approve: (id: string, e: string, d: string) => call<{ deployment: string; approved_by: string[]; needed: number; live: string | null; waiting?: string }>("POST", `${dep(id, e, d)}/approve`),
   /** The live image again with the current variables and settings: no build, same revision. */
   redeploy: (id: string, e: string, body: { message?: string } = {}) => call<Deployment>("POST", `${env(id, e)}/redeploy`, body),
   pushStates: (id: string, e: string) => call<PushState[]>("GET", `${env(id, e)}/push`),
@@ -1468,7 +1560,7 @@ export const appsApi = {
   setVariables: (
     id: string,
     e: string,
-    change: { set?: Record<string, string>; unset?: string[]; seal?: string[]; files?: Record<string, string | null>; copy_from?: string; copy?: string[] },
+    change: { set?: Record<string, string>; unset?: string[]; seal?: string[]; files?: Record<string, string | null>; runtime_only?: Record<string, boolean>; copy_from?: string; copy?: string[] },
   ) => call<Variables>("PATCH", `${env(id, e)}/variables`, change),
   diff: (id: string, e: string, from: string) => call<EnvironmentDiff>("GET", `${env(id, e)}/diff${qs({ from })}`),
 

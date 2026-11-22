@@ -1,10 +1,10 @@
 import { Boxes, Check, Copy, Database, ExternalLink, Eye, Inbox, ListChecks, Moon, Package, Pin, RefreshCw, RotateCcw, Search, Smartphone, SquareTerminal, Sun, Trash2, Waves, X, Zap, type LucideIcon } from "lucide-react";
-import { useEffect, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { appsApi, followShell as followAppsShell } from "@/lib/apps-api";
 import { codeApi } from "@/lib/code-api";
 import { Confirm } from "@/components/ui";
 import { TerminalScreen } from "@/components/terminal-screen";
-import { endpointSlower, type EndpointTime, a11yWords, checkSummary, seoWords, duration, followLogs, followShell, downloadFiles, openUrl, pageLabel, previewsApi, noteCropUrl, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewVisitor, type PreviewKind, type PreviewShare, type RequestLine, type ServiceMetrics, type ErrorGroup, type TraceSummary, type TraceSpan, type RouteTime, type Repeated } from "@/lib/previews-api";
+import { endpointSlower, type EndpointTime, a11yWords, checkSummary, seoWords, duration, followLogs, followShell, downloadFiles, openUrl, pageGroup, pageLabel, previewsApi, noteCropUrl, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewVisitor, type PreviewKind, type PreviewShare, type RequestLine, type ServiceMetrics, type ErrorGroup, type TraceSummary, type TraceSpan, type RouteTime, type Repeated } from "@/lib/previews-api";
 import { verdict, type VerdictTarget } from "@/lib/preview-verdict";
 import { isProblem, logFilter, logLevel } from "@/lib/preview-logs";
 import { formatBytes } from "@/lib/roll-api";
@@ -177,6 +177,26 @@ export function PreviewSheet({
             )}
             <VerdictStrip p={p} onTab={setTab} />
             <RegressionsAccept p={p} />
+            <TimelineLine p={p} />
+            {p.intercepted && (
+              <p className="mb-3 text-[11.5px] text-muted">
+                Keys it never holds:{" "}
+                {p.intercepted.keys.length > 0 && (
+                  <>
+                    {p.intercepted.keys.map((k) => `${k.key} → ${k.hosts.join(", ")}`).join("; ")}
+                    {` · ${p.intercepted.swapped} swapped in`}
+                    {p.intercepted.refused ? `, ${p.intercepted.refused} refused` : ""}
+                  </>
+                )}
+                {p.intercepted.on_apps && (
+                  <>
+                    {p.intercepted.keys.length > 0 ? " · " : ""}
+                    {`on roll apps, ${p.intercepted.on_apps.swapped} swapped in`}
+                    {p.intercepted.on_apps.refused?.length ? ` (latest refused: ${p.intercepted.on_apps.refused.join("; ")})` : ""}
+                  </>
+                )}
+              </p>
+            )}
             <span data-section="services" />
             <Label>Services</Label>
             {p.services.length ? (
@@ -221,9 +241,9 @@ export function PreviewSheet({
                 <ul className="space-y-1">
                   {p.earlier.map((x) => (
                     <li key={`${x.service}@${x.revision}`} className="flex items-center gap-2 text-[12px]">
-                      <span className="text-soft">{x.service}</span>
-                      <span className="font-mono text-[10.5px] text-subtle">{x.revision.replace(/^cs_/, "").slice(0, 10)}</span>
-                      <a href={openUrl(x)} target="_blank" rel="noreferrer" className="ml-auto flex items-center gap-1 font-mono text-[11px] text-accent hover:underline" title="On the same data, asleep until opened">
+                      <span className="shrink-0 text-soft">{x.service}</span>
+                      <span className="shrink-0 font-mono text-[10.5px] text-subtle">{x.revision.replace(/^cs_/, "").slice(0, 10)}</span>
+                      <a href={openUrl(x)} target="_blank" rel="noreferrer" className="ml-auto flex min-w-0 items-center gap-1 font-mono text-[11px] text-accent hover:underline" title="On the same data, asleep until opened">
                         <span className="truncate">{host(x.url)}</span>
                         <ExternalLink className="size-3 shrink-0" />
                       </a>
@@ -256,17 +276,20 @@ export function PreviewSheet({
                           <span className="shrink-0 text-subtle">→</span>
                           <span className="min-w-0 truncate font-mono text-[11px]">{r.ref ?? "—"}</span>
                         </div>
-                        <div className="mt-0.5 flex flex-wrap gap-x-1 font-mono text-[10.5px] text-subtle">
-                          <span className="whitespace-nowrap">
-                            {KIND_NAME[r.kind]} · {r.mode === "schema" ? "schema only" : "branch"} · {formatBytes(r.bytes)}
-                          </span>
-                          {!!masked?.get(id) && <span className="whitespace-nowrap">· masked ({masked.get(id)})</span>}
-                          {r.data === "real" && (
-                            <span className="whitespace-nowrap text-soft" title="Its branch holds the parent's data as it is: the preview's code reads it unmasked">
-                              · production data, unmasked
-                            </span>
-                          )}
-                        </div>
+                        <Dotted
+                          className="mt-0.5 font-mono text-[10.5px] text-subtle"
+                          items={[
+                            KIND_NAME[r.kind],
+                            r.mode === "schema" ? "schema only" : "branch",
+                            formatBytes(r.bytes),
+                            !!masked?.get(id) && `masked (${masked.get(id)})`,
+                            r.data === "real" && (
+                              <span className="text-soft" title="Its branch holds the parent's data as it is: the preview's code reads it unmasked">
+                                production data, unmasked
+                              </span>
+                            ),
+                          ]}
+                        />
                         {r.error && <p className="mt-0.5 text-[11px] break-words whitespace-pre-line text-danger">{r.error}</p>}
                       </div>
                       {!gone && r.ref && <CopyConnection previewId={p.id} kind={r.kind} parent={r.parent} name={names.get(id) ?? r.parent} />}
@@ -421,15 +444,22 @@ export function PreviewSheet({
               </p>
             )}
             {p.page_speed && (
-              <p className="mt-1.5 font-mono text-[11px] text-subtle tabular-nums" title="Timed by the browser that took the screenshot">
-                load {duration(p.page_speed.now.load_ms)}
-                {p.page_speed.before && p.page_speed.before.load_ms !== p.page_speed.now.load_ms
-                  ? ` (${p.page_speed.now.load_ms > p.page_speed.before.load_ms ? "+" : "−"}${duration(Math.abs(p.page_speed.now.load_ms - p.page_speed.before.load_ms))})`
-                  : ""}
-                {p.page_speed.now.fcp_ms != null ? ` · first paint ${duration(p.page_speed.now.fcp_ms)}` : ""} · {formatBytes(p.page_speed.now.bytes)} · first byte{" "}
-                {duration(p.page_speed.now.ttfb_ms)}
-                {p.base_change && thanMain(p.page_speed.now.load_ms, p.base_change.load_ms, p.base_change.branch) ? ` · ${thanMain(p.page_speed.now.load_ms, p.base_change.load_ms, p.base_change.branch)}` : ""}
-              </p>
+              <div title="Timed by the browser that took the screenshot">
+                <Dotted
+                  className="mt-1.5 font-mono text-[11px] text-subtle tabular-nums"
+                  items={[
+                    `load ${duration(p.page_speed.now.load_ms)}${
+                      p.page_speed.before && p.page_speed.before.load_ms !== p.page_speed.now.load_ms
+                        ? ` (${p.page_speed.now.load_ms > p.page_speed.before.load_ms ? "+" : "−"}${duration(Math.abs(p.page_speed.now.load_ms - p.page_speed.before.load_ms))})`
+                        : ""
+                    }`,
+                    p.page_speed.now.fcp_ms != null && `first paint ${duration(p.page_speed.now.fcp_ms)}`,
+                    formatBytes(p.page_speed.now.bytes),
+                    `first byte ${duration(p.page_speed.now.ttfb_ms)}`,
+                    p.base_change && thanMain(p.page_speed.now.load_ms, p.base_change.load_ms, p.base_change.branch),
+                  ]}
+                />
+              </div>
             )}
             {p.page_speed && (p.page_speed.now.lcp_ms != null || p.page_speed.now.cls != null) && (
               <p className="mt-0.5 font-mono text-[11px] text-subtle tabular-nums" title="Core Web Vitals, measured by the browser that took the screenshot">
@@ -841,8 +871,15 @@ function Screenshot({
         </span>
       </Label>
       {pages.length > 0 && (
-        <div className="mb-1.5 flex flex-wrap gap-1" role="group" aria-label="Page">
-          {["/", ...pages.map((x) => x.path)].map((x) => (
+        <div className="mb-1.5 space-y-0.5">
+          {(() => {
+            const all = ["/", ...pages.map((x) => x.path)];
+            const groups = (["Pages", "Views", "States"] as const).map((g) => [g, all.filter((x) => pageGroup(x) === g)] as const).filter(([, xs]) => xs.length);
+            return groups.map(([g, xs]) => (
+              <div key={g} className="flex items-start gap-1" role="group" aria-label={g}>
+                {groups.length > 1 && <span className="w-12 shrink-0 pt-1 text-[10.5px] text-subtle">{g}</span>}
+                <div className="flex min-w-0 flex-wrap gap-1">
+          {xs.map((x) => (
             <button
               key={x}
               type="button"
@@ -859,6 +896,10 @@ function Screenshot({
               {pageLabel(x)}
             </button>
           ))}
+                </div>
+              </div>
+            ));
+          })()}
         </div>
       )}
       {diff && <p className="mb-1 text-[11.5px] text-subtle">Marked: what differs from {baseChange ? baseChange.branch : "the push before"}.</p>}
@@ -1961,5 +2002,37 @@ function Logs({ preview: p }: { preview: Preview }) {
         </>
       )}
     </>
+  );
+}
+
+/** Items in a wrapping row, each separator after its item: a line that wraps ends with "·",
+ * never starts with one. Falsy items are left out. */
+function Dotted({ items, className }: { items: ReactNode[]; className?: string }) {
+  const shown = items.filter((x) => x !== false && x !== null && x !== undefined && x !== "");
+  return (
+    <div className={`flex flex-wrap gap-x-1 ${className ?? ""}`}>
+      {shown.map((x, i) => (
+        <span key={i} className="whitespace-nowrap">
+          {x}
+          {i < shown.length - 1 ? " ·" : ""}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+/** How its head came up: "Up in 9.4 s: data 4.1 s · setup 1.2 s · deploy 3.0 s · checks 0.4 s",
+ * or the steps so far while it's on its way. */
+function TimelineLine({ p }: { p: Preview }) {
+  const t = p.timeline;
+  if (!t || t.steps.length === 0) return null;
+  const ready = t.steps.find((x) => x.step === "ready");
+  const shown = t.steps.filter((x) => x.step !== "ready");
+  const items = shown.map((x, i) => `${x.step} ${duration(x.at - (i === 0 ? t.started_at : shown[i - 1].at))}`);
+  return (
+    <div className="mb-3 flex flex-wrap items-baseline gap-x-1.5 text-[11.5px] text-muted" title={`How ${t.head.replace(/^cs_/, "").slice(0, 10)} came up, step by step`}>
+      <span>{ready ? `Up in ${duration(ready.at - t.started_at)}:` : "So far:"}</span>
+      <Dotted className="font-mono text-[11px] text-subtle tabular-nums" items={items} />
+    </div>
   );
 }

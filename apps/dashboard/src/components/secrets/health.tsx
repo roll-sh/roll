@@ -2,12 +2,13 @@ import { CircleCheck, Dices, FileSearch, RotateCw } from "lucide-react";
 import { useState } from "react";
 import { Link } from "@/components/link";
 import { needsApproval, type Finding, type Op, type SecretsApi, type SetSecret } from "@/lib/secrets-api";
+import { decoyUse } from "@/lib/secrets-decoy";
 import { generateValue } from "@/lib/secrets-generate";
 import { secretsHref, useSecrets } from "./secrets-page";
-import { card, errorText, ErrorNote, ghost, Section, sized, useLoad } from "./ui";
+import { ago, card, errorText, ErrorNote, ghost, Section, sized, useLoad } from "./ui";
 
 const ISSUES: { issue: Finding["issue"]; title: string; what: string; serious: boolean }[] = [
-  { issue: "decoy_used", title: "Decoy used", what: "Someone used a decoy key's token: they found it where it was planted. Cut off whatever could reach that place, rotate the real credentials beside it, then delete the decoy and plant a new one.", serious: true },
+  { issue: "decoy_used", title: "Decoy used", what: "Someone used a decoy key's credential (its token or database login): they found it where it was planted. Cut off whatever could reach that place, rotate the real credentials beside it, then delete the decoy and plant a new one.", serious: true },
   { issue: "expired", title: "Expired", what: "Their values stopped working outside roll.", serious: true },
   { issue: "rotation_failing", title: "Rotation failing", what: "Their scheduled rotation fails: the database, vendor or rotator refused or didn't answer. The old credential keeps working; roll tries again.", serious: true },
   { issue: "revoke_failing", title: "Not revoked yet", what: "Credentials roll retired or that expired but couldn't revoke yet: they still work until it can. roll keeps trying.", serious: true },
@@ -15,6 +16,7 @@ const ISSUES: { issue: Finding["issue"]; title: string; what: string; serious: b
   { issue: "exposed", title: "Exposed", what: "A protected environment's value, also set where more people and less vetted code read it.", serious: true },
   { issue: "public", title: "In the browser", what: "Server credentials under a name a framework puts in the JavaScript it sends to every visitor (NEXT_PUBLIC_, VITE_, PUBLIC_…): rename the key, or keep the value on the server.", serious: true },
   { issue: "weak", title: "Weak", what: "Credentials easy to guess: New value replaces one with 48 random characters.", serious: false },
+  { issue: "unplaced", title: "No placement", what: "Keys bound to hosts without naming the header or query parameter that carries them: a placeholder may ride in any header, one the host might echo back, and untrusted code's doesn't swap. Bind each again (Authorization: Bearer {} by default).", serious: false },
   { issue: "operator_made", title: "Made as the operator", what: "Syncs and workload identities an admin's session made before roll recorded the person: they'd keep acting after that admin is demoted or can't sign in. Make each again from your session to bind it to you.", serious: false },
   { issue: "expiring", title: "Expiring", what: "Values that stop working outside roll within two weeks.", serious: false },
   { issue: "certificate_expiring", title: "Certificates ending", what: "Certificates a CA here signed for a CSR that end within two weeks: nothing renews them but whoever asked. Sign a new CSR.", serious: false },
@@ -131,7 +133,13 @@ export function HealthView() {
                     </Link>
                   )}
                   {f.owner && <span className="text-[11.5px] text-muted" title="Who supplies it (the required key's owner)">ask {f.owner}</span>}
-                  <span className={`ml-auto text-[11.5px] ${serious ? "text-danger" : "text-muted"}`}>{f.detail}</span>
+                  {f.decoy ? (
+                    <span className="ml-auto font-mono text-[11.5px] text-danger tabular-nums" title={f.detail}>
+                      {decoyUse(f.decoy, ago)}
+                    </span>
+                  ) : (
+                    <span className={`ml-auto text-[11.5px] ${serious ? "text-danger" : "text-muted"}`}>{f.detail}</span>
+                  )}
                   {f.issue === "weak" && (
                     <button className={`${ghost} h-6`} onClick={() => fix(f, { value: fresh(f) }, "a new random value")} title="48 random letters and digits (or what the key's password policy asks), made here; a change request where the environment is protected">
                       <Dices className="size-3.5" /> New value

@@ -134,9 +134,73 @@ impl SyncTarget for FakeSync {
 
 /// Audit deliveries, kept instead of sent; an OIDC issuer's keys, served; vendors' APIs; a
 /// Snowflake account's SQL API; MongoDB Atlas's Admin API; and STS, answering AWS identities'
-/// logins with the caller set in `.8`.
+/// logins with the caller set in `.8`; and the providers validity checks ask (`.9`).
 #[derive(Default)]
-struct Sent(Mutex<Vec<Value>>, Mutex<Option<Value>>, std::sync::atomic::AtomicBool, Mutex<Option<(String, String)>>, Mutex<BTreeMap<(String, String), Value>>, Mutex<Vendors>, FakeSnowflake, FakeAtlas, Mutex<FakeStsLogin>);
+struct Sent(Mutex<Vec<Value>>, Mutex<Option<Value>>, std::sync::atomic::AtomicBool, Mutex<Option<(String, String)>>, Mutex<BTreeMap<(String, String), Value>>, Mutex<Vendors>, FakeSnowflake, FakeAtlas, Mutex<FakeStsLogin>, FakeProviders);
+
+/// Fixture credentials for validity checks, built from pieces (push protection scans this repo):
+/// obviously roll's, still each detector's shape. `live` ones work, the rest are refused.
+struct Creds {
+    github_live: String,
+    github_dead: String,
+    github_moved: String,
+    aws_id: String,
+    aws_secret: String,
+    stripe: String,
+    slack: String,
+    openai: String,
+    anthropic: String,
+}
+
+fn creds() -> Creds {
+    let tail = "0123456789abcdef";
+    Creds {
+        github_live: ["ghp_", "RollFixtureLiveToken", tail].concat(),
+        github_dead: ["ghp_", "RollFixtureDeadToken", tail].concat(),
+        github_moved: ["ghp_", "RollFixtureRedirects", tail].concat(),
+        aws_id: ["AKIA", "ROLLFIXTURE", "23456"].concat(),
+        aws_secret: ["rollFixture", "SecretKey", "0123456789", "abcdefghij"].concat(),
+        stripe: ["sk_", "live_", "RollFixtureLive", tail].concat(),
+        slack: ["xoxb-", "1234567890-", "RollFixtureLive"].concat(),
+        openai: ["sk-", "proj-", "RollFixtureLive", tail, "gh"].concat(),
+        anthropic: ["sk-", "ant-", "RollFixtureLive", tail, "gh"].concat(),
+    }
+}
+
+/// The providers validity checks ask, answering as each API does: every request kept (URL and
+/// header names) to show nothing but the credential went.
+#[derive(Default)]
+struct FakeProviders(Mutex<Vec<(String, Vec<String>)>>);
+
+impl FakeProviders {
+    fn answer(&self, method: &str, url: &str, headers: &[(&str, &Secret)]) -> Option<(u16, Value)> {
+        let c = creds();
+        let header = |n: &str| headers.iter().find(|(h, _)| *h == n).map(|(_, v)| v.expose().to_string()).unwrap_or_default();
+        let bearer = |t: &str| header("authorization") == format!("Bearer {t}");
+        let (status, answer) = match (method, url) {
+            ("POST", "https://sts.amazonaws.com/") => {
+                let a = header("authorization");
+                if a.starts_with(&format!("AWS4-HMAC-SHA256 Credential={}/", c.aws_id)) && a.contains("SignedHeaders=content-type;host;x-amz-date, Signature=") && !header("x-amz-date").is_empty() {
+                    (200, Value::String("<GetCallerIdentityResponse><GetCallerIdentityResult><Arn>arn:aws:iam::123456789012:user/ci</Arn><Account>123456789012</Account></GetCallerIdentityResult></GetCallerIdentityResponse>".into()))
+                } else {
+                    (403, Value::String("<ErrorResponse><Error><Code>InvalidClientTokenId</Code></Error></ErrorResponse>".into()))
+                }
+            }
+            ("GET", "https://api.github.com/user") if bearer(&c.github_live) => (200, json!({ "login": "roll-fixture", "id": 1 })),
+            ("GET", "https://api.github.com/user") if bearer(&c.github_moved) => (302, json!({ "location": "https://github.example/elsewhere" })),
+            ("GET", "https://api.github.com/user") => (401, json!({ "message": "Bad credentials" })),
+            ("GET", "https://api.stripe.com/v1/balance") if bearer(&c.stripe) => (200, json!({ "object": "balance" })),
+            ("POST", "https://slack.com/api/auth.test") if bearer(&c.slack) => (200, json!({ "ok": true, "team_id": "T0ROLLFIX" })),
+            ("POST", "https://slack.com/api/auth.test") => (200, json!({ "ok": false, "error": "invalid_auth" })),
+            ("GET", "https://api.openai.com/v1/models") if bearer(&c.openai) => (200, json!({ "data": [] })),
+            ("GET", "https://api.anthropic.com/v1/models") if header("x-api-key") == c.anthropic && header("anthropic-version") == "2023-06-01" => (200, json!({ "data": [] })),
+            ("GET", "https://api.stripe.com/v1/balance" | "https://api.openai.com/v1/models" | "https://api.anthropic.com/v1/models") => (401, json!({ "error": "unauthorized" })),
+            _ => return None,
+        };
+        self.0.lock().unwrap().push((url.to_string(), headers.iter().map(|(h, _)| h.to_string()).collect()));
+        Some((status, answer))
+    }
+}
 
 /// STS as an AWS identity's login meets it: who signed (`None`: the signature doesn't match), and
 /// what was sent to it.
@@ -495,6 +559,13 @@ impl roll_secrets::Deliver for Sent {
     /// SendGrid's and Twilio's key APIs, matched on the URL, each taking only its credential;
     /// Snowflake's SQL API ([`Sent::snowflake`]) and MongoDB Atlas's Admin API ([`FakeAtlas`]) apart.
     fn request(&self, method: &str, url: &str, headers: &[(&str, &Secret)], body: Option<(&str, &Secret)>, _: usize) -> roll_secrets::Result<(u16, zeroize::Zeroizing<Vec<u8>>)> {
+        if let Some((status, answer)) = self.9.answer(method, url, headers) {
+            let bytes = match answer {
+                Value::String(xml) => xml.into_bytes(),
+                v => v.to_string().into_bytes(),
+            };
+            return Ok((status, bytes.into()));
+        }
         if url.starts_with("https://cloud.mongodb.com/") {
             let headers: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (*k, v.expose())).collect();
             let (status, v) = self.7.answer(method, url, &headers, body.map(|(t, b)| (t, b.expose())));
@@ -817,9 +888,20 @@ impl roll_secrets::People for People {
     fn person(&self, user: &str) -> Result<Option<roll_secrets::Person>, String> {
         Ok(match user {
             "usr_ada" if !*self.disabled.lock().unwrap() => Some(roll_secrets::Person { admin: false, code_owner: Some("ada".into()) }),
+            // Members of ada's projects (docs/members.md).
+            "usr_bob" | "usr_vic" | "usr_cat" => Some(roll_secrets::Person { admin: false, code_owner: None }),
             "usr_root" if !*self.root_disabled.lock().unwrap() => Some(roll_secrets::Person { admin: !*self.root_demoted.lock().unwrap(), code_owner: None }),
             _ => None,
         })
+    }
+}
+
+/// People's addresses, as roll accounts answers the workspace: `<handle>@example.com`.
+impl roll_workspace::People for People {
+    fn person(&self, user: &str) -> Option<roll_workspace::Person> {
+        let p = roll_secrets::People::person(self, user).ok().flatten()?;
+        let handle = user.strip_prefix("usr_")?;
+        Some(roll_workspace::Person { handle: handle.into(), email: Some(format!("{handle}@example.com")), admin: p.admin })
     }
 }
 
@@ -828,6 +910,12 @@ impl roll_workspace::Owners for People {
     fn trusts(&self, user: &str, kind: roll_workspace::Kind, r#ref: &str) -> bool {
         match roll_secrets::People::person(self, user) {
             Ok(Some(p)) => p.admin || (kind == roll_workspace::Kind::Repo && r#ref.starts_with(&format!("{}/", p.code_owner.unwrap_or_default()))),
+            _ => false,
+        }
+    }
+    fn owns(&self, user: &str, kind: roll_workspace::Kind, r#ref: &str) -> bool {
+        match roll_secrets::People::person(self, user) {
+            Ok(Some(p)) => kind == roll_workspace::Kind::Repo && r#ref.starts_with(&format!("{}/", p.code_owner.unwrap_or_default())),
             _ => false,
         }
     }
@@ -937,9 +1025,25 @@ struct Gate {
     secrets: std::sync::OnceLock<Arc<Secrets>>,
     /// Workload logins' grants: roll-access's token list leaves them out.
     workloads: Mutex<std::collections::BTreeSet<String>>,
+    /// Every grant's person, revoked ones too (roll-access keeps revoked rows).
+    owners: Mutex<BTreeMap<String, Option<String>>>,
 }
 
 impl Gate {
+    /// A checksummed token's secret, as roll-access makes them (a decoy, with `decoy`): what
+    /// scanners find.
+    fn checksummed(&self, decoy: bool) -> String {
+        let (short, id) = self.grant("found", roll_secrets::access::rule("p", None, None, &[roll_secrets::Action::Read]), None);
+        let secret = roll_auth::credentials::new_secret("rlt_");
+        let mut tokens = self.tokens.lock().unwrap();
+        let g = tokens.remove(&short).expect("just made");
+        tokens.insert(secret.clone(), g);
+        if decoy {
+            self.decoys.lock().unwrap().insert(id);
+        }
+        secret
+    }
+
     /// A grant's secret and id.
     fn grant(&self, name: &str, rule: roll_auth::scope::Rule, user: Option<&str>) -> (String, String) {
         let mut tokens = self.tokens.lock().unwrap();
@@ -947,6 +1051,7 @@ impl Gate {
         let (secret, id) = (format!("rlt_test{n}"), format!("tok_{n}"));
         let grant = roll_auth::Grant { ask_otherwise: false, user: user.map(Into::into), id: id.clone().into(), name: name.into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(roll_auth::scope::Scope(vec![rule])) };
         tokens.insert(secret.clone(), grant);
+        self.owners.lock().unwrap().insert(id.clone(), user.map(Into::into));
         (secret, id)
     }
 
@@ -960,6 +1065,13 @@ impl Gate {
 struct Granted {
     gate: Arc<Gate>,
     people: Arc<People>,
+    ws: Arc<roll_workspace::Workspace>,
+}
+
+/// A person's session grant as roll-access builds it: their memberships' roles, now.
+fn session_of(ws: &roll_workspace::Workspace, user: &str) -> roll_auth::Grant {
+    let scope = roll_auth::roles::session_scope(&ws.memberships_of(user).unwrap());
+    roll_auth::Grant { id: format!("session:{user}").into(), name: "session".into(), kind: roll_auth::GrantKind::Session, scope: Arc::new(scope), user: Some(user.into()), ask_otherwise: false }
 }
 
 impl roll_auth::Grants for Granted {
@@ -972,6 +1084,15 @@ impl roll_auth::Grants for Granted {
             Some(user) if roll_secrets::People::person(&*self.people, user).ok().flatten().is_none() => None,
             _ => Some(g),
         }
+    }
+
+    fn owner(&self, id: &str) -> Option<Option<String>> {
+        self.gate.owners.lock().unwrap().get(id).cloned()
+    }
+
+    fn session(&self, user: &str) -> Option<roll_auth::Grant> {
+        roll_secrets::People::person(&*self.people, user).ok().flatten()?;
+        Some(session_of(&self.ws, user))
     }
 }
 
@@ -1090,12 +1211,20 @@ impl Api {
         let github = Arc::new(FakeGitHub::default());
         let sts = Arc::new(FakeSts::default());
         ws.set_owners(people.clone());
+        ws.set_people(people.clone());
         let clouds = Arc::new(FakeClouds::default());
         let gate = Arc::new(Gate::default());
-        let granted: Arc<dyn roll_auth::Grants> = Arc::new(Granted { gate: gate.clone(), people: people.clone() });
+        let granted: Arc<dyn roll_auth::Grants> = Arc::new(Granted { gate: gate.clone(), people: people.clone(), ws: ws.clone() });
         let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, syncs, open: true, trust_forwarded_for: false, web_url: None, deliver: Some(sent.clone()), grants: Some(granted), people: Some(people.clone()), workloads: Some(gate.clone()), kms: Some(kms.clone()), sts: Some(sts.clone()), outside: Some(outside.clone()), directory: Some(directory.clone()), github: Some(github.clone()), clouds: Some(roll_secrets::clouds::Clouds { issuer: ISSUER_URL.into(), tokens: clouds.clone() }), gateways: None };
         let secrets = Arc::new(Secrets::new(db.clone(), ws.clone(), opts).unwrap());
+        secrets.watch_workspace();
         let _ = gate.secrets.set(secrets.clone());
+        // As rolld: a member removed, demoted or gone ends what they shared and handed out.
+        let s2 = secrets.clone();
+        ws.on_event(Box::new(move |e| match (e.action.as_str(), &e.subject) {
+            ("member.remove" | "member.leave" | "member.role", Some(user)) => s2.member_changed(&e.project, user).map_err(|e| e.to_string()),
+            _ => Ok(()),
+        }));
         let router = roll_workspace::router(ws.clone()).merge(roll_secrets::router(secrets.clone())).layer(axum::middleware::from_fn_with_state(gate.clone(), fake_gate));
         let mut api = Api { sent, gate, kms, sts, ws: ws.clone(), ws_db, people, router, secrets, db, fake, pg, sync, outside, directory, github, clouds, project: String::new(), _dir: dir };
         let (_, p) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "shop" }))).await;
@@ -1135,6 +1264,9 @@ impl Api {
         req.extensions_mut().insert(roll_auth::SignedIn { user: format!("usr_{handle}"), handle: handle.into(), admin, code_owner: None, session: format!("ses_{handle}") });
         if admin {
             req.extensions_mut().insert(roll_auth::Operator);
+        } else {
+            // What rolld's gate adds for a person: their memberships as their session's grant.
+            req.extensions_mut().insert(session_of(&self.ws, &format!("usr_{handle}")));
         }
         let resp = self.router.clone().oneshot(req).await.unwrap();
         let status = resp.status();
@@ -1256,6 +1388,41 @@ async fn every_write_is_a_version_and_an_environment_rolls_back_to_any_change() 
     let (st, e) = api.call(Method::POST, "/environments/production/requests", Some(json!({ "ops": [{ "op": "set", "key": "A", "value": "y", "if_version": now - 1 }] }))).await;
     assert!(st == StatusCode::CONFLICT && e["code"] == "stale", "{e}");
     api.ok(Method::POST, "/environments/production/requests", Some(json!({ "ops": [{ "op": "set", "key": "A", "value": "y", "if_version": now }] }))).await;
+}
+
+#[tokio::test]
+async fn a_change_of_thousands_of_keys_keeps_every_version_and_the_audit_chain() {
+    let api = Api::new().await;
+    const N: usize = 3000;
+    let dotenv: String = (0..N).map(|i| format!("K{i:04}=one-{i}\n")).collect();
+    let imported = api.ok(Method::POST, "/environments/production/import", Some(json!({ "dotenv": dotenv }))).await;
+    assert_eq!(imported["items"].as_array().unwrap().len(), N);
+    // One change: the first third changed, the second third deleted, as many keys added (some in
+    // a new folder), the last third untouched.
+    let mut ops: Vec<Value> = (0..N / 3).map(|i| json!({ "op": "set", "key": format!("K{i:04}"), "value": format!("two-{i}") })).collect();
+    ops.extend((N / 3..2 * N / 3).map(|i| json!({ "op": "delete", "key": format!("K{i:04}") })));
+    ops.extend((0..N / 3).map(|i| json!({ "op": "set", "key": format!("N{i:04}"), "value": format!("new-{i}"), "path": if i % 2 == 0 { "/" } else { "/svc/api" } })));
+    let second = api.ok(Method::POST, "/environments/production/changes", Some(json!({ "ops": ops }))).await;
+    let seq = second["change"]["seq"].as_i64().unwrap();
+    let detail = api.ok(Method::GET, &format!("/environments/production/changes/{seq}"), None).await;
+    let items = detail["items"].as_array().unwrap();
+    let what = |w: &str| items.iter().filter(|i| i["what"][0] == w).count();
+    assert_eq!((detail["keys"].as_i64(), what("changed"), what("deleted"), what("added")), (Some(N as i64), N / 3, N / 3, N / 3));
+    assert!(items.iter().all(|i| i["what"][0] != "changed" || (i["from_fp"].is_string() && i["from_fp"] != i["to_fp"])), "{detail}");
+    // Deleted keys come back with their history, in the same change as other new ones.
+    let back: Vec<Value> = (N / 3..N / 3 + 10).map(|i| json!({ "op": "set", "key": format!("K{i:04}"), "value": format!("three-{i}") })).collect();
+    api.ok(Method::POST, "/environments/production/changes", Some(json!({ "ops": back }))).await;
+
+    let root = api.values("production", "/").await["values"].clone();
+    let folder = api.values("production", "/svc/api").await["values"].clone();
+    assert_eq!((root["K0000"].as_str(), root["K1000"].as_str(), root["K1010"].as_str(), root["K2999"].as_str()), (Some("two-0"), Some("three-1000"), None, Some("one-2999")));
+    assert_eq!((root["N0000"].as_str(), folder["N0001"].as_str()), (Some("new-0"), Some("new-1")));
+    assert_eq!(root.as_object().unwrap().len(), N / 3 + 10 + N / 3 + N / 6);
+    let versions = api.ok(Method::GET, "/environments/production/secrets/K1000/versions", None).await;
+    let ops: Vec<(i64, &str)> = versions.as_array().unwrap().iter().map(|v| (v["version"].as_i64().unwrap(), v["op"].as_str().unwrap())).collect();
+    assert_eq!(ops, [(3, "set"), (2, "delete"), (1, "set")]);
+    assert_eq!(api.ok(Method::GET, "/environments/production/secrets/K1000/versions/1/value", None).await["value"], "one-1000");
+    assert_eq!(api.ok(Method::GET, "/audit/verify", None).await["ok"], true);
 }
 
 #[tokio::test]
@@ -1690,6 +1857,7 @@ async fn links_read_live_values_issue_managed_credentials_rotate_and_lease_dynam
             resources: Resources::Some(vec![Selector::Project { project: api.project.clone() }]),
             environments: Some(vec!["staging".into()]),
             paths: None,
+            unprotected: false,
             actions: BTreeMap::from([(A::Read, Effect::Allow), (A::Reveal, Effect::Allow)]),
         };
         roll_auth::Grant { user: None, ask_otherwise: false, id: "tok_tf".into(), name: "tf".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(Scope(vec![rule])) }
@@ -1880,6 +2048,111 @@ async fn a_stored_value_is_found_by_fingerprint_and_short_values_never_are() {
     let candidates = ["sk_live_51Hx9", "8080", "something-else"].map(String::from);
     let leaks = api.secrets.leaks(&api.project, &candidates).unwrap();
     assert_eq!(leaks, [roll_secrets::Leak { key: "STRIPE_KEY".into(), environment: "production".into(), path: "/".into() }]);
+}
+
+#[tokio::test]
+async fn validity_checks_ask_each_provider_once_and_only_when_an_admin_turned_them_on() {
+    let api = Api::new().await;
+    let c = creds();
+    let (roll_live, roll_decoy, roll_gone) = (api.gate.checksummed(false), api.gate.checksummed(true), roll_auth::credentials::new_secret("rlt_"));
+    let probe = |v: &str| json!({ "value": v });
+    let body = json!({ "credentials": [
+        probe(&c.github_live), probe(&c.github_dead), probe(&c.github_moved), { "value": c.aws_id, "pair": c.aws_secret },
+        probe(&c.stripe), probe(&c.slack), probe(&c.openai), probe(&c.anthropic), probe("not a credential at all"), probe(&c.github_live),
+        probe(&roll_live), probe(&roll_decoy), probe(&roll_gone),
+    ] });
+    let asked = || api.sent.9.0.lock().unwrap().clone();
+    // Off by default: nothing is asked.
+    assert_eq!(api.ok(Method::GET, "", None).await["validity_checks"], "off");
+    let v = api.ok(Method::POST, "/validity", Some(body.clone())).await;
+    assert_eq!((v["validity_checks"].as_str(), v["results"].as_array().map(Vec::len)), (Some("off"), Some(0)));
+    assert!(asked().is_empty());
+    // Turning them on is an admin's.
+    let writer = api.token(json!({ "actions": ["read", "write"] }));
+    let (s, _) = api.req(Method::PATCH, "", Some(json!({ "validity_checks": "on" })), Some(&writer)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    assert_eq!(api.ok(Method::PATCH, "", Some(json!({ "validity_checks": "on" }))).await["validity_checks"], "on");
+
+    let v = api.ok(Method::POST, "/validity", Some(body.clone())).await;
+    let r = |i: usize| (v["results"][i]["result"].as_str().unwrap(), v["results"][i]["account"].as_str(), v["results"][i]["rotator"].as_str());
+    assert_eq!(r(0), ("live", Some("roll-fixture"), Some("github-app")));
+    assert_eq!(r(1), ("invalid", None, None));
+    assert_eq!(r(2), ("unknown", None, None), "a redirect isn't followed, so nothing is known");
+    // An AWS key isn't tried (STS is what canaries alert on): its account is read from its id.
+    let account = roll_auth::credentials::aws_account(&c.aws_id).unwrap();
+    assert_eq!(r(3), ("unknown", Some(account.as_str()), None));
+    assert_eq!([r(4).0, r(5).0, r(6).0, r(7).0], ["live"; 4]);
+    assert_eq!(r(5).1, Some("T0ROLLFIX"));
+    assert_eq!((r(8).0, v["results"][8]["why"].as_str()), ("unknown", Some("roll can't check this kind of credential")));
+    assert_eq!(v["results"][9], v["results"][0], "a repeat is the first one's answer");
+    // Every roll token gets one answer, never looked up: a real one and a decoy read the same,
+    // byte for byte, but for their fingerprints.
+    let same = |i: usize| {
+        let mut a = v["results"][i].clone();
+        a.as_object_mut().unwrap().remove("fingerprint");
+        serde_json::to_vec(&a).unwrap()
+    };
+    assert_eq!((r(10), v["results"][10]["why"].as_str()), (("unknown", None, None), Some("a roll token: roll revokes it when it lands")));
+    assert_eq!(same(10), same(11), "a real token and a decoy are told apart");
+    assert_eq!(same(10), same(12));
+    // One request per credential a provider was asked about, to its own host, carrying only the
+    // credential: none to STS.
+    let sent = asked();
+    assert_eq!(sent.len(), 7, "{sent:?}");
+    for (url, headers) in &sent {
+        assert_ne!(url, "https://sts.amazonaws.com/");
+        let allowed: &[&str] = if url == "https://api.anthropic.com/v1/models" { &["x-api-key", "anthropic-version"] } else { &["authorization", "accept"] };
+        assert!(headers.iter().all(|h| allowed.contains(&h.as_str())), "{url}: {headers:?}");
+    }
+    // Kept: asking again asks nobody, and the answer is there by fingerprint.
+    api.ok(Method::POST, "/validity", Some(body)).await;
+    assert_eq!(asked().len(), 7);
+    let fp = v["results"][0]["fingerprint"].as_str().unwrap();
+    let kept = api.ok(Method::GET, &format!("/unstored/{fp}"), None).await;
+    assert_eq!((kept["result"].as_str(), kept["kind"].as_str()), (Some("live"), Some("a GitHub token")));
+    // Each check is audited with kind, fingerprint and result, never the value; roll's tokens and
+    // the AWS key asked nobody, so they have none, and nothing is kept for them.
+    let audit = api.ok(Method::GET, "/audit?action=secrets.validity", None).await;
+    assert_eq!(audit.as_array().unwrap().len(), 7, "{audit}");
+    let (s, _) = api.call(Method::GET, &format!("/unstored/{}", v["results"][11]["fingerprint"].as_str().unwrap()), None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "the decoy isn't kept");
+    let text = api.ok(Method::GET, "/audit", None).await.to_string() + &v.to_string();
+    assert!(text.contains(fp) && text.contains("a GitHub token") && text.contains("live"));
+    for value in [&c.github_live, &c.aws_id, &c.aws_secret, &c.stripe, &c.slack, &c.openai, &c.anthropic, &roll_live, &roll_decoy] {
+        assert!(!text.contains(value.as_str()), "a value got out");
+    }
+    assert!(!audit.to_string().contains(v["results"][11]["fingerprint"].as_str().unwrap()), "the decoy");
+}
+
+#[tokio::test]
+async fn an_aws_key_is_tried_only_when_the_operator_allows_and_a_canary_never() {
+    let api = Api::new().await;
+    let c = creds();
+    api.ok(Method::PATCH, "", Some(json!({ "validity_checks": "on" }))).await;
+    // A canarytokens.org account's key, with a secret next to it.
+    let canary = fake_aws_key_id(52_310_077_262);
+    let body = json!({ "credentials": [{ "value": canary, "pair": c.aws_secret }, { "value": c.aws_id, "pair": c.aws_secret }, { "value": c.github_live }] });
+    let operator = roll_secrets::validity::Canaries::parse(&format!("github:someone, {}", roll_auth::credentials::fingerprint(&c.github_live))).unwrap();
+    api.secrets.set_validity_settings(roll_secrets::validity::Settings { aws_live: true, canaries: operator });
+    let v = api.ok(Method::POST, "/validity", Some(body)).await;
+    let r = |i: usize| (v["results"][i]["result"].as_str().unwrap(), v["results"][i]["account"].as_str());
+    assert_eq!(r(0), ("unknown", Some("052310077262")));
+    assert!(v["results"][0]["why"].as_str().unwrap().contains("canary"));
+    assert_eq!(r(1), ("live", Some("123456789012")), "signed with the pair next to it");
+    assert_eq!(r(2).0, "unknown", "a fingerprint the operator listed is never tried");
+    // Only the allowed AWS key reached STS, and nothing reached GitHub.
+    let sent: Vec<String> = api.sent.9.0.lock().unwrap().iter().map(|(u, _)| u.clone()).collect();
+    assert_eq!(sent, ["https://sts.amazonaws.com/"]);
+    assert!(roll_secrets::validity::Canaries::parse("aws").is_err() && roll_secrets::validity::Canaries::parse("sha256:short").is_err());
+}
+
+/// An AWS key id carrying `account` (the encoding `aws_account` reads), built here: no real key's
+/// shape is in the repo.
+fn fake_aws_key_id(account: u64) -> String {
+    const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    let bits = (account << 7) << 2;
+    let head: String = (0..10).rev().map(|i| ALPHABET[((bits >> (i * 5)) & 31) as usize] as char).collect();
+    format!("AKIA{head}ROLLFX")
 }
 
 #[tokio::test]
@@ -2540,14 +2813,18 @@ async fn a_rotator_outside_roll_issues_and_rotates_a_keys_value() {
     assert_ne!(api.values("production", "/").await["values"]["STRIPE_KEY"], before, "rotated inside its window");
 
     // The project goes while the rotator is down: what it issued is still revoked, by the
-    // sweeper, which keeps the rotator (and the project's key) until then.
+    // sweeper, which keeps the rotator (and the project's key) until then, past the purge.
     api.sent.2.store(true, std::sync::atomic::Ordering::Relaxed);
-    let (s, p) = (api.secrets.clone(), api.project.clone());
-    tokio::task::spawn_blocking(move || s.forget_project(&p).unwrap()).await.unwrap();
+    assert_eq!(delete_project(&api, "?confirm=shop", None).await.0, StatusCode::NO_CONTENT);
     let count = |table: &str| {
         let (sql, p) = (format!("SELECT COUNT(*) FROM {table} WHERE project_id = ?"), api.project.clone());
         api.db.read(move |c| c.query_row(&sql, [p.as_str()], |r| r.get::<_, i64>(0))).unwrap()
     };
+    assert!(count("secrets") > 0, "kept for the recovery window");
+    let p = api.project.clone();
+    api.db.write(move |c| c.execute("UPDATE projects SET purge_at = 0 WHERE project_id = ?", [p.as_str()])).unwrap();
+    let s = api.secrets.clone();
+    tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap();
     assert_eq!((count("rotators"), count("projects"), count("secrets")), (1, 1, 0));
     api.sent.2.store(false, std::sync::atomic::Ordering::Relaxed);
     let p = api.project.clone();
@@ -3402,6 +3679,100 @@ async fn a_projects_ca_signs_short_lived_certificates_for_its_names_only() {
     assert_eq!(api.call(Method::DELETE, &format!("/cas/{}", ca["id"].as_str().unwrap()), None).await.0, StatusCode::CONFLICT);
 }
 
+/// Another source of bound hosts (`Secrets::set_bound_hosts`), for bindings placeholders refuse to
+/// make: a CA refuses them too.
+#[derive(Default)]
+struct FakeBound(Mutex<BTreeMap<String, BTreeMap<String, std::collections::BTreeSet<String>>>>);
+
+impl roll_secrets::intercept::BoundHosts for FakeBound {
+    fn bound_hosts(&self, consumer: &str) -> roll_secrets::Result<BTreeMap<String, std::collections::BTreeSet<String>>> {
+        Ok(self.0.lock().unwrap().get(consumer).cloned().unwrap_or_default())
+    }
+}
+
+#[tokio::test]
+async fn an_interception_ca_names_only_its_consumers_bound_hosts_and_ends_with_it() {
+    use roll_secrets::Error;
+    use std::time::Duration;
+    let api = Api::new().await;
+    let s = &api.secrets;
+    let consumer = "sandbox:sbx_1";
+    assert!(matches!(s.intercept_ca(consumer, None), Err(Error::NotFound(_))), "no placeholders, no CA");
+    // Placeholders' own bindings: the consumer's live placeholders' keys' hosts. It ends with them.
+    api.ok(Method::PUT, "/environments/staging/secrets/STRIPE_KEY", Some(json!({ "value": "sk_test_fake_ca_1" }))).await;
+    api.ok(Method::PUT, "/environments/staging/secrets/STRIPE_KEY/hosts", Some(json!({ "hosts": ["api.stripe.com", "*.stripe.dev"] }))).await;
+    api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": consumer, "placeholders": true }))).await;
+    let real = s.intercept_ca(consumer, None).unwrap();
+    assert_eq!(real.hosts, ["*.stripe.dev", "api.stripe.com"]);
+    assert_eq!(s.end_consumer(consumer).unwrap(), 1);
+    assert!(!s.intercept_ca_live(&real.id).unwrap());
+    assert!(matches!(s.intercept_ca(consumer, None), Err(Error::NotFound(_))), "its placeholders ended");
+    let bound = Arc::new(FakeBound::default());
+    let bind = |consumer: &str, hosts: &[&str]| {
+        bound.0.lock().unwrap().insert(consumer.into(), BTreeMap::from([(api.project.clone(), hosts.iter().map(|h| h.to_string()).collect())]));
+    };
+    bind(consumer, &["api.stripe.com", "*.example.com"]);
+    assert!(s.set_bound_hosts(bound.clone()));
+    assert!(matches!(s.intercept_ca("sandbox:other", None), Err(Error::NotFound(_))), "a consumer with no placeholders");
+    // The hosts are the bindings', and the TTL is a day at most.
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+    let ca = s.intercept_ca(consumer, Some(Duration::from_secs(7 * 86_400))).unwrap();
+    assert!((now + 86_400_000 - 60_000..=now + 86_400_000 + 60_000).contains(&ca.expires_at), "{}", ca.expires_at - now);
+    assert_eq!(ca.hosts, ["*.example.com", "api.stripe.com"]);
+    assert!(ca.cert_pem.starts_with("-----BEGIN CERTIFICATE-----") && ca.key.expose().starts_with("-----BEGIN PRIVATE KEY-----"));
+    assert!(!format!("{ca:?}").contains("PRIVATE KEY"));
+    // Asking again mints a new one, never the same key.
+    let again = s.intercept_ca(consumer, None).unwrap();
+    assert!(again.id != ca.id && again.key.expose() != ca.key.expose());
+    assert!(s.intercept_ca_live(&ca.id).unwrap() && s.intercept_ca_live(&again.id).unwrap() && !s.intercept_ca_live("ica_nope").unwrap());
+    // Audited with the consumer, hosts and expiry; never the key.
+    let audit = api.ok(Method::GET, "/audit?action=secrets.intercept_ca", None).await.to_string();
+    assert!(audit.contains(&format!("interception CA {} for sandbox:sbx_1: *.example.com, api.stripe.com, until 20", ca.id)), "{audit}");
+    assert!(!audit.contains("PRIVATE KEY"));
+    // Ending the consumer ends both, with a revocation row, and the proxy's next check drops them.
+    assert_eq!(s.end_intercept_cas(consumer, "the sandbox stopped").unwrap(), 2);
+    assert!(!s.intercept_ca_live(&ca.id).unwrap() && !s.intercept_ca_live(&again.id).unwrap());
+    assert_eq!(s.end_intercept_cas(consumer, "again").unwrap(), 0);
+    let ended = api.ok(Method::GET, "/audit?action=secrets.intercept_ca.end", None).await.to_string();
+    assert!(ended.contains(&format!("ended interception CA {} for sandbox:sbx_1: the sandbox stopped", ca.id)), "{ended}");
+    // A binding a CA must never name is refused, not narrowed.
+    for wide in ["*.co.uk", "*", "10.0.0.1"] {
+        bind("sandbox:sbx_2", &["api.stripe.com", wide]);
+        assert!(matches!(s.intercept_ca("sandbox:sbx_2", None), Err(Error::BadRequest(_))), "{wide}");
+    }
+}
+
+/// A consumer's hosts shrinking (a placeholder revoked, a binding taken off) ends its CAs that name a
+/// host it lost, with a revocation row; the next one names only the hosts it still has.
+#[tokio::test]
+async fn an_interception_ca_ends_when_its_consumer_loses_one_of_its_hosts() {
+    use roll_secrets::Error;
+    let api = Api::new().await;
+    let s = &api.secrets;
+    let consumer = "sandbox:sbx_1";
+    for (key, host) in [("STRIPE_KEY", "api.stripe.com"), ("GITHUB_TOKEN", "api.github.com")] {
+        api.ok(Method::PUT, &format!("/environments/staging/secrets/{key}"), Some(json!({ "value": format!("fake_{key}_value_0001") }))).await;
+        api.ok(Method::PUT, &format!("/environments/staging/secrets/{key}/hosts"), Some(json!({ "hosts": [host] }))).await;
+    }
+    api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": consumer, "placeholders": true }))).await;
+    let old = s.intercept_ca(consumer, None).unwrap();
+    assert_eq!(old.hosts, ["api.github.com", "api.stripe.com"]);
+    let listed = api.ok(Method::GET, "/placeholders", None).await;
+    let stripe = listed.as_array().unwrap().iter().find(|p| p["key"] == "STRIPE_KEY").unwrap_or_else(|| panic!("{listed}"))["id"].as_str().unwrap().to_string();
+    assert!(api.call(Method::DELETE, &format!("/placeholders/{stripe}"), None).await.0.is_success());
+    // Ended by the revocation itself (before the proxy's next check), with its row.
+    let ended = api.ok(Method::GET, "/audit?action=secrets.intercept_ca.end", None).await.to_string();
+    assert!(ended.contains(&format!("ended interception CA {} for sandbox:sbx_1: api.stripe.com no longer bound", old.id)), "{ended}");
+    assert!(!s.intercept_ca_live(&old.id).unwrap());
+    let new = s.intercept_ca(consumer, None).unwrap();
+    assert_eq!(new.hosts, ["api.github.com"]);
+    // The other key's binding taken off: that one ends too, and nothing is left to intercept.
+    assert!(api.call(Method::DELETE, "/environments/staging/secrets/GITHUB_TOKEN/hosts", None).await.0.is_success());
+    assert_eq!(s.end_intercept_cas(consumer, "again").unwrap(), 0, "already ended");
+    assert!(!s.intercept_ca_live(&new.id).unwrap());
+    assert!(matches!(s.intercept_ca(consumer, None), Err(Error::NotFound(_))));
+}
+
 #[tokio::test]
 async fn an_ssh_ca_signs_short_lived_user_certificates_for_its_principals() {
     use base64::Engine;
@@ -3752,28 +4123,105 @@ async fn a_decoy_key_reads_as_any_other_and_its_use_is_alerted() {
     assert_eq!(api.ok(Method::GET, "/audit?action=secrets.alert", None).await.as_array().map(Vec::len), Some(1));
 }
 
-/// Only the project's admins can tell a key is a decoy: to a reader, writer or revealer it's the
-/// same as any other key, in listings, health and the audit log; and only an admin plants one.
+/// Only the project's admins, signed in or the operator, can tell a key is a decoy. To any token,
+/// an admin's too (an agent on roll MCP), it answers as any other key does: listings, the key,
+/// health, the audit log and its export, the sinks and notify URLs the token set, and the daily
+/// reminder. No audit row marks the plant, and no token plants one. The session sees where it was
+/// last used (the route pattern and the address); nothing else does.
 #[tokio::test]
-async fn only_admins_can_tell_a_key_is_a_decoy() {
+async fn only_an_admins_session_can_tell_a_key_is_a_decoy() {
     let api = Api::new().await;
     api.ok(Method::PUT, "/environments/production/secrets/STRIPE_KEY", Some(json!({ "value": "sk_test_not_a_real_key_0000" }))).await;
-    api.ok(Method::POST, "/environments/production/decoys", Some(json!({ "key": "BACKUP_DB_TOKEN", "kind": "rlt" }))).await;
     let dev = api.token(json!({ "actions": ["read", "reveal", "write", "delete"] }));
-    assert_eq!(api.req(Method::POST, "/environments/production/decoys", Some(json!({ "key": "OTHER", "kind": "rlt" })), Some(&dev)).await.0, StatusCode::FORBIDDEN);
-    let (_, listed) = api.req(Method::GET, "/environments/production/secrets", None, Some(&dev)).await;
-    let shape = |key: &str| listed.as_array().unwrap().iter().find(|s| s["key"] == key).unwrap().as_object().unwrap().keys().cloned().collect::<Vec<_>>();
-    assert_eq!(shape("BACKUP_DB_TOKEN"), shape("STRIPE_KEY"), "{listed}");
-    let (_, one) = api.req(Method::GET, "/environments/production/secrets/BACKUP_DB_TOKEN", None, Some(&dev)).await;
-    assert!(one.get("decoy").is_none(), "{one}");
-    // Its use is the admins' news.
+    let admin = api.token(json!({ "actions": ["read", "reveal", "write", "delete", "admin"] }));
+    let (s, token_sink) = api.req(Method::POST, "/audit/sinks", Some(json!({ "url": "https://siem.example/token" })), Some(&admin)).await;
+    assert!(s.is_success(), "{s} {token_sink}");
+    let operator_sink = api.ok(Method::POST, "/audit/sinks", Some(json!({ "url": "https://siem.example/operator" }))).await;
+    // Production's channel, set by the admin token, with a staleness limit.
+    let (s, _) = api.req(Method::PUT, "/environments/production/policy", Some(json!({ "protected": false, "notify_url": "https://hooks.example/T0/B0/token" })), Some(&admin)).await;
+    assert!(s.is_success(), "{s}");
+    api.ok(Method::PATCH, "/environments/production", Some(json!({ "max_age_days": 90 }))).await;
+    // Planted from an admin's session: the person behind it owns it (and is mailed), not the operator.
+    let base = format!("/v1/secrets/projects/{}", api.project);
+    let (s, planted) = api.signed_in("root", true, Method::POST, &format!("{base}/environments/production/decoys"), Some(json!({ "key": "BACKUP_DB_TOKEN", "kind": "rlt" }))).await;
+    assert!(s.is_success(), "{s} {planted}");
+    // Used once.
     let (_, value) = api.req(Method::GET, "/environments/production/secrets/BACKUP_DB_TOKEN/value", None, Some(&dev)).await;
-    api.req(Method::GET, "/v1/secrets/whoami", None, value["value"].as_str()).await;
-    let (_, health) = api.req(Method::GET, "/health", None, Some(&dev)).await;
-    assert!(!health.to_string().contains("decoy"), "{health}");
-    let (_, audit) = api.req(Method::GET, "/audit", None, Some(&dev)).await;
-    assert!(!audit.to_string().contains("decoy"), "{audit}");
-    assert!(api.ok(Method::GET, "/audit", None).await.to_string().contains("secrets.alert.decoy_used"));
+    let value = value["value"].as_str().unwrap().to_string();
+    assert_eq!(api.gate.tokens.lock().unwrap()[&value].user.as_deref(), Some("usr_root"));
+    api.req(Method::GET, "/v1/secrets/whoami", None, Some(&value)).await;
+    for t in [&dev, &admin] {
+        assert_eq!(api.req(Method::POST, "/environments/production/decoys", Some(json!({ "key": "OTHER", "kind": "rlt" })), Some(t)).await.0, StatusCode::FORBIDDEN);
+        let (_, listed) = api.req(Method::GET, "/environments/production/secrets", None, Some(t)).await;
+        let shape = |key: &str| listed.as_array().unwrap().iter().find(|s| s["key"] == key).unwrap().as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+        assert_eq!(shape("BACKUP_DB_TOKEN"), shape("STRIPE_KEY"), "{listed}");
+        let (_, one) = api.req(Method::GET, "/environments/production/secrets/BACKUP_DB_TOKEN", None, Some(t)).await;
+        assert!(one.get("decoy").is_none(), "{one}");
+        let (_, health) = api.req(Method::GET, "/health", None, Some(t)).await;
+        assert!(!health.to_string().contains("decoy") && !health.to_string().contains("203.0.113.7"), "{health}");
+        let (_, audit) = api.req(Method::GET, "/audit", None, Some(t)).await;
+        assert!(!audit.to_string().contains("decoy"), "{audit}");
+        let (_, export) = api.req(Method::GET, "/audit?format=jsonl", None, Some(t)).await;
+        assert!(export.as_str().is_some_and(|e| e.contains("BACKUP_DB_TOKEN") && !e.contains("decoy")), "{export}");
+    }
+    // No row marks the plant, even for the operator: the key's write is as any new key's (but for
+    // its change's number).
+    let all = api.ok(Method::GET, "/audit", None).await;
+    let rows = all.as_array().unwrap();
+    assert!(!rows.iter().any(|r| r["action"] == "secrets.decoy"), "{all}");
+    let write = |key: &str| rows.iter().rev().find(|r| r["keys"] == json!([key])).map(|r| (r["action"].clone(), r["summary"].as_str().unwrap().split_once(' ').unwrap().1.to_string())).unwrap();
+    assert_eq!(write("BACKUP_DB_TOKEN"), write("STRIPE_KEY"), "{all}");
+    // An admin's session, as the operator, sees it all: who planted it on the key, its use.
+    let (_, listed) = api.signed_in("root", true, Method::GET, &format!("{base}/environments/production/secrets"), None).await;
+    let decoy = listed.as_array().unwrap().iter().find(|s| s["key"] == "BACKUP_DB_TOKEN").unwrap()["decoy"].clone();
+    assert_eq!((decoy["uses"].as_i64(), decoy["created_by"].as_str(), decoy["created_at"].is_i64()), (Some(1), Some("usr_root"), true), "{listed}");
+    assert_eq!((decoy["used_ip"].as_str(), decoy["used_route"].as_str(), decoy["used_endpoint"].as_str(), decoy["used_at"].is_i64()), (Some("203.0.113.7"), Some("/v1/secrets/whoami"), None, true), "{decoy}");
+    let (_, health) = api.signed_in("root", true, Method::GET, &format!("{base}/health"), None).await;
+    assert_eq!(health[0]["issue"], "decoy_used", "{health}");
+    assert_eq!(health[0]["decoy"], decoy, "{health}");
+    assert!(health[0]["detail"].as_str().unwrap().contains("from 203.0.113.7 calling /v1/secrets/whoami"), "{health}");
+    for told in [listed.to_string(), health.to_string()] {
+        assert!(!told.contains(&value), "{told}");
+    }
+    let (_, audit) = api.signed_in("root", true, Method::GET, &format!("{base}/audit"), None).await;
+    assert!(audit.to_string().contains("secrets.alert.decoy_used"), "{audit}");
+    // A member's session sees them only where their role manages the project (docs/members.md).
+    let p = api.project.clone();
+    let (_, inv) = api.call(Method::POST, &format!("/v1/workspace/projects/{p}/invites"), Some(json!({ "email": "cat@example.com", "role": "developer" }))).await;
+    let t = inv["url"].as_str().unwrap().split("token=").nth(1).unwrap().to_string();
+    assert_eq!(api.signed_in("cat", false, Method::POST, &format!("/v1/workspace/invites/{t}/accept"), None).await.0, StatusCode::OK);
+    let cat_sees = || async {
+        let (s, listed) = api.signed_in("cat", false, Method::GET, &format!("{base}/environments/production/secrets"), None).await;
+        assert!(s.is_success(), "{listed}");
+        listed.as_array().unwrap().iter().find(|s| s["key"] == "BACKUP_DB_TOKEN").unwrap().get("decoy").is_some()
+    };
+    assert!(!cat_sees().await, "a developer's session is told nothing");
+    assert_eq!(api.call(Method::PATCH, &format!("/v1/workspace/projects/{p}/members/usr_cat"), Some(json!({ "role": "admin" }))).await.0, StatusCode::OK);
+    assert!(cat_sees().await, "an admin's session is");
+    // Both keys past the limit; a day of sweeps: sinks, notices, the reminder.
+    api.db.write(|c| c.execute("UPDATE audit SET at = at - 60000", ())).unwrap();
+    api.db.write(|c| c.execute("UPDATE secrets SET updated_at = updated_at - 8640000000", ())).unwrap();
+    let s = api.secrets.clone();
+    tokio::task::spawn_blocking(move || {
+        s.sweep().unwrap();
+        s.sweep().unwrap();
+    })
+    .await
+    .unwrap();
+    let sent = api.sent.0.lock().unwrap().clone();
+    let actions = |sink: &Value| -> Vec<String> {
+        sent.iter().filter(|b| b["sink"] == sink["id"]).flat_map(|b| b["events"].as_array().unwrap().iter().map(|e| e["action"].as_str().unwrap().to_string())).collect()
+    };
+    let (theirs, ours) = (actions(&token_sink), actions(&operator_sink));
+    assert!(ours.iter().any(|a| a == "secrets.alert.decoy_used"), "{ours:?}");
+    assert!(theirs.iter().any(|a| a == "secrets.write") && !theirs.iter().any(|a| a.contains("decoy")), "{theirs:?}");
+    // The token's channel hears nothing of the decoy, and its reminder calls both keys stale.
+    let notices: Vec<&Value> = sent.iter().filter(|b| b.get("sink").is_none()).collect();
+    assert!(!json!(notices).to_string().contains("decoy") && !json!(notices).to_string().contains("/v1/secrets/whoami"), "{notices:?}");
+    let reminder = notices.iter().find(|n| n["findings"].is_array()).unwrap_or_else(|| panic!("{notices:?}"));
+    let mut stale: Vec<&str> = reminder["findings"].as_array().unwrap().iter().filter(|f| f["issue"] == "stale").map(|f| f["key"].as_str().unwrap()).collect();
+    stale.sort();
+    assert_eq!(stale, ["BACKUP_DB_TOKEN", "STRIPE_KEY"], "{reminder}");
 }
 
 /// Deleting a decoy key, or giving it a value of its own, ends the decoy: its token is revoked
@@ -3814,11 +4262,13 @@ async fn a_postgres_decoy_is_a_role_whose_login_is_alerted_and_that_goes_with_it
     // roll Postgres' proxy refused a login as the role and said so (rolld's `tell_postgres_decoys`).
     let s = api.secrets.clone();
     let h = handle.clone();
-    let used = tokio::task::spawn_blocking(move || (s.decoy_used("postgres", &h, Some("198.51.100.23"), "Postgres endpoint ep_fake"), s.decoy_used("rlt", &h, None, "/"))).await.unwrap();
+    let used = tokio::task::spawn_blocking(move || (s.decoy_used("postgres", &h, Some("198.51.100.23"), "ep_fake"), s.decoy_used("rlt", &h, None, "/"))).await.unwrap();
     assert_eq!((used.0.unwrap(), used.1.unwrap()), (true, false), "another kind's handle isn't this decoy");
     let health = api.ok(Method::GET, "/health", None).await;
     assert_eq!((health[0]["issue"].as_str(), health[0]["key"].as_str()), (Some("decoy_used"), Some("LEGACY_DATABASE_URL")), "{health}");
-    assert!(health[0]["detail"].as_str().unwrap().contains("198.51.100.23"), "{health}");
+    assert!(health[0]["detail"].as_str().unwrap().contains("from 198.51.100.23 on Postgres endpoint ep_fake"), "{health}");
+    let d = &health[0]["decoy"];
+    assert_eq!((d["used_endpoint"].as_str(), d["used_route"].as_str(), d["used_ip"].as_str(), d["uses"].as_i64()), (Some("ep_fake"), None, Some("198.51.100.23"), Some(1)), "{health}");
     let logged = api.ok(Method::GET, "/audit?action=secrets.alert", None).await;
     assert_eq!((logged[0]["action"].as_str(), logged[0]["ip"].as_str()), (Some("secrets.alert.decoy_used"), Some("198.51.100.23")), "{logged}");
     assert!(logged[0]["summary"].as_str().unwrap().contains("Postgres endpoint ep_fake"), "{logged}");
@@ -3844,6 +4294,7 @@ async fn a_rule_naming_one_encryption_key_reaches_it_alone() {
         resources: Resources::Some(vec![Selector::Id { id: api.project.clone(), index: Some("payments".into()) }]),
         environments: None,
         paths: None,
+        unprotected: false,
         actions: BTreeMap::from([(A::Read, Effect::Allow), (A::Write, Effect::Allow)]),
     };
     let grant = roll_auth::Grant { user: None, ask_otherwise: false, id: "tok_pay".into(), name: "pay".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(Scope(vec![rule])) };
@@ -3878,6 +4329,7 @@ async fn a_roll_access_grant_reaches_only_what_its_rules_name() {
         resources: Resources::Some(vec![Selector::Project { project: api.project.clone() }]),
         environments: Some(vec!["development".into()]),
         paths: None,
+        unprotected: false,
         actions: BTreeMap::from([(A::Read, Effect::Allow), (A::Reveal, Effect::Allow)]),
     };
     let grant = roll_auth::Grant { user: None, ask_otherwise: false, id: "tok_ci".into(), name: "ci".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(Scope(vec![rule])) };
@@ -3900,7 +4352,7 @@ async fn a_roll_access_grant_reaches_only_what_its_rules_name() {
     let audit = api.ok(Method::GET, "/audit?actor=token:tok_ci", None).await;
     assert_eq!(audit[0]["action"], "secrets.export");
     // A rule naming the project by id (as the dashboard's builder writes it) reaches it the same.
-    let by_id = Rule { resources: Resources::Some(vec![Selector::Id { id: api.project.clone(), index: None }]), environments: Some(vec!["development".into()]), paths: None, product: "secrets".into(), actions: BTreeMap::from([(A::Read, Effect::Allow), (A::Reveal, Effect::Allow)]) };
+    let by_id = Rule { resources: Resources::Some(vec![Selector::Id { id: api.project.clone(), index: None }]), environments: Some(vec!["development".into()]), paths: None, product: "secrets".into(), unprotected: false, actions: BTreeMap::from([(A::Read, Effect::Allow), (A::Reveal, Effect::Allow)]) };
     let grant = roll_auth::Grant { scope: Arc::new(Scope(vec![by_id])), ..grant.clone() };
     let mut req = Request::builder().uri(format!("/v1/secrets/projects/{}/environments/development/values", api.project)).body(Body::empty()).unwrap();
     req.extensions_mut().insert(roll_auth::Operator);
@@ -3945,6 +4397,7 @@ async fn a_signed_in_person_manages_only_their_own_projects_secrets() {
         resources: roll_auth::scope::Resources::All,
         environments: None,
         paths: None,
+        unprotected: false,
         actions: BTreeMap::from([(roll_auth::scope::Action::Read, roll_auth::scope::Effect::Allow)]),
     };
     let grant = roll_auth::Grant { ask_otherwise: false, user: Some("usr_ada".into()), id: "tok_ada".into(), name: "ada".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(roll_auth::scope::Scope(vec![everything])) };
@@ -4224,6 +4677,28 @@ async fn a_workload_logs_in_with_its_oidc_token_for_a_short_lived_scoped_token()
     api.ok(Method::DELETE, &format!("/identities/{id}"), None).await;
     let (s, _) = api.req(Method::GET, "/environments/staging/values", None, Some(&token)).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn an_identity_matches_a_nested_role_claim() {
+    let api = Api::new().await;
+    api.set("staging", "API_KEY", "staging-key").await;
+    // Keycloak puts a user's realm roles in an array under `realm_access`.
+    let keycloak = Issuer::new();
+    let realm = "https://sso.example.com/realms/acme";
+    let identity = |claims: Value| json!({ "name": "ci", "issuer": realm, "audience": "roll", "subject": "service-account-ci", "claims": claims, "environments": ["staging"], "actions": ["read", "reveal"], "jwks": keycloak.jwks().to_string() });
+    assert_eq!(api.call(Method::POST, "/identities", Some(identity(json!({ "/realm_access//roles": "deployer" })))).await.0, StatusCode::BAD_REQUEST);
+    let i = api.ok(Method::POST, "/identities", Some(identity(json!({ "/realm_access/roles": "deployer" })))).await;
+    assert_eq!(i["claims"], json!({ "/realm_access/roles": "deployer" }));
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    let login = |roles: Value| {
+        let token = keycloak.sign(json!({ "iss": realm, "aud": "roll", "sub": "service-account-ci", "realm_access": { "roles": roles }, "exp": now + 300, "iat": now }));
+        api.call(Method::POST, "/v1/secrets/login", Some(json!({ "identity": i["id"], "token": token })))
+    };
+    let (s, l) = login(json!(["offline_access", "deployer"])).await;
+    assert_eq!(s, StatusCode::OK, "{l}");
+    let (s, l) = login(json!(["offline_access"])).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{l}");
 }
 
 /// A signed GetCallerIdentity as roll's clients send one (STS checks the signature; roll checks the
@@ -4739,7 +5214,7 @@ async fn a_projects_admin_cuts_off_only_its_own_tokens_and_leaves_the_operators_
     let at = |rest: &str| format!("/v1/secrets/projects/{mine}{rest}");
     api.as_ada(Method::PUT, &at("/environments/production/secrets/STRIPE_KEY"), Some(json!({ "value": "sk_test_fake" }))).await;
     // The operator's CI token reaches every project's secrets; hers names only her project.
-    let everywhere = roll_auth::scope::Rule { product: "secrets".into(), resources: roll_auth::scope::Resources::All, environments: None, paths: None, actions: BTreeMap::from([(roll_auth::scope::Action::Read, roll_auth::scope::Effect::Allow)]) };
+    let everywhere = roll_auth::scope::Rule { product: "secrets".into(), resources: roll_auth::scope::Resources::All, environments: None, paths: None, unprotected: false, actions: BTreeMap::from([(roll_auth::scope::Action::Read, roll_auth::scope::Effect::Allow)]) };
     let (_, ops) = api.gate.grant("operator-ci", everywhere, None);
     let confined = |name: &str| api.gate.grant(name, roll_secrets::access::rule(&mine, None, None, &[roll_secrets::Action::Read]), None).1;
     let ci = confined("ada-ci");
@@ -4924,8 +5399,8 @@ async fn a_reference_a_person_chose_reads_only_what_they_may_reveal_now() {
     for flag in [&api.people.root_demoted, &api.people.root_disabled] {
         *flag.lock().unwrap() = true;
         let refused = s.resolve_as(&logs, reference, &root).unwrap_err();
-        assert!(matches!(refused, Refusal::NotAllowed(_)), "{refused}");
-        assert!(matches!(s.digest_as(&logs, reference, &root), Err(Refusal::NotAllowed(_))));
+        assert!(matches!(refused, Refusal::MakerUnreachable(_)), "{refused}");
+        assert!(matches!(s.digest_as(&logs, reference, &root), Err(Refusal::MakerUnreachable(_))));
         *flag.lock().unwrap() = false;
     }
     assert!(s.resolve_as(&logs, reference, &root).is_ok());
@@ -4973,9 +5448,9 @@ async fn a_reference_a_person_chose_reads_only_what_they_may_reveal_now() {
     let by_token = s.bind_ref(&logs, staging, &token).unwrap();
     assert_eq!(s.resolve_as(&logs, staging, &by_token).unwrap().value.expose(), "fake-staging");
     api.gate.tokens.lock().unwrap().remove(&secret);
-    assert!(matches!(s.resolve_as(&logs, staging, &by_token), Err(Refusal::NotAllowed(_))));
+    assert!(matches!(s.resolve_as(&logs, staging, &by_token), Err(Refusal::MakerUnreachable(_))));
 
-    // A person's own project: her reference reads while she owns it, and stops once she doesn't.
+    // A person's own project: her reference reads while she's in it, and stops once she isn't.
     let (_, mine) = api.as_ada(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "mine" }))).await;
     let mine = mine["id"].as_str().unwrap().to_string();
     api.as_ada(Method::PUT, &format!("/v1/workspace/projects/{mine}/resources/repo/ada%2Fsite"), Some(json!({ "x": 0, "y": 0 }))).await;
@@ -4989,11 +5464,14 @@ async fn a_reference_a_person_chose_reads_only_what_they_may_reveal_now() {
     assert!(st.is_success(), "{e}");
     let ada_runtime = s.bind_ref_runtime(&site, "roll://production/GIT_TOKEN", &as_ada, "production").unwrap();
     assert_eq!(s.resolve_as(&site, "roll://production/GIT_TOKEN", &ada_runtime).unwrap().value.expose(), "fake-git");
+    // Handed to the operator, without her (docs/members.md: what a person reaches is their
+    // memberships now).
     api.ws_db.write(|c| c.execute("UPDATE projects SET owner = '' WHERE id = ?", [&mine])).unwrap();
+    api.ws_db.write(|c| c.execute("DELETE FROM members WHERE project_id = ? AND user_id = 'usr_ada'", [&mine])).unwrap();
     let refused = s.resolve_as(&site, "roll://production/DEPLOY_KEY", &ada).unwrap_err();
-    assert!(matches!(refused, Refusal::NotAllowed(_)), "{refused}");
+    assert!(matches!(refused, Refusal::MakerUnreachable(_)), "{refused}");
     let refused = s.resolve_as(&site, "roll://production/GIT_TOKEN", &ada_runtime).unwrap_err();
-    assert!(matches!(refused, Refusal::NotAllowed(_)) && !refused.to_string().contains("fake-"), "{refused}");
+    assert!(matches!(refused, Refusal::MakerUnreachable(_)) && !refused.to_string().contains("fake-"), "{refused}");
 }
 
 #[tokio::test]
@@ -5325,4 +5803,849 @@ async fn an_apps_instance_logs_in_with_rolls_own_token_for_its_own_project_only(
     let (s, v) = api.req(Method::GET, "/environments/production/values", None, l["token"].as_str()).await;
     assert_eq!((s, v["values"]["API_KEY"].as_str()), (StatusCode::OK, Some("prod-key")));
     assert_eq!(login(token(other).await).await.0, StatusCode::FORBIDDEN, "another project's instance");
+}
+
+/// A key bound to hosts (docs/secrets.md, "Using a key without seeing it"): an untrusted
+/// sandbox's resolve gets a placeholder for it, sensitive or not, and never the value; keys
+/// without hosts read as they always did.
+#[tokio::test]
+async fn an_untrusted_resolve_of_a_host_bound_key_gets_a_placeholder_never_the_value() {
+    use roll_secrets::{ResourceRef, proxy};
+    let api = Api::new().await;
+    api.ok(Method::PUT, "/environments/staging/secrets/STRIPE_KEY", Some(json!({ "value": "sk_test_fake_bound_1", "tags": ["sensitive"] }))).await;
+    api.ok(Method::PUT, "/environments/staging/secrets/OTHER_SENSITIVE", Some(json!({ "value": "fake-unbound-sensitive", "tags": ["sensitive"] }))).await;
+    api.set("staging", "PLAIN_KEY", "fake-plain").await;
+    // Binding is an admin's: a writer's token can't.
+    let writer = api.token(json!({ "name": "w", "environments": ["staging"], "actions": ["read", "reveal", "write"] }));
+    // A sensitive key's placeholder reaches untrusted code only by the binding's opt-in.
+    let bind = json!({ "hosts": ["api.stripe.com"], "header": "Authorization: Bearer {}", "untrusted": true });
+    assert_eq!(api.req(Method::PUT, "/environments/staging/secrets/STRIPE_KEY/hosts", Some(bind.clone()), Some(&writer)).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(api.call(Method::PUT, "/environments/staging/secrets/STRIPE_KEY/hosts", Some(json!({ "hosts": ["*"] }))).await.0, StatusCode::BAD_REQUEST);
+    api.ok(Method::PUT, "/environments/staging/secrets/STRIPE_KEY/hosts", Some(bind)).await;
+    assert_eq!(api.ok(Method::GET, "/environments/staging/secrets/STRIPE_KEY", None).await["hosts"]["hosts"], json!(["api.stripe.com"]));
+
+    let r = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "sandbox:sbx_1", "untrusted": true, "placeholders": true }))).await;
+    let ph = r["values"]["STRIPE_KEY"].as_str().unwrap().to_string();
+    assert!(ph.starts_with("rlph_") && roll_auth::credentials::checksum_ok(&ph), "{r}");
+    assert_eq!((r["placeholders"][0]["key"].as_str(), r["placeholders"][0]["hosts"].clone()), (Some("STRIPE_KEY"), json!(["api.stripe.com"])), "{r}");
+    // Keys without hosts are unchanged: the plain one's value, the sensitive one withheld.
+    assert_eq!((r["values"]["PLAIN_KEY"].as_str(), r["withheld"].clone()), (Some("fake-plain"), json!(["OTHER_SENSITIVE"])), "{r}");
+    // Without asking, the bound sensitive key is withheld as before.
+    let plain = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "sandbox:sbx_1", "untrusted": true }))).await;
+    assert!(plain["values"].get("STRIPE_KEY").is_none() && plain.get("placeholders").is_none(), "{plain}");
+    let audit = api.ok(Method::GET, "/audit", None).await;
+    assert!(!r.to_string().contains("sk_test_fake_bound") && !audit.to_string().contains("sk_test_fake_bound") && !audit.to_string().contains(&ph), "{audit}");
+    assert!(audit.as_array().unwrap().iter().any(|a| a["summary"].as_str().is_some_and(|s| s.contains("1 as placeholders"))), "{audit}");
+    assert_eq!(api.ok(Method::GET, "/placeholders", None).await[0]["consumer"], "sandbox:sbx_1");
+
+    // A product's resource asking for placeholders gets one too, as an untrusted copy.
+    api.ok(Method::PUT, &format!("/v1/workspace/projects/{}/resources/bucket/photos", api.project), Some(json!({ "x": 0, "y": 0 }))).await;
+    let branch = ResourceRef::new(roll_workspace::Kind::Bucket, "photos").untrusted().with_placeholders();
+    let got = api.secrets.resolve_for(&branch, "roll://staging/STRIPE_KEY").unwrap();
+    assert!(got.value.expose().starts_with("rlph_") && got.placeholder.is_some());
+    let header = format!("Bearer {}", got.value.expose());
+    let at = proxy::Position { place: proxy::Place::Header, name: "authorization", value: &header };
+    assert_eq!(api.secrets.substitute(got.value.expose(), "api.stripe.com", at).unwrap().value.expose(), "sk_test_fake_bound_1");
+}
+
+/// Only roll's proxy swaps a placeholder, only for a bound host and place: another host is
+/// refused with an alert (likely an exfiltration attempt), once a minute with a count.
+#[tokio::test]
+async fn a_placeholder_is_swapped_for_a_bound_host_and_refused_with_an_alert_for_another() {
+    use roll_secrets::proxy::{self, Blocked, Outgoing, Place, Position, Refusal};
+    let api = Api::new().await;
+    api.ok(Method::PUT, "/environments/staging/policy", Some(json!({ "protected": false, "notify_url": "https://hooks.example/T0/B0/x" }))).await;
+    api.set("staging", "STRIPE_KEY", "sk_test_fake_swap_1").await;
+    api.ok(Method::PUT, "/environments/staging/secrets/STRIPE_KEY/hosts", Some(json!({ "hosts": ["*.stripe.com"], "header": "Authorization: Bearer {}" }))).await;
+    let r = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "sandbox:sbx_2", "untrusted": true, "placeholders": true }))).await;
+    let ph = r["values"]["STRIPE_KEY"].as_str().unwrap().to_string();
+
+    // Through the filter a proxy embeds: swapped in the header, for the bound host.
+    let mut headers = vec![("Authorization".to_string(), format!("Bearer {ph}"))];
+    let mut req = Outgoing { host: "api.stripe.com:443", path: "/v1/charges", headers: &mut headers, query: None };
+    assert_eq!(proxy::filter(&mut req, &*api.secrets, &proxy::Limits::default()).unwrap().swapped(), 1);
+    assert_eq!(headers[0].1, "Bearer sk_test_fake_swap_1");
+    // A rotation needs no new placeholder.
+    api.set("staging", "STRIPE_KEY", "sk_test_fake_swap_2").await;
+    let bearer = format!("Bearer {ph}");
+    let header = Position { place: Place::Header, name: "authorization", value: &bearer };
+    assert_eq!(api.secrets.substitute(&ph, "files.stripe.com", header).unwrap().value.expose(), "sk_test_fake_swap_2");
+    // Never in the query (the binding says a header), never to another host.
+    let query = Position { place: Place::Query, name: "key", value: &ph };
+    assert!(matches!(api.secrets.substitute(&ph, "api.stripe.com", query), Err(Refusal::WrongPlace(_))));
+    for _ in 0..3 {
+        let mut headers = vec![("Authorization".to_string(), format!("Bearer {ph}"))];
+        let mut req = Outgoing { host: "evil.example", path: "/", headers: &mut headers, query: None };
+        let refused = proxy::filter(&mut req, &*api.secrets, &proxy::Limits::default()).unwrap_err();
+        assert_eq!(refused, Blocked::Refused { at: "header Authorization".into(), why: Refusal::WrongHost("evil.example".into()) });
+        assert_eq!(headers[0].1, format!("Bearer {ph}"), "the placeholder stays, and the request isn't sent");
+    }
+    // One alert for the three (once a minute), in the audit log and to the notify URL.
+    let alerts = api.ok(Method::GET, "/audit?action=secrets.alert", None).await;
+    assert_eq!(alerts.as_array().unwrap().len(), 1, "{alerts}");
+    let text = alerts[0]["summary"].as_str().unwrap();
+    assert!(text.contains("evil.example") && text.contains("likely an exfiltration attempt") && !text.contains("sk_test_fake") && !text.contains(&ph), "{text}");
+    let notices: i64 = api.db.read(|c| c.query_row("SELECT COUNT(*) FROM notices WHERE body LIKE '%placeholder_host%'", (), |r| r.get(0))).unwrap();
+    assert_eq!(notices, 1);
+    // The swaps were audited once (the first), quietly, without the value.
+    let used = api.ok(Method::GET, "/audit?action=secrets.substitute", None).await;
+    assert_eq!(used.as_array().unwrap().len(), 2, "one row per (placeholder, host) a minute: {used}");
+    assert!(used[0]["summary"].as_str().unwrap().contains("once for sandbox:sbx_2") && !used.to_string().contains("sk_test_fake"), "{used}");
+}
+
+/// A binding names where its placeholder goes: one without (bound before that was required) is
+/// still a trusted reader's, in any header, but an untrusted consumer's doesn't swap, untrusted
+/// bindings need one, and Health lists it.
+#[tokio::test]
+async fn a_binding_without_a_placement_refuses_an_untrusted_swap_and_is_in_health() {
+    use roll_secrets::proxy::{Place, Position, Refusal};
+    let api = Api::new().await;
+    api.set("staging", "STRIPE_KEY", "sk_test_fake_unplaced").await;
+    let hosts = "/environments/staging/secrets/STRIPE_KEY/hosts";
+    let (s, e) = api.call(Method::PUT, hosts, Some(json!({ "hosts": ["api.stripe.com"], "untrusted": true }))).await;
+    assert_eq!((s, e["code"].as_str()), (StatusCode::BAD_REQUEST, Some("placement_required")), "{e}");
+    api.ok(Method::PUT, hosts, Some(json!({ "hosts": ["api.stripe.com"] }))).await;
+    let health = api.ok(Method::GET, "/health", None).await;
+    assert!(health.as_array().unwrap().iter().any(|f| f["issue"] == "unplaced" && f["key"] == "STRIPE_KEY"), "{health}");
+    let placeholder = |untrusted: bool| {
+        let api = &api;
+        async move { api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "sandbox:sbx_u", "untrusted": untrusted, "placeholders": true }))).await["values"]["STRIPE_KEY"].as_str().unwrap().to_string() }
+    };
+    let ph = placeholder(true).await;
+    let at = Position { place: Place::Header, name: "x-anything", value: &ph };
+    assert_eq!(api.secrets.substitute(&ph, "api.stripe.com", at).unwrap_err(), Refusal::PlacementRequired);
+    let ph = placeholder(false).await;
+    let at = Position { place: Place::Header, name: "x-anything", value: &ph };
+    assert_eq!(api.secrets.substitute(&ph, "api.stripe.com", at).unwrap().value.expose(), "sk_test_fake_unplaced");
+}
+
+/// The filter swaps a placeholder only where its binding says: anywhere else the request is
+/// blocked, so the code holding it can't pick a header the host echoes.
+#[tokio::test]
+async fn a_placeholder_outside_its_placement_is_blocked() {
+    use roll_secrets::proxy::{self, Blocked, Outgoing, Refusal};
+    let api = Api::new().await;
+    api.set("staging", "STRIPE_KEY", "sk_test_fake_placed").await;
+    api.ok(Method::PUT, "/environments/staging/secrets/STRIPE_KEY/hosts", Some(json!({ "hosts": ["api.stripe.com"], "header": "Authorization: Bearer {}" }))).await;
+    let r = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "sandbox:sbx_p", "untrusted": true, "placeholders": true }))).await;
+    let ph = r["values"]["STRIPE_KEY"].as_str().unwrap().to_string();
+    let mut headers = vec![("Authorization".to_string(), format!("Bearer {ph}")), ("X-Request-Id".to_string(), ph.clone())];
+    let before = headers.clone();
+    let mut req = Outgoing { host: "api.stripe.com", path: "/v1/charges", headers: &mut headers, query: None };
+    match proxy::filter(&mut req, &*api.secrets, &proxy::Limits::default()) {
+        Err(Blocked::Refused { at, why: Refusal::WrongPlace(_) }) => assert_eq!(at, "header X-Request-Id"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(headers, before, "nothing swapped, nothing sent");
+}
+
+/// A response that echoes a swapped value back (in a header, split across two reads of the body,
+/// base64-encoded) is caught by the request's scrub, and reporting it ends the placeholder with an
+/// alert: the consumer never sees the value.
+#[tokio::test]
+async fn an_echoed_value_is_caught_and_ends_the_placeholder() {
+    use base64::Engine;
+    use roll_secrets::proxy::{self, Outgoing, Place, Position, Refusal};
+    let api = Api::new().await;
+    api.ok(Method::PUT, "/environments/staging/policy", Some(json!({ "protected": false, "notify_url": "https://hooks.example/T0/B0/x" }))).await;
+    let value = "sk_test_fake_echo_value_1";
+    api.set("staging", "STRIPE_KEY", value).await;
+    api.ok(Method::PUT, "/environments/staging/secrets/STRIPE_KEY/hosts", Some(json!({ "hosts": ["api.stripe.com"], "header": "Authorization: Bearer {}" }))).await;
+    let r = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "sandbox:sbx_e", "untrusted": true, "placeholders": true }))).await;
+    let ph = r["values"]["STRIPE_KEY"].as_str().unwrap().to_string();
+    let scrub = || {
+        let mut headers = vec![("Authorization".to_string(), format!("Bearer {ph}")), ("Accept-Encoding".to_string(), "gzip".to_string())];
+        let mut req = Outgoing { host: "api.stripe.com", path: "/v1/charges", headers: &mut headers, query: None };
+        let scrub = proxy::filter(&mut req, &*api.secrets, &proxy::Limits::default()).unwrap();
+        assert_eq!(headers[1..], [("accept-encoding".to_string(), "identity".to_string())]);
+        scrub
+    };
+    // A response that doesn't echo it goes through.
+    let mut clean = scrub();
+    let mut h = axum::http::HeaderMap::new();
+    h.insert("content-type", "application/json".parse().unwrap());
+    assert!(clean.headers(&h).is_ok() && clean.chunk(b"{\"id\":\"ch_1\"}").is_ok());
+    // In a header.
+    h.insert("x-echo", format!("Bearer {value}").parse().unwrap());
+    let echoed = scrub().headers(&h).unwrap_err();
+    assert_eq!((echoed.key.as_str(), echoed.host.as_str()), ("STRIPE_KEY", "api.stripe.com"));
+    assert_eq!(Some(echoed.placeholder.as_str()), r["placeholders"][0]["id"].as_str());
+    // Split across two reads of the body.
+    let mut split = scrub();
+    assert!(split.chunk(br#"{"auth":"Bearer sk_test_fake_ec"#).is_ok());
+    assert_eq!(split.chunk(br#"ho_value_1"}"#).unwrap_err(), echoed);
+    // Base64-encoded.
+    let b64 = base64::engine::general_purpose::STANDARD.encode(value);
+    assert_eq!(scrub().chunk(format!("debug={b64}").as_bytes()).unwrap_err(), echoed);
+    assert!(!format!("{echoed} {echoed:?} {split:?}").contains("sk_test_fake"));
+
+    let ca = api.secrets.intercept_ca("sandbox:sbx_e", None).unwrap();
+    api.secrets.echoed(&echoed.placeholder, &echoed.host).unwrap();
+    assert!(!api.secrets.intercept_ca_live(&ca.id).unwrap(), "its CA ends with the host it no longer has");
+    let at = Position { place: Place::Header, name: "authorization", value: &format!("Bearer {ph}") };
+    assert_eq!(api.secrets.substitute(&ph, "api.stripe.com", at).unwrap_err(), Refusal::Revoked);
+    let alerts = api.ok(Method::GET, "/audit?action=secrets.alert", None).await;
+    let text = alerts[0]["summary"].as_str().unwrap();
+    assert!(text.contains("api.stripe.com echoed STRIPE_KEY") && !alerts.to_string().contains("sk_test_fake") && !alerts.to_string().contains(&ph), "{alerts}");
+    let notices: i64 = api.db.read(|c| c.query_row("SELECT COUNT(*) FROM notices WHERE body LIKE '%placeholder_echo%'", (), |r| r.get(0))).unwrap();
+    assert_eq!(notices, 1);
+}
+
+/// A placeholder works only while it's live and whoever asked for it still may: expired, revoked,
+/// ended with its consumer, its token gone or its binding off, it's refused.
+#[tokio::test]
+async fn an_expired_or_revoked_placeholder_is_refused() {
+    use roll_secrets::proxy::{Place, Position, Refusal};
+    let api = Api::new().await;
+    api.set("staging", "STRIPE_KEY", "sk_test_fake_end_1").await;
+    api.ok(Method::PUT, "/environments/staging/secrets/STRIPE_KEY/hosts", Some(json!({ "hosts": ["api.stripe.com"], "query": "key" }))).await;
+    let issue = |token: Option<String>, consumer: &'static str| {
+        let api = &api;
+        async move {
+            let (s, r) = api.req(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": consumer, "untrusted": true, "placeholders": true })), token.as_deref()).await;
+            assert!(s.is_success(), "{s} {r}");
+            (r["values"]["STRIPE_KEY"].as_str().unwrap().to_string(), r["placeholders"][0]["id"].as_str().unwrap().to_string())
+        }
+    };
+    let swap = |ph: &str| api.secrets.substitute(ph, "api.stripe.com", Position { place: Place::Query, name: "key", value: ph });
+
+    let (ph, _) = issue(None, "sandbox:sbx_3").await;
+    assert_eq!(swap(&ph).unwrap().value.expose(), "sk_test_fake_end_1");
+    api.db.write(|c| c.execute("UPDATE placeholders SET expires_at = 1", ())).unwrap();
+    assert_eq!(swap(&ph).unwrap_err(), Refusal::Expired);
+
+    // Ending the consumer (its sandbox stopped) ends its placeholders; revoking one ends it.
+    let (a, _) = issue(None, "sandbox:sbx_4").await;
+    let (b, b_id) = issue(None, "sandbox:sbx_5").await;
+    assert_eq!(api.secrets.end_consumer("sandbox:sbx_4").unwrap(), 1);
+    assert_eq!(swap(&a).unwrap_err(), Refusal::Revoked);
+    assert_eq!(api.call(Method::DELETE, &format!("/placeholders/{b_id}"), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(swap(&b).unwrap_err(), Refusal::Revoked);
+    assert_eq!(swap(&roll_auth::credentials::new_secret("rlph_")).unwrap_err(), Refusal::Unknown);
+
+    // The token that asked for it is gone: refused at the next swap, nothing cached.
+    let rule = roll_secrets::access::rule(&api.project, Some(vec!["staging".into()]), None, &[roll_secrets::Action::Read, roll_secrets::Action::Reveal]);
+    let (secret, id) = api.gate.grant("sbx", rule, None);
+    let (c, _) = issue(Some(secret), "sandbox:sbx_6").await;
+    assert!(swap(&c).is_ok());
+    roll_secrets::Workloads::revoke(&*api.gate, &id).unwrap();
+    assert!(matches!(swap(&c), Err(Refusal::NotAllowed(_))), "{:?}", swap(&c));
+    // The binding taken off: no placeholder of the key works.
+    let (d, _) = issue(None, "sandbox:sbx_7").await;
+    api.ok(Method::DELETE, "/environments/staging/secrets/STRIPE_KEY/hosts", None).await;
+    assert!(matches!(swap(&d), Err(Refusal::Unusable(_))));
+}
+
+/// A wildcard binding never covers names anyone can register (the Public Suffix List): a
+/// prompt-injected sandbox could otherwise send the key to its own subdomain.
+#[tokio::test]
+async fn a_wildcard_under_a_shared_suffix_is_refused() {
+    let api = Api::new().await;
+    api.set("staging", "SUPABASE_KEY", "fake-supabase-key").await;
+    for shared in ["*.supabase.co", "*.vercel.app", "*.workers.dev", "*.co.uk"] {
+        let (s, e) = api.call(Method::PUT, "/environments/staging/secrets/SUPABASE_KEY/hosts", Some(json!({ "hosts": [shared] }))).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{shared}: {e}");
+        assert!(e["error"].as_str().unwrap().contains("Public Suffix List"), "{e}");
+    }
+    // The exact host there is fine.
+    api.ok(Method::PUT, "/environments/staging/secrets/SUPABASE_KEY/hosts", Some(json!({ "hosts": ["myproject.supabase.co"] }))).await;
+}
+
+/// Without the binding's opt-in, an untrusted consumer gets no placeholder for a sensitive key
+/// (withheld, as before placeholders); the opt-in is an admin's and audited, and taking it off
+/// stops the swaps already handed out.
+#[tokio::test]
+async fn a_sensitive_key_without_the_opt_in_gives_untrusted_code_no_placeholder() {
+    use roll_secrets::proxy::{Place, Position, Refusal};
+    let api = Api::new().await;
+    api.ok(Method::PUT, "/environments/staging/secrets/STRIPE_KEY", Some(json!({ "value": "sk_test_fake_optin", "tags": ["sensitive"] }))).await;
+    let bind = |untrusted: bool| json!({ "hosts": ["api.stripe.com"], "header": "X-Api-Key: {}", "untrusted": untrusted });
+    api.ok(Method::PUT, "/environments/staging/secrets/STRIPE_KEY/hosts", Some(bind(false))).await;
+    let resolve = || api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "preview:fork-1", "untrusted": true, "placeholders": true })));
+    let r = resolve().await;
+    assert!(r["values"].get("STRIPE_KEY").is_none() && r.get("placeholders").is_none() && r["withheld"] == json!(["STRIPE_KEY"]), "{r}");
+    api.ok(Method::PUT, "/environments/staging/secrets/STRIPE_KEY/hosts", Some(bind(true))).await;
+    let audit = api.ok(Method::GET, "/audit?action=secrets.hosts", None).await;
+    assert!(audit[0]["summary"].as_str().unwrap().contains("untrusted consumers too"), "{audit}");
+    let ph = resolve().await["values"]["STRIPE_KEY"].as_str().unwrap().to_string();
+    let at = Position { place: Place::Header, name: "x-api-key", value: &ph };
+    assert_eq!(api.secrets.substitute(&ph, "api.stripe.com", at).unwrap().value.expose(), "sk_test_fake_optin");
+    api.ok(Method::PUT, "/environments/staging/secrets/STRIPE_KEY/hosts", Some(bind(false))).await;
+    assert!(matches!(api.secrets.substitute(&ph, "api.stripe.com", at), Err(Refusal::NotAllowed(_))));
+}
+
+/// An in-process consumer (a sandbox) names who made it, and its placeholders swap only while
+/// they may still reveal there: checked again on every swap.
+#[tokio::test]
+async fn the_maker_losing_reveal_stops_the_swaps() {
+    use roll_secrets::placeholders::Ask;
+    use roll_secrets::proxy::{Place, Position, Refusal};
+    let api = Api::new().await;
+    api.set("staging", "STRIPE_KEY", "sk_test_fake_maker").await;
+    api.ok(Method::PUT, "/environments/staging/secrets/STRIPE_KEY/hosts", Some(json!({ "hosts": ["api.stripe.com"], "header": "Authorization: {}" }))).await;
+    let reveal = roll_secrets::access::rule(&api.project, Some(vec!["staging".into()]), None, &[roll_secrets::Action::Read, roll_secrets::Action::Reveal]);
+    let (_, id) = api.gate.grant("ada's", reveal, None);
+    let read_only = roll_secrets::access::rule(&api.project, Some(vec!["staging".into()]), None, &[roll_secrets::Action::Read]);
+    let (_, reader) = api.gate.grant("reader", read_only, None);
+    let sandbox = api.secrets.untrusted(&api.project, &roll_secrets::Caller::consumer("sandbox:sbx_m")).unwrap();
+    let issue = |maker: Option<&str>| api.secrets.values_with_placeholders(&api.project, "staging", "/", "sandbox:sbx_m", false, Ask { minutes: None, maker }, &sandbox);
+    // Nobody named, or someone who may not reveal there: refused, the latter with its own code (a
+    // preview resolves without placeholders on it, and surfaces any other 403).
+    assert!(matches!(issue(None), Err(roll_secrets::Error::BadRequest(_))));
+    assert!(matches!(issue(Some(&format!("token:{reader}"))), Err(roll_secrets::Error::MakerUnreachable(_))));
+    let (status, refused) = api.call(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "sandbox:sbx_m", "placeholders": true, "maker": format!("token:{reader}") }))).await;
+    assert_eq!((status, refused["code"].as_str()), (StatusCode::FORBIDDEN, Some("maker_unreachable")), "{refused}");
+    assert!(refused["error"].as_str().unwrap().contains("can no longer reveal staging") && !refused.to_string().contains("sk_test_fake_maker"), "{refused}");
+    let maker = format!("token:{id}");
+    let v = issue(Some(&maker)).unwrap();
+    let ph = v.values["STRIPE_KEY"].expose().to_string();
+    let at = Position { place: Place::Header, name: "authorization", value: &ph };
+    assert_eq!(api.secrets.substitute(&ph, "api.stripe.com", at).unwrap().value.expose(), "sk_test_fake_maker");
+    assert_eq!(api.ok(Method::GET, "/placeholders", None).await[0]["maker"], maker.as_str());
+    roll_secrets::Workloads::revoke(&*api.gate, &id).unwrap();
+    assert!(matches!(api.secrets.substitute(&ph, "api.stripe.com", at), Err(Refusal::MakerUnreachable(_))));
+    assert!(matches!(issue(Some(&maker)), Err(roll_secrets::Error::MakerUnreachable(_))));
+}
+
+/// Reach lists a folder's live placeholders, and a cut-off ends them, without a freeze.
+#[tokio::test]
+async fn a_cut_off_ends_the_folders_placeholders() {
+    use roll_secrets::proxy::{Place, Position, Refusal};
+    let api = Api::new().await;
+    api.set("production", "STRIPE_KEY", "sk_test_fake_cut").await;
+    api.ok(Method::PUT, "/environments/production/secrets/STRIPE_KEY/hosts", Some(json!({ "hosts": ["api.stripe.com"] }))).await;
+    // Resolved through an environment based on production: still production's key's.
+    api.ok(Method::POST, "/environments", Some(json!({ "slug": "pr-9", "base": "production" }))).await;
+    let r = api.ok(Method::POST, "/environments/pr-9/resolve", Some(json!({ "consumer": "preview:pr-9", "untrusted": true, "placeholders": true }))).await;
+    let ph = r["values"]["STRIPE_KEY"].as_str().unwrap().to_string();
+    let reach = api.ok(Method::GET, "/environments/production/reach?key=STRIPE_KEY", None).await;
+    let listed = &reach["placeholders"][0];
+    assert_eq!((listed["key"].as_str(), listed["consumer"].as_str(), listed["through"].as_str()), (Some("STRIPE_KEY"), Some("preview:pr-9"), Some("pr-9:/")), "{reach}");
+    let cut = cut_off(&api, "path=/&key=STRIPE_KEY", json!({ "why": "fake incident" })).await;
+    assert_eq!((cut["placeholders"].as_array().unwrap().len(), cut["frozen"].as_bool()), (1, Some(false)), "{cut}");
+    let at = Position { place: Place::Header, name: "authorization", value: &ph };
+    assert_eq!(api.secrets.substitute(&ph, "api.stripe.com", at).unwrap_err(), Refusal::Revoked);
+    assert!(api.ok(Method::GET, "/environments/production/reach", None).await["placeholders"].as_array().unwrap().is_empty());
+}
+
+/// A loop over many wrong hosts is one alert a minute per placeholder, not one per host.
+#[tokio::test]
+async fn the_wrong_host_alert_is_limited_per_placeholder() {
+    use roll_secrets::proxy::{Place, Position, Refusal};
+    let api = Api::new().await;
+    api.ok(Method::PUT, "/environments/staging/policy", Some(json!({ "protected": false, "notify_url": "https://hooks.example/T0/B0/x" }))).await;
+    api.set("staging", "STRIPE_KEY", "sk_test_fake_flood").await;
+    api.ok(Method::PUT, "/environments/staging/secrets/STRIPE_KEY/hosts", Some(json!({ "hosts": ["api.stripe.com"] }))).await;
+    let r = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "sandbox:sbx_f", "untrusted": true, "placeholders": true }))).await;
+    let ph = r["values"]["STRIPE_KEY"].as_str().unwrap().to_string();
+    let at = Position { place: Place::Header, name: "authorization", value: &ph };
+    for i in 0..20 {
+        let host = format!("x{i}.evil.example");
+        assert_eq!(api.secrets.substitute(&ph, &host, at).unwrap_err(), Refusal::WrongHost(host));
+    }
+    let alerts = api.ok(Method::GET, "/audit?action=secrets.alert", None).await;
+    assert_eq!(alerts.as_array().unwrap().len(), 1, "{alerts}");
+    assert!(alerts[0]["summary"].as_str().unwrap().contains("x0.evil.example"), "{alerts}");
+    let notices: i64 = api.db.read(|c| c.query_row("SELECT COUNT(*) FROM notices WHERE body LIKE '%placeholder_host%'", (), |r| r.get(0))).unwrap();
+    assert_eq!(notices, 1);
+}
+
+/// A placeholder stands only for a literal value: a key holding a reference can't be bound, gets
+/// none if it comes to hold one, and a swap refuses it, so a writer can't point a bound key at
+/// another key's value.
+#[tokio::test]
+async fn a_key_holding_a_reference_gets_no_placeholder() {
+    use roll_secrets::proxy::{Place, Position, Refusal};
+    let api = Api::new().await;
+    api.ok(Method::PUT, "/environments/staging/secrets/OTHER_SENSITIVE", Some(json!({ "value": "fake-other-sensitive", "tags": ["sensitive"] }))).await;
+    api.set("staging", "STRIPE_KEY", "${OTHER_SENSITIVE}").await;
+    let (s, e) = api.call(Method::PUT, "/environments/staging/secrets/STRIPE_KEY/hosts", Some(json!({ "hosts": ["api.stripe.com"] }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{e}");
+    api.set("staging", "STRIPE_KEY", "sk_test_fake_literal").await;
+    api.ok(Method::PUT, "/environments/staging/secrets/STRIPE_KEY/hosts", Some(json!({ "hosts": ["api.stripe.com"], "header": "Authorization: {}" }))).await;
+    let resolve = || api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "sandbox:sbx_r", "untrusted": true, "placeholders": true })));
+    let ph = resolve().await["values"]["STRIPE_KEY"].as_str().unwrap().to_string();
+    // A writer points it at the other key: no new placeholder, and the old one doesn't swap.
+    api.set("staging", "STRIPE_KEY", "${OTHER_SENSITIVE}").await;
+    let r = resolve().await;
+    assert!(r["values"].get("STRIPE_KEY").is_none() && r.get("placeholders").is_none(), "{r}");
+    assert!(r["problems"].to_string().contains("reference"), "{r}");
+    let at = Position { place: Place::Header, name: "authorization", value: &ph };
+    assert!(matches!(api.secrets.substitute(&ph, "api.stripe.com", at), Err(Refusal::Unusable(_))));
+    assert!(!r.to_string().contains("fake-other-sensitive"));
+}
+
+impl Api {
+    /// `handle` joins `project` as `role` (`environments` for a developer): ada invites them and they
+    /// accept, as the dashboard does.
+    async fn join(&self, project: &str, handle: &str, role: &str, environments: Option<Vec<&str>>) {
+        let (s, inv) = self.as_ada(Method::POST, &format!("/v1/workspace/projects/{project}/invites"), Some(json!({ "email": format!("{handle}@example.com"), "role": role, "environments": environments }))).await;
+        assert_eq!(s, StatusCode::CREATED, "{inv}");
+        let token = inv["url"].as_str().unwrap().split("token=").nth(1).unwrap().to_string();
+        let (s, m) = self.signed_in(handle, false, Method::POST, &format!("/v1/workspace/invites/{token}/accept"), None).await;
+        assert_eq!(s, StatusCode::OK, "{m}");
+    }
+}
+
+/// docs/members.md, "secrets by role": a viewer sees names, never a value; a developer reveals and
+/// writes where the role applies, never a protected environment unless it's named, and a write there
+/// is a change request; an admin reviews it, and an approval stops counting once its approver is
+/// removed. A project they aren't in doesn't exist for them.
+#[tokio::test]
+async fn members_reach_secrets_by_their_role() {
+    let api = Api::new().await;
+    let (_, p) = api.as_ada(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "team" }))).await;
+    let team = p["id"].as_str().unwrap().to_string();
+    let at = |rest: &str| format!("/v1/secrets/projects/{team}{rest}");
+    for (env, value) in [("development", "dev"), ("production", "prod")] {
+        let (s, e) = api.as_ada(Method::PUT, &at(&format!("/environments/{env}/secrets/KEY")), Some(json!({ "value": value }))).await;
+        assert!(s.is_success(), "{e}");
+    }
+    let (s, e) = api.as_ada(Method::PUT, &at("/environments/production/policy"), Some(json!({ "protected": true, "approvals": 1 }))).await;
+    assert!(s.is_success(), "{e}");
+    api.join(&team, "bob", "developer", None).await;
+    api.join(&team, "vic", "viewer", None).await;
+    api.join(&team, "cat", "admin", None).await;
+    let get = |who: &'static str, rest: String| {
+        let api = &api;
+        async move { api.signed_in(who, false, Method::GET, &rest, None).await }
+    };
+
+    // A viewer: names and history, never a value (D2).
+    let (s, names) = get("vic", at("/environments/development/secrets")).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(names.to_string().contains("KEY") && !names.to_string().contains("\"dev\""), "{names}");
+    assert_eq!(get("vic", at("/environments/development/secrets/KEY/value")).await.0, StatusCode::FORBIDDEN);
+    // A developer: every environment that isn't protected (D3), and never deletes.
+    let (s, v) = get("bob", at("/environments/development/secrets/KEY/value")).await;
+    assert_eq!((s, v["value"].as_str()), (StatusCode::OK, Some("dev")), "{v}");
+    assert_eq!(get("bob", at("/environments/production/secrets/KEY/value")).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(api.signed_in("bob", false, Method::DELETE, &at("/environments/development/secrets/KEY"), None).await.0, StatusCode::FORBIDDEN);
+    // Production once it's named; then only where it's named.
+    let (s, e) = api.as_ada(Method::PATCH, &format!("/v1/workspace/projects/{team}/members/usr_bob"), Some(json!({ "environments": ["production"] }))).await;
+    assert_eq!(s, StatusCode::OK, "{e}");
+    let (s, v) = get("bob", at("/environments/production/secrets/KEY/value")).await;
+    assert_eq!((s, v["value"].as_str()), (StatusCode::OK, Some("prod")), "{v}");
+    assert_eq!(get("bob", at("/environments/development/secrets/KEY/value")).await.0, StatusCode::FORBIDDEN);
+    // His write to the protected environment is a change request, which an admin approves.
+    let (s, e) = api.signed_in("bob", false, Method::PUT, &at("/environments/production/secrets/KEY"), Some(json!({ "value": "new" }))).await;
+    assert_eq!((s, e["code"].as_str()), (StatusCode::CONFLICT, Some("approval_required")), "{e}");
+    let (s, r) = api.signed_in("bob", false, Method::POST, &at("/environments/production/requests"), Some(json!({ "ops": [{ "op": "set", "key": "KEY", "value": "new" }] }))).await;
+    assert!(s.is_success(), "{r}");
+    let id = r["id"].as_str().unwrap().to_string();
+    assert_eq!(api.signed_in("vic", false, Method::POST, &at(&format!("/environments/production/requests/{id}/review")), Some(json!({ "verdict": "approve" }))).await.0, StatusCode::FORBIDDEN);
+    let (s, r) = api.signed_in("cat", false, Method::POST, &at(&format!("/environments/production/requests/{id}/review")), Some(json!({ "verdict": "approve" }))).await;
+    assert_eq!((s, r["state"].as_str()), (StatusCode::OK, Some("approved")), "{r}");
+    // Cat leaves the project before it's applied: her approval no longer counts.
+    assert_eq!(api.signed_in("cat", false, Method::DELETE, &format!("/v1/workspace/projects/{team}/members/me"), None).await.0, StatusCode::NO_CONTENT);
+    let (s, e) = api.as_ada(Method::POST, &at(&format!("/environments/production/requests/{id}/apply")), None).await;
+    assert_eq!((s, e["code"].as_str()), (StatusCode::CONFLICT, Some("approval_required")), "{e}");
+    // A project bob isn't in is a 404 for him, as the workspace answers.
+    assert_eq!(get("bob", format!("/v1/secrets/projects/{}/environments/development/secrets", api.project)).await.0, StatusCode::NOT_FOUND);
+}
+
+/// docs/members.md, "Remove, and leave": once a member is removed, their own token stops reaching
+/// the project, a sync they made stops pushing, and their identity's logins are refused.
+#[tokio::test]
+async fn a_removed_members_token_sync_and_identity_stop() {
+    let api = Api::new().await;
+    let (_, p) = api.as_ada(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "team" }))).await;
+    let team = p["id"].as_str().unwrap().to_string();
+    let at = |rest: &str| format!("/v1/secrets/projects/{team}{rest}");
+    api.join(&team, "bob", "admin", None).await;
+    for key in ["PLATFORM_TOKEN", "A"] {
+        api.as_ada(Method::PUT, &at(&format!("/environments/development/secrets/{key}")), Some(json!({ "value": "1" }))).await;
+    }
+    let token = api.gate.issue("bob's", roll_secrets::access::rule(&team, None, None, &[roll_secrets::Action::Read, roll_secrets::Action::Reveal]), Some("usr_bob"));
+    assert_eq!(api.req(Method::GET, &at("/environments/development/values"), None, Some(&token)).await.0, StatusCode::OK);
+    let (s, e) = api.signed_in("bob", false, Method::POST, &at("/syncs"), Some(json!({ "environment": "development", "kind": "fake", "target": { "name": "x", "token_key": "PLATFORM_TOKEN" } }))).await;
+    assert_eq!(s, StatusCode::CREATED, "{e}");
+    api.secrets.sweep().unwrap();
+    let pushed = api.sync.pushes.lock().unwrap().len();
+    assert!(pushed >= 1);
+    let issuer = Issuer::new();
+    *api.sent.1.lock().unwrap() = Some(issuer.jwks());
+    let identity = json!({ "name": "deploy", "issuer": ISSUER, "audience": "roll", "subject": "repo:acme/web:ref:refs/heads/main", "environments": ["development"], "actions": ["read", "reveal"], "ttl_minutes": 10 });
+    let (s, i) = api.signed_in("bob", false, Method::POST, &at("/identities"), Some(identity)).await;
+    assert_eq!(s, StatusCode::CREATED, "{i}");
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    let jwt = issuer.sign(json!({ "iss": ISSUER, "aud": "roll", "sub": "repo:acme/web:ref:refs/heads/main", "exp": now + 300, "iat": now }));
+    let login = json!({ "identity": i["id"], "token": jwt });
+    assert_eq!(api.call(Method::POST, "/v1/secrets/login", Some(login.clone())).await.0, StatusCode::OK);
+
+    assert_eq!(api.as_ada(Method::DELETE, &format!("/v1/workspace/projects/{team}/members/usr_bob"), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(api.req(Method::GET, &at("/environments/development/values"), None, Some(&token)).await.0, StatusCode::NOT_FOUND, "his token reaches only what his session does");
+    api.as_ada(Method::PUT, &at("/environments/development/secrets/A"), Some(json!({ "value": "2" }))).await;
+    api.secrets.sweep().unwrap();
+    assert_eq!(api.sync.pushes.lock().unwrap().len(), pushed, "his sync stopped");
+    let (s, e) = api.call(Method::POST, "/v1/secrets/login", Some(login)).await;
+    assert!(!s.is_success(), "his identity's logins are refused: {s} {e}");
+}
+
+/// docs/members.md: what a member made runs at their rights as they are now. Demoted from admin to
+/// developer, their backup schedule and gateway stop (they're an admin's) while their identity and
+/// sync narrow to a developer's reach; demoted to viewer, the identity's logins and the sync stop
+/// too.
+#[tokio::test]
+async fn a_demoted_members_backup_gateway_identity_and_sync_stop_or_narrow() {
+    let api = Api::new().await;
+    let p = api.project.clone();
+    let (s, inv) = api.call(Method::POST, &format!("/v1/workspace/projects/{p}/invites"), Some(json!({ "email": "cat@example.com", "role": "admin" }))).await;
+    assert_eq!(s, StatusCode::CREATED, "{inv}");
+    let token = inv["url"].as_str().unwrap().split("token=").nth(1).unwrap().to_string();
+    assert_eq!(api.signed_in("cat", false, Method::POST, &format!("/v1/workspace/invites/{token}/accept"), None).await.0, StatusCode::OK);
+    let as_cat = |method: Method, rest: &str, body: Option<Value>| {
+        let path = format!("/v1/secrets/projects/{p}{rest}");
+        let api = &api;
+        async move { api.signed_in("cat", false, method, &path, body).await }
+    };
+    api.ok(Method::PUT, &format!("/v1/workspace/projects/{p}/resources/bucket/assets"), Some(json!({ "x": 0, "y": 0 }))).await;
+    api.set("staging", "API_KEY", "staging-key").await;
+    api.set("development", "PLATFORM_TOKEN", "tok_1").await;
+
+    // As an admin she sets up a backup schedule, an identity, a sync and a gateway.
+    let schedule = json!({ "bucket": "assets", "recipient": roll_secrets::crypto::public_key(&[7u8; 32]), "every_hours": 24, "keep": 5 });
+    let (s, e) = as_cat(Method::PUT, "/backup/schedule", Some(schedule)).await;
+    assert!(s.is_success(), "{e}");
+    let issuer = Issuer::new();
+    *api.sent.1.lock().unwrap() = Some(issuer.jwks());
+    let identity = json!({ "name": "deploy", "issuer": ISSUER, "audience": "roll", "subject": "repo:acme/web:ref:refs/heads/main", "environments": ["staging"], "actions": ["read", "reveal"], "ttl_minutes": 10 });
+    let (s, i) = as_cat(Method::POST, "/identities", Some(identity)).await;
+    assert_eq!(s, StatusCode::CREATED, "{i}");
+    let (s, e) = as_cat(Method::POST, "/syncs", Some(json!({ "environment": "development", "kind": "fake", "target": { "name": "x", "token_key": "PLATFORM_TOKEN" } }))).await;
+    assert_eq!(s, StatusCode::CREATED, "{e}");
+    let (s, made) = as_cat(Method::POST, "/gateways", Some(json!({ "name": "vpc" }))).await;
+    assert_eq!(s, StatusCode::CREATED, "{made}");
+    let gw = made["gateway"]["id"].as_str().unwrap().to_string();
+    let gw_grant = api.gate.tokens.lock().unwrap().get(made["token"].as_str().unwrap()).cloned().unwrap();
+
+    let backups = || api.sent.4.lock().unwrap().keys().filter(|(b, k)| b == "assets" && k.starts_with(&format!("roll-secrets/backups/{p}/"))).count();
+    let sweep = || {
+        let (s, db, p) = (api.secrets.clone(), api.db.clone(), p.clone());
+        async move {
+            // Every schedule due now, whatever ran before.
+            db.write(move |c| c.execute("UPDATE backup_schedules SET next_at = 0 WHERE project_id = ?", [p.as_str()])).unwrap();
+            tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap();
+        }
+    };
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    let jwt = issuer.sign(json!({ "iss": ISSUER, "aud": "roll", "sub": "repo:acme/web:ref:refs/heads/main", "exp": now + 300, "iat": now }));
+    let login = || api.call(Method::POST, "/v1/secrets/login", Some(json!({ "identity": i["id"], "token": jwt })));
+    let change = |v: &'static str| api.ok(Method::PUT, "/environments/development/secrets/A", Some(json!({ "value": v })));
+
+    change("1").await;
+    sweep().await;
+    let (pushed, made_backups) = (api.sync.pushes.lock().unwrap().len(), backups());
+    assert!(pushed >= 1 && made_backups == 1, "{pushed} {made_backups}");
+    assert_eq!(login().await.0, StatusCode::OK);
+    assert!(api.secrets.gateway_link(&gw, false, None, Some(&gw_grant)).is_ok());
+
+    // A developer: what's an admin's stops; the identity and the sync narrow to her reach now.
+    let demote = |role: &'static str| {
+        let (api, path) = (&api, format!("/v1/workspace/projects/{p}/members/usr_cat"));
+        async move { api.call(Method::PATCH, &path, Some(json!({ "role": role }))).await }
+    };
+    assert_eq!(demote("developer").await.0, StatusCode::OK);
+    change("2").await;
+    sweep().await;
+    assert_eq!(backups(), made_backups, "her backup schedule stopped");
+    let schedule = api.ok(Method::GET, "/backup/schedule", None).await;
+    assert!(schedule["last_error"].as_str().is_some_and(|e| e.contains("usr_cat")), "{schedule}");
+    assert!(api.secrets.gateway_link(&gw, false, None, Some(&gw_grant)).is_err(), "her gateway stopped");
+    let (s, l) = login().await;
+    assert_eq!(s, StatusCode::OK, "staging reveal is a developer's: {l}");
+    let narrowed = l["token"].as_str().unwrap().to_string();
+    assert_eq!(api.req(Method::GET, "/environments/staging/values", None, Some(&narrowed)).await.0, StatusCode::OK);
+    assert!(api.sync.pushes.lock().unwrap().len() > pushed, "development is a developer's");
+
+    // A viewer: no values anywhere, so the identity doesn't log in, the token it gave reaches
+    // nothing it can't, and the sync stops.
+    assert_eq!(demote("viewer").await.0, StatusCode::OK);
+    assert_eq!(api.req(Method::GET, "/environments/staging/values", None, Some(&narrowed)).await.0, StatusCode::FORBIDDEN, "a login's token acts within its maker now");
+    let (s, e) = login().await;
+    assert!(!s.is_success(), "{s} {e}");
+    let pushed = api.sync.pushes.lock().unwrap().len();
+    change("3").await;
+    sweep().await;
+    assert_eq!(api.sync.pushes.lock().unwrap().len(), pushed, "her sync stopped");
+}
+
+/// Placeholders and host bindings follow their maker (docs/members.md, "Remove, and leave"): a
+/// binding swaps only while whoever set it may still manage its folder, and a placeholder made for
+/// a member's consumer only while they may still reveal there. Each stops when its maker is
+/// demoted below what it does, and a binding that stopped still never hands out the value.
+#[tokio::test]
+async fn a_demoted_members_host_binding_and_placeholders_stop() {
+    use roll_secrets::proxy::{Place, Position, Refusal};
+    let api = Api::new().await;
+    let p = api.project.clone();
+    let (_, inv) = api.call(Method::POST, &format!("/v1/workspace/projects/{p}/invites"), Some(json!({ "email": "cat@example.com", "role": "admin" }))).await;
+    let t = inv["url"].as_str().unwrap().split("token=").nth(1).unwrap().to_string();
+    assert_eq!(api.signed_in("cat", false, Method::POST, &format!("/v1/workspace/invites/{t}/accept"), None).await.0, StatusCode::OK);
+    api.set("staging", "STRIPE_KEY", "sk_test_fake_member_1").await;
+    let bind = json!({ "hosts": ["api.stripe.com"], "query": "key" });
+    let (s, e) = api.signed_in("cat", false, Method::PUT, &format!("/v1/secrets/projects/{p}/environments/staging/secrets/STRIPE_KEY/hosts"), Some(bind.clone())).await;
+    assert!(s.is_success(), "{e}");
+    let issue = |consumer: &'static str, maker: Option<&'static str>| {
+        let api = &api;
+        async move {
+            let r = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": consumer, "untrusted": true, "placeholders": true, "maker": maker }))).await;
+            r["values"]["STRIPE_KEY"].as_str().unwrap().to_string()
+        }
+    };
+    let swap = |ph: &str| api.secrets.substitute(ph, "api.stripe.com", Position { place: Place::Query, name: "key", value: ph });
+    let demote = |role: &'static str| {
+        let (api, path) = (&api, format!("/v1/workspace/projects/{p}/members/usr_cat"));
+        async move { assert_eq!(api.call(Method::PATCH, &path, Some(json!({ "role": role }))).await.0, StatusCode::OK) }
+    };
+    let roll = issue("sandbox:sbx_m1", None).await;
+    let hers = issue("sandbox:sbx_m2", Some("usr_cat")).await;
+    assert_eq!(swap(&roll).unwrap().value.expose(), "sk_test_fake_member_1");
+    assert_eq!(swap(&hers).unwrap().value.expose(), "sk_test_fake_member_1");
+
+    // A developer may no longer manage staging: her binding swaps nothing, and a read still gets
+    // a placeholder, never the value.
+    demote("developer").await;
+    assert!(matches!(swap(&roll), Err(Refusal::MakerUnreachable(_))), "{:?}", swap(&roll));
+    let again = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "sandbox:sbx_m3", "untrusted": true, "placeholders": true }))).await;
+    assert!(again["values"]["STRIPE_KEY"].as_str().unwrap().starts_with("rlph_"), "{again}");
+
+    // Bound again by an admin: roll's placeholder works, and hers too (a developer reveals staging).
+    api.ok(Method::PUT, "/environments/staging/secrets/STRIPE_KEY/hosts", Some(bind)).await;
+    assert!(swap(&roll).is_ok() && swap(&hers).is_ok());
+    // A viewer reveals nothing: the placeholder made for her consumer stops; roll's doesn't.
+    demote("viewer").await;
+    assert!(matches!(swap(&hers), Err(Refusal::MakerUnreachable(_))), "{:?}", swap(&hers));
+    assert!(swap(&roll).is_ok());
+    // New placeholders for her consumer are refused with the code a preview falls back on.
+    let (s, refused) = api.call(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "sandbox:sbx_m4", "untrusted": true, "placeholders": true, "maker": "usr_cat" }))).await;
+    assert_eq!((s, refused["code"].as_str()), (StatusCode::FORBIDDEN, Some("maker_unreachable")), "{refused}");
+}
+
+/// The security review's finding 4: a rotator (a URL outside roll that chooses a key's value)
+/// works only while whoever registered it may still manage the project. Removed, their rotator
+/// stops choosing values at once.
+#[tokio::test]
+async fn a_removed_admins_rotator_stops_choosing_values() {
+    let api = Api::new().await;
+    let p = api.project.clone();
+    let (_, inv) = api.call(Method::POST, &format!("/v1/workspace/projects/{p}/invites"), Some(json!({ "email": "cat@example.com", "role": "admin" }))).await;
+    let token = inv["url"].as_str().unwrap().split("token=").nth(1).unwrap().to_string();
+    assert_eq!(api.signed_in("cat", false, Method::POST, &format!("/v1/workspace/invites/{token}/accept"), None).await.0, StatusCode::OK);
+    let (s, r) = api.signed_in("cat", false, Method::POST, &format!("/v1/secrets/projects/{p}/rotators"), Some(json!({ "name": "stripe", "url": "https://rotator.example/stripe" }))).await;
+    assert_eq!(s, StatusCode::CREATED, "{r}");
+    let link = json!({ "kind": "rotator", "ref": r["id"], "field": "value", "mode": "managed" });
+    api.ok(Method::PUT, "/environments/production/secrets/STRIPE_KEY", Some(json!({ "link": link }))).await;
+    assert_eq!(api.values("production", "/").await["values"]["STRIPE_KEY"], "vendor-key-1");
+
+    assert_eq!(api.call(Method::DELETE, &format!("/v1/workspace/projects/{p}/members/usr_cat"), None).await.0, StatusCode::NO_CONTENT);
+    let (s, e) = api.call(Method::POST, "/environments/production/secrets/STRIPE_KEY/rotate", None).await;
+    assert!(!s.is_success() && e.to_string().contains("usr_cat"), "{s} {e}");
+    assert_eq!(api.values("production", "/").await["values"]["STRIPE_KEY"], "vendor-key-1", "the old value stands");
+}
+
+
+/// The re-review (docs/members.md, "Remove, and leave"): what a member did through their own
+/// token is theirs. What they registered (a sink, a notify URL) outlives the token, at their rights
+/// now; what the token handed out (a folder shared with another project, a one-time share, a
+/// lease) ends with them. Removed, all of it stops.
+#[tokio::test]
+async fn what_a_member_did_through_their_token_follows_them() {
+    use base64::Engine as _;
+    let api = Api::new().await;
+    let p = api.project.clone();
+    let (_, inv) = api.call(Method::POST, &format!("/v1/workspace/projects/{p}/invites"), Some(json!({ "email": "cat@example.com", "role": "admin" }))).await;
+    let t = inv["url"].as_str().unwrap().split("token=").nth(1).unwrap().to_string();
+    assert_eq!(api.signed_in("cat", false, Method::POST, &format!("/v1/workspace/invites/{t}/accept"), None).await.0, StatusCode::OK);
+    api.ok(Method::PUT, &format!("/v1/workspace/projects/{p}/resources/bucket/assets"), Some(json!({ "x": 0, "y": 0 }))).await;
+    api.set("production", "DB", "prod-db").await;
+    api.ok(Method::PUT, "/environments/staging/secrets/TEMP_KEY", Some(json!({ "link": { "kind": "bucket", "ref": "assets", "field": "access_key_id", "mode": "dynamic", "options": { "ttl_minutes": 60 } } }))).await;
+    let (_, other) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "platform" }))).await;
+    let platform = other["id"].as_str().unwrap().to_string();
+    // She's in platform too: a folder is shared only with a project its sharer can see.
+    let (_, inv) = api.call(Method::POST, &format!("/v1/workspace/projects/{platform}/invites"), Some(json!({ "email": "cat@example.com", "role": "viewer" }))).await;
+    let t = inv["url"].as_str().unwrap().split("token=").nth(1).unwrap().to_string();
+    assert_eq!(api.signed_in("cat", false, Method::POST, &format!("/v1/workspace/invites/{t}/accept"), None).await.0, StatusCode::OK);
+
+    let actions = [roll_secrets::Action::Read, roll_secrets::Action::Reveal, roll_secrets::Action::Write, roll_secrets::Action::Admin];
+    let token = api.gate.issue("cat's cli", roll_secrets::access::rule(&p, None, None, &actions), Some("usr_cat"));
+    let with = |m: Method, path: &str, body: Value| {
+        let (api, token, path) = (&api, token.clone(), path.to_string());
+        async move {
+            let (s, v) = api.req(m.clone(), &path, Some(body), Some(&token)).await;
+            assert!(s.is_success(), "{m} {path}: {s} {v}");
+            v
+        }
+    };
+    // Through the token: share production with platform, a one-time share, a lease, a sink, a
+    // notify URL.
+    with(Method::PUT, "/environments/production/exports?path=/", json!([{ "project": platform }])).await;
+    api.ok(Method::PUT, &format!("/v1/secrets/projects/{platform}/environments/staging/imports?path=/"), Some(json!([{ "project": p, "environment": "production", "path": "/" }]))).await;
+    let imported = || {
+        let (api, path) = (&api, format!("/v1/secrets/projects/{platform}/environments/staging/values"));
+        async move { api.ok(Method::GET, &path, None).await }
+    };
+    assert_eq!(imported().await["values"]["DB"], "prod-db");
+    let blob = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7u8; 40]);
+    let share = with(Method::POST, "/shares", json!({ "ciphertext": blob, "note": "db", "views": 3, "ttl_minutes": 60 })).await;
+    let lease = with(Method::POST, "/environments/staging/resolve", json!({ "consumer": "ci:deploy" })).await["leases"][0].as_str().unwrap().to_string();
+    with(Method::POST, "/audit/sinks", json!({ "url": "https://siem.example/roll" })).await;
+    with(Method::PUT, "/environments/production/policy", json!({ "protected": true, "approvals": 1, "notify_url": "https://hooks.example/T0/B0/x" })).await;
+    let sweep = || {
+        let (s, db) = (api.secrets.clone(), api.db.clone());
+        async move {
+            // Every audit row settled, so the sink has something to send.
+            db.write(|c| c.execute("UPDATE audit SET at = at - 60000", ())).unwrap();
+            tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap();
+        }
+    };
+    let sent = || api.sent.0.lock().unwrap().len();
+
+    // The token ends: what she registered is hers and goes on; what the token shared ends with it.
+    api.gate.tokens.lock().unwrap().retain(|secret, _| *secret != token);
+    sweep().await;
+    let delivered = sent();
+    assert!(delivered >= 1, "her sink outlives the token that made it");
+    assert!(imported().await["values"].get("DB").is_none(), "a share the token made ends with the token");
+    let open = |id: String| {
+        let api = &api;
+        async move { api.call(Method::GET, &format!("/v1/secrets/shares/{id}"), None).await.0 }
+    };
+    assert_eq!(open(share["id"].as_str().unwrap().to_string()).await, StatusCode::OK, "a one-time share stands until its maker goes");
+
+    // She's removed: her share and lease end, her sink and notify URL stop.
+    assert_eq!(api.call(Method::DELETE, &format!("/v1/workspace/projects/{p}/members/usr_cat"), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(open(share["id"].as_str().unwrap().to_string()).await, StatusCode::NOT_FOUND);
+    let leases = api.ok(Method::GET, "/leases", None).await;
+    assert!(leases.as_array().unwrap().iter().find(|l| l["id"] == lease.as_str()).is_none_or(|l| l["revoked_at"].is_number()), "{leases}");
+    api.ok(Method::POST, "/environments/production/requests", Some(json!({ "ops": [{ "op": "set", "key": "DB", "value": "x" }] }))).await;
+    sweep().await;
+    assert_eq!(sent(), delivered, "no sink batch and no approval notice once she's gone");
+}
+
+/// `DELETE /v1/workspace/projects/{id}` as the operator (or with `token`), `q` its query.
+async fn delete_project(api: &Api, q: &str, token: Option<&str>) -> (StatusCode, Value) {
+    api.req(Method::DELETE, &format!("/v1/workspace/projects/{}{q}", api.project), None, token).await
+}
+
+#[tokio::test]
+async fn deleting_a_project_that_holds_secrets_needs_a_secrets_admins_confirmation() {
+    let api = Api::new().await;
+    // A project with nothing in it goes as before.
+    let (_, empty) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "empty" }))).await;
+    let empty = empty["id"].as_str().unwrap().to_string();
+    api.ok(Method::GET, &format!("/v1/secrets/projects/{empty}/environments"), None).await;
+    assert_eq!(api.call(Method::DELETE, &format!("/v1/workspace/projects/{empty}"), None).await.0, StatusCode::NO_CONTENT);
+
+    // An encryption key alone holds it back.
+    api.ok(Method::POST, "/transit", Some(json!({ "name": "cards" }))).await;
+    let (s, e) = delete_project(&api, "", None).await;
+    assert_eq!((s, e["code"].as_str()), (StatusCode::CONFLICT, Some("project_holds_secrets")), "{e}");
+    assert!(e["error"].as_str().unwrap().contains("?confirm=shop"), "{e}");
+    api.set("production", "STRIPE_KEY", "sk_live_never_in_an_error").await;
+    api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true }))).await;
+    // Workspace `delete` isn't enough: a token that may write the project's secrets, not administer
+    // them, is refused however it confirms.
+    let writer = api.token(json!({ "actions": ["read", "write", "delete"] }));
+    let (s, e) = delete_project(&api, "?confirm=shop", Some(&writer)).await;
+    assert_eq!((s, e["code"].as_str()), (StatusCode::FORBIDDEN, Some("forbidden")), "{e}");
+    let (s, e) = delete_project(&api, "?confirm=production", None).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{e}");
+    assert!(e["error"].as_str().unwrap().contains("1 secret, the protected environment production and 1 encryption key"), "{e}");
+    assert!(!e.to_string().contains("sk_live"));
+    assert_eq!(api.call(Method::GET, "/environments/production/secrets/STRIPE_KEY", None).await.0, StatusCode::OK, "refused: nothing went");
+    // An admin's token, with the project's name.
+    let admin = api.token(json!({ "actions": ["admin"] }));
+    assert_eq!(delete_project(&api, "?confirm=shop", Some(&admin)).await.0, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn a_deleted_project_reads_as_unknown_and_comes_back_within_its_window() {
+    let api = Api::new().await;
+    api.set("production", "STRIPE_KEY", "sk_live_kept").await;
+    let reader = api.token(json!({ "actions": ["read", "reveal"] }));
+    // A workload identity's login: its token is roll-access's, and ends with the delete.
+    let (login, grant) = api.gate.grant("login", roll_secrets::access::rule(&api.project, None, None, &[roll_secrets::Action::Read]), None);
+    let (p, g) = (api.project.clone(), grant.clone());
+    api.db.write(move |c| c.execute("INSERT INTO identity_logins (grant_id, identity, project_id, expires_at) VALUES (?, 'idn_ci', ?, ?)", code_sql::params![g, p, i64::MAX])).unwrap();
+    assert_eq!(api.req(Method::GET, "/environments", None, Some(&login)).await.0, StatusCode::OK);
+    assert_eq!(delete_project(&api, "?confirm=shop", None).await.0, StatusCode::NO_CONTENT);
+    // Nobody reads it: an unknown project, to the operator and to a token that could reveal it.
+    assert_eq!(api.call(Method::GET, "/environments/production/values?path=/", None).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(api.req(Method::GET, "/environments/production/values?path=/", None, Some(&reader)).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(api.ok(Method::GET, "/v1/secrets/search?key=STRIPE_KEY", None).await, json!([]));
+    let deleted = api.ok(Method::GET, "/v1/secrets/deleted", None).await;
+    assert_eq!((deleted[0]["project"].as_str(), deleted[0]["name"].as_str(), deleted[0]["deleted_by"].as_str()), (Some(api.project.as_str()), Some("shop"), Some("operator")), "{deleted}");
+    assert_eq!(deleted[0]["purge_at"].as_i64().unwrap() - deleted[0]["deleted_at"].as_i64().unwrap(), 7 * 86_400_000);
+    // Someone else's: not theirs to see or recover.
+    assert_eq!(api.as_ada(Method::GET, "/v1/secrets/deleted", None).await.1, json!([]));
+    let recover = format!("/v1/secrets/projects/{}/recover", api.project);
+    assert_eq!(api.as_ada(Method::POST, &recover, None).await.0, StatusCode::NOT_FOUND);
+    // Her own: she brings it back herself (even when an admin deleted it).
+    let (_, hers) = api.as_ada(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "notes" }))).await;
+    let hers = hers["id"].as_str().unwrap().to_string();
+    let (s, _) = api.as_ada(Method::PUT, &format!("/v1/secrets/projects/{hers}/environments/development/secrets/TOKEN"), Some(json!({ "value": "x" }))).await;
+    assert_eq!(s, StatusCode::OK);
+    // A token of hers acts as her (her membership), so it follows the window too.
+    let (ada_ci, _) = api.gate.grant("ada-ci", roll_secrets::access::rule(&hers, None, None, &[roll_secrets::Action::Read]), Some("usr_ada"));
+    let envs = format!("/v1/secrets/projects/{hers}/environments");
+    assert_eq!(api.req(Method::GET, &envs, None, Some(&ada_ci)).await.0, StatusCode::OK);
+    assert_eq!(api.call(Method::DELETE, &format!("/v1/workspace/projects/{hers}?confirm=notes"), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(api.req(Method::GET, &envs, None, Some(&ada_ci)).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(api.as_ada(Method::GET, "/v1/secrets/deleted", None).await.1[0]["project"], hers.as_str());
+    assert_eq!(api.as_ada(Method::POST, &format!("/v1/secrets/projects/{hers}/recover"), None).await.0, StatusCode::OK);
+    assert_eq!(api.req(Method::GET, &envs, None, Some(&ada_ci)).await.0, StatusCode::OK, "her membership came back with it");
+
+    let back = api.ok(Method::POST, &recover, None).await;
+    assert_eq!(back["name"], "shop");
+    assert_eq!(api.values("production", "/").await["values"]["STRIPE_KEY"], "sk_live_kept");
+    assert_eq!(api.call(Method::GET, &format!("/v1/workspace/projects/{}", api.project), None).await.0, StatusCode::OK, "its workspace project came back with it");
+    let audit = api.ok(Method::GET, "/audit", None).await;
+    let actions: Vec<&str> = audit.as_array().unwrap().iter().map(|e| e["action"].as_str().unwrap()).collect();
+    assert!(actions.contains(&"project.delete") && actions.contains(&"project.recover"), "{actions:?}");
+    assert!(!audit.to_string().contains("sk_live_kept"));
+    assert_eq!(api.call(Method::POST, &recover, None).await.0, StatusCode::NOT_FOUND, "not deleted any more");
+    assert_eq!(api.req(Method::GET, "/environments", None, Some(&login)).await.0, StatusCode::UNAUTHORIZED, "the login's token was revoked at the delete");
+}
+
+#[tokio::test]
+async fn past_its_window_a_deleted_project_ends_its_log_at_a_signed_digest_then_leaves_no_rows() {
+    let api = Api::new().await;
+    api.ok(Method::POST, "/audit/sinks", Some(json!({ "url": "https://siem.example/roll" }))).await;
+    api.set("production", "STRIPE_KEY", "sk_live_purged").await;
+    api.ok(Method::POST, "/transit", Some(json!({ "name": "cards" }))).await;
+    assert_eq!(delete_project(&api, "?confirm=shop", None).await.0, StatusCode::NO_CONTENT);
+    let sweep = || {
+        let s = api.secrets.clone();
+        async move { tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap() }
+    };
+    let count = |table: &str| {
+        let (sql, p) = (format!("SELECT COUNT(*) FROM {table} WHERE project_id = ?"), api.project.clone());
+        api.db.read(move |c| c.query_row(&sql, [p.as_str()], |r| r.get::<_, i64>(0))).unwrap()
+    };
+    sweep().await;
+    assert_eq!((count("secrets"), count("transit_keys")), (1, 1), "nothing goes within the window");
+
+    // The window over: closed with a last row and a signed digest, kept until the sink has them.
+    let p = api.project.clone();
+    api.db.write(move |c| c.execute("UPDATE projects SET purge_at = 0 WHERE project_id = ?", [p.as_str()])).unwrap();
+    sweep().await;
+    let recover = format!("/v1/secrets/projects/{}/recover", api.project);
+    assert_eq!(api.call(Method::POST, &recover, None).await.0, StatusCode::GONE, "closed: no way back");
+    assert_eq!(count("secrets"), 1, "the sink hasn't had the closing digest yet");
+    api.db.write(|c| c.execute("UPDATE audit SET at = at - 60000", ())).unwrap();
+    sweep().await;
+    let events: Vec<Value> = api.sent.0.lock().unwrap().iter().flat_map(|b| b["events"].as_array().cloned().unwrap_or_default()).collect();
+    let actions: Vec<&str> = events.iter().map(|e| e["action"].as_str().unwrap()).collect();
+    assert!(actions.contains(&"project.delete"), "{actions:?}");
+    assert_eq!(&actions[actions.len() - 2..], ["project.purge", "audit.digest"], "the log ends at a digest");
+    assert!(events.last().unwrap()["digest"].as_str().is_some_and(|d| d.split('.').count() == 3));
+    assert!(!serde_json::to_string(&events).unwrap().contains("sk_live_purged"));
+
+    sweep().await;
+    for t in ["secrets", "versions", "audit", "audit_heads", "audit_sinks", "transit_keys", "environments", "placeholders", "acme_bindings", "gateways", "projects"] {
+        assert_eq!(count(t), 0, "{t}");
+    }
+    assert!(api.ws.deleted(&api.project).unwrap().is_none(), "the workspace let it go too");
+    assert_eq!(api.call(Method::POST, &recover, None).await.0, StatusCode::NOT_FOUND);
 }

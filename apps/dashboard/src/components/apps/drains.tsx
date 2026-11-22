@@ -34,6 +34,7 @@ const FORMATS: { value: DrainFormat; label: string; placeholder: string; url: Re
   { value: "ndjson", label: "NDJSON", placeholder: "https://http-intake.logs.datadoghq.com/api/v2/logs", url: /^https?:\/\/\S+$/ },
   { value: "otlp", label: "OpenTelemetry", placeholder: "https://otlp.example.com/v1/logs", url: /^https?:\/\/\S+$/ },
   { value: "syslog", label: "Syslog", placeholder: "syslog+tls://logs.papertrailapp.com:12345", url: /^syslog(\+tls)?:\/\/[^/\s]+:\d+\/?$/ },
+  { value: "s3", label: "S3 bucket", placeholder: "https://s3.eu-west-1.amazonaws.com/my-logs/app", url: /^https?:\/\/[^/\s]+\/[\w.-]+(\/[\w./-]*)?$/ },
 ];
 
 /** A project's log drains: HTTPS endpoints its services' output is POSTed to, each with what it's sent and for whom. */
@@ -264,6 +265,7 @@ export function DrainsPanel({ project, projectName, runner }: { project: string;
           />
           {parsed.bad.length > 0 && <p className="text-[11.5px] text-danger">Not a header (Name: value): {parsed.bad.join(", ")}</p>}
           {fmt.value === "syslog" && Object.keys(parsed.headers).length > 0 && <p className="text-[11.5px] text-danger">A syslog drain is sent no headers: its token is in its host and port.</p>}
+          {fmt.value === "s3" && <p className="text-[11.5px] text-muted">Its headers are its keys: aws-access-key-id, aws-secret-access-key and aws-region (sealed, they sign each object and are never sent). Each batch is one NDJSON object by the hour.</p>}
         </form>
       </div>
     </Panel>

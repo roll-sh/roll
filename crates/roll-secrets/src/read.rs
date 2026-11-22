@@ -127,10 +127,15 @@ pub struct Secret {
     /// Why its value is easy to guess: only for a caller who may reveal it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub weak: Option<String>,
-    /// That it's a decoy (docs/secrets.md, "Decoys"): only for the project's admins. Absent for
-    /// everyone else, as on any other key.
+    /// That it's a decoy (docs/secrets.md, "Decoys"): only for the project's admins, signed in or
+    /// the operator ([`Caller::sees_decoys`]). Absent for everyone else, tokens too, as on any other
+    /// key.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decoy: Option<crate::Decoy>,
+    /// The hosts its value may be sent to through a placeholder (docs/secrets.md, "Using a key
+    /// without seeing it").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hosts: Option<crate::placeholders::Hosts>,
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
@@ -164,6 +169,10 @@ pub struct Values {
     /// `values` (no value of the parent's leaves roll secrets), for roll previews to set from its
     /// branch by `field`.
     pub followed: Vec<Followed>,
+    /// Keys bound to hosts, answered as placeholders (`rlph_…` in `values`) for a resolve that
+    /// asked for them: roll's egress proxy swaps each for the value, for those hosts only.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub placeholders: Vec<crate::placeholders::Placeholder>,
 }
 
 /// A key left out because it links a resource the environment's preview branched.
@@ -271,16 +280,20 @@ fn unfrozen(c: &Conn<'_>, env: &EnvRow, path: &str, pass: Pass<'_>) -> Result<()
 /// The effective entries of `env`/`path` for `principal` (`None`: shared values only). Imports
 /// and the base count only where `through(environment, path)` allows: a caller never reads an
 /// environment through another that it couldn't read itself. `cols`: [`ROW_COLUMNS`], or
-/// [`DIGEST_COLUMNS`] for a digest.
+/// [`DIGEST_COLUMNS`] for a digest. `only`: just that key's entry (each folder read by its key,
+/// so one key of a large folder is a few indexed rows): the same entry the whole view has for it.
 #[allow(clippy::too_many_arguments)]
-fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, through: Through<'_>, pass: Pass<'_>, untrusted: bool, cols: &str, depth: usize, seen: &mut HashSet<(String, String)>) -> Result<Vec<Entry>> {
+fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, through: Through<'_>, pass: Pass<'_>, untrusted: bool, cols: &str, only: Option<&str>, depth: usize, seen: &mut HashSet<(String, String)>, dead: &crate::exports::Dead) -> Result<Vec<Entry>> {
     if depth > DEPTH || !seen.insert((env.id.clone(), path.to_string())) {
         return Ok(vec![]);
     }
     // A frozen folder's values aren't read here, nor through an import or a base.
     unfrozen(c, env, path, pass)?;
     let owner = principal.unwrap_or("");
-    let rows = c.query(&format!("SELECT {cols} FROM secrets WHERE env_id = ? AND path = ? AND (owner = '' OR owner = ?) ORDER BY key, owner"), [&env.id, path, owner], row)?;
+    let rows = match only {
+        None => c.query(&format!("SELECT {cols} FROM secrets WHERE env_id = ? AND path = ? AND (owner = '' OR owner = ?) ORDER BY key, owner"), [&env.id, path, owner], row)?,
+        Some(k) => c.query(&format!("SELECT {cols} FROM secrets WHERE env_id = ? AND path = ? AND key = ? AND (owner = '' OR owner = ?) ORDER BY key, owner"), [env.id.as_str(), path, k, owner], row)?,
+    };
     let mut out: Vec<Entry> = vec![];
     for r in rows {
         if !r.owner.is_empty() {
@@ -301,7 +314,7 @@ fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, thro
                 if !through(&from.slug, &imp.path) {
                     continue;
                 }
-                view_in(c, &from, &imp.path, principal, through, pass, untrusted, cols, depth + 1, seen)?
+                view_in(c, &from, &imp.path, principal, through, pass, untrusted, cols, only, depth + 1, seen, dead)?
             }
             // Another project's folder, while it's shared with this one: its own stored values
             // (no personal ones, nothing it imports, no reference or live link, which would
@@ -309,12 +322,15 @@ fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, thro
             Some(p) => {
                 let Ok(from) = envs::by_slug(c, p, &imp.environment) else { continue };
                 // An untrusted consumer never reads a protected environment, shared or not.
-                if (untrusted && from.protected) || !crate::exports::exported(c, &from.id, &imp.path, &env.project_id)? {
+                if (untrusted && from.protected) || !crate::exports::exported(c, &from.id, &imp.path, &env.project_id, dead)? {
                     continue;
                 }
                 unfrozen(c, &from, &imp.path, pass)?;
-                c.query(&format!("SELECT {cols} FROM secrets WHERE env_id = ? AND path = ? AND owner = '' ORDER BY key"), [&from.id, &imp.path], row)?
-                    .into_iter()
+                let rows = match only {
+                    None => c.query(&format!("SELECT {cols} FROM secrets WHERE env_id = ? AND path = ? AND owner = '' ORDER BY key"), [&from.id, &imp.path], row)?,
+                    Some(k) => c.query(&format!("SELECT {cols} FROM secrets WHERE env_id = ? AND path = ? AND key = ? AND owner = '' ORDER BY key"), [from.id.as_str(), imp.path.as_str(), k], row)?,
+                };
+                rows.into_iter()
                     .filter(|r| r.refs.as_ref().is_some_and(|x| x.is_empty()) && r.link.as_ref().is_none_or(|l| l.mode == Mode::Managed))
                     .map(|r| Entry { row: r, env: from.slug.clone(), source: Source::Own, overridden: false })
                     .collect()
@@ -331,7 +347,7 @@ fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, thro
     }
     if let Some(base) = &env.base_id {
         let base = envs::by_id(c, base)?;
-        let inherited = if through(&base.slug, path) { view_in(c, &base, path, principal, through, pass, untrusted, cols, depth + 1, seen)? } else { vec![] };
+        let inherited = if through(&base.slug, path) { view_in(c, &base, path, principal, through, pass, untrusted, cols, only, depth + 1, seen, dead)? } else { vec![] };
         for mut e in inherited {
             if have.insert(e.row.key.clone()) {
                 if e.source == Source::Own {
@@ -466,7 +482,7 @@ impl Digests {
 /// change number (every write of a stored value takes one: `write::apply`), its environments, their
 /// imports, its required keys, and for each folder another project shares into it, that project's
 /// change number and whether it still shares it.
-fn digest_state(c: &Conn<'_>, project: &str) -> Result<String> {
+fn digest_state(c: &Conn<'_>, project: &str, dead: &crate::exports::Dead) -> Result<String> {
     use sha2::{Digest, Sha256};
     let seq = |p: &str| c.query_row("SELECT seq FROM projects WHERE project_id = ?", [p], |r| r.get::<_, i64>(0)).optional();
     let mut h = Sha256::new();
@@ -487,7 +503,7 @@ fn digest_state(c: &Conn<'_>, project: &str) -> Result<String> {
     )?;
     for (of, from, at, row) in imports {
         if let Some(other) = of.as_deref().filter(|p| *p != project) {
-            h.update(format!("{:?}\0{}\n", seq(other)?, crate::exports::exported(c, &from, &at, project)?));
+            h.update(format!("{:?}\0{}\n", seq(other)?, crate::exports::exported(c, &from, &at, project, dead)?));
         }
         h.update(format!("{row}\n"));
     }
@@ -553,7 +569,7 @@ impl Secrets {
         {
             return fp.clone();
         }
-        let fp = match self.links.get(&l.kind).and_then(|p| p.read(&l.r#ref, &l.field, l)) {
+        let fp = match self.provider_for(&l.kind, &l.r#ref).and_then(|p| p.read(&l.r#ref, &l.field, l)) {
             Ok(v) => dek.fingerprint(v.expose()),
             // A product that doesn't answer for a moment (an owner handing over, a timeout) leaves
             // the digest as it was: flipping it would redeploy apps and push syncs twice. Its
@@ -627,13 +643,25 @@ impl Secrets {
     /// The effective entries of a folder; `shared` leaves out the caller's personal values.
     /// Imports and the base show through only where the caller may `action` them.
     pub(crate) fn view(&self, project: &str, slug: &str, path: &str, caller: &Caller, shared: bool, action: Action) -> Result<Vec<Entry>> {
+        self.view_of(project, slug, path, caller, shared, action, None)
+    }
+
+    /// [`Secrets::view`] of one key: its effective entry, if any (a few indexed rows, however
+    /// large the folder).
+    pub(crate) fn view_key(&self, project: &str, slug: &str, path: &str, key: &str, caller: &Caller) -> Result<Option<Entry>> {
+        Ok(self.view_of(project, slug, path, caller, false, Action::Reveal, Some(key))?.into_iter().find(|e| e.row.key == key))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn view_of(&self, project: &str, slug: &str, path: &str, caller: &Caller, shared: bool, action: Action, only: Option<&str>) -> Result<Vec<Entry>> {
         let principal = (!shared && caller.personal()).then_some(caller.principal.as_str());
         let through = |e: &str, p: &str| caller.allows(action, &Scope::at(project, e, p));
         let passes = |p: &str, e: &str, at: &str| caller.passes_freeze(p, e, at);
         let pass: Pass<'_> = (action == Action::Reveal).then_some(&passes);
+        let dead = self.dead_exports("x.to_project = ?", project)?;
         self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
-            view_in(c, &env, path, principal, &through, pass, caller.grants.untrusted(), ROW_COLUMNS, 0, &mut HashSet::new())
+            view_in(c, &env, path, principal, &through, pass, caller.grants.untrusted(), ROW_COLUMNS, only, 0, &mut HashSet::new(), &dead)
         })
     }
 
@@ -661,11 +689,18 @@ impl Secrets {
             expires_at: e.row.expires_at,
             weak: if reveal { e.row.weak } else { None },
             decoy: None,
+            hosts: None,
         }
     }
 
     /// The project's admins see which of `list` are decoys.
     fn mark_decoys(&self, project: &str, list: &mut [Secret], caller: &Caller) -> Result<()> {
+        if !list.is_empty() {
+            let bound = self.bindings(project)?;
+            for s in list.iter_mut() {
+                s.hosts = bound.get(&s.id).cloned();
+            }
+        }
         if list.is_empty() || !self.sees_decoys(project, caller) {
             return Ok(());
         }
@@ -741,7 +776,10 @@ impl Secrets {
     /// previews resolve as (`Secrets::untrusted`, not a runtime), narrowed again for an untrusted
     /// ephemeral environment (`caller_for`). What only a protected environment holds is refused as
     /// protected, a sensitive key for a reader that isn't a runtime, and a dynamic credential.
-    pub(crate) fn consumer_entry(&self, project: &str, slug: &str, path: &str, key: &str, caller: &Caller, untrusted: bool) -> std::result::Result<(Caller, Entry), crate::consumers::Refusal> {
+    /// With `placeholders`, a key bound to hosts is answered with its binding, sensitive or not:
+    /// the resolve then gives a placeholder.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn consumer_entry(&self, project: &str, slug: &str, path: &str, key: &str, caller: &Caller, untrusted: bool, placeholders: bool) -> std::result::Result<(Caller, Entry, Option<crate::placeholders::Hosts>), crate::consumers::Refusal> {
         use crate::consumers::Refusal;
         let missing = |e: Error| match e {
             Error::NotFound(m) => Refusal::NoSuchKey(m),
@@ -768,23 +806,44 @@ impl Secrets {
                 Refusal::NoSuchKey(format!("no secret {key} in {slug}:{path}"))
             });
         };
-        if names::sensitive(&e.row.tags) && !narrowed.runtime {
+        let dynamic = e.row.link.as_ref().is_some_and(|l| l.mode == Mode::Dynamic);
+        // A sensitive key's placeholder only for a reader that could read it, or by the binding's
+        // opt-in; never for a value holding a reference.
+        let bound = if placeholders && !dynamic { self.binding(&e.row.id)?.filter(|b| b.admits(&e.row.tags, narrowed.runtime)) } else { None };
+        if bound.is_some() {
+            let dek = self.project(project)?;
+            if crate::placeholders::holds_reference(&dek, &e.row.project_id, &e.row.id, e.row.version, e.row.refs.as_deref(), e.row.value.as_deref()) {
+                return Err(Refusal::Unusable(format!("{key} holds a ${{…}} reference: a placeholder stands only for a literal value")));
+            }
+        }
+        if bound.is_none() && names::sensitive(&e.row.tags) && !narrowed.runtime {
             let why = if untrusted || caller.runtime { why } else { not_runtime };
             return Err(Refusal::Unusable(format!("{key} is sensitive, and {why}: only a trusted runtime reads it")));
         }
-        if e.row.link.as_ref().is_some_and(|l| l.mode == Mode::Dynamic) {
+        if dynamic {
             return Err(Refusal::Unusable(format!("{key} is a dynamic credential, which ends with its lease: link it as managed or live for another product")));
         }
-        Ok((narrowed, e))
+        Ok((narrowed, e, bound))
     }
 
     /// One key's value for another roll product, read as [`Secrets::consumer_entry`] decides:
     /// audited as `secrets.resolve` by `caller` (the resource asking), no dynamic credential.
-    pub(crate) fn resolve_one(&self, project: &str, slug: &str, path: &str, key: &str, caller: &Caller, untrusted: bool) -> std::result::Result<crate::consumers::Resolved, crate::consumers::Refusal> {
+    /// A key bound to hosts, for a resource that asks for placeholders, is answered as one; for a
+    /// reference a person chose ([`Secrets::resolve_as`]), its swaps re-check that person.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn resolve_one(&self, project: &str, slug: &str, path: &str, key: &str, caller: &Caller, untrusted: bool, resource: &crate::consumers::ResourceRef) -> std::result::Result<crate::consumers::Resolved, crate::consumers::Refusal> {
         use crate::consumers::{Refusal, Resolved};
-        let (narrowed, e) = self.consumer_entry(project, slug, path, key, caller, untrusted)?;
-        let dek = self.project(project)?;
+        let (narrowed, e, bound) = self.consumer_entry(project, slug, path, key, caller, untrusted, resource.wants_placeholders())?;
         let consumer = &caller.principal;
+        let chosen = caller.maker.as_ref().map(|m| format!(", for {m} (who chose it)")).unwrap_or_default();
+        if let Some(b) = bound {
+            let env_id = self.db.read(|c| envs::by_slug(c, project, slug))?.id;
+            let how = crate::placeholders::Issue { consumer, issued_by: consumer, maker: caller.maker.as_deref(), resource: Some(resource), untrusted, minutes: None };
+            let (token, p) = self.issue_placeholders(project, &env_id, path, &[(key.to_string(), e.row.id.clone(), b)], &how)?.pop().ok_or_else(|| Refusal::Failed(Error::Internal("no placeholder was issued".into())))?;
+            self.audit_now(project, &narrowed, "secrets.resolve", Some(slug), Some(path), &[key.to_string()], &format!("resolved {key} for {consumer}{chosen} as a placeholder"));
+            return Ok(Resolved { value: token, version: e.row.version, expires_at: e.row.expires_at, placeholder: Some(p) });
+        }
+        let dek = self.project(project)?;
         let mut r = Resolver::new(self, project, slug, &dek, &narrowed, true, consumer)?;
         r.no_dynamic = true;
         let (value, problem) = r.entry(&e);
@@ -792,9 +851,8 @@ impl Secrets {
         if let Some(p) = problem {
             return Err(Refusal::Unusable(format!("{key} doesn't resolve: {p}")));
         }
-        let chosen = caller.maker.as_ref().map(|m| format!(", for {m} (who chose it)")).unwrap_or_default();
         self.audit_now(project, &narrowed, "secrets.resolve", Some(slug), Some(path), &[key.to_string()], &format!("resolved {key} for {consumer}{chosen}"));
-        Ok(Resolved { value, version: e.row.version, expires_at: e.row.expires_at })
+        Ok(Resolved { value, version: e.row.version, expires_at: e.row.expires_at, placeholder: None })
     }
 
     /// Every effective value of a folder (`…/values`, `roll run`, an app's start). Audited as
@@ -808,6 +866,49 @@ impl Secrets {
     /// issuing a fresh credential each read.
     #[allow(clippy::too_many_arguments)]
     pub fn values_for(&self, project: &str, slug: &str, path: &str, resolve: bool, consumer: Option<&str>, dynamic: bool, caller: &Caller) -> Result<Values> {
+        self.values_inner(project, slug, path, resolve, consumer, dynamic, None, caller)
+    }
+
+    /// A folder as `consumer`'s runtime reads it (shared values only, never the caller's personal
+    /// ones), with `caller`'s rights: what another product may show `caller` of the values it gave
+    /// `consumer` (roll apps' reveal, shell and job output). Its base, imports and references read
+    /// only as far as `caller` may reveal; what stays out is missing or a problem. `runtime`: a
+    /// sensitive value too (a shell sees the container's environment). No dynamic credential is
+    /// issued. Audited as an export by `<consumer> (shown to <caller>)`.
+    pub fn values_seen_by(&self, project: &str, slug: &str, path: &str, consumer: &str, runtime: bool, caller: &Caller) -> Result<Values> {
+        // Named for both, with a `:` so it reads no person's own overrides (`Caller::personal`).
+        let mut seen = caller.clone().acting_as(format!("{consumer} (shown to {})", caller.made_by()));
+        seen.runtime = runtime;
+        self.values_inner(project, slug, path, true, None, false, None, &seen)
+    }
+
+    /// [`Secrets::values_for`] (resolved) for `consumer`, with every key bound to hosts answered
+    /// as a placeholder (docs/secrets.md, "Using a key without seeing it"). Not a sensitive key's
+    /// for a reader that couldn't read it, unless its binding opts in; not a key whose value holds
+    /// a reference (left out, as a problem). An in-process consumer (`sandbox:…`, `preview:…`)
+    /// names who made it in `ask.maker`: its placeholders swap only while they may reveal here.
+    #[allow(clippy::too_many_arguments)]
+    pub fn values_with_placeholders(&self, project: &str, slug: &str, path: &str, consumer: &str, dynamic: bool, ask: crate::placeholders::Ask<'_>, caller: &Caller) -> Result<Values> {
+        if caller.principal.starts_with("identity:") {
+            return Err(Error::BadRequest("a workload identity's login can't take placeholders: they'd outlive its token".into()));
+        }
+        let in_process = caller.principal != "operator" && !caller.principal.starts_with("token:") && !crate::access::is_person(&caller.principal);
+        match ask.maker {
+            None if in_process => return Err(Error::BadRequest(format!("{} is an in-process consumer: name who made it (a sandbox's secrets_by, a preview rule's writer) to take placeholders", caller.principal))),
+            Some(m) => {
+                let at = names::path(path)?;
+                self.maker_may(m, project, slug, &at, caller.grants.untrusted()).map_err(|r| match r {
+                    crate::proxy::Refusal::MakerUnreachable(m) => Error::MakerUnreachable(m),
+                    r => Error::Forbidden(r.to_string()),
+                })?;
+            }
+            None => {}
+        }
+        self.values_inner(project, slug, path, true, Some(consumer), dynamic, Some(ask), caller)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn values_inner(&self, project: &str, slug: &str, path: &str, resolve: bool, consumer: Option<&str>, dynamic: bool, ph: Option<crate::placeholders::Ask<'_>>, caller: &Caller) -> Result<Values> {
         let path = names::path(path)?;
         caller.need(Action::Reveal, &Scope::at(project, slug, &path))?;
         self.read_quota(caller)?;
@@ -831,11 +932,29 @@ impl Secrets {
         // Set, but not in this answer (withheld, or dynamic under `dynamic=false`): not missing.
         let mut left_out = vec![];
         let mut followed = vec![];
+        let bound = match &ph {
+            Some(_) => self.bindings(project)?,
+            None => HashMap::new(),
+        };
+        let mut to_issue = vec![];
         for e in &entries {
             // First: nothing of the parent's is read, issued or decrypted for it.
             if let Some(l) = r.followed(e) {
                 followed.push(Followed { name: e.row.key.clone(), kind: l.kind, parent: l.r#ref, field: l.field });
                 left_out.push(e.row.key.clone());
+                continue;
+            }
+            // Bound to hosts: a placeholder, nothing decrypted here. A sensitive key's only for a
+            // reader that could read it or by the binding's opt-in (else withheld below); never a
+            // value holding a reference, which would carry another key's value to the hosts.
+            let bound_here = bound.get(&e.row.id).filter(|b| e.row.link.as_ref().is_none_or(|l| l.mode != Mode::Dynamic) && b.admits(&e.row.tags, caller.runtime));
+            if let Some(b) = bound_here {
+                if crate::placeholders::holds_reference(&dek, &e.row.project_id, &e.row.id, e.row.version, e.row.refs.as_deref(), e.row.value.as_deref()) {
+                    problems.push(Problem { key: e.row.key.clone(), problem: "holds a ${…} reference: a placeholder stands only for a literal value".into() });
+                    left_out.push(e.row.key.clone());
+                } else {
+                    to_issue.push((e.row.key.clone(), e.row.id.clone(), b.clone()));
+                }
                 continue;
             }
             if names::sensitive(&e.row.tags) && !caller.runtime {
@@ -857,6 +976,15 @@ impl Secrets {
             values.insert(e.row.key.clone(), v);
         }
         let leases = r.finish(slug)?;
+        let mut placeholders = vec![];
+        if !to_issue.is_empty() {
+            let env_id = self.db.read(|c| envs::by_slug(c, project, slug))?.id;
+            let how = crate::placeholders::Issue { consumer: &who, issued_by: &caller.principal, resource: None, untrusted: caller.grants.untrusted(), minutes: ph.as_ref().and_then(|a| a.minutes), maker: ph.as_ref().and_then(|a| a.maker) };
+            for (token, p) in self.issue_placeholders(project, &env_id, &path, &to_issue, &how)? {
+                values.insert(p.key.clone(), token);
+                placeholders.push(p);
+            }
+        }
         let have: Vec<String> = values.keys().cloned().chain(left_out).collect();
         for m in self.missing_required(project, &path, &have)? {
             problems.push(Problem { key: m.key, problem: format!("required, but {slug} doesn't set it") });
@@ -867,8 +995,9 @@ impl Secrets {
         }
         let action = if consumer.is_some() { "secrets.resolve" } else { "secrets.export" };
         let keys: Vec<String> = values.keys().cloned().collect();
+        let as_placeholders = if placeholders.is_empty() { String::new() } else { format!(", {} as placeholders", placeholders.len()) };
         let summary = match consumer {
-            Some(c) => format!("resolved {} for {c}{}", crate::write::plural(keys.len(), "value"), lease_note(&leases)),
+            Some(c) => format!("resolved {} for {c}{as_placeholders}{}", crate::write::plural(keys.len(), "value"), lease_note(&leases)),
             None => format!("exported {}{}", crate::write::plural(keys.len(), "value"), lease_note(&leases)),
         };
         self.audit_now(project, caller, action, Some(slug), Some(&path), &keys, &summary);
@@ -876,7 +1005,7 @@ impl Secrets {
         let dynamic = entries.iter().filter(ours).filter(|e| e.row.link.as_ref().is_some_and(|l| l.mode == Mode::Dynamic)).map(|e| e.row.key.clone()).collect();
         let linked = entries.iter().filter(ours).filter(|e| e.row.link.is_some()).map(|e| e.row.key.clone()).collect();
         let plain = entries.iter().filter(ours).filter(|e| e.row.link.as_ref().is_some_and(|l| self.plain_field(l))).map(|e| e.row.key.clone()).collect();
-        Ok(Values { values, problems, leases, dynamic, linked, plain, withheld, sensitive, followed })
+        Ok(Values { values, problems, leases, dynamic, linked, plain, withheld, sensitive, followed, placeholders })
     }
 
     /// A folder's own values as they were after change `seq` (or at time `at`): what was stored
@@ -943,7 +1072,7 @@ impl Secrets {
         }
         let keys: Vec<String> = values.keys().cloned().collect();
         self.audit_now(project, caller, "secrets.export", Some(slug), Some(&path), &keys, &format!("exported {} as of change #{seq}", crate::write::plural(keys.len(), "value")));
-        Ok((seq, Values { values, problems, leases: vec![], dynamic: vec![], linked, plain, withheld, sensitive: vec![], followed }))
+        Ok((seq, Values { values, problems, leases: vec![], dynamic: vec![], linked, plain, withheld, sensitive: vec![], followed, placeholders: vec![] }))
     }
 
     /// What moves when the project's values may have: its change counter and its resources'
@@ -978,7 +1107,8 @@ impl Secrets {
         let dek = self.project(project)?;
         // Read first: a digest computed after it reflects at least this state, so one kept with it
         // is never newer than what it vouches for.
-        let state = self.db.read(|c| digest_state(c, project))?;
+        let dead = self.dead_exports("x.to_project = ?", project)?;
+        let state = self.db.read(|c| digest_state(c, project, &dead))?;
         let key = (project.to_string(), slug.to_string(), path.clone(), caller.principal.clone(), caller.grants.untrusted());
         if let Some(d) = self.digests.get(&key, &state)
             && self.still(project, &dek, &d, caller)?
@@ -1014,6 +1144,7 @@ impl Secrets {
         use std::rc::Rc;
         let principal = caller.personal().then_some(caller.principal.as_str());
         let untrusted = caller.grants.untrusted();
+        let dead = self.dead_exports("x.to_project = ?", project)?;
         // Every permission the digest depends on, with its answer: a kept digest is reused only
         // for a caller who gets the same answers (`still`).
         let asked: RefCell<BTreeMap<(Action, String, String), bool>> = RefCell::default();
@@ -1033,7 +1164,7 @@ impl Secrets {
         let passes = |p: &str, e: &str, at: &str| caller.passes_freeze(p, e, at);
         let (branches, entries) = self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
-            let entries = view_in(c, &env, path, principal, &reveal, Some(&passes), untrusted, DIGEST_COLUMNS, 0, &mut HashSet::new())?;
+            let entries = view_in(c, &env, path, principal, &reveal, Some(&passes), untrusted, DIGEST_COLUMNS, None, 0, &mut HashSet::new(), &dead)?;
             Ok::<_, Error>((env.branches, entries))
         })?;
         let mut h = Sha256::new();
@@ -1098,7 +1229,7 @@ impl Secrets {
                 let view = match views.get(&(env.clone(), at.clone())) {
                     Some(v) => v.clone(),
                     None => {
-                        let v = match self.db.read(|c| view_in(c, &envs::by_slug(c, project, &env)?, &at, principal, &read, None, untrusted, DIGEST_COLUMNS, 0, &mut HashSet::new())) {
+                        let v = match self.db.read(|c| view_in(c, &envs::by_slug(c, project, &env)?, &at, principal, &read, None, untrusted, DIGEST_COLUMNS, None, 0, &mut HashSet::new(), &dead)) {
                             Ok(v) => v,
                             // A reference to an environment that isn't there reaches nothing.
                             Err(Error::NotFound(_)) => vec![],
@@ -1248,6 +1379,7 @@ impl Secrets {
         caller.need(Action::Read, &Scope::project(project))?;
         let dek = self.project(project)?;
         let principal = caller.personal().then_some(caller.principal.as_str());
+        let dead = self.dead_exports("x.to_project = ?", project)?;
         let (envs, views, folders, previews) = self.db.read(|c| {
             let all = envs::all(c, project)?;
             let previews = all.iter().filter(|e| e.kind == Kind::Ephemeral).count() as i64;
@@ -1256,7 +1388,7 @@ impl Secrets {
             let mut folders = BTreeSet::new();
             for e in &envs {
                 let through = |x: &str, p: &str| caller.allows(Action::Read, &Scope::at(project, x, p));
-                views.push(view_in(c, e, &path, principal, &through, None, caller.grants.untrusted(), ROW_COLUMNS, 0, &mut HashSet::new())?);
+                views.push(view_in(c, e, &path, principal, &through, None, caller.grants.untrusted(), ROW_COLUMNS, None, 0, &mut HashSet::new(), &dead)?);
                 for f in c.query("SELECT path FROM folders WHERE env_id = ?", [&e.id], |r| r.get::<_, String>(0))? {
                     if f != path && names::parents(&f).last() == Some(&path) {
                         folders.insert(f);
@@ -1543,7 +1675,7 @@ impl<'a> Resolver<'a> {
         }
         match &e.row.link {
             Some(l) if l.mode == Mode::Live => {
-                let p = self.s.links.get(&l.kind).map_err(|e| e.to_string())?;
+                let p = self.s.provider_for(&l.kind, &l.r#ref).map_err(|e| e.to_string())?;
                 p.read(&l.r#ref, &l.field, l).map_err(|err| format!("{} {}: {err}", l.kind, l.r#ref))
             }
             Some(l) if l.mode == Mode::Dynamic && self.no_dynamic => Err(format!("{} {} is dynamic: short-lived credentials aren't issued to a sync or a read with dynamic=false", l.kind, l.r#ref)),
@@ -1555,8 +1687,7 @@ impl<'a> Resolver<'a> {
                     let lease = names::new_id("lse", 16);
                     let r = self
                         .s
-                        .links
-                        .get(&l.kind)
+                        .provider_for(&l.kind, &l.r#ref)
                         .and_then(|p| p.issue_lease(&l.r#ref, &cred, l, &label, l.ttl_minutes(), &lease))
                         .map(|i| (i.parts, i.handle, l.clone(), (e.row.key.clone(), e.row.path.clone()), lease))
                         .map_err(|err| format!("{} {}: {err}", l.kind, l.r#ref));

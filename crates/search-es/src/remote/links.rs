@@ -235,27 +235,32 @@ pub fn remote_roles(ctx: &Ctx, alias: &str) -> Vec<Value> {
     use crate::xpack::security::{self, privileges::Permission};
     let p = security::principal(ctx);
     if p.is_superuser() {
-        // `ReservedRolesStore`'s superuser: every remote index, restricted ones read-only.
-        return vec![obj! { "superuser" => obj! { "cluster" => Value::Arr(Vec::new()), "indices" => Value::Arr(vec![
+        // `ReservedRolesStore`'s superuser: every remote index, restricted ones read-only, and
+        // its `remote_cluster` privileges.
+        return vec![obj! { "superuser" => obj! { "cluster" => crate::arr!["monitor_enrich", "monitor_stats"], "indices" => Value::Arr(vec![
             obj! { "names" => crate::arr!["*"], "privileges" => crate::arr!["all"], "allow_restricted_indices" => false },
             obj! { "names" => crate::arr!["*"], "privileges" => crate::arr!["monitor", "read", "read_cross_cluster", "view_index_metadata"], "allow_restricted_indices" => true },
         ]) } }];
     }
     let eff = security::effective(&security::file_roles(ctx.cluster), &ctx.state(), p);
+    let names_alias = |e: &Value| {
+        let clusters: Vec<String> = match e.get("clusters") {
+            Some(Value::Arr(a)) => a.iter().map(Value::to_es_string).collect(),
+            Some(Value::Str(s)) => vec![s.clone()],
+            _ => Vec::new(),
+        };
+        clusters.iter().any(|c| glob_match(c, alias))
+    };
     let set = |perms: &[Permission]| -> Value {
         let mut m = Map::new();
         for (i, perm) in perms.iter().enumerate() {
+            // `remote_cluster` privileges naming the alias are the remote's cluster privileges
+            // (`monitor_enrich` for ES|QL's ENRICH, `monitor_stats`).
+            let cluster: Vec<Value> = perm.remote_cluster.iter().filter(|e| names_alias(e)).flat_map(|e| e.get("privileges").and_then(Value::as_array).cloned().unwrap_or_default()).map(|p| Value::Str(p.to_es_string().to_ascii_lowercase())).collect();
             let indices: Vec<Value> = perm
                 .remote_indices
                 .iter()
-                .filter(|e| {
-                    let clusters: Vec<String> = match e.get("clusters") {
-                        Some(Value::Arr(a)) => a.iter().map(Value::to_es_string).collect(),
-                        Some(Value::Str(s)) => vec![s.clone()],
-                        _ => Vec::new(),
-                    };
-                    clusters.iter().any(|c| glob_match(c, alias))
-                })
+                .filter(|e| names_alias(e))
                 .map(|e| {
                     let mut e = e.clone();
                     if let Some(m) = e.as_object_mut() {
@@ -264,7 +269,7 @@ pub fn remote_roles(ctx: &Ctx, alias: &str) -> Vec<Value> {
                     e
                 })
                 .collect();
-            m.insert(format!("r{i}"), obj! { "cluster" => Value::Arr(Vec::new()), "indices" => Value::Arr(indices) });
+            m.insert(format!("r{i}"), obj! { "cluster" => Value::Arr(cluster), "indices" => Value::Arr(indices) });
         }
         Value::Obj(m)
     };
@@ -391,21 +396,28 @@ pub fn spawn(links: Arc<dyn Links>, local: String, r: &Remote, target: String, r
     })
 }
 
-/// [`spawn`] for the request's principal: refused here, as Elasticsearch's querying cluster
-/// refuses it, when none of its `remote_indices` privileges names the remote.
+/// Why the request's principal may not reach remote `r`, as Elasticsearch's querying cluster
+/// refuses it: none of its `remote_indices` privileges names the remote.
+pub fn refusal(ctx: &Ctx, r: &Remote) -> Option<EsError> {
+    let p = crate::xpack::security::principal(ctx);
+    if p.is_superuser() || !remote_roles(ctx, &r.alias).iter().any(|set| set.as_object().is_none_or(|m| m.values().all(|d| d.get("indices").and_then(Value::as_array).is_none_or(|a| a.is_empty())))) {
+        return None;
+    }
+    Some(EsError::security(
+        403,
+        format!(
+            "action [{}] towards remote cluster [{}] is unauthorized for {} because no remote indices privileges apply for the target cluster",
+            crate::xpack::security::privileges::action_of(ctx.api.name()).1,
+            r.alias,
+            crate::xpack::security::who(p)
+        ),
+    ))
+}
+
+/// [`spawn`] for the request's principal, unless [`refusal`] refuses it.
 pub fn leg(ctx: &Ctx, r: &Remote, target: String, req: EsRequest) -> tokio::task::JoinHandle<Answer> {
     let links = ctx.cluster.config.links.clone().expect("a link has links");
-    let p = crate::xpack::security::principal(ctx);
-    if !p.is_superuser() && remote_roles(ctx, &r.alias).iter().any(|set| set.as_object().is_none_or(|m| m.values().all(|d| d.get("indices").and_then(Value::as_array).is_none_or(|a| a.is_empty())))) {
-        let e = EsError::security(
-            403,
-            format!(
-                "action [{}] towards remote cluster [{}] is unauthorized for {} because no remote indices privileges apply for the target cluster",
-                crate::xpack::security::privileges::action_of(ctx.api.name()).1,
-                r.alias,
-                crate::xpack::security::who(p)
-            ),
-        );
+    if let Some(e) = refusal(ctx, r) {
         return tokio::spawn(async move { Answer::Failed(e) });
     }
     spawn(links, local_ref(ctx.cluster).to_string(), r, target, req, wait(ctx.cluster))

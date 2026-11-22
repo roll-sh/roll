@@ -35,6 +35,8 @@ pub fn instance_prefix(service: &str, env: &str, deployment: &str) -> String {
 
 /// How far back crashes count toward a crash loop.
 const CRASH_WINDOW: Duration = Duration::from_secs(600);
+/// How long an instance over `run.busy_cpu` stays held after its last busy sample.
+const BUSY_HOLD: Duration = Duration::from_secs(30);
 
 /// What instances of the active deployment are made from.
 #[derive(Clone, Debug)]
@@ -51,6 +53,8 @@ pub struct Template {
     /// That site's edge functions ([`crate::edge`]), and the service that runs them.
     pub edge: Vec<apps_build::edge::EdgeFn>,
     pub edge_service: String,
+    /// A closed environment's: the hosts its placeholders are bound to (its CA names them all).
+    pub intercept_hosts: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -93,6 +97,8 @@ pub struct Inst {
     ports: Mutex<HashMap<u16, SocketAddr>>,
     /// A scrape of its metrics endpoint is out ([`crate::prom`]).
     scraping: AtomicBool,
+    /// Kept awake until then (`ROLL_AWAKE_URL`: work after its answer), whatever its idle time.
+    held_until: Mutex<Option<Instant>>,
 }
 
 /// An instance's last hour by minute ([`EnvLive::by_instance`]).
@@ -156,7 +162,22 @@ impl Inst {
             wanted: Vec::new(),
             ports: Mutex::new(HashMap::new()),
             scraping: AtomicBool::new(false),
+            held_until: Mutex::new(None),
         })
+    }
+
+    /// It's kept awake now (a hold that hasn't ended).
+    /// Held awake until at least `for_` from now (a later hold stands). The hold's end.
+    fn hold(&self, for_: Duration) -> Instant {
+        let until = Instant::now() + for_;
+        let mut h = self.held_until.lock();
+        let until = h.filter(|t| *t > until).unwrap_or(until);
+        *h = Some(until);
+        until
+    }
+
+    pub fn held(&self) -> bool {
+        self.held_until.lock().is_some_and(|t| t > Instant::now())
     }
 
     /// An instance of `tpl`'s deployment, knowing the other ports it publishes.
@@ -372,6 +393,11 @@ pub struct Gate {
     pub preview: bool,
     /// Headers its answers carry.
     pub headers: Vec<crate::model::HeaderRule>,
+    /// The live deployment's roll.toml firewall rules (deny, limit, challenge), judged beside
+    /// `firewall`: the stricter answer wins, so the tree only ever tightens.
+    pub file_firewall: Vec<crate::model::FirewallRule>,
+    /// The live deployment's roll.toml headers, after `headers` and never over one they set.
+    pub file_headers: Vec<crate::model::HeaderRule>,
     /// Paths another service answers, the first that takes a path deciding.
     pub routes: Vec<crate::model::Route>,
     /// Traces are on: the proxy adds its own span to each request's trace.
@@ -388,8 +414,67 @@ pub struct Gate {
     pub snippets: Option<(bytes::Bytes, bytes::Bytes)>,
 }
 
-/// A rate-limit bucket: which (0 the environment's, 1 + i firewall rule i's) and whose.
+/// What a gRPC health check is called in the log (`run.health_grpc`).
+const GRPC_HEALTH: &str = "grpc.health.v1.Health/Check";
+
+/// Whether a gRPC frame holds a HealthCheckResponse whose `status` (field 1) is SERVING (1).
+fn grpc_serving(frame: &[u8]) -> bool {
+    let Some(len) = frame.get(1..5).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize) else { return false };
+    let Some(msg) = frame.get(5..5 + len).filter(|_| frame[0] == 0) else { return false };
+    // Fields in order: a varint `status` is tag 0x08; anything else (unknown fields) is skipped.
+    let mut i = 0;
+    let mut serving = false;
+    while i < msg.len() {
+        let tag = msg[i];
+        i += 1;
+        let mut varint = || {
+            let (mut v, mut shift) = (0u64, 0);
+            while let Some(b) = msg.get(i) {
+                i += 1;
+                v |= u64::from(b & 0x7f) << shift;
+                if b & 0x80 == 0 {
+                    return Some(v);
+                }
+                shift += 7;
+                if shift > 63 {
+                    return None;
+                }
+            }
+            None
+        };
+        match tag & 7 {
+            0 => match varint() {
+                Some(v) if tag >> 3 == 1 => serving = v == 1,
+                Some(_) => {}
+                None => return false,
+            },
+            2 => match varint() {
+                Some(n) => i = i.saturating_add(n as usize),
+                None => return false,
+            },
+            _ => return false,
+        }
+    }
+    serving
+}
+
+/// A rate-limit bucket: which (0 the environment's, 1 + i firewall rule i's, [`FILE_BUCKETS`] + i
+/// the live deployment's roll.toml rule i's) and whose.
 type BucketKey = (u16, Option<std::net::IpAddr>);
+
+/// Where the buckets of a deployment's own firewall rules start (past any environment's).
+const FILE_BUCKETS: u16 = 1000;
+
+/// The first of `rules` that matches decides; none: in. A limit's bucket is `base` + its index.
+fn first_match(rules: &[crate::model::FirewallRule], asked: &crate::model::Asked<'_>, base: u16) -> Verdict {
+    match rules.iter().enumerate().find(|(_, r)| r.matches(asked)) {
+        None => Verdict::Allow,
+        Some((_, r)) if r.action == crate::model::FirewallAction::Allow => Verdict::Allow,
+        Some((i, r)) if r.action == crate::model::FirewallAction::Limit => Verdict::Limit(base + i as u16, crate::model::RateLimit { per_minute: r.per_minute.unwrap_or(60), burst: r.burst }),
+        Some((_, r)) if r.action == crate::model::FirewallAction::Challenge => Verdict::Challenge,
+        Some(_) => Verdict::Deny,
+    }
+}
 
 /// A firewall's answer: in, a 403, or in under a rule's own limit (its bucket, 1 + its index).
 #[derive(Debug, PartialEq)]
@@ -410,12 +495,22 @@ impl Gate {
     /// What its firewall says of the request: the first rule that matches decides; none lets it
     /// in.
     pub fn firewall_verdict(&self, asked: &crate::model::Asked<'_>) -> Verdict {
-        match self.firewall.iter().enumerate().find(|(_, r)| r.matches(asked)) {
-            None => Verdict::Allow,
-            Some((_, r)) if r.action == crate::model::FirewallAction::Allow => Verdict::Allow,
-            Some((i, r)) if r.action == crate::model::FirewallAction::Limit => Verdict::Limit(i as u16 + 1, crate::model::RateLimit { per_minute: r.per_minute.unwrap_or(60), burst: r.burst }),
-            Some((_, r)) if r.action == crate::model::FirewallAction::Challenge => Verdict::Challenge,
-            Some(_) => Verdict::Deny,
+        let own = first_match(&self.firewall, asked, 1);
+        if self.file_firewall.is_empty() {
+            return own;
+        }
+        // The tree's rules on their own, their limits in buckets of their own: the stricter of
+        // the two answers (deny, then a challenge, then the lower limit) decides.
+        let file = first_match(&self.file_firewall, asked, FILE_BUCKETS);
+        let rank = |v: &Verdict| match v {
+            Verdict::Allow => 0,
+            Verdict::Limit(..) => 1,
+            Verdict::Challenge => 2,
+            Verdict::Deny => 3,
+        };
+        match (own, file) {
+            (Verdict::Limit(a, x), Verdict::Limit(b, y)) => if y.per_minute < x.per_minute { Verdict::Limit(b, y) } else { Verdict::Limit(a, x) },
+            (a, b) => if rank(&b) > rank(&a) { b } else { a },
         }
     }
 
@@ -638,6 +733,15 @@ impl EnvLive {
         self.insts.lock().clone()
     }
 
+    /// Keep instance `name` awake for `for_` from now (an hour's quarter at most; a longer hold it
+    /// has stays): it's never suspended, put to sleep or scaled in meanwhile. When it ends, or
+    /// `None` when it isn't one of its awake instances.
+    pub fn hold_awake(&self, name: &str, for_: Duration) -> Option<Instant> {
+        let insts = self.insts.lock();
+        let i = insts.iter().find(|i| i.name == name && matches!(i.phase(), Phase::Running(_) | Phase::Suspended(_)))?;
+        Some(i.hold(for_.min(Duration::from_secs(15 * 60))))
+    }
+
     /// The deployment a request goes to: a visitor's bucket (0–99, its `roll_bucket` cookie)
     /// below the canary's share goes to the canary, so a visitor stays on one deployment through
     /// a step; without one, the canary's share of requests by turns (37 is coprime with 100, so
@@ -770,6 +874,44 @@ impl EnvLive {
         }
     }
 
+    /// A gRPC server's health (`run.health_grpc`): a unary `grpc.health.v1.Health/Check` for
+    /// `service` over h2c that answers 200, `grpc-status` 0 and SERVING (its body read to 1 KiB).
+    async fn answers_grpc(&self, addr: SocketAddr, service: &str) -> bool {
+        use http_body_util::BodyExt;
+        // HealthCheckRequest { service = 1 }, in gRPC's length-prefixed frame (names are short:
+        // one length byte).
+        let mut msg = Vec::with_capacity(service.len() + 2);
+        if !service.is_empty() {
+            msg.extend([0x0a, service.len() as u8]);
+            msg.extend(service.as_bytes());
+        }
+        let mut body = vec![0u8];
+        body.extend((msg.len() as u32).to_be_bytes());
+        body.extend(msg);
+        let Ok(req) = axum::http::Request::post(format!("http://{addr}/grpc.health.v1.Health/Check"))
+            .version(axum::http::Version::HTTP_2)
+            .header("content-type", "application/grpc")
+            .header("te", "trailers")
+            .header("user-agent", "roll-apps-health")
+            .body(axum::body::Body::from(body))
+        else {
+            return false;
+        };
+        let answer = async {
+            let resp = self.client_h2.request(req).await.ok()?;
+            if resp.status() != axum::http::StatusCode::OK {
+                return None;
+            }
+            // Trailers-only (an error) puts the status in the headers.
+            let early = resp.headers().get("grpc-status").cloned();
+            let got = http_body_util::Limited::new(resp.into_body(), 1024).collect().await.ok()?;
+            let status = got.trailers().and_then(|t| t.get("grpc-status").cloned()).or(early)?;
+            Some((status, got.to_bytes()))
+        };
+        let Ok(Some((status, bytes))) = tokio::time::timeout(Duration::from_secs(5), answer).await else { return false };
+        status == "0" && grpc_serving(&bytes)
+    }
+
     /// Start `inst` and wait until it answers (web) or has kept running (worker).
     async fn start(&self, inst: &Arc<Inst>, run: &Run, health: Option<&str>, deadline: Instant) -> Result<Option<SocketAddr>, WakeError> {
         let crash_stop = inst.stopping.lock().take();
@@ -791,9 +933,14 @@ impl EnvLive {
         let (mut looked, mut hint) = (Instant::now(), None);
         match (run.kind, addr) {
             (RunType::Web, Some(a)) => loop {
-                // A TCP service is up when its port accepts; anything else answers HTTP.
-                let up = if run.tcp {
+                // A TCP service is up when its port accepts; a UDP one once it runs (nothing to
+                // ask over UDP); anything else answers HTTP.
+                let up = if run.udp {
+                    true
+                } else if run.tcp {
                     tcp_answers(a).await
+                } else if let Some(svc) = run.health_grpc.as_deref() {
+                    self.answers_grpc(a, svc).await
                 } else {
                     self.answers(a, health, run.h2c).await
                 };
@@ -903,7 +1050,7 @@ impl EnvLive {
     fn claim_idle(&self, i: &Inst) -> Option<Phase> {
         let _picking = self.insts.lock();
         let mut phase = i.phase.lock();
-        if i.in_flight() > 0 || !matches!(*phase, Phase::Running(_) | Phase::Suspended(_)) {
+        if i.in_flight() > 0 || i.held() || !matches!(*phase, Phase::Running(_) | Phase::Suspended(_)) {
             return None;
         }
         Some(std::mem::replace(&mut *phase, Phase::Stopping))
@@ -1396,7 +1543,9 @@ impl EnvLive {
         let was_awake = self.awake_count() as u32;
         let n = match run.kind {
             RunType::Cron => 0,
-            // A worker following a backlog starts at what it wants, not back at its floor.
+            // A worker following a backlog starts at what it wants, not back at its floor; one
+            // that scales to zero still starts one, so the deploy sees it boot (it goes once
+            // it's caught up for `scale_down_after`).
             RunType::Worker => run.min_instances.max(1).max(if run.scale.is_some() { self.wanted.load(Ordering::SeqCst) } else { 0 }),
             RunType::Web => was_awake.max(run.min_instances).max(1),
         }
@@ -1639,7 +1788,7 @@ impl EnvLive {
                 // Asleep and frozen: kept so, nothing asked of it (a frozen process answers nothing).
                 (_, Some(a)) if a.paused => Some(Phase::Suspended(a.addr)),
                 (RunType::Web, Some(Adopted { addr: Some(a), .. })) => {
-                    let up = if tpl.run.tcp { tcp_answers(a).await } else { self.answers(a, None, tpl.run.h2c).await };
+                    let up = if tpl.run.udp { true } else if tpl.run.tcp { tcp_answers(a).await } else { self.answers(a, None, tpl.run.h2c).await };
                     up.then_some(Phase::Running(Some(a)))
                 }
                 (RunType::Web, Some(_)) => None,
@@ -1682,6 +1831,12 @@ impl EnvLive {
     }
 
     /// A scaling worker's instances for its backlog now.
+    /// Its backlog couldn't be read: unknown until it can, so a worker that may scale to zero
+    /// keeps one meanwhile (what it wanted stays).
+    pub fn forget_backlog(&self) {
+        self.backlog.store(u64::MAX, Ordering::SeqCst);
+    }
+
     pub fn set_wanted(&self, n: u32, backlog: Option<u64>) {
         self.wanted.store(n, Ordering::SeqCst);
         self.backlog.store(backlog.unwrap_or(u64::MAX), Ordering::SeqCst);
@@ -1831,6 +1986,30 @@ impl EnvLive {
         *self.template.lock() = None;
     }
 
+    /// A file instances made from now on get (`path`, its contents), in place of one there: a
+    /// closed environment's trust bundle when its interception CA changes while it sleeps.
+    /// Its template made again while nothing runs (a closed environment's new CA and placeholders
+    /// while it slept): its next start uses it.
+    pub fn set_template(&self, tpl: Arc<Template>) {
+        *self.template.lock() = Some(tpl);
+    }
+
+    pub fn set_file(&self, path: &str, contents: &str) {
+        let with = |t: &Arc<Template>| {
+            let mut t = (**t).clone();
+            t.spec.files.retain(|(p, _)| p != path);
+            t.spec.files.push((path.to_string(), contents.to_string()));
+            Arc::new(t)
+        };
+        let mut tpl = self.template.lock();
+        if let Some(t) = tpl.as_ref() {
+            *tpl = Some(with(t));
+        }
+        if let Some((t, _)) = self.canary.lock().as_mut() {
+            *t = with(t);
+        }
+    }
+
     /// The service's registry login changed (None: it went): instances made from now on use it.
     pub fn set_registry(&self, login: Option<&crate::runtime::RegistryLogin>) {
         let strip = |t: &Arc<Template>| {
@@ -1908,7 +2087,7 @@ impl EnvLive {
         };
         for tpl in due {
             if tpl.run.kind == RunType::Web
-                && let Some(path) = tpl.run.health_path.as_deref()
+                && let Some(path) = tpl.run.health_path.as_deref().or(tpl.run.health_grpc.as_ref().map(|_| GRPC_HEALTH))
             {
                 let mine: Vec<Arc<Inst>> = insts.iter().filter(|i| i.deployment == tpl.deployment).cloned().collect();
                 self.check_health(&mine, path, &tpl.run).await;
@@ -1968,7 +2147,19 @@ impl EnvLive {
                         // Its sidecars' use is the instance's (usage adds it): so is their size.
                         if let Some(tpl) = self.serving(&i.deployment) {
                             used += d;
-                            capacity += (tpl.run.cpu + tpl.spec.sidecars_size().0) * elapsed;
+                            let size = tpl.run.cpu + tpl.spec.sidecars_size().0;
+                            capacity += size * elapsed;
+                            // Busy on its own (`run.busy_cpu`): held awake as a request would.
+                            if let Some(b) = tpl.run.busy_cpu.filter(|_| elapsed > 0.0 && size > 0.0) {
+                                let pct = d / elapsed / size * 100.0;
+                                if pct >= b as f64 {
+                                    let was = i.held();
+                                    i.hold(BUSY_HOLD);
+                                    if !was {
+                                        self.log.stream(Stream::System).line(format!("{} kept awake: CPU at {pct:.0}%, over its {b}%", i.name));
+                                    }
+                                }
+                            }
                         }
                     }
                     *seen = Some(u.cpu_ns);
@@ -2082,7 +2273,14 @@ impl EnvLive {
                 _ => None,
             })
             .collect();
-        let probes = running.iter().map(|(i, a)| async move { (*i, *a, self.answers(*a, Some(path), h2c).await) });
+        let grpc = run.health_grpc.as_deref();
+        let probes = running.iter().map(|(i, a)| async move {
+            let ok = match grpc {
+                Some(svc) => self.answers_grpc(*a, svc).await,
+                None => self.answers(*a, Some(path), h2c).await,
+            };
+            (*i, *a, ok)
+        });
         for (i, addr, ok) in futures::future::join_all(probes).await {
             if ok {
                 i.health_fails.store(0, Ordering::SeqCst);
@@ -2155,10 +2353,11 @@ impl EnvLive {
             }
         };
         if scale_down
-            && let Some(i) = insts.iter().filter(|i| matches!(i.phase(), Phase::Running(_)) && i.in_flight() == 0).min_by_key(|i| *i.last_used.lock())
+            && let Some(i) = insts.iter().filter(|i| matches!(i.phase(), Phase::Running(_)) && i.in_flight() == 0 && !i.held()).min_by_key(|i| *i.last_used.lock())
             && self.claim_idle(i).is_some()
         {
-            let _ = self.runtime.stop(&i.name, Duration::from_secs(10)).await;
+            // SIGTERM, then the service's own drain to flush what it holds (`drain_s`).
+            let _ = self.runtime.stop(&i.name, self.drain_of(run)).await;
             *i.phase.lock() = Phase::Created;
             awake -= 1;
             *self.over_since.lock() = None;
@@ -2173,7 +2372,7 @@ impl EnvLive {
                 self.log.stream(Stream::System).line(format!("{} stopped: {why}", i.name));
                 continue;
             }
-            if i.in_flight() > 0 {
+            if i.in_flight() > 0 || i.held() {
                 continue;
             }
             let idle = i.last_used.lock().elapsed();
@@ -2181,7 +2380,7 @@ impl EnvLive {
                 Phase::Running(addr) if awake > run.min_instances => {
                     if idle >= sleep_after || (!self.runtime.can_suspend() && idle >= suspend_after.max(sleep_after)) {
                         if self.claim_idle(i).is_some() {
-                            let _ = self.runtime.stop(&i.name, Duration::from_secs(10)).await;
+                            let _ = self.runtime.stop(&i.name, self.drain_of(run)).await;
                             *i.phase.lock() = Phase::Created;
                             awake -= 1;
                         }
@@ -2191,7 +2390,7 @@ impl EnvLive {
                     }
                 }
                 Phase::Suspended(_) if idle >= sleep_after && awake > run.min_instances && self.claim_idle(i).is_some() => {
-                    let _ = self.runtime.stop(&i.name, Duration::from_secs(10)).await;
+                    let _ = self.runtime.stop(&i.name, self.drain_of(run)).await;
                     *i.phase.lock() = Phase::Created;
                     awake -= 1;
                 }
@@ -2234,9 +2433,14 @@ impl EnvLive {
     async fn keep_workers(self: &Arc<Self>, tpl: &Arc<Template>) {
         let scheduled = tpl.run.at(code_sql::now_ms());
         let run = &scheduled;
-        // A worker that follows its work runs what its backlog wants; else its floor.
+        // A worker that follows its work runs what its backlog wants; else its floor. One that
+        // may scale to zero keeps one while its backlog can't be read: nothing it can't see
+        // leaves its work undone.
         let target = match &run.scale {
-            Some(_) => self.wanted.load(Ordering::SeqCst).clamp(run.min_instances, run.max_instances.max(run.min_instances)),
+            Some(_) => {
+                let floor = if self.backlog.load(Ordering::SeqCst) == u64::MAX { run.min_instances.max(1) } else { run.min_instances };
+                self.wanted.load(Ordering::SeqCst).clamp(floor, run.max_instances.max(floor))
+            }
             None => run.min_instances,
         };
         let insts = self.instances();
@@ -2367,7 +2571,7 @@ impl EnvLive {
 
     /// One cron run: a fresh instance of the active deployment, to its exit or `timeout`.
     pub async fn run_once(self: &Arc<Self>, timeout: Duration) -> anyhow::Result<(String, Option<i32>, bool)> {
-        let e = self.run_to_exit(None, &[], timeout, None, tokio_util::sync::CancellationToken::new(), None).await?;
+        let e = self.run_to_exit(None, &[], timeout, None, tokio_util::sync::CancellationToken::new(), None, None).await?;
         Ok((e.deployment, e.code, e.timed_out))
     }
 
@@ -2375,6 +2579,7 @@ impl EnvLive {
     /// run, or a one-off job (`command` in place of the image's, with no port and no volume,
     /// since the service's own instance may be using it). `made` gets the container's name
     /// before it starts; the container is removed after, whatever happened.
+    #[allow(clippy::too_many_arguments)]
     pub async fn run_to_exit(
         self: &Arc<Self>,
         command: Option<&str>,
@@ -2383,8 +2588,13 @@ impl EnvLive {
         log: Option<LogSink>,
         cancel: tokio_util::sync::CancellationToken,
         name: Option<String>,
+        size: Option<(f64, u32)>,
     ) -> anyhow::Result<Exit> {
         let mut tpl = (*self.template().ok_or_else(|| anyhow::anyhow!("no deployment"))?).clone();
+        // A job's own size (Heroku's `run --size`): its container's, and what it's metered at.
+        if let Some((cpu, mb)) = size {
+            (tpl.spec.cpu, tpl.spec.memory_mb, tpl.run.cpu, tpl.run.memory_mb) = (cpu, mb, cpu, mb);
+        }
         anyhow::ensure!(command.is_some() || tpl.spec.volume.is_none() || !self.held.load(Ordering::SeqCst), "its volume is being restored");
         if let Some(cmd) = command {
             tpl.spec.command = Some(cmd.to_string());
@@ -2506,6 +2716,7 @@ mod tests {
                 vars: vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
                 port: Some(8080),
                 ports: vec![],
+                udp: false,
                 cpu: 0.5,
                 memory_mb: 512,
                 network: None,
@@ -2523,6 +2734,7 @@ mod tests {
             site: None,
             edge: Vec::new(),
             edge_service: String::new(),
+            intercept_hosts: Vec::new(),
         })
     }
 

@@ -51,6 +51,7 @@ mod analyze;
 mod cloud;
 mod elastic;
 mod elastic_restore;
+mod refs;
 mod s3;
 mod transfer;
 pub use analyze::analyze_repository;
@@ -58,6 +59,12 @@ pub use elastic::decode_id as decode_elasticsearch_id;
 pub use elastic_restore::{ShardView as RestoringShard, resume as resume_elasticsearch_restores};
 pub use s3::ALLOW_PRIVATE as S3_ALLOW_PRIVATE;
 pub(crate) use cloud::AZURE_CONTAINER;
+
+/// The settings of repository type `ty` that are credentials (`s3`'s `access_key`, …): any of
+/// them may be a roll secrets reference, set only through roll's control plane.
+pub fn credential_settings(ty: &str) -> &'static [&'static str] {
+    cloud::secret_names(ty)
+}
 
 /// The shard contents of this process's snapshots, by snapshot uuid and index name (one
 /// searcher per shard), and the snapshot operations running here.
@@ -77,6 +84,8 @@ pub struct SnapshotData {
     io: parking_lot::Mutex<std::collections::HashMap<String, Arc<transfer::RepoIo>>>,
     /// The cluster's `indices.recovery.max_bytes_per_sec`, which restores also pay.
     recovery: Arc<transfer::RateLimiter>,
+    /// Repositories' resolved credential references, kept while their digests stay the same.
+    refs: refs::KeptRefs,
     /// Restores from repositories Elasticsearch wrote, running here.
     elastic: elastic_restore::Running,
 }
@@ -728,12 +737,14 @@ pub async fn put_repository(ctx: &Ctx<'_>) -> EsResult<Reply> {
     }
     let mut settings = settings;
     validate_repository(ctx, &name, &ty, &settings)?;
+    let maker = refs::check(ctx, &name, &ty, &settings).await?;
     let secrets = cloud::take_secrets(ctx.cluster, &ty, &mut settings);
-    let mut repo = Repository { ty, settings, secrets };
+    let mut repo = Repository { ty, settings, secrets, refs_by: maker };
     // A branch registers its parent's bucket read-only unless told otherwise.
     if repo.settings.get("readonly").is_none() && crate::branch::inherited_location(ctx.cluster, &ctx.state(), &repo) {
         repo.settings.set("readonly", "true");
     }
+    let registering = name.clone();
     // A bucket is checked once registered (a write, a read and a delete); a repository that
     // fails stays registered, as on Elasticsearch, and the error is the answer.
     let registered = (repo.in_bucket() && verify).then(|| (name.clone(), repo.clone()));
@@ -759,6 +770,7 @@ pub async fn put_repository(ctx: &Ctx<'_>) -> EsResult<Reply> {
             Ok(())
         })
         .await?;
+    refs::forget(ctx.cluster, &registering);
     // A repository Elasticsearch wrote is read only: its snapshots list from its own data, and
     // no test object goes into it.
     if elastic_repository(ctx, &registered_name).await? {
@@ -878,6 +890,7 @@ pub async fn delete_repository(ctx: &Ctx<'_>) -> EsResult<Reply> {
             Ok(())
         })
         .await?;
+    refs::forget_unregistered(ctx.cluster, &ctx.state());
     Reply::acknowledged()
 }
 

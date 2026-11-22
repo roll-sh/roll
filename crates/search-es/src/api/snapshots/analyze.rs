@@ -211,7 +211,7 @@ pub async fn analyze_repository(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let blob_path = format!("temp-analysis-{}", random_uuid());
     let outcome = match repo.in_bucket() {
         true => {
-            let bucket = s3::Bucket::open(ctx.cluster, &name, &repo)?;
+            let bucket = s3::Bucket::open(ctx.cluster, &name, &repo).await?;
             let run = analyze_bucket(ctx, &bucket, &p, &sizes, &mut rng, &blob_path);
             match tokio::time::timeout(Duration::from_nanos(p.timeout.nanos().clamp(0, u64::MAX as i128) as u64), run).await {
                 Ok(Ok(o)) => o,

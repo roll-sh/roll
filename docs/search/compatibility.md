@@ -33,7 +33,7 @@ Reproduce the YAML numbers with `scripts/search-yaml-suites.sh roll` (set `ROLL_
   `-kuromoji`, `-nori`, `-smartcn` and `-icu` plugins added; `logsdb` and runtime fields rerun on
   2026-11-17). 46 suites pass every test
   Elasticsearch passes. What's left, largest first: x-pack
-  `platinum` (1,065 of 1,412; machine learning is most of it), plugins roll doesn't ship
+  `platinum` (1,080 of 1,412; machine learning is most of it), plugins roll doesn't ship
   (`mapper-annotated-text`, `-murmur3` and `-size`, `ingest-attachment`, `ingest-otel`, `prometheus`), `apm-data`'s templates and
   pipelines (1 of 26), cross-cluster replication (none),
   `mapper-unsigned-long` (33 of 34: a `terms` aggregation across `long` and `unsigned_long`
@@ -267,7 +267,7 @@ the discovery/store plugins.
 | `watcher` | `x-pack/plugin/watcher:mustache,painless,watcher` | plain | 92 | 89 | 89 | 89 | 0 |
 | `watcher-security` | `x-pack/plugin/watcher:security` | security | 9 | 9 | 9 | 9 | 0 |
 | `wildcard` | `x-pack/plugin/wildcard` | plain | 9 | 9 | 9 | 9 | 0 |
-| `platinum` | `rest-resources platinum:-esql,downsample,downsample-with-security,entsearch,eql,mustache,painless,transform,watcher` | security | 1728 | 1412 | 1065 | 1065 | 347 |
+| `platinum` | `rest-resources platinum:-esql,downsample,downsample-with-security,entsearch,eql,mustache,painless,transform,watcher` | security | 1728 | 1412 | 1080 | 1080 | 332 |
 | `esql` | `rest-resources platinum:esql` | plain | 619 | 549 | 549 | 549 | 0 |
 | `analysis-icu` | `plugins/analysis-icu` | plugins | 13 | 13 | 13 | 13 | 0 |
 | `analysis-kuromoji` | `plugins/analysis-kuromoji` | plugins | 7 | 7 | 7 | 7 | 0 |
@@ -323,7 +323,7 @@ the discovery/store plugins.
 <!-- test-search: watcher >= 89 -->
 <!-- test-search: watcher-security >= 9 -->
 <!-- test-search: wildcard >= 9 -->
-<!-- test-search: platinum >= 1065 -->
+<!-- test-search: platinum >= 1080 -->
 <!-- test-search: inference >= 161 -->
 <!-- test-search: esql >= 549 -->
 <!-- test-search: analysis-phonetic >= 5 -->
@@ -337,7 +337,7 @@ the discovery/store plugins.
 `platinum` by directory (roll / Elasticsearch passes): `ml` 349/618, `analytics` 113/114, `spatial`
 92/105, `security` 100/101, `rollup` 52/52, `exponential_histogram` 44/44, `vector-tile` 34/34,
 `api_key` 32/32, `aggregate-metrics` 26/28, `inference` 22/23, `search.vectors` 22/23, `wildcard`
-22/22, `terms_enum` 20/20, `rank_vectors` 0/15, `users` 15/15, `constant_keyword` 13/13,
+22/22, `terms_enum` 20/20, `rank_vectors` 15/15, `users` 15/15, `constant_keyword` 13/13,
 `counted_keyword` 8/11, `data_streams` 11/11, `migrate` 0/11, `change_password` 8/8, `roles` 8/8,
 `text_structure` 5/8, `enrich` 6/7, `privileges` 7/7, `profiling` 0/7, `token` 6/6, `versionfield`
 6/6, `async_search` 4/5, `redact` 5/5, `sql` 5/5, `user_profile` 5/5, `authenticate` 4/4, `logsdb`
@@ -345,6 +345,22 @@ the discovery/store plugins.
 `searchable_snapshots` 1/3, `snapshot` 1/3, `logging` 0/2, `migration` 2/2, `service_accounts` 2/2,
 `set_security_user` 2/2, `xpack` 0/2, `deprecation` 0/1, `graph` 1/1, `health` 0/1,
 `vectordb_document` 0/1, `voting_only_node` 1/1.
+
+`rank_vectors` (multi-vector fields for late-interaction reranking) is built: `element_type`
+`float` / `bfloat16` / `byte` / `bit`, `dims` from the mapping or the first document, each document's
+vectors flat in one binary doc value (`search_codec::vectors::multi`: no header, the count is the
+value's length over the vector width), `maxSimDotProduct` and `maxSimInvHamming` in
+`script_score`, `doc[...]` / `field(...)` vectors and magnitudes, `docvalue_fields`, `fields`, and
+the vectors left out of `_source` (inside `nested` too, and in nested inner hits) unless
+`exclude_vectors: false` or the includes name them, printed as their element type keeps them
+(`byte` and `bit` as integers, `bfloat16` rounded). Infinite float values are refused at index
+time, for `dense_vector` too, with Elasticsearch's message. roll keeps them in the stored `_source` and hides them on read, where
+Elasticsearch strips them and patches them back from the doc values. A MaxSim costs query vectors ×
+document vectors × dimensions for one document, so it polls the search's control (the request's
+`timeout` or `search.default_search_timeout`, and task cancellation) every 2^20 multiply-adds: a
+document with many vectors stops at the request's deadline instead of holding a search thread.
+Not built: a synthetic `_source` from the doc values (synthetic indices keep the vectors as sent)
+and `rank_vectors` in ES|QL.
 
 Largest gaps by suite (from the roll reports, `target/search-yaml/extended/roll-<suite>.json`):
 not implemented at all: the plugin mappers (`annotated_text`,
@@ -1008,6 +1024,54 @@ Checked against Elasticsearch 9.5.5 (captures in
   exactly as Elasticsearch's; a non-cancellable task answers `doesn't support cancellation`.
   `_cat/tasks` lists the real tasks. A client that disconnects cancels its search; a graceful
   stop lets requests run for 10 s, then cancels what still runs.
+- A node can cap how long one request that searches runs, so that no tenant's request holds a
+  worker of a node that many tenants share. Elasticsearch has no such cap. The cap is the node
+  setting `roll.search.max_time` (rolld's `--search-max-time`): 60 s on a daemon with an
+  operator token, none on an open daemon, and `0` turns it off. A value that isn't a time
+  stops the node from starting. The time is fixed once per request, when it holds its thread
+  pool slot, and bounds every phase, shard and nested search of it: the cap is never per shard
+  or per phase. A request's own `timeout` (or `search.default_search_timeout`) still applies per
+  shard's query phase, as on Elasticsearch, so a caller's larger `timeout` is held to the cap.
+  - **The query phase:** when the cap fires, the search answers as Elasticsearch does when its
+    timeout fires: the hits and aggregations collected so far, `timed_out: true` and the same
+    `_shards`, or a 429 `search_timeout_exception` with `allow_partial_search_results=false`.
+    This covers `_search`, `_msearch` (one cap for the whole request), search templates,
+    search applications, retrievers (one cap for every child), `knn`, point-in-time pages and
+    each cross-cluster part (each node applies its own cap). Async search runs its search as a
+    request of its own: on a node with a cap it returns partial results, `timed_out: true`, once
+    the cap passes.
+  - **Scroll pages:** each page is a request with its own cap. Elasticsearch never times a
+    scroll out. A page that passes the cap fails with `search_timeout_exception` and leaves the
+    scroll where it was, because a page cut short would leave documents out of the scroll for
+    good.
+  - **`_count`:** a shard the cap stopped is reported as failed (`search_timeout_exception` in
+    `_shards.failures`), so a count is never short without a sign; when every shard failed, the
+    count fails. A shard the caller's own `timeout` stopped counts what it reached, as on
+    Elasticsearch, and with `allow_partial_search_results=false` a timed-out shard fails the
+    count.
+  - **Phases without a partial answer:** the DFS and `knn` phases, the reduce (pipeline and
+    `scripted_metric` scripts), the fetch phase (`script_fields`, inner hits) and `_explain`
+    fail with `search_timeout_exception` once the cap passes. Elasticsearch doesn't time these
+    out.
+  - **By-query requests** (`_delete_by_query`, `_update_by_query`, `_reindex`, with or without
+    `wait_for_completion`): the cap bounds each slice's search, never the run's writes or
+    throttle waits, so a long sliced run whose every scan stays under the cap succeeds. A scan
+    that passes the cap fails its slice with `search_timeout_exception` before the slice writes
+    anything. The other slices run to their end (refreshed with `refresh=true`), and the run
+    fails with the first failed slice's error, the others' suppressed, as a run with a failed
+    slice does.
+  - **Query languages:** ES|QL (`_query` and `_query/async`) and SQL read indices through doc
+    values or an internal scroll, both under the request's cap: past it the query fails with
+    `search_timeout_exception`. PPL pages over a point in time and fails the same way. EQL's
+    searches are capped like any search: with `allow_partial_search_results` (the default) the
+    response then says so (`timed_out: true`, `is_partial: true`), and without it the query
+    fails.
+  - **Background jobs:** each search a job makes is a request with its own cap. Transforms,
+    enrich policies' loads, downsampling and the rollup indexer page through their sources with
+    `allow_partial_search_results=false`, so a page the cap cut short is a failed search that
+    the job reports and retries, never a short page taken as complete.
+  - **Not covered:** the scripts of `_update` and of by-query writes, and ingest scripts. They
+    keep Painless's loop limit (`max_loop_counter`), so one run of a script is bounded.
 - Thread pools gate requests: `search` (int(p * 3 / 2) + 1, queue size * 1000), `write` (p,
   queue max(10000, 750 * p)), `get` and `analyze` (1, queue 16) take a slot per request and
   queue FIFO behind a full pool; a full queue refuses with 429
@@ -1034,6 +1098,27 @@ Checked against Elasticsearch 9.5.5 (captures in
   answers; later heads on a kept-alive connection are hyper's (it closes on the malformed
   ones and frames a `Content-Length` next to `Transfer-Encoding` by the latter); and roll sends
   `Content-Length` where Elasticsearch streams some responses chunked (`_cat`).
+- CORS (`http.cors.*`, set per cluster through roll's API: README, "Search from the
+  browser"): diffed against Elasticsearch 9.5.5 with `http.cors.enabled: true`. Preflights are
+  answered before authentication (200 with one `Access-Control-Allow-Methods` and one
+  `Access-Control-Allow-Headers` line per value, in Elasticsearch's order, and
+  `Access-Control-Max-Age`; an empty 403 for another origin); authenticated requests from an
+  origin that isn't allowed get an empty 403, unauthenticated ones their 401 without CORS
+  headers; answers to an allowed origin, errors included, carry `Access-Control-Allow-Origin`,
+  `Vary: origin` and `Access-Control-Expose-Headers: X-elastic-product`; the request's own host
+  counts as allowed. Differences: `*` is answered with `Vary: origin` too, a preflight carries no
+  `Date` (roll sends none anywhere), `allow-credentials` can't be turned on, and the settings
+  apply per cluster without a restart. A browser key's rate limit answers 429
+  `es_rejected_execution_exception` with `Retry-After`, which Elasticsearch has no setting for.
+- Document level security around a filter, as Elasticsearch keeps it: documents another query
+  reads (a terms lookup, an indexed shape, `more_like_this` items, `percolate`'s stored
+  document) are read as the caller, so one its filter hides is missing and hidden fields are left
+  out; term vectors of a hidden document are `found: false`; `suggest` and `profile` are refused
+  (400 `action_request_validation_exception`) where the caller's documents are restricted. A
+  stored result (async search, ES|QL, EQL, SQL, and SQL cursors) is its opener's (the API key, or
+  the user and realm): anyone else gets 404 for it, its status and its delete (a cursor: unknown),
+  except that `cancel_task` may delete it. One stored before owners were recorded is the
+  cluster's superuser's alone.
 - Slow logs: `index.search.slowlog.threshold.{query,fetch}.*` and
   `index.indexing.slowlog.threshold.index.*` log a shard's query or fetch phase, or an index
   operation on the primary, that took longer than a threshold (`took > threshold`, the highest
@@ -1579,7 +1664,42 @@ the rest are skipped by the tests' own prerequisites.
   hits. A remote that fails a later scroll page while it may not be skipped
   (`skip_unavailable: false`) fails that page, and the hits the clusters after it sent for that
   page are lost to the scroll (Elasticsearch fails the shards' parts alike). Not across clusters
-  yet: suggesters and ES|QL `FROM <alias>:<index>`.
+  yet: suggesters.
+- ES|QL across clusters (README.md, "Cross-cluster search") differs from Elasticsearch 9.5.5
+  where roll plans per cluster rather than sending one physical plan: a field mapped with
+  different types on different clusters is unsupported (null) in every cluster's part, where
+  Elasticsearch resolves the union type and its conversion functions across clusters;
+  `FORK`, subqueries, views, `TS`, `PROMQL` and `SET unmapped_fields` over remote indices read
+  the remotes' rows through cross-cluster search on the coordinating cluster (no `_clusters`).
+  There, a command Elasticsearch runs with each cluster's own resources (`LOOKUP JOIN`,
+  `ENRICH _remote`, `ENRICH` in `_any` mode before any `LIMIT`, `STATS`, `FORK` or
+  `ENRICH _coordinator`; inside a `FORK` branch or a subquery too) is refused, with
+  Elasticsearch's placement error where it has one; `ENRICH _coordinator`, and `_any` after one
+  of those commands, use the local policy, as in Elasticsearch. A quoted `METADATA` name is unresolved as in Elasticsearch, but one holding
+  characters Elasticsearch's lexer refuses there (a `|`) is that verification error rather than
+  Elasticsearch's lexer error. A command that reads each cluster's own resources (`ENRICH _remote`, `ENRICH` in
+  `_any` mode before any `LIMIT`, `STATS` or `ENRICH _coordinator`, `LOOKUP JOIN`) runs in the
+  clusters' parts or is refused: Elasticsearch first drops an `INLINE STATS` whose columns
+  nothing reads, and then runs such a command after it, where roll refuses it as after one
+  that's read (`… can't be executed after [INLINE STATS …]`), runs an `ENRICH` in `_any` mode
+  after an `INLINE STATS` with each cluster's policy, where roll refuses it, and drops a `SORT`
+  before a `STATS`, where roll refuses an `ENRICH _remote` between them. Elasticsearch also runs
+  `SORT | WHERE ... | ENRICH _remote | LIMIT` in each cluster; roll refuses an `ENRICH _remote`
+  after a `SORT` whose `LIMIT` a `WHERE` (or another command that isn't `EVAL`, `KEEP`, `DROP`,
+  `RENAME` or `ENRICH`) separates it from. A lookup index's field the clusters map with
+  different types is a union type, as in Elasticsearch: using it after the `LOOKUP JOIN` is
+  Elasticsearch's 400 (`Cannot use field [lab] due to ambiguities ...`) before any part runs.
+  An enrich field the clusters' policy indices map with different types is found once the
+  parts answer: the commands after the merge can't use it (the same 400, and a `STATS` over it
+  in the parts is a 400 too), but the parts' own commands after the `ENRICH` still read it on
+  each cluster, where Elasticsearch refuses any use. roll doesn't require the local
+  `monitor_enrich` an ENRICH's policy resolution
+  needs in Elasticsearch (the remote's is required, as there). A
+  remote that can't be reached while it may not be skipped fails the query with roll's own
+  `connect_transport_exception` reason (502, as Elasticsearch's status). A policy a remote lacks
+  is reported once that remote's part answered (it fails before reading anything), not before
+  any part starts, and so is a policy whose enrich fields differ between clusters. `_clusters.details.*._shards` counts each part's indices' primary shards,
+  and a remote's `took` is its part's.
 - OpenSearch-flavor clusters' `cluster.remote.*` and `_remote/info` follow OpenSearch 3.9
   (`skip_unavailable` defaults to `false`, a seed or proxy address must be `host:port`, no
   `cluster_credentials`), but a search naming `alias:index` on them is refused (400), loopback

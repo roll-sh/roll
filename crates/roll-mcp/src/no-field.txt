@@ -1,0 +1,30 @@
+# Body fields a product's HTTP contract lists for a route whose tool doesn't take them, with why.
+# `METHOD route field  why`, one per line; the test in tools.rs fails on a field that is neither a
+# tool's argument nor here (map it, or say why not), and on a line whose field a tool takes now.
+POST /v1/secrets/projects/{project}/environments/{env}/rollback bypass           an admin landing past a protected environment's approvals: a person's call
+POST /v1/secrets/projects/{project}/environments/{env}/requests/{id}/apply bypass   an admin landing past a protected environment's approvals: a person's call
+POST /v1/secrets/projects/{project}/transit key                                  key material brought in: a credential in a tool's arguments (roll makes one instead)
+POST /v1/secrets/projects/{project}/transit vault_version                        goes with a brought key (above)
+POST /v1/secrets/projects/{project}/transit/{name}/rotate key                    key material brought in: a credential in a tool's arguments (roll makes one instead)
+POST /v1/secrets/projects/{project}/transit/{name}/rotate vault_version          goes with a brought key (above)
+POST /v1/secrets/projects/{project}/transit/{name}/encrypt items                   the batch form: a tool call does one, call it once per item
+POST /v1/secrets/projects/{project}/transit/{name}/decrypt items                   the batch form: a tool call does one, call it once per item
+POST /v1/secrets/projects/{project}/transit/{name}/rewrap items                    the batch form: a tool call does one, call it once per item
+POST /v1/secrets/projects/{project}/transit/{name}/sign items                      the batch form: a tool call does one, call it once per item
+POST /v1/secrets/projects/{project}/transit/{name}/verify items                    the batch form: a tool call does one, call it once per item
+POST /v1/secrets/projects/{project}/transit/{name}/hmac items                      the batch form: a tool call does one, call it once per item
+POST /v1/secrets/projects/{project}/transit/{name}/hmac/verify items               the batch form: a tool call does one, call it once per item
+GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/logs follow            a live stream (server-sent events): a tool answers once; call it again for newer lines
+GET /v1/apps/services/{id}/environments/{env}/logs follow                          a live stream (server-sent events): a tool answers once; call it again with since
+GET /v1/apps/services/{id}/environments/{env}/runs/{run}/logs follow               a live stream (server-sent events): a tool answers once
+GET /v1/apps/services/{id}/environments/{env}/jobs/{job}/logs follow               a live stream (server-sent events): a tool answers once
+GET /v1/previews/{id}/logs follow                                                  a live stream (server-sent events): a tool answers once
+GET /v1/apps/services/{id}/environments/{env}/metrics format                       Prometheus text for a scraper; the tool answers JSON
+GET /v1/secrets/projects/{project}/audit format                                    a CSV export for people; the tool answers JSON rows
+GET /v1/secrets/projects/{project}/environments/{env}/values format                a file to write (dotenv, docker, kubernetes…); the tool answers JSON (roll secrets export writes files)
+GET /v1/secrets/projects/{project}/environments/{env}/values name                  only with format=kubernetes (above)
+GET /v1/secrets/projects/{project}/environments/{env}/values namespace             only with format=kubernetes (above)
+GET /v1/secrets/projects/{project}/environments/{env}/values digest                a cache validator for SDKs polling a folder, not a question an agent asks
+GET /v1/secrets/projects/{project}/environments/{env}/values codes                 TOTP codes beside their keys: secrets_totp answers one, audited as itself
+DELETE /v1/secrets/projects/{project}/environments/{env} confirm                   a protected environment's delete repeats its slug: a person's confirmation, not an argument an agent fills
+DELETE /v1/workspace/projects/{id} confirm                                        a project holding secrets repeats its name: a secrets admin's confirmation, not an argument an agent fills

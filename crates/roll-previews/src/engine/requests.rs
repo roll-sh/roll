@@ -73,9 +73,17 @@ impl Engine {
         }
     }
 
-    /// The ids of `owner`'s workspace projects (a signed-in person's).
+    /// The ids of the workspace projects `owner` (a signed-in person) is a member of: what their
+    /// role lets them do in each, roll-access decides by the catalogue (previews are a member
+    /// product, docs/members.md).
     pub fn projects_of(&self, owner: &str) -> Result<std::collections::HashSet<String>> {
-        Ok(self.workspace.list(roll_workspace::Scope::Owner(owner))?.into_iter().map(|p| p.id).collect())
+        Ok(self.workspace.list(roll_workspace::Scope::Member(owner))?.into_iter().map(|p| p.id).collect())
+    }
+
+    /// The ids of the workspace projects `owner` owns (role `owner`): all a person reaches when no
+    /// role was decided for the request (it didn't come through roll-access's gate).
+    pub fn projects_owned(&self, owner: &str) -> Result<std::collections::HashSet<String>> {
+        Ok(self.workspace.list(roll_workspace::Scope::Member(owner))?.into_iter().filter(|p| p.role.is_some_and(|r| r.as_str() == "owner")).map(|p| p.id).collect())
     }
 
     /// A workspace project, or a 404.
@@ -579,6 +587,13 @@ impl Engine {
     /// (Vercel's branch-scoped variables, Railway's per-environment ones). Its services redeploy
     /// with them. roll's own (`ROLL_*`, `PORT`) and its branches' are refused: those always win.
     pub async fn set_vars(&self, id: &str, changes: BTreeMap<String, Option<String>>) -> Result<BTreeMap<String, String>> {
+        self.set_vars_as(id, changes, &crate::ports::Asker { operator: true, user: None, grant: None }).await
+    }
+
+    /// [`Engine::set_vars`] by `who`: a value that's a reference to another environment's key
+    /// (`roll://ENV[/folder]/KEY`) needs their reveal there (the environment the previews follow
+    /// needs none), and is read as them at every converge, as the rules' references are.
+    pub async fn set_vars_as(&self, id: &str, changes: BTreeMap<String, Option<String>>, who: &crate::ports::Asker<'_>) -> Result<BTreeMap<String, String>> {
         let r = self.store.row(id)?;
         if r.desired == Desired::Deleted {
             return Err(Error::Conflict("the preview is being deleted".into()));
@@ -596,10 +611,14 @@ impl Engine {
             if v.as_ref().is_some_and(|v| v.len() > MAX_VAR_BYTES) {
                 return Err(Error::BadRequest(format!("{k}: at most {MAX_VAR_BYTES} bytes")));
             }
-            // A person's own reference into roll secrets waits for its maker-checked binding
-            // (roll secrets' `bind_ref`); the project's rules (`env`, `env_for`) take one now.
-            if v.as_deref().is_some_and(|v| v.trim_start().to_ascii_lowercase().starts_with("roll://")) {
-                return Err(Error::BadRequest(format!("{k}: a preview's own variable can't be a roll:// reference yet; put it in the project's env rules")));
+            // A reference: roll secrets' to read, as whoever set it. A look-alike isn't kept as text.
+            if let Some(v) = v.as_deref().filter(|v| v.trim_start().to_ascii_lowercase().starts_with("roll://")) {
+                let reveal = self.reveal.get().ok_or_else(|| Error::BadRequest("roll:// references need roll secrets on this node".into()))?;
+                let (env, folder) = reveal.place(v).map_err(|e| Error::BadRequest(format!("{k}: {e}")))?;
+                let base = self.store.settings(&r.project_id)?.secrets.base;
+                if env != base && !reveal.may_reveal(who, &r.project_id, &env, &folder) {
+                    return Err(Error::Forbidden(format!("{k}: naming {env}'s keys needs reveal on {env} in roll secrets")));
+                }
             }
         }
         // Masked from now on, before its services (or roll apps) are given it.
@@ -617,6 +636,11 @@ impl Engine {
             }
             Ok(())
         })?;
+        let by = who.principal();
+        for (k, v) in &changes {
+            let reference = v.as_deref().filter(|v| crate::settings::is_reference(v));
+            self.store.set_var_ref(&r.project_id, id, k, reference.map(|x| (x, by.as_str())))?;
+        }
         let names: Vec<&str> = vars.keys().map(String::as_str).collect();
         self.store.log(id, &if names.is_empty() { "its own variables removed".to_string() } else { format!("its own variables: {}", names.join(", ")) })?;
         self.store.update(id, |row| row.next_at = 0)?;

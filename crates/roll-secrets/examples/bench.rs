@@ -8,6 +8,11 @@
 //! reads a second, serialization retries (the database's rolled-back transactions; reads run
 //! outside transactions), errors (failed reads, and reads whose audit row was never written), and
 //! the writer's changes, p99 and failures.
+//!
+//! `… --example bench -- big 1000,9900`: one change of that many new keys (an `.env` import, a
+//! move-in), then one change of the same keys' new values (a re-import, a promote), each into a
+//! fresh project. A line per change: wall time and, on Postgres with `pg_stat_statements` loaded,
+//! the statements it ran and the three that took longest.
 
 use roll_secrets::{Batch, Caller, Keyring, Op, Options, Secrets};
 use std::sync::Arc;
@@ -19,6 +24,10 @@ fn main() {
         let secs: u64 = std::env::args().nth(3).and_then(|a| a.parse().ok()).unwrap_or(15);
         let nodes: usize = std::env::args().nth(4).and_then(|a| a.parse().ok()).unwrap_or(1);
         return concurrent(&ns, secs, nodes);
+    }
+    if std::env::args().nth(1).as_deref() == Some("big") {
+        let ns: Vec<usize> = std::env::args().nth(2).unwrap_or("1000,9900".into()).split(',').map(|n| n.parse().unwrap()).collect();
+        return big(&ns);
     }
     let n: usize = std::env::args().nth(1).and_then(|a| a.parse().ok()).unwrap_or(2000);
     let dir = tempfile::tempdir().unwrap();
@@ -92,6 +101,27 @@ fn main() {
     }
     for _ in 0..2 {
         time("reach (300 importers)", &mut || drop(s.reach(&project, "production", "/", None, &c).unwrap()));
+    }
+    // A sandbox's outgoing request swapping a placeholder (docs/secrets.md, "Using a key without
+    // seeing it"): what roll's egress proxy calls per request, over 1,000 calls.
+    use roll_secrets::proxy::{Place, Position};
+    let hosts = roll_secrets::placeholders::Hosts { hosts: vec!["api.example.com".into()], header: Some("Authorization: Bearer {}".into()), query: None, untrusted: false };
+    s.set_hosts(&project, "production", "/", "K00001", hosts, &c).unwrap();
+    let sandbox = s.untrusted(&project, &Caller::consumer("sandbox:bench")).unwrap();
+    let ask = roll_secrets::placeholders::Ask { minutes: None, maker: Some("operator") };
+    let v = s.values_with_placeholders(&project, "production", "/", "sandbox:bench", false, ask, &sandbox).unwrap();
+    let ph = v.values["K00001"].expose().to_string();
+    let bearer = format!("Bearer {ph}");
+    for _ in 0..2 {
+        let mut ms: Vec<f64> = (0..1000)
+            .map(|_| {
+                let t = Instant::now();
+                drop(s.substitute(&ph, "api.example.com", Position { place: Place::Header, name: "authorization", value: &bearer }).unwrap());
+                t.elapsed().as_secs_f64() * 1000.0
+            })
+            .collect();
+        ms.sort_by(f64::total_cmp);
+        println!("{backend:>8} {n:>6} keys  {:<24} {:>8.2} ms p50 {:>8.2} ms p99", "substitute", ms[500], ms[990]);
     }
 }
 
@@ -193,4 +223,53 @@ fn concurrent(ns: &[usize], secs: u64, nodes: usize) {
         before = after;
     }
     probe.write(|c| c.execute_batch(&format!("DROP SCHEMA {schema} CASCADE"))).unwrap();
+}
+
+fn big(ns: &[usize]) {
+    let dir = tempfile::tempdir().unwrap();
+    let ws_db = code_sql::Db::open(&code_sql::Target::Sqlite(dir.path().join("workspace.db"))).unwrap();
+    let ws = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
+    let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("secrets.db")), "bench_big").unwrap();
+    let backend = format!("{:?}", db.backend());
+    let stats = db.backend() == code_sql::Backend::Postgres && db.read(|c| c.query_row("SELECT COUNT(*) FROM pg_extension WHERE extname = 'pg_stat_statements'", (), |r| r.get::<_, i64>(0))).unwrap_or(0) > 0;
+    let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), deliver: None, open: true, trust_forwarded_for: false, web_url: None, grants: None, people: None, kms: None, sts: None, outside: None, directory: None, github: None, clouds: None, workloads: None, gateways: None };
+    let s = Secrets::new(db.clone(), ws.clone(), opts).unwrap();
+    let c = Caller::operator();
+    let load = || std::fs::read_to_string("/proc/loadavg").unwrap_or_default().split_whitespace().next().unwrap_or("?").to_string();
+    for &n in ns {
+        let project = ws.create("", &format!("big-{n}"), "", None).unwrap().id;
+        for (what, round) in [("new keys", 0), ("new values", 1)] {
+            let ops: Vec<Op> = (0..n)
+                .map(|i| Op::Set { key: format!("K{i:05}"), value: Some(format!("value-{round}-{i:05}-abcdefghijklmnop")), comment: None, tags: None, kind: None, link: None, path: None, expires_at: None, if_version: None })
+                .collect();
+            if stats {
+                db.read(|c| c.query_row("SELECT 1 FROM public.pg_stat_statements_reset()", (), |_| Ok(()))).unwrap();
+            }
+            let load_start = load();
+            let t = Instant::now();
+            let a = s.batch(&project, "production", Batch { path: None, message: None, ops, if_seq: None }, &c).unwrap();
+            let ms = t.elapsed().as_secs_f64() * 1000.0;
+            assert_eq!(a.items.len(), n);
+            let mut line = format!("{backend:>8} {n:>6} keys  one change, {what:<10} {ms:>9.1} ms  load {load_start}");
+            if stats {
+                let (calls, top) = db
+                    .read(|c| {
+                        let calls: i64 = c.query_row("SELECT COALESCE(SUM(calls), 0)::bigint FROM public.pg_stat_statements WHERE query NOT LIKE '%pg_stat_statements%'", (), |r| r.get(0))?;
+                        let top: Vec<(String, i64, f64)> = c.query(
+                            "SELECT query, calls, total_exec_time FROM public.pg_stat_statements WHERE query NOT LIKE '%pg_stat_statements%' ORDER BY total_exec_time DESC LIMIT 3",
+                            (),
+                            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                        )?;
+                        Ok::<_, code_sql::Error>((calls, top))
+                    })
+                    .unwrap();
+                line += &format!("  {calls} statements");
+                for (q, calls, ms) in top {
+                    let q: String = q.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(70).collect();
+                    line += &format!("\n{:>40} {calls:>6} x  {ms:>8.1} ms  {q}", "");
+                }
+            }
+            println!("{line}");
+        }
+    }
 }

@@ -55,11 +55,12 @@ pub struct ResourceRef {
     pub kind: Kind,
     pub r#ref: String,
     untrusted: bool,
+    placeholders: bool,
 }
 
 impl ResourceRef {
     pub fn new(kind: Kind, r#ref: impl Into<String>) -> ResourceRef {
-        ResourceRef { kind, r#ref: r#ref.into(), untrusted: false }
+        ResourceRef { kind, r#ref: r#ref.into(), untrusted: false, placeholders: false }
     }
 
     /// The same resource as a copy nobody vetted (a branch, a clone, anything whose code or data
@@ -72,6 +73,18 @@ impl ResourceRef {
 
     pub fn is_untrusted(&self) -> bool {
         self.untrusted
+    }
+
+    /// A resource whose requests go out through roll's egress proxy: a key bound to hosts
+    /// resolves as a placeholder the proxy swaps (docs/secrets.md, "Using a key without seeing
+    /// it"), sensitive or not, so the resource never holds its value.
+    pub fn with_placeholders(mut self) -> ResourceRef {
+        self.placeholders = true;
+        self
+    }
+
+    pub fn wants_placeholders(&self) -> bool {
+        self.placeholders
     }
 
     /// Who it is in the audit log: `storage:bucket:<ref>`, `search:search:<ref>`, …, with
@@ -123,7 +136,11 @@ impl std::fmt::Display for Maker {
 /// A resolved reference. `value` redacts itself and is wiped on drop.
 #[derive(Clone, Debug)]
 pub struct Resolved {
+    /// The value, or for a key bound to hosts that a resource asked placeholders for, the
+    /// placeholder (`rlph_…`) its proxy swaps.
     pub value: Value,
+    /// The placeholder's record, when `value` is one.
+    pub placeholder: Option<crate::placeholders::Placeholder>,
     /// The version of the key read.
     pub version: i64,
     /// When the value stops working outside roll, if the key says (ms).
@@ -142,10 +159,13 @@ pub enum Refusal {
     /// another project.
     #[error("not trusted: {0}")]
     NotTrusted(String),
-    /// Whoever chose the reference may not reveal it ([`Secrets::bind_ref`]'s caller, or a
-    /// [`Maker`] since demoted, disabled, revoked or no longer on the project).
+    /// Whoever chose the reference may not reveal it ([`Secrets::bind_ref`]'s caller).
     #[error("not allowed: {0}")]
     NotAllowed(String),
+    /// Whoever chose it (a [`Maker`]) can no longer reveal it, or sign in: demoted, disabled,
+    /// revoked or no longer on the project ([`crate::Error::MakerUnreachable`] over HTTP).
+    #[error("maker unreachable: {0}")]
+    MakerUnreachable(String),
     #[error("no such key: {0}")]
     NoSuchKey(String),
     /// A protected environment, or only reachable through one, for an untrusted reader (an
@@ -254,14 +274,14 @@ impl Secrets {
     /// as `secrets.resolve` by the resource, naming the maker.
     pub fn resolve_as(&self, resource: &ResourceRef, reference: &str, maker: &Maker) -> Result<Resolved, Refusal> {
         let (project, r, caller) = self.as_maker(resource, reference, maker)?;
-        self.resolve_one(&project, &r.env, &r.path, &r.key, &caller, resource.untrusted)
+        self.resolve_one(&project, &r.env, &r.path, &r.key, &caller, resource.untrusted, resource)
     }
 
     /// The digest of the folder `reference` reads, as `maker` may now: refused exactly as
     /// [`Secrets::resolve_as`] would be, not audited, no value.
     pub fn digest_as(&self, resource: &ResourceRef, reference: &str, maker: &Maker) -> Result<String, Refusal> {
         let (project, r, caller) = self.as_maker(resource, reference, maker)?;
-        self.digest_one(&project, &r, &caller, resource.untrusted)
+        self.digest_one(&project, &r, &caller, resource)
     }
 
     /// The project, the reference, and the caller a read as `maker` runs as: the maker's rights
@@ -272,17 +292,22 @@ impl Secrets {
         let r = Reference::required(reference)?;
         let project = self.project_for(resource, r.project.as_deref())?;
         let (by, runtime_env) = maker.parts();
-        let gone = || Refusal::NotAllowed(format!("{by}, who chose it, can't reach roll secrets any more"));
+        let gone = || Refusal::MakerUnreachable(format!("{by}, who chose it, can no longer reveal {}:{} or can no longer sign in", r.env, r.path));
         let caller = self.maker_caller(by, &resource.consumer()).map_err(|e| match e {
             Error::Forbidden(_) => gone(),
             e => e.into(),
         })?;
-        self.may_reveal_for(&project, &r, &caller)?;
+        self.may_reveal_for(&project, &r, &caller).map_err(|e| match e {
+            Refusal::NotAllowed(_) => gone(),
+            e => e,
+        })?;
         let Some(env) = runtime_env else { return Ok((project, r, caller.not_runtime())) };
         if r.env != env {
             return Err(Refusal::NotAllowed(format!("{by} chose this for {env}'s runtime, not {}'s", r.env)));
         }
-        if !self.maker_reaches(by, &project)? {
+        // While its maker may still reveal what it reads, as they are now (a member removed or
+        // demoted, or no longer an admin, stops it at once).
+        if !self.maker_reaches(by, &[(crate::access::Action::Reveal, crate::access::Scope::at(&project, &r.env, &r.path))])? {
             return Err(gone());
         }
         Ok((project, r, Caller::consumer(&format!("{} (runtime read for {by})", resource.consumer()))))
@@ -301,7 +326,7 @@ impl Secrets {
     pub fn resolve_for(&self, resource: &ResourceRef, reference: &str) -> Result<Resolved, Refusal> {
         let r = Reference::required(reference)?;
         let project = self.project_for(resource, r.project.as_deref())?;
-        self.resolve_one(&project, &r.env, &r.path, &r.key, &Caller::consumer(&resource.consumer()), resource.untrusted)
+        self.resolve_one(&project, &r.env, &r.path, &r.key, &Caller::consumer(&resource.consumer()), resource.untrusted, resource)
     }
 
     /// The digest of the folder `reference` reads, under the same rules (no value, not audited):
@@ -310,11 +335,11 @@ impl Secrets {
     pub fn digest_for(&self, resource: &ResourceRef, reference: &str) -> Result<String, Refusal> {
         let r = Reference::required(reference)?;
         let project = self.project_for(resource, r.project.as_deref())?;
-        self.digest_one(&project, &r, &Caller::consumer(&resource.consumer()), resource.untrusted)
+        self.digest_one(&project, &r, &Caller::consumer(&resource.consumer()), resource)
     }
 
-    fn digest_one(&self, project: &str, r: &Reference, caller: &Caller, untrusted: bool) -> Result<String, Refusal> {
-        let (reader, _) = self.consumer_entry(project, &r.env, &r.path, &r.key, caller, untrusted)?;
+    fn digest_one(&self, project: &str, r: &Reference, caller: &Caller, resource: &ResourceRef) -> Result<String, Refusal> {
+        let (reader, _, _) = self.consumer_entry(project, &r.env, &r.path, &r.key, caller, resource.untrusted, resource.wants_placeholders())?;
         match self.digest(project, &r.env, &r.path, &reader) {
             Err(Error::NotFound(m)) => Err(Refusal::NoSuchKey(m)),
             d => Ok(d?),
@@ -322,7 +347,7 @@ impl Secrets {
     }
 
     /// The one project whose canvas holds `resource` and stands for it (and is `named`, if given).
-    fn project_for(&self, resource: &ResourceRef, named: Option<&str>) -> Result<String, Refusal> {
+    pub(crate) fn project_for(&self, resource: &ResourceRef, named: Option<&str>) -> Result<String, Refusal> {
         let who = resource.consumer();
         let ws = |e: roll_workspace::Error| Error::Internal(e.to_string());
         let ids = self.workspace.projects_of(resource.kind.as_str(), &resource.r#ref).map_err(ws)?;

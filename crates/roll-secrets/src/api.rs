@@ -33,6 +33,10 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route("/v1/secrets/health", get(health))
         .route("/v1/secrets/whoami", get(whoami))
         .route("/v1/secrets/search", get(find))
+        // Deleted projects in their recovery window (docs/secrets.md, "When a secret, an
+        // environment or the project goes").
+        .route("/v1/secrets/deleted", get(deleted_projects))
+        .route(&format!("{P}/recover"), post(recover_project))
         .route(P, get(overview).patch(project_settings))
         .route(&format!("{P}/grid"), get(grid))
         .route(&format!("{P}/compare"), get(compare))
@@ -58,6 +62,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{K}/versions/{{version}}/value"), get(version_value))
         .route(&format!("{K}/rotate"), post(rotate))
         .route(&format!("{K}/purge"), post(purge))
+        .route(&format!("{K}/hosts"), put(set_hosts).delete(clear_hosts))
         .route(&format!("{E}/values"), get(values))
         .route(&format!("{E}/digest"), get(digest))
         .route(&format!("{E}/insights"), get(insights))
@@ -80,6 +85,8 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/leases"), get(leases))
         .route(&format!("{P}/leases/{{id}}"), axum::routing::delete(revoke_lease))
         .route(&format!("{P}/leases/{{id}}/renew"), post(renew_lease))
+        .route(&format!("{P}/placeholders"), get(placeholders).delete(end_consumer))
+        .route(&format!("{P}/placeholders/{{id}}"), axum::routing::delete(revoke_placeholder))
         .route(&format!("{P}/identities"), get(identities).post(create_identity))
         .route(&format!("{P}/identities/{{id}}"), axum::routing::delete(delete_identity).patch(update_identity))
         .route(&format!("{P}/identities/{{id}}/jwks"), axum::routing::put(set_identity_keys))
@@ -94,6 +101,8 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/audit/sinks"), get(sinks).post(create_sink))
         .route(&format!("{P}/audit/sinks/{{id}}"), axum::routing::delete(delete_sink))
         .route(&format!("{P}/leaks"), post(scan_leaks))
+        .route(&format!("{P}/validity"), post(check_validity))
+        .route(&format!("{P}/unstored/{{fingerprint}}"), get(unstored))
         .route(&format!("{P}/health"), get(project_health))
         .route("/v1/secrets/findings", get(all_health))
         .route(&format!("{P}/rotations"), get(rotations))
@@ -171,22 +180,29 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .with_state(s)
 }
 
+/// The status and code an error answers with (the workspace answers secrets' refusals with them).
+pub fn status_of(e: &Error) -> (StatusCode, Option<&'static str>) {
+    match e {
+        Error::BadRequest(_) => (StatusCode::BAD_REQUEST, None),
+        Error::Invalid(code, _) => (StatusCode::BAD_REQUEST, Some(*code)),
+        Error::Unauthorized(_) => (StatusCode::UNAUTHORIZED, Some("unauthorized")),
+        Error::Forbidden(_) => (StatusCode::FORBIDDEN, Some("forbidden")),
+        Error::MakerUnreachable(_) => (StatusCode::FORBIDDEN, Some("maker_unreachable")),
+        Error::NotFound(_) => (StatusCode::NOT_FOUND, None),
+        Error::Gone(_) => (StatusCode::GONE, Some("gone")),
+        Error::Conflict(code, _) => (StatusCode::CONFLICT, Some(*code)),
+        Error::TooMany(_) => (StatusCode::TOO_MANY_REQUESTS, Some("rate_limited")),
+        Error::Unavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, Some("no_key")),
+        Error::KeyDenied(_) => (StatusCode::LOCKED, Some("kms_denied")),
+        Error::Frozen(_) => (StatusCode::LOCKED, Some("frozen")),
+        Error::Link(_) => (StatusCode::BAD_GATEWAY, Some("link")),
+        Error::Db(_) | Error::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, None),
+    }
+}
+
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
-        let (status, code) = match &self {
-            Error::BadRequest(_) => (StatusCode::BAD_REQUEST, None),
-            Error::Unauthorized(_) => (StatusCode::UNAUTHORIZED, Some("unauthorized")),
-            Error::Forbidden(_) => (StatusCode::FORBIDDEN, Some("forbidden")),
-            Error::NotFound(_) => (StatusCode::NOT_FOUND, None),
-            Error::Gone(_) => (StatusCode::GONE, Some("gone")),
-            Error::Conflict(code, _) => (StatusCode::CONFLICT, Some(*code)),
-            Error::TooMany(_) => (StatusCode::TOO_MANY_REQUESTS, Some("rate_limited")),
-            Error::Unavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, Some("no_key")),
-            Error::KeyDenied(_) => (StatusCode::LOCKED, Some("kms_denied")),
-            Error::Frozen(_) => (StatusCode::LOCKED, Some("frozen")),
-            Error::Link(_) => (StatusCode::BAD_GATEWAY, Some("link")),
-            Error::Db(_) | Error::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, None),
-        };
+        let (status, code) = status_of(&self);
         if status == StatusCode::INTERNAL_SERVER_ERROR {
             tracing::error!("roll secrets: {self}");
         }
@@ -270,6 +286,14 @@ async fn find(State(s): S, Who(c): Who, Query(q): Q) -> crate::Result<Response> 
     Ok(ok(blocking(s, move |s| s.find(key.trim(), &c)).await?))
 }
 
+async fn deleted_projects(State(s): S, Who(c): Who) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.deleted_projects(&c)).await?))
+}
+
+async fn recover_project(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.recover_project(&project, &c)).await?))
+}
+
 async fn whoami(State(s): S, Who(c): Who) -> Response {
     ok(s.whoami(&c))
 }
@@ -279,25 +303,72 @@ async fn overview(State(s): S, Who(c): Who, Path(project): Path<String>) -> crat
         let envs = s.environments(&project, &c)?;
         let previews = envs.iter().filter(|e| e.kind == crate::envs::Kind::Ephemeral).count();
         let history_days = s.history_days(&project)?;
-        Ok(json!({ "project": project, "environments": envs, "previews": previews, "history_days": history_days }))
+        let validity_checks = if s.validity_checks(&project)? { "on" } else { "off" };
+        // What deleting the workspace project would take with it, and for how long it's recoverable.
+        let deletion = s.deletion(&project)?;
+        Ok(json!({ "project": project, "environments": envs, "previews": previews, "history_days": history_days, "validity_checks": validity_checks, "deletion": deletion }))
     })
     .await?;
     Ok(ok(v))
 }
 
-/// `{history_days}`: how long old values are kept (`null`: for good).
+/// `{history_days?, validity_checks?}`: how long old values are kept (`null`: for good), and
+/// whether credentials found in code are checked with their providers (`"on"` or `"off"`).
 async fn project_settings(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
     let mut o: serde_json::Map<String, serde_json::Value> = body(&b)?;
     let days = match o.remove("history_days") {
-        Some(serde_json::Value::Null) => None,
-        Some(v) => Some(v.as_i64().ok_or_else(|| Error::BadRequest("history_days is a number of days or null".into()))?),
-        None => return Err(Error::BadRequest("nothing to change: history_days".into())),
+        Some(serde_json::Value::Null) => Some(None),
+        Some(v) => Some(Some(v.as_i64().ok_or_else(|| Error::BadRequest("history_days is a number of days or null".into()))?)),
+        None => None,
+    };
+    let checks = match o.remove("validity_checks") {
+        Some(v) => Some(match v.as_str() {
+            Some("on") => true,
+            Some("off") => false,
+            _ => return Err(Error::BadRequest("validity_checks is \"on\" or \"off\"".into())),
+        }),
+        None => None,
     };
     if let Some(k) = o.keys().next() {
         return Err(Error::BadRequest(format!("unknown field {k}")));
     }
-    let d = blocking(s, move |s| s.set_history_days(&project, days, &c)).await?;
-    Ok(ok(json!({ "history_days": d })))
+    if days.is_none() && checks.is_none() {
+        return Err(Error::BadRequest("nothing to change: history_days, validity_checks".into()));
+    }
+    let v = blocking(s, move |s| {
+        let mut out = serde_json::Map::new();
+        if let Some(days) = days {
+            out.insert("history_days".into(), json!(s.set_history_days(&project, days, &c)?));
+        }
+        if let Some(on) = checks {
+            out.insert("validity_checks".into(), json!(if s.set_validity_checks(&project, on, &c)? { "on" } else { "off" }));
+        }
+        Ok(out)
+    })
+    .await?;
+    Ok(ok(v))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ValidityBody {
+    credentials: Vec<crate::validity::Probe>,
+}
+
+/// `{credentials: [{value, pair?}]}` → `{validity_checks, results: [Checked]}` (validity.rs):
+/// none asked about while the project's checks are off.
+async fn check_validity(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let v: ValidityBody = body(&b)?;
+    let found = blocking(s, move |s| s.check_validity(&project, v.credentials, &c)).await?;
+    Ok(ok(match found {
+        Some(results) => json!({ "validity_checks": "on", "results": results }),
+        None => json!({ "validity_checks": "off", "results": [] }),
+    }))
+}
+
+/// What a credential's last check said, by its fingerprint.
+async fn unstored(State(s): S, Who(c): Who, Path((project, fingerprint)): Path<(String, String)>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.validity_of(&project, &fingerprint, &c)).await?))
 }
 
 #[derive(Deserialize, Default)]
@@ -794,6 +865,17 @@ struct ResolveBody {
     /// `true`: `<KEY>_CODE` beside each TOTP key, the one-time code when the values were read.
     #[serde(default)]
     codes: bool,
+    /// `true`: each key bound to hosts is a placeholder (`rlph_…`) that roll's egress proxy swaps
+    /// for the value, for those hosts only (docs/secrets.md, "Using a key without seeing it").
+    #[serde(default)]
+    placeholders: bool,
+    /// How long those placeholders live (default a day, at most 30 days).
+    #[serde(default)]
+    placeholder_minutes: Option<u64>,
+    /// Who made the consumer (`usr_…`, `token:…`, `operator`): its placeholders swap only while
+    /// they may reveal here.
+    #[serde(default)]
+    maker: Option<String>,
 }
 
 fn yes() -> bool {
@@ -810,10 +892,13 @@ async fn resolve(State(s): S, Who(c): Who, Path((project, env)): Path<(String, S
     }
     let path = r.path.unwrap_or_else(|| "/".into());
     let (p, e, cons) = (project.clone(), env.clone(), consumer.clone());
-    let (untrusted, dynamic, codes) = (r.untrusted, r.dynamic, r.codes);
+    let (untrusted, dynamic, codes, placeholders, minutes, maker) = (r.untrusted, r.dynamic, r.codes, r.placeholders, r.placeholder_minutes, r.maker);
+    if (minutes.is_some() || maker.is_some()) && !placeholders {
+        return Err(Error::BadRequest("placeholder_minutes and maker go with placeholders: true".into()));
+    }
     let v = blocking(s, move |s| {
         let c = if untrusted { s.untrusted(&p, &c)? } else { c };
-        let mut v = s.values_for(&p, &e, &path, true, Some(&cons), dynamic, &c)?;
+        let mut v = if placeholders { s.values_with_placeholders(&p, &e, &path, &cons, dynamic, crate::placeholders::Ask { minutes, maker: maker.as_deref() }, &c)? } else { s.values_for(&p, &e, &path, true, Some(&cons), dynamic, &c)? };
         if codes {
             s.add_codes(&p, &path, &mut v)?;
         }
@@ -826,7 +911,7 @@ async fn resolve(State(s): S, Who(c): Who, Path((project, env)): Path<(String, S
             let plain = zeroize::Zeroizing::new(serde_json::to_vec(&v.values).expect("JSON"));
             let context = format!("roll-secrets:{project}:{env}:{consumer}");
             let sealed = crate::crypto::seal_to(&to, &context, &plain).map_err(|e| Error::BadRequest(e.to_string()))?;
-            ok(json!({ "sealed": sealed, "context": context, "problems": v.problems, "leases": v.leases, "dynamic": v.dynamic, "linked": v.linked, "followed": v.followed }))
+            ok(json!({ "sealed": sealed, "context": context, "problems": v.problems, "leases": v.leases, "dynamic": v.dynamic, "linked": v.linked, "followed": v.followed, "placeholders": v.placeholders }))
         }
     };
     Ok(secret_response(out))
@@ -1022,6 +1107,32 @@ struct RenewBody {
 async fn renew_lease(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
     let r: RenewBody = if b.is_empty() { RenewBody::default() } else { body(&b)? };
     Ok(ok(blocking(s, move |s| s.renew_lease(&project, &id, r.ttl_minutes, &c)).await?))
+}
+
+/// `{hosts, header?, query?}`: bind a key to hosts (an admin's).
+async fn set_hosts(State(s): S, Who(c): Who, Path((project, env, key)): Path<(String, String, String)>, Query(q): Q, b: Bytes) -> crate::Result<Response> {
+    let hosts: crate::placeholders::Hosts = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.set_hosts(&project, &env, &path_of(&q), &key, hosts, &c)).await?))
+}
+
+async fn clear_hosts(State(s): S, Who(c): Who, Path((project, env, key)): Path<(String, String, String)>, Query(q): Q) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.clear_hosts(&project, &env, &path_of(&q), &key, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn placeholders(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.placeholders(&project, &c)).await?))
+}
+
+/// `?consumer=`: end every placeholder of a consumer (a sandbox that stopped).
+async fn end_consumer(State(s): S, Who(c): Who, Path(project): Path<String>, Query(q): Q) -> crate::Result<Response> {
+    let consumer = q.get("consumer").cloned().ok_or_else(|| Error::BadRequest("ending placeholders takes ?consumer=".into()))?;
+    Ok(ok(json!({ "ended": blocking(s, move |s| s.end_consumer_in(&project, &consumer, &c)).await? })))
+}
+
+async fn revoke_placeholder(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.revoke_placeholder(&project, &id, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn revoke_lease(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {

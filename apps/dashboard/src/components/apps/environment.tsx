@@ -213,6 +213,22 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
           </button>
         </div>
 
+        {env.name !== "production" && !env.ephemeral && (
+          <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+            <div>
+              <p className="text-[13px] font-medium">Its own data</p>
+              <p className="mt-1 text-[12px] text-muted">
+                {env.data
+                  ? `Its links reach branches made for it, never production's databases: ${env.data.branches.map((b) => `${b.kind} ${b.ref}`).join(", ") || "none linked yet"}.`
+                  : "Its links reach the databases themselves, production's data. Turn this on for a branch of each Postgres and Redis database it links."}
+              </p>
+            </div>
+            <button className={btn} disabled={busy} aria-pressed={!!env.data} onClick={() => runner.run("data", () => appsApi.putEnvironment(service.id, env.name, { data: env.data ? null : "branch" }))}>
+              {env.data ? "Use production's (deletes the branches)" : "Branch its data"}
+            </button>
+          </div>
+        )}
+
         <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
           <div>
             <p className="text-[13px] font-medium">Traces</p>
@@ -314,6 +330,71 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
           </button>
         </div>
 
+        {!env.ephemeral && (
+          <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+            <div className="min-w-0">
+              <p className="text-[13px] font-medium">Status badge</p>
+              {env.badge_url ? (
+                <p className="mt-1 flex min-w-0 items-center gap-2 text-[12px] text-muted">
+                  <img src={env.badge_url} alt={`${env.name} deploy status`} className="h-5" />
+                  <CopyButton id="badge" text={`![${env.name}](${env.badge_url})`} copied={copied} onCopy={copy} />
+                </p>
+              ) : (
+                <p className="mt-1 text-[12px] text-muted">An image of what its deploys stand at (live, deploying, failed) for a README; anyone with its URL sees it.</p>
+              )}
+            </div>
+            <button className={btn} disabled={busy} aria-pressed={!!env.badge_url} onClick={() => runner.run("badge", () => appsApi.putEnvironment(service.id, env.name, { badge: !env.badge_url }))}>
+              {env.badge_url ? "Turn off" : "Turn on"}
+            </button>
+          </div>
+        )}
+
+        {!env.ephemeral && (
+          <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+            <div>
+              <p className="text-[13px] font-medium">Deploy approvals</p>
+              <p className="mt-1 text-[12px] text-muted">
+                {env.approvals ? `A deployment waits at ready until ${env.approvals === 1 ? "someone" : `${env.approvals} people`} other than who started it approve${env.approvals === 1 ? "s" : ""}; the last approval puts it live.` : "Anyone who may deploy puts a deployment live. Ask for a second person's approval first."}
+              </p>
+            </div>
+            <select
+              aria-label="Deploy approvals"
+              className={`${input} w-40 text-[12px]`}
+              disabled={busy}
+              value={env.approvals ?? 0}
+              onChange={(e) => runner.run("approvals", () => appsApi.putEnvironment(service.id, env.name, { approvals: Number(e.target.value) || null }))}
+            >
+              <option value={0}>None</option>
+              <option value={1}>1 approval</option>
+              <option value={2}>2 approvals</option>
+              <option value={3}>3 approvals</option>
+            </select>
+          </div>
+        )}
+
+        {!env.ephemeral && (
+          <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+            <div>
+              <p className="text-[13px] font-medium">Log retention</p>
+              <p className="mt-1 text-[12px] text-muted">Its output, access log, traces and Vitals are deleted after this long.</p>
+            </div>
+            <select
+              aria-label="Log retention"
+              className={`${input} w-32 text-[12px]`}
+              disabled={busy}
+              value={env.log_retention_days ?? 7}
+              onChange={(e) => {
+                const days = Number(e.target.value) as 7 | 30 | 90;
+                runner.run("retention", () => appsApi.putEnvironment(service.id, env.name, { log_retention_days: days === 7 ? null : days }));
+              }}
+            >
+              <option value={7}>7 days</option>
+              <option value={30}>30 days</option>
+              <option value={90}>90 days</option>
+            </select>
+          </div>
+        )}
+
         <SnippetsRow service={service.id} env={env} runner={runner} busy={busy} />
         <ConfigRow service={service.id} env={env} runner={runner} busy={busy} />
 
@@ -365,6 +446,12 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
           {closed && !!env.egress_refused?.length && (
             <p className="text-[12px] text-muted">
               Refused lately: <span className="font-mono">{env.egress_refused.map((r) => (r.private ? `${r.host} (private address)` : r.host)).join(", ")}</span>
+            </p>
+          )}
+          {closed && env.intercepted && (
+            <p className="text-[12px] text-muted" title="Keys bound to hosts reach its code as placeholders; its proxy swaps them on the way out to those hosts only">
+              Keys used without being seen: {env.intercepted.swapped.toLocaleString()} swapped in {env.intercepted.requests.toLocaleString()} requests
+              {!!env.intercepted.refused?.length && <> · refused: <span className="font-mono">{env.intercepted.refused.slice(-3).join("; ")}</span></>}
             </p>
           )}
         </div>

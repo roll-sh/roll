@@ -168,7 +168,7 @@ pub(super) async fn open(cluster: &crate::Cluster, name: &str, r: &Repository) -
             Place::Fs(std::path::PathBuf::from(loc))
         }
         _ if r.in_bucket() => {
-            let bucket = s3::Bucket::open(cluster, name, r)?;
+            let bucket = s3::Bucket::open(cluster, name, r).await?;
             let base = r.settings.get("base_path").unwrap_or_default().trim_matches('/');
             Place::Bucket(Box::new(bucket), if base.is_empty() { String::new() } else { format!("{base}/") })
         }

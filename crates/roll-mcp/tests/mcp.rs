@@ -33,7 +33,18 @@ impl roll_auth::Sessions for Alice {
 struct Daemon {
     router: Router,
     access: Arc<Access>,
+    workspace: Arc<roll_workspace::Workspace>,
     _dir: tempfile::TempDir,
+}
+
+/// Each person's address, `<handle>@example.com` (an invite is accepted by its address).
+struct Addresses;
+
+impl roll_workspace::People for Addresses {
+    fn person(&self, user: &str) -> Option<roll_workspace::Person> {
+        let h = user.strip_prefix("usr_")?;
+        Some(roll_workspace::Person { handle: h.into(), email: Some(format!("{h}@example.com")), admin: false })
+    }
 }
 
 fn products() -> Router {
@@ -117,7 +128,10 @@ impl Daemon {
         let mcp_config = roll_mcp::Config { api_url: "http://127.0.0.1:7070".into(), web_url: "http://localhost:3000".into(), locked: true, products: on, access: Some(access.clone()) };
         let mcp = roll_mcp::routes(api.clone().layer(layer()), mcp_config, vec![Arc::new(Fronted) as Arc<dyn roll_mcp::ToolSet>]);
         let _ = access.people.set(Arc::new(Alice));
-        Daemon { router: api.merge(mcp).layer(layer()), access, _dir: dir }
+        // People's memberships, as rolld wires them: a person's session grant is their roles.
+        let _ = access.workspace.set(workspace.clone());
+        workspace.set_people(Arc::new(Addresses));
+        Daemon { router: api.merge(mcp).layer(layer()), access, workspace, _dir: dir }
     }
 
     /// The MCP audit log once `until` holds of it (rows go through a batching writer), at most 5 s.
@@ -545,6 +559,7 @@ async fn a_2026_client_is_served_without_initialize() {
     let r = &out["result"];
     assert_eq!((r["resultType"].as_str(), r["supportedVersions"][0].as_str(), r["_meta"]["io.modelcontextprotocol/serverInfo"]["name"].as_str()), (Some("complete"), Some("2026-07-28"), Some("roll")), "{out}");
     assert!(r["supportedVersions"].as_array().unwrap().iter().any(|v| v == "2025-11-25"), "legacy too: {out}");
+    assert_eq!(r["_meta"]["io.modelcontextprotocol/serverInfo"]["icons"][0]["mimeType"], "image/svg+xml", "discovery shows roll's icon: {out}");
     assert!(h.get("mcp-session-id").is_none(), "no session");
     // The server card (SEP-2127), public, says the same before a client connects, and the
     // domain's AI Catalog names it.
@@ -567,6 +582,11 @@ async fn a_2026_client_is_served_without_initialize() {
     let (s, h, out) = send(OPERATOR, 2, "tools/list", json!({}), std_headers("tools/list", None)).await;
     assert_eq!((s, out["result"]["cacheScope"].as_str(), out["result"]["ttlMs"].as_u64()), (StatusCode::OK, Some("private"), Some(60_000)), "{out}");
     assert!(!out["result"]["tools"].as_array().unwrap().is_empty() && h.get("mcp-session-id").is_none());
+    assert!(out["result"]["_meta"]["io.modelcontextprotocol/serverInfo"].get("icons").is_none(), "only discovery carries the icon");
+    // A resource that isn't there is Invalid Params in this revision (SEP-2164; -32002 before it).
+    let uri = "roll://nothing/here";
+    let (_, _, out) = send(OPERATOR, 21, "resources/read", json!({ "uri": uri }), std_headers("resources/read", Some(uri))).await;
+    assert_eq!(out["error"]["code"], -32602, "{out}");
 
     // Headers that don't say what the body says, or a version roll doesn't speak.
     let call = json!({ "name": "postgres_list_projects", "arguments": {} });
@@ -712,6 +732,22 @@ async fn skills_are_the_workflows_a_connection_has() {
     }
 }
 
+/// An area (`?toolsets=secrets.security`) lists its own tools and the lookups every area needs,
+/// and nothing of its product's other areas; the access tools stay.
+#[tokio::test]
+async fn an_area_lists_its_tools_and_the_lookups() {
+    let d = Daemon::with_products(vec!["secrets".into(), "workspace".into()]);
+    let (s, _, out) = d.http(OPERATOR, Method::POST, "/v1/mcp?toolsets=secrets.security", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))).await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    let listed = names(&out["result"]);
+    for has in ["secrets_audit", "secrets_findings", "secrets_list_environments", "access_wait_approval"] {
+        assert!(listed.contains(&has.to_string()), "secrets.security lists {has}: {listed:?}");
+    }
+    for not in ["secrets_set", "secrets_transit_encrypt", "workspace_list_projects"] {
+        assert!(!listed.contains(&not.to_string()), "secrets.security doesn't list {not}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn prompt_arguments_complete_from_what_it_may_read() {
     let d = Daemon::with_products(vec!["postgres".into(), "secrets".into(), "workspace".into()]);
@@ -794,10 +830,11 @@ async fn a_tokens_page_shows_what_an_agent_sees() {
 }
 
 /// A person's own token's page shows only what their account reaches (as `tools/list` would for
-/// them): rules for everything, but Postgres is the operator's, so none of its tools.
+/// them): rules for everything, but Postgres is the operator's, so none of its tools; previews are a
+/// member product (their role decides), so its tools are there.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_persons_token_page_shows_only_their_reach() {
-    let d = Daemon::new();
+    let d = Daemon::with_products(vec!["postgres".into(), "previews".into()]);
     let new = serde_json::from_value::<roll_access::store::NewGrant>(json!({ "name": "alices", "rules": [{ "product": "*", "resources": "*", "actions": { "read": "allow" } }] })).unwrap();
     let (g, _) = d.access.store.create(&new, roll_auth::GrantKind::Token, "usr_alice", None, Some("usr_alice")).unwrap();
     let (s, _, seen) = d.http(OPERATOR, Method::GET, &format!("/v1/access/tokens/{}/tools", g.id), None).await;
@@ -805,6 +842,33 @@ async fn a_persons_token_page_shows_only_their_reach() {
     let tools: Vec<&str> = seen["tools"].as_array().unwrap().iter().filter_map(|t| t["name"].as_str()).collect();
     assert!(tools.contains(&"workspace_list_projects"), "{tools:?}");
     assert!(!tools.iter().any(|t| t.starts_with("postgres_")), "a person's token never reaches Postgres: {tools:?}");
+    assert!(tools.contains(&"previews_list"), "a member's role reaches previews: {tools:?}");
+}
+
+/// A member's own token lists a member product's tools as their role allows, as the gate decides
+/// its calls (`within` their session): a viewer's client is shown secrets' reads, not its reveals or
+/// writes, even with a token that names every action; made an admin, they're there.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_members_client_lists_what_their_role_allows() {
+    let d = Daemon::with_products(vec!["secrets".into()]);
+    let project = d.workspace.create("usr_bob", "pay", "", None).unwrap();
+    let (_, url) = d.workspace.invite(&roll_workspace::Actor::operator(), &project.id, "alice@example.com", "viewer", None).unwrap();
+    d.workspace.accept("usr_alice", url.split("token=").nth(1).unwrap(), None).unwrap();
+    let all = json!([{ "product": "*", "resources": "*", "actions": { "read": "allow", "write": "allow", "reveal": "allow", "admin": "allow" } }]);
+    let new = serde_json::from_value::<roll_access::store::NewGrant>(json!({ "name": "alices", "rules": all })).unwrap();
+    let (g, _) = d.access.store.create(&new, roll_auth::GrantKind::Token, "usr_alice", None, Some("usr_alice")).unwrap();
+    let listed = || async {
+        let (s, _, seen) = d.http(OPERATOR, Method::GET, &format!("/v1/access/tokens/{}/tools", g.id), None).await;
+        assert_eq!(s, StatusCode::OK, "{seen}");
+        seen["tools"].as_array().unwrap().iter().filter_map(|t| t["name"].as_str().map(String::from)).collect::<Vec<String>>()
+    };
+    let tools = listed().await;
+    assert!(tools.iter().any(|t| t == "secrets_list"), "a viewer reads: {tools:?}");
+    // secrets_set_imports' action comes from its body (write or admin): read never counts for it.
+    assert!(!tools.iter().any(|t| t == "secrets_set" || t == "secrets_get_values" || t == "secrets_set_imports"), "a viewer neither writes nor reveals: {tools:?}");
+    d.workspace.set_role(&roll_workspace::Actor::operator(), &project.id, "usr_alice", "admin", None).unwrap();
+    let tools = listed().await;
+    assert!(tools.iter().any(|t| t == "secrets_set") && tools.iter().any(|t| t == "secrets_get_values"), "an admin does: {tools:?}");
 }
 
 /// 2026-07-28's `subscriptions/listen` (SEP-2575): the stream starts with the acknowledgement of

@@ -8,6 +8,9 @@ use crate::model::{Change, Check, Preview, RepoRow};
 use async_trait::async_trait;
 use std::path::Path;
 
+/// What `@roll preview …` asks of a change's preview.
+pub use code_review::commands::PreviewAction;
+
 /// Creates and tears down a change's preview.
 #[async_trait]
 pub trait PreviewBackend: Send + Sync {
@@ -19,6 +22,12 @@ pub trait PreviewBackend: Send + Sync {
     /// came in. Backends without one can't.
     async fn accept_visual(&self, _change: &Change, _by: &str, _head: &str) -> anyhow::Result<()> {
         anyhow::bail!("this preview backend has no visual review")
+    }
+    /// `by` (someone who can write to the change's repo: the caller checked) asks `action` of the
+    /// change's preview (`@roll preview …`): what was done, said for the answer. Backends without
+    /// one can't.
+    async fn act(&self, _change: &Change, _action: PreviewAction, _by: &str) -> anyhow::Result<String> {
+        anyhow::bail!("this change's previews can't be acted on from a comment")
     }
 }
 
@@ -54,10 +63,11 @@ impl<'a> Asker<'a> {
     }
 }
 
-/// An environment's values, and who revealed them (roll secrets' principal: `usr_…`,
-/// `token:…`, `operator`).
+/// An environment's values, who revealed them (who made the copy, as roll secrets records a
+/// maker: `usr_…`, `token:…`, `operator`), and the project they're from (its id).
 pub struct Revealed {
     pub by: String,
+    pub project: String,
     pub values: Vec<(String, String)>,
 }
 
@@ -86,6 +96,14 @@ pub trait SecretEnv: Send + Sync {
     /// `environment` themselves ([`Refused`] when they can't). The audit row is `consumer` for
     /// [`Revealed::by`].
     async fn for_owner(&self, owner: &str, project: &str, environment: &str, consumer: &str, who: Asker<'_>) -> anyhow::Result<Revealed>;
+    /// Whether what `by` copied out of `environment` of `project` (a [`Revealed`]'s) may still be
+    /// in a sandbox: they still reach the project and may reveal it. Asked before each start;
+    /// [`Refused`] when they can't. `None`: a sandbox from before its source was kept, whose
+    /// copier must still be able to act at all.
+    async fn still_reveals(&self, by: &str, source: Option<(&str, &str)>) -> anyhow::Result<()> {
+        let _ = (by, source);
+        Err(Refused("roll secrets can't tell whether its copier still may".into()).into())
+    }
     /// (candidate index, key, environment, folder) for every secret, in any environment of the
     /// projects that have repo `owner/name` on their canvas, whose value is one of `candidates`
     /// (matched by fingerprint; values never come back). Empty for a repo on no project's canvas.
@@ -108,6 +126,15 @@ pub trait SecretEnv: Send + Sync {
     async fn store(&self, repo: &str, asker: &SecretsAsker, credential: StoreCredential) -> crate::Result<StoredCredential> {
         let _ = (repo, asker, credential);
         Err(crate::Error::Unprocessable("roll secrets isn't on this server".into()))
+    }
+    /// Whether credentials a change of repo `owner/name` adds work, asked of their providers when
+    /// a project with the repo on its canvas has roll secrets' validity checks on (docs/secrets.md,
+    /// "Is it live?"): (value, the AWS secret access key next to an access key id) in, an answer
+    /// per credential (by fingerprint) out; empty when checks are off. Waits for the answers: call
+    /// it from background work. The values go nowhere but the providers.
+    async fn validity(&self, repo: &str, found: Vec<(String, Option<String>)>) -> anyhow::Result<Vec<crate::model::CredentialValidity>> {
+        let _ = (repo, found);
+        Ok(Vec::new())
     }
 }
 

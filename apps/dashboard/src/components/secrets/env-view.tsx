@@ -1,7 +1,8 @@
-import { Clock, Copy, Dices, Download, Folder, FolderPlus, History, Import as ImportIcon, Inbox, Link2, Lock, MoreHorizontal, Pencil, Plus, RotateCw, Search, Send, ShieldAlert, Trash2, Upload, User, Users } from "lucide-react";
+import { Clock, Copy, Dices, Download, Folder, FolderPlus, Globe, History, Import as ImportIcon, Inbox, Link2, Lock, MoreHorizontal, Pencil, Plus, RotateCw, Search, Send, ShieldAlert, Trash2, Upload, User, Users } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "@/components/link";
 import { canRotate, needsApproval, SECRET_KEY, TAG, type Batch, type Environment, type ExportFormat, type Import, type KeyInsight, type Op, type Secret, type SecretType } from "@/lib/secrets-api";
+import { decoyUse } from "@/lib/secrets-decoy";
 import { generateValue } from "@/lib/secrets-generate";
 import { childPath, folderName } from "@/lib/secrets-grid";
 import { rollRef } from "@/lib/secrets-ref";
@@ -14,6 +15,7 @@ import { useSlashFocus } from "./grid";
 import { HistoryDrawer, type Drawer } from "./history";
 import { ImportDialog } from "./import-dialog";
 import { ReachDialog } from "./reach-dialog";
+import { HostsDialog } from "./hosts-dialog";
 import { EsoDialog } from "./eso-dialog";
 import { ImportsPanel } from "./imports";
 import { RefInput, useRefSource, useRefWarnings, type RefSource } from "./ref-input";
@@ -46,6 +48,7 @@ export function EnvView({ env }: { env: Environment }) {
   const [adding, setAdding] = useState(false);
   const [importing, setImporting] = useState(false);
   const [reaching, setReaching] = useState<string | null>(null);
+  const [binding, setBinding] = useState<string | null>(null);
   const [pulling, setPulling] = useState(false);
   const [linking, setLinking] = useState(false);
   const [decoying, setDecoying] = useState(false);
@@ -329,6 +332,7 @@ export function EnvView({ env }: { env: Environment }) {
                 login
                 title={path === "/" ? `${env.name} has no secrets yet` : `${path} is empty in ${env.name}`}
                 cli={[`roll secrets set -p ${project.name} -e ${env.slug} KEY=value`, `roll run -p ${project.name} --env ${env.slug} -- <cmd>`]}
+                install
               >
                 Add one, paste a .env file, or link a resource so its connection string and credentials stay correct when it changes.
                 {standard.length > 1 && " Compare promotes keys from another environment."} From the CLI:
@@ -382,6 +386,7 @@ export function EnvView({ env }: { env: Environment }) {
                     onHistory={() => setDrawer({ kind: "versions", key: s.key, type: s.type })}
                     onShare={() => setSharing({ kind: "secret", env: env.slug, key: s.key, path })}
                     onReach={() => setReaching(s.key)}
+                    onBind={() => setBinding(s.key)}
                     onCopied={(text) => setNote({ text, warnings: [] })}
                     onSource={(src) => (src.kind === "import" ? setImportsOpen({ highlight: { ...(src.project && { project: src.project }), environment: src.environment, path: src.path } }) : go({ env: src.environment, path: p, key: s.key }))}
                   />
@@ -394,6 +399,7 @@ export function EnvView({ env }: { env: Environment }) {
       </div>
 
       <HistoryDrawer env={env} drawer={drawer} onClose={() => setDrawer(null)} onDrawer={setDrawer} onChanged={refresh} />
+      <HostsDialog open={binding !== null} onClose={() => setBinding(null)} env={env} path={path} secret={secrets.find((x) => x.key === binding && x.type !== "personal") ?? null} onSaved={refresh} />
       <ReachDialog open={reaching !== null} onClose={() => setReaching(null)} env={env} path={path} keyName={reaching ?? ""} link={secrets.find((x) => x.key === reaching)?.link} />
       <EsoDialog open={pulling} onClose={() => setPulling(false)} env={env} path={path} />
       <ImportDialog open={importing} onClose={() => setImporting(false)} env={env} path={path} current={secrets} onImported={(text, w) => (setNote({ text, warnings: w }), refresh(), open.reload())} />
@@ -533,6 +539,7 @@ function SecretRow({
   onShare,
   onSource,
   onReach,
+  onBind,
   onCopied,
 }: {
   env: Environment;
@@ -552,6 +559,8 @@ function SecretRow({
   onSource: (source: Exclude<Secret["source"], { kind: "own" }>) => void;
   /** Who and what can read it (a project admin's). */
   onReach: () => void;
+  /** Bind it to hosts, for placeholders (a project admin's). */
+  onBind: () => void;
   /** Says what was copied. */
   onCopied: (text: string) => void;
 }) {
@@ -709,6 +718,11 @@ function SecretRow({
                   {!personal && (
                     <MenuItem onClick={onReach}>
                       <Users className="size-3.5" /> Who can read it…
+                    </MenuItem>
+                  )}
+                  {own && !personal && s.link?.mode !== "dynamic" && (
+                    <MenuItem onClick={onBind}>
+                      <Globe className="size-3.5" /> {s.hosts ? "Hosts…" : "Bind to hosts…"}
                     </MenuItem>
                   )}
                   {s.link?.mode !== "dynamic" && (
@@ -891,12 +905,16 @@ function ValueHead({ onGenerate }: { onGenerate?: () => void }) {
   );
 }
 
-/** A decoy key (docs/secrets.md, "Decoys"), shown to the project's admins only: the API leaves it out for everyone else. */
+/**
+ * A decoy key (docs/secrets.md, "Decoys"), shown to the project's admins in a session only: the API leaves it out for
+ * tokens. Who planted it and when are here, not in the audit log (a plant's only row is its key's ordinary write).
+ */
 function DecoyMark({ decoy }: { decoy: NonNullable<Secret["decoy"]> }) {
   const used = decoy.uses > 0;
+  const planted = `Planted by ${decoy.created_by} ${ago(decoy.created_at)}.`;
   const title = used
-    ? `A decoy, used ${decoy.uses === 1 ? "once" : `${decoy.uses} times`}${decoy.used_at ? `, last ${ago(decoy.used_at)}` : ""}${decoy.used_ip ? ` from ${decoy.used_ip}` : ""}. Whoever used it found it where it was planted: cut them off and rotate what sits beside it.`
-    : `A decoy: its value is ${decoy.kind === "postgres" ? "a database login that never logs in" : "a roll token that opens nothing"}, and any use raises an alert. Only admins see this mark.`;
+    ? `A decoy, ${decoyUse(decoy, ago)}. Whoever used it found it where it was planted: cut them off and rotate what sits beside it. ${planted}`
+    : `A decoy: its value is ${decoy.kind === "postgres" ? "a database login that never logs in" : "a roll token that opens nothing"}, and any use raises an alert. ${planted} Only admins see this mark.`;
   return (
     <span className={`shrink-0 rounded border px-1 font-mono text-[10px] ${used ? "border-danger/40 text-danger" : "border-accent/40 text-accent"}`} title={title}>
       {used ? `decoy · used ${decoy.uses}×` : "decoy"}

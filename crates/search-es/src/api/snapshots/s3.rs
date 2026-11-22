@@ -13,7 +13,9 @@
 //! keystore its tenant can write, so they come with the repository's settings and are kept apart
 //! from them ([`Repository::secrets`]), sealed under the deployment's key ([`crate::seal`]),
 //! opened only to sign a request and never shown: `GET _snapshot` and the cluster state print
-//! the settings without them. A repository without credentials reads and writes anonymously;
+//! the settings without them. A credential may instead be a roll secrets reference
+//! (`roll://ENV/KEY`), kept in the settings as written and resolved when the client is built
+//! ([`super::refs`]). A repository without credentials reads and writes anonymously;
 //! roll's own credentials are never used. The endpoint is reached as every URL a tenant chooses
 //! is ([`crate::s3`]: public addresses only unless the node sets [`ALLOW_PRIVATE`]).
 //!
@@ -137,14 +139,10 @@ fn location(cluster: &crate::Cluster, s: &Settings) -> Result<Location, String> 
 }
 
 /// An `s3` repository's client, signing with its credentials when it has them.
-fn s3_client(cluster: &crate::Cluster, name: &str, r: &Repository) -> EsResult<client::Client> {
+fn s3_client(cluster: &crate::Cluster, name: &str, r: &Repository, creds: &super::refs::Creds) -> EsResult<client::Client> {
     let at = location(cluster, &r.settings).map_err(|e| failed(name, e))?;
-    let creds = match (r.secrets.get("access_key"), r.secrets.get("secret_key")) {
-        (Some(a), Some(s)) => Some(Credentials {
-            access_key: crate::seal::open(cluster, SECRET_KIND, a)?,
-            secret_key: crate::seal::open(cluster, SECRET_KIND, s)?,
-            session_token: r.secrets.get("session_token").map(|t| crate::seal::open(cluster, SECRET_KIND, t)).transpose()?,
-        }),
+    let creds = match (creds.get("access_key"), creds.get("secret_key")) {
+        (Some(a), Some(s)) => Some(Credentials { access_key: a.to_string(), secret_key: s.to_string(), session_token: creds.get("session_token").map(str::to_string) }),
         _ => None,
     };
     client::Client::new(at, creds, allow_private(cluster)).map_err(|e| failed(name, e))
@@ -164,7 +162,7 @@ fn unreachable(name: &str, prefix: &str, cause: EsError) -> EsError {
 /// `_verify`, and `PUT _snapshot` with `verify`: a repository whose client can't be made isn't
 /// accessible, as on Elasticsearch.
 pub(super) async fn verify(cluster: &crate::Cluster, name: &str, r: &Repository) -> EsResult<()> {
-    let bucket = Bucket::open(cluster, name, r).map_err(|e| unreachable(name, &prefix(r), e))?;
+    let bucket = Bucket::open(cluster, name, r).await.map_err(|e| unreachable(name, &prefix(r), e))?;
     bucket.verify().await
 }
 
@@ -235,11 +233,14 @@ pub(super) struct Bucket {
 }
 
 impl Bucket {
-    pub(super) fn open(cluster: &crate::Cluster, name: &str, r: &Repository) -> EsResult<Bucket> {
+    /// The repository's client, built now: its credentials opened, references resolved again
+    /// when their digests moved ([`super::refs`]).
+    pub(super) async fn open(cluster: &crate::Cluster, name: &str, r: &Repository) -> EsResult<Bucket> {
+        let creds = super::refs::credentials(cluster, name, r).await?;
         let (store, sizes) = match r.ty.as_str() {
-            "gcs" => super::cloud::gcs_store(cluster, name, r)?,
-            "azure" => super::cloud::azure_store(cluster, name, r)?,
-            _ => (crate::blob::Store::S3(s3_client(cluster, name, r)?), transfer::sizes(cluster, &r.settings)),
+            "gcs" => super::cloud::gcs_store(cluster, name, r, &creds)?,
+            "azure" => super::cloud::azure_store(cluster, name, r, &creds)?,
+            _ => (crate::blob::Store::S3(s3_client(cluster, name, r, &creds)?), transfer::sizes(cluster, &r.settings)),
         };
         let prefix = prefix(r);
         let st = cluster.state();
@@ -852,7 +853,7 @@ pub(super) async fn store_copy(cluster: &crate::Cluster, r: &Repository, latest:
 
 /// Reads the bucket's repository data into the cluster's copy.
 pub(super) async fn refresh(cluster: &crate::Cluster, name: &str, r: &Repository) -> EsResult<Bucket> {
-    let bucket = Bucket::open(cluster, name, r)?;
+    let bucket = Bucket::open(cluster, name, r).await?;
     let latest = bucket.read_data().await?;
     store_copy(cluster, r, latest).await?;
     Ok(bucket)
@@ -1003,7 +1004,7 @@ pub(super) async fn delete(ctx: &Ctx<'_>, repo: &str, r: &Repository, apply: imp
     if let (false, Some(before)) = (gone.is_empty(), before) {
         let kept = ctx.state().metadata.repository_data.get(&key).map(|d| (**d).clone()).unwrap_or_default();
         let doomed: Vec<Arc<Snapshot>> = before.snapshots.iter().filter(|s| gone.contains(&s.uuid)).cloned().collect();
-        Bucket::open(ctx.cluster, repo, r)?.delete_snapshots(&doomed, &kept).await;
+        Bucket::open(ctx.cluster, repo, r).await?.delete_snapshots(&doomed, &kept).await;
     }
     Ok(gone)
 }
@@ -1035,7 +1036,7 @@ pub(super) async fn clone_shards(ctx: &Ctx<'_>, repo: &str, r: &Repository, sour
 
 /// Deletes shard snapshots [`clone_shards`] wrote for a clone that wasn't recorded.
 pub(super) async fn forget_keys(ctx: &Ctx<'_>, repo: &str, r: &Repository, keys: &[String]) {
-    if let Ok(b) = Bucket::open(ctx.cluster, repo, r) {
+    if let Ok(b) = Bucket::open(ctx.cluster, repo, r).await {
         b.delete_keys(keys).await;
     }
 }
@@ -1043,7 +1044,7 @@ pub(super) async fn forget_keys(ctx: &Ctx<'_>, repo: &str, r: &Repository, keys:
 /// Whether the bucket's newest data records snapshot `uuid` (after a failed commit: it may
 /// have been written anyway).
 pub(super) async fn recorded(ctx: &Ctx<'_>, repo: &str, r: &Repository, uuid: &str) -> bool {
-    match Bucket::open(ctx.cluster, repo, r) {
+    match Bucket::open(ctx.cluster, repo, r).await {
         Ok(b) => match b.read_data().await {
             Ok(d) => d.is_some_and(|d| d.snapshots.iter().any(|s| s.uuid == uuid)),
             Err(_) => true,

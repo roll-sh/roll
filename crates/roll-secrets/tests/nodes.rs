@@ -312,3 +312,62 @@ fn two_nodes_rotating_the_issuers_key_publish_one_key_and_never_sign_with_a_pull
     }
     assert_eq!(checked(&jwks, &sign(&a)), (new.clone(), true));
 }
+
+/// Two nodes sweeping a deleted project past its window at once: its log is closed once (one last
+/// row, one digest after it), and once the sinks' grace is over it's purged once, with neither
+/// node failing.
+#[test]
+fn two_nodes_sweeping_a_deleted_project_close_its_log_once_and_purge_it_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
+    let ws = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
+    let project = ws.create("", "shop", "", None).unwrap().id;
+    let (a, b) = (node(dir.path(), ws.clone()), node(dir.path(), ws.clone()));
+    let caller = Caller::operator();
+    a.batch(&project, "production", Batch { path: None, message: None, ops: vec![set("K", "v")], if_seq: None }, &caller).unwrap();
+    // A sink that never takes anything (nothing delivers here, so it's written as create_sink
+    // writes one): the purge waits for it.
+    let db = secrets_db(dir.path());
+    let p = project.clone();
+    db.write(move |c| {
+        c.execute(
+            "INSERT INTO audit_sinks (id, project_id, url, secret, cursor, status, error, delivered_at, running_until, retry_at, created_at, created_by, format, token, decoys)
+             VALUES ('snk_never', ?, 'https://siem.example/roll', ?, 0, 'new', NULL, NULL, 0, 0, 0, 'operator', 'roll', NULL, 1)",
+            code_sql::params![p, vec![0u8]],
+        )
+    })
+    .unwrap();
+    ws.delete(roll_workspace::Scope::All, &project, &axum::http::Request::new(()).into_parts().0).unwrap();
+    a.forget_project(&project, &caller).unwrap();
+    let p = project.clone();
+    db.write(move |c| c.execute("UPDATE projects SET purge_at = 0 WHERE project_id = ?", [p.as_str()])).unwrap();
+    let race = || {
+        let both: Vec<_> = [a.clone(), b.clone()]
+            .into_iter()
+            .map(|s| {
+                std::thread::spawn(move || {
+                    for _ in 0..3 {
+                        s.sweep().unwrap();
+                    }
+                })
+            })
+            .collect();
+        for h in both {
+            h.join().unwrap();
+        }
+    };
+    race();
+    let p = project.clone();
+    let actions: Vec<String> = db.read(move |c| c.query("SELECT action FROM audit WHERE project_id = ? ORDER BY seq", [p.as_str()], |r| r.get(0))).unwrap();
+    assert_eq!(actions.iter().filter(|a| *a == "project.purge").count(), 1, "{actions:?}");
+    assert_eq!(actions[actions.len() - 2..], ["project.purge", "audit.digest"], "the log ends at one digest");
+
+    // The grace over: purged, once.
+    let p = project.clone();
+    db.write(move |c| c.execute("UPDATE projects SET closed_at = 1 WHERE project_id = ?", [p.as_str()])).unwrap();
+    race();
+    for t in ["audit", "audit_heads", "secrets", "audit_sinks", "projects"] {
+        let (sql, p) = (format!("SELECT COUNT(*) FROM {t} WHERE project_id = ?"), project.clone());
+        assert_eq!(db.read(move |c| c.query_row(&sql, [p.as_str()], |r| r.get::<_, i64>(0))).unwrap(), 0, "{t}");
+    }
+}

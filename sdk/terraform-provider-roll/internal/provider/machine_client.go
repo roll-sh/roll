@@ -130,7 +130,7 @@ func (r *machineClientResource) Schema(_ context.Context, _ resource.SchemaReque
 					"audience": schema.StringAttribute{Optional: true, Computed: true, PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 						Description: "The token's aud: the API's URL, as the CLI and the GitHub Action ask for (roll's API URL when left out)."},
 					"subject": schema.StringAttribute{Required: true, Description: "The token's sub, or a pattern of it with * (repo:acme/web:ref:refs/heads/main). Shared issuers must name one repository."},
-					"claims":  schema.MapAttribute{Optional: true, ElementType: types.StringType, Description: "Other claims that must match (ref, environment…)."},
+					"claims":  schema.MapAttribute{Optional: true, ElementType: types.StringType, Description: "Other claims that must match: a name (ref, environment…) or a JSON pointer (/realm_access/roles) to a value or a pattern with *. An array claim matches when any element does."},
 					"jwks":    schema.StringAttribute{Optional: true, Description: "The issuer's keys pinned (a JWKS document as JSON), for an issuer roll can't reach. roll answers only how many keys are pinned, so it isn't read back."},
 				},
 			},

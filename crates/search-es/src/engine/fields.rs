@@ -25,6 +25,7 @@ use search_codec::{
     DocValuesType, HnswParams, IndexOptions, PointsSpec, VectorElement, VectorQuantization, VectorSimilarity, VectorSpec,
 };
 use search_index::schema::{FieldSchema, Schema, TermVectorOptions};
+use search_codec::vectors::multi::{MultiElement, MultiVectors};
 use search_index::Similarity;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -91,6 +92,9 @@ pub enum Kind {
     DateRange,
     IpRange,
     DenseVector,
+    /// `rank_vectors`: one document's vectors back to back in a binary doc value
+    /// (`search_codec::vectors::multi`).
+    RankVectors,
     SparseVector,
     RankFeature,
     RankFeatures,
@@ -141,6 +145,7 @@ impl Kind {
             "date_range" => Kind::DateRange,
             "ip_range" => Kind::IpRange,
             "dense_vector" | "knn_vector" => Kind::DenseVector,
+            "rank_vectors" => Kind::RankVectors,
             "sparse_vector" => Kind::SparseVector,
             "rank_feature" => Kind::RankFeature,
             "rank_features" => Kind::RankFeatures,
@@ -272,7 +277,30 @@ impl FieldInfo {
     /// A vector field `index.mapping.exclude_source_vectors` keeps out of `_source`.
     pub fn is_source_vector(&self) -> bool {
         // OpenSearch's `knn_vector` stays in `_source` (`opensearch::knn::derive_source`).
-        self.parent.is_none() && self.ty != "knn_vector" && (matches!(self.kind, Kind::DenseVector | Kind::SparseVector) || self.ty == "rank_vectors")
+        self.parent.is_none() && self.ty != "knn_vector" && matches!(self.kind, Kind::DenseVector | Kind::SparseVector | Kind::RankVectors)
+    }
+
+    /// A `rank_vectors` field's element type and dimensions (`None` until its mapping or first
+    /// document sets them).
+    pub fn rank_layout(&self) -> Option<(MultiElement, u32)> {
+        if self.kind != Kind::RankVectors {
+            return None;
+        }
+        let element = match self.mapper.raw("element_type").and_then(Value::as_str) {
+            Some("byte") => MultiElement::Byte,
+            Some("bit") => MultiElement::Bit,
+            Some("bfloat16") => MultiElement::BFloat16,
+            _ => MultiElement::Float32,
+        };
+        let dims = self.mapper.raw("dims").and_then(Value::as_i64).filter(|d| *d > 0 && *d <= u32::MAX as i64)?;
+        Some((element, dims as u32))
+    }
+
+    /// A document's `rank_vectors` doc value, read in place (`None` for another kind, or a
+    /// value that isn't whole vectors of the field's width).
+    pub fn rank_vectors<'a>(&self, raw: &'a [u8]) -> Option<MultiVectors<'a>> {
+        let (element, dims) = self.rank_layout()?;
+        MultiVectors::new(element, dims, raw).ok()
     }
 
     /// The analyzer queries run their text through (`search_analyzer`, else the index one).
@@ -1072,6 +1100,13 @@ impl FieldTable {
                         fs = fs.with_doc_values(DocValuesType::Binary);
                     }
                 }
+            }
+            // Not searchable: the vectors are only read per document (scripts, fetch). The doc
+            // values are declared before the first document sets `dims`, so the engine field
+            // never changes.
+            Kind::RankVectors => {
+                info.index = false;
+                fs = fs.with_doc_values(DocValuesType::Binary);
             }
             Kind::SparseVector | Kind::RankFeatures => {
                 fs = fs.indexed(IndexOptions::DocsAndFreqs, false);

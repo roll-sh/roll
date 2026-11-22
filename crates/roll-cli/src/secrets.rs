@@ -560,6 +560,27 @@ pub enum Secrets {
     },
     /// Rotate a linked secret's credential.
     Rotate { key: String },
+    /// Bind a key to hosts, for placeholders (docs/secrets.md, "Using a key without seeing it"): a
+    /// sandbox or a preview that asks for them gets a placeholder, and roll's proxy swaps the value
+    /// in only on the way to these hosts, only in `--header` or `--query`. An admin's.
+    Bind {
+        key: String,
+        /// A hostname (api.stripe.com) or a one-label wildcard (*.stripe.com); repeatable.
+        #[arg(long = "host", required = true, value_name = "HOST")]
+        hosts: Vec<String>,
+        /// The header that carries the key, `{}` where it goes.
+        #[arg(long, default_value = "Authorization: Bearer {}", value_name = "TEMPLATE")]
+        header: String,
+        /// The query parameter that carries the key instead, as its whole value.
+        #[arg(long, value_name = "NAME")]
+        query: Option<String>,
+        /// Untrusted code too (a fork's preview, an agent's sandbox): a sensitive key's placeholder
+        /// reaches it only with this.
+        #[arg(long)]
+        untrusted: bool,
+    },
+    /// Take a key's host binding off: every placeholder of it stops working.
+    Unbind { key: String },
     /// Change requests: list, approve, reject, apply, close.
     #[command(subcommand)]
     Requests(Requests),
@@ -568,6 +589,9 @@ pub enum Secrets {
     Tokens(Tokens),
     /// Where a key is set, in every project you can read (`STRIPE_*` for a prefix). Never values.
     Find { key: String },
+    /// Deleted projects whose secrets are still recoverable, or bring one back with its
+    /// workspace project (its name or `prj_…` id).
+    Recover { project: Option<String> },
     /// Encryption keys (encryption as a service): encrypt stdin, decrypt stdin, rotate, list.
     #[command(subcommand)]
     Transit(TransitCmd),
@@ -699,7 +723,8 @@ pub enum Secrets {
     /// (`ROLL_IDENTITY`), no stored token: list, add, rm.
     #[command(subcommand)]
     Identities(Identities),
-    /// Decoy keys: a credential planted to be found, whose use raises `decoy_used` (admins only).
+    /// Decoy keys: a credential planted to be found, whose use raises `decoy_used` (admins, with
+    /// the operator token: a roll token can't plant one).
     #[command(subcommand)]
     Decoy(DecoyCmd),
     /// Hand a value to someone outside roll: a link that opens once (or `--views`) and expires.
@@ -754,6 +779,14 @@ pub enum Secrets {
     },
     /// How long old values are kept: a number of days, or `forever`.
     Retention { days: String },
+    /// Whether credentials found in code (`roll secrets scan`, roll code's notices) are checked
+    /// with their providers (GitHub, Stripe, Slack, OpenAI, Anthropic; roll's own tokens looked
+    /// up; an AWS key's account read from its id): `on` or `off`. An admin's; it contacts each
+    /// credential's provider.
+    ValidityChecks {
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
+    },
     /// When each key was last read and changed, and which are stale or unused.
     Insights {
         /// Only keys not read in the last 90 days.
@@ -1944,6 +1977,40 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
         }
         return Ok(());
     }
+    // A deleted project isn't in the workspace: it's found among the recoverable ones.
+    if let Secrets::Recover { project } = &cmd {
+        let deleted = api.get("/v1/secrets/deleted").await?;
+        let rows = deleted.as_array().cloned().unwrap_or_default();
+        let Some(given) = project else {
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&deleted)?);
+            } else if rows.is_empty() {
+                println!("no deleted project you can recover");
+            }
+            if !json_out {
+                for p in &rows {
+                    println!("{:<20} {:<18} recoverable until {}", s(&p["name"]), s(&p["project"]), chrono::DateTime::from_timestamp_millis(p["purge_at"].as_i64().unwrap_or(0)).map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default());
+                }
+            }
+            return Ok(());
+        };
+        let found: Vec<&Value> = rows.iter().filter(|p| p["project"] == given.as_str() || p["name"] == given.as_str()).collect();
+        let id = match found.as_slice() {
+            [one] => s(&one["project"]),
+            [] => bail!("no deleted project {given} you can recover (`roll secrets recover` lists them)"),
+            _ => bail!("{} deleted projects are named {given}: give its prj_… id", found.len()),
+        };
+        let back = api.post(&format!("/v1/secrets/projects/{}/recover", enc(&id)), json!({})).await?;
+        if json_out {
+            println!("{}", serde_json::to_string_pretty(&back)?);
+            return Ok(());
+        }
+        eprintln!("Recovered {} ({id}) with its secrets.", s(&back["name"]));
+        if let Some(failed) = back["rotation_failed"].as_array().filter(|f| !f.is_empty()) {
+            eprintln!("warning: these managed links didn't get a new credential; rotate them: {}", failed.iter().map(s).collect::<Vec<_>>().join(", "));
+        }
+        return Ok(());
+    }
     // A gateway runs with its own credential, in no project's name.
     if let Secrets::Gateways(GatewaysCmd::Up { gateway, allow, allow_file, token_file, identity, oidc_token_file }) = &cmd {
         return gateway_up(api, gateway.clone(), allow.clone(), allow_file.clone(), token_file.clone(), identity.clone(), oidc_token_file.clone()).await;
@@ -2301,16 +2368,41 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             hits.sort();
             hits.dedup();
             creds.retain(|(_, cred)| !stored.contains(&cred.value));
+            // Whether each works, when the project checks them with their providers: a live one first.
+            let validity = credential_validity(&c, &creds).await?;
+            let live = |cred: &Credential| validity.get(&cred.fingerprint).is_some_and(|v| v["result"] == "live");
+            creds.sort_by_key(|(_, cred)| !live(cred));
             if json_out {
                 let mut out: Vec<Value> = hits.iter().map(|h| json!({ "file": h.0, "line": h.1, "key": h.2, "environment": h.3, "path": h.4 })).collect();
-                out.extend(creds.iter().map(|(file, cred)| json!({ "file": file, "line": cred.line, "unstored": true, "kind": cred.kind, "fingerprint": cred.fingerprint, "suggested_key": cred.key })));
+                out.extend(creds.iter().map(|(file, cred)| {
+                    let mut o = json!({ "file": file, "line": cred.line, "unstored": true, "kind": cred.kind, "fingerprint": cred.fingerprint, "suggested_key": cred.key });
+                    if let Some(v) = validity.get(&cred.fingerprint) {
+                        o["validity"] = v.clone();
+                    }
+                    o
+                }));
                 print(&json!(out))?;
             } else {
                 for (file, line, key, env, path) in &hits {
                     println!("{file}:{line}  {key} ({env}{})", if path == "/" { String::new() } else { format!(" {path}") });
                 }
                 for (file, cred) in &creds {
-                    println!("{file}:{}  {}, not in roll secrets: roll secrets scan --store {}={file}:{}  [{}]", cred.line, cred.kind, cred.key, cred.line, cred.fingerprint);
+                    let said = match validity.get(&cred.fingerprint) {
+                        Some(v) if v["result"] == "live" => {
+                            let account = v["account"].as_str().map(|a| format!(", account {a}")).unwrap_or_default();
+                            let rotate = match v["rotator"].as_str() {
+                                Some("aws-iam") => "; rotate it (roll can: roll secrets aws-users add)",
+                                Some("github-app") => "; rotate it (or use a GitHub App's short-lived tokens: roll secrets github-apps add)",
+                                _ => "; rotate it",
+                            };
+                            format!(" LIVE{account}{rotate}")
+                        }
+                        Some(v) if v["result"] == "invalid" => " (revoked or invalid)".to_string(),
+                        // An AWS key's account, read from the key id: it isn't tried.
+                        Some(v) if v["account"].is_string() => format!(" (account {}, not tried)", v["account"].as_str().unwrap_or_default()),
+                        _ => String::new(),
+                    };
+                    println!("{file}:{}  {}{said}, not in roll secrets: roll secrets scan --store {}={file}:{}  [{}]", cred.line, cred.kind, cred.key, cred.line, cred.fingerprint);
                 }
             }
             if !hits.is_empty() {
@@ -2577,6 +2669,23 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 return print(&v);
             }
             println!("Rotated {key}");
+        }
+        Secrets::Bind { key, hosts, header, query, untrusted } => {
+            let (place, at) = match query {
+                Some(q) => (json!({ "query": q }), format!("query parameter {q}")),
+                None => (json!({ "header": header }), header),
+            };
+            let mut body = json!({ "hosts": hosts, "untrusted": untrusted });
+            body.as_object_mut().expect("an object").extend(place.as_object().expect("an object").clone());
+            let v = c.call(Method::PUT, &format!("{env}/secrets/{}/hosts?{}", enc(&key), c.q()), Some(body)).await?;
+            if json_out {
+                return print(&v);
+            }
+            println!("Bound {key} to {}, in {at}{}", hosts.join(", "), if untrusted { ", untrusted code too" } else { "" });
+        }
+        Secrets::Unbind { key } => {
+            c.call(Method::DELETE, &format!("{env}/secrets/{}/hosts?{}", enc(&key), c.q()), None).await?;
+            println!("Unbound {key}: its placeholders stop working");
         }
         Secrets::Requests(r) => {
             let (path, body) = match &r {
@@ -3276,7 +3385,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("Revoked {id}");
             }
         },
-        Secrets::Keygen { .. } | Secrets::Key(_) | Secrets::Unseal { .. } | Secrets::Find { .. } | Secrets::Doctor | Secrets::Health { all: true, .. } | Secrets::Issuer { .. } => unreachable!("handled before a project is picked"),
+        Secrets::Keygen { .. } | Secrets::Key(_) | Secrets::Unseal { .. } | Secrets::Find { .. } | Secrets::Recover { .. } | Secrets::Doctor | Secrets::Health { all: true, .. } | Secrets::Issuer { .. } => unreachable!("handled before a project is picked"),
         Secrets::Backup { to, out } => {
             let v = c.call(Method::POST, &format!("{}/backup", c.base()), Some(json!({ "recipient": to }))).await?;
             let text = serde_json::to_string_pretty(&v)?;
@@ -3629,6 +3738,16 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             match v["history_days"].as_i64() {
                 Some(n) => println!("Old values are destroyed after {n} days"),
                 None => println!("Old values are kept"),
+            }
+        }
+        Secrets::ValidityChecks { state } => {
+            let v = c.call(Method::PATCH, &c.base(), Some(json!({ "validity_checks": state }))).await?;
+            if json_out {
+                return print(&v);
+            }
+            match v["validity_checks"].as_str() {
+                Some("on") => println!("Credentials found in code are checked with their providers"),
+                _ => println!("Credentials found in code aren't checked"),
             }
         }
         Secrets::Insights { unused } => {
@@ -5352,9 +5471,32 @@ struct Credential {
     line: usize,
     kind: &'static str,
     value: String,
+    /// An AWS access key id's secret access key, when one is next to it (its validity check signs
+    /// with it).
+    pair: Option<String>,
     fingerprint: String,
     /// The key it would be stored as.
     key: String,
+}
+
+/// What the project's validity checks say about `creds` (docs/secrets.md, "Is it live?"), by
+/// fingerprint: nothing is sent unless the project has them on, and only kinds a provider can be
+/// asked about.
+async fn credential_validity(c: &Client<'_>, creds: &[(String, Credential)]) -> anyhow::Result<std::collections::HashMap<String, Value>> {
+    let probes: Vec<Value> = creds.iter().filter(|(_, cred)| roll_auth::credentials::VERIFIABLE.contains(&cred.kind)).map(|(_, cred)| json!({ "value": cred.value, "pair": cred.pair })).collect();
+    if probes.is_empty() || c.call(Method::GET, &c.base(), None).await?["validity_checks"] != "on" {
+        return Ok(Default::default());
+    }
+    let mut out = std::collections::HashMap::new();
+    for chunk in probes.chunks(200) {
+        let v = c.call(Method::POST, &format!("{}/validity", c.base()), Some(json!({ "credentials": chunk }))).await?;
+        for r in v["results"].as_array().into_iter().flatten() {
+            if let Some(fp) = r["fingerprint"].as_str() {
+                out.insert(fp.to_string(), r.clone());
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// The credentials in `text` that aren't placeholders, each with its line.
@@ -5369,7 +5511,8 @@ fn credentials_in(text: &str) -> Vec<Credential> {
             continue;
         }
         let line_start = text[..m.start].rfind('\n').map_or(0, |i| i + 1);
-        out.push(Credential { line, kind: m.kind, value: value.to_string(), fingerprint: roll_auth::credentials::fingerprint(value), key: roll_auth::credentials::suggested_key(m.kind, &text[line_start..m.start]) });
+        let pair = (m.kind == "an AWS access key").then(|| roll_auth::credentials::aws_secret_near(text, &m)).flatten().map(str::to_string);
+        out.push(Credential { line, kind: m.kind, value: value.to_string(), pair, fingerprint: roll_auth::credentials::fingerprint(value), key: roll_auth::credentials::suggested_key(m.kind, &text[line_start..m.start]) });
     }
     out
 }

@@ -11,6 +11,8 @@
 //!   and their live logins' grants go through `revoke_many` too.
 //! - **Leases** on its keys end, their credentials revoked outside the transaction, as ending one
 //!   does.
+//! - **Placeholders** of its keys end (in the transaction), freeze or not: roll's proxies stop
+//!   swapping them at once.
 //! - **Shares**: one-time shares made from its keys expire, and the projects it's shared with
 //!   stop reading it (its exports are removed).
 //! - **Syncs** that push it are paused until an admin resumes them.
@@ -76,6 +78,8 @@ pub struct CutOffRequest {
     #[serde(default = "yes")]
     pub leases: bool,
     #[serde(default = "yes")]
+    pub placeholders: bool,
+    #[serde(default = "yes")]
     pub shares: bool,
     #[serde(default = "yes")]
     pub syncs: bool,
@@ -101,7 +105,7 @@ pub struct Skipped {
 /// What couldn't be cut, and why; the rest went on.
 #[derive(Debug, Serialize)]
 pub struct Failure {
-    /// `tokens`, `identities`, `logins`, `leases`, `shares`, `syncs`, `freeze` or `audit`.
+    /// `tokens`, `identities`, `logins`, `leases`, `placeholders`, `shares`, `syncs`, `freeze` or `audit`.
     pub what: &'static str,
     pub ids: Vec<String>,
     pub why: String,
@@ -124,6 +128,8 @@ pub struct CutOff {
     /// How many calls to roll-access the tokens and logins took (at most 500 grants a call).
     pub batches: usize,
     pub leases: Vec<Cut>,
+    /// Placeholders of its keys, ended.
+    pub placeholders: Vec<Cut>,
     pub shares: Vec<Cut>,
     /// Projects that no longer read it (its exports removed).
     pub projects: Vec<String>,
@@ -141,6 +147,7 @@ impl CutOff {
             n(self.identities.len(), "identity", "identities"),
             n(self.logins, "login", "logins"),
             n(self.leases.len(), "lease", "leases"),
+            n(self.placeholders.len(), "placeholder", "placeholders"),
             n(self.shares.len(), "share", "shares"),
             n(self.projects.len(), "project's import", "projects' imports"),
             n(self.syncs.len(), "sync", "syncs"),
@@ -186,6 +193,7 @@ impl Secrets {
             logins: 0,
             batches: 0,
             leases: vec![],
+            placeholders: vec![],
             shares: vec![],
             projects: vec![],
             syncs: vec![],
@@ -213,6 +221,7 @@ impl Secrets {
         let share_ids: Vec<&str> = if req.shares { reach.shares.iter().map(|s| s.id.as_str()).collect() } else { vec![] };
         let projects: Vec<&str> = if req.shares { reach.projects.iter().map(String::as_str).collect() } else { vec![] };
         let sync_ids: Vec<&str> = if req.syncs { reach.syncs.iter().filter(|s| s.paused_at.is_none()).map(|s| s.id.as_str()).collect() } else { vec![] };
+        let placeholder_ids: Vec<&str> = if req.placeholders { reach.placeholders.iter().map(|p| p.id.as_str()).collect() } else { vec![] };
         let own = self.db.write(|c| {
             let env = envs::by_slug(c, project, slug)?;
             let mut disabled = vec![];
@@ -242,13 +251,22 @@ impl Secrets {
                     paused.push(id.to_string());
                 }
             }
+            let mut ended = vec![];
+            for id in &placeholder_ids {
+                if c.execute("UPDATE placeholders SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL", params![now, id])? > 0 {
+                    ended.push(id.to_string());
+                }
+            }
             if req.freeze && frozen(c, &env.id, &path)?.is_none() {
                 c.execute("INSERT INTO freezes (env_id, path, why, created_at, created_by) VALUES (?, ?, ?, ?, ?)", params![env.id, path, why, now, by])?;
             }
-            Ok::<_, Error>((disabled, logins, expired, unshared, paused))
+            Ok::<_, Error>((disabled, logins, expired, unshared, paused, ended))
         });
         let logins = match own {
-            Ok((disabled, logins, expired, unshared, paused)) => {
+            Ok((disabled, logins, expired, unshared, paused, ended)) => {
+                out.placeholders = ended.iter().map(|id| Cut { id: id.clone(), name: reach.placeholders.iter().find(|p| &p.id == id).map(|p| format!("{} for {}", p.key, p.consumer)).unwrap_or_default() }).collect();
+                // Their consumers' interception CAs naming a host they no longer have end.
+                self.hosts_shrank(reach.placeholders.iter().filter(|p| ended.contains(&p.id)).map(|p| p.consumer.as_str()));
                 let name = |list: &[crate::reach::Holder], id: &str| list.iter().find(|h| h.id == id).map(|h| h.name.clone()).unwrap_or_default();
                 out.identities = disabled.iter().map(|id| Cut { id: id.clone(), name: name(&reach.identities, id) }).collect();
                 out.shares = expired.iter().map(|id| Cut { id: id.clone(), name: reach.shares.iter().find(|s| &s.id == id).map(|s| s.note.clone()).unwrap_or_default() }).collect();
@@ -259,7 +277,7 @@ impl Secrets {
             }
             Err(e) => {
                 let why = e.to_string();
-                for (what, on) in [("identities", req.identities), ("shares", req.shares), ("syncs", req.syncs), ("freeze", req.freeze)] {
+                for (what, on) in [("identities", req.identities), ("placeholders", req.placeholders), ("shares", req.shares), ("syncs", req.syncs), ("freeze", req.freeze)] {
                     if on {
                         out.failed.push(Failure { what, ids: vec![], why: why.clone() });
                     }

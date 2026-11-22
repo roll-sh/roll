@@ -15,13 +15,16 @@
 pub mod api;
 pub mod challenge;
 pub mod backups;
+pub mod build_cache;
 pub mod hooks;
 pub mod tags;
 pub mod sites;
+pub mod submodules;
 pub mod skew;
 pub mod site_rules;
 pub mod tunnel;
 pub mod tcp;
+pub mod udp;
 pub mod refs;
 pub mod feedback;
 pub mod scale;
@@ -142,6 +145,8 @@ pub struct AppsConfig {
     pub ports: Option<(u16, u16)>,
     /// TCP services' ports (`run.tcp`), and the host clients reach them at (one node only).
     pub tcp_ports: Option<(u16, u16)>,
+    /// UDP services' ports (`run.udp`), at `tcp_host` too (one node only).
+    pub udp_ports: Option<(u16, u16)>,
     pub tcp_host: String,
     /// Domains users can't add as custom domains (roll's own).
     pub reserved: Vec<String>,
@@ -167,6 +172,9 @@ pub struct AppsConfig {
     /// registries whose names resolve to one (local development and tests only:
     /// `ROLL_APPS_ALLOW_PRIVATE`).
     pub allow_private: bool,
+    /// An open daemon (no admin token: rolld's gate puts no `Operator` on a request): a request
+    /// that's neither a user's token nor a signed-in person's is the operator's, as roll-mcp reads it.
+    pub open: bool,
     /// PagerDuty's Events API v2 and Opsgenie's Alert API, per region (`us`, `eu`): fixed, never
     /// a tenant's URL ([`notify`]'s on-call targets). Tests point them at their own servers.
     pub oncall_apis: OncallApis,
@@ -193,6 +201,7 @@ impl AppsConfig {
             url_port: Some(7080),
             ports: None,
             tcp_ports: None,
+            udp_ports: None,
             tcp_host: "127.0.0.1".into(),
             reserved: Vec::new(),
             cname_target: None,
@@ -205,6 +214,7 @@ impl AppsConfig {
             visitor_recheck: Duration::from_secs(300),
             otlp_base: None,
             allow_private: false,
+            open: false,
             oncall_apis: OncallApis::default(),
             spend_every: Duration::from_secs(30),
             cron_retry_after: Duration::from_secs(30),
@@ -267,6 +277,11 @@ pub struct Apps {
     explainer: std::sync::OnceLock<Arc<dyn integrations::Explainer>>,
     /// ECR logins' tokens by service: (the token, when it expires, unix ms).
     ecr_tokens: Mutex<HashMap<String, (String, i64)>>,
+    /// Instances' OIDC tokens by `<service>/<env>/<aud>`: (the token, when it expires, unix ms).
+    pub(crate) oidc_tokens: Mutex<HashMap<String, (String, i64)>>,
+    /// When a deployment's explanation last failed (unix ms): asked again at most a minute later,
+    /// as a kept one is (each try is charged to the repo's owner).
+    pub(crate) explain_failed: Mutex<HashMap<String, i64>>,
     pushers: push::Pushers,
     /// Who may still open a project's environments ([`Apps::set_visitors`]).
     pub(crate) visitors: std::sync::OnceLock<Arc<dyn integrations::Visitors>>,
@@ -282,6 +297,20 @@ pub struct Apps {
     pub(crate) status_cache: status_page::StatusCache,
     /// When this node last swept status pages' stale incidents (unix ms).
     status_swept: std::sync::atomic::AtomicI64,
+    /// When owned environments' logs were last expired (hourly, [`Apps::expire_logs_pass`]).
+    logs_expired: std::sync::atomic::AtomicI64,
+    /// The interception CA each closed environment's proxy serves and its instances trust: when
+    /// roll secrets answers another (near its end, ended early, a host bound since), instances
+    /// are moved to a bundle trusting both before the proxy switches.
+    pub(crate) intercept_cas: Mutex<HashMap<String, crate::deploy::Serving>>,
+    /// The next CA a closed environment's proxy switches to once the deployment whose instances
+    /// trust it is live (its network, and the CA).
+    pub(crate) intercept_pending: Mutex<HashMap<String, (String, crate::deploy::Serving)>>,
+    /// When each closed environment's instances were last moved to a new CA (at most every ten
+    /// minutes, whatever answers in between).
+    pub(crate) intercept_renewing: Mutex<HashMap<String, i64>>,
+    /// When closed environments' CAs were last checked (each minute).
+    intercepts_checked: std::sync::atomic::AtomicI64,
     /// Private environments' token hashes, by environment, as the owner last read or set them.
     access: Mutex<HashMap<String, Option<Access>>>,
     /// Bumped by every change to the access cache: a cold read caches what it read only if
@@ -348,6 +377,8 @@ pub struct Apps {
     site_loads: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Environments in a crash loop whose event is written (one per loop).
     looping: Mutex<std::collections::HashSet<String>>,
+    /// Each metric alert's run of judgments past its threshold (`service/env/name/sum`).
+    metric_streaks: Mutex<std::collections::HashMap<String, u8>>,
     /// For notification targets: public addresses only, no redirects.
     notify_client: reqwest::Client,
     /// A static site's proxy rewrites to other sites (`_redirects`' `https://… 200`): public
@@ -416,8 +447,23 @@ fn label(s: &str, max: usize) -> String {
 /// The environment's variables' fingerprint (names and values, with what the settings set): a
 /// change means the active deployment no longer matches. Settings count by what differs from
 /// their defaults, so a setting roll adds later (at its default) moves no service's fingerprint.
-/// `2:` marks this form; a deployment's hash without it is from before ([`Apps::needs_deploy`]).
-fn fingerprint(vars: &[(String, String)], svc: &ServiceRow) -> String {
+/// A closed environment's egress counts too (its instances are made on their network at a
+/// deploy): one switched to `roll` needs one while what runs still has the open network. `3:`
+/// marks this form; `2:` is the one before egress counted ([`fingerprint_v2`]), and a hash with
+/// neither is older still ([`Apps::needs_deploy`]).
+fn fingerprint(vars: &[(String, String)], svc: &ServiceRow, egress: &crate::model::Egress) -> String {
+    let mut run = set_only(&svc.run, &Run::default());
+    if egress.closed()
+        && let Value::Object(o) = &mut run
+    {
+        o.insert("egress".into(), serde_json::to_value(egress).expect("JSON"));
+    }
+    format!("3:{}", fingerprint_of(vars, &set_only(&svc.build, &Build::default()), &run))
+}
+
+/// The `2:` form: what deployments made before egress counted were hashed with, so they don't
+/// all read as needing a deploy (an egress change since is the next deploy's to carry).
+fn fingerprint_v2(vars: &[(String, String)], svc: &ServiceRow) -> String {
     format!("2:{}", fingerprint_of(vars, &set_only(&svc.build, &Build::default()), &set_only(&svc.run, &Run::default())))
 }
 
@@ -498,6 +544,11 @@ pub struct ResolvedVars {
     /// which logs may show but for a URL's password.
     pub from_secrets: BTreeSet<String>,
     pub plain_secrets: BTreeSet<String>,
+    /// What roll secrets said about the resolve (a closed environment's keys withheld): said in
+    /// the environment's log at each deploy.
+    pub notices: Vec<String>,
+    /// A closed environment's placeholders: each variable's binding (the hosts it's for).
+    pub placeholders: BTreeMap<String, String>,
 }
 
 impl ResolvedVars {
@@ -541,6 +592,19 @@ impl ResolvedVars {
         self.sealed.contains(k) || (secret && !self.plain_secrets.contains(k)) || (credential && source == Some("link"))
     }
 
+    /// What showing these variables would show of roll secrets': the keys it gave and the
+    /// `roll://` references read (from a listing: their text), sealed ones only when `sealed`.
+    fn secrets_shown(&self, sealed: bool) -> (Vec<String>, Vec<String>) {
+        let (mut keys, mut refs) = (Vec::new(), Vec::new());
+        for (k, v) in &self.vars {
+            if self.sources.get(k) != Some(&"secret") || (!sealed && self.sealed.contains(k)) {
+                continue;
+            }
+            if self.ref_texts.contains_key(k) { refs.push(v.clone()) } else { keys.push(k.clone()) }
+        }
+        (keys, refs)
+    }
+
     /// The variables a closed environment's build may have: none that is a secret
     /// ([`Self::is_secret`]), none that carries a URL password, and none that holds a secret
     /// value of eight characters or more (a reference that copied one).
@@ -581,6 +645,8 @@ impl Apps {
             mail: std::sync::OnceLock::new(),
             explainer: std::sync::OnceLock::new(),
             ecr_tokens: Mutex::new(HashMap::new()),
+            oidc_tokens: Mutex::new(HashMap::new()),
+            explain_failed: Mutex::new(HashMap::new()),
             pushers: push::Pushers::default(),
             visitors: std::sync::OnceLock::new(),
             drain_done: Arc::new(Mutex::new(Vec::new())),
@@ -589,6 +655,11 @@ impl Apps {
             preview_lines_rx: Mutex::new(Some(preview_lines_rx)),
             status_cache: Default::default(),
             status_swept: std::sync::atomic::AtomicI64::new(0),
+            logs_expired: std::sync::atomic::AtomicI64::new(0),
+            intercept_cas: Mutex::new(HashMap::new()),
+            intercept_pending: Mutex::new(HashMap::new()),
+            intercept_renewing: Mutex::new(HashMap::new()),
+            intercepts_checked: std::sync::atomic::AtomicI64::new(0),
             access: Mutex::new(HashMap::new()),
             access_gen: std::sync::atomic::AtomicU64::new(0),
             visits: Mutex::new(HashMap::new()),
@@ -630,6 +701,7 @@ impl Apps {
             edge_noted: Mutex::new(Default::default()),
             password_tries: Mutex::new(HashMap::new()),
             looping: Mutex::new(std::collections::HashSet::new()),
+            metric_streaks: Mutex::new(std::collections::HashMap::new()),
             client: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).pool_idle_timeout(Duration::from_secs(30)).build_http(),
             client_h2: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).pool_idle_timeout(Duration::from_secs(30)).http2_only(true).build_http(),
             stop: CancellationToken::new(),
@@ -803,7 +875,7 @@ impl Apps {
         }
         self.ensure_environment(&row, PRODUCTION, Some(branch.as_deref()), Some(false), &pname).await?;
         if let Some(set) = variables {
-            self.change_variables(&row.id, PRODUCTION, json!({ "set": set, "seal": sealed })).await?;
+            self.change_variables(&row.id, PRODUCTION, json!({ "set": set, "seal": sealed }), None).await?;
         }
         for (kind, r, body) in links {
             // A link that doesn't check out makes no service: nothing to clean up by hand.
@@ -813,7 +885,7 @@ impl Apps {
             }
         }
         if let Some((g, _)) = git_login
-            && let Err(e) = self.put_git_login(&row.id, g).await
+            && let Err(e) = self.put_git_login(&row.id, g, None).await
         {
             let _ = self.purge_service(&row.id).await;
             return Err(e);
@@ -957,7 +1029,8 @@ impl Apps {
     /// `PUT …/git-login`: the login a Git URL service's private repository is fetched with (a
     /// deploy token, app password or access token as `password`), sent only to the source URL's
     /// host. The URL itself stays without credentials.
-    pub async fn put_git_login(self: &Arc<Self>, service: &str, body: Value) -> Result<Service> {
+    /// `who`: who sets it (a `roll://` secret is bound to them).
+    pub async fn put_git_login(self: &Arc<Self>, service: &str, body: Value, who: Option<crate::integrations::Asker<'_>>) -> Result<Service> {
         let o = body.as_object().cloned().unwrap_or_default();
         if let Some(k) = o.keys().find(|k| !["username", "password", "secret"].contains(&k.as_str())) {
             return Err(Error::BadRequest(format!("unknown field {k}")));
@@ -974,8 +1047,11 @@ impl Apps {
         let (password, secret) = match (o.contains_key("password"), o.contains_key("secret")) {
             (true, false) => (text("password", 4096)?, None),
             (false, true) => {
-                let name = text("secret", 128)?;
-                check_var_name(&name)?;
+                let name = text("secret", 512)?;
+                // A key's name in production's root, or a reference (`roll://production/git/TOKEN`).
+                if crate::model::secret_ref_env(&name).is_none() {
+                    check_var_name(&name)?;
+                }
                 (String::new(), Some(name))
             }
             _ => return Err(Error::BadRequest("a Git login takes a password, or the secret that holds it (not both)".into())),
@@ -984,8 +1060,21 @@ impl Apps {
         let svc = self.db(move |s| s.service(&sid)).await?;
         let Source::Git { url, .. } = &svc.source else { return Err(Error::Conflict("only a Git URL source fetches with a login".into())) };
         let host = git_host(url).ok_or_else(|| Error::BadRequest("the source URL has no host".into()))?;
+        // A reference is bound to whoever sets it as production's runtime read (roll secrets'
+        // `bind_ref_runtime`: the gate already asked for deploy), read as them at each fetch.
+        let maker = match secret.as_deref().map(|s| (s, crate::model::secret_ref_env(s))) {
+            Some((r, Some(Ok(e)))) => {
+                if e != PRODUCTION {
+                    return Err(Error::BadRequest(format!("a Git login's reference names production's secret (roll://production/…), not {e}'s: fetches are the service's, whatever environment deploys")));
+                }
+                let Some(who) = who else { return Err(Error::BadRequest("a Git login's roll:// secret is set through the API, by a person who may reveal it".into())) };
+                Some(self.deps.secrets.bind_ref_runtime(who, &svc.project, service, r, PRODUCTION).await.map_err(|why| Error::Forbidden(format!("{r}: {why:#}")))?)
+            }
+            Some((_, Some(Err(e)))) => return Err(e),
+            _ => None,
+        };
         let sid = service.to_string();
-        self.db(move |s| s.set_git_login(&sid, &host, &username, &password, secret.as_deref())).await?;
+        self.db(move |s| s.set_git_login(&sid, &host, &username, &password, secret.as_deref(), maker.as_deref())).await?;
         self.service(service).await
     }
 
@@ -1143,6 +1232,23 @@ impl Apps {
         let login = self.db(move |s| s.git_login_secret(&sid)).await.ok().flatten().filter(|(l, _)| Some(&l.host) == git_host(url).as_ref());
         let login = match login {
             // Read from the project's production secrets (what the service runs with), each use.
+            // A reference: read as whoever chose it may now.
+            Some((l, _)) if l.secret.as_deref().is_some_and(|s| s.starts_with("roll://")) => {
+                let r = l.secret.clone().expect("matched");
+                let sid = service.to_string();
+                let found = self.db(move |s| Ok((s.service(&sid)?.project, s.git_login_maker(&sid)?))).await.ok();
+                let read = match found {
+                    Some((project, Some(maker))) => self.deps.secrets.resolve_as(&project, PRODUCTION, service, &r, &maker).await.map_err(|e| format!("{e:#}")),
+                    _ => Err("nobody is bound to it: set it again".to_string()),
+                };
+                match read {
+                    Ok(v) => Some((l.username, v)),
+                    Err(why) => {
+                        tracing::warn!(service, reference = %r, "apps: a Git login's reference didn't resolve ({why}); fetching without it");
+                        None
+                    }
+                }
+            }
             Some((l, _)) if l.secret.is_some() => {
                 let key = l.secret.clone().expect("matched");
                 let sid = service.to_string();
@@ -1257,6 +1363,7 @@ impl Apps {
             row.name = n.to_string();
         }
         let (mut forget_login, mut forget_git) = (false, false);
+        let before_source = o.get("source").map(|_| row.source.clone());
         if let Some(s) = o.get("source") {
             let source: Source = serde_json::from_value(s.clone()).map_err(|e| Error::BadRequest(format!("source: {e}")))?;
             self.check_source(&source)?;
@@ -1275,7 +1382,13 @@ impl Apps {
             forget_git = git(&row.source) != git(&source);
             row.source = source;
         }
+        let repo_moved = matches!((&before_source, &row.source), (Some(Source::Repo { repo: a, .. }), Source::Repo { repo: b, .. }) if a != b) || matches!((&before_source, &row.source), (Some(Source::Repo { .. }), s) if !matches!(s, Source::Repo { .. }));
         row.build = merge(&row.build, o.get("build"), "build")?;
+        // The private repos its submodules may come from were allowed for the repo it was built
+        // from: another repo starts with none unless this request names them (and is lent read).
+        if repo_moved && o.get("build").and_then(|b| b.get("submodule_repos")).is_none() {
+            row.build.submodule_repos = None;
+        }
         row.build.check()?;
         row.run = row.run.merged(o.get("run"))?;
         let r = row.clone();
@@ -1383,13 +1496,25 @@ impl Apps {
 
     /// Delete a service for good, and everything that belongs to it.
     pub async fn purge_service(self: &Arc<Self>, id: &str) -> Result<()> {
+        // Gone for good: its home goes too (docs/members.md, "The canvas rule").
+        if let Some(ws) = self.deps.workspace.clone() {
+            let sid = id.to_string();
+            let _ = tokio::task::spawn_blocking(move || ws.forget_resource(roll_workspace::Kind::Service, &sid)).await;
+        }
         let sid = id.to_string();
         let envs = self.db(move |s| s.environments(&sid)).await?;
         let sid = id.to_string();
         let (row, _) = self.db(move |s| s.service_any(&sid)).await?;
         let project = row.project.clone();
+        // Its jobs' ids, for their logs: the rows go with the service.
+        let mut jobs = Vec::new();
+        for e in &envs {
+            let (sid, en) = (id.to_string(), e.name.clone());
+            jobs.extend(self.db(move |s| s.jobs_started(&sid, &en, 0, i64::MAX)).await.unwrap_or_default());
+        }
         for e in &envs {
             self.teardown_live(id, &e.name).await;
+            self.drop_branches(id, &e.name, None).await;
         }
         // Each environment's volume goes with it (a last backup first, kept a week).
         for e in &envs {
@@ -1434,9 +1559,16 @@ impl Apps {
         self.db(move |s| s.delete_service(&sid)).await?;
         // Its hostnames name nothing now.
         self.hosts_changed();
-        // Its environments' networks, where no other service of the project has that environment.
+        // Its environments' networks, where no other service of the project has that environment,
+        // and their logs.
         for e in &envs {
             self.drop_network_if_unused(&project, &e.name, id).await;
+            for key in crate::logs::env_keys(id, &e.name) {
+                self.logs.delete(&key).await;
+            }
+        }
+        for j in &jobs {
+            self.logs.delete(&format!("job:{j}")).await;
         }
         self.release_domains(&domains).await;
         // The project's closed builds' builder, with its last service (a deleted one counts).
@@ -1474,13 +1606,37 @@ impl Apps {
     /// live (names only, from the snapshot kept at its switch; null when it has none, a
     /// deployment from before snapshots), and the run settings the service sets that the live
     /// deployment doesn't run with. Links and project secrets move `needs_deploy` too, unnamed.
+    /// The digest a deployment of `svc` in `env` goes live with: roll secrets' for the environment,
+    /// and, when its variables name other environments' secrets (bound to their makers), each of
+    /// those folders' as its maker may read it now, so a change there (or the maker losing it)
+    /// reads as needing a deploy. None: no digest to compare.
+    pub(crate) async fn secrets_digest_of(self: &Arc<Self>, svc: &ServiceRow, env: &str) -> Option<String> {
+        let own = self.deps.secrets.digest(&svc.project, env).await.ok().flatten();
+        let (sid, e) = (svc.id.clone(), env.to_string());
+        let makers = self.db(move |s| s.variable_makers(&sid, &e)).await.unwrap_or_default();
+        if makers.is_empty() {
+            return own;
+        }
+        let (sid, e) = (svc.id.clone(), env.to_string());
+        let vars = self.db(move |s| s.variables(&sid, &e)).await.unwrap_or_default();
+        use sha2::Digest;
+        let mut h = sha2::Sha256::new();
+        h.update(own.unwrap_or_default());
+        for (name, maker) in &makers {
+            let Some(r) = vars.get(name) else { continue };
+            let d = self.deps.secrets.digest_as(&svc.project, env, &svc.id, r, maker).await.unwrap_or_else(|e| format!("refused: {e}"));
+            h.update(format!("|{name}={d}"));
+        }
+        Some(format!("bound:{}", hex::encode(h.finalize())))
+    }
+
     pub async fn pending(self: &Arc<Self>, service: &str, env: &str) -> Result<Value> {
         let (svc, row) = self.service_env(service, env).await?;
         let Some(active) = row.active.clone() else { return Ok(json!({ "variables": null, "run": [], "secrets": null })) };
         let a = active.clone();
         let (dep, then, digest_then) = self.db(move |s| Ok((s.deployment(&a)?, s.snapshot(&a)?, s.secrets_digest(&a)?))).await?;
         // The project's secrets since it went live (null: no digest to compare).
-        let secrets = match (digest_then, self.deps.secrets.digest(&svc.project, env).await.ok().flatten()) {
+        let secrets = match (digest_then, self.secrets_digest_of(&svc, env).await) {
             (Some(then), Some(now)) => Value::Bool(then != now),
             _ => Value::Null,
         };
@@ -1510,7 +1666,7 @@ impl Apps {
         let key = env_key(&r.service, &r.name);
         let seen = self.settings_gen.load(SeqCst);
         // The project's secrets moved: worked out again at once, not after the minute.
-        let digest = self.deps.secrets.digest(&svc.project, &r.name).await.ok().flatten();
+        let digest = self.secrets_digest_of(svc, &r.name).await;
         if let Some((at, g, a, d, v)) = self.needs.lock().get(&key)
             && *g == seen
             && a == active
@@ -1522,7 +1678,8 @@ impl Apps {
         let a = active.to_string();
         let dep = self.db(move |s| s.deployment(&a)).await?;
         let v = match self.listed_vars(svc, r, &dep.id).await {
-            Ok(v) if dep.vars_hash.starts_with("2:") => fingerprint(&v.vars_for_hash(), svc) != dep.vars_hash,
+            Ok(v) if dep.vars_hash.starts_with("3:") => fingerprint(&v.vars_for_hash(), svc, &r.egress) != dep.vars_hash,
+            Ok(v) if dep.vars_hash.starts_with("2:") => fingerprint_v2(&v.vars_for_hash(), svc) != dep.vars_hash,
             // From before settings counted by what they set: any setting added since moves its
             // hash, so what `/pending` names decides (variables, run settings, secrets).
             Ok(_) => self.pending(&r.service, &r.name).await.is_ok_and(|p| {
@@ -1601,6 +1758,13 @@ impl Apps {
         let (sid, e) = (r.service.clone(), r.name.clone());
         let config = self.db(move |s| s.runtime_config(&sid, &e)).await?;
         let (sid, e) = (r.service.clone(), r.name.clone());
+        let (udp_port, scheduled) = self.db(move |s| Ok((s.udp_port(&sid, &e)?, s.scheduled(&sid, &e)?))).await?;
+        let (sid, e) = (r.service.clone(), r.name.clone());
+        let data = match self.db(move |s| Ok((s.env_data(&sid, &e)?, s.env_branches(&sid, &e)?))).await? {
+            (true, branches) => Some(serde_json::json!({ "mode": "branch", "branches": branches.iter().map(|(k, rr, _)| serde_json::json!({ "kind": k.as_str(), "ref": rr })).collect::<Vec<_>>() })),
+            (false, _) => None,
+        };
+        let (sid, e) = (r.service.clone(), r.name.clone());
         let rotated = self.db(move |s| s.runtime_config_rotated(&sid, &e)).await?;
         Ok(Environment {
             summary,
@@ -1610,6 +1774,7 @@ impl Apps {
             domains,
             port: r.port,
             tcp: r.tcp_port.filter(|_| svc.run.tcp && svc.run.public && !private).map(|p| format!("{}:{p}", self.cfg.tcp_host)),
+            udp: udp_port.filter(|_| svc.run.udp && svc.run.public && !private && !r.egress.closed()).map(|p| format!("{}:{p}", self.cfg.tcp_host)),
             private,
             signed_in,
             password,
@@ -1631,6 +1796,10 @@ impl Apps {
             },
             feedback: r.feedback,
             vitals: r.vitals,
+            log_retention_days: r.log_retention_days.unwrap_or(crate::logs::KEEP_DAYS),
+            approvals: r.approvals,
+            // On the environment's own public name (the apps listener answers `/_roll/badge/` on any).
+            badge_url: r.badge.then(|| format!("{}{}{}/{}.svg", self.url(&r.slug), crate::public::BADGE, r.service, r.name)),
             report: r.report,
             preview_host: {
                 let (sid, e) = (r.service.clone(), r.name.clone());
@@ -1661,6 +1830,10 @@ impl Apps {
             freeze: r.freeze.clone(),
             heartbeat_urls: Default::default(),
             egress_refused: if r.egress.closed() { self.deps.runtime.egress_refused(&closed_network_name(&svc.project, &r.name), &r.egress.hosts) } else { Vec::new() },
+            intercepted: r.egress.closed().then(|| self.deps.runtime.intercepted(&closed_network_name(&svc.project, &r.name))).flatten(),
+            data,
+            scheduled: (!scheduled).then_some(false),
+            closed_by: r.egress_by.as_ref().filter(|_| r.egress.closed()).map(|m| if m.is_empty() { Value::Null } else { Value::String(m.clone()) }),
             egress: r.egress.clone(),
             scaling,
             wait_for_ci: r.wait_for_ci,
@@ -1733,7 +1906,7 @@ impl Apps {
                 settings.push(json!({ "field": format!("run.{k}"), "from": x, "to": y, "put": { "run": { k: x } } }));
             }
         }
-        for k in ["wait_for_ci", "follow_tag", "redeploy_on_secrets", "traces", "vitals", "report", "egress", "allow_ips", "rate_limit", "firewall", "headers", "routes", "checks"] {
+        for k in ["wait_for_ci", "follow_tag", "redeploy_on_secrets", "traces", "vitals", "report", "egress", "allow_ips", "rate_limit", "firewall", "headers", "routes", "checks", "log_retention_days", "approvals"] {
             let (x, y) = (a.get(k).cloned().unwrap_or(Value::Null), b.get(k).cloned().unwrap_or(Value::Null));
             if x != y {
                 settings.push(json!({ "field": k, "from": x, "to": y, "put": { k: x } }));
@@ -1775,9 +1948,15 @@ impl Apps {
     }
 
     pub async fn put_environment(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Environment> {
+        self.put_environment_by(service, env, body, None).await
+    }
+
+    /// [`Apps::put_environment`], `by` the person asking (who an egress change is recorded as:
+    /// a closed environment's placeholders are made by them).
+    pub async fn put_environment_by(self: &Arc<Self>, service: &str, env: &str, body: Value, by: Option<String>) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "checks", "heartbeats", "split", "mirror", "snippets", "config", "freeze", "pause_schedule", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "checks", "heartbeats", "split", "mirror", "snippets", "config", "freeze", "pause_schedule", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host", "log_retention_days", "approvals", "badge", "closed_by", "data", "scheduled"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -2015,6 +2194,27 @@ impl Apps {
         if egress.as_ref().is_some_and(crate::model::Egress::closed) && !self.deps.runtime.closes_egress() {
             return Err(Error::Conflict("egress \"roll\" needs a runtime that can close an environment's network (Docker on this host); this node's can't".into()));
         }
+        // Who a closed environment's placeholders are made by, named by the operator's caller (roll
+        // previews: its rules' maker); null, no one (its bound keys withheld). With egress only.
+        let closed_by = match o.get("closed_by") {
+            None => None,
+            _ if egress.is_none() => return Err(Error::BadRequest("closed_by goes with egress".into())),
+            Some(Value::Null) => Some(String::new()),
+            Some(Value::String(m)) if (m.starts_with("usr_") || m.starts_with("token:")) && m.len() <= 128 && !m.contains(char::is_whitespace) => Some(m.clone()),
+            Some(_) => return Err(Error::BadRequest("closed_by is a person (usr_…), a token (token:…) or null".into())),
+        };
+        let by = closed_by.or(by);
+        // Data of its own (`"branch"`): a branch of each database it links, never production's;
+        // production's data is the databases themselves, and a preview's is roll previews'.
+        let data = match o.get("data") {
+            None => None,
+            Some(Value::Null) => Some(false),
+            Some(Value::String(d)) if d == "branch" => Some(true),
+            Some(_) => return Err(Error::BadRequest("data is \"branch\" (a branch of each database it links) or null".into())),
+        };
+        if data == Some(true) && (env == "production" || o.get("ephemeral") == Some(&Value::Bool(true))) {
+            return Err(Error::BadRequest("data: production's is the databases themselves, and a preview's is roll previews' to branch".into()));
+        }
         let branch = match o.get("branch") {
             None => None,
             Some(Value::Null) => Some(None),
@@ -2113,10 +2313,34 @@ impl Apps {
                 svc.for_env(&row).map_err(|e| Error::BadRequest(e.to_string().replace("no longer fit", "don't fit")))?;
             }
         }
-        for k in ["feedback", "follow_tag", "wait_for_ci", "redeploy_on_secrets", "traces", "vitals", "report"] {
+        for k in ["feedback", "follow_tag", "wait_for_ci", "redeploy_on_secrets", "traces", "vitals", "report", "badge"] {
             if !matches!(o.get(k), None | Some(Value::Null | Value::Bool(_))) {
                 return Err(Error::BadRequest(format!("{k} is a boolean")));
             }
+        }
+        // 7, 30 or 90 days (null: the default 7); a preview keeps a week.
+        let retention = match o.get("log_retention_days") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(v) => match v.as_u64() {
+                Some(d @ (7 | 30 | 90)) => Some(Some(d as u32)),
+                _ => return Err(Error::BadRequest("log_retention_days is 7, 30 or 90".into())),
+            },
+        };
+        if retention.flatten().is_some_and(|d| d != crate::logs::KEEP_DAYS) && ephemeral.unwrap_or(existing.as_ref().is_some_and(|r| r.ephemeral)) {
+            return Err(Error::BadRequest("a preview's logs are kept 7 days".into()));
+        }
+        // Approvals from people other than a deployment's author before it goes live: 0–3.
+        let approvals = match o.get("approvals") {
+            None => None,
+            Some(Value::Null) => Some(0),
+            Some(v) => match v.as_u64() {
+                Some(n @ 0..=3) => Some(n as u32),
+                _ => return Err(Error::BadRequest("approvals is 0–3 people".into())),
+            },
+        };
+        if approvals.is_some_and(|n| n > 0) && ephemeral.unwrap_or(existing.as_ref().is_some_and(|r| r.ephemeral)) {
+            return Err(Error::BadRequest("a preview's deploys need no approvals".into()));
         }
         if o.get("traces") == Some(&Value::Bool(true)) && self.cfg.otlp_base.is_none() {
             return Err(Error::Conflict("traces aren't set up on this node (no OTLP address)".into()));
@@ -2224,10 +2448,12 @@ impl Apps {
             self.changed(service);
         }
         // Instances are made from the next deploy on with it (a network of their own, the proxy's
-        // variables); what runs keeps its way out until then.
+        // variables); what runs keeps its way out until then, and `needs_deploy` says so.
         if let Some(eg) = egress {
             let (sid, e) = (service.to_string(), env.to_string());
-            self.db(move |s| s.set_egress(&sid, &e, &eg)).await?;
+            let who = by.clone();
+            self.db(move |s| s.set_egress(&sid, &e, &eg, who.as_deref())).await?;
+            self.settings_changed();
             self.changed(service);
         }
         if let Some(rules) = headers {
@@ -2301,6 +2527,24 @@ impl Apps {
         if let Some(Value::Bool(on)) = o.get("report") {
             let (sid, e, on) = (service.to_string(), env.to_string(), *on);
             self.db(move |s| s.set_report(&sid, &e, on)).await?;
+            self.changed(service);
+        }
+        // Its badge answers anyone from now on (or no one).
+        if let Some(Value::Bool(on)) = o.get("badge") {
+            let (sid, e, on) = (service.to_string(), env.to_string(), *on);
+            self.db(move |s| s.set_badge(&sid, &e, on)).await?;
+            self.changed(service);
+        }
+        // From the next deploy on: what's put live waits for them.
+        if let Some(n) = approvals {
+            let (sid, e) = (service.to_string(), env.to_string());
+            self.db(move |s| s.set_approvals(&sid, &e, n)).await?;
+            self.changed(service);
+        }
+        // Kept from the next hourly pass on (logs::expire_pass).
+        if let Some(days) = retention {
+            let (sid, e) = (service.to_string(), env.to_string());
+            self.db(move |s| s.set_log_retention(&sid, &e, days)).await?;
             self.changed(service);
         }
         // Web Vitals: the proxy tags its pages from the next request on.
@@ -2377,9 +2621,93 @@ impl Apps {
             new_urls = tokens.into_iter().map(|(name, token)| (name, format!("{}{}{token}", self.url(&slug), crate::heartbeats::PATH))).collect();
             self.changed(service);
         }
+        // Its schedules (a cron's, run.schedules) off or on; deploys and runs go on either way.
+        match o.get("scheduled") {
+            None => {}
+            Some(Value::Bool(on)) => {
+                let (sid, e, on) = (service.to_string(), env.to_string(), *on);
+                self.db(move |s| s.set_scheduled(&sid, &e, on)).await?;
+            }
+            Some(_) => return Err(Error::BadRequest("scheduled is a boolean".into())),
+        }
+        if let Some(on) = data {
+            let (sid, e) = (service.to_string(), env.to_string());
+            let ephemeral = self.db(move |s| s.environment(&sid, &e)).await?.ephemeral;
+            if on && ephemeral {
+                return Err(Error::BadRequest("data: a preview's is roll previews' to branch".into()));
+            }
+            let (sid, e) = (service.to_string(), env.to_string());
+            self.db(move |s| s.set_env_data(&sid, &e, on)).await?;
+            match on {
+                true => {
+                    let sid = service.to_string();
+                    let svc = self.db(move |s| s.service(&sid)).await?;
+                    self.ensure_branches(&svc, env).await.map_err(|e| Error::BadRequest(format!("data: {e:#}")))?;
+                }
+                false => self.drop_branches(service, env, None).await,
+            }
+            self.settings_changed();
+        }
         let mut view = self.environment(service, env).await?;
         view.heartbeat_urls.extend(new_urls);
         Ok(view)
+    }
+
+    /// An environment with data of its own: a branch of each database it links that has none
+    /// yet (a link made since, or the first time), made by the resource's product.
+    pub(crate) async fn ensure_branches(self: &Arc<Self>, svc: &ServiceRow, env: &str) -> anyhow::Result<()> {
+        let (sid, e) = (svc.id.clone(), env.to_string());
+        let (on, links, have) = self.db(move |s| Ok((s.env_data(&sid, &e)?, s.links_minted(&sid)?, s.env_branches(&sid, &e)?))).await?;
+        if !on {
+            return Ok(());
+        }
+        for (kind, r, _, _) in links.into_iter().filter(|(k, ..)| k.branches()) {
+            if have.iter().any(|(k, rr, _)| *k == kind && *rr == r) {
+                continue;
+            }
+            // Another service of the project made it for this environment: theirs is ours.
+            let (sid, p, e, rr) = (svc.id.clone(), svc.project.clone(), env.to_string(), r.clone());
+            if self.db(move |s| s.share_env_branch(&sid, &p, &e, kind, &rr)).await? {
+                continue;
+            }
+            // A name nobody can guess: names may be global (Redis'), and one someone made first
+            // would be refused, never adopted.
+            let name = format!("roll-apps-{}", crate::model::random(12));
+            let made = self.deps.resources.branch(kind, &r, &name).await?.ok_or_else(|| anyhow::anyhow!("{} {r} can't be branched on this node", kind.as_str()))?;
+            let (sid, e, rr) = (svc.id.clone(), env.to_string(), r.clone());
+            self.db(move |s| s.put_env_branch(&sid, &e, kind, &rr, &made)).await?;
+        }
+        Ok(())
+    }
+
+    /// The environment's branches taken off it (one link's with `only`), each deleted once no
+    /// other environment uses it.
+    pub(crate) async fn drop_branches(self: &Arc<Self>, service: &str, env: &str, only: Option<(LinkKind, String)>) {
+        let (sid, e) = (service.to_string(), env.to_string());
+        let taken = match self.db(move |s| s.take_env_branches(&sid, &e, only.as_ref().map(|(k, r)| (*k, r.as_str())))).await {
+            Ok(t) => t,
+            Err(e) => return tracing::warn!(service, env, error = %e, "apps: an environment's branches couldn't be read"),
+        };
+        for (kind, r, kept, used) in taken.into_iter().filter(|(.., used)| !used) {
+            let _ = used;
+            if let Err(e) = self.deps.resources.unbranch(kind, &r, &kept).await {
+                tracing::warn!(service, env, kind = kind.as_str(), r#ref = %r, error = %e, "apps: a branch couldn't be deleted: tried again each minute");
+                let rr = r.clone();
+                let _ = self.db(move |s| s.add_orphan_branch(kind, &rr, &kept)).await;
+            }
+        }
+    }
+
+    /// Branches whose delete failed (the product away, a fleet's owner moving), tried again:
+    /// each one deleted is forgotten, the rest wait for the next minute.
+    pub(crate) async fn retry_orphan_branches(self: &Arc<Self>) {
+        let Ok(orphans) = self.db(|s| s.orphan_branches(50)).await else { return };
+        for (kind, r, kept) in orphans {
+            if self.deps.resources.unbranch(kind, &r, &kept).await.is_ok() {
+                let rr = r.clone();
+                let _ = self.db(move |s| s.forget_orphan_branch(kind, &rr, &kept)).await;
+            }
+        }
     }
 
     /// Tear an environment down: instances, volume, domains, variables; deployments stay in
@@ -2387,6 +2715,9 @@ impl Apps {
     pub async fn delete_environment(self: &Arc<Self>, service: &str, env: &str) -> Result<()> {
         let (sid, e) = (service.to_string(), env.to_string());
         self.db(move |s| s.environment(&sid, &e)).await?;
+        // Its jobs' ids, for their logs: the rows go with the environment.
+        let (sid, e) = (service.to_string(), env.to_string());
+        let jobs = self.db(move |s| s.jobs_started(&sid, &e, 0, i64::MAX)).await.unwrap_or_default();
         for d in self.store.pending_deployments(service)?.into_iter().filter(|d| d.environment == env) {
             self.cancel(service, env, &d.id).await.ok();
         }
@@ -2394,6 +2725,9 @@ impl Apps {
         // live state (or a container, or the volume) again behind the teardown.
         let (sid, e) = (service.to_string(), env.to_string());
         let domains = self.db(move |s| s.custom_domains_of(&sid, Some(&e))).await?;
+        // Its branches first (deleted once no other environment uses them): the rows naming them
+        // would go with it.
+        self.drop_branches(service, env, None).await;
         let (sid, e) = (service.to_string(), env.to_string());
         self.db(move |s| s.delete_environment(&sid, &e)).await?;
         self.hosts_changed();
@@ -2414,7 +2748,10 @@ impl Apps {
         if let Ok(svc) = self.db(move |s| s.service(&sid)).await {
             self.drop_network_if_unused(&svc.project, env, service).await;
         }
-        self.logs.forget(&format!("env:{service}/{env}"));
+        // Its logs go with it (a deleted environment's are never read again), its jobs' too.
+        for key in crate::logs::env_keys(service, env).into_iter().chain(jobs.iter().map(|j| format!("job:{j}"))) {
+            self.logs.delete(&key).await;
+        }
         Ok(())
     }
 
@@ -2424,6 +2761,15 @@ impl Apps {
         if let Ok(false) = self.db(move |s| s.env_in_use(&p, &e, &l)).await {
             self.deps.runtime.remove_network(&network_name(project, env)).await;
             self.deps.runtime.remove_network(&closed_network_name(project, env)).await;
+            // Its build caches too: no service of the project builds there any more; and its
+            // placeholders and interception end.
+            let (p, e) = (project.to_string(), env.to_string());
+            if let Ok(gone) = self.db(move |s| s.drop_build_caches(&p, &e)).await {
+                self.drop_cache_objects(gone);
+            }
+            if let Err(e) = self.deps.secrets.end_intercept(project, env).await {
+                tracing::warn!(project, env, error = %e, "apps: a closed environment's placeholders couldn't be ended");
+            }
         }
     }
 
@@ -2531,8 +2877,22 @@ impl Apps {
         let dep = self.db(move |s| s.deployment(&active)).await?;
         let sid = service.to_string();
         let svc = self.db(move |s| s.service(&sid)).await?;
+        // No CA kept for it here (a restart, a takeover): its interception CA's key lived only in
+        // the node that made it, so the instances this adopts trust one no proxy can serve.
+        let unknown_ca = row.egress.closed() && !self.intercept_cas.lock().contains_key(&env_key(service, env));
         let tpl = self.template(&svc, &row, &dep).await?;
         live.adopt(Arc::new(tpl)).await;
+        // So they're moved to the CA its proxy serves now (the same image, a new deployment).
+        if unknown_ca && live.awake() > 0 {
+            let (this, sid, en, active) = (self.clone(), service.to_string(), env.to_string(), row.active.clone().unwrap_or_default());
+            tokio::spawn(async move {
+                let log = this.logs.sink(format!("env:{sid}/{en}"), crate::logs::Stream::System);
+                match this.rollback(&sid, &en, &active, Some("roll".into()), true, false).await {
+                    Ok(d) => log.line(format!("taken over with instances that trust an interception CA this node never had: moving them ({}) to the one its proxy serves", d.id)),
+                    Err(e) => log.line(format!("taken over with instances that trust an interception CA this node never had, and moving them didn't start: {e}")),
+                }
+            });
+        }
         Ok(live)
     }
 
@@ -2540,16 +2900,24 @@ impl Apps {
 
     /// An instance's variables, `roll://` references read (a deploy).
     pub async fn resolve_vars(self: &Arc<Self>, svc: &ServiceRow, env: &EnvRow, deployment: &str) -> Result<ResolvedVars> {
-        self.resolve_vars_as(svc, env, deployment, true).await
+        self.resolve_vars_as(svc, env, deployment, true, true).await
+    }
+
+    /// A deploy's variables for its hash and its checks (`roll://` read, a closed environment's
+    /// placeholders not made: the instances' are, once, with their template).
+    pub async fn checked_vars(self: &Arc<Self>, svc: &ServiceRow, env: &EnvRow, deployment: &str) -> Result<ResolvedVars> {
+        self.resolve_vars_as(svc, env, deployment, true, false).await
     }
 
     /// The same for a listing or a staleness check: a `roll://` reference is its text, never read
     /// (no secret decrypted, no read audited as the service for a person's page view).
     pub async fn listed_vars(self: &Arc<Self>, svc: &ServiceRow, env: &EnvRow, deployment: &str) -> Result<ResolvedVars> {
-        self.resolve_vars_as(svc, env, deployment, false).await
+        self.resolve_vars_as(svc, env, deployment, false, false).await
     }
 
-    async fn resolve_vars_as(self: &Arc<Self>, svc: &ServiceRow, env: &EnvRow, deployment: &str, read_refs: bool) -> Result<ResolvedVars> {
+    /// `mint`: a closed environment's placeholders made (an instance's variables); else its keys
+    /// bound to hosts are markers with their binding, nothing made.
+    async fn resolve_vars_as(self: &Arc<Self>, svc: &ServiceRow, env: &EnvRow, deployment: &str, read_refs: bool, mint: bool) -> Result<ResolvedVars> {
         let mut vars: BTreeMap<String, (String, &'static str)> = BTreeMap::new();
         let port = svc.run.port.unwrap_or(8080);
         let roll = [
@@ -2645,15 +3013,32 @@ impl Apps {
                 }
             }
         }
-        let sid = svc.id.clone();
-        let links = self.db(move |s| s.links_minted(&sid)).await?;
+        let (sid, e) = (svc.id.clone(), env.name.clone());
+        let (links, own_data, branches) = self.db(move |s| Ok((s.links_minted(&sid)?, s.env_data(&sid, &e)?, s.env_branches(&sid, &e)?))).await?;
+        let mut branch_notices = Vec::new();
         for (kind, r, prefix, minted) in links {
             // A preview (an ephemeral environment) never gets a resource's production variables:
             // roll previews sets the branched ones itself, by name; another service's URLs stay.
             if env.ephemeral && kind != LinkKind::Service {
                 continue;
             }
-            let read = self.link_values(svc, kind, &r, &env.name, minted).await;
+            // Nor does an environment with data of its own: its branch's, or none yet; a kind
+            // with no branches (search) is left out of it.
+            if own_data && kind != LinkKind::Service && !kind.branches() {
+                branch_notices.push(format!("{} {r} is left out of {}: it has data of its own, and a {} can't be branched", kind.as_str(), env.name, kind.as_str()));
+                continue;
+            }
+            let read = if own_data && kind.branches() {
+                match branches.iter().find(|(k, rr, _)| *k == kind && *rr == r) {
+                    Some((_, _, m)) => Ok(m.vars.clone()),
+                    None => {
+                        branch_notices.push(format!("{} {r} has no branch for {} yet: its variables are left out until a deploy makes one", kind.as_str(), env.name));
+                        continue;
+                    }
+                }
+            } else {
+                self.link_values(svc, kind, &r, &env.name, minted).await
+            };
             match read {
                 Ok(vs) => {
                     for (k, v) in vs {
@@ -2667,9 +3052,30 @@ impl Apps {
         }
         let mut sensitive = BTreeSet::new();
         let (mut from_secrets, mut plain_secrets) = (BTreeSet::new(), BTreeSet::new());
-        match self.deps.secrets.resolve(&svc.project, &env.name, &svc.id).await {
+        // A closed environment's keys bound to hosts come as placeholders its egress proxy swaps.
+        let mut notices = branch_notices;
+        let mut placeholders = BTreeMap::new();
+        let resolved = match env.egress.closed() {
+            true => self.deps.secrets.resolve_closed(&svc.project, &env.name, &svc.id, env.egress_by.as_deref(), mint).await.map(|c| {
+                notices.extend(c.notice);
+                c.vars
+            }),
+            false => self.deps.secrets.resolve(&svc.project, &env.name, &svc.id).await,
+        };
+        match resolved {
             Ok(secrets) => {
+                let mut parents = Vec::new();
                 for s in secrets {
+                    if let Some(b) = &s.binding {
+                        placeholders.insert(s.name.clone(), b.clone());
+                    }
+                    // An environment with data of its own never gets a linked resource's
+                    // credentials or address through roll secrets: they name the resource itself
+                    // (production's database), and its branches come through its own links.
+                    if own_data && s.linked {
+                        parents.push(s.name);
+                        continue;
+                    }
                     if s.sensitive {
                         sensitive.insert(s.name.clone());
                     }
@@ -2680,6 +3086,9 @@ impl Apps {
                     // A linked resource's address, rewritten for the container as apps' own links.
                     let v = if s.linked { self.deps.runtime.reach(&s.value) } else { s.value };
                     vars.insert(s.name, (v, "secret"));
+                }
+                if !parents.is_empty() {
+                    notices.push(format!("{} from roll secrets' links left out: {} has data of its own, and they reach the resources themselves (its branches come through its own links)", parents.join(", "), env.name));
                 }
             }
             Err(e) => return Err(Error::Internal(format!("the project's {} secrets couldn't be read: {e}", env.name))),
@@ -2692,6 +3101,25 @@ impl Apps {
         if config_url {
             sealed.insert("ROLL_CONFIG_URL".into());
         }
+        // A web service's instances ask to stay awake for work after an answer (`ROLL_AWAKE_URL`),
+        // with the environment's instance token: sealed, as the OIDC address.
+        if let Some(base) = self.cfg.otlp_base.as_ref().filter(|_| svc.run.kind == crate::model::RunType::Web) {
+            let (sid, e) = (svc.id.clone(), env.name.clone());
+            let token = self.db(move |s| s.oidc_token(&sid, &e)).await?;
+            let url = format!("{}{}{}/{}/{token}", base.trim_end_matches('/'), crate::public::AWAKE, svc.id, env.name);
+            vars.insert("ROLL_AWAKE_URL".into(), (self.deps.runtime.reach(&url), "roll"));
+            sealed.insert("ROLL_AWAKE_URL".into());
+        }
+        // Where its instances read roll's OIDC tokens (`run.oidc_audiences`): a token URL on this
+        // listener, sealed, as runtime config's; the first audience said too.
+        if let (Some(base), Some(first)) = (&self.cfg.otlp_base, svc.run.oidc_audiences.first()) {
+            let (sid, e) = (svc.id.clone(), env.name.clone());
+            let token = self.db(move |s| s.oidc_token(&sid, &e)).await?;
+            let url = format!("{}{}{}/{}/{token}", base.trim_end_matches('/'), crate::public::OIDC, svc.id, env.name);
+            vars.insert("ROLL_OIDC_URL".into(), (self.deps.runtime.reach(&url), "roll"));
+            vars.insert("ROLL_OIDC_AUDIENCE".into(), (first.clone(), "roll"));
+            sealed.insert("ROLL_OIDC_URL".into());
+        }
         for (k, v) in own {
             vars.insert(k, (v, "service"));
         }
@@ -2702,8 +3130,20 @@ impl Apps {
         let mut refused = Vec::new();
         let refs: Vec<(String, String)> = vars.iter().filter(|(_, (v, s))| *s == "service" && crate::model::secret_ref_env(v).is_some()).map(|(k, (v, _))| (k.clone(), v.clone())).collect();
         let mut ref_texts = BTreeMap::new();
+        let (sid, e) = (svc.id.clone(), env.name.clone());
+        let makers = if refs.is_empty() { BTreeMap::new() } else { self.db(move |s| s.variable_makers(&sid, &e)).await? };
         for (k, r) in refs {
-            ref_texts.insert(k.clone(), r.clone());
+            // A reference bound to its maker counts by its folder's digest as they may read it
+            // too (no value): a change there, or the maker losing it, moves the fingerprint. The
+            // same in a deploy and a listing, so both hash alike.
+            let bound = match (crate::model::secret_ref_env(&r), makers.get(&k)) {
+                (Some(Ok(e)), Some(maker)) if e != env.name => {
+                    let d = self.deps.secrets.digest_as(&svc.project, &env.name, &svc.id, &r, maker).await.unwrap_or_else(|e| format!("refused: {e}"));
+                    Some(format!("{r}#{d}"))
+                }
+                _ => None,
+            };
+            ref_texts.insert(k.clone(), bound.unwrap_or_else(|| r.clone()));
             if !read_refs {
                 // Left out of a preview as a deploy leaves it out, so both hash the same.
                 let ours = matches!(crate::model::secret_ref_env(&r), Some(Ok(e)) if e == env.name) && crate::model::secret_ref_folder_ok(&r, &svc.id);
@@ -2719,7 +3159,11 @@ impl Apps {
             let read = match crate::model::secret_ref_env(&r) {
                 Some(Ok(e)) if e == env.name && !crate::model::secret_ref_folder_ok(&r, &svc.id) => Err("it names another service's folder".to_string()),
                 Some(Ok(e)) if e == env.name => self.deps.secrets.resolve_ref(&svc.project, &env.name, &svc.id, &r).await.map_err(|e| e.to_string()),
-                Some(Ok(e)) => Err(format!("it names the {e} environment's secret, not {}'s", env.name)),
+                // Another environment's: as whoever chose it may read it now.
+                Some(Ok(e)) => match makers.get(&k) {
+                    Some(maker) => self.deps.secrets.resolve_as(&svc.project, &env.name, &svc.id, &r, maker).await.map_err(|e| format!("{e:#}")),
+                    None => Err(format!("it names the {e} environment's secret and nobody is bound to it: set it again")),
+                },
                 Some(Err(e)) => Err(e.to_string()),
                 None => continue,
             };
@@ -2743,8 +3187,33 @@ impl Apps {
         sealed.extend(sensitive.into_iter().filter(|k| vars.get(k).is_some_and(|(_, s)| *s == "secret")));
         // Reference variables, one level deep: against what resolved above, and other services'.
         let unresolved = self.fill_references(svc, &env.name, &mut vars, &mut sealed).await;
+        // The build's OpenTelemetry agent (`build.otel`), started only while its traces go to
+        // roll: last, joined to the app's own value of the same variable.
+        if trace_endpoint && !deployment.is_empty() {
+            let d = deployment.to_string();
+            let agent = self.db(move |s| s.deployment(&d)).await.ok().and_then(|d| d.plan).and_then(|p| p["otel"].as_str().map(str::to_string));
+            let join = |own: Option<&(String, &'static str)>, ours: &str, sep: &str, first: bool| match own.map(|(v, _)| v.trim()).filter(|v| !v.is_empty()) {
+                Some(v) if first => format!("{ours}{sep}{v}"),
+                Some(v) => format!("{v}{sep}{ours}"),
+                None => ours.to_string(),
+            };
+            match agent.as_deref() {
+                Some("node") => {
+                    let v = join(vars.get("NODE_OPTIONS"), &format!("--require {}", apps_build::otel::NODE_REQUIRE), " ", false);
+                    vars.insert("NODE_OPTIONS".into(), (v, "roll"));
+                }
+                Some("python") => {
+                    let v = join(vars.get("PYTHONPATH"), apps_build::otel::PYTHON_PATH, ":", true);
+                    vars.insert("PYTHONPATH".into(), (v, "roll"));
+                }
+                _ => {}
+            }
+        }
+        // After the agent's join: a value roll composed says so.
         let sources = vars.iter().map(|(k, (_, s))| (k.clone(), *s)).collect();
-        Ok(ResolvedVars { vars: vars.into_iter().map(|(k, (v, _))| (k, v)).collect(), sources, unresolved, refused, ref_texts, sealed, from_secrets, plain_secrets })
+        // A placeholder the service's own variable of the same name replaced isn't one.
+        placeholders.retain(|k, _| vars.get(k).is_some_and(|(_, s)| *s == "secret"));
+        Ok(ResolvedVars { vars: vars.into_iter().map(|(k, (v, _))| (k, v)).collect(), sources, unresolved, refused, ref_texts, sealed, from_secrets, plain_secrets, notices, placeholders })
     }
 
     /// Fill the `${{ … }}` in the service's own variables ([`refs`]); what named nothing. A
@@ -2836,8 +3305,6 @@ impl Apps {
         Ok(())
     }
 
-    /// What reads a job's output or opens a shell needs when the environment has values from
-    /// roll secrets (a job may print them, a shell reads them all): roll secrets' own rule for
     /// The web service named `name` in `service`'s project (a site's `service:` rewrite), looked
     /// up at most every 30 s (a miss every 2 s).
     pub(crate) async fn project_service(self: &Arc<Self>, service: &str, name: &str) -> Option<String> {
@@ -2865,11 +3332,14 @@ impl Apps {
         id
     }
 
-    /// revealing them.
+    /// What reads a job's output or opens a shell needs when the environment has values from
+    /// roll secrets (a job may print them, a shell reads them all, sensitive and `roll://` ones
+    /// too): roll secrets would show `who` every one of them.
     pub async fn check_secret_reveal(self: &Arc<Self>, service: &str, env: &str, who: integrations::Asker<'_>) -> Result<()> {
         let (svc, row) = self.service_env(service, env).await?;
         let r = self.listed_vars(&svc, &row, row.active.as_deref().unwrap_or("")).await?;
-        if r.sources.values().any(|s| *s == "secret") && !self.deps.secrets.may_reveal(who, &svc.project, env).await {
+        let (keys, refs) = r.secrets_shown(true);
+        if (!keys.is_empty() || !refs.is_empty()) && !self.deps.secrets.may_reveal(who, &svc.project, env, &svc.id, integrations::Reveal { keys: &keys, refs: &refs, sensitive: true }).await {
             return Err(Error::Forbidden(format!("this environment's values come from roll secrets, which you may not reveal in {env} (a shell or a job's output shows them)")));
         }
         Ok(())
@@ -2882,10 +3352,11 @@ impl Apps {
         let (svc, row) = self.service_env(service, env).await?;
         let r = self.listed_vars(&svc, &row, row.active.as_deref().unwrap_or("")).await?;
         if let Some(who) = reveal {
-            // Sensitive ones are left out for everyone, so they need no one's leave.
-            let secret: Vec<&String> = r.sources.iter().filter(|(k, s)| **s == "secret" && !r.sealed.contains(*k)).map(|(k, _)| k).collect();
-            if !secret.is_empty() && !self.deps.secrets.may_reveal(who, &svc.project, env).await {
-                return Err(Error::Forbidden(format!("{} come from roll secrets, which you may not reveal in {env}", secret.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", "))));
+            // Sealed ones (sensitive, `roll://`) are left out for everyone, so they need no one's
+            // leave; every other one, as roll secrets would show it to them.
+            let (secret, _) = r.secrets_shown(false);
+            if !secret.is_empty() && !self.deps.secrets.may_reveal(who, &svc.project, env, &svc.id, integrations::Reveal { keys: &secret, refs: &[], sensitive: false }).await {
+                return Err(Error::Forbidden(format!("{} come from roll secrets, which you may not reveal in {env}", secret.join(", "))));
             }
             // A sealed one is never in the clear, to anyone.
             let m: serde_json::Map<String, Value> = r.vars.into_iter().filter(|(k, _)| !r.sealed.contains(k)).map(|(k, v)| (k, Value::String(v))).collect();
@@ -2893,7 +3364,7 @@ impl Apps {
         }
         // A reference's template is names, not a value: shown, and what an edit starts from.
         let (sid, e) = (service.to_string(), env.to_string());
-        let (raw, files) = self.db(move |s| Ok((s.variables(&sid, &e)?, s.variable_files(&sid, &e)?))).await?;
+        let (raw, files, runtime) = self.db(move |s| Ok((s.variables(&sid, &e)?, s.variable_files(&sid, &e)?, s.runtime_only(&sid, &e)?))).await?;
         let vars: Vec<VarView> = r
             .vars
             .iter()
@@ -2903,14 +3374,17 @@ impl Apps {
                 let sealed = r.sealed.contains(k);
                 let masked = if sealed { SEALED_MASK.to_string() } else if source == "roll" { v.clone() } else { mask(v) };
                 let reference = (source == "reference").then(|| raw.get(k).cloned()).flatten();
-                VarView { name: k.clone(), masked, source, reference, sealed, file: files.get(k).cloned() }
+                VarView { name: k.clone(), masked, source, reference, sealed, file: files.get(k).cloned(), runtime_only: runtime.contains(k) }
             })
             .collect();
         Ok(json!({ "vars": vars }))
     }
 
-    pub async fn change_variables(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Value> {
-        self.service_env(service, env).await?;
+    /// `who`: whoever writes them (a reference into another environment is bound to them, roll
+    /// secrets' maker references; none, as a template's creation, refuses one).
+    pub async fn change_variables(self: &Arc<Self>, service: &str, env: &str, body: Value, who: Option<crate::integrations::Asker<'_>>) -> Result<Value> {
+        let (svc_row, _) = self.service_env(service, env).await?;
+        let mut makers: BTreeMap<String, String> = BTreeMap::new();
         let o = body.as_object().ok_or_else(|| Error::BadRequest("the body is {set?, unset?}".into()))?;
         let mut set = BTreeMap::new();
         if let Some(s) = o.get("set") {
@@ -2920,14 +3394,19 @@ impl Apps {
                 if v.len() > 64 << 10 || v.contains('\0') {
                     return Err(Error::BadRequest(format!("{k}'s value is at most 64 KiB, without NUL")));
                 }
-                // A roll secrets reference: its own environment's (another's needs whoever set
-                // it bound to it, roll secrets' maker references: not here yet).
+                // A roll secrets reference: its own environment's is read as the service's runtime;
+                // another environment's is bound to whoever sets it (roll secrets' maker
+                // references): refused unless they may reveal it now, read as them at each deploy.
                 match crate::model::secret_ref_env(v) {
-                    Some(Ok(e)) if e != env => {
-                        return Err(Error::BadRequest(format!("{k}: {v} is the {e} environment's secret; a variable's roll:// reference names its own environment (roll://{env}/…)")));
-                    }
                     Some(Ok(_)) if !crate::model::secret_ref_folder_ok(v, service) => {
                         return Err(Error::BadRequest(format!("{k}: {v} is another service's folder (/services/<id> is each service's own)")));
+                    }
+                    Some(Ok(e)) if e != env => {
+                        let Some(who) = who else {
+                            return Err(Error::BadRequest(format!("{k}: {v} is the {e} environment's secret: set it through the API, as a person who may reveal it")));
+                        };
+                        let maker = self.deps.secrets.bind_ref(who, &svc_row.project, service, v).await.map_err(|why| Error::Forbidden(format!("{k}: {v}: {why:#}")))?;
+                        makers.insert(k.clone(), maker);
                     }
                     Some(Err(e)) => return Err(Error::BadRequest(format!("{k}: {e}"))),
                     _ => {}
@@ -2960,13 +3439,24 @@ impl Apps {
                 }));
             }
         }
-        if set.len() + unset.len() + seal.len() + files.len() > 500 {
+        // Only for its instances (Vercel's and Netlify's runtime scope): never a build's steps,
+        // so a dependency's install script can't read it.
+        let mut runtime: Vec<(String, bool)> = Vec::new();
+        if let Some(r) = o.get("runtime_only") {
+            for (k, on) in r.as_object().ok_or_else(|| Error::BadRequest("runtime_only is an object of names to true or false".into()))? {
+                runtime.push((k.clone(), on.as_bool().ok_or_else(|| Error::BadRequest(format!("runtime_only.{k} is true or false")))?));
+            }
+        }
+        if set.len() + unset.len() + seal.len() + files.len() + runtime.len() > 500 {
             return Err(Error::BadRequest("at most 500 variables at once".into()));
         }
         let (sid, e) = (service.to_string(), env.to_string());
         let (have, mut kept) = self.db(move |s| Ok((s.variables(&sid, &e)?, s.variable_files(&sid, &e)?))).await?;
         if let Some(n) = seal.iter().find(|n| unset.contains(n) || !(set.contains_key(*n) || have.contains_key(*n))) {
             return Err(Error::BadRequest(format!("{n} isn't one of the environment's own variables to seal")));
+        }
+        if let Some((n, _)) = runtime.iter().find(|(n, on)| *on && (unset.contains(n) || !(set.contains_key(n) || have.contains_key(n)))) {
+            return Err(Error::BadRequest(format!("{n} isn't one of the environment's own variables to keep from builds")));
         }
         if let Some((n, _)) = files.iter().find(|(n, p)| p.is_some() && (unset.contains(n) || !(set.contains_key(n) || have.contains_key(n)))) {
             return Err(Error::BadRequest(format!("{n} isn't one of the environment's own variables to keep as a file")));
@@ -2989,8 +3479,12 @@ impl Apps {
             return Err(Error::BadRequest("two variables can't be the same file".into()));
         }
         let (sid, e, gone) = (service.to_string(), env.to_string(), unset.clone());
-        self.db(move |s| s.change_variables(&sid, &e, &set, &unset, &seal)).await?;
-        // Unset ones' files go with them.
+        self.db(move |s| s.change_variables_made(&sid, &e, &set, &unset, &seal, &makers)).await?;
+        // Unset ones' files and scopes go with them.
+        for (n, on) in runtime.into_iter().chain(gone.iter().map(|n| (n.clone(), false))) {
+            let (sid, e) = (service.to_string(), env.to_string());
+            self.db(move |s| s.set_runtime_only(&sid, &e, &n, on)).await?;
+        }
         for (n, p) in files.into_iter().chain(gone.into_iter().map(|n| (n, None))) {
             let (sid, e) = (service.to_string(), env.to_string());
             self.db(move |s| s.set_variable_file(&sid, &e, &n, p.as_deref())).await?;
@@ -3127,6 +3621,11 @@ impl Apps {
         let minted = self.db(move |s| s.links_minted(&sid)).await?.into_iter().find(|(k, rr, _, _)| *k == kind && rr == r#ref).and_then(|(_, _, _, m)| m);
         let (sid, r) = (service.to_string(), r#ref.to_string());
         self.db(move |s| s.delete_link(&sid, kind, &r)).await?;
+        // Each environment's branch of it goes too.
+        let sid = service.to_string();
+        for e in self.db(move |s| s.environments(&sid)).await.unwrap_or_default() {
+            self.drop_branches(service, &e.name, Some((kind, r#ref.to_string()))).await;
+        }
         if let Some(m) = minted {
             self.revoke_link(service, kind, r#ref, &m.kept).await;
         }
@@ -3435,7 +3934,7 @@ impl Apps {
         if let Some(Some(_)) = port {
             let (sid, e) = (service.to_string(), env.to_string());
             let (svc, row) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?))).await?;
-            if svc.run.tcp || svc.run.kind != crate::model::RunType::Web {
+            if svc.run.tcp || svc.run.udp || svc.run.kind != crate::model::RunType::Web {
                 return Err(Error::BadRequest("port is for a web service's custom domain".into()));
             }
             // Its instances answer rolld through their sandbox's socket, on their own port.
@@ -3561,8 +4060,8 @@ impl Apps {
         // A private service has no public names: the same 404 as an address nobody has, read
         // from its settings now (making it private takes effect at once, not with a deploy).
         let sid = found.0.clone();
-        // A TCP service's port isn't HTTP: its names don't serve it.
-        self.db(move |s| s.service(&sid)).await.ok().is_some_and(|svc| svc.run.public && !svc.run.tcp).then_some(found)
+        // A TCP or UDP service's port isn't HTTP: its names don't serve it.
+        self.db(move |s| s.service(&sid)).await.ok().is_some_and(|svc| svc.run.public && !svc.run.tcp && !svc.run.udp).then_some(found)
     }
 
     async fn host_target(self: &Arc<Self>, host: &str) -> Option<HostTarget> {
@@ -3595,17 +4094,29 @@ impl Apps {
         }
         let seen = live.gate_gen();
         let (sid, e) = (live.service.clone(), live.env.clone());
-        let (row, traces) = self.db(move |s| Ok((s.environment(&sid, &e)?, s.traces_on(&sid, &e)?))).await?;
+        let (row, traces, file) = self.db(move |s| Ok((s.environment(&sid, &e)?, s.traces_on(&sid, &e)?, s.active_edge(&sid, &e)?))).await?;
         let allow = row.allow_ips.iter().filter_map(|r| r.cidr.parse::<ipnet::IpNet>().ok()).collect();
+        // What the live deployment's roll.toml adds: only ever tighter (`live::Gate`).
+        let file = file.map(|f| f.resolve(&row.name, row.ephemeral)).unwrap_or_default();
         // The environment's challenge key, made the first time a rule needs it (every node reads the same).
-        let challenge_key = match row.firewall.iter().any(|r| r.action == crate::model::FirewallAction::Challenge) {
+        let challenge_key = match row.firewall.iter().chain(&file.firewall).any(|r| r.action == crate::model::FirewallAction::Challenge) {
             true => {
                 let (k, v) = (format!("challenge_key:{}/{}", live.service, live.env), crate::model::random(32));
                 Some(self.db(move |s| s.state_or(&k, &v)).await?.into_bytes())
             }
             false => None,
         };
-        let g = Arc::new(live::Gate { maintenance: row.maintenance, allow, rate: row.rate_limit, firewall: row.firewall, pages: row.pages, preview: row.ephemeral, headers: row.headers, routes: row.routes, traces, vitals: row.vitals, challenge_key, split: row.split, mirror: row.mirror, snippets: snippets_of(&row.snippets) });
+        let g = Arc::new(live::Gate {
+            maintenance: row.maintenance,
+            allow,
+            rate: crate::model::RateLimit::stricter(row.rate_limit, file.rate_limit),
+            firewall: row.firewall,
+            file_firewall: file.firewall,
+            file_headers: file.headers,
+            pages: row.pages,
+            preview: row.ephemeral,
+            headers: row.headers,
+            routes: row.routes, traces, vitals: row.vitals, challenge_key, split: row.split, mirror: row.mirror, snippets: snippets_of(&row.snippets) });
         live.set_gate(g.clone(), seen);
         Ok(g)
     }
@@ -3687,6 +4198,10 @@ impl Apps {
         }
         if d.run.volume.is_some() {
             return Err(Error::Conflict("a service with a volume has no deployment URLs: one instance writes the volume".into()));
+        }
+        // Waiting for its approvals: nothing of it runs (with the environment's values) before.
+        if row.approvals > 0 && d.status == DeployStatus::Ready {
+            return Err(Error::Conflict(format!("{dep} waits for {} approval(s): it runs once approved", row.approvals)));
         }
         self.template(&svc.for_env(&row)?, &row, &d).await
     }
@@ -3869,6 +4384,7 @@ impl Apps {
             d.requests += u.requests;
             d.egress_bytes += u.egress_bytes;
             d.build_seconds += u.build_seconds;
+            d.stored_gb_hours += u.stored_gb_hours;
         }
         let p = self.cfg.prices;
         let mut total = 0.0;
@@ -3877,7 +4393,7 @@ impl Apps {
                 let u = by_day.remove(&d).unwrap_or_default();
                 let usd = p.cost(&u);
                 total += usd;
-                json!({ "day": d, "cpu_seconds": u.cpu_seconds, "gb_seconds": u.gb_seconds, "requests": u.requests, "egress_bytes": u.egress_bytes, "build_seconds": u.build_seconds, "usd": usd })
+                json!({ "day": d, "cpu_seconds": u.cpu_seconds, "gb_seconds": u.gb_seconds, "requests": u.requests, "egress_bytes": u.egress_bytes, "build_seconds": u.build_seconds, "stored_gb_hours": u.stored_gb_hours, "usd": usd })
             })
             .collect();
         Ok(json!({ "days": days, "total_usd": total }))
@@ -3920,8 +4436,11 @@ impl ResolvedVars {
     fn vars_for_hash(&self) -> Vec<(String, String)> {
         self.vars
             .iter()
-            .filter(|(k, _)| !matches!(k.as_str(), "ROLL_DEPLOYMENT" | "ROLL_GIT_COMMIT" | "ROLL_GIT_BRANCH"))
-            .map(|(k, v)| (k.clone(), self.ref_texts.get(k).cloned().unwrap_or_else(|| v.clone())))
+            // `ROLL_AWAKE_URL` is roll's own on every web service: its arrival isn't a change of
+            // the service's to deploy (each deployment gets it).
+            .filter(|(k, _)| !matches!(k.as_str(), "ROLL_DEPLOYMENT" | "ROLL_GIT_COMMIT" | "ROLL_GIT_BRANCH" | "ROLL_AWAKE_URL"))
+            // A placeholder is new random text each time it's made: its binding decides.
+            .map(|(k, v)| (k.clone(), self.placeholders.get(k).map(|b| format!("placeholder:{b}")).or_else(|| self.ref_texts.get(k).cloned()).unwrap_or_else(|| v.clone())))
             .collect()
     }
 }
