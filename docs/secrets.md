@@ -5871,6 +5871,28 @@ adds roll-access's grant lookup or the accounts' and workspace's.
 
 ## Next
 
+**State, 2026-11-22 07:55.** The thirty-fifth review's ranking below still stands. Since it:
+- **roll apps' #603 review is closed on apps' side:**
+  - #667 (listings and staleness mint nothing, the hash by binding, dynamic keys refused, an opened
+    environment ends its interception);
+  - #669 (the CA renews and restarts without breaking: the next CA rides in the bundle, sleeping
+    environments re-mint, adopted instances roll, new hosts re-mint);
+  - #674 (a deleted environment's interception state goes; which runtimes read the bundle).
+
+  roll-intercept's leaf keys are wiped from memory (previews' #671). The response scrub is live
+  (previews' #630).
+- **Ours from that review:** #665 (a placeholder swaps only for its own consumer, references never
+  smuggle a bound value, fallbacks skip bound keys) is gated green and re-levelling a second time,
+  after apps' #667 and #669 rewrote rolld's `resolve_closed`.
+- **Building:**
+  - item 1, production protected by default (`fix/secrets-production-protected`);
+  - item 4, offboarding (`fix/secrets-offboarding`);
+  - the stampede measurement (`perf/secrets-change-stampede`);
+  - members v1.1 phase 1, groups and SCIM Groups (`feature/members-groups`, option (a)).
+- **Next to start, as build slots and disk allow (the server is at 88%):**
+  - item 2, a recoverable environment delete and a protected one's delete as a change request;
+  - item 3, reach naming people, clients, services and sandboxes.
+
 **Ranked, 2026-11-22 06:20** (the thirty-fifth product review, cold, on main 6575a213a, against
 Vault/OpenBao, Infisical, Doppler, AWS, 1Password, Akeyless, Bitwarden SM, GitGuardian, Google Secret
 Manager and Azure Key Vault). Every item of the thirty-fourth review that roll secrets owns is on main,
