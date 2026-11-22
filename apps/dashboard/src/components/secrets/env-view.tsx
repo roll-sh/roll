@@ -1,4 +1,4 @@
-import { Clock, Copy, Dices, Download, Folder, FolderPlus, History, Import as ImportIcon, Inbox, Link2, Lock, MoreHorizontal, Pencil, Plus, RotateCw, Search, Send, ShieldAlert, Trash2, Upload, User, Users } from "lucide-react";
+import { Clock, Copy, Dices, Download, Folder, FolderPlus, Globe, History, Import as ImportIcon, Inbox, Link2, Lock, MoreHorizontal, Pencil, Plus, RotateCw, Search, Send, ShieldAlert, Trash2, Upload, User, Users } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "@/components/link";
 import { canRotate, needsApproval, SECRET_KEY, TAG, type Batch, type Environment, type ExportFormat, type Import, type KeyInsight, type Op, type Secret, type SecretType } from "@/lib/secrets-api";
@@ -15,6 +15,7 @@ import { useSlashFocus } from "./grid";
 import { HistoryDrawer, type Drawer } from "./history";
 import { ImportDialog } from "./import-dialog";
 import { ReachDialog } from "./reach-dialog";
+import { HostsDialog } from "./hosts-dialog";
 import { EsoDialog } from "./eso-dialog";
 import { ImportsPanel } from "./imports";
 import { RefInput, useRefSource, useRefWarnings, type RefSource } from "./ref-input";
@@ -47,6 +48,7 @@ export function EnvView({ env }: { env: Environment }) {
   const [adding, setAdding] = useState(false);
   const [importing, setImporting] = useState(false);
   const [reaching, setReaching] = useState<string | null>(null);
+  const [binding, setBinding] = useState<string | null>(null);
   const [pulling, setPulling] = useState(false);
   const [linking, setLinking] = useState(false);
   const [decoying, setDecoying] = useState(false);
@@ -384,6 +386,7 @@ export function EnvView({ env }: { env: Environment }) {
                     onHistory={() => setDrawer({ kind: "versions", key: s.key, type: s.type })}
                     onShare={() => setSharing({ kind: "secret", env: env.slug, key: s.key, path })}
                     onReach={() => setReaching(s.key)}
+                    onBind={() => setBinding(s.key)}
                     onCopied={(text) => setNote({ text, warnings: [] })}
                     onSource={(src) => (src.kind === "import" ? setImportsOpen({ highlight: { ...(src.project && { project: src.project }), environment: src.environment, path: src.path } }) : go({ env: src.environment, path: p, key: s.key }))}
                   />
@@ -396,6 +399,7 @@ export function EnvView({ env }: { env: Environment }) {
       </div>
 
       <HistoryDrawer env={env} drawer={drawer} onClose={() => setDrawer(null)} onDrawer={setDrawer} onChanged={refresh} />
+      <HostsDialog open={binding !== null} onClose={() => setBinding(null)} env={env} path={path} secret={secrets.find((x) => x.key === binding && x.type !== "personal") ?? null} onSaved={refresh} />
       <ReachDialog open={reaching !== null} onClose={() => setReaching(null)} env={env} path={path} keyName={reaching ?? ""} link={secrets.find((x) => x.key === reaching)?.link} />
       <EsoDialog open={pulling} onClose={() => setPulling(false)} env={env} path={path} />
       <ImportDialog open={importing} onClose={() => setImporting(false)} env={env} path={path} current={secrets} onImported={(text, w) => (setNote({ text, warnings: w }), refresh(), open.reload())} />
@@ -535,6 +539,7 @@ function SecretRow({
   onShare,
   onSource,
   onReach,
+  onBind,
   onCopied,
 }: {
   env: Environment;
@@ -554,6 +559,8 @@ function SecretRow({
   onSource: (source: Exclude<Secret["source"], { kind: "own" }>) => void;
   /** Who and what can read it (a project admin's). */
   onReach: () => void;
+  /** Bind it to hosts, for placeholders (a project admin's). */
+  onBind: () => void;
   /** Says what was copied. */
   onCopied: (text: string) => void;
 }) {
@@ -711,6 +718,11 @@ function SecretRow({
                   {!personal && (
                     <MenuItem onClick={onReach}>
                       <Users className="size-3.5" /> Who can read it…
+                    </MenuItem>
+                  )}
+                  {own && !personal && s.link?.mode !== "dynamic" && (
+                    <MenuItem onClick={onBind}>
+                      <Globe className="size-3.5" /> {s.hosts ? "Hosts…" : "Bind to hosts…"}
                     </MenuItem>
                   )}
                   {s.link?.mode !== "dynamic" && (

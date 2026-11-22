@@ -36,6 +36,10 @@ pub enum Issue {
     Public,
     /// A credential easy to guess (shown to whoever may reveal it).
     Weak,
+    /// A key bound to hosts with no header or query parameter (bound before a placement was
+    /// required): a trusted reader's placeholder may ride in any header, one the host might echo,
+    /// and an untrusted consumer's doesn't swap.
+    Unplaced,
     /// A sync or a workload identity whose maker is the operator account: made from an admin's
     /// session before makers were people, so it would act after they're demoted or can't sign
     /// in. Re-saving it from a person's session binds it to them. `key` is the sync's or the
@@ -245,6 +249,16 @@ impl Secrets {
             }
             if !decoy && !read.contains(&(e.slug.clone(), path.clone(), key.clone())) && now - updated_at > UNREAD_DAYS * 86_400_000 {
                 add(Issue::Unread, format!("not read in {UNREAD_DAYS} days"));
+            }
+        }
+        // Bindings from before a placement was required.
+        let unplaced: Vec<(String, String, String, String)> = self.db.read(|c| c.query("SELECT s.env_id, s.path, s.key, h.binding FROM key_hosts h JOIN secrets s ON s.id = h.secret_id WHERE h.project_id = ? ORDER BY s.path, s.key", [project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))))?;
+        for (env_id, path, key, binding) in unplaced {
+            let Some(e) = slug.get(env_id.as_str()) else { continue };
+            let placed = serde_json::from_str::<crate::placeholders::Hosts>(&binding).map_or(true, |b| b.placed());
+            if !placed && caller.allows(Action::Read, &Scope::at(project, &e.slug, &path)) {
+                let detail = format!("a placeholder for {key} may ride in any header, one its host might echo, and an untrusted consumer's doesn't swap: bind it again with a header (Authorization: Bearer {{}}) or a query parameter");
+                out.push(Finding { issue: Issue::Unplaced, environment: e.slug.clone(), path, key, detail, owner: None, decoy: None });
             }
         }
         // Required keys a standard environment doesn't define (its imports and base included): each

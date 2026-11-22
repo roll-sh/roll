@@ -152,6 +152,9 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     ok(&api, &[], &[&at[..], &["import", "-"]].concat(), Some("DATABASE_URL=postgres://app:${PASSWORD}@${HOST}:${PORT}/shop\n")).await;
     let ls = ok(&api, &[], &[&at[..], &["ls"]].concat(), None).await;
     assert!(ls.contains("DATABASE_URL") && !ls.contains("s3cret"), "values are masked: {ls}");
+    // A key bound to hosts for placeholders goes in the bearer header unless told otherwise.
+    let bound = ok(&api, &[], &[&["--json"][..], &at[..], &["bind", "PORT", "--host", "api.example.com"]].concat(), None).await;
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&bound).unwrap(), serde_json::json!({ "hosts": ["api.example.com"], "header": "Authorization: Bearer {}" }), "{bound}");
 
     // The child sees resolved values; the shell's own variables win unless --override.
     let out = ok(&api, &[("PORT", "6000")], &["run", "-p", "shop", "-e", "production", "--no-mask", "--", "sh", "-c", "echo $DATABASE_URL $PORT"], None).await;

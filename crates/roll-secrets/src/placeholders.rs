@@ -12,7 +12,7 @@
 use crate::access::{Action, Caller, Scope};
 use crate::consumers::ResourceRef;
 use crate::links::Mode;
-use crate::proxy::{PREFIX, Place, Position, Refusal};
+use crate::proxy::{PREFIX, Place, Position, Refusal, Swap};
 use crate::{Error, Result, Secrets, Value, envs, json, names};
 use code_sql::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -79,7 +79,8 @@ pub struct Hosts {
 }
 
 impl Hosts {
-    /// The binding as stored: lower-cased hosts, each checked, and at most one placement.
+    /// The binding as stored: lower-cased hosts, each checked, and at most one placement, which
+    /// `untrusted` needs.
     pub fn checked(mut self) -> Result<Hosts> {
         let bad = Error::BadRequest;
         if self.hosts.is_empty() || self.hosts.len() > 16 {
@@ -102,7 +103,16 @@ impl Hosts {
         {
             return Err(bad("query: a parameter name, 1 to 64 of A-Z, a-z, 0-9, _ - . ~".into()));
         }
+        if self.untrusted && !self.placed() {
+            return Err(Error::Invalid("placement_required", "untrusted: true needs a placement: a header (\"Authorization: Bearer {}\") or a query parameter, so the code holding the placeholder can't pick a header the host echoes".into()));
+        }
         Ok(self)
+    }
+
+    /// Whether it names the header or query parameter that carries the key. One without (bound
+    /// before a placement was required) lets a trusted reader's placeholder ride in any header.
+    pub fn placed(&self) -> bool {
+        self.header.is_some() || self.query.is_some()
     }
 
     /// Whether `host` (as the proxy connects to it, port and final dot allowed) is one of these.
@@ -562,7 +572,7 @@ impl Secrets {
     /// key is still bound to `host`, goes `at` there, and holds a literal value. A wrong host is
     /// an alert. Audited once a minute per (placeholder, host). Blocking: in process only, for
     /// roll's egress proxies (`proxy::filter`).
-    pub fn substitute(&self, placeholder: &str, host: &str, at: Position<'_>) -> std::result::Result<Value, Refusal> {
+    pub fn substitute(&self, placeholder: &str, host: &str, at: Position<'_>) -> std::result::Result<Swap, Refusal> {
         let failed = |e: Error| Refusal::Failed(e.to_string());
         if !placeholder.starts_with(PREFIX) || !roll_auth::credentials::checksum_ok(placeholder) {
             return Err(Refusal::Unknown);
@@ -596,6 +606,9 @@ impl Secrets {
             self.note_use(&row, &slug, host, true, now);
             return Err(Refusal::WrongHost(shown(host)));
         }
+        if row.untrusted && !hosts.placed() {
+            return Err(Refusal::PlacementRequired);
+        }
         hosts.place(placeholder, &at).map_err(Refusal::WrongPlace)?;
         if !hosts.admits(&e.row.tags, reader.runtime) {
             return Err(Refusal::NotAllowed(format!("{key} is sensitive, and its binding doesn't let untrusted consumers use it")));
@@ -618,7 +631,32 @@ impl Secrets {
             return Err(Refusal::Unusable(format!("{key} can't be read: {p}")));
         }
         self.note_use(&row, &slug, host, false, now);
-        Ok(value)
+        Ok(Swap { value, key: row.key, placeholder: row.id })
+    }
+
+    /// `host` echoed back the value placeholder `id` (`phd_…`) stood for, in the response to a
+    /// request it was swapped into (`proxy::Scrub`'s [`Echoed`](crate::proxy::Echoed)): the
+    /// placeholder ends (a host that echoes once will again), with a `secrets.alert` row and the
+    /// environment's notify URL, and so do the consumer's interception CAs naming a host it no
+    /// longer has. In process only, for roll's egress proxies.
+    pub fn echoed(&self, id: &str, host: &str) -> Result<()> {
+        let now = self.db.now_ms()?;
+        let host = normalize_host(host).unwrap_or_else(|| shown(host));
+        let mac = self.keys()?;
+        let consumer = self.db.write(|c| {
+            let row: Option<(String, String, String, String, String)> = c
+                .query_row("SELECT p.project_id, COALESCE(e.slug, ''), p.path, p.key, p.consumer FROM placeholders p LEFT JOIN environments e ON e.id = p.env_id WHERE p.id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+                .optional()?;
+            let Some((project, env, path, key, consumer)) = row else { return Err(Error::NotFound(format!("no placeholder {id}"))) };
+            c.execute("UPDATE placeholders SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL", params![now, id])?;
+            let text = format!("{host} echoed {key} back in a response to {consumer}: placeholder {id} is ended, and the response was stopped. Bind {key} to a header or query parameter {host} doesn't echo");
+            let alert = serde_json::json!({ "kind": "placeholder_echo", "placeholder": id, "consumer": consumer, "host": host });
+            crate::audit::record(c, mac, &project, &Caller::consumer("roll:placeholders"), "secrets.alert", Some(&env), Some(&path), std::slice::from_ref(&key), &text, now)?;
+            self.queue_alert(c, &project, &env, &text, alert, now, now)?;
+            Ok::<_, Error>(consumer)
+        })?;
+        self.hosts_shrank([consumer.as_str()]);
+        Ok(())
     }
 
     /// `key`'s effective entry in `slug:path` for `reader`, or why not.
@@ -856,7 +894,7 @@ impl crate::intercept::BoundHosts for Secrets {
 
 /// roll's egress proxies swap through this, in process ([`crate::proxy::filter`]).
 impl crate::proxy::Substitute for Secrets {
-    fn substitute(&self, placeholder: &str, host: &str, at: Position<'_>) -> std::result::Result<Value, Refusal> {
+    fn substitute(&self, placeholder: &str, host: &str, at: Position<'_>) -> std::result::Result<Swap, Refusal> {
         Secrets::substitute(self, placeholder, host, at)
     }
 }
