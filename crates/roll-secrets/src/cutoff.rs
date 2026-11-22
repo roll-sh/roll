@@ -205,8 +205,9 @@ impl Secrets {
 
         // 1. Tokens first: they're what an attacker holding one uses now. Reach marked those this
         // caller may not revoke (they reach other projects too): they're listed, not revoked.
-        if req.tokens && !reach.tokens.is_empty() {
-            let (named, skipped): (Vec<_>, Vec<_>) = reach.tokens.iter().partition(|h| h.skipped.is_none());
+        // OAuth connections (`clients`) are roll-access grants too: cut with the tokens.
+        if req.tokens && !(reach.tokens.is_empty() && reach.clients.is_empty()) {
+            let (named, skipped): (Vec<_>, Vec<_>) = reach.tokens.iter().chain(&reach.clients).partition(|h| h.skipped.is_none());
             out.skipped = skipped.into_iter().map(|h| Skipped { id: h.id.clone(), name: h.name.clone(), why: h.skipped.unwrap_or(crate::reach::BEYOND) }).collect();
             let named: Vec<(String, String)> = named.into_iter().map(|h| (h.id.clone(), h.name.clone())).collect();
             let (done, failed) = if named.is_empty() { (vec![], vec![]) } else { self.revoke_grants(&named, &reason, &by, &mut out.batches) };

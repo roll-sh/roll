@@ -30,6 +30,8 @@ pub const MAX_ROUTES: usize = 20;
 #[serde(rename_all = "lowercase")]
 pub enum PeerKind {
     Wireguard,
+    /// A Tailscale node (userspace, ephemeral) whose routes go through its SOCKS5 server.
+    Tailscale,
 }
 
 /// One name the app connects to and where in the customer's network it goes.
@@ -52,24 +54,34 @@ impl Route {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrivateNetwork {
     pub kind: PeerKind,
-    /// `roll://ENV/KEY`: the WireGuard config (an `[Interface]` and its `[Peer]`s).
+    /// `roll://ENV/KEY`: the WireGuard config (an `[Interface]` and its `[Peer]`s), or the
+    /// Tailscale auth key.
     pub secret: String,
     pub routes: Vec<Route>,
+    /// A Tailscale node's control server when it isn't Tailscale's (Headscale's).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub login_server: Option<String>,
 }
 
 /// `private_network` from an environment's PUT body.
 pub fn parse(v: &serde_json::Value) -> Result<PrivateNetwork> {
     let bad = |why: &str| Error::BadRequest(format!("private_network: {why}"));
     let o = v.as_object().ok_or_else(|| bad("an object {kind, secret, routes} or null"))?;
-    if let Some(k) = o.keys().find(|k| !["kind", "secret", "routes"].contains(&k.as_str())) {
+    if let Some(k) = o.keys().find(|k| !["kind", "secret", "routes", "login_server"].contains(&k.as_str())) {
         return Err(bad(&format!("{k} isn't a field")));
     }
     let kind = match o.get("kind").and_then(|k| k.as_str()) {
         None | Some("wireguard") => PeerKind::Wireguard,
-        Some("tailscale") => return Err(bad("a Tailscale node isn't a kind yet: a WireGuard config (a Tailscale subnet router's network takes a WireGuard peer through its own exit)")),
-        _ => return Err(bad("kind is wireguard")),
+        Some("tailscale") => PeerKind::Tailscale,
+        _ => return Err(bad("kind is wireguard or tailscale")),
     };
-    let secret = o.get("secret").and_then(|s| s.as_str()).filter(|s| s.starts_with("roll://") && s.len() <= 512 && !s.contains(char::is_whitespace)).ok_or_else(|| bad("secret is a roll:// reference to roll secrets (the WireGuard config), never the config itself"))?;
+    let login_server = match (o.get("login_server"), kind) {
+        (None | Some(serde_json::Value::Null), _) => None,
+        (Some(serde_json::Value::String(u)), PeerKind::Tailscale) if valid_login_server(u) => Some(u.trim_end_matches('/').to_string()),
+        (Some(_), PeerKind::Tailscale) => return Err(bad("login_server is the control server's http(s) URL (Headscale's), one line")),
+        (Some(_), PeerKind::Wireguard) => return Err(bad("login_server is a Tailscale node's")),
+    };
+    let secret = o.get("secret").and_then(|s| s.as_str()).filter(|s| s.starts_with("roll://") && s.len() <= 512 && !s.contains(char::is_whitespace)).ok_or_else(|| bad("secret is a roll:// reference to roll secrets (the WireGuard config or the Tailscale auth key), never the value itself"))?;
     let list = o.get("routes").and_then(|r| r.as_array()).filter(|r| !r.is_empty() && r.len() <= MAX_ROUTES).ok_or_else(|| bad(&format!("routes is 1–{MAX_ROUTES} {{name, target}}")))?;
     let mut routes: Vec<Route> = Vec::new();
     for r in list {
@@ -93,7 +105,24 @@ pub fn parse(v: &serde_json::Value) -> Result<PrivateNetwork> {
         }
         routes.push(Route { name, target: format!("{host}:{port}") });
     }
-    Ok(PrivateNetwork { kind, secret: secret.to_string(), routes })
+    Ok(PrivateNetwork { kind, secret: secret.to_string(), routes, login_server })
+}
+
+/// A Tailscale control server: an http(s) URL with a host, nothing a command line could split
+/// (it goes to `tailscale up --login-server`).
+fn valid_login_server(u: &str) -> bool {
+    let rest = u.strip_prefix("https://").or_else(|| u.strip_prefix("http://"));
+    u.len() <= 200 && rest.is_some_and(|r| !r.is_empty() && !r.starts_with('/')) && u.chars().all(|c| c.is_ascii_graphic() && !matches!(c, '"' | '\'' | '\\' | '`' | '$' | ';' | '&' | '|'))
+}
+
+/// A Tailscale auth key as roll secrets holds it: one token (`tskey-auth-…`, or a Headscale
+/// pre-auth key), never echoed.
+pub fn tailscale_key(text: &str) -> std::result::Result<String, String> {
+    let k = text.trim();
+    if !(10..=200).contains(&k.len()) || !k.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')) {
+        return Err("isn't a Tailscale auth key (one token: tskey-auth-…, or a Headscale pre-auth key)".into());
+    }
+    Ok(k.to_string())
 }
 
 /// A route's name: a DNS name with a dot (`db.corp.internal`), so it never shadows a service's
@@ -102,6 +131,23 @@ fn valid_name(n: &str) -> bool {
     n.len() <= 253
         && n.contains('.')
         && n.split('.').all(|l| !l.is_empty() && l.len() <= 63 && !l.starts_with('-') && !l.ends_with('-') && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+}
+
+/// The store's `kind` column: `wireguard`, `tailscale`, or `tailscale <login server>`.
+pub fn kind_column(p: &PrivateNetwork) -> String {
+    match (p.kind, &p.login_server) {
+        (PeerKind::Wireguard, _) => "wireguard".into(),
+        (PeerKind::Tailscale, None) => "tailscale".into(),
+        (PeerKind::Tailscale, Some(u)) => format!("tailscale {u}"),
+    }
+}
+
+pub fn from_kind_column(k: &str) -> (PeerKind, Option<String>) {
+    match k.split_once(' ') {
+        Some(("tailscale", u)) => (PeerKind::Tailscale, Some(u.to_string())),
+        _ if k == "tailscale" => (PeerKind::Tailscale, None),
+        _ => (PeerKind::Wireguard, None),
+    }
 }
 
 /// A private network's peer: `roll-apps-peer-<service>-<env>` (its forwarders `<that>-<port>`).
@@ -140,9 +186,13 @@ impl crate::Apps {
             return Err(Error::Conflict(format!("{} is another service's route in {env}", r.name)));
         }
         let maker = self.deps.secrets.bind_ref_runtime(who, &svc.project, service, &p.secret, env).await.map_err(|why| Error::Forbidden(format!("{}: {why:#}", p.secret)))?;
-        // The config it reads must be one roll runs, before it's kept (said without its text).
+        // What it reads must be one roll runs, before it's kept (said without its text).
         let text = self.deps.secrets.resolve_as(&svc.project, env, service, &p.secret, &maker).await.map_err(|e| Error::BadRequest(format!("{}: {e:#}", p.secret)))?;
-        wireguard_config(&text).map_err(|why| Error::BadRequest(format!("{}: {why}", p.secret)))?;
+        match p.kind {
+            PeerKind::Wireguard => wireguard_config(&text).map(drop),
+            PeerKind::Tailscale => tailscale_key(&text).map(drop),
+        }
+        .map_err(|why| Error::BadRequest(format!("{}: {why}", p.secret)))?;
         let (sid, e, q, m) = (service.to_string(), env.to_string(), p.clone(), maker.clone());
         self.db(move |s| s.set_peering(&sid, &e, &q, &m)).await?;
         self.apply_peering(service, env).await;
@@ -155,7 +205,7 @@ impl crate::Apps {
         let (sid, e) = (service.to_string(), env.to_string());
         let Some((p, _)) = self.db(move |s| s.peering(&sid, &e)).await? else { return Ok(None) };
         let status = self.peer_status.lock().get(&crate::env_key(service, env)).cloned().unwrap_or_else(|| "waiting for a deploy".into());
-        Ok(Some(serde_json::json!({ "kind": "wireguard", "secret": p.secret, "routes": p.routes, "status": status })))
+        Ok(Some(serde_json::json!({ "kind": p.kind, "secret": p.secret, "routes": p.routes, "login_server": p.login_server, "status": status })))
     }
 
     pub async fn delete_private_network(self: &Arc<Self>, service: &str, env: &str) -> Result<()> {
@@ -163,15 +213,23 @@ impl crate::Apps {
         if !self.db(move |s| s.delete_peering(&sid, &e)).await? {
             return Err(Error::NotFound(format!("{env} has no private network")));
         }
+        let lock = self.peer_lock(&crate::env_key(service, env));
+        let _one = lock.lock().await;
         self.deps.runtime.remove_peer(&peer_name(service, env)).await;
         self.peer_status.lock().remove(&crate::env_key(service, env));
         Ok(())
+    }
+
+    fn peer_lock(&self, key: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.peer_locks.lock().entry(key.to_string()).or_default().clone()
     }
 
     /// Its peer running as its settings say (at a deploy, when they change, and each minute on
     /// the owner): its config read as the person who set it, every time.
     pub(crate) async fn apply_peering(self: &Arc<Self>, service: &str, env: &str) {
         let key = crate::env_key(service, env);
+        let lock = self.peer_lock(&key);
+        let _one = lock.lock().await;
         let (sid, e) = (service.to_string(), env.to_string());
         let Ok((svc, row, peering)) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?, s.peering(&sid, &e)?))).await else { return };
         let Some((p, maker)) = peering else { return };
@@ -182,7 +240,11 @@ impl crate::Apps {
         let log = self.logs.sink(format!("env:{service}/{env}"), crate::logs::Stream::System);
         let made = async {
             let text = self.deps.secrets.resolve_as(&svc.project, env, service, &p.secret, &maker).await.map_err(|e| format!("{}: {e:#}", p.secret))?;
-            let wg = wireguard_config(&text).map_err(|why| format!("{}: {why}", p.secret))?;
+            let wg = match p.kind {
+                PeerKind::Wireguard => wireguard_config(&text),
+                PeerKind::Tailscale => tailscale_key(&text).map(|key| WgConfig { setconf: key, addresses: Vec::new(), routes: Vec::new(), mtu: None }),
+            }
+            .map_err(|why| format!("{}: {why}", p.secret))?;
             // A closed environment's instances are on its closed network: the peer answers there,
             // and reaches its endpoint through a network of its own.
             let closed = row.egress.closed();
@@ -195,6 +257,8 @@ impl crate::Apps {
                 service: service.to_string(),
                 env: env.to_string(),
                 network,
+                kind: p.kind,
+                login_server: p.login_server.clone(),
                 config: wg.setconf,
                 addresses: wg.addresses,
                 routes: wg.routes,
@@ -367,7 +431,7 @@ mod tests {
             json!({"secret": "roll://p/K", "routes": [{"name": "db", "target": "10.0.0.1:5432"}]}),
             json!({"secret": "roll://p/K", "routes": [{"name": "a.corp", "target": "10.0.0.1:5432"}, {"name": "b.corp", "target": "10.0.0.2:5432"}]}),
             json!({"secret": "roll://p/K", "routes": []}),
-            json!({"kind": "tailscale", "secret": "roll://p/K", "routes": [{"name": "db.corp", "target": "10.0.0.1:5432"}]}),
+            json!({"kind": "wireguard", "login_server": "https://hs.example.com", "secret": "roll://p/K", "routes": [{"name": "db.corp", "target": "10.0.0.1:5432"}]}),
         ] {
             assert!(parse(&body).is_err(), "{body}");
         }

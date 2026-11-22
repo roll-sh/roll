@@ -320,6 +320,9 @@ pub struct Apps {
     viewed_templates: Mutex<HashMap<String, (Arc<live::Template>, std::time::Instant)>>,
     /// Each private network's peer as it last went (`running`, `failed: …`), by environment.
     pub(crate) peer_status: Mutex<HashMap<String, String>>,
+    /// One change to an environment's peer at a time (a PUT, a deploy and the minute's check
+    /// would otherwise take down each other's half-made peer).
+    pub(crate) peer_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// When closed environments' CAs were last checked (each minute).
     intercepts_checked: std::sync::atomic::AtomicI64,
     /// Private environments' token hashes, by environment, as the owner last read or set them.
@@ -673,6 +676,7 @@ impl Apps {
             intercept_stale: Mutex::new(Default::default()),
             viewed_templates: Mutex::new(HashMap::new()),
             peer_status: Mutex::new(HashMap::new()),
+            peer_locks: Mutex::new(HashMap::new()),
             intercepts_checked: std::sync::atomic::AtomicI64::new(0),
             access: Mutex::new(HashMap::new()),
             access_gen: std::sync::atomic::AtomicU64::new(0),

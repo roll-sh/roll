@@ -195,7 +195,8 @@ reads the feed once as the agent, unattended, so what would refuse or ask a pers
 rules, the policy's `agents_ask`) refuses there, before anything is kept, and nobody is asked. Then the callback proves it wants that
 connection's deliveries: a signed `{"type":"verification","challenge"}` it echoes in a 2xx answer,
 good for a day per connection and URL, at most 5 a connection a minute on a node, each refusal in
-the audit log (else `-32027 CallbackEndpointError` with a category, never what the endpoint said). A subscription is
+the audit log; a callback under a path its https origin's `/.well-known/mcp-webhook-receiver.json`
+names (`{"receivers": ["/hooks/"]}`, read through the same guard) is proved without a challenge (else `-32027 CallbackEndpointError` with a category, never what the endpoint said). A subscription is
 keyed by its connection, URL, event and arguments (canonical JSON), so subscribing again refreshes
 it (the same `sub_…` id, its cursor kept, `deliveryStatus` answered); it lives at most an hour
 unless refreshed, 20 a connection. Every 15 seconds each node claims up to 16 due subscriptions to
@@ -1232,12 +1233,13 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **MCP Events: push mode (this PR), then more feeds.** Webhook mode (#703) and `access.approval`
-   (#708) landed; now `events/stream`, the SEP's third delivery mode, for clients that hold a
-   stream (see "Events"). Next in this item: more feeds as their products have
+1. **MCP Events: the receiver document (this PR), then more feeds.** All three delivery modes are
+   on main (poll #692, webhook #703, push #710) with `apps.event` and `access.approval` (#708).
+   Next in this item: more feeds as their products have
    a log after a cursor (roll code's durable land log, `Store::land_log`, has no route yet; previews
-   becoming ready; secrets' leaks), and a well-known receiver document
-   (`/.well-known/mcp-webhook-receiver.json`) in place of the challenge. From the review: a feed
+   becoming ready, agreed with previews; secrets' events, agreed with secrets: a `project` argument
+   filling the feed's path). This PR: the receiver document (`/.well-known/mcp-webhook-receiver.json`)
+   in place of the challenge; push mode landed (#710). From the review: a feed
    whose route runs on its owner node needs `ActAs` carried across the forward (today's isn't
    forwarded); claims use each node's clock (a node more than 2 minutes ahead can deliver beside
    another; the fenced cursor and a stable `webhook-id` keep it to duplicates); fairness is 20

@@ -1316,6 +1316,32 @@ async fn earlier_pushes_stay_reachable_at_their_own_urls() {
     assert!(e.apps.removed.lock().contains(&(p.id.clone(), "web@cs_8d".into())));
 }
 
+/// On roll apps, an earlier push is that build's own deployment URL, behind the preview's link;
+/// kept only when the running build is the head it ran.
+#[tokio::test]
+async fn a_roll_apps_services_earlier_push_is_its_builds_own_url() {
+    let e = env(json!({ "enabled": true }));
+    *e.apps.catalog.lock() = Some(vec![roll_previews::ports::CatalogService { name: "web".into(), repo: Some("acme/web".into()), root: String::new(), memory_mb: 512 }]);
+    e.code.git.lock().extend([("cs_9a".to_string(), "aaa".to_string()), ("cs_9b".to_string(), "bbb".to_string())]);
+    e.code.open(change("chg_ae", 9));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_ae").unwrap().unwrap();
+    e.apps.live.lock().insert("web".into(), ("aaa".into(), "https://0123456789ab--pv-x.apps.test".into()));
+    e.code.edit("chg_ae", |c| c.head = "cs_9b".into());
+    e.engine.pass().await.unwrap();
+    let view = e.engine.store.preview(&p.id).unwrap();
+    let token = e.engine.store.access(&p.id).unwrap().unwrap().link_token().unwrap().to_string();
+    assert_eq!(view.earlier.len(), 1, "{:?}", view.earlier);
+    let x = &view.earlier[0];
+    assert_eq!((x.service.as_str(), x.revision.as_str(), x.url.as_str()), ("web", "cs_9a", "https://0123456789ab--pv-x.apps.test"));
+    assert_eq!(x.share_url.as_deref(), Some(format!("https://0123456789ab--pv-x.apps.test/?roll_access={token}").as_str()));
+    // A running build that isn't the head it ran (the new one live already) isn't kept as it.
+    e.apps.live.lock().insert("web".into(), ("ccc".into(), "https://fedcba987654--pv-x.apps.test".into()));
+    e.code.edit("chg_ae", |c| c.head = "cs_9c".into());
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.engine.store.preview(&p.id).unwrap().earlier.len(), 1, "only cs_9a's");
+}
+
 /// A preview whose egress goes through its proxy ("Roll only") gets the keys bound to hosts as
 /// placeholders, made by whoever last saved the project's rules (roll secrets checks them); with
 /// no one recorded (the operator saved them) or open egress, it resolves as before.

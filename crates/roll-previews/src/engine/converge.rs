@@ -617,6 +617,22 @@ impl Engine {
                     self.apps.remove(&r.id, &gone).await.map_err(|e| anyhow::anyhow!("removing {gone}: {e:#}"))?;
                 }
             }
+            // On roll apps, the head it ran stays reachable at that build's own URL (roll apps
+            // keeps its last builds, each at a deployment URL): asked before the new head deploys,
+            // and kept only while the running build is that head's commit (a later pass may find
+            // the new one live already). roll apps prunes its own builds: nothing to remove.
+            if on_apps
+                && repo == r.repo
+                && r.trusted
+                && let Some(old) = svc.deployed.as_deref().filter(|d| *d != rev && !d.is_empty())
+                && !self.store.pinned(&r.id)?.iter().any(|p| p.service == spec.name && p.revision == old)
+                && let Some((git, url)) = self.apps.live_build(&r.id, &spec.name).await
+            {
+                let ran = if repo.starts_with("git:") { Some(old.to_string()) } else { self.source.git_commit(&repo, old).await.ok().flatten() };
+                if ran.as_deref() == Some(git.as_str()) {
+                    self.store.pin_build(&r.id, &spec.name, old, &url)?;
+                }
+            }
             // A deploy the backend is still on is asked about again (until it's live or fails).
             let in_flight = self.deploying_since.lock().contains_key(&(r.id.clone(), spec.name.clone()));
             if svc.deployed.as_deref() != Some(&rev) || reset_any || config_moved || in_flight {
