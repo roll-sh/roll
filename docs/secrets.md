@@ -6075,9 +6075,9 @@ and webhooks' and review apps' signing secrets sealed. Still open:
 - **Item 8** (placeholders had no consumer on main): done. Previews' #535 (a06876bd1) swaps them in
   `crates/roll-intercept`, shared with apps, and is checked end to end against a TLS echo host
   (`scripts/preview-intercept.sh`). The echo step flips to expect a 502 once item 4's scrub lands.
-- **Found while gating:** rolld's test binaries race each other for ports (`free_port` only avoids
-  repeats within one process). Three gates hit it today. Next: rolld listens on port 0 and reports
-  its addresses, so tests never guess.
+- **Found while gating: fixed**, #596 (518aa3188). rolld's test binaries raced each other for ports
+  (`free_port` only avoided repeats within one process; four gates hit it on 2026-11-21). rolld now
+  binds port 0 and writes its real addresses to `--addr-file`, and its tests read that file.
 
 **Ranked, 2026-11-21 03:40** (the thirty-fourth product review, cold, on main f9bb26c17, against
 Vault/OpenBao, Infisical, Doppler, AWS, 1Password, Akeyless, Bitwarden SM, GitGuardian, Google Secret
