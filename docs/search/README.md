@@ -1117,19 +1117,17 @@ deterministic (#396).
    Elasticsearch's `_application/search_application/{name}/_search` as the safe surface, and a
    quickstart that works with Elastic's Search UI and InstantSearch through Searchkit. An IP
    allowlist still applies to browsers; the docs say how the two combine.
-2. **Migrating into roll** (built in #485; its second review's fixes (pages charged by
-   what parsing builds, rolld's own endpoints blocked by resolved address, `inspect` bounded, extra
-   indices queued) are gating; Elastic Cloud restores from other deployments, AWS
-   OpenSearch Service has migration assistants, Algolia and Typesense import from each other):
-   the way in is reindex from remote, and on hosted roll it can't reach anything. It reads plain
-   HTTP only (no TLS client) and needs `reindex.remote.whitelist`, a node setting that is empty, so
-   every remote is refused. Reindex from remote over HTTPS through roll's guarded client
-   (`roll_net::PublicOnly`, private literals refused, no redirects, bounded reads and timeouts),
-   public hosts allowed without a node allowlist (an operator's allowlist still narrows it),
-   Basic and API key credentials sealed and never echoed; then a dashboard flow that lists a
-   remote cluster's indices, copies mappings, settings and aliases, reindexes with progress
-   (`_tasks`), and switches an alias when done. Algolia's export (records, synonyms, rules)
-   mapped onto indices, synonym sets and query rules after that.
+2. **Migrating into roll** (landed in #485 after six reviews: reindex from remote over HTTPS
+   through roll's guarded client (`roll_net::PublicOnly`, private literals and rolld's own
+   addresses refused, no redirects, bounded reads and timeouts), public hosts allowed without a
+   node allowlist (an operator's allowlist still narrows it), Basic and API key credentials sealed
+   and never echoed, remote pages charged by what parsing builds; and the dashboard's migration
+   wizard: `inspect` lists a remote cluster's indices (fetched by roll, its answer charged until
+   it's sent), copies mappings, settings and aliases, reindexes with progress and switches an
+   alias when done. Elastic Cloud restores from other deployments, AWS OpenSearch Service has
+   migration assistants, Algolia and Typesense import from each other): left, Algolia's export
+   (records, synonyms, rules) mapped onto indices, synonym sets and query rules, and a Typesense
+   and Meilisearch import (their dump formats onto indices and settings).
 3. **One memory account per request** (in progress: ES|QL and aggregations in #549, Painless per execution in #591, and a
    node-wide body budget in #601, each in review; ES|QL and aggregations against a node budget
    no tenant setting can raise in #549, Painless per execution, and a node-wide body budget; Elasticsearch charges every request's
