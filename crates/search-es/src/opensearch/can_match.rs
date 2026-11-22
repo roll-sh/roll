@@ -83,7 +83,8 @@ pub fn filter(ctx: &crate::rest::Ctx, req: &SearchRequest, targets: Vec<Target>)
         let table = t.table();
         let mut qctx = QueryCtx::new(ctx.cluster, &st, &t.idx, &table, &searcher, req.now_ms, t.reader());
         qctx.runtime_mappings = req.source.runtime_mappings.clone();
-        let alias_none = t.alias_filter.as_ref().is_some_and(|f| matches!(rewrite(&qctx, f, es), Rewritten::None));
+        let alias_none = t.filter.alias.as_ref().is_some_and(|f| matches!(rewrite(&qctx, f, es), Rewritten::None))
+            || t.filter.security.as_ref().is_some_and(|f| qctx.for_security().is_ok_and(|s| matches!(rewrite(&s, f, es), Rewritten::None)));
         keep.push(!alias_none && !matches!(rewrite(&qctx, q, es), Rewritten::None));
     }
     // OpenSearch always queries one shard. Elasticsearch only when the request has

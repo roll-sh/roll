@@ -468,6 +468,9 @@ pub struct Target {
     /// With `egress` `roll`: the hosts outside roll it may still reach, through the preview's
     /// egress proxy.
     pub egress_hosts: Vec<String>,
+    /// The project's `crons`: a backend's scheduled work (roll apps' crons, scheduled commands and
+    /// calls) runs in the preview too; off, it's deployed with its schedule off.
+    pub crons: bool,
     /// With `egress` `roll`, for a backend that resolves the environment's secrets itself (roll
     /// apps' `closed_by`): who its keys bound to hosts are used as, the person who last saved
     /// the project's preview rules, or their token. None: nobody (the operator saved them), and

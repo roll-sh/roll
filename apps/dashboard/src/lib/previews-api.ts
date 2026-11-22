@@ -156,6 +156,8 @@ export interface Preview {
   regressions?: "check" | "required" | null;
   /** Who accepted its regressions at its head. */
   regressions_accepted?: { head: string; by: string; at: number } | null;
+  /** Compared with main's preview at its head (errors; routes too with traces): until then nothing says it has no regressions. */
+  regressions_compared?: boolean;
   /** The keys it holds as placeholders (its egress proxy swaps each in for its hosts only), and
    * how many requests had one swapped in or were refused. Never a value. */
   /** How its head came up: when converging it started, and when each step first finished
@@ -437,6 +439,8 @@ export interface PreviewSettings {
   env_for: Record<string, Record<string, string>>;
   /** Wake the change's services as soon as a new head is deployed (a warm first visit). */
   warm: boolean;
+  /** A roll apps cron service runs its schedule in previews too (off: deployed, schedule off). */
+  crons?: boolean;
   /** Run once on fresh data (after branching or a reset) before the services deploy. */
   seed: PreviewJob | null;
   /** Run at each new head, after the seed and before services deploy (migrations). */

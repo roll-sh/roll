@@ -51,12 +51,15 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyou
 openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout echo.key -out echo.csr -subj "/CN=echo.localhost" 2>/dev/null
 openssl x509 -req -in echo.csr -CA ca.pem -CAkey ca.key -CAcreateserial -out echo.pem -days 1 -extfile <(printf "subjectAltName=DNS:echo.localhost") 2>/dev/null
 python3 - "$ECHO_PORT" <<'PY' &
-import http.server, socket, ssl, sys
+import hashlib, http.server, socket, ssl, sys
 class Six(http.server.ThreadingHTTPServer):
     address_family = socket.AF_INET6
 class Echo(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        body = ("authorization=" + (self.headers.get("Authorization") or "")).encode()
+        # `/`: a hash of what it got (proves the swap without bringing the key back); `/echo`: the
+        # header itself, which roll secrets' scrub must stop.
+        auth = self.headers.get("Authorization") or ""
+        body = ("authorization=" + auth if self.path == "/echo" else "sha256=" + hashlib.sha256(auth.encode()).hexdigest()).encode()
         self.send_response(200); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
     def log_message(self, *a):
         pass
@@ -95,7 +98,9 @@ BOUND=$(curl -s -o "$HOME_DIR/bind.json" -w '%{http_code}' -X PUT "http://$API/v
 case "$BOUND" in 200|201|204) ;; *) echo "binding STRIPE_KEY to echo.localhost: HTTP $BOUND $(cat "$HOME_DIR/bind.json")"; exit 1;; esac
 
 say "a token saves the rules (the placeholders' maker): Roll only, echo.localhost allowed, public"
-TOKEN=$(api POST /v1/access/tokens "{\"name\":\"rules\",\"rules\":[{\"product\":\"previews\",\"resources\":\"*\",\"actions\":{\"read\":\"allow\",\"write\":\"allow\",\"admin\":\"allow\"}},{\"product\":\"secrets\",\"resources\":[{\"project\":\"$PRJ\"}],\"actions\":{\"read\":\"allow\",\"reveal\":\"allow\"}}]}" | jq_ "d['token']")
+TOKEN_JSON=$(api POST /v1/access/tokens "{\"name\":\"rules\",\"rules\":[{\"product\":\"previews\",\"resources\":\"*\",\"actions\":{\"read\":\"allow\",\"write\":\"allow\",\"admin\":\"allow\"}},{\"product\":\"secrets\",\"resources\":[{\"project\":\"$PRJ\"}],\"actions\":{\"read\":\"allow\",\"reveal\":\"allow\"}}]}")
+TOKEN=$(echo "$TOKEN_JSON" | jq_ "d['token']")
+TOKEN_ID=$(echo "$TOKEN_JSON" | jq_ "d['grant']['id']")
 SAVED=$(curl -s -o "$HOME_DIR/rules.json" -w '%{http_code}' -X PUT "http://$API/v1/previews/projects/$PRJ/settings" -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
   -d '{"enabled":true,"egress":"roll","egress_hosts":["echo.localhost"],"access":"public"}')
 [ "$SAVED" = 200 ] || { echo "the token saving the rules: HTTP $SAVED $(cat "$HOME_DIR/rules.json")"; exit 1; }
@@ -120,30 +125,63 @@ say "through the preview's interception socket: the key swapped in, a placeholde
 SOCK=$HOME_DIR/previews/intercept/$PV/sock/intercept.sock
 CA=$HOME_DIR/previews/intercept/$PV/ca.pem
 [ -S "$SOCK" ] && [ -f "$CA" ] || { echo "the preview's interception socket and CA should be there: $SOCK"; exit 1; }
-through() { # through <authorization>: the status and body the host answered, through the socket
-  python3 - "$SOCK" "$CA" "$ECHO_PORT" "$1" <<'PY'
+through() { # through <authorization> [path]: the status and body the host answered, through the socket ("cut" when none came)
+  python3 - "$SOCK" "$CA" "$ECHO_PORT" "$1" "${2:-/}" <<'PY'
 import socket, ssl, sys
-sock, ca, port, auth = sys.argv[1:]
+sock, ca, port, auth, path = sys.argv[1:]
 s = socket.socket(socket.AF_UNIX); s.connect(sock)
 s.sendall(f"echo.localhost:{port}\n".encode())
 ctx = ssl.create_default_context(cafile=ca)
 t = ctx.wrap_socket(s, server_hostname="echo.localhost")
-t.sendall(f"GET / HTTP/1.1\r\nHost: echo.localhost\r\nAuthorization: {auth}\r\nConnection: close\r\n\r\n".encode())
+t.sendall(f"GET {path} HTTP/1.1\r\nHost: echo.localhost\r\nAuthorization: {auth}\r\nConnection: close\r\n\r\n".encode())
 out = b""
-while True:
-    b = t.recv(65536)
-    if not b:
-        break
-    out += b
-head, _, body = out.partition(b"\r\n\r\n")
-print(head.split(b" ")[1].decode(), body.decode(errors="replace"))
+try:
+    while True:
+        b = t.recv(65536)
+        if not b:
+            break
+        out += b
+except (ssl.SSLError, OSError):
+    pass
+head, sep, body = out.partition(b"\r\n\r\n")
+print(head.split(b" ")[1].decode() + " " + body.decode(errors="replace") if sep else "cut " + out.decode(errors="replace"))
 PY
 }
 GOT=$(through "Bearer $PLACEHOLDER")
-[ "$GOT" = "200 authorization=Bearer $KEY_VALUE" ] || { echo "the host should get the key swapped in, not: ${GOT:0:120}"; exit 1; }
+WANT=$(printf 'Bearer %s' "$KEY_VALUE" | sha256sum | cut -d' ' -f1)
+[ "$GOT" = "200 sha256=$WANT" ] || { echo "the host should get the key swapped in (its hash back), not: ${GOT:0:120}"; exit 1; }
 WRONG=$(through "Bearer rlph_$(python3 -c 'print("a"*40)')")
 case "$WRONG" in 403*) ;; *) echo "a placeholder that isn't live should be refused (403), not: ${WRONG:0:120}"; exit 1;; esac
 ACT=$(api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d]")
 echo "$ACT" | grep -q "egress to echo.localhost: 1 request(s), 1 key(s) swapped in" || { echo "the activity should say a key was swapped in: $ACT"; exit 1; }
 echo "$ACT" | grep -q "$KEY_VALUE" && { echo "the activity should never show the key"; exit 1; }
-say "ok: the service held $(echo "$PLACEHOLDER" | cut -c1-9)…, the host got the key, a dead placeholder was refused"
+
+say "a host that echoes the key back: roll secrets' scrub stops it, and the placeholder ends"
+ECHOED=$(through "Bearer $PLACEHOLDER" /echo)
+case "$ECHOED" in *"$KEY_VALUE"*) echo "an echoed key reached the preview's service"; exit 1;; esac
+case "$ECHOED" in 502*|cut*|"200 ") ;; *) echo "an echo should be stopped (a 502, or the connection cut), not: ${ECHOED:0:120}"; exit 1;; esac
+AFTER=""
+for _ in $(seq 1 20); do
+  AFTER=$(through "Bearer $PLACEHOLDER")
+  case "$AFTER" in 403*) break;; esac
+  sleep 0.5
+done
+case "$AFTER" in 403*) ;; *) echo "the echoed placeholder should be ended (403 after), not: ${AFTER:0:120}"; exit 1;; esac
+ACT=$(api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d]")
+echo "$ACT" | grep -q "echoed STRIPE_KEY" || { echo "the activity should say the host echoed STRIPE_KEY: $ACT"; exit 1; }
+echo "$ACT" | grep -q "$KEY_VALUE" && { echo "the activity should never show the key"; exit 1; }
+say "the rules' saver loses access (its token revoked): the keys go without placeholders, said (roll secrets' maker_unreachable)"
+api DELETE "/v1/access/tokens/$TOKEN_ID" >/dev/null
+api POST "/v1/previews/$PV/sleep" >/dev/null
+ENV2=""
+for _ in $(seq 1 120); do
+  ENV2=$(curl -s --max-time 30 -H "Host: $HOST" "http://$API/env.txt")
+  echo "$ENV2" | grep -q '^STRIPE_KEY=' && break
+  sleep 1
+done
+NOW_KEY=$(echo "$ENV2" | sed -n 's/^STRIPE_KEY=//p')
+# A trusted preview: what it gets without placeholders, as before them (never another person's rights).
+[ "$NOW_KEY" = "$KEY_VALUE" ] || { echo "with the rules' saver gone the preview should get STRIPE_KEY without a placeholder: '${NOW_KEY:0:9}…'"; exit 1; }
+ACT=$(api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d]")
+echo "$ACT" | grep -q "placeholders off" || { echo "the activity should say placeholders are off and why: $ACT"; exit 1; }
+say "ok: the service held $(echo "$PLACEHOLDER" | cut -c1-9)…, the host got the key, a dead placeholder was refused, an echo was stopped and ended its placeholder, and without the rules' saver its keys went without placeholders, said"

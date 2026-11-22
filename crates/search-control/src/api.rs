@@ -42,6 +42,7 @@ impl IntoResponse for ControlError {
             ControlError::Conflict(_) => StatusCode::CONFLICT,
             ControlError::TooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             ControlError::Forbidden(_) => StatusCode::FORBIDDEN,
+            ControlError::Busy(_) => StatusCode::TOO_MANY_REQUESTS,
             ControlError::Internal(e) => {
                 tracing::warn!(error = %e, "search control error");
                 StatusCode::INTERNAL_SERVER_ERROR
@@ -70,6 +71,8 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/keys", post(create_key))
         .route("/v1/search/clusters/{id}/repositories/{name}", axum::routing::put(put_repository))
         .route("/v1/search/clusters/{id}/keys/{key}", axum::routing::delete(delete_key))
+        .route("/v1/search/clusters/{id}/migrate/inspect", post(migrate_inspect))
+        .route("/v1/search/clusters/{id}/migrate", post(migrate))
         .route("/v1/search/clusters/{id}/browser-keys", get(browser_keys).post(create_browser_key))
         .route("/v1/search/clusters/{id}/browser-keys/{key}", axum::routing::delete(revoke_browser_key))
         .route("/v1/search/clusters/{id}/remotes", get(remotes))
@@ -634,6 +637,20 @@ async fn create_key(State(c): State<AppState>, Path(id): Path<String>, Json(k): 
 async fn delete_key(State(c): State<AppState>, Path((id, key)): Path<(String, String)>) -> Result<StatusCode, ControlError> {
     c.delete_key(&id, &key).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Lists an Elasticsearch or OpenSearch cluster's indices for a migration into cluster `id`
+/// (`crate::migrate`): fetched by roll, never by the browser; the credentials aren't kept.
+async fn migrate_inspect(State(c): State<AppState>, Path(id): Path<String>, Json(b): Json<crate::migrate::InspectRequest>) -> Result<Response, ControlError> {
+    // The answer goes out in chunks, charged until it's sent (or the connection closes).
+    let answer = c.migrate_inspect(&id, &b.source).await?;
+    Ok(([(axum::http::header::CONTENT_TYPE, "application/json")], Body::from_stream(answer.into_stream())).into_response())
+}
+
+/// Copies the picked indices' definitions into cluster `id` and starts a reindex from remote
+/// for each (`wait_for_completion=false`: the answer lists the tasks).
+async fn migrate(State(c): State<AppState>, Path(id): Path<String>, Json(b): Json<crate::migrate::MigrateRequest>) -> ApiResult<Value> {
+    Ok(Json(c.migrate(&id, &b).await?))
 }
 
 /// `GET /v1/search/clusters/{id}/browser-keys`: the keys web pages ship, without their secrets.

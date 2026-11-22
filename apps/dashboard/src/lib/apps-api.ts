@@ -572,6 +572,8 @@ export interface EnvironmentDiff {
 }
 
 export interface EnvironmentPut {
+  /** false: its schedules don't run (deploys and runs still do). */
+  scheduled?: boolean;
   /** Data of its own: a branch of each Postgres and Redis database it links (admin); null goes back. */
   data?: "branch" | null;
   branch?: string | null;
@@ -737,6 +739,8 @@ export interface Environment extends EnvironmentSummary {
   closed_by?: string | null;
   /** Data of its own: a branch of each Postgres and Redis database it links. */
   data?: { mode: "branch"; branches: { kind: "postgres" | "redis"; ref: string }[] };
+  /** false: its schedules don't run. */
+  scheduled?: false;
   /** A closed environment's interception (roll secrets' placeholders): requests filtered, placeholders swapped, the latest refusals. */
   intercepted?: { requests: number; swapped: number; refused?: string[] };
   /** A push deploys only once its commit's checks pass. */

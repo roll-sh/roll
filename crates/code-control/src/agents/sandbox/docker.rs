@@ -302,6 +302,31 @@ impl SandboxBackend for Docker {
         docker(&["start", check_name(backend_id)?], TIMEOUT).await.map(drop).map_err(|e| if missing(&e) { BackendError::Permanent(e) } else { BackendError::Transient(e) })
     }
 
+    /// A new container in its place from the old one's env less `without`, on the same home volume.
+    /// The old one is set aside first and put back if the new one doesn't run.
+    async fn start_without(&self, backend_id: &str, spec: &SandboxSpec, without: &[String]) -> Result<bool, BackendError> {
+        let name = check_name(backend_id)?;
+        let fail = |e: String| if missing(&e) { BackendError::Permanent(e) } else { BackendError::Transient(e) };
+        let out = docker(&["inspect", "-f", "{{json .Config.Env}}", name], TIMEOUT).await.map_err(fail)?;
+        let had: Vec<String> = serde_json::from_str(&out).map_err(|_| BackendError::Transient("docker's answer for the container's env isn't a list".into()))?;
+        // The image's own variables come back with the image; giving them again changes nothing.
+        let env: std::collections::BTreeMap<String, String> = had.iter().filter_map(|l| l.split_once('=')).filter(|(k, _)| !without.iter().any(|d| d == k)).map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let file = EnvFile::write(&env)?;
+        let aside = format!("{name}-old");
+        let _ = docker(&["rm", "-f", check_name(&aside)?], TIMEOUT).await;
+        docker(&["rename", name, &aside], TIMEOUT).await.map_err(fail)?;
+        let args = self.run_args(spec, &file.0.to_string_lossy()).await;
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        if let Err(e) = docker(&args, RUN_TIMEOUT).await {
+            let _ = docker(&["rename", &aside, name], TIMEOUT).await;
+            return Err(BackendError::Transient(e));
+        }
+        if let Err(e) = docker(&["rm", "-f", &aside], TIMEOUT).await {
+            tracing::warn!(container = %aside, error = %e, "removing a sandbox's old container");
+        }
+        Ok(true)
+    }
+
     async fn stop(&self, backend_id: &str) -> Result<(), BackendError> {
         docker(&["stop", "-t", "10", check_name(backend_id)?], TIMEOUT).await.map(drop).map_err(|e| if missing(&e) { BackendError::Permanent(e) } else { BackendError::Transient(e) })
     }

@@ -4,6 +4,7 @@
  * among a change's checks, and MCP client configs for agents. No React, so they're unit-tested.
  */
 
+import { shellWord } from "./access-api";
 import { WEBHOOK_EVENTS, type Check, type OwnerTokenInfo, type Status, type Webhook, type WebhookEvent, type WebhookInput } from "./code-api";
 
 // ── webhooks ──
@@ -214,7 +215,8 @@ export function statusToCheck(state: Status["state"]): Check["status"] {
 /** `claude mcp add` for Claude Code; the token is a placeholder unless given. */
 export function mcpCommand(url: string, token?: string | null) {
   const header = token === null ? "" : ` \\\n  --header "Authorization: Bearer ${token || "$ROLL_CODE_TOKEN"}"`;
-  return `claude mcp add --transport http roll ${url}${header}`;
+  // A URL with a query (`?lockdown=1`) is quoted: zsh reads `?` as a glob.
+  return `claude mcp add --transport http roll ${shellWord(url)}${header}`;
 }
 
 /** The JSON most MCP clients take. */

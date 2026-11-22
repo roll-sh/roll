@@ -705,6 +705,17 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
     let resource = lent.as_ref().map(|(_, id)| id.clone()).or_else(|| describe(&target));
     let about = lent.as_ref().map_or(row.product, |(p, _)| p);
     ctx.about = lent.as_ref().map(|(p, _)| *p);
+    // An agent (a call through roll's MCP server) asks a person first for what the policy says
+    // agents always ask about, whatever its token allows (a session is a person, never an agent).
+    if outcome == Outcome::Allow && !session && ctx.mcp.as_ref().is_some_and(|m| !m.quiet) {
+        let env = match &target {
+            Target::One(r) => r.environment.clone(),
+            _ => None,
+        };
+        if policy.agent_asks(about, action, env.as_deref()) {
+            outcome = Outcome::Ask;
+        }
+    }
     let mut approved: Option<roll_auth::Approved> = None;
     match outcome {
         Outcome::Deny => {
@@ -738,11 +749,48 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
                 }
                 r
             });
+            // Step-up (MCP's `insufficient_scope` challenge): an OAuth connection's refused tool call
+            // keeps the one rule it needed, for the consent screen to propose to its person; the
+            // challenge carries only the id, so a client never chooses what's proposed.
+            // Only where adding that rule would let the call through: not a move between projects, a
+            // copy or a link (another check decided), not access's own rules, not roll's quiet probes.
+            let worth = ctx.grant.kind == "oauth"
+                && ctx.mcp.as_ref().is_some_and(|m| !m.quiet)
+                && widen.is_some()
+                && about != "access"
+                && lent.is_none()
+                && asked_env.is_none()
+                && catalog::placement(row, &params).is_none();
+            let step_up = if worth {
+                let resources = match (&lent, &target) {
+                    (Some((_, id)), _) => roll_auth::scope::Resources::Some(vec![roll_auth::scope::Selector::Id { id: id.clone(), index: None }]),
+                    (None, Target::One(r)) if r.id.is_some() => roll_auth::scope::Resources::Some(vec![roll_auth::scope::Selector::Id { id: r.id.clone().unwrap_or_default(), index: r.index.clone() }]),
+                    _ => roll_auth::scope::Resources::All,
+                };
+                let rule = roll_auth::scope::Rule {
+                    product: about.to_string(),
+                    resources,
+                    environments: None,
+                    paths: None,
+                    unprotected: false,
+                    actions: [(action, roll_auth::scope::Effect::Allow)].into_iter().collect(),
+                };
+                let mut wider = (*scope).clone();
+                wider.0.push(rule.clone());
+                if weakest(&needs, |a| wider.outcome(&target, a)).0 == Outcome::Allow {
+                    let (a2, gid) = (access.clone(), ctx.grant.id.to_string());
+                    tokio::task::spawn_blocking(move || a2.store.create_step_up(&gid, &rule)).await.ok().and_then(Result::ok)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             return deny(
                 StatusCode::FORBIDDEN,
                 "forbidden",
                 format!("this token can't {action} {what}"),
-                json!({ "needs": { "product": about, "action": action, "resource": resource }, "widen": widen, "request": request }),
+                json!({ "needs": { "product": about, "action": action, "resource": resource }, "widen": widen, "request": request, "step_up": step_up }),
             );
         }
         Outcome::Ask if decided_before => {}

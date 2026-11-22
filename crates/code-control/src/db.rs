@@ -436,6 +436,9 @@ const COLUMNS: &[(&str, &str, &str)] = &[
     ("agent_sandboxes", "last_active_at", "INTEGER"),
     // Sandboxes from before they recorded who copied a secrets environment into them.
     ("agent_sandboxes", "secrets_by", "TEXT"),
+    // Sandboxes from before they kept where copied secrets came from, and whether they went.
+    ("agent_sandboxes", "secrets_from", "TEXT"),
+    ("agent_sandboxes", "secrets_dropped", "TEXT"),
     // Automation runs from before a wake during a step's attempt was kept.
     ("automation_runs", "woken", "INTEGER NOT NULL DEFAULT 0"),
     // Work items from before issues said whether their author can push (the next sync says).

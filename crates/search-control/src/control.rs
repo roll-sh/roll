@@ -62,6 +62,9 @@ pub enum ControlError {
     /// Refused to this caller (HTTP 403): roll secrets wouldn't let them reveal a reference.
     #[error("{0}")]
     Forbidden(String),
+    /// Too much of something runs at once (HTTP 429): try again later.
+    #[error("{0}")]
+    Busy(String),
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
 }
@@ -211,6 +214,34 @@ pub struct ClusterOptions {
     /// Requests per minute all its browser keys may make together; `null`: the node's default.
     #[serde(default, deserialize_with = "present")]
     pub browser_per_minute: Option<Option<i64>>,
+    /// The cluster's `reindex.remote.whitelist`: `host:port` patterns (`*` matches any run of
+    /// characters) reindex from remote may read, at most [`MAX_WHITELIST`]; `[]`: none.
+    pub reindex_whitelist: Option<Vec<String>>,
+}
+
+/// The most patterns a cluster's reindex whitelist holds.
+pub const MAX_WHITELIST: usize = 64;
+
+/// A reindex whitelist as given, checked: `host:port` patterns of letters, digits, `.`, `-`,
+/// `_`, `*` and an IPv6 literal's brackets and colons, each at most 260 characters.
+pub fn whitelist_patterns(given: Vec<String>) -> Result<Vec<String>> {
+    if given.len() > MAX_WHITELIST {
+        return Err(ControlError::Invalid(format!("reindex_whitelist: at most {MAX_WHITELIST} entries")));
+    }
+    let mut out: Vec<String> = Vec::with_capacity(given.len());
+    for g in given {
+        let p = g.trim().to_ascii_lowercase();
+        let ok = p.len() <= 260
+            && p.rsplit_once(':').is_some_and(|(h, port)| !h.is_empty() && !port.is_empty() && (port == "*" || port.parse::<u16>().is_ok()))
+            && p.chars().all(|c| c.is_ascii_alphanumeric() || ".-_*:[]".contains(c));
+        if !ok {
+            return Err(ControlError::Invalid(format!("reindex_whitelist: [{}] isn't a host:port pattern", g.chars().take(80).collect::<String>())));
+        }
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    Ok(out)
 }
 
 /// A field that was given, `null` included (`Some(None)`), apart from one left out (`None`).
@@ -379,6 +410,8 @@ pub fn spec_for(c: &SearchCluster) -> ClusterSpec {
     spec.max_body_bytes = Some((c.max_body_mb.max(1) as usize) << 20);
     spec.destructive_requires_name = c.destructive_requires_name;
     spec.ip_allowlist = allowlist_of(&c.ip_allowlist);
+    // The cluster's own, even empty (`[]`: no remote), never the node setting's.
+    spec.reindex_whitelist = Some(c.reindex_whitelist.clone());
     spec.browser_per_minute = c.browser_per_minute.and_then(|n| u64::try_from(n).ok());
     spec.cors = c.cors.as_ref().and_then(|g| match search_server::cors::Cors::new(&g.allow_origin, g.allow_methods.as_deref(), g.allow_headers.as_deref(), g.max_age) {
         Ok(c) => Some(Arc::new(c)),
@@ -829,6 +862,9 @@ impl Control {
         if let Some(v) = o.ip_allowlist {
             c.ip_allowlist = ip_rules(v)?;
         }
+        if let Some(v) = o.reindex_whitelist {
+            c.reindex_whitelist = whitelist_patterns(v)?;
+        }
         if let Some(v) = o.cors {
             c.cors = cors_settings(v)?;
         }
@@ -908,6 +944,7 @@ impl Control {
             cors: None,
             browser_per_minute: None,
             inherit_pending: false,
+            reindex_whitelist: Vec::new(),
         }
     }
 
@@ -1090,9 +1127,21 @@ impl Control {
     /// request runs, or as soon as none does; until then it keeps its current ones. Making the
     /// cluster always-on past the owner's `caps.always_on` is refused (409).
     pub async fn update(&self, id: &str, o: ClusterOptions, caps: Caps) -> Result<SearchCluster> {
+        self.update_with(id, caps, move |c| {
+            *c = Self::apply(c.clone(), o)?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Changes cluster `id` with `f`, which reads and writes the row as it stands under the
+    /// settings lock (a read-modify-write no concurrent update is lost to), then saves and
+    /// applies it as [`Control::update`] does.
+    pub async fn update_with(&self, id: &str, caps: Caps, f: impl FnOnce(&mut SearchCluster) -> Result<()>) -> Result<SearchCluster> {
         let c = {
             let _g = self.specs.lock().await;
-            let c = Self::apply(self.get(id).await?, o)?;
+            let mut c = self.get(id).await?;
+            f(&mut c)?;
             self.check(&c)?;
             self.save(&c, caps).await?;
             self.apply_spec(&c.name).await;
@@ -2369,9 +2418,11 @@ mod tests {
             cors: None,
             browser_per_minute: None,
             inherit_pending: false,
+            reindex_whitelist: vec!["es.example.com:443".into()],
         };
         let s = spec_for(&c);
         assert!(s.ip_allowlist.contains("::ffff:203.0.113.9".parse().unwrap()) && !s.ip_allowlist.is_open());
+        assert_eq!(s.reindex_whitelist, Some(vec!["es.example.com:443".to_string()]));
         assert_eq!(s.name, "app");
         assert_eq!(s.dialect, Dialect::OpenSearch);
         assert_eq!(s.credentials.len(), 1);

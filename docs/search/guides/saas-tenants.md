@@ -103,11 +103,10 @@ Try it: with the new key, `{"query": {"match": {"title": "roadmap"}}}` on `docs`
 `acme-1`. To hide fields as well, add `"field_security": {"grant": ["title", "body"]}` next to the
 query.
 
-Keep these keys on your backend for now, and build the request body there rather than passing a
-body from the browser through. A fix is in progress for a bypass where a request's own
-`runtime_mappings` could shadow the field a document level security filter tests (`## Next`,
-Security, in [../README.md](../README.md)). Until it's on main, a client that can send arbitrary
-bodies with a filtered key could see other tenants' documents.
+The filter holds whatever body the client sends. A request's own `runtime_mappings` can't shadow
+a field the filter tests, because the filter is evaluated without them. For a key a web page ships,
+use a browser key with the same filter ([site-search.md](site-search.md), "Search from the
+browser"); it adds rate limits and refuses writes and expensive queries.
 
 ## Make keys from your backend
 
