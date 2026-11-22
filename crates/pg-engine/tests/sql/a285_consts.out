@@ -1,0 +1,94 @@
+> create function a285pair(anycompatible, anycompatible) returns anycompatiblearray as 'select array[$1, $2]' language sql
+-- CREATE FUNCTION
+
+> explain select x, pg_typeof(x) from a285pair(11, 12) x
+QUERY PLAN:text
+Result  (cost=0.00..0.01 rows=1 width=36)
+-- EXPLAIN
+
+> select x, pg_typeof(x) from a285pair(11, 12) x
+x:int4[] | pg_typeof:regtype
+{11,12} | integer[]
+-- SELECT 1
+
+> explain select * from to_tsquery('english', 'moscow') as query
+QUERY PLAN:text
+Result  (cost=0.00..0.01 rows=1 width=32)
+-- EXPLAIN
+
+> explain select * from upper('a') as u
+QUERY PLAN:text
+Result  (cost=0.00..0.01 rows=1 width=32)
+-- EXPLAIN
+
+> select * from upper('a') as u
+u:text
+A
+-- SELECT 1
+
+> explain select * from abs(-3) as u, generate_series(1, 2) g
+QUERY PLAN:text
+Function Scan on generate_series g  (cost=0.00..0.02 rows=2 width=8)
+-- EXPLAIN
+
+> select * from abs(-3) as u, generate_series(1, 2) g
+u:int4 | g:int4
+3 | 1
+3 | 2
+-- SELECT 2
+
+> explain select random() > 2 from abs(-3) as u
+QUERY PLAN:text
+Result  (cost=0.00..0.01 rows=1 width=1)
+-- EXPLAIN
+
+> explain select u + 1 from abs(-3) as u where u > 0
+QUERY PLAN:text
+Result  (cost=0.00..0.01 rows=1 width=4)
+-- EXPLAIN
+
+> select u + 1 from abs(-3) as u where u > 0
+?column?:int4
+4
+-- SELECT 1
+
+> explain select * from abs(-3) as u left join generate_series(1, 5) g on g = u
+QUERY PLAN:text
+Nested Loop Left Join  (cost=0.00..0.08 rows=1 width=8)
+  ->  Result  (cost=0.00..0.01 rows=1 width=0)
+  ->  Function Scan on generate_series g  (cost=0.00..0.07 rows=1 width=4)
+        Filter: (g = 3)
+-- EXPLAIN
+
+> create table a285t (id int, v text) with (autovacuum_enabled = off)
+-- CREATE TABLE
+
+> insert into a285t select g, g::text from generate_series(1, 20) g
+-- INSERT 0 20
+
+> explain select t1.ctid, t1.*, t2.ctid, t2.* from a285t t1, a285t t2 where t1.id = 1 and t2.ctid = t1.ctid
+QUERY PLAN:text
+Nested Loop  (cost=0.00..50.01 rows=6 width=84)
+  ->  Seq Scan on a285t t1  (cost=0.00..25.88 rows=6 width=42)
+        Filter: (id = 1)
+  ->  Tid Scan on a285t t2  (cost=0.00..4.01 rows=1 width=42)
+        TID Cond: (t1.ctid = ctid)
+-- EXPLAIN
+
+> select t1.ctid, t1.*, t2.ctid from a285t t1, a285t t2 where t1.id = 1 and t2.ctid = t1.ctid
+ctid:27 | id:int4 | v:text | ctid:27
+(0,1) | 1 | 1 | (0,1)
+-- SELECT 1
+
+> explain select ctid, xmin, cmin, tableoid, id from a285t where id = 2
+QUERY PLAN:text
+Seq Scan on a285t  (cost=0.00..25.88 rows=6 width=22)
+  Filter: (id = 2)
+-- EXPLAIN
+
+> drop function a285pair(anycompatible, anycompatible)
+-- DROP FUNCTION
+
+> drop table a285t
+-- DROP TABLE
+

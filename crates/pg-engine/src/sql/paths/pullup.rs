@@ -173,19 +173,26 @@ impl Planner<'_, '_> {
                         .unwrap()
                 })
                 .collect();
+            // (One that doesn't fold, a volatile call's, stays an expression over the
+            // constants: the item is an RTE_RESULT all the same. Not one with a sub-select,
+            // whose parameters may read the item's columns.)
             let folded: Option<Vec<Expr>> = put
                 .into_iter()
                 .map(|e| {
                     let mut plain = e.columns().is_empty() && !super::expr_volatile_deep(&e) && !e.has_outer_refs();
-                    e.walk(&mut |x| plain &= !matches!(x, Expr::Subquery(_) | Expr::Param(..) | Expr::Agg(..) | Expr::Window(..) | Expr::Srf(..)));
+                    let mut opaque = false;
+                    e.walk(&mut |x| {
+                        plain &= !matches!(x, Expr::Subquery(_) | Expr::Param(..) | Expr::Agg(..) | Expr::Window(..) | Expr::Srf(..));
+                        opaque |= matches!(x, Expr::Subquery(_) | Expr::Param(..) | Expr::Agg(..) | Expr::Window(..) | Expr::Srf(..));
+                    });
                     if !plain {
-                        return None;
+                        return (!opaque && e.columns().is_empty() && !e.has_outer_refs()).then_some(e);
                     }
                     if matches!(e, Expr::Const(..)) {
                         return Some(e);
                     }
                     let ty = e.ty();
-                    crate::sql::expr::eval(&e, &[], self.ctx).ok().map(|v| Expr::Const(v, ty))
+                    Some(crate::sql::expr::eval(&e, &[], self.ctx).map_or(e, |v| Expr::Const(v, ty)))
                 })
                 .collect();
             if let Some(folded) = folded {
@@ -194,6 +201,16 @@ impl Planner<'_, '_> {
                     exprs: folded,
                 };
             }
+        }
+        // A FROM call folding to a constant read as it is (no projection above): the
+        // item an RTE_RESULT returning the value (pull_up_constant_function).
+        if let Plan::FunctionScan { .. } = p
+            && let Some(consts) = const_rel(p, self.ctx)
+        {
+            *p = Plan::Project {
+                input: Arc::new(Plan::One),
+                exprs: consts,
+            };
         }
         // An aggregation without grouping over such an item: its values put in for its
         // columns in the aggregates' arguments, the Result returning none (the item an

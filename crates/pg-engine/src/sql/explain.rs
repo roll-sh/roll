@@ -11955,6 +11955,8 @@ impl Builder<'_, '_> {
                 ["ctid", "xmin", "cmin", "xmax", "cmax", "tableoid"]
                     .map(|c| Name::col(&refname, c)),
             );
+            // (Their widths when read: tid, xid, cid, xid, cid, oid.)
+            cols.extend([6, 4, 4, 4, 4, 4].map(|width| ColInfo { width, var: None, distinct: None, groups: None }));
         }
         // Only the columns used above (the scan's reltarget), and a row mark's ctid.
         if let Some(m) = self.needed.get(&addr(p)) {
