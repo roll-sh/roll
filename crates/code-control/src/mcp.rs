@@ -513,6 +513,11 @@ pub fn tools() -> Vec<Value> {
         if t["name"].as_str().is_some_and(|n| DESTRUCTIVE.contains(&n)) {
             t["annotations"]["destructiveHint"] = Value::Bool(true);
         }
+        // Calling it again changes nothing more (MCP's idempotentHint, as roll's own tools say it):
+        // a read, or a tool whose every route is a PUT or DELETE.
+        let name = t["name"].as_str().unwrap_or_default().to_string();
+        let idempotent = t["annotations"]["readOnlyHint"] == true || ROUTES.iter().filter(|r| r.0 == name).all(|r| matches!(r.1, "GET" | "PUT" | "DELETE"));
+        t["annotations"]["idempotentHint"] = Value::Bool(idempotent);
     }
     all
 }

@@ -187,6 +187,10 @@ JAR="$HOME_DIR/cookies"
 # A private preview (link access, the default) answers 401 without its link.
 [ "$(curl -s -o /dev/null -w '%{http_code}' -H "Host: $HOST" "http://$API/")" = 401 ] || { echo "a preview without its link should be 401"; exit 1; }
 say "preview $PV ready in $((T1 - T0)) ms: $(echo "$P" | jq_ "[(r['kind'], r['ref']) for r in d['resources']]")"
+# How its head came up, step by step (its timeline): every step named, in order.
+STEPS=$(echo "$P" | jq_ "(lambda t: ' · '.join('%s %d ms' % (s['step'], s['at'] - (t['steps'][i - 1]['at'] if i else t['started_at'])) for i, s in enumerate(t['steps']) if s['step'] != 'ready'))(d['timeline']) if d.get('timeline') else ''")
+case "$STEPS" in "data "*" · setup "*" · deploy "*" · checks "*) ;; *) echo "the preview's timeline should name each step in order: '$STEPS'"; exit 1;; esac
+say "its timeline: $STEPS"
 
 say "write into the preview's branches: 1 MiB of objects, 1,000 keys"
 BRANCH_BUCKET=$(echo "$P" | jq_ "[r['ref'] for r in d['resources'] if r['kind']=='bucket'][0]")
@@ -1025,6 +1029,7 @@ cat <<EOF
 | A visit to a service frozen after sleep_after (it read as sleeping), instead of a cold start | $((T7 - T6)) ms, the same container |
 | Change opened → preview ready ($(echo "$P" | jq_ "len(d['resources'])") branches made, the service deployed) | $((T1 - T0)) ms |
 | The preview's bucket key: its branch / production's bucket | $OWN_LS / $PARENT_LS |
+| … step by step (its timeline: data, setup, deploy, checks) | $STEPS |
 | Parent bucket bytes / the branch's own bytes after writing 1 MiB / objects the branch sees | $PARENT_OBJECTS / $BRANCH_OBJECTS / $BRANCH_SEES |
 | NoSQL branch's mask on app.users.email / masks on the parent | $MASKED / $PARENT_MASKED |
 | NoSQL: app.users.email in the branch / a filter on the real address there | $NOSQL_READ / $NOSQL_FILTER |

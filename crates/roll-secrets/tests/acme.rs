@@ -91,6 +91,7 @@ impl Setup {
         let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("secrets.db")), "secrets").unwrap();
         let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: None, sts: None, outside: None, directory: None, github: None, gateways: None, clouds: None, workloads: None };
         let secrets = Arc::new(Secrets::new(db.clone(), ws.clone(), opts).unwrap());
+        secrets.watch_workspace();
         secrets.set_public_api(API.into());
         let world = Arc::new(World::default());
         secrets.set_acme_checks(world.clone());
@@ -245,6 +246,16 @@ async fn an_acme_client_gets_certificates_from_a_projects_ca_only_with_a_live_bi
     assert_eq!(order.state().status, OrderStatus::Ready);
     order.finalize().await.unwrap();
     assert!(order.poll_certificate(&fast).await.unwrap().contains("BEGIN CERTIFICATE"));
+
+    // The project deleted: its CA issues nothing while it's recoverable (its CRL is still
+    // served), and again once it's back.
+    let (status, _) = s.call(Method::DELETE, &format!("/v1/workspace/projects/{}?confirm=shop", s.project), None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(problem(db_account.new_order(&NewOrder::new(&[dns("primary.db.svc.internal")])).await.err().unwrap()), "unauthorized");
+    let crl = s.router.clone().oneshot(Request::get(format!("/v1/secrets/crl/{id}")).body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(crl.status(), StatusCode::OK);
+    s.ok(Method::POST, &format!("/v1/secrets/projects/{}/recover", s.project), None).await;
+    assert_eq!(db_account.new_order(&NewOrder::new(&[dns("primary.db.svc.internal")])).await.unwrap().state().status, OrderStatus::Ready);
 
     // Revoking a binding stops its account at once.
     let (status, _) = s.call(Method::DELETE, &format!("/cas/{id}/acme/eab/{}", eab["key_id"].as_str().unwrap()), None).await;
