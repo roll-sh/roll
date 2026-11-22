@@ -103,6 +103,8 @@ pub fn parse(v: &serde_json::Value) -> Result<PrivateNetwork> {
         if routes.iter().any(|x| x.port() == port) {
             return Err(bad(&format!("two routes go to port {port}: each route's port is its own (the peer answers them all)")));
         }
+        // An IPv6 address keeps its brackets (socat's address syntax needs them).
+        let host = if host.parse::<std::net::Ipv6Addr>().is_ok() { format!("[{host}]") } else { host.to_string() };
         routes.push(Route { name, target: format!("{host}:{port}") });
     }
     Ok(PrivateNetwork { kind, secret: secret.to_string(), routes, login_server })
@@ -423,8 +425,9 @@ mod tests {
 
     #[test]
     fn routes_are_names_with_their_own_ports() {
-        let ok = parse(&json!({"kind": "wireguard", "secret": "roll://production/WG", "routes": [{"name": "DB.corp.internal", "target": "10.0.3.4:5432"}]})).unwrap();
+        let ok = parse(&json!({"kind": "wireguard", "secret": "roll://production/WG", "routes": [{"name": "DB.corp.internal", "target": "10.0.3.4:5432"}, {"name": "v6.corp.internal", "target": "[fd00::1]:6379"}]})).unwrap();
         assert_eq!((ok.routes[0].name.as_str(), ok.routes[0].port()), ("db.corp.internal", 5432));
+        assert_eq!((ok.routes[1].target.as_str(), ok.routes[1].port()), ("[fd00::1]:6379", 6379), "IPv6 keeps its brackets");
         for body in [
             json!({"kind": "wireguard", "secret": "[Interface]…", "routes": [{"name": "db.corp", "target": "10.0.0.1:5432"}]}),
             json!({"kind": "openvpn", "secret": "roll://p/K", "routes": [{"name": "db.corp", "target": "10.0.0.1:5432"}]}),
