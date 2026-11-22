@@ -909,6 +909,9 @@ async fn step_up_widens_the_connection() {
     let (s, refused) = d.via_mcp_body(&old, Method::DELETE, "/v1/projects/pa").await;
     assert_eq!(s, StatusCode::FORBIDDEN, "{refused}");
     let id = refused["step_up"].as_str().unwrap().to_string();
+    // Never for access's own rules (tokens and approvals): one click wouldn't hand those out.
+    let (s, own) = d.via_mcp_body(&old, Method::DELETE, &format!("/v1/access/tokens/{grant}")).await;
+    assert!(s == StatusCode::FORBIDDEN && own["step_up"].is_null(), "{own}");
     let (s, view) = d.call(OPERATOR, Method::GET, &format!("/v1/access/oauth/step-ups/{id}"), None).await;
     assert_eq!(s, StatusCode::OK, "{view}");
     assert_eq!((view["connection"]["id"].as_str(), &view["rule"]), (Some(grant.as_str()), &json!({ "product": "postgres", "resources": [{ "id": "pa" }], "actions": { "delete": "allow" } })), "{view}");
