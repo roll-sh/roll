@@ -4024,6 +4024,93 @@ async fn an_alias_pattern_over_a_link_and_a_loopback_is_authorized_locally() {
     assert!(!m.contains("secret doc"), "{m}");
 }
 
+/// A migration from another Elasticsearch-compatible cluster (here another roll cluster on this
+/// node, reached by its REST address as an outside cluster would be): the remote's indices are
+/// listed through roll, the picked one's mappings, settings and aliases copied with what roll
+/// doesn't take dropped and said why, its documents reindexed by a task the console follows;
+/// the remote's password is in no answer, error or task. An alias roll already has is never
+/// joined, and the cluster's reindex whitelist gains exactly the remote's host (nothing else is
+/// readable).
+#[tokio::test]
+async fn migrating_from_another_cluster() {
+    use reqwest::Method;
+    let e = env_with(|c| c.node_settings.push((search_control::REINDEX_ALLOW_PRIVATE.into(), "true".into()))).await;
+    let (old, old_pw) = creds(&e.post("/v1/search/clusters", json!({ "name": "old" })).await);
+    e.post("/v1/search/clusters", json!({ "name": "new" })).await;
+    let index = json!({
+        "settings": { "number_of_shards": 2, "refresh_interval": "5s", "routing": { "allocation": { "include": { "_tier_preference": "data_hot" } } } },
+        "mappings": { "properties": { "name": { "type": "text" }, "sku": { "type": "keyword" }, "price": { "type": "double" } } },
+        "aliases": { "catalog": {}, "shop": { "is_write_index": true } },
+    });
+    let (s, v) = e.es(&old, &old_pw, Method::PUT, "/products", Some(index)).await;
+    assert_eq!(s, 200, "{v}");
+    for (i, name) in ["kettle", "teapot", "mug"].iter().enumerate() {
+        let (s, v) = e.es(&old, &old_pw, Method::PUT, &format!("/products/_doc/{i}?refresh=true"), Some(json!({ "name": name, "sku": format!("s{i}"), "price": i as f64 + 0.5 }))).await;
+        assert_eq!(s, 201, "{v}");
+    }
+    // A write block on the source is the remote's business: it isn't copied.
+    let (s, v) = e.es(&old, &old_pw, Method::PUT, "/products/_settings", Some(json!({ "index.blocks.write": true }))).await;
+    assert_eq!(s, 200, "{v}");
+    let source = json!({ "host": e.es, "username": old, "password": old_pw });
+    // On roll, `shop` already names another index's alias.
+    let (_, made) = e.call(Method::POST, "/v1/search/clusters/new/request", Some(json!({ "method": "PUT", "path": "/other", "body": { "aliases": { "shop": {} } } }))).await;
+    assert_eq!(made["status"], 200, "{made}");
+
+    // A wrong password: the remote's 401, never the password.
+    let (s, v) = e.call(Method::POST, "/v1/search/clusters/new/migrate/inspect", Some(json!({ "source": { "host": e.es, "username": old, "password": "wrong-pass-123" } }))).await;
+    assert_eq!(s, 400, "{v}");
+    // Its status and error type only, never its body.
+    let msg = v["error"].as_str().unwrap_or_default();
+    assert!(msg.contains("answered 401") && msg.contains("error type [security_exception]") && !msg.contains("unable to authenticate") && !v.to_string().contains("wrong-pass-123"), "{v}");
+
+    let listed = e.post("/v1/search/clusters/new/migrate/inspect", json!({ "source": source })).await;
+    let row = listed["indices"].as_array().unwrap().iter().find(|r| r["index"] == "products").cloned().unwrap_or_default();
+    let mut aliases: Vec<&str> = row["aliases"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+    aliases.sort();
+    assert_eq!((row["docs"].as_i64(), aliases, row["aliases_on_roll"].clone(), row["exists"].as_bool()), (Some(3), vec!["catalog", "shop"], json!(["shop"]), Some(false)), "{listed}");
+    assert!(listed["remote"]["version"].as_str().is_some() && !listed.to_string().contains(&old_pw), "{listed}");
+
+    let started = e.post("/v1/search/clusters/new/migrate", json!({ "source": source, "indices": [{ "index": "products" }], "size": 2 })).await;
+    let r = &started["indices"][0];
+    let task = r["task"].as_str().unwrap_or_else(|| panic!("{started}")).to_string();
+    let dropped: Vec<&str> = r["dropped"].as_array().unwrap().iter().filter_map(|d| d["setting"].as_str()).collect();
+    for s in ["index.uuid", "index.creation_date", "index.blocks.write", "index.routing.allocation.include._tier_preference", "aliases.shop"] {
+        assert!(dropped.contains(&s), "{s} dropped: {started}");
+    }
+    assert_eq!(r["aliases"], json!(["catalog"]), "{started}");
+    assert!(!started.to_string().contains(&old_pw), "{started}");
+    // The cluster may now read exactly that host, and no other.
+    let port = e.es.rsplit(':').next().unwrap();
+    assert_eq!(e.get("/v1/search/clusters/new").await["reindex_whitelist"], json!([format!("127.0.0.1:{port}")]));
+    let other = json!({ "source": { "remote": { "host": "http://127.0.0.1:1" }, "index": "products" }, "dest": { "index": "x" } });
+    let (_, refused) = e.call(Method::POST, "/v1/search/clusters/new/request", Some(json!({ "method": "POST", "path": "/_reindex", "body": other }))).await;
+    assert_eq!(body(&refused)["error"]["reason"], "[127.0.0.1:1] not whitelisted in reindex.remote.whitelist", "{refused}");
+
+    // The console follows the task to its end; nothing it shows holds the password.
+    let (_, done) = e.call(Method::POST, "/v1/search/clusters/new/request", Some(json!({ "method": "GET", "path": format!("/_tasks/{task}?wait_for_completion=true&timeout=30s") }))).await;
+    let t = body(&done);
+    assert_eq!((t["completed"].as_bool(), t["response"]["created"].as_i64(), t["response"]["batches"].as_i64()), (Some(true), Some(3), Some(2)), "{t}");
+    let desc = t["task"]["description"].as_str().unwrap_or_default();
+    assert!(desc.starts_with("reindex from [host=127.0.0.1 port=") && desc.ends_with("][products] to [products]"), "{desc}");
+    assert!(!done.to_string().contains(&old_pw), "{done}");
+
+    // The task refreshed its copy: no refresh needed before searching it.
+    let (_, found) = e.call(Method::POST, "/v1/search/clusters/new/request", Some(json!({ "method": "POST", "path": "/catalog/_search", "body": { "query": { "term": { "sku": "s1" } } } }))).await;
+    let found = body(&found);
+    assert_eq!(found["hits"]["hits"][0]["_source"]["name"], "teapot", "{found}");
+    let (_, settings) = e.call(Method::POST, "/v1/search/clusters/new/request", Some(json!({ "method": "GET", "path": "/products/_settings?flat_settings=true" }))).await;
+    let settings = body(&settings);
+    assert_eq!(settings["products"]["settings"]["index.number_of_shards"], "2", "{settings}");
+    assert!(settings["products"]["settings"]["index.blocks.write"].is_null(), "{settings}");
+    // `shop` still names `other` alone.
+    let (_, shop) = e.call(Method::POST, "/v1/search/clusters/new/request", Some(json!({ "method": "GET", "path": "/_alias/shop" }))).await;
+    assert_eq!(index_names(&body(&shop)), ["other"], "{shop}");
+
+    // Again: the index is there now, so it isn't overwritten.
+    let again = e.post("/v1/search/clusters/new/migrate", json!({ "source": source, "indices": [{ "index": "products" }] })).await;
+    assert!(again["indices"][0]["error"].as_str().is_some_and(|m| m.contains("already exists")), "{again}");
+}
+
 /// Query suggestions from search analytics: with analytics and suggestions on, the metering
 /// pass builds `<index>-suggestions` from the index's searches (weighted by count, raised by
 /// click-through), which the completion suggester and `search_as_you_type` serve; a rare query,
@@ -4249,4 +4336,77 @@ async fn suggestions_never_touch_a_name_they_did_not_build() {
     let v = ok(Method::GET, "/_cat/indices?format=json&h=index", None).await;
     let names: Vec<&str> = v.as_array().unwrap().iter().filter_map(|r| r["index"].as_str()).collect();
     assert!(!names.iter().any(|n| n.starts_with("orders-suggestions-") || n.starts_with("crm-suggestions-")), "{names:?}");
+}
+
+/// A migration's bounds: a host that isn't a name or an address (`https://*`) is refused and
+/// nothing is whitelisted; one migration call runs per cluster at a time (another gets a 429);
+/// and copies past the free task slots wait (`queued`), with nothing created for them.
+#[tokio::test]
+async fn a_migration_is_bounded() {
+    use reqwest::Method;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let e = env_with(|c| c.node_settings.push((search_control::REINDEX_ALLOW_PRIVATE.into(), "true".into()))).await;
+    let (old, old_pw) = creds(&e.post("/v1/search/clusters", json!({ "name": "src" })).await);
+    e.post("/v1/search/clusters", json!({ "name": "dst" })).await;
+
+    for host in ["https://*", "https://*.example.com", "https://h?x.example"] {
+        let (s, v) = e.call(Method::POST, "/v1/search/clusters/dst/migrate", Some(json!({ "source": { "host": host }, "indices": [{ "index": "a" }] }))).await;
+        assert_eq!(s, 400, "{host}: {v}");
+    }
+    assert_eq!(e.get("/v1/search/clusters/dst").await["reindex_whitelist"], json!([]), "nothing whitelisted");
+    // A name leading to an address the node denies reads like any unreachable remote to
+    // `inspect`: no oracle for which names point at roll's own addresses.
+    let denied = env_with(|c| {
+        c.node_settings.push((search_control::REINDEX_ALLOW_PRIVATE.into(), "true".into()));
+        c.node_settings.push((search_control::REINDEX_DENY_ADDRESSES.into(), "127.0.0.0/8,::1".into()));
+    })
+    .await;
+    denied.post("/v1/search/clusters", json!({ "name": "d" })).await;
+    let port = e.es.rsplit(':').next().unwrap().to_string();
+    let (s, v) = denied.call(Method::POST, "/v1/search/clusters/d/migrate/inspect", Some(json!({ "source": { "host": format!("http://localhost.:{port}") } }))).await;
+    assert_eq!((s, v["error"].as_str()), (400, Some(&*format!("couldn't reach the remote at http://localhost:{port}"))), "{v}");
+
+    // A remote that holds its answer: the first call keeps the cluster's slot meanwhile.
+    let slow = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let slow_url = format!("http://{}", slow.local_addr().unwrap());
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = slow.accept().await {
+            tokio::spawn(async move {
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                let _ = sock.write_all(b"HTTP/1.1 503 X\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await;
+            });
+        }
+    });
+    let first = {
+        let (http, url) = (e.http.clone(), format!("{}/v1/search/clusters/dst/migrate/inspect", e.api));
+        let body = json!({ "source": { "host": slow_url } });
+        tokio::spawn(async move { http.post(url).json(&body).send().await.unwrap().status().as_u16() })
+    };
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let (s, v) = e.call(Method::POST, "/v1/search/clusters/dst/migrate/inspect", Some(json!({ "source": { "host": e.es } }))).await;
+    assert_eq!(s, 429, "{v}");
+    assert_eq!(first.await.unwrap(), 400, "the held call ends with the remote's 503");
+
+    // Three indices, two task slots: the third waits, and isn't created.
+    for i in ["a", "b", "c"] {
+        let (s, v) = e.es(&old, &old_pw, Method::PUT, &format!("/{i}/_doc/1?refresh=true"), Some(json!({ "n": 1 }))).await;
+        assert_eq!(s, 201, "{v}");
+    }
+    let source = json!({ "host": e.es, "username": old, "password": old_pw });
+    let started = e.post("/v1/search/clusters/dst/migrate", json!({ "source": source, "indices": [{ "index": "a" }, { "index": "b" }, { "index": "c" }], "requests_per_second": 0.0001 })).await;
+    let rows = started["indices"].as_array().unwrap();
+    assert!(rows[0]["task"].is_string() && rows[1]["task"].is_string(), "{started}");
+    assert_eq!((rows[2]["queued"].as_bool(), rows[2]["created"].as_bool()), (Some(true), None), "{started}");
+    let (_, c) = e.call(Method::POST, "/v1/search/clusters/dst/request", Some(json!({ "method": "HEAD", "path": "/c" }))).await;
+    assert_eq!(c["status"], 404, "no empty copy: {c}");
+    for r in &rows[..2] {
+        let t = r["task"].as_str().unwrap();
+        e.call(Method::POST, "/v1/search/clusters/dst/request", Some(json!({ "method": "POST", "path": format!("/_tasks/{t}/_cancel") }))).await;
+        e.call(Method::POST, "/v1/search/clusters/dst/request", Some(json!({ "method": "GET", "path": format!("/_tasks/{t}?wait_for_completion=true&timeout=10s") }))).await;
+    }
+    // The slots are free again: the waiting index starts.
+    let again = e.post("/v1/search/clusters/dst/migrate", json!({ "source": source, "indices": [{ "index": "c" }] })).await;
+    assert!(again["indices"][0]["task"].is_string(), "{again}");
 }

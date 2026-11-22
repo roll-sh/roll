@@ -149,6 +149,10 @@ async fn docker_world_netns(netns: Option<bool>) -> Option<World> {
 }
 
 async fn docker_world_with(netns: Option<bool>, setup: impl FnOnce(&mut AppsConfig)) -> Option<World> {
+    docker_world_secrets(netns, setup, Arc::new(NoSecrets)).await
+}
+
+async fn docker_world_secrets(netns: Option<bool>, setup: impl FnOnce(&mut AppsConfig), secrets: Arc<dyn apps_control::integrations::SecretSource>) -> Option<World> {
     if std::env::var("ROLL_APPS_DOCKER").ok().as_deref() != Some("1") || !apps_control::runtime::docker::available().await {
         eprintln!("skipped: set ROLL_APPS_DOCKER=1 with Docker running");
         return None;
@@ -174,7 +178,7 @@ async fn docker_world_with(netns: Option<bool>, setup: impl FnOnce(&mut AppsConf
         }),
         builder: Arc::new(DockerBuilder::new(2)),
         sources: None,
-        secrets: Arc::new(NoSecrets),
+        secrets,
         resources: Arc::new(LoopbackDb),
         resolver: dns.clone(),
         tls: Arc::new(apps_control::integrations::NoTls),
@@ -641,6 +645,106 @@ async fn deploy_container(w: &World, name: &str) -> (String, String) {
     }
     let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None, "application/json", None).await;
     (id, env["url"].as_str().unwrap().trim_start_matches("http://").split(':').next().unwrap().to_string())
+}
+
+/// A private network on real Docker: a WireGuard server whose web server answers only inside
+/// the tunnel, reached from the service's project network by the route's name through the peer
+/// and its forwarder; removed, the peer and forwarder are gone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_private_network_reaches_a_host_inside_a_wireguard_tunnel() {
+    use apps_control::runtime::peering_image::WIREGUARD;
+    struct Wg(String);
+    #[async_trait::async_trait]
+    impl apps_control::integrations::SecretSource for Wg {
+        fn name(&self) -> &'static str {
+            "fake"
+        }
+        async fn resolve(&self, _: &str, _: &str, _: &str) -> anyhow::Result<Vec<apps_control::integrations::SecretVar>> {
+            Ok(vec![])
+        }
+        async fn bind_ref_runtime(&self, _: apps_control::integrations::Asker<'_>, _: &str, _: &str, _: &str, _: &str) -> anyhow::Result<String> {
+            Ok("usr_ada@runtime:production".into())
+        }
+        async fn resolve_as(&self, _: &str, _: &str, _: &str, _: &str, _: &str) -> anyhow::Result<String> {
+            Ok(self.0.clone())
+        }
+    }
+    let docker = |args: &[&str]| {
+        let out = std::process::Command::new("docker").args(args).output().unwrap();
+        (out.status.success(), String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    if std::env::var("ROLL_APPS_DOCKER").ok().as_deref() != Some("1") {
+        return;
+    }
+    let keys = || docker(&["run", "--rm", "--entrypoint", "sh", WIREGUARD, "-c", "k=$(wg genkey); echo $k $(echo $k | wg pubkey)"]).1.split(' ').map(str::to_string).collect::<Vec<_>>();
+    let (server, client) = (keys(), keys());
+    let srv = format!("roll-apps-wgtest-{}", std::process::id());
+    let conf = format!("[Interface]\nPrivateKey = {}\nAddress = 10.9.0.2/32\n[Peer]\nPublicKey = {}\nEndpoint = {srv}:51820\nAllowedIPs = 10.9.0.1/32\nPersistentKeepalive = 5\n", client[0], server[1]);
+    let Some(w) = docker_world_secrets(None, |_| {}, Arc::new(Wg(conf))).await else { return };
+    let (id, _) = deploy_container(&w, "vpn").await;
+    // The customer's side: a WireGuard server on the project network, its web server only on
+    // the tunnel's address.
+    let net = apps_control::network_name(&w.project, "production");
+    let script = format!("set -e; ip link add wg0 type wireguard; echo {} > /tmp/k; wg set wg0 private-key /tmp/k listen-port 51820 peer {} allowed-ips 10.9.0.2/32; ip addr add 10.9.0.1/24 dev wg0; ip link set wg0 up; exec sleep 600", server[0], client[1]);
+    assert!(docker(&["run", "-d", "--name", &srv, "--network", &net, "--cap-drop", "ALL", "--cap-add", "NET_ADMIN", "--entrypoint", "sh", WIREGUARD, "-c", &script]).0);
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(docker(&["run", "-d", "--name", &format!("{srv}-web"), "--network", &format!("container:{srv}"), "busybox:1.37", "sh", "-c", "mkdir /www; echo private-hello > /www/index.html; exec httpd -f -p 10.9.0.1:8080 -h /www"]).0);
+    let url = format!("/v1/apps/services/{id}/environments/production/private-network");
+    let (st, v) = call(&w.api, "PUT", &url, Some(json!({"secret": "roll://production/WG", "routes": [{"name": "db.corp.internal", "target": "10.9.0.1:8080"}]})), "application/json", None).await;
+    assert_eq!((st, v["status"].as_str()), (StatusCode::OK, Some("running")), "{v}");
+    // From the project network (where the service's instances are), by the route's name.
+    let mut got = String::new();
+    for _ in 0..30 {
+        let out = std::process::Command::new("docker").args(["run", "--rm", "--network", &net, "busybox:1.37", "wget", "-qO-", "-T", "3", "http://db.corp.internal:8080/"]).output().unwrap();
+        got = format!("{}{}", String::from_utf8_lossy(&out.stdout).trim(), String::from_utf8_lossy(&out.stderr).trim());
+        if got == "private-hello" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    let peer = format!("roll-apps-peer-{}-production", id.trim_start_matches("svc_"));
+    let ok = got == "private-hello";
+    assert_eq!(call(&w.api, "DELETE", &url, None, "application/json", None).await.0, StatusCode::NO_CONTENT);
+    let gone = !docker(&["inspect", &peer]).0 && !docker(&["inspect", &format!("{peer}-8080")]).0;
+    let _ = docker(&["rm", "-f", &format!("{srv}-web"), &srv]);
+    delete_for_good(&w.api, &id).await;
+    assert!(ok, "through the tunnel: {got:?}");
+    assert!(gone, "the peer and its forwarder removed");
+}
+
+/// A sandbox on real Docker: a command's output and exit code, one killed in the container at
+/// its timeout (not left running), a file in and out, and its own network gone with it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sandbox_runs_commands_and_files_on_docker() {
+    let Some(w) = docker_world().await else { return };
+    let (id, _) = deploy_container(&w, "sbx").await;
+    let base = format!("/v1/apps/services/{id}/environments/production/sandboxes");
+    let (st, sb) = call(&w.api, "POST", &base, Some(json!({"ttl_s": 300})), "application/json", None).await;
+    assert_eq!(st, StatusCode::CREATED, "{sb}");
+    let sid = sb["id"].as_str().unwrap().to_string();
+    let exec = |command: &str, timeout: u64| {
+        let (api, path, command) = (w.api.clone(), format!("{base}/{sid}/exec"), command.to_string());
+        async move { call(&api, "POST", &path, Some(json!({"command": command, "timeout_s": timeout})), "application/json", None).await.1 }
+    };
+    let out = exec("echo hi; echo err >&2; exit 4", 30).await;
+    assert_eq!((out["stdout"].as_str(), out["stderr"].as_str(), out["exit_code"].as_i64()), (Some("hi\n"), Some("err\n"), Some(4)), "{out}");
+    let began = std::time::Instant::now();
+    let out = exec("sleep 299", 1).await;
+    assert_eq!((out["timed_out"].as_bool(), out["exit_code"].as_i64()), (Some(true), None), "{out}");
+    assert!(began.elapsed() < Duration::from_secs(8), "{:?}", began.elapsed());
+    assert_eq!(exec("ps | grep -c '[s]leep 299'", 30).await["stdout"].as_str().map(str::trim), Some("0"), "killed in the container, with its shell");
+    let file = format!("{base}/{sid}/files?path=%2Ftmp%2Fin%2Fdata.txt");
+    assert_eq!(call(&w.api, "PUT", &file, None, "application/octet-stream", Some(b"from here".to_vec())).await.0, StatusCode::OK);
+    assert_eq!(exec("cat /tmp/in/data.txt", 30).await["stdout"], "from here");
+    let got = w.api.clone().oneshot(Request::get(&file).body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(got.into_body().collect().await.unwrap().to_bytes(), "from here");
+    // Its own network, gone with it.
+    let name = format!("roll-apps-{}-production-sbx-{}", id.trim_start_matches("svc_"), sid.trim_start_matches("sbx_"));
+    let inspect = |what: &str| std::process::Command::new("docker").args([what, "inspect", &format!("{name}{}", if what == "network" { "-n" } else { "" })]).output().unwrap().status.success();
+    assert!(inspect("network") && inspect("container"));
+    assert_eq!(call(&w.api, "DELETE", &format!("{base}/{sid}"), None, "application/json", None).await.0, StatusCode::NO_CONTENT);
+    assert!(!inspect("network") && !inspect("container"));
+    delete_for_good(&w.api, &id).await;
 }
 
 /// An instant rollback on real Docker (Heroku's, Railway's): back to v1 its image runs again, no

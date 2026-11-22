@@ -185,6 +185,10 @@ impl Brancher for FakeData {
     async fn schema(&self, _parent: &str, _branch: &str) -> anyhow::Result<Option<(Vec<String>, Vec<String>)>> {
         Ok(self.schema.lock().clone())
     }
+    async fn branch_schema(&self, _parent: &str, _branch: &str) -> anyhow::Result<Option<Vec<String>>> {
+        // As it's made, a branch is its parent.
+        Ok(self.schema.lock().clone().map(|(parent, _)| parent))
+    }
     async fn columns(&self, parent: &str, max: usize) -> anyhow::Result<Vec<roll_previews::mask::Column>> {
         match self.columns.lock().get(parent) {
             Some(Err(_)) => Err(roll_previews::ports::Asleep.into()),

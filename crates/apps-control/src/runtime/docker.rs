@@ -130,6 +130,15 @@ pub fn sandbox_name(instance: &str) -> String {
     format!("{instance}-net")
 }
 
+/// A container's last log lines, for an error: what looks like a key (44 characters of base64)
+/// is left out.
+async fn docker_logs_tail(name: &str) -> String {
+    let out = Command::new("docker").args(["logs", "--tail", "5", name]).stdin(Stdio::null()).output().await.map(|o| format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))).unwrap_or_default();
+    let words: Vec<String> = out.split_whitespace().map(|w| if w.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '+' && c != '/' && c != '=').len() >= 43 { "[redacted]".to_string() } else { w.to_string() }).collect();
+    let line = words.join(" ");
+    line.chars().take(300).collect()
+}
+
 /// The waker in `instance`'s sandbox: it listens on the app's port while the app is stopped,
 /// takes the first private caller, and hands that connection to the app once it listens.
 pub fn waker_name(instance: &str) -> String {
@@ -1024,6 +1033,92 @@ impl Runtime for Docker {
         let _ = docker(&["volume", "rm", "-f", name]).await;
     }
 
+    async fn ensure_peer(&self, spec: &super::PeerSpec) -> anyhow::Result<()> {
+        anyhow::ensure!(spec.name.starts_with(super::PREFIX), "{} isn't a roll apps peer", spec.name);
+        let digest = spec.digest();
+        let forwarders: Vec<String> = spec.forwards.iter().map(|(_, port, _)| format!("{}-{port}", spec.name)).collect();
+        // As asked, running, its config in place (a restart of Docker loses its tmpfs) and every
+        // forwarder up: nothing to do.
+        let running = |name: &str, want: String| {
+            let name = name.to_string();
+            async move { docker(&["inspect", "-f", &format!("{{{{.State.Running}}}} {{{{index .Config.Labels \"{LABEL}.peer\"}}}}"), &name]).await.is_ok_and(|o| o.trim() == want) }
+        };
+        if running(&spec.name, format!("true {digest}")).await && docker(&["exec", &spec.name, "test", "-s", "/run/wg/wg0.conf"]).await.is_ok() {
+            let mut all = true;
+            for f in &forwarders {
+                all &= running(f, format!("true {digest}")).await;
+            }
+            if all {
+                return Ok(());
+            }
+        }
+        self.remove_peer(&spec.name).await;
+        let labels = [format!("{LABEL}={}", spec.service), format!("{LABEL}.env={}", spec.env), format!("{LABEL}.role=peer"), format!("{LABEL}.peer={digest}")];
+        let (addrs, routes, mtu) = (format!("ADDRS={}", spec.addresses.join(" ")), format!("ROUTES={}", spec.routes.join(" ")), format!("MTU={}", spec.mtu.map(|m| m.to_string()).unwrap_or_default()));
+        let mut args: Vec<&str> = vec!["create", "--name", &spec.name, "--network", &spec.network];
+        for (alias, _, _) in &spec.forwards {
+            args.extend(["--network-alias", alias]);
+        }
+        for l in &labels {
+            args.extend(["--label", l]);
+        }
+        // The tunnel in a namespace of its own: NET_ADMIN there and nothing else, no root
+        // filesystem to write, its config only in memory.
+        args.extend(["--cap-drop", "ALL", "--cap-add", "NET_ADMIN", "--security-opt", "no-new-privileges", "--read-only", "--tmpfs", "/run/wg:size=64k,mode=0700"]);
+        args.extend(["--memory", "64m", "--pids-limit", "64", "-e", &addrs, "-e", &routes, "-e", &mtu, "--entrypoint", "sh", super::peering_image::WIREGUARD, "-c", super::peering_image::SCRIPT]);
+        docker_within(&args, Some(Duration::from_secs(300))).await.context("the private network's peer")?;
+        docker(&["start", &spec.name]).await?;
+        // Its config through stdin into its tmpfs: never on disk, in argv or in an env.
+        let mut child = Command::new("docker")
+            .args(["exec", "-i", &spec.name, "sh", "-c", "umask 077; cat > /run/wg/.c && mv /run/wg/.c /run/wg/wg0.conf"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()?;
+        {
+            use tokio::io::AsyncWriteExt;
+            let mut stdin = child.stdin.take().context("no stdin")?;
+            stdin.write_all(spec.config.as_bytes()).await?;
+        }
+        let out = tokio::time::timeout(Duration::from_secs(30), child.wait_with_output()).await.context("writing the peer's config")??;
+        anyhow::ensure!(out.status.success(), "the peer's config wasn't written");
+        // Up once its interface is (or it says why it stopped).
+        let began = std::time::Instant::now();
+        loop {
+            if docker(&["exec", &spec.name, "ip", "link", "show", "wg0", "up"]).await.is_ok_and(|o| !o.trim().is_empty()) {
+                break;
+            }
+            if !running(&spec.name, format!("true {digest}")).await || began.elapsed() > Duration::from_secs(15) {
+                let why = docker_logs_tail(&spec.name).await;
+                self.remove_peer(&spec.name).await;
+                anyhow::bail!("the private network's peer didn't come up: {why}");
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        for ((_, port, target), name) in spec.forwards.iter().zip(&forwarders) {
+            let (listen, connect, net) = (format!("TCP-LISTEN:{port},fork,reuseaddr"), format!("TCP:{target}"), format!("container:{}", spec.name));
+            let mut args: Vec<&str> = vec!["run", "-d", "--name", name, "--network", &net];
+            for l in &labels {
+                args.extend(["--label", l]);
+            }
+            args.extend(["--cap-drop", "ALL", "--cap-add", "NET_BIND_SERVICE", "--security-opt", "no-new-privileges", "--read-only", "--memory", "32m", "--pids-limit", "64", super::links::IMAGE, &listen, &connect]);
+            docker_within(&args, Some(Duration::from_secs(300))).await.context("a private network route's forwarder")?;
+        }
+        Ok(())
+    }
+
+    async fn remove_peer(&self, name: &str) {
+        if !name.starts_with(super::PREFIX) {
+            return;
+        }
+        let Ok(listed) = docker(&["ps", "-a", "--filter", &format!("name={name}"), "--format", "{{.Names}}"]).await else { return };
+        // The peer and its forwarders (`<name>-<port>`), never another name holding it.
+        for n in listed.lines().map(str::trim).filter(|n| *n == name || n.strip_prefix(name).and_then(|r| r.strip_prefix('-')).is_some_and(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))) {
+            let _ = docker(&["rm", "-f", n]).await;
+        }
+    }
+
     async fn remove_network(&self, name: &str) {
         // Only one no container is on, stopped ones included (a stopped instance's start would
         // fail on a network gone, and Docker only refuses with running ones).
@@ -1050,6 +1145,52 @@ impl Runtime for Docker {
         let mount = format!("{name}:/data:ro");
         let out = docker(&["run", "--rm", "--network", "none", "--label", &format!("{LABEL}=usage"), "-v", &mount, VOLUME_IMAGE, "du", "-skx", "/data"]).await.ok()?;
         out.split_whitespace().next()?.parse::<u64>().ok().map(|kib| kib * 1024)
+    }
+
+    async fn exec_output(&self, name: &str, command: &str, timeout: Duration, max: usize) -> anyhow::Result<super::ExecOutput> {
+        use tokio::io::AsyncReadExt;
+        anyhow::ensure!(name.starts_with(super::PREFIX), "{name} isn't a roll apps instance");
+        // Killed in the container at its timeout, with everything it started: ending `docker exec`
+        // here leaves the command running, and `timeout` kills only its own child. It runs in a
+        // process group of its own (`setsid`, busybox's and util-linux's) that a watcher kills
+        // whole (`kill -9 -<group>`, the one spelling both dash and busybox take); without
+        // `setsid`, just its shell. The command goes as `$0`, never spliced into the script.
+        let secs = timeout.as_secs().max(1).to_string();
+        let wrap = r#"if command -v setsid >/dev/null 2>&1; then setsid sh -c "$0" & p=$!; setsid sh -c 'sleep "$0"; kill -9 -"$1"' "$1" "$p" >/dev/null 2>&1 & w=$!; else sh -c "$0" & p=$!; (sleep "$1"; kill -9 "$p") >/dev/null 2>&1 & w=$!; fi; wait "$p"; c=$?; kill -9 -"$w" 2>/dev/null || kill -9 "$w" 2>/dev/null; exit "$c""#;
+        let mut child = Command::new("docker")
+            .args(["exec", name, "sh", "-c", wrap, command, &secs])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .context("running docker exec")?;
+        let (mut out, mut err) = (child.stdout.take().context("no stdout")?, child.stderr.take().context("no stderr")?);
+        // Each stream read to its end (so the command never blocks on a full pipe), kept to `max`.
+        async fn read_kept(r: &mut (impl tokio::io::AsyncRead + Unpin), max: usize) -> (Vec<u8>, bool) {
+            let (mut kept, mut buf, mut over) = (Vec::new(), vec![0u8; 16 << 10], false);
+            while let Ok(n) = r.read(&mut buf).await {
+                if n == 0 {
+                    break;
+                }
+                let room = max.saturating_sub(kept.len());
+                kept.extend_from_slice(&buf[..n.min(room)]);
+                over |= n > room;
+            }
+            (kept, over)
+        }
+        let began = std::time::Instant::now();
+        let run = async {
+            let ((stdout, a), (stderr, b)) = tokio::join!(read_kept(&mut out, max), read_kept(&mut err, max));
+            let status = child.wait().await?;
+            // Killed at its timeout (in the container): no exit code of its own.
+            let code = status.code().filter(|_| began.elapsed() < timeout);
+            anyhow::Ok(super::ExecOutput { code, stdout, stderr, truncated: a || b })
+        };
+        match tokio::time::timeout(timeout + Duration::from_secs(5), run).await {
+            Ok(r) => r,
+            Err(_) => Ok(super::ExecOutput { code: None, ..Default::default() }),
+        }
     }
 
     async fn copy_from(&self, name: &str, path: &str) -> anyhow::Result<super::VolumeStream> {

@@ -131,7 +131,7 @@ fn main() {
         let mut ms: Vec<f64> = (0..1000)
             .map(|_| {
                 let t = Instant::now();
-                drop(s.substitute(&ph, "api.example.com", Position { place: Place::Header, name: "authorization", value: &bearer }).unwrap());
+                drop(s.substitute(&ph, "sandbox:bench", "api.example.com", Position { place: Place::Header, name: "authorization", value: &bearer }).unwrap());
                 t.elapsed().as_secs_f64() * 1000.0
             })
             .collect();

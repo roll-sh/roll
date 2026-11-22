@@ -27,10 +27,12 @@
 
 pub mod ask;
 pub mod card;
+pub mod events;
 pub mod guard;
 /// Lockdown is roll-auth's, so roll code's own MCP server withholds the same text.
 pub use roll_auth::lockdown;
 pub mod modern;
+pub mod output;
 pub mod prompts;
 pub mod resources;
 pub mod search;
@@ -366,6 +368,15 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
         None if roll_auth::Operator::on(&ext) || !m.config.locked => Principal::Operator,
         None => return unauthorized(&m.config),
     };
+    // The operator's policy can hold every token's and OAuth connection's MCP to lockdown or to
+    // reading, whatever the client's URL asks (roll-access's `mcp_lockdown`, `mcp_read_only`).
+    let (lockdown, readonly) = match (&principal, &m.config.access) {
+        (Principal::Grant(_), Some(a)) => {
+            let p = a.policy_now();
+            (lockdown || p.mcp_lockdown, readonly || p.mcp_read_only)
+        }
+        _ => (lockdown, readonly),
+    };
     let msg: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => return (StatusCode::BAD_REQUEST, Json(rpc_error(Value::Null, -32700, format!("parse error: {e}")))).into_response(),
@@ -464,6 +475,18 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
         if !ctx.modern && accepts_sse(&ctx.headers) && widened(&responses) {
             let events: Vec<_> = with_list_changed(responses).into_iter().map(|r| Ok::<_, std::convert::Infallible>(Event::default().event("message").data(r.to_string()))).collect();
             return Sse::new(futures::stream::iter(events)).into_response();
+        }
+        // One refused call from a client that steps up: the HTTP challenge, so it asks the person to
+        // allow the rule and retries (its body is the same JSON-RPC answer, for a client that reads it).
+        if !batch
+            && responses.len() == 1
+            && steps_up(ctx.client.as_deref())
+            && let Some(challenge) = responses[0]["result"]["_meta"]["mcp/www_authenticate"][0].as_str()
+            && let Ok(v) = HeaderValue::from_str(challenge)
+        {
+            let mut r = (StatusCode::FORBIDDEN, Json(responses.pop().unwrap_or(Value::Null))).into_response();
+            r.headers_mut().insert(header::WWW_AUTHENTICATE, v);
+            return r;
         }
         match responses.pop() {
             // A method the revision doesn't have is a 404 (with its JSON-RPC error), so a client
@@ -735,13 +758,27 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
         let params = msg.get("params").cloned().unwrap_or(Value::Null);
         let resp = match method {
             "initialize" => rpc_result(id, initialize(ctx, &params)),
-            "server/discover" => rpc_result(id, modern::discover(&PROTOCOL_VERSIONS, capabilities(tasks_available(ctx)), instructions(ctx))),
+            "server/discover" => {
+                // Events (SEP-3415) are this revision's: only discovery offers them.
+                let mut caps = capabilities(tasks_available(ctx));
+                caps["extensions"][events::EXT] = json!({});
+                rpc_result(id, modern::discover(&PROTOCOL_VERSIONS, caps, instructions(ctx)))
+            }
             "ping" => rpc_result(id, json!({})),
+            "events/list" if ctx.modern => rpc_result(id, events::list(ctx)),
+            "events/poll" if ctx.modern => match events::poll(ctx, &params).await {
+                Ok(r) => rpc_result(id, r),
+                Err((code, message, data)) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message, "data": data } }),
+            },
             "tools/list" => {
                 let mut tools = if ctx.search { search::listed(&ctx.tools()) } else { ctx.tools() };
                 // A host that renders MCP Apps shows the tools that answer rows in roll's table.
                 if ctx.ui && !ctx.search {
                     ui::attach(&mut tools);
+                }
+                // A 2026-07-28 client may run code against the tools: it gets their answers' shape.
+                if ctx.modern && !ctx.search {
+                    output::attach(&mut tools);
                 }
                 rpc_result(id, json!({ "tools": tools }))
             }
@@ -1137,8 +1174,12 @@ fn instructions(ctx: &Ctx) -> Value {
     };
     // The token's name is a person's: what it might hide stays visible.
     json!(visible(&format!(
-        "roll: serverless Postgres, Redis, storage, streams, queues, tasks, NoSQL, source control (roll code) and coding agents, grouped into workspace projects. \
-Tools are named <product>_<verb>. Ids are each product's own (Postgres projects prj_…, Redis rdb_…, streams st_…, buckets by name, repos owner/name). \
+        "roll: serverless Postgres (postgres_), Redis (redis_), S3 storage (storage_), Kafka streams (streams_), queues (queues_), tasks and \
+crons (tasks_), NoSQL (nosql_), Elasticsearch-compatible search (search_), app hosting with deploys, logs and domains (apps_), preview \
+environments (previews_), secrets and environment variables (secrets_), source control (code_) and coding agents (agents_), grouped into \
+workspace projects (workspace_) with access tokens (access_). When the user asks to deploy, debug a failing app, change a database, \
+rotate a secret, check a preview, tune search or work in a repo, look for roll's tools by those prefixes; workflows (prompts) walk the \
+common tasks. Tools are named <product>_<verb>. Ids are each product's own (Postgres projects prj_…, Redis rdb_…, streams st_…, buckets by name, repos owner/name). \
 {who} Some actions ask a person first: such a call waits up to a minute, then returns status \"approval_pending\" with an approval id and a link. \
 Tell the user, then call the same tool again with the same arguments plus \"approval\": \"apr_…\": it waits for the decision and runs once approved. \
 postgres_query is read-only (postgres_execute changes data). Credentials come back as [redacted] unless the token may reveal them. \
@@ -1203,6 +1244,12 @@ async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: bool) -> Option
         let headers = forward_headers(&ctx.headers, &args);
         (set.call(ctx.m.api.clone(), headers, ext, name.to_string(), args.clone()).await, "tool".to_string())
     };
+    // Step-up (SEP-835): an OAuth connection's refusal names the rule it needs as a scope the
+    // consent screen proposes (never grants by itself), in-band for every client and as the HTTP
+    // challenge for clients that step up (`handle`).
+    if let Some(challenge) = step_up_challenge(ctx, &result) {
+        result["_meta"]["mcp/www_authenticate"] = json!([challenge]);
+    }
     // In lockdown, an outside record's text never reaches the model: withheld in the structured
     // answer, and the text block (a fronted set may write its own) rebuilt from what's left.
     if ctx.lockdown && lockdown::withhold(&mut result["structuredContent"]) + lockdown::withhold_fields(&mut result["structuredContent"], outside) > 0 {
@@ -1397,13 +1444,18 @@ async fn read_me(ctx: &Arc<Ctx>) -> Result<Value, (String, Value)> {
 
 /// A resource's route read through the gated router with the caller's token, like a tool.
 async fn read_route(ctx: &Arc<Ctx>, route: &str, uri: &str) -> Result<Value, (String, Value)> {
+    read_route_as(ctx, route, "resources/read", json!({ "uri": uri })).await
+}
+
+/// A route read through the gated router with the caller's token, audited as `what` with `args`.
+async fn read_route_as(ctx: &Arc<Ctx>, route: &str, what: &str, args: Value) -> Result<Value, (String, Value)> {
     let fail = |e: String| (e, json!({}));
     let mut req = Request::builder().method("GET").uri(route);
     for (k, v) in forward_headers(&ctx.headers, &Value::Null).iter() {
         req = req.header(k, v);
     }
     let mut req = req.body(Body::empty()).map_err(|e| fail(e.to_string()))?;
-    req.extensions_mut().insert(McpCall { tool: "resources/read".into(), args: Arc::new(json!({ "uri": uri })), ip: ctx.ip, elicits: false, client: ctx.client.clone(), quiet: false });
+    req.extensions_mut().insert(McpCall { tool: what.into(), args: Arc::new(args), ip: ctx.ip, elicits: false, client: ctx.client.clone(), quiet: false });
     let resp = match ctx.m.api.clone().oneshot(req).await {
         Ok(r) => r,
         Err(e) => match e {},
@@ -1439,6 +1491,31 @@ fn forward_headers(h: &HeaderMap, args: &Value) -> HeaderMap {
         out.insert(roll_access::evaluate::APPROVAL_HEADER, v);
     }
     out
+}
+
+/// The `WWW-Authenticate` challenge for an OAuth connection's refused call (RFC 6750 §3.1,
+/// `insufficient_scope`; MCP's step-up), when roll recorded a step-up for it (only a refusal of the
+/// connection's own rules, which its person can widen): the scope is `roll:step-up:<id>`, which
+/// roll's consent screen looks up. The client never chooses what's proposed.
+fn step_up_challenge(ctx: &Ctx, result: &Value) -> Option<String> {
+    let Principal::Grant(g) = &ctx.principal else { return None };
+    if g.kind != roll_auth::GrantKind::Oauth || result["isError"] != true {
+        return None;
+    }
+    let id = result["structuredContent"]["step_up"].as_str().filter(|id| id.starts_with("stp_") && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))?;
+    Some(format!(
+        "Bearer error=\"insufficient_scope\", scope=\"roll:step-up:{id}\", resource_metadata=\"{}/.well-known/oauth-protected-resource/v1/mcp\", error_description=\"this connection's rules don't allow it\"",
+        ctx.m.config.api_url.trim_end_matches('/')
+    ))
+}
+
+/// Clients known to step up on a `403 insufficient_scope` (re-run authorization for the scope and
+/// retry): Claude Code from 2.1.288. Others get the refusal in-band, with the challenge in
+/// `_meta["mcp/www_authenticate"]` (ChatGPT reads it there), so nothing is lost on them.
+fn steps_up(client: Option<&str>) -> bool {
+    let Some((name, version)) = client.and_then(|c| c.split_once(' ')) else { return false };
+    let v: Vec<u32> = version.trim().split('.').map_while(|p| p.parse().ok()).collect();
+    name == "claude-code" && v.len() >= 3 && (v[0], v[1], v[2]) >= (2, 1, 288)
 }
 
 fn tool_error(text: String, data: Value) -> Value {

@@ -5,6 +5,7 @@
 GET /v1/access/catalog                                                         the dashboard's (the permission catalogue; tools carry their own actions)
 GET /v1/access/oauth/clients                                                   the dashboard's (the OAuth clients a person registered)
 GET /v1/access/oauth/clients/{id}                                              the dashboard's (one registered OAuth client)
+GET /v1/access/oauth/step-ups/{id}                                             the consent screen's (a step-up its person decides; a client never reads it)
 POST /v1/access/tokens                                                         answers or sets a credential
 DELETE /v1/access/tokens/{id}                                                  a person's call (a token's revoke is the person's; security_checkup names them)
 PATCH /v1/access/tokens/{id}                                                   a person's call (a token's rules)
@@ -201,3 +202,5 @@ PUT /v1/workspace/projects/{id}/homes/{product}/{ref}                          a
 GET /v1/workspace/projects/{id}/invites                                        a person's call: invites are a signed-in person's (#501)
 DELETE /v1/workspace/projects/{id}/invites/{invite}                            a person's call: invites are a signed-in person's (#501)
 DELETE /v1/workspace/projects/{id}/members/me                                  a person's call: leaving a project is the person's own (#501)
+GET /v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}/files            raw bytes, not JSON: apps_sandbox_exec reads and writes files (cat, a heredoc)
+PUT /v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}/files            raw bytes, not JSON: apps_sandbox_exec reads and writes files (cat, a heredoc)

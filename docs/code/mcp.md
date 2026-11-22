@@ -45,7 +45,7 @@ page's "Connect an agent" panel puts it in the snippet it gives (the URL quoted 
 function is `roll_auth::lockdown`, shared with `/v1/mcp`. Lockdown or not, characters a person
 can't see and a model reads (tag characters, zero-width and bidi controls, variation selectors) are
 written as escapes in every text block (`roll_auth::lockdown::visible`); `structuredContent` stays
-exact. A text block is cut at 48 KiB and says so (Claude Code refuses a longer answer outright); the
+exact. A text block is cut at 48 KiB and says so (past 50,000 characters Claude Code moves an answer to a file); the
 structured content keeps all of it. This runs in `mcp::call`, so roll's `/v1/mcp` fronting these
 tools cuts them too.
 

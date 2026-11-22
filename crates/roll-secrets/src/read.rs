@@ -940,8 +940,13 @@ impl Secrets {
         let dek = self.project(project)?;
         let mut r = Resolver::new(self, project, slug, &dek, &narrowed, true, consumer)?;
         r.no_dynamic = true;
+        r.withhold_bound = resource.wants_placeholders();
         let (value, problem) = r.entry(&e);
+        let through = r.through_bound(&e).map(str::to_string);
         r.finish(slug)?;
+        if let Some(b) = through {
+            return Err(Refusal::Unusable(format!("{key} references {b}, which is bound to hosts: bind {key} to them too, or reference it differently")));
+        }
         if let Some(p) = problem {
             return Err(Refusal::Unusable(format!("{key} doesn't resolve: {p}")));
         }
@@ -960,7 +965,15 @@ impl Secrets {
     /// issuing a fresh credential each read.
     #[allow(clippy::too_many_arguments)]
     pub fn values_for(&self, project: &str, slug: &str, path: &str, resolve: bool, consumer: Option<&str>, dynamic: bool, caller: &Caller) -> Result<Values> {
-        self.values_inner(project, slug, path, resolve, consumer, dynamic, None, caller)
+        self.values_inner(project, slug, path, resolve, consumer, dynamic, Bound::Values, caller)
+    }
+
+    /// [`Secrets::values_for`] (resolved) for `consumer`, with every key bound to hosts left out
+    /// before anything of it is decrypted or audited, and so is any key whose value references one
+    /// (a problem naming both): a consumer whose placeholders can't be issued (its maker can't
+    /// reveal there any more) still never gets a bound key's value.
+    pub fn values_without_bound(&self, project: &str, slug: &str, path: &str, consumer: &str, dynamic: bool, caller: &Caller) -> Result<Values> {
+        self.values_inner(project, slug, path, true, Some(consumer), dynamic, Bound::Withheld, caller)
     }
 
     /// A folder as `consumer`'s runtime reads it (shared values only, never the caller's personal
@@ -973,14 +986,16 @@ impl Secrets {
         // Named for both, with a `:` so it reads no person's own overrides (`Caller::personal`).
         let mut seen = caller.clone().acting_as(format!("{consumer} (shown to {})", caller.made_by()));
         seen.runtime = runtime;
-        self.values_inner(project, slug, path, true, None, false, None, &seen)
+        self.values_inner(project, slug, path, true, None, false, Bound::Values, &seen)
     }
 
     /// [`Secrets::values_for`] (resolved) for `consumer`, with every key bound to hosts answered
     /// as a placeholder (docs/secrets.md, "Using a key without seeing it"). Not a sensitive key's
     /// for a reader that couldn't read it, unless its binding opts in; not a key whose value holds
-    /// a reference (left out, as a problem). An in-process consumer (`sandbox:…`, `preview:…`)
-    /// names who made it in `ask.maker`: its placeholders swap only while they may reveal here.
+    /// a reference (left out, as a problem). A key whose value references a bound key is left out
+    /// too, as a problem naming both: a reference never carries a bound key's value. An in-process
+    /// consumer (`sandbox:…`, `preview:…`) names who made it in `ask.maker`: its placeholders swap
+    /// only while they may reveal here.
     #[allow(clippy::too_many_arguments)]
     pub fn values_with_placeholders(&self, project: &str, slug: &str, path: &str, consumer: &str, dynamic: bool, ask: crate::placeholders::Ask<'_>, caller: &Caller) -> Result<Values> {
         if caller.principal.starts_with("identity:") {
@@ -998,11 +1013,15 @@ impl Secrets {
             }
             None => {}
         }
-        self.values_inner(project, slug, path, true, Some(consumer), dynamic, Some(ask), caller)
+        self.values_inner(project, slug, path, true, Some(consumer), dynamic, Bound::Placeholders(ask), caller)
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn values_inner(&self, project: &str, slug: &str, path: &str, resolve: bool, consumer: Option<&str>, dynamic: bool, ph: Option<crate::placeholders::Ask<'_>>, caller: &Caller) -> Result<Values> {
+    fn values_inner(&self, project: &str, slug: &str, path: &str, resolve: bool, consumer: Option<&str>, dynamic: bool, how: Bound<'_>, caller: &Caller) -> Result<Values> {
+        let ph = match how {
+            Bound::Placeholders(ask) => Some(ask),
+            _ => None,
+        };
         let path = names::path(path)?;
         caller.need(Action::Reveal, &Scope::at(project, slug, &path))?;
         self.read_quota(caller)?;
@@ -1019,6 +1038,8 @@ impl Secrets {
         // Left out and named in `dynamic` (not a problem) for code nobody vetted too.
         let dynamic = dynamic && !caller.grants.untrusted();
         r.no_dynamic = r.no_dynamic || !dynamic;
+        // A bound key's value never leaves through a reference to it either.
+        r.withhold_bound = !matches!(how, Bound::Values);
         let mut values = BTreeMap::new();
         let mut problems = vec![];
         let mut withheld = vec![];
@@ -1026,15 +1047,20 @@ impl Secrets {
         // Set, but not in this answer (withheld, or dynamic under `dynamic=false`): not missing.
         let mut left_out = vec![];
         let mut followed = vec![];
-        let bound = match &ph {
-            Some(_) => self.bindings(project)?,
-            None => HashMap::new(),
+        let bound = match how {
+            Bound::Values => HashMap::new(),
+            _ => self.bindings(project)?,
         };
         let mut to_issue = vec![];
         for e in &entries {
             // First: nothing of the parent's is read, issued or decrypted for it.
             if let Some(l) = r.followed(e) {
                 followed.push(Followed { name: e.row.key.clone(), kind: l.kind, parent: l.r#ref, field: l.field });
+                left_out.push(e.row.key.clone());
+                continue;
+            }
+            // A sharing project's key has its binding there.
+            if matches!(how, Bound::Withheld) && (bound.contains_key(&e.row.id) || (e.row.project_id != project && !matches!(self.binding(&e.row.id), Ok(None)))) {
                 left_out.push(e.row.key.clone());
                 continue;
             }
@@ -1061,6 +1087,11 @@ impl Secrets {
                 continue;
             }
             let (v, problem) = r.entry(e);
+            if let Some(b) = r.through_bound(e) {
+                problems.push(Problem { key: e.row.key.clone(), problem: format!("references {b}, which is bound to hosts: bind {} to them too, or reference it differently", e.row.key) });
+                left_out.push(e.row.key.clone());
+                continue;
+            }
             if r.tainted(e) {
                 sensitive.push(e.row.key.clone());
             }
@@ -1720,6 +1751,22 @@ pub(crate) struct Resolver<'a> {
     /// The read environment's branched resources: a link to one is never followed, however it's
     /// reached (asked for, by reference, through an import or the base).
     branches: Vec<Branch>,
+    /// A read whose bound keys never leave as values (placeholders, or left out): a reference to
+    /// one doesn't resolve, and every entry it was reached through is [`Resolver::through_bound`].
+    pub withhold_bound: bool,
+    /// Entries whose value references a key bound to hosts, by id: that key's name.
+    through_bound: HashMap<String, String>,
+}
+
+/// How a read answers keys bound to hosts.
+#[derive(Clone, Copy)]
+enum Bound<'a> {
+    /// As values (an export, a trusted runtime's read).
+    Values,
+    /// As placeholders.
+    Placeholders(crate::placeholders::Ask<'a>),
+    /// Left out.
+    Withheld,
 }
 
 impl<'a> Resolver<'a> {
@@ -1730,7 +1777,7 @@ impl<'a> Resolver<'a> {
         // resolve, one key's reveal).
         let no_dynamic = caller.grants.untrusted();
         let branches = s.db.read(|c| envs::by_slug(c, project, slug))?.branches;
-        Ok(Resolver { s, project, dek, caller, resolve, consumer: consumer.into(), envs: HashMap::new(), views: HashMap::new(), done: HashMap::new(), stack: vec![], tainted: Default::default(), members: None, issued: BTreeMap::new(), no_dynamic, deks: HashMap::new(), branches })
+        Ok(Resolver { s, project, dek, caller, resolve, consumer: consumer.into(), envs: HashMap::new(), views: HashMap::new(), done: HashMap::new(), stack: vec![], tainted: Default::default(), members: None, issued: BTreeMap::new(), no_dynamic, deks: HashMap::new(), branches, withhold_bound: false, through_bound: HashMap::new() })
     }
 
     /// `e`'s link, when it names a resource the read environment branched.
@@ -1760,6 +1807,12 @@ impl<'a> Resolver<'a> {
         self.tainted.contains(&format!("{}:{}:{}", e.row.env_id, e.row.path, e.row.key))
     }
 
+    /// The key bound to hosts that `e`'s value references, itself or through others (after
+    /// [`Resolver::entry`], with `withhold_bound`).
+    pub(crate) fn through_bound(&self, e: &Entry) -> Option<&str> {
+        self.through_bound.get(&format!("{}:{}:{}", e.row.env_id, e.row.path, e.row.key)).map(String::as_str)
+    }
+
     /// An entry's value and the first problem resolving it (the value then keeps the
     /// unresolved reference's text).
     pub fn entry(&mut self, e: &Entry) -> (Value, Option<String>) {
@@ -1774,6 +1827,24 @@ impl<'a> Resolver<'a> {
         if names::sensitive(&e.row.tags) || self.tainted.contains(&id) {
             let chain: Vec<String> = self.stack.iter().cloned().chain([id.clone()]).collect();
             self.tainted.extend(chain);
+        }
+        // Reached through a reference in a read that never gives out a bound key's value: never
+        // decrypted, and whatever references it (now or from the cache) says so. A binding that
+        // can't be read counts as one.
+        if self.withhold_bound {
+            let bound = match self.through_bound.get(&id) {
+                Some(b) => Some(b.clone()),
+                None if !self.stack.is_empty() && !matches!(self.s.binding(&e.row.id), Ok(None)) => Some(e.row.key.clone()),
+                None => None,
+            };
+            if let Some(b) = bound {
+                for s in &self.stack {
+                    self.through_bound.entry(s.clone()).or_insert_with(|| b.clone());
+                }
+                if !self.stack.is_empty() {
+                    return (Value::default(), Some(format!("{b} is bound to hosts: a reference never carries its value")));
+                }
+            }
         }
         if let Some(d) = self.done.get(&id) {
             return d.clone();
