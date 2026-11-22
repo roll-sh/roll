@@ -18685,7 +18685,8 @@ blocks now fall into the other rows: their relations are planned, but under the 
 
 ### What changed
 
-- **System views are planned from PostgreSQL's definitions** (`catalog/system.rs`
+- **System views are planned from PostgreSQL's definitions** (narrowed to small views by the third
+  candidate below) (`catalog/system.rs`
   `expanded_view`, `binder/select.rs`): a FROM item naming a system view binds the view's
   pg_get_viewdef text (`data/sys_viewdefs.tsv.zst`) as a view owned by the bootstrap superuser,
   as the rewriter expands it (pg_stats and pg_stats_ext* with security_barrier, as PostgreSQL has
@@ -18748,7 +18749,8 @@ types, constraints, indexes, procedures and triggers, pgAdmin's trigger properti
 (`drizzlekit`, same day): 7 of 49 ids differ on the base and after (47 pass, 2 fail on both
 servers: `push::again`, `push::alter-again` fail on PostgreSQL too).
 
-Catalog query time (psql, a81_meta, medians of three, machine load ~80): information_schema
+Catalog query time of this candidate (superseded by the third candidate below; psql, a81_meta,
+medians of three, machine load ~80): information_schema
 columns of one table PostgreSQL 17.0 / base 12.4 / after 65.0 ms (second query 4.9 / 27.8 /
 34.6), all columns 9.5 / 86.8 / 56.2, table_constraints of one table 2.5 / 7.9 / 4.5,
 key_column_usage 3.4 / 7.8 / 11.2, routines 7.9 / 12.1 / 33.2, tables of a schema 2.1 / 4.0 /
@@ -18802,3 +18804,105 @@ setting for a database it doesn't have showed as the role's own), regress `numa:
   relation; it wants a cache from tree to expression first.
 - The replay's stats ids (pg_stat / pg_statio block and tuple counters), names holding oids
   (pg_toast_N, RI_ConstraintTrigger_c_N) and pg_depend's order.
+
+### Third candidate (`cand/a279-3`): catalog query time
+
+The coordinator held `cand/a279-2` for its information_schema times. Where the time went, per
+query on the server (`perf stat` around N repetitions in one session, (I25 - I5) / 20 after
+an unmeasured warm-up session; `~/.cache/a279/qb/qbench.py`), plain dist builds: one table's
+information_schema.columns cost 72.8 M user instructions, against 0.68 M on the base; about
+50 M of it was binding and planning the expanded definition (an EXPLAIN loop: 53.8 M; the
+planner's join search over its 13 relations ~27%, its cost estimates built through EXPLAIN's
+`Builder` ~26%, binding ~17%), 22.6 M executing it (a prepared EXECUTE loop; hash joins of
+whole catalogs where PostgreSQL drives index scans from pg_class). Caching such a plan
+doesn't help: the plan is the query's, with its literals, once the view is pulled up. The
+base is fast because it generates a view's rows (of the relations a filter names, or kept
+per catalog version) instead of planning anything. The expansion's regress gains were in
+views over set-returning functions or at most two catalogs (pg_roles 18, pg_prepared_statements
+16, pg_cursors 14, pg_prepared_xacts 10, pg_locks 9, pg_stat_user_functions 7, pg_views 6,
+information_schema.views 6, pg_stat_* 17 more); information_schema's other views, pg_indexes
+and pg_stats gained 0 to 9 between them.
+
+- **Only small system views are planned from their definitions** (`system::view_expanded`):
+  one reading at most two catalogs and no other system view (pg_stat_user_indexes reads
+  pg_stat_all_indexes). The others are generated relations again.
+- **Their rows stay PostgreSQL's.** For the views ORMs and migration tools read
+  (information_schema.tables, columns, table_constraints, key_column_usage,
+  constraint_column_usage, check_constraints, pg_indexes, pg_tables: `split_view`), the rows
+  are two parts: pg_catalog's and information_schema's objects' rows from PostgreSQL's
+  definition, run over them once and kept per database, role, memberships and system
+  objects' privileges (`system_part`, which a DDL statement of the user's doesn't change),
+  then the engine's own generator's rows of the user's objects, generated relation by
+  relation as before (`is_rows_named`, the base's cost) or kept per catalog version with the
+  system part shared by pointer as row chunks (no copy per version). The generators' rows of
+  user objects were fixed where they differed from the definition's: a typed table's type
+  and is_typed, an interval column's fields (`interval_fields`), a user type (a range) as
+  USER-DEFINED with its own schema, a view column's collation, a foreign table's columns not
+  updatable as it isn't insertable, information_schema's own domains left to the system part.
+  The other information_schema views (privileges, routines' and types' usage, ...) are
+  PostgreSQL's definition, generated and kept per catalog version.
+- pg_stats, pg_indexes and pg_tables are kept per catalog version (statistics live in the
+  catalog), generating the entries they need as they go (`reads_relations`: reading every
+  relation entry on several threads first cost ~0.8 M after a DDL statement).
+- `has_column_privilege` knows an index's columns (pg_stats' definition reads it);
+  `acldefault('c', ...)` is an empty ACL; a role setting for a database the cluster lacks has
+  no pg_db_role_setting row; `pg_get_shmem_allocations_numa` raises libnuma's error;
+  pg_get_expr prints information_schema's domain CHECKs from the catalog's own trees.
+
+Rows against PostgreSQL 18.6 on pgAdmin's replay database (`~/.cache/a279/nat/diffview.sh`,
+every row of the view sorted): pg_indexes 137 / 137 identical, pg_tables 80, table_constraints
+210, key_column_usage 189, constraint_column_usage 282, check_constraints 97, routines 3,518,
+routine_privileges 6,985, table_privileges 1,806, udt_privileges 460, usage_privileges 929,
+role_usage_grants 929, applicable_roles 4, referential_constraints 2, schemata 6, pg_roles 19,
+pg_views 3,136; tables 226 of 228, columns 2,169 of 2,173 and views 3,134 of 3,136 (pg_group's
+and pg_stat_database_conflicts' updatability: PostgreSQL's auto-updatable views over a catalog,
+which the engine's update analysis doesn't take as base relations; the base and `cand/a279-2`
+show the same).
+
+Measured, plain dist builds of the parent `79806dd6c` and of this commit on it (two
+alternating pairs; user instructions per query, base / new):
+
+| query | warm | after CREATE TABLE |
+|---|---|---|
+| information_schema.columns, all | 10.11 / 5.67 M | |
+| columns of one table | 0.680 / 0.683 M | 0.80 / 0.67 M |
+| key_column_usage of one table | 0.271 / 0.274 M | 1.57 / 1.54 M |
+| routines | 0.653 / 0.661 M | |
+| table_constraints of one table | 0.289 / 0.279 M | 1.60 / 1.59 M |
+| tables of a schema | 0.854 / 0.818 M | 1.05 / 0.86 M |
+| pg_indexes of one table | 0.493 / 0.270 M | 0.92 / 0.78 M |
+| pg_stats of one table | 14.69 / 0.296 M | 29.0 / 18.7 M |
+
+(`cand/a279-2`: 72.8, 27.7, 98.4, 6.7, 11.8, 3.7 and 21.2 M warm for those queries; after DDL
+its columns query cost ~617 M.) After DDL is DDL + query less a DDL-only run (~18 M, which
+wanders by 0.3 M). Milliseconds, medians of three at load 55 (psql `\timing`, PostgreSQL 18.6 /
+base / new): columns of one table 5.1 / 1.0 / 1.0 (the session's first: 21.4 / 6.9 / 1.3),
+all columns 9.5 / 7.5 / 6.7, table_constraints 2.6 / 0.8 / 0.6, key_column_usage 3.2 / 0.5 /
+0.7, routines 7.4 / 0.6 / 0.6, tables 2.3 / 0.8 / 0.8, pg_indexes 3.1 / 0.7 / 0.4, pg_stats 3.8
+/ 10.5 / 0.3.
+
+ORM startup: drizzle-kit 0.31.11's `pull` of the drizzle-kit suite's introspection database
+(connection and introspection: information_schema.columns 26 queries, table_constraints 24,
+constraint_column_usage 12, pg_stat_user_indexes 12, pg_catalog joins; `~/.cache/a279/dk`),
+server user instructions per pull: base 1.5632 to 1.5653 G, new 1.5655 to 1.5669 G (+0.15%);
+`cand/a279-2` 8.48 G. The first pull after the server starts is 1.763 against 1.942 G (+10%):
+each split view runs its definition over the system objects once per process, database and
+role. Idle footprint, 100 sessions (trust, RSS after 6 s): base 47.1 / 47.2 / 47.7 MB, new
+47.4 / 47.4 / 47.4 MB.
+
+Regress EXPLAINs: catalog plans 713 -> 720 differing (7 plans over information_schema views are
+no longer the definition's), nothing else changed.
+
+Verification: quick-check with `QC_CHECKED=1` on `a0c331a6e` (on `79806dd6c`): build, clippy (16
+warnings, none new in changed files), tests 182 passed in 19 binaries and the same with
+`--profile verify-checked`, regress 51,148 / 51,150 with 0 newly differing, isolation 1,647 /
+1,648, pg_dump 14,609 passed. Earlier runs failed golden `triggers` (information_schema.triggers'
+action_statement qualified `public.tr_note()`: definitions run by `plpgsql::system_query`
+resolve names under pg_catalog and now run under the session's path, as an expanded view
+does) and once `wire::protocol_cases` (two cases' startup timed out at load ~55; passed on the
+rerun). The measured binaries lack only that last fix (one ExecCtx more per generation).
+
+Left: the first-use cost of the system parts (+10% on a first pull; precomputing them as
+static rows from the reference server would remove it, per role kind); planning a large view's
+definition itself (join search and estimates through EXPLAIN's Builder, ~50 M for
+information_schema.columns) if those views are to be expanded again.
