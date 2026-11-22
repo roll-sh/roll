@@ -1895,6 +1895,10 @@ pub struct Environment {
     /// before that was kept.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub closed_by: Option<serde_json::Value>,
+    /// `"branch"`: data of its own, a branch of each database it links (its view lists them by
+    /// kind and ref, never their credentials); absent: its links reach the databases themselves.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
     /// A closed environment's interception on its owner (roll secrets' placeholders): requests
     /// filtered, placeholders swapped, the latest refusals; none until it has done something.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2968,6 +2972,12 @@ pub enum LinkKind {
 }
 
 impl LinkKind {
+    /// Whether an environment with data of its own (`data: "branch"`) gets a branch of it:
+    /// a database's, roll Postgres' and Redis' (each kind's product branches it).
+    pub fn branches(self) -> bool {
+        matches!(self, LinkKind::Postgres | LinkKind::Redis)
+    }
+
     pub const ALL: [LinkKind; 8] = [LinkKind::Postgres, LinkKind::Redis, LinkKind::Bucket, LinkKind::Stream, LinkKind::Queue, LinkKind::Nosql, LinkKind::Search, LinkKind::Service];
 
     pub fn as_str(self) -> &'static str {

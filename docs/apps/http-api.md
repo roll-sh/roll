@@ -462,6 +462,7 @@ type EnvironmentPut = {
    *  the app's. */
   vitals?: boolean;
   log_retention_days?: 7 | 30 | 90 | null; // how long its logs are kept (null: 7); a preview's stay 7 (400)
+  data?: "branch" | null; // admin: data of its own, a branch of each Postgres and Redis database it links (made now and at each deploy for links made since; an environment's services share one), its link variables the branch's, never the database's; null goes back to them, deleting the branches no other environment uses; 400 for production and previews (roll previews branches theirs)
   closed_by?: string | null; // with egress, the operator's only (roll previews in process, or any caller on an open daemon; a token needs admin; 403 for a user's token or a signed-in person): who a closed environment's placeholders are made by (usr_… or token:…); null, no one (its keys bound to hosts withheld); unset, whoever set the egress
   badge?: boolean; // a deploy status badge at GET /_roll/badge/<service>/<env>.svg on the apps listener, answered to anyone (Netlify's): live, deploying, waiting, failed, paused or not deployed; false: 404
   approvals?: 0 | 1 | 2 | 3 | null; // admin (as freeze): people other than a deployment's author (the person behind it: their session, their own token, the operator) who approve it (`…/approve`) before it goes live; a waiting build doesn't run (no instance, its own URL 409) until then: deploys, redeploys, promotions and automation's build to ready and wait (a service that can't wait beside the live one: 409, or skipped), putting one live without them is a 409 unless an admin's `X-Roll-Override: 1` (audited `approvals.bypassed`); rolling back to what was live needs none; never a preview's (400)
@@ -563,6 +564,7 @@ type Environment = EnvironmentSummary & {
   preview_host?: string; // its label under the project's preview domain
   egress: { mode: "roll" | "open"; hosts: string[] }; // what its code may reach (roll: roll and the hosts)
   egress_refused?: { host: string; private?: true }[]; // hosts its egress proxy refused lately, oldest first, at most 20: not listed, or (private) listed but resolving only to private addresses
+  data?: { mode: "branch"; branches: { kind: "postgres" | "redis"; ref: string }[] }; // data of its own: the branches made for it (never their credentials); absent: its links reach the databases themselves
   closed_by?: string | null; // a closed environment's placeholders' maker (usr_…, token:…, operator); null: no one (its keys bound to hosts withheld); absent when open or closed before it was kept
   intercepted?: { requests: number; swapped: number; refused?: string[] }; // a closed environment's interception on its owner (roll secrets' placeholders) since that node started: requests filtered, placeholders swapped, the latest refusals' reasons (at most 20; never a value or a placeholder)
   feedback: boolean;          // a preview's pages carry roll previews' feedback button
