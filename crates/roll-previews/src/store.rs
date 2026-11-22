@@ -612,6 +612,8 @@ pub struct PinnedData {
     pub name: String,
     pub r#ref: String,
     pub kept: Option<String>,
+    /// The preview's branch it was copied from.
+    pub source: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -795,7 +797,8 @@ impl Store {
         }
         // The branch's own schema lines as it was made (JSON), for `schema::diff_since`.
         // What an earlier push's copy of the data holds and costs (read with the branches').
-        for (col, ty) in [("bytes", "INTEGER NOT NULL DEFAULT 0"), ("usd_month", "REAL NOT NULL DEFAULT 0"), ("spent_usd", "REAL NOT NULL DEFAULT 0")] {
+        // And the branch it was copied from (its delete's guard, for products that check it).
+        for (col, ty) in [("bytes", "INTEGER NOT NULL DEFAULT 0"), ("usd_month", "REAL NOT NULL DEFAULT 0"), ("spent_usd", "REAL NOT NULL DEFAULT 0"), ("source", "TEXT NOT NULL DEFAULT ''")] {
             if !db.has_column("pinned_data", col)? {
                 db.add_column("pinned_data", col, ty)?;
             }
@@ -2604,9 +2607,9 @@ impl Store {
     /// The data kept for earlier pushes: a snapshot of a branch per head ([`PinnedData`]).
     pub fn pinned_data(&self, id: &str) -> Result<Vec<PinnedData>> {
         Ok(self.db.read(|c| {
-            c.query("SELECT revision, kind, parent, name, ref, kept FROM pinned_data WHERE preview_id = ? ORDER BY at", [id], |r| {
+            c.query("SELECT revision, kind, parent, name, ref, kept, source FROM pinned_data WHERE preview_id = ? ORDER BY at", [id], |r| {
                 let kind: String = r.get(1)?;
-                Ok(PinnedData { revision: r.get(0)?, kind: Kind::parse(&kind).unwrap_or(Kind::Postgres), parent: r.get(2)?, name: r.get(3)?, r#ref: r.get(4)?, kept: r.get(5)? })
+                Ok(PinnedData { revision: r.get(0)?, kind: Kind::parse(&kind).unwrap_or(Kind::Postgres), parent: r.get(2)?, name: r.get(3)?, r#ref: r.get(4)?, kept: r.get(5)?, source: r.get(6)? })
             })
         })?)
     }
@@ -2615,9 +2618,9 @@ impl Store {
         let now = self.now_ms()?;
         self.db.write(|c| {
             c.execute(
-                "INSERT INTO pinned_data (preview_id, revision, kind, parent, name, ref, kept, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
-                 ON CONFLICT (preview_id, revision, kind, parent) DO UPDATE SET name = excluded.name, ref = excluded.ref, kept = excluded.kept",
-                params![id, d.revision, d.kind.as_str(), d.parent, d.name, d.r#ref, d.kept, now],
+                "INSERT INTO pinned_data (preview_id, revision, kind, parent, name, ref, kept, at, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT (preview_id, revision, kind, parent) DO UPDATE SET name = excluded.name, ref = excluded.ref, kept = excluded.kept, source = excluded.source",
+                params![id, d.revision, d.kind.as_str(), d.parent, d.name, d.r#ref, d.kept, now, d.source],
             )?;
             Ok::<_, Error>(())
         })
@@ -3583,7 +3586,7 @@ mod tests {
         let (_dir, store) = store();
         let (row, _) = store.create(&new("chg_copy")).unwrap();
         let before = store.cost(&row).unwrap();
-        let d = PinnedData { revision: "cs_1".into(), kind: Kind::Postgres, parent: "prj_db".into(), name: "pv-x-1".into(), r#ref: "br_1".into(), kept: None };
+        let d = PinnedData { revision: "cs_1".into(), kind: Kind::Postgres, parent: "prj_db".into(), name: "pv-x-1".into(), r#ref: "br_1".into(), kept: None, source: "br_0".into() };
         store.add_pinned_data(&row.id, &d).unwrap();
         store.set_pinned_usage(&row.id, &d, &crate::ports::Usage { bytes: 3 << 20, storage_usd_month: 0.5, active_usd_hour: 0.0, month_to_date_usd: 0.25 }).unwrap();
         let after = store.cost(&row).unwrap();

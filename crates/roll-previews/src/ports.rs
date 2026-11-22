@@ -69,6 +69,13 @@ pub trait Brancher: Send + Sync {
         Ok(None)
     }
 
+    /// Delete a [`Brancher::snapshot`] of branch `from` named `name`. By default as a branch of
+    /// `parent` (Postgres: a branch of the project); a product whose branch guard checks the
+    /// direct parent checks `from` instead.
+    async fn delete_snapshot(&self, parent: &str, _from: &str, snapshot: &str, name: &str) -> anyhow::Result<()> {
+        self.delete(parent, snapshot, name).await
+    }
+
     /// [`Brancher::branch`] from the parent as it was at `at` (unix seconds), where the product
     /// keeps history: `None` from one that doesn't (the caller branches as of now and says so).
     async fn branch_at(&self, _parent: &str, _name: &str, _mode: Mode, _at: i64) -> anyhow::Result<Option<Branched>> {

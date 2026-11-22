@@ -341,6 +341,18 @@ impl Brancher for Redis {
         self.branch(parent, name, mode).await
     }
 
+    /// A branch of the preview's own branch: an earlier push's data (redis-control branches any
+    /// database, and keeps a parent's history while its branches use it).
+    async fn snapshot(&self, _parent: &str, branch: &str, name: &str) -> anyhow::Result<Option<Branched>> {
+        self.branch(branch, name, Mode::Branch).await.map(Some)
+    }
+
+    /// Its parent is the preview's branch it was copied from (gone after a reset: the guard then
+    /// reads the copy's own `parent_id`).
+    async fn delete_snapshot(&self, _parent: &str, from: &str, snapshot: &str, name: &str) -> anyhow::Result<()> {
+        self.delete(from, snapshot, name).await
+    }
+
     async fn delete(&self, parent: &str, branch: &str, name: &str) -> anyhow::Result<()> {
         let d = match self.0.get(&format!("/v1/redis/databases/{}", seg(branch))).await {
             Ok(d) => d,
