@@ -5974,7 +5974,9 @@ async fn an_echoed_value_is_caught_and_ends_the_placeholder() {
     assert_eq!(scrub().chunk(format!("debug={b64}").as_bytes()).unwrap_err(), echoed);
     assert!(!format!("{echoed} {echoed:?} {split:?}").contains("sk_test_fake"));
 
+    let ca = api.secrets.intercept_ca("sandbox:sbx_e", None).unwrap();
     api.secrets.echoed(&echoed.placeholder, &echoed.host).unwrap();
+    assert!(!api.secrets.intercept_ca_live(&ca.id).unwrap(), "its CA ends with the host it no longer has");
     let at = Position { place: Place::Header, name: "authorization", value: &format!("Bearer {ph}") };
     assert_eq!(api.secrets.substitute(&ph, "api.stripe.com", at).unwrap_err(), Refusal::Revoked);
     let alerts = api.ok(Method::GET, "/audit?action=secrets.alert", None).await;
@@ -6393,8 +6395,8 @@ async fn a_demoted_members_host_binding_and_placeholders_stop() {
     };
     let roll = issue("sandbox:sbx_m1", None).await;
     let hers = issue("sandbox:sbx_m2", Some("usr_cat")).await;
-    assert_eq!(swap(&roll).unwrap().expose(), "sk_test_fake_member_1");
-    assert_eq!(swap(&hers).unwrap().expose(), "sk_test_fake_member_1");
+    assert_eq!(swap(&roll).unwrap().value.expose(), "sk_test_fake_member_1");
+    assert_eq!(swap(&hers).unwrap().value.expose(), "sk_test_fake_member_1");
 
     // A developer may no longer manage staging: her binding swaps nothing, and a read still gets
     // a placeholder, never the value.

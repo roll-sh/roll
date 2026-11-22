@@ -3431,7 +3431,9 @@ the binding, issues placeholders, decides each swap and audits it, and ships the
     over its bytes.
   - `Secrets::echoed(placeholder, host)` (in process only; no HTTP route) ends the placeholder (a
     host that echoes once will again) and records a `secrets.alert` row ("api.example.com echoed
-    STRIPE_KEY back…") with a notice to the environment's notify URL (`placeholder_echo`).
+    STRIPE_KEY back…") with a notice to the environment's notify URL (`placeholder_echo`). As any
+    placeholder ending does, it then ends the consumer's interception CAs that name a host it no
+    longer has.
 - **Not covered.** A host that transforms the value before echoing it (hashes it, splits it across
   fields, encrypts it), or one that echoes it compressed when asked not to (the proxy refuses those):
   placement is what keeps the code from choosing an echoing header in the first place. A placeholder

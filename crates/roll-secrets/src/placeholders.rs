@@ -614,12 +614,13 @@ impl Secrets {
     /// `host` echoed back the value placeholder `id` (`phd_…`) stood for, in the response to a
     /// request it was swapped into (`proxy::Scrub`'s [`Echoed`](crate::proxy::Echoed)): the
     /// placeholder ends (a host that echoes once will again), with a `secrets.alert` row and the
-    /// environment's notify URL. In process only, for roll's egress proxies.
+    /// environment's notify URL, and so do the consumer's interception CAs naming a host it no
+    /// longer has. In process only, for roll's egress proxies.
     pub fn echoed(&self, id: &str, host: &str) -> Result<()> {
         let now = self.db.now_ms()?;
         let host = normalize_host(host).unwrap_or_else(|| shown(host));
         let mac = self.keys()?;
-        self.db.write(|c| {
+        let consumer = self.db.write(|c| {
             let row: Option<(String, String, String, String, String)> = c
                 .query_row("SELECT p.project_id, COALESCE(e.slug, ''), p.path, p.key, p.consumer FROM placeholders p LEFT JOIN environments e ON e.id = p.env_id WHERE p.id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
                 .optional()?;
@@ -629,8 +630,10 @@ impl Secrets {
             let alert = serde_json::json!({ "kind": "placeholder_echo", "placeholder": id, "consumer": consumer, "host": host });
             crate::audit::record(c, mac, &project, &Caller::consumer("roll:placeholders"), "secrets.alert", Some(&env), Some(&path), std::slice::from_ref(&key), &text, now)?;
             self.queue_alert(c, &project, &env, &text, alert, now, now)?;
-            Ok::<_, Error>(())
-        })
+            Ok::<_, Error>(consumer)
+        })?;
+        self.hosts_shrank([consumer.as_str()]);
+        Ok(())
     }
 
     /// `key`'s effective entry in `slug:path` for `reader`, or why not.
