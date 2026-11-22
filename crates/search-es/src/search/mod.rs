@@ -109,12 +109,13 @@ pub struct Target {
     pub idx: Arc<IndexMeta>,
     pub engine: Arc<IndexEngine>,
     pub shard: Arc<ShardEngine>,
-    pub alias_filter: Option<crate::query::Query>,
+    /// Its alias filter and the reader's document level security.
+    pub filter: query::DocFilter,
     pub boost: f32,
     /// A point-in-time searcher (scrolls, PITs); `None` = the shard's current one.
     pub searcher: Option<Searcher>,
     /// The document and field level security of the reader (its documents are in
-    /// `alias_filter` already).
+    /// `filter` already).
     pub security: Option<crate::xpack::security::dls::ReadSecurity>,
 }
 
@@ -438,7 +439,7 @@ fn stored_fields_disabled_with_fields(s: &crate::search_source::SearchSource) ->
 /// The concrete indices of a search, with alias filters and search routing (`resolveIndices`
 /// + `buildAliasFilter`).
 #[allow(clippy::type_complexity)]
-pub fn resolve_targets(cluster: &Cluster, st: &ClusterState, req: &SearchRequest) -> EsResult<Vec<(Arc<IndexMeta>, Option<crate::query::Query>, Option<String>)>> {
+pub fn resolve_targets(cluster: &Cluster, st: &ClusterState, req: &SearchRequest) -> EsResult<Vec<(Arc<IndexMeta>, query::DocFilter, Option<String>)>> {
     let names = resolve::resolve(st, &req.indices, &req.opts, req.now_ms)?;
     let aliases = st.aliases();
     let all = req.indices.is_empty() || resolve::is_all(&req.indices);
@@ -496,7 +497,7 @@ pub fn resolve_targets(cluster: &Cluster, st: &ClusterState, req: &SearchRequest
                 }
             }
         }
-        let filter = if direct || !via_alias || filters.is_empty() {
+        let alias = if direct || !via_alias || filters.is_empty() {
             None
         } else if filters.len() == 1 {
             filters.pop()
@@ -504,14 +505,15 @@ pub fn resolve_targets(cluster: &Cluster, st: &ClusterState, req: &SearchRequest
             let b = crate::query::compound::Bool { should: filters, ..Default::default() };
             Some(crate::query::Query::from(b))
         };
-        // Document level security filters what the principal reads, as an alias filter does.
-        let dls = match &req.security {
+        // Document level security filters what the principal reads, as an alias filter does,
+        // but kept apart: the request's runtime fields don't apply to it.
+        let security = match &req.security {
             Some(sec) => sec.documents(cluster, crate::xpack::security::dls::READ, &idx.name)?,
             None => None,
         };
         // `DlsFlsRequestValidator`: suggesters read the terms of every document, and a profile
         // shows the restriction's query, so neither runs where documents are restricted.
-        if dls.is_some() {
+        if security.is_some() {
             let mut errors = Vec::new();
             if req.source.suggest.is_some() {
                 errors.push("Suggest isn't supported if document level security is enabled".to_string());
@@ -523,11 +525,7 @@ pub fn resolve_targets(cluster: &Cluster, st: &ClusterState, req: &SearchRequest
                 return Err(EsError::action_request_validation(&errors));
             }
         }
-        let filter = match (filter, dls) {
-            (Some(a), Some(d)) => Some(crate::query::Query::from(crate::query::compound::Bool { filter: vec![a, d], ..Default::default() })),
-            (a, d) => a.or(d),
-        };
-        out.push((idx, filter, routing));
+        out.push((idx, query::DocFilter { alias, security }, routing));
     }
     out.sort_by(|a, b| a.0.name.cmp(&b.0.name));
     Ok(out)
@@ -581,7 +579,7 @@ pub fn shard_targets(cluster: &Cluster, st: &ClusterState, req: &SearchRequest) 
         }
         let boost = boosts.iter().find(|(names, _)| names.iter().any(|n| *n == idx.name)).map(|(_, b)| *b).unwrap_or(1.0);
         for i in ids {
-            out.push(Target { idx: idx.clone(), engine: engine.clone(), shard: engine.shard(i).clone(), alias_filter: filter.clone(), boost, searcher: None, security: req.security.clone() });
+            out.push(Target { idx: idx.clone(), engine: engine.clone(), shard: engine.shard(i).clone(), filter: filter.clone(), boost, searcher: None, security: req.security.clone() });
         }
     }
     Ok(out)
@@ -814,16 +812,14 @@ fn shard_query_knn(qctx: &QueryCtx, t: &Target, src: &SearchSource, knn: &[Query
     shard_query_main(qctx, t, main)
 }
 
-/// The shard query around `main`: the nested root filter and alias filter, the index boost.
+/// The shard query around `main`: the nested root filter, the alias filter and document level
+/// security, the index boost.
 fn shard_query_main(qctx: &QueryCtx, t: &Target, main: QueryRef) -> EsResult<QueryRef> {
     // `DefaultSearchContext.buildFilteredQuery`: the non-nested filter first, and only where
     // the query (and the alias filter) might match nested documents.
-    let alias = match &t.alias_filter {
-        // The owner's (with the reader's document level security): a browser key's policy
-        // doesn't hold it.
-        Some(af) => Some(qctx.owner_filter(af)?),
-        None => None,
-    };
+    // The owner's (the alias filter, the reader's document level security): a browser key's
+    // policy doesn't hold them.
+    let alias = t.filter.build(qctx)?;
     let mut filters: Vec<QueryRef> = Vec::new();
     if qctx.table.nested_paths().next().is_some()
         && might_match_nested_docs(qctx.table, &main)
@@ -1309,7 +1305,7 @@ fn query_phase_inner(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, 
     let mut qctx = QueryCtx::new(cluster, st, &t.idx, &table, &searcher, req.now_ms, t.reader());
     qctx.shard = t.shard.id;
     qctx.runtime_mappings = src.runtime_mappings.clone();
-    qctx.alias_filter = t.alias_filter.clone();
+    qctx.filter = t.filter.clone();
     if let Some(rm) = &src.runtime_mappings {
         let names: Vec<&str> = rm.keys().map(String::as_str).collect();
         runtime::check_time_series(&t.idx, &names, true)?;
@@ -1434,7 +1430,7 @@ fn query_phase_inner(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, 
     let mut agg_profiler: Option<Arc<search_aggs::profile::Profiler>> = None;
     let mut agg_collector = match aggs {
         Some(a) => {
-            let mut lookup = aggs::Lookup::new(cluster, st, t, &table, &searcher, req.now_ms).with_parent_fields(&src.fields);
+            let mut lookup = aggs::Lookup::new(cluster, st, t, &table, &searcher, req.now_ms).with_parent_fields(&src.fields).with_runtime_mappings(src.runtime_mappings.clone());
             if !src.rescore.is_empty() {
                 lookup = lookup.with_rescore(prepare_rescore(&QueryCtx::new(cluster, st, &t.idx, &table, &searcher, req.now_ms, t.reader()), src));
             }
@@ -1956,7 +1952,7 @@ fn request_cache_key(req: &SearchRequest, t: &Target) -> String {
     // The mapping and analysis settings decide how the request's queries are built
     // (`MappingLookup.cacheKey()`): an update to either busts the entries.
     let fls = t.security.as_ref().and_then(|s| s.fields(crate::xpack::security::dls::READ, &t.idx.name));
-    let mut k = format!("{:?}|{:?}|{:?}|{}|{}.{}", req.source, t.alias_filter, fls, req.typed_keys, t.idx.mapping_version, t.idx.settings_version);
+    let mut k = format!("{:?}|{:?}|{:?}|{}|{}.{}", req.source, t.filter, fls, req.typed_keys, t.idx.mapping_version, t.idx.settings_version);
     // Terms lookups read other indices: key on every refresh anywhere.
     if k.contains("Some(TermsLookup") {
         k.push_str(&format!("|{}", crate::engine::refresh_epoch()));
@@ -3478,7 +3474,7 @@ fn script_fields_of_hit(cluster: &Cluster, st: &ClusterState, t: &Target, table:
     }
     for f in fields {
         let bound = cluster.scripts.compile(st, &f.script, search_painless::Context::Field)?;
-        let p = scripts::Painless { bound, table: table.clone(), shard: t.shard.id as i32, index: t.idx.name.clone(), id_fielddata, counted: false };
+        let p = scripts::Painless { bound, table: table.clone(), shard: t.shard.id as i32, index: t.idx.name.clone(), id_fielddata, counted: false, runtime: Default::default() };
         match scripts::script_field(&p, seg, local, score) {
             Ok(v) => {
                 sf.insert(f.name.clone(), Value::Arr(v));
@@ -4687,12 +4683,15 @@ pub fn explain(ctx: &Ctx) -> EsResult<Reply> {
     shard.before_search(IndexEngine::refresh_interval(&idx))?;
     let searcher = shard.searcher();
     let security = crate::xpack::security::dls::ReadSecurity::of(ctx);
-    let alias_filter = match &security {
-        Some(s) => s.documents(ctx.cluster, crate::xpack::security::dls::READ, &idx.name)?,
-        None => None,
+    let filter = query::DocFilter {
+        alias: None,
+        security: match &security {
+            Some(s) => s.documents(ctx.cluster, crate::xpack::security::dls::READ, &idx.name)?,
+            None => None,
+        },
     };
     let fls = security.as_ref().and_then(|s| s.fields(crate::xpack::security::dls::READ, &idx.name));
-    let t = Target { idx: idx.clone(), engine: engine.clone(), shard: shard.clone(), alias_filter, boost: 1.0, searcher: Some(searcher.clone()), security };
+    let t = Target { idx: idx.clone(), engine: engine.clone(), shard: shard.clone(), filter, boost: 1.0, searcher: Some(searcher.clone()), security };
     // The reader's fields only: those its field level security hides are unmapped.
     let table = t.table();
     let qctx = QueryCtx::new(ctx.cluster, &st, &idx, &table, &searcher, ctx.now_ms, t.reader());
@@ -4700,7 +4699,7 @@ pub fn explain(ctx: &Ctx) -> EsResult<Reply> {
     // query: a missing document answers 404 whatever the query, and so does one the reader's
     // document level security hides (its reader doesn't hold it).
     let doc = match find_doc(&searcher, &id) {
-        Some(d) if !doc_allowed(ctx.cluster, &st, &idx, &engine.table(), &searcher, d, t.alias_filter.as_ref())? => None,
+        Some(d) if !doc_allowed(ctx.cluster, &st, &idx, &engine.table(), &searcher, d, t.filter.security.as_ref())? => None,
         d => d,
     };
     let mut m = Map::new();
@@ -4850,11 +4849,12 @@ pub(crate) fn lookup_source(ctx: &QueryCtx, idx: &Arc<IndexMeta>, id: &str, rout
 }
 
 /// Whether document `doc` of `searcher` matches a reader's document filter (`None`: none
-/// applies), on that searcher: the copy a request checks is the copy it reads.
+/// applies), on that searcher: the copy a request checks is the copy it reads. No request's
+/// runtime fields apply (one may be running on this thread: a `percolate` lookup's).
 fn doc_allowed(cluster: &Cluster, st: &ClusterState, idx: &Arc<IndexMeta>, table: &Arc<crate::engine::fields::FieldTable>, searcher: &Searcher, doc: u32, filter: Option<&crate::query::Query>) -> EsResult<bool> {
     let Some(q) = filter else { return Ok(true) };
     let qctx = QueryCtx::new(cluster, st, idx, table, searcher, crate::time::now_millis(), query::Reader::Unrestricted);
-    let query = qctx.to_filter(q)?;
+    let query = qctx.for_security()?.to_filter(q)?;
     Ok(searcher.explain(&query, doc).map_err(crate::engine::convert::index_error)?.is_match())
 }
 
@@ -4870,7 +4870,7 @@ pub fn matches_doc(cluster: &Cluster, st: &ClusterState, idx: &Arc<IndexMeta>, e
     let Some(doc) = find_doc(&searcher, id) else { return Ok(false) };
     let table = engine.table();
     let qctx = QueryCtx::new(cluster, st, idx, &table, &searcher, crate::time::now_millis(), crate::search::query::Reader::Unrestricted);
-    let query = qctx.to_filter(q)?;
+    let query = qctx.for_security()?.to_filter(q)?;
     Ok(searcher.explain(&query, doc).map_err(crate::engine::convert::index_error)?.is_match())
 }
 

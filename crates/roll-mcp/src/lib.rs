@@ -1137,8 +1137,12 @@ fn instructions(ctx: &Ctx) -> Value {
     };
     // The token's name is a person's: what it might hide stays visible.
     json!(visible(&format!(
-        "roll: serverless Postgres, Redis, storage, streams, queues, tasks, NoSQL, source control (roll code) and coding agents, grouped into workspace projects. \
-Tools are named <product>_<verb>. Ids are each product's own (Postgres projects prj_…, Redis rdb_…, streams st_…, buckets by name, repos owner/name). \
+        "roll: serverless Postgres (postgres_), Redis (redis_), S3 storage (storage_), Kafka streams (streams_), queues (queues_), tasks and \
+crons (tasks_), NoSQL (nosql_), Elasticsearch-compatible search (search_), app hosting with deploys, logs and domains (apps_), preview \
+environments (previews_), secrets and environment variables (secrets_), source control (code_) and coding agents (agents_), grouped into \
+workspace projects (workspace_) with access tokens (access_). When the user asks to deploy, debug a failing app, change a database, \
+rotate a secret, check a preview, tune search or work in a repo, look for roll's tools by those prefixes; workflows (prompts) walk the \
+common tasks. Tools are named <product>_<verb>. Ids are each product's own (Postgres projects prj_…, Redis rdb_…, streams st_…, buckets by name, repos owner/name). \
 {who} Some actions ask a person first: such a call waits up to a minute, then returns status \"approval_pending\" with an approval id and a link. \
 Tell the user, then call the same tool again with the same arguments plus \"approval\": \"apr_…\": it waits for the decision and runs once approved. \
 postgres_query is read-only (postgres_execute changes data). Credentials come back as [redacted] unless the token may reveal them. \

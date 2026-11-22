@@ -128,13 +128,16 @@ pub trait SecretSource: Send + Sync {
     /// [`SecretSource::resolve`] gives them. `maker`: who closed the environment (its placeholders
     /// swap only while they may reveal there; none, the project's owner). When they can't, the
     /// keys bound to hosts are withheld and `notice` says so.
-    async fn resolve_closed(&self, project: &str, env: &str, service: &str, _maker: Option<&str>) -> anyhow::Result<ClosedSecrets> {
+    /// `mint`: placeholders made for instances (a deploy); else (a listing, a staleness check) a
+    /// key bound to hosts comes as a marker with its binding, and nothing is made or read.
+    async fn resolve_closed(&self, project: &str, env: &str, service: &str, _maker: Option<&str>, _mint: bool) -> anyhow::Result<ClosedSecrets> {
         Ok(ClosedSecrets { vars: self.resolve(project, env, service).await?, notice: None })
     }
     /// A closed environment's interception, when its secrets have placeholders: the CA its
     /// instances trust and the step its egress proxy runs for a host the keys are bound to. One
     /// a project environment (the consumer `apps:<project>/<env>`), the same one while it stands.
-    async fn intercept(&self, _project: &str, _env: &str) -> anyhow::Result<Option<Intercept>> {
+    /// `hosts`: what its placeholders are bound to now (a CA that names fewer is made again).
+    async fn intercept(&self, _project: &str, _env: &str, _hosts: &[String]) -> anyhow::Result<Option<Intercept>> {
         Ok(None)
     }
     /// The project environment's placeholders and interception ended (it's deleted or opened).
@@ -379,6 +382,9 @@ pub struct SecretVar {
     /// A link field roll secrets says isn't a credential (`Values.plain`: a host, a port, a user,
     /// a database): logs may show it. Every other value from roll secrets is a secret.
     pub plain: bool,
+    /// A closed environment's placeholder: the hosts it's bound to (sorted, `,` between). What
+    /// decides whether a deployment is stale, never the placeholder's text (a new one each time).
+    pub binding: Option<String>,
 }
 
 /// Who asks for variables' values: what rolld's gate put on the request.

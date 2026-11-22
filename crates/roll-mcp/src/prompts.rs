@@ -348,6 +348,64 @@ const PROMPTS: &[Prompt] = &[
         },
     },
     Prompt {
+        name: "recover_deleted_objects",
+        title: "Recover deleted objects",
+        description: "Objects deleted from a bucket by mistake: which ones are still in its trash, and each brought back once you say.",
+        args: &[Arg { name: "bucket", description: "Bucket", required: true }],
+        needs: &["storage_list_trash", "storage_restore_object", "storage_head_object"],
+        text: |a| {
+            format!(
+                "Objects were deleted from bucket {} by mistake. Call storage_list_trash and narrow it to what I \
+                 describe (a prefix, a time window, a name), newest deletions first: each key, when it was deleted \
+                 and its size. Tell me what you found and what isn't there (an object deleted before the trash \
+                 was emptied is gone). Only when I say, restore each with storage_restore_object (its key and \
+                 deleted_at from the list), then check it's back with storage_head_object. Restore nothing I \
+                 didn't name, and never overwrite an object that exists now without asking me first.",
+                a("bucket")
+            )
+        },
+    },
+    Prompt {
+        name: "try_cql_change_on_branch",
+        title: "Try a CQL change on a branch",
+        description: "A NoSQL schema or data change tried on a branch first: applied there, checked against its parent, then on the database only when you say.",
+        args: &[Arg { name: "database", description: "NoSQL database", required: true }],
+        needs: &["nosql_schema", "nosql_create_branch", "nosql_cql", "nosql_diff"],
+        text: |a| {
+            format!(
+                "I want to change NoSQL database {} (a table, a column, an index, a data fix). Read nosql_schema \
+                 first. Then nosql_create_branch for a branch to try it on, and run the statements there with \
+                 nosql_cql against the branch, never the database. Check the result: nosql_schema of the branch, \
+                 nosql_diff for what changed against its parent (tables and rows added, changed and removed), and a \
+                 SELECT or two the change is for. Tell me what it did and what could break (queries that name a \
+                 dropped column, a table rewritten). Run the same statements on the database itself only when I \
+                 say. Then offer to delete the branch; nosql_reset puts it back to its parent if I want to try \
+                 again.",
+                a("database")
+            )
+        },
+    },
+    Prompt {
+        name: "find_redis_memory_hogs",
+        title: "Find what fills a Redis database",
+        description: "What uses a Redis database's memory: its totals, a sample of keys by size, type and TTL grouped by prefix, and what to change, reading only.",
+        args: &[Arg { name: "database", description: "Redis database", required: true }],
+        needs: &["redis_usage", "redis_command"],
+        text: |a| {
+            format!(
+                "Find what fills Redis database {}. Use only commands that read. Start with redis_usage, then \
+                 redis_command with [\"INFO\", \"memory\"], [\"MEMORY\", \"STATS\"] and [\"DBSIZE\"]. \
+                 Sample keys with [\"SCAN\", cursor, \"COUNT\", \"500\"] a few rounds, and for each \
+                 sampled key [\"MEMORY\", \"USAGE\", key], [\"TYPE\", key] and [\"TTL\", key]. Group them \
+                 by prefix (the part before the first : or /) and tell me the biggest prefixes by memory, the keys \
+                 over 1 MB, and how much has no expiry. Suggest what to change: a TTL for keys that are caches, \
+                 an eviction policy or memory limit (redis_update_database), splitting a big hash or list. \
+                 Change nothing and delete nothing unless I say.",
+                a("database")
+            )
+        },
+    },
+    Prompt {
         name: "clear_task_backlog",
         title: "Clear a tasks backlog",
         description: "Why roll tasks' messages pile up or fail: paused or limited queues, dead letters and each delivery's error, then a retry once the cause is fixed.",
@@ -466,6 +524,10 @@ pub fn source(prompt: &str, arg: &str) -> Option<Source> {
         "vhost" | "queue" => crate::ask::source("queues", arg),
         "stream" | "group" => crate::ask::source("streams", arg),
         "cluster" => crate::ask::source("search", "cluster"),
+        "bucket" => crate::ask::source("storage", "bucket"),
+        // A NoSQL workflow's database is NoSQL's, a Redis one's is Redis's.
+        "database" if p.needs.iter().any(|n| n.starts_with("nosql_")) => crate::ask::source("nosql", "database"),
+        "database" if p.needs.iter().any(|n| n.starts_with("redis_")) => crate::ask::source("redis", "database"),
         // roll code's: an owner of a repo the caller reads, then that owner's repos by name.
         "owner" => crate::ask::source("code", "owner"),
         "repo" => Some(Source { tool: "code_list_repos", args: |ctx| json!({ "owner": ctx["owner"] }), fields: &["name"] }),
