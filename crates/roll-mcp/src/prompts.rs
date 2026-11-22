@@ -284,6 +284,49 @@ const PROMPTS: &[Prompt] = &[
         },
     },
     Prompt {
+        name: "ship_a_service",
+        title: "Ship a new service",
+        description: "A new app service from a repo, a Git URL or an image: what its project file would make, the service with its links and variables, a deploy outside production first, checked, and production only when you say.",
+        args: &[Arg { name: "project", description: "Workspace project to put it in", required: true }],
+        needs: &["apps_create_service", "apps_deploy", "apps_wait_deploy", "apps_get_environment", "apps_logs"],
+        text: |a| {
+            format!(
+                "Ship a new service in project {} from the code I point you at (a roll code repo, a public Git URL or \
+                 an image). If it has a roll.toml, a docker-compose file or another platform's file, apps_import \
+                 first: what it would make and what isn't carried over. Then apps_create_service with that source. \
+                 Give it what it needs: apps_link for roll resources (a database's DATABASE_URL and the like), \
+                 apps_set_variables for the rest; a credential stays in roll secrets, never pasted into a variable \
+                 here. If it has an environment besides production (apps_list_environments), deploy there first \
+                 with apps_deploy and follow it with apps_wait_deploy; then apps_get_environment and apps_logs, \
+                 apps_deploy_logs for a failed build and apps_errors for a failing one. Tell me its URL and what \
+                 you saw. Deploy to production only when I say: it may wait for a person's approval, and \
+                 apps_wait_deploy says when it does.",
+                a("project")
+            )
+        },
+    },
+    Prompt {
+        name: "tune_slow_search",
+        title: "Tune a slow search",
+        description: "Why a search cluster answers slowly: its slowest requests, where their time goes, the usual causes in mapping and query, and a fix tried on a branch before the cluster.",
+        args: &[Arg { name: "cluster", description: "Search cluster", required: true }],
+        needs: &["search_slowlog", "search_cluster_metrics", "search_get_mapping", "search_query"],
+        text: |a| {
+            format!(
+                "Search cluster {} answers slowly. Start with search_slowlog for its slowest requests (which index, \
+                 how long) and search_cluster_metrics for load. For the worst, read its index's mapping \
+                 (search_get_mapping) and settings (search_index_settings), and run its body again with \
+                 search_query adding \"profile\": true to see where the time goes. Look for the usual causes: \
+                 wildcards or regexes on text fields, deep pagination (a large from), aggregations on \
+                 high-cardinality text, scripts, scoring queries where a filter would do (filters are cached), \
+                 large _source. Propose a change with what it should save. To try a mapping or settings change, \
+                 branch the cluster first (search_branch_cluster) and measure there; change the cluster itself \
+                 only when I say.",
+                a("cluster")
+            )
+        },
+    },
+    Prompt {
         name: "review_preview",
         title: "Review a preview",
         description: "Whether a change's preview is ready to land: its schema changes, new errors, routes slower than main, its pages against the base, and people's notes.",
@@ -422,6 +465,7 @@ pub fn source(prompt: &str, arg: &str) -> Option<Source> {
         "preview" => crate::ask::source("previews", "id"),
         "vhost" | "queue" => crate::ask::source("queues", arg),
         "stream" | "group" => crate::ask::source("streams", arg),
+        "cluster" => crate::ask::source("search", "cluster"),
         // roll code's: an owner of a repo the caller reads, then that owner's repos by name.
         "owner" => crate::ask::source("code", "owner"),
         "repo" => Some(Source { tool: "code_list_repos", args: |ctx| json!({ "owner": ctx["owner"] }), fields: &["name"] }),
