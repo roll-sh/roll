@@ -175,7 +175,8 @@ pub async fn seal_leftovers(cluster: &Cluster) -> EsResult<usize> {
     }
     for (id, rec) in st.metadata.xpack.iter(crate::xpack::watcher::WATCHES) {
         let Some(Value::Obj(w)) = rec.get("watch") else { continue };
-        let sealed = crate::xpack::watcher::parse::sealed_watch(cluster, w)?;
+        // Already in the cluster's state: its sealed values are its own.
+        let sealed = crate::xpack::watcher::parse::sealed_watch(cluster, w, &|_| true)?;
         if &sealed != w {
             let mut r = rec.clone();
             if let Value::Obj(m) = &mut r {
@@ -257,6 +258,13 @@ mod tests {
         assert!(String::from_utf8_lossy(&got.body).contains("conn-3"));
         let shown = call("GET", "/_watcher/watch/w", "").await;
         assert!(!String::from_utf8_lossy(&shown.body).contains(PREFIX), "redacted, not sealed text");
+        // A sealed value copied from elsewhere (another cluster under the same key) isn't kept
+        // as the password: it's sealed again as given, so the node never opens the other's.
+        let planted = Sealer::from_secret("0123456789abcdef0123456789abcdef-k").unwrap().seal(super::super::xpack::watcher::http::PASSWORD_KIND, "victim-pw");
+        let watch2 = watch.replace("pw-1", &planted);
+        assert_eq!(call("PUT", "/_watcher/watch/w2?active=false", &watch2).await.status, 201);
+        let state = format!("{:?}", c.state().metadata.xpack);
+        assert!(!state.contains(&planted), "the planted sealed value is not stored as it was");
     }
 
     /// A node without a key refuses the secrets clients give; one that gains a key seals, as the

@@ -127,6 +127,10 @@
           "type": "boolean",
           "description": "The app speaks HTTP/2 without TLS (gRPC)."
         },
+        "udp": {
+          "type": "boolean",
+          "description": "Its port speaks UDP (a game server, DNS): each environment answers on a UDP port of its own (ROLL_APPS_UDP_PORTS, one node); no HTTP."
+        },
         "health_grpc": {
           "type": "string",
           "maxLength": 100,

@@ -26,6 +26,11 @@ async fn a_change_gets_a_full_preview_that_follows_pushes_and_goes_when_it_lands
     assert!(urls.contains(&("web", "http://web-pr107-shop.preview.test", "cs_7a")), "{urls:?}");
     assert!(urls.contains(&("api", "http://api-pr107-shop.preview.test", "cs_api0")), "{urls:?}");
     assert!(p.cost.sleeping_usd_month > 0.0 && p.cost.active_usd_hour > 0.0, "{:?}", p.cost);
+    // How its head came up, step by step, in order.
+    let tl = e.engine.store.preview(&p.id).unwrap().timeline.expect("its timeline");
+    let steps: Vec<&str> = tl.steps.iter().map(|x| x.step.as_str()).collect();
+    assert_eq!((tl.head.as_str(), steps), ("cs_7a", vec!["data", "setup", "deploy", "checks", "ready"]));
+    assert!(tl.steps.windows(2).all(|w| w[0].at <= w[1].at) && tl.started_at <= tl.steps[0].at);
 
     // Converging again changes nothing: branching is idempotent.
     e.engine.pass().await.unwrap();
@@ -1178,6 +1183,18 @@ async fn a_service_with_a_health_path_is_ready_only_once_it_answers_well() {
     e.engine.store.update(&p.id, |r| r.next_at = 0).unwrap();
     e.engine.pass().await.unwrap();
     assert_eq!(e.engine.store.row(&p.id).unwrap().state, State::Ready);
+    // A push whose service is still starting when it's asked: left for the next poll, it goes on
+    // as soon as the service is up (the live run's preview spent 13 of 32 s waiting so).
+    e.apps.starting.store(1, Ordering::SeqCst);
+    e.code.edit("chg_hc", |c| c.head = "cs_5b".into());
+    e.engine.pass().await.unwrap();
+    let now = e.engine.store.now_ms().unwrap();
+    let waiting = e.engine.store.row(&p.id).unwrap();
+    assert!(waiting.state == State::Updating && waiting.next_at > now, "{waiting:?}");
+    e.engine.service_up(&p.id);
+    assert!(e.engine.store.row(&p.id).unwrap().next_at <= e.engine.store.now_ms().unwrap(), "due at once");
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.engine.store.row(&p.id).unwrap().state, State::Ready);
 }
 
 #[tokio::test]
@@ -1290,8 +1307,8 @@ async fn a_roll_only_preview_takes_placeholders_made_by_who_saved_its_rules() {
         fn leaf(&self, _: &str) -> anyhow::Result<roll_previews::intercept::Leaf> {
             anyhow::bail!("none")
         }
-        fn filter(&self, _: roll_previews::intercept::Outgoing<'_>) -> Result<usize, String> {
-            Ok(0)
+        fn filter(&self, _: roll_previews::intercept::Outgoing<'_>) -> Result<roll_previews::intercept::Filtered, String> {
+            Ok(Default::default())
         }
     }
     impl roll_previews::ports::Intercepts for Ca {

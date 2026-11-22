@@ -473,8 +473,11 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   enrollment, connector and Fleet secrets, connectors' configurations, which Elasticsearch returns
   with their sensitive values; `Api::sets_credentials`, a user's password), and runs it only when
   the gate says the grant may reveal there too (the row's `capable: [reveal]`,
-  `roll_auth::Capable`). Anything short of allowed is a 403; an approval isn't asked for it, so a
-  token that should do this needs `reveal` allowed. The gate reads no console body.
+  `roll_auth::Capable`). Anything short of allowed is a 403: the gate asks for approvals before a
+  request reaches a product, and it can't know this request needs one without reading the body,
+  so a rule that asks for `reveal` isn't asked here (the 403 says so). A token that should do this
+  needs `reveal` allowed, or can use `POST …/keys`, which asks as any route does. The gate reads
+  no console body.
 - Agents' machine commands, by `policy::agent_may`'s tiers: diffs and file reads `read`; working
   threads `write`; publishing with `land` `deploy`; a shell, writing files, rolling back, raising a
   thread's runtime or interaction mode, answering an agent's approval, endpoints, the gateway,

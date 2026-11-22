@@ -435,7 +435,7 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     );
     if as_user && !reachable {
         ctx.audit(None, None, None, "deny", None, StatusCode::FORBIDDEN);
-        return deny(StatusCode::FORBIDDEN, "operator_only", "a user's token reaches what their account does: roll code, agents, projects and their search clusters".into(), json!({}));
+        return deny(StatusCode::FORBIDDEN, "operator_only", "a user's token reaches what their account does: roll code, agents, their projects (with their secrets and previews) and their search clusters".into(), json!({}));
     }
     // A person's token acts within their session too (docs/members.md, "Evaluation"): their
     // memberships as they are now, so removing someone stops every token of theirs at once.
@@ -536,7 +536,7 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
         let carried = req.extensions().get::<roll_auth::RouteRules>().map(|r| r.access(row.route));
         if !matches!(carried, Some(roll_auth::Access::Public(_) | roll_auth::Access::Product(_) | roll_auth::Access::User(_))) {
             ctx.audit(None, None, None, "deny", None, StatusCode::FORBIDDEN);
-            return deny(StatusCode::FORBIDDEN, "operator_only", "a user's token reaches what their account does: roll code, agents, projects and their search clusters".into(), json!({}));
+            return deny(StatusCode::FORBIDDEN, "operator_only", "a user's token reaches what their account does: roll code, agents, their projects (with their secrets and previews) and their search clusters".into(), json!({}));
         }
     }
     // Matched by its real path (a catch-all, a nest, a signed hop): the log names the real route.
@@ -738,11 +738,48 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
                 }
                 r
             });
+            // Step-up (MCP's `insufficient_scope` challenge): an OAuth connection's refused tool call
+            // keeps the one rule it needed, for the consent screen to propose to its person; the
+            // challenge carries only the id, so a client never chooses what's proposed.
+            // Only where adding that rule would let the call through: not a move between projects, a
+            // copy or a link (another check decided), not access's own rules, not roll's quiet probes.
+            let worth = ctx.grant.kind == "oauth"
+                && ctx.mcp.as_ref().is_some_and(|m| !m.quiet)
+                && widen.is_some()
+                && about != "access"
+                && lent.is_none()
+                && asked_env.is_none()
+                && catalog::placement(row, &params).is_none();
+            let step_up = if worth {
+                let resources = match (&lent, &target) {
+                    (Some((_, id)), _) => roll_auth::scope::Resources::Some(vec![roll_auth::scope::Selector::Id { id: id.clone(), index: None }]),
+                    (None, Target::One(r)) if r.id.is_some() => roll_auth::scope::Resources::Some(vec![roll_auth::scope::Selector::Id { id: r.id.clone().unwrap_or_default(), index: r.index.clone() }]),
+                    _ => roll_auth::scope::Resources::All,
+                };
+                let rule = roll_auth::scope::Rule {
+                    product: about.to_string(),
+                    resources,
+                    environments: None,
+                    paths: None,
+                    unprotected: false,
+                    actions: [(action, roll_auth::scope::Effect::Allow)].into_iter().collect(),
+                };
+                let mut wider = (*scope).clone();
+                wider.0.push(rule.clone());
+                if weakest(&needs, |a| wider.outcome(&target, a)).0 == Outcome::Allow {
+                    let (a2, gid) = (access.clone(), ctx.grant.id.to_string());
+                    tokio::task::spawn_blocking(move || a2.store.create_step_up(&gid, &rule)).await.ok().and_then(Result::ok)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             return deny(
                 StatusCode::FORBIDDEN,
                 "forbidden",
                 format!("this token can't {action} {what}"),
-                json!({ "needs": { "product": about, "action": action, "resource": resource }, "widen": widen, "request": request }),
+                json!({ "needs": { "product": about, "action": action, "resource": resource }, "widen": widen, "request": request, "step_up": step_up }),
             );
         }
         Outcome::Ask if decided_before => {}

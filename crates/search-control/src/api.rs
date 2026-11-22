@@ -72,6 +72,8 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/keys", post(create_key))
         .route("/v1/search/clusters/{id}/repositories/{name}", axum::routing::put(put_repository))
         .route("/v1/search/clusters/{id}/keys/{key}", axum::routing::delete(delete_key))
+        .route("/v1/search/clusters/{id}/migrate/inspect", post(migrate_inspect))
+        .route("/v1/search/clusters/{id}/migrate", post(migrate))
         .route("/v1/search/clusters/{id}/browser-keys", get(browser_keys).post(create_browser_key))
         .route("/v1/search/clusters/{id}/browser-keys/{key}", axum::routing::delete(revoke_browser_key))
         .route("/v1/search/clusters/{id}/remotes", get(remotes))
@@ -453,13 +455,17 @@ async fn request(State(c): State<AppState>, Path(id): Path<String>, method: Meth
     let cluster = c.get(&id).await?;
     // Charged to the node's body budget while it's read and handed on.
     let mut held = Reservation::none();
-    let bytes = read_limited(body, console_limit(cluster.max_body_mb), c.node.body_budget(), &mut held).await.map_err(|e| read_error(&cluster, e))?;
+    let bytes = read_limited(body, console_limit(cluster.max_body_mb), declared(&headers), c.node.body_budget(), &mut held).await.map_err(|e| read_error(&cluster, e))?;
     let r = ConsoleRequest::parse(&bytes)?;
     console_reveal(&cluster, &r, &ext)?;
     if let Some(resp) = forward(&c, &cluster.name, method, &format!("/v1/search/clusters/{id}/request"), &headers, bytes.clone()).await {
         return Ok(resp);
     }
     let send = r.body_in(&bytes)?;
+    // A string body (NDJSON) was decoded into a copy of its own: charged before the read bytes go.
+    if !bytes.as_ptr_range().contains(&send.as_ptr()) {
+        c.node.body_budget().grow(&mut held, send.len()).map_err(|f| read_error(&cluster, ReadError::Busy(f)))?;
+    }
     let (m, p, h) = (r.method.clone(), r.path.clone(), r.headers.clone());
     drop(r);
     drop(bytes);
@@ -480,7 +486,14 @@ fn console_reveal(cluster: &SearchCluster, r: &ConsoleRequest, ext: &Extensions)
     }
     match ext.get::<roll_auth::Capable>().is_some_and(|c| c.has(roll_auth::scope::Action::Reveal)) {
         true => Ok(()),
-        false => Err(ControlError::Forbidden(format!("{} {} answers or sets a credential: it needs reveal on cluster {}", r.method.trim(), r.path.trim(), cluster.name))),
+        // An approval is the gate's to ask for, before the request reaches a product: a rule
+        // that would ask for reveal isn't asked here (docs/permissions.md).
+        false => Err(ControlError::Forbidden(format!(
+            "{} {} answers or sets a credential: it needs reveal allowed on cluster {} (a rule that asks for reveal isn't asked here; use POST …/keys, or a token that may reveal)",
+            r.method.trim(),
+            r.path.trim(),
+            cluster.name
+        ))),
     }
 }
 
@@ -492,6 +505,11 @@ enum ReadError {
     TooLarge,
     /// The node's body budget is full.
     Busy(Full),
+}
+
+/// The request's `Content-Length`, when it gives one.
+fn declared(headers: &HeaderMap) -> Option<usize> {
+    headers.get(axum::http::header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse().ok())
 }
 
 fn read_error(cluster: &SearchCluster, e: ReadError) -> ControlError {
@@ -506,15 +524,20 @@ fn read_error(cluster: &SearchCluster, e: ReadError) -> ControlError {
 const DRAIN_BYTES: usize = 64 << 20;
 const DRAIN_FOR: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// Reads `body` up to `limit` bytes, charging what it keeps to `budget` in `held` as it
-/// arrives; `TooLarge` when it is longer. An oversized body is still read to its end (dropping
+/// Reads `body` up to `limit` bytes, charging the buffer it keeps (its capacity, not just its
+/// length) to `budget` in `held` as it grows; `TooLarge` when it is longer. A `declared` length
+/// within the limit sizes the buffer exactly up front. An oversized body is still read to its end (dropping
 /// the rest, within [`DRAIN_BYTES`] and [`DRAIN_FOR`]) before the 413 goes out: answering while
 /// the client is still uploading closes the connection under it, and the client then sees a
 /// reset instead of the reason.
-async fn read_limited(body: Body, limit: usize, budget: &Arc<ByteBudget>, held: &mut Reservation) -> Result<bytes::Bytes, ReadError> {
+async fn read_limited(body: Body, limit: usize, declared: Option<usize>, budget: &Arc<ByteBudget>, held: &mut Reservation) -> Result<bytes::Bytes, ReadError> {
     use http_body_util::BodyExt;
     let mut body = body;
     let mut buf = bytes::BytesMut::new();
+    if let Some(n) = declared.filter(|n| *n <= limit) {
+        budget.grow(held, n).map_err(ReadError::Busy)?;
+        buf.reserve(n);
+    }
     let mut over = 0usize;
     let deadline = tokio::time::Instant::now() + DRAIN_FOR;
     loop {
@@ -530,7 +553,11 @@ async fn read_limited(body: Body, limit: usize, budget: &Arc<ByteBudget>, held: 
         let frame = frame.map_err(|e| ReadError::Failed(e.to_string()))?;
         let Ok(data) = frame.into_data() else { continue };
         if over == 0 && buf.len() + data.len() <= limit {
-            budget.grow(held, data.len()).map_err(ReadError::Busy)?;
+            if buf.capacity() - buf.len() < data.len() {
+                buf.reserve(data.len());
+                // `held` is what the buffer held before: its growth is charged.
+                budget.grow(held, buf.capacity().saturating_sub(held.bytes())).map_err(ReadError::Busy)?;
+            }
             buf.extend_from_slice(&data);
             continue;
         }
@@ -581,7 +608,7 @@ async fn es_route(c: &Control, id: &str, method: Method, api_path: String, es_me
     let mut held = Reservation::none();
     let bytes = match kind {
         EsBody::None => bytes::Bytes::new(),
-        _ => read_limited(body, (cluster.max_body_mb.max(1) as usize) << 20, c.node.body_budget(), &mut held).await.map_err(|e| read_error(&cluster, e))?,
+        _ => read_limited(body, (cluster.max_body_mb.max(1) as usize) << 20, declared(headers), c.node.body_budget(), &mut held).await.map_err(|e| read_error(&cluster, e))?,
     };
     if kind == EsBody::Json && !bytes.is_empty() && serde_json::from_slice::<serde::de::IgnoredAny>(&bytes).is_err() {
         return Err(ControlError::Invalid("the body isn't JSON".into()));
@@ -670,6 +697,20 @@ async fn create_key(State(c): State<AppState>, Path(id): Path<String>, Json(k): 
 async fn delete_key(State(c): State<AppState>, Path((id, key)): Path<(String, String)>) -> Result<StatusCode, ControlError> {
     c.delete_key(&id, &key).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Lists an Elasticsearch or OpenSearch cluster's indices for a migration into cluster `id`
+/// (`crate::migrate`): fetched by roll, never by the browser; the credentials aren't kept.
+async fn migrate_inspect(State(c): State<AppState>, Path(id): Path<String>, Json(b): Json<crate::migrate::InspectRequest>) -> Result<Response, ControlError> {
+    // The answer goes out in chunks, charged until it's sent (or the connection closes).
+    let answer = c.migrate_inspect(&id, &b.source).await?;
+    Ok(([(axum::http::header::CONTENT_TYPE, "application/json")], Body::from_stream(answer.into_stream())).into_response())
+}
+
+/// Copies the picked indices' definitions into cluster `id` and starts a reindex from remote
+/// for each (`wait_for_completion=false`: the answer lists the tasks).
+async fn migrate(State(c): State<AppState>, Path(id): Path<String>, Json(b): Json<crate::migrate::MigrateRequest>) -> ApiResult<Value> {
+    Ok(Json(c.migrate(&id, &b).await?))
 }
 
 /// `GET /v1/search/clusters/{id}/browser-keys`: the keys web pages ship, without their secrets.
@@ -809,7 +850,7 @@ mod tests {
     }
 
     async fn read(body: Body, limit: usize, budget: &Arc<ByteBudget>) -> Result<bytes::Bytes, ReadError> {
-        read_limited(body, limit, budget, &mut Reservation::none()).await
+        read_limited(body, limit, None, budget, &mut Reservation::none()).await
     }
 
     #[tokio::test]

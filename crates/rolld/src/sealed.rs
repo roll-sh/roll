@@ -44,13 +44,16 @@ impl axum::serve::Listener for Shared {
 /// Serve the unseal on the API's address until the shares give the key: the key, and the same
 /// listener (connections wait in its backlog while the products start). `None`: stopped while
 /// sealed.
-pub async fn unseal(args: &Args, home: &Path, sealed: Sealed) -> anyhow::Result<Option<(TcpListener, Zeroizing<String>)>> {
+pub async fn unseal(args: &Args, home: &Path, sealed: Sealed, listeners: &[(&'static str, std::net::SocketAddr)]) -> anyhow::Result<Option<(TcpListener, Zeroizing<String>)>> {
     for var in OTHER_SOURCES {
         anyhow::ensure!(std::env::var(var).ok().is_none_or(|v| v.trim().is_empty()), "ROLL_SECRET_KEY_SEALED and {var} can't both be set: a sealed node's key comes only from its shares (finish a key rotation before starting sealed)");
     }
     let (target, pg) = crate::secrets::store(args, home)?;
     let (unsealer, key) = tokio::task::block_in_place(|| Unsealer::new(sealed, roll_secrets::open_db(&target, pg)?))?;
-    let listener = Arc::new(TcpListener::bind(args.api).await?);
+    let listener = Arc::new(crate::listen::bind(args.api)?);
+    if let Some(path) = &args.addr_file {
+        crate::listen::announce(path, listeners, true)?;
+    }
     tracing::warn!(addr = %args.api, set = %Sealed::set_hex(&sealed.set), need = sealed.threshold, "sealed: nothing runs until the deployment key's shares unseal this node (roll secrets unseal)");
     let router = roll_secrets::unseal::sealed_router(unsealer).layer(axum::middleware::from_fn(crate::logs::access));
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
@@ -75,7 +78,7 @@ pub async fn unseal(args: &Args, home: &Path, sealed: Sealed) -> anyhow::Result<
     tracing::info!("unsealed: starting the products");
     let listener = match Arc::try_unwrap(listener) {
         Ok(l) => l,
-        Err(_) => TcpListener::bind(args.api).await?,
+        Err(_) => crate::listen::bind(args.api)?,
     };
     Ok(Some((listener, key)))
 }

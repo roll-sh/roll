@@ -133,10 +133,13 @@ pub struct ShardConfig {
     /// holds: Lucene's `IndexWriter.MAX_DOCS` ([`MAX_DOCS`]), which keeps every global doc id
     /// in a `u32`. Lower only in tests.
     pub max_docs: u64,
-    /// Most bytes of analyzed terms one document may produce at index time
-    /// ([`crate::buffer::MAX_DOC_TERM_BYTES`]); past it the analysis stops and the document is
+    /// Most memory one document's inversion may add to the buffer
+    /// ([`crate::buffer::MAX_DOC_ANALYSIS_BYTES`]); past it the analysis stops and the document is
     /// refused.
-    pub max_doc_term_bytes: usize,
+    pub max_doc_analysis_bytes: usize,
+    /// The node's budget for documents being inverted, shared by its shards
+    /// ([`crate::buffer::AnalysisBudget`]; `None`: none).
+    pub analysis_budget: Option<Arc<crate::buffer::AnalysisBudget>>,
 }
 
 /// Lucene's `IndexWriter.MAX_DOCS`: the most docs one shard holds.
@@ -161,7 +164,8 @@ impl Default for ShardConfig {
             vector_threads: cores.min(8),
             query_cache: true,
             max_docs: MAX_DOCS,
-            max_doc_term_bytes: crate::buffer::MAX_DOC_TERM_BYTES,
+            max_doc_analysis_bytes: crate::buffer::MAX_DOC_ANALYSIS_BYTES,
+            analysis_budget: None,
         }
     }
 }
@@ -1114,7 +1118,8 @@ impl Shard {
         }
         let uid = self.inner.uids.fetch_add(1, Ordering::Relaxed);
         let mut buf = Buffer::new(uid, st.schema.clone());
-        buf.max_doc_term_bytes = self.inner.cfg.max_doc_term_bytes;
+        buf.max_doc_analysis_bytes = self.inner.cfg.max_doc_analysis_bytes;
+        buf.analysis = self.inner.cfg.analysis_budget.clone();
         let slot = Arc::new(BufferSlot {
             uid,
             buf: RwLock::new(buf),

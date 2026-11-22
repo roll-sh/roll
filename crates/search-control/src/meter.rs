@@ -333,6 +333,7 @@ mod tests {
                     cors: None,
                     browser_per_minute: None,
                     inherit_pending: false,
+                    reindex_whitelist: Vec::new(),
                 },
                 crate::store::Caps::NONE,
             )

@@ -27,3 +27,4 @@ GET /v1/secrets/projects/{project}/environments/{env}/values namespace          
 GET /v1/secrets/projects/{project}/environments/{env}/values digest                a cache validator for SDKs polling a folder, not a question an agent asks
 GET /v1/secrets/projects/{project}/environments/{env}/values codes                 TOTP codes beside their keys: secrets_totp answers one, audited as itself
 DELETE /v1/secrets/projects/{project}/environments/{env} confirm                   a protected environment's delete repeats its slug: a person's confirmation, not an argument an agent fills
+DELETE /v1/workspace/projects/{id} confirm                                        a project holding secrets repeats its name: a secrets admin's confirmation, not an argument an agent fills

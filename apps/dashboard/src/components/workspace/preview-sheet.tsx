@@ -177,6 +177,7 @@ export function PreviewSheet({
             )}
             <VerdictStrip p={p} onTab={setTab} />
             <RegressionsAccept p={p} />
+            <TimelineLine p={p} />
             {p.intercepted && (
               <p className="mb-3 text-[11.5px] text-muted">
                 Keys it never holds:{" "}
@@ -2016,6 +2017,22 @@ function Dotted({ items, className }: { items: ReactNode[]; className?: string }
           {i < shown.length - 1 ? " ·" : ""}
         </span>
       ))}
+    </div>
+  );
+}
+
+/** How its head came up: "Up in 9.4 s: data 4.1 s · setup 1.2 s · deploy 3.0 s · checks 0.4 s",
+ * or the steps so far while it's on its way. */
+function TimelineLine({ p }: { p: Preview }) {
+  const t = p.timeline;
+  if (!t || t.steps.length === 0) return null;
+  const ready = t.steps.find((x) => x.step === "ready");
+  const shown = t.steps.filter((x) => x.step !== "ready");
+  const items = shown.map((x, i) => `${x.step} ${duration(x.at - (i === 0 ? t.started_at : shown[i - 1].at))}`);
+  return (
+    <div className="mb-3 flex flex-wrap items-baseline gap-x-1.5 text-[11.5px] text-muted" title={`How ${t.head.replace(/^cs_/, "").slice(0, 10)} came up, step by step`}>
+      <span>{ready ? `Up in ${duration(ready.at - t.started_at)}:` : "So far:"}</span>
+      <Dotted className="font-mono text-[11px] text-subtle tabular-nums" items={items} />
     </div>
   );
 }

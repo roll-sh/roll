@@ -44,17 +44,85 @@ use termhash::TermHash;
 /// Longest term Lucene accepts (`IndexWriter.MAX_TERM_LENGTH`).
 pub const MAX_TERM_LENGTH: usize = 32766;
 
-/// The most bytes of analyzed terms one document, its nested children included, may produce at
-/// index time, across every field and analyzer (multi-fields and `copy_to` targets are fields of
-/// their own): [`crate::ShardConfig::max_doc_term_bytes`]'s default. Each token costs its term's
-/// bytes plus [`TOKEN_COST`]. Elasticsearch has no such limit (only Lucene's per-thread RAM limit,
-/// near 2 GB); roll's keeps an `ngram` or `shingle` chain from turning one body into gigabytes of
+/// The most memory one document, its nested children included, may make the indexing buffer hold
+/// while its fields are inverted, across every field and analyzer (multi-fields and `copy_to`
+/// targets are fields of their own): [`crate::ShardConfig::max_doc_analysis_bytes`]'s default.
+/// What's counted is the buffer's real growth (its byte pool, term hashes and postings), as each
+/// token is inverted. Elasticsearch has no such limit (only Lucene's per-thread RAM limit, near
+/// 2 GB); roll's keeps an `ngram` or `shingle` chain from turning one body into gigabytes of
 /// postings on a shared node, and stops the analysis there rather than finish it.
-pub const MAX_DOC_TERM_BYTES: usize = 256 << 20;
+pub const MAX_DOC_ANALYSIS_BYTES: usize = 256 << 20;
 
-/// What one token costs against [`MAX_DOC_TERM_BYTES`] besides its term (its posting and
-/// position), so that many empty or one-byte terms count too.
-pub const TOKEN_COST: usize = 16;
+/// Memory all documents being inverted on a node may add to their buffers at once
+/// ([`crate::ShardConfig::analysis_budget`]): concurrent writers each charge their document's
+/// growth here as it's made, and give it back once the document is in (it's the buffer's then,
+/// flushed by its own budget). A refused document's growth stays charged until its buffer goes,
+/// since its partial postings stay there until then. Past the limit, `circuit_breaking_exception`.
+#[derive(Debug)]
+pub struct AnalysisBudget {
+    limit: usize,
+    used: std::sync::atomic::AtomicUsize,
+}
+
+impl AnalysisBudget {
+    pub fn new(limit: usize) -> Arc<AnalysisBudget> {
+        Arc::new(AnalysisBudget { limit, used: std::sync::atomic::AtomicUsize::new(0) })
+    }
+
+    pub fn used(&self) -> usize {
+        self.used.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn limit(&self) -> usize {
+        self.limit
+    }
+
+    /// Takes `n` bytes, or says what's in use when that would pass the limit.
+    fn try_charge(&self, n: usize) -> std::result::Result<(), usize> {
+        use std::sync::atomic::Ordering;
+        let mut cur = self.used.load(Ordering::SeqCst);
+        loop {
+            if cur.saturating_add(n) > self.limit {
+                return Err(cur);
+            }
+            match self.used.compare_exchange(cur, cur + n, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => return Ok(()),
+                Err(v) => cur = v,
+            }
+        }
+    }
+
+    fn release(&self, n: usize) {
+        self.used.fetch_sub(n, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// The memory a document's inversion has added, charged as it grows: to the document's own cap
+/// ([`MAX_DOC_ANALYSIS_BYTES`]) and to the node's [`AnalysisBudget`].
+struct DocMeter<'a> {
+    left: &'a mut usize,
+    max: usize,
+    budget: Option<&'a AnalysisBudget>,
+    charged: &'a mut usize,
+}
+
+impl DocMeter<'_> {
+    fn charge(&mut self, field: &str, grown: usize) -> Result<()> {
+        let Some(left) = self.left.checked_sub(grown) else { return Err(too_much_analysis(field, self.max)) };
+        if let Some(b) = self.budget {
+            b.try_charge(grown).map_err(|used| analysis_breaker(field, used, grown, b.limit))?;
+            *self.charged += grown;
+        }
+        *self.left = left;
+        Ok(())
+    }
+}
+
+/// The buffer memory inverting tokens of field `fb` can grow: the pool, its term hash, postings
+/// and term-vector occurrences (capacities, read in constant time).
+fn analyzed_ram(pool: &BytePool, fb: &FieldBuf) -> usize {
+    pool.ram_bytes() + fb.terms.ram_bytes() + fb.post.ram_bytes() + fb.tv_occ.capacity() * 24
+}
 /// Largest position (`IndexWriter.MAX_POSITION`).
 pub const MAX_POSITION: i64 = i32::MAX as i64 - 128;
 
@@ -328,10 +396,16 @@ pub struct Buffer {
     pub(crate) max_seq_no: i64,
     /// Field numbers touched by the doc being indexed.
     touched: Vec<u32>,
-    /// The most analyzed term bytes a document may produce ([`MAX_DOC_TERM_BYTES`]).
-    pub(crate) max_doc_term_bytes: usize,
+    /// The most memory a document's inversion may add ([`MAX_DOC_ANALYSIS_BYTES`]).
+    pub(crate) max_doc_analysis_bytes: usize,
     /// What the document being indexed has left of it.
-    doc_terms_left: usize,
+    doc_analysis_left: usize,
+    /// The node's budget for documents being inverted ([`AnalysisBudget`]).
+    pub(crate) analysis: Option<Arc<AnalysisBudget>>,
+    /// What the document being indexed has charged to it.
+    doc_charged: usize,
+    /// What refused documents charged to it: their partial postings stay until the buffer goes.
+    held: usize,
     stored_scratch: Vec<u8>,
     tv_scratch: Vec<u8>,
     ram: usize,
@@ -351,8 +425,11 @@ impl Buffer {
             has_nested: false,
             max_seq_no: -1,
             touched: Vec::new(),
-            max_doc_term_bytes: MAX_DOC_TERM_BYTES,
-            doc_terms_left: MAX_DOC_TERM_BYTES,
+            max_doc_analysis_bytes: MAX_DOC_ANALYSIS_BYTES,
+            doc_analysis_left: MAX_DOC_ANALYSIS_BYTES,
+            analysis: None,
+            doc_charged: 0,
+            held: 0,
             stored_scratch: Vec::new(),
             tv_scratch: Vec::new(),
             ram: 0,
@@ -434,8 +511,18 @@ impl Buffer {
                 search_codec::MAX_DOCS
             )));
         }
-        self.doc_terms_left = self.max_doc_term_bytes;
+        self.doc_analysis_left = self.max_doc_analysis_bytes;
+        self.doc_charged = 0;
         let r = self.add_rec(doc, meta, true);
+        // A document that's in hands its growth to the buffer; a refused one's stays charged.
+        let charged = std::mem::take(&mut self.doc_charged);
+        if let Some(b) = &self.analysis {
+            if r.is_ok() {
+                b.release(charged);
+            } else {
+                self.held += charged;
+            }
+        }
         if r.is_err() {
             for d in first..self.max_doc {
                 self.aborted.push(d);
@@ -536,13 +623,12 @@ impl Buffer {
             IndexableField::Tokens { field, tokens } => {
                 let number = *field;
                 check_indexed(self.touch(number)?)?;
-                let cost = tokens.iter().fold(0usize, |n, t| n.saturating_add(t.term.len() + TOKEN_COST));
-                match self.doc_terms_left.checked_sub(cost) {
-                    Some(left) => self.doc_terms_left = left,
-                    None => return Err(too_many_term_bytes(self.schema.field(number).map_or("", |f| f.name.as_str()), self.max_doc_term_bytes)),
-                }
+                let budget = self.analysis.clone();
+                let max = self.max_doc_analysis_bytes;
+                let mut meter = DocMeter { left: &mut self.doc_analysis_left, max, budget: budget.as_deref(), charged: &mut self.doc_charged };
                 let pool = &mut self.pool;
                 let fb = self.fields[number as usize].as_deref_mut().unwrap();
+                let mut seen = analyzed_ram(pool, fb);
                 for t in tokens {
                     if t.freq != 1 && fb.positions {
                         return Err(Error::illegal(format!(
@@ -566,6 +652,11 @@ impl Buffer {
                         t.freq.max(1),
                         false,
                     )?;
+                    let now = analyzed_ram(pool, fb);
+                    if now > seen {
+                        meter.charge(&fb.schema.name, now - seen)?;
+                        seen = now;
+                    }
                 }
                 if let Some(last) = tokens.last() {
                     fb.inv_offset += last.end_offset as i64;
@@ -627,18 +718,13 @@ impl Buffer {
         let mut err: Option<Error> = None;
         let mut last_abs: i64 = -1;
         let mut any = false;
-        let (max, left) = (self.max_doc_term_bytes, &mut self.doc_terms_left);
+        let budget = self.analysis.clone();
+        let max = self.max_doc_analysis_bytes;
+        let mut meter = DocMeter { left: &mut self.doc_analysis_left, max, budget: budget.as_deref(), charged: &mut self.doc_charged };
+        let mut seen = analyzed_ram(pool, fb);
         // The field's name goes into Lucene's position errors (`IndexingChain.invertTokenStream`).
         let name = self.schema.field(number).map_or("", |f| f.name.as_str());
         let r = analyzer.try_analyze_field_until(name, values, &mut |t| {
-            // Past the document's budget the analysis stops: no more terms are produced.
-            match left.checked_sub(t.term.len() + TOKEN_COST) {
-                Some(l) => *left = l,
-                None => {
-                    err = Some(too_many_term_bytes(name, max));
-                    return std::ops::ControlFlow::Break(());
-                }
-            }
             any = true;
             let pos = base_pos + t.position as i64;
             last_abs = t.position as i64;
@@ -657,6 +743,15 @@ impl Buffer {
             ) {
                 err = Some(e);
                 return std::ops::ControlFlow::Break(());
+            }
+            // What the buffer grew by is charged as it grows; past a budget the analysis stops.
+            let now = analyzed_ram(pool, fb);
+            if now > seen {
+                if let Err(e) = meter.charge(name, now - seen) {
+                    err = Some(e);
+                    return std::ops::ControlFlow::Break(());
+                }
+                seen = now;
             }
             std::ops::ControlFlow::Continue(())
         });
@@ -854,12 +949,29 @@ fn check_indexed(fb: &FieldBuf) -> Result<()> {
     Ok(())
 }
 
-/// roll's refusal of a document past [`MAX_DOC_TERM_BYTES`] (no Elasticsearch counterpart),
+/// roll's refusal of a document past [`MAX_DOC_ANALYSIS_BYTES`] (no Elasticsearch counterpart),
 /// naming the field that passed it.
-fn too_many_term_bytes(field: &str, max: usize) -> Error {
+fn too_much_analysis(field: &str, max: usize) -> Error {
     Error::illegal(format!(
-        "Document field=\"{field}\" took the document past [{max}] bytes of analyzed terms, the most one document may produce at index time on roll. Index a smaller document, or analyze it into fewer, shorter terms (a smaller [max_gram] or [max_shingle_size])"
+        "Document field=\"{field}\" took the document past [{max}] bytes of indexing memory, the most one document may use at index time on roll. Index a smaller document, or analyze it into fewer, shorter terms (a smaller [max_gram] or [max_shingle_size])"
     ))
+}
+
+/// The node's [`AnalysisBudget`] full: Elasticsearch's breaker refusal, a 429 to retry.
+fn analysis_breaker(field: &str, used: usize, wanted: usize, limit: usize) -> Error {
+    Error::es(
+        "circuit_breaking_exception",
+        format!("[in_flight_analysis] Data too large, data for [indexing field [{field}]] would be [{}b], which is larger than the limit of [{limit}b]", used.saturating_add(wanted)),
+        429,
+    )
+}
+
+impl Drop for Buffer {
+    fn drop(&mut self) {
+        if let Some(b) = &self.analysis {
+            b.release(self.held);
+        }
+    }
 }
 
 /// `Arrays.toString(byte[30])` of a term prefix (Java signed bytes).

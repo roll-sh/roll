@@ -193,10 +193,14 @@ async fn end_session(State(m): State<Mcp>, headers: HeaderMap) -> Response {
     }
 }
 
-async fn handle(State(m): State<Mcp>, ext: axum::http::Extensions, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+async fn handle(State(m): State<Mcp>, ext: axum::http::Extensions, uri: axum::http::Uri, headers: HeaderMap, body: axum::body::Bytes) -> Response {
     if !origin_ok(&m.code, &headers) {
         return http_error(StatusCode::FORBIDDEN, "Origin not allowed");
     }
+    let lockdown = match lockdown_asked(&uri, &headers) {
+        Ok(l) => l,
+        Err(e) => return http_error(StatusCode::BAD_REQUEST, &e),
+    };
     let msg: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => return (StatusCode::BAD_REQUEST, Json(rpc_error(Value::Null, -32700, format!("parse error: {e}")))).into_response(),
@@ -260,7 +264,7 @@ async fn handle(State(m): State<Mcp>, ext: axum::http::Extensions, headers: Head
             Err(resp) => return *resp,
         };
         let stream = futures::stream::once(async move {
-            let out = process(&m, &headers, messages).await.0;
+            let out = process(&m, &headers, lockdown, messages).await.0;
             drop(permit);
             out
         })
@@ -271,7 +275,7 @@ async fn handle(State(m): State<Mcp>, ext: axum::http::Extensions, headers: Head
         });
         return Sse::new(stream).keep_alive(KeepAlive::new().interval(SSE_KEEPALIVE)).into_response();
     }
-    let (mut responses, new_session) = process(&m, &headers, messages).await;
+    let (mut responses, new_session) = process(&m, &headers, lockdown, messages).await;
     let mut resp = if responses.is_empty() {
         StatusCode::ACCEPTED.into_response()
     } else if batch {
@@ -295,7 +299,7 @@ fn wants_sse(h: &HeaderMap) -> bool {
 
 /// Answer each request in `messages` (notifications get none); the new session id when one
 /// of them was `initialize`.
-async fn process(m: &Mcp, headers: &HeaderMap, messages: Vec<Value>) -> (Vec<Value>, Option<String>) {
+async fn process(m: &Mcp, headers: &HeaderMap, lockdown: bool, messages: Vec<Value>) -> (Vec<Value>, Option<String>) {
     let mut new_session = None;
     let mut responses = Vec::new();
     for msg in messages {
@@ -313,7 +317,7 @@ async fn process(m: &Mcp, headers: &HeaderMap, messages: Vec<Value>) -> (Vec<Val
         };
         let params = msg.get("params").cloned().unwrap_or(Value::Null);
         let resp = match method {
-            "initialize" => match initialize(m, headers, &params) {
+            "initialize" => match initialize(m, headers, &params, lockdown) {
                 Ok((result, sid)) => {
                     new_session = Some(sid);
                     rpc_result(id, result)
@@ -330,7 +334,7 @@ async fn process(m: &Mcp, headers: &HeaderMap, messages: Vec<Value>) -> (Vec<Val
                 } else if !args.is_object() {
                     rpc_error(id, -32602, "arguments must be an object")
                 } else {
-                    rpc_result(id, call_tool(m, headers, name, &args).await)
+                    rpc_result(id, call_tool(m, headers, name, &args, lockdown).await)
                 }
             }
             "resources/list" => rpc_result(id, json!({ "resources": [] })),
@@ -342,7 +346,7 @@ async fn process(m: &Mcp, headers: &HeaderMap, messages: Vec<Value>) -> (Vec<Val
     (responses, new_session)
 }
 
-fn initialize(m: &Mcp, headers: &HeaderMap, params: &Value) -> crate::Result<(Value, String)> {
+fn initialize(m: &Mcp, headers: &HeaderMap, params: &Value, lockdown: bool) -> crate::Result<(Value, String)> {
     let asked = params.get("protocolVersion").and_then(Value::as_str).unwrap_or("");
     let version = if PROTOCOL_VERSIONS.contains(&asked) { asked } else { PROTOCOL_VERSIONS[0] };
     let sid = crate::new_id("mcp");
@@ -360,6 +364,11 @@ changed underneath you: re-read them, revise, land again). Changes are \"chg_…
 create_agent_thread, send_agent_message, respond_agent_request, interrupt_agent_thread, publish_agent_thread; \
 create_agent_project starts a repo as a project on a machine, claim_agent_work gives a thread a work item.",
     });
+    let mut result = result;
+    if lockdown {
+        let text = format!("{} This connection is in lockdown: text written by people who can't push to a repo (issues anyone opened, pull requests from forks, their comments) comes back as \"{}\".", result["instructions"].as_str().unwrap_or_default(), roll_auth::lockdown::WITHHELD);
+        result["instructions"] = Value::String(text);
+    }
     Ok((result, sid))
 }
 
@@ -1231,7 +1240,7 @@ fn body_of(args: &Value, drop: &[&str]) -> Value {
     b
 }
 
-async fn call_tool(m: &Mcp, headers: &HeaderMap, name: &str, args: &Value) -> Value {
+async fn call_tool(m: &Mcp, headers: &HeaderMap, name: &str, args: &Value, lockdown: bool) -> Value {
     // A credential headed where people and agents read it isn't sent (roll_auth::credentials, as
     // roll's own `/v1/mcp` does before it fronts these tools): a write's arguments only.
     let writes = tools().iter().find(|t| t["name"] == name).is_some_and(|t| t["annotations"]["readOnlyHint"] != true);
@@ -1244,7 +1253,45 @@ async fn call_tool(m: &Mcp, headers: &HeaderMap, name: &str, args: &Value) -> Va
         );
         return json!({ "content": [{ "type": "text", "text": text }], "structuredContent": { "refused": "credential", "at": found.at, "kind": found.kind, "error": text }, "isError": true });
     }
-    call(&m.api, headers, None, name, args).await
+    let mut result = call(&m.api, headers, None, name, args).await;
+    // In lockdown, an outside record's text never reaches the model (roll_auth::lockdown, as
+    // roll's own /v1/mcp does): withheld in the structured answer, the text block rebuilt from it.
+    if lockdown && roll_auth::lockdown::withhold(&mut result["structuredContent"]) > 0 {
+        let text = serde_json::to_string_pretty(&result["structuredContent"]).unwrap_or_default();
+        result["content"] = json!([{ "type": "text", "text": text }]);
+    }
+    // What a person can't see but a model reads (tag characters, zero-width and bidi controls) is
+    // written out as escapes in the text block, as roll's own /v1/mcp does: a comment or a file
+    // can't hide an instruction. `structuredContent` stays exact.
+    if let Some(content) = result["content"].as_array_mut() {
+        for c in content.iter_mut().filter(|c| c["type"] == "text") {
+            if let Some(t) = c["text"].as_str() {
+                c["text"] = Value::String(roll_auth::lockdown::visible(t));
+            }
+        }
+    }
+    result
+}
+
+/// `?lockdown=1` (or `X-MCP-Lockdown: 1`): this connection withholds outsiders' text, as roll's own
+/// `/v1/mcp?lockdown=1` does. Anything but 1/true/0/false is refused, so a typo isn't silently off.
+fn lockdown_asked(uri: &axum::http::Uri, headers: &HeaderMap) -> std::result::Result<bool, String> {
+    let parse = |v: &str| match v.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "" => Ok(true),
+        "0" | "false" => Ok(false),
+        other => Err(format!("lockdown={other:?}: 1 or true (0 or false to turn it off)")),
+    };
+    let mut on = false;
+    for pair in uri.query().unwrap_or_default().split('&').filter(|p| !p.is_empty()) {
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        if k == "lockdown" {
+            on |= parse(v)?;
+        }
+    }
+    if let Some(v) = headers.get("x-mcp-lockdown").and_then(|v| v.to_str().ok()) {
+        on |= parse(v)?;
+    }
+    Ok(on)
 }
 
 /// Run one of [`tools`] against `api` with the caller's headers (`Authorization`, `X-Roll-Agent`,
@@ -1255,7 +1302,9 @@ pub async fn call(api: &Router, headers: &HeaderMap, extensions: Option<&axum::h
     let outcome = match run(&c, name, args).await {
         Ok(o) | Err(o) => o,
     };
-    let text = outcome.text.clone().unwrap_or_else(|| serde_json::to_string_pretty(&outcome.data).unwrap_or_default());
+    // At most what a client takes in one answer (roll_auth::lockdown::cut, as roll's /v1/mcp does:
+    // Claude Code moves a longer one to a file); the structured content stays whole.
+    let text = roll_auth::lockdown::cut(outcome.text.clone().unwrap_or_else(|| serde_json::to_string_pretty(&outcome.data).unwrap_or_default()), true);
     let structured = if outcome.data.is_object() { outcome.data } else { json!({ "result": outcome.data }) };
     json!({
         "content": [{ "type": "text", "text": text }],

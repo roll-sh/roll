@@ -128,21 +128,29 @@ pub fn normalize(v: &Value, previous: Option<&Value>) -> EsResult<Map> {
 
 /// Kinds of sealed values ([`crate::seal`]).
 const PASSWORD: &str = "watch password";
+#[cfg(test)]
+pub(crate) const PASSWORD_KIND: &str = PASSWORD;
 const AUTH_HEADER: &str = "watch authorization header";
 
 /// A normalized template as the cluster stores it: its password and `Authorization` headers
-/// sealed ([`crate::seal`]; refused in the clear on a node without a key).
-pub fn seal(cluster: &Cluster, stored: &Value) -> EsResult<Value> {
+/// sealed ([`crate::seal`]; refused in the clear on a node without a key). A value that looks
+/// sealed is kept only when `trusted` says it's the cluster's own (the stored watch's, kept by
+/// an update); any other is sealed as given, so a client can't plant a sealed value copied from
+/// elsewhere for the node to open and send to its URL.
+pub fn seal(cluster: &Cluster, stored: &Value, trusted: &dyn Fn(&str) -> bool) -> EsResult<Value> {
+    let seal_one = |kind: &str, s: &str| -> EsResult<String> {
+        if crate::seal::is_sealed(s) && trusted(s) { Ok(s.to_string()) } else { crate::seal::seal_given(cluster, kind, s) }
+    };
     let mut v = stored.clone();
     if let Some(Value::Obj(a)) = v.as_object_mut().and_then(|m| m.get_mut("auth")).and_then(|a| a.as_object_mut()).and_then(|a| a.get_mut("basic"))
         && let Some(p) = a.get("password").map(Value::to_es_string)
     {
-        a.insert("password".into(), crate::seal::seal(cluster, PASSWORD, &p)?.into());
+        a.insert("password".into(), seal_one(PASSWORD, &p)?.into());
     }
     if let Some(Value::Obj(h)) = v.as_object_mut().and_then(|m| m.get_mut("headers")) {
         for (k, val) in h.iter_mut() {
             if k.eq_ignore_ascii_case("authorization") && let Value::Str(s) = val {
-                *val = Value::from(crate::seal::seal(cluster, AUTH_HEADER, s)?);
+                *val = Value::from(seal_one(AUTH_HEADER, s)?);
             }
         }
     }

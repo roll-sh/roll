@@ -389,10 +389,11 @@ pub fn redacted_watch(w: &Value) -> Value {
 }
 
 /// A normalized watch as the cluster stores it (secrets sealed, [`crate::seal`]; refused in the
-/// clear on a node without a key).
-pub fn sealed_watch(cluster: &Cluster, w: &Map) -> EsResult<Map> {
+/// clear on a node without a key). Values that look sealed are kept only when `trusted` (see
+/// [`http::seal`]).
+pub fn sealed_watch(cluster: &Cluster, w: &Map, trusted: &dyn Fn(&str) -> bool) -> EsResult<Map> {
     let failed: std::cell::RefCell<Option<EsError>> = std::cell::RefCell::new(None);
-    let sealed = map_requests(&Value::Obj(w.clone()), &|r| match http::seal(cluster, r) {
+    let sealed = map_requests(&Value::Obj(w.clone()), &|r| match http::seal(cluster, r, trusted) {
         Ok(v) => v,
         Err(e) => {
             failed.borrow_mut().get_or_insert(e);
@@ -406,6 +407,18 @@ pub fn sealed_watch(cluster: &Cluster, w: &Map) -> EsResult<Map> {
         Value::Obj(m) => m,
         _ => w.clone(),
     })
+}
+
+/// The sealed values a stored watch holds: what an update may keep as they are.
+pub fn sealed_values(v: &Value, out: &mut std::collections::HashSet<String>) {
+    match v {
+        Value::Str(s) if crate::seal::is_sealed(s) => {
+            out.insert(s.clone());
+        }
+        Value::Obj(m) => m.values().for_each(|x| sealed_values(x, out)),
+        Value::Arr(a) => a.iter().for_each(|x| sealed_values(x, out)),
+        _ => {}
+    }
 }
 
 /// Whether parsing the watch warns that `ignore_throttled` is deprecated (a search request
