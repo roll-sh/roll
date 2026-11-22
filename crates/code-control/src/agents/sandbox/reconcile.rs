@@ -139,6 +139,33 @@ impl Code {
         deleted
     }
 
+    /// Stop every running sandbox holding values copied by someone `theirs` names (roll secrets'
+    /// chain from a copier to a person who was just disabled, demoted or deleted). Their next
+    /// start or wake asks roll secrets again, and takes the values out. Safe to run twice: how
+    /// many it asked to stop.
+    pub async fn stop_sandboxes_copied_by(&self, theirs: impl Fn(&str) -> Result<bool, String>) -> crate::Result<usize> {
+        let mut stopped = 0;
+        for s in store::running_with_copies(self.db.sql())? {
+            let Some(by) = s.secrets_by.as_deref() else { continue };
+            if !theirs(by).map_err(|e| crate::Error::Internal(anyhow::anyhow!(e)))? {
+                continue;
+            }
+            let hub = self.agents.hub(&s.owner_id);
+            {
+                let _order = hub.order.lock().await;
+                match store::set_desired(self.db.sql(), &s.owner_id, &s.id, Desired::Stopped)? {
+                    Some((_, Some(m))) => self.publish_machine(&m),
+                    Some(_) => {}
+                    None => continue,
+                }
+            }
+            tracing::info!(sandbox = %s.id, by, "stopping a sandbox: whoever copied roll secrets' values into it was offboarded");
+            self.kick_sandboxes(&s.owner_id);
+            stopped += 1;
+        }
+        Ok(stopped)
+    }
+
     /// Have the owner's reconciler look now (starting it if it isn't running here).
     pub(crate) fn kick_sandboxes(&self, owner_id: &str) {
         if self.sandboxes.backend.is_none() {
