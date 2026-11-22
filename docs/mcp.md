@@ -185,7 +185,8 @@ secret: by writing it somewhere it's read.
 ### The sweep
 
 `pnpm test:mcp-sweep` (`scripts/test-mcp-sweep.sh`) builds rolld and starts it with every product
-on, its listeners on free loopback ports and a throwaway home. It then calls every tool through
+on, its listeners on loopback port 0 (the addresses read back from `--addr-file`, #596) and a
+throwaway home. It then calls every tool through
 `/v1/mcp` as an agent would (`scripts/mcp-sweep.py`):
 
 1. It makes fixtures with the write tools.
@@ -193,7 +194,11 @@ on, its listeners on free loopback ports and a throwaway home. It then calls eve
    (a deploy, a trace, a mail), it sends a stand-in that doesn't exist: the route answers "not
    found" with a message, so the tool's path, query and types are still checked (`--verbose`
    lists each stand-in and its answer).
-3. It calls each write tool with values made from its schema, the destructive ones last.
+3. As a member: it signs a person in by email code (rolld's outbox), makes them a viewer in its
+   project, mints them a token that names every action, and calls each read tool of a member
+   product (secrets, previews, workspace) their client lists. None may be refused by their role,
+   and secrets' writes and reveals must not be listed for them.
+4. It calls each write tool with values made from its schema, the destructive ones last.
 
 A 5xx, an argument the route rejects (unknown, missing, or of a type it can't parse), or an empty 404
 (no route answers the path) fails it. That's what the unit tests can't see:
@@ -945,6 +950,7 @@ previews are listed once those products are on.
 | `secrets_list_rotations` | A project's secret rotations: what rotated and what's due. | `GET /v1/secrets/projects/{project}/rotations` |
 | `secrets_ca_certificates` | The certificates a project's CA has issued (never a key). | `GET /v1/secrets/projects/{project}/cas/{ca}/certificates` |
 | `secrets_list_placeholders` | Placeholders handed out for a project's host-bound keys (key, consumer, expiry; never the placeholder or the value). | `GET /v1/secrets/projects/{project}/placeholders` |
+| `secrets_list_recoverable` | Deleted workspace projects still in their recovery window that you may recover: who deleted each, when, and when it's purged (recovering stays a person's). | `GET /v1/secrets/deleted` |
 | `secrets_end_placeholder` | End one placeholder now. | `DELETE /v1/secrets/projects/{project}/placeholders/{id}` |
 | `secrets_end_consumer_placeholders` | End every live placeholder a consumer holds. | `DELETE /v1/secrets/projects/{project}/placeholders?consumer=` |
 | `secrets_list_leases` | A project's live leases on dynamic credentials, never a credential. | `GET /v1/secrets/projects/{project}/leases` |
@@ -1099,19 +1105,10 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **A member's MCP client reaches what their role does (this PR).** Project members (#501) and
-   previews on members (#524) landed, but a person's own token (an OAuth client they connect)
-   still had the pre-members reach: `roll_access::USER_REACH` left out previews, so a member's
-   client never listed the previews tools their role allows, and the token builder never offered
-   previews. And `tools/list` asked only the token's rules, so a viewer with a broad token was
-   shown every secrets reveal and write the gate then refused by their role. Now `USER_REACH`
-   holds previews, and rolld's `auth::tests::a_persons_reach_is_what_the_gate_serves_people`
-   holds it to the gate's rules for people (so apps, the next member product, can't be left out);
-   on one resource of a member product, a tool is listed only when the person's role allows it too
-   (`Tool::within_session`, the gate's own rule: a list or create goes on the token alone). The
-   gate's 403 texts named the old reach too. Test:
-   `a_members_client_lists_what_their_role_allows` (a viewer reads, an admin also writes and
-   reveals).
+1. **The sweep starts rolld on port 0 (this PR).** It picked 46 free loopback ports and let go of
+   them before rolld bound them, so another build could take one meanwhile and rolld exited
+   ("rolld exited" now and then). Every listener now binds port 0 and the sweep reads the API's
+   address from `--addr-file` (#596); only apps' per-environment range (21 ports) is still picked.
 2. **Decision for the user: a sandboxed "code mode"** (Cloudflare's Code Mode, Anthropic's code
    execution with MCP). A model writes a short script against typed tool functions; roll runs it
    and each call still goes through the gate and the audit log as if made one by one. It cuts
@@ -1121,10 +1118,8 @@ waits on a sibling PR reaching main is last.
    model-written code on fleet nodes, which roll apps' rule keeps customer code off. Options: (a)
    build it in rolld behind a flag; (b) run scripts in a preview-style container, slower to start;
    (c) not now, search mode is enough. Not started until the user picks.
-3. **As siblings land** (`sibling-check.py`, 2026-11-21 21:30, over every open PR): secrets'
-   deleted projects (#585: `GET /v1/secrets/deleted` a read; recovering one stays a person's, an
-   admin row that undoes a confirmed delete, and #585 lists it in `no-tool.txt`); search's migration from a remote cluster (#485: `migrate` and
-   `migrate/inspect`, open-world, since roll fetches an address the caller chose); search's
+3. **As siblings land** (`sibling-check.py`, 2026-11-21 21:30, over every open PR): search's
+   migration from a remote cluster (#485: `migrate` and `migrate/inspect`, open-world, since roll fetches an address the caller chose); search's
    relevance tuning (search-relevance-api, not yet open). #524 (previews on members) adds no routes
    beyond #501's; #627, #629, #596 and #504 add none. Not a tool: making a search browser key
    (#358's create answers the key; `limits.max_body_bytes` has no schema to join).
@@ -1148,7 +1143,11 @@ waits on a sibling PR reaching main is last.
    Not doing: "remember this browser"; a preset that reveals development's values without asking
    (#354); a connection-level `?project=` (only a token's rules bound a project; a default that
    some tools can't honour would look like a boundary).
-6. **Landed 2026-11-21:** an outsider's reply never becomes a reviewer learning (#639: on a public repo
+6. **Landed 2026-11-21:** the sweep as a member (#647: a viewer signed in by email code calls every
+   member-product read their client lists, none refused by their role; first run 197 listed, 75
+   called) and `secrets_list_recoverable` (#585's deleted projects; recovering stays a person's); a member's MCP client reaches what their role does (#644: previews in
+   `USER_REACH`, held to the gate's rules by rolld's `auth::tests`; `tools/list` within a member's
+   session, so a viewer isn't shown writes and reveals the gate refuses); an outsider's reply never becomes a reviewer learning (#639: on a public repo
    a reader's reply to roll's finding became what roll's reviewer kept in mind for every later
    review once a writer resolved it; the test fails without the fix); roll code's tools say
    whether a retry is safe (`idempotentHint`, #642); `hand_to_agent`, a problem handed to a coding agent and its change brought
