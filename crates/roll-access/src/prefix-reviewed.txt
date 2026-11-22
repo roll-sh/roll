@@ -232,6 +232,7 @@ PUT /v1/secrets/projects/{project}/environments/{env}
 GET /v1/secrets/projects/{project}/environments/{env}/changes
 POST /v1/secrets/projects/{project}/environments/{env}/changes
 GET /v1/secrets/projects/{project}/environments/{env}/changes/{seq}
+GET /v1/secrets/projects/{project}/environments/{env}/deletion
 GET /v1/secrets/projects/{project}/environments/{env}/digest
 GET /v1/secrets/projects/{project}/environments/{env}/exports
 DELETE /v1/secrets/projects/{project}/environments/{env}/folders

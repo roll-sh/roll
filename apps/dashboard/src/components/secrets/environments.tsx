@@ -1,6 +1,6 @@
 import { ArrowDown, ArrowUp, Bell, GripVertical, KeyRound, Lock, Pencil, Plus, Trash2 } from "lucide-react";
-import { useState } from "react";
-import { ENV_SLUG, KEY_TYPES, LABEL_PART, SECRET_KEY, secretsHealth, type Environment, type KeyType, type PasswordClass, type Required } from "@/lib/secrets-api";
+import { useEffect, useState } from "react";
+import { ENV_SLUG, KEY_TYPES, LABEL_PART, SECRET_KEY, secretsHealth, type Environment, type EnvironmentBreak, type EnvironmentDeletion, type KeyType, type PasswordClass, type Required } from "@/lib/secrets-api";
 import { Select } from "../agents/ui/select";
 import { Dialog } from "../agents/ui/dialog";
 import { Switch } from "../agents/ui/switch";
@@ -103,9 +103,10 @@ export function EnvironmentsView() {
         project={project.name}
         onClose={() => setDeleting(null)}
         onDelete={(e, confirm) =>
-          api.deleteEnvironment(e.slug, confirm).then(() => {
+          api.deleteEnvironment(e.slug, confirm).then((done) => {
             setDeleting(null);
             reloadEnvs();
+            if (done && "request" in done) setError(`Deleting ${e.slug} needs approval: change request ${done.request.id} deletes it once approved and applied.`);
           })
         }
       />
@@ -721,22 +722,47 @@ function AddEnvironment({ onAdd }: { onAdd: (slug: string, name: string) => Prom
   );
 }
 
+/** `staging:/DB_URL`, `other/dev:/shared (imports it)`. */
+function breakPlace(b: EnvironmentBreak) {
+  const at = b.key ? (b.path === "/" ? `/${b.key}` : `${b.path}/${b.key}`) : b.path;
+  return `${b.project ? `${b.project}/` : ""}${b.environment}:${at}${b.key ? "" : " (imports it)"}`;
+}
+
 function DeleteEnvironment({ env, project, onClose, onDelete }: { env: Environment | null; project: string; onClose: () => void; onDelete: (e: Environment, confirm?: string) => Promise<void> }) {
+  const { api } = useSecrets();
   const [typed, setTyped] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [kept, setKept] = useState<Environment | null>(env);
+  const [preview, setPreview] = useState<EnvironmentDeletion | null>(null);
   if (env && env !== kept) setKept(env);
   const e = env ?? kept;
-  const needType = !!e?.protected;
+  useEffect(() => {
+    if (!env) return;
+    let live = true;
+    api.environmentDeletion(env.slug).then(
+      (p) => live && setPreview(p),
+      (err) => live && setError(errorText(err)),
+    );
+    return () => {
+      live = false;
+    };
+  }, [api, env]);
+  const needType = preview ? preview.confirm : !!e?.protected;
+  const breaks = preview?.breaks ?? [];
+  const n = preview?.secrets ?? e?.secrets ?? 0;
+  const lead = e
+    ? `Its ${n} ${n === 1 ? "secret" : "secrets"}, folders, history and requests become unreadable, and what it issued (leases, managed credentials, placeholders, shares) is revoked now. ` +
+      (preview ? `It's kept for ${preview.window_days} ${preview.window_days === 1 ? "day" : "days"}: restore it from Home, "Recently deleted", until then.` : "")
+    : undefined;
   return (
     <Dialog
       open={!!env}
       onClose={onClose}
-      onExited={() => (setTyped(""), setError(null), setKept(null))}
+      onExited={() => (setTyped(""), setError(null), setKept(null), setPreview(null))}
       busy={busy}
       title={e ? `Delete ${e.name}?` : ""}
-      lead={e ? `Its ${e.secrets} ${e.secrets === 1 ? "secret" : "secrets"}, folders, history, requests and leases go with it (leases are revoked first). This can't be undone.` : undefined}
+      lead={lead}
       footer={
         <>
           <button className={ghost} onClick={onClose}>
@@ -744,7 +770,7 @@ function DeleteEnvironment({ env, project, onClose, onDelete }: { env: Environme
           </button>
           <button
             className={dangerButton}
-            disabled={busy || (needType && typed !== e?.slug)}
+            disabled={busy || !preview || (needType && typed !== e?.slug)}
             onClick={async () => {
               if (!e) return;
               setBusy(true);
@@ -758,15 +784,32 @@ function DeleteEnvironment({ env, project, onClose, onDelete }: { env: Environme
               }
             }}
           >
-            {busy ? "Deleting…" : "Delete environment"}
+            {busy ? "Deleting…" : preview?.needs_request ? "Request deletion" : "Delete environment"}
           </button>
         </>
       }
     >
+      {breaks.length > 0 && (
+        <div className="mb-3">
+          <span className={label}>
+            {breaks.length === 1 ? "This stops working" : `These ${breaks.length} stop working`} until it's restored or they're changed:
+          </span>
+          <ul className="mt-1 max-h-36 overflow-auto rounded-lg border border-line-2 px-2.5 py-1.5 font-mono text-[11.5px] text-soft">
+            {breaks.map((b) => (
+              <li key={breakPlace(b)}>{breakPlace(b)}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {preview?.needs_request && (
+        <p className="mb-3 text-[12.5px] text-muted">
+          {e?.name} needs {preview.approvals} {preview.approvals === 1 ? "approval" : "approvals"}: this opens a change request, and it's deleted once that's approved and applied.
+        </p>
+      )}
       {needType && e && (
         <label className="block">
           <span className={label}>
-            {e.name} is protected. Type <span className="font-mono text-fg">{e.slug}</span> to delete it from {project}.
+            {e.protected ? `${e.name} is protected.` : "Other keys read it."} Type <span className="font-mono text-fg">{e.slug}</span> to delete it from {project}.
           </span>
           <input autoFocus value={typed} onChange={(ev) => setTyped(ev.target.value)} className={`${field} font-mono`} />
         </label>

@@ -1292,6 +1292,9 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/secrets/deleted", "secrets", R, Tgt::AnyGrant),
     // Recovering one is its secrets admin's, as deleting it was.
     row("POST", "/v1/secrets/projects/{project}/recover", "secrets", ADMIN, one(&["project"], "project")),
+    // A deleted environment's recovery is its admin's (docs/secrets.md, "When a secret, an
+    // environment or the project goes").
+    row("POST", "/v1/secrets/projects/{project}/environments/{env}/recover", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
     row("GET", "/v1/secrets/projects/{project}/", "secrets", R, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("GET", "/v1/secrets/projects/{project}", "secrets", R, one(&["project"], "project")),
     // How long a project keeps old values (history_days): purging is the project admin's.

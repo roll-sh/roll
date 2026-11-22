@@ -251,7 +251,17 @@ export type ChangeRequest = {
   /** What it must pass: the environment's policy (no `path`) and each folder policy covering a key it changes. */
   gates: { path?: string; approvals: number; approvers?: string[]; approved: number }[];
   applied_seq: number | null;
+  /** What it does instead of changing keys: a protected environment's delete, kept for the recovery window once applied. */
+  action?: "delete_environment";
 };
+/** Something that stops working when an environment goes: a value elsewhere in the project that references it (`key`), or a folder here or in another project (`project`) that imports from it. Names only. */
+export type EnvironmentBreak = { project?: string; environment: string; path: string; key?: string; via: "reference" | "import" };
+/** `GET …/environments/{env}/deletion`: what deleting it would do, before it's asked. */
+export type EnvironmentDeletion = { environment: string; secrets: number; window_days: number; confirm: boolean; needs_request: boolean; approvals: number; breaks: EnvironmentBreak[] };
+/** `DELETE …/environments/{env}`: null for an ephemeral one (gone), the window for a standard one, or the change request that deletes a protected one once approved. */
+export type EnvironmentDeleted = null | { environment: string; deleted_at: number; purge_at: number } | { request: ChangeRequest };
+/** `POST …/environments/{env}/recover`: the environment is back; managed links got new credentials (`rotated`), or say which didn't. */
+export type RecoveredEnvironment = { project: string; environment: string; recovered_at: number; rotated: number; rotation_failed: string[] };
 /** A folder's own change policy: its keys change only through approved requests. */
 export type FolderPolicy = { path: string; approvals: number; approvers: string[]; created_at: number; created_by: string };
 export type LinkField = { field: string; label: string; modes: LinkMode[]; secret: boolean; suggest: string; credential?: string };
@@ -410,7 +420,8 @@ export type AwsUser = { id: string; name: string; role: string; user: string; cr
 export type AwsRole = { id: string; name: string; role_arn: string; trust: "external_id" | "oidc"; created_at: number; created_by: string };
 /** Where a key is set (`GET /v1/secrets/search?key=`): names and versions, never a value. */
 /** A deleted project in its recovery window (`GET /v1/secrets/deleted`): recoverable until `purge_at`. */
-export type DeletedProject = { project: string; name: string; deleted_at: number; deleted_by: string; purge_at: number };
+/** A deleted project, or a deleted environment (`environment`) of a project that isn't, in its recovery window. */
+export type DeletedProject = { project: string; name: string; environment?: string; deleted_at: number; deleted_by: string; purge_at: number };
 /** `POST …/recover`: the project is back; managed links got new credentials (`rotated`), or say which didn't. */
 export type Recovered = { project: string; name: string; recovered_at: number; rotated: number; rotation_failed: string[] };
 export type Place = { project: string; project_name: string; environment: string; path: string; key: string; version: number; updated_at: number; linked: boolean };
