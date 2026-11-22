@@ -350,6 +350,16 @@ impl roll_previews::ports::Apps for RollApps {
         Ok(())
     }
 
+    /// The `pv-` environment's live deployment: its git commit and its own URL (roll apps'
+    /// deployment URL; none for a worker, a service with a volume, or a roll apps without `url`).
+    async fn live_build(&self, preview: &str, service: &str) -> Option<(String, String)> {
+        let (id, env) = self.find(preview, service).await.ok()??;
+        let path = Self::env_path(&id, &env);
+        let dep = s(&self.api.get(&path).await.ok()?["active"]["id"])?;
+        let d = self.api.get(&format!("{path}/deploys/{}", seg(&dep))).await.ok()?;
+        Some((s(&d["revision"])?, s(&d["url"])?))
+    }
+
     /// The `pv-` environment's latest minute (roll apps' metrics): cores, and resident bytes.
     /// None while nothing ran that minute (asleep).
     async fn metrics(&self, preview: &str, service: &str) -> Option<(f64, u64)> {
@@ -754,6 +764,10 @@ impl roll_previews::ports::Apps for Services {
 
     async fn metrics(&self, preview: &str, service: &str) -> Option<(f64, u64)> {
         if matches!(self.apps.find(preview, service).await, Ok(Some(_))) { self.apps.metrics(preview, service).await } else { self.runtime.metrics(preview, service).await }
+    }
+
+    async fn live_build(&self, preview: &str, service: &str) -> Option<(String, String)> {
+        if matches!(self.apps.find(preview, service).await, Ok(Some(_))) { self.apps.live_build(preview, service).await } else { None }
     }
 
     /// roll apps groups its own; a `roll.toml` service's are grouped here, from its last

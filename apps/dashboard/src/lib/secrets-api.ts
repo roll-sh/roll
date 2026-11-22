@@ -180,6 +180,7 @@ export function secretsApi(project: string) {
     openRequest: (env: string, b: Batch) => req<ChangeRequest>("POST", `${E(env)}/requests`, b),
     /** When each key of a folder was last read and changed, and which are stale. */
     insights: (env: string, path = "/") => req<Insights>("GET", `${E(env)}/insights${qs({ path })}`),
+    /** Every way a folder's (or a key's) values leave roll: people, their OAuth clients, tokens, identities, services, sandboxes, flows, readers and who knew it (a project admin's; names only). */
     reach: (env: string, path = "/", key?: string) => req<Reach>("GET", `${E(env)}/reach${qs({ path, key })}`),
     /** An incident's cut-off of everything reach lists (a project admin's); the answer says what was cut and what failed. */
     cutOff: (env: string, path: string, key: string | undefined, body: CutOffRequest) => req<CutOff>("POST", `${E(env)}/reach/cut-off${qs({ path, key })}`, body),

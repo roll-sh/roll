@@ -2549,12 +2549,21 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             let what = key.as_deref().map(|k| format!("{k} in ")).unwrap_or_default();
             println!("{what}{}:{}", c.at.env, c.at.path);
             println!("  {}", if v["untrusted"] == true { "untrusted code (checks, sandboxes, previews) can read it: the environment isn't protected" } else { "protected: untrusted code never reads it" });
-            for (title, list) in [("tokens", &v["tokens"]), ("identities", &v["identities"])] {
+            for p in v["people"].as_array().into_iter().flatten() {
+                let actions = p["actions"].as_array().map(|a| a.iter().map(s).collect::<Vec<_>>().join(",")).unwrap_or_default();
+                let admin = if p["admin"] == true { " (admin account)" } else { "" };
+                println!("  {:<10} {:<32} {actions:<22} {}{admin}", "person", s(&p["handle"]), s(&p["role"]));
+            }
+            if let Some(n) = v["admins"].as_u64().filter(|n| *n > 0) {
+                println!("  {:<10} {n} admin account{} (they reveal everything)", "admins", if n == 1 { "" } else { "s" });
+            }
+            for (title, list) in [("tokens", &v["tokens"]), ("clients", &v["clients"]), ("identities", &v["identities"])] {
                 for h in list.as_array().into_iter().flatten() {
                     let actions = h["actions"].as_array().map(|a| a.iter().map(s).collect::<Vec<_>>().join(",")).unwrap_or_default();
                     let used = h["last_used_at"].as_i64().map(|t| format!("used {}", ago(t))).unwrap_or_else(|| "never used".into());
                     let skipped = h["skipped"].as_str().map(|w| format!(" ({w})")).unwrap_or_default();
-                    println!("  {:<10} {:<32} {actions:<22} {used}{skipped}", &title[..title.len() - 1], s(&h["name"]));
+                    let name = if title == "clients" { format!("{} ({})", s(&h["name"]), s(&h["created_by"])) } else { s(&h["name"]) };
+                    println!("  {:<10} {name:<32} {actions:<22} {used}{skipped}", &title[..title.len() - 1]);
                 }
             }
             for sy in v["syncs"].as_array().into_iter().flatten() {
@@ -2566,8 +2575,18 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             for f in v["imported_by"].as_array().into_iter().flatten() {
                 println!("  imported   by {}", s(f));
             }
+            for sv in v["services"].as_array().into_iter().flatten() {
+                let deployed = sv["last_deployed_at"].as_i64().map(|t| format!("deployed {}", ago(t))).unwrap_or_else(|| "not running".into());
+                println!("  service    {:<32} through {:<22} {deployed}", format!("{} ({})", s(&sv["name"]), s(&sv["environment"])), s(&sv["through"]));
+            }
+            for sb in v["sandboxes"].as_array().into_iter().flatten() {
+                println!("  sandbox    {:<32} copied by {} from {}", format!("{} ({})", s(&sb["name"]), s(&sb["owner"])), s(&sb["by"]), s(&sb["from"]));
+            }
             for r in v["readers"].as_array().into_iter().flatten() {
                 println!("  read       by {:<32} {} reads, last {}", s(&r["actor"]), r["reads"], ago(r["last_at"].as_i64().unwrap_or_default()));
+            }
+            for k in v["knew"].as_array().into_iter().flatten() {
+                println!("  knew       {:<32} {} reads, last {} (may no longer reveal it: {})", s(&k["user"]), k["reads"], ago(k["last_at"].as_i64().unwrap_or_default()), s(&k["why"]));
             }
             eprintln!("Not counted: {}.", s(&v["uncounted"]));
         }

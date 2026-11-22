@@ -759,6 +759,123 @@ async fn private_network_on_docker(closed: bool) {
     assert!(gone, "the peer and its forwarder removed");
 }
 
+/// A Tailscale node as a private network on real Docker: a Headscale control server and a
+/// customer's node whose web server answers only on its tailnet address, reached from the
+/// project network by the route's name through roll's node (no capabilities, userspace) and its
+/// SOCKS5 forwarder.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_tailscale_private_network_reaches_a_host_on_the_tailnet() {
+    const HEADSCALE: &str = "headscale/headscale@sha256:ea9b5ee06274d757a4d52103de56cd11a9c393acb19d9a35f4b9fe52ada410de";
+    use apps_control::runtime::peering_image::TAILSCALE;
+    struct Ts(Arc<parking_lot::Mutex<String>>);
+    #[async_trait::async_trait]
+    impl apps_control::integrations::SecretSource for Ts {
+        fn name(&self) -> &'static str {
+            "fake"
+        }
+        async fn resolve(&self, _: &str, _: &str, _: &str) -> anyhow::Result<Vec<apps_control::integrations::SecretVar>> {
+            Ok(vec![])
+        }
+        async fn bind_ref_runtime(&self, _: apps_control::integrations::Asker<'_>, _: &str, _: &str, _: &str, _: &str) -> anyhow::Result<String> {
+            Ok("usr_ada@runtime:production".into())
+        }
+        async fn resolve_as(&self, _: &str, _: &str, _: &str, _: &str, _: &str) -> anyhow::Result<String> {
+            Ok(self.0.lock().clone())
+        }
+    }
+    if std::env::var("ROLL_APPS_DOCKER").ok().as_deref() != Some("1") {
+        return;
+    }
+    let docker = |args: &[&str]| {
+        let out = std::process::Command::new("docker").args(args).output().unwrap();
+        (out.status.success(), String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    // A file into a created container (a tar on stdin, its directory made).
+    let put = |container: &str, dir: &str, name: &str, text: &str| {
+        let mut tar = tar::Builder::new(Vec::new());
+        if let Some((d, _)) = name.rsplit_once('/') {
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(tar::EntryType::Directory);
+            h.set_mode(0o755);
+            h.set_size(0);
+            h.set_cksum();
+            tar.append_data(&mut h, d, std::io::empty()).unwrap();
+        }
+        let mut h = tar::Header::new_gnu();
+        h.set_size(text.len() as u64);
+        h.set_mode(0o644);
+        h.set_cksum();
+        tar.append_data(&mut h, name, text.as_bytes()).unwrap();
+        let mut child = std::process::Command::new("docker").args(["cp", "-", &format!("{container}:{dir}")]).stdin(std::process::Stdio::piped()).spawn().unwrap();
+        std::io::Write::write_all(child.stdin.as_mut().unwrap(), &tar.into_inner().unwrap()).unwrap();
+        assert!(child.wait().unwrap().success());
+    };
+    let key = Arc::new(parking_lot::Mutex::new(String::new()));
+    let Some(w) = docker_world_secrets(None, |_| {}, Arc::new(Ts(key.clone()))).await else { return };
+    let (id, _) = deploy_container(&w, "tail").await;
+    let net = apps_control::network_name(&w.project, "production");
+    let hs = format!("roll-apps-tstest-{}-hs", std::process::id());
+    let (cust, web) = (format!("{hs}-cust"), format!("{hs}-web"));
+    let cleanup = || {
+        for n in [&web, &cust, &hs] {
+            let _ = std::process::Command::new("docker").args(["rm", "-f", n]).output();
+        }
+    };
+    // Headscale: a DERP map it requires (its own relay; the nodes reach each other directly).
+    let cfg = format!("server_url: http://{hs}:8080\nlisten_addr: 0.0.0.0:8080\nmetrics_listen_addr: 127.0.0.1:9090\ngrpc_listen_addr: 127.0.0.1:50443\nnoise:\n  private_key_path: /var/lib/headscale/noise_private.key\nprefixes:\n  v4: 100.64.0.0/10\n  allocation: sequential\nderp:\n  server:\n    enabled: true\n    region_id: 999\n    region_code: hs\n    region_name: hs\n    stun_listen_addr: 0.0.0.0:3478\n    private_key_path: /var/lib/headscale/derp_server_private.key\n    automatically_add_embedded_derp_region: false\n  urls: []\n  paths: [/etc/headscale/derp.yaml]\n  auto_update_enabled: false\ndatabase:\n  type: sqlite\n  sqlite:\n    path: /var/lib/headscale/db.sqlite\ndns:\n  magic_dns: false\n  override_local_dns: false\n  nameservers:\n    global: []\nunix_socket: /var/run/headscale/headscale.sock\nunix_socket_permission: \"0770\"\n");
+    let derp = format!("regions:\n  999:\n    regionid: 999\n    regioncode: hs\n    regionname: hs\n    nodes:\n      - name: 999a\n        regionid: 999\n        hostname: {hs}\n        stunport: 3478\n        derpport: 8080\n");
+    assert!(docker(&["create", "--name", &hs, "--network", &net, HEADSCALE, "serve"]).0);
+    put(&hs, "/etc", "headscale/config.yaml", &cfg);
+    put(&hs, "/etc/headscale", "derp.yaml", &derp);
+    assert!(docker(&["start", &hs]).0);
+    let mut users = String::new();
+    for _ in 0..50 {
+        if docker(&["exec", &hs, "headscale", "users", "create", "acme"]).0 {
+            users = docker(&["exec", &hs, "headscale", "users", "list", "-o", "json"]).1;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let uid = serde_json::from_str::<Value>(&users).ok().and_then(|u| u[0]["id"].as_u64()).unwrap_or_else(|| {
+        cleanup();
+        panic!("no headscale user: {users}")
+    });
+    let pre = docker(&["exec", &hs, "headscale", "preauthkeys", "create", "-u", &uid.to_string(), "--reusable", "--ephemeral", "-e", "1h"]).1;
+    *key.lock() = pre.lines().last().unwrap_or_default().trim().to_string();
+    // The customer's node, its web server on its localhost (answered at its tailnet address).
+    let login = format!("--login-server=http://{hs}:8080");
+    assert!(docker(&["run", "-d", "--name", &cust, "--network", &net, "-e", &format!("TS_AUTHKEY={}", key.lock()), "-e", &format!("TS_EXTRA_ARGS={login}"), "-e", "TS_USERSPACE=true", "-e", "TS_STATE_DIR=/tmp/ts", "-e", "TS_HOSTNAME=customer", TAILSCALE]).0);
+    assert!(docker(&["run", "-d", "--name", &web, "--network", &format!("container:{cust}"), "busybox:1.37", "sh", "-c", "mkdir /www; echo tailnet-hello > /www/index.html; exec httpd -f -p 127.0.0.1:8080 -h /www"]).0);
+    let mut cust_ip = String::new();
+    for _ in 0..60 {
+        cust_ip = docker(&["exec", &cust, "tailscale", "ip", "-4"]).1;
+        if !cust_ip.is_empty() {
+            break;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    let url = format!("/v1/apps/services/{id}/environments/production/private-network");
+    let body = json!({"kind": "tailscale", "secret": "roll://production/TS", "login_server": format!("http://{hs}:8080"), "routes": [{"name": "api.corp.internal", "target": format!("{cust_ip}:8080")}]});
+    let (st, v) = call(&w.api, "PUT", &url, Some(body), "application/json", None).await;
+    let mut got = String::new();
+    for _ in 0..60 {
+        let out = std::process::Command::new("docker").args(["run", "--rm", "--network", &net, "busybox:1.37", "wget", "-qO-", "-T", "3", "http://api.corp.internal:8080/"]).output().unwrap();
+        got = format!("{}{}", String::from_utf8_lossy(&out.stdout).trim(), String::from_utf8_lossy(&out.stderr).trim());
+        if got == "tailnet-hello" || st != StatusCode::OK {
+            break;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    let peer = format!("roll-apps-peer-{}-production", id.trim_start_matches("svc_"));
+    let caps = docker(&["inspect", "-f", "{{.HostConfig.CapAdd}} {{.HostConfig.CapDrop}}", &peer]).1;
+    call(&w.api, "DELETE", &url, None, "application/json", None).await;
+    cleanup();
+    delete_for_good(&w.api, &id).await;
+    assert_eq!((st, v["status"].as_str()), (StatusCode::OK, Some("running")), "{v}");
+    assert_eq!(got, "tailnet-hello", "through the tailnet");
+    assert!(!caps.contains("NET_ADMIN") && caps.contains("ALL"), "no capability at all: {caps}");
+}
+
 /// A sandbox on real Docker: a command's output and exit code, one killed in the container at
 /// its timeout (not left running), a file in and out, and its own network gone with it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
