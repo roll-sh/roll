@@ -10740,6 +10740,34 @@ Without `QC_CHECKED` (its checked stage stops at `info_schema_rows`, above): the
 sort's own), `txn_spill`, `crash_bulk`, `big_tables`, `storage_linked_gc` and `wire_waits` under
 `--profile verify-checked` instead: the lib's 246, `big_tables`' 23, `crash_bulk`'s 6, `storage_linked_gc`'s 4, `txn_spill` and `wire_waits` passed.
 
+**Third candidate: a stored COPY row without its line's frame** (`cand/a287-3`: one code commit,
+stacked on `cand/a287-2` for these docs; its code is independent, `InsertNode::insert_copied`).
+Every COPY row pushed a CONTEXT frame (`Frame::Copy`: the table's name, an `Arc` clone, the line
+and its text) onto the session's frames before its insert and truncated it after. A stored row
+(`CopyRow::Stored`) that its `StoredInsert` takes runs nothing that stacks a context of its own
+(its table has no index, CHECK, domain, generated column or trigger and every column is given:
+`dml::copies_stored`, `session::copy::stored_copy`), so it now goes in first and the frame is
+pushed only for its error (the same `in_frames`, the same CONTEXT line) or for a row
+`StoredInsert` won't take, which goes in decoded under the frame as before (`Copied::Decoded`).
+The buffer's counts and flush after each row are one function for both ways
+(`copied_row_done`). Results (BENCH "Bulk writes, round 23"; plain dist, b1 against n4 = the
+commit on `2a0f67b0d`): COPY in 6.566 / 6.567 / 6.567 -> 6.479 x3 (-1.3% in each of three
+alternating pairs; about 88 instructions a row; PostgreSQL 18.6's 6.48), and in two more pairs
+with INSERT … SELECT after it 6.592 / 6.566 -> 6.504 / 6.504 (the step reads one of two values
+run to run on either build; n4 is below b1 in each); INSERT … SELECT 5.096 / 5.110 -> 5.096 /
+5.097 (the whole script's single run read 5.133: spread). The whole script once: all steps
+43.643 -> 43.590; rows and the ctid hash equal, bytes written equal. Not gated on the PGO build:
+no inline attribute or hot function split (a new function for the per-row tail, called once a
+row on both ways). Verification: `tools/quick-check.sh` on `77c7f57d5` (the commit on
+`2a0f67b0d`): Clippy 16 warnings, none new; 127 tests in 9 binaries; regress 51,148 / 51,150, 0
+newly differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed; `big_tables`, `golden` and
+`wire_waits` under `--profile verify-checked`: `big_tables`' 23, `golden`'s 3 and `wire_waits` passed.
+The three candidates stacked on origin's `ba4e10435` (`cand/a287-3`, its code commits
+`08dbf719e`, `228277e42`, `12742a3df`): `tools/quick-check.sh` on `12eb43f86` green (Clippy 16
+warnings, none new; 433 tests in 25 binaries; crash_random seeds 1-3 x 2, power_cut_at_every_point;
+regress 51,148 / 51,150, 0 newly differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed),
+and `big_tables` (24), `golden` (3) and `wire_waits` under `--profile verify-checked`.
+
 **Left:**
 1. COPY into the indexed table 31.4 against PostgreSQL's 24.7: the write buffer (`put_fresh`
    38% of n1x's step: `record` 20%, the BTreeMap, `Runs::write_file` 14%), the background
@@ -10758,8 +10786,9 @@ sort's own), `txn_spill`, `crash_bulk`, `big_tables`, `storage_linked_gc` and `w
 4. Stored rows (`CopyRow::Stored`) for indexed tables: the stored-row path needs the model's
    placement with index entries (`inserted_stored_modelled` takes none, `inserted_stored` has no
    btree estimate) and index values read from the stored bytes; not built.
-5. The brief's items 2 and 3 (INSERT … SELECT 5.10 against 4.31; COPY's per-row frame, field
-   ends, `insert_data`'s re-read): not started.
+5. The brief's item 2 (INSERT … SELECT 5.10 against 4.31) not started; of item 3, the frame is
+   the third candidate; the field ends' `memchr` calls (one short call a field) and
+   `insert_data`'s second pass over a stored row's values to size it are left.
 
 ## Bulk writes, round 22: COPY's plain lines as stored rows, number fast paths (agent 284)
 

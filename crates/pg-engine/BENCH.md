@@ -503,6 +503,19 @@ comparison sort 13.8%, the btree model's inserts (`btsim`) 17.8%.
 sizes and bytes written (90.5 MB) equal. The whole script once: all steps 43.643 -> 43.636 (every
 step within ±0.25% but ANALYZE +0.85%, 0.004 G, its spread).
 
+### `cand/a287-3`: COPY in without its rows' frames (n4, its commit on `2a0f67b0d`, against b1)
+
+| steps | b1 | n4 |
+|---|---|---|
+| COPY in (3 alternating pairs, with the checks) | 6.566 / 6.567 / 6.567 | 6.479 x3 (-1.3% each) |
+| COPY in (2 pairs, then the index builds, COPY out and INSERT … SELECT) | 6.592 / 6.566 | 6.504 / 6.504 |
+| INSERT … SELECT (the same 2 pairs) | 5.096 / 5.110 | 5.096 / 5.097 |
+
+The whole script once: all steps 43.643 -> 43.590 (COPY in -1.33%, INSERT … SELECT +0.69% in this
+single run, level in the pairs above; every other step within ±0.3% but ANALYZE +0.85%, 0.004 G).
+Rows, the ctid hash and bytes written equal. With it, plain-dist COPY in is PostgreSQL 18.6's
+6.48 (6.479-6.504).
+
 ## Bulk writes, round 22: COPY's plain lines as stored rows, number fast paths (2026-11-21, agent 284)
 
 HANDOFF "Bulk writes, round 22" has what changed. Lane C, the 1M-row bulk script with joined
