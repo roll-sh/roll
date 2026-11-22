@@ -130,6 +130,8 @@ pub struct FakeData {
     pub fail_next: AtomicUsize,
     /// What `schema` answers: (the parent's lines, the branch's).
     pub schema: Mutex<Option<(Vec<String>, Vec<String>)>>,
+    /// What reading a branch alone finds (unset: its parent's lines, as a branch is when it's made).
+    pub branch_now: Mutex<Option<Vec<String>>>,
     /// Masks applied: (branch, columns).
     pub masks: Mutex<Vec<(String, std::collections::BTreeMap<String, String>)>>,
     /// Branched from history at (Postgres's fake keeps history; the others don't).
@@ -150,6 +152,7 @@ impl FakeData {
             masks: Mutex::new(Vec::new()),
             at: Mutex::new(Vec::new()),
             columns: Mutex::new(Default::default()),
+            branch_now: Mutex::new(None),
         })
     }
 }
@@ -187,6 +190,9 @@ impl Brancher for FakeData {
     }
     async fn branch_schema(&self, _parent: &str, _branch: &str) -> anyhow::Result<Option<Vec<String>>> {
         // As it's made, a branch is its parent.
+        if let Some(now) = self.branch_now.lock().clone() {
+            return Ok(Some(now));
+        }
         Ok(self.schema.lock().clone().map(|(parent, _)| parent))
     }
     async fn columns(&self, parent: &str, max: usize) -> anyhow::Result<Vec<roll_previews::mask::Column>> {
@@ -601,6 +607,8 @@ pub struct Env {
     pub code: Arc<FakeCode>,
     pub pg: Arc<FakeData>,
     pub redis: Arc<FakeData>,
+    /// A search cluster's fake, placed in the project only by [`env_with_search`].
+    pub search: Arc<FakeData>,
     pub apps: Arc<FakeApps>,
     pub project: String,
 }
@@ -638,11 +646,23 @@ impl roll_previews::ports::Sealer for HexSealer {
 }
 
 pub fn env(settings: serde_json::Value) -> Env {
+    env_of(settings, false)
+}
+
+/// [`env`] with a search cluster (`srch_logs`) in the project too.
+pub fn env_with_search(settings: serde_json::Value) -> Env {
+    env_of(settings, true)
+}
+
+fn env_of(settings: serde_json::Value, with_search: bool) -> Env {
     let dir = tempfile::tempdir().unwrap();
     let ws = Arc::new(Workspace::open(&code_sql::Target::Sqlite(dir.path().join("ws.db")), Default::default()).unwrap());
     let p = ws.create("", "shop", "", None).unwrap();
     for (kind, r) in [(roll_workspace::Kind::Repo, "acme/web"), (roll_workspace::Kind::Repo, "acme/api"), (roll_workspace::Kind::Postgres, "prj_db"), (roll_workspace::Kind::Redis, "rdb_cache")] {
         ws.place(roll_workspace::Scope::All, &p.id, kind, r, 0.0, 0.0).unwrap();
+    }
+    if with_search {
+        ws.place(roll_workspace::Scope::All, &p.id, roll_workspace::Kind::Search, "srch_logs", 0.0, 0.0).unwrap();
     }
     let store = Arc::new(Store::open(&code_sql::Target::Sqlite(dir.path().join("previews.db")), Default::default()).unwrap());
     // A deployment key, as rolld has one: pasted values are kept sealed.
@@ -654,6 +674,7 @@ pub fn env(settings: serde_json::Value) -> Env {
     code.heads.lock().insert("acme/api@main".into(), "cs_api0".into());
     let pg = FakeData::new(Kind::Postgres, &["prj_db"]);
     let redis = FakeData::new(Kind::Redis, &["rdb_cache"]);
+    let search = FakeData::new(Kind::Search, &["srch_logs"]);
     let apps = Arc::new(FakeApps::default());
     let secrets = Arc::new(FakeSecrets::default());
     let engine = Engine::new(
@@ -661,11 +682,11 @@ pub fn env(settings: serde_json::Value) -> Env {
         store,
         ws.clone(),
         code.clone(),
-        vec![pg.clone(), redis.clone()],
+        vec![pg.clone(), redis.clone(), search.clone()],
         apps.clone(),
         secrets.clone(),
         Box::new(|| true),
     );
-    Env { secrets, _dir: dir, ws, engine, code, pg, redis, apps, project: p.id }
+    Env { secrets, _dir: dir, ws, engine, code, pg, redis, search, apps, project: p.id }
 }
 
