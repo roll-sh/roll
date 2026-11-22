@@ -2355,13 +2355,22 @@ Ranked by what a person notices first. Done so far:
 1. **Roll secrets' response scrub wired into `roll-intercept`, in review** (stacked on roll
    secrets' #628): a response that echoes a swapped key is stopped (a 502, or the connection cut
    before those bytes), the placeholder ended and the echo in the activity; roll apps' closed
-   environments get it through the same port. Live-checked by `scripts/preview-intercept.sh`.
-2. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+   environments get it through the same port. Live-checked by `scripts/preview-intercept.sh`, which also gets a step for roll secrets' `maker_unreachable`
+   (#582, landed): the rules' saver loses access, the preview says "placeholders off" and its old
+   placeholder is refused.
+2. **How each head came up, step by step, in review** (#641): the preview's timeline (data, setup,
+   deploy, checks, ready) on its record and sheet, printed by every live run.
+3. **Faster previews where the timeline says the time goes**: once live runs report each step,
+   the slowest one first (the live run's preview took 10–29 s from the change to ready, depending
+   on the machine's load).
+4. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-3. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-4. **Watch: pg-control's recovery to a time seconds old** (unowned).
+6. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Checked 2026-11-22: every credential a preview's code holds is its branch's own. The live run now proves it for the bucket (the preview's key lists its branch and is refused on production's bucket), beside search's data-only key (#607); Postgres gets a role of its own, Redis, NoSQL and queues their branch's own login, streams and tasks a key of their own.
 
 Dropped 2026-11-21: reusing main's build for a service a change's first deploy doesn't touch. A cached rebuild of an untouched service costs a few seconds of CPU and runs at once with the changed service's build, which sets the wall time (two roll apps services, a push with cached builds: live in 4.2 s, see step 6 above), so a person would see no difference.
 

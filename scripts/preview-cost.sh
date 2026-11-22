@@ -273,6 +273,15 @@ FOLLOWED=$(python3 -c 'import sys,urllib.parse as u; e=dict(l.split("=",1) for l
 [ "$FOLLOWED" = ok ] || { echo "a secrets link to the branched parent should give the branch's password: $FOLLOWED"; exit 1; }
 echo "$APP_ENV" | grep -qx 'PAYMENTS_KEY=sk_test_from_staging_42' || { echo "roll://staging/PAYMENTS_TEST_KEY should be staging's value: $(echo "$APP_ENV" | grep '^PAYMENTS_KEY=' | cut -c1-40)"; exit 1; }
 echo "$APP_ENV" | grep -qxF 'GREETING=hello ${USER}' || { echo "a plain value's \${ should stay as it is: $(echo "$APP_ENV" | grep '^GREETING=')"; exit 1; }
+# Its bucket's key reaches only its branch: production's bucket (the parent) refuses it, as every
+# credential a preview's code holds is the branch's own (search's data-only key below too).
+PV_AK=$(echo "$APP_ENV" | sed -n 's/^AWS_ACCESS_KEY_ID=//p'); PV_SK=$(echo "$APP_ENV" | sed -n 's/^AWS_SECRET_ACCESS_KEY=//p')
+[ -n "$PV_AK" ] && [ "$PV_AK" != "$AWS_ACCESS_KEY_ID" ] || { echo "the preview's service should hold a bucket key of its own, not the operator's"; exit 1; }
+OWN_LS=$(AWS_ACCESS_KEY_ID=$PV_AK AWS_SECRET_ACCESS_KEY=$PV_SK $S3 ls "s3://$BRANCH_BUCKET/" >/dev/null 2>&1 && echo ok || echo refused)
+# (Captured first: with pipefail, `aws … | grep -q` fails on aws's own exit code.)
+PARENT_SAID=$(AWS_ACCESS_KEY_ID=$PV_AK AWS_SECRET_ACCESS_KEY=$PV_SK $S3 ls "s3://assets/" 2>&1 || true)
+case "$PARENT_SAID" in *AccessDenied*) PARENT_LS=refused ;; *) PARENT_LS="not refused" ;; esac
+[ "$OWN_LS/$PARENT_LS" = "ok/refused" ] || { echo "the preview's bucket key should reach only its branch: own $OWN_LS, parent $PARENT_LS"; exit 1; }
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X PUT "http://$API/v1/previews/projects/$PRJ/settings" -H 'content-type: application/json' -d '{"env":{"X":"roll://other@staging/KEY"}}')" = 400 ] || { echo "a reference into another project should be refused"; exit 1; }
 # A preview's own variable may be a reference too (its setter's reveal: the operator's here); a
 # look-alike is refused, never kept as text.
@@ -1015,6 +1024,7 @@ cat <<EOF
 | A note's element, cropped by the next head's screenshot run (a PNG) | $CROP_NOTE |
 | A visit to a service frozen after sleep_after (it read as sleeping), instead of a cold start | $((T7 - T6)) ms, the same container |
 | Change opened → preview ready ($(echo "$P" | jq_ "len(d['resources'])") branches made, the service deployed) | $((T1 - T0)) ms |
+| The preview's bucket key: its branch / production's bucket | $OWN_LS / $PARENT_LS |
 | Parent bucket bytes / the branch's own bytes after writing 1 MiB / objects the branch sees | $PARENT_OBJECTS / $BRANCH_OBJECTS / $BRANCH_SEES |
 | NoSQL branch's mask on app.users.email / masks on the parent | $MASKED / $PARENT_MASKED |
 | NoSQL: app.users.email in the branch / a filter on the real address there | $NOSQL_READ / $NOSQL_FILTER |
