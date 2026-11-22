@@ -3742,13 +3742,31 @@ async fn an_interception_ca_names_only_its_consumers_bound_hosts_and_ends_with_i
     }
 }
 
+/// Placeholders' own bindings, counting each time they're read.
+struct CountedBound {
+    secrets: std::sync::Weak<Secrets>,
+    reads: std::sync::atomic::AtomicUsize,
+}
+
+impl roll_secrets::intercept::BoundHosts for CountedBound {
+    fn bound_hosts(&self, consumer: &str) -> roll_secrets::Result<BTreeMap<String, std::collections::BTreeSet<String>>> {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        roll_secrets::intercept::BoundHosts::bound_hosts(&*self.secrets.upgrade().unwrap(), consumer)
+    }
+}
+
 /// A consumer's hosts shrinking (a placeholder revoked, a binding taken off) ends its CAs that name a
-/// host it lost, with a revocation row; the next one names only the hosts it still has.
+/// host it lost, with a revocation row; the next one names only the hosts it still has. Growing
+/// (a placeholder for another key, a binding widened) leaves its CAs standing but not live, and
+/// the next one names every host. A connection's check reads one row, never the bindings.
 #[tokio::test]
 async fn an_interception_ca_ends_when_its_consumer_loses_one_of_its_hosts() {
     use roll_secrets::Error;
+    use std::sync::atomic::Ordering;
     let api = Api::new().await;
     let s = &api.secrets;
+    let counted = Arc::new(CountedBound { secrets: Arc::downgrade(s), reads: Default::default() });
+    assert!(s.set_bound_hosts(counted.clone()));
     let consumer = "sandbox:sbx_1";
     for (key, host) in [("STRIPE_KEY", "api.stripe.com"), ("GITHUB_TOKEN", "api.github.com")] {
         api.ok(Method::PUT, &format!("/environments/staging/secrets/{key}"), Some(json!({ "value": format!("fake_{key}_value_0001") }))).await;
@@ -3771,6 +3789,35 @@ async fn an_interception_ca_ends_when_its_consumer_loses_one_of_its_hosts() {
     assert_eq!(s.end_intercept_cas(consumer, "again").unwrap(), 0, "already ended");
     assert!(!s.intercept_ca_live(&new.id).unwrap());
     assert!(matches!(s.intercept_ca(consumer, None), Err(Error::NotFound(_))));
+
+    // Another consumer holding only STRIPE_KEY's placeholder.
+    let grows = "sandbox:sbx_2";
+    api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": grows, "placeholders": true }))).await;
+    let first = s.intercept_ca(grows, None).unwrap();
+    assert_eq!(first.hosts, ["api.stripe.com"]);
+    // Connections check its row, never the bindings.
+    let reads = counted.reads.load(Ordering::SeqCst);
+    for _ in 0..50 {
+        assert!(s.intercept_ca_stands(&first.id).unwrap() && s.intercept_ca_live(&first.id).unwrap());
+    }
+    assert_eq!(counted.reads.load(Ordering::SeqCst), reads, "no connection read the bindings");
+    // GITHUB_TOKEN bound again and a placeholder of it issued: the CA doesn't name api.github.com,
+    // so it stops being live, but still stands for api.stripe.com (nothing ended).
+    api.ok(Method::PUT, "/environments/staging/secrets/GITHUB_TOKEN/hosts", Some(json!({ "hosts": ["api.github.com"] }))).await;
+    api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": grows, "placeholders": true }))).await;
+    assert!(!s.intercept_ca_live(&first.id).unwrap() && s.intercept_ca_stands(&first.id).unwrap());
+    let both = s.intercept_ca(grows, None).unwrap();
+    assert_eq!(both.hosts, ["api.github.com", "api.stripe.com"]);
+    assert!(s.intercept_ca_live(&both.id).unwrap());
+    // A binding the consumer already holds a placeholder of, widened: stale too.
+    api.ok(Method::PUT, "/environments/staging/secrets/STRIPE_KEY/hosts", Some(json!({ "hosts": ["api.stripe.com", "files.stripe.com"] }))).await;
+    assert!(!s.intercept_ca_live(&both.id).unwrap() && s.intercept_ca_stands(&both.id).unwrap());
+    assert_eq!(s.intercept_ca(grows, None).unwrap().hosts, ["api.github.com", "api.stripe.com", "files.stripe.com"]);
+    let ended = api.ok(Method::GET, "/audit?action=secrets.intercept_ca.end", None).await.to_string();
+    assert!(!ended.contains(&first.id) && !ended.contains(&both.id), "growing ends nothing: {ended}");
+    // The key deleted: its hosts go, and the CAs naming them end at their next check.
+    api.ok(Method::POST, "/environments/staging/changes", Some(json!({ "ops": [{ "op": "delete", "key": "GITHUB_TOKEN" }] }))).await;
+    assert!(!s.intercept_ca_stands(&both.id).unwrap());
 }
 
 #[tokio::test]

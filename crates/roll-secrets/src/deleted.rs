@@ -258,7 +258,7 @@ impl Secrets {
         }
         // Their consumers' interception CAs that name its hosts end (`bound_hosts` leaves a deleted
         // project out); a CA for other projects' hosts only stays.
-        self.hosts_shrank(consumers.iter().map(String::as_str));
+        self.hosts_changed(consumers.iter().map(String::as_str));
         // Their links close now: a deleted project's gateway opens nothing (`gateway_link`).
         for g in &gateways {
             self.recheck_gateway(g);

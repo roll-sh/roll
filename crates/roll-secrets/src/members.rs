@@ -30,6 +30,9 @@ impl Secrets {
         if manages && member {
             return Ok(());
         }
+        // A key they bound stops counting for its hosts (`binder_reaches`): the project's consumers'
+        // interception CAs are checked at their next ask, and one naming such a host ends.
+        self.db.write(|c| c.execute(&format!("{}project_id = ?)", crate::intercept::RECHECK_HOLDERS), [project]))?;
         // Whether `by` (a person, or a chain of tokens and identities) ends with `user`. A token
         // already gone stands for whoever it was: its owner, as roll-access still knows it.
         let theirs = |by: &str| -> Result<bool> {
