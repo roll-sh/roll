@@ -1039,6 +1039,19 @@ impl Store {
     pub fn latest_version_ts(&self, key: &[u8]) -> Result<Option<u64>> {
         Ok(self.get_version_raw(key, u64::MAX >> 1)?.map(|(ts, _)| ts))
     }
+
+    /// Whether `key`'s newest version (`latest_version_ts`) was committed after `ts`, read
+    /// only from the sources that may hold such a version: a row's recheck after its lock,
+    /// whose snapshot is recent, leaves the older files (and their blooms and blocks) alone.
+    pub fn changed_after(&self, key: &[u8], ts: u64) -> Result<bool> {
+        let view = self.view();
+        // (A range deletion after `ts` makes a deletion of an older version: read it all.)
+        if view.rdels.iter().any(|r| r.ts > ts) {
+            return Ok(self.latest_version_ts(key)?.is_some_and(|t| t > ts));
+        }
+        let seek = mvcc_key(key, u64::MAX >> 1);
+        Ok(point::newest_after(&view, key, &seek, ts)?.is_some_and(|(t, _)| t > ts))
+    }
 }
 
 impl View {

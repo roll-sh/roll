@@ -543,6 +543,39 @@ pub(super) fn newest(
     file_get(&view.l1, bloom_last, held.get_mut(slot), key, seek, pos)
 }
 
+/// `newest`'s version (`seek` names `key`'s newest) from the sources that may hold one
+/// committed after `ts`: the memtable, the frozen memtables and files whose newest version
+/// is. A version found after `ts` is `key`'s newest; one at or before it, or none, says no
+/// version is after `ts`.
+pub(super) fn newest_after(view: &View, key: &[u8], seek: &[u8], ts: u64) -> Result<Option<Version>> {
+    if let Some(hit) = mem_get(&view.mem, key, seek) {
+        return Ok(Some(hit));
+    }
+    let newer = |s: &SstReader| s.meta.commit_ts.unwrap_or(s.meta.max_ts) > ts;
+    let mut pos = BlockPos::default();
+    for f in &view.imm {
+        let hit = match f {
+            // (A frozen memtable takes no more commits: its newest is final.)
+            Frozen::Mem(m) if m.max_ts.load(std::sync::atomic::Ordering::Acquire) > ts => mem_get(m, key, seek),
+            Frozen::Sst(s) if newer(s) => file_get(std::slice::from_ref(s), true, None, key, seek, &mut pos)?,
+            _ => None,
+        };
+        if hit.is_some() {
+            return Ok(hit);
+        }
+    }
+    for s in view.l0.iter().filter(|s| newer(s)) {
+        if let Some(hit) = file_get(std::slice::from_ref(s), true, None, key, seek, &mut pos)? {
+            return Ok(Some(hit));
+        }
+    }
+    let f = view.l1.partition_point(|s| user_key(&s.meta.last_key) < key);
+    match view.l1.get(f) {
+        Some(s) if newer(s) => file_get(std::slice::from_ref(s), true, None, key, seek, &mut pos),
+        _ => Ok(None),
+    }
+}
+
 /// `newest`'s version from the sources newer than L1 (None: none of them has one).
 fn newest_above_l1(view: &View, key: &[u8], seek: &[u8], held: &mut [Held], pos: &mut BlockPos) -> Result<Option<Version>> {
     if let Some(hit) = mem_get(&view.mem, key, seek) {

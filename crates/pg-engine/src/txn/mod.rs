@@ -3750,11 +3750,7 @@ impl TxnState {
         if self.db.store.last_assigned_ts() <= self.snapshot_ts || self.buf_get(key)?.is_some() {
             return Ok(false);
         }
-        Ok(self
-            .db
-            .store
-            .latest_version_ts(key)?
-            .is_some_and(|ts| ts > self.snapshot_ts))
+        self.db.store.changed_after(key, self.snapshot_ts)
     }
 
     /// The open savepoints (subtransactions).
