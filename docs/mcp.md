@@ -212,7 +212,8 @@ without Docker. It skips itself when nothing changed (`--force`; `--reads` skips
 ### Lockdown
 
 `/v1/mcp?lockdown=1` (or `X-MCP-Lockdown: true`) works like GitHub's MCP server's lockdown mode:
-text written by someone who can't push to the repo never reaches the model.
+text written by someone who can't push to the repo never reaches the model. roll code's own server
+takes the same switch (`/v1/code/mcp?lockdown=1`, docs/code/mcp.md); both use `roll_auth::lockdown`.
 
 The risk it covers: anyone can open an issue on a public GitHub repo, and roll code makes the
 issue a work item that an agent claims and reads. An instruction hidden in the issue would be read
