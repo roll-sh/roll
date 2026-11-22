@@ -10,6 +10,7 @@
 
 pub mod cbor;
 pub mod filter;
+pub mod smile;
 pub mod yaml;
 
 use crate::error::EsError;

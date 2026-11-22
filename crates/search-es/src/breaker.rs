@@ -253,6 +253,13 @@ impl Reservation {
         self.bytes += bytes;
         Ok(())
     }
+
+    /// Gives back up to `bytes` of what this reserved.
+    pub fn release(&mut self, bytes: u64) {
+        let n = bytes.min(self.bytes);
+        self.budget.release(n);
+        self.bytes -= n;
+    }
 }
 
 impl Drop for Reservation {

@@ -525,3 +525,173 @@ async fn running_snapshots_are_visible_like_elasticsearch() {
     let (s, _) = call(&c, "POST", "/_snapshot/r/s1/_restore?wait_for_completion=true", Some(r#"{"rename_pattern":"snapidx","rename_replacement":"restored"}"#)).await;
     assert_eq!(s, 200);
 }
+
+/// Restoring snapshots Elasticsearch wrote (`api::snapshots::elastic`): an 8.19.7 and a 9.5.5
+/// `fs` repository of generated data (`tests/fixtures/es-snapshots`, regenerated with
+/// `scripts/search-es-snapshots.sh --write`), with routing, nested documents, deletes and
+/// updates, several segments, small `chunk_size` parts, `best_compression`, and indices without
+/// a stored `_source`. Documents, ids, routing, sequence numbers, versions and `_source` come
+/// back as Elasticsearch had them, and searches answer as it did.
+#[tokio::test]
+async fn restores_snapshots_elasticsearch_wrote() {
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/es-snapshots");
+    let mut cfg = ClusterConfig::new("es-restore");
+    cfg.node_settings.push(("path.repo".into(), fixtures.display().to_string()));
+    let c = Cluster::open(cfg, Arc::new(MemoryStore::new())).await.unwrap();
+    for version in ["es-8.19.7", "es-9.5.5"] {
+        let repo = format!(r#"{{"type":"fs","settings":{{"location":"{version}"}}}}"#);
+        check_restore(&c, &fixtures, version, &repo, false).await;
+    }
+}
+
+/// The larger set `scripts/search-es-snapshots.sh` makes (thousands of documents, global state),
+/// from an `fs` repository and from the same repository in a MinIO bucket.
+#[tokio::test]
+#[ignore = "needs scripts/search-es-snapshots.sh"]
+async fn restores_larger_snapshots_elasticsearch_wrote() {
+    let dir = std::path::PathBuf::from(std::env::var("ROLL_ES_SNAPSHOTS").expect("ROLL_ES_SNAPSHOTS"));
+    let minio = std::env::var("ROLL_ES_SNAPSHOTS_S3").expect("ROLL_ES_SNAPSHOTS_S3");
+    let mut cfg = ClusterConfig::new("es-restore-large");
+    cfg.node_settings.push(("path.repo".into(), dir.display().to_string()));
+    cfg.node_settings.push((search_es::api::snapshots::S3_ALLOW_PRIVATE.into(), "true".into()));
+    let c = Cluster::open(cfg, Arc::new(MemoryStore::new())).await.unwrap();
+    for version in ["es-8.19.7", "es-9.5.5"] {
+        let started = std::time::Instant::now();
+        check_restore(&c, &dir, version, &format!(r#"{{"type":"fs","settings":{{"location":"{version}"}}}}"#), true).await;
+        println!("{version} from fs: {:?}", started.elapsed());
+        let started = std::time::Instant::now();
+        let s3 = format!(
+            r#"{{"type":"s3","settings":{{"bucket":"es","base_path":"{version}","endpoint":"{minio}","path_style_access":true,"access_key":"roll","secret_key":"roll-secret"}}}}"#
+        );
+        check_restore(&c, &dir, version, &s3, true).await;
+        println!("{version} from a bucket: {:?}", started.elapsed());
+    }
+}
+
+async fn check_restore(c: &Cluster, dir: &std::path::Path, version: &str, repository: &str, global: bool) {
+    let expected: Value = parse(&std::fs::read(dir.join(format!("{version}.expected.json"))).unwrap()).unwrap().unwrap();
+    let repo = version.replace('.', "");
+    let (s, v) = call(c, "PUT", &format!("/_snapshot/{repo}"), Some(repository)).await;
+    assert_eq!(s, 200, "{v:?}");
+    let (s, v) = call(c, "GET", &format!("/_snapshot/{repo}/_all"), None).await;
+    assert_eq!(s, 200, "{v:?}");
+    assert_eq!(at(&v, "snapshots.0.snapshot").as_str(), Some("snap-1"));
+    assert_eq!(at(&v, "snapshots.0.state").as_str(), Some("SUCCESS"));
+    assert_eq!(at(&v, "snapshots.0.indices").as_array().map(|a| a.len()), Some(5));
+    // Nothing is ever written where Elasticsearch keeps its snapshots.
+    let (s, v) = call(c, "PUT", &format!("/_snapshot/{repo}/mine?wait_for_completion=true"), Some("{}")).await;
+    assert!(s >= 400 && at(&v, "error.reason").as_str().unwrap_or_default().contains("readonly"), "{s} {v:?}");
+    let (s, _) = call(c, "DELETE", &format!("/_snapshot/{repo}/snap-1"), None).await;
+    assert!(s >= 400);
+    // Indices without their `_source` are refused, by name and reason.
+    let restore = format!("/_snapshot/{repo}/snap-1/_restore?wait_for_completion=true");
+    let (s, v) = call(c, "POST", &restore, Some(r#"{"indices":"*"}"#)).await;
+    let reason = at(&v, "error.reason").as_str().unwrap_or_default().to_string();
+    assert_eq!(s, 500, "{v:?}");
+    assert!(reason.contains("[synthetic]") && reason.contains("[nosource]") && reason.contains("partial"), "{reason}");
+    let body = format!(r#"{{"indices":"*","partial":true,"rename_pattern":"(.+)","rename_replacement":"r-$1","include_global_state":{global}}}"#);
+    let (s, v) = call(c, "POST", &restore, Some(&body)).await;
+    assert_eq!(s, 200, "{v:?}");
+    assert_eq!(at(&v, "snapshot.shards.total").as_i64(), Some(4), "{v:?}");
+    assert_eq!(at(&v, "snapshot.shards.failed").as_i64(), Some(0));
+    if global {
+        for uri in ["/_index_template/fixture-template", "/_ingest/pipeline/fixture-pipeline", "/_ilm/policy/fixture-policy"] {
+            assert_eq!(call(c, "GET", uri, None).await.0, 200, "{uri}");
+        }
+    }
+    for (index, want) in expected.as_object().unwrap() {
+        let target = format!("r-{index}");
+        let (_, v) = call(c, "GET", &format!("/{target}/_count"), None).await;
+        assert_eq!(at(&v, "count"), at(want, "count"), "{version} {index}");
+        let (_, hits) = call(c, "POST", &format!("/{target}/_search?seq_no_primary_term=true&version=true"), Some(r#"{"size":10000,"_source":{"exclude_vectors":false}}"#)).await;
+        let got: std::collections::HashMap<String, &Value> =
+            at(&hits, "hits.hits").as_array().unwrap().iter().map(|h| (at(h, "_id").as_str().unwrap().to_string(), h)).collect();
+        for d in at(want, "docs").as_array().unwrap() {
+            let id = at(d, "_id").as_str().unwrap();
+            let h = got.get(id).unwrap_or_else(|| panic!("{version} {index}: no [{id}]"));
+            assert_eq!(at(h, "_routing"), at(d, "_routing"), "{id}");
+            assert_eq!(at(h, "_seq_no"), at(d, "_seq_no"), "{id}");
+            assert_eq!(at(h, "_version"), at(d, "_version"), "{id}");
+            assert!(same(at(h, "_source"), at(d, "_source")), "{version} {index} {id}: {:?} vs {:?}", at(h, "_source"), at(d, "_source"));
+            // `GET _source` gives what Elasticsearch's gave (roll prints it again: the stored bytes
+            // are compared in search-lucene's tests); vectors it left out show only on request.
+            let mut uri = format!("/{target}/_source/{}", urlencode(id));
+            if let Some(r) = at(d, "_routing").as_str() {
+                uri.push_str(&format!("?routing={}", urlencode(r)));
+            }
+            let raw = raw_body(c, &uri).await;
+            let kept: Value = parse(at(d, "source_raw").as_str().unwrap().as_bytes()).unwrap().unwrap();
+            assert!(same(&parse(raw.as_bytes()).unwrap().unwrap(), &kept), "{version} {index} {id}: {raw}");
+        }
+        for (name, count) in at(want, "counts").as_object().unwrap() {
+            let q = match name.as_str() {
+                "match_beta" => r#"{"match":{"title":"beta"}}"#,
+                "term_red" => r#"{"term":{"tag":"red"}}"#,
+                "range_count" => r#"{"range":{"count":{"gte":10,"lt":30}}}"#,
+                "nested_age" => r#"{"nested":{"path":"people","query":{"range":{"people.age":{"gte":50}}}}}"#,
+                "geo" => r#"{"geo_distance":{"distance":"5000km","loc":{"lat":0,"lon":0}}}"#,
+                _ => r#"{"range":{"when":{"gte":"2024-06-01"}}}"#,
+            };
+            let (_, v) = call(c, "POST", &format!("/{target}/_count"), Some(&format!(r#"{{"query":{q}}}"#))).await;
+            assert_eq!(at(&v, "count"), count, "{version} {index} {name}");
+        }
+        let (_, v) = call(c, "POST", &format!("/{target}/_search"), Some(r#"{"size":3,"_source":false,"knn":{"field":"vec","query_vector":[0.1,0.2,-0.3,0.4],"k":3,"num_candidates":100}}"#)).await;
+        let top: Vec<&str> = at(&v, "hits.hits").as_array().unwrap().iter().map(|h| at(h, "_id").as_str().unwrap()).collect();
+        assert!(top.contains(&at(want, "knn.0").as_str().unwrap()), "{version} {index} knn {top:?}");
+    }
+    let (_, v) = call(c, "GET", "/r-mixed/_recovery", None).await;
+    assert_eq!(at(&v, "r-mixed.shards.0.type").as_str(), Some("SNAPSHOT"));
+    assert_eq!(at(&v, "r-mixed.shards.0.stage").as_str(), Some("DONE"));
+    for i in ["r-mixed", "r-compressed", "r-excludes"] {
+        call(c, "DELETE", &format!("/{i}"), None).await;
+    }
+    call(c, "DELETE", &format!("/_snapshot/{repo}"), None).await;
+}
+
+/// Equal sources, numbers within `float` precision: cosine vectors come back from their
+/// normalized form and magnitude, on roll as on Elasticsearch, each with its own rounding.
+fn same(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Obj(x), Value::Obj(y)) => x.len() == y.len() && x.iter().all(|(k, v)| y.get(k).is_some_and(|w| same(v, w))),
+        (Value::Arr(x), Value::Arr(y)) => x.len() == y.len() && x.iter().zip(y).all(|(v, w)| same(v, w)),
+        (Value::Num(_), Value::Num(_)) => {
+            let (x, y) = (a.as_f64().unwrap(), b.as_f64().unwrap());
+            (x - y).abs() <= 1e-6 * x.abs().max(1.0)
+        }
+        _ => a == b,
+    }
+}
+
+fn urlencode(s: &str) -> String {
+    s.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
+}
+
+async fn raw_body(c: &Cluster, uri: &str) -> String {
+    let resp = search_es::handle(c, EsRequest::new("GET", uri)).await;
+    assert_eq!(resp.status, 200, "{uri}: {}", String::from_utf8_lossy(&resp.body));
+    String::from_utf8(resp.body.to_vec()).unwrap()
+}
+
+/// The rate of a restore from an Elasticsearch repository (docs/search/README.md, "Next"):
+/// `ROLL_ES_BENCH=<an fs repository Elasticsearch wrote> cargo test --release -p search-es --test
+/// snapshots elasticsearch_restore_rate -- --ignored --nocapture`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ROLL_ES_BENCH"]
+async fn elasticsearch_restore_rate() {
+    let dir = std::path::PathBuf::from(std::env::var("ROLL_ES_BENCH").expect("ROLL_ES_BENCH"));
+    let mut cfg = ClusterConfig::new("es-restore-rate");
+    cfg.node_settings.push(("path.repo".into(), dir.parent().unwrap().display().to_string()));
+    let c = Cluster::open(cfg, Arc::new(MemoryStore::new())).await.unwrap();
+    let body = format!(r#"{{"type":"fs","settings":{{"location":"{}"}}}}"#, dir.file_name().unwrap().to_str().unwrap());
+    assert_eq!(call(&c, "PUT", "/_snapshot/bench", Some(&body)).await.0, 200);
+    let (_, v) = call(&c, "GET", "/_snapshot/bench/_all", None).await;
+    let snap = at(&v, "snapshots.0.snapshot").as_str().unwrap().to_string();
+    let started = std::time::Instant::now();
+    let (s, v) = call(&c, "POST", &format!("/_snapshot/bench/{snap}/_restore?wait_for_completion=true"), Some(r#"{"indices":"*"}"#)).await;
+    let took = started.elapsed();
+    assert_eq!(s, 200, "{v:?}");
+    let index = at(&v, "snapshot.indices.0").as_str().unwrap().to_string();
+    let (_, v) = call(&c, "GET", &format!("/{index}/_count"), None).await;
+    let docs = at(&v, "count").as_i64().unwrap();
+    println!("restored {docs} documents in {took:?}: {:.0} docs/s", docs as f64 / took.as_secs_f64());
+}

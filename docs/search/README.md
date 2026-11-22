@@ -767,7 +767,8 @@ deterministic (#396).
    Basic and API key credentials sealed and never echoed; then a dashboard flow that lists a
    remote cluster's indices, copies mappings, settings and aliases, reindexes with progress
    (`_tasks`), and switches an alias when done. Algolia's export (records, synonyms, rules)
-   mapped onto indices, synonym sets and query rules after that.
+   mapped onto indices, synonym sets and query rules after that. Offline, with no route to the
+   old cluster: its snapshots restore on roll from the bucket they're in (item 8, #ESR).
 3. **A sweep for the bug classes the 2026-11-19 reviews kept finding** (first pass landed in #434; the follow-up, #492, covers the
    probe's other 15 abort paths). Four
    independent security reviews (connectors #318, cross-cluster search #347 and its gaps #389,
@@ -881,22 +882,23 @@ deterministic (#396).
    storage (branches copy them, they go with the cluster). And the `s3` repository type: a bucket
    the tenant names, reached through `roll_net::PublicOnly`, credentials sealed apart from the
    settings and never shown, snapshots uploaded as documents per segment (incremental), so
-   another cluster restores them (docs/search/architecture.md, "Snapshots"). Left: `_analyze`
-   against a real bucket (it plans and answers without touching one), multipart uploads and a
-   `chunk_size` setting (a chunk is ~8 MiB; one object per chunk), the `gcs` and `azure` types,
-   `max_snapshot_bytes_per_sec`/`max_restore_bytes_per_sec` throttling of bucket traffic, and
-   credentials from roll secrets instead of the repository's settings. Restoring from a snapshot
-   Elasticsearch wrote: feasible but not built. It means reading Elasticsearch's repository
-   (`index-N`, `snap-*.dat`, `meta-*.dat`, shard `index-*`/`snap-*.dat`: SMILE inside Lucene
-   codec headers, DEFLATE-compressed) and each shard's Lucene files (segment infos, field infos,
-   compound files, LZ4/DEFLATE stored fields for `_id`, `_routing`, `_source`, numeric doc values
-   for `_seq_no`, `_primary_term`, `_version`, live docs, flat vectors for excluded source
-   vectors; Lucene 9 and 10 codecs for 8.x and 9.x snapshots), all as hostile input, then
-   re-indexing every document from `_source`: about 4,000 lines and Elasticsearch-made fixtures,
-   and a restore that is a full reindex. Indices without a stored `_source` (synthetic source,
-   the logsdb and time-series default, `_source.enabled: false`) can't come back that way.
-   Decided 2026-11-17: not now. A live cluster moves by reindex from remote (item 2: today it
-   can't, over HTTPS); build it once tenants ask to move by backup alone.
+   another cluster restores them (docs/search/architecture.md, "Snapshots"); multipart uploads,
+   `chunk_size`, throttling and a real `_analyze` (#237). And restoring snapshots Elasticsearch
+   wrote (#ESR, compatibility.md "Restoring snapshots Elasticsearch wrote"): a team on Elastic
+   Cloud or its own Elasticsearch registers the bucket (or `fs` directory) it already snapshots
+   to and runs Elasticsearch's own `_restore`, with no network route to the old cluster. Such a
+   repository is read only whatever its registration says; listing answers from its own
+   metadata; a restore reads each shard's Lucene files (Lucene 9 and 10: Elasticsearch 8.0 to
+   9.x, LZ4, DEFLATE and zstd stored fields, soft deletes, sequence numbers and versions from doc
+   values, vectors Elasticsearch 9 leaves out of `_source` from the flat vector files), all as
+   hostile input, and indexes every live document again from `_source` as a task `_recovery`
+   follows. Indices without a stored `_source` are refused by name and reason (`partial`
+   restores the rest). Measured: a 1M-document restore at RATE docs/s (lane b, one run). Left:
+   credentials from roll secrets instead of the repository's settings; of the restore, segments
+   Lucene 8 wrote (Elasticsearch 7.x indices never merged since), data streams themselves (their backing indices restore), `sparse_vector`
+   and `rank_vectors` values and nested dense vectors that Elasticsearch 9 left out of `_source`,
+   `_status` file counts from the shard snapshots, and resuming after a takeover from the shard
+   reached rather than from the start of each index.
 9. **Vector search's footprint** (docs/benchmarks/search.md, "Vector search": 1M × 384 against
    Elasticsearch 9.5.5 and OpenSearch 3.9). Roll leads on indexing (4,735 docs/s against 3,585
    and 2,978 at 8 clients), merged `knn` (1.9 ms CPU against 6.1 and 4.9), `rrf` (3.2 against 13.8

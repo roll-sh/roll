@@ -1,0 +1,5192 @@
+{
+"compressed": {
+"count": 51,
+"counts": {
+"date": 30,
+"geo": 3,
+"match_beta": 5,
+"nested_age": 18,
+"range_count": 17,
+"term_red": 14
+},
+"docs": [
+{
+"_id": "1000",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 0,
+"_source": {
+"count": 0,
+"flag": true,
+"loc": {
+"lat": 40.4617,
+"lon": -85.9154
+},
+"people": [],
+"price": 197.31,
+"secret": "s0",
+"tag": "a b",
+"title": "theta lambda lambda omicron mu gamma",
+"vec": [
+-0.871,
+-0.932,
+0.105,
+-0.348
+],
+"when": "2024-01-01T00:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"theta lambda lambda omicron mu gamma\", \"tag\": \"a b\", \"count\": 0, \"price\": 197.31, \"when\": \"2024-01-01T00:00:00Z\", \"flag\": true, \"loc\": {\"lat\": 40.4617, \"lon\": -85.9154}, \"people\": [], \"secret\": \"s0\"}"
+},
+{
+"_id": "GgC1-6EBbdXx5k-2VQ5M",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 1,
+"_source": {
+"count": 1,
+"flag": false,
+"loc": {
+"lat": 78.1491,
+"lon": 160.5197
+},
+"people": [
+{
+"age": 30,
+"name": "zeta"
+}
+],
+"price": 421.06,
+"secret": "s1",
+"tag": "red",
+"title": "delta gamma iota gamma eta",
+"vec": [
+-0.734,
+-0.078,
+0.783,
+-0.53
+],
+"when": "2024-02-02T01:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"delta gamma iota gamma eta\", \"tag\": \"red\", \"count\": 1, \"price\": 421.06, \"when\": \"2024-02-02T01:00:00Z\", \"flag\": false, \"loc\": {\"lat\": 78.1491, \"lon\": 160.5197}, \"people\": [{\"name\": \"zeta\", \"age\": 30}], \"secret\": \"s1\"}"
+},
+{
+"_id": "doc-2",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 2,
+"_source": {
+"count": 2,
+"flag": true,
+"loc": {
+"lat": -38.3464,
+"lon": -20.6048
+},
+"people": [
+{
+"age": 32,
+"name": "zeta"
+},
+{
+"age": 20,
+"name": "theta"
+}
+],
+"price": 254.06,
+"secret": "s2",
+"tag": "blue",
+"title": "delta kappa kappa iota tau iota",
+"vec": [
+-0.437,
+0.815,
+-0.623,
+-0.87000006
+],
+"when": "2024-03-03T02:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"delta kappa kappa iota tau iota\", \"tag\": \"blue\", \"count\": 2, \"price\": 254.06, \"when\": \"2024-03-03T02:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -38.3464, \"lon\": -20.6048}, \"people\": [{\"name\": \"zeta\", \"age\": 32}, {\"name\": \"theta\", \"age\": 20}], \"secret\": \"s2\"}"
+},
+{
+"_id": "04",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 4,
+"_source": {
+"count": 4,
+"flag": true,
+"loc": {
+"lat": 16.0789,
+"lon": 111.4945
+},
+"people": [
+{
+"age": 10,
+"name": "eta"
+}
+],
+"price": 50.39,
+"secret": "s4",
+"tag": "red",
+"title": "kappa theta",
+"vec": [
+-0.256,
+0.732,
+-0.102,
+-0.48
+],
+"when": "2024-05-05T04:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"kappa theta\", \"tag\": \"red\", \"count\": 4, \"price\": 50.39, \"when\": \"2024-05-05T04:00:00Z\", \"flag\": true, \"loc\": {\"lat\": 16.0789, \"lon\": 111.4945}, \"people\": [{\"name\": \"eta\", \"age\": 10}], \"secret\": \"s4\"}"
+},
+{
+"_id": "GwC1-6EBbdXx5k-2VQ5M",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 6,
+"_source": {
+"count": 6,
+"flag": true,
+"loc": {
+"lat": -69.8766,
+"lon": -135.5282
+},
+"people": [],
+"price": 548.04,
+"secret": "s6",
+"tag": "ünïcødé",
+"title": "eta beta",
+"vec": [
+-0.209,
+0.1,
+0.278,
+-0.818
+],
+"when": "2024-07-07T06:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"eta beta\", \"tag\": \"\\u00fcn\\u00efc\\u00f8d\\u00e9\", \"count\": 6, \"price\": 548.04, \"when\": \"2024-07-07T06:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -69.8766, \"lon\": -135.5282}, \"people\": [], \"secret\": \"s6\"}"
+},
+{
+"_id": "doc-7",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 7,
+"_source": {
+"count": 7,
+"flag": false,
+"loc": {
+"lat": -13.1447,
+"lon": -152.5374
+},
+"people": [
+{
+"age": 46,
+"name": "tau"
+}
+],
+"price": 667.81,
+"secret": "s7",
+"tag": "blue",
+"title": "nu iota xi",
+"vec": [
+-0.172,
+-0.964,
+0.533,
+0.604
+],
+"when": "2024-08-08T07:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"nu iota xi\", \"tag\": \"blue\", \"count\": 7, \"price\": 667.81, \"when\": \"2024-08-08T07:00:00Z\", \"flag\": false, \"loc\": {\"lat\": -13.1447, \"lon\": -152.5374}, \"people\": [{\"name\": \"tau\", \"age\": 46}], \"secret\": \"s7\"}"
+},
+{
+"_id": "ïd/8 with space",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 8,
+"_source": {
+"count": 8,
+"flag": true,
+"loc": {
+"lat": -54.9493,
+"lon": -131.3966
+},
+"people": [
+{
+"age": 52,
+"name": "gamma"
+},
+{
+"age": 47,
+"name": "tau"
+}
+],
+"price": 434.16,
+"secret": "s8",
+"tag": "red",
+"title": "nu nu eta",
+"vec": [
+-0.078,
+-0.675,
+-0.97,
+0.10299999
+],
+"when": "2024-09-09T08:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"nu nu eta\", \"tag\": \"red\", \"count\": 8, \"price\": 434.16, \"when\": \"2024-09-09T08:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -54.9493, \"lon\": -131.3966}, \"people\": [{\"name\": \"gamma\", \"age\": 52}, {\"name\": \"tau\", \"age\": 47}], \"secret\": \"s8\"}"
+},
+{
+"_id": "09",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 9,
+"_source": {
+"count": 9,
+"flag": false,
+"loc": {
+"lat": -54.1096,
+"lon": -111.593
+},
+"people": [],
+"price": 347.94,
+"secret": "s9",
+"tag": "green",
+"title": "gamma tau mu rho zeta",
+"vec": [
+-0.866,
+-0.233,
+0.507,
+0.584
+],
+"when": "2024-10-10T09:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"gamma tau mu rho zeta\", \"tag\": \"green\", \"count\": 9, \"price\": 347.94, \"when\": \"2024-10-10T09:00:00Z\", \"flag\": false, \"loc\": {\"lat\": -54.1096, \"lon\": -111.593}, \"people\": [], \"secret\": \"s9\"}"
+},
+{
+"_id": "HAC1-6EBbdXx5k-2VQ5M",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 11,
+"_source": {
+"count": 11,
+"flag": false,
+"loc": {
+"lat": 2.8628,
+"lon": -39.584
+},
+"people": [
+{
+"age": 20,
+"name": "delta"
+},
+{
+"age": 25,
+"name": "theta"
+}
+],
+"price": 399.75,
+"secret": "s11",
+"tag": "red",
+"title": "nu eta pi zeta tau eta",
+"vec": [
+-0.918,
+0.125,
+0.515,
+-0.924
+],
+"when": "2024-12-12T11:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"nu eta pi zeta tau eta\", \"tag\": \"red\", \"count\": 11, \"price\": 399.75, \"when\": \"2024-12-12T11:00:00Z\", \"flag\": false, \"loc\": {\"lat\": 2.8628, \"lon\": -39.584}, \"people\": [{\"name\": \"delta\", \"age\": 20}, {\"name\": \"theta\", \"age\": 25}], \"secret\": \"s11\"}"
+},
+{
+"_id": "ïd/13 with space",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 13,
+"_source": {
+"count": 13,
+"flag": false,
+"loc": {
+"lat": 18.972,
+"lon": 108.4499
+},
+"people": [
+{
+"age": 61,
+"name": "zeta"
+}
+],
+"price": 446.82,
+"secret": "s13",
+"tag": "green",
+"title": "pi omicron",
+"vec": [
+-0.199,
+-0.866,
+-0.283,
+-0.269
+],
+"when": "2024-02-14T13:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"pi omicron\", \"tag\": \"green\", \"count\": 13, \"price\": 446.82, \"when\": \"2024-02-14T13:00:00Z\", \"flag\": false, \"loc\": {\"lat\": 18.972, \"lon\": 108.4499}, \"people\": [{\"name\": \"zeta\", \"age\": 61}], \"secret\": \"s13\"}"
+},
+{
+"_id": "014",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 14,
+"_source": {
+"count": 14,
+"flag": true,
+"loc": {
+"lat": -29.8039,
+"lon": 74.9338
+},
+"people": [
+{
+"age": 7,
+"name": "gamma"
+},
+{
+"age": 49,
+"name": "rho"
+}
+],
+"price": 922.13,
+"secret": "s14",
+"tag": "red",
+"title": "rho rho beta beta epsilon",
+"vec": [
+0.305,
+0.568,
+-0.948,
+-0.8669999
+],
+"when": "2024-03-15T14:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"rho rho beta beta epsilon\", \"tag\": \"red\", \"count\": 14, \"price\": 922.13, \"when\": \"2024-03-15T14:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -29.8039, \"lon\": 74.9338}, \"people\": [{\"name\": \"gamma\", \"age\": 7}, {\"name\": \"rho\", \"age\": 49}], \"secret\": \"s14\"}"
+},
+{
+"_id": "1015",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 15,
+"_source": {
+"count": 15,
+"flag": false,
+"loc": {
+"lat": -23.8564,
+"lon": 87.1011
+},
+"people": [],
+"price": 65.52,
+"secret": "s15",
+"tag": "green",
+"title": "delta eta epsilon pi kappa zeta",
+"vec": [
+-0.682,
+0.79300004,
+-0.45,
+0.631
+],
+"when": "2024-04-16T15:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"delta eta epsilon pi kappa zeta\", \"tag\": \"green\", \"count\": 15, \"price\": 65.52, \"when\": \"2024-04-16T15:00:00Z\", \"flag\": false, \"loc\": {\"lat\": -23.8564, \"lon\": 87.1011}, \"people\": [], \"secret\": \"s15\"}"
+},
+{
+"_id": "HQC1-6EBbdXx5k-2VQ5M",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 16,
+"_source": {
+"count": 16,
+"flag": true,
+"loc": {
+"lat": 18.5386,
+"lon": -89.2843
+},
+"people": [
+{
+"age": 5,
+"name": "mu"
+}
+],
+"price": 591.89,
+"secret": "s16",
+"tag": "green",
+"title": "iota rho pi",
+"vec": [
+-0.602,
+-0.193,
+0.273,
+-0.44399998
+],
+"when": "2024-05-17T16:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"iota rho pi\", \"tag\": \"green\", \"count\": 16, \"price\": 591.89, \"when\": \"2024-05-17T16:00:00Z\", \"flag\": true, \"loc\": {\"lat\": 18.5386, \"lon\": -89.2843}, \"people\": [{\"name\": \"mu\", \"age\": 5}], \"secret\": \"s16\"}"
+},
+{
+"_id": "ïd/18 with space",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 18,
+"_source": {
+"count": 18,
+"flag": true,
+"loc": {
+"lat": 42.3423,
+"lon": -19.6242
+},
+"people": [],
+"price": 360.25,
+"secret": "s18",
+"tag": "green",
+"title": "mu iota nu mu tau",
+"vec": [
+-0.646,
+0.487,
+-0.903,
+0.64
+],
+"when": "2024-07-19T18:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"mu iota nu mu tau\", \"tag\": \"green\", \"count\": 18, \"price\": 360.25, \"when\": \"2024-07-19T18:00:00Z\", \"flag\": true, \"loc\": {\"lat\": 42.3423, \"lon\": -19.6242}, \"people\": [], \"secret\": \"s18\"}"
+},
+{
+"_id": "1020",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 20,
+"_source": {
+"count": 20,
+"flag": true,
+"loc": {
+"lat": -31.4018,
+"lon": 7.8502
+},
+"people": [
+{
+"age": 29,
+"name": "sigma"
+},
+{
+"age": 75,
+"name": "xi"
+}
+],
+"price": 567.12,
+"secret": "s20",
+"tag": "red",
+"title": "alpha beta",
+"vec": [
+-0.398,
+-0.733,
+-0.268,
+0.657
+],
+"when": "2024-09-21T20:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"alpha beta\", \"tag\": \"red\", \"count\": 20, \"price\": 567.12, \"when\": \"2024-09-21T20:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -31.4018, \"lon\": 7.8502}, \"people\": [{\"name\": \"sigma\", \"age\": 29}, {\"name\": \"xi\", \"age\": 75}], \"secret\": \"s20\"}"
+},
+{
+"_id": "HgC1-6EBbdXx5k-2VQ50",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 21,
+"_source": {
+"count": 21,
+"flag": false,
+"loc": {
+"lat": -69.813,
+"lon": -120.8048
+},
+"people": [],
+"price": 450.85,
+"secret": "s21",
+"tag": "green",
+"title": "epsilon alpha theta",
+"vec": [
+0.331,
+-0.46,
+0.623,
+0.934
+],
+"when": "2024-10-22T21:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"epsilon alpha theta\", \"tag\": \"green\", \"count\": 21, \"price\": 450.85, \"when\": \"2024-10-22T21:00:00Z\", \"flag\": false, \"loc\": {\"lat\": -69.813, \"lon\": -120.8048}, \"people\": [], \"secret\": \"s21\"}"
+},
+{
+"_id": "doc-22",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 22,
+"_source": {
+"count": 22,
+"flag": true,
+"loc": {
+"lat": -8.9993,
+"lon": 148.6334
+},
+"people": [
+{
+"age": 32,
+"name": "pi"
+}
+],
+"price": 645.6,
+"secret": "s22",
+"tag": "a b",
+"title": "sigma mu",
+"vec": [
+-0.67,
+-0.999,
+-0.877,
+-0.95
+],
+"when": "2024-11-23T22:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"sigma mu\", \"tag\": \"a b\", \"count\": 22, \"price\": 645.6, \"when\": \"2024-11-23T22:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -8.9993, \"lon\": 148.6334}, \"people\": [{\"name\": \"pi\", \"age\": 32}], \"secret\": \"s22\"}"
+},
+{
+"_id": "ïd/23 with space",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 23,
+"_source": {
+"count": 23,
+"flag": false,
+"loc": {
+"lat": 8.1477,
+"lon": 149.913
+},
+"people": [
+{
+"age": 53,
+"name": "epsilon"
+},
+{
+"age": 67,
+"name": "eta"
+}
+],
+"price": 12.35,
+"secret": "s23",
+"tag": "red",
+"title": "theta zeta beta",
+"vec": [
+0.21599999,
+0.014000001,
+0.283,
+0.627
+],
+"when": "2024-12-24T23:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"theta zeta beta\", \"tag\": \"red\", \"count\": 23, \"price\": 12.35, \"when\": \"2024-12-24T23:00:00Z\", \"flag\": false, \"loc\": {\"lat\": 8.1477, \"lon\": 149.913}, \"people\": [{\"name\": \"epsilon\", \"age\": 53}, {\"name\": \"eta\", \"age\": 67}], \"secret\": \"s23\"}"
+},
+{
+"_id": "1025",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 25,
+"_source": {
+"count": 25,
+"flag": false,
+"loc": {
+"lat": -73.7892,
+"lon": -55.9245
+},
+"people": [
+{
+"age": 7,
+"name": "iota"
+}
+],
+"price": 232.3,
+"secret": "s25",
+"tag": "blue",
+"title": "gamma omicron zeta theta delta",
+"vec": [
+-0.468,
+0.108,
+-0.128,
+0.577
+],
+"when": "2024-02-26T01:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"gamma omicron zeta theta delta\", \"tag\": \"blue\", \"count\": 25, \"price\": 232.3, \"when\": \"2024-02-26T01:00:00Z\", \"flag\": false, \"loc\": {\"lat\": -73.7892, \"lon\": -55.9245}, \"people\": [{\"name\": \"iota\", \"age\": 7}], \"secret\": \"s25\"}"
+},
+{
+"_id": "doc-27",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 27,
+"_source": {
+"count": 27,
+"flag": false,
+"loc": {
+"lat": -30.7599,
+"lon": -97.9315
+},
+"people": [],
+"price": 570.34,
+"secret": "s27",
+"tag": "green",
+"title": "pi pi rho alpha alpha xi",
+"vec": [
+0.24499999,
+-0.844,
+0.82199997,
+-0.711
+],
+"when": "2024-04-28T03:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"pi pi rho alpha alpha xi\", \"tag\": \"green\", \"count\": 27, \"price\": 570.34, \"when\": \"2024-04-28T03:00:00Z\", \"flag\": false, \"loc\": {\"lat\": -30.7599, \"lon\": -97.9315}, \"people\": [], \"secret\": \"s27\"}"
+},
+{
+"_id": "ïd/28 with space",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 28,
+"_source": {
+"count": 28,
+"flag": true,
+"loc": {
+"lat": -24.8218,
+"lon": -121.7739
+},
+"people": [
+{
+"age": 4,
+"name": "alpha"
+}
+],
+"price": 928.95,
+"secret": "s28",
+"tag": "a b",
+"title": "delta delta",
+"vec": [
+-0.917,
+0.385,
+0.268,
+0.394
+],
+"when": "2024-05-01T04:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"delta delta\", \"tag\": \"a b\", \"count\": 28, \"price\": 928.95, \"when\": \"2024-05-01T04:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -24.8218, \"lon\": -121.7739}, \"people\": [{\"name\": \"alpha\", \"age\": 4}], \"secret\": \"s28\"}"
+},
+{
+"_id": "029",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 29,
+"_source": {
+"count": 29,
+"flag": false,
+"loc": {
+"lat": 72.7312,
+"lon": 11.524
+},
+"people": [
+{
+"age": 50,
+"name": "gamma"
+},
+{
+"age": 32,
+"name": "delta"
+}
+],
+"price": 199.31,
+"secret": "s29",
+"tag": "blue",
+"title": "gamma tau",
+"vec": [
+-0.589,
+-0.776,
+-0.93099993,
+0.695
+],
+"when": "2024-06-02T05:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"gamma tau\", \"tag\": \"blue\", \"count\": 29, \"price\": 199.31, \"when\": \"2024-06-02T05:00:00Z\", \"flag\": false, \"loc\": {\"lat\": 72.7312, \"lon\": 11.524}, \"people\": [{\"name\": \"gamma\", \"age\": 50}, {\"name\": \"delta\", \"age\": 32}], \"secret\": \"s29\"}"
+},
+{
+"_id": "1030",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 30,
+"_source": {
+"count": 30,
+"flag": true,
+"loc": {
+"lat": 46.7148,
+"lon": 49.7489
+},
+"people": [],
+"price": 132.65,
+"secret": "s30",
+"tag": "red",
+"title": "kappa pi",
+"vec": [
+-0.411,
+-0.327,
+-0.478,
+-0.298
+],
+"when": "2024-07-03T06:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"kappa pi\", \"tag\": \"red\", \"count\": 30, \"price\": 132.65, \"when\": \"2024-07-03T06:00:00Z\", \"flag\": true, \"loc\": {\"lat\": 46.7148, \"lon\": 49.7489}, \"people\": [], \"secret\": \"s30\"}"
+},
+{
+"_id": "doc-32",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 32,
+"_source": {
+"count": 32,
+"flag": true,
+"loc": {
+"lat": -47.6744,
+"lon": 89.1415
+},
+"people": [
+{
+"age": 1,
+"name": "beta"
+},
+{
+"age": 63,
+"name": "mu"
+}
+],
+"price": 1.3,
+"secret": "s32",
+"tag": "ünïcødé",
+"title": "tau eta gamma tau kappa zeta",
+"vec": [
+-0.809,
+0.39,
+0.651,
+0.934
+],
+"when": "2024-09-05T08:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"tau eta gamma tau kappa zeta\", \"tag\": \"\\u00fcn\\u00efc\\u00f8d\\u00e9\", \"count\": 32, \"price\": 1.3, \"when\": \"2024-09-05T08:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -47.6744, \"lon\": 89.1415}, \"people\": [{\"name\": \"beta\", \"age\": 1}, {\"name\": \"mu\", \"age\": 63}], \"secret\": \"s32\"}"
+},
+{
+"_id": "034",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 34,
+"_source": {
+"count": 34,
+"flag": true,
+"loc": {
+"lat": 23.338,
+"lon": -43.537
+},
+"people": [
+{
+"age": 34,
+"name": "kappa"
+}
+],
+"price": 422.13,
+"secret": "s34",
+"tag": "red",
+"title": "delta lambda mu delta nu nu",
+"vec": [
+-0.144,
+0.09,
+-0.658,
+0.965
+],
+"when": "2024-11-07T10:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"delta lambda mu delta nu nu\", \"tag\": \"red\", \"count\": 34, \"price\": 422.13, \"when\": \"2024-11-07T10:00:00Z\", \"flag\": true, \"loc\": {\"lat\": 23.338, \"lon\": -43.537}, \"people\": [{\"name\": \"kappa\", \"age\": 34}], \"secret\": \"s34\"}"
+},
+{
+"_id": "1035",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 35,
+"_source": {
+"count": 35,
+"flag": false,
+"loc": {
+"lat": 40.4783,
+"lon": 49.742
+},
+"people": [
+{
+"age": 75,
+"name": "mu"
+},
+{
+"age": 67,
+"name": "lambda"
+}
+],
+"price": 754.48,
+"secret": "s35",
+"tag": "a b",
+"title": "omicron epsilon sigma",
+"vec": [
+-0.68899995,
+0.686,
+0.324,
+0.484
+],
+"when": "2024-12-08T11:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"omicron epsilon sigma\", \"tag\": \"a b\", \"count\": 35, \"price\": 754.48, \"when\": \"2024-12-08T11:00:00Z\", \"flag\": false, \"loc\": {\"lat\": 40.4783, \"lon\": 49.742}, \"people\": [{\"name\": \"mu\", \"age\": 75}, {\"name\": \"lambda\", \"age\": 67}], \"secret\": \"s35\"}"
+},
+{
+"_id": "IQC1-6EBbdXx5k-2VQ50",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 36,
+"_source": {
+"count": 36,
+"flag": true,
+"loc": {
+"lat": -26.5514,
+"lon": 48.5183
+},
+"people": [],
+"price": 231.02,
+"secret": "s36",
+"tag": "a b",
+"title": "omicron omicron iota",
+"vec": [
+0.393,
+0.014999999,
+-0.465,
+0.509
+],
+"when": "2024-01-09T12:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"omicron omicron iota\", \"tag\": \"a b\", \"count\": 36, \"price\": 231.02, \"when\": \"2024-01-09T12:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -26.5514, \"lon\": 48.5183}, \"people\": [], \"secret\": \"s36\"}"
+},
+{
+"_id": "doc-37",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 37,
+"_source": {
+"count": 37,
+"flag": false,
+"loc": {
+"lat": 72.9269,
+"lon": -82.046
+},
+"people": [
+{
+"age": 22,
+"name": "delta"
+}
+],
+"price": 236.21,
+"secret": "s37",
+"tag": "green",
+"title": "epsilon epsilon theta lambda rho mu",
+"vec": [
+0.925,
+-0.797,
+-0.23200001,
+0.968
+],
+"when": "2024-02-10T13:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"epsilon epsilon theta lambda rho mu\", \"tag\": \"green\", \"count\": 37, \"price\": 236.21, \"when\": \"2024-02-10T13:00:00Z\", \"flag\": false, \"loc\": {\"lat\": 72.9269, \"lon\": -82.046}, \"people\": [{\"name\": \"delta\", \"age\": 22}], \"secret\": \"s37\"}"
+},
+{
+"_id": "039",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 39,
+"_source": {
+"count": 39,
+"flag": false,
+"loc": {
+"lat": -79.1172,
+"lon": -87.6234
+},
+"people": [],
+"price": 738.24,
+"secret": "s39",
+"tag": "a b",
+"title": "omicron alpha epsilon iota",
+"vec": [
+0.706,
+0.402,
+0.175,
+0.294
+],
+"when": "2024-04-12T15:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"omicron alpha epsilon iota\", \"tag\": \"a b\", \"count\": 39, \"price\": 738.24, \"when\": \"2024-04-12T15:00:00Z\", \"flag\": false, \"loc\": {\"lat\": -79.1172, \"lon\": -87.6234}, \"people\": [], \"secret\": \"s39\"}"
+},
+{
+"_id": "IgC1-6EBbdXx5k-2VQ6a",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 41,
+"_source": {
+"count": 41,
+"flag": false,
+"loc": {
+"lat": -27.5114,
+"lon": -166.3851
+},
+"people": [
+{
+"age": 14,
+"name": "pi"
+},
+{
+"age": 33,
+"name": "beta"
+}
+],
+"price": 894.49,
+"secret": "s41",
+"tag": "green",
+"title": "pi omicron alpha xi rho",
+"vec": [
+0.087,
+-0.678,
+0.564,
+0.881
+],
+"when": "2024-06-14T17:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"pi omicron alpha xi rho\", \"tag\": \"green\", \"count\": 41, \"price\": 894.49, \"when\": \"2024-06-14T17:00:00Z\", \"flag\": false, \"loc\": {\"lat\": -27.5114, \"lon\": -166.3851}, \"people\": [{\"name\": \"pi\", \"age\": 14}, {\"name\": \"beta\", \"age\": 33}], \"secret\": \"s41\"}"
+},
+{
+"_id": "doc-42",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 42,
+"_source": {
+"count": 42,
+"flag": true,
+"loc": {
+"lat": 22.2818,
+"lon": 111.855
+},
+"people": [],
+"price": 512.19,
+"secret": "s42",
+"tag": "ünïcødé",
+"title": "mu delta tau omicron sigma eta",
+"vec": [
+0.042999998,
+-0.179,
+0.896,
+-0.5799999
+],
+"when": "2024-07-15T18:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"mu delta tau omicron sigma eta\", \"tag\": \"\\u00fcn\\u00efc\\u00f8d\\u00e9\", \"count\": 42, \"price\": 512.19, \"when\": \"2024-07-15T18:00:00Z\", \"flag\": true, \"loc\": {\"lat\": 22.2818, \"lon\": 111.855}, \"people\": [], \"secret\": \"s42\"}"
+},
+{
+"_id": "ïd/43 with space",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 43,
+"_source": {
+"count": 43,
+"flag": false,
+"loc": {
+"lat": -70.9411,
+"lon": -76.7185
+},
+"people": [
+{
+"age": 8,
+"name": "nu"
+}
+],
+"price": 355.47,
+"secret": "s43",
+"tag": "a b",
+"title": "nu rho delta",
+"vec": [
+-0.973,
+-0.163,
+-0.159,
+0.397
+],
+"when": "2024-08-16T19:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"nu rho delta\", \"tag\": \"a b\", \"count\": 43, \"price\": 355.47, \"when\": \"2024-08-16T19:00:00Z\", \"flag\": false, \"loc\": {\"lat\": -70.9411, \"lon\": -76.7185}, \"people\": [{\"name\": \"nu\", \"age\": 8}], \"secret\": \"s43\"}"
+},
+{
+"_id": "044",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 44,
+"_source": {
+"count": 44,
+"flag": true,
+"loc": {
+"lat": 70.389,
+"lon": 9.206
+},
+"people": [
+{
+"age": 51,
+"name": "theta"
+},
+{
+"age": 28,
+"name": "omicron"
+}
+],
+"price": 741.47,
+"secret": "s44",
+"tag": "blue",
+"title": "tau iota delta theta",
+"vec": [
+-0.671,
+0.859,
+-0.8619999,
+0.597
+],
+"when": "2024-09-17T20:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"tau iota delta theta\", \"tag\": \"blue\", \"count\": 44, \"price\": 741.47, \"when\": \"2024-09-17T20:00:00Z\", \"flag\": true, \"loc\": {\"lat\": 70.389, \"lon\": 9.206}, \"people\": [{\"name\": \"theta\", \"age\": 51}, {\"name\": \"omicron\", \"age\": 28}], \"secret\": \"s44\"}"
+},
+{
+"_id": "IwC1-6EBbdXx5k-2VQ6a",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 46,
+"_source": {
+"count": 46,
+"flag": true,
+"loc": {
+"lat": 29.9922,
+"lon": 164.183
+},
+"people": [
+{
+"age": 62,
+"name": "zeta"
+}
+],
+"price": 704.2,
+"secret": "s46",
+"tag": "blue",
+"title": "pi mu theta",
+"vec": [
+-0.995,
+0.44400004,
+-0.438,
+-0.51
+],
+"when": "2024-11-19T22:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"pi mu theta\", \"tag\": \"blue\", \"count\": 46, \"price\": 704.2, \"when\": \"2024-11-19T22:00:00Z\", \"flag\": true, \"loc\": {\"lat\": 29.9922, \"lon\": 164.183}, \"people\": [{\"name\": \"zeta\", \"age\": 62}], \"secret\": \"s46\"}"
+},
+{
+"_id": "ïd/48 with space",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 48,
+"_source": {
+"count": 48,
+"flag": true,
+"loc": {
+"lat": -39.9958,
+"lon": -135.4859
+},
+"people": [],
+"price": 655.96,
+"secret": "s48",
+"tag": "red",
+"title": "tau alpha alpha eta",
+"vec": [
+-0.715,
+-0.533,
+0.553,
+-0.307
+],
+"when": "2024-01-21T00:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"tau alpha alpha eta\", \"tag\": \"red\", \"count\": 48, \"price\": 655.96, \"when\": \"2024-01-21T00:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -39.9958, \"lon\": -135.4859}, \"people\": [], \"secret\": \"s48\"}"
+},
+{
+"_id": "049",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 49,
+"_source": {
+"count": 49,
+"flag": false,
+"loc": {
+"lat": 30.0842,
+"lon": 162.2392
+},
+"people": [
+{
+"age": 86,
+"name": "gamma"
+}
+],
+"price": 609.51,
+"secret": "s49",
+"tag": "green",
+"title": "eta nu sigma",
+"vec": [
+0.803,
+0.097,
+0.273,
+-0.406
+],
+"when": "2024-02-22T01:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"eta nu sigma\", \"tag\": \"green\", \"count\": 49, \"price\": 609.51, \"when\": \"2024-02-22T01:00:00Z\", \"flag\": false, \"loc\": {\"lat\": 30.0842, \"lon\": 162.2392}, \"people\": [{\"name\": \"gamma\", \"age\": 86}], \"secret\": \"s49\"}"
+},
+{
+"_id": "1050",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 50,
+"_source": {
+"count": 50,
+"flag": true,
+"loc": {
+"lat": -12.9539,
+"lon": 111.1983
+},
+"people": [
+{
+"age": 64,
+"name": "pi"
+},
+{
+"age": 8,
+"name": "sigma"
+}
+],
+"price": 118.42,
+"secret": "s50",
+"tag": "a b",
+"title": "eta rho gamma omicron delta",
+"vec": [
+-0.031,
+0.81099993,
+0.401,
+-0.507
+],
+"when": "2024-03-23T02:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"eta rho gamma omicron delta\", \"tag\": \"a b\", \"count\": 50, \"price\": 118.42, \"when\": \"2024-03-23T02:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -12.9539, \"lon\": 111.1983}, \"people\": [{\"name\": \"pi\", \"age\": 64}, {\"name\": \"sigma\", \"age\": 8}], \"secret\": \"s50\"}"
+},
+{
+"_id": "JAC1-6EBbdXx5k-2VQ6a",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 51,
+"_source": {
+"count": 51,
+"flag": false,
+"loc": {
+"lat": 10.011,
+"lon": 56.2022
+},
+"people": [],
+"price": 467.96,
+"secret": "s51",
+"tag": "blue",
+"title": "sigma alpha zeta",
+"vec": [
+0.681,
+-0.25,
+-0.162,
+0.921
+],
+"when": "2024-04-24T03:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"sigma alpha zeta\", \"tag\": \"blue\", \"count\": 51, \"price\": 467.96, \"when\": \"2024-04-24T03:00:00Z\", \"flag\": false, \"loc\": {\"lat\": 10.011, \"lon\": 56.2022}, \"people\": [], \"secret\": \"s51\"}"
+},
+{
+"_id": "ïd/53 with space",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 53,
+"_source": {
+"count": 53,
+"flag": false,
+"loc": {
+"lat": 8.6601,
+"lon": 140.1929
+},
+"people": [
+{
+"age": 56,
+"name": "kappa"
+},
+{
+"age": 55,
+"name": "lambda"
+}
+],
+"price": 778.52,
+"secret": "s53",
+"tag": "ünïcødé",
+"title": "epsilon lambda delta mu lambda",
+"vec": [
+-0.497,
+-0.895,
+-0.422,
+-0.28999996
+],
+"when": "2024-06-26T05:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"epsilon lambda delta mu lambda\", \"tag\": \"\\u00fcn\\u00efc\\u00f8d\\u00e9\", \"count\": 53, \"price\": 778.52, \"when\": \"2024-06-26T05:00:00Z\", \"flag\": false, \"loc\": {\"lat\": 8.6601, \"lon\": 140.1929}, \"people\": [{\"name\": \"kappa\", \"age\": 56}, {\"name\": \"lambda\", \"age\": 55}], \"secret\": \"s53\"}"
+},
+{
+"_id": "1055",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 55,
+"_source": {
+"count": 55,
+"flag": false,
+"loc": {
+"lat": 7.2642,
+"lon": -153.1021
+},
+"people": [
+{
+"age": 14,
+"name": "kappa"
+}
+],
+"price": 885.6,
+"secret": "s55",
+"tag": "a b",
+"title": "beta nu",
+"vec": [
+-0.98800004,
+-0.62,
+0.843,
+0.217
+],
+"when": "2024-08-28T07:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"beta nu\", \"tag\": \"a b\", \"count\": 55, \"price\": 885.6, \"when\": \"2024-08-28T07:00:00Z\", \"flag\": false, \"loc\": {\"lat\": 7.2642, \"lon\": -153.1021}, \"people\": [{\"name\": \"kappa\", \"age\": 14}], \"secret\": \"s55\"}"
+},
+{
+"_id": "JQC1-6EBbdXx5k-2VQ6a",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 56,
+"_source": {
+"count": 56,
+"flag": true,
+"loc": {
+"lat": -56.4717,
+"lon": 59.0581
+},
+"people": [
+{
+"age": 28,
+"name": "gamma"
+},
+{
+"age": 86,
+"name": "beta"
+}
+],
+"price": 376.04,
+"secret": "s56",
+"tag": "a b",
+"title": "rho sigma",
+"vec": [
+0.267,
+0.251,
+-0.652,
+0.327
+],
+"when": "2024-09-01T08:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"rho sigma\", \"tag\": \"a b\", \"count\": 56, \"price\": 376.04, \"when\": \"2024-09-01T08:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -56.4717, \"lon\": 59.0581}, \"people\": [{\"name\": \"gamma\", \"age\": 28}, {\"name\": \"beta\", \"age\": 86}], \"secret\": \"s56\"}"
+},
+{
+"_id": "doc-57",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 57,
+"_source": {
+"count": 57,
+"flag": false,
+"loc": {
+"lat": 51.6177,
+"lon": 97.4236
+},
+"people": [],
+"price": 368.87,
+"secret": "s57",
+"tag": "red",
+"title": "xi delta",
+"vec": [
+0.124,
+-0.48400003,
+-0.396,
+-0.156
+],
+"when": "2024-10-02T09:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"xi delta\", \"tag\": \"red\", \"count\": 57, \"price\": 368.87, \"when\": \"2024-10-02T09:00:00Z\", \"flag\": false, \"loc\": {\"lat\": 51.6177, \"lon\": 97.4236}, \"people\": [], \"secret\": \"s57\"}"
+},
+{
+"_id": "ïd/58 with space",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 58,
+"_source": {
+"count": 58,
+"flag": true,
+"loc": {
+"lat": 3.5446,
+"lon": 110.4171
+},
+"people": [
+{
+"age": 74,
+"name": "xi"
+}
+],
+"price": 497.77,
+"secret": "s58",
+"tag": "red",
+"title": "alpha xi tau tau",
+"vec": [
+0.391,
+-0.191,
+-0.866,
+0.36
+],
+"when": "2024-11-03T10:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"alpha xi tau tau\", \"tag\": \"red\", \"count\": 58, \"price\": 497.77, \"when\": \"2024-11-03T10:00:00Z\", \"flag\": true, \"loc\": {\"lat\": 3.5446, \"lon\": 110.4171}, \"people\": [{\"name\": \"xi\", \"age\": 74}], \"secret\": \"s58\"}"
+},
+{
+"_id": "1005",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 61,
+"_source": {
+"count": 5,
+"flag": false,
+"loc": {
+"lat": -25.5974,
+"lon": -154.9834
+},
+"people": [
+{
+"age": 5,
+"name": "iota"
+},
+{
+"age": 2,
+"name": "eta"
+}
+],
+"price": 37.45,
+"secret": "s5",
+"tag": "green",
+"title": "delta mu updated",
+"when": "2024-06-06T05:00:00Z"
+},
+"_version": 2,
+"source_raw": "{\"title\": \"delta mu updated\", \"tag\": \"green\", \"count\": 5, \"price\": 37.45, \"when\": \"2024-06-06T05:00:00Z\", \"flag\": false, \"loc\": {\"lat\": -25.5974, \"lon\": -154.9834}, \"people\": [{\"name\": \"iota\", \"age\": 5}, {\"name\": \"eta\", \"age\": 2}], \"secret\": \"s5\"}"
+},
+{
+"_id": "doc-12",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 63,
+"_source": {
+"count": 12,
+"flag": true,
+"loc": {
+"lat": -30.6861,
+"lon": -85.252
+},
+"people": [],
+"price": 649.03,
+"secret": "s12",
+"tag": "blue",
+"title": "delta nu omicron sigma updated",
+"when": "2024-01-13T12:00:00Z"
+},
+"_version": 2,
+"source_raw": "{\"title\": \"delta nu omicron sigma updated\", \"tag\": \"blue\", \"count\": 12, \"price\": 649.03, \"when\": \"2024-01-13T12:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -30.6861, \"lon\": -85.252}, \"people\": [], \"secret\": \"s12\"}"
+},
+{
+"_id": "019",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 65,
+"_source": {
+"count": 19,
+"flag": false,
+"loc": {
+"lat": -33.4445,
+"lon": 42.7101
+},
+"people": [
+{
+"age": 66,
+"name": "xi"
+}
+],
+"price": 221.64,
+"secret": "s19",
+"tag": "red",
+"title": "kappa tau lambda alpha updated",
+"when": "2024-08-20T19:00:00Z"
+},
+"_version": 2,
+"source_raw": "{\"title\": \"kappa tau lambda alpha updated\", \"tag\": \"red\", \"count\": 19, \"price\": 221.64, \"when\": \"2024-08-20T19:00:00Z\", \"flag\": false, \"loc\": {\"lat\": -33.4445, \"lon\": 42.7101}, \"people\": [{\"name\": \"xi\", \"age\": 66}], \"secret\": \"s19\"}"
+},
+{
+"_id": "HwC1-6EBbdXx5k-2VQ50",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 67,
+"_source": {
+"count": 26,
+"flag": true,
+"loc": {
+"lat": -42.2225,
+"lon": 82.9187
+},
+"people": [
+{
+"age": 42,
+"name": "zeta"
+},
+{
+"age": 50,
+"name": "eta"
+}
+],
+"price": 260.37,
+"secret": "s26",
+"tag": "green",
+"title": "iota kappa eta gamma rho alpha updated",
+"when": "2024-03-27T02:00:00Z"
+},
+"_version": 2,
+"source_raw": "{\"title\": \"iota kappa eta gamma rho alpha updated\", \"tag\": \"green\", \"count\": 26, \"price\": 260.37, \"when\": \"2024-03-27T02:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -42.2225, \"lon\": 82.9187}, \"people\": [{\"name\": \"zeta\", \"age\": 42}, {\"name\": \"eta\", \"age\": 50}], \"secret\": \"s26\"}"
+},
+{
+"_id": "ïd/33 with space",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 69,
+"_source": {
+"count": 33,
+"flag": false,
+"loc": {
+"lat": -42.9556,
+"lon": -113.6311
+},
+"people": [],
+"price": 938.29,
+"secret": "s33",
+"tag": "green",
+"title": "mu rho iota tau zeta kappa updated",
+"when": "2024-10-06T09:00:00Z"
+},
+"_version": 2,
+"source_raw": "{\"title\": \"mu rho iota tau zeta kappa updated\", \"tag\": \"green\", \"count\": 33, \"price\": 938.29, \"when\": \"2024-10-06T09:00:00Z\", \"flag\": false, \"loc\": {\"lat\": -42.9556, \"lon\": -113.6311}, \"people\": [], \"secret\": \"s33\"}"
+},
+{
+"_id": "1040",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 71,
+"_source": {
+"count": 40,
+"flag": true,
+"loc": {
+"lat": -29.9177,
+"lon": 43.6142
+},
+"people": [
+{
+"age": 54,
+"name": "delta"
+}
+],
+"price": 453.9,
+"secret": "s40",
+"tag": "red",
+"title": "tau theta zeta updated",
+"when": "2024-05-13T16:00:00Z"
+},
+"_version": 2,
+"source_raw": "{\"title\": \"tau theta zeta updated\", \"tag\": \"red\", \"count\": 40, \"price\": 453.9, \"when\": \"2024-05-13T16:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -29.9177, \"lon\": 43.6142}, \"people\": [{\"name\": \"delta\", \"age\": 54}], \"secret\": \"s40\"}"
+},
+{
+"_id": "doc-47",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 73,
+"_source": {
+"count": 47,
+"flag": false,
+"loc": {
+"lat": 25.4823,
+"lon": -46.7733
+},
+"people": [
+{
+"age": 50,
+"name": "kappa"
+},
+{
+"age": 11,
+"name": "beta"
+}
+],
+"price": 637.3,
+"secret": "s47",
+"tag": "a b",
+"title": "lambda pi pi xi updated",
+"when": "2024-12-20T23:00:00Z"
+},
+"_version": 2,
+"source_raw": "{\"title\": \"lambda pi pi xi updated\", \"tag\": \"a b\", \"count\": 47, \"price\": 637.3, \"when\": \"2024-12-20T23:00:00Z\", \"flag\": false, \"loc\": {\"lat\": 25.4823, \"lon\": -46.7733}, \"people\": [{\"name\": \"kappa\", \"age\": 50}, {\"name\": \"beta\", \"age\": 11}], \"secret\": \"s47\"}"
+},
+{
+"_id": "054",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 75,
+"_source": {
+"count": 54,
+"flag": true,
+"loc": {
+"lat": 24.7295,
+"lon": 99.2634
+},
+"people": [],
+"price": 975.0,
+"secret": "s54",
+"tag": "blue",
+"title": "nu lambda rho iota rho updated",
+"when": "2024-07-27T06:00:00Z"
+},
+"_version": 2,
+"source_raw": "{\"title\": \"nu lambda rho iota rho updated\", \"tag\": \"blue\", \"count\": 54, \"price\": 975.0, \"when\": \"2024-07-27T06:00:00Z\", \"flag\": true, \"loc\": {\"lat\": 24.7295, \"lon\": 99.2634}, \"people\": [], \"secret\": \"s54\"}"
+}
+],
+"knn": [
+"034",
+"JQC1-6EBbdXx5k-2VQ6a",
+"IQC1-6EBbdXx5k-2VQ50"
+]
+},
+"excludes": {
+"count": 60,
+"counts": {
+"date": 35,
+"geo": 10,
+"match_beta": 11,
+"nested_age": 25,
+"range_count": 20,
+"term_red": 14
+},
+"docs": [
+{
+"_id": "1000",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 0,
+"_source": {
+"count": 0,
+"flag": true,
+"loc": {
+"lat": 11.0384,
+"lon": -16.7359
+},
+"people": [],
+"price": 275.45,
+"tag": "red",
+"title": "epsilon pi",
+"vec": [
+0.488,
+0.846,
+-0.268,
+0.494
+],
+"when": "2024-01-01T00:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"epsilon pi\", \"tag\": \"red\", \"count\": 0, \"price\": 275.45, \"when\": \"2024-01-01T00:00:00Z\", \"flag\": true, \"loc\": {\"lat\": 11.0384, \"lon\": -16.7359}, \"people\": []}"
+},
+{
+"_id": "JgC1-6EBbdXx5k-2WA4C",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 1,
+"_source": {
+"count": 1,
+"flag": false,
+"loc": {
+"lat": 69.1755,
+"lon": -83.6228
+},
+"people": [
+{
+"age": 5,
+"name": "beta"
+}
+],
+"price": 460.58,
+"tag": "ünïcødé",
+"title": "gamma kappa sigma",
+"vec": [
+-0.977,
+-0.971,
+0.301,
+0.635
+],
+"when": "2024-02-02T01:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"gamma kappa sigma\", \"tag\": \"\\u00fcn\\u00efc\\u00f8d\\u00e9\", \"count\": 1, \"price\": 460.58, \"when\": \"2024-02-02T01:00:00Z\", \"flag\": false, \"loc\": {\"lat\": 69.1755, \"lon\": -83.6228}, \"people\": [{\"name\": \"beta\", \"age\": 5}]}"
+},
+{
+"_id": "doc-2",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 2,
+"_source": {
+"count": 2,
+"flag": true,
+"loc": {
+"lat": -53.4405,
+"lon": 122.729
+},
+"people": [
+{
+"age": 78,
+"name": "pi"
+},
+{
+"age": 41,
+"name": "beta"
+}
+],
+"price": 729.44,
+"tag": "blue",
+"title": "nu kappa",
+"vec": [
+-0.265,
+0.15,
+-0.12300001,
+0.354
+],
+"when": "2024-03-03T02:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"nu kappa\", \"tag\": \"blue\", \"count\": 2, \"price\": 729.44, \"when\": \"2024-03-03T02:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -53.4405, \"lon\": 122.729}, \"people\": [{\"name\": \"pi\", \"age\": 78}, {\"name\": \"beta\", \"age\": 41}]}"
+},
+{
+"_id": "ïd/3 with space",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 3,
+"_source": {
+"count": 3,
+"flag": false,
+"loc": {
+"lat": 44.4949,
+"lon": -16.0631
+},
+"people": [],
+"price": 476.96,
+"tag": "ünïcødé",
+"title": "delta mu zeta",
+"vec": [
+-0.45600003,
+0.51,
+-0.332,
+-0.44
+],
+"when": "2024-04-04T03:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"delta mu zeta\", \"tag\": \"\\u00fcn\\u00efc\\u00f8d\\u00e9\", \"count\": 3, \"price\": 476.96, \"when\": \"2024-04-04T03:00:00Z\", \"flag\": false, \"loc\": {\"lat\": 44.4949, \"lon\": -16.0631}, \"people\": []}"
+},
+{
+"_id": "04",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 4,
+"_source": {
+"count": 4,
+"flag": true,
+"loc": {
+"lat": 29.5715,
+"lon": 34.6059
+},
+"people": [
+{
+"age": 58,
+"name": "theta"
+}
+],
+"price": 376.68,
+"tag": "green",
+"title": "lambda alpha epsilon kappa tau xi",
+"vec": [
+-0.433,
+-0.997,
+-0.474,
+-0.155
+],
+"when": "2024-05-05T04:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"lambda alpha epsilon kappa tau xi\", \"tag\": \"green\", \"count\": 4, \"price\": 376.68, \"when\": \"2024-05-05T04:00:00Z\", \"flag\": true, \"loc\": {\"lat\": 29.5715, \"lon\": 34.6059}, \"people\": [{\"name\": \"theta\", \"age\": 58}]}"
+},
+{
+"_id": "1005",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 5,
+"_source": {
+"count": 5,
+"flag": false,
+"loc": {
+"lat": 66.1999,
+"lon": -52.0699
+},
+"people": [
+{
+"age": 70,
+"name": "gamma"
+},
+{
+"age": 63,
+"name": "sigma"
+}
+],
+"price": 684.64,
+"tag": "a b",
+"title": "beta kappa epsilon tau epsilon iota",
+"vec": [
+0.595,
+-0.599,
+0.5,
+0.863
+],
+"when": "2024-06-06T05:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"beta kappa epsilon tau epsilon iota\", \"tag\": \"a b\", \"count\": 5, \"price\": 684.64, \"when\": \"2024-06-06T05:00:00Z\", \"flag\": false, \"loc\": {\"lat\": 66.1999, \"lon\": -52.0699}, \"people\": [{\"name\": \"gamma\", \"age\": 70}, {\"name\": \"sigma\", \"age\": 63}]}"
+},
+{
+"_id": "JwC1-6EBbdXx5k-2WA4C",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 6,
+"_source": {
+"count": 6,
+"flag": true,
+"loc": {
+"lat": 68.1598,
+"lon": 29.372
+},
+"people": [],
+"price": 708.34,
+"tag": "ünïcødé",
+"title": "kappa beta nu",
+"vec": [
+-0.98100007,
+-0.23,
+0.081,
+0.072
+],
+"when": "2024-07-07T06:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"kappa beta nu\", \"tag\": \"\\u00fcn\\u00efc\\u00f8d\\u00e9\", \"count\": 6, \"price\": 708.34, \"when\": \"2024-07-07T06:00:00Z\", \"flag\": true, \"loc\": {\"lat\": 68.1598, \"lon\": 29.372}, \"people\": []}"
+},
+{
+"_id": "doc-7",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 7,
+"_source": {
+"count": 7,
+"flag": false,
+"loc": {
+"lat": 61.615,
+"lon": 7.4319
+},
+"people": [
+{
+"age": 65,
+"name": "pi"
+}
+],
+"price": 896.93,
+"tag": "a b",
+"title": "gamma theta nu tau",
+"vec": [
+0.179,
+-0.622,
+-0.615,
+-0.639
+],
+"when": "2024-08-08T07:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"gamma theta nu tau\", \"tag\": \"a b\", \"count\": 7, \"price\": 896.93, \"when\": \"2024-08-08T07:00:00Z\", \"flag\": false, \"loc\": {\"lat\": 61.615, \"lon\": 7.4319}, \"people\": [{\"name\": \"pi\", \"age\": 65}]}"
+},
+{
+"_id": "ïd/8 with space",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 8,
+"_source": {
+"count": 8,
+"flag": true,
+"loc": {
+"lat": 57.1121,
+"lon": -86.2564
+},
+"people": [
+{
+"age": 48,
+"name": "pi"
+},
+{
+"age": 48,
+"name": "delta"
+}
+],
+"price": 779.64,
+"tag": "ünïcødé",
+"title": "mu tau tau mu",
+"vec": [
+0.265,
+0.575,
+-0.688,
+0.194
+],
+"when": "2024-09-09T08:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"mu tau tau mu\", \"tag\": \"\\u00fcn\\u00efc\\u00f8d\\u00e9\", \"count\": 8, \"price\": 779.64, \"when\": \"2024-09-09T08:00:00Z\", \"flag\": true, \"loc\": {\"lat\": 57.1121, \"lon\": -86.2564}, \"people\": [{\"name\": \"pi\", \"age\": 48}, {\"name\": \"delta\", \"age\": 48}]}"
+},
+{
+"_id": "09",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 9,
+"_source": {
+"count": 9,
+"flag": false,
+"loc": {
+"lat": 59.3233,
+"lon": 22.2613
+},
+"people": [],
+"price": 204.64,
+"tag": "red",
+"title": "iota rho alpha delta",
+"vec": [
+0.17300001,
+-0.573,
+0.851,
+-0.44
+],
+"when": "2024-10-10T09:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"iota rho alpha delta\", \"tag\": \"red\", \"count\": 9, \"price\": 204.64, \"when\": \"2024-10-10T09:00:00Z\", \"flag\": false, \"loc\": {\"lat\": 59.3233, \"lon\": 22.2613}, \"people\": []}"
+},
+{
+"_id": "1010",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 10,
+"_source": {
+"count": 10,
+"flag": true,
+"loc": {
+"lat": -39.3607,
+"lon": -157.124
+},
+"people": [
+{
+"age": 24,
+"name": "eta"
+}
+],
+"price": 963.47,
+"tag": "a b",
+"title": "omicron tau",
+"vec": [
+-0.244,
+-0.94499993,
+-0.93,
+-0.261
+],
+"when": "2024-11-11T10:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"omicron tau\", \"tag\": \"a b\", \"count\": 10, \"price\": 963.47, \"when\": \"2024-11-11T10:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -39.3607, \"lon\": -157.124}, \"people\": [{\"name\": \"eta\", \"age\": 24}]}"
+},
+{
+"_id": "KAC1-6EBbdXx5k-2WA4C",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 11,
+"_source": {
+"count": 11,
+"flag": false,
+"loc": {
+"lat": -42.6867,
+"lon": -139.4737
+},
+"people": [
+{
+"age": 51,
+"name": "rho"
+},
+{
+"age": 58,
+"name": "zeta"
+}
+],
+"price": 318.71,
+"tag": "blue",
+"title": "pi gamma nu delta gamma",
+"vec": [
+0.699,
+-0.258,
+-0.53,
+0.441
+],
+"when": "2024-12-12T11:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"pi gamma nu delta gamma\", \"tag\": \"blue\", \"count\": 11, \"price\": 318.71, \"when\": \"2024-12-12T11:00:00Z\", \"flag\": false, \"loc\": {\"lat\": -42.6867, \"lon\": -139.4737}, \"people\": [{\"name\": \"rho\", \"age\": 51}, {\"name\": \"zeta\", \"age\": 58}]}"
+},
+{
+"_id": "doc-12",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 12,
+"_source": {
+"count": 12,
+"flag": true,
+"loc": {
+"lat": 64.7316,
+"lon": 114.6541
+},
+"people": [],
+"price": 902.75,
+"tag": "red",
+"title": "beta iota mu",
+"vec": [
+-0.906,
+0.573,
+0.419,
+0.293
+],
+"when": "2024-01-13T12:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"beta iota mu\", \"tag\": \"red\", \"count\": 12, \"price\": 902.75, \"when\": \"2024-01-13T12:00:00Z\", \"flag\": true, \"loc\": {\"lat\": 64.7316, \"lon\": 114.6541}, \"people\": []}"
+},
+{
+"_id": "ïd/13 with space",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 13,
+"_source": {
+"count": 13,
+"flag": false,
+"loc": {
+"lat": -32.1932,
+"lon": 31.0982
+},
+"people": [
+{
+"age": 61,
+"name": "delta"
+}
+],
+"price": 676.89,
+"tag": "green",
+"title": "beta delta epsilon lambda alpha",
+"vec": [
+-0.352,
+-0.48600003,
+-0.752,
+-0.037
+],
+"when": "2024-02-14T13:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"beta delta epsilon lambda alpha\", \"tag\": \"green\", \"count\": 13, \"price\": 676.89, \"when\": \"2024-02-14T13:00:00Z\", \"flag\": false, \"loc\": {\"lat\": -32.1932, \"lon\": 31.0982}, \"people\": [{\"name\": \"delta\", \"age\": 61}]}"
+},
+{
+"_id": "014",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 14,
+"_source": {
+"count": 14,
+"flag": true,
+"loc": {
+"lat": 66.0139,
+"lon": 101.6088
+},
+"people": [
+{
+"age": 29,
+"name": "zeta"
+},
+{
+"age": 80,
+"name": "gamma"
+}
+],
+"price": 467.9,
+"tag": "red",
+"title": "omicron theta epsilon",
+"vec": [
+0.734,
+0.777,
+-0.72,
+-0.106
+],
+"when": "2024-03-15T14:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"omicron theta epsilon\", \"tag\": \"red\", \"count\": 14, \"price\": 467.9, \"when\": \"2024-03-15T14:00:00Z\", \"flag\": true, \"loc\": {\"lat\": 66.0139, \"lon\": 101.6088}, \"people\": [{\"name\": \"zeta\", \"age\": 29}, {\"name\": \"gamma\", \"age\": 80}]}"
+},
+{
+"_id": "1015",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 15,
+"_source": {
+"count": 15,
+"flag": false,
+"loc": {
+"lat": -25.6353,
+"lon": 109.8407
+},
+"people": [],
+"price": 452.33,
+"tag": "red",
+"title": "nu alpha",
+"vec": [
+-0.045,
+0.256,
+-0.714,
+-0.557
+],
+"when": "2024-04-16T15:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"nu alpha\", \"tag\": \"red\", \"count\": 15, \"price\": 452.33, \"when\": \"2024-04-16T15:00:00Z\", \"flag\": false, \"loc\": {\"lat\": -25.6353, \"lon\": 109.8407}, \"people\": []}"
+},
+{
+"_id": "KQC1-6EBbdXx5k-2WA4C",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 16,
+"_source": {
+"count": 16,
+"flag": true,
+"loc": {
+"lat": -9.7646,
+"lon": -119.2067
+},
+"people": [
+{
+"age": 53,
+"name": "xi"
+}
+],
+"price": 889.32,
+"tag": "a b",
+"title": "zeta omicron",
+"vec": [
+-0.506,
+-0.949,
+0.142,
+-0.407
+],
+"when": "2024-05-17T16:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"zeta omicron\", \"tag\": \"a b\", \"count\": 16, \"price\": 889.32, \"when\": \"2024-05-17T16:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -9.7646, \"lon\": -119.2067}, \"people\": [{\"name\": \"xi\", \"age\": 53}]}"
+},
+{
+"_id": "doc-17",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 17,
+"_source": {
+"count": 17,
+"flag": false,
+"loc": {
+"lat": -2.8102,
+"lon": -117.8545
+},
+"people": [
+{
+"age": 8,
+"name": "rho"
+},
+{
+"age": 72,
+"name": "eta"
+}
+],
+"price": 456.18,
+"tag": "blue",
+"title": "iota pi delta",
+"vec": [
+-0.045,
+-0.428,
+-0.48400003,
+-0.597
+],
+"when": "2024-06-18T17:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"iota pi delta\", \"tag\": \"blue\", \"count\": 17, \"price\": 456.18, \"when\": \"2024-06-18T17:00:00Z\", \"flag\": false, \"loc\": {\"lat\": -2.8102, \"lon\": -117.8545}, \"people\": [{\"name\": \"rho\", \"age\": 8}, {\"name\": \"eta\", \"age\": 72}]}"
+},
+{
+"_id": "ïd/18 with space",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 18,
+"_source": {
+"count": 18,
+"flag": true,
+"loc": {
+"lat": -13.4982,
+"lon": -114.8541
+},
+"people": [],
+"price": 390.15,
+"tag": "red",
+"title": "xi iota theta theta",
+"vec": [
+0.665,
+0.957,
+-0.711,
+0.28
+],
+"when": "2024-07-19T18:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"xi iota theta theta\", \"tag\": \"red\", \"count\": 18, \"price\": 390.15, \"when\": \"2024-07-19T18:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -13.4982, \"lon\": -114.8541}, \"people\": []}"
+},
+{
+"_id": "019",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 19,
+"_source": {
+"count": 19,
+"flag": false,
+"loc": {
+"lat": 70.9834,
+"lon": -72.6259
+},
+"people": [
+{
+"age": 56,
+"name": "mu"
+}
+],
+"price": 789.56,
+"tag": "red",
+"title": "rho lambda rho epsilon omicron",
+"vec": [
+-0.919,
+-0.182,
+-0.446,
+-0.639
+],
+"when": "2024-08-20T19:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"rho lambda rho epsilon omicron\", \"tag\": \"red\", \"count\": 19, \"price\": 789.56, \"when\": \"2024-08-20T19:00:00Z\", \"flag\": false, \"loc\": {\"lat\": 70.9834, \"lon\": -72.6259}, \"people\": [{\"name\": \"mu\", \"age\": 56}]}"
+},
+{
+"_id": "1020",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 20,
+"_source": {
+"count": 20,
+"flag": true,
+"loc": {
+"lat": 52.6353,
+"lon": 132.3706
+},
+"people": [
+{
+"age": 36,
+"name": "pi"
+},
+{
+"age": 27,
+"name": "zeta"
+}
+],
+"price": 600.65,
+"tag": "green",
+"title": "rho theta zeta",
+"vec": [
+-0.726,
+0.34,
+0.257,
+-0.616
+],
+"when": "2024-09-21T20:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"rho theta zeta\", \"tag\": \"green\", \"count\": 20, \"price\": 600.65, \"when\": \"2024-09-21T20:00:00Z\", \"flag\": true, \"loc\": {\"lat\": 52.6353, \"lon\": 132.3706}, \"people\": [{\"name\": \"pi\", \"age\": 36}, {\"name\": \"zeta\", \"age\": 27}]}"
+},
+{
+"_id": "KgC1-6EBbdXx5k-2WA4C",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 21,
+"_source": {
+"count": 21,
+"flag": false,
+"loc": {
+"lat": 66.5997,
+"lon": 6.2761
+},
+"people": [],
+"price": 841.07,
+"tag": "ünïcødé",
+"title": "eta alpha gamma rho",
+"vec": [
+-0.305,
+-0.436,
+0.278,
+0.891
+],
+"when": "2024-10-22T21:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"eta alpha gamma rho\", \"tag\": \"\\u00fcn\\u00efc\\u00f8d\\u00e9\", \"count\": 21, \"price\": 841.07, \"when\": \"2024-10-22T21:00:00Z\", \"flag\": false, \"loc\": {\"lat\": 66.5997, \"lon\": 6.2761}, \"people\": []}"
+},
+{
+"_id": "doc-22",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 22,
+"_source": {
+"count": 22,
+"flag": true,
+"loc": {
+"lat": 26.4772,
+"lon": -85.5644
+},
+"people": [
+{
+"age": 47,
+"name": "tau"
+}
+],
+"price": 133.28,
+"tag": "ünïcødé",
+"title": "alpha xi",
+"vec": [
+-0.927,
+0.405,
+0.15,
+0.716
+],
+"when": "2024-11-23T22:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"alpha xi\", \"tag\": \"\\u00fcn\\u00efc\\u00f8d\\u00e9\", \"count\": 22, \"price\": 133.28, \"when\": \"2024-11-23T22:00:00Z\", \"flag\": true, \"loc\": {\"lat\": 26.4772, \"lon\": -85.5644}, \"people\": [{\"name\": \"tau\", \"age\": 47}]}"
+},
+{
+"_id": "ïd/23 with space",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 23,
+"_source": {
+"count": 23,
+"flag": false,
+"loc": {
+"lat": -40.8438,
+"lon": 112.2154
+},
+"people": [
+{
+"age": 49,
+"name": "lambda"
+},
+{
+"age": 8,
+"name": "tau"
+}
+],
+"price": 356.72,
+"tag": "red",
+"title": "rho omicron rho gamma",
+"vec": [
+-0.417,
+-0.785,
+0.462,
+-0.107
+],
+"when": "2024-12-24T23:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"rho omicron rho gamma\", \"tag\": \"red\", \"count\": 23, \"price\": 356.72, \"when\": \"2024-12-24T23:00:00Z\", \"flag\": false, \"loc\": {\"lat\": -40.8438, \"lon\": 112.2154}, \"people\": [{\"name\": \"lambda\", \"age\": 49}, {\"name\": \"tau\", \"age\": 8}]}"
+},
+{
+"_id": "024",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 24,
+"_source": {
+"count": 24,
+"flag": true,
+"loc": {
+"lat": 74.7882,
+"lon": -93.9423
+},
+"people": [],
+"price": 20.69,
+"tag": "green",
+"title": "rho sigma",
+"vec": [
+-0.635,
+-0.795,
+-0.499,
+0.634
+],
+"when": "2024-01-25T00:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"rho sigma\", \"tag\": \"green\", \"count\": 24, \"price\": 20.69, \"when\": \"2024-01-25T00:00:00Z\", \"flag\": true, \"loc\": {\"lat\": 74.7882, \"lon\": -93.9423}, \"people\": []}"
+},
+{
+"_id": "1025",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 25,
+"_source": {
+"count": 25,
+"flag": false,
+"loc": {
+"lat": 53.9731,
+"lon": 46.5246
+},
+"people": [
+{
+"age": 67,
+"name": "omicron"
+}
+],
+"price": 261.42,
+"tag": "green",
+"title": "alpha delta",
+"vec": [
+-0.523,
+-0.112,
+-0.299,
+-0.812
+],
+"when": "2024-02-26T01:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"alpha delta\", \"tag\": \"green\", \"count\": 25, \"price\": 261.42, \"when\": \"2024-02-26T01:00:00Z\", \"flag\": false, \"loc\": {\"lat\": 53.9731, \"lon\": 46.5246}, \"people\": [{\"name\": \"omicron\", \"age\": 67}]}"
+},
+{
+"_id": "KwC1-6EBbdXx5k-2WA4C",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 26,
+"_source": {
+"count": 26,
+"flag": true,
+"loc": {
+"lat": 0.1209,
+"lon": -74.9282
+},
+"people": [
+{
+"age": 16,
+"name": "delta"
+},
+{
+"age": 18,
+"name": "nu"
+}
+],
+"price": 493.59,
+"tag": "ünïcødé",
+"title": "beta iota delta",
+"vec": [
+0.083,
+-0.545,
+-0.546,
+0.338
+],
+"when": "2024-03-27T02:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"beta iota delta\", \"tag\": \"\\u00fcn\\u00efc\\u00f8d\\u00e9\", \"count\": 26, \"price\": 493.59, \"when\": \"2024-03-27T02:00:00Z\", \"flag\": true, \"loc\": {\"lat\": 0.1209, \"lon\": -74.9282}, \"people\": [{\"name\": \"delta\", \"age\": 16}, {\"name\": \"nu\", \"age\": 18}]}"
+},
+{
+"_id": "doc-27",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 27,
+"_source": {
+"count": 27,
+"flag": false,
+"loc": {
+"lat": 4.0985,
+"lon": -35.4846
+},
+"people": [],
+"price": 839.72,
+"tag": "a b",
+"title": "nu zeta alpha nu xi",
+"vec": [
+0.883,
+0.554,
+-0.323,
+-0.519
+],
+"when": "2024-04-28T03:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"nu zeta alpha nu xi\", \"tag\": \"a b\", \"count\": 27, \"price\": 839.72, \"when\": \"2024-04-28T03:00:00Z\", \"flag\": false, \"loc\": {\"lat\": 4.0985, \"lon\": -35.4846}, \"people\": []}"
+},
+{
+"_id": "ïd/28 with space",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 28,
+"_source": {
+"count": 28,
+"flag": true,
+"loc": {
+"lat": 2.7799,
+"lon": 155.6727
+},
+"people": [
+{
+"age": 32,
+"name": "mu"
+}
+],
+"price": 53.55,
+"tag": "a b",
+"title": "xi tau lambda nu",
+"vec": [
+0.741,
+0.326,
+-0.977,
+-0.78200006
+],
+"when": "2024-05-01T04:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"xi tau lambda nu\", \"tag\": \"a b\", \"count\": 28, \"price\": 53.55, \"when\": \"2024-05-01T04:00:00Z\", \"flag\": true, \"loc\": {\"lat\": 2.7799, \"lon\": 155.6727}, \"people\": [{\"name\": \"mu\", \"age\": 32}]}"
+},
+{
+"_id": "029",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 29,
+"_source": {
+"count": 29,
+"flag": false,
+"loc": {
+"lat": -76.6675,
+"lon": -122.6017
+},
+"people": [
+{
+"age": 59,
+"name": "nu"
+},
+{
+"age": 6,
+"name": "beta"
+}
+],
+"price": 504.77,
+"tag": "green",
+"title": "gamma lambda xi",
+"vec": [
+-0.931,
+0.283,
+-0.46799996,
+0.357
+],
+"when": "2024-06-02T05:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"gamma lambda xi\", \"tag\": \"green\", \"count\": 29, \"price\": 504.77, \"when\": \"2024-06-02T05:00:00Z\", \"flag\": false, \"loc\": {\"lat\": -76.6675, \"lon\": -122.6017}, \"people\": [{\"name\": \"nu\", \"age\": 59}, {\"name\": \"beta\", \"age\": 6}]}"
+},
+{
+"_id": "1030",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 30,
+"_source": {
+"count": 30,
+"flag": true,
+"loc": {
+"lat": -10.6094,
+"lon": 153.2944
+},
+"people": [],
+"price": 520.31,
+"tag": "red",
+"title": "sigma beta delta iota",
+"vec": [
+-0.425,
+-0.389,
+0.295,
+-0.759
+],
+"when": "2024-07-03T06:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"sigma beta delta iota\", \"tag\": \"red\", \"count\": 30, \"price\": 520.31, \"when\": \"2024-07-03T06:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -10.6094, \"lon\": 153.2944}, \"people\": []}"
+},
+{
+"_id": "LAC1-6EBbdXx5k-2WA4C",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 31,
+"_source": {
+"count": 31,
+"flag": false,
+"loc": {
+"lat": 1.8612,
+"lon": 130.9648
+},
+"people": [
+{
+"age": 74,
+"name": "xi"
+}
+],
+"price": 439.98,
+"tag": "green",
+"title": "rho iota gamma omicron tau sigma",
+"vec": [
+-0.423,
+-0.513,
+-0.824,
+0.093
+],
+"when": "2024-08-04T07:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"rho iota gamma omicron tau sigma\", \"tag\": \"green\", \"count\": 31, \"price\": 439.98, \"when\": \"2024-08-04T07:00:00Z\", \"flag\": false, \"loc\": {\"lat\": 1.8612, \"lon\": 130.9648}, \"people\": [{\"name\": \"xi\", \"age\": 74}]}"
+},
+{
+"_id": "doc-32",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 32,
+"_source": {
+"count": 32,
+"flag": true,
+"loc": {
+"lat": 7.6848,
+"lon": 38.3519
+},
+"people": [
+{
+"age": 40,
+"name": "pi"
+},
+{
+"age": 32,
+"name": "alpha"
+}
+],
+"price": 460.88,
+"tag": "blue",
+"title": "tau theta nu eta sigma",
+"vec": [
+-0.333,
+-0.622,
+0.09200001,
+0.939
+],
+"when": "2024-09-05T08:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"tau theta nu eta sigma\", \"tag\": \"blue\", \"count\": 32, \"price\": 460.88, \"when\": \"2024-09-05T08:00:00Z\", \"flag\": true, \"loc\": {\"lat\": 7.6848, \"lon\": 38.3519}, \"people\": [{\"name\": \"pi\", \"age\": 40}, {\"name\": \"alpha\", \"age\": 32}]}"
+},
+{
+"_id": "ïd/33 with space",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 33,
+"_source": {
+"count": 33,
+"flag": false,
+"loc": {
+"lat": -36.8115,
+"lon": 128.6467
+},
+"people": [],
+"price": 325.48,
+"tag": "a b",
+"title": "alpha mu zeta theta lambda",
+"vec": [
+-0.568,
+-0.886,
+-0.956,
+0.102
+],
+"when": "2024-10-06T09:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"alpha mu zeta theta lambda\", \"tag\": \"a b\", \"count\": 33, \"price\": 325.48, \"when\": \"2024-10-06T09:00:00Z\", \"flag\": false, \"loc\": {\"lat\": -36.8115, \"lon\": 128.6467}, \"people\": []}"
+},
+{
+"_id": "034",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 34,
+"_source": {
+"count": 34,
+"flag": true,
+"loc": {
+"lat": -62.5209,
+"lon": -93.4432
+},
+"people": [
+{
+"age": 54,
+"name": "epsilon"
+}
+],
+"price": 735.41,
+"tag": "blue",
+"title": "mu omicron beta rho nu omicron",
+"vec": [
+-0.326,
+-0.295,
+0.35099998,
+0.233
+],
+"when": "2024-11-07T10:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"mu omicron beta rho nu omicron\", \"tag\": \"blue\", \"count\": 34, \"price\": 735.41, \"when\": \"2024-11-07T10:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -62.5209, \"lon\": -93.4432}, \"people\": [{\"name\": \"epsilon\", \"age\": 54}]}"
+},
+{
+"_id": "1035",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 35,
+"_source": {
+"count": 35,
+"flag": false,
+"loc": {
+"lat": -63.463,
+"lon": -30.4579
+},
+"people": [
+{
+"age": 75,
+"name": "sigma"
+},
+{
+"age": 64,
+"name": "delta"
+}
+],
+"price": 413.03,
+"tag": "green",
+"title": "rho delta pi iota",
+"vec": [
+-0.20499998,
+0.98600006,
+-0.701,
+0.7
+],
+"when": "2024-12-08T11:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"rho delta pi iota\", \"tag\": \"green\", \"count\": 35, \"price\": 413.03, \"when\": \"2024-12-08T11:00:00Z\", \"flag\": false, \"loc\": {\"lat\": -63.463, \"lon\": -30.4579}, \"people\": [{\"name\": \"sigma\", \"age\": 75}, {\"name\": \"delta\", \"age\": 64}]}"
+},
+{
+"_id": "LQC1-6EBbdXx5k-2WA4C",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 36,
+"_source": {
+"count": 36,
+"flag": true,
+"loc": {
+"lat": -33.133,
+"lon": -37.1673
+},
+"people": [],
+"price": 723.06,
+"tag": "blue",
+"title": "delta nu omicron omicron",
+"vec": [
+0.111,
+-0.231,
+-0.356,
+0.574
+],
+"when": "2024-01-09T12:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"delta nu omicron omicron\", \"tag\": \"blue\", \"count\": 36, \"price\": 723.06, \"when\": \"2024-01-09T12:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -33.133, \"lon\": -37.1673}, \"people\": []}"
+},
+{
+"_id": "doc-37",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 37,
+"_source": {
+"count": 37,
+"flag": false,
+"loc": {
+"lat": -10.2967,
+"lon": -41.8203
+},
+"people": [
+{
+"age": 12,
+"name": "theta"
+}
+],
+"price": 802.95,
+"tag": "blue",
+"title": "nu omicron kappa zeta sigma",
+"vec": [
+0.643,
+-0.34,
+0.938,
+0.216
+],
+"when": "2024-02-10T13:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"nu omicron kappa zeta sigma\", \"tag\": \"blue\", \"count\": 37, \"price\": 802.95, \"when\": \"2024-02-10T13:00:00Z\", \"flag\": false, \"loc\": {\"lat\": -10.2967, \"lon\": -41.8203}, \"people\": [{\"name\": \"theta\", \"age\": 12}]}"
+},
+{
+"_id": "ïd/38 with space",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 38,
+"_source": {
+"count": 38,
+"flag": true,
+"loc": {
+"lat": -38.9522,
+"lon": 134.6032
+},
+"people": [
+{
+"age": 69,
+"name": "kappa"
+},
+{
+"age": 69,
+"name": "kappa"
+}
+],
+"price": 25.58,
+"tag": "red",
+"title": "lambda eta xi",
+"vec": [
+0.24,
+-0.126,
+0.651,
+0.454
+],
+"when": "2024-03-11T14:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"lambda eta xi\", \"tag\": \"red\", \"count\": 38, \"price\": 25.58, \"when\": \"2024-03-11T14:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -38.9522, \"lon\": 134.6032}, \"people\": [{\"name\": \"kappa\", \"age\": 69}, {\"name\": \"kappa\", \"age\": 69}]}"
+},
+{
+"_id": "039",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 39,
+"_source": {
+"count": 39,
+"flag": false,
+"loc": {
+"lat": 28.2364,
+"lon": 8.5844
+},
+"people": [],
+"price": 947.9,
+"tag": "ünïcødé",
+"title": "nu omicron mu beta mu",
+"vec": [
+-0.802,
+-0.251,
+-0.198,
+0.12300001
+],
+"when": "2024-04-12T15:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"nu omicron mu beta mu\", \"tag\": \"\\u00fcn\\u00efc\\u00f8d\\u00e9\", \"count\": 39, \"price\": 947.9, \"when\": \"2024-04-12T15:00:00Z\", \"flag\": false, \"loc\": {\"lat\": 28.2364, \"lon\": 8.5844}, \"people\": []}"
+},
+{
+"_id": "1040",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 40,
+"_source": {
+"count": 40,
+"flag": true,
+"loc": {
+"lat": 13.9844,
+"lon": 65.1366
+},
+"people": [
+{
+"age": 22,
+"name": "gamma"
+}
+],
+"price": 899.15,
+"tag": "a b",
+"title": "epsilon eta xi pi nu omicron",
+"vec": [
+-0.275,
+-0.267,
+-0.85,
+-0.379
+],
+"when": "2024-05-13T16:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"epsilon eta xi pi nu omicron\", \"tag\": \"a b\", \"count\": 40, \"price\": 899.15, \"when\": \"2024-05-13T16:00:00Z\", \"flag\": true, \"loc\": {\"lat\": 13.9844, \"lon\": 65.1366}, \"people\": [{\"name\": \"gamma\", \"age\": 22}]}"
+},
+{
+"_id": "LgC1-6EBbdXx5k-2WA4C",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 41,
+"_source": {
+"count": 41,
+"flag": false,
+"loc": {
+"lat": -12.6581,
+"lon": -116.8241
+},
+"people": [
+{
+"age": 66,
+"name": "kappa"
+},
+{
+"age": 65,
+"name": "eta"
+}
+],
+"price": 888.14,
+"tag": "a b",
+"title": "delta kappa lambda",
+"vec": [
+0.786,
+-0.175,
+-0.88,
+0.13
+],
+"when": "2024-06-14T17:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"delta kappa lambda\", \"tag\": \"a b\", \"count\": 41, \"price\": 888.14, \"when\": \"2024-06-14T17:00:00Z\", \"flag\": false, \"loc\": {\"lat\": -12.6581, \"lon\": -116.8241}, \"people\": [{\"name\": \"kappa\", \"age\": 66}, {\"name\": \"eta\", \"age\": 65}]}"
+},
+{
+"_id": "doc-42",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 42,
+"_source": {
+"count": 42,
+"flag": true,
+"loc": {
+"lat": -78.2826,
+"lon": -169.0551
+},
+"people": [],
+"price": 691.74,
+"tag": "red",
+"title": "mu tau",
+"vec": [
+0.421,
+0.106,
+0.834,
+-0.205
+],
+"when": "2024-07-15T18:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"mu tau\", \"tag\": \"red\", \"count\": 42, \"price\": 691.74, \"when\": \"2024-07-15T18:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -78.2826, \"lon\": -169.0551}, \"people\": []}"
+},
+{
+"_id": "ïd/43 with space",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 43,
+"_source": {
+"count": 43,
+"flag": false,
+"loc": {
+"lat": -0.3422,
+"lon": 18.1049
+},
+"people": [
+{
+"age": 83,
+"name": "iota"
+}
+],
+"price": 196.65,
+"tag": "red",
+"title": "tau alpha",
+"vec": [
+0.791,
+0.029,
+-0.713,
+-0.603
+],
+"when": "2024-08-16T19:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"tau alpha\", \"tag\": \"red\", \"count\": 43, \"price\": 196.65, \"when\": \"2024-08-16T19:00:00Z\", \"flag\": false, \"loc\": {\"lat\": -0.3422, \"lon\": 18.1049}, \"people\": [{\"name\": \"iota\", \"age\": 83}]}"
+},
+{
+"_id": "044",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 44,
+"_source": {
+"count": 44,
+"flag": true,
+"loc": {
+"lat": -52.7143,
+"lon": 7.6483
+},
+"people": [
+{
+"age": 79,
+"name": "omicron"
+},
+{
+"age": 8,
+"name": "xi"
+}
+],
+"price": 100.1,
+"tag": "red",
+"title": "delta epsilon zeta rho rho delta",
+"vec": [
+0.3,
+0.369,
+0.158,
+-0.712
+],
+"when": "2024-09-17T20:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"delta epsilon zeta rho rho delta\", \"tag\": \"red\", \"count\": 44, \"price\": 100.1, \"when\": \"2024-09-17T20:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -52.7143, \"lon\": 7.6483}, \"people\": [{\"name\": \"omicron\", \"age\": 79}, {\"name\": \"xi\", \"age\": 8}]}"
+},
+{
+"_id": "1045",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 45,
+"_source": {
+"count": 45,
+"flag": false,
+"loc": {
+"lat": -64.0871,
+"lon": 137.3107
+},
+"people": [],
+"price": 266.61,
+"tag": "red",
+"title": "mu iota zeta",
+"vec": [
+0.165,
+-0.302,
+-0.1,
+-0.229
+],
+"when": "2024-10-18T21:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"mu iota zeta\", \"tag\": \"red\", \"count\": 45, \"price\": 266.61, \"when\": \"2024-10-18T21:00:00Z\", \"flag\": false, \"loc\": {\"lat\": -64.0871, \"lon\": 137.3107}, \"people\": []}"
+},
+{
+"_id": "LwC1-6EBbdXx5k-2WA4C",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 46,
+"_source": {
+"count": 46,
+"flag": true,
+"loc": {
+"lat": -72.9722,
+"lon": -151.4413
+},
+"people": [
+{
+"age": 32,
+"name": "theta"
+}
+],
+"price": 764.06,
+"tag": "a b",
+"title": "theta nu",
+"vec": [
+-0.554,
+-0.681,
+0.174,
+-0.653
+],
+"when": "2024-11-19T22:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"theta nu\", \"tag\": \"a b\", \"count\": 46, \"price\": 764.06, \"when\": \"2024-11-19T22:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -72.9722, \"lon\": -151.4413}, \"people\": [{\"name\": \"theta\", \"age\": 32}]}"
+},
+{
+"_id": "doc-47",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 47,
+"_source": {
+"count": 47,
+"flag": false,
+"loc": {
+"lat": 73.6046,
+"lon": -1.5124
+},
+"people": [
+{
+"age": 32,
+"name": "gamma"
+},
+{
+"age": 87,
+"name": "nu"
+}
+],
+"price": 602.55,
+"tag": "ünïcødé",
+"title": "omicron kappa",
+"vec": [
+0.437,
+-0.557,
+-0.382,
+0.751
+],
+"when": "2024-12-20T23:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"omicron kappa\", \"tag\": \"\\u00fcn\\u00efc\\u00f8d\\u00e9\", \"count\": 47, \"price\": 602.55, \"when\": \"2024-12-20T23:00:00Z\", \"flag\": false, \"loc\": {\"lat\": 73.6046, \"lon\": -1.5124}, \"people\": [{\"name\": \"gamma\", \"age\": 32}, {\"name\": \"nu\", \"age\": 87}]}"
+},
+{
+"_id": "ïd/48 with space",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 48,
+"_source": {
+"count": 48,
+"flag": true,
+"loc": {
+"lat": -78.7789,
+"lon": 129.9826
+},
+"people": [],
+"price": 379.01,
+"tag": "blue",
+"title": "alpha theta gamma zeta zeta",
+"vec": [
+-0.208,
+-0.274,
+-0.33,
+0.743
+],
+"when": "2024-01-21T00:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"alpha theta gamma zeta zeta\", \"tag\": \"blue\", \"count\": 48, \"price\": 379.01, \"when\": \"2024-01-21T00:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -78.7789, \"lon\": 129.9826}, \"people\": []}"
+},
+{
+"_id": "049",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 49,
+"_source": {
+"count": 49,
+"flag": false,
+"loc": {
+"lat": -18.0218,
+"lon": -11.2153
+},
+"people": [
+{
+"age": 31,
+"name": "mu"
+}
+],
+"price": 553.84,
+"tag": "blue",
+"title": "nu gamma delta xi",
+"vec": [
+-0.129,
+-0.44199997,
+-0.949,
+0.61
+],
+"when": "2024-02-22T01:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"nu gamma delta xi\", \"tag\": \"blue\", \"count\": 49, \"price\": 553.84, \"when\": \"2024-02-22T01:00:00Z\", \"flag\": false, \"loc\": {\"lat\": -18.0218, \"lon\": -11.2153}, \"people\": [{\"name\": \"mu\", \"age\": 31}]}"
+},
+{
+"_id": "1050",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 50,
+"_source": {
+"count": 50,
+"flag": true,
+"loc": {
+"lat": 45.9939,
+"lon": 18.6918
+},
+"people": [
+{
+"age": 31,
+"name": "omicron"
+},
+{
+"age": 48,
+"name": "zeta"
+}
+],
+"price": 544.87,
+"tag": "blue",
+"title": "epsilon gamma eta",
+"vec": [
+-0.294,
+0.445,
+-0.24600002,
+0.917
+],
+"when": "2024-03-23T02:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"epsilon gamma eta\", \"tag\": \"blue\", \"count\": 50, \"price\": 544.87, \"when\": \"2024-03-23T02:00:00Z\", \"flag\": true, \"loc\": {\"lat\": 45.9939, \"lon\": 18.6918}, \"people\": [{\"name\": \"omicron\", \"age\": 31}, {\"name\": \"zeta\", \"age\": 48}]}"
+},
+{
+"_id": "MAC1-6EBbdXx5k-2WA4C",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 51,
+"_source": {
+"count": 51,
+"flag": false,
+"loc": {
+"lat": -7.5693,
+"lon": -125.4787
+},
+"people": [],
+"price": 227.27,
+"tag": "green",
+"title": "kappa pi rho",
+"vec": [
+0.413,
+-0.478,
+0.799,
+0.175
+],
+"when": "2024-04-24T03:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"kappa pi rho\", \"tag\": \"green\", \"count\": 51, \"price\": 227.27, \"when\": \"2024-04-24T03:00:00Z\", \"flag\": false, \"loc\": {\"lat\": -7.5693, \"lon\": -125.4787}, \"people\": []}"
+},
+{
+"_id": "doc-52",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 52,
+"_source": {
+"count": 52,
+"flag": true,
+"loc": {
+"lat": 40.1092,
+"lon": 60.4706
+},
+"people": [
+{
+"age": 70,
+"name": "gamma"
+}
+],
+"price": 125.52,
+"tag": "green",
+"title": "sigma theta nu rho",
+"vec": [
+0.704,
+0.472,
+0.53,
+-0.943
+],
+"when": "2024-05-25T04:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"sigma theta nu rho\", \"tag\": \"green\", \"count\": 52, \"price\": 125.52, \"when\": \"2024-05-25T04:00:00Z\", \"flag\": true, \"loc\": {\"lat\": 40.1092, \"lon\": 60.4706}, \"people\": [{\"name\": \"gamma\", \"age\": 70}]}"
+},
+{
+"_id": "ïd/53 with space",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 53,
+"_source": {
+"count": 53,
+"flag": false,
+"loc": {
+"lat": 26.0398,
+"lon": -132.9532
+},
+"people": [
+{
+"age": 47,
+"name": "sigma"
+},
+{
+"age": 39,
+"name": "rho"
+}
+],
+"price": 321.04,
+"tag": "green",
+"title": "epsilon kappa alpha nu gamma zeta",
+"vec": [
+-0.614,
+0.437,
+-0.824,
+-0.423
+],
+"when": "2024-06-26T05:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"epsilon kappa alpha nu gamma zeta\", \"tag\": \"green\", \"count\": 53, \"price\": 321.04, \"when\": \"2024-06-26T05:00:00Z\", \"flag\": false, \"loc\": {\"lat\": 26.0398, \"lon\": -132.9532}, \"people\": [{\"name\": \"sigma\", \"age\": 47}, {\"name\": \"rho\", \"age\": 39}]}"
+},
+{
+"_id": "054",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 54,
+"_source": {
+"count": 54,
+"flag": true,
+"loc": {
+"lat": -21.3469,
+"lon": 101.793
+},
+"people": [],
+"price": 176.39,
+"tag": "blue",
+"title": "kappa mu nu omicron epsilon",
+"vec": [
+0.382,
+0.794,
+-0.949,
+0.408
+],
+"when": "2024-07-27T06:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"kappa mu nu omicron epsilon\", \"tag\": \"blue\", \"count\": 54, \"price\": 176.39, \"when\": \"2024-07-27T06:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -21.3469, \"lon\": 101.793}, \"people\": []}"
+},
+{
+"_id": "1055",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 55,
+"_source": {
+"count": 55,
+"flag": false,
+"loc": {
+"lat": 66.0298,
+"lon": 79.5782
+},
+"people": [
+{
+"age": 52,
+"name": "beta"
+}
+],
+"price": 115.23,
+"tag": "blue",
+"title": "theta nu mu delta zeta",
+"vec": [
+-0.92,
+-0.676,
+-0.604,
+-0.394
+],
+"when": "2024-08-28T07:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"theta nu mu delta zeta\", \"tag\": \"blue\", \"count\": 55, \"price\": 115.23, \"when\": \"2024-08-28T07:00:00Z\", \"flag\": false, \"loc\": {\"lat\": 66.0298, \"lon\": 79.5782}, \"people\": [{\"name\": \"beta\", \"age\": 52}]}"
+},
+{
+"_id": "MQC1-6EBbdXx5k-2WA4C",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 56,
+"_source": {
+"count": 56,
+"flag": true,
+"loc": {
+"lat": 34.6615,
+"lon": -83.3989
+},
+"people": [
+{
+"age": 86,
+"name": "xi"
+},
+{
+"age": 45,
+"name": "tau"
+}
+],
+"price": 570.17,
+"tag": "green",
+"title": "beta sigma kappa zeta tau",
+"vec": [
+0.871,
+-0.77599996,
+0.527,
+0.311
+],
+"when": "2024-09-01T08:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"beta sigma kappa zeta tau\", \"tag\": \"green\", \"count\": 56, \"price\": 570.17, \"when\": \"2024-09-01T08:00:00Z\", \"flag\": true, \"loc\": {\"lat\": 34.6615, \"lon\": -83.3989}, \"people\": [{\"name\": \"xi\", \"age\": 86}, {\"name\": \"tau\", \"age\": 45}]}"
+},
+{
+"_id": "doc-57",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 57,
+"_source": {
+"count": 57,
+"flag": false,
+"loc": {
+"lat": -74.0591,
+"lon": -61.6925
+},
+"people": [],
+"price": 681.07,
+"tag": "green",
+"title": "tau beta",
+"vec": [
+0.554,
+-0.309,
+0.827,
+-0.166
+],
+"when": "2024-10-02T09:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"tau beta\", \"tag\": \"green\", \"count\": 57, \"price\": 681.07, \"when\": \"2024-10-02T09:00:00Z\", \"flag\": false, \"loc\": {\"lat\": -74.0591, \"lon\": -61.6925}, \"people\": []}"
+},
+{
+"_id": "ïd/58 with space",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 58,
+"_source": {
+"count": 58,
+"flag": true,
+"loc": {
+"lat": -25.5521,
+"lon": 1.0454
+},
+"people": [
+{
+"age": 66,
+"name": "omicron"
+}
+],
+"price": 442.56,
+"tag": "ünïcødé",
+"title": "theta iota rho gamma mu",
+"vec": [
+-0.891,
+0.397,
+-0.143,
+0.024
+],
+"when": "2024-11-03T10:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"theta iota rho gamma mu\", \"tag\": \"\\u00fcn\\u00efc\\u00f8d\\u00e9\", \"count\": 58, \"price\": 442.56, \"when\": \"2024-11-03T10:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -25.5521, \"lon\": 1.0454}, \"people\": [{\"name\": \"omicron\", \"age\": 66}]}"
+},
+{
+"_id": "059",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 59,
+"_source": {
+"count": 59,
+"flag": false,
+"loc": {
+"lat": 7.4246,
+"lon": 159.6009
+},
+"people": [
+{
+"age": 70,
+"name": "theta"
+},
+{
+"age": 32,
+"name": "iota"
+}
+],
+"price": 261.2,
+"tag": "a b",
+"title": "pi eta beta",
+"vec": [
+0.927,
+-0.664,
+-0.306,
+-0.81500006
+],
+"when": "2024-12-04T11:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"pi eta beta\", \"tag\": \"a b\", \"count\": 59, \"price\": 261.2, \"when\": \"2024-12-04T11:00:00Z\", \"flag\": false, \"loc\": {\"lat\": 7.4246, \"lon\": 159.6009}, \"people\": [{\"name\": \"theta\", \"age\": 70}, {\"name\": \"iota\", \"age\": 32}]}"
+}
+],
+"knn": [
+"054",
+"1035",
+"1050"
+]
+},
+"mixed": {
+"count": 51,
+"counts": {
+"date": 30,
+"geo": 6,
+"match_beta": 11,
+"nested_age": 18,
+"range_count": 17,
+"term_red": 9
+},
+"docs": [
+{
+"_id": "1000",
+"_primary_term": 1,
+"_routing": "r0",
+"_seq_no": 0,
+"_source": {
+"count": 0,
+"flag": true,
+"loc": {
+"lat": 13.2461,
+"lon": 139.2994
+},
+"people": [],
+"price": 94.13,
+"secret": "s0",
+"tag": "a b",
+"title": "epsilon nu beta gamma",
+"vec": [
+-0.571,
+-0.828,
+-0.164,
+-0.519
+],
+"when": "2024-01-01T00:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"epsilon nu beta gamma\", \"tag\": \"a b\", \"count\": 0, \"price\": 94.13, \"when\": \"2024-01-01T00:00:00Z\", \"flag\": true, \"loc\": {\"lat\": 13.2461, \"lon\": 139.2994}, \"people\": [], \"secret\": \"s0\"}"
+},
+{
+"_id": "DgC1-6EBbdXx5k-2UQ6o",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 0,
+"_source": {
+"count": 1,
+"flag": false,
+"loc": {
+"lat": -16.5311,
+"lon": 161.9267
+},
+"people": [
+{
+"age": 72,
+"name": "beta"
+}
+],
+"price": 577.1,
+"secret": "s1",
+"tag": "red",
+"title": "xi beta tau delta theta tau",
+"vec": [
+0.717,
+-0.42099997,
+-0.7110001,
+-0.764
+],
+"when": "2024-02-02T01:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"xi beta tau delta theta tau\", \"tag\": \"red\", \"count\": 1, \"price\": 577.1, \"when\": \"2024-02-02T01:00:00Z\", \"flag\": false, \"loc\": {\"lat\": -16.5311, \"lon\": 161.9267}, \"people\": [{\"name\": \"beta\", \"age\": 72}], \"secret\": \"s1\"}"
+},
+{
+"_id": "doc-2",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 1,
+"_source": {
+"count": 2,
+"flag": true,
+"loc": {
+"lat": -20.4164,
+"lon": 16.2331
+},
+"people": [
+{
+"age": 73,
+"name": "gamma"
+},
+{
+"age": 80,
+"name": "beta"
+}
+],
+"price": 638.91,
+"secret": "s2",
+"tag": "a b",
+"title": "sigma zeta delta tau",
+"vec": [
+-0.588,
+0.361,
+-0.145,
+-0.372
+],
+"when": "2024-03-03T02:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"sigma zeta delta tau\", \"tag\": \"a b\", \"count\": 2, \"price\": 638.91, \"when\": \"2024-03-03T02:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -20.4164, \"lon\": 16.2331}, \"people\": [{\"name\": \"gamma\", \"age\": 73}, {\"name\": \"beta\", \"age\": 80}], \"secret\": \"s2\"}"
+},
+{
+"_id": "DwC1-6EBbdXx5k-2UQ6o",
+"_primary_term": 1,
+"_routing": "r2",
+"_seq_no": 2,
+"_source": {
+"count": 6,
+"flag": true,
+"loc": {
+"lat": 59.4275,
+"lon": -142.6024
+},
+"people": [],
+"price": 390.95,
+"secret": "s6",
+"tag": "ünïcødé",
+"title": "beta eta kappa epsilon theta",
+"vec": [
+-0.102,
+0.099,
+0.767,
+0.639
+],
+"when": "2024-07-07T06:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"beta eta kappa epsilon theta\", \"tag\": \"\\u00fcn\\u00efc\\u00f8d\\u00e9\", \"count\": 6, \"price\": 390.95, \"when\": \"2024-07-07T06:00:00Z\", \"flag\": true, \"loc\": {\"lat\": 59.4275, \"lon\": -142.6024}, \"people\": [], \"secret\": \"s6\"}"
+},
+{
+"_id": "04",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 3,
+"_source": {
+"count": 4,
+"flag": true,
+"loc": {
+"lat": -67.5807,
+"lon": 19.7458
+},
+"people": [
+{
+"age": 44,
+"name": "lambda"
+}
+],
+"price": 962.02,
+"secret": "s4",
+"tag": "red",
+"title": "zeta lambda epsilon pi xi",
+"vec": [
+0.391,
+0.189,
+0.16,
+-0.088
+],
+"when": "2024-05-05T04:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"zeta lambda epsilon pi xi\", \"tag\": \"red\", \"count\": 4, \"price\": 962.02, \"when\": \"2024-05-05T04:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -67.5807, \"lon\": 19.7458}, \"people\": [{\"name\": \"lambda\", \"age\": 44}], \"secret\": \"s4\"}"
+},
+{
+"_id": "EQC1-6EBbdXx5k-2UQ78",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 4,
+"_source": {
+"count": 16,
+"flag": true,
+"loc": {
+"lat": -56.6121,
+"lon": 111.0136
+},
+"people": [
+{
+"age": 85,
+"name": "pi"
+}
+],
+"price": 806.5,
+"secret": "s16",
+"tag": "ünïcødé",
+"title": "alpha epsilon tau",
+"vec": [
+0.875,
+-0.688,
+0.097,
+-0.9570001
+],
+"when": "2024-05-17T16:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"alpha epsilon tau\", \"tag\": \"\\u00fcn\\u00efc\\u00f8d\\u00e9\", \"count\": 16, \"price\": 806.5, \"when\": \"2024-05-17T16:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -56.6121, \"lon\": 111.0136}, \"people\": [{\"name\": \"pi\", \"age\": 85}], \"secret\": \"s16\"}"
+},
+{
+"_id": "ïd/18 with space",
+"_primary_term": 1,
+"_routing": "r2",
+"_seq_no": 5,
+"_source": {
+"count": 18,
+"flag": true,
+"loc": {
+"lat": 2.6817,
+"lon": 111.2275
+},
+"people": [],
+"price": 815.05,
+"secret": "s18",
+"tag": "a b",
+"title": "beta mu omicron",
+"vec": [
+0.756,
+-0.738,
+-0.696,
+0.021
+],
+"when": "2024-07-19T18:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"beta mu omicron\", \"tag\": \"a b\", \"count\": 18, \"price\": 815.05, \"when\": \"2024-07-19T18:00:00Z\", \"flag\": true, \"loc\": {\"lat\": 2.6817, \"lon\": 111.2275}, \"people\": [], \"secret\": \"s18\"}"
+},
+{
+"_id": "doc-7",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 4,
+"_source": {
+"count": 7,
+"flag": false,
+"loc": {
+"lat": -42.8869,
+"lon": -90.6657
+},
+"people": [
+{
+"age": 76,
+"name": "pi"
+}
+],
+"price": 176.22,
+"secret": "s7",
+"tag": "red",
+"title": "iota xi mu nu theta epsilon",
+"vec": [
+-0.635,
+-0.436,
+-0.709,
+0.069
+],
+"when": "2024-08-08T07:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"iota xi mu nu theta epsilon\", \"tag\": \"red\", \"count\": 7, \"price\": 176.22, \"when\": \"2024-08-08T07:00:00Z\", \"flag\": false, \"loc\": {\"lat\": -42.8869, \"lon\": -90.6657}, \"people\": [{\"name\": \"pi\", \"age\": 76}], \"secret\": \"s7\"}"
+},
+{
+"_id": "1020",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 6,
+"_source": {
+"count": 20,
+"flag": true,
+"loc": {
+"lat": 9.8767,
+"lon": 88.3977
+},
+"people": [
+{
+"age": 57,
+"name": "gamma"
+},
+{
+"age": 79,
+"name": "lambda"
+}
+],
+"price": 507.71,
+"secret": "s20",
+"tag": "red",
+"title": "eta iota beta",
+"vec": [
+0.947,
+0.212,
+-0.601,
+-0.446
+],
+"when": "2024-09-21T20:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"eta iota beta\", \"tag\": \"red\", \"count\": 20, \"price\": 507.71, \"when\": \"2024-09-21T20:00:00Z\", \"flag\": true, \"loc\": {\"lat\": 9.8767, \"lon\": 88.3977}, \"people\": [{\"name\": \"gamma\", \"age\": 57}, {\"name\": \"lambda\", \"age\": 79}], \"secret\": \"s20\"}"
+},
+{
+"_id": "ïd/8 with space",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 5,
+"_source": {
+"count": 8,
+"flag": true,
+"loc": {
+"lat": -16.1634,
+"lon": -134.7974
+},
+"people": [
+{
+"age": 8,
+"name": "nu"
+},
+{
+"age": 9,
+"name": "eta"
+}
+],
+"price": 392.38,
+"secret": "s8",
+"tag": "a b",
+"title": "tau lambda epsilon rho beta omicron",
+"vec": [
+0.969,
+-0.119,
+-0.78,
+0.20100002
+],
+"when": "2024-09-09T08:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"tau lambda epsilon rho beta omicron\", \"tag\": \"a b\", \"count\": 8, \"price\": 392.38, \"when\": \"2024-09-09T08:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -16.1634, \"lon\": -134.7974}, \"people\": [{\"name\": \"nu\", \"age\": 8}, {\"name\": \"eta\", \"age\": 9}], \"secret\": \"s8\"}"
+},
+{
+"_id": "09",
+"_primary_term": 1,
+"_routing": "r1",
+"_seq_no": 6,
+"_source": {
+"count": 9,
+"flag": false,
+"loc": {
+"lat": 71.8318,
+"lon": 38.6707
+},
+"people": [],
+"price": 536.62,
+"secret": "s9",
+"tag": "green",
+"title": "alpha tau",
+"vec": [
+-0.859,
+-0.584,
+-0.248,
+0.269
+],
+"when": "2024-10-10T09:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"alpha tau\", \"tag\": \"green\", \"count\": 9, \"price\": 536.62, \"when\": \"2024-10-10T09:00:00Z\", \"flag\": false, \"loc\": {\"lat\": 71.8318, \"lon\": 38.6707}, \"people\": [], \"secret\": \"s9\"}"
+},
+{
+"_id": "1025",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 8,
+"_source": {
+"count": 25,
+"flag": false,
+"loc": {
+"lat": -27.6722,
+"lon": -75.1188
+},
+"people": [
+{
+"age": 55,
+"name": "zeta"
+}
+],
+"price": 494.61,
+"secret": "s25",
+"tag": "a b",
+"title": "nu epsilon sigma rho",
+"vec": [
+0.791,
+-0.46200004,
+-0.96599996,
+-0.823
+],
+"when": "2024-02-26T01:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"nu epsilon sigma rho\", \"tag\": \"a b\", \"count\": 25, \"price\": 494.61, \"when\": \"2024-02-26T01:00:00Z\", \"flag\": false, \"loc\": {\"lat\": -27.6722, \"lon\": -75.1188}, \"people\": [{\"name\": \"zeta\", \"age\": 55}], \"secret\": \"s25\"}"
+},
+{
+"_id": "1030",
+"_primary_term": 1,
+"_routing": "r2",
+"_seq_no": 9,
+"_source": {
+"count": 30,
+"flag": true,
+"loc": {
+"lat": -34.8907,
+"lon": -87.6476
+},
+"people": [],
+"price": 670.54,
+"secret": "s30",
+"tag": "a b",
+"title": "gamma nu",
+"vec": [
+-0.41399997,
+-0.081,
+-0.685,
+-0.108
+],
+"when": "2024-07-03T06:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"gamma nu\", \"tag\": \"a b\", \"count\": 30, \"price\": 670.54, \"when\": \"2024-07-03T06:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -34.8907, \"lon\": -87.6476}, \"people\": [], \"secret\": \"s30\"}"
+},
+{
+"_id": "EAC1-6EBbdXx5k-2UQ6p",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 8,
+"_source": {
+"count": 11,
+"flag": false,
+"loc": {
+"lat": 30.4108,
+"lon": 140.8096
+},
+"people": [
+{
+"age": 39,
+"name": "rho"
+},
+{
+"age": 90,
+"name": "gamma"
+}
+],
+"price": 361.75,
+"secret": "s11",
+"tag": "a b",
+"title": "rho alpha eta",
+"vec": [
+0.691,
+0.037,
+0.817,
+-0.289
+],
+"when": "2024-12-12T11:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"rho alpha eta\", \"tag\": \"a b\", \"count\": 11, \"price\": 361.75, \"when\": \"2024-12-12T11:00:00Z\", \"flag\": false, \"loc\": {\"lat\": 30.4108, \"lon\": 140.8096}, \"people\": [{\"name\": \"rho\", \"age\": 39}, {\"name\": \"gamma\", \"age\": 90}], \"secret\": \"s11\"}"
+},
+{
+"_id": "ïd/13 with space",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 9,
+"_source": {
+"count": 13,
+"flag": false,
+"loc": {
+"lat": 78.3366,
+"lon": 98.6388
+},
+"people": [
+{
+"age": 34,
+"name": "pi"
+}
+],
+"price": 731.0,
+"secret": "s13",
+"tag": "blue",
+"title": "eta rho pi",
+"vec": [
+-0.613,
+0.21,
+-0.311,
+0.617
+],
+"when": "2024-02-14T13:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"eta rho pi\", \"tag\": \"blue\", \"count\": 13, \"price\": 731.0, \"when\": \"2024-02-14T13:00:00Z\", \"flag\": false, \"loc\": {\"lat\": 78.3366, \"lon\": 98.6388}, \"people\": [{\"name\": \"pi\", \"age\": 34}], \"secret\": \"s13\"}"
+},
+{
+"_id": "doc-32",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 11,
+"_source": {
+"count": 32,
+"flag": true,
+"loc": {
+"lat": -56.9816,
+"lon": 29.5122
+},
+"people": [
+{
+"age": 3,
+"name": "nu"
+},
+{
+"age": 39,
+"name": "kappa"
+}
+],
+"price": 817.04,
+"secret": "s32",
+"tag": "blue",
+"title": "rho alpha gamma",
+"vec": [
+0.259,
+-0.831,
+0.915,
+0.706
+],
+"when": "2024-09-05T08:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"rho alpha gamma\", \"tag\": \"blue\", \"count\": 32, \"price\": 817.04, \"when\": \"2024-09-05T08:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -56.9816, \"lon\": 29.5122}, \"people\": [{\"name\": \"nu\", \"age\": 3}, {\"name\": \"kappa\", \"age\": 39}], \"secret\": \"s32\"}"
+},
+{
+"_id": "034",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 12,
+"_source": {
+"count": 34,
+"flag": true,
+"loc": {
+"lat": -73.3021,
+"lon": 46.6208
+},
+"people": [
+{
+"age": 49,
+"name": "delta"
+}
+],
+"price": 85.09,
+"secret": "s34",
+"tag": "green",
+"title": "epsilon rho rho tau alpha tau",
+"vec": [
+0.672,
+0.117000006,
+0.256,
+0.252
+],
+"when": "2024-11-07T10:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"epsilon rho rho tau alpha tau\", \"tag\": \"green\", \"count\": 34, \"price\": 85.09, \"when\": \"2024-11-07T10:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -73.3021, \"lon\": 46.6208}, \"people\": [{\"name\": \"delta\", \"age\": 49}], \"secret\": \"s34\"}"
+},
+{
+"_id": "014",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 10,
+"_source": {
+"count": 14,
+"flag": true,
+"loc": {
+"lat": -25.962,
+"lon": -5.8979
+},
+"people": [
+{
+"age": 62,
+"name": "alpha"
+},
+{
+"age": 83,
+"name": "mu"
+}
+],
+"price": 470.08,
+"secret": "s14",
+"tag": "green",
+"title": "mu gamma theta delta",
+"vec": [
+-0.83,
+0.321,
+0.82,
+0.565
+],
+"when": "2024-03-15T14:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"mu gamma theta delta\", \"tag\": \"green\", \"count\": 14, \"price\": 470.08, \"when\": \"2024-03-15T14:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -25.962, \"lon\": -5.8979}, \"people\": [{\"name\": \"alpha\", \"age\": 62}, {\"name\": \"mu\", \"age\": 83}], \"secret\": \"s14\"}"
+},
+{
+"_id": "1015",
+"_primary_term": 1,
+"_routing": "r3",
+"_seq_no": 11,
+"_source": {
+"count": 15,
+"flag": false,
+"loc": {
+"lat": 71.3865,
+"lon": 75.4204
+},
+"people": [],
+"price": 86.75,
+"secret": "s15",
+"tag": "blue",
+"title": "pi zeta xi",
+"vec": [
+-0.074,
+0.48700002,
+-0.83,
+-0.682
+],
+"when": "2024-04-16T15:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"pi zeta xi\", \"tag\": \"blue\", \"count\": 15, \"price\": 86.75, \"when\": \"2024-04-16T15:00:00Z\", \"flag\": false, \"loc\": {\"lat\": 71.3865, \"lon\": 75.4204}, \"people\": [], \"secret\": \"s15\"}"
+},
+{
+"_id": "1035",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 13,
+"_source": {
+"count": 35,
+"flag": false,
+"loc": {
+"lat": 39.7225,
+"lon": 1.0102
+},
+"people": [
+{
+"age": 12,
+"name": "sigma"
+},
+{
+"age": 9,
+"name": "rho"
+}
+],
+"price": 797.7,
+"secret": "s35",
+"tag": "ünïcødé",
+"title": "pi iota alpha",
+"vec": [
+0.491,
+-0.052,
+0.618,
+0.692
+],
+"when": "2024-12-08T11:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"pi iota alpha\", \"tag\": \"\\u00fcn\\u00efc\\u00f8d\\u00e9\", \"count\": 35, \"price\": 797.7, \"when\": \"2024-12-08T11:00:00Z\", \"flag\": false, \"loc\": {\"lat\": 39.7225, \"lon\": 1.0102}, \"people\": [{\"name\": \"sigma\", \"age\": 12}, {\"name\": \"rho\", \"age\": 9}], \"secret\": \"s35\"}"
+},
+{
+"_id": "FQC1-6EBbdXx5k-2Ug5X",
+"_primary_term": 1,
+"_routing": "r0",
+"_seq_no": 14,
+"_source": {
+"count": 36,
+"flag": true,
+"loc": {
+"lat": -67.7216,
+"lon": 139.5587
+},
+"people": [],
+"price": 845.53,
+"secret": "s36",
+"tag": "ünïcødé",
+"title": "eta theta omicron",
+"vec": [
+-0.425,
+-0.907,
+0.266,
+-0.603
+],
+"when": "2024-01-09T12:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"eta theta omicron\", \"tag\": \"\\u00fcn\\u00efc\\u00f8d\\u00e9\", \"count\": 36, \"price\": 845.53, \"when\": \"2024-01-09T12:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -67.7216, \"lon\": 139.5587}, \"people\": [], \"secret\": \"s36\"}"
+},
+{
+"_id": "doc-37",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 15,
+"_source": {
+"count": 37,
+"flag": false,
+"loc": {
+"lat": -2.2723,
+"lon": 160.6531
+},
+"people": [
+{
+"age": 89,
+"name": "delta"
+}
+],
+"price": 482.42,
+"secret": "s37",
+"tag": "red",
+"title": "epsilon lambda iota kappa tau epsilon",
+"vec": [
+-0.565,
+-0.021,
+0.418,
+-0.429
+],
+"when": "2024-02-10T13:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"epsilon lambda iota kappa tau epsilon\", \"tag\": \"red\", \"count\": 37, \"price\": 482.42, \"when\": \"2024-02-10T13:00:00Z\", \"flag\": false, \"loc\": {\"lat\": -2.2723, \"lon\": 160.6531}, \"people\": [{\"name\": \"delta\", \"age\": 89}], \"secret\": \"s37\"}"
+},
+{
+"_id": "EgC1-6EBbdXx5k-2UQ78",
+"_primary_term": 1,
+"_routing": "r1",
+"_seq_no": 14,
+"_source": {
+"count": 21,
+"flag": false,
+"loc": {
+"lat": -47.5858,
+"lon": -17.8404
+},
+"people": [],
+"price": 892.75,
+"secret": "s21",
+"tag": "a b",
+"title": "sigma pi rho theta rho iota",
+"vec": [
+-0.167,
+-0.215,
+-0.368,
+0.34200004
+],
+"when": "2024-10-22T21:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"sigma pi rho theta rho iota\", \"tag\": \"a b\", \"count\": 21, \"price\": 892.75, \"when\": \"2024-10-22T21:00:00Z\", \"flag\": false, \"loc\": {\"lat\": -47.5858, \"lon\": -17.8404}, \"people\": [], \"secret\": \"s21\"}"
+},
+{
+"_id": "doc-22",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 15,
+"_source": {
+"count": 22,
+"flag": true,
+"loc": {
+"lat": 61.2533,
+"lon": 158.9652
+},
+"people": [
+{
+"age": 13,
+"name": "theta"
+}
+],
+"price": 142.98,
+"secret": "s22",
+"tag": "blue",
+"title": "gamma eta kappa delta epsilon",
+"vec": [
+-0.203,
+-0.025,
+0.98,
+0.665
+],
+"when": "2024-11-23T22:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"gamma eta kappa delta epsilon\", \"tag\": \"blue\", \"count\": 22, \"price\": 142.98, \"when\": \"2024-11-23T22:00:00Z\", \"flag\": true, \"loc\": {\"lat\": 61.2533, \"lon\": 158.9652}, \"people\": [{\"name\": \"theta\", \"age\": 13}], \"secret\": \"s22\"}"
+},
+{
+"_id": "doc-42",
+"_primary_term": 1,
+"_routing": "r2",
+"_seq_no": 18,
+"_source": {
+"count": 42,
+"flag": true,
+"loc": {
+"lat": 43.7094,
+"lon": 96.9485
+},
+"people": [],
+"price": 315.6,
+"secret": "s42",
+"tag": "a b",
+"title": "epsilon theta iota xi",
+"vec": [
+-0.145,
+-0.94200003,
+0.523,
+-0.2
+],
+"when": "2024-07-15T18:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"epsilon theta iota xi\", \"tag\": \"a b\", \"count\": 42, \"price\": 315.6, \"when\": \"2024-07-15T18:00:00Z\", \"flag\": true, \"loc\": {\"lat\": 43.7094, \"lon\": 96.9485}, \"people\": [], \"secret\": \"s42\"}"
+},
+{
+"_id": "ïd/23 with space",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 16,
+"_source": {
+"count": 23,
+"flag": false,
+"loc": {
+"lat": -22.9416,
+"lon": -138.654
+},
+"people": [
+{
+"age": 3,
+"name": "mu"
+},
+{
+"age": 71,
+"name": "lambda"
+}
+],
+"price": 421.28,
+"secret": "s23",
+"tag": "blue",
+"title": "xi rho nu",
+"vec": [
+-0.083,
+0.406,
+-0.231,
+0.035
+],
+"when": "2024-12-24T23:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"xi rho nu\", \"tag\": \"blue\", \"count\": 23, \"price\": 421.28, \"when\": \"2024-12-24T23:00:00Z\", \"flag\": false, \"loc\": {\"lat\": -22.9416, \"lon\": -138.654}, \"people\": [{\"name\": \"mu\", \"age\": 3}, {\"name\": \"lambda\", \"age\": 71}], \"secret\": \"s23\"}"
+},
+{
+"_id": "ïd/43 with space",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 19,
+"_source": {
+"count": 43,
+"flag": false,
+"loc": {
+"lat": 23.1185,
+"lon": -72.6892
+},
+"people": [
+{
+"age": 71,
+"name": "beta"
+}
+],
+"price": 752.67,
+"secret": "s43",
+"tag": "a b",
+"title": "sigma eta gamma beta xi omicron",
+"vec": [
+-0.745,
+-0.056,
+-0.313,
+-0.404
+],
+"when": "2024-08-16T19:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"sigma eta gamma beta xi omicron\", \"tag\": \"a b\", \"count\": 43, \"price\": 752.67, \"when\": \"2024-08-16T19:00:00Z\", \"flag\": false, \"loc\": {\"lat\": 23.1185, \"lon\": -72.6892}, \"people\": [{\"name\": \"beta\", \"age\": 71}], \"secret\": \"s43\"}"
+},
+{
+"_id": "ïd/48 with space",
+"_primary_term": 1,
+"_routing": "r0",
+"_seq_no": 20,
+"_source": {
+"count": 48,
+"flag": true,
+"loc": {
+"lat": 75.5586,
+"lon": -85.5218
+},
+"people": [],
+"price": 855.46,
+"secret": "s48",
+"tag": "a b",
+"title": "gamma nu",
+"vec": [
+-0.782,
+-0.691,
+0.045,
+0.364
+],
+"when": "2024-01-21T00:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"gamma nu\", \"tag\": \"a b\", \"count\": 48, \"price\": 855.46, \"when\": \"2024-01-21T00:00:00Z\", \"flag\": true, \"loc\": {\"lat\": 75.5586, \"lon\": -85.5218}, \"people\": [], \"secret\": \"s48\"}"
+},
+{
+"_id": "doc-27",
+"_primary_term": 1,
+"_routing": "r3",
+"_seq_no": 18,
+"_source": {
+"count": 27,
+"flag": false,
+"loc": {
+"lat": 4.9737,
+"lon": -100.0037
+},
+"people": [],
+"price": 628.67,
+"secret": "s27",
+"tag": "blue",
+"title": "zeta eta",
+"vec": [
+-0.109,
+0.344,
+-0.459,
+0.607
+],
+"when": "2024-04-28T03:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"zeta eta\", \"tag\": \"blue\", \"count\": 27, \"price\": 628.67, \"when\": \"2024-04-28T03:00:00Z\", \"flag\": false, \"loc\": {\"lat\": 4.9737, \"lon\": -100.0037}, \"people\": [], \"secret\": \"s27\"}"
+},
+{
+"_id": "049",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 21,
+"_source": {
+"count": 49,
+"flag": false,
+"loc": {
+"lat": -73.9853,
+"lon": 73.1074
+},
+"people": [
+{
+"age": 81,
+"name": "epsilon"
+}
+],
+"price": 569.38,
+"secret": "s49",
+"tag": "green",
+"title": "gamma sigma beta alpha epsilon",
+"vec": [
+-0.496,
+0.273,
+0.397,
+-0.776
+],
+"when": "2024-02-22T01:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"gamma sigma beta alpha epsilon\", \"tag\": \"green\", \"count\": 49, \"price\": 569.38, \"when\": \"2024-02-22T01:00:00Z\", \"flag\": false, \"loc\": {\"lat\": -73.9853, \"lon\": 73.1074}, \"people\": [{\"name\": \"epsilon\", \"age\": 81}], \"secret\": \"s49\"}"
+},
+{
+"_id": "ïd/28 with space",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 19,
+"_source": {
+"count": 28,
+"flag": true,
+"loc": {
+"lat": 2.2776,
+"lon": -86.469
+},
+"people": [
+{
+"age": 14,
+"name": "omicron"
+}
+],
+"price": 978.05,
+"secret": "s28",
+"tag": "a b",
+"title": "beta alpha alpha rho",
+"vec": [
+0.31699997,
+0.3,
+0.313,
+0.092
+],
+"when": "2024-05-01T04:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"beta alpha alpha rho\", \"tag\": \"a b\", \"count\": 28, \"price\": 978.05, \"when\": \"2024-05-01T04:00:00Z\", \"flag\": true, \"loc\": {\"lat\": 2.2776, \"lon\": -86.469}, \"people\": [{\"name\": \"omicron\", \"age\": 14}], \"secret\": \"s28\"}"
+},
+{
+"_id": "029",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 20,
+"_source": {
+"count": 29,
+"flag": false,
+"loc": {
+"lat": 33.0761,
+"lon": 46.2322
+},
+"people": [
+{
+"age": 45,
+"name": "nu"
+},
+{
+"age": 17,
+"name": "beta"
+}
+],
+"price": 832.29,
+"secret": "s29",
+"tag": "green",
+"title": "rho kappa eta theta lambda",
+"vec": [
+-0.971,
+0.251,
+0.76,
+-0.139
+],
+"when": "2024-06-02T05:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"rho kappa eta theta lambda\", \"tag\": \"green\", \"count\": 29, \"price\": 832.29, \"when\": \"2024-06-02T05:00:00Z\", \"flag\": false, \"loc\": {\"lat\": 33.0761, \"lon\": 46.2322}, \"people\": [{\"name\": \"nu\", \"age\": 45}, {\"name\": \"beta\", \"age\": 17}], \"secret\": \"s29\"}"
+},
+{
+"_id": "ïd/53 with space",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 23,
+"_source": {
+"count": 53,
+"flag": false,
+"loc": {
+"lat": 51.2007,
+"lon": -91.525
+},
+"people": [
+{
+"age": 34,
+"name": "theta"
+},
+{
+"age": 14,
+"name": "kappa"
+}
+],
+"price": 311.72,
+"secret": "s53",
+"tag": "green",
+"title": "eta pi",
+"vec": [
+0.904,
+-0.008,
+-0.625,
+-0.553
+],
+"when": "2024-06-26T05:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"eta pi\", \"tag\": \"green\", \"count\": 53, \"price\": 311.72, \"when\": \"2024-06-26T05:00:00Z\", \"flag\": false, \"loc\": {\"lat\": 51.2007, \"lon\": -91.525}, \"people\": [{\"name\": \"theta\", \"age\": 34}, {\"name\": \"kappa\", \"age\": 14}], \"secret\": \"s53\"}"
+},
+{
+"_id": "039",
+"_primary_term": 1,
+"_routing": "r3",
+"_seq_no": 22,
+"_source": {
+"count": 39,
+"flag": false,
+"loc": {
+"lat": 21.0669,
+"lon": -74.9469
+},
+"people": [],
+"price": 603.37,
+"secret": "s39",
+"tag": "green",
+"title": "rho iota mu",
+"vec": [
+-0.775,
+-0.27,
+-0.004,
+0.752
+],
+"when": "2024-04-12T15:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"rho iota mu\", \"tag\": \"green\", \"count\": 39, \"price\": 603.37, \"when\": \"2024-04-12T15:00:00Z\", \"flag\": false, \"loc\": {\"lat\": 21.0669, \"lon\": -74.9469}, \"people\": [], \"secret\": \"s39\"}"
+},
+{
+"_id": "1055",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 25,
+"_source": {
+"count": 55,
+"flag": false,
+"loc": {
+"lat": 24.3949,
+"lon": 8.4312
+},
+"people": [
+{
+"age": 5,
+"name": "omicron"
+}
+],
+"price": 190.68,
+"secret": "s55",
+"tag": "blue",
+"title": "gamma zeta",
+"vec": [
+-0.376,
+0.45099998,
+0.678,
+0.97
+],
+"when": "2024-08-28T07:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"gamma zeta\", \"tag\": \"blue\", \"count\": 55, \"price\": 190.68, \"when\": \"2024-08-28T07:00:00Z\", \"flag\": false, \"loc\": {\"lat\": 24.3949, \"lon\": 8.4312}, \"people\": [{\"name\": \"omicron\", \"age\": 5}], \"secret\": \"s55\"}"
+},
+{
+"_id": "FgC1-6EBbdXx5k-2Ug5X",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 23,
+"_source": {
+"count": 41,
+"flag": false,
+"loc": {
+"lat": -69.6036,
+"lon": -37.3452
+},
+"people": [
+{
+"age": 10,
+"name": "tau"
+},
+{
+"age": 55,
+"name": "mu"
+}
+],
+"price": 253.21,
+"secret": "s41",
+"tag": "blue",
+"title": "eta alpha",
+"vec": [
+0.511,
+0.70900005,
+-0.439,
+-0.8970001
+],
+"when": "2024-06-14T17:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"eta alpha\", \"tag\": \"blue\", \"count\": 41, \"price\": 253.21, \"when\": \"2024-06-14T17:00:00Z\", \"flag\": false, \"loc\": {\"lat\": -69.6036, \"lon\": -37.3452}, \"people\": [{\"name\": \"tau\", \"age\": 10}, {\"name\": \"mu\", \"age\": 55}], \"secret\": \"s41\"}"
+},
+{
+"_id": "GQC1-6EBbdXx5k-2Ug6W",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 26,
+"_source": {
+"count": 56,
+"flag": true,
+"loc": {
+"lat": 72.8824,
+"lon": -127.9392
+},
+"people": [
+{
+"age": 49,
+"name": "eta"
+},
+{
+"age": 40,
+"name": "mu"
+}
+],
+"price": 351.47,
+"secret": "s56",
+"tag": "red",
+"title": "zeta delta alpha gamma iota",
+"vec": [
+0.644,
+-0.135,
+-0.901,
+-0.053
+],
+"when": "2024-09-01T08:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"zeta delta alpha gamma iota\", \"tag\": \"red\", \"count\": 56, \"price\": 351.47, \"when\": \"2024-09-01T08:00:00Z\", \"flag\": true, \"loc\": {\"lat\": 72.8824, \"lon\": -127.9392}, \"people\": [{\"name\": \"eta\", \"age\": 49}, {\"name\": \"mu\", \"age\": 40}], \"secret\": \"s56\"}"
+},
+{
+"_id": "044",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 24,
+"_source": {
+"count": 44,
+"flag": true,
+"loc": {
+"lat": -60.8412,
+"lon": 48.6897
+},
+"people": [
+{
+"age": 27,
+"name": "gamma"
+},
+{
+"age": 64,
+"name": "rho"
+}
+],
+"price": 668.88,
+"secret": "s44",
+"tag": "a b",
+"title": "nu theta kappa pi",
+"vec": [
+0.101,
+-0.094,
+-0.334,
+0.518
+],
+"when": "2024-09-17T20:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"nu theta kappa pi\", \"tag\": \"a b\", \"count\": 44, \"price\": 668.88, \"when\": \"2024-09-17T20:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -60.8412, \"lon\": 48.6897}, \"people\": [{\"name\": \"gamma\", \"age\": 27}, {\"name\": \"rho\", \"age\": 64}], \"secret\": \"s44\"}"
+},
+{
+"_id": "FwC1-6EBbdXx5k-2Ug6W",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 26,
+"_source": {
+"count": 46,
+"flag": true,
+"loc": {
+"lat": -70.0705,
+"lon": -75.6444
+},
+"people": [
+{
+"age": 17,
+"name": "mu"
+}
+],
+"price": 338.2,
+"secret": "s46",
+"tag": "blue",
+"title": "nu xi rho eta nu",
+"vec": [
+0.374,
+0.058,
+0.581,
+0.697
+],
+"when": "2024-11-19T22:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"nu xi rho eta nu\", \"tag\": \"blue\", \"count\": 46, \"price\": 338.2, \"when\": \"2024-11-19T22:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -70.0705, \"lon\": -75.6444}, \"people\": [{\"name\": \"mu\", \"age\": 17}], \"secret\": \"s46\"}"
+},
+{
+"_id": "1005",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 28,
+"_source": {
+"count": 5,
+"flag": false,
+"loc": {
+"lat": 32.2387,
+"lon": 50.0238
+},
+"people": [
+{
+"age": 37,
+"name": "omicron"
+},
+{
+"age": 86,
+"name": "nu"
+}
+],
+"price": 60.67,
+"secret": "s5",
+"tag": "red",
+"title": "iota pi updated",
+"when": "2024-06-06T05:00:00Z"
+},
+"_version": 2,
+"source_raw": "{\"title\": \"iota pi updated\", \"tag\": \"red\", \"count\": 5, \"price\": 60.67, \"when\": \"2024-06-06T05:00:00Z\", \"flag\": false, \"loc\": {\"lat\": 32.2387, \"lon\": 50.0238}, \"people\": [{\"name\": \"omicron\", \"age\": 37}, {\"name\": \"nu\", \"age\": 86}], \"secret\": \"s5\"}"
+},
+{
+"_id": "doc-12",
+"_primary_term": 1,
+"_routing": "r0",
+"_seq_no": 29,
+"_source": {
+"count": 12,
+"flag": true,
+"loc": {
+"lat": 18.1165,
+"lon": 98.0557
+},
+"people": [],
+"price": 636.44,
+"secret": "s12",
+"tag": "blue",
+"title": "sigma sigma rho updated",
+"when": "2024-01-13T12:00:00Z"
+},
+"_version": 2,
+"source_raw": "{\"title\": \"sigma sigma rho updated\", \"tag\": \"blue\", \"count\": 12, \"price\": 636.44, \"when\": \"2024-01-13T12:00:00Z\", \"flag\": true, \"loc\": {\"lat\": 18.1165, \"lon\": 98.0557}, \"people\": [], \"secret\": \"s12\"}"
+},
+{
+"_id": "1050",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 28,
+"_source": {
+"count": 50,
+"flag": true,
+"loc": {
+"lat": -38.2589,
+"lon": 98.7656
+},
+"people": [
+{
+"age": 2,
+"name": "alpha"
+},
+{
+"age": 39,
+"name": "sigma"
+}
+],
+"price": 191.7,
+"secret": "s50",
+"tag": "a b",
+"title": "kappa rho",
+"vec": [
+0.993,
+-0.443,
+-0.367,
+0.679
+],
+"when": "2024-03-23T02:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"kappa rho\", \"tag\": \"a b\", \"count\": 50, \"price\": 191.7, \"when\": \"2024-03-23T02:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -38.2589, \"lon\": 98.7656}, \"people\": [{\"name\": \"alpha\", \"age\": 2}, {\"name\": \"sigma\", \"age\": 39}], \"secret\": \"s50\"}"
+},
+{
+"_id": "GAC1-6EBbdXx5k-2Ug6W",
+"_primary_term": 1,
+"_routing": "r3",
+"_seq_no": 29,
+"_source": {
+"count": 51,
+"flag": false,
+"loc": {
+"lat": 73.6983,
+"lon": 69.5822
+},
+"people": [],
+"price": 247.06,
+"secret": "s51",
+"tag": "a b",
+"title": "pi rho theta",
+"vec": [
+-0.385,
+-0.956,
+-0.003,
+0.349
+],
+"when": "2024-04-24T03:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"pi rho theta\", \"tag\": \"a b\", \"count\": 51, \"price\": 247.06, \"when\": \"2024-04-24T03:00:00Z\", \"flag\": false, \"loc\": {\"lat\": 73.6983, \"lon\": 69.5822}, \"people\": [], \"secret\": \"s51\"}"
+},
+{
+"_id": "1040",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 33,
+"_source": {
+"count": 40,
+"flag": true,
+"loc": {
+"lat": -57.4868,
+"lon": -53.0536
+},
+"people": [
+{
+"age": 16,
+"name": "lambda"
+}
+],
+"price": 301.95,
+"secret": "s40",
+"tag": "ünïcødé",
+"title": "alpha zeta alpha pi omicron updated",
+"when": "2024-05-13T16:00:00Z"
+},
+"_version": 2,
+"source_raw": "{\"title\": \"alpha zeta alpha pi omicron updated\", \"tag\": \"\\u00fcn\\u00efc\\u00f8d\\u00e9\", \"count\": 40, \"price\": 301.95, \"when\": \"2024-05-13T16:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -57.4868, \"lon\": -53.0536}, \"people\": [{\"name\": \"lambda\", \"age\": 16}], \"secret\": \"s40\"}"
+},
+{
+"_id": "doc-57",
+"_primary_term": 1,
+"_routing": "r1",
+"_seq_no": 30,
+"_source": {
+"count": 57,
+"flag": false,
+"loc": {
+"lat": -4.0745,
+"lon": 44.7651
+},
+"people": [],
+"price": 737.32,
+"secret": "s57",
+"tag": "blue",
+"title": "sigma omicron eta lambda",
+"vec": [
+-0.504,
+0.251,
+-0.19,
+-0.249
+],
+"when": "2024-10-02T09:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"sigma omicron eta lambda\", \"tag\": \"blue\", \"count\": 57, \"price\": 737.32, \"when\": \"2024-10-02T09:00:00Z\", \"flag\": false, \"loc\": {\"lat\": -4.0745, \"lon\": 44.7651}, \"people\": [], \"secret\": \"s57\"}"
+},
+{
+"_id": "054",
+"_primary_term": 1,
+"_routing": "r2",
+"_seq_no": 35,
+"_source": {
+"count": 54,
+"flag": true,
+"loc": {
+"lat": -57.2942,
+"lon": -152.3742
+},
+"people": [],
+"price": 974.12,
+"secret": "s54",
+"tag": "red",
+"title": "beta epsilon nu beta eta updated",
+"when": "2024-07-27T06:00:00Z"
+},
+"_version": 2,
+"source_raw": "{\"title\": \"beta epsilon nu beta eta updated\", \"tag\": \"red\", \"count\": 54, \"price\": 974.12, \"when\": \"2024-07-27T06:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -57.2942, \"lon\": -152.3742}, \"people\": [], \"secret\": \"s54\"}"
+},
+{
+"_id": "ïd/58 with space",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 31,
+"_source": {
+"count": 58,
+"flag": true,
+"loc": {
+"lat": -36.4297,
+"lon": 155.6145
+},
+"people": [
+{
+"age": 34,
+"name": "beta"
+}
+],
+"price": 339.07,
+"secret": "s58",
+"tag": "a b",
+"title": "gamma beta iota eta gamma",
+"vec": [
+0.49299997,
+0.379,
+0.84799993,
+-0.405
+],
+"when": "2024-11-03T10:00:00Z"
+},
+"_version": 1,
+"source_raw": "{\"title\": \"gamma beta iota eta gamma\", \"tag\": \"a b\", \"count\": 58, \"price\": 339.07, \"when\": \"2024-11-03T10:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -36.4297, \"lon\": 155.6145}, \"people\": [{\"name\": \"beta\", \"age\": 34}], \"secret\": \"s58\"}"
+},
+{
+"_id": "019",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 35,
+"_source": {
+"count": 19,
+"flag": false,
+"loc": {
+"lat": -60.7461,
+"lon": -149.0032
+},
+"people": [
+{
+"age": 68,
+"name": "rho"
+}
+],
+"price": 619.1,
+"secret": "s19",
+"tag": "ünïcødé",
+"title": "zeta alpha epsilon zeta epsilon updated",
+"when": "2024-08-20T19:00:00Z"
+},
+"_version": 2,
+"source_raw": "{\"title\": \"zeta alpha epsilon zeta epsilon updated\", \"tag\": \"\\u00fcn\\u00efc\\u00f8d\\u00e9\", \"count\": 19, \"price\": 619.1, \"when\": \"2024-08-20T19:00:00Z\", \"flag\": false, \"loc\": {\"lat\": -60.7461, \"lon\": -149.0032}, \"people\": [{\"name\": \"rho\", \"age\": 68}], \"secret\": \"s19\"}"
+},
+{
+"_id": "EwC1-6EBbdXx5k-2UQ78",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 36,
+"_source": {
+"count": 26,
+"flag": true,
+"loc": {
+"lat": -25.7357,
+"lon": 18.0418
+},
+"people": [
+{
+"age": 80,
+"name": "iota"
+},
+{
+"age": 6,
+"name": "epsilon"
+}
+],
+"price": 453.77,
+"secret": "s26",
+"tag": "red",
+"title": "gamma theta gamma iota updated",
+"when": "2024-03-27T02:00:00Z"
+},
+"_version": 2,
+"source_raw": "{\"title\": \"gamma theta gamma iota updated\", \"tag\": \"red\", \"count\": 26, \"price\": 453.77, \"when\": \"2024-03-27T02:00:00Z\", \"flag\": true, \"loc\": {\"lat\": -25.7357, \"lon\": 18.0418}, \"people\": [{\"name\": \"iota\", \"age\": 80}, {\"name\": \"epsilon\", \"age\": 6}], \"secret\": \"s26\"}"
+},
+{
+"_id": "ïd/33 with space",
+"_primary_term": 1,
+"_routing": "r1",
+"_seq_no": 37,
+"_source": {
+"count": 33,
+"flag": false,
+"loc": {
+"lat": 18.9931,
+"lon": -120.7842
+},
+"people": [],
+"price": 284.18,
+"secret": "s33",
+"tag": "green",
+"title": "nu lambda pi updated",
+"when": "2024-10-06T09:00:00Z"
+},
+"_version": 2,
+"source_raw": "{\"title\": \"nu lambda pi updated\", \"tag\": \"green\", \"count\": 33, \"price\": 284.18, \"when\": \"2024-10-06T09:00:00Z\", \"flag\": false, \"loc\": {\"lat\": 18.9931, \"lon\": -120.7842}, \"people\": [], \"secret\": \"s33\"}"
+},
+{
+"_id": "doc-47",
+"_primary_term": 1,
+"_routing": null,
+"_seq_no": 39,
+"_source": {
+"count": 47,
+"flag": false,
+"loc": {
+"lat": -8.6627,
+"lon": 154.3408
+},
+"people": [
+{
+"age": 17,
+"name": "alpha"
+},
+{
+"age": 55,
+"name": "beta"
+}
+],
+"price": 399.76,
+"secret": "s47",
+"tag": "ünïcødé",
+"title": "iota theta updated",
+"when": "2024-12-20T23:00:00Z"
+},
+"_version": 2,
+"source_raw": "{\"title\": \"iota theta updated\", \"tag\": \"\\u00fcn\\u00efc\\u00f8d\\u00e9\", \"count\": 47, \"price\": 399.76, \"when\": \"2024-12-20T23:00:00Z\", \"flag\": false, \"loc\": {\"lat\": -8.6627, \"lon\": 154.3408}, \"people\": [{\"name\": \"alpha\", \"age\": 17}, {\"name\": \"beta\", \"age\": 55}], \"secret\": \"s47\"}"
+}
+],
+"knn": [
+"doc-27",
+"044",
+"ïd/13 with space"
+]
+}
+}
