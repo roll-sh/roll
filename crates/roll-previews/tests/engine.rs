@@ -1345,6 +1345,7 @@ async fn a_roll_apps_services_earlier_push_is_its_builds_own_url() {
     e.code.edit("chg_ae", |c| c.head = "cs_9c".into());
     e.engine.pass().await.unwrap();
     assert_eq!(e.engine.store.preview(&p.id).unwrap().earlier.len(), 1, "only cs_9a's");
+    assert!(!e.engine.store.pinned_data(&p.id).unwrap().iter().any(|d| d.revision == "cs_9b"), "cs_9b's copies go: nothing uses them");
 }
 
 /// An earlier push runs on its own copy of the data, taken before the next head's release, so a
