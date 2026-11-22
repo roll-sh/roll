@@ -133,7 +133,8 @@ for it, and it goes with toolsets (`?toolsets=postgres&readonly=1`).
 A tool that has roll reach an address the caller chose says so with MCP's `openWorldHint: true`
 (`Tool::open_world`): publishing a task to a URL, a topic's endpoints, schedules and retries that
 deliver, running the app's own functions, adding or testing a notification or a log drain, a
-service from a Git URL or an image and its deploys, and a managed secret's rotation at its vendor.
+service from a Git URL or an image and its deploys, a sandbox (a public image, the internet by
+default) and the commands run in it, and a managed secret's rotation at its vendor.
 Every other tool's domain is roll's own (`false`). Search mode's `roll_run` is open-world when any
 tool it may run is; `roll_run_read` never is.
 
