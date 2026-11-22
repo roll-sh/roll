@@ -45,6 +45,16 @@ password  …   (shown once)
 The name is the cluster's identity: its username, the first label of its host name and
 `cluster_name` in `GET /`. It can't be changed later.
 
+### Or try it on sample data first
+
+A new cluster's **Overview** offers two datasets roll generates for you: **Products** (1,000 items
+of a made-up shop) and **Web logs** (2,000 log lines from the last 24 hours). Click **Load**, and
+three ready queries run on it in place: search as you type with a typo, facets and a filtered sort
+on the products; errors in the last hour, top paths and an ES|QL `STATS` on the logs (ES|QL only on
+`elasticsearch` clusters). Each has **Open in Console** and **Copy as** curl, JavaScript or Python,
+with the cluster's URL and a placeholder for the key. **Remove** deletes the index or data stream
+again; the Indices tab's **Sample data** button brings the panel back any time.
+
 ### Get a key
 
 The password can do everything, including managing users and keys. Give your code an API key

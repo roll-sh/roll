@@ -633,11 +633,22 @@ async fn deliveries(State(apps): S, Path((project, nid)): Path<(String, String)>
 struct EventsQuery {
     after: Option<i64>,
     limit: Option<usize>,
+    /// `1`: no events, only the newest cursor (a reader that starts from now).
+    latest: Option<u8>,
 }
 
 /// `GET /v1/apps/events?after=&limit=`: what happened to services, in order, after a cursor;
-/// `next` is the cursor for the following call.
+/// `next` is the cursor for the following call. `?latest=1` answers only the newest cursor.
 async fn events(State(apps): S, Query(q): Query<EventsQuery>) -> R {
+    match (q.latest, q.after) {
+        (Some(1), None) => {
+            let next = apps.db(|s| s.last_event_seq()).await?;
+            return ok(json!({ "events": [], "next": next }));
+        }
+        (Some(1), Some(_)) => return Err(Error::BadRequest("latest=1 starts from now: leave out after".into())),
+        (Some(_), _) => return Err(Error::BadRequest("latest is 1 or left out".into())),
+        (None, _) => {}
+    }
     let after = q.after.unwrap_or(0);
     let limit = q.limit.unwrap_or(100);
     let events = apps.db(move |s| s.events(after, limit)).await?;

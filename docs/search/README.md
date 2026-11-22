@@ -749,6 +749,14 @@ To run the YAML REST suites against clusters made through the API, start rolld w
 `search-yaml run --cluster-hook http://127.0.0.1:7070/v1/search/clusters --jobs 8 …` (each worker
 gets its own cluster, deleted afterwards).
 
+A new cluster's Overview (and the Indices tab's **Sample data**, any time) loads one of two datasets
+roll generates in the browser from a seeded PRNG (`lib/search-samples.ts`: 1,000 products in
+`sample-products`, 2,000 ECS web log lines over the last 24 hours in the data stream `sample-logs`)
+through the console's `_bulk` in pages under the body limit, then runs three ready queries on it in
+place (search as you type, facets, a filtered sort; errors in the last hour, top paths, ES|QL on
+Elasticsearch-flavor clusters), each with Open in Console and copy as curl, JavaScript or Python.
+Remove deletes the index, or the data stream and its template.
+
 The dashboard (`/dashboard/search/<cluster>`) lists indices; selecting one opens its documents
 (paged `_search` with a query string, as rows or as a table: the most common fields by default,
 a column picker over the page's paths and the mapping's leaf fields, kept per index in the
@@ -787,7 +795,7 @@ or a raw body with `{{query}}`. Each hit shows its rank, score, `_id`, highlight
 `semantic` highlighter's chunks for `semantic_text`), how it moved between A and B, and an Explain
 tree (`_explain`; a `semantic` query, which `_explain` can't rewrite, is explained by a `_search`
 limited to that id; a hybrid hit shows each part). Either side copies as curl, Python or JavaScript
-with the key from `$ROLL_SEARCH_API_KEY` (OpenSearch-flavor clusters: OpenSearch's clients and
+with the key from `$ELASTICSEARCH_API_KEY`, as the guides export it (OpenSearch-flavor clusters: OpenSearch's clients and
 `$OPENSEARCH_USERNAME`/`$OPENSEARCH_PASSWORD`).
 
 ## Audit log
@@ -1234,18 +1242,17 @@ deterministic (#396).
    (51.8 against 34.6 µs/doc on the ECS log; its profile has BP reordering at merge time at 14% of
    instructions), BP only for time-series and log indices, the request path's allocations, one
    allocator policy.
-7. **Connectors that sync** (built in #318, in its sixth round: branches keep inherited connectors paused, and rows will
-   go into `_bulk` as the JSON text Postgres sends, never parsed into a tree; `postgresql` full and incremental, `s3`, sync rules,
-   a Connectors tab; its security review found an HTML panic that stranded a sync, a host change
-   that sent the stored Postgres password to the new host, a planted sealed value, unbounded
-   Postgres reads and no client timeouts, all being fixed before it merges. Left: linking a person's own roll Postgres or bucket with a
-   read-only credential of its own, credentials from roll secrets after #134, Postgres advanced
-   rules, PDF and Office text; Elastic's connectors, Algolia's and Typesense's data sync):
-   roll serves Elasticsearch's `_connector` API but runs no syncs, so getting a database or a
-   bucket into an index is the user's own job. A runner on the cluster's owner node, scheduled
-   like ILM (an idle cluster pays nothing between syncs), with `_connector/_sync_job` rows as
-   Elasticsearch keeps them; `postgresql` (full and incremental) and `s3` first, reaching a
-   person's own roll Postgres or storage through a link instead of copied credentials.
+7. **Connectors that sync** (landed in #318, eb364e2b3, after eight reviews: a runner on the
+   cluster's owner node, scheduled like ILM so an idle cluster pays nothing between syncs, with
+   `_connector/_sync_job` rows as Elasticsearch keeps them; `postgresql` full and incremental, `s3`,
+   sync rules and a Connectors tab. A sync writes only its own index: a pipeline that moves a
+   document elsewhere fails it, and its `_bulk` takes only `index` actions naming `_id`. Credentials
+   are sealed to the cluster and refused on a node without `ROLL_SECRET_KEY`, which fields count as
+   credentials comes from roll's schema, and branches keep inherited connectors paused until
+   adopted with new credentials. Elastic's connectors, Algolia's and Typesense's data sync): left,
+   linking a person's own roll Postgres or bucket with a read-only credential of its own,
+   credentials from roll secrets after #134, Postgres advanced rules, PDF and Office text, and the
+   web crawler (item 13) on this runner.
 8. **Semantic search with no keys** (built in #563, in review: roll's float build of E5 equals
    Elasticsearch's float deployment, cosine 1.000000 on 64 of 64 cases; Elastic Cloud's `.multilingual-e5-small-elasticsearch`
    and Elastic Inference Service, Typesense's and Meilisearch's built-in embedding models,
@@ -1299,18 +1306,20 @@ deterministic (#396).
    processor): roll serves `completion` and `chat_completion` inference already, but the Playground
    compares retrieval only. Chat over hits with citations, the code for a RAG app, and a chat API
    (OpenSearch's processor shape on OpenSearch-flavor clusters). Design: [rag.md](rag.md).
-12. **The first query in a minute** (the guides landed in #604; writing them found: an API
-   key's `encoded` value works only at the cluster's own host, so clients behind a shared address
-   re-encode it as `<id>@<cluster>:<key>`; a `data` key can't post click events, so an app tracking
-   clicks needs a second key; a `semantic_text` field with no `inference_id` fails, because its
-   default (`.elser-2-elasticsearch`) answers as a cluster without ML nodes, the first error anyone
-   copying Elasticsearch's docs hits; and no screen is named Discover; Kibana's sample data,
-   Meilisearch's movies, Algolia's demo indices; Typesense's and Meilisearch's docs): the empty state
-   is a paragraph and a button (`components/search/clusters.tsx`). Sample data in one click, a guided
-   first query with a key made inline and a snippet per language; and user guides per workload (site
-   search, e-commerce: facets and typo tolerance; logs; RAG; SaaS tenants: an index per tenant or
-   filtered keys), apart from this operator- and internals-facing README.
-13. **A web crawler for site search** (design in [crawler.md](crawler.md); Elastic Open Crawler,
+12. **The first query in a minute** (the guides landed in #604; sample data and a guided first
+   query landed (#658): one click loads 1,000 generated products or 2,000 ECS log lines on the
+   Overview of a cluster with no indices or from the Indices tab, then three queries run in place
+   with Open in Console, copy as curl, JavaScript or Python reading `$ELASTICSEARCH_API_KEY` as the
+   guides do, and a link to the keys panel). Left: a key made inline in that panel (today it links
+   to Settings → API keys); a sample dataset for RAG (passages with `semantic_text` on E5); and
+   what writing the guides found: an API key's `encoded` value works only at the cluster's own
+   host, so clients behind a shared address re-encode it as `<id>@<cluster>:<key>`; a `data` key
+   can't post click events, so an app tracking clicks needs a second key; a `semantic_text` field
+   with no `inference_id` fails, because its default (`.elser-2-elasticsearch`) answers as a
+   cluster without ML nodes, the first error anyone copying Elasticsearch's docs hits; and no
+   screen is named Discover.
+13. **A web crawler for site search** (design in [crawler.md](crawler.md), ready to build now that
+   #318's runner is on main; Elastic Open Crawler,
    Algolia Crawler, DocSearch, Meilisearch's docs-scraper): connectors (#318) sync Postgres and S3;
    getting a website in is the customer's job. A native connector roll runs (`roll_web_crawler`,
    on #318's runner) taking Open Crawler's config, fields and ids, fetching through

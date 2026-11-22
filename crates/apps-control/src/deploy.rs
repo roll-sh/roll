@@ -2802,7 +2802,9 @@ impl Apps {
                 self.intercept_cas.lock().remove(&network);
                 self.intercept_pending.lock().remove(&network);
                 let (p, e2) = (svc.project.clone(), env.clone());
-                let still_closed = self.db(move |s| s.closed_in_use(&p, &e2)).await.unwrap_or(true);
+                // (Instances of a closed deployment still draining here use them too.)
+                let draining: Vec<String> = self.lives().iter().filter(|l| l.env == env && services.iter().any(|s| s.id == l.service && s.project == svc.project)).flat_map(|l| l.draining()).collect();
+                let still_closed = self.db(move |s| s.closed_in_use(&p, &e2, &draining)).await.unwrap_or(true);
                 if !still_closed {
                     self.deps.runtime.set_interception(&network, None);
                     match self.deps.secrets.end_intercept(&svc.project, &env).await {

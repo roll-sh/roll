@@ -487,6 +487,36 @@ for sk in rpc("skills/list", {}).get("result", {}).get("skills", []):
 bad = [f"{what}: {json.dumps(r.get('error'))[:200]}" for what, r in surface if "error" in r]
 print(f"surfaces: {len(surface)} prompts, completions, resources and skills read, {len(bad)} failed")
 fails += bad
+# MCP Events (poll mode, 2026-07-28): every type listed, polled from now, from its cursor, and from
+# the feed's start, through the real feed routes.
+def modern(method, params):
+    global n
+    n += 1
+    params = dict(params, _meta={"io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": {"name": "sweep", "version": "1"},
+                                 "io.modelcontextprotocol/clientCapabilities": {"extensions": {"io.modelcontextprotocol/events": {}}}})
+    h = {"authorization": f"Bearer {tok}", "content-type": "application/json", "accept": "application/json", "mcp-protocol-version": "2026-07-28", "mcp-method": method}
+    if "name" in params:
+        h["mcp-name"] = params["name"]
+    req = urllib.request.Request(f"{api}/v1/mcp", data=json.dumps({"jsonrpc": "2.0", "id": n, "method": method, "params": params}).encode(), headers=h)
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        return {"error": {"http": e.code, "body": e.read().decode(errors="replace")[:200]}}
+types = modern("events/list", {}).get("result", {}).get("events", [])
+ebad, seen_events = [], 0
+for t in types:
+    first = modern("events/poll", {"name": t["name"], "cursor": None})
+    later = modern("events/poll", {"name": t["name"], "cursor": first.get("result", {}).get("cursor")})
+    start = modern("events/poll", {"name": t["name"], "cursor": "a1:0", "maxEvents": 20})
+    for what, r in (("from now", first), ("from its cursor", later), ("from the start", start)):
+        if "error" in r or not isinstance(r.get("result", {}).get("cursor"), str):
+            ebad.append(f"events/poll {t['name']} {what}: {json.dumps(r.get('error') or r.get('result'))[:200]}")
+    seen_events += len(start.get("result", {}).get("events", []))
+print(f"events: {len(types)} types polled, {seen_events} events read from the start, {len(ebad)} failed")
+fails += ebad
+if not types:
+    fails.append("events/list listed no event types for the operator")
 if "--writes" in sys.argv:
     def fake(name, schema, prod):
         if (prod, name) in seen:
