@@ -359,6 +359,7 @@ async fn delete_repo(State(code): S, caller: Caller, Path((owner, repo)): Path<(
 #[derive(Deserialize)]
 struct SearchQuery {
     q: String,
+    kinds: Option<String>,
     limit: Option<usize>,
 }
 
@@ -369,13 +370,13 @@ async fn search_documents(State(code): S, caller: Caller, ext: axum::http::Exten
     // read before the page is cut.
     let reach = code.grant_reach.get().filter(|_| roll_auth::Grant::on(&ext).is_some()).cloned();
     let reads = |repo: &str| reach.as_ref().is_none_or(|r| r.reads(&ext, repo));
-    Ok(Json(code.search_documents(&caller, &q.q, q.limit.unwrap_or(20), &reads)?))
+    Ok(Json(code.search_documents(&caller, &q.q, q.kinds.as_deref(), q.limit.unwrap_or(20), &reads).await?))
 }
 
 /// One change (`chg_…`) or work item (`wi_…`) of the caller's own repos as a document: the
 /// `fetch` tool's route.
 async fn get_document(State(code): S, caller: Caller, Path(id): Path<String>) -> Result<Json<Value>> {
-    Ok(Json(code.document(&caller, &id)?))
+    Ok(Json(code.document(&caller, &id).await?))
 }
 
 #[derive(Deserialize)]
