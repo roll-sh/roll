@@ -67,6 +67,9 @@ pub struct BtEst {
     dirty: Vec<u32>,
     dirty_bits: Vec<u64>,
     all_dirty: bool,
+    /// Each leaf slot's place in `lows` (u32::MAX: no longer a leaf), for the changed leaves'
+    /// record; empty when the leaves' order changed since it was made (`reordered`).
+    places: Vec<u32>,
 }
 
 /// What a build hands the summary for each leaf it lays out.
@@ -140,6 +143,7 @@ impl EstBuilder {
             dirty: Vec::new(),
             dirty_bits: Vec::new(),
             all_dirty: true,
+            places: Vec::new(),
         };
         e.inner_base = e.inner_for(n);
         let pages = if n == 0 { 1 } else { 1 + n + inner } as u32;
@@ -184,6 +188,7 @@ impl BtEst {
             dirty: Vec::new(),
             dirty_bits: Vec::new(),
             all_dirty: true,
+            places: Vec::new(),
         };
         e.inner_base = e.inner_for(n);
         // (Its inner and deleted pages as the model has them: the blocks past the leaves.)
@@ -260,6 +265,7 @@ impl BtEst {
     pub fn insert(&mut self, key: u128, size: usize, dup: bool) {
         let need = size as f64 + ITEM_ID;
         if self.lows.is_empty() {
+            self.reordered();
             self.lows.push((key, 0));
             self.slots.push(self.store.len() as u32);
             self.store.push(Leaf { max: key, used: 0.0, tuples: 0.0, tids: 0.0, keys: 0.0 });
@@ -379,6 +385,7 @@ impl BtEst {
             Self::add(&mut l, key, need, new_key);
         }
         self.store[slot] = l;
+        self.reordered();
         self.lows.insert(i + 1, right_at);
         self.slots.insert(i + 1, self.store.len() as u32);
         self.touch(self.store.len());
@@ -415,6 +422,7 @@ impl BtEst {
                 (self.lows[at], self.slots[at]) = (self.lows[i], self.slots[i]);
                 at += 1;
             }
+            self.reordered();
             self.lows.truncate(at);
             self.slots.truncate(at);
             self.free += gone;
@@ -444,6 +452,11 @@ impl BtEst {
             self.dirty_bits[w] |= b;
             self.dirty.push(slot as u32);
         }
+    }
+
+    /// The leaves' order changed (`places` is made again when next needed).
+    fn reordered(&mut self) {
+        self.places.clear();
     }
 
     /// Something changed since the summary was last made durable.
@@ -482,10 +495,16 @@ impl BtEst {
             }
         } else {
             // (Each changed leaf with its low key: a new one, split off, goes in its place.)
-            let mut at = vec![u32::MAX; self.store.len()];
-            for (i, s) in self.slots.iter().enumerate() {
-                at[*s as usize] = i as u32;
+            // (The slots' places are made once for the commits between two splits, not at
+            // each: a commit changes a leaf or two of thousands.)
+            if self.places.len() != self.store.len() {
+                self.places.clear();
+                self.places.resize(self.store.len(), u32::MAX);
+                for (i, s) in self.slots.iter().enumerate() {
+                    self.places[*s as usize] = i as u32;
+                }
             }
+            let at = &self.places;
             self.dirty.sort_unstable();
             let live: Vec<(u32, u32)> = self.dirty.iter().filter_map(|&s| Some((s, *at.get(s as usize)?)).filter(|x| x.1 != u32::MAX)).collect();
             e.u32(live.len() as u32);
@@ -548,6 +567,7 @@ impl BtEst {
                     dirty: Vec::new(),
                     dirty_bits: Vec::new(),
                     all_dirty: false,
+                    places: Vec::new(),
                 }
             }
             CHANGED => {
@@ -560,6 +580,7 @@ impl BtEst {
                         e.store[slot] = l;
                     } else if slot == e.store.len() {
                         let i = e.lows.partition_point(|x| *x < lo);
+                        e.reordered();
                         e.lows.insert(i, lo);
                         e.slots.insert(i, slot as u32);
                         e.store.push(l);
@@ -620,6 +641,37 @@ mod tests {
         assert!((5300..=5700).contains(&grown), "{grown}");
         // VACUUM after a quarter of the rows went: the file keeps its size.
         assert_eq!(e.vacuum(750_000.0), grown);
+    }
+
+    /// The changed leaves' records, applied in turn to the summary as it was (a restart
+    /// reading the full record and the changes after it), give the summary as it is, splits
+    /// between and within the records included.
+    #[test]
+    fn change_records_rebuild_the_summary() {
+        let (_, mut e) = built(100_000, false, 1);
+        let mut full = Enc(Vec::new());
+        e.encode(&mut full, true);
+        let mut kept = BtEst::decode(&mut Dec(&full.0), None).expect("a full record");
+        let mut x: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut splits = 0;
+        for round in 0..400 {
+            let leaves = e.lows.len();
+            for _ in 0..(1 + round % 7) * 40 {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                e.insert(((x % 100_000 + 1) as u128) << 88, 16, true);
+            }
+            splits += e.lows.len() - leaves;
+            let mut ch = Enc(Vec::new());
+            e.encode(&mut ch, false);
+            kept = BtEst::decode(&mut Dec(&ch.0), Some(kept)).expect("a change record");
+        }
+        assert!(splits > 50, "{splits}");
+        let (mut a, mut b) = (Enc(Vec::new()), Enc(Vec::new()));
+        e.encode(&mut a, true);
+        kept.encode(&mut b, true);
+        assert!(a.0 == b.0);
     }
 
     /// Keys past the last one fill new leaves to 90%: 200,000 of them add about 548 pages
