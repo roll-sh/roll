@@ -12,7 +12,7 @@ pub const SECRET_KIND: &str = "connector configuration";
 /// What a sensitive value shows as. Writing it back keeps the stored value.
 pub const REDACTED: &str = "********";
 /// The services roll runs.
-pub const SERVICES: [&str; 2] = ["postgresql", "s3"];
+pub const SERVICES: [&str; 3] = ["postgresql", "s3", super::crawler::SERVICE];
 
 /// Whether roll runs this connector's syncs: an Elastic-managed connector of a service roll
 /// implements. Self-managed connectors are left to the tenant's connector service.
@@ -79,9 +79,24 @@ const S3: &[FieldDef] = &[
     f("page_size", "Maximum size of page", Ty::Int, || Value::from(100), false, false),
 ];
 
+/// `roll_web_crawler` (docs/search/crawler.md, "Configuration"); the rest of Open Crawler's config
+/// goes in `filtering.advanced_snippet`.
+const CRAWLER: &[FieldDef] = &[
+    FieldDef { tooltip: Some("Seed URLs, comma-separated. Each URL's origin becomes a domain of the crawl."), ..f("urls", "URLs", Ty::List, empty, true, false) },
+    FieldDef { tooltip: Some("More sitemaps, comma-separated, on the seed domains."), ..f("sitemap_urls", "Sitemap URLs", Ty::List, empty, false, false) },
+    f("sitemap_discovery", "Read the sitemaps robots.txt lists", Ty::Bool, || Value::Bool(true), false, false),
+    f("max_crawl_depth", "Maximum link depth", Ty::Int, || Value::from(10), false, false),
+    f("max_unique_url_count", "Maximum URLs per crawl", Ty::Int, || Value::from(10_000), false, false),
+    FieldDef { tooltip: Some("The one origin (https://host[:port]) the credential is sent to, never another, never over plain http."), ..f("auth_origin", "Credential origin", Ty::Str, empty, false, false) },
+    FieldDef { tooltip: Some("A whole Authorization header value, such as Bearer ..."), ..f("auth_header", "Authorization header", Ty::Str, empty, false, true) },
+    f("auth_username", "Basic auth username", Ty::Str, empty, false, false),
+    f("auth_password", "Basic auth password", Ty::Str, empty, false, true),
+];
+
 fn schema_of(service: &str) -> &'static [FieldDef] {
     match service {
         "postgresql" => POSTGRES,
+        super::crawler::SERVICE => CRAWLER,
         _ => S3,
     }
 }
@@ -237,6 +252,7 @@ pub fn seal_in_place(m: &mut Map, cluster: &str, sealer: Option<&crate::seal::Se
 fn target_fields(service: &str) -> &'static [&'static str] {
     match service {
         "postgresql" => &["host", "port", "username", "database", "ssl_enabled", "ssl_ca"],
+        super::crawler::SERVICE => &["auth_origin"],
         _ => &["endpoint", "region", "aws_access_key_id", "buckets"],
     }
 }

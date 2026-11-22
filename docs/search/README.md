@@ -1318,13 +1318,20 @@ deterministic (#396).
    with no `inference_id` fails, because its default (`.elser-2-elasticsearch`) answers as a
    cluster without ML nodes, the first error anyone copying Elasticsearch's docs hits; and no
    screen is named Discover.
-13. **A web crawler for site search** (design in [crawler.md](crawler.md), ready to build now that
-   #318's runner is on main; Elastic Open Crawler,
-   Algolia Crawler, DocSearch, Meilisearch's docs-scraper): connectors (#318) sync Postgres and S3;
-   getting a website in is the customer's job. A native connector roll runs (`roll_web_crawler`,
-   on #318's runner) taking Open Crawler's config, fields and ids, fetching through
-   `roll_net::PublicOnly` with redirects checked hop by hop, robots.txt always honoured, domain
-   verification for more than small crawls, and a purge that a site outage can't empty.
+13. **A web crawler for site search** (design in [crawler.md](crawler.md); Elastic Open Crawler,
+   Algolia Crawler, DocSearch, Meilisearch's docs-scraper). Phase 1 landed: a native connector roll
+   runs (`roll_web_crawler`, on #318's runner) taking Open Crawler's config, fields and ids;
+   robots.txt (RFC 9309, token `roll-crawler`) always honoured; sitemaps; crawl rules with Open
+   Crawler's semantics on the linear-time `regex` crate; canonical URLs, robots meta,
+   `rel=nofollow`, `data-elastic-include`/`-exclude`; fetching through `roll_net::PublicOnly` with
+   redirects checked hop by hop and the credential bound to one origin; pages parsed by
+   `html5ever` into a DOM charged to the request breaker; a purge an outage can't empty; the
+   limits with node ceilings; unverified-domain limits; and `roll search crawler import` for an
+   Open Crawler YAML file. Left: domain verification (phase 2: higher limits, the
+   `/v1/search/site-verifications` routes), the `crawl-test` route, its MCP tool and CLI, and the
+   dashboard's URL box and "crawl a site" empty state; then extraction rules (CSS selectors on the
+   arena DOM), incremental crawls with `If-Modified-Since`, and the docs preset (phase 3).
+   Charset detection beyond UTF-8 and fetching several origins at once are open too.
 14. **Semantic search on OpenSearch-flavor clusters** (AWS OpenSearch neural search):
    `neural`, `neural_sparse` and `agentic` are names only (`meta/aliases.rs`); ML Commons
    (`_plugins/_ml/connectors`, `models/_register`) and the `text_embedding`/`ml_inference` processors

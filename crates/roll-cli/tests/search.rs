@@ -20,12 +20,17 @@ impl Drop for Env {
 }
 
 async fn env() -> Env {
+    env_with(|_| {}).await
+}
+
+async fn env_with(tune: impl FnOnce(&mut SearchConfig)) -> Env {
     let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
     let home = std::env::temp_dir().join(format!("roll-cli-search-{}-{n}", std::process::id()));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mut cfg = SearchConfig::local(home.clone());
     cfg.http_port = listener.local_addr().unwrap().port();
     cfg.gc_interval = None;
+    tune(&mut cfg);
     let control = Control::new(cfg, search_store::test_objects("cli")).await.unwrap();
     tokio::spawn(search_server::serve(listener, control.node.clone(), search_server::ListenOptions::default()));
     let api_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -312,4 +317,42 @@ async fn inference_endpoints() {
     let out = e.roll_with(&["search", "inference", "delete", "sem", "nope"], None).await;
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("nope"), "{out:?}");
+}
+
+/// `roll search crawler import`: an Open Crawler YAML file becomes a `roll_web_crawler` connector
+/// (the domain's `auth` in the sealed fields, the rest in the active snippet), and every key it
+/// drops is named, never its value; two credentialed domains are refused.
+#[tokio::test]
+async fn crawler_import_reads_an_open_crawler_config() {
+    let e = env_with(|c| c.sealer = search_control::Sealer::from_secret("0123456789abcdef0123456789abcdef-cli-crawler")).await;
+    e.roll(&["search", "clusters", "create", "site"]).await;
+    let yml = e.home.join("crawler.yml");
+    std::fs::write(
+        &yml,
+        "output_sink: elasticsearch\noutput_index: docs\nmax_crawl_depth: 3\nmax_title_size: 500\nlog_level: debug\n\
+         elasticsearch:\n  host: https://es.example\n  api_key: es-key-5521\n\
+         domains:\n  - url: https://docs.example.com\n    seed_urls: [https://docs.example.com/start]\n    crawl_rules:\n      - {policy: deny, type: begins, pattern: /private}\n\
+         \x20   auth: {type: raw, header: 'Bearer crawl-token-8812'}\n    extraction_rulesets: [{url_filters: []}]\n  - url: https://blog.example.com\n",
+    )
+    .unwrap();
+    let out = e.roll(&["search", "crawler", "import", "site", yml.to_str().unwrap()]).await;
+    assert!(out.contains("connector  docs") && out.contains("index      content-docs"), "{out}");
+    let dropped = out.lines().find(|l| l.starts_with("dropped")).unwrap_or_default();
+    for k in ["output_sink", "log_level", "elasticsearch.host", "elasticsearch.api_key", "domains[0].extraction_rulesets"] {
+        assert!(dropped.contains(k), "{k}: {out}");
+    }
+    assert!(!out.contains("es-key-5521") && !out.contains("crawl-token-8812"), "{out}");
+    let c = e.roll_json(&["search", "request", "site", "GET", "/_connector/docs"]).await;
+    let c: Value = serde_json::from_str(c["body"].as_str().unwrap()).unwrap();
+    assert_eq!((c["service_type"].as_str(), c["is_native"].as_bool()), (Some("roll_web_crawler"), Some(true)));
+    let cfg = &c["configuration"];
+    assert_eq!((cfg["auth_header"]["value"].as_str(), cfg["auth_origin"]["value"].as_str()), (Some("********"), Some("https://docs.example.com")));
+    assert_eq!(cfg["urls"]["value"].as_str(), Some("https://docs.example.com/start,https://blog.example.com/"));
+    let active = &c["filtering"][0]["active"]["advanced_snippet"]["value"];
+    assert_eq!((active["domains"][0]["crawl_rules"][0]["pattern"].as_str(), active["max_title_size"].as_i64()), (Some("/private"), Some(500)), "{c}");
+    assert!(active["domains"][0].get("auth").is_none());
+
+    std::fs::write(&yml, "domains:\n  - url: https://a.example\n    auth: {type: basic, username: u, password: p}\n  - url: https://b.example\n    auth: {type: basic, username: u, password: p}\n").unwrap();
+    let out = e.roll_with(&["search", "crawler", "import", "site", yml.to_str().unwrap()], None).await;
+    assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("both have credentials"), "{out:?}");
 }

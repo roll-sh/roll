@@ -15,6 +15,7 @@ mod queues;
 mod members;
 mod preview;
 mod search;
+mod search_crawler;
 mod storage;
 mod redis;
 mod seal;

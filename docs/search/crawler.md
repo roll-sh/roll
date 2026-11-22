@@ -1,9 +1,11 @@
 # A web crawler for site search: design
 
-`## Next` item 13 in [README.md](README.md). Status: design, nothing built. It depends on the
-connector runner in #318 (open), which it reuses for jobs, schedules, slots, cancelling, counters
-and sealed credentials. This document refers to that runner's design, the "Connectors" section of
-architecture.md on `feature/search-connectors`.
+`## Next` item 13 in [README.md](README.md). Status: phase 1 landed (the crawl, robots.txt,
+sitemaps, crawl rules, default fields, the purge, limits and politeness, unverified limits, and
+`roll search crawler import`; `search-es` `xpack/entsearch/sync/crawler/`). Phases 2 and 3 are
+to come. It runs on the connector runner of #318, which it reuses for jobs, schedules, slots,
+cancelling, counters and sealed credentials (architecture.md, "Connectors" and "Web crawler").
+Where phase 1 differs from Open Crawler is listed in compatibility.md ("The web crawler").
 
 ## Why
 
@@ -275,12 +277,19 @@ an operator can raise, and the tenant's value must be at or under the ceiling.
 | `max_crawl_depth` | 10 | 50 |
 | `max_duration` | 6 h for the whole crawl (Open Crawler: 24 h) | `roll.connectors.max_sync_duration` |
 | `max_response_size` | 10 MiB | 10 MiB |
-| `max_url_length`, `max_url_segments`, `max_url_params` | 2048, 16, 10 | the same |
+| `max_url_length`, `max_url_segments`, `max_url_params` | 2048, 16, 32 | the same |
 | `max_redirects` | 10 | 10 |
 | `max_extracted_links_count` | 1,000 per page | 1,000 |
 | `url_queue_size_limit` | 10,000 | 100,000 |
-| `max_title_size`, `max_body_size`, `max_keywords_size`, `max_description_size` | Open Crawler's (1000, 5 MiB, 512, 512) | the same |
-| `max_indexed_links_count`, `max_headings_count` | 10, 10 | 100, 100 |
+| `max_title_size`, `max_body_size`, `max_keywords_size`, `max_description_size`, `max_elastic_tag_size` | Open Crawler's (1 KiB, 5 MiB, 512, 1 KiB, 512) | the same |
+| `max_indexed_links_count`, `max_headings_count` | Open Crawler's (25, 25) | 100, 100 |
+
+An operator moves a ceiling with the node setting `roll.crawler.limits.<key>`; `max_duration`'s is
+`roll.connectors.max_sync_duration`. The unverified limits are node settings too
+(`roll.crawler.unverified.max_unique_url_count`, `.min_request_interval` and
+`.max_crawls_per_day`), and `roll.crawler.min_request_interval` is 500 ms. A crawl that reaches
+`max_unique_url_count` or `max_duration` ends `completed`, with `metadata.limit_reached` naming the
+limit.
 
 The frontier holds URLs as text and is capped by `url_queue_size_limit`. A link that arrives when
 the queue is full is dropped and counted in `metadata.dropped_link_count`. The visited set holds

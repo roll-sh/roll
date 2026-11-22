@@ -10,6 +10,7 @@
 //! see, and records the outcome on the job and the connector.
 
 pub mod config;
+pub mod crawler;
 pub mod extract;
 pub mod json_scan;
 pub mod postgres;
@@ -214,7 +215,7 @@ pub async fn run_due(cluster: &Cluster, now: i64) {
         .filter(|(id, c)| syncs_here(cluster, &st, id, c) && draft_edited(c))
         .map(|(id, c)| {
             let draft = c.get("filtering").and_then(Value::as_array).and_then(|f| f.first()).and_then(|f| f.get("draft")).cloned().unwrap_or(Value::Null);
-            (id.clone(), rules::validate(str_of(c, "service_type"), &draft, &config::listed(c, "buckets")))
+            (id.clone(), rules::validate(str_of(c, "service_type"), &draft, &config::listed(c, "buckets"), &crawler::ceilings(cluster)))
         })
         .collect();
     // Schedules that came due (or are seen for the first time, which starts their count).
@@ -639,7 +640,8 @@ async fn sync(cluster: &Arc<Cluster>, job_id: &str, cid: &str, principal: Option
     let index = connector.get("index_name").and_then(Value::as_str).filter(|i| !i.is_empty()).ok_or_else(|| Stop::Failed("the connector has no [index_name]".into()))?.to_string();
     let filtering = job.pointer(&["connector", "filtering"]).cloned().unwrap_or(Value::Null);
     let rules = rules::Rules::compile(&filtering).map_err(|p| Stop::Failed(format!("the active sync rules don't parse: {}", p.into_iter().map(|p| p.message).collect::<Vec<_>>().join("; "))))?;
-    ensure_index(cluster, &index).await?;
+    let crawler = service == crawler::SERVICE;
+    ensure_index(cluster, &index, crawler.then(crawler::mappings)).await?;
     let pipeline = match connector.pointer(&["pipeline", "name"]).and_then(Value::as_str) {
         Some(p) if internal::call(cluster, "GET", &format!("/_ingest/pipeline/{}", enc(p)), None).await.is_ok() => Some(p.to_string()),
         _ => None,
@@ -673,13 +675,15 @@ async fn sync(cluster: &Arc<Cluster>, job_id: &str, cid: &str, principal: Option
     let advanced = rules::advanced(&filtering).cloned();
     let result = match service.as_str() {
         "postgresql" => postgres::sync(&values, &mut sink, full, &cursor, allow_private).await,
+        crawler::SERVICE => crawler::sync(cid, &values, &mut sink, full, &cursor, advanced.as_ref(), allow_private).await,
         _ => s3::sync(&values, &mut sink, full, &cursor, advanced.as_ref(), allow_private).await,
     };
     let cursor = result.map_err(|s| match s {
         Stop::Failed(e) => Stop::Failed(values.scrub(&e)),
         other => other,
     })?;
-    if full {
+    // A crawl purges by its own rules (`crawler::Crawl::purge`), never everything unseen.
+    if full && !crawler {
         sink.delete_unseen().await?;
     }
     Ok(cursor)
@@ -690,11 +694,13 @@ fn enc(name: &str) -> String {
     crate::s3::uri_encode(name, true)
 }
 
-async fn ensure_index(cluster: &Cluster, index: &str) -> Result<(), Stop> {
+/// Creates the connector's index when it doesn't exist (with `create`'s body), never changing an
+/// existing one's mappings.
+async fn ensure_index(cluster: &Cluster, index: &str, create: Option<Value>) -> Result<(), Stop> {
     let path = format!("/{}", enc(index));
     match internal::call(cluster, "GET", &path, None).await {
         Ok(_) => Ok(()),
-        Err(e) if e.kind == "index_not_found_exception" => match internal::call(cluster, "PUT", &path, None).await {
+        Err(e) if e.kind == "index_not_found_exception" => match internal::call(cluster, "PUT", &path, create.as_ref()).await {
             Ok(_) => Ok(()),
             Err(e) if e.kind == "resource_already_exists_exception" => Ok(()),
             Err(e) => Err(Stop::Failed(format!("creating the index [{index}] failed: {}", e.reason()))),
