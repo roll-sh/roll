@@ -1386,7 +1386,7 @@ impl Engine {
         if !r.trusted || self.apps.catalog(&r.project_id).await.ok().flatten().is_some_and(|c| !c.is_empty()) {
             return Ok(());
         }
-        let olds: BTreeSet<String> = self.store.services(&r.id)?.into_iter().filter(|s| s.repo == r.repo).filter_map(|s| s.deployed).filter(|d| !d.is_empty() && d != r.build()).collect();
+        let olds: std::collections::BTreeSet<String> = self.store.services(&r.id)?.into_iter().filter(|s| s.repo == r.repo).filter_map(|s| s.deployed).filter(|d| !d.is_empty() && d != r.build()).collect();
         if olds.is_empty() {
             return Ok(());
         }
