@@ -5112,7 +5112,12 @@ default, checks, sandboxes and untrusted previews never reach it, and deleting i
 `?confirm=production`. With `approvals: 0`, whoever may write there (an owner, an admin, a
 developer who names it, a token) still writes directly, so a project with one owner never waits on
 a request for its own changes; `PUT …/policy {"protected": true, "approvals": 1}` turns on the
-two-person rule. `approvals` is 0–10; `{"protected": true}` without it means 1. A project made
+two-person rule. `approvals` is 0–10; `{"protected": true}` without it means 1. Before #688 a
+protected environment with `approvals: 0` still took change requests (0 counted as 1), so an
+upgraded server's store migrates each such environment to `approvals: 1` once, when it opens and
+before it serves anything (`secrets-protected-approvals-zero-kept`; one `environment.policy` row
+per environment in its project's audit log, "approvals 0 → 1: kept requests as before (#688)",
+or a logged warning on a sealed start): nothing loosens without someone deciding it. A project made
 before this keeps whatever it had (nothing changes it silently): Health flags an unprotected
 `production` (`production_unprotected`, naming what reaches it), and the dashboard's "Protect
 production" there sets `{"protected": true, "approvals": 0}`. Whether or not it's protected, no

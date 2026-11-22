@@ -6285,6 +6285,43 @@ async fn an_unprotected_production_is_a_health_finding_until_protected() {
     assert!(s.is_success(), "no approvals asked: a direct write {e}");
 }
 
+/// A database from before #688: an admin had protected staging with `approvals: 0`, which took
+/// change requests then (0 counted as 1). Opening the store keeps that, once: 0 becomes 1, in the
+/// audit log, and a write there is still a change request. Production as old projects had it
+/// (unprotected) isn't touched.
+#[tokio::test]
+async fn an_upgrade_keeps_requests_where_approvals_were_zero() {
+    let api = Api::new().await;
+    api.db
+        .write(|c| {
+            c.execute("DELETE FROM code_migrations WHERE name = 'secrets-protected-approvals-zero-kept'", ())?;
+            c.execute("UPDATE environments SET protected = 1, approvals = 0 WHERE project_id = ? AND slug = 'staging'", [api.project.as_str()])?;
+            c.execute("UPDATE environments SET protected = 0, approvals = 0 WHERE project_id = ? AND slug = 'production'", [api.project.as_str()])?;
+            Ok::<_, code_sql::Error>(())
+        })
+        .unwrap();
+    let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: None, sts: None, outside: None, directory: None, github: None, clouds: None, workloads: None, gateways: None };
+    let upgraded = Arc::new(Secrets::new(api.db.clone(), api.ws.clone(), opts).unwrap());
+    let send = |method: Method, rest: &str, body: Option<Value>| {
+        let req = Request::builder().method(method).uri(format!("/v1/secrets/projects/{}{rest}", api.project)).header("content-type", "application/json").body(Body::from(body.map(|b| b.to_string()).unwrap_or_default())).unwrap();
+        let router = roll_secrets::router(upgraded.clone());
+        async move {
+            let res = router.oneshot(req).await.unwrap();
+            let status = res.status();
+            let bytes = res.into_body().collect().await.unwrap().to_bytes();
+            (status, serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null))
+        }
+    };
+    let (_, staging) = send(Method::GET, "/environments/staging", None).await;
+    assert_eq!((staging["protected"].as_bool(), staging["approvals"].as_i64()), (Some(true), Some(1)), "{staging}");
+    let (s, e) = send(Method::PUT, "/environments/staging/secrets/KEY", Some(json!({ "value": "x" }))).await;
+    assert_eq!((s, e["code"].as_str()), (StatusCode::CONFLICT, Some("approval_required")), "{e}");
+    let (_, production) = send(Method::GET, "/environments/production", None).await;
+    assert_eq!((production["protected"].as_bool(), production["approvals"].as_i64()), (Some(false), Some(0)), "{production}");
+    let audit = upgraded.audit(&api.project, roll_secrets::AuditFilter::default(), &roll_secrets::Caller::operator()).unwrap();
+    assert!(audit.iter().any(|a| a.environment.as_deref() == Some("staging") && a.summary == "approvals 0 → 1: kept requests as before (#688)"), "{audit:?}");
+}
+
 /// docs/members.md, "Remove, and leave": once a member is removed, their own token stops reaching
 /// the project, a sync they made stops pushing, and their identity's logins are refused.
 #[tokio::test]
