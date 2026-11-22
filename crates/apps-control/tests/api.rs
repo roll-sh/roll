@@ -4460,6 +4460,10 @@ async fn a_deployment_without_traffic_answers_on_its_own_url_until_put_live() {
     let (st, v) = visit(&w, &own(&d2["id"]), "/").await;
     assert_eq!((st, v["deployment"].clone()), (StatusCode::OK, d2["id"].clone()), "its own URL runs it");
     assert_eq!(visit(&w, &own(&d1["id"]), "/").await.1["deployment"], d1["id"], "the live one has its own URL too");
+    // Each deployment says its own URL (roll previews' per-commit links): the host just visited.
+    assert_eq!(host(&d2["url"]), own(&d2["id"]), "{d2}");
+    let listed = call(&w.api, "GET", &format!("{base}/deploys"), None).await.1;
+    assert!(listed.as_array().unwrap().iter().all(|d| host(&d["url"]) == own(&d["id"])), "{listed}");
     assert_eq!(visit(&w, &format!("aaaaaaaaaaaa--{h}"), "/").await.0, StatusCode::NOT_FOUND);
     // No environment's hostname can look like a deployment's: slugs never hold `--`.
     let (other, _) = image_service(&w, "abcdefghijkl--victim", json!({"port": 80})).await;

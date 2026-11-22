@@ -948,6 +948,7 @@ fn deploy_row(r: &code_sql::Row<'_>) -> code_sql::Result<Deployment> {
         fix,
         steps: Vec::new(),
         approved_by: Vec::new(),
+        url: None,
     })
 }
 
