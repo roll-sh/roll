@@ -20,9 +20,26 @@ pub enum Search {
         /// Request body: JSON, NDJSON for `_bulk`, `@file` to read a file, or `-` for stdin.
         body: Option<String>,
     },
-    /// One index: show, create, delete, mappings, search, bulk, delete by query.
-    #[command(subcommand)]
+    /// One index: show, create, delete, mappings, settings, search, bulk, delete by query.
+    #[command(subcommand, alias = "indices")]
     Index(Index),
+    /// Synonyms sets: an index's `synonym_graph` filter names one (`synonyms_set`).
+    #[command(subcommand)]
+    Synonyms(Synonyms),
+    /// Query rulesets: pin or exclude documents when a query matches (`rule` queries).
+    #[command(subcommand, alias = "query-rules")]
+    Rules(Rules),
+    /// Why a document matches a query (or doesn't), and how its score is made.
+    Explain {
+        cluster: String,
+        index: String,
+        id: String,
+        /// `{"query": …}`, inline, `@file` or `-`.
+        body: Option<String>,
+        /// Lucene query string instead of a body (`title:shoes`).
+        #[arg(long)]
+        q: Option<String>,
+    },
     /// One document of an index: get, put, add, delete.
     #[command(subcommand, alias = "doc")]
     Docs(Docs),
@@ -122,9 +139,18 @@ pub enum Keys {
         cluster: String,
         name: String,
         /// `data`: indices, templates, pipelines and lifecycle policies, no security (users,
-        /// roles, keys); `admin`: everything the cluster's own user may do.
+        /// roles, keys); `read`: search and read the indices only; `append`: add documents to
+        /// the named data streams only (a log drain; it can't read them); `admin`: everything
+        /// the cluster's own user may do.
         #[arg(long, default_value = "data")]
         access: String,
+        /// Shorthand for `--access read`.
+        #[arg(long, conflicts_with = "access")]
+        read_only: bool,
+        /// Index names or patterns the key reaches (comma-separated or repeated; default every
+        /// index). Not with `admin`.
+        #[arg(long, value_delimiter = ',')]
+        indices: Vec<String>,
         /// Stop working after this long (90s, 15m, 1h, 30d).
         #[arg(long)]
         expires_in: Option<String>,
@@ -167,6 +193,92 @@ pub enum Index {
     },
     /// Delete the documents a query matches (`{"query": …}`).
     DeleteByQuery { cluster: String, index: String, body: String },
+    /// Read or change the index's settings.
+    #[command(subcommand)]
+    Settings(IndexSettings),
+}
+
+#[derive(Subcommand)]
+pub enum IndexSettings {
+    /// The index's settings (`--defaults`: with every default).
+    Get {
+        cluster: String,
+        index: String,
+        #[arg(long)]
+        defaults: bool,
+    },
+    /// Change settings: `key=value` pairs (`index.roll.suggestions.enabled=true`; a value is
+    /// JSON when it parses, `null` resets) or one JSON body (inline, `@file` or `-`).
+    Set {
+        cluster: String,
+        index: String,
+        #[arg(required = true)]
+        settings: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum Synonyms {
+    /// The cluster's synonyms sets and how many rules each holds.
+    #[command(alias = "ls")]
+    List { cluster: String },
+    /// A set's rules.
+    Get { cluster: String, set: String },
+    /// Create or replace a set from a file (`@file` or `-` for stdin also work): Solr-format
+    /// lines (`couch, sofa` or `ny => new york`; `#` comments), or Elasticsearch's JSON (an
+    /// array of rules or `{"synonyms_set": […]}`). Indices using the set reload it.
+    #[command(alias = "import")]
+    Put { cluster: String, set: String, file: String },
+    /// Delete a set (refused while an index uses it).
+    #[command(alias = "rm")]
+    Delete { cluster: String, set: String },
+}
+
+#[derive(Subcommand)]
+pub enum Rules {
+    /// The cluster's query rulesets.
+    #[command(alias = "ls")]
+    List { cluster: String },
+    /// A ruleset's rules.
+    Get { cluster: String, ruleset: String },
+    /// Create or replace a ruleset (`{"rules": […]}` or an array of rules; inline, `@file` or `-`).
+    Put { cluster: String, ruleset: String, body: String },
+    /// Delete a ruleset.
+    #[command(alias = "rm")]
+    Delete { cluster: String, ruleset: String },
+    /// Which of the ruleset's rules match these criteria (`key=value`, e.g. `query_string=shoes`).
+    Test {
+        cluster: String,
+        ruleset: String,
+        #[arg(required = true)]
+        criteria: Vec<String>,
+    },
+}
+
+/// A synonyms file as `PUT _synonyms/{set}`'s body: Elasticsearch's JSON as it is (an array is
+/// the rules), else Solr-format lines, one rule each.
+pub fn synonyms_body(text: &str) -> anyhow::Result<String> {
+    let t = text.trim_start();
+    if t.starts_with('{') || t.starts_with('[') {
+        let v: Value = serde_json::from_str(t).context("the synonyms file looks like JSON but doesn't parse")?;
+        let v = if v.is_array() { json!({ "synonyms_set": v }) } else { v };
+        return Ok(v.to_string());
+    }
+    let rules: Vec<Value> = text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).map(|l| json!({ "synonyms": l })).collect();
+    if rules.is_empty() {
+        bail!("the synonyms file has no rules");
+    }
+    Ok(json!({ "synonyms_set": rules }).to_string())
+}
+
+/// `key=value` pairs as a JSON object (a value is JSON when it parses, else a string).
+pub fn pairs(items: &[String]) -> anyhow::Result<Value> {
+    let mut m = serde_json::Map::new();
+    for i in items {
+        let (k, v) = i.split_once('=').with_context(|| format!("{i:?} isn't key=value"))?;
+        m.insert(k.trim().to_string(), serde_json::from_str(v).unwrap_or_else(|_| Value::String(v.to_string())));
+    }
+    Ok(Value::Object(m))
 }
 
 #[derive(Subcommand)]
@@ -399,17 +511,22 @@ fn print_credentials(c: &Value) {
 /// The query string and body of a per-index call (a body is its content type and text).
 type Extra<'a> = (Vec<(&'a str, String)>, Option<(&'a str, String)>);
 
-/// One call to a per-index route (`/v1/search/clusters/{id}/indices/{index}…`): the body is sent
-/// as text, byte for byte (re-encoding parsed JSON would reorder `_source` keys), and
-/// Elasticsearch's answer is printed as it came (pretty unless `--json`).
-async fn index_call(api: &Api, as_json: bool, method: reqwest::Method, cluster: &str, index: &str, rest: &str, (query, body): Extra<'_>) -> anyhow::Result<()> {
+/// One call to a per-index route (`/v1/search/clusters/{id}/indices/{index}…`).
+async fn index_call(api: &Api, as_json: bool, method: reqwest::Method, cluster: &str, index: &str, rest: &str, extra: Extra<'_>) -> anyhow::Result<()> {
+    cluster_call(api, as_json, method, cluster, &format!("/indices/{}{rest}", urlencoding::encode(index)), extra).await
+}
+
+/// One call to a route of Elasticsearch's under `/v1/search/clusters/{id}` (`rest`, encoded):
+/// the body is sent as text, byte for byte (re-encoding parsed JSON would reorder `_source`
+/// keys), and Elasticsearch's answer is printed as it came (pretty unless `--json`).
+async fn cluster_call(api: &Api, as_json: bool, method: reqwest::Method, cluster: &str, rest: &str, (query, body): Extra<'_>) -> anyhow::Result<()> {
     let c = find(api, cluster).await?;
     let mut q: Vec<String> = query.into_iter().map(|(k, v)| format!("{k}={}", urlencoding::encode(&v))).collect();
     if !as_json {
         q.push("pretty".into());
     }
     let q = if q.is_empty() { String::new() } else { format!("?{}", q.join("&")) };
-    let path = format!("/v1/search/clusters/{}/indices/{}{rest}{q}", urlencoding::encode(&s(&c["id"])), urlencoding::encode(index));
+    let path = format!("/v1/search/clusters/{}{rest}{q}", urlencoding::encode(&s(&c["id"])));
     let mut req = api.http.request(method, format!("{}{path}", api.base));
     if let Some(k) = &api.key {
         req = req.bearer_auth(k);
@@ -473,6 +590,52 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
                     index_call(api, as_json, Method::POST, &cluster, &index, "/bulk", (refresh(r), Some(("application/x-ndjson", read_body(&body)?)))).await
                 }
                 Index::DeleteByQuery { cluster, index, body } => index_call(api, as_json, Method::POST, &cluster, &index, "/delete_by_query", (vec![], Some(json_body(body)?))).await,
+                Index::Settings(IndexSettings::Get { cluster, index, defaults }) => {
+                    let query = if defaults { vec![("include_defaults", "true".to_string())] } else { vec![] };
+                    index_call(api, as_json, Method::GET, &cluster, &index, "/settings", (query, None)).await
+                }
+                Index::Settings(IndexSettings::Set { cluster, index, settings }) => {
+                    let body = match settings.as_slice() {
+                        [one] if !one.contains('=') || one.trim_start().starts_with('{') => read_body(one)?,
+                        _ => pairs(&settings)?.to_string(),
+                    };
+                    index_call(api, as_json, Method::PUT, &cluster, &index, "/settings", (vec![], Some((JSON, body)))).await
+                }
+            };
+        }
+        Search::Explain { cluster, index, id, body, q } => {
+            let query = q.map(|q| vec![("q", q)]).unwrap_or_default();
+            let rest = format!("/explain/{}", urlencoding::encode(&id));
+            return index_call(api, as_json, Method::POST, &cluster, &index, &rest, (query, body.map(json_body).transpose()?)).await;
+        }
+        Search::Synonyms(cmd) => {
+            let set = |id: &str| format!("/synonyms/{}", urlencoding::encode(id));
+            return match cmd {
+                Synonyms::List { cluster } => cluster_call(api, as_json, Method::GET, &cluster, "/synonyms", (vec![], None)).await,
+                Synonyms::Get { cluster, set: id } => cluster_call(api, as_json, Method::GET, &cluster, &set(&id), (vec![], None)).await,
+                Synonyms::Put { cluster, set: id, file } => {
+                    let text = if file == "-" || file.starts_with('@') { read_body(&file)? } else { std::fs::read_to_string(&file).with_context(|| format!("can't read {file}"))? };
+                    cluster_call(api, as_json, Method::PUT, &cluster, &set(&id), (vec![], Some((JSON, synonyms_body(&text)?)))).await
+                }
+                Synonyms::Delete { cluster, set: id } => cluster_call(api, as_json, Method::DELETE, &cluster, &set(&id), (vec![], None)).await,
+            };
+        }
+        Search::Rules(cmd) => {
+            let rs = |id: &str| format!("/query_rules/{}", urlencoding::encode(id));
+            return match cmd {
+                Rules::List { cluster } => cluster_call(api, as_json, Method::GET, &cluster, "/query_rules", (vec![], None)).await,
+                Rules::Get { cluster, ruleset } => cluster_call(api, as_json, Method::GET, &cluster, &rs(&ruleset), (vec![], None)).await,
+                Rules::Put { cluster, ruleset, body } => {
+                    let text = read_body(&body)?;
+                    let v: Value = serde_json::from_str(&text).context("the ruleset isn't JSON")?;
+                    let text = if v.is_array() { json!({ "rules": v }).to_string() } else { text };
+                    cluster_call(api, as_json, Method::PUT, &cluster, &rs(&ruleset), (vec![], Some((JSON, text)))).await
+                }
+                Rules::Delete { cluster, ruleset } => cluster_call(api, as_json, Method::DELETE, &cluster, &rs(&ruleset), (vec![], None)).await,
+                Rules::Test { cluster, ruleset, criteria } => {
+                    let body = json!({ "match_criteria": pairs(&criteria)? }).to_string();
+                    cluster_call(api, as_json, Method::POST, &cluster, &format!("{}/test", rs(&ruleset)), (vec![], Some((JSON, body)))).await
+                }
             };
         }
         Search::Docs(cmd) => {
@@ -625,7 +788,13 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
                     }
                     for k in &keys {
                         let roles: Vec<&str> = k["role_descriptors"].as_object().map(|m| m.keys().map(String::as_str).collect()).unwrap_or_default();
-                        let access = if roles.contains(&"roll_link") { "data" } else if roles.is_empty() { "admin" } else { "limited" };
+                        let access = match roles.as_slice() {
+                            [] => "admin",
+                            ["roll_link"] => "data",
+                            ["roll_read"] => "read",
+                            ["roll_append"] => "append",
+                            _ => "limited",
+                        };
                         let expires = k["expiration"].as_i64().map_or("never expires".to_string(), |ms| format!("expires {}", key_time(ms)));
                         println!("{:<22}  {:<6}  created {}  {expires}  {}", s(&k["id"]), access, key_time(k["creation"].as_i64().unwrap_or(0)), s(&k["name"]));
                     }
@@ -633,13 +802,22 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
                 }
                 Value::Array(keys)
             }
-            Keys::Create { cluster, name, access, expires_in } => {
+            Keys::Create { cluster, name, access, read_only, indices, expires_in } => {
                 let c = find(api, &cluster).await?;
                 let expires = expires_in.as_deref().map(crate::storage::duration).transpose()?;
-                let v = api.post(&format!("/v1/search/clusters/{}/keys", s(&c["id"])), json!({ "name": name, "access": access, "expires_in_s": expires })).await?;
+                let access = if read_only { "read".to_string() } else { access };
+                let mut body = json!({ "name": name, "access": access, "expires_in_s": expires });
+                if !indices.is_empty() {
+                    body["indices"] = json!(indices);
+                }
+                let v = api.post(&format!("/v1/search/clusters/{}/keys", s(&c["id"])), body).await?;
+                let access = match v["indices"].as_array() {
+                    Some(i) => format!("{access} access to {}", i.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(",")),
+                    None => format!("{access} access"),
+                };
                 if !as_json && v.get("api_key").is_none() {
                     // An OpenSearch-flavor cluster: the key is an internal user.
-                    println!("key {} ({}) of {}, {access} access", s(&v["id"]), s(&v["name"]), s(&c["name"]));
+                    println!("key {} ({}) of {}, {access}", s(&v["id"]), s(&v["name"]), s(&c["name"]));
                     println!("username  {}", s(&v["username"]));
                     println!("password  {}   (shown once)", s(&v["password"]));
                     if let Some(at) = v["expires_at"].as_i64() {
@@ -650,7 +828,7 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
                     return Ok(());
                 }
                 if !as_json {
-                    println!("key {} ({}) of {}, {access} access", s(&v["id"]), s(&v["name"]), s(&c["name"]));
+                    println!("key {} ({}) of {}, {access}", s(&v["id"]), s(&v["name"]), s(&c["name"]));
                     println!("api_key   {}   (shown once)", s(&v["api_key"]));
                     if let Some(at) = v["expires_at"].as_i64() {
                         println!("expires   {}", key_time(at * 1000));
@@ -907,6 +1085,17 @@ mod tests {
     }
 
     #[test]
+    fn synonyms_files() {
+        let solr = "# furniture\ncouch, sofa\n\nny => new york\n";
+        let v: Value = serde_json::from_str(&synonyms_body(solr).unwrap()).unwrap();
+        assert_eq!(v, json!({"synonyms_set": [{"synonyms": "couch, sofa"}, {"synonyms": "ny => new york"}]}));
+        let v: Value = serde_json::from_str(&synonyms_body(r#"[{"id": "a", "synonyms": "x, y"}]"#).unwrap()).unwrap();
+        assert_eq!(v, json!({"synonyms_set": [{"id": "a", "synonyms": "x, y"}]}));
+        assert!(synonyms_body("# nothing\n").is_err());
+        assert_eq!(pairs(&["a=true".into(), "b=x".into(), "c=null".into()]).unwrap(), json!({"a": true, "b": "x", "c": null}));
+    }
+
+    #[test]
     fn urls() {
         assert_eq!(url_with_password("http://127.0.0.1:59200", "app", "p@ss"), "http://app:p%40ss@127.0.0.1:59200");
         assert_eq!(url_with_password("https://web.search.example.com", "web", "x"), "https://web:x@web.search.example.com");
@@ -926,6 +1115,10 @@ mod tests {
         assert!(matches!(t.s, Search::Request { ref method, ref body, .. } if method == "GET" && body.is_none()));
         let t = T::try_parse_from(["t", "request", "app", "POST", "/_bulk", "@bulk.ndjson"]).unwrap();
         assert!(matches!(t.s, Search::Request { body: Some(ref b), .. } if b == "@bulk.ndjson"));
+        let t = T::try_parse_from(["t", "indices", "settings", "set", "app", "books", "index.roll.suggestions.enabled=true"]).unwrap();
+        assert!(matches!(t.s, Search::Index(Index::Settings(IndexSettings::Set { .. }))));
+        let t = T::try_parse_from(["t", "keys", "create", "app", "web", "--read-only", "--indices", "products,docs-*"]).unwrap();
+        assert!(matches!(t.s, Search::Keys(Keys::Create { read_only: true, ref indices, .. }) if indices.len() == 2));
         let t = T::try_parse_from(["t", "keys", "create", "app", "worker"]).unwrap();
         assert!(matches!(t.s, Search::Keys(Keys::Create { ref access, .. }) if access == "data"), "keys default to data access");
         for sub in ["create", "list", "show", "delete", "restore", "branch", "password", "unload", "url", "indices", "usage"] {

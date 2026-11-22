@@ -78,8 +78,23 @@ roll search index bulk app books @books.ndjson --refresh
 roll search index search app books --q title:dune
 roll search docs get app books 1 | delete app books 1
 roll search keys create app worker --expires-in 30d   # a data-only API key, shown once (--access admin for all)
+roll search keys create app web --read-only --indices books   # a frontend's key: searches books, writes nothing
+roll search keys create app drain --access append --indices logs-app   # a log drain: adds to the data stream, can't read it
 roll search keys list app | revoke app <id>
 roll search index show app books | mapping … | delete-by-query … | delete app books
+```
+
+Relevance tuning (synonyms, query rules, settings, explanations):
+
+```sh
+roll search synonyms put app furniture synonyms.txt        # Solr lines (couch, sofa / ny => new york) or Elasticsearch's JSON
+roll search synonyms list app | get app furniture | delete app furniture
+roll search rules put app promos @rules.json               # {"rules": […]}: pin or exclude documents for a query
+roll search rules test app promos query_string=shoes       # which rules match
+roll search rules list app | get app promos | delete app promos
+roll search indices settings set app books index.roll.analytics.enabled=true index.roll.suggestions.enabled=true
+roll search indices settings get app books [--defaults]
+roll search explain app books 1 --q title:dune             # why a document matches, and its score
 ```
 
 Semantic search (or the dashboard's Inference tab):
@@ -356,7 +371,7 @@ origins (browser search), once they're on main.
 | GET | `/v1/search/clusters/{id}/metrics?range=1h\|24h\|14d` | request metrics (architecture.md, "Observability"): `{range, step_s, from, to, points, totals}`; each point (`at`, the start of its step: a minute for `1h`, 15 minutes for `24h`, 2 hours for `14d`; only steps with requests) and `totals` hold `all`, `search`, `index` and `other`, each `{requests, rate, 2xx, 4xx, 5xx, rejected, p50_ms, p95_ms, p99_ms}` (`rate` per second; `rejected`: 429s; percentiles `null` when nothing ran). Includes what the cluster's node recorded since the last metering pass |
 | GET | `/v1/search/clusters/{id}/slowlog` | the search and indexing slow logs, newest first, at most 500: `{entries, max_entries}`, each entry Elasticsearch's JSON slow log line (`@timestamp`, `log.level`, `log.logger`, `elasticsearch.index.name`, `elasticsearch.shard.id`, `elasticsearch.slowlog.{message,took,took_millis,source,total_hits,stats,search_type,total_shards,id,routing}`) |
 | GET | `/v1/search/clusters/{id}/audit?from=&to=&event=&size=` | the cluster's security audit log (below), newest first: `{flavor, retention_days, entries: [{at_ms, event, entry}], more}`. `from` (inclusive) and `to` (exclusive) are Unix milliseconds; `event` takes names or categories, comma-separated (an Elasticsearch `event.action` such as `put_user` too); `size` up to 1,000 (100). Never wakes the cluster. A read in roll's permissions, not a reveal: entries hold no secret |
-| POST | `/v1/search/clusters/{id}/keys` | a new API key of the cluster `{name, expires_in_s?, access?}` (`access`: `admin`, the default, or `data`: a link's role, data, templates, pipelines and lifecycle policies without security) → `{id, name, access, api_key, url, expires_at?}` (`access`: the access the key was made with): `api_key` is `base64(<key id>@<cluster>:<key>)` for `Authorization: ApiKey …`, in this answer only (roll secrets' managed links use it instead of sharing the password); on an OpenSearch-flavor cluster (whose clients sign in with a user) the key is an internal user of its own: `{id, name, access, username, password, url, expires_at?}` without `api_key`, `username` being `<user>@<cluster>`, refused once `expires_in_s` passes |
+| POST | `/v1/search/clusters/{id}/keys` | a new API key of the cluster `{name, expires_in_s?, access?, indices?}` (`access`: `admin`, the default, everything the cluster's own user may do; `data`: a link's role, all of the indices' data plus templates, pipelines and lifecycle policies, without security; `read`: `read` and `view_index_metadata` on the indices, no cluster privilege; `append`: `create_doc` and `auto_configure` on exactly the named indices, no cluster privilege, so a log drain adds to its data streams and reads nothing. `indices`: the index names or patterns it reaches, default every index (`["*"]`); not with `admin`; no remote (`alias:…`), hidden or system (`.…`) names; `append` takes names only. An OpenSearch-flavor cluster has no `append`, its index action also overwrites, and its `read` role holds `cluster_composite_ops_ro`, which OpenSearch needs for `_msearch`, `_mget` and scrolls) → `{id, name, access, indices?, api_key, url, expires_at?}` (`access` and `indices`: what the key was made with): `api_key` is `base64(<key id>@<cluster>:<key>)` for `Authorization: ApiKey …`, in this answer only (roll secrets' managed links use it instead of sharing the password); on an OpenSearch-flavor cluster (whose clients sign in with a user) the key is an internal user of its own: `{id, name, access, username, password, url, expires_at?}` without `api_key`, `username` being `<user>@<cluster>`, refused once `expires_in_s` passes |
 | DELETE | `/v1/search/clusters/{id}/keys/{key}` | revoke it (204; 404 when it's gone). On a deleted cluster (by its id) the revoke is kept and applied by its restore (204) |
 | GET | `/v1/search/clusters/{id}/remotes` | the remote clusters it holds credentials for: `{remotes: [{alias, cluster, cluster_id, key_id, minted, created_at, connected}]}` (never the key) |
 | PUT | `/v1/search/clusters/{id}/remotes/{alias}` | link another cluster of the same owner as remote `alias` (above): `{cluster, skip_unavailable?, access?}` or `{cluster, skip_unavailable?, api_key}` → `{alias, cluster, cluster_id, mode, proxy_address, key_id, minted, skip_unavailable?}`; 404 for a cluster the caller can't link to, missing or not. `admin` on both clusters for roll-access |
@@ -364,7 +379,14 @@ origins (browser search), once they're on main.
 | PUT | `/v1/search/clusters/{id}/repositories/{name}` | `PUT _snapshot/{name}` (Elasticsearch's body and query: `verify`), the only way a repository's credential settings can be roll secrets references (`roll://ENV/KEY`): the caller must be able to reveal each (403 if not; 400 for a cluster no project stands for or a key that doesn't exist), and is kept as their maker (architecture.md "Snapshots") → the cluster's answer |
 | GET, PUT, DELETE | `/v1/search/clusters/{id}/indices/{index}` | Elasticsearch's `GET`/`PUT`/`DELETE /<index>`: mappings, settings and aliases; create (body: `mappings`, `settings`); delete |
 | GET, PUT | `/v1/search/clusters/{id}/indices/{index}/mapping` | `GET`/`PUT /<index>/_mapping` |
-| GET | `/v1/search/clusters/{id}/indices/{index}/settings` | `GET /<index>/_settings` |
+| GET, PUT | `/v1/search/clusters/{id}/indices/{index}/settings` | `GET`/`PUT /<index>/_settings`. A write names one index; the engine refuses private, internal and managed settings to it as to any client (`can not update private setting`). Turns on `index.roll.analytics.enabled` and `index.roll.suggestions.*` |
+| POST | `/v1/search/clusters/{id}/indices/{index}/explain/{doc}` | `POST /<index>/_explain/<id>` (a body with `query`, or `?q=`; a read) |
+| GET | `/v1/search/clusters/{id}/synonyms` | `GET _synonyms`: the synonyms sets and their rule counts (`from`, `size`) |
+| GET, PUT, DELETE | `/v1/search/clusters/{id}/synonyms/{set}` | `GET`/`PUT`/`DELETE _synonyms/<set>`: `{"synonyms_set": [{id?, synonyms}]}`; indices using the set reload their search analyzers; a set an index uses isn't deleted (400) |
+| GET, PUT, DELETE | `/v1/search/clusters/{id}/synonyms/{set}/{rule}` | `_synonyms/<set>/<rule>`: one rule `{synonyms}` |
+| GET | `/v1/search/clusters/{id}/query_rules` | `GET _query_rules`: the rulesets |
+| GET, PUT, DELETE | `/v1/search/clusters/{id}/query_rules/{ruleset}` | `GET`/`PUT`/`DELETE _query_rules/<ruleset>`: `{"rules": [{rule_id, type: pinned\|exclude, criteria, actions}]}`; a `rule` query or retriever names rulesets |
+| POST | `/v1/search/clusters/{id}/query_rules/{ruleset}/test` | `POST _query_rules/<ruleset>/_test` `{match_criteria}`: the rules that match |
 | POST | `/v1/search/clusters/{id}/indices/{index}/refresh` | `POST /<index>/_refresh` |
 | POST | `/v1/search/clusters/{id}/indices/{index}/analyze` | `POST /<index>/_analyze` (a read) |
 | POST | `/v1/search/clusters/{id}/indices/{index}/search` | `POST /<index>/_search` (reads take index expressions: `logs-*`, `a,b`) |
@@ -375,7 +397,10 @@ origins (browser search), once they're on main.
 
 The per-index routes are one Elasticsearch operation each, so the cluster, the index and the kind
 of access (read, write, delete) are in the route: roll's scoped tokens and MCP tools map onto
-them. A route's request runs as the cluster's owner narrowed to the index names in its path
+them. Synonyms sets and query rulesets are the cluster's own objects (an analyzer names a set by
+`synonyms_set`, a query names rulesets), so their routes run as the cluster's owner, on the
+`_synonyms` and `_query_rules` paths they build and no other; writing them is `write` in roll's
+permissions (they change how searches match, never a credential). A route's request runs as the cluster's owner narrowed to the index names in its path
 (`x-roll-index-scope`: like an API key of the owner whose one role grants every privilege on
 those names), so it reaches no other index: a bulk line's `_index` or an `mget` doc naming
 another index is refused (403), and so is a lookup inside a query (a `terms` lookup, an indexed
@@ -930,14 +955,13 @@ deterministic (#396).
    the logsdb and time-series default, `_source.enabled: false`) can't come back that way.
    Decided 2026-11-17: not now. A live cluster moves by reindex from remote (item 2: today it
    can't, over HTTPS); build it once tenants ask to move by backup alone.
-10. **Relevance tuning by API, CLI and MCP** (in progress, with `roll search keys create` taking
-   index patterns and read-only access; Algolia's API and CLI `rules`/`synonyms import`,
-   Elastic's APIs): `/v1/search` has no routes for `_synonyms`, `_query_rules` (and `_test`), writing
-   an index's settings, or `_explain` (`search-control/src/api.rs`), so roll's MCP has no tools for
-   them, nor do `roll search` and the Terraform provider; an agent can create a cluster, index and
-   query, then stops. Writing settings also unblocks the suggestions tools (they need
-   `index.roll.suggestions.enabled`), and a redacted answer would let `POST …/inference/secrets`
-   become a tool, so an agent can set up semantic search end to end.
+10. **Relevance tuning by MCP and Terraform**: `/v1/search` serves synonyms sets, query rulesets
+   (and `_test`), writing an index's settings and `_explain` (the routes table), and `roll search`
+   has `synonyms`, `rules`, `indices settings` and `explain` and makes `read` and `append` keys on
+   named indices; roll's MCP maps them next (`no-tool.txt`). Left: `roll_search_synonyms_set` and
+   `roll_search_query_ruleset` in the Terraform provider, and a redacted answer for
+   `POST …/inference/secrets`, so it can become a tool and an agent can set up semantic search end
+   to end.
 11. **Conversational search and RAG** (Elastic Playground's chat with citations, Typesense
    `conversation=true`, Meilisearch `/chats`, OpenSearch's `retrieval_augmented_generation`
    processor): roll serves `completion` and `chat_completion` inference already, but the Playground

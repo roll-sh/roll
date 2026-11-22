@@ -1245,6 +1245,26 @@ static ROWS: &[Row] = &[
     // text, like the analytics) and rebuilding its suggestions index now (a write of the cluster).
     row("GET", "/v1/search/clusters/{id}/indices/{index}/suggestions", "search", R, one(PG, "cluster")).index("index"),
     row("POST", "/v1/search/clusters/{id}/indices/{index}/suggestions/rebuild", "search", W, one(PG, "cluster")).index("index"),
+    // Relevance tuning: an index's settings (the engine refuses private, internal and managed
+    // ones to every caller) change how it searches, as a mapping does; `_explain` reads one
+    // document's score.
+    row("PUT", "/v1/search/clusters/{id}/indices/{index}/settings", "search", W, one(PG, "cluster")).index("index"),
+    row("POST", "/v1/search/clusters/{id}/indices/{index}/explain/{doc}", "search", R, one(PG, "cluster")).index("index"),
+    // Synonyms sets and query rulesets are the cluster's (any index's analyzer or query may name
+    // one): reading them is read; putting or deleting a set, a rule or a ruleset changes search
+    // behaviour, never a credential, so it's write; testing a ruleset reads it.
+    row("GET", "/v1/search/clusters/{id}/synonyms", "search", R, one(PG, "cluster")),
+    row("GET", "/v1/search/clusters/{id}/synonyms/{set}", "search", R, one(PG, "cluster")),
+    row("PUT", "/v1/search/clusters/{id}/synonyms/{set}", "search", W, one(PG, "cluster")),
+    row("DELETE", "/v1/search/clusters/{id}/synonyms/{set}", "search", W, one(PG, "cluster")),
+    row("GET", "/v1/search/clusters/{id}/synonyms/{set}/{rule}", "search", R, one(PG, "cluster")),
+    row("PUT", "/v1/search/clusters/{id}/synonyms/{set}/{rule}", "search", W, one(PG, "cluster")),
+    row("DELETE", "/v1/search/clusters/{id}/synonyms/{set}/{rule}", "search", W, one(PG, "cluster")),
+    row("GET", "/v1/search/clusters/{id}/query_rules", "search", R, one(PG, "cluster")),
+    row("GET", "/v1/search/clusters/{id}/query_rules/{ruleset}", "search", R, one(PG, "cluster")),
+    row("PUT", "/v1/search/clusters/{id}/query_rules/{ruleset}", "search", W, one(PG, "cluster")),
+    row("DELETE", "/v1/search/clusters/{id}/query_rules/{ruleset}", "search", W, one(PG, "cluster")),
+    row("POST", "/v1/search/clusters/{id}/query_rules/{ruleset}/test", "search", R, one(PG, "cluster")),
     // ── secrets (feature/roll-secrets, docs/secrets.md) ──
     // The caller and its grant's project (`roll run`), and health: any grant.
     row("GET", "/v1/secrets/whoami", "secrets", R, Tgt::AnyGrant),

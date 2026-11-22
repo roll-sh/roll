@@ -23,7 +23,7 @@ Both are `## Next` item 18 in [../README.md](../README.md).
 ## Before you start
 
 You need a cluster, its URL and a key, as in [the first query](README.md#the-first-query-in-a-minute).
-Snapshot policies need an admin key, so use one for setup; your shippers can use `data` keys.
+Snapshot policies need an admin key, so use one for setup; your shippers can use `append` keys.
 
 ```sh
 roll search clusters create logs
@@ -223,5 +223,7 @@ roll search clusters branch logs logs-before-incident --at 1h
 
 - Watch volume and latency: the **Performance** tab shows requests, errors, 429s, p50/p95/p99
   latency and the slow logs; `roll search clusters usage logs` shows the cost.
-- Keep shippers' keys narrow: a `data` key per shipper
-  (`roll search keys create logs fluent-bit`), revoked on its own.
+- Keep shippers' keys narrow: an `append` key per shipper, which adds to its data stream and can't
+  read it or write anywhere else
+  (`roll search keys create logs fluent-bit --access append --indices logs-myapp-default`), revoked
+  on its own.
