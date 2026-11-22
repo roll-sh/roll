@@ -1404,7 +1404,10 @@ pub fn config(client: Client, url: &str, token: Option<&str>) -> String {
             if let Some(h) = &header {
                 s["headers"] = json!({ "Authorization": h });
             }
-            format!("// .vscode/mcp.json\n{}", serde_json::to_string_pretty(&json!({ "servers": { "roll": s } })).unwrap_or_default())
+            // VS Code 1.146's own files (its .vscode/mcp.json goes in February 2027): the user's, so a
+            // token never lands in a repository's file.
+            let file = if header.is_some() { "// ~/.copilot/mcp-config.json" } else { "// ~/.copilot/mcp-config.json, or .mcp.json at a workspace's root" };
+            format!("{file}\n{}", serde_json::to_string_pretty(&json!({ "mcpServers": { "roll": s } })).unwrap_or_default())
         }
         Client::Cursor | Client::ClaudeDesktop | Client::Json => {
             let mut s = json!({ "url": url });
