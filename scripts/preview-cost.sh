@@ -701,6 +701,12 @@ EARLIER_DB=$(db_of "$EJAR" "$EARLIER_HOST")
 psql_q "$LIVE_DB" "CREATE TABLE after_third (id int)" >/dev/null
 OWN_DATA="$(psql_q "$EARLIER_DB" "SELECT to_regclass('public.after_third') IS NULL") / $(psql_q "$LIVE_DB" "SELECT to_regclass('public.after_third') IS NOT NULL")"
 [ "$OWN_DATA" = "t / t" ] || { echo "a table the preview's branch got after the push shouldn't be in the earlier push's copy (earlier absent / live present): $OWN_DATA"; exit 1; }
+# Its Redis too: a database of its own.
+redis_of() { curl -sS -b "$1" -H "Host: $2" "http://$API/env.txt" | sed -n 's/^REDIS_URL=//p'; }
+LIVE_REDIS=$(redis_of "$JAR" "$HOST")
+EARLIER_REDIS=$(redis_of "$EJAR" "$EARLIER_HOST")
+[ -n "$EARLIER_REDIS" ] && [ "$EARLIER_REDIS" != "$LIVE_REDIS" ] || { echo "the earlier push should have a Redis database of its own: '$EARLIER_REDIS' / '$LIVE_REDIS'"; exit 1; }
+OWN_DATA="$OWN_DATA; Redis its own"
 
 # Screenshots stayed on through the pushes: the page's change since the head before is known.
 VISUAL=""
@@ -1070,7 +1076,7 @@ cat <<EOF
 | Change opened → preview ready ($(echo "$P" | jq_ "len(d['resources'])") branches made, the service deployed) | $((T1 - T0)) ms |
 | The preview's bucket key: its branch / production's bucket | $OWN_LS / $PARENT_LS |
 | … step by step (its timeline: data, setup, deploy, checks) | $STEPS |
-| An earlier push's own copy of the data: a table made after it is absent there / present in the preview's | $OWN_DATA |
+| An earlier push's own copy of the data: a table made after it is absent there / present in the preview's; its Redis | $OWN_DATA |
 | What a follower of the events hears (\`GET /v1/previews/events\`, roll MCP's Events) | $EVENTS |
 | Search: a sync of the parent's connector on the parent / asked of the branch (inherited, waits for adoption) | $PSTATE / $BSTATE |
 | Parent bucket bytes / the branch's own bytes after writing 1 MiB / objects the branch sees | $PARENT_OBJECTS / $BRANCH_OBJECTS / $BRANCH_SEES |
