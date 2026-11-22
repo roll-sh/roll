@@ -7622,6 +7622,15 @@ async fn a_private_network_reaches_the_customers_hosts_through_a_peer() {
     assert_eq!(call(&w.api, "PUT", &staging, Some(body("roll://staging/WG"))).await.1["status"], "running");
     let peer = w.fake.peers.lock().get(&format!("roll-apps-peer-{}-staging", id.trim_start_matches("svc_"))).cloned().unwrap();
     assert_eq!((peer.network.clone(), peer.out_network.clone()), (apps_control::closed_network_name(&w.project, "staging"), Some(format!("roll-apps-peer-{}-staging-out", id.trim_start_matches("svc_")))));
+    // A Tailscale node instead: its auth key from roll secrets, a Headscale server if named.
+    let ts = json!({"kind": "tailscale", "secret": "roll://staging/WG", "login_server": "https://hs.example.com/", "routes": [{"name": "api.corp.internal", "target": "api.tail1234.ts.net:443"}]});
+    assert_eq!(call(&w.api, "PUT", &staging, Some(ts.clone())).await.0, StatusCode::BAD_REQUEST, "a WireGuard config isn't an auth key");
+    *CONF.lock() = "tskey-auth-k1234567CNTRL-abcdefghijklmnop".into();
+    let (st, v) = call(&w.api, "PUT", &staging, Some(ts)).await;
+    assert_eq!((st, v["kind"].as_str(), v["login_server"].as_str()), (StatusCode::OK, Some("tailscale"), Some("https://hs.example.com")), "{v}");
+    let peer = w.fake.peers.lock().get(&format!("roll-apps-peer-{}-staging", id.trim_start_matches("svc_"))).cloned().unwrap();
+    assert_eq!((peer.kind, peer.login_server.as_deref(), peer.config.as_str()), (apps_control::peering::PeerKind::Tailscale, Some("https://hs.example.com"), "tskey-auth-k1234567CNTRL-abcdefghijklmnop"));
+    assert_eq!(call(&w.api, "PUT", &staging, Some(json!({"kind": "tailscale", "secret": "roll://staging/WG", "login_server": "https://x --advertise-exit-node", "routes": [{"name": "a.corp", "target": "a:1"}]}))).await.0, StatusCode::BAD_REQUEST, "no flags through the login server");
 }
 
 /// A Git login whose password is one of the project's secrets: read at each fetch, so a rotated
