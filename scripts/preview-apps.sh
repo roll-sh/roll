@@ -160,6 +160,8 @@ done
 # saved these rules, so no one, and they're withheld (without previews' field, roll apps would
 # name whoever set the egress: the operator).
 [ "$(echo "$E" | jq_ "d.get('closed_by', 'absent')")" = None ] || { echo "the closed pv- environment should name no one as its placeholders' maker (closed_by: null): $(echo "$E" | jq_ "d.get('closed_by', 'absent')")"; exit 1; }
+# Its schedules don't fire (the project's crons off, the default): roll apps' scheduled: false.
+[ "$(echo "$E" | jq_ "d.get('scheduled', 'absent')")" = False ] || { echo "a pv- environment's schedules shouldn't fire unless the project's crons says so (scheduled: false): $(echo "$E" | jq_ "d.get('scheduled', 'absent')")"; exit 1; }
 curl -sS -o /dev/null -H "Host: $HOSTPART" "http://127.0.0.1:${PORTS}080/" --max-time 120
 INST=""
 # The closed deployment's instance (its id's first six characters are in the name).

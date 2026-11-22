@@ -592,6 +592,8 @@ impl Engine {
                 + if s.traces { "o" } else { "" }
                 + &ca.as_deref().filter(|_| !on_apps).map(|id| format!("i{id}")).unwrap_or_default()
                 + &maker.as_deref().filter(|_| on_apps).map(|m| format!("m{m}")).unwrap_or_default()
+                // Crons on their schedule or not: roll apps' environment is told again.
+                + if s.crons && on_apps { "k" } else { "" }
                 + &rebuilt;
             let was = self.store.service_config(&r.id, &spec.name)?;
             let config_moved = was.as_deref() != Some(fingerprint.as_str());
@@ -638,6 +640,7 @@ impl Engine {
                     feedback,
                     egress: s.egress_for(r.trusted),
                     egress_hosts: s.egress_hosts.clone(),
+                    crons: s.crons,
                     maker: maker.clone(),
                     rebuild: fresh.then_some(rebuilds),
                     traces: s.traces,
