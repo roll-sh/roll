@@ -125,7 +125,12 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   head, the head it ran stays reachable at `<service>-<head>-<slug>`, on the preview's same data,
   behind the same link, asleep until opened; the last 3 per service (an older one's container
   goes). For comparing before and after. A trusted change's only (an approval is for one head),
-  `roll.toml` services only (roll apps runs its own), and old code on migrated data can break.
+  and old code on migrated data can break. A roll apps service's earlier push is that build's own
+  deployment URL (`<deployment>--<slug>` on roll apps' domain, never a project's preview domain;
+  roll apps' `Deployment.url`), behind the same link (the token once, a cookie for that host) or
+  sign-in: asked before the new head deploys, and kept only while the running build is the head
+  it ran. roll apps keeps an environment's last 10 builds, so the 3 kept here stay; one it pruned
+  answers roll apps' 404, not previews' 410 page.
   They're on the sheet, `roll preview show`, the change and the pull request comment.
   A link to one that's no longer kept says so: its host answers 410 with a page naming the
   service and the push and linking the service's latest (on roll's preview domain and on a

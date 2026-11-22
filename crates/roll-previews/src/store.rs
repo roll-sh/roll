@@ -2514,18 +2514,36 @@ impl Store {
     /// [`PINNED_KEEP`] latest per service. Returns the ones that no longer fit, by
     /// `<service>@<revision>`, whose containers go.
     pub fn pin(&self, id: &str, service: &str, revision: &str, url: &dyn Fn(&str) -> String) -> Result<Vec<String>> {
+        self.pin_at(id, service, revision, None, url)
+    }
+
+    /// [`Store::pin`] for a build its backend keeps at a URL of its own (roll apps' deployment
+    /// URL): nothing of roll previews' answers for it. Its host is kept as `apps:<host>`, which no
+    /// DNS label can be, so roll previews' proxy never takes a request as its.
+    pub fn pin_build(&self, id: &str, service: &str, revision: &str, own_url: &str) -> Result<Vec<String>> {
+        self.pin_at(id, service, revision, Some(own_url), &|_| String::new())
+    }
+
+    fn pin_at(&self, id: &str, service: &str, revision: &str, own_url: Option<&str>, url: &dyn Fn(&str) -> String) -> Result<Vec<String>> {
         let now = self.now_ms()?;
         self.db.write(|c| {
-            let slug: String = c.query_row("SELECT slug FROM previews WHERE id = ?", [id], |r| r.get(0))?;
-            let short: String = revision.strip_prefix("cs_").unwrap_or(revision).chars().take(10).collect();
-            let mut host = crate::label_part(&format!("{service}-{short}-{slug}"), 63);
-            if host_taken(c, &host)? {
-                host = format!("{}-{}", crate::label_part(&host, 58), &id[id.len() - 4..]);
-            }
+            let (host, url) = match own_url {
+                Some(u) => (format!("apps:{}", u.split("://").last().unwrap_or(u).split('/').next().unwrap_or(u)), u.to_string()),
+                None => {
+                    let slug: String = c.query_row("SELECT slug FROM previews WHERE id = ?", [id], |r| r.get(0))?;
+                    let short: String = revision.strip_prefix("cs_").unwrap_or(revision).chars().take(10).collect();
+                    let mut host = crate::label_part(&format!("{service}-{short}-{slug}"), 63);
+                    if host_taken(c, &host)? {
+                        host = format!("{}-{}", crate::label_part(&host, 58), &id[id.len() - 4..]);
+                    }
+                    let u = url(&host);
+                    (host, u)
+                }
+            };
             c.execute(
                 "INSERT INTO pinned (preview_id, service, revision, host, url, at) VALUES (?, ?, ?, ?, ?, ?) \
                  ON CONFLICT (preview_id, service, revision) DO UPDATE SET at = excluded.at",
-                params![id, service, revision, host, url(&host), now],
+                params![id, service, revision, host, url, now],
             )?;
             let old: Vec<String> = c.query(
                 "SELECT revision FROM pinned WHERE preview_id = ? AND service = ? ORDER BY at DESC LIMIT 1000 OFFSET ?",
