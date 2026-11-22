@@ -184,6 +184,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
 pub fn status_of(e: &Error) -> (StatusCode, Option<&'static str>) {
     match e {
         Error::BadRequest(_) => (StatusCode::BAD_REQUEST, None),
+        Error::Invalid(code, _) => (StatusCode::BAD_REQUEST, Some(*code)),
         Error::Unauthorized(_) => (StatusCode::UNAUTHORIZED, Some("unauthorized")),
         Error::Forbidden(_) => (StatusCode::FORBIDDEN, Some("forbidden")),
         Error::MakerUnreachable(_) => (StatusCode::FORBIDDEN, Some("maker_unreachable")),
