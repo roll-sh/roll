@@ -263,6 +263,11 @@ pub struct Rule {
     /// Only resources with a path under one of these (`/api` covers `/api/x`, not `/apix`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paths: Option<Vec<String>>,
+    /// Only resources whose environment the product says isn't protected ([`Resource::protected`]):
+    /// a developer's default (docs/members.md, "Per-environment narrowing"), or a CI token for every
+    /// environment but the protected ones. It only narrows.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unprotected: bool,
     pub actions: BTreeMap<Action, Effect>,
 }
 
@@ -290,6 +295,9 @@ pub struct Resource {
     /// Build a `Resource` with `..Default::default()` so fields like this one can be added.
     pub also_in: Vec<String>,
     pub environment: Option<String>,
+    /// Whether `environment` is protected, as the product says (secrets: a protection policy; apps:
+    /// `production`). `None`: not known, and then no `unprotected` rule matches.
+    pub protected: Option<bool>,
     pub path: Option<String>,
     /// The indices of it the request names (search's `{index}`: an index expression).
     pub index: Option<String>,
@@ -366,7 +374,8 @@ impl Rule {
                     Resources::All => true,
                     Resources::Some(sel) => sel.iter().any(|s| s.matches(r)),
                 };
-                resource && (r.filters_itself || (self.environment_matches(r.environment.as_deref()) && self.path_matches(r.path.as_deref())))
+                let unprotected = !self.unprotected || r.protected == Some(false);
+                resource && (r.filters_itself || (self.environment_matches(r.environment.as_deref()) && unprotected && self.path_matches(r.path.as_deref())))
             }
             Target::List { .. } => true,
             Target::Create { project, environment, .. } => {
@@ -374,9 +383,9 @@ impl Rule {
                     Resources::All => true,
                     Resources::Some(sel) => project.as_ref().is_some_and(|p| sel.iter().any(|s| matches!(s, Selector::Project { project } if project == p))),
                 };
-                resource && self.environment_matches(environment.as_deref()) && self.paths.is_none()
+                resource && self.environment_matches(environment.as_deref()) && self.paths.is_none() && !self.unprotected
             }
-            Target::Product { .. } => self.resources == Resources::All && self.environments.is_none() && self.paths.is_none(),
+            Target::Product { .. } => self.resources == Resources::All && self.environments.is_none() && self.paths.is_none() && !self.unprotected,
         }
     }
 
@@ -398,8 +407,10 @@ impl Rule {
             (Some(_), None) => false,
             (Some(mine), Some(theirs)) => theirs.iter().all(|t| mine.iter().any(|m| under(t, m))),
         };
+        // `unprotected` narrows: a rule with it covers only rules with it.
+        let unprotected = !self.unprotected || other.unprotected;
         let actions = other.actions.iter().all(|(a, e)| self.actions.get(a).is_some_and(|mine| mine >= e));
-        product && resources && environments && paths && actions
+        product && resources && environments && paths && unprotected && actions
     }
 }
 
@@ -600,6 +611,12 @@ mod tests {
         // Covering: never more than the maker.
         assert!(!scope.covers(&one));
         let wide = Scope(vec![rule(serde_json::json!({ "product": "*", "resources": "*", "actions": { "write": "allow", "read": "allow" } }))]);
+        // `unprotected`: only environments the product says aren't protected, never an unknown one.
+        let dev = rule(serde_json::json!({ "product": "secrets", "resources": [{ "project": "prj_a" }], "unprotected": true, "actions": { "reveal": "allow" } }));
+        let at = |protected: Option<bool>| Target::One(Resource { project: Some("prj_a".into()), environment: Some("x".into()), protected, ..Resource::new("secrets", "prj_a") });
+        assert!(dev.matches(&at(Some(false))) && !dev.matches(&at(Some(true))) && !dev.matches(&at(None)));
+        let everywhere = rule(serde_json::json!({ "product": "secrets", "resources": [{ "project": "prj_a" }], "actions": { "reveal": "allow" } }));
+        assert!(everywhere.covers(&dev) && !dev.covers(&everywhere));
         assert!(wide.covers(&one) && !one.covers(&wide));
         let asks = Scope(vec![rule(serde_json::json!({ "product": "postgres", "resources": "*", "actions": { "read": "ask" } }))]);
         assert!(scope.covers(&asks) && !asks.covers(&Scope(vec![rule(serde_json::json!({ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }))])));

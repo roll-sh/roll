@@ -254,6 +254,17 @@ impl Db {
 
     /// [`Db::write`] without waiting for durability on SQLite (bulk work that calls
     /// [`Db::sync`] at the end). The same as `write` on Postgres.
+    /// [`Db::write`], then what it overwrote erased from the file (SQLite: `secure_delete` during
+    /// it, the WAL checkpointed and truncated after). For rewriting values that must not linger;
+    /// on Postgres an ordinary write: the old row versions stay as dead tuples until (auto)vacuum
+    /// reuses their pages.
+    pub fn write_erasing<T, E: From<Error>>(&self, mut f: impl FnMut(&Conn<'_>) -> Result<T, E>) -> Result<T, E> {
+        match &*self.0 {
+            Inner::Sqlite(s) => s.write_erasing(|c| f(&Conn(ConnRef::Sqlite(c)))),
+            Inner::Pg(p) => p.write(Isolation::Serializable, |c| f(&Conn(ConnRef::Pg(c)))),
+        }
+    }
+
     pub fn write_unsynced<T, E: From<Error>>(&self, mut f: impl FnMut(&Conn<'_>) -> Result<T, E>) -> Result<T, E> {
         match &*self.0 {
             Inner::Sqlite(s) => s.write(false, |c| f(&Conn(ConnRef::Sqlite(c)))),

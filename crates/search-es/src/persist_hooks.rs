@@ -270,6 +270,7 @@ fn async_result_doc(e: &crate::xpack::async_results::Entry) -> crate::json::Valu
             "start_time_in_millis" => e.start_ms,
             "response" => e.response.clone(),
             "extra" => e.extra.clone(),
+            "owner" => e.owner.clone().map(crate::json::Value::from).unwrap_or(crate::json::Value::Null),
         },
     }
 }
@@ -283,6 +284,7 @@ fn async_result_entry(doc: &crate::json::Value) -> Option<crate::xpack::async_re
         expiration_ms: doc.get("expiration_time")?.as_i64()?,
         bytes: 0,
         extra: r.get("extra").cloned().unwrap_or(crate::json::Value::Null),
+        owner: r.get("owner").and_then(|v| v.as_str()).map(str::to_string),
     })
 }
 

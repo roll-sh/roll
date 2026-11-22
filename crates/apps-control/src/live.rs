@@ -391,6 +391,11 @@ pub struct Gate {
     pub preview: bool,
     /// Headers its answers carry.
     pub headers: Vec<crate::model::HeaderRule>,
+    /// The live deployment's roll.toml firewall rules (deny, limit, challenge), judged beside
+    /// `firewall`: the stricter answer wins, so the tree only ever tightens.
+    pub file_firewall: Vec<crate::model::FirewallRule>,
+    /// The live deployment's roll.toml headers, after `headers` and never over one they set.
+    pub file_headers: Vec<crate::model::HeaderRule>,
     /// Paths another service answers, the first that takes a path deciding.
     pub routes: Vec<crate::model::Route>,
     /// Traces are on: the proxy adds its own span to each request's trace.
@@ -407,8 +412,23 @@ pub struct Gate {
     pub snippets: Option<(bytes::Bytes, bytes::Bytes)>,
 }
 
-/// A rate-limit bucket: which (0 the environment's, 1 + i firewall rule i's) and whose.
+/// A rate-limit bucket: which (0 the environment's, 1 + i firewall rule i's, [`FILE_BUCKETS`] + i
+/// the live deployment's roll.toml rule i's) and whose.
 type BucketKey = (u16, Option<std::net::IpAddr>);
+
+/// Where the buckets of a deployment's own firewall rules start (past any environment's).
+const FILE_BUCKETS: u16 = 1000;
+
+/// The first of `rules` that matches decides; none: in. A limit's bucket is `base` + its index.
+fn first_match(rules: &[crate::model::FirewallRule], asked: &crate::model::Asked<'_>, base: u16) -> Verdict {
+    match rules.iter().enumerate().find(|(_, r)| r.matches(asked)) {
+        None => Verdict::Allow,
+        Some((_, r)) if r.action == crate::model::FirewallAction::Allow => Verdict::Allow,
+        Some((i, r)) if r.action == crate::model::FirewallAction::Limit => Verdict::Limit(base + i as u16, crate::model::RateLimit { per_minute: r.per_minute.unwrap_or(60), burst: r.burst }),
+        Some((_, r)) if r.action == crate::model::FirewallAction::Challenge => Verdict::Challenge,
+        Some(_) => Verdict::Deny,
+    }
+}
 
 /// A firewall's answer: in, a 403, or in under a rule's own limit (its bucket, 1 + its index).
 #[derive(Debug, PartialEq)]
@@ -429,12 +449,22 @@ impl Gate {
     /// What its firewall says of the request: the first rule that matches decides; none lets it
     /// in.
     pub fn firewall_verdict(&self, asked: &crate::model::Asked<'_>) -> Verdict {
-        match self.firewall.iter().enumerate().find(|(_, r)| r.matches(asked)) {
-            None => Verdict::Allow,
-            Some((_, r)) if r.action == crate::model::FirewallAction::Allow => Verdict::Allow,
-            Some((i, r)) if r.action == crate::model::FirewallAction::Limit => Verdict::Limit(i as u16 + 1, crate::model::RateLimit { per_minute: r.per_minute.unwrap_or(60), burst: r.burst }),
-            Some((_, r)) if r.action == crate::model::FirewallAction::Challenge => Verdict::Challenge,
-            Some(_) => Verdict::Deny,
+        let own = first_match(&self.firewall, asked, 1);
+        if self.file_firewall.is_empty() {
+            return own;
+        }
+        // The tree's rules on their own, their limits in buckets of their own: the stricter of
+        // the two answers (deny, then a challenge, then the lower limit) decides.
+        let file = first_match(&self.file_firewall, asked, FILE_BUCKETS);
+        let rank = |v: &Verdict| match v {
+            Verdict::Allow => 0,
+            Verdict::Limit(..) => 1,
+            Verdict::Challenge => 2,
+            Verdict::Deny => 3,
+        };
+        match (own, file) {
+            (Verdict::Limit(a, x), Verdict::Limit(b, y)) => if y.per_minute < x.per_minute { Verdict::Limit(b, y) } else { Verdict::Limit(a, x) },
+            (a, b) => if rank(&b) > rank(&a) { b } else { a },
         }
     }
 
@@ -1424,7 +1454,9 @@ impl EnvLive {
         let was_awake = self.awake_count() as u32;
         let n = match run.kind {
             RunType::Cron => 0,
-            // A worker following a backlog starts at what it wants, not back at its floor.
+            // A worker following a backlog starts at what it wants, not back at its floor; one
+            // that scales to zero still starts one, so the deploy sees it boot (it goes once
+            // it's caught up for `scale_down_after`).
             RunType::Worker => run.min_instances.max(1).max(if run.scale.is_some() { self.wanted.load(Ordering::SeqCst) } else { 0 }),
             RunType::Web => was_awake.max(run.min_instances).max(1),
         }
@@ -1710,6 +1742,12 @@ impl EnvLive {
     }
 
     /// A scaling worker's instances for its backlog now.
+    /// Its backlog couldn't be read: unknown until it can, so a worker that may scale to zero
+    /// keeps one meanwhile (what it wanted stays).
+    pub fn forget_backlog(&self) {
+        self.backlog.store(u64::MAX, Ordering::SeqCst);
+    }
+
     pub fn set_wanted(&self, n: u32, backlog: Option<u64>) {
         self.wanted.store(n, Ordering::SeqCst);
         self.backlog.store(backlog.unwrap_or(u64::MAX), Ordering::SeqCst);
@@ -1857,6 +1895,24 @@ impl EnvLive {
             self.runtime.release(&i.name).await;
         }
         *self.template.lock() = None;
+    }
+
+    /// A file instances made from now on get (`path`, its contents), in place of one there: a
+    /// closed environment's trust bundle when its interception CA changes while it sleeps.
+    pub fn set_file(&self, path: &str, contents: &str) {
+        let with = |t: &Arc<Template>| {
+            let mut t = (**t).clone();
+            t.spec.files.retain(|(p, _)| p != path);
+            t.spec.files.push((path.to_string(), contents.to_string()));
+            Arc::new(t)
+        };
+        let mut tpl = self.template.lock();
+        if let Some(t) = tpl.as_ref() {
+            *tpl = Some(with(t));
+        }
+        if let Some((t, _)) = self.canary.lock().as_mut() {
+            *t = with(t);
+        }
     }
 
     /// The service's registry login changed (None: it went): instances made from now on use it.
@@ -2275,9 +2331,14 @@ impl EnvLive {
     async fn keep_workers(self: &Arc<Self>, tpl: &Arc<Template>) {
         let scheduled = tpl.run.at(code_sql::now_ms());
         let run = &scheduled;
-        // A worker that follows its work runs what its backlog wants; else its floor.
+        // A worker that follows its work runs what its backlog wants; else its floor. One that
+        // may scale to zero keeps one while its backlog can't be read: nothing it can't see
+        // leaves its work undone.
         let target = match &run.scale {
-            Some(_) => self.wanted.load(Ordering::SeqCst).clamp(run.min_instances, run.max_instances.max(run.min_instances)),
+            Some(_) => {
+                let floor = if self.backlog.load(Ordering::SeqCst) == u64::MAX { run.min_instances.max(1) } else { run.min_instances };
+                self.wanted.load(Ordering::SeqCst).clamp(floor, run.max_instances.max(floor))
+            }
             None => run.min_instances,
         };
         let insts = self.instances();
@@ -2408,7 +2469,7 @@ impl EnvLive {
 
     /// One cron run: a fresh instance of the active deployment, to its exit or `timeout`.
     pub async fn run_once(self: &Arc<Self>, timeout: Duration) -> anyhow::Result<(String, Option<i32>, bool)> {
-        let e = self.run_to_exit(None, &[], timeout, None, tokio_util::sync::CancellationToken::new(), None).await?;
+        let e = self.run_to_exit(None, &[], timeout, None, tokio_util::sync::CancellationToken::new(), None, None).await?;
         Ok((e.deployment, e.code, e.timed_out))
     }
 
@@ -2416,6 +2477,7 @@ impl EnvLive {
     /// run, or a one-off job (`command` in place of the image's, with no port and no volume,
     /// since the service's own instance may be using it). `made` gets the container's name
     /// before it starts; the container is removed after, whatever happened.
+    #[allow(clippy::too_many_arguments)]
     pub async fn run_to_exit(
         self: &Arc<Self>,
         command: Option<&str>,
@@ -2424,8 +2486,13 @@ impl EnvLive {
         log: Option<LogSink>,
         cancel: tokio_util::sync::CancellationToken,
         name: Option<String>,
+        size: Option<(f64, u32)>,
     ) -> anyhow::Result<Exit> {
         let mut tpl = (*self.template().ok_or_else(|| anyhow::anyhow!("no deployment"))?).clone();
+        // A job's own size (Heroku's `run --size`): its container's, and what it's metered at.
+        if let Some((cpu, mb)) = size {
+            (tpl.spec.cpu, tpl.spec.memory_mb, tpl.run.cpu, tpl.run.memory_mb) = (cpu, mb, cpu, mb);
+        }
         anyhow::ensure!(command.is_some() || tpl.spec.volume.is_none() || !self.held.load(Ordering::SeqCst), "its volume is being restored");
         if let Some(cmd) = command {
             tpl.spec.command = Some(cmd.to_string());

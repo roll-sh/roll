@@ -50,6 +50,18 @@ pub trait Sources: Send + Sync {
     async fn landings(&self, after: i64, limit: usize) -> anyhow::Result<Vec<Landing>>;
     /// The newest landing's sequence number.
     async fn head(&self) -> anyhow::Result<i64>;
+    /// The commit the gitlink at `path` pins (a submodule), or `None` when something else is there.
+    async fn gitlink(&self, _repo: &str, _revision: &str, _path: &str) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
+    /// roll code's own Git address (`https://roll.sh`): a submodule URL on it is one of its repos.
+    fn git_base(&self) -> Option<String> {
+        None
+    }
+    /// Whether anyone can read `repo` (a public repo); a missing one isn't.
+    async fn public(&self, _repo: &str) -> anyhow::Result<bool> {
+        Ok(false)
+    }
     /// A file at `revision` (at most 64 KiB; a larger one or a symlink is `None`).
     async fn read_file(&self, _repo: &str, _revision: &str, _path: &str) -> anyhow::Result<Option<Vec<u8>>> {
         Ok(None)
@@ -110,6 +122,25 @@ pub trait SecretSource: Send + Sync {
     /// audit names, `app:<service>`). An unresolved reference or a missing required key is an
     /// error: the deploy fails rather than start without it.
     async fn resolve(&self, project: &str, env: &str, service: &str) -> anyhow::Result<Vec<SecretVar>>;
+    /// A closed environment's (`egress: roll`) secrets: a key bound to hosts comes as a roll
+    /// secrets placeholder (`rlph_…`) its egress proxy swaps on the way out to those hosts
+    /// ([`SecretSource::intercept`]; docs/secrets.md, "Using a key without seeing it"), the rest as
+    /// [`SecretSource::resolve`] gives them. `maker`: who closed the environment (its placeholders
+    /// swap only while they may reveal there; none, the project's owner). When they can't, the
+    /// keys bound to hosts are withheld and `notice` says so.
+    async fn resolve_closed(&self, project: &str, env: &str, service: &str, _maker: Option<&str>) -> anyhow::Result<ClosedSecrets> {
+        Ok(ClosedSecrets { vars: self.resolve(project, env, service).await?, notice: None })
+    }
+    /// A closed environment's interception, when its secrets have placeholders: the CA its
+    /// instances trust and the step its egress proxy runs for a host the keys are bound to. One
+    /// a project environment (the consumer `apps:<project>/<env>`), the same one while it stands.
+    async fn intercept(&self, _project: &str, _env: &str) -> anyhow::Result<Option<Intercept>> {
+        Ok(None)
+    }
+    /// The project environment's placeholders and interception ended (it's deleted or opened).
+    async fn end_intercept(&self, _project: &str, _env: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
     /// Whether `who` may see what `ask` names of `service`'s variables from roll secrets in `env`
     /// in the clear: each key resolves for them read as roll secrets' own reveal would read it
     /// (the environment's base, imports and references only as far as they may reveal; a token's
@@ -315,6 +346,22 @@ pub trait Mailbox: Send + Sync {
     fn on(&self) -> bool;
     /// Mail `user` (`usr_…`) at their own account's address.
     async fn send(&self, user: &str, subject: &str, text: &str) -> anyhow::Result<()>;
+}
+
+/// A closed environment's secrets ([`SecretSource::resolve_closed`]), and why some were withheld.
+#[derive(Clone, Debug, Default)]
+pub struct ClosedSecrets {
+    pub vars: Vec<SecretVar>,
+    pub notice: Option<String>,
+}
+
+/// A closed environment's interception ([`SecretSource::intercept`]): its CA (PEM, for the
+/// instances' trust store), when it ends (ms), and the step its egress proxy hands a covered host.
+#[derive(Clone)]
+pub struct Intercept {
+    pub ca_pem: String,
+    pub expires_at: i64,
+    pub interception: std::sync::Arc<dyn roll_intercept::Interception>,
 }
 
 /// One of a project's secrets as a variable.

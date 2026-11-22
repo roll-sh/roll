@@ -14,7 +14,47 @@ use code_sql::{OptionalExtension, params};
 /// What a deleted account's rows hold about the person: everything keyed by them.
 const THEIRS: [&str; 11] = ["sessions", "identities", "email_codes", "email_changes", "oauth_states", "totp", "recovery_codes", "passkeys", "passkey_challenges", "reset_requests", "sign_in_places"];
 
+/// Acts on a deleted account (`usr_…`) after its deletion's write. An error leaves it to be tried
+/// again ([`Accounts::run_deletions`]).
+pub type OnDeleted = Box<dyn Fn(&str) -> std::result::Result<(), String> + Send + Sync>;
+
 impl Accounts {
+    /// Run `f` for every deleted account, after the deletion's write, until it succeeds.
+    pub fn on_deleted(&self, f: OnDeleted) {
+        self.on_deleted.write().unwrap_or_else(|e| e.into_inner()).push(f);
+    }
+
+    /// Act on deletions not yet done: each claimed for a minute in a write, so two nodes don't run
+    /// one at once, done once every hook took it, and given back when one failed. rolld also calls this now and then, for what
+    /// a crash left. Blocking.
+    pub fn run_deletions(&self) {
+        if self.on_deleted.read().unwrap_or_else(|e| e.into_inner()).is_empty() {
+            return;
+        }
+        let Ok(now) = self.db.now_ms() else { return };
+        let claimed = self.db.write(|c| {
+            let due: Vec<String> = c.query("SELECT user_id FROM account_deletions WHERE done = 0 AND (claimed_at IS NULL OR claimed_at < ?) ORDER BY at LIMIT 50", [now - 60_000], |r| r.get(0))?;
+            for u in &due {
+                c.execute("UPDATE account_deletions SET claimed_at = ? WHERE user_id = ?", params![now, u])?;
+            }
+            Ok::<_, code_sql::Error>(due)
+        });
+        let Ok(claimed) = claimed else { return };
+        let hooks = self.on_deleted.read().unwrap_or_else(|e| e.into_inner());
+        for user in claimed {
+            let mut ok = true;
+            for f in hooks.iter() {
+                if let Err(e) = f(&user) {
+                    tracing::warn!(%user, error = %e, "accounts: a deleted account's hook failed; it's tried again");
+                    ok = false;
+                }
+            }
+            // Done, or given back for the next run to try again.
+            let sql = if ok { "UPDATE account_deletions SET done = 1 WHERE user_id = ?" } else { "UPDATE account_deletions SET claimed_at = NULL WHERE user_id = ?" };
+            let _ = self.db.write(|c| c.execute(sql, [user.as_str()]));
+        }
+    }
+
     /// Delete `user`'s account, `confirm` being their handle. Returns the mail for the address
     /// it had.
     pub fn delete_self(&self, user: &str, confirm: &str) -> Result<Mail> {
@@ -46,9 +86,12 @@ impl Accounts {
                 "UPDATE users SET email = ?, name = '', admin = 0, disabled = 1, disabled_by = 'self', deleted_at = ? WHERE id = ?",
                 params![tombstone, now, user],
             )?;
+            // The outbox: other products act on it after this write, until each has.
+            c.execute("INSERT INTO account_deletions (user_id, at) VALUES (?, ?) ON CONFLICT (user_id) DO NOTHING", params![user, now])?;
             Ok::<_, code_sql::Error>(Ok(()))
         })?;
         done?;
+        self.run_deletions();
         // Their roll code owner's own tokens and machine links (another database: after the write).
         if let Some(owners) = &self.owners
             && let Some(owner) = self.db.read(|c| c.query_row("SELECT code_owner_id FROM users WHERE id = ?", [user], |r| r.get::<_, Option<String>>(0)))?

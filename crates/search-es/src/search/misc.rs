@@ -558,7 +558,15 @@ fn termvectors_one(ctx: &Ctx, index: &str, id: Option<&str>, doc: Option<&Value>
         (None, Some(id)) => {
             m.insert("_id".into(), Value::Str(id.to_string()));
             let realtime = flag("realtime", true);
-            let got = shard.shard.get(id.as_bytes(), realtime).map_err(crate::engine::convert::index_error)?;
+            let mut got = shard.shard.get(id.as_bytes(), realtime).map_err(crate::engine::convert::index_error)?;
+            // Document level security: a document the reader may not see is not found, as a get.
+            if got.is_some()
+                && let Some(sec) = crate::xpack::security::dls::ReadSecurity::of(ctx)
+                && let Some(q) = sec.documents(ctx.cluster, crate::xpack::security::dls::READ, &idx.name)?
+                && !crate::search::matches_doc(ctx.cluster, &st, &idx, &engine, &shard, id, &q, realtime)?
+            {
+                got = None;
+            }
             match got {
                 Some(g) => {
                     // A realtime get reads through Elasticsearch's internal reader (refreshed
