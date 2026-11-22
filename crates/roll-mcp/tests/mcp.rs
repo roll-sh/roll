@@ -196,6 +196,14 @@ impl Daemon {
     }
 }
 
+/// The `Mcp-Param-*` headers a 2026-07-28 client sends for a call's marked arguments (SEP-2243).
+fn param_headers(params: &Value) -> Vec<(&'static str, String)> {
+    [("project", "mcp-param-project"), ("env", "mcp-param-environment"), ("service", "mcp-param-service")]
+        .into_iter()
+        .filter_map(|(arg, h)| params["arguments"][arg].as_str().map(|v| (h, v.to_string())))
+        .collect()
+}
+
 fn names(list: &Value) -> Vec<String> {
     list["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect()
 }
@@ -490,6 +498,7 @@ async fn a_call_waiting_for_approval_is_a_task_polled_to_its_result() {
             if let Some(n) = name {
                 h.push(("mcp-name", n));
             }
+            h.extend(param_headers(&params));
             let h: Vec<(&str, &str)> = h.iter().map(|(k, v)| (*k, v.as_str())).collect();
             d.http_with(&token, Method::POST, "/v1/mcp", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params })), &h).await.2
         }
@@ -594,8 +603,11 @@ async fn a_host_that_renders_apps_gets_the_table_view() {
 async fn a_2026_client_is_served_without_initialize() {
     let d = Daemon::new();
     let meta = |caps: Value| json!({ "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": { "name": "modern", "version": "2" }, "io.modelcontextprotocol/clientCapabilities": caps });
-    let send = |token: &str, id: i64, method: &str, mut params: Value, headers: Vec<(&'static str, String)>| {
+    let send = |token: &str, id: i64, method: &str, mut params: Value, mut headers: Vec<(&'static str, String)>| {
         params["_meta"] = meta(json!({ "elicitation": { "url": {} } }));
+        if !headers.is_empty() {
+            headers.extend(param_headers(&params));
+        }
         let body = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
         let token = token.to_string();
         let d = &d;
@@ -647,6 +659,20 @@ async fn a_2026_client_is_served_without_initialize() {
     let projects = out["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "postgres_list_projects").unwrap();
     assert!(projects["outputSchema"]["properties"]["items"]["items"]["properties"]["id"].is_object(), "{}", projects["outputSchema"]);
     assert_eq!(schemas(&d.rpc(OPERATOR, "tools/list", json!({})).await), 0);
+    // A routable argument is marked x-mcp-header (SEP-2243), and a call carries it as a header too.
+    let get = out["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "postgres_get_project").unwrap().clone();
+    assert_eq!(get["inputSchema"]["properties"]["project"]["x-mcp-header"], "Project");
+    let raw = |header: Option<&'static str>| {
+        let body = json!({ "jsonrpc": "2.0", "id": 30, "method": "tools/call", "params": { "name": "postgres_get_project", "arguments": { "project": "pa" }, "_meta": meta(json!({})) } });
+        let mut h = vec![("mcp-protocol-version", "2026-07-28"), ("mcp-method", "tools/call"), ("mcp-name", "postgres_get_project")];
+        h.extend(header.map(|v| ("mcp-param-project", v)));
+        let d = &d;
+        async move { d.http_with(OPERATOR, Method::POST, "/v1/mcp", Some(body), &h).await }
+    };
+    let (s, _, missing) = raw(None).await;
+    assert_eq!((s, missing["error"]["code"].as_i64()), (StatusCode::BAD_REQUEST, Some(-32020)), "{missing}");
+    let (s, _, ok) = raw(Some("=?base64?cGE=?=")).await;
+    assert!(s != StatusCode::BAD_REQUEST && ok["error"].is_null(), "the header (Base64 form) says what the body does: {ok}");
     // A resource that isn't there is Invalid Params in this revision (SEP-2164; -32002 before it).
     let uri = "roll://nothing/here";
     let (_, _, out) = send(OPERATOR, 21, "resources/read", json!({ "uri": uri }), std_headers("resources/read", Some(uri))).await;

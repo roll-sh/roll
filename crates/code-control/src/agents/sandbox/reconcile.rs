@@ -10,7 +10,7 @@
 //! go as idle while the owner has sandboxes (`Code::repo_busy`).
 
 use super::store::{self, Observed, SandboxRow};
-use super::{BackendError, BackendState, Desired, Reconciler, SandboxBackend, SandboxSpec};
+use super::{BackendError, BackendState, Desired, EnvChange, Reconciler, SandboxBackend, SandboxSpec};
 use crate::Code;
 use agent_proto::{MachineId, SandboxStatus, StreamEvent};
 use std::collections::BTreeMap;
@@ -23,14 +23,38 @@ pub(crate) fn seal_scope(sandbox_id: &str) -> String {
     format!("sandbox:{sandbox_id}")
 }
 
-/// Whether a sandbox may still start with the values copied into it from roll secrets.
+/// What a sandbox starts with of the values copied into it from roll secrets.
 enum Copied {
-    /// Nothing copied, already taken out, or the copier still may.
+    /// Nothing copied, already taken out, or (made before their source was kept) the copier
+    /// still may: as it was made.
     Keep,
-    /// The copier may no longer reveal them (why, without a value).
-    TakeOut(String),
-    /// roll secrets didn't say: don't start it with them this look.
+    /// The values as their copier reads them now: the variables it was made with
+    /// (`secrets_from.keys`) set, and any gone from the environment since unset.
+    Fresh(EnvChange),
+    /// The copier may no longer reveal them (why, without a value): those variables unset, or
+    /// `None` for a sandbox made before roll kept which they are.
+    TakeOut(String, Option<EnvChange>),
+    /// roll secrets didn't say: don't start it this look.
     Unsure(String),
+}
+
+/// The change that makes a sandbox's copied variables `values` (as their copier read them now):
+/// only the ones it was made with, each one line of at most 4096 characters (as at create); any
+/// other is unset.
+fn fresh(keys: &[String], values: Vec<(String, String)>) -> EnvChange {
+    let mut set = BTreeMap::new();
+    for (k, v) in values {
+        if !keys.contains(&k) {
+            continue;
+        }
+        if v.chars().count() > 4096 || v.contains(['\n', '\r', '\0']) {
+            tracing::warn!(key = %k, "a sandbox's copied variable is no longer one line of at most 4096 characters: left out");
+            continue;
+        }
+        set.insert(k, v);
+    }
+    let unset = keys.iter().filter(|k| !set.contains_key(*k)).cloned().collect();
+    EnvChange { set, unset }
 }
 
 /// What a backend state means for the sandbox: its status and error. A state in transition
@@ -327,25 +351,22 @@ impl Code {
                 return None;
             }
         };
-        // Taken out now, or already by an earlier try whose create didn't get through (what's
-        // sealed still has them).
-        let take_out = match self.copied(s).await {
-            Copied::Keep => s.secrets_dropped.as_ref().map(|_| None),
+        // The copied values aren't sealed (one sealed before they stopped being is left out too):
+        // they're read now, as their copier may.
+        if let Some(from) = &s.secrets_from {
+            spec.env.retain(|k, _| !from.keys.contains(k));
+        }
+        match self.copied(s).await {
+            Copied::Keep => {}
+            Copied::Fresh(change) => change.apply(&mut spec.env),
             Copied::Unsure(why) => {
                 self.note(s, SandboxStatus::Creating, Some(why), None, false).await;
                 return None;
             }
-            Copied::TakeOut(why) => Some(Some(why)),
-        };
-        if let Some(why) = take_out {
-            let Some(from) = &s.secrets_from else {
-                let why = why.unwrap_or_else(|| "its copied secrets were taken out".into());
+            Copied::TakeOut(why, Some(_)) => self.secrets_taken_out(s, &why),
+            Copied::TakeOut(why, None) => {
                 self.note(s, SandboxStatus::Failed, Some(why), None, true).await;
                 return None;
-            };
-            spec.env.retain(|k, _| !from.keys.contains(k));
-            if let Some(why) = why {
-                self.secrets_taken_out(s, &why);
             }
         }
         match b.create(&spec).await {
@@ -366,39 +387,53 @@ impl Code {
         }
     }
 
-    /// Whether the values copied into `s` from roll secrets may still go to its code: asked of roll
-    /// secrets as their copier now (removed from the project, demoted, a token revoked: no).
+    /// What the values copied into `s` from roll secrets are now: read again as their copier may
+    /// now (removed from the project, demoted, a token revoked: taken out). For a sandbox made
+    /// before their source was kept, only whether the copier still may act at all.
     async fn copied(&self, s: &SandboxRow) -> Copied {
         let Some(by) = s.secrets_by.as_deref().filter(|_| s.secrets_dropped.is_none()) else { return Copied::Keep };
         let Some(secrets) = self.secret_env.get() else { return Copied::Unsure("roll secrets isn't on this server yet".into()) };
-        let source = s.secrets_from.as_ref().map(|f| (f.project.as_str(), f.environment.as_str()));
-        match secrets.still_reveals(by, source).await {
-            Ok(()) => Copied::Keep,
-            Err(e) => match e.downcast::<crate::Refused>() {
-                Ok(r) => Copied::TakeOut(format!("its copied secrets were taken out: {r}")),
-                Err(e) => Copied::Unsure(format!("roll secrets didn't say whether its copied secrets may stay: {e:#}")),
-            },
+        let refused = |e: anyhow::Error| match e.downcast::<crate::Refused>() {
+            Ok(r) => Ok(format!("its copied secrets were taken out: {r}")),
+            Err(e) => Err(format!("roll secrets didn't say whether its copied secrets may stay: {e:#}")),
+        };
+        let Some(from) = &s.secrets_from else {
+            return match secrets.still_reveals(by, None).await {
+                Ok(()) => Copied::Keep,
+                Err(e) => refused(e).map_or_else(Copied::Unsure, |why| Copied::TakeOut(why, None)),
+            };
+        };
+        match secrets.reveal_as(by, &from.project, &from.environment, &format!("sandbox:{}", s.id)).await {
+            Ok(values) => Copied::Fresh(fresh(&from.keys, values)),
+            Err(e) => refused(e).map_or_else(Copied::Unsure, |why| Copied::TakeOut(why, Some(EnvChange { set: BTreeMap::new(), unset: from.keys.clone() }))),
         }
     }
 
-    /// Start it, without its copied secrets when their copier may no longer reveal them. A
-    /// sandbox whose backend can't take them out (or that doesn't say which they are, from before
-    /// that was kept) isn't started.
+    /// Start it with its copied secrets as their copier reads them now, or without them once they
+    /// may no longer reveal them. A sandbox whose backend can't change what it made starts as it
+    /// was made while its copier may, and isn't started once they may not; nor is one that doesn't
+    /// say which variables they are (made before that was kept).
     async fn start_sandbox(&self, b: &dyn SandboxBackend, s: &SandboxRow, backend_id: &str) -> Result<(), BackendError> {
-        let why = match self.copied(s).await {
+        let (change, why) = match self.copied(s).await {
             Copied::Keep => return b.start(backend_id).await,
             Copied::Unsure(why) => return Err(BackendError::Transient(why)),
-            Copied::TakeOut(why) => why,
-        };
-        let Some(from) = &s.secrets_from else {
-            return Err(BackendError::Permanent(format!("{why}; it was made before roll kept which variables they are, so it isn't started: delete it and make another")));
+            Copied::Fresh(change) => (change, None),
+            Copied::TakeOut(why, Some(change)) => (change, Some(why)),
+            Copied::TakeOut(why, None) => {
+                return Err(BackendError::Permanent(format!("{why}; it was made before roll kept which variables they are, so it isn't started: delete it and make another")));
+            }
         };
         let spec = SandboxSpec { id: s.id.clone(), name: s.name.clone(), size: s.size.clone(), env: BTreeMap::new() };
-        if !b.start_without(backend_id, &spec, &from.keys).await? {
-            return Err(BackendError::Permanent(format!("{why}; {} can't take them out of what it made, so it isn't started: delete it and make another", s.backend)));
+        if b.start_with(backend_id, &spec, &change).await? {
+            if let Some(why) = why {
+                self.secrets_taken_out(s, &why);
+            }
+            return Ok(());
         }
-        self.secrets_taken_out(s, &why);
-        Ok(())
+        match why {
+            None => b.start(backend_id).await,
+            Some(why) => Err(BackendError::Permanent(format!("{why}; {} can't take them out of what it made, so it isn't started: delete it and make another", s.backend))),
+        }
     }
 
     /// Record that the sandbox's copied secrets were taken out, and why (no value in it).
@@ -409,7 +444,8 @@ impl Code {
         }
     }
 
-    /// What the backend gets: the env sealed at create (the machine token and the owner's).
+    /// What the backend gets: the env sealed at create (the machine token and the owner's; the
+    /// copied values are read when it's made).
     fn sandbox_spec(&self, s: &SandboxRow) -> Result<SandboxSpec, String> {
         let sealer = self.ai.sealer.as_ref().ok_or("ROLL_SECRET_KEY isn't set on the server any more")?;
         let sealed = s.sealed.as_deref().ok_or("its secrets are gone")?;

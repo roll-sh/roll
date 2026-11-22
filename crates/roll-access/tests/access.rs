@@ -840,6 +840,12 @@ async fn oauth_connects_an_mcp_client() {
     assert!(d.access.store.client(&forged).unwrap().is_none(), "a forged id is no client");
     let bad = d.call("", Method::POST, "/v1/access/oauth/register", Some(json!({ "redirect_uris": ["http://evil.example/cb"] }))).await;
     assert_eq!(bad.1["error"], "invalid_redirect_uri");
+    // 2026-07-28 clients say what they are (SEP-837): a native one with a loopback redirect is
+    // echoed, a web one has https redirects only.
+    let native = d.call("", Method::POST, "/v1/access/oauth/register", Some(json!({ "redirect_uris": [redirect], "application_type": "native" }))).await;
+    assert_eq!((native.0, native.1["application_type"].as_str()), (StatusCode::CREATED, Some("native")), "{}", native.1);
+    let web = d.call("", Method::POST, "/v1/access/oauth/register", Some(json!({ "redirect_uris": [redirect], "application_type": "web" }))).await;
+    assert_eq!(web.1["error"], "invalid_redirect_uri");
 
     // RFC 7636's example pair.
     let (verifier, challenge) = ("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk", "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");

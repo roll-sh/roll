@@ -2148,6 +2148,25 @@ impl code_control::SecretEnv for ForCode {
         .await?
     }
 
+    /// As roll secrets reads for `by` now (`values_as_maker`: the check and the read in one), what a
+    /// sandbox it copied into starts with. Never a protected environment or an unresolved reference.
+    async fn reveal_as(&self, by: &str, project: &str, environment: &str, consumer: &str) -> anyhow::Result<Vec<(String, String)>> {
+        let (secrets, _) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting"))?;
+        let (by, project, environment, consumer) = (by.to_string(), project.to_string(), environment.to_string(), consumer.to_string());
+        tokio::task::spawn_blocking(move || {
+            let (slug, path) = environment.split_once(':').unwrap_or((&environment, "/"));
+            let v = secrets.values_as_maker(&by, &project, slug, path, &consumer).map_err(|e| match e {
+                roll_secrets::Error::Forbidden(m) | roll_secrets::Error::NotFound(m) | roll_secrets::Error::MakerUnreachable(m) => code_control::Refused(m).into(),
+                e => anyhow::Error::from(e),
+            })?;
+            if let Some(p) = v.problems.first() {
+                anyhow::bail!("{} of {slug} didn't resolve ({}: {})", v.problems.len(), p.key, p.problem);
+            }
+            Ok(v.values.into_iter().map(|(k, v)| (k, v.expose().to_string())).collect())
+        })
+        .await?
+    }
+
     /// The first project with the repo on its canvas that may reach it and has validity checks on
     /// asks (and keeps, and audits, as `roll:code`); none: nothing is asked.
     async fn validity(&self, repo: &str, found: Vec<(String, Option<String>)>) -> anyhow::Result<Vec<code_control::model::CredentialValidity>> {
@@ -2209,6 +2228,40 @@ impl code_control::SecretEnv for ForCode {
         .map_err(|e| code_control::Error::Internal(e.into()))?
         .map_err(for_code)?;
         Ok(code_control::StoredCredential { project: s.project, environment: s.environment, path: s.path, change: s.change, request: s.request })
+    }
+
+    /// An owner's reviewer key that's a `roll://` reference: bound to whoever sets it
+    /// (`Secrets::bind_ref` for `code:review:<owner>`), never a runtime read.
+    async fn bind_owner_key(&self, owner: &str, reference: &str, asker: &code_control::SecretsAsker) -> code_control::Result<String> {
+        let secrets = self.secrets()?;
+        let (owner, reference, asker) = (owner.to_string(), reference.to_string(), asker.clone());
+        tokio::task::spawn_blocking(move || {
+            let caller = secrets.caller_of(asker.operator, asker.user.as_ref(), asker.grant.as_ref()).map_err(|e| match e {
+                // A roll code owner token is no one to roll secrets.
+                Error::Unauthorized(_) => code_control::Error::Forbidden("a roll:// key is set by someone roll secrets knows: a session, the operator token or a roll token (rlt_…) that may reveal it".into()),
+                e => for_code(e),
+            })?;
+            let maker = secrets.bind_ref(&roll_secrets::ResourceRef::code_owner(&owner), &reference, &caller).map_err(|e| match e {
+                roll_secrets::Refusal::NotAllowed(_) | roll_secrets::Refusal::MakerUnreachable(_) | roll_secrets::Refusal::NotTrusted(_) | roll_secrets::Refusal::Protected(_) => code_control::Error::Forbidden(e.to_string()),
+                roll_secrets::Refusal::Failed(e) => for_code(e),
+                e => code_control::Error::Invalid(e.to_string()),
+            })?;
+            Ok(serde_json::to_value(&maker).map_err(|e| code_control::Error::Internal(e.into()))?.as_str().unwrap_or_default().to_string())
+        })
+        .await
+        .map_err(|e| code_control::Error::Internal(e.into()))?
+    }
+
+    /// That key for a review, as its maker may read it now (audited as `code:review:<owner>`).
+    async fn owner_key(&self, owner: &str, reference: &str, maker: &str) -> anyhow::Result<code_control::CredentialValue> {
+        let secrets = self.secrets().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let maker: roll_secrets::Maker = serde_json::from_value(serde_json::Value::String(maker.to_string()))?;
+        let (owner, reference) = (owner.to_string(), reference.to_string());
+        tokio::task::spawn_blocking(move || {
+            let v = secrets.resolve_as(&roll_secrets::ResourceRef::code_owner(&owner), &reference, &maker).map_err(|e| anyhow::anyhow!("{e}"))?;
+            Ok(code_control::CredentialValue(v.value.expose().to_string()))
+        })
+        .await?
     }
 }
 
