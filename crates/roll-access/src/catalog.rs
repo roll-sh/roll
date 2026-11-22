@@ -969,6 +969,7 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/access/audit", "access", R, Tgt::Product),
     row("GET", "/v1/access/oauth/clients", "access", R, Tgt::Product),
     row("GET", "/v1/access/oauth/clients/{id}", "access", R, Tgt::Product),
+    row("GET", "/v1/access/oauth/step-ups/{id}", "access", R, Tgt::Product),
     // The MCP server: every tool call is its own request through the gate.
     row("*", "/v1/mcp", "access", R, Tgt::AnyGrant),
     // rolld's own.

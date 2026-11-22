@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { type Grant, stepUpRules, connectionToWiden, installLink, accessRequest, approversText, parseApprovers, deciderName, describeApprovalRule, gateProgress, rememberable, proposedRule, approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, githubIdentity, githubStep, presetFor, presetRules, publicJwk, rulesOf, trustedLabel, statusOf, toolsetCost, pickArea, waitsForAdmin, withToolsets, type Approval, type Preset, idpFromForm, tieForAgents, untieForAgents } from "./access-api";
+import { stepUpId, broadRule, installLink, accessRequest, approversText, parseApprovers, deciderName, describeApprovalRule, gateProgress, rememberable, proposedRule, approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, githubIdentity, githubStep, presetFor, presetRules, publicJwk, rulesOf, trustedLabel, statusOf, toolsetCost, pickArea, waitsForAdmin, withToolsets, type Approval, type Preset, idpFromForm, tieForAgents, untieForAgents } from "./access-api";
 
 const presets: Preset[] = [
   { id: "read-only", name: "Read only", description: "", rules: [{ product: "*", resources: "*", actions: { read: "allow" } }] },
@@ -253,18 +253,18 @@ describe("an SSO connection for agents too", () => {
   });
 });
 
-describe("step-up scope", () => {
-  it("reads roll:add items as rules, ignoring what isn't one", () => {
-    expect(stepUpRules("agent roll:add:postgres:delete:pa roll:add:apps:deploy roll:add:nope:read roll:add:postgres:fly roll:add:postgres:read:a/b", ["postgres", "apps"])).toEqual([
-      { product: "postgres", resources: [{ id: "pa" }], actions: { delete: "allow" } },
-      { product: "apps", resources: "*", actions: { deploy: "allow" } },
-    ]);
-    expect(stepUpRules(undefined, ["postgres"])).toEqual([]);
+describe("step-up", () => {
+  it("reads one roll:step-up id from a scope, nothing else", () => {
+    expect(stepUpId("agent roll:step-up:stp_ab12")).toBe("stp_ab12");
+    expect(stepUpId("roll:step-up:stp_a roll:step-up:stp_b")).toBeNull();
+    expect(stepUpId("roll:step-up:tok_a")).toBeNull();
+    expect(stepUpId("roll:add:postgres:admin")).toBeNull();
+    expect(stepUpId(undefined)).toBeNull();
   });
 
-  it("finds the person's own live connection of the client", () => {
-    const g = (over: Partial<Grant>) => ({ id: "tok_a", kind: "oauth", client: { id: "c1" }, user: "usr_a", revoked_at: null, ...over }) as Grant;
-    expect(connectionToWiden([g({})], "c1", "usr_a")?.id).toBe("tok_a");
-    expect(connectionToWiden([g({ user: "usr_b" }), g({ revoked_at: 1 }), g({ pending: true }), g({ kind: "token" }), g({ client: { id: "c2" } as Grant["client"] })], "c1", "usr_a")).toBeUndefined();
+  it("calls a rule broad when it's admin, reveal or every resource", () => {
+    expect(broadRule({ product: "postgres", resources: [{ id: "pa" }], actions: { delete: "allow" } })).toBe(false);
+    expect(broadRule({ product: "postgres", resources: "*", actions: { delete: "allow" } })).toBe(true);
+    expect(broadRule({ product: "secrets", resources: [{ id: "p" }], actions: { reveal: "allow" } })).toBe(true);
   });
 });

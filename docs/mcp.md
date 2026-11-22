@@ -361,16 +361,21 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
   place a connection's rules come from: a client can't widen them.
 - Each connection is a grant: it's listed with its client, last use and rules, and revoking it ends
   every token it has, at once.
-- Step-up (SEP-835): a call an OAuth connection's rules refuse carries the challenge
-  `Bearer error="insufficient_scope", scope="roll:add:<product>:<action>[:<resource>]",
-  resource_metadata=…` in `_meta["mcp/www_authenticate"]` (ChatGPT reads it there), with the
-  refusal's text and widen link as before. A single call from a client known to step up (Claude
-  Code from 2.1.288) answers HTTP `403` with that `WWW-Authenticate` header, so the client sends
-  the person to authorize again with the scope. The consent screen reads `roll:add:` items as rules
-  it proposes (never grants by itself), on top of the person's live connection of that client, and
-  by default adds them to it (`widen`: the same grant, its other sessions widen too, nothing new is
-  made; the policy and an admin's approval apply as to any widened token). A scoped token (`rlt_`)
-  has no consent to step up: its refusal stays in-band.
+- Step-up (SEP-835): when an OAuth connection's own rules refuse a tool call (a refusal its person
+  can widen, not one by their role in a project), roll records a step-up: that connection and the
+  one rule the call needed, exactly as the gate decided it (the resource and an index included),
+  kept 10 minutes, at most 10 a connection. The refusal carries
+  `Bearer error="insufficient_scope", scope="roll:step-up:<id>", resource_metadata=…` in
+  `_meta["mcp/www_authenticate"]` (ChatGPT reads it there) beside its text and widen link, and a
+  single, unbatched call from a client known to step up (Claude Code from 2.1.288) answers HTTP
+  `403` with that `WWW-Authenticate` header. The consent screen looks the id up as the signed-in
+  person (`GET /v1/access/oauth/step-ups/{id}`: theirs, live, or one "no such step-up" for any
+  other case), shows the rule and the connection it joins (said plainly when it reaches far, or
+  when the policy has an admin approve it), and "Add it" sends only the id: the rule joins that
+  connection's stored rules in one transaction, used once, nothing else about the connection
+  changes, and the client's code is for that connection (its other sessions widen too, nothing new
+  is made). A client never chooses what's proposed. A scoped token (`rlt_`) has no consent to step
+  up, and a progress-streamed call keeps the challenge in-band only.
 - Clients either register (dynamic registration) or are known by a client ID metadata document
   (2025-11-25: the `client_id` is an https URL whose JSON names it). A document is fetched through
   roll's private-address guard (`roll-net`), without redirects, in 5 seconds, at most 64 KiB, and
@@ -1124,13 +1129,15 @@ waits on a sibling PR reaching main is last.
 
 1. **Step-up authorization for OAuth clients (this PR).** Claude Code re-prompts for more OAuth
    scope during a tool call (v2.1.288, 2026-10-02) and Cloudflare's API server shipped step-up on
-   2026-10-19. An OAuth connection's refusal now carries the `insufficient_scope` challenge naming
-   the rule (`roll:add:<product>:<action>[:<resource>]`) in `_meta["mcp/www_authenticate"]`, and
-   answers HTTP 403 with it to Claude Code from 2.1.288; the consent screen proposes those rules on
-   top of the person's live connection of that client and adds them to it (`widen`), so its other
-   sessions widen too and nothing new is made. `rlt_` tokens and other clients keep the in-band
-   refusal (Codex's openai/codex#20518 is open). Tests: `step_up_widens_the_connection`
-   (roll-access), `a_refused_oauth_call_challenges_for_the_rule` (roll-mcp), `consent.test.tsx`.
+   2026-10-19. A refusal of an OAuth connection's own rules records a step-up (the connection and
+   the one rule the gate refused) and carries `insufficient_scope` with `scope="roll:step-up:<id>"`,
+   in-band and as HTTP 403 to Claude Code from 2.1.288; the consent screen shows that rule and
+   adds it to that connection. An outside security review of the first version (a scope listing
+   rules, the screen ticking them on the person's connection) found a client could pre-tick any
+   rule, role refusals would loop, a resource it couldn't encode widened to every one, a widen reset
+   other settings or took an expired or the wrong connection: hence the recorded step-up, which a
+   client can't shape. Tests: `step_up_widens_the_connection` (roll-access),
+   `a_refused_oauth_call_challenges_for_the_rule` (roll-mcp), `consent.test.tsx`.
 2. **Operator policy for agent connections.** Stripe asks a person for refunds and money movement
    whatever the key allows and switches MCP per environment; PlanetScale has an org-wide MCP query
    access (none, read-only, read-write); Atlassian allowlists which OAuth clients may connect. roll's

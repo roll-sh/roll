@@ -193,10 +193,11 @@ pub struct Consent {
     pub state: Option<String>,
     #[serde(default)]
     pub resource: Option<String>,
-    /// Step-up: the person's existing connection of this client (`tok_…`) to give these rules,
-    /// instead of making a new one (MCP's `insufficient_scope` challenge sent the client here).
+    /// Step-up: the id (`stp_…`) of the step-up roll recorded when this client's connection was
+    /// refused (its `insufficient_scope` challenge). Its one rule joins that connection; the
+    /// consent's other fields aren't used.
     #[serde(default)]
-    pub widen: Option<String>,
+    pub step_up: Option<String>,
     #[serde(flatten)]
     pub allowed: Allowed,
 }
@@ -288,13 +289,13 @@ pub async fn authorize(State(a): S, ext: Extensions, body: axum::body::Bytes) ->
     if !client.redirect_uris.contains(&c.redirect_uri) {
         return Err(Error::BadRequest("redirect_uri isn't one the client registered".into()));
     }
-    let Consented { new, by, user, asker } = consented(&a, &ext, &client, &c.allowed)?;
     // The resource the client asked for (RFC 8707; MCP clients always name the MCP server): its
     // tokens are for that server only. One that named none (`roll login`) gets API tokens.
     let res = c.resource.as_ref().map(|_| resource(&a));
-    if let Some(id) = c.widen.clone() {
-        return widen(&a, &c, &client, id, new, user, asker, res).await;
+    if let Some(id) = c.step_up.clone() {
+        return step_up(&a, &ext, &c, &client, id, res).await;
     }
+    let Consented { new, by, user, asker } = consented(&a, &ext, &client, &c.allowed)?;
     let (a2, cl, uri, ch) = (a.clone(), client.clone(), c.redirect_uri.clone(), c.code_challenge.clone());
     let (code, grant_id) = tokio::task::spawn_blocking(move || a2.store.issue_code(&cl, &new, crate::store::Issuer { created_by: &by, user: user.as_deref() }, &uri, &ch, res.as_deref()))
         .await
@@ -314,39 +315,53 @@ pub async fn authorize(State(a): S, ext: Extensions, body: axum::body::Bytes) ->
     Ok(res)
 }
 
-/// Step-up's consent: the person's existing connection of this client takes the rules they allowed
-/// now (the same checks as editing it: the policy, and an admin's approval when a person widens
-/// past it), and the client gets a code for that connection, so its other sessions widen too and
-/// nothing new is made. Only a live connection of this client, this person's, not waiting on an
-/// admin.
-#[allow(clippy::too_many_arguments)]
-async fn widen(
+/// The step-up `id` and its connection, when it's the caller's own live connection of `client`
+/// (any client when `None`) and not waiting on an admin: else one answer for every other case, so
+/// an id tells nothing about whose it is.
+pub(crate) async fn own_step_up(
     a: &Arc<Access>,
-    c: &Consent,
-    client: &crate::store::Client,
-    id: String,
-    new: NewGrant,
-    user: Option<String>,
-    asker: Option<String>,
-    res: Option<String>,
-) -> crate::Result<Response> {
-    let (a2, id2) = (a.clone(), id.clone());
-    let g = tokio::task::spawn_blocking(move || a2.store.get(&id2)).await.map_err(|e| Error::Internal(e.to_string()))??;
-    let theirs = g.kind == "oauth" && g.client.as_ref().is_some_and(|cl| cl.id == client.id) && g.user == user && g.revoked_at.is_none();
+    ext: &Extensions,
+    id: &str,
+    client: Option<&str>,
+) -> crate::Result<(crate::store::Grant, roll_auth::scope::Rule, Option<String>)> {
+    let (user, asker) = match crate::api::who(a, ext)? {
+        crate::api::Who::Operator => (ext.get::<roll_auth::SignedIn>().map(|u| u.user.clone()), None),
+        crate::api::Who::User(u) => (Some(u.user), Some(u.handle)),
+        crate::api::Who::Grant(_) => return Err(Error::Forbidden("a token never connects an MCP client".into())),
+    };
+    let none = || Error::BadRequest("no such step-up of yours: retry the call that was refused".into());
+    let (a2, id2) = (a.clone(), id.to_string());
+    let (gid, rule) = tokio::task::spawn_blocking(move || a2.store.step_up(&id2)).await.map_err(|e| Error::Internal(e.to_string()))??.ok_or_else(none)?;
+    let a2 = a.clone();
+    let g = tokio::task::spawn_blocking(move || a2.store.get(&gid)).await.map_err(|e| Error::Internal(e.to_string()))?.map_err(|_| none())?;
+    let theirs = g.kind == "oauth" && g.user == user && g.live(code_sql::now_ms()) && client.is_none_or(|c| g.client.as_ref().is_some_and(|cl| cl.id == c));
     if !theirs {
-        return Err(Error::BadRequest("widen must name your own live connection of this client".into()));
+        return Err(none());
     }
     if g.pending {
         return Err(Error::Conflict("that connection waits for an admin's approval: its rules can't change until they decide".into()));
     }
-    a.check_policy(g.expires_at)?;
-    let change = crate::store::GrantChange { rules: Some(new.rules.clone()), ask_otherwise: Some(new.ask_otherwise), pending: asker.as_ref().map(|_| true), ..Default::default() };
-    let (a2, id2) = (a.clone(), id.clone());
-    let updated = tokio::task::spawn_blocking(move || a2.store.update(&id2, &change)).await.map_err(|e| Error::Internal(e.to_string()))??;
-    if let Some(h) = &asker {
+    Ok((g, rule, asker))
+}
+
+/// Step-up's consent: the step-up's one rule joins the person's connection (read and written in
+/// one transaction; nothing else about it changes), the policy and an admin's approval applying as
+/// to any widened token, and the client gets a code for that connection: its other sessions widen
+/// too and nothing new is made.
+async fn step_up(a: &Arc<Access>, ext: &Extensions, c: &Consent, client: &crate::store::Client, id: String, res: Option<String>) -> crate::Result<Response> {
+    let (g, rule, asker) = own_step_up(a, ext, &id, Some(&client.id)).await?;
+    let mut rules = g.rules.clone();
+    if !rules.0.contains(&rule) {
+        rules.0.push(rule);
+    }
+    let pending = asker.is_some() && a.policy_now().needs_approval(&rules, g.ask_otherwise);
+    let (a2, id2, gid) = (a.clone(), id.clone(), g.id.clone());
+    let updated = tokio::task::spawn_blocking(move || a2.store.apply_step_up(&id2, &gid, pending)).await.map_err(|e| Error::Internal(e.to_string()))??;
+    a.tell_added(&updated, crate::api::Added::Client(&client.name), ext);
+    if pending && let Some(h) = &asker {
         a.tell_admins_waiting(&updated, h);
     }
-    let (a2, cid, gid, uri, ch) = (a.clone(), client.id.clone(), id.clone(), c.redirect_uri.clone(), c.code_challenge.clone());
+    let (a2, cid, gid, uri, ch) = (a.clone(), client.id.clone(), g.id.clone(), c.redirect_uri.clone(), c.code_challenge.clone());
     let code = tokio::task::spawn_blocking(move || a2.store.issue_code_for(&cid, &gid, &uri, &ch, res.as_deref())).await.map_err(|e| Error::Internal(e.to_string()))??;
     let mut redirect = url::Url::parse(&c.redirect_uri).map_err(|_| Error::BadRequest("redirect_uri isn't a URL".into()))?;
     {
@@ -358,8 +373,18 @@ async fn widen(
         q.append_pair("iss", &api(a));
     }
     let mut out = Json(json!({ "redirect": redirect.to_string() })).into_response();
-    out.extensions_mut().insert(crate::api::Changed(id));
+    out.extensions_mut().insert(crate::api::Changed(g.id));
     Ok(out)
+}
+
+/// `GET /v1/access/oauth/step-ups/{id}`: what a step-up proposes, for its person's consent screen
+/// (the connection and the one rule), or one "no such step-up" for anyone else.
+pub async fn step_up_view(State(a): S, ext: Extensions, axum::extract::Path(id): axum::extract::Path<String>) -> crate::Result<Json<Value>> {
+    let (g, rule, asker) = own_step_up(&a, &ext, &id, None).await?;
+    let mut rules = g.rules.clone();
+    rules.0.push(rule.clone());
+    let waits = asker.is_some() && a.policy_now().needs_approval(&rules, g.ask_otherwise);
+    Ok(Json(json!({ "id": id, "connection": { "id": g.id, "name": g.name, "client_id": g.client.as_ref().map(|c| c.id.clone()) }, "rule": rule, "waits_for_admin": waits })))
 }
 
 /// A metadata document is fetched at most this often (it's kept between).

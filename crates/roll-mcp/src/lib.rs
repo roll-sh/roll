@@ -467,7 +467,8 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
         }
         // One refused call from a client that steps up: the HTTP challenge, so it asks the person to
         // allow the rule and retries (its body is the same JSON-RPC answer, for a client that reads it).
-        if responses.len() == 1
+        if !batch
+            && responses.len() == 1
             && steps_up(ctx.client.as_deref())
             && let Some(challenge) = responses[0]["result"]["_meta"]["mcp/www_authenticate"][0].as_str()
             && let Ok(v) = HeaderValue::from_str(challenge)
@@ -1463,22 +1464,17 @@ fn forward_headers(h: &HeaderMap, args: &Value) -> HeaderMap {
 }
 
 /// The `WWW-Authenticate` challenge for an OAuth connection's refused call (RFC 6750 §3.1,
-/// `insufficient_scope`; MCP's step-up): the scope names the rule the refusal needed,
-/// `roll:add:<product>:<action>[:<resource>]`, for roll's consent screen to propose.
+/// `insufficient_scope`; MCP's step-up), when roll recorded a step-up for it (only a refusal of the
+/// connection's own rules, which its person can widen): the scope is `roll:step-up:<id>`, which
+/// roll's consent screen looks up. The client never chooses what's proposed.
 fn step_up_challenge(ctx: &Ctx, result: &Value) -> Option<String> {
     let Principal::Grant(g) = &ctx.principal else { return None };
     if g.kind != roll_auth::GrantKind::Oauth || result["isError"] != true {
         return None;
     }
-    let s = &result["structuredContent"];
-    let needs = s.get("needs").filter(|_| s["http_status"] == 403)?;
-    let word = |v: &Value| v.as_str().filter(|w| !w.is_empty() && w.len() <= 64 && w.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))).map(str::to_string);
-    let mut scope = format!("roll:add:{}:{}", word(&needs["product"])?, word(&needs["action"])?);
-    if let Some(r) = word(&needs["resource"]) {
-        scope = format!("{scope}:{r}");
-    }
+    let id = result["structuredContent"]["step_up"].as_str().filter(|id| id.starts_with("stp_") && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))?;
     Some(format!(
-        "Bearer error=\"insufficient_scope\", scope=\"{scope}\", resource_metadata=\"{}/.well-known/oauth-protected-resource/v1/mcp\", error_description=\"this connection's rules don't allow it\"",
+        "Bearer error=\"insufficient_scope\", scope=\"roll:step-up:{id}\", resource_metadata=\"{}/.well-known/oauth-protected-resource/v1/mcp\", error_description=\"this connection's rules don't allow it\"",
         ctx.m.config.api_url.trim_end_matches('/')
     ))
 }

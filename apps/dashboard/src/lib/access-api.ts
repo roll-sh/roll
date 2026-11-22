@@ -53,23 +53,26 @@ export function proposedRule(search: string, effect: Effect): Rule | null {
 }
 
 /**
- * The rules an MCP client's step-up asks for: `scope` items `roll:add:<product>:<action>[:<resource>]`
- * (roll's `insufficient_scope` challenge on a refused call), each one action allowed, on that
- * resource or every one. The consent screen proposes them; the person decides.
+ * The step-up a client's `scope` names (`roll:step-up:stp_…`: roll's `insufficient_scope` challenge on
+ * a refused call). Only an id: what it proposes is roll's record, looked up as the signed-in person.
  */
-export function stepUpRules(scope: string | undefined | null, products: string[]): Rule[] {
-  return (scope ?? "").split(/\s+/).flatMap((item) => {
-    const [ns, verb, product, action, ...rest] = item.split(":");
-    if (ns !== "roll" || verb !== "add" || !products.includes(product) || !(ACTIONS as readonly string[]).includes(action) || rest.length > 1) return [];
-    const id = rest[0];
-    if (id !== undefined && !/^[A-Za-z0-9_.-]{1,64}$/.test(id)) return [];
-    return [{ product, resources: id ? [{ id }] : "*", actions: { [action as Action]: "allow" as Effect } }];
-  });
+export function stepUpId(scope: string | undefined | null): string | null {
+  const ids = (scope ?? "").split(/\s+/).filter((s) => s.startsWith("roll:step-up:")).map((s) => s.slice("roll:step-up:".length));
+  return ids.length === 1 && /^stp_[A-Za-z0-9_]{1,60}$/.test(ids[0]) ? ids[0] : null;
 }
 
-/** The person's live connection of this client that a step-up widens (theirs, not waiting on an admin). */
-export function connectionToWiden(grants: Grant[], clientId: string, user: string | null): Grant | undefined {
-  return grants.find((g) => g.kind === "oauth" && g.client?.id === clientId && !g.revoked_at && !g.pending && (g.user ?? null) === user);
+/** What a step-up proposes: one rule for one of the person's connections. */
+export interface StepUp {
+  id: string;
+  connection: { id: string; name: string; client_id: string | null };
+  rule: Rule;
+  /** Adding it makes the connection wait for an admin's approval (the token policy). */
+  waits_for_admin: boolean;
+}
+
+/** Whether a rule reaches far: admin or reveal, or every resource of its product. */
+export function broadRule(r: Rule): boolean {
+  return r.resources === "*" || r.actions.admin !== undefined || r.actions.reveal !== undefined;
 }
 
 export interface OAuthClient {
@@ -408,8 +411,8 @@ export interface Allowed {
 }
 
 export interface Consent extends Allowed {
-  /** Step-up: the person's existing connection of this client to give these rules (`tok_…`). */
-  widen?: string;
+  /** Step-up: the step-up roll recorded (`stp_…`); its one rule joins its connection, nothing else changes. */
+  step_up?: string;
   client_id: string;
   redirect_uri: string;
   code_challenge: string;
@@ -713,6 +716,8 @@ export const accessApi = {
   removeEnterpriseApp: (id: string) => call<{ revoked: number }>("DELETE", `/v1/access/enterprise/apps/${encodeURIComponent(id)}`),
   catalog: () => call<Catalog>("GET", "/v1/access/catalog"),
   tokens: () => call<Grant[]>("GET", "/v1/access/tokens"),
+  /** A step-up's proposal, the signed-in person's own (an error for anyone else's). */
+  stepUp: (id: string) => call<StepUp>("GET", `/v1/access/oauth/step-ups/${encodeURIComponent(id)}`),
   /** The latest workload tokens (they're not in `tokens`). */
   workloads: () => call<Grant[]>("GET", "/v1/access/tokens?kind=workload"),
   token: (id: string) => call<Grant>("GET", token(id)),

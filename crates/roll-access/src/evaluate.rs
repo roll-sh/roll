@@ -738,11 +738,33 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
                 }
                 r
             });
+            // Step-up (MCP's `insufficient_scope` challenge): an OAuth connection's refused tool call
+            // keeps the one rule it needed, for the consent screen to propose to its person; the
+            // challenge carries only the id, so a client never chooses what's proposed.
+            let step_up = if ctx.grant.kind == "oauth" && ctx.mcp.is_some() && widen.is_some() {
+                let resources = match (&lent, &target) {
+                    (Some((_, id)), _) => roll_auth::scope::Resources::Some(vec![roll_auth::scope::Selector::Id { id: id.clone(), index: None }]),
+                    (None, Target::One(r)) if r.id.is_some() => roll_auth::scope::Resources::Some(vec![roll_auth::scope::Selector::Id { id: r.id.clone().unwrap_or_default(), index: r.index.clone() }]),
+                    _ => roll_auth::scope::Resources::All,
+                };
+                let rule = roll_auth::scope::Rule {
+                    product: about.to_string(),
+                    resources,
+                    environments: None,
+                    paths: None,
+                    unprotected: false,
+                    actions: [(action, roll_auth::scope::Effect::Allow)].into_iter().collect(),
+                };
+                let (a2, gid) = (access.clone(), ctx.grant.id.to_string());
+                tokio::task::spawn_blocking(move || a2.store.create_step_up(&gid, &rule)).await.ok().and_then(Result::ok)
+            } else {
+                None
+            };
             return deny(
                 StatusCode::FORBIDDEN,
                 "forbidden",
                 format!("this token can't {action} {what}"),
-                json!({ "needs": { "product": about, "action": action, "resource": resource }, "widen": widen, "request": request }),
+                json!({ "needs": { "product": about, "action": action, "resource": resource }, "widen": widen, "request": request, "step_up": step_up }),
             );
         }
         Outcome::Ask if decided_before => {}

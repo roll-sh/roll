@@ -115,6 +115,12 @@ CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS oauth_step_ups (
+    id TEXT PRIMARY KEY,
+    grant_id TEXT NOT NULL,
+    rule TEXT NOT NULL,
+    expires_at INTEGER NOT NULL
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS oauth_codes (
     hash TEXT PRIMARY KEY,
     client_id TEXT NOT NULL,
@@ -181,6 +187,8 @@ pub const REFRESH_TTL_MS: i64 = 30 * 24 * 3600 * 1000;
 pub const REFRESH_GRACE_MS: i64 = 30 * 1000;
 /// An authorization code is good for one minute, once.
 pub const CODE_TTL_MS: i64 = 60 * 1000;
+/// A step-up waits this long for the person to allow it on the consent screen.
+pub const STEP_UP_TTL_MS: i64 = 10 * 60 * 1000;
 /// `last_used_at` is written at most this often per grant.
 const TOUCH_MS: i64 = 60 * 1000;
 /// Live grants kept at most, and per person.
@@ -1949,6 +1957,58 @@ impl Store {
             Ok::<_, Error>(())
         })?;
         Ok((code, grant_id))
+    }
+
+    /// A step-up (MCP's `insufficient_scope` challenge) for an OAuth connection's refused call: the
+    /// one rule the gate refused, kept for 10 minutes for the consent screen to propose. A client
+    /// never chooses it; its challenge carries only the id. At most 10 live per connection.
+    pub fn create_step_up(&self, grant_id: &str, rule: &roll_auth::scope::Rule) -> Result<String> {
+        let id = new_id("stp");
+        let now = code_sql::now_ms();
+        let json = serde_json::to_string(rule).unwrap_or_default();
+        self.db.write(|c| {
+            c.execute("DELETE FROM oauth_step_ups WHERE expires_at <= ?", [now])?;
+            c.execute(
+                "DELETE FROM oauth_step_ups WHERE grant_id = ? AND id NOT IN (SELECT id FROM oauth_step_ups WHERE grant_id = ? ORDER BY expires_at DESC LIMIT 9)",
+                params![grant_id, grant_id],
+            )?;
+            c.execute("INSERT INTO oauth_step_ups (id, grant_id, rule, expires_at) VALUES (?, ?, ?, ?)", params![id, grant_id, json, now + STEP_UP_TTL_MS])?;
+            Ok::<_, Error>(())
+        })?;
+        Ok(id)
+    }
+
+    /// A live step-up: its connection's id and the rule it proposes.
+    pub fn step_up(&self, id: &str) -> Result<Option<(String, roll_auth::scope::Rule)>> {
+        let now = code_sql::now_ms();
+        let row: Option<(String, String)> = self
+            .db
+            .read(|c| c.query_row("SELECT grant_id, rule FROM oauth_step_ups WHERE id = ? AND expires_at > ?", params![id, now], |r| Ok((r.get(0)?, r.get(1)?))).optional())?;
+        Ok(row.and_then(|(g, r)| serde_json::from_str(&r).ok().map(|rule| (g, rule))))
+    }
+
+    /// Use a step-up, once: its rule joins its connection's rules (unless one the same is there),
+    /// read and written in one transaction so nothing changed meanwhile is lost, and the
+    /// connection waits for an admin again when `pending`. Nothing else about it changes.
+    pub fn apply_step_up(&self, id: &str, grant_id: &str, pending: bool) -> Result<Grant> {
+        let now = code_sql::now_ms();
+        self.db.write(|c| {
+            let rule: Option<String> = c.query_row("SELECT rule FROM oauth_step_ups WHERE id = ? AND grant_id = ? AND expires_at > ?", params![id, grant_id, now], |r| r.get(0)).optional()?;
+            c.execute("DELETE FROM oauth_step_ups WHERE id = ?", [id])?;
+            let rule: roll_auth::scope::Rule = rule.and_then(|r| serde_json::from_str(&r).ok()).ok_or_else(|| Error::BadRequest("that step-up is used or expired: retry the call".into()))?;
+            let rules: String = c.query_row("SELECT rules FROM grants WHERE id = ?", [grant_id], |r| r.get(0))?;
+            let mut scope: Scope = serde_json::from_str(&rules).unwrap_or_default();
+            if !scope.0.contains(&rule) {
+                scope.0.push(rule);
+            }
+            check_rules(&scope)?;
+            c.execute("UPDATE grants SET rules = ? WHERE id = ?", params![serde_json::to_string(&scope).unwrap_or_default(), grant_id])?;
+            if pending {
+                c.execute("UPDATE grants SET pending = ? WHERE id = ?", params![true, grant_id])?;
+            }
+            Ok::<_, Error>(())
+        })?;
+        self.get(grant_id)
     }
 
     /// A code for an existing connection (step-up: the person widened it on the consent screen),
