@@ -6180,6 +6180,12 @@ and webhooks' and review apps' signing secrets sealed. Still open:
   - search: `fix/search-security-1120` and #318;
   - roll code: done, #627 (4af6bb3b5). Webhooks' and review apps' URLs are sealed, nothing is made
     without `ROLL_SECRET_KEY`, and an upgraded database keeps no clear URL or secret.
+- **Item 6: designed**, in [members-v1-1.md](members-v1-1.md) (docs only, not built). Groups hold
+  viewer, developer or admin roles on projects (never owner), and roles add up, read in one query
+  with the session grant. SCIM `Groups` is opt-in per connection. A member's time-boxed elevation is
+  a roll-access `ELEVATE` approval with the two-person rule. It lapses at `until` with nothing to
+  revoke, and it never counts for deciding for others (reviews, accepts, approvers, members,
+  tokens, decoys). Its open decisions are D10–D18.
 - **Batch 6's follow-ups: landed**, #582 (32dd78392). A consumer's CAs end as soon as it loses a host;
   `maker_unreachable` (403) when a placeholder's or a chosen reference's maker no longer reaches it;
   a decoy planted from a session mails that person.

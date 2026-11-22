@@ -117,7 +117,8 @@ narrows, so a token can carry it too (a CI token for every environment except pr
 
 ### Custom roles and groups
 
-Both are later, not v1:
+Neither is in v1. Groups are designed for v1.1 in [members-v1-1.md](members-v1-1.md), and
+custom roles come later:
 
 - **Custom roles** (Infisical Enterprise, Doppler): a role becomes a row of rules in roll-access,
   named per project or per server. The evaluation doesn't change: a membership names a role, and
@@ -176,7 +177,7 @@ canvas and gain `admin` on it. The operator's tokens keep today's meaning. See
   (`usr_…`), not a token. It is never listed in `/v1/access/tokens`, and it can't be revoked
   there: ending a session or removing a membership ends it.
 - An approval (`ask`) never applies to a session grant (`ask_otherwise: false`, and roles only
-  `allow`). A person asking for more is roll-access's access request, later ([Phasing](#phasing)).
+  `allow`). A person asking for more is an elevation (v1.1, [members-v1-1.md](members-v1-1.md)).
 
 ## What changes for each product
 
@@ -429,16 +430,19 @@ Accepting an invite isn't a tool, because it's a person's.
 - the dashboard's Members tab and Invites page, the CLI, the MCP tools.
 
 **v1.1: the products that already know their project.** Apps, previews and search become member
-products. Previews is built (`feature/roll-previews-members`, on this branch).
+products. Previews is built (#524).
+
+**v1.1: groups, SCIM groups and time-boxed elevation** (design: [members-v1-1.md](members-v1-1.md)).
+Groups hold roles on projects, and roles add up. A company's provider keeps a group's members over
+SCIM. A member asks for a role on one project or environment for a few hours, and someone else
+approves it through roll-access's approvals.
 
 **Later:**
 
 - the other products, one at a time, as each places its creates and resolves its project;
-- groups, with SCIM groups;
 - custom roles;
 - time-boxed memberships (`expires_at` on a member, Infisical's temporary access);
-- people's access requests (a viewer asking to reveal one key for an hour, approved by a project
-  admin through roll-access's approvals, scoped to the project);
+- elevation to one folder or key, and approval chains in sequence;
 - project admins approving `ask` requests of their project's tokens;
 - storage roles mapped onto IAM.
 
