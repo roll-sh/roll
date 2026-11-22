@@ -2792,6 +2792,10 @@ pub struct Deployment {
     /// deployment's GET.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub approved_by: Vec<String>,
+    /// Its own URL (`<id>--<env slug>` under the apps domain, the environment's access rules):
+    /// none for a worker, a service with a volume, one not public over HTTP, one never built,
+    /// removed, pruned or waiting for its approvals.
+    pub url: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]

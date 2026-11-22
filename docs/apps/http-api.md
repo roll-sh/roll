@@ -632,6 +632,7 @@ type Deployment = {
   status: DeployStatus;
   trigger: "push" | "manual" | "rollback" | "upload" | "api" | "settings" | "promote"; // settings: a redeploy
   approved_by?: string[];   // who approved putting it live, where its environment asks for approvals (a single deployment's GET)
+  url: string | null;        // its own URL (`<id>--<env slug>` under the apps domain, the environment's scheme, port and access rules; never a project's preview domain): null for a worker, a service with a volume, one not public over HTTP, one never built, removed, pruned or waiting for its approvals
   actor: string | null;     // who asked: "git:<name>" for a push (its commit's author, as the commit claims it), the calling token or connection ("operator" for the operator's token); null when roll did it on its own
   revision: string | null;   // git commit of a repo source
   message: string;
