@@ -1076,6 +1076,29 @@ export function withToolsets(url: string, products: string[], mode: McpMode = {}
   return u.toString().replace(/%2C/g, ",");
 }
 
+/**
+ * Whether `uri` is one of a client's redirects: the same string, or a loopback one on another port
+ * (RFC 8252 7.3): a native app listens where it can. The same rule as roll-access's.
+ */
+export function redirectRegistered(uris: string[], uri: string): boolean {
+  if (uris.includes(uri)) return true;
+  const loopback = (s: string) => {
+    try {
+      const u = new URL(s);
+      const host = u.hostname.replace(/^\[|\]$/g, "");
+      return u.protocol === "http:" && !u.username && !u.password && (host === "localhost" || /^127\./.test(host) || host === "::1") ? u : null;
+    } catch {
+      return null;
+    }
+  };
+  const asked = loopback(uri);
+  if (!asked || asked.hash) return false;
+  return uris.some((r) => {
+    const v = loopback(r);
+    return v !== null && v.hostname === asked.hostname && v.pathname === asked.pathname && v.search === asked.search;
+  });
+}
+
 /** A word as a shell reads it: a URL with a query (`?`, `&`) quoted, so `&` doesn't end the command. */
 export const shellWord = (s: string) => (/^[A-Za-z0-9_./:@%+=,-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`);
 
