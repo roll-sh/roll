@@ -2809,19 +2809,22 @@ impl Apps {
         if now - self.intercepts_checked.load(std::sync::atomic::Ordering::Relaxed) >= 60_000 {
             self.intercepts_checked.store(now, std::sync::atomic::Ordering::Relaxed);
             self.refresh_intercepts(&services).await;
+            self.retry_orphan_branches().await;
         }
         if now - self.status_swept.load(std::sync::atomic::Ordering::Relaxed) >= 60_000 {
             self.status_swept.store(now, std::sync::atomic::Ordering::Relaxed);
             self.status_sweep(&services).await;
         }
+        let unscheduled = self.db(|s| s.unscheduled()).await.unwrap_or_default();
         for svc in services.into_iter().filter(|s| s.run.kind == RunType::Cron && self.owns(&s.id) && !self.capped(&s.id)) {
             let Some(schedule) = svc.run.schedule.as_deref().and_then(|s| crate::cron::Schedule::parse(s, svc.run.timezone.as_deref()).ok()) else { continue };
             let sid = svc.id.clone();
             let Ok(envs) = self.db(move |s| s.environments(&sid)).await else { continue };
             for e in envs.into_iter().filter(|e| e.active.is_some()) {
                 let key = format!("cron:{}/{}", svc.id, e.name);
-                // Paused: skipped, and its schedule moves on, so resuming doesn't make up the runs.
-                if e.paused {
+                // Paused, or its schedule turned off (`scheduled: false`, a preview's): skipped,
+                // and its schedule moves on, so turning it back on doesn't make up the runs.
+                if e.paused || unscheduled.contains(&(svc.id.clone(), e.name.clone())) {
                     let (k, v) = (key.clone(), now.to_string());
                     let _ = self.db(move |s| s.set_state(&k, &v)).await;
                     continue;
@@ -2852,7 +2855,7 @@ impl Apps {
     /// starts a job, unless the last it started still runs; a paused environment's move on.
     async fn schedules_pass(self: &Arc<Self>, services: &[crate::store::ServiceRow], now: i64) {
         // One read of every environment a pass, not one per service.
-        let Ok(all_envs) = self.db(|s| s.all_environments()).await else { return };
+        let Ok((all_envs, unscheduled)) = self.db(|s| Ok((s.all_environments()?, s.unscheduled()?))).await else { return };
         for svc in services.iter().filter(|s| self.owns(&s.id) && !self.capped(&s.id)) {
             // A preview environment never runs production's schedules (one per open pull request).
             // In maintenance, nothing is called on a schedule (it would be answered roll's page).
@@ -2868,8 +2871,8 @@ impl Apps {
                     let key = format!("sched:{}/{}/{}", svc.id, e.name, sc.name);
                     let k = key.clone();
                     let last: Option<i64> = self.db(move |s| s.get_state(&k)).await.ok().flatten().and_then(|v| v.parse().ok());
-                    // New (or paused): counted from now, so nothing is made up.
-                    let Some(last) = last.filter(|_| !e.paused) else {
+                    // New (or paused, or its schedules off): counted from now, so nothing is made up.
+                    let Some(last) = last.filter(|_| !e.paused && !unscheduled.contains(&(e.service.clone(), e.name.clone()))) else {
                         let (k, v) = (key.clone(), now.to_string());
                         let _ = self.db(move |s| s.set_state(&k, &v)).await;
                         continue;
