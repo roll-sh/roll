@@ -441,6 +441,30 @@ async fn every_control_plane_route_needs_the_operator_token() {
         let body = resp.text().await.unwrap_or_default();
         assert_eq!(status, 200, "GET {path} with a full scoped token: {body}");
     }
+    // A search migration is the cluster admin's (it adds to the cluster's reindex whitelist and
+    // starts copies as the cluster's own user); listing a remote's indices is a write. A host
+    // that's refused (`*`) keeps either from reaching a remote.
+    let cluster: serde_json::Value = http.post(format!("{api}/v1/search/clusters")).header("authorization", &operator).json(&serde_json::json!({ "name": "mig" })).send().await.unwrap().json().await.unwrap();
+    let mig = cluster["id"].as_str().unwrap_or_else(|| panic!("{cluster}")).to_string();
+    let writer: serde_json::Value = http
+        .post(format!("{api}/v1/access/tokens"))
+        .header("authorization", &operator)
+        .json(&serde_json::json!({ "name": "writer", "rules": [{ "product": "search", "resources": "*", "actions": { "read": "allow", "write": "allow" } }] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let writer = format!("Bearer {}", writer["token"].as_str().expect("a token"));
+    let body = serde_json::json!({ "source": { "host": "https://*" }, "indices": [{ "index": "a" }] });
+    let call = |path: &'static str, auth: String, body: serde_json::Value| {
+        let (http, url) = (http.clone(), format!("{api}/v1/search/clusters/{mig}/{path}"));
+        async move { http.post(url).header("authorization", auth).json(&body).send().await.unwrap().status().as_u16() }
+    };
+    assert_eq!(call("migrate", writer.clone(), body.clone()).await, 403, "a write grant starts a migration");
+    assert_eq!(call("migrate/inspect", writer, serde_json::json!({ "source": { "host": "https://*" } })).await, 400, "a write grant lists a remote");
+    assert_eq!(call("migrate", full.clone(), body).await, 400, "an admin grant reaches the migration");
     // Every product this rolld serves routes for has its tools on MCP: one without a ROLL_PRODUCTS
     // switch of its own (previews, with roll code) once went unlisted.
     let served: std::collections::BTreeSet<String> = scoped.lock().unwrap().iter().filter(|(h, _, c)| h == "api" && roll_auth::scope::PRODUCTS.contains(&c.as_str())).map(|(_, _, c)| c.clone()).collect();

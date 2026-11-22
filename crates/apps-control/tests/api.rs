@@ -3236,6 +3236,57 @@ async fn roll_up_deploys_an_uploaded_tree_and_cron_runs_on_demand() {
     let _ = Ordering::SeqCst;
 }
 
+/// Sandboxes (Vercel Sandbox, Fly Machines): a container of the live image (or a public one)
+/// with none of the environment's variables and a network of its own unless asked, commands run
+/// for their exit code and output, a file in and out, at most ten, removed at their end.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sandbox_runs_commands_apart_from_the_environment_until_its_end() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    let base = format!("{env}/sandboxes");
+    assert_eq!(call(&w.api, "POST", &base, Some(json!({"ttl_s": 5}))).await.0, StatusCode::BAD_REQUEST, "a minute at least");
+    assert_eq!(call(&w.api, "POST", &base, Some(json!({"network": "host"}))).await.0, StatusCode::BAD_REQUEST);
+    let (st, sb) = call(&w.api, "POST", &base, Some(json!({"image": "python:3.13-slim", "ttl_s": 120}))).await;
+    assert_eq!(st, StatusCode::CREATED, "{sb}");
+    let sid = sb["id"].as_str().unwrap().to_string();
+    let name = w.fake.instances(&id).into_iter().map(|(n, _, _)| n).find(|n| n.contains("-sbx-")).expect("its container");
+    let spec = w.fake.spec(&name).unwrap();
+    assert_eq!((spec.image.as_str(), spec.port), ("python:3.13-slim", None));
+    assert!(spec.vars.iter().all(|(k, _)| k == "ROLL_INSTANCE"), "none of the environment's variables: {:?}", spec.vars.iter().map(|(k, _)| k).collect::<Vec<_>>());
+    let net = spec.network.clone().unwrap();
+    assert!(net.ends_with("-n") && w.fake.networks().contains(&net), "a network of its own: {net}");
+    // Commands: their output and exit code.
+    let (st, out) = call(&w.api, "POST", &format!("{base}/{sid}/exec"), Some(json!({"command": "echo hello"}))).await;
+    assert_eq!((st, out["stdout"].as_str(), out["exit_code"].as_i64()), (StatusCode::OK, Some("hello\n"), Some(0)), "{out}");
+    assert_eq!(call(&w.api, "POST", &format!("{base}/{sid}/exec"), Some(json!({"command": "exit 3"}))).await.1["exit_code"], 3);
+    // A file in and back out.
+    let file = format!("{base}/{sid}/files?path=%2Ftmp%2Fin%2Fdata.json");
+    let put = w.api.clone().oneshot(Request::put(&file).body(Body::from("{\"n\":1}")).unwrap()).await.unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+    let got = w.api.clone().oneshot(Request::get(&file).body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(got.into_body().collect().await.unwrap().to_bytes(), "{\"n\":1}");
+    let bad = w.api.clone().oneshot(Request::get(format!("{base}/{sid}/files?path=..%2Fetc%2Fpasswd")).body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+    // With the environment's variables when asked; ten at once at most.
+    let (_, with) = call(&w.api, "POST", &base, Some(json!({"variables": true, "network": "environment"}))).await;
+    let with_name = w.fake.instances(&id).into_iter().map(|(n, _, _)| n).find(|n| n.ends_with(with["id"].as_str().unwrap().trim_start_matches("sbx_"))).unwrap();
+    let spec = w.fake.spec(&with_name).unwrap();
+    assert!(spec.vars.iter().any(|(k, _)| k == "PORT") && !spec.network.unwrap().ends_with("-n"));
+    for _ in 2..10 {
+        assert_eq!(call(&w.api, "POST", &base, None).await.0, StatusCode::CREATED);
+    }
+    assert_eq!(call(&w.api, "POST", &base, None).await.0, StatusCode::CONFLICT, "ten at most");
+    assert_eq!(call(&w.api, "GET", &base, None).await.1.as_array().map(Vec::len), Some(10));
+    // Deleted: its container and network go; past its end, the owner's minute sweep takes it.
+    assert_eq!(call(&w.api, "DELETE", &format!("{base}/{}", with["id"].as_str().unwrap()), None).await.0, StatusCode::NO_CONTENT);
+    assert!(w.fake.state(&with_name).is_none());
+    w.apps.cron_pass(code_sql::now_ms() + 121_000).await;
+    assert_eq!(call(&w.api, "GET", &format!("{base}/{sid}"), None).await.0, StatusCode::NOT_FOUND, "ended at its TTL");
+    assert!(w.fake.state(&name).is_none() && !w.fake.networks().contains(&net));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_one_off_job_runs_the_live_image_to_its_exit_and_can_be_canceled() {
     let w = world_with(|c| c.cron_retry_after = Duration::from_millis(20)).await;
@@ -5543,8 +5594,8 @@ async fn secret_values_are_revealed_only_as_roll_secrets_allows() {
                 n => format!("s3cret-{n}"),
             };
             Ok(vec![
-                apps_control::integrations::SecretVar { name: "DB_PASSWORD".into(), value: pw, linked: false, sensitive: false, plain: false },
-                apps_control::integrations::SecretVar { name: "SIGNING_KEY".into(), value: "only-for-runtimes".into(), linked: false, sensitive: true, plain: false },
+                apps_control::integrations::SecretVar { binding: None, name: "DB_PASSWORD".into(), value: pw, linked: false, sensitive: false, plain: false },
+                apps_control::integrations::SecretVar { binding: None, name: "SIGNING_KEY".into(), value: "only-for-runtimes".into(), linked: false, sensitive: true, plain: false },
             ])
         }
         async fn may_reveal(&self, who: apps_control::integrations::Asker<'_>, _: &str, _: &str, _: &str, _: apps_control::integrations::Reveal<'_>) -> bool {
@@ -7512,7 +7563,7 @@ async fn a_git_login_reads_its_token_from_roll_secrets() {
         }
         async fn resolve(&self, _: &str, env: &str, _: &str) -> anyhow::Result<Vec<apps_control::integrations::SecretVar>> {
             assert_eq!(env, "production");
-            Ok(vec![apps_control::integrations::SecretVar { name: "GIT_TOKEN".into(), value: TOKEN.lock().clone(), linked: false, sensitive: true, plain: false }])
+            Ok(vec![apps_control::integrations::SecretVar { binding: None, name: "GIT_TOKEN".into(), value: TOKEN.lock().clone(), linked: false, sensitive: true, plain: false }])
         }
         async fn bind_ref_runtime(&self, _: apps_control::integrations::Asker<'_>, _: &str, _: &str, reference: &str, runtime_env: &str) -> anyhow::Result<String> {
             assert_eq!(runtime_env, "production");
@@ -8322,7 +8373,8 @@ async fn a_push_rule_with_oidc_carries_rolls_token() {
 /// placeholder in a closed environment and the value elsewhere, an interception for the project
 /// environment, and its end (what was asked, kept).
 #[derive(Default)]
-struct FakeVault(Mutex<Vec<String>>);
+/// What it was asked, in order, and the CA it answers (a test swaps it: a renewal).
+struct FakeVault(Mutex<Vec<String>>, Mutex<String>);
 
 struct FakeInterception;
 
@@ -8347,15 +8399,26 @@ impl apps_control::integrations::SecretSource for FakeVault {
         "fake vault"
     }
     async fn resolve(&self, _project: &str, _env: &str, _service: &str) -> anyhow::Result<Vec<apps_control::integrations::SecretVar>> {
-        Ok(vec![apps_control::integrations::SecretVar { name: "STRIPE_KEY".into(), value: "sk_live_real".into(), sensitive: true, linked: false, plain: false }])
+        Ok(vec![apps_control::integrations::SecretVar { binding: None, name: "STRIPE_KEY".into(), value: "sk_live_real".into(), sensitive: true, linked: false, plain: false }])
     }
-    async fn resolve_closed(&self, _project: &str, _env: &str, _service: &str, maker: Option<&str>) -> anyhow::Result<apps_control::integrations::ClosedSecrets> {
-        self.0.lock().push(format!("closed by {}", maker.unwrap_or("-")));
-        Ok(apps_control::integrations::ClosedSecrets { vars: vec![apps_control::integrations::SecretVar { name: "STRIPE_KEY".into(), value: "rlph_placeholder".into(), sensitive: false, linked: false, plain: false }], notice: None })
+    /// As roll secrets does: each placeholder made is new random text (and a record), made only
+    /// when asked to mint; otherwise a marker with its binding.
+    async fn resolve_closed(&self, _project: &str, _env: &str, _service: &str, maker: Option<&str>, mint: bool) -> anyhow::Result<apps_control::integrations::ClosedSecrets> {
+        let value = match mint {
+            true => {
+                self.0.lock().push(format!("closed by {}", maker.unwrap_or("-")));
+                let n = self.0.lock().iter().filter(|l| l.starts_with("minted")).count();
+                self.0.lock().push(format!("minted {n}"));
+                format!("rlph_placeholder{n}")
+            }
+            false => "rlph_(made at deploy)".to_string(),
+        };
+        Ok(apps_control::integrations::ClosedSecrets { vars: vec![apps_control::integrations::SecretVar { binding: Some("api.stripe.com".into()), name: "STRIPE_KEY".into(), value, sensitive: false, linked: false, plain: false }], notice: None })
     }
-    async fn intercept(&self, project: &str, env: &str) -> anyhow::Result<Option<apps_control::integrations::Intercept>> {
+    async fn intercept(&self, project: &str, env: &str, _hosts: &[String]) -> anyhow::Result<Option<apps_control::integrations::Intercept>> {
         self.0.lock().push(format!("intercept {project}/{env}"));
-        Ok(Some(apps_control::integrations::Intercept { ca_pem: "-----BEGIN CERTIFICATE-----\nFAKECA\n-----END CERTIFICATE-----".into(), expires_at: code_sql::now_ms() + 86_400_000, interception: Arc::new(FakeInterception) }))
+        let ca = self.1.lock().clone();
+        Ok(Some(apps_control::integrations::Intercept { ca_pem: format!("-----BEGIN CERTIFICATE-----\n{ca}\n-----END CERTIFICATE-----"), expires_at: code_sql::now_ms() + 86_400_000, interception: Arc::new(FakeInterception) }))
     }
     async fn end_intercept(&self, project: &str, env: &str) -> anyhow::Result<()> {
         self.0.lock().push(format!("end {project}/{env}"));
@@ -8369,7 +8432,7 @@ impl apps_control::integrations::SecretSource for FakeVault {
 /// gets the value; the closed one's deletion ends its placeholders.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_closed_environment_uses_its_keys_without_seeing_them() {
-    let vault = Arc::new(FakeVault::default());
+    let vault = Arc::new(FakeVault(Default::default(), Mutex::new("FAKECA".into())));
     let v2 = vault.clone();
     let w = world_full(|_| {}, false, move |d| d.secrets = v2).await;
     let (svc, _) = image_service(&w, "api", json!({"port": 80, "min_instances": 1})).await;
@@ -8399,8 +8462,15 @@ async fn a_closed_environment_uses_its_keys_without_seeing_them() {
     assert_eq!(settled(&w, &id, "staging", d["id"].as_str().unwrap()).await["status"], "active");
     let closed = live_spec("staging");
     let var = |k: &str| closed.vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
-    assert_eq!(var("STRIPE_KEY").as_deref(), Some("rlph_placeholder"), "closed: a placeholder, never the value");
+    assert!(var("STRIPE_KEY").is_some_and(|v| v.starts_with("rlph_placeholder")), "closed: a placeholder, never the value");
     assert!(vault.0.lock().contains(&"closed by usr_ada".to_string()), "{:?}", vault.0.lock());
+    // Placeholders are made for instances only: reading the environment makes none, and a closed
+    // deploy doesn't read as needing another (each one made is new text; its binding decides).
+    let minted = || vault.0.lock().iter().filter(|l| l.starts_with("minted")).count();
+    let before = minted();
+    let (_, e) = call(&w.api, "GET", &format!("{base}/staging"), None).await;
+    call(&w.api, "GET", &format!("{base}/staging/variables"), None).await;
+    assert_eq!((minted(), &e["needs_deploy"]), (before, &json!(false)), "{e}");
     // Naming another maker is the operator's (roll previews' rules' maker), nobody else's.
     let put = |ext: Option<roll_auth::SignedIn>, operator: bool| {
         let mut req = Request::builder().method("PUT").uri(format!("{base}/staging")).header("content-type", "application/json").body(Body::from(json!({"egress": {"mode": "roll", "hosts": ["api.stripe.com"]}, "closed_by": "usr_rules"}).to_string())).unwrap();
@@ -8435,9 +8505,39 @@ async fn a_closed_environment_uses_its_keys_without_seeing_them() {
     assert!(closed.files.iter().any(|(p, c)| p == apps_control::deploy::INTERCEPT_CA && c.contains("FAKECA")), "the CA in its trust bundle");
     let network = apps_control::closed_network_name(&w.project, "staging");
     assert_eq!(w.fake.intercepted.lock().get(&network).copied(), Some(true), "its proxies intercept");
+    // Its sandboxes reach nothing but roll either: on its network, never one of their own.
+    assert_eq!(call(&w.api, "POST", &format!("{base}/staging/sandboxes"), Some(json!({"network": "none"}))).await.0, StatusCode::BAD_REQUEST);
+    let (st, sb) = call(&w.api, "POST", &format!("{base}/staging/sandboxes"), None).await;
+    assert_eq!((st, sb["network"].as_str()), (StatusCode::CREATED, Some("environment")), "{sb}");
+    let sbx = w.fake.instances(&id).into_iter().map(|(n, _, _)| n).find(|n| n.contains("-sbx-")).unwrap();
+    assert_eq!(w.fake.spec(&sbx).map(|s| (s.network, s.closed)), Some((Some(network.clone()), true)));
+    assert_eq!(call(&w.api, "DELETE", &format!("{base}/staging/sandboxes/{}", sb["id"].as_str().unwrap()), None).await.0, StatusCode::NO_CONTENT);
     // What its interception did, on the environment (roll previews' sheet).
     let (_, e) = call(&w.api, "GET", &format!("{base}/staging"), None).await;
     assert_eq!((e["intercepted"]["requests"].as_u64(), e["intercepted"]["swapped"].as_u64()), (Some(3), Some(2)), "{e}");
+    // Its CA renewed while it runs: its instances move to the same image trusting both CAs (its
+    // proxy switches once that's live, never before: the running ones would fail).
+    let was = e["active"]["id"].clone();
+    *vault.1.lock() = "FAKECA2".into();
+    let t = code_sql::now_ms() + 61_000;
+    w.apps.cron_pass(t).await;
+    let e = get_until(&w.api, &format!("{base}/staging"), |e| e["active"]["id"] != was && e["active"]["id"].is_string()).await;
+    let moved = live_spec("staging");
+    let bundle = moved.files.iter().find(|(p, _)| p == apps_control::deploy::INTERCEPT_CA).map(|(_, c)| c.clone()).unwrap_or_default();
+    assert!(bundle.contains("FAKECA\n") && bundle.contains("FAKECA2"), "both CAs: {e}");
+    // Renewed while it sleeps: its template is made again now (the new CA, a placeholder made
+    // again), nothing deployed or started. (Asleep once the move above settled: until then its
+    // deploy can still start an instance.)
+    settled(&w, &id, "staging", e["active"]["id"].as_str().unwrap()).await;
+    w.apps.live(&id, "staging").sleep().await;
+    assert_eq!(w.apps.live(&id, "staging").awake(), 0);
+    let (was, minted_before) = (e["active"]["id"].clone(), minted());
+    *vault.1.lock() = "FAKECA3".into();
+    w.apps.cron_pass(t + 11 * 60_000).await;
+    let tpl = w.apps.live(&id, "staging").template().unwrap();
+    let bundle = tpl.spec.files.iter().find(|(p, _)| p == apps_control::deploy::INTERCEPT_CA).map(|(_, c)| c.clone()).unwrap_or_default();
+    assert!(bundle.contains("FAKECA3") && !bundle.contains("FAKECA2"), "{bundle}");
+    assert_eq!((minted() > minted_before, call(&w.api, "GET", &format!("{base}/staging"), None).await.1["active"]["id"].clone()), (true, was), "a placeholder made again, no deploy");
     assert!(call(&w.api, "DELETE", &format!("{base}/staging"), None).await.0.is_success());
     assert!(vault.0.lock().contains(&format!("end {}/staging", w.project)), "{:?}", vault.0.lock());
 }

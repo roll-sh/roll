@@ -20,11 +20,11 @@ impl roll_intercept::Interception for CaInterception {
     }
     fn leaf(&self, host: &str) -> anyhow::Result<roll_intercept::Leaf> {
         let l = self.ca.leaf(host).map_err(|e| anyhow::anyhow!("{e}"))?;
-        Ok(roll_intercept::Leaf { cert_pem: l.cert_pem, key_pem: l.key.expose().to_string() })
+        Ok(roll_intercept::Leaf { cert_pem: l.cert_pem, key_pem: l.key.expose().to_string().into() })
     }
     fn filter(&self, req: roll_intercept::Outgoing<'_>) -> Result<roll_intercept::Filtered, String> {
         let mut out = roll_secrets::proxy::Outgoing { host: req.host, path: req.path, headers: req.headers, query: req.query };
-        let scrub = roll_secrets::proxy::filter(&mut out, &*self.secrets, &roll_secrets::proxy::Limits::default()).map_err(|b| b.to_string())?;
+        let scrub = roll_secrets::proxy::filter(&mut out, &self.ca.consumer, &*self.secrets, &roll_secrets::proxy::Limits::default()).map_err(|b| b.to_string())?;
         let swapped = scrub.swapped();
         let scrub = (swapped > 0).then(|| Box::new(SecretsScrub { scrub, secrets: self.secrets.clone(), echoed: None }) as Box<dyn roll_intercept::ResponseScrub>);
         Ok(roll_intercept::Filtered { swapped, scrub })

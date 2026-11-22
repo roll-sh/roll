@@ -152,6 +152,13 @@ WANT=$(printf 'Bearer %s' "$KEY_VALUE" | sha256sum | cut -d' ' -f1)
 [ "$GOT" = "200 sha256=$WANT" ] || { echo "the host should get the key swapped in (its hash back), not: ${GOT:0:120}"; exit 1; }
 WRONG=$(through "Bearer rlph_$(python3 -c 'print("a"*40)')")
 case "$WRONG" in 403*) ;; *) echo "a placeholder that isn't live should be refused (403), not: ${WRONG:0:120}"; exit 1;; esac
+# A placeholder roll secrets issued to another consumer (another preview) swaps only for that one:
+# refused on this preview's socket, which passes its CA's consumer (roll secrets' WrongConsumer, #665).
+OTHER=$(curl -s -X POST "http://$API/v1/secrets/projects/$PRJ/environments/development/resolve" -H 'content-type: application/json' \
+  -d "{\"path\":\"/\",\"consumer\":\"preview:pv-someone-else\",\"placeholders\":true,\"maker\":\"token:$TOKEN_ID\"}" | jq_ "d['values'].get('STRIPE_KEY', '')")
+case "$OTHER" in rlph_*) ;; *) echo "roll secrets should issue another consumer its own placeholder (the check's premise): '${OTHER:0:9}…'"; exit 1;; esac
+ELSEWHERE=$(through "Bearer $OTHER")
+case "$ELSEWHERE" in 403*) ;; *) echo "another consumer's placeholder should be refused on this preview's socket (403), not: ${ELSEWHERE:0:120}"; exit 1;; esac
 ACT=$(api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d]")
 echo "$ACT" | grep -q "egress to echo.localhost: 1 request(s), 1 key(s) swapped in" || { echo "the activity should say a key was swapped in: $ACT"; exit 1; }
 echo "$ACT" | grep -q "$KEY_VALUE" && { echo "the activity should never show the key"; exit 1; }
@@ -184,4 +191,4 @@ NOW_KEY=$(echo "$ENV2" | sed -n 's/^STRIPE_KEY=//p')
 [ "$NOW_KEY" = "$KEY_VALUE" ] || { echo "with the rules' saver gone the preview should get STRIPE_KEY without a placeholder: '${NOW_KEY:0:9}…'"; exit 1; }
 ACT=$(api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d]")
 echo "$ACT" | grep -q "placeholders off" || { echo "the activity should say placeholders are off and why: $ACT"; exit 1; }
-say "ok: the service held $(echo "$PLACEHOLDER" | cut -c1-9)…, the host got the key, a dead placeholder was refused, an echo was stopped and ended its placeholder, and without the rules' saver its keys went without placeholders, said"
+say "ok: the service held $(echo "$PLACEHOLDER" | cut -c1-9)…, the host got the key, a dead placeholder was refused, another consumer's placeholder was refused, an echo was stopped and ended its placeholder, and without the rules' saver its keys went without placeholders, said"

@@ -969,6 +969,7 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/access/audit", "access", R, Tgt::Product),
     row("GET", "/v1/access/oauth/clients", "access", R, Tgt::Product),
     row("GET", "/v1/access/oauth/clients/{id}", "access", R, Tgt::Product),
+    row("GET", "/v1/access/oauth/step-ups/{id}", "access", R, Tgt::Product),
     // The MCP server: every tool call is its own request through the gate.
     row("*", "/v1/mcp", "access", R, Tgt::AnyGrant),
     // rolld's own.
@@ -1240,6 +1241,13 @@ static ROWS: &[Row] = &[
     // changes the cluster as the console does; roll secrets checks `reveal` on each reference
     // itself (search_control::secret_refs).
     row("PUT", "/v1/search/clusters/{id}/repositories/{name}", "search", ADMIN, one(PG, "cluster")),
+    // A migration's listing reads another Elasticsearch or OpenSearch through roll with
+    // credentials the caller gives (never kept) and changes nothing on roll: a write. The
+    // migration itself adds to the cluster's reindex whitelist (an admin's setting), creates
+    // indices with the remote's settings and aliases and starts reindex tasks as the cluster's
+    // own user (what the console does, an admin's): admin.
+    row("POST", "/v1/search/clusters/{id}/migrate/inspect", "search", W, one(PG, "cluster")),
+    row("POST", "/v1/search/clusters/{id}/migrate", "search", ADMIN, one(PG, "cluster")),
     row("GET", "/v1/search/clusters/{id}/remotes", "search", R, one(PG, "cluster")),
     row("PUT", "/v1/search/clusters/{id}/remotes/{alias}", "search", ADMIN, one(PG, "cluster")).lends(Lend::Each(search_remote)),
     row("DELETE", "/v1/search/clusters/{id}/remotes/{alias}", "search", ADMIN, one(PG, "cluster")),
@@ -1612,6 +1620,15 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/apps/services/{id}/environments/{env}/pending", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
     // A job is a command run with the environment's variables: its output can be them.
     row("GET", "/v1/apps/services/{id}/environments/{env}/jobs/{job}/logs", "apps", REVEAL, one(PG, "service")).env(EnvFrom::Param("env")),
+    // A sandbox runs any command, with the environment's variables when asked, and reads back
+    // any file: admin, as a shell is (seeing which there are is read).
+    row("GET", "/v1/apps/services/{id}/environments/{env}/sandboxes", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("POST", "/v1/apps/services/{id}/environments/{env}/sandboxes", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("GET", "/v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("DELETE", "/v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("POST", "/v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}/exec", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("GET", "/v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}/files", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("PUT", "/v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}/files", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
     // ── previews (feature/roll-previews, docs/previews.md) ──
     // A preview's link carries its access token (`share_url`, also each service's and earlier
     // ones'): the link is a credential, as its QR code is.

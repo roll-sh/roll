@@ -137,6 +137,8 @@ urlencoding = "2"
 tempfile = "3"
 libc = "0.2"
 md-5 = "0.11"
+# TCP keepalives on connections roll opens itself (search connectors' Postgres sources).
+socket2 = "0.6"
 
 # Serverless Redis.
 # JSON documents (RedisJSON): the JSONPath grammar runs on the pest version RedisJSON pins, so

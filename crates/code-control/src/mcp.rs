@@ -1303,7 +1303,7 @@ pub async fn call(api: &Router, headers: &HeaderMap, extensions: Option<&axum::h
         Ok(o) | Err(o) => o,
     };
     // At most what a client takes in one answer (roll_auth::lockdown::cut, as roll's /v1/mcp does:
-    // Claude Code refuses a longer one outright); the structured content stays whole.
+    // Claude Code moves a longer one to a file); the structured content stays whole.
     let text = roll_auth::lockdown::cut(outcome.text.clone().unwrap_or_else(|| serde_json::to_string_pretty(&outcome.data).unwrap_or_default()), true);
     let structured = if outcome.data.is_object() { outcome.data } else { json!({ "result": outcome.data }) };
     json!({

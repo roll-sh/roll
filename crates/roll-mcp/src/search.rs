@@ -62,7 +62,9 @@ pub fn listed(all: &[Value]) -> Vec<Value> {
             "limit": { "type": "integer", "description": format!("Matches answered with their schemas, 1–{MAX_FOUND} (default {DEFAULT_FOUND})") },
         }, "additionalProperties": false },
         "annotations": { "title": "Find roll tools", "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
-        "_meta": { "roll/product": "access" },
+        // Search mode is these three: a client that defers tools (Claude Code's tool search)
+        // loads them upfront, or the agent would have to search for the search tool.
+        "_meta": { "roll/product": "access", "anthropic/alwaysLoad": true },
     }));
     let open_world = rest.iter().any(|t| t["annotations"]["openWorldHint"] == true);
     let run = |name: &str, title: &str, what: &str, read_only: bool| {
@@ -76,7 +78,7 @@ pub fn listed(all: &[Value]) -> Vec<Value> {
             }, "required": ["tool"], "additionalProperties": false },
             // A run reaches outside roll when a tool it may run does (none read-only does).
             "annotations": { "title": title, "readOnlyHint": read_only, "destructiveHint": !read_only, "idempotentHint": read_only, "openWorldHint": !read_only && open_world },
-            "_meta": { "roll/product": "access" },
+            "_meta": { "roll/product": "access", "anthropic/alwaysLoad": true },
         })
     };
     if rest.iter().any(|t| is_read_only(t)) {

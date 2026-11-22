@@ -54,6 +54,7 @@ pub mod public;
 pub mod push;
 pub mod resp_cache;
 pub mod runtime;
+pub mod sandboxes;
 pub mod shell;
 pub mod spend;
 pub mod store;
@@ -299,9 +300,16 @@ pub struct Apps {
     status_swept: std::sync::atomic::AtomicI64,
     /// When owned environments' logs were last expired (hourly, [`Apps::expire_logs_pass`]).
     logs_expired: std::sync::atomic::AtomicI64,
-    /// The interception CA each closed environment's instances trust (its PEM's digest): when
-    /// roll secrets answers another (near its end, or ended early), they're moved to it.
-    pub(crate) intercept_cas: Mutex<HashMap<String, String>>,
+    /// The interception CA each closed environment's proxy serves and its instances trust: when
+    /// roll secrets answers another (near its end, ended early, a host bound since), instances
+    /// are moved to a bundle trusting both before the proxy switches.
+    pub(crate) intercept_cas: Mutex<HashMap<String, crate::deploy::Serving>>,
+    /// The next CA a closed environment's proxy switches to once the deployment whose instances
+    /// trust it is live (its network, and the CA).
+    pub(crate) intercept_pending: Mutex<HashMap<String, (String, crate::deploy::Serving)>>,
+    /// When each closed environment's instances were last moved to a new CA (at most every ten
+    /// minutes, whatever answers in between).
+    pub(crate) intercept_renewing: Mutex<HashMap<String, i64>>,
     /// When closed environments' CAs were last checked (each minute).
     intercepts_checked: std::sync::atomic::AtomicI64,
     /// Private environments' token hashes, by environment, as the owner last read or set them.
@@ -540,6 +548,8 @@ pub struct ResolvedVars {
     /// What roll secrets said about the resolve (a closed environment's keys withheld): said in
     /// the environment's log at each deploy.
     pub notices: Vec<String>,
+    /// A closed environment's placeholders: each variable's binding (the hosts it's for).
+    pub placeholders: BTreeMap<String, String>,
 }
 
 impl ResolvedVars {
@@ -648,6 +658,8 @@ impl Apps {
             status_swept: std::sync::atomic::AtomicI64::new(0),
             logs_expired: std::sync::atomic::AtomicI64::new(0),
             intercept_cas: Mutex::new(HashMap::new()),
+            intercept_pending: Mutex::new(HashMap::new()),
+            intercept_renewing: Mutex::new(HashMap::new()),
             intercepts_checked: std::sync::atomic::AtomicI64::new(0),
             access: Mutex::new(HashMap::new()),
             access_gen: std::sync::atomic::AtomicU64::new(0),
@@ -1424,6 +1436,7 @@ impl Apps {
         for e in self.db(move |s| s.environments(&sid)).await? {
             self.teardown_live(id, &e.name).await;
         }
+        self.drop_sandboxes(id, None).await;
         for name in self.deps.runtime.list(Some(id)).await {
             self.deps.runtime.remove(&name).await;
         }
@@ -1505,6 +1518,7 @@ impl Apps {
             self.teardown_live(id, &e.name).await;
             self.drop_branches(id, &e.name, None).await;
         }
+        self.drop_sandboxes(id, None).await;
         // Each environment's volume goes with it (a last backup first, kept a week).
         for e in &envs {
             let had = row.for_env(e).map(|s| s.run.volume.is_some()).unwrap_or(row.run.volume.is_some());
@@ -2717,9 +2731,16 @@ impl Apps {
         // Its branches first (deleted once no other environment uses them): the rows naming them
         // would go with it.
         self.drop_branches(service, env, None).await;
+        self.drop_sandboxes(service, Some(env)).await;
         let (sid, e) = (service.to_string(), env.to_string());
         self.db(move |s| s.delete_environment(&sid, &e)).await?;
         self.hosts_changed();
+        // Its interception's state here goes with it (the CA itself ends with the project
+        // environment's last closed service, `drop_network_if_unused`).
+        let key = env_key(service, env);
+        self.intercept_cas.lock().remove(&key);
+        self.intercept_pending.lock().remove(&key);
+        self.intercept_renewing.lock().remove(&key);
         self.release_domains(&domains).await;
         self.teardown_live(service, env).await;
         self.set_access_cache(service, env, None);
@@ -2866,8 +2887,22 @@ impl Apps {
         let dep = self.db(move |s| s.deployment(&active)).await?;
         let sid = service.to_string();
         let svc = self.db(move |s| s.service(&sid)).await?;
+        // No CA kept for it here (a restart, a takeover): its interception CA's key lived only in
+        // the node that made it, so the instances this adopts trust one no proxy can serve.
+        let unknown_ca = row.egress.closed() && !self.intercept_cas.lock().contains_key(&env_key(service, env));
         let tpl = self.template(&svc, &row, &dep).await?;
         live.adopt(Arc::new(tpl)).await;
+        // So they're moved to the CA its proxy serves now (the same image, a new deployment).
+        if unknown_ca && live.awake() > 0 {
+            let (this, sid, en, active) = (self.clone(), service.to_string(), env.to_string(), row.active.clone().unwrap_or_default());
+            tokio::spawn(async move {
+                let log = this.logs.sink(format!("env:{sid}/{en}"), crate::logs::Stream::System);
+                match this.rollback(&sid, &en, &active, Some("roll".into()), true, false).await {
+                    Ok(d) => log.line(format!("taken over with instances that trust an interception CA this node never had: moving them ({}) to the one its proxy serves", d.id)),
+                    Err(e) => log.line(format!("taken over with instances that trust an interception CA this node never had, and moving them didn't start: {e}")),
+                }
+            });
+        }
         Ok(live)
     }
 
@@ -2875,16 +2910,24 @@ impl Apps {
 
     /// An instance's variables, `roll://` references read (a deploy).
     pub async fn resolve_vars(self: &Arc<Self>, svc: &ServiceRow, env: &EnvRow, deployment: &str) -> Result<ResolvedVars> {
-        self.resolve_vars_as(svc, env, deployment, true).await
+        self.resolve_vars_as(svc, env, deployment, true, true).await
+    }
+
+    /// A deploy's variables for its hash and its checks (`roll://` read, a closed environment's
+    /// placeholders not made: the instances' are, once, with their template).
+    pub async fn checked_vars(self: &Arc<Self>, svc: &ServiceRow, env: &EnvRow, deployment: &str) -> Result<ResolvedVars> {
+        self.resolve_vars_as(svc, env, deployment, true, false).await
     }
 
     /// The same for a listing or a staleness check: a `roll://` reference is its text, never read
     /// (no secret decrypted, no read audited as the service for a person's page view).
     pub async fn listed_vars(self: &Arc<Self>, svc: &ServiceRow, env: &EnvRow, deployment: &str) -> Result<ResolvedVars> {
-        self.resolve_vars_as(svc, env, deployment, false).await
+        self.resolve_vars_as(svc, env, deployment, false, false).await
     }
 
-    async fn resolve_vars_as(self: &Arc<Self>, svc: &ServiceRow, env: &EnvRow, deployment: &str, read_refs: bool) -> Result<ResolvedVars> {
+    /// `mint`: a closed environment's placeholders made (an instance's variables); else its keys
+    /// bound to hosts are markers with their binding, nothing made.
+    async fn resolve_vars_as(self: &Arc<Self>, svc: &ServiceRow, env: &EnvRow, deployment: &str, read_refs: bool, mint: bool) -> Result<ResolvedVars> {
         let mut vars: BTreeMap<String, (String, &'static str)> = BTreeMap::new();
         let port = svc.run.port.unwrap_or(8080);
         let roll = [
@@ -3021,8 +3064,9 @@ impl Apps {
         let (mut from_secrets, mut plain_secrets) = (BTreeSet::new(), BTreeSet::new());
         // A closed environment's keys bound to hosts come as placeholders its egress proxy swaps.
         let mut notices = branch_notices;
+        let mut placeholders = BTreeMap::new();
         let resolved = match env.egress.closed() {
-            true => self.deps.secrets.resolve_closed(&svc.project, &env.name, &svc.id, env.egress_by.as_deref()).await.map(|c| {
+            true => self.deps.secrets.resolve_closed(&svc.project, &env.name, &svc.id, env.egress_by.as_deref(), mint).await.map(|c| {
                 notices.extend(c.notice);
                 c.vars
             }),
@@ -3032,6 +3076,9 @@ impl Apps {
             Ok(secrets) => {
                 let mut parents = Vec::new();
                 for s in secrets {
+                    if let Some(b) = &s.binding {
+                        placeholders.insert(s.name.clone(), b.clone());
+                    }
                     // An environment with data of its own never gets a linked resource's
                     // credentials or address through roll secrets: they name the resource itself
                     // (production's database), and its branches come through its own links.
@@ -3174,7 +3221,9 @@ impl Apps {
         }
         // After the agent's join: a value roll composed says so.
         let sources = vars.iter().map(|(k, (_, s))| (k.clone(), *s)).collect();
-        Ok(ResolvedVars { vars: vars.into_iter().map(|(k, (v, _))| (k, v)).collect(), sources, unresolved, refused, ref_texts, sealed, from_secrets, plain_secrets, notices })
+        // A placeholder the service's own variable of the same name replaced isn't one.
+        placeholders.retain(|k, _| vars.get(k).is_some_and(|(_, s)| *s == "secret"));
+        Ok(ResolvedVars { vars: vars.into_iter().map(|(k, (v, _))| (k, v)).collect(), sources, unresolved, refused, ref_texts, sealed, from_secrets, plain_secrets, notices, placeholders })
     }
 
     /// Fill the `${{ … }}` in the service's own variables ([`refs`]); what named nothing. A
@@ -4400,7 +4449,8 @@ impl ResolvedVars {
             // `ROLL_AWAKE_URL` is roll's own on every web service: its arrival isn't a change of
             // the service's to deploy (each deployment gets it).
             .filter(|(k, _)| !matches!(k.as_str(), "ROLL_DEPLOYMENT" | "ROLL_GIT_COMMIT" | "ROLL_GIT_BRANCH" | "ROLL_AWAKE_URL"))
-            .map(|(k, v)| (k.clone(), self.ref_texts.get(k).cloned().unwrap_or_else(|| v.clone())))
+            // A placeholder is new random text each time it's made: its binding decides.
+            .map(|(k, v)| (k.clone(), self.placeholders.get(k).map(|b| format!("placeholder:{b}")).or_else(|| self.ref_texts.get(k).cloned()).unwrap_or_else(|| v.clone())))
             .collect()
     }
 }

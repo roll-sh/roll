@@ -53,6 +53,8 @@ pub struct Template {
     /// That site's edge functions ([`crate::edge`]), and the service that runs them.
     pub edge: Vec<apps_build::edge::EdgeFn>,
     pub edge_service: String,
+    /// A closed environment's: the hosts its placeholders are bound to (its CA names them all).
+    pub intercept_hosts: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1986,6 +1988,12 @@ impl EnvLive {
 
     /// A file instances made from now on get (`path`, its contents), in place of one there: a
     /// closed environment's trust bundle when its interception CA changes while it sleeps.
+    /// Its template made again while nothing runs (a closed environment's new CA and placeholders
+    /// while it slept): its next start uses it.
+    pub fn set_template(&self, tpl: Arc<Template>) {
+        *self.template.lock() = Some(tpl);
+    }
+
     pub fn set_file(&self, path: &str, contents: &str) {
         let with = |t: &Arc<Template>| {
             let mut t = (**t).clone();
@@ -2673,6 +2681,18 @@ impl EnvLive {
         self.meter.lock().sample(now_ms(), secs * c.cpu * 0.5, (c.memory_mb as u64) << 20, secs, 1);
         self.runtime.remove(&c.name).await;
     }
+
+    /// A sandbox's container ([`crate::sandboxes`]) made from `tpl` as `name` and started; gone
+    /// again if it didn't start.
+    pub(crate) async fn start_sandbox(&self, tpl: &Template, name: String) -> anyhow::Result<()> {
+        let inst = self.make_run(tpl, Some(name)).await?;
+        if let Err(e) = self.runtime.start(&inst.name, self.log.instance(&inst.name, &inst.deployment)).await {
+            self.runtime.remove(&inst.name).await;
+            return Err(e);
+        }
+        self.runtime.settle(&inst.name).await;
+        Ok(())
+    }
 }
 
 /// How a run ended.
@@ -2726,6 +2746,7 @@ mod tests {
             site: None,
             edge: Vec::new(),
             edge_service: String::new(),
+            intercept_hosts: Vec::new(),
         })
     }
 
