@@ -288,6 +288,9 @@ grant, and the audit log records the adoption. Nothing restarts on its own.
   until then.
 - Deleting an account removes its memberships through the same path as a removal. A project left
   without an owner is flagged the same way.
+- Disabling an account (an admin, SCIM) keeps its memberships, but ends what a removal ends in
+  roll secrets (leases, one-time shares, shared folders) and stops sandboxes holding values they
+  copied: docs/accounts.md, "Offboarding".
 
 ### Audit
 

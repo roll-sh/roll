@@ -16,6 +16,7 @@ mod deletion;
 mod email_change;
 mod mail;
 mod oauth;
+pub mod offboarding;
 pub mod passkeys;
 mod export;
 pub mod attestation;
@@ -39,6 +40,12 @@ pub use oauth::{OAuthApp, Provider, ProviderConfig};
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS account_deletions (
+    user_id TEXT PRIMARY KEY,
+    at INTEGER NOT NULL,
+    claimed_at INTEGER,
+    done INTEGER NOT NULL DEFAULT 0
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS account_offboardings (
     user_id TEXT PRIMARY KEY,
     at INTEGER NOT NULL,
     claimed_at INTEGER,
@@ -465,6 +472,9 @@ pub struct Accounts {
     /// What other products do when an account is deleted (rolld: the workspace removes its
     /// memberships), run after the deletion's write from its outbox row until each succeeds.
     on_deleted: std::sync::RwLock<Vec<deletion::OnDeleted>>,
+    /// What other products do when someone loses rights (disabled, no longer an admin, deleted):
+    /// rolld ends their leases, shares and sandboxes' copied values, from the outbox.
+    on_offboarded: std::sync::RwLock<Vec<offboarding::OnOffboarded>>,
     /// Sudo mode's window (`sudo::SUDO_MS`; shorter in tests).
     sudo_ms: std::sync::atomic::AtomicI64,
 }
@@ -545,7 +555,7 @@ impl Accounts {
         }
         let doh = std::env::var("ROLL_ACCOUNTS_DOH").ok().filter(|u| !u.trim().is_empty()).unwrap_or_else(|| "https://cloudflare-dns.com/dns-query".into());
         let txt: Arc<dyn sso::TxtLookup> = Arc::new(sso::Doh { client: sso_http.clone(), url: doh });
-        Ok(Accounts { db, config, mailer, http, sso_http, sso_discovery: Default::default(), txt: std::sync::RwLock::new(txt), audit: Default::default(), owners, on_deleted: Default::default(), sudo_ms: std::sync::atomic::AtomicI64::new(sudo::SUDO_MS) })
+        Ok(Accounts { db, config, mailer, http, sso_http, sso_discovery: Default::default(), txt: std::sync::RwLock::new(txt), audit: Default::default(), owners, on_deleted: Default::default(), on_offboarded: Default::default(), sudo_ms: std::sync::atomic::AtomicI64::new(sudo::SUDO_MS) })
     }
 
     /// Where SSO domains' TXT records are read (tests answer from a table).
@@ -830,11 +840,12 @@ impl Accounts {
     /// As [`Accounts::update_user`], saying who disables (`admin`, or `scim:<connection>`): SCIM
     /// lifts only a disable of its own, never an admin's.
     pub(crate) fn update_user_by(&self, id: &str, admin: Option<bool>, disabled: Option<bool>, by: &str) -> Result<User> {
-        self.db.write(|c| {
+        let now = self.db.now_ms()?;
+        let offboarded = self.db.write(|c| {
             // A deleted account is gone for good: no admin turns it back on.
-            if c.query_row("SELECT 1 FROM users WHERE id = ? AND deleted_at IS NULL", [id], |_| Ok(())).optional()?.is_none() {
+            let Some(was_admin) = c.query_row("SELECT admin FROM users WHERE id = ? AND deleted_at IS NULL", [id], |r| r.get::<_, bool>(0)).optional()? else {
                 return Err(Error::NotFound(format!("no user {id}")));
-            }
+            };
             if let Some(a) = admin {
                 c.execute("UPDATE users SET admin = ? WHERE id = ?", params![a, id])?;
             }
@@ -844,8 +855,17 @@ impl Accounts {
                     c.execute("DELETE FROM sessions WHERE user_id = ?", [id])?;
                 }
             }
-            Ok(())
+            // Disabled (every time: a retry finishes what a failure left), or no longer an admin:
+            // other products end what they handed out on the person's say.
+            let offboarded = disabled == Some(true) || (was_admin && admin == Some(false));
+            if offboarded {
+                offboarding::record(c, id, now)?;
+            }
+            Ok(offboarded)
         })?;
+        if offboarded {
+            self.run_offboardings();
+        }
         // A session isn't the only way in: the roll code owner's own tokens and machine links
         // go too (another database, so after the write; an admin who sees the error retries).
         if disabled == Some(true)

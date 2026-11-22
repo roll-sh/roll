@@ -884,8 +884,14 @@ async fn the_release_runs_at_each_new_head_before_services_and_its_schema_change
     // Before the services at that head; not again at the same head; again at a new one.
     e.engine.store.update(&p.id, |r| r.next_at = 0).unwrap();
     e.engine.pass().await.unwrap();
+    // Another change's migration lands first: production gains a table the preview's branch
+    // doesn't have. Not this change's doing, so neither a change nor a risk ("drops table").
+    *e.pg.schema.lock() = Some((vec!["table public.users".into(), "table public.orders".into()], vec!["table public.users".into(), "column public.users.nick text".into()]));
     e.code.edit("chg_r", |c| c.head = "cs_3b".into());
     e.engine.pass().await.unwrap();
+    let v = e.engine.store.view(e.engine.store.row(&p.id).unwrap()).unwrap();
+    assert_eq!(v.schema_changes.as_deref(), Some(&["+ column public.users.nick text".to_string()][..]));
+    assert!(v.schema_risks.is_empty(), "{:?}", v.schema_risks);
     let runs = e.apps.runs.lock().clone();
     let heads: Vec<_> = runs.iter().map(|(_, rev, deployed)| (rev.as_str(), *deployed)).collect();
     assert_eq!(heads, [("cs_3a", 0), ("cs_3a", 0), ("cs_3b", 0)], "{runs:?}");

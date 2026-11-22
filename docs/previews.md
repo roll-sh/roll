@@ -653,7 +653,13 @@ migrations (a fork's too), so each line is made printable once, where the diff i
 control characters escaped (a newline in a name can't fake a line, an escape sequence can't reach
 a terminal), lines cut at 300 characters, 200 lines at most; the comment keeps them inside a fence
 they can't close. A failure to read is
-logged and read again on the next converge; it never fails the preview.
+logged and read again on the next converge; it never fails the preview. Only what the change made is
+named: each branch's own lines are kept as it's made (masked, before any seed or release runs;
+`base_schema` on its resource row, read from the branch alone), and a line counts only when the
+branch also differs in it from that base (`schema::diff_since`). Another change's migration that
+lands on production while the preview is open isn't read as this one dropping its table, in the
+lines or the risks. A branch made before bases were kept, or whose base couldn't be read (said in
+its activity), is compared with its parent alone.
 
 What in those lines would hurt production when the change lands is named above them
 (`schema_risks`, `roll_previews::schema::risks`; PlanetScale's deploy request warnings, Atlas's
@@ -675,8 +681,11 @@ Search branches the same way: each one's `_mapping` and its parent's, read throu
 operator console request (no cluster password), become `index <name>` and `field <index>.<path>
 <type>` lines (nested fields and multi-fields by path, system indices left out), so a change
 whose code adds or retypes a field says so (live: `+ field products.price float` after the
-preview wrote a document with a price). With several such resources, each one's lines follow a
-`# <kind>:<ref>` heading.
+preview wrote a document with a price). An index the parent made after the branch started (the
+cluster's `parent_at`: a connector's first sync, a rollover, a day's `logs-…` index) that the
+branch doesn't have is left out: production's new index, not one the change drops (live: a
+connector's index the parent's sync makes after the preview is no risk). With several such
+resources, each one's lines follow a `# <kind>:<ref>` heading.
 
 ## Egress
 
