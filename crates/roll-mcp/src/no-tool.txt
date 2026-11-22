@@ -92,20 +92,6 @@ PUT /v1/search/clusters/{id}/remotes/{alias}                                   a
 PUT /v1/search/clusters/{id}/repositories/{name}                               an outside integration's setup: an admin's, with its credentials (#361)
 POST /v1/search/clusters/{id}/request                                          the operator's (any Elasticsearch request, unscoped)
 POST /v1/search/clusters/{id}/unload                                           the operator's (health, migrations, process control)
-POST /v1/search/clusters/{id}/indices/{index}/explain/{doc}                    no tool yet: maps after search-relevance-api lands
-PUT /v1/search/clusters/{id}/indices/{index}/settings                          no tool yet: maps after search-relevance-api lands
-GET /v1/search/clusters/{id}/query_rules                                       no tool yet: maps after search-relevance-api lands
-DELETE /v1/search/clusters/{id}/query_rules/{ruleset}                          no tool yet: maps after search-relevance-api lands
-GET /v1/search/clusters/{id}/query_rules/{ruleset}                             no tool yet: maps after search-relevance-api lands
-PUT /v1/search/clusters/{id}/query_rules/{ruleset}                             no tool yet: maps after search-relevance-api lands
-POST /v1/search/clusters/{id}/query_rules/{ruleset}/test                       no tool yet: maps after search-relevance-api lands
-GET /v1/search/clusters/{id}/synonyms                                          no tool yet: maps after search-relevance-api lands
-DELETE /v1/search/clusters/{id}/synonyms/{set}                                 no tool yet: maps after search-relevance-api lands
-GET /v1/search/clusters/{id}/synonyms/{set}                                    no tool yet: maps after search-relevance-api lands
-PUT /v1/search/clusters/{id}/synonyms/{set}                                    no tool yet: maps after search-relevance-api lands
-DELETE /v1/search/clusters/{id}/synonyms/{set}/{rule}                          no tool yet: maps after search-relevance-api lands
-GET /v1/search/clusters/{id}/synonyms/{set}/{rule}                             no tool yet: maps after search-relevance-api lands
-PUT /v1/search/clusters/{id}/synonyms/{set}/{rule}                             no tool yet: maps after search-relevance-api lands
 GET /v1/secrets/gateways/{id}/connect                                          interactive (a shell, files, a forward): an admin's, live
 GET /v1/secrets/health                                                         the operator's (health, migrations, process control)
 PATCH /v1/secrets/projects/{project}                                           a person's call: how long old versions are kept (shortening it deletes history)
