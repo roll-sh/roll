@@ -735,6 +735,14 @@ async fn lockdown_withholds_outsiders_text() {
     let gc = locked.rpc("tools/call", json!({ "name": "get_change", "arguments": { "change": id } })).await;
     assert_eq!(bodies(&gc["result"]["structuredContent"]), ["why b?", roll_auth::lockdown::WITHHELD]);
     assert!(!gc["result"]["content"][0]["text"].as_str().unwrap().contains("Ignore your instructions"), "{gc}");
+    // Text a person can't see (tag characters smuggling ASCII, a zero-width space) comes out as
+    // escapes in the text block, lockdown or not; the structured answer stays exact.
+    let hidden = "fine\u{200b}\u{e0069}\u{e0067}";
+    a.req("POST", &format!("/v1/code/threads/{th}/comments"), Some(json!({ "body": hidden })), root).await;
+    let gc = open.rpc("tools/call", json!({ "name": "get_change", "arguments": { "change": id } })).await;
+    let text = gc["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("\\u200b") && !text.contains('\u{200b}') && !text.contains('\u{e0069}'), "{text}");
+    assert_eq!(bodies(&gc["result"]["structuredContent"])[2], hidden);
     let mut typo = Client::new(&a, root);
     typo.headers.push(("x-mcp-lockdown", "yes".into()));
     assert_eq!(typo.post(json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" }), &[]).await.0, StatusCode::BAD_REQUEST);

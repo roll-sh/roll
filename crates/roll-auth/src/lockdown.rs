@@ -59,6 +59,36 @@ pub fn withhold_fields(v: &mut Value, fields: &[&str]) -> usize {
     }
 }
 
+/// Characters a person can't see that a model reads: tag characters (ASCII smuggled as
+/// U+E0000–E007F), zero-width and bidi controls, and variation selectors (bytes hidden after an
+/// emoji). Third-party text reaches the model in results (review comments, a preview's notes and
+/// mail, task messages, objects), so the text block escapes them.
+pub fn invisible(c: char) -> bool {
+    matches!(c as u32,
+        0x00AD | 0x180E | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x2064 | 0x2066..=0x2069 | 0xFE00..=0xFE0F | 0xFEFF | 0xE0000..=0xE007F | 0xE0100..=0xE01EF)
+}
+
+/// `text` with each invisible character written as a JSON escape (`\u200b`, a surrogate pair past
+/// U+FFFF): the model sees that it's there, a JSON text still parses to the same value, and
+/// `structuredContent` stays exact.
+pub fn visible(text: &str) -> String {
+    if !text.chars().any(invisible) {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len() + 16);
+    for c in text.chars() {
+        if invisible(c) {
+            let mut units = [0u16; 2];
+            for u in c.encode_utf16(&mut units) {
+                out.push_str(&format!("\\u{u:04x}"));
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

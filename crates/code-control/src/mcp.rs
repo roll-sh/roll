@@ -1260,6 +1260,16 @@ async fn call_tool(m: &Mcp, headers: &HeaderMap, name: &str, args: &Value, lockd
         let text = serde_json::to_string_pretty(&result["structuredContent"]).unwrap_or_default();
         result["content"] = json!([{ "type": "text", "text": text }]);
     }
+    // What a person can't see but a model reads (tag characters, zero-width and bidi controls) is
+    // written out as escapes in the text block, as roll's own /v1/mcp does: a comment or a file
+    // can't hide an instruction. `structuredContent` stays exact.
+    if let Some(content) = result["content"].as_array_mut() {
+        for c in content.iter_mut().filter(|c| c["type"] == "text") {
+            if let Some(t) = c["text"].as_str() {
+                c["text"] = Value::String(roll_auth::lockdown::visible(t));
+            }
+        }
+    }
     result
 }
 
