@@ -1422,7 +1422,7 @@ impl Engine {
     async fn drop_pinned_data(&self, id: &str, which: impl Fn(&crate::store::PinnedData) -> bool) -> anyhow::Result<()> {
         for d in self.store.pinned_data(id)?.into_iter().filter(|d| which(d)) {
             if let Ok(b) = self.brancher(d.kind) {
-                b.delete_snapshot(&d.parent, &d.source, &d.r#ref, &d.name).await.map_err(|e| anyhow::anyhow!("deleting an earlier push's copy of {}:{}: {e:#}", d.kind.as_str(), d.parent))?;
+                b.delete_snapshot(&d.parent, &d.source, &d.r#ref, d.kept.as_deref(), &d.name).await.map_err(|e| anyhow::anyhow!("deleting an earlier push's copy of {}:{}: {e:#}", d.kind.as_str(), d.parent))?;
             }
             self.store.drop_pinned_data(id, &d)?;
         }
