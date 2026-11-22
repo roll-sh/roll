@@ -1299,7 +1299,10 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/search/clusters/{id}/password", "search", REVEAL, one(PG, "cluster")),
     // A deleted cluster back (its id still resolves while it is kept): a write, like a create.
     row("POST", "/v1/search/clusters/{id}/restore", "search", W, one(PG, "cluster")),
-    row("POST", "/v1/search/clusters/{id}/request", "search", ADMIN, one(PG, "cluster")),
+    // Any request as the cluster's owner. One that answers or sets a credential (decided by
+    // search on the API the cluster routes it to) needs reveal too: the gate says whether the
+    // grant has it (`capable`), without reading the body.
+    row("POST", "/v1/search/clusters/{id}/request", "search", ADMIN, one(PG, "cluster")).capable(&[Action::Reveal]),
     // An API key: its secret is in the answer.
     row("POST", "/v1/search/clusters/{id}/keys", "search", REVEAL, one(PG, "cluster")),
     row("DELETE", "/v1/search/clusters/{id}/keys/{key}", "search", ADMIN, one(PG, "cluster")),
@@ -1384,6 +1387,9 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/secrets/deleted", "secrets", R, Tgt::AnyGrant),
     // Recovering one is its secrets admin's, as deleting it was.
     row("POST", "/v1/secrets/projects/{project}/recover", "secrets", ADMIN, one(&["project"], "project")),
+    // A deleted environment's recovery is its admin's (docs/secrets.md, "When a secret, an
+    // environment or the project goes").
+    row("POST", "/v1/secrets/projects/{project}/environments/{env}/recover", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
     row("GET", "/v1/secrets/projects/{project}/", "secrets", R, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("GET", "/v1/secrets/projects/{project}", "secrets", R, one(&["project"], "project")),
     // How long a project keeps old values (history_days): purging is the project admin's.
@@ -1593,6 +1599,10 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/apps/projects/{project}/limits", "apps", R, one(&["project"], "project")),
     row("GET", "/v1/apps/projects/{project}/usage", "apps", R, one(&["project"], "project")),
     row("PUT", "/v1/apps/projects/{project}/limits", "apps", ADMIN, one(&["project"], "project")),
+    // Which images may run (signed ones): a supply-chain policy, an admin's call; reading it is read.
+    row("GET", "/v1/apps/projects/{project}/signing", "apps", R, one(&["project"], "project")),
+    row("PUT", "/v1/apps/projects/{project}/signing", "apps", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/apps/projects/{project}/signing", "apps", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/apps/projects/{project}/notifications", "apps", R, one(&["project"], "project")),
     row("POST", "/v1/apps/projects/{project}/notifications", "apps", Act::Body(apps_notification_action), one(&["project"], "project")),
     row("DELETE", "/v1/apps/projects/{project}/notifications/{nid}", "apps", W, one(&["project"], "project")),
@@ -1731,6 +1741,9 @@ static ROWS: &[Row] = &[
     // ones'): the link is a credential, as its QR code is.
     row("GET", "/v1/previews", "previews", R, list("id")).reveals(&["share_url"]),
     row("POST", "/v1/previews", "previews", W, Tgt::Create { project: None, place: None, id_field: "id" }).env(EnvFrom::Fixed("preview")),
+    // Each event is its project's: a member, or a token held to some projects, follows theirs
+    // (a deleted preview's event too: its project still resolves).
+    row("GET", "/v1/previews/events", "previews", R, Tgt::List { items: Some("events"), id_field: "project", kind: Some("project") }),
     row("*", "/v1/previews/projects/{project}/", "previews", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/previews/projects/{project}/", "previews", R, one(&["project"], "project")),
     // A project's preview settings carry the variable values every preview's services get
@@ -1791,6 +1804,10 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/code/names/{name}", "code", R, Tgt::Product),
     row("GET", "/v1/code/names/{owner}/{repo}", "code", R, one(REPO, "repo")),
     row("GET", "/v1/code/repos", "code", R, list("full_name")),
+    // Changes and work items across the caller's repos (the `search` tool): each result is its
+    // repo's, so a token narrowed to some repos keeps only theirs.
+    row("GET", "/v1/code/search", "code", R, Tgt::List { items: Some("results"), id_field: "repo", kind: None }),
+    row("GET", "/v1/code/documents/{id}", "code", R, one(PG, "document")),
     row("POST", "/v1/code/repos", "code", Act::Body(code_repo_action), create("repo", "full_name")),
     row("GET", "/v1/code/repos/{owner}/{repo}", "code", R, one(REPO, "repo")),
     row("PATCH", "/v1/code/repos/{owner}/{repo}", "code", ADMIN, one(REPO, "repo")),

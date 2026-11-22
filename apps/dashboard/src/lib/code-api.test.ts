@@ -404,7 +404,7 @@ describe("roll's reviewer, billing and search", () => {
     mockFetch(() => json(404, { error: "no review provider" }));
     expect(await createCodeApi("http://api").reviewProvider("acme")).toBeNull();
     // The owner's own read: 200 with a null provider means hosted too.
-    const hosted = { owner: "acme", provider: null, base_url: null, model: null, secondary_model: null, key_last4: null, updated_at: null };
+    const hosted = { owner: "acme", provider: null, base_url: null, model: null, secondary_model: null, key_last4: null, key_ref: null, updated_at: null };
     mockFetch(() => json(200, hosted));
     expect(await createCodeApi("http://api").reviewProvider("acme")).toBeNull();
     mockFetch(() => json(200, { ...hosted, provider: "anthropic", key_last4: "9999", updated_at: 1 }));

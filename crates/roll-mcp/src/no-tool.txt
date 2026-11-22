@@ -46,6 +46,7 @@ POST /v1/nosql/databases/{id}/flush                                            t
 POST /v1/nosql/databases/{id}/imports                                          the operator's (an SSTable backup import from storage the operator holds)
 POST /v1/nosql/databases/{id}/password                                         answers or sets a credential
 POST /v1/nosql/databases/{id}/unload                                           the operator's (health, migrations, process control)
+GET /v1/previews/events                                                        an MCP Events feed (previews.event): events/poll, events/stream and webhooks read it; a tool answers once
 DELETE /v1/previews/projects/{project}/bypass                                  answers or sets a credential
 GET /v1/previews/projects/{project}/bypass                                     answers or sets a credential
 POST /v1/previews/projects/{project}/bypass                                    answers or sets a credential
@@ -92,20 +93,6 @@ PUT /v1/search/clusters/{id}/remotes/{alias}                                   a
 PUT /v1/search/clusters/{id}/repositories/{name}                               an outside integration's setup: an admin's, with its credentials (#361)
 POST /v1/search/clusters/{id}/request                                          the operator's (any Elasticsearch request, unscoped)
 POST /v1/search/clusters/{id}/unload                                           the operator's (health, migrations, process control)
-POST /v1/search/clusters/{id}/indices/{index}/explain/{doc}                    no tool yet: maps after search-relevance-api lands
-PUT /v1/search/clusters/{id}/indices/{index}/settings                          no tool yet: maps after search-relevance-api lands
-GET /v1/search/clusters/{id}/query_rules                                       no tool yet: maps after search-relevance-api lands
-DELETE /v1/search/clusters/{id}/query_rules/{ruleset}                          no tool yet: maps after search-relevance-api lands
-GET /v1/search/clusters/{id}/query_rules/{ruleset}                             no tool yet: maps after search-relevance-api lands
-PUT /v1/search/clusters/{id}/query_rules/{ruleset}                             no tool yet: maps after search-relevance-api lands
-POST /v1/search/clusters/{id}/query_rules/{ruleset}/test                       no tool yet: maps after search-relevance-api lands
-GET /v1/search/clusters/{id}/synonyms                                          no tool yet: maps after search-relevance-api lands
-DELETE /v1/search/clusters/{id}/synonyms/{set}                                 no tool yet: maps after search-relevance-api lands
-GET /v1/search/clusters/{id}/synonyms/{set}                                    no tool yet: maps after search-relevance-api lands
-PUT /v1/search/clusters/{id}/synonyms/{set}                                    no tool yet: maps after search-relevance-api lands
-DELETE /v1/search/clusters/{id}/synonyms/{set}/{rule}                          no tool yet: maps after search-relevance-api lands
-GET /v1/search/clusters/{id}/synonyms/{set}/{rule}                             no tool yet: maps after search-relevance-api lands
-PUT /v1/search/clusters/{id}/synonyms/{set}/{rule}                             no tool yet: maps after search-relevance-api lands
 GET /v1/secrets/gateways/{id}/connect                                          interactive (a shell, files, a forward): an admin's, live
 GET /v1/secrets/health                                                         the operator's (health, migrations, process control)
 PATCH /v1/secrets/projects/{project}                                           a person's call: how long old versions are kept (shortening it deletes history)
@@ -134,7 +121,9 @@ DELETE /v1/secrets/projects/{project}/cloud-accounts/{id}                      a
 POST /v1/secrets/projects/{project}/directories                                an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/directories/{id}                         an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/environments/{env}/decoys                  a person's call (decoys are planted by a person, #392)
+GET /v1/secrets/projects/{project}/environments/{env}/deletion                 the dashboard's (the delete dialog: what goes and breaks; the delete's own 409 names the same)
 GET /v1/secrets/projects/{project}/environments/{env}/digest                   roll run --watch's change signal
+POST /v1/secrets/projects/{project}/environments/{env}/recover                 a person's call: it brings a deleted environment and its secrets back
 PUT /v1/secrets/projects/{project}/environments/{env}/exports                  a person's call: sharing a folder with other projects grants them its values
 DELETE /v1/secrets/projects/{project}/environments/{env}/folder-policies       a person's call: a folder's approvals
 PUT /v1/secrets/projects/{project}/environments/{env}/folder-policies          a person's call: a folder's approvals

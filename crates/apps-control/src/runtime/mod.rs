@@ -201,6 +201,11 @@ pub trait Runtime: Send + Sync {
     async fn remote_digest(&self, image: &str, login: Option<&RegistryLogin>) -> anyhow::Result<String> {
         crate::registry::Registry::new(None)?.digest(image, login).await
     }
+    /// A pinned image's cosign signature verified with one of `keys` (PEM public keys) from its
+    /// registry ([`crate::registry::Registry::verify_cosign`]): which key, or why none.
+    async fn verify_signature(&self, pinned: &str, keys: &[String], login: Option<&RegistryLogin>) -> anyhow::Result<usize> {
+        crate::registry::Registry::new(None)?.verify_cosign(pinned, keys, login).await
+    }
     /// Make the instance, ready to start; nothing runs yet.
     async fn create(&self, spec: &InstanceSpec) -> anyhow::Result<()>;
     /// Start a created (or stopped) instance and say where its port answers. Its output goes
@@ -328,8 +333,9 @@ pub trait Runtime: Send + Sync {
     async fn ensure_peer(&self, _spec: &PeerSpec) -> anyhow::Result<()> {
         anyhow::bail!("this runtime can't run a private network")
     }
-    /// A private network's peer and forwarders gone (`name` is [`PeerSpec::name`]).
-    async fn remove_peer(&self, _name: &str) {}
+    /// A private network's peer and forwarders gone (`name` is [`PeerSpec::name`]; they're
+    /// found by the environment's labels, never by a name another environment's could hold).
+    async fn remove_peer(&self, _name: &str, _service: &str, _env: &str) {}
     /// Remove a volume (an environment's teardown).
     async fn remove_volume(&self, name: &str);
     /// The files under `dir` in `image`, as a tar stream (a static site's, to serve without an

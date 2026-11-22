@@ -72,7 +72,7 @@ impl Secrets {
         type Due = (String, String, String, Option<i64>, bool);
         let due: Vec<Due> = self.db.read(|c| {
             c.query(
-                &format!("SELECT id, project_id, slug, reminded_at, COALESCE(notify_set_by_session, 0) FROM environments WHERE notify_url IS NOT NULL AND kind = 'standard' AND COALESCE(reminded_at, 0) <= ? AND {} LIMIT 100", crate::deleted::live("environments.project_id")),
+                &format!("SELECT id, project_id, slug, reminded_at, COALESCE(notify_set_by_session, 0) FROM environments WHERE notify_url IS NOT NULL AND forgotten_at IS NULL AND kind = 'standard' AND COALESCE(reminded_at, 0) <= ? AND {} LIMIT 100", crate::deleted::live("environments.project_id")),
                 params![now - REMIND_EVERY_MS],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get::<_, i64>(4)? == 1)),
             )

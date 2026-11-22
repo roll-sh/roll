@@ -1328,12 +1328,13 @@ async fn environments_start_as_three_and_can_be_added_renamed_reordered_and_dele
     let envs = api.ok(Method::PUT, "/environments/order", Some(json!({ "order": ["qa", "development", "preprod", "production"] }))).await;
     assert_eq!(slugs(&envs), ["qa", "development", "preprod", "production"]);
     let (s, _) = api.call(Method::DELETE, "/environments/qa", None).await;
-    assert_eq!(s, StatusCode::NO_CONTENT);
+    assert_eq!(s, StatusCode::OK);
+    // Production starts protected: deleting it names it.
+    let (s, e) = api.call(Method::DELETE, "/environments/production", None).await;
+    assert_eq!((s, e["code"].as_str()), (StatusCode::CONFLICT, Some("confirm_required")));
     for slug in ["development", "preprod"] {
         api.call(Method::DELETE, &format!("/environments/{slug}"), None).await;
     }
-    // Production starts protected: deleting it names it.
-    assert_eq!(api.call(Method::DELETE, "/environments/production", None).await.0, StatusCode::BAD_REQUEST);
     let (s, e) = api.call(Method::DELETE, "/environments/production?confirm=production", None).await;
     assert_eq!((s, e["code"].as_str()), (StatusCode::CONFLICT, Some("last_environment")));
 }
@@ -2047,7 +2048,7 @@ async fn nothing_reaches_an_environment_its_caller_cannot_read() {
     let t = api.token(json!({ "name": "dev", "environments": ["development"], "actions": ["read", "reveal", "write", "delete"] }));
     let token = Some(t.as_str());
     let (s, _) = api.req(Method::DELETE, "/environments/development", None, token).await;
-    assert_eq!(s, StatusCode::NO_CONTENT);
+    assert_eq!(s, StatusCode::OK, "kept for the window");
     let (s, _) = api.req(Method::POST, "/environments", Some(json!({ "slug": "development", "base": "production" })), token).await;
     assert_eq!(s, StatusCode::FORBIDDEN);
     let link = json!({ "link": { "kind": "bucket", "ref": "assets", "field": "url", "mode": "live" } });
@@ -5592,6 +5593,14 @@ async fn a_reference_a_person_chose_reads_only_what_they_may_reveal_now() {
     let as_ada = s.caller_of(false, Some(&session("ada", false)), None).unwrap();
     let ada = s.bind_ref(&site, "roll://production/DEPLOY_KEY", &as_ada).unwrap();
     assert_eq!(s.resolve_as(&site, "roll://production/DEPLOY_KEY", &ada).unwrap().value.expose(), "fake-ada");
+    // Her roll code owner's reviewer key: through the project holding one of her repos, read in
+    // reach as `code:review:ada`. Nobody else's owner reads it.
+    let review = ResourceRef::code_owner("ada");
+    let reviewer = s.bind_ref(&review, "roll://production/DEPLOY_KEY", &as_ada).unwrap();
+    assert_eq!(s.resolve_as(&review, "roll://production/DEPLOY_KEY", &reviewer).unwrap().value.expose(), "fake-ada");
+    let (_, reach) = api.as_ada(Method::GET, &format!("/v1/secrets/projects/{mine}/environments/production/reach?path=/&key=DEPLOY_KEY"), None).await;
+    assert!(reach["readers"].as_array().unwrap().iter().any(|r| r["actor"] == "code:review:ada"), "{reach}");
+    assert!(matches!(s.bind_ref(&ResourceRef::code_owner("bob"), "roll://production/DEPLOY_KEY", &as_ada), Err(Refusal::NoProject(_))));
     let (st, e) = api.as_ada(Method::POST, &format!("/v1/secrets/projects/{mine}/environments/production/changes"), Some(json!({ "ops": [{ "op": "set", "key": "GIT_TOKEN", "value": "fake-git", "tags": ["sensitive"] }] }))).await;
     assert!(st.is_success(), "{e}");
     let ada_runtime = s.bind_ref_runtime(&site, "roll://production/GIT_TOKEN", &as_ada, "production").unwrap();
@@ -5601,6 +5610,8 @@ async fn a_reference_a_person_chose_reads_only_what_they_may_reveal_now() {
     api.ws_db.write(|c| c.execute("UPDATE projects SET owner = '' WHERE id = ?", [&mine])).unwrap();
     api.ws_db.write(|c| c.execute("DELETE FROM members WHERE project_id = ? AND user_id = 'usr_ada'", [&mine])).unwrap();
     let refused = s.resolve_as(&site, "roll://production/DEPLOY_KEY", &ada).unwrap_err();
+    assert!(matches!(refused, Refusal::MakerUnreachable(_)), "{refused}");
+    let refused = s.resolve_as(&review, "roll://production/DEPLOY_KEY", &reviewer).unwrap_err();
     assert!(matches!(refused, Refusal::MakerUnreachable(_)), "{refused}");
     let refused = s.resolve_as(&site, "roll://production/GIT_TOKEN", &ada_runtime).unwrap_err();
     assert!(matches!(refused, Refusal::MakerUnreachable(_)) && !refused.to_string().contains("fake-"), "{refused}");
@@ -6913,6 +6924,108 @@ async fn past_its_window_a_deleted_project_ends_its_log_at_a_signed_digest_then_
     assert!(api.ws.deleted(&api.project).unwrap().is_none(), "the workspace let it go too");
     assert_eq!(api.call(Method::POST, &recover, None).await.0, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn a_deleted_environment_reads_as_gone_its_references_say_so_and_it_comes_back() {
+    let api = Api::new().await;
+    api.set("staging", "DB", "postgres://staging.internal").await;
+    api.set("development", "UPSTREAM", "${staging.DB}").await;
+    // Before anything goes, the refusal and the dialog's preview name what breaks.
+    let pre = api.ok(Method::GET, "/environments/staging/deletion", None).await;
+    assert_eq!((pre["confirm"].as_bool(), pre["window_days"].as_i64()), (Some(true), Some(7)), "{pre}");
+    assert_eq!(pre["breaks"], json!([{ "environment": "development", "path": "/", "key": "UPSTREAM", "via": "reference" }]));
+    let (s, e) = api.call(Method::DELETE, "/environments/staging", None).await;
+    assert_eq!((s, e["code"].as_str()), (StatusCode::CONFLICT, Some("confirm_required")), "{e}");
+    assert!(e["error"].as_str().unwrap().contains("development:/UPSTREAM") && !e.to_string().contains("postgres://"), "{e}");
+    let gone = api.ok(Method::DELETE, "/environments/staging?confirm=staging", None).await;
+    assert_eq!(gone["purge_at"].as_i64().unwrap() - gone["deleted_at"].as_i64().unwrap(), 7 * 86_400_000);
+
+    // Nobody reads it, a reference to it says why, and its slug stays its own.
+    assert_eq!(api.call(Method::GET, "/environments/staging/values?path=/", None).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(slugs(&api.ok(Method::GET, "/environments", None).await), ["development", "production"]);
+    assert_eq!(api.ok(Method::GET, "/v1/secrets/search?key=DB", None).await, json!([]));
+    let v = api.values("development", "/").await;
+    assert!(v["problems"].to_string().contains("references staging, which was deleted; recover it or change the reference"), "{v}");
+    let (s, e) = api.call(Method::POST, "/environments", Some(json!({ "slug": "staging" }))).await;
+    assert!(s == StatusCode::CONFLICT && e["error"].as_str().unwrap().contains("recover"), "{e}");
+    let deleted = api.ok(Method::GET, "/v1/secrets/deleted", None).await;
+    assert_eq!((deleted[0]["environment"].as_str(), deleted[0]["project"].as_str()), (Some("staging"), Some(api.project.as_str())), "{deleted}");
+    assert_eq!(api.as_ada(Method::GET, "/v1/secrets/deleted", None).await.1, json!([]), "not hers to see");
+
+    api.ok(Method::POST, "/environments/staging/recover", None).await;
+    assert_eq!(api.values("development", "/").await["values"]["UPSTREAM"], "postgres://staging.internal");
+    assert_eq!(api.call(Method::POST, "/environments/staging/recover", None).await.0, StatusCode::NOT_FOUND, "not deleted any more");
+    let audit = api.ok(Method::GET, "/audit?action=environment", None).await;
+    let actions: Vec<&str> = audit.as_array().unwrap().iter().map(|e| e["action"].as_str().unwrap()).collect();
+    assert!(actions.contains(&"environment.delete") && actions.contains(&"environment.recover"), "{actions:?}");
+    // A protected environment with no approvals (a new project's production) goes directly once confirmed.
+    assert_eq!(api.call(Method::DELETE, "/environments/production", None).await.0, StatusCode::CONFLICT);
+    assert_eq!(api.call(Method::DELETE, "/environments/production?confirm=production", None).await.0, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn deleting_a_protected_environment_that_asks_for_approvals_is_a_change_request() {
+    let api = Api::new().await;
+    api.set("production", "KEY", "kept").await;
+    api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true, "approvals": 1 }))).await;
+    let (s, r) = api.call(Method::DELETE, "/environments/production?confirm=production", None).await;
+    assert_eq!((s, r["request"]["action"].as_str(), r["request"]["state"].as_str()), (StatusCode::ACCEPTED, Some("delete_environment"), Some("open")), "{r}");
+    let id = r["request"]["id"].as_str().unwrap();
+    assert_eq!(api.values("production", "/").await["values"]["KEY"], "kept", "nothing went yet");
+    let (s, e) = api.call(Method::POST, &format!("/environments/production/requests/{id}/apply"), None).await;
+    assert_eq!((s, e["code"].as_str()), (StatusCode::CONFLICT, Some("approval_required")));
+    let reviewer = api.token(json!({ "name": "lead", "actions": ["read", "admin", "write", "delete"] }));
+    let (s, r) = api.req(Method::POST, &format!("/environments/production/requests/{id}/review"), Some(json!({ "verdict": "approve" })), Some(&reviewer)).await;
+    assert_eq!((s, r["state"].as_str()), (StatusCode::OK, Some("approved")), "{r}");
+    let r = api.ok(Method::POST, &format!("/environments/production/requests/{id}/apply"), None).await;
+    assert_eq!(r["state"], "applied");
+    assert_eq!(api.call(Method::GET, "/environments/production", None).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(api.ok(Method::GET, "/v1/secrets/deleted", None).await[0]["environment"], "production");
+}
+
+#[tokio::test]
+async fn a_project_holding_only_a_registered_resource_needs_a_secrets_admins_confirmation() {
+    let api = Api::new().await;
+    api.ok(Method::POST, "/rotators", Some(json!({ "name": "stripe", "url": "https://rotator.example/stripe?token=t" }))).await;
+    let (s, e) = delete_project(&api, "", None).await;
+    assert_eq!((s, e["code"].as_str()), (StatusCode::CONFLICT, Some("project_holds_secrets")), "{e}");
+    assert!(e["error"].as_str().unwrap().contains("1 rotator"), "{e}");
+    let writer = api.token(json!({ "actions": ["read", "write", "delete"] }));
+    assert_eq!(delete_project(&api, "?confirm=shop", Some(&writer)).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(delete_project(&api, "?confirm=shop", None).await.0, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn past_its_window_a_deleted_environment_is_purged_and_leaves_no_rows() {
+    let api = Api::new().await;
+    api.set("staging", "KEY", "v1").await;
+    api.set("staging", "KEY", "v2").await;
+    api.ok(Method::PUT, "/environments/staging/imports?path=/", Some(json!([{ "environment": "development", "path": "/" }]))).await;
+    let p = api.project.clone();
+    let id: String = api.db.read(move |c| c.query_row("SELECT id FROM environments WHERE project_id = ? AND slug = 'staging'", [p.as_str()], |r| r.get(0))).unwrap();
+    api.ok(Method::DELETE, "/environments/staging", None).await;
+    let sweep = || {
+        let s = api.secrets.clone();
+        async move { tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap() }
+    };
+    let count = |table: &str| {
+        let (sql, e) = (format!("SELECT COUNT(*) FROM {table} WHERE {}", if table == "environments" { "id = ?" } else { "env_id = ?" }), id.clone());
+        api.db.read(move |c| c.query_row(&sql, [e.as_str()], |r| r.get::<_, i64>(0))).unwrap()
+    };
+    sweep().await;
+    assert_eq!((count("secrets"), count("environments")), (1, 1), "nothing goes within the window");
+    let e = id.clone();
+    api.db.write(move |c| c.execute("UPDATE environments SET purge_at = 0 WHERE id = ?", [e.as_str()])).unwrap();
+    sweep().await;
+    for t in ["secrets", "versions", "changes", "folders", "imports", "requests", "leases", "environments"] {
+        assert_eq!(count(t), 0, "{t}");
+    }
+    let audit = api.ok(Method::GET, "/audit?action=environment.purge", None).await;
+    assert_eq!(audit[0]["environment"], "staging", "{audit}");
+    assert_eq!(api.call(Method::POST, "/environments/staging/recover", None).await.0, StatusCode::NOT_FOUND);
+    api.ok(Method::POST, "/environments", Some(json!({ "slug": "staging" }))).await;
+}
+
 
 /// rolld's services and sandboxes as reach asks for them: `web` deploys staging, `api` reads
 /// production through a `roll://` variable, and a sandbox holds development's KEY and OTHER.

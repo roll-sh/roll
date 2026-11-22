@@ -98,6 +98,8 @@ pub struct Fake {
     pub commands_run: Mutex<Vec<(String, String)>>,
     /// Each closed network's interception: whether its egress proxies have one.
     pub intercepted: Mutex<std::collections::HashMap<String, bool>>,
+    /// Images whose cosign signature verifies, by name (without the digest), and with which key.
+    pub signatures: Mutex<std::collections::HashMap<String, usize>>,
     /// Private networks' peers as they run now, by name.
     pub peers: Mutex<std::collections::HashMap<String, super::PeerSpec>>,
     /// Each closed network's interception as its proxies have it now (which CA they serve).
@@ -391,7 +393,7 @@ impl Runtime for Fake {
         Ok(())
     }
 
-    async fn remove_peer(&self, name: &str) {
+    async fn remove_peer(&self, name: &str, _service: &str, _env: &str) {
         self.peers.lock().remove(name);
     }
 
@@ -432,6 +434,11 @@ impl Runtime for Fake {
 
     async fn remote_digest(&self, image: &str, _login: Option<&super::RegistryLogin>) -> anyhow::Result<String> {
         Ok(self.pinned(image))
+    }
+
+    async fn verify_signature(&self, pinned: &str, keys: &[String], _login: Option<&super::RegistryLogin>) -> anyhow::Result<usize> {
+        let name = pinned.split_once('@').map_or(pinned, |(n, _)| n);
+        self.signatures.lock().get(name).copied().filter(|i| *i < keys.len()).ok_or_else(|| anyhow::anyhow!("{name} has no cosign signature by those keys"))
     }
 
     async fn create(&self, spec: &InstanceSpec) -> anyhow::Result<()> {

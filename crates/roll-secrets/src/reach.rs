@@ -363,7 +363,7 @@ impl Secrets {
                 let mut next = vec![];
                 for (eid, eproject, at) in frontier {
                     let importers: Vec<(String, String, String, String)> = c.query(
-                        "SELECT e.id, e.project_id, e.slug, i.path FROM imports i JOIN environments e ON e.id = i.env_id WHERE i.from_env_id = ? AND i.from_path = ? ORDER BY e.project_id, e.slug, i.path",
+                        "SELECT e.id, e.project_id, e.slug, i.path FROM imports i JOIN environments e ON e.id = i.env_id AND e.forgotten_at IS NULL WHERE i.from_env_id = ? AND i.from_path = ? ORDER BY e.project_id, e.slug, i.path",
                         params![eid, at],
                         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
                     )?;

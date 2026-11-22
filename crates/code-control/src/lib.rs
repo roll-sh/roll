@@ -10,6 +10,7 @@ pub mod chatops;
 pub mod checkout;
 pub mod cluster;
 pub mod db;
+mod documents;
 pub mod ext;
 pub mod git;
 pub mod kept;

@@ -762,7 +762,7 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
         Some(_) => vec![std::sync::Arc::new(access::CodeTools)],
         None => Vec::new(),
     };
-    let mcp_config = roll_mcp::Config { api_url: access::api_url(&args), web_url: args.web_url.clone(), locked: auth.enforcing(), products: mcp_products, access: Some(access.clone()) };
+    let mcp_config = roll_mcp::Config { api_url: access::api_url(&args), web_url: args.web_url.clone(), locked: auth.enforcing(), products: mcp_products, access: Some(access.clone()), inspector: access::mcp_inspector() };
     let gated = auth.layer(router.clone());
     // roll code's agents relay acts on a caller's behalf through the gate too.
     if let Some(c) = &code {

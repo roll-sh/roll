@@ -124,8 +124,15 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
 - **Earlier pushes** (Vercel's per-push URLs): when a change's own service is redeployed at a new
   head, the head it ran stays reachable at `<service>-<head>-<slug>`, on the preview's same data,
   behind the same link, asleep until opened; the last 3 per service (an older one's container
-  goes). For comparing before and after. A trusted change's only (an approval is for one head),
-  and old code on migrated data can break. A roll apps service's earlier push is that build's own
+  goes). For comparing before and after. A trusted change's only (an approval is for one head).
+  Each runs on its own data: before the next head's seed or release, each Postgres branch is
+  branched again (copy-on-write, masked as the preview's is) as that head left it, and the
+  earlier push connects there, so a migration that renamed a column doesn't break the code
+  before it. A copy's bytes count in the preview's cost, budget and `max_bytes` with its
+  branches'. A copy goes with its push, and with the data it copied (a reset, or masking rules
+  that changed: never served less masked than the rules say). Products that can't branch a
+  branch share the preview's (for now everything but Postgres), and so do roll apps services,
+  whose builds keep the variables they were deployed with. A roll apps service's earlier push is that build's own
   deployment URL (`<deployment>--<slug>` on roll apps' domain, never a project's preview domain;
   roll apps' `Deployment.url`), behind the same link (the token once, a cookie for that host) or
   sign-in: asked before the new head deploys, and kept only while the running build is the head
@@ -1616,6 +1623,7 @@ previews in it), the operator and admins see every project.
 | --- | --- | --- |
 | `GET /v1/previews?project=&state=` | | `Preview[]`, newest first, light (`Preview::light`): every count and state a row reads, without each page's accessibility issues, links and comparison, the first page's issues' markup and axe-core's words, or the words against main (by the bounds, about 130 KB a preview whose pages have the most violations, down to a few KB); `GET …/{id}` has all of it |
 | `POST /v1/previews` | `{project, repo, branch? , change?}` | 201 `Preview` (or 200 with the project's existing one). 404 unless the repo is on the project's canvas and the project stands for it (`Workspace::trusts`, as for the previews it makes itself: a preview builds and runs the repo). 409 when the change's preview is another project's (a change has one; it's never handed to another project); 400 when `X-Roll-Project` (the project roll-access decided the create on) names another project than the body |
+| `GET /v1/previews/events?after=&limit=&latest=` | | `{events: Event[], next}`: what happened to previews after the seq `after` (0 by default), oldest first, at most `limit` (1–500, 100 by default); `next` is where to ask from again (past events the caller doesn't see too: a signed-in person sees their projects'). `latest=1`: `{events: [], next}` with the newest seq, to follow from now on (400 with `after`). `type Event = {seq, at, kind: "created" \| "ready" \| "failed" \| "visual_change" \| "deleted", project, preview, change: string \| null, data: {head}}`: `ready` is up after a push or the first deploy (asleep once up counts), never a sleeping preview waking; `visual_change` is a visual change waiting for review, once a head. Each event's `seq` is taken in the write that made it so, so commit order is seq order and a follower past one never misses an earlier one; kept 7 days. roll MCP's event feeds follow it |
 | `GET /v1/previews/{id}` | | `Preview` |
 | `DELETE /v1/previews/{id}` | | 202 `Preview` (`desired: "deleted"`) |
 | `POST /v1/previews/{id}/refresh` | | `Preview`: redeploy now |
@@ -2412,11 +2420,11 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **A preview event feed for roll MCP, in review** (feat/roll-previews-events, roll MCP's ask):
-   `GET /v1/previews/events` (created, ready, failed, deleted; each seq taken in the write that
-   made it so), which roll MCP's Events follow, so an agent hears "ready" instead of polling.
-   Next after it: `visual_change` (a visual change waits) as an event, once the view's derived
-   review state has a stored transition.
+1. **Earlier pushes on their own data**: each kept
+   push's own copy of the preview's Postgres branch (#726, landed; its bytes in the cost, in
+   review). Next: search's copies (a branch of the branch cluster, once roll search says nested
+   branches and their deletes are safe), and roll apps' earlier builds on their copy (their
+   variables are frozen at deploy: a redeploy of the old image with the copy's).
 2. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
@@ -2427,6 +2435,8 @@ Ranked by what a person notices first. Done so far:
 4. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
 5. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-22, late afternoon: a preview event feed (#713, roll MCP's ask: `GET /v1/previews/events`, created, ready, failed, visual_change and deleted, each seq taken in the write that made it so; checked live by `scripts/preview-cost.sh`), which roll MCP's Events follow.
 
 Landed 2026-11-22, afternoon: a preview's interception CA kept until its hosts change or it nears its end (#686, on roll secrets' #705: no more hourly restarts of an intercepted preview's services), and a roll apps service's earlier pushes at each build's own deployment URL (#709, on roll apps' #711: they had been `roll.toml` services' only).
 

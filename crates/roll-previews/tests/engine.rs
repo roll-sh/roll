@@ -260,6 +260,9 @@ async fn a_visual_change_waits_for_someone_to_accept_it_at_each_head() {
     assert!(matches!(e.engine.accept_visual(&chg.id, "bob", &[], true, Some(Some("own_bob")), Some("cs_1b"), None).await, Err(roll_previews::Error::Forbidden(_))), "no write on its repo");
     let p = e.engine.accept_visual(&chg.id, "ada", &[], true, Some(Some("own_acme")), Some("cs_1b"), Some("/pricing")).await.unwrap();
     assert_eq!(p.visual_review.map(|v| v.state), Some(VisualState::Changed));
+    // Waiting for review is an event for followers.
+    let waits = e.engine.store.events(0, 500).unwrap().into_iter().filter(|x| x.preview == chg.id && x.kind == "visual_change").count();
+    assert_eq!(waits, 1);
     assert_eq!(waiting(), Some(vec!["".to_string()]));
     assert!(e.engine.accept_visual(&chg.id, "ada", &[], true, None, Some("cs_1b"), Some("/nowhere")).await.is_err(), "a page it has no screenshot of");
     let p = e.engine.accept_visual(&chg.id, "ada", &[], true, None, Some("cs_1b"), Some("")).await.unwrap();
@@ -330,6 +333,27 @@ async fn a_visual_change_waits_for_someone_to_accept_it_at_each_head() {
     e.engine.store.compare_with_base(&chg.id, &base.id, "main", None).unwrap();
     let b = e.engine.store.preview(&chg.id).unwrap().base_change.unwrap();
     assert!(b.api_unread && b.api.is_none(), "{b:?}");
+}
+
+/// What happened to previews, for followers: made, up, gone, in the order it happened, from any
+/// point (`latest`: from now on).
+#[tokio::test]
+async fn previews_events_follow_a_preview_from_made_to_gone() {
+    let e = env(json!({ "enabled": true }));
+    let from = e.engine.store.latest_event().unwrap();
+    e.code.open(change("chg_ev", 4));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_ev").unwrap().unwrap();
+    e.code.edit("chg_ev", |c| c.open = false);
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    let got = e.engine.store.events(from, 100).unwrap();
+    let mine: Vec<(&str, &str)> = got.iter().filter(|x| x.preview == p.id).map(|x| (x.kind.as_str(), x.data["head"].as_str().unwrap_or(""))).collect();
+    assert_eq!(mine, [("created", "cs_4a"), ("ready", "cs_4a"), ("deleted", "cs_4a")]);
+    assert!(got.windows(2).all(|w| w[0].seq < w[1].seq) && got.iter().all(|x| x.project == e.project && x.change.as_deref() == Some("chg_ev")));
+    let second = got[1].seq;
+    assert_eq!(e.engine.store.events(got[0].seq, 100).unwrap().first().map(|x| x.seq), Some(second), "from any point");
+    assert_eq!(e.engine.store.latest_event().unwrap(), got.last().unwrap().seq);
 }
 
 /// What a preview's services use right now (Render's metrics): the running ones, with the memory
@@ -1316,6 +1340,38 @@ async fn a_roll_apps_services_earlier_push_is_its_builds_own_url() {
     e.code.edit("chg_ae", |c| c.head = "cs_9c".into());
     e.engine.pass().await.unwrap();
     assert_eq!(e.engine.store.preview(&p.id).unwrap().earlier.len(), 1, "only cs_9a's");
+}
+
+/// An earlier push runs on its own copy of the data, taken before the next head's release, so a
+/// migration that renamed a column doesn't break it; copies go with their push, and with the data
+/// they copied (a reset).
+#[tokio::test]
+async fn an_earlier_push_runs_on_its_own_copy_of_the_data() {
+    use roll_previews::ports::EnvSource;
+    let e = env(json!({ "enabled": true, "release": { "image": "node:22", "run": "npm run migrate" } }));
+    e.code.open(change("chg_od", 7));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_od").unwrap().unwrap();
+    let db = |env: &[(String, String)]| env.iter().find(|(k, _)| k == "DATABASE_URL").map(|(_, v)| v.clone()).unwrap();
+    e.code.edit("chg_od", |c| c.head = "cs_7b".into());
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    let (_, live) = e.engine.env(&p.id, "web").await.unwrap();
+    let (_, earlier) = e.engine.env(&p.id, "web@cs_7a").await.unwrap();
+    assert!(db(&earlier).contains("-7a") && db(&earlier) != db(&live), "{} / {}", db(&earlier), db(&live));
+    // Kept with its push: the fourth push since evicts cs_7a, and its copy goes.
+    for head in ["cs_7c", "cs_7d", "cs_7e"] {
+        e.code.edit("chg_od", |c| c.head = head.into());
+        e.engine.pass().await.unwrap();
+        e.engine.pass().await.unwrap();
+    }
+    let copies = |e: &Env| e.engine.store.pinned_data(&p.id).unwrap().into_iter().map(|d| d.revision).collect::<Vec<_>>();
+    assert_eq!(copies(&e), ["cs_7b", "cs_7c", "cs_7d"]);
+    assert!(!e.pg.branches.lock().iter().any(|b| b.ends_with("-7a")), "{:?}", e.pg.branches.lock());
+    // A reset replaces the data: the copies of the old go with it.
+    e.engine.reset(&p.id, Vec::new()).unwrap();
+    e.engine.pass().await.unwrap();
+    assert!(copies(&e).is_empty());
 }
 
 /// A preview whose egress goes through its proxy ("Roll only") gets the keys bound to hosts as
