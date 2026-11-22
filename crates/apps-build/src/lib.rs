@@ -21,6 +21,7 @@ mod gleam;
 mod golang;
 mod java;
 mod node;
+pub mod otel;
 pub mod packages;
 mod php;
 pub mod imports;
@@ -74,6 +75,8 @@ pub struct Overrides {
     pub spa: Option<bool>,
     /// System packages a generated Dockerfile installs ([`packages`]).
     pub packages: Vec<String>,
+    /// The language's OpenTelemetry agent in a generated Dockerfile ([`otel`]).
+    pub otel: bool,
     /// Names of the variables the build sees (the service's, at deploy time): each install and
     /// build step mounts them as BuildKit secrets, so they're in its environment but never in a
     /// layer, the image's history or the cache's keys. `ROLL_BUILD_ENV` (a hash of the values)
@@ -141,6 +144,9 @@ pub struct Plan {
     /// functions service.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub edge: Vec<edge::EdgeFn>,
+    /// The OpenTelemetry agent the build added (`node`, `python`; [`otel`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub otel: Option<String>,
 }
 
 /// The images a Dockerfile builds on (its `FROM`s), for watching them move: not its own stages,
@@ -341,6 +347,20 @@ pub fn plan(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
         p.uses.push(store);
         p.notes.push(format!("{why}: it uses {}", store.label()));
     }
+    if overrides.otel {
+        if own_dockerfile {
+            p.notes.push("otel: no agent added to the tree's own Dockerfile (start one of its own; roll's OTEL_* variables point it at roll)".into());
+        } else {
+            match otel::add(&p.dockerfile, p.provider) {
+                Ok((df, kind)) => {
+                    p.dockerfile = df;
+                    p.otel = Some(kind.to_string());
+                    p.notes.push(format!("otel: the {kind} OpenTelemetry agent, started while traces are on"));
+                }
+                Err(why) => p.notes.push(why),
+            }
+        }
+    }
     if !overrides.packages.is_empty() {
         if own_dockerfile {
             p.notes.push("packages: not added to the tree's own Dockerfile (it installs what it needs)".into());
@@ -442,6 +462,7 @@ impl Overrides {
             start: clean(&self.start),
             spa: self.spa,
             packages: self.packages.clone(),
+            otel: self.otel,
             build_env: self.build_env.clone(),
             build_files: self.build_files.clone(),
             process: self.process.clone(),
@@ -513,6 +534,7 @@ impl Draft {
             crons: Vec::new(),
             functions: Vec::new(),
             edge: Vec::new(),
+            otel: None,
         }
     }
 }

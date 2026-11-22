@@ -369,6 +369,10 @@ pub const OPERATOR_ONLY: &[(&str, &str)] = &[
     ("/v1/apps/services/{id}/github", "roll's GitHub App installations span tenants: connecting a service to one (its tokens fetch any repository the installation sees) is the operator's, as connecting a repo is roll code's admin token's"),
 ];
 
+/// What a person's session does for itself, past the member rules (docs/members.md): making a
+/// project, which they then own. Tokens are decided by its row as ever.
+pub const PERSON_OWN: &[(&str, &str)] = &[("POST", "/v1/workspace/projects")];
+
 pub fn rows() -> &'static [Row] {
     ROWS
 }
@@ -446,7 +450,7 @@ pub fn find(method: &str, route: &str, path: &str) -> Option<Found> {
 /// A workspace membership change (`PUT`/`DELETE …/projects/{id}/resources/{kind}/{ref}`): the
 /// product and id of the resource being moved, which the evaluator also checks.
 pub fn placement(row: &Row, params: &[(String, String)]) -> Option<(&'static str, String)> {
-    if row.route != "/v1/workspace/projects/{id}/resources/{kind}/{ref}" {
+    if !matches!(row.route, "/v1/workspace/projects/{id}/resources/{kind}/{ref}" | "/v1/workspace/projects/{id}/homes/{kind}/{ref}") {
         return None;
     }
     let get = |k: &str| params.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
@@ -965,6 +969,7 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/access/audit", "access", R, Tgt::Product),
     row("GET", "/v1/access/oauth/clients", "access", R, Tgt::Product),
     row("GET", "/v1/access/oauth/clients/{id}", "access", R, Tgt::Product),
+    row("GET", "/v1/access/oauth/step-ups/{id}", "access", R, Tgt::Product),
     // The MCP server: every tool call is its own request through the gate.
     row("*", "/v1/mcp", "access", R, Tgt::AnyGrant),
     // rolld's own.
@@ -977,6 +982,20 @@ static ROWS: &[Row] = &[
     row("DELETE", "/v1/workspace/projects/{id}", "workspace", D, one(&["id"], "project")),
     row("PUT", "/v1/workspace/projects/{id}/resources/{kind}/{ref}", "workspace", W, one(&["id"], "project")),
     row("DELETE", "/v1/workspace/projects/{id}/resources/{kind}/{ref}", "workspace", W, one(&["id"], "project")),
+    // Members (docs/members.md): seeing who's in a project is a read; managing them is the
+    // project's admin (and a role is given only when the caller's rules cover it). Leaving is any
+    // member's own. A home changes which project stands for a resource: admin on the project, and
+    // admin outright on the resource ([`placement`]).
+    row("GET", "/v1/workspace/projects/{id}/members", "workspace", R, one(&["id"], "project")),
+    row("PATCH", "/v1/workspace/projects/{id}/members/{user}", "workspace", ADMIN, one(&["id"], "project")),
+    row("DELETE", "/v1/workspace/projects/{id}/members/{user}", "workspace", ADMIN, one(&["id"], "project")),
+    row("DELETE", "/v1/workspace/projects/{id}/members/me", "workspace", R, one(&["id"], "project")),
+    row("GET", "/v1/workspace/projects/{id}/invites", "workspace", ADMIN, one(&["id"], "project")),
+    row("POST", "/v1/workspace/projects/{id}/invites", "workspace", ADMIN, one(&["id"], "project")),
+    row("DELETE", "/v1/workspace/projects/{id}/invites/{invite}", "workspace", ADMIN, one(&["id"], "project")),
+    row("PUT", "/v1/workspace/projects/{id}/homes/{kind}/{ref}", "workspace", ADMIN, one(&["id"], "project")),
+    // The built-in roles and their rules: any grant.
+    row("GET", "/v1/workspace/roles", "workspace", R, Tgt::AnyGrant),
     // ── Postgres ──
     row("GET", "/v1/health", "postgres", R, Tgt::AnyGrant),
     row("GET", "/v1/projects", "postgres", R, list("id")).reveals(PG_SECRETS),
@@ -1213,10 +1232,22 @@ static ROWS: &[Row] = &[
     // An API key: its secret is in the answer.
     row("POST", "/v1/search/clusters/{id}/keys", "search", REVEAL, one(PG, "cluster")),
     row("DELETE", "/v1/search/clusters/{id}/keys/{key}", "search", ADMIN, one(PG, "cluster")),
+    // Keys a web page ships (read-only, rate limited): the new key's secret is in the answer;
+    // the list has none.
+    row("GET", "/v1/search/clusters/{id}/browser-keys", "search", R, one(PG, "cluster")),
+    row("POST", "/v1/search/clusters/{id}/browser-keys", "search", REVEAL, one(PG, "cluster")),
+    row("DELETE", "/v1/search/clusters/{id}/browser-keys/{key}", "search", ADMIN, one(PG, "cluster")),
     // A snapshot repository, the only way its credentials can be roll secrets references: it
     // changes the cluster as the console does; roll secrets checks `reveal` on each reference
     // itself (search_control::secret_refs).
     row("PUT", "/v1/search/clusters/{id}/repositories/{name}", "search", ADMIN, one(PG, "cluster")),
+    // A migration's listing reads another Elasticsearch or OpenSearch through roll with
+    // credentials the caller gives (never kept) and changes nothing on roll: a write. The
+    // migration itself adds to the cluster's reindex whitelist (an admin's setting), creates
+    // indices with the remote's settings and aliases and starts reindex tasks as the cluster's
+    // own user (what the console does, an admin's): admin.
+    row("POST", "/v1/search/clusters/{id}/migrate/inspect", "search", W, one(PG, "cluster")),
+    row("POST", "/v1/search/clusters/{id}/migrate", "search", ADMIN, one(PG, "cluster")),
     row("GET", "/v1/search/clusters/{id}/remotes", "search", R, one(PG, "cluster")),
     row("PUT", "/v1/search/clusters/{id}/remotes/{alias}", "search", ADMIN, one(PG, "cluster")).lends(Lend::Each(search_remote)),
     row("DELETE", "/v1/search/clusters/{id}/remotes/{alias}", "search", ADMIN, one(PG, "cluster")),
@@ -1256,6 +1287,11 @@ static ROWS: &[Row] = &[
     // (`Grant::allows`, one check per project inside the request).
     row("GET", "/v1/secrets/search", "secrets", R, Tgt::AnyGrant),
     row("GET", "/v1/secrets/findings", "secrets", R, Tgt::AnyGrant),
+    // Deleted projects in their recovery window: secrets keeps those the caller may recover (an
+    // admin of their secrets, asked of the grant per project, or the person whose project it was).
+    row("GET", "/v1/secrets/deleted", "secrets", R, Tgt::AnyGrant),
+    // Recovering one is its secrets admin's, as deleting it was.
+    row("POST", "/v1/secrets/projects/{project}/recover", "secrets", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/secrets/projects/{project}/", "secrets", R, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("GET", "/v1/secrets/projects/{project}", "secrets", R, one(&["project"], "project")),
     // How long a project keeps old values (history_days): purging is the project admin's.
@@ -1516,7 +1552,7 @@ static ROWS: &[Row] = &[
     // `variables_from` copies another environment's values into this one: reveal there too.
     // A new heartbeat's ping URL (its token) is in the PUT's answer, once: a credential.
     // Setting or lifting a deploy freeze is admin (lifting one would get past it).
-    row("*", "/v1/apps/services/{id}/environments/{env}", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).admin_if_field(&["freeze", "approvals", "closed_by"]).copies_from(CopyFrom::Body("variables_from")).reveals(&["heartbeat_urls"]),
+    row("*", "/v1/apps/services/{id}/environments/{env}", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).admin_if_field(&["freeze", "approvals", "closed_by", "data"]).copies_from(CopyFrom::Body("variables_from")).reveals(&["heartbeat_urls"]),
     row("GET", "/v1/apps/services/{id}/environments/{env}", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
     row("DELETE", "/v1/apps/services/{id}/environments/{env}", "apps", D, one(PG, "service")).env(EnvFrom::Param("env")),
     row("GET", "/v1/apps/services/{id}/environments/{env}/", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),

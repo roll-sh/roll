@@ -127,6 +127,9 @@ pub struct Ctx<'a> {
     pub ingest_nanos: std::sync::atomic::AtomicU64,
     /// Who sent the request, once authenticated (`crate::xpack::security`).
     pub principal: std::sync::OnceLock<crate::xpack::security::Principal>,
+    /// The principal's read restrictions, once looked up ([`crate::xpack::security::dls::ReadSecurity::of`]):
+    /// one per request, so a browser key's fetch budget is the whole request's (every `_msearch` item).
+    pub read_security: std::sync::OnceLock<Option<crate::xpack::security::dls::ReadSecurity>>,
 }
 
 impl<'a> Ctx<'a> {
@@ -577,6 +580,7 @@ async fn handle_inner(cluster: &Cluster, req: &EsRequest, admitted: Option<Admit
         warnings: Mutex::new(Vec::new()),
         ingest_nanos: std::sync::atomic::AtomicU64::new(0),
         principal: std::sync::OnceLock::new(),
+        read_security: std::sync::OnceLock::new(),
         now_ms: crate::time::now_millis(),
         human,
     };
@@ -636,8 +640,9 @@ async fn handle_inner(cluster: &Cluster, req: &EsRequest, admitted: Option<Admit
                 };
                 match admission {
                     Ok(admission) => {
-                        // Not boxed: the handler's future is (`crate::api::dispatch`).
-                        let r = crate::xpack::security::in_workflow(&ctx, dispatch_off_reactor(&ctx)).await;
+                        // Not boxed: the handler's future is (`crate::api::dispatch`). Its internal
+                        // calls run in its workflow and as its API for a browser key's allowlist.
+                        let r = crate::xpack::security::in_workflow(&ctx, crate::xpack::security::browser::in_request(&ctx, dispatch_off_reactor(&ctx))).await;
                         drop(admission);
                         r
                     }
@@ -757,6 +762,7 @@ pub(crate) fn with_ctx<R>(cluster: &Cluster, req: &EsRequest, f: impl FnOnce(&Ct
         warnings: Mutex::new(Vec::new()),
         ingest_nanos: std::sync::atomic::AtomicU64::new(0),
         principal: std::sync::OnceLock::new(),
+        read_security: std::sync::OnceLock::new(),
         now_ms: crate::time::now_millis(),
         human: false,
     };

@@ -21,6 +21,7 @@ mod cluster;
 mod code;
 mod edge;
 mod isolation;
+mod listen;
 mod logs;
 mod nosql;
 mod intercept;
@@ -311,6 +312,12 @@ struct Args {
     /// The deployment key a sealed start's shares gave: in memory only, never the environment.
     #[arg(skip)]
     unsealed_key: Option<std::sync::Arc<zeroize::Zeroizing<String>>>,
+    /// Once every listener accepts, write where each one is to this file, as a JSON object of
+    /// flag names and addresses (`{"api":"127.0.0.1:41234","s3":…}`; written to a temporary file
+    /// and renamed). A listener given port 0 gets a port from the OS: tests start rolld that way
+    /// and read the file (`listen.rs`).
+    #[arg(long, env = "ROLL_ADDR_FILE")]
+    addr_file: Option<PathBuf>,
 }
 
 impl Args {
@@ -389,7 +396,10 @@ async fn run() -> anyhow::Result<()> {
 }
 
 async fn run_with(mut args: Args) -> anyhow::Result<()> {
+    // Port-0 listeners get their ports before anything reads the flags (the edge's Kafka move too).
+    listen::reserve(&mut args)?;
     edge::configure(&mut args);
+    let listeners = listen::names(&mut args);
     let mut auth = auth::Auth::new(&args)?;
     let on = args.products()?;
     info!(products = %on, "starting");
@@ -398,7 +408,7 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     let mut api_listener = None;
     if let Some(s) = args.secret_key_sealed.as_deref().filter(|s| !s.trim().is_empty()) {
         let sealed = roll_secrets::unseal::Sealed::parse(s).map_err(anyhow::Error::msg)?;
-        let Some((listener, key)) = sealed::unseal(&args, &home, sealed).await? else { return Ok(()) };
+        let Some((listener, key)) = sealed::unseal(&args, &home, sealed, &listeners).await? else { return Ok(()) };
         args.unsealed_key = Some(std::sync::Arc::new(key));
         api_listener = Some(listener);
     }
@@ -603,6 +613,7 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
             secrets: secrets_envs.clone(),
             search: search.as_ref().map(|s| s.control.clone()),
             apps: apps.as_ref().map(|a| a.apps.clone()),
+            previews: previews_engine.clone(),
         },
         workspace.clone(),
     )?;
@@ -624,8 +635,26 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     // above this line, or its links 404.
     // People's accounts: what a person made acts while they can sign in, and a person's canvas
     // stands only for what's theirs (roll_workspace::Workspace::trusts, asked by every consumer).
+    // A deleted account leaves every project through the removal path (docs/members.md): roll
+    // accounts' outbox calls this after the deletion's write, and again until it succeeds.
+    {
+        let ws = workspace.clone();
+        accounts.on_deleted(Box::new(move |user| ws.forget_person(user, None).map(|_| ()).map_err(|e| e.to_string())));
+        let a = accounts.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tick.tick().await;
+                let a = a.clone();
+                let _ = tokio::task::spawn_blocking(move || a.run_deletions()).await;
+            }
+        });
+    }
     let people = secrets::People { accounts, code: code.as_ref().map(|c| c.code.clone()), search: search.as_ref().map(|s| s.control.clone()) };
     workspace.set_owners(std::sync::Arc::new(people.clone()));
+    // Members' handles and addresses, and invite links to the dashboard (docs/members.md).
+    workspace.set_people(std::sync::Arc::new(people.clone()));
+    workspace.set_web_url(&args.web_url);
     // Its tokens are roll-access's: grants for syncs a token made, workload tokens for identities.
     // Gateways into private networks: their links follow leases on the node's cluster.
     let gateways = secrets::gateway::Gateways::new(cluster.clone(), access.clone() as std::sync::Arc<dyn roll_auth::Grants>, args.code_webhook_allow_private.unwrap_or(!auth.enforcing()));
@@ -683,6 +712,11 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
         access.on_leaked("rlk_", move |secret, _why| apps.revoke_leaked_hook(secret));
         let apps = a.apps.clone();
         access.on_leaked("rlr_", move |secret, _why| apps.revoke_leaked_address(secret));
+    }
+    // …and project invites' (`rlv_`).
+    {
+        let ws = workspace.clone();
+        access.on_leaked("rlv_", move |secret, _why| ws.revoke_leaked_invite(secret));
     }
     // …and previews' (`rlb_`).
     if let Some(e) = previews_engine.clone() {
@@ -769,7 +803,8 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     type Serving<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + 'a>>;
     let mut serving: Vec<Serving<'_>> = vec![Box::pin(edge::serve(edge))];
     if let Some(p) = &postgres {
-        serving.push(Box::pin(p.proxy.clone().serve_shared()));
+        let (proxy, addr) = (p.proxy.clone(), args.proxy);
+        serving.push(Box::pin(async move { proxy.serve_listener(listen::bind(addr)?).await }));
         serving.push(Box::pin(async {
             reconciler::run(p.control.clone()).await;
             Ok(())
@@ -808,7 +843,7 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     // A sealed start kept its listener: connections waited in its backlog while products started.
     let bound = match api_listener {
         Some(l) => l,
-        None => tokio::net::TcpListener::bind(args.api).await?,
+        None => listen::bind(args.api)?,
     };
     // No Nagle: a WebSocket's small frames (a gateway's `open`, roll code's events) would otherwise
     // wait for the peer's delayed ACK.
@@ -824,7 +859,15 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
         })
         .into_future();
     tokio::pin!(api);
+    // Written once the branches above it have been polled: every listener is bound by then.
+    let announce = async {
+        if let Some(path) = &args.addr_file {
+            listen::announce(path, &listeners, false)?;
+        }
+        std::future::pending::<anyhow::Result<()>>().await
+    };
     tokio::select! {
+        biased;
         r = &mut api => r?,
         (r, ..) = futures::future::select_all(serving) => r?,
         grace = stop(code.as_ref(), queues.as_ref(), &cluster, &args) => {
@@ -846,6 +889,7 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
                 r.shutdown().await?;
             }
         }
+        r = announce => r?,
     }
     if let Some(a) = &apps {
         a.shutdown().await;

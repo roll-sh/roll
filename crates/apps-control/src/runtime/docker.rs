@@ -273,6 +273,10 @@ impl Docker {
             for (cp, hp) in &extra {
                 args.extend(["--publish".into(), format!("127.0.0.1:{hp}:{cp}")]);
             }
+            // A UDP service's port over UDP too, on any free loopback port (the relay reads it).
+            if spec.udp {
+                args.extend(["--publish".into(), format!("127.0.0.1::{p}/udp")]);
+            }
         }
         if let Some(net) = &spec.network {
             args.extend(["--network".into(), net.clone()]);
@@ -742,6 +746,19 @@ impl Runtime for Docker {
         }
         Ok(())
     }
+    async fn udp_address(&self, name: &str, port: u16) -> Option<SocketAddr> {
+        for c in [sandbox_name(name), name.to_string()] {
+            let hp = match &self.engine {
+                Some(e) => e.inspect(&c).await.ok().and_then(|i| i.published_udp.get(&port).copied()),
+                None => docker(&["port", &c, &format!("{port}/udp")]).await.ok().and_then(|o| o.lines().next()?.rsplit_once(':')?.1.trim().parse().ok()),
+            };
+            if let Some(hp) = hp {
+                return Some(SocketAddr::from(([127, 0, 0, 1], hp)));
+            }
+        }
+        None
+    }
+
     async fn port_address(&self, name: &str, port: u16) -> Option<SocketAddr> {
         // Published on the sandbox when it has one, else on the instance.
         for c in [sandbox_name(name), name.to_string()] {
@@ -1282,6 +1299,12 @@ fn sandbox_config(spec: &InstanceSpec, host_port: Option<u16>, extra: &[(u16, u1
                 config["ExposedPorts"][&k] = json!({});
                 host["PortBindings"][&k] = json!([{"HostIp": "127.0.0.1", "HostPort": hp.to_string()}]);
             }
+            // A UDP service's port over UDP too, on loopback (any free port: the relay reads it).
+            if spec.udp {
+                let k = format!("{p}/udp");
+                config["ExposedPorts"][&k] = json!({});
+                host["PortBindings"][&k] = json!([{"HostIp": "127.0.0.1", "HostPort": ""}]);
+            }
         }
         if spec.closed {
             config["Labels"][format!("{LABEL}.closed")] = json!(p.to_string());
@@ -1441,6 +1464,11 @@ fn engine_config(spec: &InstanceSpec, host_port: Option<u16>, extra: &[(u16, u16
             config["ExposedPorts"][&k] = json!({});
             host["PortBindings"][&k] = json!([{"HostIp": "127.0.0.1", "HostPort": hp.to_string()}]);
         }
+        if spec.udp {
+            let k = format!("{p}/udp");
+            config["ExposedPorts"][&k] = json!({});
+            host["PortBindings"][&k] = json!([{"HostIp": "127.0.0.1", "HostPort": ""}]);
+        }
     }
     if let Some(net) = &spec.network {
         host["NetworkMode"] = json!(net);
@@ -1563,12 +1591,15 @@ impl tokio::io::AsyncRead for ChildReader {
 /// burst of pushes queues instead of taking every CPU and all memory of the node.
 pub struct DockerBuilder {
     slots: tokio::sync::Semaphore,
+    /// One more, for a build that isn't a preview's when every slot is taken (Vercel's
+    /// prioritized production builds): ten pull requests' builds don't hold up a hotfix.
+    reserved: tokio::sync::Semaphore,
     scanner: super::scan::Scanner,
 }
 
 impl DockerBuilder {
     pub fn new(at_once: usize) -> DockerBuilder {
-        DockerBuilder { slots: tokio::sync::Semaphore::new(at_once), scanner: Default::default() }
+        DockerBuilder { slots: tokio::sync::Semaphore::new(at_once), reserved: tokio::sync::Semaphore::new(1), scanner: Default::default() }
     }
 }
 
@@ -1581,6 +1612,17 @@ impl Builder for DockerBuilder {
     async fn build(&self, job: &BuildJob, log: &LogSink, cancel: tokio_util::sync::CancellationToken) -> anyhow::Result<String> {
         let _slot = match self.slots.try_acquire() {
             Ok(s) => s,
+            Err(_) if job.priority => match self.reserved.try_acquire() {
+                Ok(s) => s,
+                Err(_) => {
+                    log.line("waiting for another build on this node to finish");
+                    tokio::select! {
+                        s = self.slots.acquire() => s?,
+                        s = self.reserved.acquire() => s?,
+                        _ = cancel.cancelled() => bail!("canceled"),
+                    }
+                }
+            },
             Err(_) => {
                 log.line("waiting for another build on this node to finish");
                 tokio::select! {
@@ -1716,6 +1758,7 @@ mod tests {
             vars: vec![("TLS_KEY".into(), pem.into())],
             port: Some(8080),
             ports: vec![9000],
+            udp: false,
             cpu: 0.5,
             memory_mb: 512,
             network: Some("roll-apps-net-p-production".into()),

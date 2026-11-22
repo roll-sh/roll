@@ -145,7 +145,7 @@ fn here(project: &str, environments: &Option<Vec<String>>, paths: &Option<Vec<St
 
 /// What grant `g` may do at `slug:path`, as roll secrets checks each request of it.
 fn granted(g: &roll_auth::Grant, project: &str, slug: &str, path: &str) -> Vec<Action> {
-    let g = GrantGrants(g.clone());
+    let g = GrantGrants(g.clone(), Default::default());
     ACTIONS.into_iter().filter(|a| g.allows(*a, &Scope::at(project, slug, path))).collect()
 }
 
@@ -190,6 +190,7 @@ impl Secrets {
         // happen, so each of those is looked at too.
         type Source = (String, String, String);
         type Held = (Vec<LeaseReach>, Vec<PlaceholderReach>, Vec<ShareReach>, usize, Option<crate::cutoff::Freeze>);
+        let dead = self.dead_exports("e.project_id = ?", project)?;
         let (env, sources, reads, truncated, (leases, placeholders, shares, unattributed_shares, frozen)) = self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
             // What it handed out that's still out: dynamic credentials not yet revoked (one past
@@ -252,7 +253,7 @@ impl Secrets {
                         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
                     )?;
                     for (iid, ipid, islug, ipath) in importers {
-                        if ipid != eproject && (eproject != project || !crate::exports::exported(c, &eid, &at, &ipid)?) {
+                        if ipid != eproject && (eproject != project || !crate::exports::exported(c, &eid, &at, &ipid, &dead)?) {
                             continue;
                         }
                         if sources.len() >= SOURCES_MAX {

@@ -332,7 +332,10 @@ only for a cross-cluster key's request): the remote answers `search-aggs`' `wire
 `Aggs` tree in an internal field, and the local cluster does the final reduce. The encoding names
 its layout version, and a part of another layout fails that cluster's part rather than being
 misread. Scrolls and points in time over linked clusters live on the local cluster's owner
-(`Cluster::ccs_contexts`), with each part's own context on its cluster's owner.
+(`Cluster::ccs_contexts`), with each part's own context on its cluster's owner. An ES|QL query's
+part on a linked remote is a `_query` whose `x-roll-esql-part` header (honored only for a
+cross-cluster key's request, like `x-roll-partial-aggs`) makes the remote answer its typed rows
+or `STATS` states in an internal field for the local cluster's merge.
 
 **The client address** is decided by the node that accepted the connection, by one rule
 (`ClientAddresses`, rolld's flags):

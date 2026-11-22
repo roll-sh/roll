@@ -847,6 +847,58 @@ async fn a_private_caller_wakes_a_sleeping_service() {
     w.apps.shutdown().await;
 }
 
+/// A UDP service on real Docker (its port published over UDP from the sandbox): socat, asleep,
+/// answers a datagram to its environment's port, and the first answer's time is measured.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_udp_service_answers_from_asleep_on_its_port() {
+    let free = std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let Some(w) = docker_world_with(None, |c| {
+        c.udp_ports = Some((free, free));
+        c.tcp_host = "127.0.0.1".into();
+    })
+    .await
+    else {
+        return;
+    };
+    // socat answers each datagram with "pong", then the datagram back (two datagrams).
+    let run = json!({"port": 9000, "udp": true, "start": "socat UDP4-RECVFROM:9000,fork SYSTEM:'printf pong; cat'", "memory_mb": 256, "cpu": 0.25});
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "dns", "source": {"kind": "image", "image": apps_control::runtime::links::IMAGE}, "run": run })), "application/json", None).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    tokio::spawn(w.apps.clone().serve_udp_ports("127.0.0.1".parse().unwrap()));
+    for _ in 0..1200 {
+        let (_, e) = call(&w.api, "GET", &base, None, "application/json", None).await;
+        if e["active"].is_object() && e["udp"].is_string() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    w.apps.live(&id, "production").sleep().await;
+    let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    client.connect(("127.0.0.1", free)).await.unwrap();
+    let began = std::time::Instant::now();
+    let (mut buf, mut got) = ([0u8; 512], None);
+    for _ in 0..200 {
+        let _ = client.send(b"ping").await;
+        if let Ok(Ok(n)) = tokio::time::timeout(Duration::from_millis(100), client.recv(&mut buf)).await {
+            got = Some(String::from_utf8_lossy(&buf[..n]).into_owned());
+            break;
+        }
+    }
+    if got.is_none() {
+        let ps = apps_control::runtime::docker::docker(&["ps", "-a", "--filter", &format!("label=sh.roll.apps={id}"), "--format", "{{.Names}} {{.Status}} {{.Ports}}"]).await.unwrap_or_default();
+        let (_, log) = call(&w.api, "GET", &format!("{base}/logs"), None, "application/json", None).await;
+        let lines: Vec<&str> = log.as_array().into_iter().flatten().filter_map(|l| l["text"].as_str()).collect();
+        eprintln!("DEBUG ps:\n{ps}\nDEBUG log:\n{}", lines.join("\n"));
+    }
+    assert_eq!(got.as_deref(), Some("pong"), "an answer from its port");
+    eprintln!("MEASURED a UDP service's first answer from asleep: {} ms", began.elapsed().as_millis());
+    assert_eq!(delete_for_good(&w.api, &id).await.0, StatusCode::NO_CONTENT);
+    let _ = apps_control::runtime::docker::docker(&["network", "rm", &apps_control::network_name(&w.project, "production")]).await;
+    w.apps.shutdown().await;
+}
+
 /// A TCP service and a tunnel on real Docker: a busybox echo server, asleep each time, answers
 /// a raw connection to its own port and a tunnel's bytes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1216,9 +1268,18 @@ async fn deno_dotnet_and_elixir_trees_build_and_answer() {
 
 /// An uploaded tree, built as roll detects it, deployed, and asked for `/`: it says `want`.
 async fn builds_and_answers(w: &World, name: &str, files: &[(&str, &str)], want: &str, build: Value) {
+    builds_and_answers_in(w, name, files, want, build, Value::Null).await
+}
+
+/// [`builds_and_answers`] with the environment's settings put first (`env`, unless null).
+async fn builds_and_answers_in(w: &World, name: &str, files: &[(&str, &str)], want: &str, build: Value, env: Value) {
     let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": name, "source": {"kind": "upload"}, "build": build, "run": {"memory_mb": 1024, "cpu": 1.0, "health_timeout_s": 120} })), "application/json", None).await;
     assert_eq!(st, StatusCode::CREATED, "{svc}");
     let id = svc["id"].as_str().unwrap().to_string();
+    if !env.is_null() {
+        let (st, e) = call(&w.api, "PUT", &format!("/v1/apps/services/{id}/environments/production"), Some(env), "application/json", None).await;
+        assert_eq!(st, StatusCode::OK, "{e}");
+    }
     let tree = tempfile::tempdir().unwrap();
     for (f, body) in files {
         let at = tree.path().join(f);
@@ -1249,6 +1310,30 @@ async fn builds_and_answers(w: &World, name: &str, files: &[(&str, &str)], want:
     let body = String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
     assert!(body.contains(want), "{name}: {body}");
     assert_eq!(delete_for_good(&w.api, &id).await.0, StatusCode::NO_CONTENT);
+}
+
+/// The pinned OpenTelemetry agents (`build.otel`) install and start: a Node and a Python app built
+/// with them, their traces on (to an intake that isn't there: an exporter's failure never stops
+/// the app), still answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_otel_agents_install_and_start() {
+    let Some(w) = docker_world_with(None, |c| c.otlp_base = Some("http://127.0.0.1:9".into())).await else { return };
+    let traces = json!({"traces": true});
+    builds_and_answers_in(&w, "node-otel", &[
+        ("package.json", r#"{"name": "n", "version": "1.0.0", "scripts": {"start": "node server.js"}}"#),
+        ("server.js", "require('http').createServer((q, r) => r.end('node ' + (process.env.NODE_OPTIONS || ''))).listen(process.env.PORT)"),
+    ], "auto-instrumentations-node", json!({"otel": true}), traces.clone()).await;
+    builds_and_answers_in(&w, "python-otel", &[
+        ("requirements.txt", ""),
+        ("main.py", "import os, sys, http.server
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        ok = 'opentelemetry' in sys.modules
+        self.send_response(200); self.end_headers(); self.wfile.write(b'python otel ' + str(ok).encode())
+http.server.HTTPServer(('0.0.0.0', int(os.environ['PORT'])), H).serve_forever()
+"),
+    ], "python otel True", json!({"otel": true}), traces).await;
+    w.apps.shutdown().await;
 }
 
 /// Clojure (Leiningen), Gleam and a root start.sh, as roll detects them: each built, deployed and

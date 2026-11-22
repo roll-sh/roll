@@ -43,6 +43,9 @@ struct FakeInstance {
     addr: Option<SocketAddr>,
     /// Where its other ports answer ([`InstanceSpec::ports`]), while running.
     extra: HashMap<u16, SocketAddr>,
+    /// A UDP service's port (`InstanceSpec::udp`): an echo that answers each datagram with
+    /// `<instance> <datagram>`, while running.
+    udp: Option<SocketAddr>,
     /// An app that listens elsewhere: its port held, bound but not listening, so a connection is
     /// refused and no other test's server on this machine can be handed the port and answer.
     reserved: Option<tokio::net::TcpSocket>,
@@ -302,6 +305,17 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
             if req.uri().path() == "/page" {
                 return ([(axum::http::header::CONTENT_TYPE, "text/html")], format!("<html><head><title>{dep}</title></head><body><h1>{dep}</h1></body></html>")).into_response();
             }
+            // gRPC's health service (grpc.health.v1): SERVING, or NOT_SERVING while it's unhealthy.
+            if req.uri().path() == "/grpc.health.v1.Health/Check" {
+                let status = if unhealthy || sick.lock().contains(&name) { 2u8 } else { 1 };
+                let mut t = axum::http::HeaderMap::new();
+                t.insert("grpc-status", axum::http::HeaderValue::from_static("0"));
+                let frame = bytes::Bytes::from(vec![0, 0, 0, 0, 2, 0x08, status]);
+                let frames = futures::stream::iter([Ok::<_, std::convert::Infallible>(hyper::body::Frame::data(frame)), Ok(hyper::body::Frame::trailers(t))]);
+                let mut r = axum::response::Response::new(axum::body::Body::new(http_body_util::StreamBody::new(frames)));
+                r.headers_mut().insert(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("application/grpc"));
+                return r;
+            }
             // As a gRPC server answers: data, then its status in a trailer.
             if req.uri().path() == "/trailers" {
                 let mut t = axum::http::HeaderMap::new();
@@ -408,7 +422,7 @@ impl Runtime for Fake {
         }
         let mut m = self.instances.lock();
         anyhow::ensure!(!m.contains_key(&spec.name), "{} exists", spec.name);
-        m.insert(spec.name.clone(), FakeInstance { spec: spec.clone(), state: FakeState::Created, server: None, addr: None, extra: HashMap::new(), reserved: None, exited: watch::channel(None).0, killed: Default::default() });
+        m.insert(spec.name.clone(), FakeInstance { spec: spec.clone(), state: FakeState::Created, server: None, addr: None, extra: HashMap::new(), udp: None, reserved: None, exited: watch::channel(None).0, killed: Default::default() });
         Ok(())
     }
 
@@ -469,12 +483,38 @@ impl Runtime for Fake {
                     extra.insert(*p, l2.local_addr()?);
                     tokio::spawn(serve(InstanceSpec { port: Some(*p), ..spec.clone() }, l2, log.clone(), self.sick.clone(), killed.clone()));
                 }
+                let udp = match spec.udp {
+                    true => {
+                        let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
+                        let at = sock.local_addr()?;
+                        let (me, k) = (spec.name.clone(), killed.clone());
+                        tokio::spawn(async move {
+                            let mut buf = vec![0u8; 2048];
+                            loop {
+                                tokio::select! {
+                                    r = sock.recv_from(&mut buf) => match r {
+                                        Ok((n, from)) => {
+                                            let mut out = format!("{me} ").into_bytes();
+                                            out.extend_from_slice(&buf[..n]);
+                                            let _ = sock.send_to(&out, from).await;
+                                        }
+                                        Err(_) => return,
+                                    },
+                                    _ = k.cancelled() => return,
+                                }
+                            }
+                        });
+                        Some(at)
+                    }
+                    false => None,
+                };
                 let server = tokio::spawn(serve(spec.clone(), l, log, self.sick.clone(), killed.clone()));
                 let mut m = self.instances.lock();
                 let i = m.get_mut(name).expect("exists");
                 i.server = Some(server);
                 i.killed = killed;
                 i.extra = extra;
+                i.udp = udp;
                 Some(addr)
             }
             None => None,
@@ -491,6 +531,12 @@ impl Runtime for Fake {
         let m = self.instances.lock();
         let i = m.get(name)?;
         (i.state == FakeState::Running).then(|| i.extra.get(&port).copied()).flatten()
+    }
+
+    async fn udp_address(&self, name: &str, _port: u16) -> Option<SocketAddr> {
+        let m = self.instances.lock();
+        let i = m.get(name)?;
+        (i.state == FakeState::Running).then_some(i.udp).flatten()
     }
 
     async fn suspend(&self, name: &str) -> anyhow::Result<()> {

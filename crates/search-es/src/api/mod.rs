@@ -11,6 +11,7 @@ mod bulk_ahead;
 pub mod by_query;
 pub mod by_query_request;
 pub mod remote;
+pub mod remote_page;
 pub mod cat;
 mod cat_columns;
 mod cat_columns_os;

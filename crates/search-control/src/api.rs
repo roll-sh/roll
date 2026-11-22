@@ -42,6 +42,7 @@ impl IntoResponse for ControlError {
             ControlError::Conflict(_) => StatusCode::CONFLICT,
             ControlError::TooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             ControlError::Forbidden(_) => StatusCode::FORBIDDEN,
+            ControlError::Busy(_) => StatusCode::TOO_MANY_REQUESTS,
             ControlError::Internal(e) => {
                 tracing::warn!(error = %e, "search control error");
                 StatusCode::INTERNAL_SERVER_ERROR
@@ -70,6 +71,10 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/keys", post(create_key))
         .route("/v1/search/clusters/{id}/repositories/{name}", axum::routing::put(put_repository))
         .route("/v1/search/clusters/{id}/keys/{key}", axum::routing::delete(delete_key))
+        .route("/v1/search/clusters/{id}/migrate/inspect", post(migrate_inspect))
+        .route("/v1/search/clusters/{id}/migrate", post(migrate))
+        .route("/v1/search/clusters/{id}/browser-keys", get(browser_keys).post(create_browser_key))
+        .route("/v1/search/clusters/{id}/browser-keys/{key}", axum::routing::delete(revoke_browser_key))
         .route("/v1/search/clusters/{id}/remotes", get(remotes))
         .route("/v1/search/clusters/{id}/remotes/{alias}", axum::routing::put(link_remote).delete(unlink_remote))
         .route("/v1/search/clusters/{id}/indices/{index}", get(index_get).put(index_create).delete(index_delete))
@@ -181,7 +186,7 @@ async fn per_cluster(State(c): State<AppState>, req: Request, next: Next) -> Res
         Ok(d) => d,
         // A key revoked while its cluster is deleted is kept for the restore
         // (`Control::delete_key`): it too runs where it lands, for whoever may see the cluster.
-        Err(ControlError::NotFound(_)) if req.method() == Method::DELETE && rest.is_some_and(|(_, r)| r.starts_with("keys/")) => {
+        Err(ControlError::NotFound(_)) if req.method() == Method::DELETE && rest.is_some_and(|(_, r)| r.starts_with("keys/") || r.starts_with("browser-keys/")) => {
             return match c.get_deleted(&id).await {
                 Ok(d) if Caller::of(req.extensions()).sees(&d.cluster) => next.run(req).await,
                 _ => no_such(&id).into_response(),
@@ -618,6 +623,42 @@ async fn create_key(State(c): State<AppState>, Path(id): Path<String>, Json(k): 
 async fn delete_key(State(c): State<AppState>, Path((id, key)): Path<(String, String)>) -> Result<StatusCode, ControlError> {
     c.delete_key(&id, &key).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Lists an Elasticsearch or OpenSearch cluster's indices for a migration into cluster `id`
+/// (`crate::migrate`): fetched by roll, never by the browser; the credentials aren't kept.
+async fn migrate_inspect(State(c): State<AppState>, Path(id): Path<String>, Json(b): Json<crate::migrate::InspectRequest>) -> Result<Response, ControlError> {
+    // The answer goes out in chunks, charged until it's sent (or the connection closes).
+    let answer = c.migrate_inspect(&id, &b.source).await?;
+    Ok(([(axum::http::header::CONTENT_TYPE, "application/json")], Body::from_stream(answer.into_stream())).into_response())
+}
+
+/// Copies the picked indices' definitions into cluster `id` and starts a reindex from remote
+/// for each (`wait_for_completion=false`: the answer lists the tasks).
+async fn migrate(State(c): State<AppState>, Path(id): Path<String>, Json(b): Json<crate::migrate::MigrateRequest>) -> ApiResult<Value> {
+    Ok(Json(c.migrate(&id, &b).await?))
+}
+
+/// `GET /v1/search/clusters/{id}/browser-keys`: the keys web pages ship, without their secrets.
+async fn browser_keys(State(c): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    Ok(Json(json!({ "keys": c.browser_keys(&id).await? })))
+}
+
+/// `POST /v1/search/clusters/{id}/browser-keys`: a key a web page can ship (read-only, one
+/// application or named indices, an optional filter, expiry and rate limit); shown once.
+async fn create_browser_key(State(c): State<AppState>, Path(id): Path<String>, Json(k): Json<crate::control::NewBrowserKey>) -> ApiResult<Value> {
+    Ok(Json(c.create_browser_key(&id, k).await?))
+}
+
+/// `DELETE /v1/search/clusters/{id}/browser-keys/{key}`: 204, or 202 on a deleted cluster (the
+/// restore revokes it).
+async fn revoke_browser_key(State(c): State<AppState>, Path((id, key)): Path<(String, String)>) -> Result<Response, ControlError> {
+    Ok(match c.revoke_browser_key(&id, &key).await? {
+        crate::control::Revoked::Now => StatusCode::NO_CONTENT.into_response(),
+        crate::control::Revoked::AtRestore => {
+            (StatusCode::ACCEPTED, Json(json!({ "revoked": "at restore", "note": "the cluster is deleted: restoring it revokes the key before it answers" }))).into_response()
+        }
+    })
 }
 
 /// The remote clusters a cluster holds credentials for (never the credentials).

@@ -103,11 +103,21 @@ pub struct SearchCluster {
     /// Who may reach its data plane (Elastic Cloud's traffic filters): canonical CIDRs, each with
     /// an optional description; empty: anyone. Branches start with their parent's.
     pub ip_allowlist: Vec<IpRule>,
+    /// Which web pages may call it from a browser (`http.cors.*`, checked after the
+    /// allowlist); `None`: CORS off. Branches start with their parent's.
+    pub cors: Option<CorsSettings>,
+    /// Requests per minute all its browser keys may make together (`None`: the node's default,
+    /// `search_server::browser::DEFAULT_CLUSTER_PER_MINUTE`).
+    pub browser_per_minute: Option<i64>,
     /// A new branch whose node hasn't yet marked what it inherited from its parent
     /// (`search_es::branch`): set when the branch is made, cleared once a load marked it.
     /// Branches made before marking existed never have it, so their own jobs are left alone.
     #[serde(skip)]
     pub inherit_pending: bool,
+    /// Its `reindex.remote.whitelist` (Elastic Cloud's user setting): the `host:port` patterns
+    /// reindex from remote may read; empty: none. roll's migration adds the host it reads.
+    /// Branches start with their parent's.
+    pub reindex_whitelist: Vec<String>,
 }
 
 impl std::fmt::Debug for SearchCluster {
@@ -135,8 +145,29 @@ impl std::fmt::Debug for SearchCluster {
             .field("owner", &self.owner)
             .field("restored_at", &self.restored_at)
             .field("ip_allowlist", &self.ip_allowlist)
+            .field("cors", &self.cors)
+            .field("browser_per_minute", &self.browser_per_minute)
+            .field("reindex_whitelist", &self.reindex_whitelist)
             .finish()
     }
+}
+
+/// A cluster's `http.cors.*` (docs/search/README.md, "Search from the browser"): as checked by
+/// `search_server::cors::Cors::new`, which keeps origins as browsers send them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CorsSettings {
+    /// `scheme://host[:port]`, `/regex/` or `*`.
+    pub allow_origin: Vec<String>,
+    /// `http.cors.allow-methods` (`None`: Elasticsearch's default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_methods: Option<Vec<String>>,
+    /// `http.cors.allow-headers` (`None`: Elasticsearch's default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_headers: Option<Vec<String>>,
+    /// `http.cors.max-age`, in seconds (`None`: Elasticsearch's 1728000).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_age: Option<i64>,
 }
 
 /// A remote cluster's credentials: a `cross_cluster` API key of cluster `target_id` that
@@ -340,10 +371,10 @@ CREATE INDEX IF NOT EXISTS search_suggestions_due ON search_suggestions (due_at)
 "#;
 
 const COLS: &str = "id, name, region, flavor, password, idle_timeout_s, max_in_flight, max_body_mb, destructive_requires_name, \
-                    parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, ip_allowlist, inherit_pending";
+                    parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, ip_allowlist, cors, browser_per_minute, inherit_pending, reindex_whitelist";
 /// What lookups read: [`COLS`] and where the cluster is loaded.
 const READ_COLS: &str = "id, name, region, flavor, password, idle_timeout_s, max_in_flight, max_body_mb, destructive_requires_name, \
-                         parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, loaded_on, own_bytes, wake_at, restored_at, ip_allowlist, inherit_pending";
+                         parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, loaded_on, own_bytes, wake_at, restored_at, ip_allowlist, cors, browser_per_minute, inherit_pending, reindex_whitelist";
 /// What deleted clusters' reads add to [`READ_COLS`].
 const DELETED_COLS: &str = "deleted_name, deleted_at, purge_at, stored_as, name";
 
@@ -372,16 +403,24 @@ fn row(r: &Row) -> code_sql::Result<SearchCluster> {
         restored_at: r.get(20)?,
         // Unreadable, the cluster can't be looked up (and so can't be reached), never opened up.
         ip_allowlist: serde_json::from_str(&r.get::<_, String>(21)?).map_err(|e| code_sql::Error::Conversion(format!("ip_allowlist: {e}")))?,
-        inherit_pending: r.get(22)?,
+        cors: match r.get::<_, Option<String>>(22)? {
+            Some(j) => Some(serde_json::from_str(&j).map_err(|e| code_sql::Error::Conversion(format!("cors: {e}")))?),
+            None => None,
+        },
+        browser_per_minute: r.get(23)?,
+        inherit_pending: r.get(24)?,
+        // Unreadable, nothing is whitelisted (reindex from remote refuses every host).
+        reindex_whitelist: serde_json::from_str(&r.get::<_, String>(25)?).unwrap_or_default(),
     })
 }
 
 fn deleted_row(r: &Row) -> code_sql::Result<DeletedCluster> {
     let mut c = row(r)?;
-    c.name = r.get(23)?;
+    // [`DELETED_COLS`] follow [`READ_COLS`]' 26 (0-25).
+    c.name = r.get(26)?;
     c.loaded_on = None;
     c.wake_at = None;
-    Ok(DeletedCluster { cluster: c, deleted_at: r.get(24)?, purge_at: r.get(25)?, stored_as: r.get(26)?, reserved: r.get(27)? })
+    Ok(DeletedCluster { cluster: c, deleted_at: r.get(27)?, purge_at: r.get(28)?, stored_as: r.get(29)?, reserved: r.get(30)? })
 }
 
 /// What the catalog keeps of an index's query suggestions (`crate::suggestions`): its settings
@@ -434,6 +473,10 @@ pub const MINUTE_SLOTS: i64 = 1440;
 /// One-hour buckets a cluster keeps: 14 days.
 pub const HOUR_SLOTS: i64 = 336;
 
+fn cors_json(cors: &Option<CorsSettings>) -> Option<String> {
+    cors.as_ref().map(|c| serde_json::to_string(c).unwrap_or_else(|_| "null".into()))
+}
+
 /// One-hour analytics buckets an index keeps: 7 days.
 pub const ANALYTICS_HOUR_SLOTS: i64 = 168;
 /// One-day analytics buckets an index keeps: 30 days and the day in progress.
@@ -450,6 +493,10 @@ pub fn analytics_caps(res: i64) -> (usize, usize) {
 
 fn allowlist_json(rules: &[IpRule]) -> String {
     serde_json::to_string(rules).expect("rules serialize")
+}
+
+fn whitelist_json(patterns: &[String]) -> String {
+    serde_json::to_string(patterns).expect("patterns serialize")
 }
 
 /// Seconds in the 30-day month the GB-month figures use (AWS bills storage per 730-hour month;
@@ -487,8 +534,13 @@ impl Store {
         db.add_column("search_clusters", "owner", "TEXT")?;
         // Clusters made before allowlists are open, as they were.
         db.add_column("search_clusters", "ip_allowlist", "TEXT NOT NULL DEFAULT '[]'")?;
+        // Clusters made before browser search have CORS off, as Elasticsearch does.
+        db.add_column("search_clusters", "cors", "TEXT")?;
+        db.add_column("search_clusters", "browser_per_minute", "INTEGER")?;
         // Branches made before marking aren't marked (`SearchCluster::inherit_pending`).
         db.add_column("search_clusters", "inherit_pending", "INTEGER NOT NULL DEFAULT 0")?;
+        // Clusters made before it whitelist no remote, as Elasticsearch's default.
+        db.add_column("search_clusters", "reindex_whitelist", "TEXT NOT NULL DEFAULT '[]'")?;
         db.ensure_schema("CREATE INDEX IF NOT EXISTS search_clusters_owner ON search_clusters (owner, created_at)")?;
         // Deleted clusters kept for restoring.
         db.add_column("search_clusters", "deleted_at", "INTEGER")?;
@@ -570,7 +622,7 @@ impl Store {
                 return Ok(Inserted::Over(over));
             }
             x.execute(
-                &format!("INSERT INTO search_clusters ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)"),
+                &format!("INSERT INTO search_clusters ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)"),
                 params![
                     c.id,
                     c.name,
@@ -590,7 +642,10 @@ impl Store {
                     c.stored_bytes,
                     c.owner,
                     allowlist_json(&c.ip_allowlist),
-                    c.inherit_pending
+                    cors_json(&c.cors),
+                    c.browser_per_minute,
+                    c.inherit_pending,
+                    whitelist_json(&c.reindex_whitelist)
                 ],
             )
             .map(|_| Inserted::Yes)
@@ -620,7 +675,7 @@ impl Store {
             }
             x.execute(
                 "UPDATE search_clusters SET flavor = ?2, password = ?3, idle_timeout_s = ?4, max_in_flight = ?5, max_body_mb = ?6,
-                 destructive_requires_name = ?7, password_rotated_at = ?8, ip_allowlist = ?9 WHERE id = ?1",
+                 destructive_requires_name = ?7, password_rotated_at = ?8, ip_allowlist = ?9, cors = ?10, browser_per_minute = ?11, reindex_whitelist = ?12 WHERE id = ?1",
                 params![
                     c.id,
                     c.flavor,
@@ -630,7 +685,10 @@ impl Store {
                     c.max_body_mb,
                     c.destructive_requires_name,
                     c.password_rotated_at,
-                    allowlist_json(&c.ip_allowlist)
+                    allowlist_json(&c.ip_allowlist),
+                    cors_json(&c.cors),
+                    c.browser_per_minute,
+                    whitelist_json(&c.reindex_whitelist)
                 ],
             )?;
             Ok::<_, code_sql::Error>(Ok(()))
@@ -1320,7 +1378,10 @@ mod tests {
             owner: None,
             restored_at: None,
             ip_allowlist: Vec::new(),
+            cors: None,
+            browser_per_minute: None,
             inherit_pending: false,
+            reindex_whitelist: Vec::new(),
         }
     }
 
