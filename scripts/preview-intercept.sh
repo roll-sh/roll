@@ -100,7 +100,7 @@ case "$BOUND" in 200|201|204) ;; *) echo "binding STRIPE_KEY to echo.localhost: 
 say "a token saves the rules (the placeholders' maker): Roll only, echo.localhost allowed, public"
 TOKEN_JSON=$(api POST /v1/access/tokens "{\"name\":\"rules\",\"rules\":[{\"product\":\"previews\",\"resources\":\"*\",\"actions\":{\"read\":\"allow\",\"write\":\"allow\",\"admin\":\"allow\"}},{\"product\":\"secrets\",\"resources\":[{\"project\":\"$PRJ\"}],\"actions\":{\"read\":\"allow\",\"reveal\":\"allow\"}}]}")
 TOKEN=$(echo "$TOKEN_JSON" | jq_ "d['token']")
-TOKEN_ID=$(echo "$TOKEN_JSON" | jq_ "d['id']")
+TOKEN_ID=$(echo "$TOKEN_JSON" | jq_ "d['grant']['id']")
 SAVED=$(curl -s -o "$HOME_DIR/rules.json" -w '%{http_code}' -X PUT "http://$API/v1/previews/projects/$PRJ/settings" -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
   -d '{"enabled":true,"egress":"roll","egress_hosts":["echo.localhost"],"access":"public"}')
 [ "$SAVED" = 200 ] || { echo "the token saving the rules: HTTP $SAVED $(cat "$HOME_DIR/rules.json")"; exit 1; }
