@@ -881,8 +881,11 @@ impl HybridDigest {
         if self.merging.is_some() {
             return Ok(());
         }
-        let s = self.sorting.as_ref().map_or(0, |s| s.values.len() as i64);
-        if s.wrapping_add(size as i64) >= self.max_sorting_size {
+        // Unsigned and saturating: a weight near `u64::MAX` must switch to the merging digest,
+        // never wrap below the threshold and push that many values. A threshold that wrapped
+        // negative (a huge compression) switches at once, as Java's does.
+        let s = self.sorting.as_ref().map_or(0, |s| s.values.len() as u64);
+        if self.max_sorting_size <= 0 || s.saturating_add(size) >= self.max_sorting_size as u64 {
             let mut m = Box::new(MergingDigest::new(self.compression)?);
             if let Some(sorting) = self.sorting.take() {
                 for &v in &sorting.values {

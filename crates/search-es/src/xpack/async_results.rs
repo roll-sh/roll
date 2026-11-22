@@ -269,14 +269,16 @@ impl Results {
             g.bytes -= old.bytes;
             g.note(&id);
         }
-        g.make_room(entry.bytes);
         self.settle(&mut g);
+        // Charged before anything is pushed out: a refusal evicts nobody.
         if let Some(b) = self.budget.get()
             && let Err(e) = b.reserve(entry.bytes as u64, "<async_result>")
         {
             self.flag(&g);
             return Err(crate::search::aggs::agg_error(e));
         }
+        g.make_room(entry.bytes);
+        self.settle(&mut g);
         g.bytes += entry.bytes;
         g.charged += entry.bytes;
         g.note(&id);
@@ -304,21 +306,28 @@ impl Results {
 
     /// Reads back a deferred result now that it is asked for: charged and kept (its stored copy
     /// is unchanged), or refused by the breaker and left deferred.
-    pub fn admit(&self, id: &str, mut entry: Entry, now: i64) -> crate::error::EsResult<Entry> {
+    /// `None`: it is no longer deferred and not in memory either (deleted or expired since).
+    pub fn admit(&self, id: &str, mut entry: Entry, now: i64) -> crate::error::EsResult<Option<Entry>> {
         entry.bytes = entry_bytes(&entry);
         let mut g = self.inner.lock();
         g.expire(now);
-        g.make_room(entry.bytes);
         self.settle(&mut g);
+        // Another get read it back first, or it went: never charged twice, never resurrected.
+        if !g.deferred.contains_key(id) {
+            return Ok(g.entries.get(id).cloned());
+        }
+        // Charged before anything is pushed out: a refusal evicts nobody (and it stays deferred).
         if let Some(b) = self.budget.get() {
             b.reserve(entry.bytes as u64, "<async_result>").map_err(crate::search::aggs::agg_error)?;
         }
         g.deferred.remove(id);
+        g.make_room(entry.bytes);
+        self.settle(&mut g);
         g.bytes += entry.bytes;
         g.charged += entry.bytes;
         g.entries.insert(id.to_string(), entry.clone());
         self.flag(&g);
-        Ok(entry)
+        Ok(Some(entry))
     }
 
     /// A live result of the given kind.
@@ -430,14 +439,16 @@ impl Results {
             self.flag(&g);
             return;
         }
-        g.make_room(entry.bytes);
         self.settle(&mut g);
+        // Charged before anything is pushed out: without room it evicts nobody.
         if self.budget.get().is_some_and(|b| b.reserve(entry.bytes as u64, "<async_result>").is_err()) {
             // No room now: it stays stored, read back when asked for ([`Results::admit`]).
             g.deferred.insert(id, (entry.kind, entry.expiration_ms));
             self.flag(&g);
             return;
         }
+        g.make_room(entry.bytes);
+        self.settle(&mut g);
         g.bytes += entry.bytes;
         g.charged += entry.bytes;
         g.entries.insert(id, entry);
@@ -489,8 +500,11 @@ mod tests {
         assert!(r.take_changes(1).is_empty(), "nothing to write or delete");
         assert!(r.admit("a", entry(Kind::Esql, 100), 1).is_err(), "still no room");
         budget.set_limit(1 << 20);
-        let e = r.admit("a", entry(Kind::Esql, 100), 2).unwrap();
+        let e = r.admit("a", entry(Kind::Esql, 100), 2).unwrap().unwrap();
         assert_eq!(e.kind, Kind::Esql);
+        // A second get that read it too charges nothing more.
+        assert!(r.admit("a", entry(Kind::Esql, 100), 2).unwrap().is_some());
+        assert_eq!(budget.used() as usize, e.bytes);
         assert!(r.get("a", Kind::Esql, 3).is_some());
         assert_eq!(budget.used() as usize, e.bytes);
         // Expired, it goes for good.

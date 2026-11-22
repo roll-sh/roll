@@ -1219,7 +1219,7 @@ impl Node {
         self.wakes.fetch_add(1, Ordering::Relaxed);
         // What the newcomer holds resident counts against requests at once (the reaper
         // recounts every cluster on its next round).
-        self.request_memory.set_held_elsewhere(self.request_memory.held_elsewhere().saturating_add(persist::resident_bytes(&cluster)));
+        self.request_memory.add_held_elsewhere(persist::resident_bytes(&cluster));
         let loaded = Arc::new(Loaded {
             cluster,
             data,

@@ -889,6 +889,9 @@ fn bits_f64(v: &Value) -> Result<f64, String> {
     v.as_str().and_then(|s| s.parse::<u64>().ok()).map(f64::from_bits).ok_or_else(|| "a bad double".into())
 }
 
+/// The most centroids a quantile state may have: 20 × `QuantileStates`' compression of 1000.
+const QUANTILE_MAX_CENTROIDS: usize = 20_000;
+
 /// Encodes an aggregation state.
 pub fn encode_acc(a: &Acc) -> Value {
     let opt = |x: &Option<f64>| x.map_or(Value::Null, f64_bits);
@@ -985,11 +988,19 @@ pub fn decode_acc(v: &Value) -> Result<Acc, String> {
             acc
         }
         "q" => {
+            // A digest of compression 1000 has at most 20,000 centroids (its exact values),
+            // whose weights sum to a count.
+            let centroids = list(1)?;
+            if centroids.len() > QUANTILE_MAX_CENTROIDS {
+                return Err("a quantile state with too many centroids".into());
+            }
             let mut d = search_aggs::metrics::tdigest::TDigest::new(1000.0, false);
-            for c in list(1)? {
+            let mut total: i64 = 0;
+            for c in centroids {
                 let c = c.as_array().filter(|c| c.len() == 2).ok_or("a bad centroid")?;
-                let count = c[1].as_i64().and_then(|n| u64::try_from(n).ok()).filter(|n| *n > 0).ok_or("a bad centroid weight")?;
-                d.add_weighted(bits_f64(&c[0])?, count).map_err(|_| "a bad centroid mean")?;
+                let count = c[1].as_i64().filter(|n| *n > 0).ok_or("a bad centroid weight")?;
+                total = total.checked_add(count).ok_or("centroid weights past a count")?;
+                d.add_weighted(bits_f64(&c[0])?, count as u64).map_err(|_| "a bad centroid mean")?;
             }
             Acc::Quantile(Box::new(d))
         }
@@ -1901,6 +1912,12 @@ mod tests {
         assert!(decode_v(&nested, true).is_err());
         assert!(decode_v(&crate::arr!["z", 1], true).is_err());
         assert!(decode_acc(&crate::arr!["hll", "keyword", 14, crate::arr![i64::from(u32::MAX - 1)], Value::Null]).is_err());
+        // A quantile state whose weights would wrap the digest's count (or push ~10^19 values).
+        let m = f64_bits(1.0);
+        assert!(decode_acc(&crate::arr!["q", crate::arr![crate::arr![m.clone(), 1], crate::arr![m.clone(), i64::MAX]]]).is_err());
+        assert!(decode_acc(&crate::arr!["q", Value::Arr((0..20_001).map(|_| crate::arr![m.clone(), 1]).collect())]).is_err());
+        // One huge weight alone goes to the merging digest, never a loop of pushes.
+        assert!(decode_acc(&crate::arr!["q", crate::arr![crate::arr![m.clone(), i64::MAX]]]).is_ok());
         let wide = obj! { PART_FIELD => obj! { "columns" => crate::arr![crate::arr!["a", "long"]], "rows" => crate::arr![crate::arr![1, 2]] } };
         assert!(decode_answer(&wide, Mode::Rows, 10).is_err());
         let bad_type = obj! { PART_FIELD => obj! { "columns" => crate::arr![crate::arr!["a", "nope"]], "rows" => crate::arr![] } };

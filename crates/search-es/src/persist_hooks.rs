@@ -685,22 +685,12 @@ impl crate::cluster::Cluster {
         let st = self.state();
         let Some(idx) = st.metadata.indices.get(ASYNC_RESULTS_INDEX) else { return Ok(None) };
         let Some(engine) = self.engine.loaded(&idx.uuid) else { return Ok(None) };
+        // By `_id` (realtime): one lookup per shard, never a scan of every stored result.
         for shard in &engine.shards {
-            let searcher = shard.searcher();
-            for seg in searcher.segments() {
-                for local in 0..seg.max_doc() {
-                    if !seg.is_live(local) {
-                        continue;
-                    }
-                    let stored = searcher.stored(seg.base + local).map_err(convert::index_error)?;
-                    if crate::search::hits::stored_id(&stored).as_deref() != Some(id) {
-                        continue;
-                    }
-                    let Some(source) = crate::fetch::source_bytes(&stored) else { return Ok(None) };
-                    let Some(entry) = crate::fetch::parse_source(source).ok().as_ref().and_then(async_result_entry) else { return Ok(None) };
-                    return results.admit(id, entry, now).map(Some);
-                }
-            }
+            let Some(doc) = shard.shard.get(id.as_bytes(), true).map_err(convert::index_error)? else { continue };
+            let Some(source) = crate::fetch::source_bytes(&doc.fields) else { return Ok(None) };
+            let Some(entry) = crate::fetch::parse_source(source).ok().as_ref().and_then(async_result_entry) else { return Ok(None) };
+            return results.admit(id, entry, now);
         }
         Ok(None)
     }

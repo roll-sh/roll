@@ -80,6 +80,11 @@ impl MemoryBudget {
         self.elsewhere.store(bytes, Ordering::Relaxed);
     }
 
+    /// Adds `bytes` to what is held elsewhere (one atomic add: concurrent wakes all count).
+    pub fn add_held_elsewhere(&self, bytes: u64) {
+        self.elsewhere.fetch_add(bytes, Ordering::Relaxed);
+    }
+
     pub fn held_elsewhere(&self) -> u64 {
         self.elsewhere.load(Ordering::Relaxed)
     }

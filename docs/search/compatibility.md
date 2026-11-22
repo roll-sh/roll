@@ -1242,7 +1242,9 @@ Checked against Elasticsearch 9.5.5 (captures in
   `multi-values` for a list): `MV_CONCAT` and `MV_ZIP` (refused before building when the
   delimiter between each pair already passes), `MV_APPEND`, `MV_UNION`, `SPLIT` (each part
   counts its value's slot, so at most about 32,000 one-byte parts per MiB), `URL_ENCODE`,
-  `URL_ENCODE_COMPONENT`, `TO_BASE64`, `TO_UPPER`, `TO_LOWER` and `TO_STRING` of a multi-value.
+  `URL_ENCODE_COMPONENT` and `TO_BASE64`; `TO_UPPER`, `TO_LOWER` and `TO_STRING` of a multi-value
+  convert each value within their input's size plus 1 MiB (a long's text outgrows its slot, so
+  a large multi-value of numbers still converts).
   The others build no more than one of their inputs (`MV_SLICE`, `MV_SORT`, `MV_DEDUPE`,
   `MV_INTERSECTION`, `MV_DIFFERENCE`, `LEFT`, `RIGHT`, `SUBSTRING`, the trims, `REVERSE`,
   `FROM_BASE64`, `URL_DECODE`, `TOP_SNIPPETS`) or a fixed size (hashes, dates, numbers).

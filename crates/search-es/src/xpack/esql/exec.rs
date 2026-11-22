@@ -1886,8 +1886,10 @@ fn run_stage(stage: &Stage, in_cols: usize, rows: Vec<Vec<V>>, w: &mut Warnings,
                         }
                     }
                     None => {
+                        // As wide as the lookup index: charged like a match.
                         let mut n = base;
                         n.extend(std::iter::repeat_n(V::Null, *add));
+                        grown.add(memory::row_bytes(&n))?;
                         out.push(n);
                     }
                 }
@@ -1914,6 +1916,7 @@ fn run_stage(stage: &Stage, in_cols: usize, rows: Vec<Vec<V>>, w: &mut Warnings,
                 if !matched {
                     let mut n = base;
                     n.extend(std::iter::repeat_n(V::Null, *add));
+                    grown.add(memory::row_bytes(&n))?;
                     out.push(n);
                 }
             }
@@ -1958,6 +1961,12 @@ impl Pipeline {
     /// Elasticsearch's blocks are) and given back with the rows: whoever keeps them charges them.
     fn run(&self, rows: Vec<Vec<V>>, w: &mut Warnings) -> EsResult<Vec<Vec<V>>> {
         Ok(self.run_charged(rows, w)?.0)
+    }
+
+    /// Whether a stage can drop rows or columns (the page's charge may then be past what the
+    /// rows hold).
+    fn shrinks(&self) -> bool {
+        self.stages.iter().any(|(s, _, _)| matches!(s, Stage::Where(_) | Stage::Project(_) | Stage::Sample(_)))
     }
 
     /// [`Pipeline::run`], handing back the page's charge with the rows: a caller that keeps
@@ -4707,8 +4716,13 @@ async fn execute_plain(cluster: &Cluster, q: Query, filter: Option<Value>, w: &m
                     let mut rows_out: Vec<Vec<V>> = Vec::new();
                     let mut held = Growth::new(&src.mem)?;
                     scan(cluster, &source, query, only_scan_bound.then_some(n), &mut stats, |rows| {
-                        let (mut rows, page) = pipe.run_charged(rows, w)?;
+                        let (mut rows, mut page) = pipe.run_charged(rows, w)?;
+                        let cut = rows.len() > n - rows_out.len();
                         rows.truncate(n - rows_out.len());
+                        // What was dropped (by the stages or the limit) gives its charge back.
+                        if cut || pipe.shrinks() {
+                            page.set(memory::rows_bytes(&rows))?;
+                        }
                         rows_out.extend(rows);
                         held.take_page(page, rows_out.len());
                         Ok(rows_out.len() < n)
@@ -4726,7 +4740,10 @@ async fn execute_plain(cluster: &Cluster, q: Query, filter: Option<Value>, w: &m
                     let cap = part.as_ref().and_then(|p| p.max_bytes);
                     let mut bytes = 0u64;
                     scan(cluster, &source, query, None, &mut stats, |rows| {
-                        let (rows, page) = pipe.run_charged(rows, w)?;
+                        let (rows, mut page) = pipe.run_charged(rows, w)?;
+                        if pipe.shrinks() {
+                            page.set(memory::rows_bytes(&rows))?;
+                        }
                         if let Some(cap) = cap {
                             bytes = rows.iter().fold(bytes, |b, r| b.saturating_add(super::ccs::row_bytes(r)));
                             if bytes > cap {

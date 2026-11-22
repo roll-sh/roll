@@ -837,6 +837,13 @@ impl Built {
         Built::new(MAX_BUILT.max(args.iter().map(held_bytes).max().unwrap_or(0)))
     }
 
+    /// A converter of each value of its first argument (its output's slots and strings can
+    /// outgrow the input's, as a long's text does): the input and 1 MiB more. Each nested call
+    /// adds at most 1 MiB, so they can't compound.
+    fn converting(args: &[V]) -> Built {
+        Built::new(args.first().map_or(0, held_bytes).saturating_add(MAX_BUILT))
+    }
+
     #[inline]
     fn take(&mut self, n: usize) -> Result<(), TooLarge> {
         self.bytes = self.bytes.saturating_add(n);
@@ -1181,7 +1188,7 @@ fn eval_call(f: F, args: &[V], types: &[DataType]) -> Result<V, Fail> {
         Trim => V::Str(text(0).trim_matches(java_space).to_string()),
         Reverse => V::Str(text(0).chars().rev().collect()),
         ToLower | ToUpper => {
-            let b = Built::over(args);
+            let b = Built::converting(args);
             let limit = b.limit;
             let failed = std::cell::Cell::new(false);
             let out = map_built(a0, b, |v| match case_within(&v.to_text(), f == ToUpper, limit) {
@@ -1417,7 +1424,7 @@ fn eval_call(f: F, args: &[V], types: &[DataType]) -> Result<V, Fail> {
             }
         })?,
         ToString | ToText if ty0.is_grid() => map_values(a0, |v| v.as_i64().map_or(V::Null, |l| V::Str(super::spatial::grid_address(l, ty0)))),
-        ToString | ToText | ToVersion => map_built(a0, Built::over(args), |v| V::Str(v.to_text())).map_err(|_| warn(MULTI_TOO_LARGE))?,
+        ToString | ToText | ToVersion => map_built(a0, Built::converting(args), |v| V::Str(v.to_text())).map_err(|_| warn(MULTI_TOO_LARGE))?,
         // Grid cells are their long encodings; strings are addresses.
         ToGeohash | ToGeotile | ToGeohex => map_try(a0, |v| match v {
             V::Str(s) => super::spatial::grid_parse(s, f.result_type(types)).map(V::Long).map_err(warn),
