@@ -1363,7 +1363,7 @@ static TOOLS: &[Tool] = &[
         "POST",
         "/v1/apps/services/{service}/environments/{env}/sandboxes",
         &[SERVICE, ENV, b("image", Ty::Str, "A public image instead of the live one (python:3.13-slim)"), b("ttl_s", Ty::Int, "Seconds it stays up, 60-86400"), b("cpu", Ty::Num, "vCPUs, 0.25-4 (default 0.5)"), b("memory_mb", Ty::Int, "MiB, 256-8192 (default 512)"), b("variables", Ty::Bool, "The live deployment's variables and files"), b("network", Ty::Str, "none (its own: the internet) or environment")],
-    ),
+    ).open_world(),
     t("apps_list_sandboxes", "List sandboxes", "An environment's sandboxes: image, size, whether they have its variables, when each ends.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/sandboxes", &[SERVICE, ENV]),
     t("apps_get_sandbox", "Get a sandbox", "One sandbox: image, size, network, when it ends.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/sandboxes/{sandbox}", &[SERVICE, ENV, req("sandbox", "Sandbox id (sbx_…)")]),
     t(
@@ -1374,7 +1374,7 @@ static TOOLS: &[Tool] = &[
         "POST",
         "/v1/apps/services/{service}/environments/{env}/sandboxes/{sandbox}/exec",
         &[SERVICE, ENV, req("sandbox", "Sandbox id (sbx_…)"), breq("command", Ty::Str, "A shell command line"), b("timeout_s", Ty::Int, "Seconds before it's killed, 1-600 (default 60)")],
-    ),
+    ).open_world(),
     t("apps_delete_sandbox", "Delete a sandbox", "Stop and remove a sandbox now (admin).", "apps", "DELETE", "/v1/apps/services/{service}/environments/{env}/sandboxes/{sandbox}", &[SERVICE, ENV, req("sandbox", "Sandbox id (sbx_…)")]).destructive(),
     t("apps_cancel_job", "Cancel a job", "Stop a running job (production is a \"deploy\" action).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/jobs/{job}/cancel", &[SERVICE, ENV, req("job", "Job id")]),
     t("apps_events", "App events", "What happened to services (deploys going live or failing, crash loops, failed cron runs and jobs, memory, error and latency alerts, and audit.* changes to settings, variables, domains and links), in order after a cursor.", "apps", "GET", "/v1/apps/events", &[q("after", Ty::Int, "The last answer's next"), q("limit", Ty::Int, "At most this many")]).outside(&["fields"]),
