@@ -80,11 +80,7 @@ impl Robots {
                         g.delay.get_or_insert(d);
                     }
                 }
-                "sitemap" => {
-                    if sitemaps.len() < 50 && !value.is_empty() {
-                        sitemaps.push(value.to_string());
-                    }
-                }
+                "sitemap" if sitemaps.len() < 50 && !value.is_empty() => sitemaps.push(value.to_string()),
                 _ => {}
             }
         }

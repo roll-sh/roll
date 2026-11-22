@@ -608,7 +608,7 @@ impl Crawl<'_, '_> {
     async fn index_page(&mut self, src: u64, at: Link, depth: u64, body: Vec<u8>) -> Result<(), Stop> {
         let mut held = self.sink.reserve();
         if let Err(e) = held.add(body.len() as u64 * 2, "crawled page") {
-            return self.failed(src, &at, &e.reason());
+            return self.failed(src, &at, e.reason());
         }
         let text = String::from_utf8_lossy(&body).into_owned();
         drop(body);

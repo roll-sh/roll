@@ -287,9 +287,7 @@ impl TreeSink for Builder {
 /// Parses `html`, charging what it builds to `held`: an error (the breaker's reason) once the
 /// page costs more than the breaker allows. The charge stays on `held` while the DOM lives.
 pub fn parse(html: &str, held: Reservation) -> Result<(Dom, Reservation), String> {
-    let mut nodes = Vec::new();
-    nodes.push(Node::new(Data::Document));
-    nodes.push(Node::new(Data::Other));
+    let nodes = vec![Node::new(Data::Document), Node::new(Data::Other)];
     let builder = Builder { nodes: RefCell::new(nodes), held: RefCell::new(held), tripped: RefCell::new(None), stop: Cell::new(false) };
     let mut opts = html5ever::ParseOpts::default();
     // As Jsoup parses: `<noscript>` holds markup, not text.
