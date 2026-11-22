@@ -103,6 +103,8 @@ pub struct ClusterSpec {
     /// it stays across a restore under another name, a branch has its own, and browser keys are
     /// bound to it ([`crate::browser`]).
     pub catalog_id: Option<String>,
+    /// Who it belongs to (`search_es::ClusterConfig::owner`), when known.
+    pub owner: Option<String>,
     /// The parent's catalog id when the cluster is a branch (`search_es::ClusterConfig::branch_of`).
     pub branch_of: Option<String>,
     /// The cluster's own `reindex.remote.whitelist` (`host:port` patterns); `None`: the node
@@ -127,6 +129,7 @@ impl ClusterSpec {
             cors: None,
             browser_per_minute: None,
             catalog_id: None,
+            owner: None,
             branch_of: None,
             reindex_whitelist: None,
         }

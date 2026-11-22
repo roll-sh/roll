@@ -705,6 +705,15 @@ async fn scim_provisions_and_deactivates_people() {
     assert_eq!(scim(Method::GET, format!("/Users/{root}"), None, token.clone()).await.status, StatusCode::NOT_FOUND);
     assert_eq!(scim(Method::GET, "/Users".into(), None, token.clone()).await.json["totalResults"], 1, "Carol only");
 
+    // Other products hear of each deactivation from the outbox (docs/accounts.md, "Offboarding":
+    // rolld ends her leases, shares and sandboxes); a reactivation gives nothing back, so it's silent.
+    let offboarded = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let heard = offboarded.clone();
+    env.accounts.on_offboarded(Box::new(move |user| {
+        heard.lock().unwrap().push(user.to_string());
+        Ok(())
+    }));
+
     // Carol signs in; deactivated by the provider (Entra's string), her session ends at once.
     let mut b = Browser::default();
     env.email_sign_in(&mut b, "carol@acme.test", None).await;
@@ -719,6 +728,7 @@ async fn scim_provisions_and_deactivates_people() {
     assert_eq!(on.json["active"], true);
     assert_eq!(scim(Method::DELETE, format!("/Users/{carol_id}"), None, token.clone()).await.status, StatusCode::NO_CONTENT);
     assert_eq!(scim(Method::GET, format!("/Users/{carol_id}"), None, token.clone()).await.json["active"], false, "DELETE deactivates");
+    assert_eq!(*offboarded.lock().unwrap(), [carol_id.as_str(), carol_id.as_str()], "the PATCH and the DELETE, not the reactivation");
 
     // Entra's userName is often a UPN, not the address: roll's address is the primary email,
     // and the UPN finds the person.

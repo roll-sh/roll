@@ -964,6 +964,8 @@ static ROWS: &[Row] = &[
     // A token asks for more for itself (a person decides): any grant may ask, as it may ask whoami.
     row("POST", "/v1/access/requests", "access", R, Tgt::AnyGrant),
     row("GET", "/v1/access/approvals", "access", R, Tgt::Product),
+    // A connection's own approvals' decisions (the handler answers no one else's).
+    row("GET", "/v1/access/approvals/decided", "access", R, Tgt::AnyGrant),
     // A grant waits on its own approvals (the handler checks it's its own, or access read).
     row("GET", "/v1/access/approvals/{id}", "access", R, Tgt::AnyGrant),
     row("GET", "/v1/access/audit", "access", R, Tgt::Product),
@@ -1620,6 +1622,20 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/apps/services/{id}/environments/{env}/pending", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
     // A job is a command run with the environment's variables: its output can be them.
     row("GET", "/v1/apps/services/{id}/environments/{env}/jobs/{job}/logs", "apps", REVEAL, one(PG, "service")).env(EnvFrom::Param("env")),
+    // A private network reaches into the customer's own (its WireGuard config read as whoever
+    // set it): admin to set or remove, as a shell is; its routes and reference are read.
+    row("GET", "/v1/apps/services/{id}/environments/{env}/private-network", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("PUT", "/v1/apps/services/{id}/environments/{env}/private-network", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("DELETE", "/v1/apps/services/{id}/environments/{env}/private-network", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
+    // A sandbox runs any command, with the environment's variables when asked, and reads back
+    // any file: admin, as a shell is (seeing which there are is read).
+    row("GET", "/v1/apps/services/{id}/environments/{env}/sandboxes", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("POST", "/v1/apps/services/{id}/environments/{env}/sandboxes", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("GET", "/v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("DELETE", "/v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("POST", "/v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}/exec", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("GET", "/v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}/files", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("PUT", "/v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}/files", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
     // ── previews (feature/roll-previews, docs/previews.md) ──
     // A preview's link carries its access token (`share_url`, also each service's and earlier
     // ones'): the link is a credential, as its QR code is.

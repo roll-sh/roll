@@ -2,6 +2,7 @@
 # is neither a tool's nor here). `no tool yet` is a gap to close, everything else a decision.
 # One `METHOD route  reason` a line, as the catalogue spells the route; `*` for a row of every method.
 # A line may name a route an open PR is about to add, so that PR's gate passes when it lands.
+GET /v1/access/approvals/decided                                               an MCP Events feed (access.approval): events/poll and webhooks read it, access_wait_approval waits on one
 GET /v1/access/catalog                                                         the dashboard's (the permission catalogue; tools carry their own actions)
 GET /v1/access/oauth/clients                                                   the dashboard's (the OAuth clients a person registered)
 GET /v1/access/oauth/clients/{id}                                              the dashboard's (one registered OAuth client)
@@ -202,3 +203,5 @@ PUT /v1/workspace/projects/{id}/homes/{product}/{ref}                          a
 GET /v1/workspace/projects/{id}/invites                                        a person's call: invites are a signed-in person's (#501)
 DELETE /v1/workspace/projects/{id}/invites/{invite}                            a person's call: invites are a signed-in person's (#501)
 DELETE /v1/workspace/projects/{id}/members/me                                  a person's call: leaving a project is the person's own (#501)
+GET /v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}/files            raw bytes, not JSON: apps_sandbox_exec reads and writes files (cat, a heredoc)
+PUT /v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}/files            raw bytes, not JSON: apps_sandbox_exec reads and writes files (cat, a heredoc)

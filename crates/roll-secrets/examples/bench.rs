@@ -13,12 +13,27 @@
 //! move-in), then one change of the same keys' new values (a re-import, a promote), each into a
 //! fresh project. A line per change: wall time and, on Postgres with `pg_stat_statements` loaded,
 //! the statements it ran and the three that took longest.
+//!
+//! `… --example bench -- stampede 100,1000 [keys] [workers] [pool]`: that many identities (each
+//! its own principal, as pods' workload logins are) watching one folder of `keys` keys (9,000 plus
+//! 900 references by default), each holding its digest, then one key's change. Two lines per
+//! count, to the point every identity has the new digest and values: its conditional read
+//! (`If-None-Match`, now a miss: the first digest after the change), then its read (`digest=1`,
+//! as `roll run --watch` asks). `workers` requests at once (64), and on Postgres a pool of `pool`
+//! connections (4, rolld's for secrets). Each line: wall seconds, this process's CPU seconds and,
+//! with `BENCH_DB_CGROUP` (the database container's cgroup directory), the database's; CPU
+//! milliseconds per identity; errors (a read that failed, or answered the old state).
 
 use roll_secrets::{Batch, Caller, Keyring, Op, Options, Secrets};
 use std::sync::Arc;
 use std::time::Instant;
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("stampede") {
+        let arg = |i: usize, or: usize| std::env::args().nth(i).and_then(|a| a.parse().ok()).unwrap_or(or);
+        let ns: Vec<usize> = std::env::args().nth(2).unwrap_or("100,1000".into()).split(',').map(|n| n.parse().unwrap()).collect();
+        return stampede(&ns, arg(3, 9000), arg(4, 64), arg(5, 4));
+    }
     if std::env::args().nth(1).as_deref() == Some("concurrent") {
         let ns: Vec<usize> = std::env::args().nth(2).unwrap_or("1,10,50,200,500".into()).split(',').map(|n| n.parse().unwrap()).collect();
         let secs: u64 = std::env::args().nth(3).and_then(|a| a.parse().ok()).unwrap_or(15);
@@ -116,7 +131,7 @@ fn main() {
         let mut ms: Vec<f64> = (0..1000)
             .map(|_| {
                 let t = Instant::now();
-                drop(s.substitute(&ph, "api.example.com", Position { place: Place::Header, name: "authorization", value: &bearer }).unwrap());
+                drop(s.substitute(&ph, "sandbox:bench", "api.example.com", Position { place: Place::Header, name: "authorization", value: &bearer }).unwrap());
                 t.elapsed().as_secs_f64() * 1000.0
             })
             .collect();
@@ -271,5 +286,86 @@ fn big(ns: &[usize]) {
             }
             println!("{line}");
         }
+    }
+}
+
+fn stampede(ns: &[usize], n: usize, workers: usize, pool: usize) {
+    let dir = tempfile::tempdir().unwrap();
+    let ws_db = code_sql::Db::open(&code_sql::Target::Sqlite(dir.path().join("workspace.db"))).unwrap();
+    let ws = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
+    let project = ws.create("", "bench", "", None).unwrap().id;
+    let (db, schema) = match std::env::var(code_sql::TEST_DATABASE_ENV) {
+        Ok(url) if !url.is_empty() => {
+            let schema = format!("bench_stampede_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+            (code_sql::Db::connect(&url, &schema, code_sql::PgOptions { max_connections: pool, ..Default::default() }).unwrap(), Some(schema))
+        }
+        _ => (code_sql::Db::open(&code_sql::Target::Sqlite(dir.path().join("secrets.db"))).unwrap(), None),
+    };
+    let backend = format!("{:?}", db.backend());
+    let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), deliver: None, open: true, trust_forwarded_for: false, web_url: None, grants: None, people: None, kms: None, sts: None, outside: None, directory: None, github: None, clouds: None, workloads: None, gateways: None };
+    let s = Secrets::new(db.clone(), ws, opts).unwrap();
+    let c = Caller::operator();
+    let set = |key: String, value: String| Op::Set { key, value: Some(value), comment: None, tags: None, kind: None, link: None, path: None, expires_at: None, if_version: None };
+    let ops = (0..n).map(|i| set(format!("K{i:05}"), format!("value-{i:05}-abcdefghijklmnop"))).chain((0..n / 10).map(|i| set(format!("R{i:05}"), format!("${{K{i:05}}}/x")))).collect();
+    s.batch(&project, "production", Batch { path: None, message: None, ops, if_seq: None }, &c).unwrap();
+    // This process's CPU seconds (user and system), and the database container's.
+    let cpu = || {
+        let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
+        let f: Vec<&str> = stat.rsplit_once(')').unwrap().1.split_whitespace().collect();
+        (f[11].parse::<f64>().unwrap() + f[12].parse::<f64>().unwrap()) / 100.0
+    };
+    let db_cpu = || {
+        let dir = std::env::var("BENCH_DB_CGROUP").ok()?;
+        let stat = std::fs::read_to_string(format!("{dir}/cpu.stat")).ok()?;
+        stat.lines().find_map(|l| l.strip_prefix("usage_usec ")).and_then(|v| v.parse::<f64>().ok()).map(|us| us / 1e6)
+    };
+    let load = || std::fs::read_to_string("/proc/loadavg").unwrap_or_default().split_whitespace().next().unwrap_or("?").to_string();
+    // One identity's request: whether it answered what it should.
+    type Poll<'a> = &'a (dyn Fn(&Caller) -> bool + Sync);
+    // `f` for every identity, `workers` at once, as rolld's blocking pool runs requests: the
+    // number that failed.
+    let each = |pods: &[Caller], f: Poll<'_>| -> usize {
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let failed = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|sc| {
+            for _ in 0..workers.min(pods.len()) {
+                sc.spawn(|| {
+                    while let Some(pod) = pods.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed)) {
+                        if !f(pod) {
+                            failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                });
+            }
+        });
+        failed.into_inner()
+    };
+    println!("backend\tidentities\tkeys\tstep\twall_s\tcpu_s\tdb_cpu_s\tcpu_ms_per_identity\terrors\tload");
+    for (round, &count) in ns.iter().enumerate() {
+        // New identities each round, so none starts with a digest an earlier round left.
+        let pods: Vec<Caller> = (0..count).map(|i| Caller::consumer(&format!("workload:r{round}-pod{i:04}"))).collect();
+        let before = s.digest(&project, "production", "/", &pods[0]).unwrap();
+        each(&pods, &|p| s.digest(&project, "production", "/", p).is_ok_and(|d| d == before));
+        let value = format!("rotated-{round}");
+        s.batch(&project, "production", Batch { path: None, message: None, ops: vec![set("K00000".into(), value.clone())], if_seq: None }, &c).unwrap();
+        let steps: [(&str, Poll<'_>); 2] = [
+            ("conditional read (miss)", &|p| matches!(s.unchanged(&project, "production", "/", &before, true, p), Ok(None))),
+            ("read (digest=1)", &|p| {
+                let digest = s.digest(&project, "production", "/", p);
+                let v = s.values_for(&project, "production", "/", true, None, true, p);
+                digest.is_ok_and(|d| d != before) && v.is_ok_and(|v| v.values.len() == n + n / 10 && v.values["K00000"].expose() == value)
+            }),
+        ];
+        for (step, f) in steps {
+            let (load, cpu0, db0, t) = (load(), cpu(), db_cpu(), Instant::now());
+            let errors = each(&pods, f);
+            let (wall, used, db) = (t.elapsed().as_secs_f64(), cpu() - cpu0, db_cpu().zip(db0).map(|(a, b)| a - b));
+            let db_s = db.map(|d| format!("{d:.1}")).unwrap_or("-".into());
+            let per = (used + db.unwrap_or(0.0)) * 1000.0 / count as f64;
+            println!("{backend}\t{count}\t{}\t{step}\t{wall:.1}\t{used:.1}\t{db_s}\t{per:.0}\t{errors}\t{load}", n + n / 10);
+        }
+    }
+    if let Some(schema) = schema {
+        db.write(|c| c.execute_batch(&format!("DROP SCHEMA {schema} CASCADE"))).unwrap();
     }
 }

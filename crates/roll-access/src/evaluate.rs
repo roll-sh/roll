@@ -43,6 +43,10 @@ pub struct McpCall {
     /// Asked for nobody's sake (an argument's completions): what would ask a person is refused at
     /// once instead, so typing never opens an approval.
     pub quiet: bool,
+    /// roll's own work for the grant, nobody waiting on it (MCP Events' webhook deliveries, and the
+    /// read a subscribe makes to check them): what would ask a person is refused (`would_ask`), and
+    /// the policy's `agents_ask` holds it as it holds an agent's calls.
+    pub unattended: bool,
 }
 
 /// What a client calls itself, fit for a log line: one line, no control characters, at most 120
@@ -130,7 +134,15 @@ fn deny(status: StatusCode, code: &str, message: String, extra: Value) -> Respon
 }
 
 fn invalid_token(access: &Access) -> Response {
-    let mut r = deny(StatusCode::UNAUTHORIZED, "invalid_token", "the token isn't valid: it was revoked, expired, or never existed".into(), json!({}));
+    invalid_token_because(access, "the token isn't valid: it was revoked, expired, or never existed")
+}
+
+/// What an OAuth client gets once roll's policy (`oauth_clients`) leaves it out: its connection
+/// isn't revoked (the policy may allow it again), it just doesn't work.
+pub(crate) const CLIENT_NOT_ALLOWED: &str = "roll's policy doesn't let this client connect: an admin lists the clients that may (the access page's policy, OAuth clients)";
+
+fn invalid_token_because(access: &Access, why: &str) -> Response {
+    let mut r = deny(StatusCode::UNAUTHORIZED, "invalid_token", why.into(), json!({}));
     let meta = format!("Bearer error=\"invalid_token\", resource_metadata=\"{}/.well-known/oauth-protected-resource/v1/mcp\"", access.config.api_url.trim_end_matches('/'));
     if let Ok(v) = HeaderValue::from_str(&meta) {
         r.headers_mut().insert(header::WWW_AUTHENTICATE, v);
@@ -302,15 +314,31 @@ impl Ctx {
 
 async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     let started = Instant::now();
-    let Some(token) = roll_auth::grant_credential(req.headers()) else { return invalid_token(&access) };
+    // roll's own work for a grant (roll_auth::ActAs, in process only): the grant by id, as usable
+    // as its token would be now; then every check below as for that token.
+    let acting = req.extensions().get::<roll_auth::ActAs>().map(|a| a.0.to_string()).filter(|_| !req.headers().contains_key(header::AUTHORIZATION));
+    let token = match (&acting, roll_auth::grant_credential(req.headers())) {
+        (Some(_), _) => String::new(),
+        (None, Some(t)) => t,
+        (None, None) => return invalid_token(&access),
+    };
     // A refresh token opens nothing here; one whose checksum is wrong isn't roll's (no lookup: a
     // flood of made-up tokens costs nothing).
-    if token.starts_with(REFRESH_PREFIX) || !crate::checksum_ok(&token) {
+    if acting.is_none() && (token.starts_with(REFRESH_PREFIX) || !crate::checksum_ok(&token)) {
         return invalid_token(&access);
     }
     let lookup = {
-        let (a, t) = (access.clone(), token.clone());
-        blocking(move || a.store.by_secret(&t)).await
+        let (a, t, id) = (access.clone(), token.clone(), acting.clone());
+        blocking(move || match id {
+            // Narrowed to reading, as a read-only secret's grant is: roll's work for a grant only
+            // reads, and never sees a credential its token could reveal.
+            Some(id) => Ok(a.store.get(&id).ok().filter(|g| g.usable(code_sql::now_ms())).map(|mut g| {
+                g.read_only();
+                g
+            })),
+            None => a.store.by_secret(&t),
+        })
+        .await
     };
     let grant = match lookup {
         // A decoy (docs/permissions.md, "Decoy tokens"): nobody should ever use it, so whoever did
@@ -326,6 +354,7 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         // Unused longer than the operator's policy allows: it stops (making it again is a person's
         // choice, not an agent's).
         Ok(Some(g)) if access.policy_now().idle(&g, code_sql::now_ms()) => return invalid_token(&access),
+        Ok(Some(g)) if !access.policy_now().allows_grant(&g) => return invalid_token_because(&access, CLIENT_NOT_ALLOWED),
         Ok(Some(g)) => g,
         // One that waits for an admin, or starts later, says so: its holder isn't left guessing.
         Ok(None) => {
@@ -349,7 +378,7 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     // A secret a rotation left working for a while (it may have leaked: that's why one rotates)
     // keeps calling products, but manages no tokens: it can't rotate, change or make one that
     // outlives its grace.
-    if route.starts_with("/v1/access") {
+    if route.starts_with("/v1/access") && acting.is_none() {
         let (a, t) = (access.clone(), token.clone());
         if blocking(move || a.store.in_grace(&t)).await.unwrap_or(true) {
             return deny(StatusCode::FORBIDDEN, "rotated_secret", "this secret was rotated: it works until its grace ends, but can't manage tokens (use the new one)".into(), json!({}));
@@ -393,8 +422,9 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         }
     }
     // Used: from an address it may be used from (a refused address neither keeps it from idling
-    // nor becomes its last address).
-    if !decided_before && access.store.touch_due(&crate::store::use_key(&ctx.grant.id, ip.map(|i| i.to_string()).as_deref())) {
+    // nor becomes its last address). roll's own work for it (ActAs) isn't its use: a webhook
+    // subscription alone never keeps a token from idling.
+    if !decided_before && acting.is_none() && access.store.touch_due(&crate::store::use_key(&ctx.grant.id, ip.map(|i| i.to_string()).as_deref())) {
         let (a, id, name, user, ip) = (access.clone(), ctx.grant.id.clone(), ctx.grant.name.clone(), ctx.grant.user.clone(), ip.map(|i| i.to_string()));
         let workload = ctx.grant.kind == "workload";
         tokio::spawn(async move {
@@ -705,6 +735,19 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
     let resource = lent.as_ref().map(|(_, id)| id.clone()).or_else(|| describe(&target));
     let about = lent.as_ref().map_or(row.product, |(p, _)| p);
     ctx.about = lent.as_ref().map(|(p, _)| *p);
+    // An agent (a call through roll's MCP server) asks a person first for what the policy says
+    // agents always ask about, whatever its token allows (a session is a person, never an agent).
+    // roll's unattended work for the grant (a webhook delivery) is held too, and refused rather
+    // than asked; a quiet probe of roll's own (a completion, the credential guard's scan) isn't.
+    if outcome == Outcome::Allow && !session && ctx.mcp.as_ref().is_some_and(|m| !m.quiet || m.unattended) {
+        let env = match &target {
+            Target::One(r) => r.environment.clone(),
+            _ => None,
+        };
+        if policy.agent_asks(about, action, env.as_deref()) {
+            outcome = Outcome::Ask;
+        }
+    }
     let mut approved: Option<roll_auth::Approved> = None;
     match outcome {
         Outcome::Deny => {
@@ -1111,8 +1154,8 @@ struct Asked<'a> {
 /// Wait for a person: an approval sent with the request (`X-Roll-Approval`), or a new one.
 async fn ask(ctx: &Ctx, row: &Row, action: Action, resource: Option<String>, req: Asked<'_>) -> Result<crate::store::Approval, Box<Response>> {
     // A completion never asks a person, nor waits on (or uses up) an approval an agent's call opened.
-    if ctx.mcp.as_ref().is_some_and(|m| m.quiet) {
-        return Err(Box::new(deny(StatusCode::FORBIDDEN, "would_ask", "this would ask a person, and a completion never does".into(), json!({}))));
+    if ctx.mcp.as_ref().is_some_and(|m| m.quiet || m.unattended) {
+        return Err(Box::new(deny(StatusCode::FORBIDDEN, "would_ask", "this would ask a person, and roll's own work for a connection never does".into(), json!({}))));
     }
     let Asked { headers, path, body, request_hash, args, environment, scope_path, scope_index, product: about } = req;
     let access = &ctx.access;

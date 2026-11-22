@@ -71,6 +71,7 @@ pub fn write_args(ctx: &Ctx) -> EsResult<WriteArgs> {
         list_executed_pipelines: false,
         principal: Some(std::sync::Arc::new(crate::xpack::security::principal(ctx).clone())),
         source_type: None,
+        index_only: None,
     })
 }
 
@@ -415,6 +416,11 @@ async fn index_resolved(ctx: &Ctx<'_>, target: write::Target, mut args: WriteArg
             // A pipeline that moved the document (`_index`, `reroute`): the write is authorized
             // again where it lands.
             if t.index.name != requested {
+                // A connector's sync writes only its own index (the pipeline refuses the move
+                // first; this holds for any path that doesn't).
+                if let Some(only) = &args.index_only {
+                    return Err(EsError::illegal_argument(format!("a connector's sync can't write document [{id}] outside [{only}] (to [{}])", t.index.name)));
+                }
                 crate::xpack::security::check_moved_write(ctx, &t.index.name)?;
             }
             if let Some(ingested) = ingested {

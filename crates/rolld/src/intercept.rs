@@ -1,11 +1,12 @@
 //! roll secrets as the intercepting egress step's [`roll_intercept::Interception`]: one consumer's
-//! interception CA, live as roll secrets says on every connection, and roll secrets' own filter
+//! interception CA, standing as roll secrets says on every connection, and roll secrets' own filter
 //! for each request. roll previews' egress uses it; roll apps' closed environments can too.
 
 use std::sync::Arc;
 
-/// One CA's interception: live as roll secrets says (asked every connection), its leaves, and
-/// roll secrets' filter against the host connected to.
+/// One CA's interception: standing as roll secrets says (asked every connection: a stale CA, its
+/// consumer bound to a host it doesn't name, still serves the hosts it names until its consumer
+/// swaps it), its leaves, and roll secrets' filter against the host connected to.
 pub struct CaInterception {
     secrets: Arc<roll_secrets::Secrets>,
     ca: roll_secrets::intercept::InterceptCa,
@@ -13,7 +14,7 @@ pub struct CaInterception {
 
 impl roll_intercept::Interception for CaInterception {
     fn live(&self) -> anyhow::Result<bool> {
-        self.secrets.intercept_ca_live(&self.ca.id).map_err(|e| anyhow::anyhow!("{e}"))
+        self.secrets.intercept_ca_stands(&self.ca.id).map_err(|e| anyhow::anyhow!("{e}"))
     }
     fn covers(&self, host: &str) -> bool {
         self.ca.covers(host)
@@ -24,7 +25,7 @@ impl roll_intercept::Interception for CaInterception {
     }
     fn filter(&self, req: roll_intercept::Outgoing<'_>) -> Result<roll_intercept::Filtered, String> {
         let mut out = roll_secrets::proxy::Outgoing { host: req.host, path: req.path, headers: req.headers, query: req.query };
-        let scrub = roll_secrets::proxy::filter(&mut out, &*self.secrets, &roll_secrets::proxy::Limits::default()).map_err(|b| b.to_string())?;
+        let scrub = roll_secrets::proxy::filter(&mut out, &self.ca.consumer, &*self.secrets, &roll_secrets::proxy::Limits::default()).map_err(|b| b.to_string())?;
         let swapped = scrub.swapped();
         let scrub = (swapped > 0).then(|| Box::new(SecretsScrub { scrub, secrets: self.secrets.clone(), echoed: None }) as Box<dyn roll_intercept::ResponseScrub>);
         Ok(roll_intercept::Filtered { swapped, scrub })
