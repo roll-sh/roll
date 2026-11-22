@@ -949,7 +949,7 @@ previews are listed once those products are on.
 | `secrets_list_rotations` | A project's secret rotations: what rotated and what's due. | `GET /v1/secrets/projects/{project}/rotations` |
 | `secrets_ca_certificates` | The certificates a project's CA has issued (never a key). | `GET /v1/secrets/projects/{project}/cas/{ca}/certificates` |
 | `secrets_list_placeholders` | Placeholders handed out for a project's host-bound keys (key, consumer, expiry; never the placeholder or the value). | `GET /v1/secrets/projects/{project}/placeholders` |
-| `secrets_list_deleted` | Deleted workspace projects still in their recovery window that you may recover: who deleted each, when, and when it's purged (recovering stays a person's). | `GET /v1/secrets/deleted` |
+| `secrets_list_recoverable` | Deleted workspace projects still in their recovery window that you may recover: who deleted each, when, and when it's purged (recovering stays a person's). | `GET /v1/secrets/deleted` |
 | `secrets_end_placeholder` | End one placeholder now. | `DELETE /v1/secrets/projects/{project}/placeholders/{id}` |
 | `secrets_end_consumer_placeholders` | End every live placeholder a consumer holds. | `DELETE /v1/secrets/projects/{project}/placeholders?consumer=` |
 | `secrets_list_leases` | A project's live leases on dynamic credentials, never a credential. | `GET /v1/secrets/projects/{project}/leases` |
@@ -1110,7 +1110,7 @@ waits on a sibling PR reaching main is last.
    rolld's outbox), makes them a viewer in its project with a token that names every action, and
    calls every read tool of secrets, previews and workspace their client lists: one refused by
    their role means the listing and the gate drifted apart (first run: 196 tools listed for a
-   viewer, 74 member-product reads called, none refused). Also here: `secrets_list_deleted`, the
+   viewer, 74 member-product reads called, none refused). Also here: `secrets_list_recoverable`, the
    deleted projects a person may recover (#585; recovering stays a person's). Next for the sweep:
    start rolld on port 0 with `--addr-file` (#596) instead of picking free ports, which ends its
    occasional "rolld exited" on a port someone took meanwhile.
