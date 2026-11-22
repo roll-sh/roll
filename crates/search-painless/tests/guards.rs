@@ -427,6 +427,7 @@ fn hosts_hear_what_executions_keep() {
     let e = limited(4 << 20);
     let returns = e.compile("String t = 'x'; while (t.length() < 64 * 1024) { t = t + t; } return t + 'y'", Context::PainlessTest).unwrap();
     let mut inst = returns.instance();
+    inst.set_result_accounting(true);
     let mut host = Breaker { held: 0, limit: 1 << 20 };
     for _ in 0..1000 {
         let v = inst.execute(&mut host).unwrap();
@@ -443,4 +444,52 @@ fn hosts_hear_what_executions_keep() {
     assert!((100..200).contains(&runs), "{runs}");
     let err = inst.execute(&mut host).unwrap_err().to_response();
     assert_eq!(cause(&err).0, "circuit_breaking_exception", "{err}");
+}
+
+/// Library calls that build many objects in one call look at the account as they go: a split,
+/// a regex split and a parsed document stop near the limit, not after building it all
+/// (a 2 MiB string of `a,` splits into a million strings, about 100 MiB).
+#[test]
+fn bulk_builders_stop_near_the_limit() {
+    let e = limited(4 << 20);
+    let input = "String s = 'a,'; while (s.length() < 2 * 1024 * 1024) { s = s + s; }";
+    for (what, src) in [
+        ("splitOnToken", format!("{input} return s.splitOnToken(',').length;")),
+        ("Pattern.split", format!("{input} return /,/.split(s).length;")),
+        ("Json.load", "StringBuilder b = new StringBuilder('['); for (int i = 0; i < 500000; i++) { b.append('1,'); } b.append('1]'); return Json.load(b.toString()).size();".to_string()),
+    ] {
+        let (r, grew) = peak_growth(|| run(&e, &src));
+        let err = r.unwrap_err();
+        assert_eq!(cause(&err).0, "painless_error", "{what}: {err}");
+        assert!(grew < 8 << 20, "{what}: the thread held {grew} bytes");
+    }
+}
+
+/// A size known before it is allocated is checked against the room first.
+#[test]
+fn known_sizes_are_refused_before_allocating() {
+    let e = limited(4 << 20);
+    let (r, grew) = peak_growth(|| run(&e, "StringBuilder b = new StringBuilder(); b.setLength(250000000); return b.length()"));
+    assert_eq!(cause(&r.unwrap_err()).0, "painless_error");
+    assert!(grew < 1 << 20, "the thread held {grew} bytes");
+}
+
+/// A host whose `_source` is parsed lazily, when a script first reads it.
+struct LargeSource;
+
+impl Host for LargeSource {
+    fn source(&mut self) -> Option<Value> {
+        Some(Value::from_json_map(&json!({ "big": "x".repeat(8 << 20) })))
+    }
+}
+
+/// What the host allocates for itself during an execution (a lazily parsed `_source` larger
+/// than the limit) isn't the script's: Elasticsearch runs these scripts.
+#[test]
+fn host_allocations_are_not_the_scripts() {
+    let e = limited(4 << 20);
+    let script = e.compile("return params['_source']['big'].length()", Context::Score).unwrap();
+    let mut inst = script.instance();
+    inst.set_params(&json!({}));
+    assert_eq!(inst.execute_f64(&mut LargeSource).unwrap(), (8 << 20) as f64);
 }

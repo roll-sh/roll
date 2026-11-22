@@ -618,6 +618,9 @@ impl Run {
 
     /// Pushes `v` into stage `k`; `Ok(false)` means downstream wants no more elements.
     fn push(&mut self, vm: &mut Vm, k: usize, v: Value, sink: &mut Sink) -> Result<bool, Thrown> {
+        // every element of every pipeline passes here: collectors, `flatMap` and the terminal
+        // operations build their results inside one library call
+        crate::guard::poll()?;
         if k == self.stages.len() {
             let r = sink(vm, v);
             if let Err(e) = &r

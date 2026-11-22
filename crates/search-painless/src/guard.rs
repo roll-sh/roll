@@ -219,7 +219,54 @@ pub fn too_long(len: usize) -> bool {
         note_out_of_memory();
         return true;
     }
+    over_budget()
+}
+
+/// For code that cannot return an error: whether the running execution is past its memory
+/// limit (the failure is recorded and surfaces after the library call, see [`take_pending`]).
+#[inline(always)]
+pub fn over_budget() -> bool {
+    if memory_exhausted()
+        && let Err(t) = refill(0)
+    {
+        note_thrown(t);
+        return true;
+    }
     false
+}
+
+/// For code that cannot return an error, before it allocates `bytes` it knows of: whether they
+/// fit (if not, the failure is recorded and surfaces after the library call).
+pub fn reserve_or_note(bytes: u64) -> bool {
+    match check_bytes(bytes) {
+        Ok(()) => true,
+        Err(t) => {
+            note_thrown(t);
+            false
+        }
+    }
+}
+
+/// Looks at the running execution's account from inside a library loop that builds many
+/// objects in one call (a split's pieces, a parsed document's nodes): past the limit the call
+/// fails there, not after it has built them all. One thread-local load and compare.
+#[inline(always)]
+pub fn poll() -> Result<(), Thrown> {
+    if memory_exhausted() {
+        return refill(0);
+    }
+    Ok(())
+}
+
+/// Strings built by library code as values, looking at the account as they are made.
+pub fn string_values(items: Vec<String>) -> Result<Vec<Value>, Thrown> {
+    check_new_elements(items.len())?;
+    let mut out = Vec::with_capacity(items.len());
+    for s in items {
+        poll()?;
+        out.push(Value::string(s));
+    }
+    Ok(out)
 }
 
 /// Clears the recorded failure and returns it as the error to throw.
@@ -297,8 +344,25 @@ static DEFAULT_EXECUTION: AtomicU64 = AtomicU64::new(DEFAULT_EXECUTION_BYTES);
 
 /// Sets the per-execution memory limit engines created afterwards default to (the node's
 /// setting; 0: no limit).
+///
+/// # Panics
+///
+/// When a limit is set but the process's global allocator isn't wrapped in [`Counting`]: the
+/// limit would silently bound nothing.
 pub fn set_default_max_execution_bytes(bytes: u64) {
+    assert!(bytes == 0 || counting_installed(), "a Painless memory limit needs the global allocator wrapped in search_painless::Counting");
     DEFAULT_EXECUTION.store(bytes, Ordering::Relaxed);
+}
+
+/// Whether the global allocator keeps executions' accounts ([`Counting`]): an allocation inside
+/// a scope moves it.
+pub fn counting_installed() -> bool {
+    let _scope = MemoryScope::enter(0);
+    let before = MemoryScope::held();
+    let probe = std::hint::black_box(Box::new([0u8; 64]));
+    let moved = MemoryScope::held() != before;
+    drop(probe);
+    moved
 }
 
 pub fn default_max_execution_bytes() -> u64 {
@@ -357,13 +421,19 @@ fn give(bytes: usize) {
 unsafe impl<A: GlobalAlloc> GlobalAlloc for Counting<A> {
     #[inline]
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        take(layout.size());
-        unsafe { self.0.alloc(layout) }
+        let p = unsafe { self.0.alloc(layout) };
+        if !p.is_null() {
+            take(layout.size());
+        }
+        p
     }
     #[inline]
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        take(layout.size());
-        unsafe { self.0.alloc_zeroed(layout) }
+        let p = unsafe { self.0.alloc_zeroed(layout) };
+        if !p.is_null() {
+            take(layout.size());
+        }
+        p
     }
     #[inline]
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
@@ -372,8 +442,12 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Counting<A> {
     }
     #[inline]
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        take(new_size.wrapping_sub(layout.size()));
-        unsafe { self.0.realloc(ptr, layout, new_size) }
+        let p = unsafe { self.0.realloc(ptr, layout, new_size) };
+        // a failed realloc leaves the old block as it was
+        if !p.is_null() {
+            take(new_size.wrapping_sub(layout.size()));
+        }
+        p
     }
 }
 
@@ -382,6 +456,8 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Counting<A> {
 pub struct MemoryScope {
     prev_room: i64,
     prev: Account,
+    /// The account is this thread's: a scope can't move to another.
+    _thread: std::marker::PhantomData<*const ()>,
 }
 
 impl MemoryScope {
@@ -391,7 +467,7 @@ impl MemoryScope {
         let room = limit.min(STEP);
         let prev_room = ROOM.replace(room);
         let prev = ACCOUNT.replace(Account { active: true, limit, granted: room, checked: 0, reported: 0 });
-        MemoryScope { prev_room, prev }
+        MemoryScope { prev_room, prev, _thread: std::marker::PhantomData }
     }
 
     /// Bytes the execution holds now (allocations minus frees since it began).
@@ -416,6 +492,22 @@ impl Drop for MemoryScope {
         ACCOUNT.set(self.prev);
         ROOM.set(self.prev_room.wrapping_sub(held));
     }
+}
+
+/// Runs a call into the host outside the running execution's account: what the host allocates
+/// or frees for itself (a lazily parsed `_source`, a segment's fielddata, doc-values buffers)
+/// is not the script's.
+#[inline(always)]
+pub fn paused<R>(f: impl FnOnce() -> R) -> R {
+    struct Restore(i64);
+    impl Drop for Restore {
+        #[inline(always)]
+        fn drop(&mut self) {
+            ROOM.set(self.0);
+        }
+    }
+    let _restore = Restore(ROOM.get());
+    f()
 }
 
 /// Whether the running execution has used up its room: the interpreter then calls [`refill`].
@@ -474,6 +566,22 @@ pub fn check_array(len: u64, elem_bytes: u64) -> Result<(), Thrown> {
         return Err(out_of_memory("Requested array size exceeds VM limit"));
     }
     check_bytes(16u64.saturating_add(len.saturating_mul(elem_bytes)))
+}
+
+/// Checks a new string of `len` UTF-16 units, before it is built: under the object cap and
+/// within what the running execution may still hold.
+#[inline]
+pub fn check_new_string(len: usize) -> Result<(), Thrown> {
+    if len as u64 > MAX_ARRAY_LENGTH {
+        return Err(out_of_memory("Requested array size exceeds VM limit"));
+    }
+    check_bytes(len as u64)
+}
+
+/// Whether `bytes` more fit in the running execution's room without looking at its account.
+#[inline]
+pub fn fits(bytes: usize) -> bool {
+    (bytes as i64) <= ROOM.get()
 }
 
 /// Checks that a string being built may grow to `len` UTF-16 units (`String`, `StringBuilder`).
@@ -565,7 +673,8 @@ impl JavaSb {
             len >> coder
         };
         let bytes = (cap as u64) << coder;
-        check_growth(16 + bytes)?;
+        // the JDK allocates the new buffer before copying the old one into it
+        check_bytes(16 + bytes)?;
         self.bytes = bytes as i32;
         self.coder = coder;
         Ok(())

@@ -943,6 +943,9 @@ impl Instance { fn set_params(&mut self, &Json); fn set_params_value(&mut self, 
                 fn set_cancellable(&mut self, bool) }   // search contexts (score, filter, fields, sort, aggs, runtime
                 // fields) when the search binds a cancellation check: no max_loop_counter, Host::check_cancelled every
                 // 1,000 loop iterations instead (Elasticsearch 9.5); off for _execute and write scripts
+                // fn set_result_accounting(&mut self, bool): keep a second reference to each result until the next
+                // execution (hosts charging a breaker per document); results must then be dropped on its thread
+pub fn counting_installed() -> bool;   // set_default_max_execution_bytes(n > 0) panics without Counting
 pub trait Host {   // every method has a default; implement what the context needs
     fn score(&mut self) -> f64;
     fn doc_values(&mut self, field: &str, out: &mut DocValues) -> Result<bool, HostError>;   // Ok(false): unmapped

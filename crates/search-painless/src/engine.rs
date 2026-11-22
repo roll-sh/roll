@@ -634,10 +634,11 @@ pub struct Instance<'s> {
     fast: Fast,
     /// This instance already reported a fast-path run to the program.
     fast_ran: bool,
-    /// Another reference to the last execution's result, dropped when the next one starts: a
-    /// result the host has let go of by then is freed inside that execution's account, which
-    /// balances what the account handed the host with it.
-    last: Value,
+    /// With [`Instance::set_result_accounting`]: another reference to the last execution's
+    /// result, dropped when the next one starts. A result the host has let go of by then is
+    /// freed inside that execution's account, which balances what the account handed the host
+    /// with it.
+    last: Option<Value>,
 }
 
 /// The instance's specialization of the script's fast path.
@@ -682,7 +683,7 @@ impl<'s> Instance<'s> {
         state.ctx_var = script.def.var_index("ctx").map(|i| i as u32);
         state.field_name = std::rc::Rc::from(script.context.name());
         let fast = if script.fast.is_some() { Fast::Untried } else { Fast::Off };
-        Instance { script, state, stack: Vec::with_capacity(64), fast, fast_ran: false, last: Value::Null }
+        Instance { script, state, stack: Vec::with_capacity(64), fast, fast_ran: false, last: None }
     }
 
     pub fn script(&self) -> &'s Script {
@@ -729,6 +730,15 @@ impl<'s> Instance<'s> {
     /// (update, ingest) run.
     pub fn set_cancellable(&mut self, on: bool) {
         self.state.cancellable = on;
+    }
+
+    /// Keeps a second reference to each execution's result until the next one starts, so the
+    /// bytes [`Host::script_memory`] reports for a result come back once the host drops it
+    /// (hosts that charge a breaker per document). The result then shares its reference counts
+    /// with the instance: the host must drop it on the instance's thread before the instance
+    /// runs again or moves to another thread. Off by default.
+    pub fn set_result_accounting(&mut self, on: bool) {
+        self.last = on.then_some(Value::Null);
     }
 
     /// Values emitted by a runtime-field script during the last execution.
@@ -865,7 +875,9 @@ impl<'s> Instance<'s> {
         // what the last execution left in the registers and per-document caches is freed
         // inside this one's account, so a host's running total does not grow by it per document
         let memory = crate::guard::MemoryScope::enter(script.max_execution);
-        self.last = Value::Null;
+        if let Some(last) = &mut self.last {
+            *last = Value::Null;
+        }
         self.state.begin_document();
         self.stack.clear();
         let _scope = crate::guard::StackScope::enter(script.stack_bytes, script.max_object);
@@ -876,7 +888,9 @@ impl<'s> Instance<'s> {
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut vm = Vm::new(prog, state, host, stack);
             vm.call_entry(prog.execute, |v: &mut Value| {
-                if v.is_heap() {
+                if let Some(last) = last
+                    && v.is_heap()
+                {
                     *last = v.clone();
                 }
                 read(v)

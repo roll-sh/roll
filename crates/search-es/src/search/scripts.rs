@@ -65,8 +65,11 @@ pub struct DocHost {
     vector_buf: Vec<f32>,
     /// The search's `request` breaker and what this host's executions hold on it
     /// ([`Host::script_memory`]).
-    memory: Option<(search_aggs::memory::MemTracker, i64)>,
+    memory: Option<ScriptMemory>,
 }
+
+/// A host's `request` breaker reservation and what its executions hold.
+pub type ScriptMemory = (search_aggs::memory::MemTracker, i64);
 
 /// What a search's scripts need from the request, carried by its `SearchControl` (`ext`) to
 /// every thread that runs its segments.
@@ -185,6 +188,15 @@ impl DocHost {
     /// Sets [`DocHost::id_fielddata`] (`super::id_fielddata::scripts` of the request's state).
     pub fn with_id_fielddata(mut self, on: bool) -> DocHost {
         self.id_fielddata = on;
+        self
+    }
+
+    /// Continues another host's breaker charge (a scripted metric's state outlives the
+    /// segment's host that charged it).
+    pub fn with_memory(mut self, memory: Option<ScriptMemory>) -> DocHost {
+        if memory.is_some() {
+            self.memory = memory;
+        }
         self
     }
 
@@ -999,8 +1011,11 @@ enum Inst {
     Expression(search_painless::expression::Instance<'static>),
 }
 
-// SAFETY: a leaf is created by the thread that runs its segment and only used there; the
-// instance's reference-counted values are never shared with another live object.
+// SAFETY: a leaf is created by the thread that runs its segment and only used there. Its
+// instance's reference-counted values are shared with no other live object, except the value a
+// run returns when the instance keeps a second reference to it (result accounting, on with a
+// breaker): every caller converts that value and drops it on the leaf's thread before the next
+// run, so no two threads ever touch the counts.
 unsafe impl Send for Leaf {}
 
 #[allow(clippy::result_large_err)]
@@ -1014,6 +1029,8 @@ impl Leaf {
         if let Inst::Painless(i) = &mut leaf.inst {
             i.set_params(params);
             i.set_cancellable(cancellable);
+            // a host charging a breaker gets back what the results it dropped held
+            i.set_result_accounting(leaf.host.memory.is_some());
         }
         leaf
     }
@@ -1064,6 +1081,11 @@ impl Leaf {
             Inst::Painless(i) => i.set_var(name, v),
             Inst::Expression(i) => i.set_var(name, v),
         }
+    }
+
+    /// The host's breaker charge, for the next segment's leaf to carry on.
+    pub fn take_memory(&mut self) -> Option<ScriptMemory> {
+        self.host.memory.take()
     }
 
     pub fn explanation(&self) -> Option<String> {

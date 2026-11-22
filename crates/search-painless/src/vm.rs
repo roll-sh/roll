@@ -627,7 +627,7 @@ impl<'a> Vm<'a> {
             self.st.cancel_poll -= 1;
             if self.st.cancel_poll == 0 {
                 self.st.cancel_poll = CANCELLATION_POLL_INTERVAL;
-                self.host.check_cancelled().map_err(cancelled_error)?;
+                crate::guard::paused(|| self.host.check_cancelled()).map_err(cancelled_error)?;
             }
         }
         let base = self.stack.len();
@@ -817,7 +817,7 @@ impl<'a> Vm<'a> {
         if let Some(t) = crate::guard::take_pending() {
             return Err(t);
         }
-        self.host.check_cancelled().map_err(cancelled_error)
+        crate::guard::paused(|| self.host.check_cancelled()).map_err(cancelled_error)
     }
 
     /// The execution has used up the room its account gave it: past the limit it fails,
@@ -828,7 +828,7 @@ impl<'a> Vm<'a> {
         crate::guard::refill(0)?;
         let delta = crate::guard::MemoryScope::unreported();
         if delta != 0 {
-            self.host.script_memory(delta).map_err(memory_refused)?;
+            crate::guard::paused(|| self.host.script_memory(delta)).map_err(memory_refused)?;
         }
         Ok(())
     }
@@ -1311,7 +1311,7 @@ impl<'a> Vm<'a> {
                     } else if let Value::Obj(o) = v
                         && let Obj::Es(crate::es::EsObj::LazyScore) = &**o
                     {
-                        let x = self.host.score();
+                        let x = crate::guard::paused(|| self.host.score());
                         double_op!(d, x)
                     } else if !matches!(v, Value::Obj(_)) {
                         let v = v.clone();

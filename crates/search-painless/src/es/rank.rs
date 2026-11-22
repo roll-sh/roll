@@ -528,7 +528,7 @@ fn score(vm: &mut Vm, a: &[Value], hamming: bool) -> VR {
         return Err(missing());
     }
     let mut buf = std::mem::take(&mut vm.st.vec_buf);
-    let out = match vm.host.doc_values(&f.field, &mut buf) {
+    let out = match crate::guard::paused(|| vm.host.doc_values(&f.field, &mut buf)) {
         Ok(true) if buf.kind == DocKind::RankVectors && buf.vector_count > 0 => {
             let host = &mut vm.host;
             let mut poll = || host.check_cancelled().map_err(crate::vm::cancelled_error);

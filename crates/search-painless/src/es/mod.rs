@@ -396,7 +396,7 @@ impl EsObj {
     pub fn map_contains(&self, vm: &mut Vm, k: &Value) -> Result<bool, Thrown> {
         match self {
             EsObj::Doc => Ok(doc::doc_contains(vm, k)),
-            EsObj::StoredFields => Ok(matches!(vm.host.stored_field(&k.to_java_string()), Ok(Some(_)))),
+            EsObj::StoredFields => Ok(matches!(crate::guard::paused(|| vm.host.stored_field(&k.to_java_string())), Ok(Some(_)))),
             EsObj::Ctx(c) => Ok(c.contains(k)),
             _ => Ok(false),
         }
@@ -503,7 +503,7 @@ pub fn resolve_param(vm: &mut Vm, v: Value) -> VR {
         _ => return Ok(v),
     };
     Ok(match key {
-        "_source" => vm.host.source().unwrap_or(Value::Null),
+        "_source" => crate::guard::paused(|| vm.host.source()).unwrap_or(Value::Null),
         "doc" | "_doc" => es_value(EsObj::Doc),
         _ => es_value(EsObj::StoredFields),
     })
@@ -512,8 +512,8 @@ pub fn resolve_param(vm: &mut Vm, v: Value) -> VR {
 /// Value of a lazily bound context variable when it is loaded.
 pub fn load_lazy(vm: &mut Vm, e: &EsObj) -> Option<Value> {
     match e {
-        EsObj::LazyScore => Some(Value::Double(vm.host.score())),
-        EsObj::LazyTermStats => Some(es_value(EsObj::TermStats(Rc::new(vm.host.term_stats().unwrap_or_default())))),
+        EsObj::LazyScore => Some(Value::Double(crate::guard::paused(|| vm.host.score()))),
+        EsObj::LazyTermStats => Some(es_value(EsObj::TermStats(Rc::new(crate::guard::paused(|| vm.host.term_stats()).unwrap_or_default())))),
         _ => None,
     }
 }

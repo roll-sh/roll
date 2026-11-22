@@ -973,7 +973,7 @@ fn element_name(e: VectorElement) -> &'static str {
 fn first_vector(vm: &mut Vm, field: &str) -> Result<(Option<Vector>, VectorElement), Thrown> {
     let mut dv = DocValues::default();
     if vm.st.has_doc {
-        match vm.host.field_values(field, &mut dv) {
+        match crate::guard::paused(|| vm.host.field_values(field, &mut dv)) {
             Ok(true) => {}
             Ok(false) => dv.clear(DocKind::DenseVector),
             Err(e) => return Err(super::doc::host_error(e)),
@@ -1226,16 +1226,16 @@ fn score(vm: &mut Vm, a: &[Value], op: VFn) -> VR {
     };
     // the host's own storage first: no copy per document
     let mut lent = None;
-    match vm.host.with_vector(&field, &mut |v| {
+    match crate::guard::paused(|| vm.host.with_vector(&field, &mut |v| {
         lent = Some(run(Impl::of(v.element, v.binary), v.floats, v.bytes, v.magnitude));
-    }) {
+    })) {
         Ok(Some(true)) => return lent.unwrap_or_else(|| Err(missing())).map(Value::Double),
         Ok(Some(false)) => return Err(missing()),
         Ok(None) => {}
         Err(e) => return Err(super::doc::host_error(e)),
     }
     let mut buf = std::mem::take(&mut vm.st.vec_buf);
-    let read = vm.host.doc_values(&field, &mut buf);
+    let read = crate::guard::paused(|| vm.host.doc_values(&field, &mut buf));
     let out = match read {
         Ok(true) if buf.kind == DocKind::DenseVector && !(buf.vector.is_empty() && buf.vector_bytes.is_empty()) => {
             run(Impl::of(buf.element, buf.vector_binary), &buf.vector, &buf.vector_bytes, buf.magnitude)

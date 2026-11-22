@@ -326,7 +326,7 @@ pub fn doc_get(vm: &mut Vm, k: &Value) -> VR {
         return Ok(vm.st.doc_sdv[idx].1.clone());
     }
     let mut buf = std::mem::take(&mut vm.st.doc_dyn[idx].1);
-    let r = vm.host.doc_values(name, &mut buf);
+    let r = crate::guard::paused(|| vm.host.doc_values(name, &mut buf));
     let out = match r {
         Ok(true) => {
             let mut cached = std::mem::replace(&mut vm.st.doc_sdv[idx].1, Value::Null);
@@ -364,7 +364,7 @@ fn refill(sdv: &mut Sdv, dv: &DocValues) {
 /// `doc.containsKey(key)`.
 pub fn doc_contains(vm: &mut Vm, k: &Value) -> bool {
     let name = k.to_java_string();
-    vm.host.has_field(&name)
+    crate::guard::paused(|| vm.host.has_field(&name))
 }
 
 /// `doc['literal'].value|.size()|.empty` over the program's literal doc-values buffer.
@@ -374,7 +374,7 @@ pub fn doc_fetch(vm: &mut Vm, field: u32) -> Result<(), crate::vm::Thrown> {
     let i = field as usize;
     let prog = vm.prog;
     let name: &str = &prog.doc_fields[i];
-    match vm.host.doc_values_at(i, name, &mut vm.st.doc_bufs[i]) {
+    match crate::guard::paused(|| vm.host.doc_values_at(i, name, &mut vm.st.doc_bufs[i])) {
         Ok(true) => {
             vm.st.doc_buf_gen[i] = vm.st.doc_gen;
             Ok(())
@@ -390,7 +390,7 @@ pub fn doc_fast(vm: &mut Vm, field: u32, what: DocWhat) -> VR {
         let prog = vm.prog;
         let name: &str = &prog.doc_fields[i];
         // fill the buffer in place: moving it out and back would copy the whole struct twice
-        let r = vm.host.doc_values_at(i, name, &mut vm.st.doc_bufs[i]);
+        let r = crate::guard::paused(|| vm.host.doc_values_at(i, name, &mut vm.st.doc_bufs[i]));
         match r {
             Ok(true) => vm.st.doc_buf_gen[i] = vm.st.doc_gen,
             Ok(false) => return Err(no_field(name)),
@@ -552,7 +552,7 @@ pub fn field_of(vm: &mut Vm, name: &str) -> Result<DocField, Thrown> {
         return Ok(empty_field(name));
     }
     let mut dv = DocValues::default();
-    match vm.host.field_values(name, &mut dv) {
+    match crate::guard::paused(|| vm.host.field_values(name, &mut dv)) {
         Ok(true) => {}
         Ok(false) => return Ok(empty_field(name)),
         Err(e) => return Err(host_error(e)),
@@ -1075,7 +1075,7 @@ fn doc_entry_set(_: &mut Vm, _: &mut [Value]) -> VR {
 /// `params._fields[name]`: the stored field's values.
 pub fn stored_field(vm: &mut Vm, k: &Value) -> VR {
     let name = k.to_java_string();
-    match vm.host.stored_field(&name) {
+    match crate::guard::paused(|| vm.host.stored_field(&name)) {
         Ok(Some(vals)) => Ok(es_value(EsObj::FieldLookup(Rc::from(vals)))),
         Ok(None) => Err(super::es_iae(
             format!("No field found for [{name}] in mapping"),

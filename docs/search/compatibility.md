@@ -1578,9 +1578,13 @@ the rest are skipped by the tests' own prerequisites.
   string (each under the object size cap) runs the JVM out of heap and the node exits. Its
   opt-in guard, `script.painless.max_allocation_bytes.context.<context>.limit`, counts every
   allocation the script's bytecode makes and never gives any back. roll counts what the
-  execution holds: everything allocated while it runs, library code and `def` conversions
-  included, minus what it frees. So a script can churn through temporaries far beyond the
-  limit, as long as it doesn't keep them. Past the limit roll answers like that guard: a
+  execution holds: what its code and the library calls it makes allocate (`def` conversions
+  included, but not what the host allocates for itself, such as a lazily parsed `_source` or a
+  segment's fielddata), minus what it frees. So a script can churn through temporaries far
+  beyond the limit, as long as it doesn't keep them. The bound is approximate. Freeing data the
+  execution didn't make (`params`, a parsed `_source`) gives it room too, and a script run
+  inside another one (a runtime field another script reads) has an account of its own. So one
+  thread holds at most about twice the limit, plus any such freed data. Past the limit roll answers like that guard: a
   `script_exception` caused by an uncatchable `painless_error`, `script allocation limit
   exceeded: allocation of [N] bytes brings the running total to [T] bytes, over the limit of
   [L] bytes`, without a script portion. Both guards apply in every context (`_execute`,

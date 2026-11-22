@@ -266,3 +266,25 @@ fn assert_like_es(got: &Value, es: &str) {
     }
     assert_eq!(blank(&got.to_json()), blank(es), "{}", got.to_json());
 }
+
+/// A scripted metric's state outlives each segment's script host, and so does what its map
+/// script keeps on the `request` breaker: 2.5 MiB a segment fits a 4 MiB breaker, both segments'
+/// together don't (roll's own; Elasticsearch charges scripts to no breaker).
+#[tokio::test]
+async fn scripted_metric_state_stays_charged_across_segments() {
+    let c = Cluster::in_memory("limits").await;
+    call(&c, "PUT", "/sm", r#"{"settings":{"number_of_shards":1,"number_of_replicas":0}}"#).await;
+    for batch in 0..2 {
+        let bulk: String = (0..40).map(|i| format!("{{\"index\":{{\"_id\":\"{batch}-{i}\"}}}}\n{{\"n\":{i}}}\n")).collect();
+        let (status, v) = call(&c, "POST", "/sm/_bulk?refresh=true", &bulk).await;
+        assert_eq!(status, 200, "{}", v.to_json());
+    }
+    let (_, v) = call(&c, "GET", "/sm/_stats/segments", "").await;
+    assert!(at(&v, &["indices", "sm", "primaries", "segments", "count"]).as_i64().unwrap_or(0) >= 2, "{}", v.to_json());
+    let (status, _) = call(&c, "PUT", "/_cluster/settings", r#"{"persistent":{"indices.breaker.request.limit":"4mb"}}"#).await;
+    assert_eq!(status, 200);
+    let agg = r#"{"size":0,"aggs":{"kept":{"scripted_metric":{"init_script":"state.l = []","map_script":"state.l.add(new int[16384])","combine_script":"return state.l.size()","reduce_script":"return states.size()"}}}}"#;
+    let (_, v) = call(&c, "POST", "/sm/_search", agg).await;
+    let body = v.to_json();
+    assert!(body.contains("circuit_breaking_exception") && body.contains("data for [<script>]"), "{body}");
+}
