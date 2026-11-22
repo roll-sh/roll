@@ -1,5 +1,5 @@
-//! Lockdown, `/v1/mcp?lockdown=1` (docs/mcp.md, "Lockdown"), as GitHub's MCP server's lockdown
-//! mode: text written by someone who can't push to the repo never reaches the model. Anyone can
+//! Lockdown, `/v1/mcp?lockdown=1` and roll code's own `/v1/code/mcp?lockdown=1` (docs/mcp.md,
+//! "Lockdown"), as GitHub's MCP server's lockdown mode: text written by someone who can't push to the repo never reaches the model. Anyone can
 //! open an issue on a public repo, and roll code makes it a work item an agent claims and reads;
 //! an instruction hidden in it would be read by a model holding write tools.
 //!
