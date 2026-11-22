@@ -1387,6 +1387,9 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/secrets/deleted", "secrets", R, Tgt::AnyGrant),
     // Recovering one is its secrets admin's, as deleting it was.
     row("POST", "/v1/secrets/projects/{project}/recover", "secrets", ADMIN, one(&["project"], "project")),
+    // A deleted environment's recovery is its admin's (docs/secrets.md, "When a secret, an
+    // environment or the project goes").
+    row("POST", "/v1/secrets/projects/{project}/environments/{env}/recover", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
     row("GET", "/v1/secrets/projects/{project}/", "secrets", R, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("GET", "/v1/secrets/projects/{project}", "secrets", R, one(&["project"], "project")),
     // How long a project keeps old values (history_days): purging is the project admin's.
@@ -1596,6 +1599,10 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/apps/projects/{project}/limits", "apps", R, one(&["project"], "project")),
     row("GET", "/v1/apps/projects/{project}/usage", "apps", R, one(&["project"], "project")),
     row("PUT", "/v1/apps/projects/{project}/limits", "apps", ADMIN, one(&["project"], "project")),
+    // Which images may run (signed ones): a supply-chain policy, an admin's call; reading it is read.
+    row("GET", "/v1/apps/projects/{project}/signing", "apps", R, one(&["project"], "project")),
+    row("PUT", "/v1/apps/projects/{project}/signing", "apps", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/apps/projects/{project}/signing", "apps", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/apps/projects/{project}/notifications", "apps", R, one(&["project"], "project")),
     row("POST", "/v1/apps/projects/{project}/notifications", "apps", Act::Body(apps_notification_action), one(&["project"], "project")),
     row("DELETE", "/v1/apps/projects/{project}/notifications/{nid}", "apps", W, one(&["project"], "project")),
@@ -1797,6 +1804,10 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/code/names/{name}", "code", R, Tgt::Product),
     row("GET", "/v1/code/names/{owner}/{repo}", "code", R, one(REPO, "repo")),
     row("GET", "/v1/code/repos", "code", R, list("full_name")),
+    // Changes and work items across the caller's repos (the `search` tool): each result is its
+    // repo's, so a token narrowed to some repos keeps only theirs.
+    row("GET", "/v1/code/search", "code", R, Tgt::List { items: Some("results"), id_field: "repo", kind: None }),
+    row("GET", "/v1/code/documents/{id}", "code", R, one(PG, "document")),
     row("POST", "/v1/code/repos", "code", Act::Body(code_repo_action), create("repo", "full_name")),
     row("GET", "/v1/code/repos/{owner}/{repo}", "code", R, one(REPO, "repo")),
     row("PATCH", "/v1/code/repos/{owner}/{repo}", "code", ADMIN, one(REPO, "repo")),

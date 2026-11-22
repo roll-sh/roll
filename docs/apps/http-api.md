@@ -67,6 +67,9 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `DELETE /v1/apps/projects/{project}/drains/{did}` | | 204 | write |
 | `GET /v1/apps/projects/{project}/limits` | | `SpendLimits` | read |
 | `GET /v1/apps/projects/{project}/usage?month=` | | `ProjectUsage`: a month's use (`YYYY-MM`, this one by default; 400 for a month to come) by service and environment at roll's prices, each service's previews as one row (`previews: true`), deleted services as one (`deleted: true`), most costly first; this month's projected to its end at the pace so far | read |
+| `GET /v1/apps/projects/{project}/signing` | | `{ keys: string[], required: boolean }` (none set: no keys, not required) | read |
+| `PUT /v1/apps/projects/{project}/signing` | `{ keys, required? }` (1–10 P-256 public keys in PEM, cosign.pub; `required` true by default) | `{ keys, required }` (with `required`, an image service's deploy needs its pinned digest's cosign signature by one of the keys, or fails before switching; roll's builds pass) | admin (which images may run) |
+| `DELETE /v1/apps/projects/{project}/signing` | | 204 | admin |
 | `PUT /v1/apps/projects/{project}/limits` | `{ alert_usd: number \| null, hard_usd: number \| null }` | `SpendLimits` (this month's alert and cap are decided again within 30 s) | admin (the hard limit pauses the whole project) |
 | `GET /v1/apps/events?after=&limit=&latest=` | | `{ events: Event[], next }`: what happened to services, in order, after a cursor; `latest=1` (never with `after`: 400) answers no events and the newest cursor, for a reader that starts from now | read |
 | `GET /v1/apps/services/{id}/changes` | | server-sent events: `ready`, then a `changed` (data `{}`) whenever a deploy moves, an instance wakes, sleeps or crashes, or someone changes the service; the page reads it again (on the owner, in memory; it carries nothing itself) | read |

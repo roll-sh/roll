@@ -201,6 +201,11 @@ pub trait Runtime: Send + Sync {
     async fn remote_digest(&self, image: &str, login: Option<&RegistryLogin>) -> anyhow::Result<String> {
         crate::registry::Registry::new(None)?.digest(image, login).await
     }
+    /// A pinned image's cosign signature verified with one of `keys` (PEM public keys) from its
+    /// registry ([`crate::registry::Registry::verify_cosign`]): which key, or why none.
+    async fn verify_signature(&self, pinned: &str, keys: &[String], login: Option<&RegistryLogin>) -> anyhow::Result<usize> {
+        crate::registry::Registry::new(None)?.verify_cosign(pinned, keys, login).await
+    }
     /// Make the instance, ready to start; nothing runs yet.
     async fn create(&self, spec: &InstanceSpec) -> anyhow::Result<()>;
     /// Start a created (or stopped) instance and say where its port answers. Its output goes

@@ -1427,7 +1427,9 @@ deterministic (#396).
    previews send from per-task public IPs on roll cloud, so an allowlisted cluster refuses them. A
    signed link identity an allowlist can admit ("apps service svc_x"), private endpoints, and a
    cluster key the customer holds (design first).
-18. **Logs end to end** (Elastic Observability's managed OTLP intake, OpenSearch Ingestion and the
+18. **Logs end to end** (design in [logs-end-to-end.md](logs-end-to-end.md); roll apps' drain
+   landed in #735, ECS documents into `logs-roll.apps-*` through an `append` key; Elastic
+   Observability's managed OTLP intake, OpenSearch Ingestion and the
    Alerting plugin): no OTLP intake in search, `_plugins/_alerting` isn't served, Watcher has no UI,
    nothing alerts on a cluster's own p99, 5xx or 429s, and Discover has no saved searches or
    visualizations. An OTLP logs and traces intake into data streams also gives roll apps' log drains a

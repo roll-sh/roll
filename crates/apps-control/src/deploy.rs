@@ -902,6 +902,8 @@ impl Apps {
                 let login = self.pull_login(&sid, img).await?;
                 let pinned = self.deps.runtime.pull(img, log, login.as_ref()).await?;
                 log.line(format!("pinned {pinned}"));
+                // A project that requires signed images: this digest's cosign signature first.
+                self.check_signed(&svc.project, &pinned, login.as_ref(), log).await?;
                 // A preview's defaults (an image service has no roll.toml), frozen with it.
                 let (run, note) = crate::config::preview_defaults(svc.run.clone(), None);
                 if env.ephemeral

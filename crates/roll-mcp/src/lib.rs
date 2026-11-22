@@ -1277,7 +1277,7 @@ async fn call(ctx: &Arc<Ctx>, name: &str, args: Value) -> Option<Value> {
 
 /// [`call`], `quiet` for a completion (an `ask` is refused, never put to a person).
 async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: bool) -> Option<Value> {
-    let redacted = roll_access::redact::value(&args, name.split('_').next().unwrap_or(""));
+    let redacted = roll_access::redact::value(&args, tool_product(name));
     let mut ext = Extensions::new();
     // The audit log says a completion was one (a person typing), not the agent listing.
     let tool: Arc<str> = if quiet { format!("completion/complete:{name}").into() } else { name.into() };
@@ -1311,7 +1311,7 @@ async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: bool) -> Option
             Principal::Grant(g) => json!({ "grant": g.id.to_string(), "name": g.name.to_string() }),
             Principal::Operator => json!({ "operator": true }),
         };
-        let look = json!({ "phase": "call", "tool": name, "arguments": roll_access::redact::value(&args, name.split('_').next().unwrap_or("")), "connection": who, "client": ctx.client.as_deref() });
+        let look = json!({ "phase": "call", "tool": name, "arguments": roll_access::redact::value(&args, tool_product(name)), "connection": who, "client": ctx.client.as_deref() });
         if let Verdict::Block(why) = i.inspect(look).await {
             tracing::info!(tool = name, "the operator's inspector refused a call");
             return Some(tool_error(format!("not run: the operator's inspector refused this call ({why})"), json!({ "refused": "inspector", "reason": why })));
@@ -1386,13 +1386,13 @@ async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: bool) -> Option
             tool: Some(name.to_string()),
             method: "POST".into(),
             route,
-            product: name.split('_').next().map(str::to_string),
+            product: Some(tool_product(name).to_string()),
             action: None,
             resource: None,
             decision: "allow".into(),
             approval: None,
             status,
-            args: Some(roll_access::redact::value(&args, name.split('_').next().unwrap_or(""))),
+            args: Some(roll_access::redact::value(&args, tool_product(name))),
             ip: ctx.ip.map(|i| i.to_string()),
             duration_ms: started.elapsed().as_millis() as i64,
             client: ctx.client.as_deref().map(str::to_string),
@@ -1412,7 +1412,7 @@ fn writes_to(ctx: &Ctx, name: &str) -> Option<(String, bool)> {
         Some(t) => (if t.published { "published".to_string() } else { t.product.to_string() }, t.method != "GET"),
         None => {
             let def = ctx.m.sets.iter().flat_map(|s| s.tools()).find(|t| t["name"] == name)?;
-            let product = def["_meta"]["roll/product"].as_str().map(str::to_string).unwrap_or_else(|| name.split('_').next().unwrap_or_default().to_string());
+            let product = def["_meta"]["roll/product"].as_str().map(str::to_string).unwrap_or_else(|| tool_product(name).to_string());
             (product, def["annotations"]["readOnlyHint"] != true)
         }
     })
@@ -1524,7 +1524,7 @@ async fn refused_audit(ctx: &Arc<Ctx>, name: &str, found: &guard::Found, started
         tool: Some(name.to_string()),
         method: "POST".into(),
         route: "tool".into(),
-        product: name.split('_').next().map(str::to_string),
+        product: Some(tool_product(name).to_string()),
         action: None,
         resource: Some(format!("{} in {}", found.kind, found.at)),
         decision: "deny".into(),
@@ -1724,6 +1724,15 @@ async fn outcome(tool: &str, resp: Response) -> Value {
         text
     };
     json!({ "content": [{ "type": "text", "text": text }], "structuredContent": structured, "isError": false })
+}
+
+/// A tool's product, from its name's first word (`apps_logs` is apps'): roll code's `search` and
+/// `fetch` keep the names ChatGPT asks for and are roll code's.
+fn tool_product(name: &str) -> &str {
+    match name {
+        "search" | "fetch" => "code",
+        n => n.split('_').next().unwrap_or(""),
+    }
 }
 
 #[cfg(test)]

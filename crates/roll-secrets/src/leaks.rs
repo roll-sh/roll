@@ -91,7 +91,7 @@ impl Secrets {
         // project that has rows to match.
         let rows = self.db.read(|c| {
             c.query(
-                "SELECT s.key, e.slug, s.path, s.fp, s.project_id, s.tags FROM secrets s JOIN environments e ON e.id = s.env_id
+                "SELECT s.key, e.slug, s.path, s.fp, s.project_id, s.tags FROM secrets s JOIN environments e ON e.id = s.env_id AND e.forgotten_at IS NULL
                  WHERE s.value IS NOT NULL AND (CAST(? AS TEXT) IS NULL OR s.owner = '' OR s.owner = ?)
                    AND (s.project_id = ? OR (s.owner = '' AND EXISTS (SELECT 1 FROM exports x WHERE x.env_id = s.env_id AND x.path = s.path AND x.to_project = ?)))",
                 code_sql::params![owner, owner, project, project],
