@@ -125,7 +125,12 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   head, the head it ran stays reachable at `<service>-<head>-<slug>`, on the preview's same data,
   behind the same link, asleep until opened; the last 3 per service (an older one's container
   goes). For comparing before and after. A trusted change's only (an approval is for one head),
-  `roll.toml` services only (roll apps runs its own), and old code on migrated data can break.
+  and old code on migrated data can break. A roll apps service's earlier push is that build's own
+  deployment URL (`<deployment>--<slug>` on roll apps' domain, never a project's preview domain;
+  roll apps' `Deployment.url`), behind the same link (the token once, a cookie for that host) or
+  sign-in: asked before the new head deploys, and kept only while the running build is the head
+  it ran. roll apps keeps an environment's last 10 builds, so the 3 kept here stay; one it pruned
+  answers roll apps' 404, not previews' 410 page.
   They're on the sheet, `roll preview show`, the change and the pull request comment.
   A link to one that's no longer kept says so: its host answers 410 with a page naming the
   service and the push and linking the service's latest (on roll's preview domain and on a
@@ -653,7 +658,13 @@ migrations (a fork's too), so each line is made printable once, where the diff i
 control characters escaped (a newline in a name can't fake a line, an escape sequence can't reach
 a terminal), lines cut at 300 characters, 200 lines at most; the comment keeps them inside a fence
 they can't close. A failure to read is
-logged and read again on the next converge; it never fails the preview.
+logged and read again on the next converge; it never fails the preview. Only what the change made is
+named: each branch's own lines are kept as it's made (masked, before any seed or release runs;
+`base_schema` on its resource row, read from the branch alone), and a line counts only when the
+branch also differs in it from that base (`schema::diff_since`). Another change's migration that
+lands on production while the preview is open isn't read as this one dropping its table, in the
+lines or the risks. A branch made before bases were kept, or whose base couldn't be read (said in
+its activity), is compared with its parent alone.
 
 What in those lines would hurt production when the change lands is named above them
 (`schema_risks`, `roll_previews::schema::risks`; PlanetScale's deploy request warnings, Atlas's
@@ -675,8 +686,11 @@ Search branches the same way: each one's `_mapping` and its parent's, read throu
 operator console request (no cluster password), become `index <name>` and `field <index>.<path>
 <type>` lines (nested fields and multi-fields by path, system indices left out), so a change
 whose code adds or retypes a field says so (live: `+ field products.price float` after the
-preview wrote a document with a price). With several such resources, each one's lines follow a
-`# <kind>:<ref>` heading.
+preview wrote a document with a price). An index the parent made after the branch started (the
+cluster's `parent_at`: a connector's first sync, a rollover, a day's `logs-…` index) that the
+branch doesn't have is left out: production's new index, not one the change drops (live: a
+connector's index the parent's sync makes after the preview is no risk). With several such
+resources, each one's lines follow a `# <kind>:<ref>` heading.
 
 ## Egress
 
@@ -864,9 +878,11 @@ through its proxy ("Roll only", a fork's default) resolves with placeholders for
 operator is no one, so rules it saved make none). When that person may no longer reveal there,
 it resolves as without placeholders and says "placeholders off: …; a writer saving the rules
 again turns them back on" in its activity, never with anyone else's rights. rolld's
-`SecretsIntercepts` asks `intercept_ca` for the consumer (reused while it lives, asked again
-after an hour so newly bound hosts are covered; none while the preview holds no placeholder),
-`intercept_ca_live` on every connection, and roll secrets' `proxy::filter` for each request; the
+`SecretsIntercepts` asks `intercept_ca` for the consumer (reused while `intercept_ca_live` says
+so and it's more than 3 h from its end: a new CA restarts the preview's services, and roll secrets
+says a CA is no longer live once its consumer's bound hosts gain one it doesn't name; none while
+the preview holds no placeholder), `intercept_ca_stands` on every connection (a stale CA keeps
+serving the hosts it names until it's swapped), and roll secrets' `proxy::filter` for each request; the
 preview's teardown calls `end_consumer`, ending its placeholders and CAs at once. Each preview's
 socket lives under `<home>/previews/intercept`. `a_roll_only_preview_takes_placeholders_made_by_who_saved_its_rules`.
 Only roll secrets' `maker_unreachable` refusal falls back without placeholders; any other 403 is
@@ -1600,6 +1616,7 @@ previews in it), the operator and admins see every project.
 | --- | --- | --- |
 | `GET /v1/previews?project=&state=` | | `Preview[]`, newest first, light (`Preview::light`): every count and state a row reads, without each page's accessibility issues, links and comparison, the first page's issues' markup and axe-core's words, or the words against main (by the bounds, about 130 KB a preview whose pages have the most violations, down to a few KB); `GET …/{id}` has all of it |
 | `POST /v1/previews` | `{project, repo, branch? , change?}` | 201 `Preview` (or 200 with the project's existing one). 404 unless the repo is on the project's canvas and the project stands for it (`Workspace::trusts`, as for the previews it makes itself: a preview builds and runs the repo). 409 when the change's preview is another project's (a change has one; it's never handed to another project); 400 when `X-Roll-Project` (the project roll-access decided the create on) names another project than the body |
+| `GET /v1/previews/events?after=&limit=&latest=` | | `{events: Event[], next}`: what happened to previews after the seq `after` (0 by default), oldest first, at most `limit` (1–500, 100 by default); `next` is where to ask from again (past events the caller doesn't see too: a signed-in person sees their projects'). `latest=1`: `{events: [], next}` with the newest seq, to follow from now on (400 with `after`). `type Event = {seq, at, kind: "created" \| "ready" \| "failed" \| "visual_change" \| "deleted", project, preview, change: string \| null, data: {head}}`: `ready` is up after a push or the first deploy (asleep once up counts), never a sleeping preview waking; `visual_change` is a visual change waiting for review, once a head. Each event's `seq` is taken in the write that made it so, so commit order is seq order and a follower past one never misses an earlier one; kept 7 days. roll MCP's event feeds follow it |
 | `GET /v1/previews/{id}` | | `Preview` |
 | `DELETE /v1/previews/{id}` | | 202 `Preview` (`desired: "deleted"`) |
 | `POST /v1/previews/{id}/refresh` | | `Preview`: redeploy now |
@@ -2396,23 +2413,30 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **A placeholder swaps only for its own consumer, checked live** (after roll secrets' #665, H5):
-   roll secrets refuses a placeholder through another consumer's proxy (`Refusal::WrongConsumer`);
-   `scripts/preview-intercept.sh` then shows another preview's placeholder refused on this one's
-   socket.
-2. **Search connectors on a branch, checked live** (after roll search's #318): a branch's
-   inherited connectors start paused and its parent's secrets don't open there; the live run makes
-   a cluster with a connector, branches it into a preview, and expects no sync and its masks kept.
-3. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
+1. **Earlier pushes on their own data**: an earlier push runs its old code against the preview's
+   data as the newest head's migration left it, so a push that renamed a column breaks the one
+   before it (said today, not solved). Each kept push could keep a copy-on-write branch of the
+   preview's Postgres (and search) branch taken as the next head's release starts: three at most,
+   asleep, paying only the bytes that change, gone with the push. Nobody else can (Vercel's
+   per-commit URLs share one database), and roll's branches make it cheap.
+2. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
    (3.3 s in its log) and its masking, which needs that compute up: pg-control's to shorten.
-4. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+3. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+4. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-6. **Watch: pg-control's recovery to a time seconds old** (unowned).
+5. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-22, late afternoon: a preview event feed (#713, roll MCP's ask: `GET /v1/previews/events`, created, ready, failed, visual_change and deleted, each seq taken in the write that made it so; checked live by `scripts/preview-cost.sh`), which roll MCP's Events follow.
+
+Landed 2026-11-22, afternoon: a preview's interception CA kept until its hosts change or it nears its end (#686, on roll secrets' #705: no more hourly restarts of an intercepted preview's services), and a roll apps service's earlier pushes at each build's own deployment URL (#709, on roll apps' #711: they had been `roll.toml` services' only).
+
+Landed 2026-11-22, late morning: a search branch's inherited connector checked live, its sync waiting for adoption while the parent's runs (#690, roll search's #318), and an index production makes after the branch (a connector's first sync, a rollover) no longer read as a drop; schema changes that name only what the change made (#695: each branch's own schema kept as it's made, so another change's migration landing on production first isn't read as this one dropping its table); and a search branch masked again in place keeping the schema it was made with, #702).
+
+Landed 2026-11-22, mid-morning: a share link works only while its maker may still open the project's previews (#679: someone who left the project no longer keeps a working link), and the live run checks that another consumer's placeholder is refused on a preview's socket (#685, roll secrets' #665).
 
 Landed 2026-11-22, later that morning: roll secrets' response scrub wired into `roll-intercept` (#630: an echoed key stopped, its placeholder ended; and the `maker_unreachable` fallback checked live), a preview's crons and scheduled commands off unless the project says so (#656, on roll apps' `scheduled`), the API contract's `Preview` and `Settings` complete again with a test that keeps them so (#656: 23 fields had fallen out), and a leaf's private key zeroized in memory with `preview-apps.sh` no longer leaking Docker networks (#671: 23 had used up the address pools).
 

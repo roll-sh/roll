@@ -21,6 +21,12 @@ pub enum Issue {
     /// A decoy key's credential was used (docs/secrets.md, "Decoys"): someone found it where it
     /// was planted. Only the project's admins see it, signed in or the operator, never a token.
     DecoyUsed,
+    /// The project's `production` isn't protected (a project made before new ones started with it
+    /// protected, or unprotected by hand): checks, sandboxes and untrusted previews read it, and
+    /// nothing there needs a change request. `detail` lists what reaches it: members by role,
+    /// checks and sandboxes that read it in the last 90 days. `key` is empty. Never changed for
+    /// the project: protecting it is the admin's call (the dashboard's "Protect production").
+    ProductionUnprotected,
     /// Its value stopped working outside roll.
     Expired,
     /// Its scheduled rotation fails (the database, vendor or rotator refused or didn't answer).
@@ -198,6 +204,12 @@ impl Secrets {
             let detail = format!("used {times}, last on {day}{from}{on}: cut it off and rotate what sits beside it");
             out.push(Finding { issue: Issue::DecoyUsed, environment: env, path: d.path, key: d.key, detail, owner: None, decoy: Some(d.decoy) });
         }
+        if let Some(e) = envs.iter().find(|e| e.slug == crate::PRODUCTION && !e.protected)
+            && caller.allows(Action::Read, &Scope::env(project, &e.slug))
+        {
+            let detail = self.production_reach(project, now)?;
+            out.push(Finding { issue: Issue::ProductionUnprotected, environment: e.slug.clone(), path: "/".into(), key: String::new(), detail, owner: None, decoy: None });
+        }
         let mut have: HashSet<(String, String, String)> = HashSet::new();
         for (env_id, path, key, fp, link, refs, updated_at, expires_at, weak, public) in &rows {
             let Some(e) = slug.get(env_id.as_str()) else { continue };
@@ -362,6 +374,61 @@ impl Secrets {
         let position: HashMap<&str, i64> = envs.iter().map(|e| (e.slug.as_str(), e.position)).collect();
         out.sort_by(|a, b| (a.issue, position.get(a.environment.as_str()), &a.path, &a.key).cmp(&(b.issue, position.get(b.environment.as_str()), &b.path, &b.key)));
         Ok(out)
+    }
+}
+
+/// The most names one kind lists in a `production_unprotected` finding.
+const REACH_NAMES: usize = 10;
+
+/// `names` joined, the first [`REACH_NAMES`] and how many more.
+fn some(names: &BTreeSet<String>) -> String {
+    let shown: Vec<&str> = names.iter().take(REACH_NAMES).map(String::as_str).collect();
+    match names.len().saturating_sub(REACH_NAMES) {
+        0 => shown.join(", "),
+        n => format!("{} and {n} more", shown.join(", ")),
+    }
+}
+
+impl Secrets {
+    /// What reaches an unprotected `production`, as a finding's detail: members by role (owners and
+    /// admins everywhere, developers who name it), and the checks and sandboxes that read it in the
+    /// last 90 days (its audit log: what can be told without reading any repository).
+    fn production_reach(&self, project: &str, now: i64) -> Result<String> {
+        use roll_auth::roles::Role;
+        let mut by_role: [(Role, &str, BTreeSet<String>); 3] = [(Role::Owner, "owners", BTreeSet::new()), (Role::Admin, "admins", BTreeSet::new()), (Role::Developer, "developers who name it", BTreeSet::new())];
+        for m in self.workspace.members(roll_workspace::Scope::All, project, false).unwrap_or_default() {
+            let names_it = m.environments.as_ref().is_some_and(|l| l.iter().any(|e| roll_auth::scope::env_covers(e, crate::PRODUCTION)));
+            if m.inactive || (m.role == Role::Developer && !names_it) {
+                continue;
+            }
+            if let Some((_, _, set)) = by_role.iter_mut().find(|(r, ..)| *r == m.role) {
+                set.insert(m.handle);
+            }
+        }
+        let rows: Vec<(String, String)> = self.db.read(|c| {
+            c.query(
+                "SELECT actor, summary FROM audit WHERE project_id = ? AND env = ? AND action = 'secrets.resolve' AND at >= ? ORDER BY id DESC LIMIT 2000",
+                params![project, crate::PRODUCTION, now - UNREAD_DAYS * 86_400_000],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })?;
+        let (mut checks, mut sandboxes) = (BTreeSet::new(), BTreeSet::new());
+        for (actor, summary) in rows {
+            if let Some(check) = actor.strip_prefix("check:") {
+                checks.insert(check.to_string());
+            } else if let Some(rest) = summary.split(" for sandbox:").nth(1) {
+                sandboxes.insert(rest.split(' ').next().unwrap_or_default().to_string());
+            }
+        }
+        let mut reach: Vec<String> = by_role.iter().filter(|(.., s)| !s.is_empty()).map(|(_, name, s)| format!("{name} {}", some(s))).collect();
+        if !checks.is_empty() {
+            reach.push(format!("checks {}", some(&checks)));
+        }
+        if !sandboxes.is_empty() {
+            reach.push(format!("sandboxes {}", some(&sandboxes)));
+        }
+        let reach = if reach.is_empty() { String::new() } else { format!("; these reach it: {}", reach.join("; ")) };
+        Ok(format!("production isn't protected: any check or sandbox may read it, untrusted previews too, and no change there needs approval{reach}"))
     }
 }
 

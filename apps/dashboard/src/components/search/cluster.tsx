@@ -1,5 +1,5 @@
 import { HorizonMark } from "@roll/brand";
-import { ArrowLeft, CloudDownload, FileUp, GitBranch, KeyRound, Moon, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { ArrowLeft, CloudDownload, Database, FileUp, GitBranch, KeyRound, Moon, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { Link } from "@/components/link";
 import { useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useState } from "react";
@@ -38,9 +38,11 @@ import { PerformanceTab } from "./performance";
 import { Playground } from "./playground";
 import { PipelinesTab } from "./pipelines";
 import { RelevanceTab } from "./relevance";
+import { SampleData } from "./sample-data";
 import { Remotes } from "./remotes";
 import { SnapshotsTab } from "./snapshots";
 import { CredentialsOnce, SearchStateDot, settingsOf, SettingsFields, stateLabel, useAction, useSearchClusters, type Run } from "./shared";
+import { presentSamples, type SampleId } from "@/lib/search-samples";
 
 const TABS = ["overview", "indices", "console", "playground", "analyze", "relevance", "inference", "pipelines", "snapshots", "connectors", "branches", "performance", "usage", "settings"] as const;
 type Tab = (typeof TABS)[number];
@@ -62,6 +64,18 @@ export function SearchClusterPage({ id }: { id: string }) {
   const [revealed, setRevealed] = useState<SearchCluster | null>(null);
   // A request handed to the console from another tab (the index browser); `n` re-applies it.
   const [prefill, setPrefill] = useState<{ text: string; n: number } | null>(null);
+  // Sample datasets loaded from this page, so the Overview keeps its first queries once it has indices.
+  const [samples, setSamples] = useState<ReadonlySet<SampleId>>(new Set());
+  const [scrollTo, setScrollTo] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!scrollTo) return;
+    const el = document.getElementById(scrollTo);
+    if (!el) return;
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    el.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
+    setScrollTo(null);
+  });
 
   useEffect(() => {
     const h = window.location.hash.slice(1) as Tab;
@@ -113,6 +127,28 @@ export function SearchClusterPage({ id }: { id: string }) {
   }
 
   const loaded = cluster.status.state === "loaded";
+  const openConsole = (text: string) => {
+    setPrefill((p) => ({ text, n: (p?.n ?? 0) + 1 }));
+    setTab("console");
+  };
+  const sampleProps = {
+    samples,
+    onSamples: (id: SampleId, on: boolean) => {
+      setSamples((s) => {
+        const next = new Set(s);
+        if (on) next.add(id);
+        else next.delete(id);
+        return next;
+      });
+      // The Overview's figures follow at once rather than on the next poll.
+      refresh();
+    },
+    onOpenConsole: openConsole,
+    onManageKeys: () => {
+      setTab("settings");
+      setScrollTo("api-keys");
+    },
+  };
 
   return (
     <AppShell
@@ -187,17 +223,8 @@ export function SearchClusterPage({ id }: { id: string }) {
       {revealed && <CredentialsOnce cluster={revealed} title={`New password for ${revealed.name}`} onDone={() => setRevealed(null)} />}
 
       <div className="mt-6">
-        {tab === "overview" && <OverviewTab cluster={cluster} info={info} />}
-        {tab === "indices" && (
-          <IndicesTab
-            key={cluster.id}
-            cluster={cluster}
-            onOpenConsole={(text) => {
-              setPrefill((p) => ({ text, n: (p?.n ?? 0) + 1 }));
-              setTab("console");
-            }}
-          />
-        )}
+        {tab === "overview" && <OverviewTab cluster={cluster} info={info} {...sampleProps} />}
+        {tab === "indices" && <IndicesTab key={cluster.id} cluster={cluster} {...sampleProps} />}
         {tab === "console" && <SearchConsole key={cluster.id} cluster={cluster} prefill={prefill} />}
         {tab === "playground" && <Playground key={cluster.id} cluster={cluster} onOpenInference={() => setTab("inference")} />}
         {tab === "analyze" && <AnalyzeTab key={cluster.id} cluster={cluster} />}
@@ -205,50 +232,35 @@ export function SearchClusterPage({ id }: { id: string }) {
           <RelevanceTab
             key={cluster.id}
             cluster={cluster}
-            onOpenConsole={(text) => {
-              setPrefill((p) => ({ text, n: (p?.n ?? 0) + 1 }));
-              setTab("console");
-            }}
+            onOpenConsole={openConsole}
           />
         )}
         {tab === "inference" && (
           <InferenceTab
             key={cluster.id}
             cluster={cluster}
-            onOpenConsole={(text) => {
-              setPrefill((p) => ({ text, n: (p?.n ?? 0) + 1 }));
-              setTab("console");
-            }}
+            onOpenConsole={openConsole}
           />
         )}
         {tab === "connectors" && (
           <ConnectorsTab
             key={cluster.id}
             cluster={cluster}
-            onOpenConsole={(text) => {
-              setPrefill((p) => ({ text, n: (p?.n ?? 0) + 1 }));
-              setTab("console");
-            }}
+            onOpenConsole={openConsole}
           />
         )}
         {tab === "pipelines" && (
           <PipelinesTab
             key={cluster.id}
             cluster={cluster}
-            onOpenConsole={(text) => {
-              setPrefill((p) => ({ text, n: (p?.n ?? 0) + 1 }));
-              setTab("console");
-            }}
+            onOpenConsole={openConsole}
           />
         )}
         {tab === "snapshots" && (
           <SnapshotsTab
             key={cluster.id}
             cluster={cluster}
-            onOpenConsole={(text) => {
-              setPrefill((p) => ({ text, n: (p?.n ?? 0) + 1 }));
-              setTab("console");
-            }}
+            onOpenConsole={openConsole}
           />
         )}
         {tab === "branches" && (
@@ -264,10 +276,7 @@ export function SearchClusterPage({ id }: { id: string }) {
           <PerformanceTab
             key={cluster.id}
             cluster={cluster}
-            onOpenConsole={(text) => {
-              setPrefill((p) => ({ text, n: (p?.n ?? 0) + 1 }));
-              setTab("console");
-            }}
+            onOpenConsole={openConsole}
           />
         )}
         {tab === "usage" && <UsageTab cluster={cluster} info={info} />}
@@ -289,9 +298,21 @@ export function SearchClusterPage({ id }: { id: string }) {
 
 // --- Overview ----------------------------------------------------------------------------------
 
-function OverviewTab({ cluster, info }: { cluster: SearchCluster; info: SearchInfo }) {
+/** What the Overview and Indices tabs need for sample data. */
+interface SampleProps {
+  samples: ReadonlySet<SampleId>;
+  onSamples: (id: SampleId, loaded: boolean) => void;
+  onOpenConsole: (text: string) => void;
+  onManageKeys: () => void;
+}
+
+function OverviewTab({ cluster, info, samples, onSamples, onOpenConsole, onManageKeys }: { cluster: SearchCluster; info: SearchInfo } & SampleProps) {
   const st = cluster.status;
   const on = st.state === "loaded";
+  const empty = (st.indices ?? cluster.indices) === 0;
+  // Once offered, the panel stays while the tab is open: a key made there adds a system index,
+  // and removing a dataset shouldn't take the panel (and the key shown in it) away.
+  const [offered] = useState(empty);
   return (
     <div className="space-y-4">
       <Stats
@@ -316,6 +337,9 @@ function OverviewTab({ cluster, info }: { cluster: SearchCluster; info: SearchIn
           { label: "In flight", value: on ? formatCount(st.in_flight ?? 0) : "0", hint: `limit ${cluster.max_in_flight} · bodies to ${cluster.max_body_mb} MB` },
         ]}
       />
+      {(offered || empty || samples.size > 0) && (
+        <SampleData cluster={cluster} present={samples} onChanged={onSamples} onOpenConsole={onOpenConsole} onManageKeys={onManageKeys} />
+      )}
       <div className="grid gap-4 lg:grid-cols-5">
         <Connection cluster={cluster} info={info} />
         <Quickstart cluster={cluster} />
@@ -498,7 +522,7 @@ function healthDot(h: string) {
   return "bg-accent";
 }
 
-function IndicesTab({ cluster, onOpenConsole }: { cluster: SearchCluster; onOpenConsole: (text: string) => void }) {
+function IndicesTab({ cluster, samples, onSamples, onOpenConsole, onManageKeys }: { cluster: SearchCluster } & SampleProps) {
   const [rows, setRows] = useState<SearchIndex[] | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -506,6 +530,7 @@ function IndicesTab({ cluster, onOpenConsole }: { cluster: SearchCluster; onOpen
   const [importing, setImporting] = useState(false);
   const [creating, setCreating] = useState(false);
   const [migrating, setMigrating] = useState(false);
+  const [sampling, setSampling] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -528,6 +553,19 @@ function IndicesTab({ cluster, onOpenConsole }: { cluster: SearchCluster; onOpen
   const open = rows?.find((r) => r.index === selected) ?? null;
   return (
     <div className="space-y-4">
+      {sampling && (
+        <SampleData
+          cluster={cluster}
+          present={rows ? presentSamples(rows.map((r) => r.index)) : samples}
+          onChanged={(id, on) => {
+            onSamples(id, on);
+            load();
+          }}
+          onOpenConsole={onOpenConsole}
+          onManageKeys={onManageKeys}
+          onClose={() => setSampling(false)}
+        />
+      )}
       <Panel
         title="Indices"
         aside={
@@ -540,6 +578,9 @@ function IndicesTab({ cluster, onOpenConsole }: { cluster: SearchCluster; onOpen
             </button>
             <button onClick={() => setMigrating(true)} disabled={migrating} className={btn} title="Migrate from Elasticsearch / OpenSearch" aria-label="Migrate from Elasticsearch / OpenSearch">
               <CloudDownload className="size-3.5" /> <span className="hidden sm:inline">Migrate</span>
+            </button>
+            <button onClick={() => setSampling(true)} disabled={sampling} className={btn} title="Load a generated dataset and try queries on it" aria-label="Sample data">
+              <Database className="size-3.5" /> <span className="hidden sm:inline">Sample data</span>
             </button>
             <button onClick={load} disabled={loading} className={btn}>
               <RefreshCw className={`size-3.5 ${loading ? "animate-spin motion-reduce:animate-none" : ""}`} /> Refresh
@@ -565,6 +606,10 @@ function IndicesTab({ cluster, onOpenConsole }: { cluster: SearchCluster; onOpen
             ,{" "}
             <button onClick={() => setCreating(true)} className="text-accent hover:underline">
               create one with its fields
+            </button>
+            ,{" "}
+            <button onClick={() => setSampling(true)} className="text-accent hover:underline">
+              load sample data
             </button>
             , or index a document with any client: indices are created on the first write.
           </p>
@@ -1060,7 +1105,9 @@ function SettingsTab({
 
       <BrowserSearch cluster={cluster} busy={busy} run={run} />
 
-      <ApiKeys cluster={cluster} />
+      <div id="api-keys" className="scroll-mt-16">
+        <ApiKeys cluster={cluster} />
+      </div>
 
       <Remotes cluster={cluster} />
 

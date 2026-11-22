@@ -1529,6 +1529,133 @@ async fn api_keys() {
     assert_eq!(s, 400);
 }
 
+/// Keys narrowed by `indices` and `access`: `read` searches but writes nothing, `append` adds to
+/// its data stream but reads nothing and writes nowhere else, and an OpenSearch-flavor `read`
+/// user is held to its indices as well.
+#[tokio::test]
+async fn narrowed_keys() {
+    let e = env().await;
+    let e = &e;
+    let c = e.post("/v1/search/clusters", json!({"name": "narrow"})).await;
+    let (user, pw) = creds(&c);
+    for (path, doc) in [("/products/_doc/1?refresh=true", json!({"t": "shoe"})), ("/private/_doc/1?refresh=true", json!({"t": "x"}))] {
+        assert_eq!(e.es(&user, &pw, reqwest::Method::PUT, path, Some(doc)).await.0, 201);
+    }
+    let (s, v) = e.es(&user, &pw, reqwest::Method::PUT, "/_index_template/logs", Some(json!({"index_patterns": ["logs-*"], "data_stream": {}}))).await;
+    assert_eq!(s, 200, "{v}");
+    let key = |body: Value| async move { e.post("/v1/search/clusters/narrow/keys", body).await };
+    let send = |k: &Value, m: reqwest::Method, path: &str, body: Option<Value>| {
+        let mut r = e.http.request(m, format!("{}{path}", e.es)).header("Authorization", format!("ApiKey {}", k["api_key"].as_str().unwrap()));
+        if let Some(b) = body {
+            r = r.json(&b);
+        }
+        async move { r.send().await.unwrap().status().as_u16() }
+    };
+    let read = key(json!({"name": "web", "access": "read", "indices": ["prod*"]})).await;
+    assert_eq!((read["access"].as_str(), &read["indices"]), (Some("read"), &json!(["prod*"])));
+    assert_eq!(send(&read, reqwest::Method::POST, "/products/_search", Some(json!({}))).await, 200);
+    assert_eq!(send(&read, reqwest::Method::PUT, "/products/_doc/2", Some(json!({"t": "y"}))).await, 403);
+    assert_eq!(send(&read, reqwest::Method::POST, "/private/_search", Some(json!({}))).await, 403);
+    let drain = key(json!({"name": "drain", "access": "append", "indices": ["logs-app"]})).await;
+    assert_eq!(send(&drain, reqwest::Method::POST, "/logs-app/_doc?refresh=true", Some(json!({"@timestamp": "2026-11-21T00:00:00Z", "m": "hi"}))).await, 201);
+    assert_eq!(send(&drain, reqwest::Method::POST, "/logs-app/_search", Some(json!({}))).await, 403);
+    assert_eq!(send(&drain, reqwest::Method::POST, "/logs-other/_doc", Some(json!({"@timestamp": "2026-11-21T00:00:00Z"}))).await, 403);
+    assert_eq!(send(&drain, reqwest::Method::PUT, "/products/_doc/3", Some(json!({"t": "z"}))).await, 403);
+    let (_, v) = e.es(&user, &pw, reqwest::Method::GET, "/logs-app/_count", None).await;
+    assert_eq!(v["count"], 1, "{v}");
+    // A data key restricted to its indices.
+    let data = key(json!({"name": "app", "access": "data", "indices": ["products"]})).await;
+    assert_eq!(send(&data, reqwest::Method::PUT, "/products/_doc/4", Some(json!({"t": "w"}))).await, 201);
+    assert_eq!(send(&data, reqwest::Method::PUT, "/private/_doc/4", Some(json!({"t": "w"}))).await, 403);
+    // Templates are the whole cluster's (this one would match `private`): not a narrowed key's.
+    assert_eq!(send(&data, reqwest::Method::PUT, "/_index_template/sneaky", Some(json!({"index_patterns": ["priv*"]}))).await, 403);
+    for (bad, why) in [
+        (json!({"name": "x", "access": "admin", "indices": ["a"]}), "admin"),
+        (json!({"name": "x", "access": "append", "indices": ["logs-*"]}), "pattern"),
+        (json!({"name": "x", "access": "append"}), "names its indices"),
+        (json!({"name": "x", "access": "read", "indices": ["other:logs"]}), "remote"),
+        (json!({"name": "x", "access": "read", "indices": [".security"]}), "start with"),
+    ] {
+        let (s, v) = e.call(reqwest::Method::POST, "/v1/search/clusters/narrow/keys", Some(bad.clone())).await;
+        assert!(s == 400 && v.to_string().contains(why), "{bad}: {s} {v}");
+    }
+    // OpenSearch: a read user of its own, on its indices only.
+    let c = e.post("/v1/search/clusters", json!({"name": "narrow-os", "flavor": "opensearch"})).await;
+    let (user, pw) = creds(&c);
+    for path in ["/products/_doc/1?refresh=true", "/private/_doc/1?refresh=true"] {
+        assert_eq!(e.es(&user, &pw, reqwest::Method::PUT, path, Some(json!({"t": "x"}))).await.0, 201);
+    }
+    let k = e.post("/v1/search/clusters/narrow-os/keys", json!({"name": "web", "access": "read", "indices": ["products"]})).await;
+    let (ku, kp) = (k["username"].as_str().unwrap(), k["password"].as_str().unwrap());
+    assert_eq!(e.es(ku, kp, reqwest::Method::POST, "/products/_search", Some(json!({}))).await.0, 200);
+    assert_eq!(e.es(ku, kp, reqwest::Method::PUT, "/products/_doc/2", Some(json!({"t": "y"}))).await.0, 403);
+    assert_eq!(e.es(ku, kp, reqwest::Method::POST, "/private/_search", Some(json!({}))).await.0, 403);
+}
+
+/// Relevance tuning through `/v1/search`: a synonyms set a search then uses, a query ruleset that
+/// pins a document, an index's settings (roll's suggestions on; a private setting refused) and
+/// one document's explanation.
+#[tokio::test]
+async fn relevance_tuning_routes() {
+    let e = env().await;
+    let e = &e;
+    e.post("/v1/search/clusters", json!({"name": "rel"})).await;
+    let base = "/v1/search/clusters/rel";
+    let call = |m: reqwest::Method, path: &str, body: Option<Value>| {
+        let p = format!("{base}{path}");
+        async move { e.call(m, &p, body).await }
+    };
+    let (s, v) = call(reqwest::Method::PUT, "/synonyms/furniture", Some(json!({"synonyms_set": [{"id": "couch", "synonyms": "couch, sofa"}]}))).await;
+    assert_eq!((s, v["result"].as_str()), (201, Some("created")), "Elasticsearch's status comes through: {v}");
+    let index = json!({
+        "settings": {"analysis": {"filter": {"syn": {"type": "synonym_graph", "synonyms_set": "furniture", "updateable": true}}, "analyzer": {"syn": {"tokenizer": "standard", "filter": ["lowercase", "syn"]}}}},
+        "mappings": {"properties": {"title": {"type": "text", "analyzer": "standard", "search_analyzer": "syn"}}}
+    });
+    assert_eq!(call(reqwest::Method::PUT, "/indices/shop", Some(index)).await.0, 200);
+    for (id, title) in [("1", "red sofa"), ("2", "blue chair"), ("3", "green lamp")] {
+        assert_eq!(call(reqwest::Method::PUT, &format!("/indices/shop/docs/{id}?refresh=true"), Some(json!({"title": title}))).await.0, 201);
+    }
+    let search = |q: Value| call(reqwest::Method::POST, "/indices/shop/search", Some(q));
+    let (s, v) = search(json!({"query": {"match": {"title": "couch"}}})).await;
+    assert_eq!((s, v["hits"]["hits"][0]["_id"].as_str()), (200, Some("1")), "the set's synonym matched: {v}");
+    // One rule more, then the set lists it.
+    assert!(call(reqwest::Method::PUT, "/synonyms/furniture/seat", Some(json!({"synonyms": "seat, chair"}))).await.0 < 300);
+    let (s, v) = call(reqwest::Method::GET, "/synonyms/furniture", None).await;
+    assert_eq!((s, v["count"].as_i64()), (200, Some(2)), "{v}");
+    let (s, v) = search(json!({"query": {"match": {"title": "seat"}}})).await;
+    assert_eq!((s, v["hits"]["hits"][0]["_id"].as_str()), (200, Some("2")), "{v}");
+    let (s, v) = call(reqwest::Method::GET, "/synonyms", None).await;
+    assert_eq!((s, v["count"].as_i64()), (200, Some(1)), "{v}");
+    // A ruleset pins the lamp to the top of a search for "sofa".
+    let rules = json!({"rules": [{"rule_id": "lamp", "type": "pinned", "criteria": [{"type": "exact", "metadata": "q", "values": ["sofa"]}], "actions": {"ids": ["3"]}}]});
+    let (s, v) = call(reqwest::Method::PUT, "/query_rules/promos", Some(rules)).await;
+    assert!(s < 300, "{s} {v}");
+    let (s, v) = call(reqwest::Method::POST, "/query_rules/promos/test", Some(json!({"match_criteria": {"q": "sofa"}}))).await;
+    assert_eq!((s, v["total_matched_rules"].as_i64()), (200, Some(1)), "{v}");
+    let (s, v) = search(json!({"retriever": {"rule": {"retriever": {"standard": {"query": {"match": {"title": "sofa"}}}}, "match_criteria": {"q": "sofa"}, "ruleset_ids": ["promos"]}}})).await;
+    let ids: Vec<&str> = v["hits"]["hits"].as_array().unwrap().iter().filter_map(|h| h["_id"].as_str()).collect();
+    assert_eq!((s, ids), (200, vec!["3", "1"]), "{v}");
+    assert_eq!(call(reqwest::Method::GET, "/query_rules", None).await.1["count"], 1);
+    // Settings: roll's suggestions on, a private setting refused as Elasticsearch refuses it.
+    let (s, v) = call(reqwest::Method::PUT, "/indices/shop/settings", Some(json!({"index.roll.analytics.enabled": true, "index.roll.suggestions.enabled": true}))).await;
+    assert_eq!(s, 200, "{v}");
+    let (_, v) = call(reqwest::Method::GET, "/indices/shop/settings?flat_settings=true", None).await;
+    assert_eq!(v["shop"]["settings"]["index.roll.suggestions.enabled"], "true", "{v}");
+    let (s, v) = call(reqwest::Method::PUT, "/indices/shop/settings", Some(json!({"index.roll.suggestions.source": "shop"}))).await;
+    assert!(s == 400 && v.to_string().contains("can not update private setting"), "{s} {v}");
+    // A write names one index.
+    assert_eq!(call(reqwest::Method::PUT, "/indices/shop*/settings", Some(json!({"index.refresh_interval": "1s"}))).await.0, 400);
+    // Why a document matched.
+    let (s, v) = call(reqwest::Method::POST, "/indices/shop/explain/1", Some(json!({"query": {"match": {"title": "sofa"}}}))).await;
+    assert_eq!((s, &v["matched"]), (200, &json!(true)), "{v}");
+    // Elasticsearch's answers come through: a set in use isn't deleted; `_` ids are refused.
+    let (s, v) = call(reqwest::Method::DELETE, "/synonyms/furniture", None).await;
+    assert_eq!(s, 400, "{v}");
+    assert_eq!(call(reqwest::Method::GET, "/synonyms/_all", None).await.0, 400);
+    assert_eq!(call(reqwest::Method::DELETE, "/query_rules/promos", None).await.0, 200);
+    assert_eq!(call(reqwest::Method::GET, "/query_rules/promos", None).await.0, 404);
+}
+
 /// A cluster's audit log entries (`GET …/audit`), and the one of them that is `event` and
 /// whose entry passes `f`.
 async fn audit_entries(e: &Env, cluster: &str, query: &str) -> Vec<Value> {

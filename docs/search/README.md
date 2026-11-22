@@ -79,8 +79,23 @@ roll search index bulk app books @books.ndjson --refresh
 roll search index search app books --q title:dune
 roll search docs get app books 1 | delete app books 1
 roll search keys create app worker --expires-in 30d   # a data-only API key, shown once (--access admin for all)
+roll search keys create app web --read-only --indices books   # a frontend's key: searches books, writes nothing
+roll search keys create app drain --access append --indices logs-app   # a log drain: adds to the data stream, can't read it
 roll search keys list app | revoke app <id>
 roll search index show app books | mapping … | delete-by-query … | delete app books
+```
+
+Relevance tuning (synonyms, query rules, settings, explanations):
+
+```sh
+roll search synonyms put app furniture synonyms.txt        # Solr lines (couch, sofa / ny => new york) or Elasticsearch's JSON
+roll search synonyms list app | get app furniture | delete app furniture
+roll search rules put app promos @rules.json               # {"rules": […]}: pin or exclude documents for a query
+roll search rules test app promos query_string=shoes       # which rules match
+roll search rules list app | get app promos | delete app promos
+roll search indices settings set app books index.roll.analytics.enabled=true index.roll.suggestions.enabled=true
+roll search indices settings get app books [--defaults]
+roll search explain app books 1 --q title:dune             # why a document matches, and its score
 ```
 
 Semantic search (or the dashboard's Inference tab):
@@ -691,7 +706,7 @@ origins (browser search), once they're on main.
 | GET | `/v1/search` | version, endpoint, defaults, pricing; for a person their `caps`; for the operator and admins also `storage`, `loaded` clusters and the `cache` |
 | GET | `/v1/search/clusters` | list (a person: their own); `?deleted=true`: recently deleted clusters kept for restoring, newest first, with `deleted_at` and `purge_at` (Unix seconds), the name each had and its last figures (`stored_bytes` is still billed) |
 | POST | `/v1/search/clusters` | create `{name, flavor?, parent?, at?, idle_timeout_s?, max_in_flight?, max_body_mb?, destructive_requires_name?}`; answers with `url`, `username`, `password` (once) and `id` — the shape `search-yaml run --cluster-hook` expects; `owner` is the signed-in person who isn't an admin, and a branch's is its parent's |
-| GET | `/v1/search/clusters/{id or name}` | settings, `status` (`loaded` with live index count and requests in flight, and live `docs` once every index is open, or `asleep` with `wakes_at`, unix seconds, when a background job is due to wake it), last metered `indices`/`docs`/`stored_bytes` and `own_bytes` (what a branch references that its parent's latest commit points don't; all of `stored_bytes` for a cluster that isn't a branch), `url`, `branches` |
+| GET | `/v1/search/clusters/{id or name}` | settings, `status` (`loaded` with live index count and requests in flight, and live `docs` once every index is open, or `asleep` with `wakes_at`, unix seconds, when a background job is due to wake it), last metered `indices`/`docs`/`stored_bytes` and `own_bytes` (what a branch references that its parent's latest commit points don't; all of `stored_bytes` for a cluster that isn't a branch), `url`, `branches` (each `{id, name, parent_at, created_at}`); a branch's `parent_id`, `parent_name` and `parent_at` (Unix seconds: the parent's state it started from). roll previews compares `parent_at` with `_cat/indices`' `creation.date` (Unix milliseconds) to leave out indices the parent made after the branch, so both fields stay |
 | PATCH | `/v1/search/clusters/{id}` | `flavor`, `idle_timeout_s` (0: always loaded), `max_in_flight`, `max_body_mb`, `destructive_requires_name`, `ip_allowlist` (below), `cors` and `browser_per_minute` (above: browser search), `reindex_whitelist` (`host:port` patterns reindex from remote may read, "Migrating into roll"); the idle timeout, body limit, `max_in_flight`, allowlist and CORS apply at once (also to a cluster that is waking up); a new flavor or `destructive_requires_name` needs a reload: the cluster is put to sleep now, or as soon as no request runs (always-on clusters included), and keeps its current ones until then |
 | DELETE | `/v1/search/clusters/{id}` | waits for running requests and for a wake in progress (which is locked out and unloaded, never left serving); the cluster leaves the list, its REST endpoint answers as for a missing cluster and its name is free at once, but its storage is kept for `--search-deleted-retention-days` (7) and billed as storage, for `restore` (0 days: removed at once); branches keep working |
 | POST | `/v1/search/clusters/{id}/restore` | a deleted cluster (by its id) back as it was within its window: data, snapshots, settings, owner, password and API keys; under its own name, else 409 and `{"name": "…"}` restores it under another (the new name is its Basic auth user, API key id suffix and host label; the password stays). Scoped like every per-cluster route (owner, admins, the operator); 404 once purged |
@@ -704,7 +719,7 @@ origins (browser search), once they're on main.
 | GET | `/v1/search/clusters/{id}/metrics?range=1h\|24h\|14d` | request metrics (architecture.md, "Observability"): `{range, step_s, from, to, points, totals}`; each point (`at`, the start of its step: a minute for `1h`, 15 minutes for `24h`, 2 hours for `14d`; only steps with requests) and `totals` hold `all`, `search`, `index` and `other`, each `{requests, rate, 2xx, 4xx, 5xx, rejected, p50_ms, p95_ms, p99_ms}` (`rate` per second; `rejected`: 429s; percentiles `null` when nothing ran). Includes what the cluster's node recorded since the last metering pass |
 | GET | `/v1/search/clusters/{id}/slowlog` | the search and indexing slow logs, newest first, at most 500: `{entries, max_entries}`, each entry Elasticsearch's JSON slow log line (`@timestamp`, `log.level`, `log.logger`, `elasticsearch.index.name`, `elasticsearch.shard.id`, `elasticsearch.slowlog.{message,took,took_millis,source,total_hits,stats,search_type,total_shards,id,routing}`) |
 | GET | `/v1/search/clusters/{id}/audit?from=&to=&event=&size=` | the cluster's security audit log (below), newest first: `{flavor, retention_days, entries: [{at_ms, event, entry}], more}`. `from` (inclusive) and `to` (exclusive) are Unix milliseconds; `event` takes names or categories, comma-separated (an Elasticsearch `event.action` such as `put_user` too); `size` up to 1,000 (100). Never wakes the cluster. A read in roll's permissions, not a reveal: entries hold no secret |
-| POST | `/v1/search/clusters/{id}/keys` | a new API key of the cluster `{name, expires_in_s?, access?}` (`access`: `admin`, the default, or `data`: a link's role, data, templates, pipelines and lifecycle policies without security) → `{id, name, access, api_key, url, expires_at?}` (`access`: the access the key was made with): `api_key` is `base64(<key id>@<cluster>:<key>)` for `Authorization: ApiKey …`, in this answer only (roll secrets' managed links use it instead of sharing the password); on an OpenSearch-flavor cluster (whose clients sign in with a user) the key is an internal user of its own: `{id, name, access, username, password, url, expires_at?}` without `api_key`, `username` being `<user>@<cluster>`, refused once `expires_in_s` passes |
+| POST | `/v1/search/clusters/{id}/keys` | a new API key of the cluster `{name, expires_in_s?, access?, indices?}` (`access`: `admin`, the default, everything the cluster's own user may do; `data`: a link's role, every index's data plus the cluster's templates, pipelines and lifecycle policies, without security, or with `indices` given those indices' data only (and `monitor`): templates, pipelines and lifecycle policies are the whole cluster's, so a narrowed key gets none; `read`: `read` and `view_index_metadata` on the indices, no cluster privilege; `append`: `create_doc` and `auto_configure` on exactly the named indices, no cluster privilege, so a log drain adds to its data streams and reads nothing. `indices`: the index names or patterns it reaches, default every index (`["*"]`); not with `admin`; no remote (`alias:…`), hidden or system (`.…`) names; `append` takes names only. An OpenSearch-flavor cluster has no `append`, its index action also overwrites, and its `read` role holds `cluster_composite_ops_ro`, which OpenSearch needs for `_msearch`, `_mget` and scrolls. roll secrets' and apps' search links ask for these through their `permission` (`read`, `append`; left out, `data`) and `names` options) → `{id, name, access, indices?, api_key, url, expires_at?}` (`access` and `indices`: what the key was made with): `api_key` is `base64(<key id>@<cluster>:<key>)` for `Authorization: ApiKey …`, in this answer only (roll secrets' managed links use it instead of sharing the password); on an OpenSearch-flavor cluster (whose clients sign in with a user) the key is an internal user of its own: `{id, name, access, username, password, url, expires_at?}` without `api_key`, `username` being `<user>@<cluster>`, refused once `expires_in_s` passes |
 | DELETE | `/v1/search/clusters/{id}/keys/{key}` | revoke it (204; 404 when it's gone). On a deleted cluster (by its id) the revoke is kept and applied by its restore (204) |
 | GET | `/v1/search/clusters/{id}/browser-keys` | `{keys}`: the browser keys that still work, newest first, each `{id, name, indices or application, filter?, rate_limit, created_at, expires_at}` (no secret). Wakes the cluster |
 | POST | `/v1/search/clusters/{id}/browser-keys` | a key a web page ships (above) `{name, indices or application, filter?, expires_in_s?, rate_limit?: {per_minute?, per_ip_per_minute?}, limits?: {max_concurrent?, max_result_window?, max_buckets?, max_items?, max_inference?, max_rerank_window?, max_body_bytes?, inference_endpoints?, allow_scripts?, allow_expensive_queries?}}` → the same fields plus `api_key` (once) and `url`. 400 on an OpenSearch-flavor cluster; 409 past 20 browser keys |
@@ -717,7 +732,14 @@ origins (browser search), once they're on main.
 | POST | `/v1/search/clusters/{id}/migrate` | copy picked indices' definitions and start their reindex tasks (above) |
 | GET, PUT, DELETE | `/v1/search/clusters/{id}/indices/{index}` | Elasticsearch's `GET`/`PUT`/`DELETE /<index>`: mappings, settings and aliases; create (body: `mappings`, `settings`); delete |
 | GET, PUT | `/v1/search/clusters/{id}/indices/{index}/mapping` | `GET`/`PUT /<index>/_mapping` |
-| GET | `/v1/search/clusters/{id}/indices/{index}/settings` | `GET /<index>/_settings` |
+| GET, PUT | `/v1/search/clusters/{id}/indices/{index}/settings` | `GET`/`PUT /<index>/_settings`. A write names one index; the engine refuses private, internal and managed settings to it as to any client (`can not update private setting`). Turns on `index.roll.analytics.enabled` and `index.roll.suggestions.*`. A body naming a lifecycle (`index.lifecycle.*`, OpenSearch ISM's `index_state_management`) is `delete` in roll's permissions, not `write`: its policy can delete the index |
+| POST | `/v1/search/clusters/{id}/indices/{index}/explain/{doc}` | `POST /<index>/_explain/<id>` (a body with `query`, or `?q=`; a read) |
+| GET | `/v1/search/clusters/{id}/synonyms` | `GET _synonyms`: the synonyms sets and their rule counts (`from`, `size`) |
+| GET, PUT, DELETE | `/v1/search/clusters/{id}/synonyms/{set}` | `GET`/`PUT`/`DELETE _synonyms/<set>`: `{"synonyms_set": [{id?, synonyms}]}`; indices using the set reload their search analyzers; a set an index uses isn't deleted (400) |
+| GET, PUT, DELETE | `/v1/search/clusters/{id}/synonyms/{set}/{rule}` | `_synonyms/<set>/<rule>`: one rule `{synonyms}` |
+| GET | `/v1/search/clusters/{id}/query_rules` | `GET _query_rules`: the rulesets |
+| GET, PUT, DELETE | `/v1/search/clusters/{id}/query_rules/{ruleset}` | `GET`/`PUT`/`DELETE _query_rules/<ruleset>`: `{"rules": [{rule_id, type: pinned\|exclude, criteria, actions}]}`; a `rule` query or retriever names rulesets |
+| POST | `/v1/search/clusters/{id}/query_rules/{ruleset}/test` | `POST _query_rules/<ruleset>/_test` `{match_criteria}`: the rules that match |
 | POST | `/v1/search/clusters/{id}/indices/{index}/refresh` | `POST /<index>/_refresh` |
 | POST | `/v1/search/clusters/{id}/indices/{index}/analyze` | `POST /<index>/_analyze` (a read) |
 | POST | `/v1/search/clusters/{id}/indices/{index}/search` | `POST /<index>/_search` (reads take index expressions: `logs-*`, `a,b`) |
@@ -728,7 +750,13 @@ origins (browser search), once they're on main.
 
 The per-index routes are one Elasticsearch operation each, so the cluster, the index and the kind
 of access (read, write, delete) are in the route: roll's scoped tokens and MCP tools map onto
-them. A route's request runs as the cluster's owner narrowed to the index names in its path
+them. Synonyms sets and query rulesets are the cluster's own objects (an analyzer names a set by
+`synonyms_set`, a query names rulesets), so their routes run as the cluster's owner, on the
+`_synonyms` and `_query_rules` paths they build and no other; writing them is `write` in roll's
+permissions (they change how searches match, never a credential). Being the cluster's, a set
+isn't held to a grant's indices: anyone who may write an index (create it or change its
+settings) can name any set in its analyzers (`index.analysis.filter.*.synonyms_set`) and then
+read the set's rules through `_analyze`. Keep nothing secret in a synonyms set. A route's request runs as the cluster's owner narrowed to the index names in its path
 (`x-roll-index-scope`: like an API key of the owner whose one role grants every privilege on
 those names), so it reaches no other index: a bulk line's `_index` or an `mget` doc naming
 another index is refused (403), and so is a lookup inside a query (a `terms` lookup, an indexed
@@ -750,6 +778,18 @@ To run the YAML REST suites against clusters made through the API, start rolld w
 `--search-test-features` and point the runner at the create endpoint:
 `search-yaml run --cluster-hook http://127.0.0.1:7070/v1/search/clusters --jobs 8 …` (each worker
 gets its own cluster, deleted afterwards).
+
+A new cluster's Overview (and the Indices tab's **Sample data**, any time) loads one of two datasets
+roll generates in the browser from a seeded PRNG (`lib/search-samples.ts`: 1,000 products in
+`sample-products`, 2,000 ECS web log lines over the last 24 hours in the data stream `sample-logs`)
+through the console's `_bulk` in pages under the body limit, then runs three ready queries on it in
+place (search as you type, facets, a filtered sort; errors in the last hour, top paths, ES|QL on
+Elasticsearch-flavor clusters), each with Open in Console and copy as curl, JavaScript or Python.
+The copied code reads `$ELASTICSEARCH_API_KEY` (or `$OPENSEARCH_USERNAME`/`$OPENSEARCH_PASSWORD`)
+until **Make a key** in the panel creates a `data` key for 30 days: shown once, then written into
+the copied code while the panel stays open (never stored in the browser). Remove deletes the index,
+or the data stream and its template. The Overview's figures refetch as soon as a load or remove
+finishes.
 
 The dashboard (`/dashboard/search/<cluster>`) lists indices; selecting one opens its documents
 (paged `_search` with a query string, as rows or as a table: the most common fields by default,
@@ -789,7 +829,7 @@ or a raw body with `{{query}}`. Each hit shows its rank, score, `_id`, highlight
 `semantic` highlighter's chunks for `semantic_text`), how it moved between A and B, and an Explain
 tree (`_explain`; a `semantic` query, which `_explain` can't rewrite, is explained by a `_search`
 limited to that id; a hybrid hit shows each part). Either side copies as curl, Python or JavaScript
-with the key from `$ROLL_SEARCH_API_KEY` (OpenSearch-flavor clusters: OpenSearch's clients and
+with the key from `$ELASTICSEARCH_API_KEY`, as the guides export it (OpenSearch-flavor clusters: OpenSearch's clients and
 `$OPENSEARCH_USERNAME`/`$OPENSEARCH_PASSWORD`).
 
 ## Audit log
@@ -1112,8 +1152,14 @@ deterministic (#396).
 
 1. **Search from the browser** (landed in #358 after six reviews, its policy enforced in the
    engine on the parsed request: per-cluster CORS, browser keys with rate limits and their own body
-   cap, a Browser search section and the site-search guide's browser page; what remains is RAG's
-   chat limits for browser keys, item 11; Algolia's search-only and secured API keys,
+   cap, a Browser search section and the site-search guide's browser page; what remains: RAG's
+   chat limits for browser keys (item 11); keys derived without a call to roll (Algolia's
+   `generateSecuredApiKey`, Typesense's `generateScopedSearchKey`, Meilisearch's tenant tokens: a
+   SaaS signs a short-lived key per end customer from one parent key, where today it's 20 browser
+   keys a cluster and one control-plane call each); browser search on previews (a branch keeps the
+   parent's origins but no browser key works there: give it one and the preview's URL, roll
+   previews' side); and usage and 429s per browser key in the Browser search section (Algolia's
+   per-key usage and logs); Algolia's search-only and secured API keys,
    Typesense's scoped keys, Meilisearch's tenant tokens, Elastic's search applications): a web
    page can't call a roll cluster today. There's no CORS (`http.cors.*` are static settings no
    tenant can set), so every site needs a backend in front of search, which is the first thing
@@ -1132,8 +1178,10 @@ deterministic (#396).
    it's sent), copies mappings, settings and aliases, reindexes with progress and switches an
    alias when done. Elastic Cloud restores from other deployments, AWS OpenSearch Service has
    migration assistants, Algolia and Typesense import from each other): left, Algolia's export
-   (records, synonyms, rules) mapped onto indices, synonym sets and query rules, and a Typesense
-   and Meilisearch import (their dump formats onto indices and settings).
+   (records, synonyms, rules) mapped onto indices, synonym sets and query rules, a Typesense
+   and Meilisearch import (their dump formats onto indices and settings), and catch-up and cutover
+   (AWS OpenSearch Migration Assistant's capture and replay): a copy is one point in time today, so
+   writes made during the copy are lost unless the client double-writes.
 3. **One memory account per request** (in progress: ES|QL and aggregations in #549, Painless per execution in #591, and a
    node-wide body budget in #601, each in review; ES|QL and aggregations against a node budget
    no tenant setting can raise in #549, Painless per execution, and a node-wide body budget; Elasticsearch charges every request's
@@ -1236,18 +1284,20 @@ deterministic (#396).
    (51.8 against 34.6 µs/doc on the ECS log; its profile has BP reordering at merge time at 14% of
    instructions), BP only for time-series and log indices, the request path's allocations, one
    allocator policy.
-7. **Connectors that sync** (built in #318, in its sixth round: branches keep inherited connectors paused, and rows will
-   go into `_bulk` as the JSON text Postgres sends, never parsed into a tree; `postgresql` full and incremental, `s3`, sync rules,
-   a Connectors tab; its security review found an HTML panic that stranded a sync, a host change
-   that sent the stored Postgres password to the new host, a planted sealed value, unbounded
-   Postgres reads and no client timeouts, all being fixed before it merges. Left: linking a person's own roll Postgres or bucket with a
-   read-only credential of its own, credentials from roll secrets after #134, Postgres advanced
-   rules, PDF and Office text; Elastic's connectors, Algolia's and Typesense's data sync):
-   roll serves Elasticsearch's `_connector` API but runs no syncs, so getting a database or a
-   bucket into an index is the user's own job. A runner on the cluster's owner node, scheduled
-   like ILM (an idle cluster pays nothing between syncs), with `_connector/_sync_job` rows as
-   Elasticsearch keeps them; `postgresql` (full and incremental) and `s3` first, reaching a
-   person's own roll Postgres or storage through a link instead of copied credentials.
+7. **Connectors that sync** (landed in #318, eb364e2b3, after eight reviews: a runner on the
+   cluster's owner node, scheduled like ILM so an idle cluster pays nothing between syncs, with
+   `_connector/_sync_job` rows as Elasticsearch keeps them; `postgresql` full and incremental, `s3`,
+   sync rules and a Connectors tab. A sync writes only its own index: a pipeline that moves a
+   document elsewhere fails it, and its `_bulk` takes only `index` actions naming `_id`. Credentials
+   are sealed to the cluster and refused on a node without `ROLL_SECRET_KEY`, which fields count as
+   credentials comes from roll's schema, and branches keep inherited connectors paused until
+   adopted with new credentials. Elastic's connectors, Algolia's and Typesense's data sync): left,
+   linking a person's own roll Postgres or bucket with a read-only credential of its own,
+   credentials from roll secrets after #134, Postgres advanced rules, PDF and Office text, and the
+   web crawler (item 13) on this runner, and alerts on failed syncs through roll's webhooks or
+   chat ops (Algolia's connectors notify on failed runs). A whole-product review on 2026-11-22
+   found connectors refusing private addresses but not reindex's deny rules, and no per-owner cap on
+   remote reindex slots: being fixed together as one node-wide egress check and owner-fair slots.
 8. **Semantic search with no keys** (built in #563, in review: roll's float build of E5 equals
    Elasticsearch's float deployment, cosine 1.000000 on 64 of 64 cases; Elastic Cloud's `.multilingual-e5-small-elasticsearch`
    and Elastic Inference Service, Typesense's and Meilisearch's built-in embedding models,
@@ -1287,32 +1337,35 @@ deterministic (#396).
    the logsdb and time-series default, `_source.enabled: false`) can't come back that way.
    Decided 2026-11-17: not now. A live cluster moves by reindex from remote (item 2: today it
    can't, over HTTPS); build it once tenants ask to move by backup alone.
-10. **Relevance tuning by API, CLI and MCP** (in progress, with `roll search keys create` taking
-   index patterns and read-only access; Algolia's API and CLI `rules`/`synonyms import`,
-   Elastic's APIs): `/v1/search` has no routes for `_synonyms`, `_query_rules` (and `_test`), writing
-   an index's settings, or `_explain` (`search-control/src/api.rs`), so roll's MCP has no tools for
-   them, nor do `roll search` and the Terraform provider; an agent can create a cluster, index and
-   query, then stops. Writing settings also unblocks the suggestions tools (they need
-   `index.roll.suggestions.enabled`), and a redacted answer would let `POST …/inference/secrets`
-   become a tool, so an agent can set up semantic search end to end.
+10. **Relevance tuning by MCP and Terraform**: `/v1/search` serves synonyms sets, query rulesets
+   (and `_test`), writing an index's settings and `_explain` (the routes table), and `roll search`
+   has `synonyms`, `rules`, `indices settings` and `explain` and makes `read` and `append` keys on
+   named indices; roll's MCP maps them next (`no-tool.txt`). Left: `roll_search_synonyms_set` and
+   `roll_search_query_ruleset` in the Terraform provider, and a redacted answer for
+   `POST …/inference/secrets`, so it can become a tool and an agent can set up semantic search end
+   to end.
 11. **Conversational search and RAG** (phase 1 in progress: streamed `chat_completion` and
    `completion` inference and the Playground's Chat tab; Elastic Playground's chat with citations, Typesense
    `conversation=true`, Meilisearch `/chats`, OpenSearch's `retrieval_augmented_generation`
    processor): roll serves `completion` and `chat_completion` inference already, but the Playground
    compares retrieval only. Chat over hits with citations, the code for a RAG app, and a chat API
    (OpenSearch's processor shape on OpenSearch-flavor clusters). Design: [rag.md](rag.md).
-12. **The first query in a minute** (the guides landed in #604; writing them found: an API
-   key's `encoded` value works only at the cluster's own host, so clients behind a shared address
-   re-encode it as `<id>@<cluster>:<key>`; a `data` key can't post click events, so an app tracking
-   clicks needs a second key; a `semantic_text` field with no `inference_id` fails, because its
-   default (`.elser-2-elasticsearch`) answers as a cluster without ML nodes, the first error anyone
-   copying Elasticsearch's docs hits; and no screen is named Discover; Kibana's sample data,
-   Meilisearch's movies, Algolia's demo indices; Typesense's and Meilisearch's docs): the empty state
-   is a paragraph and a button (`components/search/clusters.tsx`). Sample data in one click, a guided
-   first query with a key made inline and a snippet per language; and user guides per workload (site
-   search, e-commerce: facets and typo tolerance; logs; RAG; SaaS tenants: an index per tenant or
-   filtered keys), apart from this operator- and internals-facing README.
-13. **A web crawler for site search** (design in [crawler.md](crawler.md); Elastic Open Crawler,
+12. **The first query in a minute** (the guides landed in #604; sample data and a guided first
+   query landed (#658): one click loads 1,000 generated products or 2,000 ECS log lines on the
+   Overview of a cluster with no indices or from the Indices tab, then three queries run in place
+   with Open in Console, copy as curl, JavaScript or Python reading `$ELASTICSEARCH_API_KEY` as the
+   guides do; a 30-day `data` key made in the panel goes into the copied code, shown once). Left:
+   a sample dataset for RAG (passages with `semantic_text` on E5); the Overview's document count
+   falls back to the metered figure while any index is closed (a key's security index right after
+   it's made), so it can read 0 until metering's next sample; and
+   what writing the guides found: an API key's `encoded` value works only at the cluster's own
+   host, so clients behind a shared address re-encode it as `<id>@<cluster>:<key>`; a `data` key
+   can't post click events, so an app tracking clicks needs a second key; a `semantic_text` field
+   with no `inference_id` fails, because its default (`.elser-2-elasticsearch`) answers as a
+   cluster without ML nodes, the first error anyone copying Elasticsearch's docs hits; and no
+   screen is named Discover.
+13. **A web crawler for site search** (design in [crawler.md](crawler.md), ready to build now that
+   #318's runner is on main; Elastic Open Crawler,
    Algolia Crawler, DocSearch, Meilisearch's docs-scraper): connectors (#318) sync Postgres and S3;
    getting a website in is the customer's job. A native connector roll runs (`roll_web_crawler`,
    on #318's runner) taking Open Crawler's config, fields and ids, fetching through
@@ -1519,7 +1572,10 @@ deterministic (#396).
 26. **Integration with the other threads**: on main since #29: previews branch search clusters
    (`scripts/preview-cost.sh`: the branch reads the parent's document, its writes stay in it, the
    service gets its `ELASTICSEARCH_URL`, landing deletes it; previews mask search fields), and
-   roll secrets' search link asks for `access: "data"` keys and refuses anything else (#97). On
+   roll secrets' search link asks for `access: "data"` keys and refuses anything else (#97); since
+   #677 a link's `permission` (`read`, `append`) and `names` options (the vocabulary buckets,
+   queues and certificates use) ask for a narrower key, and one that comes back with another
+   access or other indices is deleted and refused. On
    main since #100: apps services link search clusters through roll secrets' search provider like
    buckets and streams (rolld's `secrets::link_provider("search")`, search's keys route with
    `access: "data"`): an API key with a data-only role, `ELASTICSEARCH_URL` +

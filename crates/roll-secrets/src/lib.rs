@@ -273,8 +273,14 @@ CREATE TABLE IF NOT EXISTS required (
 ) WITHOUT ROWID;
 ";
 
-/// The environments a project starts with, in order.
+/// The environments a project starts with, in order. `production` starts protected with no
+/// approvals ([`PRODUCTION`]).
 pub const DEFAULT_ENVIRONMENTS: [(&str, &str); 3] = [("development", "Development"), ("staging", "Staging"), ("production", "Production")];
+
+/// The slug of the environment a new project protects (with `approvals: 0`: whoever may write
+/// still writes directly), and that a rule's `unprotected` never reaches (roll-auth's
+/// `scope::PRODUCTION`, docs/members.md D3).
+pub const PRODUCTION: &str = roll_auth::scope::PRODUCTION;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -432,6 +438,9 @@ pub struct Secrets {
     reads_per_minute: std::sync::atomic::AtomicU32,
     /// roll code's search, once rolld has it (health's `code` check).
     code_refs: std::sync::OnceLock<Arc<dyn health::CodeRefs>>,
+    /// Which services and sandboxes hold a project's secrets, for reach (rolld, once roll apps and
+    /// roll code are open).
+    reach_holders: std::sync::OnceLock<Arc<dyn reach::Holders>>,
     /// Where clients reach rolld's API, once rolld says (certificates' CRL distribution point).
     public_api: Arc<std::sync::OnceLock<String>>,
     /// What AWS identities' logins must name in `X-Roll-Server-ID` (`ROLL_SECRETS_AWS_SERVER_ID`,
@@ -584,6 +593,11 @@ impl Secrets {
         db.ensure_schema(alerts::SCHEMA)?;
         db.ensure_schema(decoys::SCHEMA)?;
         db.ensure_schema(intercept::SCHEMA)?;
+        // When a CA's hosts were last checked against the bindings, when one of the placeholders
+        // they come from ends, and when the consumer gained a host it doesn't name (intercept.rs).
+        db.add_column("intercept_cas", "checked_at", "INTEGER")?;
+        db.add_column("intercept_cas", "bound_until", "INTEGER")?;
+        db.add_column("intercept_cas", "stale_at", "INTEGER")?;
         db.ensure_schema(placeholders::SCHEMA)?;
         db.ensure_schema(rotators::SCHEMA)?;
         db.ensure_schema(saas::SCHEMA)?;
@@ -663,6 +677,24 @@ impl Secrets {
         if let Ok(keys) = &opts.keyring {
             audit_key::ensure_key(&db, keys, &audit_keys, &issuer_keys)?;
         }
+        // Before #688, a protected environment with `approvals: 0` took change requests with one
+        // approval (the gates count 0 as 1); since, 0 means direct writes (`EnvRow::needs_request`).
+        // Every such environment from before keeps its requests: 0 becomes 1, once, before this
+        // store serves anything (so before any new project's production is made with 0). Each
+        // change is in the project's audit log, when the deployment key is open (a sealed start
+        // logs it instead).
+        db.migrate("secrets-protected-approvals-zero-kept", |c| {
+            let rows: Vec<(String, String)> = c.query("SELECT project_id, slug FROM environments WHERE protected = 1 AND approvals = 0 ORDER BY project_id, position", (), |r| Ok((r.get(0)?, r.get(1)?)))?;
+            c.execute("UPDATE environments SET approvals = 1 WHERE protected = 1 AND approvals = 0", ())?;
+            let now = code_sql::now_ms();
+            for (project, slug) in &rows {
+                match &opts.keyring {
+                    Ok(keys) => audit::record(c, keys, project, &Caller::operator(), "environment.policy", Some(slug), None, &[], "approvals 0 → 1: kept requests as before (#688)", now).map_err(|e| code_sql::Error::Other(e.to_string()))?,
+                    Err(_) => tracing::warn!(project, environment = slug.as_str(), "approvals 0 → 1: kept requests as before (#688); not in the audit log (the deployment key is sealed)"),
+                }
+            }
+            Ok(())
+        })?;
         if let (Some(c), Ok(keys)) = (&opts.clouds, &opts.keyring) {
             // The issuer's key exists before anyone asks for its public half.
             issuer::ensure_key(&db, keys)?;
@@ -715,7 +747,7 @@ impl Secrets {
         if let (Some(github), Ok(keys)) = (&opts.github, &opts.keyring) {
             links.register(Arc::new(github_app::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), github: github.clone() }));
         }
-        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, gateway_links: opts.gateways, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, directory: opts.directory, github: opts.github, oidc: Default::default(), logins: Default::default(), answers: Default::default(), reads_per_minute: read::READS_PER_MINUTE.into(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, aws_server_id: Default::default(), crls, live_fps: Default::default(), issuer_keys: Default::default(), issuer_rotate_days: issuer::ROTATE_DAYS.into(), audit_keys: Default::default(), audit_rotate_days: audit_key::ROTATE_DAYS.into(), digests: Default::default(), counters: Default::default(), acme: Default::default(), recorder: Default::default(), validity: Default::default(), bound_hosts: Default::default(), uses: Default::default(), delete_window_days: deleted::WINDOW_DAYS.into(), purge_sink_grace_hours: deleted::SINK_GRACE_HOURS.into() })
+        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, gateway_links: opts.gateways, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, directory: opts.directory, github: opts.github, oidc: Default::default(), logins: Default::default(), answers: Default::default(), reads_per_minute: read::READS_PER_MINUTE.into(), code_refs: Default::default(), reach_holders: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, aws_server_id: Default::default(), crls, live_fps: Default::default(), issuer_keys: Default::default(), issuer_rotate_days: issuer::ROTATE_DAYS.into(), audit_keys: Default::default(), audit_rotate_days: audit_key::ROTATE_DAYS.into(), digests: Default::default(), counters: Default::default(), acme: Default::default(), recorder: Default::default(), validity: Default::default(), bound_hosts: Default::default(), uses: Default::default(), delete_window_days: deleted::WINDOW_DAYS.into(), purge_sink_grace_hours: deleted::SINK_GRACE_HOURS.into() })
     }
 
     pub fn links(&self) -> &Links {
@@ -749,7 +781,13 @@ impl Secrets {
                     )?;
                     if n == 1 {
                         for (i, (slug, name)) in DEFAULT_ENVIRONMENTS.iter().enumerate() {
-                            envs::insert(c, project, slug, name, i as i64, envs::Kind::Standard, None, &Default::default(), None, now)?;
+                            let e = envs::insert(c, project, slug, name, i as i64, envs::Kind::Standard, None, &Default::default(), None, now)?;
+                            // Protected from the start, so developers' default, checks, sandboxes
+                            // and untrusted previews never reach it; no approvals, so writes stay
+                            // direct for whoever may write until someone asks for them.
+                            if *slug == PRODUCTION {
+                                c.execute("UPDATE environments SET protected = 1, approvals = 0 WHERE id = ?", [&e.id])?;
+                            }
                         }
                     }
                     Ok::<_, Error>(c.query_row("SELECT dek FROM projects WHERE project_id = ?", [project], |r| r.get::<_, String>(0))?)

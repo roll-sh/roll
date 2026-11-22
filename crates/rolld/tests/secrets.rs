@@ -12,6 +12,8 @@
 //!
 //! And roll apps (`ForApps`): what a service got from roll secrets is shown only as roll secrets
 //! would show it to whoever asks.
+//!
+//! And reach (`ReachHolders`): the services that read a folder.
 
 mod common;
 
@@ -274,6 +276,22 @@ async fn links_resolve_to_working_credentials_and_follow_rotations_in_every_prod
     assert_ne!(new, old);
     p.revoke_retired().await;
     assert_eq!((searches(new).await, searches(old).await), (200, 401));
+    // A link's `names` and `permission: read` narrow its key: it reads those indices only.
+    let (owner, password) = (sc["username"].as_str().unwrap(), sc["password"].as_str().unwrap());
+    for index in ["logs-app", "audit"] {
+        let put = r.http.put(format!("{url}/{index}/_doc/1?refresh=true")).basic_auth(owner, Some(password)).json(&json!({ "m": "hi" })).send().await.unwrap();
+        assert_eq!(put.status().as_u16(), 201);
+    }
+    let read_link = json!({ "kind": "search", "ref": id, "field": "api_key", "mode": "managed", "options": { "names": ["logs-app"], "permission": "read" } });
+    r.post(&format!("/v1/secrets/projects/{}/environments/production/changes", p.id), json!({ "ops": [{ "op": "set", "key": "SEARCH_READ_KEY", "link": read_link }] })).await;
+    let reader = p.value("SEARCH_READ_KEY").await;
+    let send = |m: reqwest::Method, path: &str| {
+        let req = r.http.request(m, format!("{url}{path}")).header("authorization", format!("ApiKey {reader}")).json(&json!({}));
+        async move { req.send().await.unwrap().status().as_u16() }
+    };
+    assert_eq!(send(reqwest::Method::POST, "/logs-app/_search").await, 200);
+    assert_eq!(send(reqwest::Method::PUT, "/logs-app/_doc/2").await, 403);
+    assert_eq!(send(reqwest::Method::POST, "/audit/_search").await, 403);
 
     // Redis (live): the database's own URL logs in; rotating it resets the password and the
     // link reads the new one.
@@ -451,4 +469,31 @@ async fn apps_shows_a_staging_reference_to_production_only_to_who_may_reveal_pro
     assert!(s == 403 && e.contains("DB_URL") && !e.contains("fake-production-password"), "{s} {e}");
     let (s, e) = as_token(reqwest::Method::POST, format!("{staging}/shell/sessions"), Some(json!({}))).await;
     assert!(s == 403 && e.contains("roll secrets"), "{s} {e}");
+}
+
+/// Reach names the roll apps services that read a folder (rolld's `ReachHolders`): one deploying
+/// the environment reads its root, and one whose `roll://` variable names a key of a subfolder
+/// reads that folder too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reach_names_the_services_that_read_a_folder() {
+    // With search: the harness reads every rolld's search address.
+    let r = Rolld::start("apps,search", false).await;
+    let project = Project::new(&r).await.id;
+    let secrets = format!("/v1/secrets/projects/{project}/environments");
+    r.call(reqwest::Method::PUT, &format!("{secrets}/production/secrets/LOG_LEVEL"), Some(json!({ "value": "debug" }))).await;
+    r.call(reqwest::Method::PUT, &format!("{secrets}/production/secrets/API_TOKEN?path=/api"), Some(json!({ "value": "fake-api-token" }))).await;
+    for name in ["web", "worker"] {
+        let svc = r.post("/v1/apps/services", json!({ "project": project, "name": name, "source": { "kind": "upload" } })).await;
+        let env = format!("/v1/apps/services/{}/environments/production", svc["id"].as_str().unwrap());
+        r.call(reqwest::Method::PUT, &env, Some(json!({}))).await;
+        if name == "worker" {
+            r.call(reqwest::Method::PATCH, &format!("{env}/variables"), Some(json!({ "set": { "TOKEN": "roll://production/api/API_TOKEN" } }))).await;
+        }
+    }
+    let through = |reach: &Value| -> Vec<(String, String)> { reach["services"].as_array().unwrap().iter().map(|s| (s["name"].as_str().unwrap().to_string(), s["through"].as_str().unwrap().to_string())).collect() };
+    let root = r.get(&format!("{secrets}/production/reach?path=/")).await;
+    assert_eq!(through(&root), [("web".to_string(), "production:/".to_string()), ("worker".to_string(), "production:/".to_string())], "{root}");
+    let api = r.get(&format!("{secrets}/production/reach?path=/api")).await;
+    assert_eq!(through(&api), [("worker".to_string(), "roll://production/api/API_TOKEN".to_string())], "{api}");
+    assert!(!api.to_string().contains("fake-api-token"), "names, never a value");
 }
