@@ -1653,7 +1653,23 @@ deterministic (#396).
    the same run) plus ~1 s to load the cluster from S3 and replay its WAL. Search's part is the
    load; the TTL is roll cloud's fleet-wide choice.
 28. **CI**: the merge gate runs `search-codec`'s lib tests (`rust (search)`, 54 s on PR #29 with
-   main's cache: under the minute, no room for another crate). (`search-store`'s mass-recovery
+   main's cache: under the minute, no room for another crate). Test gaps a read-only analysis found on 2026-11-22
+   (main at d9aecc990), ranked; each test goes in `test:search`, not the merge gate:
+   (1) connectors refusing private addresses: every `connectors.rs` cluster sets
+   `allow_private_hosts`, so deleting the check fails nothing (being added with the egress fix,
+   `a_connector_never_reaches_a_private_address`); (2) a search link refusing and deleting a key
+   wider than asked (`rolld/src/secrets.rs` ~1207, untested; previews' twin is tested);
+   (3) previews' `Search::mask` end to end (previews' code, sent to that thread); (4) an apps
+   search link narrowed by `names`/`permission` and unlinking revoking its key, and the drain's key
+   401 after the drain is deleted (`rolld/tests/secrets.rs`); (5) owner-node jobs across a drain: a
+   watch, an ILM rollover and a sync running once on the next owner (`cluster.rs`); (6) ES|QL over a
+   remote on another node and a migration reported across a drain (`cluster.rs`); (7) MCP with a
+   person's project token against real search (sent to the MCP thread); (8) `roll://` repository
+   keys following rotation against real roll secrets (`rolld/tests/secrets.rs`); (9) the
+   dashboard's connectors tab and (10) migration wizard as Testing Library flows; (11) `roll
+   search docs add|delete`, `synonyms`/`rules list|delete` and `inference test` as lines in the
+   existing CLI flows. `rolld/tests/search_cluster_e2e.rs` never runs (no script sets `ROLL_E2E` for
+   it) and `fleet_e2e.rs` covers it: delete it or wire it into `test:search --docker`. (`search-store`'s mass-recovery
    WAL test flaked on a loaded host: a replay counted itself in the shared replay cache only
    after listing, so one could finish and empty it while the others listed; it now counts first.
    12 of 40 runs on one CPU failed before, 0 of 40 after.) `search-server`'s parked-governor
