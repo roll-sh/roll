@@ -1369,7 +1369,8 @@ deterministic (#396).
    on #318's runner) taking Open Crawler's config, fields and ids, fetching through
    `roll_net::PublicOnly` with redirects checked hop by hop, robots.txt always honoured, domain
    verification for more than small crawls, and a purge that a site outage can't empty.
-14. **Semantic search on OpenSearch-flavor clusters** (AWS OpenSearch neural search):
+14. **Semantic search on OpenSearch-flavor clusters** (design in
+   [opensearch-neural.md](opensearch-neural.md); AWS OpenSearch neural search):
    `neural`, `neural_sparse` and `agentic` are names only (`meta/aliases.rs`); ML Commons
    (`_plugins/_ml/connectors`, `models/_register`) and the `text_embedding`/`ml_inference` processors
    aren't served, so OpenSearch customers' neural setups (Bedrock or OpenAI connectors) fail on
