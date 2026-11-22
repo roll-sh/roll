@@ -360,6 +360,15 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
   roll's private-address guard (`roll-net`), without redirects, in 5 seconds, at most 64 KiB, and
   at most once an hour; it must name itself, list valid redirect URIs, and be a public client.
 
+**A person's own connection.** A token or OAuth client of a person who isn't an admin reaches
+what their account does (`roll_access::USER_REACH`, held to rolld's gate by its `auth::tests`):
+roll code and agents through their own owners, and the projects they're members of, with those
+projects' secrets and previews as their role allows (docs/members.md). `tools/list` shows only
+those products' tools, and on one resource of a member product only what their role allows too,
+as the gate decides each call (`within` their session): a viewer's client lists secrets' reads,
+not its reveals or writes, whatever the token names. A list or a create goes on the token's rules
+alone, as at the gate.
+
 ## Protocol
 
 - Streamable HTTP, JSON-RPC 2.0, protocol versions `2026-07-28`, `2025-11-25`, `2025-06-18`,

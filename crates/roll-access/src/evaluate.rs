@@ -435,7 +435,7 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     );
     if as_user && !reachable {
         ctx.audit(None, None, None, "deny", None, StatusCode::FORBIDDEN);
-        return deny(StatusCode::FORBIDDEN, "operator_only", "a user's token reaches what their account does: roll code, agents, projects and their search clusters".into(), json!({}));
+        return deny(StatusCode::FORBIDDEN, "operator_only", "a user's token reaches what their account does: roll code, agents, their projects (with their secrets and previews) and their search clusters".into(), json!({}));
     }
     // A person's token acts within their session too (docs/members.md, "Evaluation"): their
     // memberships as they are now, so removing someone stops every token of theirs at once.
@@ -536,7 +536,7 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
         let carried = req.extensions().get::<roll_auth::RouteRules>().map(|r| r.access(row.route));
         if !matches!(carried, Some(roll_auth::Access::Public(_) | roll_auth::Access::Product(_) | roll_auth::Access::User(_))) {
             ctx.audit(None, None, None, "deny", None, StatusCode::FORBIDDEN);
-            return deny(StatusCode::FORBIDDEN, "operator_only", "a user's token reaches what their account does: roll code, agents, projects and their search clusters".into(), json!({}));
+            return deny(StatusCode::FORBIDDEN, "operator_only", "a user's token reaches what their account does: roll code, agents, their projects (with their secrets and previews) and their search clusters".into(), json!({}));
         }
     }
     // Matched by its real path (a catch-all, a nest, a signed hop): the log names the real route.
