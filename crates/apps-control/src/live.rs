@@ -758,7 +758,7 @@ impl EnvLive {
 
     /// `deployment`'s template while it still serves (the active one, the canary, or one asked
     /// for by its own URL).
-    fn serving(&self, deployment: &str) -> Option<Arc<Template>> {
+    pub(crate) fn serving(&self, deployment: &str) -> Option<Arc<Template>> {
         if let Some((c, _)) = self.canary.lock().as_ref()
             && c.deployment == deployment
         {
