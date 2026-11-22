@@ -94,10 +94,15 @@ a project deletes its members, invites and homes in the same write.
 `member_events` is the outbox: every membership change records its event in its own transaction,
 and rolld acts on it after the write (roll's audit log, `product=workspace`; a removal revokes the
 person's tokens confined to the project, D7), claiming each for a minute first and retrying until
-it's done. A group change that may cut people off keeps them in `group_fanout` in its write; the
-outbox then turns it into one `group.lost` event per person and project, 500 at a time, before the
-group event's own hooks run. A `group.lost` revokes the person's confined tokens only when they
-reach the project in no other way, and roll secrets checks what they made.
+it's done. A group change that may cut people off (a role removed or narrowed, people taken out,
+the group deleted) keeps them in `group_fanout` in its write; the outbox then looks at them 500 at
+a time and writes one `group.lost` per person, naming the projects where what they hold now (their
+own role or another group's) no longer covers what the group gave. Someone still there with as
+much gets none. The group event's own hooks run once that's done. A `group.lost` revokes the
+person's tokens confined to each project only where they reach it in no other way, and roll
+secrets checks what they made. Members' own events are claimed before groups', so a big group's
+fan-out never holds up a removal; a request runs one round of the outbox, and rolld's tick works
+off the rest.
 
 - A project id is `prj_` followed by 12 random characters of lowercase base32.
 - Times are unix milliseconds.
@@ -224,7 +229,17 @@ time-boxed elevation).
   is a 404.
 - `PUT …/groups/{group}` needs `admin` on the project; the role, and the one it replaces, must be
   covered by the caller's own rules (403 `forbidden`), and a person must be in the group (D11: the
-  operator, or a project admin who is in the group). `DELETE` needs the old role covered.
+  operator, or a project admin who is in the group). "The operator" is the operator itself or an
+  admin's session: a scoped token (an operator's too) never gives a group a role, nor makes or
+  changes groups. `DELETE` needs the old role covered.
+- A SCIM group's members are its provider's while its connection's SCIM groups are on. While
+  they're off, the operator may take people out of it (not add them); once the connection is
+  removed, its groups go (rolld's tick drops any a crash left behind).
+- Someone in a project only through a group can't leave it (`DELETE …/members/me`) or be removed
+  from it as a member: 409 naming the group, which roll's operator or an admin changes.
+- Nobody invites themselves (403), and an invite its own maker would accept is refused: a role
+  held through a group never turns into a direct one by itself.
+- A deleted account leaves its groups too (one `group.member_remove` each).
 - Limits, each a 409 `{code: "limit"}` naming it: 10,000 groups; 10,000 people in a group; 100 groups
   a person is in; 200 projects a group has a role on; 50 groups with a role on a project; 1,000
   projects in a person's grant (any member who'd pass it refuses the group role).

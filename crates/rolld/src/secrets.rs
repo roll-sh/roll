@@ -487,7 +487,8 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
     // shares and leases end once they no longer hold what those need.
     let s = secrets.clone();
     workspace.on_event(Box::new(move |e| match (e.action.as_str(), &e.subject) {
-        ("member.remove" | "member.leave" | "member.role" | "group.lost", Some(user)) => s.member_changed(&e.project, user).map_err(|e| e.to_string()),
+        ("member.remove" | "member.leave" | "member.role", Some(user)) => s.member_changed(&e.project, user).map_err(|e| e.to_string()),
+        ("group.lost", Some(user)) => e.lost_projects().iter().try_for_each(|p| s.member_changed(p, user)).map_err(|e| e.to_string()),
         _ => Ok(()),
     }));
     // A workspace project that holds secrets goes only when a secrets admin confirms; then its
@@ -1268,6 +1269,10 @@ impl roll_workspace::People for People {
 
     fn scim_groups_on(&self, connection: &str) -> bool {
         self.accounts.scim_groups_on(connection)
+    }
+
+    fn connection_gone(&self, connection: &str) -> bool {
+        self.accounts.sso_connection_gone(connection)
     }
 
     fn mail(&self, email: &str, subject: &str, text: &str) {

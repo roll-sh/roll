@@ -118,6 +118,12 @@ pub trait People: Send + Sync {
         let _ = connection;
         false
     }
+    /// Whether SSO connection `connection` is gone for sure (a failed lookup is a no): its groups
+    /// are then dropped by [`Workspace::sweep_groups`].
+    fn connection_gone(&self, connection: &str) -> bool {
+        let _ = connection;
+        false
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -228,6 +234,11 @@ pub struct MemberEvent {
 }
 
 impl MemberEvent {
+    /// The projects a `group.lost` names (where its person no longer holds what the group gave).
+    pub fn lost_projects(&self) -> Vec<String> {
+        self.detail.get("projects").and_then(|p| serde_json::from_value(p.clone()).ok()).unwrap_or_default()
+    }
+
     /// The person who left the project, when they were removed or left.
     pub fn removal(&self) -> Option<&str> {
         matches!(self.action.as_str(), "member.remove" | "member.leave").then_some(self.subject.as_deref()).flatten()
@@ -397,16 +408,22 @@ impl Workspace {
             )
         })?;
         let mut projects: HashSet<String> = HashSet::new();
+        let mut capped = false;
         let mut out = Vec::with_capacity(rows.len());
         for (project, role, environments, via_group) in rows {
             if !projects.contains(&project) {
                 if projects.len() as i64 >= PROJECTS_MAX {
+                    capped = true;
                     continue;
                 }
                 projects.insert(project.clone());
             }
             let role = if via_group { crate::groups::group_role(&role) } else { Role::parse(&role).unwrap_or(Role::Viewer) };
             out.push(roles::Membership { project, role, environments: envs_of(environments) });
+        }
+        if capped {
+            // Only SCIM can put someone here (roll's own writes refuse): never silent.
+            tracing::warn!(user = %user, code = "too_many_projects", max = PROJECTS_MAX, "workspace: a person's groups reach more projects than a grant holds; those past the cap are left out");
         }
         Ok(out)
     }
@@ -506,7 +523,15 @@ impl Workspace {
         let now = self.db.now_ms()?;
         self.db.write(|c| {
             owner_of(c, actor.scope(), project)?;
-            let Some((role, envs)) = role_of(c, project, user)? else { return Err(Error::NotFound(format!("{user} isn't a member of {project}"))) };
+            let Some((role, envs)) = role_of(c, project, user)? else {
+                // In only through groups: leaving is the groups' (their admins or identity provider).
+                let via: Vec<String> = c.query("SELECT g.name FROM group_members gm JOIN group_roles gr ON gr.group_id = gm.group_id JOIN groups g ON g.id = gm.group_id WHERE gr.project_id = ? AND gm.user_id = ? ORDER BY g.name", [project, user], |r| r.get(0))?;
+                if !via.is_empty() {
+                    let who = if leaving { "you're" } else { "they're" };
+                    return Err(Error::Conflict(format!("{who} in this project only through the group {}: ask roll's operator or an admin to change the group", via.join(", "))));
+                }
+                return Err(Error::NotFound(format!("{user} isn't a member of {project}")));
+            };
             if !leaving && !actor.may_grant(project, role, envs.as_deref()) {
                 return Err(Error::Forbidden(format!("you can't remove a {}: it's more than your own role gives", role.as_str())));
             }
@@ -532,6 +557,11 @@ impl Workspace {
         let email = normal_email(email)?;
         if !actor.may_grant(project, role, environments.as_deref()) {
             return Err(Error::Forbidden(format!("you can't invite a {}: it's more than your own role gives", role.as_str())));
+        }
+        // Nobody invites themselves: a role held through a group would become their own, and
+        // outlast the identity provider taking them out of the group.
+        if actor.user.as_deref().and_then(|u| self.person(u)).and_then(|p| p.email).is_some_and(|e| e.eq_ignore_ascii_case(&email)) {
+            return Err(Error::Forbidden("you can't invite yourself: a project admin who isn't you invites you".into()));
         }
         // Checksummed and prefixed (`rlv_`), so the credential guard and leak scanning know it.
         let token = roll_auth::credentials::new_secret("rlv_");
@@ -631,7 +661,11 @@ impl Workspace {
         let checked = match &pending {
             Some((id, role, envs, by)) if accept => {
                 let project: String = self.db.read(|c| c.query_row("SELECT project_id FROM project_invites WHERE id = ?", [id.as_str()], |r| r.get(0)))?;
-                let still = Role::parse(role).is_some_and(|r| self.inviter(by).is_some_and(|a| a.may_grant(&project, r, envs_of(envs.clone()).as_deref())));
+                let inviter = self.inviter(by);
+                if inviter.as_ref().and_then(|a| a.user.as_deref()) == Some(user) {
+                    return Err(Error::Forbidden("an invite you made yourself can't be accepted: a project admin who isn't you invites you".into()));
+                }
+                let still = Role::parse(role).is_some_and(|r| inviter.is_some_and(|a| a.may_grant(&project, r, envs_of(envs.clone()).as_deref())));
                 if !still {
                     return Err(Error::Forbidden("whoever invited you can no longer give this role: ask a project admin for a new invite".into()));
                 }
@@ -663,7 +697,12 @@ impl Workspace {
                 return Err(Error::Conflict("you're a member of this project already: an admin changes your role".into()));
             }
             let members: i64 = c.query_row("SELECT COUNT(*) FROM members WHERE project_id = ?", [project.as_str()], |r| r.get(0))?;
-            let projects: i64 = c.query_row("SELECT COUNT(*) FROM members WHERE user_id = ?", [user], |r| r.get(0))?;
+            // Their projects through groups count too.
+            let projects: i64 = c.query_row(
+                "SELECT COUNT(*) FROM (SELECT project_id FROM members WHERE user_id = ?1 UNION SELECT gr.project_id FROM group_members gm JOIN group_roles gr ON gr.group_id = gm.group_id WHERE gm.user_id = ?1) x",
+                [user],
+                |r| r.get(0),
+            )?;
             if members >= MEMBERS_MAX || projects >= PROJECTS_MAX {
                 return Err(Error::Conflict(format!("a project has at most {MEMBERS_MAX} members, and a person is in at most {PROJECTS_MAX} projects")));
             }
@@ -730,8 +769,14 @@ impl Workspace {
     /// don't run one at once, and done once every hook took it. rolld also calls this now and
     /// then, for what a crash left.
     pub fn run_events(&self) {
-        // A group's fan-out writes more events: a few rounds now, the rest on rolld's next tick.
-        for _ in 0..20 {
+        // One round after a request's write: a group's fan-out is worked off by rolld's tick
+        // ([`Workspace::drain_events`]), never inside the request.
+        self.run_events_once();
+    }
+
+    /// Rounds of [`Workspace::run_events`] until nothing is due, at most `rounds` (rolld's tick).
+    pub fn drain_events(&self, rounds: usize) {
+        for _ in 0..rounds {
             if self.run_events_once() == 0 {
                 break;
             }
@@ -746,7 +791,10 @@ impl Workspace {
         let Ok(now) = self.db.now_ms() else { return 0 };
         let claimed = self.db.write(|c| {
             let due: Vec<MemberEvent> = c.query(
-                "SELECT id, at, action, project_id, actor, subject, detail, ip FROM member_events WHERE done = 0 AND (claimed_at IS NULL OR claimed_at < ?) ORDER BY at, id LIMIT 50",
+                // Members' own events first: a big group's fan-out never holds up a removal (what
+                // ends its person's shares and leases).
+                "SELECT id, at, action, project_id, actor, subject, detail, ip FROM member_events WHERE done = 0 AND (claimed_at IS NULL OR claimed_at < ?) \
+                 ORDER BY CASE WHEN action LIKE 'group.%' THEN 1 ELSE 0 END, at, id LIMIT 50",
                 [now - 60_000],
                 |r| {
                     let detail: String = r.get(6)?;
@@ -822,6 +870,11 @@ impl Workspace {
             for (project, role) in &projects {
                 c.execute("DELETE FROM members WHERE project_id = ? AND user_id = ?", [project.as_str(), user])?;
                 record(c, now, "member.remove", project, &actor, Some(user), json!({ "role": role, "why": "account deleted" }))?;
+            }
+            // Their groups too, each a `group.member_remove`.
+            let groups: Vec<String> = c.query("SELECT group_id FROM group_members WHERE user_id = ?", [user], |r| r.get(0))?;
+            for g in &groups {
+                crate::groups::remove_members(c, now, g, &actor, &[user.to_string()])?;
             }
             let invites: Vec<(String, String)> = c.query("SELECT id, project_id FROM project_invites WHERE created_by = ? AND state = 'pending'", [user], |r| Ok((r.get(0)?, r.get(1)?)))?;
             for (id, project) in &invites {

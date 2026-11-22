@@ -193,11 +193,13 @@ fn external_value(v: &Value) -> Option<String> {
 
 /// `members[value eq "usr_…"]` (Entra's remove path): the id.
 fn member_filter(path: &str) -> Option<String> {
-    let inner = path.strip_prefix("members[")?.strip_suffix(']')?.trim();
+    let inner = path.get(..8).filter(|p| p.eq_ignore_ascii_case("members["))?;
+    let inner = path[inner.len()..].strip_suffix(']')?.trim();
     let (attr, rest) = inner.split_once(char::is_whitespace)?;
     let (op, value) = rest.trim_start().split_once(char::is_whitespace)?;
+    // Exactly one quoted value: no quote inside it, nothing after it.
     let value = value.trim().strip_prefix('"')?.strip_suffix('"')?;
-    (attr.eq_ignore_ascii_case("value") && op.eq_ignore_ascii_case("eq") && !value.is_empty() && value.len() <= VALUE_MAX).then(|| value.to_string())
+    (attr.eq_ignore_ascii_case("value") && op.eq_ignore_ascii_case("eq") && !value.is_empty() && !value.contains('"') && value.len() <= VALUE_MAX).then(|| value.to_string())
 }
 
 /// A PATCH's operations, as the directory applies them (member ids not yet checked for reach).
@@ -245,8 +247,8 @@ fn parse_patch(v: &Value) -> std::result::Result<Vec<GroupOp>, ScimError> {
                     out.push(if kind == "add" { GroupOp::Add(list) } else { GroupOp::Replace(list) });
                 }
             }
-            // An attribute roll keeps nothing of: nothing to do.
-            ("replace" | "add" | "remove", Some(_)) => {}
+            // A Group has no other attribute: a path roll doesn't know is a 400, never a silent no-op.
+            ("replace" | "add" | "remove", Some(_)) => return Err(ScimError(StatusCode::BAD_REQUEST, Some("invalidPath"), "a Group's paths are members, members[value eq \"…\"], displayName and externalId".into())),
             (other, _) => return Err(bad(format!("op {other:?}: add, replace or remove"))),
         }
     }

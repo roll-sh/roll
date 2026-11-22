@@ -2767,6 +2767,49 @@ async fn a_members_role_decides_what_they_do_to_a_preview() {
     assert_eq!(d.call(t["token"].as_str().unwrap(), Method::GET, &pv, None).await.0, StatusCode::OK);
 }
 
+/// docs/members-v1-1.md, "When a group loses a role": a person's token confined to a project lives
+/// while anything still gives them the project. Removed as a member while a group gives it, or out
+/// of one of two groups that do, it's kept; out of the last, it's revoked.
+#[tokio::test]
+async fn a_confined_token_follows_its_persons_groups() {
+    let d = Daemon::new(0);
+    for (u, h) in [("usr_ada", "ada"), ("usr_bob", "bob")] {
+        d.people.add(u, h);
+    }
+    let (_, p) = d.as_user("usr_ada", Method::POST, "/v1/workspace/projects", Some(json!({ "name": "pay" }))).await;
+    let id = p["id"].as_str().unwrap().to_string();
+    let (_, inv) = d.as_user("usr_ada", Method::POST, &format!("/v1/workspace/projects/{id}/invites"), Some(json!({ "email": "bob@acme.test", "role": "viewer" }))).await;
+    let token = inv["url"].as_str().unwrap().split("token=").nth(1).unwrap().to_string();
+    assert_eq!(d.as_user("usr_bob", Method::POST, &format!("/v1/workspace/invites/{token}/accept"), None).await.0, StatusCode::OK);
+    let mut groups = vec![];
+    for name in ["one", "two"] {
+        let (s, g) = d.call(OPERATOR, Method::POST, "/v1/workspace/groups", Some(json!({ "name": name }))).await;
+        assert_eq!(s, StatusCode::CREATED, "{g}");
+        let g = g["id"].as_str().unwrap().to_string();
+        assert_eq!(d.call(OPERATOR, Method::PUT, &format!("/v1/workspace/groups/{g}/members/usr_bob"), None).await.0, StatusCode::NO_CONTENT);
+        assert_eq!(d.call(OPERATOR, Method::PUT, &format!("/v1/workspace/projects/{id}/groups/{g}"), Some(json!({ "role": "viewer" }))).await.0, StatusCode::OK);
+        groups.push(g);
+    }
+    let rules = json!([{ "product": "workspace", "resources": [{ "project": id }], "actions": { "read": "allow" } }]);
+    let (s, t) = d.as_user("usr_bob", Method::POST, "/v1/access/tokens", Some(json!({ "name": "pay", "rules": rules }))).await;
+    assert_eq!(s, StatusCode::CREATED, "{t}");
+    let bobs = t["token"].as_str().unwrap().to_string();
+    let alive = |want: StatusCode, why: &'static str| {
+        let (d, bobs) = (&d, bobs.clone());
+        async move {
+            d.workspace.drain_events(20);
+            assert_eq!(d.call(&bobs, Method::GET, "/v1/access", None).await.0, want, "{why}");
+        }
+    };
+    alive(StatusCode::OK, "made").await;
+    assert_eq!(d.as_user("usr_ada", Method::DELETE, &format!("/v1/workspace/projects/{id}/members/usr_bob"), None).await.0, StatusCode::NO_CONTENT);
+    alive(StatusCode::OK, "removed as a member, but both groups still give him the project").await;
+    assert_eq!(d.call(OPERATOR, Method::DELETE, &format!("/v1/workspace/groups/{}/members/usr_bob", groups[0]), None).await.0, StatusCode::NO_CONTENT);
+    alive(StatusCode::OK, "out of one group, the other still gives it").await;
+    assert_eq!(d.call(OPERATOR, Method::DELETE, &format!("/v1/workspace/groups/{}/members/usr_bob", groups[1]), None).await.0, StatusCode::NO_CONTENT);
+    alive(StatusCode::UNAUTHORIZED, "out of the last group: revoked").await;
+}
+
 #[tokio::test]
 async fn a_session_is_its_roles_and_a_removal_revokes_what_it_confines() {
     let d = Daemon::new(0);

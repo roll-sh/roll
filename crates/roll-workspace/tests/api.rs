@@ -514,6 +514,16 @@ async fn groups_hold_roles_that_add_up_and_go_at_once() {
     assert_eq!(api.call(Method::PUT, &format!("/v1/workspace/groups/{}/members/usr_cat", ops.id), None).await.1["code"], "managed");
     assert_eq!(api.call(Method::PUT, &at(&format!("/groups/{}", ops.id)), Some(json!({ "role": "admin" }))).await.0, StatusCode::OK);
     assert_eq!(api.ws.role_in(&id, "usr_bob").unwrap(), Some(roll_auth::roles::Role::Admin));
+    // An admin only through groups can't make that his own by inviting himself, nor leave as if
+    // he were a member (the groups decide).
+    let (s, e) = api.call_as(Some("usr_bob"), Method::POST, &at("/invites"), Some(json!({ "email": "bob@example.com", "role": "admin" }))).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{e}");
+    let (s, e) = api.call_as(Some("usr_bob"), Method::DELETE, &at("/members/me"), None).await;
+    assert!(s == StatusCode::CONFLICT && e["error"].as_str().unwrap().contains("eng"), "{s} {e}");
+    // A scoped token is never D11's operator, whatever its rules.
+    let everything = roll_auth::roles::session_scope(&[roll_auth::roles::Membership { project: id.clone(), role: roll_auth::roles::Role::Owner, environments: None }]);
+    let token = roll_workspace::Actor { id: "token:tok_ops".into(), grant: Some(everything), ..Default::default() };
+    assert!(matches!(api.ws.set_group_role(&token, &id, &ops.id, "viewer", None), Err(roll_workspace::Error::Forbidden(_))));
     // Cat sees the group she is in, not one that only has a role on a project she doesn't manage.
     let (_, mine) = api.call_as(Some("usr_cat"), Method::GET, "/v1/workspace/groups", None).await;
     assert_eq!(mine.as_array().unwrap().iter().map(|g| g["name"].as_str().unwrap()).collect::<Vec<_>>(), vec!["eng"]);
@@ -524,6 +534,7 @@ async fn groups_hold_roles_that_add_up_and_go_at_once() {
     events.lock().unwrap().clear();
     let n = api.ws.scim_patch("sso_acme", &ops.id, &[roll_workspace::GroupOp::RemoveMembers(vec!["usr_bob".into()])]).unwrap();
     assert_eq!(n.removed, 1);
+    api.ws.drain_events(10);
     assert_eq!(api.ws.role_in(&id, "usr_bob").unwrap(), Some(roll_auth::roles::Role::Developer));
     assert!(events.lock().unwrap().contains(&"group.lost usr_bob".to_string()), "{:?}", events.lock().unwrap());
     assert_eq!(api.call(Method::DELETE, &format!("/v1/workspace/groups/{eng}/members/usr_bob"), None).await.0, StatusCode::NO_CONTENT);
@@ -533,8 +544,42 @@ async fn groups_hold_roles_that_add_up_and_go_at_once() {
     events.lock().unwrap().clear();
     assert_eq!(api.call_as(Some("usr_ada"), Method::DELETE, &role, None).await.0, StatusCode::NO_CONTENT);
     assert_eq!(api.ws.role_in(&id, "usr_cat").unwrap(), Some(roll_auth::roles::Role::Viewer));
+    api.ws.drain_events(10);
+    // Cat lost the developer role; ada, an owner in her own right, lost nothing and gets none.
     let log = events.lock().unwrap().clone();
-    assert!(log.contains(&"group.lost usr_cat".to_string()) && log.contains(&"group.lost usr_ada".to_string()) && log.contains(&"group.role_remove -".to_string()), "{log:?}");
+    assert!(log.contains(&"group.lost usr_cat".to_string()) && !log.contains(&"group.lost usr_ada".to_string()) && log.contains(&"group.role_remove -".to_string()), "{log:?}");
+}
+
+/// docs/members-v1-1.md, "When a group loses a role": a big group's fan-out never holds up a
+/// member's own removal (what ends their shares and leases): members' events are claimed first,
+/// and a request runs one round of the outbox, leaving the rest to rolld's tick.
+#[tokio::test]
+async fn a_big_groups_fan_out_never_holds_up_a_removal() {
+    let api = Api::new();
+    let order = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let o = order.clone();
+    api.ws.on_event(Box::new(move |e| {
+        o.lock().unwrap().push(e.action.clone());
+        Ok(())
+    }));
+    let (_, p) = api.call_as(Some("usr_ada"), Method::POST, "/v1/workspace/projects", Some(json!({ "name": "big" }))).await;
+    let id = p["id"].as_str().unwrap().to_string();
+    let people: Vec<String> = (0..300).map(|i| format!("usr_p{i:03}")).collect();
+    let (g, _) = api.ws.scim_create("sso_acme", "everyone", None, &people).unwrap();
+    api.ws.set_group_role(&roll_workspace::Actor::operator(), &id, &g.id, "viewer", None).unwrap();
+    let (_, inv) = api.call_as(Some("usr_ada"), Method::POST, &format!("/v1/workspace/projects/{id}/invites"), Some(json!({ "email": "bob@example.com", "role": "viewer" }))).await;
+    let token = inv["url"].as_str().unwrap().split("token=").nth(1).unwrap().to_string();
+    assert_eq!(api.call_as(Some("usr_bob"), Method::POST, &format!("/v1/workspace/invites/{token}/accept"), None).await.0, StatusCode::OK);
+    order.lock().unwrap().clear();
+    // The provider deletes the group (300 people to fan out), then ada removes bob.
+    api.ws.scim_delete("sso_acme", &g.id).unwrap();
+    assert_eq!(api.call_as(Some("usr_ada"), Method::DELETE, &format!("/v1/workspace/projects/{id}/members/usr_bob"), None).await.0, StatusCode::NO_CONTENT);
+    api.ws.drain_events(100);
+    let log = order.lock().unwrap().clone();
+    let removal = log.iter().position(|a| a == "member.remove").expect("the removal ran");
+    let lost = log.iter().filter(|a| *a == "group.lost").count();
+    assert_eq!(lost, 300, "one per person, not per person and project");
+    assert!(removal < 60, "the removal waited behind {removal} events of the group's: {:?}", &log[..removal.min(10)]);
 }
 
 #[tokio::test]

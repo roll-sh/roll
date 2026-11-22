@@ -28,14 +28,18 @@ impl Access {
     /// one audit row each, the removal named in why. Their other tokens only stop reaching the
     /// project, as their session does.
     pub fn member_event(&self, e: &roll_workspace::MemberEvent) -> Result<()> {
-        // One person a group change may have cut off (its own event is the audit row): only when
-        // they reach the project in no other way now are their confined tokens revoked.
+        // One person a group change may have cut off, on the projects it names (its own event is
+        // the audit row): only where they reach a project in no other way now are their tokens
+        // confined to it revoked.
         if e.action == "group.lost" {
             let (Some(user), Some(ws)) = (e.subject.as_deref(), self.workspace.get()) else { return Ok(()) };
-            if ws.reaches(&e.project, user).map_err(|err| Error::Internal(format!("reading memberships: {err}")))? {
-                return Ok(());
+            for project in e.lost_projects() {
+                if ws.reaches(&project, user).map_err(|err| Error::Internal(format!("reading memberships: {err}")))? {
+                    continue;
+                }
+                self.revoke_confined(user, &project, &format!("lost project {project} with group {} ({})", e.detail["group"].as_str().unwrap_or("?"), e.detail["event"].as_str().unwrap_or(&e.id)))?;
             }
-            return self.revoke_confined(user, &e.project, &format!("lost project {} with group {} ({})", e.project, e.detail["group"].as_str().unwrap_or("?"), e.detail["event"].as_str().unwrap_or(&e.id)));
+            return Ok(());
         }
         self.store.audit(&AuditEvent {
             id: new_id("aud"),
@@ -75,9 +79,9 @@ impl Access {
         let now = code_sql::now_ms();
         let confined: Vec<String> = self
             .store
-            .list()?
+            .live_of_user(user)?
             .into_iter()
-            .filter(|g| g.user.as_deref() == Some(user) && g.live(now) && !g.decoy)
+            .filter(|g| g.live(now) && !g.decoy)
             .filter(|g| roll_auth::roles::confined_to(&g.rules, g.ask_otherwise, project))
             .map(|g| g.id)
             .collect();

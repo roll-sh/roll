@@ -245,6 +245,11 @@ impl Accounts {
         Ok(self.db.read(|c| c.query(&format!("SELECT {COLUMNS} FROM sso_connections ORDER BY created_at"), (), |r| self.connection_row(r)))?)
     }
 
+    /// Whether connection `id` is gone for sure (a failed lookup isn't): its groups go then.
+    pub fn sso_connection_gone(&self, id: &str) -> bool {
+        matches!(self.sso_connection(id), Err(Error::NotFound(_)))
+    }
+
     /// Whether connection `id`'s provider keeps groups over SCIM now (looked up every time).
     pub fn scim_groups_on(&self, id: &str) -> bool {
         self.sso_connection(id).is_ok_and(|c| c.groups)
@@ -454,7 +459,8 @@ impl Accounts {
             Ok(())
         })?;
         // Its groups go with it, as if its provider deleted each (their people lose what the
-        // groups gave them on their next request).
+        // groups gave them on their next request). Should this fail or the node stop first, the
+        // workspace's sweep drops them (`Workspace::sweep_groups`: their connection is gone).
         if let Some(d) = self.directory()
             && let Err(e) = d.forget_connection(id)
         {

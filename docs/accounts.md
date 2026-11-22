@@ -407,8 +407,13 @@ over SCIM 2.0 (RFC 7643 and 7644), so someone who leaves loses roll at once.
     made stops by `maker_reaches`.
   - Bounds: a body is read up to 1 MiB (413 `tooLarge` past it, nothing parsed); at most 1,000
     member values of at most 64 bytes in one request, 100 operations in a `PATCH` and 256 bytes a
-    path (400 `tooMany` or `invalidValue`); a group holds at most 10,000 people (400 `tooMany`,
-    nothing applied).
+    path (400 `tooMany` or `invalidValue`; a path that isn't `members`, `members[value eq "…"]`,
+    `displayName` or `externalId` is 400 `invalidPath`); a group holds at most 10,000 people (400
+    `tooMany`, nothing applied). A `PUT` and a `POST` carry at most 1,000 members too, so a provider
+    syncs a bigger group with `PATCH` adds (Okta and Entra send members in batches far below this).
+  - A person whose address leaves the connection's verified domains stays in its groups until the
+    provider takes them out, and SCIM no longer reaches them, so it can't: the operator turns the
+    connection's SCIM groups off and takes them out in roll (not swept on its own yet).
 - Deactivating is roll's own disable, done every time it's asked (a retry finishes cutting off
   what a failure left): the person's sessions end, and their roll code owner (its tokens and
   machine links) is cut off. Their own roll tokens and connections pause with the account, and

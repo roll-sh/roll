@@ -587,8 +587,8 @@ The elevation routes are a person's, like `/v1/workspace/invites`. They go in pe
 - `group_roles` of a deleted project move to `deleted_group_roles` in the delete's write, beside
   `deleted_members` and `deleted_homes`. Nobody's grant names the project while it's deleted.
 - `Workspace::restore` brings them back as they were, except roles of groups deleted since. Those
-  are dropped and listed in the restore's answer (`dropped_groups`), and roll secrets' recovery
-  reports them.
+  are dropped, each a `group.role_remove` in roll's audit log (built: the restore's answer doesn't
+  list them).
 - The elevation policy travels with the project row.
 - Pending elevations on P are denied (`project deleted`), and live ones end in the delete's
   follow-up. They're **not** restored: an approval was for that time, and a recovery days later

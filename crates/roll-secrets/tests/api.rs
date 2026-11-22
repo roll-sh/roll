@@ -1223,7 +1223,8 @@ impl Api {
         // shared and handed out.
         let s2 = secrets.clone();
         ws.on_event(Box::new(move |e| match (e.action.as_str(), &e.subject) {
-            ("member.remove" | "member.leave" | "member.role" | "group.lost", Some(user)) => s2.member_changed(&e.project, user).map_err(|e| e.to_string()),
+            ("member.remove" | "member.leave" | "member.role", Some(user)) => s2.member_changed(&e.project, user).map_err(|e| e.to_string()),
+            ("group.lost", Some(user)) => e.lost_projects().iter().try_for_each(|p| s2.member_changed(p, user)).map_err(|e| e.to_string()),
             _ => Ok(()),
         }));
         let router = roll_workspace::router(ws.clone()).merge(roll_secrets::router(secrets.clone())).layer(axum::middleware::from_fn_with_state(gate.clone(), fake_gate));

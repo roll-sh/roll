@@ -19,7 +19,7 @@
 use crate::members::{Actor, MemberEvent, envs_json, envs_of, random, record};
 use crate::{Error, Result, Scope, Workspace, owner_of};
 use code_sql::{Conn, OptionalExtension, params};
-use roll_auth::roles::{GroupAssigners, Role, decisions};
+use roll_auth::roles::{self, GroupAssigners, Role, decisions};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashSet};
@@ -84,7 +84,7 @@ pub const PROJECT_GROUPS_MAX: i64 = 50;
 pub const GROUP_NAME_MAX: usize = 255;
 /// People one page of a group's members holds, at most.
 pub const MEMBERS_PAGE_MAX: i64 = 500;
-/// `group.lost` events one fan-out step writes, at most.
+/// People one fan-out step looks at (one `group.lost` each, at most).
 const FANOUT_PAGE: usize = 500;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -207,12 +207,39 @@ fn projects_of(c: &Conn<'_>, group: &str) -> Result<Vec<String>> {
     Ok(c.query("SELECT project_id FROM group_roles WHERE group_id = ? ORDER BY project_id", [group], |r| r.get(0))?)
 }
 
-/// An event about a group that may have cut people off: `users` lost whatever the group gave
-/// them on `projects`. Nothing to fan out (no projects, or nobody) records the event alone.
+/// The roles `group` holds, as memberships (what its people lose when it goes).
+fn held_by(c: &Conn<'_>, group: &str) -> Result<Vec<roles::Membership>> {
+    Ok(c.query("SELECT project_id, role, environments FROM group_roles WHERE group_id = ? ORDER BY project_id", [group], |r| {
+        let role: String = r.get(1)?;
+        Ok(roles::Membership { project: r.get(0)?, role: group_role(&role), environments: envs_of(r.get(2)?) })
+    })?)
+}
+
+/// `user`'s memberships on `project` now: their own and their groups'.
+fn memberships_on(c: &Conn<'_>, project: &str, user: &str) -> Result<Vec<roles::Membership>> {
+    let rows: Vec<(String, Option<String>, i64)> = c.query(
+        "SELECT role, environments, 0 FROM members WHERE project_id = ?1 AND user_id = ?2 UNION ALL \
+         SELECT gr.role, gr.environments, 1 FROM group_members gm JOIN group_roles gr ON gr.group_id = gm.group_id WHERE gr.project_id = ?1 AND gm.user_id = ?2",
+        [project, user],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    Ok(rows
+        .into_iter()
+        .map(|(role, envs, via)| roles::Membership { project: project.into(), role: if via == 1 { group_role(&role) } else { Role::parse(&role).unwrap_or(Role::Viewer) }, environments: envs_of(envs) })
+        .collect())
+}
+
+/// Whether rules `now` still give everything `lost` did on its project (nothing was lost).
+fn still_covered(now: &[roles::Membership], lost: &roles::Membership) -> bool {
+    roles::may_grant(&roles::session_scope(now), &lost.project, lost.role, lost.environments.as_deref())
+}
+
+/// An event about a group that may have cut people off: `who` lost whatever `lost` gave them.
+/// Nothing to fan out (no roles, or nobody) records the event alone.
 fn record_loss(c: &Conn<'_>, now: i64, action: &str, project: &str, actor: &Actor, loss: Loss<'_>, mut detail: Value) -> Result<()> {
-    let Loss { group, projects, who } = loss;
+    let Loss { group, lost, who } = loss;
     let id = format!("mev_{}", random(16));
-    let fanout = !projects.is_empty()
+    let fanout = !lost.is_empty()
         && match who {
             Who::Everyone => {
                 c.execute("INSERT INTO group_fanout (event_id, user_id) SELECT ?, user_id FROM group_members WHERE group_id = ?", [id.as_str(), group])? > 0
@@ -227,7 +254,7 @@ fn record_loss(c: &Conn<'_>, now: i64, action: &str, project: &str, actor: &Acto
     detail["group"] = json!(group);
     if fanout {
         detail["fanout"] = json!(true);
-        detail["projects"] = json!(projects);
+        detail["lost"] = lost.iter().map(|m| json!({ "project": m.project, "role": m.role, "environments": m.environments })).collect();
     }
     c.execute(
         "INSERT INTO member_events (id, at, action, project_id, actor, subject, detail, ip) VALUES (?, ?, ?, ?, ?, NULL, ?, ?)",
@@ -236,10 +263,10 @@ fn record_loss(c: &Conn<'_>, now: i64, action: &str, project: &str, actor: &Acto
     Ok(())
 }
 
-/// What a group change may have taken: whatever `group` gave `who` on `projects`.
+/// What a group change may have taken: the roles `lost` that `group` gave `who`.
 struct Loss<'a> {
     group: &'a str,
-    projects: &'a [String],
+    lost: &'a [roles::Membership],
     who: Who<'a>,
 }
 
@@ -410,9 +437,7 @@ impl Workspace {
     pub fn delete_group(&self, actor: &Actor, id: &str) -> Result<()> {
         operator_only(actor, "deleting a group")?;
         let g = self.group(None, id)?;
-        if let Some(conn) = g.connection()
-            && self.people.get().is_some_and(|p| p.scim_groups_on(conn))
-        {
+        if self.keeper(&g) == Keeper::Provider {
             return Err(Error::Managed(format!("{} is kept by its identity provider: delete it there, or turn the connection's SCIM groups off first", g.name)));
         }
         self.drop_group(actor, id)
@@ -422,8 +447,8 @@ impl Workspace {
         let now = self.db.now_ms()?;
         self.db.write(|c| {
             let g = load(c, id)?.ok_or_else(|| no_group(id))?;
-            let projects = projects_of(c, id)?;
-            record_loss(c, now, "group.delete", "", actor, Loss { group: id, projects: &projects, who: Who::Everyone }, json!({ "name": g.name, "source": g.source }))?;
+            let lost = held_by(c, id)?;
+            record_loss(c, now, "group.delete", "", actor, Loss { group: id, lost: &lost, who: Who::Everyone }, json!({ "name": g.name, "source": g.source }))?;
             for t in ["group_roles", "group_members", "groups"] {
                 let col = if t == "groups" { "id" } else { "group_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
@@ -440,10 +465,11 @@ impl Workspace {
         if self.person(user).is_none() {
             return Err(Error::NotFound(format!("no person {user}")));
         }
+        let g = self.group(None, id)?;
+        managed(&g, self.keeper(&g), false)?;
         let now = self.db.now_ms()?;
         self.db.write(|c| {
-            let g = load(c, id)?.ok_or_else(|| no_group(id))?;
-            managed(&g)?;
+            load(c, id)?.ok_or_else(|| no_group(id))?;
             if c.query_row("SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?", [id, user], |r| r.get::<_, i64>(0)).optional()?.is_some() {
                 return Ok(());
             }
@@ -458,13 +484,15 @@ impl Workspace {
         Ok(())
     }
 
-    /// Take `user` out of roll group `id`: they lose its roles at once.
+    /// Take `user` out of group `id` (a SCIM group's only while its connection's SCIM groups are
+    /// off): they lose its roles at once.
     pub fn remove_group_member(&self, actor: &Actor, id: &str, user: &str) -> Result<()> {
         operator_only(actor, "changing a group's members")?;
+        let g = self.group(None, id)?;
+        managed(&g, self.keeper(&g), true)?;
         let now = self.db.now_ms()?;
         self.db.write(|c| {
-            let g = load(c, id)?.ok_or_else(|| no_group(id))?;
-            managed(&g)?;
+            load(c, id)?.ok_or_else(|| no_group(id))?;
             remove_members(c, now, id, actor, &[user.to_string()])?;
             Ok::<_, Error>(())
         })?;
@@ -520,9 +548,16 @@ impl Workspace {
                 record(c, now, "group.role", project, actor, None, json!({ "group": group, "new": { "role": role, "environments": environments } }))?;
             } else {
                 c.execute("UPDATE group_roles SET role = ?, environments = ? WHERE project_id = ? AND group_id = ?", params![role.as_str(), envs_json(&environments), project, group])?;
-                // Whatever changed may have narrowed someone: their made things are checked again.
+                // Only a change that narrows the role can have cut someone off: theirs is checked again.
                 let (r, e) = old.clone().expect("old");
-                record_loss(c, now, "group.role", project, actor, Loss { group, projects: &[project.to_string()], who: Who::Everyone }, json!({ "old": { "role": r, "environments": e }, "new": { "role": role, "environments": environments } }))?;
+                let was = roles::Membership { project: project.into(), role: r, environments: e.clone() };
+                let is = roles::Membership { project: project.into(), role, environments: environments.clone() };
+                let detail = json!({ "old": { "role": r, "environments": e }, "new": { "role": role, "environments": environments } });
+                if still_covered(std::slice::from_ref(&is), &was) {
+                    record(c, now, "group.role", project, actor, None, json!({ "group": group, "old": detail["old"].clone(), "new": detail["new"].clone() }))?;
+                } else {
+                    record_loss(c, now, "group.role", project, actor, Loss { group, lost: std::slice::from_ref(&was), who: Who::Everyone }, detail)?;
+                }
             }
             Ok(())
         })?;
@@ -541,7 +576,8 @@ impl Workspace {
             if !actor.may_grant(project, role, envs.as_deref()) {
                 return Err(Error::Forbidden(format!("you can't take away a {}: it's more than your own role gives", role.as_str())));
             }
-            record_loss(c, now, "group.role_remove", project, actor, Loss { group, projects: &[project.to_string()], who: Who::Everyone }, json!({ "role": role, "environments": envs }))?;
+            let was = roles::Membership { project: project.into(), role, environments: envs.clone() };
+            record_loss(c, now, "group.role_remove", project, actor, Loss { group, lost: std::slice::from_ref(&was), who: Who::Everyone }, json!({ "role": role, "environments": envs }))?;
             c.execute("DELETE FROM group_roles WHERE project_id = ? AND group_id = ?", [project, group])?;
             Ok(())
         })?;
@@ -669,8 +705,8 @@ impl Workspace {
             if count > GROUP_MEMBERS_MAX {
                 return Err(Error::TooMany(format!("a group holds at most {GROUP_MEMBERS_MAX} people")));
             }
-            let projects = projects_of(c, id)?;
-            record_loss(c, now, "group.update", "", &actor, Loss { group: id, projects: &projects, who: Who::These(&removed) }, json!({ "added": total.added, "removed": total.removed, "skipped": total.skipped }))?;
+            let lost = held_by(c, id)?;
+            record_loss(c, now, "group.update", "", &actor, Loss { group: id, lost: &lost, who: Who::These(&removed) }, json!({ "added": total.added, "removed": total.removed, "skipped": total.skipped }))?;
             Ok::<_, Error>(total)
         })?;
         self.run_events();
@@ -692,10 +728,20 @@ impl Workspace {
     }
 
     /// One step of a group event's fan-out: the next page of the people it kept, one `group.lost`
-    /// event each per project. `true` once every one is written (the event's own hooks run then).
+    /// event each, naming the projects where what they hold now no longer covers what the group
+    /// gave (someone still there with as much, directly or through another group, lost nothing).
+    /// `true` once every one is written (the event's own hooks run then).
     pub(crate) fn fan_out(&self, e: &MemberEvent) -> Result<bool> {
-        let projects: Vec<String> = e.detail.get("projects").and_then(|p| serde_json::from_value(p.clone()).ok()).unwrap_or_default();
-        let per = (FANOUT_PAGE / projects.len().max(1)).max(1) as i64;
+        let lost: Vec<roles::Membership> = e
+            .detail
+            .get("lost")
+            .and_then(Value::as_array)
+            .map(|l| {
+                l.iter()
+                    .filter_map(|m| Some(roles::Membership { project: m.get("project")?.as_str()?.to_string(), role: group_role(m.get("role")?.as_str()?), environments: m.get("environments").and_then(|e| serde_json::from_value(e.clone()).ok()) }))
+                    .collect()
+            })
+            .unwrap_or_default();
         let now = self.db.now_ms()?;
         self.db.write(|c| {
             let detail: String = c.query_row("SELECT detail FROM member_events WHERE id = ?", [e.id.as_str()], |r| r.get(0))?;
@@ -704,17 +750,24 @@ impl Workspace {
                 return Ok(true);
             }
             let cursor = detail.get("cursor").and_then(Value::as_str).unwrap_or("").to_string();
-            let users: Vec<String> = c.query("SELECT user_id FROM group_fanout WHERE event_id = ? AND user_id > ? ORDER BY user_id LIMIT ?", params![e.id, cursor, per], |r| r.get(0))?;
+            let users: Vec<String> = c.query("SELECT user_id FROM group_fanout WHERE event_id = ? AND user_id > ? ORDER BY user_id LIMIT ?", params![e.id, cursor, FANOUT_PAGE as i64], |r| r.get(0))?;
             let group = detail.get("group").cloned().unwrap_or(Value::Null);
             for u in &users {
-                for p in &projects {
-                    c.execute(
-                        "INSERT INTO member_events (id, at, action, project_id, actor, subject, detail, ip) VALUES (?, ?, 'group.lost', ?, ?, ?, ?, ?)",
-                        params![format!("mev_{}", random(16)), now, p, e.actor, u, json!({ "group": group, "event": e.id, "why": e.action }).to_string(), e.ip],
-                    )?;
+                let mut projects = vec![];
+                for l in &lost {
+                    if !still_covered(&memberships_on(c, &l.project, u)?, l) {
+                        projects.push(l.project.clone());
+                    }
                 }
+                if projects.is_empty() {
+                    continue;
+                }
+                c.execute(
+                    "INSERT INTO member_events (id, at, action, project_id, actor, subject, detail, ip) VALUES (?, ?, 'group.lost', '', ?, ?, ?, ?)",
+                    params![format!("mev_{}", random(16)), now, e.actor, u, json!({ "group": group, "event": e.id, "why": e.action, "projects": projects }).to_string(), e.ip],
+                )?;
             }
-            let done = (users.len() as i64) < per;
+            let done = users.len() < FANOUT_PAGE;
             if done {
                 c.execute("DELETE FROM group_fanout WHERE event_id = ?", [e.id.as_str()])?;
                 detail["fanout"] = json!(false);
@@ -733,23 +786,68 @@ fn scim_actor(conn: &str) -> Actor {
 
 /// The operator's (and roll's admins', D12): a person acting as themselves may not.
 fn operator_only(actor: &Actor, what: &str) -> Result<()> {
-    if actor.user.is_some() && !decisions::PEOPLE_MAKE_GROUPS {
+    // The operator itself or an admin's session: never a scoped grant, which a token of either
+    // carries.
+    if (actor.user.is_some() || actor.grant.is_some()) && !decisions::PEOPLE_MAKE_GROUPS {
         return Err(Error::Forbidden(format!("{what} is roll's operator's or an admin's")));
     }
     Ok(())
 }
 
-/// A SCIM group's members are its provider's.
-fn managed(g: &Group) -> Result<()> {
-    match g.connection() {
-        Some(_) => Err(Error::Managed(format!("{}'s members are kept by its identity provider", g.name))),
-        None => Ok(()),
+/// What roll's routes may do to a SCIM group's members: nothing while its provider keeps them;
+/// take people out while the connection's SCIM groups are off; anything once the connection is
+/// gone (it's roll's then).
+#[derive(Clone, Copy, PartialEq)]
+enum Keeper {
+    Provider,
+    Paused,
+    Roll,
+}
+
+impl Workspace {
+    fn keeper(&self, g: &Group) -> Keeper {
+        let Some(conn) = g.connection() else { return Keeper::Roll };
+        let people = self.people.get();
+        if people.is_some_and(|p| p.connection_gone(conn)) {
+            Keeper::Roll
+        } else if people.is_some_and(|p| p.scim_groups_on(conn)) {
+            Keeper::Provider
+        } else {
+            Keeper::Paused
+        }
+    }
+
+    /// Drop the groups of SSO connections that are gone (a removal that crashed before its groups
+    /// went): rolld runs this at start and on its tick.
+    pub fn sweep_groups(&self) -> Result<usize> {
+        let Some(people) = self.people.get() else { return Ok(0) };
+        let sources: Vec<String> = self.db.read(|c| Ok::<_, Error>(c.query("SELECT DISTINCT source FROM groups WHERE source LIKE 'scim:%'", (), |r| r.get(0))?))?;
+        let mut n = 0;
+        for s in sources {
+            let conn = s.trim_start_matches("scim:");
+            if people.connection_gone(conn) {
+                n += self.forget_connection_groups(conn)?;
+            }
+        }
+        Ok(n)
+    }
+}
+
+fn managed(g: &Group, keeper: Keeper, removing: bool) -> Result<()> {
+    match keeper {
+        Keeper::Roll => Ok(()),
+        Keeper::Paused if removing => Ok(()),
+        _ => Err(Error::Managed(format!("{}'s members are kept by its identity provider", g.name))),
     }
 }
 
 /// D11: who may give `group` a role.
 fn may_assign(c: &Conn<'_>, actor: &Actor, group: &str) -> Result<()> {
-    let Some(user) = &actor.user else { return Ok(()) };
+    // D11's operator is the operator itself or an admin's session, never a scoped token (an
+    // operator's `rlt_` with admin on one project could otherwise hand any tenant's group a role).
+    let Some(user) = &actor.user else {
+        return if actor.grant.is_none() { Ok(()) } else { Err(Error::Forbidden("a token never gives a group a role: roll's operator or a project admin in the group does, signed in".into())) };
+    };
     let ok = match decisions::GROUP_ASSIGNERS {
         GroupAssigners::AnyAdmin => true,
         GroupAssigners::Operator => false,
@@ -812,14 +910,14 @@ fn take_out(c: &Conn<'_>, group: &str, users: &[String]) -> Result<Vec<String>> 
 }
 
 /// Take `users` out of `group`, recording what they lost.
-fn remove_members(c: &Conn<'_>, now: i64, group: &str, actor: &Actor, users: &[String]) -> Result<()> {
+pub(crate) fn remove_members(c: &Conn<'_>, now: i64, group: &str, actor: &Actor, users: &[String]) -> Result<()> {
     let removed = take_out(c, group, users)?;
     if removed.is_empty() {
         return Ok(());
     }
-    let projects = projects_of(c, group)?;
+    let lost = held_by(c, group)?;
     let subject = (removed.len() == 1).then(|| removed[0].clone());
-    record_loss(c, now, "group.member_remove", "", actor, Loss { group, projects: &projects, who: Who::These(&removed) }, json!({ "user": subject, "removed": removed.len() }))
+    record_loss(c, now, "group.member_remove", "", actor, Loss { group, lost: &lost, who: Who::These(&removed) }, json!({ "user": subject, "removed": removed.len() }))
 }
 
 fn project_group_rows(c: &Conn<'_>, filter: &str, p: impl code_sql::Params) -> Result<Vec<GroupRole>> {

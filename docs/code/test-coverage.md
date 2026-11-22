@@ -1915,6 +1915,12 @@ holding a tiny ACP agent that answers `initialize`.
 | The fleet: requests to the owner, takeovers keeping instances, a deploy finishing on the node left, joins and handoffs | `apps-control/tests/cluster.rs::a_visitor_at_a_node_that_doesnt_own_the_service_gets_the_owners_answer`, `apps-control/tests/cluster.rs::a_killed_owners_service_moves_to_the_node_left`, `apps-control/tests/cluster.rs::a_deploy_in_flight_on_a_killed_owner_finishes_on_the_node_left`, `apps-control/tests/cluster.rs::a_joining_node_takes_services_with_no_request_failing`, `apps-control/tests/cluster.rs::a_takeover_keeps_the_instances_the_dead_owner_ran`, `apps-control/tests/cluster.rs::a_handoff_on_a_shared_runtime_keeps_the_instances`, `apps-control/tests/cluster.rs::a_cron_service_runs_on_the_node_that_takes_it_over`, `apps-control/tests/cluster.rs::a_visitor_cant_reach_a_service_through_the_internal_route` |
 | Fargate (a fake ECS and CodeBuild): tasks wake and sleep, failed builds, private images, cron tasks, multi-line values | `apps-control/tests/fargate.rs::a_web_service_builds_in_codebuild_runs_as_tasks_wakes_and_sleeps`, `apps-control/tests/fargate.rs::a_failed_build_fails_the_deploy_and_leaves_nothing`, `apps-control/tests/fargate.rs::a_private_image_pulls_with_its_registry_secret`, `apps-control/tests/fargate.rs::a_cron_run_is_a_task_and_reports_its_exit_code`, `apps-control/tests/fargate.rs::a_multi_line_value_reaches_the_task_through_its_deployments_secret` |
 
+## Members' groups and their tokens (`roll-access/tests/access.rs`, docs/members-v1-1.md)
+
+| behaviour | test |
+| --- | --- |
+| a person's token confined to a project is kept while a membership or another group still gives them it (`member.remove` and one of two groups going), and revoked once the last group goes (`group.lost`) | `access.rs::a_confined_token_follows_its_persons_groups` |
+
 ## Measurements
 
 | What | Test | Result |
