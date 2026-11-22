@@ -732,7 +732,7 @@ pub(crate) async fn stream(ctx: Arc<Ctx>, msg: &Value) -> axum::response::Respon
     let Some(f) = feed(name) else {
         return fail((-32023, format!("no event {name:?}: events/list says which there are"), json!({ "kind": "event" })));
     };
-    if !usable(ctx, f) {
+    if !usable(&ctx, f) {
         return fail((-32024, "Forbidden".into(), json!({ "reason": format!("this connection can't use {}", f.tool) })));
     }
     let Opened { filter, after: route, latest } = match open(f, &params["arguments"]) {
