@@ -442,13 +442,13 @@ pub struct Copies {
 
 /// `n` NULLs appended to `out` (a store of the variant each: no clone).
 #[inline]
-fn nulls(out: &mut Row, n: usize) {
+pub(super) fn nulls(out: &mut Row, n: usize) {
     out.resize_with(out.len() + n, || Value::Null);
 }
 
 /// `v` into slot `at` of `out`, which holds a NULL (nothing to drop).
 #[inline]
-fn put(out: &mut [Value], at: usize, v: Value) {
+pub(super) fn put(out: &mut [Value], at: usize, v: Value) {
     std::mem::forget(std::mem::replace(&mut out[at], v));
 }
 
@@ -507,6 +507,22 @@ impl Copies {
         out
     }
 
+    /// `joined_taking` by the lists.
+    fn joined_taking(&self, l: &[Value], r: &mut [Value], spare: usize) -> Row {
+        let (n, w) = (l.len(), r.len());
+        let mut out = Vec::with_capacity(n + w + spare);
+        nulls(&mut out, n + w);
+        for &i in &self.lkeep {
+            put(&mut out, i as usize, l[i as usize].clone());
+        }
+        for &i in &self.rkeep {
+            if let Some(v) = r.get_mut(i as usize) {
+                put(&mut out, n + i as usize, std::mem::replace(v, Value::Null));
+            }
+        }
+        out
+    }
+
     /// The outer row's columns not kept made NULL, and room for `w` inner ones (NULL).
     #[inline]
     fn outer(&self, l: &mut Row, w: usize) {
@@ -543,6 +559,29 @@ impl Copies {
         }
         l
     }
+}
+
+/// `joined` of an inner row its caller is done with (`r`'s values moved, not copied), by the
+/// stage's lists `c` when they fit.
+pub fn joined_taking_by(c: Option<&Copies>, l: &[Value], r: &mut [Value], keep: Option<&[bool]>, spare: usize) -> Row {
+    if let Some(c) = Copies::fits(c, l) {
+        return c.joined_taking(l, r, spare);
+    }
+    let take = |v: &mut Value| std::mem::replace(v, Value::Null);
+    let mut out = Vec::with_capacity(l.len() + r.len() + spare);
+    match keep {
+        None => {
+            out.extend_from_slice(l);
+            out.extend(r.iter_mut().map(take));
+        }
+        Some(k) => {
+            let kept = |i: usize| k.get(i).copied().unwrap_or(false);
+            out.extend(l.iter().enumerate().map(|(i, v)| if kept(i) { v.clone() } else { Value::Null }));
+            let n = l.len();
+            out.extend(r.iter_mut().enumerate().map(|(i, v)| if kept(n + i) { take(v) } else { Value::Null }));
+        }
+    }
+    out
 }
 
 /// `joined_from_taken`, by the stage's lists `c` when they fit.
@@ -856,7 +895,7 @@ fn run(stages: &[Arc<Stage>], cp: &[Option<Copies>], from: usize, row: Row, s: &
                     drain_from(stages, cp, from + 1, s, emit);
                     emit(Joined::Row(row), from as u8)
                 }
-                true => lk.emit(row, &mut rows, from + 1 < stages.len(), c, &mut |j| onward(stages, cp, from, j, s, emit)),
+                true => lk.emit(row, &mut rows, next_spare(stages, from), c, &mut |j| onward(stages, cp, from, j, s, emit)),
             }
             s.rows[from] = rows;
         }
@@ -889,6 +928,7 @@ fn drain_from(stages: &[Arc<Stage>], cp: &[Option<Copies>], from: usize, s: &mut
 fn lookup_batch(stages: &[Arc<Stage>], cp: &[Option<Copies>], from: usize, s: &mut Scratch, emit: &mut dyn FnMut(Joined, u8)) {
     let Stage::Lookup(lk) = &*stages[from] else { return };
     let c = cp.get(from).and_then(Option::as_ref);
+    let next = next_spare(stages, from);
     let mut ls = std::mem::take(&mut s.held[from]);
     let mut got = std::mem::take(&mut s.got[from]);
     let mut rows = std::mem::take(&mut s.rows[from]);
@@ -899,12 +939,18 @@ fn lookup_batch(stages: &[Arc<Stage>], cp: &[Option<Copies>], from: usize, s: &m
                 drain_from(stages, cp, from + 1, s, emit);
                 emit(Joined::Row(l), from as u8)
             }
-            super::lookup::Got::Rows(a, b) => lk.emit(l, &mut rows[a as usize..b as usize], from + 1 < stages.len(), c, &mut |j| onward(stages, cp, from, j, s, emit)),
+            super::lookup::Got::Rows(a, b) => lk.emit(l, &mut rows[a as usize..b as usize], next, c, &mut |j| onward(stages, cp, from, j, s, emit)),
         }
     }
     s.held[from] = ls;
     s.got[from] = got;
     s.rows[from] = rows;
+}
+
+/// When a stage follows stage `from`: the room its rows are made with (`spare`).
+#[inline]
+fn next_spare(stages: &[Arc<Stage>], from: usize) -> Option<usize> {
+    (from + 1 < stages.len()).then(|| spare(stages, from + 1))
 }
 
 /// A row stage `from` made, to the stage after it (or out, after the last).

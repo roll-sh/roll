@@ -449,42 +449,39 @@ impl Lookup {
     /// those not needed NULL (Err: it didn't decode; nothing appended).
     fn decode_into(&self, bytes: &[u8], out: &mut Vec<Value>) -> crate::error::Result<()> {
         use crate::storage::row::{decode_value, skip_value_fast};
+        use super::pipe::put;
         let data = super::scan::row_data(bytes)?;
         let base = out.len();
-        out.reserve(self.width);
+        // (The row's values NULL, then those decoded put in their places: no push a value.)
+        super::pipe::nulls(out, self.width);
         let r = (|| {
+            let row = &mut out[base..];
             let mut pos = 0;
             let n = crate::storage::sst::get_varint(data, &mut pos)? as usize;
             let walk = self.last.min(n);
             match self.decode.need.as_deref() {
                 Some(need) => {
-                    for &want in &need[..walk] {
+                    for (i, &want) in need[..walk].iter().enumerate() {
                         if want {
-                            out.push(decode_value(data, &mut pos)?);
+                            put(row, i, decode_value(data, &mut pos)?);
                         } else {
                             skip_value_fast(data, &mut pos)?;
-                            out.push(Value::Null);
                         }
                     }
                 }
                 None => {
-                    for _ in 0..walk {
-                        out.push(decode_value(data, &mut pos)?);
+                    for i in 0..walk {
+                        put(row, i, decode_value(data, &mut pos)?);
                     }
                 }
             }
             // (The columns past the walk NULL; one added since the row was stored, and
             // needed, its value.)
-            let stored = n.min(self.width);
-            for _ in walk..stored {
-                out.push(Value::Null);
-            }
-            for i in stored..self.width {
+            for i in n.min(self.width)..self.width {
                 let needed = self.decode.need.as_deref().is_none_or(|nd| nd[i]);
-                out.push(match &self.decode.missing[i] {
-                    Some(v) if needed => v.clone(),
-                    _ => Value::Null,
-                });
+                if let Some(v) = self.decode.missing[i].as_ref().filter(|_| needed) {
+                    put(row, i, v.clone());
+                }
             }
             Ok(())
         })();
@@ -863,9 +860,11 @@ impl Lookup {
     }
 
     /// The join's rows for outer row `l` and its inner `rows` (`width` values a row), in
-    /// order, to `f` (`own_last`: `Probe::emit`'s; the last row's values are moved into the
-    /// joined row, not copied).
-    pub fn emit(&self, l: Row, rows: &mut [Value], own_last: bool, cp: Option<&super::pipe::Copies>, f: &mut dyn FnMut(Joined)) {
+    /// order, to `f`. `next`: a stage after this one makes each a row of its own, with room
+    /// for that many more values (`pipe::spare`): the rows are made here, the inner rows'
+    /// values moved into them, not copied (the caller is done with `rows`), and the last
+    /// row's outer values too. `cp`: the stage's lists (`pipe::Copies`).
+    pub fn emit(&self, l: Row, rows: &mut [Value], next: Option<usize>, cp: Option<&super::pipe::Copies>, f: &mut dyn FnMut(Joined)) {
         match self.kind {
             JoinKind::Semi if !rows.is_empty() => f(Joined::Row(l)),
             JoinKind::Anti if rows.is_empty() => f(Joined::Row(l)),
@@ -878,16 +877,16 @@ impl Lookup {
             _ => {
                 let keep = self.keep.as_deref();
                 let last = rows.len().saturating_sub(self.width);
-                if !own_last || rows.is_empty() {
+                let Some(spare) = next.filter(|_| !rows.is_empty()) else {
                     for r in rows.chunks_exact(self.width) {
                         f(Joined::Pair { l: &l, r: super::pipe::Inner::plain(r), keep });
                     }
                     super::pipe::drop_row(l);
                     return;
-                }
+                };
                 let (rest, last) = rows.split_at_mut(last);
-                for r in rest.chunks_exact(self.width) {
-                    f(Joined::Pair { l: &l, r: super::pipe::Inner::plain(r), keep });
+                for r in rest.chunks_exact_mut(self.width) {
+                    f(Joined::Row(super::pipe::joined_taking_by(cp, &l, r, keep, spare)));
                 }
                 f(Joined::Row(super::pipe::joined_from_taken_by(cp, l, last, keep)));
             }
@@ -990,11 +989,8 @@ fn entry_spans_to(store: &Arc<Store>, ts: u64, unique: bool, start: &[u8], end: 
     if unique {
         use crate::storage::point::First;
         let r = sc.reader.get_or_insert_with(|| store.point_reader(ts, false));
-        match store.first_with(r, start, end, false).ok()? {
-            First::Row(_, v) => {
-                push(&v);
-                return Some(true);
-            }
+        match store.first_to(r, start, end, &mut *push).ok()? {
+            First::Row(..) => return Some(true),
             First::None => return Some(false),
             First::Unknown => {}
         }

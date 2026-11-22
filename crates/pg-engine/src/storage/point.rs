@@ -169,6 +169,50 @@ impl PointReader {
         })
     }
 
+    /// `first_raw` with the row's value (as stored) lent to `f`, not returned: `First::Row`
+    /// then holds no key and no value. When L1 alone answers (`first_in_l1`), nothing is made:
+    /// an index entry's value (the row's key, made from the entry's key) was copied into a new
+    /// buffer, and the key into another, for a lookup that only appends the value to its own.
+    pub fn first_raw_to(&mut self, start: &[u8], end: &[u8], f: &mut dyn FnMut(&[u8])) -> Result<First> {
+        self.room();
+        if let Some(first) = self.first_in_l1_to(start, end, f)? {
+            return Ok(first);
+        }
+        Ok(match self.first_raw(start, end)? {
+            First::Row(_, v) => {
+                f(&v);
+                First::Row(Vec::new(), Bytes::new())
+            }
+            other => other,
+        })
+    }
+
+    /// `first_in_l1` with the row's value lent to `f` (`first_raw_to`).
+    fn first_in_l1_to(&mut self, start: &[u8], end: &[u8], f: &mut dyn FnMut(&[u8])) -> Result<Option<First>> {
+        let view = &*self.view;
+        if !view.imm.is_empty() || !view.l0.is_empty() || view.l1.is_empty() || !view.rdels.is_empty() || (!view.mem.is_empty() && view.mem.may_hold_range(start, end)) {
+            return Ok(None);
+        }
+        let ts = self.ts;
+        let Bufs { held, pos, .. } = &mut self.bufs;
+        let mut first = Some(First::None);
+        file_first(&view.l1, held.get_mut(0), start, pos, &mut |block, pos| {
+            let k = pos.key();
+            let uk = user_key(k);
+            first = if !end.is_empty() && uk >= end {
+                Some(First::None)
+            } else if uk < start || key_ts(k) > ts {
+                None
+            } else {
+                block.value_ref(pos).map(|v| {
+                    f(v);
+                    First::Row(Vec::new(), Bytes::new())
+                })
+            };
+        })?;
+        Ok(first)
+    }
+
     /// `first_raw` by one seek, when L1 is the only source that may hold a key of
     /// [start, end) (no frozen source, no L0 file, a memtable without keys of the range's
     /// relation, no range deletion): its first entry at or after `start` is the newest version

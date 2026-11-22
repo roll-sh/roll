@@ -1471,6 +1471,21 @@ impl Store {
         })
     }
 
+    /// `first_with` of values as stored, the row's value lent to `f` (`First::Row` then holds
+    /// no key and no value: `PointReader::first_raw_to`).
+    pub fn first_to(&self, r: &mut point::PointReader, start: &[u8], end: &[u8], f: &mut dyn FnMut(&[u8])) -> Result<point::First> {
+        match self.hot.scan(start, end, r.ts()) {
+            Some(rows) => Ok(match rows.first() {
+                Some((_, v)) => {
+                    f(v);
+                    point::First::Row(Vec::new(), Bytes::new())
+                }
+                None => point::First::None,
+            }),
+            None => r.first_raw_to(start, end, f),
+        }
+    }
+
     /// `first_with` (values as stored) for a lookup a scan would otherwise make: the hot
     /// ranges as `scan_raw` reads them, the probe counted toward keeping its range hot as a
     /// scan is.
