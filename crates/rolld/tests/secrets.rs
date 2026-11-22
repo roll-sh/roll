@@ -474,6 +474,33 @@ async fn apps_shows_a_staging_reference_to_production_only_to_who_may_reveal_pro
 /// Reach names the roll apps services that read a folder (rolld's `ReachHolders`): one deploying
 /// the environment reads its root, and one whose `roll://` variable names a key of a subfolder
 /// reads that folder too.
+/// A roll apps log drain into roll search, end to end: rolld makes the drain's data stream (roll
+/// apps' template, the stream, its retention) through search's console as the operator, mints a
+/// key that may only append to that stream through the search link's provider, and the drain's
+/// batch lands there as an ECS document through `_bulk`; the key reads and deletes nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_apps_drain_appends_to_its_own_search_data_stream() {
+    let r = Rolld::start("apps,search", false).await;
+    let p = Project::new(&r).await;
+    let sc = r.post("/v1/search/clusters", json!({ "name": "logs" })).await;
+    let id = sc["id"].as_str().unwrap();
+    r.call(reqwest::Method::PUT, &format!("/v1/workspace/projects/{}/resources/search/{id}", p.id), Some(json!({ "x": 0, "y": 0 }))).await;
+    let drains = format!("/v1/apps/projects/{}/drains", p.id);
+    let d = r.post(&drains, json!({ "search": id, "namespace": "web", "retention_days": 7 })).await;
+    assert_eq!(d["stream"], "logs-roll.apps-web", "{d}");
+    let t = r.post(&format!("{drains}/{}/test", d["id"].as_str().unwrap()), json!({})).await;
+    assert_eq!(t["ok"], true, "{t}");
+    let (url, owner, password) = (sc["url"].as_str().unwrap(), sc["username"].as_str().unwrap(), sc["password"].as_str().unwrap());
+    let as_owner = |m: reqwest::Method, path: &str| r.http.request(m, format!("{url}{path}")).basic_auth(owner, Some(password));
+    as_owner(reqwest::Method::POST, "/logs-roll.apps-web/_refresh").send().await.unwrap();
+    let found: Value = as_owner(reqwest::Method::POST, "/logs-roll.apps-web/_search").json(&json!({})).send().await.unwrap().json().await.unwrap();
+    let doc = &found["hits"]["hits"][0]["_source"];
+    assert!(doc["@timestamp"].is_string() && doc["event"]["dataset"] == "roll.apps", "an ECS document: {found}");
+    let life: Value = as_owner(reqwest::Method::GET, "/_data_stream/logs-roll.apps-web/_lifecycle").send().await.unwrap().json().await.unwrap();
+    assert_eq!(life["data_streams"][0]["lifecycle"]["data_retention"], "7d", "{life}");
+    r.call(reqwest::Method::DELETE, &format!("{drains}/{}", d["id"].as_str().unwrap()), None).await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reach_names_the_services_that_read_a_folder() {
     // With search: the harness reads every rolld's search address.

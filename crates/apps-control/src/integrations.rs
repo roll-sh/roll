@@ -438,6 +438,12 @@ pub trait Resources: Send + Sync {
     async fn link(&self, _kind: LinkKind, _ref: &str, _service: &str, _options: &LinkOptions) -> anyhow::Result<Option<Minted>> {
         Ok(None)
     }
+    /// A search cluster's data stream for a log drain made or kept as asked: roll apps' index
+    /// template for `logs-roll.apps-*` (ECS mappings, no ILM policy, compressed), the stream, and
+    /// its retention (`retention_days`). Run as the operator; the drain's own key only appends.
+    async fn log_stream(&self, _cluster: &str, _stream: &str, _retention_days: u32) -> anyhow::Result<()> {
+        anyhow::bail!("roll search isn't on this node")
+    }
     /// Revoke what [`Resources::link`] made (`kept`: what it said to keep, a key's id) when
     /// the link goes.
     async fn unlink(&self, _kind: LinkKind, _ref: &str, _kept: &str) -> anyhow::Result<()> {
