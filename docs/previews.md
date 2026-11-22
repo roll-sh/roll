@@ -1680,6 +1680,11 @@ type Preview = {
   last_reset_at: number | null; last_active_at: number; expires_at: number | null;
   created_by: string; created_at: number; updated_at: number;
   baseline: boolean;                  // roll keeps it to compare the project's changes with (github.baseline)
+  timeline?: { head: string; started_at: number; steps: { step: "data" | "setup" | "deploy" | "checks" | "ready"; at: number }[] };
+                                      // how its head came up: each step once, when it first finished
+  intercepted?: { keys: { key: string; hosts: string[] }[]; swapped: number; refused: number;
+                  on_apps?: { requests: number; swapped: number; refused?: string[] } };
+                                      // keys it holds as placeholders, and what egress proxies swapped or refused
 };
 type Service = { name: string; repo: string; url: string; share_url: string | null; revision: string | null; deployed: string | null;
                  state: "pending" | "deploying" | "running" | "sleeping" | "failed"; error: string | null };
@@ -1714,6 +1719,7 @@ type Settings = {
   egress_hosts?: string[];            // with "roll" (or egress_forks "roll", for forks): hosts outside roll still reachable through its egress proxy (api.stripe.com, *.sentry.io; at most 20)
   egress_forks: "roll" | "open";      // what a fork's preview reaches when egress is "open" (default "roll")
   warm: boolean;                      // wake the change's services as soon as a new head is deployed (true)
+  crons: boolean;                     // roll apps' crons and scheduled commands run on their schedule in previews (false)
   env_for: Record<string, Record<string, string>>; // branch glob → variables, over env, under a preview's own ({})
   seed: Job | null;                   // once on fresh data
   release: Job | null;                // at each new head, before services deploy (migrations)
