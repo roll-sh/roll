@@ -1208,7 +1208,8 @@ A link is `{kind, ref, field, mode, options}`:
   `rotate_days`, on a managed link.
 - **`dynamic`** (short-lived credentials): each resolve that asks for it (`roll run`, an app's
   start) issues a fresh credential with a TTL (`ttl_minutes`, default 60, at least 15 minutes, at most 7 days), recorded
-  as a **lease**. Leases are revoked when they expire, or at once with `DELETE …/leases/{id}`. A
+  as a **lease**. Leases are revoked when they expire, or at once with `DELETE …/leases/{id}`, and
+  when the person they were issued to leaves the project or their account is disabled. A
   long-running consumer renews instead of restarting: `POST …/leases/{id}/renew` pushes the expiry
   out by the link's TTL (at most 30 days from issue), and the provider follows where the product
   enforces its own expiry (a Postgres role's `VALID UNTIL`). `roll run --watch` renews its leases
@@ -3923,6 +3924,11 @@ open it.
 - Creating, opening (with the opener's address) and revoking are in the project's audit log.
   `GET …/shares` lists a project's shares (never their ciphertext); `DELETE …/shares/{id}` revokes
   one. A project has at most 200 open at once.
+- **It opens at its maker's rights now.** Opening checks that whoever made it may still `reveal`
+  in the project, and where it came from (`registration_reaches`: a person's token stands for its
+  person). One whose maker was removed, demoted or disabled ends unopened (404, a `share.revoke`
+  audit row). A member removed or an account disabled ends their shares at once too
+  (docs/accounts.md, "Offboarding").
 - **Where it came from.** A share of a stored key (the CLI's `share KEY`, a key's "Share once" in
   the dashboard) says so: `from: {environment, path, key}`, checked against the caller's `reveal`
   there. The server can't see that the ciphertext holds that value; it records the claim so an
@@ -4568,7 +4574,10 @@ When a member is removed, leaves, is demoted or deletes their account, rolld als
 `Secrets::member_changed`: the folders they shared with other projects stop being shared once they
 may no longer manage the project, and the one-time shares they made end and the dynamic leases
 issued to them are revoked once they're no longer a member. Their personal overrides stay (only
-they read them, and they can't).
+they read them, and they can't). When their account is disabled (an admin, SCIM), stops being an
+admin's or is deleted, rolld calls `Secrets::person_offboarded`, which runs the same hook in every
+project holding an open share, a live lease or a shared folder: a disabled person counts as no
+member anywhere (docs/accounts.md, "Offboarding"). Enabled again, they get nothing back.
 
 So removing or demoting a member stops or narrows what they made at once. rolld asks roll-accounts
 and roll-access on every use; a lookup that fails is an error, not a disabled account.
@@ -5901,7 +5910,9 @@ Newest entries first; older State and Ranked entries follow further down, as his
 4. **An offboarded person's leases and one-time shares outlive them** (security, medium-low, S).
    Disabling an account (an admin, or SCIM deactivate or delete) doesn't run `member_changed`, so
    their dynamic credentials live out their TTL (up to 7 days) and their shares still open.
-   roll-accounts' disable writes an outbox event, and rolld treats a disabled person as no member.
+   roll-accounts' disable writes an outbox event, and rolld treats a disabled person as no member
+   (fixing in `fix/secrets-offboarding`, with item 5's "a disable stops the copier's running
+   sandboxes").
 5. **Sandbox copies are frozen at create** (S–M). Resolve `secrets_from` afresh at each start as the
    maker. agent37 recreates the instance on its home. A member event or a disable stops the copier's
    running sandboxes.
