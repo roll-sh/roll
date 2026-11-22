@@ -337,11 +337,11 @@ fn take_shard(db: &Database, cat: &Catalog, rf: &mut RelFiles, writes: &mut Vec<
             left = true;
             continue;
         };
-        let full = all
-            || saved.full_next
-            || saved.seq.is_none()
-            || saved.changes_bytes > saved.full_bytes.max(1 << 16)
-            || saved.seq.is_some_and(|s| s >= 256);
+        // (Folded by bytes alone: the change records cost at most the full record's bytes
+        // again. A fold after a fixed count of them wrote a big table's whole estimate, a
+        // megabyte and more with its places, every 256 small commits: to the log, the
+        // memtable and every compaction after it.)
+        let full = all || saved.full_next || saved.seq.is_none() || saved.changes_bytes > saved.full_bytes.max(1 << 16);
         let mut enc = Enc(Vec::with_capacity(256));
         enc.u8(if full { FULL } else { CHANGES });
         enc.u32(node);
