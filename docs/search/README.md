@@ -1334,8 +1334,10 @@ deterministic (#396).
    chat ops (Algolia's connectors notify on failed runs). A whole-product review on 2026-11-22
    found connectors refusing private addresses but not reindex's deny rules, and no per-owner cap on
    remote reindex slots: being fixed together as one node-wide egress check and owner-fair slots.
-8. **Semantic search with no keys** (built in #563, in review: roll's float build of E5 equals
-   Elasticsearch's float deployment, cosine 1.000000 on 64 of 64 cases; Elastic Cloud's `.multilingual-e5-small-elasticsearch`
+8. **Semantic search with no keys** (landed in #563, d756be014: roll's float build of E5 equals
+   Elasticsearch's float deployment, cosine 1.000000 on 68 of 68 cases, and its CPU is billed by the
+   cluster's catalog id; left: a RAG sample dataset on it (item 12) and OpenSearch-flavor local
+   models mapped onto it (item 14); Elastic Cloud's `.multilingual-e5-small-elasticsearch`
    and Elastic Inference Service, Typesense's and Meilisearch's built-in embedding models,
    Algolia's NeuralSearch): every `semantic_text` field and `text_embedding` endpoint on roll needs
    the customer's own provider key today, so the first semantic search means an OpenAI or Cohere
@@ -1682,7 +1684,10 @@ deterministic (#396).
    field could shadow the field the filter tests. Security filters (roles, API keys' role
    descriptors, OpenSearch Security's `dls`, a browser key's `filter`) are now built without the
    request's runtime fields on every read path, and a runtime field without a script reads only the
-   `_source` its reader may see. #601 (in review) carries the whole-product
+   `_source` its reader may see. #601 (landed, 27a29ffa6: the console decided on the routed API with
+   reveal-capable grants, an analysis memory budget per document and per node, one sealing path that
+   refuses secrets on a node without `ROLL_SECRET_KEY`, watch secrets bound to their cluster)
+   carried the whole-product
    review's fixes. A third, whole-product review on 2026-11-20 (main at 21708aef1) found no
    cross-tenant reach through branches, links or internal calls. Being fixed: Painless memory per
    execution, aggregation memory across the node (#549), observations keyed by name (a reused
