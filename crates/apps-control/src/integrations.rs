@@ -136,7 +136,8 @@ pub trait SecretSource: Send + Sync {
     /// A closed environment's interception, when its secrets have placeholders: the CA its
     /// instances trust and the step its egress proxy runs for a host the keys are bound to. One
     /// a project environment (the consumer `apps:<project>/<env>`), the same one while it stands.
-    async fn intercept(&self, _project: &str, _env: &str) -> anyhow::Result<Option<Intercept>> {
+    /// `hosts`: what its placeholders are bound to now (a CA that names fewer is made again).
+    async fn intercept(&self, _project: &str, _env: &str, _hosts: &[String]) -> anyhow::Result<Option<Intercept>> {
         Ok(None)
     }
     /// The project environment's placeholders and interception ended (it's deleted or opened).

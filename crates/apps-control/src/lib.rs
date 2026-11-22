@@ -299,9 +299,16 @@ pub struct Apps {
     status_swept: std::sync::atomic::AtomicI64,
     /// When owned environments' logs were last expired (hourly, [`Apps::expire_logs_pass`]).
     logs_expired: std::sync::atomic::AtomicI64,
-    /// The interception CA each closed environment's instances trust (its PEM's digest): when
-    /// roll secrets answers another (near its end, or ended early), they're moved to it.
-    pub(crate) intercept_cas: Mutex<HashMap<String, String>>,
+    /// The interception CA each closed environment's proxy serves and its instances trust: when
+    /// roll secrets answers another (near its end, ended early, a host bound since), instances
+    /// are moved to a bundle trusting both before the proxy switches.
+    pub(crate) intercept_cas: Mutex<HashMap<String, crate::deploy::Serving>>,
+    /// The next CA a closed environment's proxy switches to once the deployment whose instances
+    /// trust it is live (its network, and the CA).
+    pub(crate) intercept_pending: Mutex<HashMap<String, (String, crate::deploy::Serving)>>,
+    /// When each closed environment's instances were last moved to a new CA (at most every ten
+    /// minutes, whatever answers in between).
+    pub(crate) intercept_renewing: Mutex<HashMap<String, i64>>,
     /// When closed environments' CAs were last checked (each minute).
     intercepts_checked: std::sync::atomic::AtomicI64,
     /// Private environments' token hashes, by environment, as the owner last read or set them.
@@ -650,6 +657,8 @@ impl Apps {
             status_swept: std::sync::atomic::AtomicI64::new(0),
             logs_expired: std::sync::atomic::AtomicI64::new(0),
             intercept_cas: Mutex::new(HashMap::new()),
+            intercept_pending: Mutex::new(HashMap::new()),
+            intercept_renewing: Mutex::new(HashMap::new()),
             intercepts_checked: std::sync::atomic::AtomicI64::new(0),
             access: Mutex::new(HashMap::new()),
             access_gen: std::sync::atomic::AtomicU64::new(0),
@@ -2868,8 +2877,22 @@ impl Apps {
         let dep = self.db(move |s| s.deployment(&active)).await?;
         let sid = service.to_string();
         let svc = self.db(move |s| s.service(&sid)).await?;
+        // No CA kept for it here (a restart, a takeover): its interception CA's key lived only in
+        // the node that made it, so the instances this adopts trust one no proxy can serve.
+        let unknown_ca = row.egress.closed() && !self.intercept_cas.lock().contains_key(&env_key(service, env));
         let tpl = self.template(&svc, &row, &dep).await?;
         live.adopt(Arc::new(tpl)).await;
+        // So they're moved to the CA its proxy serves now (the same image, a new deployment).
+        if unknown_ca && live.awake() > 0 {
+            let (this, sid, en, active) = (self.clone(), service.to_string(), env.to_string(), row.active.clone().unwrap_or_default());
+            tokio::spawn(async move {
+                let log = this.logs.sink(format!("env:{sid}/{en}"), crate::logs::Stream::System);
+                match this.rollback(&sid, &en, &active, Some("roll".into()), true, false).await {
+                    Ok(d) => log.line(format!("taken over with instances that trust an interception CA this node never had: moving them ({}) to the one its proxy serves", d.id)),
+                    Err(e) => log.line(format!("taken over with instances that trust an interception CA this node never had, and moving them didn't start: {e}")),
+                }
+            });
+        }
         Ok(live)
     }
 

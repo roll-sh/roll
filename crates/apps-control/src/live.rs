@@ -53,6 +53,8 @@ pub struct Template {
     /// That site's edge functions ([`crate::edge`]), and the service that runs them.
     pub edge: Vec<apps_build::edge::EdgeFn>,
     pub edge_service: String,
+    /// A closed environment's: the hosts its placeholders are bound to (its CA names them all).
+    pub intercept_hosts: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1986,6 +1988,12 @@ impl EnvLive {
 
     /// A file instances made from now on get (`path`, its contents), in place of one there: a
     /// closed environment's trust bundle when its interception CA changes while it sleeps.
+    /// Its template made again while nothing runs (a closed environment's new CA and placeholders
+    /// while it slept): its next start uses it.
+    pub fn set_template(&self, tpl: Arc<Template>) {
+        *self.template.lock() = Some(tpl);
+    }
+
     pub fn set_file(&self, path: &str, contents: &str) {
         let with = |t: &Arc<Template>| {
             let mut t = (**t).clone();
@@ -2726,6 +2734,7 @@ mod tests {
             site: None,
             edge: Vec::new(),
             edge_service: String::new(),
+            intercept_hosts: Vec::new(),
         })
     }
 
