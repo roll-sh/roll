@@ -489,7 +489,7 @@ async fn a_denied_address_is_refused_as_reindex_refuses_it() {
     let (port, got) = fake_postgres(Fake::Password).await;
     let c = cluster(&[("roll.egress.deny_addresses", "127.0.0.0/8,::1")]).await;
     for (id, host) in [("pg", "127.0.0.1"), ("pg-named", "localhost.")] {
-        pg_connector(&c, &format!("{host}:{port}"), id, "content-denied", "*", "pw-denied-1").await;
+        pg_connector(&c, &format!("{host}:{port}"), id, &format!("content-{id}"), "*", "pw-denied-1").await;
         let job = finished(&c, &start(&c, id, "full").await).await;
         assert_eq!(at(&job, "status").as_str(), Some("error"), "{job:?}");
         assert!(at(&job, "error").as_str().is_some_and(|e| e.contains(&format!("[{host}] is an address roll may not reach"))), "{host}: {job:?}");
