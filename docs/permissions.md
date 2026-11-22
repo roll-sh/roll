@@ -366,7 +366,18 @@ first, so they can't hide what runs, and anything that makes or changes credenti
 
 - Postgres SQL: `{"read_only": true}` is `read`, and the SQL runs as a role made for that one query
   that holds only `pg_read_all_data`, so Postgres refuses its writes whatever the SQL says (on a
-  branch's primary; a read replica refuses read-only SQL). Anything else is `write`.
+  branch's primary; a read replica refuses read-only SQL). Anything else is `write`, and a grant
+  that may not `admin` the endpoint runs it as a role made for that one query too: a member of the
+  roles that own the database's objects (its `roll_owner`, which takes what the project's superuser
+  owns there, and a branch's app role) holding `pg_read_all_data` and `pg_write_all_data`. It
+  changes rows and schemas, tables the superuser made included, and what it makes stays
+  (`roll_owner`'s); it can't make roles, run programs (`COPY … PROGRAM`) or read the server's
+  files, however the SQL is written (dynamic SQL in a `DO` block too). The operator's SQL, and a
+  grant's that may `admin` the endpoint (the gate's `roll_auth::Capable`, from the row's
+  `capable(Admin)`), runs as the superuser. On a read replica, write SQL from such a grant is
+  refused: send it `read_only`. Dropping objects (tables, indexes, columns, schemas, functions)
+  needs `delete` on the endpoint: without it the writer is a member of `roll_no_drop`, and an event
+  trigger the superuser owns refuses its drops. Deleting rows is a write.
 - Redis commands: commands that only read are `read`; `FLUSHDB`, `FLUSHALL`, `SWAPDB` and scripts
   (`EVAL`, `FCALL`, `FUNCTION`, `SCRIPT`) are `delete`; the server's own, Redis's `@dangerous`
   category (`ACL`, `CONFIG`, `MONITOR` and `SYNC`, which stream everyone's commands and data,
@@ -460,10 +471,10 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   cluster's own router picks for the request (`search_es::routes::handles_credentials`:
   `Api::answers_credentials`, new API keys, service, OAuth2, SAML, OIDC and PKI tokens,
   enrollment, connector and Fleet secrets, connectors' configurations, which Elasticsearch returns
-  with their sensitive values; `Api::sets_credentials`, a user's password), and asks the grant
-  (`Grant::allows`, on the resource the gate decided, `roll_auth::DecidedOn`). Anything short of
-  allowed is a 403; an approval isn't asked there, so a token that should do this needs `reveal`
-  allowed. The gate reads no console body.
+  with their sensitive values; `Api::sets_credentials`, a user's password), and runs it only when
+  the gate says the grant may reveal there too (the row's `capable: [reveal]`,
+  `roll_auth::Capable`). Anything short of allowed is a 403; an approval isn't asked for it, so a
+  token that should do this needs `reveal` allowed. The gate reads no console body.
 - Agents' machine commands, by `policy::agent_may`'s tiers: diffs and file reads `read`; working
   threads `write`; publishing with `land` `deploy`; a shell, writing files, rolling back, raising a
   thread's runtime or interaction mode, answering an agent's approval, endpoints, the gateway,
@@ -650,6 +661,34 @@ take only signed requests, so nobody outside the cluster can put a path there. O
   ask a person a second time, and doesn't log the request again; it still denies whatever the
   grant's rules deny there, and a revoked token stops there too. A hop from a node that didn't
   decide it (a public listener in front of the tasks leader) is decided in full.
+
+### People's sessions
+
+A signed-in person who isn't an admin (D9: roll's admin accounts stay the operator) is a grant too
+(docs/members.md, "Evaluation"). On a route their session may call (`Access::User`,
+`Access::UserOrCredential`), rolld's gate hands the request to the evaluator
+(`Authorizer::handle_session`), which builds `GrantKind::Session` from their memberships now (one
+indexed read in the workspace, never cached) and, on a **member product's** row (workspace and
+secrets in v1, `roll_auth::roles::MEMBER_PRODUCTS`), decides it as a token's: the row, the
+resource, the rules. Making a project is the person's own (`catalog::PERSON_OWN`). Every other
+route goes on as it did.
+
+- The roles are fixed rule templates (`crates/roll-auth/src/roles.rs`, one module holding the open
+  decisions D1–D9). A rule may carry `unprotected: true`: it matches only a resource whose
+  environment the product says isn't protected (`Resource::protected`: secrets, an environment
+  with a protection policy; a resource whose protection isn't known matches no such rule). It only
+  narrows, so a token can carry it too.
+- A project the session's rules don't name is a 404 (as the workspace answers); one they do is a
+  403 that names what the role lacks. A list it can't see whole is filtered; a session never asks.
+- Session requests aren't access-log rows (they aren't a token's), allowed or refused: a refused
+  session request leaves no audit row either, only its answer. Membership changes are
+  (`product=workspace`: `member.invite`, `member.accept`, `member.role`, `member.remove`,
+  `member.leave`, `home.set`, …).
+- A person (their session, or a token of theirs) puts a resource on a canvas, or makes a project
+  its home, only when `Owners` says it's theirs (their repo, their search cluster), or when it's
+  already at home in that project. Their grant's rules never count for this: a token can name any
+  resource. Taking a resource off their project's canvas is the project's `write`, whoever put it
+  there. The operator's tokens keep the rule of `admin` outright on the resource where it is.
 
 On an open daemon (loopback, no `ROLL_ADMIN_TOKEN`), requests without a token still pass, and a
 request **with** a scoped token is still evaluated. That keeps a well-behaved client to its rules,
@@ -928,6 +967,12 @@ a SIEM", `roll mcp sinks add https://…`, or `POST /v1/access/audit/sinks {url,
 
 ## Users' own tokens
 
+A person's session is a grant built from their project roles ([members.md](members.md),
+[People's sessions](#peoples-sessions)), and a person's own token reaches only what both its rules
+and that session grant allow, as it is on each request (`roll_auth::SessionGrant` beside the
+token's grant): removing someone from a project stops every token of theirs there at once, and
+their tokens confined to the project are revoked (D7).
+
 With accounts (docs/accounts.md), a signed-in person who isn't an admin makes tokens and connects
 MCP clients for themselves, as GitHub's fine-grained tokens act for the person who made them:
 
@@ -961,11 +1006,13 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
   A product's own background work that looks a stored grant up (`roll_auth::Grants::grant`: a
   sync a token made) gets `None` for it then too (`Sessions::person_now`).
   An admin's token runs as the operator's, narrowed. Anyone else's token runs as their session
-  would: only routes their session may call (the gate's `User`, `Product` and `Public` rules, which
-  it hands the evaluator as `roll_auth::RouteAccess`), as them (`roll_auth::SignedIn`, no
-  `Operator`), then narrowed again by its rules. So roll code sees their own owner (git checks the
-  repo as them before it takes the gate's word), projects and search clusters are their own, and
-  every other product answers `403 operator_only`, whatever the rules say.
+  would: only routes their session may call (the gate's `User`, `UserOrCredential`, `Product` and
+  `Public` rules, which it hands the evaluator as `roll_auth::RouteAccess`), as them
+  (`roll_auth::SignedIn`, no `Operator`), then narrowed again by its rules and, on a member
+  product, by their session's grant. So roll code sees their own owner (git checks the repo as them
+  before it takes the gate's word), projects are the ones they're a member of, secrets are those
+  projects' as their roles allow, search clusters are their own, and every other product answers
+  `403 operator_only`, whatever the rules say.
 - They see and manage only their own tokens, connections, approvals and audit rows, and **they
   decide their own token's approvals** (a token never decides one). The operator sees everyone's.
 - A token or connection made from an admin's session is that admin's too: it acts as the operator
@@ -1270,6 +1317,7 @@ classify, so the check skips them):
 | `/v1/code/agents/shares/{id}`, `/v1/code/names` | public pages |
 | `/v1/code/review-apps` | review apps' own tokens |
 | `/v1/accounts` | people's accounts (docs/accounts.md): sign-in, sessions and invites are a person's, never a token's |
+| `/v1/workspace/invites` | a person's own project invites (docs/members.md): listing, accepting and declining take their session, never a token |
 | `/v1/code/mcp` | roll code's MCP server calls roll code without the gate; grants use `/v1/mcp` |
 | `/v1/access/approvals/{id}/approve` and `/deny`, `/v1/access/oauth/authorize`, `/v1/access/oauth/devices/{code}`, `/v1/access/notify`, `/v1/access/policy`, `/v1/access/audit/sinks` | the operator decides |
 

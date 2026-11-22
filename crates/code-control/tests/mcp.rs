@@ -12,19 +12,26 @@ use serde_json::{Value, json};
 const MCP: &str = "/v1/code/mcp";
 
 /// The tools docs/code/mcp.md lists.
-const TOOLS: [&str; 38] = [
+const TOOLS: [&str; 71] = [
     "list_repos", "search_code", "read_file", "list_tree", "log", "blame", "get_changeset", "compare", "create_change", "revise_change", "land", "get_change",
     "list_changes", "claim_work", "heartbeat_work", "release_work", "complete_work", "list_work", "create_work", "comment", "review", "queue_status",
     "request_ai_review", "list_agent_machines", "list_agent_threads", "create_agent_thread", "send_agent_message", "respond_agent_request",
     "interrupt_agent_thread", "publish_agent_thread", "create_agent_project", "claim_agent_work", "list_agent_automations", "save_agent_automation",
-    "run_agent_automation", "list_agent_automation_runs", "get_agent_automation_run", "cancel_agent_automation_run",
+    "run_agent_automation", "list_agent_automation_runs", "get_agent_automation_run", "cancel_agent_automation_run", "enqueue_change", "dequeue_change",
+    "close_change", "report_check", "set_commit_status", "list_refs", "create_repo", "resolve_thread", "reopen_thread", "apply_suggestion", "request_review",
+    "get_commit_statuses", "get_work", "update_work", "release_agent_work", "update_change", "set_change_lane",
+    "get_ai_review_pricing", "get_review_usage", "list_ai_reviews", "get_reviewer", "get_review_rules", "get_repo_audit", "start_preview",
+    "stop_preview", "retry_agent_automation_run", "enable_agent_automation", "disable_agent_automation", "get_agent_automation_catalog", "test_agent_automation",
+    "list_agent_sandboxes", "stop_agent_sandbox", "get_agent_sandbox_usage",
 ];
 /// The agents tools (not repo-scoped: `agent_tools_drive_a_machine_like_their_routes`,
 /// `agent_tools_work_in_roll_code_like_their_routes` and `automation_tools_map_onto_their_routes`).
-const AGENT_TOOLS: usize = 15;
+const AGENT_TOOLS: usize = 24;
 /// The ones that only read (`readOnlyHint`).
-const READ_ONLY: [&str; 17] = [
-    "list_repos", "search_code", "read_file", "list_tree", "log", "blame", "get_changeset", "compare", "get_change", "list_changes", "list_work", "queue_status",
+const READ_ONLY: [&str; 29] = [
+    "list_repos", "search_code", "read_file", "list_tree", "log", "blame", "get_changeset", "compare", "get_change", "list_changes", "list_work", "queue_status", "list_refs",
+    "get_commit_statuses", "get_work", "get_ai_review_pricing", "get_review_usage", "list_ai_reviews", "get_reviewer", "get_review_rules",
+    "get_repo_audit", "get_agent_automation_catalog", "list_agent_sandboxes", "get_agent_sandbox_usage",
     "list_agent_machines", "list_agent_threads", "list_agent_automations", "list_agent_automation_runs", "get_agent_automation_run",
 ];
 
@@ -137,7 +144,13 @@ async fn transport_sessions_and_protocol() {
         let read_only = READ_ONLY.contains(&t["name"].as_str().unwrap());
         assert_eq!(t["annotations"]["readOnlyHint"], read_only, "{}", t["name"]);
         // A model provider or a branch's remote is outside roll; a repo's own reads and writes aren't.
-        let open = ["request_ai_review", "create_agent_thread", "publish_agent_thread"].contains(&t["name"].as_str().unwrap());
+        let open = ["request_ai_review", "create_agent_thread", "publish_agent_thread", "retry_agent_automation_run"].contains(&t["name"].as_str().unwrap());
+        // What can't be undone asks a person first: a closed change, a preview's data.
+        let destructive = ["close_change", "stop_preview"].contains(&t["name"].as_str().unwrap());
+        assert_eq!(t["annotations"]["destructiveHint"], destructive, "{}", t["name"]);
+        // A read, or only PUTs and DELETEs: retrying it is safe.
+        let idempotent = read_only || ["dequeue_change", "stop_preview", "release_agent_work"].contains(&t["name"].as_str().unwrap());
+        assert_eq!(t["annotations"]["idempotentHint"], idempotent, "{}", t["name"]);
         if open || ["read_file", "land", "comment"].contains(&t["name"].as_str().unwrap()) {
             assert_eq!(t["annotations"]["openWorldHint"], open, "{}", t["name"]);
         }
@@ -449,6 +462,16 @@ async fn land_outcomes_queued_branches_and_errors() {
     let three = c.tool("create_change", json!({ "repo": repo, "title": "three", "base": "main", "files": { "4.txt": { "content": "4\n" } } })).await;
     let bad = c.call("land", json!({ "change": three["id"], "lane": "sideways" })).await;
     assert_eq!((bad["isError"].as_bool(), bad["structuredContent"]["http_status"].as_i64()), (Some(true), Some(400)), "{bad}");
+    // The queue's own tools: queue a change in a lane, take it out (open again), close it; a
+    // closed change can't queue.
+    let qd = c.tool("enqueue_change", json!({ "change": three["id"], "lane": "urgent" })).await;
+    assert_eq!((qd["status"].as_str(), qd["change"]["queue"]["lane"].as_str()), (Some("queued"), Some("urgent")), "{qd}");
+    let moved = c.tool("set_change_lane", json!({ "change": three["id"], "lane": "normal" })).await;
+    assert_eq!(moved["queue"]["lane"], "normal", "{moved}");
+    assert_eq!(c.tool("dequeue_change", json!({ "change": three["id"] })).await["state"], "open");
+    assert_eq!(c.tool("close_change", json!({ "change": three["id"] })).await["state"], "closed");
+    let shut = c.call("enqueue_change", json!({ "change": three["id"] })).await;
+    assert_eq!((shut["isError"].as_bool(), shut["structuredContent"]["http_status"].as_i64()), (Some(true), Some(409)), "{shut}");
 }
 
 /// `read_file` past 2,000 lines comes back in ranges with a pointer to the next one; a binary
@@ -617,6 +640,68 @@ async fn tools_map_onto_their_routes() {
     ada.initialize("2025-06-18").await;
     let r = ada.tool("review", json!({ "change": id, "verdict": "approve" })).await;
     assert_eq!((r["reviewer"]["kind"].as_str(), r["reviewer"]["name"].as_str()), (Some("user"), Some("ada")), "{r}");
+
+    // What outside CI reports, a repo's refs, and a new repo: each what its route then shows.
+    let ch = c.tool("report_check", json!({ "change": id, "name": "tests", "status": "success", "summary": "42 passed" })).await;
+    assert!(ch["checks"].as_array().unwrap().iter().any(|k| k["name"] == "tests" && k["status"] == "success"), "{ch}");
+    let st = c.tool("set_commit_status", json!({ "repo": repo, "rev": "main", "state": "pending", "context": "ci/build" })).await;
+    assert_eq!(st["status"]["context"], "ci/build", "{st}");
+    let refs = c.tool("list_refs", json!({ "repo": repo })).await;
+    assert_eq!(refs["items"], a.ok("GET", &format!("{p}/refs"), None).await, "a list comes back as items");
+    let made = c.tool("create_repo", json!({ "owner": "acme", "name": "fresh", "visibility": "private" })).await;
+    assert_eq!(made, a.ok("GET", "/v1/code/repos/acme/fresh", None).await);
+
+    // A review thread resolved and reopened, a suggestion applied (a new revision, its thread
+    // resolved), a review asked for, statuses read back, one work item read and updated: each
+    // what its route then shows.
+    let resolved = c.tool("resolve_thread", json!({ "thread": th_id })).await;
+    assert_eq!(resolved["resolved"], true, "{resolved}");
+    assert_eq!(resolved, a.ok("GET", &format!("/v1/code/threads/{th_id}"), None).await);
+    assert_eq!(c.tool("reopen_thread", json!({ "thread": th_id })).await["resolved"], false);
+    let before = a.ok("GET", &format!("/v1/code/changes/{id}"), None).await["revision"].as_u64().unwrap();
+    let sug = c.tool("comment", json!({ "change": id, "path": "src/lib.rs", "line": 5, "side": "new", "body": "rename\n```suggestion\nfn e2() {}\n```" })).await;
+    let applied = c.tool("apply_suggestion", json!({ "thread": sug["id"] })).await;
+    assert_eq!((applied["change"]["revision"].as_u64(), applied["thread"]["resolved"].as_bool()), (Some(before + 1), Some(true)), "{applied}");
+    let file = c.tool("read_file", json!({ "repo": repo, "path": "src/lib.rs", "rev": applied["change"]["head"] })).await;
+    assert!(file["content"].as_str().unwrap().contains("fn e2() {}\n"), "{file}");
+    let asked = c.tool("request_review", json!({ "change": id, "reviewer": "agent:bot", "required": true })).await;
+    let requests = a.ok("GET", &format!("/v1/code/changes/{id}/review-requests"), None).await;
+    assert_eq!(asked["items"], requests, "{asked}");
+    let gc = c.tool("get_change", json!({ "change": id })).await;
+    assert_eq!(gc["review_requests"], requests);
+    assert_eq!(gc["reviews"], a.ok("GET", &format!("/v1/code/changes/{id}/reviews"), None).await, "reviews with what each reviewer wrote");
+    same(c.tool("get_commit_statuses", json!({ "repo": repo, "rev": "main" })).await, a.ok("GET", &format!("{p}/statuses/main"), None).await);
+    same(c.tool("get_work", json!({ "work": wn })).await, a.ok("GET", &format!("/v1/code/work/{wid}"), None).await);
+    let upd = c.tool("update_work", json!({ "work": wid, "title": "Add f, renamed", "labels": ["feat", "later"] })).await;
+    assert_eq!((upd["title"].as_str(), upd["labels"].as_array().map(Vec::len)), (Some("Add f, renamed"), Some(2)), "{upd}");
+    assert_eq!(upd, a.ok("GET", &format!("/v1/code/work/{wid}"), None).await);
+    // A change retitled, labelled and marked ready, as its route then shows.
+    let ready = c.tool("update_change", json!({ "change": id, "title": "Add d and e", "ready": true, "labels": ["api"] })).await;
+    assert_eq!((ready["title"].as_str(), ready["draft"].as_bool(), ready["labels"][0].as_str()), (Some("Add d and e"), Some(false), Some("api")), "{ready}");
+    assert_eq!(ready, a.ok("GET", &format!("/v1/code/changes/{id}"), None).await);
+    // Back to draft would take a queued change out of the queue: that's dequeue_change's.
+    assert!(c.tool_err("update_change", json!({ "change": id, "ready": false })).await.contains("dequeue_change"));
+
+    // The reviewer's reads, each its route's (jobs and their status move on their own, so ids).
+    let ids = |v: &Value| v.as_array().map(|a| a.iter().map(|j| j["id"].clone()).collect::<Vec<_>>());
+    let jobs = c.tool("list_ai_reviews", json!({ "change": id })).await;
+    assert_eq!(ids(&jobs["items"]), ids(&a.ok("GET", &format!("/v1/code/changes/{id}/ai-jobs"), None).await), "{jobs}");
+    let reviewer = c.tool("get_reviewer", json!({ "repo": repo })).await;
+    assert_eq!(reviewer["effective"], a.ok("GET", &format!("{p}/reviewer"), None).await["effective"]);
+    same(c.tool("get_review_rules", json!({ "repo": repo })).await, a.ok("GET", &format!("{p}/review-settings"), None).await);
+    same(c.tool("get_repo_audit", json!({ "repo": repo })).await, a.ok("GET", &format!("{p}/audit"), None).await);
+    same(c.tool("get_ai_review_pricing", json!({})).await, a.ok("GET", "/v1/code/pricing", None).await);
+    same(c.tool("get_review_usage", json!({ "owner": "acme" })).await, a.ok("GET", "/v1/code/owners/acme/usage", None).await);
+    // A preview answers as its route does, whether this app runs previews or not.
+    for (tool, method) in [("start_preview", "POST"), ("stop_preview", "DELETE")] {
+        let r = c.call(tool, json!({ "change": id })).await;
+        let (status, body) = a.req(method, &format!("/v1/code/changes/{id}/preview"), None, None).await;
+        if status.is_success() {
+            assert_eq!((r["isError"].as_bool(), &r["structuredContent"]["id"]), (Some(false), &body["id"]), "{tool}: {r}");
+        } else {
+            assert_eq!((r["isError"].as_bool(), r["structuredContent"]["http_status"].as_u64()), (Some(true), Some(status.as_u16() as u64)), "{tool}: {r}");
+        }
+    }
 }
 
 /// Every tool's argument errors: each required argument missing, ill-typed values, and
@@ -838,6 +923,27 @@ async fn every_tool_is_authorized_like_its_route() {
                 ("review", json!({ "change": ch, "verdict": "approve" }), post(format!("/v1/code/changes/{ch}/reviews"), json!({ "verdict": "approve" })), false),
                 ("review", json!({ "change": ch, "verdict": "comment", "body": "c" }), post(format!("/v1/code/changes/{ch}/reviews"), json!({ "verdict": "comment", "body": "c" })), false),
                 ("request_ai_review", json!({ "change": ch }), post(format!("/v1/code/changes/{ch}/ai-review"), json!({})), false),
+                ("list_refs", json!({ "repo": f.repo }), get(format!("{p}/refs")), true),
+                ("enqueue_change", json!({ "change": ch }), post(format!("/v1/code/changes/{ch}/enqueue"), json!({})), false),
+                ("dequeue_change", json!({ "change": ch }), ("DELETE", format!("/v1/code/changes/{ch}/enqueue"), None), false),
+                ("close_change", json!({ "change": ch }), post(format!("/v1/code/changes/{ch}/close"), json!({})), false),
+                ("report_check", json!({ "change": ch, "name": "ci", "status": "success" }), post(format!("/v1/code/changes/{ch}/checks"), json!({ "name": "ci", "status": "success" })), false),
+                ("set_commit_status", json!({ "repo": f.repo, "rev": "main", "state": "success" }), post(format!("{p}/statuses/main"), json!({ "state": "success" })), false),
+                ("get_commit_statuses", json!({ "repo": f.repo, "rev": "main" }), get(format!("{p}/statuses/main")), true),
+                ("list_ai_reviews", json!({ "change": ch }), get(format!("/v1/code/changes/{ch}/ai-jobs")), true),
+                ("get_reviewer", json!({ "repo": f.repo }), get(format!("{p}/reviewer")), true),
+                ("get_review_rules", json!({ "repo": f.repo }), get(format!("{p}/review-settings")), true),
+                ("get_repo_audit", json!({ "repo": f.repo }), get(format!("{p}/audit")), false),
+                ("start_preview", json!({ "change": ch }), post(format!("/v1/code/changes/{ch}/preview"), json!({})), false),
+                ("stop_preview", json!({ "change": ch }), ("DELETE", format!("/v1/code/changes/{ch}/preview"), None), false),
+                ("update_change", json!({ "change": ch, "title": "x" }), ("PATCH", format!("/v1/code/changes/{ch}"), Some(json!({ "title": "x" }))), false),
+                ("set_change_lane", json!({ "change": ch, "lane": "urgent" }), ("PATCH", format!("/v1/code/changes/{ch}/enqueue"), Some(json!({ "lane": "urgent" }))), false),
+                ("resolve_thread", json!({ "thread": th }), post(format!("/v1/code/threads/{th}/resolve"), json!({})), false),
+                ("reopen_thread", json!({ "thread": th }), post(format!("/v1/code/threads/{th}/unresolve"), json!({})), false),
+                ("apply_suggestion", json!({ "thread": th }), post(format!("/v1/code/threads/{th}/apply"), json!({})), false),
+                ("request_review", json!({ "change": ch, "reviewer": "agent:bot" }), post(format!("/v1/code/changes/{ch}/review-requests"), json!({ "reviewer": "agent:bot" })), false),
+                ("get_work", json!({ "work": wi }), get(format!("/v1/code/work/{wi}")), true),
+                ("update_work", json!({ "work": wi, "title": "x" }), ("PATCH", format!("/v1/code/work/{wi}"), Some(json!({ "title": "x" }))), false),
             ];
             let mut seen = std::collections::HashSet::new();
             for (tool, args, (method, path, body), reads) in cases {
@@ -868,12 +974,21 @@ async fn every_tool_is_authorized_like_its_route() {
                     _ => assert!(text.starts_with("not found"), "{ctx}"),
                 }
             }
-            assert_eq!(seen.len(), TOOLS.len() - AGENT_TOOLS - 1, "every repo tool is checked (and list_repos below)");
+            assert_eq!(seen.len(), TOOLS.len() - AGENT_TOOLS - 4, "every repo tool is checked (list_repos, create_repo and get_review_usage below; get_ai_review_pricing is public)");
         }
         // The list is the route's: only what the caller may read, so the private repo isn't in it.
         let listed = c.tool("list_repos", json!({})).await;
         let names: Vec<&str> = listed["items"].as_array().unwrap().iter().filter_map(|r| r["full_name"].as_str()).collect();
         assert_eq!(names, ["acme/pub"], "{who}: {listed}");
+        // Making a repo under acme is acme's (or the admin's): as the route answers.
+        let (status, _) = a.req("POST", "/v1/code/repos", Some(json!({ "owner": "acme", "name": "nope" })), token).await;
+        let res = c.call("create_repo", json!({ "owner": "acme", "name": "nope" })).await;
+        assert_eq!((res["isError"].as_bool(), res["structuredContent"]["http_status"].as_u64()), (Some(true), Some(status.as_u16() as u64)), "{who}: {res}");
+        assert!(!status.is_success(), "{who} made a repo under acme");
+        // An owner's spend is its managers': as the route answers.
+        let (status, _) = a.req("GET", "/v1/code/owners/acme/usage", None, token).await;
+        let res = c.call("get_review_usage", json!({ "owner": "acme" })).await;
+        assert_eq!((res["isError"].as_bool(), res["structuredContent"]["http_status"].as_u64()), (Some(true), Some(status.as_u16() as u64)), "{who}: {res}");
     }
     // The owner's own token and the admin read and write the private repo.
     let (_, t) = a.req("POST", "/v1/code/owners/acme/tokens", Some(json!({ "name": "t" })), root).await;
@@ -983,9 +1098,10 @@ async fn agent_tools_drive_a_machine_like_their_routes() {
         "body": { "type": "approval", "action": "command", "title": "Run `cargo test`", "decisions": ["accept", "decline"] }
     });
     let items = vec![
-        Stamped { seq: 1, entity: entity(json!({ "kind": "project", "id": "prj_1", "name": "api", "path": "/x", "created_at": 1, "updated_at": 1 })) },
+        Stamped { seq: 1, entity: entity(json!({ "kind": "project", "id": "prj_1", "name": "api", "path": "/x", "repo": { "owner": "acme", "repo": "api" }, "created_at": 1, "updated_at": 1 })) },
         Stamped { seq: 2, entity: entity(thread) },
         Stamped { seq: 3, entity: entity(request) },
+        Stamped { seq: 4, entity: entity(json!({ "kind": "project", "id": "prj_2", "name": "web", "path": "/y", "created_at": 1, "updated_at": 1 })) },
     ];
     d.upsert(items).await;
     // The daemon: records each command, answers interrupts with `conflict`, the rest `created`.
@@ -1011,6 +1127,10 @@ async fn agent_tools_drive_a_machine_like_their_routes() {
     let listed = c.tool("list_agent_threads", json!({ "owner": "acme", "machine": "box" })).await;
     assert_eq!((listed["threads"][0]["id"].as_str(), listed["threads"][0]["project_name"].as_str()), (Some("thr_a"), Some("api")), "{listed}");
     assert_eq!((listed["threads"][0]["machine"].as_str(), listed["requests"][0]["id"].as_str()), (Some(mid.as_str()), Some("req_1")), "{listed}");
+    // Projects, threads or not, with the repo each clones: where a new thread can start.
+    let projects: Vec<(&str, &Value)> = listed["projects"].as_array().unwrap().iter().map(|p| (p["id"].as_str().unwrap(), &p["repo"])).collect();
+    assert_eq!(projects, [("prj_1", &json!({ "owner": "acme", "repo": "api" })), ("prj_2", &Value::Null)], "{listed}");
+    assert_eq!(listed["projects"][1]["machine"], mid.as_str());
 
     // An agent starts threads in ask or auto_edit only (the default is full_access).
     let err = c.tool_err("create_agent_thread", json!({ "owner": "acme", "machine": mid, "project": "prj_1", "provider": "claude", "id": "k0" })).await;
@@ -1135,6 +1255,14 @@ async fn agent_tools_work_in_roll_code_like_their_routes() {
     let (_, state) = a.req("GET", "/v1/code/agents/acme/state", None, root).await;
     let thread = state["entities"].as_array().unwrap().iter().find(|m| m["entity"]["id"] == "thr_a").unwrap();
     assert_eq!(thread["entity"]["work"]["id"], item["id"], "{thread}");
+    // Letting go: the thread holds no work, and the item's claim stays until its lease runs out.
+    assert_eq!(c.tool("release_agent_work", json!({ "owner": "acme", "thread": "thr_a" })).await["released"], true);
+    let (_, state) = a.req("GET", "/v1/code/agents/acme/state", None, root).await;
+    let thread = state["entities"].as_array().unwrap().iter().find(|m| m["entity"]["id"] == "thr_a").unwrap();
+    assert!(thread["entity"]["work"].is_null(), "{thread}");
+    let (_, w) = a.req("GET", &format!("/v1/code/work/{}", item["id"].as_str().unwrap()), None, root).await;
+    assert_eq!(w["claimed_by"], "agent:bot", "{w}");
+    assert!(c.tool_err("release_agent_work", json!({ "owner": "acme", "thread": "thr_nope" })).await.starts_with("not found"));
 }
 
 /// The automation tools map onto their routes: save, list, run (an agent only when the
@@ -1175,4 +1303,22 @@ async fn automation_tools_map_onto_their_routes() {
     assert!(err.contains("agent"), "{err}");
     let cancelled = owner.tool("cancel_agent_automation_run", json!({ "owner": "acme", "run": rid })).await;
     assert_eq!(cancelled["status"], "cancelled");
+    // A cancelled run goes on again; an automation turned off and on by name; the catalogue and a
+    // dry run, each what its route answers.
+    let retried = owner.tool("retry_agent_automation_run", json!({ "owner": "acme", "run": rid })).await;
+    assert_ne!(retried["status"], "cancelled", "{retried}");
+    assert_eq!(owner.tool("disable_agent_automation", json!({ "owner": "acme", "automation": "Hello again" })).await["enabled"], false);
+    assert_eq!(a.req("GET", &format!("/v1/code/agents/acme/automations/{id}"), None, root).await.1["enabled"], false);
+    assert_eq!(owner.tool("enable_agent_automation", json!({ "owner": "acme", "automation": id })).await["enabled"], true);
+    assert_eq!(owner.tool("get_agent_automation_catalog", json!({ "owner": "acme" })).await, a.req("GET", "/v1/code/agents/acme/automations/catalog", None, root).await.1);
+    let event = json!({ "source": "manual", "kind": "run", "data": { "input": 1 } });
+    let tried = owner.tool("test_agent_automation", json!({ "owner": "acme", "spec": spec, "event": event })).await;
+    assert_eq!(tried, a.req("POST", "/v1/code/agents/acme/automations/test", Some(json!({ "automation": spec, "event": event })), root).await.1);
+    assert!(tried["trigger"].is_boolean(), "{tried}");
+    // Sandboxes: the list and a month's use as their routes answer; an unknown one isn't found.
+    assert_eq!(owner.tool("list_agent_sandboxes", json!({ "owner": "acme" })).await, a.req("GET", "/v1/code/agents/acme/sandboxes", None, root).await.1);
+    assert_eq!(owner.tool("get_agent_sandbox_usage", json!({ "owner": "acme" })).await, a.req("GET", "/v1/code/agents/acme/sandboxes/usage", None, root).await.1);
+    let (status, _) = a.req("POST", "/v1/code/agents/acme/sandboxes/sbx_nope/stop", Some(json!({})), root).await;
+    let r = owner.call("stop_agent_sandbox", json!({ "owner": "acme", "sandbox": "sbx_nope" })).await;
+    assert_eq!((r["isError"].as_bool(), r["structuredContent"]["http_status"].as_u64()), (Some(true), Some(status.as_u16() as u64)), "{r}");
 }

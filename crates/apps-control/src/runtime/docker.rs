@@ -1116,6 +1116,16 @@ impl Runtime for Docker {
         Ok(())
     }
 
+    fn intercepted(&self, network: &str) -> Option<super::egress::Intercepted> {
+        self.egress.as_ref().and_then(|p| p.intercepted(network))
+    }
+
+    fn set_interception(&self, network: &str, i: Option<std::sync::Arc<dyn roll_intercept::Interception>>) {
+        if let Some(p) = &self.egress {
+            p.set_interception(network, i);
+        }
+    }
+
     fn closes_egress(&self) -> bool {
         self.egress.is_some()
     }
@@ -1553,12 +1563,15 @@ impl tokio::io::AsyncRead for ChildReader {
 /// burst of pushes queues instead of taking every CPU and all memory of the node.
 pub struct DockerBuilder {
     slots: tokio::sync::Semaphore,
+    /// One more, for a build that isn't a preview's when every slot is taken (Vercel's
+    /// prioritized production builds): ten pull requests' builds don't hold up a hotfix.
+    reserved: tokio::sync::Semaphore,
     scanner: super::scan::Scanner,
 }
 
 impl DockerBuilder {
     pub fn new(at_once: usize) -> DockerBuilder {
-        DockerBuilder { slots: tokio::sync::Semaphore::new(at_once), scanner: Default::default() }
+        DockerBuilder { slots: tokio::sync::Semaphore::new(at_once), reserved: tokio::sync::Semaphore::new(1), scanner: Default::default() }
     }
 }
 
@@ -1571,6 +1584,17 @@ impl Builder for DockerBuilder {
     async fn build(&self, job: &BuildJob, log: &LogSink, cancel: tokio_util::sync::CancellationToken) -> anyhow::Result<String> {
         let _slot = match self.slots.try_acquire() {
             Ok(s) => s,
+            Err(_) if job.priority => match self.reserved.try_acquire() {
+                Ok(s) => s,
+                Err(_) => {
+                    log.line("waiting for another build on this node to finish");
+                    tokio::select! {
+                        s = self.slots.acquire() => s?,
+                        s = self.reserved.acquire() => s?,
+                        _ = cancel.cancelled() => bail!("canceled"),
+                    }
+                }
+            },
             Err(_) => {
                 log.line("waiting for another build on this node to finish");
                 tokio::select! {

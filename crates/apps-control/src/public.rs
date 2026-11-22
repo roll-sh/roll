@@ -1452,9 +1452,22 @@ pub(crate) async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment:
     // The environment's own headers (HSTS, a CSP): the app's own of the same name win unless the
     // rule replaces them, as a static site's `_headers` do.
     if let Some(g) = &gate {
+        let mut ours = Vec::new();
         for rule in g.headers.iter().filter(|h| h.matches(&path)) {
             for (k, v) in &rule.set {
                 if let (Ok(name), Ok(value)) = (axum::http::HeaderName::from_bytes(k.as_bytes()), HeaderValue::from_str(v))
+                    && (rule.replace || !r.headers().contains_key(&name))
+                {
+                    ours.push(name.clone());
+                    r.headers_mut().insert(name, value);
+                }
+            }
+        }
+        // Then the live deployment's roll.toml headers: never over one the environment set.
+        for rule in g.file_headers.iter().filter(|h| h.matches(&path)) {
+            for (k, v) in &rule.set {
+                if let (Ok(name), Ok(value)) = (axum::http::HeaderName::from_bytes(k.as_bytes()), HeaderValue::from_str(v))
+                    && !ours.contains(&name)
                     && (rule.replace || !r.headers().contains_key(&name))
                 {
                     r.headers_mut().insert(name, value);
@@ -1513,7 +1526,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
         return by("challenge", r);
     }
-    if !ours && !gate.firewall.is_empty() {
+    if !ours && !(gate.firewall.is_empty() && gate.file_firewall.is_empty()) {
         let path = crate::model::normal_path(req.uri().path());
         let asked = crate::model::Asked { method: req.method().as_str(), path: &path, user_agent: &ua, ip: crate::live::client_ip(client.as_deref()), headers: req.headers(), query: req.uri().query() };
         let verdict = gate.firewall_verdict(&asked);

@@ -613,6 +613,15 @@ impl Engine {
         // there fail; said once, so it doesn't read as a broken key.
         let mut unreachable: Vec<String> = got.placeholders.iter().flat_map(|(k, hosts)| hosts.iter().filter(|h| !crate::settings::egress_allows(&s.egress_hosts, h)).map(move |h| format!("{k} → {h}"))).collect();
         unreachable.sort();
+        // What it holds as placeholders, on its record (names and hosts only).
+        if maker.is_some() {
+            let keys: Vec<crate::HeldKey> = got.placeholders.iter().map(|(k, h)| crate::HeldKey { key: k.clone(), hosts: h.clone() }).collect();
+            let _ = self.store.update_intercepted(&r.id, |x| {
+                if x.keys != keys {
+                    x.keys = keys.clone();
+                }
+            });
+        }
         let new = self.bound_told.lock().insert(r.id.clone(), unreachable.clone()).is_none_or(|before| before != unreachable);
         if new && !unreachable.is_empty() {
             let _ = self.store.log(&r.id, &format!("keys bound to hosts its egress doesn't allow (add them to egress_hosts, or calls there fail): {}", unreachable.join("; ")));
@@ -682,6 +691,16 @@ impl Engine {
             if !local {
                 continue;
             }
+            // What roll apps' proxies did for its keys there, on its record (a refusal's reason
+            // can name a host its code chose: masked as its logs are).
+            let mut on_apps = self.apps.intercepted(&r.id).await;
+            if let Some(x) = on_apps.as_mut().filter(|x| !x.refused.is_empty()) {
+                match self.masks(&r.id).await {
+                    Ok(values) => x.refused = x.refused.iter().map(|h| code_preview::runner::mask(h, &values)).collect(),
+                    Err(_) => x.refused.clear(),
+                }
+            }
+            let _ = self.store.set_runtime_fact(&r.id, "intercepted_apps", on_apps.as_ref());
             let fresh: Vec<String> = {
                 let refused = self.apps.egress_refused(&r.id).await;
                 let mut told = self.egress_told.lock();

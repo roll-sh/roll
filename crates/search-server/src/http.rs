@@ -443,7 +443,102 @@ pub fn filtered() -> Response<Full<Bytes>> {
     r
 }
 
+/// A cross-origin request (one with an `Origin` header) and, once its cluster allows that
+/// origin, the cluster's CORS settings ([`crate::cors`]).
+struct CrossOrigin {
+    origin: String,
+    host: Option<String>,
+    allowed: Option<Arc<crate::cors::Cors>>,
+}
+
+impl CrossOrigin {
+    fn allow(&mut self, cors: Option<Arc<crate::cors::Cors>>) {
+        self.allowed = cors.filter(|c| c.allows(&self.origin, self.host.as_deref()));
+    }
+}
+
+/// Elasticsearch's answer to a cross-origin request its CORS settings refuse: an empty 403.
+fn cors_forbidden() -> Response<Full<Bytes>> {
+    let mut r = Response::new(Full::new(Bytes::new()));
+    *r.status_mut() = StatusCode::FORBIDDEN;
+    r.headers_mut().insert(hyper::header::CONTENT_LENGTH, HeaderValue::from_static("0"));
+    r
+}
+
+/// `headers` in front of `r`'s own, as Elasticsearch's CORS handler writes them first.
+fn with_headers_first(mut r: Response<Full<Bytes>>, headers: Vec<(&'static str, String)>) -> Response<Full<Bytes>> {
+    let own = std::mem::take(r.headers_mut());
+    let h = r.headers_mut();
+    for (k, v) in headers {
+        if let Ok(v) = HeaderValue::try_from(v) {
+            h.append(HeaderName::from_static(k), v);
+        }
+    }
+    let mut last = None;
+    for (k, v) in own {
+        let k = match k {
+            Some(k) => {
+                last = Some(k.clone());
+                k
+            }
+            None => match &last {
+                Some(k) => k.clone(),
+                None => continue,
+            },
+        };
+        h.append(k, v);
+    }
+    r
+}
+
+fn header_string(h: &hyper::HeaderMap, name: hyper::header::HeaderName) -> Option<String> {
+    h.get(name).and_then(|v| v.to_str().ok()).map(str::to_string)
+}
+
 async fn respond<B: RequestBody>(node: Arc<Node>, req: Request<B>, sni: Option<&str>, origin: Origin, timeouts: (Duration, Duration)) -> Result<Response<Full<Bytes>>, DropConnection> {
+    // Owned copies: nothing borrowed from `req` may live across an await (its body needn't be `Sync`).
+    let page = header_string(req.headers(), hyper::header::ORIGIN);
+    let Some(page) = page else { return answer(node, req, sni, origin, timeouts, None).await };
+    let host = header_string(req.headers(), hyper::header::HOST);
+    // A preflight carries no credentials: answered from the cluster's settings, after its IP
+    // allowlist. A cluster without CORS (or none at all) answers it as any other request.
+    let preflight = crate::cors::is_preflight(req.method().as_str(), true, req.headers().contains_key(hyper::header::ACCESS_CONTROL_REQUEST_METHOD));
+    if preflight {
+        let head = head_of(&req);
+        match Box::pin(node.cors_of(&head, sni, origin)).await {
+            Err(_) => return Ok(filtered()),
+            Ok(Some(cors)) => {
+                return Ok(match cors.preflight_headers(&page, host.as_deref()) {
+                    Some(h) => {
+                        let mut r = Response::new(Full::new(Bytes::new()));
+                        r.headers_mut().insert(hyper::header::CONTENT_LENGTH, HeaderValue::from_static("0"));
+                        with_headers_first(r, h)
+                    }
+                    None => cors_forbidden(),
+                });
+            }
+            Ok(None) => {}
+        }
+    }
+    let mut cross = CrossOrigin { origin: page, host, allowed: None };
+    let r = Box::pin(answer(node, req, sni, origin, timeouts, Some(&mut cross))).await?;
+    let throttled = r.headers().contains_key(hyper::header::RETRY_AFTER);
+    Ok(match cross.allowed.as_ref().and_then(|c| c.answer_headers(&cross.origin, cross.host.as_deref(), throttled)) {
+        Some(h) => with_headers_first(r, h),
+        None => r,
+    })
+}
+
+/// Answers one request; `cross`: it came with an `Origin` (filled in with the cluster's CORS
+/// settings once they allow it).
+async fn answer<B: RequestBody>(
+    node: Arc<Node>,
+    req: Request<B>,
+    sni: Option<&str>,
+    origin: Origin,
+    timeouts: (Duration, Duration),
+    mut cross: Option<&mut CrossOrigin>,
+) -> Result<Response<Full<Bytes>>, DropConnection> {
     let mut es = head_of(&req);
     // The client's address for audit entries is the one the allowlist checks: only the node
     // says it, never a client.
@@ -465,11 +560,38 @@ async fn respond<B: RequestBody>(node: Arc<Node>, req: Request<B>, sni: Option<&
     if es.header("expect").is_some_and(|v| !v.trim().eq_ignore_ascii_case("100-continue")) {
         return Ok(expectation_failed());
     }
-    let mut lease = match node.enter_from(&es, sni, origin).await {
+    let mut seen = None;
+    let entered = node.enter_seeing(&es, sni, origin, &mut seen).await;
+    let mut lease = match entered {
         Ok(l) => l,
-        Err(Refused::Filtered) => return Ok(filtered()),
-        Err(Refused::Rejected(r)) => return Ok(to_hyper(search_es::rest::error_response(&r.error, &es, r.dialect), gzip_ok).await),
+        Err(refused) => {
+            let (r, retry_after) = match refused {
+                Refused::Filtered => return Ok(filtered()),
+                Refused::Throttled(r, s) => (r, Some(s)),
+                Refused::Rejected(r) => (r, None),
+            };
+            // Past the allowlist: a page may read why it was turned away (a 401, a 429), from
+            // the settings the refusal already read.
+            if let Some(x) = cross.as_deref_mut() {
+                x.allow(seen);
+            }
+            let mut resp = search_es::rest::error_response(&r.error, &es, r.dialect);
+            if let Some(s) = retry_after {
+                resp.headers.push(("Retry-After".into(), s.to_string()));
+            }
+            return Ok(to_hyper(resp, gzip_ok).await);
+        }
     };
+    // Authenticated: a cross-origin request its cluster doesn't allow gets an empty 403 (and a
+    // cluster without CORS answers it as any other request, without CORS headers).
+    if let Some(x) = cross
+        && let Some(cors) = lease.loaded.spec().cors.clone()
+    {
+        x.allow(Some(cors));
+        if x.allowed.is_none() {
+            return Ok(cors_forbidden());
+        }
+    }
     let max = lease.max_body_bytes(&node);
     let declared = es.header("content-length").and_then(|v| v.trim().parse::<u64>().ok());
     if declared.is_some_and(|len| len > max as u64) {

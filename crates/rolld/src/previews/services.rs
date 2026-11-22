@@ -85,6 +85,27 @@ impl RollApps {
         }
     }
 
+    /// Every service's view of the preview's environment, as roll apps has them (not only those
+    /// this process deployed: after a restart a preview that doesn't redeploy still says).
+    async fn pv_environments(&self, preview: &str) -> Vec<Value> {
+        let env = roll_previews::engine::env_name(preview);
+        let all = self.api.get("/v1/apps/services").await.unwrap_or(Value::Null);
+        let ids: Vec<String> = all
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|x| x["environments"].as_array().is_some_and(|e| e.iter().any(|e| e["name"] == env.as_str())))
+            .filter_map(|x| s(&x["id"]))
+            .collect();
+        let mut out = Vec::new();
+        for id in ids {
+            if let Ok(e) = self.api.get(&Self::env_path(&id, &env)).await {
+                out.push(e);
+            }
+        }
+        out
+    }
+
     fn env_path(id: &str, env: &str) -> String {
         format!("/v1/apps/services/{}/environments/{}", seg(id), seg(env))
     }
@@ -145,6 +166,11 @@ impl roll_previews::ports::Apps for RollApps {
         // One voice on a pull request: previews posts `roll/preview` and its comment for the
         // environment, so roll apps posts no commit status or GitHub Deployment of its own (apps' #249).
         let mut body = json!({ "branch": null, "ephemeral": true, "access": access, "egress": egress, "report": false });
+        // Who its keys bound to hosts are used as (roll apps resolves them): the rules' maker, or
+        // nobody (withheld), never whoever made the call (the operator: rolld in process).
+        if closed {
+            body["closed_by"] = json!(t.maker);
+        }
         // The project's traces: roll apps keeps the environment's itself (its own OpenTelemetry
         // variables), and the preview's sheet reads them from it.
         // Off is said too: roll apps keeps an environment's `traces` as it was when a field is left out.
@@ -156,12 +182,13 @@ impl roll_previews::ports::Apps for RollApps {
         // project preview domain): apps routes that name to this environment.
         body["preview_host"] = json!(t.host);
         // A roll apps that predates a field refuses it (a node not yet upgraded, on a fleet):
-        // `report` (#249; then its deploys report as well as previews) or `preview_host` (its
-        // rolld preview URL still works). The environment is made without the fields it doesn't know.
+        // `report` (#249; then its deploys report as well as previews), `preview_host` (its
+        // rolld preview URL still works) or `closed_by` (its maker is who set the egress, as
+        // before). The environment is made without the fields it doesn't know.
         let mut made = self.api.call(Method::PUT, &path, Some(body.clone())).await;
-        for _ in 0..2 {
+        for _ in 0..3 {
             let unknown = match &made {
-                Err(e) => e.downcast_ref::<super::Refused>().filter(|r| r.status.as_u16() == 400).and_then(|r| r.error.strip_prefix("unknown field ")).filter(|f| matches!(*f, "report" | "preview_host")).map(str::to_string),
+                Err(e) => e.downcast_ref::<super::Refused>().filter(|r| r.status.as_u16() == 400).and_then(|r| r.error.strip_prefix("unknown field ")).filter(|f| matches!(*f, "report" | "preview_host" | "closed_by")).map(str::to_string),
                 Ok(_) => None,
             };
             let Some(field) = unknown else { break };
@@ -215,7 +242,7 @@ impl roll_previews::ports::Apps for RollApps {
             t.git.as_deref().unwrap_or("image"),
             if t.access_token.is_some() { "p" } else if t.signed_in { "s" } else { "" },
             if self.feedback && t.feedback { "f" } else { "" },
-            if closed { format!("e{}", t.egress_hosts.join(",")) } else { String::new() },
+            if closed { format!("e{}{}", t.egress_hosts.join(","), t.maker.as_deref().map(|m| format!("m{m}")).unwrap_or_default()) } else { String::new() },
             t.rebuild.map(|n| format!("#r{n}")).unwrap_or_default()
         );
         // The deployment previews last started for exactly this, still under way or live: wait on
@@ -367,23 +394,32 @@ impl roll_previews::ports::Apps for RollApps {
         false
     }
 
+    /// The preview's environments' interception (apps' `intercepted`, per closed network since
+    /// its proxy came up), added up; the latest refusals, each once.
+    async fn intercepted(&self, preview: &str) -> Option<roll_previews::AppsIntercepted> {
+        let mut out: Option<roll_previews::AppsIntercepted> = None;
+        for e in self.pv_environments(preview).await {
+            let i = &e["intercepted"];
+            if !i.is_object() {
+                continue;
+            }
+            let x = out.get_or_insert_with(Default::default);
+            x.requests += i["requests"].as_u64().unwrap_or(0);
+            x.swapped += i["swapped"].as_u64().unwrap_or(0);
+            for r in i["refused"].as_array().into_iter().flatten().filter_map(s) {
+                if !x.refused.contains(&r) {
+                    x.refused.push(r);
+                }
+            }
+        }
+        out
+    }
+
     /// What the preview's environments' egress proxies refused, each host once: `<host>`, or
     /// `<host> private` for a listed one that resolves only to private addresses.
     async fn egress_refused(&self, preview: &str) -> Vec<String> {
-        // Every service with the preview's environment, as roll apps has them (not only those this
-        // process deployed: after a restart a preview that doesn't redeploy still says).
-        let env = roll_previews::engine::env_name(preview);
-        let all = self.api.get("/v1/apps/services").await.unwrap_or(Value::Null);
-        let ids: Vec<String> = all
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|x| x["environments"].as_array().is_some_and(|e| e.iter().any(|e| e["name"] == env.as_str())))
-            .filter_map(|x| s(&x["id"]))
-            .collect();
         let mut out: Vec<String> = Vec::new();
-        for id in ids {
-            let Ok(e) = self.api.get(&Self::env_path(&id, &env)).await else { continue };
+        for e in self.pv_environments(preview).await {
             for r in e["egress_refused"].as_array().into_iter().flatten() {
                 let Some(host) = s(&r["host"]) else { continue };
                 let line = if r["private"] == true { format!("{host} private") } else { host };
@@ -826,6 +862,11 @@ impl roll_previews::ports::Apps for Services {
     // while its process kept them (the engine's tend reads it).
     fn warm(&self, preview: &str, service: &str) -> bool {
         self.runtime.warm(preview, service)
+    }
+
+    /// roll apps' (the runtime's own counts go on the record as they happen).
+    async fn intercepted(&self, preview: &str) -> Option<roll_previews::AppsIntercepted> {
+        self.apps.intercepted(preview).await
     }
 
     /// What roll's runtime's proxy refused and what roll apps' did (its `pv-` environments):

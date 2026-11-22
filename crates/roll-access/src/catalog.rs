@@ -84,6 +84,10 @@ pub struct Row {
     /// A request header that makes it `admin` when it's `1` (apps' `X-Roll-Override`: going past
     /// a deploy freeze the team set is a person's call, never a deploy token's).
     pub admin_if: Option<&'static str>,
+    /// A stronger action the product may use within this route when the grant allows it (Postgres
+    /// SQL as the database's superuser only for a grant that may `admin` the endpoint): the gate
+    /// asks it quietly, never refusing for it, and says yes with `roll_auth::Capable`.
+    pub capable: &'static [Action],
     /// A JSON body field whose presence makes it `admin` (apps' `freeze`: setting or lifting a
     /// freeze is the same call as going past one).
     pub admin_if_field: Option<&'static [&'static str]>,
@@ -137,12 +141,14 @@ fn apps_drain_bucket(b: &Value) -> Vec<Lent> {
     b.get("bucket").and_then(Value::as_str).map(|r| Lent { kind: "bucket".into(), r#ref: r.into(), action: Action::Write }).into_iter().collect()
 }
 
-/// A roll code repo the body names, which apps reads for the caller (`repo` for a plan or an import,
-/// `source.repo` for a service built from one): read on it, so a token can't learn a repo's stack,
-/// head or roll.toml, or build and run its code, without being allowed to read it.
+/// The roll code repos the body names, which apps reads for the caller (`repo` for a plan or an
+/// import, `source.repo` for a service built from one, `build.submodule_repos` its private
+/// submodules come from): read on each, so a token can't learn a repo's stack, head or roll.toml,
+/// or build and run its code, without being allowed to read it.
 fn apps_repo(b: &Value) -> Vec<Lent> {
     let from_source = (b.pointer("/source/kind").and_then(Value::as_str) == Some("repo")).then(|| b.pointer("/source/repo").and_then(Value::as_str)).flatten();
-    b.get("repo").and_then(Value::as_str).or(from_source).map(|r| Lent { kind: "repo".into(), r#ref: r.into(), action: Action::Read }).into_iter().collect()
+    let subs = b.pointer("/build/submodule_repos").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str);
+    b.get("repo").and_then(Value::as_str).or(from_source).into_iter().chain(subs).map(|r| Lent { kind: "repo".into(), r#ref: r.into(), action: Action::Read }).collect()
 }
 
 /// A new service: its links, its scaling and pushed streams and the repo it's built from.
@@ -232,7 +238,7 @@ impl Row {
 }
 
 const fn row(method: &'static str, route: &'static str, product: &'static str, act: Act, target: Tgt) -> Row {
-    Row { method, route, product, act, target, env: EnvFrom::None, path_query: None, reveals: &[], copies_from: None, index: None, lends: None, filters_itself: false, filters_index: false, admin_if: None, admin_if_field: None }
+    Row { method, route, product, act, target, env: EnvFrom::None, path_query: None, reveals: &[], copies_from: None, index: None, lends: None, filters_itself: false, filters_index: false, admin_if: None, admin_if_field: None, capable: &[] }
 }
 
 const R: Act = Act::Is(Action::Read);
@@ -268,6 +274,10 @@ impl Row {
     }
     const fn path_query(mut self, q: &'static str) -> Row {
         self.path_query = Some(q);
+        self
+    }
+    const fn capable(mut self, a: &'static [Action]) -> Row {
+        self.capable = a;
         self
     }
     const fn admin_if(mut self, header: &'static str) -> Row {
@@ -359,6 +369,10 @@ pub const OPERATOR_ONLY: &[(&str, &str)] = &[
     ("/v1/apps/services/{id}/github", "roll's GitHub App installations span tenants: connecting a service to one (its tokens fetch any repository the installation sees) is the operator's, as connecting a repo is roll code's admin token's"),
 ];
 
+/// What a person's session does for itself, past the member rules (docs/members.md): making a
+/// project, which they then own. Tokens are decided by its row as ever.
+pub const PERSON_OWN: &[(&str, &str)] = &[("POST", "/v1/workspace/projects")];
+
 pub fn rows() -> &'static [Row] {
     ROWS
 }
@@ -436,7 +450,7 @@ pub fn find(method: &str, route: &str, path: &str) -> Option<Found> {
 /// A workspace membership change (`PUT`/`DELETE …/projects/{id}/resources/{kind}/{ref}`): the
 /// product and id of the resource being moved, which the evaluator also checks.
 pub fn placement(row: &Row, params: &[(String, String)]) -> Option<(&'static str, String)> {
-    if row.route != "/v1/workspace/projects/{id}/resources/{kind}/{ref}" {
+    if !matches!(row.route, "/v1/workspace/projects/{id}/resources/{kind}/{ref}" | "/v1/workspace/projects/{id}/homes/{kind}/{ref}") {
         return None;
     }
     let get = |k: &str| params.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
@@ -967,6 +981,20 @@ static ROWS: &[Row] = &[
     row("DELETE", "/v1/workspace/projects/{id}", "workspace", D, one(&["id"], "project")),
     row("PUT", "/v1/workspace/projects/{id}/resources/{kind}/{ref}", "workspace", W, one(&["id"], "project")),
     row("DELETE", "/v1/workspace/projects/{id}/resources/{kind}/{ref}", "workspace", W, one(&["id"], "project")),
+    // Members (docs/members.md): seeing who's in a project is a read; managing them is the
+    // project's admin (and a role is given only when the caller's rules cover it). Leaving is any
+    // member's own. A home changes which project stands for a resource: admin on the project, and
+    // admin outright on the resource ([`placement`]).
+    row("GET", "/v1/workspace/projects/{id}/members", "workspace", R, one(&["id"], "project")),
+    row("PATCH", "/v1/workspace/projects/{id}/members/{user}", "workspace", ADMIN, one(&["id"], "project")),
+    row("DELETE", "/v1/workspace/projects/{id}/members/{user}", "workspace", ADMIN, one(&["id"], "project")),
+    row("DELETE", "/v1/workspace/projects/{id}/members/me", "workspace", R, one(&["id"], "project")),
+    row("GET", "/v1/workspace/projects/{id}/invites", "workspace", ADMIN, one(&["id"], "project")),
+    row("POST", "/v1/workspace/projects/{id}/invites", "workspace", ADMIN, one(&["id"], "project")),
+    row("DELETE", "/v1/workspace/projects/{id}/invites/{invite}", "workspace", ADMIN, one(&["id"], "project")),
+    row("PUT", "/v1/workspace/projects/{id}/homes/{kind}/{ref}", "workspace", ADMIN, one(&["id"], "project")),
+    // The built-in roles and their rules: any grant.
+    row("GET", "/v1/workspace/roles", "workspace", R, Tgt::AnyGrant),
     // ── Postgres ──
     row("GET", "/v1/health", "postgres", R, Tgt::AnyGrant),
     row("GET", "/v1/projects", "postgres", R, list("id")).reveals(PG_SECRETS),
@@ -995,7 +1023,10 @@ static ROWS: &[Row] = &[
     row("DELETE", "/v1/endpoints/{id}", "postgres", D, one(PG, "endpoint")),
     row("POST", "/v1/endpoints/{id}/start", "postgres", W, one(PG, "endpoint")),
     row("POST", "/v1/endpoints/{id}/suspend", "postgres", W, one(PG, "endpoint")),
-    row("POST", "/v1/endpoints/{id}/query", "postgres", Act::Body(sql_action), one(PG, "endpoint")),
+    // SQL that isn't read-only runs as a role that owns the database's objects but is never the
+    // superuser (pg-control's `SqlAs::Writer`), unless the grant may `admin` the endpoint; it
+    // drops objects only if the grant may `delete` there.
+    row("POST", "/v1/endpoints/{id}/query", "postgres", Act::Body(sql_action), one(PG, "endpoint")).capable(&[Action::Admin, Action::Delete]),
     // ── Redis ──
     row("GET", "/v1/redis", "redis", R, Tgt::AnyGrant),
     row("GET", "/v1/redis/databases", "redis", R, list("id")).reveals(REDIS_SECRETS),
@@ -1196,10 +1227,18 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/search/clusters/{id}/password", "search", REVEAL, one(PG, "cluster")),
     // A deleted cluster back (its id still resolves while it is kept): a write, like a create.
     row("POST", "/v1/search/clusters/{id}/restore", "search", W, one(PG, "cluster")),
-    row("POST", "/v1/search/clusters/{id}/request", "search", ADMIN, one(PG, "cluster")),
+    // Any request as the cluster's owner. One that answers or sets a credential (decided by
+    // search on the API the cluster routes it to) needs reveal too: the gate says whether the
+    // grant has it (`capable`), without reading the body.
+    row("POST", "/v1/search/clusters/{id}/request", "search", ADMIN, one(PG, "cluster")).capable(&[Action::Reveal]),
     // An API key: its secret is in the answer.
     row("POST", "/v1/search/clusters/{id}/keys", "search", REVEAL, one(PG, "cluster")),
     row("DELETE", "/v1/search/clusters/{id}/keys/{key}", "search", ADMIN, one(PG, "cluster")),
+    // Keys a web page ships (read-only, rate limited): the new key's secret is in the answer;
+    // the list has none.
+    row("GET", "/v1/search/clusters/{id}/browser-keys", "search", R, one(PG, "cluster")),
+    row("POST", "/v1/search/clusters/{id}/browser-keys", "search", REVEAL, one(PG, "cluster")),
+    row("DELETE", "/v1/search/clusters/{id}/browser-keys/{key}", "search", ADMIN, one(PG, "cluster")),
     // A snapshot repository, the only way its credentials can be roll secrets references: it
     // changes the cluster as the console does; roll secrets checks `reveal` on each reference
     // itself (search_control::secret_refs).
@@ -1503,7 +1542,7 @@ static ROWS: &[Row] = &[
     // `variables_from` copies another environment's values into this one: reveal there too.
     // A new heartbeat's ping URL (its token) is in the PUT's answer, once: a credential.
     // Setting or lifting a deploy freeze is admin (lifting one would get past it).
-    row("*", "/v1/apps/services/{id}/environments/{env}", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).admin_if_field(&["freeze", "approvals"]).copies_from(CopyFrom::Body("variables_from")).reveals(&["heartbeat_urls"]),
+    row("*", "/v1/apps/services/{id}/environments/{env}", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).admin_if_field(&["freeze", "approvals", "closed_by"]).copies_from(CopyFrom::Body("variables_from")).reveals(&["heartbeat_urls"]),
     row("GET", "/v1/apps/services/{id}/environments/{env}", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
     row("DELETE", "/v1/apps/services/{id}/environments/{env}", "apps", D, one(PG, "service")).env(EnvFrom::Param("env")),
     row("GET", "/v1/apps/services/{id}/environments/{env}/", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
@@ -1863,13 +1902,18 @@ mod tests {
         let none = axum::http::HeaderMap::new();
         assert_eq!(env.row.action_with("PUT", &[("env".into(), "staging".into())], Some(&serde_json::json!({ "freeze": null })), &none), Action::Admin);
         assert_eq!(env.row.action_with("PUT", &[("env".into(), "production".into())], Some(&serde_json::json!({ "approvals": 0 })), &none), Action::Admin);
+        // Naming whose placeholders a closed environment uses is the operator's call, never write's.
+        assert_eq!(env.row.action_with("PUT", &[("env".into(), "staging".into())], Some(&serde_json::json!({ "closed_by": null })), &none), Action::Admin);
         assert_eq!(env.row.action_with("PUT", &[("env".into(), "staging".into())], Some(&serde_json::json!({ "vitals": true })), &none), Action::Write);
         assert_eq!(dep.row.action("POST", &[("env".into(), "staging".into())], None), Action::Write);
         assert_eq!(sql_action(&serde_json::json!({ "sql": "select 1", "read_only": true })), Action::Read);
         assert_eq!(sql_action(&serde_json::json!({ "sql": "select 1" })), Action::Write);
+        // Without `admin`, pg-control runs it as the database's owner role, never the superuser.
+        assert_eq!(by_path("POST", "/v1/endpoints/ep_x/query").map(|f| f.row.capable), Some(&[Action::Admin, Action::Delete][..]));
         // A repo apps reads for the caller needs read on it: a plan's, an import's, a source's.
         let repo = |r: &str| vec![Lent { kind: "repo".into(), r#ref: r.into(), action: Action::Read }];
         assert_eq!(apps_repo(&serde_json::json!({ "repo": "acme/web", "revision": "main" })), repo("acme/web"));
+        assert_eq!(apps_repo(&serde_json::json!({ "build": { "submodule_repos": ["acme/lib"] } })), repo("acme/lib"));
         assert_eq!(apps_repo(&serde_json::json!({ "source": { "kind": "repo", "repo": "acme/api" } })), repo("acme/api"));
         assert!(apps_repo(&serde_json::json!({ "source": { "kind": "image", "image": "nginx" } })).is_empty());
         assert_eq!(link_target("repo"), Some(("code", "repo")));

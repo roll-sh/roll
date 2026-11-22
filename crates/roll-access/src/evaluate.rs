@@ -66,6 +66,10 @@ impl roll_auth::Authorizer for Evaluator {
     fn handle(&self, req: Request, next: Next) -> Pin<Box<dyn Future<Output = Response> + Send + 'static>> {
         Box::pin(decide(self.0.clone(), req, next))
     }
+
+    fn handle_session(&self, req: Request, next: Next) -> Pin<Box<dyn Future<Output = Response> + Send + 'static>> {
+        Box::pin(decide_session(self.0.clone(), req, next))
+    }
 }
 
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> crate::Result<T> + Send + 'static) -> crate::Result<T> {
@@ -158,8 +162,15 @@ pub(crate) fn target(access: &Access, row: &Row, params: &[(String, String)], qu
             let mut r = access.resource(row.product, kind, &id);
             match row.env {
                 // The product says what the environment is (a preview's own is "preview").
-                EnvFrom::Param(p) => r.environment = param(p).map(|e| access.resolvers.environment(row.product, &id, &e)).or(r.environment),
-                EnvFrom::Fixed(e) => r.environment = Some(e.into()),
+                EnvFrom::Param(p) => {
+                    r.protected = param(p).and_then(|e| access.resolvers.protected(row.product, &id, &e));
+                    r.environment = param(p).map(|e| access.resolvers.environment(row.product, &id, &e)).or(r.environment);
+                }
+                // Whether it's protected, the product says too (a preview's never is).
+                EnvFrom::Fixed(e) => {
+                    r.protected = access.resolvers.protected(row.product, &id, e);
+                    r.environment = Some(e.into());
+                }
                 EnvFrom::None => {}
             }
             r.index = row.index.and_then(param);
@@ -252,10 +263,16 @@ struct Ctx {
     about: Option<&'static str>,
     /// What made the request ([`client_name`]).
     client: Option<String>,
+    /// A person's session (docs/members.md): decided like a token, but not a token's request, so
+    /// it isn't in the access log (their own audit is each product's).
+    session: bool,
 }
 
 impl Ctx {
     fn audit(&self, row: Option<&Row>, action: Option<Action>, resource: Option<String>, decision: &str, approval: Option<&str>, status: StatusCode) {
+        if self.session {
+            return;
+        }
         let e = AuditEvent {
             id: new_id("aud"),
             at: code_sql::now_ms(),
@@ -362,7 +379,7 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
             crate::rate::Verdict::Allowed { remaining, reset } => limit = Some((rate, remaining, reset)),
         }
     }
-    let mut ctx = Ctx { access: access.clone(), grant, started, ip, mcp: req.extensions().get::<McpCall>().cloned(), method: req.method().as_str().to_string(), route, args: None, list_prefix: None, about: None, client: None };
+    let mut ctx = Ctx { access: access.clone(), grant, started, ip, mcp: req.extensions().get::<McpCall>().cloned(), method: req.method().as_str().to_string(), route, args: None, list_prefix: None, about: None, client: None, session: false };
     ctx.client = match ctx.mcp.as_ref().and_then(|m| m.client.clone()) {
         Some(c) => Some(c.to_string()),
         None => req.headers().get(axum::http::header::USER_AGENT).and_then(|v| v.to_str().ok()).and_then(client_name),
@@ -414,12 +431,85 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     let as_user = person.as_ref().is_some_and(|p| !p.admin);
     let reachable = matches!(
         req.extensions().get::<roll_auth::RouteAccess>(),
-        Some(roll_auth::RouteAccess(roll_auth::Access::Public(_) | roll_auth::Access::Product(_) | roll_auth::Access::User(_)))
+        Some(roll_auth::RouteAccess(roll_auth::Access::Public(_) | roll_auth::Access::Product(_) | roll_auth::Access::User(_) | roll_auth::Access::UserOrCredential(_)))
     );
     if as_user && !reachable {
         ctx.audit(None, None, None, "deny", None, StatusCode::FORBIDDEN);
         return deny(StatusCode::FORBIDDEN, "operator_only", "a user's token reaches what their account does: roll code, agents, projects and their search clusters".into(), json!({}));
     }
+    // A person's token acts within their session too (docs/members.md, "Evaluation"): their
+    // memberships as they are now, so removing someone stops every token of theirs at once.
+    let within = match person.as_ref().filter(|_| as_user) {
+        Some(p) => {
+            let (a, u) = (access.clone(), p.user.clone());
+            match blocking(move || a.session_grant(&u, None)).await {
+                Ok(g) => Some(g),
+                Err(e) => return e.into_response(),
+            }
+        }
+        None => None,
+    };
+    judge(ctx, req, next, Judge { session: false, as_user, decided_before, limit, person, within }).await
+}
+
+/// How [`judge`] decides: for a token (a person's acts `within` their session), or for a person's
+/// session itself.
+struct Judge {
+    session: bool,
+    as_user: bool,
+    decided_before: bool,
+    limit: Option<(u32, u32, std::time::Duration)>,
+    person: Option<roll_auth::SignedIn>,
+    within: Option<roll_auth::Grant>,
+}
+
+/// A signed-in person's request (not an admin's) on a route their session may call: on a member
+/// product's route (docs/members.md, "Phasing"), their memberships' rules decide it exactly as a
+/// token's would. Anything else goes on as it did before members.
+async fn decide_session(access: Arc<Access>, req: Request, next: Next) -> Response {
+    let Some(person) = req.extensions().get::<roll_auth::SignedIn>().cloned() else { return next.run(req).await };
+    let route = req.extensions().get::<MatchedPath>().map_or_else(|| "unmatched".to_string(), |m| m.as_str().to_string());
+    let method = req.method().as_str().to_string();
+    // A person's own (making a project, which they then own): the product decides.
+    if catalog::PERSON_OWN.iter().any(|(m, r)| *m == method && *r == route) {
+        return next.run(req).await;
+    }
+    let path = req.extensions().get::<axum::extract::OriginalUri>().map_or_else(|| req.uri().path().to_string(), |o| o.0.path().to_string());
+    match catalog::find(&method, &route, &path) {
+        Some(f) if roll_auth::roles::MEMBER_PRODUCTS.contains(&f.row.product) => {}
+        _ => return next.run(req).await,
+    }
+    let (a, u, ses) = (access.clone(), person.user.clone(), person.session.clone());
+    let grant = match blocking(move || a.session_grant(&u, Some(&ses))).await {
+        Ok(g) => g,
+        Err(e) => return e.into_response(),
+    };
+    let stored = Grant { id: grant.id.to_string(), name: grant.name.to_string(), kind: "session", rules: (*grant.scope).clone(), user: Some(person.user.clone()), ..Default::default() };
+    let ip = client_ip(&req, &access.config);
+    let ctx = Ctx { access: access.clone(), grant: stored, started: Instant::now(), ip, mcp: None, method, route, args: None, list_prefix: None, about: None, client: None, session: true };
+    judge(ctx, req, next, Judge { session: true, as_user: true, decided_before: false, limit: None, person: Some(person), within: None }).await
+}
+
+/// A refusal for a person's session or their token's session: a project they aren't a member of
+/// doesn't exist for them (404, as the workspace answers), and one they are is a 403 that names
+/// what their role lacks.
+fn refuse_session(scope: &Scope, target: &Target, action: Action, about: &str) -> Response {
+    let project = match target {
+        Target::One(r) => r.project.clone().or_else(|| r.id.clone()),
+        Target::Create { project, .. } => project.clone(),
+        _ => None,
+    };
+    match project {
+        Some(p) if !roll_auth::roles::names_project(scope, &p) => (StatusCode::NOT_FOUND, axum::Json(json!({ "error": format!("no project {p}") }))).into_response(),
+        Some(p) => deny(StatusCode::FORBIDDEN, "forbidden", format!("your role in project {p} can't {action} {about} there"), json!({ "needs": { "product": about, "action": action, "resource": p } })),
+        None => deny(StatusCode::FORBIDDEN, "forbidden", format!("your roles can't {action} {about}"), json!({ "needs": { "product": about, "action": action } })),
+    }
+}
+
+/// The decision itself, once the grant is known: the route's row, the resource, the rules.
+async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
+    let Judge { session, as_user, decided_before, limit, person, within } = j;
+    let access = ctx.access.clone();
     // A nested service (storage) sees its path without the prefix: the original has it.
     let mut original = req.extensions().get::<axum::extract::OriginalUri>().map_or_else(|| req.uri().clone(), |o| o.0.clone());
     // A signed hop to an owner or leader: the request it carries is the one to decide.
@@ -529,8 +619,31 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     if let Some((product, r#ref)) = catalog::placement(row, &params) {
         let (a, product2, r2) = (access.clone(), product, r#ref.clone());
         let moved = tokio::task::spawn_blocking(move || a.resource(product2, product2, &r2)).await.ok();
-        let ok = moved.is_some_and(|m| scope.outcome(&Target::One(m), Action::Admin) == Outcome::Allow);
-        if !ok {
+        // A person's grant (their session, or a token of theirs) proves nothing here: a token's rules
+        // can name any product's resources, whatever the person reaches. A person places only what
+        // `Owners` says is theirs (their repo, their cluster), or moves on its canvas what's already
+        // at home in the project.
+        // Taking a resource off a person's own canvas is theirs to do (the project's write): only
+        // putting one on, or making a project its home, needs it to be theirs.
+        let taking_off = as_user && ctx.method == "DELETE";
+        let ok = taking_off || (!as_user && moved.is_some_and(|m| scope.outcome(&Target::One(m), Action::Admin) == Outcome::Allow));
+        let user = person.as_ref().filter(|_| as_user && !ok).map(|p| p.user.clone());
+        let kind = params.iter().find(|(k, _)| k == "kind").and_then(|(_, v)| roll_workspace::Kind::parse(v).ok());
+        let project = params.iter().find(|(k, _)| k == "id").map(|(_, v)| v.clone());
+        let own = match (user, kind, project) {
+            (Some(u), Some(k), Some(p)) => {
+                let a = access.clone();
+                tokio::task::spawn_blocking(move || {
+                    a.workspace.get().is_some_and(|ws| {
+                        ws.owned_by(&u, k, &r#ref) || (roll_workspace::members::HOME_KINDS.contains(&k) && ws.home_of(k, &r#ref).ok().flatten().as_deref() == Some(p.as_str()))
+                    })
+                })
+                .await
+                .unwrap_or(false)
+            }
+            _ => false,
+        };
+        if !ok && !own {
             outcome = Outcome::Deny;
         }
     }
@@ -561,10 +674,33 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
             lent = Some((l.product, l.id));
         }
     }
+    // A person's token on a member product reaches only what their session does too.
+    if let Some(w) = &within
+        && roll_auth::roles::MEMBER_PRODUCTS.contains(&row.product)
+        && !matches!(row.target, Tgt::AnyGrant | Tgt::List { .. } | Tgt::Product | Tgt::Create { .. })
+    {
+        let (o, a) = weakest(&needs, |a| w.scope.outcome(&target, a));
+        if o != Outcome::Allow {
+            ctx.audit(Some(row), Some(a), describe(&target), "deny", None, StatusCode::FORBIDDEN);
+            return refuse_session(&w.scope, &target, a, row.product);
+        }
+    }
     // "Ask for anything else": what the rules refuse asks a person instead. Operator-only routes
     // were refused before any rule; a move between projects stays refused.
     if outcome == Outcome::Deny && ctx.grant.ask_otherwise && catalog::placement(row, &params).is_none() {
         outcome = Outcome::Ask;
+    }
+    // A session never asks (its roles only allow); a list it can't see whole is filtered to what it
+    // can (a person in no project sees an empty list); anything else it can't do is refused.
+    if session {
+        if outcome == Outcome::Ask {
+            outcome = Outcome::Deny;
+        }
+        if outcome == Outcome::Deny && matches!(row.target, Tgt::List { .. }) {
+            outcome = Outcome::Allow;
+        } else if outcome == Outcome::Deny {
+            return refuse_session(&scope, &target, action, row.product);
+        }
     }
     let resource = lent.as_ref().map(|(_, id)| id.clone()).or_else(|| describe(&target));
     let about = lent.as_ref().map_or(row.product, |(p, _)| p);
@@ -651,32 +787,43 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
                 Err(resp) => return *resp,
             }
         }
+        Outcome::Allow if session => {}
         Outcome::Allow => approved = remembered(&access, &ctx.grant, &scope, &target, action).await,
     }
     // Allowed: on as the operator's, narrowed, with the grant for products and the audit. A grant
     // reviews and comments only as itself (roll code takes these headers from the operator).
     parts.headers.remove("x-roll-user");
-    if let Ok(v) = axum::http::HeaderValue::from_str(&reviewer_name(&ctx.grant)) {
+    if !session && let Ok(v) = axum::http::HeaderValue::from_str(&reviewer_name(&ctx.grant)) {
         parts.headers.insert("x-roll-agent", v);
     }
     // As the operator, narrowed; a user's token as that user (an admin also as the operator).
     if !as_user {
         parts.extensions.insert(roll_auth::Operator);
     }
-    if let Some(p) = &person {
+    // A session's request carries its own `SignedIn` already.
+    if let Some(p) = person.as_ref().filter(|_| !session) {
         parts.extensions.insert(roll_auth::SignedIn { session: ctx.grant.id.clone(), ..p.clone() });
+    }
+    if let Some(w) = within {
+        parts.extensions.insert(roll_auth::SessionGrant(w));
     }
     if let Some(ip) = ctx.ip {
         parts.extensions.insert(roll_auth::ClientIp(ip));
         parts.extensions.insert(roll_cluster::ClientAddr(ip.to_string()));
     }
     // Forwarded to an owner, it carries this decision (signed) so a person isn't asked again.
-    parts.extensions.insert(roll_cluster::Decided(ctx.grant.id.clone()));
+    if !session {
+        parts.extensions.insert(roll_cluster::Decided(ctx.grant.id.clone()));
+    }
     if let Some(a) = approved.clone() {
         parts.extensions.insert(a);
     }
-    if let Target::One(r) = &target {
-        parts.extensions.insert(roll_auth::DecidedOn(r.clone()));
+    // A stronger action the product may use here (the row's `capable`): decided at it already
+    // (allowed or approved), or allowed outright. An `ask` for it asks nobody: the product just
+    // does less.
+    let capable: Vec<Action> = row.capable.iter().copied().filter(|a| action == *a || scope.outcome(&target, *a) == Outcome::Allow).collect();
+    if !capable.is_empty() {
+        parts.extensions.insert(roll_auth::Capable(capable));
     }
     parts.extensions.insert(roll_auth::Grant {
         id: ctx.grant.id.as_str().into(),

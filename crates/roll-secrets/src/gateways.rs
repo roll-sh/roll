@@ -47,6 +47,7 @@ pub fn rule(gateway: &str) -> roll_auth::scope::Rule {
         resources: scope::Resources::Some(vec![scope::Selector::id(gateway)]),
         environments: None,
         paths: None,
+        unprotected: false,
         actions: std::collections::BTreeMap::from([(scope::Action::Write, scope::Effect::Allow)]),
     }
 }
@@ -284,7 +285,8 @@ impl Secrets {
         if let Some(caller) = caller {
             caller.need(Action::Admin, &Scope::project(&project)).map_err(|_| denied())?;
         }
-        if !self.maker_reaches(&created_by, &project)? {
+        // A gateway is the project admin's: it works while its maker still is one.
+        if !self.maker_reaches(&created_by, &[(Action::Admin, Scope::whole(&project))])? {
             return Err(denied());
         }
         Ok(LinkOf { project, name })

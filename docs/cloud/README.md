@@ -711,10 +711,10 @@ against it, then removes everything it created (all named `roll-cloud-e2e-*`).
 - **Per-table tombstone GC switches** (`/column_family/tombstone_gc/<ks>:<cf>`,
   `/storage_service/tombstone_gc/<ks>`) are answered without doing anything in roll nosql, as the
   per-table autocompaction switch was until it broke a conformance test.
-- **Images not pinned by digest**: the Postgres compute images (`postgres:{16,17,18}-alpine`, one
-  `{v}` template in `pg-control`'s config that the gates' pre-pulls must match) and the bases of
-  the `deploy/` Dockerfiles that end-to-end gates build (`deploy/code`, `deploy/queues`,
-  `deploy/nosql`). Every other image a suite or gate pulls is `tag@sha256:<multi-arch index>`.
+- **Images not pinned by digest**: the bases of the `deploy/` Dockerfiles that end-to-end gates
+  build (`deploy/code`, `deploy/queues`, `deploy/nosql`). Every other image a suite or gate
+  pulls is `tag@sha256:<multi-arch index>`, the Postgres compute images included
+  (`pg_control::config::IMAGES`, which the gates' pre-pulls read).
 - **What the fleet test showed** (`pnpm test:fleet`, 2026-11-08; "Testing the fleet"). Each run
   makes about 4.5k code landings, 6.5k Redis `SET`s, 6k CQL `INSERT`s, 21k Kafka records, 3k
   objects and 1k–2k tasks publishes through a SIGKILL, a rolling restart and a scale-out. Every

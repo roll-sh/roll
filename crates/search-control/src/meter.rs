@@ -330,6 +330,8 @@ mod tests {
                     owner: None,
                     restored_at: None,
                     ip_allowlist: Vec::new(),
+                    cors: None,
+                    browser_per_minute: None,
                     inherit_pending: false,
                 },
                 crate::store::Caps::NONE,

@@ -107,16 +107,16 @@ export class ApiError extends Error {
 }
 
 /** A product API call; sudo mode's refusal asks the person to confirm, then runs it once more. */
-export function call<T>(method: string, path: string, body?: unknown): Promise<T> {
-  return withReauth(() => callOnce<T>(method, path, body));
+export function call<T>(method: string, path: string, body?: unknown, headers?: Record<string, string>): Promise<T> {
+  return withReauth(() => callOnce<T>(method, path, body, headers));
 }
 
-async function callOnce<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function callOnce<T>(method: string, path: string, body?: unknown, headers?: Record<string, string>): Promise<T> {
   const res = await fetch(
     `${ROLL_API}${path}`,
     withSession({
       method,
-      headers: apiHeaders(body),
+      headers: headers ? { ...apiHeaders(body), ...headers } : apiHeaders(body),
       body: body === undefined ? undefined : JSON.stringify(body),
       cache: "no-store",
     }),

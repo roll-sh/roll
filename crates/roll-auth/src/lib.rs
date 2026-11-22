@@ -34,6 +34,7 @@
 //! everywhere. It sends allowed requests on with [`Operator`] and a [`Grant`] in their extensions.
 
 pub mod credentials;
+pub mod roles;
 pub mod scope;
 pub mod totp;
 
@@ -138,6 +139,10 @@ pub struct Grant {
 pub enum GrantKind {
     Token,
     Oauth,
+    /// A signed-in person's session: their memberships' roles as rules (docs/members.md), built on
+    /// every request and never stored, listed or revocable as a token is. Its `id` is the
+    /// session's (`ses_…`) and its `user` the person.
+    Session,
 }
 
 impl Grant {
@@ -151,16 +156,35 @@ impl Grant {
     }
 }
 
-/// In a grant's request about one resource: that resource as the gate resolved it (its project
-/// and environment included), so a product asking [`Grant::allows`] about a second action on it
-/// (search's console answering a credential: `reveal`) decides as the gate would. Set only by
-/// the gate.
+/// In a request a person's own token made, beside its [`Grant`]: the person's session grant as it
+/// is now (docs/members.md, "Evaluation"). The token reaches only what both allow, so a product's
+/// second check asks both.
 #[derive(Clone, Debug)]
-pub struct DecidedOn(pub scope::Resource);
+pub struct SessionGrant(pub Grant);
+
+impl SessionGrant {
+    pub fn on(extensions: &axum::http::Extensions) -> Option<&Grant> {
+        extensions.get::<SessionGrant>().map(|s| &s.0)
+    }
+}
 
 impl fmt::Debug for Grant {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Grant").field("id", &self.id).field("name", &self.name).field("kind", &self.kind).field("user", &self.user).finish()
+    }
+}
+
+/// In a grant's request when the grant also allows a stronger action on the route's resource that
+/// the catalogue row names (`capable`): a product that can do more within one route does it only
+/// with this (Postgres runs SQL as the database's superuser only for a grant that may `admin` it,
+/// and lets it drop objects only for one that may `delete`).
+/// The operator's requests carry no grant and need none.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Capable(pub Vec<scope::Action>);
+
+impl Capable {
+    pub fn has(&self, a: scope::Action) -> bool {
+        self.0.contains(&a)
     }
 }
 
@@ -207,6 +231,20 @@ pub fn is_grant_token(token: &str) -> bool {
 /// syncs): the grant as it is now, `None` once it's revoked, expired or gone. Never cache it.
 pub trait Grants: Send + Sync + 'static {
     fn grant(&self, id: &str) -> Option<Grant>;
+    /// `user`'s session grant as it is now (docs/members.md): their memberships' rules, `None` once
+    /// they can't sign in. What a person made that acts later (a sync, an identity) acts only while
+    /// this allows it. Blocking; never cached.
+    fn session(&self, user: &str) -> Option<Grant> {
+        let _ = user;
+        None
+    }
+    /// Whose grant `id` is, whether or not it still works: `Some(Some(usr_…))` a person's,
+    /// `Some(None)` the operator's, `None` unknown. What a person registered through their token
+    /// (a rotator, a sink) is theirs, and acts while they may, after the token ends. Blocking.
+    fn owner(&self, id: &str) -> Option<Option<String>> {
+        let _ = id;
+        None
+    }
 }
 
 /// The evaluator for scoped tokens (`roll-access`).
@@ -215,6 +253,13 @@ pub trait Authorizer: Send + Sync + 'static {
     fn claims(&self, token: &str) -> bool;
     /// Decide the request: answer it, or run it through `next`.
     fn handle(&self, req: Request, next: Next) -> Pin<Box<dyn Future<Output = Response> + Send + 'static>>;
+    /// Decide a signed-in person's request (not an admin's: [`roles::decisions::ADMIN_IS_OPERATOR`])
+    /// on a route their session may call, with [`SignedIn`] in its extensions: their memberships
+    /// as a [`GrantKind::Session`] grant (docs/members.md). Products that aren't member products
+    /// yet see it as before.
+    fn handle_session(&self, req: Request, next: Next) -> Pin<Box<dyn Future<Output = Response> + Send + 'static>> {
+        Box::pin(next.run(req))
+    }
 }
 
 /// One of roll accounts' SSO connections (docs/accounts.md, "SSO"), as it is now: what enterprise
@@ -562,10 +607,11 @@ pub async fn check(State(gate): State<Arc<Gate>>, mut req: Request, next: Next) 
                             }
                         }
                     }
-                    if s.admin {
+                    if s.admin && roles::decisions::ADMIN_IS_OPERATOR {
                         req.extensions_mut().insert(Operator);
                     }
-                    signed_in = Some(s.admin);
+                    // Whether they act as the operator (D9): an admin who doesn't is a member like anyone else.
+                    signed_in = Some(s.admin && roles::decisions::ADMIN_IS_OPERATOR);
                     req.extensions_mut().insert(s);
                 }
                 Session::SecondFactor(s) => {
@@ -575,9 +621,23 @@ pub async fn check(State(gate): State<Arc<Gate>>, mut req: Request, next: Next) 
         }
     }
     if gate.token.is_none() || signed_in == Some(true) {
+        // A person's session on a route it may call is their memberships' grant (docs/members.md),
+        // with or without the operator's token: it's who they are, not whether roll checks tokens.
+        if signed_in == Some(false)
+            && let Some(a) = gate.authorizer.get()
+            && req.extensions().get::<MatchedPath>().is_some_and(|m| matches!(gate.access(m.as_str()), Access::User(_) | Access::UserOrCredential(_)))
+        {
+            return a.handle_session(req, next).await;
+        }
         return next.run(req).await;
     }
     let access = req.extensions().get::<MatchedPath>().map_or(Access::Operator, |m| gate.access(m.as_str()));
+    if signed_in == Some(false)
+        && matches!(access, Access::User(_) | Access::UserOrCredential(_))
+        && let Some(a) = gate.authorizer.get()
+    {
+        return a.handle_session(req, next).await;
+    }
     match access {
         Access::Public(_) | Access::Product(_) => next.run(req).await,
         Access::Credential(_) if authorization => next.run(req).await,

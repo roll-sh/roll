@@ -291,6 +291,9 @@ pub trait Runtime: Send + Sync {
     async fn build_egress(&self, _project: &str) -> anyhow::Result<Option<BuildEgress>> {
         Ok(None)
     }
+    /// The interception (roll secrets' placeholders swapped for the hosts its keys are bound to)
+    /// a closed network's egress proxies run for those hosts, or none.
+    fn set_interception(&self, _network: &str, _i: Option<std::sync::Arc<dyn roll_intercept::Interception>>) {}
     /// The project's closed builds' builder and network, once it has no service left.
     async fn remove_build_egress(&self, _project: &str) {}
     /// Closed builds' networks nothing runs on any more (a process that stopped without
@@ -301,6 +304,10 @@ pub trait Runtime: Send + Sync {
     async fn sweep_build_networks(&self, _projects: &std::collections::HashSet<String>) {}
     /// The hosts closed `network`'s egress proxy for `hosts` refused lately (none: it hasn't, or
     /// isn't here).
+    /// What a closed network's interception did on this node (none: nothing, or no proxy here).
+    fn intercepted(&self, _network: &str) -> Option<egress::Intercepted> {
+        None
+    }
     fn egress_refused(&self, _network: &str, _hosts: &[String]) -> Vec<egress::Refused> {
         Vec::new()
     }
@@ -403,6 +410,9 @@ pub struct BuildJob {
     pub layers: Option<String>,
     /// A closed environment's build: on this network, through its proxy, not the default one.
     pub egress: Option<BuildEgress>,
+    /// Not a preview's (Vercel's prioritized production builds): a builder with a queue lets it
+    /// past a burst of previews' builds.
+    pub priority: bool,
 }
 
 impl std::fmt::Debug for BuildJob {
@@ -532,6 +542,7 @@ mod tests {
             target: None,
             layers: None,
             egress: None,
+            priority: true,
         };
         assert_eq!(build_args(&job), ["NPM_TOKEN", "A"]);
         job.own_dockerfile = false;
