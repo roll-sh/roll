@@ -96,6 +96,16 @@ impl Apps {
         let spec = &mut tpl.spec;
         if let Some(i) = &image {
             spec.image = i.clone();
+            // A project that requires signed images: the named image's digest is checked, and
+            // that digest is what runs (a tag moved meanwhile runs nothing unchecked).
+            let sid = service.to_string();
+            let project = self.db(move |s| s.service(&sid)).await?.project;
+            if self.signing_required(&project).await {
+                let pinned = self.deps.runtime.remote_digest(i, None).await.map_err(|e| Error::BadRequest(format!("image {i}: {e:#}")))?;
+                let log = self.logs.sink(format!("env:{service}/{env}"), crate::logs::Stream::System);
+                self.check_signed(&project, &pinned, None, &log).await.map_err(|e| Error::Forbidden(format!("{e:#}")))?;
+                spec.image = pinned;
+            }
             // A public image: the deployment's registry login is the deployment's.
             spec.registry = None;
         }
