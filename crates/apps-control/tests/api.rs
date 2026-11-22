@@ -1406,6 +1406,11 @@ async fn a_deploy_that_fails_its_health_check_leaves_the_old_one_serving() {
     assert!(log["events"].as_array().unwrap().iter().any(|e| e["kind"] == "deploy.failed" && e["data"]["error"].as_str().unwrap_or("").contains("health check")));
     let next = log["next"].as_i64().unwrap();
     assert!(call(&w.api, "GET", &format!("/v1/apps/events?after={next}"), None).await.1["events"].as_array().unwrap().is_empty());
+    // A reader starting from now (MCP Events' first poll) gets the newest cursor and nothing else;
+    // with a cursor of its own too, it's told it can't have both.
+    let (_, now) = call(&w.api, "GET", "/v1/apps/events?latest=1", None).await;
+    assert_eq!((now["events"].as_array().map(Vec::len), now["next"].as_i64()), (Some(0), Some(next)), "{now}");
+    assert_eq!(call(&w.api, "GET", "/v1/apps/events?latest=1&after=0", None).await.0, StatusCode::BAD_REQUEST);
     // A pre-deploy command (a migration) that fails stops the deploy before anything starts.
     call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"unset": ["FAKE_UNHEALTHY"]}))).await;
     let (st, v) = call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"pre_deploy": "exit 3"}}))).await;
