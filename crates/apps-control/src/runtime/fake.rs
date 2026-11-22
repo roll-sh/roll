@@ -98,6 +98,8 @@ pub struct Fake {
     pub commands_run: Mutex<Vec<(String, String)>>,
     /// Each closed network's interception: whether its egress proxies have one.
     pub intercepted: Mutex<std::collections::HashMap<String, bool>>,
+    /// Each `dial` to another port of an instance: the instance and the port.
+    pub dialed: Mutex<Vec<(String, u16)>>,
     /// Images whose cosign signature verifies, by name (without the digest), and with which key.
     pub signatures: Mutex<std::collections::HashMap<String, usize>>,
     /// Private networks' peers as they run now, by name.
@@ -434,6 +436,18 @@ impl Runtime for Fake {
 
     async fn remote_digest(&self, image: &str, _login: Option<&super::RegistryLogin>) -> anyhow::Result<String> {
         Ok(self.pinned(image))
+    }
+
+    /// Another port of a running instance: an echo (what's written comes back), recorded.
+    async fn dial(&self, name: &str, port: u16) -> anyhow::Result<Box<dyn super::ShellStream>> {
+        anyhow::ensure!(self.instances.lock().get(name).is_some_and(|i| i.state == FakeState::Running), "{name} isn't running");
+        self.dialed.lock().push((name.to_string(), port));
+        let (ours, theirs) = tokio::io::duplex(64 << 10);
+        tokio::spawn(async move {
+            let (mut r, mut w) = tokio::io::split(theirs);
+            let _ = tokio::io::copy(&mut r, &mut w).await;
+        });
+        Ok(Box::new(ours))
     }
 
     async fn verify_signature(&self, pinned: &str, keys: &[String], _login: Option<&super::RegistryLogin>) -> anyhow::Result<usize> {

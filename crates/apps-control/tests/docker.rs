@@ -879,6 +879,34 @@ async fn a_tailscale_private_network_reaches_a_host_on_the_tailnet() {
     assert!(env_vars.contains("--shields-up"), "the tailnet can't connect in: {env_vars}");
 }
 
+/// A tunnel to another port of the app on real Docker (a debugger's, `roll apps proxy --port`):
+/// reached inside the instance's own network namespace by a relay, whatever the app publishes.
+/// The app's own port stands in for the debugger's here (busybox's httpd answers only one).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_tunnel_reaches_a_port_inside_the_instance() {
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    let Some(w) = docker_world().await else { return };
+    let (id, _) = deploy_container(&w, "dial").await;
+    let port = w.apps.live(&id, "production").template().and_then(|t| t.run.port).unwrap_or(8080);
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let at = l.local_addr().unwrap();
+    tokio::spawn(axum::serve(l, w.api.clone()).into_future());
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{at}/v1/apps/services/{id}/environments/production/tunnel?port={port}")).await.unwrap();
+    ws.send(Message::Binary(b"GET / HTTP/1.0\r\n\r\n".to_vec().into())).await.unwrap();
+    let mut got = Vec::new();
+    while let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_secs(10), ws.next()).await {
+        match m {
+            Message::Binary(b) if b.is_empty() => break,
+            Message::Binary(b) => got.extend_from_slice(&b),
+            _ => break,
+        }
+    }
+    let text = String::from_utf8_lossy(&got).to_string();
+    delete_for_good(&w.api, &id).await;
+    assert!(text.contains("200") && text.contains("cold"), "through the relay in its namespace: {text}");
+}
+
 /// A sandbox on real Docker: a command's output and exit code, one killed in the container at
 /// its timeout (not left running), a file in and out, and its own network gone with it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

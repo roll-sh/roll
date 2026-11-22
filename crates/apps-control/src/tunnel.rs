@@ -68,19 +68,29 @@ impl Apps {
         live.acquire_tpl(tpl).await.map_err(|e| Error::Conflict(format!("the service didn't wake: {e}")))
     }
 
-    /// Copy between the WebSocket and the instance's port until either side closes.
-    pub async fn bridge_tunnel(self: Arc<Self>, socket: WebSocket, lease: Lease, slot: TunnelSlot) {
+    /// Copy between the WebSocket and the instance's port (or, with `port`, another port of the
+    /// app: a debugger's, Fly's `fly proxy`) until either side closes.
+    pub async fn bridge_tunnel(self: Arc<Self>, socket: WebSocket, lease: Lease, slot: TunnelSlot, port: Option<u16>) {
         let _slot = slot;
         let (mut tx, mut rx) = socket.split();
-        let tcp = match tokio::net::TcpStream::connect(lease.addr).await {
-            Ok(t) => t,
-            Err(e) => {
-                let _ = tx.send(Message::Close(Some(axum::extract::ws::CloseFrame { code: 1011, reason: format!("the service's port didn't answer: {e}").into() }))).await;
+        let conn: std::result::Result<Box<dyn crate::runtime::ShellStream>, String> = match port {
+            Some(p) => self.deps.runtime.dial(&lease.inst.name, p).await.map_err(|e| format!("port {p} didn't answer: {e:#}")),
+            None => match tokio::net::TcpStream::connect(lease.addr).await {
+                Ok(t) => {
+                    let _ = t.set_nodelay(true);
+                    Ok(Box::new(t))
+                }
+                Err(e) => Err(format!("the service's port didn't answer: {e}")),
+            },
+        };
+        let conn = match conn {
+            Ok(c) => c,
+            Err(why) => {
+                let _ = tx.send(Message::Close(Some(axum::extract::ws::CloseFrame { code: 1011, reason: why.into() }))).await;
                 return;
             }
         };
-        let _ = tcp.set_nodelay(true);
-        let (mut rd, mut wr) = tcp.into_split();
+        let (mut rd, mut wr) = tokio::io::split(conn);
         let mut buf = vec![0u8; 64 << 10];
         let (mut from_client, mut from_app) = (true, true);
         while from_client || from_app {

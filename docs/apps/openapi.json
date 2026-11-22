@@ -4184,7 +4184,7 @@
     },
     "/v1/apps/services/{id}/environments/{env}/shell": {
       "get": {
-        "description": "Answers a terminal: binary both ways, text `{\"resize\":[cols,rows]}`; `console=true` makes it a fresh container of the live deployment running `command` (a login shell without one), sized by `cpu` (0.25–8) and `memory_mb` (256–16384), removed when it closes (`command`, `cpu`, `memory_mb` without `console`: 400).",
+        "description": "Answers a terminal: binary both ways, text `{\"resize\":[cols,rows]}`; `console=true` makes it a fresh container of the live deployment (or, with `deployment`, of another kept one's image and settings) running `command` (a login shell without one), sized by `cpu` (0.25–8) and `memory_mb` (256–16384), removed when it closes (`command`, `cpu`, `memory_mb` without `console`: 400).",
         "operationId": "getServicesIdEnvironmentsEnvShell",
         "parameters": [
           {
@@ -4216,7 +4216,7 @@
         },
         "responses": {
           "200": {
-            "description": "a terminal: binary both ways, text `{\"resize\":[cols,rows]}`; `console=true` makes it a fresh container of the live deployment running `command` (a login shell without one), sized by `cpu` (0.25–8) and `memory_mb` (256–16384), removed when it closes (`command`, `cpu`, `memory_mb` without `console`: 400)"
+            "description": "a terminal: binary both ways, text `{\"resize\":[cols,rows]}`; `console=true` makes it a fresh container of the live deployment (or, with `deployment`, of another kept one's image and settings) running `command` (a login shell without one), sized by `cpu` (0.25–8) and `memory_mb` (256–16384), removed when it closes (`command`, `cpu`, `memory_mb` without `console`: 400)"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
@@ -4259,7 +4259,7 @@
               }
             }
           },
-          "description": "`{ instance?, cols?, rows?, console?, command?, cpu?, memory_mb? }` (a console as on the WebSocket)"
+          "description": "`{ instance?, cols?, rows?, console?, command?, cpu?, memory_mb?, deployment? }` (a console as on the WebSocket; `deployment`: another kept deployment's image and settings, 404 another environment's, 409 never built or cleaned up)"
         },
         "responses": {
           "201": {
@@ -4634,7 +4634,7 @@
     },
     "/v1/apps/services/{id}/environments/{env}/tunnel": {
       "get": {
-        "description": "Answers one TCP connection to the web service's own port, binary both ways (`roll apps proxy`); wakes an instance and holds it while open; at most 20 per environment (409); 409 for a worker, a cron service or a static site.",
+        "description": "Answers one TCP connection to the web service's own port, or with `port` another port of the app (a debugger's; reached inside its instance by a relay in its network namespace, published or not), binary both ways (`roll apps proxy`); wakes an instance and holds it while open; at most 20 per environment (409); 409 for a worker, a cron service or a static site.",
         "operationId": "getServicesIdEnvironmentsEnvTunnel",
         "parameters": [
           {
@@ -4666,7 +4666,7 @@
         },
         "responses": {
           "200": {
-            "description": "one TCP connection to the web service's own port, binary both ways (`roll apps proxy`); wakes an instance and holds it while open; at most 20 per environment (409); 409 for a worker, a cron service or a static site"
+            "description": "one TCP connection to the web service's own port, or with `port` another port of the app (a debugger's; reached inside its instance by a relay in its network namespace, published or not), binary both ways (`roll apps proxy`); wakes an instance and holds it while open; at most 20 per environment (409); 409 for a worker, a cron service or a static site"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"

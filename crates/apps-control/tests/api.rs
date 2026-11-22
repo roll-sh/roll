@@ -3502,6 +3502,13 @@ async fn a_shell_wakes_the_service_and_carries_the_terminal_both_ways() {
     let console = w.fake.instances(&id).into_iter().map(|(n, _, _)| n).find(|n| n.contains("console")).expect("its own container");
     assert_eq!(w.fake.spec(&console).map(|s| (s.memory_mb, s.port)), Some((1024, None)), "its size, no port");
     assert!(before.iter().all(|n| w.fake.instances(&id).iter().any(|(m, _, _)| m == n)), "the serving instances are untouched");
+    // A console on another kept deployment (one that won't come up): its image, not the live one's.
+    assert_eq!(call(&w.api, "POST", &base, Some(json!({"console": true, "deployment": "dep_nonesuchaaa"}))).await.0, StatusCode::NOT_FOUND);
+    let live = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await.1["active"]["id"].as_str().unwrap().to_string();
+    let (st, other) = call(&w.api, "POST", &base, Some(json!({"console": true, "deployment": live}))).await;
+    assert_eq!(st, StatusCode::CREATED, "{other}");
+    assert!(w.fake.instances(&id).iter().any(|(n, d, _)| n.contains("console") && *d == live));
+    call(&w.api, "DELETE", &format!("{base}/{}", other["id"].as_str().unwrap()), None).await;
     assert_eq!(call(&w.api, "DELETE", &format!("{base}/{sh}"), None).await.0, StatusCode::NO_CONTENT);
     let mut gone = false;
     for _ in 0..100 {
@@ -6016,6 +6023,18 @@ async fn a_tunnel_reaches_a_private_services_port() {
     assert!(text.starts_with("HTTP/1.1 200") && text.contains(r#""path":"/through""#), "{text}");
     let (_, act) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/activity"), None).await;
     assert!(act.to_string().contains("audit.tunnel.opened"), "{act}");
+    // Another port of the app (a debugger's): reached inside its instance, whatever it publishes.
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{at}/v1/apps/services/{id}/environments/production/tunnel?port=9229")).await.unwrap();
+    ws.send(Message::Binary(b"debugger hello".to_vec().into())).await.unwrap();
+    let mut got = Vec::new();
+    while got.len() < 14 {
+        match tokio::time::timeout(Duration::from_secs(5), ws.next()).await {
+            Ok(Some(Ok(Message::Binary(b)))) => got.extend_from_slice(&b),
+            other => panic!("{other:?}"),
+        }
+    }
+    assert_eq!(got, b"debugger hello");
+    assert!(w.fake.dialed.lock().iter().any(|(_, p)| *p == 9229));
 }
 
 /// A rate limit lets each client make so many requests (a burst, then its rate) and tells the
