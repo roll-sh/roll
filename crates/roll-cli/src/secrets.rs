@@ -5647,7 +5647,9 @@ fn render(tpl: &str, get: impl Fn(&str) -> Option<String>) -> Result<String, Vec
 
 /// The variables `roll run` adds: the environment's resolved values, minus the ones the shell
 /// already sets (unless `--override`). Fails on a problem unless `--allow-unresolved`.
-async fn run_env(c: &Client<'_>, at: &At, r: &Run) -> anyhow::Result<(Vec<Var>, Vec<String>, Digests)> {
+/// `held`: the folder's last answer under `--watch` (its values, stamps, digest and basis), so a
+/// read after a change asks only for what changed (`…/values/delta`).
+async fn run_env(c: &Client<'_>, at: &At, r: &Run, held: &mut Option<Value>) -> anyhow::Result<(Vec<Var>, Vec<String>, Digests)> {
     let digest = if r.watch { "&digest=1" } else { "" };
     let codes = if r.totp_codes { "&codes=1" } else { "" };
     let path = format!("{}/values?{}{digest}{codes}", c.env(&at.env), c.q());
@@ -5660,7 +5662,9 @@ async fn run_env(c: &Client<'_>, at: &At, r: &Run) -> anyhow::Result<(Vec<Var>, 
         files.push(crate::secret_refs::parse_env_file(&text, file)?);
     }
     let refs: Vec<crate::secret_refs::Ref> = files.iter().flatten().filter_map(|(_, v)| crate::secret_refs::Ref::parse(v).transpose()).collect::<anyhow::Result<_>>()?;
-    let v = match (c.api.answer(Method::GET, &path, None).await, &r.fallback) {
+    // `codes=1` moves without the digest: always the full read.
+    let read = if r.watch && !r.totp_codes { read_delta(c, &format!("{}/values/delta?{}", c.env(&at.env), c.q()), &path, held).await } else { c.api.answer(Method::GET, &path, None).await };
+    let v = match (read, &r.fallback) {
         (Ok(Ok(v)), _) => v,
         // Refused (a revoked token, no such environment): never the fallback.
         (Ok(Err((status, message))), _) if !status.is_server_error() => bail!("{message}"),
@@ -5711,6 +5715,44 @@ async fn run_env(c: &Client<'_>, at: &At, r: &Run) -> anyhow::Result<(Vec<Var>, 
         }
     }
     Ok((with_env_files(values, &files, &resolved, r)?, leases, follow))
+}
+
+/// A watch's read of a folder's values (`get`) through its delta route (`delta`): with the answer
+/// it holds (no problems, a basis), only what changed, merged into it; otherwise, or when rolld
+/// answers the full set, the whole answer, kept for next time. A rolld without the route: `get`.
+async fn read_delta(c: &Client<'_>, delta: &str, get: &str, held: &mut Option<Value>) -> anyhow::Result<Result<Value, (reqwest::StatusCode, String)>> {
+    let claim = match held.as_ref() {
+        Some(h) if h["problems"].as_array().is_some_and(|p| p.is_empty()) && h["basis"].is_string() => json!({ "digest": h["digest"], "basis": h["basis"], "stamps": h["stamps"] }),
+        _ => json!({}),
+    };
+    let d = match c.api.answer(Method::POST, delta, Some(claim)).await? {
+        Ok(d) => d,
+        Err((reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::METHOD_NOT_ALLOWED | reqwest::StatusCode::PAYLOAD_TOO_LARGE, _)) => {
+            *held = None;
+            return c.api.answer(Method::GET, get, None).await;
+        }
+        Err(e) => return Ok(Err(e)),
+    };
+    // A delta's values and stamps are the changed keys': the rest are the held answer's.
+    let merged = match held.take() {
+        Some(h) if d["delta"] == true => {
+            let mut values = h["values"].as_object().cloned().unwrap_or_default();
+            let mut stamps = h["stamps"].as_object().cloned().unwrap_or_default();
+            for gone in d["removed"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+                values.remove(gone);
+                stamps.remove(gone);
+            }
+            values.extend(d["values"].as_object().cloned().unwrap_or_default());
+            stamps.extend(d["stamps"].as_object().cloned().unwrap_or_default());
+            let mut m = d;
+            m["values"] = Value::Object(values);
+            m["stamps"] = Value::Object(stamps);
+            m
+        }
+        _ => d,
+    };
+    *held = Some(merged.clone());
+    Ok(Ok(merged))
 }
 
 /// `roll run` started from the fallback file (`why`: what rolld didn't answer): the values kept
@@ -5894,10 +5936,11 @@ pub async fn run_command(api: &Api, r: Run) -> anyhow::Result<()> {
     // Never in an outage either: a repo can't route a protected environment's values to its code.
     refuse_protected(api, &project, &at).await?;
     let c = Client { project, api, at: at.clone() };
-    let (env, leases, follow) = run_env(&c, &at, &r).await?;
+    let mut held = None;
+    let (env, leases, follow) = run_env(&c, &at, &r, &mut held).await?;
     let streams = crate::mask::Streams::choose(r.mask, r.no_mask);
     if r.watch {
-        return watch(&c, &at, &r, env, leases, follow, streams).await;
+        return watch(&c, &at, &r, env, leases, follow, streams, held).await;
     }
     if streams.any() {
         return run_masked(&r, &env, streams).await;
@@ -6011,7 +6054,8 @@ fn spawn_masked(r: &Run, env: &[Var], streams: crate::mask::Streams) -> anyhow::
     crate::mask::spawn(&r.command, &pairs, &conceal, streams).with_context(|| format!("running {}", r.command[0]))
 }
 
-async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<Var>, mut leases: Vec<String>, follow: Digests, streams: crate::mask::Streams) -> anyhow::Result<()> {
+#[allow(clippy::too_many_arguments)]
+async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<Var>, mut leases: Vec<String>, follow: Digests, streams: crate::mask::Streams, mut held: Option<Value>) -> anyhow::Result<()> {
     // The environment's digest, and every referenced one's (an env file's `roll://…`), as the
     // first read's answers gave them (started from a fallback: one that reloads at the first
     // answer).
@@ -6068,7 +6112,7 @@ async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<Var>, mut leases: 
                     }
                     let which = moved(c, &last, &now);
                     last = now.clone();
-                    match run_env(c, at, r).await {
+                    match run_env(c, at, r, &mut held).await {
                         Ok((next, next_leases, next_follow)) => {
                             eprintln!("roll run: {which} changed, restarting {}", r.command[0]);
                             env = next;

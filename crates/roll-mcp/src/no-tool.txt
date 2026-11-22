@@ -134,6 +134,7 @@ POST /v1/secrets/projects/{project}/environments/{env}/resolve                 a
 DELETE /v1/secrets/projects/{project}/environments/{env}/secrets/{name}/hosts  a person's call: the hosts a key's value may go to through a placeholder (#520)
 PUT /v1/secrets/projects/{project}/environments/{env}/secrets/{name}/hosts     a person's call: the hosts a key's value may go to through a placeholder (#520)
 POST /v1/secrets/projects/{project}/environments/{env}/secrets/{name}/purge    a person's call (a secret's history gone for good)
+POST /v1/secrets/projects/{project}/environments/{env}/values/delta             a runtime client's read: a watcher's delta since the values it holds (secrets_get_values reads them)
 POST /v1/secrets/projects/{project}/gateways                                   an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/gateways/{id}                            an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/github-apps                                an outside integration's setup: an admin's, with its credentials

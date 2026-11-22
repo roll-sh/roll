@@ -6965,3 +6965,60 @@ async fn reach_names_the_people_clients_and_holders_of_a_folder() {
     assert_eq!((services, r["sandboxes"][0]["keys"].clone()), (vec![("web", "staging:/")], json!(["KEY"])), "{r}");
     assert!(!r.to_string().contains("fake-dev"), "names, never a value");
 }
+
+/// A watcher's delta read (docs/secrets.md, "Delta reads"): after one key changes and another
+/// goes, it gets that key and what references it, the gone key's name, and their new stamps;
+/// it's audited as an export naming only those keys. Sent back as it now is, it's nothing.
+#[tokio::test]
+async fn a_watchers_delta_returns_what_changed_and_is_audited() {
+    let api = Api::new().await;
+    for (k, v) in [("A", "1"), ("B", "2"), ("C", "3"), ("R", "${A}-x")] {
+        api.set("production", k, v).await;
+    }
+    let tok = api.token(json!({ "environments": ["production"], "actions": ["read", "reveal"] }));
+    let delta = |held: Value| api.req(Method::POST, "/environments/production/values/delta", Some(held), Some(&tok));
+    let (s, full) = delta(json!({})).await;
+    assert_eq!((s, full["delta"].as_bool()), (StatusCode::OK, Some(false)), "{full}");
+    assert_eq!(full["values"], json!({ "A": "1", "B": "2", "C": "3", "R": "1-x" }));
+    assert_eq!(full["stamps"].as_object().map(|s| s.len()), Some(4), "{full}");
+
+    api.set("production", "A", "10").await;
+    api.ok(Method::DELETE, "/environments/production/secrets/C", None).await;
+    let held = |a: &Value| json!({ "digest": a["digest"], "basis": a["basis"], "stamps": a["stamps"] });
+    let (s, d) = delta(held(&full)).await;
+    assert_eq!((s, d["delta"].as_bool()), (StatusCode::OK, Some(true)), "{d}");
+    assert_eq!((d["values"].clone(), d["removed"].clone()), (json!({ "A": "10", "R": "10-x" }), json!(["C"])));
+    assert_eq!(d["stamps"].as_object().unwrap().keys().collect::<Vec<_>>(), ["A", "R"]);
+    assert_ne!(d["stamps"]["A"], full["stamps"]["A"]);
+    let (_, now) = api.req(Method::GET, "/environments/production/digest", None, Some(&tok)).await;
+    assert_eq!(d["digest"], now["digest"]);
+    let audit = api.ok(Method::GET, "/audit?action=secrets.export", None).await;
+    assert_eq!(audit[0]["keys"], json!(["A", "R"]), "{}", audit[0]);
+
+    let mut kept = full["stamps"].as_object().unwrap().clone();
+    kept.remove("C");
+    kept.extend(d["stamps"].as_object().unwrap().clone());
+    let (_, again) = delta(json!({ "digest": d["digest"], "basis": d["basis"], "stamps": kept })).await;
+    assert_eq!((again["delta"].as_bool(), again["values"].clone(), again["removed"].clone()), (Some(true), json!({}), json!([])), "{again}");
+}
+
+/// A delta can't vouch for what a permission decided: once the token may no longer reveal the
+/// environment a reference reads, the same claim gets the full set, which says so.
+#[tokio::test]
+async fn a_permission_change_since_the_answer_held_gets_the_full_set() {
+    let api = Api::new().await;
+    api.set("staging", "S", "upstream").await;
+    api.set("production", "A", "1").await;
+    api.set("production", "R", "${staging.S}").await;
+    let tok = api.token(json!({ "environments": ["production", "staging"], "actions": ["read", "reveal"] }));
+    let delta = |held: Value| api.req(Method::POST, "/environments/production/values/delta", Some(held), Some(&tok));
+    let (_, full) = delta(json!({})).await;
+    assert_eq!(full["values"], json!({ "A": "1", "R": "upstream" }), "{full}");
+
+    let narrower = roll_secrets::access::rule(&api.project, Some(vec!["production".into()]), None, &[roll_secrets::Action::Read, roll_secrets::Action::Reveal]);
+    api.gate.tokens.lock().unwrap().get_mut(&tok).unwrap().scope = Arc::new(roll_auth::scope::Scope(vec![narrower]));
+    let (s, d) = delta(json!({ "digest": full["digest"], "basis": full["basis"], "stamps": full["stamps"] })).await;
+    assert_eq!((s, d["delta"].as_bool()), (StatusCode::OK, Some(false)), "{d}");
+    assert_eq!(d["values"]["A"], "1");
+    assert!(d["problems"].as_array().unwrap().iter().any(|p| p["key"] == "R"), "{d}");
+}

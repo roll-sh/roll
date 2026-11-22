@@ -2834,7 +2834,8 @@ roll completions bash|zsh|fish|powershell
   carries, which the server takes just before that read (asked for, since it costs about as much
   as the read): a write that lands while the command's values are
   being read (or re-read, or newly referenced) is still a change, never folded into what it
-  compares against. The message names the folders that moved (`production:/ changed`). A change
+  compares against. After a change it reads only what changed (`…/values/delta`, "Delta reads"),
+  merged into what it holds. The message names the folders that moved (`production:/ changed`). A change
   that doesn't resolve keeps the running command. A live link's resource rotated through roll
   moves the digest of every folder that links it (a password changed outside roll can't).
 - `roll secrets edit` opens the folder's own keys as a `.env` in `$EDITOR` (a 0600 file under
@@ -5522,6 +5523,7 @@ isn't in the workspace is 404.
 | `PUT /environments/{env}/secrets/{key}/hosts?path=` | `Hosts` | `Hosts` (`admin`; a shared key of the folder itself, not a dynamic link's; see "Using a key without seeing it") |
 | `DELETE /environments/{env}/secrets/{key}/hosts?path=` | | 204 (`admin`); 404 when it isn't bound |
 | `GET /environments/{env}/values?path=&format=&resolve=&dynamic=&strict=&digest=&codes=&name=&namespace=&seq=&at=` | | `Values` (`codes=1`: `<KEY>_CODE` beside each TOTP key, never a 304; `dynamic=false`: a dynamic key is left out, named in `dynamic`, instead of a fresh credential; `strict=1`: any problem is a 409 `unresolved` naming the keys, so a reader keeps what it had; `digest=1`: the folder's `…/digest`, taken just before the read, as `digest`; with `seq`: as stored after that change, `seq` in the answer), or text with `format`: `dotenv`, `shell`, `json`, `yaml`, `docker` (`--env-file`; a value with a line break is a 400 naming the key) or `kubernetes` (a Secret named `name`, default the environment, in `namespace`); with `digest=1` or `If-None-Match` an `ETag` (the digest), and `If-None-Match` with the digest still current is a 304 that decrypts and issues nothing, and writes one `secrets.revalidate` row a day per caller and folder (so health and insights still see the folder read) (never for a folder holding a dynamic credential unless `dynamic=false`: a lease ends without moving the digest) |
+| `POST /environments/{env}/values/delta?path=&dynamic=` | `{digest?, basis?, stamps?: {KEY: stamp}}` (what the watcher holds; `{}` for none; at most 4 MiB, else a 413) | `ValuesDelta` (`reveal`, as `…/values`; see "Delta reads"): `delta: true` with only the keys whose stamp differs from the one held (and every live link's, read again), the names held that the folder no longer answers in `removed`, the changed keys' `stamps`, and every list as the whole folder's; or `delta: false`, the full set as `…/values?digest=1` answers it with every key's stamp, whenever the delta can't be proven exact (nothing held, another `basis`, a dynamic credential a read would issue, stamps that couldn't be worked out). Audited as `secrets.export` naming the keys returned; nothing changed is a `secrets.revalidate` row a day, as a 304. A held key or stamp of the wrong shape is a 400 |
 | `GET /environments/{env}/insights?path=` | | `Insights` (read) |
 | `GET /environments/{env}/reach?path=&key=` | | `Reach` (a project admin's): tokens and identities that reach it, syncs, live leases and attributed shares, projects it's shared with, folders that import it, readers in 30 days, `frozen` |
 | `POST /environments/{env}/reach/cut-off?path=&key=` | `{why, tokens?, identities?, leases?, placeholders?, shares?, syncs?, freeze?}` | `CutOff`: what was cut, what was left to the operator (`skipped`: tokens reaching beyond the project) and what failed, with why (a project admin's; idempotent) |
@@ -5746,6 +5748,7 @@ type ChangeDetail = Change & { items: Item[]; state?: { key: string; path: strin
 // what: added | changed | deleted | comment | tags | link | rotated
 type Version = { version: number; seq: number; op: "set" | "delete"; what: string[]; purged: boolean; fp: string | null; comment: string; tags: string[]; link: Link | null; at: number; by: string };
 type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[]; plain?: string[]; withheld: string[]; sensitive: string[]; followed: Followed[]; placeholders?: Placeholder[] }; // placeholders: keys bound to hosts answered as rlph_… in values (a resolve that asked); plain: of linked, keys whose link field isn't a credential (a host, a port), which a consumer hiding secret values in logs may show (every other value is a secret); followed: keys linked to what the ephemeral environment's preview branched, not in values; leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
+type ValuesDelta = Values & { delta: boolean; digest: string; basis?: string; removed: string[]; stamps: Record<string, string> }; // delta: only the keys changed since the answer held are in values (and their stamps in stamps), removed the names it no longer answers, every list the folder's whole; not delta: the full set, every key's stamp; basis (sent back with the next claim) absent when the stamps couldn't be worked out
 type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[]; plain?: string[]; followed: Followed[]; digest?: string }; // plain: as above; digest (with ?digest=1, not with seq or at): the folder's `…/digest`, taken just before this read; leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
 type Grid = { path: string; environments: string[]; rows: { key: string; cells: Record<string, Cell | null>; status: "same" | "different" | "missing"; required: boolean }[]; folders: string[]; previews: number };
 type Reach = { environment: string; path: string; key: string | null; protected: boolean; untrusted: boolean; tokens: Holder[]; identities: Holder[]; syncs: { id: string; kind: string; target: unknown; last_synced_at: number | null }[]; placeholders: { id: string; key: string; consumer: string; maker: string | null; through: string; expires_at: number }[]; projects: string[]; imported_by: string[]; truncated: boolean; readers: { actor: string; last_at: number; reads: number }[]; uncounted: string }; // untrusted: checks, sandboxes and previews may read it (not protected)
@@ -5950,7 +5953,8 @@ ran on about 4.7 of the 12 cores: a digest is computed inside a database read, a
 readers or 4 Postgres connections bound it. Now it is one computation per node and answer set.
 What's left is each identity's read of its own values (182–233 ms each across all runs; the read
 didn't change, and the after runs ran under lower load), on 5.5–7 cores: it is bound by the same
-4 connections, and it is per reader by design.
+4 connections, and it is per reader by design. A watcher's read after a change is now a delta of
+7–18 ms ("Delta reads").
 
 `tests/nodes.rs` (`a_digest_one_node_keeps_moves_at_once_with_what_another_node_changes`) keeps
 a digest on one node and changes things on another: a write, an import, a write to the imported
@@ -5961,6 +5965,72 @@ still covers 304s, and a product changing its own password.
 
 Every lookup by key inside a request is a hash map (a grid of ~11k keys over 5 environments took
 3.07 s before that, 0.43 s after, on a debug build).
+
+### Delta reads
+
+After one key changes, each watcher used to read the whole folder again: at 1,000 pods on a
+9,900-key folder that was the 137–213 CPU-seconds above, per change. A watcher (`roll run
+--watch`, the Go and TypeScript watches) now keeps its last answer with each key's **stamp** and,
+when the digest moves, asks `POST …/values/delta` for what changed since it, sending back the
+digest, the basis and the stamps it holds.
+
+- **A stamp per key, from rows.** A digest's computation (once per node and answer set, as above)
+  also works out each key's stamp: a hash of its line in the digest (row id, version, source
+  environment, link, a live link's generation and keyed value fingerprint) and, in order, each of
+  its references' stamps or why one reaches nothing (no access, nothing there). Every write moves
+  a key's version, so a stamp moves whenever the value a read answers for the key would. It's
+  never derived from a stored value. A node keeps at most 2,000,000 keys' stamps; past that a
+  digest keeps none.
+- **The client says what it holds.** The server remembers no watcher's state. It compares the
+  claimed stamps with its own in memory, then reads, decrypts and resolves only the keys whose
+  stamp differs (each by key, a few indexed rows, references by key too; the folder once past 64)
+  and every live link's (read again, as a full read would). Names the client holds that the folder
+  no longer answers come back in `removed`. The claim is checked for shape (keys that are keys,
+  16-hex stamps) and bounded by its bytes (4 MiB). A claimed stamp only ever withholds a value
+  from its own caller.
+- **The full set whenever it isn't provably exact.** The **basis** is what the answer depends on
+  beyond the rows: every permission the digest asked and freeze it read past, with their answers
+  (an import's or a base's environment, a reference's folder as reading and as revealing),
+  whose own values it holds, whether the caller is untrusted or a runtime, the folder's required
+  and typed keys, and the freezes of the project and what it imports. A different basis gets the
+  full set. So does a folder whose stamps couldn't be worked out: a followed key (a preview's
+  branched resource), a reference cycle or a chain past 8, a referenced folder whose import a
+  caller may read but not reveal, anything that failed to read. A folder holding a dynamic
+  credential gets the full set, so a read still issues a fresh one as before (with
+  `dynamic=false` such keys are left out and named, as in `…/values`). A client holding an answer
+  with problems sends nothing, and gets the full set.
+- **Audited as reads.** A delta is `secrets.export` by the caller, naming only the keys it
+  returned; a claim that matches the folder as it is (nothing changed) writes the one
+  `secrets.revalidate` row a day a 304 does. It counts against the read quota as a read.
+  Untrusted callers read as they do for `…/values` (no protected environment).
+
+Where a full read's time went, one identity at a time on the bench's folder (main at `5c35bb7cb`,
+release, wall per identity, SQLite / Postgres): reading the folder's rows 60 / 56 ms; decrypting and
+resolving 9,900 values 102 / 101 ms, which includes reading the folder a second time for its
+references; problems for required and typed keys 36 / 30 ms; the audit row naming 9,900 keys
+20 / 4 ms; and over HTTP, the JSON 11 / 8 ms. Every part grows with the folder, so a delta touches
+only the keys that changed.
+
+The stampede bench (above) now also has every identity hold its answer's stamps and, after the
+change, times each one's delta read (it gets the changed key and the one that references it).
+Measured 2026-11-22 on ai-server as above (pinned to 12 CPUs, the database on 6 others, rolld's 4
+connections on Postgres), three rounds of main and this change alternated, SQLite and Postgres,
+under load averages of 44 to 90. Medians for 1,000 identities, CPU-seconds of rolld plus the
+database, wall in brackets; no run had an error.
+
+| | each identity's full read (main) | each identity's delta read |
+| --- | --- | --- |
+| SQLite | 216 s (58 s) | 7.7 s (1.3 s) |
+| Postgres | 158 + 56 s (41 s) | 11.2 + 3.7 s (3.7 s) |
+
+That's 205–219 ms of CPU per identity down to 7–18 ms, across all runs. The first digest after the
+change, which now also works out the stamps, cost the same as before: 0.3 s on SQLite and 0.6–0.8
++ 0.9–1.0 s on Postgres, for all 1,000.
+
+`a_watchers_delta_returns_what_changed_and_is_audited` and
+`a_permission_change_since_the_answer_held_gets_the_full_set` (`tests/api.rs`) and
+`roll_run_watch_reads_a_change_through_a_delta` (`roll-cli/tests/secrets.rs`) cover it. The Python,
+Java, .NET and Ruby clients still read the full set on a change (rolld answers them as before).
 
 ### Large changes
 
@@ -6045,7 +6115,7 @@ In flight:
 - agent-host's `pi_compaction` in the shared gate set (item 10).
 
 New since the ranking:
-- **Delta reads for watchers** (performance, M). After a change each pod still reads all its values: about 190 CPU-s per change at 1,000 pods, bound by the database connections. A watcher holding digest X asks for what changed since X and gets only the changed keys.
+- **Delta reads for watchers** (performance, M; building in `feature/secrets-delta-reads`). After a change each pod still reads all its values: about 190 CPU-s per change at 1,000 pods, bound by the database connections. A watcher holding digest X asks for what changed since X and gets only the changed keys ("Delta reads").
 - **Item 6, parts B and C** (agents' endpoints and the model gateway's upstreams as `roll://`): a relay-side maker table, an `agent:<machine>` resource, the value sealed to the daemon after each `hello`, `EndpointSpec::check` taking `roll://`.
 
 **State, 2026-11-22 07:55.** The thirty-fifth review's ranking below still stands. Since it:
