@@ -157,17 +157,17 @@ impl Brancher for Postgres {
         let branches = p["branches"].as_array().cloned().unwrap_or_default();
         let b = branches.iter().find(|b| b["id"] == branch).ok_or_else(|| anyhow::anyhow!("no Postgres branch {branch}"))?;
         let from = branches.iter().find(|x| x["id"] == b["parent_id"]).ok_or_else(|| anyhow::anyhow!("Postgres branch {branch} has no parent"))?;
-        let lines = |ep: Option<String>, role: Option<String>| async move {
-            let ep = ep.ok_or_else(|| anyhow::anyhow!("a Postgres branch without an endpoint"))?;
-            let set_role = role.map(|r| format!("SET ROLE \"{}\"; ", r.replace('"', "\"\""))).unwrap_or_default();
-            let sql = format!("{set_role}SET search_path = pg_catalog, pg_temp; {SCHEMA_SQL}");
-            let v = self.0.post(&format!("/v1/endpoints/{}/query", seg(&ep)), json!({ "sql": sql })).await?;
-            let rows = v["results"].as_array().and_then(|r| r.last()).and_then(|r| r["rows"].as_array()).cloned().unwrap_or_default();
-            anyhow::Ok(rows.iter().filter_map(|r| r[0].as_str().map(str::to_string)).collect::<Vec<_>>())
-        };
         // pg-control names a branch's role after the branch.
         let role = b["app_connection_uri"].is_string().then(|| s(&b["id"])).flatten();
-        Ok(Some((lines(s(&from["endpoint"]["id"]), None).await?, lines(s(&b["endpoint"]["id"]), role).await?)))
+        Ok(Some((pg_schema_lines(&self.0, s(&from["endpoint"]["id"]), None).await?, pg_schema_lines(&self.0, s(&b["endpoint"]["id"]), role).await?)))
+    }
+
+    /// The branch's lines alone, as `schema` reads them (as its own role), the parent untouched.
+    async fn branch_schema(&self, parent: &str, branch: &str) -> anyhow::Result<Option<Vec<String>>> {
+        let p = self.0.get(&format!("/v1/projects/{}", seg(parent))).await?;
+        let b = p["branches"].as_array().and_then(|bs| bs.iter().find(|b| b["id"] == branch).cloned()).ok_or_else(|| anyhow::anyhow!("no Postgres branch {branch}"))?;
+        let role = b["app_connection_uri"].is_string().then(|| s(&b["id"])).flatten();
+        Ok(Some(pg_schema_lines(&self.0, s(&b["endpoint"]["id"]), role).await?))
     }
 
     /// The parent's table columns (`main`, the branch previews start from), as the superuser
@@ -830,6 +830,17 @@ if (!mask(ctx._source, params.path, 0, params.rule, ctx._id)) { ctx.op = 'noop';
 
 /// A `_mapping` answer as lines: each index (not the system ones, `.…`), and each field with its
 /// type, nested ones by path (`field users.address.city text`) and multi-fields too. Bounded.
+/// One Postgres endpoint's schema lines (`SCHEMA_SQL`), as `role` when given (a branch's own),
+/// with only the catalog's names in reach.
+async fn pg_schema_lines(api: &Api, ep: Option<String>, role: Option<String>) -> anyhow::Result<Vec<String>> {
+    let ep = ep.ok_or_else(|| anyhow::anyhow!("a Postgres branch without an endpoint"))?;
+    let set_role = role.map(|r| format!("SET ROLE \"{}\"; ", r.replace('"', "\"\""))).unwrap_or_default();
+    let sql = format!("{set_role}SET search_path = pg_catalog, pg_temp; {SCHEMA_SQL}");
+    let v = api.post(&format!("/v1/endpoints/{}/query", seg(&ep)), json!({ "sql": sql })).await?;
+    let rows = v["results"].as_array().and_then(|r| r.last()).and_then(|r| r["rows"].as_array()).cloned().unwrap_or_default();
+    Ok(rows.iter().filter_map(|r| r[0].as_str().map(str::to_string)).collect())
+}
+
 fn mapping_lines(v: &Value, skip: &std::collections::BTreeSet<String>) -> Vec<String> {
     fn walk(props: &Value, prefix: &str, depth: usize, out: &mut Vec<String>) {
         let Some(props) = props.as_object() else { return };
@@ -1050,6 +1061,13 @@ impl Brancher for Search {
         }
         let parents = get(parent.to_string(), "/_mapping").await?;
         Ok(Some((mapping_lines(&parents, &newer), mapping_lines(&theirs, &Default::default()))))
+    }
+
+    /// The branch's mapping lines alone, as `schema` reads them.
+    async fn branch_schema(&self, _parent: &str, branch: &str) -> anyhow::Result<Option<Vec<String>>> {
+        let v = self.0.post(&format!("/v1/search/clusters/{}/request", seg(branch)), json!({ "method": "GET", "path": "/_mapping" })).await?;
+        anyhow::ensure!(v["status"].as_u64() == Some(200), "reading {branch}'s mappings: {}", v["status"]);
+        Ok(Some(mapping_lines(&serde_json::from_str(v["body"].as_str().unwrap_or("{}"))?, &Default::default())))
     }
 
     /// Rewrite the masked fields in the branch's documents (`_update_by_query`, Painless): the

@@ -759,6 +759,10 @@ impl Store {
         if !db.has_column("resources", "mask_digest")? {
             db.add_column("resources", "mask_digest", "TEXT")?;
         }
+        // The branch's own schema lines as it was made (JSON), for `schema::diff_since`.
+        if !db.has_column("resources", "base_schema")? {
+            db.add_column("resources", "base_schema", "TEXT")?;
+        }
         for col in ["text", "links", "page_reports", "api"] {
             if !db.has_column("base_history", col)? {
                 db.add_column("base_history", col, "TEXT")?;
@@ -1410,6 +1414,25 @@ impl Store {
             .db
             .read(|c| c.query_row("SELECT mask_digest FROM resources WHERE preview_id = ? AND kind = ? AND parent = ?", [id, kind.as_str(), parent], |r| r.get(0)).optional())?
             .flatten())
+    }
+
+    /// A branch's schema lines as it was made, if kept ([`crate::schema::diff_since`]).
+    pub fn base_schema(&self, id: &str, kind: Kind, parent: &str) -> Result<Option<Vec<String>>> {
+        let json: Option<String> = self
+            .db
+            .read(|c| c.query_row("SELECT base_schema FROM resources WHERE preview_id = ? AND kind = ? AND parent = ?", [id, kind.as_str(), parent], |r| r.get(0)).optional())?
+            .flatten();
+        Ok(json.and_then(|j| serde_json::from_str(&j).ok()))
+    }
+
+    /// Keep a branch's schema lines as it was made, or none (a new branch whose read failed: its
+    /// changes are then compared with the parent alone, never with an older branch's lines).
+    pub fn set_base_schema(&self, id: &str, kind: Kind, parent: &str, lines: Option<&[String]>) -> Result<()> {
+        let json = lines.map(|l| serde_json::to_string(l).unwrap_or_default());
+        self.db.write(|c| {
+            c.execute("UPDATE resources SET base_schema = ? WHERE preview_id = ? AND kind = ? AND parent = ?", params![json, id, kind.as_str(), parent])?;
+            Ok::<_, Error>(())
+        })
     }
 
     pub fn set_mask_digest(&self, id: &str, kind: Kind, parent: &str, digest: &str) -> Result<()> {
