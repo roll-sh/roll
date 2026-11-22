@@ -8337,8 +8337,8 @@ impl roll_intercept::Interception for FakeInterception {
     fn leaf(&self, _host: &str) -> anyhow::Result<roll_intercept::Leaf> {
         anyhow::bail!("no leaves in the fake")
     }
-    fn filter(&self, _req: roll_intercept::Outgoing<'_>) -> Result<usize, String> {
-        Ok(0)
+    fn filter(&self, _req: roll_intercept::Outgoing<'_>) -> Result<roll_intercept::Filtered, String> {
+        Ok(Default::default())
     }
 }
 
