@@ -2414,10 +2414,9 @@ Ranked by what a person notices first. Done so far:
   logs that say when lines were missed and stop with a hidden tab).
 
 1. **A preview event feed for roll MCP, in review** (feat/roll-previews-events, roll MCP's ask):
-   `GET /v1/previews/events` (created, ready, failed, deleted; each seq taken in the write that
-   made it so), which roll MCP's Events follow, so an agent hears "ready" instead of polling.
-   Next after it: `visual_change` (a visual change waits) as an event, once the view's derived
-   review state has a stored transition.
+   `GET /v1/previews/events` (created, ready, failed, visual_change, deleted; each seq taken in
+   the write that made it so), which roll MCP's Events follow, so an agent hears "ready" or "a
+   visual change waits" instead of polling.
 2. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
