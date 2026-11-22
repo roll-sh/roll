@@ -816,10 +816,11 @@ async fn a_tokens_page_shows_what_an_agent_sees() {
 }
 
 /// A person's own token's page shows only what their account reaches (as `tools/list` would for
-/// them): rules for everything, but Postgres is the operator's, so none of its tools.
+/// them): rules for everything, but Postgres is the operator's, so none of its tools; previews are a
+/// member product (their role decides), so its tools are there.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_persons_token_page_shows_only_their_reach() {
-    let d = Daemon::new();
+    let d = Daemon::with_products(vec!["postgres".into(), "previews".into()]);
     let new = serde_json::from_value::<roll_access::store::NewGrant>(json!({ "name": "alices", "rules": [{ "product": "*", "resources": "*", "actions": { "read": "allow" } }] })).unwrap();
     let (g, _) = d.access.store.create(&new, roll_auth::GrantKind::Token, "usr_alice", None, Some("usr_alice")).unwrap();
     let (s, _, seen) = d.http(OPERATOR, Method::GET, &format!("/v1/access/tokens/{}/tools", g.id), None).await;
@@ -827,6 +828,7 @@ async fn a_persons_token_page_shows_only_their_reach() {
     let tools: Vec<&str> = seen["tools"].as_array().unwrap().iter().filter_map(|t| t["name"].as_str()).collect();
     assert!(tools.contains(&"workspace_list_projects"), "{tools:?}");
     assert!(!tools.iter().any(|t| t.starts_with("postgres_")), "a person's token never reaches Postgres: {tools:?}");
+    assert!(tools.contains(&"previews_list"), "a member's role reaches previews: {tools:?}");
 }
 
 /// 2026-07-28's `subscriptions/listen` (SEP-2575): the stream starts with the acknowledgement of
