@@ -691,6 +691,16 @@ for _ in $(seq 1 120); do
   sleep 0.5
 done
 [ "$EARLIER_PAGE" = "preview of change 1, again" ] || { echo "the earlier push should serve its own page: $EARLIER_PAGE"; exit 1; }
+# It runs on its own copy of the data (taken before the next head's data step): a table the
+# preview's branch gets now isn't in the earlier push's.
+db_of() { curl -sS -b "$1" -H "Host: $2" "http://$API/env.txt" | sed -n 's/^DATABASE_URL=//p' | sed 's#host.docker.internal#127.0.0.1#'; }
+psql_q() { docker run --rm --name roll-previews-psqltest --network host postgres:18-alpine psql "$1" -Atc "$2" 2>&1 | tail -1 || true; }
+LIVE_DB=$(db_of "$JAR" "$HOST")
+EARLIER_DB=$(db_of "$EJAR" "$EARLIER_HOST")
+[ -n "$LIVE_DB" ] && [ -n "$EARLIER_DB" ] && [ "$LIVE_DB" != "$EARLIER_DB" ] || { echo "the earlier push should have a database of its own: '$EARLIER_DB' / '$LIVE_DB'"; exit 1; }
+psql_q "$LIVE_DB" "CREATE TABLE after_third (id int)" >/dev/null
+OWN_DATA="$(psql_q "$EARLIER_DB" "SELECT to_regclass('public.after_third') IS NULL") / $(psql_q "$LIVE_DB" "SELECT to_regclass('public.after_third') IS NOT NULL")"
+[ "$OWN_DATA" = "t / t" ] || { echo "a table the preview's branch got after the push shouldn't be in the earlier push's copy (earlier absent / live present): $OWN_DATA"; exit 1; }
 
 # Screenshots stayed on through the pushes: the page's change since the head before is known.
 VISUAL=""
@@ -1057,6 +1067,7 @@ cat <<EOF
 | Change opened → preview ready ($(echo "$P" | jq_ "len(d['resources'])") branches made, the service deployed) | $((T1 - T0)) ms |
 | The preview's bucket key: its branch / production's bucket | $OWN_LS / $PARENT_LS |
 | … step by step (its timeline: data, setup, deploy, checks) | $STEPS |
+| An earlier push's own copy of the data: a table made after it is absent there / present in the preview's | $OWN_DATA |
 | What a follower of the events hears (\`GET /v1/previews/events\`, roll MCP's Events) | $EVENTS |
 | Search: a sync of the parent's connector on the parent / asked of the branch (inherited, waits for adoption) | $PSTATE / $BSTATE |
 | Parent bucket bytes / the branch's own bytes after writing 1 MiB / objects the branch sees | $PARENT_OBJECTS / $BRANCH_OBJECTS / $BRANCH_SEES |
