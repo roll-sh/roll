@@ -71,6 +71,8 @@ trap cleanup EXIT
 umask 077
 head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$home/token"
 export ROLL_ADMIN_TOKEN=$(cat "$home/token") ROLL_SECRET_KEY=$(head -c 32 /dev/urandom | base64)
+# Sign-in codes land here: the member pass signs a person in by email code (docs/accounts.md).
+export ROLL_ACCOUNTS_OUTBOX="$home/outbox" MCP_SWEEP_OUTBOX="$home/outbox"
 L=127.0.0.1 p=("${ports[@]}")
 flags=(--home "$home/rolld" --api $L:${p[0]} --proxy $L:${p[1]} --redis $L:${p[2]} --redis-http $L:${p[3]}
   --kafka $L:${p[4]} --s3 $L:${p[5]} --storage-api $L:${p[6]} --queues-amqp $L:${p[7]} --queues-stomp $L:${p[8]}
