@@ -1800,6 +1800,10 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/code/names/{name}", "code", R, Tgt::Product),
     row("GET", "/v1/code/names/{owner}/{repo}", "code", R, one(REPO, "repo")),
     row("GET", "/v1/code/repos", "code", R, list("full_name")),
+    // Changes and work items across the caller's repos (the `search` tool): each result is its
+    // repo's, so a token narrowed to some repos keeps only theirs.
+    row("GET", "/v1/code/search", "code", R, Tgt::List { items: Some("results"), id_field: "repo", kind: None }),
+    row("GET", "/v1/code/documents/{id}", "code", R, one(PG, "document")),
     row("POST", "/v1/code/repos", "code", Act::Body(code_repo_action), create("repo", "full_name")),
     row("GET", "/v1/code/repos/{owner}/{repo}", "code", R, one(REPO, "repo")),
     row("PATCH", "/v1/code/repos/{owner}/{repo}", "code", ADMIN, one(REPO, "repo")),
