@@ -7572,11 +7572,11 @@ async fn a_private_network_reaches_the_customers_hosts_through_a_peer() {
             Ok(vec![])
         }
         async fn bind_ref_runtime(&self, _: apps_control::integrations::Asker<'_>, _: &str, _: &str, reference: &str, runtime_env: &str) -> anyhow::Result<String> {
-            anyhow::ensure!(reference == "roll://production/WG" && runtime_env == "production", "you may not reveal {reference}");
-            Ok("usr_ada@runtime:production".into())
+            anyhow::ensure!(reference == format!("roll://{runtime_env}/WG"), "you may not reveal {reference}");
+            Ok(format!("usr_ada@runtime:{runtime_env}"))
         }
         async fn resolve_as(&self, _: &str, env: &str, _: &str, reference: &str, maker: &str) -> anyhow::Result<String> {
-            assert_eq!((env, reference, maker), ("production", "roll://production/WG", "usr_ada@runtime:production"));
+            assert_eq!((reference, maker), (format!("roll://{env}/WG").as_str(), format!("usr_ada@runtime:{env}").as_str()));
             Ok(CONF.lock().clone())
         }
     }
@@ -7608,6 +7608,16 @@ async fn a_private_network_reaches_the_customers_hosts_through_a_peer() {
     assert_eq!(call(&w.api, "GET", &url, None).await.1["routes"][0]["name"], "db.corp.internal");
     assert_eq!(call(&w.api, "DELETE", &url, None).await.0, StatusCode::NO_CONTENT);
     assert!(w.fake.peers.lock().is_empty() && call(&w.api, "GET", &url, None).await.0 == StatusCode::NOT_FOUND);
+    // A closed environment's: on its closed network, out through a network of the peer's own.
+    let mut req = Request::builder().method("PUT").uri(format!("/v1/apps/services/{id}/environments/staging")).header("content-type", "application/json").body(Body::from(json!({"egress": {"mode": "roll"}}).to_string())).unwrap();
+    req.extensions_mut().insert(roll_auth::SignedIn { user: "usr_ada".into(), handle: "ada".into(), admin: true, code_owner: None, session: "ses_1".into() });
+    assert!(w.api.clone().oneshot(req).await.unwrap().status().is_success());
+    let (_, d) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/staging/deploys"), Some(json!({}))).await;
+    settled(&w, &id, "staging", d["id"].as_str().unwrap()).await;
+    let staging = format!("/v1/apps/services/{id}/environments/staging/private-network");
+    assert_eq!(call(&w.api, "PUT", &staging, Some(body("roll://staging/WG"))).await.1["status"], "running");
+    let peer = w.fake.peers.lock().get(&format!("roll-apps-peer-{}-staging", id.trim_start_matches("svc_"))).cloned().unwrap();
+    assert_eq!((peer.network.clone(), peer.out_network.clone()), (apps_control::closed_network_name(&w.project, "staging"), Some(format!("roll-apps-peer-{}-staging-out", id.trim_start_matches("svc_")))));
 }
 
 /// A Git login whose password is one of the project's secrets: read at each fetch, so a rotated

@@ -652,6 +652,17 @@ async fn deploy_container(w: &World, name: &str) -> (String, String) {
 /// and its forwarder; removed, the peer and forwarder are gone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_private_network_reaches_a_host_inside_a_wireguard_tunnel() {
+    private_network_on_docker(false).await;
+}
+
+/// The same for a closed environment: its peer answers on the closed network and gets out
+/// through a network of its own, and the closed network still reaches nothing else.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_closed_environments_private_network_reaches_only_its_routes() {
+    private_network_on_docker(true).await;
+}
+
+async fn private_network_on_docker(closed: bool) {
     use apps_control::runtime::peering_image::WIREGUARD;
     struct Wg(String);
     #[async_trait::async_trait]
@@ -682,33 +693,69 @@ async fn a_private_network_reaches_a_host_inside_a_wireguard_tunnel() {
     let conf = format!("[Interface]\nPrivateKey = {}\nAddress = 10.9.0.2/32\n[Peer]\nPublicKey = {}\nEndpoint = {srv}:51820\nAllowedIPs = 10.9.0.1/32\nPersistentKeepalive = 5\n", client[0], server[1]);
     let Some(w) = docker_world_secrets(None, |_| {}, Arc::new(Wg(conf))).await else { return };
     let (id, _) = deploy_container(&w, "vpn").await;
-    // The customer's side: a WireGuard server on the project network, its web server only on
-    // the tunnel's address.
-    let net = apps_control::network_name(&w.project, "production");
+    let env = if closed { "staging" } else { "production" };
+    // The customer's side: a WireGuard server where the peer reaches it (an open environment's
+    // project network; a closed one's peer's own way out, standing for the internet), its web
+    // server only on the tunnel's address.
+    let net = if closed {
+        let mut req = Request::builder().method("PUT").uri(format!("/v1/apps/services/{id}/environments/staging")).header("content-type", "application/json").body(Body::from(json!({"egress": {"mode": "roll"}}).to_string())).unwrap();
+        req.extensions_mut().insert(roll_auth::SignedIn { user: "usr_ada".into(), handle: "ada".into(), admin: true, code_owner: None, session: "ses_1".into() });
+        assert!(w.api.clone().oneshot(req).await.unwrap().status().is_success());
+        let tree = tempfile::tempdir().unwrap();
+        std::fs::write(tree.path().join("index.html"), "<h1>closed</h1>").unwrap();
+        let mut bundle = Vec::new();
+        roll_fetch::pack(&mut bundle, &Default::default(), Some(tree.path()), roll_fetch::Limits::default()).unwrap();
+        let (_, d) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/staging/deploys"), None, "application/gzip", Some(bundle)).await;
+        let dep = d["id"].as_str().unwrap().to_string();
+        for _ in 0..1200 {
+            let (_, x) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/staging/deploys/{dep}"), None, "application/json", None).await;
+            if x["status"] == "active" {
+                break;
+            }
+            assert!(!["failed", "canceled"].contains(&x["status"].as_str().unwrap_or("")), "{x}");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let out = format!("roll-apps-peer-{}-staging-out", id.trim_start_matches("svc_"));
+        assert!(docker(&["network", "create", "--label", "sh.roll.apps=test", &out]).0);
+        out
+    } else {
+        apps_control::network_name(&w.project, "production")
+    };
     let script = format!("set -e; ip link add wg0 type wireguard; echo {} > /tmp/k; wg set wg0 private-key /tmp/k listen-port 51820 peer {} allowed-ips 10.9.0.2/32; ip addr add 10.9.0.1/24 dev wg0; ip link set wg0 up; exec sleep 600", server[0], client[1]);
     assert!(docker(&["run", "-d", "--name", &srv, "--network", &net, "--cap-drop", "ALL", "--cap-add", "NET_ADMIN", "--entrypoint", "sh", WIREGUARD, "-c", &script]).0);
     std::thread::sleep(Duration::from_millis(500));
     assert!(docker(&["run", "-d", "--name", &format!("{srv}-web"), "--network", &format!("container:{srv}"), "busybox:1.37", "sh", "-c", "mkdir /www; echo private-hello > /www/index.html; exec httpd -f -p 10.9.0.1:8080 -h /www"]).0);
-    let url = format!("/v1/apps/services/{id}/environments/production/private-network");
-    let (st, v) = call(&w.api, "PUT", &url, Some(json!({"secret": "roll://production/WG", "routes": [{"name": "db.corp.internal", "target": "10.9.0.1:8080"}]})), "application/json", None).await;
+    let url = format!("/v1/apps/services/{id}/environments/{env}/private-network");
+    let (st, v) = call(&w.api, "PUT", &url, Some(json!({"secret": format!("roll://{env}/WG"), "routes": [{"name": "db.corp.internal", "target": "10.9.0.1:8080"}]})), "application/json", None).await;
     assert_eq!((st, v["status"].as_str()), (StatusCode::OK, Some("running")), "{v}");
-    // From the project network (where the service's instances are), by the route's name.
+    // From the network the environment's instances are on, by the route's name.
+    let instances = if closed { apps_control::closed_network_name(&w.project, "staging") } else { net.clone() };
+    let fetch = |url: &str| {
+        let out = std::process::Command::new("docker").args(["run", "--rm", "--network", &instances, "busybox:1.37", "wget", "-qO-", "-T", "3", url]).output().unwrap();
+        format!("{}{}", String::from_utf8_lossy(&out.stdout).trim(), String::from_utf8_lossy(&out.stderr).trim())
+    };
     let mut got = String::new();
     for _ in 0..30 {
-        let out = std::process::Command::new("docker").args(["run", "--rm", "--network", &net, "busybox:1.37", "wget", "-qO-", "-T", "3", "http://db.corp.internal:8080/"]).output().unwrap();
+        let out = std::process::Command::new("docker").args(["run", "--rm", "--network", &instances, "busybox:1.37", "wget", "-qO-", "-T", "3", "http://db.corp.internal:8080/"]).output().unwrap();
         got = format!("{}{}", String::from_utf8_lossy(&out.stdout).trim(), String::from_utf8_lossy(&out.stderr).trim());
         if got == "private-hello" {
             break;
         }
         std::thread::sleep(Duration::from_millis(300));
     }
-    let peer = format!("roll-apps-peer-{}-production", id.trim_start_matches("svc_"));
+    let peer = format!("roll-apps-peer-{}-{env}", id.trim_start_matches("svc_"));
     let ok = got == "private-hello";
+    // A closed one still reaches nothing else: not the internet past its peer.
+    let shut = !closed || fetch("http://1.1.1.1/") != "private-hello" && !fetch("http://1.1.1.1/").contains("<html");
     assert_eq!(call(&w.api, "DELETE", &url, None, "application/json", None).await.0, StatusCode::NO_CONTENT);
     let gone = !docker(&["inspect", &peer]).0 && !docker(&["inspect", &format!("{peer}-8080")]).0;
     let _ = docker(&["rm", "-f", &format!("{srv}-web"), &srv]);
     delete_for_good(&w.api, &id).await;
+    if closed {
+        let _ = docker(&["network", "rm", &net]);
+    }
     assert!(ok, "through the tunnel: {got:?}");
+    assert!(shut, "a closed environment reaches nothing past its routes");
     assert!(gone, "the peer and its forwarder removed");
 }
 
