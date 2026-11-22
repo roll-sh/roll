@@ -1543,6 +1543,10 @@ static ROWS: &[Row] = &[
     row("*", "/v1/secrets/projects/{project}/syncs", "secrets", ADMIN, one(&["project"], "project")).reveals(&["signing_secret"]),
     row("GET", "/v1/secrets/projects/{project}/syncs", "secrets", R, one(&["project"], "project")),
     row("*", "/v1/secrets/projects/{project}/syncs/", "secrets", ADMIN, one(&["project"], "project")),
+    // The events feed (docs/secrets.md, "Events"): names, kinds and counts, never a value. Secrets
+    // asks the caller's `Grant` for each event's environment (and for `environment=`'s), so a token
+    // limited to some environments reads only theirs.
+    row("GET", "/v1/secrets/projects/{project}/events", "secrets", R, one(&["project"], "project")).filters_itself(),
     // Checking the audit log's chain answers where it breaks, never what a row says.
     row("GET", "/v1/secrets/projects/{project}/audit/verify", "secrets", R, one(&["project"], "project")),
     row("*", "/v1/secrets/projects/{project}/audit/sinks", "secrets", ADMIN, one(&["project"], "project")).reveals(&["secret"]),

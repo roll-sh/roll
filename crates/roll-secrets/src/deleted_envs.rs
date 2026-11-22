@@ -185,7 +185,7 @@ impl Secrets {
             }
             c.execute("UPDATE decoys SET ended_at = ? WHERE env_id = ? AND ended_at IS NULL", params![now, env.id])?;
             let summary = format!("deleted environment {}: what it issued is revoked, and its secrets, history and requests are kept unreadable until {}, then purged", env.slug, crate::deleted::utc(purge_at));
-            audit::record(c, self.keys()?, project, by, "environment.delete", Some(&env.slug), None, &[], &summary, now)?;
+            audit::record_event(c, self.keys()?, project, by, "environment.delete", Some(&env.slug), None, &[], &summary, now, crate::events::Event::new(crate::events::Kind::EnvDeleted, serde_json::json!({ "purge_at": purge_at })))?;
             hook(c)?;
             Ok::<_, Error>(consumers)
         })?;
@@ -209,7 +209,7 @@ impl Secrets {
             let Some(id) = id else { return Err(Error::NotFound(format!("no deleted environment {slug}"))) };
             c.execute("UPDATE environments SET forgotten_at = NULL, purge_at = NULL, forgotten_by = NULL WHERE id = ?", [&id])?;
             let summary = format!("recovered {slug} within its window: what it issued was revoked at the delete (dynamic leases are issued again, managed links get new credentials)");
-            audit::record(c, self.keys()?, project, caller, "environment.recover", Some(slug), None, &[], &summary, now)?;
+            audit::record_event(c, self.keys()?, project, caller, "environment.recover", Some(slug), None, &[], &summary, now, crate::events::Event::new(crate::events::Kind::EnvRecovered, serde_json::json!({})))?;
             Ok::<_, Error>(id)
         })?;
         let managed: Vec<(String, String, String)> = self.db.read(|c| {

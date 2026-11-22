@@ -425,7 +425,7 @@ first, so they can't hide what runs, and anything that makes or changes credenti
 - A route whose product filters its answer per environment and path itself, asking the caller's
   `Grant` for each finding, can be matched by rules limited to some environments or paths too
   (`Row::filters_itself`): a token for staging would get staging's findings, never production's,
-  rather than a 403. Secrets' health and leak scan have it; secrets' cross-project routes
+  rather than a 403. Secrets' health, leak scan and events feed have it; secrets' cross-project routes
   (`GET /v1/secrets/search`, `GET /v1/secrets/findings`) take any grant and keep each project's
   results only where it may read. An approval on such a route is approved once (a rule from it
   would drop the token's environments).
