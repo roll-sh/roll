@@ -1299,7 +1299,10 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/search/clusters/{id}/password", "search", REVEAL, one(PG, "cluster")),
     // A deleted cluster back (its id still resolves while it is kept): a write, like a create.
     row("POST", "/v1/search/clusters/{id}/restore", "search", W, one(PG, "cluster")),
-    row("POST", "/v1/search/clusters/{id}/request", "search", ADMIN, one(PG, "cluster")),
+    // Any request as the cluster's owner. One that answers or sets a credential (decided by
+    // search on the API the cluster routes it to) needs reveal too: the gate says whether the
+    // grant has it (`capable`), without reading the body.
+    row("POST", "/v1/search/clusters/{id}/request", "search", ADMIN, one(PG, "cluster")).capable(&[Action::Reveal]),
     // An API key: its secret is in the answer.
     row("POST", "/v1/search/clusters/{id}/keys", "search", REVEAL, one(PG, "cluster")),
     row("DELETE", "/v1/search/clusters/{id}/keys/{key}", "search", ADMIN, one(PG, "cluster")),
@@ -1735,6 +1738,9 @@ static ROWS: &[Row] = &[
     // ones'): the link is a credential, as its QR code is.
     row("GET", "/v1/previews", "previews", R, list("id")).reveals(&["share_url"]),
     row("POST", "/v1/previews", "previews", W, Tgt::Create { project: None, place: None, id_field: "id" }).env(EnvFrom::Fixed("preview")),
+    // Each event is its project's: a member, or a token held to some projects, follows theirs
+    // (a deleted preview's event too: its project still resolves).
+    row("GET", "/v1/previews/events", "previews", R, Tgt::List { items: Some("events"), id_field: "project", kind: Some("project") }),
     row("*", "/v1/previews/projects/{project}/", "previews", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/previews/projects/{project}/", "previews", R, one(&["project"], "project")),
     // A project's preview settings carry the variable values every preview's services get

@@ -977,6 +977,10 @@ export interface Link {
   ref: string;
   prefix: string;
   vars: string[];
+  /** A search link's key: only these indices (names or patterns). */
+  indices?: string[];
+  /** A search link's key: read, or append (create documents on exact names); none: read and write. */
+  access?: "read" | "append";
 }
 
 /** `reference`: one of its own with `${{ … }}` in it, filled in at the deploy. */

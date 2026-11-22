@@ -1034,6 +1034,8 @@ impl Store {
         db.add_column("environments", "secrets_seen", "TEXT")?;
         db.add_column("environments", "feedback", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("links", "minted", "TEXT")?;
+        // A link's options (a search key's indices and access), as JSON: what its key was made with.
+        db.add_column("links", "options", "TEXT")?;
         db.add_column("environments", "maintenance", "TEXT")?;
         db.add_column("environments", "allow_ips", "TEXT")?;
         db.add_column("environments", "rate_limit", "TEXT")?;
@@ -1185,6 +1187,7 @@ impl Store {
                 [id],
             )?;
             c.execute("DELETE FROM deploy_steps WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
+            c.execute("DELETE FROM deploy_closed WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
             c.execute("DELETE FROM state WHERE key LIKE ?", [format!("%:{id}/%")])?;
             c.execute("DELETE FROM status_days WHERE key LIKE ?", [format!("%:{id}/%")])?;
             for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans", "env_data", "env_branches", "udp_ports", "env_unscheduled", "sandboxes", "env_peering"] {
@@ -2188,16 +2191,38 @@ impl Store {
 
     /// Make or update a link. A credential the link already has stays (two requests making it
     /// at once both minted one; the first stored wins): whether `minted` is the one it keeps.
-    pub fn put_link(&self, service: &str, kind: LinkKind, r#ref: &str, prefix: &str, minted: Option<&crate::integrations::Minted>) -> Result<bool> {
+    pub fn put_link(&self, service: &str, kind: LinkKind, r#ref: &str, prefix: &str, minted: Option<&crate::integrations::Minted>, options: &str) -> Result<bool> {
         let sealed = minted.map(|m| self.sealer.seal(&format!("link:{service}:{}:{ref}", kind.as_str()), &serde_json::to_string(m).expect("JSON")));
         self.db.write(|c| {
+            // The options go with the credential the link keeps.
             c.execute(
-                "INSERT INTO links (service, kind, ref, prefix, minted) VALUES (?, ?, ?, ?, ?) ON CONFLICT (service, kind, ref) DO UPDATE SET prefix = excluded.prefix, minted = COALESCE(links.minted, excluded.minted)",
-                params![service, kind.as_str(), r#ref, prefix, sealed],
+                "INSERT INTO links (service, kind, ref, prefix, minted, options) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (service, kind, ref) DO UPDATE SET prefix = excluded.prefix, options = CASE WHEN links.minted IS NULL THEN excluded.options ELSE links.options END, minted = COALESCE(links.minted, excluded.minted)",
+                params![service, kind.as_str(), r#ref, prefix, sealed, options],
             )?;
             let kept: Option<String> = c.query_row("SELECT minted FROM links WHERE service = ? AND kind = ? AND ref = ?", [service, kind.as_str(), r#ref], |r| r.get(0))?;
             Ok(sealed.is_none() || kept == sealed)
         })
+    }
+
+    /// A link's credential swapped for one made with other options, if it still has the one
+    /// whose handles are `was` (a compare-and-swap: two changes at once can't both replace it).
+    pub fn swap_link_minted(&self, service: &str, kind: LinkKind, r#ref: &str, was: &str, minted: &crate::integrations::Minted, options: &str) -> Result<bool> {
+        let aad = format!("link:{service}:{}:{ref}", kind.as_str());
+        let sealed = self.sealer.seal(&aad, &serde_json::to_string(minted).expect("JSON"));
+        self.db.write(|c| {
+            let now: Option<Option<String>> = c.query_row("SELECT minted FROM links WHERE service = ? AND kind = ? AND ref = ?", [service, kind.as_str(), r#ref], |r| r.get(0)).optional()?;
+            let kept = now.flatten().map(|s| self.sealer.open(&aad, &s)).transpose()?.and_then(|j| serde_json::from_str::<crate::integrations::Minted>(&j).ok()).map(|m| m.kept);
+            if kept.as_deref() != Some(was) {
+                return Ok(false);
+            }
+            c.execute("UPDATE links SET minted = ?, options = ? WHERE service = ? AND kind = ? AND ref = ?", params![sealed, options, service, kind.as_str(), r#ref])?;
+            Ok(true)
+        })
+    }
+
+    /// Each of a service's links' options (JSON), by kind and ref.
+    pub fn link_options(&self, service: &str) -> Result<std::collections::HashMap<(String, String), String>> {
+        Ok(self.db.query("SELECT kind, ref, COALESCE(options, '{}') FROM links WHERE service = ?", [service], |r| Ok(((r.get(0)?, r.get(1)?), r.get(2)?)))?.into_iter().collect())
     }
 
     /// Every link to a resource that's gone (a service being deleted): how many there were.

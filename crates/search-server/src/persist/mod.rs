@@ -442,6 +442,9 @@ const LEASE_REVOKED: u64 = u64::MAX;
 /// A loaded cluster's durable storage; the engine's [`ShardStorage`].
 pub struct ClusterData {
     me: Weak<ClusterData>,
+    /// The node's budget for documents being inverted, given to every shard opened
+    /// ([`search_index::buffer::AnalysisBudget`]).
+    analysis: std::sync::OnceLock<Arc<search_index::buffer::AnalysisBudget>>,
     store: Store,
     cluster: String,
     dir: PathBuf,
@@ -560,6 +563,7 @@ impl ClusterData {
         let dir = store.staging_dir().join(format!("c-{cluster}"));
         Arc::new_cyclic(|me| ClusterData {
             me: me.clone(),
+            analysis: std::sync::OnceLock::new(),
             store,
             cluster: cluster.to_string(),
             dir,
@@ -617,6 +621,12 @@ impl ClusterData {
     fn fail(&self, why: String) {
         tracing::warn!(cluster = self.cluster, reason = why, "cluster persistence failed; unloading it");
         self.failed.lock().get_or_insert(why);
+    }
+
+    /// The node's budget for documents being inverted, charged by every shard this opens from
+    /// now on (the first one given stays).
+    pub fn set_analysis_budget(&self, budget: Arc<search_index::buffer::AnalysisBudget>) {
+        let _ = self.analysis.set(budget);
     }
 
     /// Acknowledgements need the lease valid until `deadline` (from now; `None`: no lease).
@@ -910,7 +920,7 @@ impl ClusterData {
     }
 
     fn shard_config(&self, dir: PathBuf, checkpoint: Option<i64>, primary_term: i64) -> ShardConfig {
-        ShardConfig { dir: Some(dir), merge_threads: 1, local_checkpoint: checkpoint, primary_term, ..ShardConfig::default() }
+        ShardConfig { dir: Some(dir), merge_threads: 1, local_checkpoint: checkpoint, primary_term, analysis_budget: self.analysis.get().cloned(), ..ShardConfig::default() }
     }
 
     // ---------------------------------------------------------------- write path

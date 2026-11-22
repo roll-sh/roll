@@ -785,9 +785,15 @@ impl FieldTable {
                     Some("offsets") => IndexOptions::DocsAndFreqsAndPositionsAndOffsets,
                     _ => IndexOptions::DocsAndFreqsAndPositions,
                 };
-                let a = self.analyzer(f.effective("analyzer", ctx).as_str().unwrap_or("default"))?;
+                let mut a = self.analyzer(f.effective("analyzer", ctx).as_str().unwrap_or("default"))?;
                 if f.is_set("position_increment_gap") {
                     info.position_gap = f.effective("position_increment_gap", ctx).as_i64().map(|g| g as i32);
+                }
+                // The field's own gap goes into its analyzer (Elasticsearch's `NamedAnalyzer` with
+                // the field's `positionIncrementGap`): a multi-valued value is analyzed as one
+                // field, under the document's term budget, never gathered into tokens first.
+                if let Some(g) = info.position_gap {
+                    a = a.with_position_increment_gap(g.max(0));
                 }
                 let sa = match f.raw("search_analyzer").and_then(Value::as_str) {
                     Some(n) => self.search_analyzer(n)?,

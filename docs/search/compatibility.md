@@ -1286,7 +1286,9 @@ Differences: streamed answers are read whole before they're sent (the same event
 end); `rate_limit.requests_per_minute` is enforced per node as Elasticsearch enforces it (a
 one-token bucket per cluster and endpoint, requests waiting their turn, timing out when the wait
 would outlast them; a cluster runs on one node at a time, so it is the cluster's limit), and the
-service's own 429s are retried at most twice; `max_input_tokens` doesn't truncate inputs;
+service's own 429s are retried at most twice; a `custom` endpoint's `_update` that changes a
+stored `parameters` value its `url` or `query_parameters` name must give `secret_parameters` again
+(400 otherwise: the stored secrets never go to a new host on their own); `max_input_tokens` doesn't truncate inputs;
 Cohere's settings are read with roll's settings reader, so a malformed one fails with
 `validation_exception` instead of Cohere's object parser's `x_content_parse_exception` (so does
 Azure OpenAI's `task_settings.user`). Amazon Bedrock embeds Titan inputs one request each, where
@@ -1665,6 +1667,20 @@ the rest are skipped by the tests' own prerequisites.
     (roll's own).
   - **KQL, PromQL, `query_string` and `simple_query_string`:** 300 levels (roll's own;
     Elasticsearch and OpenSearch fail with a `StackOverflowError` somewhere deeper).
+- `index.max_ngram_diff` and `index.max_shingle_diff` go up to 50 (roll's own; Elasticsearch
+  and OpenSearch allow up to `Integer.MAX_VALUE`): past it, the settings' usual range error
+  (`must be <= 50`), and indices made before the bound are analyzed as if it were 50. An `ngram`
+  or `edge_ngram` tokenizer or filter's `max_gram` goes up to 1,000 characters (Elasticsearch has
+  no bound; `[max_gram] may be at most [1000] on roll`). One document, its nested children
+  included, may add at most 256 MiB to the indexing buffer while its fields are inverted (the
+  buffer's real growth: its byte pool, term hashes and postings; multi-fields and `copy_to` targets
+  included; `search_index::buffer::MAX_DOC_ANALYSIS_BYTES`; Elasticsearch has only Lucene's
+  per-thread RAM limit near 2 GB): the analysis stops there and the document fails with a 400
+  `illegal_argument_exception` naming the field that passed it. Documents being inverted at once
+  on a node share a budget for it too (a quarter of `--search-memory-mb`, or 1 GiB): past it a
+  429 `circuit_breaking_exception`; a refused document's partial postings stay charged until
+  its buffer goes. `index.analyze.max_token_count` goes up to 100,000 and
+  `index.highlight.max_analyzed_offset` to 10,000,000 (Elasticsearch: `Integer.MAX_VALUE`).
 - An Elasticsearch-flavor cluster holds at most 1,000 open points in time (roll's own;
   Elasticsearch has no limit). The 1,001st fails as OpenSearch 3.9 refuses one past
   `search.max_open_pit_context` (a 429 `rejected_execution_exception`), which

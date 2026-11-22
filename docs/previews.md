@@ -124,8 +124,19 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
 - **Earlier pushes** (Vercel's per-push URLs): when a change's own service is redeployed at a new
   head, the head it ran stays reachable at `<service>-<head>-<slug>`, on the preview's same data,
   behind the same link, asleep until opened; the last 3 per service (an older one's container
-  goes). For comparing before and after. A trusted change's only (an approval is for one head),
-  `roll.toml` services only (roll apps runs its own), and old code on migrated data can break.
+  goes). For comparing before and after. A trusted change's only (an approval is for one head).
+  Each runs on its own data: before the next head's seed or release, each Postgres branch is
+  branched again (copy-on-write, masked as the preview's is) as that head left it, and the
+  earlier push connects there, so a migration that renamed a column doesn't break the code
+  before it. A copy goes with its push, and with the data it copied (a reset, or masking rules
+  that changed: never served less masked than the rules say). Products that can't branch a
+  branch share the preview's (for now everything but Postgres), and so do roll apps services,
+  whose builds keep the variables they were deployed with. A roll apps service's earlier push is that build's own
+  deployment URL (`<deployment>--<slug>` on roll apps' domain, never a project's preview domain;
+  roll apps' `Deployment.url`), behind the same link (the token once, a cookie for that host) or
+  sign-in: asked before the new head deploys, and kept only while the running build is the head
+  it ran. roll apps keeps an environment's last 10 builds, so the 3 kept here stay; one it pruned
+  answers roll apps' 404, not previews' 410 page.
   They're on the sheet, `roll preview show`, the change and the pull request comment.
   A link to one that's no longer kept says so: its host answers 410 with a page naming the
   service and the push and linking the service's latest (on roll's preview domain and on a
@@ -1611,6 +1622,7 @@ previews in it), the operator and admins see every project.
 | --- | --- | --- |
 | `GET /v1/previews?project=&state=` | | `Preview[]`, newest first, light (`Preview::light`): every count and state a row reads, without each page's accessibility issues, links and comparison, the first page's issues' markup and axe-core's words, or the words against main (by the bounds, about 130 KB a preview whose pages have the most violations, down to a few KB); `GET …/{id}` has all of it |
 | `POST /v1/previews` | `{project, repo, branch? , change?}` | 201 `Preview` (or 200 with the project's existing one). 404 unless the repo is on the project's canvas and the project stands for it (`Workspace::trusts`, as for the previews it makes itself: a preview builds and runs the repo). 409 when the change's preview is another project's (a change has one; it's never handed to another project); 400 when `X-Roll-Project` (the project roll-access decided the create on) names another project than the body |
+| `GET /v1/previews/events?after=&limit=&latest=` | | `{events: Event[], next}`: what happened to previews after the seq `after` (0 by default), oldest first, at most `limit` (1–500, 100 by default); `next` is where to ask from again (past events the caller doesn't see too: a signed-in person sees their projects'). `latest=1`: `{events: [], next}` with the newest seq, to follow from now on (400 with `after`). `type Event = {seq, at, kind: "created" \| "ready" \| "failed" \| "visual_change" \| "deleted", project, preview, change: string \| null, data: {head}}`: `ready` is up after a push or the first deploy (asleep once up counts), never a sleeping preview waking; `visual_change` is a visual change waiting for review, once a head. Each event's `seq` is taken in the write that made it so, so commit order is seq order and a follower past one never misses an earlier one; kept 7 days. roll MCP's event feeds follow it |
 | `GET /v1/previews/{id}` | | `Preview` |
 | `DELETE /v1/previews/{id}` | | 202 `Preview` (`desired: "deleted"`) |
 | `POST /v1/previews/{id}/refresh` | | `Preview`: redeploy now |
@@ -2407,9 +2419,10 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **A preview's interception CA kept until its hosts change or it nears its end, in review**
-   (fix/roll-previews-ca-reuse, after roll secrets' fix/secrets-ca-live-fit): today a new CA every
-   hour restarts an intercepted preview's services, about 24 times a day.
+1. **Earlier pushes on their own data, in review** (feat/roll-previews-pinned-data): each kept
+   push's own copy of the preview's Postgres branch. Next after it: search's copies (a branch of
+   the branch cluster), the copies' bytes in the preview's cost, and roll apps' earlier builds on
+   their copy (their variables are frozen at deploy: a redeploy of the old image with the copy's).
 2. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
@@ -2417,14 +2430,13 @@ Ranked by what a person notices first. Done so far:
 3. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-4. **An earlier head opened as it was** (Vercel's per-commit URLs): a reviewer can open only the
-   change's latest head. roll apps' deployments are immutable, so a preview could keep its last
-   few heads' deployments answering at `<head>-<slug>` on the same branches (asleep, costing
-   bytes). The catch to design around: an older head's code against data a newer migration
-   changed.
-5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+4. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-6. **Watch: pg-control's recovery to a time seconds old** (unowned).
+5. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-22, late afternoon: a preview event feed (#713, roll MCP's ask: `GET /v1/previews/events`, created, ready, failed, visual_change and deleted, each seq taken in the write that made it so; checked live by `scripts/preview-cost.sh`), which roll MCP's Events follow.
+
+Landed 2026-11-22, afternoon: a preview's interception CA kept until its hosts change or it nears its end (#686, on roll secrets' #705: no more hourly restarts of an intercepted preview's services), and a roll apps service's earlier pushes at each build's own deployment URL (#709, on roll apps' #711: they had been `roll.toml` services' only).
 
 Landed 2026-11-22, late morning: a search branch's inherited connector checked live, its sync waiting for adoption while the parent's runs (#690, roll search's #318), and an index production makes after the branch (a connector's first sync, a rollover) no longer read as a drop; schema changes that name only what the change made (#695: each branch's own schema kept as it's made, so another change's migration landing on production first isn't read as this one dropping its table); and a search branch masked again in place keeping the schema it was made with, #702).
 

@@ -21,6 +21,7 @@ type S = AxState<Arc<Engine>>;
 pub fn router(engine: Arc<Engine>) -> Router {
     Router::new()
         .route("/v1/previews", get(list).post(create))
+        .route("/v1/previews/events", get(events))
         .route("/v1/previews/{id}", get(one).delete(delete))
         .route("/v1/previews/{id}/refresh", post(refresh))
         .route("/v1/previews/{id}/keep", post(keep))
@@ -242,6 +243,37 @@ async fn list(AxState(e): S, axum::Extension(visible): axum::Extension<Visible>,
         }
         let rows = e.store.rows(q.project.as_deref())?;
         rows.into_iter().filter(|r| visible.sees(&r.project_id) && state.is_none_or(|s| r.state == s)).map(|r| e.store.view(r).map(Preview::light)).collect::<crate::Result<Vec<_>>>()
+    })
+    .await
+    .map(Json)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EventsQuery {
+    after: Option<i64>,
+    limit: Option<usize>,
+    latest: Option<String>,
+}
+
+/// What happened to previews after `after`, oldest first (`{events, next}`; `next` is where to
+/// ask from again, past the events the caller doesn't see too). `latest=1`: none, and the newest
+/// seq, to follow from now on.
+async fn events(AxState(e): S, axum::Extension(visible): axum::Extension<Visible>, Query(q): Query<EventsQuery>) -> crate::Result<Json<Value>> {
+    let latest = matches!(q.latest.as_deref(), Some("1" | "true"));
+    if latest && q.after.is_some() {
+        return Err(Error::BadRequest("latest or after, not both".into()));
+    }
+    let limit = q.limit.unwrap_or(100).clamp(1, 500);
+    blocking(e, move |e| {
+        if latest {
+            return Ok(json!({ "events": [], "next": e.store.latest_event()? }));
+        }
+        let after = q.after.unwrap_or(0);
+        let got = e.store.events(after, limit)?;
+        let next = got.last().map_or(after, |x| x.seq);
+        let seen: Vec<crate::Event> = got.into_iter().filter(|x| visible.sees(&x.project)).collect();
+        Ok(json!({ "events": seen, "next": next }))
     })
     .await
     .map(Json)
