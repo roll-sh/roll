@@ -57,6 +57,19 @@ mod unicode;
 use std::sync::Arc;
 
 pub use analysis::Analysis;
+
+/// The longest `max_gram` an `ngram` or `edge_ngram` tokenizer or filter may have: 1,000
+/// characters (roll's own; Elasticsearch bounds only `max_gram - min_gram`, by
+/// `index.max_ngram_diff`, so a long gram makes every one of a value's grams that long).
+pub const MAX_GRAM: i32 = 1000;
+
+/// Refuses a `max_gram` past [`MAX_GRAM`].
+pub(crate) fn check_max_gram(max: i32) -> std::result::Result<(), AnalysisError> {
+    if max > MAX_GRAM {
+        return Err(AnalysisError::illegal(format!("[max_gram] may be at most [{MAX_GRAM}] on roll, but was [{max}]")));
+    }
+    Ok(())
+}
 pub use analyzers::pattern_text_delimiter;
 pub use analyze::{AnalyzeLimits, AnalyzeRequest, NameOrDefinition};
 pub use analyzer::{Analyzer, CharFilteredText, Explain, ExplainToken, Normalizer, ShingleInfo, TokenList};

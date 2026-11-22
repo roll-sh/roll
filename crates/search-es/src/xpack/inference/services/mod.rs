@@ -108,9 +108,12 @@ fn java_class(v: &Value) -> &'static str {
 pub fn api_key_secret(cluster: &Cluster, ss: &mut Map, errors: &mut Vec<String>) -> Map {
     let mut out = Map::new();
     match ss.shift_remove("api_key") {
-        Some(Value::Str(k)) if !k.is_empty() => {
-            out.insert("api_key".into(), crate::seal::seal_given(cluster, super::SECRET_KIND, &k).into());
-        }
+        Some(Value::Str(k)) if !k.is_empty() => match crate::seal::seal_given(cluster, super::SECRET_KIND, &k) {
+            Ok(s) => {
+                out.insert("api_key".into(), s.into());
+            }
+            Err(e) => errors.push(e.reason().to_string()),
+        },
         Some(Value::Str(_)) => errors.push("[secret_settings] Invalid value empty string. [api_key] must be a non-empty string".into()),
         Some(other) => errors.push(format!("field [api_key] is not of the expected type. The value [{}] cannot be converted to a [String]", java_string(&other))),
         None => errors.push("[secret_settings] does not contain the required setting [api_key]".into()),
@@ -122,7 +125,7 @@ pub fn api_key_secret(cluster: &Cluster, ss: &mut Map, errors: &mut Vec<String>)
 pub fn updated_api_key(cluster: &Cluster, ss: &mut Map) -> EsResult<Option<String>> {
     match ss.shift_remove("api_key") {
         None => Ok(None),
-        Some(Value::Str(k)) if !k.is_empty() => Ok(Some(crate::seal::seal_given(cluster, super::SECRET_KIND, &k))),
+        Some(Value::Str(k)) if !k.is_empty() => crate::seal::seal_given(cluster, super::SECRET_KIND, &k).map(Some),
         Some(Value::Str(_)) => Err(super::settings::validation(&["[secret_settings] Invalid value empty string. [api_key] must be a non-empty string".into()])),
         Some(other) => Err(super::settings::validation(&[format!(
             "field [api_key] is not of the expected type. The value [{}] cannot be converted to a [String]",
@@ -279,6 +282,7 @@ impl Service {
             ep.chunking = Some(Chunking::from_request(Some(&c))?);
         }
         let own_secrets = matches!(self, Service::AzureOpenAi | Service::Bedrock | Service::VertexAi | Service::Custom | Service::Test(_));
+        let secrets_given = ss.contains_key("secret_parameters");
         if !own_secrets && let Some(k) = updated_api_key(cluster, &mut ss)? {
             ep.secrets.insert("api_key".into(), k.into());
         }
@@ -327,6 +331,17 @@ impl Service {
             Service::HuggingFace => huggingface::task_settings(current.task, &mut merged)?,
             _ => merged,
         };
+        // Where the secrets go moved: they go there only when given again (roll's rule; the
+        // update's validation call would send them to the new host at once).
+        if self == Service::Custom
+            && !secrets_given
+            && let Some(name) = custom::moved_parameter(current, &ep)
+        {
+            return Err(EsError::status(
+                400,
+                format!("[task_settings] [parameters] [{name}] decides where the endpoint sends its secrets: give [service_settings] [secret_parameters] again to change it"),
+            ));
+        }
         Ok(ep)
     }
 
@@ -537,7 +552,13 @@ pub fn ordered(mut m: Map, order: &[&str]) -> Map {
 /// sealed; errors are collected.
 pub fn take_secret(cluster: &Cluster, ss: &mut Map, key: &str, scope: &str, required: bool, errors: &mut Vec<String>) -> Option<String> {
     match ss.shift_remove(key) {
-        Some(Value::Str(k)) if !k.is_empty() => Some(crate::seal::seal_given(cluster, super::SECRET_KIND, &k)),
+        Some(Value::Str(k)) if !k.is_empty() => match crate::seal::seal_given(cluster, super::SECRET_KIND, &k) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                errors.push(e.reason().to_string());
+                None
+            }
+        },
         Some(Value::Str(_)) => {
             errors.push(format!("[{scope}] Invalid value empty string. [{key}] must be a non-empty string"));
             None
