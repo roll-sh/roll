@@ -274,6 +274,22 @@ async fn links_resolve_to_working_credentials_and_follow_rotations_in_every_prod
     assert_ne!(new, old);
     p.revoke_retired().await;
     assert_eq!((searches(new).await, searches(old).await), (200, 401));
+    // A link's `names` and `permission: read` narrow its key: it reads those indices only.
+    let (owner, password) = (sc["username"].as_str().unwrap(), sc["password"].as_str().unwrap());
+    for index in ["logs-app", "audit"] {
+        let put = r.http.put(format!("{url}/{index}/_doc/1?refresh=true")).basic_auth(owner, Some(password)).json(&json!({ "m": "hi" })).send().await.unwrap();
+        assert_eq!(put.status().as_u16(), 201);
+    }
+    let read_link = json!({ "kind": "search", "ref": id, "field": "api_key", "mode": "managed", "options": { "names": ["logs-app"], "permission": "read" } });
+    r.post(&format!("/v1/secrets/projects/{}/environments/production/changes", p.id), json!({ "ops": [{ "op": "set", "key": "SEARCH_READ_KEY", "link": read_link }] })).await;
+    let reader = p.value("SEARCH_READ_KEY").await;
+    let send = |m: reqwest::Method, path: &str| {
+        let req = r.http.request(m, format!("{url}{path}")).header("authorization", format!("ApiKey {reader}")).json(&json!({}));
+        async move { req.send().await.unwrap().status().as_u16() }
+    };
+    assert_eq!(send(reqwest::Method::POST, "/logs-app/_search").await, 200);
+    assert_eq!(send(reqwest::Method::PUT, "/logs-app/_doc/2").await, 403);
+    assert_eq!(send(reqwest::Method::POST, "/audit/_search").await, 403);
 
     // Redis (live): the database's own URL logs in; rotating it resets the password and the
     // link reads the new one.

@@ -1109,6 +1109,38 @@ const OPENSEARCH_FIELDS: &[Field] = &[
 ];
 
 impl Search {
+    /// What a link's options ask the keys route for: `permission` (`read`, `append`; left out,
+    /// today's `data`) as its `access`, and `names` (index names or patterns: a list or a
+    /// comma-separated string, as a certificate link's names) as its `indices`. An append link
+    /// names its data streams exactly.
+    fn key_options(link: &Link) -> roll_secrets::Result<(&'static str, Option<Vec<String>>)> {
+        let access = match link.options.get("permission") {
+            None | Some(Json::Null) => "data",
+            Some(Json::String(p)) if p == "read" => "read",
+            Some(Json::String(p)) if p == "append" => "append",
+            Some(_) => return Err(Error::BadRequest("a search link's permission is read or append (left out: data, which also writes)".into())),
+        };
+        let bad = || Error::BadRequest("a search link's names are index names or patterns: a list, or a comma-separated string".into());
+        let names: Option<Vec<String>> = match link.options.get("names") {
+            None | Some(Json::Null) => None,
+            Some(Json::Array(a)) => Some(a.iter().map(|n| n.as_str().map(|n| n.trim().to_string()).ok_or_else(bad)).collect::<Result<Vec<_>, _>>()?),
+            Some(Json::String(s)) => Some(s.split(',').map(|n| n.trim().to_string()).collect()),
+            Some(_) => return Err(bad()),
+        };
+        let names = names.map(|n| n.into_iter().filter(|n| !n.is_empty()).collect::<Vec<_>>());
+        if names.as_ref().is_some_and(Vec::is_empty) {
+            return Err(bad());
+        }
+        if access == "append" {
+            match &names {
+                None => return Err(Error::BadRequest("an append link names its data streams (names)".into())),
+                Some(n) if n.iter().any(|n| n.contains(['*', '?'])) => return Err(Error::BadRequest("an append link names its data streams exactly: no patterns in names".into())),
+                _ => {}
+            }
+        }
+        Ok((access, names))
+    }
+
     /// The cluster's flavor (`elasticsearch`, `opensearch`), when roll search says; kept 30 s.
     fn flavor(&self, r#ref: &str) -> Option<String> {
         if let Some((at, f)) = self.1.lock().expect("flavors").get(r#ref)
@@ -1158,22 +1190,27 @@ impl LinkProvider for Search {
             f => text(&c, &format!("/{f}")),
         }
     }
-    fn issue(&self, r#ref: &str, _: &str, _: &Link, label: &str, ttl: Option<u64>) -> roll_secrets::Result<Issued> {
-        // Data access only (indices, templates, pipelines, lifecycle): a leaked app key can't make
-        // more keys or users.
-        let mut body = json!({ "name": label.chars().take(64).collect::<String>(), "access": "data" });
+    fn issue(&self, r#ref: &str, _: &str, link: &Link, label: &str, ttl: Option<u64>) -> roll_secrets::Result<Issued> {
+        // Never admin: a leaked app key can't make more keys or users. `data` (indices,
+        // templates, pipelines, lifecycle) unless the link narrows it ([`Search::key_options`]).
+        let (access, names) = Self::key_options(link)?;
+        let mut body = json!({ "name": label.chars().take(64).collect::<String>(), "access": access });
+        if let Some(n) = &names {
+            body["indices"] = json!(n);
+        }
         // A dynamic key expires by itself a little after its lease, should a revoke fail.
         if let Some(m) = ttl {
             body["expires_in_s"] = json!((m + 5) * 60);
         }
         let k = self.0.call(Method::POST, &format!("/v1/search/clusters/{}/keys", enc(r#ref)), Some(body))?;
         let id = text(&k, "/id")?;
-        // roll search says what it made (#29): anything but a data key, or a key that doesn't
-        // say, is deleted and refused (docs/secrets.md, "Links": search).
-        if k["access"].as_str() != Some("data") {
+        // roll search says what it made (#29): a key of another access or other indices than
+        // asked, or one that doesn't say, is deleted and refused (docs/secrets.md, "Links": search).
+        let indices_ok = names.as_ref().is_none_or(|n| k["indices"] == json!(n));
+        if k["access"].as_str() != Some(access) || !indices_ok {
             let _ = self.0.delete_gone(&format!("/v1/search/clusters/{}/keys/{}", enc(r#ref), enc(id.expose())));
-            let made = k["access"].as_str().map_or("a key without its access".to_string(), |a| format!("an {a} key"));
-            return Err(Error::Link(format!("roll search made {made}, not a data one: refused (and deleted)")));
+            let made = k["access"].as_str().map_or("a key without its access".to_string(), |a| format!("a {a} key on {}", k["indices"]));
+            return Err(Error::Link(format!("roll search made {made}, not the {access} key asked for: refused (and deleted)")));
         }
         Ok(Issued { parts: search_parts(&k)?, handle: json!({ "id": id.expose() }) })
     }
@@ -1181,7 +1218,11 @@ impl LinkProvider for Search {
     /// Elasticsearch) is refused when the link is written. A build of roll search that doesn't
     /// say its flavor is taken at its word later, at the first issue.
     fn check(&self, link: &Link) -> roll_secrets::Result<()> {
+        let (access, _) = Self::key_options(link)?;
         let c = self.0.call(Method::GET, &format!("/v1/search/clusters/{}", enc(&link.r#ref)), None)?;
+        if c["flavor"].as_str() == Some("opensearch") && access == "append" {
+            return Err(Error::BadRequest("an OpenSearch cluster has no append keys (its index action also overwrites): link data with names".into()));
+        }
         match (c["flavor"].as_str(), link.field.as_str()) {
             (Some("opensearch"), "api_key") => Err(Error::BadRequest("an OpenSearch cluster has no API keys: link user and password (OPENSEARCH_USERNAME, OPENSEARCH_PASSWORD)".into())),
             (Some("elasticsearch"), "user" | "password") => Err(Error::BadRequest("an Elasticsearch cluster issues API keys: link api_key (ELASTICSEARCH_API_KEY)".into())),
