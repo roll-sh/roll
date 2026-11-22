@@ -340,6 +340,22 @@ CREATE TABLE IF NOT EXISTS error_groups (
 ) WITHOUT ROWID;
 -- Who started a deployment, as a person (their session's, their own token's, the operator's): what
 -- an approval is compared with.
+-- Environments with data of their own (data: branch), and the branch each linked database
+-- made for one: its sealed variables and what deletes it (shared by an environment's services).
+CREATE TABLE IF NOT EXISTS env_data (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    PRIMARY KEY (service, env)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS env_branches (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    ref TEXT NOT NULL,
+    kept TEXT NOT NULL,
+    vars TEXT NOT NULL,
+    PRIMARY KEY (service, env, kind, ref)
+) WITHOUT ROWID;
 -- A deployment's edge settings from its tree's roll.toml (`EdgeFile`, every block), copied to a
 -- promotion or a rollback of it: they travel with the image.
 CREATE TABLE IF NOT EXISTS deploy_edge (
@@ -1234,7 +1250,7 @@ impl Store {
             if n == 0 {
                 return Err(Error::NotFound(format!("service {service} has no environment {env}")));
             }
-            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "form_submissions"] {
+            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "form_submissions", "env_data"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ? AND env = ?"), [service, env])?;
             }
             // Its schedules', challenge's and base images' state goes with it.
@@ -3345,6 +3361,55 @@ impl Store {
             let counted = all.iter().filter(|a| Some(a.as_str()) != author).count() as u32;
             Ok((all, fresh && counted == needed))
         })
+    }
+
+    /// Whether the environment has data of its own (`data: "branch"`).
+    pub fn env_data(&self, service: &str, env: &str) -> Result<bool> {
+        Ok(self.db.query_row("SELECT 1 FROM env_data WHERE service = ? AND env = ?", [service, env], |_| Ok(())).optional()?.is_some())
+    }
+
+    pub fn set_env_data(&self, service: &str, env: &str, on: bool) -> Result<()> {
+        match on {
+            true => self.db.execute("INSERT INTO env_data (service, env) VALUES (?, ?) ON CONFLICT (service, env) DO NOTHING", [service, env])?,
+            false => self.db.execute("DELETE FROM env_data WHERE service = ? AND env = ?", [service, env])?,
+        };
+        Ok(())
+    }
+
+    /// The environment's branches of its linked databases.
+    pub fn env_branches(&self, service: &str, env: &str) -> Result<Vec<(LinkKind, String, crate::integrations::Minted)>> {
+        let rows: Vec<(String, String, String, String)> = self.db.query("SELECT kind, ref, kept, vars FROM env_branches WHERE service = ? AND env = ? ORDER BY kind, ref", [service, env], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+        rows.into_iter()
+            .map(|(k, r, kept, sealed)| {
+                let vars = serde_json::from_str(&self.sealer.open(&format!("branch:{service}:{env}:{k}:{r}"), &sealed)?).unwrap_or_default();
+                Ok((LinkKind::parse(&k)?, r, crate::integrations::Minted { vars, kept }))
+            })
+            .collect()
+    }
+
+    /// A branch made for the environment, kept sealed; one already there (two deploys at once)
+    /// stays.
+    pub fn put_env_branch(&self, service: &str, env: &str, kind: LinkKind, r#ref: &str, m: &crate::integrations::Minted) -> Result<()> {
+        let sealed = self.sealer.seal(&format!("branch:{service}:{env}:{}:{}", kind.as_str(), r#ref), &to_json(&m.vars));
+        self.db.execute("INSERT INTO env_branches (service, env, kind, ref, kept, vars) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (service, env, kind, ref) DO NOTHING", params![service, env, kind.as_str(), r#ref, m.kept, sealed])?;
+        Ok(())
+    }
+
+    /// The environment's branches taken off it (one link's, with `only`), in one write: each,
+    /// and whether another environment still uses it (then it stays).
+    pub fn take_env_branches(&self, service: &str, env: &str, only: Option<(LinkKind, &str)>) -> Result<Vec<(LinkKind, String, String, bool)>> {
+        let only = only.map(|(k, r)| (k.as_str().to_string(), r.to_string()));
+        let taken: Vec<(String, String, String, bool)> = self.db.write(|c| {
+            let rows: Vec<(String, String, String)> = c.query("SELECT kind, ref, kept FROM env_branches WHERE service = ? AND env = ?", [service, env], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            let mut out = Vec::new();
+            for (k, r, kept) in rows.into_iter().filter(|(k, r, _)| only.as_ref().is_none_or(|(ok, or)| ok == k && or == r)) {
+                c.execute("DELETE FROM env_branches WHERE service = ? AND env = ? AND kind = ? AND ref = ?", params![service, env, k, r])?;
+                let used = c.query_row("SELECT 1 FROM env_branches WHERE kind = ? AND ref = ? AND kept = ?", params![k, r, kept], |_| Ok(())).optional()?.is_some();
+                out.push((k, r, kept, used));
+            }
+            Ok::<_, Error>(out)
+        })?;
+        taken.into_iter().map(|(k, r, kept, used)| Ok((LinkKind::parse(&k)?, r, kept, used))).collect()
     }
 
     /// A build's edge settings from its tree (none: what an earlier build of it said goes).

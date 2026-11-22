@@ -173,6 +173,8 @@ impl apps_control::integrations::DomainTls for FakeTls {
 /// roll secrets' search provider, through search's keys route).
 struct FakeResources;
 
+/// What the fake branched and deleted for environments' own data, in order.
+static BRANCHED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /// What the fake made and revoked for `logs` links, in order.
 static MINTED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /// While set, a `logs` link waits (a while at most) for a second one to reach the provider too,
@@ -206,6 +208,20 @@ impl apps_control::integrations::Resources for FakeResources {
 
     async fn unlink(&self, _kind: apps_control::model::LinkKind, _ref: &str, kept: &str) -> anyhow::Result<()> {
         MINTED.lock().push(format!("unlink {}", kept.trim_start_matches("key:")));
+        Ok(())
+    }
+
+    /// A Postgres project's branch for an environment, by name (one an environment's services share).
+    async fn branch(&self, kind: apps_control::model::LinkKind, r#ref: &str, env: &str) -> anyhow::Result<Option<apps_control::integrations::Minted>> {
+        if kind != apps_control::model::LinkKind::Postgres {
+            return Ok(None);
+        }
+        BRANCHED.lock().push(format!("branch {ref} {env}"));
+        Ok(Some(apps_control::integrations::Minted { vars: vec![("DATABASE_URL".into(), format!("postgres://app:pw@db.roll.test:5432/{ref}-{env}"))], kept: format!("br_{ref}_{env}") }))
+    }
+
+    async fn unbranch(&self, _kind: apps_control::model::LinkKind, _ref: &str, kept: &str) -> anyhow::Result<()> {
+        BRANCHED.lock().push(format!("unbranch {kept}"));
         Ok(())
     }
 
@@ -1656,6 +1672,28 @@ async fn a_link_puts_its_variables_in_the_instances() {
     let log: Vec<String> = MINTED.lock()[before..].to_vec();
     assert_eq!(log.iter().filter(|l| l.starts_with("link ")).count(), 2, "{log:?}");
     assert_eq!(log.iter().filter(|l| l.starts_with("unlink ")).count(), 1, "the loser's goes: {log:?}");
+}
+
+/// An environment's own data (`data: "branch"`, Railway's environments' own databases): its
+/// Postgres links reach a branch made for it, never production's database; production and
+/// previews can't; deleting the environment deletes the branch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_environment_with_its_own_data_gets_a_branch_of_each_database() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments");
+    assert_eq!(call(&w.api, "PUT", &format!("/v1/apps/services/{id}/links/postgres/main"), Some(json!({}))).await.0, StatusCode::OK);
+    assert_eq!(call(&w.api, "PUT", &format!("{base}/production"), Some(json!({"data": "branch"}))).await.0, StatusCode::BAD_REQUEST, "production's is the database itself");
+    let (st, e) = call(&w.api, "PUT", &format!("{base}/staging"), Some(json!({"data": "branch"}))).await;
+    assert_eq!(st, StatusCode::OK, "{e}");
+    assert_eq!(e["data"], json!({"mode": "branch", "branches": [{"kind": "postgres", "ref": "main"}]}), "{e}");
+    let (_, v) = call(&w.api, "GET", &format!("{base}/staging/variables/values"), None).await;
+    assert_eq!(v["DATABASE_URL"], "postgres://app:pw@db.roll.test:5432/main-staging", "{v}");
+    let (_, v) = call(&w.api, "GET", &format!("{base}/production/variables/values"), None).await;
+    assert_eq!(v["DATABASE_URL"], "postgres://app:pw@db.roll.test:5432/main", "production keeps its own");
+    assert_eq!(call(&w.api, "DELETE", &format!("{base}/staging"), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(*BRANCHED.lock(), ["branch main staging", "unbranch br_main_staging"]);
 }
 
 /// Requests that pile up past an instance's concurrency start more instances, up to
@@ -5058,7 +5096,15 @@ async fn a_runtime_only_variable_never_reaches_a_build() {
     assert_eq!(call(&w.api, "PATCH", &format!("{env}/variables"), Some(json!({"runtime_only": {"NOPE": true}}))).await.0, StatusCode::BAD_REQUEST);
     let deploy = || async {
         let (_, d) = call(&w.api, "POST", &format!("{env}/deploys"), Some(json!({}))).await;
-        settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
+        let dep = d["id"].as_str().unwrap().to_string();
+        settled(&w, &id, "production", &dep).await;
+        // Active a moment before its template is the live one on a loaded machine: waited for.
+        for _ in 0..200 {
+            if w.apps.live(&id, "production").template().is_some_and(|t| t.deployment == dep) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         w.fake.build_vars.lock().last().cloned().unwrap()
     };
     let built = deploy().await;
