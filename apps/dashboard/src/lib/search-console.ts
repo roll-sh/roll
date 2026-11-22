@@ -1150,9 +1150,10 @@ export function mappingFields(resp: unknown): FieldInfo[] {
 }
 
 /** JSON keys whose string values are credentials (inference endpoints' `api_key`, users'
- * `password`, snapshot repositories' and connectors' secrets, tokens). */
+ * `password`, a reindex from remote's `Authorization` header, snapshot repositories' and
+ * connectors' secrets, tokens). */
 const SECRET_KEYS =
-  /"(api_key|password|password_hash|passphrase|secret|secret_key|secret_access_key|access_key|session_token|access_token|refresh_token|client_secret|private_key|token)"(\s*:\s*)"(?:[^"\\]|\\.)*"/g;
+  /"(api_key|Authorization|authorization|password|password_hash|passphrase|secret|secret_key|secret_access_key|access_key|session_token|access_token|refresh_token|client_secret|private_key|token)"(\s*:\s*)"(?:[^"\\]|\\.)*"/g;
 
 /** A request with its credentials replaced by `<redacted>`, as the console keeps it in history
  * (the browser's storage must never hold a key someone pasted into a request). */

@@ -3396,6 +3396,18 @@ the binding, issues placeholders, decides each swap and audits it, and ships the
     problem ("holds a ${…} reference"), and a swap refuses a key that has come to hold one since.
     Otherwise a writer with no reveal could point a bound key at `${OTHER_SENSITIVE}` and send that
     value to the bound host.
+  - **Never through a reference.** The other way round: in a read for placeholders, a key whose
+    value references a bound key (`AUTH="Bearer ${STRIPE_KEY}"`, directly or through other keys)
+    never resolves to the bound key's value. It's left out with a problem naming both ("references
+    STRIPE_KEY, which is bound to hosts: bind AUTH to them too, or reference it differently"), and a
+    resource's reference to it (`ResourceRef::with_placeholders()`) is refused the same way.
+    Otherwise anyone who may write AUTH would get STRIPE_KEY's value to code that holds only its
+    placeholder. Bind the key the code sends (here AUTH, holding the literal value), or have the code
+    build the header from STRIPE_KEY's placeholder.
+  - **Bound keys withheld.** A read that can't take placeholders but mustn't hand out a bound key
+    (`Secrets::values_without_bound`: roll apps' closed environment when whoever closed it can no
+    longer reveal there, or no one did) leaves every bound key out before anything of it is
+    decrypted or audited, and a key referencing one as above.
   - **The maker.** An in-process consumer (`sandbox:…`, `preview:…`) runs for someone, so it names
     them: `Ask { maker }` in process, `"maker"` over HTTP. That's #440's `secrets_by` for a sandbox,
     and the rule's writer for a preview. The maker is a person (`usr_…`), a token (`token:…`) or the
@@ -3423,9 +3435,15 @@ the binding, issues placeholders, decides each swap and audits it, and ships the
   consumer, placeholder or not: a placeholder would act as production against the host.
 - **Swapping (`Secrets::substitute`).** In process only, behind the `proxy::Substitute` trait: no
   HTTP route trades a placeholder for its value, since holding a placeholder must never be enough
-  to read the value. The proxy passes the placeholder, the host it connects to (the name it
-  verified TLS for, never one a client wrote in a header), and where the placeholder is
-  (`proxy::Position`: a header's name and value, or a query parameter's). Each call checks again:
+  to read the value. The proxy passes the placeholder, the consumer it serves (its interception
+  CA's `consumer`: `apps:<project>/<env>`, `preview:pv-…`, `sandbox:…`; never one the request
+  names), the host it connects to (the name it verified TLS for, never one a client wrote in a
+  header), and where the placeholder is (`proxy::Position`: a header's name and value, or a query
+  parameter's). Each call checks again:
+  - the placeholder was issued to that consumer, first, before anything else about it is said
+    (else `WrongConsumer`, an alert, below): every tenant has a proxy now (roll apps' closed
+    environments, previews), and many bind the same hosts, so a placeholder leaked in a log line or
+    an error page would otherwise swap in someone else's;
   - the placeholder is live (not expired, revoked or ended with its consumer);
   - whoever asked for it still may: the token still exists and may still reveal there, the person
     can still sign in and still owns the project, a product's resource is still on a canvas that
@@ -3455,8 +3473,13 @@ the binding, issues placeholders, decides each swap and audits it, and ships the
   is refused with `WrongHost` and an alert, which is likely an exfiltration attempt: a
   `secrets.alert` row and the environment's notify URL. That's once a minute per placeholder,
   whatever the host, with a count and up to five of the hosts (`… and others`), so a loop over random
-  hosts is one row and one notice a minute, not one per host. The placeholder keeps working for its bound hosts: off the proxy it's useless, and
-  the alert says who to look at. An expired, revoked or unknown placeholder is refused quietly.
+  hosts is one row and one notice a minute, not one per host. Another consumer's proxy is refused
+  with `WrongConsumer` and an alert the same way (`placeholder_consumer`: "placeholder phd_… of
+  STRIPE_KEY, issued to sandbox:sbx_1, was sent through the proxy of apps:prj_2/production…:
+  likely a leaked placeholder"), once a minute per placeholder with up to five of the consumers.
+  The placeholder keeps working for its bound hosts through its own consumer's proxy: off it it's
+  useless, and the alert says who to look at. An expired, revoked or unknown placeholder is refused
+  quietly.
 - **Ending.** A placeholder ends as a lease does: when it expires, with `DELETE …/placeholders/{id}`,
   and with its consumer. `Secrets::end_consumer(consumer)` (or `DELETE …/placeholders?consumer=`)
   ends every placeholder issued to it, when a sandbox stops or a preview is torn down
@@ -3466,8 +3489,9 @@ the binding, issues placeholders, decides each swap and audits it, and ships the
   secret it stands for, so **Reach** lists the live ones of a folder's keys (or one key's) wherever
   they were resolved (here, a folder importing it, an environment based on it), and an incident's
   **cut-off** ends them in its transaction, freeze or not (`"placeholders": false` keeps them).
-- **The filter (`roll_secrets::proxy::filter`).** No I/O. It takes the request's host, path, headers
-  and query, finds every `rlph_` in them and swaps each through `Substitute`, all or nothing:
+- **The filter (`roll_secrets::proxy::filter(req, consumer, with, limits)`).** No I/O. It takes the
+  request's host, path, headers and query and the consumer the proxy serves, finds every `rlph_` in
+  them and swaps each through `Substitute` as that consumer, all or nothing:
   - it swaps only in headers and the query, never in the path or the body (the body isn't passed
     in);
   - the swap goes only to the request's host. A proxy calls the filter per request, so a redirect
@@ -3552,7 +3576,9 @@ agents' sandboxes). Each one does exactly this:
    then serve `InterceptCa::leaf(host)`, a certificate for exactly that name that lives as long as
    the CA. One label under a wildcard binding, never deeper.
 4. **Filter each request** with `roll_secrets::proxy::filter`, which calls `Secrets::substitute`
-   for every placeholder. Pass the host it terminated TLS for, never the request's `Host` header.
+   for every placeholder. Pass the CA's `consumer` (rolld's `CaInterception` does), never one the
+   request or the client names, and the host it terminated TLS for, never the request's `Host`
+   header.
    Send nothing that the filter refuses, and send the headers it rewrote as they are (on a swapped
    request it asks for `Accept-Encoding: identity`). Keep the `Scrub` it answers for step 6.
 5. **Re-dial upstream with real TLS verification**, against the system's roots (never the
@@ -5870,6 +5896,28 @@ The bench's consumer is an in-process one whose maker is the operator; a token o
 adds roll-access's grant lookup or the accounts' and workspace's.
 
 ## Next
+
+**State, 2026-11-22 07:55.** The thirty-fifth review's ranking below still stands. Since it:
+- **roll apps' #603 review is closed on apps' side:**
+  - #667 (listings and staleness mint nothing, the hash by binding, dynamic keys refused, an opened
+    environment ends its interception);
+  - #669 (the CA renews and restarts without breaking: the next CA rides in the bundle, sleeping
+    environments re-mint, adopted instances roll, new hosts re-mint);
+  - #674 (a deleted environment's interception state goes; which runtimes read the bundle).
+
+  roll-intercept's leaf keys are wiped from memory (previews' #671). The response scrub is live
+  (previews' #630).
+- **Ours from that review:** #665 (a placeholder swaps only for its own consumer, references never
+  smuggle a bound value, fallbacks skip bound keys) is gated green and re-levelling a second time,
+  after apps' #667 and #669 rewrote rolld's `resolve_closed`.
+- **Building:**
+  - item 1, production protected by default (`fix/secrets-production-protected`);
+  - item 4, offboarding (`fix/secrets-offboarding`);
+  - the stampede measurement (`perf/secrets-change-stampede`);
+  - members v1.1 phase 1, groups and SCIM Groups (`feature/members-groups`, option (a)).
+- **Next to start, as build slots and disk allow (the server is at 88%):**
+  - item 2, a recoverable environment delete and a protected one's delete as a change request;
+  - item 3, reach naming people, clients, services and sandboxes.
 
 **Ranked, 2026-11-22 06:20** (the thirty-fifth product review, cold, on main 6575a213a, against
 Vault/OpenBao, Infisical, Doppler, AWS, 1Password, Akeyless, Bitwarden SM, GitGuardian, Google Secret
