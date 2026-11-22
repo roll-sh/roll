@@ -6117,8 +6117,10 @@ and webhooks' and review apps' signing secrets sealed. Still open:
   running.
 
 **State, 2026-11-21 05:10.** The thirty-fourth review's items, where they are:
-- **Item 1** (apps' reveal and shell as the asker) **and item 3** (the sandbox resolving as its copier):
-  `fix/secrets-reveal-as-asker`, gating.
+- **Items 1 and 3: landed**, #621 (658cecf0e). apps' reveal and shell read roll secrets as the asker
+  (any `from_secrets` key that doesn't resolve for them is a 403, no partial answer; a bound `roll://`
+  needs reveal on its own folder), and an agents sandbox re-checks its copier's reach on each start,
+  starting without the copied values when refused.
 - **Item 2: landed**, #585 (a2e1d8b2f), after an independent review (1 high, 5 medium, all fixed). A
   workspace project's delete asks roll secrets first (403 unless a secrets admin; 409
   `project_holds_secrets` until `?confirm=`). Its secrets are kept for a window (7 days by default,
