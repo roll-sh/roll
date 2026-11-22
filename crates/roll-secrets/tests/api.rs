@@ -2043,6 +2043,35 @@ async fn nothing_reaches_an_environment_its_caller_cannot_read() {
 }
 
 #[tokio::test]
+async fn readers_share_a_folders_first_digest_only_with_the_same_permissions() {
+    let api = Api::new().await;
+    api.set("production", "DB_PASSWORD", "prod-pw").await;
+    api.set("staging", "APP", "a").await;
+    api.ok(Method::PUT, "/environments/staging/imports?path=/", Some(json!([{ "environment": "production", "path": "/" }]))).await;
+    // Staging through production's import for one, without it for the others.
+    let wide = api.token(json!({ "name": "wide", "environments": ["staging", "production"], "actions": ["read", "reveal"] }));
+    let narrow = api.token(json!({ "name": "narrow", "environments": ["staging"], "actions": ["read", "reveal"] }));
+    let also = api.token(json!({ "name": "also", "environments": ["staging"], "actions": ["read", "reveal"] }));
+    let digest = |token: String| {
+        let api = &api;
+        async move { api.req(Method::GET, "/environments/staging/digest", None, Some(&token)).await.1["digest"].as_str().unwrap().to_string() }
+    };
+    let (w, n) = (digest(wide.clone()).await, digest(narrow.clone()).await);
+    assert_ne!(w, n);
+    // A write elsewhere is a new state, and staging's digests come out as before: whoever computes
+    // first after it, the others get their own, and the same permissions the same one.
+    for round in 0..2 {
+        api.set("development", "OTHER", &round.to_string()).await;
+        let mut got = if round == 0 { vec![digest(wide.clone()).await, digest(narrow.clone()).await] } else { vec![digest(narrow.clone()).await, digest(wide.clone()).await] };
+        if round == 1 {
+            got.reverse();
+        }
+        got.push(digest(also.clone()).await);
+        assert_eq!(got, [w.clone(), n.clone(), n.clone()], "round {round}");
+    }
+}
+
+#[tokio::test]
 async fn a_stored_value_is_found_by_fingerprint_and_short_values_never_are() {
     let api = Api::new().await;
     api.set("production", "STRIPE_KEY", "sk_live_51Hx9").await;

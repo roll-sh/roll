@@ -5874,6 +5874,42 @@ once after each change and then reused (`Secrets::digest_of`, read.rs):
   gets the same answers now. Each live link is checked as before: its generation (`source_changed`)
   is read again, and its value's fingerprint is read the same way, at most 10 s old. A digest
   where anything failed to read is never kept.
+- **Computed once for every reader with the same answers.** After a change, a rollout's pods
+  (each its own principal) would each compute the same digest. A node offers each folder's digests
+  of its newest state to its other readers: by project, environment, folder, whether the caller is
+  untrusted, and the person, where the caller is one (their own values are in it). A reader takes
+  one only where it gets the same answers to every permission the digest asked and passes every
+  freeze it read past, as the same reader's own reuse does; otherwise it computes its own (up to 8
+  answer sets per folder). While none of the new state is kept, the folder's readers on that node
+  wait for the one computing it rather than all computing it. Nothing is shared between nodes,
+  and values never are: each reader still reads, and is audited for, its own.
+  `readers_share_a_folders_first_digest_only_with_the_same_permissions` (`tests/api.rs`) has
+  readers with different permissions compute in either order after a change: each gets its own
+  digest.
+
+`… --example bench -- stampede 100,1000` has that many identities hold one folder's digest (9,900
+keys), then changes one key and times every identity's conditional read (a miss: the first
+digest after the change) and then its read (`digest=1`, as `roll run --watch` asks), 64 at a
+time, with rolld's pool for secrets on Postgres (4 connections). Measured 2026-11-22 on ai-server,
+pinned to 12 CPUs (`taskset -c 12-17,30-35`, the database on 6-11,24-29), three runs each,
+SQLite and Postgres alternated, under load averages of 37 to 103: the medians for 1,000
+identities, CPU-seconds of rolld plus the database, wall in brackets (no run had an error: every
+identity got the new digest and values).
+
+| | before | after |
+| --- | --- | --- |
+| SQLite, first digest after the change | 74.6 s (16.2 s) | 0.4 s (0.1 s) |
+| SQLite, each identity's read | 213 s (42 s) | 194 s (34 s) |
+| Postgres, first digest after the change | 45.8 + 26.8 s (15.4 s) | 0.7 + 1.1 s (0.6 s) |
+| Postgres, each identity's read | 159 + 58 s (43 s) | 137 + 49 s (28 s) |
+
+Before, the first digest cost 70–78 ms of CPU per identity at 100 identities as at 1,000, so the
+rotation of one key under 1,000 pods cost about 75 CPU-seconds before anyone read a value. Both
+ran on about 4.7 of the 12 cores: a digest is computed inside a database read, and the 4 SQLite
+readers or 4 Postgres connections bound it. Now it is one computation per node and answer set.
+What's left is each identity's read of its own values (182–233 ms each across all runs; the read
+didn't change, and the after runs ran under lower load), on 5.5–7 cores: it is bound by the same
+4 connections, and it is per reader by design.
 
 `tests/nodes.rs` (`a_digest_one_node_keeps_moves_at_once_with_what_another_node_changes`) keeps
 a digest on one node and changes things on another: a write, an import, a write to the imported
@@ -6423,10 +6459,13 @@ found them sound. What's left is at the edges:
 6. **People: groups, SCIM groups and time-boxed elevation** (completeness, L; members v1.1, #445's
    "later"): IdP groups as role holders, SCIM `Groups`, and a person's time-boxed role request through
    roll-access's approvals with the two-person rule.
-7. **The stampede after a change is unmeasured** (performance, M): the first digest after a write is
-   71–157 ms per polling identity, so a rotation under 1,000 pods could cost 100–250 CPU-seconds in
-   one poll interval. Run the load on SQLite and Postgres. If it spikes, share the first digest per
-   (folder, permission fingerprint) on a node.
+7. **The stampede after a change** (performance, M; `perf/secrets-change-stampede`): measured, it
+   spiked. For 1,000 identities on one folder of 9,900 keys, the first digest after a one-key write
+   cost 75 CPU-seconds on SQLite and 73 on Postgres (rolld plus the database), about 73–75 ms per
+   identity at any count. Each identity's read of its values then cost another 213–218 ms. Now a
+   node computes the first digest once for every reader with the same answers: 0.4 and 1.8
+   CPU-seconds, 0.1 and 0.6 s wall ("Performance"). The reads are what's left (~190 CPU-seconds per
+   change at 1,000 pods), bound by secrets' 4 connections, and they are per reader by design.
 8. **Placeholders have no consumer on main yet** (integration): previews' #535 is first; then apps'
    egress and the agents sandbox's proxy. Add one end-to-end swap test through the first real proxy,
    with item 4's scrub.
@@ -6908,8 +6947,8 @@ inconsistencies are fixed in #264:
    ~0.1 core (worked out from single-request latency, not a load run), not ~5.6. A digest reads only the columns it hashes and each folder once, and each node
    keeps it while one read of the database's state (the project's change number, environments,
    imports, required keys, shared folders' projects) says the same, every permission it asked
-   answers the same, and live links' generations and fingerprints hold. Next: the first digest after
-   a write (~70–100 ms per polling identity) if a fleet's numbers call for it.
+   answers the same, and live links' generations and fingerprints hold. The first digest after a
+   write is computed once for every reader with the same answers (the thirty-fourth review's item 7).
 1. **Land the queue**, one at a time when the merge lock is free (the order is in "Landing"):
    four threads share it, so each gate runs before the lock is taken and only main's newest change
    is merged under it.
