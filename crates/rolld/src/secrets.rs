@@ -58,7 +58,7 @@ impl Api {
 
     /// Call a product's route as the operator: its status and JSON answer, whatever the status.
     /// Runs on the store's blocking threads.
-    fn call_status(&self, method: Method, path: &str, body: Option<Json>) -> roll_secrets::Result<(axum::http::StatusCode, Json)> {
+    pub(crate) fn call_status(&self, method: Method, path: &str, body: Option<Json>) -> roll_secrets::Result<(axum::http::StatusCode, Json)> {
         self.call_status_as(method, path, body, |e| {
             e.insert(roll_auth::Operator);
         })
