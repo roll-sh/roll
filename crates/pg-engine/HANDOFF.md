@@ -9785,8 +9785,8 @@ its btrees were their build's size. Now:
   it; a crash leaves the estimate as of the last commit (what an uncommitted transaction placed goes
   with the next commit, as PostgreSQL's file keeps an aborted transaction's tuples). Commits that
   touch no estimate pay one atomic load.
-- The change records are folded into a new full record when they outgrow it (or after 256), and at
-  the database's close (`persist_estimates`).
+- The change records are folded into a new full record when they outgrow it (or after 256, until
+  agent 289's round 11 folded by bytes alone), and at the database's close (`persist_estimates`).
 - `ensure` restores a table's estimate from its records before the relstats or legacy paths, when
   they are of its relfilenode and it is still too big under today's limit (kept per estimate:
   `EstHeap::limit`, the limit it went past, not the closing thread's). Temporary and unlogged
@@ -14258,6 +14258,107 @@ failed: all passed.
 
 Not this round's: roll's `VACUUM (VERBOSE)` sends none of PostgreSQL's INFO lines (agent 205's
 note, still open).
+
+## Short write transactions, round 11: the standing table, a big table's estimate records (agent 289)
+
+BENCH.md "Short write transactions, round 11" has the tables. The PGO row of the standing table is
+not in this candidate (its build waited for the gate): it follows in a docs-only `cand/a289-2`. Lane A through `tools/lane.sh`, one
+server (or one pair) a hold, harness `~/.cache/a289/bench` (`lib.sh`: pgbench from PostgreSQL
+18.6's image, `pgbench -i -s 32`, `-M prepared`, 10 s runs; counts from `perf stat -a -C <server
+CPUs> -G <server cgroup>` over 8 s of the run: user and kernel instructions and cycles, switches
+voluntary / involuntary, every syscall by tracepoint, the cgroup's write bytes). The host carried
+3-6 foreign cores on the lane's 8 CPUs in every hold; on the server CPUs most runs were at
+0.2-0.9 foreign cores.
+
+**Where roll stood** (origin `621de3f17`, plain dist; the PGO row is in BENCH): select-only leads
+both on instructions (40.2-40.6k user a read against PostgreSQL's 44.7-45.4k and pgrust's
+41.7-42.4k; kernel 37-38k against 73k and 41-42k: one recvfrom and one sendto a read, PostgreSQL
+six syscalls, pgrust four) but trails pgrust on cycles (95-102k against 71-84k) and tps (72-82k
+against 86-89k). TPC-B-like was far behind: 1.38-1.40 M user instructions a transaction against
+320-326k (PostgreSQL) and 386-391k (pgrust), 3,664-3,922 tps against 5,764-7,663, p99 13-38 ms
+against 3-12. Each statement alone (8 clients, one autocommitted statement a transaction) put
+all of it in one: **`UPDATE pgbench_accounts` 698k user instructions against 93k and 95k** (6,285
+tps against 14,529 and 19,739); tellers 80k (PostgreSQL 88k, pgrust 98k), branches 323k (161k,
+194k: 32 rows under 8 clients), the history INSERT 56k (52k, 54k), BEGIN/END 24k (25k, 38k).
+Scale 32's accounts (3.2 M rows) is past the heap model (`MAX_VERSIONS` 400,000), so its sizes
+are estimated (`EstHeap`, `btest::BtEst`) and kept durable by `estkeep`: a change record each
+commit, a full record now and then.
+
+Kept (two commits, handed in as `cand/a289`):
+
+1. *A btree summary's change record finds its changed leaves' places without an inverse of every
+   leaf* (`BtEst::places`). `BtEst::encode`'s change path built a slot -> place array over all
+   leaves (`vec![u32::MAX; leaves]` and a pass over `slots`) at every commit, under the store's
+   commit lock: 17.2% of the UPDATE's user instructions (the loop's 6 instructions times ~8.7k
+   leaves of the accounts pkey's summary). Now the array is kept and made again only after the
+   leaves' order changed (`reordered`: the first leaf, a split, VACUUM's removals, a change
+   record's new leaf); the records are the same bytes. Unit test
+   `btest::change_records_rebuild_the_summary` (change records over 400 commits and their splits,
+   applied in turn to the full record, give the summary byte for byte). Measured (UPDATE accounts
+   alone, 8 clients, 2 pairs against the base): the connection threads' user instructions -21.2%
+   and -22.4% (190k -> 150k, 148k); the statement's total moves with the compactions' timing
+   (+3%, +13% background) and isn't resolvable by it.
+2. *Change records fold into a full record by bytes alone* (`estkeep::take_shard`; no longer
+   after every 256). The full record holds the btrees' leaf summaries and every moved version's
+   place (`EstHeap::moved`): over a megabyte here (agent 257 measured 7.7 MB for the bulk table
+   and listed this as item 5, not measured). Written every 256 small commits, it went to the log,
+   the memtable and every compaction after it. Folding when the changes outgrow the full record
+   (or 64 KB) keeps the records' bytes within twice the full record, and `restore` reads the same
+   records in the same order. Measured against item 1 alone (UPDATE accounts, 8 clients, 2
+   pairs): user instructions -55.0% and -54.5% (687k -> 309k, 692k -> 315k; connection threads
+   -42%, background -58%), cgroup write bytes 40.2 / 38.2 KB -> 8.7 / 8.2 KB a statement, tps
+   6,152 -> 14,558 and 7,793 -> 18,434, p99 17.7 -> 3.8 and 15.1 -> 2.6 ms.
+
+Both against the base, TPC-B-like (plain dist, alternating pairs; Δ is the medians'): 32 clients,
+3 pairs: user instructions -40.2% (-40.2, -30.2, -48.0%), user cycles -26.8%, kernel instructions
+-13.4%, write bytes 27.6 -> 10.8 KB a transaction (-60%), tps +89.5% (2,401 -> 4,551, 4,081 ->
+5,098, 2,909 -> 5,566), p99 -52%; 8 clients, 2 pairs: user instructions -54.5% (1.43 M -> 663k,
+1.43 M -> 639k), cycles -35.2%, tps +30.1%, p99 -57%. Five of the six 32-client runs and all four
+8-client runs were at or under 1.0 foreign core (the first pair's base run 1.29). Select-only
+unchanged (40.8k against 40.6k user instructions, one run each). Verification: `tools/quick-check.sh` with `QC_CHECKED=1`
+`QC_TESTS=big_tables` on `4f2023d24` (on `2a0f67b0d`): 11 test binaries, clippy 16 warnings, none
+new in a changed file, 366 tests in 8 binaries (big_tables, golden, heap_order_scan, kept_plans,
+the lib's unit tests, models_kept, wire, wire_waits), the same again built `--profile
+verify-checked`, regress 51,148 / 51,150 (0 newly differing), isolation 1647 / 1648, pg_dump_tap
+14,609 passed; then (the diff maps `exec/sizing` to no crash stage) `crash_random` with
+`CRASH_SEEDS=1,2,3 CRASH_ROUNDS=2` and `crash_ctids` on the same build: 382 passed in 10 binaries.
+`power_cut_at_every_point` (the `powerloss` build) was not run: no storage path changed.
+
+Measured and not kept:
+
+- *Agent 266's vendored `parking_lot_core` without `sched_yield`* (`~/.cache/a289/patches/
+  noyield-vendored.patch`, the code part of `locks-no-sched-yield-vendored.patch` unchanged).
+  Decided by counts, TPC-B-like at 32 clients, 3 alternating pairs, all six runs at 0.44-0.74
+  foreign cores: yields 3.2 -> 0 a transaction, involuntary switches -62.8% (3.6 -> 1.4), but
+  voluntary switches +32.4% (9.4 -> 12.5; all switches +6%), futex calls +147% (4.3 -> 10.8),
+  syscalls +12.6%, migrations +69%; user cycles -1.4% (-2.5, -1.4, +4.2%), kernel cycles +2.7%;
+  p99 -12.4% (down in all three), tps +0.4%. Each yield becomes a park and a wake: switches don't
+  fall and cycles aren't lower, so it fails the brief's rule. Not re-measured on top of this
+  round's commits (where the accounts UPDATE no longer dominates). No form without the vendored
+  crate was built, as none was needed for a keep.
+
+What is left, by size (TPC-B-like at 32 clients after this round: 0.83-0.99 M user instructions a
+transaction, PostgreSQL 0.33 M; UPDATE accounts 309-315k against 93-95k):
+
+- The UPDATE's own lookups (c2's instruction profile, UPDATE accounts alone): `point::newest` 21%
+  of the samples (the memtable's skiplist and the SST block searches for the row), and
+  `TxnState::changed_since_snapshot` -> `Store::latest_version_ts` 8.4%, a second point lookup
+  of the same key; commit 21%; libc memcpy 11% (a quarter of it the memtable skiplist's key
+  compares); compaction 9-15% (`compact_within` 9.1% of the samples, the flush threads 15%; `bloom_set` 6.4%: building a 3.2 M-key filter misses the cache at
+  each of its bits, a cycles item more than an instruction one).
+- Branches (32 rows, 8 clients): 323k against 161-194k, with 0.6 yields a statement.
+- Past the model, `pg_stat_user_tables.n_tup_hot_upd` for pgbench_accounts is 0 where PostgreSQL
+  has 220 of 5,000 updates at one client (an update reaching a page its earlier update left a
+  dead version on prunes it and fits: heap-only); the estimate counts none. At scale 1 (modelled)
+  roll's counts match (830-837 against 840 of 2,000). `n_dead_tup` also differs after pruning
+  (roll 3, PostgreSQL 1 in a three-update case): PostgreSQL subtracts what a page prune removed.
+- Lock waits: yields 2.8-3.3 a transaction at 32 clients (PostgreSQL and pgrust none), involuntary
+  switches 3.4-3.7 against 0.5.
+- Harness for the next round: `~/.cache/a289/bench` (`table.sh` one server's cells, `pairs.sh` /
+  `pair.sh` / `cmp.py` alternating pairs with every count, `on2.sh` per-thread counts and an
+  LBR instruction profile, `sql/` one-statement scripts, `explain.sh` / `hot.sh` / `hot2.sh` the
+  plan and HOT checks off the lane). Per-thread counts split connection and background work for
+  UPDATE alone, not for TPC-B (its connection threads compact inline).
 
 ## Short write transactions, round 10: locks without sched_yield as they would ship (agent 266)
 

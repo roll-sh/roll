@@ -1651,6 +1651,171 @@ session thread's user instructions by `perf stat --per-thread` over a 14 s run l
 the difference in selects; CPUs 4 and 22): base (`c4ad9402d`) 38,025 / 38,948 / 37,578, the stack
 (`e974a84e1`) 37,624 / 39,504 / 37,995 user instructions a select, alternated.
 
+## Short write transactions, round 11: the standing table, a big table's estimate records (2026-11-22, agent 289)
+
+Lane A (servers on CPUs 6,7,24,25, pgbench on 8,9,26,27), one server or one pair a
+`tools/lane.sh` hold; harness `~/.cache/a289/bench`. Every server: fresh data dir, `pgbench -i -I
+dtGvp -s 32` (3.2 M accounts, 320 tellers, 32 branches), `-M prepared`, 2 s warm-up, then 10 s;
+counts are the server cgroup's (`perf stat -a -C <server CPUs> -G <cgroup>`, 8 s from +1 s, all
+three servers alike: every process and thread) divided by tps x 8 s. Settings as rounds 7-10:
+fsync on, synchronous_commit on, 2 GB shared buffers, max_wal_size 8 GB, checkpoint_timeout 30
+min. Foreign cores: other tenants' busy time on the four server CPUs during the run (the lane's
+8 CPUs carried 3-6 foreign cores in every hold). p50 / p99 from pgbench's sampled log (2% of
+select-only transactions, 20% of TPC-B's). ONE run per cell (the brief's rule): tps and latency
+are readings under that load; instructions and the counted quantities hold under it.
+
+The PGO row (`tools/dist-pgo.sh` of `621de3f17`) follows in `cand/a289-2`.
+
+Same-day table, 2026-11-22 04:50-05:20 UTC (roll: origin `621de3f17`; pgrust's published image is
+PGO-built; the `c2` row is this round's two commits on `621de3f17`, run at 06:50 while a
+quick-check built on other CPUs):
+
+| workload | clients | server | tps | p50 / p99 ms | user instr/txn | user cycles/txn | kernel instr/txn | kernel cycles/txn | CPU µs/txn | syscalls/txn | yields/txn | futex/txn | switches vol / invol per txn | foreign cores |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| select-only | 8 | roll, plain dist | 72,139 | 0.10 / 0.25 | 40,600 | 94,911 | 38,228 | 64,781 | 45.2 | 2.1 | 0.00 | 0.00 | 0.96 / 0.18 | 0.42 |
+| select-only | 8 | roll, plain dist + round 11 | 55,166 | 0.13 / 0.35 | 40,837 | 97,439 | 39,723 | 69,535 | 52.2 | 2.1 | 0.00 | 0.00 | 0.97 / 0.17 | 1.18 |
+| select-only | 8 | PostgreSQL 18.6 | 45,623 | 0.17 / 0.41 | 45,366 | 112,851 | 72,988 | 129,963 | 72.4 | 6.1 | 0.00 | 0.00 | 1.00 / 0.23 | 0.6 |
+| select-only | 8 | pgrust (published, PGO) | 85,942 | 0.08 / 0.21 | 42,371 | 71,236 | 41,989 | 65,965 | 38.6 | 3.9 | 0.00 | 0.00 | 0.96 / 0.18 | 0.34 |
+| select-only | 32 | roll, plain dist | 82,278 | 0.35 / 0.90 | 40,235 | 101,879 | 36,893 | 64,772 | 47.2 | 2.0 | 0.00 | 0.00 | 0.98 / 0.02 | 0.17 |
+| select-only | 32 | roll, plain dist + round 11 | 68,224 | 0.40 / 1.76 | 40,579 | 103,164 | 38,369 | 67,586 | 53.1 | 2.0 | 0.00 | 0.00 | 0.99 / 0.03 | 0.84 |
+| select-only | 32 | PostgreSQL 18.6 | 51,509 | 0.58 / 1.50 | 44,710 | 124,904 | 73,286 | 135,179 | 77.8 | 6.0 | 0.00 | 0.00 | 1.00 / 0.02 | 0.26 |
+| select-only | 32 | pgrust (published, PGO) | 88,900 | 0.31 / 0.99 | 41,655 | 83,779 | 41,201 | 67,899 | 43.1 | 4.0 | 0.00 | 0.08 | 0.98 / 0.02 | 0.5 |
+| TPC-B-like | 8 | roll, plain dist | 3,922 | 1.44 / 13.28 | 1,400,456 | 2,004,127 | 397,725 | 771,073 | 829.6 | 24.8 | 2.69 | 1.96 | 8.33 / 4.03 | 0.65 |
+| TPC-B-like | 8 | roll, plain dist + round 11 | 4,356 | 1.44 / 7.16 | 680,732 | 1,335,561 | 349,712 | 692,041 | 620.9 | 20.4 | 2.31 | 1.84 | 8.38 / 3.52 | 1.26 |
+| TPC-B-like | 8 | PostgreSQL 18.6 | 6,794 | 1.04 / 2.95 | 319,772 | 738,937 | 426,664 | 817,115 | 482.2 | 36.4 | 0.00 | 1.25 | 7.95 / 2.03 | 0.58 |
+| TPC-B-like | 8 | pgrust (published, PGO) | 5,764 | 1.20 / 5.36 | 390,825 | 820,994 | 350,236 | 665,596 | 470.2 | 31.6 | 0.00 | 2.54 | 8.76 / 1.75 | 1.16 |
+| TPC-B-like | 32 | roll, plain dist | 3,664 | 6.41 / 38.35 | 1,376,687 | 2,218,978 | 420,384 | 841,417 | 947.6 | 27.2 | 3.27 | 4.36 | 9.58 / 3.67 | 0.56 |
+| TPC-B-like | 32 | roll, plain dist + round 11 | 4,011 | 6.09 / 33.80 | 972,356 | 1,694,286 | 368,677 | 748,019 | 780.5 | 25.1 | 2.83 | 4.12 | 9.33 / 3.41 | 1.02 |
+| TPC-B-like | 32 | PostgreSQL 18.6 | 7,274 | 3.99 / 9.95 | 325,956 | 977,799 | 468,688 | 912,673 | 540.7 | 40.1 | 0.00 | 2.29 | 8.88 / 0.48 | 0.16 |
+| TPC-B-like | 32 | pgrust (published, PGO) | 7,663 | 3.62 / 11.84 | 385,828 | 997,236 | 340,841 | 639,526 | 488.1 | 32.6 | 0.00 | 3.71 | 9.22 / 0.50 | 0.46 |
+
+Each TPC-B statement alone (8 clients, one autocommitted statement a transaction, scripts in
+`~/.cache/a289/bench/sql`; roll `621de3f17` plain dist; one run each):
+
+| statement | roll tps | PostgreSQL tps | pgrust tps | roll user instr | PostgreSQL | pgrust | roll yields |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| BEGIN; END | 53,905 | 52,089 | 48,510 | 23,605 | 24,693 | 37,566 | 0.00 |
+| BEGIN; SELECT accounts; END | 27,550 | 23,021 | 24,622 | 62,693 | 65,475 | 73,198 | 0.00 |
+| UPDATE pgbench_accounts | 6,285 | 14,529 | 19,739 | 697,891 | 92,609 | 95,432 | 1.51 |
+| UPDATE pgbench_tellers | 18,971 | 13,231 | 17,087 | 80,302 | 87,512 | 98,302 | 1.28 |
+| UPDATE pgbench_branches | 7,334 | 5,359 | 8,520 | 323,333 | 161,337 | 193,619 | 0.60 |
+| INSERT pgbench_history | 22,796 | 25,473 | 27,491 | 55,904 | 51,700 | 54,495 | 0.41 |
+
+Pairs (plain dist, alternating, a fresh server and fixture each run; values are first / second
+build, counts per transaction; `conn_iu` / `bg_iu`: user instructions of the connection threads
+(per-thread counts) and the rest of the cgroup's; foreign: each run's foreign cores on the server
+CPUs). Builds: `plain0` = `621de3f17`; `c1` = + the summary's kept leaf places; `c2` = c1 + the
+fold by bytes (`cand/a289`'s two commits, before the rebase onto `2a0f67b0d`, which touched
+neither file); `noyield` = `621de3f17` + agent 266's vendored `parking_lot_core`. (TPC-B's
+connection threads run compactions inline: no split shown for it.)
+
+2 pairs, ua8, c1 against plain0:
+
+| count | pair 1 | pair 2 | median Δ |
+|---|---:|---:|---:|
+| tps | 8071/6406 | 6239/6412 | -8.9% |
+| p99_ms | 13.829/15.707 | 15.665/15.741 | +7.0% |
+| instructions_u | 709399/684297 | 719246/747133 | +0.2% |
+| conn_iu | 190449/150096 | 190044/147495 | -21.8% |
+| bg_iu | 518950/534201 | 529202/599638 | +8.1% |
+| cycles_u | 764127/825075 | 851451/840731 | +3.4% |
+| conn_cu | 389762/385227 | 397192/398426 | -0.4% |
+| bg_cu | 374365/439848 | 454259/442305 | +7.4% |
+| instructions_k | 169645/168590 | 170198/175794 | +1.3% |
+| cycles_k | 312462/318929 | 327482/347061 | +4.0% |
+| sc_sched_yield | 2.067/0.903 | 1.35/0.974 | -42.1% |
+| switch_voluntary | 2.672/2.535 | 2.531/2.608 | -1.0% |
+| switch_involuntary | 1.911/1.231 | 1.537/1.297 | -25.6% |
+| sc_futex | 2.34/2.124 | 2.019/2.215 | +0.2% |
+| syscalls | 9.628/8.446 | 8.766/8.986 | -4.9% |
+| cpu-migrations | 0.325/0.212 | 0.21/0.225 | -13.8% |
+| cpu_us_per_txn | 330.3/357.0 | 370.7/362.9 | +3.0% |
+| wbytes_per_txn | 37179/39676 | 38187/39299 | +4.8% |
+| foreign_cores | 0.65/1.2 | 1.26/1.15 |  |
+
+2 pairs, ua8, c2 against c1:
+
+| count | pair 1 | pair 2 | median Δ |
+|---|---:|---:|---:|
+| tps | 6152/14558 | 7793/18434 | +136.6% |
+| p99_ms | 17.737/3.815 | 15.14/2.645 | -80.5% |
+| instructions_u | 687021/309321 | 692110/314747 | -54.8% |
+| conn_iu | 151234/87655 | 157141/92331 | -41.6% |
+| bg_iu | 535787/221666 | 534969/222416 | -58.5% |
+| cycles_u | 859450/453072 | 767555/428563 | -45.7% |
+| conn_cu | 399481/251525 | 383207/248020 | -36.2% |
+| bg_cu | 459969/201547 | 384348/180543 | -54.6% |
+| instructions_k | 171180/85634 | 174511/87711 | -49.9% |
+| cycles_k | 338332/188198 | 321819/183773 | -43.6% |
+| sc_sched_yield | 0.868/1.096 | 1.086/1.179 | +17.4% |
+| switch_voluntary | 2.567/2.371 | 2.681/2.503 | -7.1% |
+| switch_involuntary | 1.252/1.281 | 1.362/1.268 | -2.3% |
+| sc_futex | 2.145/2.114 | 2.338/2.282 | -1.9% |
+| syscalls | 8.476/7.271 | 8.764/7.599 | -13.8% |
+| cpu-migrations | 0.166/0.207 | 0.292/0.285 | +11.2% |
+| cpu_us_per_txn | 395.2/217.0 | 323.9/180.0 | -44.8% |
+| wbytes_per_txn | 40157/8713 | 38234/8219 | -78.4% |
+| foreign_cores | 1.33/0.86 | 0.91/0.33 |  |
+
+3 pairs, T32, c2 against plain0:
+
+| count | pair 1 | pair 2 | pair 3 | median Δ |
+|---|---:|---:|---:|---:|
+| tps | 2401/4551 | 4081/5098 | 2909/5566 | +89.5% |
+| p99_ms | 65.064/31.012 | 34.61/27.624 | 65.998/25.045 | -52.3% |
+| instructions_u | 1659724/992565 | 1380903/963957 | 1603424/833800 | -40.2% |
+| cycles_u | 2398797/1755348 | 2139321/1693615 | 2280587/1538505 | -26.8% |
+| instructions_k | 417974/373533 | 423201/366586 | 426247/350978 | -13.4% |
+| cycles_k | 889516/764182 | 843169/739803 | 884291/707211 | -14.1% |
+| sc_sched_yield | 2.753/3.151 | 3.117/3.092 | 3.151/3.214 | +2.0% |
+| switch_voluntary | 9.076/9.336 | 9.492/9.315 | 9.635/9.274 | -1.9% |
+| switch_involuntary | 3.225/3.565 | 3.527/3.486 | 3.656/3.61 | -1.2% |
+| sc_futex | 3.85/4.155 | 4.17/3.988 | 4.275/4.065 | -4.4% |
+| syscalls | 28.311/25.379 | 27.215/24.781 | 29.094/24.406 | -10.4% |
+| cpu-migrations | 0.651/0.763 | 0.81/0.733 | 0.826/0.73 | -9.5% |
+| cpu_us_per_txn | 1081.9/788.3 | 870.9/687.8 | 1001.0/654.1 | -27.1% |
+| wbytes_per_txn | 27810/11330 | 27374/10906 | 27690/10105 | -60.2% |
+| foreign_cores | 1.29/0.42 | 0.25/0.33 | 0.86/0.25 |  |
+
+2 pairs, T8, c2 against plain0:
+
+| count | pair 1 | pair 2 | median Δ |
+|---|---:|---:|---:|
+| tps | 4063/5357 | 4399/5650 | +30.1% |
+| p99_ms | 13.355/5.439 | 12.838/5.77 | -57.2% |
+| instructions_u | 1425567/663397 | 1434366/638551 | -54.5% |
+| cycles_u | 2015277/1305337 | 1900609/1232851 | -35.2% |
+| instructions_k | 397743/337003 | 387171/327843 | -15.3% |
+| cycles_k | 787216/689131 | 763279/658528 | -13.1% |
+| sc_sched_yield | 2.409/2.483 | 2.505/2.575 | +2.9% |
+| switch_voluntary | 8.321/8.282 | 8.124/8.086 | -0.5% |
+| switch_involuntary | 3.815/3.391 | 3.715/3.292 | -11.3% |
+| sc_futex | 1.868/1.834 | 1.866/1.821 | -2.1% |
+| syscalls | 25.248/20.923 | 25.004/20.606 | -17.4% |
+| cpu-migrations | 0.366/0.55 | 0.413/0.627 | +51.0% |
+| cpu_us_per_txn | 831.8/588.8 | 772.9/564.0 | -28.1% |
+| wbytes_per_txn | 30428/10301 | 30119/10283 | -66.0% |
+| foreign_cores | 0.51/0.71 | 0.34/0.52 |  |
+
+3 pairs, T32, noyield against plain0:
+
+| count | pair 1 | pair 2 | pair 3 | median Δ |
+|---|---:|---:|---:|---:|
+| tps | 3209/3515 | 4024/3843 | 3537/3551 | +0.4% |
+| p99_ms | 48.334/42.354 | 32.787/31.882 | 46.2/39.393 | -12.4% |
+| instructions_u | 1365767/1403593 | 1395620/1330000 | 1384784/1426980 | +2.8% |
+| cycles_u | 2197077/2141389 | 2132277/2102842 | 2129572/2219883 | -1.4% |
+| instructions_k | 430490/437540 | 420058/425250 | 402499/450714 | +1.6% |
+| cycles_k | 848018/871318 | 823352/839511 | 800081/898634 | +2.7% |
+| sc_sched_yield | 3.209/0.0 | 3.179/0.0 | 3.139/0.0 | -100.0% |
+| switch_voluntary | 9.475/12.548 | 9.507/12.328 | 9.303/12.937 | +32.4% |
+| switch_involuntary | 3.669/1.364 | 3.585/1.332 | 3.502/1.474 | -62.8% |
+| sc_futex | 4.39/10.664 | 4.259/10.53 | 4.219/11.159 | +147.2% |
+| syscalls | 27.585/31.051 | 27.527/30.167 | 27.391/32.108 | +12.6% |
+| cpu-migrations | 0.825/1.392 | 0.833/1.34 | 0.817/1.451 | +68.7% |
+| cpu_us_per_txn | 985.2/922.7 | 893.3/874.6 | 902.4/928.4 | -2.1% |
+| foreign_cores | 0.74/0.54 | 0.59/0.52 | 0.58/0.44 |  |
+
 ## Short write transactions, round 10: locks without sched_yield as they would ship (2026-11-19, agent 266)
 
 HANDOFF.md has the reading. short_txn at 32 clients (UPDATE, SELECT, INSERT, COMMIT with
