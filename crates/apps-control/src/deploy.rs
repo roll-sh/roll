@@ -986,6 +986,8 @@ impl Apps {
             fingerprint(&r.vars_for_hash(), &svc, &env.egress)
         };
         let tpl = Arc::new(self.template(&svc, &env, &dep).await?);
+        // Its private network up before its instances start (they may connect at boot).
+        self.apply_peering(&svc.id, &env.name).await;
         // Whether it runs closed, for any node to read (a project environment's placeholders end
         // only once nothing live ran closed there).
         if tpl.spec.closed {
@@ -1995,6 +1997,10 @@ impl Apps {
         for name in self.deps.runtime.list(Some(service)).await {
             // A known instance's network sandbox (`<instance>-net`) and waker (`-wake`) are its own.
             let owner = name.strip_suffix("-net").or_else(|| name.strip_suffix("-wake")).unwrap_or(&name).to_string();
+            // Its private networks' peers and forwarders: the minute's check keeps them as asked.
+            if name.starts_with(&format!("{}peer-{}-", crate::runtime::PREFIX, service.trim_start_matches("svc_"))) {
+                continue;
+            }
             if known.contains(&name) || known.contains(&owner) || own_runs.iter().any(|r| name.ends_with(r.as_str())) || (own_jobs && name.contains("-run")) {
                 continue;
             }
@@ -2950,6 +2956,7 @@ impl Apps {
             self.refresh_intercepts(&services, now).await;
             self.retry_orphan_branches().await;
             self.reap_sandboxes(now).await;
+            self.peering_pass().await;
         }
         if now - self.status_swept.load(std::sync::atomic::Ordering::Relaxed) >= 60_000 {
             self.status_swept.store(now, std::sync::atomic::Ordering::Relaxed);
