@@ -54,6 +54,7 @@ pub mod public;
 pub mod push;
 pub mod resp_cache;
 pub mod runtime;
+pub mod sandboxes;
 pub mod shell;
 pub mod spend;
 pub mod store;
@@ -1435,6 +1436,7 @@ impl Apps {
         for e in self.db(move |s| s.environments(&sid)).await? {
             self.teardown_live(id, &e.name).await;
         }
+        self.drop_sandboxes(id, None).await;
         for name in self.deps.runtime.list(Some(id)).await {
             self.deps.runtime.remove(&name).await;
         }
@@ -1516,6 +1518,7 @@ impl Apps {
             self.teardown_live(id, &e.name).await;
             self.drop_branches(id, &e.name, None).await;
         }
+        self.drop_sandboxes(id, None).await;
         // Each environment's volume goes with it (a last backup first, kept a week).
         for e in &envs {
             let had = row.for_env(e).map(|s| s.run.volume.is_some()).unwrap_or(row.run.volume.is_some());
@@ -2728,6 +2731,7 @@ impl Apps {
         // Its branches first (deleted once no other environment uses them): the rows naming them
         // would go with it.
         self.drop_branches(service, env, None).await;
+        self.drop_sandboxes(service, Some(env)).await;
         let (sid, e) = (service.to_string(), env.to_string());
         self.db(move |s| s.delete_environment(&sid, &e)).await?;
         self.hosts_changed();
