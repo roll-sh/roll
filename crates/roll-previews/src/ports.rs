@@ -449,7 +449,6 @@ pub trait Source: Send + Sync {
 }
 
 /// What a service should run. (No `Debug`: `vars` holds the branches' passwords.)
-#[derive(Clone)]
 /// The build a service runs now, where its backend keeps each build at a URL of its own.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LiveBuild {
@@ -460,6 +459,7 @@ pub struct LiveBuild {
     pub url: String,
 }
 
+#[derive(Clone)]
 pub struct Target {
     pub project: String,
     pub preview: String,
