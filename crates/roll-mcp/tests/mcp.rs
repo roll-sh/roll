@@ -1076,7 +1076,9 @@ async fn an_agent_polls_what_happened() {
 }
 
 /// A callback that echoes MCP Events' challenge (`/good`) or doesn't (`/bad`), keeping each POST.
-struct Receiver(Arc<std::sync::Mutex<Vec<(Vec<(String, String)>, Vec<u8>)>>>);
+/// One POST: its headers and body.
+type Post = (Vec<(String, String)>, Vec<u8>);
+struct Receiver(Arc<std::sync::Mutex<Vec<Post>>>);
 
 impl roll_access::sinks::SinkTransport for Receiver {
     fn check(&self, url: &str) -> Result<(), String> {
