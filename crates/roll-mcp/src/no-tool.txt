@@ -79,9 +79,7 @@ POST /v1/queues/vhosts/{vhost}/credentials                                     a
 POST /v1/redis/databases/{id}/password                                         answers or sets a credential
 POST /v1/redis/databases/{id}/unload                                           the operator's (health, migrations, process control)
 POST /v1/redis/replicas/{id}/unload                                            the operator's (health, migrations, process control)
-GET /v1/search/clusters/{id}/browser-keys                                      no tool yet: maps after #358 lands
 POST /v1/search/clusters/{id}/browser-keys                                     answers or sets a credential (#358)
-DELETE /v1/search/clusters/{id}/browser-keys/{key}                             no tool yet: maps after #358 lands (destructive, as search_revoke_key)
 GET /v1/search/clusters/{id}/indices/{index}/docs                              no such handler (only POST exists)
 POST /v1/search/clusters/{id}/inference/secrets                                answers or sets a credential (an inference service's key)
 POST /v1/search/clusters/{id}/keys                                             answers or sets a credential

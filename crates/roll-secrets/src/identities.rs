@@ -476,7 +476,9 @@ impl Secrets {
         if i.disabled_at.is_some() {
             return Err(Error::Forbidden(format!("identity {} is disabled: an admin of its project enables it again", i.name)));
         }
-        if !self.maker_reaches(&i.created_by, &project)? {
+        // Never more than its maker holds now: every action of its rule, in each of its
+        // environments and folders (a gateway's identity: its maker still the project's admin).
+        if !self.maker_reaches(&i.created_by, &identity_needs(&i, &project))? {
             return Err(denied());
         }
         if let Some(list) = &i.allowed_ips
@@ -601,4 +603,24 @@ impl Secrets {
         })?)
     }
 
+}
+
+/// What an identity's login gives, as checks on its maker (`Secrets::maker_reaches`): each of its
+/// actions in each of its environments and folders, every environment where it names none. A
+/// gateway's identity opens that gateway's link, which is its project admin's.
+fn identity_needs<'a>(i: &'a Identity, project: &'a str) -> Vec<(Action, Scope<'a>)> {
+    if i.gateway.is_some() {
+        return vec![(Action::Admin, Scope::whole(project))];
+    }
+    let envs: Vec<Option<&str>> = i.environments.as_ref().map_or(vec![None], |e| e.iter().map(|x| Some(x.as_str())).collect());
+    let paths: Vec<Option<&str>> = i.paths.as_ref().map_or(vec![None], |p| p.iter().map(|x| Some(x.as_str())).collect());
+    let mut out = Vec::new();
+    for a in &i.actions {
+        for env in &envs {
+            for path in &paths {
+                out.push((*a, Scope { project, env: *env, path: *path, whole: env.is_none() }));
+            }
+        }
+    }
+    out
 }

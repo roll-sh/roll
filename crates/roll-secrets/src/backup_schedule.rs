@@ -175,9 +175,10 @@ impl Secrets {
     fn scheduled_backup(&self, project: &str, deliver: &dyn crate::Deliver) -> Result<String> {
         let (bucket, recipient, keep, by): (String, String, i64, String) =
             self.db.read(|c| c.query_row("SELECT bucket, recipient, keep, created_by FROM backup_schedules WHERE project_id = ?", [project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))))?;
-        // As syncs: what a person set up runs while they can still reach the project.
-        if !self.maker_reaches(&by, project)? {
-            return Err(Error::Forbidden(format!("{by} set this schedule up and can't reach the project any more: set it up again")));
+        // A backup holds every value of the project: it runs only while whoever set it up may still
+        // manage the project and reveal all of it, as they are now.
+        if !self.maker_reaches(&by, &[(Action::Admin, Scope::whole(project)), (Action::Reveal, Scope::whole(project))])? {
+            return Err(Error::Forbidden(format!("{by} set this schedule up and may no longer manage and read the whole project: an admin sets it up again")));
         }
         // The bucket may have left the project since.
         if !self.members(project)?.contains(&("bucket".to_string(), bucket.clone())) {

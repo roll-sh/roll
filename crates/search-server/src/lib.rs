@@ -2,6 +2,8 @@
 //!
 //! - [`allow`]: a cluster's IP allowlist, checked before authentication, and how a listener
 //!   decides a request's client address (PROXY protocol, a trusted proxy's header).
+//! - [`cors`]: which web pages may call a cluster (`http.cors.*` per cluster), and
+//!   [`browser`]: the rate limits of the keys those pages ship.
 //! - [`node::Node`] holds the loaded clusters: it authenticates and routes requests
 //!   ([`auth`]), wakes clusters from their [`catalog::StoreProvider`], enforces per-cluster
 //!   limits and unloads idle clusters.
@@ -23,7 +25,9 @@
 pub mod allow;
 pub mod audit;
 pub mod auth;
+pub mod browser;
 pub mod catalog;
+pub mod cors;
 pub mod http;
 mod http_head;
 pub mod lease;

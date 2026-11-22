@@ -51,8 +51,12 @@ export interface Build {
   timeout_s?: number;
   /** Its builder: small (2 vCPU, 4 GiB; default), medium (4, 8 GiB) or large (8, 16 GiB), minutes metered by size on the fleet. */
   size?: "small" | "medium" | "large";
-  /** A Git URL service's submodules fetched into the tree (default: left out). */
+  /** Submodules fetched into the tree (default: left out): a Git URL's, or a roll code repo's. */
   submodules?: boolean;
+  /** The private roll code repos (owner/name) a roll code repo's submodules may come from. */
+  submodule_repos?: string[];
+  /** A Git URL service's Git LFS objects in place of their pointers (default: pointers as text). */
+  lfs?: boolean;
 }
 
 export type ServiceType = "web" | "worker" | "cron";
@@ -86,6 +90,15 @@ export interface PushState extends Push {
   last_delivered_at?: number;
   failing_since?: number;
   last_error?: string;
+}
+
+/** An alert on one of the app's own gauges: above or below a threshold for 1–5 minutes running. */
+export interface MetricAlert {
+  name: string;
+  above?: number;
+  below?: number;
+  minutes?: number;
+  sum?: boolean;
 }
 
 export interface Run {
@@ -131,7 +144,7 @@ export interface Run {
   volume?: { mount: string; size_gb: number; backups?: { every_hours: number; keep: number } };
   /** Metric alerts (`alert.*` events), over five minutes; each 0 is off. */
   /** log_match: text its output holds log_count times in five minutes (alert.log). */
-  alerts?: { memory_pct: number; error_pct: number; p95_ms: number; capacity_pct?: number; log_match?: string; log_count?: number };
+  alerts?: { memory_pct: number; error_pct: number; p95_ms: number; capacity_pct?: number; log_match?: string; log_count?: number; cpu_pct?: number; metrics?: MetricAlert[] };
   /** Its service level objective: `objective`% of requests not 5xx (and of minutes under `latency_ms` at p95) over `window_days`; `alert.slo` when its budget burns fast. */
   slo?: Slo;
   /** Its own Prometheus endpoint, scraped every 15 s on each running instance (port: the app's own by default). */
@@ -710,6 +723,10 @@ export interface Environment extends EnvironmentSummary {
   egress?: Egress;
   /** Hosts its egress proxy refused lately: not listed, or (`private`) resolving only to private addresses. */
   egress_refused?: { host: string; private?: true }[];
+  /** Who a closed environment's placeholders are made by; null: no one (its bound keys withheld). */
+  closed_by?: string | null;
+  /** A closed environment's interception (roll secrets' placeholders): requests filtered, placeholders swapped, the latest refusals. */
+  intercepted?: { requests: number; swapped: number; refused?: string[] };
   /** A push deploys only once its commit's checks pass. */
   wait_for_ci?: boolean;
   /** The push (sha) waiting for its checks, if one is. */
@@ -1235,6 +1252,8 @@ export type NotifyEvent =
   | "spend.alert"
   | "spend.limit"
   | "alert.memory"
+  | "alert.cpu"
+  | "alert.metric"
   | "alert.errors"
   | "alert.latency"
   | "alert.capacity"

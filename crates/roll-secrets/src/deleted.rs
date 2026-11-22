@@ -271,14 +271,50 @@ impl Secrets {
         Ok(())
     }
 
-    /// Who may recover `project`: an admin of its secrets (the operator, an admin's session, a
-    /// token whose rules say so), or the person whose project it was.
+    /// Who may recover `project`: an admin of its secrets by their grant as it is now (the
+    /// operator, an admin's session, a token whose rules say so; a member's session names no
+    /// deleted project, since its members are kept apart), or the person whose namespace it is,
+    /// signed in themselves. Membership kept from when it was deleted never lets anyone in: it
+    /// only narrows the namespace's person to one who was still an owner then.
     fn may_recover(&self, project: &str, caller: &Caller) -> Result<bool> {
         if caller.allows(Action::Admin, &Scope::project(project)) {
             return Ok(true);
         }
-        let owner = self.workspace.deleted(project).map_err(|e| Error::Internal(e.to_string()))?.map(|p| p.owner);
-        Ok(owner.is_some_and(|o| !o.is_empty() && caller.maker.is_none() && caller.principal == o))
+        let Some(p) = self.workspace.deleted(project).map_err(|e| Error::Internal(e.to_string()))? else { return Ok(false) };
+        if p.owner.is_empty() || caller.maker.is_some() || caller.principal != p.owner {
+            return Ok(false);
+        }
+        let kept = self.workspace.deleted_members(project).map_err(|e| Error::Internal(e.to_string()))?;
+        Ok(kept.iter().any(|(user, role)| *user == p.owner && *role == roll_auth::roles::Role::Owner))
+    }
+
+    /// Whether `project`'s secrets are a deleted project's, in its window or after.
+    pub(crate) fn is_deleted(&self, project: &str) -> Result<bool> {
+        Ok(self.db.read(|c| c.query_row("SELECT forgotten_at FROM projects WHERE project_id = ?", [project], |r| r.get::<_, Option<i64>>(0)).optional())?.flatten().is_some())
+    }
+
+    /// Whether what `by` registered (an audit sink) may keep acting for a deleted project: by
+    /// whether they managed it when it was deleted (its members are kept apart, so nobody's grant
+    /// names it now). The operator and server admins always; a person while they can still sign in
+    /// and were an admin or owner of it then; a person's token for its person.
+    pub(crate) fn managed_when_deleted(&self, by: &str, project: &str) -> Result<bool> {
+        let by = match (by.strip_prefix("token:"), &self.grants) {
+            (Some(id), Some(grants)) => grants.owner(id).flatten().unwrap_or_else(|| by.to_string()),
+            _ => by.to_string(),
+        };
+        Ok(match self.maker(&by)? {
+            crate::caller::Origin::Gone => false,
+            crate::caller::Origin::Operator => true,
+            crate::caller::Origin::Person(user) => match self.person(&user)? {
+                None => false,
+                Some(p) if p.admin => true,
+                Some(_) => {
+                    use roll_auth::roles::Role;
+                    let kept = self.workspace.deleted_members(project).map_err(|e| Error::Internal(e.to_string()))?;
+                    kept.iter().any(|(u, r)| *u == user && matches!(r, Role::Admin | Role::Owner))
+                }
+            },
+        })
     }
 
     /// The deleted projects in their window that `caller` may recover, soonest purged first.
@@ -499,7 +535,7 @@ impl Secrets {
     /// indices keep delivering through the window, and the closing digest).
     pub(crate) fn deleted_canvas(&self, project: &str) -> Result<BTreeSet<(String, String)>> {
         let p = self.workspace.deleted(project).map_err(|e| Error::Internal(e.to_string()))?.ok_or_else(|| Error::NotFound(format!("no project {project}")))?;
-        Ok(p.resources.iter().filter(|r| self.workspace.trusts(&p, r.kind, &r.r#ref)).map(|r| (r.kind.as_str().to_string(), r.r#ref.clone())).collect())
+        Ok(p.resources.iter().filter(|r| self.workspace.trusts_deleted(&p, r.kind, &r.r#ref)).map(|r| (r.kind.as_str().to_string(), r.r#ref.clone())).collect())
     }
 }
 

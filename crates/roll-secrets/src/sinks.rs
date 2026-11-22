@@ -262,7 +262,7 @@ impl Secrets {
             c.execute(
                 "INSERT INTO audit_sinks (id, project_id, url, secret, cursor, status, error, delivered_at, running_until, retry_at, created_at, created_by, format, token, decoys)
                  VALUES (?, ?, ?, ?, ?, 'new', NULL, NULL, 0, 0, ?, ?, ?, ?, ?)",
-                params![id, project, n.url.trim(), sealed, cursor, now, caller.principal, format, sealed_token, decoys as i64],
+                params![id, project, n.url.trim(), sealed, cursor, now, caller.made_by().to_string(), format, sealed_token, decoys as i64],
             )?;
             audit::record(c, self.keys()?, project, caller, "sink.create", None, None, &[], &format!("audit stream to {} ({format})", host(&n.url)), now)?;
             Ok(c.query_row(&format!("SELECT {COLUMNS} FROM audit_sinks WHERE id = ?"), [&id], sink_row)?)
@@ -289,17 +289,17 @@ impl Secrets {
         // Only rows older than SETTLE_MS: ids are given out when a row is written, so on Postgres a
         // row can commit after a higher one is already visible, and a cursor past it would skip it.
         let settled = now - SETTLE_MS;
-        type Due = (String, String, String, Vec<u8>, i64, String, Option<Vec<u8>>, bool);
+        type Due = (String, String, String, Vec<u8>, i64, String, Option<Vec<u8>>, bool, String);
         let due: Vec<Due> = self.db.read(|c| {
             c.query(
-                "SELECT s.id, s.project_id, s.url, s.secret, s.cursor, COALESCE(s.format, 'roll'), s.token, COALESCE(s.decoys, 0) FROM audit_sinks s WHERE s.running_until <= ? AND s.retry_at <= ?
+                "SELECT s.id, s.project_id, s.url, s.secret, s.cursor, COALESCE(s.format, 'roll'), s.token, COALESCE(s.decoys, 0), s.created_by FROM audit_sinks s WHERE s.running_until <= ? AND s.retry_at <= ?
                  AND EXISTS (SELECT 1 FROM audit a WHERE a.project_id = s.project_id AND a.id > s.cursor AND a.at <= ?) LIMIT 100",
                 params![now, now, settled],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get::<_, i64>(7)? == 1)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get::<_, i64>(7)? == 1, r.get(8)?)),
             )
         })?;
         let (mut ok, mut failed) = (0, 0);
-        for (id, project, url, sealed, cursor, format, sealed_token, decoys) in due {
+        for (id, project, url, sealed, cursor, format, sealed_token, decoys, by) in due {
             let hold = now + HOLD_MS;
             if self.db.write(|c| c.execute("UPDATE audit_sinks SET running_until = ? WHERE id = ? AND running_until <= ? AND cursor = ?", params![hold, id, now, cursor]))? != 1 {
                 continue;
@@ -324,9 +324,20 @@ impl Secrets {
             // A bucket must still be on the project's canvas: one moved to another project, or
             // removed, gets nothing more. A deleted project's sinks keep delivering through its
             // recovery window, and its closing digest, from the canvas it had (deleted.rs).
-            let canvas = || self.members(&project).or_else(|_| self.deleted_canvas(&project));
+            let deleted = self.is_deleted(&project)?;
+            let canvas = || if deleted { self.deleted_canvas(&project) } else { self.members(&project) };
             let gone = roll_target(&url).is_some_and(|(kind, name)| !canvas().map(|m| m.contains(&(kind.to_string(), name.to_string()))).unwrap_or(false));
-            let sent = if gone { Err(Error::BadRequest(format!("{url} isn't on this project's canvas any more"))) } else { Ok(()) };
+            // The project's audit log goes out only while whoever set the sink up may still manage
+            // the project: a removed or demoted admin's URL stops getting it. A deleted project's
+            // members are kept apart, so there it's whether they managed it when it was deleted.
+            let maker_ok = if deleted { self.managed_when_deleted(&by, &project)? } else { self.registration_reaches(&by, &[(crate::access::Action::Admin, crate::access::Scope::whole(&project))])? };
+            let sent = if gone {
+                Err(Error::BadRequest(format!("{url} isn't on this project's canvas any more")))
+            } else if !maker_ok {
+                Err(Error::Forbidden(format!("{by} set this sink up and may no longer manage the project: an admin of it sets it up again")))
+            } else {
+                Ok(())
+            };
             let sent = sent.and_then(|_| self.stored_key(&project)).and_then(|dek| {
                 let secret = dek.open(&sink_aad(&project, &id), &sealed)?;
                 let token = sealed_token.as_ref().map(|t| dek.open(&token_aad(&project, &id), t)).transpose()?;

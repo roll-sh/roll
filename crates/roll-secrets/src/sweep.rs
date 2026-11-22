@@ -189,7 +189,7 @@ impl Secrets {
         }
         let handle: Json = handle.and_then(|h| serde_json::from_str(&h).ok()).unwrap_or_default();
         // The product first: if recording fails, the old expiry stands and the sweeper revokes then.
-        self.links.get(&link.kind)?.renew(&link.r#ref, &handle, until)?;
+        self.provider_for(&link.kind, &link.r#ref)?.renew(&link.r#ref, &handle, until)?;
         let n = self.db.write(|c| c.execute("UPDATE leases SET expires_at = ? WHERE id = ? AND revoked_at IS NULL AND expires_at = ?", params![until, id, expires_at]))?;
         if n == 0 {
             return Err(Error::Conflict("conflict", format!("{id} changed meanwhile: try again")));
@@ -356,7 +356,7 @@ impl Secrets {
         if !self.members(project)?.contains(&(link.kind.clone(), link.r#ref.clone())) {
             return Err(Error::BadRequest(format!("{} {} isn't in this project any more", link.kind, link.r#ref)));
         }
-        let provider = self.links.get(&link.kind)?;
+        let provider = self.provider_for(&link.kind, &link.r#ref)?;
         match link.mode {
             Mode::Live => {
                 // Resetting the resource's own credential affects every environment that links it.

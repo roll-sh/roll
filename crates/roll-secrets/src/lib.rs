@@ -76,6 +76,7 @@ pub mod totp;
 pub mod window;
 pub mod syncs;
 mod caller;
+mod members;
 pub mod consumers;
 pub mod kms;
 mod write;
@@ -493,6 +494,8 @@ impl Secrets {
         // Approval notifications (notices.rs): the sealed URL, its host to show, and the outbox.
         db.add_column("environments", "notify_url", "BLOB")?;
         db.add_column("environments", "notify_host", "TEXT")?;
+        // Who set the notify URL: it's announced to only while they may manage the project.
+        db.add_column("environments", "notify_by", "TEXT")?;
         db.add_column("syncs", "checked_at", "INTEGER")?;
         // Syncs a change marked due (checked_at NULL), found every couple of seconds (syncs.rs).
         db.ensure_schema("CREATE INDEX IF NOT EXISTS syncs_due ON syncs (retry_at) WHERE checked_at IS NULL;")?;
