@@ -895,6 +895,11 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
     if !session {
         parts.extensions.insert(roll_cluster::Decided(ctx.grant.id.clone()));
     }
+    // roll's own work for the grant has no token to forward: a forward carries the grant (signed),
+    // and the owner's gate acts for it again (rolld's `act_as_from_hop`).
+    if !parts.headers.contains_key(header::AUTHORIZATION) && parts.extensions.get::<roll_auth::ActAs>().is_some_and(|a| *a.0 == *ctx.grant.id) {
+        parts.extensions.insert(roll_cluster::Acting(ctx.grant.id.clone()));
+    }
     if let Some(a) = approved.clone() {
         parts.extensions.insert(a);
     }
