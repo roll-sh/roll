@@ -201,7 +201,7 @@ impl Secrets {
                 });
             }
             for (path, ops) in by_path {
-                let write = |ops: Vec<Op>| self.batch(project, &e.slug, crate::Batch { path: Some(path.to_string()), message: Some("restored from a backup".into()), ops, if_seq: None }, caller);
+                let write = |ops: Vec<Op>| self.batch_via(project, &e.slug, crate::Batch { path: Some(path.to_string()), message: Some("restored from a backup".into()), ops, if_seq: None }, crate::write::Via::Restore, caller);
                 let n = ops.len();
                 let linked = |o: &Op| matches!(o, Op::Set { link: Some(Some(_)), .. });
                 match write(ops.clone()) {

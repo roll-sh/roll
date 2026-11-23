@@ -5478,15 +5478,29 @@ some environments call it (`filters_itself`). `decoy.used` is only for those who
 deleted project's feed stays readable through its recovery window, so a follower sees
 `project.deleted` and `project.recovered`.
 
-**Never a value.** `data` holds names, ids, counts and reasons, and always `actor`; `path` and `keys`
-(when there's more than one; one is `key`) come from the row. Never a value, a hash of one, or its
-length.
+**Never a value.** `data` holds names, ids, versions, counts and reasons, and always `actor`; `path`
+and `keys` (when there's more than one; one is `key`) come from the row. Never a value, a hash of
+one, or its length.
+
+**Value changes.** Every change to stored values (`apply` in `write.rs`, which every write, import,
+restore, request, promote, rollback, rotation and environment rename goes through) carries its event
+in its own audit row: one per change, never one per key, so a bulk write of 40 keys is one
+`secret.changed`. `via` says how it came about: `write`, `import` (a `.env` file), `restore` (a
+backup), `answer` (a secret request answered), `request` (a change request applied), `promote`,
+`rollback`, `rotation`, or `rename` (references to a renamed environment rewritten). Live and dynamic
+links store no value, so a resource's own credential changing is no `secret.changed` (a live link's
+`rotate` is `rotation.succeeded`). Keys have no trash: a deleted key's versions stay in its history
+(its value until retention or a purge), and a rollback brings it back. Role changes in a project are
+roll-workspace's records, not secrets' audit rows, so they aren't events here yet.
 
 | Kind | When | `data` |
 | --- | --- | --- |
+| `secret.changed` | a change added, changed, linked or rotated stored values (a change that only edits comments, tags or expiry isn't one) | `via`, `change` (its number in the history), `version` (one key) or `versions` (`{key: version}`), `keys` when the row names more (the change's other keys only had their metadata edited or were deleted), `deleted` (keys the same change deleted) |
+| `secret.deleted` | a change only deleted keys (a folder's delete too) | `via`, `change`, `version` or `versions` (the delete's) |
 | `secret.leaked` | a stored value turned up in a roll code repository (a change's added lines or a scan; in the project holding the value, once a day for the same keys and repo), or GitHub's secret scanning found a placeholder (`secrets.placeholders.end`) | `repo` (and `project`, the repo's, when the value came from another's shared folder), or `placeholder`, `consumer`, `reason` |
 | `scan.finding` | `roll secrets scan` or roll MCP's credential guard (`POST …/leaks`) matched values: a row per folder | `candidates`, `matched`, `guard` |
 | `rotation.failed` | a managed key's scheduled rotation failed: once as a failing run starts (health's `rotation_failing` until one works) | `reason` |
+| `rotation.succeeded` | a rotation worked, scheduled or `--now`: a managed key's new credential (the row right after its `secret.changed` via `rotation`, in the same transaction), or a live link's resource credential reset | `mode` (`managed` or `live`), `scheduled`, `version` and `change` (managed), `sharing` (the keys holding the same credential, when more than one) |
 | `request.pending` | a change request or a secret request opened | `request`, `type` (`change` or `value`), `expires_at` (a secret request's) |
 | `request.decided` | a change request approved or rejected (once its state moves) or closed; a secret request answered or cancelled | `request`, `type`, `state` |
 | `sync.failed` | a sync's push failed | `sync`, `target`, `reason` |
@@ -5496,6 +5510,7 @@ length.
 | `placeholder.wrong_consumer` | another consumer's proxy sent a placeholder | `placeholder`, `consumer`, `by`, `more_by`, `count` |
 | `placeholder.wrong_host` | a placeholder went to hosts its key isn't bound to | `placeholder`, `consumer`, `hosts`, `more_hosts`, `count` |
 | `production.unprotected` | `production` went from protected to not (health's `production_unprotected`) | |
+| `access.changed` | an environment's protection or approvals changed (not its notify URL alone; `production.unprotected` instead when that's what it did), or a folder's change policy was set or removed | `what` (`environment` or `folder`), `protected` (an environment's), `approvals` (0: a folder's policy removed) |
 | `env.deleted`, `env.recovered` | a standard environment was deleted (kept for its recovery window; ephemeral ones, previews', aren't events), or recovered within it | `purge_at` (deleted) |
 | `project.deleted`, `project.recovered` | the workspace project was deleted (its recovery window starts), or recovered | `purge_at` (deleted) |
 
@@ -5756,7 +5771,7 @@ isn't in the workspace is 404.
 | `PUT /identities/{id}/jwks` | `{jwks}` | `Identity` (admin; a person's): its pinned keys replaced, its id kept (400 for an `aws` one) |
 | `POST /v1/secrets/login` | `{identity, token}` or `{identity, aws: {method, url, headers, body}}` | `{token, expires_at, project, identity}` (public; `aws`: a signed `GetCallerIdentity`, "AWS IAM") |
 | `GET /audit?env=&key=&actor=&action=&before=&since=&limit=&digests=&format=` | | `AuditEntry[]` newest first, or CSV/JSONL with `format`; `digests=false` leaves out `audit.digest` rows |
-| `GET /events?after=&limit=&kinds=&environment=&latest=` | | `{events: SecretsEvent[], next}` in commit order after the cursor (`limit` 1–500, default 100; `kinds` comma-separated, a family as `request.*`, 400 for an unknown one; `environment` needs read there); `latest=1` answers `{events: [], next}` at the head, 400 with `after` ("Events") |
+| `GET /events?after=&limit=&kinds=&environment=&latest=` | | `{events: SecretsEvent[], next}` in commit order after the cursor (`limit` 1–500, default 100; `kinds` comma-separated, a family as `request.*` (`secret.*` is `secret.changed`, `secret.deleted` and `secret.leaked`), 400 for an unknown one; `environment` needs read there); `latest=1` answers `{events: [], next}` at the head, 400 with `after` ("Events") |
 | `GET /required` | | `Required[]` |
 | `PUT /required` | `Required[]` | `Required[]` (replaces the list; `admin`) |
 | `GET /shares` | | `Share[]` newest first |
