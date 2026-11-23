@@ -17,6 +17,11 @@
 //! retryable status (the service's handler decides: 429, 500, 503) is sent again, here at most
 //! twice, within the request's timeout. Answers are untrusted data: services parse them with
 //! [`crate::json::parse`] and check their shape.
+//!
+//! A streamed answer ([`post_stream`]) is retried and checked the same way until its status
+//! arrives; a successful one then comes back open ([`Answer::open`]) for
+//! [`super::stream`] to read as it comes. As in Elasticsearch, the request's `timeout` covers
+//! the wait for that status; the whole stream may last the node's [`max_timeout`].
 
 use crate::cluster::Cluster;
 use crate::error::{EsError, EsResult};
@@ -86,7 +91,21 @@ pub struct Answer {
     /// Response headers, names in lower case.
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+    /// A successful streamed answer, its body not read yet ([`post_stream`]).
+    pub open: Option<Opened>,
 }
+
+/// A streamed answer whose body is still coming.
+pub struct Opened {
+    pub response: reqwest::Response,
+    /// When the whole stream must have ended (the node's [`max_timeout`] after it was sent).
+    pub deadline: Instant,
+    /// The longest wait for its next piece: the request's `timeout` (within the node's cap).
+    pub idle: Duration,
+}
+
+/// The most of an unsuccessful streamed answer read (its error message).
+const MAX_ERROR_BODY: usize = 1024 * 1024;
 
 impl Answer {
     pub fn ok(&self) -> bool {
@@ -111,7 +130,7 @@ fn failed(id: &str, detail: String) -> EsError {
     EsError::new(500, "exception", format!("Failed to send request from inference entity id [{id}]")).caused_by(EsError::java(500, "connect_exception", detail))
 }
 
-fn innermost(e: &reqwest::Error) -> String {
+pub(crate) fn innermost(e: &reqwest::Error) -> String {
     let mut s = e.to_string();
     let mut src = std::error::Error::source(e);
     while let Some(x) = src {
@@ -128,6 +147,16 @@ pub async fn post(cluster: &Cluster, call: &Call<'_>) -> EsResult<Answer> {
 
 /// [`post`], reading at most `max` bytes of the answer.
 pub async fn post_limited(cluster: &Cluster, call: &Call<'_>, max: usize) -> EsResult<Answer> {
+    exchange(cluster, call, max, false).await
+}
+
+/// [`post`] for a streamed answer: a successful one comes back with its body unread
+/// ([`Answer::open`]); any other is read whole (at most 1 MiB) for its error.
+pub async fn post_stream(cluster: &Cluster, call: &Call<'_>) -> EsResult<Answer> {
+    exchange(cluster, call, MAX_ERROR_BODY, true).await
+}
+
+async fn exchange(cluster: &Cluster, call: &Call<'_>, max: usize, stream: bool) -> EsResult<Answer> {
     let egress = crate::egress::Egress::of_cluster(cluster, ALLOW_PRIVATE);
     let invalid = || EsError::status(400, format!("Invalid host [{}], please check that the URL is correct.", redact(&call.url)));
     let url = reqwest::Url::parse(&call.url).map_err(|_| invalid())?;
@@ -147,15 +176,18 @@ pub async fn post_limited(cluster: &Cluster, call: &Call<'_>, max: usize) -> EsR
         Err(e) => return Err(EsError::status(400, format!("host [{}]: {e}", url.host_str().unwrap_or_default()))),
         Ok(()) => {}
     }
-    let timeout = call.timeout.min(max_timeout(cluster));
-    let b = reqwest::Client::builder()
-        .connect_timeout(timeout.min(Duration::from_secs(10)))
-        .timeout(timeout)
-        .redirect(reqwest::redirect::Policy::none())
-        .no_proxy()
-        .dns_resolver(egress.resolver());
+    let cap = max_timeout(cluster);
+    let timeout = call.timeout.min(cap);
+    let mut b = reqwest::Client::builder().connect_timeout(timeout.min(Duration::from_secs(10))).redirect(reqwest::redirect::Policy::none()).no_proxy().dns_resolver(egress.resolver());
+    // A stream's body outlives the request's timeout: its waits are bounded below instead.
+    if !stream {
+        b = b.timeout(timeout);
+    }
     let client = b.build().map_err(|e| EsError::illegal_state(e.to_string()))?;
-    let deadline = Instant::now() + timeout;
+    let started = Instant::now();
+    let deadline = started + timeout;
+    let stream_deadline = started + cap;
+    let until = tokio::time::Instant::from_std(deadline);
     super::rate::acquire(&cluster.config.name, call.inference_id, call.per_minute, timeout).await?;
     let mut attempt = 0;
     loop {
@@ -163,15 +195,25 @@ pub async fn post_limited(cluster: &Cluster, call: &Call<'_>, max: usize) -> EsR
         for (k, v) in &call.headers {
             rb = rb.header(k.as_str(), v.as_str());
         }
-        let sent = rb.body(call.body.clone()).send().await;
+        let sent = match tokio::time::timeout_at(until, rb.body(call.body.clone()).send()).await {
+            Ok(sent) => sent,
+            Err(_) => return Err(timed_out(call.inference_id)),
+        };
         // A retryable answer, or a connection error.
         let outcome = match sent {
             Ok(mut resp) => {
                 let status = resp.status().as_u16();
                 let headers: Vec<(String, String)> = resp.headers().iter().filter_map(|(k, v)| Some((k.as_str().to_string(), v.to_str().ok()?.to_string()))).collect();
+                if stream && (200..300).contains(&status) {
+                    return Ok(Answer { status, headers, body: Vec::new(), open: Some(Opened { response: resp, deadline: stream_deadline, idle: timeout }) });
+                }
                 let mut body = Vec::new();
                 loop {
-                    match resp.chunk().await {
+                    let next = match tokio::time::timeout_at(until, resp.chunk()).await {
+                        Ok(next) => next,
+                        Err(_) => return Err(timed_out(call.inference_id)),
+                    };
+                    match next {
                         Ok(Some(c)) => {
                             if body.len() + c.len() > max {
                                 return Err(EsError::status(400, format!("the answer of inference endpoint [{}] exceeds [{max}] bytes", call.inference_id)));
@@ -183,7 +225,7 @@ pub async fn post_limited(cluster: &Cluster, call: &Call<'_>, max: usize) -> EsR
                         Err(e) => return Err(failed(call.inference_id, innermost(&e))),
                     }
                 }
-                let answer = Answer { status, headers, body };
+                let answer = Answer { status, headers, body, open: None };
                 if !(call.retry)(status) {
                     return Ok(answer);
                 }

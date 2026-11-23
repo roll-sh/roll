@@ -122,8 +122,8 @@ narrows, so a token can carry it too (a CI token for every environment except pr
 
 ### Custom roles and groups
 
-Neither is in v1. Groups are designed for v1.1 in [members-v1-1.md](members-v1-1.md), and
-custom roles come later:
+Neither is in v1. Groups are built in v1.1 ([members-v1-1.md](members-v1-1.md), phase 1, with SCIM
+groups), and custom roles come later:
 
 - **Custom roles** (Infisical Enterprise, Doppler): a role becomes a row of rules in roll-access,
   named per project or per server. The evaluation doesn't change: a membership names a role, and

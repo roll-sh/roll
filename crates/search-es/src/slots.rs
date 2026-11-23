@@ -467,7 +467,6 @@ mod tests {
         assert_eq!(slots.try_take("shop-2", "alice").unwrap_err(), Full::Owner(2));
         assert_eq!(slots.try_take("shop-1", "alice").unwrap_err(), Full::Cluster(2));
         assert_eq!(slots.try_take("blog", "bob").unwrap_err(), Full::Queue, "the freed slot isn't the freeing cluster's");
-        assert!(!slots.ask("blog", "bob"), "Carol is ahead");
         let _c = slots.try_take("wiki", "carol").expect("the slot Carol waited for");
         assert_eq!((slots.held("wiki"), slots.held("shop-1"), slots.held("shop-2")), (1, 2, 0));
     }

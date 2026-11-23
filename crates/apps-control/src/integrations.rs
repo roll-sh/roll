@@ -372,9 +372,11 @@ pub struct Intercept {
 pub struct SecretVar {
     pub name: String,
     pub value: String,
-    /// It's a linked resource's address as rolld sees it (`Values.linked`: `127.0.0.1`, a
-    /// node's own host name): apps rewrites it for the container, as its own links.
-    pub linked: bool,
+    /// The resource it's linked to, `(kind, ref)` (`Values.links`: `("postgres", "main")`). Its
+    /// value is an address as rolld sees it (`127.0.0.1`, a node's own host name): apps rewrites it
+    /// for the container, as its own links, and leaves it out of an environment with data of its
+    /// own when it links a resource apps links there itself.
+    pub link: Option<(String, String)>,
     /// Only for runtimes (roll secrets' `sensitive` keys, Vercel's sensitive variables): it goes
     /// to builds and instances, and no answer ever holds it, as a sealed variable (shown
     /// `sealed`, left out of `…/variables/values` for everyone, references to it sealed too).

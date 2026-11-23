@@ -146,6 +146,58 @@ export interface NewGrant {
   decoy?: boolean;
 }
 
+/** One tool's calls in `GET /v1/access/activity`. */
+export type ToolActivity = { tool: string; calls: number; denied: number; failed: number; avg_ms: number; p50_ms?: number; p95_ms?: number; max_ms: number; last_at: number };
+/** How agents used roll's MCP server lately (`GET /v1/access/activity`). */
+export type Activity = {
+  since: number;
+  days_asked: number;
+  calls: number;
+  tools: ToolActivity[];
+  connections: { grant: string | null; name: string | null; calls: number; denied: number; failed: number; tools: number; last_at: number }[];
+  days: { day: number; calls: number; denied: number; failed: number }[];
+};
+
+/** One of roll's alerts to the operator (`GET /v1/access/alerts`, MCP Events' `access.alert`). */
+export type Alert = {
+  seq: number;
+  at: number;
+  kind: "tool_failing" | "decoy_used" | "token_revoked" | "secret_revoked" | "checkup_finding" | string;
+  tool?: string;
+  calls?: number;
+  failed?: number;
+  rate_pct?: number;
+  usual_pct?: number;
+  grant?: string;
+  name?: string;
+  route?: string;
+  ip?: string | null;
+  what?: string;
+  found_at?: string;
+  finding?: string;
+  why?: string;
+  fix?: string;
+};
+
+/** An alert in one sentence, and the token it's about (for a link), if any. */
+export function describeAlert(a: Alert): { text: string; grant: string | null } {
+  const grant = a.grant ?? null;
+  switch (a.kind) {
+    case "tool_failing":
+      return { text: `${a.tool} is failing: ${a.failed} of ${a.calls} calls in 15 minutes were server errors (${a.rate_pct}%, usually ${a.usual_pct}%).`, grant: null };
+    case "decoy_used":
+      return { text: `The decoy "${a.name}" was used to call ${a.route}${a.ip ? ` from ${a.ip}` : ""}.`, grant };
+    case "token_revoked":
+      return { text: `"${a.name}" was revoked: it was found in ${a.found_at}.`, grant };
+    case "secret_revoked":
+      return { text: `${a.what} was revoked: it was found in ${a.found_at}.`, grant: null };
+    case "checkup_finding":
+      return { text: `"${a.name}": ${a.why}.`, grant };
+    default:
+      return { text: a.kind, grant };
+  }
+}
+
 /** A token that needs attention (`GET /v1/access/checkup`). */
 export interface Checkup {
   grant: { id: string; name: string; kind: Grant["kind"]; last_used_at: number | null; expires_at: number | null; created_at: number };
@@ -761,6 +813,13 @@ export const accessApi = {
   revoke: (id: string) => call<Grant>("DELETE", token(id)),
   /** The live tokens that need attention, each with its findings and their fixes. */
   checkup: () => call<Checkup[]>("GET", "/v1/access/checkup"),
+  activity: (days = 7) => call<Activity>("GET", `/v1/access/activity?days=${days}`),
+  /** The newest `n` alerts, newest first (the feed answers oldest first after a place). */
+  latestAlerts: async (n = 20) => {
+    const head = await call<{ next: number }>("GET", "/v1/access/alerts?latest=1");
+    const page = await call<{ events: Alert[] }>("GET", `/v1/access/alerts?after=${Math.max(0, head.next - n)}&limit=${n}`);
+    return page.events.slice().reverse();
+  },
   /** The networks it's been used from (/24s and /48s), newest first. */
   networks: (id: string) => call<{ network: string; first_at: number; last_at: number }[]>("GET", `${token(id)}/networks`),
   /** What an agent connected with this token is offered over MCP (`tools/list`, `prompts/list`). */

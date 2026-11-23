@@ -45,6 +45,10 @@ pub fn router(apps: Arc<Apps>) -> axum::Router {
             if req.uri().path().starts_with(crate::build_cache::PATH) && req.uri().path()[crate::build_cache::PATH.len()..].starts_with('/') {
                 return crate::build_cache::serve(apps, req).await;
             }
+            // Next.js's cache across instances, with the environment's token.
+            if req.uri().path().starts_with(crate::next_cache::PATH) && req.uri().path()[crate::next_cache::PATH.len()..].starts_with('/') {
+                return crate::next_cache::serve(apps, req).await;
+            }
             // An edge function's `context.next()` ([`crate::edge`]): signed, any host.
             if req.uri().path().starts_with(crate::edge::NEXT) {
                 return crate::edge::next(apps, req).await;
@@ -1492,8 +1496,12 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         Err(_) => return by("unavailable", page(StatusCode::SERVICE_UNAVAILABLE, "Unavailable", "This environment's settings couldn't be read. Try again in a few seconds.")),
     };
     let client = roll_cluster::client_addr(&req);
-    // roll's own call on a schedule: none of the environment's gates are for it.
-    let ours = req.extensions().get::<Scheduled>().is_some();
+    // roll's own call on a schedule, or a browser check's page (its run's token, for this
+    // environment only, never sent on): none of the environment's gates are for it. A check's
+    // page is otherwise a visitor's (its routes and skew protection apply); a scheduled call isn't.
+    let check = req.headers_mut().remove("x-roll-check");
+    let scheduled = req.extensions().get::<Scheduled>().is_some();
+    let ours = scheduled || check.as_ref().and_then(|v| v.to_str().ok()).is_some_and(|t| apps.check_token_admits(t, service, env));
     if !ours && !gate.admits(client.as_deref()) {
         return by("allow_list", page(StatusCode::FORBIDDEN, "Not from here", "This service only answers visitors from the networks its owner allowed."));
     }
@@ -1594,7 +1602,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     // target's gates as a site's rewrite is (this environment's let it in). Never again from there.
     // Never roll's own scheduled call: its `CRON_SECRET` is this service's, not the route's.
     if !req.headers().contains_key(VIA_SITE)
-        && !ours
+        && !scheduled
         && let Some(r) = gate.routes.iter().find(|r| r.takes(req.uri().path()))
     {
         let pq = req.uri().path_and_query().map_or("/", |p| p.as_str()).to_string();
@@ -1663,7 +1671,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     // Skew protection (`run.skew_protection`): what a page loaded before a deploy asks for,
     // naming its deployment, goes to that one (past every gate above, as its own URL would).
     let skewed = match (deployment, live.template()) {
-        (None, Some(t)) if !ours && t.run.skew_protection => {
+        (None, Some(t)) if !scheduled && t.run.skew_protection => {
             let asked = crate::skew::asked(&req);
             apps.skew_target(service, env, &t, asked).await
         }

@@ -39,6 +39,8 @@ pub fn router(access: Arc<Access>) -> Router {
         .route("/v1/access/approvals/{id}/approve", post(approve))
         .route("/v1/access/approvals/{id}/deny", post(deny))
         .route("/v1/access/audit", get(audit))
+        .route("/v1/access/activity", get(activity))
+        .route("/v1/access/alerts", get(alerts))
         .route("/v1/access/audit/sinks", get(sinks).post(create_sink))
         .route("/v1/access/audit/sinks/{id}", axum::routing::delete(delete_sink))
         .route("/v1/access/audit/sinks/{id}/retry", post(retry_sink))
@@ -438,46 +440,48 @@ const CHECKUP_TIGHTEN: usize = 200;
 async fn checkup(State(a): S, ext: Extensions) -> crate::Result<Json<Value>> {
     // A person's checkup is of their own tokens.
     let who = who(&a, &ext)?;
-    let policy = a.policy_now();
-    let out = blocking(a, move |a| {
-        let now = code_sql::now_ms();
-        let counts = a.store.network_counts()?;
-        let machines: std::collections::HashMap<String, crate::store::ListedClient> = a.store.machine_clients()?.into_iter().map(|c| (c.grant_id.clone(), c)).collect();
-        let since = now - crate::checkup::UNUSED_DAYS * 86_400_000;
-        let mut checked = 0;
-        let mut out = Vec::new();
-        for g in a.store.list()?.into_iter().filter(|g| g.live(now) && visible(&who, g)) {
-            // Whether its proposal is narrower: for tokens used lately, a bounded number of them.
-            let used_lately = g.last_used_at.is_some_and(|t| t >= since);
-            let narrower = if used_lately && checked < CHECKUP_TIGHTEN {
-                checked += 1;
-                let used = a.store.used(&g.id, since)?;
-                !used.is_empty() && crate::tighten::tighten(&g.rules, &used) != g.rules
-            } else {
-                false
-            };
-            let machine = machines.get(&g.id).map(|c| crate::checkup::Machine { secret: !c.signs_with_key && c.trusts.is_none(), last_sign_in: c.last_sign_in });
-            let seen = crate::checkup::Seen { networks: counts.get(&g.id).copied().unwrap_or(0), narrower, machine };
-            let mut findings = crate::checkup::findings(&g, &seen, now);
-            // A person sees that their own waits elsewhere; deciding it isn't theirs.
-            if matches!(who, Who::User(_)) {
-                findings.retain(|f| f.kind != "pending");
-            } else if g.user.is_some() && !g.pending && g.approved_at.is_none() && g.live(now) && policy.needs_approval(&g.rules, g.ask_otherwise) {
-                // A person's token made before the policy asked: it works, unapproved, until an
-                // admin decides it.
-                findings.insert(0, crate::checkup::Finding { kind: "unapproved", why: "a person's token that reaches what the policy has an admin approve, made before the policy asked: approve it or deny it".into(), fix: "approve" });
-            }
-            if !findings.is_empty() {
-                out.push(json!({
-                    "grant": { "id": g.id, "name": g.name, "kind": g.kind, "last_used_at": g.last_used_at, "expires_at": g.expires_at, "created_at": g.created_at },
-                    "findings": findings,
-                }));
-            }
-        }
-        Ok(out)
-    })
-    .await?;
+    let out = blocking(a, move |a| checkup_rows(a, &who)).await?;
     Ok(Json(json!(out)))
+}
+
+/// The checkup's rows as `who` sees them (the route's, and the hourly scan's as the operator).
+pub(crate) fn checkup_rows(a: &Access, who: &Who) -> crate::Result<Vec<Value>> {
+    let policy = a.policy_now();
+    let now = code_sql::now_ms();
+    let counts = a.store.network_counts()?;
+    let machines: std::collections::HashMap<String, crate::store::ListedClient> = a.store.machine_clients()?.into_iter().map(|c| (c.grant_id.clone(), c)).collect();
+    let since = now - crate::checkup::UNUSED_DAYS * 86_400_000;
+    let mut checked = 0;
+    let mut out = Vec::new();
+    for g in a.store.list()?.into_iter().filter(|g| g.live(now) && visible(who, g)) {
+        // Whether its proposal is narrower: for tokens used lately, a bounded number of them.
+        let used_lately = g.last_used_at.is_some_and(|t| t >= since);
+        let narrower = if used_lately && checked < CHECKUP_TIGHTEN {
+            checked += 1;
+            let used = a.store.used(&g.id, since)?;
+            !used.is_empty() && crate::tighten::tighten(&g.rules, &used) != g.rules
+        } else {
+            false
+        };
+        let machine = machines.get(&g.id).map(|c| crate::checkup::Machine { secret: !c.signs_with_key && c.trusts.is_none(), last_sign_in: c.last_sign_in });
+        let seen = crate::checkup::Seen { networks: counts.get(&g.id).copied().unwrap_or(0), narrower, machine };
+        let mut findings = crate::checkup::findings(&g, &seen, now);
+        // A person sees that their own waits elsewhere; deciding it isn't theirs.
+        if matches!(who, Who::User(_)) {
+            findings.retain(|f| f.kind != "pending");
+        } else if g.user.is_some() && !g.pending && g.approved_at.is_none() && g.live(now) && policy.needs_approval(&g.rules, g.ask_otherwise) {
+            // A person's token made before the policy asked: it works, unapproved, until an
+            // admin decides it.
+            findings.insert(0, crate::checkup::Finding { kind: "unapproved", why: "a person's token that reaches what the policy has an admin approve, made before the policy asked: approve it or deny it".into(), fix: "approve" });
+        }
+        if !findings.is_empty() {
+            out.push(json!({
+                "grant": { "id": g.id, "name": g.name, "kind": g.kind, "last_used_at": g.last_used_at, "expires_at": g.expires_at, "created_at": g.created_at },
+                "findings": findings,
+            }));
+        }
+    }
+    Ok(out)
 }
 
 /// The networks a token has been used from (its /24 or /48), with when first and last.
@@ -1359,6 +1363,50 @@ async fn set_policy(State(a): S, ext: Extensions, Json(p): Json<crate::Policy>) 
 }
 
 /// The audit log; `?format=jsonl`: one event per line, as a download (what a SIEM or `jq` reads).
+#[derive(Deserialize)]
+struct ActivityQuery {
+    days: Option<i64>,
+}
+
+/// `GET /v1/access/activity?days=`: how agents used roll's MCP server lately (1-30 days, default 7):
+/// per tool, per connection and per day, from the audit log. A person sees only their own
+/// connections', as with the audit log.
+async fn activity(State(a): S, ext: Extensions, Query(q): Query<ActivityQuery>) -> crate::Result<Json<Value>> {
+    let days = q.days.unwrap_or(7);
+    if !(1..=30).contains(&days) {
+        return Err(Error::BadRequest("days is 1-30".into()));
+    }
+    let since = code_sql::now_ms() - days * 86_400_000;
+    let grants = match who(&a, &ext)?.mine().map(str::to_string) {
+        Some(user) => Some(grants_of(&a, &user).await?.into_iter().collect::<Vec<_>>()),
+        None => None,
+    };
+    let mut v = blocking(a.clone(), move |a| a.store.tool_activity(since, grants.as_deref())).await?;
+    v["days_asked"] = json!(days);
+    Ok(Json(v))
+}
+
+/// `GET /v1/access/alerts?after=&limit=&latest=1`: what roll alerted about, oldest first after a
+/// place; MCP Events' `access.alert`. The operator (and tokens the operator made) see every alert; a
+/// person's own connections see the ones about their tokens (a decoy of theirs used, one revoked
+/// for a leak, the checkup's news about one).
+async fn alerts(State(a): S, ext: Extensions, Query(q): Query<DecidedQuery>) -> crate::Result<Json<Value>> {
+    let theirs = who(&a, &ext)?.mine().map(str::to_string);
+    match (q.latest, q.after) {
+        (Some(1), Some(_)) => return Err(Error::BadRequest("latest=1 starts from now: leave out after".into())),
+        (Some(1), None) => {}
+        (Some(_), _) => return Err(Error::BadRequest("latest is 1 or left out".into())),
+        (None, after) => {
+            let (after, limit) = (after.unwrap_or(0), q.limit.unwrap_or(100));
+            let events = blocking(a, move |a| a.store.alerts_after(after, limit, theirs.as_deref())).await?;
+            let next = events.last().and_then(|e| e["seq"].as_i64()).unwrap_or(after);
+            return Ok(Json(json!({ "events": events, "next": next })));
+        }
+    }
+    let next = blocking(a, |a| a.store.alerts_head()).await?;
+    Ok(Json(json!({ "events": [], "next": next })))
+}
+
 async fn audit(State(a): S, ext: Extensions, Query(mut q): Query<AuditQuery>) -> crate::Result<Response> {
     let format = q.format.clone();
     if format.as_deref().is_some_and(|f| f != "jsonl" && f != "csv") {

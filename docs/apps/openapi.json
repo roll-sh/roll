@@ -1633,7 +1633,7 @@
     },
     "/v1/apps/services/{id}/environments/{env}/cache/purge": {
       "post": {
-        "description": "Answers `{ purged }`: how many kept answers went (on-demand revalidation, \"Public traffic\").",
+        "description": "Answers `{ purged }`: how many kept answers went (on-demand revalidation, \"Public traffic\"); a Next app's shared cache too (everything emptied, or those tags and the paths' own expired).",
         "operationId": "postServicesIdEnvironmentsEnvCachePurge",
         "parameters": [
           {
@@ -1665,7 +1665,7 @@
         },
         "responses": {
           "200": {
-            "description": "`{ purged }`: how many kept answers went (on-demand revalidation, \"Public traffic\")"
+            "description": "`{ purged }`: how many kept answers went (on-demand revalidation, \"Public traffic\"); a Next app's shared cache too (everything emptied, or those tags and the paths' own expired)"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
@@ -1676,6 +1676,96 @@
           "services"
         ],
         "x-roll-action": "deploy*"
+      }
+    },
+    "/v1/apps/services/{id}/environments/{env}/checks/{check}/screenshot": {
+      "get": {
+        "description": "Answers a browser check's last failure as the page looked (`image/png`); 404 when none is kept (\"Browser checks\").",
+        "operationId": "getServicesIdEnvironmentsEnvChecksCheckScreenshot",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "check",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "a browser check's last failure as the page looked (`image/png`); 404 when none is kept (\"Browser checks\")"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Get screenshot",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "read"
+      }
+    },
+    "/v1/apps/services/{id}/environments/{env}/checks/{check}/trace": {
+      "get": {
+        "description": "Answers its Playwright trace (`application/zip`, a download: `npx playwright show-trace`); 404 when none is kept.",
+        "operationId": "getServicesIdEnvironmentsEnvChecksCheckTrace",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "check",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "its Playwright trace (`application/zip`, a download: `npx playwright show-trace`); 404 when none is kept"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Get trace",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "read"
       }
     },
     "/v1/apps/services/{id}/environments/{env}/config/rotate": {

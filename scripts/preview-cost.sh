@@ -678,6 +678,8 @@ done
 PAGE=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/")
 [ "$PAGE" = 'preview of change 1, third<script>console.error("boom")</script> <nav><a href="/gone">a page that went</a></nav>' ] || { echo "a push that touches code should redeploy: the page says $PAGE"; exit 1; }
 KEPT="kept $(bare "$RUNS" | cut -c1-10) through a docs-only push; redeployed at $(bare "$CODE_HEAD" | cut -c1-10)"
+# How that push came up: its data step takes the earlier push's copies (every product's).
+STEPS3=$(api GET "/v1/previews/$PV" | jq_ "(lambda t: ' · '.join('%s %d ms' % (s['step'], s['at'] - (t['steps'][i - 1]['at'] if i else t['started_at'])) for i, s in enumerate(t['steps']) if s['step'] != 'ready'))(d['timeline']) if d.get('timeline') else ''")
 # The push before stays reachable at a URL of its own, on the same data (Vercel's per-push URLs).
 EARLIER_URL=$(api GET "/v1/previews/$PV" | jq_ "((d.get('earlier') or [{}])[0]).get('share_url') or ''")
 [ -n "$EARLIER_URL" ] || { echo "the previous push should stay reachable"; api GET "/v1/previews/$PV" | jq_ "d.get('earlier')"; exit 1; }
@@ -1111,6 +1113,7 @@ cat <<EOF
 | The preview's bucket key: its branch / production's bucket | $OWN_LS / $PARENT_LS |
 | … step by step (its timeline: data, setup, deploy, checks) | $STEPS |
 | An earlier push's own copy of the data: a table made after it is absent there / present in the preview's; its Redis, search, bucket, stream and NoSQL | $OWN_DATA |
+| A push whose earlier head keeps copies of every branch: its timeline | $STEPS3 |
 | What a follower of the events hears (\`GET /v1/previews/events\`, roll MCP's Events) | $EVENTS |
 | Search: a sync of the parent's connector on the parent / asked of the branch (inherited, waits for adoption) | $PSTATE / $BSTATE |
 | Parent bucket bytes / the branch's own bytes after writing 1 MiB / objects the branch sees | $PARENT_OBJECTS / $BRANCH_OBJECTS / $BRANCH_SEES |

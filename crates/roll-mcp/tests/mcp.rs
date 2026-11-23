@@ -1241,6 +1241,23 @@ async fn an_agent_subscribes_a_webhook() {
     assert!(ended["error"].is_null() && ended["result"]["resultType"] == "complete", "{ended}");
     assert_eq!(unsub("https://hooks.example.com/good").await["error"]["code"], -32023);
     assert_eq!(unsub("https://hooks.example.com/bad").await["error"]["code"], -32023, "the refused one was never kept");
+    // A person's connections share one allowance: more connections don't multiply it.
+    let mine = serde_json::from_value::<roll_access::store::NewGrant>(json!({ "name": "alices", "rules": [{ "product": "apps", "resources": "*", "actions": { "read": "allow" } }] })).unwrap();
+    let person = |i: usize| {
+        let g = d.access.store.create(&mine, roll_auth::GrantKind::Token, "usr_alice", None, Some("usr_alice")).unwrap().0.id;
+        (0..20).map(move |n| (g.clone(), format!("https://hooks.example.com/{i}/{n}")))
+    };
+    let made: Vec<_> = (0..roll_access::event_subs::PER_PERSON as usize / 20).flat_map(person).collect();
+    let put = |g: &str, url: &str| {
+        let args = json!({});
+        d.access.put_event_sub(&roll_access::event_subs::NewEventSub { grant_id: g, name: "apps.event", arguments: &args, url, secret, cursor: "a1:0", lockdown: false, ttl_ms: 600_000 })
+    };
+    for (g, url) in &made {
+        put(g, url).unwrap();
+    }
+    let (another, _) = person(99).next().unwrap();
+    assert!(matches!(put(&another, "https://hooks.example.com/more"), Err(roll_access::Error::TooMany(why)) if why.contains("person")));
+
     // What the policy has agents ask a person about is never delivered unasked: subscribing reads
     // the feed once as the agent, and that asks, so nothing is kept.
     assert_eq!(d.http(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "agents_ask": [{ "product": "apps" }] }))).await.0, StatusCode::OK);

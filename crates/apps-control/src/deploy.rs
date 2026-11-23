@@ -1164,7 +1164,9 @@ impl Apps {
             log.stream(Stream::System).line("nothing else is running, so it switches at once");
         }
         let prepared = if gradual {
-            live.begin_canary(tpl.clone(), prepared, tpl.run.rollout.steps[0]).await;
+            // With browser checks to pass first, it starts with none of the requests.
+            let first = if tpl.run.rollout.checks { 0 } else { tpl.run.rollout.steps[0] };
+            live.begin_canary(tpl.clone(), prepared, first).await;
             if let Err(e) = self.canary(&svc.id, &d.id, &live, &tpl, log, &cancel).await {
                 live.abort_canary().await;
                 return Err(e);
@@ -1263,6 +1265,26 @@ impl Apps {
             }
         }
         let _unwait = Unwait(self.clone(), id.to_string());
+        // Its browser checks first, against its own URL, before it takes a request.
+        if r.checks {
+            let (sid, en) = (service.to_string(), tpl.spec.env.clone());
+            let row = self.db(move |s| s.environment(&sid, &en)).await?;
+            let url = self.url(&format!("{}--{}", id.trim_start_matches("dep_"), row.slug));
+            for c in row.checks.iter().filter(|c| c.browser.is_some()) {
+                anyhow::ensure!(self.owns(service), "this node no longer holds the service; the node that took it over deploys");
+                self.step(service, id, &format!("check_{}", c.name)).await;
+                let at = format!("{}{}", url.trim_end_matches('/'), c.path);
+                let ran = self.run_browser_check(service, &row.name, &at, c, cancel).await;
+                anyhow::ensure!(!cancel.is_cancelled(), "canceled");
+                match ran {
+                    Ok(_) => sys.line(format!("canary: browser check {} passed on the new deployment", c.name)),
+                    Err(why) => {
+                        sys.line(format!("canary: rolled back before any requests: browser check {} failed: {why}", c.name));
+                        anyhow::bail!("rolled back before any requests: browser check {} failed: {why}", c.name);
+                    }
+                }
+            }
+        }
         for &share in &r.steps {
             live.set_share(share);
             live.take_served();
@@ -2275,6 +2297,40 @@ impl Apps {
 
     /// Metric alerts: the last five finished minutes against the deployment's `run.alerts`. An
     /// alert is an event once, when it starts; it can start again once it has cleared.
+    /// The last hour against the same hour of the week over the last four weeks (their median,
+    /// two weeks at least, enough traffic to tell): requests dropped below a fifth, errors at three
+    /// times their rate (1% at least), or p95 doubled (200 ms at least). What's unusual, or none.
+    async fn anomaly(self: &Arc<Self>, service: &str, env: &str, now_minute: i64) -> Option<serde_json::Value> {
+        let hour = now_minute / 60;
+        let (sid, e) = (service.to_string(), env.to_string());
+        let weeks: Vec<i64> = (1..=4).map(|k| hour - k * 168).collect();
+        let (past, recent) = self.db(move |s| Ok((s.hours_of(&sid, &e, &weeks)?, s.minutes(&sid, &e, now_minute - 60)?))).await.ok()?;
+        if past.len() < 2 {
+            return None;
+        }
+        let median = |mut v: Vec<f64>| {
+            v.sort_by(|a, b| a.total_cmp(b));
+            v[v.len() / 2]
+        };
+        let usual_requests = median(past.iter().map(|p| p.0 as f64).collect());
+        let usual_error_rate = median(past.iter().map(|p| if p.0 > 0 { p.1 as f64 / p.0 as f64 } else { 0.0 }).collect());
+        let usual_p95 = median(past.iter().map(|p| p.2).collect());
+        let recent: Vec<_> = recent.into_iter().filter(|r| r.minute < now_minute).collect();
+        let (requests, errors) = recent.iter().fold((0i64, 0i64), |(q, e), r| (q + r.requests, e + r.errors));
+        if usual_requests >= 100.0 && (requests as f64) < usual_requests / 5.0 {
+            return Some(serde_json::json!({ "kind": "traffic", "value": requests, "usual": usual_requests.round() }));
+        }
+        let rate = if requests > 0 { errors as f64 / requests as f64 } else { 0.0 };
+        if requests >= 50 && errors >= 10 && rate >= 0.01 && rate >= usual_error_rate * 3.0 {
+            return Some(serde_json::json!({ "kind": "errors", "value": (rate * 1000.0).round() / 10.0, "usual": (usual_error_rate * 1000.0).round() / 10.0 }));
+        }
+        let p95 = recent.iter().filter(|r| r.requests > 0).map(|r| r.p95_ms).fold(0.0, f64::max);
+        if requests >= 50 && usual_p95 > 0.0 && p95 >= 200.0 && p95 >= usual_p95 * 2.0 {
+            return Some(serde_json::json!({ "kind": "latency", "value": p95.round(), "usual": usual_p95.round() }));
+        }
+        None
+    }
+
     pub async fn judge_alerts(self: &Arc<Self>, l: &crate::live::EnvLive) {
         let Some(tpl) = l.template() else { return };
         let (a, limit_mb) = (tpl.run.alerts.clone(), tpl.run.memory_mb);
@@ -2339,6 +2395,11 @@ impl Apps {
                 firing.push(("alert.log", serde_json::json!({ "pattern": pat, "count": count, "threshold": a.log_count })));
             }
         }
+        if a.anomaly
+            && let Some(data) = self.anomaly(&l.service, &l.env, now).await
+        {
+            firing.push(("alert.anomaly", data));
+        }
         if let Some(slo) = &tpl.run.slo
             && let Some((indicator, rate, window)) = crate::slo::burning(slo, &all, now)
         {
@@ -2385,7 +2446,7 @@ impl Apps {
                 }
             }
         }
-        for kind in ["alert.memory", "alert.cpu", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "alert.slo"] {
+        for kind in ["alert.memory", "alert.cpu", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "alert.slo", "alert.anomaly"] {
             let key = format!("{}/{}/{kind}", l.service, l.env);
             match firing.iter().find(|(k, _)| *k == kind) {
                 Some((_, data)) => {
@@ -3040,6 +3101,7 @@ impl Apps {
             self.logs_expired.store(now, std::sync::atomic::Ordering::Relaxed);
             self.expire_logs_pass(&services, now).await;
             self.build_cache_pass(&services, now).await;
+            self.next_cache_pass(now).await;
         }
         if now - self.intercepts_checked.load(std::sync::atomic::Ordering::Relaxed) >= 60_000 {
             self.intercepts_checked.store(now, std::sync::atomic::Ordering::Relaxed);

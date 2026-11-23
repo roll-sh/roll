@@ -1316,8 +1316,9 @@ async fn earlier_pushes_stay_reachable_at_their_own_urls() {
     assert!(e.apps.removed.lock().contains(&(p.id.clone(), "web@cs_8d".into())));
 }
 
-/// On roll apps, an earlier push is that build's own deployment URL, behind the preview's link;
-/// kept only when the running build is the head it ran.
+/// On roll apps, an earlier push is that build started again on its own copy of the data (a
+/// no-traffic rollback with the copy's variables), behind the preview's link; kept only when the
+/// running build is the head it ran.
 #[tokio::test]
 async fn a_roll_apps_services_earlier_push_is_its_builds_own_url() {
     let e = env(json!({ "enabled": true }));
@@ -1333,13 +1334,18 @@ async fn a_roll_apps_services_earlier_push_is_its_builds_own_url() {
     let token = e.engine.store.access(&p.id).unwrap().unwrap().link_token().unwrap().to_string();
     assert_eq!(view.earlier.len(), 1, "{:?}", view.earlier);
     let x = &view.earlier[0];
-    assert_eq!((x.service.as_str(), x.revision.as_str(), x.url.as_str()), ("web", "cs_9a", "https://0123456789ab--pv-x.apps.test"));
-    assert_eq!(x.share_url.as_deref(), Some(format!("https://0123456789ab--pv-x.apps.test/?roll_access={token}").as_str()));
+    // The same build again, taking no traffic, on its own copy of the data.
+    let views = e.apps.views.lock().clone();
+    assert!(views.len() == 1 && views[0].1 == "dep_aaa" && views[0].2.iter().any(|(k, v)| k == "DATABASE_URL" && v.contains("-9a")), "{views:?}");
+    assert_eq!((x.service.as_str(), x.revision.as_str(), x.url.as_str()), ("web", "cs_9a", "https://view-dep_aaa--pv-x.apps.test"));
+    assert_eq!(x.share_url.as_deref(), Some(format!("https://view-dep_aaa--pv-x.apps.test/?roll_access={token}").as_str()));
+    assert!(x.own_data.contains(&roll_previews::Kind::Postgres));
     // A running build that isn't the head it ran (the new one live already) isn't kept as it.
     e.apps.live.lock().insert("web".into(), ("ccc".into(), "https://fedcba987654--pv-x.apps.test".into()));
     e.code.edit("chg_ae", |c| c.head = "cs_9c".into());
     e.engine.pass().await.unwrap();
     assert_eq!(e.engine.store.preview(&p.id).unwrap().earlier.len(), 1, "only cs_9a's");
+    assert!(!e.engine.store.pinned_data(&p.id).unwrap().iter().any(|d| d.revision == "cs_9b"), "cs_9b's copies go: nothing uses them");
 }
 
 /// An earlier push runs on its own copy of the data, taken before the next head's release, so a
@@ -1359,6 +1365,9 @@ async fn an_earlier_push_runs_on_its_own_copy_of_the_data() {
     e.engine.pass().await.unwrap();
     let (_, live) = e.engine.env(&p.id, "web").await.unwrap();
     let (_, earlier) = e.engine.env(&p.id, "web@cs_7a").await.unwrap();
+    // Taken in a step of their own, which the timeline shows.
+    let steps: Vec<String> = e.engine.store.preview(&p.id).unwrap().timeline.map(|t| t.steps.into_iter().map(|s| s.step).collect()).unwrap_or_default();
+    assert!(steps.windows(2).any(|w| w[0] == "data" && w[1] == "copies"), "{steps:?}");
     assert!(db(&earlier).contains("-7a") && db(&earlier) != db(&live), "{} / {}", db(&earlier), db(&live));
     assert!(var(&earlier, "REDIS_URL").contains("-7a") && var(&earlier, "REDIS_URL") != var(&live, "REDIS_URL"), "Redis too");
     // And it says so, wherever its link is shown.
@@ -1373,10 +1382,29 @@ async fn an_earlier_push_runs_on_its_own_copy_of_the_data() {
     let copies = |e: &Env| e.engine.store.pinned_data(&p.id).unwrap().into_iter().map(|d| d.revision).collect::<Vec<_>>();
     assert_eq!(copies(&e), ["cs_7b", "cs_7b", "cs_7c", "cs_7c", "cs_7d", "cs_7d"], "Postgres and Redis");
     assert!(!e.pg.branches.lock().iter().chain(e.redis.branches.lock().iter()).any(|b| b.ends_with("-7a")), "{:?}", e.pg.branches.lock());
+    // An evicted copy that can't be deleted (its product down) doesn't hold the push up: it stays
+    // recorded, deleted later.
+    e.pg.fail_snapshot_deletes.store(1, Ordering::SeqCst);
+    e.code.edit("chg_od", |c| c.head = "cs_7e2".into());
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    let v = e.engine.store.preview(&p.id).unwrap();
+    assert!(v.state == State::Ready && v.head == "cs_7e2", "{:?} {}", v.state, v.head);
+    assert!(copies(&e).contains(&"cs_7b".to_string()), "cs_7b's Postgres copy stays recorded: {:?}", copies(&e));
     // A reset replaces the data: the copies of the old go with it.
     e.engine.reset(&p.id, Vec::new()).unwrap();
     e.engine.pass().await.unwrap();
     assert!(copies(&e).is_empty());
+    // A copy that fails doesn't hold the push up: said, and that push shares the preview's data
+    // for that product.
+    e.pg.fail_snapshots.store(1, Ordering::SeqCst);
+    e.code.edit("chg_od", |c| c.head = "cs_7f".into());
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    let v = e.engine.store.preview(&p.id).unwrap();
+    assert!(v.state == State::Ready && v.head == "cs_7f", "{:?} {}", v.state, v.head);
+    assert_eq!(v.earlier.iter().find(|x| x.revision == "cs_7e2").map(|x| x.own_data.clone()), Some(vec![roll_previews::Kind::Redis]));
+    assert!(e.engine.store.activity(&p.id).unwrap().iter().any(|a| a.message.starts_with("couldn't keep postgres:prj_db's data")));
 }
 
 /// A preview whose egress goes through its proxy ("Roll only") gets the keys bound to hosts as

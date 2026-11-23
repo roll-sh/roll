@@ -16,9 +16,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 source scripts/lib/gate.sh
 
-RUST_PATHS=(crates/roll-secrets crates/roll-oidc crates/roll-workspace crates/rolld/src/secrets.rs crates/rolld/src/secrets
+RUST_PATHS=(crates/roll-secrets crates/roll-secrets-ref crates/roll-oidc crates/roll-workspace crates/rolld/src/secrets.rs crates/rolld/src/secrets
             crates/rolld/tests/secrets.rs crates/rolld/tests/auth.rs crates/roll-access/src/catalog.rs crates/roll-access/src/prefix-reviewed.txt
-            crates/roll-cli/src/secrets.rs crates/roll-cli/src/mask.rs crates/roll-cli/tests/secrets.rs
+            crates/roll-cli/src/secrets.rs crates/roll-cli/src/secrets crates/roll-cli/src/mask.rs crates/roll-cli/tests/secrets.rs
             Cargo.toml Cargo.lock scripts/test-secrets.sh scripts/lib/gate.sh)
 WEB_PATHS_SECRETS=(apps/dashboard/src/lib apps/dashboard/src/components/secrets apps/dashboard/package.json apps/dashboard/vitest.config.mts
                    pnpm-lock.yaml scripts/test-secrets.sh)
@@ -38,7 +38,7 @@ TARGETS=(--lib --bin roll --bin rolld --test api --test nodes --test secrets --t
 # Which test binaries are secrets' (same-named targets in other packages are skipped).
 test_args() {
   case "$1:$2:$3" in
-    roll-secrets:*) ;;
+    roll-secrets:* | roll-secrets-ref:*) ;;
     rolld:rolld:bin) ARGS=(secrets) ;;
     rolld:secrets:test | rolld:auth:test | roll-cli:secrets:test) ;;
     roll-cli:roll:bin) ARGS=(secrets:: mask::) ;;

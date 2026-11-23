@@ -695,6 +695,7 @@ static TOOLS: &[Tool] = &[
     ),
     t("access_list_approvals", "List approvals", "Approvals, newest first: pending ones wait for the operator.", "access", "GET", "/v1/access/approvals", &[q("state", Ty::Str, "pending, approved, denied, used")]),
     t("access_audit_log", "Audit log", "Every request made with a token and every MCP tool call, newest first.", "access", "GET", "/v1/access/audit", &[q("grant", Ty::Str, "Only this token (tok_…)"), q("product", Ty::Str, "Only this product"), q("decision", Ty::Str, "allow, deny or ask"), q("limit", Ty::Int, "At most (default 100)")]),
+    t("access_activity", "Agent activity: tools, connections, days", "How agents used roll's MCP server lately (default 7 days, up to 30): per tool its calls, refused and failed calls, average, median, 95th percentile and longest duration and last call; per connection; per day. Answers \"which tools fail\" and \"which agent is busiest\". A person's are their own connections'.", "access", "GET", "/v1/access/activity", &[q("days", Ty::Int, "Days back, 1-30 (default 7)")]),
     t("access_checkup", "Checkup: which tokens need attention", "The live tokens that need attention, most serious first, each with its findings and fix: everything (delete, reveal or admin on every resource without asking: tighten), never_expires (give it an expiry), unused (nothing in 30 days: revoke), narrower (its requests needed less than its rules: tighten), roams (five or more networks and no address limit). A person's checkup is of their own tokens; fixing one is theirs or the operator's, on the token's page or with roll token.", "access", "GET", "/v1/access/checkup", &[]),
     t("access_list_tokens", "List tokens", "Scoped tokens and OAuth connections you may see: name, rules, expiry, address limits, who made it and when it was last used (never a secret). A person sees their own.", "access", "GET", "/v1/access/tokens", &[q("product", Ty::Str, "Only tokens made for this product"), q("resource", Ty::Str, "Only tokens made for this resource (with product)"), q("kind", Ty::Str, "workload: CI and cluster logins (the latest 500) instead")]),
     t("access_get_token", "Get a token", "One token's rules, expiry, address limits, approvals for a while and last use (never its secret).", "access", "GET", "/v1/access/tokens/{id}", &[req("id", "Token id (tok_…)")]),
@@ -739,6 +740,20 @@ static TOOLS: &[Tool] = &[
     )
     .destructive(),
     t("workspace_remove_member", "Remove a member", "Take a person out of a project: their session and tokens stop reaching it at once, and their tokens confined to it are revoked. The last owner can't be removed.", "workspace", "DELETE", "/v1/workspace/projects/{id}/members/{user}", &[WS, req("user", "The member (usr_…)")]).destructive(),
+    // Groups (docs/members-v1-1.md): a group's members get its role on a project, added to their
+    // own. Making groups and their members is the operator's (or the IdP's, through SCIM).
+    t("workspace_list_groups", "List a project's groups", "The groups with a role on a workspace project: each group's role, a developer role's environments and how many members it has. A member's access is the union of their own role and their groups'.", "workspace", "GET", "/v1/workspace/projects/{id}/groups", &[WS]),
+    t(
+        "workspace_set_group_role",
+        "Give a group a role",
+        "Give a group a role on a project, or change it: every member of the group gets it, added to their own. Never owner; never more than the caller's own role, and only a group the caller may assign (one they're in, unless they're the operator).",
+        "workspace",
+        "PUT",
+        "/v1/workspace/projects/{id}/groups/{group}",
+        &[WS, req("group", "The group (grp_…)"), breq("role", Ty::Str, "viewer, developer or admin"), b("environments", Ty::Arr, "A developer role's environments (default: every environment that isn't protected)")],
+    )
+    .destructive(),
+    t("workspace_remove_group_role", "Take a group's role away", "Take a group's role on a project away: its members keep only their own roles (and other groups'), at once.", "workspace", "DELETE", "/v1/workspace/projects/{id}/groups/{group}", &[WS, req("group", "The group (grp_…)")]).destructive(),
     // ── Postgres ──
     t("postgres_list_projects", "List Postgres projects", "Postgres projects with their branches and endpoints.", "postgres", "GET", "/v1/projects", &[]),
     t("postgres_get_project", "Get a Postgres project", "A Postgres project with its branches and endpoints (connection strings need reveal).", "postgres", "GET", "/v1/projects/{project}", &[PROJECT]),

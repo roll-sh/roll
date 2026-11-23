@@ -137,7 +137,7 @@ async fn cluster(mock: &str, extra: &[(&str, &str)]) -> Cluster {
 
 async fn call(c: &Cluster, method: &str, uri: &str, body: &str) -> (u16, Value, String) {
     let r = if body.is_empty() { EsRequest::new(method, uri) } else { EsRequest::json(method, uri, body.to_string()) };
-    let resp = search_es::handle(c, r).await;
+    let resp = search_es::handle(c, r).await.collect(64 << 20).await;
     let text = String::from_utf8_lossy(&resp.body).into_owned();
     (resp.status, resp.body_json(), text)
 }
@@ -290,7 +290,7 @@ async fn call_as(c: &Cluster, auth: &str, method: &str, uri: &str, body: &str) -
         r.headers = vec![("content-type".into(), "application/x-ndjson".into())];
     }
     r.headers.push(("authorization".into(), format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(auth))));
-    let resp = search_es::handle(c, r).await;
+    let resp = search_es::handle(c, r).await.collect(64 << 20).await;
     let text = String::from_utf8_lossy(&resp.body).into_owned();
     (resp.status, resp.body_json(), text)
 }
@@ -441,4 +441,112 @@ async fn a_planted_sealed_key_is_not_opened_for_the_client() {
     for s in calls {
         assert_ne!(s.header("authorization"), Some("Bearer sk-victim"));
     }
+}
+
+/// An upstream that streams forever: after the request it answers a chunked event stream and
+/// writes `piece(i)` every few milliseconds until the connection breaks, then says so.
+async fn endless(piece: fn(usize) -> String) -> (String, tokio::sync::oneshot::Receiver<usize>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let (closed, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 16384];
+        let mut got = Vec::new();
+        // The head and the body (the request is small: one read past the head is enough).
+        while !got.windows(4).any(|w| w == b"\r\n\r\n") {
+            let n = sock.read(&mut buf).await.unwrap();
+            got.extend_from_slice(&buf[..n]);
+        }
+        sock.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n").await.unwrap();
+        let mut i = 0;
+        loop {
+            let p = piece(i);
+            if sock.write_all(format!("{:x}\r\n{p}\r\n", p.len()).as_bytes()).await.is_err() || sock.flush().await.is_err() {
+                break;
+            }
+            i += 1;
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let _ = closed.send(i);
+    });
+    (url, rx)
+}
+
+fn hello_chunk(_: usize) -> String {
+    "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hel\"},\"finish_reason\":null}]}\n\n".into()
+}
+
+/// A completion endpoint on `url` (no validation call: the upstream serves one stream only).
+async fn streaming_endpoint(url: &str) -> Cluster {
+    let c = cluster(url, &[("xpack.inference.skip_validate_and_start", "true")]).await;
+    let put = format!(r#"{{"service":"openai","service_settings":{{"api_key":"k","model_id":"m","url":"{url}/v1/chat/completions"}}}}"#);
+    assert_eq!(call(&c, "PUT", "/_inference/completion/live", &put).await.0, 200);
+    c
+}
+
+#[tokio::test]
+async fn a_client_that_goes_away_closes_the_upstream_stream() {
+    use futures::StreamExt;
+    let (url, closed) = endless(hello_chunk).await;
+    let c = streaming_endpoint(&url).await;
+    let resp = search_es::handle(&c, EsRequest::json("POST", "/_inference/completion/live/_stream", r#"{"input":"hi"}"#)).await;
+    assert_eq!((resp.status, resp.content_type()), (200, Some("text/event-stream")));
+    let mut body = resp.stream.and_then(|s| s.take()).expect("a streamed body");
+    // The first events come while the upstream is still writing.
+    let first = body.next().await.unwrap();
+    assert!(String::from_utf8_lossy(&first).contains(r#"{"completion":[{"delta":"Hel"}]}"#), "{first:?}");
+    // The client goes away: the body is dropped, and with it the upstream's connection.
+    drop(body);
+    let wrote = tokio::time::timeout(std::time::Duration::from_secs(10), closed).await.expect("the upstream connection stayed open").unwrap();
+    assert!(wrote >= 1);
+}
+
+#[tokio::test]
+async fn an_upstream_event_past_the_cap_ends_the_stream() {
+    // One event that never ends: a data line of a megabyte and more.
+    fn endless_line(i: usize) -> String {
+        if i == 0 { format!("{}data: {{\"choices\":[{{\"delta\":{{\"content\":\"", hello_chunk(0)) } else { "x".repeat(64 * 1024) }
+    }
+    let (url, closed) = endless(endless_line).await;
+    let c = streaming_endpoint(&url).await;
+    let (s, _, sse) = call(&c, "POST", "/_inference/completion/live/_stream", r#"{"input":"hi"}"#).await;
+    assert_eq!(s, 200);
+    assert!(sse.starts_with("\u{feff}event: message\ndata: {\"completion\":[{\"delta\":\"Hel\"}]}\n\n"), "{}", &sse[..sse.len().min(300)]);
+    assert!(
+        sse.ends_with("\u{feff}event: error\ndata: {\"error\":{\"root_cause\":[{\"type\":\"status_exception\",\"reason\":\"an event in the streamed answer of inference endpoint [live] exceeds [1048576] bytes\"}],\"type\":\"status_exception\",\"reason\":\"an event in the streamed answer of inference endpoint [live] exceeds [1048576] bytes\"},\"status\":400}\n\n"),
+        "{}",
+        &sse[sse.len().saturating_sub(400)..]
+    );
+    assert!(!sse.contains("[DONE]") && sse.len() < 4096);
+    // Cut, not drained: the upstream's connection closes.
+    tokio::time::timeout(std::time::Duration::from_secs(10), closed).await.expect("the upstream connection stayed open").unwrap();
+}
+
+/// A browser key (#358) never reaches a model: `browser::check` refuses every `_inference` API
+/// after routing, before the handler opens anything, even for a superuser's key that lists the
+/// endpoints in `inference_endpoints` (which only lets its searches embed with them).
+#[tokio::test]
+async fn a_browser_key_cannot_stream_inference() {
+    let (m, log) = mock().await;
+    let c = cluster(&m, &[("xpack.inference.skip_validate_and_start", "true")]).await;
+    let put = format!(r#"{{"service":"openai","service_settings":{{"api_key":"k","model_id":"m","url":"{m}/v1/chat/completions"}}}}"#);
+    assert_eq!(call(&c, "PUT", "/_inference/completion/live-c", &put).await.0, 200);
+    assert_eq!(call(&c, "PUT", "/_inference/chat_completion/live-cc", &put).await.0, 200);
+    assert_eq!(call(&c, "PUT", "/_security/user/o", r#"{"password":"o-password-1","roles":["superuser"]}"#).await.0, 200);
+    let key = r#"{"name":"page","metadata":{"roll_browser":{"limits":{"inference_endpoints":["live-c","live-cc"]}}}}"#;
+    let (s, k, _) = call_as(&c, "o:o-password-1", "POST", "/_security/api_key", key).await;
+    assert_eq!(s, 200, "{}", k.to_json());
+    let field = |f: &str| k.get(f).and_then(Value::as_str).unwrap_or_default().to_string();
+    let auth = format!("ApiKey {}", base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", field("id"), field("api_key"))));
+    for (path, body) in [("/_inference/completion/live-c/_stream", r#"{"input":"hi"}"#), ("/_inference/chat_completion/live-cc/_stream", r#"{"messages":[{"role":"user","content":"hi"}]}"#)] {
+        let mut r = EsRequest::json("POST", path, body.to_string());
+        r.headers.push(("authorization".into(), auth.clone()));
+        let resp = search_es::handle(&c, r).await;
+        let v = resp.body_json();
+        assert_eq!(resp.status, 400, "{}", v.to_json());
+        assert!(resp.stream.is_none());
+        assert!(v.pointer(&["error", "reason"]).and_then(Value::as_str).unwrap_or_default().contains("isn't available to a browser key"), "{}", v.to_json());
+    }
+    assert!(seen(&log).is_empty(), "a browser key's request reached the model");
 }

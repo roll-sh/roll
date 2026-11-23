@@ -489,7 +489,7 @@ pub fn parse_date_math(vm: &mut Vm, s: &str) -> Result<i64, Thrown> {
         t.with_cause(&inner)
     };
     let (base, math) = if let Some(rest) = s.strip_prefix("now") {
-        (vm.host.now_millis(), rest)
+        (crate::guard::paused(|| vm.host.now_millis()), rest)
     } else {
         match s.find("||") {
             Some(i) => (parse_es_date(&s[..i]).ok_or_else(fail)?, &s[i + 2..]),
@@ -736,8 +736,8 @@ fn random_binding(vm: &mut Vm, a: &[Value], field: bool) -> Result<Rc<RandomScor
         let field_name = if field { Some(a[1].to_java_string()) } else { None };
         if let Some(f) = &field_name {
             // the doc values are looked up first
-            let mut dv = crate::host::DocValues::default();
-            match vm.host.doc_values(f, &mut dv) {
+            let mut dv = crate::host::HostBuf::default();
+            match crate::host::call(|| vm.host.doc_values(f, &mut dv)) {
                 Ok(true) => {}
                 Ok(false) => {
                     let mut t = super::doc::no_field(f);
@@ -764,7 +764,7 @@ fn random_value(salted: i32, seed_value: &str) -> f64 {
 
 fn s_random_doc(vm: &mut Vm, a: &mut [Value]) -> VR {
     let b = random_binding(vm, a, false)?;
-    let id = vm.host.doc_id();
+    let id = crate::guard::paused(|| vm.host.doc_id());
     Ok(Value::Double(random_value(b.salted, &id.to_string())))
 }
 
