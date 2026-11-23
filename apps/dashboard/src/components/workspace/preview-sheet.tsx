@@ -235,6 +235,21 @@ export function PreviewSheet({
               <p className="text-[11.5px] text-subtle">No services: a repo in this project runs here once its roll.toml has a [preview] section.</p>
             )}
             {(p.state === "ready" || p.state === "sleeping") && p.trusted && <Promote preview={p} />}
+            <span data-section="secrets" />
+            {!!p.served_secrets?.length && (
+              <div className="rounded-lg border border-danger/40 bg-danger/5 px-3 py-2 text-[12px]" role="alert">
+                <p className="text-danger">
+                  Its pages serve {p.served_secrets.length === 1 ? "a secret value" : `${p.served_secrets.length} secret values`}: anyone who opens the preview can read {p.served_secrets.length === 1 ? "it" : "them"}.
+                </p>
+                <ul className="mt-1 space-y-0.5 font-mono text-[11px] break-words text-soft">
+                  {p.served_secrets.map((x) => (
+                    <li key={`${x.key} ${x.path}`}>
+                      {x.key} in {x.path}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
             {!!p.browser_checks?.length && (
               <>
                 <Label>Browser checks</Label>
