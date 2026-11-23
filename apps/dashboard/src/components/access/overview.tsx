@@ -318,7 +318,8 @@ function Attention({ list, refresh }: { list: Checkup[]; refresh: () => Promise<
 
 /**
  * How agents used the MCP server lately (`GET /v1/access/activity`), as Cloudflare's and Stripe's
- * MCP dashboards show it: the busiest tools with what was refused or failed and how slow they were.
+ * MCP dashboards show it: the busiest tools with what was refused or failed and how slow they were
+ * (the 95th percentile).
  * A person's are their own connections'.
  */
 function AgentActivity({ activity }: { activity: Activity }) {
@@ -351,7 +352,7 @@ function AgentActivity({ activity }: { activity: Activity }) {
               <th className="py-1 pr-3 text-right font-normal">Calls</th>
               <th className="py-1 pr-3 text-right font-normal">Refused</th>
               <th className="py-1 pr-3 text-right font-normal">Failed</th>
-              <th className="py-1 pr-3 text-right font-normal">Avg</th>
+              <th className="py-1 pr-3 text-right font-normal">p95</th>
               <th className="py-1 text-right font-normal">Last</th>
             </tr>
           </thead>
@@ -362,7 +363,7 @@ function AgentActivity({ activity }: { activity: Activity }) {
                 <td className="py-1.5 pr-3 text-right font-mono">{t.calls.toLocaleString()}</td>
                 <td className="py-1.5 pr-3 text-right font-mono text-muted">{t.denied || ""}</td>
                 <td className="py-1.5 pr-3 text-right font-mono text-muted">{t.failed || ""}</td>
-                <td className="py-1.5 pr-3 text-right font-mono text-muted">{t.avg_ms} ms</td>
+                <td className="py-1.5 pr-3 text-right font-mono text-muted">{t.p95_ms ?? t.avg_ms} ms</td>
                 <td className="py-1.5 text-right text-muted">{relative(t.last_at)}</td>
               </tr>
             ))}

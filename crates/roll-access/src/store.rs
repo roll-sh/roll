@@ -111,6 +111,12 @@ CREATE TABLE IF NOT EXISTS oauth_clients (
     created_at INTEGER NOT NULL,
     last_used_at INTEGER
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS access_alerts (
+    seq INTEGER PRIMARY KEY,
+    at INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    data TEXT NOT NULL
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -551,6 +557,10 @@ pub struct AuditEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client: Option<String>,
 }
+
+/// The window [`Store::failure_jumps`] looks at, and how many server errors in it count.
+pub const JUMP_WINDOW_MS: i64 = 15 * 60_000;
+pub const JUMP_MIN_ERRORS: i64 = 10;
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct AuditQuery {
@@ -1767,7 +1777,8 @@ impl Store {
     }
 
     /// How agents used roll's MCP server since `since` (audit rows that name a tool): per tool
-    /// (calls, refused, failed, average and longest duration, the last call), per connection (the
+    /// (calls, refused, failed, average, median, 95th percentile and longest duration, the last
+    /// call), per connection (the
     /// operator's own as `grant: null`) and per day (UTC). `grants`: only these connections' (a
     /// person's own); `None`, everyone's.
     pub fn tool_activity(&self, since: i64, grants: Option<&[String]>) -> Result<Value> {
@@ -1787,6 +1798,29 @@ impl Store {
                 args.as_slice(),
                 |r| Ok(json!({ "tool": r.get::<_, String>(0)?, "calls": r.get::<_, i64>(1)?, "denied": r.get::<_, i64>(2)?, "failed": r.get::<_, i64>(3)?, "avg_ms": r.get::<_, i64>(4)?, "max_ms": r.get::<_, i64>(5)?, "last_at": r.get::<_, i64>(6)? })),
             )?;
+            // Median and 95th percentile per tool: each call's rank among its tool's (window
+            // functions, in both databases), the first duration at or past the share.
+            let ranks: std::collections::HashMap<String, (i64, i64)> = c
+                .query(
+                    &format!(
+                        "SELECT tool, MIN(CASE WHEN rn * 100 >= n * 50 THEN duration_ms END), MIN(CASE WHEN rn * 100 >= n * 95 THEN duration_ms END) FROM \
+                         (SELECT tool, duration_ms, ROW_NUMBER() OVER (PARTITION BY tool ORDER BY duration_ms) AS rn, COUNT(*) OVER (PARTITION BY tool) AS n FROM audit WHERE {filter}) ranked GROUP BY tool"
+                    ),
+                    args.as_slice(),
+                    |r| Ok((r.get::<_, String>(0)?, (r.get::<_, Option<i64>>(1)?.unwrap_or(0), r.get::<_, Option<i64>>(2)?.unwrap_or(0)))),
+                )?
+                .into_iter()
+                .collect();
+            let tools: Vec<Value> = tools
+                .into_iter()
+                .map(|mut t| {
+                    if let Some((p50, p95)) = t["tool"].as_str().and_then(|n| ranks.get(n)) {
+                        t["p50_ms"] = json!(p50);
+                        t["p95_ms"] = json!(p95);
+                    }
+                    t
+                })
+                .collect();
             let connections = c.query(
                 &format!("SELECT grant_id, MAX(grant_name), {counts}, COUNT(DISTINCT tool), MAX(at) FROM audit WHERE {filter} GROUP BY grant_id ORDER BY COUNT(*) DESC LIMIT 100"),
                 args.as_slice(),
@@ -1802,6 +1836,86 @@ impl Store {
             Ok::<_, code_sql::Error>(json!({ "since": since, "calls": calls, "tools": tools, "connections": connections, "days": days }))
         })
         .map_err(Into::into)
+    }
+
+    /// Tools whose server errors jumped: at least [`JUMP_MIN_ERRORS`] 5xx answers in the last
+    /// [`JUMP_WINDOW_MS`], a quarter or more of their calls there, and three times (or more) their
+    /// rate over the day before. Each with its counts and its usual rate.
+    pub fn failure_jumps(&self, now: i64) -> Result<Vec<Value>> {
+        let recent_from = now - JUMP_WINDOW_MS;
+        let errors = "SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END)";
+        self.db
+            .read(|c| {
+                let recent = c.query(
+                    &format!("SELECT tool, COUNT(*), {errors} FROM audit WHERE at >= ? AND tool IS NOT NULL GROUP BY tool HAVING {errors} >= ?"),
+                    params![recent_from, JUMP_MIN_ERRORS],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)),
+                )?;
+                let mut out = Vec::new();
+                for (tool, calls, failed) in recent {
+                    let (before, before_failed): (i64, i64) = c.query_row(
+                        &format!("SELECT COUNT(*), COALESCE({errors}, 0) FROM audit WHERE tool = ? AND at >= ? AND at < ?"),
+                        params![tool, now - 86_400_000, recent_from],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )?;
+                    let rate = failed as f64 / calls as f64;
+                    let usual = if before > 0 { before_failed as f64 / before as f64 } else { 0.0 };
+                    if rate >= 0.25 && rate >= 3.0 * usual {
+                        out.push(json!({ "tool": tool, "calls": calls, "failed": failed, "rate": rate, "usual": usual }));
+                    }
+                }
+                Ok::<_, code_sql::Error>(out)
+            })
+            .map_err(Into::into)
+    }
+
+    /// Keep an alert for the operator's feed (`GET /v1/access/alerts`, MCP Events' `access.alert`):
+    /// its place is the next after the newest, taken in the same write. Its place.
+    pub fn record_alert(&self, kind: &str, data: &Value) -> Result<i64> {
+        let (now, data) = (code_sql::now_ms(), data.to_string());
+        self.db.write(|c| {
+            let seq: i64 = c.query_row("SELECT COALESCE(MAX(seq), 0) + 1 FROM access_alerts", (), |r| r.get(0))?;
+            c.execute("INSERT INTO access_alerts (seq, at, kind, data) VALUES (?, ?, ?, ?)", params![seq, now, kind, data])?;
+            Ok::<_, Error>(seq)
+        })
+    }
+
+    /// Alerts after `after`, oldest first (at most `limit`), each its data with `seq`, `at` and
+    /// `kind`.
+    pub fn alerts_after(&self, after: i64, limit: usize) -> Result<Vec<Value>> {
+        let rows = self.db.read(|c| {
+            c.query("SELECT seq, at, kind, data FROM access_alerts WHERE seq > ? ORDER BY seq LIMIT ?", params![after, limit.clamp(1, 500) as i64], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?))
+            })
+        })?;
+        Ok(rows
+            .into_iter()
+            .map(|(seq, at, kind, data)| {
+                let mut v: Value = serde_json::from_str(&data).unwrap_or_else(|_| json!({}));
+                v["seq"] = json!(seq);
+                v["at"] = json!(at);
+                v["kind"] = json!(kind);
+                v
+            })
+            .collect())
+    }
+
+    /// The newest alert's place (0: none yet).
+    pub fn alerts_head(&self) -> Result<i64> {
+        Ok(self.db.read(|c| c.query_row("SELECT COALESCE(MAX(seq), 0) FROM access_alerts", (), |r| r.get(0)))?)
+    }
+
+    /// Claim an alert named `key` if it hasn't gone out in `every_ms`: true for one caller on any
+    /// node (read and written in one transaction).
+    pub fn claim_alert(&self, key: &str, now: i64, every_ms: i64) -> Result<bool> {
+        self.db.write(|c| {
+            let last: Option<String> = c.query_row("SELECT value FROM settings WHERE key = ?", [key], |r| r.get(0)).optional()?;
+            if last.and_then(|v| v.parse::<i64>().ok()).is_some_and(|at| now - at < every_ms) {
+                return Ok::<_, Error>(false);
+            }
+            c.execute("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", params![key, now.to_string()])?;
+            Ok(true)
+        })
     }
 
     /// What a grant's requests that ran since `since` were about, by product, action and resource
@@ -1868,6 +1982,8 @@ impl Store {
                 break;
             }
         }
+        // Alerts as long as the audit log, the newest always kept: places are never reused.
+        self.db.write(|c| Ok::<_, Error>(c.execute("DELETE FROM access_alerts WHERE at < ? AND seq < (SELECT MAX(seq) FROM access_alerts)", [before])?))?;
         self.db.write(|c| {
             c.execute("DELETE FROM approvals WHERE expires_at < ?", [now - 24 * 3600 * 1000])?;
             // A network unused for the log's days is forgotten (used again, it's news again).

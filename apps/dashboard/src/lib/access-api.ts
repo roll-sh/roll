@@ -147,7 +147,7 @@ export interface NewGrant {
 }
 
 /** One tool's calls in `GET /v1/access/activity`. */
-export type ToolActivity = { tool: string; calls: number; denied: number; failed: number; avg_ms: number; max_ms: number; last_at: number };
+export type ToolActivity = { tool: string; calls: number; denied: number; failed: number; avg_ms: number; p50_ms?: number; p95_ms?: number; max_ms: number; last_at: number };
 /** How agents used roll's MCP server lately (`GET /v1/access/activity`). */
 export type Activity = {
   since: number;
