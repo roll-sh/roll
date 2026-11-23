@@ -92,6 +92,11 @@ SVC=$(echo "$SVCJ" | jq_ "d['id']")
 # A stream linked to it: production's link gets a SASL user of its own (KAFKA_BROKERS, …).
 api PUT "/v1/apps/services/$SVC/links/stream/$STREAM" '{}' >/dev/null
 say "service $SVC"
+# Production's browser checks (roll apps runs them once on each preview head): one the preview's
+# page passes, one whose script throws. Playwright's image first (roll apps builds its checker on it).
+docker pull -q mcr.microsoft.com/playwright:v1.65.1-noble >/dev/null 2>&1 || true
+CHECKS='{"checks":[{"name":"home","path":"/","every_s":3600,"timeout_s":60,"browser":"await page.waitForSelector(\"body\")"},{"name":"cart","path":"/","every_s":3600,"timeout_s":60,"browser":"throw new Error(\"the cart is empty\")"}]}'
+api PUT "/v1/apps/services/$SVC/environments/production" "$CHECKS" >/dev/null
 api PUT "/v1/previews/projects/$PRJ/settings" '{"enabled":true,"access":"public"}' >/dev/null
 
 say "open a change"
@@ -110,6 +115,16 @@ P=$(api GET "/v1/previews/$PV")
 ENV="pv-${PV#pv_}"
 URL=$(echo "$P" | jq_ "d['services'][0]['url']")
 say "preview $PV ready in $((T1 - T0)) ms, service url $URL"
+say "production's browser checks on the preview's head: home passes, cart fails, said"
+BC=""
+for _ in $(seq 1 300); do
+  BC=$(api GET "/v1/previews/$PV" | jq_ "' '.join(sorted('%s=%s' % (c['name'], c['state']) for c in d.get('browser_checks', [])))")
+  case "$BC" in *pending*|"") ;; *) break;; esac
+  sleep 1
+done
+[ "$BC" = "cart=failed home=passed" ] || { echo "production's browser checks should run on the preview's head (home passes, cart fails): '$BC'"; exit 1; }
+BC_ERR=$(api GET "/v1/previews/$PV" | jq_ "[c.get('error') or '' for c in d['browser_checks'] if c['name'] == 'cart'][0]")
+case "$BC_ERR" in *"the cart is empty"*) ;; *) echo "the failed check should say why: ${BC_ERR:0:200}"; exit 1;; esac
 E=$(api GET "/v1/apps/services/$SVC/environments/$ENV")
 echo "$E" | python3 -m json.tool | head -30 >&2
 # Wait for the deploy to be active, then open it.
@@ -492,6 +507,7 @@ cat <<EOF
 | What | Measured |
 | --- | --- |
 | Change opened → preview ready (Redis branched, roll apps environment made, deploy queued) | $((T1 - T0)) ms |
+| Production's browser checks on the preview's head (roll apps runs them; previews reads them) | $BC |
 | The roll apps service's screenshot (its instance's network) / load / against main's baseline on roll apps / its [app.previews.screenshots] states | $SHOT / $LOAD ms / $BASE / $APPS_STATE |
 | The feedback button on the roll apps environment (a visitor through roll) / its notes | tagged / $NOTES |
 | … → its deploy active (a Docker build of the change's commit) | $((T2 - T0)) ms |
