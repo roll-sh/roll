@@ -1330,11 +1330,16 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **An independent review of #755-#789 (this PR).** Eight landings in a row touched access,
-   events and alerts (file search across repos, fair shares on one clock, agent activity and its
-   alerts, the alert feed and a person's own alerts). As after #703 and #745, a fresh reviewer
-   reads the merged code for leaks across people, SQL on both databases, floods and races; this PR
-   fixes what it confirms.
+1. **Fixes from an independent review of #755-#789 (this PR).** Nothing high: no leak across
+   people, no secret in an alert. Fixed: a file search no longer builds every never-indexed repo at
+   once (it skips them as `indexing` and starts two builds at a time); the failure-jump check skips
+   tools alerted on lately before reading their day, runs off the async workers again, and has an
+   index (`audit (tool, at) WHERE tool IS NOT NULL`); the access page's Alerts panel asks for the
+   caller's own newest (`?last=`), and a person's `latest=1` is their own newest place (it said
+   how often others' alerts came); a person's alerts have an index; a decoy flood costs a read,
+   not a write, once kept; a subscription's times are on the database's clock; a file fetched at a
+   revision off the default branch is marked `outside`. Left as measured: the activity panel's
+   scans (every 60 s per open operator tab) once real audit logs are measured.
 2. **MCP Events: more feeds.** All three delivery modes are on main (poll #692, webhook #703,
    push #710) with `apps.event`, `access.approval` (#708), `previews.event` (#719), `code.landed`
    (#739) and `secrets.event` (#751), and fair shares on one clock (#760). Next as products add a
