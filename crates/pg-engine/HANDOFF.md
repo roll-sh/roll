@@ -10625,6 +10625,130 @@ and confirm on PGO:
 Agent 218's short-transaction stack (ten steps, `wip/a218`) was gated this way and landed: BENCH
 "Profile-guided build", part 2.
 
+## Bulk writes, round 25: INSERT … SELECT's stored rows in runs, a fresh-unique COPY's key path, the sink's sort (agent 300)
+
+BENCH.md "Bulk writes, round 25" has the measurements (lane C, agent 246's `bulkx.sh` with
+`JOIN=1`, copied to `~/.cache/a300/bench`; plain dist builds of the change on origin's
+`58ad4d95d`). `cand/a300`: one code commit on origin's `ff72a4b50` (upstream touched no file of
+the change between the two) and this section. No format change: the same rows, TIDs, files,
+relation and index sizes and bytes written.
+
+**Where INSERT … SELECT went** (b0 = `58ad4d95d`, `instructions:upp` samples of the joined
+window, inclusive shares): the sink's runs 31% (zstd 17%, the bloom filter 5.3%,
+`SstWriter::add` 4%), the source's scan 29% (its blocks' decompression 14%), the first 400,000
+rows' placement in the heap model (`inserted_stored_modelled`) 12.9% (the model's `insert` 8.6%:
+`get_buffer`, the key map, the line pointer; with `ensure`, the shard's lock, `cur_xid`,
+`output_cid`, `vis_of` and `settle_left` around each row: ~1,600 instructions a modelled row),
+`StoredInsert::insert_data` itself 10%, the rows past the model (`inserted_stored`, a write
+lock, the fillfactor parsed, the estimate's `add_in` a row) 4.1%, the row id, the key and the
+row as two allocations each copied again into the sink.
+
+**INSERT … SELECT's stored rows in runs** (`exec/dml.rs` `StoredInsert::stage` / `flush`,
+`sizing::inserted_stored_run` / `inserted_stored_past`, `heapsim::Heap::insert_run`,
+`Database::nextval_by_one_n`, `TxnState::put_fresh_parts`). The source's stored rows
+(`Node::each_stored`) were each sized, given a row id, placed and stored before the next was
+read. Now each is checked and sized as before (`stored_len`: the same one pass) and staged (its
+values copied after the others', with its tuple length); 256 staged rows, a row that has to go
+in decoded, the sink opening (`SINK_AFTER`) or the source's end (or error) put the staged rows
+in, in their order:
+- their row ids taken together (`nextval_by_one_n`: those logged ahead under one lock, the
+  same values and `log_cnt` as one call a row);
+- while the table is modelled, placed by one call (`inserted_stored_run`: `ensure`, the xid, the
+  command id and the visibility once, one write lock): `Heap::insert_run` places each row as
+  `insert` does (the same `get_buffer` rule, line pointer, key map entry and `settle_left` after
+  each), but a row that fits on the page the row before went on (`get_buffer`'s target, which
+  would take it) goes there without the lookups, and the page's prune hint is published once its
+  rows are in (or before `settle_left` would settle a page: nothing reads a hint under the lock).
+  It stops after the row that takes the heap past the model's size, as the per-row path does,
+  and the rest go in the estimate. A COPY's buffer or a deferring load (neither in INSERT …
+  SELECT) places them one by one as before;
+- past the model, in the estimate by one call (`inserted_stored_past`: one write lock, the
+  fillfactor once, each row's `add_in` and `placed`, a run's key given as `stored_run_key` gives
+  it);
+- each stored with its header and TID, straight into an open sink (`put_fresh_parts`: no key or
+  row made for it; a held or measured load, or no sink, takes `put_fresh` as before).
+A staged row the estimate can't take (the table modelled again meanwhile: not seen) and the
+rows after it go one by one (`flush_rest`, `insert_data`, decoded where that refuses), under row
+ids of their own. A NOT NULL violation (a row that goes decoded) finds the rows before it in:
+the same dead tuples and counts. Test: `big_tables::insert_select_from_stored_rows` now also
+fails a load at row 2,500 through both paths and compares the relation sizes and `n_tup_ins`.
+
+**A fresh-unique COPY's key path** (`exec/dml.rs`, `txn/mod.rs`, `txn/locks.rs`): each row of a
+COPY into a primary key `FreshUnique` answers for built its lock key in two allocations
+(`unique_lock_key`: now one, `scan::index_value_prefix_into`), hashed the key twice (`holds`,
+then `add`: now `enter`, one hash and one probe while no other transaction has ended), and its
+compact lock (`hold_compact_unique_key`) looked up and re-held the transaction's own lock every
+row (`hold_xact`: now skipped when the holder is the top transaction with its xid, whose lock
+`cur_xid` put in the main table). The same locks, waits and errors
+(`big_tables::copy_into_fresh_unique_index_waits_for_writers`, golden `a287_copy_unique`).
+
+**The sink's sort** (`txn/mod.rs` `flush_sink`, `sort.rs`). A run's entries are sorted by 16
+bytes as two words, then the keys where those tie (agent 287). Two changes:
+- `flag_sort` leaves a bucket already in order as it is (one comparison pass instead of a pass a
+  byte): a load's rows and ascending keys among an index's entries in no order;
+- the 16 bytes were each key's first 16, of which 8 are its table and index: an int index
+  entry's 16 ended inside its row id, so the entries of one value tied and went to comparisons.
+  Now the sink's distinct 8-byte prefixes are ranked (at most 255; keys under 8 bytes keep the
+  first 16 bytes) and the 16 bytes are the rank and the 15 bytes after the prefix: a row's whole
+  key, an int4 entry's value and row id. Zeros past a key's end order as its end does, and ties
+  still go to the keys: the same order. Debug builds assert every run's keys strictly ascending.
+
+Results (BENCH "Bulk writes, round 25"; plain dist, G user instructions, two alternating pairs
+each, one lane.sh hold a pair; b0 = `58ad4d95d`):
+- INSERT … SELECT (the short gate, without the index builds before it): 5.815-5.826 -> 5.153 with
+  the runs alone (n1, -11.4% in every pair), 5.128 with the sort (n4, -11.9%); in the whole
+  script 5.101 -> 4.424 (-13.3%; PostgreSQL 18.6's 4.31: 1.03x). The ctid hash of the copy, its
+  size (68,272,128 bytes) and bytes written equal.
+- COPY into `bulkp` (primary key and a secondary index): 29.40 -> 28.86 with the key path (n2,
+  -1.8%), 28.76 with ordered buckets left (n3, -0.3% more), 26.80 with the ranked-prefix key (n4,
+  -6.8% more): -8.8% in all (PostgreSQL's 24.70: 1.19x -> 1.09x).
+- COPY into `bulks` (one secondary index): 20.356 -> 19.03 (-6.5%; PostgreSQL's 18.92: 1.08x ->
+  1.006x), all of it the ranked-prefix key; n1-n3 read 0.03-0.06 G above b0 (below).
+- COPY in: 6.467 -> 6.456 (-0.17%). n1-n3 read 6.478-6.497 with COPY's code unchanged:
+  `InsertNode::next`, which runs COPY's rows, grew 160 bytes with INSERT … SELECT's staging
+  inlined into it (the out-of-line functions of b0 and n3 are the same set but `flush` and
+  `flush_rest`); no inline attribute was added to move it out (that would need the PGO gate),
+  and n4's sort more than makes it up on every step.
+- The whole bulk script once each, with the indexed variants after it: all steps 95.20 -> 90.58
+  (-4.85%), CREATE INDEX -0.19%, CREATE UNIQUE INDEX +0.21% (0.007 G, inside its 3.357-3.388
+  spread of rounds 21-24), every other step level; rows, the ctid hashes, relation and index
+  sizes equal.
+Foreign load 0.7-7.6 cores (the machine's load average 55-145): instruction counts repeat within
+0.02% on a build; cycles are a reading only.
+
+Not gated on the PGO build: no inline attribute added or removed; the new functions are called
+from the old ones (`insert_each_stored`, `find_conflict`, `flush_sink`), `insert_data` and
+`index_value_prefix` keep their bodies (a first version that called a shared `stored_len` from
+`insert_data` put it out of line: COPY in +0.45%, replaced).
+
+Verification: `tools/quick-check.sh` with `QC_CHECKED=1` on `af2d2ff33` (the tree of the code commit) (the code on origin's
+`ff72a4b50`): Clippy 16 warnings, none new in a changed file; 454 tests in 27 binaries, again built `--profile verify-checked`; crash_random seeds 1-3 x 2, power_cut_at_every_point; regress 51,148 / 51,150, 0 newly differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed. Before it, `big_tables` (25), `crash_bulk` (6) and `txn_spill` (1) under
+`--profile verify-checked` (the sink's order assertion on), and `big_tables` under `--profile
+verify`.
+
+**Considered, not built:**
+- Skipping a fresh-unique COPY's key locks: other writers find the COPY's keys only through them
+  (its entries are in the sink, unread), and the compact lock set already is one arena entry a
+  key. `FreshUnique`'s own key set repeats those keys; answering from the lock set would need
+  "entered by this statement" apart from "held by the transaction" (a key it inserted and
+  deleted earlier is held, not entered). Left.
+- The background merges of the sink's runs during an indexed COPY (15% of `bulkp`'s step, the
+  secondary index's runs overlapping): storage compaction, agent 299's area.
+- Stored rows for indexed tables (the brief's item 3): index keys and the model's entries from
+  the stored bytes through every branch of `plain_row` (unique checks, `rowsize`, the btree
+  estimates). Not started.
+
+**Left (G user instructions, against PostgreSQL 18.6):**
+1. COPY into `bulkp` 26.8 against 24.7: the sink's flush (zstd of the runs, the writer's
+   per-entry work and bloom filter), the background merges of the runs of the secondary index
+   (overlapping: ~15% of the step on the compaction thread, agent 299's area), the unique keys'
+   compact locks and `FreshUnique`'s set (`find_conflict` 11% at b0: two sets of the same keys), the size model
+   past the model (`inserted_with` ~12%).
+2. COPY into `bulks` 19.03 against 18.92; INSERT … SELECT 4.42 against 4.31: of INSERT … SELECT
+   (n1's profile) the run writer 36% (zstd 21%, the bloom filter 5.4%, `SstWriter::add` 5.5%), the
+   source's scan 20% (decompression 16%), the model's key map and line pointers ~6%.
+3. Stored rows for indexed tables (the brief's item 3): not started.
+
 ## Bulk writes, round 24: the btree model's inserts, a failed COPY's buffer, index estimates of repeated keys (agent 298)
 
 BENCH.md "Bulk writes, round 24" has the measurements (lane C, agent 246's `bulkx.sh` with
