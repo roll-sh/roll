@@ -1039,7 +1039,7 @@ impl Store {
     /// [`SKEW_WINDOW_MS`] ago). `None` when it's off.
     pub fn skew(&self, id: &str, name: &str, asked: Option<&str>) -> Result<Option<(String, bool)>> {
         let since = self.now_ms()? - SKEW_WINDOW_MS;
-        Ok(self.db.read(|c| {
+        self.db.read(|c| {
             let current = c
                 .query_row("SELECT revision FROM services WHERE preview_id = ? AND name = ? AND skew = 1 AND revision IS NOT NULL AND revision <> ''", params![id, name], |r| r.get::<_, String>(0))
                 .optional()?;
@@ -1049,7 +1049,7 @@ impl Store {
                 _ => false,
             };
             Ok(Some((current, earlier)))
-        })?)
+        })
     }
 
     /// An earlier push as if it had been replaced `ms` earlier.
