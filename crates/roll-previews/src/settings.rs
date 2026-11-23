@@ -462,7 +462,7 @@ impl Default for SecretsRule {
 
 impl Default for GithubRule {
     fn default() -> Self {
-        GithubRule { comment: true, status: true, deployment: true, screenshot: false, baseline: true, pages: Vec::new(), hide: Vec::new(), budget: Budget::default(), visual_threshold: 0.0, widths: Vec::new(), openapi: None, endpoints: Vec::new(), states: Vec::new(), browsers: Vec::new() }
+        GithubRule { comment: true, status: true, deployment: true, screenshot: false, baseline: true, pages: Vec::new(), hide: Vec::new(), budget: Budget::default(), visual_threshold: 0.0, widths: Vec::new(), openapi: None, endpoints: Vec::new(), states: Vec::new(), browsers: Vec::new(), storybook: None }
     }
 }
 
