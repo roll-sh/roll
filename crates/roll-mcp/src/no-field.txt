@@ -29,3 +29,15 @@ GET /v1/secrets/projects/{project}/environments/{env}/values digest             
 GET /v1/secrets/projects/{project}/environments/{env}/values codes                 TOTP codes beside their keys: secrets_totp answers one, audited as itself
 DELETE /v1/secrets/projects/{project}/environments/{env} confirm                   a protected environment's delete repeats its slug: a person's confirmation, not an argument an agent fills
 DELETE /v1/workspace/projects/{id} confirm                                        a project holding secrets repeats its name: a secrets admin's confirmation, not an argument an agent fills
+POST /v1/apps/projects/{project}/services registry          a private registry's login: sets a credential (the dashboard, or roll apps' registry route)
+POST /v1/apps/projects/{project}/services git_login         a private Git repository's login: sets a credential (the dashboard)
+POST /v1/apps/projects/{project}/services x                 where it sits on the project's canvas: the dashboard's
+POST /v1/apps/projects/{project}/services y                 where it sits on the project's canvas: the dashboard's
+PUT /v1/apps/services/{id}/environments/{env} access        a visitor password, token or bypass hash: sets a credential (the dashboard)
+PUT /v1/apps/services/{id}/environments/{env} heartbeats    its answer carries each new heartbeat's URL token once: answers a credential (the dashboard)
+PUT /v1/apps/services/{id}/environments/{env} closed_by     the operator's and roll previews' (who a closed environment's placeholders are made by)
+PUT /v1/apps/services/{id}/environments/{env} preview_host  roll previews sets it on its own environments
+PUT /v1/apps/services/{id}/environments/{env} feedback      roll previews sets it on its own environments (400 on another)
+POST /v1/secrets/projects/{project}/environments branches   an ephemeral environment's branched resources: roll previews' and the operator's
+PUT /v1/previews/projects/{project}/settings env            values every preview's services get, API keys among them: sets a credential (keys go in roll secrets, read through secrets.base)
+PUT /v1/previews/projects/{project}/settings env_for        per-branch variable values, API keys among them: sets a credential (as env)
