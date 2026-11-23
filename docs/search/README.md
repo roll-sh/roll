@@ -1640,7 +1640,7 @@ deterministic (#396).
    rotated first);
    a cluster's admin password can't be kept as a project secret from roll's API or CLI; and only a
    unit test covers previews' search branch, and one MCP test search (no create → bulk → query
-   flow with a person's scoped token). Project members landed in PR_NUMBER
+   flow with a person's scoped token). Project members landed in #808
    (`feature/search-members`): search is a member product, so a member's role in a cluster's project
    decides what they do to it through roll-access, a person's own clusters stay theirs, and linking
    two clusters takes administering both ([Who sees a cluster](architecture.md#who-sees-a-cluster)).

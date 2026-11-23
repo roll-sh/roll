@@ -438,7 +438,7 @@ Accepting an invite isn't a tool, because it's a person's.
 - the dashboard's Members tab and Invites page, the CLI, the MCP tools.
 
 **v1.1: the products that already know their project.** Apps, previews and search become member
-products. Previews is built (#524), and so is search (PR_NUMBER).
+products. Previews is built (#524), and so is search (#808).
 
 **v1.1: groups, SCIM groups and time-boxed elevation** (design: [members-v1-1.md](members-v1-1.md)).
 Groups hold roles on projects, and roles add up. A company's provider keeps a group's members over
