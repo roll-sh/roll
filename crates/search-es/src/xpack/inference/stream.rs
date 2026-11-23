@@ -288,13 +288,14 @@ mod tests {
 
     #[test]
     fn a_read_of_many_tiny_events_costs_its_length() {
-        // 100,000 events in one read (800 KB): split in one pass, not one shift per event.
-        let read = "data:x\n\n".repeat(100_000);
-        let started = std::time::Instant::now();
-        let mut r = Reader::default();
-        let events = r.feed(read.as_bytes(), "x").unwrap();
-        assert_eq!(events.len(), 100_000);
-        assert!(started.elapsed() < std::time::Duration::from_secs(1), "took {:?}", started.elapsed());
+        // Many events in one read are split in one pass, not one shift per event: the work is
+        // linear in the read's length (the thread's CPU time, which a loaded host can't stretch;
+        // a wall-clock bound failed at load 45-70 on 2026-11-23).
+        search_test_support::assert_linear("splitting one read into events", 10_000, |n| "data:x\n\n".repeat(n), |read| {
+            let mut r = Reader::default();
+            let events = r.feed(read.as_bytes(), "x").unwrap();
+            assert_eq!(events.len(), read.len() / 8);
+        });
     }
 
     #[test]

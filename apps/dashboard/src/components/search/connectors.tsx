@@ -20,7 +20,19 @@ type Connector = {
   last_sync_error?: string | null;
   last_synced?: string | null;
   last_indexed_document_count?: number;
+  configuration?: Record<string, { sensitive?: boolean; value?: unknown }>;
 };
+
+/**
+ * `c` with its sensitive configuration values blanked. A self-managed connector's values come
+ * back in the clear (as on Elasticsearch: the tenant's connector service reads them), so the tab
+ * never keeps them.
+ */
+function masked(c: Connector): Connector {
+  if (!c.configuration) return c;
+  const configuration = Object.fromEntries(Object.entries(c.configuration).map(([k, f]) => [k, f?.sensitive ? { ...f, value: f.value ? "••••••" : "" } : f]));
+  return { ...c, configuration };
+}
 
 type SyncJob = {
   id: string;
@@ -60,7 +72,7 @@ export function ConnectorsTab({ cluster, onOpenConsole }: { cluster: SearchClust
     // Jobs come newest first: the first one of each connector is its newest.
     const newest = new Map<string, SyncJob>();
     for (const j of jobs.results) if (!newest.has(j.connector.id)) newest.set(j.connector.id, j);
-    return cs.results.map((c) => ({ connector: c, job: newest.get(c.id) }));
+    return cs.results.map((c) => ({ connector: masked(c), job: newest.get(c.id) }));
   }, [cluster.id]);
   const { value: rows, error, reload } = useLoad(load);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -135,7 +147,12 @@ export function ConnectorsTab({ cluster, onOpenConsole }: { cluster: SearchClust
                         <p className="font-medium">{c.name || c.id}</p>
                         <p className="font-mono text-[11px] text-subtle">
                           {c.service_type ?? "no service"}
-                          {!runs && " · self-managed"}
+                          {!runs && (
+                            <span title="Run by your own connector service, which reads its configuration: roll stores those values as given, as Elasticsearch does">
+                              {" "}
+                              · self-managed
+                            </span>
+                          )}
                         </p>
                       </td>
                       <td className="px-3 py-2.5 font-mono text-[12px]">{c.index_name ?? "—"}</td>

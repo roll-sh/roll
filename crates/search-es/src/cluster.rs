@@ -127,7 +127,7 @@ pub struct ClusterConfig {
     pub owner: Option<String>,
     /// The pool of connector sync slots this cluster takes from (`None`: the process's, shared by
     /// every cluster on the node; tests give clusters a pool of their own).
-    pub connector_slots: Option<std::sync::Arc<crate::xpack::entsearch::sync::slots::Slots>>,
+    pub connector_slots: Option<std::sync::Arc<crate::slots::Slots>>,
     /// The parent's catalog id, on a new branch's first load only: what it inherited from the
     /// parent is marked then, so its jobs don't act on the parent's outside storage or run twice
     /// ([`crate::branch`]). Later loads, and branches made before marking existed, have none:
@@ -243,8 +243,6 @@ pub struct Cluster {
     pub breakers: crate::breaker::Breakers,
     /// The node's reindex from remote limits ([`ClusterConfig::reindex_node`]).
     pub remote: Arc<crate::api::remote::RemoteNode>,
-    /// This cluster's running reindex from remote tasks (counted against `remote`).
-    pub remote_running: Arc<std::sync::atomic::AtomicUsize>,
     /// The cluster's own `reindex.remote.whitelist` (roll's API sets it, as Elastic Cloud's user
     /// settings set it); `None`: the node setting's.
     pub reindex_whitelist: RwLock<Option<Vec<String>>>,
@@ -663,7 +661,6 @@ impl Cluster {
             xpack,
             breakers,
             remote: remote_node,
-            remote_running: Default::default(),
             reindex_whitelist: RwLock::new(None),
             thread_pools,
             snapshot_data: Default::default(),

@@ -103,6 +103,9 @@ mod tests {
     fn feedback_reviews_read_back_and_others_dont() {
         let body = "**Feedback on the preview** · [`/checkout?step=2`](https://web-pr7.preview.roll.site/checkout?step=2) · `button.pay`\n\nToo small\n\n<sub>1280x800 viewport · roll preview pv_1</sub>";
         assert_eq!(parse(body), Some(("/checkout?step=2".into(), "button.pay".into(), "Too small".into())));
+        // What went wrong on the page comes after the `<sub>` line: never the note.
+        let with_context = format!("{body}\n\n<details><summary>On the page: 1 error</summary>\n\n- error: `TypeError`\n\n</details>");
+        assert_eq!(parse(&with_context), parse(body));
         let plain = "**Feedback on the preview** · `/` \n\nx";
         assert_eq!(parse(plain), None, "a path in backticks only, then the separator");
         let bare = "**Feedback on the preview** · `/about`\n\nLooks off\n\n<sub>roll preview pv_1</sub>";

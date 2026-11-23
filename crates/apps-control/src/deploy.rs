@@ -614,6 +614,8 @@ impl Apps {
             for p in pruned {
                 if let Some(img) = &p.image {
                     self.deps.builder.remove_image(img).await;
+                    let i = img.clone();
+                    let _ = self.db(move |s| s.drop_provenance(&i)).await;
                     // A site is keyed by its digest: another service's image with the same one
                     // (a byte-identical build) still serves it.
                     if let Some(k) = crate::sites::key(img) {
@@ -1278,10 +1280,12 @@ impl Apps {
                 anyhow::ensure!(self.owns(service), "this node no longer holds the service; the node that took it over deploys");
                 self.step(service, id, &format!("check_{}", c.name)).await;
                 let at = format!("{}{}", url.trim_end_matches('/'), c.path);
-                let ran = self.run_browser_check(service, &row.name, &at, c, cancel).await;
+                let ran = self.run_browser_check(service, &row.name, &at, c, cancel, None).await;
                 anyhow::ensure!(!cancel.is_cancelled(), "canceled");
+                // Over its budgets fails a canary as a broken flow does.
+                let ran = ran.and_then(|p| p.over_budget.map_or(Ok(()), Err));
                 match ran {
-                    Ok(_) => sys.line(format!("canary: browser check {} passed on the new deployment", c.name)),
+                    Ok(()) => sys.line(format!("canary: browser check {} passed on the new deployment", c.name)),
                     Err(why) => {
                         sys.line(format!("canary: rolled back before any requests: browser check {} failed: {why}", c.name));
                         anyhow::bail!("rolled back before any requests: browser check {} failed: {why}", c.name);
@@ -1787,38 +1791,14 @@ impl Apps {
             }
             None => None,
         };
+        let (reused_from, began) = (reused.as_ref().map(|(from, _)| from.clone()), code_sql::now_ms());
         let image = if let Some((from, image)) = reused {
             log.line(format!("{from} was built from the same source, settings and build variables: its image goes on, no build"));
             image
         } else {
         log.line(format!("building with {}", self.deps.builder.name()));
-        let began = code_sql::now_ms();
         match self.deps.builder.build(&job, log, cancel.clone()).await {
-            Ok(i) => {
-                // Its provenance, signed, beside it (what it was built from; never a value).
-                if let Some(digest) = self.deps.runtime.image_id(&i).await {
-                    use sha2::{Digest, Sha256};
-                    let dockerfile = std::fs::read(job.context.join(&job.dockerfile)).or_else(|_| std::fs::read(&job.dockerfile)).unwrap_or_default();
-                    let built = crate::provenance::Built {
-                        image: &i,
-                        digest: &digest,
-                        service: &svc.id,
-                        deployment: &d.id,
-                        builder: self.deps.builder.name(),
-                        source: serde_json::to_value(&svc.source).unwrap_or_default(),
-                        revision: d.revision.as_deref(),
-                        plan: &plan_json,
-                        dockerfile_sha256: hex::encode(Sha256::digest(&dockerfile)),
-                        variables: job.env.iter().map(|(k, _)| k.clone()).collect(),
-                        started_ms: began,
-                        finished_ms: code_sql::now_ms(),
-                    };
-                    if let Err(e) = self.record_provenance(&svc.project, built).await {
-                        log.line(format!("its provenance wasn't recorded: {e}"));
-                    }
-                }
-                i
-            }
+            Ok(i) => i,
             // What failed, as BuildKit said it (the step, its last words), not only its exit code.
             Err(e) if !cancel.is_cancelled() => {
                 let lines: Vec<String> = self.logs.follow(&format!("build:{}", d.id), 400).0.into_iter().map(|l| l.text).collect();
@@ -1843,6 +1823,30 @@ impl Apps {
         }
         if !pinned.is_empty() {
             plan_json["bases"] = serde_json::Value::Array(pinned);
+        }
+        // Its provenance, signed, beside it: once its bases are pinned (they're what it was
+        // built on). Never for a build roll can't say all of (an unreadable Dockerfile).
+        if reused_from.is_none()
+            && let Some(digest) = self.deps.runtime.image_id(&image).await
+            && let Ok(dockerfile) = std::fs::read(job.context.join(&job.dockerfile)).or_else(|_| std::fs::read(&job.dockerfile))
+        {
+            use sha2::{Digest, Sha256};
+            let built = crate::provenance::Built {
+                image: &image,
+                digest: &digest,
+                deployment: &d.id,
+                builder: self.deps.builder.name(),
+                source: serde_json::to_value(&svc.source).unwrap_or_default(),
+                revision: d.revision.as_deref(),
+                plan: &plan_json,
+                dockerfile_sha256: hex::encode(Sha256::digest(&dockerfile)),
+                variables: job.env.iter().map(|(k, _)| k.clone()).collect(),
+                started_ms: began,
+                finished_ms: code_sql::now_ms(),
+            };
+            if let Err(e) = self.record_provenance(&svc.project, built).await {
+                log.line(format!("its provenance wasn't recorded: {e}"));
+            }
         }
         let (id, img, r) = (d.id.clone(), image.clone(), run.clone());
         self.db(move |s| {

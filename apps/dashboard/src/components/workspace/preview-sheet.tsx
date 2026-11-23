@@ -248,6 +248,7 @@ export function PreviewSheet({
                         <span className={`ml-auto shrink-0 font-mono text-[11px] ${c.state === "failed" ? "text-danger" : "text-subtle"}`}>{c.state === "pending" ? "running" : c.state}</span>
                       </div>
                       {c.error && <p className="mt-0.5 ml-3.5 font-mono text-[10.5px] break-words text-subtle">{c.error}</p>}
+                      {c.files && <CheckFiles files={c.files} check={c.name} />}
                     </li>
                   ))}
                 </ul>
@@ -608,6 +609,29 @@ export function PreviewSheet({
         )}
       </div>
     </>
+  );
+}
+
+/** A failed browser check's screenshot and Playwright trace, kept by roll apps (`read` on its
+ * service: someone without it gets nothing). */
+function CheckFiles({ files, check }: { files: { service_id: string; environment: string }; check: string }) {
+  const open = async (which: "screenshot" | "trace") => {
+    const blob = await appsApi.checkFailure(files.service_id, files.environment, check, which).catch(() => null);
+    if (!blob) return;
+    const url = URL.createObjectURL(blob);
+    if (which === "screenshot") window.open(url, "_blank", "noopener");
+    else Object.assign(document.createElement("a"), { href: url, download: `${check}-trace.zip` }).click();
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  };
+  return (
+    <span className="mt-0.5 ml-3.5 flex gap-3 text-[11px]">
+      <button type="button" className="text-accent hover:underline" onClick={() => void open("screenshot")}>
+        Screenshot of the failure
+      </button>
+      <button type="button" className="text-accent hover:underline" onClick={() => void open("trace")} title="open it with npx playwright show-trace, or at trace.playwright.dev">
+        Its Playwright trace
+      </button>
+    </span>
   );
 }
 
@@ -1049,7 +1073,8 @@ export function TextAgainst({ diff, branch, what = "words" }: { diff: TextDiff; 
 }
 
 /** The project's endpoints timed on the preview's data (`github.endpoints`: the median of 10
- * GETs) against main's, the clearly slower ones in red. */
+ * GETs) against main's, the clearly slower ones in red, and what each JSON answer lost (a field
+ * gone, a type widened) under it. */
 export function Endpoints({ items, branch }: { items: EndpointTime[]; branch: string }) {
   if (!items.length) return null;
   return (
@@ -1060,6 +1085,15 @@ export function Endpoints({ items, branch }: { items: EndpointTime[]; branch: st
           <li key={e.path} className={endpointSlower(e) ? "text-danger" : "text-fg"}>
             GET {e.path} {e.ms} ms{e.main_ms != null ? ` (${branch} ${e.main_ms} ms)` : ""}
             {e.status === 0 ? ", no answer" : e.status >= 400 ? `, ${e.status}` : ""}
+            {!!e.shape_changes?.length && (
+              <ul className="ml-3 text-danger" aria-label={`What its answer lost against ${branch}`}>
+                {e.shape_changes.map((c) => (
+                  <li key={c.path} className="break-words">
+                    {c.path} {c.now == null ? "gone" : `${c.main} → ${c.now}`}
+                  </li>
+                ))}
+              </ul>
+            )}
           </li>
         ))}
       </ul>

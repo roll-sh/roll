@@ -40,12 +40,15 @@ pub struct McpCall {
     pub elicits: bool,
     /// The MCP client's name and version, as it said in `initialize`.
     pub client: Option<Arc<str>>,
-    /// Asked for nobody's sake (an argument's completions): what would ask a person is refused at
-    /// once instead, so typing never opens an approval.
+    /// Made by roll on its own, never by the agent (the credential guard's scan, an argument's
+    /// completions, `roll_find`'s lookups): what would ask a person is refused at once instead, so
+    /// typing or a lookup never opens an approval.
     pub quiet: bool,
-    /// roll's own work for the grant, nobody waiting on it (MCP Events' webhook deliveries, and the
-    /// read a subscribe makes to check them): what would ask a person is refused (`would_ask`), and
-    /// the policy's `agents_ask` holds it as it holds an agent's calls.
+    /// Nobody can be asked for it now, and its answer goes on to someone (MCP Events' webhook
+    /// deliveries and the read a subscribe makes to check them; completions and `roll_find`'s
+    /// lookups): what would ask a person is refused (`would_ask`), and the policy's `agents_ask`
+    /// holds it as it holds an agent's calls. Only a quiet probe whose answer reaches nobody (the
+    /// guard's scan) skips the policy.
     pub unattended: bool,
 }
 
@@ -737,8 +740,9 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
     ctx.about = lent.as_ref().map(|(p, _)| *p);
     // An agent (a call through roll's MCP server) asks a person first for what the policy says
     // agents always ask about, whatever its token allows (a session is a person, never an agent).
-    // roll's unattended work for the grant (a webhook delivery) is held too, and refused rather
-    // than asked; a quiet probe of roll's own (a completion, the credential guard's scan) isn't.
+    // roll's unattended work for the grant (a webhook delivery, a completion, `roll_find`'s lookups)
+    // is held too, and refused rather than asked; a quiet probe whose answer reaches nobody (the
+    // credential guard's scan) isn't.
     if outcome == Outcome::Allow && !session && ctx.mcp.as_ref().is_some_and(|m| !m.quiet || m.unattended) {
         let env = match &target {
             Target::One(r) => r.environment.clone(),

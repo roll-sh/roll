@@ -71,6 +71,8 @@ fn products() -> Router {
             let next = events.last().map_or(after, |e| e["seq"].as_i64().unwrap());
             axum::Json(json!({ "events": events, "next": next }))
         }))
+        // A deploy still building (MCP Apps views read it again until it settles).
+        .route("/v1/apps/services/{id}/environments/{env}/deploys/{deploy}", get(|| async { axum::Json(json!({ "id": "dep_1", "status": "building" })) }))
         .route("/v1/previews/{id}/screenshot", get(|| async { ([(axum::http::header::CONTENT_TYPE, "image/png")], vec![0x89u8, b'P', b'N', b'G', 0, 1, 2]) }))
         // A run still going the first two times it's waited on (each wait answers at its limit).
         .route("/v1/tasks/runs/{id}/wait", get(|| async {
@@ -588,11 +590,17 @@ async fn a_host_that_renders_apps_gets_the_table_view() {
     let ui_of = |list: &Value, name: &str| list["tools"].as_array().unwrap().iter().find(|t| t["name"] == name).map(|t| t["_meta"]["ui"]["resourceUri"].clone()).unwrap_or(Value::Null);
     assert_eq!(ui_of(&tools, "postgres_query"), "ui://roll/table", "{tools}");
     assert_eq!(ui_of(&tools, "postgres_delete_project"), Value::Null, "only tools that read rows");
-    let view = rpc("resources/read", json!({ "uri": "ui://roll/table" }), Some(session)).await;
+    let view = rpc("resources/read", json!({ "uri": "ui://roll/table" }), Some(session.clone())).await;
     assert_eq!(view["contents"][0]["mimeType"], "text/html;profile=mcp-app", "{view}");
     assert!(view["contents"][0]["text"].as_str().unwrap().contains("ui/initialize"));
     // A host that didn't declare them: no UI.
     assert_eq!(ui_of(&rpc("tools/list", json!({}), None).await, "postgres_query"), Value::Null);
+    // A deploy still building names the read that shows it again, for the view to follow; a
+    // host without views gets the answer alone.
+    let deploy = json!({ "name": "apps_get_deploy", "arguments": { "service": "svc_1", "env": "production", "deploy": "dep_1" } });
+    let building = rpc("tools/call", deploy.clone(), Some(session.clone())).await;
+    assert_eq!(building["_meta"]["roll/pending"], json!({ "tool": "apps_get_deploy", "arguments": deploy["arguments"] }), "{building}");
+    assert!(rpc("tools/call", deploy, None).await["_meta"].get("roll/pending").is_none());
 }
 
 /// A 2026-07-28 client (the stateless core) is served with no `initialize`: each request names its
@@ -898,6 +906,43 @@ async fn a_screenshot_is_an_image_the_agent_sees() {
     let d = Daemon::with_products(vec!["previews".into()]);
     let shot = d.tool(OPERATOR, "previews_screenshot", json!({ "id": "pv_1" })).await;
     assert_eq!((shot["isError"].as_bool(), shot["content"][1]["type"].as_str(), shot["content"][1]["mimeType"].as_str()), (Some(false), Some("image"), Some("image/png")), "{shot}");
+}
+
+/// `roll_find`: a resource by part of its name, from each list the connection has, naming the read
+/// that goes on from it; a pasted dashboard link read at once; a page it doesn't know says which
+/// it does.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resource_is_found_by_name_or_link() {
+    let d = Daemon::with_products(vec!["postgres".into(), "workspace".into()]);
+    let (_, _, made) = d.http(OPERATOR, Method::POST, "/v1/workspace/projects", Some(json!({ "name": "billing" }))).await;
+    let project = made["id"].as_str().unwrap().to_string();
+    let listed = d.rpc(OPERATOR, "tools/list", json!({})).await;
+    assert!(names(&listed).iter().any(|n| n == "roll_find"), "{listed}");
+    let found = d.tool(OPERATOR, "roll_find", json!({ "query": "BILL" })).await;
+    let m = &found["structuredContent"]["matches"];
+    assert_eq!(m.as_array().unwrap().len(), 1, "{found}");
+    assert_eq!((m[0]["kind"].as_str(), m[0]["name"].as_str()), (Some("project"), Some("billing")));
+    assert_eq!(m[0]["read"], json!({ "tool": "workspace_get_project", "arguments": { "id": project } }));
+    // A fronted set's list counts too (roll code's repos).
+    let repo = d.tool(OPERATOR, "roll_find", json!({ "query": "acme/api" })).await;
+    assert_eq!(repo["structuredContent"]["matches"][0]["read"], json!({ "tool": "code_list_changes", "arguments": { "repo": "acme/api" } }), "{repo}");
+    let link = d.tool(OPERATOR, "roll_find", json!({ "query": format!("https://roll.example/dashboard/projects/{project}?tab=canvas") })).await;
+    assert_eq!((link["isError"].as_bool(), link["structuredContent"]["name"].as_str()), (Some(false), Some("billing")), "{link}");
+    let unknown = d.tool(OPERATOR, "roll_find", json!({ "query": "https://roll.example/dashboard/access" })).await;
+    assert!(unknown["isError"] == true && unknown["content"][0]["text"].as_str().unwrap().contains("/dashboard/apps/<id>"), "{unknown}");
+    // A token's lookups go through the gate as its own calls: what the policy has agents ask
+    // about is skipped, never put to a person, and the rest is found.
+    let token = d.token(json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }, { "product": "postgres", "resources": "*", "actions": { "read": "allow" } }])).await;
+    assert_eq!(d.http(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "agents_ask": [{ "product": "postgres" }] }))).await.0, StatusCode::OK);
+    let held = d.tool(&token, "roll_find", json!({ "query": "pa" })).await;
+    let skipped = held["structuredContent"]["skipped"].as_array().unwrap();
+    assert!(skipped.iter().any(|s| s["tool"] == "postgres_list_projects"), "{held}");
+    assert!(d.tool(&token, "roll_find", json!({ "query": "billing" })).await["structuredContent"]["matches"][0]["name"] == "billing");
+    let pending = d.http(OPERATOR, Method::GET, "/v1/access/approvals", None).await.2;
+    assert!(pending.as_array().is_none_or(|a| a.is_empty()) && pending["items"].as_array().is_none_or(|a| a.is_empty()), "a lookup asked a person: {pending}");
+    // A connection that picks its tools can pick it.
+    let (s, _, listed) = d.http(&token, Method::POST, "/v1/mcp?tools=roll_find", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {} }))).await;
+    assert_eq!((s, names(&listed["result"])), (StatusCode::OK, vec!["roll_find".to_string()]), "{listed}");
 }
 
 /// A token's page shows what an agent connected with it is offered: its tools (as `tools/list`

@@ -20,17 +20,21 @@
 //! user settings set it, and which roll's migration adds its host to), else the node setting.
 //! The node's operator rules apply on top: `reindex.remote.blocklist` refuses what it matches.
 //!
-//! The remote is a URL a tenant chose, so roll's rule for those applies (AGENTS.md): names
-//! resolve to public addresses only ([`roll_net::PublicOnly`]), private IP literals and
-//! `localhost` are refused ([`roll_net::literal_private_host`]), no redirect is followed, no
+//! The remote is a URL a tenant chose, so roll's rule for those applies (AGENTS.md), through the
+//! node's egress check ([`crate::egress`]): names resolve to public addresses only, private IP
+//! literals and `localhost` are refused, no redirect is followed, no
 //! proxy is used, each read times out and a request's whole exchange is capped at 10 minutes. The
 //! node setting [`ALLOW_PRIVATE`] lifts the address check (local development, tests). HTTPS is
 //! verified against the platform's roots plus `reindex.ssl.certificate_authorities` (PEM files),
 //! with `reindex.ssl.verification_mode` (`full`, `certificate`, `none`).
 //!
+//! The node's deny lists apply as to every outbound call ([`crate::egress`]): the operator's
+//! networks and roll's own addresses are never reached, whatever name leads there.
+//!
 //! What a node spends on it is bounded by its operator, never by a tenant ([`RemoteNode`]): at
-//! most [`MAX_PER_CLUSTER`] tasks per cluster and [`MAX_PER_NODE`] per node run at once (more get
-//! a 429), every answer is read to at most [`BUFFER_LIMIT`] (16 MiB) and charged, three times
+//! most [`MAX_PER_CLUSTER`] tasks per cluster, [`MAX_PER_OWNER`] per owner across their clusters
+//! and [`MAX_PER_NODE`] per node run at once, shared in turn ([`crate::slots`]: more get a 429,
+//! and keep their place in line while they ask again), every answer is read to at most [`BUFFER_LIMIT`] (16 MiB) and charged, three times
 //! over for the parsed documents and their re-serialized sources, to a node-wide budget
 //! ([`MEMORY`]) while it's held, a scroll or point-in-time id is at most [`MAX_ID_BYTES`], and a
 //! task runs at most [`MAX_DURATION`] (24 hours).
@@ -48,9 +52,9 @@ use crate::json::{Map, Value};
 use crate::obj;
 use bytes::Bytes;
 use search_aggs::memory::MemoryBudget;
+use crate::egress::{Egress, Refused, list, normal_host};
+use crate::slots::{Caps, Full, Permit, Slots};
 use std::sync::Arc;
-use std::net::IpAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// Lets reindex from remote reach private addresses (loopback, private ranges, `localhost`).
@@ -66,27 +70,17 @@ pub const SSL_VERIFICATION_MODE: &str = "reindex.ssl.verification_mode";
 pub const MAX_PER_CLUSTER: &str = "roll.reindex.remote.max_per_cluster";
 /// Remote reindex tasks one node may run at once, across its clusters (4 unless set).
 pub const MAX_PER_NODE: &str = "roll.reindex.remote.max_per_node";
+/// Remote reindex tasks one owner's clusters may run at once on a node (2 unless set).
+pub const MAX_PER_OWNER: &str = "roll.reindex.remote.max_per_owner";
 /// Bytes a node's remote answers may hold at once, across its clusters (256mb unless set).
 pub const MEMORY: &str = "roll.reindex.remote.memory";
 /// How long one remote reindex task may run (24h unless set).
 pub const MAX_DURATION: &str = "roll.reindex.remote.max_duration";
 /// The longest scroll or point-in-time id kept from a remote.
 pub const MAX_ID_BYTES: usize = 4096;
-/// Addresses reindex from remote never connects to, whatever name leads there (CIDRs or
-/// addresses, comma-separated): rolld puts its own public addresses and the operator's fleet
-/// networks here.
-pub const DENY_ADDRESSES: &str = "roll.reindex.remote.deny_addresses";
-/// Names whose addresses reindex from remote never connects to (comma-separated): rolld puts
-/// the names it serves on here. They're resolved again every [`DENY_NAMES_TTL`], so the check
-/// follows the addresses as they change.
-pub const DENY_NAMES: &str = "roll.reindex.remote.deny_names";
-/// How long the addresses of [`DENY_NAMES`] are reused before they're resolved again.
-const DENY_NAMES_TTL: Duration = Duration::from_secs(30);
-/// After a name of [`DENY_NAMES`] failed to resolve, how soon it's asked again.
-const DENY_NAMES_RETRY: Duration = Duration::from_secs(5);
-/// roll's own calls to a remote (a migration's listing and index definitions) at once per node;
-/// one per cluster.
-pub const MAX_CONTROL_PER_NODE: usize = 4;
+/// roll's own calls to a remote (a migration's listing and index definitions) at once: per node,
+/// per owner and per cluster.
+pub const CONTROL_SLOTS: Caps = Caps { node: 4, owner: 2, cluster: 1 };
 /// The most one answer to a control call may hold.
 pub const CONTROL_ANSWER_LIMIT: u64 = 1024 * 1024;
 /// The most a remote's index listing (`_cat/indices`, scanned without a tree) may hold: about
@@ -121,32 +115,35 @@ const MAX_RETRIES: u32 = 11;
 const REDACTED: &str = "::es_redacted::";
 
 /// What reindex from remote may use on one node, across every cluster it serves: the tasks it
-/// runs at once, the memory their answers hold and how long a task runs. Read from the node's
-/// settings when the node starts; no tenant setting changes it.
+/// runs at once, roll's own calls to remotes, the memory their answers hold and how long a task
+/// runs. Read from the node's settings when the node starts; no tenant setting changes it.
 pub struct RemoteNode {
-    running: AtomicUsize,
-    max_per_node: usize,
-    max_per_cluster: usize,
+    /// Remote reindex tasks ([`MAX_PER_NODE`], [`MAX_PER_OWNER`], [`MAX_PER_CLUSTER`]).
+    pub tasks: Arc<Slots>,
+    /// roll's own calls ([`CONTROL_SLOTS`]).
+    pub control: Arc<Slots>,
     /// What the tasks' answers hold ([`MEMORY`] less the control slice).
     pub budget: Arc<MemoryBudget>,
     /// What roll's own calls to remotes hold ([`CONTROL_MEMORY`] of [`MEMORY`]).
     pub control_budget: Arc<MemoryBudget>,
-    /// The clusters with a control call running.
-    control: parking_lot::Mutex<std::collections::HashSet<String>>,
     pub max_duration: Duration,
 }
 
 impl std::fmt::Debug for RemoteNode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RemoteNode")
-            .field("running", &self.running.load(Ordering::Relaxed))
-            .field("max_per_node", &self.max_per_node)
-            .field("max_per_cluster", &self.max_per_cluster)
+            .field("tasks", &self.tasks)
+            .field("control", &self.control)
             .field("memory", &self.budget.limit())
             .field("control_memory", &self.control_budget.limit())
             .finish_non_exhaustive()
     }
 }
+
+/// A running remote reindex task's slot, given back when dropped.
+pub type RemoteSlot = Permit;
+/// A control call's slot, given back when dropped.
+pub type ControlSlot = Permit;
 
 impl RemoteNode {
     /// The node's limits from its settings.
@@ -164,90 +161,58 @@ impl RemoteNode {
             .and_then(|v| crate::units::TimeValue::parse(v, MAX_DURATION).ok())
             .map_or(DEFAULT_MAX_DURATION, |t| Duration::from_millis(t.as_millis().max(1) as u64));
         let control = CONTROL_MEMORY.min(memory / 8).max(1);
+        let tasks = Caps { node: count(MAX_PER_NODE, 4), owner: count(MAX_PER_OWNER, 2), cluster: count(MAX_PER_CLUSTER, 2) };
         Arc::new(RemoteNode {
-            running: AtomicUsize::new(0),
-            max_per_node: count(MAX_PER_NODE, 4),
-            max_per_cluster: count(MAX_PER_CLUSTER, 2),
+            tasks: Slots::new(tasks),
+            control: Slots::new(CONTROL_SLOTS),
             budget: MemoryBudget::with_parent((memory - control).max(1), parent.clone()),
             control_budget: MemoryBudget::with_parent(control, parent),
-            control: Default::default(),
             max_duration,
         })
     }
 
-    /// Whether one more task of the cluster whose running count is `cluster` would get a slot
-    /// now (roll's migration creates a copy only then).
-    pub fn has_room(&self, cluster: &AtomicUsize) -> bool {
-        cluster.load(Ordering::SeqCst) < self.max_per_cluster && self.running.load(Ordering::SeqCst) < self.max_per_node
+    /// A task slot for `cluster` (of `owner`, [`crate::slots::owner_of`]) held until its next
+    /// remote `_reindex` takes it: roll's migration reserves one before it reads the remote's
+    /// definitions and creates the copy, so the slot is still there when the copy starts. Refused
+    /// as [`RemoteNode::acquire`] is (the cluster keeps its place in line while it asks again).
+    pub fn reserve_task(&self, cluster: &str, owner: &str) -> Option<crate::slots::Reservation> {
+        self.tasks.reserve(cluster, owner).ok()
     }
 
     /// The most tasks one cluster runs at once.
     pub fn max_per_cluster(&self) -> usize {
-        self.max_per_cluster
+        self.tasks.caps().cluster
     }
 
-    /// A place for one control call on `cluster` (one per cluster, [`MAX_CONTROL_PER_NODE`] per
-    /// node), or a 429.
-    pub fn control_slot(self: &Arc<Self>, cluster: &str) -> EsResult<ControlSlot> {
-        let mut busy = self.control.lock();
-        if busy.contains(cluster) {
-            return Err(rejected("a migration call of this cluster is running: wait for it".into()));
-        }
-        if busy.len() >= MAX_CONTROL_PER_NODE {
-            return Err(rejected(format!("the node runs [{MAX_CONTROL_PER_NODE}] migration calls, the most it may run at once")));
-        }
-        busy.insert(cluster.to_string());
-        Ok(ControlSlot { node: self.clone(), cluster: cluster.to_string() })
+    /// A slot for one control call of `cluster` (of `owner`), or a 429.
+    pub fn control_slot(&self, cluster: &str, owner: &str) -> EsResult<ControlSlot> {
+        self.control.try_take(cluster, owner).map_err(|f| {
+            rejected(match f {
+                Full::Cluster(_) => "a migration call of this cluster is running: wait for it".into(),
+                Full::Owner(n) => format!("your clusters run [{n}] migration calls on this node, the most they may run at once"),
+                Full::Node(n) => format!("the node runs [{n}] migration calls, the most it may run at once"),
+                Full::Queue => "other clusters are waiting for the node's migration calls: try again shortly".into(),
+            })
+        })
     }
 
-    /// A slot for one remote reindex task of the cluster whose running count is `cluster`, or
-    /// a 429 when the cluster or the node runs as many as it may.
-    pub fn acquire(self: &Arc<Self>, cluster: &Arc<AtomicUsize>) -> EsResult<RemoteSlot> {
-        let take = |c: &AtomicUsize, max: usize| c.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n < max).then_some(n + 1)).is_ok();
-        if !take(cluster, self.max_per_cluster) {
-            return Err(rejected(format!("the cluster runs [{}] reindex from remote tasks, the most it may run at once", self.max_per_cluster)));
-        }
-        if !take(&self.running, self.max_per_node) {
-            cluster.fetch_sub(1, Ordering::SeqCst);
-            return Err(rejected(format!("the node runs [{}] reindex from remote tasks, the most it may run at once", self.max_per_node)));
-        }
-        Ok(RemoteSlot { node: self.clone(), cluster: cluster.clone() })
+    /// A slot for one remote reindex task of `cluster` (of `owner`, [`crate::slots::owner_of`]),
+    /// or a 429 when the cluster, its owner or the node runs as many as it may (or others waited
+    /// first).
+    pub fn acquire(&self, cluster: &str, owner: &str) -> EsResult<RemoteSlot> {
+        self.tasks.try_take(cluster, owner).map_err(|f| {
+            rejected(match f {
+                Full::Cluster(n) => format!("the cluster runs [{n}] reindex from remote tasks, the most it may run at once"),
+                Full::Owner(n) => format!("the clusters of this cluster's owner run [{n}] reindex from remote tasks on this node, the most they may run at once"),
+                Full::Node(n) => format!("the node runs [{n}] reindex from remote tasks, the most it may run at once"),
+                Full::Queue => "other clusters are waiting for the node's reindex from remote slots: try again shortly".into(),
+            })
+        })
     }
 }
 
 fn rejected(why: String) -> EsError {
     EsError::new(429, "es_rejected_execution_exception", format!("rejected execution of reindex from remote: {why}"))
-}
-
-/// One control call's place in [`RemoteNode`]'s pool, given back when dropped.
-pub struct ControlSlot {
-    node: Arc<RemoteNode>,
-    cluster: String,
-}
-
-impl Drop for ControlSlot {
-    fn drop(&mut self) {
-        self.node.control.lock().remove(&self.cluster);
-    }
-}
-
-/// One running remote reindex task's place in [`RemoteNode`]'s counts, given back when dropped.
-pub struct RemoteSlot {
-    node: Arc<RemoteNode>,
-    cluster: Arc<AtomicUsize>,
-}
-
-impl std::fmt::Debug for RemoteSlot {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("RemoteSlot")
-    }
-}
-
-impl Drop for RemoteSlot {
-    fn drop(&mut self) {
-        self.node.running.fetch_sub(1, Ordering::SeqCst);
-        self.cluster.fetch_sub(1, Ordering::SeqCst);
-    }
 }
 
 /// One document read from the remote cluster.
@@ -261,9 +226,7 @@ pub struct RemoteDoc {
 
 /// How the node lets reindex from remote connect (its operator's settings).
 pub struct Rules {
-    allow_private: bool,
-    deny: Arc<Vec<Net>>,
-    deny_names: Arc<Vec<String>>,
+    egress: Egress,
     whitelist: Option<Vec<String>>,
     blocklist: Vec<String>,
     buffer_limit: u64,
@@ -276,221 +239,6 @@ enum Verification {
     Full,
     Certificate,
     None,
-}
-
-/// An address or network (`10.0.0.0/8`, `2001:db8::/32`, `203.0.113.7`).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Net {
-    addr: IpAddr,
-    prefix: u8,
-}
-
-impl Net {
-    pub fn parse(s: &str) -> Option<Net> {
-        let (a, p) = s.trim().split_once('/').map_or((s.trim(), None), |(a, p)| (a, Some(p)));
-        let addr: IpAddr = a.trim_start_matches('[').trim_end_matches(']').parse().ok()?;
-        let max = if addr.is_ipv4() { 32 } else { 128 };
-        let prefix = match p {
-            Some(p) => p.parse::<u8>().ok().filter(|p| *p <= max)?,
-            None => max,
-        };
-        // An IPv4-mapped network is that IPv4 network (its prefix less the 96 bits before it);
-        // any other IPv6 network stays one (`2002::/16` is all of 6to4).
-        if let IpAddr::V6(v) = addr
-            && let Some(v4) = v.to_ipv4_mapped()
-            && prefix >= 96
-        {
-            return Some(Net { addr: IpAddr::V4(v4), prefix: prefix - 96 });
-        }
-        Some(Net { addr, prefix })
-    }
-
-    /// Whether `ip` is in the network as written, or the IPv4 address it carries is.
-    pub fn contains(&self, ip: IpAddr) -> bool {
-        self.holds(ip) || { let v4 = unwrap_v4(ip); v4 != ip && self.holds(v4) }
-    }
-
-    fn holds(&self, ip: IpAddr) -> bool {
-        let mask = |bits: u32, len: u8| if len == 0 { 0 } else { u128::MAX << (bits - len as u32) };
-        match (self.addr, ip) {
-            (IpAddr::V4(n), IpAddr::V4(i)) => {
-                let m = mask(32, self.prefix) as u32;
-                u32::from(n) & m == u32::from(i) & m
-            }
-            (IpAddr::V6(n), IpAddr::V6(i)) => {
-                let m = mask(128, self.prefix);
-                u128::from(n) & m == u128::from(i) & m
-            }
-            _ => false,
-        }
-    }
-}
-
-/// The IPv4 address an IPv6 one carries, if it carries one, as `roll_net::private_ip` reads it:
-/// mapped (`::ffff:a.b.c.d`), NAT64 (`64:ff9b::/96` and the local-use `64:ff9b:1::/48`), 6to4
-/// (`2002::/16`) and IPv4-compatible (`::a.b.c.d`); any other address as it is.
-fn unwrap_v4(ip: IpAddr) -> IpAddr {
-    let IpAddr::V6(v) = ip else { return ip };
-    if let Some(v4) = v.to_ipv4_mapped() {
-        return IpAddr::V4(v4);
-    }
-    let s = v.segments();
-    let embedded = |hi: u16, lo: u16| IpAddr::V4(std::net::Ipv4Addr::new((hi >> 8) as u8, hi as u8, (lo >> 8) as u8, lo as u8));
-    if s[0] == 0x64 && s[1] == 0xff9b && (s[2..6] == [0, 0, 0, 0] || s[2] == 1) {
-        return embedded(s[6], s[7]);
-    }
-    if s[0] == 0x2002 {
-        return embedded(s[1], s[2]);
-    }
-    if s[..6] == [0, 0, 0, 0, 0, 0] && (s[6] != 0 || s[7] > 1) {
-        return embedded(s[6], s[7]);
-    }
-    ip
-}
-
-/// A host as patterns match it: lower case, no trailing dot.
-fn normal_host(h: &str) -> String {
-    h.to_ascii_lowercase().trim_end_matches('.').to_string()
-}
-
-/// Resolves names to the addresses reindex from remote may reach: public ones unless private
-/// ones are allowed, never a denied one ([`DENY_ADDRESSES`]); checked on the addresses the
-/// connection uses, so no name (or name of a name) leads around it.
-struct Guarded {
-    allow_private: bool,
-    deny: Arc<Vec<Net>>,
-    deny_names: Arc<Vec<String>>,
-}
-
-/// What [`DENY_NAMES`] resolved to lately, by the joined names.
-struct DenyEntry {
-    at: std::time::Instant,
-    addrs: Arc<Vec<IpAddr>>,
-    /// The names that have answered at least once (with addresses, or "no such name").
-    answered: std::collections::HashSet<String>,
-}
-
-type DenyCache = parking_lot::Mutex<std::collections::HashMap<String, DenyEntry>>;
-
-fn deny_cache() -> &'static DenyCache {
-    static C: std::sync::OnceLock<DenyCache> = std::sync::OnceLock::new();
-    C.get_or_init(Default::default)
-}
-
-/// What `names` resolved to last (any age), without resolving: for literals, which never reach
-/// the resolver.
-fn cached_denied(names: &[String]) -> Arc<Vec<IpAddr>> {
-    deny_cache().lock().get(&names.join(",")).map(|e| e.addrs.clone()).unwrap_or_default()
-}
-
-/// The public addresses `names` resolve to now (at most [`DENY_NAMES_TTL`] old). Private ones are
-/// refused anyway unless private hosts are allowed, which is local development. Until every name
-/// has answered once (an address, or "no such name"), it fails closed: no connection may go out
-/// while roll doesn't know its own addresses, and the names are asked again soon.
-async fn denied_now(names: &[String]) -> Result<Arc<Vec<IpAddr>>, String> {
-    if names.is_empty() {
-        return Ok(Arc::default());
-    }
-    let key = names.join(",");
-    let complete = |e: &DenyEntry| names.iter().all(|n| e.answered.contains(n));
-    if let Some(e) = deny_cache().lock().get(&key)
-        && e.at.elapsed() < DENY_NAMES_TTL
-    {
-        return if complete(e) { Ok(e.addrs.clone()) } else { Err(unknown()) };
-    }
-    let mut out = Vec::new();
-    let mut answered = std::collections::HashSet::new();
-    let mut failed = false;
-    for n in names {
-        if let Ok(ip) = n.trim_start_matches('[').trim_end_matches(']').parse::<IpAddr>() {
-            out.extend(Some(unwrap_v4(ip)).filter(|ip| !roll_net::private_ip(*ip)));
-            answered.insert(n.clone());
-            continue;
-        }
-        match tokio::time::timeout(Duration::from_secs(2), tokio::net::lookup_host((n.as_str(), 0))).await {
-            Ok(Ok(addrs)) => {
-                out.extend(addrs.map(|a| unwrap_v4(a.ip())).filter(|ip| !roll_net::private_ip(*ip)));
-                answered.insert(n.clone());
-            }
-            // No such name (nothing to deny for it) is an answer; a resolver that failed
-            // (SERVFAIL, a timeout, no network) isn't.
-            Ok(Err(_)) => {
-                if no_such_name(n).await {
-                    answered.insert(n.clone());
-                }
-                failed = true;
-            }
-            // No answer at all.
-            Err(_) => failed = true,
-        }
-    }
-    let now = std::time::Instant::now();
-    let mut at = now;
-    let mut cache = deny_cache().lock();
-    if let Some(prev) = cache.get(&key) {
-        if failed {
-            // A name that didn't resolve keeps the addresses it had (never fewer than before).
-            out.extend(prev.addrs.iter().copied());
-        }
-        answered.extend(prev.answered.iter().cloned());
-    }
-    let entry = DenyEntry { at, addrs: Arc::default(), answered };
-    if failed || !complete(&entry) {
-        // Asked again soon.
-        at = now.checked_sub(DENY_NAMES_TTL.saturating_sub(DENY_NAMES_RETRY)).unwrap_or(now);
-    }
-    out.sort();
-    out.dedup();
-    let entry = DenyEntry { at, addrs: Arc::new(out), ..entry };
-    let r = if complete(&entry) { Ok(entry.addrs.clone()) } else { Err(unknown()) };
-    cache.insert(key, entry);
-    r
-}
-
-/// Whether the resolver answered that `name` has no addresses: NXDOMAIN, or a name without A
-/// or AAAA records (NODATA). `lookup_host`'s error doesn't tell that from a resolver that failed,
-/// so the name is asked again through hickory; anything but those two answers is a failure.
-async fn no_such_name(name: &str) -> bool {
-    use hickory_resolver::net::{DnsError, NetError, NoRecords};
-    use hickory_resolver::proto::op::ResponseCode;
-    static R: std::sync::OnceLock<Option<hickory_resolver::TokioResolver>> = std::sync::OnceLock::new();
-    let Some(r) = R.get_or_init(|| hickory_resolver::TokioResolver::builder_tokio().ok().and_then(|b| b.build().ok())) else {
-        return false;
-    };
-    matches!(
-        tokio::time::timeout(Duration::from_secs(2), r.lookup_ip(name)).await,
-        Ok(Err(NetError::Dns(DnsError::NoRecordsFound(NoRecords { response_code: ResponseCode::NXDomain | ResponseCode::NoError, .. }))))
-    )
-}
-
-/// Why a connection is refused while some of the node's own names haven't answered yet (the
-/// names aren't said: they're roll's, not the caller's).
-fn unknown() -> String {
-    "roll hasn't resolved its own addresses yet; try again shortly".to_string()
-}
-
-impl reqwest::dns::Resolve for Guarded {
-    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
-        let host = name.as_str().to_string();
-        let (allow_private, deny, deny_names) = (self.allow_private, self.deny.clone(), self.deny_names.clone());
-        Box::pin(async move {
-            let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host.as_str(), 0)).await?.collect();
-            let own = denied_now(&deny_names).await.map_err(|why| -> Box<dyn std::error::Error + Send + Sync> { why.into() })?;
-            let denied = |ip: IpAddr| deny.iter().any(|n| n.contains(ip)) || own.contains(&unwrap_v4(ip));
-            let private = addrs.iter().any(|a| !allow_private && roll_net::private_ip(a.ip()));
-            let ok: Vec<std::net::SocketAddr> = addrs.into_iter().filter(|a| (allow_private || !roll_net::private_ip(a.ip())) && !denied(a.ip())).collect();
-            if ok.is_empty() {
-                let why = if private { "a private address" } else { "an address reindex from remote may not reach" };
-                return Err(format!("{host} resolves to {why}").into());
-            }
-            Ok(Box::new(ok.into_iter()) as reqwest::dns::Addrs)
-        })
-    }
-}
-
-/// A list setting as node settings hold it: `a,b` or `[a, b]`.
-fn list(v: &str) -> Vec<String> {
-    v.trim().trim_start_matches('[').trim_end_matches(']').split(',').map(str::trim).filter(|p| !p.is_empty()).map(str::to_string).collect()
 }
 
 impl Rules {
@@ -513,14 +261,9 @@ impl Rules {
             Some("none") => Verification::None,
             Some(v) => return Err(EsError::illegal_argument(format!("unknown verification mode [{v}] for [{SSL_VERIFICATION_MODE}]"))),
         };
-        let mut deny = Vec::new();
-        for n in setting(DENY_ADDRESSES).map(list).unwrap_or_default() {
-            deny.push(Net::parse(&n).ok_or_else(|| EsError::illegal_argument(format!("[{DENY_ADDRESSES}] holds [{n}], which isn't an address or network")))?);
-        }
+        let allow_private = setting(ALLOW_PRIVATE).is_some_and(|v| v.eq_ignore_ascii_case("true"));
         Ok(Rules {
-            allow_private: setting(ALLOW_PRIVATE).is_some_and(|v| v.eq_ignore_ascii_case("true")),
-            deny: Arc::new(deny),
-            deny_names: Arc::new(setting(DENY_NAMES).map(list).unwrap_or_default().iter().map(|n| normal_host(n)).collect()),
+            egress: Egress::of(&setting, allow_private).map_err(EsError::illegal_argument)?,
             whitelist: setting(WHITELIST).map(list),
             blocklist: setting(BLOCKLIST).map(list).unwrap_or_default(),
             buffer_limit,
@@ -548,18 +291,11 @@ impl Rules {
     }
 
     /// [`Rules::check`], with an address written out checked against what the node's own names
-    /// resolve to now ([`DENY_NAMES`], resolved again if stale): for callers about to connect.
+    /// resolve to now ([`crate::egress::DENY_NAMES`], resolved again if stale): for callers about to connect.
     pub async fn check_now(&self, r: &Remote) -> EsResult<()> {
         self.check(r)?;
         let url = reqwest::Url::parse(&format!("{}://{}:{}/", r.scheme, r.host, r.port)).map_err(|_| EsError::illegal_argument(format!("[host] [{}:{}] is not a valid host", r.host, r.port)))?;
-        let literal = url.host_str().and_then(|h| h.trim_start_matches('[').trim_end_matches(']').parse::<IpAddr>().ok());
-        let own = denied_now(&self.deny_names).await.map_err(|why| EsError::java(503, "connect_exception", why))?;
-        if let Some(ip) = literal
-            && own.contains(&unwrap_v4(ip))
-        {
-            return Err(EsError::illegal_argument(format!("[{}:{}] is an address reindex from remote may not reach", r.host, r.port)));
-        }
-        Ok(())
+        self.egress.check_literal_now(url.host_str().unwrap_or_default()).await.map_err(|e| refusal(e, &format!("{}:{}", r.host, r.port)))
     }
 
     /// `ReindexValidator.checkRemoteWhitelist`, then roll's address rule.
@@ -592,16 +328,18 @@ impl Rules {
                 format!("[{target}] either not whitelisted in {WHITELIST} or blocked in {BLOCKLIST}")
             }));
         }
-        if !self.allow_private && roll_net::literal_private_host(&url) {
-            return Err(EsError::illegal_argument(format!("[{target}] is a private address, which reindex from remote may not connect to unless [{ALLOW_PRIVATE}] is set")));
-        }
         // An address written out never reaches the resolver: checked here, in any of its forms.
-        let literal = host.trim_start_matches('[').trim_end_matches(']').parse::<IpAddr>().ok();
-        let own = cached_denied(&self.deny_names);
-        if literal.is_some_and(|ip| self.deny.iter().any(|n| n.contains(ip)) || own.contains(&unwrap_v4(ip))) {
-            return Err(EsError::illegal_argument(format!("[{target}] is an address reindex from remote may not reach")));
-        }
-        Ok(())
+        self.egress.check_url(&url).map_err(|e| refusal(e, &target))
+    }
+}
+
+/// How reindex from remote says the node's egress rules refused `target`.
+fn refusal(e: Refused, target: &str) -> EsError {
+    match e {
+        Refused::Private(_) => EsError::illegal_argument(format!("[{target}] is a private address, which reindex from remote may not connect to unless [{ALLOW_PRIVATE}] is set")),
+        Refused::Denied(_) => EsError::illegal_argument(Refused::Denied(target.to_string()).to_string()),
+        Refused::NotReady => EsError::java(503, "connect_exception", crate::egress::NOT_READY),
+        Refused::Unresolved(_) => EsError::java(500, "unknown_host_exception", format!("{target}: Name or service not known")),
     }
 }
 
@@ -739,7 +477,7 @@ impl Client {
             .http1_only()
             .user_agent(concat!("roll-search/", env!("CARGO_PKG_VERSION"), " (reindex)"))
             .default_headers(headers);
-        b = b.dns_resolver(Arc::new(Guarded { allow_private: rules.allow_private, deny: rules.deny.clone(), deny_names: rules.deny_names.clone() }));
+        b = b.dns_resolver(rules.egress.resolver());
         if !rules.roots.is_empty() {
             b = b.tls_certs_merge(rules.roots.iter().cloned());
         }
@@ -1241,21 +979,6 @@ mod tests {
     }
 
     #[test]
-    fn ipv4_inside_ipv6_is_denied_as_ipv4() {
-        let n = Net::parse("203.0.113.0/24").unwrap();
-        for ip in ["::ffff:203.0.113.9", "64:ff9b::cb00:7109", "2002:cb00:7109::1", "203.0.113.9"] {
-            assert!(n.contains(ip.parse().unwrap()), "{ip}");
-        }
-        assert!(!n.contains("2001:db8::1".parse().unwrap()));
-        // Networks keep their own size: 6to4 as a whole, a mapped IPv4 network as that network.
-        let six_to_four = Net::parse("2002::/16").unwrap();
-        assert!(six_to_four.contains("2002:cb00:7109::1".parse().unwrap()) && six_to_four.contains("2002:a00:1::1".parse().unwrap()));
-        assert!(!six_to_four.contains("203.0.113.9".parse().unwrap()));
-        let mapped = Net::parse("::ffff:203.0.113.0/120").unwrap();
-        assert!(mapped.contains("203.0.113.200".parse().unwrap()) && !mapped.contains("203.0.114.1".parse().unwrap()));
-    }
-
-    #[test]
     fn whitelisted_hosts_only_private_ones_with_the_flag() {
         // Unset, as in Elasticsearch: every remote is refused.
         assert_eq!(rules(&[]).check(&remote("search.example.com", 443)).unwrap_err().reason(), "[search.example.com:443] not whitelisted in reindex.remote.whitelist");
@@ -1288,20 +1011,24 @@ mod tests {
     }
 
     #[test]
-    fn tasks_per_cluster_and_per_node_are_capped() {
+    fn tasks_per_cluster_per_owner_and_per_node_are_capped() {
         let node = RemoteNode::from_settings(&[]);
-        let (a, b) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
-        let held = [node.acquire(&a).unwrap(), node.acquire(&a).unwrap()];
-        let e = node.acquire(&a).unwrap_err();
+        let held = [node.acquire("a", "alice").unwrap(), node.acquire("a", "alice").unwrap()];
+        let e = node.acquire("a", "alice").unwrap_err();
         assert_eq!((e.status, e.reason()), (429, "rejected execution of reindex from remote: the cluster runs [2] reindex from remote tasks, the most it may run at once"));
-        let more = [node.acquire(&b).unwrap(), node.acquire(&b).unwrap()];
-        let c = Arc::new(AtomicUsize::new(0));
-        assert!(node.acquire(&c).unwrap_err().reason().contains("the node runs [4]"));
-        assert_eq!(c.load(Ordering::SeqCst), 0, "a refusal holds nothing");
+        // Alice's second cluster: her clusters hold her share of the node.
+        assert!(node.acquire("a2", "alice").unwrap_err().reason().contains("of this cluster's owner run [2]"));
+        let (b1, _b2) = (node.acquire("b", "bob").unwrap(), node.acquire("b", "bob").unwrap());
+        assert!(node.acquire("c", "carol").unwrap_err().reason().contains("the node runs [4]"));
+        assert_eq!(node.tasks.held("c"), 0, "a refusal holds nothing");
+        // A task of Bob's ends: Alice's clusters are still at her share, and Bob can't take back
+        // the slot Carol waits for.
+        drop(b1);
+        assert!(node.acquire("a2", "alice").unwrap_err().reason().contains("owner"));
+        assert!(node.acquire("b", "bob").unwrap_err().reason().contains("waiting"));
+        let _c = node.acquire("c", "carol").unwrap();
         drop(held);
-        assert!(node.acquire(&a).is_ok());
-        drop(more);
-        assert_eq!(node.running.load(Ordering::SeqCst), 0);
+        assert_eq!((node.tasks.held("a"), node.tasks.held("b"), node.tasks.held("c")), (0, 1, 1));
     }
 
     #[test]

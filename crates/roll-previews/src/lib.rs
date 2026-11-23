@@ -886,6 +886,71 @@ pub struct EndpointTime {
     pub path: String,
     pub ms: u32,
     pub status: u16,
+    /// Its JSON answer's shape, `path types` lines ([`shape_changes`]); empty when it wasn't JSON.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shape: Vec<String>,
+}
+
+/// A field of an endpoint's JSON answer that main's has and this one doesn't, or whose type
+/// widened (Signadot's SmartTests, Optic's traffic diff): what breaks whoever reads it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ShapeChange {
+    /// `users[].email`: `[]` an array's elements, `*` an object keyed by ids.
+    pub path: String,
+    /// Its types in main's answer (`string`, `number|null`).
+    pub main: String,
+    /// Its types now; `None`: gone.
+    pub now: Option<String>,
+}
+
+const SHAPE_TYPES: [&str; 7] = ["object", "array", "[]", "string", "number", "boolean", "null"];
+
+/// A shape line as the session writes it: a printable path, a space, known types.
+fn shape_line_ok(l: &str) -> bool {
+    l.len() <= 200
+        && !l.chars().any(|c| c.is_control() || c == '`')
+        && l.rsplit_once(' ').is_some_and(|(p, t)| !p.is_empty() && t.split('|').all(|t| SHAPE_TYPES.contains(&t)))
+}
+
+/// What a JSON answer lost against main's: fields gone (only the outermost one said) and types
+/// that widened (`string` to `number`, or to `string|null`). Fields it gained and types that
+/// narrowed break nobody. What sits under an array that's empty on either side isn't known
+/// there, so it's never called gone: the two previews' data can differ. At most 10.
+pub fn shape_changes(now: &[String], main: &[String]) -> Vec<ShapeChange> {
+    use std::collections::{BTreeMap, BTreeSet};
+    if now.is_empty() || main.is_empty() {
+        return Vec::new();
+    }
+    let read = |lines: &[String]| -> BTreeMap<String, BTreeSet<String>> {
+        lines.iter().filter_map(|l| l.rsplit_once(' ')).map(|(p, t)| (p.to_string(), t.split('|').map(str::to_string).collect())).collect()
+    };
+    let (now, main) = (read(now), read(main));
+    let empty = |m: &BTreeMap<String, BTreeSet<String>>| m.iter().filter(|(_, t)| t.contains("[]") && !t.contains("array")).map(|(p, _)| format!("{p}[]")).collect::<Vec<_>>();
+    let unknown: Vec<String> = empty(&now).into_iter().chain(empty(&main)).collect();
+    let types = |t: &BTreeSet<String>| t.iter().map(|x| if x == "[]" { "array" } else { x.as_str() }).collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>().join("|");
+    let mut gone: Vec<String> = Vec::new();
+    let mut out = Vec::new();
+    // Sorted: a field comes before what's under it.
+    for (p, was) in &main {
+        let under = |g: &String| p.starts_with(&format!("{g}.")) || p.starts_with(&format!("{g}[]"));
+        if out.len() >= 10 || unknown.iter().any(|u| p.starts_with(u.as_str())) || gone.iter().any(under) {
+            continue;
+        }
+        let was = types(was);
+        match now.get(p) {
+            None => {
+                gone.push(p.clone());
+                out.push(ShapeChange { path: p.clone(), main: was, now: None });
+            }
+            Some(t) => {
+                let is = types(t);
+                if is.split('|').any(|x| !was.split('|').any(|w| w == x)) {
+                    out.push(ShapeChange { path: p.clone(), main: was, now: Some(is) });
+                }
+            }
+        }
+    }
+    out
 }
 
 /// An endpoint's time against the branch's (`base_change.endpoints`).
@@ -896,6 +961,9 @@ pub struct EndpointAgainst {
     pub status: u16,
     /// The branch's, when it timed the same path.
     pub main_ms: Option<u32>,
+    /// What its JSON answer lost against the branch's, when both answered 2xx JSON.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub shape_changes: Vec<ShapeChange>,
 }
 
 impl EndpointAgainst {
@@ -907,6 +975,14 @@ impl EndpointAgainst {
 }
 
 impl PageSpeed {
+    /// As a preview's record shows it: its endpoints' shapes stay with the comparison.
+    pub fn without_shapes(mut self) -> PageSpeed {
+        for e in &mut self.endpoints {
+            e.shape.clear();
+        }
+        self
+    }
+
     /// From what the browser wrote, if it's that and within reason (10 minutes, 10 GiB, a
     /// layout shift up to 100).
     pub fn parse(json: &str) -> Option<PageSpeed> {
@@ -916,10 +992,13 @@ impl PageSpeed {
         let ok = s.ttfb_ms <= ms && s.load_ms <= ms && s.fcp_ms.is_none_or(|f| f <= ms) && s.bytes <= 10 << 30;
         // The endpoints the project named, each once and within reason; anything else dropped.
         let mut seen = Vec::new();
-        s.endpoints.retain(|e| {
+        s.endpoints.retain_mut(|e| {
             let keep = crate::settings::page_path_ok(&e.path) && e.ms <= 60_000 && e.status <= 599 && !seen.contains(&e.path) && seen.len() < crate::settings::MAX_ENDPOINTS;
             if keep {
                 seen.push(e.path.clone());
+                // Its shape: whole lines as the session writes them, at most 100.
+                e.shape.retain(|l| shape_line_ok(l));
+                e.shape.truncate(100);
             }
             keep
         });
@@ -1186,6 +1265,17 @@ pub struct BrowserCheck {
     pub state: CheckState,
     /// What failed (the check's own words, made printable and cut).
     pub error: Option<String>,
+    /// Where its failure's screenshot and Playwright trace are kept (roll apps': `GET
+    /// /v1/apps/services/{service_id}/environments/{environment}/checks/{name}/screenshot` and
+    /// `/trace`, `read` on that service), when they were.
+    pub files: Option<BrowserCheckFiles>,
+}
+
+/// A roll apps service and environment a browser check's failure files are kept under.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct BrowserCheckFiles {
+    pub service_id: String,
+    pub environment: String,
 }
 
 /// The browser checks read for `head` (a runtime fact; a new head reads its own).
@@ -1458,11 +1548,36 @@ mod tests {
         )
         .unwrap();
         assert_eq!(s.endpoints.iter().map(|e| (e.path.as_str(), e.ms)).collect::<Vec<_>>(), [("/api/users", 40)]);
-        let e = |ms, main_ms| super::EndpointAgainst { path: "/x".into(), ms, status: 200, main_ms };
+        let e = |ms, main_ms| super::EndpointAgainst { path: "/x".into(), ms, status: 200, main_ms, shape_changes: Vec::new() };
         assert!(e(140, Some(40)).slower());
         assert!(!e(14, Some(4)).slower(), "within 20 ms");
         assert!(!e(55, Some(40)).slower(), "not half again");
         assert!(!e(140, None).slower(), "nothing to compare with");
+    }
+
+    /// An endpoint's JSON answer against main's: a field gone (the outermost only) or a type
+    /// widened is said; a field gained, a type narrowed, or what's under an array empty on either
+    /// side isn't. Its shape reads back as whole, known lines only.
+    #[test]
+    fn a_response_shape_change_is_a_field_gone_or_a_type_widened() {
+        let lines = |s: &[&str]| s.iter().map(|l| l.to_string()).collect::<Vec<_>>();
+        let main = lines(&["$ object", "total number", "users array", "users[] object", "users[].email string", "users[].name string", "meta object", "meta.page number", "tags []", "next string|null"]);
+        let now = lines(&["$ object", "total string", "users array", "users[] object", "users[].name null|string", "users[].avatar string", "tags array", "tags[] string", "next string"]);
+        let said: Vec<(String, String, Option<String>)> = super::shape_changes(&now, &main).into_iter().map(|c| (c.path, c.main, c.now)).collect();
+        assert_eq!(
+            said,
+            [
+                ("meta".to_string(), "object".to_string(), None),
+                ("total".into(), "number".into(), Some("string".into())),
+                ("users[].email".into(), "string".into(), None),
+                ("users[].name".into(), "string".into(), Some("null|string".into())),
+            ]
+        );
+        let unknown = super::shape_changes(&lines(&["$ object", "users []"]), &main);
+        assert!(!unknown.iter().any(|c| c.path.starts_with("users[]")), "under an empty array: {unknown:?}");
+        assert!(super::shape_changes(&[], &main).is_empty(), "not JSON now");
+        let s = super::PageSpeed::parse(r#"{"ttfb_ms": 1, "fcp_ms": null, "load_ms": 9, "bytes": 1, "endpoints": [{"path": "/x", "ms": 4, "status": 200, "shape": ["$ object", "a`b string", "c date", "d\nx string", "e number"]}]}"#).unwrap();
+        assert_eq!(s.endpoints[0].shape, ["$ object", "e number"]);
     }
 
     /// What the browser writes reads back; numbers past reason, or anything else, don't.

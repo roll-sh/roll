@@ -179,7 +179,7 @@ export interface Preview {
   /** Earlier pushes of the change's services, still reachable (newest first), each on its own copy of the data where `own_data` names products. */
   earlier?: { service: string; revision: string; url: string; share_url: string | null; at: number; own_data?: string[] }[];
   /** Production's browser checks on this head (roll apps runs them as its deployment goes live). */
-  browser_checks?: { service: string; name: string; state: "pending" | "passed" | "failed"; error: string | null }[];
+  browser_checks?: { service: string; name: string; state: "pending" | "passed" | "failed"; error: string | null; files?: { service_id: string; environment: string } | null }[];
   /** The earlier pushes' own copies of the data: how many, their bytes and a month of keeping them (in `cost`). */
   copies?: { count: number; bytes: number; usd_month: number };
   /** When its screenshot was taken (`screenshot` below), if it has one. */
@@ -378,6 +378,15 @@ export interface EndpointTime {
   main_ms: number | null;
   /** Slower than main's by half again and by more than 20 ms (roll code's change view says so). */
   slower?: boolean;
+  /** What its JSON answer lost against main's: a field gone (`now: null`) or a type widened. */
+  shape_changes?: ShapeChange[];
+}
+
+export interface ShapeChange {
+  /** `users[].email`: `[]` an array's elements, `*` an object keyed by ids. */
+  path: string;
+  main: string;
+  now: string | null;
 }
 
 /** Slower than main's by half again and by more than 20 ms (`EndpointAgainst::slower`). */
