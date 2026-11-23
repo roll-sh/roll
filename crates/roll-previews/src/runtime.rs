@@ -1646,6 +1646,37 @@ impl Apps for Runtime {
         Ok(true)
     }
 
+    async fn fetch(&self, preview: &str, service: &str, path: &str, head: bool) -> anyhow::Result<Option<crate::ports::Fetched>> {
+        use futures::StreamExt;
+        let me = self.me.upgrade().ok_or_else(|| anyhow::anyhow!("the preview runtime is stopping"))?;
+        let host = self.store.service_host(preview, service)?.ok_or_else(|| anyhow::anyhow!("no service {service}"))?;
+        let req = Request::builder()
+            .method(if head { axum::http::Method::HEAD } else { axum::http::Method::GET })
+            .uri(path)
+            .header(header::HOST, format!("{host}.{}", self.cfg.domain))
+            .header(header::ACCEPT, "text/html,application/json,text/plain;q=0.9,*/*;q=0.5")
+            .header(header::ACCEPT_ENCODING, "identity")
+            .body(Body::empty())?;
+        let resp = me.proxy(preview, service, req, false).await;
+        let status = resp.status().as_u16();
+        const SHOWN: [&str; 4] = ["content-type", "location", "cache-control", "content-length"];
+        let headers = SHOWN.iter().filter_map(|h| resp.headers().get(*h).and_then(|v| v.to_str().ok()).map(|v| (h.to_string(), v.chars().take(500).collect()))).collect();
+        let mut body = Vec::new();
+        let mut truncated = false;
+        let mut stream = resp.into_body().into_data_stream();
+        while let Some(chunk) = stream.next().await {
+            let Ok(chunk) = chunk else { break };
+            let room = crate::ports::FETCH_MAX - body.len();
+            if chunk.len() > room {
+                body.extend_from_slice(&chunk[..room]);
+                truncated = true;
+                break;
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(Some(crate::ports::Fetched { status, headers, body, truncated }))
+    }
+
     fn swap(&self, preview: &str, service: &str, to: Option<crate::ports::Laptop>) {
         let key = (preview.to_string(), service.to_string());
         match to {
@@ -2732,6 +2763,53 @@ mod tests {
         assert!(swapped.ends_with("laptop saw /cart web-pr1-shop.preview.test bypass=false"), "{swapped}");
         rt.swap(&row.id, "web", None);
         assert!(get().await.ends_with("\r\n\r\ncontainer"), "given back");
+    }
+
+    /// A page read through roll's own way in (`GET …/fetch`): past the preview's gate (no token
+    /// asked), only the headers worth seeing, the body cut at its cap and said so.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_page_read_through_roll_passes_the_gate_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&code_sql::Target::Sqlite(dir.path().join("p.db")), Default::default()).unwrap());
+        let new = crate::store::New {
+            project_id: "prj_1".into(),
+            key: "pr1".into(),
+            project_name: "shop".into(),
+            repo: "acme/web".into(),
+            change_id: Some("chg_1".into()),
+            branch: None,
+            number: Some(1),
+            title: "t".into(),
+            github_pr: Some(1),
+            head: "cs_1".into(),
+            trusted: true,
+            state: crate::State::Ready,
+            expires_at: None,
+            created_by: "roll".into(),
+        };
+        let (row, _) = store.create(&new).unwrap();
+        store.want_service(&row.id, "web", "acme/web", "cs_1", 512, &|h| format!("http://{h}.preview.test")).unwrap();
+        let rt = Runtime::new(RuntimeConfig { domain: "preview.test".into(), ..RuntimeConfig::default() }, Arc::new(code_preview::docker::Docker), Arc::new(NoTrees), store);
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        rt.pretend_running(&row.id, "web", upstream.local_addr().unwrap());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut s, _)) = upstream.accept().await else { return };
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let n = s.read(&mut buf).await.unwrap_or(0);
+                    let big = String::from_utf8_lossy(&buf[..n]).contains("GET /big ");
+                    let body = if big { "x".repeat(crate::ports::FETCH_MAX + 10) } else { "<h1>Cart</h1>".to_string() };
+                    let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nSet-Cookie: s=1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await;
+                });
+            }
+        });
+        // Link access (the default): a visitor without the token gets a 401; roll reads the page.
+        let page = rt.fetch(&row.id, "web", "/cart", false).await.unwrap().unwrap();
+        assert_eq!((page.status, String::from_utf8_lossy(&page.body).to_string(), page.truncated), (200, "<h1>Cart</h1>".to_string(), false));
+        assert!(page.headers.iter().any(|(k, v)| k == "content-type" && v == "text/html") && !page.headers.iter().any(|(k, _)| k == "set-cookie"), "{:?}", page.headers);
+        let big = rt.fetch(&row.id, "web", "/big", false).await.unwrap().unwrap();
+        assert_eq!((big.body.len(), big.truncated), (crate::ports::FETCH_MAX, true));
     }
 
     /// Skew protection: a request naming an earlier push (its header, `?dpl=`, or the cookie its

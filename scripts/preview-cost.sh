@@ -500,6 +500,12 @@ done
 [ -n "$BACK" ] && [ "$BACK" != "from the laptop" ] || { echo "given back, the container should answer again: $BACK"; exit 1; }
 api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d]" | grep -q "swapped web for a process on their machine" || { echo "the activity should say web was swapped"; exit 1; }
 
+say "a page read through roll (roll preview fetch, roll MCP's previews_fetch): no link token asked or answered"
+FETCHED=$(ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview fetch "$PV" /index.html --service web 2>/dev/null)
+CONTAINER_PAGE=$(curl -s --max-time 10 -b "$JAR" -H "Host: $HOST" "http://$API/index.html")
+[ -n "$FETCHED" ] && [ "$FETCHED" = "$CONTAINER_PAGE" ] || { echo "roll preview fetch should read the page as the container serves it: '$FETCHED' vs '$CONTAINER_PAGE'"; exit 1; }
+api GET "/v1/previews/$PV/fetch?path=/index.html&service=web" | grep -q "roll_access" && { echo "a fetched page's answer must carry no token"; exit 1; }
+
 say "traces: with the project's traces on, the service gets OpenTelemetry's variables, spans it posts are the preview's traces, and an error naming one opens it"
 api PUT "/v1/previews/projects/$PRJ/settings" '{"traces":true}' >/dev/null
 # It restarts with them (its deploy's fingerprint): the env it writes at start says so.
