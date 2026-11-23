@@ -868,13 +868,10 @@ impl Access {
         Some((i.to_string(), c.to_string()))
     }
 
-    /// Tools whose server errors jumped lately ([`store::Store::failure_jumps`]) mailed to every admin:
-    /// one node sends each (claimed in the store), at most once every six hours per tool. How many
-    /// went out.
-    pub fn activity_alerts(self: &Arc<Self>) -> Result<usize> {
-        if self.people.get().is_none() {
-            return Ok(0);
-        }
+    /// Tools whose server errors jumped lately ([`store::Store::failure_jumps`]): each kept for the
+    /// operator's feed (`access.alert`), mailed to every admin and posted where approvals go. One
+    /// node sends each (claimed in the store), at most once every six hours per tool. How many.
+    pub async fn activity_alerts(self: &Arc<Self>) -> Result<usize> {
         let now = code_sql::now_ms();
         let mut sent = 0;
         for j in self.store.failure_jumps(now)? {
@@ -883,12 +880,16 @@ impl Access {
                 continue;
             }
             let pct = |r: &serde_json::Value| (r.as_f64().unwrap_or(0.0) * 100.0).round() as i64;
-            let subject = format!("roll MCP: {tool} is failing ({}% of calls)", pct(&j["rate"]));
-            let text = format!(
-                "{tool} answered {} of its {} calls in the last 15 minutes with a server error ({}%; usually {}%).\n\nAgent activity: {}/dashboard/access",
-                j["failed"], j["calls"], pct(&j["rate"]), pct(&j["usual"]), self.web_url()
-            );
-            self.tell_admins(&format!("activity_alert:{tool}"), subject, text);
+            let (rate, usual) = (pct(&j["rate"]), pct(&j["usual"]));
+            self.store.record_alert("tool_failing", &serde_json::json!({ "tool": tool, "calls": j["calls"], "failed": j["failed"], "rate_pct": rate, "usual_pct": usual }))?;
+            let line = format!("{tool} answered {} of its {} calls in the last 15 minutes with a server error ({rate}%; usually {usual}%).", j["failed"], j["calls"]);
+            let link = format!("Agent activity: {}/dashboard/access", self.web_url());
+            self.tell_admins(&format!("activity_alert:{tool}"), format!("roll MCP: {tool} is failing ({rate}% of calls)"), format!("{line}\n\n{link}"));
+            if let Some((chat, (install, channel))) = self.chat.get().cloned().zip(self.chat_target())
+                && let Err(e) = chat.notice(install, channel, format!("roll MCP: {line} {link}")).await
+            {
+                tracing::warn!(error = %e, "posting a failing tool where approvals go");
+            }
             sent += 1;
         }
         Ok(sent)

@@ -1039,6 +1039,7 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/access/approvals/{id}", "access", R, Tgt::AnyGrant),
     row("GET", "/v1/access/audit", "access", R, Tgt::Product),
     row("GET", "/v1/access/activity", "access", R, Tgt::Product),
+    row("GET", "/v1/access/alerts", "access", R, Tgt::Product),
     row("GET", "/v1/access/oauth/clients", "access", R, Tgt::Product),
     row("GET", "/v1/access/oauth/clients/{id}", "access", R, Tgt::Product),
     row("GET", "/v1/access/oauth/step-ups/{id}", "access", R, Tgt::Product),

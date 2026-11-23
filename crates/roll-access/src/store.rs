@@ -111,6 +111,12 @@ CREATE TABLE IF NOT EXISTS oauth_clients (
     created_at INTEGER NOT NULL,
     last_used_at INTEGER
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS access_alerts (
+    seq INTEGER PRIMARY KEY,
+    at INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    data TEXT NOT NULL
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -1863,6 +1869,42 @@ impl Store {
             .map_err(Into::into)
     }
 
+    /// Keep an alert for the operator's feed (`GET /v1/access/alerts`, MCP Events' `access.alert`):
+    /// its place is the next after the newest, taken in the same write. Its place.
+    pub fn record_alert(&self, kind: &str, data: &Value) -> Result<i64> {
+        let (now, data) = (code_sql::now_ms(), data.to_string());
+        self.db.write(|c| {
+            let seq: i64 = c.query_row("SELECT COALESCE(MAX(seq), 0) + 1 FROM access_alerts", (), |r| r.get(0))?;
+            c.execute("INSERT INTO access_alerts (seq, at, kind, data) VALUES (?, ?, ?, ?)", params![seq, now, kind, data])?;
+            Ok::<_, Error>(seq)
+        })
+    }
+
+    /// Alerts after `after`, oldest first (at most `limit`), each its data with `seq`, `at` and
+    /// `kind`.
+    pub fn alerts_after(&self, after: i64, limit: usize) -> Result<Vec<Value>> {
+        let rows = self.db.read(|c| {
+            c.query("SELECT seq, at, kind, data FROM access_alerts WHERE seq > ? ORDER BY seq LIMIT ?", params![after, limit.clamp(1, 500) as i64], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?))
+            })
+        })?;
+        Ok(rows
+            .into_iter()
+            .map(|(seq, at, kind, data)| {
+                let mut v: Value = serde_json::from_str(&data).unwrap_or_else(|_| json!({}));
+                v["seq"] = json!(seq);
+                v["at"] = json!(at);
+                v["kind"] = json!(kind);
+                v
+            })
+            .collect())
+    }
+
+    /// The newest alert's place (0: none yet).
+    pub fn alerts_head(&self) -> Result<i64> {
+        Ok(self.db.read(|c| c.query_row("SELECT COALESCE(MAX(seq), 0) FROM access_alerts", (), |r| r.get(0)))?)
+    }
+
     /// Claim an alert named `key` if it hasn't gone out in `every_ms`: true for one caller on any
     /// node (read and written in one transaction).
     pub fn claim_alert(&self, key: &str, now: i64, every_ms: i64) -> Result<bool> {
@@ -1940,6 +1982,8 @@ impl Store {
                 break;
             }
         }
+        // Alerts as long as the audit log, the newest always kept: places are never reused.
+        self.db.write(|c| Ok::<_, Error>(c.execute("DELETE FROM access_alerts WHERE at < ? AND seq < (SELECT MAX(seq) FROM access_alerts)", [before])?))?;
         self.db.write(|c| {
             c.execute("DELETE FROM approvals WHERE expires_at < ?", [now - 24 * 3600 * 1000])?;
             // A network unused for the log's days is forgotten (used again, it's news again).

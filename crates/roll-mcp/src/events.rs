@@ -115,6 +115,28 @@ const FEEDS: &[Feed] = &[
         },
     },
     Feed {
+        name: "access.alert",
+        description: "roll alerted the operator: a tool is failing (its server errors jumped: 10 or more in 15 minutes, a quarter of its calls, three times its usual rate). The operator's connections only. Filter by kinds (tool_failing) and tool.",
+        tool: "access_activity",
+        product: "access",
+        path: &[],
+        after: "/v1/access/alerts?limit=100&after=",
+        latest: "/v1/access/alerts?latest=1",
+        filters: &[("kinds", "kind", "Only these kinds (tool_failing); all when left out"), ("tool", "tool", "Only alerts about this tool")],
+        payload: || {
+            json!({ "type": "object", "properties": {
+                "seq": { "type": "integer" },
+                "at": { "type": "integer", "description": "Unix milliseconds" },
+                "kind": { "type": "string" },
+                "tool": { "type": "string" },
+                "calls": { "type": "integer", "description": "Its calls in the last 15 minutes" },
+                "failed": { "type": "integer", "description": "Of them, server errors" },
+                "rate_pct": { "type": "integer" },
+                "usual_pct": { "type": "integer", "description": "Its server-error rate over the day before" },
+            } })
+        },
+    },
+    Feed {
         name: "secrets.event",
         description: "Something happened to a project's secrets: a secret leaked or a scan found one, a rotation or sync failed, a value request waiting or decided, a placeholder echoed or sent to the wrong place, production left unprotected, an environment or the project deleted or recovered. Never a value. Give the project; filter by kinds (secret.leaked, or request.* for a family) and environment.",
         tool: "secrets_audit",

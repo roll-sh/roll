@@ -40,6 +40,7 @@ pub fn router(access: Arc<Access>) -> Router {
         .route("/v1/access/approvals/{id}/deny", post(deny))
         .route("/v1/access/audit", get(audit))
         .route("/v1/access/activity", get(activity))
+        .route("/v1/access/alerts", get(alerts))
         .route("/v1/access/audit/sinks", get(sinks).post(create_sink))
         .route("/v1/access/audit/sinks/{id}", axum::routing::delete(delete_sink))
         .route("/v1/access/audit/sinks/{id}/retry", post(retry_sink))
@@ -1381,6 +1382,28 @@ async fn activity(State(a): S, ext: Extensions, Query(q): Query<ActivityQuery>) 
     let mut v = blocking(a.clone(), move |a| a.store.tool_activity(since, grants.as_deref())).await?;
     v["days_asked"] = json!(days);
     Ok(Json(v))
+}
+
+/// `GET /v1/access/alerts?after=&limit=&latest=1`: what roll alerted the operator about (a tool
+/// whose server errors jumped), oldest first after a place; MCP Events' `access.alert`. About the
+/// whole deployment, so the operator's (and tokens the operator made) only: a person's own
+/// connections get none, at the newest place.
+async fn alerts(State(a): S, ext: Extensions, Query(q): Query<DecidedQuery>) -> crate::Result<Json<Value>> {
+    let theirs = who(&a, &ext)?.mine().is_some();
+    match (q.latest, q.after) {
+        (Some(1), Some(_)) => return Err(Error::BadRequest("latest=1 starts from now: leave out after".into())),
+        (Some(1), None) => {}
+        (Some(_), _) => return Err(Error::BadRequest("latest is 1 or left out".into())),
+        (None, _) if theirs => {}
+        (None, after) => {
+            let (after, limit) = (after.unwrap_or(0), q.limit.unwrap_or(100));
+            let events = blocking(a, move |a| a.store.alerts_after(after, limit)).await?;
+            let next = events.last().and_then(|e| e["seq"].as_i64()).unwrap_or(after);
+            return Ok(Json(json!({ "events": events, "next": next })));
+        }
+    }
+    let next = blocking(a, |a| a.store.alerts_head()).await?;
+    Ok(Json(json!({ "events": [], "next": next })))
 }
 
 async fn audit(State(a): S, ext: Extensions, Query(mut q): Query<AuditQuery>) -> crate::Result<Response> {
