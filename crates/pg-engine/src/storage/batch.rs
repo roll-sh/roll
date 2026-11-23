@@ -206,7 +206,7 @@ impl RowBatch {
 
     /// Row `i`'s value with the buffer holding it and where in it (None: a copied value, in
     /// the batch's own buffer, valid until it is cleared).
-    #[inline]
+    #[inline(always)]
     pub fn value_in(&self, i: usize) -> (&[u8], Option<(&Bytes, usize)>) {
         if self.has_col_rows() {
             return self.value_in_lazy(i);

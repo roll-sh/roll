@@ -3674,7 +3674,14 @@ impl Cursor {
 /// How many of the ranked sources `rank` (heads ascending) have a head below `k`.
 #[inline(always)]
 fn rank_of(sources: &[Cursor], rank: &[usize], k: &[u8]) -> usize {
-    rank.iter().take_while(|&&j| sources[j].head_key().is_some_and(|h| h < k)).count()
+    let mut n = 0;
+    for &j in rank {
+        if !sources[j].head_key().is_some_and(|h| h < k) {
+            break;
+        }
+        n += 1;
+    }
+    n
 }
 
 struct Merge {
