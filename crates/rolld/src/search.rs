@@ -71,6 +71,10 @@ pub struct SearchArgs {
     /// for requests (default `25%`; `-1`: no maximum).
     #[arg(long = "search-request-memory-max", env = "ROLL_SEARCH_REQUEST_MEMORY_MAX", default_value = "25%", value_parser = request_memory_max)]
     pub search_request_memory_max: String,
+    /// Memory one Painless script execution may hold, in MiB (0: no limit). Tenants can't
+    /// raise it; past it the script fails with a `painless_error`.
+    #[arg(long = "search-script-memory-mb", env = "ROLL_SEARCH_SCRIPT_MEMORY_MB", default_value_t = 64)]
+    pub search_script_memory_mb: u64,
     /// Request body bytes all clusters together may have in flight on this node, in MiB (0: no
     /// node budget). Each cluster's own budget (twice its `max_body_mb`) is charged to it too;
     /// past it, requests get 429.
@@ -280,6 +284,8 @@ impl Search {
         cfg.defaults.idle_timeout_s = args.search_idle_unload_s as i64;
         cfg.cache_bytes = args.search_cache_bytes;
         cfg.memory_budget = (args.search_memory_mb > 0).then_some(args.search_memory_mb << 20);
+        // every cluster's script engine is made after this
+        search_painless::set_default_max_execution_bytes(args.search_script_memory_mb << 20);
         cfg.max_in_flight_bytes = (args.search_max_in_flight_body_mb > 0).then(|| usize::try_from(args.search_max_in_flight_body_mb << 20).unwrap_or(usize::MAX));
         cfg.sync_objects |= args.search_sync_objects;
         cfg.history_retention = Duration::from_secs(args.search_history_s);

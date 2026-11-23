@@ -389,9 +389,28 @@ pub(crate) async fn to_owner(c: &crate::Control, name: &str, req: &search_es::Es
     r.extensions_mut().insert(roll_cluster::ClientAddr(INTERNAL_CLIENT.into()));
     let resp = cluster.forward(&owner, r, 0).await;
     let status = resp.status().as_u16();
-    let headers = resp.headers().iter().filter_map(|(k, v)| Some((k.to_string(), v.to_str().ok()?.to_string()))).collect();
+    let headers: Vec<(String, String)> = resp.headers().iter().filter_map(|(k, v)| Some((k.to_string(), v.to_str().ok()?.to_string()))).collect();
+    // A streamed answer stays one (server-sent events, as the owner sends them). If the link to
+    // the owner breaks, the stream ends as a broken upstream does: with an error event.
+    if headers.iter().any(|(k, v)| k.eq_ignore_ascii_case("content-type") && v.starts_with("text/event-stream")) {
+        use futures::StreamExt;
+        use search_es::xpack::inference::{TaskType, stream::error_event};
+        let task = if req.uri.contains("/chat_completion/") { TaskType::ChatCompletion } else { TaskType::Completion };
+        let pieces = futures::stream::unfold(Some(resp.into_body().into_data_stream()), move |body| async move {
+            let mut body = body?;
+            match body.next().await? {
+                Ok(piece) => Some((piece, Some(body))),
+                Err(e) => {
+                    let e = search_es::EsError::java(500, "connection_closed_exception", format!("the stream from the cluster's owner node broke: {e}"));
+                    Some((bytes::Bytes::from(error_event(task, &e)), None))
+                }
+            }
+        });
+        let stream = search_es::rest::Streamed::new(Box::pin(pieces));
+        return Some(search_es::EsResponse { status, headers, body: bytes::Bytes::new(), head: false, stream: Some(stream) });
+    }
     let body = axum::body::to_bytes(resp.into_body(), ANSWER_BYTES).await.unwrap_or_default();
-    Some(search_es::EsResponse { status, headers, body, head: false })
+    Some(search_es::EsResponse { status, headers, body, head: false, stream: None })
 }
 
 async fn send(cluster: &Cluster, key: &str, mut req: axum::extract::Request, forwarded: axum::http::Uri, original: axum::http::Uri, node: Arc<search_server::Node>) -> axum::response::Response {

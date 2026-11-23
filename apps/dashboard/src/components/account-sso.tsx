@@ -27,7 +27,7 @@ export function SsoSection() {
     accessApi.enterprise().then((e) => setIdps(e.idps), () => setIdps(null));
   }, []);
   const saveIdps = (next: EnterpriseIdp[]) => accessApi.setIdps(next).then((r) => setIdps(r.idps), (e) => setError(errorText(e)));
-  const change = (id: string, c: { enforce?: boolean; provision?: boolean; session_hours?: number }) => accountsApi.updateSso(id, c).then(load, (e) => setError(errorText(e)));
+  const change = (id: string, c: { enforce?: boolean; provision?: boolean; session_hours?: number; groups?: boolean }) => accountsApi.updateSso(id, c).then(load, (e) => setError(errorText(e)));
   return (
     <section id="sso" className="rise scroll-mt-16">
       <div className="flex items-end gap-3">
@@ -148,6 +148,12 @@ export function SsoSection() {
                 <input type="checkbox" checked={c.provision} onChange={(e) => void change(c.id, { provision: e.target.checked })} />
                 Make accounts for new people (never admins)
               </label>
+              {c.scim && (
+                <label className="flex items-center gap-1.5">
+                  <input type="checkbox" checked={c.groups} onChange={(e) => void change(c.id, { groups: e.target.checked })} />
+                  Its groups over SCIM (give them roles in a project&apos;s Members)
+                </label>
+              )}
               <label className="flex items-center gap-1.5">
                 Sessions last
                 <select value={c.session_hours ?? 0} onChange={(e) => void change(c.id, { session_hours: Number(e.target.value) })} className="rounded-md border border-line-2 bg-canvas px-1.5 py-0.5 text-[12px]">

@@ -1,0 +1,7 @@
+[package]
+name = "roll-secrets-ref"
+description = "roll secrets' `roll://` reference and its parser (no I/O, no dependencies): `roll_secrets::Reference`, shared with the agents' wire so it doesn't pull in roll secrets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true

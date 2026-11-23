@@ -4,7 +4,7 @@
 //! streamed unified chat completion, translated to and from the Messages API. The host is
 //! `api.anthropic.com`; the node's `roll.inference.anthropic.url` points it elsewhere.
 
-use super::{Config, answer_json, base_url, missing_field, sse_data};
+use super::{Config, answer_json, base_url, missing_field};
 use crate::cluster::Cluster;
 use crate::error::{EsError, EsResult};
 use crate::json::{Map, Value};
@@ -12,6 +12,7 @@ use crate::obj;
 use crate::xpack::inference::http::{self, Call};
 use crate::xpack::inference::results::Results;
 use crate::xpack::inference::settings::Reader;
+use crate::xpack::inference::stream::Streaming;
 use crate::xpack::inference::{Endpoint, Request, TaskType};
 use std::time::Duration;
 
@@ -69,7 +70,7 @@ pub fn update(ep: &mut Endpoint, ss: &mut Map) -> EsResult<()> {
     Ok(())
 }
 
-async fn send(cluster: &Cluster, ep: &Endpoint, body: Value, timeout: Duration) -> EsResult<http::Answer> {
+async fn send(cluster: &Cluster, ep: &Endpoint, body: Value, timeout: Duration, stream: bool) -> EsResult<http::Answer> {
     let mut headers = vec![("Content-Type".to_string(), "application/json".to_string())];
     if let Some(k) = ep.secret(cluster, "api_key")? {
         headers.push(("x-api-key".into(), k));
@@ -77,7 +78,7 @@ async fn send(cluster: &Cluster, ep: &Endpoint, body: Value, timeout: Duration) 
     headers.push(("anthropic-version".into(), "2023-06-01".into()));
     let url = format!("{}/v1/messages", base_url(cluster, "anthropic", HOST));
     let call = Call { inference_id: &ep.id, url: url.clone(), headers, body: body.to_json().into_bytes(), timeout, retry: |s| matches!(s, 429 | 500 | 503 | 529), per_minute: ep.requests_per_minute() };
-    let answer = http::post(cluster, &call).await?;
+    let answer = if stream { http::post_stream(cluster, &call).await? } else { http::post(cluster, &call).await? };
     http::check(&ep.id, &url, &answer)?;
     Ok(answer)
 }
@@ -110,33 +111,46 @@ pub async fn infer(cluster: &Cluster, ep: &Endpoint, req: &Request) -> EsResult<
         return Err(crate::xpack::inference::unsupported_task(ep.task, "anthropic"));
     }
     let ts = effective(ep, req)?;
-    let answer = send(cluster, ep, body(ep, &ts, &req.input, false), req.timeout).await?;
+    let answer = send(cluster, ep, body(ep, &ts, &req.input, false), req.timeout, false).await?;
     let v = answer_json("anthropic", &answer)?;
     let content = v.get("content").and_then(Value::as_array).ok_or_else(|| missing_field("content", "Anthropic chat completions"))?;
     // `AnthropicChatCompletionResponseEntity`: one result per text block.
     Ok(Results::Completion(content.iter().filter(|c| c.get("type").and_then(Value::as_str) == Some("text")).filter_map(|c| c.get("text").and_then(Value::as_str)).map(str::to_owned).collect()))
 }
 
-/// The text deltas of a Messages event stream.
-fn text_deltas(raw: &[u8]) -> Vec<String> {
-    sse_data(raw)
-        .into_iter()
-        .filter_map(|(_, d)| crate::json::parse(d.as_bytes()).ok().flatten())
-        .filter(|e| e.get("type").and_then(Value::as_str) == Some("content_block_delta"))
-        .filter_map(|e| e.pointer(&["delta", "text"]).and_then(Value::as_str).map(str::to_owned))
-        .collect()
+/// A Messages stream's error event as Elasticsearch reports it.
+fn stream_error(id: &str, e: &Value) -> EsError {
+    let msg = e.pointer(&["error", "message"]).and_then(Value::as_str).unwrap_or("stream error");
+    EsError::status(400, format!("Received an error response for request from inference entity id [{id}]. Error message: [{msg}]"))
 }
 
-pub async fn stream_completion(cluster: &Cluster, ep: &Endpoint, req: &Request) -> EsResult<Vec<Value>> {
+pub async fn stream_completion(cluster: &Cluster, ep: &Endpoint, req: &Request) -> EsResult<Streaming> {
     let ts = effective(ep, req)?;
-    let answer = send(cluster, ep, body(ep, &ts, &req.input, true), req.timeout).await?;
-    let deltas: Vec<Value> = text_deltas(&answer.body).into_iter().map(|t| obj! { "delta" => t }).collect();
-    Ok(if deltas.is_empty() { vec![] } else { vec![obj! { "completion" => Value::Arr(deltas) }] })
+    let answer = send(cluster, ep, body(ep, &ts, &req.input, true), req.timeout, true).await?;
+    let id = ep.id.clone();
+    // Each read's text deltas, one `completion` event.
+    Streaming::open(
+        answer,
+        Box::new(move |events: &[(Option<String>, String)]| -> EsResult<Vec<Value>> {
+            let mut deltas = Vec::new();
+            for (_, d) in events {
+                let Some(e) = crate::json::parse(d.as_bytes()).ok().flatten() else { continue };
+                match e.get("type").and_then(Value::as_str) {
+                    Some("content_block_delta") => {
+                        if let Some(t) = e.pointer(&["delta", "text"]).and_then(Value::as_str) {
+                            deltas.push(obj! { "delta" => t });
+                        }
+                    }
+                    Some("error") => return Err(stream_error(&id, &e)),
+                    _ => {}
+                }
+            }
+            Ok(if deltas.is_empty() { vec![] } else { vec![obj! { "completion" => Value::Arr(deltas) }] })
+        }),
+    )
 }
 
-/// A unified chat completion as a Messages request: `system` messages become `system`, the
-/// rest keep their role; `max_completion_tokens` or the endpoint's `max_tokens`.
-pub async fn stream_chat(cluster: &Cluster, ep: &Endpoint, body: &Value, timeout: Duration) -> EsResult<Vec<Value>> {
+pub async fn stream_chat(cluster: &Cluster, ep: &Endpoint, body: &Value, timeout: Duration) -> EsResult<Streaming> {
     let req = super::openai::unified_request(body)?;
     let mut system = Vec::new();
     let mut messages = Vec::new();
@@ -167,11 +181,11 @@ pub async fn stream_chat(cluster: &Cluster, ep: &Endpoint, body: &Value, timeout
         }
     }
     b.insert("stream".into(), true.into());
-    let answer = send(cluster, ep, Value::Obj(b), timeout).await?;
-    let mut out = Vec::new();
+    let answer = send(cluster, ep, Value::Obj(b), timeout, true).await?;
     let mut id = Value::Null;
     let mut model = ep.service_settings.get("model_id").cloned().unwrap_or(Value::Null);
     let (mut input_tokens, mut output_tokens) = (0i64, 0i64);
+    let endpoint = ep.id.clone();
     let chunk = |id: &Value, model: &Value, delta: Value, finish: Option<Value>| {
         let mut choice = Map::new();
         choice.insert("delta".into(), delta);
@@ -181,45 +195,47 @@ pub async fn stream_chat(cluster: &Cluster, ep: &Endpoint, body: &Value, timeout
         choice.insert("index".into(), 0.into());
         obj! { "id" => id.clone(), "choices" => Value::Arr(vec![Value::Obj(choice)]), "model" => model.clone(), "object" => "chat.completion.chunk" }
     };
-    for (_, d) in sse_data(&answer.body) {
-        let Some(e) = crate::json::parse(d.as_bytes()).ok().flatten() else { continue };
-        match e.get("type").and_then(Value::as_str) {
-            Some("message_start") => {
-                id = e.pointer(&["message", "id"]).cloned().unwrap_or(Value::Null);
-                if let Some(m) = e.pointer(&["message", "model"]) {
-                    model = m.clone();
+    // The message's id, model and token counts carry from one read to the next.
+    let decode = move |events: &[(Option<String>, String)]| -> EsResult<Vec<Value>> {
+        let mut out = Vec::new();
+        for (_, d) in events {
+            let Some(e) = crate::json::parse(d.as_bytes()).ok().flatten() else { continue };
+            match e.get("type").and_then(Value::as_str) {
+                Some("message_start") => {
+                    id = e.pointer(&["message", "id"]).cloned().unwrap_or(Value::Null);
+                    if let Some(m) = e.pointer(&["message", "model"]) {
+                        model = m.clone();
+                    }
+                    input_tokens = e.pointer(&["message", "usage", "input_tokens"]).and_then(Value::as_i64).unwrap_or(0);
+                    out.push(chunk(&id, &model, obj! { "role" => "assistant" }, None));
                 }
-                input_tokens = e.pointer(&["message", "usage", "input_tokens"]).and_then(Value::as_i64).unwrap_or(0);
-                out.push(chunk(&id, &model, obj! { "role" => "assistant" }, None));
-            }
-            Some("content_block_delta") => {
-                if let Some(t) = e.pointer(&["delta", "text"]).and_then(Value::as_str) {
-                    out.push(chunk(&id, &model, obj! { "content" => t }, None));
+                Some("content_block_delta") => {
+                    if let Some(t) = e.pointer(&["delta", "text"]).and_then(Value::as_str) {
+                        out.push(chunk(&id, &model, obj! { "content" => t }, None));
+                    }
                 }
-            }
-            Some("message_delta") => {
-                output_tokens = e.pointer(&["usage", "output_tokens"]).and_then(Value::as_i64).unwrap_or(output_tokens);
-                let finish = e.pointer(&["delta", "stop_reason"]).and_then(Value::as_str).map(|r| match r {
-                    "end_turn" | "stop_sequence" => "stop",
-                    "max_tokens" => "length",
-                    "tool_use" => "tool_calls",
-                    other => other,
-                });
-                let mut c = chunk(&id, &model, Value::object(), finish.map(Value::from));
-                if let Some(m) = c.as_object_mut() {
-                    m.insert(
-                        "usage".into(),
-                        obj! { "completion_tokens" => output_tokens, "prompt_tokens" => input_tokens, "total_tokens" => input_tokens + output_tokens },
-                    );
+                Some("message_delta") => {
+                    output_tokens = e.pointer(&["usage", "output_tokens"]).and_then(Value::as_i64).unwrap_or(output_tokens);
+                    let finish = e.pointer(&["delta", "stop_reason"]).and_then(Value::as_str).map(|r| match r {
+                        "end_turn" | "stop_sequence" => "stop",
+                        "max_tokens" => "length",
+                        "tool_use" => "tool_calls",
+                        other => other,
+                    });
+                    let mut c = chunk(&id, &model, Value::object(), finish.map(Value::from));
+                    if let Some(m) = c.as_object_mut() {
+                        m.insert(
+                            "usage".into(),
+                            obj! { "completion_tokens" => output_tokens, "prompt_tokens" => input_tokens, "total_tokens" => input_tokens + output_tokens },
+                        );
+                    }
+                    out.push(c);
                 }
-                out.push(c);
+                Some("error") => return Err(stream_error(&endpoint, &e)),
+                _ => {}
             }
-            Some("error") => {
-                let msg = e.pointer(&["error", "message"]).and_then(Value::as_str).unwrap_or("stream error").to_string();
-                return Err(EsError::status(400, format!("Received an error response for request from inference entity id [{}]. Error message: [{msg}]", ep.id)));
-            }
-            _ => {}
         }
-    }
-    Ok(out)
+        Ok(out)
+    };
+    Streaming::open(answer, Box::new(decode))
 }

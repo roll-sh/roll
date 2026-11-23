@@ -521,7 +521,7 @@ impl Code {
     }
 
     /// `POST /internal/code/repos/{id}/{what}`, run where the repo lives: here, or on its owner.
-    async fn to_owner(&self, repo_id: &str, what: &'static str, body: Bytes) -> Response {
+    pub(crate) async fn to_owner(&self, repo_id: &str, what: &'static str, body: Bytes) -> Response {
         let (Some(cluster), Some(me)) = (self.cluster().cloned(), self.me.upgrade()) else {
             return StatusCode::SERVICE_UNAVAILABLE.into_response();
         };
@@ -550,6 +550,7 @@ impl Code {
             Target::Thread(id) => one("SELECT repo_id FROM review_threads WHERE id = ?", id),
             Target::Work(id) => one("SELECT repo_id FROM work_items WHERE id = ?", id),
             Target::Agents(owner) => self.db.owner(owner).ok().flatten().map(|o| format!("{AGENTS_KEY}{}", o.id)),
+            Target::RepoId(id) => self.db.repo_by_id(id).ok().flatten().map(|r| r.id),
         }
     }
 
@@ -595,6 +596,8 @@ enum Target {
     Work(String),
     /// An owner's agents (`/v1/code/agents/{owner}/…`).
     Agents(String),
+    /// A repo by its id (a file document: `f.<repo id>.…`).
+    RepoId(String),
 }
 
 fn decode(s: &str) -> String {
@@ -609,9 +612,13 @@ fn classify(path: &str) -> Option<Target> {
         ["v1", "code", "changes", id, ..] => Target::Change(decode(id)),
         ["v1", "code", "threads", id, ..] => Target::Thread(decode(id)),
         ["v1", "code", "work", id, ..] => Target::Work(decode(id)),
-        // A document is a change or a work item, by its id's prefix.
-        ["v1", "code", "documents", id] if id.starts_with("chg_") => Target::Change(decode(id)),
-        ["v1", "code", "documents", id] if id.starts_with("wi_") => Target::Work(decode(id)),
+        // A document is a change or a work item, by its (decoded) id's prefix, as the handler reads it.
+        ["v1", "code", "documents", id] => match decode(id) {
+            id if id.starts_with("chg_") => Target::Change(id),
+            id if id.starts_with("wi_") => Target::Work(id),
+            id if id.starts_with("f.") => Target::RepoId(id.split('.').nth(1).unwrap_or_default().to_string()),
+            _ => return None,
+        },
         // `login/poll` and `shares/{id}` are global (`login` and `shares` are reserved owner names).
         ["v1", "code", "agents", owner, _, ..] if !matches!(*owner, "login" | "shares") => Target::Agents(decode(owner)),
         ["git", owner, repo, ..] => {
@@ -622,7 +629,7 @@ fn classify(path: &str) -> Option<Target> {
     };
     match &t {
         Target::Repo(o, r) if o.is_empty() || r.is_empty() => None,
-        Target::Change(id) | Target::Thread(id) | Target::Work(id) | Target::Agents(id) if id.is_empty() => None,
+        Target::Change(id) | Target::Thread(id) | Target::Work(id) | Target::Agents(id) | Target::RepoId(id) if id.is_empty() => None,
         _ => Some(t),
     }
 }
@@ -743,6 +750,7 @@ pub(crate) fn internal_routes(code: Arc<Code>, cluster: Arc<Cluster>) -> Router 
         .route("/internal/code/repos/{id}/events", post(internal_events))
         .route("/internal/code/repos/{id}/kick", post(internal_kick))
         .route("/internal/code/repos/{id}/github", post(internal_github))
+        .route("/internal/code/repos/{id}/search", post(internal_search))
         .layer(axum::extract::DefaultBodyLimit::max(32 << 20))
         .route_layer(axum::middleware::from_fn_with_state(cluster, roll_cluster::require_signed))
         .with_state(code)
@@ -764,6 +772,10 @@ async fn internal_kick(State(code): State<Arc<Code>>, Path(id): Path<String>, re
 
 async fn internal_github(State(code): State<Arc<Code>>, Path(id): Path<String>, req: Request) -> Response {
     internal(code, id, "github", req).await
+}
+
+async fn internal_search(State(code): State<Arc<Code>>, Path(id): Path<String>, req: Request) -> Response {
+    internal(code, id, "search", req).await
 }
 
 /// An internal request, on the repo's owner.
@@ -795,6 +807,20 @@ async fn internal_local(code: Arc<Code>, repo_id: String, what: &'static str, re
             };
             match crate::github::inbox::process(&code, &repo_id, part, claimed_until).await {
                 Ok(()) => StatusCode::NO_CONTENT.into_response(),
+                Err(e) => e.into_response(),
+            }
+        }
+        // One repo's part of a search across repos (crate::documents), on its owner: the node that
+        // asked chose the repos for its caller.
+        "search" => {
+            let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+            let Some(q) = v["q"].as_str() else { return Error::Invalid("a search needs q".into()).into_response() };
+            let per_repo = v["per_repo"].as_u64().unwrap_or(5).clamp(1, 20) as usize;
+            match code.repo_by_id(&repo_id) {
+                Ok(r) => match code.search_code(&r, q, false, false, None, per_repo, None).await {
+                    Ok(v) => axum::Json(v).into_response(),
+                    Err(e) => e.into_response(),
+                },
                 Err(e) => e.into_response(),
             }
         }

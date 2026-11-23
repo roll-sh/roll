@@ -1350,8 +1350,22 @@ authorized by the one security evaluator (`monitor_inference`, `manage_inference
 parsed as untrusted data: shapes are checked (a rerank index outside the inputs, a missing field
 or a wrong embedding count fail the call).
 
-Differences: streamed answers are read whole before they're sent (the same events, all at the
-end); `rate_limit.requests_per_minute` is enforced per node as Elasticsearch enforces it (a
+Streamed answers (`…/_stream`) go out as they come, each read of the upstream becoming the
+events Elasticsearch makes of it (a completion's text deltas together in one event, a chat
+completion's chunks one event each), and a failure after the stream started ends it with
+`event: error` and no `[DONE]`, in Elasticsearch's error shape for completions and the unified
+API's for chat completions. Checked against a recording of a private Elasticsearch 9.5.5 whose
+mock answered piece by piece, failed with an error chunk and cut its connection
+(`tests/inference_services/streams.rs`). A client that goes away closes the upstream request.
+
+Differences: a stream may hold at most 16 MiB, one event at most 1 MiB, each read must come
+within the request's `timeout` of the one before, and the stream must end within the node's
+`roll.inference.max_timeout` (the request's `timeout`, as in Elasticsearch, otherwise covers only
+the wait for the upstream's status); past any of these it ends with `event: error`, where
+Elasticsearch reads on without a bound. While it streams, the request keeps its cluster's
+concurrency permit (and a browser key's slot), 1 MiB of the cluster's in-flight bytes for its
+buffer, and its latency in the metrics runs to the stream's end. A connection cut inside a body with a `Content-Length`
+reports roll's HTTP client's message. `rate_limit.requests_per_minute` is enforced per node as Elasticsearch enforces it (a
 one-token bucket per cluster and endpoint, requests waiting their turn, timing out when the wait
 would outlast them; a cluster runs on one node at a time, so it is the cluster's limit), and the
 service's own 429s are retried at most twice; a `custom` endpoint's `_update` that changes a
@@ -1883,6 +1897,33 @@ the rest are skipped by the tests' own prerequisites.
     (roll's own).
   - **KQL, PromQL, `query_string` and `simple_query_string`:** 300 levels (roll's own;
     Elasticsearch and OpenSearch fail with a `StackOverflowError` somewhere deeper).
+- **Painless memory per execution.** One Painless execution may hold at most the node's
+  `--search-script-memory-mb` (`ROLL_SEARCH_SCRIPT_MEMORY_MB`, 64 MiB on roll's hosted
+  nodes; 0 turns it off). It's an operator setting, and no cluster or index setting can raise
+  it. Elasticsearch 9.5.5 has no limit by default: a script that keeps copies of a large
+  string (each under the object size cap) runs the JVM out of heap and the node exits. Its
+  opt-in guard, `script.painless.max_allocation_bytes.context.<context>.limit`, counts every
+  allocation the script's bytecode makes and never gives any back. roll counts what the
+  execution holds: what its code and the library calls it makes allocate (`def` conversions
+  and stored fields it reads included), minus what it frees. What the host allocates for itself
+  (doc-values buffers, a segment's fielddata) doesn't count. A document's `_source` is parsed
+  once per document, as Elasticsearch's `SourceLookup` does, so changes persist across reads.
+  It's charged, but left out of the limit. So a script can churn through temporaries far beyond
+  the limit, as long as it doesn't keep them. Freeing data the execution didn't make (`params`,
+  `_source`, an earlier document's leftovers) never lets it grow the thread by more than the
+  limit: such frees can offset what it allocates, but never take its balance below zero. A
+  script run inside another one counts against the caller once it ends. That covers a runtime
+  field another script reads, up to 5 levels deep. While it runs, it also has an account of its
+  own, so one thread holds at most about six times the limit, plus the document's `_source`. Past the limit roll answers like that guard: a
+  `script_exception` caused by an uncatchable `painless_error`, `script allocation limit
+  exceeded: allocation of [N] bytes brings the running total to [T] bytes, over the limit of
+  [L] bytes`, without a script portion. Both guards apply in every context (`_execute`,
+  ingest, `_update`, by-query, searches, watches), and each execution has its own account.
+  Search and aggregation scripts that run once per document also charge what their executions
+  hold, at each one's peak and including what they keep between documents (`params`, a
+  scripted metric's state), to the `request` breaker under `<script>`. Past its limit they fail
+  with a `circuit_breaking_exception`, as the regex breaker does. Elasticsearch doesn't charge
+  scripts to any breaker.
 - `index.max_ngram_diff` and `index.max_shingle_diff` go up to 50 (roll's own; Elasticsearch
   and OpenSearch allow up to `Integer.MAX_VALUE`): past it, the settings' usual range error
   (`must be <= 50`), and indices made before the bound are analyzed as if it were 50. An `ngram`

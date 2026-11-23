@@ -1633,7 +1633,7 @@
     },
     "/v1/apps/services/{id}/environments/{env}/cache/purge": {
       "post": {
-        "description": "Answers `{ purged }`: how many kept answers went (on-demand revalidation, \"Public traffic\").",
+        "description": "Answers `{ purged }`: how many kept answers went (on-demand revalidation, \"Public traffic\"); a Next app's shared cache too (everything emptied, or those tags and the paths' own expired).",
         "operationId": "postServicesIdEnvironmentsEnvCachePurge",
         "parameters": [
           {
@@ -1665,7 +1665,7 @@
         },
         "responses": {
           "200": {
-            "description": "`{ purged }`: how many kept answers went (on-demand revalidation, \"Public traffic\")"
+            "description": "`{ purged }`: how many kept answers went (on-demand revalidation, \"Public traffic\"); a Next app's shared cache too (everything emptied, or those tags and the paths' own expired)"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
@@ -1676,6 +1676,96 @@
           "services"
         ],
         "x-roll-action": "deploy*"
+      }
+    },
+    "/v1/apps/services/{id}/environments/{env}/checks/{check}/screenshot": {
+      "get": {
+        "description": "Answers a browser check's last failure as the page looked (`image/png`); 404 when none is kept (\"Browser checks\").",
+        "operationId": "getServicesIdEnvironmentsEnvChecksCheckScreenshot",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "check",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "a browser check's last failure as the page looked (`image/png`); 404 when none is kept (\"Browser checks\")"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Get screenshot",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "read"
+      }
+    },
+    "/v1/apps/services/{id}/environments/{env}/checks/{check}/trace": {
+      "get": {
+        "description": "Answers its Playwright trace (`application/zip`, a download: `npx playwright show-trace`); 404 when none is kept.",
+        "operationId": "getServicesIdEnvironmentsEnvChecksCheckTrace",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "check",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "its Playwright trace (`application/zip`, a download: `npx playwright show-trace`); 404 when none is kept"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Get trace",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "read"
       }
     },
     "/v1/apps/services/{id}/environments/{env}/config/rotate": {
@@ -2069,7 +2159,7 @@
     },
     "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/rollback": {
       "post": {
-        "description": "Answers 202 `Deployment`.",
+        "description": "Answers 202 `Deployment` (a view's `url` is its own).",
         "operationId": "postServicesIdEnvironmentsEnvDeploysDepRollback",
         "parameters": [
           {
@@ -2105,11 +2195,11 @@
               }
             }
           },
-          "description": "`{ keep_variables? }` (default false: the variables come back as they were when it was live); `X-Roll-Override: 1` puts a never-live `ready` build live during a freeze, audited"
+          "description": "`{ keep_variables? }` (default false: the variables come back as they were when it was live); `X-Roll-Override: 1` puts a never-live `ready` build live during a freeze, audited; or `{ no_traffic: true, variables: {NAME: value} }`: a view of `dep` at its own URL with some of the environment's variables given values of its own (1–50 of its names, each ≤ 64 KiB; `variables` without `no_traffic`, or `no_traffic` without `variables`, is a 400): sealed, never listed, never put live (no `deploy.ready`), not counted toward what's kept, pruned a day after its URL was last visited"
         },
         "responses": {
           "202": {
-            "description": "202 `Deployment`"
+            "description": "202 `Deployment` (a view's `url` is its own)"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
@@ -4184,7 +4274,7 @@
     },
     "/v1/apps/services/{id}/environments/{env}/shell": {
       "get": {
-        "description": "Answers a terminal: binary both ways, text `{\"resize\":[cols,rows]}`; `console=true` makes it a fresh container of the live deployment running `command` (a login shell without one), sized by `cpu` (0.25–8) and `memory_mb` (256–16384), removed when it closes (`command`, `cpu`, `memory_mb` without `console`: 400).",
+        "description": "Answers a terminal: binary both ways, text `{\"resize\":[cols,rows]}`; `console=true` makes it a fresh container of the live deployment (or, with `deployment`, of another kept one's image and settings) running `command` (a login shell without one), sized by `cpu` (0.25–8) and `memory_mb` (256–16384), removed when it closes (`command`, `cpu`, `memory_mb` without `console`: 400).",
         "operationId": "getServicesIdEnvironmentsEnvShell",
         "parameters": [
           {
@@ -4216,7 +4306,7 @@
         },
         "responses": {
           "200": {
-            "description": "a terminal: binary both ways, text `{\"resize\":[cols,rows]}`; `console=true` makes it a fresh container of the live deployment running `command` (a login shell without one), sized by `cpu` (0.25–8) and `memory_mb` (256–16384), removed when it closes (`command`, `cpu`, `memory_mb` without `console`: 400)"
+            "description": "a terminal: binary both ways, text `{\"resize\":[cols,rows]}`; `console=true` makes it a fresh container of the live deployment (or, with `deployment`, of another kept one's image and settings) running `command` (a login shell without one), sized by `cpu` (0.25–8) and `memory_mb` (256–16384), removed when it closes (`command`, `cpu`, `memory_mb` without `console`: 400)"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
@@ -4259,7 +4349,7 @@
               }
             }
           },
-          "description": "`{ instance?, cols?, rows?, console?, command?, cpu?, memory_mb? }` (a console as on the WebSocket)"
+          "description": "`{ instance?, cols?, rows?, console?, command?, cpu?, memory_mb?, deployment? }` (a console as on the WebSocket; `deployment`: another kept deployment's image and settings, 404 another environment's, 409 never built or cleaned up)"
         },
         "responses": {
           "201": {
@@ -4634,7 +4724,7 @@
     },
     "/v1/apps/services/{id}/environments/{env}/tunnel": {
       "get": {
-        "description": "Answers one TCP connection to the web service's own port, binary both ways (`roll apps proxy`); wakes an instance and holds it while open; at most 20 per environment (409); 409 for a worker, a cron service or a static site.",
+        "description": "Answers one TCP connection to the web service's own port, or with `port` another port of the app (a debugger's; reached inside its instance by a relay in its network namespace, published or not), binary both ways (`roll apps proxy`); wakes an instance and holds it while open; at most 20 per environment (409); 409 for a worker, a cron service or a static site.",
         "operationId": "getServicesIdEnvironmentsEnvTunnel",
         "parameters": [
           {
@@ -4666,7 +4756,7 @@
         },
         "responses": {
           "200": {
-            "description": "one TCP connection to the web service's own port, binary both ways (`roll apps proxy`); wakes an instance and holds it while open; at most 20 per environment (409); 409 for a worker, a cron service or a static site"
+            "description": "one TCP connection to the web service's own port, or with `port` another port of the app (a debugger's; reached inside its instance by a relay in its network namespace, published or not), binary both ways (`roll apps proxy`); wakes an instance and holds it while open; at most 20 per environment (409); 409 for a worker, a cron service or a static site"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"

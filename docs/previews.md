@@ -125,15 +125,21 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   head, the head it ran stays reachable at `<service>-<head>-<slug>`, on the preview's same data,
   behind the same link, asleep until opened; the last 3 per service (an older one's container
   goes). For comparing before and after. A trusted change's only (an approval is for one head).
-  Each runs on its own data: before the next head's seed or release, each Postgres, Redis and
-  search branch is branched again (copy-on-write, masked as the preview's is) as that head left it, and the
+  Each runs on its own data: before the next head's seed or release, each branch (Postgres,
+  Redis, search, NoSQL, bucket, stream) is branched again, all at once (measured 2026-11-23 under load 35–58: the push's setup step 3.8–3.9 s against 5.1–5.9 s one after another) (copy-on-write, masked as the preview's is) as that head left it, and the
   earlier push connects there, so a migration that renamed a column doesn't break the code
-  before it. A copy's bytes count in the preview's cost, budget and `max_bytes` with its
+  before it. A copy that fails (its product down, a stream's tail slow to reach object storage)
+  doesn't hold the push up: it's said in the activity, and that push shares the preview's data
+  for that product (`own_data` names only the copies it has). A copy's bytes count in the preview's cost, budget and `max_bytes` with its
   branches'. A copy goes with its push, and with the data it copied (a reset, or masking rules
   that changed: never served less masked than the rules say). Products that can't branch a
-  branch share the preview's (for now NoSQL, buckets and streams), and so do roll apps services,
-  whose builds keep the variables they were deployed with. A roll apps service's earlier push is that build's own
-  deployment URL (`<deployment>--<slug>` on roll apps' domain, never a project's preview domain;
+  branch share the preview's. A NoSQL copy inherits its branch's masking policy (a read policy,
+  not a rewrite). A roll apps service's earlier push is that build started again, taking no
+  traffic, with its copy's variables (roll apps' `POST …/deploys/{dep}/rollback {no_traffic,
+  variables}`: names the environment has, sealed with that deployment); if that fails, the build
+  itself on the preview's data (said in its activity, its copies dropped), and when a reset or
+  changed masks drop its copy, the push goes with it (its variables can't fall back). Either way
+  it's at a deployment's own URL (`<deployment>--<slug>` on roll apps' domain, never a project's preview domain;
   roll apps' `Deployment.url`), behind the same link (the token once, a cookie for that host) or
   sign-in: asked before the new head deploys, and kept only while the running build is the head
   it ran. roll apps keeps an environment's last 10 builds, so the 3 kept here stay; one it pruned
@@ -167,7 +173,8 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   runs, as before).
 - **How it came up** (Vercel's and Render's deploy steps): each head's timeline is on the
   preview's record (`timeline`: when converging it started, and when each step first finished:
-  `data`, its branches made or kept and masked; `setup`, seed, release and schema read; `deploy`,
+  `data`, its branches made or kept and masked; `copies`, when it took any, the earlier push's
+  own copies of them; `setup`, seed, release and schema read; `deploy`,
   every service live; `checks`, health paths answered; `ready`) and the sheet ("Up in 9.4 s: data
   4.1 s · setup 1.2 s · deploy 3.0 s · checks 0.4 s", the steps so far while it's on its way). A
   push starts a new one; a push that keeps the services shows how little it took.
@@ -841,7 +848,10 @@ this: they get no secrets, or all of them.
   connection is cut before those bytes. An encoded body (which can't be checked): a 502. An echo
   ends the placeholder (`Secrets::echoed`: an alert audited, the environment's notice queued) and
   says so in the activity ("echo.localhost echoed STRIPE_KEY back in its response: stopped, and its
-  placeholder ended"). `roll-intercept`'s port: `Interception::filter` answers a `Filtered` with a
+  placeholder ended"). After that the placeholder is refused (a 403) while the CA stands; ending
+  it shrinks the key's bound hosts, which ends the CA (roll secrets' #705), and with no other live
+  placeholder there's nothing left to intercept, so connections are then cut. Either way it never
+  reaches the key. `roll-intercept`'s port: `Interception::filter` answers a `Filtered` with a
   `ResponseScrub`, so roll apps' closed environments get the same. Swapped requests and refusals
   are counted in the preview's activity, never their values or placeholders.
 
@@ -1691,6 +1701,7 @@ type Preview = {
   title: string; head: string; trusted: boolean;
   runs: string | null;                // the earlier head its services run (later pushes touched only ignored paths)
   earlier: {service: string; revision: string; url: string; share_url: string | null; at: number; own_data: string[]}[]; // earlier pushes, still reachable; own_data: the products it has its own copy of (as its head left them)
+  copies: {count: number; bytes: number; usd_month: number}; // the earlier pushes' own copies of its data, said apart (counted in cost)
   goes_at: number | null;             // when it goes (TTL, keep or expiry running out), once a day away (or a quarter of a shorter TTL)
   reported_by: string | null;         // the project that reports a Git URL branch's pull request, when another one does (one voice per pull request)
   desired: "active" | "deleted";
@@ -1726,7 +1737,7 @@ type Preview = {
   regressions?: "check" | "required" | null;
   regressions_accepted?: { head: string; by: string; at: number } | null;
   regressions_compared?: boolean;     // compared with main's preview at its head (errors; routes too with traces)
-  timeline?: { head: string; started_at: number; steps: { step: "data" | "setup" | "deploy" | "checks" | "ready"; at: number }[] };
+  timeline?: { head: string; started_at: number; steps: { step: "data" | "copies" | "setup" | "deploy" | "checks" | "ready"; at: number }[] };
                                       // how its head came up: each step once, when it first finished
   intercepted?: { keys: { key: string; hosts: string[] }[]; swapped: number; refused: number;
                   on_apps?: { requests: number; swapped: number; refused?: string[] } };
@@ -2420,12 +2431,9 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Earlier pushes on their own data**: each kept
-   push's own copy of the preview's Postgres branch (#726) and its bytes in the cost (#731),
-   Redis's and search's copies (#740), landed; each earlier push saying which data is its own (the
-   sheet, `roll preview show`, the PR comment), in review. Next: roll apps' earlier builds on
-   their copy, once roll apps' `POST …/deploys/{dep}/rollback {no_traffic, variables}` lands
-   (it's building it); NoSQL, buckets and streams share the preview's for now.
+1. **A copy that fails doesn't hold the push up, in review**: a product's copy failing (down, or
+   a stream's tail slow to reach object storage) failed the whole push, though the copies are
+   only for the earlier push; now it's said and that push shares the preview's data for it.
 2. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
@@ -2436,6 +2444,12 @@ Ranked by what a person notices first. Done so far:
 4. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
 5. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-23 morning: what the earlier pushes' copies hold, said apart on the sheet and in `roll preview show` (#776, found in the 2026-11-23 review pack).
+
+Landed 2026-11-23 night: the copies as a timeline step of their own (#770: live, data 2 ms · copies 2.6 s · setup 1.8 s).
+
+Landed 2026-11-22 evening to 2026-11-23: earlier pushes on their own data, for every product a preview branches and for roll apps services (#726 Postgres, #731 their cost, #740 Redis and search, #746 shown on every surface, #752 buckets, streams and NoSQL, #756 roll apps on roll apps' #750), the copies taken all at once (this PR).
 
 Landed 2026-11-22, late afternoon: a preview event feed (#713, roll MCP's ask: `GET /v1/previews/events`, created, ready, failed, visual_change and deleted, each seq taken in the write that made it so; checked live by `scripts/preview-cost.sh`), which roll MCP's Events follow.
 

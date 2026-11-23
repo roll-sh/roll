@@ -32,6 +32,8 @@ libc.workspace = true
 # `roll gateway`: the standalone model gateway.
 model-gateway.workspace = true
 aho-corasick.workspace = true
+# `roll secrets agent`: values on 127.0.0.1 (already built for agent-host and the gateway).
+axum.workspace = true
 anyhow.workspace = true
 base64.workspace = true
 bytes.workspace = true
@@ -75,7 +77,6 @@ roll-auth.workspace = true
 code-review.workspace = true
 
 [dev-dependencies]
-axum.workspace = true
 # `tests/apps.rs`: roll apps in process on its fake runtime.
 apps-control.workspace = true
 roll-cluster.workspace = true

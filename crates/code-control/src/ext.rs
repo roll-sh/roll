@@ -48,6 +48,14 @@ pub trait Runner: Send + Sync {
     async fn remove_leftovers(&self) {}
 }
 
+/// Whether the grant rolld's gate put on a request (and a person's session grant beside it) may
+/// read a repo, as roll-access decides it, the repo's workspace projects resolved: a request that
+/// reads many repos at once (`GET /v1/code/search`) keeps only those before it cuts to a page, so
+/// the gate's filter afterwards never empties a page that had answers.
+pub trait GrantReach: Send + Sync {
+    fn reads(&self, ext: &axum::http::Extensions, repo: &str) -> bool;
+}
+
 /// Who asks for an environment's values, as rolld's gate put them on the request: roll secrets
 /// answers as it would a request of theirs to it.
 #[derive(Clone, Copy, Default)]
@@ -158,6 +166,26 @@ pub trait SecretEnv: Send + Sync {
     /// more, it's gone…), never a value.
     async fn owner_key(&self, owner: &str, reference: &str, maker: &str) -> anyhow::Result<CredentialValue> {
         let _ = (owner, reference, maker);
+        anyhow::bail!("roll secrets isn't on this server")
+    }
+    /// `asker` sets an endpoint's key on owner `owner`'s agent machine `machine` (its name) to
+    /// `reference`, a `roll://` reference: roll secrets checks they may reveal it for
+    /// `agent:<machine>` (through the same project as [`SecretEnv::bind_owner_key`]) and answers
+    /// who to keep as its maker. Errors as there.
+    async fn bind_machine_key(&self, owner: &str, machine: &str, reference: &str, asker: &SecretsAsker) -> crate::Result<String> {
+        let _ = (owner, machine, reference, asker);
+        Err(crate::Error::Unprocessable("roll:// keys need roll secrets on this server".into()))
+    }
+    /// That key's value now, read as `maker` may (re-checked, audited as `agent:<machine>`), to
+    /// seal to the machine's daemon. The error says why, never a value.
+    async fn machine_key(&self, owner: &str, machine: &str, reference: &str, maker: &str) -> anyhow::Result<CredentialValue> {
+        let _ = (owner, machine, reference, maker);
+        anyhow::bail!("roll secrets isn't on this server")
+    }
+    /// The digest of what [`SecretEnv::machine_key`] would read, refused exactly as it would be
+    /// (no value, not audited): checked often, the value read only when it moves.
+    async fn machine_key_digest(&self, owner: &str, machine: &str, reference: &str, maker: &str) -> anyhow::Result<String> {
+        let _ = (owner, machine, reference, maker);
         anyhow::bail!("roll secrets isn't on this server")
     }
 }

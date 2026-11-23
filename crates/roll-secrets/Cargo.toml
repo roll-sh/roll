@@ -26,6 +26,7 @@ roll-auth.workspace = true
 roll-keyshares.workspace = true
 roll-oidc.workspace = true
 roll-secrets-chain.workspace = true
+roll-secrets-ref.workspace = true
 roll-workspace.workspace = true
 rcgen = { workspace = true, features = ["x509-parser"] }
 rsa.workspace = true

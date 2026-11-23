@@ -51,6 +51,12 @@ impl Apps {
         self.db(move |s| s.delete_project_signing(&p)).await
     }
 
+    /// Whether the project requires signed images.
+    pub(crate) async fn signing_required(self: &Arc<Self>, project: &str) -> bool {
+        let p = project.to_string();
+        matches!(self.db(move |s| s.project_signing(&p)).await, Ok(Some((_, true))))
+    }
+
     /// An image service's pinned image meets its project's signing rule (nothing asked: it
     /// does), said in the deploy's log either way.
     pub(crate) async fn check_signed(self: &Arc<Self>, project: &str, pinned: &str, login: Option<&crate::runtime::RegistryLogin>, log: &crate::logs::LogSink) -> anyhow::Result<()> {

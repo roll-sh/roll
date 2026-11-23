@@ -757,8 +757,35 @@ async fn search_and_fetch_read_your_own_repos() {
     assert!(doc["url"].as_str().unwrap().ends_with(&format!("/acme/api/work#w{wn}")) && doc["text"] == "fails on CI 1 in 10", "{doc}");
     assert!(acme.tool("search", json!({ "query": "%" })).await["results"].as_array().unwrap().is_empty(), "a wildcard is text");
 
+    // A scoped grant (the operator's caller, narrowed) keeps its repos before the page is cut: newer
+    // matches elsewhere don't push its own out of a one-result page.
+    let narrowed = a.code.search_documents(&code_control::Caller::Admin, "login", None, 1, &|repo: &str| repo == "acme/api").await.unwrap();
+    assert_eq!(narrowed["results"][0]["repo"], "acme/api", "{narrowed}");
+    // Text whose lowercase is the same length but shifted (İ grows, ẞ shrinks) is still snippeted.
+    ok("POST", "/v1/code/repos/acme/api/work".into(), json!({ "title": "unicode", "body": "İ éclair ẞ" })).await;
+    let found = acme.tool("search", json!({ "query": "éclair" })).await;
+    assert_eq!(found["results"].as_array().map(Vec::len), Some(1), "found, no panic: {found}");
+
+    // Files, from each repo's index: a match with its line, an id fetch reads around it.
+    ok("POST", "/v1/code/repos/acme/api/land".into(), json!({ "message": "m", "files": { "src/auth.rs": { "content": "fn a() {}\nfn retry_login_probe() {}\n" } } })).await;
+    // The first search builds the repo's index; until it's built the repo is skipped (timeout or
+    // indexing), so ask until it answers.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let files = loop {
+        let v = acme.tool("search", json!({ "query": "retry_login", "kinds": "files" })).await;
+        if v["skipped"].as_array().is_some_and(Vec::is_empty) || std::time::Instant::now() > deadline {
+            break v;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    };
+    let hit = &files["results"][0];
+    assert_eq!((hit["kind"].as_str(), hit["path"].as_str(), hit["line"].as_u64(), files["skipped"].as_array().map(Vec::len)), (Some("file"), Some("src/auth.rs"), Some(2), Some(0)), "{files}");
+    let doc = acme.tool("fetch", json!({ "id": hit["id"] })).await;
+    assert!(doc["text"].as_str().unwrap().contains("fn retry_login_probe") && doc["metadata"]["path"] == "src/auth.rs", "{doc}");
+
     let mut eve = Client::new(&a, Some(&tokens[1]));
     eve.initialize("2025-06-18").await;
+    assert!(eve.tool_err("fetch", json!({ "id": hit["id"] })).await.starts_with("not found"), "another owner's file");
     let theirs = eve.tool("search", json!({ "query": "login" })).await;
     assert_eq!(theirs["results"].as_array().map(Vec::len), Some(1), "{theirs}");
     assert!(eve.tool_err("fetch", json!({ "id": chid })).await.starts_with("not found"));

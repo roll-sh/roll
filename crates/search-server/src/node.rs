@@ -476,6 +476,49 @@ impl Drop for Queued<'_> {
     }
 }
 
+/// What a streamed answer holds until its body ends or is dropped ([`Lease::hold`]).
+struct Streaming {
+    lease: Option<Lease>,
+    kind: crate::metrics::Kind,
+    status: u16,
+    since: Instant,
+}
+
+impl Streaming {
+    /// Records the stream's latency and gives the lease back (once).
+    fn finish(&mut self) {
+        if let Some(lease) = self.lease.take() {
+            lease.loaded.metrics.record(std::time::SystemTime::now(), self.kind, self.status, Some(self.since.elapsed()));
+        }
+    }
+}
+
+impl Drop for Streaming {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
+/// A streamed body with what it holds: dropped together.
+struct Held {
+    body: search_es::rest::ByteStream,
+    held: Streaming,
+}
+
+impl futures::Stream for Held {
+    type Item = bytes::Bytes;
+
+    fn poll_next(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<bytes::Bytes>> {
+        let this = self.get_mut();
+        let next = this.body.as_mut().poll_next(cx);
+        // Ended: give the lease back now, not when the connection drops the body.
+        if let std::task::Poll::Ready(None) = next {
+            this.held.finish();
+        }
+        next
+    }
+}
+
 impl Drop for Lease {
     fn drop(&mut self) {
         if let Some(p) = self.permit.take() {
@@ -543,8 +586,43 @@ impl Lease {
         self.bytes = r;
     }
 
-    /// Runs the request on its cluster and makes its writes durable before answering.
-    pub async fn handle(&self, mut req: EsRequest) -> EsResponse {
+    /// Runs the request on its cluster ([`Lease::handle`]) and gives the lease back when it's
+    /// answered, or, for an answer it streams, when the stream ends ([`Lease::hold`]).
+    pub async fn serve(self, req: EsRequest) -> EsResponse {
+        let kind = crate::metrics::Kind::of(&req.method, &req.uri);
+        let head = EsRequest { method: req.method.clone(), uri: req.uri.clone(), headers: Vec::new(), body: bytes::Bytes::new() };
+        let since = self.since.unwrap_or_else(Instant::now);
+        let resp = self.handle(req).await;
+        if resp.stream.is_none() {
+            self.loaded.metrics.record(std::time::SystemTime::now(), kind, resp.status, Some(since.elapsed()));
+            return resp;
+        }
+        self.hold(resp, &head, kind, since)
+    }
+
+    /// A streamed answer (`_inference/…/_stream`) keeps the lease until its body ends or its
+    /// client goes away: the cluster's concurrency permit and in-flight count, a browser key's
+    /// running slot, and the request's byte reservation, grown by the stream's buffer
+    /// ([`search_es::xpack::inference::stream::MAX_EVENT_BYTES`]; 429 when the cluster's budget
+    /// can't take it, which closes the upstream request). The node-wide running slot goes back
+    /// now: a stream waits on its upstream, it doesn't compute. Its latency is recorded when it
+    /// ends.
+    fn hold(mut self, mut resp: EsResponse, head: &EsRequest, kind: crate::metrics::Kind, since: Instant) -> EsResponse {
+        drop(self.fair.lock().take());
+        let Some(body) = resp.stream.take().and_then(|s| s.take()) else { return resp };
+        if let Err(used) = self.loaded.bytes.grow(&mut self.bytes, search_es::xpack::inference::stream::MAX_EVENT_BYTES) {
+            drop(body);
+            let r = self.over_budget(head, used, self.bytes.bytes() + search_es::xpack::inference::stream::MAX_EVENT_BYTES);
+            return search_es::rest::error_response(&r.error, head, r.dialect);
+        }
+        let held = Streaming { lease: Some(self), kind, status: resp.status, since };
+        resp.stream = Some(search_es::rest::Streamed::new(Box::pin(Held { body, held })));
+        resp
+    }
+
+    /// Runs the request on its cluster and makes its writes durable before answering (the
+    /// caller records its metrics: [`Lease::serve`]).
+    async fn handle(&self, mut req: EsRequest) -> EsResponse {
         use search_es::remote::links::REMOTE_ACCESS_HEADER;
         use search_es::xpack::security::AUTHENTICATED_HEADER;
         // Only the node may say who authenticated, and only roll's own calls are a remote
@@ -559,11 +637,7 @@ impl Lease {
             req.headers.retain(|(k, _)| !k.eq_ignore_ascii_case("authorization"));
             req.headers.push(("authorization".to_string(), h.clone()));
         }
-        let kind = crate::metrics::Kind::of(&req.method, &req.uri);
-        let since = self.since.unwrap_or_else(Instant::now);
-        let resp = self.run(req).await;
-        self.loaded.metrics.record(std::time::SystemTime::now(), kind, resp.status, Some(since.elapsed()));
-        resp
+        self.run(req).await
     }
 
     /// Counts a request the cluster's limits refused (429) in its metrics.
@@ -2283,7 +2357,7 @@ impl Node {
                 if let Err(r) = lease.acquire(&req).await {
                     return search_es::rest::error_response(&r.error, &req, r.dialect);
                 }
-                lease.handle(req).await
+                lease.serve(req).await
             }
             Err(r) => search_es::rest::error_response(&r.error, &req, r.dialect),
         }

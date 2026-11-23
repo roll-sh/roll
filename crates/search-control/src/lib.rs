@@ -27,7 +27,7 @@ pub mod store;
 pub mod suggestions;
 mod wake;
 
-pub use control::{ClusterOptions, ConsoleRequest, ConsoleResponse, Control, ControlError, Defaults, SearchConfig, SqlCatalog};
+pub use control::{ClusterOptions, ConsoleAnswer, ConsoleRequest, ConsoleResponse, Control, ControlError, Defaults, SearchConfig, SqlCatalog};
 pub use pricing::{Cost, Pricing};
 pub use search_es::seal::Sealer;
 /// Node setting that lets `s3` snapshot repositories reach private addresses (local development).

@@ -1038,6 +1038,8 @@ static ROWS: &[Row] = &[
     // A grant waits on its own approvals (the handler checks it's its own, or access read).
     row("GET", "/v1/access/approvals/{id}", "access", R, Tgt::AnyGrant),
     row("GET", "/v1/access/audit", "access", R, Tgt::Product),
+    row("GET", "/v1/access/activity", "access", R, Tgt::Product),
+    row("GET", "/v1/access/alerts", "access", R, Tgt::Product),
     row("GET", "/v1/access/oauth/clients", "access", R, Tgt::Product),
     row("GET", "/v1/access/oauth/clients/{id}", "access", R, Tgt::Product),
     row("GET", "/v1/access/oauth/step-ups/{id}", "access", R, Tgt::Product),
@@ -1065,6 +1067,13 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/workspace/projects/{id}/invites", "workspace", ADMIN, one(&["id"], "project")),
     row("DELETE", "/v1/workspace/projects/{id}/invites/{invite}", "workspace", ADMIN, one(&["id"], "project")),
     row("PUT", "/v1/workspace/projects/{id}/homes/{kind}/{ref}", "workspace", ADMIN, one(&["id"], "project")),
+    // Groups' roles (docs/members-v1-1.md): seeing which groups hold a role is a read; giving or
+    // taking one away is the project's admin (covered by the caller's own rules, and only by one
+    // who is in the group, D11). The groups themselves (`/v1/workspace/groups…`) are the
+    // operator's: no row.
+    row("GET", "/v1/workspace/projects/{id}/groups", "workspace", R, one(&["id"], "project")),
+    row("PUT", "/v1/workspace/projects/{id}/groups/{group}", "workspace", ADMIN, one(&["id"], "project")),
+    row("DELETE", "/v1/workspace/projects/{id}/groups/{group}", "workspace", ADMIN, one(&["id"], "project")),
     // The built-in roles and their rules: any grant.
     row("GET", "/v1/workspace/roles", "workspace", R, Tgt::AnyGrant),
     // ── Postgres ──
@@ -1534,6 +1543,8 @@ static ROWS: &[Row] = &[
     row("DELETE", "/v1/secrets/projects/{project}/environments/{env}/folder-policies", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/requests/{id}/review", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/values", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
+    // A watcher's read of what changed since the values it holds: values, so reveal.
+    row("POST", "/v1/secrets/projects/{project}/environments/{env}/values/delta", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/value", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     // A TOTP key's current code is a credential: reveal, never the prefix's read.
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/totp", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),

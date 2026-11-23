@@ -115,6 +115,57 @@ const FEEDS: &[Feed] = &[
         },
     },
     Feed {
+        name: "access.alert",
+        description: "roll alerted the operator: a tool is failing (tool_failing: its server errors jumped), a decoy token was used (decoy_used: someone found where it was planted), a leaked token or secret was revoked (token_revoked, secret_revoked: where it was found), or the checkup found something new about a token (checkup_finding: gone broad, unused, roaming…, with its fix). The operator's connections hear every alert; a person's own connections hear those about their own tokens. Filter by kinds and tool.",
+        tool: "access_activity",
+        product: "access",
+        path: &[],
+        after: "/v1/access/alerts?limit=100&after=",
+        latest: "/v1/access/alerts?latest=1",
+        filters: &[("kinds", "kind", "Only these kinds (tool_failing, decoy_used, token_revoked, secret_revoked, checkup_finding); all when left out"), ("tool", "tool", "Only alerts about this tool")],
+        payload: || {
+            json!({ "type": "object", "properties": {
+                "seq": { "type": "integer" },
+                "at": { "type": "integer", "description": "Unix milliseconds" },
+                "kind": { "type": "string" },
+                "tool": { "type": "string" },
+                "calls": { "type": "integer", "description": "Its calls in the last 15 minutes" },
+                "failed": { "type": "integer", "description": "Of them, server errors" },
+                "rate_pct": { "type": "integer" },
+                "usual_pct": { "type": "integer", "description": "Its server-error rate over the day before" },
+                "grant": { "type": "string", "description": "The token (decoy_used, token_revoked)" },
+                "name": { "type": "string" },
+                "route": { "type": "string", "description": "What a decoy was used to call" },
+                "ip": { "type": ["string", "null"] },
+                "what": { "type": "string", "description": "Another product's secret or an enterprise app, revoked" },
+                "found_at": { "type": "string", "description": "Where a leaked one was found" },
+                "finding": { "type": "string", "description": "The checkup's kind (everything, never_expires, unused, narrower, roams…)" },
+                "why": { "type": "string" },
+                "fix": { "type": "string", "description": "tighten, expire, revoke, limit_addresses, rotate_client or approve" },
+            } })
+        },
+    },
+    Feed {
+        name: "secrets.event",
+        description: "Something happened to a project's secrets: a secret leaked or a scan found one, a rotation or sync failed, a value request waiting or decided, a placeholder echoed or sent to the wrong place, production left unprotected, an environment or the project deleted or recovered. Never a value. Give the project; filter by kinds (secret.leaked, or request.* for a family) and environment.",
+        tool: "secrets_audit",
+        product: "secrets",
+        path: &[("project", "The project (prj_…)")],
+        after: "/v1/secrets/projects/{project}/events?limit=100&after=",
+        latest: "/v1/secrets/projects/{project}/events?latest=1",
+        filters: &[("kinds", "kind", "Only these kinds (secret.leaked, rotation.failed, or request.* for a family); all when left out"), ("environment", "environment", "Only this environment's")],
+        payload: || {
+            json!({ "type": "object", "properties": {
+                "seq": { "type": "integer" },
+                "at": { "type": "integer", "description": "Unix milliseconds" },
+                "kind": { "type": "string" },
+                "environment": { "type": ["string", "null"] },
+                "key": { "type": ["string", "null"] },
+                "data": { "type": "object", "description": "Names, ids, counts and reasons, with the actor; never a value" },
+            } })
+        },
+    },
+    Feed {
         name: "code.landed",
         description: "A change landed on a roll code repo (its default branch or another ref): the change, the commit and what it brought. Give the repo by owner and repo; filter by ref.",
         tool: "code_list_refs",
@@ -351,7 +402,11 @@ async fn blocking<T: Send + 'static>(access: &Arc<roll_access::Access>, f: impl 
         Ok(Ok(v)) => Ok(v),
         Ok(Err(roll_access::Error::Forbidden(why))) => Err((-32024, "Forbidden".into(), json!({ "reason": why }))),
         Ok(Err(roll_access::Error::BadRequest(why))) => Err(invalid(why)),
-        Ok(Err(roll_access::Error::TooMany(why))) => Err((-32025, why, json!({ "limit": "subscriptions", "max": roll_access::event_subs::PER_GRANT }))),
+        Ok(Err(roll_access::Error::TooMany(why))) => {
+            // A connection's allowance, or its person's across all their connections.
+            let (scope, max) = if why.contains("person") { ("person", roll_access::event_subs::PER_PERSON) } else { ("connection", roll_access::event_subs::PER_GRANT) };
+            Err((-32025, why, json!({ "limit": "subscriptions", "scope": scope, "max": max })))
+        }
         Ok(Err(e)) => Err(internal(e)),
         Err(e) => Err(internal(e)),
     }

@@ -90,15 +90,22 @@ POST   /v1/code/repos {owner, name, description?, visibility?, default_branch?, 
 GET    /v1/code/repos/{owner}/{repo} → Repo     an old name answers 301 with Location and {redirect: "owner/new"} (404 to callers who can't read the repo)
 PATCH  /v1/code/repos/{owner}/{repo} {name?, description?, visibility?, land_policy?, required_checks?, default_branch?} → Repo
 DELETE /v1/code/repos/{owner}/{repo} → 204
-GET    /v1/code/search?q=&limit= → {results: [{id /* chg_… | wi_… */, title, url, kind: "change" | "work_item", repo, number, state,
-                                               text /* a snippet */, outside, updated_at}]}
+GET    /v1/code/search?q=&kinds=&limit= → {results: [{id /* chg_… | wi_… */, title, url, kind: "change" | "work_item", repo, number, state,
+                                               text /* a snippet */, outside, updated_at}
+                                             | {id /* f.… */, title, url, kind: "file", repo, path, line, text /* the line */, outside: false}],
+                                    skipped? /* with files */: [{repo, why: "limit" | "timeout" | "unavailable" | "indexing" | "off" | "error"}]}
        changes and work items whose title or text holds `q` (1-200 characters, any case), in the caller's own
        repos only (an owner's token: its owner's; a review app's: where it's installed; admin: every repo), most
        recently updated first (`limit` 1-50, default 20); a scoped token keeps only its repos' results.
-       roll's `search` tool (ChatGPT's deep research)
+       `kinds` (comma-separated `changes`, `work`, `files`; default `changes,work`): `files` adds files whose content
+       holds `q` (3+ characters) from each repo's index on its owner (the 200 most recently changed repos, 5 matches
+       each, 1 s each, 3 s in all), interleaved by repo; every repo not searched is in `skipped`.
+       roll's `search` tool (ChatGPT's deep research); docs/code/search.md
 GET    /v1/code/documents/{id} → {id, title, text, url, metadata: {kind, repo, number, state, author?, branch?,
                                    work_item?, labels?, priority?, changes?, github_url?}, repo, outside}
-       one change or work item of the caller's own repos, in full; 404 for anything else. roll's `fetch` tool
+       one change or work item of the caller's own repos, in full, or a file match (`f.…`): up to 400 lines around
+       it at the revision searched, metadata {kind: "file", repo, path, rev, line, from, to, lines}; 404 for
+       anything else. roll's `fetch` tool
 ```
 
 ## Reading code

@@ -121,6 +121,41 @@ CREATE TABLE IF NOT EXISTS build_cache_artifacts (
     used_at INTEGER NOT NULL,
     PRIMARY KEY (project, ns, hash)
 ) WITHOUT ROWID;
+-- Next.js's cache across an environment's instances (`next_cache`): their token, sealed, found by
+-- its hash on each request; its entries, each one's bytes in object storage under a key of its
+-- own upload's (`scope` is a deployment's, or `data` for Next's fetch cache, which every
+-- deployment shares); and its tags' invalidations, kept while an entry written before them is.
+CREATE TABLE IF NOT EXISTS next_cache_tokens (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    sealed TEXT NOT NULL,
+    hash TEXT NOT NULL UNIQUE,
+    PRIMARY KEY (service, env)
+);
+CREATE TABLE IF NOT EXISTS next_cache_entries (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    key TEXT NOT NULL,
+    object TEXT NOT NULL,
+    bytes INTEGER NOT NULL,
+    tags TEXT NOT NULL,
+    written_at INTEGER NOT NULL,
+    expires_at INTEGER,
+    used_at INTEGER NOT NULL,
+    PRIMARY KEY (service, env, scope, key)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS next_cache_tags (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    tag TEXT NOT NULL,
+    stale_at INTEGER,
+    expired_at INTEGER,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (service, env, tag)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS next_cache_tags_at ON next_cache_tags (service, env, at);
+
 -- Where an environment's instances read roll's OIDC tokens: its URL's token, sealed.
 CREATE TABLE IF NOT EXISTS oidc_access (
     service TEXT NOT NULL,
@@ -337,6 +372,14 @@ CREATE TABLE IF NOT EXISTS error_groups (
     name TEXT NOT NULL,
     first_seen INTEGER NOT NULL,
     PRIMARY KEY (service, env, fingerprint)
+) WITHOUT ROWID;
+-- A no-traffic deployment's own values for some of its environment's variables (an earlier
+-- push on its own copy of the data, roll previews'): sealed, never listed; when its URL was last
+-- visited (it's pruned a day after).
+CREATE TABLE IF NOT EXISTS deploy_overrides (
+    deployment TEXT PRIMARY KEY,
+    vars TEXT NOT NULL,
+    seen_at INTEGER NOT NULL
 ) WITHOUT ROWID;
 -- A project's image signing keys (PEM) and whether its image services must meet them
 -- (`signing.rs`).
@@ -768,6 +811,20 @@ pub struct UsageAdd {
     pub stored_gb_hours: f64,
 }
 
+impl UsageAdd {
+    /// Both added up.
+    pub fn plus(&self, o: &UsageAdd) -> UsageAdd {
+        UsageAdd {
+            cpu_seconds: self.cpu_seconds + o.cpu_seconds,
+            gb_seconds: self.gb_seconds + o.gb_seconds,
+            requests: self.requests + o.requests,
+            egress_bytes: self.egress_bytes + o.egress_bytes,
+            build_seconds: self.build_seconds + o.build_seconds,
+            stored_gb_hours: self.stored_gb_hours + o.stored_gb_hours,
+        }
+    }
+}
+
 /// One move of an environment's active deployment ([`Store::switch_active`]): from `from` to
 /// `to`, with the new one's health-check time, the node's lease epoch (fenced when given) and
 /// its variables' hash.
@@ -1195,6 +1252,7 @@ impl Store {
             )?;
             c.execute("DELETE FROM deploy_steps WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
             c.execute("DELETE FROM deploy_closed WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
+            c.execute("DELETE FROM deploy_overrides WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
             c.execute("DELETE FROM state WHERE key LIKE ?", [format!("%:{id}/%")])?;
             c.execute("DELETE FROM status_days WHERE key LIKE ?", [format!("%:{id}/%")])?;
             for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans", "env_data", "env_branches", "udp_ports", "env_unscheduled", "sandboxes", "env_peering"] {
@@ -1759,9 +1817,21 @@ impl Store {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )?;
             let live: Vec<String> = c.query("SELECT active FROM environments WHERE service = ? AND active IS NOT NULL", [service], |r| r.get(0))?;
+            // Deployments with their own values (earlier pushes' views): never counted toward
+            // what's kept, pruned a day after their URL was last visited.
+            let views: HashMap<String, i64> = c.query("SELECT o.deployment, o.seen_at FROM deploy_overrides o JOIN deployments d ON d.id = o.deployment WHERE d.service = ?", [service], |r| Ok((r.get(0)?, r.get(1)?)))?.into_iter().collect();
             let mut built: HashMap<String, usize> = HashMap::new();
             let mut out = Vec::new();
             for (id, env, status, image, ended) in rows {
+                if let Some(seen) = views.get(&id) {
+                    if live.contains(&id) || ended >= recent || *seen >= now - 86_400_000 || matches!(status.as_str(), "queued" | "building" | "deploying") {
+                        continue;
+                    }
+                    c.execute("UPDATE deployments SET pruned_at = ?, status = 'removed' WHERE id = ?", params![now, id])?;
+                    c.execute("DELETE FROM deploy_overrides WHERE deployment = ?", [&id])?;
+                    out.push(Pruned { id, image });
+                    continue;
+                }
                 let removed = status == "removed";
                 if image.is_some() && matches!(status.as_str(), "active" | "inactive") {
                     let n = built.entry(env).or_default();
@@ -2883,6 +2953,169 @@ impl Store {
         })
     }
 
+    /// An environment's Next.js cache token, made the first time it's asked for.
+    pub fn next_cache_token(&self, service: &str, env: &str) -> Result<String> {
+        let token = roll_auth::credentials::new_secret("rlr_");
+        let what = format!("next-cache:{service}:{env}");
+        let (sealed, hash) = (self.sealer.seal(&what, &token), crate::public::token_hash(&token));
+        self.db.execute("INSERT INTO next_cache_tokens (service, env, sealed, hash) VALUES (?, ?, ?, ?) ON CONFLICT (service, env) DO NOTHING", params![service, env, sealed, hash])?;
+        let kept: String = self.db.query_row("SELECT sealed FROM next_cache_tokens WHERE service = ? AND env = ?", params![service, env], |r| r.get(0))?;
+        self.sealer.open(&what, &kept)
+    }
+
+    /// The environment a Next.js cache token (by its hash) is.
+    pub fn next_cache_owner(&self, hash: &str) -> Result<Option<(String, String)>> {
+        Ok(self.db.query_row("SELECT service, env FROM next_cache_tokens WHERE hash = ?", [hash], |r| Ok((r.get(0)?, r.get(1)?))).optional()?)
+    }
+
+    /// An environment's Next.js cache emptied (`token` too: a leaked one, whose environment
+    /// gets a new one with its next deploy; or the environment or service going, `env` `None`
+    /// for all of a service's): the objects to delete.
+    pub fn drop_next_cache(&self, service: &str, env: Option<&str>, token: bool) -> Result<Vec<String>> {
+        self.db.write(|c| {
+            let (sql_env, args): (&str, Vec<String>) = match env {
+                Some(e) => (" AND env = ?", vec![service.to_string(), e.to_string()]),
+                None => ("", vec![service.to_string()]),
+            };
+            let objects: Vec<String> = c.query(&format!("SELECT object FROM next_cache_entries WHERE service = ?{sql_env}"), &args, |r| r.get(0))?;
+            c.execute(&format!("DELETE FROM next_cache_entries WHERE service = ?{sql_env}"), &args)?;
+            c.execute(&format!("DELETE FROM next_cache_tags WHERE service = ?{sql_env}"), &args)?;
+            if token {
+                c.execute(&format!("DELETE FROM next_cache_tokens WHERE service = ?{sql_env}"), &args)?;
+            }
+            Ok(objects)
+        })
+    }
+
+    /// A leaked Next.js cache token (by its hash): its environment's cache emptied and the token
+    /// gone. Whose it was, and the objects to delete.
+    pub fn drop_next_cache_token(&self, hash: &str) -> Result<Option<DroppedCache>> {
+        let Some((s, e)) = self.next_cache_owner(hash)? else { return Ok(None) };
+        let gone = self.drop_next_cache(&s, Some(&e), true)?;
+        Ok(Some(((s, e), gone)))
+    }
+
+    /// One entry, and how its tags (and `soft`, the path's) stand since it was written: `None`
+    /// when one of them expired it.
+    pub fn next_entry(&self, service: &str, env: &str, scope: &str, key: &str, soft: &[String], now: i64) -> Result<Option<crate::next_cache::Entry>> {
+        let row = self
+            .db
+            .query_row(
+                "SELECT object, bytes, tags, written_at, expires_at, used_at FROM next_cache_entries WHERE service = ? AND env = ? AND scope = ? AND key = ?",
+                params![service, env, scope, key],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?, r.get::<_, Option<i64>>(4)?, r.get::<_, i64>(5)?)),
+            )
+            .optional()?;
+        let Some((object, bytes, tags, written_at, expires_at, used_at)) = row else { return Ok(None) };
+        if expires_at.is_some_and(|x| x <= now) {
+            return Ok(None);
+        }
+        let mut tags: Vec<String> = serde_json::from_str(&tags).unwrap_or_default();
+        tags.extend(soft.iter().cloned());
+        tags.sort();
+        tags.dedup();
+        // Its own tags' marks only (at most 256, by the primary key): only what was invalidated
+        // after it was written can make it old.
+        let mut marks: Vec<(String, Option<i64>, Option<i64>, i64)> = Vec::new();
+        for chunk in tags.chunks(100) {
+            let sql = format!("SELECT tag, stale_at, expired_at, at FROM next_cache_tags WHERE service = ? AND env = ? AND tag IN ({})", vec!["?"; chunk.len()].join(", "));
+            let args: Vec<String> = [service.to_string(), env.to_string()].into_iter().chain(chunk.iter().cloned()).collect();
+            marks.extend(self.db.query(&sql, &args, |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?);
+        }
+        let mut stale = false;
+        for (_, stale_at, expired_at, at) in marks {
+            if at <= written_at {
+                continue;
+            }
+            if expired_at.is_some_and(|x| x > written_at && x <= now) {
+                return Ok(None);
+            }
+            stale |= stale_at.is_some_and(|x| x > written_at);
+        }
+        Ok(Some(crate::next_cache::Entry { object, bytes, written_at, used_at, stale }))
+    }
+
+    /// An uploaded entry (in `object`) put in, in place of one there; then the environment's
+    /// least recently used past `cap` bytes go. The objects no row names any more.
+    #[allow(clippy::too_many_arguments)]
+    pub fn put_next_entry(&self, service: &str, env: &str, scope: &str, key: &str, object: &str, bytes: i64, tags: &[String], written_at: i64, expires_at: Option<i64>, now: i64, cap: i64) -> Result<Vec<String>> {
+        let tags = serde_json::to_string(tags).unwrap_or_else(|_| "[]".into());
+        self.db.write(|c| {
+            let old: Option<String> = c.query_row("SELECT object FROM next_cache_entries WHERE service = ? AND env = ? AND scope = ? AND key = ?", params![service, env, scope, key], |r| r.get(0)).optional()?;
+            c.execute(
+                "INSERT INTO next_cache_entries (service, env, scope, key, object, bytes, tags, written_at, expires_at, used_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT (service, env, scope, key) DO UPDATE SET object = excluded.object, bytes = excluded.bytes, tags = excluded.tags, \
+                 written_at = excluded.written_at, expires_at = excluded.expires_at, used_at = excluded.used_at",
+                params![service, env, scope, key, object, bytes, tags, written_at, expires_at, now],
+            )?;
+            let mut gone: Vec<String> = old.into_iter().collect();
+            let held: i64 = c.query_row("SELECT COALESCE(SUM(bytes), 0) FROM next_cache_entries WHERE service = ? AND env = ?", params![service, env], |r| r.get(0))?;
+            if held <= cap {
+                return Ok(gone);
+            }
+            let rows: Vec<(String, String, String, i64)> = c.query(
+                "SELECT scope, key, object, bytes FROM next_cache_entries WHERE service = ? AND env = ? ORDER BY used_at DESC, scope, key",
+                params![service, env],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )?;
+            let mut held = 0i64;
+            for (s, k, o, b) in rows {
+                held += b;
+                if held > cap && !(s == scope && k == key) {
+                    c.execute("DELETE FROM next_cache_entries WHERE service = ? AND env = ? AND scope = ? AND key = ?", params![service, env, s, k])?;
+                    gone.push(o);
+                }
+            }
+            Ok(gone)
+        })
+    }
+
+    pub fn touch_next_entry(&self, service: &str, env: &str, scope: &str, key: &str, now: i64) -> Result<()> {
+        self.db.execute("UPDATE next_cache_entries SET used_at = ? WHERE service = ? AND env = ? AND scope = ? AND key = ?", params![now, service, env, scope, key])?;
+        Ok(())
+    }
+
+    /// Tags invalidated now: expired at once, or (`expire_s`, Next's `revalidateTag(tag, "max")`)
+    /// stale now and expired that much later. Past `cap` tags the oldest go, and with them every
+    /// entry written before them (one they'd have made old must never read as fresh). The
+    /// objects no row names any more.
+    pub fn mark_next_tags(&self, service: &str, env: &str, tags: &[String], expire_s: Option<i64>, now: i64, cap: usize) -> Result<Vec<String>> {
+        let (stale_at, expired_at) = match expire_s {
+            Some(s) => (Some(now), Some(now + s.max(0) * 1000)),
+            None => (None, Some(now)),
+        };
+        self.db.write(|c| {
+            for t in tags {
+                c.execute(
+                    "INSERT INTO next_cache_tags (service, env, tag, stale_at, expired_at, at) VALUES (?, ?, ?, ?, ?, ?) \
+                     ON CONFLICT (service, env, tag) DO UPDATE SET stale_at = excluded.stale_at, expired_at = excluded.expired_at, at = excluded.at",
+                    params![service, env, t, stale_at, expired_at, now],
+                )?;
+            }
+            let cut: Option<i64> = c.query_row("SELECT at FROM next_cache_tags WHERE service = ? AND env = ? ORDER BY at DESC LIMIT 1 OFFSET ?", params![service, env, cap as i64], |r| r.get(0)).optional()?;
+            let Some(cut) = cut else { return Ok(Vec::new()) };
+            c.execute("DELETE FROM next_cache_tags WHERE service = ? AND env = ? AND at <= ?", params![service, env, cut])?;
+            let objects: Vec<String> = c.query("SELECT object FROM next_cache_entries WHERE service = ? AND env = ? AND written_at <= ?", params![service, env, cut], |r| r.get(0))?;
+            c.execute("DELETE FROM next_cache_entries WHERE service = ? AND env = ? AND written_at <= ?", params![service, env, cut])?;
+            Ok(objects)
+        })
+    }
+
+    /// Entries unused since `before`, or past their own expiry, gone in one write: the objects
+    /// to delete.
+    pub fn expire_next_entries(&self, before: i64, now: i64) -> Result<Vec<String>> {
+        self.db.write(|c| {
+            let objects: Vec<String> = c.query("SELECT object FROM next_cache_entries WHERE used_at < ? OR expires_at <= ?", params![before, now], |r| r.get(0))?;
+            c.execute("DELETE FROM next_cache_entries WHERE used_at < ? OR expires_at <= ?", params![before, now])?;
+            Ok(objects)
+        })
+    }
+
+    /// What each environment's Next.js cache holds now: `(service, env, bytes)`.
+    pub fn next_cache_bytes(&self) -> Result<Vec<(String, String, i64)>> {
+        Ok(self.db.query("SELECT service, env, SUM(bytes) FROM next_cache_entries GROUP BY service, env", (), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?)
+    }
+
     /// The environment whose OIDC address a token is, by its hash; its row gone (the address
     /// reads nothing from now on; the next deploy makes a new one).
     pub fn drop_oidc_by_hash(&self, hash: &str) -> Result<Option<(String, String)>> {
@@ -3542,6 +3775,43 @@ impl Store {
         Ok(self.db.execute("DELETE FROM env_peering WHERE service = ? AND env = ?", [service, env])? > 0)
     }
 
+    pub fn set_deploy_overrides(&self, deployment: &str, vars: &std::collections::BTreeMap<String, String>) -> Result<()> {
+        let sealed = self.sealer.seal(&format!("deploy-overrides:{deployment}"), &serde_json::to_string(vars).map_err(|e| Error::Internal(e.to_string()))?);
+        self.db.execute("INSERT INTO deploy_overrides (deployment, vars, seen_at) VALUES (?, ?, ?) ON CONFLICT (deployment) DO NOTHING", params![deployment, sealed, self.now()?])?;
+        Ok(())
+    }
+
+    /// A deployment's own variable values, if it has any.
+    pub fn deploy_overrides(&self, deployment: &str) -> Result<Option<std::collections::BTreeMap<String, String>>> {
+        let Some(sealed) = self.db.query_row("SELECT vars FROM deploy_overrides WHERE deployment = ?", [deployment], |r| r.get::<_, String>(0)).optional()? else { return Ok(None) };
+        let json = self.sealer.open(&format!("deploy-overrides:{deployment}"), &sealed)?;
+        Ok(Some(serde_json::from_str(&json).map_err(|e| Error::Internal(e.to_string()))?))
+    }
+
+    /// Its URL was visited now (what keeps it from the prune).
+    pub fn touch_deploy_overrides(&self, deployment: &str) -> Result<()> {
+        self.db.execute("UPDATE deploy_overrides SET seen_at = ? WHERE deployment = ?", params![self.now()?, deployment])?;
+        Ok(())
+    }
+
+    /// [`Store::set_ready`] without the `deploy.ready` event: a deployment with its own values is
+    /// a view (an earlier push), never something to put live.
+    pub fn set_ready_quiet(&self, id: &str) -> Result<bool> {
+        let now = self.now()?;
+        Ok(self.db.execute("UPDATE deployments SET status = ?, finished_at = COALESCE(finished_at, ?) WHERE id = ? AND status = ?", params![DeployStatus::Ready.as_str(), now, id, DeployStatus::Deploying.as_str()])? > 0)
+    }
+
+    /// An environment's hours (`metrics_hourly`): requests, errors and p95, for those it has.
+    pub fn hours_of(&self, service: &str, env: &str, hours: &[i64]) -> Result<Vec<(i64, i64, f64)>> {
+        let mut out = Vec::new();
+        for h in hours {
+            if let Some(r) = self.db.query_row("SELECT requests, errors, p95_ms FROM metrics_hourly WHERE service = ? AND env = ? AND hour = ?", params![service, env, h], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, f64>(2)?))).optional()? {
+                out.push(r);
+            }
+        }
+        Ok(out)
+    }
+
     pub fn project_signing(&self, project: &str) -> Result<Option<(Vec<String>, bool)>> {
         Ok(self.db.query_row("SELECT keys, required FROM project_signing WHERE project = ?", [project], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))).optional()?.map(|(k, r)| (serde_json::from_str(&k).unwrap_or_default(), r != 0)))
     }
@@ -4007,6 +4277,29 @@ impl Store {
                 return Ok(false);
             }
             insert_event(c, now, kind, "", "", None, data)?;
+            Ok(true)
+        })
+    }
+
+    /// The first hour a project used anything (its services', or deleted ones'), if it has.
+    pub fn project_first_hour(&self, project: &str) -> Result<Option<i64>> {
+        let live: Option<i64> = self.db.query_row("SELECT MIN(u.hour) FROM usage u JOIN services s ON s.id = u.service WHERE s.project = ?", [project], |r| r.get(0))?;
+        let gone: Option<i64> = self.db.query_row("SELECT MIN(hour) FROM project_usage WHERE project = ?", [project], |r| r.get(0))?;
+        Ok(live.into_iter().chain(gone).min())
+    }
+
+    /// A spend spike in `hour` recorded once: the event and the hour marked in one write; false
+    /// when that hour (or a later one) already was.
+    pub fn spend_spiked(&self, project: &str, hour: i64, data: &serde_json::Value) -> Result<bool> {
+        let key = format!("spend-spike:{project}");
+        let now = self.now()?;
+        self.db.write(|c| {
+            let last: Option<i64> = c.query_row("SELECT value FROM state WHERE key = ?", [&key], |r| r.get::<_, String>(0)).optional()?.and_then(|v| v.parse().ok());
+            if last.is_some_and(|l| l >= hour) {
+                return Ok(false);
+            }
+            c.execute("INSERT INTO state (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", params![key, hour.to_string()])?;
+            insert_event(c, now, "spend.spike", "", "", None, data)?;
             Ok(true)
         })
     }

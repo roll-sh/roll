@@ -129,20 +129,40 @@ pub fn open(args: &crate::Args, home: &std::path::Path, auth: &crate::auth::Auth
     workspace.set_grants(access.clone() as Arc<dyn roll_auth::Grants>);
     let a = access.clone();
     workspace.on_event(Box::new(move |e| a.member_event(e).map_err(|e| e.to_string())));
-    // What a crash left between a change and its event's effects, now and then.
+    // What a crash left between a change and its event's effects, now and then; and the groups of
+    // SSO connections that are gone (a removal that stopped before its groups went), from the
+    // first tick at start.
     let ws = workspace.clone();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
         loop {
             tick.tick().await;
             let ws = ws.clone();
-            let _ = tokio::task::spawn_blocking(move || ws.run_events()).await;
+            // Up to 10,000 events a tick: what a big group's fan-out left, as well as crashes.
+            let _ = tokio::task::spawn_blocking(move || {
+                if let Err(e) = ws.sweep_groups() {
+                    tracing::warn!(error = %e, "workspace: dropping a removed SSO connection's groups failed; tried again");
+                }
+                ws.drain_events(200)
+            })
+            .await;
         }
     });
     auth.set_authorizer(Arc::new(roll_access::evaluate::Evaluator(access.clone())));
     // People's sessions from allowed networks only: the same client address the evaluator reads.
     let a = access.clone();
     auth.set_client_ip(Arc::new(move |req| roll_access::evaluate::client_ip(req, &a.config)));
+    // A tool whose server errors jumped: the admins mailed (one node, once in six hours per tool).
+    let a = access.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(300));
+        loop {
+            tick.tick().await;
+            if let Err(e) = a.activity_alerts().await {
+                tracing::warn!(error = %e, "checking agent activity for failure jumps");
+            }
+        }
+    });
     // Old audit rows, decided approvals, spent codes and expired secrets go once an hour.
     let a = access.clone();
     tokio::spawn(async move {
@@ -154,6 +174,11 @@ pub fn open(args: &crate::Args, home: &std::path::Path, auth: &crate::auth::Auth
             let a2 = a.clone();
             if let Ok(Err(e)) = tokio::task::spawn_blocking(move || a2.store.prune(days)).await {
                 tracing::warn!(error = %e, "pruning the access store");
+            }
+            // The checkup's new findings, for the operator's alert feed (one node an hour).
+            let a3 = a.clone();
+            if let Ok(Err(e)) = tokio::task::spawn_blocking(move || a3.checkup_alerts()).await {
+                tracing::warn!(error = %e, "looking for the checkup's new findings");
             }
             // Tokens about to expire, once a day, where approvals go.
             if let Err(e) = a.expiry_digest().await {
@@ -474,6 +499,19 @@ impl roll_access::ApprovalChat for ChatCards {
 }
 
 /// roll code's MCP tools, fronted by `/v1/mcp` under product-prefixed names (`code_…`, `agents_…`).
+/// roll-access's answer for roll code's searches across repos: whether the request's grant (and a
+/// person's session grant beside it) may read a repo, resolved as the gate's list filter resolves
+/// each item (`Access::resource` with the product as the kind: the repo's workspace projects too).
+pub struct CodeReach(pub Arc<Access>);
+
+impl code_control::GrantReach for CodeReach {
+    fn reads(&self, ext: &axum::http::Extensions, repo: &str) -> bool {
+        let r = self.0.resource("code", "code", repo);
+        let ok = |g: &roll_auth::Grant| g.allows(&r, roll_auth::scope::Action::Read) == roll_auth::scope::Outcome::Allow;
+        roll_auth::Grant::on(ext).is_none_or(ok) && roll_auth::SessionGrant::on(ext).is_none_or(ok)
+    }
+}
+
 pub struct CodeTools;
 
 /// roll code's tool name → the roll-wide one.

@@ -9,7 +9,8 @@ const NAME = /^[a-z0-9-]{1,32}$/;
 /**
  * An environment's uptime checks (Cloud Monitoring's): a path GET'd every so often through its
  * own proxy; two failures in a row are `check.down` for its notification targets, the next
- * pass resolves it. A check wakes a service that scales to zero.
+ * pass resolves it. A check wakes a service that scales to zero. With a browser script (Checkly's,
+ * through Vercel) the page loads in Chromium and the script runs against it, every 5 min at most.
  */
 export function ChecksPanel({ service, env, runner }: { service: string; env: Environment; runner: Runner }) {
   const checks = env.checks ?? [];
@@ -17,9 +18,19 @@ export function ChecksPanel({ service, env, runner }: { service: string; env: En
   const [path, setPath] = useState("/");
   const [every, setEvery] = useState("60");
   const [contains, setContains] = useState("");
+  const [script, setScript] = useState("");
   const save = (next: UptimeCheck[]) => runner.run("checks", () => appsApi.putEnvironment(service, env.name, { checks: next.length ? next : null }));
-  const ok = NAME.test(name) && !checks.some((c) => c.name === name) && path.startsWith("/") && !/\s/.test(path) && Number(every) >= 30 && Number(every) <= 3600 && checks.length < 5;
+  const ok = NAME.test(name) && !checks.some((c) => c.name === name) && path.startsWith("/") && !/\s/.test(path) && Number(every) >= (script.trim() ? 300 : 30) && Number(every) <= 3600 && script.length <= 16384 && checks.length < 5;
   const busy = runner.busy !== null;
+  // A failure's file, opened (the screenshot) or saved (the trace) from a blob: the routes need the session.
+  const open = async (check: string, which: "screenshot" | "trace") => {
+    const blob = await appsApi.checkFailure(service, env.name, check, which).catch(() => null);
+    if (!blob) return;
+    const url = URL.createObjectURL(blob);
+    if (which === "screenshot") window.open(url, "_blank", "noopener");
+    else Object.assign(document.createElement("a"), { href: url, download: `${check}-trace.zip` }).click();
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  };
   return (
     <Panel title="Uptime checks" aside={<span className="text-[12px] text-muted">two failures in a row notify; a check keeps a sleeping service awake</span>}>
       {checks.length > 0 && (
@@ -32,7 +43,7 @@ export function ChecksPanel({ service, env, runner }: { service: string; env: En
                 <i className={`size-1.5 rounded-full ${tone}`} aria-label={st?.up === false ? "down" : st?.up ? "up" : "not tried yet"} />
                 <span className="font-medium">{c.name}</span>
                 <code className="min-w-0 flex-1 truncate font-mono text-[12px]">
-                  GET {c.path}
+                  {c.browser ? "Browser" : "GET"} {c.path}
                   {c.contains ? ` · contains ${JSON.stringify(c.contains)}` : ""}
                 </code>
                 <span className="text-[11.5px] text-subtle">
@@ -40,6 +51,16 @@ export function ChecksPanel({ service, env, runner }: { service: string; env: En
                   {st?.last_at ? ` · ${st.status ?? "no answer"}${st.ms != null ? ` in ${st.ms} ms` : ""}, ${since(st.last_at, Date.now())}` : ""}
                 </span>
                 {st?.error && <span className="w-full truncate text-[11.5px] text-danger">{st.error}</span>}
+                {c.browser && st?.failure_at != null && (
+                  <span className="flex w-full gap-3 text-[11.5px]">
+                    <button type="button" className="text-accent hover:underline" onClick={() => void open(c.name, "screenshot")}>
+                      Screenshot of the failure
+                    </button>
+                    <button type="button" className="text-accent hover:underline" onClick={() => void open(c.name, "trace")} title="open it with npx playwright show-trace, or at trace.playwright.dev">
+                      Its Playwright trace
+                    </button>
+                  </span>
+                )}
                 <SureButton className="p-1 text-subtle hover:text-fg" label={`Remove the check ${c.name}`} sure="Sure? Remove" disabled={busy} onSure={() => save(checks.filter((x) => x.name !== c.name))}>
                   <Trash2 className="size-3.5" />
                 </SureButton>
@@ -52,11 +73,12 @@ export function ChecksPanel({ service, env, runner }: { service: string; env: En
         className="flex flex-wrap gap-2 px-5 py-4"
         onSubmit={(e) => {
           e.preventDefault();
-          void save([...checks, { name, path: path.trim(), every_s: Number(every), ...(contains.trim() ? { contains: contains.trim() } : {}) }]).then((r) => {
+          void save([...checks, { name, path: path.trim(), every_s: Number(every), ...(contains.trim() ? { contains: contains.trim() } : {}), ...(script.trim() ? { browser: script, timeout_s: 60 } : {}) }]).then((r) => {
             if (!r) return;
             setName("");
             setPath("/");
             setContains("");
+            setScript("");
           });
         }}
       >
@@ -70,6 +92,16 @@ export function ChecksPanel({ service, env, runner }: { service: string; env: En
             </option>
           ))}
         </select>
+        <textarea
+          value={script}
+          onChange={(e) => setScript(e.target.value)}
+          rows={script ? 4 : 1}
+          placeholder="a browser check's Playwright script (optional): await page.getByRole('button', { name: 'Sign in' }).click()"
+          aria-label="Browser script"
+          spellCheck={false}
+          className={`${input} w-full font-mono text-[12px]`}
+        />
+        {script.trim() && Number(every) < 300 && <span className="w-full text-[11.5px] text-muted">A browser check runs every 5 min at most.</span>}
         <button type="submit" className={primary} disabled={!ok || busy}>
           <Plus className="size-3.5" /> Add
         </button>

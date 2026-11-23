@@ -517,6 +517,83 @@ func (c *Client) freshValues(ctx context.Context, env, path string) (*Values, er
 	return &v, nil
 }
 
+// held is what a watch keeps of a folder's last answer: its values and every key's stamp, so a
+// read after a change asks only for what changed (`…/values/delta`, docs/secrets.md "Delta reads").
+type held struct {
+	values *Values
+	digest string
+	basis  string
+	stamps map[string]string
+	// off: a rolld without the route; reads are full.
+	off bool
+}
+
+// deltaAnswer is `…/values/delta`'s answer: the full set (Delta false), or the keys that changed
+// since the answer held, the names it no longer has, and the changed keys' stamps.
+type deltaAnswer struct {
+	Values
+	Delta   bool              `json:"delta"`
+	Digest  string            `json:"digest"`
+	Basis   string            `json:"basis"`
+	Removed []string          `json:"removed"`
+	Stamps  map[string]string `json:"stamps"`
+}
+
+// deltaValues is freshValues through the delta route: with an answer h holds (no problems, a
+// basis), only what changed, merged into it; otherwise, or when rolld answers the full set, the
+// whole answer, kept in h. A rolld without the route: freshValues from then on.
+func (c *Client) deltaValues(ctx context.Context, env, path string, h *held) (*Values, error) {
+	if h.off {
+		return c.freshValues(ctx, env, path)
+	}
+	e, err := c.env(ctx, env)
+	if err != nil {
+		return nil, err
+	}
+	claim := map[string]any{}
+	if h.values != nil && h.basis != "" && len(h.values.Problems) == 0 {
+		claim = map[string]any{"digest": h.digest, "basis": h.basis, "stamps": h.stamps}
+	}
+	var a deltaAnswer
+	if err := c.call(ctx, http.MethodPost, e+"/values/delta"+query(path), claim, &a); err != nil {
+		var re *Error
+		if errors.As(err, &re) && (re.Status == http.StatusNotFound || re.Status == http.StatusMethodNotAllowed || re.Status == http.StatusRequestEntityTooLarge) {
+			*h = held{off: true}
+			return c.freshValues(ctx, env, path)
+		}
+		return nil, err
+	}
+	stamps := a.Stamps
+	if a.Delta && h.values != nil {
+		values := make(map[string]string, len(h.values.Values)+len(a.Values.Values))
+		stamps = make(map[string]string, len(h.stamps)+len(a.Stamps))
+		for k, v := range h.values.Values {
+			values[k] = v
+		}
+		for k, s := range h.stamps {
+			stamps[k] = s
+		}
+		for _, k := range a.Removed {
+			delete(values, k)
+			delete(stamps, k)
+		}
+		for k, v := range a.Values.Values {
+			values[k] = v
+		}
+		for k, s := range a.Stamps {
+			stamps[k] = s
+		}
+		a.Values.Values = values
+	}
+	v := a.Values
+	*h = held{values: &v, digest: a.Digest, basis: a.Basis, stamps: stamps}
+	// The newest answer: a kept one for the folder goes.
+	c.cacheMu.Lock()
+	delete(c.cache, e+"/values"+query(path))
+	c.cacheMu.Unlock()
+	return v.clone(), nil
+}
+
 // clone is a copy the caller may change without changing what CacheTTL keeps.
 func (v *Values) clone() *Values {
 	out := *v
@@ -748,6 +825,7 @@ func (c *Client) Watch(ctx context.Context, env string, w Watch) error {
 	}
 	var last string
 	var leases []string
+	var h held
 	tick := func() {
 		// A long poll: a change arrives within a second or two (Every paces a server without them).
 		now, err := c.DigestSince(ctx, env, w.Path, last, 25*time.Second)
@@ -762,7 +840,7 @@ func (c *Client) Watch(ctx context.Context, env string, w Watch) error {
 		if w.Consumer != "" {
 			v, err = c.Resolve(ctx, env, w.Path, w.Consumer)
 		} else {
-			v, err = c.freshValues(ctx, env, w.Path)
+			v, err = c.deltaValues(ctx, env, w.Path, &h)
 		}
 		if err != nil {
 			fail(err) // the next tick tries again

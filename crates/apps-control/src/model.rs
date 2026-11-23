@@ -1125,11 +1125,16 @@ pub struct Rollout {
     /// consumer that must be alone. A web service's requests wait for the new one meanwhile.
     #[serde(skip_serializing_if = "is_true")]
     pub overlap: bool,
+    /// The environment's browser checks run against the new deployment's own URL before it
+    /// takes any requests (Checkly's deployment checks, through Vercel); one that fails rolls it
+    /// back (`crate::browser`).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub checks: bool,
 }
 
 impl Default for Rollout {
     fn default() -> Self {
-        Rollout { steps: Vec::new(), step_s: 120, error_pct: 5, manual: false, slo_burn: None, p95_pct: None, overlap: true }
+        Rollout { steps: Vec::new(), step_s: 120, error_pct: 5, manual: false, slo_burn: None, p95_pct: None, overlap: true, checks: false }
     }
 }
 
@@ -1181,11 +1186,17 @@ pub struct Alerts {
     /// some minutes running (Cloud Monitoring's metric alerts): `alert.metric`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub metrics: Vec<MetricAlert>,
+    /// Unusual against its own past (Vercel Observability's anomaly alerts): the last hour
+    /// against the same hour of the week over the last four weeks (two at least), for requests
+    /// dropping, errors or p95 rising, where no fixed threshold would fire: `alert.anomaly`. Off by
+    /// default.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub anomaly: bool,
 }
 
 impl Default for Alerts {
     fn default() -> Self {
-        Alerts { memory_pct: 90, error_pct: 5, p95_ms: 0, capacity_pct: 10, log_match: None, log_count: 10, cpu_pct: 0, metrics: Vec::new() }
+        Alerts { memory_pct: 90, error_pct: 5, p95_ms: 0, capacity_pct: 10, log_match: None, log_count: 10, cpu_pct: 0, metrics: Vec::new(), anomaly: false }
     }
 }
 
@@ -2370,6 +2381,11 @@ pub struct Check {
     /// At most 200 characters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contains: Option<String>,
+    /// A browser check (Checkly's, through Vercel): a Playwright script run in Chromium against
+    /// `path` (`crate::browser`), the body of an async function given `page`, `context` and `url`;
+    /// it fails by throwing. At most 16 KiB; every 300–3600 s, timeout 1–120 s.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser: Option<String>,
 }
 
 impl Check {
@@ -2389,8 +2405,17 @@ impl Check {
         if !self.path.starts_with('/') || self.path.starts_with("//") || self.path.len() > 2000 || !self.path.bytes().all(|b| b.is_ascii_graphic()) {
             return bad("a check's path is an absolute path, like /healthz");
         }
-        if !(30..=3600).contains(&self.every_s) || !(1..=60).contains(&self.timeout_s) {
-            return bad("every_s is 30–3600, timeout_s 1–60");
+        match &self.browser {
+            Some(script) => {
+                if script.trim().is_empty() || script.len() > 16 << 10 {
+                    return bad("a browser check's script is 1 byte to 16 KiB");
+                }
+                if !(300..=3600).contains(&self.every_s) || !(1..=120).contains(&self.timeout_s) {
+                    return bad("a browser check's every_s is 300–3600, timeout_s 1–120");
+                }
+            }
+            None if !(30..=3600).contains(&self.every_s) || !(1..=60).contains(&self.timeout_s) => return bad("every_s is 30–3600, timeout_s 1–60"),
+            None => {}
         }
         if self.status.is_some_and(|s| !(100..=599).contains(&s)) || self.contains.as_ref().is_some_and(|c| c.is_empty() || c.len() > 200) {
             return bad("status is an HTTP status, contains 1–200 characters");
@@ -2463,6 +2488,10 @@ pub struct CheckState {
     pub ms: Option<u64>,
     pub error: Option<String>,
     pub down_since: Option<i64>,
+    /// When a browser check's last failure was kept: its screenshot and Playwright trace
+    /// (`…/checks/{name}/screenshot`, `…/trace`), as this node knows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_at: Option<i64>,
 }
 
 impl Route {
