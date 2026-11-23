@@ -539,7 +539,7 @@ export type MadeGateway = { gateway: Gateway; token?: string };
 export type GitHubApp = { id: string; name: string; app_id: number; installation_id: number; api_base: string; repositories: string[]; permissions: Record<string, string>; created_at: number; created_by: string };
 export type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
 /** A vendor roll issues and revokes keys at itself (`saas` links): its account, never the credential. */
-export type SaasVendor = "sendgrid" | "twilio" | "okta" | "entra" | "auth0" | "gitlab" | "openai" | "datadog";
+export type SaasVendor = "sendgrid" | "twilio" | "okta" | "entra" | "auth0" | "gitlab" | "openai" | "datadog" | "cloudflare" | "databricks" | "confluent";
 export type SaasRotator = { id: string; name: string; vendor: SaasVendor; target: Record<string, unknown>; created_at: number; created_by: string };
 /** `credential` is sealed at once and never answered. */
 export type NewSaasRotator = { name: string; vendor: SaasVendor; target: Record<string, unknown>; credential: string };
