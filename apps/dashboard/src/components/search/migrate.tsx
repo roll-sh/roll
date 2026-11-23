@@ -14,6 +14,7 @@ import {
   migrateApi,
   partial,
   queuedPicks,
+  QUEUED_RETRY_MS,
   queueRetryDelay,
   retryableStart,
   shouldStartQueued,
@@ -178,11 +179,9 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
           if (next && !next.some((x) => x.queued)) waiting.current = null;
           return next;
         });
-        if (r.indices.every((x) => x.queued)) {
-          setTimeout(() => setNudge((n) => n + 1), queueRetryDelay(failures.current++));
-        } else {
-          failures.current = 0;
-        }
+        // Roll answered: errors aren't piling up, and a queued copy keeps its turn by asking again soon.
+        failures.current = 0;
+        if (r.indices.every((x) => x.queued)) setTimeout(() => setNudge((n) => n + 1), QUEUED_RETRY_MS);
         onChanged();
       } catch (e) {
         const status = e instanceof ApiError ? e.status : undefined;

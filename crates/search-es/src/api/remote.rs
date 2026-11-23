@@ -165,11 +165,12 @@ impl RemoteNode {
         })
     }
 
-    /// Whether one more task of `cluster` (of `owner`, [`crate::slots::owner_of`]) would get a
-    /// slot now (roll's migration creates a copy only then); if not, the cluster keeps its place
-    /// in line while it asks again.
-    pub fn has_room(&self, cluster: &str, owner: &str) -> bool {
-        self.tasks.ask(cluster, owner)
+    /// A task slot for `cluster` (of `owner`, [`crate::slots::owner_of`]) held until its next
+    /// remote `_reindex` takes it: roll's migration reserves one before it reads the remote's
+    /// definitions and creates the copy, so the slot is still there when the copy starts. Refused
+    /// as [`RemoteNode::acquire`] is (the cluster keeps its place in line while it asks again).
+    pub fn reserve_task(&self, cluster: &str, owner: &str) -> Option<crate::slots::Reservation> {
+        self.tasks.reserve(cluster, owner).ok()
     }
 
     /// The most tasks one cluster runs at once.

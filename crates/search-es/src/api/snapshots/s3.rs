@@ -248,7 +248,11 @@ impl Bucket {
         // until they have, before anything connects.
         let egress = egress(cluster);
         for url in store.endpoints() {
-            egress.check_url_now(url).await.map_err(|e| repository_exception(name, "cannot create blob store").caused_by(EsError::illegal_argument(format!("the endpoint: {e}"))))?;
+            egress.check_url_now(url).await.map_err(|e| match e {
+                // Not the tenant's mistake: try again, as reindex from remote says it.
+                crate::egress::Refused::NotReady => EsError::java(503, "connect_exception", crate::egress::NOT_READY),
+                e => repository_exception(name, "cannot create blob store").caused_by(EsError::illegal_argument(format!("the endpoint: {e}"))),
+            })?;
         }
         let prefix = prefix(r);
         let st = cluster.state();

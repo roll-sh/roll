@@ -271,8 +271,13 @@ export function retryableStart(status: number | undefined): boolean {
   return status !== undefined && (status === 429 || status >= 500);
 }
 
+/** How soon to ask again while every waiting copy came back `queued`: roll holds the node's copy
+ * slots for each cluster's owner in turn, and a turn that isn't taken within a few seconds goes
+ * to the next one in line, so a queued copy asks again often. */
+export const QUEUED_RETRY_MS = 1_500;
+
 /** How long to wait before asking again to start waiting copies, after `failures` attempts in a
- * row that failed or started nothing: 5s, doubling, at most a minute. */
+ * row that failed: 5s, doubling, at most a minute. */
 export function queueRetryDelay(failures: number): number {
   return Math.min(60_000, 5_000 * 2 ** Math.max(0, Math.min(failures, 10)));
 }

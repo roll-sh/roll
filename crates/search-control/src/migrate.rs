@@ -343,11 +343,12 @@ impl Control {
         let host = normalize_host(&s.host)?;
         let budget = self.node.reindex().control_budget.clone();
         let rules = self.remote_rules()?.without_whitelist();
-        // An address roll refuses (private, denied, blocked, a name that doesn't resolve) reads
-        // like any remote it can't reach: no oracle for which names lead where.
+        // An address roll refuses (private, denied, blocked) reads like any remote it can't
+        // reach: no oracle for which names lead where. (`check_now` resolves nothing; a name that
+        // doesn't resolve fails later, at a call, through `remote_error`.)
         let refused = |e: search_es::EsError| {
             let reason = e.reason();
-            if reason.contains("private address") || reason.contains("may not reach") || reason.contains("blocked in") || reason.contains("not whitelisted") || reason.contains("Name or service not known") {
+            if reason.contains("private address") || reason.contains("may not reach") || reason.contains("blocked in") || reason.contains("not whitelisted") {
                 ControlError::Invalid(format!("couldn't reach the remote at {host}"))
             } else {
                 ControlError::Invalid(reason.to_string())
@@ -597,14 +598,16 @@ impl Control {
             }
             return Err(format!("index [{dest}] already exists on roll: give the copy another name"));
         }
-        // Created only while a task slot is free for the cluster, in turn with every other
+        // Created only with a task slot reserved for the cluster, in turn with every other
         // cluster on the node: otherwise nothing is made, and the index waits (keeping the
-        // cluster's place in line while the dashboard asks again).
+        // owner's place in line while the dashboard asks again). The reservation holds the slot
+        // while the definitions are read and the copy created, however long the remote takes, and
+        // the `_reindex` below uses it; dropped unused (a failure before then), it frees it.
         let owner = search_es::slots::owner_of(c.owner.as_deref(), &c.name);
-        let free = || self.node.get_loaded(&c.name).is_some() && self.node.reindex().has_room(&c.name, &owner);
-        if !free() {
+        let reserved = self.node.get_loaded(&c.name).and_then(|_| self.node.reindex().reserve_task(&c.name, &owner));
+        let Some(_reserved) = reserved else {
             return Ok(json!({ "queued": true, "reason": format!("the node's copy slots are taken (a cluster copies [{}] indices at a time, in turn with the node's other clusters)", self.node.reindex().max_per_cluster()) }));
-        }
+        };
         let err = |e| match remote_error(host, e) {
             ControlError::Invalid(m) | ControlError::Busy(m) => m,
             e => e.to_string(),
