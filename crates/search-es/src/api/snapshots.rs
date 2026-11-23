@@ -1137,6 +1137,11 @@ pub async fn create(ctx: &Ctx<'_>) -> EsResult<Reply> {
                 return Err(EsError::illegal_argument(format!("[{r2}] cannot create snapshot in a readonly repository")));
             }
             let key = r.location_key();
+            // A copy of Elasticsearch's that arrived after the check above: roll's snapshot never
+            // joins it.
+            if st.metadata.repository_data.get(&key).is_some_and(|d| d.elastic) {
+                return Err(EsError::illegal_argument(format!("[{r2}] cannot create snapshot in a readonly repository: Elasticsearch wrote this repository, and roll never writes where Elasticsearch keeps its snapshots")));
+            }
             if st.metadata.repository_data.get(&key).is_some_and(|d| d.find(&snap).is_some()) {
                 return Err(EsError::new(400, "snapshot_name_already_in_use_exception", format!(
                     "[{r2}:{snap}] Invalid snapshot name [{snap}], snapshot with the same name already exists"
@@ -1391,6 +1396,9 @@ pub async fn delete(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let apply = move |st: &mut ClusterState| {
             let Some(r) = st.metadata.repositories.get(&repo).cloned() else { return Err(repository_missing(&repo)) };
             let key = r.location_key();
+            if st.metadata.repository_data.get(&key).is_some_and(|d| d.elastic) {
+                return Err(elastic_read_only(&repo, "delete snapshots"));
+            }
             let mut data = st.metadata.repository_data.get(&key).map(|d| (**d).clone()).unwrap_or_default();
             for p in snaps.iter().filter(|p| !p.contains('*') && *p != "_all") {
                 if data.find(p).is_none() {
@@ -1659,6 +1667,9 @@ pub async fn clone(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let apply = move |st: &mut ClusterState| {
             let Some(r) = st.metadata.repositories.get(&repo).cloned() else { return Err(repository_missing(&repo)) };
             let key = r.location_key();
+            if st.metadata.repository_data.get(&key).is_some_and(|d| d.elastic) {
+                return Err(elastic_read_only(&repo, "create snapshot"));
+            }
             let mut data = st.metadata.repository_data.get(&key).map(|d| (**d).clone()).unwrap_or_default();
             let Some(src) = data.find(&source).cloned() else { return Err(snapshot_missing(&repo, &source)) };
             if data.find(&target).is_some() {

@@ -7,6 +7,7 @@
 use crate::codec;
 use crate::input::Input;
 use crate::{Error, Id, Result, corrupt};
+use std::collections::HashMap;
 
 pub const CODEC: &str = "Lucene94FieldInfos";
 pub const CODEC_90: &str = "Lucene90FieldInfos";
@@ -54,18 +55,27 @@ impl FieldInfo {
     }
 }
 
+/// A segment's fields, found by number or name in constant time (a file may list many: other
+/// readers look a field up for each entry they read).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FieldInfos {
-    pub fields: Vec<FieldInfo>,
+    fields: Vec<FieldInfo>,
+    by_number: HashMap<u32, usize>,
+    by_name: HashMap<String, usize>,
 }
 
 impl FieldInfos {
     pub fn by_number(&self, n: u32) -> Option<&FieldInfo> {
-        self.fields.iter().find(|f| f.number == n)
+        self.by_number.get(&n).map(|&i| &self.fields[i])
     }
 
     pub fn by_name(&self, name: &str) -> Option<&FieldInfo> {
-        self.fields.iter().find(|f| f.name == name)
+        self.by_name.get(name).map(|&i| &self.fields[i])
+    }
+
+    /// The fields in file order.
+    pub fn iter(&self) -> std::slice::Iter<'_, FieldInfo> {
+        self.fields.iter()
     }
 }
 
@@ -90,6 +100,7 @@ pub fn read_field_infos(file: &[u8], id: &Id, suffix: &str) -> Result<FieldInfos
     // A field takes at least its name, number, bits, types, generation and counts.
     let n = inp.count(16)?;
     let mut fields: Vec<FieldInfo> = Vec::with_capacity(n);
+    let (mut by_number, mut by_name) = (HashMap::with_capacity(n), HashMap::with_capacity(n));
     for _ in 0..n {
         let name = inp.string()?.to_string();
         let number = inp.vint()?;
@@ -136,13 +147,15 @@ pub fn read_field_infos(file: &[u8], id: &Id, suffix: &str) -> Result<FieldInfos
             },
         };
         let _similarity = inp.u8()?;
-        if fields.iter().any(|f| f.number == number as u32 || f.name == name) {
+        if by_number.contains_key(&(number as u32)) || by_name.contains_key(&name) {
             return corrupt(format!("duplicate field [{name}] or number [{number}]"));
         }
+        by_number.insert(number as u32, fields.len());
+        by_name.insert(name.clone(), fields.len());
         fields.push(FieldInfo { name, number: number as u32, soft_deletes: bits & SOFT_DELETES_FIELD != 0, doc_values, dv_skipper, dv_gen, attributes, vector_dims, vector_encoding });
     }
     if inp.remaining() != 0 {
         return corrupt("trailing bytes after the field infos");
     }
-    Ok(FieldInfos { fields })
+    Ok(FieldInfos { fields, by_number, by_name })
 }

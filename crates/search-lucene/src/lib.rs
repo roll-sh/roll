@@ -13,12 +13,15 @@
 //! except CodecUtil's headers and footers and the segment infos, which stay big-endian. Files
 //! of other versions are refused with [`Error::Unsupported`], naming what they are.
 //!
-//! Everything read is someone else's input (a tenant's bucket can hold anything). No reader
-//! sizes an allocation from a count or length it read: counts are bounded by the bytes
-//! present, lengths are checked against the input before anything is copied, decompressed
+//! Everything read is someone else's input (a tenant's bucket can hold anything). A count a
+//! reader reads is bounded by the bytes present or by a fixed maximum (documents per chunk,
+//! table sizes), lengths are checked against the input before anything is copied, decompressed
 //! sizes are capped by the caller, and every file's CodecUtil checksum is checked
-//! ([`codec::check_footer`], [`codec::Checksum`] for files read as a stream). No reader does
-//! I/O: they parse byte slices, so the caller decides how bytes arrive and what they cost.
+//! ([`codec::check_footer`], [`codec::Checksum`] for files read as a stream). What a segment's
+//! read holds is charged through [`segment::Files::charge`] before it's fetched or allocated:
+//! small files read whole, stream windows, decompressed chunks, live docs and the doc values
+//! ranges kept; only codec headers of a few dozen bytes go uncharged. No reader does I/O: they
+//! parse byte slices, so the caller decides how bytes arrive and what they cost.
 
 pub mod codec;
 pub mod compound;

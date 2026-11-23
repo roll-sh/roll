@@ -5,6 +5,7 @@
 use crate::codec;
 use crate::input::Input;
 use crate::{Id, Result, corrupt};
+use std::collections::HashSet;
 
 pub const DATA_CODEC: &str = "Lucene90CompoundData";
 pub const ENTRY_CODEC: &str = "Lucene90CompoundEntries";
@@ -27,9 +28,10 @@ pub fn read_entries(cfe: &[u8], id: &Id, cfs_len: u64) -> Result<Vec<Entry>> {
     // An entry takes a suffix and two longs.
     let n = inp.count(17)?;
     let mut out: Vec<Entry> = Vec::with_capacity(n);
+    let mut seen: HashSet<String> = HashSet::with_capacity(n);
     for _ in 0..n {
         let suffix = inp.string()?.to_string();
-        if out.iter().any(|e| e.suffix == suffix) {
+        if !seen.insert(suffix.clone()) {
             return corrupt(format!("Duplicate cfs entry id={suffix} in CFS"));
         }
         if suffix.contains('/') || suffix.contains('\\') {

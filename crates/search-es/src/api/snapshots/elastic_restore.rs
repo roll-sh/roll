@@ -24,9 +24,11 @@
 //!   here; its writes fail at the write-ahead log's ownership check (`log.check()` in
 //!   `CopyTarget::index`), as every write of a node that lost a cluster does. A task that panics
 //!   marks its indices failed on the way out, so no owner retries it forever.
-//! - **Bounds.** Memory held (doc values, vector ordinals, chunk buffers, read windows) is
-//!   charged to the `request` breaker as it is built, and each document from the moment it is
-//!   read until it is indexed (at most [`IN_FLIGHT`] wait in the channel, every one of them
+//! - **Bounds.** Memory a shard's read holds is charged to the `request` breaker before it is
+//!   fetched or allocated: the commit, `.si` and other small files (at most 64 MiB each) while
+//!   they're held, read windows, decompressed chunks, live docs, and the doc values and vector
+//!   ranges kept; only codec headers of a few dozen bytes aren't. Each document is charged from
+//!   the moment it is read until it is indexed (at most [`IN_FLIGHT`] wait in the channel, every one of them
 //!   charged, so the channel's memory is the breaker's, not a count's); a stored fields chunk may
 //!   not decompress past `http.max_content_length` plus a margin; every Lucene file read is
 //!   checksummed; sequence numbers must be in `[0, 2^62)` and primary terms and versions at
@@ -628,6 +630,9 @@ async fn supervise(cluster: Arc<crate::Cluster>, job: Arc<Job>, cancelled: Arc<A
     let (c, j) = (cluster.clone(), job.clone());
     match tokio::spawn(async move { run(&c, &j, &cancelled).await }).await {
         Ok(out) => out,
+        // Cancelled with the runtime (the node stopping): the indices stay restoring, for the
+        // next owner to resume.
+        Err(e) if !e.is_panic() => Err(EsError::internal(format!("the restore task stopped: {e}"))),
         Err(e) => {
             for ix in job.indices.iter().filter(|ix| !ix.finished.load(Ordering::SeqCst)) {
                 cluster.snapshot_data.elastic.progress.lock().remove(&ix.target.uuid);
@@ -971,17 +976,25 @@ async fn restore_shard(cluster: &crate::Cluster, job: &Job, ix: &IndexJob, shard
         if len > SMALL_FILE as u64 {
             return Err(EsError::new(500, "snapshot_restore_exception", format!("[{repo_name}] [{commit_name}] is larger than [{SMALL_FILE}] bytes")));
         }
+        // Small files are charged while they're held, from before they're fetched.
+        d.held.add(len, "<elasticsearch_restore>")?;
         let bytes = d.fetch(&commit_name, 0, len as usize)?;
-        let commit = search_lucene::segments::read_commit(&bytes, generation).map_err(|e| map(d, &commit_name, e))?;
+        let commit = search_lucene::segments::read_commit(&bytes, generation).map_err(|e| map(d, &commit_name, e));
         drop(bytes);
+        d.held.release(len);
+        let commit = commit?;
         for seg in &commit.segments {
             let si_name = format!("{}.si", seg.name);
             let len = d.files.get(&si_name).map(|f| f.length).ok_or_else(|| map(d, &si_name, search_lucene::Error::Corrupt("missing".into())))?;
             if len > SMALL_FILE as u64 {
                 return Err(map(d, &si_name, search_lucene::Error::Unsupported("too large".into())));
             }
+            d.held.add(len, "<elasticsearch_restore>")?;
             let raw = d.fetch(&si_name, 0, len as usize)?;
-            let si = search_lucene::segments::read_segment_info(&raw, &seg.id).map_err(|e| map(d, &si_name, e))?;
+            let si = search_lucene::segments::read_segment_info(&raw, &seg.id).map_err(|e| map(d, &si_name, e));
+            drop(raw);
+            d.held.release(len);
+            let si = si?;
             let mut stop = None;
             // A breaker that trips on a document: its own error, not a damaged file's.
             let mut tripped: Option<EsError> = None;

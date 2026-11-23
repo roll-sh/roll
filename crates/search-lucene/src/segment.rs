@@ -92,12 +92,16 @@ impl View {
         self.locate(files, name)?.ok_or_else(|| Error::Corrupt(format!("the segment's file [{name}] is missing")))
     }
 
-    fn small(&self, files: &mut dyn Files, name: &str, limits: &Limits) -> Result<Vec<u8>> {
+    /// Reads small file `name` whole and parses it, its bytes charged while they're held.
+    fn small<T>(&self, files: &mut dyn Files, name: &str, limits: &Limits, parse: impl FnOnce(&[u8]) -> Result<T>) -> Result<T> {
         let (file, offset, len) = self.need(files, name)?;
         if len > limits.small_file as u64 {
             return Err(Error::Unsupported(format!("[{name}] is [{len}] bytes, more than the [{}] read whole", limits.small_file)));
         }
-        files.read(&file, offset, len as usize)
+        files.charge(len as i64)?;
+        let out = files.read(&file, offset, len as usize).and_then(|b| parse(&b));
+        let _ = files.charge(-(len as i64));
+        out
     }
 }
 
@@ -141,6 +145,12 @@ impl Stream {
                 self.buf_start += stale as u64;
             }
             let want = (self.len - self.fetched).min(self.window.max(n.saturating_sub(self.buf.len())) as u64) as usize;
+            // Charged before it's fetched: the window in flight and the buffer it joins.
+            let ahead = self.buf.capacity().max(self.buf.len() + want) + want;
+            if ahead > self.charged {
+                files.charge((ahead - self.charged) as i64)?;
+                self.charged = ahead;
+            }
             let piece = files.read(&self.file, self.base + self.fetched, want)?;
             if piece.len() != want {
                 return corrupt(format!("[{}] gave [{}] bytes, not [{want}]", self.file, piece.len()));
@@ -150,6 +160,7 @@ impl Stream {
             }
             self.fetched += want as u64;
             self.buf.extend_from_slice(&piece);
+            drop(piece);
             let held = self.buf.capacity();
             files.charge(held as i64 - self.charged as i64)?;
             self.charged = held;
@@ -229,19 +240,18 @@ pub fn read(files: &mut dyn Files, commit: &SegmentCommit, si: &SegmentInfo, vec
     let name = commit.name.as_str();
     let mut view = View { segment: name.to_string(), cfs: None };
     if si.compound {
-        let cfe = view.small(files, &format!("{name}.cfe"), limits)?;
         let cfs = format!("{name}.cfs");
         let cfs_len = files.len(&cfs)?.ok_or_else(|| Error::Corrupt(format!("the segment's file [{cfs}] is missing")))?;
-        let entries = compound::read_entries(&cfe, &commit.id, cfs_len)?;
+        let entries = view.small(files, &format!("{name}.cfe"), limits, |cfe| compound::read_entries(cfe, &commit.id, cfs_len))?;
         let head = files.read(&cfs, 0, (4 + 1 + compound::DATA_CODEC.len() + 4 + 16 + 1).min(cfs_len as usize))?;
         compound::check_data_header(&head, &commit.id)?;
         view.cfs = Some((cfs, entries));
     }
     let infos: FieldInfos = match commit.field_infos_gen {
-        -1 => fields::read_field_infos(&view.small(files, &format!("{name}.fnm"), limits)?, &commit.id, "")?,
+        -1 => view.small(files, &format!("{name}.fnm"), limits, |b| fields::read_field_infos(b, &commit.id, ""))?,
         g => {
             let suffix = crate::base36(g);
-            fields::read_field_infos(&view.small(files, &format!("{name}_{suffix}.fnm"), limits)?, &commit.id, &suffix)?
+            view.small(files, &format!("{name}_{suffix}.fnm"), limits, |b| fields::read_field_infos(b, &commit.id, &suffix))?
         }
     };
     let id_field = infos.by_name("_id").map(|f| f.number);
@@ -256,7 +266,7 @@ pub fn read(files: &mut dyn Files, commit: &SegmentCommit, si: &SegmentInfo, vec
     files.charge(Bits::bytes(max_doc) as i64)?;
     let mut kept = Bits::bytes(max_doc);
     let mut live = match crate::file_name_from_generation(name, "liv", commit.del_gen) {
-        Some(liv) => live::read_live_docs(&view.small(files, &liv, limits)?, &commit.id, commit.del_gen, max_doc, commit.del_count as u32)?,
+        Some(liv) => view.small(files, &liv, limits, |b| live::read_live_docs(b, &commit.id, commit.del_gen, max_doc, commit.del_count as u32))?,
         None if commit.del_count == 0 => Bits::all(max_doc),
         None => return corrupt(format!("[{}] deletions without a live docs file", commit.del_count)),
     };
@@ -273,7 +283,7 @@ pub fn read(files: &mut dyn Files, commit: &SegmentCommit, si: &SegmentInfo, vec
         Magnitude(usize),
     }
     let mut wanted: Vec<(Role, &FieldInfo)> = Vec::new();
-    if let Some(f) = infos.fields.iter().find(|f| f.soft_deletes) {
+    if let Some(f) = infos.iter().find(|f| f.soft_deletes) {
         wanted.push((Role::SoftDeletes, f));
     }
     for (role, n) in [(Role::SeqNo, "_seq_no"), (Role::Version, "_version"), (Role::PrimaryTerm, "_primary_term")] {
@@ -312,8 +322,7 @@ pub fn read(files: &mut dyn Files, commit: &SegmentCommit, si: &SegmentInfo, vec
     type Kept = Vec<(Role, NumericEntry, Option<Vec<u8>>, Vec<u8>)>;
     let mut numerics: Kept = Vec::new();
     for ((suffix, base), members) in &groups {
-        let meta = view.small(files, &format!("{base}.dvm"), limits)?;
-        let entries = docvalues::read_meta(&meta, &commit.id, suffix, &infos)?;
+        let entries = view.small(files, &format!("{base}.dvm"), limits, |meta| docvalues::read_meta(meta, &commit.id, suffix, &infos))?;
         let at = view.need(files, &format!("{base}.dvd"))?;
         let head = files.read(&at.0, at.1, (4 + 1 + docvalues::DATA_CODEC.len() + 4 + 16 + 1 + suffix.len()).min(at.2 as usize))?;
         codec::check_index_header(&mut crate::input::Input::new(&head), docvalues::DATA_CODEC, 0, 2, &commit.id, suffix)?;
@@ -381,8 +390,7 @@ pub fn read(files: &mut dyn Files, commit: &SegmentCommit, si: &SegmentInfo, vec
                 f.attribute("PerFieldKnnVectorsFormat.format").unwrap_or("?")
             )));
         };
-        let meta = view.small(files, &format!("{base}.vemf"), limits)?;
-        let entries = vectors::read_meta(&meta, &commit.id, &suffix, &infos)?;
+        let entries = view.small(files, &format!("{base}.vemf"), limits, |meta| vectors::read_meta(meta, &commit.id, &suffix, &infos))?;
         let Some(entry) = entries.into_iter().find(|e| e.field == f.number) else { continue };
         let at = view.need(files, &format!("{base}.vec"))?;
         let head = files.read(&at.0, at.1, (4 + 1 + vectors::DATA_CODEC.len() + 4 + 16 + 1 + suffix.len()).min(at.2 as usize))?;
@@ -418,7 +426,7 @@ pub fn read(files: &mut dyn Files, commit: &SegmentCommit, si: &SegmentInfo, vec
         }
     }
     // Stored fields, chunk by chunk.
-    let chunk_size = stored::read_chunk_size(&view.small(files, &format!("{name}.fdm"), limits)?, &commit.id)?;
+    let chunk_size = view.small(files, &format!("{name}.fdm"), limits, |b| stored::read_chunk_size(b, &commit.id))?;
     let at = view.need(files, &format!("{name}.fdt"))?;
     let mut fdt = Stream::new(at.0, at.1, at.2, true, limits.window);
     let Some(end) = at.2.checked_sub(codec::FOOTER_LEN as u64) else { return corrupt(format!("[{name}.fdt] is [{}] bytes", at.2)) };

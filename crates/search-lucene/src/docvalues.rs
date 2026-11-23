@@ -14,6 +14,7 @@ use crate::codec;
 use crate::fields::{DocValues, FieldInfos};
 use crate::input::Input;
 use crate::{Id, Result, corrupt};
+use std::collections::HashSet;
 
 pub const META_CODEC: &str = "Lucene90DocValuesMetadata";
 pub const DATA_CODEC: &str = "Lucene90DocValuesData";
@@ -52,6 +53,7 @@ pub fn read_meta(file: &[u8], id: &Id, suffix: &str, fields: &FieldInfos) -> Res
     let mut inp = Input::new(codec::body(file)?);
     let version = codec::check_index_header(&mut inp, META_CODEC, 0, 2, id, suffix)?;
     let mut out = Vec::new();
+    let mut seen = HashSet::new();
     loop {
         let number = inp.i32()?;
         if number == -1 {
@@ -70,7 +72,7 @@ pub fn read_meta(file: &[u8], id: &Id, suffix: &str, fields: &FieldInfos) -> Res
                 if info.doc_values != DocValues::Numeric {
                     return corrupt(format!("field [{}] has numeric doc values but isn't numeric", info.name));
                 }
-                if out.iter().any(|(n, _)| *n == info.number) {
+                if !seen.insert(info.number) {
                     return corrupt(format!("field [{}] listed twice", info.name));
                 }
                 out.push((info.number, e));

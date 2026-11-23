@@ -343,8 +343,23 @@ pub(super) fn forget(cluster: &crate::Cluster, repo: &str) {
     cluster.snapshot_data.elastic_data.lock().retain(|_, c| c.repo != repo);
 }
 
-/// Reads `index.latest` and the newest `index-N`: the copy parsed last when the generation and
-/// the blob's length haven't changed.
+/// How much of `index-N` is read to find its uuid (`min_version` and `uuid` come first).
+const HEAD_LEN: usize = 256;
+
+/// The repository uuid at the start of an `index-N` Elasticsearch wrote, as its JSON starts
+/// (`{"min_version":"7.12.0","uuid":"…"`); `None` when it isn't there.
+fn head_uuid(head: &[u8]) -> Option<&str> {
+    // The head may end inside a character.
+    let text = match std::str::from_utf8(head) {
+        Ok(t) => t,
+        Err(e) => std::str::from_utf8(&head[..e.valid_up_to()]).ok()?,
+    };
+    let rest = &text[text.find("\"uuid\":\"")? + 8..];
+    Some(&rest[..rest.find('"')?])
+}
+
+/// Reads `index.latest` and the newest `index-N`: the copy parsed last when the generation, the
+/// blob's length and the repository uuid it starts with haven't changed.
 pub(super) async fn read_data(cluster: &crate::Cluster, src: &Source) -> EsResult<Arc<EsData>> {
     let latest = src.get("index.latest", 64).await?.ok_or_else(|| repository_exception(&src.repo, "the Elasticsearch repository's [index.latest] is gone"))?;
     let mut generation = i64::from_be_bytes(latest[..8].try_into().map_err(|_| damaged(&src.repo, "index.latest", "short"))?);
@@ -371,19 +386,26 @@ pub(super) async fn read_data(cluster: &crate::Cluster, src: &Source) -> EsResul
         Some(r) => Some(r.len() as u64),
         None => src.size(&what).await?,
     };
-    let cached = {
-        let mut cache = cluster.snapshot_data.elastic_data.lock();
-        let tick = cache.values().map(|c| c.used).max().unwrap_or(0) + 1;
-        match cache.get_mut(&src.cache_key) {
-            Some(c) if c.generation == generation && Some(c.len) == len => {
-                c.used = tick;
-                Some(c.data.clone())
-            }
-            _ => None,
-        }
+    // Generation and length alone don't tell a wiped and rewritten repository's `index-N` from
+    // the one cached: its uuid, at the start, does.
+    let candidate = {
+        let cache = cluster.snapshot_data.elastic_data.lock();
+        cache.get(&src.cache_key).filter(|c| c.generation == generation && Some(c.len) == len && !c.data.uuid.is_empty() && c.data.uuid != "_na_").map(|c| c.data.clone())
     };
-    if let Some(d) = cached {
-        return Ok(d);
+    if let (Some(d), Some(len)) = (candidate, len) {
+        // A file rewritten since its size was read is read whole below.
+        let head = match &raw {
+            Some(r) => Some(r.slice(..r.len().min(HEAD_LEN))),
+            None => src.range(&what, 0, (len as usize).min(HEAD_LEN)).await.ok(),
+        };
+        if head.as_deref().and_then(head_uuid) == Some(d.uuid.as_str()) {
+            let mut cache = cluster.snapshot_data.elastic_data.lock();
+            let tick = cache.values().map(|c| c.used).max().unwrap_or(0) + 1;
+            if let Some(c) = cache.get_mut(&src.cache_key) {
+                c.used = tick;
+            }
+            return Ok(d);
+        }
     }
     let raw = match raw {
         Some(r) => r,
@@ -609,7 +631,6 @@ pub(super) async fn sync(cluster: &crate::Cluster, name: &str, r: &Repository) -
 /// repository was being read (it took the check in [`open`] before) is never replaced. Whether
 /// the copy is Elasticsearch's.
 async fn store_copy(cluster: &crate::Cluster, key: String, copy: RepositoryData) -> EsResult<bool> {
-    let roll_owned = |st: &ClusterState, key: &str| st.metadata.repository_data.get(key).is_some_and(|d| !d.elastic && !d.snapshots.is_empty());
     let st = cluster.state();
     if roll_owned(&st, &key) {
         return Ok(false);
@@ -618,15 +639,22 @@ async fn store_copy(cluster: &crate::Cluster, key: String, copy: RepositoryData)
         return Ok(true);
     }
     drop(st);
-    cluster
-        .update(move |st| {
-            if roll_owned(st, &key) {
-                return Ok(false);
-            }
-            st.metadata.repository_data.insert(key, Arc::new(copy));
-            Ok(true)
-        })
-        .await
+    cluster.update(move |st| Ok(apply_copy(st, key, copy))).await
+}
+
+/// Whether roll's own snapshots are recorded at `key`.
+fn roll_owned(st: &ClusterState, key: &str) -> bool {
+    st.metadata.repository_data.get(key).is_some_and(|d| !d.elastic && !d.snapshots.is_empty())
+}
+
+/// The copy's insert, checked again inside the update: a roll snapshot recorded since
+/// [`store_copy`] looked keeps its place, and the copy is dropped.
+fn apply_copy(st: &mut ClusterState, key: String, copy: RepositoryData) -> bool {
+    if roll_owned(st, &key) {
+        return false;
+    }
+    st.metadata.repository_data.insert(key, Arc::new(copy));
+    true
 }
 
 /// `_id` as Elasticsearch keeps it in Lucene, back to the id it was given (as observed:
@@ -663,24 +691,23 @@ pub fn decode_id(b: &[u8]) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// The race of a roll snapshot recorded between [`open`]'s check and the copy's insert: the
-    /// insert re-checks, so roll's list stays.
+    /// The race of a roll snapshot recorded between [`store_copy`]'s check and the copy's insert:
+    /// the insert checks again, so roll's list stays.
     #[tokio::test]
     async fn a_copy_never_replaces_rolls_snapshots() {
         let c = crate::Cluster::in_memory("es-race").await;
         let roll = RepositoryData { uuid: "roll".into(), generation: 1, snapshots: vec![Arc::new(snapshot_record(&EsSnapshot { name: "mine".into(), uuid: "u".into(), state: 1, start_ms: 0, end_ms: 0, index_metadata: HashMap::new() }, &Value::Null))], elastic: false };
         let es = RepositoryData { uuid: "es".into(), generation: 3, snapshots: Vec::new(), elastic: true };
-        assert!(store_copy(&c, "fs:/x".into(), es.clone()).await.unwrap());
-        c.update(move |st| {
-            st.metadata.repository_data.insert("fs:/x".into(), Arc::new(roll));
-            Ok(())
-        })
-        .await
-        .unwrap();
-        assert!(!store_copy(&c, "fs:/x".into(), es).await.unwrap());
-        let st = c.state();
+        // The update runs on a state that gained roll's snapshot after the first look.
+        let mut st = (*c.state()).clone();
+        assert!(!roll_owned(&st, "fs:/x"));
+        st.metadata.repository_data.insert("fs:/x".into(), Arc::new(roll));
+        assert!(!apply_copy(&mut st, "fs:/x".into(), es.clone()));
         let kept = &st.metadata.repository_data["fs:/x"];
         assert!(!kept.elastic && kept.snapshots[0].name == "mine");
+        // With nothing of roll's there, the copy goes in.
+        assert!(store_copy(&c, "fs:/x".into(), es).await.unwrap());
+        assert!(c.state().metadata.repository_data["fs:/x"].elastic);
     }
 
     #[test]
