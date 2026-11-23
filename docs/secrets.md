@@ -6371,6 +6371,37 @@ adds roll-access's grant lookup or the accounts' and workspace's.
 
 ## Next
 
+**State, 2026-11-23 16:50.** The thirty-fifth review is done: item 6B (#763, 5583dfbfd; `Reference::parse` moved into `crates/roll-secrets-ref`, so agent-proto, the `roll` binary and the gateway don't link roll-secrets) and 6C (#794, dbb4d65af; a refused upstream key fails closed without trying another key of that provider) landed. Also #778, the 05:20 entry below.
+
+The thirty-sixth product review (2026-11-23, cold, read only, against 5430a1b0d) found no live security bug. Its top items were seams where the night's fixes meet each other:
+1. A sandbox stopped on any broken key in its folder, not just the ones it copies.
+2. An environment's delete warning didn't name the services, sandboxes, syncs, identities and tokens that read it.
+3. The events feed had no value changes.
+4. Reach unsealed every roll apps variable to find references.
+5. The CLI didn't follow #720.
+6. `roll secrets agent` kept serving after a 403.
+7. An environment delete revoked credentials before deciding.
+8. Offboarding walked every project.
+9. Five SaaS rotators against AWS's twenty.
+
+Landed since, each with main's CI green and most after a check of the merged tree:
+- #796 (cd59a6cc8): items 1 and 6. A sandbox fails only the keys it copies; a deleted environment in its window is "unsure", so a recovery brings values back. The local agent drops a refused folder at once.
+- #793 (1815bac01): item 3. `secret.changed`, `secret.deleted`, `rotation.succeeded` and `access.changed`, each in the change's own audit row.
+- #798 (ccd0fcdbd): items 2, 5 and 7. The deletion preview names every reader and any break needs `confirm`. `envs rm` previews and says what happened, and `envs recover` exists. The delete decides in one write, then revokes.
+- #816 (efafbcac6): items 4 and 8. roll apps keeps a `reference` column, so reach opens no value. Offboarding reads only the person's rows (`SecretsMemberRechecks`).
+- #819 (3dd33c1d5): item 9, part 1. GitLab (create, then revoke), OpenAI project service accounts and Datadog keys.
+- #800 (e9d6e59b5) and #803 (d40c853b1): delta reads in the operator, CSI provider and Lambda extension, and in the Python, Java, .NET and Ruby clients. All six SDKs and the Go consumers now read only what changed.
+- #813 (8b2470590): roll workspace's project events feed (members, groups, invites) for roll MCP's `workspace.event`. It uses the same cursor rule as secrets' feed.
+
+In flight:
+- item 9, part 2 (Cloudflare, Databricks, Confluent);
+- a test that a fresh project's developer can't reveal production (the thirty-fifth's last gap).
+
+Left from the thirty-sixth:
+- item 10 (time-boxed access for people) and item 13 (the root of trust beyond AWS KMS) are the user's call;
+- item 12 (search's clear passwords without `ROLL_SECRET_KEY`) is roll search's, raised with them;
+- `Watch` with a consumer still reads `/resolve` whole, because there's no delta route there.
+
 **State, 2026-11-23 05:20.** Landed since 19:25, each with main's CI green (most after a check of the merged tree, since main moved about ten commits an hour and the merge queue's CI runs only `cargo test --lib`):
 - #720 (fcafbf9fc): item 2, an environment's delete is kept for the recovery window, and a protected one's is a change request.
 - #732 (de8f381a4): the events feed (`GET …/projects/{project}/events`), roll MCP's `secrets.event`.
