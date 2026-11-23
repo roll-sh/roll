@@ -162,8 +162,9 @@ public class ClientTests
     }
 
     /// <summary>
-    /// Values are kept for CacheTtl, revalidated with their digest (a 304 keeps them), and never
-    /// kept when they hold dynamic credentials or come without an ETag.
+    /// Values are kept for CacheTtl, revalidated with their digest (a 304 keeps them; here a rolld
+    /// without delta reads), and never kept when they hold dynamic credentials or come without an
+    /// ETag.
     /// </summary>
     [Fact]
     public async Task ValuesAreCachedAndRevalidatedWithTheirDigest()
@@ -174,6 +175,10 @@ public class ClientTests
         var asked = new List<string>();
         using var rolld = new FakeRolld(r =>
         {
+            if (r.Path.EndsWith("/values/delta"))
+            {
+                return FakeRolld.Error(404, "no route");
+            }
             var tag = r.Header("If-None-Match");
             lock (asked)
             {
@@ -210,6 +215,75 @@ public class ClientTests
         await c.ValuesAsync("production");
         await c.ValuesAsync("production");
         Assert.Equal(6, asked.Count); // nothing to revalidate by: never kept
+    }
+
+    /// <summary>
+    /// After a one-key change a watch reads only what changed (<c>…/values/delta</c>: each key's
+    /// stamp is its version, the basis fixed) and hands on the whole folder; an older rolld (a 404
+    /// on the route) is read in full.
+    /// </summary>
+    [Fact]
+    public async Task AWatchReadsAChangeThroughTheDeltaAndAnOlderRolldInFull()
+    {
+        var values = new SortedDictionary<string, string> { ["A"] = "1", ["B"] = "2" };
+        var versions = new SortedDictionary<string, int> { ["A"] = 1, ["B"] = 1 };
+        bool route = true;
+        int full = 0;
+        var deltas = new List<string>();
+        using var rolld = new FakeRolld(r =>
+        {
+            lock (values)
+            {
+                string digest = "d" + string.Concat(versions.Select(x => x.Key + x.Value));
+                if (r.Path == Env + "/digest")
+                {
+                    return new(200, new Dictionary<string, string> { ["digest"] = digest });
+                }
+                if (r.Path == Env + "/values")
+                {
+                    full++;
+                    return new(200, FakeRolld.Values(new(values)));
+                }
+                if (r.Path == Env + "/values/delta" && route)
+                {
+                    var claim = r.Json();
+                    bool delta = claim.TryGetProperty("basis", out var b) && b.GetString() == "b1";
+                    var held = claim.TryGetProperty("stamps", out var st) ? st.EnumerateObject().ToDictionary(p => p.Name, p => p.Value.GetString()) : new();
+                    var changed = values.Where(x => !delta || held.GetValueOrDefault(x.Key) != versions[x.Key].ToString()).ToDictionary(x => x.Key, x => x.Value);
+                    deltas.Add(string.Join(",", changed.Keys));
+                    var a = (Dictionary<string, object>)FakeRolld.Values(changed);
+                    a["delta"] = delta;
+                    a["digest"] = digest;
+                    a["basis"] = "b1";
+                    a["removed"] = Array.Empty<string>();
+                    a["stamps"] = changed.Keys.ToDictionary(k => k, k => versions[k].ToString());
+                    return new(200, a);
+                }
+                return FakeRolld.Error(404, "not found");
+            }
+        });
+        using var c = Client(rolld, o => { o.Api = FakeRolld.Url; o.Token = "rlt_fake"; o.Project = "prj_a"; });
+        var seen = new BlockingCollection<string>();
+        string Show(SecretValues v) => string.Join(",", v.Values.OrderBy(x => x.Key).Select(x => x.Key + "=" + x.Value));
+        using (var w = c.Watch("production", new WatchOptions { OnChange = v => seen.Add(Show(v)), Every = TimeSpan.FromMilliseconds(20) }))
+        {
+            Assert.Equal("A=1,B=2", await Next(seen));
+            lock (values)
+            {
+                (values["B"], versions["B"]) = ("3", 2);
+            }
+            Assert.Equal("A=1,B=3", await Next(seen));
+            lock (values)
+            {
+                Assert.Equal(new[] { "A,B", "B" }, deltas); // only B came back, merged into what the watch held
+                Assert.Equal(0, full);
+                route = false;
+                (values["A"], versions["A"]) = ("9", 2);
+            }
+            Assert.Equal("A=9,B=3", await Next(seen));
+            Assert.Equal(1, full); // a 404 reads in full
+            Assert.True(w.Running);
+        }
     }
 
     /// <summary>One key, errors with roll's code, and nothing printable that holds a value.</summary>

@@ -776,6 +776,127 @@ async fn scim_provisions_and_deactivates_people() {
     assert_eq!(scim(Method::GET, "/Users".into(), None, token2).await.status, StatusCode::UNAUTHORIZED);
 }
 
+/// The workspace as rolld hands it to SCIM (`rolld::workspace::Directory`): each change one write.
+struct Groups(Arc<roll_workspace::Workspace>);
+
+fn dir_err(e: roll_workspace::Error) -> roll_accounts::scim_groups::DirError {
+    use roll_accounts::scim_groups::DirError;
+    match e {
+        roll_workspace::Error::NotFound(m) => DirError::NotFound(m),
+        roll_workspace::Error::Conflict(m) => DirError::Conflict(m),
+        roll_workspace::Error::TooMany(m) | roll_workspace::Error::Limit(m) => DirError::TooMany(m),
+        e => DirError::Internal(e.to_string()),
+    }
+}
+
+impl roll_accounts::scim_groups::Directory for Groups {
+    fn list(&self, conn: &str, filter: Option<(&str, &str)>, offset: i64, count: i64) -> Result<(i64, Vec<roll_accounts::scim_groups::DirGroup>), roll_accounts::scim_groups::DirError> {
+        let (n, page) = self.0.scim_groups(conn, filter, offset, count).map_err(dir_err)?;
+        Ok((n, page.into_iter().map(|g| roll_accounts::scim_groups::DirGroup { id: g.id, name: g.name, external_id: g.external_id, members: vec![], created_at: g.created_at }).collect()))
+    }
+    fn get(&self, conn: &str, id: &str, members: bool) -> Result<roll_accounts::scim_groups::DirGroup, roll_accounts::scim_groups::DirError> {
+        let (g, m) = self.0.scim_group(conn, id, members).map_err(dir_err)?;
+        Ok(roll_accounts::scim_groups::DirGroup { id: g.id, name: g.name, external_id: g.external_id, members: m.into_iter().map(|m| (m.user, m.handle)).collect(), created_at: g.created_at })
+    }
+    fn create(&self, conn: &str, name: &str, external_id: Option<&str>, members: &[String]) -> Result<(roll_accounts::scim_groups::DirGroup, roll_accounts::scim_groups::Counts), roll_accounts::scim_groups::DirError> {
+        let (g, c) = self.0.scim_create(conn, name, external_id, members).map_err(dir_err)?;
+        Ok((roll_accounts::scim_groups::DirGroup { id: g.id, name: g.name, external_id: g.external_id, members: vec![], created_at: g.created_at }, roll_accounts::scim_groups::Counts { added: c.added, removed: c.removed, skipped: c.skipped }))
+    }
+    fn patch(&self, conn: &str, id: &str, ops: &[roll_accounts::scim_groups::GroupOp]) -> Result<roll_accounts::scim_groups::Counts, roll_accounts::scim_groups::DirError> {
+        use roll_accounts::scim_groups::GroupOp as A;
+        use roll_workspace::GroupOp as W;
+        let ops: Vec<W> = ops.iter().map(|o| match o { A::Add(l) => W::AddMembers(l.clone()), A::Remove(l) => W::RemoveMembers(l.clone()), A::Replace(l) => W::ReplaceMembers(l.clone()), A::Rename(n) => W::Rename(n.clone()), A::ExternalId(x) => W::ExternalId(x.clone()) }).collect();
+        let c = self.0.scim_patch(conn, id, &ops).map_err(dir_err)?;
+        Ok(roll_accounts::scim_groups::Counts { added: c.added, removed: c.removed, skipped: c.skipped })
+    }
+    fn delete(&self, conn: &str, id: &str) -> Result<(), roll_accounts::scim_groups::DirError> {
+        self.0.scim_delete(conn, id).map_err(dir_err)
+    }
+    fn forget_connection(&self, conn: &str) -> Result<(), roll_accounts::scim_groups::DirError> {
+        self.0.forget_connection_groups(conn).map(|_| ()).map_err(dir_err)
+    }
+}
+
+/// docs/members-v1-1.md, "SCIM Groups": off until an admin turns a connection's groups on; then the
+/// provider's group is one roll group whose members it keeps. Adding someone gives them the
+/// group's project role at once and taking them out (Entra's path form, a PUT, a DELETE) takes it;
+/// people the connection doesn't reach are skipped, and the bounds hold.
+#[tokio::test]
+async fn scim_groups_give_and_take_a_projects_role() {
+    let env = Env::new().await;
+    let idp = fake_idp().await;
+    let issuer = idp.base.lock().unwrap().clone();
+    let txt = Arc::new(Txt::default());
+    env.accounts.set_txt_lookup(txt.clone());
+    let root_invite = env.operator(Method::POST, "/v1/accounts/invites", json!({ "email": "root@acme.test", "admin": true })).await.json["token"].as_str().unwrap().to_string();
+    let root = env.email_sign_in(&mut Browser::default(), "root@acme.test", Some(&root_invite)).await.json["user"]["id"].as_str().unwrap().to_string();
+    let conn = env.operator(Method::POST, "/v1/accounts/sso", json!({ "issuer": issuer, "client_id": "roll-sso", "client_secret": "s3cret", "domains": ["acme.test"] })).await.json;
+    let id = conn["id"].as_str().unwrap().to_string();
+    txt.0.lock().unwrap().insert("_roll-sso.acme.test".into(), vec![conn["dns"]["value"].as_str().unwrap().to_string()]);
+    env.operator(Method::POST, &format!("/v1/accounts/sso/{id}/verify"), json!({})).await;
+    let token = env.operator(Method::POST, &format!("/v1/accounts/sso/{id}/scim"), json!({})).await.json["token"].as_str().unwrap().to_string();
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Arc::new(roll_workspace::Workspace::new(code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap()).unwrap());
+    env.accounts.set_directory(Arc::new(Groups(ws.clone())));
+    let project = ws.create("", "shop", "", None).unwrap().id;
+    let scim = |method: Method, path: String, body: Option<String>| {
+        let (env, token) = (&env, token.clone());
+        async move {
+            let req = Request::builder().method(method).uri(format!("/v1/accounts/scim/v2{path}")).header("authorization", format!("Bearer {token}")).header("content-type", "application/scim+json");
+            env.send(req.body(body.map_or(Body::empty(), Body::from)).unwrap()).await
+        }
+    };
+    let patch = |ops: Value| Some(json!({ "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": ops }).to_string());
+    let mut people = vec![];
+    for who in ["carol", "dave"] {
+        people.push(scim(Method::POST, "/Users".into(), Some(json!({ "userName": format!("{who}@acme.test") }).to_string())).await.json["id"].as_str().unwrap().to_string());
+    }
+    let (carol, dave) = (people[0].clone(), people[1].clone());
+
+    // Off by default: a SCIM 404, and the config describes users only.
+    let eng = json!({ "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"], "displayName": "eng", "externalId": "okta-eng", "members": [{ "value": carol }, { "value": root }, { "value": "usr_nobody" }] }).to_string();
+    assert_eq!(scim(Method::POST, "/Groups".into(), Some(eng.clone())).await.status, StatusCode::NOT_FOUND);
+    assert_eq!(scim(Method::GET, "/ResourceTypes".into(), None).await.json["totalResults"], 1);
+    assert_eq!(env.operator(Method::PATCH, &format!("/v1/accounts/sso/{id}"), json!({ "groups": true })).await.json["groups"], true);
+    assert_eq!(scim(Method::GET, "/ResourceTypes".into(), None).await.json["totalResults"], 2);
+
+    // Made with carol; the admin and the unknown id are skipped, never an error.
+    let made = scim(Method::POST, "/Groups".into(), Some(eng.clone())).await;
+    assert_eq!(made.status, StatusCode::CREATED, "{}", made.json);
+    let group = made.json["id"].as_str().unwrap().to_string();
+    assert_eq!(made.json["members"].as_array().unwrap().iter().map(|m| m["value"].as_str().unwrap()).collect::<Vec<_>>(), vec![carol.as_str()]);
+    assert_eq!(scim(Method::POST, "/Groups".into(), Some(eng)).await.json["scimType"], "uniqueness");
+    let found = scim(Method::GET, "/Groups?filter=displayName%20eq%20%22eng%22&excludedAttributes=members".into(), None).await;
+    assert_eq!((found.json["totalResults"].as_i64(), found.json["Resources"][0]["id"].as_str()), (Some(1), Some(group.as_str())), "{}", found.json);
+    ws.set_group_role(&roll_workspace::Actor::operator(), &project, &group, "developer", None).unwrap();
+    assert!(ws.reaches(&project, &carol).unwrap() && !ws.reaches(&project, &dave).unwrap());
+
+    // Okta adds dave; Entra removes carol by its path form: each takes effect at once.
+    let r = scim(Method::PATCH, format!("/Groups/{group}"), patch(json!([{ "op": "add", "path": "members", "value": [{ "value": dave }] }]))).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    assert!(ws.reaches(&project, &dave).unwrap());
+    assert_eq!(scim(Method::PATCH, format!("/Groups/{group}"), patch(json!([{ "op": "Remove", "path": format!("members[value eq \"{carol}\"]") }]))).await.status, StatusCode::OK);
+    assert!(!ws.reaches(&project, &carol).unwrap(), "removed from the group, she's out of the project");
+    // A PUT replaces the members: carol back, dave out.
+    let put = json!({ "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"], "displayName": "eng", "members": [{ "value": carol }] }).to_string();
+    assert_eq!(scim(Method::PUT, format!("/Groups/{group}"), Some(put)).await.status, StatusCode::OK);
+    assert!(ws.reaches(&project, &carol).unwrap() && !ws.reaches(&project, &dave).unwrap());
+
+    // Bounds: a body past 1 MiB isn't read; too many members or operations change nothing.
+    let huge = format!("{{\"pad\": \"{}\"}}", "x".repeat(roll_accounts::scim_groups::BODY_MAX));
+    assert_eq!(scim(Method::PATCH, format!("/Groups/{group}"), Some(huge)).await.status, StatusCode::PAYLOAD_TOO_LARGE);
+    let many: Vec<Value> = (0..=roll_accounts::scim_groups::MEMBERS_PER_REQUEST).map(|i| json!({ "value": format!("usr_{i}") })).collect();
+    assert_eq!(scim(Method::PATCH, format!("/Groups/{group}"), patch(json!([{ "op": "add", "path": "members", "value": many }]))).await.json["scimType"], "tooMany");
+    let ops: Vec<Value> = (0..=roll_accounts::scim_groups::OPS_MAX).map(|_| json!({ "op": "remove", "path": "members", "value": [{ "value": carol }] })).collect();
+    assert_eq!(scim(Method::PATCH, format!("/Groups/{group}"), patch(json!(ops))).await.json["scimType"], "tooMany");
+    assert!(ws.reaches(&project, &carol).unwrap());
+
+    // Deleted by the provider: its people lose its role, and it's gone.
+    assert_eq!(scim(Method::DELETE, format!("/Groups/{group}"), None).await.status, StatusCode::NO_CONTENT);
+    assert!(!ws.reaches(&project, &carol).unwrap());
+    assert_eq!(scim(Method::GET, format!("/Groups/{group}"), None).await.status, StatusCode::NOT_FOUND);
+}
+
 /// Account events, as rolld's audit log gets them (docs/accounts.md, "Audit").
 #[derive(Default)]
 struct Events(Mutex<Vec<roll_accounts::audit::AccountEvent>>);

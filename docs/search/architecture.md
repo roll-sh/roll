@@ -284,6 +284,26 @@ in-flight body bytes are charged to the node's budget too (`--search-max-in-flig
 4 GiB by default), so one person's many clusters can't hold more bodies than the node allows all
 of them; a body past either budget gets Elasticsearch's indexing-pressure 429.
 
+One memory account per request: what a request holds is charged as it is built to the
+cluster's `request` breaker, and through it (a parent budget, `search_aggs::memory`) to the
+node's budget, `Node::request_memory`, which only the operator sets. It is one budget with what
+the loaded clusters hold resident: `--search-memory-mb` (else half of the host's memory) covers
+both, the reaper telling the budget what residents hold, so requests get what residents leave.
+The node shares that room fairly (a cluster over its share grows only while an eighth stays
+free) and refuses as Elasticsearch's `[parent]` breaker, in the cluster's own numbers; the
+`request` breaker refuses as `[request]`. Both are a 429 `circuit_breaking_exception`. The tenant sets `indices.breaker.request.limit` (`-1` even), but
+its effective limit is held to `--search-request-memory-max` (node setting
+`roll.breaker.request.max_limit`, by default a quarter of the node's budget), so a few busy
+tenants can't add up past the host. Aggregations (shard collection and reduces, composite and
+`terms` included, so transforms and rollups too), buffered `_msearch` responses, snapshot
+transfers and ES|QL all charge it; ES|QL charges each page of rows, group table and aggregate
+state, sort buffer, join and lookup table and its result as they grow, from what they allocate,
+and gives each back when it drops (`xpack/esql/memory.rs`), and its functions build strings
+and multi-values through one bounded builder (`functions::Built`); kept async results and
+cross-cluster contexts stay charged while they live. Requests can't be evicted, so past
+`--search-memory-mb` in residents plus requests, idle clusters unload to make room for both;
+a wake counts the newcomer's resident memory at once.
+
 The embedding model is the node's, shared by its clusters (`search_server::embed`): a bounded
 pool of workers (a third of the CPUs by default, optionally pinned); inputs cut to the bounded
 start their 512 tokens come from and queued per cluster in jobs of about 1,024 tokens; turns by
@@ -537,7 +557,8 @@ allowlist (a preview's branch included); change it like any setting.
   they expire, keyed by a digest of the account. Without credentials requests are anonymous:
   roll's own credentials are never used for a tenant's bucket. Endpoints, a key file's
   `token_uri` and a GCS session URL (which must be on the endpoint's origin) are URLs the
-  tenant chose: public addresses only (`roll_net::PublicOnly`, `literal_private_host`), no
+  tenant chose: the node's egress check (`search_es::egress`: public addresses only, never one
+  the node denies, literals checked too), no
   redirects, no proxy, bounded reads (`--search-repository-allow-private` for local MinIO,
   fake-gcs-server and Azurite; `scripts/search-repo-emulators.sh` runs the `gcs` and `azure`
   tests against those two in Docker).
@@ -611,9 +632,11 @@ both with Elasticsearch 9.5.5's shapes, validation and state machines
   scheduled sync is due; between syncs it costs nothing. A sync is a task of its own
   (one per connector at a time; others wait as `pending`): the scheduler starts it and goes
   back to sleep. At most two run at once per cluster, four per node, and two per owner on a node
-  (the person a cluster belongs to; `sync/slots.rs`). A cluster that can't get one of the
-  node's slots waits in a FIFO queue: a slot that frees wakes the first waiter whose owner is
-  under its cap, and nobody behind it (the cluster that freed it included) takes the slot first.
+  (the person a cluster belongs to; `search_es::slots`, the pool remote reindex tasks and a
+  migration's calls take turns in too, each with its own caps). A cluster that can't get one of the
+  node's slots waits in a FIFO queue: a slot that frees wakes the first waiter whose owner and
+  cluster are under their caps, and nobody behind it (the cluster that freed it included) takes
+  the slot first.
   A waiter counts only while its cluster is loaded and still has a job it could start (checked
   whenever the queue is looked at, against a few of its own jobs, so a canceled job or a
   removed connector never holds it up), a woken waiter that doesn't take its slot within 30
@@ -765,11 +788,16 @@ both with Elasticsearch 9.5.5's shapes, validation and state machines
   draft of a connector it runs (rules parse, regexes compile, an advanced snippet has the
   service's shape) and sets its `validation` to `valid` or `invalid`, which
   `_filtering/_activate` requires, as Elastic's connector service does.
-- **Reaching sources.** Host, port and endpoint are the tenant's choice, so connections go to
-  public addresses only: Postgres hosts are resolved and refused when any address is private,
-  and S3 goes through `search-es` `s3.rs` (`roll_net::PublicOnly`, private literals refused, no
-  redirects, bounded reads). `roll.connectors.allow_private_hosts`
-  (`ROLL_SEARCH_CONNECTORS_ALLOW_PRIVATE`) lifts that for local development only.
+- **Reaching sources.** Host, port and endpoint are the tenant's choice, so connections go
+  through the node's egress check (`search_es::egress`, the one reindex from remote uses):
+  public addresses only, never one the node denies (rolld's own addresses and names, the
+  operator's `--search-egress-deny` networks), and nothing out until the node's own names have
+  resolved once. A Postgres host is resolved by the check and the connection goes to an address
+  it passed; S3 goes through `search-es` `s3.rs` (the check's resolver, literals checked, no
+  redirects, bounded reads). A denied host fails the job with reindex's refusal (`[host] is an
+  address roll may not reach`). `roll.connectors.allow_private_hosts`
+  (`ROLL_SEARCH_CONNECTORS_ALLOW_PRIVATE`) lets private addresses through for local development
+  only; the deny list still applies.
 - **Credentials.** Fields roll's schema marks `sensitive` (`password`, `aws_secret_access_key`)
   of a connector roll runs are sealed when written (`seal.rs`, under `ROLL_SECRET_KEY`), opened
   only by the sync, and never returned:
@@ -788,6 +816,11 @@ both with Elasticsearch 9.5.5's shapes, validation and state machines
     writing `********` back keeps the stored value, so a client can round-trip a
     configuration. A sealed value shows as `********` on every connector, self-managed ones
     included.
+  - A self-managed connector's values are stored and returned as given, in the clear, as
+    Elasticsearch does: the tenant's own connector service reads its configuration through the
+    API, so roll can't seal what that service must read. Anyone who can read the cluster's
+    connectors (`monitor_connector`) sees them. The dashboard's Connectors tab blanks every
+    `sensitive` value as it loads, so it never holds one.
   - A value's associated data is `connector configuration:<cluster id>:<connector id>:<field>`
     (the cluster's id in roll's catalog), so a sealed value copied into another connector or
     field, or carried to another cluster (a branch's copy of its parent's state), doesn't

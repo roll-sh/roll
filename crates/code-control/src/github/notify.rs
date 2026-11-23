@@ -198,9 +198,10 @@ pub(super) async fn preview(code: &Code, hub: &Hub, c: &Change) -> Result<()> {
     let visual = env.and_then(|e| e.visual_review.as_ref()).map(visual_status);
     let speed = env.and_then(speed_status);
     let regressions = env.and_then(regressions_status);
+    let browser = env.and_then(browser_checks_status);
     // Statuses go out when they change for this head, not on every wake and sleep.
     let state_key = format!("pv-state:{}", c.id);
-    let state_now = format!("{sha}:{status:?}:{deploy:?}:{description}:{visual:?}:{speed:?}:{regressions:?}");
+    let state_now = format!("{sha}:{status:?}:{deploy:?}:{description}:{visual:?}:{speed:?}:{regressions:?}:{browser:?}");
     if mark(code, &state_key)?.as_deref() == Some(state_now.as_str()) {
         return Ok(());
     }
@@ -267,6 +268,12 @@ pub(super) async fn preview(code: &Code, hub: &Hub, c: &Change) -> Result<()> {
         && let Some((state, why)) = &regressions
     {
         hub.client.create_status(l.installation_id, &l.owner, &l.repo, &sha, state, "roll/regressions", Some(why), log_url.as_deref()).await.map_err(gh)?;
+    }
+    // Production's browser checks on the preview's head (Vercel's Deployment Checks).
+    if rules.status
+        && let Some((state, why)) = &browser
+    {
+        hub.client.create_status(l.installation_id, &l.owner, &l.repo, &sha, state, "roll/browser-checks", Some(why), log_url.as_deref()).await.map_err(gh)?;
     }
     // The deployment: one per head, its status following the preview; the last one goes
     // inactive when the preview is removed.
@@ -480,6 +487,24 @@ fn regressions_status(e: &crate::model::PreviewEnvironment) -> Option<(&'static 
     })
 }
 
+/// The `roll/browser-checks` status, with the project's `browser_checks` rule (`check`,
+/// `required`) and checks to run: pending while any runs, failing while any failed.
+fn browser_checks_status(e: &crate::model::PreviewEnvironment) -> Option<(&'static str, String)> {
+    e.browser_checks_rule.as_ref()?;
+    if e.browser_checks.is_empty() {
+        return None;
+    }
+    let n = |st: &str| e.browser_checks.iter().filter(|c| c.state == st).count();
+    let total = e.browser_checks.len();
+    Some(if n("pending") > 0 {
+        ("pending", format!("{} of {total} production browser checks running", n("pending")))
+    } else if n("failed") > 0 {
+        ("failure", format!("{} of {total} production browser checks failed", n("failed")))
+    } else {
+        ("success", format!("{total} production browser checks passed"))
+    })
+}
+
 /// The `roll/speed` status, once the first page was timed under a budget.
 fn speed_status(e: &crate::model::PreviewEnvironment) -> Option<(&'static str, String)> {
     let (b, s) = (e.speed_budget.as_ref()?, e.page_speed.as_ref()?);
@@ -637,6 +662,10 @@ fn page_checks(e: &crate::model::PreviewEnvironment) -> Option<String> {
             if slower > 0 {
                 summary.push(format!("{} slower than {branch}", plural(slower as u64, "endpoint", "endpoints")));
             }
+            let reshaped = b.endpoints.iter().filter(|x| !x.shape_changes.is_empty()).count();
+            if reshaped > 0 {
+                summary.push(if reshaped == 1 { format!("1 endpoint's answer changed shape against {branch}") } else { format!("{reshaped} endpoints' answers changed shape against {branch}") });
+            }
             details.push_str(&endpoints_line(&b.endpoints, &branch));
         }
         // roll's own signed link (a public preview's); nothing in it can end the image's markdown.
@@ -654,6 +683,10 @@ fn page_checks(e: &crate::model::PreviewEnvironment) -> Option<String> {
         let branch = branch_name(&n.branch);
         summary.push(format!("{} against {branch}", plural(n.total as u64, "new error", "new errors")));
         details.push_str(&new_errors_line(n, &branch));
+    }
+    if !e.served_secrets.is_empty() {
+        summary.push(format!("serves {}", plural(e.served_secrets.len() as u64, "secret value", "secret values")));
+        details.push_str(&served_line(&e.served_secrets));
     }
     if let Some(v) = &e.visual_change {
         summary.push(if v.percent <= 0.0 { "unchanged since the push before".into() } else { format!("changed {} since the push before", pct(v.percent)) });
@@ -790,6 +823,28 @@ fn visual_line(v: &crate::model::PreviewVisualChange) -> String {
     }
 }
 
+/// The comment's line on production's browser checks run on this head: how many passed, which
+/// failed (by name; what they printed stays on the sheet), how many are still running.
+fn browser_checks_line(checks: &[crate::model::PreviewBrowserCheck]) -> Option<String> {
+    if checks.is_empty() {
+        return None;
+    }
+    let tidy = |s: &str| s.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ' ' | '.')).take(60).collect::<String>();
+    let count = |st: &str| checks.iter().filter(|c| c.state == st).count();
+    let failed: Vec<String> = checks.iter().filter(|c| c.state == "failed").map(|c| format!("`{}: {}`", tidy(&c.service), tidy(&c.name))).collect();
+    let mut parts = Vec::new();
+    if !failed.is_empty() {
+        parts.push(format!("**{} failed** ({})", failed.len(), failed.join(", ")));
+    }
+    if count("passed") > 0 {
+        parts.push(format!("{} passed", count("passed")));
+    }
+    if count("pending") > 0 {
+        parts.push(format!("{} running", count("pending")));
+    }
+    Some(format!("Production's browser checks on this head: {}.\n\n", parts.join(", ")))
+}
+
 /// The comment's links to earlier pushes (before and after), each saying whether it runs on its
 /// own copy of the data or the preview's.
 fn earlier_line(earlier: &[crate::model::PreviewEarlier]) -> Option<String> {
@@ -892,6 +947,9 @@ pub fn preview_comment_for(p: Option<&Preview>, marker: &str, teardown: Option<&
             if let Some(block) = page_checks(e) {
                 out.push_str(&block);
             }
+            if let Some(line) = browser_checks_line(&e.browser_checks) {
+                out.push_str(&line);
+            }
             if let Some(line) = earlier_line(&e.earlier) {
                 out.push_str(&line);
             }
@@ -912,6 +970,20 @@ pub fn preview_comment_for(p: Option<&Preview>, marker: &str, teardown: Option<&
     }
     out.push_str(&format!("\n{marker}"));
     out
+}
+
+/// Its secret values its pages serve: each by the name it's given as, and where (never the
+/// value), each in a code span nothing in it can close.
+fn served_line(served: &[crate::model::PreviewServedSecret]) -> String {
+    let each: Vec<String> = served
+        .iter()
+        .map(|s| {
+            let key: String = s.key.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_').take(100).collect();
+            let path: String = s.path.chars().filter(|c| !c.is_control() && *c != '`').take(200).collect();
+            format!("`{key}` in `{path}`")
+        })
+        .collect();
+    format!("**Secret values in what it serves:** {}. Anyone who opens the preview can read them: rotate them, and keep them out of the browser's code.\n\n", each.join(", "))
 }
 
 /// Its error groups the branch's preview doesn't have: how many, by service. Their titles are log
@@ -958,7 +1030,18 @@ fn endpoints_line(endpoints: &[crate::model::PreviewEndpoint], branch: &str) -> 
             let path = x.path.replace('`', "'");
             let main = x.main_ms.map(|m| format!(" ({branch} {m} ms)")).unwrap_or_default();
             let status = if x.status == 0 { ", no answer".to_string() } else if x.status >= 400 { format!(", {}", x.status) } else { String::new() };
-            format!("`GET {path}` {} ms{main}{status}{}", x.ms, if x.slower { ", slower" } else { "" })
+            // The answer's fields, each in a code span nothing in it can close.
+            let field = |s: &str| format!("`{}`", s.chars().filter(|c| !c.is_control() && *c != '`').take(200).collect::<String>());
+            let shape: Vec<String> = x
+                .shape_changes
+                .iter()
+                .map(|c| match &c.now {
+                    None => format!("{} gone", field(&c.path)),
+                    Some(now) => format!("{} {} → {}", field(&c.path), field(&c.main), field(now)),
+                })
+                .collect();
+            let shape = if shape.is_empty() { String::new() } else { format!(", its answer: {}", shape.join(", ")) };
+            format!("`GET {path}` {} ms{main}{status}{}{shape}", x.ms, if x.slower { ", slower" } else { "" })
         })
         .collect();
     format!("Its endpoints against `{branch}`: {}.\n\n", each.join("; "))
@@ -1102,6 +1185,8 @@ mod preview_tests {
             screenshot_url: None,
             expires_at: None,
             earlier: Vec::new(),
+            browser_checks: Vec::new(),
+            browser_checks_rule: None,
             visual_change: None,
             page_speed: None,
             page_health: None,
@@ -1109,6 +1194,7 @@ mod preview_tests {
             page_links: None,
             slower_routes: None,
             new_errors: None,
+            served_secrets: Vec::new(),
             base_change: None,
             diff_url: None,
             pages: Vec::new(),
@@ -1138,6 +1224,22 @@ mod preview_tests {
         let earlier = |url: &str| crate::model::PreviewEarlier { service: "web".into(), head: "cs_1a2b3c4d5e6f".into(), url: url.into(), own_data: true };
         assert_eq!(earlier_line(&[earlier("https://web-1a2b3c4d5e-pr7-shop.preview.roll.site")]).as_deref(), Some("\nEarlier pushes: [web at `1a2b3c4d5e`](https://web-1a2b3c4d5e-pr7-shop.preview.roll.site) (on its own data).\n"));
         assert_eq!(earlier_line(&[earlier("javascript:alert(1)"), earlier("https://x/a)b")]), None, "only plain links");
+        let bc = |name: &str, state: &str| crate::model::PreviewBrowserCheck { service: "web".into(), name: name.into(), state: state.into() };
+        assert_eq!(
+            browser_checks_line(&[bc("checkout`](x)", "failed"), bc("home", "passed"), bc("search", "pending")]).as_deref(),
+            Some("Production's browser checks on this head: **1 failed** (`web: checkoutx`), 1 passed, 1 running.\n\n"),
+            "a name can't close its code span or add a link"
+        );
+        assert_eq!(browser_checks_line(&[]), None);
+        let mut ruled = p.environment.clone().unwrap();
+        assert_eq!(browser_checks_status(&ruled), None, "no rule, no status");
+        ruled.browser_checks_rule = Some("check".into());
+        ruled.browser_checks = vec![bc("home", "passed"), bc("checkout", "pending")];
+        assert_eq!(browser_checks_status(&ruled).map(|x| x.0), Some("pending"));
+        ruled.browser_checks[1].state = "failed".into();
+        assert_eq!(browser_checks_status(&ruled), Some(("failure", "1 of 2 production browser checks failed".to_string())));
+        ruled.browser_checks[1].state = "passed".into();
+        assert_eq!(browser_checks_status(&ruled).map(|x| x.0), Some("success"));
         let v = |percent: f64| crate::model::PreviewVisualChange { since: "cs_1a2b3c4d5e6f".into(), percent, phone_percent: None };
         assert_eq!(visual_line(&v(12.34)), "The page changed 12.3% since `1a2b3c4d5e` (its share of pixels).\n\n");
         assert_eq!(visual_line(&v(0.0)), "The page looks the same as at `1a2b3c4d5e`.\n\n");
@@ -1164,12 +1266,18 @@ mod preview_tests {
         let words = crate::model::PreviewTextDiff { added: vec!["Pay ```now".into()], removed: vec!["Checkout".into()], added_n: 1, removed_n: 1 };
         assert_eq!(text_block(&words, "main"), "**Its words against `main`:**\n\n```diff\n- Checkout\n+ Pay now\n```\n\n");
         let api = crate::model::PreviewTextDiff { added: vec!["POST /orders".into()], removed: vec!["DELETE /users/{id}`x".into()], added_n: 1, removed_n: 1 };
-        let ep = |path: &str, ms, main_ms, slower| crate::model::PreviewEndpoint { path: path.into(), ms, status: 200, main_ms, slower };
+        let ep = |path: &str, ms, main_ms, slower| crate::model::PreviewEndpoint { path: path.into(), ms, status: 200, main_ms, slower, shape_changes: Vec::new() };
         assert_eq!(
             endpoints_line(&[ep("/api/users", 140, Some(40), true), ep("/api/`x`", 12, None, false)], "main"),
             "Its endpoints against `main`: `GET /api/users` 140 ms (main 40 ms), slower; `GET /api/'x'` 12 ms.\n\n",
             "a path can't end its code span"
         );
+        let mut reshaped = ep("/api/users", 40, Some(40), false);
+        reshaped.shape_changes = vec![
+            crate::model::PreviewShapeChange { path: "users[].email`".into(), main: "string".into(), now: None },
+            crate::model::PreviewShapeChange { path: "total".into(), main: "number".into(), now: Some("string".into()) },
+        ];
+        assert_eq!(endpoints_line(&[reshaped], "main"), "Its endpoints against `main`: `GET /api/users` 40 ms (main 40 ms), its answer: `users[].email` gone, `total` `number` → `string`.\n\n");
         assert_eq!(api_line(&api, &[], "main"), "**Its API against `main`:** removes `DELETE /users/{id}x` (breaking for callers of `main`'s); adds `POST /orders`.\n\n", "an operation can't end its code span");
         let same = crate::model::PreviewTextDiff { added: vec![], removed: vec![], added_n: 0, removed_n: 0 };
         assert_eq!(
@@ -1178,6 +1286,8 @@ mod preview_tests {
         );
         let links = crate::model::PreviewPageLinks { checked: 4, broken: vec![crate::model::PreviewBrokenLink { path: "/gone`)".into(), status: 404 }, crate::model::PreviewBrokenLink { path: "/slow".into(), status: 0 }] };
         assert_eq!(links_line(&links), "**Broken links** (of 4 checked on its first page): `/gone` 404, `/slow` no answer.\n\n");
+        let served = [crate::model::PreviewServedSecret { key: "STRIPE_KEY`".into(), path: "/app.js`x".into() }];
+        assert_eq!(served_line(&served), "**Secret values in what it serves:** `STRIPE_KEY` in `/app.jsx`. Anyone who opens the preview can read them: rotate them, and keep them out of the browser's code.\n\n");
         // In the comment, one folded block whose summary is counts only.
         let mut e = p.environment.clone().unwrap();
         (e.page_health, e.page_a11y, e.base_change, e.visual_change, e.page_speed) = (Some(h(2, 1)), Some(a), Some(b), Some(v(12.34)), Some(sp(1200, Some(900))));

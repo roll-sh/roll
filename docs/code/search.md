@@ -1,10 +1,10 @@
 # Searching across repos
 
-Status: design (2026-11-22). Not built yet.
+Status: built (2026-11-22, the PR after #751), as below, with one change from the first design: each repo's part is its own internal request (`Code::to_owner`, `POST /internal/code/repos/{id}/search`), at most 16 at once, rather than one request per node. That reuses the owner routing every repo request has (retries, moves), at the cost of more requests for a caller with many repos on one node.
 
 `GET /v1/code/search` (roll MCP's `search`, #745) finds the changes and work items of the caller's
 own repos. It reads control.db, which every node shares, so it never leaves the node that got the
-request. This document is the plan for the next step: files by content, across the same repos.
+request. This document covers the next step: files by content, across the same repos.
 
 ## What's in the way
 
@@ -43,9 +43,10 @@ The node that gets the request:
    keeps the 200 most recently landed. The rest go in `skipped` with `limit`.
 2. Groups them by owner (`Cluster::route_async` on each repo's key): local repos and one group per
    other node.
-3. Searches its own repos in process. For each other node it sends one signed request,
-   `POST /internal/code/search {repos: [repo id], q, regex: false, per_repo: 5, deadline_ms}`, on
-   the internal router (`require_signed`, as `/internal/code/repos/{id}/kick` is).
+3. Sends each repo's part to its owner, at most 16 at a time: `POST
+   /internal/code/repos/{id}/search {q, per_repo: 5}` through `Code::to_owner` (in process when this
+   node owns it; signed and forwarded otherwise, on the internal router behind `require_signed`, as
+   `kick` is).
 4. Waits up to 3 s overall. A node that hasn't answered by then has all of its repos skipped with
    `unavailable`.
 
@@ -72,11 +73,13 @@ both.
 - A 1 s budget per repo and 3 s overall.
 - 64 KiB per internal answer. Lines are cut at 300 characters.
 
-## Tests to write with it
+## Tests
 
-- `code-control/tests/cluster.rs`: three nodes, repos owned by each. A file search through a
-  non-owner finds a match in every repo. A stopped node's repos come back in `skipped` as
-  `unavailable` within the overall wait.
-- `code-control/tests/mcp.rs`: `search` with `kinds=files` and `fetch` of a file id. Another
-  owner's public repo is still left out.
-- `routes.rs`: file document ids in the documents matrix.
+- `code-control/tests/cluster.rs::a_file_search_runs_each_repo_on_its_owner`: three nodes, repos
+  owned across them. A file search through one node finds a match in every repo, nothing is
+  skipped, and no node built an index for a repo it doesn't own.
+- `code-control/tests/mcp.rs::search_and_fetch_read_your_own_repos`: `search` with `kinds=files`
+  and `fetch` of a file id. Another owner can't fetch it.
+- The same cluster test kills a repo's owner (no goodbye): the search through another node
+  answers in time, the dead owner's repo is in `skipped` (`unavailable`), and every repo is found
+  or skipped.

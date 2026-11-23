@@ -90,15 +90,22 @@ POST   /v1/code/repos {owner, name, description?, visibility?, default_branch?, 
 GET    /v1/code/repos/{owner}/{repo} → Repo     an old name answers 301 with Location and {redirect: "owner/new"} (404 to callers who can't read the repo)
 PATCH  /v1/code/repos/{owner}/{repo} {name?, description?, visibility?, land_policy?, required_checks?, default_branch?} → Repo
 DELETE /v1/code/repos/{owner}/{repo} → 204
-GET    /v1/code/search?q=&limit= → {results: [{id /* chg_… | wi_… */, title, url, kind: "change" | "work_item", repo, number, state,
-                                               text /* a snippet */, outside, updated_at}]}
+GET    /v1/code/search?q=&kinds=&limit= → {results: [{id /* chg_… | wi_… */, title, url, kind: "change" | "work_item", repo, number, state,
+                                               text /* a snippet */, outside, updated_at}
+                                             | {id /* f.… */, title, url, kind: "file", repo, path, line, text /* the line */, outside: false}],
+                                    skipped? /* with files */: [{repo, why: "limit" | "timeout" | "unavailable" | "indexing" | "off" | "error"}]}
        changes and work items whose title or text holds `q` (1-200 characters, any case), in the caller's own
        repos only (an owner's token: its owner's; a review app's: where it's installed; admin: every repo), most
        recently updated first (`limit` 1-50, default 20); a scoped token keeps only its repos' results.
-       roll's `search` tool (ChatGPT's deep research)
+       `kinds` (comma-separated `changes`, `work`, `files`; default `changes,work`): `files` adds files whose content
+       holds `q` (3+ characters) from each repo's index on its owner (the 200 most recently changed repos, 5 matches
+       each, 1 s each, 3 s in all), interleaved by repo; every repo not searched is in `skipped`.
+       roll's `search` tool (ChatGPT's deep research); docs/code/search.md
 GET    /v1/code/documents/{id} → {id, title, text, url, metadata: {kind, repo, number, state, author?, branch?,
                                    work_item?, labels?, priority?, changes?, github_url?}, repo, outside}
-       one change or work item of the caller's own repos, in full; 404 for anything else. roll's `fetch` tool
+       one change or work item of the caller's own repos, in full, or a file match (`f.…`): up to 400 lines around
+       it at the revision searched, metadata {kind: "file", repo, path, rev, line, from, to, lines}; 404 for
+       anything else. roll's `fetch` tool
 ```
 
 ## Reading code
@@ -166,12 +173,15 @@ Preview = {state: "creating" | "running" | "sleeping" | "failed", url: string | 
                           screenshot_url?: string /* a public preview's screenshot, signed and expiring */,
                           diff_url?: string /* the same for where it differs from the default branch's, when it does */,
                           expires_at?: number /* ms: when it goes (its TTL, or a keep, running out), once a day away */,
+                          browser_checks?: [{service, name, state}] /* production's browser checks on this head: pending, passed or failed */,
+                          served_secrets?: [{key, path}] /* its secret values its pages serve: names and where, never values */,
+                          browser_checks_rule?: "check" | "required" /* the project's rule: the roll/browser-checks status; required also a blocker */,
                           earlier?: [{service, head, url, own_data}] /* earlier pushes still reachable, newest first; own_data: on its own copy of the data, as its head left it (else the preview's) */,
                           visual_change?: {since, percent, phone_percent?} /* how much the first service's page changed since the screenshot at an earlier head */,
                           page_speed?: {ttfb_ms, fcp_ms: number | null, load_ms, bytes, before_load_ms: number | null} /* how fast that page loaded, timed with its screenshot */,
                           page_health?: {errors, first_error: string | null, failed, first_failed: string | null} /* what went wrong while it loaded: the page's own words, untrusted */,
                           page_a11y?: {issues: [{kind: "images" | "fields" | "buttons" | "links", count, first: string | null}], lang: bool, title: bool} /* what a screen reader can't name there; first is the page's markup, untrusted */,
-                          base_change?: {branch, percent, phone_percent: number | null, head?: string | null, load_ms?: number, a11y_added?: number, errors_added?: number, text?: TextDiff, links_added?: number, seo_added?: number, api?: TextDiff /* its API operations against the branch's */, api_breaking?: string[] /* what it breaks inside the operations both keep */, endpoints?: {path, ms, status, main_ms: number | null, slower}[] /* github.endpoints' times against the branch's */} /* how much the page differs from the project's preview of the default branch */,
+                          base_change?: {branch, percent, phone_percent: number | null, head?: string | null, load_ms?: number, a11y_added?: number, errors_added?: number, text?: TextDiff, links_added?: number, seo_added?: number, api?: TextDiff /* its API operations against the branch's */, api_breaking?: string[] /* what it breaks inside the operations both keep */, endpoints?: {path, ms, status, main_ms: number | null, slower, shape_changes?: {path, main, now: string | null}[]}[] /* github.endpoints' times against the branch's */} /* how much the page differs from the project's preview of the default branch */,
                           pages?: [{path, errors, percent: number | null, base_percent: number | null}] /* the project's other pages (github.pages): errors while each loaded, its change since the push before, against the default branch */,
                           speed_budget?: {load_ms, bytes} /* the project's github.budget (0: no limit), for roll/speed */,
                           visual_review?: {state: 'unchanged' | 'changed' | 'accepted', branch, percent, by: string | null, required, head?, pages?: {path /* '': the first page */, percent, by: string | null}[] /* each page that differs, accepted per page */} /* the roll/visual status (the project's visual_review; required: a visual blocker too) */,
@@ -953,7 +963,8 @@ Sandbox = {id /* sbx_… */, name, machine /* mch_… */, backend, size: Size,
            error?: string /* the backend's last complaint */,
            created_at, updated_at, last_active_at? /* its machine last did something; it sleeps a window after */,
            secrets_by? /* who copied secrets into its env: roll secrets' maker (usr_…, token:…, operator; an admin's session is the person) */,
-           secrets_dropped? /* why the copied secrets were taken out: secrets_by may no longer reveal them */}
+           secrets_dropped? /* why the copied secrets were taken out: secrets_by may no longer reveal them */,
+           secrets_unset? /* the copied variables it last started without, as they don't resolve for secrets_by, and why (names only) */}
 SandboxInfo = {backend, size /* a Size name */, status /* as Sandbox.status */, hourly_cents,
                stopped_reason? /* as Sandbox.stopped_reason */}   (Machine.sandbox)
 Size = {name /* "standard" */, cpu, memory_gb, disk_gb, hourly_cents /* price per running hour, US cents */}
@@ -972,7 +983,11 @@ secrets as `secrets_by` may now at its create and at each start (a wake too), so
 since reaches it at its next start (the variables it was made with; one deleted from the
 environment since is unset). Once the copier can't reach the project or reveal the environment
 (removed, demoted, a token revoked), the sandbox starts without those variables, its home and the
-rest of its env kept (`secrets_dropped` says why, and they stay out). Every backend changes what it
+rest of its env kept (`secrets_dropped` says why, and they stay out). Only the copied variables
+count: a key of the environment it didn't copy never holds it up, and a copied one that doesn't
+resolve for `secrets_by` (a reference to a protected environment) is left unset and named in
+`secrets_unset`. While its source environment is deleted but recoverable, its create and starts
+wait (`error` says why); once purged, the copied values are taken out. Every backend changes what it
 starts with in place of what it made: docker a new container on the same home volume (or the same
 one when nothing changed), fargate what it keeps for its next task, agent37 the instance's env
 (`PATCH`, a `null` for each variable taken out) before it starts it, its disk kept. A sandbox made

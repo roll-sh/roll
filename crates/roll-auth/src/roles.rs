@@ -31,6 +31,33 @@ pub mod decisions {
     pub const OPERATOR_PROJECTS_TAKE_MEMBERS: bool = true;
     /// D9: roll's admin accounts stay the operator in every project, whatever their membership.
     pub const ADMIN_IS_OPERATOR: bool = true;
+
+    // Members v1.1 (docs/members-v1-1.md), D10–D18. Groups (D10–D12, D18) are built; time-boxed
+    // elevation (D13–D17) isn't yet: a session's rules are all standing rules until it is, so
+    // every check that must never count an elevation (`may_grant`, decoys, `role:` approvers)
+    // reads the same grant it reads today.
+
+    /// D10: a group never holds `owner` (owners stay people, so an identity provider adding
+    /// someone to a group can't widen what a project trusts). A group role of `owner` is a 400.
+    pub const GROUPS_HOLD_OWNER: bool = false;
+    /// D11: who gives a group a role on a project.
+    pub const GROUP_ASSIGNERS: super::GroupAssigners = super::GroupAssigners::OperatorOrMemberAdmin;
+    /// D12: who makes roll's own (non-SCIM) groups: the operator and roll's admin accounts only.
+    pub const PEOPLE_MAKE_GROUPS: bool = false;
+    /// D18: SCIM `Groups` is off for each SSO connection until an admin turns it on.
+    pub const SCIM_GROUPS_BY_DEFAULT: bool = false;
+}
+
+/// D11's options: who may give a group a role on a project.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GroupAssigners {
+    /// The operator, or a project admin who is in the group themselves (so an admin can't read
+    /// any group's member list by assigning it, or put a whole company in a project).
+    OperatorOrMemberAdmin,
+    /// Any project admin, for any group.
+    AnyAdmin,
+    /// The operator only.
+    Operator,
 }
 
 /// D3's options: where a developer's role applies in full when the membership names no
@@ -135,7 +162,8 @@ pub fn rules(m: &Membership) -> Vec<Rule> {
     out
 }
 
-/// A person's session grant: every membership's rules.
+/// A person's session grant: every membership's rules, their own and their groups' (roles add
+/// up: a union of rules, so one role through a group and another directly give both).
 pub fn session_scope(memberships: &[Membership]) -> Scope {
     Scope(memberships.iter().flat_map(rules).collect())
 }

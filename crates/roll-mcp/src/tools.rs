@@ -120,6 +120,29 @@ fn as_text(v: &Value) -> String {
     }
 }
 
+
+/// The candidate closest to `word` by edit distance, when it's close enough to be a slip (a third
+/// of the word's length, at least 2): "stauts" finds "status", "lmit" finds "limit".
+pub fn nearest<'a>(word: &str, candidates: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
+    let w: Vec<char> = word.to_lowercase().chars().collect();
+    let distance = |b: &str| {
+        let b: Vec<char> = b.to_lowercase().chars().collect();
+        let mut row: Vec<usize> = (0..=b.len()).collect();
+        for (i, a) in w.iter().enumerate() {
+            let mut prev = row[0];
+            row[0] = i + 1;
+            for (j, c) in b.iter().enumerate() {
+                let next = (prev + usize::from(a != c)).min(row[j] + 1).min(row[j + 1] + 1);
+                prev = row[j + 1];
+                row[j + 1] = next;
+            }
+        }
+        row[b.len()]
+    };
+    let most = (w.len() / 3).max(2);
+    candidates.into_iter().map(|c| (distance(c), c)).filter(|(d, _)| *d <= most).min_by_key(|(d, c)| (*d, c.len())).map(|(_, c)| c)
+}
+
 impl Tool {
     /// A path with every `{param}` filled with a sample: what the catalogue classifies.
     fn sample_path(&self) -> String {
@@ -243,7 +266,10 @@ impl Tool {
         let clearable = self.params.iter().any(|p| p.at == At::BodyOrNull);
         for k in obj.keys() {
             if k != "approval" && !(k == "clear" && clearable) && !self.params.iter().any(|p| p.name == k) {
-                return Err(format!("{}: unknown argument {k:?}", self.name));
+                // What it takes, and the nearest name when it's a slip, so the model fixes it in one go.
+                let names: Vec<&str> = self.params.iter().map(|p| p.name).collect();
+                let near = nearest(k, names.iter().copied()).map(|n| format!(" (did you mean {n:?}?)")).unwrap_or_default();
+                return Err(format!("{}: unknown argument {k:?}{near}; it takes {}", self.name, names.join(", ")));
             }
         }
         let mut path = self.path.to_string();
@@ -395,7 +421,7 @@ fn apps_area(method: &str, path: &str) -> Area {
             _ => return Area::Unplaced,
         },
         ["services", "activity"] | ["events"] => "observe",
-        ["services", "links"] | ["services", "restore"] | ["import"] | ["plan"] => "configure",
+        ["services", "links"] | ["services", "restore"] | ["services", "move"] | ["import"] | ["plan"] | ["quote"] => "configure",
         ["projects", "drains" | "notifications" | "limits" | "usage" | "status-page" | "preview-domain" | "export" | "signing", ..] => "project",
         _ => return Area::Unplaced,
     };
@@ -695,6 +721,16 @@ static TOOLS: &[Tool] = &[
     ),
     t("access_list_approvals", "List approvals", "Approvals, newest first: pending ones wait for the operator.", "access", "GET", "/v1/access/approvals", &[q("state", Ty::Str, "pending, approved, denied, used")]),
     t("access_audit_log", "Audit log", "Every request made with a token and every MCP tool call, newest first.", "access", "GET", "/v1/access/audit", &[q("grant", Ty::Str, "Only this token (tok_…)"), q("product", Ty::Str, "Only this product"), q("decision", Ty::Str, "allow, deny or ask"), q("limit", Ty::Int, "At most (default 100)")]),
+    t("access_activity", "Agent activity: tools, connections, days", "How agents used roll's MCP server lately (default 7 days, up to 30): per tool its calls, refused and failed calls, average, median, 95th percentile and longest duration and last call; per connection; per day. Answers \"which tools fail\" and \"which agent is busiest\". A person's are their own connections'.", "access", "GET", "/v1/access/activity", &[q("days", Ty::Int, "Days back, 1-30 (default 7)")]),
+    t(
+        "access_send_feedback",
+        "Tell roll's operator what was hard",
+        "Send roll's operator feedback when something got in the way: a tool that failed or answered unexpectedly, a missing tool, a confusing error. Say what you were doing, what happened and what you expected; never a secret or a user's data. It changes nothing; 20 an hour.",
+        "access",
+        "POST",
+        "/v1/access/feedback",
+        &[breq("task", Ty::Str, "What you were trying to do"), breq("actual", Ty::Str, "What happened"), b("expected", Ty::Str, "What you expected instead"), b("tool", Ty::Str, "The tool it was about, if one")],
+    ),
     t("access_checkup", "Checkup: which tokens need attention", "The live tokens that need attention, most serious first, each with its findings and fix: everything (delete, reveal or admin on every resource without asking: tighten), never_expires (give it an expiry), unused (nothing in 30 days: revoke), narrower (its requests needed less than its rules: tighten), roams (five or more networks and no address limit). A person's checkup is of their own tokens; fixing one is theirs or the operator's, on the token's page or with roll token.", "access", "GET", "/v1/access/checkup", &[]),
     t("access_list_tokens", "List tokens", "Scoped tokens and OAuth connections you may see: name, rules, expiry, address limits, who made it and when it was last used (never a secret). A person sees their own.", "access", "GET", "/v1/access/tokens", &[q("product", Ty::Str, "Only tokens made for this product"), q("resource", Ty::Str, "Only tokens made for this resource (with product)"), q("kind", Ty::Str, "workload: CI and cluster logins (the latest 500) instead")]),
     t("access_get_token", "Get a token", "One token's rules, expiry, address limits, approvals for a while and last use (never its secret).", "access", "GET", "/v1/access/tokens/{id}", &[req("id", "Token id (tok_…)")]),
@@ -739,6 +775,20 @@ static TOOLS: &[Tool] = &[
     )
     .destructive(),
     t("workspace_remove_member", "Remove a member", "Take a person out of a project: their session and tokens stop reaching it at once, and their tokens confined to it are revoked. The last owner can't be removed.", "workspace", "DELETE", "/v1/workspace/projects/{id}/members/{user}", &[WS, req("user", "The member (usr_…)")]).destructive(),
+    // Groups (docs/members-v1-1.md): a group's members get its role on a project, added to their
+    // own. Making groups and their members is the operator's (or the IdP's, through SCIM).
+    t("workspace_list_groups", "List a project's groups", "The groups with a role on a workspace project: each group's role, a developer role's environments and how many members it has. A member's access is the union of their own role and their groups'.", "workspace", "GET", "/v1/workspace/projects/{id}/groups", &[WS]),
+    t(
+        "workspace_set_group_role",
+        "Give a group a role",
+        "Give a group a role on a project, or change it: every member of the group gets it, added to their own. Never owner; never more than the caller's own role, and only a group the caller may assign (one they're in, unless they're the operator).",
+        "workspace",
+        "PUT",
+        "/v1/workspace/projects/{id}/groups/{group}",
+        &[WS, req("group", "The group (grp_…)"), breq("role", Ty::Str, "viewer, developer or admin"), b("environments", Ty::Arr, "A developer role's environments (default: every environment that isn't protected)")],
+    )
+    .destructive(),
+    t("workspace_remove_group_role", "Take a group's role away", "Take a group's role on a project away: its members keep only their own roles (and other groups'), at once.", "workspace", "DELETE", "/v1/workspace/projects/{id}/groups/{group}", &[WS, req("group", "The group (grp_…)")]).destructive(),
     // ── Postgres ──
     t("postgres_list_projects", "List Postgres projects", "Postgres projects with their branches and endpoints.", "postgres", "GET", "/v1/projects", &[]),
     t("postgres_get_project", "Get a Postgres project", "A Postgres project with its branches and endpoints (connection strings need reveal).", "postgres", "GET", "/v1/projects/{project}", &[PROJECT]),
@@ -1153,10 +1203,10 @@ static TOOLS: &[Tool] = &[
     t("secrets_shared", "Folders shared with a project", "The folders other projects share with this one, which its environments can import.", "secrets", "GET", "/v1/secrets/projects/{project}/shared", &[SECRET_PROJECT]),
     t("secrets_list_shares", "A project's share links", "Its one-off share links, newest first: note, views left, who made it and when, when it expires and whether it was opened (never the link or its value). Open ones are values out of roll until they expire.", "secrets", "GET", "/v1/secrets/projects/{project}/shares", &[SECRET_PROJECT]),
     t("secrets_reveal", "Read a secret's value", "Read a secret's value. A key tagged sensitive is never returned to anyone (403): only running services get it, so don't retry or look for it another way.", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/value", &[SECRET_PROJECT, ENV, req("name", "Secret name"), q("path", Ty::Str, "Folder"), q("resolve", Ty::Bool, "false: the value as stored, a reference as written")]),
-    t("secrets_set", "Set a secret", "Create or change a secret's value. Give if_version (the version you read) so a change someone made meanwhile isn't overwritten: then it's a 409 stale, and you read it again.", "secrets", "PUT", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}", &[SECRET_PROJECT, ENV, req("name", "Secret name"), breq("value", Ty::Str, "The value"), q("path", Ty::Str, "Folder"), b("if_version", Ty::Int, "Only if it's still this version (0: only if it doesn't exist)")]),
+    t("secrets_set", "Set a secret", "Create or change a secret's value. Give if_version (the version you read) so a change someone made meanwhile isn't overwritten: then it's a 409 stale, and you read it again.", "secrets", "PUT", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}", &[SECRET_PROJECT, ENV, req("name", "Secret name"), b("value", Ty::Str, "The value (leave it out to change only the comment, tags, type or expiry: the value never passes through you)"), q("path", Ty::Str, "Folder"), b("if_version", Ty::Int, "Only if it's still this version (0: only if it doesn't exist)"), b("comment", Ty::Str, "What it is, shown beside it"), b("tags", Ty::Arr, "Tags (replace its tags)"), b("type", Ty::Str, "shared (default) or personal (only yours, over the shared one)"), b("message", Ty::Str, "The change's message, in its history"), bnull("expires_at", Ty::Int, "When it expires (Unix ms; the health check flags it before); clear it for never")]),
     t("secrets_import", "Import a .env file", "Write a .env file's keys (or JSON: {\"KEY\": \"value\"} or [{key, value, comment?}]) into an environment as one change: only new keys unless overwrite, and replace makes the folder match the file (its other own keys are deleted). On a protected environment it opens a change request instead (request: true asks for one anywhere).", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/import", &[SECRET_PROJECT, ENV, b("dotenv", Ty::Str, "A .env file's text"), b("json", Ty::Obj, "Or the keys as JSON"), b("path", Ty::Str, "Folder (default /)"), b("overwrite", Ty::Bool, "Replace keys that exist"), b("replace", Ty::Bool, "Also delete the folder's keys the file lacks"), b("message", Ty::Str, "Why, for the change's history"), b("request", Ty::Bool, "Open a change request instead of writing"), b("if_seq", Ty::Int, "Only if the environment's last change is still this one")]).destructive(),
     t("secrets_rollback", "Roll back an environment", "Put an environment's values back as they were at a change (to: its seq, from secrets_changes) or a time (at: Unix ms), as one new change: what's there now is replaced. On a protected environment it opens a change request.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/rollback", &[SECRET_PROJECT, ENV, b("to", Ty::Int, "The change (seq) to go back to"), b("at", Ty::Int, "Or a time, Unix ms"), b("message", Ty::Str, "Why")]).destructive(),
-    t("secrets_create_environment", "Add an environment", "A new environment in a project (staging, a preview's): slug, optional name, base (an environment it inherits from), labels, and for an ephemeral one ttl_minutes. Making one is the project admin's.", "secrets", "POST", "/v1/secrets/projects/{project}/environments", &[SECRET_PROJECT, breq("slug", Ty::Str, "Short name (staging, pr-42)"), b("name", Ty::Str, "Display name"), b("kind", Ty::Str, "standard or ephemeral"), b("base", Ty::Str, "Environment it inherits from"), b("labels", Ty::Obj, "Labels, {key: value}"), b("ttl_minutes", Ty::Int, "An ephemeral one ends after this")]),
+    t("secrets_create_environment", "Add an environment", "A new environment in a project (staging, a preview's): slug, optional name, base (an environment it inherits from), labels, and for an ephemeral one ttl_minutes. Making one is the project admin's.", "secrets", "POST", "/v1/secrets/projects/{project}/environments", &[SECRET_PROJECT, breq("slug", Ty::Str, "Short name (staging, pr-42)"), b("name", Ty::Str, "Display name"), b("kind", Ty::Str, "standard or ephemeral"), b("base", Ty::Str, "Environment it inherits from"), b("labels", Ty::Obj, "Labels, {key: value}"), b("ttl_minutes", Ty::Int, "An ephemeral one ends after this"), b("expires_at", Ty::Int, "Or an ephemeral one ends then (Unix ms)"), b("secrets", Ty::Arr, "An ephemeral one's overrides, made in the same call: [{op: set|delete, key, value?, comment?, tags?, type?}]"), b("trusted", Ty::Bool, "An ephemeral one may read a protected base (needs admin on it)")]),
     t("secrets_link_targets", "List what keys can link to", "The project's resources a key can be linked to (a database, a bucket, a stream…) and each one's fields, for secrets_link.", "secrets", "GET", "/v1/secrets/projects/{project}/links", &[SECRET_PROJECT]),
     t("secrets_link", "Link a key to a resource", "Make a key read its value from a project resource instead of holding one: link {kind, ref, field, mode} from secrets_link_targets (mode: live reads it on every resolve, managed issues and stores one, dynamic issues one per resolve and revokes it when its lease ends). link: null unlinks.", "secrets", "PUT", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}", &[SECRET_PROJECT, ENV, req("name", "Secret name"), breq("link", Ty::Obj, "{kind, ref, field, mode, options?}, or null"), q("path", Ty::Str, "Folder"), b("if_version", Ty::Int, "Only if it's still this version")]),
     t("secrets_delete", "Delete a secret", "Delete a secret (if_version: only if it's still the version you read).", "secrets", "DELETE", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}", &[SECRET_PROJECT, ENV, req("name", "Secret name"), q("path", Ty::Str, "Folder"), q("if_version", Ty::Int, "Only if it's still this version"), q("type", Ty::Str, "personal: your own override instead of the shared value")]),
@@ -1167,7 +1217,7 @@ static TOOLS: &[Tool] = &[
     t("secrets_list_cas", "List certificate authorities", "A project's own certificate authorities: their public certificates, domains and limits (never a CA's key; adding one is the project admin's, in the dashboard).", "secrets", "GET", "/v1/secrets/projects/{project}/cas", &[req("project", "Workspace project")]),
     t("secrets_list_ssh_cas", "List SSH certificate authorities", "A project's SSH CAs: their public keys, principals and limits (never a private key; adding one is the project admin's, in the dashboard).", "secrets", "GET", "/v1/secrets/projects/{project}/ssh-cas", &[req("project", "Workspace project")]),
     t("secrets_totp", "Get a one-time code", "The current one-time code (TOTP) from a secret that holds an authenticator seed, and how long it lasts: a reveal, asked for like reading a value. The seed itself is never returned.", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/totp", &[SECRET_PROJECT, ENV, req("name", "Secret name"), q("path", Ty::Str, "Folder")]),
-    t("secrets_list_saas", "List SaaS rotators", "A project's rotators for third-party API keys: each one's vendor (SendGrid, Twilio, Okta, Entra, Auth0) and the account or app it rotates for (never a credential; adding one is the project admin's).", "secrets", "GET", "/v1/secrets/projects/{project}/saas", &[SECRET_PROJECT]),
+    t("secrets_list_saas", "List SaaS rotators", "A project's rotators for third-party API keys: each one's vendor (SendGrid, Twilio, Okta, Entra, Auth0, GitLab, OpenAI, Datadog, Cloudflare, Databricks, Confluent) and the account or app it rotates for (never a credential; adding one is the project admin's).", "secrets", "GET", "/v1/secrets/projects/{project}/saas", &[SECRET_PROJECT]),
     t("secrets_list_kubernetes", "List Kubernetes clusters", "The Kubernetes clusters a project issues service-account tokens for: names, API servers, and whether calls trust the cluster's own CA (never a token or the CA; adding one is the project admin's).", "secrets", "GET", "/v1/secrets/projects/{project}/kubernetes", &[SECRET_PROJECT]),
     t("secrets_list_github_apps", "List GitHub Apps", "A project's GitHub Apps that short-lived installation tokens come from: app and installation ids, repositories and permissions (never the private key; adding one is the project admin's, in the dashboard).", "secrets", "GET", "/v1/secrets/projects/{project}/github-apps", &[req("project", "Workspace project")]),
     t("secrets_list_directories", "List LDAP and Active Directory servers", "A project's directories whose account passwords roll rotates and where dynamic users are made: URL, flavor, bind DN, managed accounts, groups and the gateway it's reached through (never the bind password; adding one is the project admin's, in the dashboard).", "secrets", "GET", "/v1/secrets/projects/{project}/directories", &[SECRET_PROJECT]),
@@ -1191,7 +1241,7 @@ static TOOLS: &[Tool] = &[
     t("secrets_get_request", "Get a change request", "One change request on a protected environment: what it changes (keys, fingerprints, never values), who asked, its reviews and whether its approvals are met.", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/requests/{id}", &[SECRET_PROJECT, ENV, req("id", "Request id")]),
     t("secrets_apply_request", "Apply an approved change request", "Apply a change request whose approvals are met, as one change. Applying one that isn't approved (bypass) is a person's: not here.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/requests/{id}/apply", &[SECRET_PROJECT, ENV, req("id", "Request id")]),
     t("secrets_close_request", "Close a change request", "Withdraw a change request without applying it.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/requests/{id}/close", &[SECRET_PROJECT, ENV, req("id", "Request id")]),
-    t("secrets_propose", "Propose a change", "Propose changes to an environment for a person to review and apply: ops [{op: set, key, value?, if_version?} or {op: delete, key, if_version?}]; if_version keeps each op from applying over a change made meanwhile. The way to change a protected environment.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/requests", &[SECRET_PROJECT, ENV, breq("ops", Ty::Arr, "[{op: set|delete, key, value?, comment?, if_version?}]"), b("message", Ty::Str, "Why"), b("path", Ty::Str, "Folder")]),
+    t("secrets_propose", "Propose a change", "Propose changes to an environment for a person to review and apply: ops [{op: set, key, value?, if_version?} or {op: delete, key, if_version?}]; if_version keeps each op from applying over a change made meanwhile. The way to change a protected environment.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/requests", &[SECRET_PROJECT, ENV, breq("ops", Ty::Arr, "[{op: set|delete, key, value?, comment?, if_version?}]"), b("message", Ty::Str, "Why"), b("path", Ty::Str, "Folder"), b("if_seq", Ty::Int, "Only if the environment's last change is still this one (seq; a 409 otherwise)")]),
     t("secrets_transit_encrypt", "Encrypt with a key", "Encrypt with one of a project's encryption keys; the key never leaves roll. plaintext is base64. Returns ciphertext (roll:v<n>:…) to store.", "secrets", "POST", "/v1/secrets/projects/{project}/transit/{name}/encrypt", &[SECRET_PROJECT, req("name", "Encryption key name"), breq("plaintext", Ty::Str, "Base64"), b("context", Ty::Str, "Base64 context, if the key derives per context")]),
     t("secrets_transit_decrypt", "Decrypt with a key", "Decrypt a ciphertext (roll:v<n>:…, or vault:v<n>:… for a key brought from Vault). Returns plaintext as base64. Audited.", "secrets", "POST", "/v1/secrets/projects/{project}/transit/{name}/decrypt", &[SECRET_PROJECT, req("name", "Encryption key name"), breq("ciphertext", Ty::Str, "roll:v<n>:…"), b("context", Ty::Str, "Base64 context")]),
     t("secrets_transit_sign", "Sign with a key", "An Ed25519 signature over input's raw bytes, by a project's signing key. input is base64. Returns signature (roll:v<n>:…).", "secrets", "POST", "/v1/secrets/projects/{project}/transit/{name}/sign", &[SECRET_PROJECT, req("name", "Signing key name"), breq("input", Ty::Str, "Base64")]),
@@ -1250,7 +1300,7 @@ static TOOLS: &[Tool] = &[
         "apps",
         "POST",
         "/v1/apps/projects/{project}/services",
-        &[req("project", "Workspace project"), breq("name", Ty::Str, "Service name"), breq("source", Ty::Obj, "Where the code comes from"), b("branch", Ty::Str, "A repo source's branch for production (default: the repo's default)"), b("variables", Ty::Obj, "{NAME: value}, set before the first deploy"), b("run", Ty::Obj, "Run settings: start, port, scale, size"), b("links", Ty::Arr, "[{kind: postgres|redis|bucket|stream|queue|nosql, ref, prefix?}]: connection variables, before the first deploy (reveal on each)")],
+        &[req("project", "Workspace project"), breq("name", Ty::Str, "Service name"), breq("source", Ty::Obj, "Where the code comes from"), b("branch", Ty::Str, "A repo source's branch for production (default: the repo's default)"), b("variables", Ty::Obj, "{NAME: value}, set before the first deploy"), b("run", Ty::Obj, "Run settings: start, port, scale, size"), b("links", Ty::Arr, "[{kind: postgres|redis|bucket|stream|queue|nosql, ref, prefix?}]: connection variables, before the first deploy (reveal on each)"), b("build", Ty::Obj, "Build settings: {builder: auto|dockerfile|functions, dockerfile?, …} (default: detected)"), b("sealed", Ty::Arr, "Which of variables are sealed from the start (a generated secret nobody reads back)")],
     ).open_world(),
     t("apps_list_environments", "List environments", "A service's environments.", "apps", "GET", "/v1/apps/services/{service}/environments", &[SERVICE]),
     t("apps_get_service", "Get a service", "A service with its environments' summaries (apps_list_deploys lists an environment's deploys).", "apps", "GET", "/v1/apps/services/{service}", &[SERVICE]),
@@ -1267,8 +1317,9 @@ static TOOLS: &[Tool] = &[
         b("maintenance", Ty::Any, "true, {message} or false: answer a maintenance page instead of the app"),
         b("allow_ips", Ty::Arr, "Only these addresses get in: [cidr or {cidr, description}]"),
         b("rate_limit", Ty::Obj, "{per_minute, burst?}: requests a client address may make"),
-        b("firewall", Ty::Arr, "[{action: allow|deny|limit|challenge, path?, methods?, user_agent?, per_minute?, burst?}], first match wins; limit holds a client to per_minute (1-100000) on what it matches; challenge lets in a browser that passed a proof of work this hour (GET only)"),
+        b("firewall", Ty::Arr, "[{action: allow|deny|limit|challenge|log, path?, methods?, user_agent?, ips? (cidrs), header?|cookie?|query? ({name, contains?}), bots? (ai, search, preview, tools, verified, spoofed: roll's lists of crawlers, assistants' fetchers, link previews and HTTP tools; verified: a crawler its operator's DNS vouches for; spoofed: one claiming such a name from elsewhere), per_minute?, burst?, key? (limit's client: ip, header:<name> or cookie:<name>)}], first match wins; limit holds a client to per_minute (1-100000) on what it matches; challenge lets in a browser that passed a proof of work this hour (GET only), and a verified search engine; log only counts what it matches (the environment's firewall_hits) and goes on, to try a rule before it blocks"),
         bnull("routes", Ty::Arr, "[{path, service}] (at most 20): a path (a prefix ends in *) another service of the project answers, by name; clear it for none"),
+        bnull("redirects", Ty::Str, "its own redirects on any service, _redirects lines: `/old /new 308`, `/blog/* /posts/:splat` (301 unless 302, 303, 307 or 308); clear it for none"),
         bnull("egress", Ty::Any, "{mode: roll|open, hosts?}: roll lets its code reach roll and only these hosts (at most 20, *. for subdomains), from the next deploy; clear it for open"),
         b("vitals", Ty::Bool, "Measure its pages' Web Vitals in visitors' browsers (read them with apps_vitals)"),
         bnull("config", Ty::Obj, "Runtime config its instances read at ROLL_CONFIG_URL (edge functions: context.config) without a deploy: at most 200 keys, 64 KiB; the first one needs a deploy to give them the address. Clear it for none"),
@@ -1283,6 +1334,14 @@ static TOOLS: &[Tool] = &[
         b("hostname", Ty::Str, "Its new name on the roll domain (<hostname>.<domain>); the old one stops answering"),
         b("report", Ty::Bool, "false: its deploys post no commit status and no GitHub Deployment (something else reports them)"),
         b("scheduled", Ty::Bool, "false: its schedules (a cron's, run.schedules) don't run; deploys and runs still go"),
+        b("log_retention_days", Ty::Int, "How long its logs are kept: 7 (default), 30 or 90 days (a preview's stay 7)"),
+        b("badge", Ty::Bool, "A deploy status badge anyone can load at /_roll/badge/<service>/<env>.svg on the apps listener"),
+        b("approvals", Ty::Int, "0-3 people other than a deployment's author approve it before it goes live (admin; never a preview's)"),
+        bnull("checks", Ty::Arr, "Uptime and browser checks: [{name, path, every_s? (30-3600), timeout_s?, status?, contains?, browser? (a Playwright script: the body of an async function given page, context and url; it fails by throwing), budgets? {lcp_ms, cls, ttfb_ms, kb, requests}, from? (roll, or public: over the internet as a visitor, its DNS, TLS and gates), host? (a public check's custom domain)}]; clear it for none"),
+        bnull("pause_schedule", Ty::Obj, "Paused by the clock: {windows: [{from: \"fri 19:00\", to}], timezone?}; a person's pause or resume inside a window holds until it ends; clear it for none"),
+        bnull("mirror", Ty::Obj, "{environment, percent (1-100)}: a copy of that share of GET and HEAD requests goes to another environment of this service; clear it to stop"),
+        bnull("snippets", Ty::Arr, "At most 5 [{at: head|body_end, html}]: its own HTML put before </head> or </body> of every HTML page (an analytics or chat tag); clear it for none"),
+        bnull("split", Ty::Obj, "A split test: {environment, percent (1-99)}: that share of visitors (kept by a cookie roll sets) is served by another environment of this service; clear it to end it"),
         bnull("data", Ty::Str, "\"branch\": data of its own, a branch of each Postgres and Redis database it links in place of the databases (admin; not production or a preview); clear it to go back, deleting the branches"),
     ]),
     t("apps_update_service", "Update a service", "Change a service's name, source, build or run settings (fields given are changed; run takes alerts {memory_pct, error_pct, p95_ms} for metric alerts).", "apps", "PATCH", "/v1/apps/services/{service}", &[
@@ -1417,12 +1476,13 @@ static TOOLS: &[Tool] = &[
     ),
     t("apps_diff_environments", "Compare environments", "How an environment differs from another (Railway's environment sync): variables missing, extra or with another value (names only; which differ needs reveal on both), and settings with the body that makes each match. Read on both environments.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/diff", &[SERVICE, ENV, qreq("from", "The environment to compare with")]),
     t("apps_metrics", "Service metrics", "CPU, memory and requests of an environment, and each instance's own last hour (by_instance).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/metrics", &[SERVICE, ENV, q("minutes", Ty::Int, "Window")]),
+    t("apps_quote", "Quote a service", "What a service would cost at most a month and an hour, before making it: its run settings (cpu, memory_mb, min_instances, max_instances, type, sidecars) at roll's prices. Sleeping costs nothing; min_instances always run.", "apps", "POST", "/v1/apps/quote", &[b("run", Ty::Obj, "The run settings apps_create_service would take; left out, the defaults")]),
     t("apps_plan", "Plan a service", "How roll would build and run a repo (provider, framework, install, build and start commands, port), before making a service: a dry run.", "apps", "POST", "/v1/apps/plan", &[breq("repo", Ty::Str, "owner/name"), b("revision", Ty::Str, "A branch or commit"), b("root", Ty::Str, "The app's folder in the repo")]),
     t("apps_import", "Check a project file", "What a roll.toml, a docker-compose file or another platform's file (Render, Fly, Railway, Heroku) would make, without making anything: the apps with their source, branch, run settings, links and variables, the databases, notes on what isn't carried over, and the file as roll.toml (check it before roll up --all). Give one: a file's text, a roll code repo's root roll.toml, or a public Git repository's.", "apps", "POST", "/v1/apps/import", &[b("roll_toml", Ty::Str, "A roll.toml's text"), b("compose", Ty::Str, "A docker-compose.yml's text"), b("render", Ty::Str, "A Render Blueprint's render.yaml text"), b("fly", Ty::Str, "A fly.toml's text"), b("railway", Ty::Str, "A railway.json or railway.toml's text"), b("heroku", Ty::Str, "A Heroku app.json's text"), b("procfile", Ty::Str, "With heroku: its Procfile's text"), b("repo", Ty::Str, "A roll code repo (owner/name): its root roll.toml"), b("revision", Ty::Str, "With repo: a branch or commit (default: its default branch's head)"), b("git", Ty::Str, "A public Git repository's https URL: its root roll.toml"), b("branch", Ty::Str, "With git: a branch (default: its default branch)")]).open_world(),
     t("apps_export_project", "Export a project file", "A project as a roll.toml: its services (source, branch, run settings that differ from defaults) and the postgres and redis databases they link, variables by name only, never a value. Write it to the repo, check it with apps_import, deploy it with roll up --all.", "apps", "POST", "/v1/apps/projects/{project}/export", &[req("project", "Workspace project"), b("databases", Ty::Obj, "Names for the linked databases, as {\"postgres:<ref>\": \"db\"}")]),
     t("apps_get_environment", "Get an environment", "One environment: its URL, state (running, asleep), live deploy, branch and size; build_closed (its builds get no secret value) and base_updated (base images that moved since its build).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}", &[SERVICE, ENV]),
     t("apps_delete_environment", "Delete an environment", "Delete an environment with its deploys, instances and domains. Irreversible.", "apps", "DELETE", "/v1/apps/services/{service}/environments/{env}", &[SERVICE, ENV]),
-    t("apps_link", "Link a resource", "Give a service a roll resource's connection variables (DATABASE_URL and the like, with prefix if given): kind is postgres, redis, bucket, stream, queue, nosql or search (a search cluster: a data-only key of the link's own, narrowed with indices and access: a SaaS's tenants' indices, a frontend's read-only key, a log shipper's append-only one; changing them makes a new key and revokes the old). Needs reveal on the resource; the next deploy picks it up.", "apps", "PUT", "/v1/apps/services/{service}/links/{kind}/{ref}", &[SERVICE, req("kind", "postgres, redis, bucket, stream, queue, nosql or search"), req("ref", "The resource's id or name"), b("prefix", Ty::Str, "Variable name prefix"), b("indices", Ty::Arr, "Search only: the key's index names or patterns (tenant-*)"), b("access", Ty::Str, "Search only: read, or append (create documents on exact names); none: read and write documents")]),
+    t("apps_link", "Link a resource", "Give a service a roll resource's connection variables (DATABASE_URL and the like, with prefix if given): kind is postgres, redis, bucket, stream, queue, nosql, tasks (a roll tasks tenant: an API key of the link's own and the tenant's signing keys) or search (a search cluster: a data-only key of the link's own, narrowed with indices and access: a SaaS's tenants' indices, a frontend's read-only key, a log shipper's append-only one; changing them makes a new key and revokes the old). Needs reveal on the resource; the next deploy picks it up.", "apps", "PUT", "/v1/apps/services/{service}/links/{kind}/{ref}", &[SERVICE, req("kind", "postgres, redis, bucket, stream, queue, nosql, tasks or search"), req("ref", "The resource's id or name"), b("prefix", Ty::Str, "Variable name prefix"), b("indices", Ty::Arr, "Search only: the key's index names or patterns (tenant-*)"), b("access", Ty::Str, "Search only: read, or append (create documents on exact names); none: read and write documents")]),
     t("apps_unlink", "Unlink a resource", "Stop giving a service a linked resource's variables (from the next deploy).", "apps", "DELETE", "/v1/apps/services/{service}/links/{kind}/{ref}", &[SERVICE, req("kind", "Link kind"), req("ref", "The resource's id or name")]),
     t("apps_verify_domain", "Check a domain", "Check a custom domain's DNS now and answer its state (pending, verified) and the record to add.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/domains/{host}/verify", &[SERVICE, ENV, req("host", "The domain")]),
     t("apps_list_backups", "Volume backups", "An environment's volume backups, newest first (7 kept).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/volume/backups", &[SERVICE, ENV]),
@@ -1504,6 +1564,8 @@ static TOOLS: &[Tool] = &[
     t("apps_deploy_vulnerabilities", "A deploy's vulnerabilities", "Known vulnerabilities in a deploy's image, most severe first, then those with a fix: id (CVE-…, GHSA-…), severity, package, installed and fixed versions, and where (the OS's packages or a lockfile), at most 2,000, with the scan's counts. Use it before promoting a deploy, or to find what to upgrade.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/vulnerabilities", &[SERVICE, ENV, req("deploy", "Deploy id"), q("severity", Ty::Str, "Only this severity or worse: critical, high, medium or low")]),
     t("apps_explain_deploy", "Why did a deploy fail", "Ask why a failed deploy failed: the model of the owner of the service's roll code repo reads its error, plan, steps and the newest lines of its build log and output (masked) and answers what went wrong and what to change. The answer is kept with the deploy and answered again without a model call; again: true asks anew (at most once a minute). 409 when it didn't fail.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/explain", &[SERVICE, ENV, req("deploy", "Deploy id"), q("again", Ty::Bool, "Ask the model anew instead of the kept answer")]).open_world(),
     t("apps_deploy_sbom", "A deploy's software bill of materials", "A deploy's image as a CycloneDX SBOM (JSON) from the same scan as its vulnerabilities: every package and version it ships. 404 when it wasn't scanned or was pruned.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/sbom", &[SERVICE, ENV, req("deploy", "Deploy id")]),
+    t("apps_move_service", "Move a service to another project", "Move a service to another project of the same owner (Render's, Vercel's transfers): refused, naming them, while it has links either way, routes either way, roll:// references, a private network or running sandboxes; what it used stays the old project's; every live environment redeploys onto the new project's network and rules. Admin on it, in both projects.", "apps", "POST", "/v1/apps/services/{service}/move", &[SERVICE, breq("project", Ty::Str, "The project to move it to"), b("secrets", Ty::Str, "switch: go ahead though its environments' project secrets become the target project's of those names (the 409 names them)")]),
+    t("apps_deploy_provenance", "A deploy's build provenance", "The signed SLSA v1 provenance of a deploy's image, as roll built it: a DSSE envelope (in-toto statement) naming the source and revision, base images' digests, the plan and the image's digest, signed with the project's provenance key (the public key apps_signing answers). 404 for an image roll didn't build.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/provenance", &[SERVICE, ENV, req("deploy", "Deploy id")]),
     t("apps_status_page", "The project's public status page", "A project's public status page: its title, its public URL and what it shows (which services' checks and heartbeats, names and up or down only). 404 without one; making one is a person's choice, in the dashboard.", "apps", "GET", "/v1/apps/projects/{project}/status-page", &[req("project", "Workspace project")]),
     t("apps_remove_status_page", "Take down the status page", "Take a project's public status page down: its address answers nothing after, and its incidents go with it. Making or changing one stays a person's (it makes the project's service names public; admin, no tool).", "apps", "DELETE", "/v1/apps/projects/{project}/status-page", &[req("project", "Workspace project")]).destructive(),
     t("apps_list_incidents", "Status page incidents", "The last 90 days' incidents on a project's status page and the open ones, newest first: title, state, whether roll opened it, and its updates.", "apps", "GET", "/v1/apps/projects/{project}/status-page/incidents", &[req("project", "Workspace project")]),
@@ -1631,6 +1693,9 @@ static TOOLS: &[Tool] = &[
             b("feedback", Ty::Bool, "A feedback button on its pages for people who came in through roll"),
             b("warm", Ty::Bool, "Wake the services as soon as a new head is deployed"),
             b("crons", Ty::Bool, "Scheduled work (roll apps' crons, scheduled commands and calls) runs in previews too; off by default: deployed, schedule off"),
+            b("browser_checks", Ty::Str, "Production's browser checks on each preview head: report (shown), check (the roll/browser-checks status) or required (also keeps a change from landing)"),
+            b("traces", Ty::Bool, "roll.toml services get the OpenTelemetry SDK's variables"),
+            bnull("data_at", Ty::Str, "Branch the data as of then: -24h, -30m, -7d or an RFC 3339 time; clear it for now"),
         ],
     ),
     t("previews_visitors", "Who opened a preview", "The last 8 people signed in to roll who opened a preview (team access), by handle, latest first. Share links and the CI bypass aren't people and aren't listed.", "previews", "GET", "/v1/previews/{id}/visitors", &[req("id", "Preview id")]),
@@ -1658,6 +1723,18 @@ static PREPARED: std::sync::LazyLock<std::collections::HashMap<&'static str, Pre
 
 #[cfg(test)]
 mod tests {
+    /// A slip finds its name; something unlike every name finds none.
+    #[test]
+    fn nearest_finds_slips() {
+        let names = ["status", "limit", "service", "environment"];
+        assert_eq!(super::nearest("stauts", names), Some("status"));
+        assert_eq!(super::nearest("lmit", names), Some("limit"));
+        assert_eq!(super::nearest("enviroment", names), Some("environment"));
+        assert_eq!(super::nearest("zebra", names), None);
+        let all: Vec<&str> = super::all().iter().map(|t| t.name).collect();
+        assert_eq!(super::nearest("apps_list_service", all.iter().copied()), Some("apps_list_services"));
+    }
+
     use super::*;
 
     /// Every tool calls a route the permission catalogue classifies, tool names are unique and
@@ -1696,7 +1773,8 @@ mod tests {
                 '{' | '[' | '(' => depth += 1,
                 '}' | ']' | ')' if depth == 0 => break,
                 '}' | ']' | ')' => depth -= 1,
-                ',' if depth == 0 => {
+                // Inline bodies part fields with `,`, TypeScript types with `;`.
+                ',' | ';' if depth == 0 => {
                     segs.push(std::mem::take(&mut cur));
                     continue;
                 }
@@ -1715,6 +1793,42 @@ mod tests {
                 (!name.is_empty() && name.starts_with(|c: char| c.is_ascii_lowercase()) && (rest.is_empty() || rest.starts_with(':'))).then_some(name)
             })
             .collect()
+    }
+
+    /// The body a contract names by type (`` `EnvironmentPut` ``): its `type X = { … }` in the same
+    /// contract, comments taken out, so its fields are checked as an inline body's are.
+    fn named_body(doc: &str, body: &str) -> Option<String> {
+        let name = body.trim().strip_prefix('`')?.split('`').next()?;
+        if !name.starts_with(|c: char| c.is_ascii_uppercase()) || !name.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return None;
+        }
+        let start = doc.find(&format!("type {name} = {{"))? + format!("type {name} = ").len();
+        // Comments out first: `/* … */` and `// …` to the end of the line.
+        let (mut out, mut rest) = (String::new(), &doc[start..]);
+        let mut depth = 0usize;
+        while let Some(c) = rest.chars().next() {
+            if rest.starts_with("/*") {
+                rest = rest.find("*/").map_or("", |e| &rest[e + 2..]);
+                continue;
+            }
+            if rest.starts_with("//") {
+                rest = rest.find('\n').map_or("", |e| &rest[e..]);
+                continue;
+            }
+            out.push(c);
+            rest = &rest[c.len_utf8()..];
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
     }
 
     /// A tool takes every body field and query parameter its route's contract lists, or
@@ -1760,15 +1874,19 @@ mod tests {
                         c => body.push(c),
                     }
                 }
-                let tools: Vec<&Tool> = all().iter().filter(|t| t.method == method && norm(t.path) == norm(&path)).collect();
-                for t in tools.iter().filter(|t| !t.params.iter().any(|p| p.at == At::RawJson)) {
-                    let body = if matches!(method, "POST" | "PUT" | "PATCH") { body_fields(&body) } else { Vec::new() };
-                    for field in body.into_iter().chain(queries.iter().cloned()) {
-                        if t.params.iter().any(|p| p.name == field) {
-                            taken.insert((method.to_string(), norm(&path), field));
-                        } else if !listed.iter().any(|(m, r, f)| m == method && *r == norm(&path) && *f == field) {
-                            missing.push(format!("{} ({method} {path}): {field}", t.name));
-                        }
+                // A route several tools share (secrets_set's values, secrets_link's references): a
+                // field counts once any of them takes it.
+                let tools: Vec<&Tool> = all().iter().filter(|t| t.method == method && norm(t.path) == norm(&path) && !t.params.iter().any(|p| p.at == At::RawJson)).collect();
+                if tools.is_empty() {
+                    continue;
+                }
+                let body = if matches!(method, "POST" | "PUT" | "PATCH") { body_fields(&named_body(doc, &body).unwrap_or_else(|| body.clone())) } else { Vec::new() };
+                for field in body.into_iter().chain(queries.iter().cloned()) {
+                    if tools.iter().any(|t| t.params.iter().any(|p| p.name == field)) {
+                        taken.insert((method.to_string(), norm(&path), field));
+                    } else if !listed.iter().any(|(m, r, f)| m == method && *r == norm(&path) && *f == field) {
+                        let names: Vec<&str> = tools.iter().map(|t| t.name).collect();
+                        missing.push(format!("{} ({method} {path}): {field}", names.join(", ")));
                     }
                 }
             }
@@ -1778,6 +1896,8 @@ mod tests {
         assert!(stale.is_empty(), "no-field.txt lines for fields a tool takes now: remove them:\n{}", stale.join("\n"));
         assert_eq!(body_fields("{ from, message?, expect?: string, files?: {[name]: path | null} }"), ["from", "message", "expect", "files"]);
         assert_eq!(body_fields("{ url, headers? } or { bucket, prefix?, … } (prose `{ x }`)"), ["url", "headers", "bucket", "prefix"]);
+        let doc = "type Put = {\n  a?: string; // b: no, c\n  d: { e: number } /* f: g */;\n};";
+        assert_eq!(body_fields(&named_body(doc, "`Put` (as is)").unwrap()), ["a", "d"]);
     }
 
     #[test]
@@ -1868,10 +1988,11 @@ mod tests {
         assert!(unmarked.is_empty(), "removes or replaces something but isn't destructive (mark it .destructive() or .undoable()): {unmarked:?}");
         assert_eq!(def("workspace_remove_resource")["annotations"]["destructiveHint"], false);
         // A project's preview rules from an agent are only the operational ones: who may open the
-        // previews, production secrets, egress, variables, masking, the visual review's gate and the
-        // jobs (which run with the preview's secrets) stay a person's, so the closed schema refuses them.
+        // previews, production secrets, egress, variables, masking, the visual review's and
+        // regressions' gates, real mail and the jobs (which run with the preview's secrets) stay a
+        // person's, so the closed schema refuses them (no-field.txt says so per field).
         let rules = all().iter().find(|t| t.name == "previews_set_rules").unwrap();
-        for field in ["access", "secrets", "egress", "egress_hosts", "egress_forks", "env", "env_for", "masking", "visual_review", "github", "seed", "release", "teardown"] {
+        for field in ["access", "secrets", "egress", "egress_hosts", "egress_forks", "env", "env_for", "masking", "visual_review", "regressions", "mail", "github", "seed", "release", "teardown"] {
             assert!(rules.request(&json!({ "project": "prj_a", field: "x" })).is_err(), "previews_set_rules takes {field}");
         }
         assert!(rules.request(&json!({ "project": "prj_a", "ttl_hours": 24 })).is_ok());

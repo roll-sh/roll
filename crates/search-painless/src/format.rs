@@ -1294,6 +1294,12 @@ pub fn format_locale(vm: &mut Vm, locale: Option<&str>, f: &str, args: &[Value])
             }
             Piece::Spec(s) => s,
         };
+        crate::guard::check_string(out.len())?;
+        // a width pads before anything is printed: its size is known now
+        if spec.width > 0 {
+            crate::guard::check_string(out.len().saturating_add(spec.width as usize))?;
+            crate::guard::check_bytes(spec.width as u64)?;
+        }
         let p = Printer { spec, locale: loc };
         let missing = |line: u32| cx.err(cls::MISSING_FORMAT_ARGUMENT_EXCEPTION, format!("Format specifier '{}'", spec.to_java_string()), &[&format!("java.util.Formatter.format(Formatter.java:{line})")], &[]);
         match spec.index {

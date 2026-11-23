@@ -553,16 +553,16 @@ fn every_tool() -> Vec<Value> {
         tool(
             "search",
             "Search changes and work items",
-            "Changes and work items in your own repos whose title or text mentions the query (any case), most recently updated first: each with an id for fetch, a title, a URL and a snippet. For a repo's code, use search_code.",
-            json!({ "query": s("Words to look for (1-200 characters)") }),
+            "Changes and work items in your own repos whose title or text mentions the query (any case), most recently updated first, and with kinds=files the files whose content holds it (from each repo's index; repos not searched are listed in skipped): each with an id for fetch, a title, a URL and a snippet. For one repo's code with regex or paths, use search_code.",
+            json!({ "query": s("Words to look for (1-200 characters; 3 or more for files)"), "kinds": s("Comma-separated: changes, work, files (default changes,work)") }),
             &["query"],
             true,
         ),
         tool(
             "fetch",
             "Fetch a change or work item",
-            "One search result in full: its title, whole text, URL and metadata (repo, number, state, author or labels).",
-            json!({ "id": s("An id from search (chg_… or wi_…)") }),
+            "One search result in full: its title, whole text (a file: the lines around its match), URL and metadata (repo, number, state, author or labels; a file's path, revision and lines).",
+            json!({ "id": s("An id from search (chg_…, wi_… or f.…)") }),
             &["id"],
             true,
         ),
@@ -1275,7 +1275,7 @@ async fn call_tool(m: &Mcp, headers: &HeaderMap, name: &str, args: &Value, lockd
     // In lockdown, an outside record's text never reaches the model (roll_auth::lockdown, as
     // roll's own /v1/mcp does): withheld in the structured answer, the text block rebuilt from it.
     if lockdown && roll_auth::lockdown::withhold(&mut result["structuredContent"]) > 0 {
-        let text = serde_json::to_string_pretty(&result["structuredContent"]).unwrap_or_default();
+        let text = serde_json::to_string(&result["structuredContent"]).unwrap_or_default();
         result["content"] = json!([{ "type": "text", "text": text }]);
     }
     // What a person can't see but a model reads (tag characters, zero-width and bidi controls) is
@@ -1322,7 +1322,8 @@ pub async fn call(api: &Router, headers: &HeaderMap, extensions: Option<&axum::h
     };
     // At most what a client takes in one answer (roll_auth::lockdown::cut, as roll's /v1/mcp does:
     // Claude Code moves a longer one to a file); the structured content stays whole.
-    let text = roll_auth::lockdown::cut(outcome.text.clone().unwrap_or_else(|| serde_json::to_string_pretty(&outcome.data).unwrap_or_default()), true);
+    // Compact JSON: indentation costs a model tokens and reads no better to it.
+    let text = roll_auth::lockdown::cut(outcome.text.clone().unwrap_or_else(|| serde_json::to_string(&outcome.data).unwrap_or_default()), true);
     let structured = if outcome.data.is_object() { outcome.data } else { json!({ "result": outcome.data }) };
     json!({
         "content": [{ "type": "text", "text": text }],
@@ -1373,7 +1374,7 @@ async fn run(c: &Call<'_>, name: &str, args: &Value) -> std::result::Result<Outc
         "list_repos" => pass(c.get(&format!("/v1/code/repos{}", query(&[("owner", opt(args, "owner"))]))).await),
         "search" => {
             let q = str_arg(args, "query").ok_or_else(|| fail("query is required"))?;
-            pass(c.get(&format!("/v1/code/search{}", query(&[("q", Some(q.to_string()))]))).await)
+            pass(c.get(&format!("/v1/code/search{}", query(&[("q", Some(q.to_string())), ("kinds", opt(args, "kinds"))]))).await)
         }
         "fetch" => {
             let id = str_arg(args, "id").ok_or_else(|| fail("id is required"))?;

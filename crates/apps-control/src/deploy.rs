@@ -614,6 +614,8 @@ impl Apps {
             for p in pruned {
                 if let Some(img) = &p.image {
                     self.deps.builder.remove_image(img).await;
+                    let i = img.clone();
+                    let _ = self.db(move |s| s.drop_provenance(&i)).await;
                     // A site is keyed by its digest: another service's image with the same one
                     // (a byte-identical build) still serves it.
                     if let Some(k) = crate::sites::key(img) {
@@ -1164,7 +1166,9 @@ impl Apps {
             log.stream(Stream::System).line("nothing else is running, so it switches at once");
         }
         let prepared = if gradual {
-            live.begin_canary(tpl.clone(), prepared, tpl.run.rollout.steps[0]).await;
+            // With browser checks to pass first, it starts with none of the requests.
+            let first = if tpl.run.rollout.checks { 0 } else { tpl.run.rollout.steps[0] };
+            live.begin_canary(tpl.clone(), prepared, first).await;
             if let Err(e) = self.canary(&svc.id, &d.id, &live, &tpl, log, &cancel).await {
                 live.abort_canary().await;
                 return Err(e);
@@ -1198,6 +1202,10 @@ impl Apps {
             live.forget_gate();
             // What the old deployment answered isn't this one's.
             self.responses.clear(&crate::env_key(&d.service, &d.environment));
+            // A preview's head: production's browser checks on it ([`crate::browser`]).
+            if env.ephemeral {
+                self.spawn_preview_checks(&d.service, &d.environment, &d.id);
+            }
             Ok(())
         }
         .await;
@@ -1263,6 +1271,28 @@ impl Apps {
             }
         }
         let _unwait = Unwait(self.clone(), id.to_string());
+        // Its browser checks first, against its own URL, before it takes a request.
+        if r.checks {
+            let (sid, en) = (service.to_string(), tpl.spec.env.clone());
+            let row = self.db(move |s| s.environment(&sid, &en)).await?;
+            let url = self.url(&format!("{}--{}", id.trim_start_matches("dep_"), row.slug));
+            for c in row.checks.iter().filter(|c| c.browser.is_some()) {
+                anyhow::ensure!(self.owns(service), "this node no longer holds the service; the node that took it over deploys");
+                self.step(service, id, &format!("check_{}", c.name)).await;
+                let at = format!("{}{}", url.trim_end_matches('/'), c.path);
+                let ran = self.run_browser_check(service, &row.name, &at, c, cancel, None).await;
+                anyhow::ensure!(!cancel.is_cancelled(), "canceled");
+                // Over its budgets fails a canary as a broken flow does.
+                let ran = ran.and_then(|p| p.over_budget.map_or(Ok(()), Err));
+                match ran {
+                    Ok(()) => sys.line(format!("canary: browser check {} passed on the new deployment", c.name)),
+                    Err(why) => {
+                        sys.line(format!("canary: rolled back before any requests: browser check {} failed: {why}", c.name));
+                        anyhow::bail!("rolled back before any requests: browser check {} failed: {why}", c.name);
+                    }
+                }
+            }
+        }
         for &share in &r.steps {
             live.set_share(share);
             live.take_served();
@@ -1732,7 +1762,7 @@ impl Apps {
                 false => log.line("build.size: this node's builds share its BuildKit, unsized (it applies on the fleet's builders)"),
             }
         }
-        let job = BuildJob {
+        let mut job = BuildJob {
             service: svc.id.clone(),
             deployment: d.id.clone(),
             context,
@@ -1754,6 +1784,14 @@ impl Apps {
         // The same inputs built before in this project (Railway's skipped builds): the same tree,
         // Dockerfile, target and build variables, and its image still kept. Never with `no_cache`.
         let build_key = if job.no_cache { None } else { Some(build_key(&job, &plan.dockerfile, self.deps.builder.name()).await?) };
+        // Next's deployment id, from the same inputs as the build's key (it's left out of it): a
+        // reused image's pages, or a cached build step's, name the id this deployment records,
+        // which skew protection follows (`skew.rs`).
+        if plan.framework.as_deref() == Some("next") && !job.env.iter().any(|(k, _)| k == apps_build::NEXT_DEPLOYMENT_ID) {
+            let id = format!("nb_{}", build_key.as_deref().map_or_else(|| d.id.trim_start_matches("dep_").to_string(), |k| k[..20].to_string()));
+            job.env.push((apps_build::NEXT_DEPLOYMENT_ID.into(), id.clone()));
+            plan_json["next_deployment_id"] = json!(id);
+        }
         let reused = match build_key.clone() {
             Some(k) => {
                 let p = svc.project.clone();
@@ -1761,6 +1799,7 @@ impl Apps {
             }
             None => None,
         };
+        let (reused_from, began) = (reused.as_ref().map(|(from, _)| from.clone()), code_sql::now_ms());
         let image = if let Some((from, image)) = reused {
             log.line(format!("{from} was built from the same source, settings and build variables: its image goes on, no build"));
             image
@@ -1792,6 +1831,30 @@ impl Apps {
         }
         if !pinned.is_empty() {
             plan_json["bases"] = serde_json::Value::Array(pinned);
+        }
+        // Its provenance, signed, beside it: once its bases are pinned (they're what it was
+        // built on). Never for a build roll can't say all of (an unreadable Dockerfile).
+        if reused_from.is_none()
+            && let Some(digest) = self.deps.runtime.image_id(&image).await
+            && let Ok(dockerfile) = std::fs::read(job.context.join(&job.dockerfile)).or_else(|_| std::fs::read(&job.dockerfile))
+        {
+            use sha2::{Digest, Sha256};
+            let built = crate::provenance::Built {
+                image: &image,
+                digest: &digest,
+                deployment: &d.id,
+                builder: self.deps.builder.name(),
+                source: serde_json::to_value(&svc.source).unwrap_or_default(),
+                revision: d.revision.as_deref(),
+                plan: &plan_json,
+                dockerfile_sha256: hex::encode(Sha256::digest(&dockerfile)),
+                variables: job.env.iter().map(|(k, _)| k.clone()).collect(),
+                started_ms: began,
+                finished_ms: code_sql::now_ms(),
+            };
+            if let Err(e) = self.record_provenance(&svc.project, built).await {
+                log.line(format!("its provenance wasn't recorded: {e}"));
+            }
         }
         let (id, img, r) = (d.id.clone(), image.clone(), run.clone());
         self.db(move |s| {
@@ -1990,9 +2053,10 @@ impl Apps {
             _ => None,
         };
         // Its edge functions, run by `<name>-fn` (what Run its functions makes).
-        let edge: Vec<apps_build::edge::EdgeFn> = match &site {
-            Some(_) => dep.plan.as_ref().and_then(|p| serde_json::from_value(p["edge"].clone()).ok()).unwrap_or_default(),
-            None => Vec::new(),
+        // A site's, or a web service's middleware.
+        let edge: Vec<apps_build::edge::EdgeFn> = match (&site, run.kind) {
+            (Some(_), _) | (None, RunType::Web) => dep.plan.as_ref().and_then(|p| serde_json::from_value(p["edge"].clone()).ok()).unwrap_or_default(),
+            _ => Vec::new(),
         };
         let edge_service: String = format!("{}-fn", svc.name).chars().take(40).collect();
         Ok(Template { deployment: dep.id.clone(), spec, run, spa, site, edge, edge_service, intercept_hosts })
@@ -2275,6 +2339,40 @@ impl Apps {
 
     /// Metric alerts: the last five finished minutes against the deployment's `run.alerts`. An
     /// alert is an event once, when it starts; it can start again once it has cleared.
+    /// The last hour against the same hour of the week over the last four weeks (their median,
+    /// two weeks at least, enough traffic to tell): requests dropped below a fifth, errors at three
+    /// times their rate (1% at least), or p95 doubled (200 ms at least). What's unusual, or none.
+    async fn anomaly(self: &Arc<Self>, service: &str, env: &str, now_minute: i64) -> Option<serde_json::Value> {
+        let hour = now_minute / 60;
+        let (sid, e) = (service.to_string(), env.to_string());
+        let weeks: Vec<i64> = (1..=4).map(|k| hour - k * 168).collect();
+        let (past, recent) = self.db(move |s| Ok((s.hours_of(&sid, &e, &weeks)?, s.minutes(&sid, &e, now_minute - 60)?))).await.ok()?;
+        if past.len() < 2 {
+            return None;
+        }
+        let median = |mut v: Vec<f64>| {
+            v.sort_by(|a, b| a.total_cmp(b));
+            v[v.len() / 2]
+        };
+        let usual_requests = median(past.iter().map(|p| p.0 as f64).collect());
+        let usual_error_rate = median(past.iter().map(|p| if p.0 > 0 { p.1 as f64 / p.0 as f64 } else { 0.0 }).collect());
+        let usual_p95 = median(past.iter().map(|p| p.2).collect());
+        let recent: Vec<_> = recent.into_iter().filter(|r| r.minute < now_minute).collect();
+        let (requests, errors) = recent.iter().fold((0i64, 0i64), |(q, e), r| (q + r.requests, e + r.errors));
+        if usual_requests >= 100.0 && (requests as f64) < usual_requests / 5.0 {
+            return Some(serde_json::json!({ "kind": "traffic", "value": requests, "usual": usual_requests.round() }));
+        }
+        let rate = if requests > 0 { errors as f64 / requests as f64 } else { 0.0 };
+        if requests >= 50 && errors >= 10 && rate >= 0.01 && rate >= usual_error_rate * 3.0 {
+            return Some(serde_json::json!({ "kind": "errors", "value": (rate * 1000.0).round() / 10.0, "usual": (usual_error_rate * 1000.0).round() / 10.0 }));
+        }
+        let p95 = recent.iter().filter(|r| r.requests > 0).map(|r| r.p95_ms).fold(0.0, f64::max);
+        if requests >= 50 && usual_p95 > 0.0 && p95 >= 200.0 && p95 >= usual_p95 * 2.0 {
+            return Some(serde_json::json!({ "kind": "latency", "value": p95.round(), "usual": usual_p95.round() }));
+        }
+        None
+    }
+
     pub async fn judge_alerts(self: &Arc<Self>, l: &crate::live::EnvLive) {
         let Some(tpl) = l.template() else { return };
         let (a, limit_mb) = (tpl.run.alerts.clone(), tpl.run.memory_mb);
@@ -2339,6 +2437,11 @@ impl Apps {
                 firing.push(("alert.log", serde_json::json!({ "pattern": pat, "count": count, "threshold": a.log_count })));
             }
         }
+        if a.anomaly
+            && let Some(data) = self.anomaly(&l.service, &l.env, now).await
+        {
+            firing.push(("alert.anomaly", data));
+        }
         if let Some(slo) = &tpl.run.slo
             && let Some((indicator, rate, window)) = crate::slo::burning(slo, &all, now)
         {
@@ -2385,7 +2488,7 @@ impl Apps {
                 }
             }
         }
-        for kind in ["alert.memory", "alert.cpu", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "alert.slo"] {
+        for kind in ["alert.memory", "alert.cpu", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "alert.slo", "alert.anomaly"] {
             let key = format!("{}/{}/{kind}", l.service, l.env);
             match firing.iter().find(|(k, _)| *k == kind) {
                 Some((_, data)) => {
@@ -3040,6 +3143,7 @@ impl Apps {
             self.logs_expired.store(now, std::sync::atomic::Ordering::Relaxed);
             self.expire_logs_pass(&services, now).await;
             self.build_cache_pass(&services, now).await;
+            self.next_cache_pass(now).await;
         }
         if now - self.intercepts_checked.load(std::sync::atomic::Ordering::Relaxed) >= 60_000 {
             self.intercepts_checked.store(now, std::sync::atomic::Ordering::Relaxed);

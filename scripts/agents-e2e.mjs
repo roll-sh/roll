@@ -1,10 +1,11 @@
 // The roll code agents end to end (`pnpm test:agents`, after the unit tests): the real binaries on
-// free ports with a throwaway home. rolld --code-only; an owner; `roll agent login` approved
-// through the API (after looking the pending login up); `ROLL_AGENT_FAKE=1 roll agent up`; then
-// over HTTP and SSE: project add → thread create → a streamed run → its approval answered → the
-// checkpoint and its diff → a share → the share read anonymously → "Orchestrate" on the fake
-// orchestrator (two subagent threads through the daemon's real MCP server, their completion, the
-// wake and the summary); the dashboard in a production
+// ports the OS picks as each binds (rolld's read from its `--addr-file`, the dashboard's from what
+// it prints; never one picked here and let go first) with a throwaway home. rolld --code-only; an
+// owner; `roll agent login` approved through the API (after looking the pending login up);
+// `ROLL_AGENT_FAKE=1 roll agent up`; then over HTTP and SSE: project add → thread create → a
+// streamed run → its approval answered → the checkpoint and its diff → a share → the share read
+// anonymously → "Orchestrate" on the fake orchestrator (two subagent threads through the daemon's
+// real MCP server, their completion, the wake and the summary); the dashboard in a production
 // build against that rolld (`/dashboard/agents`, the share page, its preview image, a missing
 // share's 404); and `roll agent logout`, which stops `up`.
 //
@@ -14,7 +15,6 @@
 
 import { spawn, execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
-import { createServer } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -45,15 +45,30 @@ function check(cond, msg) {
   if (!cond) fail(msg);
 }
 
-async function freePort() {
-  return new Promise((res, rej) => {
-    const s = createServer();
-    s.once("error", rej);
-    s.listen(0, "127.0.0.1", () => {
-      const { port } = s.address();
-      s.close(() => res(port));
-    });
-  });
+/** `fn()`'s first truthy value, failing at once if `c` exits first. */
+async function listening(what, c, fn, ms) {
+  const end = Date.now() + ms;
+  for (;;) {
+    const v = fn();
+    if (v) return v;
+    if (c.exited) fail(`${c.name} exited ${JSON.stringify(c.exited)} before ${what}`);
+    if (Date.now() > end) fail(`timed out waiting for ${what}`);
+    await sleep(50);
+  }
+}
+
+/** rolld's listeners (`LISTENERS` in `crates/rolld/tests/common`). */
+const LISTENERS = ["api", "proxy", "redis", "redis-http", "kafka", "s3", "storage-api", "queues-amqp", "queues-management", "queues-stomp", "queues-web-stomp", "queues-mqtt", "queues-web-mqtt", "queues-stream", "queues-http", "nosql-cql", "nosql-cql-shard-aware", "nosql-alternator", "nosql-rest", "search-http", "apps-listen", "previews-smtp"];
+
+/** rolld as `crates/rolld/tests/common` starts it: every listener on `127.0.0.1:0` and
+ * `--addr-file`; its API's URL once it has written its addresses. */
+async function startRolld(args, opts) {
+  const addrFile = join(dir, "rolld-addrs.json");
+  const ports = LISTENERS.flatMap((l) => [`--${l}`, "127.0.0.1:0"]);
+  const rolld = start("rolld", ROLLD, [...args, ...ports, "--addr-file", addrFile], opts);
+  const addrs = await listening("it wrote its addresses", rolld, () => existsSync(addrFile) && JSON.parse(readFileSync(addrFile, "utf8")), 120_000);
+  check(typeof addrs.api === "string", `rolld's addresses: ${JSON.stringify(addrs)}`);
+  return { rolld, api: `http://${addrs.api}` };
 }
 
 /** Clean environment for the children: nothing from the developer's roll setup leaks in. */
@@ -186,16 +201,14 @@ function git(cwd, ...args) {
 }
 
 async function main() {
-  const apiPort = await freePort();
-  const webPort = await freePort();
-  API = `http://127.0.0.1:${apiPort}`;
-  const WEB = `http://127.0.0.1:${webPort}`;
-  log(`home ${dir}; rolld on ${API}${withDashboard ? `, dashboard on ${WEB}` : ""}`);
-
   // ── rolld ──
-  const rolld = start("rolld", ROLLD, ["--code-only", "--home", join(dir, "rolld"), "--api", `127.0.0.1:${apiPort}`], {
-    env: env({ ROLL_WEB_URL: WEB, ROLL_CODE_PUBLIC_URL: API }),
-  });
+  // Share links are on ROLL_WEB_URL, which rolld reads as it starts: before the dashboard (built
+  // with rolld's address) has a port. A fixed origin stands in; the dashboard serves the share by id.
+  const SHARES = "http://dashboard.e2e.invalid";
+  // ROLL_CODE_PUBLIC_URL defaults to http://<public host>:<API port>, the port rolld bound.
+  const { rolld, api } = await startRolld(["--code-only", "--home", join(dir, "rolld")], { env: env({ ROLL_WEB_URL: SHARES }) });
+  API = api;
+  log(`home ${dir}; rolld on ${API}`);
   await until("rolld to answer", async () => (await req("GET", "/v1/code")).status === 200);
   const owner = await req("POST", "/v1/code/owners", { name: "acme", kind: "org" });
   check(owner.status === 201, `owner: ${owner.status} ${owner.text}`);
@@ -275,7 +288,7 @@ async function main() {
 
   // ── a share, read anonymously ──
   const shared = await req("POST", `/v1/code/agents/acme/threads/${thread}/shares`, {});
-  check(shared.status === 201 && shared.json.url === `${WEB}/agents/s/${shared.json.id}`, `share: ${shared.status} ${shared.text}`);
+  check(shared.status === 201 && shared.json.url === `${SHARES}/agents/s/${shared.json.id}`, `share: ${shared.status} ${shared.text}`);
   const share = await req("GET", `/v1/code/agents/shares/${shared.json.id}`);
   check(share.status === 200 && share.headers.get("cache-control") === "no-store", `share read: ${share.status}`);
   const kinds = new Set(share.json.entities.map((e) => e.kind));
@@ -335,6 +348,7 @@ async function main() {
   log(`orchestrator woke ${wakes.length}x and summed up: ${JSON.stringify(orchestration().said.at(-1))}`);
 
   // ── the dashboard, production build, against this rolld ──
+  let WEB;
   if (withDashboard) {
     const dash = join(ROOT, "apps/dashboard");
     log("building the dashboard (vite build)…");
@@ -345,7 +359,11 @@ async function main() {
     // left the server running (every e2e run leaked one).
     const viteBin = join(dash, "node_modules/vite/bin/vite.js");
     execFileSync(process.execPath, [viteBin, "build"], { cwd: dash, env: webEnv, stdio: ["ignore", "inherit", "inherit"] });
-    start("dashboard", process.execPath, ["server.mjs", "-H", "127.0.0.1", "-p", String(webPort)], { cwd: dash, env: webEnv });
+    // Port 0: srvx prints `➜ Listening on: <url>` once it listens (stdout isn't a TTY: no colours;
+    // a TEST in the environment would silence it).
+    const web = start("dashboard", process.execPath, ["server.mjs", "-H", "127.0.0.1", "-p", "0"], { cwd: dash, env: { ...webEnv, TEST: "" } });
+    WEB = await listening("it listened", web, () => /Listening on: (http:\/\/127\.0\.0\.1:\d+)/.exec(web.out)?.[1], 60_000);
+    log(`dashboard on ${WEB}`);
     const page = async (path) => {
       const r = await fetch(`${WEB}${path}`, { redirect: "manual" });
       return { status: r.status, text: await r.text(), type: r.headers.get("content-type") };

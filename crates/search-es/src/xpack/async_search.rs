@@ -94,11 +94,22 @@ pub async fn submit(ctx: &Ctx<'_>) -> EsResult<Reply> {
         }
     }
     if keep {
+        // `AsyncTaskIndexService`'s limit on a stored response (`search.max_async_search_response_size`).
+        let max = ctx.state().metadata.cluster_setting("search.max_async_search_response_size").and_then(|v| crate::units::ByteSize::parse(v, "search.max_async_search_response_size").ok()).map_or(10 << 20, |b| b.bytes());
+        // The stored copy (charged by the store); `m` itself is the reply.
+        let stored = Value::Obj(m.clone());
+        if max >= 0 {
+            let mut buf = Vec::new();
+            crate::json::write::write_json(&mut buf, &stored, false);
+            if buf.len() as i64 > max {
+                return Err(EsError::illegal_argument(format!("Can't store an async search response larger than [{max}] bytes. This limit can be set by changing the [search.max_async_search_response_size] setting.")));
+            }
+        }
         ctx.cluster.xpack.results.put(
             id.clone(),
             Entry {
                 kind: Kind::Search,
-                response: Value::Obj(m.clone()),
+                response: stored,
                 start_ms: start,
                 expiration_ms: start + keep_alive,
                 bytes: 0,
@@ -106,7 +117,7 @@ pub async fn submit(ctx: &Ctx<'_>) -> EsResult<Reply> {
                 owner: async_results::owner(ctx),
             },
             ctx.now_ms,
-        );
+        )?;
         let mut with_id = Map::new();
         with_id.insert("id".into(), id.into());
         with_id.extend(m);
@@ -120,7 +131,7 @@ pub async fn submit(ctx: &Ctx<'_>) -> EsResult<Reply> {
 fn stored(ctx: &Ctx) -> EsResult<(String, Entry)> {
     let id = ctx.path_param("id").unwrap_or_default().to_string();
     async_results::check_id(&id)?;
-    match async_results::get_own(ctx, &id, Kind::Search) {
+    match async_results::get_own(ctx, &id, Kind::Search)? {
         Some(e) => Ok((id, e)),
         None => Err(EsError::resource_not_found(id)),
     }

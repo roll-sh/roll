@@ -22,6 +22,8 @@ mod golang;
 mod java;
 mod node;
 pub mod otel;
+pub mod next_cache;
+pub mod source_maps;
 pub mod packages;
 mod php;
 pub mod imports;
@@ -147,6 +149,12 @@ pub struct Plan {
     /// The OpenTelemetry agent the build added (`node`, `python`; [`otel`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub otel: Option<String>,
+    /// roll's Next.js adapter is in the image ([`next_cache`]): its instances share a cache.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub next_cache: bool,
+    /// Its Node build writes source maps ([`source_maps`]): it starts with `--enable-source-maps`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub source_maps: bool,
 }
 
 /// The images a Dockerfile builds on (its `FROM`s), for watching them move: not its own stages,
@@ -279,6 +287,11 @@ pub fn candidates(tree: &dyn Tree) -> Vec<Candidate> {
     out
 }
 
+/// Next.js's deployment id (`deploymentId`), set at a Next build: its pages then name it on
+/// their requests (`?dpl=` on assets, `x-deployment-id` on its own fetches), which roll's skew
+/// protection follows, and Next reloads a page whose build is no longer the one answering.
+pub const NEXT_DEPLOYMENT_ID: &str = "NEXT_DEPLOYMENT_ID";
+
 pub fn plan(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
     // A Procfile (Heroku's; Nixpacks and Railpack read it too) names the start command when
     // the service doesn't, unless the tree's own Dockerfile has its CMD.
@@ -335,6 +348,27 @@ pub fn plan(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
             p.functions.push("edge".into());
         }
         p.edge = found;
+    } else if !own_dockerfile && p.start.is_some() && overrides.builder != Builder::Functions {
+        // Middleware for any web service (Vercel's Routing Middleware, Netlify's edge functions on
+        // a server's routes): the same files, run before the service by its functions service.
+        // Next.js runs its own middleware.ts; a server's own module of that name isn't one.
+        let (mut found, notes) = edge::find(tree);
+        let next = p.framework.as_deref() == Some("next");
+        found.retain(|f| {
+            let keep = f.kind != edge::EdgeKind::Vercel || (!next && edge::vercel_middleware(tree, &f.file));
+            if !keep && !next {
+                p.notes.push(format!("{}: not Vercel's middleware (no config.matcher, no next/server or @vercel import): left to the app", f.file));
+            }
+            keep
+        });
+        p.notes.extend(notes);
+        for f in &found {
+            p.notes.push(format!("{}: an edge function on {}, run before the service by its functions service (Run its functions)", f.file, f.paths.join(", ")));
+        }
+        if !found.is_empty() {
+            p.functions.push("edge".into());
+        }
+        p.edge = found;
     }
     // Vercel's crons, whatever builds it (a Next.js app's usually).
     if let Some(text) = tree.read("vercel.json").and_then(|b| String::from_utf8(b).ok()) {
@@ -359,6 +393,26 @@ pub fn plan(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
                 }
                 Err(why) => p.notes.push(why),
             }
+        }
+    }
+    // A Node server built with source maps: its stacks name the source's lines.
+    if p.provider == Provider::Node && p.start.as_deref() != Some(static_site::START) {
+        let pkg: serde_json::Value = tree.read("package.json").and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        if let Some(why) = source_maps::emitted(tree, &pkg) {
+            p.source_maps = true;
+            p.notes.push(format!("{why}: it starts with --enable-source-maps, so its stacks name the source's lines"));
+        }
+    }
+    // A Next server's caches shared by its instances (not a static export, not its own Dockerfile).
+    if p.provider == Provider::Node && p.framework.as_deref() == Some("next") && !own_dockerfile {
+        let pkg: serde_json::Value = tree.read("package.json").and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        match next_cache::adapters(&pkg) {
+            Ok(()) => {
+                p.dockerfile = next_cache::add(&p.dockerfile);
+                p.next_cache = true;
+                p.notes.push("next: roll's adapter shares its ISR, fetch and \"use cache\" entries between instances and across sleep".into());
+            }
+            Err(why) => p.notes.push(why),
         }
     }
     if !overrides.packages.is_empty() {
@@ -535,6 +589,8 @@ impl Draft {
             functions: Vec::new(),
             edge: Vec::new(),
             otel: None,
+            next_cache: false,
+            source_maps: false,
         }
     }
 }

@@ -376,6 +376,41 @@
     "endpoint": "cliproxy"
   },
   {
+    "type": "endpoint.set",
+    "endpoint": {
+      "id": "cliproxy",
+      "name": "CLIProxyAPI",
+      "kind": "cliproxy",
+      "base_url": "http://100.64.0.7:8317",
+      "providers": [
+        "claude",
+        "codex"
+      ],
+      "key_ref": "roll://production/ai/ANTHROPIC_KEY"
+    }
+  },
+  {
+    "type": "endpoint.key",
+    "endpoint": "cliproxy",
+    "key": {
+      "type": "set",
+      "sealed": {
+        "v": 1,
+        "epk": "3p7bfXt9wbTTW2HC7OQ1Nz-DQ8hbeGdNrfx-FG-IK08",
+        "nonce": "AAECAwQFBgcICQoL",
+        "ct": "bm90IGEgcmVhbCBrZXksIGp1c3QgYSBzaGFwZQ"
+      }
+    }
+  },
+  {
+    "type": "endpoint.key",
+    "endpoint": "cliproxy",
+    "key": {
+      "type": "refused",
+      "reason": "maker unreachable: usr_ada, who chose it, can no longer reveal production:/ai or can no longer sign in"
+    }
+  },
+  {
     "type": "gateway.configure",
     "settings": {
       "enabled": true,
@@ -495,6 +530,27 @@
     "upstream": "openrouter",
     "key": {
       "type": "clear"
+    }
+  },
+  {
+    "type": "gateway.upstream_key",
+    "upstream": "anthropic",
+    "key": {
+      "type": "set",
+      "sealed": {
+        "v": 1,
+        "epk": "3p7bfXt9wbTTW2HC7OQ1Nz-DQ8hbeGdNrfx-FG-IK08",
+        "nonce": "AAECAwQFBgcICQoL",
+        "ct": "bm90IGEgcmVhbCBrZXksIGp1c3QgYSBzaGFwZQ"
+      }
+    }
+  },
+  {
+    "type": "gateway.upstream_key",
+    "upstream": "anthropic",
+    "key": {
+      "type": "refused",
+      "reason": "maker unreachable: usr_ada, who chose it, can no longer reveal production:/ or can no longer sign in"
     }
   },
   {

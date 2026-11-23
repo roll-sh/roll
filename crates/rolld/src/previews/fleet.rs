@@ -94,7 +94,7 @@ mod tests {
     impl Shoot for Here {
         async fn shoot(&self, service: &str, env: &str, opts: &ShotOptions) -> anyhow::Result<Option<Shot>> {
             let text = format!("{} took {service} {env} {}", self.0, opts.pages.join(","));
-            Ok(Some(Shot { png: vec![137, 80, 78, 71], speed: None, health: None, a11y: None, phone: Some(vec![1, 2]), pages: Vec::new(), text: Some(text), links: None, api: None, crops: vec![("n1".into(), vec![3])] }))
+            Ok(Some(Shot { png: vec![137, 80, 78, 71], speed: None, health: None, a11y: None, phone: Some(vec![1, 2]), pages: Vec::new(), text: Some(text), links: None, api: None, crops: vec![("n1".into(), vec![3])] , bodies: Vec::new() }))
         }
     }
 

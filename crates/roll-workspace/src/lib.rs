@@ -8,19 +8,23 @@
 //!
 //! Every project has a namespace (`owner`): the id of the person who made it (docs/accounts.md), or
 //! empty for the operator's. Names and resource places are per namespace. People share a project as
-//! its members, each with a role ([`members`], docs/members.md); a [`Scope`] says which projects a
-//! caller sees.
+//! its members, each with a role ([`members`], docs/members.md), and through groups that hold roles
+//! ([`groups`], docs/members-v1-1.md); a [`Scope`] says which projects a caller sees.
 //!
-//! A deleted project is kept apart (`deleted_projects`, `deleted_resources`, and its members and
-//! homes in `deleted_members`, `deleted_homes`) so it can come back ([`Workspace::restore`]) while a
+//! A deleted project is kept apart (`deleted_projects`, `deleted_resources`, and its members,
+//! homes and groups' roles in `deleted_members`, `deleted_homes`, `deleted_group_roles`) so it can come back ([`Workspace::restore`]) while a
 //! product still keeps its data (roll secrets' recovery window), for at most [`KEEP_DELETED_DAYS`].
 //! A product may refuse a delete first ([`Workspace::before_delete`]).
 //!
 //! [`api::router`] serves it under `/v1/workspace`.
 
 pub mod api;
+pub mod events;
+pub mod groups;
 pub mod members;
 
+pub use events::{EventPage, EventsQuery, FeedEvent};
+pub use groups::{Counts, Group, GroupMember, GroupOp, GroupRole};
 pub use members::{Actor, Invite, Member, MemberEvent, People, Person};
 
 use code_sql::{Db, OptionalExtension, Target, params};
@@ -110,6 +114,15 @@ pub enum Error {
     /// The change would leave the project without an owner who can sign in.
     #[error("{0}")]
     LastOwner(String),
+    /// The write would pass one of the groups' limits (409 `limit`, naming it).
+    #[error("{0}")]
+    Limit(String),
+    /// A SCIM group's name or members: its identity provider's (403 `managed`).
+    #[error("{0}")]
+    Managed(String),
+    /// More than a group holds (SCIM's `tooMany`; nothing in the request applied).
+    #[error("{0}")]
+    TooMany(String),
     /// A product refused a delete ([`Workspace::before_delete`]).
     #[error("{}", .0.message)]
     Refused(Refusal),
@@ -260,6 +273,8 @@ impl Workspace {
         }
         db.ensure_schema(SCHEMA)?;
         db.ensure_schema(members::SCHEMA)?;
+        db.ensure_schema(groups::SCHEMA)?;
+        db.ensure_schema(events::SCHEMA)?;
         db.migrate("workspace-owners-copy", |c| {
             if !c.has_column("projects_v1", "id")? {
                 return Ok(());
@@ -284,11 +299,23 @@ impl Workspace {
             let projects: Vec<Project> = match scope {
                 Scope::All => projects,
                 Scope::Member(user) => {
-                    let roles: HashMap<String, String> = c.query("SELECT project_id, role FROM members WHERE user_id = ?", [user], |r| Ok((r.get(0)?, r.get(1)?)))?.into_iter().collect();
+                    // Their highest role in each project, their own or a group's.
+                    let mut roles: HashMap<String, roll_auth::roles::Role> = HashMap::new();
+                    let rows: Vec<(String, String, i64)> = c.query(
+                        "SELECT project_id, role, 0 FROM members WHERE user_id = ?1 UNION ALL \
+                         SELECT gr.project_id, gr.role, 1 FROM group_members gm JOIN group_roles gr ON gr.group_id = gm.group_id WHERE gm.user_id = ?1",
+                        [user],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    )?;
+                    for (project, role, via) in rows {
+                        let role = if via == 1 { groups::group_role(&role) } else { roll_auth::roles::Role::parse(&role).unwrap_or(roll_auth::roles::Role::Viewer) };
+                        let e = roles.entry(project).or_insert(role);
+                        *e = (*e).max(role);
+                    }
                     projects
                         .into_iter()
                         .filter_map(|mut p| {
-                            p.role = roll_auth::roles::Role::parse(roles.get(&p.id)?);
+                            p.role = Some(*roles.get(&p.id)?);
                             Some(p)
                         })
                         .collect()
@@ -318,7 +345,7 @@ impl Workspace {
             owner_of(c, scope, id)?;
             let mut p = load(c, id)?;
             if let Scope::Member(user) = scope {
-                p.role = c.query_row("SELECT role FROM members WHERE project_id = ? AND user_id = ?", [id, user], |r| r.get::<_, String>(0)).optional()?.and_then(|r| roll_auth::roles::Role::parse(&r));
+                p.role = groups::effective_role(c, id, user)?;
             }
             Ok(p)
         })
@@ -331,6 +358,7 @@ impl Workspace {
         let icon = icon.map(check_icon).transpose()?;
         let id = new_id();
         let now = self.db.now_ms()?;
+        let handle = self.handle(owner);
         self.db.write(|c| {
             name_free(c, owner, name, None)?;
             // After every project before it, even one made the same millisecond: projects list
@@ -339,6 +367,10 @@ impl Workspace {
             let at = last.map_or(now, |l| now.max(l + 1));
             c.execute("INSERT INTO projects (id, owner, name, description, icon, created_at) VALUES (?, ?, ?, ?, ?, ?)", params![id, owner, name, description, icon, at])?;
             members::first_owner(c, &id, owner, at)?;
+            if !owner.is_empty() {
+                let data = serde_json::json!({ "user": owner, "handle": handle, "role": "owner", "environments": null, "via": "created" });
+                events::emit(c, &id, at, events::Kind::MemberAdded, owner, owner, data)?;
+            }
             let mut p = load(c, &id)?;
             p.role = (!owner.is_empty()).then_some(roll_auth::roles::Role::Owner);
             Ok(p)
@@ -394,6 +426,11 @@ impl Workspace {
             let old: Vec<String> = c.query("SELECT id FROM deleted_projects WHERE deleted_at < ? OR id = ?", params![now - KEEP_DELETED_DAYS * 86_400_000, id], |r| r.get(0))?;
             for p in &old {
                 forget_deleted_rows(c, p)?;
+                // Gone for good: its feed too (never this project's, which may come back and
+                // must go on from its cursor).
+                if p != id {
+                    events::forget(c, p)?;
+                }
             }
             c.execute(&format!("INSERT INTO deleted_projects ({PROJECT_COLUMNS}, deleted_at) SELECT {PROJECT_COLUMNS}, ? FROM projects WHERE id = ?"), params![now, id])?;
             c.execute("INSERT INTO deleted_resources (project_id, owner, kind, ref, x, y, added_at) SELECT project_id, owner, kind, ref, x, y, added_at FROM resources WHERE project_id = ?", [id])?;
@@ -422,7 +459,8 @@ impl Workspace {
     /// 409 if its namespace has another project of its name now. A project that exists is answered
     /// as it is.
     pub fn restore(&self, id: &str) -> Result<Project> {
-        self.db.write(|c| {
+        let now = self.db.now_ms()?;
+        let p = self.db.write(|c| {
             if c.query_row("SELECT 1 FROM projects WHERE id = ?", [id], |r| r.get::<_, i64>(0)).optional()?.is_some() {
                 return load(c, id);
             }
@@ -434,14 +472,25 @@ impl Workspace {
                 [id],
             )?;
             members::bring_back(c, id)?;
+            // Groups' roles too, except those of groups deleted since (each in the audit log).
+            groups::bring_back(c, id, now)?;
             forget_deleted_rows(c, id)?;
             load(c, id)
-        })
+        })?;
+        self.run_events();
+        Ok(p)
     }
 
     /// Stop keeping a deleted project (a product purged what it kept of it).
     pub fn forget_deleted(&self, id: &str) -> Result<()> {
-        self.db.write(|c| forget_deleted_rows(c, id))
+        self.db.write(|c| {
+            // Only a project that is kept deleted, never one restored since.
+            let kept = c.query_row("SELECT 1 FROM deleted_projects WHERE id = ?", [id], |r| r.get::<_, i64>(0)).optional()?.is_some();
+            if kept {
+                events::forget(c, id)?;
+            }
+            forget_deleted_rows(c, id)
+        })
     }
 
     /// Whether a deleted project's canvas stood for `kind ref` when it was deleted, from its kept
@@ -573,7 +622,8 @@ pub(crate) fn owner_of(c: &code_sql::Conn<'_>, scope: Scope<'_>, id: &str) -> Re
     let seen = match (scope, &owner) {
         (_, None) => false,
         (Scope::All, Some(_)) => true,
-        (Scope::Member(user), Some(_)) => c.query_row("SELECT 1 FROM members WHERE project_id = ? AND user_id = ?", [id, user], |r| r.get::<_, i64>(0)).optional()?.is_some(),
+        // A member, directly or through one of their groups.
+        (Scope::Member(user), Some(_)) => c.query_row(&format!("SELECT 1 WHERE {}", groups::REACHES), [id, user], |r| r.get::<_, i64>(0)).optional()?.is_some(),
     };
     match owner {
         Some(owner) if seen => Ok(owner),

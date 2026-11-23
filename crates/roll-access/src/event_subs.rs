@@ -40,6 +40,11 @@ CREATE TABLE IF NOT EXISTS mcp_event_subs (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS mcp_event_subs_grant ON mcp_event_subs (grant_id);
 CREATE INDEX IF NOT EXISTS mcp_event_subs_expires ON mcp_event_subs (expires_at);
+CREATE TABLE IF NOT EXISTS mcp_event_verifies (
+    grant_id TEXT NOT NULL,
+    at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS mcp_event_verifies_grant ON mcp_event_verifies (grant_id, at);
 CREATE TABLE IF NOT EXISTS mcp_event_receivers (
     grant_id TEXT NOT NULL,
     url TEXT NOT NULL,
@@ -50,6 +55,10 @@ CREATE TABLE IF NOT EXISTS mcp_event_receivers (
 
 /// Subscriptions one connection may hold.
 pub const PER_GRANT: i64 = 20;
+/// Subscriptions one person may hold across all their connections (their tokens and OAuth
+/// connections), so opening more connections doesn't multiply [`PER_GRANT`]. The operator's own
+/// tokens have only the per-connection limit.
+pub const PER_PERSON: i64 = 100;
 /// A subscription lives at most this long without a refresh (the client asks again before it ends).
 pub const MAX_TTL_MS: i64 = 3_600_000;
 /// …and at least this long (a client asking for less refreshes too often).
@@ -65,9 +74,9 @@ const RETRY_MS: i64 = 5 * 60_000;
 const GIVE_UP_MS: i64 = 24 * 3_600_000;
 /// A callback's proof lasts a day: one whose domain now points elsewhere proves it again.
 const VERIFIED_FOR_MS: i64 = 24 * 3_600_000;
-/// Callback URLs one connection may ask roll to verify a minute: each is one POST to an address it
-/// chose, so a token can't make roll knock on many.
-const VERIFIES_PER_MINUTE: usize = 5;
+/// Callback URLs one connection may ask roll to verify a minute, across every node (counted in the
+/// shared store): each is one POST to an address it chose, so a token can't make roll knock on many.
+const VERIFIES_PER_MINUTE: i64 = 5;
 
 /// A subscription as its connection sees it (never its secret).
 #[derive(Clone, Debug)]
@@ -203,7 +212,8 @@ impl Access {
         let id = sub_id(n.grant_id, n.url, n.name, n.arguments);
         let t = self.event_transport()?;
         let sealed = t.seal(&id, n.secret).map_err(Error::Internal)?;
-        let now = code_sql::now_ms();
+        // The database's clock, as claims compare a subscription's times on it.
+        let now = self.store.db.now_ms()?;
         let expires = now + n.ttl_ms.clamp(MIN_TTL_MS, MAX_TTL_MS);
         let args = canonical(n.arguments);
         self.store.db.write(|c| {
@@ -222,6 +232,16 @@ impl Access {
                     let held: i64 = c.query_row("SELECT COUNT(*) FROM mcp_event_subs WHERE grant_id = ?", [n.grant_id], |r| r.get(0))?;
                     if held >= PER_GRANT {
                         return Err(Error::TooMany(format!("a connection holds at most {PER_GRANT} event subscriptions")));
+                    }
+                    // A person's connections share one allowance.
+                    let theirs: i64 = c.query_row(
+                        "SELECT COUNT(*) FROM mcp_event_subs s JOIN grants g ON g.id = s.grant_id \
+                         WHERE g.user_id IS NOT NULL AND g.user_id = (SELECT user_id FROM grants WHERE id = ?)",
+                        [n.grant_id],
+                        |r| r.get(0),
+                    )?;
+                    if theirs >= PER_PERSON {
+                        return Err(Error::TooMany(format!("a person holds at most {PER_PERSON} event subscriptions across their connections")));
                     }
                     c.execute(
                         "INSERT INTO mcp_event_subs (id, grant_id, name, arguments, url, secret, cursor, lockdown, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -279,7 +299,7 @@ impl Access {
     /// `{"type":"verification","challenge"}` it must echo in a 2xx answer. `Err` is the SEP's
     /// category (`challenge_failed`, `timeout`, `http_4xx`…), never what the endpoint said.
     pub async fn verify_event_receiver(self: &Arc<Self>, grant_id: &str, url: &str, secret: &str, sub_id: &str) -> std::result::Result<(), String> {
-        if self.event_verifies.lock().unwrap_or_else(|e| e.into_inner()).admit(grant_id, code_sql::now_ms(), VERIFIES_PER_MINUTE).is_err() {
+        if !self.admit_verify(grant_id).await {
             return Err("rate".into());
         }
         let key = secret_key(secret).ok_or("challenge_failed")?;
@@ -308,6 +328,26 @@ impl Access {
             return Err("challenge_failed".into());
         }
         self.mark_receiver(grant_id, url).await
+    }
+
+    /// Count one verification for this connection in the shared store, on the database's clock:
+    /// whether it's within [`VERIFIES_PER_MINUTE`] on every node together.
+    async fn admit_verify(self: &Arc<Self>, grant_id: &str) -> bool {
+        let (a, g) = (self.clone(), grant_id.to_string());
+        let admitted = tokio::task::spawn_blocking(move || {
+            let now = a.store.db.now_ms()?;
+            a.store.db.write(|c| {
+                c.execute("DELETE FROM mcp_event_verifies WHERE at < ?", [now - 60_000])?;
+                let n: i64 = c.query_row("SELECT COUNT(*) FROM mcp_event_verifies WHERE grant_id = ?", [&g], |r| r.get(0))?;
+                if n >= VERIFIES_PER_MINUTE {
+                    return Ok::<_, Error>(false);
+                }
+                c.execute("INSERT INTO mcp_event_verifies (grant_id, at) VALUES (?, ?)", params![g, now])?;
+                Ok(true)
+            })
+        })
+        .await;
+        matches!(admitted, Ok(Ok(true)))
     }
 
     /// Record that this connection's callback proved it wants deliveries (good for a day).
@@ -358,7 +398,9 @@ impl Access {
             return Ok(Vec::new());
         }
         let t = self.event_transport()?;
-        let now = code_sql::now_ms();
+        // The database's clock, not this node's: two nodes whose clocks disagree never both see a
+        // claim lapsed (the rest of a subscription's times are only ever compared on it too).
+        let now = self.store.db.now_ms()?;
         let claim = now + HOLD_MS;
         let marks = vec!["?"; names.len()].join(", ");
         let rows: Vec<(EventSub, String, Option<String>, Option<i64>)> = self.store.db.write(|c| {
@@ -399,7 +441,7 @@ impl Access {
     /// `more`: the round stopped with events still waiting (a full page, its share used): it's due
     /// again at once, so a backlog catches up.
     pub fn event_sub_done(&self, c: &Claimed, cursor: &str, delivered: bool, error: Option<&str>, more: bool) -> Result<()> {
-        let (id, claim, now) = (&c.sub.id, c.claim, code_sql::now_ms());
+        let (id, claim, now) = (&c.sub.id, c.claim, self.store.db.now_ms()?);
         let next = if more { now } else { now + READ_EVERY_MS };
         self.store.db.write(|c| {
             match error {
@@ -422,7 +464,7 @@ impl Access {
     /// A claimed subscription read nothing this round (its feed's product was busy): the next
     /// read waits as usual, its delivery state as it was.
     pub fn event_sub_retry(&self, c: &Claimed) -> Result<()> {
-        let (id, claim, next) = (&c.sub.id, c.claim, code_sql::now_ms() + READ_EVERY_MS);
+        let (id, claim, next) = (&c.sub.id, c.claim, self.store.db.now_ms()? + READ_EVERY_MS);
         self.store.db.write(|c| Ok::<_, Error>(c.execute("UPDATE mcp_event_subs SET running_until = 0, next_at = ? WHERE id = ? AND running_until = ?", params![next, id, claim]).map(|_| ())?))
     }
 

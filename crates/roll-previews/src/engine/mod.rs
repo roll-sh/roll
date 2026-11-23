@@ -177,6 +177,8 @@ pub struct Engine {
     forwards_said: Mutex<HashMap<(String, String, String, u16), i64>>,
     /// What ends a preview's forwarded connections when it goes, by preview.
     forwards_end: Mutex<HashMap<String, tokio::sync::watch::Sender<bool>>>,
+    /// Services swapped for a laptop's process (`roll preview swap`): by preview and service, who.
+    swaps: Mutex<HashMap<(String, String), String>>,
     /// Each preview's recent spans (`traces.rs`), and what reads an OTLP request into them
     /// (rolld: roll apps' reader); unset, the intake answers 404.
     traces: Mutex<traces::Kept>,
@@ -339,6 +341,7 @@ impl Engine {
             forwards: Mutex::new(HashMap::new()),
             forwards_said: Mutex::new(HashMap::new()),
             forwards_end: Mutex::new(HashMap::new()),
+            swaps: Mutex::new(HashMap::new()),
             started_stamp: drains::now_stamp(),
         })
     }
@@ -935,6 +938,10 @@ fn title_says(title: &str) -> Option<bool> {
 pub fn env_name(preview_id: &str) -> String {
     branch_name(preview_id)
 }
+
+/// How long after a head is up its browser checks are read for (roll apps runs them once as the
+/// deployment goes live).
+pub const BROWSER_CHECKS_FOR_MS: i64 = 5 * 60_000;
 
 fn short(rev: &str) -> &str {
     let rev = rev.strip_prefix("cs_").unwrap_or(rev);

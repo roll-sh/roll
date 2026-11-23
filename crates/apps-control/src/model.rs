@@ -1125,11 +1125,16 @@ pub struct Rollout {
     /// consumer that must be alone. A web service's requests wait for the new one meanwhile.
     #[serde(skip_serializing_if = "is_true")]
     pub overlap: bool,
+    /// The environment's browser checks run against the new deployment's own URL before it
+    /// takes any requests (Checkly's deployment checks, through Vercel); one that fails rolls it
+    /// back (`crate::browser`).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub checks: bool,
 }
 
 impl Default for Rollout {
     fn default() -> Self {
-        Rollout { steps: Vec::new(), step_s: 120, error_pct: 5, manual: false, slo_burn: None, p95_pct: None, overlap: true }
+        Rollout { steps: Vec::new(), step_s: 120, error_pct: 5, manual: false, slo_burn: None, p95_pct: None, overlap: true, checks: false }
     }
 }
 
@@ -1181,11 +1186,17 @@ pub struct Alerts {
     /// some minutes running (Cloud Monitoring's metric alerts): `alert.metric`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub metrics: Vec<MetricAlert>,
+    /// Unusual against its own past (Vercel Observability's anomaly alerts): the last hour
+    /// against the same hour of the week over the last four weeks (two at least), for requests
+    /// dropping, errors or p95 rising, where no fixed threshold would fire: `alert.anomaly`. Off by
+    /// default.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub anomaly: bool,
 }
 
 impl Default for Alerts {
     fn default() -> Self {
-        Alerts { memory_pct: 90, error_pct: 5, p95_ms: 0, capacity_pct: 10, log_match: None, log_count: 10, cpu_pct: 0, metrics: Vec::new() }
+        Alerts { memory_pct: 90, error_pct: 5, p95_ms: 0, capacity_pct: 10, log_match: None, log_count: 10, cpu_pct: 0, metrics: Vec::new(), anomaly: false }
     }
 }
 
@@ -1857,12 +1868,19 @@ pub struct Environment {
     pub rate_limit: Option<RateLimit>,
     /// Its firewall rules, in order ([]: none).
     pub firewall: Vec<FirewallRule>,
+    /// How many requests each of them matched in the last 24 hours, in their order (on the node
+    /// that serves it: a takeover starts them again). A `log` rule's too.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub firewall_hits: Vec<u32>,
     /// Headers its answers carry ([]: none).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub headers: Vec<HeaderRule>,
     /// Paths another service of the project answers ([]: none).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub routes: Vec<Route>,
+    /// Its own redirects, `_redirects` lines (`crate::site_rules::EnvRedirects`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redirects: Option<String>,
     /// Its uptime checks ([]: none), and how each stands on its owner.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub checks: Vec<Check>,
@@ -1984,6 +2002,15 @@ pub struct FirewallRule {
     pub per_minute: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub burst: Option<u32>,
+    /// `limit`'s: what a client is (Vercel's and Cloud Armor's rate-limit keys): `ip` (the
+    /// default), `header:<name>` (an API key's header) or `cookie:<name>` (a session's). A
+    /// request without it counts by its address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// Kinds of client from roll's managed lists ([`crate::bots`]): `ai`, `search`, `preview`,
+    /// `tools`, `verified`, `spoofed`; any of them matches.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bots: Vec<String>,
 }
 
 /// A named part of a request a firewall rule reads ([`FirewallRule::header`]): there, or there
@@ -2031,6 +2058,8 @@ pub struct Asked<'a> {
     pub ip: Option<std::net::IpAddr>,
     pub headers: &'a axum::http::HeaderMap,
     pub query: Option<&'a str>,
+    /// What [`crate::bots`] made of its client.
+    pub bot: Option<crate::bots::Bot>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2043,6 +2072,19 @@ pub enum FirewallAction {
     /// Let in a browser that has passed a proof of work this hour (Vercel's Attack Challenge
     /// Mode, `challenge.rs`); anything else gets the page that works it out.
     Challenge,
+    /// Count what it matches and go on to the next rule (Vercel's Log action, Cloud Armor's
+    /// preview mode): a rule tried on real traffic before it blocks anyone.
+    Log,
+}
+
+impl FirewallRule {
+    /// What it's counted by ([`Environment::firewall_hits`]): its content, so moving it or
+    /// changing another setting keeps its count, and changing it starts a new one.
+    pub fn fingerprint(&self) -> u64 {
+        use sha2::{Digest, Sha256};
+        let d = Sha256::digest(serde_json::to_vec(self).unwrap_or_default());
+        u64::from_be_bytes(d[..8].try_into().unwrap_or_default())
+    }
 }
 
 /// The most rules an environment has.
@@ -2109,11 +2151,28 @@ impl FirewallRule {
                 m.check(what, lower)?;
             }
         }
-        if self.path.is_none() && self.methods.is_empty() && self.user_agent.is_none() && self.ips.is_empty() && self.header.is_none() && self.cookie.is_none() && self.query.is_none() {
-            return bad("a rule matches on a path, methods, a user agent, addresses, a header, a cookie or a query parameter");
+        if self.bots.len() > crate::bots::KINDS.len() || self.bots.iter().any(|b| !crate::bots::KINDS.contains(&b.as_str())) {
+            return bad("bots are any of ai, search, preview, tools, verified, spoofed");
+        }
+        self.bots.sort();
+        self.bots.dedup();
+        if self.path.is_none() && self.methods.is_empty() && self.user_agent.is_none() && self.ips.is_empty() && self.header.is_none() && self.cookie.is_none() && self.query.is_none() && self.bots.is_empty() {
+            return bad("a rule matches on a path, methods, a user agent, addresses, a header, a cookie, a query parameter or bots");
         }
         if self.action == FirewallAction::Challenge && !self.methods.is_empty() && self.methods.iter().any(|m| m != "GET") {
             return bad("a challenge is a page a browser opens: GET only");
+        }
+        if let Some(k) = &self.key {
+            let ok = k == "ip" || [("header:", 128), ("cookie:", 128)].iter().any(|(p, max)| k.strip_prefix(p).is_some_and(|n| !n.is_empty() && n.len() <= *max && n.bytes().all(|b| b.is_ascii_graphic() && !b";,=\"".contains(&b))));
+            if !ok {
+                return bad("a limit's key is ip, header:<name> or cookie:<name>");
+            }
+            if self.action != FirewallAction::Limit {
+                return bad("key is a limit rule's");
+            }
+            if let Some(n) = k.strip_prefix("header:") {
+                self.key = Some(format!("header:{}", n.to_ascii_lowercase()));
+            }
         }
         match (self.action, self.per_minute) {
             (FirewallAction::Limit, Some(n)) => RateLimit { per_minute: n, burst: self.burst }.check().map_err(|_| Error::BadRequest("firewall: a limit is 1–100000 a minute, its burst 1–100000".into()))?,
@@ -2143,7 +2202,25 @@ impl FirewallRule {
             let pairs: Vec<(String, String)> = url::form_urlencoded::parse(a.query.unwrap_or("").as_bytes()).map(|(k, v)| (k.into_owned(), v.into_owned())).collect();
             m.takes(pairs.iter().filter(|(k, _)| *k == m.name).map(|(_, v)| v.as_str()))
         });
-        path_ok && method_ok && ua_ok && ip_ok && header_ok && cookie_ok && query_ok
+        let bots_ok = self.bots.is_empty() || a.bot.is_some_and(|b| self.bots.iter().any(|k| b.is(k)));
+        path_ok && method_ok && ua_ok && ip_ok && header_ok && cookie_ok && query_ok && bots_ok
+    }
+
+    /// A limit's client by its `key` (a header's or cookie's value, hashed: never kept as it
+    /// came), or None: by its address.
+    pub fn client_key(&self, a: &Asked<'_>) -> Option<u64> {
+        let k = self.key.as_deref()?;
+        let value: Option<String> = if let Some(h) = k.strip_prefix("header:") {
+            a.headers.get(h).and_then(|v| v.to_str().ok()).map(str::to_string)
+        } else if let Some(c) = k.strip_prefix("cookie:") {
+            a.headers.get_all(axum::http::header::COOKIE).iter().filter_map(|v| v.to_str().ok()).flat_map(|v| v.split(';')).filter_map(|kv| kv.trim().split_once('=')).find(|(n, _)| *n == c).map(|(_, v)| v.to_string())
+        } else {
+            None
+        };
+        let value = value.filter(|v| !v.is_empty())?;
+        use sha2::{Digest, Sha256};
+        let d = Sha256::digest(value.as_bytes());
+        Some(u64::from_be_bytes(d[..8].try_into().expect("8 bytes")))
     }
 }
 
@@ -2370,6 +2447,40 @@ pub struct Check {
     /// At most 200 characters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contains: Option<String>,
+    /// A browser check (Checkly's, through Vercel): a Playwright script run in Chromium against
+    /// `path` (`crate::browser`), the body of an async function given `page`, `context` and `url`;
+    /// it fails by throwing. At most 16 KiB; every 300–3600 s, timeout 1–120 s.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser: Option<String>,
+    /// A browser check's performance budgets (Lighthouse's, Netlify's): the page's lab metrics
+    /// past any of them fail it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budgets: Option<Budgets>,
+    /// `public`: fetched over the internet as a visitor's request is (Cloud Monitoring's uptime
+    /// checks, Checkly's): its DNS, a custom domain's TLS and the edge, the environment's gates
+    /// included; `roll` (the default): through its own proxy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// A public check's host: one of the environment's custom domains (none: its own URL's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+}
+
+/// A browser check's budgets, each optional: its largest contentful paint, cumulative layout
+/// shift, time to first byte, weight (every response's body) and requests.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Budgets {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lcp_ms: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cls: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttfb_ms: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kb: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requests: Option<u32>,
 }
 
 impl Check {
@@ -2381,7 +2492,7 @@ impl Check {
         10
     }
 
-    pub fn check(self) -> Result<Check> {
+    pub fn check(mut self) -> Result<Check> {
         let bad = |m: &str| Err(Error::BadRequest(format!("checks: {m}")));
         if self.name.is_empty() || self.name.len() > 32 || !self.name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
             return bad("a check's name is a-z, 0-9 and -, at most 32");
@@ -2389,8 +2500,45 @@ impl Check {
         if !self.path.starts_with('/') || self.path.starts_with("//") || self.path.len() > 2000 || !self.path.bytes().all(|b| b.is_ascii_graphic()) {
             return bad("a check's path is an absolute path, like /healthz");
         }
-        if !(30..=3600).contains(&self.every_s) || !(1..=60).contains(&self.timeout_s) {
-            return bad("every_s is 30–3600, timeout_s 1–60");
+        match self.from.as_deref() {
+            None | Some("roll") if self.host.is_some() => return bad("host is a public check's (from: public)"),
+            None | Some("roll") => {}
+            Some("public") if self.browser.is_some() => return bad("a browser check runs from roll"),
+            Some("public") => {
+                if let Some(h) = &self.host {
+                    let h = h.trim().to_ascii_lowercase();
+                    if h.is_empty() || h.len() > 253 || !h.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-') {
+                        return bad("a public check's host is one of the environment's domains (example.com)");
+                    }
+                    self.host = Some(h);
+                }
+            }
+            Some(_) => return bad("from is roll or public"),
+        }
+        if let Some(b) = &self.budgets {
+            if self.browser.is_none() {
+                return bad("budgets are a browser check's");
+            }
+            let ok = b.lcp_ms.is_none_or(|v| (1..=120_000).contains(&v))
+                && b.cls.is_none_or(|v| v.is_finite() && (0.0..=10.0).contains(&v))
+                && b.ttfb_ms.is_none_or(|v| (1..=120_000).contains(&v))
+                && b.kb.is_none_or(|v| (1..=1_000_000).contains(&v))
+                && b.requests.is_none_or(|v| (1..=10_000).contains(&v));
+            if !ok {
+                return bad("budgets: lcp_ms and ttfb_ms 1–120000, cls 0–10, kb 1–1000000, requests 1–10000");
+            }
+        }
+        match &self.browser {
+            Some(script) => {
+                if script.trim().is_empty() || script.len() > 16 << 10 {
+                    return bad("a browser check's script is 1 byte to 16 KiB");
+                }
+                if !(300..=3600).contains(&self.every_s) || !(1..=120).contains(&self.timeout_s) {
+                    return bad("a browser check's every_s is 300–3600, timeout_s 1–120");
+                }
+            }
+            None if !(30..=3600).contains(&self.every_s) || !(1..=60).contains(&self.timeout_s) => return bad("every_s is 30–3600, timeout_s 1–60"),
+            None => {}
         }
         if self.status.is_some_and(|s| !(100..=599).contains(&s)) || self.contains.as_ref().is_some_and(|c| c.is_empty() || c.len() > 200) {
             return bad("status is an HTTP status, contains 1–200 characters");
@@ -2463,6 +2611,22 @@ pub struct CheckState {
     pub ms: Option<u64>,
     pub error: Option<String>,
     pub down_since: Option<i64>,
+    /// When a browser check's last failure was kept: its screenshot and Playwright trace
+    /// (`…/checks/{name}/screenshot`, `…/trace`), as this node knows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_at: Option<i64>,
+    /// A preview's: the deployment this result is of (production's browser checks run once on
+    /// each deployment going live there); none yet for it while it's another's or absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deployment: Option<String>,
+    /// A browser check's lab metrics from its last run (`lcp_ms`, `cls`, `ttfb_ms`, `kb`,
+    /// `requests`), against its budgets.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<serde_json::Value>,
+    /// A browser check's last pass that was over its budgets, and how: a verdict of its own,
+    /// never down (no incident, no `check.down`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub over_budget: Option<String>,
 }
 
 impl Route {
@@ -2995,6 +3159,9 @@ pub enum LinkKind {
     /// Another web service of the project: its private and public URLs (apps' own, not a
     /// [`crate::integrations::Resources`] kind).
     Service,
+    /// A roll tasks tenant: an API key of its own per link and the tenant's signing keys, so the
+    /// service publishes messages and verifies what's delivered to it.
+    Tasks,
 }
 
 impl LinkKind {
@@ -3004,7 +3171,7 @@ impl LinkKind {
         matches!(self, LinkKind::Postgres | LinkKind::Redis | LinkKind::Nosql | LinkKind::Bucket | LinkKind::Stream | LinkKind::Queue)
     }
 
-    pub const ALL: [LinkKind; 8] = [LinkKind::Postgres, LinkKind::Redis, LinkKind::Bucket, LinkKind::Stream, LinkKind::Queue, LinkKind::Nosql, LinkKind::Search, LinkKind::Service];
+    pub const ALL: [LinkKind; 9] = [LinkKind::Postgres, LinkKind::Redis, LinkKind::Bucket, LinkKind::Stream, LinkKind::Queue, LinkKind::Nosql, LinkKind::Search, LinkKind::Service, LinkKind::Tasks];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -3016,6 +3183,7 @@ impl LinkKind {
             LinkKind::Nosql => "nosql",
             LinkKind::Search => "search",
             LinkKind::Service => "service",
+            LinkKind::Tasks => "tasks",
         }
     }
 

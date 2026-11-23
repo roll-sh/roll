@@ -33,21 +33,36 @@ pub struct Mock {
     state: Arc<Mutex<State>>,
 }
 
+/// A recorded answer. A streamed one has `pieces`: sent chunked, a pause between them (as the
+/// recording's mock sent them, so each arrives in its own read), and `cut` drops the
+/// connection after the last instead of ending the body.
+struct Reply {
+    status: u16,
+    ctype: String,
+    headers: Vec<(String, String)>,
+    body: String,
+    pieces: Option<Vec<String>>,
+    cut: bool,
+}
+
 /// The answer to a request: the recorded one for the same method and path, Google's token
 /// endpoint's, or a 599 that makes the miss visible.
-fn answer(state: &mut State, method: &str, path: &str) -> (u16, String, Vec<(String, String)>, String) {
+fn answer(state: &mut State, method: &str, path: &str) -> Reply {
+    let plain = |status, ctype: &str, body: String| Reply { status, ctype: ctype.into(), headers: vec![], body, pieces: None, cut: false };
     if path == "/token" {
-        return (200, "application/json".into(), vec![], r#"{"access_token":"ya29.mock-token","expires_in":3599,"token_type":"Bearer"}"#.into());
+        return plain(200, "application/json", r#"{"access_token":"ya29.mock-token","expires_in":3599,"token_type":"Bearer"}"#.into());
     }
     for (e, used) in state.expected.iter_mut() {
         if !*used && str_at(e, "method") == method && str_at(e, "path") == path {
             *used = true;
             let r = e.get("response").cloned().unwrap_or(Value::Null);
             let headers = r.get("headers").and_then(Value::as_array).into_iter().flatten().filter_map(|h| Some((h.as_array()?.first()?.to_es_string(), h.as_array()?.get(1)?.to_es_string()))).collect();
-            return (r.get("status").and_then(Value::as_i64).unwrap_or(500) as u16, str_at(&r, "ctype"), headers, str_at(&r, "body"));
+            let pieces = r.get("pieces").and_then(Value::as_array).map(|p| p.iter().map(Value::to_es_string).collect());
+            let cut = r.get("cut").and_then(Value::as_bool) == Some(true);
+            return Reply { status: r.get("status").and_then(Value::as_i64).unwrap_or(500) as u16, ctype: str_at(&r, "ctype"), headers, body: str_at(&r, "body"), pieces, cut };
         }
     }
-    (599, "text/plain".into(), vec![], format!("no recorded answer for {method} {path}"))
+    plain(599, "text/plain", format!("no recorded answer for {method} {path}"))
 }
 
 fn str_at(v: &Value, k: &str) -> String {
@@ -92,19 +107,40 @@ pub async fn mock() -> Mock {
                 let path = first.next().unwrap_or_default().to_string();
                 let headers = lines.filter_map(|l| l.split_once(':')).map(|(k, v)| (k.trim().to_string(), v.trim().to_string())).collect();
                 let body = String::from_utf8_lossy(&buf[head_end..]).to_string();
-                let (status, ct, extra, out) = {
+                let a = {
                     let mut s = state.lock().unwrap();
                     let a = answer(&mut s, &method, &path);
                     s.seen.push(Seen { method, path, headers, body });
                     a
                 };
-                let mut resp = format!("HTTP/1.1 {status} X\r\ncontent-type: {ct}\r\ncontent-length: {}\r\nconnection: close\r\n", out.len());
-                for (k, v) in extra {
+                let length = match &a.pieces {
+                    Some(_) => "transfer-encoding: chunked".to_string(),
+                    None => format!("content-length: {}", a.body.len()),
+                };
+                let mut resp = format!("HTTP/1.1 {} X\r\ncontent-type: {}\r\n{length}\r\nconnection: close\r\n", a.status, a.ctype);
+                for (k, v) in &a.headers {
                     resp.push_str(&format!("{k}: {v}\r\n"));
                 }
                 resp.push_str("\r\n");
-                resp.push_str(&out);
+                let Some(pieces) = a.pieces else {
+                    resp.push_str(&a.body);
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    return;
+                };
                 let _ = sock.write_all(resp.as_bytes()).await;
+                for (i, p) in pieces.iter().enumerate() {
+                    if i > 0 {
+                        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                    }
+                    let _ = sock.write_all(format!("{:x}\r\n{p}\r\n", p.len()).as_bytes()).await;
+                    let _ = sock.flush().await;
+                }
+                if a.cut {
+                    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                    let _ = sock.shutdown().await;
+                } else {
+                    let _ = sock.write_all(b"0\r\n\r\n").await;
+                }
             });
         }
     });
@@ -140,7 +176,7 @@ pub async fn call(c: &Cluster, method: &str, uri: &str, body: Option<&str>) -> (
         Some(b) => EsRequest::json(method, uri, b.to_string()),
         None => EsRequest::new(method, uri),
     };
-    let resp = search_es::handle(c, r).await;
+    let resp = search_es::handle(c, r).await.collect(64 << 20).await;
     (resp.status, String::from_utf8_lossy(&resp.body).into_owned())
 }
 

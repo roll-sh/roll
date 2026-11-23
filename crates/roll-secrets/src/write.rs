@@ -4,6 +4,7 @@
 use crate::access::{Action, Caller, Scope};
 use crate::crypto::{Dek, value_aad};
 use crate::envs::{self, EnvRow};
+use crate::events::{Event, Kind};
 use crate::links::{Link, Mode};
 use crate::{Error, Result, Secrets, Value, audit, from_json, json, names};
 use base64::Engine as _;
@@ -463,7 +464,94 @@ fn credential_id(state: &Option<Json>) -> Option<String> {
 
 /// Apply `items` to `env` as one change. Inside a write closure: only the database.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn apply(c: &Conn<'_>, dek: &Dek, mac: &crate::Keyring, env: &EnvRow, items: &[Item], kind: &str, message: &str, caller: &Caller, now: i64) -> Result<(Change, Vec<ItemDiff>)> {
+/// How a change came about: its kind in the history (`changes.kind`, the audit row's
+/// `secrets.<kind>`) and its event's `via` (events.rs, `secret.changed`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Via {
+    Write,
+    /// A `.env` file imported.
+    Import,
+    /// A backup restored.
+    Restore,
+    /// A secret request answered.
+    Answer,
+    /// A change request applied.
+    Request,
+    Rotation,
+    Promote,
+    Rollback,
+    /// References to a renamed environment rewritten.
+    Rename,
+}
+
+impl Via {
+    pub(crate) fn kind(self) -> &'static str {
+        match self {
+            Via::Write | Via::Import | Via::Restore | Via::Answer => "write",
+            Via::Request => "request",
+            Via::Rotation => "rotate",
+            Via::Promote => "promote",
+            Via::Rollback => "rollback",
+            Via::Rename => "rename",
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Via::Write => "write",
+            Via::Import => "import",
+            Via::Restore => "restore",
+            Via::Answer => "answer",
+            Via::Request => "request",
+            Via::Rotation => "rotation",
+            Via::Promote => "promote",
+            Via::Rollback => "rollback",
+            Via::Rename => "rename",
+        }
+    }
+}
+
+/// A change's event, for its audit row: `secret.changed` naming the keys whose value moved
+/// (added, changed, linked, rotated) with their new versions, or `secret.deleted` when it only
+/// deleted keys. None when it only edited comments, tags or expiry. Names and versions only.
+/// A change across folders is recorded at `/`: its event names its keys by folder (`folders`,
+/// names only), so a reader of one folder sees it with that folder's keys (events.rs, `readable`).
+fn change_event(writes: &[Write<'_>], via: Via, seq: i64, row_keys: &[String], across: bool) -> Option<Event> {
+    let moved = |w: &&Write<'_>| !w.set || w.what.split(',').any(|x| matches!(x, "added" | "changed" | "link" | "rotated"));
+    let (set, deleted): (Vec<&Write<'_>>, Vec<&Write<'_>>) = writes.iter().filter(moved).partition(|w| w.set);
+    let (kind, named) = match (set.is_empty(), deleted.is_empty()) {
+        (true, true) => return None,
+        (true, false) => (Kind::SecretDeleted, &deleted),
+        (false, _) => (Kind::SecretChanged, &set),
+    };
+    let keys: Vec<&str> = named.iter().map(|w| w.item.key.as_str()).collect();
+    let mut data = serde_json::Map::new();
+    data.insert("via".into(), serde_json::json!(via.as_str()));
+    data.insert("change".into(), serde_json::json!(seq));
+    // The row names every key the change touched; the event's own when that's fewer.
+    if keys.len() != row_keys.len() {
+        data.insert("keys".into(), serde_json::json!(keys));
+    }
+    match named.as_slice() {
+        [w] => data.insert("version".into(), serde_json::json!(w.version)),
+        many => data.insert("versions".into(), serde_json::json!(many.iter().map(|w| (w.item.key.clone(), w.version)).collect::<BTreeMap<_, _>>())),
+    };
+    if kind == Kind::SecretChanged && !deleted.is_empty() {
+        data.insert("deleted".into(), serde_json::json!(deleted.iter().map(|w| w.item.key.as_str()).collect::<Vec<_>>()));
+    }
+    if across {
+        let mut folders: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for w in set.iter().chain(&deleted) {
+            folders.entry(w.item.path.as_str()).or_default().push(w.item.key.as_str());
+        }
+        data.insert("folders".into(), serde_json::json!(folders));
+    }
+    Some(Event::new(kind, serde_json::Value::Object(data)))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply(c: &Conn<'_>, dek: &Dek, mac: &crate::Keyring, env: &EnvRow, items: &[Item], via: Via, message: &str, caller: &Caller, now: i64) -> Result<(Change, Vec<ItemDiff>)> {
+    let kind = via.kind();
     let project = &env.project_id;
     c.execute("UPDATE projects SET seq = seq + 1 WHERE project_id = ?", [project])?;
     // The project's syncs check their digests next, within seconds, ahead of their turn.
@@ -669,7 +757,9 @@ pub(crate) fn apply(c: &Conn<'_>, dek: &Dek, mac: &crate::Keyring, env: &EnvRow,
             retire(c, env, &link, handle, &caller.principal, now + link.grace_minutes() as i64 * 60_000, now)?;
         }
     }
-    let path = match items.iter().map(|i| i.path.as_str()).collect::<BTreeSet<_>>() {
+    let paths = items.iter().map(|i| i.path.as_str()).collect::<BTreeSet<_>>();
+    let across = paths.len() > 1;
+    let path = match paths {
         s if s.len() == 1 => s.into_iter().next().unwrap_or("/").to_string(),
         _ => "/".to_string(),
     };
@@ -680,7 +770,11 @@ pub(crate) fn apply(c: &Conn<'_>, dek: &Dek, mac: &crate::Keyring, env: &EnvRow,
     )?;
     let keys: Vec<String> = diffs.iter().map(|d| d.key.clone()).collect();
     let summary = summarize(&diffs);
-    audit::record(c, mac, project, caller, &format!("secrets.{kind}"), Some(&env.slug), Some(&change.path), &keys, &format!("#{seq} {summary}"), now)?;
+    let (action, summary) = (format!("secrets.{kind}"), format!("#{seq} {summary}"));
+    match change_event(&writes, via, seq, &keys, across) {
+        Some(event) => audit::record_event(c, mac, project, caller, &action, Some(&env.slug), Some(&change.path), &keys, &summary, now, event)?,
+        None => audit::record(c, mac, project, caller, &action, Some(&env.slug), Some(&change.path), &keys, &summary, now)?,
+    }
     Ok((change, diffs))
 }
 
@@ -929,15 +1023,15 @@ impl Secrets {
     /// Prepare and apply `items` to `env_slug` as one change, refusing a protected environment
     /// unless `force` (an approved request, a rotation).
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn commit(&self, project: &str, env_slug: &str, items: Vec<Item>, kind: &str, message: &str, if_seq: Option<i64>, force: bool, caller: &Caller) -> Result<Applied> {
-        self.commit_with(project, env_slug, items, &[], kind, message, if_seq, force, caller)
+    pub(crate) fn commit(&self, project: &str, env_slug: &str, items: Vec<Item>, via: Via, message: &str, if_seq: Option<i64>, force: bool, caller: &Caller) -> Result<Applied> {
+        self.commit_with(project, env_slug, items, &[], via, message, if_seq, force, caller)
     }
 
     /// [`Self::commit`], checking each key's expected version in the same transaction
     /// (`if_version`: the key moved since it was read, so the change is refused as `stale`).
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn commit_with(&self, project: &str, env_slug: &str, items: Vec<Item>, expect: &[(usize, i64)], kind: &str, message: &str, if_seq: Option<i64>, force: bool, caller: &Caller) -> Result<Applied> {
-        self.commit_then(project, env_slug, items, expect, kind, message, if_seq, force, caller, &|_, _, _, _| Ok(()))
+    pub(crate) fn commit_with(&self, project: &str, env_slug: &str, items: Vec<Item>, expect: &[(usize, i64)], via: Via, message: &str, if_seq: Option<i64>, force: bool, caller: &Caller) -> Result<Applied> {
+        self.commit_then(project, env_slug, items, expect, via, message, if_seq, force, caller, &|_, _, _, _| Ok(()))
     }
 
     /// [`Self::commit_with`], running `then` in the change's own transaction after it's applied
@@ -950,7 +1044,7 @@ impl Secrets {
         env_slug: &str,
         items: Vec<Item>,
         expect: &[(usize, i64)],
-        kind: &str,
+        via: Via,
         message: &str,
         if_seq: Option<i64>,
         force: bool,
@@ -959,7 +1053,7 @@ impl Secrets {
     ) -> Result<Applied> {
         let warnings = self.warnings(project, env_slug, &items, caller);
         // A rollback restores what was there, typed or not.
-        if kind != "rollback" {
+        if via != Via::Rollback {
             self.check_types(project, &items)?;
         }
         let prepared = self.prepare(project, env_slug, &items, caller)?;
@@ -984,7 +1078,7 @@ impl Secrets {
             {
                 return Err(Error::Conflict("stale", format!("{} changed after #{s}", env.slug)));
             }
-            let applied = apply(c, &dek, self.keys()?, &env, &prepared.items, kind, message, caller, now)?;
+            let applied = apply(c, &dek, self.keys()?, &env, &prepared.items, via, message, caller, now)?;
             then(c, &env, &applied.0, now)?;
             Ok(applied)
         });
@@ -1033,6 +1127,11 @@ impl Secrets {
     }
 
     pub fn batch(&self, project: &str, env: &str, b: Batch, caller: &Caller) -> Result<Applied> {
+        self.batch_via(project, env, b, Via::Write, caller)
+    }
+
+    /// [`Self::batch`], saying how the change came about (an import, a restore).
+    pub(crate) fn batch_via(&self, project: &str, env: &str, b: Batch, via: Via, caller: &Caller) -> Result<Applied> {
         let path = names::path(b.path.as_deref().unwrap_or("/"))?;
         caller.need(Action::Write, &Scope::at(project, env, &path))?;
         let message = b.message.unwrap_or_default();
@@ -1040,7 +1139,7 @@ impl Secrets {
         let items = items(&path, &b.ops, caller)?;
         self.check_items(project, env, &items, caller)?;
         let expect = expectations(&b.ops)?;
-        self.commit_with(project, env, items, &expect, "write", &message, b.if_seq, false, caller)
+        self.commit_with(project, env, items, &expect, via, &message, b.if_seq, false, caller)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1058,7 +1157,7 @@ impl Secrets {
         caller.need(Action::Delete, &Scope::at(project, env, &path))?;
         let items = items(&path, &[Op::Delete { key: key.into(), kind, path: None, if_version }], caller)?;
         let expect = expectations(&[Op::Delete { key: key.into(), kind, path: None, if_version }])?;
-        let a = self.commit_with(project, env, items, &expect, "write", &format!("deleted {key}"), None, false, caller)?;
+        let a = self.commit_with(project, env, items, &expect, Via::Write, &format!("deleted {key}"), None, false, caller)?;
         Ok(Written { change: a.change, secret: None, warnings: vec![] })
     }
 
@@ -1124,7 +1223,7 @@ impl Secrets {
         })?;
         let message = r.message.unwrap_or_else(|| format!("rolled back to #{target}"));
         names::message(&message)?;
-        let mut res = self.commit(project, slug, items, "rollback", &message, None, r.bypass, caller)?;
+        let mut res = self.commit(project, slug, items, Via::Rollback, &message, None, r.bypass, caller)?;
         res.warnings.extend(purged.iter().map(|k| format!("{k}'s value at #{target} was purged: it stays as it is now")));
         if r.bypass {
             self.audit_now(project, caller, "approval.bypass", Some(slug), None, &[], &format!("rolled back to #{target} without approval"));
@@ -1159,7 +1258,7 @@ impl Secrets {
             let request = self.open_request_items(project, to, &path, message, items, &[], caller)?;
             return Ok(Applied { change: None, items: vec![], warnings: vec![], request: Some(request) });
         }
-        self.commit(project, to, items, "promote", &message, None, false, caller)
+        self.commit(project, to, items, Via::Promote, &message, None, false, caller)
     }
 
     /// The items that make `to` match `from` for `keys` (default: every key that differs).

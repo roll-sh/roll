@@ -10,7 +10,8 @@
 //! and never print them (their description names the host alone).
 //!
 //! These are roll's own calls to a remote a tenant named, so they're bounded on their own terms:
-//! one at a time per cluster and [`remote::MAX_CONTROL_PER_NODE`] per node (429 past them), only
+//! [`remote::CONTROL_SLOTS`] (one at a time per cluster, two per owner and four per node, taken in
+//! turn: 429 past them, [`search_es::slots`]), only
 //! the fixed paths below, answers of at most [`remote::CONTROL_ANSWER_LIMIT`] (definitions
 //! [`DEFINITION_LIMIT`]) charged to the node's control budget (a slice of the reindex budget
 //! tasks never draw from), [`DEADLINE`] for the whole call, and errors that never quote the
@@ -198,6 +199,10 @@ fn remote_error(host: &str, e: search_es::EsError) -> ControlError {
     if e.kind == "circuit_breaking_exception" || e.reason().starts_with("Remote responded with a chunk that was too large") {
         return ControlError::Invalid(format!("the answer from {host} is larger than roll reads here at once (roll's limit)"));
     }
+    // roll's own names haven't resolved yet (just after a restart): try again shortly.
+    if e.status == 503 && e.reason() == search_es::egress::NOT_READY {
+        return ControlError::Busy(e.reason().to_string());
+    }
     let transport = matches!(&*e.kind, "connect_exception" | "unknown_host_exception" | "s_s_l_handshake_exception" | "socket_timeout_exception" | "i_o_exception");
     if transport {
         return ControlError::Invalid(format!("couldn't reach the remote at {host}"));
@@ -323,7 +328,7 @@ fn listing(rows: &[search_es::api::remote_page::CatRow], aliases: Option<&EsValu
 struct Progress {
     created: bool,
     task: Option<String>,
-    /// The empty copy was being removed (every task slot was taken).
+    /// The empty copy was being removed (its task slot was taken meanwhile).
     removing: bool,
 }
 
@@ -343,9 +348,14 @@ impl Control {
         let budget = self.node.reindex().control_budget.clone();
         let rules = self.remote_rules()?.without_whitelist();
         // An address roll refuses (private, denied, blocked) reads like any remote it can't
-        // reach: no oracle for which names lead where.
+        // reach: no oracle for which names lead where. (`check_now` resolves nothing; a name that
+        // doesn't resolve fails later, at a call, through `remote_error`.)
         let refused = |e: search_es::EsError| {
             let reason = e.reason();
+            // roll's own names haven't resolved yet (just after a restart): try again shortly.
+            if e.status == 503 {
+                return ControlError::Busy(reason.to_string());
+            }
             if reason.contains("private address") || reason.contains("may not reach") || reason.contains("blocked in") || reason.contains("not whitelisted") {
                 ControlError::Invalid(format!("couldn't reach the remote at {host}"))
             } else {
@@ -358,7 +368,8 @@ impl Control {
 
     /// A place in the node's pool of control calls for cluster `c` (429 when it's taken).
     fn control_slot(&self, c: &SearchCluster) -> Result<remote::ControlSlot> {
-        self.node.reindex().control_slot(&c.name).map_err(|e| ControlError::Busy(e.reason().to_string()))
+        let owner = search_es::slots::owner_of(c.owner.as_deref(), &c.name);
+        self.node.reindex().control_slot(&c.name, &owner).map_err(|e| ControlError::Busy(e.reason().to_string()))
     }
 
     /// Every index and alias name cluster `c` has (an alias of the remote's by one of these
@@ -501,7 +512,7 @@ impl Control {
                 }
                 Ok(Err(e)) => row["error"] = json!(e),
                 Err(_) if progress.removing => {
-                    row["error"] = json!(format!("not started (every task slot was taken), and the call ran past {}s while the empty index [{dest}] was being removed: it may remain; delete it, then copy it again", DEADLINE.as_secs()));
+                    row["error"] = json!(format!("not started (its task slot was taken meanwhile), and the call ran past {}s while the empty index [{dest}] was being removed: it may remain; delete it, then copy it again", DEADLINE.as_secs()));
                 }
                 Err(_) if progress.created && progress.task.is_none() => {
                     // The deadline came while the copy was being started: look its task up.
@@ -533,6 +544,12 @@ impl Control {
     /// tasks the migration starts need it), read and written under the settings lock.
     async fn whitelist_host(&self, id: &str, r: &Remote) -> Result<SearchCluster> {
         let pattern = format!("{}:{}", r.host.to_ascii_lowercase().trim_end_matches('.'), r.port);
+        // Already there (a later call for copies still waiting): no write, which would save and
+        // apply the cluster's spec again.
+        let current = self.get(id).await?;
+        if current.reindex_whitelist.contains(&pattern) {
+            return Ok(current);
+        }
         self.update_with(id, crate::store::Caps::NONE, |c| {
             if c.reindex_whitelist.contains(&pattern) {
                 return Ok(());
@@ -595,11 +612,16 @@ impl Control {
             }
             return Err(format!("index [{dest}] already exists on roll: give the copy another name"));
         }
-        // Created only while a task slot is free: otherwise nothing is made, and the index waits.
-        let free = || self.node.get_loaded(&c.name).is_some_and(|l| self.node.reindex().has_room(&l.cluster.remote_running));
-        if !free() {
-            return Ok(json!({ "queued": true, "reason": format!("the cluster copies [{}] indices at a time", self.node.reindex().max_per_cluster()) }));
-        }
+        // Created only with a task slot reserved for the cluster, in turn with every other
+        // cluster on the node: otherwise nothing is made, and the index waits (keeping the
+        // owner's place in line while the dashboard asks again). The reservation holds the slot
+        // while the definitions are read and the copy created, however long the remote takes, and
+        // the `_reindex` below uses it; dropped unused (a failure before then), it frees it.
+        let owner = search_es::slots::owner_of(c.owner.as_deref(), &c.name);
+        let reserved = self.node.get_loaded(&c.name).and_then(|_| self.node.reindex().reserve_task(&c.name, &owner));
+        let Some(_reserved) = reserved else {
+            return Ok(json!({ "queued": true, "reason": format!("the node's copy slots are taken (a cluster copies [{}] indices at a time, in turn with the node's other clusters)", self.node.reindex().max_per_cluster()) }));
+        };
         let err = |e| match remote_error(host, e) {
             ControlError::Invalid(m) | ControlError::Busy(m) => m,
             e => e.to_string(),
@@ -695,15 +717,17 @@ impl Control {
         }
         let (status, v) = self.call_json(c, "POST", &path, Some(&body)).await;
         if status == 429 {
-            // Another copy took the last slot meanwhile: the empty copy goes, the index waits.
+            // Its reservation was used meanwhile by another remote `_reindex` of this cluster
+            // (reservations are the cluster's, not the call's: `search_es::slots::Reservation`), and
+            // no slot was free: the empty copy goes, the index waits.
             progress.removing = true;
             let (deleted, _) = self.call_json(c, "DELETE", &format!("/{}", urlencoding::encode(dest)), None).await;
             if deleted != 200 {
-                return Err(format!("[{dest}] was created, but not started (every task slot was taken) and couldn't be removed ({deleted}): delete it, then copy it again"));
+                return Err(format!("[{dest}] was created, but not started (its task slot was taken meanwhile) and couldn't be removed ({deleted}): delete it, then copy it again"));
             }
             progress.created = false;
             names.remove(dest);
-            return Ok(json!({ "queued": true, "reason": "every task slot was taken meanwhile" }));
+            return Ok(json!({ "queued": true, "reason": "another copy of this cluster took its task slot meanwhile" }));
         }
         let Some(task) = v["task"].as_str().filter(|_| status == 200) else {
             let reason = v.pointer("/error/reason").and_then(Value::as_str).unwrap_or("starting the reindex failed");

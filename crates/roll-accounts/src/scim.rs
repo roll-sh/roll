@@ -13,8 +13,9 @@
 //!   retry finishes what a failure left): sessions end, and the person's roll code owner (its
 //!   tokens, machine links) is cut off. Their own roll tokens pause with the account. SCIM
 //!   reactivates only an account it deactivated itself, never one an admin disabled.
-//! - Users only: no groups (the service provider config says so; other paths are SCIM 404s),
-//!   filters `userName eq`, `externalId eq`, `emails.value eq`.
+//! - Users: filters `userName eq`, `externalId eq`, `emails.value eq`. Groups are
+//!   [`crate::scim_groups`], for a connection whose SCIM groups an admin turned on (other paths,
+//!   and `/Groups` while they're off, are SCIM 404s).
 
 use crate::{Accounts, Error, normalize_email, sha256_hex};
 use axum::extract::{Path, Query, State};
@@ -28,16 +29,16 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 const USER: &str = "urn:ietf:params:scim:schemas:core:2.0:User";
-const LIST: &str = "urn:ietf:params:scim:api:messages:2.0:ListResponse";
+pub(crate) const LIST: &str = "urn:ietf:params:scim:api:messages:2.0:ListResponse";
 const ERROR: &str = "urn:ietf:params:scim:api:messages:2.0:Error";
-const PATCH_OP: &str = "urn:ietf:params:scim:api:messages:2.0:PatchOp";
+pub(crate) const PATCH_OP: &str = "urn:ietf:params:scim:api:messages:2.0:PatchOp";
 /// Users one page answers, at most.
-const MAX_PAGE: i64 = 200;
+pub(crate) const MAX_PAGE: i64 = 200;
 /// The longest name, `userName` or `externalId` roll keeps.
 const MAX_TEXT: usize = 255;
 
-type S = State<Arc<Accounts>>;
-type Ip = Option<axum::Extension<roll_auth::ClientIp>>;
+pub(crate) type S = State<Arc<Accounts>>;
+pub(crate) type Ip = Option<axum::Extension<roll_auth::ClientIp>>;
 
 /// A SCIM change in the audit log, as the connection that made it (`failed`: why it didn't
 /// happen, or happened only in part, as a deactivation that couldn't finish).
@@ -65,13 +66,18 @@ pub(crate) fn routes() -> Router<Arc<Accounts>> {
         .route("/v1/accounts/scim/v2/Schemas", get(schemas))
         .route("/v1/accounts/scim/v2/Users", get(list_users).post(create_user))
         .route("/v1/accounts/scim/v2/Users/{id}", get(get_user).put(replace_user).patch(patch_user).delete(delete_user))
-        // Groups, Bulk, Me, a schema by id: a SCIM 404 (an unmatched path would be the gate's
-        // 401, which a provider reads as a bad token and stops syncing for).
+        .route("/v1/accounts/scim/v2/Groups", get(crate::scim_groups::list_groups).post(crate::scim_groups::create_group))
+        .route(
+            "/v1/accounts/scim/v2/Groups/{id}",
+            get(crate::scim_groups::get_group).put(crate::scim_groups::replace_group).patch(crate::scim_groups::patch_group).delete(crate::scim_groups::delete_group),
+        )
+        // Bulk, Me, a schema by id: a SCIM 404 (an unmatched path would be the gate's 401, which
+        // a provider reads as a bad token and stops syncing for).
         .route("/v1/accounts/scim/v2/{*rest}", any(not_here))
 }
 
 /// A SCIM error answer (RFC 7644 §3.12).
-struct ScimError(StatusCode, Option<&'static str>, String);
+pub(crate) struct ScimError(pub(crate) StatusCode, pub(crate) Option<&'static str>, pub(crate) String);
 
 impl IntoResponse for ScimError {
     fn into_response(self) -> Response {
@@ -104,9 +110,9 @@ impl From<Error> for ScimError {
     }
 }
 
-type R = std::result::Result<Response, ScimError>;
+pub(crate) type R = std::result::Result<Response, ScimError>;
 
-fn scim_json(status: StatusCode, body: Value) -> Response {
+pub(crate) fn scim_json(status: StatusCode, body: Value) -> Response {
     let mut r = (status, Json(body)).into_response();
     r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/scim+json"));
     r
@@ -116,13 +122,13 @@ fn invalid(m: &str) -> Error {
     Error::BadRequest(m.to_string(), None)
 }
 
-async fn blocking<T: Send + 'static>(a: &Arc<Accounts>, f: impl FnOnce(&Accounts) -> crate::Result<T> + Send + 'static) -> std::result::Result<T, ScimError> {
+pub(crate) async fn blocking<T: Send + 'static>(a: &Arc<Accounts>, f: impl FnOnce(&Accounts) -> crate::Result<T> + Send + 'static) -> std::result::Result<T, ScimError> {
     let a = a.clone();
     Ok(tokio::task::spawn_blocking(move || f(&a)).await.map_err(|e| Error::Internal(e.to_string()))??)
 }
 
 /// The connection a request's bearer token belongs to (looked up every time; never cached).
-fn connection_of(a: &Accounts, headers: &HeaderMap) -> crate::Result<crate::sso::Connection> {
+pub(crate) fn connection_of(a: &Accounts, headers: &HeaderMap) -> crate::Result<crate::sso::Connection> {
     let unauthorized = || Error::Unauthorized("a SCIM token from roll's SSO settings, as Authorization: Bearer".into());
     let raw = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).ok_or_else(unauthorized)?;
     let (scheme, token) = raw.trim().split_once(' ').ok_or_else(unauthorized)?;
@@ -155,11 +161,11 @@ enum Who<'a> {
     All,
 }
 
-fn domain_of(email: &str) -> &str {
+pub(crate) fn domain_of(email: &str) -> &str {
     email.rsplit_once('@').map(|(_, d)| d).unwrap_or_default()
 }
 
-fn clean(s: &str) -> String {
+pub(crate) fn clean(s: &str) -> String {
     s.chars().filter(|c| !c.is_control()).take(MAX_TEXT).collect::<String>().trim().to_string()
 }
 
@@ -376,7 +382,7 @@ fn email_of(v: &Value) -> crate::Result<String> {
 
 async fn not_here(State(a): S, headers: HeaderMap) -> R {
     blocking(&a, move |a| connection_of(a, &headers)).await?;
-    Err(ScimError(StatusCode::NOT_FOUND, None, "roll's SCIM serves Users only (no Groups, Bulk or Me)".into()))
+    Err(ScimError(StatusCode::NOT_FOUND, None, "roll's SCIM serves Users, and Groups when the connection's SCIM groups are on (no Bulk or Me)".into()))
 }
 
 async fn service_provider_config(State(a): S, headers: HeaderMap) -> R {
@@ -397,13 +403,14 @@ async fn service_provider_config(State(a): S, headers: HeaderMap) -> R {
 }
 
 async fn resource_types(State(a): S, headers: HeaderMap) -> R {
-    blocking(&a, move |a| connection_of(a, &headers)).await?;
+    let groups = blocking(&a, move |a| connection_of(a, &headers).map(|c| crate::scim_groups::groups_on(a, &c))).await?;
     let user = json!({ "schemas": ["urn:ietf:params:scim:schemas:core:2.0:ResourceType"], "id": "User", "name": "User", "endpoint": "/Users", "schema": USER });
-    Ok(scim_json(StatusCode::OK, json!({ "schemas": [LIST], "totalResults": 1, "startIndex": 1, "itemsPerPage": 1, "Resources": [user] })))
+    let all: Vec<Value> = std::iter::once(user).chain(groups.then(crate::scim_groups::resource_type)).collect();
+    Ok(scim_json(StatusCode::OK, json!({ "schemas": [LIST], "totalResults": all.len(), "startIndex": 1, "itemsPerPage": all.len(), "Resources": all })))
 }
 
 async fn schemas(State(a): S, headers: HeaderMap) -> R {
-    blocking(&a, move |a| connection_of(a, &headers)).await?;
+    let groups = blocking(&a, move |a| connection_of(a, &headers).map(|c| crate::scim_groups::groups_on(a, &c))).await?;
     let attr = |name: &str, ty: &str, mutability: &str| json!({ "name": name, "type": ty, "multiValued": false, "required": name == "userName", "mutability": mutability, "returned": "default", "uniqueness": if name == "userName" { "server" } else { "none" } });
     let mut emails = attr("emails", "complex", "readOnly");
     emails["multiValued"] = json!(true);
@@ -413,7 +420,8 @@ async fn schemas(State(a): S, headers: HeaderMap) -> R {
         "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Schema"], "id": USER, "name": "User",
         "attributes": [attr("userName", "string", "readWrite"), name, attr("displayName", "string", "readWrite"), emails, attr("active", "boolean", "readWrite"), attr("externalId", "string", "readWrite")],
     });
-    Ok(scim_json(StatusCode::OK, json!({ "schemas": [LIST], "totalResults": 1, "startIndex": 1, "itemsPerPage": 1, "Resources": [user] })))
+    let all: Vec<Value> = std::iter::once(user).chain(groups.then(crate::scim_groups::schema)).collect();
+    Ok(scim_json(StatusCode::OK, json!({ "schemas": [LIST], "totalResults": all.len(), "startIndex": 1, "itemsPerPage": all.len(), "Resources": all })))
 }
 
 #[derive(Deserialize)]

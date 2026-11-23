@@ -71,10 +71,12 @@ async fn gate(axum::extract::State(tokens): axum::extract::State<Tokens>, mut re
 }
 
 /// The digest route's requests, and whether it fails (503) for now: what `roll run --watch` polls.
+/// And the values route's reads (`roll secrets agent` reads values only when the digest moved).
 #[derive(Default)]
 struct Polls {
     failing: std::sync::atomic::AtomicBool,
     asked: std::sync::atomic::AtomicUsize,
+    reads: std::sync::atomic::AtomicUsize,
 }
 
 async fn flaky_digest(axum::extract::State(p): axum::extract::State<Arc<Polls>>, req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
@@ -86,6 +88,9 @@ async fn flaky_digest(axum::extract::State(p): axum::extract::State<Arc<Polls>>,
             return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
         }
     }
+    if req.uri().path().ends_with("/values") {
+        p.reads.fetch_add(1, Ordering::SeqCst);
+    }
     next.run(req).await
 }
 
@@ -95,6 +100,7 @@ struct Server {
     secrets: Arc<roll_secrets::Secrets>,
     projects: Arc<roll_workspace::Workspace>,
     polls: Arc<Polls>,
+    tokens: Tokens,
     _dir: tempfile::TempDir,
 }
 
@@ -133,9 +139,9 @@ async fn start() -> Server {
     let tokens = Tokens::default();
     let polls = Arc::new(Polls::default());
     let access = axum::Router::new().route("/v1/access/tokens", axum::routing::post(create_token)).with_state(tokens.clone());
-    let router = roll_workspace::router(ws).merge(roll_secrets::router(served)).merge(access).layer(axum::middleware::from_fn_with_state(tokens, gate)).layer(axum::middleware::from_fn_with_state(polls.clone(), flaky_digest));
+    let router = roll_workspace::router(ws).merge(roll_secrets::router(served)).merge(access).layer(axum::middleware::from_fn_with_state(tokens.clone(), gate)).layer(axum::middleware::from_fn_with_state(polls.clone(), flaky_digest));
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-    Server { api, secrets, projects, polls, _dir: dir }
+    Server { api, secrets, projects, polls, tokens, _dir: dir }
 }
 
 #[tokio::test]
@@ -640,6 +646,51 @@ async fn roll_run_watch_restarts_on_a_write_waits_out_failures_and_passes_sigter
     assert_eq!(seen(), "one\nterm\ntwo\nterm\n");
 }
 
+/// `roll run --watch` reads a change through a delta (docs/secrets.md, "Delta reads"): the
+/// restarted command has the new value and the one that didn't change, and the read after the
+/// change is audited as returning only the key that changed.
+#[cfg(unix)]
+#[tokio::test]
+async fn roll_run_watch_reads_a_change_through_a_delta() {
+    use std::time::Duration;
+    let s = start().await;
+    let at = ["secrets", "-p", "shop", "-e", "production"];
+    ok(&s.api, &[], &[&at[..], &["set", "A=one", "B=kept"]].concat(), None).await;
+    let seen_at = s._dir.path().join("seen");
+    let seen = || std::fs::read_to_string(&seen_at).unwrap_or_default();
+    let wait_for = |want: &'static str| {
+        let seen = &seen;
+        async move {
+            let started = std::time::Instant::now();
+            while seen() != want {
+                assert!(started.elapsed() < Duration::from_secs(20), "waited for {want:?}, the command wrote {:?}", seen());
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    };
+    let _roll = tokio::process::Command::new(env!("CARGO_BIN_EXE_roll"))
+        .args(["run", "-p", "shop", "-e", "production", "--watch", "--interval", "1", "--no-mask", "--", "sh", "-c", r#"echo "$A $B" >> "$SEEN"; while :; do sleep 0.05; done"#])
+        .env("ROLL_API_URL", &s.api)
+        .env("SEEN", &seen_at)
+        .env_remove("ROLL_TOKEN")
+        .env_remove("ROLL_PROJECT")
+        .env_remove("ROLL_ENV")
+        .env_remove("ROLL_ADMIN_TOKEN")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    wait_for("one kept\n").await;
+    ok(&s.api, &[], &[&at[..], &["set", "A=two"]].concat(), None).await;
+    wait_for("one kept\ntwo kept\n").await;
+    let project = s.projects.list(roll_workspace::Scope::All).unwrap().into_iter().find(|p| p.name == "shop").unwrap().id;
+    let filter = roll_secrets::AuditFilter { action: Some("secrets.export".into()), ..Default::default() };
+    let reads = s.secrets.audit(&project, filter, &roll_secrets::Caller::operator()).unwrap();
+    assert_eq!(reads[0].keys, ["A"], "{}", reads[0].summary);
+}
+
 /// A token reaches what it's told to, for 90 days: no environment named is refused (or the
 /// directory's own, never a protected one), and forever or everywhere are asked for. `setup` makes
 /// a project that isn't there yet when asked to.
@@ -756,4 +807,249 @@ async fn roll_secrets_recover_brings_a_deleted_project_back_by_name() {
     let host = ok(&api, &[], &["secrets", "-p", "shop", "-e", "production", "get", "HOST", "--raw"], None).await;
     assert_eq!(host.trim(), "db.internal");
     assert!(roll(&api, &[], &["secrets", "recover", "shop"], None).await.code != Some(0), "nothing left to recover");
+}
+
+/// `roll secrets agent` on port 0 for `shop`'s production, with `env` set (its login): its address
+/// once it listens, and what it has logged so far.
+struct LocalAgent {
+    url: String,
+    token: String,
+    log: Arc<std::sync::Mutex<String>>,
+    _child: tokio::process::Child,
+}
+
+async fn local_agent(s: &Server, env: &[(&str, &str)]) -> LocalAgent {
+    use tokio::io::AsyncBufReadExt;
+    let token_file = s._dir.path().join("run").join("agent-token");
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_roll"))
+        .args(["secrets", "-p", "shop", "-e", "production", "agent", "--port", "0", "--ttl", "1h", "--token-file", token_file.to_str().unwrap()])
+        .env("ROLL_API_URL", &s.api)
+        .env_remove("ROLL_TOKEN")
+        .env_remove("ROLL_PROJECT")
+        .env_remove("ROLL_ENV")
+        .env_remove("ROLL_ADMIN_TOKEN")
+        .env_remove("ROLL_AGENT_TOKEN")
+        .envs(env.iter().copied())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut lines = tokio::io::BufReader::new(child.stderr.take().unwrap()).lines();
+    let log: Arc<std::sync::Mutex<String>> = Arc::default();
+    let url = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        while let Some(line) = lines.next_line().await.unwrap() {
+            log.lock().unwrap().push_str(&format!("{line}\n"));
+            if let Some(addr) = line.split("listening on ").nth(1) {
+                return format!("http://{}", addr.split_whitespace().next().unwrap());
+            }
+        }
+        panic!("the agent exited: {}", log.lock().unwrap());
+    })
+    .await
+    .expect("the agent listens");
+    let kept = log.clone();
+    tokio::spawn(async move {
+        while let Ok(Some(line)) = lines.next_line().await {
+            kept.lock().unwrap().push_str(&format!("{line}\n"));
+        }
+    });
+    // Made with a random value, readable by its owner only.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&token_file).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+    let token = std::fs::read_to_string(&token_file).unwrap().trim().to_string();
+    LocalAgent { url, token, log, _child: child }
+}
+
+/// An app reads through the agent only with the token the agent was given (a server-side request
+/// forgery can't set the header), in the Lambda extension's shapes; no value is logged.
+#[tokio::test]
+async fn the_local_agent_answers_only_requests_that_carry_its_token() {
+    let s = start().await;
+    ok(&s.api, &[], &["secrets", "-p", "shop", "-e", "production", "set", "GREETING=fake-hello", "PORT=5432"], None).await;
+    let a = local_agent(&s, &[]).await;
+    let http = reqwest::Client::new();
+    for token in [None, Some("fake-wrong-token")] {
+        let mut req = http.get(format!("{}/secrets/GREETING", a.url));
+        if let Some(t) = token {
+            req = req.header("X-Roll-Token", t);
+        }
+        let res = req.send().await.unwrap();
+        assert_eq!(res.status(), 401);
+        assert!(!res.text().await.unwrap().contains("fake-hello"));
+    }
+    let res = http.get(format!("{}/secrets/GREETING", a.url)).header("X-Roll-Token", &a.token).send().await.unwrap();
+    assert_eq!((res.status().as_u16(), res.headers()["cache-control"].to_str().unwrap().to_string()), (200, "no-store".to_string()));
+    assert_eq!(res.text().await.unwrap(), "fake-hello");
+    let all: serde_json::Value = http.get(format!("{}/secrets?env=production&path=/", a.url)).header("X-Roll-Token", &a.token).send().await.unwrap().json().await.unwrap();
+    assert_eq!(all, serde_json::json!({ "GREETING": "fake-hello", "PORT": "5432" }));
+    let missing = http.get(format!("{}/secrets/NOPE", a.url)).header("X-Roll-Token", &a.token).send().await.unwrap();
+    assert_eq!(missing.status(), 404);
+    let started = std::time::Instant::now();
+    while !a.log.lock().unwrap().contains("GET /secrets/NOPE 404") && started.elapsed() < std::time::Duration::from_secs(10) {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let log = a.log.lock().unwrap().clone();
+    assert!(log.contains("GET /secrets/GREETING 401") && log.contains("GET /secrets 200") && !log.contains("fake-hello") && !log.contains("env=production"), "{log}");
+}
+
+/// A write reaches the agent through the folder's digest: the agent reads the values again by
+/// itself, and the app's next read is the new value, from memory.
+#[tokio::test]
+async fn a_change_reaches_the_local_agents_cache_through_the_digest() {
+    use std::sync::atomic::Ordering;
+    let s = start().await;
+    let at = ["secrets", "-p", "shop", "-e", "production"];
+    ok(&s.api, &[], &[&at[..], &["set", "GREETING=fake-one"]].concat(), None).await;
+    let a = local_agent(&s, &[]).await;
+    let http = reqwest::Client::new();
+    let read = || async { http.get(format!("{}/secrets/GREETING", a.url)).header("X-Roll-Token", &a.token).send().await.unwrap().text().await.unwrap() };
+    let reads = || s.polls.reads.load(Ordering::SeqCst);
+    let before = reads();
+    assert_eq!(read().await, "fake-one");
+    assert_eq!(read().await, "fake-one");
+    assert_eq!(reads() - before, 1, "the second read is from memory");
+    ok(&s.api, &[], &[&at[..], &["set", "GREETING=fake-two"]].concat(), None).await;
+    // Logged once the new values are kept.
+    let started = std::time::Instant::now();
+    while !a.log.lock().unwrap().contains("production:/ changed; read again") {
+        assert!(started.elapsed() < std::time::Duration::from_secs(20), "the agent didn't read the change: {}", a.log.lock().unwrap());
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(read().await, "fake-two");
+    assert_eq!(reads() - before, 2, "the agent read the change once, and the app's read after it is from memory");
+}
+
+/// Once roll refuses the agent's login (its token revoked), the agent stops answering from memory
+/// at its next poll's answer, though its TTL is an hour: the app gets roll's refusal, not the
+/// values it kept.
+#[tokio::test]
+async fn a_revoked_logins_local_agent_answers_a_refusal_within_one_poll() {
+    let s = start().await;
+    let at = ["secrets", "-p", "shop", "-e", "production"];
+    ok(&s.api, &[], &[&at[..], &["set", "GREETING=fake-one"]].concat(), None).await;
+    let token = ok(&s.api, &[], &["secrets", "-p", "shop", "tokens", "create", "agent", "--for-env", "production"], None).await.trim().to_string();
+    let a = local_agent(&s, &[("ROLL_TOKEN", &token)]).await;
+    let http = reqwest::Client::new();
+    let read = || async {
+        let r = http.get(format!("{}/secrets/GREETING", a.url)).header("X-Roll-Token", &a.token).send().await.unwrap();
+        (r.status().as_u16(), r.text().await.unwrap())
+    };
+    assert_eq!(read().await, (200, "fake-one".to_string()));
+    assert!(s.tokens.lock().unwrap().remove(&token).is_some());
+    // A change ends the poll in flight at once; the next poll, or the read after the move, is
+    // refused, and the folder is dropped.
+    ok(&s.api, &[], &[&at[..], &["set", "OTHER=fake-two"]].concat(), None).await;
+    let started = std::time::Instant::now();
+    while !a.log.lock().unwrap().contains("roll refused") {
+        assert!(started.elapsed() < std::time::Duration::from_secs(20), "the agent kept the folder: {}", a.log.lock().unwrap());
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let (status, body) = read().await;
+    assert_eq!(status, 403, "{body}");
+    assert!(body.contains("refused the agent's login") && !body.contains("fake-"), "{body}");
+}
+
+/// `roll secrets mount .env`: a named pipe (0600), never a file, that each read gets the current
+/// values from, a change included, and that's gone once roll refuses the login. The repo's
+/// `.gitignore` gains it. No value is logged.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_mounted_env_is_a_pipe_that_follows_changes_and_goes_with_the_login() {
+    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+    use tokio::io::AsyncBufReadExt;
+    let s = start().await;
+    let at = ["secrets", "-p", "shop", "-e", "production"];
+    ok(&s.api, &[], &[&at[..], &["set", "GREETING=fake one"]].concat(), None).await;
+    let token = ok(&s.api, &[], &["secrets", "-p", "shop", "tokens", "create", "mount", "--for-env", "production"], None).await.trim().to_string();
+    let work = s._dir.path().join("app");
+    std::fs::create_dir_all(&work).unwrap();
+    assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(&work).status().unwrap().success());
+    let env_file = work.join(".env");
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_roll"))
+        .args([&at[..], &["mount", env_file.to_str().unwrap()]].concat())
+        .env("ROLL_API_URL", &s.api)
+        .env("ROLL_TOKEN", &token)
+        .env("XDG_STATE_HOME", s._dir.path().join("state"))
+        .env_remove("ROLL_PROJECT")
+        .env_remove("ROLL_ENV")
+        .env_remove("ROLL_ADMIN_TOKEN")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut lines = tokio::io::BufReader::new(child.stderr.take().unwrap()).lines();
+    let log: Arc<std::sync::Mutex<String>> = Arc::default();
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        while let Some(line) = lines.next_line().await.unwrap() {
+            log.lock().unwrap().push_str(&format!("{line}\n"));
+            if line.contains(" serves production:/") {
+                return;
+            }
+        }
+        panic!("the mount exited: {}", log.lock().unwrap());
+    })
+    .await
+    .expect("the mount serves");
+    let kept = log.clone();
+    tokio::spawn(async move {
+        while let Ok(Some(line)) = lines.next_line().await {
+            kept.lock().unwrap().push_str(&format!("{line}\n"));
+        }
+    });
+    let meta = std::fs::symlink_metadata(&env_file).unwrap();
+    assert!(meta.file_type().is_fifo() && meta.permissions().mode() & 0o777 == 0o600);
+    assert!(std::fs::read_to_string(work.join(".gitignore")).unwrap().lines().any(|l| l == "/.env"));
+    // A read in a thread of its own, with a deadline: an open of a pipe nobody serves blocks.
+    let read = || {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let path = env_file.clone();
+        std::thread::spawn(move || tx.send(std::fs::read_to_string(path).unwrap()));
+        async move { tokio::time::timeout(std::time::Duration::from_secs(10), rx).await.expect("the pipe answers").unwrap() }
+    };
+    assert_eq!(read().await, "GREETING=\"fake one\"\n");
+    ok(&s.api, &[], &[&at[..], &["set", "GREETING=fake-two"]].concat(), None).await;
+    let started = std::time::Instant::now();
+    loop {
+        let text = read().await;
+        if text == "GREETING=fake-two\n" {
+            break;
+        }
+        assert_eq!(text, "GREETING=\"fake one\"\n");
+        assert!(started.elapsed() < std::time::Duration::from_secs(20), "the change didn't reach the mount: {}", log.lock().unwrap());
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    // A change ends the digest's poll in flight; reading the folder again is refused.
+    assert!(s.tokens.lock().unwrap().remove(&token).is_some());
+    ok(&s.api, &[], &[&at[..], &["set", "OTHER=fake-three"]].concat(), None).await;
+    let status = tokio::time::timeout(std::time::Duration::from_secs(20), child.wait()).await.expect("the mount stops").unwrap();
+    let log = log.lock().unwrap().clone();
+    assert!(!status.success() && log.contains("refused") && !log.contains("fake"), "{log}");
+    assert!(std::fs::symlink_metadata(&env_file).is_err(), "the pipe is removed");
+}
+
+/// `envs rm` says what a delete would do before it's confirmed, and what the server did: a
+/// protected environment with approvals opens a change request; another is kept for the window
+/// and `envs recover` brings it back (`recover` lists it apart from projects).
+#[tokio::test]
+async fn envs_rm_previews_and_says_what_happened_and_envs_recover_brings_one_back() {
+    let Server { api, .. } = start().await;
+    ok(&api, &[], &["secrets", "-p", "shop", "-e", "staging", "set", "HOST=db.internal"], None).await;
+    ok(&api, &[], &["secrets", "-p", "shop", "envs", "protect", "production", "--approvals", "1"], None).await;
+    let unconfirmed = roll(&api, &[], &["secrets", "-p", "shop", "envs", "rm", "production"], None).await;
+    assert!(unconfirmed.code != Some(0) && unconfirmed.stderr.contains("Deleting production") && unconfirmed.stderr.contains("--yes"), "{}", unconfirmed.stderr);
+    let requested = ok(&api, &[], &["secrets", "-p", "shop", "envs", "rm", "production", "--yes"], None).await;
+    assert!(requested.contains("Opened change request") && requested.contains("1 approval"), "{requested}");
+    let kept = ok(&api, &[], &["secrets", "-p", "shop", "envs", "rm", "staging"], None).await;
+    assert!(kept.contains("kept until") && kept.contains("roll secrets envs recover staging"), "{kept}");
+    let listed = ok(&api, &[], &["secrets", "recover"], None).await;
+    assert!(listed.contains("Deleted environments") && listed.contains("shop/staging"), "{listed}");
+    ok(&api, &[], &["secrets", "-p", "shop", "envs", "recover", "staging"], None).await;
+    assert!(ok(&api, &[], &["secrets", "-p", "shop", "-e", "staging", "get", "HOST"], None).await.contains("db.internal"));
 }

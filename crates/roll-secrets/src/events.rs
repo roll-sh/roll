@@ -12,6 +12,7 @@ use crate::{Error, Result, Secrets, from_json};
 use code_sql::{Conn, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+use std::collections::BTreeSet;
 
 pub(crate) const SCHEMA: &str = "
 CREATE INDEX IF NOT EXISTS audit_events ON audit (project_id, seq) WHERE event IS NOT NULL;
@@ -26,6 +27,13 @@ CREATE TABLE IF NOT EXISTS event_marks (
 /// What happened.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
+    /// Stored values written: one event per change (its audit row), naming the keys whose value
+    /// was added, changed, linked or rotated, their new versions and how (`via`). A change that
+    /// only edits comments, tags or expiry isn't one.
+    SecretChanged,
+    /// A change that only deleted keys (one that also wrote values is `secret.changed`, its
+    /// deleted keys under `deleted`).
+    SecretDeleted,
     /// A stored value turned up in a roll code repository (a change or a scan), or a placeholder
     /// in pushed code (GitHub's secret scanning).
     SecretLeaked,
@@ -33,6 +41,9 @@ pub enum Kind {
     ScanFinding,
     /// A managed key's scheduled rotation failed, once per failing run.
     RotationFailed,
+    /// A rotation worked, scheduled or `--now`: a managed key's new version, or a live link's
+    /// resource credential reset.
+    RotationSucceeded,
     /// A change request or a secret request opened.
     RequestPending,
     /// A change request approved, rejected or closed; a secret request answered or cancelled.
@@ -45,6 +56,9 @@ pub enum Kind {
     PlaceholderWrongConsumer,
     PlaceholderWrongHost,
     ProductionUnprotected,
+    /// An environment's protection or approvals, or a folder's change policy, changed
+    /// (`production.unprotected` instead when that's what it did).
+    AccessChanged,
     /// A standard environment deleted (kept for the recovery window), or recovered within it.
     EnvDeleted,
     EnvRecovered,
@@ -53,9 +67,12 @@ pub enum Kind {
 }
 
 pub const KINDS: &[Kind] = &[
+    Kind::SecretChanged,
+    Kind::SecretDeleted,
     Kind::SecretLeaked,
     Kind::ScanFinding,
     Kind::RotationFailed,
+    Kind::RotationSucceeded,
     Kind::RequestPending,
     Kind::RequestDecided,
     Kind::SyncFailed,
@@ -65,6 +82,7 @@ pub const KINDS: &[Kind] = &[
     Kind::PlaceholderWrongConsumer,
     Kind::PlaceholderWrongHost,
     Kind::ProductionUnprotected,
+    Kind::AccessChanged,
     Kind::EnvDeleted,
     Kind::EnvRecovered,
     Kind::ProjectDeleted,
@@ -74,9 +92,12 @@ pub const KINDS: &[Kind] = &[
 impl Kind {
     pub fn as_str(self) -> &'static str {
         match self {
+            Kind::SecretChanged => "secret.changed",
+            Kind::SecretDeleted => "secret.deleted",
             Kind::SecretLeaked => "secret.leaked",
             Kind::ScanFinding => "scan.finding",
             Kind::RotationFailed => "rotation.failed",
+            Kind::RotationSucceeded => "rotation.succeeded",
             Kind::RequestPending => "request.pending",
             Kind::RequestDecided => "request.decided",
             Kind::SyncFailed => "sync.failed",
@@ -86,6 +107,7 @@ impl Kind {
             Kind::PlaceholderWrongConsumer => "placeholder.wrong_consumer",
             Kind::PlaceholderWrongHost => "placeholder.wrong_host",
             Kind::ProductionUnprotected => "production.unprotected",
+            Kind::AccessChanged => "access.changed",
             Kind::EnvDeleted => "env.deleted",
             Kind::EnvRecovered => "env.recovered",
             Kind::ProjectDeleted => "project.deleted",
@@ -152,8 +174,10 @@ pub struct EventPage {
 
 pub const LIMIT: i64 = 100;
 pub const LIMIT_MAX: i64 = 500;
-/// Rows read at once, and pages read at most per call: a filter that leaves most rows out still
-/// answers promptly, its `next` past what it read.
+/// Rows read at once, and pages read at most per call: a grant that leaves most rows out still
+/// answers promptly, its `next` past what it read. A filter's kinds are an index range
+/// (`audit_event_kinds`), and a page short of `limit` moves `next` to the head read before it, so
+/// rows a filter leaves out are never read again.
 const PAGE: i64 = 500;
 const PAGES: usize = 20;
 
@@ -184,10 +208,13 @@ fn parse_kinds(kinds: Option<&str>) -> Result<Vec<Kind>> {
 
 impl Secrets {
     /// A project's events after a cursor, in commit order, as the caller may see them: only the
-    /// environments it may read (asked of its grant row by row, as the audit log is), decoys' only
-    /// for those who see decoys. `kinds` and `environment` filter here, not in the reader. A
-    /// deleted project's feed stays readable through its recovery window, so a follower sees
-    /// `project.deleted` (and `project.recovered`).
+    /// environments and folders it may read (asked of its grant row by row, as the audit log is),
+    /// decoys' only for those who see decoys. `kinds` and `environment` filter here, not in the
+    /// reader. `next` is past every row read and, when the page is short, at the head: the head is
+    /// read first, so every row up to it has committed (rows commit in `seq` order, audit.rs) and a
+    /// later one is after it. A change across folders is seen by a reader of any one of them, with
+    /// that folder's keys only ([`readable`]). A deleted project's feed stays readable through its
+    /// recovery window, so a follower sees `project.deleted` (and `project.recovered`).
     pub fn events(&self, project: &str, q: EventsQuery, caller: &Caller) -> Result<EventPage> {
         caller.need(Action::Read, &Scope::project(project))?;
         if let Some(e) = &q.environment {
@@ -216,24 +243,27 @@ impl Secrets {
                 return Ok(EventPage { events: vec![], next: after });
             }
         }
+        // The head before any row: every row up to it has committed (each statement sees the
+        // latest commit, and rows commit in `seq` order), so a page short of it read them all.
+        let head: i64 = self.db.read(|c| c.query_row("SELECT seq FROM audit_heads WHERE project_id = ?", [project], |r| r.get(0)).optional())?.unwrap_or(0);
         if latest {
-            let head: Option<i64> = self.db.read(|c| c.query_row("SELECT seq FROM audit_heads WHERE project_id = ?", [project], |r| r.get(0)).optional())?;
-            return Ok(EventPage { events: vec![], next: head.unwrap_or(0) });
+            return Ok(EventPage { events: vec![], next: head });
         }
         if !self.sees_decoys(project, caller) {
             kinds.retain(|k| *k != Kind::DecoyUsed);
         }
         if kinds.is_empty() {
-            return Ok(EventPage { events: vec![], next: after });
+            return Ok(EventPage { events: vec![], next: head.max(after) });
         }
         let sql = format!(
-            "SELECT seq, at, env, path, keys, actor, event, event_data FROM audit WHERE project_id = ? AND seq > ? AND event IS NOT NULL AND event IN ({}){} ORDER BY seq LIMIT ?",
+            "SELECT seq, at, env, path, keys, actor, event, event_data FROM audit WHERE project_id = ? AND event IS NOT NULL AND event IN ({}) AND seq > ? AND seq <= ?{} ORDER BY seq LIMIT ?",
             vec!["?"; kinds.len()].join(", "),
             if q.environment.is_some() { " AND env = ?" } else { "" },
         );
         let args = |from: i64| {
-            let mut a = vec![code_sql::Value::Text(project.into()), code_sql::Value::Int(from)];
+            let mut a = vec![code_sql::Value::Text(project.into())];
             a.extend(kinds.iter().map(|k| code_sql::Value::Text(k.as_str().into())));
+            a.extend([code_sql::Value::Int(from), code_sql::Value::Int(head)]);
             a.extend(q.environment.iter().map(|e| code_sql::Value::Text(e.clone())));
             a.push(code_sql::Value::Int(PAGE));
             a
@@ -246,17 +276,24 @@ impl Secrets {
             let n = rows.len() as i64;
             for (seq, at, env, path, keys, actor, kind, data) in rows {
                 next = seq;
-                let path_or_root = path.as_deref().unwrap_or("/");
-                if env.as_deref().is_some_and(|e| !caller.allows(Action::Read, &Scope::at(project, e, path_or_root))) {
+                let mut d: Map<String, Value> = match data.as_deref().and_then(|d| serde_json::from_str(d).ok()) {
+                    Some(Value::Object(m)) => m,
+                    _ => Map::new(),
+                };
+                let mut keys: Vec<String> = from_json(&keys);
+                if let Some(e) = env.as_deref()
+                    && !readable(&mut d, &mut keys, path.as_deref().unwrap_or("/"), |p| caller.allows(Action::Read, &Scope::at(project, e, p)))
+                {
                     continue;
                 }
-                events.push(feed_event(seq, at, env, path, &keys, actor, kind, data.as_deref()));
+                events.push(feed_event(seq, at, env, path, keys, actor, kind, d));
                 if events.len() as i64 == limit {
                     return Ok(EventPage { events, next });
                 }
             }
             if n < PAGE {
-                break;
+                // Everything up to the head is read: rows a filter or the grant left out too.
+                return Ok(EventPage { events, next: next.max(head) });
             }
         }
         Ok(EventPage { events, next })
@@ -290,13 +327,41 @@ impl Secrets {
     }
 }
 
+/// Whether a reader that `reads` folders sees an event at `path`, trimming it to what it may see.
+/// A change across folders is recorded at `/` with its keys by folder (`data.folders`, names only,
+/// write.rs): a reader of any one of them sees it, with only the readable folders and their keys,
+/// so it never learns a key's name in a folder it can't read.
+fn readable(d: &mut Map<String, Value>, keys: &mut Vec<String>, path: &str, reads: impl Fn(&str) -> bool) -> bool {
+    let Some(Value::Object(folders)) = d.get("folders") else { return reads(path) };
+    if reads(path) {
+        return true;
+    }
+    let names = |v: &Value| v.as_array().into_iter().flatten().filter_map(|k| k.as_str().map(String::from)).collect::<Vec<_>>();
+    let seen: Map<String, Value> = folders.iter().filter(|(p, _)| reads(p)).map(|(p, v)| (p.clone(), v.clone())).collect();
+    if seen.is_empty() {
+        return false;
+    }
+    let ok: BTreeSet<String> = seen.values().flat_map(names).collect();
+    // `version` is the event's one key's: gone with it.
+    let own = d.get("keys").map_or_else(|| keys.clone(), names);
+    if own.len() == 1 && !ok.contains(&own[0]) {
+        d.remove("version");
+    }
+    keys.retain(|k| ok.contains(k));
+    for f in ["keys", "deleted"] {
+        if let Some(Value::Array(a)) = d.get_mut(f) {
+            a.retain(|k| k.as_str().is_some_and(|k| ok.contains(k)));
+        }
+    }
+    if let Some(Value::Object(v)) = d.get_mut("versions") {
+        v.retain(|k, _| ok.contains(k));
+    }
+    d.insert("folders".into(), Value::Object(seen));
+    true
+}
+
 #[allow(clippy::too_many_arguments)]
-fn feed_event(seq: i64, at: i64, environment: Option<String>, path: Option<String>, keys: &str, actor: String, kind: String, data: Option<&str>) -> FeedEvent {
-    let mut d: Map<String, Value> = match data.and_then(|d| serde_json::from_str(d).ok()) {
-        Some(Value::Object(m)) => m,
-        _ => Map::new(),
-    };
-    let keys: Vec<String> = from_json(keys);
+fn feed_event(seq: i64, at: i64, environment: Option<String>, path: Option<String>, keys: Vec<String>, actor: String, kind: String, mut d: Map<String, Value>) -> FeedEvent {
     let key = (keys.len() == 1).then(|| keys[0].clone());
     if keys.len() > 1 {
         d.entry("keys").or_insert_with(|| json!(keys));

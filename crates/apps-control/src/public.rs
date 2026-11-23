@@ -45,6 +45,10 @@ pub fn router(apps: Arc<Apps>) -> axum::Router {
             if req.uri().path().starts_with(crate::build_cache::PATH) && req.uri().path()[crate::build_cache::PATH.len()..].starts_with('/') {
                 return crate::build_cache::serve(apps, req).await;
             }
+            // Next.js's cache across instances, with the environment's token.
+            if req.uri().path().starts_with(crate::next_cache::PATH) && req.uri().path()[crate::next_cache::PATH.len()..].starts_with('/') {
+                return crate::next_cache::serve(apps, req).await;
+            }
             // An edge function's `context.next()` ([`crate::edge`]): signed, any host.
             if req.uri().path().starts_with(crate::edge::NEXT) {
                 return crate::edge::next(apps, req).await;
@@ -378,6 +382,28 @@ pub fn port_router(apps: Arc<Apps>, service: String, env: String) -> axum::Route
             serve(apps, service, env, None, req).await
         }
     })
+}
+
+/// The edge function a request goes to first (its target service, the function and its `next`
+/// address), if one runs on its path as the app would read it; never on the way back from one.
+async fn edge_first(apps: &Arc<Apps>, service: &str, env: &str, t: &crate::live::Template, req: EdgeProbe) -> Option<(String, String, String)> {
+    if t.edge.is_empty() || req.back {
+        return None;
+    }
+    apps.edge_for(service, env, t, &req.path, req.client.as_deref()).await
+}
+
+/// What [`edge_first`] reads of a request.
+struct EdgeProbe {
+    back: bool,
+    path: String,
+    client: Option<String>,
+}
+
+impl EdgeProbe {
+    fn of(req: &Request) -> EdgeProbe {
+        EdgeProbe { back: req.headers().contains_key(VIA_EDGE), path: crate::model::normal_path(req.uri().path()), client: roll_cluster::client_addr(req) }
+    }
 }
 
 /// roll's own request headers, off a visitor's request where it comes in: from here on, one is
@@ -1492,8 +1518,14 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         Err(_) => return by("unavailable", page(StatusCode::SERVICE_UNAVAILABLE, "Unavailable", "This environment's settings couldn't be read. Try again in a few seconds.")),
     };
     let client = roll_cluster::client_addr(&req);
-    // roll's own call on a schedule: none of the environment's gates are for it.
-    let ours = req.extensions().get::<Scheduled>().is_some();
+    // roll's own call on a schedule, or a browser check's page (its run's token, for this
+    // environment only, never sent on): none of the environment's gates are for it. A check's
+    // page is otherwise a visitor's (its routes and skew protection apply); a scheduled call isn't.
+    let check = req.headers_mut().remove("x-roll-check");
+    let scheduled = req.extensions().get::<Scheduled>().is_some();
+    // Back from an edge function's `next()` (signed, with the visitor's address): its gates
+    // were passed on the way in, so none of them runs twice.
+    let ours = scheduled || req.headers().contains_key(VIA_EDGE) || check.as_ref().and_then(|v| v.to_str().ok()).is_some_and(|t| apps.check_token_admits(t, service, env));
     if !ours && !gate.admits(client.as_deref()) {
         return by("allow_list", page(StatusCode::FORBIDDEN, "Not from here", "This service only answers visitors from the networks its owner allowed."));
     }
@@ -1528,12 +1560,24 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     }
     if !ours && !(gate.firewall.is_empty() && gate.file_firewall.is_empty()) {
         let path = crate::model::normal_path(req.uri().path());
-        let asked = crate::model::Asked { method: req.method().as_str(), path: &path, user_agent: &ua, ip: crate::live::client_ip(client.as_deref()), headers: req.headers(), query: req.uri().query() };
-        let verdict = gate.firewall_verdict(&asked);
+        let ip = crate::live::client_ip(client.as_deref());
+        // Who the client is, only when a rule asks (a crawler's claim costs DNS lookups).
+        let asks = gate.firewall.iter().chain(gate.file_firewall.iter()).any(|r| !r.bots.is_empty() || r.action == crate::model::FirewallAction::Challenge);
+        let bot = match asks {
+            true => crate::bots::identify(&apps.bots_verified, apps.deps.resolver.as_ref(), &ua, ip).await,
+            false => None,
+        };
+        let asked = crate::model::Asked { method: req.method().as_str(), path: &path, user_agent: &ua, ip, headers: req.headers(), query: req.uri().query(), bot };
+        let mut hits = Vec::new();
+        let verdict = gate.firewall_verdict(&asked, &mut hits);
+        apps.live(service, env).count_hits(&hits);
         match verdict {
             crate::live::Verdict::Allow => {}
             // A browser with this hour's pass goes on (the cookie is roll's: the app never sees it);
             // anything else gets the page that earns one.
+            // A verified search engine can't run the page, and a challenge is never meant to
+            // keep one out.
+            crate::live::Verdict::Challenge if bot.is_some_and(|b| b.class == crate::bots::Class::Search && b.verified == Some(true)) => {}
             crate::live::Verdict::Challenge => {
                 let key = gate.challenge_key.clone().unwrap_or_default();
                 let net = crate::challenge::network(crate::live::client_ip(client.as_deref()));
@@ -1547,9 +1591,14 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
             }
             crate::live::Verdict::Deny => return by("firewall", page(StatusCode::FORBIDDEN, "Not allowed", "This service doesn't answer this request.")),
             // A rule's own limit (Vercel's rate-limit rules): its bucket per client, before anything wakes.
-            crate::live::Verdict::Limit(bucket, limit) => {
-                if let Err(wait) = apps.live(service, env).take_token_in(bucket, crate::live::client_ip(client.as_deref()), &limit) {
-                    let mut r = page(StatusCode::TOO_MANY_REQUESTS, "Slow down", "Too many requests from your address. Try again in a moment.");
+            crate::live::Verdict::Limit(bucket, limit, keyed) => {
+                let (lv, ip) = (apps.live(service, env), crate::live::client_ip(client.as_deref()));
+                // Keyed, each address still has ten times the rate between its keys: a new key
+                // on every request isn't a way around it.
+                let wide = crate::model::RateLimit { per_minute: limit.per_minute.saturating_mul(10), burst: Some(limit.burst().saturating_mul(10)) };
+                let held = lv.take_token_in(bucket, ip, keyed, &limit).and_then(|()| if keyed.is_some() { lv.take_token_in(bucket, ip, None, &wide) } else { Ok(()) });
+                if let Err(wait) = held {
+                    let mut r = page(StatusCode::TOO_MANY_REQUESTS, "Slow down", if keyed.is_some() { "Too many requests with this key. Try again in a moment." } else { "Too many requests from your address. Try again in a moment." });
                     if let Ok(v) = HeaderValue::from_str(&(wait.as_secs_f64().ceil() as u64).max(1).to_string()) {
                         r.headers_mut().insert(header::RETRY_AFTER, v);
                     }
@@ -1589,12 +1638,26 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
             _ => turned_away,
         };
     }
+    // Its own redirects (Vercel's project redirects, any kind of service), before anything wakes:
+    // a GET or HEAD, or any method for a 307 or 308 (which keep it).
+    let reads = matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD);
+    if !scheduled
+        && let Some(rules) = &gate.redirects
+        && let Some((status, to)) = rules.find(req.uri().path(), req.uri().query(), &crate::site_rules::Visitor::of(req.headers()))
+        && (reads || matches!(status, 307 | 308))
+        && let Ok(loc) = HeaderValue::from_str(&to)
+    {
+        let mut r = Response::new(Body::empty());
+        *r.status_mut() = StatusCode::from_u16(status).unwrap_or(StatusCode::MOVED_PERMANENTLY);
+        r.headers_mut().insert(header::LOCATION, loc);
+        return by("redirect", r);
+    }
     // Its routes (Vercel's rewrites to another project): the first that takes the path sends the
     // request to that service's environment of the same name, the path as it came, past the
     // target's gates as a site's rewrite is (this environment's let it in). Never again from there.
     // Never roll's own scheduled call: its `CRON_SECRET` is this service's, not the route's.
     if !req.headers().contains_key(VIA_SITE)
-        && !ours
+        && !scheduled
         && let Some(r) = gate.routes.iter().find(|r| r.takes(req.uri().path()))
     {
         let pq = req.uri().path_and_query().map_or("/", |p| p.as_str()).to_string();
@@ -1663,7 +1726,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     // Skew protection (`run.skew_protection`): what a page loaded before a deploy asks for,
     // naming its deployment, goes to that one (past every gate above, as its own URL would).
     let skewed = match (deployment, live.template()) {
-        (None, Some(t)) if !ours && t.run.skew_protection => {
+        (None, Some(t)) if !scheduled && t.run.skew_protection => {
             let asked = crate::skew::asked(&req);
             apps.skew_target(service, env, &t, asked).await
         }
@@ -1805,15 +1868,17 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         Some(d) => match apps.deployment_template(service, env, d).await {
             // A deployment's own URL takes no form's submission: only what's live keeps them.
             Ok(t) if t.site.is_some() => {
-                if !t.edge.is_empty()
-                    && !req.headers().contains_key(VIA_EDGE)
-                    && let Some((target, name, next)) = apps.edge_for(service, env, &t, req.uri().path()).await
-                {
+                if let Some((target, name, next)) = edge_first(&apps, service, env, &t, EdgeProbe::of(&req)).await {
                     return crate::edge::to_function(apps.clone(), target, env.to_string(), name, next, req).await;
                 }
                 return with_feedback(feedback, serve_site(&apps, &live, &t, SiteRequest::of(&req), service, env, began).await);
             }
             Ok(t) => {
+                // A web service's middleware first, on the paths it names (its `next()` comes
+                // back to this deployment).
+                if let Some((target, name, next)) = edge_first(&apps, service, env, &t, EdgeProbe::of(&req)).await {
+                    return crate::edge::to_function(apps.clone(), target, env.to_string(), name, next, req).await;
+                }
                 again = Some(Again::Deployment(Box::new(t.clone())));
                 live.acquire_deployment(t).await
             }
@@ -1823,10 +1888,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
             // A static site's files answer (a gradual rollout's bucket chose which deployment's).
             Ok(Some(t)) if t.site.is_some() => {
                 // Its edge functions first, on the paths they name.
-                if !t.edge.is_empty()
-                    && !req.headers().contains_key(VIA_EDGE)
-                    && let Some((target, name, next)) = apps.edge_for(service, env, &t, req.uri().path()).await
-                {
+                if let Some((target, name, next)) = edge_first(&apps, service, env, &t, EdgeProbe::of(&req)).await {
                     return crate::edge::to_function(apps.clone(), target, env.to_string(), name, next, req).await;
                 }
                 let mut r = with_feedback(feedback, serve_site(&apps, &live, &t, SiteRequest::read(req).await, service, env, began).await);
@@ -1839,6 +1901,10 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
                 return r;
             }
             Ok(Some(t)) => {
+                // A web service's middleware first, before anything wakes for it.
+                if let Some((target, name, next)) = edge_first(&apps, service, env, &t, EdgeProbe::of(&req)).await {
+                    return crate::edge::to_function(apps.clone(), target, env.to_string(), name, next, req).await;
+                }
                 again = Some(Again::Route(t.clone()));
                 live.acquire_preferring(t, affine.as_deref()).await
             }

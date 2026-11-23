@@ -9,6 +9,7 @@ use crate::error::EsResult;
 use crate::json::{Map, Value};
 use crate::xpack::inference::http::{self, Call};
 use crate::xpack::inference::results::Results;
+use crate::xpack::inference::stream::Streaming;
 use crate::xpack::inference::settings::{Reader, validation};
 use crate::xpack::inference::{Endpoint, Request, TaskType};
 use std::time::Duration;
@@ -34,13 +35,13 @@ fn style(ep: &Endpoint) -> oai::Style<'_> {
     oai::Style { model: ep.service_settings.get("model_id"), max_tokens_key: "max_tokens", stream_false: true, stream_options: true, ..oai::Style::default() }
 }
 
-async fn chat(cluster: &Cluster, ep: &Endpoint, body: &Value, timeout: Duration) -> EsResult<http::Answer> {
+async fn chat(cluster: &Cluster, ep: &Endpoint, body: &Value, timeout: Duration, stream: bool) -> EsResult<http::Answer> {
     let url = match ep.service_settings.get("url").and_then(Value::as_str) {
         Some(u) => u.to_string(),
         None => format!("{}/chat/completions", super::base_url(cluster, "deepseek", "https://api.deepseek.com")),
     };
     let call = Call::json(&ep.id, url.clone(), json_bearer(cluster, ep, false)?, body, timeout, None);
-    let answer = http::post(cluster, &call).await?;
+    let answer = if stream { http::post_stream(cluster, &call).await? } else { http::post(cluster, &call).await? };
     http::check(&ep.id, &url, &answer)?;
     Ok(answer)
 }
@@ -50,18 +51,18 @@ pub async fn infer(cluster: &Cluster, ep: &Endpoint, req: &Request) -> EsResult<
         return Err(crate::xpack::inference::unsupported_task(ep.task, "deepseek"));
     }
     let input = one_input(req, "DeepSeek completion")?;
-    let answer = chat(cluster, ep, &oai::body(style(ep), oai::user_message(input), &Map::new(), false), req.timeout).await?;
+    let answer = chat(cluster, ep, &oai::body(style(ep), oai::user_message(input), &Map::new(), false), req.timeout, false).await?;
     Ok(Results::Completion(vec![oai::completion_text(&super::answer_json("deepseek", &answer)?, "DeepSeek chat completions")?]))
 }
 
-pub async fn stream_completion(cluster: &Cluster, ep: &Endpoint, req: &Request) -> EsResult<Vec<Value>> {
+pub async fn stream_completion(cluster: &Cluster, ep: &Endpoint, req: &Request) -> EsResult<Streaming> {
     let input = one_input(req, "DeepSeek completion")?;
-    let answer = chat(cluster, ep, &oai::body(style(ep), oai::user_message(input), &Map::new(), true), req.timeout).await?;
-    Ok(oai::completion_events(&answer.body))
+    let answer = chat(cluster, ep, &oai::body(style(ep), oai::user_message(input), &Map::new(), true), req.timeout, true).await?;
+    Streaming::open(answer, oai::completion_decoder("DeepSeek chat completions"))
 }
 
-pub async fn stream_chat(cluster: &Cluster, ep: &Endpoint, body: &Value, timeout: Duration) -> EsResult<Vec<Value>> {
+pub async fn stream_chat(cluster: &Cluster, ep: &Endpoint, body: &Value, timeout: Duration) -> EsResult<Streaming> {
     let (messages, req) = oai::unified(body)?;
-    let answer = chat(cluster, ep, &oai::body(style(ep), messages, &req, true), timeout).await?;
-    Ok(oai::chat_events(&answer.body))
+    let answer = chat(cluster, ep, &oai::body(style(ep), messages, &req, true), timeout, true).await?;
+    Streaming::open(answer, oai::chat_decoder(&ep.id))
 }

@@ -129,9 +129,12 @@ pub struct NodeConfig {
     /// `None`: no node budget.
     pub max_in_flight_bytes: Option<usize>,
     /// Memory all loaded clusters together may hold (indexing buffers, in-heap segments,
-    /// version maps; [`Usage::resident_bytes`]). Past it, the least recently used clusters with
-    /// no request in flight are unloaded, and waking another cluster first makes room.
-    /// `None`: no node budget.
+    /// version maps; [`Usage::resident_bytes`]) and what their requests hold
+    /// ([`Node::request_memory`]), together. Past it, the least recently used clusters with no
+    /// request in flight are unloaded (requests can't be), and waking another cluster first makes
+    /// room; a request that would take residents and requests past it fails with
+    /// `circuit_breaking_exception`. `None`: no node budget for loaded clusters, and half of the
+    /// host's memory for residents and requests.
     pub memory_budget: Option<u64>,
     /// Memory documents being inverted may add to the indexing buffers of every cluster at once
     /// (`search_index::buffer::AnalysisBudget`); past it a document is refused with a 429
@@ -394,6 +397,12 @@ pub struct Node {
     pub unloads: AtomicU64,
     /// Every cluster's security audit log.
     pub audit: Arc<crate::audit::AuditLogs>,
+    /// What requests on every cluster hold together (aggregations, ES|QL, kept results),
+    /// whatever the tenants set their `request` breakers to: one budget with the loaded clusters'
+    /// resident memory, the operator's `memory_budget` (or else half of the host's memory,
+    /// [`search_es::breaker::Breakers::node_budget`]). The reaper tells it what clusters hold
+    /// resident ([`Node::enforce_memory`]); requests get the rest.
+    pub request_memory: Arc<search_es::breaker::MemoryBudget>,
     /// Request body bytes in flight across clusters (`NodeConfig::max_in_flight_bytes`).
     body_bytes: Arc<ByteBudget>,
     /// Memory documents being inverted may add to every cluster's buffers at once
@@ -467,6 +476,49 @@ impl Drop for Queued<'_> {
     }
 }
 
+/// What a streamed answer holds until its body ends or is dropped ([`Lease::hold`]).
+struct Streaming {
+    lease: Option<Lease>,
+    kind: crate::metrics::Kind,
+    status: u16,
+    since: Instant,
+}
+
+impl Streaming {
+    /// Records the stream's latency and gives the lease back (once).
+    fn finish(&mut self) {
+        if let Some(lease) = self.lease.take() {
+            lease.loaded.metrics.record(std::time::SystemTime::now(), self.kind, self.status, Some(self.since.elapsed()));
+        }
+    }
+}
+
+impl Drop for Streaming {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
+/// A streamed body with what it holds: dropped together.
+struct Held {
+    body: search_es::rest::ByteStream,
+    held: Streaming,
+}
+
+impl futures::Stream for Held {
+    type Item = bytes::Bytes;
+
+    fn poll_next(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<bytes::Bytes>> {
+        let this = self.get_mut();
+        let next = this.body.as_mut().poll_next(cx);
+        // Ended: give the lease back now, not when the connection drops the body.
+        if let std::task::Poll::Ready(None) = next {
+            this.held.finish();
+        }
+        next
+    }
+}
+
 impl Drop for Lease {
     fn drop(&mut self) {
         if let Some(p) = self.permit.take() {
@@ -534,8 +586,43 @@ impl Lease {
         self.bytes = r;
     }
 
-    /// Runs the request on its cluster and makes its writes durable before answering.
-    pub async fn handle(&self, mut req: EsRequest) -> EsResponse {
+    /// Runs the request on its cluster ([`Lease::handle`]) and gives the lease back when it's
+    /// answered, or, for an answer it streams, when the stream ends ([`Lease::hold`]).
+    pub async fn serve(self, req: EsRequest) -> EsResponse {
+        let kind = crate::metrics::Kind::of(&req.method, &req.uri);
+        let head = EsRequest { method: req.method.clone(), uri: req.uri.clone(), headers: Vec::new(), body: bytes::Bytes::new() };
+        let since = self.since.unwrap_or_else(Instant::now);
+        let resp = self.handle(req).await;
+        if resp.stream.is_none() {
+            self.loaded.metrics.record(std::time::SystemTime::now(), kind, resp.status, Some(since.elapsed()));
+            return resp;
+        }
+        self.hold(resp, &head, kind, since)
+    }
+
+    /// A streamed answer (`_inference/…/_stream`) keeps the lease until its body ends or its
+    /// client goes away: the cluster's concurrency permit and in-flight count, a browser key's
+    /// running slot, and the request's byte reservation, grown by the stream's buffer
+    /// ([`search_es::xpack::inference::stream::MAX_EVENT_BYTES`]; 429 when the cluster's budget
+    /// can't take it, which closes the upstream request). The node-wide running slot goes back
+    /// now: a stream waits on its upstream, it doesn't compute. Its latency is recorded when it
+    /// ends.
+    fn hold(mut self, mut resp: EsResponse, head: &EsRequest, kind: crate::metrics::Kind, since: Instant) -> EsResponse {
+        drop(self.fair.lock().take());
+        let Some(body) = resp.stream.take().and_then(|s| s.take()) else { return resp };
+        if let Err(used) = self.loaded.bytes.grow(&mut self.bytes, search_es::xpack::inference::stream::MAX_EVENT_BYTES) {
+            drop(body);
+            let r = self.over_budget(head, used, self.bytes.bytes() + search_es::xpack::inference::stream::MAX_EVENT_BYTES);
+            return search_es::rest::error_response(&r.error, head, r.dialect);
+        }
+        let held = Streaming { lease: Some(self), kind, status: resp.status, since };
+        resp.stream = Some(search_es::rest::Streamed::new(Box::pin(Held { body, held })));
+        resp
+    }
+
+    /// Runs the request on its cluster and makes its writes durable before answering (the
+    /// caller records its metrics: [`Lease::serve`]).
+    async fn handle(&self, mut req: EsRequest) -> EsResponse {
         use search_es::remote::links::REMOTE_ACCESS_HEADER;
         use search_es::xpack::security::AUTHENTICATED_HEADER;
         // Only the node may say who authenticated, and only roll's own calls are a remote
@@ -550,11 +637,7 @@ impl Lease {
             req.headers.retain(|(k, _)| !k.eq_ignore_ascii_case("authorization"));
             req.headers.push(("authorization".to_string(), h.clone()));
         }
-        let kind = crate::metrics::Kind::of(&req.method, &req.uri);
-        let since = self.since.unwrap_or_else(Instant::now);
-        let resp = self.run(req).await;
-        self.loaded.metrics.record(std::time::SystemTime::now(), kind, resp.status, Some(since.elapsed()));
-        resp
+        self.run(req).await
     }
 
     /// Counts a request the cluster's limits refused (429) in its metrics.
@@ -953,9 +1036,12 @@ impl Node {
             n => n,
         };
         let audit = crate::audit::AuditLogs::new(stores.data(), cfg.audit.clone());
-        let reindex = search_es::api::remote::RemoteNode::from_settings(&cfg.node_settings);
+        let request_memory = search_es::breaker::Breakers::node_budget(cfg.memory_budget);
+        // Reindex from remote's own budgets are part of the node's: children of it.
+        let reindex = search_es::api::remote::RemoteNode::from_settings_under(&cfg.node_settings, Some(request_memory.clone()));
         Arc::new(Node {
             audit,
+            request_memory,
             body_bytes: ByteBudget::new(cfg.max_in_flight_bytes.unwrap_or(usize::MAX)),
             analysis: search_index::buffer::AnalysisBudget::new(cfg.analysis_limit()),
             reindex,
@@ -1210,6 +1296,9 @@ impl Node {
         let wake_time = started.elapsed();
         tracing::debug!(cluster = name, ms = wake_time.as_secs_f64() * 1e3, shards = recovery.shards, records = recovery.records, "cluster loaded");
         self.wakes.fetch_add(1, Ordering::Relaxed);
+        // What the newcomer holds resident counts against requests at once (the reaper
+        // recounts every cluster on its next round).
+        self.request_memory.add_held_elsewhere(persist::resident_bytes(&cluster));
         let loaded = Arc::new(Loaded {
             cluster,
             data,
@@ -1279,6 +1368,7 @@ impl Node {
         cfg.default_repository = self.cfg.default_repository.clone().filter(|_| data_store.is_some());
         cfg.file_service_tokens = self.reads_file_service_tokens(&spec.name);
         cfg.audit = Some(search_es::xpack::security::audit::AuditLog(self.audit.clone()));
+        cfg.request_memory = Some(self.request_memory.clone());
         cfg.reindex_node = Some(self.reindex.clone());
         let mut cluster = Cluster::open(cfg, store).await?;
         *cluster.reindex_whitelist.write() = spec.reindex_whitelist.clone();
@@ -1709,7 +1799,14 @@ impl Node {
     async fn enforce_memory_with(&self, room: u64, commit: bool) -> Vec<String> {
         let loaded: Vec<Arc<Loaded>> = self.clusters.read().values().filter_map(|s| s.get().cloned()).collect();
         if loaded.is_empty() {
+            self.request_memory.set_held_elsewhere(self.cfg.embedder.as_ref().map_or(0, |e| e.resident_bytes()));
             return Vec::new();
+        }
+        // Kept async results past their keep-alive go (and give their memory back) even on a
+        // cluster nobody calls.
+        let now = search_es::time::now_millis();
+        for l in &loaded {
+            l.cluster.xpack.results.sweep(now);
         }
         let mut sizes: Vec<(Arc<Loaded>, u64)> = loaded.into_iter().map(|l| {
             let r = persist::resident_bytes(&l.cluster);
@@ -1726,17 +1823,21 @@ impl Node {
             }
         }
         let mut evicted = Vec::new();
-        let Some(budget) = self.cfg.memory_budget else { return evicted };
-        // The embedding model and its running batches are the node's, and stay: clusters make
-        // room for them.
+        // One budget: what the clusters and the node's embedding model (its batches included)
+        // hold resident leaves the rest to requests.
         let mut total: u64 = sizes.iter().map(|(_, r)| *r).sum::<u64>() + self.cfg.embedder.as_ref().map_or(0, |e| e.resident_bytes());
-        if total.saturating_add(room) <= budget {
+        self.request_memory.set_held_elsewhere(total);
+        let Some(budget) = self.cfg.memory_budget else { return evicted };
+        // Residents and requests share the budget, and requests can't be evicted: idle clusters
+        // make room for both.
+        let over = |total: u64| total.saturating_add(self.request_memory.used()).saturating_add(room) > budget;
+        if !over(total) {
             return evicted;
         }
         // Clusters holding scrolls or points in time go last.
         sizes.sort_by_key(|(l, _)| (l.pinned(), l.last_used.load(Ordering::SeqCst)));
         for (l, r) in sizes {
-            if total.saturating_add(room) <= budget {
+            if !over(total) {
                 break;
             }
             // A running task (a reindex from remote, a by-query run in the background) would be
@@ -1747,6 +1848,7 @@ impl Node {
             if self.unload_with(&l.name, true, Some(&l)).await {
                 tracing::info!(cluster = &*l.name, resident = r, total, budget, "unloaded a cluster to stay within the node's memory budget");
                 total = total.saturating_sub(r);
+                self.request_memory.set_held_elsewhere(total);
                 evicted.push(l.name.to_string());
             }
         }
@@ -2255,7 +2357,7 @@ impl Node {
                 if let Err(r) = lease.acquire(&req).await {
                     return search_es::rest::error_response(&r.error, &req, r.dialect);
                 }
-                lease.handle(req).await
+                lease.serve(req).await
             }
             Err(r) => search_es::rest::error_response(&r.error, &req, r.dialect),
         }

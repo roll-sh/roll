@@ -59,6 +59,9 @@ pub fn router(engine: Arc<Engine>) -> Router {
                 .route("/v1/previews/{id}/shell/sessions/{sh}/keys", post(shell_keys))
                 .route("/v1/previews/{id}/shell/sessions/{sh}/resize", post(shell_resize))
                 .route("/v1/previews/{id}/forward", get(forward))
+                .route("/v1/previews/{id}/swap", get(swap))
+                // A page read through roll (roll MCP's `previews_fetch`): its services are here.
+                .route("/v1/previews/{id}/fetch", get(fetch_page))
                 // A preview's spans, kept on its holder: the intake (its token the credential) and the reads.
                 .route("/v1/previews/{id}/otlp/{token}/v1/traces", post(otlp_traces).layer(axum::extract::DefaultBodyLimit::max(8 << 20)))
                 .route("/v1/previews/{id}/traces", get(traces))
@@ -873,13 +876,65 @@ async fn forward(AxState(e): S, Path(id): Path<String>, Query(q): Query<ForwardQ
     Ok(ws.max_message_size(1 << 20).max_frame_size(1 << 20).on_upgrade(move |socket| bridge(socket, f)))
 }
 
-async fn bridge(socket: axum::extract::ws::WebSocket, f: crate::engine::shell::Forward) {
+async fn bridge(socket: axum::extract::ws::WebSocket, mut f: crate::engine::shell::Forward) {
+    // `f` lives as long as the bridge: it holds the service awake.
+    let ended = f.ended.clone();
+    bridge_io(socket, &mut f.io, ended).await;
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FetchQuery {
+    path: String,
+    service: Option<String>,
+    #[serde(default)]
+    head: bool,
+}
+
+/// One page of a preview's service, read through roll's own way in: for an agent checking its
+/// change (roll MCP's `previews_fetch`) without anyone making a share link.
+async fn fetch_page(AxState(e): S, Path(id): Path<String>, Query(q): Query<FetchQuery>) -> crate::Result<Json<crate::engine::shell::FetchedPage>> {
+    check_id(&id)?;
+    Ok(Json(e.fetch(&id, q.service.as_deref(), &q.path, q.head).await?))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SwapQuery {
+    service: Option<String>,
+}
+
+/// A laptop's process standing in for a service (`roll preview swap`): the WebSocket carries one
+/// HTTP/2 connection the laptop serves (binary both ways, as `forward`'s), and the service's
+/// requests go over it while it's open.
+async fn swap(AxState(e): S, Path(id): Path<String>, Query(q): Query<SwapQuery>, who: Option<axum::Extension<roll_auth::SignedIn>>, ws: axum::extract::ws::WebSocketUpgrade) -> crate::Result<Response> {
+    check_id(&id)?;
+    let by = who.map_or_else(|| "the operator".to_string(), |w| w.handle.clone());
+    let mut held = e.swap(&id, q.service.as_deref(), &by).await?;
+    Ok(ws.max_message_size(1 << 20).max_frame_size(1 << 20).on_upgrade(move |socket| async move {
+        let (ours, theirs) = tokio::io::duplex(256 << 10);
+        let carried = bridge_io(socket, theirs, held.ended.clone());
+        let laptop = async {
+            let Ok((sender, conn)) = hyper::client::conn::http2::handshake(hyper_util::rt::TokioExecutor::new(), hyper_util::rt::TokioIo::new(ours)).await else { return };
+            held.attach(sender);
+            let _ = conn.await;
+        };
+        // Either end going ends the swap (the service's container answers again).
+        tokio::select! {
+            _ = carried => {}
+            _ = laptop => {}
+        }
+        drop(held);
+    }))
+}
+
+/// One WebSocket carrying `io`'s bytes both ways until either side ends or `ended` turns.
+async fn bridge_io(socket: axum::extract::ws::WebSocket, io: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin, mut ended: tokio::sync::watch::Receiver<bool>) {
     use axum::extract::ws::Message;
     use futures::{SinkExt, StreamExt};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let (mut tx, mut rx) = socket.split();
-    let mut ended = f.ended.clone();
-    let (mut rd, mut wr) = tokio::io::split(f.io);
+    let (mut rd, mut wr) = tokio::io::split(io);
     let mut buf = vec![0u8; 64 << 10];
     let (mut from_client, mut from_service) = (true, true);
     while from_client || from_service {

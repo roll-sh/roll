@@ -12,23 +12,24 @@
 //! - **1Password.** A key may be a reference (`op://…`, T3 Code's secret providers,
 //!   `packages/secret-provider-onepassword` there): read with the `op` CLI on this machine, kept in
 //!   memory only.
+//! - **roll secrets.** A key may be a `roll://` reference: the daemon never reads it itself. roll's
+//!   relay sends its value sealed to this daemon (`endpoint.key`, sealed with
+//!   `SealedSecret::ref_context`) after each `hello` and when it changes, or why it can't; kept in
+//!   memory only. Until it arrives, and after a refusal, the endpoint has no key.
 //! - **Models.** The endpoint's `/models`, bounded (10 s, 2 MiB, 500 models, no redirects), offered
 //!   by every provider that uses it. The daemon calls the endpoint, so a private or tailnet address
 //!   is fine; roll's relay never calls it.
 
 use crate::provider::ProviderConfig;
-use aes_gcm::aead::{Aead, KeyInit, Payload};
-use agent_proto::{EndpointKind, EndpointModel, EndpointSpec, KeyState, ProviderId, SEAL_VERSION, SealedSecret, endpoint_limits};
+use aes_gcm::aead::{Aead, Payload};
+use agent_proto::seal::box_cipher;
+use agent_proto::{EndpointKind, EndpointModel, EndpointSpec, KeyState, ProviderId, SealedSecret, endpoint_limits};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use curve25519_dalek::montgomery::MontgomeryPoint;
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
 use std::time::Duration;
 use zeroize::Zeroizing;
-
-/// The HKDF info of a `roll-seal-v1` box.
-const SEAL_INFO: &[u8] = b"roll-seal-v1";
 /// How long a models list may take.
 const LIST_TIMEOUT: Duration = Duration::from_secs(10);
 /// How much of a models list is read.
@@ -119,32 +120,15 @@ impl SealKey {
 
 const SEAL_SETTING: &str = "seal_key";
 
-fn box_cipher(shared: &[u8; 32], epk: &[u8; 32], public: &[u8; 32]) -> aes_gcm::Aes256Gcm {
-    let mut salt = [0u8; 64];
-    salt[..32].copy_from_slice(epk);
-    salt[32..].copy_from_slice(public);
-    let mut okm = Zeroizing::new([0u8; 32]);
-    hkdf::Hkdf::<Sha256>::new(Some(&salt), shared).expand(SEAL_INFO, okm.as_mut()).expect("32 bytes is a valid HKDF length");
-    aes_gcm::Aes256Gcm::new_from_slice(okm.as_ref()).expect("a 32-byte key")
-}
-
 /// Seals `key` to the daemon whose public key is `public` (base64url), for `endpoint`: what the
 /// dashboard does in the browser (`agents-seal.ts`), for tests and tools.
 pub fn seal(public: &str, endpoint: &str, key: &str) -> anyhow::Result<SealedSecret> {
     seal_with(public, &SealedSecret::context(endpoint), key)
 }
 
-/// [`seal`] with any associated data (see [`SealKey::open_with`]).
+/// [`seal`] with any associated data (see [`SealKey::open_with`]): `agent_proto::seal::seal_with`.
 pub fn seal_with(public: &str, context: &str, key: &str) -> anyhow::Result<SealedSecret> {
-    let public: [u8; 32] = B64.decode(public)?.try_into().map_err(|_| anyhow::anyhow!("a seal key is 32 bytes"))?;
-    let esk = Zeroizing::new(rand::random::<[u8; 32]>());
-    let epk = MontgomeryPoint::mul_base_clamped(*esk).to_bytes();
-    let shared = Zeroizing::new(MontgomeryPoint(public).mul_clamped(*esk).to_bytes());
-    let nonce: [u8; 12] = rand::random();
-    let ct = box_cipher(&shared, &epk, &public)
-        .encrypt(&nonce.into(), Payload { msg: key.as_bytes(), aad: context.as_bytes() })
-        .map_err(|_| anyhow::anyhow!("sealing failed"))?;
-    Ok(SealedSecret { v: SEAL_VERSION, epk: B64.encode(epk), nonce: B64.encode(nonce), ct: B64.encode(ct) })
+    agent_proto::seal::seal_with(public, context, key).map_err(|e| anyhow::anyhow!(e))
 }
 
 /// A key goes into an environment variable: one line of text.
@@ -188,7 +172,8 @@ pub const SETTING: &str = "endpoints";
 #[derive(Clone, Debug)]
 pub struct Live {
     pub stored: Stored,
-    /// `key_ref`'s value, read from 1Password at start and when the endpoint is set.
+    /// `key_ref`'s value: read from 1Password at start and when the endpoint is set, or sent by
+    /// roll's relay for a `roll://` one (`endpoint.key`).
     pub resolved: Option<Secret>,
     /// Why the reference couldn't be read.
     pub ref_error: Option<String>,

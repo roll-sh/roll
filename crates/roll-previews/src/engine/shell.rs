@@ -274,7 +274,93 @@ impl Drop for HeldAwake {
     }
 }
 
+/// A service held for a laptop's process (`roll preview swap`): taken for it by
+/// [`Engine::swap`], its requests going there from [`Swap::attach`] until this drops.
+pub struct Swap {
+    engine: Arc<Engine>,
+    pub preview: String,
+    pub service: String,
+    who: String,
+    /// Turns true when the preview goes (its swaps end with it).
+    pub ended: tokio::sync::watch::Receiver<bool>,
+    attached: bool,
+}
+
+impl Swap {
+    /// The laptop's connection is up: the service's requests go to it from now on.
+    pub fn attach(&mut self, laptop: crate::ports::Laptop) {
+        self.engine.apps.swap(&self.preview, &self.service, Some(laptop));
+        self.attached = true;
+        let _ = self.engine.store.log(&self.preview, &format!("{} swapped {} for a process on their machine", self.who, self.service));
+    }
+}
+
+impl Drop for Swap {
+    fn drop(&mut self) {
+        if self.attached {
+            self.engine.apps.swap(&self.preview, &self.service, None);
+            let _ = self.engine.store.log(&self.preview, &format!("{} gave {} back to its container", self.who, self.service));
+        }
+        self.engine.swaps.lock().remove(&(self.preview.clone(), self.service.clone()));
+    }
+}
+
+/// A page of a preview's service as an agent reads it through roll (`GET …/fetch`; roll MCP's
+/// `previews_fetch`).
+#[derive(serde::Serialize)]
+pub struct FetchedPage {
+    pub service: String,
+    pub path: String,
+    /// The service's link, never with its token.
+    pub url: String,
+    pub status: u16,
+    pub headers: std::collections::BTreeMap<String, String>,
+    /// Its text, masked as its logs are; `None` when it isn't text.
+    pub body: Option<String>,
+    pub truncated: bool,
+}
+
 impl Engine {
+    /// `GET …/{id}/fetch?path=&service=&head=`: one page of the service read through roll's own
+    /// way in (no link token or share link made), its text masked as the preview's logs are.
+    pub async fn fetch(self: &Arc<Self>, id: &str, service: Option<&str>, path: &str, head: bool) -> Result<FetchedPage> {
+        if !crate::settings::page_path_ok(path) {
+            return Err(Error::BadRequest("path: a path of the service's own, starting with / (up to 200 characters, no #, quotes or spaces)".into()));
+        }
+        let svc = self.files_service(id, service)?;
+        let f = match self.apps.fetch(id, &svc, path, head).await {
+            Ok(Some(f)) => f,
+            Ok(None) => return Err(Error::Conflict(format!("{svc} runs on roll apps, which serves it at its own URL"))),
+            Err(e) => return Err(Error::Conflict(self.mask_text(id, &format!("{e:#}")).await?)),
+        };
+        let url = self.store.services(id)?.into_iter().find(|s| s.name == svc).map(|s| s.url).unwrap_or_default();
+        let headers: std::collections::BTreeMap<String, String> = f.headers.into_iter().collect();
+        let text = headers.get("content-type").is_none_or(|t| ["text/", "json", "xml", "javascript"].iter().any(|k| t.contains(k)));
+        let body = match String::from_utf8(f.body) {
+            Ok(s) if text && !head => Some(self.mask_text(id, &s).await?),
+            _ => None,
+        };
+        Ok(FetchedPage { service: svc, path: path.to_string(), url, status: f.status, headers, body, truncated: f.truncated })
+    }
+
+    /// `GET …/{id}/swap?service=` (`roll preview swap`): `service` held for `who`'s laptop, one
+    /// laptop at a time; roll apps' services are roll apps' to serve.
+    pub async fn swap(self: &Arc<Self>, id: &str, service: Option<&str>, who: &str) -> Result<Swap> {
+        let svc = self.files_service(id, service)?;
+        if !self.apps.can_swap(id, &svc).await.map_err(|e| Error::Conflict(format!("{e:#}")))? {
+            return Err(Error::Conflict(format!("{svc} runs on roll apps, which serves its requests itself: swap a roll.toml service")));
+        }
+        {
+            let mut swaps = self.swaps.lock();
+            if let Some(by) = swaps.get(&(id.to_string(), svc.clone())) {
+                return Err(Error::Conflict(format!("{svc} is swapped for {by}'s machine already")));
+            }
+            swaps.insert((id.to_string(), svc.clone()), who.to_string());
+        }
+        let ended = self.forwards_end.lock().entry(id.to_string()).or_insert_with(|| tokio::sync::watch::channel(false).0).subscribe();
+        Ok(Swap { engine: self.clone(), preview: id.to_string(), service: svc, who: who.to_string(), ended, attached: false })
+    }
+
     /// `GET …/{id}/forward?service=&port=` (`roll preview forward`): one TCP connection to `port`
     /// in the service, from inside it, by `who` (said once an hour per person, service and port).
     pub async fn forward(self: &Arc<Self>, id: &str, service: Option<&str>, port: u16, who: &str) -> Result<Forward> {

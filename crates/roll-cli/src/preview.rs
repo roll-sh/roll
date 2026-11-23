@@ -298,6 +298,26 @@ pub enum Preview {
         #[arg(long)]
         local_port: Option<u16>,
     },
+    /// Read a page of a service through roll (no link or share needed): its status, a few
+    /// headers and its text, masked: `roll preview fetch pv_… /checkout`.
+    Fetch {
+        preview: String,
+        path: String,
+        #[arg(long, short)]
+        service: Option<String>,
+        /// Only its status and headers.
+        #[arg(long)]
+        head: bool,
+    },
+    /// Swap a service for a process on this machine (Signadot's local sandboxes, Telepresence):
+    /// the preview's requests for it, its visitors' and its other services', come here to
+    /// 127.0.0.1:<port> until Ctrl-C: `roll preview swap pv_… 3000 --service web`.
+    Swap {
+        preview: String,
+        port: u16,
+        #[arg(long, short)]
+        service: Option<String>,
+    },
     /// Print a service's link (with its access token when the preview is private); `--browser`
     /// opens it.
     Open {
@@ -698,6 +718,16 @@ fn print_preview(p: &Value) {
     if let Some(t) = timeline_line(p) {
         println!("{t}");
     }
+    for x in p["served_secrets"].as_array().into_iter().flatten() {
+        println!("serves a secret value  {} at {}", s(&x["key"]), s(&x["path"]));
+    }
+    for c in p["browser_checks"].as_array().into_iter().flatten() {
+        let state = match s(&c["state"]).as_str() {
+            "pending" => "running".to_string(),
+            other => other.to_string(),
+        };
+        println!("browser check  {}/{}  {state}{}", s(&c["service"]), s(&c["name"]), c["error"].as_str().map(|e| format!(": {}", e.lines().next().unwrap_or(""))).unwrap_or_default());
+    }
     for x in p["earlier"].as_array().into_iter().flatten() {
         let rev = s(&x["revision"]);
         let own: Vec<&str> = x["own_data"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
@@ -711,6 +741,9 @@ fn print_preview(p: &Value) {
     }
     for r in p["resources"].as_array().into_iter().flatten() {
         println!("  {:<8} {} → {} ({}, {})", s(&r["kind"]), s(&r["parent"]), r["ref"].as_str().unwrap_or("…"), s(&r["state"]), bytes(r["bytes"].as_f64().unwrap_or(0.0)));
+    }
+    if let Some(n) = p["copies"]["count"].as_u64().filter(|n| *n > 0) {
+        println!("  earlier pushes' copies: {n}, {}, {}/month", bytes(p["copies"]["bytes"].as_f64().unwrap_or(0.0)), usd(&p["copies"]["usd_month"]));
     }
     let c = &p["cost"];
     println!("cost: {}/month asleep, {}/hour in use, {} this month", usd(&c["sleeping_usd_month"]), usd(&c["active_usd_hour"]), usd(&c["month_to_date_usd"]));
@@ -1367,6 +1400,39 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
             }
             return Ok(());
         }
+        Preview::Fetch { preview, path, service, head } => {
+            let svc = service.as_deref().map(|s| format!("&service={}", crate::apps::enc(s))).unwrap_or_default();
+            let v = api.get(&format!("/v1/previews/{preview}/fetch?path={}{svc}{}", crate::apps::enc(&path), if head { "&head=true" } else { "" })).await?;
+            if !as_json {
+                eprintln!("{} {}{}", v["status"], s(&v["url"]).trim_end_matches('/'), s(&v["path"]));
+                for (k, h) in v["headers"].as_object().into_iter().flatten() {
+                    eprintln!("{k}: {}", h.as_str().unwrap_or(""));
+                }
+                if let Some(b) = v["body"].as_str() {
+                    println!("{b}");
+                }
+                if v["truncated"].as_bool() == Some(true) {
+                    eprintln!("(cut at 256 KiB)");
+                }
+                return Ok(());
+            }
+            v
+        }
+        Preview::Swap { preview, port, service } => {
+            let base = api.base.strip_prefix("http").map(|rest| format!("ws{rest}")).unwrap_or_else(|| api.base.clone());
+            let svc = service.as_deref().map(|s| format!("?service={}", crate::apps::enc(s))).unwrap_or_default();
+            let url = format!("{base}/v1/previews/{preview}/swap{svc}");
+            let mut headers: Vec<(String, String)> = api.headers.clone();
+            if let Some(k) = api.bearer().await? {
+                headers.push(("authorization".into(), format!("Bearer {k}")));
+            }
+            eprintln!("{preview}'s {} → 127.0.0.1:{port} (Ctrl-C gives it back)", service.as_deref().unwrap_or("first service"));
+            tokio::select! {
+                r = swap_to(url, headers, port) => r?,
+                _ = tokio::signal::ctrl_c() => {}
+            }
+            return Ok(());
+        }
         Preview::Cp { preview, src, dst, service } => {
             let svc = service.map(|s| format!("&service={}", crate::apps::enc(&s))).unwrap_or_default();
             let url = |path: &str| format!("/v1/previews/{preview}/files?path={}{svc}", crate::apps::enc(path));
@@ -1464,6 +1530,53 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
         return Ok(());
     }
     println!("{}", serde_json::to_string_pretty(&out)?);
+    Ok(())
+}
+
+/// `roll preview swap`: the tunnel carries one HTTP/2 connection the preview opens toward this
+/// side, and each request on it is sent to 127.0.0.1:<port> (as that host, so a dev server's host
+/// check passes; `x-forwarded-host` keeps the preview's), each said on stderr.
+async fn swap_to(url: String, headers: Vec<(String, String)>, port: u16) -> anyhow::Result<()> {
+    use http_body_util::{BodyExt, Full};
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut req = url.as_str().into_client_request()?;
+    for (k, v) in &headers {
+        req.headers_mut().insert(reqwest::header::HeaderName::from_bytes(k.as_bytes())?, v.parse()?);
+    }
+    let (ours, theirs) = tokio::io::duplex(256 << 10);
+    let tunnel = crate::apps::carry(req, theirs);
+    let client = hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).build_http::<hyper::body::Incoming>();
+    let here: hyper::http::uri::Authority = format!("127.0.0.1:{port}").parse()?;
+    let svc = hyper::service::service_fn(move |mut r: hyper::Request<hyper::body::Incoming>| {
+        let (client, here) = (client.clone(), here.clone());
+        async move {
+            let (method, path) = (r.method().clone(), r.uri().path().to_string());
+            let pq = r.uri().path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| "/".into());
+            let resp = match format!("http://{here}{pq}").parse::<hyper::Uri>() {
+                Ok(uri) => {
+                    *r.uri_mut() = uri;
+                    *r.version_mut() = hyper::Version::HTTP_11;
+                    if let Ok(h) = here.as_str().parse() {
+                        r.headers_mut().insert(hyper::header::HOST, h);
+                    }
+                    client.request(r).await.map(|x| x.map(|b| b.map_err(|e| anyhow::anyhow!(e)).boxed_unsync())).map_err(|e| e.to_string())
+                }
+                Err(e) => Err(e.to_string()),
+            };
+            let resp = resp.unwrap_or_else(|e| {
+                let mut x = hyper::Response::new(Full::new(bytes::Bytes::from(format!("127.0.0.1:{} didn't answer: {e}", here.port_u16().unwrap_or(0)))).map_err(|e| anyhow::anyhow!(e)).boxed_unsync());
+                *x.status_mut() = hyper::StatusCode::BAD_GATEWAY;
+                x
+            });
+            eprintln!("{method} {path} {}", resp.status().as_u16());
+            Ok::<_, std::convert::Infallible>(resp)
+        }
+    });
+    let serve = hyper::server::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new()).serve_connection(hyper_util::rt::TokioIo::new(ours), svc);
+    tokio::select! {
+        r = serve => r.map_err(|e| anyhow::anyhow!("the preview's connection ended: {e}"))?,
+        r = tunnel => r?,
+    }
     Ok(())
 }
 

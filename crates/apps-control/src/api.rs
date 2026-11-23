@@ -84,6 +84,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route("/v1/apps/services/{id}/git-login", put(put_git_login).delete(delete_git_login))
         .route("/v1/apps/services/{id}/github", put(put_github).delete(delete_github))
         .route("/v1/apps/services/{id}/environments", get(environments))
+        .route("/v1/apps/services/{id}/move", post(move_service))
         .route(env, get(get_env).put(put_env).delete(delete_env))
         .route(&format!("{env}/deploys"), get(deploys).post(create_deploy).layer(DefaultBodyLimit::max(apps.cfg.upload_max)))
         .route(&format!("{env}/deploys/{{dep}}"), get(get_deploy))
@@ -91,6 +92,9 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/deploys/{{dep}}/commits"), get(deploy_commits))
         .route(&format!("{env}/deploys/{{dep}}/vulnerabilities"), get(deploy_vulnerabilities))
         .route(&format!("{env}/deploys/{{dep}}/sbom"), get(deploy_sbom))
+        .route(&format!("{env}/deploys/{{dep}}/provenance"), get(deploy_provenance))
+        .route(&format!("{env}/checks/{{check}}/screenshot"), get(check_screenshot))
+        .route(&format!("{env}/checks/{{check}}/trace"), get(check_trace))
         .route(&format!("{env}/deploys/{{dep}}/explain"), post(explain_deploy))
         .route(&format!("{env}/deploys/{{dep}}/approve"), post(approve_deploy))
         .route(&format!("{env}/deploys/{{dep}}/rollback"), post(rollback))
@@ -157,6 +161,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
     Router::new()
         .route("/v1/apps", get(overview))
         .route("/v1/apps/plan", post(plan))
+        .route("/v1/apps/quote", post(quote))
         .route("/v1/apps/import", post(import))
         .route("/v1/apps/services", get(list_services).post(create_service))
         .route("/v1/apps/projects/{project}/services", get(project_services).post(create_project_service))
@@ -234,6 +239,14 @@ async fn overview(State(apps): S) -> R {
     let mut o = apps.overview();
     o["services"] = serde_json::to_value(services).expect("JSON");
     ok(o)
+}
+
+/// What a service would cost at most, before it's made: `{ run }` as `NewService`'s (checked as
+/// it is), answered at this node's prices.
+async fn quote(State(apps): S, b: Bytes) -> R {
+    let v = body(&b)?;
+    let run: crate::model::Run = serde_json::from_value(v.get("run").cloned().unwrap_or_else(|| json!({}))).map_err(|e| Error::BadRequest(format!("run: {e}")))?;
+    ok(apps.cfg.prices.quote(&run.normalized()?))
 }
 
 /// A project in one file, read (no service made): a roll.toml's `[apps]` and `[databases]`, or
@@ -883,6 +896,30 @@ async fn deploy_sbom(State(apps): S, Path((id, env, dep)): Path<(String, String,
     Ok(([(axum::http::header::CONTENT_TYPE, "application/vnd.cyclonedx+json".to_string()), (axum::http::header::CONTENT_DISPOSITION, file)], body).into_response())
 }
 
+/// `POST /v1/apps/services/{id}/move {project}`: to another project of the same owner.
+async fn move_service(State(apps): S, Path(id): Path<String>, ext: Extensions, Json(body): Json<Value>) -> R {
+    Ok(Json(apps.move_service(&id, body, [roll_auth::Grant::on(&ext), roll_auth::SessionGrant::on(&ext)], actor(&ext)).await?).into_response())
+}
+
+/// `GET …/deploys/{dep}/provenance`: its image's signed SLSA provenance (a DSSE envelope).
+async fn deploy_provenance(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>) -> R {
+    Ok(Json(apps.deploy_provenance(&id, &env, &dep).await?).into_response())
+}
+
+/// `GET …/checks/{check}/screenshot`: a browser check's last failure, as the page looked.
+async fn check_screenshot(State(apps): S, Path((id, env, check)): Path<(String, String, String)>) -> R {
+    let body = apps.check_failure_file(&id, &env, &check, crate::browser::SCREENSHOT).await?;
+    Ok(([(axum::http::header::CONTENT_TYPE, "image/png".to_string()), (axum::http::header::CACHE_CONTROL, "no-store".to_string())], body).into_response())
+}
+
+/// `GET …/checks/{check}/trace`: a browser check's last failure's Playwright trace (open it in
+/// `npx playwright show-trace` or trace.playwright.dev).
+async fn check_trace(State(apps): S, Path((id, env, check)): Path<(String, String, String)>) -> R {
+    let body = apps.check_failure_file(&id, &env, &check, crate::browser::TRACE).await?;
+    let file = format!("attachment; filename=\"{check}-trace.zip\"");
+    Ok(([(axum::http::header::CONTENT_TYPE, "application/zip".to_string()), (axum::http::header::CONTENT_DISPOSITION, file)], body).into_response())
+}
+
 async fn deploy_vulnerabilities(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>, Query(q): Query<VulnQuery>) -> R {
     ok(apps.vulnerabilities(&id, &env, &dep, q.severity.as_deref()).await?)
 }
@@ -1520,6 +1557,8 @@ struct ShellQuery {
     command: Option<String>,
     cpu: Option<f64>,
     memory_mb: Option<u32>,
+    /// With `console`: another kept deployment's image (one that won't come up).
+    deployment: Option<String>,
 }
 
 /// `GET …/shell` (a WebSocket): a shell in a running instance; see `crate::shell`.
@@ -1528,9 +1567,9 @@ async fn shell(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q)
     apps.check_secret_reveal(&id, &env, asker(&ext)).await?;
     let slot = apps.shell_slot(&id, &env)?;
     let target = if q.console == Some(true) {
-        let t = apps.console_target(&id, &env, crate::shell::ConsoleAsk { command: q.command.clone(), cpu: q.cpu, memory_mb: q.memory_mb }).await?;
+        let t = apps.console_target(&id, &env, crate::shell::ConsoleAsk { command: q.command.clone(), cpu: q.cpu, memory_mb: q.memory_mb, deployment: q.deployment.clone() }).await?;
         // What it runs stays out of the trail (a command line can hold a credential).
-        apps.audit("console.opened", &id, &env, actor(&ext), json!({ "command": q.command.is_some(), "cpu": q.cpu, "memory_mb": q.memory_mb })).await;
+        apps.audit("console.opened", &id, &env, actor(&ext), json!({ "command": q.command.is_some(), "cpu": q.cpu, "memory_mb": q.memory_mb, "deployment": q.deployment })).await;
         t
     } else {
         if q.command.is_some() || q.cpu.is_some() || q.memory_mb.is_some() {
@@ -1569,12 +1608,21 @@ async fn write_files(State(apps): S, Path((id, env)): Path<(String, String)>, Qu
 }
 
 /// `GET …/tunnel` (a WebSocket): one TCP connection to the service's port; see `crate::tunnel`.
-async fn tunnel(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, ws: axum::extract::ws::WebSocketUpgrade) -> R {
+#[derive(Deserialize)]
+struct TunnelQuery {
+    /// Another port of the app than its own (a debugger's 9229, JMX, pprof).
+    port: Option<u16>,
+}
+
+async fn tunnel(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<TunnelQuery>, ext: Extensions, ws: axum::extract::ws::WebSocketUpgrade) -> R {
+    if q.port == Some(0) {
+        return Err(Error::BadRequest("port is 1–65535".into()));
+    }
     let slot = apps.tunnel_slot(&id, &env)?;
     let lease = apps.tunnel_target(&id, &env).await?;
-    apps.audit("tunnel.opened", &id, &env, actor(&ext), json!({})).await;
+    apps.audit("tunnel.opened", &id, &env, actor(&ext), json!({ "port": q.port })).await;
     let ws = ws.max_message_size(1 << 20).max_frame_size(1 << 20);
-    Ok(ws.on_upgrade(move |socket| apps.bridge_tunnel(socket, lease, slot)).into_response())
+    Ok(ws.on_upgrade(move |socket| apps.bridge_tunnel(socket, lease, slot, q.port)).into_response())
 }
 
 #[derive(Deserialize)]
@@ -1588,13 +1636,14 @@ struct OpenSession {
     command: Option<String>,
     cpu: Option<f64>,
     memory_mb: Option<u32>,
+    deployment: Option<String>,
 }
 
 /// `POST …/shell/sessions`: a shell over HTTP (the dashboard's terminal); see `crate::shell`.
 async fn open_session(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
     apps.check_secret_reveal(&id, &env, asker(&ext)).await?;
-    let o: OpenSession = if b.is_empty() { OpenSession { instance: None, cols: None, rows: None, console: false, command: None, cpu: None, memory_mb: None } } else { serde_json::from_slice(&b).map_err(|e| Error::BadRequest(e.to_string()))? };
-    let console = o.console.then(|| crate::shell::ConsoleAsk { command: o.command.clone(), cpu: o.cpu, memory_mb: o.memory_mb });
+    let o: OpenSession = if b.is_empty() { OpenSession { instance: None, cols: None, rows: None, console: false, command: None, cpu: None, memory_mb: None, deployment: None } } else { serde_json::from_slice(&b).map_err(|e| Error::BadRequest(e.to_string()))? };
+    let console = o.console.then(|| crate::shell::ConsoleAsk { command: o.command.clone(), cpu: o.cpu, memory_mb: o.memory_mb, deployment: o.deployment.clone() });
     if console.is_none() && (o.command.is_some() || o.cpu.is_some() || o.memory_mb.is_some()) {
         return Err(Error::BadRequest("command, cpu and memory_mb are a console's (console: true)".into()));
     }
