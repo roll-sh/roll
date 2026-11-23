@@ -543,6 +543,20 @@ impl StoredCmps {
         Some((StoredCmps { cmps, upto, pairs, exact }, used))
     }
 
+    /// The stored row's columns it reads, marked in `cols` (false: one past its end).
+    pub fn mark_cols(&self, cols: &mut [bool]) -> bool {
+        let mut ok = true;
+        for c in &self.cmps {
+            for x in [Some(c.col), if let Other::Col(x) = c.other { Some(x) } else { None }].into_iter().flatten() {
+                match cols.get_mut(x) {
+                    Some(b) => *b = true,
+                    None => ok = false,
+                }
+            }
+        }
+        ok
+    }
+
     /// Whether the stored row's values `data` (after its header) pass (None: leave it to
     /// the kernel).
     pub fn passes(&self, data: &[u8]) -> Option<bool> {

@@ -185,6 +185,10 @@ pub struct Lookup {
     /// A unique index's every key column equated: its one visible entry read without a
     /// merging scan (`Store::first_with`), as the serial point path reads it.
     unique: bool,
+    /// The stored columns it reads: those decoded and those `stored` compares (None: all). A
+    /// row of a column block (format 5) is made of these alone, the others NULL
+    /// (`PointReader::get_sorted_cols`).
+    reads: Option<Arc<[bool]>>,
 }
 
 /// `e` with the nested loop's parameters (`Outer(1, k)`: `params[k]`, over the outer
@@ -315,7 +319,15 @@ impl Lookup {
             Some(Arc::from(n))
         })();
         let last = need.as_deref().map_or(width, |n: &[bool]| n.iter().rposition(|&x| x).map_or(0, |i| i + 1));
+        let reads = need.as_deref().and_then(|n| {
+            let mut r = n.to_vec();
+            match &stored {
+                Some((c, _)) => c.mark_cols(&mut r).then(|| Arc::from(r)),
+                None => Some(Arc::from(r)),
+            }
+        });
         Ok(Some(Lookup {
+            reads,
             store,
             ts,
             prefix: index_prefix(s.table.oid, ix.id),
@@ -812,7 +824,7 @@ impl Lookup {
         }
         let keys: Vec<&[u8]> = sorted.iter().map(span).collect();
         let r = sc.reader.get_or_insert_with(|| self.store.point_reader(self.ts, false));
-        match r.get_sorted(&keys, true) {
+        match r.get_sorted_cols(&keys, true, self.reads.as_deref()) {
             Ok(r) => {
                 *rows = r;
                 true

@@ -261,6 +261,13 @@ impl PointReader {
     /// block the key before it went to, or in the block the reader holds from its last read,
     /// is sought on from there, without a search.
     pub fn get_sorted<K: AsRef<[u8]>>(&mut self, keys: &[K], resolve: bool) -> Result<Vec<Option<Bytes>>> {
+        self.get_sorted_cols(keys, resolve, None)
+    }
+
+    /// `get_sorted` for a reader of the columns `cols` marks alone (None: all): a row of a
+    /// column block (format 5) is made of those, the others NULL (`ColDir::row_cols`), the
+    /// rows made after every seek into one buffer, each a slice of it.
+    pub fn get_sorted_cols<K: AsRef<[u8]>>(&mut self, keys: &[K], resolve: bool, cols: Option<&[bool]>) -> Result<Vec<Option<Bytes>>> {
         debug_assert!(keys.windows(2).all(|w| w[0].as_ref() < w[1].as_ref()), "keys strictly ascending");
         self.room();
         let ts = self.ts;
@@ -348,6 +355,8 @@ impl PointReader {
         // (Rows found in the batch's blocks, their values asked for and read after every seek:
         // a row's first byte was a miss of its own, one row after another.)
         let mut found: Vec<(usize, usize, (u32, u32))> = Vec::with_capacity(sorted.len());
+        // (Rows of column blocks: key, block, row.)
+        let mut colrows: Vec<(usize, usize, usize)> = Vec::new();
         for st in sorted.iter() {
             let key = keys[st.i].as_ref();
             let sk = &seek[st.seek.clone()];
@@ -403,8 +412,16 @@ impl PointReader {
                 continue;
             }
             if block.is_cols() {
-                // (A column block's row (never stored out of line), made alone.)
-                out[st.i] = block.value(bpos);
+                // (A column block's row (never stored out of line), made with the others
+                // after the seeks; the held block's alone.)
+                match st.l1 {
+                    L1::Block(..) => colrows.push((st.i, plan[pi - 1].0, bpos.index())),
+                    _ => {
+                        let mut v = Vec::new();
+                        block.row_into(bpos.index(), cols, &mut v);
+                        out[st.i] = Some(Bytes::from(v));
+                    }
+                }
                 continue;
             }
             match block.value_ref(bpos) {
@@ -422,6 +439,20 @@ impl PointReader {
                 true => super::toast::resolve(view, keys[i].as_ref(), block.span(span), ts)?,
                 false => block.span(span),
             });
+        }
+        if !colrows.is_empty() {
+            let mut buf = Vec::new();
+            let mut ends = Vec::with_capacity(colrows.len());
+            for &(_, b, r) in &colrows {
+                blocks[b].2.row_into(r, cols, &mut buf);
+                ends.push(buf.len());
+            }
+            let all = Bytes::from(buf);
+            let mut s = 0;
+            for (&(i, _, _), e) in colrows.iter().zip(ends) {
+                out[i] = Some(all.slice(s..e));
+                s = e;
+            }
         }
         // (Held for the reader's next reads: a nested loop's next outer row's keys are often
         // in it.)

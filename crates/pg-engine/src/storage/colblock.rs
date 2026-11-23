@@ -635,6 +635,25 @@ impl ColDir {
         }
     }
 
+    /// Row `r` as `row` makes it, but a column `cols` doesn't mark (or past its end) NULL: a
+    /// row for a reader of those columns alone.
+    pub fn row_cols(&self, d: &[u8], r: usize, cols: &[bool], out: &mut Vec<u8>) {
+        out.reserve(24 + self.cols.len());
+        out.push(if self.tid { ROW_HEADER_TID } else { ROW_HEADER });
+        put_varint(out, self.xmin.get(d, r));
+        if self.tid {
+            put_varint(out, self.tb.get(d, r));
+            put_varint(out, self.to.get(d, r));
+        }
+        put_varint(out, self.ncols as u64);
+        for c in 0..self.ncols as usize {
+            match cols.get(c) {
+                Some(true) => self.value(d, c, r, out),
+                _ => out.push(tag::NULL),
+            }
+        }
+    }
+
     /// Every row's bytes, in order (`vlen` of them).
     pub fn rows(&self, d: &[u8]) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.vlen as usize);
