@@ -296,8 +296,11 @@ pub trait Host {
     /// its scripts hold across executions (values kept in `params` or a scripted metric's state)
     /// and at the peak of each one. Hosts that answer to a memory breaker (a search's `request`
     /// breaker) reserve it there and refuse past its limit; the script then fails with a
-    /// `circuit_breaking_exception`. It runs inside the execution's account (charged): what it
-    /// allocates, its refusal included, counts as the script's and is given back when freed.
+    /// `circuit_breaking_exception`. It's asked with the execution's account open for the reports
+    /// during it (what it allocates then, its refusal included, counts as the script's and is
+    /// given back when freed), and after the account closes for the one at its end. An execution
+    /// another's host call started (a runtime field's script read by a script) reports nothing:
+    /// the enclosing execution is charged what it keeps, and its host reports.
     fn script_memory(&mut self, delta: i64) -> Result<(), MemoryRefused> {
         let _ = delta;
         Ok(())

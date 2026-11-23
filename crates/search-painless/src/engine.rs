@@ -918,23 +918,34 @@ impl<'s> Instance<'s> {
             Err(panic) => {
                 self.stack.clear();
                 self.state.begin_document();
+                // a failure recorded before the panic must not fail the caller's next check
+                crate::guard::take_pending();
                 let e = crate::guard::outside(|| ScriptError::internal(&prog.source, &*panic));
                 // the payload may have been built by host code, outside the account
                 crate::guard::paused(|| drop(panic));
                 Err(e)
             }
         };
+        // what of this document's `_source` outlives it (a field of it a runtime field emitted)
+        let before = crate::guard::MemoryScope::held();
         self.state.source = None;
+        let freed = before.saturating_sub(crate::guard::MemoryScope::held()).max(0);
+        let kept_source = crate::guard::MemoryScope::exempt().saturating_sub(freed).max(0);
         // the host hears what the execution keeps (values stored in `params`, a scripted
-        // metric's state, caches), or gives back
+        // metric's state, caches), or gives back; an execution a host call of another started
+        // reports nothing (that one is charged it, below, and its host reports)
         let delta = crate::guard::MemoryScope::unreported();
-        // an enclosing execution is charged what this instance holds, less the `_source` this
-        // one was handed (outside the limit wherever it's kept: a runtime field emitting a field
-        // of it); never less than nothing, so a later free of such a part credits nothing
         self.held = self.held.saturating_add(crate::guard::MemoryScope::held());
-        let charged = self.held.saturating_sub(crate::guard::MemoryScope::exempt()).max(0);
-        memory.close(charged - self.passed_on);
-        self.passed_on = charged;
+        if crate::guard::MemoryScope::enclosed() {
+            // the enclosing execution is charged what this instance holds, less the part of
+            // this document's `_source` it keeps (outside the limit wherever it's kept); never
+            // less than nothing, so a later free of such a part credits nothing
+            let charged = self.held.saturating_sub(kept_source).max(0);
+            memory.close(charged - self.passed_on);
+            self.passed_on = charged;
+        } else {
+            memory.close(0);
+        }
         match delta {
             0 => r,
             _ => match host.script_memory(delta) {

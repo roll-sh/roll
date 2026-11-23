@@ -1842,8 +1842,8 @@ the rest are skipped by the tests' own prerequisites.
   once per document, as Elasticsearch's `SourceLookup` does, so changes persist across reads.
   It's charged, but left out of the limit. So a script can churn through temporaries far beyond
   the limit, as long as it doesn't keep them. Freeing data the execution didn't make never
-  lets it grow the thread by more than the limit. That covers `params`, an earlier document's
-  leftovers, and another nesting level's copy of `_source`. Such frees can offset what it
+  lets it grow the thread by more than the limit. That covers `params` and an earlier
+  document's leftovers. Such frees can offset what it
   allocates, but never take its balance below zero. A script run inside another one counts
   against the caller once it ends. That covers a runtime field another script reads, up to 5
   levels deep. While it runs, it also has an account of its own, and it reads its own copy of

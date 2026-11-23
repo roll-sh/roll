@@ -645,3 +645,43 @@ fn runtime_fields_leave_their_caller_nothing() {
         assert!(host.held < 1 << 20, "the breaker holds {}", host.held);
     }
 }
+
+/// A host whose `field()` reads a runtime field on one instance kept across documents, whose
+/// script returns a field of its document's 8 MiB `_source`, kept until the next document as
+/// an emitted value is; it charges what its scripts hold to a breaker like a search's.
+struct KeepsSource<'a> {
+    inner: search_painless::Instance<'a>,
+    held: i64,
+}
+
+impl Host for KeepsSource<'_> {
+    fn field_values(&mut self, _field: &str, out: &mut DocValues) -> Result<bool, HostError> {
+        let _ = self.inner.execute(&mut LargeSource);
+        out.clear(DocKind::Long);
+        out.longs.push(1);
+        Ok(true)
+    }
+    fn script_memory(&mut self, delta: i64) -> Result<(), MemoryRefused> {
+        self.held += delta;
+        Ok(())
+    }
+}
+
+/// What a runtime field keeps of the `_source` it was handed stays outside its caller's limit,
+/// document after document, and its caller's breaker hears nothing of it.
+#[test]
+fn a_runtime_field_keeping_its_source_charges_its_caller_nothing() {
+    let e = limited(4 << 20);
+    let inner = e.compile("return params['_source']['big']", Context::Field).unwrap();
+    let mut kept = inner.instance();
+    kept.set_params(&json!({}));
+    kept.set_result_accounting(true);
+    let outer = e.compile("for (int i = 0; i < 3; ++i) { field('rt'); } return 1", Context::Score).unwrap();
+    let mut inst = outer.instance();
+    inst.set_params(&json!({}));
+    let mut host = KeepsSource { inner: kept, held: 0 };
+    for _ in 0..2 {
+        assert_eq!(inst.execute_f64(&mut host).map_err(|e| e.to_response()).unwrap(), 1.0);
+    }
+    assert!(host.held < 1 << 20, "the breaker holds {}", host.held);
+}

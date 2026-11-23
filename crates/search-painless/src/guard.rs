@@ -32,11 +32,13 @@
 //!   script can't keep (doc-values buffers, caches) run outside the account ([`paused`]); a
 //!   document's `_source` is charged but left out of the limit ([`hosted`]); and those whose
 //!   results become the script's or whose errors it may hold (stored fields, term statistics,
-//!   the shard's name, the rank functions' cancellation poll, [`crate::Host::script_memory`])
-//!   simply run charged, so what they make and what is freed of it match. Frees of data the
-//!   execution didn't make can offset its own
-//!   allocations but never take its balance below zero, so they never let it grow the thread by
-//!   more than the limit. Past the limit the script fails like Elasticsearch 9.5's own
+//!   the shard's name, the rank functions' cancellation poll) simply run charged, so what they
+//!   make and what is freed of it match. [`crate::Host::script_memory`] is asked with the
+//!   account open during an execution and after it closes at its end, and never by an execution
+//!   another's host call started (that one is charged it and its host reports). Frees of data
+//!   the execution didn't make can offset its own allocations but never take its balance below
+//!   zero, so they never let it grow the thread by more than the limit. Past the limit the
+//!   script fails like Elasticsearch 9.5's own
 //!   per-execution guard (`script.painless.max_allocation_bytes`): an uncatchable
 //!   `painless_error`.
 
@@ -393,8 +395,9 @@ thread_local! {
     /// then too (one unsigned compare covers both, see [`memory_exhausted`]).
     static CAP: Cell<i64> = const { Cell::new(i64::MAX) };
     static ACCOUNT: Cell<Account> = const { Cell::new(Account::IDLE) };
-    /// What every closed scope on this thread held at its end, summed: a host call that ran a
-    /// script (a runtime field's) passes the script's memory on through [`paused`].
+    /// What closed scopes on this thread passed on to the execution enclosing them (what that
+    /// one is charged for them, see [`MemoryScope::close`]), summed: a host call that ran a
+    /// script (a runtime field's) passes it on through [`paused`].
     static NESTED: Cell<i64> = const { Cell::new(0) };
     /// Host calls running ([`paused`], [`hosted`]): the account isn't looked at inside them
     /// (an execution they start opens its own).
@@ -415,6 +418,10 @@ struct Account {
     forgiven: i64,
     /// Data the host handed the script that is charged but left out of the limit ([`hosted`]).
     exempt: i64,
+    /// Another execution's account was open when this one opened: this one runs inside a host
+    /// call of it (a runtime field's script read by a script), which is charged what this one
+    /// keeps and whose host reports it, so this one reports nothing to its own host.
+    enclosed: bool,
     /// What it held when the account was last looked at.
     checked: i64,
     /// What it held when it was last reported to the host.
@@ -422,7 +429,7 @@ struct Account {
 }
 
 impl Account {
-    const IDLE: Account = Account { active: false, limit: i64::MAX, granted: IDLE_ROOM, forgiven: 0, exempt: 0, checked: 0, reported: 0 };
+    const IDLE: Account = Account { active: false, limit: i64::MAX, granted: IDLE_ROOM, forgiven: 0, exempt: 0, enclosed: false, checked: 0, reported: 0 };
 
     /// What the execution really holds: its allocations minus all its frees.
     fn net(&self, room: i64) -> i64 {
@@ -502,13 +509,21 @@ impl MemoryScope {
         let prev_room = ROOM.replace(room);
         let prev_cap = CAP.replace(room);
         let prev_hosting = HOSTING.replace(0);
-        let prev = ACCOUNT.replace(Account { active: true, limit, granted: room, forgiven: 0, exempt: 0, checked: 0, reported: 0 });
+        let enclosed = ACCOUNT.get().active;
+        let prev = ACCOUNT.replace(Account { active: true, limit, granted: room, forgiven: 0, exempt: 0, enclosed, checked: 0, reported: 0 });
         MemoryScope { pass_on: None, prev_room, prev_cap, prev_hosting, prev, _thread: std::marker::PhantomData }
     }
 
     /// Bytes the execution really holds now (allocations minus frees since it began).
     pub fn held() -> i64 {
         ACCOUNT.get().net(ROOM.get())
+    }
+
+    /// Whether another execution's account was open when this one opened (see `Account::enclosed`).
+    /// An execution started without one (by the interpreter's fast path, a Lucene expression
+    /// or the host itself) reports to its own host.
+    pub fn enclosed() -> bool {
+        ACCOUNT.get().enclosed
     }
 
     /// What the execution was handed by its host and left out of its limit ([`hosted`]).
@@ -523,8 +538,13 @@ impl MemoryScope {
     }
 
     /// What the execution holds that the host has not been told about yet, marked as told.
+    /// Always nothing for an enclosed execution ([`MemoryScope::enclosed`]): its caller's host
+    /// reports it.
     pub fn unreported() -> i64 {
         let mut a = ACCOUNT.get();
+        if a.enclosed {
+            return 0;
+        }
         let held = a.net(ROOM.get());
         let delta = held.wrapping_sub(a.reported);
         a.reported = held;
@@ -548,8 +568,8 @@ impl Drop for MemoryScope {
 /// doc-values buffers and caches, a segment's fielddata) is not the script's. Nothing built
 /// inside may reach the script or be freed inside an execution, since it was never charged: the
 /// result is `Copy`, a host's error goes through [`crate::host::call`], anything else through
-/// [`crate::vm::recharged`]. What a script started inside (a runtime field's) holds at its end
-/// still counts.
+/// [`crate::vm::recharged`]. What a script started inside (a runtime field's) passes on when it
+/// ends still counts.
 #[inline(always)]
 pub fn paused<R: Copy>(f: impl FnOnce() -> R) -> R {
     outside(f)
