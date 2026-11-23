@@ -5,6 +5,23 @@
   if (window.__rollFeedback) return;
   window.__rollFeedback = true;
   const TARGET = __ROLL_TARGET__;
+  // What went wrong on the page, sent with a note (the person sees it in roll before posting it):
+  // uncaught errors since this script ran, and requests answered 400 or more, earlier ones too
+  // (the browser's own resource timings, buffered). Paths only, never a query, each cut short.
+  // Nothing of the page's is wrapped (console, fetch): its devtools stay its own.
+  const errors = [], failed = new Map();
+  const cut = (s, n) => String(s).replace(/\s+/g, " ").trim().slice(0, n);
+  const keep = (s) => { if (s && !errors.includes(s)) { errors.push(s); if (errors.length > 5) errors.shift(); } };
+  addEventListener("error", (e) => { if (e.message) keep(cut(e.message, 200)); });
+  addEventListener("unhandledrejection", (e) => keep(cut(`Unhandled rejection: ${e.reason instanceof Error ? e.reason.message : e.reason}`, 200)));
+  const pathOf = (u) => { try { const x = new URL(u, location.href); return x.origin === location.origin ? x.pathname : x.host + x.pathname; } catch { return ""; } };
+  try {
+    new PerformanceObserver((l) => {
+      for (const r of l.getEntries()) {
+        if (r.responseStatus >= 400) { const p = pathOf(r.name); failed.delete(p); failed.set(p, `${cut(p, 160)} ${r.responseStatus}`); }
+      }
+    }).observe({ type: "resource", buffered: true });
+  } catch {}
   const host = document.createElement("div");
   host.setAttribute("data-roll-feedback", "");
   host.style.cssText = "all:initial;position:fixed;right:16px;bottom:16px;z-index:2147483647";
@@ -121,6 +138,9 @@ textarea{width:100%;min-height:72px;resize:vertical;padding:8px;border-radius:8p
       fb_box: picked.box,
       fb_viewport: `${innerWidth}x${innerHeight}`,
       fb_note: note.value.trim(),
+      fb_errors: JSON.stringify(errors),
+      fb_requests: JSON.stringify([...failed.values()].slice(-5)),
+      fb_ua: navigator.userAgent.slice(0, 300),
     });
     window.open(`${TARGET}&${q}`, "_blank", "noopener");
     reset();
