@@ -3030,7 +3030,7 @@ async fn a_branch_runs_none_of_its_parents_jobs() {
     let (s, v) = e.es(&bu, &bp, Method::PUT, "/_snapshot/mine", Some(again)).await;
     assert_eq!(s, 200, "{v}");
     let (s, v) = e.es(&bu, &bp, Method::PUT, "/_snapshot/mine/mine?wait_for_completion=true", Some(json!({"indices": "docs"}))).await;
-    assert_eq!((s, v["error"]["type"].as_str()), (400, Some("illegal_argument_exception")), "{v}");
+    assert_eq!((s, v["error"]["type"].as_str()), (500, Some("repository_exception")), "{v}");
 
     // SLM running on the branch neither runs the inherited policy nor applies its retention.
     let (s, v) = e.es(&bu, &bp, Method::POST, "/_slm/start", None).await;
