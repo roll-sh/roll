@@ -2613,11 +2613,16 @@ impl Block {
         }
     }
 
-    /// `expand` of a column block: its rows made (`col_rows`), the offsets into them.
+    /// `expand` of a column block: its rows made into the `Expanded` (not kept with the block,
+    /// which the cache may hold: a reverse scan's), the offsets into them.
     #[cold]
     #[inline(never)]
     fn expand_cols(&self) -> Expanded {
-        let (rows, base) = self.col_rows();
+        let c = self.cols.as_ref().expect("a column block");
+        let (rows, base) = match c.rows.get() {
+            Some(r) => (r.clone(), c.base as usize),
+            None => (Bytes::from(c.dir.rows(&self.data)), c.base as usize),
+        };
         let mut keys = Vec::with_capacity(self.data.len());
         let mut ents = Vec::with_capacity(self.len);
         let mut pos = BlockPos::default();
@@ -2627,7 +2632,7 @@ impl Block {
             ents.push(ExpandedEnt { key_end: keys.len() as u32, val_off: pos.val_off - base as u32, val_len: pos.val_len });
             self.step(&mut pos);
         }
-        Expanded { data: rows.clone(), keys, ents }
+        Expanded { data: rows, keys, ents }
     }
 
     /// A format 2 block as it was decompressed (`SstWriter::body2`): its entries and values
