@@ -1874,6 +1874,9 @@ pub struct Environment {
     /// Paths another service of the project answers ([]: none).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub routes: Vec<Route>,
+    /// Its own redirects, `_redirects` lines (`crate::site_rules::EnvRedirects`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redirects: Option<String>,
     /// Its uptime checks ([]: none), and how each stands on its owner.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub checks: Vec<Check>,
@@ -2492,6 +2495,10 @@ pub struct CheckState {
     /// (`…/checks/{name}/screenshot`, `…/trace`), as this node knows.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_at: Option<i64>,
+    /// A preview's: the deployment this result is of (production's browser checks run once on
+    /// each deployment going live there); none yet for it while it's another's or absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deployment: Option<String>,
 }
 
 impl Route {
