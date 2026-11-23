@@ -7305,6 +7305,7 @@ dependencies = [
  "roll-auth",
  "roll-net",
  "roll-oidc",
+ "roll-workspace",
  "rustls-pki-types",
  "rustls-webpki 0.103.15",
  "serde",

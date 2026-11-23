@@ -72,6 +72,40 @@ export interface Invite {
   expires_at: number;
 }
 
+/** A set of people that holds roles on projects (docs/members-v1-1.md). */
+export interface Group {
+  id: string;
+  name: string;
+  description: string;
+  /** `roll`, or `scim:<SSO connection>`: only its identity provider changes its name and members. */
+  source: string;
+  external_id?: string;
+  /** How many people are in it. */
+  members: number;
+  created_by: string;
+  created_at: number;
+  /** The signed-in person is in it (only in a person's list): only then may they give it a role. */
+  yours?: boolean;
+}
+
+/** The roles a group can hold: never owner (owners are people). */
+export const GROUP_ROLES = ["viewer", "developer", "admin"] as const;
+export type GroupRoleName = (typeof GROUP_ROLES)[number];
+
+/** A group's role on one project. */
+export interface GroupRole {
+  project: string;
+  group: string;
+  name: string;
+  source: string;
+  role: GroupRoleName;
+  environments: string[] | null;
+  /** How many people it reaches. */
+  members: number;
+  added_by: string;
+  added_at: number;
+}
+
 export interface RoleRules {
   roles: { role: Role; rules: unknown[] }[];
   products: string[];
@@ -107,6 +141,14 @@ export const workspaceApi = {
   removeMember: (id: string, user: string) => call<null>("DELETE", `${project(id)}/members/${encodeURIComponent(user)}`),
   leave: (id: string) => call<null>("DELETE", `${project(id)}/members/me`),
   roles: () => call<RoleRules>("GET", "/v1/workspace/roles"),
+  /** The groups with a role on the project. */
+  projectGroups: (id: string) => call<GroupRole[]>("GET", `${project(id)}/groups`),
+  /** Gives the group a role here, or changes the one it has. */
+  setGroupRole: (id: string, group: string, role: GroupRoleName, environments: string[] | null) =>
+    call<GroupRole>("PUT", `${project(id)}/groups/${encodeURIComponent(group)}`, { role, environments }),
+  removeGroupRole: (id: string, group: string) => call<null>("DELETE", `${project(id)}/groups/${encodeURIComponent(group)}`),
+  /** Every group for the operator; a person's own, and those with a role on a project they manage. */
+  groups: () => call<Group[]>("GET", "/v1/workspace/groups"),
   /** The signed-in person's own pending invites. */
   myInvites: () => call<Invite[]>("GET", "/v1/workspace/invites"),
   accept: (token: string) => call<Member>("POST", `/v1/workspace/invites/${encodeURIComponent(token)}/accept`),
