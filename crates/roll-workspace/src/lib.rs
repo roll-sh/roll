@@ -251,6 +251,7 @@ pub struct Workspace {
     grants: std::sync::OnceLock<std::sync::Arc<dyn roll_auth::Grants>>,
     web_url: std::sync::OnceLock<String>,
     on_event: std::sync::RwLock<Vec<members::OnEvent>>,
+    on_homed: std::sync::RwLock<Vec<members::OnHomed>>,
 }
 
 impl Workspace {
@@ -289,7 +290,7 @@ impl Workspace {
         })?;
         // Members came after owners: every project's maker is its owner.
         db.migrate("workspace-members", members::migrate)?;
-        Ok(Workspace { db, before_delete: Default::default(), on_delete: Default::default(), owners: Default::default(), people: Default::default(), grants: Default::default(), web_url: Default::default(), on_event: Default::default() })
+        Ok(Workspace { db, before_delete: Default::default(), on_delete: Default::default(), owners: Default::default(), people: Default::default(), grants: Default::default(), web_url: Default::default(), on_event: Default::default(), on_homed: Default::default() })
     }
 
     /// Every project `scope` sees, with its resources, oldest first.

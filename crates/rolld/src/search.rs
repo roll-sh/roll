@@ -465,3 +465,64 @@ pub fn home_branches(workspace: std::sync::Arc<roll_workspace::Workspace>) -> se
         }
     })
 }
+
+/// Search clusters and workspace projects (docs/members.md): a cluster at home in a project is the
+/// project's, never a person's, and a project still home to clusters isn't deleted from under them.
+/// - A cluster that gets a home loses its owner (`Store::disown`: who owned it becomes `made_by`,
+///   for their caps), so leaving the project ends their access and a home never stands for a
+///   stranger's cluster.
+/// - Homes made before that are put right at start (also after a crash between a home and its
+///   hand-over): a cluster whose owner reaches its home project is handed over; one whose owner
+///   doesn't loses that home (a stranger homed it there) and is reported.
+/// - Deleting a project at home to live clusters is refused (409): they'd be no one's.
+pub fn members(control: &std::sync::Arc<search_control::Control>, workspace: &std::sync::Arc<roll_workspace::Workspace>) {
+    let kind = roll_workspace::Kind::Search;
+    let c = control.clone();
+    workspace.on_homed(Box::new(move |k, r#ref, project| {
+        if k != kind {
+            return;
+        }
+        if let Err(e) = c.store.disown(r#ref) {
+            tracing::warn!(cluster = r#ref, project, error = %e, "handing a search cluster to its project failed; done again at the next start");
+        }
+    }));
+    // The workspace holds its hooks: they hold it weakly.
+    let (c, weak) = (control.clone(), std::sync::Arc::downgrade(workspace));
+    workspace.before_delete(Box::new(move |d| {
+        let Some(ws) = weak.upgrade() else { return Ok(()) };
+        let homed = ws.homes_in(&d.project.id, kind).unwrap_or_default();
+        let live: Vec<String> = homed.into_iter().filter(|r| matches!(c.store.id_of(r), Ok(Some(_)))).collect();
+        if live.is_empty() {
+            return Ok(());
+        }
+        Err(roll_workspace::Refusal {
+            status: 409,
+            code: "search_clusters".into(),
+            message: format!("project {} is home to {} search cluster(s) ({}): delete them first", d.project.name, live.len(), live.join(", ")),
+        })
+    }));
+    let (c, ws) = (control.clone(), workspace.clone());
+    tokio::task::spawn_blocking(move || {
+        let homes = match ws.homes(kind) {
+            Ok(h) => h,
+            Err(e) => return tracing::warn!(error = %e, "reading search clusters' homes failed"),
+        };
+        for (r#ref, project) in homes {
+            let Ok(Some(Some(owner))) = c.store.owner_of(&r#ref) else { continue };
+            match ws.reaches(&project, &owner) {
+                Ok(true) => {
+                    if let Err(e) = c.store.disown(&r#ref) {
+                        tracing::warn!(cluster = r#ref, error = %e, "handing a search cluster to its project failed");
+                    }
+                }
+                Ok(false) => {
+                    tracing::warn!(cluster = r#ref, project, owner, "a search cluster at home in a project its owner isn't in: its home is dropped");
+                    if let Err(e) = ws.drop_home(kind, &r#ref) {
+                        tracing::warn!(cluster = r#ref, error = %e, "dropping a search cluster's home failed");
+                    }
+                }
+                Err(e) => tracing::warn!(cluster = r#ref, error = %e, "reading a project's members failed"),
+            }
+        }
+    });
+}

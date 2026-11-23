@@ -176,6 +176,12 @@ impl SessionGrant {
     }
 }
 
+/// In an allowed request that creates something in a workspace project: the project the gate
+/// decided it by (`X-Roll-Project`, as it read it). A product makes it there only with this, never
+/// by reading the header again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InProject(pub String);
+
 /// In a person's request the gate decided (their session's, or a token of theirs): whether that
 /// same decision allows an action on another resource of the route's product, named by id. The
 /// gate resolves it as it resolves the route's own resource: its projects, counting only those

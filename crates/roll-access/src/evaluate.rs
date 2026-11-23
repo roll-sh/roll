@@ -751,19 +751,31 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
             lent = Some((l.product, l.id));
         }
     }
-    // A person's token on a member product reaches only what their session does too, a create
-    // named in a project included (its rules may say `*`: it never makes something in a project
-    // its person isn't in). A create naming no project is the person's own.
+    // A person's token on a member product reaches only what their session does too, creates
+    // included (its rules may say `*`: it never makes something in a project its person isn't
+    // in, nor where their role doesn't). Only a create that's a person's own, naming no project
+    // (`PERSON_OWN_UNPLACED`: their own search cluster), is theirs to make.
+    let own_create = matches!(target, Target::Create { project: None, .. }) && catalog::PERSON_OWN_UNPLACED.iter().any(|(m, r)| *m == ctx.method && *r == row.route);
     if let Some(w) = &within
         && roll_auth::roles::MEMBER_PRODUCTS.contains(&row.product)
         && !matches!(row.target, Tgt::AnyGrant | Tgt::List { .. } | Tgt::Product)
-        && !matches!(target, Target::Create { project: None, .. })
+        && !own_create
     {
         let (o, a) = weakest(&needs, |a| w.scope.outcome(&target, a));
         if o != Outcome::Allow {
             ctx.audit(Some(row), Some(a), describe(&target), "deny", None, StatusCode::FORBIDDEN);
             return refuse_session(&w.scope, &target, a, row.product, named.as_deref());
         }
+    }
+    // What it hands this resource from others (a branch's parent, a remote) its session must
+    // reach too. One it doesn't answers as missing, as a stranger's resource does.
+    if let Some(w) = &within
+        && roll_auth::roles::MEMBER_PRODUCTS.contains(&row.product)
+        && let Some(l) = lend_outcome(&access, row, &params, json_body.as_ref(), &w.scope, true).await
+        && l.outcome != Outcome::Allow
+    {
+        ctx.audit(Some(row), Some(l.action), Some(l.id.clone()), "deny", None, StatusCode::NOT_FOUND);
+        return (StatusCode::NOT_FOUND, axum::Json(json!({ "error": format!("the request names a {} resource you may not {} (none, as far as you can see)", l.product, l.action) }))).into_response();
     }
     // "Ask for anything else": what the rules refuse asks a person instead. Operator-only routes
     // were refused before any rule; a move between projects stays refused.
@@ -973,10 +985,12 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
     // A person's request: the product may ask this same decision about its other resources (a
     // list narrowed before it's built, a second cluster), resolved as a person's are.
     if as_user {
+        // A resource of the product's own kind (a search cluster by name too), as its links name it.
+        let own_kind = catalog::link_target(row.product).filter(|(p, _)| *p == row.product).map_or(row.product, |(_, k)| k);
         let kind = match row.target {
             Tgt::Param(_, kind) => kind,
-            Tgt::List { kind, .. } => kind.unwrap_or(row.product),
-            _ => row.product,
+            Tgt::List { kind, .. } => kind.unwrap_or(own_kind),
+            _ => own_kind,
         };
         let (a, s, w, product) = (access.clone(), scope.clone(), within_scope, row.product);
         // The request's own: projects' trust is read once however many it's asked about.
@@ -986,6 +1000,11 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
             let t = Target::One(r);
             s.outcome(&t, act) == Outcome::Allow && w.as_ref().is_none_or(|w| w.outcome(&t, act) == Outcome::Allow)
         })));
+    }
+    // A create in a project: the one the gate decided it by, for the product (never the header
+    // again, which it could read otherwise).
+    if let Target::Create { project: Some(p), .. } = &target {
+        parts.extensions.insert(roll_auth::InProject(p.clone()));
     }
     // A list filtered, an answer's credentials redacted, a create placed: the answer is read.
     let filter_list = matches!(row.target, Tgt::List { .. }) && narrowed(&scope, row.product, action);

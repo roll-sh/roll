@@ -135,6 +135,9 @@ pub struct Person {
     pub admin: bool,
 }
 
+/// Run after a resource gets a home ([`Workspace::on_homed`]): `(kind, ref, project)`.
+pub type OnHomed = Box<dyn Fn(Kind, &str, &str) + Send + Sync>;
+
 /// What [`Workspace::trusts`] reads of a project itself: its namespace (empty: the operator's)
 /// and its owners ([`Workspace::trust_basis`]).
 #[derive(Clone, Debug)]
@@ -798,8 +801,35 @@ impl Workspace {
             Ok(true)
         })?;
         if changed {
+            for f in self.on_homed.read().expect("on_homed").iter() {
+                f(kind, r#ref, project);
+            }
             self.run_events();
         }
+        Ok(())
+    }
+
+    /// Run `f(kind, ref, project)` after each resource gets a home, or a new one, outside the
+    /// write: a product whose resources also have a person owner (search) hands it to the project
+    /// there, so a home never stands for a stranger's resource.
+    pub fn on_homed(&self, f: OnHomed) {
+        self.on_homed.write().expect("on_homed").push(f);
+    }
+
+    /// Every home of `kind`: `(ref, project)`.
+    pub fn homes(&self, kind: Kind) -> Result<Vec<(String, String)>> {
+        Ok(self.db.read(|c| c.query("SELECT ref, project_id FROM homes WHERE kind = ? ORDER BY ref", [kind.as_str()], |r| Ok((r.get(0)?, r.get(1)?))))?)
+    }
+
+    /// The refs of `kind` at home in `project`.
+    pub fn homes_in(&self, project: &str, kind: Kind) -> Result<Vec<String>> {
+        Ok(self.db.read(|c| c.query("SELECT ref FROM homes WHERE project_id = ? AND kind = ? ORDER BY ref", [project, kind.as_str()], |r| r.get(0)))?)
+    }
+
+    /// The operator's: `kind ref` has no home any more (its places on canvases stay, trusted only
+    /// as their projects' owners' own).
+    pub fn drop_home(&self, kind: Kind, r#ref: &str) -> Result<()> {
+        self.db.write(|c| c.execute("DELETE FROM homes WHERE kind = ? AND ref = ?", [kind.as_str(), r#ref]).map(|_| ()))?;
         Ok(())
     }
 

@@ -196,8 +196,13 @@ impl Caller {
 
     /// `id_or_name`, if the caller may see it: another's is "no such cluster".
     async fn get(&self, c: &Control, id_or_name: &str) -> Result<SearchCluster, ControlError> {
+        self.get_to(c, id_or_name, roll_auth::scope::Action::Read).await
+    }
+
+    /// `id_or_name`, if the caller may `action` it: any other answers as missing.
+    async fn get_to(&self, c: &Control, id_or_name: &str, action: roll_auth::scope::Action) -> Result<SearchCluster, ControlError> {
         let d = c.get(id_or_name).await?;
-        if self.sees(&d).await { Ok(d) } else { Err(no_such(id_or_name)) }
+        if self.may(&d, action).await { Ok(d) } else { Err(no_such(id_or_name)) }
     }
 }
 
@@ -344,6 +349,10 @@ async fn view(c: &Control, caller: &Caller, mut d: SearchCluster, with_password:
         },
         None => None,
     };
+    // A parent the caller may not see (or one gone, for anyone but the operator) isn't named.
+    if parent_name.is_none() && !caller.is_all() {
+        d.parent_id = None;
+    }
     let mut status = c.status(&d).await;
     // Which node of the fleet holds it is the operator's (and admins') to know.
     if !caller.is_all()
@@ -420,16 +429,17 @@ struct CreateReq {
     opts: ClusterOptions,
 }
 
-async fn create(State(c): State<AppState>, caller: Caller, method: Method, headers: HeaderMap, body: bytes::Bytes) -> Result<Response, ControlError> {
+async fn create(State(c): State<AppState>, caller: Caller, method: Method, headers: HeaderMap, ext: Extensions, body: bytes::Bytes) -> Result<Response, ControlError> {
     let r: CreateReq = serde_json::from_slice(&body).map_err(|e| ControlError::Invalid(format!("invalid request: {e}")))?;
-    // Made in a workspace project (`X-Roll-Project`, which the gate decided by): the project's,
-    // through its home, never its maker's (who may leave the project); their caps count it.
-    let in_project = headers.contains_key("x-roll-project");
+    // Made in a workspace project (the gate decided it by its `X-Roll-Project` and puts it in that
+    // project): the project's, through its home, never its maker's (who may leave the
+    // project); their caps count it.
+    let in_project = ext.get::<roll_auth::InProject>().is_some();
     let d = match &r.parent {
         Some(p) => {
             // A branch is cut on the node holding the parent, which commits it first. It is the
-            // parent owner's.
-            let parent = caller.get(&c, p).await?;
+            // parent owner's. Branching copies the parent's indices: it takes write there.
+            let parent = caller.get_to(&c, p, roll_auth::scope::Action::Write).await?;
             // The owner gets the parent checked here by its id: a cluster that took its name in
             // between is never branched in its place.
             let mut forwarded: Value = serde_json::from_slice(&body).map_err(|e| ControlError::Invalid(format!("invalid request: {e}")))?;
@@ -932,7 +942,7 @@ struct LinkRemote {
 /// administer too, as they may this one (the gate asked admin on both; a member's role decides it
 /// in each cluster's project, and their own clusters are theirs). Any other answers 404 as a
 /// missing one does.
-async fn link_remote(State(c): State<AppState>, caller: Caller, Path((id, alias)): Path<(String, String)>, Json(b): Json<LinkRemote>) -> ApiResult<Value> {
+async fn link_remote(State(c): State<AppState>, caller: Caller, Path((id, alias)): Path<(String, String)>, ext: Extensions, Json(b): Json<LinkRemote>) -> ApiResult<Value> {
     if b.access.is_some() && b.api_key.is_some() {
         return Err(ControlError::Invalid("give access (roll makes the key) or api_key (yours), not both".into()));
     }
@@ -942,8 +952,9 @@ async fn link_remote(State(c): State<AppState>, caller: Caller, Path((id, alias)
         None => false,
     };
     let may_admin = |t: &SearchCluster| admin && target.as_ref().is_some_and(|x| x.id == t.id);
-    // The link holds by its maker's rights from now on (`Control::link_holds`).
-    let made_by = caller.user().unwrap_or(crate::remotes::OPERATOR);
+    // The link holds by its maker's rights from now on (`Control::link_holds`): an admin account's
+    // too, by their own `usr_…` (it stops once they're no longer one, or a member who may).
+    let made_by = caller.user().or_else(|| ext.get::<roll_auth::SignedIn>().map(|s| s.user.as_str())).unwrap_or(crate::remotes::OPERATOR);
     Ok(Json(c.link_remote(&id, &alias, &b.cluster, b.skip_unavailable, b.access, b.api_key.as_deref(), may_admin, made_by).await?))
 }
 

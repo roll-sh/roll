@@ -672,6 +672,8 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     // members who could branch it reach the copy, and no other project gains it.
     if let Some(s) = &search {
         s.control.on_branch(search::home_branches(workspace.clone()));
+        // A home hands a cluster to its project; a project home to clusters isn't deleted.
+        search::members(&s.control, &workspace);
         // A remote link works only while whoever linked it may still administer its target, as
         // roll-access decides it now (a removed or demoted member's links stop at once).
         let a = access.clone();

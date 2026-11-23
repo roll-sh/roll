@@ -753,6 +753,15 @@ impl Store {
         Ok(self.db.read(|x| x.query("SELECT id FROM search_clusters WHERE owner = ?1 AND deleting = 0", params![owner], |r| r.get(0)))?)
     }
 
+    /// Cluster `id` (live or kept for restoring) is its workspace project's from now on (it got a
+    /// home there): its owner becomes who made it (`made_by`, for their caps), and it has no
+    /// owner, so leaving the project ends their access. Synchronously (the workspace's
+    /// `on_homed`). Whether it had an owner to hand over.
+    pub fn disown(&self, id: &str) -> anyhow::Result<bool> {
+        let n = self.db.write(|x| x.execute("UPDATE search_clusters SET made_by = COALESCE(made_by, owner), owner = NULL WHERE id = ?1 AND owner IS NOT NULL", params![id]))?;
+        Ok(n > 0)
+    }
+
     async fn one(&self, filter: &str, arg: &str) -> anyhow::Result<Option<SearchCluster>> {
         let mut c = self.db.read(|x| x.query_row(&format!("SELECT {READ_COLS} FROM search_clusters WHERE {filter} = ?1 AND {LIVE}"), params![arg], row).optional())?;
         self.reveal(c.iter_mut())?;

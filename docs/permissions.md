@@ -701,9 +701,13 @@ token's: the row, the resource, the rules. Making a project is the person's own
   project trusts it (`Workspace::trusts`: its home, or one of the project's owners' own;
   `Access::resource_as`). A resource in none of their projects is a 404 worded as for a missing
   one. Products that aren't member products yet keep the canvas as it is.
-- A person's token is held within their session on a create that names a project too
-  (`X-Roll-Project`), whatever its own rules say: it never makes anything in a project its
-  person isn't in (404). A create naming no project is the person's own.
+- A person's token is held within their session on a create too, whatever its own rules say: it
+  never makes anything in a project its person isn't in (404), nor where their role doesn't let
+  them (403). A create naming no project is refused the same way (previews'), except where it's
+  the person's own (`catalog::PERSON_OWN_UNPLACED`: a search cluster of theirs). What a request
+  hands its resource from others (`lends`: a branch's parent, a remote) the session must reach
+  too, or it answers 404. An allowed create in a project carries the project the gate decided it
+  by (`roll_auth::InProject`); a product makes it there from that, never from the header.
 - What a person owns themselves stays theirs beside their projects: a product registers it
   (`Resolvers::owned_fn`; search's clusters), and the person's grant gets a rule with every action on
   each, by id.

@@ -364,8 +364,12 @@ evaluator and search's catalogue rows. search adds no role checks of its own.
   project trusts a cluster when the project is its home, or when the cluster belongs to one of the
   project's owners (`Workspace::trusts`). A cluster made with `X-Roll-Project` gets that project as
   its home and has no owner: it's the project's, so whoever made it loses it when they leave
-  the project. A branch a person makes takes its parent's home. A stranger's cluster dropped on the
-  project's canvas reaches nobody through it, and a purged cluster leaves every canvas.
+  the project. A person's own cluster that gets a home (`PUT …/homes`) is handed to the project
+  the same way, as is a branch a person makes, which takes its parent's home. rolld puts older
+  homes right at start: a cluster whose owner is in its home project is handed over, and one
+  homed in a project its owner isn't in loses that home (it's reported). A stranger's cluster
+  dropped on the project's canvas reaches nobody through it, a purged cluster leaves every
+  canvas, and a project still home to live clusters can't be deleted (409).
 
   | role | what they may do to the project's clusters |
   | --- | --- |
@@ -383,10 +387,14 @@ evaluator and search's catalogue rows. search adds no role checks of its own.
 
 Per-person caps (`SearchConfig::person_caps`) count toward a cluster's owner, or for one made in a
 project toward who made it (`made_by`, which grants nothing). A branch counts toward its parent's
-owner, or when the parent has none, toward the person branching it.
+owner, or when the parent has none, toward the person branching it. `made_by` keeps counting after
+its maker leaves the project, until the cluster is deleted: caps bound what a person may cause to
+be made, not what they reach.
 
 Linking two clusters (`PUT …/remotes/{alias}`) takes administering both: the gate asks `admin` on
-each, and search asks the same decision about the target. The link keeps who made it, and works
+each, and search asks the same decision about the target. The link keeps who made it (an admin
+account by its own `usr_…`, so it stops once they're no longer one; `operator` only for the
+operator's token), and works
 only while they still may administer the target, which roll-access decides again on every use
 (`Access::person_reaches`): a removed or demoted member's links stop at once, though they stay
 listed (not connected) for the cluster's admins to remove. It's also bound to the target's id. A

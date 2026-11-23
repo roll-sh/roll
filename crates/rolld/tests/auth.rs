@@ -424,6 +424,42 @@ async fn every_control_plane_route_needs_the_operator_token() {
         let refused = v["error"].as_str().is_some_and(|e| e == format!("no project {hers}") || e.starts_with("your role"));
         assert!(!refused, "{path} in her own project: {s} {v}");
     }
+    // A viewer's token does no more through a create than their role does: no preview naming no
+    // project (only a person's own search cluster is made that way), and no branch of the
+    // project's cluster (it takes write there: 404, as for one they can't see).
+    let (s, t) = as_person(
+        bob.clone(),
+        bob_csrf.clone(),
+        reqwest::Method::POST,
+        "/v1/access/tokens".into(),
+        Some(serde_json::json!({ "name": "bob-wide", "rules": [
+            { "product": "search", "resources": "*", "actions": { "read": "allow", "write": "allow", "reveal": "allow" } },
+            { "product": "previews", "resources": "*", "actions": { "read": "allow", "write": "allow" } },
+        ] })),
+        None,
+    )
+    .await;
+    assert_eq!(s, 201, "{t}");
+    let bobs = t["token"].as_str().unwrap().to_string();
+    let as_bobs = |path: &'static str, body: serde_json::Value| {
+        let (http, api, bobs) = (http.clone(), api.clone(), bobs.clone());
+        async move { http.post(format!("{api}{path}")).bearer_auth(bobs).json(&body).send().await.unwrap().status().as_u16() }
+    };
+    assert_eq!(as_bobs("/v1/previews", serde_json::json!({ "project": hers, "repo": "ada/none", "branch": "main" })).await, 403, "a viewer's preview with no project named");
+    assert_eq!(as_bobs("/v1/search/clusters", serde_json::json!({ "name": "vb", "parent": "hers-search" })).await, 404, "a viewer's branch of the project's cluster");
+    // Her own cluster put in her project and made at home there is the project's from then on:
+    // no owner (she's its maker), and its members reach it.
+    let own_id = own["id"].as_str().unwrap().to_string();
+    let (s, v) = ada_does(reqwest::Method::PUT, format!("/v1/workspace/projects/{hers}/resources/search/{own_id}"), Some(serde_json::json!({ "x": 0, "y": 0 })), None).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = ada_does(reqwest::Method::PUT, format!("/v1/workspace/projects/{hers}/homes/search/{own_id}"), None, None).await;
+    assert_eq!(s, 200, "{v}");
+    let (_, homed_own) = ada_does(reqwest::Method::GET, format!("/v1/search/clusters/{own_id}"), None, None).await;
+    assert!(homed_own["owner"].is_null() && homed_own["made_by"].as_str() == Some(ada.as_str()), "{homed_own}");
+    assert_eq!(bob_does(reqwest::Method::GET, format!("/v1/search/clusters/{own_id}")).await.0, 200, "a viewer of its project reads it");
+    // A project home to clusters isn't deleted from under them (they'd be no one's).
+    let (s, v) = ada_does(reqwest::Method::DELETE, format!("/v1/workspace/projects/{hers}"), None, None).await;
+    assert!(s == 409 && v.to_string().contains("search cluster"), "{s} {v}");
     let off = http.patch(format!("{api}/v1/accounts/users/{ada}")).header("authorization", &operator).json(&serde_json::json!({ "disabled": true })).send().await.unwrap();
     assert_eq!(off.status(), 200);
     assert_ne!(as_token(token).await, "owner", "a disabled account's roll code token still works");

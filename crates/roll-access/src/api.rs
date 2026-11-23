@@ -326,9 +326,15 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
     };
     // A person's token is decided as the gate decides it: as a person's grant (a canvas counts
     // only where it trusts) unless they're an admin, whose token is the operator's, narrowed.
+    // A token whose person can't sign in is dead at the gate: so it is here.
     let person = match (&user, a.people.get()) {
-        (Some(u), Some(people)) => people.person(u).await.ok().flatten().is_some_and(|p| !p.admin),
-        _ => false,
+        (None, _) => false,
+        (Some(_), None) => return Ok(Json(json!({ "decision": "deny", "why": "the token's person can't sign in: it works for nothing" }))),
+        (Some(u), Some(people)) => match people.person(u).await {
+            Ok(Some(p)) => !p.admin,
+            Ok(None) => return Ok(Json(json!({ "decision": "deny", "why": "the token's person can't sign in: it works for nothing" }))),
+            Err(e) => return Err(Error::Internal(format!("looking up the token's person: {e}"))),
+        },
     };
     let method = c.method.to_ascii_uppercase();
     let uri: axum::http::Uri = c.path.parse().map_err(|_| Error::BadRequest("path isn't a request path".into()))?;

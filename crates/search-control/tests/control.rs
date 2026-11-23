@@ -88,6 +88,10 @@ async fn as_person(mut req: axum::extract::Request, next: axum::middleware::Next
         req.extensions_mut().insert(roll_auth::Operator);
         req.extensions_mut().insert(roll_auth::Grant { id: "tok_t".into(), name: "t".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(rules), user: None, ask_otherwise: false });
     }
+    // A create's project, as the gate decided it (`X-Roll-Project`).
+    if let Some(p) = req.headers().get("x-roll-project").and_then(|v| v.to_str().ok()).map(str::to_string) {
+        req.extensions_mut().insert(roll_auth::InProject(p));
+    }
     let who = req.headers().get("x-test-as").and_then(|v| v.to_str().ok()).map(str::to_string);
     if let Some(who) = who {
         let admin = who == "admin";
