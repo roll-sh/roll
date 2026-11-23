@@ -69,6 +69,10 @@ pub const FORMAT: u32 = 2;
 /// dictionary between the blocks and the index, where format 4's footer says (`SstMeta::
 /// dict`). The newest file format this build reads.
 pub const FORMAT_DICT: u32 = 4;
+/// A file with column blocks (format 5, `storage::colblock`): its footer is format 4's, with a
+/// dictionary's offset and length 0 when it has none. Written only by a store whose data
+/// directory has column blocks switched on (`StoreOptions::colblocks`, off by default).
+pub const FORMAT_COLS: u32 = 5;
 /// Format 2's block trailer after the restart arrays: version, entries, restarts, common, flags.
 const TRAILER: usize = 8 + 4 + 4 + 2 + 1;
 
@@ -239,6 +243,9 @@ pub struct SstMeta {
     /// Its blocks are compressed with a zstd dictionary it holds (format 4, `FORMAT_DICT`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dict: bool,
+    /// Some of its blocks are column blocks (format 5, `FORMAT_COLS`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cols: bool,
     /// Its blocks a compaction may copy as they are (`SstWriter::copy_block`), as its writer
     /// saw them: every user key in one version, none a deletion, none sharing its key with
     /// the block before or after. Known only to the process that wrote the file (not stored:
@@ -581,6 +588,10 @@ pub struct SstWriter {
     copied_keys: u64,
     /// The block being made may grow to twice its target (`stretch`).
     stretched: bool,
+    /// Its blocks of rows are written as column blocks where they fit one (`colblocks`), and
+    /// whether one was (format 5).
+    colblocks: bool,
+    wrote_cols: bool,
 }
 
 /// A file with fewer bytes of blocks than this gets no dictionary (its blocks are plain zstd).
@@ -599,10 +610,16 @@ struct Block2 {
     ts: Option<[u8; 8]>,
     stored0: usize,
     derived: bool,
+    /// Each stored value's length, in order (`colblocks` writers only); `odd`: an entry
+    /// without one (a deletion, a derived value): not a column block.
+    lens: Vec<u32>,
+    odd: bool,
 }
 
 impl Block2 {
     fn clear(&mut self) {
+        self.lens.clear();
+        self.odd = false;
         self.vals.clear();
         self.rkeys.clear();
         self.rends.clear();
@@ -648,6 +665,16 @@ impl SstWriter {
         if self.entries == 0 {
             self.block_target = Some(BLOCK_TARGET);
             self.dict = None;
+            self.colblocks = false;
+        }
+    }
+
+    /// Write its blocks of a table's rows as column blocks where they fit one (format 5,
+    /// `storage::colblock`): an L1 writer (one with a dictionary) of a store that has them
+    /// switched on, before its first entry.
+    pub(crate) fn colblocks(&mut self) {
+        if self.entries == 0 && self.v2 && self.dict.is_some() {
+            self.colblocks = true;
         }
     }
 
@@ -753,6 +780,8 @@ impl SstWriter {
             carried: Vec::new(),
             copied_keys: 0,
             stretched: false,
+            colblocks: false,
+            wrote_cols: false,
         })
     }
 
@@ -992,6 +1021,11 @@ impl SstWriter {
         self.block.extend_from_slice(&key[share..ukey]);
         if let (Some(v), None) = (value, tail) {
             b.vals.extend_from_slice(v);
+            if self.colblocks {
+                b.lens.push(v.len() as u32);
+            }
+        } else {
+            b.odd = true;
         }
     }
 
@@ -1001,7 +1035,12 @@ impl SstWriter {
         let b = &mut self.b2;
         let mut raw = std::mem::take(&mut self.block);
         let vbase = raw.len() as u32;
-        raw.extend_from_slice(&b.vals);
+        // (Format 5: a block of rows alone, its values as columns when they fit them.)
+        let cols = self.colblocks && !b.odd && b.lens.len() == self.block_entries && super::colblock::encode_lens(&b.vals, &b.lens, vbase as usize, &mut raw);
+        if !cols {
+            raw.extend_from_slice(&b.vals);
+        }
+        self.wrote_cols |= cols;
         let nr = b.roffs.len();
         let rkey_at = |i: usize| &b.rkeys[if i == 0 { 0 } else { b.rends[i - 1] as usize }..b.rends[i] as usize];
         let common = match nr {
@@ -1023,7 +1062,7 @@ impl SstWriter {
         raw.extend_from_slice(&(self.block_entries as u32).to_le_bytes());
         raw.extend_from_slice(&(nr as u32).to_le_bytes());
         raw.extend_from_slice(&(common as u16).to_le_bytes());
-        raw.push(b.derived as u8 | self.rlog << 4);
+        raw.push(b.derived as u8 | (cols as u8) << 1 | self.rlog << 4);
         b.clear();
         raw
     }
@@ -1171,11 +1210,13 @@ impl SstWriter {
         let mut footer = Vec::with_capacity(FOOTER4_LEN);
         let tail: &[u64] = match (self.v2, dict) {
             (false, _) => &[MAGIC],
+            (true, _) if self.wrote_cols => &[FORMAT_COLS as u64, MAGIC2],
             (true, None) => &[FORMAT as u64, MAGIC2],
             (true, Some(_)) => &[FORMAT_DICT as u64, MAGIC2],
         };
         let head: &[u64] = match dict {
             Some((at, n)) => &[at, n],
+            None if self.wrote_cols => &[0, 0],
             None => &[],
         };
         for v in head.iter().chain(&[index_off, index.len() as u64, bloom_off, bloom.len() as u64, self.entries]).chain(tail) {
@@ -1209,6 +1250,7 @@ impl SstWriter {
             dv: None,
             dead: 0,
             dict: dict.is_some(),
+            cols: self.wrote_cols,
             clean: self.v2.then(|| Arc::new(std::mem::take(&mut self.clean))),
         })
     }
@@ -1333,7 +1375,7 @@ pub struct Block {
     rs: u32,
     nr: u32,
     lk: u32,
-    common: usize,
+    common: u32,
     len: usize,
     /// The version (a key's last 8 bytes) entries flagged `F_TS` end with.
     ts: [u8; 8],
@@ -1346,7 +1388,25 @@ pub struct Block {
     pooled: bool,
     /// The bytes `data`'s allocations hold (`held_by`).
     held: u32,
+    /// A column block's section (format 5, `colblock`; None: format 2's values). Its entries'
+    /// value offsets start at `data`'s end (`ColBlk::base`), past every slice of `data`: each
+    /// reader of a value by offset finds it missing there, where a check it makes anyway
+    /// fails, and only then asks for the row (`col_row`, `col_rows`). Format 2's blocks pay
+    /// nothing for it.
+    cols: Option<Box<ColBlk>>,
 }
+
+/// A column block's parsed section, where its value offsets start (`data`'s length), and its
+/// rows' bytes once a reader wanted them all (a compaction's merge: `Block::col_rows`).
+pub struct ColBlk {
+    pub dir: super::colblock::ColDir,
+    base: u32,
+    rows: std::sync::OnceLock<Bytes>,
+}
+
+// (A block's size is what the cache counts it at (`mem_bytes`): the column section's pointer
+// took the room `common` gave up.)
+const _: () = assert!(std::mem::size_of::<Block>() == 80);
 
 const F_TS: usize = 1;
 const F_DERIVED: usize = 2;
@@ -1631,7 +1691,7 @@ impl Block {
         if n == 0 {
             return 0;
         }
-        let c = self.common;
+        let c = self.common as usize;
         let m = c.min(key.len());
         // (Restart 0 stores its key's first `common` bytes whole.)
         let mut p = self.restart(0) as u32 as usize;
@@ -1800,20 +1860,83 @@ impl Block {
         match pos.val_len {
             TOMBSTONE => None,
             DERIVED => Some(Bytes::copy_from_slice(&pos.dval)),
-            n => Some(self.data.slice(pos.val_off as usize..(pos.val_off + n) as usize)),
+            n => {
+                let (a, b) = (pos.val_off as usize, (pos.val_off + n) as usize);
+                Some(match b <= self.data.len() {
+                    true => self.data.slice(a..b),
+                    false => self.col_row(pos),
+                })
+            }
         }
     }
 
     /// Where the value at `pos` is in the block's bytes, asked for (`prefetch`): None for a
-    /// deletion or a value made from the key (`value` makes those).
+    /// deletion or a value made from the key (`value` makes those), or a column block's row.
     pub fn value_span(&self, pos: &BlockPos) -> Option<(u32, u32)> {
         match pos.val_len {
             TOMBSTONE | DERIVED => None,
             n => {
-                prefetch(&self.data[pos.val_off as usize..(pos.val_off + n) as usize], 2);
+                prefetch(self.data.get(pos.val_off as usize..(pos.val_off + n) as usize)?, 2);
                 Some((pos.val_off, n))
             }
         }
+    }
+
+    /// A column block's section (format 5).
+    #[inline]
+    pub fn col_dir(&self) -> Option<&super::colblock::ColDir> {
+        self.cols.as_deref().map(|c| &c.dir)
+    }
+
+    /// Whether it is a column block (format 5).
+    #[inline]
+    pub fn is_cols(&self) -> bool {
+        self.cols.is_some()
+    }
+
+    /// The block's buffer (a column block's section is in it).
+    pub fn data(&self) -> &Bytes {
+        &self.data
+    }
+
+    /// Whether the entry at `pos` has a value (not a deletion).
+    #[inline]
+    pub fn has_value(&self, pos: &BlockPos) -> bool {
+        pos.val_len != TOMBSTONE
+    }
+
+    /// The row at `pos` of a column block, made alone from its columns (or a slice of its rows
+    /// when they're made).
+    #[cold]
+    #[inline(never)]
+    fn col_row(&self, pos: &BlockPos) -> Bytes {
+        let c = self.cols.as_ref().expect("a column block's value");
+        let off = (pos.val_off - c.base) as usize;
+        match c.rows.get() {
+            Some(rows) => rows.slice(off..off + pos.val_len as usize),
+            None => {
+                let mut v = Vec::with_capacity(pos.val_len as usize);
+                c.dir.row(&self.data, pos.i, &mut v);
+                Bytes::from(v)
+            }
+        }
+    }
+
+    /// A column block's rows' bytes, made from its columns once (kept while the block lives:
+    /// a compaction's or a one-pass reader's block), and where its value offsets start.
+    #[cold]
+    #[inline(never)]
+    pub fn col_rows(&self) -> (&Bytes, usize) {
+        let c = self.cols.as_ref().expect("a column block's values");
+        (c.rows.get_or_init(|| Bytes::from(c.dir.rows(&self.data))), c.base as usize)
+    }
+
+    /// The value at `off` (`len` bytes) of a column block, borrowed from its rows made.
+    #[cold]
+    #[inline(never)]
+    fn col_value_ref(&self, off: u32, len: u32) -> &[u8] {
+        let (rows, base) = self.col_rows();
+        &rows[off as usize - base..(off + len) as usize - base]
     }
 
     /// The value `value_span` gave, borrowed.
@@ -1826,18 +1949,41 @@ impl Block {
         self.data.slice(off as usize..(off + n) as usize)
     }
 
-    /// The value at `pos`, borrowed.
+    /// The value at `pos`, borrowed. (A column block's from its rows made, `col_rows`: a
+    /// reader of a few rows asks for `value`.)
     pub fn value_ref<'a>(&'a self, pos: &'a BlockPos) -> Option<&'a [u8]> {
         match pos.val_len {
             TOMBSTONE => None,
             DERIVED => Some(&pos.dval),
-            n => Some(&self.data[pos.val_off as usize..(pos.val_off + n) as usize]),
+            n => Some(match self.data.get(pos.val_off as usize..(pos.val_off + n) as usize) {
+                Some(v) => v,
+                None => self.col_value_ref(pos.val_off, n),
+            }),
         }
     }
 
+    /// Whether the entry at `pos` is a row with values stored out of line (a column block's
+    /// never is).
+    #[inline]
+    pub fn external(&self, pos: &BlockPos) -> bool {
+        match pos.val_len {
+            TOMBSTONE => false,
+            DERIVED => super::toast::has_external(&pos.dval),
+            n => self.data.get(pos.val_off as usize..(pos.val_off + n) as usize).is_some_and(super::toast::has_external),
+        }
+    }
+
+    /// `push_value` of a column block's row (`buf`: the batch's index of the block,
+    /// `RowBatch::buf_block`), not made.
+    pub fn push_col(&self, pos: &BlockPos, key: &[u8], buf: u32, batch: &mut super::batch::RowBatch) {
+        debug_assert!(self.is_cols() && pos.val_len != TOMBSTONE && pos.val_len != DERIVED);
+        batch.push_col(key, buf, pos.val_len as usize, pos.i as u32);
+    }
+
     /// The entry at `pos` (not a tombstone) into `batch` under `key`: its value referenced in
-    /// the block's bytes, or copied when derived.
+    /// the block's bytes, or copied when derived. (Not a column block's: `push_col`.)
     pub fn push_value(&self, pos: &BlockPos, key: &[u8], batch: &mut super::batch::RowBatch) {
+        debug_assert!(!self.is_cols());
         match pos.val_len {
             TOMBSTONE => debug_assert!(false, "a tombstone pushed"),
             DERIVED => batch.push_copy(key, &pos.dval),
@@ -1901,7 +2047,29 @@ impl Block {
     /// ends on the first entry not taken (or past the end). How many it took, and the last
     /// one's version.
     pub fn run_rows(&self, pos: &mut BlockPos, ts: u64, max: usize, resolve: bool, batch: &mut super::batch::RowBatch) -> (usize, u64) {
+        debug_assert!(!self.is_cols());
+        self.run_rows_in::<false>(pos, ts, max, resolve, batch, 0)
+    }
+
+    /// `run_rows` of a column block: its rows into the batch as rows of buffer `cbuf`
+    /// (`RowBatch::buf_block`), not made. (Never out of line: none of its rows are.)
+    pub fn run_rows_col(&self, pos: &mut BlockPos, ts: u64, max: usize, batch: &mut super::batch::RowBatch, cbuf: u32) -> (usize, u64) {
+        debug_assert!(self.is_cols());
+        self.run_rows_in::<true>(pos, ts, max, false, batch, cbuf)
+    }
+
+    /// Row `r` of a column block (`len` bytes), made alone from its columns.
+    pub fn row_at(&self, r: usize, len: usize) -> Bytes {
+        let c = self.cols.as_ref().expect("a column block");
+        let mut v = Vec::with_capacity(len);
+        c.dir.row(&self.data, r, &mut v);
+        Bytes::from(v)
+    }
+
+    #[inline(always)]
+    fn run_rows_in<const COL: bool>(&self, pos: &mut BlockPos, ts: u64, max: usize, resolve: bool, batch: &mut super::batch::RowBatch, cbuf: u32) -> (usize, u64) {
         let b = &self.data[..];
+        let row0 = pos.i as u32 + 1;
         let (mut p, mut v) = (pos.next as usize, pos.vnext as usize);
         let mut i = pos.i + 1;
         let Some(last) = batch.last_key() else {
@@ -1919,7 +2087,7 @@ impl Block {
         }
         let own = self.version() <= ts;
         let mut ver = self.ts;
-        let buf = batch.buf_index(&self.data);
+        let buf = if COL { cbuf } else { batch.buf_index(&self.data) };
         let mut n = 0;
         while n < max && i < self.len {
             let at = p;
@@ -1952,7 +2120,7 @@ impl Block {
                     true => kb[..klen] == *suffix,
                     false => batch.last_key() == Some(suffix),
                 };
-            if again || (resolve && super::toast::has_external(&b[v..v + len])) {
+            if again || (!COL && resolve && super::toast::has_external(&b[v..v + len])) {
                 p = at;
                 break;
             }
@@ -1976,6 +2144,9 @@ impl Block {
             klen = nk;
             n += 1;
             i += 1;
+        }
+        if COL && n > 0 {
+            batch.note_rows(n, row0);
         }
         if n > 0 {
             // (On the entry stopped at: its key from the last row's and its version.)
@@ -2381,7 +2552,10 @@ impl Block {
     /// it is cached in, at the allocator's size.
     pub fn mem_bytes(&self) -> usize {
         let arc = 2 * std::mem::size_of::<usize>() + std::mem::size_of::<Block>();
-        self.held as usize + super::cache::alloc_bytes(arc)
+        match &self.cols {
+            None => self.held as usize + super::cache::alloc_bytes(arc),
+            Some(c) => self.held as usize + super::cache::alloc_bytes(arc) + c.dir.mem_bytes(),
+        }
     }
 
     /// What a buffer of `len` bytes holds: its piece of the cache's arena and the owner
@@ -2407,6 +2581,9 @@ impl Block {
 
     /// Every entry with its key whole, for readers that go backwards or read a block once.
     pub fn expand(&self) -> Expanded {
+        if self.is_cols() {
+            return self.expand_cols();
+        }
         let mut keys = Vec::with_capacity(self.data.len());
         let mut ents = Vec::with_capacity(self.len);
         // (Derived values exist only as a cursor makes them: copied out, with the others.)
@@ -2435,6 +2612,23 @@ impl Block {
         }
     }
 
+    /// `expand` of a column block: its rows made (`col_rows`), the offsets into them.
+    #[cold]
+    #[inline(never)]
+    fn expand_cols(&self) -> Expanded {
+        let (rows, base) = self.col_rows();
+        let mut keys = Vec::with_capacity(self.data.len());
+        let mut ents = Vec::with_capacity(self.len);
+        let mut pos = BlockPos::default();
+        self.at(0, &mut pos);
+        while pos.i < self.len {
+            keys.extend_from_slice(&pos.key);
+            ents.push(ExpandedEnt { key_end: keys.len() as u32, val_off: pos.val_off - base as u32, val_len: pos.val_len });
+            self.step(&mut pos);
+        }
+        Expanded { data: rows.clone(), keys, ents }
+    }
+
     /// A format 2 block as it was decompressed (`SstWriter::body2`): its entries and values
     /// are the compact form already, the restarts read from its end, the last key from the
     /// file's block index. Its buffer is `into`'s of its length when that gives one (the
@@ -2449,14 +2643,27 @@ impl Block {
         let common = u16::from_le_bytes([t[16], t[17]]) as usize;
         // (Flags: bit 0 a value is derived; bits 4-7 the restart interval's log.)
         let derived = t[18] & 1 != 0;
+        let columns = t[18] & 2 != 0;
         let rlog = t[18] >> 4;
         let data_len = n.checked_sub(TRAILER + nr * 12).ok_or_else(bad)?;
         if !(1..=8).contains(&rlog) || nr != len.div_ceil(1 << rlog) {
             return Err(bad());
         }
+        // (A column block (format 5): its section where the values were, its last 4 bytes
+        // where it starts; the restarts' value offsets are into its rows' bytes from there.)
+        let cdir = match columns {
+            false => None,
+            true => {
+                let at = data_len.checked_sub(4).ok_or_else(bad)?;
+                let vb = u32::from_le_bytes(raw[at..data_len].try_into().unwrap()) as usize;
+                let d = super::colblock::ColDir::parse(raw, vb, data_len).filter(|d| d.n as usize == len && !derived).ok_or_else(bad)?;
+                Some(d)
+            }
+        };
+        let vend = cdir.as_ref().map_or(data_len, |d| d.vbase as usize + d.vlen as usize);
         let r = &raw[data_len..];
         if r[..nr * 8].as_chunks::<8>().0.iter().any(|c| u64::from_le_bytes(*c) as u32 as usize >= data_len)
-            || r[nr * 8..nr * 12].as_chunks::<4>().0.iter().any(|c| u32::from_le_bytes(*c) as usize > data_len)
+            || r[nr * 8..nr * 12].as_chunks::<4>().0.iter().any(|c| u32::from_le_bytes(*c) as usize > vend)
         {
             return Err(bad());
         }
@@ -2467,17 +2674,28 @@ impl Block {
         let buf = into.and_then(|f| f(total));
         let held = Block::held_by(total, buf.as_ref());
         let pooled = buf.is_some();
+        // (A column block's value offsets moved to start at the buffer's end: `Block::cols`.)
+        let shift = |d: &mut [u8]| {
+            if let Some(c) = &cdir {
+                let by = (total - c.vbase as usize) as u32;
+                for w in d[data_len + nr * 8..data_len + nr * 12].as_chunks_mut::<4>().0 {
+                    *w = (u32::from_le_bytes(*w) + by).to_le_bytes();
+                }
+            }
+        };
         let data = match buf {
             Some(mut b) => {
                 let d = b.as_mut();
                 d[..lk].copy_from_slice(&raw[..lk]);
                 d[lk..].copy_from_slice(last_key);
+                shift(d);
                 b.freeze()
             }
             None => {
                 let mut data = Vec::with_capacity(total);
                 data.extend_from_slice(&raw[..lk]);
                 data.extend_from_slice(last_key);
+                shift(&mut data);
                 Bytes::from(data)
             }
         };
@@ -2486,13 +2704,14 @@ impl Block {
             rs: data_len as u32,
             nr: nr as u32,
             lk: lk as u32,
-            common,
+            common: common as u32,
             len,
             ts,
             derived,
             rlog,
             pooled,
             held,
+            cols: cdir.map(|dir| Box::new(ColBlk { dir, base: total as u32, rows: std::sync::OnceLock::new() })),
         })
     }
 
@@ -2620,12 +2839,13 @@ impl Block {
             rs,
             nr: restarts.len() as u32,
             lk,
-            common,
+            common: common as u32,
             len: n,
             ts: ts.unwrap_or([0xFF; 8]),
             derived,
             rlog,
             pooled: false,
+            cols: None,
         })
     }
 }
@@ -2831,7 +3051,7 @@ fn keep(mut s: Scratch) {
 }
 
 impl SstReader {
-    pub fn open(dir: &Path, meta: SstMeta, cache: Arc<BlockCache>) -> Result<SstReader> {
+    pub fn open(dir: &Path, mut meta: SstMeta, cache: Arc<BlockCache>) -> Result<SstReader> {
         let path = sst_path(dir, meta.id);
         let file = File::open(&path)?;
         let len = file.metadata()?.len();
@@ -2849,11 +3069,15 @@ impl SstReader {
         let (v2, dict) = match back(0) {
             MAGIC => (false, None),
             MAGIC2 if got >= FOOTER2_LEN => match back(1) {
-                f if f > FORMAT_DICT as u64 => {
+                f if f > FORMAT_COLS as u64 => {
                     return Err(internal(format!(
-                        "sst {} is of storage format {f}, newer than this build reads ({FORMAT_DICT})",
+                        "sst {} is of storage format {f}, newer than this build reads ({FORMAT_COLS})",
                         path.display()
                     )));
+                }
+                f if f == FORMAT_COLS as u64 && got == FOOTER4_LEN => {
+                    meta.cols = true;
+                    (true, (back(7) != 0).then(|| (back(8), back(7))))
                 }
                 f if f == FORMAT_DICT as u64 && got == FOOTER4_LEN => (true, Some((back(8), back(7)))),
                 f if f == FORMAT as u64 => (true, None),
@@ -3075,6 +3299,7 @@ impl SstReader {
     pub fn format(&self) -> u32 {
         match (self.v2, &self.ddict) {
             (false, _) => 1,
+            _ if self.meta.cols => FORMAT_COLS,
             (true, None) => FORMAT,
             (true, Some(_)) => FORMAT_DICT,
         }
@@ -4079,10 +4304,10 @@ mod tests {
         let path = sst_path(dir.path(), 1);
         let mut b = std::fs::read(&path).unwrap();
         let n = b.len();
-        b[n - 16..n - 8].copy_from_slice(&(FORMAT_DICT as u64 + 1).to_le_bytes());
+        b[n - 16..n - 8].copy_from_slice(&(FORMAT_COLS as u64 + 1).to_le_bytes());
         std::fs::write(&path, &b).unwrap();
         let e = SstReader::open(dir.path(), meta.clone(), cache.clone()).err().unwrap();
-        assert!(e.message.contains(&format!("storage format {}, newer than this build reads ({FORMAT_DICT})", FORMAT_DICT + 1)), "{}", e.message);
+        assert!(e.message.contains(&format!("storage format {}, newer than this build reads ({FORMAT_COLS})", FORMAT_COLS + 1)), "{}", e.message);
         // (Format 3 is a store's, never a file's.)
         b[n - 16..n - 8].copy_from_slice(&3u64.to_le_bytes());
         std::fs::write(&path, &b).unwrap();

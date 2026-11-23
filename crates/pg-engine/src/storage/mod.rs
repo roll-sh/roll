@@ -7,6 +7,7 @@
 
 pub mod batch;
 pub mod cache;
+pub mod colblock;
 pub mod cols;
 mod dead;
 pub mod discard;
@@ -242,7 +243,7 @@ impl Compacted<'_> {
             let ulast = user_key(f.block_last_key(b));
             for j in 0..li {
                 merge.sources[j].fill()?;
-                if merge.sources[j].head().is_some_and(|(k, _)| user_key(k) <= ulast) {
+                if merge.sources[j].head_key().is_some_and(|k| user_key(k) <= ulast) {
                     return Ok(());
                 }
             }
@@ -411,6 +412,16 @@ pub struct StoreOptions {
     /// A compaction copies the blocks of its L1 inputs it would write unchanged as they are
     /// (`Compacted::copy_blocks`; off: every one is written again, for tests comparing them).
     pub copy_blocks: bool,
+    /// A data directory made by this store writes its L1 blocks of rows as column blocks
+    /// (storage format 5, `colblock`; off by default, `ROLL_COLBLOCKS=1` turns it on). Kept in
+    /// the manifest when the directory is made: an existing directory keeps what it was made
+    /// with, and one made without it stays format 4, readable by builds before format 5.
+    pub colblocks: bool,
+}
+
+/// `StoreOptions::colblocks`' default: `ROLL_COLBLOCKS=1`.
+fn colblocks_default() -> bool {
+    std::env::var("ROLL_COLBLOCKS").is_ok_and(|v| v == "1")
 }
 
 /// When a store writes its marked files (`Store::mark_dead`) again without their dead
@@ -489,6 +500,7 @@ impl Default for StoreOptions {
             format: sst::FORMAT,
             reclaim: Reclaim::default(),
             copy_blocks: true,
+            colblocks: colblocks_default(),
         }
     }
 }
@@ -618,6 +630,10 @@ struct Manifest {
     l0: Vec<SstMeta>,
     /// Sorted by key, non-overlapping.
     l1: Vec<SstMeta>,
+    /// Its L1 files' blocks of rows are written as column blocks (`StoreOptions::colblocks`,
+    /// set when the directory was made).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    colblocks: bool,
 }
 
 /// Sort writes by key, the last write of a key winning (a transaction's come sorted).
@@ -860,8 +876,9 @@ const BULK_RATIO: u64 = 4;
 /// naming dead-entry sets (`SstMeta::dv`), which builds before them would read past (their
 /// files' dead entries as live), and 4 for one naming a file with a dictionary
 /// (`sst::FORMAT_DICT`), whose blocks builds before it can't decompress. A manifest says 3
-/// or 4 while it names one.
-pub const STORE_FORMAT: u32 = sst::FORMAT_DICT;
+/// or 4 while it names one, and 5 while it names a file with column blocks (`sst::FORMAT_COLS`,
+/// a store made with `StoreOptions::colblocks`).
+pub const STORE_FORMAT: u32 = sst::FORMAT_COLS;
 const DEAD_FORMAT: u32 = 3;
 
 /// Replace the manifest durably. The directory is fsynced first: the SSTs it names were
@@ -870,7 +887,9 @@ const DEAD_FORMAT: u32 = 3;
 fn write_manifest(dir: &Path, m: &Manifest) -> Result<()> {
     let dead = m.l1.iter().chain(&m.l0).any(|s| s.dv.is_some());
     let dict = m.l1.iter().chain(&m.l0).any(|s| s.dict);
+    let cols = m.l1.iter().chain(&m.l0).any(|s| s.cols);
     let format = match (dict, dead) {
+        _ if cols => sst::FORMAT_COLS,
         (true, _) => sst::FORMAT_DICT,
         (false, true) => DEAD_FORMAT,
         (false, false) => m.format.min(sst::FORMAT),
@@ -897,6 +916,7 @@ impl Store {
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Manifest {
                 next_id: 1,
+                colblocks: opts.colblocks,
                 ..Default::default()
             },
             Err(e) => return Err(e.into()),
@@ -1005,6 +1025,7 @@ impl Store {
         // of format 3 has format 2's files: `write_manifest` says 3 while it names a
         // dead-entry set.)
         let format = manifest.format.min(sst::FORMAT).max(opts.format);
+        let opts = StoreOptions { colblocks: manifest.colblocks, ..opts };
         let store = Arc::new(Store {
             dir: dir.to_path_buf(),
             opts,
@@ -1083,7 +1104,11 @@ impl Store {
     /// files are when `compress`: L1's form (format 2's small blocks with a dictionary).
     fn sst_writer(&self, id: u64, compress: bool) -> Result<SstWriter> {
         let codec = if compress && self.opts.compress { sst::Codec::Zstd } else { sst::Codec::None };
-        SstWriter::create_with(&self.dir, id, codec, self.opts.format >= 2)
+        let mut w = SstWriter::create_with(&self.dir, id, codec, self.opts.format >= 2)?;
+        if self.opts.colblocks {
+            w.colblocks();
+        }
+        Ok(w)
     }
 
     /// `sst_writer` for an L0 file (a flush, an ingested commit): its blocks as before small
@@ -2795,7 +2820,7 @@ impl Store {
                 if !sst::short_eq(user_key(pos.key()), &uk) {
                     break;
                 }
-                let (vts, tomb) = (key_ts(pos.key()), blk.value_ref(&pos).is_none());
+                let (vts, tomb) = (key_ts(pos.key()), !blk.has_value(&pos));
                 if !dead.is_dead(b, pos.index()) {
                     // (The deletion, at or before `horizon`, sorts before the versions it
                     // isn't newer than: from it on, a version below `horizon` is dropped.)
@@ -3344,6 +3369,45 @@ impl Cursor {
         }
     }
 
+    /// `head`'s key alone (a column block's row not made).
+    #[inline]
+    fn head_key(&self) -> Option<&[u8]> {
+        match self {
+            Cursor::Mem { buf, .. } => buf.front().map(|(k, _)| k.as_slice()),
+            Cursor::Level { ssts, file, block, pos, end, whole, .. } => {
+                if *file >= ssts.len() {
+                    return None;
+                }
+                let b = block.as_ref()?;
+                if pos.index() >= b.len() {
+                    return None;
+                }
+                let k = pos.key();
+                (*whole || end.is_empty() || k < end.as_slice()).then_some(k)
+            }
+        }
+    }
+
+    /// `head`'s key, and whether its entry has a value (Some) stored out of line (true),
+    /// without making a column block's row.
+    #[inline]
+    fn head_meta(&self) -> Option<(&[u8], Option<bool>)> {
+        match self {
+            Cursor::Mem { buf, .. } => buf.front().map(|(k, v)| (k.as_slice(), v.as_deref().map(toast::has_external))),
+            Cursor::Level { ssts, file, block, pos, end, whole, .. } => {
+                if *file >= ssts.len() {
+                    return None;
+                }
+                let b = block.as_ref()?;
+                if pos.index() >= b.len() {
+                    return None;
+                }
+                let k = pos.key();
+                (*whole || end.is_empty() || k < end.as_slice()).then(|| (k, b.has_value(pos).then(|| b.external(pos))))
+            }
+        }
+    }
+
     /// The head entry, owned, and on past it.
     fn take(&mut self) -> RawEntry {
         match self {
@@ -3367,7 +3431,13 @@ impl Cursor {
             }
             Cursor::Level { block, pos, .. } => {
                 let b = block.as_ref().expect("a head entry");
-                b.push_value(pos, &pos.key()[..ulen], batch);
+                match b.is_cols() {
+                    false => b.push_value(pos, &pos.key()[..ulen], batch),
+                    true => {
+                        let buf = batch.buf_block(b);
+                        b.push_col(pos, &pos.key()[..ulen], buf, batch);
+                    }
+                }
             }
         }
     }
@@ -3381,6 +3451,9 @@ impl Cursor {
         let Cursor::Level { block: Some(b), pos, end, whole, .. } = self else {
             return (0, 0);
         };
+        if b.is_cols() {
+            return Cursor::run_into_cols(b, pos, *whole, end, ts, bound, batch, max);
+        }
         let (mut n, mut last) = (0, 0);
         // (Every entry of the block in range and no other source's entry before the block's
         // end: the rows after one pushed go a run at a time, `Block::run_rows`. With another
@@ -3421,6 +3494,41 @@ impl Cursor {
         (n, last)
     }
 
+    /// `run_into` of a column block (format 5): its rows into the batch not made (`Block::
+    /// run_rows_col`; none of them is stored out of line, none a deletion).
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn run_into_cols(b: &Arc<sst::Block>, pos: &mut sst::BlockPos, whole: bool, end: &[u8], ts: u64, bound: Option<&[u8]>, batch: &mut batch::RowBatch, max: usize) -> (usize, u64) {
+        let (mut n, mut last) = (0, 0);
+        let runs = (whole || end.is_empty()) && bound.is_none();
+        let buf = batch.buf_block(b);
+        while n < max && pos.index() < b.len() {
+            let k = pos.key();
+            if (!whole && !end.is_empty() && k >= end) || bound.is_some_and(|x| k >= x) || k.len() < 8 {
+                break;
+            }
+            let (uk, kts) = (user_key(k), key_ts(k));
+            let prev = batch.last_key().map_or(0, <[u8]>::len);
+            let same = pos.shared() >= prev || (pos.shared() == 0 && batch.last_key() == Some(uk));
+            if kts > ts || same || !b.has_value(pos) {
+                break;
+            }
+            b.push_col(pos, uk, buf, batch);
+            n += 1;
+            last = kts;
+            if runs && n < max {
+                let (m, ver) = b.run_rows_col(pos, ts, max - n, batch, buf);
+                if m > 0 {
+                    n += m;
+                    last = ver;
+                }
+            } else {
+                b.step(pos);
+            }
+        }
+        (n, last)
+    }
+
     /// Past the entries at the head of the current block that `Scan::position` would step
     /// over one at a time, below `bound` (the other sources' smallest head) and the end:
     /// older versions of the key decided last (`decided`), and deletions at or before `ts`
@@ -3438,7 +3546,7 @@ impl Cursor {
             }
             let (uk, kts) = (user_key(k), key_ts(k));
             if uk != decided.as_slice() {
-                if kts > ts || b.value_ref(pos).is_some() {
+                if kts > ts || b.has_value(pos) {
                     break;
                 }
                 decided.clear();
@@ -3520,7 +3628,7 @@ impl Cursor {
 
 /// How many of the ranked sources `rank` (heads ascending) have a head below `k`.
 fn rank_of(sources: &[Cursor], rank: &[usize], k: &[u8]) -> usize {
-    rank.iter().take_while(|&&j| sources[j].head().is_some_and(|(h, _)| h < k)).count()
+    rank.iter().take_while(|&&j| sources[j].head_key().is_some_and(|h| h < k)).count()
 }
 
 struct Merge {
@@ -3555,15 +3663,15 @@ impl Merge {
         if let Some(i) = self.cur {
             self.sources[i].fill()?;
             // (A source's entries stop at the end: `head`, the memtables' ranges.)
-            match self.sources[i].head() {
-                Some((k, _)) if !self.bounded || k < self.bound.as_slice() => return Ok(Some(i)),
+            match self.sources[i].head_key() {
+                Some(k) if !self.bounded || k < self.bound.as_slice() => return Ok(Some(i)),
                 None if !self.bounded => return Ok(None),
                 _ => {}
             }
             // (Past the bound, the next source's head, or run out.)
             debug_assert_eq!(self.rank.first(), Some(&i));
             self.rank.remove(0);
-            if let Some((k, _)) = self.sources[i].head() {
+            if let Some(k) = self.sources[i].head_key() {
                 let at = 1 + rank_of(&self.sources, &self.rank[1..], k);
                 self.rank.insert(at, i);
             }
@@ -3573,7 +3681,7 @@ impl Merge {
             }
             self.rank.clear();
             for i in 0..self.sources.len() {
-                if let Some((k, _)) = self.sources[i].head() {
+                if let Some(k) = self.sources[i].head_key() {
                     let at = rank_of(&self.sources, &self.rank, k);
                     self.rank.insert(at, i);
                 }
@@ -3583,7 +3691,7 @@ impl Merge {
             self.cur = None;
             return Ok(None);
         };
-        let (k, _) = self.sources[i].head().expect("a ranked head");
+        let k = self.sources[i].head_key().expect("a ranked head");
         if !self.end.is_empty() && k >= self.end.as_slice() {
             self.cur = None;
             return Ok(None);
@@ -3591,7 +3699,7 @@ impl Merge {
         self.bound.clear();
         self.bounded = self.rank.len() > 1;
         if self.bounded {
-            let (b, _) = self.sources[self.rank[1]].head().expect("a ranked head");
+            let b = self.sources[self.rank[1]].head_key().expect("a ranked head");
             self.bound.extend_from_slice(b);
         }
         self.cur = Some(i);
@@ -3604,14 +3712,15 @@ impl Merge {
     /// `min` chose last may have moved since; a `g` that moves any makes the ranks stale: the
     /// caller then sets `cur` to None.
     fn with_zip<R>(&mut self, g: impl FnOnce(&mut [(&sst::Block, &mut sst::BlockPos)], Option<&[u8]>) -> R) -> Option<R> {
-        let zippable = |c: &Cursor| matches!(c, Cursor::Level { block: Some(_), end, whole, .. } if *whole || end.is_empty());
+        // (Not a column block's: the zips read values in the block's bytes.)
+        let zippable = |c: &Cursor| matches!(c, Cursor::Level { block: Some(b), end, whole, .. } if (*whole || end.is_empty()) && !b.is_cols());
         let n = self.rank.iter().take(sst::ZIP_MAX).take_while(|&&i| zippable(&self.sources[i])).count();
         if n < 2 {
             return None;
         }
         let bound = match self.rank.get(n) {
             Some(&ic) => {
-                let (k, _) = self.sources[ic].head().expect("a ranked head");
+                let k = self.sources[ic].head_key().expect("a ranked head");
                 self.zbound.clear();
                 self.zbound.extend_from_slice(k);
                 Some(self.zbound.as_slice())
@@ -3900,7 +4009,7 @@ impl Scan {
                 return Ok(None);
             };
             // (Entries passed over are never copied.)
-            let (k, v) = self.merge.sources[i].head().expect("a head entry");
+            let (k, v) = self.merge.sources[i].head_meta().expect("a head entry");
             let uk = user_key(k);
             if self.decided.as_deref() == Some(uk) {
                 // Another version of a key decided already. Past a second one, a seek past
@@ -4025,8 +4134,8 @@ impl Scan {
                 break;
             };
             let c = &mut self.merge.sources[i];
-            let (k, v) = c.head().expect("a head entry");
-            if resolve && v.is_some_and(toast::has_external) {
+            let (k, v) = c.head_meta().expect("a head entry");
+            if resolve && v == Some(true) {
                 if put_back.is_some() && batch.len() > first {
                     // (Left at the head for the next call, which `position` finds again: not
                     // as a key decided already.)
