@@ -1042,6 +1042,8 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/access/audit", "access", R, Tgt::Product),
     row("GET", "/v1/access/activity", "access", R, Tgt::Product),
     row("GET", "/v1/access/alerts", "access", R, Tgt::Product),
+    // Any connection may tell the operator what was hard (it changes nothing; capped an hour).
+    row("POST", "/v1/access/feedback", "access", R, Tgt::AnyGrant),
     row("GET", "/v1/access/oauth/clients", "access", R, Tgt::Product),
     row("GET", "/v1/access/oauth/clients/{id}", "access", R, Tgt::Product),
     row("GET", "/v1/access/oauth/step-ups/{id}", "access", R, Tgt::Product),
