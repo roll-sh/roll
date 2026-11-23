@@ -1936,6 +1936,20 @@ impl Store {
         self.alerts_after(from, n.clamp(1, 100), user)
     }
 
+    /// Count one use of `key` this hour (`hour`: the hour's number), on any node: false once
+    /// `max` were counted this hour (one row per key, reset when the hour moves on).
+    pub fn bump_hourly(&self, key: &str, hour: i64, max: i64) -> Result<bool> {
+        self.db.write(|c| {
+            let had: Option<String> = c.query_row("SELECT value FROM settings WHERE key = ?", [key], |r| r.get(0)).optional()?;
+            let n = had.and_then(|v| v.split_once(':').filter(|(h, _)| h.parse::<i64>().ok() == Some(hour)).and_then(|(_, n)| n.parse::<i64>().ok())).unwrap_or(0);
+            if n >= max {
+                return Ok::<_, Error>(false);
+            }
+            c.execute("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", params![key, format!("{hour}:{}", n + 1)])?;
+            Ok(true)
+        })
+    }
+
     /// Whether the alert `key` went out within `ms` (a read: no write when it did).
     pub fn alerted_within(&self, key: &str, now: i64, ms: i64) -> Result<bool> {
         Ok(self.setting_raw(key)?.and_then(|v| v.parse::<i64>().ok()).is_some_and(|at| now - at < ms))

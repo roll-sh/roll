@@ -41,6 +41,7 @@ pub fn router(access: Arc<Access>) -> Router {
         .route("/v1/access/audit", get(audit))
         .route("/v1/access/activity", get(activity))
         .route("/v1/access/alerts", get(alerts))
+        .route("/v1/access/feedback", post(feedback))
         .route("/v1/access/audit/sinks", get(sinks).post(create_sink))
         .route("/v1/access/audit/sinks/{id}", axum::routing::delete(delete_sink))
         .route("/v1/access/audit/sinks/{id}/retry", post(retry_sink))
@@ -1415,6 +1416,45 @@ async fn alerts(State(a): S, ext: Extensions, Query(q): Query<AlertsQuery>) -> c
     // A person starts from their own newest: it says nothing about others' alerts.
     let next = blocking(a, move |a| a.store.alerts_head(theirs.as_deref())).await?;
     Ok(Json(json!({ "events": [], "next": next })))
+}
+
+#[derive(Deserialize)]
+struct Feedback {
+    task: String,
+    actual: String,
+    expected: Option<String>,
+    tool: Option<String>,
+}
+
+/// Feedback a connection sends a step at a time (MCP's `access_send_feedback`, as Vercel's
+/// `submit_feedback`): what it was doing, what happened, what it expected. Kept on the alert feed
+/// (`agent_feedback`): the operator sees all of it, a person their own connections'. The words are
+/// a model's, maybe steered by what it read, so they're marked `outside` (lockdown withholds them),
+/// under the text fields lockdown knows (`title`: the task, `text`: what happened, `description`:
+/// what it expected). 20 an hour per connection.
+async fn feedback(State(a): S, ext: Extensions, Json(f): Json<Feedback>) -> crate::Result<Json<Value>> {
+    let who = who(&a, &ext)?;
+    let (key, grant, name, user) = match &who {
+        Who::Operator => ("operator".to_string(), None, None, None),
+        Who::Grant(g) => (g.id.to_string(), Some(g.id.to_string()), Some(g.name.to_string()), g.user.as_deref().map(str::to_string)),
+        Who::User(u) => (u.user.clone(), None, Some(u.handle.clone()), Some(u.user.clone())),
+    };
+    let fits = |v: &str, max: usize| !v.trim().is_empty() && v.chars().count() <= max;
+    if !fits(&f.task, 500) || !fits(&f.actual, 2000) || f.expected.as_deref().is_some_and(|e| e.chars().count() > 2000) || f.tool.as_deref().is_some_and(|t| t.chars().count() > 100) {
+        return Err(Error::BadRequest("task (1-500 characters) and actual (1-2,000) are required; expected up to 2,000; tool up to 100".into()));
+    }
+    let data = json!({
+        "grant": grant, "name": name, "tool": f.tool, "title": f.task.trim(), "text": f.actual.trim(),
+        "description": f.expected.as_deref().map(str::trim), "outside": true,
+    });
+    let seq = blocking(a, move |a| {
+        if !a.store.bump_hourly(&format!("feedback:{key}"), code_sql::now_ms() / 3_600_000, 20)? {
+            return Err(Error::TooMany("20 feedback notes an hour per connection: thanks, the operator has plenty to go on".into()));
+        }
+        a.store.record_alert("agent_feedback", &data, user.as_deref())
+    })
+    .await?;
+    Ok(Json(json!({ "kept": true, "seq": seq })))
 }
 
 #[derive(Deserialize)]
