@@ -93,7 +93,7 @@ pub fn listed(all: &[Value]) -> Vec<Value> {
         "name": FIND,
         "title": "Find roll tools",
         "description": format!(
-            "Search the tools this connection may use (products: {}) by what you want to do, e.g. \"create a postgres branch\" or \"redis keys\". Answers each match's name, description, input schema and whether it only reads. Run one with {RUN_READ} (read-only tools) or {RUN}. With no query, answers every tool's name and title.",
+            "Search the tools this connection may use (products: {}) by what you want to do, e.g. \"create a postgres branch\" or \"redis keys\". Answers each match's name, description, input schema and whether it only reads. Run one with {RUN_READ} (read-only tools) or {RUN}. With no query, answers every tool's name and title. To find a resource (a project, a database, a service) by its name or a dashboard link, use roll_find.",
             products.join(", ")
         ),
         "inputSchema": { "type": "object", "properties": {
