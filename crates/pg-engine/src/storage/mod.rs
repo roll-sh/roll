@@ -1725,14 +1725,14 @@ impl Store {
                 mem.insert(&k, v, ts);
             }
             appended(ts);
-            rotate = mem.bytes() >= self.opts.memtable_bytes;
+            rotate = (mem.bytes() >= self.opts.memtable_bytes).then_some(mem);
         }
         self.wait_durable(ts)?;
         after(ts);
-        if rotate {
-            self.rotate()?;
+        if let Some(m) = &rotate {
+            self.rotate_full(m)?;
         }
-        if rotate || ranged {
+        if rotate.is_some() || ranged {
             self.schedule_background();
         }
         Ok(ts)
@@ -1778,7 +1778,7 @@ impl Store {
             for (k, v) in writes {
                 mem.insert(&k, v, ts);
             }
-            rotate = mem.bytes() >= self.opts.memtable_bytes;
+            rotate = (mem.bytes() >= self.opts.memtable_bytes).then_some(mem);
         }
         if self.durable.load(Ordering::Acquire) < before {
             self.wait_durable(before)?;
@@ -1786,8 +1786,8 @@ impl Store {
         self.visible.fetch_max(ts, Ordering::AcqRel);
         self.wal_writer_delay.store(wal_writer_delay_ms.max(1), Ordering::Relaxed);
         self.wal_writer();
-        if rotate {
-            self.rotate()?;
+        if let Some(m) = &rotate {
+            self.rotate_full(m)?;
             self.schedule_background();
         }
         Ok(ts)
@@ -1864,7 +1864,7 @@ impl Store {
                 self.note_untouched(&writes);
                 self.ingest_locked(&mut c, ts, writes)?;
                 after(ts);
-                rotate = false;
+                rotate = None;
             } else {
                 c.wal.append_now(ts, &writes)?;
                 if self.opts.sync {
@@ -1882,13 +1882,13 @@ impl Store {
                 }
                 self.made_durable(ts);
                 after(ts);
-                rotate = mem.bytes() >= self.opts.memtable_bytes;
+                rotate = (mem.bytes() >= self.opts.memtable_bytes).then_some(mem);
             }
         }
-        if rotate {
-            self.rotate()?;
+        if let Some(m) = &rotate {
+            self.rotate_full(m)?;
         }
-        if rotate || ingest || ranged {
+        if rotate.is_some() || ingest || ranged {
             self.schedule_background();
         }
         Ok(ts)
@@ -2229,6 +2229,20 @@ impl Store {
     /// Freeze the memtable and start a new one (with its own WAL file).
     fn rotate(&self) -> Result<()> {
         self.rotate_inner(false)
+    }
+
+    /// `rotate` of memtable `mem`, which a commit found full, unless it was frozen already.
+    /// Every commit appended after the memtable filled up finds it full, and calls this after
+    /// its fsync, outside the commit lock: a plain `rotate` from each after the first froze the
+    /// memtable that took over, holding the few commits made meanwhile. Each such file of a few
+    /// entries (and its WAL file, made and synced) counted towards L0's compaction trigger as a
+    /// full one: under 8 clients, a compaction every two memtables instead of four.
+    fn rotate_full(&self, mem: &Arc<Memtable>) -> Result<()> {
+        let mut c = self.commit.lock();
+        if self.closed.load(Ordering::Acquire) || !Arc::ptr_eq(&self.view.load().mem, mem) {
+            return Ok(());
+        }
+        self.rotate_locked(&mut c)
     }
 
     /// `rotate`; but once the store is closed only `close`'s own rotation (`closing`) runs:
