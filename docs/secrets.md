@@ -6204,7 +6204,7 @@ Every lookup by key inside a request is a hash map (a grid of ~11k keys over 5 e
 
 After one key changes, each watcher used to read the whole folder again: at 1,000 pods on a
 9,900-key folder that was the 137–213 CPU-seconds above, per change. A watcher (`roll run
---watch`, the Go and TypeScript watches) now keeps its last answer with each key's **stamp** and,
+--watch`, every runtime client's watch and cache) now keeps its last answer with each key's **stamp** and,
 when the digest moves, asks `POST …/values/delta` for what changed since it, sending back the
 digest, the basis and the stamps it holds.
 
@@ -6263,8 +6263,9 @@ change, which now also works out the stamps, cost the same as before: 0.3 s on S
 
 `a_watchers_delta_returns_what_changed_and_is_audited` and
 `a_permission_change_since_the_answer_held_gets_the_full_set` (`tests/api.rs`) and
-`roll_run_watch_reads_a_change_through_a_delta` (`roll-cli/tests/secrets.rs`) cover it. The Python,
-Java, .NET and Ruby clients still read the full set on a change (rolld answers them as before).
+`roll_run_watch_reads_a_change_through_a_delta` (`roll-cli/tests/secrets.rs`) cover it, and each
+runtime client has a watch test against its own fake rolld that reads a one-key change through the
+route and falls back to a full read on a 404 (an older rolld).
 
 ### Large changes
 
@@ -6345,7 +6346,7 @@ In flight:
 
 Next after those:
 - **Item 6C** (the model gateway's upstreams as `roll://`, on #763's ref crate).
-- **Delta reads for the rest** (S each): the Kubernetes operator, the CSI provider and the Lambda extension don't use `Watch`, so they still read whole folders. `Watch` with a consumer goes through `/resolve`. The Python, Java, .NET and Ruby clients still need their deltas. The server's full-set fallback keeps all of them working.
+- **Delta reads for the rest** (S each): the Kubernetes operator, the CSI provider and the Lambda extension don't use `Watch`, so they still read whole folders. `Watch` with a consumer goes through `/resolve`. The server's full-set fallback keeps all of them working.
 - **A fresh project's developer can't reveal production** has no test of its own (item 9's last gap).
 - **Gate flakes under load** (another product's tests, seen on every secrets gate tonight at loads of 55–93): roll-cluster's Postgres lease and routing tests, code-control's `the_merge_queue_continues_a_dead_owners_batch` and `an_idle_sandbox_sleeps_and_a_command_wakes_it`. Each passes alone. They're roll code's and roll-cluster's tests, so they aren't fixed here.
 
