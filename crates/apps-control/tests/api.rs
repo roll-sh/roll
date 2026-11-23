@@ -2088,6 +2088,36 @@ async fn changes_are_an_audit_trail_without_values() {
     assert!(!all.to_string().contains("sk-s3cr3t"));
 }
 
+/// A spend spike (AWS Cost Anomaly Detection's): a project with limits whose last hour cost three
+/// times what that hour of the week usually does (and $1 at least) gets `spend.spike` once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_hour_far_past_its_usual_spend_is_a_spike() {
+    let w = world_with(|cfg| cfg.spend_every = Duration::from_millis(20)).await;
+    let (svc, _) = image_service(&w, "shop", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    call(&w.api, "PUT", &format!("/v1/apps/projects/{}/limits", w.project), Some(json!({"alert_usd": 10000}))).await;
+    let last = code_sql::now_ms() / 3_600_000 - 1;
+    let cpu = |s: f64| apps_control::store::UsageAdd { cpu_seconds: s, ..Default::default() };
+    // Four weeks of that hour at about $0.20; then $2.
+    for k in 1..=4 {
+        w.apps.store.add_usage(&id, "production", last - k * 168, &cpu(16_000.0)).unwrap();
+    }
+    let events = || async { call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1["events"].as_array().cloned().unwrap_or_default().into_iter().filter(|e| e["kind"] == "spend.spike").collect::<Vec<_>>() };
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(events().await.is_empty(), "its usual hour isn't a spike");
+    w.apps.store.add_usage(&id, "production", last, &cpu(170_000.0)).unwrap();
+    let mut got = Vec::new();
+    for _ in 0..200 {
+        got = events().await;
+        if !got.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(events().await.len() == 1 && got[0]["data"]["usd"].as_f64() > Some(1.9) && got[0]["data"]["usual_usd"].as_f64() < Some(0.3), "once: {got:?}");
+}
+
 /// A project past its alert gets `spend.alert` once; past its hard limit it's capped: its
 /// instances stop, a visitor gets a 402, deploys are refused; raising the limit lifts it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -4408,7 +4438,7 @@ async fn a_failed_deploy_is_sent_to_the_projects_targets_signed_and_retried() {
     let (st, hook) = call(&w.api, "POST", &base, Some(json!({"url": format!("http://{ok_at}/hook")}))).await;
     assert_eq!(st, StatusCode::CREATED, "{hook}");
     let secret = hook["secret"].as_str().unwrap().to_string();
-    assert_eq!(hook["events"], json!(["check.down", "heartbeat.missed", "alert.slo", "alert.anomaly", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "error.regressed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.cpu", "alert.metric", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]), "the default events");
+    assert_eq!(hook["events"], json!(["check.down", "heartbeat.missed", "alert.slo", "alert.anomaly", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "error.regressed", "crash_loop", "spend.alert", "spend.spike", "spend.limit", "alert.memory", "alert.cpu", "alert.metric", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]), "the default events");
     let (_, down) = call(&w.api, "POST", &base, Some(json!({"kind": "webhook", "url": format!("http://{bad_at}/x"), "events": ["deploy.failed"]}))).await;
     let (_, list) = call(&w.api, "GET", &base, None).await;
     assert!(!list.to_string().contains(&secret) && !list.to_string().contains("/hook"), "neither the secret nor the URL comes back: {list}");

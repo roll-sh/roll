@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// What a target can ask for; a new one gets the two that need someone.
-pub const EVENTS: [&str; 32] = [
+pub const EVENTS: [&str; 33] = [
     "deploy.failed",
     "deploy.base_updated",
     "rollout.waiting",
@@ -28,6 +28,7 @@ pub const EVENTS: [&str; 32] = [
     "crash_loop",
     "deploy.active",
     "spend.alert",
+    "spend.spike",
     "spend.limit",
     "alert.memory",
     "alert.cpu",
@@ -53,7 +54,7 @@ pub const EVENTS: [&str; 32] = [
     // Every `audit.*` entry (who changed what), for a SIEM's webhook; never an on-call page.
     "audit",
 ];
-const DEFAULT_EVENTS: [&str; 25] = ["check.down", "heartbeat.missed", "alert.slo", "alert.anomaly", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "error.regressed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.cpu", "alert.metric", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"];
+const DEFAULT_EVENTS: [&str; 26] = ["check.down", "heartbeat.missed", "alert.slo", "alert.anomaly", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "error.regressed", "crash_loop", "spend.alert", "spend.spike", "spend.limit", "alert.memory", "alert.cpu", "alert.metric", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"];
 /// Whether a target with `events` hears an event: its own kind, or for a resolution, the alert's
 /// (whoever heard an alert hears it clear; there's nothing else to ask for).
 fn wants(events: &[String], kind: &str, data: &Value, oncall: bool) -> bool {
@@ -447,6 +448,10 @@ impl Apps {
                 } else {
                     (format!("{project}: spending limit reached"), format!("${usd:.2} this month reached the ${limit:.2} limit: its services are stopped until the limit is raised or the month ends."))
                 }
+            }
+            "spend.spike" => {
+                let (project, usd, usual) = (e.data["project_name"].as_str().unwrap_or("a project"), e.data["usd"].as_f64().unwrap_or(0.0), e.data["usual_usd"].as_f64().unwrap_or(0.0));
+                (format!("{project}: spending spiked"), format!("${usd:.2} in the last hour, against ${usual:.2} usually at this hour (the median of the same hour over the last four weeks). Its usage shows what by service."))
             }
             "alert.memory" => (format!("{what}: memory"), format!("Its instances used {}% of their {} MB limit for five minutes (the alert is at {}%).", e.data["value"], e.data["limit_mb"], e.data["threshold"])),
             "alert.cpu" => (format!("{what}: CPU"), format!("Its instances used {}% of their {} vCPU for five minutes (the alert is at {}%). Give them more (`roll apps set --cpu`), or let it scale on CPU (`--cpu-target`).", e.data["value"], e.data["cpu"], e.data["threshold"])),
