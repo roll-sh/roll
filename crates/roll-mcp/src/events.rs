@@ -70,13 +70,13 @@ const FEEDS: &[Feed] = &[
     },
     Feed {
         name: "previews.event",
-        description: "Something happened to a preview: created, ready (up after a push, never a sleeping one waking), failed, a visual change waiting for review, or deleted. Filter by kinds and project; only your projects' previews.",
+        description: "Something happened to a preview: created, ready (up after a push, never a sleeping one waking), failed, a visual change waiting for review, production's browser checks passed or failed on its head, or deleted. Filter by kinds and project; only your projects' previews.",
         tool: "previews_list",
         product: "previews",
         path: &[],
         after: "/v1/previews/events?limit=100&after=",
         latest: "/v1/previews/events?latest=1",
-        filters: &[("kinds", "kind", "Only these kinds (ready, failed, visual_change, created, deleted); all when left out"), ("project", "project", "Only this workspace project's")],
+        filters: &[("kinds", "kind", "Only these kinds (ready, failed, visual_change, browser_checks_passed, browser_checks_failed, created, deleted); all when left out"), ("project", "project", "Only this workspace project's")],
         payload: || {
             json!({ "type": "object", "properties": {
                 "seq": { "type": "integer" },
@@ -116,13 +116,13 @@ const FEEDS: &[Feed] = &[
     },
     Feed {
         name: "access.alert",
-        description: "roll alerted the operator: a tool is failing (tool_failing: its server errors jumped), a decoy token was used (decoy_used: someone found where it was planted), a leaked token or secret was revoked (token_revoked, secret_revoked: where it was found), or the checkup found something new about a token (checkup_finding: gone broad, unused, roaming…, with its fix). The operator's connections hear every alert; a person's own connections hear those about their own tokens. Filter by kinds and tool.",
+        description: "roll alerted the operator: a tool is failing (tool_failing: its server errors jumped), a decoy token was used (decoy_used: someone found where it was planted), a leaked token or secret was revoked (token_revoked, secret_revoked: where it was found), the checkup found something new about a token (checkup_finding: gone broad, unused, roaming…, with its fix), or an agent sent feedback (agent_feedback: what it was doing and what went wrong; withheld in lockdown). The operator's connections hear every alert; a person's own connections hear those about their own tokens. Filter by kinds and tool.",
         tool: "access_activity",
         product: "access",
         path: &[],
         after: "/v1/access/alerts?limit=100&after=",
         latest: "/v1/access/alerts?latest=1",
-        filters: &[("kinds", "kind", "Only these kinds (tool_failing, decoy_used, token_revoked, secret_revoked, checkup_finding); all when left out"), ("tool", "tool", "Only alerts about this tool")],
+        filters: &[("kinds", "kind", "Only these kinds (tool_failing, decoy_used, token_revoked, secret_revoked, checkup_finding, agent_feedback); all when left out"), ("tool", "tool", "Only alerts about this tool")],
         payload: || {
             json!({ "type": "object", "properties": {
                 "seq": { "type": "integer" },
