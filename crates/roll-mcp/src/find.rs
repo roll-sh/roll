@@ -110,14 +110,13 @@ where
         return call(k.read, json!({ k.param: id }), false).await.unwrap_or_else(|| error(&format!("{} isn't available", k.read)));
     }
     let q = query.to_lowercase();
-    let lists: Vec<&'static Kind> = KINDS.iter().filter(|k| has(k.list)).collect();
-    let answers: Vec<(&'static Kind, Option<Value>)> = futures::stream::iter(lists.into_iter().map(|k: &'static Kind| {
+    // The calls made up front: a stream over a closure trips the Send check of the request's future.
+    let mut reads = Vec::new();
+    for k in KINDS.iter().filter(|k| has(k.list)) {
         let f = call(k.list, json!({}), true);
-        async move { (k, f.await) }
-    }))
-    .buffer_unordered(AT_ONCE)
-    .collect()
-    .await;
+        reads.push(async move { (k, f.await) });
+    }
+    let answers: Vec<(&'static Kind, Option<Value>)> = futures::stream::iter(reads).buffer_unordered(AT_ONCE).collect().await;
     let (mut matches, mut skipped) = (Vec::new(), Vec::new());
     for (k, answer) in answers {
         match answer {
