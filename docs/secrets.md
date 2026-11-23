@@ -4043,8 +4043,12 @@ Agent's templates do).
   that can't read it any more says why instead of running. No canvas holds a roll code owner, so
   its project is the one whose canvas holds one of the owner's repositories and stands for it,
   named in the reference when there are several. Pasted keys are still sealed in roll code's own
-  table. The agents' endpoints and gateway upstreams still keep their own copies (`op://`,
-  `env:`, a file).
+  table. An agent machine's endpoint key can be one too (an endpoint's `key_ref`,
+  docs/code/agents.md "Endpoints"). It's bound to whoever sets it for `agent:<machine>`, through
+  the same project. roll code's relay reads it as them after each of the machine's `hello`s (a
+  digest each time, the value only when it moved) and sends it sealed to the daemon, never kept.
+  Once they can't read it, the daemon is told why and the endpoint has no key. The model
+  gateway's upstreams still keep their own copies (`op://`, `env:`, a file).
 - **Who reads it.** The product asks rolld in process (`resolve_as` or `resolve_for`), naming the workspace resource that needs the value: a replication target
   resolves for the source bucket that replicates through it. The project is the one whose canvas
   holds that resource *and* that stands for it (`Workspace::trusts`): a person's canvas only
@@ -6402,17 +6406,14 @@ Newest entries first; older State and Ranked entries follow further down, as his
    or a disable stops the copier's running sandboxes (#697).
 6. **roll's own AI and chat credentials can't be `roll://` references** (integration, M):
    - reviewer provider keys (code-control's own table): **done**, `bind_ref` for `code:review:<owner>`;
-   - agents' endpoints (pasted or `op://`);
+   - agents' endpoints (pasted or `op://`): **done**, `bind_ref` for `agent:<machine>`, sent sealed
+     by the relay (`endpoint.key`);
    - the model gateway's upstreams (`env:`/file).
 
    A leaked model key, the commonest leak, gets no reach, health, validity check or rotation.
    Bind with `bind_ref` and read with `resolve_as`. The daemon resolves over its machine link.
-   Left for the endpoints and upstreams: the relay binds a `roll://` `key_ref` at `endpoint.set`
-   (and `gateway.key`) to the sender, for `agent:<machine>` (a `ResourceRef` like
-   `code_owner`'s, through the machine owner's project), keeps the maker in its own table, and
-   after each `hello` sends the value sealed to the daemon's `seal_key` (`open_with`'s context
-   names the endpoint); the daemon keeps it in memory, as `op://`. `EndpointSpec::check` then
-   takes `roll://` too (fixtures, `agents-api.ts`).
+   Left for the upstreams: the endpoints' way (`code-control/src/agents/endpoint_refs.rs`), at
+   `gateway.key` with its upstream's context.
 7. **apps' environments with their own data drop every linked key** (S). `Values.linked` gains
    `{name, kind, ref}`, so apps drops only what it branched.
 8. **A local agent outside Lambda** (S–M): the Lambda extension's surface as a sidecar.

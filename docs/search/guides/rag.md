@@ -190,8 +190,15 @@ for i, h in enumerate(hits, 1):
 
 The model call goes out from roll with the key sealed in the cluster, so the script only holds
 the cluster's key. Each call waits at most two minutes. For streaming, call
-`POST /_inference/completion/llm/_stream`; roll currently sends the streamed events all at once
-when the answer is complete.
+`POST /_inference/completion/llm/_stream` (or `_inference/chat_completion/llm/_stream` for a
+`chat_completion` endpoint): the answer comes as server-sent events while the model writes it.
+
+Documents can hold text that reads like instructions. The Playground's Chat tab (in the
+dashboard) does this flow with the documents fenced as quoted data: a random boundary per
+request, `<`, `>` and the boundary escaped in their text, and a system message that says never
+to follow them. Its "View code" gives the same flow in curl, Python or JavaScript, and that code
+runs on Elasticsearch too. Render the answer as text: a link or image the model writes could
+send another document's text to someone else's server.
 
 ## Good to know
 

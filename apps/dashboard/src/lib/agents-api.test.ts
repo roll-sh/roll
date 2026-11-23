@@ -137,6 +137,7 @@ describe("agent-proto fixtures", () => {
       "endpoint.set": true,
       "endpoint.remove": true,
       "endpoint.check": true,
+      "endpoint.key": true,
       "gateway.configure": true,
       "gateway.key": true,
       "gateway.client.issue": true,

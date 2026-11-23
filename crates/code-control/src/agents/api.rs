@@ -559,11 +559,13 @@ async fn events(State(code): S, caller: Caller, parts: Parts, Path(owner): Path<
 /// A daemon's error, the machine being offline or not answering are `Reply::Error`s too, with
 /// a status to match and `error` set. Commands that work on a roll code repo get a grant for it
 /// (`code.rs`), and a published branch's change is added to the reply.
+#[allow(clippy::too_many_arguments)]
 async fn command(
     State(code): S,
     caller: Caller,
     fwd: super::code::Forward,
     api: Option<Extension<ApiRouter>>,
+    ext: axum::http::Extensions,
     Path((owner, machine)): Path<(String, String)>,
     Body(b): Body,
 ) -> Result<Response> {
@@ -589,13 +591,19 @@ async fn command(
             (**settings).clone().check().map_err(Error::Invalid)?;
         }
         // An endpoint's key arrives sealed to the daemon: the relay can only check its shape
-        // and forwards it without keeping it (docs/code/agents.md, "Endpoints").
+        // and forwards it without keeping it (docs/code/agents.md, "Endpoints"). A `roll://` key
+        // is bound to the sender here, and sent sealed from roll secrets (`endpoint_refs`).
         agent_proto::Command::EndpointSet { endpoint, key } => {
-            endpoint.clone().check().map_err(Error::Invalid)?;
+            let spec = endpoint.clone().check().map_err(Error::Invalid)?;
             if let agent_proto::KeyChange::Set { sealed } = key {
                 sealed.check().map_err(Error::Invalid)?;
             }
+            match spec.roll_ref() {
+                Some(r) => super::endpoint_refs::bind(&code, &o, &m, &spec.id, r, &crate::SecretsAsker::of(&ext)).await?,
+                None => super::endpoint_refs::unbind(&code, &m.id, &spec.id)?,
+            }
         }
+        agent_proto::Command::EndpointKey { .. } => return Err(Error::Forbidden("endpoint.key comes from roll's relay only".into())),
         // The gateway's settings hold no secret; an upstream's key arrives sealed to the host, and
         // a client key leaves it sealed to the machine named by `seal_key` (docs/code/gateway.md).
         agent_proto::Command::GatewayConfigure { settings } => {
@@ -613,6 +621,9 @@ async fn command(
     let granted = super::code::grant_for(&code, &caller, &m, &req.command).await?;
     let (grant, repo) = granted.map_or((None, None), |(g, r)| (Some(g), Some(r)));
     let reply = code.machine_command(&m, req.id, sender(&caller), req.command.clone(), grant).await;
+    if let (agent_proto::Command::EndpointRemove { endpoint }, false) = (&req.command, matches!(reply, Reply::Error(_))) {
+        super::endpoint_refs::unbind(&code, &m.id, endpoint)?;
+    }
     let reply = match repo {
         Some(r) => super::code::published(&code, api.as_ref().map(|e| &e.0), &fwd, &m, &req.command, &r, reply).await,
         None => reply,

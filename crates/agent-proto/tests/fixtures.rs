@@ -478,6 +478,12 @@ fn commands() -> Vec<Command> {
         Command::EndpointSet { endpoint: endpoint_spec(), key: KeyChange::Clear },
         Command::EndpointRemove { endpoint: "cliproxy".into() },
         Command::EndpointCheck { endpoint: "cliproxy".into() },
+        Command::EndpointSet { endpoint: EndpointSpec { key_ref: Some("roll://production/ai/ANTHROPIC_KEY".into()), ..endpoint_spec() }, key: KeyChange::Keep },
+        Command::EndpointKey { endpoint: "cliproxy".into(), key: RefKey::Set { sealed: sealed() } },
+        Command::EndpointKey {
+            endpoint: "cliproxy".into(),
+            key: RefKey::Refused { reason: "maker unreachable: usr_ada, who chose it, can no longer reveal production:/ai or can no longer sign in".into() },
+        },
         Command::GatewayConfigure { settings: Box::new(gateway_settings()) },
         Command::GatewayKey { upstream: "anthropic".into(), key: KeyChange::Set { sealed: sealed() } },
         Command::GatewayKey { upstream: "openrouter".into(), key: KeyChange::Clear },
@@ -540,6 +546,7 @@ fn covered_command(c: &Command) {
         | Command::EndpointSet { .. }
         | Command::EndpointRemove { .. }
         | Command::EndpointCheck { .. }
+        | Command::EndpointKey { .. }
         | Command::GatewayConfigure { .. }
         | Command::GatewayKey { .. }
         | Command::GatewayClientIssue { .. }
@@ -1349,7 +1356,7 @@ fn every_variant_of_every_tagged_enum_is_sampled() {
     let tags = |v: serde_json::Value, key: &str| -> std::collections::BTreeSet<String> {
         v.as_array().unwrap().iter().map(|x| x[key].as_str().unwrap().to_string()).collect()
     };
-    assert_eq!(tags(serde_json::to_value(commands()).unwrap(), "type").len(), 55, "commands");
+    assert_eq!(tags(serde_json::to_value(commands()).unwrap(), "type").len(), 56, "commands");
     assert_eq!(tags(serde_json::to_value(replies()).unwrap(), "type").len(), 20, "replies");
     assert_eq!(tags(serde_json::to_value(entities()).unwrap(), "kind").len(), 8, "entities");
     let bodies: std::collections::BTreeSet<String> = entities()

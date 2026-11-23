@@ -62,6 +62,7 @@ describe("endpoints", () => {
     expect(keyLabel(a)).toBe("Key set (never shown)");
     expect(keyLabel(b)).toBe("No key");
     expect(keyLabel({ ...b, key: "reference", key_ref: "op://Dev/GW/key" })).toBe("1Password: op://Dev/GW/key");
+    expect(keyLabel({ ...b, key: "reference", key_ref: "roll://production/GW_KEY" })).toBe("roll secrets: roll://production/GW_KEY");
   });
 });
 

@@ -49,7 +49,9 @@ export function checkEndpoint(spec: EndpointSpec): { spec: EndpointSpec } | { er
   const text = (v?: string) => v?.trim() || undefined;
   const url_env = text(spec.url_env);
   const key_env = text(spec.key_env);
-  const key_ref = text(spec.key_ref);
+  // A roll secrets reference is kept exactly as typed (roll's relay parses it, `Reference::parse`);
+  // a 1Password one is trimmed.
+  const key_ref = spec.key_ref?.trim().startsWith("roll://") ? spec.key_ref : text(spec.key_ref);
   for (const n of [url_env, key_env]) {
     if (n !== undefined && (!ENV_NAME.test(n) || n.length > l.envName)) {
       return { error: `${JSON.stringify(n)} isn't an environment variable name (letters, digits and _, not starting with a digit)` };
@@ -60,8 +62,8 @@ export function checkEndpoint(spec: EndpointSpec): { spec: EndpointSpec } | { er
   } else if (url_env || key_env) {
     return { error: `only a custom endpoint names its variables (${KIND_LABEL[spec.kind]} sets its own)` };
   }
-  if (key_ref !== undefined && (!key_ref.startsWith("op://") || key_ref.length > l.keyRef || /\s/.test(key_ref))) {
-    return { error: `a 1Password reference looks like op://vault/item/field (at most ${l.keyRef} bytes, no spaces)` };
+  if (key_ref !== undefined && (!(key_ref.startsWith("op://") || key_ref.startsWith("roll://")) || key_ref.length > l.keyRef || /\s/.test(key_ref))) {
+    return { error: `a key reference is a 1Password one (op://vault/item/field) or roll secrets' (roll://ENV/KEY), at most ${l.keyRef} bytes, no spaces` };
   }
   const out: EndpointSpec = { id: spec.id, name, kind: spec.kind, base_url };
   if (providers.length) out.providers = providers;
@@ -146,7 +148,7 @@ export function demoModels(kind: EndpointKind): EndpointModel[] {
 
 /** "Key set (never shown)", "No key", "1Password: op://…". */
 export function keyLabel(e: EndpointInfo): string {
-  if (e.key === "reference") return `1Password: ${e.key_ref ?? ""}`;
+  if (e.key === "reference") return e.key_ref?.startsWith("roll://") ? `roll secrets: ${e.key_ref}` : `1Password: ${e.key_ref ?? ""}`;
   if (e.key === "sealed") return "Key set (never shown)";
   return "No key";
 }
