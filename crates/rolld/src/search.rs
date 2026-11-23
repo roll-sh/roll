@@ -22,6 +22,12 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::info;
 
+/// `--search-request-memory-max`: refused at startup unless it's a byte size, a percentage above
+/// 0 and at most 100, or -1.
+fn request_memory_max(v: &str) -> Result<String, String> {
+    search_control::request_max_limit(v, 1 << 30).map(|_| v.trim().to_string())
+}
+
 #[derive(Args, Clone, Debug)]
 pub struct SearchArgs {
     /// Disable roll search.
@@ -54,10 +60,17 @@ pub struct SearchArgs {
     /// Local disk cache for segments, in bytes.
     #[arg(long = "search-cache-bytes", env = "ROLL_SEARCH_CACHE_BYTES", default_value_t = 10 << 30)]
     pub search_cache_bytes: u64,
-    /// Memory all loaded clusters may hold together, in MiB (0: no budget). Past it the least
-    /// recently used idle clusters unload.
+    /// Memory loaded clusters and their requests may hold together, in MiB (0: no budget for
+    /// loaded clusters, and half of the host's memory for both). Past it in resident memory the
+    /// least recently used idle clusters unload; a request (aggregations, ES|QL, kept results)
+    /// that would take residents and requests past it fails with `circuit_breaking_exception`.
     #[arg(long = "search-memory-mb", env = "ROLL_SEARCH_MEMORY_MB", default_value_t = 0)]
     pub search_memory_mb: u64,
+    /// The most one cluster's `request` circuit breaker may allow, whatever its
+    /// `indices.breaker.request.limit`: a byte size (`512mb`) or a percentage of the node's memory
+    /// for requests (default `25%`; `-1`: no maximum).
+    #[arg(long = "search-request-memory-max", env = "ROLL_SEARCH_REQUEST_MEMORY_MAX", default_value = "25%", value_parser = request_memory_max)]
+    pub search_request_memory_max: String,
     /// Memory one Painless script execution may hold, in MiB (0: no limit). Tenants can't
     /// raise it; past it the script fails with a `painless_error`.
     #[arg(long = "search-script-memory-mb", env = "ROLL_SEARCH_SCRIPT_MEMORY_MB", default_value_t = 64)]
@@ -286,6 +299,7 @@ impl Search {
         }
         cfg.audit.retention = Duration::from_secs(args.search_audit_retention_days.max(1) * 86_400);
         cfg.audit.max_bytes = args.search_audit_max_mb.max(1) << 20;
+        cfg.node_settings.push((search_control::SEARCH_REQUEST_MAX_LIMIT.to_string(), args.search_request_memory_max.trim().to_string()));
         cfg.embed = embed_config(home, args)?;
         if args.search_repository_allow_private {
             cfg.node_settings.push((search_control::S3_ALLOW_PRIVATE.to_string(), "true".to_string()));
