@@ -141,7 +141,8 @@ pub fn convert(yaml: &str, connector: Option<&str>) -> anyhow::Result<Import> {
                 values.insert("sitemap_discovery".into(), json!(!disabled));
             }
             "full_html_extraction_enabled" => {
-                snippet.insert(k.clone(), v.clone());
+                let Some(on) = yaml_bool(v) else { bail!("[full_html_extraction_enabled] is true or false") };
+                snippet.insert(k.clone(), json!(on));
             }
             k if LIMITS.contains(&k) => {
                 snippet.insert(k.into(), v.clone());

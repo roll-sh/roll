@@ -121,7 +121,11 @@ impl CrawlRule {
     pub fn matches(&self, url: &str) -> bool {
         use regex_automata::dfa::Automaton;
         let input = regex_automata::Input::new(url.as_bytes()).anchored(regex_automata::Anchored::Yes);
-        matches!(self.dfa.try_search_fwd(&input), Ok(Some(_)))
+        match self.dfa.try_search_fwd(&input) {
+            Ok(m) => m.is_some(),
+            // A search that gives up proves nothing: a deny rule then denies (fails closed).
+            Err(_) => !self.allow,
+        }
     }
 }
 
@@ -164,6 +168,7 @@ const MAX_LISTED: usize = 10_000;
 /// Unicode off, so `.` is one byte, not a UTF-8 automaton, and an ordinary rule's DFA is a few KiB.
 const MAX_RULES: usize = 1000;
 const RULES_BYTES: usize = 10 << 20;
+const NFA_BYTES: usize = 64 << 10;
 const MAX_PATTERN: usize = 2 << 10;
 
 /// A domain's URL as Open Crawler takes it: `scheme://host[:port]`, nothing else. Its origin.
@@ -222,9 +227,10 @@ fn compile_rule(origin: &str, r: &Value, at: &str, size_limit: usize) -> Result<
     };
     use regex_automata::{dfa::dense, nfa::thompson, util::syntax};
     let dfa = dense::Builder::new()
-        .configure(dense::Config::new().start_kind(regex_automata::dfa::StartKind::Anchored).dfa_size_limit(Some(size_limit)).determinize_size_limit(Some(size_limit * 4)))
+        .configure(dense::Config::new().start_kind(regex_automata::dfa::StartKind::Anchored).dfa_size_limit(Some(size_limit)).determinize_size_limit(Some(size_limit)))
         .syntax(syntax::Config::new().unicode(false).utf8(false))
-        .thompson(thompson::Config::new().nfa_size_limit(Some(size_limit)))
+        // A small NFA keeps each state's closure cheap while the DFA is built.
+        .thompson(thompson::Config::new().nfa_size_limit(Some(size_limit.min(NFA_BYTES))))
         .build(&format!("\\A{}(?:{body})", regex::escape(origin)))
         .map_err(|e| {
             if e.is_size_limit_exceeded() {
@@ -475,6 +481,20 @@ mod tests {
                 assert!(d.rule_for(&l).is_none());
             }
         });
+        // And cheap outright, not only linear: a thousand checks of a 2 KiB URL.
+        let long = Link::parse(&format!("https://e.com/{}", "a".repeat(2040)), None).unwrap();
+        let ((), cpu) = search_test_support::cpu_time(|| {
+            for _ in 0..1000 {
+                assert!(d.rule_for(&long).is_none());
+            }
+        });
+        assert!(cpu < std::time::Duration::from_secs(2), "{cpu:?} of CPU for 1,000 URLs");
+        // Building the worst rules the limits let through (each splitting every byte class,
+        // nesting optional pieces) is bounded too: whatever is accepted or refused, the plan's
+        // CPU stays small.
+        let worst = "/[\\x00-\\x08\\x10-\\x18\\x20-\\x28\\x30-\\x38\\x40-\\x48\\x50-\\x58\\x60-\\x68\\x70-\\x78\\x80-\\x88\\x90-\\x98](?:[^x]?){1000}";
+        let (_, cpu) = search_test_support::cpu_time(|| plan(&fields(&[]), Some(&rules(&[worst; 10])), &ceilings()));
+        assert!(cpu < std::time::Duration::from_secs(5), "{cpu:?} of CPU to build the plan");
         assert!(snippet_problem(&obj(r#"{"domains":[{"url":"https://e.com","seed_urls":["https://other.com/"]}]}"#), &ceilings()).unwrap().contains("isn't on the domain"));
     }
 }

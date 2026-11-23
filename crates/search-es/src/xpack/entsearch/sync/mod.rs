@@ -226,17 +226,24 @@ pub async fn run_due(cluster: &Cluster, now: i64) {
         .filter(|(_, j)| instant_ms(j.get("last_seen")).unwrap_or(0) + STALE_MS <= now)
         .map(|(id, _)| id.clone())
         .collect();
-    // Edited drafts of connectors roll runs, and their validation.
-    let drafts: Vec<(String, Value)> = st
+    // Edited drafts of connectors roll runs, and their validation: off the async workers, since a
+    // crawler's crawl rules are compiled to DFAs to be validated.
+    let edited: Vec<(String, String, Value, Vec<String>)> = st
         .metadata
         .xpack
         .iter(CONNECTORS)
         .filter(|(id, c)| syncs_here(cluster, &st, id, c) && draft_edited(c))
         .map(|(id, c)| {
             let draft = c.get("filtering").and_then(Value::as_array).and_then(|f| f.first()).and_then(|f| f.get("draft")).cloned().unwrap_or(Value::Null);
-            (id.clone(), rules::validate(str_of(c, "service_type"), &draft, &config::listed(c, "buckets"), &crawler::ceilings(cluster)))
+            (id.clone(), str_of(c, "service_type").to_string(), draft, config::listed(c, "buckets"))
         })
         .collect();
+    let drafts: Vec<(String, Value)> = if edited.is_empty() {
+        Vec::new()
+    } else {
+        let ceilings = crawler::ceilings(cluster);
+        tokio::task::spawn_blocking(move || edited.into_iter().map(|(id, service, draft, buckets)| (id, rules::validate(&service, &draft, &buckets, &ceilings))).collect()).await.unwrap_or_default()
+    };
     // Schedules that came due (or are seen for the first time, which starts their count).
     let fired: Vec<(String, &'static str, bool)> = st
         .metadata

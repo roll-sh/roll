@@ -192,7 +192,12 @@ pub async fn sync(cid: &str, v: &Values, sink: &mut Sink<'_>, full: bool, cursor
     }
     let int = |k: &str| -> Result<Option<i64>, String> { v.text(k).map(|s| s.parse::<i64>().map_err(|_| format!("the connector's [{k}] isn't a number"))).transpose() };
     let fields = Fields { urls: v.list("urls"), sitemap_urls: v.list("sitemap_urls"), sitemap_discovery: v.bool("sitemap_discovery", true), max_crawl_depth: int("max_crawl_depth")?, max_unique_url_count: int("max_unique_url_count")? };
-    let plan = config::plan(&fields, advanced, &ceilings(cluster)).map_err(Stop::Failed)?;
+    // Building the rules' DFAs is CPU work: off the async workers.
+    let (ceil, advanced) = (ceilings(cluster), advanced.cloned());
+    let plan = tokio::task::spawn_blocking(move || config::plan(&fields, advanced.as_ref(), &ceil))
+        .await
+        .map_err(|_| Stop::Failed("building the crawl's rules stopped on an internal error".into()))?
+        .map_err(Stop::Failed)?;
     let auth = auth(v, egress.allow_private()).map_err(Stop::Failed)?;
     let auth_origin = auth.as_ref().map(|a| a.origin.clone());
     let fetcher = Fetcher::new(egress.clone(), auth).map_err(Stop::Failed)?;
@@ -472,6 +477,20 @@ impl Crawl<'_, '_> {
         }
     }
 
+    /// Whether the crawl's own configuration leaves `link` out: not on its domains, over its URL
+    /// limits, or denied by its crawl rules (robots.txt and blocked hosts aren't the tenant's
+    /// configuration, and are left to the re-check).
+    fn configured_out(&mut self, link: &Link) -> bool {
+        let started = Instant::now();
+        let limits = &self.plan.limits;
+        let out = link.as_str().len() > limits.usize(L::UrlLength)
+            || link.segments() > limits.usize(L::UrlSegments)
+            || link.params() > limits.usize(L::UrlParams)
+            || self.plan.domain(link).is_none_or(|d| d.rule_for(link).is_some_and(|r| !r.allow));
+        self.match_time += started.elapsed();
+        out
+    }
+
     /// Counts a verdict that keeps a URL out.
     fn count(&mut self, v: Verdict) {
         match v {
@@ -568,11 +587,18 @@ impl Crawl<'_, '_> {
         if let Some(at) = self.next_at.get(&origin).copied()
             && at > Instant::now()
         {
+            // A turn after the deadline (a long `Crawl-delay`): the origin is left for this
+            // crawl, rather than holding every other origin until the deadline.
+            if at >= self.deadline {
+                self.stats.skipped_origin_urls += 1;
+                self.skipped_origins.insert(origin);
+                return Ok(false);
+            }
             self.sleep_until(at).await?;
         }
         let site = hosts::site_of(link);
         while let Some(at) = hosts::turn(&site, self.floor) {
-            if Instant::now() >= self.deadline {
+            if Instant::now() >= self.deadline || at >= self.deadline {
                 self.limit_reached.get_or_insert("max_duration");
                 return Ok(false);
             }
@@ -975,6 +1001,12 @@ impl Crawl<'_, '_> {
                 let last = h.pointer(&["_source", "last_crawled_at"]).and_then(Value::as_str).and_then(ms_of);
                 let k = link.hash64();
                 origins.entry(link.origin()).or_default().0 += 1;
+                // Left out by the crawl's own configuration (its domains, crawl rules, URL
+                // limits): decided here, fetching nothing, whatever budget the crawl has left.
+                if !self.gone.contains(&k) && !self.kept.contains(&k) && self.configured_out(&link) {
+                    self.gone.insert(k);
+                    self.excluded.insert(k);
+                }
                 if self.gone.contains(&k) || self.kept.contains(&k) {
                     settle(self, id.to_string(), &link, last, &mut delete, &mut origins);
                 } else if recheck.len() < max_recheck {

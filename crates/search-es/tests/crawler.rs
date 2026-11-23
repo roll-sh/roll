@@ -154,7 +154,13 @@ async fn crawler(c: &Cluster, values: &str, snippet: Option<&str>) {
     assert_eq!(s, 201, "{t}");
     let (s, _, t) = call(c, "PUT", "/_connector/site/_configuration", Some(&format!(r#"{{"values":{values}}}"#))).await;
     assert_eq!(s, 200, "{t}");
-    let Some(snippet) = snippet else { return };
+    if let Some(snippet) = snippet {
+        set_snippet(c, snippet).await;
+    }
+}
+
+/// Puts `snippet` as the draft advanced snippet, waits for roll to validate it, and activates it.
+async fn set_snippet(c: &Cluster, snippet: &str) {
     let (s, _, t) = call(c, "PUT", "/_connector/site/_filtering", Some(&format!(r#"{{"advanced_snippet":{{"value":{snippet}}}}}"#))).await;
     assert_eq!(s, 200, "{t}");
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
@@ -389,8 +395,37 @@ async fn purge_guards_and_strikes() {
     assert_eq!(at(&conn, "configuration.force_purge.value"), &Value::Bool(false), "{conn:?}");
 }
 
+/// A domain taken out of the crawl is purged even when the crawl used its whole budget (its
+/// documents are decided as they are listed, fetching nothing), and a page kept through three
+/// crawls in a row stays while it is less than a week old (`roll.crawler.strike_min_age`).
+#[tokio::test]
+async fn removed_domains_go_and_strikes_wait_a_week() {
+    let (a, b) = (Site::start().await, Site::start().await);
+    a.page("/", r#"<p>a</p><a href="/a1">1</a><a href="/a2">2</a>"#);
+    a.page("/a1", "<p>a1</p>");
+    a.page("/a2", "<p>a2</p>");
+    b.page("/", r#"<p>b</p><a href="/b1">1</a><a href="/b2">2</a>"#);
+    b.page("/b1", "<p>b1</p>");
+    b.page("/b2", "<p>b2</p>");
+    let c = cluster(&[]).await;
+    crawler(&c, &format!(r#"{{"urls":"{}"}}"#, a.url("/")), Some(&format!(r#"{{"domains":[{{"url":"{}"}},{{"url":"{}"}}]}}"#, a.base, b.base))).await;
+    assert_eq!(num(&crawl(&c).await, "indexed_document_count"), 6);
+    a.set("/a1", 503, &[], "busy");
+    for _ in 0..2 {
+        crawl(&c).await;
+    }
+    // B leaves the crawl, and the budget (2 URLs) ends the crawl before anything is re-checked.
+    set_snippet(&c, &format!(r#"{{"domains":[{{"url":"{}"}}]}}"#, a.base)).await;
+    assert_eq!(call(&c, "PUT", "/_connector/site/_configuration", Some(r#"{"values":{"max_unique_url_count":2}}"#)).await.0, 200);
+    let job = crawl(&c).await;
+    assert_eq!((at(&job, "metadata.limit_reached").as_str(), at(&job, "metadata.purge_skipped")), (Some("max_unique_url_count"), &Value::Bool(false)), "{job:?}");
+    assert_eq!((num(&job, "metadata.excluded_document_count"), num(&job, "metadata.deleted_after_three_kept_crawls_count")), (3, 0), "{job:?}");
+    assert!(doc(&c, &b.url("/b1")).await.is_none() && doc(&c, &a.url("/a1")).await.is_some());
+}
+
 /// A request whose turn would come after the crawl's deadline isn't made: a `Crawl-delay` of 30 s
-/// and `max_duration` of 1 s fetch robots.txt and nothing else.
+/// and `max_duration` of 1 s fetch robots.txt and nothing else, and the origin is left at once
+/// rather than slept on.
 #[tokio::test]
 async fn no_request_after_the_deadline() {
     let site = Site::start().await;
@@ -399,7 +434,7 @@ async fn no_request_after_the_deadline() {
     let c = cluster(&[]).await;
     crawler(&c, &format!(r#"{{"urls":"{}"}}"#, site.url("/")), Some(r#"{"max_duration":1}"#)).await;
     let job = crawl(&c).await;
-    assert_eq!((at(&job, "status").as_str(), at(&job, "metadata.limit_reached").as_str()), (Some("completed"), Some("max_duration")), "{job:?}");
+    assert_eq!((at(&job, "status").as_str(), num(&job, "metadata.skipped_origin_url_count")), (Some("completed"), 1), "{job:?}");
     assert_eq!(site.requests().iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(), ["/robots.txt"]);
 }
 

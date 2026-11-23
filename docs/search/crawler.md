@@ -103,7 +103,8 @@ ever sees JSON.
    matched by finding the literal text between its `*`s left to right, which is exact for `*`
    patterns and linear in the URL per rule; a group of more than 5,000 rules disallows its origin,
    and the files are charged to the request breaker. `Crawl-delay` is honoured, up to the crawl's
-   deadline: a request whose turn would come after it isn't made.
+   deadline: a request whose turn would come after it isn't made, and an origin whose next turn
+   comes after the deadline is left for this crawl rather than holding up the others.
 
    Deciding whether URLs may be fetched (crawl rules and robots.txt) has a budget of 30 seconds a
    crawl; past it the crawl ends `completed` with `limit_reached: rule_matching_time`. The cheap
@@ -111,7 +112,9 @@ ever sees JSON.
    is full, and long lists of links yield to the runtime as they're queued (the job's
    `metadata.checked_url_count` counts the checks). Crawl rules are fully built DFAs over a URL's
    bytes with Unicode off, one step per byte whatever the pattern; a rule whose DFA doesn't fit its
-   equal share of a 10 MiB budget fails validation.
+   equal share of a 10 MiB budget (or whose NFA passes 64 KiB) fails validation. They're built off
+   the async workers, both when a draft is validated and when a crawl starts, and a deny rule
+   whose search gives up denies.
 
    Unlike Open Crawler, a site's `Elastic-Crawler` group doesn't apply to roll, whose token is
    `roll-crawler`. A crawl that finds such a group and no `roll-crawler` group names the origin in
@@ -282,7 +285,8 @@ the page is gone:
   count.
 - **Purge skipped:** when more than half of the index's documents weren't refreshed by the crawl
   (gone, kept or not re-checked; documents the crawl's own configuration now leaves out, by its
-  domains, rules or URL limits, don't count, so removing a domain does purge it), or when ten redirects or more of re-checked documents mostly led
+  domains, rules or URL limits, don't count and are decided as they're listed, before any budget
+  or deadline, so removing a domain purges it even from a crawl that used its whole budget), or when ten redirects or more of re-checked documents mostly led
   to one URL. And per origin: nothing of an origin more than half of whose documents weren't
   refreshed is deleted (`metadata.purge_skipped_origins`), so one domain of a crawl that ships
   `Disallow: /` or 404s everywhere keeps its documents. A site that is down, behind an expired
