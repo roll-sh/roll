@@ -316,6 +316,11 @@ export function PreviewSheet({
             ) : (
               <p className="text-[11.5px] text-subtle">No data branches.</p>
             )}
+            {!!p.copies?.count && (
+              <p className="mt-1.5 font-mono text-[11px] text-subtle tabular-nums" title="Each earlier push's own copy of the data, as its head left it: counted in the cost above">
+                earlier pushes' copies: {p.copies.count} · {formatBytes(p.copies.bytes)} · {money(p.copies.usd_month)}/mo asleep
+              </p>
+            )}
 
             {p.release && (
               <p className="mt-1.5 font-mono text-[11px] text-subtle tabular-nums" title="The project's release (migrations), run on this preview's data before its services">
