@@ -1931,6 +1931,26 @@ session thread's user instructions by `perf stat --per-thread` over a 14 s run l
 the difference in selects; CPUs 4 and 22): base (`c4ad9402d`) 38,025 / 38,948 / 37,578, the stack
 (`e974a84e1`) 37,624 / 39,504 / 37,995 user instructions a select, alternated.
 
+## Range reads of a big table: a short key range serial (2026-11-23, agent 299)
+
+Lane A, harness `~/.cache/a299/bench` (`mixed.sh`: a fresh server, `pgbench -i -s 32`, rounds of 40k
+TPC-B transactions at 32 clients, each followed by 3 s of each read at 8 clients, `-M prepared`; the
+server cgroup's user instructions over the reads). Plain dist: `base0` = `2ab4c22f4` (the head's code),
+`g1` = it + "a short key range keeps the serial path". One pair of 3 rounds, 5.2 foreign cores on the
+lane's 8 CPUs:
+
+| read | base0 | g1 | Δ |
+|---|---:|---:|---:|
+| `SELECT abalance ... WHERE aid BETWEEN $1 AND $1 + 99` (100 rows), user instr / read | 3,274,152 | 328,199 | -90.0% |
+| user cycles / read | 4,481,317 | 452,769 | -89.9% |
+| `SELECT sum(abalance) ... WHERE aid BETWEEN $1 AND $1 + 99`, user instr / read | 5,390,648 | 614,279 | -88.6% |
+| user cycles / read | 7,325,788 | 965,077 | -86.8% |
+| select-only (`-S`), user instr / read | 47,554 | 48,832 | +2.7% |
+
+Select-only off the lane (CPUs 2,3,20,21; one run each, 6 s): 43,926 / 43,800 user instructions a read
+(point reads don't take the parallel paths). In 12-round runs of round 15 (below) g1's 100-row range
+read 340.6k and its sum 630.8k.
+
 ## Short write transactions, round 14: the one-statement scripts' scale, an UPDATE's sequential scan of a small hot table (2026-11-23, agent 295)
 
 Lane A (servers on CPUs 6,7,24,25, pgbench on 8,9,26,27), one table or one pair a `tools/lane.sh` hold,

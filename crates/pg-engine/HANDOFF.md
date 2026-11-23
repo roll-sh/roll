@@ -14772,6 +14772,52 @@ failed: all passed.
 Not this round's: roll's `VACUUM (VERBOSE)` sends none of PostgreSQL's INFO lines (agent 205's
 note, still open).
 
+## Range reads of a big table: a short key range keeps the serial path (agent 299)
+
+Found while gating round 15's L0 merge on range reads (BENCH.md "Short write transactions, round 15",
+the read rows). On the head, a range read of a table too big to model went to the parallel paths
+whatever the range held: `SELECT abalance FROM pgbench_accounts WHERE aid BETWEEN $1 AND $1 + 99`
+(100 rows, scale 32, an Index Scan in PostgreSQL's plan and ours) cost 3.27 M user instructions, with
+`sum(abalance)` over it 5.39 M, and `... WHERE aid >= $1 ORDER BY aid LIMIT 100` 9.0 M (prepared or
+simple protocol alike; a fresh server's EXPLAIN ANALYZE 0.4 ms). An LBR profile: `start_parallel_index`
+(any btree range of an unmodelled table, not only a full index scan) and `start_parallel` (an
+aggregating scan of a key range) seek the range's first and last keys, cut it into
+`ParScan::chunks(workers)` pieces, position a merging scan at each cut (`keyed_cuts`: a scan over every
+source each) and start worker threads, ~60% of the read in `keyed_cuts` alone, ~10% thread starts.
+The cost grew with every L0 file and memtable (each cut positions every source): 4.7-7.7 M by L0's
+state in a TPC-B run. PostgreSQL considers no parallel index scan of less than
+min_parallel_index_scan_size (512 kB).
+
+**What changed** (one commit, `exec/scan.rs`, `storage/mod.rs`): `Store::range_bytes` (the stored bytes
+of the files' blocks a key range meets, from their indexes: `bulk_range`'s sum, now shared), and a key
+range narrower than its table's or index's keys (`short_range`) under `PARALLEL_MIN_BYTES` (512 kB
+stored) keeps the serial path in `start_parallel_index` and in `start_parallel` (an inline aggregating
+scan, which starts no threads, under `INLINE_MIN_BYTES`, 64 kB). A whole table's or index's scan is
+decided as before (big_tables' `deferred_entry_deletes` and parallel_scan's tests read small unmodelled
+tables in parallel on purpose: the first form, any range under 512 kB, made that count serial).
+The serial path is the one these scans took with workers off; results and their order are the serial
+scan's (the parallel paths returned their chunks in order: the same rows). Point reads don't go
+there (`point_probe`): select-only level (43,800 / 43,926 user instructions a read, off-lane).
+
+**Measured** (lane A, `mixed.sh`: rounds of 40k TPC-B transactions at 32 clients, each followed by 3 s
+of each read at 8 clients; plain dist, `base0` = the head's code, `g1` = it + this commit), one pair of
+3 rounds: the 100-row range 3,274,152 -> 328,199 user instructions a read (-90.0%), 4.48 M -> 0.45 M
+user cycles, 21,387 -> 142,162 reads in the 9 s; `sum()` over it 5,390,648 -> 614,279 (-88.6%);
+select-only 47.6k / 48.8k (level, 5.2 foreign cores). Not gated on PGO (no inlining aim). (g1 is the first form; the commit's narrower test takes these
+reads the same way.)
+
+Verification: `tools/quick-check.sh` with `QC_CHECKED=1` and `QC_TESTS="parallel_scan big_tables"` on
+`47381f462` (on `58ad4d95d`): 29 test binaries, clippy 16 warnings, none new in a changed file, 437
+tests in 25 binaries (parallel_scan, big_tables, heap_order_scan, pk_clustered, stored_filters, the
+storage and crash binaries, golden, wire among them), the same 437 built `--profile verify-checked`,
+`crash_random` seeds 1-3 x 2 rounds and `power_cut_at_every_point`, regress 51,148 / 51,150 (0 newly
+differing), isolation 1,647 / 1,648, pg_dump_tap 14,609.
+
+What is left: the `LIMIT 100` form under a generic plan (rows=1,066,667 estimated for `aid >= $1`) went
+through `start_parallel_index` too; it is serial now when its range is short of 512 kB stored, but an
+open-ended range (`aid >= $1`) still meets the whole index: a scan under a LIMIT reads chunks ahead of
+what it returns. `p.limit` is the scan's own; a Limit node above it isn't seen there. Not done.
+
 ## Short write transactions, round 14: the standing table at the right scale, an UPDATE's sequential scan of a small hot table (agent 295)
 
 BENCH.md "Short write transactions, round 14" has the tables. Plain dist builds: `base0` = `4b0f41516`
