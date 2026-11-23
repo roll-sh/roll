@@ -1342,7 +1342,7 @@ static TOOLS: &[Tool] = &[
         bnull("pause_schedule", Ty::Obj, "Paused by the clock: {windows: [{from: \"fri 19:00\", to}], timezone?}; a person's pause or resume inside a window holds until it ends; clear it for none"),
         bnull("mirror", Ty::Obj, "{environment, percent (1-100)}: a copy of that share of GET and HEAD requests goes to another environment of this service; clear it to stop"),
         bnull("snippets", Ty::Arr, "At most 5 [{at: head|body_end, html}]: its own HTML put before </head> or </body> of every HTML page (an analytics or chat tag); clear it for none"),
-        bnull("split", Ty::Obj, "A split test: {environment, percent (1-99)}: that share of visitors (by their roll_bucket cookie) is served by another environment of this service; clear it to end it"),
+        bnull("split", Ty::Obj, "A split test: {environment, percent (1-99)}: that share of visitors (kept by a cookie roll sets) is served by another environment of this service; clear it to end it"),
         bnull("data", Ty::Str, "\"branch\": data of its own, a branch of each Postgres and Redis database it links in place of the databases (admin; not production or a preview); clear it to go back, deleting the branches"),
     ]),
     t("apps_update_service", "Update a service", "Change a service's name, source, build or run settings (fields given are changed; run takes alerts {memory_pct, error_pct, p95_ms} for metric alerts).", "apps", "PATCH", "/v1/apps/services/{service}", &[
