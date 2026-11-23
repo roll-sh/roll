@@ -142,6 +142,69 @@ first run in a session (per-session catalog caches, `Catalog::rel_rowtype`'s deb
 integer converted to decimal, quadratic; PostgreSQL keeps base-10000 digits); jOOQ's codegen
 catalog queries 13 s vs 2.3 s; EF Core's suite 31 min vs 7 min.
 
+## Round 9 (agent 297): frameworks and tools against the head
+
+`tools/compat/compat.sh` as in round 8: each suite against a private PostgreSQL 18.6 (`a297-pg`,
+the pinned image, default settings, `--locale=C --encoding=UTF8`) and against roll (a plain dist
+build, a fresh data directory per suite), in containers pinned to CPUs 0-5,18-23. Round 8 is
+its "after" column; "head" is the origin head `4b0f41516` (about forty planner, system view,
+executor, COPY, store and connection changes after round 8); "after" is agent 297's commits on
+`99e4b81af`. Differing counts are tests (for drizzlekit and metaqueries: ids whose result
+differs; each such id shows once per server in `compat.sh table`).
+
+| suite (`tools/compat` name) | tests | PostgreSQL pass / fail | round 8: differing | head: differing | after: roll pass / fail, differing |
+|---|---:|---:|---:|---:|---:|
+| Django 5.2.4 (`django`) | 4419 | 4402 / 17 | 0 | 0 | 4402 / 17, **0** |
+| SQLAlchemy 2.0.41, psycopg2 (`sqlalchemy`) | 15803 | 15801 / 2 | 0 | 0 | 15801 / 2, **0** |
+| SQLAlchemy 2.0.41, psycopg 3.2.9 (`sqla_psycopg`) | 15891 | 15889 / 2 | 0 | 0 | 15889 / 2, **0** |
+| SQLAlchemy 2.0.41, asyncpg 0.30.0 (`sqla_asyncpg`) | 15829 | 15827 / 2 | 0 | 0 | 15827 / 2, **0** |
+| ActiveRecord 8.1.4 (`activerecord`) | 777 | 776 / 1 | 0 | 0 | 776 / 1, **0** |
+| Prisma 7.10.1 (`prisma`) | 47 | 47 / 0 | 0 | 0 | 47 / 0, **0** |
+| Drizzle ORM 0.45.4 (`drizzle`) | 852 | 852 / 0 | 0 | 0 | 852 / 0, **0** |
+| drizzle-kit 0.31.11 (`drizzlekit`) | 49 ids | 47 / 2 | 20 (agent 279: 7) | 7 | 47 / 2, **5** |
+| Hibernate 7.4.14 (`hibernate`) | 438 | 438 / 0 | 0 | 0 | 438 / 0, **0** |
+| asyncpg 0.30.0 (`asyncpg`) | 267 | 262 / 5 | 0 | 0 | 261 / 6, 1 (timing, below) |
+| pgx 5.7.5 (`pgx`) | 1220 | 1217 / 3 | 0 | 0 | 1217 / 3, **0** |
+| Spring JDBC / Flyway 13.11.1 / Liquibase 5.0.4 (`spring`) | 271 | 271 / 0 | 0 | 0 | 271 / 0, **0** |
+| Alembic 1.20.1 (`alembic`) | 2153 | 2152 / 1 | 0 | 0 | 2152 / 1, **0** |
+| pg_restore 18.6, 11 ways (`pgrestore`) | 1935 | 1934 / 1 | 0 | 0 | 1934 / 1, **0** |
+| pgAdmin 4 9.18 / DBeaver 26.2.3 catalog queries (`metaqueries`) | 856 ids | 856 / 0 | 28 (agent 279: 16) | 14 | 856 / 0, **13** |
+| Knex 3.3.0 (`knex`, new) | 523 | 523 / 0 | | 0 | 523 / 0, **0** |
+| TypeORM 1.1.2 (`typeorm`, new) | 3078 | 3059 / 11 | | 12 | 3069 / 7, 12 (pgvector, below) |
+
+Regressions since round 8: none (the head column). Fixed (golden `a297_compat`; HANDOFF "Frameworks
+and tools against the head, round 9"):
+- drizzle-kit (2 ids): its foreign keys of a table, without ORDER BY, came in the referenced
+  tables' order: a catalog column's get_actual_variable_range never answered (catalogs are
+  generated), so mergejoinscansel of pg_constraint.confrelid against pg_class.oid costed a Merge
+  Join that stops early; PostgreSQL's plan is a nested loop over pg_constraint.
+- metaqueries (1 id, DBeaver's `schema.tables`): pg_class.relpartbound held `FOR VALUES ...`;
+  PostgreSQL's is the PartitionBoundSpec node tree. Node trees' datum bytes print as signed
+  chars (200 is -56), as outDatum does.
+- No suite reads them, found on the way (item 3's list): pg_typeof of an information_schema
+  column (the domain, sql_identifier, ...), PUBLIC's privileges on information_schema's
+  `_pg_*` views, sql_parts, transforms and pg_subscription.subconninfo, pg_relation_is_updatable
+  of catalogs and of pg_group / pg_stat_database_conflicts / pg_settings / enabled_roles.
+
+Left:
+- drizzle-kit (5 ids): its tables come from a pg_class scan without ORDER BY, in PostgreSQL's
+  heap order after pruning reused line pointers (`Catalog::class_order` models page 0 only
+  before that): relations.ts lists in another order (3). A composite key's columns: PostgreSQL
+  reads its constraint_column_usage branch (pg_attribute by name) back from a hash bucket,
+  reverse column-name order, `pair_pkey` [b, a] (2); round 8's PostgreSQL gave name order for
+  the same query.
+- metaqueries (13 ids): array_agg order of the ACL queries (4: which side of a hash join the
+  sorted aclexplode subquery is on; pg_authid estimates 21 after the setup's ANALYZE where
+  PostgreSQL keeps initdb's 17 for its nailed shared catalogs until a VACUUM), pg_stat / pg_statio
+  counters (6), a non-view rule's ev_action as SQL text (1), and DBeaver's dependency lists (2):
+  `SELECT DISTINCT ... ORDER BY type` ties in hash order, because the DISTINCT keys aren't
+  reordered with the ORDER BY's first (transformDistinctClause) in the binder / EXPLAIN model.
+- asyncpg `test_executemany_server_failure_during_writes`: timing (round 5's note). Passed on
+  the head run, failed on the after run; alone at load 48 it failed 5 of 5 on both the head and
+  the after build, and 1 of 3 on PostgreSQL.
+- TypeORM (12): its pgvector tests fail on the reference image, which has no pgvector (roll
+  has `vector` built in): the environment's.
+
 ## Round 8 (agent 263): frameworks and tools, `tools/compat`
 
 `crates/pg-engine/tools/compat/compat.sh run both <suite...>` runs each suite against a

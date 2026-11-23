@@ -19932,3 +19932,125 @@ here (perf_event_paranoid 3). Also restored the doc comment's first line, which 
   auto-updatable view over a catalog), shown by the definition path and pg_views.
 - The fallback (a predefined role's member, changed system ACLs, another encoding or path) still
   runs the definition once per key, the temporary schema included.
+
+## Frameworks and tools against the head, round 9 (agent 297, 2026-11-23)
+
+Recorded against a private PostgreSQL 18.6 (`a297-pg`, the pinned image, `--locale=C`, default
+settings; goldens from a fresh `a297-gold`). `tools/compat/compat.sh run pg|engine <suite>`, each
+suite in a container pinned to CPUs 0-5,18-23, the engine a plain dist build (`tools/dist.sh`)
+with a fresh data directory per suite. Scripts in `~/.cache/a297` (`pgside.sh`, `engside2.sh`
+with `ENGINE_BIN` / `SUF`, `probe/`). tests/clients/STATUS.md "Round 9" has the table.
+
+### Regressions since round 8 (item 1, 2)
+
+None. The origin head `4b0f41516` (round 8 was `59f079357` plus agent 263's commits; about forty
+planner, system view, executor, COPY, store and connection changes since) against PostgreSQL:
+Django 4,419, SQLAlchemy psycopg2 15,803 / psycopg 3 15,891 / asyncpg 15,829, ActiveRecord 777,
+Hibernate 438, Prisma 47, Drizzle 852, asyncpg 267, pgx 1,220, Spring / Flyway / Liquibase 271,
+Alembic 2,153, pg_restore 1,935 ids: every test the same outcome on both servers. drizzle-kit
+differs on 7 of 49 ids (round 8: 20; agent 279: 7), the pgAdmin / DBeaver replay on 14 of 856
+(round 8: 28; agent 279: 16); each of those is a round-8 cause or one agent 279 named, none new.
+The suites' own failures on PostgreSQL (Django's 17, asyncpg's 5, pgx's 3, ...) are the same
+tests on roll.
+
+### Fixed (item 3)
+
+Golden `a297_compat` (recorded from 18.6; each case fails on the head build):
+- **A catalog column's actual range** (`paths.rs` `endpoint`, `syscat::sys_column_end`):
+  get_actual_variable_range read only stored index entries, so for a system catalog (generated
+  rows) it never answered and every comparison past a catalog histogram's end took the
+  1/(100 * (n - 1)) cutoff. It now takes the least / greatest value of the catalog's rows when one
+  of PostgreSQL's btree indexes on the catalog (`sys_indexes.tsv`) leads with the column. What
+  it changes: mergejoinscansel of `pg_constraint.confrelid` (all 0 in initdb's statistics)
+  against `pg_class.oid` had an end fraction just above 0 and costed a Merge Join that stops
+  after a few rows (7.7 for drizzle-kit's foreign-key listing); with the actual minimum the
+  fraction is 0, the bail-out resets it to a full scan, and the plan is PostgreSQL's nested
+  loop over pg_constraint, which returns the keys in pg_constraint's order: drizzle-kit `pull`
+  wrote a table's foreign keys in the referenced tables' order (2 ids). `pg_constraint.oid >
+  4000000000` is an Index Scan as on PostgreSQL (was a Seq Scan).
+- **information_schema columns are of their domains** (`binder/select.rs`): a generated system
+  view's columns had no domain, so `pg_typeof(table_name)` was `name` (PostgreSQL:
+  `information_schema.sql_identifier`), `cardinal_number` showed `integer`, `yes_or_no`
+  `character varying`, and CREATE TABLE AS SELECT from them made `name` / `varchar(3)` columns.
+  The scope columns take `SysTable::domains`, as pg_attribute already showed them; the wire
+  type stays the base type (getBaseTypeAndTypmod).
+- **System relations' privileges** (`catalog/acl.rs`): information_schema's `_pg_foreign_*` views,
+  `_pg_user_mappings`, `sql_parts` and `transforms` have no PUBLIC grant (relacl NULL) and
+  pg_subscription only column grants (all but subconninfo), but `system_rel_acl` gave PUBLIC
+  SELECT on every system relation outside a short list: a plain role read them, and
+  information_schema.views listed 6 more rows for it (135 against 129). Now they are the
+  owner's; `col_mask` and the binder's "any column" check know pg_subscription's column grants,
+  so `count(*)` and `subname` read, `subconninfo` and a whole-row reference fail as on
+  PostgreSQL.
+- **relation_is_updatable of system relations** (`func/system.rs` `sys_updatability`): 0 for
+  every catalog and system view. PostgreSQL: a catalog 28 (every event, every column), pg_group
+  and pg_stat_database_conflicts 28 (auto-updatable over one catalog: their plain columns),
+  pg_settings 4 (its INSTEAD rule), information_schema.enabled_roles 16; the others 0 (checked
+  over all 68 catalogs and every system view of 18.6). information_schema.views showed pg_group
+  and pg_stat_database_conflicts as NO / NO (PostgreSQL YES / YES), as did the split views'
+  definition path.
+- **pg_class.relpartbound is a node tree** (`system::partition_bound_tree`): it held
+  `FOR VALUES IN ('a', 'b')`; PostgreSQL's is nodeToString of the PartitionBoundSpec (strategy,
+  is_default, modulus / remainder, list Consts or PartitionRangeDatums of kind -1 / 0 / 1, each
+  Const of the partition key's type, typmod and collation). `pg_get_expr(relpartbound, oid)`
+  prints the bound from it as before (from any relation oid, as PostgreSQL's needs none). DBeaver
+  reads relpartbound raw (`schema.tables`: 1 id).
+- **Node trees' datum bytes are signed chars** (`nodetree::datum`): outDatum prints each byte as
+  a `char`, so a constant 200 is `[ -56 0 0 0 0 0 0 0 ]`; the engine printed `200`. Every
+  conbin / indexprs / indpred / adbin-like tree with a byte of 128 or more differed.
+
+Tests changed beside the golden: `sqlbody_nodetree`, `sqlbody_nodetree3` and
+`sqlbody_nodetree_consts` recorded again from 18.6 (their `.out` files, from the initial import,
+had the datum bytes unsigned: `255 255 ...` where 18.6 prints `-1 -1 ...`; nothing else
+changed in them), and `tests/data/catalog_format4.pgclass`'s two partitions' relpartbound (that
+file is what an engine build showed, not PostgreSQL).
+
+### Measured
+
+No hot path changed: `endpoint` tests `stand_in_of` (a field compare) before the user-table
+path; the rest runs for catalogs, system views and privileges of system relations only. No
+instruction pair.
+
+Logical replication PostgreSQL <-> roll (`tools/bench/repl/e2e.sh`, 9 scenarios x 4 pairs) on
+the after build: all scenarios identical.
+
+Verification: quick-check with `QC_CHECKED=1` on `988c534ae` (these commits on `99e4b81af`):
+build, clippy (16 warnings, none new in changed files), tests 169 passed in 15 binaries and the
+same with `--profile verify-checked`, regress 51,148 / 51,150 with 0 newly differing, isolation
+1,647 / 1,648, pg_dump 14,609 passed. The first run stopped at `catalog_format` (the format-4
+expectation's relpartbound) and the three sqlbody goldens above; fixed as described.
+
+### Dropped
+
+- A plain DISTINCT under an ORDER BY of fewer columns kept its rows' hash order among rows the
+  ORDER BY finds equal (DBeaver's dependency lists: `SELECT DISTINCT ... ORDER BY type`, 2 ids):
+  PostgreSQL's transformDistinctClause puts the ORDER BY's items first in the DISTINCT list, so
+  one Sort serves both and ties come out in the other columns' order. Making
+  `exec::distinct_presort` sort for identical-value types too doesn't help: the engine's EXPLAIN
+  model and binder keep the DISTINCT keys in select-list order (`dkeys` = columns 0..n), so the
+  level shows Sort -> Unique -> Sort and not PostgreSQL's Unique -> Sort(order keys, rest).
+  The fix is the DISTINCT key order in the binder and the EXPLAIN builder (planner area);
+  patch of the presort attempt in `~/.cache/a297/patches/distinct-presort.patch`.
+
+### Left
+
+- drizzle-kit (5 ids): its tables come from a pg_class scan without ORDER BY; PostgreSQL's heap
+  order after DDL has pruned line pointers reused (`thing` and `post` placed first), which
+  `Catalog::class_order` doesn't model (it is exact only while page 0 takes every version in
+  line-pointer order): its relations.ts lists in another order (3 ids). A composite key's columns
+  come from table_constraints / constraint_column_usage / columns: PostgreSQL hashes the
+  constraint_column_usage UNION's branch whose rows come from pg_attribute_relid_attnam_index
+  (name order) and reads its bucket chain back, reverse column-name order (`pair_pkey` [b, a] for
+  (a, b)); round 8's PostgreSQL gave column-name order for the same query, so this follows its
+  plan of the day (2 ids).
+- pgAdmin / DBeaver (13 ids): the ACL queries' array_agg order (4: PostgreSQL probes the sorted
+  aclexplode subquery against hashed pg_authid, the engine hashes the subquery: a hash right join,
+  helped by pg_authid's estimate, 21 rows after the setup's ANALYZE where PostgreSQL's planner
+  keeps initdb's 17 for its nailed shared catalogs until a VACUUM of it); pg_stat / pg_statio
+  counters (6); a non-view rule's ev_action as SQL text (1); the DISTINCT tie order above (2).
+- asyncpg `test_executemany_server_failure_during_writes` passed on the head run and failed on
+  the after run: timing (round 5's note: whether the error reaches the client before it has
+  written all 128 rows). Alone at load 48: 5 of 5 failed on the head build and on the after
+  build, 1 of 3 on PostgreSQL.
+- New suites: Knex 3.3.0 (523, identical) and TypeORM 1.1.2 (3,078: 12 differ, all pgvector
+  tests that fail on the reference image, which lacks the extension) are in `compat.sh`'s list.
