@@ -217,7 +217,7 @@ pub(super) fn secret_values(secrets: &[(String, String)], plain: &[String], own:
 /// What a preview's pages must never serve, by the name it gets each as: roll secrets' values (a
 /// `plain` one's URL password only), the branches' credentials, and its own variables named like a
 /// credential. Never one meant for the browser (`NEXT_PUBLIC_`, `VITE_`, …), nor one under 8
-/// characters (a short value is in pages by chance).
+/// characters (a short value is in pages by chance), nor a user name.
 pub(super) fn served_keyed(secrets: &[(String, String)], plain: &[String], own: &[(String, String)], branches: &[(String, String)]) -> Vec<(String, String)> {
     const PUBLIC: [&str; 9] = ["NEXT_PUBLIC_", "VITE_", "PUBLIC_", "REACT_APP_", "NUXT_PUBLIC_", "EXPO_PUBLIC_", "GATSBY_", "VUE_APP_", "STORYBOOK_"];
     let public = |k: &str| {
@@ -239,7 +239,8 @@ pub(super) fn served_keyed(secrets: &[(String, String)], plain: &[String], own: 
         }
         out.extend(url_password(v).into_iter().map(|p| (k.clone(), p)));
     }
-    out.retain(|(_, v)| v.trim().chars().count() >= 8);
+    // A user name isn't a secret, wherever it comes from (a linked database's `PGUSER`).
+    out.retain(|(k, v)| v.trim().chars().count() >= 8 && !k.to_ascii_uppercase().ends_with("USER") && !k.to_ascii_uppercase().ends_with("USERNAME"));
     out
 }
 

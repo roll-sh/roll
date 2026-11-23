@@ -3,9 +3,10 @@
 //! service (`<site>-fn`, Deno beside its Node server) instead of its files, as
 //! `/.roll/edge/<name>` with the visitor's path in `x-edge-path`. The function's `context.next()`
 //! comes back here at `x-edge-next`, a path on this listener (the service has its address as
-//! `ROLL_EDGE_BASE`, set at its start): [`NEXT`], signed for that deployment
-//! for a minute, which answers from the same deployment's files and never runs an edge function
-//! again. Without its functions service running, the files answer as they would.
+//! `ROLL_EDGE_BASE`, set at its start): [`NEXT`], signed for that deployment and the visitor's
+//! address for a minute, which answers from the same deployment as the visitor (its gates
+//! already passed on the way in: never the functions service's address) and never runs an edge
+//! function again. Without its functions service running, the files answer as they would.
 
 use crate::Apps;
 use crate::live::Template;
@@ -15,15 +16,16 @@ use axum::response::{IntoResponse, Response};
 use std::sync::Arc;
 
 /// Where an edge function's `context.next()` asks for the site's files:
-/// `/_roll/edge/{service}/{env}/{deployment}/{until}/{sig}{path}`, on this listener, any host.
+/// `/_roll/edge/{service}/{env}/{deployment}/{until}/{client}/{sig}{path}`, on this listener, any
+/// host (`client`: the visitor's address, `-` for none).
 pub const NEXT: &str = "/_roll/edge/";
 /// How long a `next` address works (an edge function's whole run).
 const VALID_S: i64 = 60;
 pub(crate) const PATH_HEADER: &str = "x-edge-path";
 pub(crate) const NEXT_HEADER: &str = "x-edge-next";
 
-fn sig(key: &[u8], service: &str, env: &str, dep: &str, until: i64) -> String {
-    crate::challenge::mac(key, &["edge-next", service, env, dep, &until.to_string()])
+fn sig(key: &[u8], service: &str, env: &str, dep: &str, until: i64, client: &str) -> String {
+    crate::challenge::mac(key, &["edge-next", service, env, dep, &until.to_string(), client])
 }
 
 impl Apps {
@@ -40,7 +42,7 @@ impl Apps {
 
     /// The edge function this request to a site goes to first, if one runs on its path and the
     /// site's functions service is there: that service's id, the function, and its `next` base.
-    pub(crate) async fn edge_for(self: &Arc<Self>, service: &str, env: &str, tpl: &Template, path: &str) -> Option<(String, String, String)> {
+    pub(crate) async fn edge_for(self: &Arc<Self>, service: &str, env: &str, tpl: &Template, path: &str, client: Option<&str>) -> Option<(String, String, String)> {
         let f = tpl.edge.iter().find(|f| apps_build::edge::runs_on(f, path))?;
         let target = self.project_service(service, &tpl.edge_service).await;
         // Without an apps address, its functions service has nowhere to call `next()` on.
@@ -54,7 +56,8 @@ impl Apps {
         let until = code_sql::now_ms() / 1000 + VALID_S;
         // A path only: the functions service prefixes it with its own `ROLL_EDGE_BASE`, never an
         // address a header gave it.
-        let next = format!("{NEXT}{service}/{env}/{}/{until}/{}", tpl.deployment, sig(&key, service, env, &tpl.deployment, until));
+        let client = client.and_then(|c| crate::live::client_ip(Some(c))).map_or_else(|| "-".to_string(), |ip| ip.to_string());
+        let next = format!("{NEXT}{service}/{env}/{}/{until}/{client}/{}", tpl.deployment, sig(&key, service, env, &tpl.deployment, until, &client));
         Some((target, f.name.clone(), next))
     }
 }
@@ -88,13 +91,24 @@ pub(crate) fn to_function(apps: Arc<Apps>, target: String, env: String, name: St
 pub(crate) async fn next(apps: Arc<Apps>, mut req: Request) -> Response {
     let not_found = || (StatusCode::NOT_FOUND, "").into_response();
     let rest = req.uri().path()[NEXT.len()..].to_string();
-    let mut parts = rest.splitn(6, '/');
-    let (Some(service), Some(env), Some(dep), Some(until), Some(given)) = (parts.next(), parts.next(), parts.next(), parts.next(), parts.next()) else { return not_found() };
+    let mut parts = rest.splitn(7, '/');
+    let (Some(service), Some(env), Some(dep), Some(until), Some(client), Some(given)) = (parts.next(), parts.next(), parts.next(), parts.next(), parts.next(), parts.next()) else { return not_found() };
     let path = format!("/{}", parts.next().unwrap_or(""));
     let Ok(until) = until.parse::<i64>() else { return not_found() };
     let Some(key) = apps.edge_key().await else { return not_found() };
-    if until < code_sql::now_ms() / 1000 || !crate::public::same(&sig(&key, service, env, dep, until), given) || !service.starts_with("svc_") {
+    if until < code_sql::now_ms() / 1000 || !crate::public::same(&sig(&key, service, env, dep, until, client), given) || !service.starts_with("svc_") {
         return not_found();
+    }
+    // The visitor's, as signed: never the functions service's own address.
+    req.extensions_mut().remove::<roll_cluster::Forwarded>();
+    req.extensions_mut().remove::<axum::extract::ConnectInfo<std::net::SocketAddr>>();
+    match client.parse::<std::net::IpAddr>() {
+        Ok(ip) => {
+            req.extensions_mut().insert(roll_cluster::ClientAddr(ip.to_string()));
+        }
+        Err(_) => {
+            req.extensions_mut().remove::<roll_cluster::ClientAddr>();
+        }
     }
     let (service, env, dep) = (service.to_string(), env.to_string(), dep.to_string());
     let pq = match req.uri().query() {
