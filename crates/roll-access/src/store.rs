@@ -935,6 +935,10 @@ impl Store {
         if !db.has_column("grants", "user_id")? {
             db.add_column("grants", "user_id", "TEXT")?;
         }
+        // Whose an alert is (a person's token's decoy, revocation or finding); none: the operator's.
+        if !db.has_column("access_alerts", "user_id")? {
+            db.add_column("access_alerts", "user_id", "TEXT")?;
+        }
         db.ensure_schema("CREATE INDEX IF NOT EXISTS grants_user ON grants (user_id);")?;
         // Why it was revoked, when roll did it (a leaked secret).
         if !db.has_column("grants", "decoy")? {
@@ -1876,20 +1880,22 @@ impl Store {
 
     /// Keep an alert for the operator's feed (`GET /v1/access/alerts`, MCP Events' `access.alert`):
     /// its place is the next after the newest, taken in the same write. Its place.
-    pub fn record_alert(&self, kind: &str, data: &Value) -> Result<i64> {
+    /// `user`: the person it's about (their token's), who sees it on their own feed too.
+    pub fn record_alert(&self, kind: &str, data: &Value, user: Option<&str>) -> Result<i64> {
         let (now, data) = (code_sql::now_ms(), data.to_string());
         self.db.write(|c| {
             let seq: i64 = c.query_row("SELECT COALESCE(MAX(seq), 0) + 1 FROM access_alerts", (), |r| r.get(0))?;
-            c.execute("INSERT INTO access_alerts (seq, at, kind, data) VALUES (?, ?, ?, ?)", params![seq, now, kind, data])?;
+            c.execute("INSERT INTO access_alerts (seq, at, kind, data, user_id) VALUES (?, ?, ?, ?, ?)", params![seq, now, kind, data, user])?;
             Ok::<_, Error>(seq)
         })
     }
 
     /// Alerts after `after`, oldest first (at most `limit`), each its data with `seq`, `at` and
     /// `kind`.
-    pub fn alerts_after(&self, after: i64, limit: usize) -> Result<Vec<Value>> {
+    /// `user`: only that person's (their own feed); `None`, every alert.
+    pub fn alerts_after(&self, after: i64, limit: usize, user: Option<&str>) -> Result<Vec<Value>> {
         let rows = self.db.read(|c| {
-            c.query("SELECT seq, at, kind, data FROM access_alerts WHERE seq > ? ORDER BY seq LIMIT ?", params![after, limit.clamp(1, 500) as i64], |r| {
+            c.query("SELECT seq, at, kind, data FROM access_alerts WHERE seq > ?1 AND (CAST(?2 AS TEXT) IS NULL OR user_id = ?2) ORDER BY seq LIMIT ?3", params![after, user, limit.clamp(1, 500) as i64], |r| {
                 Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?))
             })
         })?;

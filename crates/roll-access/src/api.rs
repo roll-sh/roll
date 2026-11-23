@@ -1386,20 +1386,19 @@ async fn activity(State(a): S, ext: Extensions, Query(q): Query<ActivityQuery>) 
     Ok(Json(v))
 }
 
-/// `GET /v1/access/alerts?after=&limit=&latest=1`: what roll alerted the operator about (a tool
-/// whose server errors jumped), oldest first after a place; MCP Events' `access.alert`. About the
-/// whole deployment, so the operator's (and tokens the operator made) only: a person's own
-/// connections get none, at the newest place.
+/// `GET /v1/access/alerts?after=&limit=&latest=1`: what roll alerted about, oldest first after a
+/// place; MCP Events' `access.alert`. The operator (and tokens the operator made) see every alert; a
+/// person's own connections see the ones about their tokens (a decoy of theirs used, one revoked
+/// for a leak, the checkup's news about one).
 async fn alerts(State(a): S, ext: Extensions, Query(q): Query<DecidedQuery>) -> crate::Result<Json<Value>> {
-    let theirs = who(&a, &ext)?.mine().is_some();
+    let theirs = who(&a, &ext)?.mine().map(str::to_string);
     match (q.latest, q.after) {
         (Some(1), Some(_)) => return Err(Error::BadRequest("latest=1 starts from now: leave out after".into())),
         (Some(1), None) => {}
         (Some(_), _) => return Err(Error::BadRequest("latest is 1 or left out".into())),
-        (None, _) if theirs => {}
         (None, after) => {
             let (after, limit) = (after.unwrap_or(0), q.limit.unwrap_or(100));
-            let events = blocking(a, move |a| a.store.alerts_after(after, limit)).await?;
+            let events = blocking(a, move |a| a.store.alerts_after(after, limit, theirs.as_deref())).await?;
             let next = events.last().and_then(|e| e["seq"].as_i64()).unwrap_or(after);
             return Ok(Json(json!({ "events": events, "next": next })));
         }

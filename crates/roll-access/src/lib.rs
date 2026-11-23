@@ -825,7 +825,7 @@ impl Access {
             }
             if let Some(g) = self.store.revoke_leaked(s, &format!("found in {found_at}"))? {
                 tracing::warn!(grant = %g.id, name = %g.name, at = %found_at, "a leaked token was revoked");
-                self.alert("token_revoked", serde_json::json!({ "grant": g.id, "name": g.name, "found_at": found_at }));
+                self.alert_for("token_revoked", serde_json::json!({ "grant": g.id, "name": g.name, "found_at": found_at }), g.user.as_deref());
                 self.tell(
                     g.user.as_deref(),
                     None,
@@ -874,7 +874,12 @@ impl Access {
     /// Keep an alert for the operator's feed (`access.alert`); a failure to keep it is logged, never
     /// the caller's error (what it alerts about already happened).
     fn alert(&self, kind: &str, data: serde_json::Value) {
-        if let Err(e) = self.store.record_alert(kind, &data) {
+        self.alert_for(kind, data, None);
+    }
+
+    /// [`Access::alert`], about a person's own token: on their feed too.
+    fn alert_for(&self, kind: &str, data: serde_json::Value, user: Option<&str>) {
+        if let Err(e) = self.store.record_alert(kind, &data, user) {
             tracing::warn!(error = %e, kind, "keeping an alert for the operator's feed");
         }
     }
@@ -910,7 +915,8 @@ impl Access {
         let before: std::collections::BTreeSet<String> = before.as_array().into_iter().flatten().filter_map(|v| v.as_str().map(str::to_string)).collect();
         let mut sent = 0;
         for (_, r, f) in found.into_iter().filter(|(k, ..)| !before.contains(k)).take(20) {
-            self.alert("checkup_finding", serde_json::json!({ "grant": r["grant"]["id"], "name": r["grant"]["name"], "finding": f["kind"], "why": f["why"], "fix": f["fix"] }));
+            let user = r["grant"]["id"].as_str().and_then(|id| self.store.get(id).ok()).and_then(|g| g.user);
+            self.alert_for("checkup_finding", serde_json::json!({ "grant": r["grant"]["id"], "name": r["grant"]["name"], "finding": f["kind"], "why": f["why"], "fix": f["fix"] }), user.as_deref());
             sent += 1;
         }
         Ok(sent)
@@ -1150,7 +1156,7 @@ impl Access {
         // Kept for the operator's feed at most once an hour per decoy (on any node): one prober
         // can trip it many times.
         if self.store.claim_alert(&format!("alert_{key}"), code_sql::now_ms(), 3_600_000).unwrap_or(false) {
-            self.alert("decoy_used", serde_json::json!({ "grant": g.id, "name": g.name, "route": route.chars().take(200).collect::<String>(), "ip": ip }));
+            self.alert_for("decoy_used", serde_json::json!({ "grant": g.id, "name": g.name, "route": route.chars().take(200).collect::<String>(), "ip": ip }), g.user.as_deref());
         }
         self.tell(g.user.as_deref(), Some((&key, 3_600_000)), subject.clone(), text.clone());
         self.tell_admins(&key, subject, text);

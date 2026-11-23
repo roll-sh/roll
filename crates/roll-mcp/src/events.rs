@@ -116,7 +116,7 @@ const FEEDS: &[Feed] = &[
     },
     Feed {
         name: "access.alert",
-        description: "roll alerted the operator: a tool is failing (tool_failing: its server errors jumped), a decoy token was used (decoy_used: someone found where it was planted), a leaked token or secret was revoked (token_revoked, secret_revoked: where it was found), or the checkup found something new about a token (checkup_finding: gone broad, unused, roaming…, with its fix). The operator's connections only. Filter by kinds and tool.",
+        description: "roll alerted the operator: a tool is failing (tool_failing: its server errors jumped), a decoy token was used (decoy_used: someone found where it was planted), a leaked token or secret was revoked (token_revoked, secret_revoked: where it was found), or the checkup found something new about a token (checkup_finding: gone broad, unused, roaming…, with its fix). The operator's connections hear every alert; a person's own connections hear those about their own tokens. Filter by kinds and tool.",
         tool: "access_activity",
         product: "access",
         path: &[],
