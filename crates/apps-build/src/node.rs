@@ -255,7 +255,10 @@ pub(crate) fn detect(tree: &dyn Tree, o: &Overrides) -> Result<Option<Draft>, Er
         df.from("base", Some("build"));
         node.source(&mut df, c);
         if let Some(build) = c.build {
-            df.run(&node.build_caches(framework), build);
+            match framework {
+                Some("next") => df.run_with(crate::NEXT_DEPLOYMENT_ID, &node.build_caches(framework), build),
+                _ => df.run(&node.build_caches(framework), build),
+            }
         }
         if let Some(p) = prune {
             df.run(&node.caches(), p);

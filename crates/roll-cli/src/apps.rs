@@ -1399,7 +1399,8 @@ pub enum AppsCmd {
         no_rate_limit: bool,
         /// A firewall rule, in order (the first match decides): `deny /admin/*`,
         /// `deny method=DELETE,PUT`, `allow /admin/health`, `deny ip=203.0.113.0/24`,
-        /// `deny header=X-Bot`, `deny cookie=beta:1`, `deny query=debug`, `deny ua=BadBot` (ua=
+        /// `deny header=X-Bot`, `deny cookie=beta:1`, `deny query=debug`, `deny bots=ai,spoofed`
+        /// (roll's lists: ai, search, preview, tools, verified, spoofed), `deny ua=BadBot` (ua=
         /// last). Repeatable; the rules replace the ones it has.
         #[arg(long = "firewall", value_name = "RULE", conflicts_with = "no_firewall")]
         firewall: Vec<String>,
@@ -5296,10 +5297,12 @@ fn firewall_rule(line: &str) -> anyhow::Result<Value> {
             };
         } else if let Some(k) = w.strip_prefix("key=") {
             rule["key"] = json!(k);
+        } else if let Some(b) = w.strip_prefix("bots=") {
+            rule["bots"] = json!(b.split(',').filter(|b| !b.is_empty()).collect::<Vec<_>>());
         } else if w.starts_with('/') {
             rule["path"] = json!(w);
         } else {
-            anyhow::bail!("{w:?} in {line:?}: a path (/…), method=…, ip=…, header=…, cookie=…, query=…, key=…, or ua=…");
+            anyhow::bail!("{w:?} in {line:?}: a path (/…), method=…, ip=…, header=…, cookie=…, query=…, key=…, bots=…, or ua=…");
         }
     }
     Ok(rule)

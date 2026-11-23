@@ -2641,11 +2641,25 @@ async fn an_edge_function_runs_before_a_site_or_a_service() {
     let d: Value = serde_json::from_slice(&w.api.clone().oneshot(req).await.unwrap().into_body().collect().await.unwrap().to_bytes()).unwrap();
     let d = settled(&w, &aid, "production", d["id"].as_str().unwrap()).await;
     assert_eq!((d["plan"]["edge"][0]["name"].as_str(), &d["plan"]["edge"][0]["paths"]), (Some("middleware"), &json!(["/private/*"])), "{d}");
-    let h = host(&call(&w.api, "GET", &format!("/v1/apps/services/{aid}/environments/production"), None).await.1["url"]);
+    let env_api = format!("/v1/apps/services/{aid}/environments/production");
+    let h = host(&call(&w.api, "GET", &env_api, None).await.1["url"]);
+    // Only the visitors' network: `next()` comes from the functions service's address, and is
+    // the visitor's request still (its gates passed on the way in).
+    assert_eq!(call(&w.api, "PUT", &env_api, Some(json!({"allow_ips": ["198.51.100.0/24"]}))).await.0, StatusCode::OK);
+    let from = |path: String, host: String, addr: &'static str| {
+        let public = w.public.clone();
+        async move {
+            let mut r = Request::builder().uri(path).header("host", host).body(Body::empty()).unwrap();
+            r.extensions_mut().insert(axum::extract::ConnectInfo(addr.parse::<std::net::SocketAddr>().unwrap()));
+            let resp = public.oneshot(r).await.unwrap();
+            let st = resp.status();
+            (st, serde_json::from_slice::<Value>(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap_or(Value::Null))
+        }
+    };
     image_service(&w, "api-fn", json!({"port": 80, "min_instances": 1})).await;
     let mut sent = Value::Null;
     for _ in 0..100 {
-        sent = serde_json::from_str(&get("/private/x".into(), h.clone()).await.1).unwrap_or(Value::Null);
+        sent = from("/private/x".into(), h.clone(), "198.51.100.7:4000").await.1;
         if sent["path"] == "/.roll/edge/middleware" {
             break;
         }
@@ -2653,10 +2667,15 @@ async fn an_edge_function_runs_before_a_site_or_a_service() {
     }
     assert_eq!(sent["edge"]["x-edge-path"].as_str(), Some("/private/x"), "{sent}");
     let next_path = sent["edge"]["x-edge-next"].as_str().unwrap().to_string();
-    let back: Value = serde_json::from_str(&get(format!("{next_path}/private/x"), "127.0.0.1".into()).await.1).unwrap_or(Value::Null);
-    assert_eq!(back["path"], "/private/x", "next() reaches the service itself, never the middleware again: {back}");
-    let other: Value = serde_json::from_str(&get("/public".into(), h).await.1).unwrap_or(Value::Null);
+    assert!(next_path.contains("/198.51.100.7/"), "signed for the visitor: {next_path}");
+    let (st, back) = from(format!("{next_path}/private/x"), "127.0.0.1".into(), "10.9.9.9:4000").await;
+    assert_eq!((st, &back["path"]), (StatusCode::OK, &json!("/private/x")), "next() reaches the service itself, as the visitor, never the middleware again: {back}");
+    for other in ["/PRIVATE/x", "/%70rivate/x", "/private;a=1/x"] {
+        assert_eq!(from(other.into(), h.clone(), "198.51.100.7:4000").await.1["path"], "/.roll/edge/middleware", "{other} as the app reads it");
+    }
+    let other = from("/public".into(), h.clone(), "198.51.100.7:4000").await.1;
     assert_eq!(other["path"], "/public", "other paths go straight to it: {other}");
+    assert_eq!(from("/public".into(), h, "203.0.113.1:4000").await.0, StatusCode::FORBIDDEN, "the allow list still holds for anyone else");
 }
 
 /// A worker that follows a gauge of its own (KEDA's Prometheus scaler): the newest point of each
@@ -4924,6 +4943,9 @@ async fn a_request_naming_an_earlier_deployment_goes_to_it() {
     let id = svc["id"].as_str().unwrap().to_string();
     let base = format!("/v1/apps/services/{id}/environments/production");
     let h = host(&call(&w.api, "GET", &base, None).await.1["url"]);
+    // As a Next.js build's would: the id roll gave its build (`NEXT_DEPLOYMENT_ID`), in its plan.
+    let d1 = settled(&w, &id, "production", d1["id"].as_str().unwrap()).await;
+    w.apps.store.set_built(d1["id"].as_str().unwrap(), d1["image"].as_str().unwrap(), Some(&json!({"next_deployment_id": "nb_0a1b2c3d"})), None).unwrap();
     let (_, d2) = call(&w.api, "POST", &format!("{base}/deploys"), Some(json!({}))).await;
     let d2 = settled(&w, &id, "production", d2["id"].as_str().unwrap()).await;
     assert_eq!(visit_deployment(&w, &h, d2["id"].as_str().unwrap()).await.1["deployment"], d2["id"]);
@@ -4951,6 +4973,12 @@ async fn a_request_naming_an_earlier_deployment_goes_to_it() {
     // Another service's deployment, or one never live here: what's live.
     let (_, theirs) = image_service(&w, "other", json!({"port": 80})).await;
     assert_eq!(ask("/api", &[("x-deployment-id", theirs["id"].as_str().unwrap())]).await.0, d2["id"]);
+    assert_eq!(ask("/_next/static/a.js?dpl=nb_0a1b2c3d", &[]).await.0, d1["id"], "its build's Next.js id");
+    // Rolled back to that build: a new deployment, the same pages, so what's live answers them.
+    let (st, d3) = call(&w.api, "POST", &format!("{base}/deploys/{first}/rollback"), Some(json!({}))).await;
+    assert!(st.is_success(), "{d3}");
+    let d3 = settled(&w, &id, "production", d3["id"].as_str().unwrap()).await;
+    assert_eq!(ask("/api", &[("x-deployment-id", "nb_0a1b2c3d")]).await.0, d3["id"], "{d3}");
 }
 
 /// A deployment has its own URL: one deployed without traffic is reached there, not on the
@@ -5670,6 +5698,7 @@ async fn next_shares_its_cache_between_instances() {
     let d = settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
     let dep = d["id"].as_str().unwrap().to_string();
     assert!(d["plan"]["next_cache"] == true && d["plan"]["dockerfile"].as_str().unwrap_or_default().contains("NEXT_ADAPTER_PATH=/opt/roll-next/adapter.js"), "{d}");
+    assert!(d["plan"]["next_deployment_id"].as_str().is_some_and(|i| i.starts_with("nb_")), "its build's Next.js id, for skew protection: {d}");
     let (_, body) = visit_deployment(&w, &host(&svc["environments"][0]["url"]), &dep).await;
     let token = body["vars"]["ROLL_NEXT_CACHE_TOKEN"].as_str().unwrap_or_else(|| panic!("{body}")).to_string();
     assert!(token.starts_with("rlr_") && body["vars"]["ROLL_NEXT_CACHE_URL"].as_str().unwrap_or_default().ends_with("/_roll/next"), "{body}");
@@ -6890,6 +6919,21 @@ async fn firewall_rules_decide_in_order() {
     assert_eq!(call(&w.api, "PUT", &base, Some(json!({"firewall": [{"action": "deny", "path": "/x", "key": "ip"}]}))).await.0, StatusCode::BAD_REQUEST, "a key is a limit's");
     assert_eq!(call(&w.api, "PUT", &base, Some(json!({"firewall": [{"action": "limit", "path": "/x"}]}))).await.0, StatusCode::BAD_REQUEST, "a limit says its rate");
     assert_eq!(call(&w.api, "PUT", &base, Some(json!({"firewall": [{"action": "deny", "path": "/x", "per_minute": 5}]}))).await.0, StatusCode::BAD_REQUEST);
+    // Managed lists: AI crawlers kept out, and a crawler claiming Googlebot's name checked by
+    // Google's DNS both ways; the real one passes a challenge.
+    w.dns.add("1.66.249.66.in-addr.arpa", "PTR", "crawl-66-249-66-1.googlebot.com.");
+    w.dns.add("crawl-66-249-66-1.googlebot.com", "A", "66.249.66.1");
+    assert_eq!(call(&w.api, "PUT", &base, Some(json!({"firewall": [{"action": "deny", "bots": ["robots"]}]}))).await.0, StatusCode::BAD_REQUEST);
+    let (st, e) = call(&w.api, "PUT", &base, Some(json!({"firewall": [{"action": "deny", "bots": ["spoofed", "ai"]}]}))).await;
+    assert_eq!((st, &e["firewall"][0]["bots"]), (StatusCode::OK, &json!(["ai", "spoofed"])), "{e}");
+    let gb = [("user-agent", "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)")];
+    assert_eq!(ask("198.51.100.1:5000", "/", &[("user-agent", "Mozilla/5.0 (compatible; GPTBot/1.2; +https://openai.com/gptbot)")]).await, StatusCode::FORBIDDEN, "an AI crawler");
+    assert_eq!(ask("198.51.100.1:5000", "/", &gb).await, StatusCode::FORBIDDEN, "Googlebot's name from elsewhere");
+    assert_eq!(ask("66.249.66.1:5000", "/", &gb).await, StatusCode::OK, "Googlebot from Google");
+    assert_eq!(ask("198.51.100.1:5000", "/", &[("user-agent", "Mozilla/5.0 (Macintosh) Safari/605.1.15")]).await, StatusCode::OK, "a browser");
+    call(&w.api, "PUT", &base, Some(json!({"firewall": [{"action": "challenge", "path": "/*"}]}))).await;
+    assert_eq!(ask("66.249.66.1:5000", "/", &gb).await, StatusCode::OK, "a verified crawler passes a challenge");
+    assert_eq!(ask("198.51.100.1:5000", "/", &gb).await, StatusCode::FORBIDDEN, "a claimed one gets the page");
     call(&w.api, "PUT", &base, Some(json!({"firewall": null}))).await;
     assert_eq!(req("GET", "/admin/users", "curl").await, StatusCode::OK);
 }
