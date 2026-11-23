@@ -121,6 +121,17 @@ CREATE TABLE IF NOT EXISTS build_cache_artifacts (
     used_at INTEGER NOT NULL,
     PRIMARY KEY (project, ns, hash)
 ) WITHOUT ROWID;
+-- Provenance on roll's builds (`provenance`): each project's signing key (PKCS#8, sealed) and its
+-- public key, made once; each built image's signed statement (a DSSE envelope).
+CREATE TABLE IF NOT EXISTS provenance_keys (
+    project TEXT PRIMARY KEY,
+    sealed TEXT NOT NULL,
+    public TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS image_provenance (
+    image TEXT PRIMARY KEY,
+    envelope TEXT NOT NULL
+);
 -- Next.js's cache across an environment's instances (`next_cache`): their token, sealed, found by
 -- its hash on each request; its entries, each one's bytes in object storage under a key of its
 -- own upload's (`scope` is a deployment's, or `data` for Next's fetch cache, which every
@@ -2955,6 +2966,32 @@ impl Store {
             c.execute("DELETE FROM build_cache_artifacts WHERE used_at < ?", [before])?;
             Ok(objects)
         })
+    }
+
+    /// A project's provenance key (PKCS#8 DER) and its public key (PEM), made the first time.
+    pub fn provenance_key(&self, project: &str) -> Result<(Vec<u8>, String)> {
+        let what = format!("provenance:{project}");
+        let (der, public) = crate::provenance::new_key();
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let sealed = self.sealer.seal(&what, &b64.encode(&der));
+        self.db.execute("INSERT INTO provenance_keys (project, sealed, public) VALUES (?, ?, ?) ON CONFLICT (project) DO NOTHING", params![project, sealed, public])?;
+        let (kept, public): (String, String) = self.db.query_row("SELECT sealed, public FROM provenance_keys WHERE project = ?", [project], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let der = b64.decode(self.sealer.open(&what, &kept)?).map_err(|e| Error::Internal(e.to_string()))?;
+        Ok((der, public))
+    }
+
+    /// A project's provenance public key, if it has one yet.
+    pub fn provenance_public(&self, project: &str) -> Result<Option<String>> {
+        Ok(self.db.query_row("SELECT public FROM provenance_keys WHERE project = ?", [project], |r| r.get(0)).optional()?)
+    }
+
+    pub fn put_provenance(&self, image: &str, envelope: &str) -> Result<()> {
+        self.db.execute("INSERT INTO image_provenance (image, envelope) VALUES (?, ?) ON CONFLICT (image) DO UPDATE SET envelope = excluded.envelope", params![image, envelope])?;
+        Ok(())
+    }
+
+    pub fn provenance(&self, image: &str) -> Result<Option<String>> {
+        Ok(self.db.query_row("SELECT envelope FROM image_provenance WHERE image = ?", [image], |r| r.get(0)).optional()?)
     }
 
     /// An environment's Next.js cache token, made the first time it's asked for.
