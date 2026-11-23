@@ -474,6 +474,7 @@ impl Db {
             crate::agents::sandbox::store::SCHEMA,
             crate::agents::docs::SCHEMA,
             crate::agents::endpoints::SCHEMA,
+            crate::agents::endpoint_refs::SCHEMA,
             crate::agents::gateway::SCHEMA,
             crate::agents::automations::SCHEMA,
             crate::agents::linear::SCHEMA,

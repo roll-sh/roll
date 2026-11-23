@@ -740,6 +740,20 @@ static TOOLS: &[Tool] = &[
     )
     .destructive(),
     t("workspace_remove_member", "Remove a member", "Take a person out of a project: their session and tokens stop reaching it at once, and their tokens confined to it are revoked. The last owner can't be removed.", "workspace", "DELETE", "/v1/workspace/projects/{id}/members/{user}", &[WS, req("user", "The member (usr_…)")]).destructive(),
+    // Groups (docs/members-v1-1.md): a group's members get its role on a project, added to their
+    // own. Making groups and their members is the operator's (or the IdP's, through SCIM).
+    t("workspace_list_groups", "List a project's groups", "The groups with a role on a workspace project: each group's role, a developer role's environments and how many members it has. A member's access is the union of their own role and their groups'.", "workspace", "GET", "/v1/workspace/projects/{id}/groups", &[WS]),
+    t(
+        "workspace_set_group_role",
+        "Give a group a role",
+        "Give a group a role on a project, or change it: every member of the group gets it, added to their own. Never owner; never more than the caller's own role, and only a group the caller may assign (one they're in, unless they're the operator).",
+        "workspace",
+        "PUT",
+        "/v1/workspace/projects/{id}/groups/{group}",
+        &[WS, req("group", "The group (grp_…)"), breq("role", Ty::Str, "viewer, developer or admin"), b("environments", Ty::Arr, "A developer role's environments (default: every environment that isn't protected)")],
+    )
+    .destructive(),
+    t("workspace_remove_group_role", "Take a group's role away", "Take a group's role on a project away: its members keep only their own roles (and other groups'), at once.", "workspace", "DELETE", "/v1/workspace/projects/{id}/groups/{group}", &[WS, req("group", "The group (grp_…)")]).destructive(),
     // ── Postgres ──
     t("postgres_list_projects", "List Postgres projects", "Postgres projects with their branches and endpoints.", "postgres", "GET", "/v1/projects", &[]),
     t("postgres_get_project", "Get a Postgres project", "A Postgres project with its branches and endpoints (connection strings need reveal).", "postgres", "GET", "/v1/projects/{project}", &[PROJECT]),

@@ -466,7 +466,7 @@ impl Request {
             }
             Dialect::OpenSearch => {
                 let Some(doc) = os_config_doc(ctx.api) else { return };
-                if !matches!(reply, Reply::Body(s, _) | Reply::Empty(s) | Reply::Raw(s, ..) if *s < 300) {
+                if !matches!(reply, Reply::Body(s, _) | Reply::Empty(s) | Reply::Raw(s, ..) | Reply::Stream(s, ..) if *s < 300) {
                     return;
                 }
                 let kind = if ctx.method == Method::Get { Kind::ConfigRead } else { Kind::ConfigChange };

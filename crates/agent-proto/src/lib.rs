@@ -64,9 +64,10 @@ pub mod endpoint;
 pub mod gateway;
 pub mod identity;
 pub mod registry;
+pub mod seal;
 
 pub use endpoint::{
-    EndpointCheck, EndpointInfo, EndpointKind, EndpointModel, EndpointProfile, EndpointSpec, KeyChange, KeyState, SEAL_VERSION, SealedSecret, endpoint_limits,
+    EndpointCheck, EndpointInfo, EndpointKind, EndpointModel, EndpointProfile, EndpointSpec, KeyChange, KeyState, RefKey, SEAL_VERSION, SealedSecret, endpoint_limits,
 };
 pub use gateway::{
     Attempt, CircuitState, ClientSeen, GatewayClient, GatewayInfo, GatewayJoin, GatewayMember, GatewayPlan, GatewayRun, GatewaySettings, GatewayStatus, GatewayUrl,
@@ -2368,6 +2369,11 @@ pub enum Command {
     /// Ask the endpoint for its models now (answers `endpoint_checked`, and keeps what it lists).
     #[serde(rename = "endpoint.check")]
     EndpointCheck { endpoint: String },
+    /// An endpoint's `roll://` key from roll secrets ([`RefKey`]): sent by roll's relay alone (it
+    /// refuses one from anyone else), sealed to this daemon. Kept in memory; replies once the
+    /// providers have it and `hello` says the endpoint's state.
+    #[serde(rename = "endpoint.key")]
+    EndpointKey { endpoint: String, key: RefKey },
     /// Install an agent of the ACP registry on the machine (docs/code/agents.md, "The ACP
     /// registry"): the daemon fetches the registry, downloads and checks the agent (or installs
     /// its package with the machine's own `npm`/`uv`) into its own directory, and offers it as the

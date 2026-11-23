@@ -718,7 +718,11 @@ export interface EndpointSpec {
   url_env?: string;
   /** `custom`: the variable the key goes in. */
   key_env?: string;
-  /** The key is read on the machine from 1Password (`op://vault/item/field`). */
+  /**
+   * A reference instead of a sealed key: 1Password's (`op://vault/item/field`, read on the machine),
+   * or roll secrets' (`roll://ENV[/folder]/KEY`: bound to whoever sets it, and sent by the relay
+   * sealed to the daemon while they may read it).
+   */
   key_ref?: string;
   /** When it doesn't answer as a provider's process starts, the provider starts on its own login or keys instead of failing. */
   fallback?: boolean;
@@ -734,6 +738,9 @@ export interface SealedSecret {
 
 /** What `endpoint.set` does to the endpoint's key. */
 export type KeyChange = { type: "keep" } | { type: "clear" } | { type: "set"; sealed: SealedSecret };
+
+/** What `endpoint.key` (sent by roll's relay alone) says about an endpoint's `roll://` key. */
+export type RefKey = { type: "set"; sealed: SealedSecret } | { type: "refused"; reason: string };
 
 /** Where an endpoint's key comes from. Never any part of the key. */
 export type KeyState = "none" | "sealed" | "reference";
@@ -1367,6 +1374,8 @@ export type Command =
   | { type: "endpoint.remove"; endpoint: string }
   /** Ask the endpoint for its models now (answers `endpoint_checked`). */
   | { type: "endpoint.check"; endpoint: string }
+  /** An endpoint's `roll://` key from roll secrets, sealed to the daemon: roll's relay sends it, never a browser. */
+  | { type: "endpoint.key"; endpoint: string; key: RefKey }
   /** Set up, change, start or stop the gateway on this machine (replaced whole, applied live). */
   | { type: "gateway.configure"; settings: GatewaySettings }
   /** An upstream's key: sealed to this daemon (`sealUpstreamKey`), or cleared. */
@@ -2098,6 +2107,10 @@ const keyChangeD: Decoder<KeyChange> = tagged("type", {
   clear: obj<object>({}),
   set: obj<{ sealed: SealedSecret }>({ sealed: sealedSecretD }),
 } satisfies Record<KeyChange["type"], Decoder<object>>);
+const refKeyD: Decoder<RefKey> = tagged("type", {
+  set: obj<{ sealed: SealedSecret }>({ sealed: sealedSecretD }),
+  refused: obj<{ reason: string }>({ reason: str }),
+} satisfies Record<RefKey["type"], Decoder<object>>);
 const endpointInfoD = obj<EndpointInfo>({
   ...endpointSpecFields,
   key: withDefault(literal("none", "sealed", "reference"), () => "none" as const),
@@ -2373,6 +2386,7 @@ export const commandD: Decoder<Command> = tagged("type", {
   "endpoint.set": cmd<"endpoint.set">(obj({ endpoint: endpointSpecD, key: optional(keyChangeD) })),
   "endpoint.remove": cmd<"endpoint.remove">(obj({ endpoint: str })),
   "endpoint.check": cmd<"endpoint.check">(obj({ endpoint: str })),
+  "endpoint.key": cmd<"endpoint.key">(obj({ endpoint: str, key: refKeyD })),
   "gateway.configure": cmd<"gateway.configure">(obj({ settings: gatewaySettingsD })),
   "gateway.key": cmd<"gateway.key">(obj({ upstream: str, key: optional(keyChangeD) })),
   "gateway.client.issue": cmd<"gateway.client.issue">(obj({ name: str, machine: optional(str), seal_key: str })),

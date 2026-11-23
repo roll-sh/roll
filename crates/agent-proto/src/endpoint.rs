@@ -7,7 +7,9 @@
 //! the relay forwards only the ciphertext ([`SealedSecret`]) and keeps none, and only the daemon
 //! can open it. What the daemon reports back ([`EndpointInfo`]) says whether a key is set, never
 //! any part of it. A key may instead be a 1Password reference (`op://…`) the daemon reads on the
-//! machine (T3 Code's secret providers, `packages/secret-provider-onepassword` there).
+//! machine (T3 Code's secret providers, `packages/secret-provider-onepassword` there), or a roll
+//! secrets reference (`roll://ENV[/folder]/KEY`): the relay binds it to whoever sets it and,
+//! after each `hello`, sends its value sealed to the daemon (`endpoint.key`, [`RefKey`]).
 //!
 //! Profiles ([`EndpointProfile`]) are the owner's endpoints kept on the relay without a key, to
 //! apply to many machines at once: the browser seals the key once per machine.
@@ -89,7 +91,9 @@ pub struct EndpointSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_env: Option<String>,
     /// The key is read on the machine from 1Password (`op://vault/item/field`, with the `op`
-    /// CLI signed in there) instead of being sealed to the daemon. A reference isn't a secret.
+    /// CLI signed in there), or comes from roll secrets (`roll://ENV[/folder]/KEY`, sent by the
+    /// relay sealed to the daemon: [`RefKey`]), instead of being sealed to the daemon once. A
+    /// reference isn't a secret.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_ref: Option<String>,
     /// When the endpoint doesn't answer as a provider's process starts, start it on its own login
@@ -120,7 +124,16 @@ impl EndpointSpec {
         let text = |v: Option<String>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
         self.url_env = text(self.url_env.take());
         self.key_env = text(self.key_env.take());
-        self.key_ref = text(self.key_ref.take());
+        // roll secrets' own parser decides, on the value as sent (` roll://…` is an error, never
+        // trimmed into a reference).
+        let roll = match self.key_ref.as_deref().map(roll_secrets_ref::Reference::parse) {
+            Some(Err(e)) => return Err(format!("key_ref: {e}")),
+            Some(Ok(r)) => r.is_some(),
+            None => false,
+        };
+        if !roll {
+            self.key_ref = text(self.key_ref.take());
+        }
         for name in [&self.url_env, &self.key_env].into_iter().flatten() {
             if !valid_env_name(name) {
                 return Err(format!("{name:?} isn't an environment variable name (letters, digits and _, not starting with a digit)"));
@@ -134,11 +147,20 @@ impl EndpointSpec {
             return Err(format!("only a custom endpoint names its variables ({} sets its own)", self.kind.label()));
         }
         if let Some(r) = &self.key_ref
-            && (!r.starts_with("op://") || r.len() > l::KEY_REF || r.chars().any(|c| c.is_control() || c.is_whitespace()))
+            && (r.len() > l::KEY_REF || (!roll && (!r.starts_with("op://") || r.chars().any(|c| c.is_control() || c.is_whitespace()))))
         {
-            return Err(format!("a 1Password reference looks like op://vault/item/field (at most {} bytes, no spaces)", l::KEY_REF));
+            return Err(format!(
+                "a key reference is a 1Password one (op://vault/item/field) or roll secrets' (roll://ENV/KEY), at most {} bytes, no spaces",
+                l::KEY_REF
+            ));
         }
         Ok(self)
+    }
+
+    /// Its `key_ref` when that's a roll secrets reference (`roll_secrets::Reference::parse`,
+    /// from `roll-secrets-ref`, says so): the relay sends its value ([`RefKey`]); the daemon never reads it itself.
+    pub fn roll_ref(&self) -> Option<&str> {
+        self.key_ref.as_deref().filter(|r| matches!(roll_secrets_ref::Reference::parse(r), Ok(Some(_))))
     }
 
     /// Whether `provider` uses it.
@@ -206,6 +228,25 @@ impl SealedSecret {
     pub fn context(endpoint: &str) -> String {
         format!("roll-endpoint:{endpoint}")
     }
+
+    /// The associated data the relay seals an endpoint's `roll://` key with ([`RefKey`]): not
+    /// [`SealedSecret::context`], so one never opens as the other.
+    pub fn ref_context(endpoint: &str) -> String {
+        format!("roll-endpoint-ref:{endpoint}")
+    }
+}
+
+/// What `endpoint.key` says about an endpoint's `roll://` key (only roll's relay sends it, after
+/// each `hello` and when the key or who may read it changes). The daemon keeps it in memory only,
+/// as a 1Password reference's value.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RefKey {
+    /// Its value, sealed to the daemon with [`SealedSecret::ref_context`].
+    Set { sealed: SealedSecret },
+    /// It can't be read (whoever chose it can no longer reveal it, it's gone…): the endpoint gets
+    /// no key, and `reason` is its error. Never holds the value.
+    Refused { reason: String },
 }
 
 /// Never prints the ciphertext (it is only ever useful to its daemon, but logs are no place for
@@ -249,7 +290,8 @@ pub enum KeyState {
     None,
     /// Sealed from roll and kept by the daemon.
     Sealed,
-    /// Read from 1Password on the machine (`key_ref`).
+    /// A reference (`key_ref`): read from 1Password on the machine, or sent by roll's relay from
+    /// roll secrets.
     Reference,
 }
 
@@ -341,6 +383,13 @@ mod tests {
         assert!(bad(|s| s.providers.push(ProviderId::claude())).contains("once"));
         assert!(bad(|s| s.key_env = Some("GEMINI_API_KEY".into())).contains("only a custom"));
         assert!(bad(|s| s.key_ref = Some("vault/item".into())).contains("op://"));
+        // A roll secrets reference is exactly what `Reference::parse` takes: never trimmed into one.
+        assert!(bad(|s| s.key_ref = Some(" roll://production/ANTHROPIC_KEY".into())).contains("roll://"));
+        assert!(bad(|s| s.key_ref = Some("roll://production".into())).contains("roll://"));
+        let roll = EndpointSpec { key_ref: Some("roll://production/ai/ANTHROPIC_KEY".into()), ..spec() }.check().unwrap();
+        assert_eq!(roll.roll_ref(), Some("roll://production/ai/ANTHROPIC_KEY"));
+        let op = EndpointSpec { key_ref: Some(" op://vault/item/key ".into()), ..spec() }.check().unwrap();
+        assert_eq!((op.key_ref.as_deref(), op.roll_ref()), (Some("op://vault/item/key"), None));
         assert!(bad(|s| s.kind = EndpointKind::Custom).contains("names the variable"));
         let custom = EndpointSpec { kind: EndpointKind::Custom, key_env: Some("GEMINI_API_KEY".into()), ..spec() };
         assert!(custom.check().is_ok());
