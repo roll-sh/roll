@@ -645,6 +645,51 @@ async fn roll_run_watch_restarts_on_a_write_waits_out_failures_and_passes_sigter
     assert_eq!(seen(), "one\nterm\ntwo\nterm\n");
 }
 
+/// `roll run --watch` reads a change through a delta (docs/secrets.md, "Delta reads"): the
+/// restarted command has the new value and the one that didn't change, and the read after the
+/// change is audited as returning only the key that changed.
+#[cfg(unix)]
+#[tokio::test]
+async fn roll_run_watch_reads_a_change_through_a_delta() {
+    use std::time::Duration;
+    let s = start().await;
+    let at = ["secrets", "-p", "shop", "-e", "production"];
+    ok(&s.api, &[], &[&at[..], &["set", "A=one", "B=kept"]].concat(), None).await;
+    let seen_at = s._dir.path().join("seen");
+    let seen = || std::fs::read_to_string(&seen_at).unwrap_or_default();
+    let wait_for = |want: &'static str| {
+        let seen = &seen;
+        async move {
+            let started = std::time::Instant::now();
+            while seen() != want {
+                assert!(started.elapsed() < Duration::from_secs(20), "waited for {want:?}, the command wrote {:?}", seen());
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    };
+    let _roll = tokio::process::Command::new(env!("CARGO_BIN_EXE_roll"))
+        .args(["run", "-p", "shop", "-e", "production", "--watch", "--interval", "1", "--no-mask", "--", "sh", "-c", r#"echo "$A $B" >> "$SEEN"; while :; do sleep 0.05; done"#])
+        .env("ROLL_API_URL", &s.api)
+        .env("SEEN", &seen_at)
+        .env_remove("ROLL_TOKEN")
+        .env_remove("ROLL_PROJECT")
+        .env_remove("ROLL_ENV")
+        .env_remove("ROLL_ADMIN_TOKEN")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    wait_for("one kept\n").await;
+    ok(&s.api, &[], &[&at[..], &["set", "A=two"]].concat(), None).await;
+    wait_for("one kept\ntwo kept\n").await;
+    let project = s.projects.list(roll_workspace::Scope::All).unwrap().into_iter().find(|p| p.name == "shop").unwrap().id;
+    let filter = roll_secrets::AuditFilter { action: Some("secrets.export".into()), ..Default::default() };
+    let reads = s.secrets.audit(&project, filter, &roll_secrets::Caller::operator()).unwrap();
+    assert_eq!(reads[0].keys, ["A"], "{}", reads[0].summary);
+}
+
 /// A token reaches what it's told to, for 90 days: no environment named is refused (or the
 /// directory's own, never a protected one), and forever or everywhere are asked for. `setup` makes
 /// a project that isn't there yet when asked to.

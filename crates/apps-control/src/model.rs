@@ -1125,11 +1125,16 @@ pub struct Rollout {
     /// consumer that must be alone. A web service's requests wait for the new one meanwhile.
     #[serde(skip_serializing_if = "is_true")]
     pub overlap: bool,
+    /// The environment's browser checks run against the new deployment's own URL before it
+    /// takes any requests (Checkly's deployment checks, through Vercel); one that fails rolls it
+    /// back (`crate::browser`).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub checks: bool,
 }
 
 impl Default for Rollout {
     fn default() -> Self {
-        Rollout { steps: Vec::new(), step_s: 120, error_pct: 5, manual: false, slo_burn: None, p95_pct: None, overlap: true }
+        Rollout { steps: Vec::new(), step_s: 120, error_pct: 5, manual: false, slo_burn: None, p95_pct: None, overlap: true, checks: false }
     }
 }
 

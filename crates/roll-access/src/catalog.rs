@@ -1536,6 +1536,8 @@ static ROWS: &[Row] = &[
     row("DELETE", "/v1/secrets/projects/{project}/environments/{env}/folder-policies", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/requests/{id}/review", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/values", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
+    // A watcher's read of what changed since the values it holds: values, so reveal.
+    row("POST", "/v1/secrets/projects/{project}/environments/{env}/values/delta", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/value", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     // A TOTP key's current code is a credential: reveal, never the prefix's read.
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/totp", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),

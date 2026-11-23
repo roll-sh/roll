@@ -4130,6 +4130,29 @@ async fn a_browser_check_runs_its_script_past_the_password() {
     assert_eq!(w.fake.build_trees.lock().len(), 1, "still the one image");
 }
 
+/// A rollout that checks first (`rollout.checks`, Checkly's deployment checks): the environment's
+/// browser checks run against the new deployment's own URL before it takes a request; one that
+/// fails rolls it back with the old deployment still live, and one that passes lets it roll out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rollout_runs_its_browser_checks_on_the_canary_first() {
+    let w = world().await;
+    *w.fake.check_pages.lock() = Some(w.public.clone());
+    let run = json!({"port": 80, "min_instances": 1, "rollout": {"steps": [50], "step_s": 1, "error_pct": 20, "checks": true}});
+    let (svc, d1) = image_service(&w, "api", run).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    let checks = |script: &str| json!({"checks": [{"name": "home", "path": "/", "every_s": 3600, "browser": script}]});
+    assert_eq!(call(&w.api, "PUT", &base, Some(checks("throw new Error('broken')"))).await.0, StatusCode::OK);
+    let (_, d2) = call(&w.api, "POST", &format!("{base}/deploys"), Some(json!({}))).await;
+    let d2 = settled(&w, &id, "production", d2["id"].as_str().unwrap()).await;
+    assert!(d2["status"] == "failed" && d2["error"].as_str().unwrap_or_default().contains("browser check home failed: new Error('broken')"), "{d2}");
+    assert_eq!(call(&w.api, "GET", &base, None).await.1["active"]["id"], d1["id"], "the old one stays live");
+    call(&w.api, "PUT", &base, Some(checks("await page.title()"))).await;
+    let (_, d3) = call(&w.api, "POST", &format!("{base}/deploys"), Some(json!({}))).await;
+    let d3 = settled(&w, &id, "production", d3["id"].as_str().unwrap()).await;
+    assert_eq!(d3["status"], "active", "{d3}");
+}
+
 /// Heartbeats (Healthchecks', Cronitor's): something outside roll pings its URL; one that
 /// doesn't within its period and grace is `heartbeat.missed` once, the next ping resolves it. The
 /// URL is shown once, when the heartbeat is added, and a kept heartbeat keeps it.

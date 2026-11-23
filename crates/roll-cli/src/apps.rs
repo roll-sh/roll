@@ -422,6 +422,10 @@ pub enum AppsCmd {
         /// `roll apps rollout advance|all|abort` decides.
         #[arg(long)]
         rollout_manual: Option<bool>,
+        /// The environment's browser checks run against a new deployment's own URL before it
+        /// takes any requests, and one that fails rolls it back (`true`), or not.
+        #[arg(long)]
+        rollout_checks: Option<bool>,
         /// `false`: the old instances stop before the new ones start, so two never run at once
         /// (a bot, a scheduler); `true` (the default): the new ones start beside them.
         #[arg(long, value_name = "BOOL")]
@@ -3167,10 +3171,10 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, alert_cpu, alert_metric, alert_anomaly, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, build_timeout, build_size, submodules, submodule_repos, lfs, otel, rollout, rollout_step, rollout_errors, rollout_manual, overlap, h2c, health_grpc, scale, public, drain, cpu_target, busy_cpu, memory_target, latency_target, oidc_audience, push, restart, restart_tries, affinity, tcp, udp, rollback_on_crash, rebuild_on_base, block_on } => {
+        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, alert_cpu, alert_metric, alert_anomaly, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, build_timeout, build_size, submodules, submodule_repos, lfs, otel, rollout, rollout_step, rollout_errors, rollout_manual, rollout_checks, overlap, h2c, health_grpc, scale, public, drain, cpu_target, busy_cpu, memory_target, latency_target, oidc_audience, push, restart, restart_tries, affinity, tcp, udp, rollback_on_crash, rebuild_on_base, block_on } => {
             let svc = service(api, &target).await?;
             // The service's rollout with what was given replaced (the API takes it whole).
-            let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() || rollout_manual.is_some() || overlap.is_some() {
+            let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() || rollout_manual.is_some() || rollout_checks.is_some() || overlap.is_some() {
                 let mut r = svc["run"]["rollout"].as_object().cloned().unwrap_or_default();
                 match rollout.as_deref() {
                     None => {}
@@ -3190,6 +3194,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 }
                 if let Some(m) = rollout_manual {
                     r.insert("manual".into(), json!(m));
+                }
+                if let Some(c) = rollout_checks {
+                    r.insert("checks".into(), json!(c));
                 }
                 if let Some(o) = overlap {
                     r.insert("overlap".into(), json!(o));
