@@ -1770,7 +1770,7 @@ type Preview = {
   reaches?: "open" | "roll";
   visual_change?: { since: string; percent: number; phone_percent?: number | null } | null;
   phone_screenshot?: boolean;
-  base_change?: { branch: string; percent: number; phone_percent: number | null; head?: string | null; load_ms?: number | null; lcp_ms?: number | null; a11y_added?: number | null; errors_added?: number | null; text?: TextDiff | null; links_added?: number | null; seo_added?: number | null; api?: TextDiff | null; api_breaking?: string[]; api_unread?: boolean; endpoints?: EndpointTime[] } | null;
+  base_change?: { branch: string; percent: number; phone_percent: number | null; head?: string | null; load_ms?: number | null; lcp_ms?: number | null; a11y_added?: number | null; errors_added?: number | null; text?: TextDiff | null; links_added?: number | null; seo_added?: number | null; api?: TextDiff | null; api_breaking?: string[]; api_unread?: boolean; endpoints?: EndpointTime[] /* {path, ms, status, main_ms, shape_changes?: {path, main, now: string | null}[]} */ } | null;
   pages?: PageCheck[];
   visual_review?: { state: "unchanged" | "changed" | "accepted"; branch: string; percent: number; by: string | null; at: number | null; required: boolean; head: string; pages: { path: string; percent: number; by: string | null; at: number | null; unstable?: boolean }[]; } | null;
   page_speed?: { now: PageSpeed; before: PageSpeed | null } | null;
@@ -1983,6 +1983,20 @@ type Settings = {
     more than 20 ms called slower: in the comment's folded checks ("1 endpoint slower than
     main"; "`GET /api/users` 140 ms (main 40 ms), slower"), the sheet and the change page (live:
     `/openapi.json` timed on both).
+    And their answers' shapes (Signadot's SmartTests, Optic's traffic diff): the untimed warm-up
+    GET's JSON answer (up to 1 MiB) is read for its shape, one `path types` line per field
+    (`users[].email string`, `total number|null`; `[]` an array's elements, `*` an object keyed by
+    ids; at most 100 lines, 8 levels, 20 elements an array, 100 keys an object), never its values.
+    When both answered 2xx JSON, it's compared with main's (`shape_changes`): a field main's has
+    and this one doesn't (the outermost only) or a type that widened (`number` to `string`, or to
+    `string|null`) breaks whoever reads it. A field it gained, or a type that narrowed, breaks
+    nobody. What sits under an array that's empty on either side isn't known there, so it's never
+    called gone (the two previews' data can differ). It's on the sheet's verdict strip as a danger
+    ("1 endpoint's answer changed shape"), under its endpoint on the sheet and the change page, and
+    in the comment ("`GET /api/users` 40 ms (main 40 ms), its answer: `users[].email` gone,
+    `total` `number` → `string`"). The shapes stay with the comparison: a preview's
+    `page_speed` doesn't carry them (live: the change's `/openapi.json` loses
+    `paths./users/{id}`).
     Page states too (Chromatic's interaction tests, Percy's scripted snapshots): much of what a
     change touches shows only after a click (a cart open, a dialog, a form's errors). A project
     names up to 3 (`github.states`: a name, a page of the first service's, and 1 to 10 steps:
