@@ -161,6 +161,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
     Router::new()
         .route("/v1/apps", get(overview))
         .route("/v1/apps/plan", post(plan))
+        .route("/v1/apps/quote", post(quote))
         .route("/v1/apps/import", post(import))
         .route("/v1/apps/services", get(list_services).post(create_service))
         .route("/v1/apps/projects/{project}/services", get(project_services).post(create_project_service))
@@ -238,6 +239,14 @@ async fn overview(State(apps): S) -> R {
     let mut o = apps.overview();
     o["services"] = serde_json::to_value(services).expect("JSON");
     ok(o)
+}
+
+/// What a service would cost at most, before it's made: `{ run }` as `NewService`'s (checked as
+/// it is), answered at this node's prices.
+async fn quote(State(apps): S, b: Bytes) -> R {
+    let v = body(&b)?;
+    let run: crate::model::Run = serde_json::from_value(v.get("run").cloned().unwrap_or_else(|| json!({}))).map_err(|e| Error::BadRequest(format!("run: {e}")))?;
+    ok(apps.cfg.prices.quote(&run.normalized()?))
 }
 
 /// A project in one file, read (no service made): a roll.toml's `[apps]` and `[databases]`, or

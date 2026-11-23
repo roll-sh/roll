@@ -2045,9 +2045,10 @@ impl Apps {
             _ => None,
         };
         // Its edge functions, run by `<name>-fn` (what Run its functions makes).
-        let edge: Vec<apps_build::edge::EdgeFn> = match &site {
-            Some(_) => dep.plan.as_ref().and_then(|p| serde_json::from_value(p["edge"].clone()).ok()).unwrap_or_default(),
-            None => Vec::new(),
+        // A site's, or a web service's middleware.
+        let edge: Vec<apps_build::edge::EdgeFn> = match (&site, run.kind) {
+            (Some(_), _) | (None, RunType::Web) => dep.plan.as_ref().and_then(|p| serde_json::from_value(p["edge"].clone()).ok()).unwrap_or_default(),
+            _ => Vec::new(),
         };
         let edge_service: String = format!("{}-fn", svc.name).chars().take(40).collect();
         Ok(Template { deployment: dep.id.clone(), spec, run, spa, site, edge, edge_service, intercept_hosts })

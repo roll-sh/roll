@@ -2153,6 +2153,21 @@ async fn an_hour_far_past_its_usual_spend_is_a_spike() {
     assert!(events().await.len() == 1 && got[0]["data"]["usd"].as_f64() > Some(1.9) && got[0]["data"]["usual_usd"].as_f64() < Some(0.3), "once: {got:?}");
 }
 
+/// A quote before a service is made: its run's ceiling at the node's prices, nothing while it
+/// sleeps, `min_instances` always, and a run it would refuse refused here too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_quote_is_what_a_run_costs_at_most() {
+    let w = world().await;
+    let (st, q) = call(&w.api, "POST", "/v1/apps/quote", Some(json!({}))).await;
+    assert_eq!((st, q["scales_to_zero"].as_bool(), q["idle_hour"].as_f64()), (StatusCode::OK, Some(true), Some(0.0)), "{q}");
+    let hour = q["instance_hour"].as_f64().unwrap();
+    assert!(hour > 0.0 && (q["month"]["most"].as_f64().unwrap() - hour * 3.0 * 730.0).abs() < 0.2, "three instances all month: {q}");
+    let (_, big) = call(&w.api, "POST", "/v1/apps/quote", Some(json!({"run": {"cpu": 1, "memory_mb": 1024, "min_instances": 2}}))).await;
+    let (bh, idle) = (big["instance_hour"].as_f64().unwrap(), big["idle_hour"].as_f64().unwrap());
+    assert!(bh > hour * 1.9 && (idle - bh * 2.0).abs() < 0.0002 && big["scales_to_zero"] == false, "two always on: {big}");
+    assert_eq!(call(&w.api, "POST", "/v1/apps/quote", Some(json!({"run": {"cpu": 64}}))).await.0, StatusCode::BAD_REQUEST);
+}
+
 /// A project past its alert gets `spend.alert` once; past its hard limit it's capped: its
 /// instances stop, a visitor gets a 402, deploys are refused; raising the limit lifts it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2564,12 +2579,12 @@ async fn a_split_test_serves_its_share_from_another_environment() {
     assert_eq!(visit(Some("roll_bucket=90")).await.0, d["id"].as_str().unwrap(), "no split: production answers all");
 }
 
-/// A static site's edge functions (Netlify's, Vercel's middleware): a request on one's path goes
-/// to the site's functions service as `/.roll/edge/<name>`, the visitor's path and a signed
+/// Edge functions (Netlify's, Vercel's middleware), a static site's and a server's: a request on
+/// one's path goes to the functions service as `/.roll/edge/<name>`, the visitor's path and a signed
 /// `context.next()` address with it; that address answers the site's own files (no edge function
 /// again), and nothing unsigned does. Other paths are the files as ever.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_sites_edge_function_runs_before_its_files() {
+async fn an_edge_function_runs_before_a_site_or_a_service() {
     let w = world().await;
     let (_, site) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "shop", "source": {"kind": "upload"} }))).await;
     let id = site["id"].as_str().unwrap().to_string();
@@ -2612,6 +2627,36 @@ async fn a_sites_edge_function_runs_before_its_files() {
     let forged = next_path.rsplit_once('/').unwrap().0.to_string() + "/00000000000000000000000000000000";
     assert_eq!(get(format!("{forged}/index.html"), "127.0.0.1".into()).await.0, StatusCode::NOT_FOUND);
     assert_eq!(get("/assets/app.js".into(), h.clone()).await.1, "start()", "other paths are its files");
+
+    // A server's middleware (Vercel's Routing Middleware): the same, before the service wakes.
+    let (_, api) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "api", "source": {"kind": "upload"} }))).await;
+    let aid = api["id"].as_str().unwrap().to_string();
+    let tree = tempfile::tempdir().unwrap();
+    std::fs::write(tree.path().join("package.json"), r#"{"name":"api","scripts":{"start":"node server.js"}}"#).unwrap();
+    std::fs::write(tree.path().join("server.js"), "require('http').createServer((q, r) => r.end('hi')).listen(process.env.PORT)").unwrap();
+    std::fs::write(tree.path().join("middleware.ts"), "export default (req) => new Response('no');\nexport const config = { matcher: [\"/private/*\"] };\n").unwrap();
+    let mut bundle = Vec::new();
+    roll_fetch::pack(&mut bundle, &Default::default(), Some(tree.path()), roll_fetch::Limits::default()).unwrap();
+    let req = Request::post(format!("/v1/apps/services/{aid}/environments/production/deploys")).header("content-type", "application/gzip").body(Body::from(bundle)).unwrap();
+    let d: Value = serde_json::from_slice(&w.api.clone().oneshot(req).await.unwrap().into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let d = settled(&w, &aid, "production", d["id"].as_str().unwrap()).await;
+    assert_eq!((d["plan"]["edge"][0]["name"].as_str(), &d["plan"]["edge"][0]["paths"]), (Some("middleware"), &json!(["/private/*"])), "{d}");
+    let h = host(&call(&w.api, "GET", &format!("/v1/apps/services/{aid}/environments/production"), None).await.1["url"]);
+    image_service(&w, "api-fn", json!({"port": 80, "min_instances": 1})).await;
+    let mut sent = Value::Null;
+    for _ in 0..100 {
+        sent = serde_json::from_str(&get("/private/x".into(), h.clone()).await.1).unwrap_or(Value::Null);
+        if sent["path"] == "/.roll/edge/middleware" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(sent["edge"]["x-edge-path"].as_str(), Some("/private/x"), "{sent}");
+    let next_path = sent["edge"]["x-edge-next"].as_str().unwrap().to_string();
+    let back: Value = serde_json::from_str(&get(format!("{next_path}/private/x"), "127.0.0.1".into()).await.1).unwrap_or(Value::Null);
+    assert_eq!(back["path"], "/private/x", "next() reaches the service itself, never the middleware again: {back}");
+    let other: Value = serde_json::from_str(&get("/public".into(), h).await.1).unwrap_or(Value::Null);
+    assert_eq!(other["path"], "/public", "other paths go straight to it: {other}");
 }
 
 /// A worker that follows a gauge of its own (KEDA's Prometheus scaler): the newest point of each
@@ -4271,6 +4316,44 @@ async fn a_rollout_runs_its_browser_checks_on_the_canary_first() {
     let (_, d3) = call(&w.api, "POST", &format!("{base}/deploys"), Some(json!({}))).await;
     let d3 = settled(&w, &id, "production", d3["id"].as_str().unwrap()).await;
     assert_eq!(d3["status"], "active", "{d3}");
+}
+
+/// Uptime checks from outside (Cloud Monitoring's, Checkly's): `from: public` fetches the
+/// environment's real URL over the network as a visitor's request goes (here the apps listener
+/// served for real, at its `*.localhost` name); a host that isn't one of its domains is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_public_check_fetches_its_real_url() {
+    let listener = tokio::net::TcpListener::bind("[::]:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let w = world_with(|cfg| cfg.url_port = Some(port)).await;
+    let app = w.public.clone();
+    tokio::spawn(async move { axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await });
+    let (svc, _) = image_service(&w, "web", json!({"port": 80, "min_instances": 1})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    assert_eq!(call(&w.api, "PUT", &base, Some(json!({"checks": [{"name": "home", "path": "/", "host": "x.example"}]}))).await.0, StatusCode::BAD_REQUEST, "a host is a public check's");
+    let checks = |c: Value| json!({"checks": [c]});
+    assert_eq!(call(&w.api, "PUT", &base, Some(checks(json!({"name": "home", "path": "/", "from": "public"})))).await.0, StatusCode::OK);
+    let t0 = code_sql::now_ms() + 3_600_000;
+    let pass = |n: i64| {
+        let (w, base) = (&w, base.clone());
+        async move {
+            w.apps.cron_pass(t0 + n * 61_000).await;
+            for _ in 0..300 {
+                let st = call(&w.api, "GET", &base, None).await.1["check_states"][0].clone();
+                if st["last_at"].as_i64() == Some(t0 + n * 61_000) && (!st["status"].is_null() || !st["error"].is_null()) {
+                    return st;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            panic!("pass {n} never came back");
+        }
+    };
+    let up = pass(0).await;
+    assert_eq!((up["up"].as_bool(), up["status"].as_u64()), (Some(true), Some(200)), "over the network: {up}");
+    call(&w.api, "PUT", &base, Some(checks(json!({"name": "home", "path": "/", "from": "public", "host": "not-ours.example"})))).await;
+    let refused = pass(1).await;
+    assert!(refused["error"].as_str().is_some_and(|e| e.contains("isn't one of this environment's active domains")), "{refused}");
 }
 
 /// Heartbeats (Healthchecks', Cronitor's): something outside roll pings its URL; one that
@@ -6796,6 +6879,15 @@ async fn firewall_rules_decide_in_order() {
     }
     assert_eq!(got, [StatusCode::OK, StatusCode::OK, StatusCode::TOO_MANY_REQUESTS], "its burst through, the next held");
     assert_eq!(req("GET", "/", "curl").await, StatusCode::OK, "other paths aren't limited");
+    // Keyed by an API key's header: two clients behind one address each get their own rate.
+    let (st, e) = call(&w.api, "PUT", &base, Some(json!({"firewall": [{"action": "limit", "path": "/api/*", "per_minute": 1, "burst": 1, "key": "header:X-Api-Key"}]}))).await;
+    assert_eq!((st, e["firewall"][0]["key"].as_str()), (StatusCode::OK, Some("header:x-api-key")), "{e}");
+    let keyed = |k: &'static str| {
+        let (public, h) = (w.public.clone(), h.clone());
+        async move { public.oneshot(Request::get("/api/orders").header("host", h.as_str()).header("x-api-key", k).body(Body::empty()).unwrap()).await.unwrap().status() }
+    };
+    assert_eq!((keyed("ka").await, keyed("ka").await, keyed("kb").await), (StatusCode::OK, StatusCode::TOO_MANY_REQUESTS, StatusCode::OK), "each key its own bucket");
+    assert_eq!(call(&w.api, "PUT", &base, Some(json!({"firewall": [{"action": "deny", "path": "/x", "key": "ip"}]}))).await.0, StatusCode::BAD_REQUEST, "a key is a limit's");
     assert_eq!(call(&w.api, "PUT", &base, Some(json!({"firewall": [{"action": "limit", "path": "/x"}]}))).await.0, StatusCode::BAD_REQUEST, "a limit says its rate");
     assert_eq!(call(&w.api, "PUT", &base, Some(json!({"firewall": [{"action": "deny", "path": "/x", "per_minute": 5}]}))).await.0, StatusCode::BAD_REQUEST);
     call(&w.api, "PUT", &base, Some(json!({"firewall": null}))).await;

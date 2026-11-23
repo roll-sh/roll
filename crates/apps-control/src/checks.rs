@@ -95,6 +95,11 @@ impl Apps {
                     Err(e) => (None, Err(e)),
                 }
             }
+            // From outside: its real URL over the internet, as a visitor's request goes.
+            None if c.from.as_deref() == Some("public") => match self.check_from_public(service, env, url, c).await {
+                Ok((s, body)) => (Some(s), passes(c, s, &body)),
+                Err(e) => (None, Err(e)),
+            },
             None => match crate::public::call_check(self.clone(), service, env, host, &c.path, Duration::from_secs(c.timeout_s as u64), MAX_BODY).await {
                 Ok((s, body)) => (Some(s), passes(c, s, &body)),
                 Err(e) => (None, Err(e)),
@@ -152,6 +157,36 @@ impl Apps {
         }
     }
 
+    /// A public check's request (`from: public`): to the environment's own URL, or one of its
+    /// active custom domains over HTTPS, through the client for URLs a tenant chose (public
+    /// addresses only, no redirects, a bounded read).
+    async fn check_from_public(self: &Arc<Self>, service: &str, env: &str, url: &str, c: &Check) -> Result<(u16, Vec<u8>), String> {
+        let at = match &c.host {
+            None => format!("{}{}", url.trim_end_matches('/'), c.path),
+            Some(h) => {
+                let (sid, e, h) = (service.to_string(), env.to_string(), h.clone());
+                let ours = self.db(move |s| s.domains(&sid, &e)).await.map_err(|e| e.to_string())?.into_iter().any(|d| d.hostname == h && d.status == crate::model::DomainStatus::Active);
+                if !ours {
+                    return Err(format!("{h} isn't one of this environment's active domains"));
+                }
+                format!("https://{h}{}", c.path)
+            }
+        };
+        let client = crate::net::client(self.cfg.allow_private, Duration::from_secs(c.timeout_s as u64));
+        let res = client.get(&at).header(reqwest::header::USER_AGENT, "roll-uptime/1.0 (from outside)").send().await.map_err(|e| {
+            // What failed (DNS, TLS, the connection), from the error's own chain.
+            let mut why = e.to_string();
+            let mut src = std::error::Error::source(&e);
+            while let Some(s) = src {
+                why = format!("{why}: {s}");
+                src = s.source();
+            }
+            why.chars().take(300).collect::<String>()
+        })?;
+        let status = res.status().as_u16();
+        Ok((status, crate::net::read_bounded(res, MAX_BODY).await))
+    }
+
     /// An environment's checks as they stand, on this node (its owner runs them).
     pub(crate) fn check_states_of(&self, service: &str, env: &str, checks: &[Check]) -> Vec<CheckState> {
         let runs = self.check_states.lock();
@@ -175,7 +210,7 @@ mod tests {
 
     #[test]
     fn an_answer_passes_by_its_status_and_text() {
-        let c = |status: Option<u16>, contains: Option<&str>| Check { name: "x".into(), path: "/".into(), every_s: 60, timeout_s: 10, status, contains: contains.map(String::from), browser: None, budgets: None };
+        let c = |status: Option<u16>, contains: Option<&str>| Check { name: "x".into(), path: "/".into(), every_s: 60, timeout_s: 10, status, contains: contains.map(String::from), browser: None, budgets: None, from: None, host: None };
         assert!(passes(&c(None, None), 301, b"").is_ok(), "2xx or 3xx by default");
         assert_eq!(passes(&c(None, None), 503, b""), Err("answered 503".into()));
         assert!(passes(&c(Some(204), None), 204, b"").is_ok());
