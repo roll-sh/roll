@@ -1597,6 +1597,18 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
             _ => turned_away,
         };
     }
+    // Its own redirects (Vercel's project redirects, any kind of service), before anything wakes.
+    if !scheduled
+        && matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD)
+        && let Some(rules) = &gate.redirects
+        && let Some((status, to)) = rules.find(req.uri().path(), req.uri().query(), &crate::site_rules::Visitor::of(req.headers()))
+        && let Ok(loc) = HeaderValue::from_str(&to)
+    {
+        let mut r = Response::new(Body::empty());
+        *r.status_mut() = StatusCode::from_u16(status).unwrap_or(StatusCode::MOVED_PERMANENTLY);
+        r.headers_mut().insert(header::LOCATION, loc);
+        return by("redirect", r);
+    }
     // Its routes (Vercel's rewrites to another project): the first that takes the path sends the
     // request to that service's environment of the same name, the path as it came, past the
     // target's gates as a site's rewrite is (this environment's let it in). Never again from there.

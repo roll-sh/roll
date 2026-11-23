@@ -1200,6 +1200,10 @@ impl Apps {
             live.forget_gate();
             // What the old deployment answered isn't this one's.
             self.responses.clear(&crate::env_key(&d.service, &d.environment));
+            // A preview's head: production's browser checks on it ([`crate::browser`]).
+            if env.ephemeral {
+                self.spawn_preview_checks(&d.service, &d.environment, &d.id);
+            }
             Ok(())
         }
         .await;
