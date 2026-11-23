@@ -12,7 +12,7 @@ describe("verdict", () => {
       ...base,
       services: [{ name: "web", state: "failed" }, { name: "wiki", state: "sleeping" }],
       schema_risks: ["users.email becomes NOT NULL"],
-      base_change: { branch: "main", percent: 0.3, phone_percent: null, api_breaking: ["GET /users: limit becomes required"], errors_added: 1, links_added: 1, endpoints: [{ path: "/a", ms: 90, status: 200, main_ms: 30 }] },
+      base_change: { branch: "main", percent: 0.3, phone_percent: null, api_breaking: ["GET /users: limit becomes required"], errors_added: 1, links_added: 1, endpoints: [{ path: "/a", ms: 90, status: 200, main_ms: 30, shape_changes: [{ path: "total", main: "number", now: "string" }] }] },
       new_errors: { branch: "main", total: 2, errors: [{ service: "web", title: "TypeError" }] },
       slower_routes: { branch: "main", routes: [{ name: "GET /a", count: 9, p50_ms: 400, main_p50_ms: 100 }] },
       visual_review: { state: "changed", branch: "main", percent: 0.3, by: null, at: null, required: true, head: "h", pages: [{ path: "", percent: 0.2, by: null, at: null }, { path: "/p", percent: 0.3, by: "ada", at: 1, unstable: true }] },
@@ -20,6 +20,7 @@ describe("verdict", () => {
     expect(verdict(p).map((v) => [v.target, v.text, v.tone])).toEqual([
       ["services", "1 service failed", "danger"],
       ["api", "1 breaking API change", "danger"],
+      ["endpoints", "1 endpoint's answer changed shape", "danger"],
       ["schema", "1 migration risk", "danger"],
       ["checks", "2 new problems against main", "danger"],
       ["errors", "2 new errors against main", "danger"],

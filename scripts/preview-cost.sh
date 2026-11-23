@@ -847,6 +847,9 @@ API_BREAKING=$(api GET "/v1/previews/$PV" | jq_ "' | '.join(d['base_change'].get
 # Its endpoints timed on the preview's data, against main's (github.endpoints).
 ENDPOINTS=$(api GET "/v1/previews/$PV" | jq_ "' '.join('%s %s %s ms, main %s ms' % (x['path'], x['status'], x['ms'], x['main_ms']) for x in d['base_change'].get('endpoints') or [])")
 case "$ENDPOINTS" in "/openapi.json 200 "*" ms, main "[0-9]*" ms") ;; *) echo "the change's endpoints should be timed against main's: $ENDPOINTS"; exit 1;; esac
+# And its answer's shape against main's: the operation the change removes is a field gone.
+RESHAPED=$(api GET "/v1/previews/$PV" | jq_ "' | '.join('%s %s' % (c['path'], c.get('now') or 'gone') for x in d['base_change'].get('endpoints') or [] for c in x.get('shape_changes') or [])")
+[ "$RESHAPED" = "paths./users/{id} gone" ] || { echo "the change's /openapi.json should lose paths./users/{id} against main's: $RESHAPED"; exit 1; }
 case "$WORDS" in "+['preview of change 1"*"-['main']") ;; *) echo "the page's words should be compared with main's: $WORDS"; exit 1;; esac
 MAIN_LOAD=$(api GET "/v1/previews/$PV" | jq_ "d['base_change'].get('load_ms')")
 case "$MAIN_LOAD" in [0-9]*) ;; *) echo "the comparison with main should carry main's load time: $MAIN_LOAD"; exit 1;; esac
@@ -1142,6 +1145,7 @@ cat <<EOF
 | The first page's words against main's | $WORDS |
 | Its API against main's (from each one's OpenAPI document) / what it breaks in the operations both keep | $API_DIFF / $API_BREAKING |
 | Its endpoints against main's (the median of 10 GETs) | $ENDPOINTS |
+| Its endpoint's answer against main's, by shape | $RESHAPED |
 | SEO basics of the first page | $SEO |
 | /pricing's own checks (against main's /pricing) | $PRICING |
 | The first page's broken links (HEAD only) / new against main | $LINKS / $LINKS_NEW |

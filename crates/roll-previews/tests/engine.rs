@@ -321,12 +321,30 @@ async fn a_visual_change_waits_for_someone_to_accept_it_at_each_head() {
     let page = light.pages.iter().find(|p| p.path == "/pricing").unwrap();
     assert!(page.links.is_none() && page.against.is_none() && page.base_percent.is_some());
     // Its endpoints against main's, timed with each one's screenshot (`github.endpoints`).
-    let timed = |ms| roll_previews::PageSpeed { ttfb_ms: 1, fcp_ms: None, load_ms: 9, bytes: 1, lcp_ms: None, cls: None, endpoints: vec![roll_previews::EndpointTime { path: "/api/users".into(), ms, status: 200 }] };
-    e.engine.store.set_screenshot(&base.id, "cs_main3", &png(255), Some(&timed(40)), None).unwrap();
-    e.engine.store.set_screenshot(&chg.id, "cs_1f", &dot, Some(&timed(140)), None).unwrap();
+    // And their JSON answers' shapes: a field main's has and the change's doesn't.
+    let timed = |ms, shape: &[&str]| roll_previews::PageSpeed {
+        ttfb_ms: 1,
+        fcp_ms: None,
+        load_ms: 9,
+        bytes: 1,
+        lcp_ms: None,
+        cls: None,
+        endpoints: vec![roll_previews::EndpointTime { path: "/api/users".into(), ms, status: 200, shape: shape.iter().map(|l| l.to_string()).collect() }],
+    };
+    e.engine.store.set_screenshot(&base.id, "cs_main3", &png(255), Some(&timed(40, &["$ object", "email string"])), None).unwrap();
+    e.engine.store.set_screenshot(&chg.id, "cs_1f", &dot, Some(&timed(140, &["$ object"])), None).unwrap();
     e.engine.store.compare_with_base(&chg.id, &base.id, "main", None).unwrap();
-    let ep = e.engine.store.preview(&chg.id).unwrap().base_change.unwrap().endpoints;
+    let v = e.engine.store.preview(&chg.id).unwrap();
+    let ep = v.base_change.unwrap().endpoints;
     assert!(ep.len() == 1 && ep[0].main_ms == Some(40) && ep[0].slower(), "{ep:?}");
+    assert_eq!(ep[0].shape_changes.iter().map(|c| (c.path.as_str(), c.now.is_none())).collect::<Vec<_>>(), [("email", true)]);
+    assert!(v.page_speed.unwrap().now.endpoints[0].shape.is_empty(), "the record doesn't carry the shapes");
+    // An answer that failed isn't compared by shape (its error body isn't the endpoint's answer).
+    let mut failing = timed(140, &["$ object"]);
+    failing.endpoints[0].status = 500;
+    e.engine.store.set_screenshot(&chg.id, "cs_1g", &dot, Some(&failing), None).unwrap();
+    e.engine.store.compare_with_base(&chg.id, &base.id, "main", None).unwrap();
+    assert!(e.engine.store.preview(&chg.id).unwrap().base_change.unwrap().endpoints[0].shape_changes.is_empty());
     // Main's API document read and the change's not: said so, nothing compared.
     e.engine.store.set_page_report(&base.id, None, None, None, None, Some(&["GET /users".to_string()])).unwrap();
     e.engine.store.set_page_report(&chg.id, None, None, None, None, None).unwrap();
