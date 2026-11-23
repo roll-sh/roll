@@ -377,6 +377,12 @@ impl Crawl<'_, '_> {
             if self.plan.sitemap_discovery {
                 sitemaps.extend(r.sitemaps.iter().filter_map(|s| Link::parse(s, None)).map(|l| (l, 0)));
             }
+            // The file's own `Crawl-delay` already spaces the request after the one that read it.
+            if let Some(d) = r.crawl_delay {
+                let at = Instant::now() + Duration::from_secs_f64(d.min(86_400.0));
+                let next = self.next_at.entry(o.clone()).or_insert(at);
+                *next = (*next).max(at);
+            }
             self.robots.insert(o, r);
         }
         for s in self.plan.seeds.clone() {
