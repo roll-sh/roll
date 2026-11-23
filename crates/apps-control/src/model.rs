@@ -2376,6 +2376,11 @@ pub struct Check {
     /// At most 200 characters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contains: Option<String>,
+    /// A browser check (Checkly's, through Vercel): a Playwright script run in Chromium against
+    /// `path` (`crate::browser`), the body of an async function given `page`, `context` and `url`;
+    /// it fails by throwing. At most 16 KiB; every 300–3600 s, timeout 1–120 s.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser: Option<String>,
 }
 
 impl Check {
@@ -2395,8 +2400,17 @@ impl Check {
         if !self.path.starts_with('/') || self.path.starts_with("//") || self.path.len() > 2000 || !self.path.bytes().all(|b| b.is_ascii_graphic()) {
             return bad("a check's path is an absolute path, like /healthz");
         }
-        if !(30..=3600).contains(&self.every_s) || !(1..=60).contains(&self.timeout_s) {
-            return bad("every_s is 30–3600, timeout_s 1–60");
+        match &self.browser {
+            Some(script) => {
+                if script.trim().is_empty() || script.len() > 16 << 10 {
+                    return bad("a browser check's script is 1 byte to 16 KiB");
+                }
+                if !(300..=3600).contains(&self.every_s) || !(1..=120).contains(&self.timeout_s) {
+                    return bad("a browser check's every_s is 300–3600, timeout_s 1–120");
+                }
+            }
+            None if !(30..=3600).contains(&self.every_s) || !(1..=60).contains(&self.timeout_s) => return bad("every_s is 30–3600, timeout_s 1–60"),
+            None => {}
         }
         if self.status.is_some_and(|s| !(100..=599).contains(&s)) || self.contains.as_ref().is_some_and(|c| c.is_empty() || c.len() > 200) {
             return bad("status is an HTTP status, contains 1–200 characters");

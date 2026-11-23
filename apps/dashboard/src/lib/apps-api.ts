@@ -1132,6 +1132,8 @@ export interface UptimeCheck {
   timeout_s?: number;
   status?: number;
   contains?: string;
+  /** A browser check: a Playwright script run in Chromium against `path` (the body of an async function given `page`, `context` and `url`; it fails by throwing). At most 16 KiB; every 300–3600 s, timeout 1–120 s. */
+  browser?: string;
 }
 
 export interface UptimeCheckState {

@@ -66,22 +66,33 @@ impl Apps {
                         r.running = true;
                         r.started_at = now;
                     }
-                    let host = url::Url::parse(&self.url(&e.slug)).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
+                    let url = self.url(&e.slug);
+                    let host = url::Url::parse(&url).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
                     let (this, sid, en, c) = (self.clone(), svc.id.clone(), e.name.clone(), c.clone());
-                    tokio::spawn(async move { this.run_check(&sid, &en, &host, &c, key, now).await });
+                    tokio::spawn(async move { this.run_check(&sid, &en, &host, &url, &c, key, now).await });
                 }
             }
         }
     }
 
-    async fn run_check(self: &Arc<Self>, service: &str, env: &str, host: &str, c: &Check, key: String, started: i64) {
+    #[allow(clippy::too_many_arguments)]
+    async fn run_check(self: &Arc<Self>, service: &str, env: &str, host: &str, url: &str, c: &Check, key: String, started: i64) {
         let began = std::time::Instant::now();
-        let got = crate::public::call_check(self.clone(), service, env, host, &c.path, Duration::from_secs(c.timeout_s as u64), MAX_BODY).await;
-        let ms = began.elapsed().as_millis() as u64;
-        let (status, verdict) = match &got {
-            Ok((s, body)) => (Some(*s), passes(c, *s, body)),
-            Err(e) => (None, Err(e.clone())),
+        let (status, verdict) = match &c.browser {
+            // A browser check: its page in Chromium, then its script ([`crate::browser`]).
+            Some(_) => {
+                let at = format!("{}{}", url.trim_end_matches('/'), c.path);
+                match self.run_browser_check(service, env, &at, c).await {
+                    Ok(s) => (s, Ok(())),
+                    Err(e) => (None, Err(e)),
+                }
+            }
+            None => match crate::public::call_check(self.clone(), service, env, host, &c.path, Duration::from_secs(c.timeout_s as u64), MAX_BODY).await {
+                Ok((s, body)) => (Some(s), passes(c, s, &body)),
+                Err(e) => (None, Err(e)),
+            },
         };
+        let ms = began.elapsed().as_millis() as u64;
         let now = code_sql::now_ms();
         let (went_down, came_up, up) = {
             let mut runs = self.check_states.lock();
@@ -154,7 +165,7 @@ mod tests {
 
     #[test]
     fn an_answer_passes_by_its_status_and_text() {
-        let c = |status: Option<u16>, contains: Option<&str>| Check { name: "x".into(), path: "/".into(), every_s: 60, timeout_s: 10, status, contains: contains.map(String::from) };
+        let c = |status: Option<u16>, contains: Option<&str>| Check { name: "x".into(), path: "/".into(), every_s: 60, timeout_s: 10, status, contains: contains.map(String::from), browser: None };
         assert!(passes(&c(None, None), 301, b"").is_ok(), "2xx or 3xx by default");
         assert_eq!(passes(&c(None, None), 503, b""), Err("answered 503".into()));
         assert!(passes(&c(Some(204), None), 204, b"").is_ok());
