@@ -1275,7 +1275,7 @@ async fn call_tool(m: &Mcp, headers: &HeaderMap, name: &str, args: &Value, lockd
     // In lockdown, an outside record's text never reaches the model (roll_auth::lockdown, as
     // roll's own /v1/mcp does): withheld in the structured answer, the text block rebuilt from it.
     if lockdown && roll_auth::lockdown::withhold(&mut result["structuredContent"]) > 0 {
-        let text = serde_json::to_string_pretty(&result["structuredContent"]).unwrap_or_default();
+        let text = serde_json::to_string(&result["structuredContent"]).unwrap_or_default();
         result["content"] = json!([{ "type": "text", "text": text }]);
     }
     // What a person can't see but a model reads (tag characters, zero-width and bidi controls) is
@@ -1322,7 +1322,8 @@ pub async fn call(api: &Router, headers: &HeaderMap, extensions: Option<&axum::h
     };
     // At most what a client takes in one answer (roll_auth::lockdown::cut, as roll's /v1/mcp does:
     // Claude Code moves a longer one to a file); the structured content stays whole.
-    let text = roll_auth::lockdown::cut(outcome.text.clone().unwrap_or_else(|| serde_json::to_string_pretty(&outcome.data).unwrap_or_default()), true);
+    // Compact JSON: indentation costs a model tokens and reads no better to it.
+    let text = roll_auth::lockdown::cut(outcome.text.clone().unwrap_or_else(|| serde_json::to_string(&outcome.data).unwrap_or_default()), true);
     let structured = if outcome.data.is_object() { outcome.data } else { json!({ "result": outcome.data }) };
     json!({
         "content": [{ "type": "text", "text": text }],
