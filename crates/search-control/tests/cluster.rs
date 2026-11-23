@@ -352,6 +352,152 @@ async fn a_remote_on_another_node_is_searched_through_the_signed_forward() {
     assert!(far_node.control.node.loaded().iter().any(|n| **n == *far), "it runs on its owner");
 }
 
+/// Two nodes that see each other, sharing `leases`, objects and a catalog, each with `f` applied.
+async fn two_nodes(name: &str, f: impl Fn(&mut SearchConfig)) -> (Node, Node) {
+    let leases = MemoryStore::new();
+    let objects = search_store::test_objects(name);
+    let catalog = Arc::new(search_control::store::Store::memory().unwrap());
+    let a = node_with("a", &leases, &objects, &catalog, &f).await;
+    let b = node_with("b", &leases, &objects, &catalog, &f).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while a.cluster.nodes().len() != 2 || b.cluster.nodes().len() != 2 {
+        assert!(tokio::time::Instant::now() < deadline, "the nodes never saw each other");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    (a, b)
+}
+
+/// Until `check` holds, for at most `secs` seconds: what it last saw, if it never did.
+async fn eventually<T: std::fmt::Debug>(secs: u64, mut check: impl AsyncFnMut() -> (bool, T)) -> Result<T, T> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
+    loop {
+        let (ok, seen) = check().await;
+        if ok {
+            return Ok(seen);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(seen);
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// A cluster's due jobs move with it: after its owner drains, a watch on a one-second schedule
+/// runs on the next owner with no request waking the cluster, and no scheduled run runs twice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn due_jobs_run_once_on_the_next_owner() {
+    let (a, b) = two_nodes("fleet-jobs", |_| {}).await;
+    let http = reqwest::Client::new();
+    let (s, c) = call(&http, reqwest::Method::POST, format!("{}/v1/search/clusters", a.api), None, Some(json!({"name": "jobs"}))).await;
+    assert_eq!(s, 200, "{c}");
+    let pw = c["password"].as_str().unwrap().to_string();
+    let es = |n: &Node, method: reqwest::Method, path: &str, body: Option<Value>| call(&http, method, format!("{}{path}", n.rest), Some(("jobs", &pw)), body);
+    let (s, v) = es(&a, reqwest::Method::PUT, "/_watcher/watch/tick", Some(json!({"trigger": {"schedule": {"interval": "1s"}}, "input": {"simple": {"n": 1}}, "actions": {"keep": {"index": {"index": "ticks"}}}}))).await;
+    assert_eq!(s, 201, "{v}");
+    let key = search_control::cluster::key("jobs");
+    let (owner, other) = if a.cluster.owns(&key) { (&a, &b) } else { (&b, &a) };
+    // The watch runs on its owner first.
+    let history = |n: &Node| {
+        let search = es(n, reqwest::Method::POST, "/.watcher-history-*/_search", Some(json!({"size": 1000, "query": {"term": {"watch_id": "tick"}}})));
+        async move {
+            let (_, v) = search.await;
+            v["hits"]["hits"].as_array().cloned().unwrap_or_default().iter().map(|h| h["_source"]["trigger_event"]["schedule"]["scheduled_time"].as_str().unwrap_or_default().to_string()).collect::<Vec<_>>()
+        }
+    };
+    eventually(20, async || {
+        let h = history(owner).await;
+        (!h.is_empty(), h)
+    })
+    .await
+    .expect("the watch runs on its owner");
+
+    owner.cluster.drain(Duration::from_secs(20)).await;
+    // Nothing asks for the cluster: its due jobs load it on the other node.
+    eventually(20, async || {
+        let loaded = other.control.node.loaded();
+        (loaded.iter().any(|n| &**n == "jobs"), loaded)
+    })
+    .await
+    .expect("the next owner loads the cluster for its due jobs");
+    assert!(other.cluster.owns(&key) && owner.control.node.loaded().is_empty());
+    // Loaded only there now, it keeps running.
+    let ran = history(other).await.len();
+    let after = eventually(20, async || {
+        let h = history(other).await;
+        (h.len() >= ran + 2, h)
+    })
+    .await
+    .expect("the watch runs on the next owner");
+    let mut times: Vec<&String> = after.iter().collect();
+    let all = times.len();
+    times.sort();
+    times.dedup();
+    assert_eq!(times.len(), all, "a scheduled run ran twice: {after:?}");
+}
+
+/// ES|QL across clusters owned by two nodes (the remote's part runs on its owner), and a
+/// migration started before its cluster's owner drained is reported on the next owner: the copy
+/// finished, failed or stopped, never a task that just vanished.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn esql_and_a_migration_work_across_nodes() {
+    let (a, b) = two_nodes("fleet-esql", |c| c.node_settings.push((search_control::REINDEX_ALLOW_PRIVATE.into(), "true".into()))).await;
+    let http = reqwest::Client::new();
+    let owner_of = |name: &str| if a.cluster.owns(&search_control::cluster::key(name)) { "a" } else { "b" };
+    let create = |name: String| {
+        let req = call(&http, reqwest::Method::POST, format!("{}/v1/search/clusters", a.api), None, Some(json!({"name": name})));
+        async move {
+            let (s, c) = req.await;
+            assert_eq!(s, 200, "{c}");
+            c["password"].as_str().unwrap().to_string()
+        }
+    };
+    let near_pw = create("near".into()).await;
+    let bulk = |name: String, pw: String, n: usize| {
+        let body: String = (0..n).map(|i| format!("{{\"index\":{{\"_id\":\"{i}\"}}}}\n{{\"n\":{i}}}\n")).collect();
+        let req = http.post(format!("{}/items/_bulk?refresh=true", a.rest)).basic_auth(name, Some(pw)).header("content-type", "application/x-ndjson").body(body);
+        async move { assert_eq!(req.send().await.unwrap().status(), 200) }
+    };
+    bulk("near".into(), near_pw.clone(), 2).await;
+    let mut far = None;
+    for i in 0..16 {
+        let name = format!("far-{i}");
+        let pw = create(name.clone()).await;
+        bulk(name.clone(), pw.clone(), 3).await;
+        if owner_of(&name) != owner_of("near") {
+            far = Some((name, pw));
+            break;
+        }
+    }
+    let (far, far_pw) = far.expect("some cluster lands on the other node");
+    let (s, v) = call(&http, reqwest::Method::PUT, format!("{}/v1/search/clusters/near/remotes/far", b.api), None, Some(json!({"cluster": far}))).await;
+    assert_eq!(s, 200, "{v}");
+    for front in [&a, &b] {
+        let (s, v) = call(&http, reqwest::Method::POST, format!("{}/_query", front.rest), Some(("near", &near_pw)), Some(json!({"query": "FROM items, far:items | STATS c = COUNT(*)"}))).await;
+        assert_eq!((s, &v["values"]), (200, &json!([[5]])), "{v}");
+    }
+    let (near_node, far_node) = if owner_of("near") == "a" { (&a, &b) } else { (&b, &a) };
+    assert!(!near_node.control.node.loaded().iter().any(|n| **n == *far), "the remote isn't loaded on the local cluster's node");
+    assert!(far_node.control.node.loaded().iter().any(|n| **n == *far), "it runs on its owner");
+
+    // A migration into `near` from `far` (another cluster's endpoint, read as a remote), slow
+    // enough to be running when `near`'s owner drains.
+    let source = json!({"host": a.rest, "username": far, "password": far_pw});
+    let (s, v) = call(&http, reqwest::Method::POST, format!("{}/v1/search/clusters/near/migrate", a.api), None, Some(json!({"source": source, "indices": [{"index": "items", "dest": "copied"}], "requests_per_second": 1, "size": 1}))).await;
+    assert_eq!(s, 200, "{v}");
+    let task = v["indices"][0]["task"].as_str().unwrap_or_else(|| panic!("{v}")).to_string();
+    let (owner, other) = if owner_of("near") == "a" { (&a, &b) } else { (&b, &a) };
+    owner.cluster.drain(Duration::from_secs(20)).await;
+    let reported = eventually(20, async || {
+        let (s, v) = call(&http, reqwest::Method::GET, format!("{}/_tasks/{task}", other.rest), Some(("near", &near_pw)), None).await;
+        (s == 200 && v["completed"] == true, (s, v))
+    })
+    .await;
+    let (_, v) = reported.unwrap_or_else(|seen| panic!("the copy isn't reported on the next owner: {seen:?}"));
+    // Stopped by the handover (the unload cancels its tasks), finished, or failed.
+    let stopped = v["response"]["canceled"].is_string() || v["error"].is_object();
+    assert!(stopped || v["response"]["created"].as_u64() == Some(3), "finished or failed: {v}");
+}
+
 /// A scroll and a point in time whose parts live on two owner nodes: the local cluster's on
 /// its owner, the remote's on the other, each reached through the signed forward; pages go
 /// through either front.

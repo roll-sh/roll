@@ -545,7 +545,8 @@ async fn sign_in(http: &reqwest::Client, api: &str, outbox: &std::path::Path) ->
 
 /// A person's token for one of their projects works roll search through `/v1/mcp`, scoped by
 /// the gate with search's real resolver: it makes a cluster in that project, bulk-indexes and
-/// queries it, and gets a 403 on their cluster in another project.
+/// queries it, and gets the gate's 403 on their cluster in another project; `tools/list` shows it
+/// search's tools only.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_search_with_a_project_token() {
     let home = tempfile::tempdir().unwrap();
@@ -605,6 +606,23 @@ async fn mcp_search_with_a_project_token() {
     assert_eq!(found["structuredContent"]["hits"]["total"]["value"], 2, "{found}");
     let (s, refused) = tool("search_query", serde_json::json!({ "cluster": other, "index": "notes", "query": { "match_all": {} } })).await;
     assert_eq!(s, 403, "a cluster in another project: {refused}");
+    // Refused as the gate refuses (never a 404 or an empty answer): what's missing, and where the
+    // person can allow it.
+    let text = refused["content"][0]["text"].as_str().unwrap_or_default();
+    let widen = refused["structuredContent"]["widen"].as_str().unwrap_or_default();
+    assert!(refused["isError"] == true && text.starts_with("not allowed: this token can't") && !widen.is_empty() && text.contains(widen), "{refused}");
+    // Its tool list follows its rules: search's tools, not a project-scoped tool of a product it
+    // has no rule for (secrets' cross-project ones take any grant, so they stay).
+    let names = |token: &str| {
+        let req = http.post(format!("{api}/v1/mcp")).bearer_auth(token).header("accept", "application/json").json(&serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }));
+        async move {
+            let v: serde_json::Value = req.send().await.unwrap().json().await.unwrap();
+            v["result"]["tools"].as_array().unwrap_or_else(|| panic!("{v}")).iter().filter_map(|t| t["name"].as_str().map(str::to_string)).collect::<Vec<_>>()
+        }
+    };
+    assert!(names(TOKEN).await.iter().any(|n| n == "secrets_list_environments"), "the operator's list");
+    let listed = names(&token).await;
+    assert!(listed.iter().any(|n| n.starts_with("search_")) && !listed.iter().any(|n| n.starts_with("postgres_") || n == "secrets_list_environments"), "{listed:?}");
 }
 
 #[test]
