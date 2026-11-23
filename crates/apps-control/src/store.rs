@@ -155,6 +155,7 @@ CREATE TABLE IF NOT EXISTS next_cache_tags (
     PRIMARY KEY (service, env, tag)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS next_cache_tags_at ON next_cache_tags (service, env, at);
+
 -- Where an environment's instances read roll's OIDC tokens: its URL's token, sealed.
 CREATE TABLE IF NOT EXISTS oidc_access (
     service TEXT NOT NULL,
@@ -3009,16 +3010,21 @@ impl Store {
         if expires_at.is_some_and(|x| x <= now) {
             return Ok(None);
         }
-        let tags: Vec<String> = serde_json::from_str(&tags).unwrap_or_default();
-        // Only what was invalidated after it was written can make it old.
-        let marks: Vec<(String, Option<i64>, Option<i64>)> = self.db.query(
-            "SELECT tag, stale_at, expired_at FROM next_cache_tags WHERE service = ? AND env = ? AND at > ? LIMIT 10000",
-            params![service, env, written_at],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )?;
+        let mut tags: Vec<String> = serde_json::from_str(&tags).unwrap_or_default();
+        tags.extend(soft.iter().cloned());
+        tags.sort();
+        tags.dedup();
+        // Its own tags' marks only (at most 256, by the primary key): only what was invalidated
+        // after it was written can make it old.
+        let mut marks: Vec<(String, Option<i64>, Option<i64>, i64)> = Vec::new();
+        for chunk in tags.chunks(100) {
+            let sql = format!("SELECT tag, stale_at, expired_at, at FROM next_cache_tags WHERE service = ? AND env = ? AND tag IN ({})", vec!["?"; chunk.len()].join(", "));
+            let args: Vec<String> = [service.to_string(), env.to_string()].into_iter().chain(chunk.iter().cloned()).collect();
+            marks.extend(self.db.query(&sql, &args, |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?);
+        }
         let mut stale = false;
-        for (tag, stale_at, expired_at) in marks {
-            if !tags.contains(&tag) && !soft.contains(&tag) {
+        for (_, stale_at, expired_at, at) in marks {
+            if at <= written_at {
                 continue;
             }
             if expired_at.is_some_and(|x| x > written_at && x <= now) {

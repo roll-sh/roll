@@ -249,6 +249,12 @@ struct World {
     _dir: tempfile::TempDir,
 }
 
+/// A route's raw answer (not JSON): its status and bytes.
+async fn call_raw(r: &axum::Router, method: &str, path: &str) -> (StatusCode, Vec<u8>) {
+    let resp = r.clone().oneshot(Request::builder().method(method).uri(path).body(Body::empty()).unwrap()).await.unwrap();
+    (resp.status(), resp.into_body().collect().await.unwrap().to_bytes().to_vec())
+}
+
 async fn world() -> World {
     world_with(|_| {}).await
 }
@@ -4119,7 +4125,7 @@ async fn an_uptime_check_goes_down_and_comes_back() {
 /// token (which then opens nothing), and a script that throws is `check.down` saying why.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_browser_check_runs_its_script_past_the_password() {
-    let w = world().await;
+    let w = world_full(|_| {}, true, |_| {}).await;
     *w.fake.check_pages.lock() = Some(w.public.clone());
     let (svc, _) = image_service(&w, "web", json!({"port": 80, "min_instances": 1})).await;
     let id = svc["id"].as_str().unwrap().to_string();
@@ -4157,6 +4163,12 @@ async fn a_browser_check_runs_its_script_past_the_password() {
     pass(1).await;
     let down = pass(2).await;
     assert_eq!((down["up"].as_bool(), down["error"].as_str()), (Some(false), Some("new Error('no heading')")), "{down}");
+    // Its failure's screenshot and trace are kept, and said to be.
+    assert!(down["failure_at"].as_i64().is_some(), "{down}");
+    let (st, png) = call_raw(&w.api, "GET", &format!("{base}/checks/home/screenshot")).await;
+    assert_eq!((st, png.as_slice()), (StatusCode::OK, &b"\x89PNG fake"[..]));
+    assert_eq!(call_raw(&w.api, "GET", &format!("{base}/checks/home/trace")).await.1, b"PK fake");
+    assert_eq!(call_raw(&w.api, "GET", &format!("{base}/checks/other/trace")).await.0, StatusCode::NOT_FOUND);
     assert_eq!(w.fake.build_trees.lock().len(), 1, "still the one image");
 }
 

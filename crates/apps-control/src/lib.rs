@@ -352,6 +352,8 @@ pub struct Apps {
     pub(crate) check_tokens: Mutex<HashMap<String, (String, String)>>,
     /// The checker images built on this node ([`browser`]).
     pub(crate) checker_images: Mutex<std::collections::HashSet<String>>,
+    /// When each browser check's last failure was kept, by `<service>/<env>/<check>`.
+    pub(crate) check_failures: Mutex<HashMap<String, i64>>,
     /// A pass of daily rescans is running, and when live deployments were last looked at for
     /// one ([`vulns`]).
     pub(crate) rescanning: std::sync::atomic::AtomicBool,
@@ -701,6 +703,7 @@ impl Apps {
             check_states: Mutex::new(HashMap::new()),
             check_tokens: Mutex::new(HashMap::new()),
             checker_images: Mutex::new(std::collections::HashSet::new()),
+            check_failures: Mutex::new(HashMap::new()),
             rescanning: Default::default(),
             rescan_looked: Default::default(),
             errors_seen: Mutex::new(HashMap::new()),
@@ -1600,6 +1603,7 @@ impl Apps {
         if let Ok(gone) = self.db(move |s| s.drop_next_cache(&sid, None, true)).await {
             self.drop_cache_objects(gone);
         }
+        self.drop_check_failures(id, None).await;
         let sid = id.to_string();
         self.db(move |s| s.delete_service(&sid)).await?;
         // Its hostnames name nothing now.
@@ -2778,6 +2782,7 @@ impl Apps {
         if let Ok(gone) = self.db(move |s| s.drop_next_cache(&sid, Some(&e), true)).await {
             self.drop_cache_objects(gone);
         }
+        self.drop_check_failures(service, Some(env)).await;
         let (sid, e) = (service.to_string(), env.to_string());
         self.db(move |s| s.delete_environment(&sid, &e)).await?;
         // Its peer after the row (a check in flight finishes first; none starts again).
@@ -3060,7 +3065,9 @@ impl Apps {
         let mut next_cache = false;
         if !deployment.is_empty() && !env.egress.closed() {
             let d = deployment.to_string();
-            let adapter = self.db(move |s| s.deployment(&d)).await.ok().and_then(|d| d.plan).is_some_and(|p| p["next_cache"] == true);
+            // Never a view's with values of its own: what it caches (from a copy's data) would be
+            // the environment's, shared with every deployment.
+            let adapter = self.db(move |s| Ok(s.deployment(&d)?.plan.is_some_and(|p| p["next_cache"] == true) && s.deploy_overrides(&d)?.is_none())).await.unwrap_or(false);
             if adapter && let Some((url, token)) = self.next_cache_vars(&svc.id, &env.name).await? {
                 vars.insert(crate::next_cache::URL_VAR.into(), (url, "roll"));
                 vars.insert(crate::next_cache::TOKEN_VAR.into(), (token, "roll"));
