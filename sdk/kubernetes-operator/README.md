@@ -19,6 +19,9 @@ spec:
   every `ROLL_SYNC_EVERY` anyway (default 30s). It reads values only when the digest moved, or the
   Secret is missing. Past 32 held polls per login, roll answers at once, and those RollSecrets fall
   back to the interval.
+- It keeps each RollSecret's last answer in memory, so a read after a change asks only for the keys
+  that changed (`…/values/delta`); roll answers the whole folder whenever it can't prove the delta
+  exact. A restarted operator reads each folder in full once.
 - It writes only Secrets it made: labelled `roll.sh/managed-by: rollsecret` and owned by their
   RollSecret, so deleting the RollSecret deletes them. A Secret of the same name someone else made
   is left alone, and the RollSecret's status says so.
