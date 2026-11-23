@@ -690,6 +690,15 @@ pub struct EvalLeaf {
 }
 
 impl EvalLeaf {
+    /// For a runtime field read inside another script's host call: its executions' memory is
+    /// charged to that script and reported to the breaker by that script's host, so its own
+    /// host reports nothing (it would be counted twice).
+    pub fn caller_reports(&mut self) {
+        if let Some(l) = &mut self.leaf {
+            drop(l.take_memory());
+        }
+    }
+
     /// The values of segment doc `doc`, as doc values hold them (see below).
     pub fn values(&mut self, doc: u32) -> EsResult<Vec<RtValue>> {
         self.collect(doc, true)

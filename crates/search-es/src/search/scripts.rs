@@ -173,7 +173,10 @@ impl DocHost {
                     let e = HostError::illegal_argument(format!("Field requires resolving too many dependent fields: {}", names.join(" -> ")));
                     return Err(super::runtime::with_fork_frames(e, ty, 134));
                 }
-                let leaf = ev.leaf_chained(&self.seg, chain, &super::runtime::RuntimeSource::Fixed(self.runtime.clone())).map_err(|e| HostError::illegal_argument(super::runtime::innermost_reason(&e)))?;
+                let mut leaf = ev.leaf_chained(&self.seg, chain, &super::runtime::RuntimeSource::Fixed(self.runtime.clone())).map_err(|e| HostError::illegal_argument(super::runtime::innermost_reason(&e)))?;
+                // it runs inside this host's calls: what it keeps is charged to the script
+                // calling them, whose host reports it, so its own reports nothing
+                leaf.caller_reports();
                 self.rt_leaves.push((field.into(), Box::new(leaf)));
                 self.rt_leaves.len() - 1
             }

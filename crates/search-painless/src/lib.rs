@@ -54,6 +54,11 @@ pub mod xcontent;
 pub use contexts::Context;
 pub use engine::{compile_painless, Compiled, Engine, Instance, Lang, RegexEnabled, Script, Settings, Stats, Vars};
 pub use error::{Position, ScriptError};
+/// Unit tests run with executions' memory accounts, as hosts do.
+#[cfg(test)]
+#[global_allocator]
+static TEST_ALLOC: guard::Counting<std::alloc::System> = guard::Counting(std::alloc::System);
+
 pub use guard::{counting_installed, default_max_execution_bytes, set_default_max_execution_bytes, Counting};
 pub use host::{DocKind, DocValues, Host, HostError, MemoryRefused, NoHost, TermStats, VectorElement, VectorView};
 pub use value::Value;

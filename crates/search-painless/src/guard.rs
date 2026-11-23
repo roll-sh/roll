@@ -28,8 +28,13 @@
 //!   back and the account is what the execution holds, not what it ever allocated. Sizes a
 //!   script controls are checked against the room before they are allocated ([`check_bytes`]);
 //!   small allocations are caught when the interpreter next leaves its arithmetic loop
-//!   ([`memory_exhausted`]). Host calls run outside the account ([`paused`]) unless their result
-//!   is the script's ([`hosted`]); frees of data the execution didn't make can offset its own
+//!   ([`memory_exhausted`]). Host calls come in three kinds: those whose allocations the
+//!   script can't keep (doc-values buffers, caches) run outside the account ([`paused`]); a
+//!   document's `_source` is charged but left out of the limit ([`hosted`]); and those whose
+//!   results become the script's or whose errors it may hold (stored fields, term statistics,
+//!   the shard's name, the rank functions' cancellation poll, [`crate::Host::script_memory`])
+//!   simply run charged, so what they make and what is freed of it match. Frees of data the
+//!   execution didn't make can offset its own
 //!   allocations but never take its balance below zero, so they never let it grow the thread by
 //!   more than the limit. Past the limit the script fails like Elasticsearch 9.5's own
 //!   per-execution guard (`script.painless.max_allocation_bytes`): an uncatchable
@@ -479,6 +484,8 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Counting<A> {
 /// The account of one execution, open while it is alive. Scopes nest: what an inner execution
 /// keeps counts against the outer one.
 pub struct MemoryScope {
+    /// What the enclosing execution is charged for this one (default: what it holds now).
+    pass_on: Option<i64>,
     prev_room: i64,
     prev_cap: i64,
     prev_hosting: u32,
@@ -496,12 +503,23 @@ impl MemoryScope {
         let prev_cap = CAP.replace(room);
         let prev_hosting = HOSTING.replace(0);
         let prev = ACCOUNT.replace(Account { active: true, limit, granted: room, forgiven: 0, exempt: 0, checked: 0, reported: 0 });
-        MemoryScope { prev_room, prev_cap, prev_hosting, prev, _thread: std::marker::PhantomData }
+        MemoryScope { pass_on: None, prev_room, prev_cap, prev_hosting, prev, _thread: std::marker::PhantomData }
     }
 
     /// Bytes the execution really holds now (allocations minus frees since it began).
     pub fn held() -> i64 {
         ACCOUNT.get().net(ROOM.get())
+    }
+
+    /// What the execution was handed by its host and left out of its limit ([`hosted`]).
+    pub fn exempt() -> i64 {
+        ACCOUNT.get().exempt
+    }
+
+    /// Closes the account, charging the enclosing execution (one a host call of it started
+    /// this one in) `pass_on` bytes instead of what this one holds.
+    pub fn close(mut self, pass_on: i64) {
+        self.pass_on = Some(pass_on);
     }
 
     /// What the execution holds that the host has not been told about yet, marked as told.
@@ -517,7 +535,7 @@ impl MemoryScope {
 
 impl Drop for MemoryScope {
     fn drop(&mut self) {
-        let held = MemoryScope::held();
+        let held = self.pass_on.unwrap_or_else(MemoryScope::held);
         ACCOUNT.set(self.prev);
         CAP.set(self.prev_cap);
         HOSTING.set(self.prev_hosting);
@@ -909,6 +927,26 @@ mod tests {
         }
         assert!(!stack_exhausted());
         assert_eq!(max_object_bytes(), DEFAULT_MAX_OBJECT_BYTES);
+    }
+
+    /// What a host call allocates isn't looked at against the limit while it runs, nor counted
+    /// after; a result the script keeps ([`hosted`]) is charged by what the account holds net,
+    /// and left out of the limit.
+    #[test]
+    fn host_calls_and_the_account() {
+        let _scope = MemoryScope::enter(1 << 20);
+        let inside = paused(|| {
+            let big = std::hint::black_box(vec![0u8; 4 << 20]);
+            let ok = refill(0).is_ok() && check_bytes(1 << 10).is_ok();
+            drop(big);
+            ok
+        });
+        assert!(inside && refill(0).is_ok());
+        let before = MemoryScope::held();
+        let kept = hosted(|| std::hint::black_box(vec![0u8; 2 << 20]));
+        assert!(MemoryScope::exempt() >= 2 << 20 && MemoryScope::held() - before >= 2 << 20);
+        assert!(refill(0).is_ok());
+        drop(kept);
     }
 
     #[test]

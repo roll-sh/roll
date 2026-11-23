@@ -639,6 +639,10 @@ pub struct Instance<'s> {
     /// freed inside that execution's account, which balances what the account handed the host
     /// with it.
     last: Option<Value>,
+    /// What this instance's executions hold, summed over them, and what an execution enclosing
+    /// them (whose host call started them: a runtime field's) has been charged for it.
+    held: i64,
+    passed_on: i64,
 }
 
 /// The instance's specialization of the script's fast path.
@@ -683,7 +687,7 @@ impl<'s> Instance<'s> {
         state.ctx_var = script.def.var_index("ctx").map(|i| i as u32);
         state.field_name = std::rc::Rc::from(script.context.name());
         let fast = if script.fast.is_some() { Fast::Untried } else { Fast::Off };
-        Instance { script, state, stack: Vec::with_capacity(64), fast, fast_ran: false, last: None }
+        Instance { script, state, stack: Vec::with_capacity(64), fast, fast_ran: false, last: None, held: 0, passed_on: 0 }
     }
 
     pub fn script(&self) -> &'s Script {
@@ -896,33 +900,41 @@ impl<'s> Instance<'s> {
                 read(v)
             })
         }));
-        let r = match r {
-            Ok(r) => r,
-            Err(panic) => {
-                self.stack.clear();
-                self.state.begin_document();
-                let e = crate::guard::outside(|| ScriptError::internal(&prog.source, &*panic));
-                drop(panic);
-                return Err(e);
-            }
-        };
-        // a recursion that could not report its overflow (map key hashing, …) fails the run
-        let r = match crate::guard::take_pending() {
-            Some(t) if r.is_ok() => Err(t),
-            _ => r,
-        };
         // the error the host gets is made outside the account and the exception freed inside
         // it, as is this document's `_source`: an execution a host call started (a runtime
         // field's) leaves its caller neither
         let r = match r {
-            Ok(v) => Ok(v),
-            Err(t) => Err(crate::guard::outside(|| script.runtime_error(&t))),
+            Ok(r) => {
+                // a recursion that could not report its overflow (map key hashing, …) fails the run
+                let r = match crate::guard::take_pending() {
+                    Some(t) if r.is_ok() => Err(t),
+                    _ => r,
+                };
+                match r {
+                    Ok(v) => Ok(v),
+                    Err(t) => Err(crate::guard::outside(|| script.runtime_error(&t))),
+                }
+            }
+            Err(panic) => {
+                self.stack.clear();
+                self.state.begin_document();
+                let e = crate::guard::outside(|| ScriptError::internal(&prog.source, &*panic));
+                // the payload may have been built by host code, outside the account
+                crate::guard::paused(|| drop(panic));
+                Err(e)
+            }
         };
         self.state.source = None;
         // the host hears what the execution keeps (values stored in `params`, a scripted
         // metric's state, caches), or gives back
         let delta = crate::guard::MemoryScope::unreported();
-        drop(memory);
+        // an enclosing execution is charged what this instance holds, less the `_source` this
+        // one was handed (outside the limit wherever it's kept: a runtime field emitting a field
+        // of it); never less than nothing, so a later free of such a part credits nothing
+        self.held = self.held.saturating_add(crate::guard::MemoryScope::held());
+        let charged = self.held.saturating_sub(crate::guard::MemoryScope::exempt()).max(0);
+        memory.close(charged - self.passed_on);
+        self.passed_on = charged;
         match delta {
             0 => r,
             _ => match host.script_memory(delta) {

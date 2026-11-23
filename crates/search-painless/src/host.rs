@@ -296,7 +296,8 @@ pub trait Host {
     /// its scripts hold across executions (values kept in `params` or a scripted metric's state)
     /// and at the peak of each one. Hosts that answer to a memory breaker (a search's `request`
     /// breaker) reserve it there and refuse past its limit; the script then fails with a
-    /// `circuit_breaking_exception`.
+    /// `circuit_breaking_exception`. It runs inside the execution's account (charged): what it
+    /// allocates, its refusal included, counts as the script's and is given back when freed.
     fn script_memory(&mut self, delta: i64) -> Result<(), MemoryRefused> {
         let _ = delta;
         Ok(())

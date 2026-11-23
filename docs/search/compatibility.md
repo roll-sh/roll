@@ -1841,12 +1841,14 @@ the rest are skipped by the tests' own prerequisites.
   (doc-values buffers, a segment's fielddata) doesn't count. A document's `_source` is parsed
   once per document, as Elasticsearch's `SourceLookup` does, so changes persist across reads.
   It's charged, but left out of the limit. So a script can churn through temporaries far beyond
-  the limit, as long as it doesn't keep them. Freeing data the execution didn't make (`params`,
-  `_source`, an earlier document's leftovers) never lets it grow the thread by more than the
-  limit: such frees can offset what it allocates, but never take its balance below zero. A
-  script run inside another one counts against the caller once it ends. That covers a runtime
-  field another script reads, up to 5 levels deep. While it runs, it also has an account of its
-  own, so one thread holds at most about six times the limit, plus the document's `_source`. Past the limit roll answers like that guard: a
+  the limit, as long as it doesn't keep them. Freeing data the execution didn't make never
+  lets it grow the thread by more than the limit. That covers `params`, an earlier document's
+  leftovers, and another nesting level's copy of `_source`. Such frees can offset what it
+  allocates, but never take its balance below zero. A script run inside another one counts
+  against the caller once it ends. That covers a runtime field another script reads, up to 5
+  levels deep. While it runs, it also has an account of its own, and it reads its own copy of
+  `_source`. So one thread holds at most about six times the limit plus the document's
+  `_source`, counting each nesting level. Past the limit roll answers like that guard: a
   `script_exception` caused by an uncatchable `painless_error`, `script allocation limit
   exceeded: allocation of [N] bytes brings the running total to [T] bytes, over the limit of
   [L] bytes`, without a script portion. Both guards apply in every context (`_execute`,

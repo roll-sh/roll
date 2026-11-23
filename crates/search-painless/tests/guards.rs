@@ -590,11 +590,13 @@ impl Host for FailingField {
 }
 
 /// A host's error is built outside the account: a script that catches and drops it in a loop
-/// gets back only what the copy it was handed cost, and still meets the limit.
+/// gets back only what the copy it was handed cost. Keeping as much as each error frees, it
+/// still meets the limit (were the frees credited, the account would stay flat while the
+/// thread grew by 32 MiB over the 500 errors).
 #[test]
 fn caught_host_errors_give_no_room() {
     let e = limited(4 << 20);
-    let script = e.compile("List l = []; while (true) { try { def v = doc['body'].value; } catch (Exception x) {} l.add(new byte[200]); }", Context::Score).unwrap();
+    let script = e.compile("List l = []; while (true) { try { def v = doc['body'].value; } catch (Exception x) {} l.add(new byte[65536]); }", Context::Score).unwrap();
     let mut inst = script.instance();
     inst.set_params(&json!({}));
     let (r, grew) = peak_growth(|| inst.execute_f64(&mut FailingField { calls: 0 }).map_err(|e| e.to_response()));
