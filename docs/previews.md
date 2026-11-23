@@ -1553,6 +1553,17 @@ land on the change.
 - roll posts it as a `comment` review on the change ("**Feedback on the preview** · `/checkout`
   linked to the preview · `button.pay`", then the note), which reaches the pull request like any
   review. The page's own names are kept to one inert line each.
+- A note carries what went wrong on the page (Netlify's drawer, Jam): the script sends the page's
+  uncaught errors and rejected promises since it loaded, and the requests answered 400 or more,
+  as the browser's own resource timings tell them (earlier ones too, before it loaded; roll's own
+  `/__roll/` ones left out), each a path and a status, never a query. At most 5 of each, each cut
+  to 200 characters, plus the browser (`Chrome 131 on macOS`, from the user agent). Nothing of
+  the page's is wrapped (`console`, `fetch`), so its devtools stay its own, and a
+  `console.error` the page catches isn't sent. The browser goes on the note's `<sub>` line.
+  Errors and requests go in a folded "On the page: 1 error, 2 failed requests" block after it,
+  so `roll_previews::notes` never reads them as the note. They go only if the person keeps them:
+  the form in roll lists them, with a box to leave them out (a page's own words can hold what a
+  public pull request shouldn't).
 - The button also lists what's been said about the page already (Vercel's comment pins): the
   proxy answers `/__roll/feedback.json?path=…` for the same visitors only (link access or a
   team session, through roll), from the change's feedback reviews (`roll_previews::notes` reads back the shape the

@@ -18,7 +18,9 @@
   try {
     new PerformanceObserver((l) => {
       for (const r of l.getEntries()) {
-        if (r.responseStatus >= 400) { const p = pathOf(r.name); failed.delete(p); failed.set(p, `${cut(p, 160)} ${r.responseStatus}`); }
+        const p = pathOf(r.name);
+        // roll's own (this button's) aren't the page's.
+        if (r.responseStatus >= 400 && !p.startsWith("/__roll/")) { failed.delete(p); failed.set(p, `${cut(p, 160)} ${r.responseStatus}`); }
       }
     }).observe({ type: "resource", buffered: true });
   } catch {}
