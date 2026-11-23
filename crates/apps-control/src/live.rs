@@ -462,7 +462,8 @@ fn grpc_serving(frame: &[u8]) -> bool {
 
 /// A rate-limit bucket: which (0 the environment's, 1 + i firewall rule i's, [`FILE_BUCKETS`] + i
 /// the live deployment's roll.toml rule i's) and whose.
-type BucketKey = (u16, Option<std::net::IpAddr>);
+/// A bucket, and its client: an address, or a rule's key's hashed value.
+type BucketKey = (u16, Option<std::net::IpAddr>, Option<u64>);
 
 /// Where the buckets of a deployment's own firewall rules start (past any environment's).
 const FILE_BUCKETS: u16 = 1000;
@@ -472,7 +473,7 @@ fn first_match(rules: &[crate::model::FirewallRule], asked: &crate::model::Asked
     match rules.iter().enumerate().find(|(_, r)| r.matches(asked)) {
         None => Verdict::Allow,
         Some((_, r)) if r.action == crate::model::FirewallAction::Allow => Verdict::Allow,
-        Some((i, r)) if r.action == crate::model::FirewallAction::Limit => Verdict::Limit(base + i as u16, crate::model::RateLimit { per_minute: r.per_minute.unwrap_or(60), burst: r.burst }),
+        Some((i, r)) if r.action == crate::model::FirewallAction::Limit => Verdict::Limit(base + i as u16, crate::model::RateLimit { per_minute: r.per_minute.unwrap_or(60), burst: r.burst }, r.client_key(asked)),
         Some((_, r)) if r.action == crate::model::FirewallAction::Challenge => Verdict::Challenge,
         Some(_) => Verdict::Deny,
     }
@@ -483,7 +484,8 @@ fn first_match(rules: &[crate::model::FirewallRule], asked: &crate::model::Asked
 pub enum Verdict {
     Allow,
     Deny,
-    Limit(u16, crate::model::RateLimit),
+    /// Its bucket, its limit, and its client by the rule's key (none: by address).
+    Limit(u16, crate::model::RateLimit, Option<u64>),
     /// In with a pass ([`crate::challenge`]); else its page.
     Challenge,
 }
@@ -511,7 +513,7 @@ impl Gate {
             Verdict::Deny => 3,
         };
         match (own, file) {
-            (Verdict::Limit(a, x), Verdict::Limit(b, y)) => if y.per_minute < x.per_minute { Verdict::Limit(b, y) } else { Verdict::Limit(a, x) },
+            (Verdict::Limit(a, x, ka), Verdict::Limit(b, y, kb)) => if y.per_minute < x.per_minute { Verdict::Limit(b, y, kb) } else { Verdict::Limit(a, x, ka) },
             (a, b) => if rank(&b) > rank(&a) { b } else { a },
         }
     }
@@ -1317,11 +1319,11 @@ impl EnvLive {
     /// One request from `client` under `limit`: let through (a token taken), or how long until
     /// the next token.
     pub fn take_token(&self, client: Option<std::net::IpAddr>, limit: &crate::model::RateLimit) -> Result<(), Duration> {
-        self.take_token_in(0, client, limit)
+        self.take_token_in(0, client, None, limit)
     }
 
     /// [`Self::take_token`] in one of its buckets (a firewall rule's own: 1 + its index).
-    pub fn take_token_in(&self, bucket: u16, client: Option<std::net::IpAddr>, limit: &crate::model::RateLimit) -> Result<(), Duration> {
+    pub fn take_token_in(&self, bucket: u16, client: Option<std::net::IpAddr>, keyed: Option<u64>, limit: &crate::model::RateLimit) -> Result<(), Duration> {
         let (rate, burst) = (limit.per_minute as f64 / 60.0, limit.burst() as f64);
         // An IPv6 client counts by its /64: one host has the whole of it to rotate through.
         let client = client.map(|ip| match ip {
@@ -1329,7 +1331,11 @@ impl EnvLive {
             v4 => v4,
         });
         let now = Instant::now();
-        let key = (bucket, client);
+        // Keyed: the key's value is the client, wherever it comes from.
+        let key = match keyed {
+            Some(k) => (bucket, None, Some(k)),
+            None => (bucket, client, None),
+        };
         let mut b = self.buckets.lock();
         if b.len() >= MAX_BUCKETS && !b.contains_key(&key) {
             // Full ones first: they're the same as no entry. Then the longest unseen, never

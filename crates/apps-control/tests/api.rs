@@ -4273,6 +4273,44 @@ async fn a_rollout_runs_its_browser_checks_on_the_canary_first() {
     assert_eq!(d3["status"], "active", "{d3}");
 }
 
+/// Uptime checks from outside (Cloud Monitoring's, Checkly's): `from: public` fetches the
+/// environment's real URL over the network as a visitor's request goes (here the apps listener
+/// served for real, at its `*.localhost` name); a host that isn't one of its domains is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_public_check_fetches_its_real_url() {
+    let listener = tokio::net::TcpListener::bind("[::]:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let w = world_with(|cfg| cfg.url_port = Some(port)).await;
+    let app = w.public.clone();
+    tokio::spawn(async move { axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await });
+    let (svc, _) = image_service(&w, "web", json!({"port": 80, "min_instances": 1})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    assert_eq!(call(&w.api, "PUT", &base, Some(json!({"checks": [{"name": "home", "path": "/", "host": "x.example"}]}))).await.0, StatusCode::BAD_REQUEST, "a host is a public check's");
+    let checks = |c: Value| json!({"checks": [c]});
+    assert_eq!(call(&w.api, "PUT", &base, Some(checks(json!({"name": "home", "path": "/", "from": "public"})))).await.0, StatusCode::OK);
+    let t0 = code_sql::now_ms() + 3_600_000;
+    let pass = |n: i64| {
+        let (w, base) = (&w, base.clone());
+        async move {
+            w.apps.cron_pass(t0 + n * 61_000).await;
+            for _ in 0..300 {
+                let st = call(&w.api, "GET", &base, None).await.1["check_states"][0].clone();
+                if st["last_at"].as_i64() == Some(t0 + n * 61_000) && (!st["status"].is_null() || !st["error"].is_null()) {
+                    return st;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            panic!("pass {n} never came back");
+        }
+    };
+    let up = pass(0).await;
+    assert_eq!((up["up"].as_bool(), up["status"].as_u64()), (Some(true), Some(200)), "over the network: {up}");
+    call(&w.api, "PUT", &base, Some(checks(json!({"name": "home", "path": "/", "from": "public", "host": "not-ours.example"})))).await;
+    let refused = pass(1).await;
+    assert!(refused["error"].as_str().is_some_and(|e| e.contains("isn't one of this environment's active domains")), "{refused}");
+}
+
 /// Heartbeats (Healthchecks', Cronitor's): something outside roll pings its URL; one that
 /// doesn't within its period and grace is `heartbeat.missed` once, the next ping resolves it. The
 /// URL is shown once, when the heartbeat is added, and a kept heartbeat keeps it.
@@ -6796,6 +6834,15 @@ async fn firewall_rules_decide_in_order() {
     }
     assert_eq!(got, [StatusCode::OK, StatusCode::OK, StatusCode::TOO_MANY_REQUESTS], "its burst through, the next held");
     assert_eq!(req("GET", "/", "curl").await, StatusCode::OK, "other paths aren't limited");
+    // Keyed by an API key's header: two clients behind one address each get their own rate.
+    let (st, e) = call(&w.api, "PUT", &base, Some(json!({"firewall": [{"action": "limit", "path": "/api/*", "per_minute": 1, "burst": 1, "key": "header:X-Api-Key"}]}))).await;
+    assert_eq!((st, e["firewall"][0]["key"].as_str()), (StatusCode::OK, Some("header:x-api-key")), "{e}");
+    let keyed = |k: &'static str| {
+        let (public, h) = (w.public.clone(), h.clone());
+        async move { public.oneshot(Request::get("/api/orders").header("host", h.as_str()).header("x-api-key", k).body(Body::empty()).unwrap()).await.unwrap().status() }
+    };
+    assert_eq!((keyed("ka").await, keyed("ka").await, keyed("kb").await), (StatusCode::OK, StatusCode::TOO_MANY_REQUESTS, StatusCode::OK), "each key its own bucket");
+    assert_eq!(call(&w.api, "PUT", &base, Some(json!({"firewall": [{"action": "deny", "path": "/x", "key": "ip"}]}))).await.0, StatusCode::BAD_REQUEST, "a key is a limit's");
     assert_eq!(call(&w.api, "PUT", &base, Some(json!({"firewall": [{"action": "limit", "path": "/x"}]}))).await.0, StatusCode::BAD_REQUEST, "a limit says its rate");
     assert_eq!(call(&w.api, "PUT", &base, Some(json!({"firewall": [{"action": "deny", "path": "/x", "per_minute": 5}]}))).await.0, StatusCode::BAD_REQUEST);
     call(&w.api, "PUT", &base, Some(json!({"firewall": null}))).await;
