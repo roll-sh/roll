@@ -1325,9 +1325,9 @@ impl roll_secrets::reach::Holders for ReachHolders {
             }
             for env in apps.store.environments(&svc.id).map_err(|e| e.to_string())? {
                 let last_deployed_at = env.active.as_deref().and_then(|d| apps.store.deployment(d).ok()).map(|d| d.finished_at.unwrap_or(d.created_at));
-                // A variable goes back only when it is a `roll://` reference (its text, as roll
-                // secrets parses it); every other value is dropped here.
-                let references = apps.store.variables(&svc.id, &env.name).map_err(|e| e.to_string())?.into_values().filter(|v| matches!(roll_secrets::Reference::parse(v), Ok(Some(_)))).collect();
+                // Its `roll://` references, as roll apps keeps them beside the values (roll
+                // secrets' parser decided when each was set): no value is opened.
+                let references = apps.store.variable_references(&svc.id, &env.name).map_err(|e| e.to_string())?.into_values().collect();
                 out.push(roll_secrets::reach::ServiceUse { service: svc.id.clone(), name: svc.name.clone(), environment: env.name, last_deployed_at, references });
             }
         }

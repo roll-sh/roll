@@ -2239,8 +2239,9 @@ async fn a_shared_value_opens_as_many_times_as_allowed_and_the_server_never_hold
 
 /// docs/accounts.md, "Offboarding": a disabled person (an admin, SCIM) keeps their memberships,
 /// but what they handed out ends anyway. Their one-time share refuses to open (it checks its
-/// maker), and rolld's offboarding hook revokes their dynamic credential now, not at its TTL.
-/// Enabled again, they get nothing back.
+/// maker), and rolld's offboarding hook revokes their dynamic credential now, not at its TTL,
+/// checking only the projects holding what they made: never root's unrelated project with root's
+/// own open share. Enabled again, they get nothing back.
 #[tokio::test]
 async fn a_disabled_persons_share_refuses_to_open_and_their_leases_are_revoked() {
     use base64::Engine as _;
@@ -2259,11 +2260,16 @@ async fn a_disabled_persons_share_refuses_to_open_and_their_leases_are_revoked()
     let (s, share) = api.as_ada(Method::POST, &at("/shares"), Some(json!({ "ciphertext": blob, "note": "for the contractor" }))).await;
     assert_eq!(s, StatusCode::CREATED, "{share}");
     let open = format!("/v1/secrets/shares/{}/open", share["id"].as_str().unwrap());
+    let (_, unrelated) = api.signed_in("root", true, Method::POST, "/v1/workspace/projects", Some(json!({ "name": "root-shop" }))).await;
+    let (s, e) = api.signed_in("root", true, Method::POST, &format!("/v1/secrets/projects/{}/shares", unrelated["id"].as_str().unwrap()), Some(json!({ "ciphertext": blob }))).await;
+    assert_eq!(s, StatusCode::CREATED, "{e}");
 
     *api.people.disabled.lock().unwrap() = true;
     assert_eq!(api.call(Method::POST, &open, None).await.0, StatusCode::NOT_FOUND, "a disabled maker's share ends unopened");
     assert!(api.fake.live_keys.lock().unwrap().contains(&key), "until the hook runs, the credential is live");
+    let rechecks = api.secrets.metrics().unwrap().member_rechecks;
     api.secrets.person_offboarded("usr_ada").unwrap();
+    assert_eq!(api.secrets.metrics().unwrap().member_rechecks, rechecks + 1, "only her own project is checked, not root's");
     assert!(!api.fake.live_keys.lock().unwrap().contains(&key), "revoked now, not at its TTL");
     let leases = api.ok(Method::GET, "/leases", None).await;
     assert!(leases.as_array().unwrap().iter().all(|l| !l["revoked_at"].is_null()), "{leases}");

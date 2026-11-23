@@ -861,6 +861,12 @@ const SERVICE_COLS: &str = "id, project, name, source, build, run, created_at";
 const NOT_DELETED: &str = "service NOT IN (SELECT id FROM services WHERE deleted_at IS NOT NULL)";
 
 /// The conflict a taken name is: a live service's, or a deleted one's until it goes for good.
+/// What the `reference` column keeps for a variable's value: its text when roll secrets' parser
+/// takes it for a `roll://` reference, else ''.
+fn reference_of(value: &str) -> String {
+    if matches!(roll_secrets_ref::Reference::parse(value), Ok(Some(_))) { value.to_string() } else { String::new() }
+}
+
 fn name_taken(name: &str, deleted: Option<i64>) -> String {
     match deleted {
         None => format!("a service named {name} exists in this project"),
@@ -1095,6 +1101,10 @@ impl Store {
         db.add_column("environments", "follow_tag", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("environments", "tag_seen", "TEXT")?;
         db.add_column("variables", "write_only", "INTEGER NOT NULL DEFAULT 0")?;
+        // A variable's text when it's a `roll://` reference, '' when it isn't, kept beside its
+        // sealed value (a reference isn't secret): roll secrets' reach reads it without opening
+        // anything. NULL: set before this column, marked by `mark_references` when the store opens.
+        db.add_column("variables", "reference", "TEXT")?;
         db.add_column("services", "build_cache", "TEXT")?;
         db.add_column("environments", "pages", "TEXT")?;
         db.add_column("environments", "redeploy_on_secrets", "INTEGER NOT NULL DEFAULT 0")?;
@@ -1155,7 +1165,9 @@ impl Store {
         // NULL: NDJSON, as every drain was before formats.
         db.add_column("log_drains", "format", "TEXT")?;
         db.add_column("domains", "redirect_to", "TEXT")?;
-        Ok(Store { db, sealer })
+        let store = Store { db, sealer };
+        store.mark_references()?;
+        Ok(store)
     }
 
     pub fn now(&self) -> Result<i64> {
@@ -2209,6 +2221,34 @@ impl Store {
         rows.into_iter().map(|(n, s)| Ok((n.clone(), self.sealer.open(&Self::aad(service, env, &n), &s)?))).collect()
     }
 
+    /// `env`'s variables that are `roll://` references, and what each names, by name: read from
+    /// beside the values, never opening one (roll secrets' reach).
+    pub fn variable_references(&self, service: &str, env: &str) -> Result<BTreeMap<String, String>> {
+        Ok(self.db.query("SELECT name, reference FROM variables WHERE service = ? AND env = ? AND reference IS NOT NULL AND reference <> ''", [service, env], |r| Ok((r.get(0)?, r.get(1)?)))?.into_iter().collect())
+    }
+
+    /// Marks the variables set before references were kept beside them: each is opened once, here.
+    /// Runs at every open and finds nothing after the first. One that doesn't open stays unmarked
+    /// (its deploys fail on it anyway); a value changed meanwhile keeps the mark its write made.
+    fn mark_references(&self) -> Result<()> {
+        let rows: Vec<(String, String, String, String)> =
+            self.db.query("SELECT service, env, name, sealed FROM variables WHERE reference IS NULL", (), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+        for (service, env, name, sealed) in rows {
+            let reference = match self.sealer.open(&Self::aad(&service, &env, &name), &sealed) {
+                Ok(v) => reference_of(&v),
+                Err(e) => {
+                    tracing::warn!(%service, %env, variable = %name, "marking a variable's reference: {e}");
+                    continue;
+                }
+            };
+            self.db.execute(
+                "UPDATE variables SET reference = ? WHERE service = ? AND env = ? AND name = ? AND sealed = ? AND reference IS NULL",
+                params![reference, service, env, name, sealed],
+            )?;
+        }
+        Ok(())
+    }
+
     /// The names of `env`'s sealed variables: set and run with, never shown again.
     pub fn sealed_variables(&self, service: &str, env: &str) -> Result<BTreeSet<String>> {
         Ok(self.db.query("SELECT name FROM variables WHERE service = ? AND env = ? AND write_only = 1", [service, env], |r| r.get(0))?.into_iter().collect())
@@ -2223,7 +2263,7 @@ impl Store {
     /// [`Store::change_variables`], with the makers of `set`'s references into other environments
     /// (a variable set without one has none from now on).
     pub fn change_variables_made(&self, service: &str, env: &str, set: &BTreeMap<String, String>, unset: &[String], seal: &BTreeSet<String>, makers: &BTreeMap<String, String>) -> Result<()> {
-        let sealed: Vec<(String, String)> = set.iter().map(|(k, v)| (k.clone(), self.sealer.seal(&Self::aad(service, env, k), v))).collect();
+        let sealed: Vec<(String, String, String)> = set.iter().map(|(k, v)| (k.clone(), self.sealer.seal(&Self::aad(service, env, k), v), reference_of(v))).collect();
         self.db.write(|c| {
             for n in unset.iter().chain(set.keys()) {
                 c.execute("DELETE FROM variable_makers WHERE service = ? AND env = ? AND name = ?", [service, env, n])?;
@@ -2234,10 +2274,10 @@ impl Store {
             for n in unset {
                 c.execute("DELETE FROM variables WHERE service = ? AND env = ? AND name = ?", [service, env, n])?;
             }
-            for (n, s) in &sealed {
+            for (n, s, r) in &sealed {
                 c.execute(
-                    "INSERT INTO variables (service, env, name, sealed) VALUES (?, ?, ?, ?) ON CONFLICT (service, env, name) DO UPDATE SET sealed = excluded.sealed",
-                    [service, env, n, s],
+                    "INSERT INTO variables (service, env, name, sealed, reference) VALUES (?, ?, ?, ?, ?) ON CONFLICT (service, env, name) DO UPDATE SET sealed = excluded.sealed, reference = excluded.reference",
+                    [service, env, n, s, r],
                 )?;
             }
             for n in seal {
