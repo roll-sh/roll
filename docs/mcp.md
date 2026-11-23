@@ -154,8 +154,10 @@ or part of it ("checkout-db"), part of its id, or a roll dashboard link a person
 `search` and Linear's pasted URLs do. It has no route of its own: a name is looked up in each
 product's list tool the connection has (projects, services, repos, Postgres, Redis, NoSQL, search
 clusters, buckets, streams, queues' virtual hosts, functions, previews), at most six at once,
-through the gate as the caller. Those lists are quiet: one that would ask a person is skipped, not
-put to them, and the audit log has each as `roll_find:<tool>`. Matches come exact first, then by
+through the gate as the caller. Those lists are quiet: one that would ask a person (the token's
+`ask` rules, or the policy's `agents_ask`) is skipped, not put to them, and the audit log has each
+as `roll_find:<tool>`. The operator's inspector sees `roll_find`'s own call and answer, and hidden
+text in names is made visible as in every answer. `?tools=` and `exclude_tools=` pick or drop it. Matches come exact first, then by
 prefix, then by part, at most 25. Each says its kind, id, name and `read: {tool, arguments}`, the
 ordinary tool that goes on from it. A list that refused or failed is in `skipped`. A link
 (`/dashboard/apps/<id>`, `/dashboard/code/<owner>/<repo>[/changes/<n>]`, `/dashboard/projects/<id>`,
@@ -215,7 +217,7 @@ person's own connections hear those about their own tokens): a failing tool (`to
 (`decoy_used`, once an hour per decoy), and a leaked token or another product's secret revoked
 (`token_revoked`, `secret_revoked`, with where it was found and never the secret), and the
 checkup's new findings (`checkup_finding`: one node an hour compares the operator's checkup with
-what it saw last time, at most 20 a look; the first look only remembers). An agent's own feedback lands there too (`agent_feedback`, from `access_send_feedback`: what it was doing, what happened and what it expected, marked as a model's words so lockdown withholds them; 20 an hour per connection), so the operator hears what got in an agent's way where it happened. Previews: `previews.event`
+what it saw last time, at most 20 a look; the first look only remembers). An agent's own feedback lands there too (`agent_feedback`, from `access_send_feedback`: what it was doing, what happened and what it expected, marked as a model's words so lockdown withholds them; 20 an hour per token), so the operator hears what got in an agent's way where it happened. Previews: `previews.event`
 (created, ready, failed, a visual change waiting, production's browser checks passed or failed on its head, deleted; `GET /v1/previews/events`, tied to
 `previews_list`, its project's events only, as the gate filters the list). roll code: `code.landed`
 (each change landed on one repo, with its change, ref, changeset and author; `GET
@@ -660,7 +662,9 @@ alone, as at the gate.
     steps).
   - **Views that refresh themselves:** an answer that's still changing (a deploy building, a job
     or a tasks run running, a preview being made, a call waiting for a person) carries
-    `_meta["roll/pending"]`, `{tool, arguments}`: the read that shows it again. That's the tool's
+    `_meta["roll/pending"]`, `{tool, arguments}`: the read that shows it again. A call waits for a
+    person only when roll's gate said so (its refusal, with `http_status`): a product's own answer
+    can't pose as one, here, in MCP tasks or in a client's approval prompt. That's the tool's
     own `until` (what MCP tasks wait on), or the one of the waiting tool on the same `GET` route
     (`apps_get_deploy` refreshes as `apps_wait_deploy` waits). Any wait in its arguments is cut short
     (20 s, `10s`). A call waiting for a person names `access_wait_approval` on its approval, when the
@@ -873,7 +877,7 @@ previews are listed once those products are on.
 | `access_list_approvals` | Approvals, newest first: pending ones wait for the operator. | `GET /v1/access/approvals` |
 | `access_audit_log` | Every request made with a token and every MCP tool call, newest first. | `GET /v1/access/audit` |
 | `access_activity` | How agents used roll's MCP server lately: per tool (calls, refused, failed, average, median, p95 and longest duration, last call), per connection and per day. A person's are their own connections'. | `GET /v1/access/activity` |
-| `access_send_feedback` | Tell roll's operator what got in the way (what it was doing, what happened, what it expected): kept on the alert feed as `agent_feedback`, withheld in lockdown, 20 an hour per connection. Changes nothing. | `POST /v1/access/feedback` |
+| `access_send_feedback` | Tell roll's operator what got in the way (what it was doing, what happened, what it expected): kept on the alert feed as `agent_feedback`, withheld in lockdown, 20 an hour per token. Changes nothing. | `POST /v1/access/feedback` |
 | `access_checkup` | The live tokens that need attention (everything, never expires, unused, narrower, roams), most serious first, each with its fix. A person's are their own. | `GET /v1/access/checkup` |
 | `access_list_tokens` | Tokens and OAuth connections you may see (rules, expiry, last use; never a secret). | `GET /v1/access/tokens` |
 | `access_get_token` | One token. | `GET /v1/access/tokens/{id}` |
@@ -1402,7 +1406,7 @@ gaps are in how results read and how roll is distributed):
 4. **A feedback tool (#814).** `access_send_feedback` (Vercel's `submit_feedback`; Supabase,
    Neon, Stripe, PlanetScale have one): an agent tells the operator what got in its way, kept on
    `access.alert` and the access page's Alerts (a person's agents' to them), withheld in lockdown,
-   capped at 20 an hour per connection.
+   capped at 20 an hour per token.
 5. **MCP Apps views that refresh themselves (#820).** A changing answer (a deploy building, a
    job or run running, a preview being made, an approval pending) names the read that shows it
    again (`_meta["roll/pending"]`, from each tool's `until`), and the view follows it through the
