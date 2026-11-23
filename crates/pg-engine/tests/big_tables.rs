@@ -221,7 +221,8 @@ fn copy_through_the_sink() {
 }
 
 /// Parallel btree builds (`session::ddl::parbuild`) give what the serial build gives: the
-/// same entries (index-only scans against the rows), pg_class numbers, and unique errors.
+/// same entries (index-only scans against the rows), pg_class numbers, and unique errors;
+/// also when each participant spills its sorted runs to files every 1,024 rows.
 #[test]
 fn parallel_index_builds() {
     let dir = tempfile::tempdir().unwrap();
@@ -233,33 +234,44 @@ fn parallel_index_builds() {
              VACUUM pb;
              SET min_parallel_table_scan_size = 0");
         let mut stats = Vec::new();
-        for workers in [0, 2] {
-            run(&mut s, &format!("SET max_parallel_maintenance_workers = {workers}"));
-            let before = pg_engine::exec::parscan::index_builds();
-            run(&mut s, "CREATE INDEX pb_a ON pb (a) INCLUDE (t);\nCREATE UNIQUE INDEX pb_id ON pb (id);\nCREATE INDEX pb_t ON pb (t, a);\nVACUUM pb");
-            assert_eq!(pg_engine::exec::parscan::index_builds() - before, if workers > 0 { 3 } else { 0 });
-            // (Each query through the indexes and through the rows: the same answers.)
-            for q in ["SELECT a, count(*) FROM pb WHERE a < 20 GROUP BY a ORDER BY a", "SELECT count(*) FROM pb WHERE id > 100", "SELECT t, a FROM pb WHERE t < 'v2' ORDER BY t, a LIMIT 30"] {
-                run(&mut s, "SET enable_seqscan = off;\nSET enable_bitmapscan = off");
-                let plan = rows(&mut s, &format!("EXPLAIN (COSTS OFF) {q}")).join("\n");
-                assert!(plan.contains("Index"), "{q}: {plan}");
-                let by_index = rows(&mut s, q);
-                run(&mut s, "RESET enable_seqscan;\nSET enable_indexscan = off;\nSET enable_indexonlyscan = off");
-                assert_eq!(by_index, rows(&mut s, q), "{q}");
-                run(&mut s, "RESET enable_bitmapscan;\nRESET enable_indexscan;\nRESET enable_indexonlyscan");
+        for (workers, spill) in [(0, None), (2, None), (2, Some(4096))] {
+            let spills = pg_engine::exec::parscan::index_build_spills();
+            let mut round = || {
+                run(&mut s, &format!("SET max_parallel_maintenance_workers = {workers}"));
+                let before = pg_engine::exec::parscan::index_builds();
+                run(&mut s, "CREATE INDEX pb_a ON pb (a) INCLUDE (t);\nCREATE UNIQUE INDEX pb_id ON pb (id);\nCREATE INDEX pb_t ON pb (t, a);\nVACUUM pb");
+                assert_eq!(pg_engine::exec::parscan::index_builds() - before, if workers > 0 { 3 } else { 0 });
+                // (Each query through the indexes and through the rows: the same answers.)
+                for q in ["SELECT a, count(*) FROM pb WHERE a < 20 GROUP BY a ORDER BY a", "SELECT count(*) FROM pb WHERE id > 100", "SELECT t, a FROM pb WHERE t < 'v2' ORDER BY t, a LIMIT 30"] {
+                    run(&mut s, "SET enable_seqscan = off;\nSET enable_bitmapscan = off");
+                    let plan = rows(&mut s, &format!("EXPLAIN (COSTS OFF) {q}")).join("\n");
+                    assert!(plan.contains("Index"), "{q}: {plan}");
+                    let by_index = rows(&mut s, q);
+                    run(&mut s, "RESET enable_seqscan;\nSET enable_indexscan = off;\nSET enable_indexonlyscan = off");
+                    assert_eq!(by_index, rows(&mut s, q), "{q}");
+                    run(&mut s, "RESET enable_bitmapscan;\nRESET enable_indexscan;\nRESET enable_indexonlyscan");
+                }
+                stats.push(rows(&mut s, "SELECT relname, relpages, reltuples FROM pg_class WHERE relname LIKE 'pb\\_%' ORDER BY relname"));
+                let mut errs = Vec::new();
+                for sql in ["CREATE UNIQUE INDEX pb_bad ON pb (a)", "CREATE UNIQUE INDEX pb_bad ON pb (t)", "CREATE UNIQUE INDEX pb_bad ON pb (a) NULLS NOT DISTINCT"] {
+                    let e = s.query(sql).unwrap_err();
+                    errs.push((e.code, e.message.clone(), e.detail.clone()));
+                }
+                run(&mut s, "UPDATE pb SET a = -id WHERE a IS NULL OR id > 211;\nCREATE UNIQUE INDEX pb_ok ON pb (a) NULLS NOT DISTINCT");
+                stats.push(errs.iter().map(|e| format!("{e:?}")).collect());
+                run(&mut s, "DROP INDEX pb_a, pb_id, pb_t, pb_ok;\nUPDATE pb SET a = CASE WHEN id % 97 = 0 THEN NULL ELSE id % 211 END;\nVACUUM pb");
+            };
+            match spill {
+                Some(n) => pg_engine::exec::parscan::with_build_spill_bytes(n, round),
+                None => round(),
             }
-            stats.push(rows(&mut s, "SELECT relname, relpages, reltuples FROM pg_class WHERE relname LIKE 'pb\\_%' ORDER BY relname"));
-            let mut errs = Vec::new();
-            for sql in ["CREATE UNIQUE INDEX pb_bad ON pb (a)", "CREATE UNIQUE INDEX pb_bad ON pb (t)", "CREATE UNIQUE INDEX pb_bad ON pb (a) NULLS NOT DISTINCT"] {
-                let e = s.query(sql).unwrap_err();
-                errs.push((e.code, e.message.clone(), e.detail.clone()));
-            }
-            run(&mut s, "UPDATE pb SET a = -id WHERE a IS NULL OR id > 211;\nCREATE UNIQUE INDEX pb_ok ON pb (a) NULLS NOT DISTINCT");
-            stats.push(errs.iter().map(|e| format!("{e:?}")).collect());
-            run(&mut s, "DROP INDEX pb_a, pb_id, pb_t, pb_ok;\nUPDATE pb SET a = CASE WHEN id % 97 = 0 THEN NULL ELSE id % 211 END;\nVACUUM pb");
+            let spilled = pg_engine::exec::parscan::index_build_spills() - spills;
+            assert_eq!(spilled > 10, spill.is_some(), "{spilled} runs spilled");
         }
         assert_eq!(stats[0], stats[2]);
         assert_eq!(stats[1], stats[3]);
+        assert_eq!(stats[0], stats[4]);
+        assert_eq!(stats[1], stats[5]);
     });
 }
 

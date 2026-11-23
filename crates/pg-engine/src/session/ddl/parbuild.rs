@@ -19,6 +19,7 @@ use crate::sql::plan::BoundIndex;
 use crate::storage::keys::KeyColl;
 use crate::types::{DataType, Value};
 use std::collections::VecDeque;
+use std::io::{Read as _, Write as _};
 use std::sync::Mutex;
 use super::idxprogress::IndexProgress;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -40,6 +41,22 @@ const CHECKED: u32 = 1 << 31;
 /// (Two words, not a `u128`: its 16-byte alignment made an entry 32 bytes.)
 type Ent = ([u64; 2], u32, u32);
 
+/// An entry key's 16 bytes after the index's 8-byte prefix, zero-padded, as two big-endian
+/// words: entries sort by them, then by the keys where they tie.
+fn words(k: &[u8]) -> [u64; 2] {
+    let mut w = [0u8; 16];
+    let rest = k.get(8..).unwrap_or(&[]);
+    let n = rest.len().min(16);
+    w[..n].copy_from_slice(&rest[..n]);
+    let word = |b: &[u8]| u64::from_be_bytes(b.try_into().unwrap());
+    [word(&w[..8]), word(&w[8..])]
+}
+
+/// A tail length out of an entry's lengths word.
+fn tail_len(lens: u32) -> usize {
+    ((lens & !CHECKED) >> 16) as usize
+}
+
 impl Entries {
     fn push(&mut self, k: &[u8], tail: usize, checked: bool) {
         let at = self.data.len();
@@ -50,22 +67,17 @@ impl Entries {
     /// An entry whose key was appended to `data` from `at` on.
     fn push_at(&mut self, at: usize, tail: usize, checked: bool) {
         let k = &self.data[at..];
-        let mut w = [0u8; 16];
-        let rest = k.get(8..).unwrap_or(&[]);
-        let n = rest.len().min(16);
-        w[..n].copy_from_slice(&rest[..n]);
         let lens = k.len() as u32 | (tail as u32) << 16 | if checked { CHECKED } else { 0 };
-        let word = |b: &[u8]| u64::from_be_bytes(b.try_into().unwrap());
-        self.ents.push(([word(&w[..8]), word(&w[8..])], at as u32, lens));
+        self.ents.push((words(k), at as u32, lens));
+    }
+
+    /// What the entries hold in memory.
+    fn bytes(&self) -> usize {
+        self.data.len() + self.ents.len() * std::mem::size_of::<Ent>()
     }
 
     fn key(&self, e: Ent) -> &[u8] {
         &self.data[e.1 as usize..(e.1 + (e.2 & 0xffff)) as usize]
-    }
-
-    fn tail(&self, e: Ent) -> &[u8] {
-        let k = self.key(e);
-        &k[k.len() - ((e.2 & !CHECKED) >> 16) as usize..]
     }
 
     /// By each key's first 16 bytes past the index's prefix, then the keys themselves where
@@ -105,6 +117,311 @@ struct Gathered {
     /// A row's key values and sort key (`row`'s, kept for the next row: no allocation each).
     vals: Vec<Value>,
     sort: Vec<u8>,
+    /// The bytes of the measure keys' longer parts (`MeasureKey`'s boxes).
+    long: usize,
+    /// Sorted runs of entries and of measure keys spilled to files, each time the participant
+    /// held its share of maintenance_work_mem (`Plan::spill`).
+    runs: Vec<RunFile>,
+    key_runs: Vec<RunFile>,
+}
+
+impl Gathered {
+    /// What the entries and measure keys hold in memory.
+    fn held(&self) -> usize {
+        self.entries.bytes() + self.keys.len() * std::mem::size_of::<super::vacuum::MeasureKey>() + self.long
+    }
+
+    /// The entries and measure keys sorted, each to a run file in `dir`, and let go.
+    fn spill(&mut self, dir: &std::path::Path) -> Result<()> {
+        crate::storage::durable::create_dir_all(dir)?;
+        self.entries.sort();
+        let e = &self.entries;
+        self.runs.push(RunFile::write(dir, e.ents.len(), |w| {
+            for &x in &e.ents {
+                w.write_all(&x.2.to_le_bytes())?;
+                w.write_all(e.key(x))?;
+            }
+            Ok(())
+        })?);
+        self.entries.data.clear();
+        self.entries.ents.clear();
+        super::vacuum::sort_measure_keys(&mut self.keys);
+        let keys = &self.keys;
+        self.key_runs.push(RunFile::write(dir, keys.len(), |w| {
+            for k in keys {
+                w.write_all(&k.0[0].to_le_bytes())?;
+                w.write_all(&k.0[1].to_le_bytes())?;
+                w.write_all(&k.2.to_le_bytes())?;
+                let long = k.1.as_deref().unwrap_or(&[]);
+                w.write_all(&(long.len() as u32).to_le_bytes())?;
+                w.write_all(long)?;
+            }
+            Ok(())
+        })?);
+        self.keys.clear();
+        self.long = 0;
+        Ok(())
+    }
+}
+
+/// A sorted run a participant spilled (`Gathered::spill`): `n` records in the build's
+/// directory, removed when this goes. An entry is its lengths word (`Ent`'s third) and key;
+/// a measure key its two prefix words, size, the longer part's length (0: none) and bytes.
+struct RunFile {
+    path: std::path::PathBuf,
+    n: usize,
+}
+
+static RUN_SEQ: AtomicU64 = AtomicU64::new(0);
+
+impl RunFile {
+    fn write(dir: &std::path::Path, n: usize, f: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> std::io::Result<()>) -> Result<RunFile> {
+        let run = RunFile { path: dir.join(format!("{}.run", RUN_SEQ.fetch_add(1, Ordering::Relaxed))), n };
+        let mut w = std::io::BufWriter::with_capacity(RUN_IO, std::fs::File::create(&run.path)?);
+        f(&mut w)?;
+        w.flush()?;
+        Ok(run)
+    }
+
+    fn open(&self) -> Result<std::io::BufReader<std::fs::File>> {
+        Ok(std::io::BufReader::with_capacity(RUN_IO, std::fs::File::open(&self.path)?))
+    }
+}
+
+impl Drop for RunFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// A run file's buffer, written and read.
+const RUN_IO: usize = 32 << 10;
+
+/// The least a participant holds before it spills (a small maintenance_work_mem would make
+/// hundreds of runs, each open in the merge).
+const MIN_SPILL: usize = 4 << 20;
+
+/// The build's directory for spilled runs, under the store's spill directory (which the store
+/// empties when it opens after a crash), removed with what is left in it when this goes.
+struct SpillDir(std::path::PathBuf);
+
+impl Drop for SpillDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Where a merge takes entries from: a participant's sorted entries in memory, or a run it
+/// spilled, its current entry read into `key`.
+enum Source<'a> {
+    Mem(&'a Entries, usize),
+    File { r: std::io::BufReader<std::fs::File>, left: usize, key: Vec<u8>, lens: u32, words: [u64; 2] },
+}
+
+impl Source<'_> {
+    fn file(run: &RunFile) -> Result<Source<'static>> {
+        let mut s = Source::File { r: run.open()?, left: run.n, key: Vec::new(), lens: 0, words: [0; 2] };
+        s.read()?;
+        Ok(s)
+    }
+
+    /// A file's next entry into its buffer (none left: `left` is 0 and the key empty).
+    fn read(&mut self) -> Result<()> {
+        let Source::File { r, left, key, lens, words: w } = self else { return Ok(()) };
+        key.clear();
+        if *left == 0 {
+            return Ok(());
+        }
+        *left -= 1;
+        let mut b = [0u8; 4];
+        r.read_exact(&mut b)?;
+        *lens = u32::from_le_bytes(b);
+        key.resize((*lens & 0xffff) as usize, 0);
+        r.read_exact(key)?;
+        *w = words(key);
+        Ok(())
+    }
+
+    /// The current entry: its sort words, key and lengths word.
+    fn head(&self) -> Option<([u64; 2], &[u8], u32)> {
+        match self {
+            Source::Mem(e, at) => e.ents.get(*at).map(|&x| (x.0, e.key(x), x.2)),
+            Source::File { key, lens, words, .. } => (!key.is_empty()).then_some((*words, key.as_slice(), *lens)),
+        }
+    }
+
+    fn advance(&mut self) -> Result<()> {
+        match self {
+            Source::Mem(_, at) => {
+                *at += 1;
+                Ok(())
+            }
+            Source::File { .. } => self.read(),
+        }
+    }
+}
+
+/// The sources' entries merged in key order, each given to `f` (key, lengths word).
+fn merge_entries(mut srcs: Vec<Source<'_>>, f: &mut dyn FnMut(&[u8], u32) -> Result<()>) -> Result<()> {
+    srcs.retain(|s| s.head().is_some());
+    let less = |srcs: &[Source<'_>], a: usize, b: usize| {
+        let (x, y) = (srcs[a].head().unwrap(), srcs[b].head().unwrap());
+        x.0.cmp(&y.0).then_with(|| x.1.cmp(y.1)).is_lt()
+    };
+    // (A binary heap of the sources by their current entries: a big build has dozens of runs.)
+    let mut heap: Vec<usize> = (0..srcs.len()).collect();
+    let sift = |srcs: &[Source<'_>], heap: &mut [usize], mut i: usize| {
+        loop {
+            let (l, r) = (2 * i + 1, 2 * i + 2);
+            let mut m = i;
+            if l < heap.len() && less(srcs, heap[l], heap[m]) {
+                m = l;
+            }
+            if r < heap.len() && less(srcs, heap[r], heap[m]) {
+                m = r;
+            }
+            if m == i {
+                return;
+            }
+            heap.swap(i, m);
+            i = m;
+        }
+    };
+    for i in (0..heap.len() / 2).rev() {
+        sift(&srcs, &mut heap, i);
+    }
+    while let Some(&top) = heap.first() {
+        {
+            let (_, k, lens) = srcs[top].head().unwrap();
+            f(k, lens)?;
+        }
+        srcs[top].advance()?;
+        if srcs[top].head().is_none() {
+            let last = heap.pop().unwrap();
+            if heap.is_empty() {
+                break;
+            }
+            heap[0] = last;
+        }
+        sift(&srcs, &mut heap, 0);
+    }
+    Ok(())
+}
+
+/// The participants' sorted entries in memory and the runs they spilled, as a merge's sources.
+fn sources<'a>(sorted: &'a [Entries], runs: &[RunFile]) -> Result<Vec<Source<'a>>> {
+    let mut v: Vec<Source<'a>> = sorted.iter().map(|e| Source::Mem(e, 0)).collect();
+    for r in runs {
+        v.push(Source::file(r)?);
+    }
+    Ok(v)
+}
+
+/// The duplicate a unique index build reports: the serial build's, the key whose second row
+/// comes first in the table's order, as its first row's data key tail. (Checked entries only:
+/// values none null, or NULLS NOT DISTINCT.) The participants' sorted entries, merged.
+fn duplicate_in(sorted: &[Entries]) -> Option<&[u8]> {
+    // (An entry's key values: its key without its row's tail, `index_entry_key`.)
+    fn values(e: &Entries, x: Ent) -> &[u8] {
+        let k = e.key(x);
+        &k[..k.len() - tail_len(x.2)]
+    }
+    fn tail(e: &Entries, x: Ent) -> &[u8] {
+        let k = e.key(x);
+        &k[k.len() - tail_len(x.2)..]
+    }
+    let mut at = vec![0usize; sorted.len()];
+    // (The current group of equal checked keys: its first entry and how many so far; and the
+    // duplicate found: the second row's tail and the first's.)
+    let mut group: Option<((usize, Ent), usize)> = None;
+    let mut found: Option<(&[u8], &[u8])> = None;
+    loop {
+        let mut min: Option<usize> = None;
+        for (i, e) in sorted.iter().enumerate() {
+            if at[i] < e.ents.len() && min.is_none_or(|m| e.key(e.ents[at[i]]) < sorted[m].key(sorted[m].ents[at[m]])) {
+                min = Some(i);
+            }
+        }
+        let Some(m) = min else { break };
+        let ent = sorted[m].ents[at[m]];
+        at[m] += 1;
+        if ent.2 & CHECKED == 0 {
+            continue;
+        }
+        match &mut group {
+            Some(((l, lent), n)) if values(&sorted[*l], *lent) == values(&sorted[m], ent) => {
+                *n += 1;
+                let second = tail(&sorted[m], ent);
+                if *n == 2 && found.is_none_or(|f| second < f.0) {
+                    found = Some((second, tail(&sorted[*l], *lent)));
+                }
+            }
+            _ => group = Some(((m, ent), 1)),
+        }
+    }
+    found.map(|f| f.1)
+}
+
+/// `duplicate_in` over spilled runs too: the entries stream by, the last checked one copied.
+fn duplicate_in_runs(srcs: Vec<Source<'_>>) -> Result<Option<Vec<u8>>> {
+    let (mut last, mut last_tail, mut n) = (Vec::new(), Vec::new(), 0usize);
+    let mut found: Option<(Vec<u8>, Vec<u8>)> = None;
+    merge_entries(srcs, &mut |k, lens| {
+        if lens & CHECKED == 0 {
+            return Ok(());
+        }
+        let (values, tail) = k.split_at(k.len() - tail_len(lens));
+        if n > 0 && last.as_slice() == values {
+            n += 1;
+            if n == 2 && found.as_ref().is_none_or(|f| tail < f.0.as_slice()) {
+                found = Some((tail.to_vec(), last_tail.clone()));
+            }
+        } else {
+            n = 1;
+            last.clear();
+            last.extend_from_slice(values);
+            last_tail.clear();
+            last_tail.extend_from_slice(tail);
+        }
+        Ok(())
+    })?;
+    Ok(found.map(|f| f.1))
+}
+
+/// A measure key run's keys, in order; a read error ends them and is kept in `err`.
+fn key_run<'a>(run: &RunFile, err: &'a std::cell::RefCell<Option<crate::error::Error>>) -> Result<Box<dyn Iterator<Item = super::vacuum::MeasureKey> + 'a>> {
+    let mut r = run.open()?;
+    let mut left = run.n;
+    Ok(Box::new(std::iter::from_fn(move || {
+        if left == 0 {
+            return None;
+        }
+        left -= 1;
+        let mut read = || -> std::io::Result<super::vacuum::MeasureKey> {
+            let mut b = [0u8; 24];
+            r.read_exact(&mut b)?;
+            let word = |i: usize| u64::from_le_bytes(b[i..i + 8].try_into().unwrap());
+            let size = u32::from_le_bytes(b[16..20].try_into().unwrap());
+            let n = u32::from_le_bytes(b[20..24].try_into().unwrap()) as usize;
+            let long = match n {
+                0 => None,
+                n => {
+                    let mut v = vec![0u8; n];
+                    r.read_exact(&mut v)?;
+                    Some(v.into_boxed_slice())
+                }
+            };
+            Ok(([word(0), word(8)], long, size))
+        };
+        match read() {
+            Ok(k) => Some(k),
+            Err(e) => {
+                *err.borrow_mut() = Some(e.into());
+                left = 0;
+                None
+            }
+        }
+    })))
 }
 
 /// What every participant needs, shared.
@@ -126,6 +443,10 @@ struct Plan<'a> {
     /// The table is modelled: each row's key in the index's model is taken (`sizing::
     /// btree_from_build` lays the model out from them) in place of the measure.
     model: bool,
+    /// Where a participant spills its sorted entries and measure keys, and how many bytes of
+    /// them it holds first: its share of maintenance_work_mem, as PostgreSQL's participants
+    /// sort in theirs (`_bt_parallel_scan_and_sort`). None: a modelled table's (small) build.
+    spill: Option<(std::path::PathBuf, usize)>,
 }
 
 impl Plan<'_> {
@@ -184,6 +505,9 @@ impl Plan<'_> {
             g.oversized = Some((k.to_vec(), size, dkey.to_vec()));
         }
         g.keys.push(super::vacuum::measure_key(&g.sort, size));
+        if g.sort.len() > 16 {
+            g.long += g.sort.len();
+        }
         g.vals = vals;
         match stored {
             None => {}
@@ -223,6 +547,11 @@ impl Plan<'_> {
                     check()?;
                     if i > 0 {
                         progress.0.scanned_now(progress.1.fetch_add(1024, Ordering::Relaxed) + 1024);
+                    }
+                    if let Some((dir, budget)) = &self.spill
+                        && g.held() > *budget
+                    {
+                        g.spill(dir)?;
                     }
                 }
                 i += 1;
@@ -283,6 +612,21 @@ fn merge_sorted<T: Ord>(lists: Vec<Vec<T>>) -> impl Iterator<Item = T> {
         }
         let m = min?;
         std::mem::replace(&mut heads[m], its[m].next())
+    })
+}
+
+/// `merge_sorted` of sequences read from spilled runs too (dozens of them: a heap), equal
+/// items in any order.
+fn merge_runs<'a, T: Ord + 'a>(lists: Vec<Box<dyn Iterator<Item = T> + 'a>>) -> impl Iterator<Item = T> + 'a {
+    let mut its = lists;
+    let mut heap: std::collections::BinaryHeap<std::cmp::Reverse<(T, usize)>> =
+        its.iter_mut().enumerate().filter_map(|(i, it)| it.next().map(|x| std::cmp::Reverse((x, i)))).collect();
+    std::iter::from_fn(move || {
+        let std::cmp::Reverse((x, i)) = heap.pop()?;
+        if let Some(y) = its[i].next() {
+            heap.push(std::cmp::Reverse((y, i)));
+        }
+        Some(x)
     })
 }
 
@@ -405,6 +749,13 @@ impl Ddl<'_, '_> {
         let layout = crate::txn::unchanged::layout_of(&types, &virt_mask);
         let snap = self.ctx.txn.borrow().snapshot_ts();
         let kept = (!model).then(|| self.kept_live(t, layout, snap)).flatten();
+        let mwm_kb = self.ctx.sess.settings.borrow().get_str("maintenance_work_mem").and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(65536);
+        let spill = (!model).then(|| {
+            let dir = self.ctx.sess.db.store.spill_dir().join(format!("build-{}", RUN_SEQ.fetch_add(1, Ordering::Relaxed)));
+            let budget = crate::exec::parscan::build_spill_bytes().unwrap_or(((mwm_kb << 10) / (got + 1)).max(MIN_SPILL));
+            (dir, budget)
+        });
+        let _spill_dir = spill.as_ref().map(|(d, _)| SpillDir(d.clone()));
         let plan = Plan {
             t,
             ix,
@@ -419,6 +770,7 @@ impl Ddl<'_, '_> {
             check_nulls: ix.unique && !ix.nulls_not_distinct,
             sized: kept.is_none(),
             model,
+            spill,
         };
         let chunks = Mutex::new(chunks);
         let stop = AtomicBool::new(false);
@@ -449,12 +801,13 @@ impl Ddl<'_, '_> {
         });
         drop(release);
         let mut parts: Vec<(usize, Part)> = Vec::new();
-        let mut keys = Vec::new();
-        let mut sorted = Vec::new();
+        let (mut keys, mut key_runs) = (Vec::new(), Vec::new());
+        let (mut sorted, mut runs) = (Vec::new(), Vec::new());
         let mut oversized: Option<(Vec<u8>, usize, Vec<u8>)> = None;
         let mut model_keys = Vec::new();
+        let gathered: Vec<Gathered> = gathered.into_iter().collect::<Result<_>>()?;
+        crate::exec::parscan::count_build_spills(gathered.iter().map(|g| g.runs.len()).sum());
         for g in gathered {
-            let g = g?;
             if let Some(o) = g.oversized
                 && oversized.as_ref().is_none_or(|m| o.0 < m.0)
             {
@@ -462,11 +815,13 @@ impl Ddl<'_, '_> {
             }
             parts.extend(g.parts);
             keys.push(g.keys);
+            key_runs.extend(g.key_runs);
             sorted.push(g.entries);
+            runs.extend(g.runs);
             model_keys.extend(g.model);
         }
         if ix.unique {
-            self.unique_check(t, bix, ix, &sorted)?;
+            self.unique_check(t, bix, ix, &sorted, &runs)?;
         }
         if let Some((_, n, dkey)) = oversized {
             let tid = crate::exec::dml::row_tid(t, &dkey, self.ctx);
@@ -479,7 +834,7 @@ impl Ddl<'_, '_> {
             // (The serial build's count of the rows it read, as heap_getnext's.)
             crate::exec::pgstat::count_returned(self.ctx, t.oid, tuples as i64);
             progress.scanned_all(tuples as u64);
-            self.put_runs(&start, sorted)?;
+            self.put_runs(&start, &sorted, &runs)?;
             progress.loaded(tuples as u64);
             return Ok(Some(ParBuilt::Modelled { rows, tuples, keys: model_keys }));
         }
@@ -501,13 +856,28 @@ impl Ddl<'_, '_> {
                 live
             }
         };
-        let tuples = keys.iter().map(Vec::len).sum::<usize>();
+        let tuples = keys.iter().map(Vec::len).sum::<usize>() + key_runs.iter().map(|r| r.n).sum::<usize>();
         progress.scanned_all(tuples as u64);
-        let (pages, est) = super::vacuum::btree_pages_sorted(bix, &plan.ix_types, merge_sorted(keys), tuples);
+        let (pages, est) = match key_runs.is_empty() {
+            true => super::vacuum::btree_pages_sorted(bix, &plan.ix_types, merge_sorted(keys), tuples),
+            false => {
+                let err = std::cell::RefCell::new(None);
+                let mut lists: Vec<Box<dyn Iterator<Item = super::vacuum::MeasureKey>>> = keys.into_iter().map(|k| Box::new(k.into_iter()) as Box<dyn Iterator<Item = _>>).collect();
+                for r in &key_runs {
+                    lists.push(key_run(r, &err)?);
+                }
+                let r = super::vacuum::btree_pages_sorted(bix, &plan.ix_types, merge_runs(lists), tuples);
+                if let Some(e) = err.into_inner() {
+                    return Err(e);
+                }
+                r
+            }
+        };
+        drop(key_runs);
         if ix.method == "btree" {
             crate::exec::sizing::btree_estimated(t.oid, ix.oid, est, &self.ctx.sess.db);
         }
-        self.put_runs(&start, sorted)?;
+        self.put_runs(&start, &sorted, &runs)?;
         progress.loaded(tuples as u64);
         Ok(Some(ParBuilt::Measured(RowMeasure::new(rows, live, vec![(ix.oid, pages, tuples as f64)]))))
     }
@@ -715,69 +1085,46 @@ impl Ddl<'_, '_> {
         Ok(Some(ParBuilt::Measured(measure)))
     }
 
-    /// The participants' sorted entries merged into one run (`Entries::sort`'s order).
-    fn put_runs(&self, start: &[u8], sorted: Vec<Entries>) -> Result<()> {
-        let mut at = vec![0usize; sorted.len()];
-        let mut merged = std::iter::from_fn(|| {
-            let mut min: Option<usize> = None;
-            for (i, e) in sorted.iter().enumerate() {
-                let Some(&x) = e.ents.get(at[i]) else { continue };
-                if min.is_none_or(|m| {
-                    let y = sorted[m].ents[at[m]];
-                    x.0.cmp(&y.0).then_with(|| e.key(x).cmp(sorted[m].key(y))).is_lt()
-                }) {
-                    min = Some(i);
-                }
-            }
-            let m = min?;
-            let x = sorted[m].ents[at[m]];
-            at[m] += 1;
-            Some((sorted[m].key(x), sorted[m].tail(x).len()))
-        });
-        self.ctx.txn.borrow_mut().put_index_run(start, &mut merged)
-    }
-
-    /// A unique index's duplicates, merging the participants' sorted entries (entries of
-    /// one key sort by their data keys: the table's order).
-    fn unique_check(&self, t: &Table, bix: &BoundIndex, ix: &Index, sorted: &[Entries]) -> Result<()> {
-        // (An entry's key values: its key without its row's tail, `index_entry_key`.)
-        fn values(e: &Entries, x: Ent) -> &[u8] {
-            let k = e.key(x);
-            &k[..k.len() - e.tail(x).len()]
+    /// The participants' sorted entries merged into one run (`Entries::sort`'s order); with
+    /// the runs they spilled, by `merge_entries`.
+    fn put_runs(&self, start: &[u8], sorted: &[Entries], runs: &[RunFile]) -> Result<()> {
+        if !runs.is_empty() {
+            let mut srcs = Some(sources(sorted, runs)?);
+            return self.ctx.txn.borrow_mut().put_index_run(start, &mut |emit| {
+                merge_entries(srcs.take().expect("one merge"), &mut |k, lens| emit(k, tail_len(lens)))
+            });
         }
-        let mut at = vec![0usize; sorted.len()];
-        // (The current group of equal checked keys: its first entry and how many so far; and
-        // the duplicate to report: the serial build's, the key whose second row comes first
-        // in the table's order, with that key's first row: their data keys' tails.)
-        let mut group: Option<((usize, Ent), usize)> = None;
-        let mut found: Option<(&[u8], &[u8])> = None;
-        loop {
-            let mut min: Option<usize> = None;
-            for (i, e) in sorted.iter().enumerate() {
-                if at[i] < e.ents.len() && min.is_none_or(|m| e.key(e.ents[at[i]]) < sorted[m].key(sorted[m].ents[at[m]])) {
-                    min = Some(i);
-                }
-            }
-            let Some(m) = min else { break };
-            let ent = sorted[m].ents[at[m]];
-            at[m] += 1;
-            if ent.2 & CHECKED == 0 {
-                continue;
-            }
-            match &mut group {
-                Some(((l, lent), n)) if values(&sorted[*l], *lent) == values(&sorted[m], ent) => {
-                    *n += 1;
-                    let second = sorted[m].tail(ent);
-                    if *n == 2 && found.is_none_or(|f| second < f.0) {
-                        found = Some((second, sorted[*l].tail(*lent)));
+        self.ctx.txn.borrow_mut().put_index_run(start, &mut |emit| {
+            let mut at = vec![0usize; sorted.len()];
+            loop {
+                let mut min: Option<usize> = None;
+                for (i, e) in sorted.iter().enumerate() {
+                    let Some(&x) = e.ents.get(at[i]) else { continue };
+                    if min.is_none_or(|m| {
+                        let y = sorted[m].ents[at[m]];
+                        x.0.cmp(&y.0).then_with(|| e.key(x).cmp(sorted[m].key(y))).is_lt()
+                    }) {
+                        min = Some(i);
                     }
                 }
-                _ => group = Some(((m, ent), 1)),
+                let Some(m) = min else { return Ok(()) };
+                let x = sorted[m].ents[at[m]];
+                at[m] += 1;
+                emit(sorted[m].key(x), tail_len(x.2))?;
             }
-        }
-        let Some((_, first)) = found else { return Ok(()) };
+        })
+    }
+
+    /// A unique index's duplicates, merging the participants' sorted entries and the runs they
+    /// spilled (entries of one key sort by their data keys: the table's order).
+    fn unique_check(&self, t: &Table, bix: &BoundIndex, ix: &Index, sorted: &[Entries], runs: &[RunFile]) -> Result<()> {
+        let first = match runs.is_empty() {
+            true => duplicate_in(sorted).map(<[u8]>::to_vec),
+            false => duplicate_in_runs(sources(sorted, runs)?)?,
+        };
+        let Some(first) = first else { return Ok(()) };
         let mut dkey = crate::storage::keys::index_prefix(t.oid, 0);
-        dkey.extend_from_slice(first);
+        dkey.extend_from_slice(&first);
         let bytes = self.ctx.txn.borrow().get(&dkey)?;
         let first = match bytes {
             Some(b) => super::table::index_values(bix, &crate::exec::scan::decode_table_row(t, &b)?, self)?,

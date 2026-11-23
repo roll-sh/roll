@@ -60,6 +60,54 @@ pub(crate) struct Runs {
     segs: std::collections::HashMap<u64, Vec<(Vec<u8>, Vec<u8>)>>,
 }
 
+/// A fresh run being written (`Runs::fresh_run`). Dropped before `Runs::add_fresh_run`
+/// (a push failed), its file goes.
+pub(crate) struct FreshRun {
+    w: Option<SstWriter>,
+    cid: u32,
+    val: Vec<u8>,
+    /// The last key pushed, with its version: each key made in one buffer, no allocation
+    /// per key.
+    key: Vec<u8>,
+    version: [u8; 8],
+    /// The keys as ranges, one per index or table (`Runs::segs`), and the current one's
+    /// first key (its last is the one in `key`).
+    segs: Vec<(Vec<u8>, Vec<u8>)>,
+    first: Option<Vec<u8>>,
+}
+
+impl FreshRun {
+    /// The next write, in key order, its value in two parts put end to end.
+    pub fn push(&mut self, k: &[u8], [v1, v2]: [&[u8]; 2]) -> Result<()> {
+        self.val.clear();
+        self.val.extend_from_slice(v1);
+        self.val.extend_from_slice(v2);
+        // (The table's and index's ids: 8 bytes. A key of other ids ends the range at the key
+        // before, still in `key`.)
+        match &self.first {
+            Some(f) if f.get(..8) == k.get(..8) => {}
+            Some(_) => {
+                let last = self.key[..self.key.len() - 8].to_vec();
+                let first = self.first.replace(k.to_vec()).expect("a range");
+                self.segs.push((first, last));
+            }
+            None => self.first = Some(k.to_vec()),
+        }
+        self.key.clear();
+        self.key.extend_from_slice(k);
+        self.key.extend_from_slice(&self.version);
+        self.w.as_mut().expect("not added yet").add(&self.key, Some(&self.val))
+    }
+}
+
+impl Drop for FreshRun {
+    fn drop(&mut self) {
+        if let Some(w) = self.w.take() {
+            w.abandon();
+        }
+    }
+}
+
 /// A run value: a tag (bit 0: a value follows, bit 1: a command id follows), the command
 /// id (4 bytes), the value.
 fn encode(out: &mut Vec<u8>, e: &Ent) {
@@ -125,6 +173,17 @@ impl Runs {
     /// entries, `index`: one index's, `SstWriter::index_run`). Each value comes in two parts,
     /// put end to end.
     pub fn write_fresh<'a>(&mut self, items: &mut dyn Iterator<Item = (&'a [u8], [&'a [u8]; 2])>, cid: u32, ts: u64, index: bool) -> Result<()> {
+        let mut run = self.fresh_run(cid, ts, index)?;
+        for (k, v) in items {
+            run.push(k, v)?;
+        }
+        self.add_fresh_run(run)
+    }
+
+    /// `write_fresh`'s run, its writes given one at a time (`FreshRun::push`), then added
+    /// (`add_fresh_run`): for writes that aren't all in memory at once (a parallel index
+    /// build's spilled runs merged).
+    pub fn fresh_run(&mut self, cid: u32, ts: u64, index: bool) -> Result<FreshRun> {
         crate::storage::durable::create_dir_all(&self.dir)?;
         let id = self.next_id;
         self.next_id += 1;
@@ -134,41 +193,21 @@ impl Runs {
         if index {
             w.index_run();
         }
-        let mut val = Vec::new();
-        let mut segs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-        let mut seg: Option<(&[u8], &[u8])> = None;
-        // (Each key with its version made in one buffer: no allocation per key.)
-        let (mut key, version) = (Vec::new(), (!ts).to_be_bytes());
-        for (k, [v1, v2]) in items {
-            val.clear();
-            val.extend_from_slice(v1);
-            val.extend_from_slice(v2);
-            key.clear();
-            key.extend_from_slice(k);
-            key.extend_from_slice(&version);
-            if let Err(err) = w.add(&key, Some(&val)) {
-                w.abandon();
-                return Err(err);
-            }
-            // (The table's and index's ids: 8 bytes.)
-            seg = match seg {
-                Some((first, _)) if first.get(..8) == k.get(..8) => Some((first, k)),
-                Some((first, last)) => {
-                    segs.push((first.to_vec(), last.to_vec()));
-                    Some((k, k))
-                }
-                None => Some((k, k)),
-            };
-        }
-        if let Some((first, last)) = seg {
-            segs.push((first.to_vec(), last.to_vec()));
+        Ok(FreshRun { w: Some(w), cid, val: Vec::new(), key: Vec::new(), version: (!ts).to_be_bytes(), segs: Vec::new(), first: None })
+    }
+
+    pub fn add_fresh_run(&mut self, mut run: FreshRun) -> Result<()> {
+        let w = run.w.take().expect("a run is added once");
+        let mut segs = std::mem::take(&mut run.segs);
+        if let Some(first) = run.first.take() {
+            segs.push((first, run.key[..run.key.len() - 8].to_vec()));
         }
         if w.entries() == 0 {
             w.abandon();
             return Ok(());
         }
         let meta = w.finish()?;
-        let r = SstReader::open(&self.dir, meta, self.cache.clone())?.retagged(cid);
+        let r = SstReader::open(&self.dir, meta, self.cache.clone())?.retagged(run.cid);
         r.mark_obsolete();
         self.segs.insert(r.meta.id, segs);
         self.add_file(Arc::new(r), true)

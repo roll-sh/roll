@@ -2701,13 +2701,15 @@ impl TxnState {
     /// its tail's length, in key order, as one linkable run: alone in its range, it goes to
     /// the store's bottom level as it is at commit (`Store::alone_at_bottom`), no compaction
     /// merging it again. An entry's value is its row's data key: `table` (the table's
-    /// 8-byte prefix) and the key's last `tail` bytes (`index_entry_key`).
-    pub fn put_index_run<'a>(&mut self, table: &'a [u8], entries: &mut dyn Iterator<Item = (&'a [u8], usize)>) -> Result<()> {
+    /// 8-byte prefix) and the key's last `tail` bytes (`index_entry_key`). `fill` gives the
+    /// entries to the function it is called with, one at a time (they may come from files).
+    pub fn put_index_run(&mut self, table: &[u8], fill: &mut dyn FnMut(&mut dyn FnMut(&[u8], usize) -> Result<()>) -> Result<()>) -> Result<()> {
         let (cid, ts) = (self.write_cid, self.position() as u64);
         let dir = self.db.store.spill_dir().join(self.id.to_string());
         let r = Self::runs_in(&mut self.runs, dir, &self.rdels, self.db.store.compress());
-        let mut items = entries.map(|(k, tail)| (k, [table, &k[k.len() - tail..]]));
-        r.write_fresh(&mut items, cid, ts, true)?;
+        let mut run = r.fresh_run(cid, ts, true)?;
+        fill(&mut |k, tail| run.push(k, [table, &k[k.len() - tail..]]))?;
+        r.add_fresh_run(run)?;
         self.wrote = true;
         self.cur_xid();
         Ok(())

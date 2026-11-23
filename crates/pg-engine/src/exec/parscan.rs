@@ -83,6 +83,33 @@ pub(crate) fn count_index_build() {
     BUILDS.with(|c| c.set(c.get() + 1));
 }
 
+thread_local! {
+    static SPILL_AT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static SPILLED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// `f` with this thread's parallel index builds spilling their sorted runs past `bytes` a
+/// participant, not their share of maintenance_work_mem (tests: a small table's build spills).
+pub fn with_build_spill_bytes<R>(bytes: usize, f: impl FnOnce() -> R) -> R {
+    let old = SPILL_AT.with(|c| c.replace(Some(bytes)));
+    let r = f();
+    SPILL_AT.with(|c| c.set(old));
+    r
+}
+
+pub(crate) fn build_spill_bytes() -> Option<usize> {
+    SPILL_AT.with(std::cell::Cell::get)
+}
+
+/// Runs this thread's parallel index builds spilled, for tests.
+pub fn index_build_spills() -> u64 {
+    SPILLED.with(std::cell::Cell::get)
+}
+
+pub(crate) fn count_build_spills(n: usize) {
+    SPILLED.with(|c| c.set(c.get() + n as u64));
+}
+
 /// Rows a worker sends at a time.
 const BATCH: usize = 512;
 /// Chunks per worker: small enough that the rows read ahead stay few.
