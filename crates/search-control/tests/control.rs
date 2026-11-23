@@ -3020,7 +3020,7 @@ async fn a_branch_runs_none_of_its_parents_jobs() {
     assert_eq!(s, 200, "{v}");
     assert_eq!(e.es(&bu, &bp, Method::GET, "/restored/_count", None).await.1["count"], 1);
     let (s, v) = e.es(&bu, &bp, Method::PUT, "/_snapshot/backup/mine?wait_for_completion=true", Some(json!({"indices": "docs"}))).await;
-    assert_eq!((s, v["error"]["type"].as_str()), (400, Some("illegal_argument_exception")), "{v}");
+    assert_eq!((s, v["error"]["type"].as_str()), (500, Some("repository_exception")), "{v}");
     let (s, v) = e.es(&bu, &bp, Method::DELETE, "/_snapshot/backup/base", None).await;
     assert_eq!(s, 500, "{v}");
     let (s, v) = e.es(&bu, &bp, Method::PUT, "/_snapshot/backup/base/_clone/copy", Some(json!({"indices": "docs"}))).await;

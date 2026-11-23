@@ -18,7 +18,8 @@
 //! client is built, for the maker: each repository operation (a snapshot, a restore, a
 //! verification, a cleanup) first asks for the references' digests, which re-checks that the
 //! maker still may reveal them, and builds its client from the values kept in memory while the
-//! digests stay the same; a rotation moves a digest, and the next operation resolves again.
+//! references, their maker and the digests stay the same; a rotation moves a digest, and the
+//! next operation resolves again.
 //! Nothing about them is persisted. `PUT` checks each reference before registering the
 //! repository (no resolver on the node, no project standing for the cluster, no such key: a 400
 //! naming the setting, the reference and why). A reference refused later (the secret deleted,
@@ -40,10 +41,12 @@ impl Creds {
     }
 }
 
-/// Resolved references kept for one repository while their digests stay the same.
+/// Resolved references kept for one repository while their references, their digests and who
+/// wrote them stay the same (registered again by someone else, they resolve afresh).
 pub(super) struct Kept {
     /// `(setting, reference)`, as the repository named them when they were resolved.
     refs: Vec<(&'static str, String)>,
+    maker: String,
     digests: Vec<String>,
     values: Vec<Revealed>,
 }
@@ -78,12 +81,6 @@ fn why(setting: &str, reference: &str, why: &str) -> String {
 /// What the resolver knows the cluster by: its control-plane id (a name can be reused).
 fn resource(cluster: &crate::Cluster) -> &str {
     cluster.config.catalog_id.as_deref().unwrap_or(&cluster.name)
-}
-
-/// Drops what's kept for repository `name` (registered again: its new references, or none,
-/// resolve afresh).
-pub(super) fn forget(cluster: &crate::Cluster, name: &str) {
-    cluster.snapshot_data.refs.lock().remove(name);
 }
 
 /// Drops what's kept for repositories that are no longer registered (`DELETE _snapshot`).
@@ -133,7 +130,7 @@ pub(super) async fn credentials(cluster: &crate::Cluster, name: &str, r: &Reposi
         digests.push(resolver.0.digest(resource(cluster), maker, reference).await.map_err(|e| refused(k, reference, &e))?);
     }
     let kept = &cluster.snapshot_data.refs;
-    let same = kept.lock().get(name).filter(|c| c.refs == refs && c.digests == digests).map(|c| c.values.clone());
+    let same = kept.lock().get(name).filter(|c| c.refs == refs && c.maker == maker && c.digests == digests).map(|c| c.values.clone());
     let values = match same {
         Some(v) => v,
         None => {
@@ -141,7 +138,7 @@ pub(super) async fn credentials(cluster: &crate::Cluster, name: &str, r: &Reposi
             for (k, reference) in &refs {
                 values.push(resolver.0.resolve(resource(cluster), maker, reference).await.map_err(|e| refused(k, reference, &e))?);
             }
-            kept.lock().insert(name.to_string(), Kept { refs: refs.clone(), digests, values: values.clone() });
+            kept.lock().insert(name.to_string(), Kept { refs: refs.clone(), maker: maker.to_string(), digests, values: values.clone() });
             values
         }
     };

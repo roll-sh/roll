@@ -753,7 +753,6 @@ pub async fn put_repository(ctx: &Ctx<'_>) -> EsResult<Reply> {
     if repo.in_bucket() && verify {
         s3::refuse_foreign(ctx.cluster, &name, &repo).await?;
     }
-    let registering = name.clone();
     // A bucket is checked once registered (a write, a read and a delete); a repository that
     // fails stays registered, as on Elasticsearch, and the error is the answer.
     let registered = (repo.in_bucket() && verify).then(|| (name.clone(), repo.clone()));
@@ -779,7 +778,6 @@ pub async fn put_repository(ctx: &Ctx<'_>) -> EsResult<Reply> {
             Ok(())
         })
         .await?;
-    refs::forget(ctx.cluster, &registering);
     // A repository Elasticsearch wrote is read only: its snapshots list from its own data, and
     // no test object goes into it.
     if elastic_repository(ctx, &registered_name).await? {
