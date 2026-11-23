@@ -182,7 +182,7 @@ async fn docker_world_secrets(netns: Option<bool>, setup: impl FnOnce(&mut AppsC
         resources: Arc::new(LoopbackDb),
         resolver: dns.clone(),
         tls: Arc::new(apps_control::integrations::NoTls),
-        objects: None,
+        objects: Some(pg_storage::Objects::new(&pg_storage::StorageConfig::Local(dir.path().join("objects"))).unwrap()),
         cluster,
         workspace: Some(ws.clone()),
     };
@@ -1632,6 +1632,55 @@ class H(http.server.BaseHTTPRequestHandler):
 http.server.HTTPServer(('0.0.0.0', int(os.environ['PORT'])), H).serve_forever()
 "),
     ], "python otel True", json!({"otel": true}), traces).await;
+    w.apps.shutdown().await;
+}
+
+/// A real Next 16 app shares its cache through roll (roll's adapter, `next_cache`): a `"use cache"`
+/// value made by one instance is what the next one serves after a sleep, and `revalidateTag` on
+/// any instance makes it again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_next_apps_cache_outlives_its_instance() {
+    // The apps listener, where instances reach the cache: served for real.
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let Some(w) = docker_world_with(None, |c| c.otlp_base = Some(format!("http://127.0.0.1:{port}"))).await else { return };
+    let app = w.public.clone();
+    tokio::spawn(async move { axum::serve(listener, app.into_make_service()).await });
+    let (id, host) = deploy_tree_with(&w, "next-cache", &[
+        ("package.json", r#"{"name": "n", "version": "1.0.0", "scripts": {"build": "next build", "start": "next start"}, "dependencies": {"next": "16.4.6", "react": "19.3.1", "react-dom": "19.3.1"}}"#),
+        ("next.config.mjs", "export default { cacheComponents: true };\n"),
+        ("app/layout.js", "export default function Layout({ children }) { return <html><body>{children}</body></html> }\n"),
+        ("app/page.js", "export default function Page() { return <p>home</p> }\n"),
+        ("app/stamp/route.js", "import { cacheTag } from 'next/cache';\nasync function stamp() { 'use cache'; cacheTag('stamp'); return String(Date.now()) + '-' + Math.random() }\nexport async function GET() { return new Response(await stamp()) }\n"),
+        ("app/revalidate/route.js", "import { revalidateTag } from 'next/cache';\nexport async function POST() { revalidateTag('stamp', { expire: 0 }); return new Response('ok') }\n"),
+    ], json!({})).await;
+    let fetch = |method: &'static str, path: &'static str| {
+        let req = Request::builder().method(method).uri(path).header("host", host.as_str()).body(Body::empty()).unwrap();
+        let public = w.public.clone();
+        async move {
+            let r = public.oneshot(req).await.unwrap();
+            let st = r.status();
+            (st, String::from_utf8(r.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap())
+        }
+    };
+    let (st, first) = fetch("GET", "/stamp").await;
+    assert_eq!(st, StatusCode::OK, "{first}");
+    assert_eq!(fetch("GET", "/stamp").await.1, first, "cached");
+    // Asleep: the next request starts another instance, which serves what the first one made.
+    w.apps.live(&id, "production").sleep().await;
+    assert_eq!(fetch("GET", "/stamp").await.1, first, "the cache outlived its instance");
+    assert_eq!(fetch("POST", "/revalidate").await.1, "ok");
+    // Next marks the tag once the route has answered: read until it's made again.
+    let mut again = String::new();
+    for _ in 0..40 {
+        again = fetch("GET", "/stamp").await.1;
+        if again != first {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    assert!(again != first && !again.is_empty(), "made again after revalidateTag: {again}");
+    assert_eq!(delete_for_good(&w.api, &id).await.0, StatusCode::NO_CONTENT);
     w.apps.shutdown().await;
 }
 

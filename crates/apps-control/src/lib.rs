@@ -16,6 +16,7 @@ pub mod api;
 pub mod challenge;
 pub mod backups;
 pub mod build_cache;
+pub mod next_cache;
 pub mod hooks;
 pub mod tags;
 pub mod sites;
@@ -1226,6 +1227,9 @@ impl Apps {
             Some(_) => return Err(Error::BadRequest("tags is 1–100 tags, or left out".into())),
         };
         let n = self.responses.purge(&env_key(service, env), paths.as_deref(), tags.as_deref());
+        // Next.js's cache too, its tags as given (Next's are case-sensitive).
+        let next_tags: Option<Vec<String>> = tags.as_ref().map(|_| body["tags"].as_array().into_iter().flatten().filter_map(|t| t.as_str()).map(|t| t.trim().to_string()).collect());
+        self.purge_next_cache(service, env, paths.as_deref(), next_tags.as_deref()).await;
         Ok(json!({ "purged": n }))
     }
 
@@ -1584,6 +1588,10 @@ impl Apps {
         }
         let sid = id.to_string();
         let domains = self.db(move |s| s.custom_domains_of(&sid, None)).await?;
+        let sid = id.to_string();
+        if let Ok(gone) = self.db(move |s| s.drop_next_cache(&sid, None, true)).await {
+            self.drop_cache_objects(gone);
+        }
         let sid = id.to_string();
         self.db(move |s| s.delete_service(&sid)).await?;
         // Its hostnames name nothing now.
@@ -2759,6 +2767,10 @@ impl Apps {
         self.drop_branches(service, env, None).await;
         self.drop_sandboxes(service, Some(env)).await;
         let (sid, e) = (service.to_string(), env.to_string());
+        if let Ok(gone) = self.db(move |s| s.drop_next_cache(&sid, Some(&e), true)).await {
+            self.drop_cache_objects(gone);
+        }
+        let (sid, e) = (service.to_string(), env.to_string());
         self.db(move |s| s.delete_environment(&sid, &e)).await?;
         // Its peer after the row (a check in flight finishes first; none starts again).
         self.drop_peer(service, env).await;
@@ -3034,6 +3046,19 @@ impl Apps {
                 config_url = true;
             }
         }
+        // Next.js's cache across instances (`next_cache`), for a build with roll's adapter in it;
+        // its token sealed, as a credential. Never a closed environment's: a fork's code would
+        // fill the fetch cache trusted deployments read.
+        let mut next_cache = false;
+        if !deployment.is_empty() && !env.egress.closed() {
+            let d = deployment.to_string();
+            let adapter = self.db(move |s| s.deployment(&d)).await.ok().and_then(|d| d.plan).is_some_and(|p| p["next_cache"] == true);
+            if adapter && let Some((url, token)) = self.next_cache_vars(&svc.id, &env.name).await? {
+                vars.insert(crate::next_cache::URL_VAR.into(), (url, "roll"));
+                vars.insert(crate::next_cache::TOKEN_VAR.into(), (token, "roll"));
+                next_cache = true;
+            }
+        }
         // A site's functions service: where its edge functions' `context.next()` reaches the
         // site (this listener, as instances reach it; `crate::edge`), set at start so the runtime
         // makes it reachable.
@@ -3145,6 +3170,9 @@ impl Apps {
         }
         if config_url {
             sealed.insert("ROLL_CONFIG_URL".into());
+        }
+        if next_cache {
+            sealed.insert(crate::next_cache::TOKEN_VAR.into());
         }
         // A web service's instances ask to stay awake for work after an answer (`ROLL_AWAKE_URL`),
         // with the environment's instance token: sealed, as the OIDC address.
