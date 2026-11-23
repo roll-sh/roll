@@ -1231,9 +1231,11 @@ deterministic (#396).
    and Meilisearch import (their dump formats onto indices and settings), and catch-up and cutover
    (AWS OpenSearch Migration Assistant's capture and replay): a copy is one point in time today, so
    writes made during the copy are lost unless the client double-writes.
-3. **One memory account per request** (in progress: ES|QL and aggregations in #549, Painless per execution in #591, and a
-   node-wide body budget in #601, each in review; ES|QL and aggregations against a node budget
-   no tenant setting can raise in #549, Painless per execution, and a node-wide body budget; Elasticsearch charges every request's
+3. **One memory account per request** (landed: Painless per execution in #591, af195cbbe, after
+   four reviews: each execution holds at most `--search-script-memory-mb`, and once-per-document
+   scripts charge the `request` breaker; the node-wide body budget in #601. In progress: ES|QL and
+   aggregations against a node budget no tenant setting can raise in #549, and #591's review
+   follow-ups on `fix/search-painless-memory-2`; Elasticsearch charges every request's
    memory to its circuit breakers, ES|QL's blocks included, and Elastic Cloud's per-deployment
    limits hold because of it). roll serves many tenants per node, so a request whose memory the
    breakers don't see is a way for one tenant to stop everyone's searches. Today's reviews found
