@@ -414,6 +414,12 @@ async fn runtime_field_memory_is_charged_to_the_breaker_once() {
         let body = v.to_json();
         assert!(body.contains("[request] Data too large, data for [<script>]"), "{script}: {body}");
     }
+    // a lenient field (`on_script_error: continue`) skips documents its script fails on, but
+    // not the breaker's refusal
+    let lenient = r#"{"size":0,"runtime_mappings":{"rt":{"type":"long","on_script_error":"continue","script":{"source":"params.keep.add(new byte[1048576]); emit(1)","params":{"keep":[]}}}},"aggs":{"t":{"terms":{"field":"rt"}}}}"#;
+    let (status, v) = call(&c, "POST", "/rtk/_search", lenient).await;
+    assert_eq!(status, 429, "{}", v.to_json());
+    assert!(v.to_json().contains("[request] Data too large, data for [<script>]"), "{}", v.to_json());
     assert_eq!(call(&c, "PUT", "/_cluster/settings", &limit(20)).await.0, 200);
     let (status, v) = call(&c, "POST", "/rtk/_search", &search(r#"{"source":"String s = 'x'; return doc['rt'].value * 2 + s.length();"}"#)).await;
     assert_eq!(status, 200, "{}", v.to_json());

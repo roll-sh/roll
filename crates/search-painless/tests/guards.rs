@@ -685,3 +685,87 @@ fn a_runtime_field_keeping_its_source_charges_its_caller_nothing() {
     }
     assert!(host.held < 1 << 20, "the breaker holds {}", host.held);
 }
+
+/// A host whose `field()` reads a runtime field on one instance kept across documents, run on a
+/// host of its own that adds up what it reports; this host adds up what its caller reports and
+/// refuses past 4 MiB, like a search's `request` breaker.
+struct KeptRuntime<'a> {
+    inner: search_painless::Instance<'a>,
+    inner_host: Counter,
+    held: i64,
+}
+
+/// A runtime field's own host: adds up what its executions report.
+struct Counter {
+    held: i64,
+}
+
+impl Host for Counter {
+    fn script_memory(&mut self, delta: i64) -> Result<(), MemoryRefused> {
+        self.held += delta;
+        Ok(())
+    }
+}
+
+impl Host for KeptRuntime<'_> {
+    fn field_values(&mut self, _field: &str, out: &mut DocValues) -> Result<bool, HostError> {
+        let _ = self.inner.execute(&mut self.inner_host);
+        out.clear(DocKind::Long);
+        out.longs.push(1);
+        Ok(true)
+    }
+    fn script_memory(&mut self, delta: i64) -> Result<(), MemoryRefused> {
+        self.held += delta;
+        if self.held > 4 << 20 {
+            return Err(MemoryRefused { reason: format!("[request] Data too large, data for [<script>] would be [{}b]", self.held), wanted: self.held as u64, limit: 4 << 20 });
+        }
+        Ok(())
+    }
+}
+
+fn kept_runtime<'a>(script: &'a search_painless::Script) -> KeptRuntime<'a> {
+    let mut inner = script.instance();
+    inner.set_params(&json!({ "keep": [] }));
+    KeptRuntime { inner, inner_host: Counter { held: 0 }, held: 0 }
+}
+
+/// What a runtime field's instance keeps is charged once, across documents and whoever runs it:
+/// a field that alternately keeps and frees 1 MiB stays near 1 MiB over 40 documents; one run
+/// three times without an enclosing account (by a fast path) and then once by a script is
+/// counted 4 MiB in all; and keeping 3 MiB a read while merely looking at an 8 MiB `_source`
+/// is charged in full (none of that `_source` is kept).
+#[test]
+fn runtime_field_instances_are_charged_once() {
+    let e = limited(4 << 20);
+    let read = e.compile("field('rt'); return 1", Context::Score).unwrap();
+    let alternating = e.compile("if (params.keep.size() > 0) { params.keep.clear() } else { params.keep.add(new byte[1048576]) } return 1", Context::Field).unwrap();
+    let mut host = kept_runtime(&alternating);
+    for _ in 0..40 {
+        let mut inst = read.instance();
+        inst.set_params(&json!({}));
+        assert_eq!(inst.execute_f64(&mut host).map_err(|e| e.to_response()).unwrap(), 1.0);
+    }
+    assert!(host.held < 2 << 20, "the breaker holds {}", host.held);
+
+    let keeps = e.compile("params.keep.add(new byte[1048576]); return 1", Context::Field).unwrap();
+    let mut host = kept_runtime(&keeps);
+    for _ in 0..3 {
+        host.inner.execute(&mut host.inner_host).unwrap();
+    }
+    let mut inst = read.instance();
+    inst.set_params(&json!({}));
+    assert_eq!(inst.execute_f64(&mut host).map_err(|e| e.to_response()).unwrap(), 1.0);
+    let counted = host.held + host.inner_host.held;
+    assert!(counted < 5 << 20, "4 MiB alive, {counted} counted");
+
+    let looks = e.compile("def s = params._source; params.keep.add(new byte[3145728]); return 1", Context::Field).unwrap();
+    let mut inner = looks.instance();
+    inner.set_params(&json!({ "keep": [] }));
+    inner.set_result_accounting(true);
+    let mut host = KeepsSource { inner, held: 0 };
+    let three = e.compile("for (int i = 0; i < 3; ++i) { field('rt'); } return 1", Context::Score).unwrap();
+    let mut inst = three.instance();
+    inst.set_params(&json!({}));
+    let err = inst.execute_f64(&mut host).map_err(|e| e.to_response()).unwrap_err();
+    assert_eq!(cause(&err).0, "painless_error", "{err}");
+}

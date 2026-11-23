@@ -936,16 +936,21 @@ impl<'s> Instance<'s> {
         // reports nothing (that one is charged it, below, and its host reports)
         let delta = crate::guard::MemoryScope::unreported();
         self.held = self.held.saturating_add(crate::guard::MemoryScope::held());
+        // what this instance holds that is accounted somewhere, less the part of this document's
+        // `_source` it keeps (outside the limit wherever it's kept; the part is measured as what
+        // dropping the `_source` didn't free, so data the script took out of it before counts
+        // as kept: at most one document's `_source` per instance); never less than nothing, so
+        // a later free of such a part credits nothing
+        let charged = self.held.saturating_sub(kept_source).max(0);
         if crate::guard::MemoryScope::enclosed() {
-            // the enclosing execution is charged what this instance holds, less the part of
-            // this document's `_source` it keeps (outside the limit wherever it's kept); never
-            // less than nothing, so a later free of such a part credits nothing
-            let charged = self.held.saturating_sub(kept_source).max(0);
+            // the enclosing execution is charged the change
             memory.close(charged - self.passed_on);
-            self.passed_on = charged;
         } else {
+            // this execution's own host heard it (`delta`): an enclosing execution later is
+            // charged only what changes after
             memory.close(0);
         }
+        self.passed_on = charged;
         match delta {
             0 => r,
             _ => match host.script_memory(delta) {

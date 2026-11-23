@@ -1848,7 +1848,13 @@ the rest are skipped by the tests' own prerequisites.
   against the caller once it ends. That covers a runtime field another script reads, up to 5
   levels deep. While it runs, it also has an account of its own, and it reads its own copy of
   `_source`. So one thread holds at most about six times the limit plus the document's
-  `_source`, counting each nesting level. Past the limit roll answers like that guard: a
+  `_source`, counting each nesting level. What a runtime field is charged to the script
+  reading it leaves out the part of the document's `_source` it keeps. That part is measured as
+  what dropping the `_source` didn't free, so data the field took out of the `_source` can go
+  uncharged up to one document's `_source` per field. A lenient runtime field
+  (`on_script_error: continue`) skips the documents its script fails on, but not these limits
+  or the breaker: as in Elasticsearch, which catches only exceptions there, those still fail
+  the request. Past the limit roll answers like that guard: a
   `script_exception` caused by an uncatchable `painless_error`, `script allocation limit
   exceeded: allocation of [N] bytes brings the running total to [T] bytes, over the limit of
   [L] bytes`, without a script portion. Both guards apply in every context (`_execute`,

@@ -707,7 +707,9 @@ impl EvalLeaf {
         match &mut self.leaf {
             Some(l) => {
                 if let Err(e) = l.run_emit(doc) {
-                    if f.lenient {
+                    // `on_script_error: continue` skips the document, but not a failure no
+                    // script may swallow (a memory or breaker limit, a cancelled search)
+                    if f.lenient && !e.uncatchable() {
                         return Ok(out);
                     }
                     return Err(crate::scripting::script_error(e));

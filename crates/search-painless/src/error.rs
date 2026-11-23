@@ -98,6 +98,18 @@ impl std::fmt::Display for ScriptError {
 impl std::error::Error for ScriptError {}
 
 impl ScriptError {
+    /// Whether a script's own error handling can't swallow this failure: Elasticsearch's
+    /// `on_script_error: continue` catches `Exception`s, not `PainlessError` (the loop and
+    /// memory limits), the JVM's errors, a memory circuit breaker or the search's cancellation
+    /// and timeout. (The regex limit's circuit breaker is an ordinary exception.)
+    pub fn uncatchable(&self) -> bool {
+        match self.cause_type.as_str() {
+            "painless_error" | "out_of_memory_error" | "stack_overflow_error" | "task_cancelled_exception" | "time_exceeded_exception" => true,
+            "circuit_breaking_exception" => !self.cause_reason.as_deref().is_some_and(|r| r.starts_with("[scripting]")),
+            _ => false,
+        }
+    }
+
     /// The `caused_by` object.
     pub fn cause_json(&self) -> Json {
         let mut m = Map::new();
