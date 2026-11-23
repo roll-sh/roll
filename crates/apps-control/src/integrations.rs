@@ -576,6 +576,11 @@ pub trait Resolver: Send + Sync {
     async fn addresses(&self, _host: &str) -> Vec<String> {
         Vec::new()
     }
+    /// The PTR names a reverse name (`1.2.0.192.in-addr.arpa`) answers with: verifying a
+    /// crawler's address ([`crate::bots`]).
+    async fn ptr(&self, _name: &str) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// DNS over HTTPS (RFC 8484's JSON form, as Cloudflare and Google serve it): no resolver
@@ -600,6 +605,7 @@ impl Doh {
             "CNAME" => 5,
             "A" => 1,
             "AAAA" => 28,
+            "PTR" => 12,
             _ => 16,
         };
         v["Answer"]
@@ -629,6 +635,10 @@ impl Resolver for Doh {
         let mut v = self.query(host, "A").await;
         v.extend(self.query(host, "AAAA").await);
         v
+    }
+
+    async fn ptr(&self, name: &str) -> Vec<String> {
+        self.query(name, "PTR").await
     }
 }
 
@@ -660,5 +670,9 @@ impl Resolver for StaticDns {
         let mut v = self.find(host, "A");
         v.extend(self.find(host, "AAAA"));
         v
+    }
+
+    async fn ptr(&self, name: &str) -> Vec<String> {
+        self.find(name, "PTR")
     }
 }

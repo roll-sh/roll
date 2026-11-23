@@ -274,7 +274,56 @@ impl Drop for HeldAwake {
     }
 }
 
+/// A service held for a laptop's process (`roll preview swap`): taken for it by
+/// [`Engine::swap`], its requests going there from [`Swap::attach`] until this drops.
+pub struct Swap {
+    engine: Arc<Engine>,
+    pub preview: String,
+    pub service: String,
+    who: String,
+    /// Turns true when the preview goes (its swaps end with it).
+    pub ended: tokio::sync::watch::Receiver<bool>,
+    attached: bool,
+}
+
+impl Swap {
+    /// The laptop's connection is up: the service's requests go to it from now on.
+    pub fn attach(&mut self, laptop: crate::ports::Laptop) {
+        self.engine.apps.swap(&self.preview, &self.service, Some(laptop));
+        self.attached = true;
+        let _ = self.engine.store.log(&self.preview, &format!("{} swapped {} for a process on their machine", self.who, self.service));
+    }
+}
+
+impl Drop for Swap {
+    fn drop(&mut self) {
+        if self.attached {
+            self.engine.apps.swap(&self.preview, &self.service, None);
+            let _ = self.engine.store.log(&self.preview, &format!("{} gave {} back to its container", self.who, self.service));
+        }
+        self.engine.swaps.lock().remove(&(self.preview.clone(), self.service.clone()));
+    }
+}
+
 impl Engine {
+    /// `GET …/{id}/swap?service=` (`roll preview swap`): `service` held for `who`'s laptop, one
+    /// laptop at a time; roll apps' services are roll apps' to serve.
+    pub async fn swap(self: &Arc<Self>, id: &str, service: Option<&str>, who: &str) -> Result<Swap> {
+        let svc = self.files_service(id, service)?;
+        if !self.apps.can_swap(id, &svc).await.map_err(|e| Error::Conflict(format!("{e:#}")))? {
+            return Err(Error::Conflict(format!("{svc} runs on roll apps, which serves its requests itself: swap a roll.toml service")));
+        }
+        {
+            let mut swaps = self.swaps.lock();
+            if let Some(by) = swaps.get(&(id.to_string(), svc.clone())) {
+                return Err(Error::Conflict(format!("{svc} is swapped for {by}'s machine already")));
+            }
+            swaps.insert((id.to_string(), svc.clone()), who.to_string());
+        }
+        let ended = self.forwards_end.lock().entry(id.to_string()).or_insert_with(|| tokio::sync::watch::channel(false).0).subscribe();
+        Ok(Swap { engine: self.clone(), preview: id.to_string(), service: svc, who: who.to_string(), ended, attached: false })
+    }
+
     /// `GET …/{id}/forward?service=&port=` (`roll preview forward`): one TCP connection to `port`
     /// in the service, from inside it, by `who` (said once an hour per person, service and port).
     pub async fn forward(self: &Arc<Self>, id: &str, service: Option<&str>, port: u16, who: &str) -> Result<Forward> {

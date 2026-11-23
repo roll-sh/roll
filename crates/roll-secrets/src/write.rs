@@ -514,7 +514,9 @@ impl Via {
 /// A change's event, for its audit row: `secret.changed` naming the keys whose value moved
 /// (added, changed, linked, rotated) with their new versions, or `secret.deleted` when it only
 /// deleted keys. None when it only edited comments, tags or expiry. Names and versions only.
-fn change_event(writes: &[Write<'_>], via: Via, seq: i64, row_keys: &[String]) -> Option<Event> {
+/// A change across folders is recorded at `/`: its event names its keys by folder (`folders`,
+/// names only), so a reader of one folder sees it with that folder's keys (events.rs, `readable`).
+fn change_event(writes: &[Write<'_>], via: Via, seq: i64, row_keys: &[String], across: bool) -> Option<Event> {
     let moved = |w: &&Write<'_>| !w.set || w.what.split(',').any(|x| matches!(x, "added" | "changed" | "link" | "rotated"));
     let (set, deleted): (Vec<&Write<'_>>, Vec<&Write<'_>>) = writes.iter().filter(moved).partition(|w| w.set);
     let (kind, named) = match (set.is_empty(), deleted.is_empty()) {
@@ -536,6 +538,13 @@ fn change_event(writes: &[Write<'_>], via: Via, seq: i64, row_keys: &[String]) -
     };
     if kind == Kind::SecretChanged && !deleted.is_empty() {
         data.insert("deleted".into(), serde_json::json!(deleted.iter().map(|w| w.item.key.as_str()).collect::<Vec<_>>()));
+    }
+    if across {
+        let mut folders: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for w in set.iter().chain(&deleted) {
+            folders.entry(w.item.path.as_str()).or_default().push(w.item.key.as_str());
+        }
+        data.insert("folders".into(), serde_json::json!(folders));
     }
     Some(Event::new(kind, serde_json::Value::Object(data)))
 }
@@ -748,7 +757,9 @@ pub(crate) fn apply(c: &Conn<'_>, dek: &Dek, mac: &crate::Keyring, env: &EnvRow,
             retire(c, env, &link, handle, &caller.principal, now + link.grace_minutes() as i64 * 60_000, now)?;
         }
     }
-    let path = match items.iter().map(|i| i.path.as_str()).collect::<BTreeSet<_>>() {
+    let paths = items.iter().map(|i| i.path.as_str()).collect::<BTreeSet<_>>();
+    let across = paths.len() > 1;
+    let path = match paths {
         s if s.len() == 1 => s.into_iter().next().unwrap_or("/").to_string(),
         _ => "/".to_string(),
     };
@@ -760,7 +771,7 @@ pub(crate) fn apply(c: &Conn<'_>, dek: &Dek, mac: &crate::Keyring, env: &EnvRow,
     let keys: Vec<String> = diffs.iter().map(|d| d.key.clone()).collect();
     let summary = summarize(&diffs);
     let (action, summary) = (format!("secrets.{kind}"), format!("#{seq} {summary}"));
-    match change_event(&writes, via, seq, &keys) {
+    match change_event(&writes, via, seq, &keys, across) {
         Some(event) => audit::record_event(c, mac, project, caller, &action, Some(&env.slug), Some(&change.path), &keys, &summary, now, event)?,
         None => audit::record(c, mac, project, caller, &action, Some(&env.slug), Some(&change.path), &keys, &summary, now)?,
     }

@@ -5,6 +5,7 @@ import { codeApi } from "@/lib/code-api";
 import { Confirm } from "@/components/ui";
 import { TerminalScreen } from "@/components/terminal-screen";
 import { endpointSlower, type EndpointTime, a11yWords, checkSummary, seoWords, duration, followLogs, followShell, downloadFiles, openUrl, pageGroup, pageLabel, previewsApi, noteCropUrl, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewVisitor, type PreviewKind, type PreviewShare, type RequestLine, type ServiceMetrics, type ErrorGroup, type TraceSummary, type TraceSpan, type RouteTime, type Repeated } from "@/lib/previews-api";
+import { workFromError, workFromNote } from "@/lib/preview-work";
 import { verdict, type VerdictTarget } from "@/lib/preview-verdict";
 import { isProblem, logFilter, logLevel } from "@/lib/preview-logs";
 import { formatBytes } from "@/lib/roll-api";
@@ -136,7 +137,7 @@ export function PreviewSheet({
             )}
             {resolve && p.change && (
               <div className="mb-3">
-                <NoteThread previewId={p.id} change={p.change} review={resolve} onDone={onFeedbackPosted} />
+                <NoteThread previewId={p.id} change={p.change} review={resolve} where={p} onDone={onFeedbackPosted} />
               </div>
             )}
             {p.state === "awaiting_approval" &&
@@ -235,6 +236,21 @@ export function PreviewSheet({
               <p className="text-[11.5px] text-subtle">No services: a repo in this project runs here once its roll.toml has a [preview] section.</p>
             )}
             {(p.state === "ready" || p.state === "sleeping") && p.trusted && <Promote preview={p} />}
+            <span data-section="secrets" />
+            {!!p.served_secrets?.length && (
+              <div className="rounded-lg border border-danger/40 bg-danger/5 px-3 py-2 text-[12px]" role="alert">
+                <p className="text-danger">
+                  Its pages serve {p.served_secrets.length === 1 ? "a secret value" : `${p.served_secrets.length} secret values`}: anyone who opens the preview can read {p.served_secrets.length === 1 ? "it" : "them"}.
+                </p>
+                <ul className="mt-1 space-y-0.5 font-mono text-[11px] break-words text-soft">
+                  {p.served_secrets.map((x) => (
+                    <li key={`${x.key} ${x.path}`}>
+                      {x.key} in {x.path}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
             {!!p.browser_checks?.length && (
               <>
                 <Label>Browser checks</Label>
@@ -926,7 +942,7 @@ function Screenshot({
         <div className="mb-1.5 space-y-0.5">
           {(() => {
             const all = ["/", ...pages.map((x) => x.path)];
-            const groups = (["Pages", "Views", "States"] as const).map((g) => [g, all.filter((x) => pageGroup(x) === g)] as const).filter(([, xs]) => xs.length);
+            const groups = (["Pages", "Views", "States", "Stories"] as const).map((g) => [g, all.filter((x) => pageGroup(x) === g)] as const).filter(([, xs]) => xs.length);
             return groups.map(([g, xs]) => (
               <div key={g} className="flex items-start gap-1" role="group" aria-label={g}>
                 {groups.length > 1 && <span className="w-12 shrink-0 pt-1 text-[10.5px] text-subtle">{g}</span>}
@@ -1073,7 +1089,8 @@ export function TextAgainst({ diff, branch, what = "words" }: { diff: TextDiff; 
 }
 
 /** The project's endpoints timed on the preview's data (`github.endpoints`: the median of 10
- * GETs) against main's, the clearly slower ones in red. */
+ * GETs) against main's, the clearly slower ones in red, and what each JSON answer lost (a field
+ * gone, a type widened) under it. */
 export function Endpoints({ items, branch }: { items: EndpointTime[]; branch: string }) {
   if (!items.length) return null;
   return (
@@ -1084,6 +1101,15 @@ export function Endpoints({ items, branch }: { items: EndpointTime[]; branch: st
           <li key={e.path} className={endpointSlower(e) ? "text-danger" : "text-fg"}>
             GET {e.path} {e.ms} ms{e.main_ms != null ? ` (${branch} ${e.main_ms} ms)` : ""}
             {e.status === 0 ? ", no answer" : e.status >= 400 ? `, ${e.status}` : ""}
+            {!!e.shape_changes?.length && (
+              <ul className="ml-3 text-danger" aria-label={`What its answer lost against ${branch}`}>
+                {e.shape_changes.map((c) => (
+                  <li key={c.path} className="break-words">
+                    {c.path} {c.now == null ? "gone" : `${c.main} → ${c.now}`}
+                  </li>
+                ))}
+              </ul>
+            )}
           </li>
         ))}
       </ul>
@@ -1247,8 +1273,11 @@ export function ApiBreaking({ items }: { items: string[] }) {
 /** A note from the preview's page with its replies (Vercel Comments' threads): anyone on the
  * project replies (a comment review naming the note, which the page lists under it) or resolves
  * it (`POST …/notes/{review}/resolve`, kept by previews), and the page stops listing it. */
-function NoteThread({ previewId, change, review, onDone }: { previewId: string; change: string; review: string; onDone?: () => void }) {
+function NoteThread({ previewId, change, review, where, onDone }: { previewId: string; change: string; review: string; where: Pick<Preview, "repo" | "number">; onDone?: () => void }) {
   const [note, setNote] = useState<string | null>(null);
+  // The note's whole review (the page, the element, what went wrong there), for a work item.
+  const [whole, setWhole] = useState<string | null>(null);
+  const [made, setMade] = useState<number | null>(null);
   const [replies, setReplies] = useState<{ id: string; by: string; text: string }[]>([]);
   const [reply, setReply] = useState("");
   const [state, setState] = useState<"idle" | "busy" | "done">("idle");
@@ -1277,6 +1306,7 @@ function NoteThread({ previewId, change, review, onDone }: { previewId: string; 
         const r = all.find((x) => x.id === review);
         if (!r) return setError("That note isn't on this change.");
         setNote(r.body.split("\n\n")[1] ?? r.body);
+        setWhole(r.body);
         setReplies(
           all
             .filter((x) => !x.dismissed && replyOf(x.body)?.note === review)
@@ -1349,7 +1379,38 @@ function NoteThread({ previewId, change, review, onDone }: { previewId: string; 
         >
           {state === "busy" ? "Working…" : "Resolve"}
         </button>
+        {where.repo && (
+          <button
+            type="button"
+            disabled={state === "busy" || whole === null || made !== null}
+            title="A work item in the repo, with the note and its page: someone, or an agent, picks it up"
+            onClick={async () => {
+              if (!where.repo || whole === null) return;
+              setState("busy");
+              try {
+                const item = await codeApi.createWork(where.repo, workFromNote(where, review, whole));
+                setMade(item.number);
+                await codeApi.submitReview(change, { verdict: "comment", body: replyBody(review, `Made work item #${item.number} from this note.`) });
+                await load();
+              } catch (e) {
+                setError(errorText(e));
+              } finally {
+                setState("idle");
+              }
+            }}
+            className={button}
+          >
+            {made !== null ? `Work item #${made}` : "Make a work item"}
+          </button>
+        )}
       </div>
+      {made !== null && where.repo && (
+        <p className="mt-1 text-right text-[11px]">
+          <a href={`/${where.repo}/work`} className="text-accent hover:underline">
+            Open the repo's work
+          </a>
+        </p>
+      )}
     </div>
   );
 }
@@ -1764,12 +1825,51 @@ function Errors({ preview: p }: { preview: Preview }) {
                   <pre className="rise max-h-[40vh] overflow-auto border-t border-line px-2.5 py-2 font-mono text-[10.5px] leading-relaxed whitespace-pre-wrap text-soft [scrollbar-width:thin]">{g.sample}</pre>
                 )}
                 {shown && g.trace && <ErrorTrace preview={p} trace={g.trace} />}
+                {shown && p.repo && <ErrorWork preview={p} group={g} />}
               </li>
             );
           })}
         </ul>
       )}
     </>
+  );
+}
+
+/** An error group made a work item in the preview's repo (its sample as the preview shows it,
+ * masked): someone, or an agent, picks it up. */
+function ErrorWork({ preview: p, group }: { preview: Preview; group: ErrorGroup }) {
+  const [state, setState] = useState<"idle" | "busy" | { made: number } | { error: string }>("idle");
+  if (typeof state === "object" && "made" in state)
+    return (
+      <p className="border-t border-line px-2.5 py-1.5 text-[11px] text-soft">
+        Work item #{state.made}
+        {" · "}
+        <a href={`/${p.repo}/work`} className="text-accent hover:underline">
+          open the repo's work
+        </a>
+      </p>
+    );
+  return (
+    <div className="flex items-center justify-end gap-2 border-t border-line px-2.5 py-1.5 text-[11px]">
+      {typeof state === "object" && "error" in state && <span className="mr-auto text-danger">{state.error}</span>}
+      <button
+        type="button"
+        disabled={state === "busy"}
+        onClick={async () => {
+          if (!p.repo) return;
+          setState("busy");
+          try {
+            const item = await codeApi.createWork(p.repo, workFromError(p, group));
+            setState({ made: item.number });
+          } catch (e) {
+            setState({ error: errorText(e) });
+          }
+        }}
+        className="h-6 rounded-md border border-line-2 px-2 text-fg hover:bg-white/[0.05] disabled:opacity-40"
+      >
+        {state === "busy" ? "Making…" : "Make a work item"}
+      </button>
+    </div>
   );
 }
 

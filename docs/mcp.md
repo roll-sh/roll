@@ -100,8 +100,8 @@ that use them.
 ### Search mode
 
 With every product on, a node lists about 500 tools (~56k tokens), past VS Code's
-and Cursor's limits. `/v1/mcp?tools=search` (or `X-MCP-Tools: search`) lists the access tools plus three
-tools instead, about 1.8k tokens whatever runs (the three are ~500). This is the pattern of Cloudflare's code mode and
+and Cursor's limits. `/v1/mcp?tools=search` (or `X-MCP-Tools: search`) lists the access tools, `roll_find`
+(a resource by name or link, see [Finding a resource](#finding-a-resource)) and three tools instead, about 2k tokens whatever runs (the three are ~500, `roll_find` ~150). This is the pattern of Cloudflare's code mode and
 GitHub's dynamic toolsets, applied to a stateless server:
 
 | Tool | What it does |
@@ -149,20 +149,24 @@ for it, and it goes with toolsets (`?toolsets=postgres&readonly=1`).
 
 ### Finding a resource
 
-`roll_find` (on every connection but search mode's, read-only) finds any roll resource by its name
+`roll_find` (on every connection, search mode's too; read-only) finds any roll resource by its name
 or part of it ("checkout-db"), part of its id, or a roll dashboard link a person pasted, as Neon's
 `search` and Linear's pasted URLs do. It has no route of its own: a name is looked up in each
 product's list tool the connection has (projects, services, repos, Postgres, Redis, NoSQL, search
-clusters, buckets, streams, queues' virtual hosts, functions, previews), at most six at once,
+clusters, buckets, streams, queues' virtual hosts, functions, task queues and topics, previews,
+tokens), at most six at once,
 through the gate as the caller. Those lists are quiet: one that would ask a person (the token's
 `ask` rules, or the policy's `agents_ask`) is skipped, not put to them, and the audit log has each
 as `roll_find:<tool>`. The operator's inspector sees `roll_find`'s own call and answer, and hidden
 text in names is made visible as in every answer. `?tools=` and `exclude_tools=` pick or drop it. Matches come exact first, then by
 prefix, then by part, at most 25. Each says its kind, id, name and `read: {tool, arguments}`, the
-ordinary tool that goes on from it. A list that refused or failed is in `skipped`. A link
-(`/dashboard/apps/<id>`, `/dashboard/code/<owner>/<repo>[/changes/<n>]`, `/dashboard/projects/<id>`,
-Redis, NoSQL, search and storage pages) is read at once with that tool, as the agent would call it,
-approvals included. Any origin works (roll cloud, a local dashboard): only the path is read.
+ordinary tool that goes on from it. A list that refused or failed is in `skipped`. A link is
+read at once with the tool that shows its page, as the agent would call it, approvals included:
+a project, a service, a repo (its changes) or one change (`code_get_change` on `owner/repo#N`),
+a Redis, NoSQL or search database, a bucket, a token (`/dashboard/access/tokens/<id>`, or its
+audit's `?grant=`), an approval (`/dashboard/access/approvals?id=`, read without waiting), a queue
+or a virtual host's queues. Any origin works (roll cloud, a local dashboard): only the path and the
+query are read.
 
 ### Reaching outside roll
 
@@ -738,13 +742,19 @@ alone, as at the gate.
   rebinding).
 - Results come back as `structuredContent` (the route's JSON; arrays as `{"items": […]}`) and a
   `text` block of the same JSON, compact (no indentation: a model reads it the same, and a nested
-  list answer is about 40% smaller than pretty-printed), cut at 48 KiB (inline in Claude Code, which moves an answer past 50,000 characters or
+  list answer is about 40% smaller than pretty-printed). A list of objects (the answer, or its one
+  list beside `key: value` lines for its other fields) is a tab-separated table instead, whose
+  header names each column once: a plain string as itself, `null` empty, anything else (an empty or
+  quoted string, one with a tab or a line break, a list, an object) as compact JSON, so a cell never
+  spills. Whichever of the two is shorter is sent; on the sweep's recorded answers a list of 20 or
+  more rows came out about 40% smaller (the audit log 53%, apps' usage 74%), and rows with big nested
+  fields gain little. `structuredContent` stays the exact JSON for clients that read it. The text is
+  cut at 48 KiB (inline in Claude Code, which moves an answer past 50,000 characters or
   its default 25,000 tokens to a file, even for dense JSON), saying so and that the tool can be asked for less. Binary content comes back base64 (`content_b64`). An image (a preview's screenshot: PNG, JPEG or WebP, up to
   4 MiB) comes back as MCP image content the agent can look at.
 - Characters a person can't see but a model reads are escaped in the `text` block: tag characters
   (ASCII smuggled as U+E0000–E007F), zero-width and bidi controls, and variation selectors. They
-  appear as JSON escapes (`\u200b`), so the text still parses to the same value, and
-  `structuredContent` stays exact. Results carry other people's text (review comments, a
+  appear as JSON escapes (`\u200b`), and `structuredContent` stays exact. Results carry other people's text (review comments, a
   preview's notes and mail, task messages, objects), and instructions hidden that way stay
   visible to the model.
 - A route refusing a call is a result with `isError: true`, and its text says why ("not allowed:
@@ -813,8 +823,8 @@ is `-32602`.
 | `tune_slow_query` | `project` | A slow query made faster on a branch first (Neon's query tuning): its plan, an index tried on a copy, both plans compared, main only when you say so. | `postgres_get_project`, `postgres_slow_queries`, `postgres_explain`, `postgres_create_branch`, `postgres_execute`, `postgres_delete_branch` |
 | `security_checkup` | | Which tokens need attention, most serious first: a narrower rule set for each over-broad one, where roaming ones were used from, which to revoke or give an expiry; adds secrets' findings, a project's secrets audit log that doesn't hold (`secrets_verify_audit`), unmasked personal data, over-broad or unused S3 keys, public buckets, search clusters with no IP allowlist, previews shared outside the team and live images with high or critical vulnerabilities when the connection has those tools. Changes nothing. | `access_checkup`, `access_tighten_token`, `access_token_networks` |
 | `debug_failing_service` | `service`, `env` | Why an environment is failing (what roll already flags in its `attention`, the whole timeline, deploys, deploy logs, failing requests and routes, metrics), then a fix or a rollback it asks about first. | `apps_get_environment`, `apps_activity`, `apps_route_stats`, `apps_list_deploys`, `apps_deploy_logs`, `apps_logs`, `apps_metrics` |
-| `ship_a_service` | `project` | A new app service from a repo, a Git URL or an image: what its project file would make (`apps_import`), the service with its links and variables, a deploy outside production first, checked (environment, logs, errors), and production only when you say. | `apps_create_service`, `apps_deploy`, `apps_wait_deploy`, `apps_get_environment`, `apps_logs` |
-| `ship_from_chat` | `project`, `owner`, `name` | An app from what you describe in the chat, with no git on your side (Vercel's `deploy_to_vercel`, on roll's own tools): a new roll code repo, its files landed, a service deploying from it, a failed build fixed from its deploy logs (three tries, then it shows you), its URL; later changes are lands production follows. | `code_create_repo`, `code_land`, `apps_create_service`, `apps_wait_deploy`, `apps_deploy_logs`, `apps_get_environment` |
+| `ship_a_service` | `project` | A new app service from a repo, a Git URL or an image: what its project file would make (`apps_import`), what it would cost a month (`apps_quote`, you say go), the service with its links and variables, a deploy outside production first, checked (environment, logs, errors), and production only when you say. | `apps_quote`, `apps_create_service`, `apps_deploy`, `apps_wait_deploy`, `apps_get_environment`, `apps_logs` |
+| `ship_from_chat` | `project`, `owner`, `name` | An app from what you describe in the chat, with no git on your side (Vercel's `deploy_to_vercel`, on roll's own tools): a new roll code repo, its files landed, what the service would cost a month (`apps_quote`, you say go), the service deploying from it, a failed build fixed from its deploy logs (three tries, then it shows you), its URL; later changes are lands production follows. | `code_create_repo`, `code_land`, `apps_quote`, `apps_create_service`, `apps_wait_deploy`, `apps_deploy_logs`, `apps_get_environment` |
 | `tune_slow_search` | `cluster` | Why a search cluster answers slowly: its slowest requests, a profile of the worst, the usual causes in mapping and query, and a fix tried on a branch (`search_branch_cluster`) before the cluster. | `search_slowlog`, `search_cluster_metrics`, `search_get_mapping`, `search_query` |
 | `review_preview` | `preview` | Whether a change's preview is ready to land: why it failed or waits for `approve-run`, its schema changes (a dropped column, a `NOT NULL` with no default), new errors, routes slower than main's preview, its pages against the base (screenshots it looks at), people's notes. Changes nothing without asking. | `previews_wait`, `previews_get`, `previews_logs`, `previews_errors`, `previews_routes`, `previews_screenshot`, `previews_list_notes` |
 | `hand_to_agent` | `owner`, `repo` | A problem (an error group, a slow query, a bug described) as a work item with its evidence quoted as data, handed to a coding agent on one of your machines (a thread in its own worktree, `auto_edit`, the prompt shown to you first, the item bound to it), its requests left to you, its branch published as a change, checked and previewed, and queued only when you say. | roll code's and agents' (`code_create_work`, `agents_create_thread`, `agents_claim_work`, `agents_publish_thread`, `code_get_change`, `code_enqueue_change`, …; rolld's tests hold each name to one roll code fronts) |
@@ -1269,6 +1279,7 @@ previews are listed once those products are on.
 | `apps_set_variables` | Set or unset an environment's variables, or copy some from another (`copy_from` with `copy`; reveal on that environment too). `seal` hides values for good, `files` keeps some as files in the instances, `runtime_only` keeps some out of builds. Production is a "deploy" action. | `PATCH /v1/apps/services/{service}/environments/{env}/variables` |
 | `apps_diff_environments` | How an environment differs from another: variables missing, extra or different (names only; `differ` needs reveal on both) and settings with the body that matches each. | `GET /v1/apps/services/{service}/environments/{env}/diff` |
 | `apps_metrics` | CPU, memory and requests of an environment, and each instance's own last hour (`by_instance`). | `GET /v1/apps/services/{service}/environments/{env}/metrics` |
+| `apps_quote` | What a service would cost at most, before making it, from its run settings. | `POST /v1/apps/quote` |
 | `apps_plan` | How roll would build and run a repo, before making a service (a dry run). | `POST /v1/apps/plan` |
 | `apps_errors` | An environment's errors, grouped, the most frequent first. | `GET /v1/apps/services/{service}/environments/{env}/errors` |
 | `apps_push_status` | Each run.push rule's lag, deliveries, dead letters and failures. | `GET /v1/apps/services/{service}/environments/{env}/push` |
@@ -1392,9 +1403,9 @@ ahead of every hosted server checked on 2026-07-28, events, tasks, apps, skills 
 gaps are in how results read and how roll is distributed):
 
 1. **Results that cost fewer tokens.** Compact text (#804; a nested list answer about 40%
-   smaller). A continuation past the 48 KiB cut needs roll to keep the answer (2026-07-28 is
-   stateless) or each route's own cursor, which the cut's note already points to; rows as a
-   table for flat lists (while `structuredContent` stays exact) is the next measurable step.
+   smaller), and lists of objects as tables (this PR; 20+ rows about 40% smaller than compact
+   JSON). A continuation past the 48 KiB cut needs roll to keep the answer (2026-07-28 is
+   stateless) or each route's own cursor, which the cut's note already points to.
 2. **Errors that suggest a fix (#805).** An unknown argument's error lists what the tool takes
    and the nearest name ("did you mean \"status\"?"); an unknown tool names the nearest one the
    connection has; `?tools=` names the nearest for a name it doesn't know. Next for it: the nearest
@@ -1412,18 +1423,20 @@ gaps are in how results read and how roll is distributed):
    again (`_meta["roll/pending"]`, from each tool's `until`), and the view follows it through the
    host until it settles (Vercel's deployment card, with no app-only tool). Next for it: a rollback
    button on a deploy ("More MCP Apps views" below), once a host that renders views is confirmed.
-6. **Find any roll resource by name or dashboard URL (#821).** `roll_find`: each product's list
+6. **Find any roll resource by name or dashboard URL (#821, #845, and this PR).** `roll_find`: each product's list
    tool the connection has, quiet and through the gate, matched by name and id, each match naming
-   the read that goes on from it; a pasted dashboard link read at once. Next for it: pages whose
-   resource is in the query string (approvals, Postgres, streams), once those pages say it in
-   their path.
+   the read that goes on from it; a pasted dashboard link read at once (this PR: query-string
+   pages, a change's own page, queues, tokens, approvals; tokens and tasks' queues and topics by
+   name; #845), in search mode too (this PR). Next for it: Postgres and streams pages, once their
+   links name a resource.
 7. **The files extension** (`io.modelcontextprotocol/files`, experimental, 2026-11-10): uploads to
    a presigned URL and downloads that never pass through the model's context; a prototype once a
    client implements it.
 8. **A price before creating something billable** (Supabase's form, PlanetScale's `confirm`):
-   needs each product's quote route. `apps_overview` answers apps' unit prices; a quote for a size
-   and scale (`GET /v1/apps/quote`, then `apps_quote` before `apps_create_service` in
-   `ship_a_service` and `ship_from_chat`) was suggested to roll apps on 2026-11-23.
+   apps' `POST /v1/apps/quote` (`apps_quote`, roll apps #835, built on this thread's suggestion);
+   `ship_a_service` and `ship_from_chat` quote before `apps_create_service` and go on once the
+   person says (this PR). Next: the other products' quotes (Postgres, search clusters), as their
+   threads add a quote route.
 9. **Shipping from a chat with no git (#826):** `ship_from_chat`, a prompt (and skill) that
    chains `code_create_repo`, `code_land` with `files`, `apps_create_service` from that repo and
    `apps_wait_deploy` (Vercel's `deploy_to_vercel`). Next for it: a preview environment first

@@ -1998,6 +1998,15 @@ pub struct FirewallRule {
     pub per_minute: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub burst: Option<u32>,
+    /// `limit`'s: what a client is (Vercel's and Cloud Armor's rate-limit keys): `ip` (the
+    /// default), `header:<name>` (an API key's header) or `cookie:<name>` (a session's). A
+    /// request without it counts by its address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// Kinds of client from roll's managed lists ([`crate::bots`]): `ai`, `search`, `preview`,
+    /// `tools`, `verified`, `spoofed`; any of them matches.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bots: Vec<String>,
 }
 
 /// A named part of a request a firewall rule reads ([`FirewallRule::header`]): there, or there
@@ -2045,6 +2054,8 @@ pub struct Asked<'a> {
     pub ip: Option<std::net::IpAddr>,
     pub headers: &'a axum::http::HeaderMap,
     pub query: Option<&'a str>,
+    /// What [`crate::bots`] made of its client.
+    pub bot: Option<crate::bots::Bot>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2123,11 +2134,28 @@ impl FirewallRule {
                 m.check(what, lower)?;
             }
         }
-        if self.path.is_none() && self.methods.is_empty() && self.user_agent.is_none() && self.ips.is_empty() && self.header.is_none() && self.cookie.is_none() && self.query.is_none() {
-            return bad("a rule matches on a path, methods, a user agent, addresses, a header, a cookie or a query parameter");
+        if self.bots.len() > crate::bots::KINDS.len() || self.bots.iter().any(|b| !crate::bots::KINDS.contains(&b.as_str())) {
+            return bad("bots are any of ai, search, preview, tools, verified, spoofed");
+        }
+        self.bots.sort();
+        self.bots.dedup();
+        if self.path.is_none() && self.methods.is_empty() && self.user_agent.is_none() && self.ips.is_empty() && self.header.is_none() && self.cookie.is_none() && self.query.is_none() && self.bots.is_empty() {
+            return bad("a rule matches on a path, methods, a user agent, addresses, a header, a cookie, a query parameter or bots");
         }
         if self.action == FirewallAction::Challenge && !self.methods.is_empty() && self.methods.iter().any(|m| m != "GET") {
             return bad("a challenge is a page a browser opens: GET only");
+        }
+        if let Some(k) = &self.key {
+            let ok = k == "ip" || [("header:", 128), ("cookie:", 128)].iter().any(|(p, max)| k.strip_prefix(p).is_some_and(|n| !n.is_empty() && n.len() <= *max && n.bytes().all(|b| b.is_ascii_graphic() && !b";,=\"".contains(&b))));
+            if !ok {
+                return bad("a limit's key is ip, header:<name> or cookie:<name>");
+            }
+            if self.action != FirewallAction::Limit {
+                return bad("key is a limit rule's");
+            }
+            if let Some(n) = k.strip_prefix("header:") {
+                self.key = Some(format!("header:{}", n.to_ascii_lowercase()));
+            }
         }
         match (self.action, self.per_minute) {
             (FirewallAction::Limit, Some(n)) => RateLimit { per_minute: n, burst: self.burst }.check().map_err(|_| Error::BadRequest("firewall: a limit is 1–100000 a minute, its burst 1–100000".into()))?,
@@ -2157,7 +2185,25 @@ impl FirewallRule {
             let pairs: Vec<(String, String)> = url::form_urlencoded::parse(a.query.unwrap_or("").as_bytes()).map(|(k, v)| (k.into_owned(), v.into_owned())).collect();
             m.takes(pairs.iter().filter(|(k, _)| *k == m.name).map(|(_, v)| v.as_str()))
         });
-        path_ok && method_ok && ua_ok && ip_ok && header_ok && cookie_ok && query_ok
+        let bots_ok = self.bots.is_empty() || a.bot.is_some_and(|b| self.bots.iter().any(|k| b.is(k)));
+        path_ok && method_ok && ua_ok && ip_ok && header_ok && cookie_ok && query_ok && bots_ok
+    }
+
+    /// A limit's client by its `key` (a header's or cookie's value, hashed: never kept as it
+    /// came), or None: by its address.
+    pub fn client_key(&self, a: &Asked<'_>) -> Option<u64> {
+        let k = self.key.as_deref()?;
+        let value: Option<String> = if let Some(h) = k.strip_prefix("header:") {
+            a.headers.get(h).and_then(|v| v.to_str().ok()).map(str::to_string)
+        } else if let Some(c) = k.strip_prefix("cookie:") {
+            a.headers.get_all(axum::http::header::COOKIE).iter().filter_map(|v| v.to_str().ok()).flat_map(|v| v.split(';')).filter_map(|kv| kv.trim().split_once('=')).find(|(n, _)| *n == c).map(|(_, v)| v.to_string())
+        } else {
+            None
+        };
+        let value = value.filter(|v| !v.is_empty())?;
+        use sha2::{Digest, Sha256};
+        let d = Sha256::digest(value.as_bytes());
+        Some(u64::from_be_bytes(d[..8].try_into().expect("8 bytes")))
     }
 }
 
@@ -2393,6 +2439,14 @@ pub struct Check {
     /// past any of them fail it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budgets: Option<Budgets>,
+    /// `public`: fetched over the internet as a visitor's request is (Cloud Monitoring's uptime
+    /// checks, Checkly's): its DNS, a custom domain's TLS and the edge, the environment's gates
+    /// included; `roll` (the default): through its own proxy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// A public check's host: one of the environment's custom domains (none: its own URL's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
 }
 
 /// A browser check's budgets, each optional: its largest contentful paint, cumulative layout
@@ -2421,13 +2475,28 @@ impl Check {
         10
     }
 
-    pub fn check(self) -> Result<Check> {
+    pub fn check(mut self) -> Result<Check> {
         let bad = |m: &str| Err(Error::BadRequest(format!("checks: {m}")));
         if self.name.is_empty() || self.name.len() > 32 || !self.name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
             return bad("a check's name is a-z, 0-9 and -, at most 32");
         }
         if !self.path.starts_with('/') || self.path.starts_with("//") || self.path.len() > 2000 || !self.path.bytes().all(|b| b.is_ascii_graphic()) {
             return bad("a check's path is an absolute path, like /healthz");
+        }
+        match self.from.as_deref() {
+            None | Some("roll") if self.host.is_some() => return bad("host is a public check's (from: public)"),
+            None | Some("roll") => {}
+            Some("public") if self.browser.is_some() => return bad("a browser check runs from roll"),
+            Some("public") => {
+                if let Some(h) = &self.host {
+                    let h = h.trim().to_ascii_lowercase();
+                    if h.is_empty() || h.len() > 253 || !h.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-') {
+                        return bad("a public check's host is one of the environment's domains (example.com)");
+                    }
+                    self.host = Some(h);
+                }
+            }
+            Some(_) => return bad("from is roll or public"),
         }
         if let Some(b) = &self.budgets {
             if self.browser.is_none() {

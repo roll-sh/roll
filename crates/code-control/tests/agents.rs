@@ -1137,9 +1137,34 @@ async fn endpoint_profiles_keep_no_key_and_sealed_keys_pass_through() {
 
 /// roll secrets as far as an endpoint's `roll://` key goes: one reference, bound to whoever sets
 /// it on machine `box`, readable while they may still reveal it (`gone`: they can't any more).
+/// `down`: it can't answer (starting after a restart, a database blip); `asked` counts the reads.
 #[derive(Default)]
 struct EndpointKeys {
     gone: std::sync::atomic::AtomicBool,
+    down: std::sync::atomic::AtomicBool,
+    asked: std::sync::atomic::AtomicUsize,
+}
+
+impl EndpointKeys {
+    /// roll secrets can't answer at the daemon's `hello` (rolld restarting): nothing goes to the
+    /// daemon, which keeps what it holds, not even a refusal. Once it answers, the relay asks
+    /// again by itself.
+    async fn down_at(&self, d: &mut Daemon, hello: &DaemonFrame) {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.down.store(true, SeqCst);
+        let before = self.asked.load(SeqCst);
+        d.send(hello).await;
+        for _ in 0..500 {
+            if self.asked.load(SeqCst) > before {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(self.asked.load(SeqCst) > before, "the relay asked roll secrets");
+        let sent = tokio::time::timeout(Duration::from_millis(300), d.recv()).await;
+        assert!(sent.is_err(), "nothing is sent while roll secrets can't answer: {sent:?}");
+        self.down.store(false, SeqCst);
+    }
 }
 
 #[async_trait::async_trait]
@@ -1165,8 +1190,12 @@ impl code_control::SecretEnv for EndpointKeys {
     }
     async fn machine_key_digest(&self, owner: &str, machine: &str, reference: &str, maker: &str) -> anyhow::Result<String> {
         assert_eq!((owner, machine, reference, maker), ("acme", "box", "roll://production/ANTHROPIC_KEY", "usr_ada"));
+        self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.down.load(std::sync::atomic::Ordering::SeqCst) {
+            anyhow::bail!("roll secrets is starting");
+        }
         if self.gone.load(std::sync::atomic::Ordering::SeqCst) {
-            anyhow::bail!("maker unreachable: usr_ada, who chose it, can no longer reveal production:/ or can no longer sign in");
+            return Err(code_control::Refused("maker unreachable: usr_ada, who chose it, can no longer reveal production:/ or can no longer sign in".into()).into());
         }
         Ok("digest-1".into())
     }
@@ -1175,8 +1204,8 @@ impl code_control::SecretEnv for EndpointKeys {
 /// An endpoint's key can be a roll secrets reference (docs/code/agents.md, "Endpoints"): the relay
 /// binds it to whoever sets it (refusing what roll secrets refuses, and an `endpoint.key` from
 /// anyone but itself), then sends the value sealed to the daemon after its `hello`, opened only
-/// with the daemon's key. Once the maker can't read it, the relay says why and the daemon gets no
-/// key.
+/// with the daemon's key. While roll secrets can't answer (starting), nothing is sent; once the
+/// maker can't read it, the relay says why and the daemon gets no key.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_endpoints_roll_key_reaches_the_daemon_sealed_while_its_maker_may_read_it() {
     let w = std::sync::Arc::new(world().await);
@@ -1218,9 +1247,9 @@ async fn an_endpoints_roll_key_reaches_the_daemon_sealed_while_its_maker_may_rea
     let shown = agent_proto::EndpointInfo { spec: endpoint, key: agent_proto::KeyState::Reference, models: vec![], checked_at: None, error: None };
     let config = MachineConfig { set: Default::default(), base, providers: vec![], config_path: "/home/me/config.toml".into(), endpoints: vec![shown], gateway: None, registry: None };
     let hello = DaemonFrame::Hello { protocol: agent_proto::PROTOCOL, info: MachineInfo { settings: Some(Box::new(config)), seal_key: Some(seal.public()), ..info() } };
-    d.send(&hello).await;
     d.send(&DaemonFrame::Reply { id: "r3".into(), result: Reply::Ok }).await;
     assert_eq!(pending.await.unwrap(), (StatusCode::OK, json!({ "type": "ok" })));
+    secrets.down_at(&mut d, &hello).await;
     let Some(RelayFrame::Command { id: cid, command, by, .. }) = d.recv().await else { panic!("no endpoint.key") };
     let Command::EndpointKey { endpoint, key: agent_proto::RefKey::Set { sealed } } = *command else { panic!("not a key: {command:?}") };
     assert_eq!((endpoint.as_str(), by.as_str()), ("cliproxy", "roll"));
@@ -1241,8 +1270,8 @@ async fn an_endpoints_roll_key_reaches_the_daemon_sealed_while_its_maker_may_rea
 /// The model gateway's upstream key can be a roll secrets reference too (docs/code/gateway.md,
 /// "Upstreams"): `gateway.configure` binds it to the sender (refusing what roll secrets refuses,
 /// and a `gateway.upstream_key` from anyone but the relay); after the host's `hello` the value goes
-/// sealed to it with the upstream's own context, and once the maker can't read it the next
-/// `hello` sends the refusal.
+/// sealed to it with the upstream's own context (none while roll secrets can't answer, which would
+/// bar its provider), and once the maker can't read it the next `hello` sends the refusal.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_gateway_upstreams_roll_key_reaches_the_host_sealed_while_its_maker_may_read_it() {
     let w = std::sync::Arc::new(world().await);
@@ -1297,9 +1326,9 @@ async fn a_gateway_upstreams_roll_key_reaches_the_host_sealed_while_its_maker_ma
     let gateway = agent_proto::GatewayInfo { settings: *settings, keys: vec![], clients: vec![], run: Default::default() };
     let config = MachineConfig { set: Default::default(), base, providers: vec![], config_path: "/home/me/config.toml".into(), endpoints: vec![], gateway: Some(Box::new(gateway)), registry: None };
     let hello = DaemonFrame::Hello { protocol: agent_proto::PROTOCOL, info: MachineInfo { settings: Some(Box::new(config)), seal_key: Some(seal.public()), ..info() } };
-    d.send(&hello).await;
     d.send(&DaemonFrame::Reply { id: "g2".into(), result: Reply::Ok }).await;
     assert_eq!(pending.await.unwrap(), (StatusCode::OK, json!({ "type": "ok" })));
+    secrets.down_at(&mut d, &hello).await;
     let Some(RelayFrame::Command { id: cid, command, by, .. }) = d.recv().await else { panic!("no gateway.upstream_key") };
     let Command::GatewayUpstreamKey { upstream, key: agent_proto::RefKey::Set { sealed } } = *command else { panic!("not a key: {command:?}") };
     assert_eq!((upstream.as_str(), by.as_str()), ("anthropic", "roll"));

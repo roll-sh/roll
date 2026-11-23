@@ -7497,7 +7497,7 @@ async fn the_events_feed_answers_in_commit_order_filtered_by_kind_environment_an
     assert_eq!(got, [("scan.finding", Some("production")), ("scan.finding", Some("staging")), ("production.unprotected", Some("production")), ("env.deleted", Some("qa")), ("env.recovered", Some("qa"))]);
     let seqs: Vec<i64> = events.iter().map(|e| e["seq"].as_i64().unwrap()).collect();
     assert!(seqs.windows(2).all(|w| w[0] < w[1]) && seqs[0] > start, "{seqs:?}");
-    assert_eq!(all["next"], json!(seqs[4]));
+    assert_eq!(all["next"], api.ok(Method::GET, "/events?latest=1", None).await["next"], "a short page ends at the head");
     assert_eq!(events[0]["key"], "STRIPE_KEY");
     assert_eq!(events[0]["data"]["matched"], 2);
     // Never a value, or anything made from one: names, kinds, ids, counts and reasons.
@@ -7633,6 +7633,52 @@ async fn a_change_is_one_event_at_its_audit_rows_seq_naming_keys_and_versions_ne
     let token = api.token(json!({ "environments": ["staging"], "actions": ["read"] }));
     let (_, mine) = api.req(Method::GET, &format!("/events?after={start}&kinds=secret.changed"), None, Some(&token)).await;
     assert_eq!(mine["events"].as_array().unwrap().iter().map(|e| e["environment"].as_str().unwrap()).collect::<Vec<_>>(), ["staging"], "{mine}");
+}
+
+/// Every write is an event (#793): a follower of rare kinds, of one environment, or with a grant
+/// that leaves most rows out, has its cursor at the head once it has read up to it, so it never
+/// walks the same rows again.
+#[tokio::test]
+async fn a_filtered_follower_moves_to_the_head_past_the_rows_its_filter_left_out() {
+    let api = Api::new().await;
+    let start = api.ok(Method::GET, "/events?latest=1", None).await["next"].as_i64().unwrap();
+    for i in 0..300 {
+        api.set("development", "N", &i.to_string()).await;
+    }
+    let head = api.ok(Method::GET, "/events?latest=1", None).await["next"].clone();
+    assert!(head.as_i64().unwrap() >= start + 300, "{head}");
+    for q in ["kinds=secret.leaked", "environment=staging", "kinds=secret.changed&environment=production"] {
+        let page = api.ok(Method::GET, &format!("/events?after={start}&{q}"), None).await;
+        assert_eq!((&page["events"], &page["next"]), (&json!([]), &head), "{q}");
+    }
+    let staging = api.token(json!({ "environments": ["staging"], "actions": ["read"] }));
+    let (_, page) = api.req(Method::GET, &format!("/events?after={start}"), None, Some(&staging)).await;
+    assert_eq!((&page["events"], &page["next"]), (&json!([]), &head), "the grant's");
+    // A full page stops at its last event, short of the head.
+    let page = api.ok(Method::GET, &format!("/events?after={start}&limit=10"), None).await;
+    assert_eq!(page["next"], page["events"][9]["seq"]);
+}
+
+/// A change across folders (a batch whose operations name their folders) is one change at `/`: a
+/// reader of one folder sees it, with that folder's keys only, never another folder's key names.
+#[tokio::test]
+async fn a_folder_scoped_reader_sees_a_change_across_folders_with_only_its_keys() {
+    let api = Api::new().await;
+    let start = api.ok(Method::GET, "/events?latest=1", None).await["next"].as_i64().unwrap();
+    let ops = json!([{ "op": "set", "key": "DB_URL", "value": "postgres://app", "path": "/app" }, { "op": "set", "key": "X", "value": "x", "path": "/db" }]);
+    api.ok(Method::POST, "/environments/staging/changes", Some(json!({ "ops": ops }))).await;
+    let all = api.ok(Method::GET, &format!("/events?after={start}&kinds=secret.changed"), None).await;
+    assert_eq!(all["events"][0]["data"]["folders"], json!({ "/app": ["DB_URL"], "/db": ["X"] }), "{all}");
+
+    let app = api.token(json!({ "environments": ["staging"], "paths": ["/app"], "actions": ["read"] }));
+    let (s, mine) = api.req(Method::GET, &format!("/events?after={start}&kinds=secret.changed"), None, Some(&app)).await;
+    assert_eq!(s, StatusCode::OK, "{mine}");
+    let e = &mine["events"][0];
+    assert_eq!((mine["events"].as_array().unwrap().len(), &e["key"], &e["data"]["folders"], &e["data"]["versions"]), (1, &json!("DB_URL"), &json!({ "/app": ["DB_URL"] }), &json!({ "DB_URL": 1 })), "{mine}");
+    let text = mine.to_string();
+    assert!(!text.contains("\"X\"") && !text.contains("/db"), "{text}");
+    let web = api.token(json!({ "environments": ["staging"], "paths": ["/web"], "actions": ["read"] }));
+    assert_eq!(api.req(Method::GET, &format!("/events?after={start}"), None, Some(&web)).await.1["events"], json!([]));
 }
 
 #[tokio::test]

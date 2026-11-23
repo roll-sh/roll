@@ -1399,7 +1399,8 @@ pub enum AppsCmd {
         no_rate_limit: bool,
         /// A firewall rule, in order (the first match decides): `deny /admin/*`,
         /// `deny method=DELETE,PUT`, `allow /admin/health`, `deny ip=203.0.113.0/24`,
-        /// `deny header=X-Bot`, `deny cookie=beta:1`, `deny query=debug`, `deny ua=BadBot` (ua=
+        /// `deny header=X-Bot`, `deny cookie=beta:1`, `deny query=debug`, `deny bots=ai,spoofed`
+        /// (roll's lists: ai, search, preview, tools, verified, spoofed), `deny ua=BadBot` (ua=
         /// last). Repeatable; the rules replace the ones it has.
         #[arg(long = "firewall", value_name = "RULE", conflicts_with = "no_firewall")]
         firewall: Vec<String>,
@@ -1681,7 +1682,7 @@ pub(crate) async fn tunnels(url: String, headers: Vec<(String, String)>, l: toki
 }
 
 /// One local connection over one tunnel, until either side closes.
-async fn carry(req: tokio_tungstenite::tungstenite::handshake::client::Request, conn: tokio::net::TcpStream) -> anyhow::Result<()> {
+pub(crate) async fn carry(req: tokio_tungstenite::tungstenite::handshake::client::Request, conn: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin) -> anyhow::Result<()> {
     use futures::{SinkExt, StreamExt};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_tungstenite::tungstenite::{Error as WsError, Message};
@@ -1690,7 +1691,7 @@ async fn carry(req: tokio_tungstenite::tungstenite::handshake::client::Request, 
         e => anyhow::anyhow!("{e}"),
     })?;
     let (mut tx, mut rx) = ws.split();
-    let (mut rd, mut wr) = conn.into_split();
+    let (mut rd, mut wr) = tokio::io::split(conn);
     let mut buf = vec![0u8; 64 << 10];
     // An empty message ends a direction (a half-close); the tunnel ends when both have.
     let (mut from_local, mut from_service) = (true, true);
@@ -5294,10 +5295,14 @@ fn firewall_rule(line: &str) -> anyhow::Result<Value> {
                 Some((name, contains)) => json!({ "name": name, "contains": contains }),
                 None => json!({ "name": v }),
             };
+        } else if let Some(k) = w.strip_prefix("key=") {
+            rule["key"] = json!(k);
+        } else if let Some(b) = w.strip_prefix("bots=") {
+            rule["bots"] = json!(b.split(',').filter(|b| !b.is_empty()).collect::<Vec<_>>());
         } else if w.starts_with('/') {
             rule["path"] = json!(w);
         } else {
-            anyhow::bail!("{w:?} in {line:?}: a path (/…), method=…, ip=…, header=…, cookie=…, query=…, or ua=…");
+            anyhow::bail!("{w:?} in {line:?}: a path (/…), method=…, ip=…, header=…, cookie=…, query=…, key=…, bots=…, or ua=…");
         }
     }
     Ok(rule)

@@ -1148,10 +1148,13 @@ scripts/test-search.sh --unit # no Docker
 
 `scripts/test-search.sh` builds and lints every `search-*` crate, `rolld` and `roll-cli`, runs
 their tests (the control plane's integration tests in `crates/search-control/tests` drive the
-API, the node and an Elasticsearch client over HTTP, and `cluster.rs` two nodes of a fleet;
+API, the node and an Elasticsearch client over HTTP, and `cluster.rs` two nodes of a fleet: handovers, owner-only jobs across a drain, ES|QL and
+migrations across nodes; the fleet of real `rolld` processes is `rolld/tests/fleet_e2e.rs`;
 `crates/roll-cli/tests/search.rs` runs the real `roll` binary against an in-process control
 plane), the dashboard's console completion and document helpers
-(`apps/dashboard/src/lib/search-*.test.ts`, vitest), then the YAML REST suites against
+(`apps/dashboard/src/lib/search-*.test.ts`, vitest; the connectors tab, migration wizard and
+other component flows are `components/search/*.test.tsx`, Testing Library, run by `pnpm --filter
+dashboard test`), then the YAML REST suites against
 `search-dev` for both dialects. A suite passes when its pass count is at least the minimum in
 [compatibility.md](compatibility.md), written as
 
@@ -1715,13 +1718,14 @@ deterministic (#396).
    load; the TTL is roll cloud's fleet-wide choice.
 28. **CI**: the merge gate runs `search-codec`'s lib tests (`rust (search)`, 54 s on PR #29 with
    main's cache: under the minute, no room for another crate). Test gaps a read-only analysis found on 2026-11-22
-   (main at d9aecc990), ranked; each test goes in `test:search`, not the merge gate ((2), (3),
-   (4), (7) and (8) landed in #768, 1c2b5e62c, each failing against its guarded line; in progress:
-   (5), (6), (9), (10), (11) and the e2e file on `test/search-gaps-b`, which also found that a
-   drain leaves a running connector sync `in_progress` for 5 minutes on the next owner; `persist.rs`'s memory-budget flake fixed in
+   (main at d9aecc990), ranked; each test goes in `test:search`, not the merge gate (all landed, each
+   failing against its guarded line: (1) with the egress fix in #771, 0d6daf6cc; (2), (3), (4), (7)
+   and (8) in #768, 1c2b5e62c; (5), (6), (9), (10), (11) and the unused e2e file's removal in
+   #833, f47d36793, which also found that a drain leaves a running connector sync `in_progress` for
+   5 minutes on the next owner, not yet fixed; `persist.rs`'s memory-budget flake fixed in
    #766, 9641a1bd6: the test no longer races a second commit, 60 of 60 under load):
    (1) connectors refusing private addresses: every `connectors.rs` cluster sets
-   `allow_private_hosts`, so deleting the check fails nothing (being added with the egress fix,
+   `allow_private_hosts`, so deleting the check fails nothing (now
    `a_connector_never_reaches_a_private_address`); (2) a search link refusing and deleting a key
    wider than asked (`rolld/src/secrets.rs` ~1207, untested; previews' twin is tested);
    (3) previews' `Search::mask` end to end (previews' code, sent to that thread); (4) an apps
@@ -1767,6 +1771,18 @@ deterministic (#396).
    take over a second, and the test still lost 1 run in 10 (at host loads 63-81; the old build
    passed 10 of 10 there, but at loads 18-50). The suite's minimum (108) holds on a rerun, and
    that load is much harsher than CI's.
+   **Found by the fleet tests (2026-11-23)**: a connector sync running when its cluster's owner
+   drains isn't stopped or settled by the unload (`Node::unload_with` cancels tasks, not
+   `connector_syncs`), so the next owner reads the job `in_progress` with a fresh `last_seen` and
+   marks it `error` only after `STALE_MS` (5 minutes): "Syncing…" in the dashboard and no new sync
+   for that connector until then. `due_jobs_run_once_on_the_next_owner` covers the watch, not the
+   sync, until the unload settles it. And a migration copy the drain stops
+   reports `"canceled": "by user request"` (the unload's cancel), though nobody asked. And ILM
+   doesn't advance on a `search-control` node (a fleet node, no drain; `poll_interval` 1s): an
+   index under a policy whose `hot` phase has `min_age` 0 stays at `new/complete/complete` (15 s
+   checked, though `ilm_run::next_due` says due at once), and a document on its write alias
+   doesn't roll it over (10 s). `ilm_run`'s unit tests call `run` directly, so the node's scheduler
+   path is uncovered; the drain test leaves ILM out until it moves.
 29. **Security**: landed in #632 (53a45bd36), a fix for a bypass a #358 review found: a role's document level
    security filter was evaluated with the request's own `runtime_mappings` in scope, so a runtime
    field could shadow the field the filter tests. Security filters (roles, API keys' role

@@ -971,11 +971,13 @@ impl Engine {
     /// backend that can't, a failure) is remembered for the head, and the last one taken stays.
     pub(super) async fn take_screenshot(&self, r: &Row) -> bool {
         let Ok(Some(first)) = self.store.services(&r.id).map(|v| v.into_iter().next()) else { return false };
-        let (mut entries, mut hide, widths, openapi, endpoints, mut states, browsers) = self
+        let (mut entries, mut hide, widths, openapi, endpoints, mut states, browsers, storybook) = self
             .store
             .settings(&r.project_id)
-            .map(|s| (s.github.pages, s.github.hide, s.github.widths, s.github.openapi, s.github.endpoints, s.github.states, s.github.browsers))
+            .map(|s| (s.github.pages, s.github.hide, s.github.widths, s.github.openapi, s.github.endpoints, s.github.states, s.github.browsers, s.github.storybook))
             .unwrap_or_default();
+        // Its Storybook's service and where it serves it (`github.storybook`).
+        let storybook: Option<(String, String)> = storybook.as_deref().and_then(crate::settings::storybook_entry).map(|(s, p)| (s.to_string(), p.to_string()));
         // What the first service's own repo says its screenshots take, at the revision it runs
         // (versioned with the code it names), joined with the project's (a state name the
         // project has wins): a service on roll apps from its `[app.previews.screenshots]` (roll
@@ -1031,7 +1033,8 @@ impl Engine {
         // The open notes' elements not cropped yet, on the first service's pages (a note's link
         // is the preview's first URL and its path): what each note is about, as a picture.
         let crops = self.crops_wanted(r).await;
-        let opts = crate::ports::ShotOptions { pages: first_paths, hide: hide.clone(), openapi, endpoints, states, browsers, crops };
+        let stories = storybook.as_ref().filter(|(svc, _)| *svc == first.name).map(|(_, at)| at.clone());
+        let opts = crate::ports::ShotOptions { pages: first_paths, hide: hide.clone(), openapi, endpoints, states, browsers, crops, stories };
         let started = std::time::Instant::now();
         // The page's words are its code's: what it was given is masked before they're kept (and
         // reach the pull request's comment); a run whose masks can't be read fails as a run.
@@ -1040,13 +1043,14 @@ impl Engine {
             other => other,
         };
         match taken {
-            Ok(Some(shot)) => {
+            Ok(Some(mut shot)) => {
+                self.check_served(r, &mut shot).await;
                 // Kept under the entry that asked for each (`/pricing`, or `web:/pricing`).
                 let mut pages: Vec<crate::ports::PageShot> = shot
                     .pages
                     .iter()
                     .filter_map(|p| {
-                        if width_keys.contains(&p.path) || own_keys.contains(&p.path) {
+                        if width_keys.contains(&p.path) || own_keys.contains(&p.path) || p.path.starts_with("story:") {
                             return Some(p.clone());
                         }
                         let entry = entries.iter().find(|e| crate::settings::page_entry(e).is_some_and(|(s, path)| mine(s) && path == p.path))?;
@@ -1059,13 +1063,15 @@ impl Engine {
                     let report = crate::PageReport { a11y: shot.a11y.clone(), links: shot.links.clone(), text: shot.text.clone(), unstable: shot.health.as_ref().is_some_and(|h| h.unstable), step: None };
                     pages.push(crate::ports::PageShot { path: e.clone(), png: shot.png.clone(), errors, report });
                 }
-                pages.extend(self.other_services_pages(r, &first.name, &entries, &hide).await);
+                pages.extend(self.other_services_pages(r, &first.name, &entries, &hide, storybook.as_ref()).await);
                 // Keeping it compares PNGs (with the push before, every page): CPU work, off the
                 // runtime's workers.
                 // Another browser's page only when this run took it: a failed browsers run leaves
                 // no older picture behind to be compared and reviewed as this head's.
                 let took = |k: &String| !k.starts_with("browser:") || pages.iter().any(|p| p.path == *k);
-                let wanted: Vec<String> = entries.iter().cloned().chain(width_keys.iter().cloned()).chain(own_keys.iter().filter(|k| took(k)).cloned()).collect();
+                // The stories this run took (or kept): a story gone from Storybook goes.
+                let stories: Vec<String> = pages.iter().filter(|p| p.path.starts_with("story:")).map(|p| p.path.clone()).collect();
+                let wanted: Vec<String> = entries.iter().cloned().chain(width_keys.iter().cloned()).chain(own_keys.iter().filter(|k| took(k)).cloned()).chain(stories).collect();
                 for (note, png) in &shot.crops {
                     if let Err(e) = self.store.set_note_crop(&r.id, note, png) {
                         warn!(preview = %r.id, error = %e, "previews: keeping a note's crop");
@@ -1137,14 +1143,19 @@ impl Engine {
     }
 
     /// The pages `github.pages` names on the preview's other services (`admin:/`, `admin:/users`),
-    /// a screenshot run per service in that service's own network. Best effort: a service that
-    /// can't be taken is logged and its pages wait for the next head.
-    async fn other_services_pages(&self, r: &Row, first: &str, entries: &[String], hide: &[String]) -> Vec<crate::ports::PageShot> {
+    /// and the stories of a Storybook another service serves (`github.storybook`), a screenshot
+    /// run per service in that service's own network. Best effort: a service that can't be taken
+    /// is logged and its pages wait for the next head.
+    async fn other_services_pages(&self, r: &Row, first: &str, entries: &[String], hide: &[String], storybook: Option<&(String, String)>) -> Vec<crate::ports::PageShot> {
         let mut by_service: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
         for (svc, path) in entries.iter().filter_map(|e| crate::settings::page_entry(e)) {
             if let Some(svc) = svc.filter(|s| *s != first) {
                 by_service.entry(svc).or_default().push(path);
             }
+        }
+        let stories_of = storybook.filter(|(svc, _)| svc != first);
+        if let Some((svc, _)) = stories_of {
+            by_service.entry(svc.as_str()).or_default();
         }
         let services = self.store.services(&r.id).unwrap_or_default();
         let mut out = Vec::new();
@@ -1153,16 +1164,21 @@ impl Engine {
             // Only the pages a push can change are taken again (Chromatic's TurboSnap): a service
             // that runs what it ran last time (its revision, what it's deployed with, the same
             // data) keeps its pages, checks and all, without a browser run.
-            let key = service.deployed.as_ref().map(|rev| format!("{rev}:{}:{}", self.store.service_config(&r.id, svc).ok().flatten().unwrap_or_default(), r.last_reset_at.unwrap_or(0)));
+            // Its stories, when it serves the Storybook: where, in the key too (turning them on
+            // takes them at once).
+            let stories = stories_of.filter(|(s, _)| s == svc).map(|(_, at)| at.clone());
+            let key = service.deployed.as_ref().map(|rev| format!("{rev}:{}:{}:{}", self.store.service_config(&r.id, svc).ok().flatten().unwrap_or_default(), r.last_reset_at.unwrap_or(0), stories.as_deref().unwrap_or("")));
             if let Some(key) = &key
                 && self.store.service_shot_key(&r.id, svc).ok().flatten().as_deref() == Some(key.as_str())
                 && let Some(kept) = paths.iter().map(|p| self.store.kept_page(&r.id, &format!("{svc}:{p}")).ok().flatten()).collect::<Option<Vec<_>>>()
+                && let Ok(kept_stories) = if stories.is_some() { self.store.kept_story_pages(&r.id) } else { Ok(Vec::new()) }
             {
                 let _ = self.store.log(&r.id, &format!("kept {svc}'s pages: it runs what it ran at the push before"));
                 out.extend(kept);
+                out.extend(kept_stories);
                 continue;
             }
-            let opts = crate::ports::ShotOptions { pages: paths.iter().filter(|p| **p != "/").map(|p| p.to_string()).collect(), hide: hide.to_vec(), ..Default::default() };
+            let opts = crate::ports::ShotOptions { pages: paths.iter().filter(|p| **p != "/").map(|p| p.to_string()).collect(), hide: hide.to_vec(), stories, ..Default::default() };
             match self.apps.screenshot(&r.id, svc, &opts).await {
                 Ok(Some(mut shot)) => {
                     if let Err(e) = self.mask_shot(&r.id, &mut shot).await {
@@ -1177,7 +1193,8 @@ impl Engine {
                         let report = crate::PageReport { a11y: shot.a11y.clone(), links: shot.links.clone(), text: shot.text.clone(), unstable: shot.health.as_ref().is_some_and(|h| h.unstable), step: None };
                         out.push(crate::ports::PageShot { path: format!("{svc}:/"), png: shot.png.clone(), errors, report });
                     }
-                    out.extend(shot.pages.into_iter().map(|p| crate::ports::PageShot { path: format!("{svc}:{}", p.path), ..p }));
+                    // A story is a story whichever service serves it (`story:<id>`).
+                    out.extend(shot.pages.into_iter().map(|p| if p.path.starts_with("story:") { p } else { crate::ports::PageShot { path: format!("{svc}:{}", p.path), ..p } }));
                 }
                 Ok(None) => {}
                 Err(e) => {

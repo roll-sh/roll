@@ -39,6 +39,7 @@ pub mod resources;
 pub mod search;
 pub mod skills;
 pub mod tasks;
+pub mod text;
 pub mod tools;
 pub mod ui;
 
@@ -266,8 +267,9 @@ async fn toolset_costs(State(m): State<Mcp>, ext: Extensions) -> Response {
             }));
         }
     }
-    // Search mode's own tools (`?tools=search`): listed in place of every product's.
-    let meta: Vec<Value> = search::listed(&ctx.tools()).into_iter().filter(|t| t["name"].as_str().is_some_and(|n| [search::FIND, search::RUN_READ, search::RUN].contains(&n))).collect();
+    // Search mode's own tools (`?tools=search`): listed in place of every product's, `roll_find` too.
+    let mut meta: Vec<Value> = search::listed(&ctx.tools()).into_iter().filter(|t| t["name"].as_str().is_some_and(|n| [search::FIND, search::RUN_READ, search::RUN].contains(&n))).collect();
+    meta.push(find::definition());
     let search = json!({
         "tools": meta.len(),
         "read_only": meta.iter().filter(|t| t["annotations"]["readOnlyHint"] == true).count(),
@@ -837,8 +839,14 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
             },
             "tools/list" => {
                 let mut tools = if ctx.search { search::listed(&ctx.tools()) } else { ctx.tools() };
-                if !ctx.search && ctx.pick.keeps(find::NAME) {
-                    tools.push(find::definition());
+                // In search mode too: finding a resource by name is what a client with few tools needs.
+                if ctx.pick.keeps(find::NAME) {
+                    let mut def = find::definition();
+                    // Loaded upfront with search mode's own tools by clients that defer tools.
+                    if ctx.search {
+                        def["_meta"] = json!({ "anthropic/alwaysLoad": true });
+                    }
+                    tools.push(def);
                 }
                 // A host that renders MCP Apps shows the tools that answer rows in roll's table.
                 if ctx.ui && !ctx.search {
@@ -869,7 +877,7 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                     rpc_result(id, search::find(&ctx.tools(), &args))
                 } else if !args.is_object() {
                     rpc_error(id, -32602, "arguments must be an object")
-                } else if name == find::NAME && !ctx.search && ctx.pick.keeps(find::NAME) {
+                } else if name == find::NAME && ctx.pick.keeps(find::NAME) {
                     // Each list and read in it is a tool call of the caller's own, through the gate.
                     let names = tool_names(ctx);
                     let has = |t: &str| names.iter().any(|n| n == t);
@@ -1420,7 +1428,7 @@ async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: Option<&str>) -
     // In lockdown, an outside record's text never reaches the model: withheld in the structured
     // answer, and the text block (a fronted set may write its own) rebuilt from what's left.
     if ctx.lockdown && lockdown::withhold(&mut result["structuredContent"]) + lockdown::withhold_fields(&mut result["structuredContent"], outside) > 0 {
-        let text = cut(serde_json::to_string(&result["structuredContent"]).unwrap_or_default(), true);
+        let text = cut(text::render(&result["structuredContent"]), true);
         if let Some(content) = result["content"].as_array_mut() {
             content.retain(|c| c["type"] != "text");
             content.insert(0, json!({ "type": "text", "text": text }));
@@ -1765,8 +1773,9 @@ async fn outcome(tool: &str, resp: Response) -> Value {
     }
     let (text, structured) = match json {
         // Compact: a model reads JSON without its indentation, which is about a third of a
-        // pretty-printed answer's tokens (and leaves more under the cut).
-        Some(v) => (cut(serde_json::to_string(&v).unwrap_or_default(), true), if v.is_object() { v } else { json!({ "items": v }) }),
+        // pretty-printed answer's tokens (and leaves more under the cut); a list of objects as a
+        // table, which names its columns once.
+        Some(v) => (cut(text::render(&v), true), if v.is_object() { v } else { json!({ "items": v }) }),
         None if bytes.is_empty() => ("done".to_string(), json!({ "ok": true })),
         None => match std::str::from_utf8(&bytes) {
             Ok(s) => (cut(s.to_string(), false), json!({ "content_type": ct, "bytes": bytes.len() })),

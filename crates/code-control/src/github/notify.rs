@@ -662,6 +662,10 @@ fn page_checks(e: &crate::model::PreviewEnvironment) -> Option<String> {
             if slower > 0 {
                 summary.push(format!("{} slower than {branch}", plural(slower as u64, "endpoint", "endpoints")));
             }
+            let reshaped = b.endpoints.iter().filter(|x| !x.shape_changes.is_empty()).count();
+            if reshaped > 0 {
+                summary.push(if reshaped == 1 { format!("1 endpoint's answer changed shape against {branch}") } else { format!("{reshaped} endpoints' answers changed shape against {branch}") });
+            }
             details.push_str(&endpoints_line(&b.endpoints, &branch));
         }
         // roll's own signed link (a public preview's); nothing in it can end the image's markdown.
@@ -679,6 +683,10 @@ fn page_checks(e: &crate::model::PreviewEnvironment) -> Option<String> {
         let branch = branch_name(&n.branch);
         summary.push(format!("{} against {branch}", plural(n.total as u64, "new error", "new errors")));
         details.push_str(&new_errors_line(n, &branch));
+    }
+    if !e.served_secrets.is_empty() {
+        summary.push(format!("serves {}", plural(e.served_secrets.len() as u64, "secret value", "secret values")));
+        details.push_str(&served_line(&e.served_secrets));
     }
     if let Some(v) = &e.visual_change {
         summary.push(if v.percent <= 0.0 { "unchanged since the push before".into() } else { format!("changed {} since the push before", pct(v.percent)) });
@@ -964,6 +972,20 @@ pub fn preview_comment_for(p: Option<&Preview>, marker: &str, teardown: Option<&
     out
 }
 
+/// Its secret values its pages serve: each by the name it's given as, and where (never the
+/// value), each in a code span nothing in it can close.
+fn served_line(served: &[crate::model::PreviewServedSecret]) -> String {
+    let each: Vec<String> = served
+        .iter()
+        .map(|s| {
+            let key: String = s.key.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_').take(100).collect();
+            let path: String = s.path.chars().filter(|c| !c.is_control() && *c != '`').take(200).collect();
+            format!("`{key}` in `{path}`")
+        })
+        .collect();
+    format!("**Secret values in what it serves:** {}. Anyone who opens the preview can read them: rotate them, and keep them out of the browser's code.\n\n", each.join(", "))
+}
+
 /// Its error groups the branch's preview doesn't have: how many, by service. Their titles are log
 /// lines (a branch's data can be in them), so they stay in roll (the change page, the sheet),
 /// never in a comment anyone reading the pull request reads.
@@ -1008,7 +1030,18 @@ fn endpoints_line(endpoints: &[crate::model::PreviewEndpoint], branch: &str) -> 
             let path = x.path.replace('`', "'");
             let main = x.main_ms.map(|m| format!(" ({branch} {m} ms)")).unwrap_or_default();
             let status = if x.status == 0 { ", no answer".to_string() } else if x.status >= 400 { format!(", {}", x.status) } else { String::new() };
-            format!("`GET {path}` {} ms{main}{status}{}", x.ms, if x.slower { ", slower" } else { "" })
+            // The answer's fields, each in a code span nothing in it can close.
+            let field = |s: &str| format!("`{}`", s.chars().filter(|c| !c.is_control() && *c != '`').take(200).collect::<String>());
+            let shape: Vec<String> = x
+                .shape_changes
+                .iter()
+                .map(|c| match &c.now {
+                    None => format!("{} gone", field(&c.path)),
+                    Some(now) => format!("{} {} → {}", field(&c.path), field(&c.main), field(now)),
+                })
+                .collect();
+            let shape = if shape.is_empty() { String::new() } else { format!(", its answer: {}", shape.join(", ")) };
+            format!("`GET {path}` {} ms{main}{status}{}{shape}", x.ms, if x.slower { ", slower" } else { "" })
         })
         .collect();
     format!("Its endpoints against `{branch}`: {}.\n\n", each.join("; "))
@@ -1161,6 +1194,7 @@ mod preview_tests {
             page_links: None,
             slower_routes: None,
             new_errors: None,
+            served_secrets: Vec::new(),
             base_change: None,
             diff_url: None,
             pages: Vec::new(),
@@ -1232,12 +1266,18 @@ mod preview_tests {
         let words = crate::model::PreviewTextDiff { added: vec!["Pay ```now".into()], removed: vec!["Checkout".into()], added_n: 1, removed_n: 1 };
         assert_eq!(text_block(&words, "main"), "**Its words against `main`:**\n\n```diff\n- Checkout\n+ Pay now\n```\n\n");
         let api = crate::model::PreviewTextDiff { added: vec!["POST /orders".into()], removed: vec!["DELETE /users/{id}`x".into()], added_n: 1, removed_n: 1 };
-        let ep = |path: &str, ms, main_ms, slower| crate::model::PreviewEndpoint { path: path.into(), ms, status: 200, main_ms, slower };
+        let ep = |path: &str, ms, main_ms, slower| crate::model::PreviewEndpoint { path: path.into(), ms, status: 200, main_ms, slower, shape_changes: Vec::new() };
         assert_eq!(
             endpoints_line(&[ep("/api/users", 140, Some(40), true), ep("/api/`x`", 12, None, false)], "main"),
             "Its endpoints against `main`: `GET /api/users` 140 ms (main 40 ms), slower; `GET /api/'x'` 12 ms.\n\n",
             "a path can't end its code span"
         );
+        let mut reshaped = ep("/api/users", 40, Some(40), false);
+        reshaped.shape_changes = vec![
+            crate::model::PreviewShapeChange { path: "users[].email`".into(), main: "string".into(), now: None },
+            crate::model::PreviewShapeChange { path: "total".into(), main: "number".into(), now: Some("string".into()) },
+        ];
+        assert_eq!(endpoints_line(&[reshaped], "main"), "Its endpoints against `main`: `GET /api/users` 40 ms (main 40 ms), its answer: `users[].email` gone, `total` `number` → `string`.\n\n");
         assert_eq!(api_line(&api, &[], "main"), "**Its API against `main`:** removes `DELETE /users/{id}x` (breaking for callers of `main`'s); adds `POST /orders`.\n\n", "an operation can't end its code span");
         let same = crate::model::PreviewTextDiff { added: vec![], removed: vec![], added_n: 0, removed_n: 0 };
         assert_eq!(
@@ -1246,6 +1286,8 @@ mod preview_tests {
         );
         let links = crate::model::PreviewPageLinks { checked: 4, broken: vec![crate::model::PreviewBrokenLink { path: "/gone`)".into(), status: 404 }, crate::model::PreviewBrokenLink { path: "/slow".into(), status: 0 }] };
         assert_eq!(links_line(&links), "**Broken links** (of 4 checked on its first page): `/gone` 404, `/slow` no answer.\n\n");
+        let served = [crate::model::PreviewServedSecret { key: "STRIPE_KEY`".into(), path: "/app.js`x".into() }];
+        assert_eq!(served_line(&served), "**Secret values in what it serves:** `STRIPE_KEY` in `/app.jsx`. Anyone who opens the preview can read them: rotate them, and keep them out of the browser's code.\n\n");
         // In the comment, one folded block whose summary is counts only.
         let mut e = p.environment.clone().unwrap();
         (e.page_health, e.page_a11y, e.base_change, e.visual_change, e.page_speed) = (Some(h(2, 1)), Some(a), Some(b), Some(v(12.34)), Some(sp(1200, Some(900))));

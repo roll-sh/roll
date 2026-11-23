@@ -358,13 +358,13 @@ function Commits({ c }: { c: DeployCommits }) {
   );
 }
 
-/** A static site's functions, made a service and routed to (`runFunctions`). */
+/** A static site's functions, or a service's edge functions, made a service and routed to (`runFunctions`). */
 function RunFunctions({ service, env, dirs }: { service: string; env: string; dirs: string[] }) {
   const [state, setState] = useState<{ busy: boolean; done?: string; error?: string }>({ busy: false });
   return (
     <div className="mt-3 flex flex-wrap items-center gap-3 border-t border-line pt-3 text-[12px]">
       <span className="min-w-0 flex-1 text-muted">
-        {state.done ?? state.error ?? `Its ${dirs.map((d) => (d === "edge" ? "edge functions" : d)).join(" and ")} don't run on a static site: a service of them, with their paths sent to it, does.`}
+        {state.done ?? state.error ?? `Its ${dirs.map((d) => (d === "edge" ? "edge functions" : d)).join(" and ")} run in a service of their own: Run its functions makes it, with their paths sent to it.`}
       </span>
       {!state.done && (
         <button

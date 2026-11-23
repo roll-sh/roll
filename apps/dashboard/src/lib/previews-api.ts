@@ -178,6 +178,8 @@ export interface Preview {
   slower_routes?: { branch: string; routes: { name: string; count: number; p50_ms: number; main_p50_ms: number; grew?: GrewSpan | null; /** Its budget, when it's over it. */ budget_ms?: number | null }[] } | null;
   /** Earlier pushes of the change's services, still reachable (newest first), each on its own copy of the data where `own_data` names products. */
   earlier?: { service: string; revision: string; url: string; share_url: string | null; at: number; own_data?: string[] }[];
+  /** Its secret values its pages serve at its head, by name and where (never the value). */
+  served_secrets?: { key: string; path: string }[];
   /** Production's browser checks on this head (roll apps runs them as its deployment goes live). */
   browser_checks?: { service: string; name: string; state: "pending" | "passed" | "failed"; error: string | null; files?: { service_id: string; environment: string } | null }[];
   /** The earlier pushes' own copies of the data: how many, their bytes and a month of keeping them (in `cost`). */
@@ -378,6 +380,15 @@ export interface EndpointTime {
   main_ms: number | null;
   /** Slower than main's by half again and by more than 20 ms (roll code's change view says so). */
   slower?: boolean;
+  /** What its JSON answer lost against main's: a field gone (`now: null`) or a type widened. */
+  shape_changes?: ShapeChange[];
+}
+
+export interface ShapeChange {
+  /** `users[].email`: `[]` an array's elements, `*` an object keyed by ids. */
+  path: string;
+  main: string;
+  now: string | null;
 }
 
 /** Slower than main's by half again and by more than 20 ms (`EndpointAgainst::slower`). */
@@ -385,10 +396,11 @@ export const endpointSlower = (e: EndpointTime) => e.slower ?? (e.main_ms != nul
 
 /** Which row of the screenshot's chooser a page check goes in: a page, a view of the first one (a
  * width or a browser), or a state (`state:<name>`). */
-export const pageGroup = (path: string): "Pages" | "Views" | "States" => (/^@\d+$/.test(path) || path.startsWith("browser:") ? "Views" : path.startsWith("state:") ? "States" : "Pages");
+export const pageGroup = (path: string): "Pages" | "Views" | "States" | "Stories" =>
+  /^@\d+$/.test(path) || path.startsWith("browser:") ? "Views" : path.startsWith("state:") ? "States" : path.startsWith("story:") ? "Stories" : "Pages";
 
 export const pageLabel = (path: string) =>
-  /^@\d+$/.test(path) ? `${path.slice(1)} px` : path === "browser:firefox" ? "Firefox" : path === "browser:webkit" ? "WebKit" : path === "browser:webkit-phone" ? "WebKit, phone" : path || "/";
+  /^@\d+$/.test(path) ? `${path.slice(1)} px` : path.startsWith("story:") ? path.slice(6).replace("--", " / ") : path === "browser:firefox" ? "Firefox" : path === "browser:webkit" ? "WebKit" : path === "browser:webkit-phone" ? "WebKit, phone" : path || "/";
 
 /** "1.2 s" or "380 ms". */
 export const duration = (ms: number) => (ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`);
@@ -420,7 +432,7 @@ export interface PreviewSettings {
   secrets: { base: string; allow_production: boolean };
   /** A patch replaces the whole map. */
   env: Record<string, string>;
-  github: { comment: boolean; status: boolean; deployment: boolean; screenshot?: boolean; baseline?: boolean; pages?: string[]; hide?: string[]; budget?: SpeedBudget; visual_threshold?: number; widths?: number[]; openapi?: string | null; endpoints?: string[]; states?: PageState[]; browsers?: ("firefox" | "webkit" | "webkit-phone")[] };
+  github: { comment: boolean; status: boolean; deployment: boolean; screenshot?: boolean; baseline?: boolean; pages?: string[]; hide?: string[]; budget?: SpeedBudget; visual_threshold?: number; widths?: number[]; openapi?: string | null; endpoints?: string[]; states?: PageState[]; browsers?: ("firefox" | "webkit" | "webkit-phone")[]; storybook?: string | null };
   /** "link": a preview's URLs need its link (its access token once, then a cookie). "team": only people signed in to roll who may open the project (they sign in on the way; the link's token lets nobody in). */
   access: "link" | "team" | "public";
   /** Chromatic's UI Review: `check` posts `roll/visual`; `required` also keeps a change waiting for one from landing in roll. */

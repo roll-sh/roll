@@ -1005,6 +1005,12 @@ impl Store {
 
     /// A page as it was last kept (its picture, what went wrong while it loaded, its checks), to
     /// keep again at a new head.
+    /// The stories kept from the last run that took them (`story:<id>` pages).
+    pub fn kept_story_pages(&self, id: &str) -> Result<Vec<crate::ports::PageShot>> {
+        let paths: Vec<String> = self.db.read(|c| c.query("SELECT path FROM page_shots WHERE preview_id = ? AND path LIKE 'story:%' ORDER BY path", [id], |r| r.get(0)))?;
+        Ok(paths.iter().filter_map(|p| self.kept_page(id, p).ok().flatten()).collect())
+    }
+
     pub fn kept_page(&self, id: &str, path: &str) -> Result<Option<crate::ports::PageShot>> {
         use base64::Engine as _;
         let row: Option<(String, i64, Option<String>)> = self.db.read(|c| c.query_row("SELECT png, errors, report FROM page_shots WHERE preview_id = ? AND path = ?", [id, path], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional())?;
@@ -1797,7 +1803,7 @@ impl Store {
         let row: Option<(Option<String>, Option<String>)> = self.db.read(|c| c.query_row("SELECT speed, prev_speed FROM screenshots WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?))).optional())?;
         let Some((now, before)) = row else { return Ok(None) };
         let parse = |s: Option<String>| s.and_then(|s| serde_json::from_str::<crate::PageSpeed>(&s).ok());
-        Ok(parse(now).map(|now| crate::PageSpeedView { now, before: parse(before) }))
+        Ok(parse(now).map(|now| crate::PageSpeedView { now: now.without_shapes(), before: parse(before).map(crate::PageSpeed::without_shapes) }))
     }
 
     /// How much the page changed since the screenshot before (its head, in basis points).
@@ -3239,15 +3245,24 @@ impl Store {
             api_unread: b.api_unread,
             endpoints: f.speed.as_ref().map(|now| {
                 let main = b.speed.as_ref().map(|s| s.endpoints.as_slice()).unwrap_or_default();
-                now.endpoints.iter().map(|e| crate::EndpointAgainst { path: e.path.clone(), ms: e.ms, status: e.status, main_ms: main.iter().find(|m| m.path == e.path).map(|m| m.ms) }).collect()
+                now.endpoints
+                    .iter()
+                    .map(|e| {
+                        let m = main.iter().find(|m| m.path == e.path);
+                        let ok = |s: u16| (200..300).contains(&s);
+                        let shape_changes = m.filter(|m| ok(m.status) && ok(e.status)).map(|m| crate::shape_changes(&e.shape, &m.shape)).unwrap_or_default();
+                        crate::EndpointAgainst { path: e.path.clone(), ms: e.ms, status: e.status, main_ms: m.map(|m| m.ms), shape_changes }
+                    })
+                    .collect()
             }).unwrap_or_default(),
         });
         let first_unstable = page_health.as_ref().is_some_and(|h| h.unstable);
         let visual_review = self.visual_review(&r, settings.visual_review, settings.github.visual_threshold, base_change.as_ref(), &pages, first_unstable, f.head)?;
-        let page_speed = f.speed.map(|now| crate::PageSpeedView { now, before: f.prev_speed });
+        let page_speed = f.speed.map(|now| crate::PageSpeedView { now: now.without_shapes(), before: f.prev_speed.map(crate::PageSpeed::without_shapes) });
         // What the holder read against main's, for this head only (a push reads it again), and
         // whether it compared at this head at all (errors; routes too with traces).
         let new_errors = self.runtime_fact::<crate::NewErrors>(&r.id, "new_errors")?.filter(|f| f.head == r.head);
+        let served_secrets = self.runtime_fact::<crate::ServedSecrets>(&r.id, "served_secrets")?.filter(|f| f.head == r.build()).map(|f| f.secrets).unwrap_or_default();
         let slower_routes = if settings.traces { self.runtime_fact::<crate::SlowerRoutes>(&r.id, "slower_routes")?.filter(|f| f.head == r.head) } else { None };
         let compared_at = |kind: &str| -> Result<bool> { Ok(self.runtime_fact::<String>(&r.id, kind)?.as_deref() == Some(r.head.as_str())) };
         let regressions_compared = compared_at("compared_errors")? && (!settings.traces || compared_at("compared_routes")?);
@@ -3348,6 +3363,7 @@ impl Store {
             page_links,
             slower_routes,
             new_errors,
+            served_secrets,
             regressions,
             regressions_accepted,
             regressions_compared,

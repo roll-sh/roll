@@ -969,6 +969,24 @@ thirty-fourth review found them in the clear.
 
 ## Safety
 
+- **Secret values in what a preview serves** (Netlify's secrets scan). A preview's pages are
+  read by whoever opens it (a public one by anyone), and its code can put what it was given in
+  them: a server-rendered page, a bundle built with a server variable, an API answer. The first
+  page's screenshot run keeps what its pages served (documents, the origin's own scripts, fetch
+  and XHR answers, each path once and never its query; 40 bodies, 2 MiB each, 8 MiB in all) and
+  hands it to roll, which looks in it for the preview's secret values: roll secrets' values (a
+  `plain` one's URL password only), its branches' credentials, and its own variables named like
+  a credential. A value meant for the browser (`NEXT_PUBLIC_`, `VITE_`, `PUBLIC_`, `REACT_APP_`,
+  `NUXT_PUBLIC_`, `EXPO_PUBLIC_`, `GATSBY_`, `VUE_APP_`, `STORYBOOK_`) isn't one, nor a user name
+  (`PGUSER`, `SMTP_USERNAME`), nor one under 8 characters. The run is never given the values (the page's code shares its container), and
+  what was served is dropped once looked in. Each one found is named by the name the preview gets
+  it as, with where (`served_secrets: [{key, path}]`, for the run's head): on the record, first
+  on the sheet's verdict strip ("1 secret value in what it serves") and in a box under it, in
+  `roll preview show`, in the activity when it changes, and in the pull request comment
+  ("**Secret values in what it serves:** `STRIPE_KEY` in `/assets/app.js`"), never the value
+  (checked in the screenshot image: a page's document, its script and its fetch answer kept by
+  path, the query left out; live: `scripts/preview-cost.sh`'s service serves its environment at
+  `/env.txt`, and the record names `DATABASE_URL` there without the password).
 - **Forks.** A change with `trusted: false` (a PR from a fork) gets a preview only for a head a
   writer approved (`approve-run`, roll code's rule). A new push un-approves it. Its services
   stop, and it waits as `awaiting_approval` with its data branches kept. This also fixes roll
@@ -1439,6 +1457,23 @@ egress included, removed with each connection. `a_shell_in_a_previews_service_is
 live preview's container through `roll preview shell` and reads its `ROLL_PREVIEW` back, puts a
 file in with `roll preview cp` and brings it back, and reads the service through `roll preview
 forward` (no relay left after).
+A service can also be swapped for a process on a laptop (Signadot's local sandboxes,
+Telepresence's intercepts): `roll preview swap <preview> 3000 --service web` opens
+`…/swap?service=web`, a WebSocket carrying one HTTP/2 connection the laptop serves, and while
+it's open every request for that service goes there instead of its container: its visitors',
+and its other services' (they reach it by its URL). The laptop's process works against the
+preview's data and services (`roll preview connect`, `roll preview env`) and is debugged there,
+with no deploy in between. The CLI sends each request to `127.0.0.1:<port>` as that host (a dev
+server's host check passes; `x-forwarded-host` keeps the preview's) and says each on stderr. The
+request is the one the container would get: past the preview's gate, roll's access cookie and
+bypass secret taken out. A WebSocket from the preview isn't carried (501). One laptop at a
+time per service (409), on the preview's holder; it's admin (the laptop gets the preview's
+visitors' requests), and the activity says who swapped it and when it was given back. Ctrl-C,
+a dropped connection or the preview going gives it back to its container. A roll apps service
+is served by roll apps' proxy, so it can't be swapped (409).
+`a_swapped_service_is_answered_by_the_laptop_until_given_back`; `scripts/preview-cost.sh` swaps
+the live preview's web for a local server, reads it through the preview's host, and reads the
+container again once it's given back.
 
 ### Traces
 
@@ -1582,6 +1617,15 @@ land on the change.
   team session, through roll), from the change's feedback reviews (`roll_previews::notes` reads back the shape the
   dashboard posts and nothing else; dismissed ones don't show), the latest 50. Each note says
   who and when, and outlines its element on hover; all of it is text, never HTML.
+- A note or an error becomes a fix to make (Vercel Comments' "Create issue", Netlify's drawer):
+  the note's sheet (opened from its Reply or Resolve) and each error group on the sheet's Errors
+  tab have "Make a work item". It's made in the preview's repo as the person looking (roll code's
+  `POST …/work`; someone without write on the repo gets its refusal), where roll's agents claim
+  work too. A note's item takes the note's first line as its title and its whole review as its
+  body (the page and its link, the element, the note, what went wrong on the page), labelled
+  `preview-feedback`, and the note gets a reply naming the item. An error's item takes its service
+  and title, and its sample as the preview shows it (masked), in a block nothing in it can close,
+  labelled `preview-error` (`lib/preview-work.ts`).
 - A note is resolved from the page too (Vercel Comments): its Resolve opens roll
   (`?fb_resolve=<review id>`), where the sheet shows the note and anyone on the project resolves
   it (`POST …/notes/{review}/resolve`, kept by previews: roll code's comment reviews aren't
@@ -1770,7 +1814,7 @@ type Preview = {
   reaches?: "open" | "roll";
   visual_change?: { since: string; percent: number; phone_percent?: number | null } | null;
   phone_screenshot?: boolean;
-  base_change?: { branch: string; percent: number; phone_percent: number | null; head?: string | null; load_ms?: number | null; lcp_ms?: number | null; a11y_added?: number | null; errors_added?: number | null; text?: TextDiff | null; links_added?: number | null; seo_added?: number | null; api?: TextDiff | null; api_breaking?: string[]; api_unread?: boolean; endpoints?: EndpointTime[] } | null;
+  base_change?: { branch: string; percent: number; phone_percent: number | null; head?: string | null; load_ms?: number | null; lcp_ms?: number | null; a11y_added?: number | null; errors_added?: number | null; text?: TextDiff | null; links_added?: number | null; seo_added?: number | null; api?: TextDiff | null; api_breaking?: string[]; api_unread?: boolean; endpoints?: EndpointTime[] /* {path, ms, status, main_ms, shape_changes?: {path, main, now: string | null}[]} */ } | null;
   pages?: PageCheck[];
   visual_review?: { state: "unchanged" | "changed" | "accepted"; branch: string; percent: number; by: string | null; at: number | null; required: boolean; head: string; pages: { path: string; percent: number; by: string | null; at: number | null; unstable?: boolean }[]; } | null;
   page_speed?: { now: PageSpeed; before: PageSpeed | null } | null;
@@ -1779,6 +1823,7 @@ type Preview = {
   page_links?: { checked: number; broken: { path: string; status: number }[] } | null;
   slower_routes?: { branch: string; routes: { name: string; count: number; p50_ms: number; main_p50_ms: number; grew?: GrewSpan | null; budget_ms?: number | null }[] } | null;
   new_errors?: { branch: string; total: number; errors: { service: string; title: string }[] } | null;
+  served_secrets?: { key: string; path: string }[]; // its secret values its pages serve at its head: names and where, never values
   regressions?: "check" | "required" | null;
   regressions_accepted?: { head: string; by: string; at: number } | null;
   regressions_compared?: boolean;     // compared with main's preview at its head (errors; routes too with traces)
@@ -1813,7 +1858,7 @@ type Settings = {
   max_usd_month: number;              // 0: no cap; once the month's cost reaches it, new previews wait
   secrets: { base: string; allow_production: boolean };      // "development", false
   env: Record<string, string>;        // overrides every service gets
-  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[]; hide: string[]; budget: { load_ms: number; bytes: number }; openapi?: string; endpoints?: string[]; states?: {name, page, steps}[]; browsers?: ("firefox" | "webkit" | "webkit-phone")[] };   // all true but screenshot; pages, hide: []; budget 0s (none); openapi: the first service's OpenAPI JSON path, compared with main's; endpoints: up to 5 GET paths timed against main's
+  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[]; hide: string[]; budget: { load_ms: number; bytes: number }; openapi?: string; endpoints?: string[]; states?: {name, page, steps}[]; storybook?: string /* "web" or "web:/storybook/" */; browsers?: ("firefox" | "webkit" | "webkit-phone")[] };   // all true but screenshot; pages, hide: []; budget 0s (none); openapi: the first service's OpenAPI JSON path, compared with main's; endpoints: up to 5 GET paths timed against main's
   access: "link" | "team" | "public"; // "link": a preview's URLs need its link; "team": a person signed in to roll who may open the project
   visual_review: "off" | "check" | "required";   // the roll/visual review; required also blocks landing in roll ("off")
   feedback: boolean;                  // a feedback button on its pages for people who came in through roll (true)
@@ -1983,6 +2028,35 @@ type Settings = {
     more than 20 ms called slower: in the comment's folded checks ("1 endpoint slower than
     main"; "`GET /api/users` 140 ms (main 40 ms), slower"), the sheet and the change page (live:
     `/openapi.json` timed on both).
+    And their answers' shapes (Signadot's SmartTests, Optic's traffic diff): the untimed warm-up
+    GET's JSON answer (up to 1 MiB) is read for its shape, one `path types` line per field
+    (`users[].email string`, `total number|null`; `[]` an array's elements, `*` an object keyed by
+    ids; at most 100 lines, 8 levels, 20 elements an array, 100 keys an object), never its values.
+    When both answered 2xx JSON, it's compared with main's (`shape_changes`): a field main's has
+    and this one doesn't (the outermost only) or a type that widened (`number` to `string`, or to
+    `string|null`) breaks whoever reads it. A field it gained, or a type that narrowed, breaks
+    nobody. What sits under an array that's empty on either side isn't known there, so it's never
+    called gone (the two previews' data can differ). It's on the sheet's verdict strip as a danger
+    ("1 endpoint's answer changed shape"), under its endpoint on the sheet and the change page, and
+    in the comment ("`GET /api/users` 40 ms (main 40 ms), its answer: `users[].email` gone,
+    `total` `number` → `string`"). The shapes stay with the comparison: a preview's
+    `page_speed` doesn't carry them (live: the change's `/openapi.json` loses
+    `paths./users/{id}`).
+    Its Storybook's stories too (Chromatic's stories): with `github.storybook` (`web`, or
+    `web:/storybook/` when the service serves it under a path: a static build or `storybook
+    dev`), that service's run reads Storybook's index (`index.json`, Storybook 7 and later;
+    `stories.json` before), and takes the first 40 stories (docs left out) in a run of its own
+    beside the screenshot's, in the service's network and locked down the same way. Each story is
+    loaded alone (`iframe.html?id=…&viewMode=story`) at the desktop width, waited for until its
+    root holds something (3 s at most), and captured clipped to what it rendered (an 8 px margin,
+    at most 1280 by 2000; 256 KiB a PNG), 100 s in all. Each is a page of its own (`story:<id>`,
+    "Stories" on the sheet, labelled `button / primary`), with what went wrong while it rendered,
+    compared with main's same story and reviewed like a page. A story gone from Storybook goes
+    from the preview. The index is the preview's code's: an id Storybook wouldn't make
+    (`components-button--primary`) is dropped. A Storybook on another service is kept with that
+    service's pages while it runs what it ran (TurboSnap), and taken at once when the rule is
+    turned on (checked in the screenshot image: a docs entry and a bad id skipped, a 600 by 120
+    card captured as 616 by 136 with its console error counted).
     Page states too (Chromatic's interaction tests, Percy's scripted snapshots): much of what a
     change touches shows only after a click (a cart open, a dialog, a form's errors). A project
     names up to 3 (`github.states`: a name, a page of the first service's, and 1 to 10 steps:
@@ -2477,27 +2551,40 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Feedback notes that carry the reviewer's context, in review** (Netlify's drawer, Jam): the
-   page's uncaught errors, its failed requests and the browser, sent with the note when the
-   person keeps them, folded on the change.
-2. **Endpoint responses compared with main's by shape** (Signadot's SmartTests): a field gone or
-   a type changed in a JSON answer, on the sheet's verdict strip and the pull request comment
-   (values differ by design: main's preview has its own data).
-3. **Storybook stories as snapshots** (Chromatic): each story taken, compared with main's and
-   reviewed like a page, with TurboSnap's skip.
-4. **A process on a laptop standing in for one service** (Signadot local sandboxes,
-   Telepresence): the preview's other services and data reach it, the reverse of
-   `roll preview forward`.
-5. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
+1. **A note or an error made a work item, in review** (Vercel Comments' "Create issue"): on the
+   note's sheet and each error group, in the preview's repo, where roll's agents claim work too.
+2. **A preview's page read through roll, for agents** (Vercel MCP's `web_fetch_vercel_url`; roll
+   MCP's ask): `GET …/fetch?path=` answering its status, a few headers and its text, bounded, with
+   roll's own access to the preview (no share link), its own host only, `GET`/`HEAD` only;
+   `reveal`, as its mail is. roll MCP maps it as `previews_fetch`.
+3. **A preview's data from the sheet** (Neon's Tables, Supabase's table editor): a branch's tables
+   read as the branch's own role (so masks hold), a few rows a page.
+4. **Feature flags on a preview** (Vercel's Flags Explorer): per-preview values, and a reviewer's
+   own override from the page's toolbar.
+5. **Restore points for a preview's data** (Neon's snapshots): save the branches now, put them back
+   after a test run.
+6. **A workload identity for `roll.toml` services** (Vercel's OIDC federation): roll apps' `pv-`
+   instances have one; runtime services don't.
+7. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
    (3.3 s in its log) and its masking, which needs that compute up: pg-control's to shorten.
-6. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+8. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-7. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+9. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-8. **Watch: pg-control's recovery to a time seconds old** (unowned).
+10. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-23, near midnight: secret values in what a preview serves (#846: named with where, never the value; live, `DATABASE_URL` in `/env.txt`).
+
+Landed 2026-11-23, late night: a service swapped for a process on a laptop (#842: `roll preview swap`, checked live through the preview's host and back).
+
+Landed 2026-11-23, night: Storybook stories as snapshots (#837: each story a page, compared with main's and reviewed).
+
+Landed 2026-11-23, evening, later: endpoint answers compared with main's by shape (#834: a field gone or a type widened; live, `/openapi.json` loses `paths./users/{id}`).
+
+Landed 2026-11-23, evening: feedback notes that carry the page's uncaught errors, failed requests and browser (#823, checked in headless Chromium).
 
 Landed 2026-11-23, late afternoon: skew protection for `roll.toml` services (#822: a page loaded before a push keeps reaching that push; checked live).
 

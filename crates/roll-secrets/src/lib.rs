@@ -532,6 +532,9 @@ impl Secrets {
         db.add_column("audit", "event", "TEXT")?;
         db.add_column("audit", "event_data", "TEXT")?;
         db.ensure_schema(events::SCHEMA)?;
+        // A feed filtered by kind reads an index range, not every event since its cursor (#793 made
+        // every write an event).
+        db.migrate("secrets-audit-event-kinds", |c| c.execute_batch("CREATE INDEX IF NOT EXISTS audit_event_kinds ON audit (project_id, event, seq) WHERE event IS NOT NULL"))?;
         // Workload identities (identities.rs); their logins' tokens are roll-access's.
         db.ensure_schema(identities::SCHEMA)?;
         // Secrets' own `rlst_` tokens are gone (roll-access's grants instead); never on main.
