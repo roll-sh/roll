@@ -18,9 +18,8 @@ fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
 }
 
-fn slots() -> Arc<search_es::xpack::entsearch::sync::slots::Slots> {
-    use search_es::xpack::entsearch::sync::slots::{NODE_MAX, OWNER_MAX, Slots};
-    Slots::new(NODE_MAX, OWNER_MAX)
+fn slots() -> Arc<search_es::slots::Slots> {
+    search_es::slots::Slots::new(search_es::xpack::entsearch::sync::SLOTS)
 }
 
 async fn cluster(settings: &[(&str, &str)]) -> Arc<Cluster> {
@@ -253,7 +252,7 @@ async fn s3_bucket_objects_and_text() {
     };
     use search_es::s3::{Client, Credentials, Location};
     let at_ = Location { endpoint: reqwest::Url::parse(&endpoint).unwrap(), bucket: "docs".into(), region: "us-east-1".into(), path_style: true };
-    let bucket = Client::new(at_, Some(Credentials { access_key: S3_KEY.into(), secret_key: S3_SECRET.into(), session_token: None }), true).unwrap();
+    let bucket = Client::new(at_, Some(Credentials { access_key: S3_KEY.into(), secret_key: S3_SECRET.into(), session_token: None }), &search_es::egress::Egress::of(|_| None, true).unwrap()).unwrap();
     for (key, body) in [
         ("notes/hello.txt", "hello from a text file"),
         ("data/item.json", r#"{"title":"blue kettle","tags":["kitchen"]}"#),
@@ -482,6 +481,63 @@ async fn a_huge_message_header_fails_the_sync() {
     assert!(started.elapsed() < Duration::from_secs(10), "took {:?}", started.elapsed());
 }
 
+/// The node's egress rules cover connectors as they cover reindex from remote: a host the node
+/// denies (its own addresses, the operator's networks) is refused with reindex's refusal, written
+/// out or behind a name, even where private hosts are allowed, and nothing connects to it.
+#[tokio::test]
+async fn a_denied_address_is_refused_as_reindex_refuses_it() {
+    let (port, got) = fake_postgres(Fake::Password).await;
+    let c = cluster(&[("roll.egress.deny_addresses", "127.0.0.0/8,::1")]).await;
+    for (id, host) in [("pg", "127.0.0.1"), ("pg-named", "localhost.")] {
+        pg_connector(&c, &format!("{host}:{port}"), id, &format!("content-{id}"), "*", "pw-denied-1").await;
+        let job = finished(&c, &start(&c, id, "full").await).await;
+        assert_eq!(at(&job, "status").as_str(), Some("error"), "{job:?}");
+        assert!(at(&job, "error").as_str().is_some_and(|e| e.contains(&format!("[{host}] is an address roll may not reach"))), "{host}: {job:?}");
+    }
+    assert!(got.lock().unwrap().is_empty(), "a denied address was reached");
+}
+
+/// Without `allow_private_hosts`, neither connector reaches a private address or one the node
+/// denies, whichever way it's named: a loopback literal, a name that resolves to loopback, or a
+/// deny-list address. Each job fails with the egress refusal, and nothing connects.
+#[tokio::test]
+async fn a_connector_never_reaches_a_private_address() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let reached = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = reached.clone();
+    tokio::spawn(async move {
+        while let Ok((s, _)) = listener.accept().await {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            drop(s);
+        }
+    });
+    let mut cfg = ClusterConfig::new("connectors");
+    cfg.connector_slots = Some(slots());
+    cfg.sealer = search_es::seal::Sealer::from_secret("0123456789abcdef0123456789abcdef-connectors");
+    cfg.node_settings.push(("roll.egress.deny_addresses".into(), "1.2.3.4".into()));
+    let c = Arc::new(Cluster::open(cfg, Arc::new(MemoryStore::new())).await.unwrap());
+    c.enable_background_tasks();
+    let cases = [("loopback", "127.0.0.1", "private address"), ("named", "localhost.", "private address"), ("denied", "1.2.3.4", "is an address roll may not reach")];
+    for (name, host, refusal) in cases {
+        let id = format!("pg-{name}");
+        pg_connector(&c, &format!("{host}:{port}"), &id, &format!("content-{id}"), "*", "pw-private-1").await;
+        let job = finished(&c, &start(&c, &id, "full").await).await;
+        assert_eq!(at(&job, "status").as_str(), Some("error"), "{id}: {job:?}");
+        assert!(at(&job, "error").as_str().is_some_and(|e| e.contains(refusal)), "{id}: {job:?}");
+
+        let id = format!("s3-{name}");
+        let (s, _, t) = call(&c, "PUT", &format!("/_connector/{id}"), Some(&format!(r#"{{"index_name":"content-{id}","is_native":true,"service_type":"s3"}}"#))).await;
+        assert_eq!(s, 201, "{t}");
+        let values = format!(r#"{{"values":{{"buckets":"docs","endpoint":"http://{host}:{port}","aws_access_key_id":"{S3_KEY}","aws_secret_access_key":"{S3_SECRET}"}}}}"#);
+        assert_eq!(call(&c, "PUT", &format!("/_connector/{id}/_configuration"), Some(&values)).await.0, 200);
+        let job = finished(&c, &start(&c, &id, "full").await).await;
+        assert_eq!(at(&job, "status").as_str(), Some("error"), "{id}: {job:?}");
+        assert!(at(&job, "error").as_str().is_some_and(|e| e.contains(refusal)), "{id}: {job:?}");
+    }
+    assert_eq!(reached.load(std::sync::atomic::Ordering::SeqCst), 0, "a connector reached a private address");
+}
+
 /// A sealed value copied into a self-managed connector isn't shown, and once the connector is
 /// run by roll it's only text: the sync sends the ciphertext, never what it seals.
 #[tokio::test]
@@ -547,8 +603,8 @@ async fn a_detour_through_self_managed_never_sends_the_password_elsewhere() {
 /// the queue: another tenant's sync still runs when a slot frees.
 #[tokio::test]
 async fn a_canceled_queued_job_doesnt_hold_up_other_tenants() {
-    use search_es::xpack::entsearch::sync::slots::Slots;
-    let pool = Slots::new(1, 1);
+    use search_es::slots::{Caps, Slots};
+    let pool = Slots::new(Caps { node: 1, owner: 1, cluster: 1 });
     let tenant = |name: &'static str, owner: &'static str| {
         let pool = pool.clone();
         async move {
