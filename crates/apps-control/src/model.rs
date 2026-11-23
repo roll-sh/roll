@@ -3031,6 +3031,9 @@ pub enum LinkKind {
     /// Another web service of the project: its private and public URLs (apps' own, not a
     /// [`crate::integrations::Resources`] kind).
     Service,
+    /// A roll tasks tenant: an API key of its own per link and the tenant's signing keys, so the
+    /// service publishes messages and verifies what's delivered to it.
+    Tasks,
 }
 
 impl LinkKind {
@@ -3040,7 +3043,7 @@ impl LinkKind {
         matches!(self, LinkKind::Postgres | LinkKind::Redis | LinkKind::Nosql | LinkKind::Bucket | LinkKind::Stream | LinkKind::Queue)
     }
 
-    pub const ALL: [LinkKind; 8] = [LinkKind::Postgres, LinkKind::Redis, LinkKind::Bucket, LinkKind::Stream, LinkKind::Queue, LinkKind::Nosql, LinkKind::Search, LinkKind::Service];
+    pub const ALL: [LinkKind; 9] = [LinkKind::Postgres, LinkKind::Redis, LinkKind::Bucket, LinkKind::Stream, LinkKind::Queue, LinkKind::Nosql, LinkKind::Search, LinkKind::Service, LinkKind::Tasks];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -3052,6 +3055,7 @@ impl LinkKind {
             LinkKind::Nosql => "nosql",
             LinkKind::Search => "search",
             LinkKind::Service => "service",
+            LinkKind::Tasks => "tasks",
         }
     }
 
