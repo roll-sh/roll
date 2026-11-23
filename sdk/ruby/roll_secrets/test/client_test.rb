@@ -132,6 +132,7 @@ class ACacheTest < Minitest::Test
     state = { digest: "d1", value: "1", dynamic: [] }
     asked = []
     server = FakeServer.new do |_method, path, headers, _body|
+      next FakeServer.json(404, { "error" => "no route" }) if path.include?("/values/delta") # a rolld without delta reads
       tag = headers["if-none-match"]
       asked << tag
       next FakeServer.json(400) unless path.include?("digest=1")
@@ -151,6 +152,65 @@ class ACacheTest < Minitest::Test
     assert_equal ["2", "2", 4], [c.values("production").values["A"], c.values("production").values["A"], asked.size]
   ensure
     server&.close
+  end
+end
+
+class AWatchDeltaTest < Minitest::Test
+  # After a one-key change a watch reads only what changed (+…/values/delta+: each key's stamp is
+  # its version, the basis fixed) and hands on the whole folder; an older rolld (a 404 on the route)
+  # is read in full.
+  def test_a_change_reads_through_the_delta_and_an_older_rolld_reads_in_full
+    lock = Mutex.new
+    state = { values: { "A" => "1", "B" => "2" }, versions: { "A" => 1, "B" => 1 }, route: true, deltas: [], full: 0 }
+    server = FakeServer.new do |method, path, _headers, body|
+      lock.synchronize do
+        digest = "d" + state[:versions].sort.map(&:join).join
+        if path.include?("/digest")
+          FakeServer.json(200, { "digest" => digest })
+        elsif method == "GET" && path.end_with?("/values")
+          state[:full] += 1
+          FakeServer.json(200, { "values" => state[:values].dup, "problems" => [], "leases" => [], "dynamic" => [], "linked" => [] })
+        elsif path.end_with?("/values/delta") && state[:route]
+          delta = body["basis"] == "b1"
+          held = body["stamps"] || {}
+          keys = state[:values].keys.sort.select { |k| !delta || held[k] != state[:versions][k].to_s }
+          state[:deltas] << keys
+          FakeServer.json(200, { "delta" => delta, "digest" => digest, "basis" => "b1", "values" => state[:values].slice(*keys), "removed" => [],
+                                 "stamps" => keys.to_h { |k| [k, state[:versions][k].to_s] }, "problems" => [], "leases" => [], "dynamic" => [], "linked" => [] })
+        else
+          FakeServer.json(404, { "error" => "not found" })
+        end
+      end
+    end
+    c = RollSecrets::Client.new(server.url, "rlt_test", project: "prj_1")
+    seen = Queue.new
+    stop = RollSecrets::Stop.new
+    watching = Thread.new { c.watch("production", every: 0.01, stop: stop) { |v| seen << v.values.dup } }
+    assert_equal({ "A" => "1", "B" => "2" }, pop(seen))
+    lock.synchronize { state[:values]["B"], state[:versions]["B"] = "3", 2 }
+    assert_equal({ "A" => "1", "B" => "3" }, pop(seen))
+    lock.synchronize do
+      assert_equal [[%w[A B], ["B"]], 0], [state[:deltas], state[:full]], "only B came back, merged into what the watch held"
+      state[:route] = false
+      state[:values]["A"], state[:versions]["A"] = "9", 2
+    end
+    assert_equal({ "A" => "9", "B" => "3" }, pop(seen))
+    assert_equal 1, state[:full], "a 404 reads in full"
+  ensure
+    stop&.set
+    watching&.join
+    server&.close
+  end
+
+  private
+
+  def pop(queue)
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 5
+    until Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+      return queue.pop(true) unless queue.empty?
+      sleep 0.01
+    end
+    flunk "timed out"
   end
 end
 
