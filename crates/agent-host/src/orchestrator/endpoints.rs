@@ -9,6 +9,9 @@ use crate::provider::ProviderConfig;
 use agent_proto::*;
 use std::time::Instant;
 
+/// A `roll://` key's state until roll's relay sends it.
+const WAITING: &str = "waiting for roll's relay to send this key from roll secrets";
+
 impl Host {
     /// The stored endpoints; ones that no longer parse are dropped with a warning.
     pub(crate) fn stored_endpoints(store: &crate::store::Store) -> Vec<Live> {
@@ -68,13 +71,15 @@ impl Host {
             provider.endpoint_use(&spec, Some("k")).map_err(Fail::Invalid)?;
         }
         if spec.key_ref.is_some() && matches!(key, KeyChange::Set { .. }) {
-            return Err(Fail::Invalid("an endpoint's key is sealed or a 1Password reference, not both".into()));
+            return Err(Fail::Invalid("an endpoint's key is sealed or a reference, not both".into()));
         }
         let opened = match &key {
             KeyChange::Set { sealed } => Some(self.seal.open(&spec.id, sealed).map_err(Fail::Invalid)?),
             _ => None,
         };
+        // A `roll://` key comes from roll's relay (`endpoint.key`), never read here.
         let resolved = match &spec.key_ref {
+            Some(_) if spec.roll_ref().is_some() => None,
             Some(r) => Some(endpoints::read_reference(r).await),
             None => None,
         };
@@ -106,16 +111,21 @@ impl Host {
             stored.models = o.stored.models.clone();
             stored.checked_at = o.stored.checked_at;
         }
+        // The same `roll://` reference set again keeps what the relay sent for it (it sends again
+        // only when the key or who may read it changes); a new one waits for the relay.
+        let kept = old.as_ref().filter(|o| spec.roll_ref().is_some() && o.stored.spec.key_ref == spec.key_ref).map(|o| (o.resolved.clone(), o.ref_error.clone()));
         stored.key = match (key, spec.key_ref.is_some()) {
             (_, true) | (KeyChange::Clear, _) => None,
             (KeyChange::Set { .. }, false) => opened.map(|k| zeroize::Zeroizing::new(k.expose().to_string())),
             (KeyChange::Keep, false) => old.and_then(|o| o.stored.key),
         };
         let mut live = Live::new(stored);
-        match resolved {
-            Some(Ok(k)) => live.resolved = Some(k),
-            Some(Err(e)) => live.ref_error = Some(e),
-            None => {}
+        match (resolved, kept) {
+            (Some(Ok(k)), _) => live.resolved = Some(k),
+            (Some(Err(e)), _) => live.ref_error = Some(e),
+            (None, Some((k, e))) => (live.resolved, live.ref_error) = (k, e),
+            (None, None) if spec.roll_ref().is_some() => live.ref_error = Some(WAITING.into()),
+            (None, None) => {}
         }
         list.push(live);
         self.save_endpoints(&list)?;
@@ -127,6 +137,27 @@ impl Host {
         self.publish_info().await;
         drop(_guard);
         self.spawn_listing(spec.id);
+        Ok(Reply::Ok)
+    }
+
+    /// `endpoint.key`: an endpoint's `roll://` key from roll's relay, or why it can't be read.
+    /// Kept in memory only; the providers get it (or lose it) from their next process, and `hello`
+    /// says the endpoint's state (its `error` names a refusal).
+    pub(crate) async fn endpoint_key(&self, id: &str, key: RefKey) -> Res<Reply> {
+        let (resolved, error) = match key {
+            RefKey::Set { sealed } => (Some(self.seal.open_with(&SealedSecret::ref_context(id), &sealed).map_err(Fail::Invalid)?), None),
+            RefKey::Refused { reason } => (None, Some(format!("roll secrets: {}", reason.chars().take(500).collect::<String>()))),
+        };
+        let _guard = self.configuring.lock().await;
+        {
+            let mut list = self.endpoints.lock().unwrap();
+            let Some(l) = list.iter_mut().find(|l| l.stored.spec.id == id && l.stored.spec.roll_ref().is_some()) else {
+                return Err(Fail::NotFound(format!("endpoint {id} with a roll:// key")));
+            };
+            (l.resolved, l.ref_error) = (resolved, error);
+        }
+        self.configure_providers();
+        self.publish_info().await;
         Ok(Reply::Ok)
     }
 
@@ -159,7 +190,7 @@ impl Host {
     pub(crate) async fn endpoint_check(&self, id: &str) -> Res<Reply> {
         let found = self.endpoints.lock().unwrap().iter().find(|l| l.stored.spec.id == id).cloned();
         let Some(mut live) = found else { return Err(Fail::NotFound(format!("endpoint {id}"))) };
-        if let Some(r) = live.stored.spec.key_ref.clone() {
+        if let Some(r) = live.stored.spec.key_ref.clone().filter(|_| live.stored.spec.roll_ref().is_none()) {
             match endpoints::read_reference(&r).await {
                 Ok(k) => (live.resolved, live.ref_error) = (Some(k), None),
                 Err(e) => (live.resolved, live.ref_error) = (None, Some(e)),
@@ -196,8 +227,20 @@ impl Host {
         let me = self.me.clone();
         tokio::spawn(async move {
             let Some(host) = me.upgrade() else { return };
-            let refs: Vec<(String, String)> =
-                host.endpoints.lock().unwrap().iter().filter_map(|l| Some((l.stored.spec.id.clone(), l.stored.spec.key_ref.clone()?))).collect();
+            // 1Password's only: roll's relay sends the `roll://` ones once the link is up.
+            let refs: Vec<(String, String)> = host
+                .endpoints
+                .lock()
+                .unwrap()
+                .iter_mut()
+                .filter_map(|l| {
+                    if l.stored.spec.roll_ref().is_some() {
+                        l.ref_error = Some(WAITING.into());
+                        return None;
+                    }
+                    Some((l.stored.spec.id.clone(), l.stored.spec.key_ref.clone()?))
+                })
+                .collect();
             if !refs.is_empty() {
                 for (id, r) in refs {
                     let got = endpoints::read_reference(&r).await;
@@ -226,8 +269,11 @@ impl Host {
         let mut list = self.endpoints.lock().unwrap().clone();
         let Some(l) = list.iter_mut().find(|l| l.stored.spec == was.stored.spec) else { return Ok(()) };
         l.stored.checked_at = Some(now());
-        l.resolved = was.resolved.clone();
-        l.ref_error = was.ref_error.clone();
+        // A `roll://` key may have come from the relay while this listed: keep the newest.
+        if l.stored.spec.roll_ref().is_none() {
+            l.resolved = was.resolved.clone();
+            l.ref_error = was.ref_error.clone();
+        }
         match listed {
             Ok(models) => (l.stored.models, l.stored.error) = (models, None),
             Err(e) => l.stored.error = Some(e),

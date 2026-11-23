@@ -93,8 +93,16 @@ dependencies = [
 name = "agent-proto"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
+ "base64 0.22.1",
+ "curve25519-dalek",
+ "hkdf",
+ "rand 0.8.8",
+ "roll-secrets-ref",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "zeroize",
 ]
 
 [[package]]
@@ -7642,6 +7650,7 @@ dependencies = [
  "roll-keyshares",
  "roll-oidc",
  "roll-secrets-chain",
+ "roll-secrets-ref",
  "roll-workspace",
  "rsa",
  "rustls-pki-types",
@@ -7672,6 +7681,10 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
 ]
+
+[[package]]
+name = "roll-secrets-ref"
+version = "0.1.0"
 
 [[package]]
 name = "roll-workspace"

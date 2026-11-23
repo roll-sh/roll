@@ -25,7 +25,7 @@ const KINDS: EndpointKind[] = ["cliproxy", "anthropic", "openai", "custom"];
 /** The segmented control's words (the full ones are its tooltips). */
 const KIND_SHORT: Record<EndpointKind, string> = { cliproxy: "CLIProxyAPI", anthropic: "Anthropic", openai: "OpenAI", custom: "Custom", gateway: "roll gateway" };
 
-const TERMS = ["endpoint", "cliproxy", "cliproxyapi", "proxy", "gateway", "base url", "api key", "key", "token", "1password", "op://", "anthropic", "openai", "litellm", "openrouter"];
+const TERMS = ["endpoint", "cliproxy", "cliproxyapi", "proxy", "gateway", "base url", "api key", "key", "token", "1password", "op://", "roll://", "anthropic", "openai", "litellm", "openrouter"];
 
 export const ENDPOINT_SETTINGS = {
   machine: {
@@ -307,7 +307,7 @@ export function EndpointEditor({
       ...(kind === "custom" ? { url_env: urlEnv, key_env: keyEnv } : {}),
       ...(fromOp ? { key_ref: ref } : {}),
     };
-    if (fromOp && !ref.trim()) return setProblem("Enter the op:// reference, or turn off From 1Password.");
+    if (fromOp && !ref.trim()) return setProblem("Enter the op:// or roll:// reference, or turn off From a reference.");
     // A profile is for the providers it lists; one for none would never be used.
     if (!withKey && !picked.length && providers.length) return setProblem("Pick the providers this profile is for.");
     const checked = checkEndpoint(spec);
@@ -402,10 +402,12 @@ export function EndpointEditor({
         )}
       </Labeled>
       <Labeled
-        label={withKey ? "Key" : "Key from 1Password"}
+        label={withKey ? "Key" : "Key from a reference"}
         hint={
           fromOp
-            ? "Read on the machine with the op CLI when it's needed. A reference isn't a secret."
+            ? ref.startsWith("roll://")
+              ? "From roll secrets, read as you while you may reveal it, and sent sealed to this machine. A reference isn't a secret."
+              : "Read on the machine with the op CLI when it's needed. A reference isn't a secret."
             : withKey
               ? typing && !clearKey
                 ? "Sealed to this machine in your browser; roll only carries it encrypted and never shows it again."
@@ -415,7 +417,7 @@ export function EndpointEditor({
       >
         <div className="flex flex-wrap items-center gap-2">
           {fromOp ? (
-            <input aria-label="1Password reference" value={ref} onChange={(e) => setRef(e.target.value)} placeholder="op://vault/item/field" spellCheck={false} className={cn(field, "min-w-48 flex-1 font-mono text-[12px]")} />
+            <input aria-label="Key reference" value={ref} onChange={(e) => setRef(e.target.value)} placeholder="op://vault/item/field or roll://production/KEY" spellCheck={false} className={cn(field, "min-w-48 flex-1 font-mono text-[12px]")} />
           ) : withKey ? (
             typing && !clearKey ? (
               <div className="min-w-48 flex-1">
@@ -443,8 +445,8 @@ export function EndpointEditor({
             )
           ) : null}
           <label className="ml-auto flex shrink-0 items-center gap-2 text-[12px] text-muted">
-            From 1Password
-            <Switch size="sm" checked={fromOp} onCheckedChange={setFromOp} aria-label="Key from 1Password" />
+            From a reference
+            <Switch size="sm" checked={fromOp} onCheckedChange={setFromOp} aria-label="Key from a reference" />
           </label>
         </div>
         {clearKey && <p className="text-[11.5px] text-subtle">The key is removed when you save.</p>}
