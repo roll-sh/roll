@@ -27,6 +27,32 @@ fn count_catalog_scan(table: crate::catalog::system::SysTable, path: Option<&cra
 }
 
 /// Start running `plan`.
+/// `open` of a plan whose caller reads at most `rows` of its rows (an EXISTS sub-select's one,
+/// a scalar one's two): a scan right below (through projections) counts that fraction of its
+/// rows in its choice of workers, as PostgreSQL plans a sub-select for the rows it is read
+/// for (make_subplan's tuple_fraction).
+pub fn open_bounded(plan: &Arc<Plan>, rows: Option<usize>, ctx: &ExecCtx) -> Result<BoxNode> {
+    let Some(at) = rows.and_then(|_| bounded_scan(plan)) else {
+        return open(plan, ctx);
+    };
+    let prev = ctx.scan_bound.replace(rows.map(|n| (at, n)));
+    let n = open(plan, ctx);
+    ctx.scan_bound.set(prev);
+    n
+}
+
+/// The scan a bound on `p`'s rows bounds (its `ScanPlan`'s address): `p`'s, or one right below
+/// projections (ExecSetTupleBound's walk).
+fn bounded_scan(mut p: &Plan) -> Option<usize> {
+    loop {
+        match p {
+            Plan::Project { input, .. } | Plan::Barrier { input, .. } => p = input,
+            Plan::Scan(s) => return Some(&**s as *const crate::sql::plan::ScanPlan as usize),
+            _ => return None,
+        }
+    }
+}
+
 pub fn open(plan: &Arc<Plan>, ctx: &ExecCtx) -> Result<BoxNode> {
     // (Taken first: a mask is for this node alone, whatever happens next.)
     let mut need = ctx.need.take();
@@ -495,14 +521,21 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             with_ties,
         } => Box::new(LimitNode {
             input: {
-                // ExecSetTupleBound: a sort right below needs only LIMIT + OFFSET rows.
+                // ExecSetTupleBound: a sort right below needs only LIMIT + OFFSET rows; a
+                // scan right below is read for them (its choice of workers).
                 ctx.sort_bound.set(tuple_bound(input, limit, offset, with_ties, ctx));
+                let scan = bounded_scan(input).and_then(|at| Some((at, limit_rows(limit, offset, with_ties, ctx)?)));
+                let prev = ctx.scan_bound.get();
+                if scan.is_some() {
+                    ctx.scan_bound.set(scan);
+                }
                 let need = match with_ties {
                     Some(k) => nd::add(need.map(<[bool]>::to_vec), nd::keys(k)),
                     None => need.map(<[bool]>::to_vec),
                 };
                 let n = open_need(input, need, ctx);
                 ctx.sort_bound.set(None);
+                ctx.scan_bound.set(prev);
                 n?
             },
             limit: limit.clone(),
@@ -3769,6 +3802,11 @@ fn tuple_bound(
             _ => return None,
         }
     }
+    limit_rows(limit, offset, with_ties, ctx)
+}
+
+/// LIMIT + OFFSET, when their counts are known and valid (and no WITH TIES).
+fn limit_rows(limit: &Option<Expr>, offset: &Option<Expr>, with_ties: &Option<Vec<SortKey>>, ctx: &ExecCtx) -> Option<usize> {
     if with_ties.is_some() {
         return None;
     }

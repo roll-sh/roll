@@ -688,6 +688,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             streamed: false,
             par: None,
             par_tried: false,
+            bound: None,
             in_order: None,
             prefilter: None,
             toast: None,
@@ -791,6 +792,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             streamed: false,
             par: None,
             par_tried: false,
+            bound: None,
             in_order: None,
             prefilter: None,
             toast: None,
@@ -884,6 +886,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             streamed: false,
             par: None,
             par_tried: false,
+            bound: None,
             in_order: None,
             prefilter: None,
             toast: None,
@@ -1047,6 +1050,7 @@ fn open_scan_as(
         streamed: false,
         par: None,
         par_tried: false,
+        bound: ctx.scan_bound.get().filter(|b| b.0 == key).map(|b| b.1),
         in_order: None,
         prefilter: None,
         toast: None,
@@ -2090,6 +2094,7 @@ fn dense_bitmap_scan(
         streamed: false,
         par: None,
         par_tried: false,
+        bound: None,
         in_order: None,
         prefilter: None,
         toast: None,
@@ -2614,6 +2619,8 @@ struct ScanNode {
     /// Such a scan read by worker threads (`parscan`), once decided (`par_tried`).
     par: Option<super::parscan::ParScan>,
     par_tried: bool,
+    /// The rows a LIMIT or a sub-select right above reads of it (`ExecCtx::scan_bound`).
+    bound: Option<usize>,
     /// The range is one key of a unique index (`unique_point`): at most one row of it is
     /// visible, so the scan reads its entries one at a time, ends at that row and takes no
     /// workers.
@@ -4807,25 +4814,6 @@ const INLINE_MIN_PAGES: u32 = 32;
 /// min_parallel_table_scan_size's default).
 const INLINE_MAX_PAGES: u32 = 1024;
 
-/// The least stored bytes of a scan's key range narrower than its relation's read by workers
-/// (min_parallel_index_scan_size's default, 512 kB): PostgreSQL plans no parallel scan of less, and for a range of a few
-/// hundred rows the workers' setup (the range's ends, its cuts, threads) costs many times
-/// the rows. An inline scan's range: `INLINE_MIN_BYTES`.
-const PARALLEL_MIN_BYTES: u64 = 512 << 10;
-
-/// The least stored bytes of a key range scanned inline (`ParScan::start_inline`): under it
-/// the serial path (its cuts each position a scan over every source).
-const INLINE_MIN_BYTES: u64 = 64 << 10;
-
-/// Whether [start, end), a range of relation `rel`'s keys (`index_prefix`) narrower than all of
-/// them (a BETWEEN's, an equality's), holds under `min` stored bytes (`Store::range_bytes`). A
-/// whole relation's scan is decided as before.
-fn short_range(start: &[u8], end: &[u8], rel: &[u8], min: u64, ctx: &ExecCtx) -> bool {
-    let rel_end = prefix_end(rel);
-    let narrower = start > rel || (!end.is_empty() && end < rel_end.as_slice());
-    narrower && ctx.sess.db.store.range_bytes(start, end) < min
-}
-
 fn parallel_workers(ctx: &ExecCtx) -> (usize, usize) {
     let (pool, per_gather) = ctx.sess.settings.borrow().hot().parallel_workers;
     let n = per_gather.min(pool);
@@ -4963,6 +4951,37 @@ pub(crate) fn keyed_cuts(
 }
 
 impl ScanNode {
+    /// Whether this scan of [start, end) reads too little for workers, as PostgreSQL gives a
+    /// scan none (compute_parallel_worker): an index range (`table` None), or a key range of a
+    /// table narrower than its keys (`table`: its key prefix; a primary key's BETWEEN, its
+    /// index scan in PostgreSQL's plan), under min_parallel_index_scan_size; a table's whole
+    /// scan under min_parallel_table_scan_size, only when read for fewer rows than it
+    /// returns (else as before: the heap's own sizes decide it). A scan read for `bound` rows
+    /// (a LIMIT's, an EXISTS's) reads that fraction of the rows the planner expects of it
+    /// (the fraction of its cost the LIMIT's plan pays). A setting of 0: never too little.
+    /// The range's size is its files' blocks decompressed and its memtables' entries
+    /// (`Store::range_at_least`), against 8 kB pages. (A prepared statement's generic plan
+    /// doesn't know its range: pgbench's 100-row ranges of a 3.2 M-row table, and `aid >= $1
+    /// ORDER BY aid LIMIT 100`, were cut into chunks for workers, 3-9 M user instructions.)
+    fn reads_little(&self, start: &[u8], end: &[u8], table: Option<&[u8]>, ctx: &ExecCtx) -> bool {
+        let rows = self.plan.est.1;
+        let fraction = match self.bound {
+            Some(n) if rows > n as f64 => n as f64 / rows,
+            _ => 1.0,
+        };
+        let whole = table.is_some_and(|t| start <= t && (end.is_empty() || end >= prefix_end(t).as_slice()));
+        if whole && fraction >= 1.0 {
+            return false;
+        }
+        let (table_pages, index_pages) = ctx.sess.settings.borrow().hot().min_parallel_pages;
+        let pages = if whole { table_pages } else { index_pages };
+        if pages <= 0.0 {
+            return false;
+        }
+        let bytes = (pages * 8192.0 / fraction).min(u64::MAX as f64) as u64;
+        !ctx.sess.db.store.range_at_least(start, end, bytes)
+    }
+
     /// A sequential scan of a big table (its heap not modelled: rows in storage order)
     /// read by worker threads, when nothing it does needs this thread per row.
     fn start_parallel(
@@ -5083,8 +5102,7 @@ impl ScanNode {
             return Ok(None);
         }
         let (start, end) = self.ranges[0].clone();
-        // (A short key range, a primary key's BETWEEN: the serial path.)
-        if short_range(&start, &end, &index_prefix(p.table.oid, 0), if inline { INLINE_MIN_BYTES } else { PARALLEL_MIN_BYTES }, ctx) {
+        if self.reads_little(&start, &end, Some(&index_prefix(p.table.oid, 0)), ctx) {
             return Ok(None);
         }
         // (A heap whose rows only inserts put out of key order, as a COPY puts some in an
@@ -5279,9 +5297,7 @@ impl ScanNode {
             },
         };
         let (start, end) = self.ranges[0].clone();
-        // (An index range of a few entries, an equality's or a short BETWEEN's: the serial
-        // index scan, as PostgreSQL's plan.)
-        if short_range(&start, &end, &index_prefix(p.table.oid, ix.id), PARALLEL_MIN_BYTES, ctx) {
+        if self.reads_little(&start, &end, None, ctx) {
             return Ok(None);
         }
         let lo = txn.scan_snap(&start, &end, &snap).next().transpose()?.map(|(k, _)| k);
@@ -5869,6 +5885,9 @@ impl Node for ScanNode {
             spare,
             probe,
             plan_decided: _,
+            // (Kept: the LIMIT's count as the execution that opened it read it; a count
+            // given as a parameter only moves the choice of workers.)
+            bound: _,
             fscan,
             fetch_calls,
             dscan,
@@ -7127,6 +7146,7 @@ fn keyed_scan(s: &ScanPlan, plan: ScanPlan, ix: &Index, keys: Keys, ctx: &ExecCt
         streamed: false,
         par: None,
         par_tried: false,
+        bound: None,
         in_order: None,
         prefilter: None,
         toast: None,

@@ -904,6 +904,21 @@ fn parallel_fetches_match_serial_inner() {
     assert!(!a.is_empty(), "{stat_serial}");
     let runs = |v: &[i64]| v.iter().zip(&z).map(|(x, z)| x - z).collect::<Vec<_>>();
     assert_eq!(runs(&b), runs(&a).iter().map(|x| 2 * x).collect::<Vec<_>>(), "{stat_setup} {stat_serial} {stat_parallel}");
+    // A read of fewer index pages than min_parallel_index_scan_size starts no workers, as
+    // PostgreSQL plans none: a short range, and an open-ended one read for a LIMIT's or an
+    // EXISTS's rows (that fraction of its rows); the open-ended range alone does.
+    s.query("SET enable_seqscan = off; SET enable_bitmapscan = off").unwrap();
+    for (q, workers) in [
+        ("SELECT count(*), sum(x) FROM big3 WHERE v BETWEEN 10 AND 11", false),
+        ("SELECT sum(x) FROM (SELECT x FROM big3 WHERE v >= 10 ORDER BY v LIMIT 100) s", false),
+        ("SELECT EXISTS (SELECT 1 FROM big3 WHERE v >= 10 AND x > 1)", false),
+        ("SELECT sum(x) FROM big3 WHERE v >= 10", true),
+    ] {
+        assert!(out(&mut s, &format!("EXPLAIN (COSTS OFF) {q}")).iter().any(|l| l.contains("Index Scan using big3_v")), "{q}");
+        let started = pg_engine::exec::parscan::started();
+        out(&mut s, q);
+        assert_eq!(pg_engine::exec::parscan::started() > started, workers, "{q}");
+    }
 }
 
 /// A bitmap whose quals read only index columns of fixed-width types checks them on the

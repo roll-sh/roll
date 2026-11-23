@@ -513,6 +513,10 @@ pub struct ExecCtx<'a> {
     stable_snap: RefCell<Option<Rc<crate::txn::Snap>>>,
     /// Set while a LIMIT opens its input: the bound a sort right below it gets.
     pub sort_bound: Cell<Option<usize>>,
+    /// Set while a LIMIT (or an EXISTS's or a scalar subquery's read) opens its input: the
+    /// scan right below it (through projections), by its plan's address, and the rows it is
+    /// read for: its choice of workers counts that fraction of its rows (`ScanNode::reads_little`).
+    pub scan_bound: Cell<Option<(usize, usize)>>,
     /// Set right before opening a plan node (`nodes::open_need`), taken as it opens: the
     /// columns of its rows anything above reads (None: all). A scan leaves the others
     /// undecoded (NULL).
@@ -975,6 +979,7 @@ impl<'a> ExecCtx<'a> {
             snap: RefCell::new(None),
             stable_snap: RefCell::new(None),
             sort_bound: Cell::new(None),
+            scan_bound: Cell::new(None),
             need: Cell::new(None),
             logical_need: Cell::new(None),
             estimates: RefCell::default(),
@@ -1109,6 +1114,7 @@ impl<'a> ExecCtx<'a> {
             snap: RefCell::new(None),
             stable_snap: RefCell::new(self.stable_snap.borrow().clone()),
             sort_bound: Cell::new(None),
+            scan_bound: Cell::new(None),
             need: Cell::new(None),
             logical_need: Cell::new(None),
             estimates: RefCell::default(),
@@ -1556,7 +1562,7 @@ impl<'a> ExecCtx<'a> {
         };
         let mut node = match rescanned {
             Some(n) => n,
-            None => nodes::open(&s.plan, self)?,
+            None => nodes::open_bounded(&s.plan, limit, self)?,
         };
         let mut out = Vec::new();
         while let Some(r) = node.next(self)? {
@@ -1892,7 +1898,7 @@ impl<'a> ExecCtx<'a> {
 /// Run a plan to completion (as a statement of its own when none runs in `ctx`).
 pub fn collect(plan: &Arc<Plan>, ctx: &ExecCtx, limit: Option<usize>) -> Result<Vec<Row>> {
     let run = || ctx.statement(|| {
-        let mut node = nodes::open(plan, ctx)?;
+        let mut node = nodes::open_bounded(plan, limit, ctx)?;
         let mut out = Vec::new();
         while let Some(r) = node.next(ctx)? {
             out.push(r);

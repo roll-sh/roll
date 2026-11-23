@@ -575,6 +575,9 @@ pub struct Hot {
     /// max_parallel_workers and max_parallel_workers_per_gather (their defaults when
     /// unparsable).
     pub parallel_workers: (usize, usize),
+    /// min_parallel_table_scan_size and min_parallel_index_scan_size, in pages (their
+    /// defaults when unparsable).
+    pub min_parallel_pages: (f64, f64),
 }
 
 /// A session's search path (`session_search_path`) for a `$user` and backend id: what every
@@ -1522,6 +1525,10 @@ impl Settings {
                     parallel_workers: {
                         let num = |n: &str, d: usize| self.get_str(n).and_then(|v| v.parse::<usize>().ok()).unwrap_or(d);
                         (num("max_parallel_workers", 8), num("max_parallel_workers_per_gather", 2))
+                    },
+                    min_parallel_pages: {
+                        let num = |n: &str, d: f64| self.get_str(n).and_then(|v| v.parse::<f64>().ok()).unwrap_or(d);
+                        (num("min_parallel_table_scan_size", 1024.0), num("min_parallel_index_scan_size", 64.0))
                     },
                 },
             })

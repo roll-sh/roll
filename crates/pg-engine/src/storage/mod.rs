@@ -856,6 +856,9 @@ impl PinSlot {
 /// MB of format 2 files) before blocks were of several sizes.
 const BULK_RATIO: u64 = 4;
 
+/// The most memtable entries `Store::range_at_least` walks before taking a range as big.
+const RANGE_WALK: usize = 4096;
+
 /// The newest store format this build reads: its files' (`sst::FORMAT`), 3 for a manifest
 /// naming dead-entry sets (`SstMeta::dv`), which builds before them would read past (their
 /// files' dead entries as live), and 4 for one naming a file with a dictionary
@@ -1258,6 +1261,48 @@ impl Store {
             bytes += s.stored_bytes(s.find_block(start), b);
         }
         bytes
+    }
+
+    /// Whether [start, end) (an empty `end`: unbounded) holds at least `bytes` as a scan reads
+    /// them: its files' blocks over the range decompressed (about `BULK_RATIO` times their
+    /// stored bytes, as `bulk_range` counts them), then its memtables' entries. Stops at
+    /// `bytes`; a range whose memtable entries could reach it is walked for at most
+    /// `RANGE_WALK` entries (more: true). For a scan's choice of workers
+    /// (min_parallel_index_scan_size).
+    pub fn range_at_least(&self, start: &[u8], end: &[u8], bytes: u64) -> bool {
+        let v = self.view();
+        let ssts = v.l0.iter().chain(&v.l1).chain(v.imm.iter().filter_map(|f| match f {
+            Frozen::Sst(s) => Some(s),
+            Frozen::Mem(_) => None,
+        }));
+        let mut held = 0u64;
+        for s in ssts {
+            if s.meta.last_key.as_slice() < start || (!end.is_empty() && s.meta.first_key.as_slice() >= end) {
+                continue;
+            }
+            let last = s.block_count().saturating_sub(1);
+            let b = if end.is_empty() { last } else { s.find_block(end).min(last) };
+            held += s.stored_bytes(s.find_block(start), b).saturating_mul(BULK_RATIO);
+            if held >= bytes {
+                return true;
+            }
+        }
+        // (The memtables' whole sizes first: a range they can't fill is decided without a walk.)
+        if held + v.memtables().map(|m| m.bytes() as u64).sum::<u64>() < bytes {
+            return false;
+        }
+        let upper = if end.is_empty() { Bound::Unbounded } else { Bound::Excluded(end) };
+        let mut walked = 0;
+        for m in v.memtables() {
+            for e in m.map.range::<[u8], _>((Bound::Included(start), upper)) {
+                held += (e.key().len() + e.value().as_ref().map_or(0, |v| v.len())) as u64;
+                walked += 1;
+                if held >= bytes || walked >= RANGE_WALK {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Watch `table` (the first 4 bytes of its keys): until a commit writes one of its keys
