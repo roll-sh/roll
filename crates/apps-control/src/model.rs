@@ -1868,6 +1868,10 @@ pub struct Environment {
     pub rate_limit: Option<RateLimit>,
     /// Its firewall rules, in order ([]: none).
     pub firewall: Vec<FirewallRule>,
+    /// How many requests each of them matched in the last 24 hours, in their order (on the node
+    /// that serves it: a takeover starts them again). A `log` rule's too.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub firewall_hits: Vec<u32>,
     /// Headers its answers carry ([]: none).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub headers: Vec<HeaderRule>,
@@ -2068,6 +2072,19 @@ pub enum FirewallAction {
     /// Let in a browser that has passed a proof of work this hour (Vercel's Attack Challenge
     /// Mode, `challenge.rs`); anything else gets the page that works it out.
     Challenge,
+    /// Count what it matches and go on to the next rule (Vercel's Log action, Cloud Armor's
+    /// preview mode): a rule tried on real traffic before it blocks anyone.
+    Log,
+}
+
+impl FirewallRule {
+    /// What it's counted by ([`Environment::firewall_hits`]): its content, so moving it or
+    /// changing another setting keeps its count, and changing it starts a new one.
+    pub fn fingerprint(&self) -> u64 {
+        use sha2::{Digest, Sha256};
+        let d = Sha256::digest(serde_json::to_vec(self).unwrap_or_default());
+        u64::from_be_bytes(d[..8].try_into().unwrap_or_default())
+    }
 }
 
 /// The most rules an environment has.

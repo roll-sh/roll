@@ -6933,7 +6933,15 @@ async fn firewall_rules_decide_in_order() {
     assert_eq!(ask("198.51.100.1:5000", "/", &[("user-agent", "Mozilla/5.0 (Macintosh) Safari/605.1.15")]).await, StatusCode::OK, "a browser");
     call(&w.api, "PUT", &base, Some(json!({"firewall": [{"action": "challenge", "path": "/*"}]}))).await;
     assert_eq!(ask("66.249.66.1:5000", "/", &gb).await, StatusCode::OK, "a verified crawler passes a challenge");
+    assert_eq!(ask("66.249.66.1:5000", "/", &[("user-agent", "Mozilla/5.0 (compatible; Amazonbot/0.1)")]).await, StatusCode::FORBIDDEN, "an AI crawler gets the page");
     assert_eq!(ask("198.51.100.1:5000", "/", &gb).await, StatusCode::FORBIDDEN, "a claimed one gets the page");
+    // A rule tried before it blocks: `log` counts and goes on; each rule's last 24 hours.
+    call(&w.api, "PUT", &base, Some(json!({"firewall": [{"action": "log", "path": "/wp-*"}, {"action": "deny", "path": "/wp-admin/*"}]}))).await;
+    assert_eq!(req("GET", "/wp-login.php", "curl").await, StatusCode::OK, "logged, let in");
+    assert_eq!(req("GET", "/wp-admin/x", "curl").await, StatusCode::FORBIDDEN, "logged, then the next rule decides");
+    assert_eq!(call(&w.api, "GET", &base, None).await.1["firewall_hits"], json!([2, 1]));
+    call(&w.api, "PUT", &base, Some(json!({"firewall": [{"action": "deny", "path": "/wp-admin/*"}, {"action": "log", "path": "/wp-*"}]}))).await;
+    assert_eq!(call(&w.api, "GET", &base, None).await.1["firewall_hits"], json!([1, 2]), "a moved rule keeps its count");
     call(&w.api, "PUT", &base, Some(json!({"firewall": null}))).await;
     assert_eq!(req("GET", "/admin/users", "curl").await, StatusCode::OK);
 }

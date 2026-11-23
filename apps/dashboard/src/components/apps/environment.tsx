@@ -659,8 +659,13 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
                 <p className="mt-1 text-[12px] text-muted">
                   {env.firewall?.length
                     ? `${env.firewall.length} ${env.firewall.length === 1 ? "rule" : "rules"}, in order: the first that matches a request decides.`
-                    : "No rules. One a line: deny /admin/*, deny method=DELETE, allow /admin/health, deny ua=BadBot, limit 10 /login method=POST (10 a minute a client), challenge /* (a browser check), deny bots=ai,spoofed (AI crawlers, and crawlers posing as Google's or Bing's)."}
+                    : "No rules. One a line: deny /admin/*, deny method=DELETE, allow /admin/health, deny ua=BadBot, limit 10 /login method=POST (10 a minute a client), challenge /* (a browser check), deny bots=ai,spoofed (AI crawlers, and crawlers posing as Google's or Bing's), log /wp-* (counts, blocks nothing)."}
                 </p>
+                {!!env.firewall?.length && !!env.firewall_hits?.length && (
+                  <p className="mt-1 font-mono text-[11px] text-subtle">
+                    Last 24 h: {env.firewall.map((r, i) => `${i + 1}. ${r.action} ${(env.firewall_hits?.[i] ?? 0).toLocaleString()}`).join(" · ")}
+                  </p>
+                )}
               </div>
               <button className={btn} disabled={busy || fw === fwText} onClick={() => runner.run("firewall", () => appsApi.putEnvironment(service.id, env.name, { firewall: parseFirewall(fw) }))}>
                 Save

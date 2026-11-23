@@ -1317,7 +1317,7 @@ static TOOLS: &[Tool] = &[
         b("maintenance", Ty::Any, "true, {message} or false: answer a maintenance page instead of the app"),
         b("allow_ips", Ty::Arr, "Only these addresses get in: [cidr or {cidr, description}]"),
         b("rate_limit", Ty::Obj, "{per_minute, burst?}: requests a client address may make"),
-        b("firewall", Ty::Arr, "[{action: allow|deny|limit|challenge, path?, methods?, user_agent?, per_minute?, burst?}], first match wins; limit holds a client to per_minute (1-100000) on what it matches; challenge lets in a browser that passed a proof of work this hour (GET only)"),
+        b("firewall", Ty::Arr, "[{action: allow|deny|limit|challenge|log, path?, methods?, user_agent?, bots?, per_minute?, burst?}], first match wins; limit holds a client to per_minute (1-100000) on what it matches; challenge lets in a browser that passed a proof of work this hour (GET only); log only counts what it matches (the environment's firewall_hits) and goes on, to try a rule before it blocks"),
         bnull("routes", Ty::Arr, "[{path, service}] (at most 20): a path (a prefix ends in *) another service of the project answers, by name; clear it for none"),
         bnull("redirects", Ty::Str, "its own redirects on any service, _redirects lines: `/old /new 308`, `/blog/* /posts/:splat` (301 unless 302, 303, 307 or 308); clear it for none"),
         bnull("egress", Ty::Any, "{mode: roll|open, hosts?}: roll lets its code reach roll and only these hosts (at most 20, *. for subdomains), from the next deploy; clear it for open"),

@@ -2006,8 +2006,21 @@ impl roll_secrets::Workloads for Workloads {
     /// Each token as roll-access answers it now: gone once revoked or expired, or (a person's own)
     /// once its person can't sign in.
     fn grants(&self) -> roll_secrets::Result<Vec<roll_auth::Grant>> {
+        self.live(|_| true)
+    }
+
+    /// Only tokens whose rules (and rules approved for a while) can name `project` are resolved.
+    fn grants_naming(&self, project: &str) -> roll_secrets::Result<Vec<roll_auth::Grant>> {
+        let names = |r: &roll_auth::scope::Rule| roll_secrets::access::rule_may_name(r, project);
+        Ok(self.live(|g| g.rules.0.iter().chain(g.temporary.iter().map(|t| &t.rule)).any(names))?.into_iter().filter(|g| g.scope.0.iter().any(names)).collect())
+    }
+}
+
+impl Workloads {
+    /// roll-access's tokens that aren't revoked and that `keep` keeps, each as its grant now.
+    fn live(&self, keep: impl Fn(&roll_access::store::Grant) -> bool) -> roll_secrets::Result<Vec<roll_auth::Grant>> {
         let list = self.0.store.list().map_err(|e| Error::Internal(format!("listing roll-access's tokens: {e}")))?;
-        Ok(list.into_iter().filter(|g| g.revoked_at.is_none()).filter_map(|g| roll_auth::Grants::grant(&*self.0, &g.id)).collect())
+        Ok(list.into_iter().filter(|g| g.revoked_at.is_none() && keep(g)).filter_map(|g| roll_auth::Grants::grant(&*self.0, &g.id)).collect())
     }
 }
 
@@ -2176,13 +2189,14 @@ impl code_control::SecretEnv for ForCode {
             let (slug, path) = environment.split_once(':').unwrap_or((&environment, "/"));
             let v = match secrets.values_as_maker(&by, &project, slug, path, &consumer) {
                 Ok(v) => v,
-                Err(roll_secrets::Error::MakerUnreachable(m)) => return Err(code_control::Refused(m).into()),
+                // Where it stands first: a deleted project fails the maker check too, and its
+                // recovery brings both back.
                 Err(e) => {
                     return Err(match secrets.environment_standing(&project, slug)? {
-                        roll_secrets::deleted_envs::Standing::Kept { .. } => anyhow::anyhow!("{slug} is deleted and kept for its recovery window: its values come back if it's recovered"),
+                        roll_secrets::deleted_envs::Standing::Kept { .. } => anyhow::anyhow!("{slug}, or its project, is deleted and kept for its recovery window: its values come back if it's recovered"),
                         roll_secrets::deleted_envs::Standing::Gone => code_control::Refused(format!("{slug} no longer exists")).into(),
                         roll_secrets::deleted_envs::Standing::Live => match e {
-                            roll_secrets::Error::Forbidden(m) | roll_secrets::Error::NotFound(m) => code_control::Refused(m).into(),
+                            roll_secrets::Error::MakerUnreachable(m) | roll_secrets::Error::Forbidden(m) | roll_secrets::Error::NotFound(m) => code_control::Refused(m).into(),
                             e => anyhow::Error::from(e),
                         },
                     });

@@ -7231,11 +7231,20 @@ async fn a_deleted_project_reads_as_unknown_and_comes_back_within_its_window() {
     let (ada_ci, _) = api.gate.grant("ada-ci", roll_secrets::access::rule(&hers, None, None, &[roll_secrets::Action::Read]), Some("usr_ada"));
     let envs = format!("/v1/secrets/projects/{hers}/environments");
     assert_eq!(api.req(Method::GET, &envs, None, Some(&ada_ci)).await.0, StatusCode::OK);
+    // A sandbox she copied development into reads it again as her at each start: in the project's
+    // window it's kept (the sandbox waits), not refused (it would let go of the values for good).
+    let copy = || api.secrets.values_as_maker("usr_ada", &hers, "development", "/", "sandbox:sbx_notes").map(|v| v.values.contains_key("TOKEN"));
+    let standing = || api.secrets.environment_standing(&hers, "development").unwrap();
+    assert!(copy().unwrap());
     assert_eq!(api.call(Method::DELETE, &format!("/v1/workspace/projects/{hers}?confirm=notes"), None).await.0, StatusCode::NO_CONTENT);
     assert_eq!(api.req(Method::GET, &envs, None, Some(&ada_ci)).await.0, StatusCode::NOT_FOUND);
+    assert!(copy().is_err());
+    assert!(matches!(standing(), roll_secrets::deleted_envs::Standing::Kept { .. }), "{:?}", standing());
     assert_eq!(api.as_ada(Method::GET, "/v1/secrets/deleted", None).await.1[0]["project"], hers.as_str());
     assert_eq!(api.as_ada(Method::POST, &format!("/v1/secrets/projects/{hers}/recover"), None).await.0, StatusCode::OK);
     assert_eq!(api.req(Method::GET, &envs, None, Some(&ada_ci)).await.0, StatusCode::OK, "her membership came back with it");
+    assert_eq!(standing(), roll_secrets::deleted_envs::Standing::Live);
+    assert!(copy().unwrap(), "the sandbox's next start has its values again");
 
     let back = api.ok(Method::POST, &recover, None).await;
     assert_eq!(back["name"], "shop");
@@ -7273,6 +7282,7 @@ async fn past_its_window_a_deleted_project_ends_its_log_at_a_signed_digest_then_
     sweep().await;
     let recover = format!("/v1/secrets/projects/{}/recover", api.project);
     assert_eq!(api.call(Method::POST, &recover, None).await.0, StatusCode::GONE, "closed: no way back");
+    assert_eq!(api.secrets.environment_standing(&api.project, "production").unwrap(), roll_secrets::deleted_envs::Standing::Gone, "a sandbox copying it lets go");
     assert_eq!(count("secrets"), 1, "the sink hasn't had the closing digest yet");
     api.db.write(|c| c.execute("UPDATE audit SET at = at - 60000", ())).unwrap();
     sweep().await;
