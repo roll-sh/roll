@@ -60,14 +60,10 @@ pub fn resolve(link: &str) -> Option<(&'static Kind, String)> {
     let path = url.path();
     KINDS.iter().find_map(|k| {
         let rest = path.strip_prefix(k.page?)?;
-        let segments: Vec<String> = rest.split('/').filter(|s| !s.is_empty()).map(|s| urlencoding_decode(s)).collect();
+        let segments: Vec<String> = rest.split('/').filter(|s| !s.is_empty()).map(|s| percent_encoding::percent_decode_str(s).decode_utf8_lossy().into_owned()).collect();
         let id = if k.kind == "repo" { (segments.len() >= 2).then(|| format!("{}/{}", segments[0], segments[1]))? } else { segments.first()?.clone() };
         (!id.is_empty()).then_some((k, id))
     })
-}
-
-fn urlencoding_decode(s: &str) -> String {
-    url::form_urlencoded::parse(s.replace('+', "%2B").as_bytes()).map(|(k, v)| if v.is_empty() { k.into_owned() } else { format!("{k}={v}") }).collect()
 }
 
 /// The first list of objects in an answer: the answer itself, or its first array field.
