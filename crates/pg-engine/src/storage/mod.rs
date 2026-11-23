@@ -6275,6 +6275,8 @@ mod tests {
     /// A store made with column blocks (format 5) reads every row as a store without them
     /// (format 4) holding the same writes: scans by batch (rows and columns), by row and in
     /// reverse, point reads one at a time and sorted, a unique key's probe; its manifest says 5.
+    /// The switch is the directory's, from when it was made: reopened with it the other way,
+    /// a store goes on writing (or not) column blocks as before.
     #[test]
     fn column_blocks_read_as_rows() {
         use crate::types::{Value, numeric::Numeric};
@@ -6314,8 +6316,8 @@ mod tests {
         let mut seen: Vec<Vec<String>> = Vec::new();
         for on in [false, true] {
             let dir = tempfile::tempdir().unwrap();
-            let o = || StoreOptions { memtable_bytes: 256 << 10, sync: false, background: false, target_file_bytes: 1 << 20, colblocks: on, ..Default::default() };
-            let mut s = Store::open(dir.path(), o()).unwrap();
+            let o = |on| StoreOptions { memtable_bytes: 256 << 10, sync: false, background: false, target_file_bytes: 1 << 20, colblocks: on, ..Default::default() };
+            let mut s = Store::open(dir.path(), o(on)).unwrap();
             for c in (0..n).collect::<Vec<_>>().chunks(500) {
                 s.commit(c.iter().map(|&i| (key(i), Some(row(i, 0)))).collect(), |_| Ok(())).unwrap();
             }
@@ -6327,7 +6329,7 @@ mod tests {
             s.flush_memtables().unwrap();
             s.close().unwrap();
             drop(s);
-            s = Store::open(dir.path(), o()).unwrap();
+            s = Store::open(dir.path(), o(!on)).unwrap();
             let mut out: Vec<String> = Vec::new();
             for phase in 0..2 {
                 let ts = s.visible_ts();
