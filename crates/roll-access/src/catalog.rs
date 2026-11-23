@@ -1817,6 +1817,9 @@ static ROWS: &[Row] = &[
     // visitors see, which can be copies of production's people (masked or not): reveal, as its
     // mail is.
     row("GET", "/v1/previews/{id}/fetch", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // A look at a preview's data branch (its tables, a table's first rows): copies of
+    // production's (masked or not): reveal.
+    row("GET", "/v1/previews/{id}/data/{resource}", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     row("PUT", "/v1/previews/{id}/files", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     // The mail a preview's services sent, caught and never delivered (previews-next): it can hold
     // copies of production's people, so reveal, as the preview's env is.

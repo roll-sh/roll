@@ -219,6 +219,16 @@ impl Brancher for FakeData {
     async fn schema(&self, _parent: &str, _branch: &str) -> anyhow::Result<Option<(Vec<String>, Vec<String>)>> {
         Ok(self.schema.lock().clone())
     }
+    async fn browse(&self, _parent: &str, branch: &str, table: Option<&str>) -> anyhow::Result<Option<roll_previews::Browse>> {
+        if self.kind != Kind::Postgres {
+            return Ok(None);
+        }
+        let tables = vec![roll_previews::BrowseTable { name: "public.users".into(), rows: 2 }];
+        Ok(Some(match table {
+            None => roll_previews::Browse::Tables { tables },
+            Some(t) => roll_previews::Browse::Rows { table: t.into(), columns: vec!["email".into()], rows: vec![vec![Some(format!("user-1@{branch}.invalid"))]], more: false },
+        }))
+    }
     async fn branch_schema(&self, _parent: &str, _branch: &str) -> anyhow::Result<Option<Vec<String>>> {
         // As it's made, a branch is its parent.
         if let Some(now) = self.branch_now.lock().clone() {

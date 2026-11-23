@@ -212,7 +212,7 @@ impl LinkProvider for Provider {
         let seconds = ((ttl_minutes.unwrap_or(60) + 5) * 60).clamp(900, 43_200) as i32;
         let s = session(&*self.sts, &self.db, self.issuing.as_ref(), &project, &arn, &trust, &session_name(label), seconds).map_err(|why| Error::Link(format!("AWS didn't let roll assume {name}: {why}")))?;
         let parts = BTreeMap::from([("access_key_id".to_string(), s.access_key_id), ("secret_access_key".to_string(), s.secret_access_key), ("session_token".to_string(), s.session_token)]);
-        Ok(Issued { parts, handle: json!({ "expires_at": s.expires_at }) })
+        Ok(Issued { expires_at: None, parts, handle: json!({ "expires_at": s.expires_at }) })
     }
 
     /// STS has no way to end one session early: it ends at its own expiry.

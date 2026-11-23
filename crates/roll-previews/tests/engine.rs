@@ -422,6 +422,25 @@ async fn a_previews_metrics_are_what_its_running_services_use() {
     assert!(matches!(e.engine.metrics("pv_nope").await, Err(roll_previews::Error::NotFound(_))));
 }
 
+/// A look at a data branch from the sheet (Neon's Tables): a ready Postgres branch's tables and a
+/// table's rows, through the product as the branch's own role; a kind with no way to show it yet
+/// is a 409, and a data branch the preview doesn't have a 404.
+#[tokio::test]
+async fn a_previews_data_branch_is_looked_at_from_the_sheet() {
+    let e = env(json!({ "enabled": true }));
+    e.code.open(change("chg_db", 8));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_db").unwrap().unwrap();
+    let res = e.engine.store.resources(&p.id).unwrap();
+    let id = |k: Kind| res.iter().find(|r| r.kind == k).map(|r| format!("{}:{}", r.kind.as_str(), r.parent)).unwrap();
+    let tables = e.engine.browse(&p.id, &id(Kind::Postgres), None).await.unwrap();
+    assert!(matches!(&tables, roll_previews::Browse::Tables { tables } if tables[0].name == "public.users"), "{tables:?}");
+    let rows = e.engine.browse(&p.id, &id(Kind::Postgres), Some("public.users")).await.unwrap();
+    assert!(matches!(&rows, roll_previews::Browse::Rows { rows, .. } if rows[0][0].as_deref().is_some_and(|v| v.ends_with(".invalid"))), "{rows:?}");
+    assert!(matches!(e.engine.browse(&p.id, &id(Kind::Redis), None).await, Err(roll_previews::Error::Conflict(_))));
+    assert!(matches!(e.engine.browse(&p.id, "postgres:nope", None).await, Err(roll_previews::Error::NotFound(_))));
+}
+
 /// A secret value its pages serve (Netlify's secrets scan) is named on its record and in its
 /// activity, with where, never the value; one meant for the browser (`NEXT_PUBLIC_…`) or a user
 /// name isn't.

@@ -467,7 +467,7 @@ impl Provider {
             let _ = client.delete(&user);
             return Err(Error::Link(format!("creating {user}: {why}")));
         }
-        Ok(Issued { parts: Self::parts(user.clone(), pw, srv), handle: json!({ "user": user }) })
+        Ok(Issued { expires_at: None, parts: Self::parts(user.clone(), pw, srv), handle: json!({ "user": user }) })
     }
 }
 
@@ -537,7 +537,7 @@ impl LinkProvider for Provider {
         // The cluster first: a failure there changes no password.
         let srv = link_cluster(link)?.map(|c| client.srv(&c)).transpose()?;
         let (user, pw, handle) = TURNS.issue(&self.db, r#ref, &o.managed_users, password, |u, pw| client.set_password(u, pw).map_err(|e| e.to_string()))?;
-        Ok(Issued { parts: Self::parts(user, pw, srv), handle })
+        Ok(Issued { expires_at: None, parts: Self::parts(user, pw, srv), handle })
     }
 
     fn issue_lease(&self, r#ref: &str, credential: &str, link: &Link, label: &str, ttl_minutes: u64, lease: &str) -> Result<Issued> {
