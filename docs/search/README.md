@@ -1688,7 +1688,14 @@ deterministic (#396).
    dashboard's connectors tab and (10) migration wizard as Testing Library flows; (11) `roll
    search docs add|delete`, `synonyms`/`rules list|delete` and `inference test` as lines in the
    existing CLI flows. `rolld/tests/search_cluster_e2e.rs` never runs (no script sets `ROLL_E2E` for
-   it) and `fleet_e2e.rs` covers it: delete it or wire it into `test:search --docker`. (`search-store`'s mass-recovery
+   it) and `fleet_e2e.rs` covers it: delete it or wire it into `test:search --docker`. Tests for (2), (3), (4), (7)
+   and (8), in process: `rolld` `secrets.rs`'s `a_search_link_refuses_and_deletes_a_wider_key`,
+   `previews/data.rs`'s `a_masked_search_branch_shows_no_original_value` (a text field and its
+   `.keyword`, an address in an array of objects, a dotted key, an index `logs.2024`: none in
+   `_source`, `_terms_enum` or a terms aggregation on the branch), `tests/secrets.rs`'s
+   `an_apps_search_link_is_narrowed_and_unlinking_revokes_it` (and the drain's key revoked with the
+   drain) and `a_repository_key_follows_rotation_and_a_branch_gets_no_protected_key`, and
+   `tests/auth.rs`'s `mcp_search_with_a_project_token`. (`search-store`'s mass-recovery
    WAL test flaked on a loaded host: a replay counted itself in the shared replay cache only
    after listing, so one could finish and empty it while the others listed; it now counts first.
    12 of 40 runs on one CPU failed before, 0 of 40 after.) `search-server`'s parked-governor
