@@ -292,14 +292,16 @@ const PROMPTS: &[Prompt] = &[
     Prompt {
         name: "ship_a_service",
         title: "Ship a new service",
-        description: "A new app service from a repo, a Git URL or an image: what its project file would make, the service with its links and variables, a deploy outside production first, checked, and production only when you say.",
+        description: "A new app service from a repo, a Git URL or an image: what its project file would make, what it would cost a month (you say go), the service with its links and variables, a deploy outside production first, checked, and production only when you say.",
         args: &[Arg { name: "project", description: "Workspace project to put it in", required: true }],
-        needs: &["apps_create_service", "apps_deploy", "apps_wait_deploy", "apps_get_environment", "apps_logs"],
+        needs: &["apps_quote", "apps_create_service", "apps_deploy", "apps_wait_deploy", "apps_get_environment", "apps_logs"],
         text: |a| {
             format!(
                 "Ship a new service in project {} from the code I point you at (a roll code repo, a public Git URL or \
                  an image). If it has a roll.toml, a docker-compose file or another platform's file, apps_import \
-                 first: what it would make and what isn't carried over. Then apps_create_service with that source. \
+                 first: what it would make and what isn't carried over. Before making anything, apps_quote with the \
+                 run settings you'll give it and tell me what it costs a month at most and at least (sleeping costs \
+                 nothing); go on once I say. Then apps_create_service with that source. \
                  Give it what it needs: apps_link for roll resources (a database's DATABASE_URL and the like), \
                  apps_set_variables for the rest; a credential stays in roll secrets, never pasted into a variable \
                  here. If it has an environment besides production (apps_list_environments), deploy there first \
@@ -314,13 +316,13 @@ const PROMPTS: &[Prompt] = &[
     Prompt {
         name: "ship_from_chat",
         title: "Ship an app from this chat",
-        description: "An app built from what you describe here and put live, with no git on your side: a new roll code repo, its files landed, a service deploying from it, a failed build fixed from its logs, and its URL.",
+        description: "An app built from what you describe here and put live, with no git on your side: a new roll code repo, its files landed, what the service would cost a month (you say go), the service deploying from it, a failed build fixed from its logs, and its URL.",
         args: &[
             Arg { name: "project", description: "Workspace project to put it in", required: true },
             Arg { name: "owner", description: "roll code owner the repo goes under", required: true },
             Arg { name: "name", description: "Name for the repo and the service", required: true },
         ],
-        needs: &["code_create_repo", "code_land", "apps_create_service", "apps_wait_deploy", "apps_deploy_logs", "apps_get_environment"],
+        needs: &["code_create_repo", "code_land", "apps_quote", "apps_create_service", "apps_wait_deploy", "apps_deploy_logs", "apps_get_environment"],
         text: |a| {
             format!(
                 "Build the app I describe in this chat and put it live in project {project}. I have no git here: \
@@ -329,7 +331,9 @@ const PROMPTS: &[Prompt] = &[
                  package.json, requirements.txt or go.mod roll apps can build from; it listens on $PORT), and land \
                  it with code_land: repo {owner}/{name}, a message and files, and no base (the repo is empty). \
                  Never put a credential in a file: a value I give you goes in later as a variable \
-                 (apps_set_variables) or stays in roll secrets. Then apps_create_service in project {project}, \
+                 (apps_set_variables) or stays in roll secrets. Before the service, apps_quote with the run settings \
+                 it needs (the defaults if none) and tell me what it costs a month at most and at least (sleeping \
+                 costs nothing); go on once I say. Then apps_create_service in project {project}, \
                  named {name}, with a source of kind \"repo\" whose repo is {owner}/{name} as one \"owner/name\" \
                  string: a new service has no users yet, so its first deploy is production's. Follow it with \
                  apps_wait_deploy. If the build or start fails, read apps_deploy_logs, fix the files, land again \
