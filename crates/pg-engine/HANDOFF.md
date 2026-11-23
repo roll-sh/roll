@@ -20356,3 +20356,108 @@ expectation's relpartbound) and the three sqlbody goldens above; fixed as descri
   build, 1 of 3 on PostgreSQL.
 - New suites: Knex 3.3.0 (523, identical) and TypeORM 1.1.2 (3,078: 12 differ, all pgvector
   tests that fail on the reference image, which lacks the extension) are in `compat.sh`'s list.
+
+## EXPLAIN plans against PostgreSQL 18.6's, round 6 (agent 296, 2026-11-23)
+
+Harness: agent 288's `~/.cache/a288/rx`, copied to `~/.cache/a296/rx` (`run.sh <port> <label>`,
+`cmp.py`, `classify.py`, `lst.py`, `show.py`, `sub.py <pg> <a> <b>`, and `difflines.py <pg> <x>
+<key>...`: each block's first differing line). PostgreSQL 18.6 ran in `a296-pg` (the pinned
+reference image, uid 1000, `--locale=C`, data in `~/.cache/a296/pgdata`, autovacuum off,
+max_prepared_transactions 10). Base `4b0f41516`: 1,928 of 17,654 differ (catalog 700, errors 39,
+cost 597, width 216, rows 160, display 88, extra-node 85, other shapes 15, sort-agg 15,
+join-order 9, scan 4). Both sides ran on 2026-11-22 in America/Los_Angeles. Repros in
+`~/.cache/a296/probe`.
+
+### First candidate (`cand/a296`)
+
+Plan choice (item 1):
+- **Equivalence classes have a collation** (`Search::ec_coll`, by name: a COLLATE written in
+  the clause, else a column's collation other than "default", else "default", as
+  select_common_collation derives the inputcollid; `col_coll` from the leaves' plans). A clause
+  of another collation makes no class with it. A merge join's sides read an index only in
+  their class's collation (`Want::merge_coll`, `Want::merges`); a join's ORDER BY keys
+  (`leaf_want`) and Merge Append members (`member_path`) carry the key's collation
+  (`PathKey::ident`); an index path's keys become a class's (`gkeys`, `ec_under`) only in its
+  collation. In a C database with indexes on `t COLLATE "C"`, `a.t = b.t` was merged over
+  both indexes (PostgreSQL sorts both), `a.t COLLATE "C" = b.t COLLATE "C"` now reads them,
+  `pc.t = cb.t` with `pc.t` a "C" column reads the "C" index of the default column.
+- **An ordered Append or Merge Append only for an order a member already has**
+  (generate_orderedappend_paths' all_child_pathkeys): one whose members would all be sorted
+  was chosen over a Sort of the Append (`order by t` of a range-partitioned table whose
+  indexes are `COLLATE "C"`: 1,788 against 891).
+- No regress block changed with these (the suite's collation cases already matched);
+  `probe/coll.sql` has the 14 shapes, all PostgreSQL's now but widths of resjunk `COLLATE`
+  sort columns (below).
+
+Costs (item 2):
+- **A user aggregate's transition and final functions cost their procost**, not an inlined
+  SQL body's, and two calls with the same transition function, initial value and inputs share
+  one state (get_agg_clause_costs over find_compatible_trans; `UserAgg::trans_cost`,
+  `final_cost`, `trans_fn`; aggregates, polymorphism: 40 blocks).
+- **A Result over a ProjectSet costs the level's target list with the calls in it**
+  (split_pathtarget_at_srfs: `abs(unnest(a))` pays unnest again; arrays, misc, tsrf,
+  polymorphism). An injected projection Result adds `(cpu_tuple_cost + per_tuple) * rows` in
+  one step as create_projection_path does (0.085 printed 0.08 when added in two).
+- **`text || non-text` is anytextcat / textanycat inlined**: textcat and the other side's
+  cast (an I/O cast two operators; horology:273-281 and 8 more).
+- **A FROM subquery's scan costs cpu_tuple_cost a row when the query reads none of its
+  columns** (cost_subqueryscan's trivial_pathtarget), also when setrefs then removes the scan
+  (`count(*)` over a UNION or a grouped subquery). The node under it shows its own cost: a new
+  `ExNode::hidden_cost` is in `total_cost` for the parent and not printed; a shown Subquery Scan
+  takes it as its own. union:36-42, jsonb:560/561, json:102, subselect:77/78. PostgreSQL
+  charges whenever the columns read aren't all of them in order, but the engine's column masks
+  (`needed`) mark a semi join's hashed subquery columns unread (golden `a7_partial_joins`
+  caught it), so the partial case waits for that.
+- **IS JSON** is boolvarsel's 0.5 and costs nothing (a JsonIsPredicate); **`^@`** is
+  prefixsel (`Ptype::Prefix`: the pattern is the prefix).
+- **An inheritance tree's Append has a Result over a computing projection**
+  (apply_scanjoin_target_to_paths takes it into a partitioned table's members only; the
+  engine put it there in VERBOSE only): cluster, compression, inherit, insert_conflict, merge
+  (19 blocks). Not for a whole-row reference (the members return it), nor for a tree under a
+  UNION ALL appendrel (flattened into it); a Result over members merged in order unwraps as in
+  VERBOSE (the MIN / MAX path's estimate is non-VERBOSE: quick-check's regress caught
+  inherit:441, union:162 and rowsecurity:129 / :131 on the first try).
+
+Width (item 3):
+- **A grouping's scan returns the grouping's input target** (make_group_input_target): the key
+  expressions at their types' widths, the columns the aggregates read, a whole row as a tuple
+  header and its columns (select_implicit, psql_crosstab, json:78, jsonb:66).
+- **A domain's column has no typmod** (atttypmod -1): its width is its base type's without
+  one, which also sizes a never-analyzed table (domain:3-57, copy2:22).
+
+Display (item 5):
+- **A hashed grouping's key a subquery level computes shows as the expression**
+  (show_agg_keys deparses the child's target list: `random()`, not `(random())`; random:1-20).
+- **An inlined CTE that stays a query level is a subquery named by its reference**
+  (inline_cte keeps the reference's eref): `Subquery Scan on rows` with `rows.la < rows.a`, not
+  `unnamed_subquery` over the window's expressions (cluster:23, :26).
+
+Golden `a296_plans` (recorded from 18.6).
+
+Regression files' EXPLAINs (full pass of the candidate, `out-c9`, against `out-base2`, both
+and PostgreSQL's `out-pg2` run again on 2026-11-23 in America/Los_Angeles): 139 more of the
+17,654 match, none newly differ (1,927 -> 1,788: catalog 700, errors 39, cost 513, width 208,
+rows 148, display 88, extra-node 55, sort-agg 14, other shapes 11, join-order 8, scan 4).
+TPC-H: base against new on one copied SF 0.05 data directory (`~/.cache/a296/tpch-one.sh`),
+22 of 22 plans identical in text, costs x1.000 (q13's outer grouping reads one of its grouped
+subquery's two columns: a charge PostgreSQL makes and this candidate doesn't yet, above). No
+performance gate: planning and EXPLAIN only (a collation name per group column and per
+equivalence class of a join group, a procost lookup per user
+aggregate); not measured, as a change of that size isn't measurable against the lanes' noise.
+
+Not done, found:
+- **Stable I/O casts the engine folds** (enum:22/23, age(timestamp), date 'today' casts,
+  xmlserialize, JSON_SERIALIZE ... RETURNING bytea: ~25 one-row Results 0.01 for 0.02): the
+  binder folds a constant's cast at bind time unless it plans a custom plan (`param_consts`);
+  eval_const_expressions folds only immutable ones (enum_in / enum_out are stable).
+- JSON_QUERY / JSON_VALUE `RETURNING` a domain over `char(2)`: PostgreSQL's expression has
+  typmod -1 (width 32); the engine's call returns the base type with its typmod, which its
+  coercion uses (sqljson_queryfuncs: 12 blocks).
+- `xmlexists(...)` filters estimate 0.5 in the engine (PostgreSQL: a FuncExpr, 1/3); not found
+  why (xml:146-149).
+- A resjunk sort column computed under a Sort or Merge Append (`ORDER BY t COLLATE "C"`,
+  `ORDER BY b` inside a subquery) counts in PostgreSQL's widths below the sort.
+- A UNION arm over an inheritance tree: PostgreSQL keeps the arm's Append nested under the
+  set operation's; the engine flattens it (costs then differ).
+- Subquery Scan widths (remove_unused_subquery_outputs' NULLs at their types' widths), memoize:8,
+  subselect:19 rows, the catalog plans (bloat), as agent 288 left them.
