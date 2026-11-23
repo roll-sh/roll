@@ -1710,7 +1710,7 @@ deterministic (#396).
    (main at d9aecc990), ranked; each test goes in `test:search`, not the merge gate (all landed, each
    failing against its guarded line: (1) with the egress fix in #771, 0d6daf6cc; (2), (3), (4), (7)
    and (8) in #768, 1c2b5e62c; (5), (6), (9), (10), (11) and the unused e2e file's removal in
-   #833, f47d36793, whose three fleet findings are fixed on `fix/search-ilm-drain` (below); `persist.rs`'s memory-budget flake fixed in
+   #833, f47d36793, whose three fleet findings are fixed in #853 (below); `persist.rs`'s memory-budget flake fixed in
    #766, 9641a1bd6: the test no longer races a second commit, 60 of 60 under load):
    (1) connectors refusing private addresses: every `connectors.rs` cluster sets
    `allow_private_hosts`, so deleting the check fails nothing (now
@@ -1759,7 +1759,7 @@ deterministic (#396).
    take over a second, and the test still lost 1 run in 10 (at host loads 63-81; the old build
    passed 10 of 10 there, but at loads 18-50). The suite's minimum (108) holds on a rerun, and
    that load is much harsher than CI's.
-   **Found by the fleet tests (2026-11-23), fixed on `fix/search-ilm-drain`**: (a) ILM didn't
+   **Found by the fleet tests (2026-11-23), fixed in #853**: (a) ILM didn't
    advance on a node. The job scheduler (`opensearch/jobs.rs`) ran the other jobs first, then
    read ILM's due time again with the clock: an index to move on is due "now", so once the other
    jobs took a millisecond it was past the run's `now`, never due, and the task looped at once
