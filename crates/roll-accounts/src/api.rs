@@ -522,6 +522,9 @@ async fn update_sso(State(a): S, me: Me, op: Op, Path(id): Path<String>, b: Byte
     if let Some(n) = &ch.name {
         what.push(format!("renamed {n}"));
     }
+    if let Some(g) = ch.groups {
+        what.push(format!("its SCIM groups {}", on_off(g)));
+    }
     let c = blocking(&a, move |a| a.update_sso(&id, ch)).await?;
     if !what.is_empty() {
         alert(&a, by, format!("the SSO connection {} changed: {}", c.name, what.join("; "))).await;

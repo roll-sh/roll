@@ -766,6 +766,7 @@ impl Access {
             if let Some(revoked) = foreign {
                 if let Some(what) = revoked {
                     tracing::warn!(what = %what, at = %found_at, "a leaked secret was revoked");
+                    self.alert("secret_revoked", serde_json::json!({ "what": what, "found_at": found_at }));
                     self.store.audit(&store::AuditEvent {
                         id: new_id("aud"),
                         at: code_sql::now_ms(),
@@ -799,6 +800,7 @@ impl Access {
             // An enterprise app's secret: dropped with its tokens until the operator rotates it.
             if let Some(app) = self.revoke_leaked_app(s, &format!("found in {found_at}"))? {
                 tracing::warn!(app = %app.client_id, at = %found_at, "a leaked enterprise app secret was revoked");
+                self.alert("secret_revoked", serde_json::json!({ "what": format!("enterprise app {} ({})", app.name, app.client_id), "found_at": found_at }));
                 self.store.audit(&store::AuditEvent {
                     id: new_id("aud"),
                     at: code_sql::now_ms(),
@@ -823,6 +825,7 @@ impl Access {
             }
             if let Some(g) = self.store.revoke_leaked(s, &format!("found in {found_at}"))? {
                 tracing::warn!(grant = %g.id, name = %g.name, at = %found_at, "a leaked token was revoked");
+                self.alert("token_revoked", serde_json::json!({ "grant": g.id, "name": g.name, "found_at": found_at }));
                 self.tell(
                     g.user.as_deref(),
                     None,
@@ -868,6 +871,14 @@ impl Access {
         Some((i.to_string(), c.to_string()))
     }
 
+    /// Keep an alert for the operator's feed (`access.alert`); a failure to keep it is logged, never
+    /// the caller's error (what it alerts about already happened).
+    fn alert(&self, kind: &str, data: serde_json::Value) {
+        if let Err(e) = self.store.record_alert(kind, &data) {
+            tracing::warn!(error = %e, kind, "keeping an alert for the operator's feed");
+        }
+    }
+
     /// Tools whose server errors jumped lately ([`store::Store::failure_jumps`]): each kept for the
     /// operator's feed (`access.alert`), mailed to every admin and posted where approvals go. One
     /// node sends each (claimed in the store), at most once every six hours per tool. How many.
@@ -881,7 +892,7 @@ impl Access {
             }
             let pct = |r: &serde_json::Value| (r.as_f64().unwrap_or(0.0) * 100.0).round() as i64;
             let (rate, usual) = (pct(&j["rate"]), pct(&j["usual"]));
-            self.store.record_alert("tool_failing", &serde_json::json!({ "tool": tool, "calls": j["calls"], "failed": j["failed"], "rate_pct": rate, "usual_pct": usual }))?;
+            self.alert("tool_failing", serde_json::json!({ "tool": tool, "calls": j["calls"], "failed": j["failed"], "rate_pct": rate, "usual_pct": usual }));
             let line = format!("{tool} answered {} of its {} calls in the last 15 minutes with a server error ({rate}%; usually {usual}%).", j["failed"], j["calls"]);
             let link = format!("Agent activity: {}/dashboard/access", self.web_url());
             self.tell_admins(&format!("activity_alert:{tool}"), format!("roll MCP: {tool} is failing ({rate}% of calls)"), format!("{line}\n\n{link}"));
@@ -1099,6 +1110,11 @@ impl Access {
             g.id,
         );
         let key = format!("decoy:{}", g.id);
+        // Kept for the operator's feed at most once an hour per decoy (on any node): one prober
+        // can trip it many times.
+        if self.store.claim_alert(&format!("alert_{key}"), code_sql::now_ms(), 3_600_000).unwrap_or(false) {
+            self.alert("decoy_used", serde_json::json!({ "grant": g.id, "name": g.name, "route": route.chars().take(200).collect::<String>(), "ip": ip }));
+        }
         self.tell(g.user.as_deref(), Some((&key, 3_600_000)), subject.clone(), text.clone());
         self.tell_admins(&key, subject, text);
         let used = DecoyUse { grant: g.id.clone(), ip, route: route.chars().take(200).collect(), at: code_sql::now_ms() };

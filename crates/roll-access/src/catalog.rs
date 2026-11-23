@@ -1067,6 +1067,13 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/workspace/projects/{id}/invites", "workspace", ADMIN, one(&["id"], "project")),
     row("DELETE", "/v1/workspace/projects/{id}/invites/{invite}", "workspace", ADMIN, one(&["id"], "project")),
     row("PUT", "/v1/workspace/projects/{id}/homes/{kind}/{ref}", "workspace", ADMIN, one(&["id"], "project")),
+    // Groups' roles (docs/members-v1-1.md): seeing which groups hold a role is a read; giving or
+    // taking one away is the project's admin (covered by the caller's own rules, and only by one
+    // who is in the group, D11). The groups themselves (`/v1/workspace/groups…`) are the
+    // operator's: no row.
+    row("GET", "/v1/workspace/projects/{id}/groups", "workspace", R, one(&["id"], "project")),
+    row("PUT", "/v1/workspace/projects/{id}/groups/{group}", "workspace", ADMIN, one(&["id"], "project")),
+    row("DELETE", "/v1/workspace/projects/{id}/groups/{group}", "workspace", ADMIN, one(&["id"], "project")),
     // The built-in roles and their rules: any grant.
     row("GET", "/v1/workspace/roles", "workspace", R, Tgt::AnyGrant),
     // ── Postgres ──
