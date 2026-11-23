@@ -246,6 +246,7 @@ struct World {
     dns: Arc<StaticDns>,
     tls: Arc<FakeTls>,
     project: String,
+    ws: Arc<roll_workspace::Workspace>,
     _dir: tempfile::TempDir,
 }
 
@@ -294,12 +295,12 @@ async fn world_full(setup: impl FnOnce(&mut AppsConfig), objects: bool, deps_set
         tls: tls.clone(),
         objects: objects.then(|| pg_storage::Objects::new(&pg_storage::StorageConfig::Local(dir.path().join("objects"))).unwrap()),
         cluster,
-        workspace: Some(ws),
+        workspace: Some(ws.clone()),
     };
     deps_setup(&mut deps);
     let apps = Apps::new(cfg, store, deps);
     apps.start();
-    World { api: apps_control::api::router(apps.clone()), public: apps_control::public::router(apps.clone()), apps, fake, code, dns, tls, project, _dir: dir }
+    World { api: apps_control::api::router(apps.clone()), public: apps_control::public::router(apps.clone()), apps, fake, code, dns, tls, project, ws, _dir: dir }
 }
 
 async fn call(r: &axum::Router, method: &str, path: &str, body: Option<Value>) -> (StatusCode, Value) {
@@ -5465,6 +5466,50 @@ async fn builds_share_a_remote_cache_for_turborepo_and_nx() {
     let (_, d) = call(&w.api, "POST", &format!("{env}/deploys"), Some(json!({"closed": true}))).await;
     settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
     assert!(!w.fake.build_vars.lock().last().unwrap().iter().any(|k| k.starts_with("TURBO_")));
+}
+
+/// Moving a service to another project (Render's, Vercel's transfers): refused while it's tied to
+/// the old one, naming what ties it; then it's the new project's (its card too), what it used
+/// stays the old project's, and its live environment redeploys there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_service_moves_to_another_project() {
+    let w = world().await;
+    let other = w.ws.create("", "beta", "", None).unwrap().id;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80, "min_instances": 1})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let hour = code_sql::now_ms() / 3_600_000;
+    w.apps.store.add_usage(&id, "production", hour, &apps_control::store::UsageAdd { cpu_seconds: 1000.0, ..Default::default() }).unwrap();
+    let mv = format!("/v1/apps/services/{id}/move");
+    assert_eq!(call(&w.api, "POST", &mv, Some(json!({"project": "prj_nope"}))).await.0, StatusCode::NOT_FOUND);
+    // A roll:// reference names this project's secrets: it holds it here.
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    call(&w.api, "PATCH", &format!("{env}/variables"), Some(json!({"set": {"API_KEY": "roll://production/stripe"}}))).await;
+    let (st, e) = call(&w.api, "POST", &mv, Some(json!({"project": other}))).await;
+    assert!(st == StatusCode::CONFLICT && e.to_string().contains("API_KEY"), "{st} {e}");
+    call(&w.api, "PATCH", &format!("{env}/variables"), Some(json!({"unset": ["API_KEY"]}))).await;
+    // A token with admin on this service alone can't take it into another project.
+    let scope: roll_auth::scope::Scope = serde_json::from_value(json!([{"product": "apps", "resources": [{"id": id}], "actions": {"admin": "allow"}}])).unwrap();
+    let grant = roll_auth::Grant { id: "tok_m".into(), name: "ci".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(scope), user: None, ask_otherwise: false };
+    let mut req = Request::builder().method("POST").uri(&mv).header("content-type", "application/json").body(Body::from(json!({"project": other}).to_string())).unwrap();
+    req.extensions_mut().insert(grant);
+    req.extensions_mut().insert(roll_auth::Operator);
+    assert_eq!(w.api.clone().oneshot(req).await.unwrap().status(), StatusCode::FORBIDDEN);
+    let (st, moved) = call(&w.api, "POST", &mv, Some(json!({"project": other}))).await;
+    assert_eq!((st, moved["project"].as_str()), (StatusCode::OK, Some(other.as_str())), "{moved}");
+    assert_eq!(moved["redeployed"][0]["environment"], "production", "{moved}");
+    // Its redeploy holds nothing: the next push still goes live.
+    let e = call(&w.api, "GET", &env, None).await.1;
+    assert!(e["held"] != true, "{e}");
+    assert_eq!(call(&w.api, "GET", &format!("/v1/apps/services/{id}"), None).await.1["project"], other.as_str());
+    let card = w.ws.get(roll_workspace::Scope::All, &other).unwrap().resources.into_iter().any(|r| r.kind == roll_workspace::Kind::Service && r.r#ref == id);
+    assert!(card, "its card moved");
+    // What it used is still the old project's month.
+    let (_, used) = call(&w.api, "GET", &format!("/v1/apps/projects/{}/usage", w.project), None).await;
+    assert!(used["total_usd"].as_f64().is_some_and(|u| u > 0.0), "{used}");
+    // A second service of that name there is a conflict.
+    let (svc2, _) = image_service(&w, "api", json!({"port": 80})).await;
+    let (st, _) = call(&w.api, "POST", &format!("/v1/apps/services/{}/move", svc2["id"].as_str().unwrap()), Some(json!({"project": other}))).await;
+    assert_eq!(st, StatusCode::CONFLICT);
 }
 
 /// Provenance on roll's builds (SLSA v1): a build's image has a DSSE envelope whose statement names

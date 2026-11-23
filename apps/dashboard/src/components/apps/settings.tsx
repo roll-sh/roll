@@ -446,6 +446,7 @@ export function SettingsTab({
   const [form, setForm] = useState<Form>(() => formOf(service));
   const base = useRef<Form>(form);
   const [deleting, setDeleting] = useState(false);
+  const [moveTo, setMoveTo] = useState("");
   // A save (or someone else's, or a panel's beside it) brings what wasn't edited to what rolld
   // has, and keeps what was; polls that change nothing don't.
   const saved = JSON.stringify([service.name, service.source, service.build, service.run]);
@@ -1100,6 +1101,22 @@ export function SettingsTab({
         </Anchor>
 
         <Section id="danger" title="Danger zone">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line p-5">
+            <p className="text-[13px] text-muted">Move it to another project: its live environments redeploy there; links, routes and roll:// references hold it here until removed.</p>
+            <span className="flex gap-2">
+              <select value={moveTo} onChange={(e) => setMoveTo(e.target.value)} aria-label="Project to move it to" className={`${input} w-48 text-[12px]`}>
+                <option value="">Another project…</option>
+                {ws.projects.filter((p) => p.id !== service.project).map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+              <button className={btn} disabled={!moveTo || runner.busy !== null} onClick={() => void runner.run("move", () => appsApi.move(service.id, moveTo))}>
+                Move
+              </button>
+            </span>
+          </div>
           <div className="p-5">
             {deleting ? (
               <Confirm

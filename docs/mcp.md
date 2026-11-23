@@ -1290,6 +1290,7 @@ previews are listed once those products are on.
 | `apps_deploy_vulnerabilities` | Known vulnerabilities in a deploy's image, most severe first (`severity` keeps that or worse), with the scan's counts. | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/vulnerabilities` |
 | `apps_explain_deploy` | Why a failed deploy failed, from the repo owner's model (kept; `again` asks anew). | `POST /v1/apps/services/{service}/environments/{env}/deploys/{deploy}/explain` |
 | `apps_deploy_sbom` | A deploy's image as a CycloneDX SBOM (every package and version). | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/sbom` |
+| `apps_move_service` | Move a service to another project of the same owner (refused while it's tied to the old one). | `POST /v1/apps/services/{id}/move` |
 | `apps_deploy_provenance` | A deploy's image's signed SLSA provenance (a DSSE envelope), as roll built it. | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/provenance` |
 | `apps_status_page` | A project's public status page: title, URL, what it shows. | `GET /v1/apps/projects/{project}/status-page` |
 | `apps_remove_status_page` | Take a project's public status page down (making or changing one is a person's: admin, no tool). | `DELETE /v1/apps/projects/{project}/status-page` |
