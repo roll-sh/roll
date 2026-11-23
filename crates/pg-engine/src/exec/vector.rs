@@ -998,20 +998,30 @@ fn node_lane(node: LNode, done: &[Lane], o: &mut Lane, b: &ColBatch, live: &[u32
         }
         LNode::Col(i) => {
             let Some(c) = col_at(b, i) else { return false };
-            if live.iter().any(|&r| c.nulls[r as usize]) {
-                o.nulls.extend(live.iter().map(|&r| c.nulls[r as usize]));
+            // (The column's vectors as slices: read through `c`'s Vecs, their pointer and length
+            // were loaded again for every row, as the lane's pushes might have changed them.)
+            let cn = c.nulls.as_slice();
+            if live.iter().any(|&r| cn[r as usize]) {
+                o.nulls.extend(live.iter().map(|&r| cn[r as usize]));
             }
             let nulls = &o.nulls;
             let null = |p: usize| !nulls.is_empty() && nulls[p];
             o.scale = 0;
             o.narrow = true;
             match &c.data {
-                ColData::I32(x) => o.n64.extend(live.iter().map(|&r| x[r as usize] as i64)),
-                ColData::I64(x) => o.n64.extend(live.iter().map(|&r| x[r as usize])),
+                ColData::I32(x) => {
+                    let x = x.as_slice();
+                    o.n64.extend(live.iter().map(|&r| x[r as usize] as i64))
+                }
+                ColData::I64(x) => {
+                    let x = x.as_slice();
+                    o.n64.extend(live.iter().map(|&r| x[r as usize]))
+                }
                 // (One scale, every row's: a product's scale is its operands' sum, so rows of
                 // other scales would give it another. Each value's high bits xor its low word's
                 // sign accumulated: 0 when every one fits 64 bits.)
                 ColData::Num(x) if nulls.is_empty() => {
+                    let x = x.as_slice();
                     let s = live.first().map_or(0, |&r| x[r as usize].1);
                     // (Every row's scale xor the first's: 0 when they are all one.)
                     let (mut other, mut high) = (0, 0i128);
@@ -1032,6 +1042,7 @@ fn node_lane(node: LNode, done: &[Lane], o: &mut Lane, b: &ColBatch, live: &[u32
                     o.scale = s;
                 }
                 ColData::Num(x) => {
+                    let x = x.as_slice();
                     let mut s = None;
                     o.narrow = false;
                     for (p, &r) in live.iter().enumerate() {
