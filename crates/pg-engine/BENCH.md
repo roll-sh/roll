@@ -1997,6 +1997,35 @@ Select-only, 8 clients:
 | wbytes_per_txn | 0 / 0  |
 | foreign_cores | 1.8 / 1.12  |
 
+A memtable rotated once (`cand/a295-2`), fixed work: 160k TPC-B-like transactions (`fixed.sh`: 32 clients x
+5,000, then 8 s; the server cgroup's counts over all of it; off-lane, one run each), new1 / new3 (new3 =
+new1 + the rotate commit + a temporary compaction log line, `A295_DIAG`, which lists each compaction's
+L0 files, L1 inputs, outputs and copied blocks):
+
+| count | new1 | new3 |
+|---|---:|---:|
+| compactions after the fixture's | 8 | 4 |
+| L0 files merged: full / tiny (under 100 entries) | 15 / 34 | 16 / 0 |
+| accounts file blocks read by them | 368,225 | 184,913 |
+| of which copied / rewritten | 252,407 / 115,818 | 79,818 / 105,095 |
+| compaction output | 274 MB | 139 MB |
+| user instructions / transaction | 685,307 | 628,254 (-8.3%) |
+| user cycles / transaction | 1,781,720 | 1,774,135 |
+| kernel instructions / transaction | 359,040 | 352,595 |
+
+The same at 8 clients x 20,000 (no compaction log): user instructions 812,098 -> 735,799 (-9.4%); an
+aborted run of new1 read 930k (a run's compactions and autovacuum move it by ~10%). Lane pairs of 10 s
+(new1 / new3) don't resolve it, a run holding 0-1 compactions: TPC-B 8 clients all user instructions
++11.6% / -3.6%, 32 clients -23.9% / +68.9% (the second new3 run at 2.64 foreign cores).
+
+One run each at scale 32 (`DSCALE=32`, base0 / new3, both commits): UPDATE accounts 244,618 / 182,202
+(flush thread 149,733 / 94,559), UPDATE branches 166,946 / 138,356, UPDATE tellers 76,336 / 73,194, INSERT
+history 55,327 / 48,026 (the new3 runs at 2.4-2.5 foreign cores).
+
+A whole fixed run's flat profile (160k transactions, 32 clients, new3, lane A): 595k user instructions a
+transaction, `roll-conn` 82.4%, `roll-flush` 17.0%, `roll-autovacuum` 0.6%; in the connection threads zstd
+decompression ~4.3% (point reads of accounts blocks the cache dropped with each compaction's input files).
+
 ## Short write transactions, round 13: a compaction copies the blocks it would write unchanged (2026-11-23, agent 292)
 
 Lane A (servers on CPUs 6,7,24,25, pgbench on 8,9,26,27), one pair a `tools/lane.sh` hold, harness

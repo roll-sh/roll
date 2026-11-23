@@ -14685,6 +14685,39 @@ verify-checked`, regress 51,148 / 51,150 (0 newly differing), isolation 1,647 / 
 the server" for "connection closed": the close race agent 293 measured at 1% under load); the binary
 passed twice run alone, and the whole check passed on the second run.
 
+**A second commit (`cand/a295-2`, on `cand/a295`): a memtable is rotated once.** A commit that
+finds the memtable full (`mem.bytes() >= memtable_bytes`, under the commit lock) rotates it after
+its fsync, outside the lock (`commit_grouped`, `commit_with`, `commit_async`). Every commit appended
+between the one that filled it and the rotation finds it full too, and each `rotate` after the
+first froze the memtable that had just taken over, holding the few commits made meanwhile: an L0
+file of 2-8 entries (and a WAL file made, zero-filled ahead and synced) each time, which counts
+toward `l0_compaction_trigger` (4) as a full one does. Under 8 clients a compaction ran every 2-3
+memtables; under 32, TPC-B's 160k transactions left 34 such files beside 15 full ones. Now the
+commit rotates only the memtable it found full (`Store::rotate_full`: under the commit lock, if it
+is still the view's memtable). The compaction log (a temporary line naming each compaction's L0
+files, L1 inputs, outputs and copied blocks; not in the commit) and `fixed.sh` (160k TPC-B
+transactions, then 8 s; the server cgroup's counts over all of it, off-lane):
+
+- 32 clients, 160k transactions, one run each (new1 -> new3): compactions 8 -> 4, L0 files merged 15
+  full + 34 tiny -> 16 full + 0, the accounts file's blocks read by compactions 368,225 -> 184,913
+  (copied 252,407 -> 79,818, rewritten 115,818 -> 105,095), compaction output 274 -> 139 MB; user
+  instructions a transaction 685k -> 628k (-8.3%), user cycles 1.78 M -> 1.77 M, kernel instructions
+  359k -> 353k.
+- 8 clients, 160k transactions, one run each: user instructions 812k -> 736k (-9.4%) (the same build
+  read 930k in an aborted run: such a run's compactions and autovacuum move it by ~10%).
+- Lane pairs of 10 s don't resolve it: a run holds 0-1 compactions now (TPC-B 8 clients, 2 pairs:
+  all user instructions +11.6% and -3.6%, the flush thread +41% and +20%; 32 clients -23.9% and
+  +68.9%, the second new3 run at 2.64 foreign cores with a compaction in its window).
+- `UPDATE pgbench_accounts` at scale 32, one run each (base0 -> new3, both commits): 244.6k ->
+  182.2k user instructions, the flush thread 149.7k -> 94.6k.
+
+Verification of the second commit: `tools/quick-check.sh` with `QC_CHECKED=1` and `QC_TESTS="crash_ctids
+big_tables"` on `3152f2bc8` (on `cand/a295`'s `f515a4f71`): 29 test binaries, clippy none new, 436 tests
+in 25 binaries (crash_ctids, crash_async_commit, crash_bulk, crash_unlogged, compact_locks, the storage
+format binaries, twophase, txn_spill among them), the same 436 built `--profile verify-checked`,
+`crash_random` seeds 1-3 x 2 rounds and `power_cut_at_every_point`, regress 51,148 / 51,150 (0 newly
+differing), isolation 1,647 / 1,648, pg_dump_tap 14,609.
+
 What is left, by size:
 
 - **A big table's random updates are compacted at ~95-150k user instructions an UPDATE** (scale 32:
