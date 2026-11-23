@@ -29,17 +29,20 @@ pub fn declared(capabilities: &Value) -> bool {
 /// call that reads it again.
 pub const PENDING: &str = "roll/pending";
 
+/// Whether an answer settled (a tool's `until`).
+type Settled = fn(&Value) -> bool;
+
 /// How each tool's answer says it settled: a waiting tool's own `until`, or the one of the waiting
 /// tool on the same `GET` route (`apps_get_deploy` is `apps_wait_deploy` without the wait). Only
 /// `GET` tools, so a view only ever reads.
-static SETTLES: LazyLock<HashMap<&'static str, fn(&Value) -> bool>> = LazyLock::new(|| {
+static SETTLES: LazyLock<HashMap<&'static str, Settled>> = LazyLock::new(|| {
     let all = crate::tools::all();
     let waits = |path: &str| all.iter().filter(|w| w.method == "GET" && w.path == path).find_map(|w| w.until);
     all.iter().filter(|t| t.method == "GET").filter_map(|t| Some((t.name, t.until.or_else(|| waits(t.path))?))).collect()
 });
 
 /// Whether `name`'s answer can still be changing ([`SETTLES`]).
-pub fn settles(name: &str) -> Option<fn(&Value) -> bool> {
+pub fn settles(name: &str) -> Option<Settled> {
     SETTLES.get(name).copied()
 }
 
