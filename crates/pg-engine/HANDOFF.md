@@ -14718,6 +14718,25 @@ format binaries, twophase, txn_spill among them), the same 436 built `--profile 
 `crash_random` seeds 1-3 x 2 rounds and `power_cut_at_every_point`, regress 51,148 / 51,150 (0 newly
 differing), isolation 1,647 / 1,648, pg_dump_tap 14,609.
 
+Measured and not kept: *a compaction's outputs take the copied blocks' cached entries*
+(`~/.cache/a295/patches/carry-cache.patch`: each block a compaction copied, when the cache holds the
+input file's, copied into a buffer of the output's shard before the outputs are in the view, so a big
+table's point reads don't read and decompress it again after each compaction). In TPC-B the
+connection threads' zstd decompression is ~11.5k user instructions a transaction (32 clients, a whole
+160k-transaction run's profile); with the carry the same, 11.5k (1.93% of 595k against 1.56% of 738k,
+one run each). A block read since the last compaction was read by an UPDATE of its row, so the next
+compaction rewrites it rather than copying it: the copied blocks are the ones nobody read, cached only
+where an earlier carry kept them. Steady state would save under 1%; dropped.
+
+Whole-run profiles (160k TPC-B-like transactions, 32 clients, lane A, one run each): base0 709k user
+instructions a transaction, `roll-conn` 78.3% / `roll-flush` 21.2%; new3 (both commits) 595k, 82.4% /
+17.0%; with the carry 738k, 82.3% / 17.1%. At 32 clients one run's count moves by ~20% (the same work:
+compactions, autovacuum and lock waits fall differently), so these totals don't compare the builds;
+the shares and the fixed-work compaction counts above do. In all three, `Expr`'s clone and walk are
+~1.2-1.9% (re-planning after autoanalyze; base0 0.63% + 1.16%); `kernel::compile_bound` is ~0.6%
+inclusive of the 32-client TPC-B (it clones the filter to bind `$n`: binding in `compile_node` would
+avoid the copy).
+
 What is left, by size:
 
 - **A big table's random updates are compacted at ~95-150k user instructions an UPDATE** (scale 32:
