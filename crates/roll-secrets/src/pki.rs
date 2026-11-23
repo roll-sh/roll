@@ -240,7 +240,7 @@ impl LinkProvider for Provider {
         let project: String = self.db.read(|c| c.query_row("SELECT project_id FROM cas WHERE id = ?", [r#ref], |r| r.get(0)))?;
         record(&self.db, r#ref, &project, &hex(&serial_of(&params)), &names, "link", not_after, label)?;
         let parts = BTreeMap::from([("certificate".to_string(), Value::new(cert.pem())), ("private_key".to_string(), Value::new(key.serialize_pem())), ("ca".to_string(), Value::new(ca_pem))]);
-        Ok(Issued { parts, handle: json!({ "serial": hex(&serial_of(&params)), "names": names, "not_after": not_after }) })
+        Ok(Issued { expires_at: None, parts, handle: json!({ "serial": hex(&serial_of(&params)), "names": names, "not_after": not_after }) })
     }
 
     /// A lease that ends, or a managed certificate past its grace: on the CA's CRL until it expires.

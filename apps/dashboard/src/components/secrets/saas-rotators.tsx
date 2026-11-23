@@ -108,6 +108,8 @@ export function SaasRotators() {
   const [vendor, setVendor] = useState<SaasVendor>("sendgrid");
   const [target, setTarget] = useState<Record<string, string>>({});
   const [credential, setCredential] = useState("");
+  // The day the registered credential ends at the vendor (optional): health warns two weeks before.
+  const [ends, setEnds] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
@@ -127,11 +129,12 @@ export function SaasRotators() {
       else t[f.name] = f.kind === "number" ? Number(v) : v;
     }
     try {
-      await api.addSaasRotator({ name, vendor, target: t, credential: credential.trim() });
+      await api.addSaasRotator({ name, vendor, target: t, credential: credential.trim(), ...(ends && { credential_expires_at: Date.parse(`${ends}T00:00:00Z`) }) });
       setAdding(false);
       setName("");
       setTarget({});
       setCredential("");
+      setEnds("");
       list.reload();
     } catch (e) {
       setError(errorText(e));
@@ -155,7 +158,7 @@ export function SaasRotators() {
       }
     >
       <p className="mb-2 text-[11.5px] text-muted">
-        roll issues keys at SendGrid, Twilio, Okta, Entra, Auth0, GitLab, OpenAI, Datadog, Cloudflare, Databricks or Confluent itself, with a credential you register here, and revokes the old key after the grace period. Auth0 replaces a secret at once, so it has no grace period. Link a key to one from Link a resource.
+        roll issues keys at SendGrid, Twilio, Okta, Entra, Auth0, GitLab, OpenAI, Datadog, Cloudflare, Databricks or Confluent itself, with a credential you register here, and revokes the old key after the grace period. Auth0 replaces a secret at once, so it has no grace period. Link a key to one from Link a resource. GitLab, Databricks and Entra end their keys by themselves: a link to one rotates at least two weeks before that.
       </p>
       <ErrorNote error={error ?? list.error} onDismiss={error ? () => setError(null) : undefined} className="mb-2" />
       {adding && (
@@ -200,6 +203,10 @@ export function SaasRotators() {
             <span className="mb-1 block text-[11px] font-medium text-subtle">{spec.credential} (kept sealed)</span>
             <input type="password" autoComplete="off" value={credential} onChange={(e) => setCredential(e.target.value)} spellCheck={false} className={`${field} font-mono text-[12px]`} />
           </label>
+          <label className="w-40">
+            <span className="mb-1 block text-[11px] font-medium text-subtle">Credential expires (optional)</span>
+            <input type="date" value={ends} onChange={(e) => setEnds(e.target.value)} className={`${field} font-mono text-[12px]`} />
+          </label>
           <button type="submit" className={primary} disabled={!ok || busy}>
             {busy ? "Adding…" : "Add"}
           </button>
@@ -219,6 +226,7 @@ export function SaasRotators() {
                 <span className="font-mono text-[12px]">{r.name}</span>
                 <span className="text-[11.5px] text-muted">{VENDORS[r.vendor]?.label ?? r.vendor}</span>
                 <span className="min-w-0 truncate font-mono text-[11.5px] text-subtle">{targetText(r.target)}</span>
+                {r.credential_expires_at !== undefined && <span className="font-mono text-[11px] text-subtle">credential expires {new Date(r.credential_expires_at).toISOString().slice(0, 10)}</span>}
                 <span className="ml-auto text-[11px] text-subtle">
                   added {ago(r.created_at)} · <ActorMark who={r.created_by} />
                 </span>

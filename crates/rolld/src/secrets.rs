@@ -724,7 +724,7 @@ impl LinkProvider for Postgres {
             ("role_user".to_string(), Value::new(role.clone())),
             ("role_password".to_string(), Value::new(password)),
         ]);
-        Ok(Issued { parts, handle: json!({ "role": role, "endpoint": endpoint }) })
+        Ok(Issued { expires_at: None, parts, handle: json!({ "role": role, "endpoint": endpoint }) })
     }
     /// A decoy role (docs/secrets.md, "Decoys"): named and passworded as `issue`'s roles are, in
     /// the root branch's connection string. roll Postgres keeps no password for it: the proxy
@@ -867,7 +867,7 @@ impl LinkProvider for Stream {
             ("password".to_string(), text(&k, "/secret")?),
             ("properties".to_string(), text(&k, "/connect/properties")?),
         ]);
-        Ok(Issued { parts, handle: json!({ "username": username.expose() }) })
+        Ok(Issued { expires_at: None, parts, handle: json!({ "username": username.expose() }) })
     }
     fn revoke(&self, r#ref: &str, h: &Json) -> roll_secrets::Result<()> {
         let Some(u) = h["username"].as_str() else { return Ok(()) };
@@ -908,7 +908,7 @@ impl LinkProvider for Bucket {
         let k = self.0.call(Method::POST, "/v1/storage/keys", Some(json!({ "name": label.chars().take(64).collect::<String>(), "permission": permission, "buckets": [r#ref] })))?;
         let id = text(&k, "/id")?;
         let parts = BTreeMap::from([("access_key_id".to_string(), id.clone()), ("secret_access_key".to_string(), text(&k, "/secret_access_key")?)]);
-        Ok(Issued { parts, handle: json!({ "id": id.expose() }) })
+        Ok(Issued { expires_at: None, parts, handle: json!({ "id": id.expose() }) })
     }
     fn revoke(&self, _: &str, h: &Json) -> roll_secrets::Result<()> {
         let Some(id) = h["id"].as_str() else { return Ok(()) };
@@ -1062,7 +1062,7 @@ impl LinkProvider for Queue {
             ("username".to_string(), Value::new(user.clone())),
             ("password".to_string(), Value::new(password)),
         ]);
-        Ok(Issued { parts, handle: json!({ "user": user }) })
+        Ok(Issued { expires_at: None, parts, handle: json!({ "user": user }) })
     }
     /// Deletes the user, which closes its connections and drops its permissions.
     fn revoke(&self, _: &str, h: &Json) -> roll_secrets::Result<()> {
@@ -1214,7 +1214,7 @@ impl LinkProvider for Search {
             let made = k["access"].as_str().map_or("a key without its access".to_string(), |a| format!("a {a} key on {}", k["indices"]));
             return Err(Error::Link(format!("roll search made {made}, not the {access} key asked for: refused (and deleted)")));
         }
-        Ok(Issued { parts: search_parts(&k)?, handle: json!({ "id": id.expose() }) })
+        Ok(Issued { expires_at: None, parts: search_parts(&k)?, handle: json!({ "id": id.expose() }) })
     }
     /// A field the cluster's flavor doesn't issue (an API key from OpenSearch, a user from
     /// Elasticsearch) is refused when the link is written. A build of roll search that doesn't

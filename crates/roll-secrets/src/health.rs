@@ -27,7 +27,8 @@ pub enum Issue {
     /// checks and sandboxes that read it in the last 90 days. `key` is empty. Never changed for
     /// the project: protecting it is the admin's call (the dashboard's "Protect production").
     ProductionUnprotected,
-    /// Its value stopped working outside roll.
+    /// Its value stopped working outside roll. A SaaS rotator's registered credential too (`key`
+    /// its name, `environment` empty): roll can't issue or revoke its keys any more.
     Expired,
     /// Its scheduled rotation fails (the database, vendor or rotator refused or didn't answer).
     RotationFailing,
@@ -51,7 +52,9 @@ pub enum Issue {
     /// in. Re-saving it from a person's session binds it to them. `key` is the sync's or the
     /// identity's id (the identity's `environment` and `path` are empty).
     OperatorMade,
-    /// Its value stops working outside roll within two weeks.
+    /// Its value stops working outside roll within two weeks (a credential a vendor ends by
+    /// itself, such as a GitLab token, that roll hasn't rotated by then), or a SaaS rotator's
+    /// registered credential does (`credential_expires_at`; `key` its name, `environment` empty).
     Expiring,
     /// A certificate a project CA signed for a CSR ends within two weeks (pki.rs). Links' own
     /// certificates are replaced by roll; a CSR's is the requester's to renew. `key` is its
@@ -319,6 +322,15 @@ impl Secrets {
         for (ca, names, serial, end) in ending {
             let names = from_json::<Vec<String>>(&names).join(", ");
             out.push(Finding { issue: Issue::CertificateExpiring, environment: String::new(), path: ca, key: names, detail: format!("ends {} (serial {serial}): sign a new CSR", chrono_day(end)), owner: None, decoy: None });
+        }
+        // SaaS rotators whose own credential ends: after that roll can't issue or revoke their keys.
+        for (name, vendor, end) in self.saas_credentials_ending(project, now + EXPIRING_DAYS * 86_400_000)? {
+            let (issue, detail) = if end <= now {
+                (Issue::Expired, format!("its {vendor} credential expired {}: roll can't issue or revoke its keys", chrono_day(end)))
+            } else {
+                (Issue::Expiring, format!("its {vendor} credential expires {}: after that roll can't issue or revoke its keys", chrono_day(end)))
+            };
+            out.push(Finding { issue, environment: String::new(), path: "/".into(), key: name, detail, owner: None, decoy: None });
         }
         // What roll couldn't do for a key: rotate it on schedule, or revoke a credential it issued.
         type Failed = Vec<(String, String, String, String)>;
