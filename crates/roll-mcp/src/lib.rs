@@ -841,7 +841,12 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                 let mut tools = if ctx.search { search::listed(&ctx.tools()) } else { ctx.tools() };
                 // In search mode too: finding a resource by name is what a client with few tools needs.
                 if ctx.pick.keeps(find::NAME) {
-                    tools.push(find::definition());
+                    let mut def = find::definition();
+                    // Loaded upfront with search mode's own tools by clients that defer tools.
+                    if ctx.search {
+                        def["_meta"] = json!({ "anthropic/alwaysLoad": true });
+                    }
+                    tools.push(def);
                 }
                 // A host that renders MCP Apps shows the tools that answer rows in roll's table.
                 if ctx.ui && !ctx.search {

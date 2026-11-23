@@ -239,7 +239,7 @@ async fn tools_follow_the_tokens_rules() {
     // Search mode's tools load upfront in clients that defer tools (Claude Code's alwaysLoad).
     let (_, _, found) = d.http(OPERATOR, Method::POST, "/v1/mcp?tools=search", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))).await;
     let search: Vec<&Value> = found["result"]["tools"].as_array().unwrap().iter().filter(|t| t["name"].as_str().is_some_and(|n| n.starts_with("roll_"))).collect();
-    assert!(search.len() == 3 && search.iter().all(|t| t["_meta"]["anthropic/alwaysLoad"] == true), "{found}");
+    assert!(search.len() == 4 && search.iter().all(|t| t["_meta"]["anthropic/alwaysLoad"] == true), "{found}");
     let all = names(&d.rpc(OPERATOR, "tools/list", json!({})).await);
     assert!(all.contains(&"postgres_delete_project".into()) && all.contains(&"workspace_list_projects".into()));
     // Not even one any token may call (apps_plan).
