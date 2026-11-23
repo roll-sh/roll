@@ -44,10 +44,11 @@ public sealed class RollSecretsOptions
 
     /// <summary>
     /// Keep <see cref="RollSecretsClient.ValuesAsync"/> answers this long and answer from memory
-    /// meanwhile; after that, ask again with the digest they were read against, and an unchanged
-    /// folder costs a 304 that reads, issues and audits nothing. A folder holding dynamic
-    /// credentials is never kept (they end with their lease), nor one that didn't resolve, nor an
-    /// answer without an ETag. Zero (the default): off.
+    /// meanwhile; after that, ask again with the answer's digest and every key's stamp
+    /// (<c>…/values/delta</c>): an unchanged folder costs what a 304 does, and a changed one only
+    /// its changed keys. A folder holding dynamic credentials is never kept (they end with their
+    /// lease), nor one that didn't resolve, nor a full read's answer without an ETag. Zero (the
+    /// default): off.
     /// </summary>
     public TimeSpan CacheTtl { get; set; } = TimeSpan.Zero;
 

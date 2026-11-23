@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net"
@@ -34,7 +36,8 @@ func (c *clock) add(d time.Duration) {
 }
 
 // roll is a fake rolld: a workload identity's login, a folder's values with their digest (a 304
-// when unchanged), and a folder with a dynamic credential whose lease renews to leaseEnd.
+// when unchanged), and a folder with a dynamic credential whose lease renews to leaseEnd. With
+// delta, production also answers `…/values/delta` as rolld does (otherwise it's an older rolld).
 type roll struct {
 	mu       sync.Mutex
 	logins   int
@@ -44,6 +47,17 @@ type roll struct {
 	value    string
 	digest   string
 	leaseEnd time.Time
+
+	delta    bool
+	basis    string
+	fullSets int      // delta reads answered with the full set
+	sent     []string // the keys the last delta read answered
+}
+
+// stamp is a key's stamp: it moves when the key's value does.
+func stamp(k, v string) string {
+	h := sha256.Sum256([]byte(k + "\x00" + v))
+	return hex.EncodeToString(h[:8])
 }
 
 func fakeRoll(t *testing.T) (*httptest.Server, *roll) {
@@ -71,7 +85,39 @@ func fakeRoll(t *testing.T) (*httptest.Server, *roll) {
 			answer(401, map[string]string{"error": "unknown token"})
 			return
 		}
+		production := map[string]string{"DATABASE_URL": st.value, "LOG_LEVEL": "debug"}
 		switch r.URL.Path {
+		case "/v1/secrets/projects/prj_1/environments/production/values/delta":
+			if !st.delta {
+				answer(404, map[string]string{"error": "no route"})
+				return
+			}
+			var claim struct {
+				Basis  string            `json:"basis"`
+				Stamps map[string]string `json:"stamps"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&claim)
+			values, stamps, removed := map[string]string{}, map[string]string{}, []string{}
+			for k, v := range production {
+				if claim.Basis != st.basis || claim.Stamps[k] != stamp(k, v) {
+					values[k], stamps[k] = v, stamp(k, v)
+				}
+			}
+			for k := range claim.Stamps {
+				if _, ok := production[k]; !ok {
+					removed = append(removed, k)
+				}
+			}
+			full := claim.Basis != st.basis
+			if full {
+				st.fullSets++
+				removed = []string{}
+			}
+			st.sent = st.sent[:0]
+			for k := range values {
+				st.sent = append(st.sent, k)
+			}
+			answer(200, map[string]any{"delta": !full, "digest": st.digest, "basis": st.basis, "values": values, "stamps": stamps, "removed": removed, "problems": []any{}, "leases": []string{}, "dynamic": []string{}, "linked": []string{}})
 		case "/v1/secrets/projects/prj_1/environments/production/values":
 			w.Header().Set("ETag", `"`+st.digest+`"`)
 			if r.Header.Get("If-None-Match") == `"`+st.digest+`"` {
@@ -80,7 +126,7 @@ func fakeRoll(t *testing.T) (*httptest.Server, *roll) {
 				return
 			}
 			st.reads["production"]++
-			answer(200, map[string]any{"values": map[string]string{"DATABASE_URL": st.value, "LOG_LEVEL": "debug"}, "problems": []any{}, "leases": []string{}, "dynamic": []string{}, "linked": []string{}})
+			answer(200, map[string]any{"values": production, "problems": []any{}, "leases": []string{}, "dynamic": []string{}, "linked": []string{}})
 		case "/v1/secrets/projects/prj_1/environments/staging/values":
 			st.reads["staging"]++
 			answer(200, map[string]any{"values": map[string]string{"DB_PASSWORD": "fake-dynamic-pw"}, "problems": []any{}, "leases": []string{"lse_1"}, "dynamic": []string{"DB_PASSWORD"}, "linked": []string{}})
@@ -275,6 +321,51 @@ func TestTheExtensionsLife(t *testing.T) {
 	}
 	if _, err := http.Get(base + "/health"); err == nil {
 		t.Fatal("still listening after SHUTDOWN")
+	}
+}
+
+// Past the TTL the cache asks for what changed since its answer (`…/values/delta`): after a
+// one-key change only that key comes back and the folder answered is whole, and a full-set answer
+// (here a changed basis) replaces what was kept.
+func TestRevalidationReadsOnlyWhatChanged(t *testing.T) {
+	rolld, st := fakeRoll(t)
+	st.delta, st.basis = true, "b1"
+	clk := &clock{t: time.Unix(1_800_000_000, 0)}
+	env := map[string]string{"ROLL_TOKEN": "rlt_static", "ROLL_PROJECT": "prj_1"}
+	s := newStore(config{ttl: 5 * time.Minute}, connector(rolld.URL, func(k string) string { return env[k] }, clk.now), clk.now)
+	read := func(want string) {
+		t.Helper()
+		v, err := s.values(context.Background(), folder{"production", "/"})
+		if err != nil || len(v.Values) != 2 || v.Values["DATABASE_URL"] != want || v.Values["LOG_LEVEL"] != "debug" {
+			t.Fatalf("%v %v", v, err)
+		}
+	}
+	state := func() (int, int, []string) {
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		return st.reads["production"], st.fullSets, append([]string(nil), st.sent...)
+	}
+	read("postgres://fake-user:fake-pass@db.test/app")
+	if reads, full, _ := state(); reads != 0 || full != 1 {
+		t.Fatalf("the first read is the delta route's full set: %d reads, %d full sets", reads, full)
+	}
+
+	st.mu.Lock()
+	st.value, st.digest = "postgres://fake-user:rotated@db.test/app", "d2"
+	st.mu.Unlock()
+	clk.add(301 * time.Second)
+	read("postgres://fake-user:rotated@db.test/app")
+	if reads, full, sent := state(); reads != 0 || full != 1 || len(sent) != 1 || sent[0] != "DATABASE_URL" {
+		t.Fatalf("a one-key change: %d reads, %d full sets, sent %v", reads, full, sent)
+	}
+
+	st.mu.Lock()
+	st.value, st.digest, st.basis = "postgres://fake-user:again@db.test/app", "d3", "b2"
+	st.mu.Unlock()
+	clk.add(301 * time.Second)
+	read("postgres://fake-user:again@db.test/app")
+	if reads, full, sent := state(); reads != 0 || full != 2 || len(sent) != 2 {
+		t.Fatalf("a full-set answer: %d reads, %d full sets, sent %v", reads, full, sent)
 	}
 }
 

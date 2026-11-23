@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -17,21 +19,37 @@ import (
 	"testing"
 )
 
-// rollState is what fakeRoll counts and takes: its logins, and the pods' current roll token.
+// rollState is what fakeRoll counts and takes: its logins, the pods' current roll token, the
+// folder's DATABASE_URL, digest and basis, and its reads.
 type rollState struct {
 	mu     sync.Mutex
 	logins int
 	pod    string
+	db     string
+	digest string
+	basis  string
+	// strict: strict reads (`…/values`); fullSets: delta reads answered with the full set; sent:
+	// the keys the last delta read answered, and by whom.
+	strict   int
+	fullSets int
+	sent     []string
+	sentTo   string
 }
 
-// fakeRoll answers a workload identity's login and the values route as rolld does.
+// stamp is a key's stamp: it moves when the key's value does.
+func stamp(k, v string) string {
+	h := sha256.Sum256([]byte(k + "\x00" + v))
+	return hex.EncodeToString(h[:8])
+}
+
+// fakeRoll answers a workload identity's login and the values routes as rolld does.
 func fakeRoll(t *testing.T) *httptest.Server {
 	srv, _ := fakeRollState(t)
 	return srv
 }
 
 func fakeRollState(t *testing.T) (*httptest.Server, *rollState) {
-	st := &rollState{pod: "rlst_pod"}
+	st := &rollState{pod: "rlst_pod", db: "postgres://app:s3cret@db:5432/shop", digest: "d1", basis: "b1"}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		st.mu.Lock()
 		defer st.mu.Unlock()
@@ -49,11 +67,44 @@ func fakeRollState(t *testing.T) (*httptest.Server, *rollState) {
 			}
 			st.logins++
 			answer(200, map[string]string{"token": st.pod, "project": "prj_1"})
+		case r.URL.Path == "/v1/secrets/projects/prj_1/environments/production/values/delta":
+			a := r.Header.Get("Authorization")
+			if a != "Bearer "+st.pod && a != "Bearer rlt_node" {
+				answer(401, map[string]string{"error": "unknown token"})
+				return
+			}
+			q := r.URL.Query()
+			if q.Get("dynamic") != "false" {
+				t.Errorf("a delta read holds no dynamic credential: %s", r.URL.RawQuery)
+			}
+			if q.Get("path") == "/broken" {
+				answer(200, map[string]any{"delta": false, "digest": st.digest, "values": map[string]string{"OK": "fine"}, "problems": []any{map[string]string{"key": "BROKEN", "problem": "a reference to nothing"}}, "stamps": map[string]string{}})
+				return
+			}
+			var claim struct {
+				Basis  string            `json:"basis"`
+				Stamps map[string]string `json:"stamps"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&claim)
+			full := claim.Basis != st.basis
+			if full {
+				st.fullSets++
+			}
+			values, stamps := map[string]string{}, map[string]string{}
+			st.sent, st.sentTo = nil, a
+			for k, v := range map[string]string{"DATABASE_URL": st.db, "NAME": `it's "q" $x`} {
+				if full || claim.Stamps[k] != stamp(k, v) {
+					values[k], stamps[k] = v, stamp(k, v)
+					st.sent = append(st.sent, k)
+				}
+			}
+			answer(200, map[string]any{"delta": !full, "digest": st.digest, "basis": st.basis, "values": values, "stamps": stamps, "removed": []string{}, "dynamic": []string{"TEMP_KEY"}, "problems": []any{}})
 		case r.URL.Path == "/v1/secrets/projects/prj_1/environments/production/values":
 			if a := r.Header.Get("Authorization"); a != "Bearer "+st.pod && a != "Bearer rlt_node" {
 				answer(401, map[string]string{"error": "unknown token"})
 				return
 			}
+			st.strict++
 			q := r.URL.Query()
 			if q.Get("strict") != "1" || q.Get("digest") != "1" {
 				t.Errorf("a mount reads strictly, with the digest: %s", r.URL.RawQuery)
@@ -62,13 +113,13 @@ func fakeRollState(t *testing.T) (*httptest.Server, *rollState) {
 				answer(409, map[string]string{"error": "1 didn't resolve: BROKEN (strict: nothing is answered)", "code": "unresolved"})
 				return
 			}
-			values := map[string]string{"DATABASE_URL": "postgres://app:s3cret@db:5432/shop", "NAME": `it's "q" $x`}
+			values := map[string]string{"DATABASE_URL": st.db, "NAME": `it's "q" $x`}
 			dynamic := []string{"TEMP_KEY"}
 			if q.Get("dynamic") == "true" {
 				values["TEMP_KEY"] = "AKIA-temp"
 				dynamic = nil
 			}
-			answer(200, map[string]any{"values": values, "dynamic": dynamic, "digest": "d1"})
+			answer(200, map[string]any{"values": values, "dynamic": dynamic, "digest": st.digest})
 		default:
 			answer(404, map[string]string{"error": "no route"})
 		}
@@ -209,6 +260,51 @@ func TestAMountGetsTheEnvironmentAsFiles(t *testing.T) {
 	if r, err = mount(ctx, &mountRequest{Attributes: attributes(roll.URL, nil)}); err != nil || len(r.Files) != 2 || st.logins != 2 {
 		t.Fatalf("after the token was refused: %+v %v (%d logins)", r, err, st.logins)
 	}
+}
+
+// A rotation poll after a one-key change reads only that key (`…/values/delta`) and the volume
+// still gets the whole folder; a full-set answer (here a changed basis) is used as it is. Another
+// login's mount never builds on the pod's answer.
+func TestARotationPollReadsOnlyWhatChanged(t *testing.T) {
+	roll, st := fakeRollState(t)
+	_, mount := driver(t)
+	ctx := context.Background()
+	check := func(when string, extra map[string]string, secrets, wantDB, version string, fullSets, sent int) {
+		t.Helper()
+		r, err := mount(ctx, &mountRequest{Attributes: attributes(roll.URL, extra), Secrets: secrets})
+		if err != nil {
+			t.Fatalf("%s: %v", when, err)
+		}
+		got := map[string]string{}
+		for _, f := range r.Files {
+			got[f.Path] = string(f.Contents)
+		}
+		if len(got) != 2 || got["DATABASE_URL"] != wantDB || got["NAME"] != `it's "q" $x` || r.ObjectVersion[0].Version != version {
+			t.Fatalf("%s: files %v, versions %+v", when, got, r.ObjectVersion)
+		}
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		if st.strict != 0 || st.fullSets != fullSets || len(st.sent) != sent {
+			t.Fatalf("%s: %d strict reads, %d full sets, sent %v", when, st.strict, st.fullSets, st.sent)
+		}
+	}
+	check("the first mount", nil, "", "postgres://app:s3cret@db:5432/shop", "d1", 1, 2)
+
+	st.mu.Lock()
+	st.db, st.digest = "postgres://app:rotated@db:5432/shop", "d2"
+	st.mu.Unlock()
+	check("a one-key change", nil, "", "postgres://app:rotated@db:5432/shop", "d2", 1, 1)
+	if st.sent[0] != "DATABASE_URL" || st.sentTo != "Bearer rlst_pod" {
+		t.Fatalf("sent %v to %s", st.sent, st.sentTo)
+	}
+
+	// The node's own token holds no answer yet: the full set, though the pod holds one.
+	check("another login", map[string]string{"identity": "", "project": "prj_1"}, `{"token":"rlt_node"}`, "postgres://app:rotated@db:5432/shop", "d2", 2, 2)
+
+	st.mu.Lock()
+	st.db, st.digest, st.basis = "postgres://app:again@db:5432/shop", "d3", "b2"
+	st.mu.Unlock()
+	check("a full-set answer", nil, "", "postgres://app:again@db:5432/shop", "d3", 3, 2)
 }
 
 // A mount that can't get everything it asked for fails (the pod waits, a rotation keeps what it

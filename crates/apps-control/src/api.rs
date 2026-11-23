@@ -91,6 +91,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/deploys/{{dep}}/commits"), get(deploy_commits))
         .route(&format!("{env}/deploys/{{dep}}/vulnerabilities"), get(deploy_vulnerabilities))
         .route(&format!("{env}/deploys/{{dep}}/sbom"), get(deploy_sbom))
+        .route(&format!("{env}/deploys/{{dep}}/provenance"), get(deploy_provenance))
         .route(&format!("{env}/checks/{{check}}/screenshot"), get(check_screenshot))
         .route(&format!("{env}/checks/{{check}}/trace"), get(check_trace))
         .route(&format!("{env}/deploys/{{dep}}/explain"), post(explain_deploy))
@@ -883,6 +884,11 @@ async fn deploy_sbom(State(apps): S, Path((id, env, dep)): Path<(String, String,
     let body = apps.sbom(&id, &env, &dep).await?;
     let file = format!("attachment; filename=\"{dep}.cdx.json\"");
     Ok(([(axum::http::header::CONTENT_TYPE, "application/vnd.cyclonedx+json".to_string()), (axum::http::header::CONTENT_DISPOSITION, file)], body).into_response())
+}
+
+/// `GET …/deploys/{dep}/provenance`: its image's signed SLSA provenance (a DSSE envelope).
+async fn deploy_provenance(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>) -> R {
+    Ok(Json(apps.deploy_provenance(&id, &env, &dep).await?).into_response())
 }
 
 /// `GET …/checks/{check}/screenshot`: a browser check's last failure, as the page looked.

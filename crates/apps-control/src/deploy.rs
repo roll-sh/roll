@@ -1792,8 +1792,33 @@ impl Apps {
             image
         } else {
         log.line(format!("building with {}", self.deps.builder.name()));
+        let began = code_sql::now_ms();
         match self.deps.builder.build(&job, log, cancel.clone()).await {
-            Ok(i) => i,
+            Ok(i) => {
+                // Its provenance, signed, beside it (what it was built from; never a value).
+                if let Some(digest) = self.deps.runtime.image_id(&i).await {
+                    use sha2::{Digest, Sha256};
+                    let dockerfile = std::fs::read(job.context.join(&job.dockerfile)).or_else(|_| std::fs::read(&job.dockerfile)).unwrap_or_default();
+                    let built = crate::provenance::Built {
+                        image: &i,
+                        digest: &digest,
+                        service: &svc.id,
+                        deployment: &d.id,
+                        builder: self.deps.builder.name(),
+                        source: serde_json::to_value(&svc.source).unwrap_or_default(),
+                        revision: d.revision.as_deref(),
+                        plan: &plan_json,
+                        dockerfile_sha256: hex::encode(Sha256::digest(&dockerfile)),
+                        variables: job.env.iter().map(|(k, _)| k.clone()).collect(),
+                        started_ms: began,
+                        finished_ms: code_sql::now_ms(),
+                    };
+                    if let Err(e) = self.record_provenance(&svc.project, built).await {
+                        log.line(format!("its provenance wasn't recorded: {e}"));
+                    }
+                }
+                i
+            }
             // What failed, as BuildKit said it (the step, its last words), not only its exit code.
             Err(e) if !cancel.is_cancelled() => {
                 let lines: Vec<String> = self.logs.follow(&format!("build:{}", d.id), 400).0.into_iter().map(|l| l.text).collect();

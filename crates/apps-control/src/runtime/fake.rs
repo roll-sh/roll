@@ -454,6 +454,12 @@ impl Runtime for Fake {
         Ok(Box::new(ours))
     }
 
+    /// A digest of its name: the same image, the same digest.
+    async fn image_id(&self, image: &str) -> Option<String> {
+        use sha2::{Digest, Sha256};
+        Some(format!("sha256:{}", hex::encode(Sha256::digest(image.as_bytes()))))
+    }
+
     async fn verify_signature(&self, pinned: &str, keys: &[String], _login: Option<&super::RegistryLogin>) -> anyhow::Result<usize> {
         let name = pinned.split_once('@').map_or(pinned, |(n, _)| n);
         self.signatures.lock().get(name).copied().filter(|i| *i < keys.len()).ok_or_else(|| anyhow::anyhow!("{name} has no cosign signature by those keys"))
