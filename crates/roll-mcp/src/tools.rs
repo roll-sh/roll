@@ -1647,6 +1647,7 @@ static TOOLS: &[Tool] = &[
             b("feedback", Ty::Bool, "A feedback button on its pages for people who came in through roll"),
             b("warm", Ty::Bool, "Wake the services as soon as a new head is deployed"),
             b("crons", Ty::Bool, "Scheduled work (roll apps' crons, scheduled commands and calls) runs in previews too; off by default: deployed, schedule off"),
+            b("browser_checks", Ty::Str, "Production's browser checks on each preview head: report (shown), check (the roll/browser-checks status) or required (also keeps a change from landing)"),
         ],
     ),
     t("previews_visitors", "Who opened a preview", "The last 8 people signed in to roll who opened a preview (team access), by handle, latest first. Share links and the CI bypass aren't people and aren't listed.", "previews", "GET", "/v1/previews/{id}/visitors", &[req("id", "Preview id")]),
