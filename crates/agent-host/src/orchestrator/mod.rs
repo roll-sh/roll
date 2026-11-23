@@ -680,6 +680,7 @@ impl Host {
             Command::EndpointKey { endpoint, key } => self.endpoint_key(&endpoint, key).await,
             Command::GatewayConfigure { settings } => self.gateway_configure(*settings).await,
             Command::GatewayKey { upstream, key } => self.gateway_key(&upstream, key).await,
+            Command::GatewayUpstreamKey { upstream, key } => self.gateway_upstream_key(&upstream, key).await,
             Command::GatewayClientIssue { name, machine, seal_key } => self.gateway_client_issue(&name, machine, &seal_key).await,
             Command::GatewayClientRevoke { client } => self.gateway_client_revoke(&client).await,
             Command::GatewayTest { upstream } => self.gateway_test(upstream.as_deref()).await,

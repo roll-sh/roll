@@ -574,8 +574,18 @@ async fn proxy(mut req: Req, permit: OwnedSemaphorePermit) -> Response {
         live.upstreams.values().filter_map(|u| gw.inner.health.cooling_until(&u.spec.id, now).map(|until| (u.spec.clone(), until))).collect();
     let mut waited: Option<u64> = None;
     let mut last: Option<Failure> = None;
+    // An upstream whose key was refused bars its provider whole: no other key of it instead.
+    let refused: Vec<(UpstreamSpec, String)> = {
+        let r = gw.inner.refused.lock().unwrap();
+        live.upstreams.values().filter_map(|u| r.get(&u.spec.id).map(|why| (u.spec.clone(), why.clone()))).collect()
+    };
     for t in order {
         let Some(up) = live.upstreams.get(&t.upstream).cloned() else { continue };
+        if let Some((b, why)) = refused.iter().find(|(b, _)| route::same_provider(b, &up.spec)) {
+            let error = format!("{}: {}'s key can't be used ({why}), and no other key of its provider is tried", up.spec.name, b.name);
+            last = Some(Failure { status: 0, error, rate_limited: false, retry_after: None, body: None });
+            continue;
+        }
         if let Some(until) = barred.iter().filter(|(b, _)| route::same_provider(b, &up.spec)).map(|(_, u)| *u).min() {
             waited = Some(waited.map_or(until, |w| w.min(until)));
             continue;

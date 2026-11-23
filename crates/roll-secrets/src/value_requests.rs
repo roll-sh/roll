@@ -421,7 +421,7 @@ impl Secrets {
             audit::record_event(c, self.keys()?, &project, &answerer, "value_request.answer", Some(&slug), Some(&path), &keys, &summary, now, event)
         };
         let message = format!("answer to secret request {id}, asked by {requester}");
-        let landed = self.commit_then(&project, &slug, items.clone(), &[], "write", &message, None, false, &landing, &|c, _, change, _| {
+        let landed = self.commit_then(&project, &slug, items.clone(), &[], crate::write::Via::Answer, &message, None, false, &landing, &|c, _, change, _| {
             claim(c, serde_json::json!({ "change": change.seq }), format!("answered secret request {id}: change #{} in {slug}", change.seq))?;
             notify_landed(c, self.web_url.as_deref(), &project, &env_id, &slug, &path, id, &requester, &keys, change.seq, now)
         });

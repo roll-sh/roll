@@ -29,6 +29,16 @@ pub enum Deletion {
     Requested(Box<crate::requests::Request>),
 }
 
+/// Where an environment stands ([`Secrets::environment_standing`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Standing {
+    Live,
+    /// Deleted, and kept until `purge_at`: a recovery brings it back.
+    Kept { purge_at: i64 },
+    /// Purged, or never there.
+    Gone,
+}
+
 /// Something that stops working when an environment goes.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Break {
@@ -235,6 +245,18 @@ impl Secrets {
             }
         }
         Ok(serde_json::json!({ "project": project, "environment": slug, "recovered_at": now, "rotated": rotated, "rotation_failed": failed }))
+    }
+
+    /// Where `slug` of `project` stands, for a consumer that was refused a read of it and must tell
+    /// "deleted, still recoverable" (wait) from "gone" (let go of what it copied). Checks no
+    /// access and says nothing of what's in it: the consumer was already allowed to name it.
+    pub fn environment_standing(&self, project: &str, slug: &str) -> Result<Standing> {
+        let row: Option<(Option<i64>, Option<i64>)> = self.db.read(|c| c.query_row("SELECT forgotten_at, purge_at FROM environments WHERE project_id = ? AND slug = ?", [project, slug], |r| Ok((r.get(0)?, r.get(1)?))).optional())?;
+        Ok(match row {
+            Some((None, _)) => Standing::Live,
+            Some((Some(_), Some(purge_at))) => Standing::Kept { purge_at },
+            Some((Some(_), None)) | None => Standing::Gone,
+        })
     }
 
     /// Deleted environments in their window that `caller` may recover (`admin` there), in projects

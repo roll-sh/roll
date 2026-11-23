@@ -961,7 +961,8 @@ Sandbox = {id /* sbx_… */, name, machine /* mch_… */, backend, size: Size,
            error?: string /* the backend's last complaint */,
            created_at, updated_at, last_active_at? /* its machine last did something; it sleeps a window after */,
            secrets_by? /* who copied secrets into its env: roll secrets' maker (usr_…, token:…, operator; an admin's session is the person) */,
-           secrets_dropped? /* why the copied secrets were taken out: secrets_by may no longer reveal them */}
+           secrets_dropped? /* why the copied secrets were taken out: secrets_by may no longer reveal them */,
+           secrets_unset? /* the copied variables it last started without, as they don't resolve for secrets_by, and why (names only) */}
 SandboxInfo = {backend, size /* a Size name */, status /* as Sandbox.status */, hourly_cents,
                stopped_reason? /* as Sandbox.stopped_reason */}   (Machine.sandbox)
 Size = {name /* "standard" */, cpu, memory_gb, disk_gb, hourly_cents /* price per running hour, US cents */}
@@ -980,7 +981,11 @@ secrets as `secrets_by` may now at its create and at each start (a wake too), so
 since reaches it at its next start (the variables it was made with; one deleted from the
 environment since is unset). Once the copier can't reach the project or reveal the environment
 (removed, demoted, a token revoked), the sandbox starts without those variables, its home and the
-rest of its env kept (`secrets_dropped` says why, and they stay out). Every backend changes what it
+rest of its env kept (`secrets_dropped` says why, and they stay out). Only the copied variables
+count: a key of the environment it didn't copy never holds it up, and a copied one that doesn't
+resolve for `secrets_by` (a reference to a protected environment) is left unset and named in
+`secrets_unset`. While its source environment is deleted but recoverable, its create and starts
+wait (`error` says why); once purged, the copied values are taken out. Every backend changes what it
 starts with in place of what it made: docker a new container on the same home volume (or the same
 one when nothing changed), fargate what it keeps for its next task, agent37 the instance's env
 (`PATCH`, a `null` for each variable taken out) before it starts it, its disk kept. A sandbox made

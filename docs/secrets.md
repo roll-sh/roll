@@ -491,7 +491,8 @@ to install. An app moves between it and the Lambda extension unchanged:
   setup), `path` to its `--path`, else `/`. Errors are `{"error", "code"}`, naming keys and folders,
   never a value: 404 `not_found`, 409 `unresolved` (`/secrets` answers a folder only when every key
   resolves), 403 `withheld` for a key this login isn't given (sensitive, or an untrusted
-  caller's), roll's own 403, 404, 409, 423 and 429, and 502 for anything else. Every answer is
+  caller's), roll's own 403, 404, 409, 423 and 429 (its 401, the agent's login refused after
+  logging in again, as a 403), and 502 for anything else. Every answer is
   `Cache-Control: no-store`.
 - **The request token.** Every request but `/health` carries `X-Roll-Token` (the extension's header)
   with the contents of `--token-file` (`ROLL_AGENT_TOKEN_FILE`; by default
@@ -514,7 +515,10 @@ to install. An app moves between it and the Lambda extension unchanged:
   moved, so a change reaches the agent within a second or so and an app's read is answered from
   memory. Each answered poll confirms the folder for another `--ttl` (`ROLL_CACHE_TTL`, 300 s); a
   folder roll hasn't confirmed for that long (roll unreachable) is read from roll again on its next
-  request, and `--ttl 0` turns the cache off. `--cache-size` (`ROLL_CACHE_SIZE`, 1000) caps the
+  request, and `--ttl 0` turns the cache off. Only no answer, or a 5xx, keeps a folder until its
+  TTL: once roll refuses it (a 401 after logging in again, or a 403 or 404 on the poll or on the
+  read after the digest moved: the login revoked, or no longer allowed to reveal the folder) the
+  agent drops it at once, so the app's next request gets roll's refusal rather than the values. `--cache-size` (`ROLL_CACHE_SIZE`, 1000) caps the
   folders kept; past it, the one read longest ago goes. `--prefetch production:/,staging:/api`
   (`ROLL_PREFETCH`) reads folders before the agent answers. A folder with a key that doesn't
   resolve is never kept. A folder holding a dynamic credential is kept only within its leases: the
@@ -586,7 +590,8 @@ curl -sH "X-Roll-Token: $(cat /run/roll/agent-token)" http://127.0.0.1:2773/secr
 ```
 
 Tests: `crates/roll-cli/tests/secrets.rs` (`the_local_agent_answers_only_requests_that_carry_its_token`,
-`a_change_reaches_the_local_agents_cache_through_the_digest`); the identity login's renewal is
+`a_change_reaches_the_local_agents_cache_through_the_digest`,
+`a_revoked_logins_local_agent_answers_a_refusal_within_one_poll`); the identity login's renewal is
 `relogin_tests` in `crates/roll-cli/src/secrets.rs`, which the agent shares.
 ## Customer-managed keys
 A project's data key can be wrapped once more by a KMS key in the customer's own AWS account, as
@@ -3207,7 +3212,13 @@ cluster, instead of a key pasted into it: the Inference tab's "A roll secret", o
   create and at each start roll code reads them again as the maker may now
   (`Secrets::values_as_maker`: the check and the read in one call, untrusted, not a runtime), so a
   rotated value reaches it at its next start. Once the maker may not (`maker_unreachable` or not
-  allowed), the sandbox starts without those variables (`secrets_dropped`). A sandbox made before
+  allowed), the sandbox starts without those variables (`secrets_dropped`). Only the variables it
+  copied count: a key of the folder that doesn't resolve for an untrusted read (`${production.X}`,
+  production being protected, or a reference to a deleted environment) stops nothing that didn't
+  copy it, and a copied one that doesn't resolve is left unset and named with why
+  (`secrets_unset`). An environment deleted but still in its recovery window holds the sandbox's
+  create and start (they wait), so recovering it brings the values back; once it's purged, the
+  sandbox starts without them (`secrets_dropped`). A sandbox made before
   `secrets_from` was kept only has its maker asked whether they can still act (`maker_acts`), and
   keeps what it was made with; delete it and make another to get fresh reads
   (docs/code/http-api.md, "Sandboxes").
@@ -4048,7 +4059,10 @@ Agent's templates do).
   the same project. roll code's relay reads it as them after each of the machine's `hello`s (a
   digest each time, the value only when it moved) and sends it sealed to the daemon, never kept.
   Once they can't read it, the daemon is told why and the endpoint has no key. The model
-  gateway's upstreams still keep their own copies (`op://`, `env:`, a file).
+  gateway's upstream keys can be one too (an upstream's `key_ref`, docs/code/gateway.md
+  "Upstreams"). They're bound on `gateway.configure`, read as the host machine
+  (`agent:<machine>`), and sent the same way. A refusal leaves the upstream with no key and bars
+  its provider, so no other key of it is tried.
 - **Who reads it.** The product asks rolld in process (`resolve_as` or `resolve_for`), naming the workspace resource that needs the value: a replication target
   resolves for the source bucket that replicates through it. The project is the one whose canvas
   holds that resource *and* that stands for it (`Workspace::trusts`): a person's canvas only
@@ -5482,15 +5496,29 @@ some environments call it (`filters_itself`). `decoy.used` is only for those who
 deleted project's feed stays readable through its recovery window, so a follower sees
 `project.deleted` and `project.recovered`.
 
-**Never a value.** `data` holds names, ids, counts and reasons, and always `actor`; `path` and `keys`
-(when there's more than one; one is `key`) come from the row. Never a value, a hash of one, or its
-length.
+**Never a value.** `data` holds names, ids, versions, counts and reasons, and always `actor`; `path`
+and `keys` (when there's more than one; one is `key`) come from the row. Never a value, a hash of
+one, or its length.
+
+**Value changes.** Every change to stored values (`apply` in `write.rs`, which every write, import,
+restore, request, promote, rollback, rotation and environment rename goes through) carries its event
+in its own audit row: one per change, never one per key, so a bulk write of 40 keys is one
+`secret.changed`. `via` says how it came about: `write`, `import` (a `.env` file), `restore` (a
+backup), `answer` (a secret request answered), `request` (a change request applied), `promote`,
+`rollback`, `rotation`, or `rename` (references to a renamed environment rewritten). Live and dynamic
+links store no value, so a resource's own credential changing is no `secret.changed` (a live link's
+`rotate` is `rotation.succeeded`). Keys have no trash: a deleted key's versions stay in its history
+(its value until retention or a purge), and a rollback brings it back. Role changes in a project are
+roll-workspace's records, not secrets' audit rows, so they aren't events here yet.
 
 | Kind | When | `data` |
 | --- | --- | --- |
+| `secret.changed` | a change added, changed, linked or rotated stored values (a change that only edits comments, tags or expiry isn't one) | `via`, `change` (its number in the history), `version` (one key) or `versions` (`{key: version}`), `keys` when the row names more (the change's other keys only had their metadata edited or were deleted), `deleted` (keys the same change deleted) |
+| `secret.deleted` | a change only deleted keys (a folder's delete too) | `via`, `change`, `version` or `versions` (the delete's) |
 | `secret.leaked` | a stored value turned up in a roll code repository (a change's added lines or a scan; in the project holding the value, once a day for the same keys and repo), or GitHub's secret scanning found a placeholder (`secrets.placeholders.end`) | `repo` (and `project`, the repo's, when the value came from another's shared folder), or `placeholder`, `consumer`, `reason` |
 | `scan.finding` | `roll secrets scan` or roll MCP's credential guard (`POST …/leaks`) matched values: a row per folder | `candidates`, `matched`, `guard` |
 | `rotation.failed` | a managed key's scheduled rotation failed: once as a failing run starts (health's `rotation_failing` until one works) | `reason` |
+| `rotation.succeeded` | a rotation worked, scheduled or `--now`: a managed key's new credential (the row right after its `secret.changed` via `rotation`, in the same transaction), or a live link's resource credential reset | `mode` (`managed` or `live`), `scheduled`, `version` and `change` (managed), `sharing` (the keys holding the same credential, when more than one) |
 | `request.pending` | a change request or a secret request opened | `request`, `type` (`change` or `value`), `expires_at` (a secret request's) |
 | `request.decided` | a change request approved or rejected (once its state moves) or closed; a secret request answered or cancelled | `request`, `type`, `state` |
 | `sync.failed` | a sync's push failed | `sync`, `target`, `reason` |
@@ -5500,6 +5528,7 @@ length.
 | `placeholder.wrong_consumer` | another consumer's proxy sent a placeholder | `placeholder`, `consumer`, `by`, `more_by`, `count` |
 | `placeholder.wrong_host` | a placeholder went to hosts its key isn't bound to | `placeholder`, `consumer`, `hosts`, `more_hosts`, `count` |
 | `production.unprotected` | `production` went from protected to not (health's `production_unprotected`) | |
+| `access.changed` | an environment's protection or approvals changed (not its notify URL alone; `production.unprotected` instead when that's what it did), or a folder's change policy was set or removed | `what` (`environment` or `folder`), `protected` (an environment's), `approvals` (0: a folder's policy removed) |
 | `env.deleted`, `env.recovered` | a standard environment was deleted (kept for its recovery window; ephemeral ones, previews', aren't events), or recovered within it | `purge_at` (deleted) |
 | `project.deleted`, `project.recovered` | the workspace project was deleted (its recovery window starts), or recovered | `purge_at` (deleted) |
 
@@ -5760,7 +5789,7 @@ isn't in the workspace is 404.
 | `PUT /identities/{id}/jwks` | `{jwks}` | `Identity` (admin; a person's): its pinned keys replaced, its id kept (400 for an `aws` one) |
 | `POST /v1/secrets/login` | `{identity, token}` or `{identity, aws: {method, url, headers, body}}` | `{token, expires_at, project, identity}` (public; `aws`: a signed `GetCallerIdentity`, "AWS IAM") |
 | `GET /audit?env=&key=&actor=&action=&before=&since=&limit=&digests=&format=` | | `AuditEntry[]` newest first, or CSV/JSONL with `format`; `digests=false` leaves out `audit.digest` rows |
-| `GET /events?after=&limit=&kinds=&environment=&latest=` | | `{events: SecretsEvent[], next}` in commit order after the cursor (`limit` 1–500, default 100; `kinds` comma-separated, a family as `request.*`, 400 for an unknown one; `environment` needs read there); `latest=1` answers `{events: [], next}` at the head, 400 with `after` ("Events") |
+| `GET /events?after=&limit=&kinds=&environment=&latest=` | | `{events: SecretsEvent[], next}` in commit order after the cursor (`limit` 1–500, default 100; `kinds` comma-separated, a family as `request.*` (`secret.*` is `secret.changed`, `secret.deleted` and `secret.leaked`), 400 for an unknown one; `environment` needs read there); `latest=1` answers `{events: [], next}` at the head, 400 with `after` ("Events") |
 | `GET /required` | | `Required[]` |
 | `PUT /required` | `Required[]` | `Required[]` (replaces the list; `admin`) |
 | `GET /shares` | | `Share[]` newest first |
@@ -6408,12 +6437,11 @@ Newest entries first; older State and Ranked entries follow further down, as his
    - reviewer provider keys (code-control's own table): **done**, `bind_ref` for `code:review:<owner>`;
    - agents' endpoints (pasted or `op://`): **done**, `bind_ref` for `agent:<machine>`, sent sealed
      by the relay (`endpoint.key`);
-   - the model gateway's upstreams (`env:`/file).
+   - the model gateway's upstreams (`env:`/file): **done**, `agent:<machine>`, sent as `gateway.upstream_key`.
 
    A leaked model key, the commonest leak, gets no reach, health, validity check or rotation.
    Bind with `bind_ref` and read with `resolve_as`. The daemon resolves over its machine link.
-   Left for the upstreams: the endpoints' way (`code-control/src/agents/endpoint_refs.rs`), at
-   `gateway.key` with its upstream's context.
+   All three are done (#733, #763, and this item's part C).
 7. **apps' environments with their own data drop every linked key** (S). `Values.linked` gains
    `{name, kind, ref}`, so apps drops only what it branched.
 8. **A local agent outside Lambda** (S–M): the Lambda extension's surface as a sidecar.
