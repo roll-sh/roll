@@ -1277,6 +1277,7 @@ export type NotifyEvent =
   | "crash_loop"
   | "deploy.active"
   | "spend.alert"
+  | "spend.spike"
   | "spend.limit"
   | "alert.memory"
   | "alert.cpu"

@@ -810,6 +810,20 @@ pub struct UsageAdd {
     pub stored_gb_hours: f64,
 }
 
+impl UsageAdd {
+    /// Both added up.
+    pub fn plus(&self, o: &UsageAdd) -> UsageAdd {
+        UsageAdd {
+            cpu_seconds: self.cpu_seconds + o.cpu_seconds,
+            gb_seconds: self.gb_seconds + o.gb_seconds,
+            requests: self.requests + o.requests,
+            egress_bytes: self.egress_bytes + o.egress_bytes,
+            build_seconds: self.build_seconds + o.build_seconds,
+            stored_gb_hours: self.stored_gb_hours + o.stored_gb_hours,
+        }
+    }
+}
+
 /// One move of an environment's active deployment ([`Store::switch_active`]): from `from` to
 /// `to`, with the new one's health-check time, the node's lease epoch (fenced when given) and
 /// its variables' hash.
@@ -4257,6 +4271,29 @@ impl Store {
                 return Ok(false);
             }
             insert_event(c, now, kind, "", "", None, data)?;
+            Ok(true)
+        })
+    }
+
+    /// The first hour a project used anything (its services', or deleted ones'), if it has.
+    pub fn project_first_hour(&self, project: &str) -> Result<Option<i64>> {
+        let live: Option<i64> = self.db.query_row("SELECT MIN(u.hour) FROM usage u JOIN services s ON s.id = u.service WHERE s.project = ?", [project], |r| r.get(0))?;
+        let gone: Option<i64> = self.db.query_row("SELECT MIN(hour) FROM project_usage WHERE project = ?", [project], |r| r.get(0))?;
+        Ok(live.into_iter().chain(gone).min())
+    }
+
+    /// A spend spike in `hour` recorded once: the event and the hour marked in one write; false
+    /// when that hour (or a later one) already was.
+    pub fn spend_spiked(&self, project: &str, hour: i64, data: &serde_json::Value) -> Result<bool> {
+        let key = format!("spend-spike:{project}");
+        let now = self.now()?;
+        self.db.write(|c| {
+            let last: Option<i64> = c.query_row("SELECT value FROM state WHERE key = ?", [&key], |r| r.get::<_, String>(0)).optional()?.and_then(|v| v.parse().ok());
+            if last.is_some_and(|l| l >= hour) {
+                return Ok(false);
+            }
+            c.execute("INSERT INTO state (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", params![key, hour.to_string()])?;
+            insert_event(c, now, "spend.spike", "", "", None, data)?;
             Ok(true)
         })
     }
