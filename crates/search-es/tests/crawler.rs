@@ -104,9 +104,9 @@ impl Site {
 }
 
 async fn cluster(settings: &[(&str, &str)]) -> Arc<Cluster> {
-    use search_es::xpack::entsearch::sync::slots::{NODE_MAX, OWNER_MAX, Slots};
     let mut cfg = ClusterConfig::new("crawler");
-    cfg.connector_slots = Some(Slots::new(NODE_MAX, OWNER_MAX));
+    // Its own slots: the tests' clusters share a name, and the node's pool keys on it.
+    cfg.connector_slots = Some(search_es::slots::Slots::new(search_es::xpack::entsearch::sync::SLOTS));
     cfg.sealer = search_es::seal::Sealer::from_secret("0123456789abcdef0123456789abcdef-crawler");
     for (k, v) in [
         ("roll.connectors.allow_private_hosts", "true"),
