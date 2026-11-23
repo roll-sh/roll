@@ -4838,7 +4838,9 @@ may no longer manage the project, and the one-time shares they made end and the 
 issued to them are revoked once they're no longer a member. Their personal overrides stay (only
 they read them, and they can't). When their account is disabled (an admin, SCIM), stops being an
 admin's or is deleted, rolld calls `Secrets::person_offboarded`, which runs the same hook in every
-project holding an open share, a live lease or a shared folder: a disabled person counts as no
+project holding an open share, a live lease, a shared folder or a key bound to hosts they made
+(themselves, or a token or identity of theirs) and in their memberships' projects, never one only
+others made things in (`SecretsMemberRechecks` counts them): a disabled person counts as no
 member anywhere (docs/accounts.md, "Offboarding"). Enabled again, they get nothing back.
 
 So removing or demoting a member stops or narrows what they made at once. rolld asks roll-accounts
@@ -4899,7 +4901,9 @@ credentials as the tokens list does. Names and metadata only, never a value:
   it, or their account is `gone`). They still know what they read: rotate it.
 
 roll secrets knows no product: rolld answers which services and sandboxes hold a project's
-secrets (`reach::Holders`, from roll apps' and roll code's stores; names and references only).
+secrets (`reach::Holders`, from roll apps' and roll code's stores; names and references only:
+roll apps keeps each variable's `roll://` text beside its sealed value when it's set, so reach
+opens no value, write-only ones included).
 - **Where it goes by itself**: syncs of that folder (and that key), projects the folder is shared
   with, and this project's folders that import it.
 - **Where it goes by itself** also counts folders that import it and environments based on it
@@ -6130,6 +6134,7 @@ and `product`. Numbers only: never a value, a key's name or a project.
 | `SecretsSyncsPushed`, `SecretsSyncFailures` | Sync pushes that worked and that failed |
 | `SecretsRotations`, `SecretsRotationFailures` | Scheduled rotations that worked and that failed |
 | `SecretsKmsRefusals` | A customer's KMS refusing to open a project's data key |
+| `SecretsMemberRechecks` | Projects checked again because a member lost rights there (removed, demoted, offboarded): an offboarding checks only the projects holding what the person made and their memberships' |
 | `SecretsLeasesLive`, `SecretsSyncsFailing`, `SecretsRotationsFailing` | Gauges: leases not ended, syncs whose last push failed, credentials whose last rotation failed |
 
 Each node counts what it did, so sum the counters across nodes. The gauges read the store every

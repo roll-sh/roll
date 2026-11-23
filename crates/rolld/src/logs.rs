@@ -448,7 +448,7 @@ impl SecretsMetrics {
         f.insert("node".into(), node.into());
         f.insert("service".into(), SERVICE.into());
         f.insert("product".into(), "secrets".into());
-        let metrics: [(&str, u64, &str); 12] = [
+        let metrics: [(&str, u64, &str); 13] = [
             ("SecretsReads", d(now.reads, last.reads), "Count"),
             ("SecretsDynamicIssued", d(now.dynamic_issued, last.dynamic_issued), "Count"),
             ("SecretsLeasesRevoked", d(now.leases_revoked, last.leases_revoked), "Count"),
@@ -458,6 +458,7 @@ impl SecretsMetrics {
             ("SecretsRotations", d(now.rotations, last.rotations), "Count"),
             ("SecretsRotationFailures", d(now.rotation_failures, last.rotation_failures), "Count"),
             ("SecretsKmsRefusals", d(now.kms_refusals, last.kms_refusals), "Count"),
+            ("SecretsMemberRechecks", d(now.member_rechecks, last.member_rechecks), "Count"),
             ("SecretsLeasesLive", now.leases_live, "Count"),
             ("SecretsSyncsFailing", now.syncs_failing, "Count"),
             ("SecretsRotationsFailing", now.rotations_failing, "Count"),

@@ -686,7 +686,9 @@ and an enabled one is back where they were). What was handed out on their say, a
 checks again, ends at once rather than at its TTL, as Vault revokes a token's leases with it:
 
 - **roll secrets** runs the member-removal hook (`Secrets::member_changed`) for every project
-  holding an open share, a live lease or a shared folder (`Secrets::person_offboarded`). A disabled
+  holding an open share, a live lease, a shared folder or a key bound to hosts that they made
+  (themselves, or a token or identity of theirs), and for their memberships' projects
+  (`Secrets::person_offboarded`); never a project only others made things in. A disabled
   person's session grant sees nothing, so their dynamic database and cloud credentials are revoked
   (outside the write, as a removal's are), their one-time shares end and their shared folders stop
   being shared. A demoted admin keeps what their memberships still allow.
