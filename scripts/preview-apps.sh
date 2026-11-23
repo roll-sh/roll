@@ -125,6 +125,10 @@ done
 [ "$BC" = "cart=failed home=passed" ] || { echo "production's browser checks should run on the preview's head (home passes, cart fails): '$BC'"; exit 1; }
 BC_ERR=$(api GET "/v1/previews/$PV" | jq_ "[c.get('error') or '' for c in d['browser_checks'] if c['name'] == 'cart'][0]")
 case "$BC_ERR" in *"the cart is empty"*) ;; *) echo "the failed check should say why: ${BC_ERR:0:200}"; exit 1;; esac
+# And where its screenshot is: roll apps answers it (a PNG) to someone who can read the service.
+BC_SHOT=$(api GET "/v1/previews/$PV" | jq_ "[('/v1/apps/services/%s/environments/%s/checks/cart/screenshot' % (c['files']['service_id'], c['files']['environment'])) for c in d['browser_checks'] if c['name'] == 'cart' and c.get('files')][0] if [c for c in d['browser_checks'] if c['name'] == 'cart' and c.get('files')] else ''")
+[ -n "$BC_SHOT" ] || { echo "the failed check should say where its screenshot is"; exit 1; }
+curl -sf "http://$API$BC_SHOT" -o "$H/cart.png" && head -c 8 "$H/cart.png" | od -An -c | grep -q "P   N   G" || { echo "its screenshot should be a PNG at $BC_SHOT"; exit 1; }
 E=$(api GET "/v1/apps/services/$SVC/environments/$ENV")
 echo "$E" | python3 -m json.tool | head -30 >&2
 # Wait for the deploy to be active, then open it.

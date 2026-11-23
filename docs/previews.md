@@ -129,7 +129,9 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   up. They're on the record (`browser_checks`), the sheet (what failed, the check's own words
   made printable), `roll preview show` and the pull request comment ("Production's browser checks
   on this head: **1 failed** (`web: checkout`), 2 passed": names only). The screenshot and trace
-  of a failure stay roll apps' (`read` on the service). The project's `browser_checks` rule:
+  of a failure stay roll apps' (`read` on the service): the record names where (`files`), and the
+  sheet opens them as the person looking, as roll apps' own Settings does (someone without `read`
+  on the service gets nothing). The project's `browser_checks` rule:
   `report` (the default) shows them; `check` also posts `roll/browser-checks` on the head (pending
   while one runs, failing while one failed: for GitHub's branch protection); `required` also keeps
   the change from landing in roll (a `browser` blocker in `Code::blockers`, from the project's rule,
@@ -1719,7 +1721,7 @@ type Preview = {
   runs: string | null;                // the earlier head its services run (later pushes touched only ignored paths)
   earlier: {service: string; revision: string; url: string; share_url: string | null; at: number; own_data: string[]}[]; // earlier pushes, still reachable; own_data: the products it has its own copy of (as its head left them)
   copies: {count: number; bytes: number; usd_month: number}; // the earlier pushes' own copies of its data, said apart (counted in cost)
-  browser_checks: {service: string; name: string; state: "pending" | "passed" | "failed"; error: string | null}[]; // production's browser checks on this head (roll apps)
+  browser_checks: {service: string; name: string; state: "pending" | "passed" | "failed"; error: string | null; files: {service_id: string; environment: string} | null}[]; // production's browser checks on this head (roll apps); files: where a failure's screenshot and trace are kept
   browser_checks_rule: "check" | "required" | null; // the project's rule for them, when it's more than showing them
   goes_at: number | null;             // when it goes (TTL, keep or expiry running out), once a day away (or a quarter of a shorter TTL)
   reported_by: string | null;         // the project that reports a Git URL branch's pull request, when another one does (one voice per pull request)
@@ -2451,8 +2453,8 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Production's browser checks checked live, in review**: `preview-apps.sh` runs them for
-   real on the preview's head (roll apps' checker image) and expects one passed, one failed.
+1. **A failed browser check's screenshot and trace from the sheet, in review**: the record says
+   where roll apps keeps them (`files`), and the sheet opens them as the person looking.
 2. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
@@ -2463,6 +2465,8 @@ Ranked by what a person notices first. Done so far:
 4. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
 5. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-23, afternoon: production's browser checks checked live in `preview-apps.sh` (#812: one passed, one failed with its error).
 
 Landed 2026-11-23, early afternoon: browser checks in the event feed (#807: `browser_checks_passed`, `browser_checks_failed`, once a head).
 
