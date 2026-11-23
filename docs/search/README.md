@@ -1670,9 +1670,10 @@ deterministic (#396).
    load; the TTL is roll cloud's fleet-wide choice.
 28. **CI**: the merge gate runs `search-codec`'s lib tests (`rust (search)`, 54 s on PR #29 with
    main's cache: under the minute, no room for another crate). Test gaps a read-only analysis found on 2026-11-22
-   (main at d9aecc990), ranked; each test goes in `test:search`, not the merge gate (in progress:
-   (2), (3), (4), (7) and (8) on `test/search-gaps-a`, (5), (6), (9), (10), (11) and the e2e
-   file on `test/search-gaps-b`, both in their gates; `persist.rs`'s memory-budget flake fixed in
+   (main at d9aecc990), ranked; each test goes in `test:search`, not the merge gate ((2), (3),
+   (4), (7) and (8) landed in #768, 1c2b5e62c, each failing against its guarded line; in progress:
+   (5), (6), (9), (10), (11) and the e2e file on `test/search-gaps-b`, which also found that a
+   drain leaves a running connector sync `in_progress` for 5 minutes on the next owner; `persist.rs`'s memory-budget flake fixed in
    #766, 9641a1bd6: the test no longer races a second commit, 60 of 60 under load):
    (1) connectors refusing private addresses: every `connectors.rs` cluster sets
    `allow_private_hosts`, so deleting the check fails nothing (being added with the egress fix,
