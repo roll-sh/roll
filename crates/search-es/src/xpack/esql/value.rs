@@ -1728,7 +1728,7 @@ impl Acc {
 }
 
 /// `QuantileStates.DEFAULT_COMPRESSION`.
-const QUANTILE_COMPRESSION: f64 = 1000.0;
+pub(super) const QUANTILE_COMPRESSION: f64 = 1000.0;
 
 /// `TOP`'s order parameter: descending unless `asc`.
 fn top_desc(extra: &[V]) -> bool {
