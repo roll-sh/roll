@@ -3268,6 +3268,17 @@ impl Apps {
         sealed.extend(sensitive.into_iter().filter(|k| vars.get(k).is_some_and(|(_, s)| *s == "secret")));
         // Reference variables, one level deep: against what resolved above, and other services'.
         let unresolved = self.fill_references(svc, &env.name, &mut vars, &mut sealed).await;
+        // A Node build with source maps: its stacks name the source's lines (joined to the app's
+        // own `NODE_OPTIONS`; the agent's below joins after it).
+        if !deployment.is_empty() {
+            let d = deployment.to_string();
+            if self.db(move |s| s.deployment(&d)).await.ok().and_then(|d| d.plan).is_some_and(|p| p["source_maps"] == true) {
+                let own = vars.get("NODE_OPTIONS").map(|(v, _)| v.trim().to_string()).filter(|v| !v.is_empty());
+                if !own.as_deref().is_some_and(|v| v.split_whitespace().any(|w| w == "--enable-source-maps")) {
+                    vars.insert("NODE_OPTIONS".into(), (own.map_or_else(|| "--enable-source-maps".to_string(), |v| format!("{v} --enable-source-maps")), "roll"));
+                }
+            }
+        }
         // The build's OpenTelemetry agent (`build.otel`), started only while its traces go to
         // roll: last, joined to the app's own value of the same variable.
         if trace_endpoint && !deployment.is_empty() {
