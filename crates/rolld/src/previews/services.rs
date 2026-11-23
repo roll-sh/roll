@@ -374,7 +374,9 @@ impl roll_previews::ports::Apps for RollApps {
                     let name = s(&c["name"])?;
                     let ran = c["deployment"].as_str() == Some(live.as_str());
                     let passed = if ran { c["up"].as_bool() } else { None };
-                    Some(roll_previews::ports::BrowserCheckResult { name, passed, error: s(&c["error"]).filter(|_| passed == Some(false)) })
+                    // A failure's screenshot and trace, kept by roll apps under this environment.
+                    let files = (passed == Some(false) && c["failure_at"].is_number()).then(|| roll_previews::BrowserCheckFiles { service_id: id.clone(), environment: env.clone() });
+                    Some(roll_previews::ports::BrowserCheckResult { name, passed, error: s(&c["error"]).filter(|_| passed == Some(false)), files })
                 })
                 .collect(),
         )

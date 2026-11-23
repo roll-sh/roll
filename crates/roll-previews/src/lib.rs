@@ -1186,6 +1186,17 @@ pub struct BrowserCheck {
     pub state: CheckState,
     /// What failed (the check's own words, made printable and cut).
     pub error: Option<String>,
+    /// Where its failure's screenshot and Playwright trace are kept (roll apps': `GET
+    /// /v1/apps/services/{service_id}/environments/{environment}/checks/{name}/screenshot` and
+    /// `/trace`, `read` on that service), when they were.
+    pub files: Option<BrowserCheckFiles>,
+}
+
+/// A roll apps service and environment a browser check's failure files are kept under.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct BrowserCheckFiles {
+    pub service_id: String,
+    pub environment: String,
 }
 
 /// The browser checks read for `head` (a runtime fact; a new head reads its own).

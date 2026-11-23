@@ -457,6 +457,8 @@ pub struct BrowserCheckResult {
     /// `None`: not run on the live deployment yet.
     pub passed: Option<bool>,
     pub error: Option<String>,
+    /// Where its backend keeps the failure's screenshot and trace, when it kept them.
+    pub files: Option<crate::BrowserCheckFiles>,
 }
 
 /// The build a service runs now, where its backend keeps each build at a URL of its own.
