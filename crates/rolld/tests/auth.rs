@@ -410,7 +410,9 @@ async fn every_control_plane_route_needs_the_operator_token() {
             (r.status().as_u16(), r.json::<serde_json::Value>().await.unwrap_or_default())
         }
     };
-    let cases: [(&'static str, fn(&str) -> serde_json::Value); 2] = [
+    // Each product's create body, for a project.
+    type Body = fn(&str) -> serde_json::Value;
+    let cases: [(&'static str, Body); 2] = [
         ("/v1/search/clusters", |p| serde_json::json!({ "name": format!("wide-{}", &p[p.len() - 4..]) })),
         ("/v1/previews", |p| serde_json::json!({ "project": p, "repo": "ada/none", "branch": "main" })),
     ];
