@@ -900,6 +900,30 @@ async fn a_screenshot_is_an_image_the_agent_sees() {
     assert_eq!((shot["isError"].as_bool(), shot["content"][1]["type"].as_str(), shot["content"][1]["mimeType"].as_str()), (Some(false), Some("image"), Some("image/png")), "{shot}");
 }
 
+/// `roll_find`: a resource by part of its name, from each list the connection has, naming the read
+/// that goes on from it; a pasted dashboard link read at once; a page it doesn't know says which
+/// it does.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resource_is_found_by_name_or_link() {
+    let d = Daemon::with_products(vec!["postgres".into(), "workspace".into()]);
+    let (_, _, made) = d.http(OPERATOR, Method::POST, "/v1/workspace/projects", Some(json!({ "name": "billing" }))).await;
+    let project = made["id"].as_str().unwrap().to_string();
+    let listed = d.rpc(OPERATOR, "tools/list", json!({})).await;
+    assert!(names(&listed).iter().any(|n| n == "roll_find"), "{listed}");
+    let found = d.tool(OPERATOR, "roll_find", json!({ "query": "BILL" })).await;
+    let m = &found["structuredContent"]["matches"];
+    assert_eq!(m.as_array().unwrap().len(), 1, "{found}");
+    assert_eq!((m[0]["kind"].as_str(), m[0]["name"].as_str()), (Some("project"), Some("billing")));
+    assert_eq!(m[0]["read"], json!({ "tool": "workspace_get_project", "arguments": { "id": project } }));
+    // A fronted set's list counts too (roll code's repos).
+    let repo = d.tool(OPERATOR, "roll_find", json!({ "query": "acme/api" })).await;
+    assert_eq!(repo["structuredContent"]["matches"][0]["read"], json!({ "tool": "code_list_changes", "arguments": { "repo": "acme/api" } }), "{repo}");
+    let link = d.tool(OPERATOR, "roll_find", json!({ "query": format!("https://roll.example/dashboard/projects/{project}?tab=canvas") })).await;
+    assert_eq!((link["isError"].as_bool(), link["structuredContent"]["name"].as_str()), (Some(false), Some("billing")), "{link}");
+    let unknown = d.tool(OPERATOR, "roll_find", json!({ "query": "https://roll.example/dashboard/access" })).await;
+    assert!(unknown["isError"] == true && unknown["content"][0]["text"].as_str().unwrap().contains("/dashboard/apps/<id>"), "{unknown}");
+}
+
 /// A token's page shows what an agent connected with it is offered: its tools (as `tools/list`
 /// would list them) and what they cost an agent's context, read as the caller.
 #[tokio::test(flavor = "multi_thread")]

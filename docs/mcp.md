@@ -147,6 +147,21 @@ anything but `1`, `true`, `0` or `false`, or the key spelled another way (`read_
 so a typo never means "not read-only". The connect panel has a checkbox
 for it, and it goes with toolsets (`?toolsets=postgres&readonly=1`).
 
+### Finding a resource
+
+`roll_find` (on every connection but search mode's, read-only) finds any roll resource by its name
+or part of it ("checkout-db"), part of its id, or a roll dashboard link a person pasted, as Neon's
+`search` and Linear's pasted URLs do. It has no route of its own: a name is looked up in each
+product's list tool the connection has (projects, services, repos, Postgres, Redis, NoSQL, search
+clusters, buckets, streams, queues' virtual hosts, functions, previews), at most six at once,
+through the gate as the caller. Those lists are quiet: one that would ask a person is skipped, not
+put to them, and the audit log has each as `roll_find:<tool>`. Matches come exact first, then by
+prefix, then by part, at most 25. Each says its kind, id, name and `read: {tool, arguments}`, the
+ordinary tool that goes on from it. A list that refused or failed is in `skipped`. A link
+(`/dashboard/apps/<id>`, `/dashboard/code/<owner>/<repo>[/changes/<n>]`, `/dashboard/projects/<id>`,
+Redis, NoSQL, search and storage pages) is read at once with that tool, as the agent would call it,
+approvals included. Any origin works (roll cloud, a local dashboard): only the path is read.
+
 ### Reaching outside roll
 
 A tool that has roll reach an address the caller chose says so with MCP's `openWorldHint: true`
@@ -1376,8 +1391,11 @@ gaps are in how results read and how roll is distributed):
    capped at 20 an hour per connection.
 5. **MCP Apps views that refresh themselves:** read-only, app-only tools (`_meta.ui.visibility:
    ["app"]`) a deploy, job or preview card calls through the gate (Vercel's deployment card).
-6. **Find any roll resource by name or dashboard URL** (Neon's `search`, Linear's pasted URLs):
-   "checkout-db is slow" or a dashboard link to the resource's id, through the list routes.
+6. **Find any roll resource by name or dashboard URL (this PR).** `roll_find`: each product's list
+   tool the connection has, quiet and through the gate, matched by name and id, each match naming
+   the read that goes on from it; a pasted dashboard link read at once. Next for it: pages whose
+   resource is in the query string (approvals, Postgres, streams), once those pages say it in
+   their path.
 7. **The files extension** (`io.modelcontextprotocol/files`, experimental, 2026-11-10): uploads to
    a presigned URL and downloads that never pass through the model's context; a prototype once a
    client implements it.
