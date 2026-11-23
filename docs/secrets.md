@@ -5578,6 +5578,13 @@ webhooks, with a `project` argument; docs/mcp.md, "Events"). It answers
 answers `{events: [], next}` at the head, for a follower that starts from now. `limit` is 1–500
 (default 100).
 
+The dashboard's Events tab (`components/secrets/events.tsx`, `lib/secrets-events.ts`) is a person's
+view of it. It opens at `?latest=1` and polls after that `next` every 5 s while it's in view,
+following each `next` as answered. The feed only reads forward, so the tab goes back by windows of
+chain rows before the oldest row it holds: `after=hi-w` up to `hi`. A window of 500 rows or fewer is
+answered whole. A wider one whose `next` falls short of `hi` is narrowed and read again, so no
+events are skipped. The kind chips and the environment filter are `kinds=` and `environment=`.
+
 **The cursor.** An event is an audit row that carries one (`audit.event`, `audit.event_data`), so
 `seq` is the row's number in the project's chain ("Tamper evidence"): taken from `audit_heads` in
 the row's own write, under the head's row lock (on Postgres a second writer waits for it, or loses a
