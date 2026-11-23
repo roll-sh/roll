@@ -7044,7 +7044,8 @@ async fn deleting_a_protected_environment_that_asks_for_approvals_is_a_change_re
 }
 
 /// Decide, then revoke: an environment's delete that its write refuses (here an ephemeral one based
-/// on it meanwhile) revokes none of what it issued; the delete that goes revokes it all.
+/// on it meanwhile) revokes none of what it issued and is no event; the delete that goes revokes it
+/// all, with its `env.deleted`.
 #[tokio::test]
 async fn an_environment_delete_its_write_refuses_revokes_nothing() {
     let api = Api::new().await;
@@ -7065,9 +7066,11 @@ async fn an_environment_delete_its_write_refuses_revokes_nothing() {
     assert_eq!(s, StatusCode::CONFLICT, "{e}");
     assert_eq!(*api.fake.live_keys.lock().unwrap(), live, "refused: nothing revoked");
     assert!(api.ok(Method::GET, "/leases", None).await.as_array().unwrap().iter().all(|l| l["revoked_at"].is_null()));
+    assert_eq!(api.ok(Method::GET, "/events?kinds=env.deleted", None).await["events"], json!([]), "nor an event");
     api.ok(Method::DELETE, "/environments/pv-1", None).await;
     assert_eq!(api.ok(Method::POST, &format!("/environments/production/requests/{id}/apply"), None).await["state"], "applied");
     assert!(api.fake.live_keys.lock().unwrap().is_empty(), "deleted: what it issued is revoked");
+    assert_eq!(api.ok(Method::GET, "/events?kinds=env.deleted", None).await["events"].as_array().unwrap().len(), 1);
 }
 
 #[tokio::test]
