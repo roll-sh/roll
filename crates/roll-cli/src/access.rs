@@ -680,6 +680,23 @@ pub enum Mcp {
         #[arg(long)]
         all_tools: bool,
     },
+    /// Write roll as an Agent Plugin (agent-plugins.org 1.0): plugin.json, mcp.json (roll's server
+    /// over OAuth; no token is written) and the skills this connection is offered, read from the
+    /// server. Hosts that load plugins (Codex, Cursor, Copilot, Claude Code) take the folder.
+    Plugin {
+        /// Where to write it (a new or empty folder).
+        #[arg(long, default_value = "roll-plugin")]
+        out: std::path::PathBuf,
+        /// Only these products' tools, or an area of one (as for `roll mcp config`).
+        #[arg(long, value_delimiter = ',')]
+        toolsets: Vec<String>,
+        /// Only tools that read are listed and run.
+        #[arg(long)]
+        readonly: bool,
+        /// What people who can't push to a repo wrote never reaches the agent.
+        #[arg(long)]
+        lockdown: bool,
+    },
     /// Add roll's server to the agents installed here (Claude Code, Cursor, VS Code, Codex), each
     /// with OAuth (it asks you to sign in; no token is written). Merges, never replaces: a server
     /// already named roll is left alone.
@@ -1465,6 +1482,27 @@ pub async fn mcp(api: &Api, json_out: bool, cmd: Mcp) -> anyhow::Result<()> {
             }
             check_toolsets(&toolsets)?;
             println!("{}", config(client, &with_mode(&server(&api.base), &toolsets, readonly, search, lockdown), with_token.as_deref()));
+        }
+        Mcp::Plugin { out, toolsets, readonly, lockdown } => {
+            check_toolsets(&toolsets)?;
+            if out.exists() && std::fs::read_dir(&out).map(|mut d| d.next().is_some()).unwrap_or(true) {
+                anyhow::bail!("{} isn't empty: write the plugin to a new folder", out.display());
+            }
+            let url = with_mode(&server(&api.base), &toolsets, readonly, false, lockdown);
+            // The skills this connection is offered, as a host would read them over MCP.
+            let path = url.strip_prefix(api.base.trim_end_matches('/')).unwrap_or("/v1/mcp").to_string();
+            let rpc = |method: &str, params: Value| json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
+            let listed = api.post(&path, rpc("skills/list", json!({}))).await?;
+            let mut skills = Vec::new();
+            for s in listed["result"]["skills"].as_array().into_iter().flatten() {
+                let (Some(name), Some(uri)) = (s["frontmatter"]["name"].as_str(), s["uri"].as_str()) else { continue };
+                let read = api.post(&path, rpc("resources/read", json!({ "uri": uri }))).await?;
+                if let Some(text) = read["result"]["contents"][0]["text"].as_str() {
+                    skills.push((name.to_string(), text.to_string()));
+                }
+            }
+            let n = crate::mcp_install::write_plugin(&out, &url, env!("CARGO_PKG_VERSION"), &skills)?;
+            println!("wrote roll's plugin to {} ({n} skills): add the folder in your agent's plugins (it asks you to sign in to roll)", out.display());
         }
         Mcp::Install { clients, dry_run, toolsets, readonly, lockdown, all_tools } => {
             check_toolsets(&toolsets)?;
