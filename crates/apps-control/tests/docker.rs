@@ -1684,6 +1684,50 @@ async fn a_next_apps_cache_outlives_its_instance() {
     w.apps.shutdown().await;
 }
 
+/// A browser check in real Chromium (roll's checker image: Playwright's with the pinned library):
+/// its script finds the page's heading past the environment's password, and one that looks for
+/// what isn't there fails saying so.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_browser_check_runs_in_chromium() {
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let Some(w) = docker_world_with(None, |c| c.otlp_base = Some(format!("http://127.0.0.1:{port}"))).await else { return };
+    let app = w.public.clone();
+    tokio::spawn(async move { axum::serve(listener, app.into_make_service()).await });
+    let (id, _) = deploy_tree(&w, "browsed", &[
+        ("package.json", r#"{"name": "n", "version": "1.0.0", "scripts": {"start": "node server.js"}}"#),
+        ("server.js", "require('http').createServer((q, r) => { r.setHeader('content-type', 'text/html'); r.end('<title>t</title><h1>Hello roll</h1><script>document.body.append(Object.assign(document.createElement(\"p\"), {textContent: \"ran\"}))</script>') }).listen(process.env.PORT)"),
+    ]).await;
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    let check = |script: &str| json!({"access": {"password": "correct horse"}, "checks": [{"name": "home", "path": "/", "every_s": 300, "timeout_s": 60, "browser": script}]});
+    let (st, e) = call(&w.api, "PUT", &base, Some(check("await page.getByRole('heading', { name: 'Hello roll' }).waitFor(); await page.getByText('ran').waitFor()")), "application/json", None).await;
+    assert_eq!(st, StatusCode::OK, "{e}");
+    let t0 = code_sql::now_ms() + 3_600_000;
+    let pass = |n: i64| {
+        let (w, base) = (&w, base.clone());
+        async move {
+            w.apps.cron_pass(t0 + n * 301_000).await;
+            // The first builds roll's checker image: minutes.
+            for _ in 0..6000 {
+                let st = call(&w.api, "GET", &base, None, "application/json", None).await.1["check_states"][0].clone();
+                if st["last_at"].as_i64() == Some(t0 + n * 301_000) {
+                    return st;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            panic!("pass {n} never came back");
+        }
+    };
+    let up = pass(0).await;
+    assert_eq!((up["up"].as_bool(), up["status"].as_u64()), (Some(true), Some(200)), "{up}");
+    call(&w.api, "PUT", &base, Some(check("await page.getByRole('heading', { name: 'Goodbye' }).waitFor({ timeout: 2000 })")), "application/json", None).await;
+    let failed = pass(1).await;
+    assert!(failed["failures"].as_u64() == Some(1) && failed["error"].as_str().is_some_and(|e| e.contains("Goodbye")), "{failed}");
+    assert_eq!(delete_for_good(&w.api, &id).await.0, StatusCode::NO_CONTENT);
+    let _ = std::process::Command::new("docker").args(["rmi", &format!("roll-apps-{id}:browser-check-{}", apps_control::browser::PLAYWRIGHT.replace('.', "-"))]).output();
+    w.apps.shutdown().await;
+}
+
 /// Clojure (Leiningen), Gleam and a root start.sh, as roll detects them: each built, deployed and
 /// answering.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -15,6 +15,7 @@
 pub mod api;
 pub mod challenge;
 pub mod backups;
+pub mod browser;
 pub mod build_cache;
 pub mod next_cache;
 pub mod hooks;
@@ -346,6 +347,11 @@ pub struct Apps {
     pub(crate) forms_seen: Mutex<HashMap<String, (i64, u32)>>,
     /// Uptime checks' last results here, on the owner ([`checks`]), by environment and name.
     pub(crate) check_states: Mutex<HashMap<String, checks::Run>>,
+    /// Browser checks running now: each one's token, and its service and environment
+    /// ([`browser`]).
+    pub(crate) check_tokens: Mutex<HashMap<String, (String, String)>>,
+    /// The checker images built on this node ([`browser`]).
+    pub(crate) checker_images: Mutex<std::collections::HashSet<String>>,
     /// A pass of daily rescans is running, and when live deployments were last looked at for
     /// one ([`vulns`]).
     pub(crate) rescanning: std::sync::atomic::AtomicBool,
@@ -693,6 +699,8 @@ impl Apps {
             events_seen: Mutex::new(HashMap::new()),
             forms_seen: Mutex::new(HashMap::new()),
             check_states: Mutex::new(HashMap::new()),
+            check_tokens: Mutex::new(HashMap::new()),
+            checker_images: Mutex::new(std::collections::HashSet::new()),
             rescanning: Default::default(),
             rescan_looked: Default::default(),
             errors_seen: Mutex::new(HashMap::new()),

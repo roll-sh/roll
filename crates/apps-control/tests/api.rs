@@ -4084,6 +4084,52 @@ async fn an_uptime_check_goes_down_and_comes_back() {
     assert_eq!(kinds, ["check.down", "alert.resolved"], "down once, then resolved: {ev}");
 }
 
+/// Browser checks (Checkly's, through Vercel): a check with a Playwright script runs in roll's
+/// checker image (built once) on its schedule, gets past the environment's password with its run's
+/// token (which then opens nothing), and a script that throws is `check.down` saying why.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_browser_check_runs_its_script_past_the_password() {
+    let w = world().await;
+    *w.fake.check_pages.lock() = Some(w.public.clone());
+    let (svc, _) = image_service(&w, "web", json!({"port": 80, "min_instances": 1})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    let script = "await page.getByRole('heading').waitFor()";
+    assert_eq!(call(&w.api, "PUT", &base, Some(json!({"checks": [{"name": "home", "path": "/", "browser": script}]}))).await.0, StatusCode::BAD_REQUEST, "every 300 s at least");
+    let (st, env) = call(&w.api, "PUT", &base, Some(json!({"access": {"password": "correct horse"}, "checks": [{"name": "home", "path": "/", "every_s": 300, "browser": script}]}))).await;
+    assert_eq!((st, env["checks"][0]["browser"].as_str()), (StatusCode::OK, Some(script)), "{env}");
+    let t0 = code_sql::now_ms() + 3_600_000;
+    let pass = |n: i64| {
+        let (w, base) = (&w, base.clone());
+        async move {
+            w.apps.cron_pass(t0 + n * 301_000).await;
+            for _ in 0..300 {
+                let st = call(&w.api, "GET", &base, None).await.1["check_states"][0].clone();
+                if st["last_at"].as_i64() == Some(t0 + n * 301_000) {
+                    return st;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            panic!("pass {n} never came back");
+        }
+    };
+    let up = pass(0).await;
+    assert_eq!((up["up"].as_bool(), up["status"].as_u64()), (Some(true), Some(200)), "past the password: {up}");
+    assert_eq!(w.fake.build_trees.lock().len(), 1, "roll's checker image, built once");
+    // A token opens nothing once its run is done (nor one never made).
+    let h = host(&env["url"]);
+    for t in ["rlc_never", "x"] {
+        let req = Request::get("/").header("host", h.as_str()).header("x-roll-check", t).body(Body::empty()).unwrap();
+        assert_eq!(w.public.clone().oneshot(req).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+    }
+    // A script that throws: down after two, saying why.
+    call(&w.api, "PUT", &base, Some(json!({"checks": [{"name": "home", "path": "/", "every_s": 300, "browser": "throw new Error('no heading')"}]}))).await;
+    pass(1).await;
+    let down = pass(2).await;
+    assert_eq!((down["up"].as_bool(), down["error"].as_str()), (Some(false), Some("new Error('no heading')")), "{down}");
+    assert_eq!(w.fake.build_trees.lock().len(), 1, "still the one image");
+}
+
 /// Heartbeats (Healthchecks', Cronitor's): something outside roll pings its URL; one that
 /// doesn't within its period and grace is `heartbeat.missed` once, the next ping resolves it. The
 /// URL is shown once, when the heartbeat is added, and a kept heartbeat keeps it.
