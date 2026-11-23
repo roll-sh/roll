@@ -1439,6 +1439,23 @@ egress included, removed with each connection. `a_shell_in_a_previews_service_is
 live preview's container through `roll preview shell` and reads its `ROLL_PREVIEW` back, puts a
 file in with `roll preview cp` and brings it back, and reads the service through `roll preview
 forward` (no relay left after).
+A service can also be swapped for a process on a laptop (Signadot's local sandboxes,
+Telepresence's intercepts): `roll preview swap <preview> 3000 --service web` opens
+`…/swap?service=web`, a WebSocket carrying one HTTP/2 connection the laptop serves, and while
+it's open every request for that service goes there instead of its container: its visitors',
+and its other services' (they reach it by its URL). The laptop's process works against the
+preview's data and services (`roll preview connect`, `roll preview env`) and is debugged there,
+with no deploy in between. The CLI sends each request to `127.0.0.1:<port>` as that host (a dev
+server's host check passes; `x-forwarded-host` keeps the preview's) and says each on stderr. The
+request is the one the container would get: past the preview's gate, roll's access cookie and
+bypass secret taken out. A WebSocket from the preview isn't carried (501). One laptop at a
+time per service (409), on the preview's holder; it's admin (the laptop gets the preview's
+visitors' requests), and the activity says who swapped it and when it was given back. Ctrl-C,
+a dropped connection or the preview going gives it back to its container. A roll apps service
+is served by roll apps' proxy, so it can't be swapped (409).
+`a_swapped_service_is_answered_by_the_laptop_until_given_back`; `scripts/preview-cost.sh` swaps
+the live preview's web for a local server, reads it through the preview's host, and reads the
+container again once it's given back.
 
 ### Traces
 
