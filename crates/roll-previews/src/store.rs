@@ -768,6 +768,10 @@ impl Store {
                 db.add_column("services", col, "TEXT")?;
             }
         }
+        // Skew protection (`roll.toml` `skew_protection`), as of its last deploy.
+        if !db.has_column("services", "skew")? {
+            db.add_column("services", "skew", "INTEGER NOT NULL DEFAULT 0")?;
+        }
         // Who made a share link (`usr_…`: a person, or the person behind their token; none for the
         // operator), and when it was last asked whether they still may.
         if !db.has_column("shares", "maker")? {
@@ -1019,6 +1023,40 @@ impl Store {
     pub fn set_healthy(&self, id: &str, name: &str, revision: &str) -> Result<()> {
         self.db.write(|c| {
             c.execute("UPDATE services SET healthy = ? WHERE preview_id = ? AND name = ?", params![revision, id, name])?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    pub fn set_service_skew(&self, id: &str, name: &str, on: bool) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("UPDATE services SET skew = ? WHERE preview_id = ? AND name = ?", params![on as i64, id, name])?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// A service with skew protection on: the revision its host serves, and whether `asked` is
+    /// one of its earlier pushes a request may still reach (kept, and replaced less than
+    /// [`SKEW_WINDOW_MS`] ago). `None` when it's off.
+    pub fn skew(&self, id: &str, name: &str, asked: Option<&str>) -> Result<Option<(String, bool)>> {
+        let since = self.now_ms()? - SKEW_WINDOW_MS;
+        Ok(self.db.read(|c| {
+            let current = c
+                .query_row("SELECT revision FROM services WHERE preview_id = ? AND name = ? AND skew = 1 AND revision IS NOT NULL AND revision <> ''", params![id, name], |r| r.get::<_, String>(0))
+                .optional()?;
+            let Some(current) = current else { return Ok(None) };
+            let earlier = match asked {
+                Some(a) if a != current => c.query_row("SELECT 1 FROM pinned WHERE preview_id = ? AND service = ? AND revision = ? AND at >= ?", params![id, name, a, since], |_| Ok(())).optional()?.is_some(),
+                _ => false,
+            };
+            Ok(Some((current, earlier)))
+        })?)
+    }
+
+    /// An earlier push as if it had been replaced `ms` earlier.
+    #[cfg(test)]
+    pub(crate) fn age_pinned(&self, id: &str, service: &str, revision: &str, ms: i64) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("UPDATE pinned SET at = at - ? WHERE preview_id = ? AND service = ? AND revision = ?", params![ms, id, service, revision])?;
             Ok::<_, Error>(())
         })
     }
@@ -3384,6 +3422,9 @@ pub struct BaseRow {
 pub const SHARES_MAX: usize = 20;
 
 /// Earlier pushes kept reachable per service.
+/// How long after it was replaced an earlier push still answers requests that name it (skew
+/// protection), as roll apps' window.
+pub const SKEW_WINDOW_MS: i64 = 24 * 3600 * 1000;
 pub const PINNED_KEEP: usize = 3;
 
 /// An earlier push its preview no longer keeps ([`Store::gone_push`]): whose it was, and the
