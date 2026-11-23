@@ -1356,6 +1356,10 @@ async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: Option<&str>) -
     if let Some(challenge) = step_up_challenge(ctx, &result) {
         result["_meta"]["mcp/www_authenticate"] = json!([challenge]);
     }
+    // An MCP Apps view reads a changing answer again (a deploy building, an approval pending).
+    if ctx.ui && !ctx.search && !quiet {
+        ui::mark_pending(name, &args, &mut result, |t| tool_names(ctx).iter().any(|n| n == t));
+    }
     // In lockdown, an outside record's text never reaches the model: withheld in the structured
     // answer, and the text block (a fronted set may write its own) rebuilt from what's left.
     if ctx.lockdown && lockdown::withhold(&mut result["structuredContent"]) + lockdown::withhold_fields(&mut result["structuredContent"], outside) > 0 {

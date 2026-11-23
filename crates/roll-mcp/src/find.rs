@@ -110,8 +110,8 @@ where
         return call(k.read, json!({ k.param: id }), false).await.unwrap_or_else(|| error(&format!("{} isn't available", k.read)));
     }
     let q = query.to_lowercase();
-    let lists: Vec<&Kind> = KINDS.iter().filter(|k| has(k.list)).collect();
-    let answers: Vec<(&Kind, Option<Value>)> = futures::stream::iter(lists.into_iter().map(|k| {
+    let lists: Vec<&'static Kind> = KINDS.iter().filter(|k| has(k.list)).collect();
+    let answers: Vec<(&'static Kind, Option<Value>)> = futures::stream::iter(lists.into_iter().map(|k: &'static Kind| {
         let f = call(k.list, json!({}), true);
         async move { (k, f.await) }
     }))
