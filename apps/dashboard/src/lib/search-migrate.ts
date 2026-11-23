@@ -271,7 +271,7 @@ export function retryableStart(status: number | undefined): boolean {
   return status !== undefined && (status === 429 || status >= 500);
 }
 
-/** How soon to ask again while every waiting copy came back `queued`: roll holds the node's copy
+/** How soon to ask again while any waiting copy came back `queued`: roll holds the node's copy
  * slots for each cluster's owner in turn, and a turn that isn't taken within a few seconds goes
  * to the next one in line, so a queued copy asks again often. */
 export const QUEUED_RETRY_MS = 1_500;

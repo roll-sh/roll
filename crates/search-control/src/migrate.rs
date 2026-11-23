@@ -328,7 +328,7 @@ fn listing(rows: &[search_es::api::remote_page::CatRow], aliases: Option<&EsValu
 struct Progress {
     created: bool,
     task: Option<String>,
-    /// The empty copy was being removed (every task slot was taken).
+    /// The empty copy was being removed (its task slot was taken meanwhile).
     removing: bool,
 }
 
@@ -512,7 +512,7 @@ impl Control {
                 }
                 Ok(Err(e)) => row["error"] = json!(e),
                 Err(_) if progress.removing => {
-                    row["error"] = json!(format!("not started (every task slot was taken), and the call ran past {}s while the empty index [{dest}] was being removed: it may remain; delete it, then copy it again", DEADLINE.as_secs()));
+                    row["error"] = json!(format!("not started (its task slot was taken meanwhile), and the call ran past {}s while the empty index [{dest}] was being removed: it may remain; delete it, then copy it again", DEADLINE.as_secs()));
                 }
                 Err(_) if progress.created && progress.task.is_none() => {
                     // The deadline came while the copy was being started: look its task up.
@@ -723,7 +723,7 @@ impl Control {
             progress.removing = true;
             let (deleted, _) = self.call_json(c, "DELETE", &format!("/{}", urlencoding::encode(dest)), None).await;
             if deleted != 200 {
-                return Err(format!("[{dest}] was created, but not started (every task slot was taken) and couldn't be removed ({deleted}): delete it, then copy it again"));
+                return Err(format!("[{dest}] was created, but not started (its task slot was taken meanwhile) and couldn't be removed ({deleted}): delete it, then copy it again"));
             }
             progress.created = false;
             names.remove(dest);

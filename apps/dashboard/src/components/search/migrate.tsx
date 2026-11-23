@@ -79,9 +79,17 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
   const [nudge, setNudge] = useState(0);
   /** Attempts in a row that failed (429 or 5xx; the pause before the next grows). */
   const failures = useRef(0);
+  /** The one pending ask-again timer: replaced (never added to) by each attempt, so a copy ending
+   * mid-wait can't leave a second chain of asks running, nor cut a failure's backoff short. */
+  const retry = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const askAgain = (ms: number) => {
+    clearTimeout(retry.current);
+    retry.current = setTimeout(() => setNudge((n) => n + 1), ms);
+  };
   useEffect(
     () => () => {
       waiting.current = null;
+      clearTimeout(retry.current);
     },
     [],
   );
@@ -178,6 +186,7 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
     const options = waiting.current;
     if (!ready || !rows || !options || starting.current) return;
     starting.current = true;
+    clearTimeout(retry.current);
     (async () => {
       try {
         const r = await migrateApi.start(cluster.id, { ...options, indices: queuedPicks(rows) });
@@ -189,13 +198,13 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
         // Roll answered: errors aren't piling up, and a copy still waiting keeps its turn by asking
         // again soon.
         failures.current = 0;
-        if (r.indices.some((x) => x.queued)) setTimeout(() => setNudge((n) => n + 1), QUEUED_RETRY_MS);
+        if (r.indices.some((x) => x.queued)) askAgain(QUEUED_RETRY_MS);
         onChangedRef.current();
       } catch (e) {
         const status = e instanceof ApiError ? e.status : undefined;
         if (retryableStart(status)) {
           // Busy or a deadline (roll answered 429 or 5xx): ask again later rather than stall.
-          setTimeout(() => setNudge((n) => n + 1), queueRetryDelay(failures.current++));
+          askAgain(queueRetryDelay(failures.current++));
         } else {
           waiting.current = null;
           setError(e instanceof Error ? e.message : String(e));
