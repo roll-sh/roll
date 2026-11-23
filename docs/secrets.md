@@ -491,7 +491,8 @@ to install. An app moves between it and the Lambda extension unchanged:
   setup), `path` to its `--path`, else `/`. Errors are `{"error", "code"}`, naming keys and folders,
   never a value: 404 `not_found`, 409 `unresolved` (`/secrets` answers a folder only when every key
   resolves), 403 `withheld` for a key this login isn't given (sensitive, or an untrusted
-  caller's), roll's own 403, 404, 409, 423 and 429, and 502 for anything else. Every answer is
+  caller's), roll's own 403, 404, 409, 423 and 429 (its 401, the agent's login refused after
+  logging in again, as a 403), and 502 for anything else. Every answer is
   `Cache-Control: no-store`.
 - **The request token.** Every request but `/health` carries `X-Roll-Token` (the extension's header)
   with the contents of `--token-file` (`ROLL_AGENT_TOKEN_FILE`; by default
@@ -514,7 +515,10 @@ to install. An app moves between it and the Lambda extension unchanged:
   moved, so a change reaches the agent within a second or so and an app's read is answered from
   memory. Each answered poll confirms the folder for another `--ttl` (`ROLL_CACHE_TTL`, 300 s); a
   folder roll hasn't confirmed for that long (roll unreachable) is read from roll again on its next
-  request, and `--ttl 0` turns the cache off. `--cache-size` (`ROLL_CACHE_SIZE`, 1000) caps the
+  request, and `--ttl 0` turns the cache off. Only no answer, or a 5xx, keeps a folder until its
+  TTL: once roll refuses it (a 401 after logging in again, or a 403 or 404 on the poll or on the
+  read after the digest moved: the login revoked, or no longer allowed to reveal the folder) the
+  agent drops it at once, so the app's next request gets roll's refusal rather than the values. `--cache-size` (`ROLL_CACHE_SIZE`, 1000) caps the
   folders kept; past it, the one read longest ago goes. `--prefetch production:/,staging:/api`
   (`ROLL_PREFETCH`) reads folders before the agent answers. A folder with a key that doesn't
   resolve is never kept. A folder holding a dynamic credential is kept only within its leases: the
@@ -586,7 +590,8 @@ curl -sH "X-Roll-Token: $(cat /run/roll/agent-token)" http://127.0.0.1:2773/secr
 ```
 
 Tests: `crates/roll-cli/tests/secrets.rs` (`the_local_agent_answers_only_requests_that_carry_its_token`,
-`a_change_reaches_the_local_agents_cache_through_the_digest`); the identity login's renewal is
+`a_change_reaches_the_local_agents_cache_through_the_digest`,
+`a_revoked_logins_local_agent_answers_a_refusal_within_one_poll`); the identity login's renewal is
 `relogin_tests` in `crates/roll-cli/src/secrets.rs`, which the agent shares.
 ## Customer-managed keys
 A project's data key can be wrapped once more by a KMS key in the customer's own AWS account, as
@@ -3207,7 +3212,13 @@ cluster, instead of a key pasted into it: the Inference tab's "A roll secret", o
   create and at each start roll code reads them again as the maker may now
   (`Secrets::values_as_maker`: the check and the read in one call, untrusted, not a runtime), so a
   rotated value reaches it at its next start. Once the maker may not (`maker_unreachable` or not
-  allowed), the sandbox starts without those variables (`secrets_dropped`). A sandbox made before
+  allowed), the sandbox starts without those variables (`secrets_dropped`). Only the variables it
+  copied count: a key of the folder that doesn't resolve for an untrusted read (`${production.X}`,
+  production being protected, or a reference to a deleted environment) stops nothing that didn't
+  copy it, and a copied one that doesn't resolve is left unset and named with why
+  (`secrets_unset`). An environment deleted but still in its recovery window holds the sandbox's
+  create and start (they wait), so recovering it brings the values back; once it's purged, the
+  sandbox starts without them (`secrets_dropped`). A sandbox made before
   `secrets_from` was kept only has its maker asked whether they can still act (`maker_acts`), and
   keeps what it was made with; delete it and make another to get fresh reads
   (docs/code/http-api.md, "Sandboxes").
