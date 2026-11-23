@@ -618,6 +618,43 @@ pgrust's PGO-built 90.4 G 0.996-1.013x.
 
 Foreign cores per arm 2.4-3.2. One binary's q03 cycles moved 8.5% between pairs.
 
+## Bulk writes, round 24: the btree model's inserts, a failed COPY's buffer, index estimates of repeated keys (2026-11-23, agent 298)
+
+HANDOFF "Bulk writes, round 24" has what changed. Lane C, agent 246's `bulkx.sh` with `JOIN=1`
+(copied to `~/.cache/a298/bench`; steps `pk_setup copy_pk checkp pk_idx ctidsp sx_setup copy_sx
+checks`: `bulk1m.tsv` COPYed into `bulkp (id int PRIMARY KEY, a int NOT NULL, b text, c float8)`
+with `CREATE INDEX bulkp_a ON bulkp (a)`, then into `bulks`, the same with no primary key, the
+tables and indexes made before each COPY). Plain dist builds (`tools/dist.sh`) of **b0**,
+origin's `4b0f41516`, and **n1**, `cand/a298-3`'s change with a measuring switch (an environment
+variable read once a COPY, off) for the next candidate. Each pair one `tools/lane.sh` hold. G
+user instructions of the server's cgroup; every counter ran 100% of its window. Foreign load
+3.3-6.5 cores by lane.sh, 0.9-3.3 by the harness: over the 1.0 rule in every hold; instruction
+counts repeat within 0.03%, cycles are a reading only.
+
+### COPY of 1M rows, two alternating pairs
+
+| step | b0 | n1 | written MB | index bytes (b0 -> n1; PostgreSQL 18.6) |
+|---|---|---|---|---|
+| into `bulkp` (FreshUnique, rows waiting) | 31.692 / 31.692 | 31.715 x4 (+0.07%) | 346.0 / 345.5 | `bulkp_a` 36,061,184 -> 9,625,600 (9,650,176); `bulkp_pkey` 22,429,696 (22,487,040) |
+| into `bulks` (held rows, the sink) | 23.864 / 23.867 | 22.436 / 22.442 (-6.0%) | 90.8 | `bulks_a` 9,641,984 (9,650,176) |
+
+Rows (count and sums of every column), the hash of every row's ctid in id order and the heap's
+size (68,747,264 bytes, PostgreSQL's) equal on every run; index scans count every row.
+
+### The whole bulk script once each
+
+All steps 44.774 -> 44.777 (+0.01%): COPY in 6.481 -> 6.479, CREATE INDEX 3.695 both, CREATE UNIQUE
+INDEX 3.382 -> 3.388 (+0.18%, inside its spread), INSERT … SELECT 5.103 -> 5.101, UPDATE half
+11.703 both, DELETE a quarter 7.746 -> 7.747, VACUUM 1.719 both, every other step level. Rows and
+the ctid hash equal.
+
+### The btree model alone (`~/.cache/a298/scripts/btsim_bench.rs`, verify build, CPU 16)
+
+400,000 int4 entries into a model, user instructions of the process (the keys' creation 0.61 G
+in each): a secondary index of `bulk1m.tsv`'s `a` (100,000 keys, each four times, in no order)
+7.18 -> 3.79 G; ascending primary keys 3.47 -> 2.81 G. The trees' image hashes equal before and
+after, also for a mixed run (text keys, duplicates, LP_DEAD marks, bottom-up deletion, VACUUM).
+
 ## Bulk writes, round 23: COPY into unique indexes without reading them (2026-11-22, agent 287)
 
 HANDOFF "Bulk writes, round 23" has what changed. Lane C, agent 246's `bulkx.sh` with `JOIN=1`

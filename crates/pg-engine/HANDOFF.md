@@ -10625,6 +10625,108 @@ and confirm on PGO:
 Agent 218's short-transaction stack (ten steps, `wip/a218`) was gated this way and landed: BENCH
 "Profile-guided build", part 2.
 
+## Bulk writes, round 24: the btree model's inserts, a failed COPY's buffer, index estimates of repeated keys (agent 298)
+
+BENCH.md "Bulk writes, round 24" has the measurements (lane C, agent 246's `bulkx.sh` with
+`JOIN=1`, copied to `~/.cache/a298/bench`; plain dist builds). `cand/a298-3`: one code commit on
+origin's `94dc5c2ed` and this section (first pushed as `cand/a298` on `99e4b81af`; measured
+against `4b0f41516`, which differs from both in other files). No format change.
+
+**The btree model's inserts** (`catalog/btsim.rs`, `btsim/leaf.rs`). A COPY's held rows (the
+sink path: a table with non-unique btree indexes) place each row's index entries in the exact
+model (`Btree::insert`) for the table's first 400,000 rows. A secondary index over keys in no
+order cost ~16,400 instructions an entry (`~/.cache/a298/scripts`' micro benchmark, verify
+build: 400,000 int4 entries of 100,000 keys four times each, as `bulk1m.tsv`'s `a`); half of it
+took each page's items out as owned `Item`s and put them back (`Leaf::take` / `put`: a key
+allocation and a TID vector an item) for every deduplication pass and split, the rest the
+descent's pivot compares and decoding items whole where their key bytes were enough. Now, with
+the same trees:
+- the deduplication pass and the leaf split lay the page out anew from its packed items
+  (`Leaf::with_capacity`, `push_from`, `push_packed`): the pending posting list is its base
+  item's key and its TIDs packed as the page keeps them; the split's sizes, posting bytes and
+  suffix truncation read the packed items, the halves are copied from them, and only the high
+  key is an owned key;
+- a page's count of items not LP_DEAD answers whether simple deletion has anything to do (it
+  walked every item), and the deduplication pass's "no equal neighbours" test compares key
+  bytes;
+- the descent compares each pivot's kept attributes with the key's as one run of bytes, the
+  key's prefixes read once a descent (`descend_for`; self-delimiting encodings compare as the
+  attributes do one by one, as `insert_pos` already relies on); a unique insert's search for
+  its key's entries (`kill_dead_duplicates`) does the same on key bytes; the descent's path is
+  a `SmallVec` (no allocation an insert);
+- a TID list is encoded into its place in one pass.
+The micro benchmark (verify build, user instructions with the keys' creation, 0.61 G, in each):
+the secondary index 7.18 -> 3.79 G (16,400 -> 7,950 an entry), the primary key's ascending keys
+3.47 -> 2.81 G; the trees' images (`write_image`) hash the same before and after for both and for
+a mixed run (text keys of many lengths, duplicates, a unique and two non-unique trees,
+fillfactors 70-100, LP_DEAD marks, bottom-up deletion, VACUUM's bulk deletes).
+
+**A failed multi-insert COPY's buffer** (`exec/dml.rs`, `exec/sizing.rs`). PostgreSQL's
+CopyMultiInsertBufferFlush inserts the whole buffer into the heap (heap_multi_insert), then each
+row's index entries until one clashes: the buffer's rows stay as dead tuples, the next rows go
+in after them, and the indexes hold the entries of the rows before the clash (and the clashing
+row's in indexes before the one it failed). roll found the clash as the row went in, held the
+error to the buffer's flush (agent 287), and then: at a full buffer's flush the model placed the
+buffer with every later row's entries; at the last buffer's (the end of the data) it dropped
+the buffer from the model, so the next rows' ctids came that many tuples early (100 rows early
+in the golden case: `(5,76)` where PostgreSQL has `(5,176)`) and pg_relation_size of the heap
+was a page short; the indexes were a page long after the full-buffer case. Now the clashing
+row marks its buffer (`CopyLoad::clashed`): later rows wait in it without index entries; and a
+flush that raises the violation places the buffer first (`CopyLoad::flush_failed`, modelled
+only, nothing stored), through `Defer` as any batch when its rows wait. Golden
+`a298_copy_failed` (recorded from PostgreSQL 18.6): a clash at line 500 found at the first
+buffer's flush (line 1000 of 1,100), one at line 7 of 30 found at the last flush, one within an
+empty table's own keys (the plain path), each followed by a COPY whose ctids and the relation
+and index sizes it prints; index scans count the live rows.
+
+**Index estimates of repeated keys** (`exec/sizing.rs`). A COPY whose rows past its first
+`DEFER_AFTER` (10,000) wait (`Defer`; a COPY into a table with a unique index, or any non-held
+load) gives them to the btrees' estimates (`btest`) when the table goes past the model's size
+(`past_model`, `est_inserted`), each as a new key (`dup: false`). The estimate guesses whether an
+insert's key is new from its leaf's counts (`2 keys / tids - 1`), which says "new" while every
+key has one TID, so a load's first repeats of its keys (`bulk1m.tsv`'s 100,000 values of `a`,
+each again every 100,000 rows) all went in as new keys: `bulkp_a` 36,061,184 bytes against
+PostgreSQL's 9,650,176 (3.7x; pg_relation_size, relpages and the planner's index costs read it).
+Now `est_entries_of` flags each entry whose key a non-unique index holds already: the model's
+keys (`model_keys`, by the 16-byte prefixes the estimate keeps) and the batch's before it, in an
+exact set: 9,625,600 bytes (3 pages short). Test `big_tables::copy_past_the_model_repeated_keys`:
+20,000 rows over 2,000 keys repeating every 2,000 rows; modelled, `ix_a` is PostgreSQL's 37 pages
+(303,104 bytes, recorded from PostgreSQL 18.6); past the model (limit 5,000, rows waiting after
+100) within two pages of it.
+
+Results (BENCH "Bulk writes, round 24"; plain dist, b0 = `4b0f41516` against n1 = the change
+with a measuring switch, off, for the next candidate's sink path; G user instructions, two
+alternating pairs, each pair one `tools/lane.sh` hold):
+- COPY of 1M rows into `bulks` (one secondary index: held rows, the sink): 23.864 / 23.867 ->
+  22.436 / 22.442 (-6.0% both pairs; PostgreSQL 18.6's 18.92); rows, the ctid hash, both
+  relation sizes and bytes written (90.8 MB) equal.
+- COPY of 1M rows into `bulkp` (primary key and a secondary index: FreshUnique, rows waiting):
+  31.692 / 31.692 -> 31.715 x4 (+0.07%: the exact set of the 390,000 waiting rows' keys);
+  `bulkp_a` 36,061,184 -> 9,625,600 bytes (PostgreSQL 9,650,176), `bulkp_pkey` 22,429,696 both
+  (PostgreSQL 22,487,040); rows, the ctid hash, the heap's size and bytes written equal.
+- The whole bulk script once each: all steps 44.774 -> 44.777 (+0.01%; every step within ±0.04%
+  but CREATE UNIQUE INDEX +0.18%, 0.006 G, inside its run-to-run spread of 3.357-3.375); rows and
+  the ctid hash equal.
+Foreign load 3.3-6.5 cores by lane.sh (0.9-3.3 by the harness) in every hold: instruction
+counts repeat within 0.03%; cycles are a reading only.
+
+Not gated on the PGO build: no inline attribute added or removed; `dedup_pass` and
+`split_leaf` keep their boundaries (new `Leaf` helpers called from them).
+
+Verification: `tools/quick-check.sh` with `QC_CHECKED=1` on `36e533feb` (the code commit's tree
+on `99e4b81af`): Clippy 16 warnings, none new in a changed file (a first run caught three in this
+change, fixed); 395 tests in 12 binaries, again built `--profile verify-checked`; regress 51,148
+/ 51,150, 0 newly differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed. Before it,
+golden and big_tables (verify build). Rebased onto `94dc5c2ed` (upstream touched no file of this change but HANDOFF):
+`tools/quick-check.sh` with `QC_CHECKED=1` of both candidates on it (`53609aab1`) green, the same
+counts.
+
+**Left:**
+1. The btree model still costs ~8,000 instructions a random-order entry (verify build): the
+   descent (two inner levels, a key-bytes compare a pivot) and `insert_pos` are now most of it.
+2. Index estimates past the model guess a new key from the leaf's counts for writes one row at
+   a time (`untracked_write`); only the waiting rows' entries know.
+
 ## Bulk writes, round 23: COPY into unique indexes without reading them (agent 287)
 
 BENCH.md "Bulk writes, round 23" has the measurements (lane C, a variant of the 1M-row bulk script:
