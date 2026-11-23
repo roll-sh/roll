@@ -1599,6 +1599,15 @@ land on the change.
   team session, through roll), from the change's feedback reviews (`roll_previews::notes` reads back the shape the
   dashboard posts and nothing else; dismissed ones don't show), the latest 50. Each note says
   who and when, and outlines its element on hover; all of it is text, never HTML.
+- A note or an error becomes a fix to make (Vercel Comments' "Create issue", Netlify's drawer):
+  the note's sheet (opened from its Reply or Resolve) and each error group on the sheet's Errors
+  tab have "Make a work item". It's made in the preview's repo as the person looking (roll code's
+  `POST …/work`; someone without write on the repo gets its refusal), where roll's agents claim
+  work too. A note's item takes the note's first line as its title and its whole review as its
+  body (the page and its link, the element, the note, what went wrong on the page), labelled
+  `preview-feedback`, and the note gets a reply naming the item. An error's item takes its service
+  and title, and its sample as the preview shows it (masked), in a block nothing in it can close,
+  labelled `preview-error` (`lib/preview-work.ts`).
 - A note is resolved from the page too (Vercel Comments): its Resolve opens roll
   (`?fb_resolve=<review id>`), where the sheet shows the note and anyone on the project resolves
   it (`POST …/notes/{review}/resolve`, kept by previews: roll code's comment reviews aren't
