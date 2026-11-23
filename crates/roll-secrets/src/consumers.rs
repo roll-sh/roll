@@ -35,7 +35,9 @@
 //! **A roll code owner's own settings** (its reviewer's provider key; [`ResourceRef::code_owner`]):
 //! no canvas holds an owner, so its project is the one whose canvas holds one of the owner's
 //! repositories and stands for it (`Workspace::trusts` for that repo, as its checks read), named
-//! in the reference when there are several. Audited as `code:review:<owner>`.
+//! in the reference when there are several. Audited as `code:review:<owner>`. One of the owner's
+//! agent machines (an endpoint's key; [`ResourceRef::agent_machine`]) reads through the same
+//! project, audited as `agent:<machine>`.
 //!
 //! **Untrusted copies.** A resource whose code or data didn't come through its owner (a search
 //! branch keeps its cluster's id, as a preview keeps its service's) asks with
@@ -61,19 +63,43 @@ pub struct ResourceRef {
     pub r#ref: String,
     untrusted: bool,
     placeholders: bool,
-    /// A roll code owner (`r#ref`), not a canvas resource: [`ResourceRef::code_owner`].
-    owner: bool,
+    /// Not a canvas resource: something of a roll code owner's, read through the project that
+    /// stands for the owner.
+    owner: Option<OwnersOwn>,
+}
+
+/// What of a roll code owner's reads a reference ([`ResourceRef::code_owner`],
+/// [`ResourceRef::agent_machine`]): the owner's name, and what of theirs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum OwnersOwn {
+    Reviewer(String),
+    Machine(String),
+}
+
+impl OwnersOwn {
+    fn owner(&self) -> &str {
+        match self {
+            OwnersOwn::Reviewer(o) | OwnersOwn::Machine(o) => o,
+        }
+    }
 }
 
 impl ResourceRef {
     pub fn new(kind: Kind, r#ref: impl Into<String>) -> ResourceRef {
-        ResourceRef { kind, r#ref: r#ref.into(), untrusted: false, placeholders: false, owner: false }
+        ResourceRef { kind, r#ref: r#ref.into(), untrusted: false, placeholders: false, owner: None }
     }
 
     /// roll code owner `owner`'s reviewer (its provider key): `code:review:<owner>`, read through
     /// the project whose canvas holds one of the owner's repositories and stands for it.
     pub fn code_owner(owner: impl Into<String>) -> ResourceRef {
-        ResourceRef { owner: true, ..ResourceRef::new(Kind::Repo, owner) }
+        let owner = owner.into();
+        ResourceRef { owner: Some(OwnersOwn::Reviewer(owner.clone())), ..ResourceRef::new(Kind::Repo, owner) }
+    }
+
+    /// roll code owner `owner`'s agent machine `machine` (its name; an endpoint's key):
+    /// `agent:<machine>`, read through the same project as [`ResourceRef::code_owner`].
+    pub fn agent_machine(owner: impl Into<String>, machine: impl Into<String>) -> ResourceRef {
+        ResourceRef { owner: Some(OwnersOwn::Machine(owner.into())), ..ResourceRef::new(Kind::Repo, machine) }
     }
 
     /// The same resource as a copy nobody vetted (a branch, a clone, anything whose code or data
@@ -103,8 +129,10 @@ impl ResourceRef {
     /// Who it is in the audit log: `storage:bucket:<ref>`, `search:search:<ref>`, …, with
     /// ` (untrusted)` after it for an untrusted copy.
     pub fn consumer(&self) -> String {
-        if self.owner {
-            return format!("code:review:{}", self.r#ref);
+        match &self.owner {
+            Some(OwnersOwn::Reviewer(o)) => return format!("code:review:{o}"),
+            Some(OwnersOwn::Machine(_)) => return format!("agent:{}", self.r#ref),
+            None => {}
         }
         let product = match self.kind {
             Kind::Bucket => "storage",
@@ -367,13 +395,14 @@ impl Secrets {
         let who = resource.consumer();
         let ws = |e: roll_workspace::Error| Error::Internal(e.to_string());
         let mut trusting = vec![];
-        if resource.owner {
+        if let Some(own) = &resource.owner {
             // One of the owner's repositories on its canvas, which it stands for.
-            let prefix = format!("{}/", resource.r#ref);
+            let owner = own.owner();
+            let prefix = format!("{owner}/");
             let theirs = |p: &roll_workspace::Project| p.resources.iter().any(|x| x.kind == Kind::Repo && x.r#ref.starts_with(&prefix) && self.workspace.trusts(p, Kind::Repo, &x.r#ref));
             trusting = self.workspace.list(roll_workspace::Scope::All).map_err(ws)?.into_iter().filter(theirs).collect();
             if trusting.is_empty() {
-                return Err(Refusal::NoProject(format!("no project's canvas holds one of {}'s repositories and stands for it", resource.r#ref)));
+                return Err(Refusal::NoProject(format!("no project's canvas holds one of {owner}'s repositories and stands for it")));
             }
         } else {
             let ids = self.workspace.projects_of(resource.kind.as_str(), &resource.r#ref).map_err(ws)?;
@@ -419,5 +448,6 @@ mod tests {
         assert_eq!(ResourceRef::new(Kind::Bucket, "photos").consumer(), "storage:bucket:photos");
         assert_eq!(ResourceRef::new(Kind::Bucket, "photos").untrusted().consumer(), "storage:bucket:photos (untrusted)");
         assert_eq!(ResourceRef::code_owner("acme").consumer(), "code:review:acme");
+        assert_eq!(ResourceRef::agent_machine("acme", "acme").consumer(), "agent:acme");
     }
 }

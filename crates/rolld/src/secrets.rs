@@ -2234,22 +2234,36 @@ impl code_control::SecretEnv for ForCode {
     /// (`Secrets::bind_ref` for `code:review:<owner>`), never a runtime read.
     async fn bind_owner_key(&self, owner: &str, reference: &str, asker: &code_control::SecretsAsker) -> code_control::Result<String> {
         let secrets = self.secrets()?;
-        let (owner, reference, asker) = (owner.to_string(), reference.to_string(), asker.clone());
+        let (resource, reference, asker) = (roll_secrets::ResourceRef::code_owner(owner), reference.to_string(), asker.clone());
+        tokio::task::spawn_blocking(move || bind_for_code(&secrets, &resource, &reference, &asker)).await.map_err(|e| code_control::Error::Internal(e.into()))?
+    }
+
+    /// An agent machine's endpoint key that's a `roll://` reference: bound to whoever sets it
+    /// (`Secrets::bind_ref` for `agent:<machine>`), as an owner's reviewer key is.
+    async fn bind_machine_key(&self, owner: &str, machine: &str, reference: &str, asker: &code_control::SecretsAsker) -> code_control::Result<String> {
+        let secrets = self.secrets()?;
+        let (resource, reference, asker) = (roll_secrets::ResourceRef::agent_machine(owner, machine), reference.to_string(), asker.clone());
+        tokio::task::spawn_blocking(move || bind_for_code(&secrets, &resource, &reference, &asker)).await.map_err(|e| code_control::Error::Internal(e.into()))?
+    }
+
+    /// That key for the machine's daemon, as its maker may read it now (audited as `agent:<machine>`).
+    async fn machine_key(&self, owner: &str, machine: &str, reference: &str, maker: &str) -> anyhow::Result<code_control::CredentialValue> {
+        let secrets = self.secrets().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let maker: roll_secrets::Maker = serde_json::from_value(serde_json::Value::String(maker.to_string()))?;
+        let (resource, reference) = (roll_secrets::ResourceRef::agent_machine(owner, machine), reference.to_string());
         tokio::task::spawn_blocking(move || {
-            let caller = secrets.caller_of(asker.operator, asker.user.as_ref(), asker.grant.as_ref()).map_err(|e| match e {
-                // A roll code owner token is no one to roll secrets.
-                Error::Unauthorized(_) => code_control::Error::Forbidden("a roll:// key is set by someone roll secrets knows: a session, the operator token or a roll token (rlt_…) that may reveal it".into()),
-                e => for_code(e),
-            })?;
-            let maker = secrets.bind_ref(&roll_secrets::ResourceRef::code_owner(&owner), &reference, &caller).map_err(|e| match e {
-                roll_secrets::Refusal::NotAllowed(_) | roll_secrets::Refusal::MakerUnreachable(_) | roll_secrets::Refusal::NotTrusted(_) | roll_secrets::Refusal::Protected(_) => code_control::Error::Forbidden(e.to_string()),
-                roll_secrets::Refusal::Failed(e) => for_code(e),
-                e => code_control::Error::Invalid(e.to_string()),
-            })?;
-            Ok(serde_json::to_value(&maker).map_err(|e| code_control::Error::Internal(e.into()))?.as_str().unwrap_or_default().to_string())
+            let v = secrets.resolve_as(&resource, &reference, &maker).map_err(|e| anyhow::anyhow!("{e}"))?;
+            Ok(code_control::CredentialValue(v.value.expose().to_string()))
         })
-        .await
-        .map_err(|e| code_control::Error::Internal(e.into()))?
+        .await?
+    }
+
+    /// Its digest as its maker may read it now: no value, not audited.
+    async fn machine_key_digest(&self, owner: &str, machine: &str, reference: &str, maker: &str) -> anyhow::Result<String> {
+        let secrets = self.secrets().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let maker: roll_secrets::Maker = serde_json::from_value(serde_json::Value::String(maker.to_string()))?;
+        let (resource, reference) = (roll_secrets::ResourceRef::agent_machine(owner, machine), reference.to_string());
+        tokio::task::spawn_blocking(move || secrets.digest_as(&resource, &reference, &maker).map_err(|e| anyhow::anyhow!("{e}"))).await?
     }
 
     /// That key for a review, as its maker may read it now (audited as `code:review:<owner>`).
@@ -2269,6 +2283,23 @@ impl ForCode {
     fn secrets(&self) -> code_control::Result<Arc<Secrets>> {
         Ok(self.0.get().ok_or_else(|| code_control::Error::Unavailable("roll secrets is starting".into()))?.0.clone())
     }
+}
+
+/// A `roll://` key roll code keeps for `resource` (an owner's reviewer, an agent machine's
+/// endpoint), bound to the request's caller (`Secrets::bind_ref`): the maker to keep, as roll
+/// code's API answers a refusal. On the store's blocking threads.
+fn bind_for_code(secrets: &Secrets, resource: &roll_secrets::ResourceRef, reference: &str, asker: &code_control::SecretsAsker) -> code_control::Result<String> {
+    let caller = secrets.caller_of(asker.operator, asker.user.as_ref(), asker.grant.as_ref()).map_err(|e| match e {
+        // A roll code owner token is no one to roll secrets.
+        Error::Unauthorized(_) => code_control::Error::Forbidden("a roll:// key is set by someone roll secrets knows: a session, the operator token or a roll token (rlt_…) that may reveal it".into()),
+        e => for_code(e),
+    })?;
+    let maker = secrets.bind_ref(resource, reference, &caller).map_err(|e| match e {
+        roll_secrets::Refusal::NotAllowed(_) | roll_secrets::Refusal::MakerUnreachable(_) | roll_secrets::Refusal::NotTrusted(_) | roll_secrets::Refusal::Protected(_) => code_control::Error::Forbidden(e.to_string()),
+        roll_secrets::Refusal::Failed(e) => for_code(e),
+        e => code_control::Error::Invalid(e.to_string()),
+    })?;
+    Ok(serde_json::to_value(&maker).map_err(|e| code_control::Error::Internal(e.into()))?.as_str().unwrap_or_default().to_string())
 }
 
 /// roll secrets' answer as roll code's API answers it (the same statuses).

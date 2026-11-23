@@ -93,8 +93,16 @@ dependencies = [
 name = "agent-proto"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
+ "base64 0.22.1",
+ "curve25519-dalek",
+ "hkdf",
+ "rand 0.8.8",
+ "roll-secrets",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "zeroize",
 ]
 
 [[package]]
