@@ -1536,7 +1536,10 @@ instead of at the first rotation:
 - GitLab: one page of the project's or group's access tokens (listing them takes the role that
   makes them);
 - OpenAI: one page of the project's service accounts;
-- Datadog: one page of the API keys, or of the credential's user's application keys.
+- Datadog: one page of the API keys, or of the credential's user's application keys;
+- Cloudflare: the template token (read as each rotation will);
+- Databricks: the identity's tokens (`GET /api/2.0/token/list`);
+- Confluent: one page of the owner's API keys.
 
 | `vendor` | `target` | `credential` | Issue | Revoke |
 | --- | --- | --- | --- | --- |
@@ -1548,6 +1551,9 @@ instead of at the first rotation:
 | `gitlab` | `{host?: "gitlab.com", project: "123" \| "group/project"` or `group: "456" \| "group", scopes: ["read_api", …], access_level?: 10-40 (50 for a group; default 40), expires_days?: 1-400 (default 365)}` | an access token with the `api` scope of a Maintainer or Owner of the project or group | `POST https://{host}/api/v4/{projects\|groups}/{id}/access_tokens {name, scopes, access_level, expires_at}` (`PRIVATE-TOKEN`) → `id`, `token` | `DELETE …/access_tokens/{id}` |
 | `openai` | `{project_id: "proj_…"}` | an organization Admin API key | `POST https://api.openai.com/v1/organization/projects/{project_id}/service_accounts {name}` (Bearer) → `id`, `api_key.value` (`id` is the service account's) | `DELETE …/service_accounts/{id}` (the account and its key) |
 | `datadog` | `{site?: "datadoghq.com", key: "api" \| "application", scopes?: string[]}` (scopes for application keys only; none: the user's permissions) | `<API key>:<application key>`, the application key allowed to manage the kind that rotates (`api_keys_write`, or `user_app_keys`) | `POST https://api.{site}/api/v2/api_keys` or `…/current_user/application_keys` `{data: {type, attributes: {name, scopes?}}}` (`DD-API-KEY`, `DD-APPLICATION-KEY`) → `data.id`, `data.attributes.key` | `DELETE …/api_keys/{id}` or `…/current_user/application_keys/{id}` |
+| `cloudflare` | `{account_id?, template}` (no `account_id`: the user's tokens) | an API token that may manage API tokens (`API Tokens Write` on the user or the account) | `GET https://api.cloudflare.com/client/v4/{user\|accounts/{account_id}}/tokens/{template}`, then `POST …/tokens {name, policies, condition?}` with the template's policies (permission groups by id) and condition (Bearer) → `result.id`, `result.value` | `DELETE …/tokens/{id}` |
+| `databricks` | `{host: "dbc-a1b2c3d4-e5f6.cloud.databricks.com", lifetime_days?: 1-730 (default 90)}` | a personal access token of the identity whose tokens rotate (a service principal's, ideally) | `POST https://{host}/api/2.0/token/create {comment, lifetime_seconds}` (Bearer) → `token_value`, `token_info.token_id` | `POST /api/2.0/token/delete {token_id}` |
+| `confluent` | `{owner: "sa-…" \| "u-…", resource?: "lkc-…", environment?: "env-…"}` (no `resource`: a Cloud API key) | a Cloud API key as `KEY:SECRET` that may manage `owner`'s keys (OrganizationAdmin, or AccountAdmin of the owner) | `POST https://api.confluent.cloud/iam/v2/api-keys {spec: {display_name, owner: {id}, resource?: {id, environment?}}}` (basic auth) → `id` (the key), `spec.secret` | `DELETE …/api-keys/{id}` |
 
 - **Auth0 has no grace period.** `rotate-secret` replaces the app's secret at once: the old one
   stops working the moment roll rotates, whatever `grace_minutes` says, so services must pick up
@@ -1573,11 +1579,26 @@ instead of at the first rotation:
   `datadoghq.eu`, `ap1.datadoghq.com`, `ap2.datadoghq.com` or `ddog-gov.com`; the API is
   `api.<site>`. Application keys belong to the user (or service account) whose application key is
   in the credential.
+- **Cloudflare tokens are made new, not rolled.** Cloudflare's roll (`PUT …/tokens/{id}/value`)
+  keeps a token's policies but ends its old value the moment it answers, which breaks every
+  consumer still holding it, as GitLab's rotate would. roll makes a new token instead, copying the
+  policies and conditions of `template` (a token you keep for that, which may be disabled; edit
+  it in Cloudflare and the next rotation follows), and deletes the old one after `grace_minutes`.
+  A template roll can't read, or one without policies, fails the rotation (`rotation.failed`).
+- **Databricks: personal access tokens, not OAuth secrets.** Every Databricks workspace on every
+  cloud takes them, and every consumer (the CLI, SDKs, JDBC/ODBC, `DATABRICKS_TOKEN`) uses one
+  as is; a service principal's OAuth secret is account-level, and each consumer must exchange it
+  for a token. A new token belongs to the credential's identity, so register a service principal's
+  token. Each lasts `lifetime_days` (a workspace may cap it lower): set `rotate_days` below it.
+  `host` is a hostname (no IP literal, no port).
+- **Confluent: link `CONFLUENT_API_KEY` to `id` and `CONFLUENT_API_SECRET` to `secret`.** They
+  share one key, and a new one can take a moment to work on a cluster: keep `grace_minutes` above
+  a few minutes.
 
 Requests go out from rolld's guarded client, as a rotator's calls do: HTTPS to a public address, no
 redirects, a 15-second timeout, at most 64 KiB of answer. The hosts are the vendors' own, except
-Okta's and Auth0's tenant domains and a self-managed GitLab's host, which must be hostnames (no IP
-literal, no port) and then pass the same guard; Datadog's site must be one of its documented ones. The credential is sealed with the project's data key, bound to the registration's
+Okta's and Auth0's tenant domains, a self-managed GitLab's host and a Databricks workspace's host,
+which must be hostnames (no IP literal, no port) and then pass the same guard; Datadog's site must be one of its documented ones. The credential is sealed with the project's data key, bound to the registration's
 id, vendor and target, so a row pointed at another host no longer opens; it's never answered,
 logged or audited, and the list shows the vendor and target only. A vendor's answer is never part
 of an error: errors name the vendor, the step and the status (`okta answered 401 issuing a key`).
@@ -6029,7 +6050,7 @@ type ProjectFindings = { project: string; project_name: string; findings: Findin
 type Finding = { issue: "decoy_used" | "production_unprotected" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "unplaced" | "operator_made" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string; decoy?: Decoy }; // decoy: on decoy_used only (an admin's session's or the operator's), the key's Decoy
 type Rotation = { environment: string; path: string; keys: string[]; kind: string; ref: string; name: string; rotate_days: number | null; rotate_window: string | null; grace_minutes: number; issued_at: number | null; next_due: number | null; last_error: string | null; failed_at: number | null };
 type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
-type SaasRotator = { id: string; name: string; vendor: "sendgrid" | "twilio" | "okta" | "entra" | "auth0" | "gitlab" | "openai" | "datadog"; target: Record<string, unknown>; created_at: number; created_by: string };
+type SaasRotator = { id: string; name: string; vendor: "sendgrid" | "twilio" | "okta" | "entra" | "auth0" | "gitlab" | "openai" | "datadog" | "cloudflare" | "databricks" | "confluent"; target: Record<string, unknown>; created_at: number; created_by: string };
 type KubernetesCluster = { id: string; name: string; api_url: string; has_ca: boolean; created_at: number; created_by: string };
 type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
 type NewValueRequest = { keys: string[]; note?: string; ttl_minutes?: number /* 5–43200, default 10080 */; answers?: number /* 1–10, default 1 */ };
