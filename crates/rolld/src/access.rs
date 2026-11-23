@@ -149,8 +149,7 @@ pub fn open(args: &crate::Args, home: &std::path::Path, auth: &crate::auth::Auth
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(300));
         loop {
             tick.tick().await;
-            let a = a.clone();
-            if let Ok(Err(e)) = tokio::task::spawn_blocking(move || a.activity_alerts()).await {
+            if let Err(e) = a.activity_alerts().await {
                 tracing::warn!(error = %e, "checking agent activity for failure jumps");
             }
         }

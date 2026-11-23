@@ -2986,6 +2986,11 @@ async fn agent_activity_by_tool_and_connection() {
     }
     let jumps = d.access.store.failure_jumps(now).unwrap();
     assert_eq!((jumps.len(), jumps[0]["tool"].as_str(), jumps[0]["failed"].as_i64()), (1, Some("flaky_tool"), Some(12)), "{jumps:?}");
-    assert!(d.access.store.claim_alert("activity_alert:flaky_tool", now, 3_600_000).unwrap());
-    assert!(!d.access.store.claim_alert("activity_alert:flaky_tool", now + 1000, 3_600_000).unwrap(), "once in the interval");
+    // Alerted once (kept for the operator's feed), not again within six hours.
+    assert_eq!(d.access.activity_alerts().await.unwrap(), 1);
+    assert_eq!(d.access.activity_alerts().await.unwrap(), 0, "once in the interval");
+    let (_, feed) = d.call(OPERATOR, Method::GET, "/v1/access/alerts?after=0", None).await;
+    assert_eq!((feed["events"][0]["kind"].as_str(), feed["events"][0]["tool"].as_str(), feed["next"].as_i64()), (Some("tool_failing"), Some("flaky_tool"), Some(1)), "{feed}");
+    let (_, theirs) = d.as_user("usr_ada", Method::GET, "/v1/access/alerts?after=0", None).await;
+    assert_eq!((theirs["events"].as_array().map(Vec::len), theirs["next"].as_i64()), (Some(0), Some(1)), "a person's connections get none: {theirs}");
 }
