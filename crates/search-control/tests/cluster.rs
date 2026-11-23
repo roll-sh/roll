@@ -436,8 +436,8 @@ async fn due_jobs_run_once_on_the_next_owner() {
 }
 
 /// ES|QL across clusters owned by two nodes (the remote's part runs on its owner), and a
-/// migration started before its cluster's owner drained is reported on the next owner: the copy
-/// finished, failed or stopped, never a task that just vanished.
+/// migration copying when its cluster's owner drains is reported on the next owner as stopped by
+/// the handover, never a task that just vanished.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn esql_and_a_migration_work_across_nodes() {
     let (a, b) = two_nodes("fleet-esql", |c| c.node_settings.push((search_control::REINDEX_ALLOW_PRIVATE.into(), "true".into()))).await;
@@ -479,10 +479,10 @@ async fn esql_and_a_migration_work_across_nodes() {
     assert!(!near_node.control.node.loaded().iter().any(|n| **n == *far), "the remote isn't loaded on the local cluster's node");
     assert!(far_node.control.node.loaded().iter().any(|n| **n == *far), "it runs on its owner");
 
-    // A migration into `near` from `far` (another cluster's endpoint, read as a remote), slow
-    // enough to be running when `near`'s owner drains.
+    // A migration into `near` from `far` (another cluster's endpoint, read as a remote): one
+    // document every 10 seconds, so it's always mid-copy when `near`'s owner drains.
     let source = json!({"host": a.rest, "username": far, "password": far_pw});
-    let (s, v) = call(&http, reqwest::Method::POST, format!("{}/v1/search/clusters/near/migrate", a.api), None, Some(json!({"source": source, "indices": [{"index": "items", "dest": "copied"}], "requests_per_second": 1, "size": 1}))).await;
+    let (s, v) = call(&http, reqwest::Method::POST, format!("{}/v1/search/clusters/near/migrate", a.api), None, Some(json!({"source": source, "indices": [{"index": "items", "dest": "copied"}], "requests_per_second": 0.1, "size": 1}))).await;
     assert_eq!(s, 200, "{v}");
     let task = v["indices"][0]["task"].as_str().unwrap_or_else(|| panic!("{v}")).to_string();
     let (owner, other) = if owner_of("near") == "a" { (&a, &b) } else { (&b, &a) };
@@ -493,11 +493,8 @@ async fn esql_and_a_migration_work_across_nodes() {
     })
     .await;
     let (_, v) = reported.unwrap_or_else(|seen| panic!("the copy isn't reported on the next owner: {seen:?}"));
-    // Stopped by the handover (the unload cancels its tasks, saying why), finished, or failed.
-    let canceled = &v["response"]["canceled"];
-    assert!(canceled.is_null() || *canceled == search_server::HANDED_OVER, "{v}");
-    let stopped = canceled.is_string() || v["error"].is_object();
-    assert!(stopped || v["response"]["created"].as_u64() == Some(3), "finished or failed: {v}");
+    // Stopped by the handover: the unload cancels its tasks, saying why.
+    assert_eq!(v["response"]["canceled"], search_server::HANDED_OVER, "{v}");
 }
 
 /// A connector sync running when its cluster's owner drains isn't left `in_progress` for the

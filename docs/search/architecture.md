@@ -637,7 +637,11 @@ both with Elasticsearch 9.5.5's shapes, validation and state machines
   `last_sync_status` too), as Elastic's connector service does when it shuts down mid-sync
   (Elasticsearch's state machine has `in_progress → suspended → in_progress`). A suspended job
   waits like a pending one: the cluster's `wake_at` is now, and whichever node loads it next
-  resumes the sync at once (from its last cursor), not after the 5-minute stale check.
+  runs it again at once, not after the 5-minute stale check. The run starts over: an incremental
+  sync from the connector's `sync_cursor` (the last completed sync's), a full sync from the
+  beginning, and the suspended run's counters are dropped. A forced unload (a lost lease, failed
+  storage) writes nothing: its syncs stop, and the next owner finds their jobs stale as before.
+  The memory budget never evicts a cluster while a sync runs, as for running tasks.
 - **On a branch, and connectors from before.** Some connectors wait to be made the cluster's
   own (`sync::waits_for_adoption`): none of their jobs becomes due or starts, and their
   schedules make none. They are the connectors a branch inherited (`branch::inherited_connector`,

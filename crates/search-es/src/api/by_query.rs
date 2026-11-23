@@ -457,9 +457,12 @@ impl Live {
     }
 
     /// Records why the task is being cancelled (the node unloading its cluster), before its flag
-    /// is set: the run reports it as its `canceled` reason. The first reason given stays.
+    /// is set: the run reports it as its `canceled` reason. The first reason given stays, and a
+    /// run already cancelled (a client's `_cancel` of it or of its parent) keeps its own.
     pub fn set_reason(&self, reason: &str) {
-        let _ = self.reason.set(reason.to_string());
+        if !self.is_cancelled() {
+            let _ = self.reason.set(reason.to_string());
+        }
     }
 
     /// The `canceled` reason a cancelled run reports (`BulkByScrollTask.Status.reasonCancelled`).

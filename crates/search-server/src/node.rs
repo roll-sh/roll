@@ -1517,8 +1517,13 @@ impl Node {
             tracing::info!(cluster = name, tasks = cancelled.len(), ended, "cancelled the running tasks of a cluster being unloaded");
         }
         // Connector syncs stop as `suspended`, for the next load to resume (before the hook
-        // below, which records when the cluster is due next: at once, for such a job).
-        search_es::xpack::entsearch::sync::suspend(&loaded.cluster).await;
+        // below, which records when the cluster is due next: at once, for such a job). A forced
+        // unload writes nothing: its syncs only stop, and the next owner finds their jobs stale.
+        if flush {
+            search_es::xpack::entsearch::sync::suspend(&loaded.cluster).await;
+        } else {
+            search_es::xpack::entsearch::sync::close(&loaded.cluster);
+        }
         self.hooks.unloading(&loaded.cluster).await;
         // Failed logins the node refuses while it sleeps are recorded as it last asked.
         self.audit.remember(name, search_es::xpack::security::audit::snapshot(&loaded.cluster));
@@ -1858,8 +1863,9 @@ impl Node {
                 break;
             }
             // A running task (a reindex from remote, a by-query run in the background) would be
-            // lost with the cluster: it stays.
-            if l.in_flight() > 0 || !l.cluster.tasks.is_empty() || !self.may_drop(&l, "memory budget") {
+            // lost with the cluster: it stays. So does a running connector sync: unloaded, it's
+            // suspended, and its job is due at once, which would load the cluster straight back.
+            if l.in_flight() > 0 || !l.cluster.tasks.is_empty() || l.cluster.xpack.connector_syncs.busy() || !self.may_drop(&l, "memory budget") {
                 continue;
             }
             if self.unload_with(&l.name, true, Some(&l)).await {

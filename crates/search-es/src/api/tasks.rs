@@ -216,8 +216,7 @@ pub async fn get(ctx: &Ctx<'_>) -> EsResult<Reply> {
 pub fn cancel_all(cluster: &crate::Cluster, reason: &str) -> Vec<u64> {
     let tasks: Vec<_> = cluster.tasks.list().into_iter().filter(|t| t.cancellable).collect();
     // Every reason first: a slice stops on its parent's flag too, and must already have its own.
-    // A task a client already cancelled keeps its reason.
-    for l in tasks.iter().filter(|t| !t.cancelled.load(std::sync::atomic::Ordering::Relaxed)).filter_map(|t| t.live.as_ref()) {
+    for l in tasks.iter().filter_map(|t| t.live.as_ref()) {
         l.set_reason(reason);
     }
     let mut ids = Vec::new();

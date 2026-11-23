@@ -12,8 +12,8 @@
 //! When the cluster unloads (handed over to another node, put to sleep, deleted), [`suspend`]
 //! stops its running syncs and records their jobs `suspended`, as Elastic's connector service
 //! does when it shuts down mid-sync. A suspended job waits like a pending one, so whichever node
-//! loads the cluster next resumes it at once rather than calling it abandoned after
-//! [`STALE_MS`].
+//! loads the cluster next runs it again at once rather than calling it abandoned after
+//! [`STALE_MS`]. A forced unload writes nothing ([`close`]): its jobs go stale as before.
 
 pub mod config;
 pub mod extract;
@@ -372,8 +372,8 @@ async fn start_pending(cluster: &Cluster, handle: &Arc<Cluster>) {
 /// cluster next to resume. Waits a few seconds at most for the syncs to stop: one stuck in its
 /// source's I/O ends when its next write finds the cluster closed.
 pub async fn suspend(cluster: &Cluster) {
+    close(cluster);
     let syncs = &cluster.xpack.connector_syncs;
-    syncs.closing.store(true, std::sync::atomic::Ordering::SeqCst);
     let running: HashSet<String> = syncs.running.lock().clone();
     if running.is_empty() {
         return;
@@ -405,6 +405,12 @@ pub async fn suspend(cluster: &Cluster) {
     while syncs.busy() && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+}
+
+/// The cluster is unloading without writing (a lost lease, failed storage): nothing starts any
+/// more, and running syncs stop at their next check, their jobs left as they are.
+pub fn close(cluster: &Cluster) {
+    cluster.xpack.connector_syncs.closing.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// Runs a claimed slot's sync (`work`) as a task of its own and, however it ends (a panic
