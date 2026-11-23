@@ -3310,6 +3310,80 @@ async fn a_sandbox_runs_commands_apart_from_the_environment_until_its_end() {
     assert!(w.fake.state(&name).is_none() && !w.fake.networks().contains(&net));
 }
 
+/// A view of a deployment with values of its own (roll previews' earlier pushes on their own
+/// copy of the data): its image again at its own URL with some of the environment's variables
+/// given other values, never live, never listed, no one told to put it live.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_view_of_a_deployment_runs_its_image_with_values_of_its_own() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    assert!(call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"DATABASE_URL": "postgres://live", "FAKE_ECHO": "DATABASE_URL"}}))).await.0.is_success());
+    let (_, d) = call(&w.api, "POST", &format!("{base}/deploys"), Some(json!({}))).await;
+    let live = d["id"].as_str().unwrap().to_string();
+    settled(&w, &id, "production", &live).await;
+    let rollback = format!("{base}/deploys/{live}/rollback");
+    assert_eq!(call(&w.api, "POST", &rollback, Some(json!({"variables": {"DATABASE_URL": "postgres://copy"}}))).await.0, StatusCode::BAD_REQUEST, "never live");
+    assert_eq!(call(&w.api, "POST", &rollback, Some(json!({"no_traffic": true, "variables": {"NEW_ONE": "x"}}))).await.0, StatusCode::BAD_REQUEST, "only the environment's own names");
+    assert_eq!(call(&w.api, "POST", &rollback, Some(json!({"no_traffic": true}))).await.0, StatusCode::BAD_REQUEST);
+    let (st, v) = call(&w.api, "POST", &rollback, Some(json!({"no_traffic": true, "variables": {"DATABASE_URL": "postgres://copy"}}))).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{v}");
+    let view = v["id"].as_str().unwrap().to_string();
+    let done = settled(&w, &id, "production", &view).await;
+    assert_eq!(done["status"], "ready", "{done}");
+    let events = call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1;
+    assert!(!events["events"].as_array().unwrap().iter().any(|e| e["kind"] == "deploy.ready" && e["deployment"] == view.as_str()), "no one is told to put a view live");
+    // Its URL runs it with the copy's value; the environment's keeps its own.
+    let h = host(&call(&w.api, "GET", &base, None).await.1["url"]);
+    let (st, at_view) = visit(&w, &host(&done["url"]), "/").await;
+    assert_eq!((st, &at_view["vars"]["DATABASE_URL"]), (StatusCode::OK, &json!("postgres://copy")), "{at_view}");
+    assert_eq!(visit(&w, &h, "/").await.1["vars"]["DATABASE_URL"], "postgres://live");
+    assert!(!call(&w.api, "GET", &format!("{base}/variables"), None).await.1.to_string().contains("postgres://copy"), "never listed");
+}
+
+/// Signed images (Cloud Run's Binary Authorization): with a project's signing keys required, an
+/// image service's deploy needs its pinned digest's cosign signature by one of them, or it fails
+/// before anything switches; removing the rule lets unsigned images deploy again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_project_that_requires_signed_images_refuses_unsigned_ones() {
+    use p256::pkcs8::EncodePublicKey;
+    let w = world().await;
+    let (svc, d1) = image_service(&w, "api", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let deploys = format!("/v1/apps/services/{id}/environments/production/deploys");
+    let signing = format!("/v1/apps/projects/{}/signing", w.project);
+    assert_eq!(call(&w.api, "PUT", &signing, Some(json!({"keys": ["not a key"]}))).await.0, StatusCode::BAD_REQUEST);
+    let pem = p256::ecdsa::SigningKey::from_bytes(&[7u8; 32].into()).unwrap().verifying_key().to_public_key_pem(Default::default()).unwrap();
+    let (st, v) = call(&w.api, "PUT", &signing, Some(json!({"keys": [pem]}))).await;
+    assert_eq!((st, &v["required"]), (StatusCode::OK, &json!(true)), "{v}");
+    let (_, d) = call(&w.api, "POST", &deploys, Some(json!({}))).await;
+    let d = settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
+    assert!(d["status"] == "failed" && d["error"].as_str().unwrap_or_default().contains("requires signed images"), "{d}");
+    assert_eq!(call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await.1["active"]["id"], d1["id"], "nothing switched");
+    // Signed by the project's key: it deploys, and its log says so.
+    w.fake.signatures.lock().insert("nginx:1.27".into(), 0);
+    let (_, d) = call(&w.api, "POST", &deploys, Some(json!({}))).await;
+    let dep = d["id"].as_str().unwrap().to_string();
+    assert_eq!(settled(&w, &id, "production", &dep).await["status"], "active");
+    let (_, logs) = call(&w.api, "GET", &format!("{deploys}/{dep}/logs"), None).await;
+    assert!(logs.to_string().contains("cosign signature verifies"), "{logs}");
+    // A sidecar runs with the app's values: its image too.
+    assert!(call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"sidecars": [{"name": "cache", "image": "redis:7"}]}}))).await.0.is_success());
+    let (_, d) = call(&w.api, "POST", &deploys, Some(json!({}))).await;
+    let d = settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
+    assert!(d["status"] == "failed" && d["error"].as_str().unwrap_or_default().contains("sidecar cache"), "{d}");
+    w.fake.signatures.lock().insert("redis:7".into(), 0);
+    let (_, d) = call(&w.api, "POST", &deploys, Some(json!({}))).await;
+    assert_eq!(settled(&w, &id, "production", d["id"].as_str().unwrap()).await["status"], "active");
+    // A sandbox of another image: checked as a deploy's, refused unsigned; the live one's runs.
+    let sandboxes = format!("/v1/apps/services/{id}/environments/production/sandboxes");
+    assert_eq!(call(&w.api, "POST", &sandboxes, Some(json!({"image": "python:3.13-slim"}))).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(call(&w.api, "POST", &sandboxes, None).await.0, StatusCode::CREATED);
+    assert_eq!(call(&w.api, "DELETE", &signing, None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(call(&w.api, "GET", &signing, None).await.1, json!({"keys": [], "required": false}));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_one_off_job_runs_the_live_image_to_its_exit_and_can_be_canceled() {
     let w = world_with(|c| c.cron_retry_after = Duration::from_millis(20)).await;
@@ -3727,6 +3801,85 @@ async fn a_drain_into_the_projects_bucket_has_a_key_of_its_own() {
     assert_eq!(call(&w.api, "PATCH", &format!("{base}/{id}"), Some(json!({"headers": {"aws-access-key-id": "mine", "aws-secret-access-key": "x"}}))).await.0, StatusCode::BAD_REQUEST, "its key is roll's");
     assert!(call(&w.api, "DELETE", &format!("{base}/{id}"), None).await.0.is_success());
     assert_eq!(*fake.seen.lock(), [format!("key drain:{} logs", w.project), "revoked AKIAMINTED".to_string()]);
+}
+
+/// roll search as a drain sees it: a cluster at `endpoint`, its data stream made as asked, a key
+/// minted with the link's options (what was asked and revoked, kept).
+struct FakeSearch {
+    endpoint: String,
+    seen: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl apps_control::integrations::Resources for FakeSearch {
+    async fn link_vars(&self, _kind: apps_control::model::LinkKind, _ref: &str) -> anyhow::Result<Vec<(String, String)>> {
+        Ok(vec![("ELASTICSEARCH_URL".into(), self.endpoint.clone())])
+    }
+    async fn link(&self, _kind: apps_control::model::LinkKind, r#ref: &str, to: &str, options: &apps_control::integrations::LinkOptions) -> anyhow::Result<Option<apps_control::integrations::Minted>> {
+        self.seen.lock().push(format!("key {to} {ref} {}", Value::Object(options.clone())));
+        Ok(Some(apps_control::integrations::Minted { vars: vec![("ELASTICSEARCH_API_KEY".into(), "sk_append".into())], kept: "key_1".into() }))
+    }
+    async fn log_stream(&self, cluster: &str, stream: &str, retention_days: u32) -> anyhow::Result<()> {
+        self.seen.lock().push(format!("stream {cluster} {stream} {retention_days}d"));
+        Ok(())
+    }
+    async fn unlink(&self, _kind: apps_control::model::LinkKind, _ref: &str, kept: &str) -> anyhow::Result<()> {
+        self.seen.lock().push(format!("revoked {kept}"));
+        Ok(())
+    }
+}
+
+/// A drain into the project's roll search cluster (Elastic's and OpenSearch's ingestion): its
+/// own data stream made with its retention, a key minted for it that only appends there, lines
+/// as ECS documents through `_bulk` (`create` actions), the key revoked with the drain.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_drain_into_a_search_cluster_appends_ecs_documents() {
+    let got: Arc<parking_lot::Mutex<Vec<(String, String, String)>>> = Default::default();
+    let g = got.clone();
+    let app = axum::Router::new().fallback(move |uri: axum::http::Uri, h: axum::http::HeaderMap, b: bytes::Bytes| {
+        let g = g.clone();
+        async move {
+            g.lock().push((uri.path().to_string(), h.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string(), String::from_utf8_lossy(&b).to_string()));
+            axum::Json(json!({"errors": false, "items": []}))
+        }
+    });
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", l.local_addr().unwrap());
+    tokio::spawn(axum::serve(l, app).into_future());
+    let fake = Arc::new(FakeSearch { endpoint, seen: Mutex::new(Vec::new()) });
+    let f2 = fake.clone();
+    let w = world_full(|_| {}, false, move |d| d.resources = f2).await;
+    let base = format!("/v1/apps/projects/{}/drains", w.project);
+    assert_eq!(call(&w.api, "POST", &base, Some(json!({"search": "logs"}))).await.0, StatusCode::BAD_REQUEST, "not on the project");
+    let ws = w.apps.deps.workspace.clone().unwrap();
+    ws.place(roll_workspace::Scope::All, &w.project, roll_workspace::Kind::Search, "logs", 0.0, 0.0).unwrap();
+    assert_eq!(call(&w.api, "POST", &base, Some(json!({"search": "logs", "url": "https://x.example"}))).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(call(&w.api, "POST", &base, Some(json!({"search": "logs", "namespace": "Web-1"}))).await.0, StatusCode::BAD_REQUEST);
+    let (st, d) = call(&w.api, "POST", &base, Some(json!({"search": "logs", "namespace": "web", "retention_days": 7}))).await;
+    assert_eq!((st, d["format"].as_str(), d["stream"].as_str()), (StatusCode::CREATED, Some("search"), Some("logs-roll.apps-web")), "{d}");
+    assert!(!d.to_string().contains("sk_append"), "its key isn't shown");
+    assert_eq!(fake.seen.lock()[..2], ["stream logs logs-roll.apps-web 7d".to_string(), format!("key drain:{} logs {}", w.project, json!({"names": ["logs-roll.apps-web"], "permission": "append"}))]);
+    let id = d["id"].as_str().unwrap().to_string();
+    assert_eq!(call(&w.api, "POST", &format!("{base}/{id}/test"), None).await.1["ok"], true);
+    // A runtime line, as an ECS document appended to the stream with the drain's key.
+    let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
+    visit(&w, &host(&svc["environments"][0]["url"]), "/").await;
+    let mut bulk = String::new();
+    for _ in 0..200 {
+        if let Some((_, _, b)) = got.lock().iter().find(|(_, _, b)| b.contains("listening on")) {
+            bulk = b.clone();
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let (path, auth, _) = got.lock().last().cloned().unwrap();
+    assert_eq!((path.as_str(), auth.as_str()), ("/logs-roll.apps-web/_bulk", "ApiKey sk_append"));
+    let lines: Vec<&str> = bulk.lines().collect();
+    assert!(!lines.is_empty() && lines.chunks(2).all(|c| c[0] == r#"{"create":{}}"#), "create actions only: {bulk}");
+    let doc: Value = serde_json::from_str(lines.iter().find(|l| l.contains("listening on")).unwrap()).unwrap();
+    assert!(doc["@timestamp"].is_string() && doc["service"]["name"] == "api" && doc["service"]["environment"] == "production" && doc["event"]["dataset"] == "roll.apps", "{doc}");
+    assert!(call(&w.api, "DELETE", &format!("{base}/{id}"), None).await.0.is_success());
+    assert_eq!(fake.seen.lock().last().map(String::as_str), Some("revoked key_1"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -8712,7 +8865,14 @@ async fn closed_services_on_one_network_move_to_a_new_ca_together() {
     assert!(!ended(), "web still uses them: {:?}", vault.0.lock());
     let (_, d) = call(&w.api, "POST", &format!("/v1/apps/services/{web}/environments/staging/deploys"), Some(json!({}))).await;
     settled(&w, &web, "staging", d["id"].as_str().unwrap()).await;
-    w.apps.cron_pass(code_sql::now_ms() + 60 * 60_000).await;
+    // (web's closed instances still draining keep them until they're gone: checked each minute.)
+    for i in 0..100 {
+        w.apps.cron_pass(code_sql::now_ms() + (60 + i) * 61_000).await;
+        if ended() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert!(ended(), "{:?}", vault.0.lock());
 }
 

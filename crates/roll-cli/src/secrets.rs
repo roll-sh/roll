@@ -805,6 +805,21 @@ pub enum Secrets {
         #[arg(long)]
         revoke: Option<String>,
     },
+    /// What happened that someone acts on, in order (never values): a leaked value, a failing
+    /// rotation or sync, a request waiting. `--follow` keeps reading as more happen.
+    Events {
+        /// Only these kinds, comma-separated (`secret.leaked,request.*`).
+        #[arg(long)]
+        kinds: Option<String>,
+        /// Only this environment's.
+        #[arg(long)]
+        env: Option<String>,
+        /// After this cursor (an earlier line's seq); from the start without it, from now with `--follow`.
+        #[arg(long)]
+        after: Option<i64>,
+        #[arg(long)]
+        follow: bool,
+    },
     /// Who read and changed what (never values). `audit verify` checks it wasn't tampered with.
     #[command(args_conflicts_with_subcommands = true)]
     Audit {
@@ -3828,6 +3843,39 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             for l in v.as_array().into_iter().flatten() {
                 let state = if l["revoked_at"].is_number() { "revoked".to_string() } else { format!("ends {}", chrono::DateTime::from_timestamp_millis(l["expires_at"].as_i64().unwrap_or(0)).map(|t| t.to_rfc3339()).unwrap_or_default()) };
                 println!("{}  {:<8} {:<12} {:<24} {}  {state}", s(&l["id"]), s(&l["kind"]), s(&l["environment"]), s(&l["key"]), s(&l["consumer"]));
+            }
+        }
+        Secrets::Events { kinds, env, after, follow } => {
+            let mut filter = String::new();
+            if let Some(k) = &kinds {
+                filter.push_str(&format!("&kinds={}", enc(k)));
+            }
+            if let Some(e) = &env {
+                filter.push_str(&format!("&environment={}", enc(e)));
+            }
+            let mut after = match after {
+                Some(a) => a,
+                None if follow => c.call(Method::GET, &format!("{}/events?latest=1", c.base()), None).await?["next"].as_i64().unwrap_or(0),
+                None => 0,
+            };
+            loop {
+                let v = c.call(Method::GET, &format!("{}/events?after={after}&limit=500{filter}", c.base()), None).await?;
+                let events = v["events"].as_array().cloned().unwrap_or_default();
+                for e in &events {
+                    if json_out {
+                        println!("{e}");
+                    } else {
+                        let at = [&e["environment"], &e["key"]].iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(" ");
+                        println!("{:<8} {:<8} {:<28} {:<24} {}", e["seq"], ago(e["at"].as_i64().unwrap_or(0)), s(&e["kind"]), at, e["data"]);
+                    }
+                }
+                after = v["next"].as_i64().unwrap_or(after);
+                if events.is_empty() {
+                    if !follow {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
             }
         }
         Secrets::Audit { cmd: Some(AuditCmd::Key { .. }), .. } => unreachable!("handled above"),

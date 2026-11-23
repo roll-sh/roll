@@ -11,6 +11,7 @@ anyhow.workspace = true
 # Streaming a connector's Postgres rows (`xpack::entsearch::sync::postgres`).
 futures-util.workspace = true
 async-trait.workspace = true
+futures.workspace = true
 aes-gcm.workspace = true
 # Inference: SigV4 for Amazon Bedrock and SageMaker (`xpack::inference::services::aws`).
 aws-credential-types.workspace = true
@@ -29,8 +30,6 @@ flate2.workspace = true
 crc32fast.workspace = true
 # Fixed-seed hashing of per-document lookups (field tables, the bulk fast path).
 foldhash.workspace = true
-# Streamed REST bodies (`rest::ByteStream`: `_inference/…/_stream`).
-futures.workspace = true
 indexmap.workspace = true
 # Inference: Google service-account JWTs (RS256) for Vertex AI's OAuth tokens.
 jsonwebtoken.workspace = true

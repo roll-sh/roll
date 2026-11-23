@@ -2,6 +2,10 @@
 //! round-robin across clusters, and each tenant's own budgets (in flight, rate, bytes) turn its
 //! excess away with 429.
 
+// Spawned tasks hold the node's request futures, which hold reqwest's HTTP/2 client state (h2,
+// on in builds with crates that enable it); their `Send` proof nests past the default 128.
+#![recursion_limit = "256"]
+
 mod common;
 
 use common::{basic, send, start};

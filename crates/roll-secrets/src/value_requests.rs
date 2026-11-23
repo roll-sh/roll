@@ -251,7 +251,8 @@ impl Secrets {
                 params![id, project, env.id, path, json(&keys), n.note, public_key, sealed, answers, caller.principal, now, expires_at, token_hash(&token)],
             )?;
             let note = if n.note.is_empty() { String::new() } else { format!(": {}", n.note) };
-            audit::record(c, self.keys()?, project, caller, "value_request.create", Some(slug), Some(&path), &keys, &format!("asked for {} from outside roll ({answers} answer{}, {ttl} min){note}", keys.join(", "), if answers == 1 { "" } else { "s" }), now)?;
+            let event = crate::events::Event::new(crate::events::Kind::RequestPending, serde_json::json!({ "request": id, "type": "value", "expires_at": expires_at }));
+            audit::record_event(c, self.keys()?, project, caller, "value_request.create", Some(slug), Some(&path), &keys, &format!("asked for {} from outside roll ({answers} answer{}, {ttl} min){note}", keys.join(", "), if answers == 1 { "" } else { "s" }), now, event)?;
             Ok(())
         })?;
         Ok(ValueRequest {
@@ -304,7 +305,8 @@ impl Secrets {
             }
             if c.execute("UPDATE value_requests SET seal_key = NULL, answers_left = 0, cancelled_at = ? WHERE id = ? AND seal_key IS NOT NULL", params![now, id])? == 1 {
                 let env = (!r.environment.is_empty()).then_some(r.environment.as_str());
-                audit::record(c, self.keys()?, project, caller, "value_request.cancel", env, Some(&r.path), &r.keys, &format!("cancelled secret request {id}"), now)?;
+                let event = crate::events::Event::new(crate::events::Kind::RequestDecided, serde_json::json!({ "request": id, "type": "value", "state": "cancelled" }));
+                audit::record_event(c, self.keys()?, project, caller, "value_request.cancel", env, Some(&r.path), &r.keys, &format!("cancelled secret request {id}"), now, event)?;
             }
             Ok(())
         })
@@ -415,7 +417,8 @@ impl Secrets {
             if n != 1 {
                 return Err(gone());
             }
-            audit::record(c, self.keys()?, &project, &answerer, "value_request.answer", Some(&slug), Some(&path), &keys, &summary, now)
+            let event = crate::events::Event::new(crate::events::Kind::RequestDecided, serde_json::json!({ "request": id, "type": "value", "state": "answered" }));
+            audit::record_event(c, self.keys()?, &project, &answerer, "value_request.answer", Some(&slug), Some(&path), &keys, &summary, now, event)
         };
         let message = format!("answer to secret request {id}, asked by {requester}");
         let landed = self.commit_then(&project, &slug, items.clone(), &[], "write", &message, None, false, &landing, &|c, _, change, _| {
@@ -455,7 +458,8 @@ impl Secrets {
                 return Ok(None);
             }
             let keys: Vec<String> = from_json(&keys);
-            audit::record(c, self.keys()?, &project, &leak, "value_request.cancel", slug.as_deref(), Some(&path), &keys, &format!("cancelled secret request {id}: its link was {why}"), now)?;
+            let event = crate::events::Event::new(crate::events::Kind::RequestDecided, serde_json::json!({ "request": id, "type": "value", "state": "cancelled" }));
+            audit::record_event(c, self.keys()?, &project, &leak, "value_request.cancel", slug.as_deref(), Some(&path), &keys, &format!("cancelled secret request {id}: its link was {why}"), now, event)?;
             Ok::<_, Error>(Some(format!("secret request {id}")))
         });
         r.unwrap_or_else(|e| {

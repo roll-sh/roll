@@ -250,7 +250,7 @@ export function ProviderCard({ owner, busy, run }: { owner: string; busy: string
             <KeyRound className="size-4 text-muted" />
             <div className="min-w-0">
               <p>
-                {current.provider === "anthropic" ? "Anthropic" : "OpenAI-compatible"} · <span className="font-mono text-[12px]">…{current.key_last4}</span>
+                {current.provider === "anthropic" ? "Anthropic" : "OpenAI-compatible"} · <span className="font-mono text-[12px]">{current.key_ref ?? `…${current.key_last4 ?? ""}`}</span>
               </p>
               <p className="text-[11px] text-subtle">
                 {current.model ?? "provider default model"}
@@ -313,7 +313,7 @@ export function ProviderCard({ owner, busy, run }: { owner: string; busy: string
               onChange={setProvider}
             />
             <div className="grid gap-4 sm:grid-cols-2">
-              <Field label="API key" hint="Encrypted at rest; never shown again">
+              <Field label="API key" hint="Encrypted at rest and never shown again, or a roll:// reference from roll secrets">
                 <input type="password" autoComplete="off" value={key} onChange={(e) => setKey(e.target.value)} spellCheck={false} className={`${input} w-full font-mono text-[12px]`} />
               </Field>
               {compat && (

@@ -4,6 +4,10 @@
 //! Object storage is S3 when `ROLL_E2E_S3_BUCKET` is set (`search_store::test_objects`), a
 //! temp directory otherwise.
 
+// The writers' futures hold reqwest's HTTP/2 client state (h2), whose `Send` proof nests past
+// the default limit of 128 once the node's request types grow.
+#![recursion_limit = "256"]
+
 mod common;
 
 use search_es::EsRequest;

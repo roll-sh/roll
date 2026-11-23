@@ -701,6 +701,19 @@ EARLIER_DB=$(db_of "$EJAR" "$EARLIER_HOST")
 psql_q "$LIVE_DB" "CREATE TABLE after_third (id int)" >/dev/null
 OWN_DATA="$(psql_q "$EARLIER_DB" "SELECT to_regclass('public.after_third') IS NULL") / $(psql_q "$LIVE_DB" "SELECT to_regclass('public.after_third') IS NOT NULL")"
 [ "$OWN_DATA" = "t / t" ] || { echo "a table the preview's branch got after the push shouldn't be in the earlier push's copy (earlier absent / live present): $OWN_DATA"; exit 1; }
+# Its Redis too: a database of its own.
+redis_of() { curl -sS -b "$1" -H "Host: $2" "http://$API/env.txt" | sed -n 's/^REDIS_URL=//p'; }
+LIVE_REDIS=$(redis_of "$JAR" "$HOST")
+EARLIER_REDIS=$(redis_of "$EJAR" "$EARLIER_HOST")
+[ -n "$EARLIER_REDIS" ] && [ "$EARLIER_REDIS" != "$LIVE_REDIS" ] || { echo "the earlier push should have a Redis database of its own: '$EARLIER_REDIS' / '$LIVE_REDIS'"; exit 1; }
+OWN_DATA="$OWN_DATA; Redis its own"
+# And its search cluster (a branch of the preview's, masked as it is): the cluster its data key
+# names (`base64(<id>@<cluster>:<key>)`; every cluster answers at the node's one URL).
+es_of() { curl -sS -b "$1" -H "Host: $2" "http://$API/env.txt" | sed -n 's/^ELASTICSEARCH_API_KEY=//p' | python3 -c "import base64,sys; k=sys.stdin.read().strip(); print(base64.b64decode(k).decode().split(':')[0].rsplit('@',1)[-1] if k else '')"; }
+LIVE_ES=$(es_of "$JAR" "$HOST")
+EARLIER_ES=$(es_of "$EJAR" "$EARLIER_HOST")
+[ -n "$EARLIER_ES" ] && [ "$EARLIER_ES" != "$LIVE_ES" ] || { echo "the earlier push should have a search cluster of its own: '$EARLIER_ES' / '$LIVE_ES'"; exit 1; }
+OWN_DATA="$OWN_DATA, search its own"
 
 # Screenshots stayed on through the pushes: the page's change since the head before is known.
 VISUAL=""
@@ -1055,6 +1068,9 @@ TEARDOWN=$(sed 's/\x1b\[[0-9;]*m//g' "$HOME_DIR/rolld.log" | grep -c "the teardo
 PARENTS_OK=$( (api GET "/v1/redis/databases/$REDIS" | jq_ "d['id']"; api GET /v1/storage/buckets/assets | jq_ "d['name']"; api GET "/v1/nosql/databases/$NOSQL" | jq_ "d['id']"; api GET "/v1/search/clusters/$SEARCH" | jq_ "d['id']") | wc -l)
 SEARCH_BRANCH_GONE=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${ROLL_ADMIN_TOKEN:-}" "http://$API/v1/search/clusters/$BRANCH_SEARCH")
 [ "$SEARCH_BRANCH_GONE" = 404 ] || { echo "the search branch should be gone after landing ($SEARCH_BRANCH_GONE)"; exit 1; }
+# Nor an earlier push's copy of it.
+SEARCH_LEFT=$(api GET /v1/search/clusters | jq_ "len([c for c in (d if isinstance(d, list) else d.get('clusters', [])) if c['name'].startswith('pv-')])")
+[ "$SEARCH_LEFT" = 0 ] || { echo "no search cluster of the preview's should outlive it: $SEARCH_LEFT"; exit 1; }
 BRANCHES_LEFT=$(api GET /v1/redis/databases | jq_ "len([x for x in d if x['name'].startswith('pv-')])")
 # The Postgres branch and every earlier push's copy of it went with the preview.
 PG_LEFT=$(api GET "/v1/projects/$PG" | jq_ "len([b for b in d['branches'] if b['name'].startswith('pv-')])")
@@ -1070,7 +1086,7 @@ cat <<EOF
 | Change opened → preview ready ($(echo "$P" | jq_ "len(d['resources'])") branches made, the service deployed) | $((T1 - T0)) ms |
 | The preview's bucket key: its branch / production's bucket | $OWN_LS / $PARENT_LS |
 | … step by step (its timeline: data, setup, deploy, checks) | $STEPS |
-| An earlier push's own copy of the data: a table made after it is absent there / present in the preview's | $OWN_DATA |
+| An earlier push's own copy of the data: a table made after it is absent there / present in the preview's; its Redis and search | $OWN_DATA |
 | What a follower of the events hears (\`GET /v1/previews/events\`, roll MCP's Events) | $EVENTS |
 | Search: a sync of the parent's connector on the parent / asked of the branch (inherited, waits for adoption) | $PSTATE / $BSTATE |
 | Parent bucket bytes / the branch's own bytes after writing 1 MiB / objects the branch sees | $PARENT_OBJECTS / $BRANCH_OBJECTS / $BRANCH_SEES |
@@ -1125,5 +1141,5 @@ cat <<EOF
 | Search: products.name in the branch / in the parent / the branch's term dictionary | $ES_READ / $ES_PARENT / $ES_TERMS |
 | Search: the branch's data-only ELASTICSEARCH_API_KEY reads / makes a key | $KEY_READ / $KEY_MINT |
 | Search: an address in an array of objects / under a dotted key / in an index named logs.2024, in the branch | $ES_DEEP / $ES_DOTTED |
-| After landing: parents present / preview Redis branches left / Postgres branches left (earlier pushes' copies too) | $PARENTS_OK of 4 / $BRANCHES_LEFT / $PG_LEFT |
+| After landing: parents present / preview Redis branches left / Postgres branches left / search clusters left (earlier pushes' copies too) | $PARENTS_OK of 4 / $BRANCHES_LEFT / $PG_LEFT / $SEARCH_LEFT |
 EOF

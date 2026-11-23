@@ -790,7 +790,8 @@ fn visual_line(v: &crate::model::PreviewVisualChange) -> String {
     }
 }
 
-/// The comment's links to earlier pushes (before and after, on the same data).
+/// The comment's links to earlier pushes (before and after), each saying whether it runs on its
+/// own copy of the data or the preview's.
 fn earlier_line(earlier: &[crate::model::PreviewEarlier]) -> Option<String> {
     let links: Vec<String> = earlier
         .iter()
@@ -798,10 +799,11 @@ fn earlier_line(earlier: &[crate::model::PreviewEarlier]) -> Option<String> {
         .take(3)
         .map(|x| {
             let head: String = x.head.strip_prefix("cs_").unwrap_or(&x.head).chars().filter(|c| c.is_ascii_alphanumeric()).take(10).collect();
-            format!("[{} at `{head}`]({})", x.service.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect::<String>(), x.url)
+            let data = if x.own_data { "its own data" } else { "the preview's data" };
+            format!("[{} at `{head}`]({}) (on {data})", x.service.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect::<String>(), x.url)
         })
         .collect();
-    (!links.is_empty()).then(|| format!("\nEarlier pushes, on the same data: {}.\n", links.join(", ")))
+    (!links.is_empty()).then(|| format!("\nEarlier pushes: {}.\n", links.join(", ")))
 }
 
 /// The comment's warning that the preview is about to go (its TTL, or a keep, running out).
@@ -1133,8 +1135,8 @@ mod preview_tests {
         let risks = risks_line(&["drops column public.`x`.y: the version running while it deploys may still read it".into()]);
         assert_eq!(risks, "**Migration risks** (1):\n- `drops column public.'x'.y: the version running while it deploys may still read it`\n\n", "a name can't end its code span");
         assert!(expiry_line(1_794_600_000_000).is_some_and(|l| l.contains("goes at 2026-11-13 20:00 UTC")));
-        let earlier = |url: &str| crate::model::PreviewEarlier { service: "web".into(), head: "cs_1a2b3c4d5e6f".into(), url: url.into() };
-        assert_eq!(earlier_line(&[earlier("https://web-1a2b3c4d5e-pr7-shop.preview.roll.site")]).as_deref(), Some("\nEarlier pushes, on the same data: [web at `1a2b3c4d5e`](https://web-1a2b3c4d5e-pr7-shop.preview.roll.site).\n"));
+        let earlier = |url: &str| crate::model::PreviewEarlier { service: "web".into(), head: "cs_1a2b3c4d5e6f".into(), url: url.into(), own_data: true };
+        assert_eq!(earlier_line(&[earlier("https://web-1a2b3c4d5e-pr7-shop.preview.roll.site")]).as_deref(), Some("\nEarlier pushes: [web at `1a2b3c4d5e`](https://web-1a2b3c4d5e-pr7-shop.preview.roll.site) (on its own data).\n"));
         assert_eq!(earlier_line(&[earlier("javascript:alert(1)"), earlier("https://x/a)b")]), None, "only plain links");
         let v = |percent: f64| crate::model::PreviewVisualChange { since: "cs_1a2b3c4d5e6f".into(), percent, phone_percent: None };
         assert_eq!(visual_line(&v(12.34)), "The page changed 12.3% since `1a2b3c4d5e` (its share of pixels).\n\n");

@@ -56,6 +56,7 @@ pub mod resp_cache;
 pub mod runtime;
 pub mod sandboxes;
 pub mod peering;
+pub mod signing;
 pub mod shell;
 pub mod spend;
 pub mod store;
@@ -325,6 +326,8 @@ pub struct Apps {
     pub(crate) peer_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// A failing peer's tries so far and when the minute's check may try it again.
     pub(crate) peer_backoff: Mutex<HashMap<String, (u32, i64)>>,
+    /// When each deployment URL's visit was last written down (a view's prune clock).
+    viewed_touched: Mutex<HashMap<String, std::time::Instant>>,
     /// When closed environments' CAs were last checked (each minute).
     intercepts_checked: std::sync::atomic::AtomicI64,
     /// Private environments' token hashes, by environment, as the owner last read or set them.
@@ -680,6 +683,7 @@ impl Apps {
             peer_status: Mutex::new(HashMap::new()),
             peer_locks: Mutex::new(HashMap::new()),
             peer_backoff: Mutex::new(HashMap::new()),
+            viewed_touched: Mutex::new(HashMap::new()),
             intercepts_checked: std::sync::atomic::AtomicI64::new(0),
             access: Mutex::new(HashMap::new()),
             access_gen: std::sync::atomic::AtomicU64::new(0),
@@ -4261,6 +4265,12 @@ impl Apps {
         // Waiting for its approvals: nothing of it runs (with the environment's values) before.
         if row.approvals > 0 && d.status == DeployStatus::Ready {
             return Err(Error::Conflict(format!("{dep} waits for {} approval(s): it runs once approved", row.approvals)));
+        }
+        // A view with values of its own is kept while its URL is visited (once an hour is enough).
+        let touch = { let mut seen = self.viewed_touched.lock(); let stale = seen.get(dep).is_none_or(|at| at.elapsed() > Duration::from_secs(3600)); if stale { if seen.len() > 4096 { seen.retain(|_, at| at.elapsed() < Duration::from_secs(3600)); } seen.insert(dep.to_string(), std::time::Instant::now()); } stale };
+        if touch {
+            let d = dep.to_string();
+            let _ = self.db(move |s| s.touch_deploy_overrides(&d)).await;
         }
         // What the live state serves of it (the active one, a canary, one viewed by its URL), or
         // one made a minute ago: each made again would make a closed environment's placeholders.

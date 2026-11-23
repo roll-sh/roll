@@ -352,7 +352,7 @@ impl Secrets {
         type Made = Vec<(String, String, String, String)>;
         let (syncs, identities): (Made, Made) = self.db.read(|c| {
             Ok::<_, crate::Error>((
-                c.query("SELECT e.slug, s.path, s.id, s.kind FROM syncs s JOIN environments e ON e.id = s.env_id WHERE s.project_id = ? AND s.created_by = 'operator' ORDER BY s.id", [project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?,
+                c.query("SELECT e.slug, s.path, s.id, s.kind FROM syncs s JOIN environments e ON e.id = s.env_id AND e.forgotten_at IS NULL WHERE s.project_id = ? AND s.created_by = 'operator' ORDER BY s.id", [project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?,
                 c.query("SELECT '', '/', id, name FROM identities WHERE project_id = ? AND created_by = 'operator' ORDER BY id", [project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?,
             ))
         })?;

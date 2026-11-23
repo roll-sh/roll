@@ -306,11 +306,12 @@ pub(crate) fn insert(
 }
 
 pub(crate) fn by_slug(c: &Conn<'_>, project: &str, slug: &str) -> Result<EnvRow> {
-    c.query_row(&format!("SELECT {ENV_SELECT} FROM environments WHERE project_id = ? AND slug = ?"), [project, slug], env_row)
+    c.query_row(&format!("SELECT {ENV_SELECT} FROM environments WHERE project_id = ? AND slug = ? AND forgotten_at IS NULL"), [project, slug], env_row)
         .optional()?
         .ok_or_else(|| Error::NotFound(format!("no environment {slug}")))
 }
 
+/// By id, deleted or not: for rows that name it (a base, a request, a value's environment).
 pub(crate) fn by_id(c: &Conn<'_>, id: &str) -> Result<EnvRow> {
     c.query_row(&format!("SELECT {ENV_SELECT} FROM environments WHERE id = ?"), [id], env_row)
         .optional()?
@@ -318,7 +319,19 @@ pub(crate) fn by_id(c: &Conn<'_>, id: &str) -> Result<EnvRow> {
 }
 
 pub(crate) fn all(c: &Conn<'_>, project: &str) -> Result<Vec<EnvRow>> {
-    Ok(c.query(&format!("SELECT {ENV_SELECT} FROM environments WHERE project_id = ? ORDER BY position, created_at"), [project], env_row)?)
+    Ok(c.query(&format!("SELECT {ENV_SELECT} FROM environments WHERE project_id = ? AND forgotten_at IS NULL ORDER BY position, created_at"), [project], env_row)?)
+}
+
+/// 409 when `slug` is taken: by an environment, or by a deleted one in its recovery window (its
+/// slug stays its own until the purge, so a recovery never collides and `${slug.X}` never starts
+/// reading another environment's values meanwhile).
+pub(crate) fn free(c: &Conn<'_>, project: &str, slug: &str) -> Result<()> {
+    let row: Option<Option<i64>> = c.query_row("SELECT purge_at FROM environments WHERE project_id = ? AND slug = ?", [project, slug], |r| r.get(0)).optional()?;
+    match row {
+        None => Ok(()),
+        Some(None) => Err(Error::Conflict("conflict", format!("an environment named {slug} exists"))),
+        Some(Some(at)) => Err(Error::Conflict("conflict", format!("{slug} was deleted and is kept until {}: recover it (POST …/environments/{slug}/recover) or pick another name until then", crate::deleted::utc(at)))),
+    }
 }
 
 fn view(c: &Conn<'_>, rows: Vec<EnvRow>) -> Result<Vec<Environment>> {
@@ -520,9 +533,7 @@ impl Secrets {
         self.check_types(project, &items)?;
         let items = self.prepare(project, &new.slug, &items, caller)?;
         let env = self.db.write(|c| {
-            if by_slug(c, project, &new.slug).is_ok() {
-                return Err(Error::Conflict("conflict", format!("an environment named {} exists", new.slug)));
-            }
+            free(c, project, &new.slug)?;
             let base = match &new.base {
                 Some(b) => {
                     let b = by_slug(c, project, b)?;
@@ -590,9 +601,7 @@ impl Secrets {
                 env.max_age_days = d;
             }
             if let Some(new) = change.slug.as_deref().filter(|s| *s != slug) {
-                if by_slug(c, project, new).is_ok() {
-                    return Err(Error::Conflict("conflict", format!("an environment named {new} exists")));
-                }
+                free(c, project, new)?;
                 c.execute("UPDATE environments SET slug = ? WHERE id = ?", [new, &env.id])?;
                 env.slug = new.to_string();
                 rewrite_references(c, &dek, self.keys()?, project, slug, new, caller, now)?;
@@ -659,43 +668,52 @@ impl Secrets {
             }
             c.execute("UPDATE environments SET protected = ?, approvals = ?, approvers = ? WHERE id = ?", params![p.protected as i64, approvals, json(&approvers), env.id])?;
             let summary = if p.protected { format!("protected, {approvals} approval{}", if approvals == 1 { "" } else { "s" }) } else { "unprotected".into() };
-            audit::record(c, self.keys()?, project, caller, "environment.policy", Some(slug), None, &[], &summary, now)?;
+            // Health's `production_unprotected`, as it starts.
+            if slug == crate::PRODUCTION && env.protected && !p.protected {
+                let event = crate::events::Event::new(crate::events::Kind::ProductionUnprotected, serde_json::json!({}));
+                audit::record_event(c, self.keys()?, project, caller, "environment.policy", Some(slug), None, &[], &summary, now, event)?;
+            } else {
+                audit::record(c, self.keys()?, project, caller, "environment.policy", Some(slug), None, &[], &summary, now)?;
+            }
             let env = by_id(c, &env.id)?;
             one(c, env)
         })
     }
 
-    /// Delete an environment and everything in it, revoking its leases first.
-    pub fn delete_environment(&self, project: &str, slug: &str, confirm: Option<&str>, caller: &Caller) -> Result<()> {
+    /// Delete an environment. An ephemeral one goes at once, with everything in it (its leases
+    /// revoked first). A standard one is kept for the recovery window (deleted_envs.rs): asked to
+    /// confirm with `?confirm=<slug>` when it's protected or something else reads it (the 409
+    /// names what breaks), and, where its policy asks for approvals, opened as a change request.
+    pub fn delete_environment(&self, project: &str, slug: &str, confirm: Option<&str>, caller: &Caller) -> Result<crate::deleted_envs::Deletion> {
         caller.need(Action::Delete, &Scope::env(project, slug))?;
-        self.project(project)?;
+        let dek = self.project(project)?;
         let env = self.db.read(|c| by_slug(c, project, slug))?;
-        if env.protected && confirm != Some(slug) {
-            return Err(Error::BadRequest(format!("{slug} is protected: pass ?confirm={slug} to delete it")));
+        if env.kind == Kind::Ephemeral {
+            self.drop_ephemeral(project, &env, &format!("deleted ephemeral environment {slug}"), caller)?;
+            return Ok(crate::deleted_envs::Deletion::Erased);
         }
-        self.revoke_leases_where("env_id = ?", &env.id);
-        let managed = self.managed_where("env_id = ?", &env.id);
+        self.db.read(|c| deletable(c, project, &env))?;
+        let breaks = self.db.read(|c| crate::deleted_envs::breaks(c, &dek, &env))?;
+        if (env.protected || !breaks.is_empty()) && confirm != Some(slug) {
+            return Err(Error::Conflict("confirm_required", crate::deleted_envs::refusal(&env, &breaks, self.window_days())));
+        }
+        if env.needs_request() {
+            return Ok(crate::deleted_envs::Deletion::Requested(Box::new(self.request_env_delete(project, &env, caller)?)));
+        }
+        self.forget_environment(project, &env, caller, &|_| Ok(()))
+    }
+
+    /// An ephemeral environment and everything in it, at once (its leases revoked first).
+    pub(crate) fn drop_ephemeral(&self, project: &str, e: &EnvRow, summary: &str, caller: &Caller) -> Result<()> {
+        self.revoke_leases_where("env_id = ?", &e.id);
+        let managed = self.managed_where("env_id = ?", &e.id);
         let now = self.db.now_ms()?;
-        let done = self.db.write(|c| {
-            let env = by_slug(c, project, slug)?;
-            if env.kind == Kind::Standard {
-                let standard: i64 = c.query_row("SELECT COUNT(*) FROM environments WHERE project_id = ? AND kind = 'standard'", [project], |r| r.get(0))?;
-                if standard <= 1 {
-                    return Err(Error::Conflict("last_environment", "a project keeps at least one environment".into()));
-                }
-                let dependants: i64 = c.query_row("SELECT COUNT(*) FROM environments WHERE base_id = ?", [&env.id], |r| r.get(0))?;
-                if dependants > 0 {
-                    return Err(Error::Conflict("conflict", format!("{dependants} ephemeral environment(s) are based on {slug}: delete them first")));
-                }
-            }
-            drop_env(c, &env)?;
-            audit::record(c, self.keys()?, project, caller, "environment.delete", Some(slug), None, &[], &format!("deleted environment {slug}"), now)?;
-            Ok(())
-        });
-        if done.is_ok() {
-            self.revoke_gone(project, managed);
-        }
-        done
+        self.db.write(|c| {
+            drop_env(c, e)?;
+            audit::record(c, self.keys()?, project, caller, "environment.delete", Some(&e.slug), None, &[], summary, now)
+        })?;
+        self.revoke_gone(project, managed);
+        Ok(())
     }
 
     /// Delete every ephemeral environment with label `k=v`. Returns their slugs.
@@ -709,14 +727,7 @@ impl Secrets {
         }
         let mut deleted = vec![];
         for e in doomed {
-            self.revoke_leases_where("env_id = ?", &e.id);
-            let managed = self.managed_where("env_id = ?", &e.id);
-            let now = self.db.now_ms()?;
-            self.db.write(|c| {
-                drop_env(c, &e)?;
-                audit::record(c, self.keys()?, project, caller, "environment.delete", Some(&e.slug), None, &[], &format!("deleted ephemeral environment {} ({k}={v})", e.slug), now)
-            })?;
-            self.revoke_gone(project, managed);
+            self.drop_ephemeral(project, &e, &format!("deleted ephemeral environment {} ({k}={v})", e.slug), caller)?;
             deleted.push(e.slug);
         }
         Ok(deleted)
@@ -889,12 +900,28 @@ pub(crate) fn ensure_folders(c: &Conn<'_>, env_id: &str, path: &str, now: i64) -
     Ok(())
 }
 
-fn drop_env(c: &Conn<'_>, env: &EnvRow) -> Result<()> {
+/// Whether a standard environment may go: not the project's last, and no ephemeral environment
+/// based on it.
+pub(crate) fn deletable(c: &Conn<'_>, project: &str, env: &EnvRow) -> Result<()> {
+    let standard: i64 = c.query_row("SELECT COUNT(*) FROM environments WHERE project_id = ? AND kind = 'standard' AND forgotten_at IS NULL", [project], |r| r.get(0))?;
+    if standard <= 1 {
+        return Err(Error::Conflict("last_environment", "a project keeps at least one environment".into()));
+    }
+    let dependants: i64 = c.query_row("SELECT COUNT(*) FROM environments WHERE base_id = ? AND forgotten_at IS NULL", [&env.id], |r| r.get(0))?;
+    if dependants > 0 {
+        return Err(Error::Conflict("conflict", format!("{dependants} ephemeral environment(s) are based on {}: delete them first", env.slug)));
+    }
+    Ok(())
+}
+
+/// Every row of an environment (an ephemeral one's delete, a standard one's purge). Its decoys
+/// stay: they end, and their tokens are revoked, once their keys are gone (decoys.rs).
+pub(crate) fn drop_env(c: &Conn<'_>, env: &EnvRow) -> Result<()> {
     // Its keys' hosts and its placeholders (a preview's, torn down with it) end with it, and so
     // do their consumers' CAs naming those hosts, at their next ask.
     c.execute(&format!("{}env_id = ?)", crate::intercept::RECHECK_HOLDERS), [&env.id])?;
     c.execute("DELETE FROM key_hosts WHERE secret_id IN (SELECT id FROM secrets WHERE env_id = ?)", [&env.id])?;
-    for t in ["secrets", "versions", "requests", "leases", "folders", "imports", "exports", "folder_policies", "placeholders"] {
+    for t in ["secrets", "versions", "requests", "leases", "folders", "imports", "exports", "folder_policies", "placeholders", "freezes", "syncs", "notices", "read_bursts", "shares", "value_requests"] {
         c.execute(&format!("DELETE FROM {t} WHERE env_id = ?"), [&env.id])?;
     }
     c.execute("DELETE FROM imports WHERE from_env_id = ?", [&env.id])?;

@@ -66,6 +66,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route("/v1/apps/services/{id}/changes", get(changes))
         .route("/v1/apps/projects/{project}/notifications", get(targets).post(add_target))
         .route("/v1/apps/projects/{project}/limits", get(limits).put(set_limits))
+        .route("/v1/apps/projects/{project}/signing", get(signing).put(set_signing).delete(delete_signing))
         .route("/v1/apps/projects/{project}/usage", get(project_usage))
         .route("/v1/apps/projects/{project}/drains", get(drains).post(add_drain))
         .route("/v1/apps/projects/{project}/export", post(export_project))
@@ -594,6 +595,22 @@ struct MonthQuery {
 /// A month's use by service and environment, with this month's projection.
 async fn project_usage(State(apps): S, Path(project): Path<String>, Query(q): Query<MonthQuery>) -> R {
     ok(apps.project_usage_view(&project, q.month.as_deref()).await?)
+}
+
+async fn signing(State(apps): S, Path(project): Path<String>) -> R {
+    ok(apps.signing(&project).await?)
+}
+
+async fn set_signing(State(apps): S, Path(project): Path<String>, ext: Extensions, b: Bytes) -> R {
+    let v = apps.set_signing(&project, body(&b)?).await?;
+    apps.audit("signing.set", "", "", actor(&ext), json!({ "project": project, "keys": v["keys"].as_array().map_or(0, Vec::len), "required": v["required"] })).await;
+    ok(v)
+}
+
+async fn delete_signing(State(apps): S, Path(project): Path<String>, ext: Extensions) -> R {
+    apps.delete_signing(&project).await?;
+    apps.audit("signing.removed", "", "", actor(&ext), json!({ "project": project })).await;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 async fn limits(State(apps): S, Path(project): Path<String>) -> R {
@@ -1254,6 +1271,20 @@ async fn promote(State(apps): S, Path((id, env)): Path<(String, String)>, ext: E
 
 async fn rollback(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>, ext: Extensions, headers: HeaderMap, b: Bytes) -> R {
     let o = with_override(body(&b)?, &headers)?;
+    // A view with values of its own (roll previews' earlier pushes): never live.
+    if let Some(vars) = o.get("variables").filter(|v| !v.is_null()) {
+        if o.get("no_traffic") != Some(&Value::Bool(true)) {
+            return Err(Error::BadRequest("variables go with no_traffic: true (a view at its own URL; nothing live runs with them)".into()));
+        }
+        let vars: std::collections::BTreeMap<String, String> = serde_json::from_value(vars.clone()).map_err(|_| Error::BadRequest("variables is {NAME: value}".into()))?;
+        let names: Vec<String> = vars.keys().cloned().collect();
+        let d = apps.rollback_view(&id, &env, &dep, actor(&ext), vars).await?;
+        apps.audit("deploy.view", &id, &env, actor(&ext), json!({ "of": dep, "deployment": d.id, "variables": names })).await;
+        return Ok((StatusCode::ACCEPTED, Json(d)).into_response());
+    }
+    if o.get("no_traffic").is_some() {
+        return Err(Error::BadRequest("no_traffic on a rollback makes a view, with variables of its own".into()));
+    }
     let (keep, over) = (o.get("keep_variables").and_then(Value::as_bool).unwrap_or(false), o.get("override").and_then(Value::as_bool).unwrap_or(false));
     let d = apps.rollback(&id, &env, &dep, actor(&ext), keep, over).await?;
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())

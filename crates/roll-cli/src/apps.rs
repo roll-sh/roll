@@ -1122,6 +1122,16 @@ pub enum AppsCmd {
         /// With `--bucket`: where in it, `logs/web` (letters, digits, - _ . /).
         #[arg(long, requires = "bucket")]
         prefix: Option<String>,
+        /// Add a drain into a roll search cluster on the project: its own data stream
+        /// (`logs-roll.apps-<namespace>`), ECS documents, an append-only key minted for it.
+        #[arg(long, value_name = "CLUSTER", conflicts_with_all = ["add", "bucket", "remove", "edit", "test"])]
+        search: Option<String>,
+        /// With `--search`: the data stream's namespace (a-z, 0-9, _).
+        #[arg(long, requires = "search")]
+        namespace: Option<String>,
+        /// With `--search`: how long the stream keeps them (1–3650 days, default 30).
+        #[arg(long, requires = "search")]
+        retention_days: Option<u32>,
         /// With `--add`: how its lines go: `ndjson` (the default, signed), `otlp` (OpenTelemetry
         /// logs over OTLP/HTTP JSON) or `syslog` (RFC 5424 over TLS).
         #[arg(long, requires = "add", value_parser = ["ndjson", "otlp", "syslog", "s3"])]
@@ -1241,6 +1251,21 @@ pub enum AppsCmd {
         alert: Option<f64>,
         #[arg(long)]
         hard: Option<f64>,
+    },
+    /// The project's image signing rule (Binary Authorization): `--key cosign.pub` (repeated)
+    /// requires its image services' images to carry a cosign signature by one of them,
+    /// `--not-required` keeps the keys without enforcing, `--remove` drops the rule; alone, it
+    /// shows it. Admin.
+    Signing {
+        #[command(flatten)]
+        target: Target,
+        /// A public key file in PEM (cosign generate-key-pair's cosign.pub).
+        #[arg(long = "key", value_name = "FILE", conflicts_with = "remove")]
+        keys: Vec<PathBuf>,
+        #[arg(long, requires = "keys")]
+        not_required: bool,
+        #[arg(long)]
+        remove: bool,
     },
     /// This month's use and what it costs.
     Usage {
@@ -4600,9 +4625,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Drains { target, add, bucket, prefix, format, source, only_env, only_service, previews, every_env, every_service, header, edit, test, remove } => {
+        AppsCmd::Drains { target, add, bucket, prefix, search, namespace, retention_days, format, source, only_env, only_service, previews, every_env, every_service, header, edit, test, remove } => {
             let given = source.is_some() || !only_env.is_empty() || !only_service.is_empty() || previews.is_some() || !header.is_empty();
-            if given && add.is_none() && edit.is_none() && bucket.is_none() {
+            if given && add.is_none() && edit.is_none() && bucket.is_none() && search.is_none() {
                 bail!("--source, --only-env, --only-service, --previews and --header go with --add or --edit");
             }
             let svc = service(api, &target).await?;
@@ -4652,6 +4677,20 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 let d = api.call(reqwest::Method::PATCH, &format!("{path}/{}", enc(&id)), Some(Value::Object(settings))).await?;
                 if !json_out {
                     println!("{}", row(&d));
+                    return Ok(());
+                }
+                d
+            } else if let Some(c) = search {
+                settings.insert("search".into(), json!(c));
+                if let Some(n) = namespace {
+                    settings.insert("namespace".into(), json!(n));
+                }
+                if let Some(d) = retention_days {
+                    settings.insert("retention_days".into(), json!(d));
+                }
+                let d = api.post(&path, Value::Object(settings)).await?;
+                if !json_out {
+                    println!("{}  into {}", row(&d), s(&d["stream"]));
                     return Ok(());
                 }
                 d
@@ -4853,6 +4892,29 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 }
                 json!({ "page": p, "incidents": inc["incidents"] })
             }
+        }
+        AppsCmd::Signing { target, keys, not_required, remove } => {
+            let svc = service(api, &target).await?;
+            let path = format!("/v1/apps/projects/{}/signing", enc(&s(&svc["project"])));
+            let v = if remove {
+                api.call(reqwest::Method::DELETE, &path, None).await?;
+                json!({ "keys": [], "required": false })
+            } else if !keys.is_empty() {
+                let pems = keys.iter().map(|k| std::fs::read_to_string(k).with_context(|| format!("reading {}", k.display()))).collect::<anyhow::Result<Vec<_>>>()?;
+                api.call(reqwest::Method::PUT, &path, Some(json!({ "keys": pems, "required": !not_required }))).await?
+            } else {
+                api.get(&path).await?
+            };
+            if !json_out {
+                let n = v["keys"].as_array().map_or(0, Vec::len);
+                println!("{}", match (n, v["required"].as_bool().unwrap_or(false)) {
+                    (0, _) => "no signing rule: any image deploys".to_string(),
+                    (n, true) => format!("image services' images must be signed by one of {n} key(s)"),
+                    (n, false) => format!("{n} key(s) kept, not required"),
+                });
+                return Ok(());
+            }
+            v
         }
         AppsCmd::Limits { target, alert, hard } => {
             let svc = service(api, &target).await?;
