@@ -9,7 +9,7 @@ use roll_auth::GrantKind;
 use roll_auth::scope::Scope;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 mod device;
 pub use device::{DEVICE_TTL_MS, DeviceRequest, normalize_user_code, show_user_code};
@@ -1764,6 +1764,44 @@ impl Store {
         sql.push_str(" ORDER BY at DESC, id DESC LIMIT ?");
         args.push(code_sql::Value::Int(limit));
         Ok(self.db.read(|c| c.query(&sql, args.as_slice(), audit_row))?)
+    }
+
+    /// How agents used roll's MCP server since `since` (audit rows that name a tool): per tool
+    /// (calls, refused, failed, average and longest duration, the last call), per connection (the
+    /// operator's own as `grant: null`) and per day (UTC). `grants`: only these connections' (a
+    /// person's own); `None`, everyone's.
+    pub fn tool_activity(&self, since: i64, grants: Option<&[String]>) -> Result<Value> {
+        if grants.is_some_and(<[String]>::is_empty) {
+            return Ok(json!({ "since": since, "calls": 0, "tools": [], "connections": [], "days": [] }));
+        }
+        let mut filter = String::from("at >= ? AND tool IS NOT NULL");
+        let mut args: Vec<code_sql::Value> = vec![code_sql::Value::Int(since)];
+        if let Some(ids) = grants {
+            filter.push_str(&format!(" AND grant_id IN ({})", vec!["?"; ids.len()].join(", ")));
+            args.extend(ids.iter().map(|i| code_sql::Value::Text(i.clone())));
+        }
+        let counts = "COUNT(*), SUM(CASE WHEN decision = 'deny' THEN 1 ELSE 0 END), SUM(CASE WHEN decision <> 'deny' AND status >= 400 THEN 1 ELSE 0 END)";
+        self.db.read(|c| {
+            let tools = c.query(
+                &format!("SELECT tool, {counts}, CAST(AVG(duration_ms) AS INTEGER), MAX(duration_ms), MAX(at) FROM audit WHERE {filter} GROUP BY tool ORDER BY COUNT(*) DESC, tool LIMIT 200"),
+                args.as_slice(),
+                |r| Ok(json!({ "tool": r.get::<_, String>(0)?, "calls": r.get::<_, i64>(1)?, "denied": r.get::<_, i64>(2)?, "failed": r.get::<_, i64>(3)?, "avg_ms": r.get::<_, i64>(4)?, "max_ms": r.get::<_, i64>(5)?, "last_at": r.get::<_, i64>(6)? })),
+            )?;
+            let connections = c.query(
+                &format!("SELECT grant_id, MAX(grant_name), {counts}, COUNT(DISTINCT tool), MAX(at) FROM audit WHERE {filter} GROUP BY grant_id ORDER BY COUNT(*) DESC LIMIT 100"),
+                args.as_slice(),
+                |r| Ok(json!({ "grant": r.get::<_, Option<String>>(0)?, "name": r.get::<_, Option<String>>(1)?, "calls": r.get::<_, i64>(2)?, "denied": r.get::<_, i64>(3)?, "failed": r.get::<_, i64>(4)?, "tools": r.get::<_, i64>(5)?, "last_at": r.get::<_, i64>(6)? })),
+            )?;
+            let days = c.query(
+                &format!("SELECT at / 86400000, {counts} FROM audit WHERE {filter} GROUP BY at / 86400000 ORDER BY at / 86400000"),
+                args.as_slice(),
+                |r| Ok(json!({ "day": r.get::<_, i64>(0)? * 86_400_000, "calls": r.get::<_, i64>(1)?, "denied": r.get::<_, i64>(2)?, "failed": r.get::<_, i64>(3)? })),
+            )?;
+            // The days hold every call (the tool and connection lists are cut at 200 and 100).
+            let calls: i64 = days.iter().filter_map(|d| d["calls"].as_i64()).sum();
+            Ok::<_, code_sql::Error>(json!({ "since": since, "calls": calls, "tools": tools, "connections": connections, "days": days }))
+        })
+        .map_err(Into::into)
     }
 
     /// What a grant's requests that ran since `since` were about, by product, action and resource
