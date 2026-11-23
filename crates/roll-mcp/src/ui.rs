@@ -54,8 +54,8 @@ pub fn mark_pending(name: &str, args: &Value, result: &mut Value, has: impl Fn(&
         return;
     }
     let s = &result["structuredContent"];
-    let again = if s["status"] == "approval_pending" && s["approval"].is_string() {
-        has("access_wait_approval").then(|| ("access_wait_approval", json!({ "approval_id": s["approval"], "wait": 20 })))
+    let again = if let Some(approval) = crate::waiting_approval(s) {
+        has("access_wait_approval").then(|| ("access_wait_approval", json!({ "approval_id": approval, "wait": 20 })))
     } else {
         settles(name).filter(|over| !over(s)).map(|_| (name, short_wait(name, args)))
     };
@@ -146,7 +146,7 @@ mod tests {
         mark_pending("tasks_wait_run", &json!({ "id": "run_1", "timeout": "5m" }), &mut run, |_| true);
         assert_eq!(run["_meta"][PENDING]["arguments"], json!({ "id": "run_1", "timeout": "10s" }));
         // A call waiting for a person: its approval, read again while the connection can.
-        let pending = json!({ "structuredContent": { "status": "approval_pending", "approval": "apr_1" } });
+        let pending = json!({ "structuredContent": { "status": "approval_pending", "approval": "apr_1", "http_status": 202 } });
         let (mut with, mut without) = (pending.clone(), pending);
         mark_pending("apps_deploy", &json!({}), &mut with, |_| true);
         assert_eq!(with["_meta"][PENDING], json!({ "tool": "access_wait_approval", "arguments": { "approval_id": "apr_1", "wait": 20 } }));

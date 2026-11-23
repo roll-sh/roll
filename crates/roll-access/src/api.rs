@@ -1431,7 +1431,8 @@ struct Feedback {
 /// (`agent_feedback`): the operator sees all of it, a person their own connections'. The words are
 /// a model's, maybe steered by what it read, so they're marked `outside` (lockdown withholds them),
 /// under the text fields lockdown knows (`title`: the task, `text`: what happened, `description`:
-/// what it expected). 20 an hour per connection.
+/// what it expected). `tool` is only a tool's name (letters, digits, `_`), so no model text rides
+/// past lockdown in it. 20 an hour per token (the operator's connections share one count).
 async fn feedback(State(a): S, ext: Extensions, Json(f): Json<Feedback>) -> crate::Result<Json<Value>> {
     let who = who(&a, &ext)?;
     let (key, grant, name, user) = match &who {
@@ -1440,8 +1441,9 @@ async fn feedback(State(a): S, ext: Extensions, Json(f): Json<Feedback>) -> crat
         Who::User(u) => (u.user.clone(), None, Some(u.handle.clone()), Some(u.user.clone())),
     };
     let fits = |v: &str, max: usize| !v.trim().is_empty() && v.chars().count() <= max;
-    if !fits(&f.task, 500) || !fits(&f.actual, 2000) || f.expected.as_deref().is_some_and(|e| e.chars().count() > 2000) || f.tool.as_deref().is_some_and(|t| t.chars().count() > 100) {
-        return Err(Error::BadRequest("task (1-500 characters) and actual (1-2,000) are required; expected up to 2,000; tool up to 100".into()));
+    let a_name = |t: &str| (1..=64).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+    if !fits(&f.task, 500) || !fits(&f.actual, 2000) || f.expected.as_deref().is_some_and(|e| e.chars().count() > 2000) || f.tool.as_deref().is_some_and(|t| !a_name(t)) {
+        return Err(Error::BadRequest("task (1-500 characters) and actual (1-2,000) are required; expected up to 2,000; tool is a tool's name (a-z, 0-9, _; up to 64)".into()));
     }
     let data = json!({
         "grant": grant, "name": name, "tool": f.tool, "title": f.task.trim(), "text": f.actual.trim(),
@@ -1449,7 +1451,7 @@ async fn feedback(State(a): S, ext: Extensions, Json(f): Json<Feedback>) -> crat
     });
     let seq = blocking(a, move |a| {
         if !a.store.bump_hourly(&format!("feedback:{key}"), code_sql::now_ms() / 3_600_000, 20)? {
-            return Err(Error::TooMany("20 feedback notes an hour per connection: thanks, the operator has plenty to go on".into()));
+            return Err(Error::TooMany("20 feedback notes an hour per token: thanks, the operator has plenty to go on".into()));
         }
         a.store.record_alert("agent_feedback", &data, user.as_deref())
     })

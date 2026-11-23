@@ -1079,8 +1079,9 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
   whatever its URL asks (the operator's own connection isn't held). `mcp_require_grant` takes agents only as
   grants: the admin token, an admin's session and an open daemon get a 401 with OAuth's challenge at
   `/v1/mcp` (as Stripe's MCP server refuses full-access keys from 2027-01-11), so no agent connects
-  past these controls. A quiet call (a completion, an MCP Events
-  webhook delivery reading for its grant) that `agents_ask` covers is refused, nobody asked. `oauth_clients` lists the
+  past these controls. A quiet call (a completion, `roll_find`'s lookups, an MCP Events
+  webhook delivery reading for its grant) that `agents_ask` covers is refused, nobody asked; only
+  the credential guard's scan, whose answer reaches nobody, isn't held. `oauth_clients` lists the
   OAuth clients that may connect (empty: any): a host (`claude.ai`, `*.example.com`), an exact
   `https://` URL, `localhost`, an app scheme (`cursor:`) or `device`; a registered client matches
   only when every redirect it registered does (docs/mcp.md, "Authorization"). One left out gets
