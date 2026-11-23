@@ -12446,11 +12446,39 @@ Every result hash equal to the base's (and so PostgreSQL's).
   batch fall in 64 of `orders_pkey`'s ~11,500 blocks, so consecutive keys seldom share one, and a
   larger batch would share few more. What a probe made beside its seek is gone (above); the seeks
   themselves (`find_block`, `Block::seek`) were left.
-- **Left**: item 3 (q01's aggregates under PGO) and the PGO total of the 22 follow in cand/a294-2;
-  in q09, the multi-get's block scans inside `Lookup::batch`, an inner numeric still decoded into
-  an `Arc` (a `Value` has no inline numeric; a row left to the executor's thread must hold real
-  values), the inner filters' recheck of the index condition over stored rows (`passes_with`
-  1.9%), and the orders probes' seeks.
+- **PGO and the 22** (one `tools/dist-pgo.sh` build, default training: instrumented build 2,183 s,
+  training 624 s; **p1** of cand/a294's code plus `Lanes::eval` kept out of line, below, dropped)
+  beside plain **b3** of the same code, one pass of the 22 in one hold: **95.27 G plain -> 87.86 G
+  PGO** (-7.8%), every hash equal (and round 12's: PostgreSQL's), VmHWM 1,686,128 / 1,677,600 kB,
+  foreign cores 1.34 / 1.66. From round 12: plain 96.61 -> 95.27 (-1.39%), PGO 89.81 -> 87.86
+  (-2.2%). With two PGO builds' ~0.9% spread, 87.1-88.7 G: **0.963-0.981x pgrust's PGO-built
+  90.4 G** (round 6's), the whole range under 89.0. q09 on PGO 6.835 G (plain 7.870). Against
+  plain, PGO is above on q12 +1.98%, q15 +1.12, q01 +0.74 (p3: -0.09, +0.36, +0.86): q12 and q15
+  moved without a change to their paths, inside the PGO builds' spread on them (1.9%, round 12).
+- **Item 3, q01's aggregates under PGO.** By function (precise samples scaled to the measured
+  counts, plain b2 against p1) the PGO excess (~55 M) is spread: `Lanes::eval` +35 M (out of line
+  in both builds here), `VB::eval` +29, `partial_chunk` +23, `fill_batch_with` +22 with
+  `Block::read` inlined (`Scan::position` out of line instead), `batch_run` -16, `Pre::decode`
+  level. Round 12's +45 M with `Lanes::eval` inlined into `partial_chunk` didn't go away with it
+  out of line (`#[inline(never)]`: q01 +0.74% against +0.86% at p3, inside the spread): dropped
+  (`~/.cache/a294/patches/lanes-eval-inline-never.patch`). Reading both builds' `Lanes::eval`,
+  the hottest loop (a numeric column's lane) was the same in both, and both loaded the column
+  Vec's pointer and length again for every row (the lane's pushes might have changed them).
+  **cand/a294-2** (on cand/a294): `node_lane` reads the column's values and nulls as slices:
+  plain q01 7.410 -> 7.389 G (-0.29 / -0.29%, b3 against b4, 2 pairs), q06 / q12 / q15 level.
+  Not PGO-built (no inlining or function boundary changed). The rest of q01's PGO excess is code
+  placement in `VB::eval`'s and the scan's loops (the filter's loop already reads slices).
+  Verification (`tools/quick-check.sh` on `249574be9`): clippy 16 warnings, none new in a changed
+  file; 447 tests in 28 binaries; crash_random seeds 1-3 x 2, power_cut_at_every_point; regress
+  51,148 / 51,150, 0 newly differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed. (A first
+  run stopped at regress: its reference container had been stopped by the machine's idle timer.)
+- **Left**: in q09 (b2's precise profile, M instructions of 7,875), the multi-get's block scans
+  inside `Lookup::batch` (~1,365), `truncate_row` of a batch's rows that are mostly NULL by now
+  (~228), `Vec::resize_with` writing the NULL runs, not inlined (~129), an inner numeric still
+  decoded into an `Arc` (a `Value` has no inline numeric; a row left to the executor's thread
+  must hold real values), the inner filters' recheck of the index condition over stored rows
+  (`passes_with` ~167), and the orders probes' seeks (`find_block`, `Block::seek`); q01's and
+  q15's PGO placement.
 
 ## Analytic CPU, round 12: the scans under PGO, stored compares with outer and own columns (agent 286)
 

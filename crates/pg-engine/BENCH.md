@@ -310,6 +310,51 @@ Foreign cores (the pairs' own reading): 2.63 / 1.87, 2.75 / 3.38, 2.34 / 1.98, 3
 1,655,808 kB, b1 1,653,760 kB. Cycles moved with the foreign load (q09 11.0-13.6 G a run) and decide
 nothing here.
 
+### The 22, plain b3 against PGO p1 (one pass each, one hold; G)
+
+b3: cand/a294's code (`0404e88c6`) plus `Lanes::eval` out of line (plain: the same code, the
+function was out of line already); p1: its PGO build. Foreign cores 1.34 / 1.66.
+
+| query | b3 plain | p1 PGO | PGO % |
+|---|---|---|---|
+| q01 | 7.410 | 7.465 | +0.74 |
+| q02 | 2.631 | 2.250 | -14.48 |
+| q03 | 4.149 | 3.670 | -11.56 |
+| q04 | 1.719 | 1.603 | -6.71 |
+| q05 | 3.123 | 2.752 | -11.89 |
+| q06 | 5.148 | 5.142 | -0.12 |
+| q07 | 3.523 | 2.985 | -15.27 |
+| q08 | 1.456 | 1.249 | -14.22 |
+| q09 | 7.870 | 6.835 | -13.15 |
+| q10 | 7.479 | 7.208 | -3.62 |
+| q11 | 0.837 | 0.731 | -12.71 |
+| q12 | 5.982 | 6.100 | +1.98 |
+| q13 | 4.126 | 3.677 | -10.87 |
+| q14 | 1.391 | 1.187 | -14.64 |
+| q15 | 4.691 | 4.744 | +1.12 |
+| q16 | 2.968 | 2.387 | -19.58 |
+| q17 | 5.277 | 4.715 | -10.65 |
+| q18 | 16.254 | 14.690 | -9.62 |
+| q19 | 0.477 | 0.439 | -7.88 |
+| q20 | 1.367 | 1.106 | -19.10 |
+| q21 | 6.762 | 6.375 | -5.72 |
+| q22 | 0.628 | 0.551 | -12.18 |
+| the 22 | 95.27 | 87.86 | -7.77 |
+
+Round 12: 96.61 plain, 89.81 PGO. With the PGO builds' ~0.9% spread p1 is 87.1-88.7 G: 0.963-0.981x
+pgrust's PGO-built 90.4 G (round 6's). VmHWM 1,686,128 / 1,677,600 kB.
+
+### cand/a294-2, b3 against b4 (plain dist, user instructions a run, G; % per pair, both orders)
+
+| query | b3 | b4 | % |
+|---|---|---|---|
+| q01 | 7.410 | 7.389 | -0.29 / -0.29 |
+| q06 | 5.148 | 5.148 | -0.01 / -0.01 |
+| q12 | 5.982 | 5.981 | -0.01 / -0.00 |
+| q15 | 4.691 | 4.690 | -0.02 / -0.01 |
+
+Foreign cores 3.31 / 1.31, 1.53 / 2.76.
+
 ## Analytic CPU, round 12: the scans under PGO, stored compares with outer and own columns (2026-11-22, agent 286)
 
 HANDOFF "Analytic CPU, round 12" has what changed. Plain dist builds (`tools/dist.sh`): **b0n**
