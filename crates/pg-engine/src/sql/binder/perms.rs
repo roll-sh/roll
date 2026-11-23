@@ -443,11 +443,15 @@ fn check_privileges(perms: &Perms, cat: &crate::catalog::Catalog, ctx: &ExecCtx)
             }
             let ok = if cols.is_empty() || cols.contains(&0) {
                 let all_cols = cols.contains(&0);
+                // (With a system catalog's built-in column grants: pg_subscription's.)
+                let builtin = crate::catalog::system::SysTable::by_oid(p.oid)
+                    .map_or(0, |t| t.columns().len() as i32);
                 let col_entries: Vec<i32> = cat
                     .acls
                     .iter()
                     .filter(|a| a.class == 1259 && a.oid == p.oid && a.sub > 0)
                     .map(|a| a.sub)
+                    .chain((1..=builtin).filter(|&c| crate::catalog::acl::sys_column_public(p.oid, c)))
                     .collect();
                 if all_cols {
                     let n = cat

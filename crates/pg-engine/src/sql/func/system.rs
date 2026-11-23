@@ -1979,9 +1979,29 @@ fn pg_get_expr(a: &[Value], c: &FnCtx) -> Result<Value> {
     let Value::Text(t) = &a[0] else {
         return Ok(Value::Null);
     };
-    // Partition bounds are stored as they print.
+    // Partition bounds are stored as they print (where a bound has no node tree).
     if t.starts_with("FOR VALUES") || &**t == "DEFAULT" {
         return Ok(Value::Text(t.clone()));
+    }
+    // A partition's bound (pg_class.relpartbound): get_rule_expr's PartitionBoundSpec.
+    if t.starts_with("{PARTITIONBOUNDSPEC ") {
+        // (The tree needs no relation: one given that isn't the partition's, the partition
+        // whose tree it is.)
+        use crate::catalog::system::{partition_bound_text, partition_bound_tree};
+        let cat = c.exec.catalog();
+        let rel = Some(oid_arg(&a[1]))
+            .filter(|&r| partition_bound_tree(&cat, r).as_deref() == Some(&**t))
+            .or_else(|| {
+                cat.tables
+                    .values()
+                    .filter(|x| x.partbound.is_some())
+                    .find(|x| partition_bound_tree(&cat, x.oid).as_deref() == Some(&**t))
+                    .map(|x| x.oid)
+            });
+        return Ok(match rel.and_then(|r| partition_bound_text(&cat, r, c.exec.fmt())) {
+            Some(s) => text(s),
+            None => Value::Text(t.clone()),
+        });
     }
     let pretty = a.get(2).is_some_and(|v| matches!(v, Value::Bool(true)));
     let cat = c.exec.catalog();
@@ -2782,8 +2802,33 @@ fn relation_updatability(c: &FnCtx, oid: u32, triggers: bool) -> Result<(i32, Ve
     }
     Ok(match cat.views.get(&oid) {
         Some(v) => crate::sql::binder::views::view_updatability(c.exec, v, triggers),
-        None => (0, Vec::new()),
+        None => match crate::catalog::system::SysTable::by_oid(oid) {
+            Some(st) if oid < crate::catalog::FIRST_USER_OID => sys_updatability(st),
+            _ => (0, Vec::new()),
+        },
     })
+}
+
+/// relation_is_updatable of a system relation, as PostgreSQL 18.6 answers it (with INSTEAD OF
+/// triggers counted or not: no system view has one): a catalog, as any table, every event
+/// and every column; of the system views, those auto-updatable over one catalog (pg_group,
+/// pg_stat_database_conflicts: their plain columns; information_schema.enabled_roles: a
+/// DELETE only, its column an expression) and pg_settings, whose unconditional INSTEAD rule
+/// takes an UPDATE (its columns a function's); every other view none.
+fn sys_updatability(st: crate::catalog::system::SysTable) -> (i32, Vec<bool>) {
+    let cols = st.columns();
+    if !st.is_view() {
+        return (28, vec![true; cols.len()]);
+    }
+    let pgc = st.schema() == crate::catalog::PG_CATALOG_OID;
+    let (mask, updatable): (i32, &[&str]) = match st.name() {
+        "pg_group" if pgc => (28, &["groname", "grosysid"]),
+        "pg_stat_database_conflicts" if pgc => (28, &["datid", "datname"]),
+        "pg_settings" if pgc => (4, &[]),
+        "enabled_roles" if !pgc => (16, &[]),
+        _ => (0, &[]),
+    };
+    (mask, cols.iter().map(|(n, _)| updatable.contains(&n.as_str())).collect())
 }
 fn pg_relation_is_updatable(a: &[Value], c: &FnCtx) -> Result<Value> {
     let triggers = matches!(a.get(1), Some(Value::Bool(true)));

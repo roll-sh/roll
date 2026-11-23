@@ -4775,16 +4775,20 @@ impl Binder<'_, '_> {
                     Relation::View(v)
                 }
                 Some(st) => {
+                    // (An information_schema column is of its domain, sql_identifier, ...:
+                    // pg_typeof shows it, CREATE TABLE AS takes it.)
+                    let domains = st.domains();
                     let cols: Vec<OutCol> = st
                         .columns()
                         .iter()
-                        .map(|(n, t)| OutCol {
+                        .zip(domains.iter())
+                        .map(|((n, t), d)| OutCol {
                             name: n.clone(),
                             ty: t.clone(),
                             table: st.oid(),
                             attnum: 0,
                             domain_array: None,
-                            domain: None,
+                            domain: *d,
                             collation: None,
                         })
                         .collect();

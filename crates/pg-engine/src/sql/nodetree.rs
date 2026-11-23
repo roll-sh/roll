@@ -498,7 +498,7 @@ fn coll_oid(c: &Coll) -> u32 {
 }
 
 /// The `[ bytes ]` of a datum (`outDatum`): a by-value one as the 8 bytes of its Datum.
-fn datum(
+pub(crate) fn datum(
     out: &mut String,
     v: &Value,
     ty: &DataType,
@@ -517,8 +517,9 @@ fn datum(
         bytes.resize(8, if neg { 0xff } else { 0 });
     }
     let _ = write!(out, "{len} [ ");
+    // (outDatum prints each byte as a signed char: 200 is -56.)
     for b in bytes {
-        let _ = write!(out, "{b} ");
+        let _ = write!(out, "{} ", b as i8);
     }
     out.push(']');
     Some(())

@@ -844,6 +844,13 @@ fn system_rel_acl(oid: u32) -> Acl {
             "pg_shadow" | "pg_file_settings" | "pg_hba_file_rules" | "pg_ident_file_mappings"
             | "pg_config" | "pg_replication_origin_status",
         ) => return acl,
+        // information_schema.sql grants these nothing (relacl NULL: the owner's only).
+        Some(
+            "_pg_foreign_data_wrappers" | "_pg_foreign_servers" | "_pg_foreign_table_columns"
+            | "_pg_foreign_tables" | "_pg_user_mappings" | "sql_parts" | "transforms",
+        ) if super::system::SysTable::by_oid(oid).is_some_and(|t| t.schema() == super::INFORMATION_SCHEMA_OID) => {
+            return acl;
+        }
         Some("pg_settings") => {
             acl.push(AclItem {
                 grantee: 0,
@@ -856,8 +863,9 @@ fn system_rel_acl(oid: u32) -> Acl {
         _ => {}
     }
     // pg_authid, pg_largeobject, pg_statistic, pg_statistic_ext_data and pg_user_mapping
-    // are readable by superusers only.
-    if !matches!(oid, 1260 | 2613 | 2619 | 3429 | 1418) {
+    // are readable by superusers only; pg_subscription's columns but subconninfo are
+    // PUBLIC's (`sys_column_public`), not the table.
+    if !matches!(oid, 1260 | 2613 | 2619 | 3429 | 1418 | 6100) {
         acl.push(AclItem {
             grantee: 0,
             grantor: BOOTSTRAP_SUPERUSER_OID,
@@ -866,6 +874,17 @@ fn system_rel_acl(oid: u32) -> Acl {
         });
     }
     acl
+}
+
+/// system_views.sql's `GRANT SELECT (oid, subdbid, ...) ON pg_subscription TO public`: every
+/// column but subconninfo (the connection string, which may hold a password). (Column
+/// privileges of a system catalog's no other relation has; a GRANT on one is stored.)
+pub(crate) fn sys_column_public(rel: u32, attnum: i32) -> bool {
+    rel == 6100
+        && attnum > 0
+        && super::system::SysTable::by_oid(rel)
+            .and_then(|t| t.columns().get(attnum as usize - 1).map(|c| c.0 != "subconninfo"))
+            .unwrap_or(false)
 }
 
 impl Catalog {
@@ -932,6 +951,7 @@ impl Catalog {
                 let (p, g) = self.aclmask(a, role, owner, db_owner);
                 (p & COLUMN_PRIVS, g & COLUMN_PRIVS)
             }
+            None if sys_column_public(rel, attnum) => (SELECT, 0),
             None => (0, 0),
         }
     }

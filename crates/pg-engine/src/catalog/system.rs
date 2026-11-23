@@ -784,6 +784,111 @@ pub fn partition_bound_text(
     Some(super::partition::bound_text(bound, &types, fmt))
 }
 
+/// A partition's pg_class.relpartbound: its PartitionBoundSpec as nodeToString writes it
+/// (pg_get_expr prints `partition_bound_text` for it). Each bound value is a Const of the
+/// partition key's type, typmod and collation (transformPartitionBoundValue); a range's are
+/// PartitionRangeDatums (kind -1 MINVALUE, 0 a value, 1 MAXVALUE); a default partition has
+/// its parent's strategy and no datums.
+pub fn partition_bound_tree(cat: &Catalog, oid: u32) -> Option<String> {
+    use super::partition::{PartBound, PartStrategy, RangeDatum};
+    use std::fmt::Write;
+    let t = cat.tables.get(&oid)?;
+    let bound = t.partbound.as_ref()?;
+    let parent = cat.tables.get(t.inherits.first()?)?;
+    let key = parent.partkey.as_ref()?;
+    let strategy = match key.strategy {
+        PartStrategy::List => 'l',
+        PartStrategy::Range => 'r',
+        PartStrategy::Hash => 'h',
+    };
+    // (partcollation: as pg_partitioned_table shows it.)
+    let coll = |i: usize| -> u32 {
+        let Some(k) = key.cols.get(i) else { return 0 };
+        match &k.collation {
+            _ if type_collation(&k.ty) == 0 => 0,
+            Some(n) => collation_oid_in(cat, n).unwrap_or(0),
+            None => k.col.map_or_else(|| type_collation(&k.ty), |c| column_collation_in(cat, &parent.columns[c])),
+        }
+    };
+    let enum_oid = |ty: u32, label: &str| {
+        cat.enums
+            .get(&ty)
+            .and_then(|e| e.labels.iter().position(|l| l == label).map(|i| e.label_oid(i)))
+            .unwrap_or(0)
+    };
+    let konst = |out: &mut String, v: &Value, i: usize| -> Option<()> {
+        let ty = &key.cols.get(i)?.ty;
+        let m = crate::types::ondisk::meta(ty)?;
+        let _ = write!(
+            out,
+            "{{CONST :consttype {} :consttypmod {} :constcollid {} :constlen {} :constbyval {} :constisnull {} :location -1 :constvalue ",
+            ty.oid(),
+            ty.typmod(),
+            coll(i),
+            m.len,
+            m.byval,
+            v.is_null()
+        );
+        if v.is_null() {
+            out.push_str("<>");
+        } else {
+            crate::sql::nodetree::datum(out, v, ty, &enum_oid)?;
+        }
+        out.push('}');
+        Some(())
+    };
+    let range = |out: &mut String, ds: &[RangeDatum]| -> Option<()> {
+        out.push('(');
+        for (i, d) in ds.iter().enumerate() {
+            if i > 0 {
+                out.push(' ');
+            }
+            match d {
+                RangeDatum::MinValue => out.push_str("{PARTITIONRANGEDATUM :kind -1 :value <> :location -1}"),
+                RangeDatum::MaxValue => out.push_str("{PARTITIONRANGEDATUM :kind 1 :value <> :location -1}"),
+                RangeDatum::Value(v) => {
+                    out.push_str("{PARTITIONRANGEDATUM :kind 0 :value ");
+                    konst(out, &v.0, i)?;
+                    out.push_str(" :location -1}");
+                }
+            }
+        }
+        out.push(')');
+        Some(())
+    };
+    let mut out = format!("{{PARTITIONBOUNDSPEC :strategy {strategy} :is_default {}", bound.is_default());
+    let (modulus, remainder) = match bound {
+        PartBound::Hash { modulus, remainder } => (*modulus, *remainder),
+        _ => (0, 0),
+    };
+    let _ = write!(out, " :modulus {modulus} :remainder {remainder} :listdatums ");
+    match bound {
+        PartBound::List(vals) if !vals.is_empty() => {
+            out.push('(');
+            for (i, d) in vals.iter().enumerate() {
+                if i > 0 {
+                    out.push(' ');
+                }
+                konst(&mut out, &d.0, 0)?;
+            }
+            out.push(')');
+        }
+        _ => out.push_str("<>"),
+    }
+    out.push_str(" :lowerdatums ");
+    match bound {
+        PartBound::Range { from, .. } => range(&mut out, from)?,
+        _ => out.push_str("<>"),
+    }
+    out.push_str(" :upperdatums ");
+    match bound {
+        PartBound::Range { to, .. } => range(&mut out, to)?,
+        _ => out.push_str("<>"),
+    }
+    out.push_str(" :location -1}");
+    Some(out)
+}
+
 /// The default operator class of `method` for a column of type `ty` (0 if none)
 /// (GetDefaultOpClass: an exact match, else the one default class whose input type the type
 /// is binary-coercible to, a preferred type's breaking a tie: cidr's is inet's).
@@ -3413,7 +3518,11 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
                         _ => N,
                     },
                     if has(PARTITION) && matches!(r.kind, 'r' | 'p' | 'f') {
-                        partition_bound_text(cat, r.oid, ctx.fmt()).map_or(N, nm)
+                        // (Its node tree; where a bound's value has no datum form here, the
+                        // text pg_get_expr shows.)
+                        partition_bound_tree(cat, r.oid)
+                            .or_else(|| partition_bound_text(cat, r.oid, ctx.fmt()))
+                            .map_or(N, nm)
                     } else {
                         N
                     },
