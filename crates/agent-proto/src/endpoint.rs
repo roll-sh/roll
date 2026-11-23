@@ -126,7 +126,7 @@ impl EndpointSpec {
         self.key_env = text(self.key_env.take());
         // roll secrets' own parser decides, on the value as sent (` roll://…` is an error, never
         // trimmed into a reference).
-        let roll = match self.key_ref.as_deref().map(roll_secrets::Reference::parse) {
+        let roll = match self.key_ref.as_deref().map(roll_secrets_ref::Reference::parse) {
             Some(Err(e)) => return Err(format!("key_ref: {e}")),
             Some(Ok(r)) => r.is_some(),
             None => false,
@@ -157,10 +157,10 @@ impl EndpointSpec {
         Ok(self)
     }
 
-    /// Its `key_ref` when that's a roll secrets reference (`roll_secrets::Reference::parse` says
-    /// so): the relay sends its value ([`RefKey`]); the daemon never reads it itself.
+    /// Its `key_ref` when that's a roll secrets reference (`roll_secrets::Reference::parse`,
+    /// from `roll-secrets-ref`, says so): the relay sends its value ([`RefKey`]); the daemon never reads it itself.
     pub fn roll_ref(&self) -> Option<&str> {
-        self.key_ref.as_deref().filter(|r| matches!(roll_secrets::Reference::parse(r), Ok(Some(_))))
+        self.key_ref.as_deref().filter(|r| matches!(roll_secrets_ref::Reference::parse(r), Ok(Some(_))))
     }
 
     /// Whether `provider` uses it.

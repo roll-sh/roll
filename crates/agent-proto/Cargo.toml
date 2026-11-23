@@ -13,8 +13,9 @@ base64.workspace = true
 curve25519-dalek.workspace = true
 hkdf.workspace = true
 rand.workspace = true
-# `EndpointSpec::check`: whether a key_ref is a roll secrets reference (`Reference::parse` only).
-roll-secrets.workspace = true
+# `EndpointSpec::check`: whether a key_ref is a roll secrets reference (`Reference::parse`, the
+# parser roll secrets re-exports, without roll secrets itself).
+roll-secrets-ref.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

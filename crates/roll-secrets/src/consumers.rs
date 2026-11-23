@@ -52,7 +52,7 @@
 //! resolves again when it moves.
 
 use crate::access::Caller;
-use crate::{Error, Secrets, Value, names};
+use crate::{Error, Secrets, Value};
 use roll_workspace::Kind;
 
 /// The product resource asking, as on the workspace canvas: its kind and ref, and whether it's an
@@ -230,50 +230,20 @@ impl From<Error> for Refusal {
     }
 }
 
-/// `roll://[PROJECT@]ENV[/folder…]/KEY`, as roll-cli reads it (docs/secrets.md, "References in files").
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Reference {
-    pub project: Option<String>,
-    pub env: String,
-    pub path: String,
-    pub key: String,
+/// `roll://[PROJECT@]ENV[/folder…]/KEY`, as roll-cli reads it (docs/secrets.md, "References in
+/// files"): `Reference::parse` is the one parser every product uses. It lives in
+/// `roll-secrets-ref` (no I/O) so the agents' wire can use it without roll secrets.
+pub use roll_secrets_ref::Reference;
+
+impl From<roll_secrets_ref::BadReference> for Refusal {
+    fn from(e: roll_secrets_ref::BadReference) -> Refusal {
+        Refusal::BadReference(e.0)
+    }
 }
 
-impl Reference {
-    /// `Some` for a `roll://` value, an error for a malformed one, `None` for anything else.
-    ///
-    /// Exact: a value that would be a reference only once trimmed or lowercased (` roll://…`,
-    /// `ROLL://…`) is an error, never plain text and never a reference, so a product's own
-    /// "is this a reference?" check can't disagree with what's resolved.
-    pub fn parse(text: &str) -> Result<Option<Reference>, Refusal> {
-        let bad = || Refusal::BadReference("a reference is roll://ENV/KEY, roll://ENV/folder/KEY or roll://PROJECT@ENV/KEY".into());
-        let Some(rest) = text.strip_prefix("roll://") else {
-            let t = text.trim_start();
-            if t.len() >= 7 && t.is_char_boundary(7) && t[..7].eq_ignore_ascii_case("roll://") {
-                return Err(Refusal::BadReference("a reference starts with roll:// exactly: no space before it, lowercase".into()));
-            }
-            return Ok(None);
-        };
-        if rest.trim_end().len() != rest.len() {
-            return Err(Refusal::BadReference("a reference has no space after it".into()));
-        }
-        let (project, rest) = match rest.split_once('@') {
-            Some((p, r)) if !p.is_empty() && !p.contains('/') => (Some(p.to_string()), r),
-            Some(_) => return Err(bad()),
-            None => (None, rest),
-        };
-        let parts: Vec<&str> = rest.split('/').collect();
-        if parts.len() < 2 || !parts.iter().all(|p| names::segment(p)) || names::slug(parts[0]).is_err() || names::key(parts[parts.len() - 1]).is_err() {
-            return Err(bad());
-        }
-        let path = if parts.len() == 2 { "/".to_string() } else { format!("/{}", parts[1..parts.len() - 1].join("/")) };
-        let path = names::path(&path).map_err(|_| bad())?;
-        Ok(Some(Reference { project, env: parts[0].to_string(), path, key: parts[parts.len() - 1].to_string() }))
-    }
-
-    fn required(text: &str) -> Result<Reference, Refusal> {
-        Reference::parse(text)?.ok_or_else(|| Refusal::BadReference("it doesn't start with roll://".into()))
-    }
+/// A reference, or why `text` isn't one.
+fn required(text: &str) -> Result<Reference, Refusal> {
+    Reference::parse(text)?.ok_or_else(|| Refusal::BadReference("it doesn't start with roll://".into()))
 }
 
 impl Secrets {
@@ -303,7 +273,7 @@ impl Secrets {
 
     fn bind(&self, resource: &ResourceRef, reference: &str, caller: &Caller, runtime_env: Option<&str>) -> Result<Maker, Refusal> {
         let by = self.maker_of(caller)?;
-        let r = Reference::required(reference)?;
+        let r = required(reference)?;
         let project = self.project_for(resource, r.project.as_deref())?;
         self.may_reveal_for(&project, &r, caller)?;
         let maker = match runtime_env {
@@ -333,7 +303,7 @@ impl Secrets {
     /// binding then reads its one environment as the resource's runtime, named
     /// `<resource> (runtime read for <maker>)`, while the maker still reaches the project.
     fn as_maker(&self, resource: &ResourceRef, reference: &str, maker: &Maker) -> Result<(String, Reference, Caller), Refusal> {
-        let r = Reference::required(reference)?;
+        let r = required(reference)?;
         let project = self.project_for(resource, r.project.as_deref())?;
         let (by, runtime_env) = maker.parts();
         let gone = || Refusal::MakerUnreachable(format!("{by}, who chose it, can no longer reveal {}:{} or can no longer sign in", r.env, r.path));
@@ -368,7 +338,7 @@ impl Secrets {
 
     /// `reference`'s value for `resource`, read as described in the module doc and audited.
     pub fn resolve_for(&self, resource: &ResourceRef, reference: &str) -> Result<Resolved, Refusal> {
-        let r = Reference::required(reference)?;
+        let r = required(reference)?;
         let project = self.project_for(resource, r.project.as_deref())?;
         self.resolve_one(&project, &r.env, &r.path, &r.key, &Caller::consumer(&resource.consumer()), resource.untrusted, resource)
     }
@@ -377,7 +347,7 @@ impl Secrets {
     /// refused as the resolve would be, and it moves when the value would, so a product polls it
     /// and resolves again only then.
     pub fn digest_for(&self, resource: &ResourceRef, reference: &str) -> Result<String, Refusal> {
-        let r = Reference::required(reference)?;
+        let r = required(reference)?;
         let project = self.project_for(resource, r.project.as_deref())?;
         self.digest_one(&project, &r, &Caller::consumer(&resource.consumer()), resource)
     }
@@ -436,15 +406,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn references_read_as_roll_cli_reads_them() {
-        let r = |v: &str| Reference::parse(v).unwrap().unwrap();
-        assert_eq!(r("roll://production/AWS_SECRET_ACCESS_KEY"), Reference { project: None, env: "production".into(), path: "/".into(), key: "AWS_SECRET_ACCESS_KEY".into() });
-        assert_eq!(r("roll://shop@staging/payments/stripe/KEY").path, "/payments/stripe");
-        assert_eq!(r("roll://shop@staging/KEY").project.as_deref(), Some("shop"));
-        assert!(Reference::parse("not-a-reference").unwrap().is_none());
-        for bad in ["roll://production", "roll://prod/../KEY", "roll://@prod/KEY", "roll://prod//KEY", " roll://prod/KEY", "\troll://prod/KEY", "ROLL://prod/KEY", "Roll://prod/KEY", "roll://prod/KEY "] {
-            assert!(matches!(Reference::parse(bad), Err(Refusal::BadReference(_))), "{bad}");
-        }
+    fn resources_are_named_for_the_audit_log() {
+        // A malformed reference is a refusal of its own (the parser's tests are in roll-secrets-ref).
+        assert!(matches!(required(" roll://prod/KEY"), Err(Refusal::BadReference(_))));
+        assert!(matches!(required("plain"), Err(Refusal::BadReference(_))));
         assert_eq!(ResourceRef::new(Kind::Bucket, "photos").consumer(), "storage:bucket:photos");
         assert_eq!(ResourceRef::new(Kind::Bucket, "photos").untrusted().consumer(), "storage:bucket:photos (untrusted)");
         assert_eq!(ResourceRef::code_owner("acme").consumer(), "code:review:acme");
