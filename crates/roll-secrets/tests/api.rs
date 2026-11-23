@@ -2049,7 +2049,8 @@ async fn nothing_reaches_an_environment_its_caller_cannot_read() {
     // resource (that's an admin's), nor see the fingerprint of what it can't reveal.
     let t = api.token(json!({ "name": "dev", "environments": ["development"], "actions": ["read", "reveal", "write", "delete"] }));
     let token = Some(t.as_str());
-    let (s, _) = api.req(Method::DELETE, "/environments/development", None, token).await;
+    // The token's own scope names development: deleting it is confirmed.
+    let (s, _) = api.req(Method::DELETE, "/environments/development?confirm=development", None, token).await;
     assert_eq!(s, StatusCode::OK, "kept for the window");
     let (s, _) = api.req(Method::POST, "/environments", Some(json!({ "slug": "development", "base": "production" })), token).await;
     assert_eq!(s, StatusCode::FORBIDDEN);
@@ -7040,6 +7041,33 @@ async fn deleting_a_protected_environment_that_asks_for_approvals_is_a_change_re
     assert_eq!(r["state"], "applied");
     assert_eq!(api.call(Method::GET, "/environments/production", None).await.0, StatusCode::NOT_FOUND);
     assert_eq!(api.ok(Method::GET, "/v1/secrets/deleted", None).await[0]["environment"], "production");
+}
+
+/// Decide, then revoke: an environment's delete that its write refuses (here an ephemeral one based
+/// on it meanwhile) revokes none of what it issued; the delete that goes revokes it all.
+#[tokio::test]
+async fn an_environment_delete_its_write_refuses_revokes_nothing() {
+    let api = Api::new().await;
+    api.ok(Method::PUT, &format!("/v1/workspace/projects/{}/resources/bucket/assets", api.project), Some(json!({ "x": 0, "y": 0 }))).await;
+    let link = |field: &str, mode: &str| json!({ "link": { "kind": "bucket", "ref": "assets", "field": field, "mode": mode } });
+    api.ok(Method::PUT, "/environments/production/secrets/AWS_ACCESS_KEY_ID", Some(link("access_key_id", "managed"))).await;
+    api.ok(Method::PUT, "/environments/production/secrets/TEMP_KEY", Some(link("access_key_id", "dynamic"))).await;
+    api.ok(Method::POST, "/environments/production/resolve", Some(json!({ "consumer": "app:web" }))).await;
+    let live = api.fake.live_keys.lock().unwrap().clone();
+    assert_eq!(live.len(), 2, "a managed key and a lease: {live:?}");
+    api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true, "approvals": 1 }))).await;
+    let (_, r) = api.call(Method::DELETE, "/environments/production?confirm=production", None).await;
+    let id = r["request"]["id"].as_str().unwrap().to_string();
+    let reviewer = api.token(json!({ "name": "lead", "actions": ["read", "admin", "write", "delete"] }));
+    api.req(Method::POST, &format!("/environments/production/requests/{id}/review"), Some(json!({ "verdict": "approve" })), Some(&reviewer)).await;
+    api.ok(Method::POST, "/environments", Some(json!({ "slug": "pv-1", "base": "production", "ttl_minutes": 60 }))).await;
+    let (s, e) = api.call(Method::POST, &format!("/environments/production/requests/{id}/apply"), None).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{e}");
+    assert_eq!(*api.fake.live_keys.lock().unwrap(), live, "refused: nothing revoked");
+    assert!(api.ok(Method::GET, "/leases", None).await.as_array().unwrap().iter().all(|l| l["revoked_at"].is_null()));
+    api.ok(Method::DELETE, "/environments/pv-1", None).await;
+    assert_eq!(api.ok(Method::POST, &format!("/environments/production/requests/{id}/apply"), None).await["state"], "applied");
+    assert!(api.fake.live_keys.lock().unwrap().is_empty(), "deleted: what it issued is revoked");
 }
 
 #[tokio::test]

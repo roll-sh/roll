@@ -266,13 +266,7 @@ impl Secrets {
     /// The managed credentials of the secrets matching `cond` (`env_id = ?`, `project_id = ?`),
     /// one per credential: collected before what holds them is deleted.
     pub(crate) fn managed_where(&self, cond: &str, arg: &str) -> Vec<(Link, Json)> {
-        let rows = self.db.read(|c| c.query(&format!("SELECT link, link_state FROM secrets WHERE link_state IS NOT NULL AND {cond}"), [arg], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))));
-        let mut seen = std::collections::BTreeSet::new();
-        rows.unwrap_or_default()
-            .into_iter()
-            .filter_map(|(l, s)| Some((serde_json::from_str::<Link>(&l).ok()?, serde_json::from_str::<Json>(&s).ok()?)))
-            .filter(|(_, s)| s.get("credential").and_then(Json::as_str).is_some_and(|c| seen.insert(c.to_string())))
-            .collect()
+        self.db.read(|c| managed_in(c, cond, arg)).unwrap_or_default()
     }
 
     /// Revoke credentials whose secrets are gone (an environment or a project deleted), best
@@ -575,4 +569,15 @@ impl Secrets {
             }
         }
     }
+}
+
+/// [`Secrets::managed_where`] on `c` (inside a write that retires them).
+pub(crate) fn managed_in(c: &code_sql::Conn<'_>, cond: &str, arg: &str) -> Result<Vec<(Link, Json)>> {
+    let rows = c.query(&format!("SELECT link, link_state FROM secrets WHERE link_state IS NOT NULL AND {cond}"), [arg], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    let mut seen = std::collections::BTreeSet::new();
+    Ok(rows
+        .into_iter()
+        .filter_map(|(l, s)| Some((serde_json::from_str::<Link>(&l).ok()?, serde_json::from_str::<Json>(&s).ok()?)))
+        .filter(|(_, s)| s.get("credential").and_then(Json::as_str).is_some_and(|c| seen.insert(c.to_string())))
+        .collect())
 }

@@ -682,8 +682,9 @@ impl Secrets {
 
     /// Delete an environment. An ephemeral one goes at once, with everything in it (its leases
     /// revoked first). A standard one is kept for the recovery window (deleted_envs.rs): asked to
-    /// confirm with `?confirm=<slug>` when it's protected or something else reads it (the 409
-    /// names what breaks), and, where its policy asks for approvals, opened as a change request.
+    /// confirm with `?confirm=<slug>` when it's protected or anything reads it (a key, a folder, a
+    /// service, a sandbox, a sync, an identity or a token: the 409 names what breaks), and, where
+    /// its policy asks for approvals, opened as a change request.
     pub fn delete_environment(&self, project: &str, slug: &str, confirm: Option<&str>, caller: &Caller) -> Result<crate::deleted_envs::Deletion> {
         caller.need(Action::Delete, &Scope::env(project, slug))?;
         let dek = self.project(project)?;
@@ -693,7 +694,7 @@ impl Secrets {
             return Ok(crate::deleted_envs::Deletion::Erased);
         }
         self.db.read(|c| deletable(c, project, &env))?;
-        let breaks = self.db.read(|c| crate::deleted_envs::breaks(c, &dek, &env))?;
+        let breaks = self.env_breaks(&env, &dek, caller)?;
         if (env.protected || !breaks.is_empty()) && confirm != Some(slug) {
             return Err(Error::Conflict("confirm_required", crate::deleted_envs::refusal(&env, &breaks, self.window_days())));
         }

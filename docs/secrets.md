@@ -829,7 +829,8 @@ environments and approvals"). Teams add, rename, reorder and delete their own en
   for the recovery window, read by nobody, and revokes what it issued at once (see "When a secret,
   an environment or the project goes"). It takes `?confirm=<slug>` when the environment is
   protected or anything else reads it (409 `confirm_required`, naming every value that references
-  it and every folder, here or in another project, that imports from it); a protected one whose
+  it, every folder, here or in another project, that imports from it, and the services, sandboxes,
+  syncs, identities and tokens that read it); a protected one whose
   policy asks for approvals is deleted through a change request. `GET …/environments/{env}/deletion`
   says all that before anyone asks. An ephemeral environment goes at once. The last standard
   environment can't be deleted, nor one an ephemeral environment is based on.
@@ -1349,17 +1350,27 @@ A link is `{kind, ref, field, mode, options}`:
 - **Deleting a standard environment** keeps it for the same recovery window as a project
   (`ROLL_SECRETS_DELETE_WINDOW_DAYS`, 7 days unless set), as Google Secret Manager's delayed
   destruction and Azure Key Vault's soft delete do:
-  - first the refusal says what breaks: `${staging.X}` in another environment of the project, and
-    folders here or in other projects that import from it (409 `confirm_required` until
-    `?confirm=<slug>`; also asked of every protected environment). Names only, never a value;
+  - first the refusal says what breaks, and anything that does asks for `?confirm=<slug>` (409
+    `confirm_required`; also asked of every protected environment). Names only, never a value:
+    - `${staging.X}` in another environment of the project, and folders here or in other projects
+      that import from it;
+    - roll apps services that deploy from it or read it through a `roll://` variable: their next
+      deploy, or a wake that resolves at runtime, fails;
+    - agents sandboxes copying from it: they lose those values;
+    - its syncs, which stop: the copies they pushed stay at their targets until removed there;
+    - workload identities and roll-access tokens whose scope names it (their names only for a
+      project admin; anyone else sees that one is there);
   - a protected environment whose policy asks for approvals (`approvals` ≥ 1) is deleted through a
     change request with those approvals and every folder policy in it (`"action":
     "delete_environment"`, answered 202 `{request}`), exactly as deleting one of its folders is;
     applying it (`delete` there) is the delete, and an admin's `bypass` is audited as any other.
     With `approvals: 0` (a new project's `production`) the confirmed delete is direct;
-  - then what it issued is revoked (leases, managed credentials, placeholders, and the interception
-    CAs that named their hosts), its one-time shares and secret requests end, and its decoys end.
-    The delete is audited (`environment.delete`: who, and the window's end);
+  - one write decides: it checks again that the environment may go (no ephemeral environment based
+    on it, a change request still approved), marks it deleted, ends its placeholders (and the
+    interception CAs that named their hosts), one-time shares, secret requests and decoys, and is
+    audited (`environment.delete`: who, and the window's end). Only then is what it issued revoked
+    (leases and managed credentials, each kept as a due lease the sweeper retries if its product
+    doesn't answer). A delete that write refuses revokes nothing;
   - through the window nobody reads it: every route answers 404 for it, it's left out of listings,
     search, health, insights, syncs and rotations, and a reference to it is a problem that says so
     ("references staging, which was deleted; recover it or change the reference"). Its slug stays
@@ -1403,8 +1414,9 @@ A link is `{kind, ref, field, mode, options}`:
     an admin of its secrets by their grant as it is now, or the person whose namespace it is while
     they were still one of its owners when it was deleted, so an owner can undo an admin's delete
     of their project; membership kept from the delete never lets anyone else in;
-    `GET /v1/secrets/deleted` lists what the caller may recover, as do
-    the dashboard's Home, "Recently deleted", and `roll secrets recover [project]`). The workspace
+    `GET /v1/secrets/deleted` lists what the caller may recover, as do the dashboard's Home,
+    "Recently deleted", and `roll secrets recover [project]`, which lists deleted environments
+    under their own heading: `roll secrets envs recover <env>` brings one back). The workspace
     keeps a deleted project, its canvas and members apart for this (`deleted_projects`, at most
     91 days), and recovering brings them back.
     Recovering claims the project on the secrets side first (one write: a close on another node
@@ -2891,7 +2903,7 @@ roll secrets scan    [PATH…] | --staged [--allow-unstored]    # this project's
 roll secrets scan    --store [KEY=]FILE:LINE                   # move one such credential in; prints what to write instead
 roll secrets render  config.tpl [--out config.yml [--watch --exec CMD]]   # ${KEY} filled in
 roll secrets export  [--format dotenv|json|shell|yaml|docker|kubernetes] [--name N --namespace NS]
-roll secrets envs    ls | add NAME [--base ENV --ephemeral] | rename OLD NEW | rm NAME | order A B C
+roll secrets envs    ls | add NAME [--base ENV --ephemeral] | rename OLD NEW | rm NAME [--yes] | recover NAME | order A B C
 roll secrets history [KEY]   roll secrets rollback --to SEQ | --at TIME
 roll secrets diff    --from development --to staging | --file .env   # two environments, or a local copy
 roll secrets promote --from development --to staging [KEY…]
@@ -5690,7 +5702,7 @@ isn't in the workspace is 404.
 | `PUT /environments/{env}` | `Ensure` | 201 or 200 `{environment, created, change}` (409 `mismatch`; `branches` on a standard environment is a 400, an addition by anyone but roll previews or the operator a 403) |
 | `PATCH /environments/{env}` | `{slug?, name?, expires_at?, max_age_days?}` | `Environment` |
 | `DELETE /environments/{env}?confirm=` | | 204 for an ephemeral one; 200 `{environment, deleted_at, purge_at}` for a standard one, kept for the window; 202 `{request}` when its policy asks for approvals (409 `confirm_required`, naming what breaks, until `confirm` repeats the slug of a protected or referenced one) |
-| `GET /environments/{env}/deletion` | | `{environment, secrets, window_days, confirm, needs_request, approvals, breaks: {project?, environment, path, key?, via: "reference" \| "import"}[]}` (`delete`) |
+| `GET /environments/{env}/deletion` | | `{environment, secrets, window_days, confirm, needs_request, approvals, breaks: {project?, environment, path, key?, via: "reference" \| "import" \| "service" \| "sandbox" \| "sync" \| "identity" \| "token", name?, id?}[]}` (`delete`; `name`: the service, sandbox, identity or token's, or a sync's `kind target`; an identity's or token's `name` and `id` only for a project admin) |
 | `POST /environments/{env}/recover` | | `{project, environment, recovered_at, rotated, rotation_failed: string[]}`: a deleted environment back within its window (`admin`; audited as `environment.recover`) |
 | `PUT /environments/{env}/policy` | `{protected, approvals?, approvers?, notify_url?}` | `Environment` |
 | `GET /environments/{env}/folder-policies` | | `FolderPolicy[]` |
