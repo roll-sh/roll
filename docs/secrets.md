@@ -4838,7 +4838,9 @@ may no longer manage the project, and the one-time shares they made end and the 
 issued to them are revoked once they're no longer a member. Their personal overrides stay (only
 they read them, and they can't). When their account is disabled (an admin, SCIM), stops being an
 admin's or is deleted, rolld calls `Secrets::person_offboarded`, which runs the same hook in every
-project holding an open share, a live lease or a shared folder: a disabled person counts as no
+project holding an open share, a live lease, a shared folder or a key bound to hosts they made
+(themselves, or a token or identity of theirs) and in their memberships' projects, never one only
+others made things in (`SecretsMemberRechecks` counts them): a disabled person counts as no
 member anywhere (docs/accounts.md, "Offboarding"). Enabled again, they get nothing back.
 
 So removing or demoting a member stops or narrows what they made at once. rolld asks roll-accounts
@@ -4899,7 +4901,9 @@ credentials as the tokens list does. Names and metadata only, never a value:
   it, or their account is `gone`). They still know what they read: rotate it.
 
 roll secrets knows no product: rolld answers which services and sandboxes hold a project's
-secrets (`reach::Holders`, from roll apps' and roll code's stores; names and references only).
+secrets (`reach::Holders`, from roll apps' and roll code's stores; names and references only:
+roll apps keeps each variable's `roll://` text beside its sealed value when it's set, so reach
+opens no value, write-only ones included).
 - **Where it goes by itself**: syncs of that folder (and that key), projects the folder is shared
   with, and this project's folders that import it.
 - **Where it goes by itself** also counts folders that import it and environments based on it
@@ -6130,6 +6134,7 @@ and `product`. Numbers only: never a value, a key's name or a project.
 | `SecretsSyncsPushed`, `SecretsSyncFailures` | Sync pushes that worked and that failed |
 | `SecretsRotations`, `SecretsRotationFailures` | Scheduled rotations that worked and that failed |
 | `SecretsKmsRefusals` | A customer's KMS refusing to open a project's data key |
+| `SecretsMemberRechecks` | Projects checked again because a member lost rights there (removed, demoted, offboarded): an offboarding checks only the projects holding what the person made and their memberships' |
 | `SecretsLeasesLive`, `SecretsSyncsFailing`, `SecretsRotationsFailing` | Gauges: leases not ended, syncs whose last push failed, credentials whose last rotation failed |
 
 Each node counts what it did, so sum the counters across nodes. The gauges read the store every
@@ -6366,6 +6371,37 @@ adds roll-access's grant lookup or the accounts' and workspace's.
 
 ## Next
 
+**State, 2026-11-23 16:50.** The thirty-fifth review is done: item 6B (#763, 5583dfbfd; `Reference::parse` moved into `crates/roll-secrets-ref`, so agent-proto, the `roll` binary and the gateway don't link roll-secrets) and 6C (#794, dbb4d65af; a refused upstream key fails closed without trying another key of that provider) landed. Also #778, the 05:20 entry below.
+
+The thirty-sixth product review (2026-11-23, cold, read only, against 5430a1b0d) found no live security bug. Its top items were seams where the night's fixes meet each other:
+1. A sandbox stopped on any broken key in its folder, not just the ones it copies.
+2. An environment's delete warning didn't name the services, sandboxes, syncs, identities and tokens that read it.
+3. The events feed had no value changes.
+4. Reach unsealed every roll apps variable to find references.
+5. The CLI didn't follow #720.
+6. `roll secrets agent` kept serving after a 403.
+7. An environment delete revoked credentials before deciding.
+8. Offboarding walked every project.
+9. Five SaaS rotators against AWS's twenty.
+
+Landed since, each with main's CI green and most after a check of the merged tree:
+- #796 (cd59a6cc8): items 1 and 6. A sandbox fails only the keys it copies; a deleted environment in its window is "unsure", so a recovery brings values back. The local agent drops a refused folder at once.
+- #793 (1815bac01): item 3. `secret.changed`, `secret.deleted`, `rotation.succeeded` and `access.changed`, each in the change's own audit row.
+- #798 (ccd0fcdbd): items 2, 5 and 7. The deletion preview names every reader and any break needs `confirm`. `envs rm` previews and says what happened, and `envs recover` exists. The delete decides in one write, then revokes.
+- #816 (efafbcac6): items 4 and 8. roll apps keeps a `reference` column, so reach opens no value. Offboarding reads only the person's rows (`SecretsMemberRechecks`).
+- #819 (3dd33c1d5): item 9, part 1. GitLab (create, then revoke), OpenAI project service accounts and Datadog keys.
+- #800 (e9d6e59b5) and #803 (d40c853b1): delta reads in the operator, CSI provider and Lambda extension, and in the Python, Java, .NET and Ruby clients. All six SDKs and the Go consumers now read only what changed.
+- #813 (8b2470590): roll workspace's project events feed (members, groups, invites) for roll MCP's `workspace.event`. It uses the same cursor rule as secrets' feed.
+
+In flight:
+- item 9, part 2 (Cloudflare, Databricks, Confluent);
+- a test that a fresh project's developer can't reveal production (the thirty-fifth's last gap).
+
+Left from the thirty-sixth:
+- item 10 (time-boxed access for people) and item 13 (the root of trust beyond AWS KMS) are the user's call;
+- item 12 (search's clear passwords without `ROLL_SECRET_KEY`) is roll search's, raised with them;
+- `Watch` with a consumer still reads `/resolve` whole, because there's no delta route there.
+
 **State, 2026-11-23 05:20.** Landed since 19:25, each with main's CI green (most after a check of the merged tree, since main moved about ten commits an hour and the merge queue's CI runs only `cargo test --lib`):
 - #720 (fcafbf9fc): item 2, an environment's delete is kept for the recovery window, and a protected one's is a change request.
 - #732 (de8f381a4): the events feed (`GET …/projects/{project}/events`), roll MCP's `secrets.event`.
@@ -6383,7 +6419,6 @@ In flight:
 Next after those:
 - **Item 6C** (the model gateway's upstreams as `roll://`, on #763's ref crate).
 - **Delta reads for the rest** (S each): the Kubernetes operator, the CSI provider and the Lambda extension don't use `Watch`, so they still read whole folders. `Watch` with a consumer goes through `/resolve`. The server's full-set fallback keeps all of them working.
-- **A fresh project's developer can't reveal production** has no test of its own (item 9's last gap).
 - **Gate flakes under load** (another product's tests, seen on every secrets gate tonight at loads of 55–93): roll-cluster's Postgres lease and routing tests, code-control's `the_merge_queue_continues_a_dead_owners_batch` and `an_idle_sandbox_sleeps_and_a_command_wakes_it`. Each passes alone. They're roll code's and roll-cluster's tests, so they aren't fixed here.
 
 **State, 2026-11-22 19:25.** Landed since 07:55, each with main's CI green:

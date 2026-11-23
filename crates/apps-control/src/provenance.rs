@@ -54,7 +54,6 @@ pub fn sign(statement: &Value, key: &[u8]) -> anyhow::Result<Value> {
 pub struct Built<'a> {
     pub image: &'a str,
     pub digest: &'a str,
-    pub service: &'a str,
     pub deployment: &'a str,
     pub builder: &'a str,
     pub source: Value,
@@ -137,7 +136,6 @@ mod tests {
         let s = statement(&Built {
             image: "roll-apps-svc_a:dep_1",
             digest: "sha256:0123",
-            service: "svc_a",
             deployment: "dep_1",
             builder: "docker",
             source: json!({ "kind": "repo", "repo": "acme/site" }),

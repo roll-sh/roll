@@ -552,7 +552,7 @@ impl Engine {
                         },
                         None => String::new(),
                     };
-                    let spec = ServiceSpec { name: c.name.clone(), image: String::new(), run: String::new(), port: 0, memory_mb: c.memory_mb, cpus: 0.0, env: Vec::new(), health: None, states: Vec::new(), pages: Vec::new(), hide: Vec::new(), watch: Vec::new() };
+                    let spec = ServiceSpec { name: c.name.clone(), image: String::new(), run: String::new(), port: 0, memory_mb: c.memory_mb, cpus: 0.0, env: Vec::new(), health: None, skew_protection: false, states: Vec::new(), pages: Vec::new(), hide: Vec::new(), watch: Vec::new() };
                     wanted.push((spec, c.repo.unwrap_or_default(), rev, true));
                 }
             }
@@ -739,6 +739,7 @@ impl Engine {
                     let state = self.apps.status(&r.id, &spec.name).unwrap_or(ServiceState::Sleeping);
                     self.store.set_service(&r.id, &spec.name, state, Some(&rev), None)?;
                     self.store.set_service_config(&r.id, &spec.name, &fingerprint)?;
+                    self.store.set_service_skew(&r.id, &spec.name, spec.skew_protection)?;
                     // A new deploy is checked again, even at the same revision.
                     self.store.set_healthy(&r.id, &spec.name, "")?;
                     self.store.log(&r.id, &format!("deployed {} at {}", spec.name, short(&rev)))?;
