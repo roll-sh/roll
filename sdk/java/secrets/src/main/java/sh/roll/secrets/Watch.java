@@ -16,6 +16,8 @@ public final class Watch implements AutoCloseable {
     private final WatchOptions o;
     private final Thread thread;
     private final Object lock = new Object();
+    /** The last answer and its stamps, so a change reads only what changed (`…/values/delta`). */
+    private final RollSecrets.Held held = new RollSecrets.Held();
     private volatile boolean stopped;
 
     Watch(RollSecrets client, String env, WatchOptions o) {
@@ -77,7 +79,7 @@ public final class Watch implements AutoCloseable {
                     next = 0;
                 }
                 if (changed) {
-                    Values v = client.load(env, o); // a failure is retried on the next round
+                    Values v = client.load(env, o, held); // a failure is retried on the next round
                     String before = last;
                     last = now;
                     if (!v.problems().isEmpty()) {

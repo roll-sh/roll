@@ -46,9 +46,42 @@ public final class RollSecrets {
     private volatile String project;
 
     private final Map<String, Cached> cache = new ConcurrentHashMap<>();
+    /** A rolld without {@code …/values/delta}: reads are full (conditional, with cacheTtl). */
+    private volatile boolean noDelta;
 
-    /** A Values answer kept by cacheTtl, with the digest it was read against. */
-    private record Cached(Values values, String etag, long at) { }
+    /** A Values answer kept by cacheTtl, with its digest and stamps, and when it was asked. */
+    private record Cached(Held held, long at) { }
+
+    /**
+     * A folder's last answer with every key's stamp, so a read after a change asks only for what
+     * changed ({@code …/values/delta}, docs/secrets.md "Delta reads"): what a watch keeps, and what
+     * cacheTtl keeps. {@code off}: the folder's claim is past what rolld takes (a 413); its reads
+     * are full.
+     */
+    static final class Held {
+        Values values;
+        String digest = "";
+        String basis = "";
+        Map<String, String> stamps = Map.of();
+        boolean off;
+
+        Held copy() {
+            Held h = new Held();
+            h.values = values;
+            h.digest = digest;
+            h.basis = basis;
+            h.stamps = stamps;
+            h.off = off;
+            return h;
+        }
+
+        void clear() {
+            values = null;
+            digest = "";
+            basis = "";
+            stamps = Map.of();
+        }
+    }
 
     private RollSecrets(Builder b) {
         this.api = b.api.replaceAll("/+$", "");
@@ -150,9 +183,10 @@ public final class RollSecrets {
 
         /**
          * Keep {@link #values} answers this long and answer from memory meanwhile; after that, ask
-         * again with the digest they were read against, and an unchanged folder costs a 304 that
-         * reads, issues and audits nothing. A folder holding dynamic credentials is never kept (they
-         * end with their lease). Zero (the default): off.
+         * again with the answer's digest and every key's stamp ({@code …/values/delta}): an
+         * unchanged folder costs what a 304 does, and a changed one only its changed keys. A folder
+         * holding dynamic credentials is never kept (they end with their lease). Zero (the
+         * default): off.
          */
         public Builder cacheTtl(Duration cacheTtl) {
             this.cacheTtl = Objects.requireNonNull(cacheTtl);
@@ -342,16 +376,21 @@ public final class RollSecrets {
      * won't renew leases ({@code ?dynamic=false}).
      */
     public Values values(String env, String path, boolean dynamic) {
-        String url = valuesUrl(env, path, dynamic);
+        String e = env(env);
+        String q = valuesQuery(path, dynamic);
         if (cacheTtl.isZero() || cacheTtl.isNegative()) {
-            return Values.of(call("GET", url, null), null);
+            return Values.of(call("GET", e + "/values" + q, null), null);
         }
-        return cached(url, dynamic);
+        return cached(e, q, dynamic);
+    }
+
+    private static String valuesQuery(String path, boolean dynamic) {
+        String q = query(path);
+        return q + (dynamic ? "" : (q.isEmpty() ? "?" : "&") + "dynamic=false");
     }
 
     private String valuesUrl(String env, String path, boolean dynamic) {
-        String q = query(path);
-        return env(env) + "/values" + q + (dynamic ? "" : (q.isEmpty() ? "?" : "&") + "dynamic=false");
+        return env(env) + "/values" + valuesQuery(path, dynamic);
     }
 
     /** A fresh read (a watch that saw the digest move): a kept answer for the folder goes. */
@@ -362,27 +401,134 @@ public final class RollSecrets {
         return v;
     }
 
-    /** From memory within cacheTtl, else revalidated with the digest (a 304 keeps the values). */
-    private Values cached(String url, boolean dynamic) {
+    /**
+     * From memory within cacheTtl, else asks for what changed since the kept answer
+     * ({@code …/values/delta}; the full set when nothing is kept). Where that fails, a conditional
+     * read: a 304 keeps the values. {@code e} is the environment's route, {@code q} the query.
+     */
+    private Values cached(String e, String q, boolean dynamic) {
+        String url = e + "/values" + q;
         Cached hit = cache.get(url);
         if (hit != null && clock.millis() - hit.at() < cacheTtl.toMillis()) {
-            return hit.values();
+            return hit.held().values;
+        }
+        boolean off = hit != null && hit.held().off;
+        if (!off && !noDelta) {
+            Held h = hit != null ? hit.held().copy() : new Held();
+            Values v = tryDelta(e + "/values/delta" + q, h);
+            if (v != null) {
+                keep(url, h, dynamic);
+                return v;
+            }
+            off = h.off;
         }
         String sep = url.contains("?") ? "&" : "?";
-        Map<String, String> headers = hit != null && hit.etag() != null ? Map.of("If-None-Match", "\"" + hit.etag() + "\"") : Map.of();
+        Map<String, String> headers = hit != null && !hit.held().digest.isEmpty() ? Map.of("If-None-Match", "\"" + hit.held().digest + "\"") : Map.of();
         Answer a = authed(t -> send(t, "GET", url + sep + "digest=1", null, headers, Duration.ZERO));
         if (a.status() == 304 && hit != null) {
-            cache.put(url, new Cached(hit.values(), hit.etag(), clock.millis()));
-            return hit.values();
+            Held k = hit.held().copy();
+            k.off = off;
+            keep(url, k, dynamic);
+            return k.values;
         }
         Values v = Values.of(parse(a.body()), null);
-        // Never kept: dynamic credentials (they end with their lease) or a key that didn't resolve
-        // (the digest may not move when the link recovers).
-        if ((dynamic && !v.dynamic().isEmpty()) || !v.problems().isEmpty() || a.etag() == null) {
+        if (a.etag() == null) {
+            cache.remove(url);
+            return v;
+        }
+        Held k = new Held();
+        k.values = v.digest().isEmpty() ? v.with(v.values(), a.etag()) : v;
+        k.digest = a.etag();
+        k.off = off;
+        keep(url, k, dynamic);
+        return k.values;
+    }
+
+    /**
+     * Keeps an answer for cacheTtl, unless it holds dynamic credentials (they end with their
+     * lease; with {@code dynamic=false} there are none, only their names) or a key that didn't
+     * resolve (the digest may not move when the link recovers).
+     */
+    private void keep(String url, Held h, boolean dynamic) {
+        if ((dynamic && !h.values.dynamic().isEmpty()) || !h.values.problems().isEmpty()) {
             cache.remove(url);
         } else {
-            cache.put(url, new Cached(v, a.etag(), clock.millis()));
+            cache.put(url, new Cached(h, clock.millis()));
         }
+    }
+
+    /**
+     * {@link #readDelta}, or null where it fails and the caller reads in full instead: a rolld
+     * without the route (404, 405) from then on, a claim past what it takes (413) for that folder,
+     * anything else this once. A stopped watch's interrupt is thrown.
+     */
+    private Values tryDelta(String url, Held h) {
+        try {
+            return readDelta(url, h);
+        } catch (RollSecretsException e) {
+            if ("interrupted".equals(e.code())) {
+                throw e;
+            }
+            if (e.status() == 404 || e.status() == 405) {
+                noDelta = true;
+            } else if (e.status() == 413) {
+                h.off = true;
+            }
+            return null;
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    /**
+     * Asks {@code url} ({@code …/values/delta?…}) for what changed since the answer {@code h}
+     * holds and merges it in, leaving the new answer in {@code h}: the full set when {@code h}
+     * holds nothing it may claim (nothing yet, problems, no basis) or when rolld answers it. On
+     * any failure {@code h} holds nothing, so the next claim asks for the full set.
+     */
+    private Values readDelta(String url, Held h) {
+        Map<String, Object> claim = new LinkedHashMap<>();
+        if (h.values != null && !h.basis.isEmpty() && h.values.problems().isEmpty()) {
+            claim.put("digest", h.digest);
+            claim.put("basis", h.basis);
+            claim.put("stamps", h.stamps);
+        }
+        Map<String, Object> a;
+        try {
+            a = call("POST", url, claim);
+        } catch (RuntimeException e) {
+            h.clear();
+            throw e;
+        }
+        Values v = Values.of(a, null);
+        Map<String, String> stamps = new LinkedHashMap<>();
+        Map<String, Object> raw = Json.obj(a, "stamps");
+        if (raw != null) {
+            raw.forEach((k, s) -> {
+                if (s instanceof String) {
+                    stamps.put(k, (String) s);
+                }
+            });
+        }
+        Map<String, String> values = v.values();
+        Map<String, String> kept = stamps;
+        if (Boolean.TRUE.equals(a.get("delta")) && h.values != null) {
+            values = new LinkedHashMap<>(h.values.values());
+            kept = new LinkedHashMap<>(h.stamps);
+            for (String k : Json.strings(a, "removed")) {
+                values.remove(k);
+                kept.remove(k);
+            }
+            values.putAll(v.values());
+            kept.putAll(stamps);
+        }
+        String digest = Json.str(a, "digest");
+        String basis = Json.str(a, "basis");
+        v = v.with(values, digest);
+        h.values = v;
+        h.digest = v.digest();
+        h.basis = basis == null ? "" : basis;
+        h.stamps = Map.copyOf(kept);
         return v;
     }
 
@@ -511,8 +657,26 @@ public final class RollSecrets {
         return w;
     }
 
-    Values load(String env, WatchOptions o) {
-        return o.consumer != null ? resolve(env, o.path, o.consumer, o.dynamic) : freshValues(env, o.path, o.dynamic);
+    /**
+     * A watch's read after the digest moved: as the consumer ({@code …/resolve} has no delta
+     * route, so the whole folder), else only what changed since the answer {@code h} holds. Any
+     * failure of the delta reads in full (a rolld without the route: from then on).
+     */
+    Values load(String env, WatchOptions o, Held h) {
+        if (o.consumer != null) {
+            return resolve(env, o.path, o.consumer, o.dynamic);
+        }
+        if (!h.off && !noDelta) {
+            String e = env(env);
+            String q = valuesQuery(o.path, o.dynamic);
+            Values v = tryDelta(e + "/values/delta" + q, h);
+            if (v != null) {
+                // The newest answer: a kept one for the folder goes.
+                cache.remove(e + "/values" + q);
+                return v;
+            }
+        }
+        return freshValues(env, o.path, o.dynamic);
     }
 
     // Workload identities.

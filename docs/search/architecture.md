@@ -283,6 +283,26 @@ in-flight body bytes are charged to the node's budget too (`--search-max-in-flig
 4 GiB by default), so one person's many clusters can't hold more bodies than the node allows all
 of them; a body past either budget gets Elasticsearch's indexing-pressure 429.
 
+One memory account per request: what a request holds is charged as it is built to the
+cluster's `request` breaker, and through it (a parent budget, `search_aggs::memory`) to the
+node's budget, `Node::request_memory`, which only the operator sets. It is one budget with what
+the loaded clusters hold resident: `--search-memory-mb` (else half of the host's memory) covers
+both, the reaper telling the budget what residents hold, so requests get what residents leave.
+The node shares that room fairly (a cluster over its share grows only while an eighth stays
+free) and refuses as Elasticsearch's `[parent]` breaker, in the cluster's own numbers; the
+`request` breaker refuses as `[request]`. Both are a 429 `circuit_breaking_exception`. The tenant sets `indices.breaker.request.limit` (`-1` even), but
+its effective limit is held to `--search-request-memory-max` (node setting
+`roll.breaker.request.max_limit`, by default a quarter of the node's budget), so a few busy
+tenants can't add up past the host. Aggregations (shard collection and reduces, composite and
+`terms` included, so transforms and rollups too), buffered `_msearch` responses, snapshot
+transfers and ES|QL all charge it; ES|QL charges each page of rows, group table and aggregate
+state, sort buffer, join and lookup table and its result as they grow, from what they allocate,
+and gives each back when it drops (`xpack/esql/memory.rs`), and its functions build strings
+and multi-values through one bounded builder (`functions::Built`); kept async results and
+cross-cluster contexts stay charged while they live. Requests can't be evicted, so past
+`--search-memory-mb` in residents plus requests, idle clusters unload to make room for both;
+a wake counts the newcomer's resident memory at once.
+
 The embedding model is the node's, shared by its clusters (`search_server::embed`): a bounded
 pool of workers (a third of the CPUs by default, optionally pinned); inputs cut to the bounded
 start their 512 tokens come from and queued per cluster in jobs of about 1,024 tokens; turns by

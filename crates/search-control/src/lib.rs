@@ -27,11 +27,15 @@ pub mod store;
 pub mod suggestions;
 mod wake;
 
-pub use control::{ClusterOptions, ConsoleRequest, ConsoleResponse, Control, ControlError, Defaults, SearchConfig, SqlCatalog};
+pub use control::{ClusterOptions, ConsoleAnswer, ConsoleRequest, ConsoleResponse, Control, ControlError, Defaults, SearchConfig, SqlCatalog};
 pub use pricing::{Cost, Pricing};
 pub use search_es::seal::Sealer;
 /// Node setting that lets `s3` snapshot repositories reach private addresses (local development).
 pub use search_es::api::snapshots::S3_ALLOW_PRIVATE;
+/// Node setting: the most one cluster's `request` breaker may allow, whatever its tenant sets.
+pub use search_es::breaker::REQUEST_MAX_LIMIT as SEARCH_REQUEST_MAX_LIMIT;
+/// Checks a [`SEARCH_REQUEST_MAX_LIMIT`] value (`25%`, `512mb`, `-1`).
+pub use search_es::breaker::request_max_limit;
 /// Node setting that lets connectors reach databases and buckets at private addresses (local
 /// development).
 pub use search_es::xpack::entsearch::sync::ALLOW_PRIVATE as CONNECTORS_ALLOW_PRIVATE;

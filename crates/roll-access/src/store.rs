@@ -9,7 +9,7 @@ use roll_auth::GrantKind;
 use roll_auth::scope::Scope;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 mod device;
 pub use device::{DEVICE_TTL_MS, DeviceRequest, normalize_user_code, show_user_code};
@@ -110,6 +110,12 @@ CREATE TABLE IF NOT EXISTS oauth_clients (
     redirect_uris TEXT NOT NULL,
     created_at INTEGER NOT NULL,
     last_used_at INTEGER
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS access_alerts (
+    seq INTEGER PRIMARY KEY,
+    at INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    data TEXT NOT NULL
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
@@ -552,6 +558,10 @@ pub struct AuditEvent {
     pub client: Option<String>,
 }
 
+/// The window [`Store::failure_jumps`] looks at, and how many server errors in it count.
+pub const JUMP_WINDOW_MS: i64 = 15 * 60_000;
+pub const JUMP_MIN_ERRORS: i64 = 10;
+
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct AuditQuery {
     /// Answer format (`jsonl`), read by the route; not a filter.
@@ -925,6 +935,14 @@ impl Store {
         if !db.has_column("grants", "user_id")? {
             db.add_column("grants", "user_id", "TEXT")?;
         }
+        // Whose an alert is (a person's token's decoy, revocation or finding); none: the operator's.
+        if !db.has_column("access_alerts", "user_id")? {
+            db.add_column("access_alerts", "user_id", "TEXT")?;
+        }
+        db.ensure_schema("CREATE INDEX IF NOT EXISTS access_alerts_user ON access_alerts (user_id, seq);")?;
+        // MCP calls by tool (agent activity, failure jumps): only rows that name a tool, so the
+        // rest of the audit log's writes don't pay for it.
+        db.ensure_schema("CREATE INDEX IF NOT EXISTS audit_tool ON audit (tool, at) WHERE tool IS NOT NULL;")?;
         db.ensure_schema("CREATE INDEX IF NOT EXISTS grants_user ON grants (user_id);")?;
         // Why it was revoked, when roll did it (a leaked secret).
         if !db.has_column("grants", "decoy")? {
@@ -1084,6 +1102,11 @@ impl Store {
     /// workloads ([`Store::workloads`]): they come and go by the minute.
     pub fn list(&self) -> Result<Vec<Grant>> {
         Ok(self.db.read(|c| c.query(&format!("SELECT {GRANT_COLUMNS} FROM {GRANT_FROM} WHERE g.kind <> 'workload' ORDER BY g.created_at DESC, g.id"), (), grant_row))?)
+    }
+
+    /// `user`'s tokens and connections that aren't revoked (one indexed read, `grants_user`).
+    pub fn live_of_user(&self, user: &str) -> Result<Vec<Grant>> {
+        Ok(self.db.read(|c| c.query(&format!("SELECT {GRANT_COLUMNS} FROM {GRANT_FROM} WHERE g.user_id = ? AND g.kind <> 'workload' AND g.revoked_at IS NULL ORDER BY g.created_at DESC, g.id"), [user], grant_row))?)
     }
 
     /// Revoke workload grant `id` (and only a workload grant), with why. Whether it was live.
@@ -1766,6 +1789,189 @@ impl Store {
         Ok(self.db.read(|c| c.query(&sql, args.as_slice(), audit_row))?)
     }
 
+    /// How agents used roll's MCP server since `since` (audit rows that name a tool): per tool
+    /// (calls, refused, failed, average, median, 95th percentile and longest duration, the last
+    /// call), per connection (the
+    /// operator's own as `grant: null`) and per day (UTC). `grants`: only these connections' (a
+    /// person's own); `None`, everyone's.
+    pub fn tool_activity(&self, since: i64, grants: Option<&[String]>) -> Result<Value> {
+        if grants.is_some_and(<[String]>::is_empty) {
+            return Ok(json!({ "since": since, "calls": 0, "tools": [], "connections": [], "days": [] }));
+        }
+        let mut filter = String::from("at >= ? AND tool IS NOT NULL");
+        let mut args: Vec<code_sql::Value> = vec![code_sql::Value::Int(since)];
+        if let Some(ids) = grants {
+            filter.push_str(&format!(" AND grant_id IN ({})", vec!["?"; ids.len()].join(", ")));
+            args.extend(ids.iter().map(|i| code_sql::Value::Text(i.clone())));
+        }
+        let counts = "COUNT(*), SUM(CASE WHEN decision = 'deny' THEN 1 ELSE 0 END), SUM(CASE WHEN decision <> 'deny' AND status >= 400 THEN 1 ELSE 0 END)";
+        self.db.read(|c| {
+            let tools = c.query(
+                &format!("SELECT tool, {counts}, CAST(AVG(duration_ms) AS INTEGER), MAX(duration_ms), MAX(at) FROM audit WHERE {filter} GROUP BY tool ORDER BY COUNT(*) DESC, tool LIMIT 200"),
+                args.as_slice(),
+                |r| Ok(json!({ "tool": r.get::<_, String>(0)?, "calls": r.get::<_, i64>(1)?, "denied": r.get::<_, i64>(2)?, "failed": r.get::<_, i64>(3)?, "avg_ms": r.get::<_, i64>(4)?, "max_ms": r.get::<_, i64>(5)?, "last_at": r.get::<_, i64>(6)? })),
+            )?;
+            // Median and 95th percentile per tool: each call's rank among its tool's (window
+            // functions, in both databases), the first duration at or past the share.
+            let ranks: std::collections::HashMap<String, (i64, i64)> = c
+                .query(
+                    &format!(
+                        "SELECT tool, MIN(CASE WHEN rn * 100 >= n * 50 THEN duration_ms END), MIN(CASE WHEN rn * 100 >= n * 95 THEN duration_ms END) FROM \
+                         (SELECT tool, duration_ms, ROW_NUMBER() OVER (PARTITION BY tool ORDER BY duration_ms) AS rn, COUNT(*) OVER (PARTITION BY tool) AS n FROM audit WHERE {filter}) ranked GROUP BY tool"
+                    ),
+                    args.as_slice(),
+                    |r| Ok((r.get::<_, String>(0)?, (r.get::<_, Option<i64>>(1)?.unwrap_or(0), r.get::<_, Option<i64>>(2)?.unwrap_or(0)))),
+                )?
+                .into_iter()
+                .collect();
+            let tools: Vec<Value> = tools
+                .into_iter()
+                .map(|mut t| {
+                    if let Some((p50, p95)) = t["tool"].as_str().and_then(|n| ranks.get(n)) {
+                        t["p50_ms"] = json!(p50);
+                        t["p95_ms"] = json!(p95);
+                    }
+                    t
+                })
+                .collect();
+            let connections = c.query(
+                &format!("SELECT grant_id, MAX(grant_name), {counts}, COUNT(DISTINCT tool), MAX(at) FROM audit WHERE {filter} GROUP BY grant_id ORDER BY COUNT(*) DESC LIMIT 100"),
+                args.as_slice(),
+                |r| Ok(json!({ "grant": r.get::<_, Option<String>>(0)?, "name": r.get::<_, Option<String>>(1)?, "calls": r.get::<_, i64>(2)?, "denied": r.get::<_, i64>(3)?, "failed": r.get::<_, i64>(4)?, "tools": r.get::<_, i64>(5)?, "last_at": r.get::<_, i64>(6)? })),
+            )?;
+            let days = c.query(
+                &format!("SELECT at / 86400000, {counts} FROM audit WHERE {filter} GROUP BY at / 86400000 ORDER BY at / 86400000"),
+                args.as_slice(),
+                |r| Ok(json!({ "day": r.get::<_, i64>(0)? * 86_400_000, "calls": r.get::<_, i64>(1)?, "denied": r.get::<_, i64>(2)?, "failed": r.get::<_, i64>(3)? })),
+            )?;
+            // The days hold every call (the tool and connection lists are cut at 200 and 100).
+            let calls: i64 = days.iter().filter_map(|d| d["calls"].as_i64()).sum();
+            Ok::<_, code_sql::Error>(json!({ "since": since, "calls": calls, "tools": tools, "connections": connections, "days": days }))
+        })
+        .map_err(Into::into)
+    }
+
+    /// Tools whose server errors jumped: at least [`JUMP_MIN_ERRORS`] 5xx answers in the last
+    /// [`JUMP_WINDOW_MS`], a quarter or more of their calls there, and three times (or more) their
+    /// rate over the day before. Each with its counts and its usual rate.
+    /// `skip`: tools not to look at (alerted on lately), before their day is read.
+    pub fn failure_jumps(&self, now: i64, skip: &dyn Fn(&str) -> bool) -> Result<Vec<Value>> {
+        let recent_from = now - JUMP_WINDOW_MS;
+        let errors = "SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END)";
+        let recent = self.db.read(|c| {
+            c.query(
+                &format!("SELECT tool, COUNT(*), {errors} FROM audit WHERE at >= ? AND tool IS NOT NULL GROUP BY tool HAVING {errors} >= ?"),
+                params![recent_from, JUMP_MIN_ERRORS],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)),
+            )
+        })?;
+        // `skip` reads the store too: asked between reads, never inside one (a pool with one reader
+        // would wait on itself).
+        let mut out = Vec::new();
+        for (tool, calls, failed) in recent.into_iter().filter(|(t, ..)| !skip(t)) {
+            let (before, before_failed): (i64, i64) = self.db.read(|c| {
+                c.query_row(
+                    &format!("SELECT COUNT(*), COALESCE({errors}, 0) FROM audit WHERE tool = ? AND at >= ? AND at < ?"),
+                    params![tool, now - 86_400_000, recent_from],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+            })?;
+            let rate = failed as f64 / calls as f64;
+            let usual = if before > 0 { before_failed as f64 / before as f64 } else { 0.0 };
+            if rate >= 0.25 && rate >= 3.0 * usual {
+                out.push(json!({ "tool": tool, "calls": calls, "failed": failed, "rate": rate, "usual": usual }));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Keep an alert for the operator's feed (`GET /v1/access/alerts`, MCP Events' `access.alert`):
+    /// its place is the next after the newest, taken in the same write. Its place.
+    /// `user`: the person it's about (their token's), who sees it on their own feed too.
+    pub fn record_alert(&self, kind: &str, data: &Value, user: Option<&str>) -> Result<i64> {
+        let (now, data) = (code_sql::now_ms(), data.to_string());
+        self.db.write(|c| {
+            let seq: i64 = c.query_row("SELECT COALESCE(MAX(seq), 0) + 1 FROM access_alerts", (), |r| r.get(0))?;
+            c.execute("INSERT INTO access_alerts (seq, at, kind, data, user_id) VALUES (?, ?, ?, ?, ?)", params![seq, now, kind, data, user])?;
+            Ok::<_, Error>(seq)
+        })
+    }
+
+    /// Alerts after `after`, oldest first (at most `limit`), each its data with `seq`, `at` and
+    /// `kind`.
+    /// `user`: only that person's (their own feed); `None`, every alert.
+    pub fn alerts_after(&self, after: i64, limit: usize, user: Option<&str>) -> Result<Vec<Value>> {
+        let rows = self.db.read(|c| {
+            c.query("SELECT seq, at, kind, data FROM access_alerts WHERE seq > ?1 AND (CAST(?2 AS TEXT) IS NULL OR user_id = ?2) ORDER BY seq LIMIT ?3", params![after, user, limit.clamp(1, 500) as i64], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?))
+            })
+        })?;
+        Ok(rows
+            .into_iter()
+            .map(|(seq, at, kind, data)| {
+                let mut v: Value = serde_json::from_str(&data).unwrap_or_else(|_| json!({}));
+                v["seq"] = json!(seq);
+                v["at"] = json!(at);
+                v["kind"] = json!(kind);
+                v
+            })
+            .collect())
+    }
+
+    /// The newest alert's place (0: none yet); `user`: that person's newest (so a person's cursor
+    /// says nothing about how often others' alerts come).
+    pub fn alerts_head(&self, user: Option<&str>) -> Result<i64> {
+        Ok(self.db.read(|c| c.query_row("SELECT COALESCE(MAX(seq), 0) FROM access_alerts WHERE CAST(?1 AS TEXT) IS NULL OR user_id = ?1", params![user], |r| r.get(0)))?)
+    }
+
+    /// The newest `n` alerts (`user`: that person's), oldest first.
+    pub fn alerts_last(&self, n: usize, user: Option<&str>) -> Result<Vec<Value>> {
+        let from: i64 = self.db.read(|c| {
+            c.query_row(
+                "SELECT COALESCE(MIN(seq), 1) - 1 FROM (SELECT seq FROM access_alerts WHERE CAST(?1 AS TEXT) IS NULL OR user_id = ?1 ORDER BY seq DESC LIMIT ?2) newest",
+                params![user, n.clamp(1, 100) as i64],
+                |r| r.get(0),
+            )
+        })?;
+        self.alerts_after(from, n.clamp(1, 100), user)
+    }
+
+    /// Count one use of `key` this hour (`hour`: the hour's number), on any node: false once
+    /// `max` were counted this hour (one row per key, reset when the hour moves on).
+    pub fn bump_hourly(&self, key: &str, hour: i64, max: i64) -> Result<bool> {
+        self.db.write(|c| {
+            let had: Option<String> = c.query_row("SELECT value FROM settings WHERE key = ?", [key], |r| r.get(0)).optional()?;
+            let n = had.and_then(|v| v.split_once(':').filter(|(h, _)| h.parse::<i64>().ok() == Some(hour)).and_then(|(_, n)| n.parse::<i64>().ok())).unwrap_or(0);
+            if n >= max {
+                return Ok::<_, Error>(false);
+            }
+            c.execute("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", params![key, format!("{hour}:{}", n + 1)])?;
+            Ok(true)
+        })
+    }
+
+    /// Whether the alert `key` went out within `ms` (a read: no write when it did).
+    pub fn alerted_within(&self, key: &str, now: i64, ms: i64) -> Result<bool> {
+        Ok(self.setting_raw(key)?.and_then(|v| v.parse::<i64>().ok()).is_some_and(|at| now - at < ms))
+    }
+
+    fn setting_raw(&self, key: &str) -> Result<Option<String>> {
+        Ok(self.db.read(|c| c.query_row("SELECT value FROM settings WHERE key = ?", [key], |r| r.get(0)).optional())?)
+    }
+
+    /// Claim an alert named `key` if it hasn't gone out in `every_ms`: true for one caller on any
+    /// node (read and written in one transaction).
+    pub fn claim_alert(&self, key: &str, now: i64, every_ms: i64) -> Result<bool> {
+        self.db.write(|c| {
+            let last: Option<String> = c.query_row("SELECT value FROM settings WHERE key = ?", [key], |r| r.get(0)).optional()?;
+            if last.and_then(|v| v.parse::<i64>().ok()).is_some_and(|at| now - at < every_ms) {
+                return Ok::<_, Error>(false);
+            }
+            c.execute("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", params![key, now.to_string()])?;
+            Ok(true)
+        })
+    }
+
     /// What a grant's requests that ran since `since` were about, by product, action and resource
     /// (most used first; at most 5,000 kinds): allowed ones, and ones that ran on an approval (a
     /// pending one is the gate's 403).
@@ -1830,6 +2036,8 @@ impl Store {
                 break;
             }
         }
+        // Alerts as long as the audit log, the newest always kept: places are never reused.
+        self.db.write(|c| Ok::<_, Error>(c.execute("DELETE FROM access_alerts WHERE at < ? AND seq < (SELECT MAX(seq) FROM access_alerts)", [before])?))?;
         self.db.write(|c| {
             c.execute("DELETE FROM approvals WHERE expires_at < ?", [now - 24 * 3600 * 1000])?;
             // A network unused for the log's days is forgotten (used again, it's news again).

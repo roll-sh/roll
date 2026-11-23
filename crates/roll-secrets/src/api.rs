@@ -67,6 +67,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{K}/purge"), post(purge))
         .route(&format!("{K}/hosts"), put(set_hosts).delete(clear_hosts))
         .route(&format!("{E}/values"), get(values))
+        .route(&format!("{E}/values/delta"), post(values_delta).layer(axum::extract::DefaultBodyLimit::max(DELTA_BODY)))
         .route(&format!("{E}/digest"), get(digest))
         .route(&format!("{E}/insights"), get(insights))
         .route(&format!("{E}/reach"), get(reach))
@@ -731,6 +732,19 @@ async fn values(State(s): S, Who(c): Who, Path((project, env)): Path<(String, St
     Ok(secret_response(r))
 }
 
+/// The most a delta read's claim may hold (`POST …/values/delta`): every key's name and stamp of a
+/// large folder (about 60 bytes a key). Past it a watcher reads the full set.
+const DELTA_BODY: usize = 4 << 20;
+
+/// `POST …/values/delta?path=&dynamic=`: what changed since the answer a watcher holds
+/// ([`Secrets::values_delta`]); an empty body is the full set with its stamps.
+async fn values_delta(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, Query(q): Q, b: Bytes) -> crate::Result<Response> {
+    let held: crate::Held = if b.is_empty() { Default::default() } else { body(&b)? };
+    let dynamic = flag(&q, "dynamic", true);
+    let d = blocking(s, move |s| s.values_delta(&project, &env, &path_of(&q), &held, dynamic, &c)).await?;
+    Ok(secret_response(ok(d)))
+}
+
 async fn reach(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, Query(q): Q) -> crate::Result<Response> {
     Ok(ok(blocking(s, move |s| s.reach(&project, &env, &path_of(&q), q.get("key").map(String::as_str), &c)).await?))
 }
@@ -1062,7 +1076,7 @@ async fn import_dotenv(State(s): S, Who(c): Who, Path((project, env)): Path<(Str
             let r = s.open_request(&project, &env, b, &c)?;
             return Ok(json!({ "request": r, "skipped": skipped }));
         }
-        let a = s.batch(&project, &env, b, &c)?;
+        let a = s.batch_via(&project, &env, b, crate::write::Via::Import, &c)?;
         Ok(json!({ "change": a.change, "items": a.items, "warnings": a.warnings, "skipped": skipped }))
     })
     .await?;

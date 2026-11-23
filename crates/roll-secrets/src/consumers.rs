@@ -35,7 +35,9 @@
 //! **A roll code owner's own settings** (its reviewer's provider key; [`ResourceRef::code_owner`]):
 //! no canvas holds an owner, so its project is the one whose canvas holds one of the owner's
 //! repositories and stands for it (`Workspace::trusts` for that repo, as its checks read), named
-//! in the reference when there are several. Audited as `code:review:<owner>`.
+//! in the reference when there are several. Audited as `code:review:<owner>`. One of the owner's
+//! agent machines (an endpoint's key; [`ResourceRef::agent_machine`]) reads through the same
+//! project, audited as `agent:<machine>`.
 //!
 //! **Untrusted copies.** A resource whose code or data didn't come through its owner (a search
 //! branch keeps its cluster's id, as a preview keeps its service's) asks with
@@ -50,7 +52,7 @@
 //! resolves again when it moves.
 
 use crate::access::Caller;
-use crate::{Error, Secrets, Value, names};
+use crate::{Error, Secrets, Value};
 use roll_workspace::Kind;
 
 /// The product resource asking, as on the workspace canvas: its kind and ref, and whether it's an
@@ -61,19 +63,43 @@ pub struct ResourceRef {
     pub r#ref: String,
     untrusted: bool,
     placeholders: bool,
-    /// A roll code owner (`r#ref`), not a canvas resource: [`ResourceRef::code_owner`].
-    owner: bool,
+    /// Not a canvas resource: something of a roll code owner's, read through the project that
+    /// stands for the owner.
+    owner: Option<OwnersOwn>,
+}
+
+/// What of a roll code owner's reads a reference ([`ResourceRef::code_owner`],
+/// [`ResourceRef::agent_machine`]): the owner's name, and what of theirs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum OwnersOwn {
+    Reviewer(String),
+    Machine(String),
+}
+
+impl OwnersOwn {
+    fn owner(&self) -> &str {
+        match self {
+            OwnersOwn::Reviewer(o) | OwnersOwn::Machine(o) => o,
+        }
+    }
 }
 
 impl ResourceRef {
     pub fn new(kind: Kind, r#ref: impl Into<String>) -> ResourceRef {
-        ResourceRef { kind, r#ref: r#ref.into(), untrusted: false, placeholders: false, owner: false }
+        ResourceRef { kind, r#ref: r#ref.into(), untrusted: false, placeholders: false, owner: None }
     }
 
     /// roll code owner `owner`'s reviewer (its provider key): `code:review:<owner>`, read through
     /// the project whose canvas holds one of the owner's repositories and stands for it.
     pub fn code_owner(owner: impl Into<String>) -> ResourceRef {
-        ResourceRef { owner: true, ..ResourceRef::new(Kind::Repo, owner) }
+        let owner = owner.into();
+        ResourceRef { owner: Some(OwnersOwn::Reviewer(owner.clone())), ..ResourceRef::new(Kind::Repo, owner) }
+    }
+
+    /// roll code owner `owner`'s agent machine `machine` (its name; an endpoint's key):
+    /// `agent:<machine>`, read through the same project as [`ResourceRef::code_owner`].
+    pub fn agent_machine(owner: impl Into<String>, machine: impl Into<String>) -> ResourceRef {
+        ResourceRef { owner: Some(OwnersOwn::Machine(owner.into())), ..ResourceRef::new(Kind::Repo, machine) }
     }
 
     /// The same resource as a copy nobody vetted (a branch, a clone, anything whose code or data
@@ -103,8 +129,10 @@ impl ResourceRef {
     /// Who it is in the audit log: `storage:bucket:<ref>`, `search:search:<ref>`, …, with
     /// ` (untrusted)` after it for an untrusted copy.
     pub fn consumer(&self) -> String {
-        if self.owner {
-            return format!("code:review:{}", self.r#ref);
+        match &self.owner {
+            Some(OwnersOwn::Reviewer(o)) => return format!("code:review:{o}"),
+            Some(OwnersOwn::Machine(_)) => return format!("agent:{}", self.r#ref),
+            None => {}
         }
         let product = match self.kind {
             Kind::Bucket => "storage",
@@ -202,50 +230,20 @@ impl From<Error> for Refusal {
     }
 }
 
-/// `roll://[PROJECT@]ENV[/folder…]/KEY`, as roll-cli reads it (docs/secrets.md, "References in files").
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Reference {
-    pub project: Option<String>,
-    pub env: String,
-    pub path: String,
-    pub key: String,
+/// `roll://[PROJECT@]ENV[/folder…]/KEY`, as roll-cli reads it (docs/secrets.md, "References in
+/// files"): `Reference::parse` is the one parser every product uses. It lives in
+/// `roll-secrets-ref` (no I/O) so the agents' wire can use it without roll secrets.
+pub use roll_secrets_ref::Reference;
+
+impl From<roll_secrets_ref::BadReference> for Refusal {
+    fn from(e: roll_secrets_ref::BadReference) -> Refusal {
+        Refusal::BadReference(e.0)
+    }
 }
 
-impl Reference {
-    /// `Some` for a `roll://` value, an error for a malformed one, `None` for anything else.
-    ///
-    /// Exact: a value that would be a reference only once trimmed or lowercased (` roll://…`,
-    /// `ROLL://…`) is an error, never plain text and never a reference, so a product's own
-    /// "is this a reference?" check can't disagree with what's resolved.
-    pub fn parse(text: &str) -> Result<Option<Reference>, Refusal> {
-        let bad = || Refusal::BadReference("a reference is roll://ENV/KEY, roll://ENV/folder/KEY or roll://PROJECT@ENV/KEY".into());
-        let Some(rest) = text.strip_prefix("roll://") else {
-            let t = text.trim_start();
-            if t.len() >= 7 && t.is_char_boundary(7) && t[..7].eq_ignore_ascii_case("roll://") {
-                return Err(Refusal::BadReference("a reference starts with roll:// exactly: no space before it, lowercase".into()));
-            }
-            return Ok(None);
-        };
-        if rest.trim_end().len() != rest.len() {
-            return Err(Refusal::BadReference("a reference has no space after it".into()));
-        }
-        let (project, rest) = match rest.split_once('@') {
-            Some((p, r)) if !p.is_empty() && !p.contains('/') => (Some(p.to_string()), r),
-            Some(_) => return Err(bad()),
-            None => (None, rest),
-        };
-        let parts: Vec<&str> = rest.split('/').collect();
-        if parts.len() < 2 || !parts.iter().all(|p| names::segment(p)) || names::slug(parts[0]).is_err() || names::key(parts[parts.len() - 1]).is_err() {
-            return Err(bad());
-        }
-        let path = if parts.len() == 2 { "/".to_string() } else { format!("/{}", parts[1..parts.len() - 1].join("/")) };
-        let path = names::path(&path).map_err(|_| bad())?;
-        Ok(Some(Reference { project, env: parts[0].to_string(), path, key: parts[parts.len() - 1].to_string() }))
-    }
-
-    fn required(text: &str) -> Result<Reference, Refusal> {
-        Reference::parse(text)?.ok_or_else(|| Refusal::BadReference("it doesn't start with roll://".into()))
-    }
+/// A reference, or why `text` isn't one.
+fn required(text: &str) -> Result<Reference, Refusal> {
+    Reference::parse(text)?.ok_or_else(|| Refusal::BadReference("it doesn't start with roll://".into()))
 }
 
 impl Secrets {
@@ -275,7 +273,7 @@ impl Secrets {
 
     fn bind(&self, resource: &ResourceRef, reference: &str, caller: &Caller, runtime_env: Option<&str>) -> Result<Maker, Refusal> {
         let by = self.maker_of(caller)?;
-        let r = Reference::required(reference)?;
+        let r = required(reference)?;
         let project = self.project_for(resource, r.project.as_deref())?;
         self.may_reveal_for(&project, &r, caller)?;
         let maker = match runtime_env {
@@ -305,7 +303,7 @@ impl Secrets {
     /// binding then reads its one environment as the resource's runtime, named
     /// `<resource> (runtime read for <maker>)`, while the maker still reaches the project.
     fn as_maker(&self, resource: &ResourceRef, reference: &str, maker: &Maker) -> Result<(String, Reference, Caller), Refusal> {
-        let r = Reference::required(reference)?;
+        let r = required(reference)?;
         let project = self.project_for(resource, r.project.as_deref())?;
         let out = self.as_maker_in(resource, &project, &r, maker);
         if let Err(Refusal::MakerUnreachable(why)) = &out {
@@ -348,7 +346,7 @@ impl Secrets {
 
     /// `reference`'s value for `resource`, read as described in the module doc and audited.
     pub fn resolve_for(&self, resource: &ResourceRef, reference: &str) -> Result<Resolved, Refusal> {
-        let r = Reference::required(reference)?;
+        let r = required(reference)?;
         let project = self.project_for(resource, r.project.as_deref())?;
         self.resolve_one(&project, &r.env, &r.path, &r.key, &Caller::consumer(&resource.consumer()), resource.untrusted, resource)
     }
@@ -357,7 +355,7 @@ impl Secrets {
     /// refused as the resolve would be, and it moves when the value would, so a product polls it
     /// and resolves again only then.
     pub fn digest_for(&self, resource: &ResourceRef, reference: &str) -> Result<String, Refusal> {
-        let r = Reference::required(reference)?;
+        let r = required(reference)?;
         let project = self.project_for(resource, r.project.as_deref())?;
         self.digest_one(&project, &r, &Caller::consumer(&resource.consumer()), resource)
     }
@@ -375,13 +373,14 @@ impl Secrets {
         let who = resource.consumer();
         let ws = |e: roll_workspace::Error| Error::Internal(e.to_string());
         let mut trusting = vec![];
-        if resource.owner {
+        if let Some(own) = &resource.owner {
             // One of the owner's repositories on its canvas, which it stands for.
-            let prefix = format!("{}/", resource.r#ref);
+            let owner = own.owner();
+            let prefix = format!("{owner}/");
             let theirs = |p: &roll_workspace::Project| p.resources.iter().any(|x| x.kind == Kind::Repo && x.r#ref.starts_with(&prefix) && self.workspace.trusts(p, Kind::Repo, &x.r#ref));
             trusting = self.workspace.list(roll_workspace::Scope::All).map_err(ws)?.into_iter().filter(theirs).collect();
             if trusting.is_empty() {
-                return Err(Refusal::NoProject(format!("no project's canvas holds one of {}'s repositories and stands for it", resource.r#ref)));
+                return Err(Refusal::NoProject(format!("no project's canvas holds one of {owner}'s repositories and stands for it")));
             }
         } else {
             let ids = self.workspace.projects_of(resource.kind.as_str(), &resource.r#ref).map_err(ws)?;
@@ -415,17 +414,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn references_read_as_roll_cli_reads_them() {
-        let r = |v: &str| Reference::parse(v).unwrap().unwrap();
-        assert_eq!(r("roll://production/AWS_SECRET_ACCESS_KEY"), Reference { project: None, env: "production".into(), path: "/".into(), key: "AWS_SECRET_ACCESS_KEY".into() });
-        assert_eq!(r("roll://shop@staging/payments/stripe/KEY").path, "/payments/stripe");
-        assert_eq!(r("roll://shop@staging/KEY").project.as_deref(), Some("shop"));
-        assert!(Reference::parse("not-a-reference").unwrap().is_none());
-        for bad in ["roll://production", "roll://prod/../KEY", "roll://@prod/KEY", "roll://prod//KEY", " roll://prod/KEY", "\troll://prod/KEY", "ROLL://prod/KEY", "Roll://prod/KEY", "roll://prod/KEY "] {
-            assert!(matches!(Reference::parse(bad), Err(Refusal::BadReference(_))), "{bad}");
-        }
+    fn resources_are_named_for_the_audit_log() {
+        // A malformed reference is a refusal of its own (the parser's tests are in roll-secrets-ref).
+        assert!(matches!(required(" roll://prod/KEY"), Err(Refusal::BadReference(_))));
+        assert!(matches!(required("plain"), Err(Refusal::BadReference(_))));
         assert_eq!(ResourceRef::new(Kind::Bucket, "photos").consumer(), "storage:bucket:photos");
         assert_eq!(ResourceRef::new(Kind::Bucket, "photos").untrusted().consumer(), "storage:bucket:photos (untrusted)");
         assert_eq!(ResourceRef::code_owner("acme").consumer(), "code:review:acme");
+        assert_eq!(ResourceRef::agent_machine("acme", "acme").consumer(), "agent:acme");
     }
 }

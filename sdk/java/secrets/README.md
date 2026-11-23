@@ -26,7 +26,8 @@ v = c.resolveSealed("production", "", "app:web", key);
 // credentials' leases are renewed meanwhile. close() stops it.
 Watch w = c.watch("production", WatchOptions.of(vals -> reload(vals.values())).onError(e -> log.warn(e.getMessage())));
 
-// Read per request? Keep answers 30 s, then revalidate (a 304 while unchanged).
+// Read per request? Keep answers 30 s, then ask for what changed since (`…/values/delta`:
+// nothing while unchanged, only the changed keys after a change). A watch reads changes the same way.
 RollSecrets cached = RollSecrets.builder().cacheTtl(Duration.ofSeconds(30)).build();
 
 // An encryption key (docs/secrets.md, "Encryption keys"): the key stays in roll.

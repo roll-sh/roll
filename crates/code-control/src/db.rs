@@ -439,6 +439,8 @@ const COLUMNS: &[(&str, &str, &str)] = &[
     // Sandboxes from before they kept where copied secrets came from, and whether they went.
     ("agent_sandboxes", "secrets_from", "TEXT"),
     ("agent_sandboxes", "secrets_dropped", "TEXT"),
+    // Sandboxes from before they named the copied variables they started without.
+    ("agent_sandboxes", "secrets_unset", "TEXT"),
     // Automation runs from before a wake during a step's attempt was kept.
     ("automation_runs", "woken", "INTEGER NOT NULL DEFAULT 0"),
     // Work items from before issues said whether their author can push (the next sync says).
@@ -474,6 +476,7 @@ impl Db {
             crate::agents::sandbox::store::SCHEMA,
             crate::agents::docs::SCHEMA,
             crate::agents::endpoints::SCHEMA,
+            crate::agents::endpoint_refs::SCHEMA,
             crate::agents::gateway::SCHEMA,
             crate::agents::automations::SCHEMA,
             crate::agents::linear::SCHEMA,

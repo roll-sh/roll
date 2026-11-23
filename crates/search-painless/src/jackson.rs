@@ -1174,6 +1174,11 @@ impl XContentReader {
         if crate::guard::stack_exhausted() {
             return Err(self.fail(self.lx.err("Document nesting depth exceeds the stack available to read it".into()), Call::NextToken));
         }
+        // a document read inside an execution counts against its memory: past the limit the
+        // limit's failure is pending, and replaces this error after the library call
+        if crate::guard::over_budget() {
+            return Err(self.fail(self.lx.err("script memory limit".into()), Call::NextToken));
+        }
         self.stack.push(("readValueUnsafe", 464));
         let v = match t {
             Some(Tok::Str) => Value::string(self.text()?),
@@ -1208,6 +1213,12 @@ pub(crate) fn load(src: &str, map_class: ClassId) -> Result<Option<Value>, ReadE
     // treats specially or rejects goes through the exact reader below
     if let Some(v) = fast::load(src, map_class) {
         return Ok(Some(v));
+    }
+    // the exact reader starts with the input in UTF-16: inside an execution that has to fit
+    // (the fast reader may also have stopped at the limit); the pending failure then replaces
+    // whatever this returns
+    if !crate::guard::reserve_or_note(2 * src.len() as u64) {
+        return Ok(None);
     }
     let mut r = XContentReader::new(src, map_class);
     Ok(Some(match r.next_token()? {

@@ -372,9 +372,11 @@ pub struct Intercept {
 pub struct SecretVar {
     pub name: String,
     pub value: String,
-    /// It's a linked resource's address as rolld sees it (`Values.linked`: `127.0.0.1`, a
-    /// node's own host name): apps rewrites it for the container, as its own links.
-    pub linked: bool,
+    /// The resource it's linked to, `(kind, ref)` (`Values.links`: `("postgres", "main")`). Its
+    /// value is an address as rolld sees it (`127.0.0.1`, a node's own host name): apps rewrites it
+    /// for the container, as its own links, and leaves it out of an environment with data of its
+    /// own when it links a resource apps links there itself.
+    pub link: Option<(String, String)>,
     /// Only for runtimes (roll secrets' `sensitive` keys, Vercel's sensitive variables): it goes
     /// to builds and instances, and no answer ever holds it, as a sealed variable (shown
     /// `sealed`, left out of `…/variables/values` for everyone, references to it sealed too).
@@ -429,6 +431,12 @@ pub trait Resources: Send + Sync {
     /// The variables a link to this resource injects, under their unprefixed names
     /// (`DATABASE_URL`, `REDIS_URL`, …). An error when the resource doesn't exist.
     async fn link_vars(&self, kind: LinkKind, r#ref: &str) -> anyhow::Result<Vec<(String, String)>>;
+    /// What a link sets, read with the credentials it made for itself (`minted`'s variables):
+    /// what only its own key may read (a tasks tenant's signing keys). By default
+    /// [`Resources::link_vars`].
+    async fn link_vars_as(&self, kind: LinkKind, r#ref: &str, _minted: &[(String, String)]) -> anyhow::Result<Vec<(String, String)>> {
+        self.link_vars(kind, r#ref).await
+    }
     /// A new link's own credentials, made once when the link is made and kept sealed with it
     /// (a search cluster's API key for this service): `None` for a kind whose variables are
     /// read fresh with [`Resources::link_vars`] (a database's own URL).

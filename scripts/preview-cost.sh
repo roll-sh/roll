@@ -114,7 +114,7 @@ PG=$(api POST /v1/projects '{"name":"shop-db"}' | jq_ "d['id']")
 PG_PARENT_EP=$(api GET "/v1/projects/$PG" | jq_ "[b['endpoint']['id'] for b in d['branches'] if b['parent_id'] is None][0]")
 api POST "/v1/endpoints/$PG_PARENT_EP/query" '{"sql":"CREATE TABLE users (id int PRIMARY KEY, email text); INSERT INTO users VALUES (1, '"'"'ada@example.com'"'"')"}' >/dev/null
 api POST "/v1/streams/$STREAM/topics" '{"name":"clicks","partitions":3}' >/dev/null
-api POST /_roll/tenants '{"id":"work"}' >/dev/null
+WORK_TOKEN=$(api POST /_roll/tenants '{"id":"work"}' | jq_ "d['token']")
 # Data in the parents, so the branches have something to share: 20 MiB of objects, 20,000 keys.
 KEY=$(api POST /v1/storage/keys '{"name":"e2e","permission":"admin"}')
 export AWS_ACCESS_KEY_ID=$(echo "$KEY" | jq_ "d['id']") AWS_SECRET_ACCESS_KEY=$(echo "$KEY" | jq_ "d['secret_access_key']") AWS_DEFAULT_REGION=us-east-1
@@ -284,6 +284,14 @@ FOLLOWED=$(python3 -c 'import sys,urllib.parse as u; e=dict(l.split("=",1) for l
 [ "$FOLLOWED" = ok ] || { echo "a secrets link to the branched parent should give the branch's password: $FOLLOWED"; exit 1; }
 echo "$APP_ENV" | grep -qx 'PAYMENTS_KEY=sk_test_from_staging_42' || { echo "roll://staging/PAYMENTS_TEST_KEY should be staging's value: $(echo "$APP_ENV" | grep '^PAYMENTS_KEY=' | cut -c1-40)"; exit 1; }
 echo "$APP_ENV" | grep -qxF 'GREETING=hello ${USER}' || { echo "a plain value's \${ should stay as it is: $(echo "$APP_ENV" | grep '^GREETING=')"; exit 1; }
+# Its tasks tenant's own webhook signing keys (roll apps' `tasks` link names them), not production's:
+# its deliveries verify.
+BRANCH_TASKS=$(echo "$P" | jq_ "[r['ref'] for r in d['resources'] if r['kind']=='tasks'][0]")
+TASKS_SK=$(echo "$APP_ENV" | sed -n 's/^ROLL_TASKS_SIGNING_KEY=//p')
+keys_of() { curl -sf -H "Authorization: Bearer $2" "http://$API/t/$1/v1/tasks/keys" | jq_ "d['current']"; }
+OWN_TASKS_KEY=$(keys_of "$BRANCH_TASKS" "$(echo "$APP_ENV" | sed -n 's/^ROLL_TASKS_TOKEN=//p')")
+PROD_TASKS_KEY=$(keys_of work "$WORK_TOKEN")
+[ -n "$TASKS_SK" ] && [ "$TASKS_SK" = "$OWN_TASKS_KEY" ] && [ "$TASKS_SK" != "$PROD_TASKS_KEY" ] || { echo "the preview's service should hold its tasks tenant's own signing key (own $([ "$TASKS_SK" = "$OWN_TASKS_KEY" ] && echo yes || echo no), production's $([ "$TASKS_SK" = "$PROD_TASKS_KEY" ] && echo yes || echo no))"; exit 1; }
 # Its bucket's key reaches only its branch: production's bucket (the parent) refuses it, as every
 # credential a preview's code holds is the branch's own (search's data-only key below too).
 PV_AK=$(echo "$APP_ENV" | sed -n 's/^AWS_ACCESS_KEY_ID=//p'); PV_SK=$(echo "$APP_ENV" | sed -n 's/^AWS_SECRET_ACCESS_KEY=//p')
@@ -678,6 +686,8 @@ done
 PAGE=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/")
 [ "$PAGE" = 'preview of change 1, third<script>console.error("boom")</script> <nav><a href="/gone">a page that went</a></nav>' ] || { echo "a push that touches code should redeploy: the page says $PAGE"; exit 1; }
 KEPT="kept $(bare "$RUNS" | cut -c1-10) through a docs-only push; redeployed at $(bare "$CODE_HEAD" | cut -c1-10)"
+# How that push came up: its data step takes the earlier push's copies (every product's).
+STEPS3=$(api GET "/v1/previews/$PV" | jq_ "(lambda t: ' · '.join('%s %d ms' % (s['step'], s['at'] - (t['steps'][i - 1]['at'] if i else t['started_at'])) for i, s in enumerate(t['steps']) if s['step'] != 'ready'))(d['timeline']) if d.get('timeline') else ''")
 # The push before stays reachable at a URL of its own, on the same data (Vercel's per-push URLs).
 EARLIER_URL=$(api GET "/v1/previews/$PV" | jq_ "((d.get('earlier') or [{}])[0]).get('share_url') or ''")
 [ -n "$EARLIER_URL" ] || { echo "the previous push should stay reachable"; api GET "/v1/previews/$PV" | jq_ "d.get('earlier')"; exit 1; }
@@ -1111,6 +1121,7 @@ cat <<EOF
 | The preview's bucket key: its branch / production's bucket | $OWN_LS / $PARENT_LS |
 | … step by step (its timeline: data, setup, deploy, checks) | $STEPS |
 | An earlier push's own copy of the data: a table made after it is absent there / present in the preview's; its Redis, search, bucket, stream and NoSQL | $OWN_DATA |
+| A push whose earlier head keeps copies of every branch: its timeline | $STEPS3 |
 | What a follower of the events hears (\`GET /v1/previews/events\`, roll MCP's Events) | $EVENTS |
 | Search: a sync of the parent's connector on the parent / asked of the branch (inherited, waits for adoption) | $PSTATE / $BSTATE |
 | Parent bucket bytes / the branch's own bytes after writing 1 MiB / objects the branch sees | $PARENT_OBJECTS / $BRANCH_OBJECTS / $BRANCH_SEES |

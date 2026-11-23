@@ -13,7 +13,8 @@
 //! And roll apps (`ForApps`): what a service got from roll secrets is shown only as roll secrets
 //! would show it to whoever asks.
 //!
-//! And reach (`ReachHolders`): the services that read a folder.
+//! And reach (`ReachHolders`): the services that read a folder, and the ones an environment's delete
+//! would break.
 
 mod common;
 
@@ -643,4 +644,23 @@ async fn reach_names_the_services_that_read_a_folder() {
     let api = r.get(&format!("{secrets}/production/reach?path=/api")).await;
     assert_eq!(through(&api), [("worker".to_string(), "roll://production/api/API_TOKEN".to_string())], "{api}");
     assert!(!api.to_string().contains("fake-api-token"), "names, never a value");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_environments_delete_names_the_services_that_read_it_and_needs_a_confirm() {
+    let r = Rolld::start("apps,search", false).await;
+    let project = Project::new(&r).await.id;
+    let envs = format!("/v1/secrets/projects/{project}/environments");
+    r.call(reqwest::Method::PUT, &format!("{envs}/staging/secrets/LOG_LEVEL"), Some(json!({ "value": "debug" }))).await;
+    let svc = r.post("/v1/apps/services", json!({ "project": project, "name": "web", "source": { "kind": "upload" } })).await;
+    r.call(reqwest::Method::PUT, &format!("/v1/apps/services/{}/environments/staging", svc["id"].as_str().unwrap()), Some(json!({}))).await;
+    let preview = r.get(&format!("{envs}/staging/deletion")).await;
+    assert_eq!(preview["confirm"], true, "something reads it: {preview}");
+    assert!(preview["breaks"].as_array().unwrap().iter().any(|b| b["via"] == "service" && b["name"] == "web" && b["id"] == svc["id"]), "{preview}");
+    assert!(!preview.to_string().contains("debug"), "names, never a value");
+    let delete = |q: &str| r.http.delete(format!("{}{envs}/staging{q}", r.api)).bearer_auth(TOKEN).send();
+    let refused = delete("").await.unwrap();
+    assert_eq!(refused.status(), 409);
+    assert!(refused.text().await.unwrap().contains("service web"));
+    assert_eq!(delete("?confirm=staging").await.unwrap().status(), 200);
 }

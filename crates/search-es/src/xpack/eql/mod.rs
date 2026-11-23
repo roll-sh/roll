@@ -249,14 +249,14 @@ pub async fn search(ctx: &Ctx<'_>) -> EsResult<Reply> {
         id.clone(),
         Entry { kind: Kind::Eql, response: Value::Obj(m.clone()), start_ms: ctx.now_ms, expiration_ms: ctx.now_ms + req.keep_alive_ms, bytes: 0, extra: Value::Null, owner: crate::xpack::async_results::owner(ctx) },
         ctx.now_ms,
-    );
+    )?;
     Reply::ok(with_id(&id, &m))
 }
 
 fn stored(ctx: &Ctx) -> EsResult<(String, Entry)> {
     let id = ctx.path_param("id").unwrap_or_default().to_string();
     async_results::check_id(&id)?;
-    match crate::xpack::async_results::get_own(ctx, &id, Kind::Eql) {
+    match crate::xpack::async_results::get_own(ctx, &id, Kind::Eql)? {
         Some(e) => Ok((id, e)),
         None => Err(EsError::resource_not_found(id)),
     }

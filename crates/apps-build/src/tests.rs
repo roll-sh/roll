@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::*;
 
-fn tree(files: &[(&str, &str)]) -> MapTree {
+pub(crate) fn tree(files: &[(&str, &str)]) -> MapTree {
     MapTree(
         files
             .iter()

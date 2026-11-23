@@ -11,6 +11,7 @@ use crate::json::{Map, Value};
 use crate::obj;
 use crate::xpack::inference::http::{self, Call};
 use crate::xpack::inference::results::{Results, Sparse};
+use crate::xpack::inference::stream::Streaming;
 use crate::xpack::inference::settings::{Reader, validation};
 use crate::xpack::inference::{Endpoint, Request, TaskType};
 use std::time::Duration;
@@ -84,11 +85,11 @@ pub fn embedding_details(ep: &mut Endpoint, size: usize) {
     learned(ep, size, "cosine", ORDER);
 }
 
-async fn send(cluster: &Cluster, ep: &Endpoint, body: &Value, timeout: Duration) -> EsResult<http::Answer> {
+async fn send(cluster: &Cluster, ep: &Endpoint, body: &Value, timeout: Duration, stream: bool) -> EsResult<http::Answer> {
     let url = ep.service_settings.get("url").and_then(Value::as_str).unwrap_or_default().to_string();
     let headers = bearer(cluster, ep, vec![("Content-Type".into(), "application/json".into())])?;
     let call = Call::json(&ep.id, url.clone(), headers, body, timeout, ep.requests_per_minute());
-    let answer = http::post(cluster, &call).await?;
+    let answer = if stream { http::post_stream(cluster, &call).await? } else { http::post(cluster, &call).await? };
     http::check(&ep.id, &url, &answer)?;
     Ok(answer)
 }
@@ -101,13 +102,13 @@ pub async fn infer(cluster: &Cluster, ep: &Endpoint, req: &Request) -> EsResult<
     let json = |a: &http::Answer| super::answer_json("hugging_face", a);
     match ep.task {
         TaskType::TextEmbedding => {
-            let v = json(&send(cluster, ep, &obj! { "inputs" => super::strings(&req.input) }, req.timeout).await?)?;
+            let v = json(&send(cluster, ep, &obj! { "inputs" => super::strings(&req.input) }, req.timeout, false).await?)?;
             // Text Embeddings Inference answers a list of vectors; some servers wrap it.
             let list = v.as_array().or_else(|| v.get("embeddings").and_then(Value::as_array)).ok_or_else(|| missing_field("embeddings", "Hugging Face embeddings"))?;
             super::float_vectors(list, req.input.len(), "Hugging Face embeddings")
         }
         TaskType::SparseEmbedding => {
-            let v = json(&send(cluster, ep, &obj! { "inputs" => super::strings(&req.input) }, req.timeout).await?)?;
+            let v = json(&send(cluster, ep, &obj! { "inputs" => super::strings(&req.input) }, req.timeout, false).await?)?;
             let list = v.as_array().ok_or_else(|| missing_field("embeddings", "Hugging Face sparse embeddings"))?;
             if list.len() != req.input.len() {
                 return Err(EsError::java(500, "illegal_state_exception", format!("The Hugging Face sparse embeddings response holds [{}] embeddings for [{}] inputs", list.len(), req.input.len())));
@@ -135,7 +136,7 @@ pub async fn infer(cluster: &Cluster, ep: &Endpoint, req: &Request) -> EsResult<
                 b.insert("top_n".into(), n);
             }
             let top_n = req.top_n.or_else(|| ts.get("top_n").and_then(Value::as_i64));
-            let v = json(&send(cluster, ep, &Value::Obj(b), req.timeout).await?)?;
+            let v = json(&send(cluster, ep, &Value::Obj(b), req.timeout, false).await?)?;
             let list = v.as_array().ok_or_else(|| missing_field("score", "Hugging Face rerank"))?;
             let mut ranked = super::ranked(list, req.input.len(), "score", |r| r.get("text").and_then(Value::as_str).map(str::to_owned), "Hugging Face rerank")?;
             // The server may answer every document; the endpoint keeps its top `top_n`.
@@ -146,21 +147,21 @@ pub async fn infer(cluster: &Cluster, ep: &Endpoint, req: &Request) -> EsResult<
         }
         TaskType::Completion => {
             let input = one_input(req, "Hugging Face completion")?;
-            let answer = send(cluster, ep, &oai::body(style(ep), oai::user_message(input), &Map::new(), false), req.timeout).await?;
+            let answer = send(cluster, ep, &oai::body(style(ep), oai::user_message(input), &Map::new(), false), req.timeout, false).await?;
             Ok(Results::Completion(vec![oai::completion_text(&json(&answer)?, "Hugging Face chat completions")?]))
         }
         other => Err(crate::xpack::inference::unsupported_task(other, "hugging_face")),
     }
 }
 
-pub async fn stream_completion(cluster: &Cluster, ep: &Endpoint, req: &Request) -> EsResult<Vec<Value>> {
+pub async fn stream_completion(cluster: &Cluster, ep: &Endpoint, req: &Request) -> EsResult<Streaming> {
     let input = one_input(req, "Hugging Face completion")?;
-    let answer = send(cluster, ep, &oai::body(style(ep), oai::user_message(input), &Map::new(), true), req.timeout).await?;
-    Ok(oai::completion_events(&answer.body))
+    let answer = send(cluster, ep, &oai::body(style(ep), oai::user_message(input), &Map::new(), true), req.timeout, true).await?;
+    Streaming::open(answer, oai::completion_decoder("Hugging Face chat completions"))
 }
 
-pub async fn stream_chat(cluster: &Cluster, ep: &Endpoint, body: &Value, timeout: Duration) -> EsResult<Vec<Value>> {
+pub async fn stream_chat(cluster: &Cluster, ep: &Endpoint, body: &Value, timeout: Duration) -> EsResult<Streaming> {
     let (messages, req) = oai::unified(body)?;
-    let answer = send(cluster, ep, &oai::body(style(ep), messages, &req, true), timeout).await?;
-    Ok(oai::chat_events(&answer.body))
+    let answer = send(cluster, ep, &oai::body(style(ep), messages, &req, true), timeout, true).await?;
+    Streaming::open(answer, oai::chat_decoder(&ep.id))
 }

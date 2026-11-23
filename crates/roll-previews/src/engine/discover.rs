@@ -66,6 +66,45 @@ impl Engine {
         Ok(())
     }
 
+    /// Production's browser checks on `r`'s head (roll apps runs them once on a preview's
+    /// deployment as it goes live): read each pass from when the head is up until each has run, or
+    /// [`BROWSER_CHECKS_FOR_MS`] after; kept with the head, and reported when they change. They
+    /// never hold `ready` up. A preview without any reads once.
+    async fn read_browser_checks(&self, r: &Row, now: i64) {
+        let Ok(Some(t)) = self.store.runtime_fact::<crate::Timeline>(&r.id, "timeline") else { return };
+        let Some(up) = t.steps.iter().find(|s| s.step == "ready").map(|s| s.at).filter(|_| t.head == r.head) else { return };
+        let had = self.store.runtime_fact::<crate::BrowserChecks>(&r.id, "browser_checks").ok().flatten().filter(|f| f.head == r.head);
+        let done = had.as_ref().is_some_and(|f| f.checks.iter().all(|c| c.state != crate::CheckState::Pending));
+        if done || (had.is_some() && now > up + BROWSER_CHECKS_FOR_MS) {
+            return;
+        }
+        let Ok(services) = self.store.services(&r.id) else { return };
+        let mut checks = Vec::new();
+        for svc in services {
+            for c in self.apps.browser_checks(&r.id, &svc.name).await.unwrap_or_default() {
+                let state = match c.passed {
+                    Some(true) => crate::CheckState::Passed,
+                    Some(false) => crate::CheckState::Failed,
+                    None => crate::CheckState::Pending,
+                };
+                let error = c.error.filter(|_| state == crate::CheckState::Failed).map(|e| crate::schema::printable(&e));
+                checks.push(crate::BrowserCheck { service: svc.name.clone(), name: crate::schema::printable(&c.name), state, error });
+            }
+        }
+        let fact = crate::BrowserChecks { head: r.head.clone(), checks };
+        if had.as_ref() != Some(&fact) {
+            let _ = self.store.set_runtime_fact(&r.id, "browser_checks", Some(&fact));
+            // Once they've all run: an event for followers (roll MCP's Events), once a head.
+            if !fact.checks.is_empty() && fact.checks.iter().all(|c| c.state != crate::CheckState::Pending) {
+                let kind = if fact.checks.iter().any(|c| c.state == crate::CheckState::Failed) { "browser_checks_failed" } else { "browser_checks_passed" };
+                let _ = self.store.emit_once(&r.id, kind, &r.head);
+            }
+            if let Ok(row) = self.store.row(&r.id) {
+                self.report(row).await;
+            }
+        }
+    }
+
     pub(super) async fn discover(&self, project_id: &str, s: &Settings) -> anyhow::Result<()> {
         let project = match self.workspace.get(roll_workspace::Scope::All, project_id) {
             Ok(p) => p,
@@ -300,6 +339,10 @@ impl Engine {
                     self.store.set_idled(&r.id, true)?;
                     self.store.log(&r.id, "idle for an hour: its branches went cold")?;
                 }
+            }
+            // Production's browser checks on this head, read until each has run.
+            if r.state == State::Ready {
+                self.read_browser_checks(&r, now).await;
             }
             // A service from another repo of the project follows that repo's branch of the same name,
             // else its default branch.

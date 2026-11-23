@@ -172,7 +172,7 @@ impl Secrets {
         // transaction: never a decoy key without its mark. It's also the plant's only record past
         // the key's ordinary `secrets.write` (who and when, on [`Decoy`]): an audit row of its own
         // would leave a gap right after that write in a token's view.
-        let written = self.commit_then(project, env, vec![item], &[(0, 0)], "write", "", None, true, caller, &|c, e, _, now| {
+        let written = self.commit_then(project, env, vec![item], &[(0, 0)], crate::write::Via::Write, "", None, true, caller, &|c, e, _, now| {
             let id = current(c, &e.id, &path, &key, "")?.ok_or_else(|| Error::Internal(format!("{key} wasn't written")))?.id;
             c.execute(
                 "INSERT INTO decoys (id, project_id, env_id, secret_id, path, key, kind, ref, created_by, created_at, uses) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",

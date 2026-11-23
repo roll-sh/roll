@@ -120,6 +120,29 @@ fn as_text(v: &Value) -> String {
     }
 }
 
+
+/// The candidate closest to `word` by edit distance, when it's close enough to be a slip (a third
+/// of the word's length, at least 2): "stauts" finds "status", "lmit" finds "limit".
+pub fn nearest<'a>(word: &str, candidates: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
+    let w: Vec<char> = word.to_lowercase().chars().collect();
+    let distance = |b: &str| {
+        let b: Vec<char> = b.to_lowercase().chars().collect();
+        let mut row: Vec<usize> = (0..=b.len()).collect();
+        for (i, a) in w.iter().enumerate() {
+            let mut prev = row[0];
+            row[0] = i + 1;
+            for (j, c) in b.iter().enumerate() {
+                let next = (prev + usize::from(a != c)).min(row[j] + 1).min(row[j + 1] + 1);
+                prev = row[j + 1];
+                row[j + 1] = next;
+            }
+        }
+        row[b.len()]
+    };
+    let most = (w.len() / 3).max(2);
+    candidates.into_iter().map(|c| (distance(c), c)).filter(|(d, _)| *d <= most).min_by_key(|(d, c)| (*d, c.len())).map(|(_, c)| c)
+}
+
 impl Tool {
     /// A path with every `{param}` filled with a sample: what the catalogue classifies.
     fn sample_path(&self) -> String {
@@ -243,7 +266,10 @@ impl Tool {
         let clearable = self.params.iter().any(|p| p.at == At::BodyOrNull);
         for k in obj.keys() {
             if k != "approval" && !(k == "clear" && clearable) && !self.params.iter().any(|p| p.name == k) {
-                return Err(format!("{}: unknown argument {k:?}", self.name));
+                // What it takes, and the nearest name when it's a slip, so the model fixes it in one go.
+                let names: Vec<&str> = self.params.iter().map(|p| p.name).collect();
+                let near = nearest(k, names.iter().copied()).map(|n| format!(" (did you mean {n:?}?)")).unwrap_or_default();
+                return Err(format!("{}: unknown argument {k:?}{near}; it takes {}", self.name, names.join(", ")));
             }
         }
         let mut path = self.path.to_string();
@@ -395,7 +421,7 @@ fn apps_area(method: &str, path: &str) -> Area {
             _ => return Area::Unplaced,
         },
         ["services", "activity"] | ["events"] => "observe",
-        ["services", "links"] | ["services", "restore"] | ["import"] | ["plan"] => "configure",
+        ["services", "links"] | ["services", "restore"] | ["services", "move"] | ["import"] | ["plan"] => "configure",
         ["projects", "drains" | "notifications" | "limits" | "usage" | "status-page" | "preview-domain" | "export" | "signing", ..] => "project",
         _ => return Area::Unplaced,
     };
@@ -695,6 +721,16 @@ static TOOLS: &[Tool] = &[
     ),
     t("access_list_approvals", "List approvals", "Approvals, newest first: pending ones wait for the operator.", "access", "GET", "/v1/access/approvals", &[q("state", Ty::Str, "pending, approved, denied, used")]),
     t("access_audit_log", "Audit log", "Every request made with a token and every MCP tool call, newest first.", "access", "GET", "/v1/access/audit", &[q("grant", Ty::Str, "Only this token (tok_…)"), q("product", Ty::Str, "Only this product"), q("decision", Ty::Str, "allow, deny or ask"), q("limit", Ty::Int, "At most (default 100)")]),
+    t("access_activity", "Agent activity: tools, connections, days", "How agents used roll's MCP server lately (default 7 days, up to 30): per tool its calls, refused and failed calls, average, median, 95th percentile and longest duration and last call; per connection; per day. Answers \"which tools fail\" and \"which agent is busiest\". A person's are their own connections'.", "access", "GET", "/v1/access/activity", &[q("days", Ty::Int, "Days back, 1-30 (default 7)")]),
+    t(
+        "access_send_feedback",
+        "Tell roll's operator what was hard",
+        "Send roll's operator feedback when something got in the way: a tool that failed or answered unexpectedly, a missing tool, a confusing error. Say what you were doing, what happened and what you expected; never a secret or a user's data. It changes nothing; 20 an hour.",
+        "access",
+        "POST",
+        "/v1/access/feedback",
+        &[breq("task", Ty::Str, "What you were trying to do"), breq("actual", Ty::Str, "What happened"), b("expected", Ty::Str, "What you expected instead"), b("tool", Ty::Str, "The tool it was about, if one")],
+    ),
     t("access_checkup", "Checkup: which tokens need attention", "The live tokens that need attention, most serious first, each with its findings and fix: everything (delete, reveal or admin on every resource without asking: tighten), never_expires (give it an expiry), unused (nothing in 30 days: revoke), narrower (its requests needed less than its rules: tighten), roams (five or more networks and no address limit). A person's checkup is of their own tokens; fixing one is theirs or the operator's, on the token's page or with roll token.", "access", "GET", "/v1/access/checkup", &[]),
     t("access_list_tokens", "List tokens", "Scoped tokens and OAuth connections you may see: name, rules, expiry, address limits, who made it and when it was last used (never a secret). A person sees their own.", "access", "GET", "/v1/access/tokens", &[q("product", Ty::Str, "Only tokens made for this product"), q("resource", Ty::Str, "Only tokens made for this resource (with product)"), q("kind", Ty::Str, "workload: CI and cluster logins (the latest 500) instead")]),
     t("access_get_token", "Get a token", "One token's rules, expiry, address limits, approvals for a while and last use (never its secret).", "access", "GET", "/v1/access/tokens/{id}", &[req("id", "Token id (tok_…)")]),
@@ -739,6 +775,20 @@ static TOOLS: &[Tool] = &[
     )
     .destructive(),
     t("workspace_remove_member", "Remove a member", "Take a person out of a project: their session and tokens stop reaching it at once, and their tokens confined to it are revoked. The last owner can't be removed.", "workspace", "DELETE", "/v1/workspace/projects/{id}/members/{user}", &[WS, req("user", "The member (usr_…)")]).destructive(),
+    // Groups (docs/members-v1-1.md): a group's members get its role on a project, added to their
+    // own. Making groups and their members is the operator's (or the IdP's, through SCIM).
+    t("workspace_list_groups", "List a project's groups", "The groups with a role on a workspace project: each group's role, a developer role's environments and how many members it has. A member's access is the union of their own role and their groups'.", "workspace", "GET", "/v1/workspace/projects/{id}/groups", &[WS]),
+    t(
+        "workspace_set_group_role",
+        "Give a group a role",
+        "Give a group a role on a project, or change it: every member of the group gets it, added to their own. Never owner; never more than the caller's own role, and only a group the caller may assign (one they're in, unless they're the operator).",
+        "workspace",
+        "PUT",
+        "/v1/workspace/projects/{id}/groups/{group}",
+        &[WS, req("group", "The group (grp_…)"), breq("role", Ty::Str, "viewer, developer or admin"), b("environments", Ty::Arr, "A developer role's environments (default: every environment that isn't protected)")],
+    )
+    .destructive(),
+    t("workspace_remove_group_role", "Take a group's role away", "Take a group's role on a project away: its members keep only their own roles (and other groups'), at once.", "workspace", "DELETE", "/v1/workspace/projects/{id}/groups/{group}", &[WS, req("group", "The group (grp_…)")]).destructive(),
     // ── Postgres ──
     t("postgres_list_projects", "List Postgres projects", "Postgres projects with their branches and endpoints.", "postgres", "GET", "/v1/projects", &[]),
     t("postgres_get_project", "Get a Postgres project", "A Postgres project with its branches and endpoints (connection strings need reveal).", "postgres", "GET", "/v1/projects/{project}", &[PROJECT]),
@@ -1269,6 +1319,7 @@ static TOOLS: &[Tool] = &[
         b("rate_limit", Ty::Obj, "{per_minute, burst?}: requests a client address may make"),
         b("firewall", Ty::Arr, "[{action: allow|deny|limit|challenge, path?, methods?, user_agent?, per_minute?, burst?}], first match wins; limit holds a client to per_minute (1-100000) on what it matches; challenge lets in a browser that passed a proof of work this hour (GET only)"),
         bnull("routes", Ty::Arr, "[{path, service}] (at most 20): a path (a prefix ends in *) another service of the project answers, by name; clear it for none"),
+        bnull("redirects", Ty::Str, "its own redirects on any service, _redirects lines: `/old /new 308`, `/blog/* /posts/:splat` (301 unless 302, 303, 307 or 308); clear it for none"),
         bnull("egress", Ty::Any, "{mode: roll|open, hosts?}: roll lets its code reach roll and only these hosts (at most 20, *. for subdomains), from the next deploy; clear it for open"),
         b("vitals", Ty::Bool, "Measure its pages' Web Vitals in visitors' browsers (read them with apps_vitals)"),
         bnull("config", Ty::Obj, "Runtime config its instances read at ROLL_CONFIG_URL (edge functions: context.config) without a deploy: at most 200 keys, 64 KiB; the first one needs a deploy to give them the address. Clear it for none"),
@@ -1422,7 +1473,7 @@ static TOOLS: &[Tool] = &[
     t("apps_export_project", "Export a project file", "A project as a roll.toml: its services (source, branch, run settings that differ from defaults) and the postgres and redis databases they link, variables by name only, never a value. Write it to the repo, check it with apps_import, deploy it with roll up --all.", "apps", "POST", "/v1/apps/projects/{project}/export", &[req("project", "Workspace project"), b("databases", Ty::Obj, "Names for the linked databases, as {\"postgres:<ref>\": \"db\"}")]),
     t("apps_get_environment", "Get an environment", "One environment: its URL, state (running, asleep), live deploy, branch and size; build_closed (its builds get no secret value) and base_updated (base images that moved since its build).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}", &[SERVICE, ENV]),
     t("apps_delete_environment", "Delete an environment", "Delete an environment with its deploys, instances and domains. Irreversible.", "apps", "DELETE", "/v1/apps/services/{service}/environments/{env}", &[SERVICE, ENV]),
-    t("apps_link", "Link a resource", "Give a service a roll resource's connection variables (DATABASE_URL and the like, with prefix if given): kind is postgres, redis, bucket, stream, queue, nosql or search (a search cluster: a data-only key of the link's own, narrowed with indices and access: a SaaS's tenants' indices, a frontend's read-only key, a log shipper's append-only one; changing them makes a new key and revokes the old). Needs reveal on the resource; the next deploy picks it up.", "apps", "PUT", "/v1/apps/services/{service}/links/{kind}/{ref}", &[SERVICE, req("kind", "postgres, redis, bucket, stream, queue, nosql or search"), req("ref", "The resource's id or name"), b("prefix", Ty::Str, "Variable name prefix"), b("indices", Ty::Arr, "Search only: the key's index names or patterns (tenant-*)"), b("access", Ty::Str, "Search only: read, or append (create documents on exact names); none: read and write documents")]),
+    t("apps_link", "Link a resource", "Give a service a roll resource's connection variables (DATABASE_URL and the like, with prefix if given): kind is postgres, redis, bucket, stream, queue, nosql, tasks (a roll tasks tenant: an API key of the link's own and the tenant's signing keys) or search (a search cluster: a data-only key of the link's own, narrowed with indices and access: a SaaS's tenants' indices, a frontend's read-only key, a log shipper's append-only one; changing them makes a new key and revokes the old). Needs reveal on the resource; the next deploy picks it up.", "apps", "PUT", "/v1/apps/services/{service}/links/{kind}/{ref}", &[SERVICE, req("kind", "postgres, redis, bucket, stream, queue, nosql, tasks or search"), req("ref", "The resource's id or name"), b("prefix", Ty::Str, "Variable name prefix"), b("indices", Ty::Arr, "Search only: the key's index names or patterns (tenant-*)"), b("access", Ty::Str, "Search only: read, or append (create documents on exact names); none: read and write documents")]),
     t("apps_unlink", "Unlink a resource", "Stop giving a service a linked resource's variables (from the next deploy).", "apps", "DELETE", "/v1/apps/services/{service}/links/{kind}/{ref}", &[SERVICE, req("kind", "Link kind"), req("ref", "The resource's id or name")]),
     t("apps_verify_domain", "Check a domain", "Check a custom domain's DNS now and answer its state (pending, verified) and the record to add.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/domains/{host}/verify", &[SERVICE, ENV, req("host", "The domain")]),
     t("apps_list_backups", "Volume backups", "An environment's volume backups, newest first (7 kept).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/volume/backups", &[SERVICE, ENV]),
@@ -1504,6 +1555,8 @@ static TOOLS: &[Tool] = &[
     t("apps_deploy_vulnerabilities", "A deploy's vulnerabilities", "Known vulnerabilities in a deploy's image, most severe first, then those with a fix: id (CVE-…, GHSA-…), severity, package, installed and fixed versions, and where (the OS's packages or a lockfile), at most 2,000, with the scan's counts. Use it before promoting a deploy, or to find what to upgrade.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/vulnerabilities", &[SERVICE, ENV, req("deploy", "Deploy id"), q("severity", Ty::Str, "Only this severity or worse: critical, high, medium or low")]),
     t("apps_explain_deploy", "Why did a deploy fail", "Ask why a failed deploy failed: the model of the owner of the service's roll code repo reads its error, plan, steps and the newest lines of its build log and output (masked) and answers what went wrong and what to change. The answer is kept with the deploy and answered again without a model call; again: true asks anew (at most once a minute). 409 when it didn't fail.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/explain", &[SERVICE, ENV, req("deploy", "Deploy id"), q("again", Ty::Bool, "Ask the model anew instead of the kept answer")]).open_world(),
     t("apps_deploy_sbom", "A deploy's software bill of materials", "A deploy's image as a CycloneDX SBOM (JSON) from the same scan as its vulnerabilities: every package and version it ships. 404 when it wasn't scanned or was pruned.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/sbom", &[SERVICE, ENV, req("deploy", "Deploy id")]),
+    t("apps_move_service", "Move a service to another project", "Move a service to another project of the same owner (Render's, Vercel's transfers): refused, naming them, while it has links either way, routes either way, roll:// references, a private network or running sandboxes; what it used stays the old project's; every live environment redeploys onto the new project's network and rules. Admin on it, in both projects.", "apps", "POST", "/v1/apps/services/{service}/move", &[SERVICE, breq("project", Ty::Str, "The project to move it to"), b("secrets", Ty::Str, "switch: go ahead though its environments' project secrets become the target project's of those names (the 409 names them)")]),
+    t("apps_deploy_provenance", "A deploy's build provenance", "The signed SLSA v1 provenance of a deploy's image, as roll built it: a DSSE envelope (in-toto statement) naming the source and revision, base images' digests, the plan and the image's digest, signed with the project's provenance key (the public key apps_signing answers). 404 for an image roll didn't build.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/provenance", &[SERVICE, ENV, req("deploy", "Deploy id")]),
     t("apps_status_page", "The project's public status page", "A project's public status page: its title, its public URL and what it shows (which services' checks and heartbeats, names and up or down only). 404 without one; making one is a person's choice, in the dashboard.", "apps", "GET", "/v1/apps/projects/{project}/status-page", &[req("project", "Workspace project")]),
     t("apps_remove_status_page", "Take down the status page", "Take a project's public status page down: its address answers nothing after, and its incidents go with it. Making or changing one stays a person's (it makes the project's service names public; admin, no tool).", "apps", "DELETE", "/v1/apps/projects/{project}/status-page", &[req("project", "Workspace project")]).destructive(),
     t("apps_list_incidents", "Status page incidents", "The last 90 days' incidents on a project's status page and the open ones, newest first: title, state, whether roll opened it, and its updates.", "apps", "GET", "/v1/apps/projects/{project}/status-page/incidents", &[req("project", "Workspace project")]),
@@ -1631,6 +1684,7 @@ static TOOLS: &[Tool] = &[
             b("feedback", Ty::Bool, "A feedback button on its pages for people who came in through roll"),
             b("warm", Ty::Bool, "Wake the services as soon as a new head is deployed"),
             b("crons", Ty::Bool, "Scheduled work (roll apps' crons, scheduled commands and calls) runs in previews too; off by default: deployed, schedule off"),
+            b("browser_checks", Ty::Str, "Production's browser checks on each preview head: report (shown), check (the roll/browser-checks status) or required (also keeps a change from landing)"),
         ],
     ),
     t("previews_visitors", "Who opened a preview", "The last 8 people signed in to roll who opened a preview (team access), by handle, latest first. Share links and the CI bypass aren't people and aren't listed.", "previews", "GET", "/v1/previews/{id}/visitors", &[req("id", "Preview id")]),
@@ -1658,6 +1712,18 @@ static PREPARED: std::sync::LazyLock<std::collections::HashMap<&'static str, Pre
 
 #[cfg(test)]
 mod tests {
+    /// A slip finds its name; something unlike every name finds none.
+    #[test]
+    fn nearest_finds_slips() {
+        let names = ["status", "limit", "service", "environment"];
+        assert_eq!(super::nearest("stauts", names), Some("status"));
+        assert_eq!(super::nearest("lmit", names), Some("limit"));
+        assert_eq!(super::nearest("enviroment", names), Some("environment"));
+        assert_eq!(super::nearest("zebra", names), None);
+        let all: Vec<&str> = super::all().iter().map(|t| t.name).collect();
+        assert_eq!(super::nearest("apps_list_service", all.iter().copied()), Some("apps_list_services"));
+    }
+
     use super::*;
 
     /// Every tool calls a route the permission catalogue classifies, tool names are unique and

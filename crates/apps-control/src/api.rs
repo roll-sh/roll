@@ -84,6 +84,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route("/v1/apps/services/{id}/git-login", put(put_git_login).delete(delete_git_login))
         .route("/v1/apps/services/{id}/github", put(put_github).delete(delete_github))
         .route("/v1/apps/services/{id}/environments", get(environments))
+        .route("/v1/apps/services/{id}/move", post(move_service))
         .route(env, get(get_env).put(put_env).delete(delete_env))
         .route(&format!("{env}/deploys"), get(deploys).post(create_deploy).layer(DefaultBodyLimit::max(apps.cfg.upload_max)))
         .route(&format!("{env}/deploys/{{dep}}"), get(get_deploy))
@@ -91,6 +92,9 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/deploys/{{dep}}/commits"), get(deploy_commits))
         .route(&format!("{env}/deploys/{{dep}}/vulnerabilities"), get(deploy_vulnerabilities))
         .route(&format!("{env}/deploys/{{dep}}/sbom"), get(deploy_sbom))
+        .route(&format!("{env}/deploys/{{dep}}/provenance"), get(deploy_provenance))
+        .route(&format!("{env}/checks/{{check}}/screenshot"), get(check_screenshot))
+        .route(&format!("{env}/checks/{{check}}/trace"), get(check_trace))
         .route(&format!("{env}/deploys/{{dep}}/explain"), post(explain_deploy))
         .route(&format!("{env}/deploys/{{dep}}/approve"), post(approve_deploy))
         .route(&format!("{env}/deploys/{{dep}}/rollback"), post(rollback))
@@ -881,6 +885,30 @@ async fn deploy_sbom(State(apps): S, Path((id, env, dep)): Path<(String, String,
     let body = apps.sbom(&id, &env, &dep).await?;
     let file = format!("attachment; filename=\"{dep}.cdx.json\"");
     Ok(([(axum::http::header::CONTENT_TYPE, "application/vnd.cyclonedx+json".to_string()), (axum::http::header::CONTENT_DISPOSITION, file)], body).into_response())
+}
+
+/// `POST /v1/apps/services/{id}/move {project}`: to another project of the same owner.
+async fn move_service(State(apps): S, Path(id): Path<String>, ext: Extensions, Json(body): Json<Value>) -> R {
+    Ok(Json(apps.move_service(&id, body, [roll_auth::Grant::on(&ext), roll_auth::SessionGrant::on(&ext)], actor(&ext)).await?).into_response())
+}
+
+/// `GET …/deploys/{dep}/provenance`: its image's signed SLSA provenance (a DSSE envelope).
+async fn deploy_provenance(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>) -> R {
+    Ok(Json(apps.deploy_provenance(&id, &env, &dep).await?).into_response())
+}
+
+/// `GET …/checks/{check}/screenshot`: a browser check's last failure, as the page looked.
+async fn check_screenshot(State(apps): S, Path((id, env, check)): Path<(String, String, String)>) -> R {
+    let body = apps.check_failure_file(&id, &env, &check, crate::browser::SCREENSHOT).await?;
+    Ok(([(axum::http::header::CONTENT_TYPE, "image/png".to_string()), (axum::http::header::CACHE_CONTROL, "no-store".to_string())], body).into_response())
+}
+
+/// `GET …/checks/{check}/trace`: a browser check's last failure's Playwright trace (open it in
+/// `npx playwright show-trace` or trace.playwright.dev).
+async fn check_trace(State(apps): S, Path((id, env, check)): Path<(String, String, String)>) -> R {
+    let body = apps.check_failure_file(&id, &env, &check, crate::browser::TRACE).await?;
+    let file = format!("attachment; filename=\"{check}-trace.zip\"");
+    Ok(([(axum::http::header::CONTENT_TYPE, "application/zip".to_string()), (axum::http::header::CONTENT_DISPOSITION, file)], body).into_response())
 }
 
 async fn deploy_vulnerabilities(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>, Query(q): Query<VulnQuery>) -> R {

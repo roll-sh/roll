@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -101,13 +103,27 @@ func (f *fakeKube) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// rolld for a workload identity: its login's token ends when rolld says so.
+// rolld for a workload identity: its login's token ends when rolld says so. With delta it answers
+// `…/values/delta` as rolld does (otherwise it's an older rolld).
 type fakeRolld struct {
 	mu     sync.Mutex
 	logins int
 	live   string // the token that works
 	digest string
 	value  string
+	extra  map[string]string // keys beside DB_URL
+	reads  int               // full reads (`…/values`)
+
+	delta    bool
+	basis    string
+	fullSets int      // delta reads answered with the full set
+	sent     []string // the keys the last delta read answered
+}
+
+// stamp is a key's stamp: it moves when the key's value does.
+func stamp(k, v string) string {
+	h := sha256.Sum256([]byte(k + "\x00" + v))
+	return hex.EncodeToString(h[:8])
 }
 
 func (f *fakeRolld) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -147,10 +163,47 @@ func (f *fakeRolld) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		write(200, map[string]string{"digest": f.digest})
 	case "/v1/secrets/projects/prj_a/environments/production/values":
-		write(200, map[string]any{"values": map[string]string{"DB_URL": f.value}, "problems": []any{}})
+		f.reads++
+		write(200, map[string]any{"values": f.values(), "problems": []any{}})
+	case "/v1/secrets/projects/prj_a/environments/production/values/delta":
+		if !f.delta {
+			write(404, map[string]string{"error": "no route"})
+			return
+		}
+		var claim struct {
+			Basis  string            `json:"basis"`
+			Stamps map[string]string `json:"stamps"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&claim)
+		full := claim.Basis != f.basis
+		if full {
+			f.fullSets++
+		}
+		values, stamps, removed := map[string]string{}, map[string]string{}, []string{}
+		f.sent = nil
+		for k, v := range f.values() {
+			if full || claim.Stamps[k] != stamp(k, v) {
+				values[k], stamps[k] = v, stamp(k, v)
+				f.sent = append(f.sent, k)
+			}
+		}
+		for k := range claim.Stamps {
+			if _, ok := f.values()[k]; !ok && !full {
+				removed = append(removed, k)
+			}
+		}
+		write(200, map[string]any{"delta": !full, "digest": f.digest, "basis": f.basis, "values": values, "stamps": stamps, "removed": removed, "problems": []any{}})
 	default:
 		write(404, map[string]string{"error": "no route"})
 	}
+}
+
+func (f *fakeRolld) values() map[string]string {
+	m := map[string]string{"DB_URL": f.value}
+	for k, v := range f.extra {
+		m[k] = v
+	}
+	return m
 }
 
 func TestTheOperatorKeepsItsSecretsInStepAndTouchesNoOtherSecret(t *testing.T) {
@@ -320,4 +373,54 @@ func TestARollSecretElsewhereLogsInAsItsOwnNamespacesServiceAccount(t *testing.T
 	if len(kubeAPI.secrets) != 1 {
 		t.Fatalf("Secrets written: %d", len(kubeAPI.secrets))
 	}
+}
+
+// After the digest moves, a RollSecret's values are read through `…/values/delta`: only the
+// changed key comes back, and the Secret holds the whole folder. A full-set answer (here a
+// changed basis) is written as it is.
+func TestAChangeIsReadThroughADelta(t *testing.T) {
+	kubeAPI := &fakeKube{secrets: map[string]*secretObj{}, status: map[string]rollStatus{}}
+	var rs rollSecret
+	rs.Metadata = meta{Name: "web", Namespace: "apps", UID: "uid-web", Generation: 1}
+	rs.Spec.Environment = "production"
+	kubeAPI.rs = append(kubeAPI.rs, rs)
+	rolld := &fakeRolld{digest: "d1", value: "postgres://db/one", extra: map[string]string{"LOG_LEVEL": "debug"}, delta: true, basis: "b1"}
+	k8s, roll := httptest.NewServer(kubeAPI), httptest.NewServer(rolld)
+	defer k8s.Close()
+	defer roll.Close()
+	o := &operator{
+		kube: &kube{api: k8s.URL, token: "sa", http: http.DefaultClient}, api: roll.URL, identity: "idn_cluster",
+		oidc: func() (string, error) { return "projected-sa-token", nil }, now: time.Now, clients: map[string]*secrets.Client{},
+		namespaces: map[string]bool{"apps": true},
+	}
+	ctx := context.Background()
+	check := func(when, want string, fullSets int, sent int) {
+		t.Helper()
+		if err := o.pass(ctx); err != nil {
+			t.Fatal(err)
+		}
+		s := kubeAPI.secrets["apps/web"]
+		if s == nil || len(s.Data) != 2 || string(s.Data["DB_URL"]) != want || string(s.Data["LOG_LEVEL"]) != "debug" {
+			t.Fatalf("%s: the Secret %+v, status %+v", when, s, kubeAPI.status["apps/web"])
+		}
+		rolld.mu.Lock()
+		defer rolld.mu.Unlock()
+		if rolld.reads != 0 || rolld.fullSets != fullSets || len(rolld.sent) != sent {
+			t.Fatalf("%s: %d full reads, %d full sets, sent %v", when, rolld.reads, rolld.fullSets, rolld.sent)
+		}
+	}
+	check("the first pass", "postgres://db/one", 1, 2)
+
+	rolld.mu.Lock()
+	rolld.digest, rolld.value = "d2", "postgres://db/two"
+	rolld.mu.Unlock()
+	check("a one-key change", "postgres://db/two", 1, 1)
+	if rolld.sent[0] != "DB_URL" {
+		t.Fatalf("sent %v", rolld.sent)
+	}
+
+	rolld.mu.Lock()
+	rolld.digest, rolld.value, rolld.basis = "d3", "postgres://db/three", "b2"
+	rolld.mu.Unlock()
+	check("a full-set answer", "postgres://db/three", 2, 2)
 }

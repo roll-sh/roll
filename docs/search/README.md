@@ -37,6 +37,7 @@ pnpm dev                                # dashboard: /dashboard/search
 | `--search-proxy-protocol`                          | off               | PROXY protocol headers (behind an NLB or HAProxy) |
 | `--search-client-ip-header` (`ROLL_SEARCH_CLIENT_IP_HEADER`), `--search-trusted-proxies` (`ROLL_SEARCH_TRUSTED_PROXIES`) | | the header a trusted proxy writes the client's address in (`CF-Connecting-IP`), believed only from those CIDRs; for IP allowlists (architecture.md, "Client addresses and IP allowlists") |
 | `--search-history` (`ROLL_SEARCH_HISTORY`)         | `86400`           | point-in-time branching window, seconds (0: off) |
+| `--search-script-memory-mb` (`ROLL_SEARCH_SCRIPT_MEMORY_MB`) | `64` | memory one Painless execution may hold, MiB (0: no limit); tenants can't raise it (compatibility.md, "Painless memory per execution") |
 | `--search-gc-interval`                             | `3600`            | garbage collection of unreferenced objects (0: off; one node per bucket) |
 | `--search-deleted-retention-days` (`ROLL_SEARCH_DELETED_RETENTION_DAYS`) | `7` | days a deleted cluster can be restored, its storage billed meanwhile (0: deleted at once) |
 | `--search-test-features`                           | off               | publish Elasticsearch's test features (YAML suites through `--cluster-hook`; test deployments only) |
@@ -745,7 +746,7 @@ origins (browser search), once they're on main.
 | POST | `/v1/search/clusters/{id}/password` | rotate; the new password is in the answer, once. From the answer on, the old one fails, also on a cluster that was waking up |
 | POST | `/v1/search/clusters/{id}/unload` | sleep now (`{"unloaded": false}` while requests run) |
 | GET | `/v1/search/clusters/{id}/indices` | `_cat/indices` as JSON numbers: health, status, shards, docs, sizes; docs and sizes of open indices come from the engine (as `_stats` reports them: Lucene documents, nested ones included, unflushed writes included). Wakes the cluster |
-| POST | `/v1/search/clusters/{id}/request` | console: `{method, path, body?}` (a JSON body, sent byte for byte so `_source` keeps its key order, or a string such as NDJSON, sent as is) → `{status, headers, body, took_ms, truncated}`. Accepts bodies up to the cluster's `max_body_mb` (the request may be up to twice that plus 1 MiB, for JSON escapes) |
+| POST | `/v1/search/clusters/{id}/request` | console: `{method, path, body?}` (a JSON body, sent byte for byte so `_source` keeps its key order, or a string such as NDJSON, sent as is) → `{status, headers, body, took_ms, truncated}`; an answer the cluster streams (`_inference/…/_stream`) is passed through as it comes instead, with its status and `Content-Type: text/event-stream`. Accepts bodies up to the cluster's `max_body_mb` (the request may be up to twice that plus 1 MiB, for JSON escapes) |
 | GET | `/v1/search/clusters/{id}/usage?days=30` | loaded seconds, GiB-hours, requests, stored GiB-months, cost, and the same workload on Elastic Cloud Hosted, an Amazon OpenSearch Service domain and OpenSearch Serverless |
 | GET | `/v1/search/clusters/{id}/metrics?range=1h\|24h\|14d` | request metrics (architecture.md, "Observability"): `{range, step_s, from, to, points, totals}`; each point (`at`, the start of its step: a minute for `1h`, 15 minutes for `24h`, 2 hours for `14d`; only steps with requests) and `totals` hold `all`, `search`, `index` and `other`, each `{requests, rate, 2xx, 4xx, 5xx, rejected, p50_ms, p95_ms, p99_ms}` (`rate` per second; `rejected`: 429s; percentiles `null` when nothing ran). Includes what the cluster's node recorded since the last metering pass |
 | GET | `/v1/search/clusters/{id}/slowlog` | the search and indexing slow logs, newest first, at most 500: `{entries, max_entries}`, each entry Elasticsearch's JSON slow log line (`@timestamp`, `log.level`, `log.logger`, `elasticsearch.index.name`, `elasticsearch.shard.id`, `elasticsearch.slowlog.{message,took,took_millis,source,total_hits,stats,search_type,total_shards,id,routing}`) |
@@ -862,6 +863,18 @@ tree (`_explain`; a `semantic` query, which `_explain` can't rewrite, is explain
 limited to that id; a hybrid hit shows each part). Either side copies as curl, Python or JavaScript
 with the key from `$ELASTICSEARCH_API_KEY`, as the guides export it (OpenSearch-flavor clusters: OpenSearch's clients and
 `$OPENSEARCH_USERNAME`/`$OPENSEARCH_PASSWORD`).
+
+Its Chat view (Elasticsearch-flavor clusters; `lib/search-chat.ts`, [rag.md](rag.md) phase 1)
+answers questions from an index's hits: it retrieves with its own retrieval config (hybrid `rrf`
+where the mapping has a semantic target), shows the sources at once, then streams the answer from
+a `chat_completion` endpoint the cluster has (it says how to add one keyed by a roll secret when
+there are none). The prompt is roll's fixed frame and the person's instructions in the system
+message, then the sources fenced as quoted data (a random boundary per request; `&`, `<`, `>`, `"`
+and the boundary escaped) and the question. Sources stop at 5 or about 6,000 tokens, and the rest
+are listed as left out. The answer is rendered as text; only `[n]` markers naming a source it was
+given are citations. The conversation stays in the page. "View code" gives the composed calls
+(`_search`, then `_inference/chat_completion/{id}/_stream`) as curl, Python or JavaScript, which
+run on Elasticsearch too.
 
 ## Audit log
 
@@ -1218,9 +1231,13 @@ deterministic (#396).
    and Meilisearch import (their dump formats onto indices and settings), and catch-up and cutover
    (AWS OpenSearch Migration Assistant's capture and replay): a copy is one point in time today, so
    writes made during the copy are lost unless the client double-writes.
-3. **One memory account per request** (in progress: ES|QL and aggregations in #549, Painless per execution in #591, and a
-   node-wide body budget in #601, each in review; ES|QL and aggregations against a node budget
-   no tenant setting can raise in #549, Painless per execution, and a node-wide body budget; Elasticsearch charges every request's
+3. **One memory account per request** (landed: Painless per execution in #591, af195cbbe, after
+   four reviews: each execution holds at most `--search-script-memory-mb`, and once-per-document
+   scripts charge the `request` breaker; the node-wide body budget in #601; ES|QL and aggregations
+   in #549, ab50f8507, after five reviews: pages, groups, remote states and kept results charged to
+   the request breaker as built, under a node budget no tenant setting can raise
+   (`--search-request-memory-max`). In progress: both PRs' review follow-ups
+   (`fix/search-painless-memory-2`, `fix/search-esql-breaker-2`); Elasticsearch charges every request's
    memory to its circuit breakers, ES|QL's blocks included, and Elastic Cloud's per-deployment
    limits hold because of it). roll serves many tenants per node, so a request whose memory the
    breakers don't see is a way for one tenant to stop everyone's searches. Today's reviews found
@@ -1382,12 +1399,13 @@ deterministic (#396).
    `roll_search_query_ruleset` in the Terraform provider, and a redacted answer for
    `POST …/inference/secrets`, so it can become a tool and an agent can set up semantic search end
    to end.
-11. **Conversational search and RAG** (phase 1 in progress: streamed `chat_completion` and
-   `completion` inference and the Playground's Chat tab; Elastic Playground's chat with citations, Typesense
+11. **Conversational search and RAG** (Elastic Playground's chat with citations, Typesense
    `conversation=true`, Meilisearch `/chats`, OpenSearch's `retrieval_augmented_generation`
-   processor): roll serves `completion` and `chat_completion` inference already, but the Playground
-   compares retrieval only. Chat over hits with citations, the code for a RAG app, and a chat API
-   (OpenSearch's processor shape on OpenSearch-flavor clusters). Design: [rag.md](rag.md).
+   processor). Design: [rag.md](rag.md). Phase 1 is built: streamed inference (`…/_stream` sent as
+   it comes, through the node and the console route) and the Playground's Chat view with "view
+   code". Left: phase 2 (the `/_roll/chat` engine, the OpenAI-compatible route, browser key limits
+   on `_answer` (#358's keys can't call `_inference` at all), CLI and MCP) and phase 3 (memory,
+   OpenSearch's processor).
 12. **The first query in a minute** (the guides landed in #604; sample data and a guided first
    query landed (#658): one click loads 1,000 generated products or 2,000 ECS log lines on the
    Overview of a cluster with no indices or from the Indices tab, then three queries run in place
@@ -1400,8 +1418,8 @@ deterministic (#396).
    with no `inference_id` fails, because its default (`.elser-2-elasticsearch`) answers as a
    cluster without ML nodes, the first error anyone copying Elasticsearch's docs hits; and no
    screen is named Discover.
-13. **A web crawler for site search** (design in [crawler.md](crawler.md), ready to build now that
-   #318's runner is on main; Elastic Open Crawler,
+13. **A web crawler for site search** (phase 1 in progress on `feat/search-crawler`: the
+   `roll_web_crawler` connector on #318's runner, in its gate; design in [crawler.md](crawler.md); Elastic Open Crawler,
    Algolia Crawler, DocSearch, Meilisearch's docs-scraper): connectors (#318) sync Postgres and S3;
    getting a website in is the customer's job. A native connector roll runs (`roll_web_crawler`,
    on #318's runner) taking Open Crawler's config, fields and ids, fetching through
@@ -1626,19 +1644,17 @@ deterministic (#396).
    it, a prefix applies); on a fleet `Control::call` sends search's own in-process requests to the
    cluster's owner (`cluster::to_owner`). Next: an inference endpoint's key from a roll secret (#134, landed), credentials as `roll://ENV/KEY` references read through roll
    secrets' `resolve_for` (#329) for snapshot repositories and connectors, rebuilt when the
-   secret's digest moves, roll.toml declaring a search link (apps' side), and checking search's routes through
-   MCP's search mode (#80) end to end. A flavor switch doesn't carry keys across (an API key isn't
+   secret's digest moves, and checking search's routes through MCP's search mode (#80) end to end.
+   roll.toml declares a search link (`[databases]`, `kind = "search"`), but its entry takes no
+   `indices` or `access` yet (the CLI's `roll apps link search --index --access` does). A flavor switch doesn't carry keys across (an API key isn't
    an OpenSearch user): links made before one are reissued. The fleet test with every product on
    passed (2026-11-13: search 8,077 writes acknowledged and verified, no errors, longest stall
    1.2 s in the rolling restart).
-   Joins the 2026-11-21 category review found, not yet built: an apps link can't be narrowed to
-   index patterns or read-only (`[databases] kind = "search"` takes neither; the keys route does);
-   apps' log drains can't yet land in a roll search data stream (apps is building a drain that writes
-   ECS documents through `_bulk` with a key limited to `create_doc` on its stream: no OTLP needed); previews
-   put a branch's superuser login in `ELASTICSEARCH_URL` beside the data key (fixed in #607: only the
-   data credential, no fallback, and old branches remade with the key revoked and the password
-   rotated first);
-   a cluster's admin password can't be kept as a project secret from roll's API or CLI; and only a
+   Joins the 2026-11-21 category review found: landed since, an apps link narrowed to indices and
+   `read` or `append` (#721, through secrets' `names` and `permission` link options), apps' log
+   drains into a roll search data stream (#735: ECS documents through `_bulk` with an `append` key
+   on `logs-roll.apps-*`), and previews giving a branch only its data credential (#607). Not yet
+   built: a cluster's admin password can't be kept as a project secret from roll's API or CLI; and only a
    unit test covers previews' search branch, and one MCP test search (no create → bulk → query
    flow with a person's scoped token). Project members (roll secrets' #501, on main since
    991d98225): search's API serves a signed-in person only the clusters they own (`SignedIn` is
@@ -1654,7 +1670,10 @@ deterministic (#396).
    load; the TTL is roll cloud's fleet-wide choice.
 28. **CI**: the merge gate runs `search-codec`'s lib tests (`rust (search)`, 54 s on PR #29 with
    main's cache: under the minute, no room for another crate). Test gaps a read-only analysis found on 2026-11-22
-   (main at d9aecc990), ranked; each test goes in `test:search`, not the merge gate:
+   (main at d9aecc990), ranked; each test goes in `test:search`, not the merge gate (in progress:
+   (2), (3), (4), (7) and (8) on `test/search-gaps-a`, (5), (6), (9), (10), (11) and the e2e
+   file on `test/search-gaps-b`, both in their gates; `persist.rs`'s memory-budget flake fixed in
+   #766, 9641a1bd6: the test no longer races a second commit, 60 of 60 under load):
    (1) connectors refusing private addresses: every `connectors.rs` cluster sets
    `allow_private_hosts`, so deleting the check fails nothing (being added with the egress fix,
    `a_connector_never_reaches_a_private_address`); (2) a search link refusing and deleting a key

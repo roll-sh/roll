@@ -901,6 +901,9 @@ pub struct Settings { max_size_in_bytes, cache_max_size, cache_expire, max_compi
                       regex_enabled: RegexEnabled /* True|False|Limited */, regex_limit_factor, max_loop_counter,
                       max_object_bytes /* 256 MiB: largest array/string/collection a script builds → out_of_memory_error */,
                       stack_bytes /* 1 MiB of native stack per execution → stack_overflow_error */,
+                      max_execution_bytes /* memory one execution may hold (operator's; default from
+                                             set_default_max_execution_bytes, 64 MiB) → painless_error,
+                                             counted by the host's #[global_allocator] Counting<A> wrapper */,
                       max_allocation_bytes: Vec<(Context, u64)> /* script.painless.max_allocation_bytes.context.<c>.limit;
                                                                    empty = -1b (off) */ }
 pub enum Context { PainlessTest, Score, Filter, Field, Update, UpdateByQuery, Reindex, Ingest, ProcessorConditional,
@@ -948,6 +951,9 @@ impl Instance { fn set_params(&mut self, &Json); fn set_params_value(&mut self, 
                 fn set_cancellable(&mut self, bool) }   // search contexts (score, filter, fields, sort, aggs, runtime
                 // fields) when the search binds a cancellation check: no max_loop_counter, Host::check_cancelled every
                 // 1,000 loop iterations instead (Elasticsearch 9.5); off for _execute and write scripts
+                // fn set_result_accounting(&mut self, bool): keep a second reference to each result until the next
+                // execution (hosts charging a breaker per document); results must then be dropped on its thread
+pub fn counting_installed() -> bool;   // set_default_max_execution_bytes(n > 0) panics without Counting
 pub trait Host {   // every method has a default; implement what the context needs
     fn score(&mut self) -> f64;
     fn doc_values(&mut self, field: &str, out: &mut DocValues) -> Result<bool, HostError>;   // Ok(false): unmapped
@@ -959,6 +965,9 @@ pub trait Host {   // every method has a default; implement what the context nee
     fn doc_id(&mut self) -> i32; fn shard(&mut self) -> (i32, String); fn now_millis(&mut self) -> i64;
     fn stored_field(&mut self, field: &str) -> Result<Option<Vec<Value>>, HostError>;   // params._fields[f]: None = unmapped
     fn check_cancelled(&mut self) -> Result<(), HostError>;   // cancellable instances: Err stops the script
+    fn script_memory(&mut self, delta: i64) -> Result<(), MemoryRefused>;   // what the host's executions hold moved by
+                // delta (each ~MiB of growth and at each end): search hosts charge the request breaker, Err fails the
+                // script with circuit_breaking_exception
     fn with_vector(&mut self, field, f: &mut dyn FnMut(&VectorView)) -> Result<Option<bool>, HostError>;
         // zero-copy dense_vector for the vector score functions (Ok(None): use doc_values)
 }
@@ -1219,6 +1228,7 @@ pub struct ClusterConfig { pub name, pub dialect: Dialect /* Elasticsearch|OpenS
                           pub host_metrics: bool /* false: node stats report synthetic figures (shared nodes must not leak the host) */,
                           pub default_repository: Option<String> /* roll's default snapshot repository's name (api::snapshots::install_default_repository) */,
                           pub file_service_tokens: bool /* read <path.conf>/service_tokens; search-server sets it in dev mode or for clusters named in roll.security.service_token_file.clusters */,
+                          pub request_memory: Option<Arc<MemoryBudget>> /* the node's budget for what requests hold: the `request` breaker's parent (breaker::Breakers::node), its limit held to roll.breaker.request.max_limit (25% of this by default); search-server passes Node::request_memory */,
                           pub embedder: Option<Arc<dyn xpack::inference::local::Embedder>> /* the node's model pool: runs E5 for the `elasticsearch`
                                                           service; None: E5 answers as without ML nodes */ }
 #[async_trait] pub trait xpack::inference::local::Embedder: Send + Sync {
@@ -1501,8 +1511,10 @@ pub struct NodeConfig { pub node_name, pub node_id: Option<String> /* lease iden
                         pub lease_ttl: Duration /* 10 s */,
                         pub snapshot_leftover_grace: Duration /* 1 h: age before the post-wake sweep drops unrecorded snapshot pins */,
                         pub default_repository: Option<String> /* copied into ClusterConfig for clusters with object storage */,
-                        pub memory_budget: Option<u64> /* resident bytes of all loaded clusters; LRU idle clusters are unloaded past it,
-                                                          and a wake makes room first */,
+                        pub memory_budget: Option<u64> /* resident bytes of all loaded clusters plus what their requests hold
+                                                          (Node::request_memory); LRU idle clusters are unloaded past it, and a wake
+                                                          makes room first. Also the limit of Node::request_memory (None: half the
+                                                          host's memory) */,
                         pub unload_memory_only: bool /* false: with a StoreProvider whose data() is None, idle and budget unloads skip
                                                         clusters holding documents (they'd lose them; warned once); explicit unload still
                                                         unloads. true: tests / throwaway nodes */,

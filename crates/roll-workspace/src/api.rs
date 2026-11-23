@@ -5,7 +5,7 @@
 //! only the projects they're a member of, and grants only what that grant covers.
 
 use crate::{Actor, Error, Kind, Scope, Workspace};
-use axum::extract::{FromRequestParts, Path, State};
+use axum::extract::{FromRequestParts, Path, Query, State};
 use axum::http::StatusCode;
 use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
@@ -85,11 +85,18 @@ pub fn router(ws: Arc<Workspace>) -> Router {
         .route("/v1/workspace/projects/{id}", get(get_one).patch(update).delete(delete_project))
         .route("/v1/workspace/projects/{id}/resources/{kind}/{ref}", put(place).delete(remove))
         .route("/v1/workspace/projects/{id}/members", get(members))
+        .route("/v1/workspace/projects/{id}/events", get(events))
         .route("/v1/workspace/projects/{id}/members/me", delete(leave))
         .route("/v1/workspace/projects/{id}/members/{user}", patch(set_role).delete(remove_member))
         .route("/v1/workspace/projects/{id}/invites", get(invites).post(invite))
         .route("/v1/workspace/projects/{id}/invites/{invite}", delete(revoke_invite))
         .route("/v1/workspace/projects/{id}/homes/{kind}/{ref}", put(set_home))
+        .route("/v1/workspace/projects/{id}/groups", get(project_groups))
+        .route("/v1/workspace/projects/{id}/groups/{group}", put(set_group_role).delete(remove_group_role))
+        .route("/v1/workspace/groups", get(groups).post(create_group))
+        .route("/v1/workspace/groups/{group}", get(group).patch(update_group).delete(delete_group))
+        .route("/v1/workspace/groups/{group}/members", get(group_members))
+        .route("/v1/workspace/groups/{group}/members/{user}", put(add_group_member).delete(remove_group_member))
         .route("/v1/workspace/roles", get(roles))
         .route("/v1/workspace/invites", get(my_invites))
         .route("/v1/workspace/invites/{token}/accept", post(accept))
@@ -105,6 +112,9 @@ impl IntoResponse for Error {
             Error::Conflict(_) => (StatusCode::CONFLICT, None),
             Error::Forbidden(_) => (StatusCode::FORBIDDEN, Some("forbidden")),
             Error::LastOwner(_) => (StatusCode::CONFLICT, Some("last_owner")),
+            Error::Limit(_) => (StatusCode::CONFLICT, Some("limit")),
+            Error::Managed(_) => (StatusCode::FORBIDDEN, Some("managed")),
+            Error::TooMany(_) => (StatusCode::BAD_REQUEST, Some("limit")),
             Error::Refused(r) => {
                 let status = StatusCode::from_u16(r.status).unwrap_or(StatusCode::CONFLICT);
                 return (status, Json(json!({ "error": r.message, "code": r.code }))).into_response();
@@ -212,6 +222,13 @@ async fn members(State(ws): S, me: Caller, Path(id): Path<String>) -> crate::Res
     Ok(Json(blocking(ws, move |ws| ws.members(me.scope(), &id, emails)).await?).into_response())
 }
 
+/// `?after=&limit=&kinds=&latest=1` (docs/workspace.md, "Events"): whoever sees the members, with
+/// an invite's address only for those who see it there.
+async fn events(State(ws): S, me: Caller, Path(id): Path<String>, Query(q): Query<crate::EventsQuery>) -> crate::Result<Response> {
+    let emails = me.actor().manages(&id);
+    Ok(Json(blocking(ws, move |ws| ws.events(me.scope(), &id, q, emails)).await?).into_response())
+}
+
 /// `{role?, environments?}`: a missing role keeps the current one, and `"environments": null`
 /// goes back to the default.
 async fn set_role(State(ws): S, me: Caller, Path((id, user)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
@@ -314,5 +331,101 @@ async fn decline(State(ws): S, me: Caller, Path(token): Path<String>) -> crate::
     let user = me.session_person()?.to_string();
     let ip = me.ip.clone();
     blocking(ws, move |ws| ws.decline(&user, &token, ip)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ── Groups (docs/members-v1-1.md): server-wide groups are the operator's and roll's admins'
+// (D12; no catalogue row, so rolld's gate lets only a person's session through to here, and a
+// person acting as themselves is refused below); a group's roles on a project are the project's
+// admins' (catalogue rows), given only by one who is in the group (D11). ──
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GroupBody {
+    name: String,
+    #[serde(default)]
+    description: String,
+}
+
+#[derive(Deserialize)]
+struct Page {
+    #[serde(default)]
+    after: String,
+    limit: Option<i64>,
+}
+
+async fn groups(State(ws): S, me: Caller) -> crate::Result<Response> {
+    let viewer = me.user().map(str::to_string);
+    Ok(Json(blocking(ws, move |ws| ws.groups(viewer.as_deref())).await?).into_response())
+}
+
+async fn create_group(State(ws): S, me: Caller, b: Bytes) -> crate::Result<Response> {
+    let GroupBody { name, description } = body(&b)?;
+    let actor = me.actor();
+    let g = blocking(ws, move |ws| ws.create_group(&actor, &name, &description)).await?;
+    Ok((StatusCode::CREATED, Json(g)).into_response())
+}
+
+async fn group(State(ws): S, me: Caller, Path(id): Path<String>) -> crate::Result<Response> {
+    let viewer = me.user().map(str::to_string);
+    Ok(Json(blocking(ws, move |ws| ws.group(viewer.as_deref(), &id)).await?).into_response())
+}
+
+/// `{name?, description?}`.
+async fn update_group(State(ws): S, me: Caller, Path(id): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let mut o: Map<String, Value> = body(&b)?;
+    let (name, description) = (text(&mut o, "name")?, text(&mut o, "description")?);
+    if let Some(k) = o.keys().next() {
+        return Err(Error::BadRequest(format!("unknown field {k}")));
+    }
+    let actor = me.actor();
+    Ok(Json(blocking(ws, move |ws| ws.update_group(&actor, &id, name.as_deref(), description.as_deref())).await?).into_response())
+}
+
+async fn delete_group(State(ws): S, me: Caller, Path(id): Path<String>) -> crate::Result<StatusCode> {
+    let actor = me.actor();
+    blocking(ws, move |ws| ws.delete_group(&actor, &id)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `?after=<usr_…>&limit=` (up to 500).
+async fn group_members(State(ws): S, me: Caller, Path(id): Path<String>, Query(p): Query<Page>) -> crate::Result<Response> {
+    let viewer = me.user().map(str::to_string);
+    Ok(Json(blocking(ws, move |ws| ws.group_members(viewer.as_deref(), &id, &p.after, p.limit.unwrap_or(crate::groups::MEMBERS_PAGE_MAX))).await?).into_response())
+}
+
+async fn add_group_member(State(ws): S, me: Caller, Path((id, user)): Path<(String, String)>) -> crate::Result<StatusCode> {
+    let actor = me.actor();
+    blocking(ws, move |ws| ws.add_group_member(&actor, &id, &user)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn remove_group_member(State(ws): S, me: Caller, Path((id, user)): Path<(String, String)>) -> crate::Result<StatusCode> {
+    let actor = me.actor();
+    blocking(ws, move |ws| ws.remove_group_member(&actor, &id, &user)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn project_groups(State(ws): S, me: Caller, Path(id): Path<String>) -> crate::Result<Response> {
+    Ok(Json(blocking(ws, move |ws| ws.project_groups(me.scope(), &id)).await?).into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GroupRoleBody {
+    role: String,
+    #[serde(default)]
+    environments: Option<Vec<String>>,
+}
+
+async fn set_group_role(State(ws): S, me: Caller, Path((id, group)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let GroupRoleBody { role, environments } = body(&b)?;
+    let actor = me.actor();
+    Ok(Json(blocking(ws, move |ws| ws.set_group_role(&actor, &id, &group, &role, environments)).await?).into_response())
+}
+
+async fn remove_group_role(State(ws): S, me: Caller, Path((id, group)): Path<(String, String)>) -> crate::Result<StatusCode> {
+    let actor = me.actor();
+    blocking(ws, move |ws| ws.remove_group_role(&actor, &id, &group)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
