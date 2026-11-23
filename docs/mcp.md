@@ -703,8 +703,11 @@ alone, as at the gate.
   visible to the model.
 - A route refusing a call is a result with `isError: true`, and its text says why ("not allowed:
   this token can't delete postgres prj_…"). Bad arguments are results too (`isError: true`,
-  `invalid_arguments`, saying which), so the model can correct them, as the spec asks; only
-  arguments that aren't an object and unknown tools are JSON-RPC errors.
+  `invalid_arguments`, saying which, what the tool takes, and the nearest name for a slip:
+  "unknown argument \"stauts\" (did you mean \"status\"?)"), so the model can correct them, as
+  the spec asks; only arguments that aren't an object and unknown tools are JSON-RPC errors (an
+  unknown tool's names the nearest one the connection has, as `?tools=` does for a name it doesn't
+  know).
 
 ## Resources
 
@@ -1339,13 +1342,14 @@ From a 2026-11-23 comparison (the spec's next release moved to 2027-03-30, SEP-3
 ahead of every hosted server checked on 2026-07-28, events, tasks, apps, skills and step-up, so the
 gaps are in how results read and how roll is distributed):
 
-1. **Results that cost fewer tokens (this PR: compact text).** Each tool's text block was
-   pretty-printed JSON; it's compact now (a nested list answer about 40% smaller). Next: a
-   continuation cursor in place of the 48 KiB cut (Datadog pages by a token budget), then rows as
-   a table for flat lists while `structuredContent` stays exact.
-2. **Errors that suggest a fix.** "No argument `stauts`; did you mean `status`?" with the valid
-   arguments, the nearest tool name for an unknown one, and the nearest listed ids for one not
-   found (Datadog's MCP server).
+1. **Results that cost fewer tokens.** Compact text (#804; a nested list answer about 40%
+   smaller). A continuation past the 48 KiB cut needs roll to keep the answer (2026-07-28 is
+   stateless) or each route's own cursor, which the cut's note already points to; rows as a
+   table for flat lists (while `structuredContent` stays exact) is the next measurable step.
+2. **Errors that suggest a fix (this PR).** An unknown argument's error lists what the tool takes
+   and the nearest name ("did you mean \"status\"?"); an unknown tool names the nearest one the
+   connection has; `?tools=` names the nearest for a name it doesn't know. Next for it: the nearest
+   listed ids for an id that isn't found (each product's 404 would need to say what it looked up).
 3. **An Agent Plugin bundle** (Agent Plugins 1.0: `plugin.json`, `skills/`, `mcp.json`; Stripe,
    Vercel, Sentry, Datadog ship one): roll's skills and an OAuth MCP entry in hosts that don't load
    skills over MCP yet; `roll mcp install` installs it.

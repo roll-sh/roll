@@ -120,6 +120,29 @@ fn as_text(v: &Value) -> String {
     }
 }
 
+
+/// The candidate closest to `word` by edit distance, when it's close enough to be a slip (a third
+/// of the word's length, at least 2): "stauts" finds "status", "lmit" finds "limit".
+pub fn nearest<'a>(word: &str, candidates: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
+    let w: Vec<char> = word.to_lowercase().chars().collect();
+    let distance = |b: &str| {
+        let b: Vec<char> = b.to_lowercase().chars().collect();
+        let mut row: Vec<usize> = (0..=b.len()).collect();
+        for (i, a) in w.iter().enumerate() {
+            let mut prev = row[0];
+            row[0] = i + 1;
+            for (j, c) in b.iter().enumerate() {
+                let next = (prev + usize::from(a != c)).min(row[j] + 1).min(row[j + 1] + 1);
+                prev = row[j + 1];
+                row[j + 1] = next;
+            }
+        }
+        row[b.len()]
+    };
+    let most = (w.len() / 3).max(2);
+    candidates.into_iter().map(|c| (distance(c), c)).filter(|(d, _)| *d <= most).min_by_key(|(d, c)| (*d, c.len())).map(|(_, c)| c)
+}
+
 impl Tool {
     /// A path with every `{param}` filled with a sample: what the catalogue classifies.
     fn sample_path(&self) -> String {
@@ -243,7 +266,10 @@ impl Tool {
         let clearable = self.params.iter().any(|p| p.at == At::BodyOrNull);
         for k in obj.keys() {
             if k != "approval" && !(k == "clear" && clearable) && !self.params.iter().any(|p| p.name == k) {
-                return Err(format!("{}: unknown argument {k:?}", self.name));
+                // What it takes, and the nearest name when it's a slip, so the model fixes it in one go.
+                let names: Vec<&str> = self.params.iter().map(|p| p.name).collect();
+                let near = nearest(k, names.iter().copied()).map(|n| format!(" (did you mean {n:?}?)")).unwrap_or_default();
+                return Err(format!("{}: unknown argument {k:?}{near}; it takes {}", self.name, names.join(", ")));
             }
         }
         let mut path = self.path.to_string();
@@ -1675,6 +1701,18 @@ static PREPARED: std::sync::LazyLock<std::collections::HashMap<&'static str, Pre
 
 #[cfg(test)]
 mod tests {
+    /// A slip finds its name; something unlike every name finds none.
+    #[test]
+    fn nearest_finds_slips() {
+        let names = ["status", "limit", "service", "environment"];
+        assert_eq!(super::nearest("stauts", names), Some("status"));
+        assert_eq!(super::nearest("lmit", names), Some("limit"));
+        assert_eq!(super::nearest("enviroment", names), Some("environment"));
+        assert_eq!(super::nearest("zebra", names), None);
+        let all: Vec<&str> = super::all().iter().map(|t| t.name).collect();
+        assert_eq!(super::nearest("apps_list_service", all.iter().copied()), Some("apps_list_services"));
+    }
+
     use super::*;
 
     /// Every tool calls a route the permission catalogue classifies, tool names are unique and

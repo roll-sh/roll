@@ -399,7 +399,9 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
         known.extend(m.sets.iter().flat_map(|s| s.tools()).filter_map(|t| t["name"].as_str().map(str::to_string)));
         let unknown = pick.unknown(&known);
         if !unknown.is_empty() {
-            return http_error(StatusCode::BAD_REQUEST, &format!("no tool named {}: tools/list says which there are", unknown.join(", ")));
+            let near: Vec<String> = unknown.iter().filter_map(|u| tools::nearest(u, known.iter().map(String::as_str)).map(|n| format!("{u} → {n}"))).collect();
+            let hint = if near.is_empty() { String::new() } else { format!(" (did you mean: {})", near.join(", ")) };
+            return http_error(StatusCode::BAD_REQUEST, &format!("no tool named {}{hint}: tools/list says which there are", unknown.join(", ")));
         }
     }
     let principal = match roll_auth::Grant::on(&ext) {
@@ -882,7 +884,11 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                             if ctx.modern { rpc_result(id, modern::approval_input_required(&r)) } else { approval_elicitation(id, &r) }
                         }
                         Ok(Some(r)) => rpc_result(id, r),
-                        Ok(None) => rpc_error(id, -32602, format!("unknown tool {name:?}")),
+                        Ok(None) => {
+                            let listed = ctx.usable_tools();
+                            let near = tools::nearest(&name, listed.iter().filter_map(|t| t["name"].as_str())).map(|n| format!(": did you mean {n:?}?")).unwrap_or_default();
+                            rpc_error(id, -32602, format!("unknown tool {name:?}{near}"))
+                        }
                     }
                 }
             }
