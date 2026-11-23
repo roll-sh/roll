@@ -134,6 +134,7 @@ Bodies are JSON. Every error is `{"error": string}`, plus a `code` when a produc
 | `PUT /v1/workspace/projects/{id}/resources/{kind}/{ref}` | `{x, y}` | `Resource` |
 | `DELETE /v1/workspace/projects/{id}/resources/{kind}/{ref}` | | 204 |
 | `GET /v1/workspace/projects/{id}/members` | | `Member[]` (emails only for its admins) |
+| `GET /v1/workspace/projects/{id}/events?after=&limit=&kinds=&latest=1` | | `{events: [{seq, at, kind, data}], next}` ([Events](#events)) |
 | `PATCH /v1/workspace/projects/{id}/members/{user}` | `{role?, environments?}` | `Member` |
 | `DELETE /v1/workspace/projects/{id}/members/{user}` | | 204 |
 | `DELETE /v1/workspace/projects/{id}/members/me` | | 204: leave |
@@ -246,6 +247,49 @@ time-boxed elevation).
 - A deleted project's group roles are kept apart with it (`deleted_group_roles`) and come back with
   `Workspace::restore`, except those of groups deleted since (dropped, each a `group.role_remove`
   in the audit log).
+
+### Events
+
+`GET …/projects/{id}/events?after=<seq>&limit=&kinds=` is what changed in who holds a role on a
+project, in order after a cursor: a follower asks with its last `next` instead of polling the
+members list. It's what roll MCP's `workspace.event` reads (mapped by roll MCP's feed table), as
+`secrets.event` reads roll secrets' feed (docs/secrets.md, "Events"). It answers
+`{events: [{seq, at, kind, data}], next}`. `limit` is 1–500 (default 100). `kinds` is
+comma-separated: exact names, or a family as `member.*`; an unknown one is a 400. `?latest=1`
+answers `{events: [], next}` at the head, for a follower that starts from now (with `after`: 400).
+
+- **Who reads it:** whoever sees the project's members (`R` on the project in the catalogue:
+  its members, and admins); anyone else gets the members route's 404. Its rows aren't per
+  environment, so nothing is filtered by one.
+- **The cursor.** Each event is written in the change's own write, and its `seq` is taken there
+  from the project's head row (`project_event_heads`), incremented under its row lock (a second
+  writer on Postgres waits for it, or loses a serializable race and runs again; SQLite has one
+  writer). Rows therefore commit in `seq` order, and a follower past 7 has already been able to
+  see 6. Never a Postgres sequence: its values commit out of order, and a follower would skip one
+  forever. `next` is past every row read; a page a `kinds` filter cut short moves it to the head.
+  `tests/api.rs`'s `two_nodes_changing_roles_never_leave_a_gap_a_follower_has_passed` checks it
+  (on Postgres too, with `ROLL_CODE_TEST_DATABASE`).
+- **Never a secret.** `data` holds person and group ids, handles, group names, roles and
+  environments, reasons, and always `actor`. Never a token or code; an invite's `email` only for
+  the project's admins, who see it in the invites list.
+- A deleted project's feed goes with it (404), and comes back with it on a restore, going on from
+  its cursor; it's dropped for good when the project is (`Workspace::forget_deleted`, or past
+  91 days).
+
+| Kind | When | `data` |
+| --- | --- | --- |
+| `member.added` | the project's maker (`via: "created"`), or an invite accepted (`via: "invite"`, right after its `invite.accepted`) | `user`, `handle`, `role`, `environments`, `via`, `invite` and `invited_by` (an invite's) |
+| `member.removed` | someone was removed (`reason: "removed"`), left (`left`), or their account was deleted (`offboarded`: one in each project they were a member of) | `user`, `handle`, `role`, `environments`, `reason` |
+| `member.role_changed` | a member's role or environments changed (a change to the same role is none) | `user`, `handle`, `from` and `to` (`{role, environments}`) |
+| `member.deactivated` | a person's account can't sign in any more (an admin or SCIM disabled it; roll accounts' offboarding outbox): one in each project they reach, directly or through a group. They stay members (counting for nothing) until it's enabled again; a deleted account is `member.removed` | `user`, `handle` (their id: the account can't be looked up), `role` (their highest there) |
+| `group.role_set` | a group was given a role on the project (`from: null`), or its role changed | `group`, `name`, `from`, `to` |
+| `group.role_removed` | a group's role was taken away (`reason: "removed"`), or the group was deleted (`group_deleted`, also when it was deleted while the project was and the project came back) | `group`, `name`, `role`, `environments`, `reason` |
+| `invite.sent` | an invite was made | `invite`, `email` (admins only), `role`, `environments`, `expires_at` |
+| `invite.accepted` | an invite was accepted | `invite`, `user`, `handle`, `role`, `environments` |
+| `invite.revoked` | an invite stopped working unused: `reason` is `revoked`, `replaced` (a new invite to the same address), `declined` (with `user`, `handle`), `inviter_role` (its inviter's role no longer gives it), `inviter_offboarded` or `leaked` | `invite`, `role`, `environments`, `reason` |
+
+A group's members coming and going changes what its people hold here too, but those are the
+group's records (roll's audit log), not the project's: they aren't events here.
 
 ## Shapes
 
