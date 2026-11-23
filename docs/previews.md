@@ -1696,6 +1696,7 @@ type Preview = {
   title: string; head: string; trusted: boolean;
   runs: string | null;                // the earlier head its services run (later pushes touched only ignored paths)
   earlier: {service: string; revision: string; url: string; share_url: string | null; at: number; own_data: string[]}[]; // earlier pushes, still reachable; own_data: the products it has its own copy of (as its head left them)
+  copies: {count: number; bytes: number; usd_month: number}; // the earlier pushes' own copies of its data, said apart (counted in cost)
   goes_at: number | null;             // when it goes (TTL, keep or expiry running out), once a day away (or a quarter of a shorter TTL)
   reported_by: string | null;         // the project that reports a Git URL branch's pull request, when another one does (one voice per pull request)
   desired: "active" | "deleted";
@@ -2425,9 +2426,10 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **The copies on the timeline, in review**: a `copies` step of its own between data and setup,
-   so a slow product's copy (a stream's waits for its tail to reach object storage) shows as
-   that, not as a slow setup.
+1. **What the copies hold, said apart, in review**: their bytes count in the preview's cost and
+   size cap, but the sheet listed only the branches, so a cost above their sum had no reason
+   shown (found in the 2026-11-23 review pack). `copies` on the record, a line under the data
+   branches and in `roll preview show`.
 2. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
@@ -2438,6 +2440,8 @@ Ranked by what a person notices first. Done so far:
 4. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
 5. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-23 night: the copies as a timeline step of their own (#770: live, data 2 ms · copies 2.6 s · setup 1.8 s).
 
 Landed 2026-11-22 evening to 2026-11-23: earlier pushes on their own data, for every product a preview branches and for roll apps services (#726 Postgres, #731 their cost, #740 Redis and search, #746 shown on every surface, #752 buckets, streams and NoSQL, #756 roll apps on roll apps' #750), the copies taken all at once (this PR).
 

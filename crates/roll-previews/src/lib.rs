@@ -349,6 +349,9 @@ pub struct Preview {
     /// Earlier pushes of the change's services, still reachable (newest first; the last
     /// [`store::PINNED_KEEP`] per service).
     pub earlier: Vec<Pinned>,
+    /// The earlier pushes' own copies of its data: how many, what they hold and keep costing
+    /// (counted in `cost` with its branches').
+    pub copies: Copies,
     /// When its screenshot was taken (`GET …/screenshot`), if it has one.
     pub screenshot_at: Option<i64>,
     /// How much the page changed since the screenshot at an earlier head (`GET
@@ -1158,8 +1161,16 @@ pub struct LeaseRow {
     pub expires_at: i64,
 }
 
-/// An earlier push of a change's service, still reachable at a URL of its own (on the preview's
-/// data, asleep until opened).
+/// What the earlier pushes' own copies of a preview's data add up to.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct Copies {
+    pub count: usize,
+    pub bytes: i64,
+    pub usd_month: f64,
+}
+
+/// An earlier push of a change's service, still reachable at a URL of its own (asleep until
+/// opened; on its own copy of the data where `own_data` names products).
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Pinned {
     pub service: String,

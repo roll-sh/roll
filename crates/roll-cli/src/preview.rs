@@ -712,6 +712,9 @@ fn print_preview(p: &Value) {
     for r in p["resources"].as_array().into_iter().flatten() {
         println!("  {:<8} {} → {} ({}, {})", s(&r["kind"]), s(&r["parent"]), r["ref"].as_str().unwrap_or("…"), s(&r["state"]), bytes(r["bytes"].as_f64().unwrap_or(0.0)));
     }
+    if let Some(n) = p["copies"]["count"].as_u64().filter(|n| *n > 0) {
+        println!("  earlier pushes' copies: {n}, {}, {}/month", bytes(p["copies"]["bytes"].as_f64().unwrap_or(0.0)), usd(&p["copies"]["usd_month"]));
+    }
     let c = &p["cost"];
     println!("cost: {}/month asleep, {}/hour in use, {} this month", usd(&c["sleeping_usd_month"]), usd(&c["active_usd_hour"]), usd(&c["month_to_date_usd"]));
     if let Some(lines) = p["schema_changes"].as_array().filter(|l| !l.is_empty()) {
