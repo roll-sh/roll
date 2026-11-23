@@ -1197,7 +1197,7 @@ mod preview_tests {
             "a name can't close its code span or add a link"
         );
         assert_eq!(browser_checks_line(&[]), None);
-        let mut ruled = env.clone();
+        let mut ruled = p.environment.clone().unwrap();
         assert_eq!(browser_checks_status(&ruled), None, "no rule, no status");
         ruled.browser_checks_rule = Some("check".into());
         ruled.browser_checks = vec![bc("home", "passed"), bc("checkout", "pending")];
