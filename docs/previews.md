@@ -168,6 +168,18 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   service and the push and linking the service's latest (on roll's preview domain and on a
   project's own, there only for that project's previews; the latest 30 a preview evicted, gone
   with the preview), not a 404 that reads as a broken preview.
+- **A page loaded before a push keeps working** (Vercel's skew protection; roll apps'
+  `run.skew_protection`): with `skew_protection = true` in `[preview]`, a request that names an
+  earlier push goes to that push's own service (above), past the same gate, while the push is
+  kept and for a day after it was replaced. A request names it with the `x-deployment-id` header,
+  a `dpl` query parameter, or the `__roll_dpl` cookie every page load gets. The app knows its own
+  push as `ROLL_DEPLOYMENT`, for its asset URLs and fetches (Next.js's `deploymentId`). A page
+  load always gets the current push and a new cookie, so a reload moves a visitor on. The cookie
+  is roll's and never reaches the app. A single-page app left open while someone pushes keeps
+  loading its own chunks and calling the API it was built against, instead of failing with
+  "failed to fetch dynamically imported module". This covers a trusted change's services on the
+  runtime, the only ones whose earlier pushes are kept. A roll apps service follows its own
+  `run.skew_protection` in its `pv-` environment.
 - **From the pull request or roll's change** (Bunnyshell's and Uffizzi's comment commands):
   someone who can write to the repo comments, in the pull request's conversation, an inline
   review comment or any of the change's threads in roll, `@roll preview redeploy` (build and deploy it again), `reset` (its
@@ -544,7 +556,8 @@ behind the `Apps` trait:
      With two resources of a kind, the first one takes the plain name and the others add
      `_<NAME>` (`DATABASE_URL_ANALYTICS`).
   5. `ROLL_PREVIEW`, `ROLL_PREVIEW_URL`, and `ROLL_PREVIEW_URL_<SERVICE>` for each service, so
-     services find each other; `PORT`, `ROLL_REPO`, `ROLL_CHANGE` and `ROLL_CHANGESET`.
+     services find each other; `PORT`, `ROLL_REPO`, `ROLL_CHANGE` and `ROLL_CHANGESET`;
+     `ROLL_DEPLOYMENT`, the push, which a request names to reach it again (skew protection).
 - **Shared images and caches.** Images are pulled once per node. Each repo has one package cache
   (a Docker volume `roll-previews-cache-<repo>`, at `/roll-cache`), shared by every preview of
   the repo. npm, pnpm, yarn, bun, pip, uv, cargo and go are pointed into it, so the second
@@ -2453,18 +2466,31 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **A failed browser check's screenshot and trace from the sheet, in review**: the record says
-   where roll apps keeps them (`files`), and the sheet opens them as the person looking.
-2. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
+1. **Skew protection for `roll.toml` services, in review**: a page loaded before a push keeps
+   reaching that push (`skew_protection = true`).
+2. **Feedback notes that carry the reviewer's context** (Netlify's drawer, Jam): the browser,
+   its console errors and failed requests on that page, sent with the note and shown with it on
+   the change.
+3. **Endpoint responses compared with main's by shape** (Signadot's SmartTests): a field gone or
+   a type changed in a JSON answer, on the sheet's verdict strip and the pull request comment
+   (values differ by design: main's preview has its own data).
+4. **Storybook stories as snapshots** (Chromatic): each story taken, compared with main's and
+   reviewed like a page, with TurboSnap's skip.
+5. **A process on a laptop standing in for one service** (Signadot local sandboxes,
+   Telepresence): the preview's other services and data reach it, the reverse of
+   `roll preview forward`.
+6. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
    (3.3 s in its log) and its masking, which needs that compute up: pg-control's to shorten.
-3. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+7. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-4. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+8. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-5. **Watch: pg-control's recovery to a time seconds old** (unowned).
+9. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-23, mid-afternoon: a failed browser check's screenshot and trace from the sheet (#815: the record names where roll apps keeps them).
 
 Landed 2026-11-23, afternoon: production's browser checks checked live in `preview-apps.sh` (#812: one passed, one failed with its error).
 

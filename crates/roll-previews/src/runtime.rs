@@ -1124,6 +1124,28 @@ impl Runtime {
         if feedback { add_feedback(resp) } else { resp }
     }
 
+    /// Skew protection (`roll.toml` `skew_protection`; Vercel's): a request a page loaded before a
+    /// push makes, naming the push that served it, goes to that push's own service (`web@<rev>`,
+    /// as its own URL would, past the same gate), while it's kept and for a day after it was
+    /// replaced. A page load always gets the current push, and a cookie naming it, so a reload
+    /// moves a visitor on. The cookie is roll's: the app never sees it.
+    fn skew(&self, preview: &str, service: String, req: &mut Request) -> (String, Option<String>) {
+        let cookie = take_cookies(req, SKEW_COOKIE).pop();
+        if service.contains('@') {
+            return (service, None);
+        }
+        let page = req.method() == axum::http::Method::GET && is_page_load(req);
+        let asked = if page { None } else { skew_asked(req, cookie) };
+        if !page && asked.is_none() {
+            return (service, None);
+        }
+        match self.store.skew(preview, &service, asked.as_deref()) {
+            Ok(Some((current, _))) if page => (service, Some(current)),
+            Ok(Some((_, true))) => (format!("{service}@{}", asked.unwrap_or_default()), None),
+            _ => (service, None),
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn pretend_running(&self, preview: &str, service: &str, addr: SocketAddr) {
         let live = self.live(preview, service);
@@ -2248,7 +2270,8 @@ async fn serve(rt: Arc<Runtime>, preview: String, service: String, mut req: Requ
         return rt.feedback_notes(&preview, &path).await;
     }
     let feedback = target.is_some() && req.method() == axum::http::Method::GET && is_page_load(&req);
-    match rt.cluster.get().cloned() {
+    let (service, skew_cookie) = rt.skew(&preview, service, &mut req);
+    let resp = match rt.cluster.get().cloned() {
         Some(cluster) => {
             let rt2 = rt.clone();
             cluster
@@ -2260,7 +2283,33 @@ async fn serve(rt: Arc<Runtime>, preview: String, service: String, mut req: Requ
                 .await
         }
         None => rt.proxy(&preview, &service, req, feedback).await,
+    };
+    with_skew_cookie(resp, skew_cookie, rt.cfg.scheme == "https")
+}
+
+/// The cookie a skew-protected service's page load gets: the push that answered it.
+const SKEW_COOKIE: &str = "__roll_dpl";
+
+/// The push a request that isn't a page load names: `x-deployment-id`, a `dpl` query parameter,
+/// or the cookie its page load got (the app's `ROLL_DEPLOYMENT`, as roll apps').
+fn skew_asked(req: &Request, cookie: Option<String>) -> Option<String> {
+    let ok = |s: &str| (!s.is_empty() && s.len() <= 100 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')).then(|| s.to_string());
+    if let Some(d) = req.headers().get("x-deployment-id").and_then(|v| v.to_str().ok()) {
+        return ok(d);
     }
+    if let Some(q) = req.uri().query()
+        && let Some((_, d)) = url::form_urlencoded::parse(q.as_bytes()).find(|(k, _)| k == "dpl")
+    {
+        return ok(&d);
+    }
+    cookie.as_deref().and_then(ok)
+}
+
+fn with_skew_cookie(mut resp: Response, push: Option<String>, secure: bool) -> Response {
+    if let Some(v) = push.and_then(|p| HeaderValue::from_str(&format!("{SKEW_COOKIE}={p}; Path=/; HttpOnly; SameSite=Lax{}", if secure { "; Secure" } else { "" })).ok()) {
+        resp.headers_mut().append(header::SET_COOKIE, v);
+    }
+    resp
 }
 
 #[cfg(test)]
@@ -2435,6 +2484,81 @@ mod tests {
         let host: &'static str = Box::leak(format!("WEB-{short}-PR1-SHOP.preview.test.:7070").into_boxed_str());
         let gone = get(host).await;
         assert!(gone.starts_with("HTTP/1.1 410") && gone.contains("http://web-pr1-shop.preview.test") && gone.contains("x-robots-tag: noindex"), "{gone}");
+    }
+
+    /// Skew protection: a request naming an earlier push (its header, `?dpl=`, or the cookie its
+    /// page load got) reaches that push while it's kept and for a day after it was replaced; a
+    /// page load gets the current push and the cookie; off, nothing moves; the app never sees
+    /// roll's cookie.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_request_naming_an_earlier_push_goes_to_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&code_sql::Target::Sqlite(dir.path().join("p.db")), Default::default()).unwrap());
+        let new = crate::store::New {
+            project_id: "prj_1".into(),
+            key: "pr1".into(),
+            project_name: "shop".into(),
+            repo: "acme/web".into(),
+            change_id: Some("chg_1".into()),
+            branch: None,
+            number: Some(1),
+            title: "t".into(),
+            github_pr: Some(1),
+            head: "cs_3".into(),
+            trusted: true,
+            state: crate::State::Ready,
+            expires_at: None,
+            created_by: "roll".into(),
+        };
+        let (row, _) = store.create(&new).unwrap();
+        let url = |h: &str| format!("http://{h}.preview.test");
+        store.want_service(&row.id, "web", "acme/web", "cs_3", 512, &url).unwrap();
+        store.pin(&row.id, "web", "cs_1", &url).unwrap();
+        store.pin(&row.id, "web", "cs_2", &url).unwrap();
+        store.age_pinned(&row.id, "web", "cs_1", crate::store::SKEW_WINDOW_MS + 1).unwrap();
+        store.set_service_skew(&row.id, "web", true).unwrap();
+        store.put_settings("prj_1", &crate::Settings { access: crate::settings::Access::Public, ..Default::default() }).unwrap();
+        let rt = Runtime::new(RuntimeConfig { domain: "preview.test".into(), ..RuntimeConfig::default() }, Arc::new(code_preview::docker::Docker), Arc::new(NoTrees), store);
+        // Each push's container says which it is, and whether roll's cookie reached it.
+        for (service, said) in [("web", "cs_3"), ("web@cs_2", "cs_2"), ("web@cs_1", "cs_1")] {
+            let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            rt.pretend_running(&row.id, service, upstream.local_addr().unwrap());
+            tokio::spawn(async move {
+                loop {
+                    let Ok((mut s, _)) = upstream.accept().await else { return };
+                    tokio::spawn(async move {
+                        let mut buf = vec![0u8; 4096];
+                        let n = s.read(&mut buf).await.unwrap_or(0);
+                        let body = format!("{said}{}", if String::from_utf8_lossy(&buf[..n]).contains("__roll_dpl") { " and the cookie" } else { "" });
+                        let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await;
+                    });
+                }
+            });
+        }
+        let app = axum::Router::new().fallback(|| async { "api" }).layer(axum::middleware::from_fn_with_state(rt.clone(), route));
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        let get = |path: &str, headers: &str| {
+            let req = format!("GET {path} HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\n{headers}Connection: close\r\n\r\n");
+            async move {
+                let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+                s.write_all(req.as_bytes()).await.unwrap();
+                let mut out = String::new();
+                s.read_to_string(&mut out).await.unwrap();
+                out
+            }
+        };
+        assert!(get("/api", "Cookie: a=1; __roll_dpl=cs_2\r\n").await.ends_with("\r\n\r\ncs_2"), "the cookie, kept from the app");
+        assert!(get("/api", "x-deployment-id: cs_2\r\n").await.ends_with("\r\n\r\ncs_2"));
+        assert!(get("/assets/app.js?dpl=cs_2", "").await.ends_with("\r\n\r\ncs_2"));
+        assert!(get("/api", "x-deployment-id: cs_1\r\n").await.ends_with("\r\n\r\ncs_3"), "replaced over a day ago");
+        assert!(get("/api", "x-deployment-id: cs_9\r\n").await.ends_with("\r\n\r\ncs_3"), "never kept");
+        let page = get("/", "Sec-Fetch-Dest: document\r\nCookie: __roll_dpl=cs_2\r\n").await;
+        assert!(page.ends_with("\r\n\r\ncs_3") && page.contains("set-cookie: __roll_dpl=cs_3; Path=/; HttpOnly"), "a page load: the current push, {page}");
+        rt.store.set_service_skew(&row.id, "web", false).unwrap();
+        let off = get("/api", "x-deployment-id: cs_2\r\n").await;
+        assert!(off.ends_with("\r\n\r\ncs_3") && !get("/", "Sec-Fetch-Dest: document\r\n").await.contains("__roll_dpl"), "off: {off}");
     }
 
     /// The tag goes in as the page streams: before `</body>` even when a chunk splits it, at the
