@@ -706,6 +706,9 @@ type Plan = {
   /** roll's Next.js adapter is in the image (a Next 16 server, not its own Dockerfile): its
    *  instances share ISR, fetch and "use cache" entries (README, "Next.js across instances"). */
   next_cache?: boolean;
+  /** Its Node build writes source maps (`--sourcemap`, or tsc with `sourceMap`): it starts with
+   *  `--enable-source-maps` joined into NODE_OPTIONS (README, "Errors"). */
+  source_maps?: boolean;
 };
 
 /** Wired on a node today: postgres (DATABASE_URL), redis (REDIS_URL, REDIS_REST_URL/TOKEN) and search. */
