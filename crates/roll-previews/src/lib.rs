@@ -236,6 +236,43 @@ pub struct GrewSpan {
     pub main_ms: u64,
 }
 
+/// One of a preview's secret values in what its pages served (Netlify's secrets scan): which, by
+/// the name the preview gets it as (never the value), and where.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct ServedSecret {
+    pub key: String,
+    pub path: String,
+}
+
+/// What a preview's pages served, looked in at a head (`served_secrets`, a runtime fact).
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct ServedSecrets {
+    pub head: String,
+    pub secrets: Vec<ServedSecret>,
+}
+
+/// `keyed`'s values (name, value) found in `bodies` (path, bytes): each name and path once, at
+/// most 20.
+pub fn served_secrets(bodies: &[(String, Vec<u8>)], keyed: &[(String, String)]) -> Vec<ServedSecret> {
+    let mut out: Vec<ServedSecret> = Vec::new();
+    if keyed.is_empty() {
+        return out;
+    }
+    let Ok(ac) = aho_corasick::AhoCorasick::new(keyed.iter().map(|(_, v)| v.as_bytes())) else { return out };
+    for (path, bytes) in bodies {
+        for m in ac.find_overlapping_iter(bytes.as_slice()) {
+            let key = &keyed[m.pattern().as_usize()].0;
+            if !out.iter().any(|s| s.key == *key && s.path == *path) {
+                out.push(ServedSecret { key: key.clone(), path: path.clone() });
+                if out.len() >= 20 {
+                    return out;
+                }
+            }
+        }
+    }
+    out
+}
+
 /// A preview's error groups that main's preview (`branch`) doesn't have: how many, and the most
 /// frequent few by service and title (masked).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -387,6 +424,9 @@ pub struct Preview {
     /// minutes: Sentry's new issues in a release).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_errors: Option<NewErrors>,
+    /// Its secret values its pages served at its head, by name and path (never the value).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub served_secrets: Vec<ServedSecret>,
     /// The project's rule for regressions against main's (`check`, `required`), when it has one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub regressions: Option<String>,
@@ -1553,6 +1593,21 @@ mod tests {
         assert!(!e(14, Some(4)).slower(), "within 20 ms");
         assert!(!e(55, Some(40)).slower(), "not half again");
         assert!(!e(140, None).slower(), "nothing to compare with");
+    }
+
+    /// A secret value in what a preview's pages served is named with where, each name and path
+    /// once; nothing else is.
+    #[test]
+    fn a_served_secret_is_named_with_where_each_once() {
+        let keyed = [("STRIPE_KEY".to_string(), "sk_live_abcdef12".to_string()), ("DATABASE_URL".to_string(), "p4ssw0rd-xyz".to_string())];
+        let bodies = [
+            ("/app.js".to_string(), b"a='sk_live_abcdef12';b='sk_live_abcdef12'".to_vec()),
+            ("/".to_string(), b"<p>nothing here</p>".to_vec()),
+            ("/api/me".to_string(), b"{\"db\":\"postgres://u:p4ssw0rd-xyz@h\"}".to_vec()),
+        ];
+        let found: Vec<(String, String)> = super::served_secrets(&bodies, &keyed).into_iter().map(|s| (s.key, s.path)).collect();
+        assert_eq!(found, [("STRIPE_KEY".to_string(), "/app.js".to_string()), ("DATABASE_URL".to_string(), "/api/me".to_string())]);
+        assert!(super::served_secrets(&bodies, &[]).is_empty());
     }
 
     /// An endpoint's JSON answer against main's: a field gone (the outermost only) or a type

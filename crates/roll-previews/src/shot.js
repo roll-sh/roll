@@ -509,6 +509,34 @@ const stories = async (sessionId) => {
   });
   await send("Runtime.enable", {}, sessionId);
   await send("Network.enable", {}, sessionId);
+  // What the pages served (documents, the origin's own scripts, fetch and XHR answers), for roll
+  // to look for the preview's secret values in (this run is never given them): at most 40
+  // bodies, 2 MiB each and 8 MiB in all, to $OUT.bodies.json. Paths only, never a query.
+  const served = [];
+  let servedBytes = 0;
+  const servedWanted = new Map();
+  const origin = new URL(process.env.URL).origin;
+  listeners.add((m) => {
+    const p = m.params || {};
+    if (m.method === "Network.responseReceived" && ["Document", "Script", "XHR", "Fetch"].includes(p.type) && p.response?.status < 400) {
+      try {
+        const u = new URL(p.response.url);
+        if (u.origin === origin) servedWanted.set(p.requestId, u.pathname);
+      } catch {}
+    } else if (m.method === "Network.loadingFinished" && servedWanted.has(p.requestId)) {
+      const path = servedWanted.get(p.requestId);
+      servedWanted.delete(p.requestId);
+      if (served.length >= 40 || servedBytes >= 8 << 20 || (p.encodedDataLength || 0) > 4 << 20) return;
+      send("Network.getResponseBody", { requestId: p.requestId }, sessionId)
+        .then((b) => {
+          const bytes = Buffer.from(b.body || "", b.base64Encoded ? "base64" : "utf8");
+          if (bytes.length > 2 << 20 || served.length >= 40 || servedBytes + bytes.length > 8 << 20) return;
+          servedBytes += bytes.length;
+          served.push({ path: path.slice(0, 200), b64: bytes.toString("base64") });
+        })
+        .catch(() => {});
+    }
+  });
   mainFrame = (await send("Page.getFrameTree", {}, sessionId)).frameTree.frame.id;
   // In the checks' world, made with each document before its first script.
   await send("Page.addScriptToEvaluateOnNewDocument", { source: VITALS, worldName: WORLD }, sessionId).catch(() => null);
@@ -666,6 +694,8 @@ const stories = async (sessionId) => {
     }
   } catch {}
   fs.writeFileSync(process.env.OUT + ".crops.json", JSON.stringify(crops));
+  await sleep(200);
+  fs.writeFileSync(process.env.OUT + ".bodies.json", JSON.stringify(served));
   chrome.kill();
   process.exit(0);
 })().catch((e) => {
