@@ -4798,6 +4798,25 @@ const INLINE_MIN_PAGES: u32 = 32;
 /// min_parallel_table_scan_size's default).
 const INLINE_MAX_PAGES: u32 = 1024;
 
+/// The least stored bytes of a scan's key range narrower than its relation's read by workers
+/// (min_parallel_index_scan_size's default, 512 kB): PostgreSQL plans no parallel scan of less, and for a range of a few
+/// hundred rows the workers' setup (the range's ends, its cuts, threads) costs many times
+/// the rows. An inline scan's range: `INLINE_MIN_BYTES`.
+const PARALLEL_MIN_BYTES: u64 = 512 << 10;
+
+/// The least stored bytes of a key range scanned inline (`ParScan::start_inline`): under it
+/// the serial path (its cuts each position a scan over every source).
+const INLINE_MIN_BYTES: u64 = 64 << 10;
+
+/// Whether [start, end), a range of relation `rel`'s keys (`index_prefix`) narrower than all of
+/// them (a BETWEEN's, an equality's), holds under `min` stored bytes (`Store::range_bytes`). A
+/// whole relation's scan is decided as before.
+fn short_range(start: &[u8], end: &[u8], rel: &[u8], min: u64, ctx: &ExecCtx) -> bool {
+    let rel_end = prefix_end(rel);
+    let narrower = start > rel || (!end.is_empty() && end < rel_end.as_slice());
+    narrower && ctx.sess.db.store.range_bytes(start, end) < min
+}
+
 fn parallel_workers(ctx: &ExecCtx) -> (usize, usize) {
     let (pool, per_gather) = ctx.sess.settings.borrow().hot().parallel_workers;
     let n = per_gather.min(pool);
@@ -5055,6 +5074,10 @@ impl ScanNode {
             return Ok(None);
         }
         let (start, end) = self.ranges[0].clone();
+        // (A short key range, a primary key's BETWEEN: the serial path.)
+        if short_range(&start, &end, &index_prefix(p.table.oid, 0), if inline { INLINE_MIN_BYTES } else { PARALLEL_MIN_BYTES }, ctx) {
+            return Ok(None);
+        }
         // (A heap whose rows only inserts put out of key order, as a COPY puts some in an
         // earlier page's free space: the model names them, and the workers read chunks of
         // keys with those rows moved to their places in heap order (`DisplacedFill`). Else
@@ -5247,6 +5270,11 @@ impl ScanNode {
             },
         };
         let (start, end) = self.ranges[0].clone();
+        // (An index range of a few entries, an equality's or a short BETWEEN's: the serial
+        // index scan, as PostgreSQL's plan.)
+        if short_range(&start, &end, &index_prefix(p.table.oid, ix.id), PARALLEL_MIN_BYTES, ctx) {
+            return Ok(None);
+        }
         let lo = txn.scan_snap(&start, &end, &snap).next().transpose()?.map(|(k, _)| k);
         let hi = txn.scan_rev(&start, &end, Some(&*snap)).next().transpose()?.map(|(k, _)| k);
         let (Some(lo), Some(hi)) = (lo, hi) else {

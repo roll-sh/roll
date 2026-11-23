@@ -1237,6 +1237,12 @@ impl Store {
     /// BAS_BULKREAD for relations over NBuffers / 4). Such a read goes through
     /// `bulk_read`, so a full scan of a big table doesn't push out everything else.
     pub fn bulk_range(&self, start: &[u8], end: &[u8]) -> bool {
+        self.range_bytes(start, end).saturating_mul(BULK_RATIO) > self.opts.cache.capacity_bytes() as u64 / 4
+    }
+
+    /// The stored bytes of the files' blocks that [start, end) meets (an empty `end`:
+    /// unbounded), from their indexes: about what a scan of the range reads from files.
+    pub fn range_bytes(&self, start: &[u8], end: &[u8]) -> u64 {
         let v = self.view();
         let ssts = v.l0.iter().chain(&v.l1).chain(v.imm.iter().filter_map(|f| match f {
             Frozen::Sst(s) => Some(s),
@@ -1244,13 +1250,14 @@ impl Store {
         }));
         let mut bytes = 0u64;
         for s in ssts {
-            if s.meta.last_key.as_slice() < start || s.meta.first_key.as_slice() >= end {
+            if s.meta.last_key.as_slice() < start || (!end.is_empty() && s.meta.first_key.as_slice() >= end) {
                 continue;
             }
-            let (a, b) = (s.find_block(start), s.find_block(end).min(s.block_count().saturating_sub(1)));
-            bytes += s.stored_bytes(a, b);
+            let last = s.block_count().saturating_sub(1);
+            let b = if end.is_empty() { last } else { s.find_block(end).min(last) };
+            bytes += s.stored_bytes(s.find_block(start), b);
         }
-        bytes.saturating_mul(BULK_RATIO) > self.opts.cache.capacity_bytes() as u64 / 4
+        bytes
     }
 
     /// Watch `table` (the first 4 bytes of its keys): until a commit writes one of its keys
