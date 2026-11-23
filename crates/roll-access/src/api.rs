@@ -311,12 +311,13 @@ struct Check {
 /// a nested or catch-all route is matched by its path, as the gate matches it.
 async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Result<Json<Value>> {
     let who = who(&a, &ext)?;
-    let (scope, ask_otherwise) = match (&who, &c.token) {
-        (Who::Grant(g), None) => (g.scope.as_ref().clone(), g.ask_otherwise),
+    // A person's token is decided as a person's grant: a canvas counts only where it trusts.
+    let (scope, ask_otherwise, person) = match (&who, &c.token) {
+        (Who::Grant(g), None) => (g.scope.as_ref().clone(), g.ask_otherwise, g.user.is_some()),
         (Who::Grant(_), Some(_)) => return Err(Error::Forbidden("a token checks only itself".into())),
         (Who::Operator | Who::User(_), Some(id)) => {
             let g = visible_grant(&a, &who, id).await?;
-            (g.effective_rules(code_sql::now_ms(), |r| a.policy_now().asks_again(r)), g.ask_otherwise)
+            (g.effective_rules(code_sql::now_ms(), |r| a.policy_now().asks_again(r)), g.ask_otherwise, g.user.is_some())
         }
         (Who::Operator, None) => return Ok(Json(json!({ "decision": "allow", "why": "the operator may do everything" }))),
         (Who::User(_), None) => return Err(Error::BadRequest("name the token to check (token)".into())),
@@ -330,7 +331,7 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
     let params = found.params.unwrap_or_default();
     let (a2, q) = (a.clone(), uri.query().map(str::to_string));
     let params2 = params.clone();
-    let target = tokio::task::spawn_blocking(move || crate::evaluate::target(&a2, row, &params2, q.as_deref(), &axum::http::HeaderMap::new()))
+    let target = tokio::task::spawn_blocking(move || crate::evaluate::target(&a2, row, &params2, q.as_deref(), &axum::http::HeaderMap::new(), person))
         .await
         .map_err(|e| Error::Internal(e.to_string()))?;
     // Decided as the gate decides: the copy a body asks for, and "ask for anything else".
@@ -348,7 +349,7 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
         (outcome, action) = (copied, Action::Reveal);
     }
     let mut about: (&str, Option<String>) = (row.product, None);
-    if let Some(l) = crate::evaluate::lend_outcome(&a, row, &params, c.body.as_ref(), &scope).await
+    if let Some(l) = crate::evaluate::lend_outcome(&a, row, &params, c.body.as_ref(), &scope, person).await
         && crate::evaluate::rank(l.outcome) < crate::evaluate::rank(outcome)
     {
         (outcome, action) = (l.outcome, l.action);

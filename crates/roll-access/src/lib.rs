@@ -373,10 +373,20 @@ pub struct Resolvers {
     /// Per product: the workspace project a resource is in, for a product that keeps it itself
     /// rather than on the canvas (previews: a preview's project).
     pub projects: HashMap<&'static str, ProjectFn>,
+    /// Per product: the ids of the resources a person owns themselves (search: their clusters),
+    /// for a product whose owner stays a source of trust beside projects (docs/members.md).
+    pub owned: HashMap<&'static str, OwnedFn>,
+    /// Products whose resources have no environments and are never protected (search's
+    /// clusters): an `unprotected` rule, a developer's default (docs/members.md, D3), reaches them
+    /// whole.
+    pub never_protected: std::collections::HashSet<&'static str>,
 }
 
 /// The workspace project `product`'s resource `id` is in (`None`: not known, or gone).
 pub type ProjectFn = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
+/// The ids of `product`'s resources the person `user` (`usr_…`) owns.
+pub type OwnedFn = Arc<dyn Fn(&str) -> Vec<String> + Send + Sync>;
 
 /// Whether environment `env` of resource `id` is protected (`None`: not known).
 pub type ProtectedFn = Arc<dyn Fn(&str, &str) -> Option<bool> + Send + Sync>;
@@ -412,6 +422,19 @@ impl Resolvers {
     /// the project).
     pub fn project_fn(&mut self, product: &'static str, f: impl Fn(&str) -> Option<String> + Send + Sync + 'static) {
         self.projects.insert(product, Arc::new(f));
+    }
+
+    /// Register the resources of `product` a person owns themselves: `f(user)`. A person's grant
+    /// (their session, and within it their tokens) reaches each of them with every action, as their
+    /// own did before members (docs/members.md, "search").
+    pub fn owned_fn(&mut self, product: &'static str, f: impl Fn(&str) -> Vec<String> + Send + Sync + 'static) {
+        self.owned.insert(product, Arc::new(f));
+    }
+
+    /// Say `product`'s resources have no environments and none is ever protected
+    /// ([`Resolvers::never_protected`]).
+    pub fn unprotected_whole(&mut self, product: &'static str) {
+        self.never_protected.insert(product);
     }
 
     /// Whether `env` of `product`'s resource `id` is protected, as the product says now.
@@ -649,6 +672,14 @@ impl Access {
 
     /// The resource of `kind` named `id`, with its project and environment filled in.
     pub fn resource(&self, product: &str, kind: &str, id: &str) -> Resource {
+        self.resource_as(false, product, kind, id)
+    }
+
+    /// [`Access::resource`] as a person's grant sees it (`person`: their session, or a token of
+    /// theirs): a project whose canvas holds it counts only when the project trusts it (its home,
+    /// or one of its owners' own: `Workspace::trusts`), so an admin of a project gains nothing on a
+    /// stranger's resource dropped on its canvas (docs/members.md, "A canvas proves nothing").
+    pub fn resource_as(&self, person: bool, product: &str, kind: &str, id: &str) -> Resource {
         // A git URL names its repo with or without `.git`.
         let (product, kind, id) = if kind == "git-repo" { (product, "repo", id.trim_end_matches(".git")) } else { (product, kind, id) };
         // tasks' queues, topics, schedules and functions share one product: their ids say which
@@ -665,10 +696,35 @@ impl Access {
         } else if let Some(f) = self.resolvers.projects.get(product) {
             f(&id).into_iter().collect()
         } else {
-            catalog::workspace_kind(product).map(|wk| self.resolvers.projects_of(wk, &id)).unwrap_or_default()
+            let wk = catalog::workspace_kind(product);
+            let mut on = wk.map(|wk| self.resolvers.projects_of(wk, &id)).unwrap_or_default();
+            if let (true, Some(wk)) = (person, wk) {
+                on.retain(|p| self.trusts(p, wk, &id));
+            }
+            on
         };
         let project = (!projects.is_empty()).then(|| projects.remove(0));
-        Resource { product: product.into(), id: Some(id), project, also_in: projects, environment: resolved.and_then(|r| r.environment), ..Default::default() }
+        let protected = self.resolvers.never_protected.contains(product).then_some(false);
+        Resource { product: product.into(), id: Some(id), project, also_in: projects, environment: resolved.and_then(|r| r.environment), protected, ..Default::default() }
+    }
+
+    /// Whether workspace project `project` stands for `kind ref` (`Workspace::trusts`). No
+    /// workspace, or a failed lookup, is a no.
+    fn trusts(&self, project: &str, workspace_kind: &str, r#ref: &str) -> bool {
+        let (Some(ws), Ok(kind)) = (self.workspace.get(), roll_workspace::Kind::parse(workspace_kind)) else { return false };
+        ws.get(roll_workspace::Scope::All, project).is_ok_and(|p| ws.trusts(&p, kind, r#ref))
+    }
+
+    /// The rule a person's grant gets for what they own of `product` (`Resolvers::owned_fn`):
+    /// every action on each, by id. `None`: the product registers none, or they own nothing.
+    pub fn own_rule(&self, product: &str, user: &str) -> Option<roll_auth::scope::Rule> {
+        use roll_auth::scope::{Action, Effect, Resources, Rule, Selector};
+        let ids = self.resolvers.owned.get(product).map(|f| f(user)).unwrap_or_default();
+        if ids.is_empty() {
+            return None;
+        }
+        let resources = Resources::Some(ids.into_iter().map(|id| Selector::Id { id, index: None }).collect());
+        Some(Rule { product: product.into(), resources, environments: None, paths: None, unprotected: false, actions: Action::ALL.iter().map(|a| (*a, Effect::Allow)).collect() })
     }
 }
 

@@ -478,6 +478,11 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   so a rule that asks for `reveal` isn't asked here (the 403 says so). A token that should do this
   needs `reveal` allowed, or can use `POST …/keys`, which asks as any route does. The gate reads
   no console body.
+- A search API key (`POST /v1/search/clusters/{id}/keys`) is `reveal` when its `access` is
+  `data`, `read` or `append`, and `admin` when it's `admin` (the default, everything the
+  cluster's own user may do, as the console is) or anything else. A new admin password
+  (`POST …/password`) is `admin`. Both answer a credential, so search refuses them (403) to a
+  grant that can't also reveal on the cluster (`capable: [reveal]`).
 - Agents' machine commands, by `policy::agent_may`'s tiers: diffs and file reads `read`; working
   threads `write`; publishing with `land` `deploy`; a shell, writing files, rolling back, raising a
   thread's runtime or interaction mode, answering an agent's approval, endpoints, the gateway,
@@ -677,9 +682,10 @@ A signed-in person who isn't an admin (D9: roll's admin accounts stay the operat
 `Access::UserOrCredential`), rolld's gate hands the request to the evaluator
 (`Authorizer::handle_session`), which builds `GrantKind::Session` from their memberships now (one
 indexed read in the workspace, never cached) and, on a **member product's** row (workspace and
-secrets in v1, `roll_auth::roles::MEMBER_PRODUCTS`), decides it as a token's: the row, the
-resource, the rules. Making a project is the person's own (`catalog::PERSON_OWN`). Every other
-route goes on as it did.
+secrets in v1, previews and search in v1.1, `roll_auth::roles::MEMBER_PRODUCTS`), decides it as a
+token's: the row, the resource, the rules. Making a project is the person's own
+(`catalog::PERSON_OWN`), and so is a search cluster made without `X-Roll-Project`
+(`catalog::PERSON_OWN_UNPLACED`). Every other route goes on as it did.
 
 - The roles are fixed rule templates (`crates/roll-auth/src/roles.rs`, one module holding the open
   decisions D1–D9). A rule may carry `unprotected: true`: it matches only a resource whose
@@ -689,6 +695,16 @@ route goes on as it did.
   carry it too.
 - A project the session's rules don't name is a 404 (as the workspace answers); one they do is a
   403 that names what the role lacks. A list it can't see whole is filtered; a session never asks.
+- A canvas proves nothing for a person's grant (their session, or a token of theirs): a resource a
+  project's canvas holds is in that project for their rules only when the project trusts it
+  (`Workspace::trusts`: its home, or one of the project's owners' own; `Access::resource_as`). A
+  resource in none of their projects is a 404.
+- What a person owns themselves stays theirs beside their projects: a product registers it
+  (`Resolvers::owned_fn`; search's clusters), and the person's grant gets a rule with every action on
+  each, by id.
+- A person's allowed request carries `roll_auth::Reach`: the same decision, asked about another
+  resource of the product by id, resolved the same way. search narrows lists and checks a remote
+  cluster with it.
 - Session requests aren't access-log rows (they aren't a token's), allowed or refused: a refused
   session request leaves no audit row either, only its answer. Membership changes are
   (`product=workspace`: `member.invite`, `member.accept`, `member.role`, `member.remove`,

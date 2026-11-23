@@ -67,10 +67,10 @@ pub const RULES: &[Rule] = &[
     // Workspace projects: the operator and every signed-in user, each seeing their own.
     Rule { route: "/v1/workspace", access: Access::User("workspace projects: a user's own") },
     Rule { route: "/v1/previews", access: Access::User("previews: the projects a person is a member of, each route as their role there allows (docs/members.md)") },
-    // roll search's control plane: the operator and every signed-in person, each seeing their own
-    // clusters (search scopes by SignedIn; another's answers 404). Clusters' data plane is the
-    // REST port, with the cluster's own credentials.
-    Rule { route: "/v1/search", access: Access::User("search clusters: a user's own") },
+    // roll search's control plane: the operator and every signed-in person, each reaching their own
+    // clusters and their projects' as their role there allows (docs/members.md); anything else
+    // answers 404. Clusters' data plane is the REST port, with the cluster's own credentials.
+    Rule { route: "/v1/search", access: Access::User("search clusters: a person's own, and their projects' as their role there allows (docs/members.md)") },
     // Node-to-node hops are signed with the cluster secret; computes fetch WAL with their token.
     Rule { route: "/internal", access: Access::Product("internal: signed hops and the WAL token") },
     // Storage: IAM users signed in to the dashboard (console sessions) act as themselves.

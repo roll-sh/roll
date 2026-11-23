@@ -1701,7 +1701,7 @@ contexts of x-pack's version allowlist), `EsObj::Version`, `contexts::version_al
 | method | path                                             | |
 | ------ | ------------------------------------------------ | - |
 | GET    | `/v1/search/clusters`                            | list |
-| POST   | `/v1/search/clusters`                            | create `{name, flavor?, parent?, at?}` → includes the password once |
+| POST   | `/v1/search/clusters`                            | create `{name, flavor?, parent?, at?}` → includes the password once; `X-Roll-Project` makes it in (and homes it in) that project |
 | GET    | `/v1/search/clusters/{id}`                       | show: state (loaded/asleep), indices, docs, bytes, url |
 | PATCH  | `/v1/search/clusters/{id}`                       | settings: idle timeout, flavor, limits |
 | DELETE | `/v1/search/clusters/{id}`                       | |

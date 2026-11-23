@@ -288,8 +288,10 @@ export const searchApi = {
   info: () => call<SearchInfo>("GET", "/v1/search"),
   list: () => call<SearchCluster[]>("GET", "/v1/search/clusters"),
   get: (id: string) => call<SearchCluster>("GET", cl(id)),
-  create: (name: string, settings: Partial<SearchSettings>) =>
-    call<SearchCluster>("POST", "/v1/search/clusters", { name, ...settings }),
+  /** A cluster of your own, or with `projectId` one made in that project (`X-Roll-Project`): your
+   * role there decides it (admin and owner), and the project is its home, so its members reach it. */
+  create: (name: string, settings: Partial<SearchSettings>, projectId?: string) =>
+    call<SearchCluster>("POST", "/v1/search/clusters", { name, ...settings }, projectId ? { "x-roll-project": projectId } : undefined),
   update: (id: string, settings: SearchClusterPatch) => call<SearchCluster>("PATCH", cl(id), settings),
   remove: (id: string) => call<{ deleted: string; name: string }>("DELETE", cl(id)),
   deleted: () => call<DeletedSearchCluster[]>("GET", "/v1/search/clusters?deleted=true"),

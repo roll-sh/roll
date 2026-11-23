@@ -1278,6 +1278,7 @@ Every code-control test runs on SQLite, and on Postgres with `ROLL_CODE_TEST_DAT
 
 | Defect fixed | Test |
 | --- | --- |
+| roll search on members (docs/members.md): a member's role in a cluster's project decides each route (a viewer reads; a developer also writes and makes `data` keys; an admin or owner makes `admin` keys, rotates the admin password, deletes and creates in the project), a person's own clusters stay theirs, lists hold the project's trusted clusters and their own, a stranger's cluster dropped on the canvas reaches nobody until it's homed, someone outside the project gets 404, a branch stays in its parent's project | `roll-access/tests/access.rs::a_members_role_decides_what_they_do_to_a_search_cluster`, `rolld/tests/auth.rs::every_control_plane_route_needs_the_operator_token` |
 | control planes without auth: every route rolld merges answers 401 without the operator token (and to a wrong one, or another credential, where the product checks its own) and not 401 with it, except `crates/rolld/src/auth.rs`'s public list; CORS answers only `ROLL_DASHBOARD_ORIGIN` | `rolld/tests/auth.rs::every_control_plane_route_needs_the_operator_token` |
 | rolld off loopback (or `ROLL_EDGE=1`) without `ROLL_ADMIN_TOKEN`, or with a short one, refuses to start and doesn't print it | `rolld/tests/auth.rs::refuses_to_listen_off_loopback_without_a_token` |
 | owners' provider `base_url` on private addresses (SSRF; literals at set and use time, credentials in the URL) | `reviewer.rs::byok_endpoints_on_private_addresses_are_refused` |

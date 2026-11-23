@@ -217,7 +217,7 @@ export const workspace = {
 
   /** Creates a resource in its product (unless `made` names one already) and places it on the project's canvas at `at`; its ref. A failed placing throws a {@link PlaceError} with the ref. */
   async make(projectId: string, kind: ResourceKind, name: string, at: { x: number; y: number }, made?: string) {
-    const ref = made ?? (await createResource(kind, name));
+    const ref = made ?? (await createResource(kind, name, projectId));
     try {
       await workspaceApi.place(projectId, kind, ref, at.x, at.y);
     } catch (e) {

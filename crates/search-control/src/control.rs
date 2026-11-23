@@ -754,7 +754,12 @@ pub struct Control {
     leases: OnceLock<Arc<crate::cluster::ClusterLeases>>,
     /// Resolves snapshot repositories' credential references ([`Control::set_secrets`]).
     secret_refs: Arc<crate::secret_refs::CatalogRefs>,
+    /// Told of each new branch ([`Control::on_branch`]).
+    on_branch: OnceLock<OnBranch>,
 }
+
+/// Called with a new branch's parent and the branch, once it's in the catalog.
+pub type OnBranch = Box<dyn Fn(&SearchCluster, &SearchCluster) + Send + Sync>;
 
 impl Control {
     pub async fn new(cfg: SearchConfig, objects: Objects) -> anyhow::Result<Arc<Self>> {
@@ -843,6 +848,7 @@ impl Control {
             refreshed: Mutex::new(HashMap::new()),
             leases: OnceLock::new(),
             secret_refs,
+            on_branch: OnceLock::new(),
         });
         // Nothing can load before the node is handed out, so the hook always finds the control.
         let _ = hooks.control.set(Arc::downgrade(&control));
@@ -951,6 +957,13 @@ impl Control {
     /// without it) references are refused.
     pub fn set_secrets(&self, secrets: Arc<dyn crate::secret_refs::ResourceSecrets>) {
         let _ = self.secret_refs.secrets.set(secrets);
+    }
+
+    /// Tell `f` of every new branch, with its parent, once it's in the catalog (rolld: a branch
+    /// stays in the workspace project its parent is at home in, so the members who could branch it
+    /// reach the copy). Once.
+    pub fn on_branch(&self, f: OnBranch) {
+        let _ = self.on_branch.set(f);
     }
 
     pub fn cluster_leases(&self) -> Option<&Arc<crate::cluster::ClusterLeases>> {
@@ -1247,6 +1260,9 @@ impl Control {
                 tracing::warn!(cluster = c.name, error = %e, "reading a new branch's figures failed");
                 self.meter.mark_dirty(&c.id);
             }
+        }
+        if let Some(f) = self.on_branch.get() {
+            f(&p, &c);
         }
         Ok(c)
     }

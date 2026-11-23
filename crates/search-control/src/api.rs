@@ -7,12 +7,16 @@
 //! in the shape `search-yaml run --cluster-hook` expects (`url`, `username`, `password`, `id`).
 //!
 //! rolld's gate (roll-auth) lets the operator and signed-in people in (`Access::User`), and
-//! search scopes them ([`Caller`], docs/accounts.md "Phase 2"): the operator and admins see every
-//! cluster; anyone else sees, creates and branches only their own (`SearchCluster::owner`), and
-//! every `/v1/search/clusters/{id}/…` call about another's answers 404, as for a cluster that
-//! doesn't exist, and their clusters' `status` doesn't say which node of the fleet holds them. A person's creates, branches and switches to always-on are held to the node's
-//! per-person caps (`SearchConfig::person_caps`), counted in the write's own transaction. A person's own token reaches search as them (roll-access hands it on with
-//! `SignedIn`, without `Operator`). On a fleet, calls about one cluster run on its owner
+//! search scopes them ([`Caller`]): the operator and admins see every cluster. search is a member
+//! product (docs/members.md): roll-access decides a person's request (their session, or a token
+//! of theirs) by their role in the cluster's project, and hands search the decision
+//! ([`roll_auth::Reach`]), so a person sees their own clusters (`SearchCluster::owner`) and those
+//! of their projects as their role allows. Every `/v1/search/clusters/{id}/…` call about any other
+//! answers 404, as for a cluster that doesn't exist, and a person's view of a cluster doesn't say
+//! which node of the fleet holds it. A create that names a project (`X-Roll-Project`) is homed
+//! there by the gate; one that doesn't is the person's own. A person's creates, branches and
+//! switches to always-on are held to the node's per-person caps (`SearchConfig::person_caps`),
+//! counted toward the cluster's owner in the write's own transaction. On a fleet, calls about one cluster run on its owner
 //! (`crate::cluster::on_owner`), and so does creating a branch (on its parent's owner); the
 //! check is made from the catalog before the call is forwarded and again on the owner, behind
 //! its own gate.
@@ -107,12 +111,17 @@ pub fn router(control: Arc<Control>) -> Router {
 /// Who is asking. The gate lets the operator, admins and signed-in people through; a request with
 /// neither `Operator` nor `SignedIn` comes from an open daemon (no `ROLL_ADMIN_TOKEN`, loopback
 /// only) or from rolld's own in-process calls, and sees everything, as before owners.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub enum Caller {
     /// The operator, an admin, or an open daemon: every cluster; what it creates has no owner.
     All,
-    /// A signed-in person who isn't an admin (`usr_…`), or their own token: their clusters only.
+    /// A signed-in person who isn't an admin, without a decision of the gate beside them (a create
+    /// naming no project, an in-process call on their behalf): their own clusters only.
     Person(String),
+    /// A signed-in person (`usr_…`) whose request the gate decided by their grant (their session,
+    /// or a token of theirs): their own clusters, and whatever the same decision reaches (their
+    /// projects' clusters, as their role there allows).
+    Member(String, roll_auth::Reach),
 }
 
 impl Caller {
@@ -121,16 +130,57 @@ impl Caller {
             return Caller::All;
         }
         match ext.get::<roll_auth::SignedIn>() {
-            Some(s) if !s.admin => Caller::Person(s.user.clone()),
+            Some(s) if !s.admin => match roll_auth::Reach::on(ext) {
+                Some(r) => Caller::Member(s.user.clone(), r.clone()),
+                None => Caller::Person(s.user.clone()),
+            },
             _ => Caller::All,
         }
     }
 
-    /// Whether `c` is one the caller may see (anyone else's answers 404).
-    pub fn sees(&self, c: &SearchCluster) -> bool {
+    /// The operator, an admin or an open daemon.
+    pub fn is_all(&self) -> bool {
+        matches!(self, Caller::All)
+    }
+
+    fn user(&self) -> Option<&str> {
+        match self {
+            Caller::All => None,
+            Caller::Person(u) | Caller::Member(u, _) => Some(u),
+        }
+    }
+
+    /// Whether the caller may `action` cluster `c`: everything for the operator, their own for a
+    /// person, and for a member also what the gate's decision allows (roll-access, by their role in
+    /// the cluster's project).
+    pub async fn may(&self, c: &SearchCluster, action: roll_auth::scope::Action) -> bool {
         match self {
             Caller::All => true,
             Caller::Person(u) => c.owner.as_deref() == Some(u.as_str()),
+            Caller::Member(u, _) if c.owner.as_deref() == Some(u.as_str()) => true,
+            Caller::Member(_, reach) => {
+                let (reach, id) = (reach.clone(), c.id.clone());
+                tokio::task::spawn_blocking(move || reach.allows(&id, action)).await.unwrap_or(false)
+            }
+        }
+    }
+
+    /// Whether `c` is one the caller may see (anyone else's answers 404).
+    pub async fn sees(&self, c: &SearchCluster) -> bool {
+        self.may(c, roll_auth::scope::Action::Read).await
+    }
+
+    /// The clusters of `list` the caller sees, in order: a list is narrowed before its answer is
+    /// built (the gate filters the answer too).
+    async fn keep<T: Send + 'static>(&self, list: Vec<T>, cluster: fn(&T) -> &SearchCluster) -> Vec<T> {
+        match self {
+            Caller::All => list,
+            Caller::Person(u) => list.into_iter().filter(|t| cluster(t).owner.as_deref() == Some(u.as_str())).collect(),
+            Caller::Member(u, reach) => {
+                let (u, reach) = (u.clone(), reach.clone());
+                let keep = move |c: &SearchCluster| c.owner.as_deref() == Some(u.as_str()) || reach.allows(&c.id, roll_auth::scope::Action::Read);
+                tokio::task::spawn_blocking(move || list.into_iter().filter(|t| keep(cluster(t))).collect::<Vec<T>>()).await.unwrap_or_default()
+            }
         }
     }
 
@@ -139,22 +189,20 @@ impl Caller {
     fn caps(&self, c: &Control) -> Caps {
         match self {
             Caller::All => Caps::NONE,
-            Caller::Person(_) => c.cfg.person_caps,
+            Caller::Person(_) | Caller::Member(..) => c.cfg.person_caps,
         }
     }
 
-    /// The owner a cluster the caller creates gets.
+    /// The owner a cluster the caller creates gets: whoever made it (a member's create in a
+    /// project too: their caps count it), none for the operator's.
     fn owner(&self) -> Option<&str> {
-        match self {
-            Caller::All => None,
-            Caller::Person(u) => Some(u),
-        }
+        self.user()
     }
 
     /// `id_or_name`, if the caller may see it: another's is "no such cluster".
     async fn get(&self, c: &Control, id_or_name: &str) -> Result<SearchCluster, ControlError> {
         let d = c.get(id_or_name).await?;
-        if self.sees(&d) { Ok(d) } else { Err(no_such(id_or_name)) }
+        if self.sees(&d).await { Ok(d) } else { Err(no_such(id_or_name)) }
     }
 }
 
@@ -184,21 +232,23 @@ async fn per_cluster(State(c): State<AppState>, req: Request, next: Next) -> Res
     // A deleted cluster has no owner node: its restore runs where it lands, once the caller
     // may see it (theirs, or the operator's and admins').
     if rest.is_some_and(|(_, r)| r == "restore") {
-        return match c.get_deleted(&id).await {
-            Ok(d) if Caller::of(req.extensions()).sees(&d.cluster) => next.run(req).await,
-            Ok(_) => no_deleted(&id).into_response(),
-            Err(e) => e.into_response(),
+        let d = match c.get_deleted(&id).await {
+            Ok(d) => d,
+            Err(e) => return e.into_response(),
         };
+        let sees = Caller::of(req.extensions()).sees(&d.cluster).await;
+        return if sees { next.run(req).await } else { no_deleted(&id).into_response() };
     }
     let d = match Caller::of(req.extensions()).get(&c, &id).await {
         Ok(d) => d,
         // A key revoked while its cluster is deleted is kept for the restore
         // (`Control::delete_key`): it too runs where it lands, for whoever may see the cluster.
         Err(ControlError::NotFound(_)) if req.method() == Method::DELETE && rest.is_some_and(|(_, r)| r.starts_with("keys/") || r.starts_with("browser-keys/")) => {
-            return match c.get_deleted(&id).await {
-                Ok(d) if Caller::of(req.extensions()).sees(&d.cluster) => next.run(req).await,
-                _ => no_such(&id).into_response(),
+            let sees = match c.get_deleted(&id).await {
+                Ok(d) => Caller::of(req.extensions()).sees(&d.cluster).await,
+                Err(_) => false,
             };
+            return if sees { next.run(req).await } else { no_such(&id).into_response() };
         }
         Err(e) => return e.into_response(),
     };
@@ -242,7 +292,7 @@ async fn info(State(c): State<AppState>, caller: Caller) -> Json<Value> {
         // What the person may own (0: no cap), for "3 of 50 clusters".
         v["caps"] = json!({ "clusters": caps.clusters, "always_on": caps.always_on });
     }
-    if caller == Caller::All {
+    if caller.is_all() {
         let stats = c.data.stats();
         v["storage"] = json!(c.objects().description);
         v["loaded"] = json!(c.node.loaded().len());
@@ -298,7 +348,7 @@ async fn view(c: &Control, caller: &Caller, mut d: SearchCluster, with_password:
     };
     let mut status = c.status(&d).await;
     // Which node of the fleet holds it is the operator's (and admins') to know.
-    if *caller != Caller::All
+    if !caller.is_all()
         && let Some(o) = status.as_object_mut()
     {
         o.remove("node");
@@ -330,11 +380,16 @@ struct ListQuery {
 
 async fn list(State(c): State<AppState>, caller: Caller, Query(q): Query<ListQuery>) -> Result<Response, ControlError> {
     if q.deleted {
-        return Ok(Json(c.list_deleted(caller.owner()).await?).into_response());
+        let deleted = match &caller {
+            Caller::Person(u) => c.list_deleted(Some(u.as_str())).await?,
+            _ => caller.keep(c.list_deleted(None).await?, |d| &d.cluster).await,
+        };
+        return Ok(Json(deleted).into_response());
     }
     let list = match &caller {
         Caller::All => c.list().await?,
         Caller::Person(u) => c.store.list_owned(u).await?,
+        Caller::Member(..) => caller.keep(c.list().await?, |c| c).await,
     };
     Ok(Json(views(&c, &caller, list).await?).into_response())
 }
@@ -429,11 +484,12 @@ async fn branch(State(c): State<AppState>, caller: Caller, Path(id): Path<String
 
 async fn branches(State(c): State<AppState>, caller: Caller, Path(id): Path<String>) -> ApiResult<Vec<ClusterView>> {
     let p = c.get(&id).await?;
-    let list = c.store.children(&p.id).await?.into_iter().filter(|b| caller.sees(b)).collect();
+    let list = caller.keep(c.store.children(&p.id).await?, |c| c).await;
     Ok(Json(views(&c, &caller, list).await?))
 }
 
-async fn rotate(State(c): State<AppState>, caller: Caller, Path(id): Path<String>) -> ApiResult<ClusterView> {
+async fn rotate(State(c): State<AppState>, caller: Caller, Path(id): Path<String>, ext: Extensions) -> ApiResult<ClusterView> {
+    answers_credential(&ext, || format!("a new admin password of cluster {id}"))?;
     let d = c.rotate_password(&id).await?;
     Ok(Json(view(&c, &caller, d, true).await?))
 }
@@ -502,6 +558,17 @@ fn console_reveal(cluster: &SearchCluster, r: &ConsoleRequest, ext: &Extensions)
             cluster.name
         ))),
     }
+}
+
+/// A grant's request whose answer is a credential: it needs `reveal` on the cluster, which the gate
+/// says through `Capable` when the row asks something else first (an `admin` key, a new admin
+/// password: `admin`). The operator and people on their own clusters by session carry their grant
+/// with every action; the operator's own requests carry none.
+fn answers_credential(ext: &Extensions, what: impl FnOnce() -> String) -> Result<(), ControlError> {
+    if roll_auth::Grant::on(ext).is_none() || ext.get::<roll_auth::Capable>().is_some_and(|c| c.has(roll_auth::scope::Action::Reveal)) {
+        return Ok(());
+    }
+    Err(ControlError::Forbidden(format!("{} is a credential: it needs reveal allowed on the cluster too (a rule that asks for reveal isn't asked here)", what())))
 }
 
 /// Why a body wasn't read ([`read_limited`]).
@@ -758,7 +825,8 @@ struct NewKey {
     indices: Option<Vec<String>>,
 }
 
-async fn create_key(State(c): State<AppState>, Path(id): Path<String>, Json(k): Json<NewKey>) -> ApiResult<Value> {
+async fn create_key(State(c): State<AppState>, Path(id): Path<String>, ext: Extensions, Json(k): Json<NewKey>) -> ApiResult<Value> {
+    answers_credential(&ext, || format!("an API key of cluster {id}"))?;
     Ok(Json(c.create_key(&id, &k.name, k.expires_in_s, k.access.as_deref(), k.indices).await?))
 }
 
@@ -811,7 +879,7 @@ async fn remotes(State(c): State<AppState>, Path(id): Path<String>) -> ApiResult
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LinkRemote {
-    /// The remote cluster: another of the caller's own (id or name).
+    /// The remote cluster (id or name): another the caller may administer.
     cluster: String,
     skip_unavailable: Option<bool>,
     /// What the cross-cluster API key roll makes may search (Elasticsearch's `access`).
@@ -820,13 +888,21 @@ struct LinkRemote {
     api_key: Option<String>,
 }
 
-/// Links a cluster to another of the same owner as its remote `alias` (cross-cluster search).
-/// A remote the caller can't see, or another person's, answers 404 as a missing one does.
+/// Links a cluster to another as its remote `alias` (cross-cluster search): one the caller may
+/// administer too, as they may this one (the gate asked admin on both; a member's role decides it
+/// in each cluster's project, and their own clusters are theirs). Any other answers 404 as a
+/// missing one does.
 async fn link_remote(State(c): State<AppState>, caller: Caller, Path((id, alias)): Path<(String, String)>, Json(b): Json<LinkRemote>) -> ApiResult<Value> {
     if b.access.is_some() && b.api_key.is_some() {
         return Err(ControlError::Invalid("give access (roll makes the key) or api_key (yours), not both".into()));
     }
-    Ok(Json(c.link_remote(&id, &alias, &b.cluster, b.skip_unavailable, b.access, b.api_key.as_deref(), |t| caller.sees(t)).await?))
+    let target = c.get(&b.cluster).await.ok();
+    let admin = match &target {
+        Some(t) => caller.may(t, roll_auth::scope::Action::Admin).await,
+        None => false,
+    };
+    let may_admin = |t: &SearchCluster| admin && target.as_ref().is_some_and(|x| x.id == t.id);
+    Ok(Json(c.link_remote(&id, &alias, &b.cluster, b.skip_unavailable, b.access, b.api_key.as_deref(), may_admin).await?))
 }
 
 async fn unlink_remote(State(c): State<AppState>, Path((id, alias)): Path<(String, String)>) -> Result<StatusCode, ControlError> {

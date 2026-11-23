@@ -217,7 +217,7 @@ async fn every_control_plane_route_needs_the_operator_token() {
 
     // A signed-in user who isn't an admin: 403 on every operator route (and on a credential
     // route without its credential), their own projects, and roll code as their own owner.
-    let cookie = sign_in(&http, &api, &home.path().join("outbox")).await;
+    let cookie = sign_in(&http, &api, &home.path().join("outbox"), "ada@example.com").await;
     let mut wrong = Vec::new();
     for (host, route, access) in routes.iter().filter(|(h, ..)| h == "api") {
         if access.starts_with("product:") || access.starts_with("public:") {
@@ -335,6 +335,57 @@ async fn every_control_plane_route_needs_the_operator_token() {
     }
     let users: serde_json::Value = http.get(format!("{api}/v1/accounts/users")).header("authorization", &operator).send().await.unwrap().json().await.unwrap();
     let ada = users.as_array().unwrap().iter().find(|u| u["handle"] == "ada").unwrap()["id"].as_str().unwrap().to_string();
+    // roll search on members (docs/members.md): a cluster made in her project reaches its members
+    // by their role there (a branch of it too), a person's own stays theirs, a stranger's dropped
+    // on the canvas reaches nobody, and someone outside the project gets 404.
+    let bob = sign_in(&http, &api, &home.path().join("outbox"), "bob@example.com").await;
+    let csrf_of = |cookie: String| {
+        let (http, api) = (http.clone(), api.clone());
+        async move { http.get(format!("{api}/v1/accounts/session")).header("cookie", &cookie).send().await.unwrap().json::<serde_json::Value>().await.unwrap()["csrf"].as_str().unwrap().to_string() }
+    };
+    let (ada_csrf, bob_csrf) = (csrf_of(cookie.clone()).await, csrf_of(bob.clone()).await);
+    let as_person = |cookie: String, csrf: String, method: reqwest::Method, path: String, body: Option<serde_json::Value>, project: Option<String>| {
+        let (http, api) = (http.clone(), api.clone());
+        async move {
+            let mut req = http.request(method, format!("{api}{path}")).header("cookie", cookie).header("origin", DASHBOARD).header("x-roll-csrf", csrf);
+            if let Some(p) = project {
+                req = req.header("x-roll-project", p);
+            }
+            if let Some(b) = body {
+                req = req.json(&b);
+            }
+            let r = req.send().await.unwrap();
+            (r.status().as_u16(), r.json::<serde_json::Value>().await.unwrap_or_default())
+        }
+    };
+    let ada_does = |m: reqwest::Method, path: String, body: Option<serde_json::Value>, project: Option<String>| as_person(cookie.clone(), ada_csrf.clone(), m, path, body, project);
+    let bob_does = |m: reqwest::Method, path: String| as_person(bob.clone(), bob_csrf.clone(), m, path, None, None);
+    let names = |v: &serde_json::Value| v.as_array().map(|a| a.iter().filter_map(|c| c["name"].as_str().map(String::from)).collect::<Vec<_>>()).unwrap_or_default();
+    let (s, homed) = ada_does(reqwest::Method::POST, "/v1/search/clusters".into(), Some(serde_json::json!({ "name": "hers-search" })), Some(hers.clone())).await;
+    assert_eq!(s, 200, "{homed}");
+    let (s, own) = ada_does(reqwest::Method::POST, "/v1/search/clusters".into(), Some(serde_json::json!({ "name": "adas-own" })), None).await;
+    assert_eq!((s, own["owner"].as_str()), (200, Some(ada.as_str())), "{own}");
+    let dropped: serde_json::Value = http.post(format!("{api}/v1/search/clusters")).header("authorization", &operator).json(&serde_json::json!({ "name": "ops-dropped" })).send().await.unwrap().json().await.unwrap();
+    let placed = http.put(format!("{api}/v1/workspace/projects/{hers}/resources/search/{}", dropped["id"].as_str().unwrap())).header("authorization", &operator).json(&serde_json::json!({ "x": 0, "y": 0 })).send().await.unwrap();
+    assert!(placed.status().is_success(), "{}", placed.text().await.unwrap_or_default());
+    let homed_path = format!("/v1/search/clusters/{}", homed["id"].as_str().unwrap());
+    assert_eq!(bob_does(reqwest::Method::GET, homed_path.clone()).await.0, 404, "not a member yet");
+    let (s, inv) = ada_does(reqwest::Method::POST, format!("/v1/workspace/projects/{hers}/invites"), Some(serde_json::json!({ "email": "bob@example.com", "role": "viewer" })), None).await;
+    assert_eq!(s, 201, "{inv}");
+    let token = inv["url"].as_str().unwrap().split("token=").nth(1).unwrap().to_string();
+    assert_eq!(bob_does(reqwest::Method::POST, format!("/v1/workspace/invites/{token}/accept")).await.0, 200);
+    let (s, branch) = ada_does(reqwest::Method::POST, format!("{homed_path}/branches"), Some(serde_json::json!({ "name": "hers-dev" })), None).await;
+    assert_eq!(s, 200, "{branch}");
+    let (_, listed) = bob_does(reqwest::Method::GET, "/v1/search/clusters".into()).await;
+    assert_eq!(names(&listed), ["hers-search", "hers-dev"], "{listed}");
+    let (_, listed) = ada_does(reqwest::Method::GET, "/v1/search/clusters".into(), None, None).await;
+    assert_eq!(names(&listed), ["hers-search", "adas-own", "hers-dev"], "{listed}");
+    assert_eq!(bob_does(reqwest::Method::GET, homed_path.clone()).await.0, 200, "a viewer reads it");
+    assert_eq!(bob_does(reqwest::Method::DELETE, homed_path.clone()).await.0, 403, "a viewer doesn't delete it");
+    for theirs in ["adas-own", "ops-dropped"] {
+        assert_eq!(bob_does(reqwest::Method::GET, format!("/v1/search/clusters/{theirs}")).await.0, 404, "{theirs}");
+    }
+    assert_eq!(ada_does(reqwest::Method::GET, "/v1/search/clusters/ops-dropped".into(), None, None).await.0, 404, "dropped on her canvas, never hers");
     let off = http.patch(format!("{api}/v1/accounts/users/{ada}")).header("authorization", &operator).json(&serde_json::json!({ "disabled": true })).send().await.unwrap();
     assert_eq!(off.status(), 200);
     assert_ne!(as_token(token).await, "owner", "a disabled account's roll code token still works");
@@ -498,13 +549,13 @@ async fn every_control_plane_route_needs_the_operator_token() {
     assert!(foreign.headers().get("access-control-allow-origin").is_none(), "a foreign origin gets no CORS grant");
 }
 
-/// Invite `ada@example.com` with the operator's token and sign in by email code (from the
-/// outbox): the session cookie, as `name=value`.
-async fn sign_in(http: &reqwest::Client, api: &str, outbox: &std::path::Path) -> String {
+/// Invite `email` with the operator's token and sign in by email code (from the outbox): the
+/// session cookie, as `name=value`.
+async fn sign_in(http: &reqwest::Client, api: &str, outbox: &std::path::Path, email: &str) -> String {
     let invite: serde_json::Value = http
         .post(format!("{api}/v1/accounts/invites"))
         .bearer_auth(TOKEN)
-        .json(&serde_json::json!({ "email": "ada@example.com" }))
+        .json(&serde_json::json!({ "email": email }))
         .send()
         .await
         .unwrap()
@@ -513,7 +564,7 @@ async fn sign_in(http: &reqwest::Client, api: &str, outbox: &std::path::Path) ->
         .unwrap();
     let start: serde_json::Value = http
         .post(format!("{api}/v1/accounts/email/start"))
-        .json(&serde_json::json!({ "email": "ada@example.com", "invite": invite["token"] }))
+        .json(&serde_json::json!({ "email": email, "invite": invite["token"] }))
         .send()
         .await
         .unwrap()
@@ -525,6 +576,7 @@ async fn sign_in(http: &reqwest::Client, api: &str, outbox: &std::path::Path) ->
         let mails = std::fs::read_dir(outbox).into_iter().flatten().flatten().filter(|e| !e.file_name().to_string_lossy().starts_with('.'));
         code = mails
             .filter_map(|e| serde_json::from_slice::<serde_json::Value>(&std::fs::read(e.path()).ok()?).ok())
+            .filter(|m| m["to"].as_str() == Some(email))
             .find_map(|m| m["subject"].as_str().filter(|s| s.contains("sign-in code")).map(|s| s[..6].to_string()));
         if code.is_some() {
             break;

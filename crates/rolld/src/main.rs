@@ -658,6 +658,11 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     let offboarding = accounts.clone();
     let people = secrets::People { accounts, code: code.as_ref().map(|c| c.code.clone()), search: search.as_ref().map(|s| s.control.clone()) };
     workspace.set_owners(std::sync::Arc::new(people.clone()));
+    // A search branch stays in the project its parent is at home in (docs/members.md): the
+    // members who could branch it reach the copy, and no other project gains it.
+    if let Some(s) = &search {
+        s.control.on_branch(search::home_branches(workspace.clone()));
+    }
     // Members' handles and addresses, and invite links to the dashboard (docs/members.md).
     workspace.set_people(std::sync::Arc::new(people.clone()));
     workspace.set_web_url(&args.web_url);

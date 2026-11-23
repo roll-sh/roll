@@ -329,6 +329,49 @@ fails that read: the error names the cluster, but neither the value nor the key.
 search keeps. `Debug` output of a cluster, a node's credentials and a presented
 `Authorization` header prints `<redacted>` in place of the secret.
 
+## Who sees a cluster
+
+roll's control plane (`/v1/search`, `search-control` `api.rs`) answers the operator, roll's admin
+accounts and signed-in people. search is a member product (docs/members.md): roll-access decides a
+person's request, whether it comes from their session or a token of theirs, with the one
+evaluator and search's catalogue rows. search adds no role checks of its own.
+
+- **The operator and admins** see and manage every cluster. What they make has no owner.
+- **A person** owns what they make without naming a project (`SearchCluster::owner`). Their grant
+  reaches each of their own clusters with every action, whatever their projects say
+  (`Resolvers::owned_fn`).
+- **A project's members** reach a cluster that the project trusts, as their role there allows. A
+  project trusts a cluster when the project is its home, or when the cluster belongs to one of the
+  project's owners (`Workspace::trusts`). A cluster made with `X-Roll-Project` gets that project as
+  its home, and a branch takes its parent's home. A stranger's cluster dropped on the project's
+  canvas reaches nobody through it.
+
+  | role | what they may do to the project's clusters |
+  | --- | --- |
+  | viewer | read: settings, indices, documents, searches, metrics, logs, analytics |
+  | developer | as viewer, plus write (documents, indices, mappings, synonyms, branches, restores) and reveal (`data`, `read` and `append` API keys, browser keys) |
+  | admin, owner | everything: settings, the console, `admin` API keys, the admin password, remotes, migrations, deletes, creates in the project |
+
+  A cluster has no environments and is never protected, so a developer's default reaches it. A
+  bulk that deletes, `delete_by_query` and a lifecycle setting are `delete`, which only admins and
+  owners have.
+- **Anyone else** gets 404 for the cluster, as for one that doesn't exist. Lists hold only what
+  the caller reaches: search narrows them by the gate's decision (`roll_auth::Reach`), and the
+  gate filters the answer again.
+
+Per-person caps (`SearchConfig::person_caps`) count toward a cluster's owner. A member's create
+in a project is theirs, so it counts toward them, and a branch counts toward its parent's owner.
+The owner keeps their own cluster after leaving the project. An admin of the project can still
+delete it.
+
+Linking two clusters (`PUT …/remotes/{alias}`) takes administering both: the gate asks `admin` on
+each, and search asks the same decision about the target. Once linked, the link holds by its
+credentials' row, bound to the target's id. A cluster's own endpoint (`PUT _cluster/settings`)
+may name only a cluster of the same owner, or one that roll linked it to.
+
+On a fleet, a call about one cluster still runs on the cluster's owner node. The forward carries
+the person's own credentials, and the owner node's gate decides again.
+
 ## Client addresses and IP allowlists
 
 A cluster can have an IP allowlist (`ip_allowlist`: at most 64 CIDRs, IPv4 or IPv6, each with an

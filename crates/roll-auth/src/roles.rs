@@ -47,8 +47,8 @@ pub enum DeveloperDefault {
 }
 
 /// The products whose routes are open to members (docs/members.md, "Phasing": v1 is workspace and
-/// secrets, v1.1 previews). Other products' routes keep answering a person as they did.
-pub const MEMBER_PRODUCTS: &[&str] = &["workspace", "secrets", "previews"];
+/// secrets, v1.1 previews and search). Other products' routes keep answering a person as they did.
+pub const MEMBER_PRODUCTS: &[&str] = &["workspace", "secrets", "previews", "search"];
 
 /// The built-in roles (D1: `viewer`, `developer`, `admin`, `owner`), weakest first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

@@ -384,16 +384,16 @@ async fn shell(api: &Api, preview: &str, service: Option<&str>) -> anyhow::Resul
     ended
 }
 
-/// A project by id or name.
 /// The API with `X-Roll-Project` naming `project`: what roll-access decides a create by (a member's
 /// role there, a token's rule); previews refuses one whose body names another project.
-fn in_project(api: &Api, project: &str) -> Api {
+pub(crate) fn in_project(api: &Api, project: &str) -> Api {
     let mut headers = api.headers.clone();
     headers.push(("x-roll-project".into(), project.into()));
     Api { base: api.base.clone(), http: api.http.clone(), key: api.key.clone(), headers, login: api.login.clone() }
 }
 
-async fn project_id(api: &Api, p: &str) -> anyhow::Result<String> {
+/// A project by id or name.
+pub(crate) async fn project_id(api: &Api, p: &str) -> anyhow::Result<String> {
     if p.starts_with("prj_") {
         return Ok(p.to_string());
     }

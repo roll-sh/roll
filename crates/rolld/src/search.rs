@@ -419,3 +419,25 @@ impl Search {
         self.stop.trigger();
     }
 }
+
+/// A new branch takes its parent's workspace home, and goes on that project's canvas: it was made
+/// from the project's own cluster, so the project trusts it as it trusts the parent
+/// (docs/members.md, "The canvas rule"). A parent with no home leaves the branch without one.
+pub fn home_branches(workspace: std::sync::Arc<roll_workspace::Workspace>) -> search_control::control::OnBranch {
+    Box::new(move |parent, branch| {
+        let kind = roll_workspace::Kind::Search;
+        let home = || -> roll_workspace::Result<()> {
+            let Some(project) = workspace.home_of(kind, &parent.id)? else { return Ok(()) };
+            workspace.place(roll_workspace::Scope::All, &project, kind, &branch.id, 0.0, 0.0)?;
+            workspace.set_home(&roll_workspace::Actor::operator(), &project, kind, &branch.id, true)
+        };
+        // A quick write to the workspace database, on a worker that may block.
+        let done = match tokio::runtime::Handle::try_current().map(|h| h.runtime_flavor()) {
+            Ok(tokio::runtime::RuntimeFlavor::MultiThread) => tokio::task::block_in_place(home),
+            _ => home(),
+        };
+        if let Err(e) = done {
+            tracing::warn!(branch = branch.name, error = %e, "putting a search branch in its parent's project failed");
+        }
+    })
+}

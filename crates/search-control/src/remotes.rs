@@ -2,11 +2,15 @@
 //! Cloud's remote clusters between deployments, Elasticsearch 9's API key based remote cluster
 //! security). docs/search/README.md, "Cross-cluster search".
 //!
-//! - **Who may link**: a cluster may name another as a remote only when both are one person's,
-//!   or both the operator's ([`may_link`]). Names are global, so naming another person's cluster
-//!   is refused exactly as naming one that doesn't exist. Checked when the remote is set up
-//!   (`PUT _cluster/settings`, [`Control::link_remote`]) and again on every request, since a
-//!   deleted cluster's name can be taken by someone else.
+//! - **Who may link**: whoever may administer both clusters, as roll-access decides it: the
+//!   operator, a person for their own clusters, a project member whose role there lets them
+//!   administer each (docs/members.md). [`Control::link_remote`] links only a target its caller
+//!   may (`PUT …/remotes/{alias}` needs admin on both at the gate too); any other answers exactly
+//!   as one that doesn't exist, since names are global. The link then holds by its credentials'
+//!   row, bound to the target's id ([`linkable`] on every request, and the row's target), so a
+//!   deleted cluster's name taken by someone else never inherits it. On the cluster's own endpoint
+//!   (`PUT _cluster/settings`) a remote may name only a cluster of the same owner, or one roll
+//!   linked it to ([`Control::linked`]).
 //! - **Credentials**: the remote issues a `cross_cluster` API key (`search` access patterns);
 //!   the local cluster keeps it as `cluster.remote.<alias>.credentials`, a secure setting, here
 //!   in the catalog (`search_remotes`), sealed under the deployment's key and bound to its row
@@ -59,10 +63,10 @@ pub fn target(address: &str, domain: Option<&str>) -> Option<String> {
     crate::control::valid_name(&label).then_some(label)
 }
 
-/// Whether `local` may name `target` as a remote: two Elasticsearch-flavor clusters with the
-/// same owner (one person's, or both the operator's), not the same cluster.
-pub fn may_link(local: &SearchCluster, target: &SearchCluster) -> bool {
-    local.id != target.id && local.owner == target.owner && local.flavor == "elasticsearch" && target.flavor == "elasticsearch"
+/// Whether `local` can name `target` as a remote at all: two Elasticsearch-flavor clusters, not the
+/// same one. Who may link them is the caller's decision ([`Control::link_remote`]).
+pub fn linkable(local: &SearchCluster, target: &SearchCluster) -> bool {
+    local.id != target.id && local.flavor == "elasticsearch" && target.flavor == "elasticsearch"
 }
 
 /// The answer for a target the caller can't link to: the same as for one that doesn't exist.
@@ -101,7 +105,7 @@ impl Links for ControlLinks {
     async fn may_link(&self, local: &str, target: &str) -> bool {
         let Some(c) = self.control() else { return false };
         match (c.get(local).await, c.get(target).await) {
-            (Ok(l), Ok(t)) => may_link(&l, &t),
+            (Ok(l), Ok(t)) => c.linked(&l, &t).await,
             _ => false,
         }
     }
@@ -119,7 +123,7 @@ impl Links for ControlLinks {
         let unreachable = |why: Option<&str>| EsError::new(500, "connect_transport_exception", format!("Unable to connect to [{alias}]{}", why.map(|w| format!(": {w}")).unwrap_or_default()));
         let Some(c) = self.control() else { return Err(unreachable(None)) };
         let (Ok(l), Ok(t)) = (c.get(local).await, c.get(target).await) else { return Err(unreachable(None)) };
-        if !may_link(&l, &t) {
+        if !linkable(&l, &t) {
             return Err(unreachable(None));
         }
         let Ok(Some(row)) = c.store.remote(&l.id, alias).await else {
@@ -136,6 +140,14 @@ impl Links for ControlLinks {
 }
 
 impl Control {
+    /// Whether the cluster's own endpoint may name `target` as a remote of `local`
+    /// (`PUT _cluster/settings`): a cluster of the same owner, or one roll linked it to through
+    /// the API ([`Control::link_remote`], whose caller could administer both). A stranger's
+    /// cluster answers as one that doesn't exist.
+    pub async fn linked(&self, local: &SearchCluster, target: &SearchCluster) -> bool {
+        linkable(local, target) && (local.owner == target.owner || self.store.remotes(&local.id).await.is_ok_and(|rs| rs.iter().any(|r| r.target_id == target.id)))
+    }
+
     /// Opens a remote's sealed credentials (`None`: sealed under another key, or tampered with).
     fn open_remote_credentials(&self, row: &RemoteLink) -> Option<String> {
         match &self.cfg.sealer {
@@ -170,7 +182,7 @@ impl Control {
                 "key_id": r.key_id,
                 "minted": r.minted,
                 "created_at": r.created_at,
-                "connected": target.as_ref().is_some_and(|t| may_link(&c, t)),
+                "connected": target.as_ref().is_some_and(|t| linkable(&c, t)),
             }));
         }
         Ok(out)
@@ -180,8 +192,8 @@ impl Control {
     /// stores the credentials sealed and sets `cluster.remote.<alias>.*` (proxy mode, the
     /// target's name). `api_key`: a `cross_cluster` key the person made on the target
     /// (`POST _security/cross_cluster/api_key`), checked there; else roll makes one with
-    /// `access` (Elasticsearch's shape; default: search every index). `visible`: whether the
-    /// caller may see a cluster (anyone else's answers as missing).
+    /// `access` (Elasticsearch's shape; default: search every index). `may_admin`: whether the
+    /// caller may administer the target, as roll-access decides it (any other answers as missing).
     #[allow(clippy::too_many_arguments)]
     pub async fn link_remote(
         &self,
@@ -191,7 +203,7 @@ impl Control {
         skip_unavailable: Option<bool>,
         access: Option<Value>,
         api_key: Option<&str>,
-        visible: impl Fn(&SearchCluster) -> bool,
+        may_admin: impl Fn(&SearchCluster) -> bool,
     ) -> Result<Value> {
         if !valid_alias(alias) {
             return Err(ControlError::Invalid("alias: 1 to 64 letters, digits, - and _".into()));
@@ -208,7 +220,7 @@ impl Control {
         }
         let t = match self.get(target).await {
             Ok(t) if t.id == c.id => return Err(ControlError::Invalid("a cluster can't be its own remote".into())),
-            Ok(t) if visible(&t) && may_link(&c, &t) => t,
+            Ok(t) if may_admin(&t) && linkable(&c, &t) => t,
             _ => return Err(no_target(target)),
         };
         let (key_id, encoded, minted) = match api_key {

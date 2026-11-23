@@ -153,7 +153,19 @@ fn postgres() -> Router {
         .route("/v1/apps/services/{id}/environments/{env}", axum::routing::put(|| async { axum::Json(json!({ "ok": true })) }))
         .route("/v1/apps/services/{id}/environments/{env}/redeploy", post(|| async { axum::Json(json!({ "ok": true })) }))
         .route("/v1/search/clusters/{id}/indices/{index}/search", post(|| async { axum::Json(json!({ "hits": [] })) }))
-        .route("/v1/search/clusters", post(|| async { axum::Json(json!({ "id": "cl_new", "password": "fresh" })) }))
+        .route(
+            "/v1/search/clusters",
+            post(|| async { axum::Json(json!({ "id": "cl_new", "password": "fresh" })) })
+                // Every cluster the stand-in knows: the gate keeps what the caller's grant reaches.
+                .get(|| async { axum::Json(json!([{ "id": "cl_home" }, { "id": "cl_foreign" }, { "id": "cl_bobs" }, { "id": "cl_other" }])) }),
+        )
+        .route("/v1/search/clusters/{id}", get(|ext: axum::http::Extensions| async move { axum::Json(seen(&ext)) }).delete(|ext: axum::http::Extensions| async move { axum::Json(seen(&ext)) }))
+        .route("/v1/search/clusters/{id}/branches", post(|ext: axum::http::Extensions| async move { axum::Json(seen(&ext)) }))
+        .route(
+            "/v1/search/clusters/{id}/password",
+            post(|ext: axum::http::Extensions| async move { axum::Json(json!({ "reveal": ext.get::<roll_auth::Capable>().is_some_and(|c| c.has(roll_auth::scope::Action::Reveal)) })) }),
+        )
+        .route("/v1/search/clusters/{id}/keys", post(|ext: axum::http::Extensions| async move { axum::Json(seen(&ext)) }))
         .route("/v1/search/clusters/{id}/indices", get(|| async { axum::Json(json!([])) }))
         .route("/v1/search/clusters/{id}/request", post(|ext: axum::http::Extensions| async move { axum::Json(json!({ "reveal": ext.get::<roll_auth::Capable>().is_some_and(|c| c.has(roll_auth::scope::Action::Reveal)) })) }))
         .route("/v1/search/clusters/{id}/indices/{index}/bulk", post(|body: String| async move { axum::Json(json!({ "lines": body.lines().count() })) }))
@@ -193,6 +205,9 @@ impl Daemon {
         // Previews keep each preview's project themselves: `pv_in_<project>` is in `<project>`.
         resolvers.project_fn("previews", |id: &str| id.strip_prefix("pv_in_").map(String::from));
         resolvers.protected_fn("previews", |_, _| Some(false));
+        // Search: bob owns `cl_bobs` himself, and clusters have no protected environments.
+        resolvers.owned_fn("search", |user: &str| if user == "usr_bob" { vec!["cl_bobs".to_string()] } else { Vec::new() });
+        resolvers.unprotected_whole("search");
         // Metadata documents from 127.0.0.1 (the test's own server) are allowed here only.
         let mut config = Config { locked: true, approval_wait: std::time::Duration::from_millis(wait_ms), metadata_allow_private: true, ..Config::default() };
         configure(&mut config);
@@ -203,6 +218,7 @@ impl Daemon {
             roll_auth::Rule { route: "/v1/access", access: roll_auth::Access::User("a user's own tokens") },
             roll_auth::Rule { route: "/v1/secrets", access: roll_auth::Access::UserOrCredential("a project's members, or a token") },
             roll_auth::Rule { route: "/v1/previews", access: roll_auth::Access::User("a project's members") },
+            roll_auth::Rule { route: "/v1/search", access: roll_auth::Access::User("a person's own clusters, and their projects'") },
             roll_auth::Rule { route: "/internal", access: roll_auth::Access::Product("signed hops") },
         ];
         let people = Arc::new(People::default());
@@ -2839,6 +2855,96 @@ async fn a_members_role_decides_what_they_do_to_a_preview() {
     let (s, t) = d.as_user("usr_ada", Method::POST, "/v1/access/tokens", Some(json!({ "name": "pv", "rules": [{ "product": "previews", "resources": [{ "project": id }], "actions": { "read": "allow" } }] }))).await;
     assert_eq!(s, StatusCode::CREATED, "{t}");
     assert_eq!(d.call(t["token"].as_str().unwrap(), Method::GET, &pv, None).await.0, StatusCode::OK);
+}
+
+/// Search is a member product (docs/members.md, v1.1): a member's role in a cluster's project
+/// decides what they do to it (a viewer reads; a developer also writes and makes data keys; an
+/// admin manages: admin keys, the admin password, deletes), a stranger doesn't see it, a person's
+/// own cluster stays theirs, and a stranger's cluster dropped on the project's canvas gives its
+/// admin nothing until the project is its home.
+#[tokio::test]
+async fn a_members_role_decides_what_they_do_to_a_search_cluster() {
+    let d = Daemon::new(0);
+    for (u, h) in [("usr_ada", "ada"), ("usr_bob", "bob"), ("usr_cy", "cy"), ("usr_dee", "dee"), ("usr_eve", "eve")] {
+        d.people.add(u, h);
+    }
+    let (_, p) = d.as_user("usr_ada", Method::POST, "/v1/workspace/projects", Some(json!({ "name": "web" }))).await;
+    let id = p["id"].as_str().unwrap().to_string();
+    for (who, email, role) in [("usr_bob", "bob@acme.test", "viewer"), ("usr_cy", "cy@acme.test", "developer"), ("usr_dee", "dee@acme.test", "admin")] {
+        let (s, inv) = d.as_user("usr_ada", Method::POST, &format!("/v1/workspace/projects/{id}/invites"), Some(json!({ "email": email, "role": role }))).await;
+        assert_eq!(s, StatusCode::CREATED, "{inv}");
+        let token = inv["url"].as_str().unwrap().split("token=").nth(1).unwrap().to_string();
+        assert_eq!(d.as_user(who, Method::POST, &format!("/v1/workspace/invites/{token}/accept"), None).await.0, StatusCode::OK);
+    }
+    // On the canvas: one made through the project (its home), and a stranger's dropped there.
+    let search = roll_workspace::Kind::Search;
+    for r in ["cl_home", "cl_foreign"] {
+        d.workspace.place(roll_workspace::Scope::All, &id, search, r, 0.0, 0.0).unwrap();
+    }
+    d.workspace.set_home(&roll_workspace::Actor::operator(), &id, search, "cl_home", false).unwrap();
+    let status = |who: &'static str, m: Method, path: String, body: Option<Value>| {
+        let d = &d;
+        async move { d.as_user(who, m, &path, body).await.0 }
+    };
+    let matrix = |who: &'static str, cluster: &'static str| async move {
+        let c = format!("/v1/search/clusters/{cluster}");
+        [
+            status(who, Method::GET, c.clone(), None).await,
+            status(who, Method::POST, format!("{c}/branches"), Some(json!({ "name": "b" }))).await,
+            status(who, Method::POST, format!("{c}/keys"), Some(json!({ "name": "k", "access": "data" }))).await,
+            status(who, Method::POST, format!("{c}/keys"), Some(json!({ "name": "k" }))).await,
+            status(who, Method::POST, format!("{c}/password"), None).await,
+            status(who, Method::DELETE, c.clone(), None).await,
+        ]
+    };
+    let (ok, no, gone) = (StatusCode::OK, StatusCode::FORBIDDEN, StatusCode::NOT_FOUND);
+    // (reads, branches, a data key, an admin key, a new admin password, deletes)
+    for (who, want) in [
+        ("usr_bob", [ok, no, no, no, no, no]),
+        ("usr_cy", [ok, ok, ok, no, no, no]),
+        ("usr_dee", [ok, ok, ok, ok, ok, ok]),
+        ("usr_ada", [ok, ok, ok, ok, ok, ok]),
+        ("usr_eve", [gone; 6]),
+    ] {
+        assert_eq!(matrix(who, "cl_home").await, want, "{who} on the project's own cluster");
+    }
+    // A stranger's cluster on the canvas proves nothing: not even the project's owner sees it.
+    for who in ["usr_ada", "usr_dee", "usr_bob"] {
+        assert_eq!(matrix(who, "cl_foreign").await, [gone; 6], "{who} on a cluster dropped on the canvas");
+    }
+    // His own cluster is all his, whatever his role in the project.
+    assert_eq!(matrix("usr_bob", "cl_bobs").await, [ok; 6]);
+    // Lists keep what each person reaches: the project's own cluster, and their own.
+    let listed = |who: &'static str| {
+        let d = &d;
+        async move { ids(&d.as_user(who, Method::GET, "/v1/search/clusters", None).await.1).into_iter().map(String::from).collect::<Vec<_>>() }
+    };
+    assert_eq!(listed("usr_bob").await, ["cl_home", "cl_bobs"]);
+    assert_eq!(listed("usr_ada").await, ["cl_home"]);
+    assert!(listed("usr_eve").await.is_empty());
+    // A new admin password is refused to a grant that can't reveal it (the product reads `Capable`).
+    let (_, pw) = d.as_user("usr_dee", Method::POST, "/v1/search/clusters/cl_home/password", None).await;
+    assert_eq!(pw["reveal"], true, "{pw}");
+    // Made a home of the project, the dropped cluster counts.
+    d.workspace.set_home(&roll_workspace::Actor::operator(), &id, search, "cl_foreign", false).unwrap();
+    assert_eq!(matrix("usr_bob", "cl_foreign").await, [ok, no, no, no, no, no]);
+    // A create in the project is the role's (admin and owner); one naming no project is a person's own.
+    let create = |who: &'static str, project: Option<&str>| {
+        let (d, cookie) = (&d, format!("roll_session=rls_{who}"));
+        let csrf = roll_auth::csrf_token(&format!("rls_{who}"));
+        let project = project.map(str::to_string);
+        async move {
+            let mut h: Vec<(&str, &str)> = vec![("cookie", cookie.as_str()), ("x-roll-csrf", csrf.as_str())];
+            if let Some(p) = &project {
+                h.push(("x-roll-project", p.as_str()));
+            }
+            d.raw("", Method::POST, "/v1/search/clusters", Body::from(json!({ "name": "n" }).to_string()), &h, None).await.0
+        }
+    };
+    assert_eq!(create("usr_cy", Some(id.as_str())).await, no, "a developer doesn't make the project's clusters");
+    assert_eq!(create("usr_dee", Some(id.as_str())).await, ok);
+    assert_eq!(create("usr_eve", Some(id.as_str())).await, gone, "a stranger's project doesn't exist");
+    assert_eq!(create("usr_cy", None).await, ok, "her own");
 }
 
 #[tokio::test]

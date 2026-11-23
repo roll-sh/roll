@@ -176,6 +176,35 @@ impl SessionGrant {
     }
 }
 
+/// In a person's request the gate decided (their session's, or a token of theirs): whether that
+/// same decision allows an action on another resource of the route's product, named by id. The
+/// gate resolves it as it resolves the route's own resource: its projects, counting only those
+/// that trust it (docs/members.md, "The canvas rule"), with the person's token held within their
+/// session. A product narrows a list with it before building its answer, or checks a second
+/// resource inside one request. Blocking (it reads the workspace).
+#[derive(Clone)]
+pub struct Reach(pub ReachFn);
+
+/// [`Reach`]'s decision: whether `action` is allowed on the resource `id`.
+pub type ReachFn = Arc<dyn Fn(&str, scope::Action) -> bool + Send + Sync>;
+
+impl Reach {
+    pub fn on(extensions: &axum::http::Extensions) -> Option<&Reach> {
+        extensions.get::<Reach>()
+    }
+
+    /// Whether the gate's decision allows `action` on the resource `id`. Blocking.
+    pub fn allows(&self, id: &str, action: scope::Action) -> bool {
+        (self.0)(id, action)
+    }
+}
+
+impl fmt::Debug for Reach {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Reach")
+    }
+}
+
 impl fmt::Debug for Grant {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Grant").field("id", &self.id).field("name", &self.name).field("kind", &self.kind).field("user", &self.user).finish()

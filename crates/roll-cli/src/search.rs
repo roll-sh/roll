@@ -349,6 +349,10 @@ pub enum Clusters {
         /// Default of `action.destructive_requires_name` (Elasticsearch's default: true).
         #[arg(long)]
         destructive_requires_name: Option<bool>,
+        /// Make it in this workspace project (id or name), as its home: your role there decides
+        /// (admin or owner), and its members reach it by theirs. Without it, the cluster is yours.
+        #[arg(long)]
+        project: Option<String>,
     },
     /// Show a cluster: state, URL, indices, branches.
     Show { cluster: String },
@@ -916,12 +920,15 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
                 }
                 v
             }
-            Clusters::Create { name, flavor, idle, max_in_flight, max_body_mb, destructive_requires_name } => {
+            Clusters::Create { name, flavor, idle, max_in_flight, max_body_mb, destructive_requires_name, project } => {
                 let body = json!({
                     "name": name, "flavor": flavor, "idle_timeout_s": idle, "max_in_flight": max_in_flight, "max_body_mb": max_body_mb,
                     "destructive_requires_name": destructive_requires_name,
                 });
-                let v = api.post("/v1/search/clusters", body).await?;
+                let v = match project {
+                    Some(p) => crate::preview::in_project(api, &crate::preview::project_id(api, &p).await?).post("/v1/search/clusters", body).await?,
+                    None => api.post("/v1/search/clusters", body).await?,
+                };
                 if !as_json {
                     print_cluster(&v);
                     print_credentials(&v);

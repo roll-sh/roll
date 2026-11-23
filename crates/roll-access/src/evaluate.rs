@@ -150,8 +150,10 @@ fn invalid_token_because(access: &Access, why: &str) -> Response {
     r
 }
 
-/// What a request is about, from its row and path.
-pub(crate) fn target(access: &Access, row: &Row, params: &[(String, String)], query: Option<&str>, headers: &axum::http::HeaderMap) -> Target {
+/// What a request is about, from its row and path. `person`: a person's grant decides it (their
+/// session, or a token of theirs), which a canvas's project reaches only where it trusts the
+/// resource ([`Access::resource_as`]).
+pub(crate) fn target(access: &Access, row: &Row, params: &[(String, String)], query: Option<&str>, headers: &axum::http::HeaderMap, person: bool) -> Target {
     let param = |name: &str| params.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
     let product = row.product.to_string();
     // Storage acts in the account a request names. Bucket names repeat across accounts, so a
@@ -161,7 +163,7 @@ pub(crate) fn target(access: &Access, row: &Row, params: &[(String, String)], qu
         return match row.target {
             Tgt::Param(names, kind) => {
                 let bucket = names.iter().filter_map(|n| param(n)).collect::<Vec<_>>().join("/");
-                Target::One(access.resource(row.product, kind, &format!("{account}/{bucket}")))
+                Target::One(access.resource_as(person, row.product, kind, &format!("{account}/{bucket}")))
             }
             // Its buckets, filtered to the ones the token has there.
             Tgt::List { .. } => Target::List { product },
@@ -171,7 +173,7 @@ pub(crate) fn target(access: &Access, row: &Row, params: &[(String, String)], qu
     match row.target {
         Tgt::Param(names, kind) => {
             let id = names.iter().filter_map(|n| param(n)).collect::<Vec<_>>().join("/");
-            let mut r = access.resource(row.product, kind, &id);
+            let mut r = access.resource_as(person, row.product, kind, &id);
             match row.env {
                 // The product says what the environment is (a preview's own is "preview").
                 EnvFrom::Param(p) => {
@@ -278,6 +280,9 @@ struct Ctx {
     /// A person's session (docs/members.md): decided like a token, but not a token's request, so
     /// it isn't in the access log (their own audit is each product's).
     session: bool,
+    /// A person's grant decides it (their session, or a token of theirs): a list's items are
+    /// resolved as [`Access::resource_as`] resolves them for a person.
+    person: bool,
 }
 
 impl Ctx {
@@ -408,7 +413,7 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
             crate::rate::Verdict::Allowed { remaining, reset } => limit = Some((rate, remaining, reset)),
         }
     }
-    let mut ctx = Ctx { access: access.clone(), grant, started, ip, mcp: req.extensions().get::<McpCall>().cloned(), method: req.method().as_str().to_string(), route, args: None, list_prefix: None, about: None, client: None, session: false };
+    let mut ctx = Ctx { access: access.clone(), grant, started, ip, mcp: req.extensions().get::<McpCall>().cloned(), method: req.method().as_str().to_string(), route, args: None, list_prefix: None, about: None, client: None, session: false, person: false };
     ctx.client = match ctx.mcp.as_ref().and_then(|m| m.client.clone()) {
         Some(c) => Some(c.to_string()),
         None => req.headers().get(axum::http::header::USER_AGENT).and_then(|v| v.to_str().ok()).and_then(client_name),
@@ -509,6 +514,11 @@ async fn decide_session(access: Arc<Access>, req: Request, next: Next) -> Respon
         Some(f) if roll_auth::roles::MEMBER_PRODUCTS.contains(&f.row.product) => {}
         _ => return next.run(req).await,
     }
+    // A create that names no project makes the person's own (their search cluster): the product
+    // makes it theirs and holds it to their caps. Named in a project, the project's role decides.
+    if catalog::PERSON_OWN_UNPLACED.iter().any(|(m, r)| *m == method && *r == route) && !req.headers().contains_key(PROJECT_HEADER) {
+        return next.run(req).await;
+    }
     let (a, u, ses) = (access.clone(), person.user.clone(), person.session.clone());
     let grant = match blocking(move || a.session_grant(&u, Some(&ses))).await {
         Ok(g) => g,
@@ -516,7 +526,7 @@ async fn decide_session(access: Arc<Access>, req: Request, next: Next) -> Respon
     };
     let stored = Grant { id: grant.id.to_string(), name: grant.name.to_string(), kind: "session", rules: (*grant.scope).clone(), user: Some(person.user.clone()), ..Default::default() };
     let ip = client_ip(&req, &access.config);
-    let ctx = Ctx { access: access.clone(), grant: stored, started: Instant::now(), ip, mcp: None, method, route, args: None, list_prefix: None, about: None, client: None, session: true };
+    let ctx = Ctx { access: access.clone(), grant: stored, started: Instant::now(), ip, mcp: None, method, route, args: None, list_prefix: None, about: None, client: None, session: true, person: true };
     judge(ctx, req, next, Judge { session: true, as_user: true, decided_before: false, limit: None, person: Some(person), within: None }).await
 }
 
@@ -524,6 +534,14 @@ async fn decide_session(access: Arc<Access>, req: Request, next: Next) -> Respon
 /// doesn't exist for them (404, as the workspace answers), and one they are is a 403 that names
 /// what their role lacks.
 fn refuse_session(scope: &Scope, target: &Target, action: Action, about: &str) -> Response {
+    // A resource in none of their projects (or in one that doesn't trust it) doesn't exist for
+    // them either.
+    if let Target::One(r) = target
+        && r.project.is_none()
+        && let Some(id) = r.id.as_deref().filter(|id| !roll_auth::roles::names_project(scope, id))
+    {
+        return (StatusCode::NOT_FOUND, axum::Json(json!({ "error": format!("no {about} {id}") }))).into_response();
+    }
     let project = match target {
         Target::One(r) => r.project.clone().or_else(|| r.id.clone()),
         Target::Create { project, .. } => project.clone(),
@@ -538,8 +556,9 @@ fn refuse_session(scope: &Scope, target: &Target, action: Action, about: &str) -
 
 /// The decision itself, once the grant is known: the route's row, the resource, the rules.
 async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
-    let Judge { session, as_user, decided_before, limit, person, within } = j;
+    let Judge { session, as_user, decided_before, limit, person, mut within } = j;
     let access = ctx.access.clone();
+    ctx.person = as_user;
     // A nested service (storage) sees its path without the prefix: the original has it.
     let mut original = req.extensions().get::<axum::extract::OriginalUri>().map_or_else(|| req.uri().clone(), |o| o.0.clone());
     // A signed hop to an owner or leader: the request it carries is the one to decide.
@@ -573,6 +592,20 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
     if found.params.is_some() {
         ctx.route = row.route.to_string();
     }
+    // What the person owns of the product themselves (their search clusters) is theirs whatever
+    // their projects: their session reaches it, and their token within it.
+    if as_user && let Some(p) = &person {
+        let (a, product, user) = (access.clone(), row.product, p.user.clone());
+        if let Ok(Some(own)) = tokio::task::spawn_blocking(move || a.own_rule(product, &user)).await {
+            if session {
+                ctx.grant.rules.0.push(own);
+            } else if let Some(w) = within.as_mut() {
+                let mut scope = (*w.scope).clone();
+                scope.0.push(own);
+                w.scope = Arc::new(scope);
+            }
+        }
+    }
     let policy = access.policy_now();
     let scope = Arc::new(ctx.grant.effective_rules(code_sql::now_ms(), |r| policy.asks_again(r)));
     let (mut parts, body) = req.into_parts();
@@ -599,7 +632,7 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
     let target = {
         let (a, q, h) = (access.clone(), original.query().map(str::to_string), parts.headers.clone());
         let params = params.clone();
-        match tokio::task::spawn_blocking(move || target(&a, row, &params, q.as_deref(), &h)).await {
+        match tokio::task::spawn_blocking(move || target(&a, row, &params, q.as_deref(), &h, as_user)).await {
             Ok(t) => t,
             Err(e) => return Error::Internal(e.to_string()).into_response(),
         }
@@ -696,7 +729,7 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
     // Handing another resource's credentials to this one (apps' links) is revealing them: when
     // that decides, the request (and its approval) is about the linked resource.
     let mut lent: Option<(&'static str, String)> = None;
-    if let Some(l) = lend_outcome(&access, row, &params, json_body.as_ref(), &scope).await {
+    if let Some(l) = lend_outcome(&access, row, &params, json_body.as_ref(), &scope, as_user).await {
         seconds.extend(l.all.into_iter().map(|(p, a, r)| (p, a, Some(r))));
         if rank(l.outcome) < rank(outcome) {
             (outcome, action) = (l.outcome, l.action);
@@ -884,6 +917,7 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
     if let Some(p) = person.as_ref().filter(|_| !session) {
         parts.extensions.insert(roll_auth::SignedIn { session: ctx.grant.id.clone(), ..p.clone() });
     }
+    let within_scope = within.as_ref().map(|w| w.scope.clone());
     if let Some(w) = within {
         parts.extensions.insert(roll_auth::SessionGrant(w));
     }
@@ -918,6 +952,20 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
         user: ctx.grant.user.as_deref().map(Into::into),
         ask_otherwise: ctx.grant.ask_otherwise,
     });
+    // A person's request: the product may ask this same decision about its other resources (a
+    // list narrowed before it's built, a second cluster), resolved as a person's are.
+    if as_user {
+        let kind = match row.target {
+            Tgt::Param(_, kind) => kind,
+            Tgt::List { kind, .. } => kind.unwrap_or(row.product),
+            _ => row.product,
+        };
+        let (a, s, w, product) = (access.clone(), scope.clone(), within_scope, row.product);
+        parts.extensions.insert(roll_auth::Reach(Arc::new(move |id: &str, act: Action| {
+            let t = Target::One(a.resource_as(true, product, kind, id));
+            s.outcome(&t, act) == Outcome::Allow && w.as_ref().is_none_or(|w| w.outcome(&t, act) == Outcome::Allow)
+        })));
+    }
     // A list filtered, an answer's credentials redacted, a create placed: the answer is read.
     let filter_list = matches!(row.target, Tgt::List { .. }) && narrowed(&scope, row.product, action);
     let redact_fields = !row.reveals.is_empty() && scope.outcome(&target, Action::Reveal) != Outcome::Allow;
@@ -1035,7 +1083,7 @@ pub(crate) async fn copy_outcome(
 /// What handing other resources' credentials to this one needs ([`catalog::Lend`]): `reveal` on
 /// each, as a rule places it. The weakest decides; a kind roll doesn't know is refused.
 #[allow(clippy::type_complexity)]
-pub(crate) async fn lend_outcome(access: &Arc<Access>, row: &'static Row, params: &[(String, String)], body: Option<&Value>, scope: &Scope) -> Option<Lending> {
+pub(crate) async fn lend_outcome(access: &Arc<Access>, row: &'static Row, params: &[(String, String)], body: Option<&Value>, scope: &Scope, person: bool) -> Option<Lending> {
     let param = |n: &str| params.iter().find(|(k, _)| k == n).map(|(_, v)| v.clone());
     let lent: Vec<catalog::Lent> = match row.lends? {
         // A route that names them otherwise than its row is refused, never let through.
@@ -1057,7 +1105,7 @@ pub(crate) async fn lend_outcome(access: &Arc<Access>, row: &'static Row, params
             None => (Outcome::Deny, row.product, l.action, format!("{}/{}", l.kind, l.r#ref)),
             Some((product, rkind)) => {
                 let (a, r2) = (access.clone(), l.r#ref.clone());
-                match tokio::task::spawn_blocking(move || a.resource(product, rkind, &r2)).await {
+                match tokio::task::spawn_blocking(move || a.resource_as(person, product, rkind, &r2)).await {
                     // Named as rules name it (a database by name is its id).
                     Ok(res) => (scope.outcome(&Target::One(res.clone()), l.action), product, l.action, res.id.unwrap_or(l.r#ref)),
                     Err(_) => (Outcome::Deny, product, l.action, l.r#ref),
@@ -1338,7 +1386,7 @@ async fn post_process(
         }
     }
     if (filter_list || redact_items) && let Tgt::List { items, id_field, kind } = row.target {
-        let (a, s, product, prefix, fields) = (ctx.access.clone(), scope.clone(), row.product, ctx.list_prefix.clone(), row.reveals);
+        let (a, s, product, prefix, fields, person) = (ctx.access.clone(), scope.clone(), row.product, ctx.list_prefix.clone(), row.reveals, ctx.person);
         let kind = kind.unwrap_or(product);
         v = tokio::task::spawn_blocking(move || {
             // Each item is its own resource: the token keeps the ones it may `action`, and sees
@@ -1347,7 +1395,7 @@ async fn post_process(
                 let id = item.get(id_field).and_then(Value::as_str)?;
                 let named = prefix.as_ref().map(|p| format!("{p}/{id}"));
                 let id = named.as_deref().unwrap_or(id);
-                Some(if product == "workspace" { Resource { project: Some(id.into()), ..Resource::new("workspace", id) } } else { a.resource(product, kind, id) })
+                Some(if product == "workspace" { Resource { project: Some(id.into()), ..Resource::new("workspace", id) } } else { a.resource_as(person, product, kind, id) })
             };
             let may = |item: &Value, act: Action| resource(item).is_some_and(|r| s.outcome(&Target::One(r), act) == Outcome::Allow);
             if filter_list {

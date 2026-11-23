@@ -718,6 +718,13 @@ impl Store {
         })?)
     }
 
+    /// The ids of the clusters the signed-in person `owner` owns, synchronously (roll's access rules:
+    /// a person's own clusters are theirs, whatever their projects): live ones, and deleted ones
+    /// kept for restoring.
+    pub fn owned_ids(&self, owner: &str) -> anyhow::Result<Vec<String>> {
+        Ok(self.db.read(|x| x.query("SELECT id FROM search_clusters WHERE owner = ?1 AND deleting = 0", params![owner], |r| r.get(0)))?)
+    }
+
     async fn one(&self, filter: &str, arg: &str) -> anyhow::Result<Option<SearchCluster>> {
         let mut c = self.db.read(|x| x.query_row(&format!("SELECT {READ_COLS} FROM search_clusters WHERE {filter} = ?1 AND {LIVE}"), params![arg], row).optional())?;
         self.reveal(c.iter_mut())?;
