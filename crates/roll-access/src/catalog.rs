@@ -174,11 +174,14 @@ fn search_parent(b: &Value) -> Vec<Lent> {
     b.get("parent").and_then(Value::as_str).map(|p| Lent { kind: "search".into(), r#ref: p.into(), action: Action::Write }).into_iter().collect()
 }
 
-/// A search API key's action: `reveal` for a `data`, `read` or `append` key; `admin` for an
-/// `admin` one, the default, or anything else (it fails closed).
+/// A search API key's action, by what the key may do: `reveal` for a `read` or `append` key; `delete`
+/// for a `data` key, whose role manages indices and lifecycle policies (it deletes indices, runs
+/// delete-by-query, sets ILM); `admin` for an `admin` one, the default, or anything else (it fails
+/// closed). Each answers the key, so search asks `reveal` too (the row's `capable`).
 fn search_key_action(b: &Value) -> Action {
     match b.get("access").and_then(Value::as_str) {
-        Some("data" | "read" | "append") => Action::Reveal,
+        Some("read" | "append") => Action::Reveal,
+        Some("data") => Action::Delete,
         _ => Action::Admin,
     }
 }
@@ -1319,9 +1322,10 @@ static ROWS: &[Row] = &[
     // search on the API the cluster routes it to) needs reveal too: the gate says whether the
     // grant has it (`capable`), without reading the body.
     row("POST", "/v1/search/clusters/{id}/request", "search", ADMIN, one(PG, "cluster")).capable(&[Action::Reveal]),
-    // An API key: its secret is in the answer. One with `admin` access (the default) is everything
-    // the cluster's own user may do, as the console is: admin, and search refuses it to a grant
-    // that can't reveal too (`capable`); a `data`, `read` or `append` key is reveal.
+    // An API key: its secret is in the answer, so search refuses it to a grant that can't reveal
+    // too (`capable`). The action is what the key may do (`search_key_action`): `admin` access
+    // (the default) is everything the cluster's own user may do, as the console is; a `data` key
+    // deletes indices and sets lifecycle policies (`delete`); `read` and `append` keys are reveal.
     row("POST", "/v1/search/clusters/{id}/keys", "search", Act::Body(search_key_action), one(PG, "cluster")).capable(&[Action::Reveal]),
     row("DELETE", "/v1/search/clusters/{id}/keys/{key}", "search", ADMIN, one(PG, "cluster")),
     // Keys a web page ships (read-only, rate limited): the new key's secret is in the answer;

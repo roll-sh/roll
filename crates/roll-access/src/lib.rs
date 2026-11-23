@@ -385,6 +385,10 @@ pub struct Resolvers {
 /// The workspace project `product`'s resource `id` is in (`None`: not known, or gone).
 pub type ProjectFn = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
+/// Workspace projects' trust bases read for one request ([`Access::resource_with`]).
+#[derive(Default)]
+pub struct TrustMemo(HashMap<String, Option<roll_workspace::TrustBasis>>);
+
 /// The ids of `product`'s resources the person `user` (`usr_…`) owns.
 pub type OwnedFn = Arc<dyn Fn(&str) -> Vec<String> + Send + Sync>;
 
@@ -676,10 +680,18 @@ impl Access {
     }
 
     /// [`Access::resource`] as a person's grant sees it (`person`: their session, or a token of
-    /// theirs): a project whose canvas holds it counts only when the project trusts it (its home,
-    /// or one of its owners' own: `Workspace::trusts`), so an admin of a project gains nothing on a
-    /// stranger's resource dropped on its canvas (docs/members.md, "A canvas proves nothing").
+    /// theirs): on a member product, a project whose canvas holds it counts only when the project
+    /// trusts it (its home, or one of its owners' own: `Workspace::trusts`), so an admin of a
+    /// project gains nothing on a stranger's resource dropped on its canvas (docs/members.md, "A
+    /// canvas proves nothing"). Other products keep the canvas as it is until they become member
+    /// products.
     pub fn resource_as(&self, person: bool, product: &str, kind: &str, id: &str) -> Resource {
+        self.resource_with(person, product, kind, id, &mut TrustMemo::default())
+    }
+
+    /// [`Access::resource_as`] reading each project's trust basis once in `memo` (one request's
+    /// resources: a list's items, a product's second checks).
+    pub fn resource_with(&self, person: bool, product: &str, kind: &str, id: &str, memo: &mut TrustMemo) -> Resource {
         // A git URL names its repo with or without `.git`.
         let (product, kind, id) = if kind == "git-repo" { (product, "repo", id.trim_end_matches(".git")) } else { (product, kind, id) };
         // tasks' queues, topics, schedules and functions share one product: their ids say which
@@ -698,8 +710,8 @@ impl Access {
         } else {
             let wk = catalog::workspace_kind(product);
             let mut on = wk.map(|wk| self.resolvers.projects_of(wk, &id)).unwrap_or_default();
-            if let (true, Some(wk)) = (person, wk) {
-                on.retain(|p| self.trusts(p, wk, &id));
+            if let (true, Some(wk)) = (person && roll_auth::roles::MEMBER_PRODUCTS.contains(&product), wk) {
+                on.retain(|p| self.trusts(p, wk, &id, memo));
             }
             on
         };
@@ -708,11 +720,29 @@ impl Access {
         Resource { product: product.into(), id: Some(id), project, also_in: projects, environment: resolved.and_then(|r| r.environment), protected, ..Default::default() }
     }
 
-    /// Whether workspace project `project` stands for `kind ref` (`Workspace::trusts`). No
-    /// workspace, or a failed lookup, is a no.
-    fn trusts(&self, project: &str, workspace_kind: &str, r#ref: &str) -> bool {
+    /// Whether workspace project `project` stands for `kind ref` (`Workspace::trusts`), its basis
+    /// read once per `memo`. No workspace, or a failed lookup, is a no.
+    fn trusts(&self, project: &str, workspace_kind: &str, r#ref: &str, memo: &mut TrustMemo) -> bool {
         let (Some(ws), Ok(kind)) = (self.workspace.get(), roll_workspace::Kind::parse(workspace_kind)) else { return false };
-        ws.get(roll_workspace::Scope::All, project).is_ok_and(|p| ws.trusts(&p, kind, r#ref))
+        let basis = memo.0.entry(project.to_string()).or_insert_with(|| ws.trust_basis(project).ok().flatten());
+        basis.as_ref().is_some_and(|b| ws.trusts_on(project, b, kind, r#ref))
+    }
+
+    /// Whether person `user`, as they are now, may `action` `product`'s resource `id`: they can still
+    /// sign in, and their grant (their memberships' rules and what they own of the product, or
+    /// everything for an admin account) allows it, resolved as a person's request is. What a
+    /// person set up that acts later (a search cluster's remote link) acts only while this holds.
+    /// Blocking; never cached.
+    pub fn person_reaches(&self, user: &str, product: &str, kind: &str, id: &str, action: Action) -> bool {
+        let Some(people) = self.people.get() else { return false };
+        let Ok(Some(p)) = people.person_now(user) else { return false };
+        if p.admin {
+            return true;
+        }
+        let Ok(g) = self.session_grant(user, None) else { return false };
+        let mut scope = (*g.scope).clone();
+        scope.0.extend(self.own_rule(product, user));
+        scope.outcome(&roll_auth::scope::Target::One(self.resource_as(true, product, kind, id)), action) == roll_auth::scope::Outcome::Allow
     }
 
     /// The rule a person's grant gets for what they own of `product` (`Resolvers::owned_fn`):

@@ -754,9 +754,16 @@ pub struct Control {
     leases: OnceLock<Arc<crate::cluster::ClusterLeases>>,
     /// Resolves snapshot repositories' credential references ([`Control::set_secrets`]).
     secret_refs: Arc<crate::secret_refs::CatalogRefs>,
-    /// Told of each new branch ([`Control::on_branch`]).
+    /// Told of the branches people make ([`Control::on_branch`]).
     on_branch: OnceLock<OnBranch>,
+    /// Told of each cluster purged for good ([`Control::on_purged`]).
+    on_purged: OnceLock<OnPurged>,
+    /// Whether a remote link's maker may still administer its target ([`Control::set_link_makers`]).
+    pub(crate) link_makers: OnceLock<crate::remotes::LinkMakers>,
 }
+
+/// Called with a purged cluster's id, once it's gone for good.
+pub type OnPurged = Box<dyn Fn(&str) + Send + Sync>;
 
 /// Called with a new branch's parent and the branch, once it's in the catalog.
 pub type OnBranch = Box<dyn Fn(&SearchCluster, &SearchCluster) + Send + Sync>;
@@ -849,6 +856,8 @@ impl Control {
             leases: OnceLock::new(),
             secret_refs,
             on_branch: OnceLock::new(),
+            on_purged: OnceLock::new(),
+            link_makers: OnceLock::new(),
         });
         // Nothing can load before the node is handed out, so the hook always finds the control.
         let _ = hooks.control.set(Arc::downgrade(&control));
@@ -959,11 +968,25 @@ impl Control {
         let _ = self.secret_refs.secrets.set(secrets);
     }
 
-    /// Tell `f` of every new branch, with its parent, once it's in the catalog (rolld: a branch
-    /// stays in the workspace project its parent is at home in, so the members who could branch it
-    /// reach the copy). Once.
+    /// Tell `f` of the branches people make, with their parents ([`Control::branched`]; rolld: a
+    /// branch stays in the workspace project its parent is at home in, so the members who could
+    /// branch it reach the copy). Once.
     pub fn on_branch(&self, f: OnBranch) {
         let _ = self.on_branch.set(f);
+    }
+
+    /// Tell `f` of each cluster purged for good (rolld: its home and canvas places go, so nothing
+    /// keeps a project's trust in it). A delete kept for restoring isn't a purge. Once.
+    pub fn on_purged(&self, f: OnPurged) {
+        let _ = self.on_purged.set(f);
+    }
+
+    /// A person made `branch` of `parent` through the API ([`Control::on_branch`]). The
+    /// operator's own branches (previews' data copies) aren't told: they belong to no project.
+    pub fn branched(&self, parent: &SearchCluster, branch: &SearchCluster) {
+        if let Some(f) = self.on_branch.get() {
+            f(parent, branch);
+        }
     }
 
     pub fn cluster_leases(&self) -> Option<&Arc<crate::cluster::ClusterLeases>> {
@@ -1109,6 +1132,7 @@ impl Control {
             loaded_on: None,
             wake_at: None,
             owner: None,
+            made_by: None,
             restored_at: None,
             ip_allowlist: Vec::new(),
             cors: None,
@@ -1118,11 +1142,13 @@ impl Control {
         }
     }
 
-    /// A new, empty cluster, `owner`'s (a signed-in person's `usr_…`; `None`: the operator's).
-    /// Past one of `caps` for the owner it is refused (409). Nothing is written to object storage
-    /// until it is first used.
-    pub async fn create(&self, name: &str, o: ClusterOptions, owner: Option<&str>, caps: Caps) -> Result<SearchCluster> {
-        let c = Self::apply(SearchCluster { owner: owner.map(str::to_string), ..self.fresh(name) }, o)?;
+    /// A new, empty cluster, `owner`'s (a signed-in person's `usr_…`; `None`: the operator's, or
+    /// a workspace project's). `made_by`: the person who made one with no owner (in a project),
+    /// whose caps count it. Past one of `caps` it is refused (409). Nothing is written to object
+    /// storage until it is first used.
+    pub async fn create(&self, name: &str, o: ClusterOptions, owner: Option<&str>, made_by: Option<&str>, caps: Caps) -> Result<SearchCluster> {
+        let made_by = made_by.filter(|_| owner.is_none()).map(str::to_string);
+        let c = Self::apply(SearchCluster { owner: owner.map(str::to_string), made_by, ..self.fresh(name) }, o)?;
         self.check(&c)?;
         self.check_free(name).await?;
         self.insert(&c, caps).await?;
@@ -1176,12 +1202,13 @@ impl Control {
     /// A new cluster with `parent`'s indices, as they are now or as they were at `at` (Unix
     /// seconds, within the history window). Instant: the branch's commit points name the
     /// parent's segments, nothing is copied. Settings and the owner come from the parent (settings
-    /// unless given), and the branch counts toward the owner's `caps`. In a
+    /// unless given), and the branch counts toward the owner's `caps`; a branch of a cluster with
+    /// no owner counts toward `made_by`, the person making it (none for the operator's). In a
     /// fleet, call it on the node holding the parent (the API forwards there): a loaded parent
     /// is committed first, so the branch sees every acknowledged write. `parent` is the cluster
     /// the caller was checked against: it is read again by its id, never its name, so a cluster
     /// that took the name meanwhile is never branched in its place.
-    pub async fn branch(&self, parent: &SearchCluster, name: &str, at: Option<i64>, o: ClusterOptions, caps: Caps) -> Result<SearchCluster> {
+    pub async fn branch(&self, parent: &SearchCluster, name: &str, at: Option<i64>, o: ClusterOptions, made_by: Option<&str>, caps: Caps) -> Result<SearchCluster> {
         let p = self.store.get(&parent.id).await?.ok_or_else(|| ControlError::NotFound(format!("no search cluster {}", parent.id)))?;
         let now = now();
         if let Some(t) = at {
@@ -1201,6 +1228,7 @@ impl Control {
                 parent_at: Some(at.unwrap_or(now).min(now)),
                 // Its first load marks what it inherits (`search_es::branch`).
                 inherit_pending: true,
+                made_by: made_by.filter(|_| p.owner.is_none()).map(str::to_string),
                 ..p.clone()
             },
             o,
@@ -1209,7 +1237,7 @@ impl Control {
         self.check_free(name).await?;
         // Refused by a cap before anything is copied (the insert's count, in its transaction,
         // still decides).
-        if let Some(owner) = &c.owner
+        if let Some(owner) = c.counted_toward()
             && let Some(o) = self.store.check_caps(owner, c.idle_timeout_s, caps).await?
         {
             return Err(over(o));
@@ -1260,9 +1288,6 @@ impl Control {
                 tracing::warn!(cluster = c.name, error = %e, "reading a new branch's figures failed");
                 self.meter.mark_dirty(&c.id);
             }
-        }
-        if let Some(f) = self.on_branch.get() {
-            f(&p, &c);
         }
         Ok(c)
     }
@@ -1562,6 +1587,9 @@ impl Control {
                 tracing::warn!(cluster = c.id, error = %e, "revoking a deleted search cluster's remote keys failed");
             }
             self.store.delete(&c.id).await?;
+            if let Some(f) = self.on_purged.get() {
+                f(&c.id);
+            }
         } else {
             self.keep_deleted(c).await?;
         }
@@ -1740,6 +1768,9 @@ impl Control {
             }
             if ok && self.store.finish_purge(&d.cluster.id, &claim).await? {
                 purged += 1;
+                if let Some(f) = self.on_purged.get() {
+                    f(&d.cluster.id);
+                }
             } else if let Err(e) = self.store.release_claim(&d.cluster.id, &claim).await {
                 tracing::warn!(cluster = d.cluster.id, error = %e, "releasing a purge claim failed; it lapses");
             }
@@ -2601,6 +2632,7 @@ mod tests {
             loaded_on: None,
             wake_at: None,
             owner: None,
+            made_by: None,
             restored_at: None,
             ip_allowlist: vec![IpRule { cidr: "203.0.113.0/24".into(), description: None }],
             cors: None,

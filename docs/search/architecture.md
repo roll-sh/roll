@@ -339,35 +339,39 @@ evaluator and search's catalogue rows. search adds no role checks of its own.
 - **The operator and admins** see and manage every cluster. What they make has no owner.
 - **A person** owns what they make without naming a project (`SearchCluster::owner`). Their grant
   reaches each of their own clusters with every action, whatever their projects say
-  (`Resolvers::owned_fn`).
+  (`Resolvers::owned_fn`). A token of theirs reaches them only as far as its own rules do.
 - **A project's members** reach a cluster that the project trusts, as their role there allows. A
   project trusts a cluster when the project is its home, or when the cluster belongs to one of the
   project's owners (`Workspace::trusts`). A cluster made with `X-Roll-Project` gets that project as
-  its home, and a branch takes its parent's home. A stranger's cluster dropped on the project's
-  canvas reaches nobody through it.
+  its home and has no owner: it's the project's, so whoever made it loses it when they leave
+  the project. A branch a person makes takes its parent's home. A stranger's cluster dropped on the
+  project's canvas reaches nobody through it, and a purged cluster leaves every canvas.
 
   | role | what they may do to the project's clusters |
   | --- | --- |
   | viewer | read: settings, indices, documents, searches, metrics, logs, analytics |
-  | developer | as viewer, plus write (documents, indices, mappings, synonyms, branches, restores) and reveal (`data`, `read` and `append` API keys, browser keys) |
-  | admin, owner | everything: settings, the console, `admin` API keys, the admin password, remotes, migrations, deletes, creates in the project |
+  | developer | as viewer, plus write (documents, indices, mappings, synonyms, branches, restores) and reveal (`read` and `append` API keys, browser keys) |
+  | admin, owner | everything: settings, the console, `data` and `admin` API keys, the admin password, remotes, migrations, deletes, creates in the project |
 
   A cluster has no environments and is never protected, so a developer's default reaches it. A
-  bulk that deletes, `delete_by_query` and a lifecycle setting are `delete`, which only admins and
-  owners have.
-- **Anyone else** gets 404 for the cluster, as for one that doesn't exist. Lists hold only what
-  the caller reaches: search narrows them by the gate's decision (`roll_auth::Reach`), and the
-  gate filters the answer again.
+  bulk that deletes, `delete_by_query`, a lifecycle setting and a `data` key (its role deletes
+  indices and sets lifecycle policies) are `delete`, which only admins and owners have.
+- **Anyone else** gets 404 for the cluster, worded as for one that doesn't exist (the name they
+  asked for, never the id or project it resolved to). Lists hold only what the caller reaches:
+  search narrows them by the gate's decision (`roll_auth::Reach`), and the gate filters the answer
+  again. A cluster's `branches`, `parent_name` and remotes show only clusters the caller sees.
 
-Per-person caps (`SearchConfig::person_caps`) count toward a cluster's owner. A member's create
-in a project is theirs, so it counts toward them, and a branch counts toward its parent's owner.
-The owner keeps their own cluster after leaving the project. An admin of the project can still
-delete it.
+Per-person caps (`SearchConfig::person_caps`) count toward a cluster's owner, or for one made in a
+project toward who made it (`made_by`, which grants nothing). A branch counts toward its parent's
+owner, or when the parent has none, toward the person branching it.
 
 Linking two clusters (`PUT …/remotes/{alias}`) takes administering both: the gate asks `admin` on
-each, and search asks the same decision about the target. Once linked, the link holds by its
-credentials' row, bound to the target's id. A cluster's own endpoint (`PUT _cluster/settings`)
-may name only a cluster of the same owner, or one that roll linked it to.
+each, and search asks the same decision about the target. The link keeps who made it, and works
+only while they still may administer the target, which roll-access decides again on every use
+(`Access::person_reaches`): a removed or demoted member's links stop at once, though they stay
+listed (not connected) for the cluster's admins to remove. It's also bound to the target's id. A
+cluster's own endpoint (`PUT _cluster/settings`) may name only a cluster of the same owner, or one
+a link that still holds points at.
 
 On a fleet, a call about one cluster still runs on the cluster's owner node. The forward carries
 the person's own credentials, and the owner node's gate decides again.

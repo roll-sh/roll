@@ -686,6 +686,14 @@ async fn people_are_held_to_their_cluster_caps() {
     assert!(e.call_as("admin", Method::GET, "/v1/search", None).await.1["caps"].is_null());
     // Alice's count toward nobody else: bob still makes his.
     assert_eq!(e.call_as("bob", Method::POST, "/v1/search/clusters", Some(create("b1", None))).await.0, 200);
+    // One made in a workspace project (`X-Roll-Project`, which the gate decided) is no one's (the
+    // project's, through its home), and counts toward who made it.
+    for name in ["b2", "b3"] {
+        let r = e.http.post(format!("{}/v1/search/clusters", e.api)).header("x-test-as", "bob").header("x-roll-project", "prj_p").json(&create(name, None)).send().await.unwrap();
+        let v: Value = r.json().await.unwrap();
+        assert!(v["owner"].is_null() && v["made_by"] == "usr_bob", "{v}");
+    }
+    assert_eq!(e.call_as("bob", Method::POST, "/v1/search/clusters", Some(create("b4", None))).await.0, 409, "what bob made in a project counts toward him");
 
     // A deleted cluster frees its place (alice: a1, a2, a1-dev and the admin's a1-fix; two go),
     // and restoring one past the cap is the same 409 as a create.
@@ -3625,6 +3633,36 @@ async fn cross_cluster_search_between_a_persons_own_clusters() {
     assert_eq!(e.call_as("ann", Method::DELETE, "/v1/search/clusters/ann-app/remotes/logs", None).await.0, 204);
     let (_, info) = e.es(&app, &app_pw, Method::GET, "/_remote/info", None).await;
     assert!(info.get("logs").is_none(), "{info}");
+}
+
+/// A remote link holds by its maker's rights: once roll-access says they may no longer administer
+/// its target (removed from the project, demoted), searches across it are skipped and it shows as
+/// not connected, though the link is still there.
+#[tokio::test]
+async fn a_link_stops_once_its_maker_may_not_administer_the_target() {
+    use reqwest::Method;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let e = env().await;
+    let still = Arc::new(AtomicBool::new(true));
+    let s2 = still.clone();
+    e.control.set_link_makers(Arc::new(move |maker: &str, _target: &str| maker == "usr_ann" && s2.load(Ordering::SeqCst)));
+    let mut made = Vec::new();
+    for name in ["mk-app", "mk-logs"] {
+        let (s, c) = e.call_as("ann", Method::POST, "/v1/search/clusters", Some(json!({ "name": name }))).await;
+        assert_eq!(s, 200, "{c}");
+        made.push(creds(&c));
+    }
+    let ((app, app_pw), (logs, logs_pw)) = (made[0].clone(), made[1].clone());
+    assert_eq!(e.es(&logs, &logs_pw, Method::PUT, "/logs-1/_doc/1?refresh=true", Some(json!({ "m": "x" }))).await.0, 201);
+    let (s, v) = e.call_as("ann", Method::PUT, "/v1/search/clusters/mk-app/remotes/logs", Some(json!({ "cluster": "mk-logs" }))).await;
+    assert_eq!(s, 200, "{v}");
+    let (_, v) = e.es(&app, &app_pw, Method::GET, "/logs:logs-1/_search", None).await;
+    assert_eq!(v["hits"]["total"]["value"], 1, "{v}");
+    still.store(false, Ordering::SeqCst);
+    let (_, v) = e.es(&app, &app_pw, Method::GET, "/logs:logs-1/_search", None).await;
+    assert_eq!((v["hits"]["total"]["value"].as_i64(), v["_clusters"]["details"]["logs"]["status"].as_str()), (Some(0), Some("skipped")), "{v}");
+    let (_, listed) = e.call_as("ann", Method::GET, "/v1/search/clusters/mk-app/remotes", None).await;
+    assert_eq!((listed["remotes"][0]["alias"].as_str(), listed["remotes"][0]["connected"].as_bool()), (Some("logs"), Some(false)), "{listed}");
 }
 
 /// A linked remote that sleeps wakes for the search; one that's gone is skipped (the default),

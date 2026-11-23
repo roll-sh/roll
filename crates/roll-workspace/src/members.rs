@@ -122,6 +122,14 @@ pub struct Person {
     pub admin: bool,
 }
 
+/// What [`Workspace::trusts`] reads of a project itself: its namespace (empty: the operator's)
+/// and its owners ([`Workspace::trust_basis`]).
+#[derive(Clone, Debug)]
+pub struct TrustBasis {
+    namespace: String,
+    owners: Vec<String>,
+}
+
 /// Who is changing membership, and what they hold: the operator (no grant: everything), or a
 /// grant's rules (a person's session, their token and the session it acts within, an operator's
 /// token).
@@ -733,13 +741,32 @@ impl Workspace {
     /// Whether `project` trusts `kind ref` through its home or its owners' resources
     /// ([`Workspace::trusts`]).
     pub(crate) fn trusted_by_members(&self, project: &str, namespace: &str, kind: Kind, r#ref: &str) -> bool {
+        self.trusted_with(project, namespace, &self.owners_of(project).unwrap_or_default(), kind, r#ref)
+    }
+
+    /// [`Workspace::trusted_by_members`] with the project's owners read already.
+    fn trusted_with(&self, project: &str, namespace: &str, project_owners: &[String], kind: Kind, r#ref: &str) -> bool {
         if roles::decisions::HOMES && HOME_KINDS.contains(&kind) && self.home_of(kind, r#ref).ok().flatten().as_deref() == Some(project) {
             return true;
         }
         let Some(owners) = self.owners.get() else { return false };
         // The person who made the project as before members (an admin's project is the operator's,
         // D9); another owner adds only what's their own, never all of an admin account's reach.
-        self.owners_of(project).unwrap_or_default().iter().any(|o| if o == namespace { owners.trusts(o, kind, r#ref) } else { owners.owns(o, kind, r#ref) })
+        project_owners.iter().any(|o| if o == namespace { owners.trusts(o, kind, r#ref) } else { owners.owns(o, kind, r#ref) })
+    }
+
+    /// What [`Workspace::trusts`] reads of `project` itself (its namespace and owners), read once
+    /// to ask about many resources ([`Workspace::trusts_on`]). `None`: no such project.
+    pub fn trust_basis(&self, project: &str) -> Result<Option<TrustBasis>> {
+        let namespace: Option<String> = self.db.read(|c| c.query_row("SELECT owner FROM projects WHERE id = ?", [project], |r| r.get(0)).optional())?;
+        let Some(namespace) = namespace else { return Ok(None) };
+        let owners = if namespace.is_empty() { Vec::new() } else { self.owners_of(project)? };
+        Ok(Some(TrustBasis { namespace, owners }))
+    }
+
+    /// [`Workspace::trusts`] on a project's [`TrustBasis`].
+    pub fn trusts_on(&self, project: &str, basis: &TrustBasis, kind: Kind, r#ref: &str) -> bool {
+        basis.namespace.is_empty() || self.trusted_with(project, &basis.namespace, &basis.owners, kind, r#ref)
     }
 
     /// A product deleted `kind ref`: its home and its places on every canvas go, so nothing made

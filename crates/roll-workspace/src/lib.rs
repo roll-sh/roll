@@ -21,7 +21,7 @@
 pub mod api;
 pub mod members;
 
-pub use members::{Actor, Invite, Member, MemberEvent, People, Person};
+pub use members::{Actor, Invite, Member, MemberEvent, People, Person, TrustBasis};
 
 use code_sql::{Db, OptionalExtension, Target, params};
 use serde::Serialize;

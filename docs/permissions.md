@@ -478,11 +478,12 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   so a rule that asks for `reveal` isn't asked here (the 403 says so). A token that should do this
   needs `reveal` allowed, or can use `POST …/keys`, which asks as any route does. The gate reads
   no console body.
-- A search API key (`POST /v1/search/clusters/{id}/keys`) is `reveal` when its `access` is
-  `data`, `read` or `append`, and `admin` when it's `admin` (the default, everything the
-  cluster's own user may do, as the console is) or anything else. A new admin password
-  (`POST …/password`) is `admin`. Both answer a credential, so search refuses them (403) to a
-  grant that can't also reveal on the cluster (`capable: [reveal]`).
+- A search API key (`POST /v1/search/clusters/{id}/keys`) is what the key may do: `reveal` when
+  its `access` is `read` or `append`, `delete` when it's `data` (its role deletes indices and sets
+  lifecycle policies), and `admin` when it's `admin` (the default, everything the cluster's own
+  user may do, as the console is) or anything else. A new admin password (`POST …/password`) is
+  `admin`. Both answer a credential, so search refuses them (403) to a grant that can't also
+  reveal on the cluster (`capable: [reveal]`).
 - Agents' machine commands, by `policy::agent_may`'s tiers: diffs and file reads `read`; working
   threads `write`; publishing with `land` `deploy`; a shell, writing files, rolling back, raising a
   thread's runtime or interaction mode, answering an agent's approval, endpoints, the gateway,
@@ -695,10 +696,14 @@ token's: the row, the resource, the rules. Making a project is the person's own
   carry it too.
 - A project the session's rules don't name is a 404 (as the workspace answers); one they do is a
   403 that names what the role lacks. A list it can't see whole is filtered; a session never asks.
-- A canvas proves nothing for a person's grant (their session, or a token of theirs): a resource a
-  project's canvas holds is in that project for their rules only when the project trusts it
-  (`Workspace::trusts`: its home, or one of the project's owners' own; `Access::resource_as`). A
-  resource in none of their projects is a 404.
+- A canvas proves nothing for a person's grant (their session, or a token of theirs): on a member
+  product, a resource a project's canvas holds is in that project for their rules only when the
+  project trusts it (`Workspace::trusts`: its home, or one of the project's owners' own;
+  `Access::resource_as`). A resource in none of their projects is a 404 worded as for a missing
+  one. Products that aren't member products yet keep the canvas as it is.
+- A person's token is held within their session on a create that names a project too
+  (`X-Roll-Project`), whatever its own rules say: it never makes anything in a project its
+  person isn't in (404). A create naming no project is the person's own.
 - What a person owns themselves stays theirs beside their projects: a product registers it
   (`Resolvers::owned_fn`; search's clusters), and the person's grant gets a rule with every action on
   each, by id.

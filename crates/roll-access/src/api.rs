@@ -311,16 +311,21 @@ struct Check {
 /// a nested or catch-all route is matched by its path, as the gate matches it.
 async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Result<Json<Value>> {
     let who = who(&a, &ext)?;
-    // A person's token is decided as a person's grant: a canvas counts only where it trusts.
-    let (scope, ask_otherwise, person) = match (&who, &c.token) {
-        (Who::Grant(g), None) => (g.scope.as_ref().clone(), g.ask_otherwise, g.user.is_some()),
+    let (scope, ask_otherwise, user) = match (&who, &c.token) {
+        (Who::Grant(g), None) => (g.scope.as_ref().clone(), g.ask_otherwise, g.user.as_deref().map(str::to_string)),
         (Who::Grant(_), Some(_)) => return Err(Error::Forbidden("a token checks only itself".into())),
         (Who::Operator | Who::User(_), Some(id)) => {
             let g = visible_grant(&a, &who, id).await?;
-            (g.effective_rules(code_sql::now_ms(), |r| a.policy_now().asks_again(r)), g.ask_otherwise, g.user.is_some())
+            (g.effective_rules(code_sql::now_ms(), |r| a.policy_now().asks_again(r)), g.ask_otherwise, g.user.clone())
         }
         (Who::Operator, None) => return Ok(Json(json!({ "decision": "allow", "why": "the operator may do everything" }))),
         (Who::User(_), None) => return Err(Error::BadRequest("name the token to check (token)".into())),
+    };
+    // A person's token is decided as the gate decides it: as a person's grant (a canvas counts
+    // only where it trusts) unless they're an admin, whose token is the operator's, narrowed.
+    let person = match (&user, a.people.get()) {
+        (Some(u), Some(people)) => people.person(u).await.ok().flatten().is_some_and(|p| !p.admin),
+        _ => false,
     };
     let method = c.method.to_ascii_uppercase();
     let uri: axum::http::Uri = c.path.parse().map_err(|_| Error::BadRequest("path isn't a request path".into()))?;

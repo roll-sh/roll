@@ -532,25 +532,28 @@ async fn decide_session(access: Arc<Access>, req: Request, next: Next) -> Respon
 
 /// A refusal for a person's session or their token's session: a project they aren't a member of
 /// doesn't exist for them (404, as the workspace answers), and one they are is a 403 that names
-/// what their role lacks.
-fn refuse_session(scope: &Scope, target: &Target, action: Action, about: &str) -> Response {
-    // A resource in none of their projects (or in one that doesn't trust it) doesn't exist for
-    // them either.
-    if let Target::One(r) = target
-        && r.project.is_none()
-        && let Some(id) = r.id.as_deref().filter(|id| !roll_auth::roles::names_project(scope, id))
-    {
-        return (StatusCode::NOT_FOUND, axum::Json(json!({ "error": format!("no {about} {id}") }))).into_response();
-    }
+/// what their role lacks. `named`: the resource as the path names it. A 404 echoes only that (or
+/// the project the caller named), never the id it resolved to or the project it's in, so a
+/// stranger's resource answers exactly as a missing one.
+fn refuse_session(scope: &Scope, target: &Target, action: Action, about: &str, named: Option<&str>) -> Response {
+    let gone = |what: String| (StatusCode::NOT_FOUND, axum::Json(json!({ "error": format!("no {what}") }))).into_response();
     let project = match target {
+        // A resource in none of their projects (or in one that doesn't trust it): its project
+        // when it has one they're in, else itself (a project's own routes, their own resource).
         Target::One(r) => r.project.clone().or_else(|| r.id.clone()),
         Target::Create { project, .. } => project.clone(),
         _ => None,
     };
-    match project {
-        Some(p) if !roll_auth::roles::names_project(scope, &p) => (StatusCode::NOT_FOUND, axum::Json(json!({ "error": format!("no project {p}") }))).into_response(),
-        Some(p) => deny(StatusCode::FORBIDDEN, "forbidden", format!("your role in project {p} can't {action} {about} there"), json!({ "needs": { "product": about, "action": action, "resource": p } })),
-        None => deny(StatusCode::FORBIDDEN, "forbidden", format!("your roles can't {action} {about}"), json!({ "needs": { "product": about, "action": action } })),
+    match (project, target) {
+        (Some(p), Target::One(r)) if !roll_auth::roles::names_project(scope, &p) => match named {
+            // A project's own routes (secrets', the workspace's) name the project itself.
+            Some(n) if r.project.as_deref() == Some(n) => gone(format!("project {n}")),
+            Some(n) => gone(format!("{about} {n}")),
+            None => gone(about.to_string()),
+        },
+        (Some(p), _) if !roll_auth::roles::names_project(scope, &p) => gone(format!("project {p}")),
+        (Some(p), _) => deny(StatusCode::FORBIDDEN, "forbidden", format!("your role in project {p} can't {action} {about} there"), json!({ "needs": { "product": about, "action": action, "resource": p } })),
+        (None, _) => deny(StatusCode::FORBIDDEN, "forbidden", format!("your roles can't {action} {about}"), json!({ "needs": { "product": about, "action": action } })),
     }
 }
 
@@ -594,7 +597,10 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
     }
     // What the person owns of the product themselves (their search clusters) is theirs whatever
     // their projects: their session reaches it, and their token within it.
-    if as_user && let Some(p) = &person {
+    if as_user
+        && let Some(p) = &person
+        && access.resolvers.owned.contains_key(row.product)
+    {
         let (a, product, user) = (access.clone(), row.product, p.user.clone());
         if let Ok(Some(own)) = tokio::task::spawn_blocking(move || a.own_rule(product, &user)).await {
             if session {
@@ -618,6 +624,11 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
                 Err(_) => Vec::new(),
             }
         }
+    };
+    // The resource as the path names it, for a refusal that answers as if it didn't exist.
+    let named: Option<String> = match row.target {
+        Tgt::Param(names, _) => Some(names.iter().filter_map(|n| params.iter().find(|(k, _)| k == n).map(|(_, v)| v.as_str())).collect::<Vec<_>>().join("/")),
+        _ => None,
     };
     // A query parameter the decision reads (a folder, a copy's source) must be there once: products
     // may read another copy of it than the gate did.
@@ -737,15 +748,18 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
             lent = Some((l.product, l.id));
         }
     }
-    // A person's token on a member product reaches only what their session does too.
+    // A person's token on a member product reaches only what their session does too, a create
+    // named in a project included (its rules may say `*`: it never makes something in a project
+    // its person isn't in). A create naming no project is the person's own.
     if let Some(w) = &within
         && roll_auth::roles::MEMBER_PRODUCTS.contains(&row.product)
-        && !matches!(row.target, Tgt::AnyGrant | Tgt::List { .. } | Tgt::Product | Tgt::Create { .. })
+        && !matches!(row.target, Tgt::AnyGrant | Tgt::List { .. } | Tgt::Product)
+        && !matches!(target, Target::Create { project: None, .. })
     {
         let (o, a) = weakest(&needs, |a| w.scope.outcome(&target, a));
         if o != Outcome::Allow {
             ctx.audit(Some(row), Some(a), describe(&target), "deny", None, StatusCode::FORBIDDEN);
-            return refuse_session(&w.scope, &target, a, row.product);
+            return refuse_session(&w.scope, &target, a, row.product, named.as_deref());
         }
     }
     // "Ask for anything else": what the rules refuse asks a person instead. Operator-only routes
@@ -762,7 +776,7 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
         if outcome == Outcome::Deny && matches!(row.target, Tgt::List { .. }) {
             outcome = Outcome::Allow;
         } else if outcome == Outcome::Deny {
-            return refuse_session(&scope, &target, action, row.product);
+            return refuse_session(&scope, &target, action, row.product, named.as_deref());
         }
     }
     let resource = lent.as_ref().map(|(_, id)| id.clone()).or_else(|| describe(&target));
@@ -961,8 +975,11 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
             _ => row.product,
         };
         let (a, s, w, product) = (access.clone(), scope.clone(), within_scope, row.product);
+        // The request's own: projects' trust is read once however many it's asked about.
+        let memo = std::sync::Mutex::new(crate::TrustMemo::default());
         parts.extensions.insert(roll_auth::Reach(Arc::new(move |id: &str, act: Action| {
-            let t = Target::One(a.resource_as(true, product, kind, id));
+            let r = a.resource_with(true, product, kind, id, &mut memo.lock().unwrap_or_else(|e| e.into_inner()));
+            let t = Target::One(r);
             s.outcome(&t, act) == Outcome::Allow && w.as_ref().is_none_or(|w| w.outcome(&t, act) == Outcome::Allow)
         })));
     }
@@ -1390,12 +1407,13 @@ async fn post_process(
         let kind = kind.unwrap_or(product);
         v = tokio::task::spawn_blocking(move || {
             // Each item is its own resource: the token keeps the ones it may `action`, and sees
-            // the credentials of only the ones it may reveal.
+            // the credentials of only the ones it may reveal. Projects' trust is read once.
+            let memo = std::cell::RefCell::new(crate::TrustMemo::default());
             let resource = |item: &Value| {
                 let id = item.get(id_field).and_then(Value::as_str)?;
                 let named = prefix.as_ref().map(|p| format!("{p}/{id}"));
                 let id = named.as_deref().unwrap_or(id);
-                Some(if product == "workspace" { Resource { project: Some(id.into()), ..Resource::new("workspace", id) } } else { a.resource_as(person, product, kind, id) })
+                Some(if product == "workspace" { Resource { project: Some(id.into()), ..Resource::new("workspace", id) } } else { a.resource_with(person, product, kind, id, &mut memo.borrow_mut()) })
             };
             let may = |item: &Value, act: Action| resource(item).is_some_and(|r| s.outcome(&Target::One(r), act) == Outcome::Allow);
             if filter_list {

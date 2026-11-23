@@ -369,6 +369,7 @@ mod tests {
                     loaded_on: None,
                     wake_at: None,
                     owner: None,
+                    made_by: None,
                     restored_at: None,
                     ip_allowlist: Vec::new(),
                     cors: None,

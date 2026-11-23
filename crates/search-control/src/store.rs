@@ -93,9 +93,14 @@ pub struct SearchCluster {
     /// When a sleeping cluster's next background job is due (ms; its node wakes it then).
     #[serde(skip)]
     pub wake_at: Option<i64>,
-    /// The signed-in person (`usr_…`) whose cluster it is; `None` for the operator's and admins'.
-    /// Set on create, kept by branches, never changed.
+    /// The signed-in person (`usr_…`) whose cluster it is; `None` for the operator's and admins',
+    /// and for one made in a workspace project (the project's, through its home). Set on create,
+    /// kept by branches, never changed.
     pub owner: Option<String>,
+    /// Who made it, when it has no owner but a person made it (in a workspace project): what the
+    /// per-person caps count it toward. Never a source of trust: it reaches them nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub made_by: Option<String>,
     /// When it was last restored after a delete (Unix seconds): its point-in-time history
     /// starts again there.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -118,6 +123,13 @@ pub struct SearchCluster {
     /// reindex from remote may read; empty: none. roll's migration adds the host it reads.
     /// Branches start with their parent's.
     pub reindex_whitelist: Vec<String>,
+}
+
+impl SearchCluster {
+    /// Whose per-person caps count it: its owner, else who made it in a project.
+    pub fn counted_toward(&self) -> Option<&str> {
+        self.owner.as_deref().or(self.made_by.as_deref())
+    }
 }
 
 impl std::fmt::Debug for SearchCluster {
@@ -186,6 +198,11 @@ pub struct RemoteLink {
     /// roll made the key (revoked when the link goes); else the person gave it.
     pub minted: bool,
     pub created_at: i64,
+    /// Who linked it: `operator`, or a person (`usr_…`) whose rights it holds by: it works only
+    /// while they may still administer the target ([`crate::Control::set_link_makers`]). `None`:
+    /// linked before makers were kept, when both clusters had to have one owner.
+    #[serde(skip)]
+    pub made_by: Option<String>,
 }
 
 impl std::fmt::Debug for RemoteLink {
@@ -202,10 +219,10 @@ impl std::fmt::Debug for RemoteLink {
     }
 }
 
-const REMOTE_COLS: &str = "cluster_id, alias, target_id, key_id, credentials, minted, created_at";
+const REMOTE_COLS: &str = "cluster_id, alias, target_id, key_id, credentials, minted, created_at, made_by";
 
 fn remote_row(r: &Row) -> code_sql::Result<RemoteLink> {
-    Ok(RemoteLink { cluster_id: r.get(0)?, alias: r.get(1)?, target_id: r.get(2)?, key_id: r.get(3)?, credentials: r.get(4)?, minted: r.get(5)?, created_at: r.get(6)? })
+    Ok(RemoteLink { cluster_id: r.get(0)?, alias: r.get(1)?, target_id: r.get(2)?, key_id: r.get(3)?, credentials: r.get(4)?, minted: r.get(5)?, created_at: r.get(6)?, made_by: r.get(7)? })
 }
 
 /// One entry of a cluster's IP allowlist.
@@ -337,6 +354,10 @@ pub enum Recorded {
 /// The clusters a person owns, as [`Store::list_owned`] lists them.
 const OWNED: &str = "deleting = 0 AND deleted_at IS NULL AND owner = ?1";
 
+/// The live clusters a person's caps count: the ones they own, and the ones they made in a
+/// workspace project (no owner).
+const COUNTED: &str = "deleting = 0 AND deleted_at IS NULL AND COALESCE(owner, made_by) = ?1";
+
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS search_clusters (
   id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, region TEXT NOT NULL, flavor TEXT NOT NULL,
@@ -375,10 +396,10 @@ CREATE INDEX IF NOT EXISTS search_suggestions_due ON search_suggestions (due_at)
 "#;
 
 const COLS: &str = "id, name, region, flavor, password, idle_timeout_s, max_in_flight, max_body_mb, destructive_requires_name, \
-                    parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, ip_allowlist, cors, browser_per_minute, inherit_pending, reindex_whitelist";
+                    parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, ip_allowlist, cors, browser_per_minute, inherit_pending, reindex_whitelist, made_by";
 /// What lookups read: [`COLS`] and where the cluster is loaded.
 const READ_COLS: &str = "id, name, region, flavor, password, idle_timeout_s, max_in_flight, max_body_mb, destructive_requires_name, \
-                         parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, loaded_on, own_bytes, wake_at, restored_at, ip_allowlist, cors, browser_per_minute, inherit_pending, reindex_whitelist";
+                         parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, loaded_on, own_bytes, wake_at, restored_at, ip_allowlist, cors, browser_per_minute, inherit_pending, reindex_whitelist, made_by";
 /// What deleted clusters' reads add to [`READ_COLS`].
 const DELETED_COLS: &str = "deleted_name, deleted_at, purge_at, stored_as, name";
 
@@ -415,16 +436,17 @@ fn row(r: &Row) -> code_sql::Result<SearchCluster> {
         inherit_pending: r.get(24)?,
         // Unreadable, nothing is whitelisted (reindex from remote refuses every host).
         reindex_whitelist: serde_json::from_str(&r.get::<_, String>(25)?).unwrap_or_default(),
+        made_by: r.get(26)?,
     })
 }
 
 fn deleted_row(r: &Row) -> code_sql::Result<DeletedCluster> {
     let mut c = row(r)?;
-    // [`DELETED_COLS`] follow [`READ_COLS`]' 26 (0-25).
-    c.name = r.get(26)?;
+    // [`DELETED_COLS`] follow [`READ_COLS`]' 27 (0-26).
+    c.name = r.get(27)?;
     c.loaded_on = None;
     c.wake_at = None;
-    Ok(DeletedCluster { cluster: c, deleted_at: r.get(27)?, purge_at: r.get(28)?, stored_as: r.get(29)?, reserved: r.get(30)? })
+    Ok(DeletedCluster { cluster: c, deleted_at: r.get(28)?, purge_at: r.get(29)?, stored_as: r.get(30)?, reserved: r.get(31)? })
 }
 
 /// What the catalog keeps of an index's query suggestions (`crate::suggestions`): its settings
@@ -548,6 +570,9 @@ impl Store {
         // Clusters made before it whitelist no remote, as Elasticsearch's default.
         db.add_column("search_clusters", "reindex_whitelist", "TEXT NOT NULL DEFAULT '[]'")?;
         db.ensure_schema("CREATE INDEX IF NOT EXISTS search_clusters_owner ON search_clusters (owner, created_at)")?;
+        // Who made a cluster in a workspace project (no owner), for their caps.
+        db.add_column("search_clusters", "made_by", "TEXT")?;
+        db.ensure_schema("CREATE INDEX IF NOT EXISTS search_clusters_made_by ON search_clusters (made_by) WHERE made_by IS NOT NULL")?;
         // Deleted clusters kept for restoring.
         db.add_column("search_clusters", "deleted_at", "INTEGER")?;
         db.add_column("search_clusters", "purge_at", "INTEGER")?;
@@ -564,6 +589,8 @@ impl Store {
         db.ensure_schema(
             "CREATE TABLE IF NOT EXISTS search_remotes (cluster_id TEXT NOT NULL, alias TEXT NOT NULL, target_id TEXT NOT NULL, key_id TEXT NOT NULL, credentials TEXT NOT NULL, minted INTEGER NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (cluster_id, alias))",
         )?;
+        // Who linked a remote (links made before hold only between clusters of one owner).
+        db.add_column("search_remotes", "made_by", "TEXT")?;
         // Catalogs written before `code-sql` lack nothing but may lack the index on parents
         // (created above); their extra columns (`seq`) and tables (`search_tombstones`) are unused.
         Ok(Self { db, sealer: OnceLock::new() })
@@ -622,13 +649,13 @@ impl Store {
     pub async fn insert(&self, c: &SearchCluster, caps: Caps) -> anyhow::Result<Inserted> {
         let password = self.stored_password(c);
         let r = self.db.write(|x| {
-            if let Some(owner) = &c.owner
+            if let Some(owner) = c.counted_toward()
                 && let Some(over) = over_caps(x, owner, c.idle_timeout_s, caps)?
             {
                 return Ok(Inserted::Over(over));
             }
             x.execute(
-                &format!("INSERT INTO search_clusters ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)"),
+                &format!("INSERT INTO search_clusters ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)"),
                 params![
                     c.id,
                     c.name,
@@ -651,7 +678,8 @@ impl Store {
                     cors_json(&c.cors),
                     c.browser_per_minute,
                     c.inherit_pending,
-                    whitelist_json(&c.reindex_whitelist)
+                    whitelist_json(&c.reindex_whitelist),
+                    c.made_by
                 ],
             )
             .map(|_| Inserted::Yes)
@@ -674,7 +702,7 @@ impl Store {
     pub async fn update(&self, c: &SearchCluster, caps: Caps) -> anyhow::Result<Result<(), Over>> {
         let password = self.stored_password(c);
         Ok(self.db.write(|x| {
-            if let Some(owner) = &c.owner
+            if let Some(owner) = c.counted_toward()
                 && let Some(over) = over_always_on(x, owner, Some(&c.id), c.idle_timeout_s, caps)?
             {
                 return Ok(Err(over));
@@ -907,7 +935,7 @@ impl Store {
     pub async fn finish_restore(&self, id: &str, claim: &str, at: i64, caps: Caps) -> anyhow::Result<Result<bool, Over>> {
         Ok(self.db.write(|x| {
             let row: Option<(Option<String>, i64)> = x
-                .query_row("SELECT owner, idle_timeout_s FROM search_clusters WHERE id = ?1 AND claim = ?2 AND deleted_at IS NOT NULL", params![id, claim], |r| {
+                .query_row("SELECT COALESCE(owner, made_by), idle_timeout_s FROM search_clusters WHERE id = ?1 AND claim = ?2 AND deleted_at IS NOT NULL", params![id, claim], |r| {
                     Ok((r.get(0)?, r.get(1)?))
                 })
                 .optional()?;
@@ -1017,9 +1045,9 @@ impl Store {
         Ok(self.db.write(|x| {
             let old = x.query_row(&format!("SELECT {REMOTE_COLS} FROM search_remotes WHERE cluster_id = ?1 AND alias = ?2"), params![r.cluster_id, r.alias], remote_row).optional()?;
             x.execute(
-                "INSERT INTO search_remotes (cluster_id, alias, target_id, key_id, credentials, minted, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
-                 ON CONFLICT (cluster_id, alias) DO UPDATE SET target_id = excluded.target_id, key_id = excluded.key_id, credentials = excluded.credentials, minted = excluded.minted, created_at = excluded.created_at",
-                params![r.cluster_id, r.alias, r.target_id, r.key_id, r.credentials, r.minted, r.created_at],
+                "INSERT INTO search_remotes (cluster_id, alias, target_id, key_id, credentials, minted, created_at, made_by) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+                 ON CONFLICT (cluster_id, alias) DO UPDATE SET target_id = excluded.target_id, key_id = excluded.key_id, credentials = excluded.credentials, minted = excluded.minted, created_at = excluded.created_at, made_by = excluded.made_by",
+                params![r.cluster_id, r.alias, r.target_id, r.key_id, r.credentials, r.minted, r.created_at, r.made_by],
             )?;
             Ok::<_, code_sql::Error>(old)
         })?)
@@ -1351,7 +1379,7 @@ impl Store {
 /// Whether one more cluster of `owner` (with `idle_timeout_s`) is past one of `caps`.
 fn over_caps(x: &code_sql::Conn<'_>, owner: &str, idle_timeout_s: i64, caps: Caps) -> code_sql::Result<Option<Over>> {
     if caps.clusters > 0 {
-        let count: i64 = x.query_row(&format!("SELECT COUNT(*) FROM search_clusters WHERE {OWNED}"), params![owner], |r| r.get(0))?;
+        let count: i64 = x.query_row(&format!("SELECT COUNT(*) FROM search_clusters WHERE {COUNTED}"), params![owner], |r| r.get(0))?;
         if count >= caps.clusters {
             return Ok(Some(Over::Clusters { cap: caps.clusters, count }));
         }
@@ -1369,7 +1397,7 @@ fn over_always_on(x: &code_sql::Conn<'_>, owner: &str, id: Option<&str>, idle_ti
             return Ok(None);
         }
     }
-    let count: i64 = x.query_row(&format!("SELECT COUNT(*) FROM search_clusters WHERE {OWNED} AND idle_timeout_s = 0"), params![owner], |r| r.get(0))?;
+    let count: i64 = x.query_row(&format!("SELECT COUNT(*) FROM search_clusters WHERE {COUNTED} AND idle_timeout_s = 0"), params![owner], |r| r.get(0))?;
     Ok((count >= caps.always_on).then_some(Over::AlwaysOn { cap: caps.always_on, count }))
 }
 
@@ -1411,6 +1439,7 @@ mod tests {
             loaded_on: None,
             wake_at: None,
             owner: None,
+            made_by: None,
             restored_at: None,
             ip_allowlist: Vec::new(),
             cors: None,

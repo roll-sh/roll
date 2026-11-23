@@ -2858,8 +2858,9 @@ async fn a_members_role_decides_what_they_do_to_a_preview() {
 }
 
 /// Search is a member product (docs/members.md, v1.1): a member's role in a cluster's project
-/// decides what they do to it (a viewer reads; a developer also writes and makes data keys; an
-/// admin manages: admin keys, the admin password, deletes), a stranger doesn't see it, a person's
+/// decides what they do to it (a viewer reads; a developer also writes and makes read keys, never a
+/// data key, which deletes indices; an admin manages: data and admin keys, the admin password,
+/// deletes), a stranger doesn't see it, a person's
 /// own cluster stays theirs, and a stranger's cluster dropped on the project's canvas gives its
 /// admin nothing until the project is its home.
 #[tokio::test]
@@ -2891,6 +2892,7 @@ async fn a_members_role_decides_what_they_do_to_a_search_cluster() {
         [
             status(who, Method::GET, c.clone(), None).await,
             status(who, Method::POST, format!("{c}/branches"), Some(json!({ "name": "b" }))).await,
+            status(who, Method::POST, format!("{c}/keys"), Some(json!({ "name": "k", "access": "read" }))).await,
             status(who, Method::POST, format!("{c}/keys"), Some(json!({ "name": "k", "access": "data" }))).await,
             status(who, Method::POST, format!("{c}/keys"), Some(json!({ "name": "k" }))).await,
             status(who, Method::POST, format!("{c}/password"), None).await,
@@ -2898,22 +2900,22 @@ async fn a_members_role_decides_what_they_do_to_a_search_cluster() {
         ]
     };
     let (ok, no, gone) = (StatusCode::OK, StatusCode::FORBIDDEN, StatusCode::NOT_FOUND);
-    // (reads, branches, a data key, an admin key, a new admin password, deletes)
+    // (reads, branches, a read key, a data key, an admin key, a new admin password, deletes)
     for (who, want) in [
-        ("usr_bob", [ok, no, no, no, no, no]),
-        ("usr_cy", [ok, ok, ok, no, no, no]),
-        ("usr_dee", [ok, ok, ok, ok, ok, ok]),
-        ("usr_ada", [ok, ok, ok, ok, ok, ok]),
-        ("usr_eve", [gone; 6]),
+        ("usr_bob", [ok, no, no, no, no, no, no]),
+        ("usr_cy", [ok, ok, ok, no, no, no, no]),
+        ("usr_dee", [ok; 7]),
+        ("usr_ada", [ok; 7]),
+        ("usr_eve", [gone; 7]),
     ] {
         assert_eq!(matrix(who, "cl_home").await, want, "{who} on the project's own cluster");
     }
     // A stranger's cluster on the canvas proves nothing: not even the project's owner sees it.
     for who in ["usr_ada", "usr_dee", "usr_bob"] {
-        assert_eq!(matrix(who, "cl_foreign").await, [gone; 6], "{who} on a cluster dropped on the canvas");
+        assert_eq!(matrix(who, "cl_foreign").await, [gone; 7], "{who} on a cluster dropped on the canvas");
     }
     // His own cluster is all his, whatever his role in the project.
-    assert_eq!(matrix("usr_bob", "cl_bobs").await, [ok; 6]);
+    assert_eq!(matrix("usr_bob", "cl_bobs").await, [ok; 7]);
     // Lists keep what each person reaches: the project's own cluster, and their own.
     let listed = |who: &'static str| {
         let d = &d;
@@ -2927,7 +2929,7 @@ async fn a_members_role_decides_what_they_do_to_a_search_cluster() {
     assert_eq!(pw["reveal"], true, "{pw}");
     // Made a home of the project, the dropped cluster counts.
     d.workspace.set_home(&roll_workspace::Actor::operator(), &id, search, "cl_foreign", false).unwrap();
-    assert_eq!(matrix("usr_bob", "cl_foreign").await, [ok, no, no, no, no, no]);
+    assert_eq!(matrix("usr_bob", "cl_foreign").await, [ok, no, no, no, no, no, no]);
     // A create in the project is the role's (admin and owner); one naming no project is a person's own.
     let create = |who: &'static str, project: Option<&str>| {
         let (d, cookie) = (&d, format!("roll_session=rls_{who}"));

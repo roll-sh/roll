@@ -662,6 +662,17 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     // members who could branch it reach the copy, and no other project gains it.
     if let Some(s) = &search {
         s.control.on_branch(search::home_branches(workspace.clone()));
+        // A remote link works only while whoever linked it may still administer its target, as
+        // roll-access decides it now (a removed or demoted member's links stop at once).
+        let a = access.clone();
+        s.control.set_link_makers(std::sync::Arc::new(move |maker, target| a.person_reaches(maker, "search", "cluster", target, roll_auth::scope::Action::Admin)));
+        // A purged cluster leaves every canvas and its home (its id is never given out again).
+        let ws = workspace.clone();
+        s.control.on_purged(Box::new(move |id| {
+            if let Err(e) = ws.forget_resource(roll_workspace::Kind::Search, id) {
+                tracing::warn!(cluster = id, error = %e, "taking a purged search cluster off its projects failed");
+            }
+        }));
     }
     // Members' handles and addresses, and invite links to the dashboard (docs/members.md).
     workspace.set_people(std::sync::Arc::new(people.clone()));

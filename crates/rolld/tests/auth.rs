@@ -363,6 +363,8 @@ async fn every_control_plane_route_needs_the_operator_token() {
     let names = |v: &serde_json::Value| v.as_array().map(|a| a.iter().filter_map(|c| c["name"].as_str().map(String::from)).collect::<Vec<_>>()).unwrap_or_default();
     let (s, homed) = ada_does(reqwest::Method::POST, "/v1/search/clusters".into(), Some(serde_json::json!({ "name": "hers-search" })), Some(hers.clone())).await;
     assert_eq!(s, 200, "{homed}");
+    // Made in the project, it's the project's (its home), never hers: her caps count it.
+    assert!(homed["owner"].is_null() && homed["made_by"].as_str() == Some(ada.as_str()), "{homed}");
     let (s, own) = ada_does(reqwest::Method::POST, "/v1/search/clusters".into(), Some(serde_json::json!({ "name": "adas-own" })), None).await;
     assert_eq!((s, own["owner"].as_str()), (200, Some(ada.as_str())), "{own}");
     let dropped: serde_json::Value = http.post(format!("{api}/v1/search/clusters")).header("authorization", &operator).json(&serde_json::json!({ "name": "ops-dropped" })).send().await.unwrap().json().await.unwrap();
@@ -386,6 +388,40 @@ async fn every_control_plane_route_needs_the_operator_token() {
         assert_eq!(bob_does(reqwest::Method::GET, format!("/v1/search/clusters/{theirs}")).await.0, 404, "{theirs}");
     }
     assert_eq!(ada_does(reqwest::Method::GET, "/v1/search/clusters/ops-dropped".into(), None, None).await.0, 404, "dropped on her canvas, never hers");
+    // Her token, whatever its rules say (`*`), makes nothing in a project she isn't in: a create
+    // named there is held within her session, and the project doesn't exist for her (404, never
+    // a 403 that says it does). In her own project the same token gets past the gate.
+    let (s, wide) = ada_does(
+        reqwest::Method::POST,
+        "/v1/access/tokens".into(),
+        Some(serde_json::json!({ "name": "wide", "rules": [
+            { "product": "search", "resources": "*", "actions": { "read": "allow", "write": "allow" } },
+            { "product": "previews", "resources": "*", "actions": { "read": "allow", "write": "allow" } },
+        ] })),
+        None,
+    )
+    .await;
+    assert_eq!(s, 201, "{wide}");
+    let wide = wide["token"].as_str().unwrap().to_string();
+    let create_in = |path: &'static str, project: String, body: serde_json::Value| {
+        let (http, api, wide) = (http.clone(), api.clone(), wide.clone());
+        async move {
+            let r = http.post(format!("{api}{path}")).bearer_auth(wide).header("x-roll-project", project).json(&body).send().await.unwrap();
+            (r.status().as_u16(), r.json::<serde_json::Value>().await.unwrap_or_default())
+        }
+    };
+    let cases: [(&'static str, fn(&str) -> serde_json::Value); 2] = [
+        ("/v1/search/clusters", |p| serde_json::json!({ "name": format!("wide-{}", &p[p.len() - 4..]) })),
+        ("/v1/previews", |p| serde_json::json!({ "project": p, "repo": "ada/none", "branch": "main" })),
+    ];
+    for (path, body) in cases {
+        let (s, v) = create_in(path, theirs.clone(), body(&theirs)).await;
+        assert_eq!((s, v["error"].as_str()), (404, Some(&*format!("no project {theirs}"))), "{path} in a project she isn't in");
+        // In hers the gate lets it through (what the product answers next is its own).
+        let (s, v) = create_in(path, hers.clone(), body(&hers)).await;
+        let refused = v["error"].as_str().is_some_and(|e| e == format!("no project {hers}") || e.starts_with("your role"));
+        assert!(!refused, "{path} in her own project: {s} {v}");
+    }
     let off = http.patch(format!("{api}/v1/accounts/users/{ada}")).header("authorization", &operator).json(&serde_json::json!({ "disabled": true })).send().await.unwrap();
     assert_eq!(off.status(), 200);
     assert_ne!(as_token(token).await, "owner", "a disabled account's roll code token still works");
