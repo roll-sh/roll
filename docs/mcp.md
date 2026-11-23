@@ -153,16 +153,20 @@ for it, and it goes with toolsets (`?toolsets=postgres&readonly=1`).
 or part of it ("checkout-db"), part of its id, or a roll dashboard link a person pasted, as Neon's
 `search` and Linear's pasted URLs do. It has no route of its own: a name is looked up in each
 product's list tool the connection has (projects, services, repos, Postgres, Redis, NoSQL, search
-clusters, buckets, streams, queues' virtual hosts, functions, previews), at most six at once,
+clusters, buckets, streams, queues' virtual hosts, functions, task queues and topics, previews,
+tokens), at most six at once,
 through the gate as the caller. Those lists are quiet: one that would ask a person (the token's
 `ask` rules, or the policy's `agents_ask`) is skipped, not put to them, and the audit log has each
 as `roll_find:<tool>`. The operator's inspector sees `roll_find`'s own call and answer, and hidden
 text in names is made visible as in every answer. `?tools=` and `exclude_tools=` pick or drop it. Matches come exact first, then by
 prefix, then by part, at most 25. Each says its kind, id, name and `read: {tool, arguments}`, the
-ordinary tool that goes on from it. A list that refused or failed is in `skipped`. A link
-(`/dashboard/apps/<id>`, `/dashboard/code/<owner>/<repo>[/changes/<n>]`, `/dashboard/projects/<id>`,
-Redis, NoSQL, search and storage pages) is read at once with that tool, as the agent would call it,
-approvals included. Any origin works (roll cloud, a local dashboard): only the path is read.
+ordinary tool that goes on from it. A list that refused or failed is in `skipped`. A link is
+read at once with the tool that shows its page, as the agent would call it, approvals included:
+a project, a service, a repo (its changes) or one change (`code_get_change` on `owner/repo#N`),
+a Redis, NoSQL or search database, a bucket, a token (`/dashboard/access/tokens/<id>`, or its
+audit's `?grant=`), an approval (`/dashboard/access/approvals?id=`, read without waiting), a queue
+or a virtual host's queues. Any origin works (roll cloud, a local dashboard): only the path and the
+query are read.
 
 ### Reaching outside roll
 
@@ -1419,11 +1423,11 @@ gaps are in how results read and how roll is distributed):
    again (`_meta["roll/pending"]`, from each tool's `until`), and the view follows it through the
    host until it settles (Vercel's deployment card, with no app-only tool). Next for it: a rollback
    button on a deploy ("More MCP Apps views" below), once a host that renders views is confirmed.
-6. **Find any roll resource by name or dashboard URL (#821).** `roll_find`: each product's list
+6. **Find any roll resource by name or dashboard URL (#821, and this PR).** `roll_find`: each product's list
    tool the connection has, quiet and through the gate, matched by name and id, each match naming
-   the read that goes on from it; a pasted dashboard link read at once. Next for it: pages whose
-   resource is in the query string (approvals, Postgres, streams), once those pages say it in
-   their path.
+   the read that goes on from it; a pasted dashboard link read at once (this PR: query-string
+   pages, a change's own page, queues, tokens, approvals; tokens and tasks' queues and topics by
+   name). Next for it: Postgres and streams pages, once their links name a resource.
 7. **The files extension** (`io.modelcontextprotocol/files`, experimental, 2026-11-10): uploads to
    a presigned URL and downloads that never pass through the model's context; a prototype once a
    client implements it.
