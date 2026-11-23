@@ -567,11 +567,13 @@ impl Crawl<'_, '_> {
         let site = hosts::site_of(link);
         while let Some(at) = hosts::turn(&site, self.floor) {
             if Instant::now() >= self.deadline {
+                self.limit_reached.get_or_insert("max_duration");
                 return Ok(false);
             }
             self.sleep_until(at).await?;
         }
         if Instant::now() >= self.deadline {
+            self.limit_reached.get_or_insert("max_duration");
             return Ok(false);
         }
         self.next_at.insert(origin, Instant::now() + gap);
