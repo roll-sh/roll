@@ -151,6 +151,12 @@ impl std::fmt::Debug for RemoteNode {
 impl RemoteNode {
     /// The node's limits from its settings.
     pub fn from_settings(settings: &[(String, String)]) -> Arc<RemoteNode> {
+        RemoteNode::from_settings_under(settings, None)
+    }
+
+    /// [`RemoteNode::from_settings`] with its budgets children of the node's budget for what
+    /// requests hold (`parent`, [`crate::breaker`]): reindex from remote counts against it too.
+    pub fn from_settings_under(settings: &[(String, String)], parent: Option<Arc<MemoryBudget>>) -> Arc<RemoteNode> {
         let get = |k: &str| settings.iter().rev().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
         let count = |k: &str, d: usize| get(k).and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(d);
         let memory = get(MEMORY).and_then(|v| crate::units::ByteSize::parse(v, MEMORY).ok()).map_or(DEFAULT_MEMORY, |b| b.0.max(1) as u64);
@@ -162,8 +168,8 @@ impl RemoteNode {
             running: AtomicUsize::new(0),
             max_per_node: count(MAX_PER_NODE, 4),
             max_per_cluster: count(MAX_PER_CLUSTER, 2),
-            budget: MemoryBudget::new((memory - control).max(1)),
-            control_budget: MemoryBudget::new(control),
+            budget: MemoryBudget::with_parent((memory - control).max(1), parent.clone()),
+            control_budget: MemoryBudget::with_parent(control, parent),
             control: Default::default(),
             max_duration,
         })
