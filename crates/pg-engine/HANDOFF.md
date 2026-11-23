@@ -14995,6 +14995,87 @@ failed: all passed.
 Not this round's: roll's `VACUUM (VERBOSE)` sends none of PostgreSQL's INFO lines (agent 205's
 note, still open).
 
+## Short write transactions, round 16: a small table's UPDATE scan leaves out the rows its filter rejects (agent 305)
+
+BENCH.md "A scan's workers: one rule for small reads; a small table's UPDATE scan" has the counts.
+`UPDATE pgbench_tellers SET tbalance = tbalance + $1 WHERE tid = $2` is a sequential scan, in
+PostgreSQL's plan and ours, until the table's statistics (autoanalyze, or its pages growing) move it to
+the index scan: the first ~40 s of a TPC-B run after a load (round 15). It cost ~700 k user instructions
+a statement for 320 rows. An LBR profile (u1, the scan forced with `SET LOCAL enable_indexscan = off,
+enable_bitmapscan = off`): `next_heap_ordered` 43% inclusive (the held pass: each row's TID, its key
+copied, its value's `Bytes` cloned, all 320 sorted by TID, then returned one by one through the merge),
+`emit` 20% (the filter over the stored values rejecting 319 of them there), the sorts 9%, `Bytes`
+clone / drop 8%.
+
+**What changed** (one commit, `exec/scan.rs`). The held pass of `next_heap_ordered` (a small table's
+rows read once and returned from there in TID order, agent 295's) asks the filter's stored-value
+comparisons (`StoredCmps`, what `emit` asks first) of each row as it reads it: a row they reject is
+not held, sorted or returned; it is counted as `emit` counts a rejected row (`count_row`, EXPLAIN
+ANALYZE's rows removed) once the held rows are what the scan returns (when the table turns out too big
+to hold, the pass's rows are read again and `emit` counts them, as before). Only where `emit` decides
+the filter that way before anything else (`early_filter`: a filter, a sequential scan, no predicate
+locks, no index-only columns, not implied by a key range). The rows returned, their order, the pages
+pruned before each one (a page is pruned when a later row's TID is returned, or at the end: as the
+rows between were rejected before, the same pages are pruned before the same rows) and the counts are
+as before.
+
+Measured (plain dist, lane A at 6.1-7.1 foreign cores, u1 -> t1): the forced scan's transaction 858 k ->
+542 k and 856 k -> 544 k user instructions (two pairs; its other statements ~192 k), cycles -28% and
+-32%; `ut.sql` right after `pgbench -i -s 32` (2,000 statements, all of them the sequential scan) 696 k
+-> 379 k user instructions a statement (-46%), cycles -38%, tps 3,639 -> 5,363 (one pair). Not gated
+on PGO (no inlining or function-boundary aim). What is left of the scan (t1's profile, 54% of the
+forced transaction): the hot range's batch (`Hot::scan`, `RowBatch::push` / `get`, ~18%), the stored
+comparisons over 320 rows (10%), the pass itself (8%), each row's TID (4%).
+
+Existing tests cover it (`heap_order_scan`: a small table's scans against `ORDER BY ctid`, prepared
+UPDATE ... RETURNING and SELECT filtering on `$1` under `force_generic_plan` against the literal forms).
+
+Verification: `tools/quick-check.sh` with `QC_CHECKED=1` and `QC_TESTS="parallel_scan big_tables heap_order_scan"` on
+`937ce674e` (this change and the rule's before it, on `3b57f35a5`): 29 test binaries, clippy 16 warnings, none new in a changed
+file, 438 tests in 25 binaries (parallel_scan with the new cases, big_tables, heap_order_scan, golden, wire, the storage
+and crash binaries among them), the same 438 built `--profile verify-checked`, `crash_random` seeds 1-3 x 2 rounds and
+`power_cut_at_every_point`, regress 51,148 / 51,150 (0 newly differing; no planner change: EXPLAIN and TPC-H's plans
+are untouched), isolation 1,647 / 1,648, pg_dump_tap 14,609.
+
+**Not landed: the L0 merge (round 15's `cand/a299-2`, `3f0f6d320`; patch in
+`~/.cache/a305/patches/l0-merge-3f0f6d320.patch`).** Its reads were gated again, sampled across the
+whole write cycle without aliasing (`cycle.sh`: 34 rounds of 7,040 TPC-B transactions at 32 clients,
+after each 2 s of each read at 8 clients; 299's 40k-transaction rounds were about one compaction cycle
+of the base, so its reads met the base's L0 at nearly the same stage every round), each sample labelled
+with L0's file count at its start (rebuilt from the store's flush / merge / compaction log lines). One
+pair, plain dist, lane A at 5.2 foreign cores, t1 -> t1 + the merge (26 flushes each; 7 compactions
+-> 9 L0 merges + 3 compactions):
+
+| read | t1 | + merge | by L0 files, t1 | by L0 files, + merge |
+|---|---|---|---|---|
+| 100-row BETWEEN | 342,401 | 352,439 (+2.9%) | 0: 332.5 k, 1: 337.9 k, 2: 344.8 k, 3: 351.7 k | 0: 332.9 k, 1: 347.8 k, 2: 359.7 k, 3: 371.2 k |
+| 1,000-row BETWEEN | 2,349,138 | 2,450,050 (+4.3%) | 0: 2,285 k, 1: 2,320 k, 2: 2,368 k, 3: 2,408 k | 0: 2,281 k, 1: 2,431 k, 2: 2,486 k, 3: 2,687 k |
+| select-only | 46,294 | 46,381 (level) | | |
+
+The cost isn't the merged file as one more source: the merge leaves fewer L0 files on average (1.44
+against 1.59 over the samples). It follows L0's entries: with the merge one file's cost grows through
+the cycle (the 100-row read 337 k after the first merge to 365-371 k before the L1 compaction, 330 k
+right after it), about 6 k user instructions for each L0 entry inside the range (an estimate: a
+1,000-row read meets ~25 of a merged file's ~100 k accounts entries, counted from its bytes). An LBR profile of the 1,000-row read with the merged
+file present (2.43 M a read): the rows are fetched by a merging scan of the table's key range
+(`fetch_dense_ref` -> `TxnScan::fill_batch` -> `Scan::fill_batch_with`, 37%), and (from the code, not
+separated in the profile) each interleaved L0 entry ends the L1 source's run of its block (`run_into`), so the rows after it go through `position`
+/ `push_head` / `RowBatch::push_in` again (`Block::read` 10%, `push_in` 4.5%, all inlined into
+`fill_batch_with`: the profile can't split L0's work from L1's). So 299's three suggested ways (block
+bounds so a range missing the file skips it, no per-entry cost for a source with no key in range, the
+merge replacing rather than adding a source) don't reach it: the ranges do meet the file, and the cost
+is per entry met. What would: a merging scan whose L1 run continues past a newer version of one of its
+keys (the superseded entry skipped in the run, the newer one taken from L0 in place) rather than
+restarting at each, measured on t1 first (it lowers every read with L0 entries, merged or not), then
+the merge on top. Not built.
+
+What is left, by size: the L0 merge's read cost (above; the write side stands as round 15 measured it:
+-10.6 to -14.9% user instructions a TPC-B transaction); the flush thread's ~85 k a transaction
+(brief item 4, none built: the bloom bits a compaction ORs into an adopted filter for keys that came from
+that file, `SstWriter::copied_bloom`, ~1.5% of the flush thread; clean blocks derived when a file is
+opened, so the first compaction after a restart copies them; VACUUM's rewrite copying blocks); the
+tellers scan's remaining ~350 k (the hot range's batch, above).
+
 ## A scan's workers: one rule for small reads, a LIMIT's and an EXISTS's rows (agent 305)
 
 Agents 299 (`cand/a299-r`, landed: "Range reads of a big table" above) and 301 (`cand/a301`, commit

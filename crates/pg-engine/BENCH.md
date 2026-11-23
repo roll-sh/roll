@@ -2052,6 +2052,18 @@ The 100-row read's +0.5% was the settings looked up by name per scan in u1; the 
 from the session's derived settings (not measured again: a hash lookup and a parse of the setting
 per scan, ~2 k instructions, are gone).
 
+`UPDATE pgbench_tellers ... WHERE tid = $1` while its plan is a sequential scan (u1 -> t1, `fixed.sh`, 8
+clients, the server cgroup's counts over the whole run):
+
+| run | u1 iu / cu a transaction | t1 iu / cu | tps |
+|---|---|---|---|
+| forced scan (`tseq.sql`: BEGIN, two SET LOCAL, the UPDATE, END), 4,000, pair 1 | 858,090 / 1,203,430 | 542,028 / 872,374 | 4,505 -> 5,769 |
+| the same, pair 2 | 856,363 / 1,207,866 | 543,570 / 827,182 | 4,376 -> 6,033 |
+| `ut.sql` right after the load, 2,000 (its plan a sequential scan throughout), 1 pair | 696,304 / 920,570 | 378,588 / 566,808 | 3,639 -> 5,363 |
+
+(The forced script's BEGIN, SET LOCAL x2 and END cost ~192 k user instructions without the UPDATE:
+`tseq0.sql`, one run.)
+
 ## Range reads of a big table: a short key range serial (2026-11-23, agent 299)
 
 Lane A, harness `~/.cache/a299/bench` (`mixed.sh`: a fresh server, `pgbench -i -s 32`, rounds of 40k
