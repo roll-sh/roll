@@ -184,7 +184,8 @@ curl -sS -o /dev/null -H "Host: $HOSTPART" "http://127.0.0.1:${PORTS}080/" --max
 INST=""
 # The closed deployment's instance (its id's first six characters are in the name).
 CLOSED=$(echo "$E" | jq_ "d['active']['id'][len('dep_'):][:6]")
-for _ in $(seq 1 60); do INST=$(docker ps --format '{{.Names}}' | grep "^roll-apps-${SVC#svc_}-$ENV-$CLOSED-" | head -1); [ -n "$INST" ] && break; sleep 1; done
+# (Not one of its runs: a job's or a browser check's container shares the prefix, `…run<n>`.)
+for _ in $(seq 1 60); do INST=$(docker ps --format '{{.Names}}' | grep "^roll-apps-${SVC#svc_}-$ENV-$CLOSED-" | grep -v -- '-run[0-9]*$' | head -1); [ -n "$INST" ] && break; sleep 1; done
 EGRESS_APPS=$(docker exec "$INST" python3 -c '
 import socket, urllib.request
 r = []
