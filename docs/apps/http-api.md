@@ -716,7 +716,7 @@ type Plan = {
 };
 
 /** Wired on a node today: postgres (DATABASE_URL), redis (REDIS_URL, REDIS_REST_URL/TOKEN) and search. */
-type LinkKind = "postgres" | "redis" | "bucket" | "stream" | "queue" | "nosql" | "search" | "service";
+type LinkKind = "postgres" | "redis" | "bucket" | "stream" | "queue" | "nosql" | "search" | "service" | "tasks";
 type Link = { kind: LinkKind; ref: string; prefix: string; vars: string[]; indices?: string[] /* a search link's key's indices */; access?: "read" | "append" };
 // `search`: `ref` is a roll search cluster (id or name). The link makes a data-only credential of
 // its own, once (never the cluster's password): ELASTICSEARCH_URL and ELASTICSEARCH_API_KEY, or on
@@ -727,6 +727,11 @@ type Link = { kind: LinkKind; ref: string; prefix: string; vars: string[]; indic
 // `service`: `ref` is another web service of the project (its id); `URL` is
 // `http://<name>.<env>.internal:<port>` in the linking environment, `PUBLIC_URL` its public URL
 // when it has one there. The prefix defaults to its name (`API_`). A service's links go with it.
+// `tasks`: `ref` is a roll tasks tenant (`default` for rolld's own). The link makes an API key of its
+// own, once (`ROLL_TASKS_TOKEN`, kept sealed; unlinking deletes it), and each deploy reads
+// `ROLL_TASKS_URL` (the tenant's API base, `/v1/tasks` under it) and the tenant's Standard Webhooks
+// signing keys (`ROLL_TASKS_SIGNING_KEY`, and `ROLL_TASKS_NEXT_SIGNING_KEY` for a rotation), the
+// names roll previews' tenant branch sets. A scoped token needs `reveal` on roll tasks.
 
 type Variables = { vars: { name: string; masked: string; source: "service" | "secret" | "link" | "roll" | "reference"; reference?: string /* a reference variable's template, `${{ api.KEY }}` */; sealed?: true /* never shown again: masked "••••••••" whatever its length */; file?: string /* kept as a file at this path in its instances */; runtime_only?: true /* only its instances get it, never a build's steps */ }[] };
 // A value set with `${{ VAR }}` / `${{ service.VAR }}` is a reference, filled in at each deploy;

@@ -9171,9 +9171,18 @@ async fn a_closed_environment_uses_its_keys_without_seeing_them() {
     let (was, minted_before) = (e["active"]["id"].clone(), minted());
     *vault.1.lock() = "FAKECA3".into();
     w.apps.cron_pass(t + 11 * 60_000).await;
-    let tpl = w.apps.live(&id, "staging").template().unwrap();
-    let bundle = tpl.spec.files.iter().find(|(p, _)| p == apps_control::deploy::INTERCEPT_CA).map(|(_, c)| c.clone()).unwrap_or_default();
-    assert!(bundle.contains("FAKECA3") && !bundle.contains("FAKECA2"), "{bundle}");
+    // The template is made again as the pass's renewal finishes: read until it has.
+    let mut bundle = String::new();
+    for _ in 0..250 {
+        let tpl = w.apps.live(&id, "staging").template().unwrap();
+        bundle = tpl.spec.files.iter().find(|(p, _)| p == apps_control::deploy::INTERCEPT_CA).map(|(_, c)| c.clone()).unwrap_or_default();
+        if bundle.contains("FAKECA3") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let tail: String = bundle.lines().rev().take(4).collect::<Vec<_>>().join(" | ");
+    assert!(bundle.contains("FAKECA3") && !bundle.contains("FAKECA2"), "its last lines: {tail}");
     assert_eq!((minted() > minted_before, call(&w.api, "GET", &format!("{base}/staging"), None).await.1["active"]["id"].clone()), (true, was), "a placeholder made again, no deploy");
     assert!(call(&w.api, "DELETE", &format!("{base}/staging"), None).await.0.is_success());
     assert!(vault.0.lock().contains(&format!("end {}/staging", w.project)), "{:?}", vault.0.lock());
