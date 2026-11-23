@@ -259,9 +259,14 @@ impl Apps {
             return;
         }
         let usd: Vec<f64> = costs.iter().map(|u| self.cfg.prices.cost(u)).collect();
-        let mut past = usd[1..].to_vec();
+        // The weeks it existed in only (an hour before its first counts for nothing, not $0).
+        let mut past: Vec<f64> = (1..=4).filter(|k| first.is_some_and(|f| hour - k * 168 >= f)).map(|k| usd[k as usize]).collect();
         past.sort_by(|a, b| a.total_cmp(b));
-        let usual = (past[1] + past[2]) / 2.0;
+        let usual = match past.len() {
+            0 | 1 => return,
+            n if n % 2 == 0 => (past[n / 2 - 1] + past[n / 2]) / 2.0,
+            n => past[n / 2],
+        };
         if usd[0] < SPIKE_USD || usd[0] < usual * SPIKE_TIMES {
             return;
         }

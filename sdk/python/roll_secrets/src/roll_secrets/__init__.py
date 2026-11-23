@@ -24,7 +24,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Dict, List, Optional
 
 __all__ = [
@@ -78,7 +78,9 @@ class Followed:
 class Values:
     """An environment's values. ``dynamic`` keys hold a credential that ends with its lease
     (``leases``; ``renew`` keeps it); ``linked`` keys come from a link to a resource; ``followed``
-    keys link a resource a preview branched, and aren't in ``values``."""
+    keys link a resource a preview branched, and aren't in ``values``; ``withheld`` are sensitive
+    keys left out (only roll's runtimes and syncs read them). ``digest`` is the folder's digest the
+    values were read against, when the read asked for it (a cached or delta read does)."""
 
     values: Dict[str, str]
     problems: List[Problem] = field(default_factory=list)
@@ -86,6 +88,8 @@ class Values:
     dynamic: List[str] = field(default_factory=list)
     linked: List[str] = field(default_factory=list)
     followed: List[Followed] = field(default_factory=list)
+    withheld: List[str] = field(default_factory=list)
+    digest: str = ""
 
     def __repr__(self) -> str:
         # Never a value: a logged or printed Values names its keys only.
@@ -100,7 +104,23 @@ class Values:
             dynamic=list(d.get("dynamic") or []),
             linked=list(d.get("linked") or []),
             followed=[Followed(f["name"], f["kind"], f["parent"], f["field"]) for f in d.get("followed") or []],
+            withheld=list(d.get("withheld") or []),
+            digest=d.get("digest") or "",
         )
+
+
+@dataclass
+class _Held:
+    """A folder's last answer with every key's stamp, so a read after a change asks only for what
+    changed (``…/values/delta``, docs/secrets.md "Delta reads"): what a watch keeps, and what
+    ``cache_ttl`` keeps. ``off``: the folder's claim is past what rolld takes (a 413); its reads
+    are full."""
+
+    values: Optional[Values] = None
+    digest: str = ""
+    basis: str = ""
+    stamps: Dict[str, str] = field(default_factory=dict)
+    off: bool = False
 
 
 @dataclass
@@ -163,9 +183,9 @@ class Client:
 
     def __init__(self, api: str, token: str, project: Optional[str] = None, timeout: float = 30.0, cache_ttl: float = 0.0, clock: Callable[[], float] = time.monotonic, cache_size: int = 0):
         """``cache_ttl`` (seconds) keeps ``values`` answers that long and answers from memory
-        meanwhile; after that it asks again with the digest they were read against, and an
-        unchanged folder costs a 304 that reads, issues and audits nothing. A folder holding dynamic
-        credentials is never kept (they end with their lease). ``cache_size`` caps how many
+        meanwhile; after that it asks again with the answer's digest and every key's stamp
+        (``…/values/delta``): an unchanged folder costs what a 304 does, and a changed one only its
+        changed keys. A folder holding dynamic credentials is never kept (they end with their lease). ``cache_size`` caps how many
         folders are kept (past it, the one read longest ago goes; 0: no cap). ``clock`` is for
         tests."""
         self.api = api.rstrip("/")
@@ -177,6 +197,8 @@ class Client:
         self._clock = clock
         self._cache: Dict[str, Any] = {}
         self._lock = threading.Lock()
+        # A rolld without ``…/values/delta``: reads are full (conditional, with cache_ttl).
+        self._no_delta = False
         # Renews the token of a client a workload identity's login made.
         self._login: Optional[_Relogin] = None
 
@@ -232,25 +254,107 @@ class Client:
         skips ``cache_ttl`` (a watch that saw the digest move reads anew). ``dynamic=False`` issues
         no dynamic credential (for a reader that can't renew a lease): those keys are left out and
         named in ``Values.dynamic``, and such an answer can be kept."""
-        url = self._env(env) + "/values" + _q(path)
+        e, q = self._env(env), _q(path)
         if not dynamic:
-            url += ("&" if "?" in url else "?") + "dynamic=false"
+            q += ("&" if q else "?") + "dynamic=false"
+        url = e + "/values" + q
         if self.cache_ttl <= 0 or fresh:
             v = Values._of(self._call("GET", url))
             if fresh:
                 with self._lock:
                     self._cache.pop(url, None)
             return v
-        return copy.deepcopy(self._cached(url, keep_dynamic=not dynamic))
+        return copy.deepcopy(self._cached(e, q, keep_dynamic=not dynamic))
 
-    def _cached(self, url: str, keep_dynamic: bool = False) -> Values:
-        """Kept for ``cache_ttl``, then revalidated with the digest (a 304 keeps them).
+    def _cached(self, e: str, q: str, keep_dynamic: bool = False) -> Values:
+        """Kept for ``cache_ttl``, then asks for what changed since the kept answer
+        (``…/values/delta``; the full set when nothing is kept). Where that fails, a conditional
+        read: a 304 keeps the values. ``e`` is the environment's route, ``q`` the query;
         ``keep_dynamic``: read with ``dynamic=false``, so naming dynamic keys holds no credential."""
+        url = e + "/values" + q
         with self._lock:
             hit = self._cache.get(url)
-        if hit and self._clock() - hit[2] < self.cache_ttl:
-            return hit[0]
-        return self._authed(lambda token: self._revalidate(url, token, hit, keep_dynamic))
+        if hit and self._clock() - hit[1] < self.cache_ttl:
+            return hit[0].values
+        held = hit[0] if hit else _Held()
+        off = held.off
+        if not off and not self._no_delta:
+            h = replace(held)
+            v = self._try_delta(e + "/values/delta" + q, h)
+            if v is not None:
+                self._keep(url, h, keep_dynamic)
+                return v
+            off = h.off
+        return self._authed(lambda token: self._revalidate(url, token, hit, keep_dynamic, off))
+
+    def _try_delta(self, url: str, h: _Held) -> Optional[Values]:
+        """``_read_delta``, or None where it fails and the caller reads in full instead: a rolld
+        without the route (404, 405) from then on, a claim past what it takes (413) for that
+        folder, anything else this once."""
+        try:
+            return self._read_delta(url, h)
+        except SecretsError as e:
+            if e.status in (404, 405):
+                self._no_delta = True
+            elif e.status == 413:
+                h.off = True
+        except Exception:  # noqa: BLE001 - any failure of the delta reads in full
+            pass
+        return None
+
+    def _read_delta(self, url: str, h: _Held) -> Values:
+        """Asks ``url`` (``…/values/delta?…``) for what changed since the answer ``h`` holds and
+        merges it in, leaving the new answer in ``h``: the full set when ``h`` holds nothing it may
+        claim (nothing yet, problems, no basis) or when rolld answers it. On any failure ``h`` holds
+        nothing, so the next claim asks for the full set."""
+        claim: Dict[str, Any] = {}
+        if h.values is not None and h.basis and not h.values.problems:
+            claim = {"digest": h.digest, "basis": h.basis, "stamps": h.stamps}
+        try:
+            a = self._call("POST", url, claim) or {}
+        except Exception:
+            h.values, h.digest, h.basis, h.stamps = None, "", "", {}
+            raise
+        v = Values._of(a)
+        stamps = dict(a.get("stamps") or {})
+        if a.get("delta") and h.values is not None:
+            values, kept = dict(h.values.values), dict(h.stamps)
+            for k in a.get("removed") or []:
+                values.pop(k, None)
+                kept.pop(k, None)
+            values.update(v.values)
+            kept.update(stamps)
+            v.values, stamps = values, kept
+        v.digest = a.get("digest") or ""
+        h.values, h.digest, h.basis, h.stamps = v, v.digest, a.get("basis") or "", stamps
+        return v
+
+    def _delta_values(self, env: str, path: str, h: _Held) -> Values:
+        """A fresh read of the values through the delta route, keeping the answer in ``h``. Any
+        failure of the delta reads in full (a rolld without the route: from then on)."""
+        if not h.off and not self._no_delta:
+            e = self._env(env)
+            v = self._try_delta(e + "/values/delta" + _q(path), h)
+            if v is not None:
+                # The newest answer: a kept one for the folder goes.
+                with self._lock:
+                    self._cache.pop(e + "/values" + _q(path), None)
+                return copy.deepcopy(v)
+        return self.values(env, path, fresh=True)
+
+    def _keep(self, url: str, h: _Held, keep_dynamic: bool) -> None:
+        """Keeps an answer for ``cache_ttl``, unless it holds dynamic credentials (they end with
+        their lease; with dynamic=false there are none, only their names) or a key that didn't
+        resolve (the digest may not move when the link recovers). Past ``cache_size``, the folder
+        read longest ago goes."""
+        v = h.values
+        with self._lock:
+            if v is None or (v.dynamic and not keep_dynamic) or v.problems:
+                self._cache.pop(url, None)
+                return
+            if url not in self._cache and 0 < self.cache_size <= len(self._cache):
+                del self._cache[min(self._cache, key=lambda k: self._cache[k][1])]
+            self._cache[url] = (h, self._clock())
 
     def _secret(self, env: str, key: str, path: str) -> str:
         return self._env(env) + "/secrets/" + urllib.parse.quote(key, safe="") + _q(path)
@@ -316,37 +420,30 @@ class Client:
         with self._lock:
             self._cache.clear()
 
-    def _revalidate(self, url: str, token: str, hit: Any, keep_dynamic: bool = False) -> Values:
-        """One conditional read of ``url`` with ``token``: a 304 keeps ``hit``'s values."""
+    def _revalidate(self, url: str, token: str, hit: Any, keep_dynamic: bool = False, off: bool = False) -> Values:
+        """One conditional read of ``url`` with ``token``: a 304 keeps ``hit``'s values. ``off``:
+        the folder's claims are past what rolld takes, kept with the answer."""
         req = urllib.request.Request(self.api + url + ("&" if "?" in url else "?") + "digest=1", method="GET")
         if token:
             req.add_header("Authorization", "Bearer " + token)
-        if hit and hit[1]:
-            req.add_header("If-None-Match", '"' + hit[1] + '"')
+        if hit and hit[0].digest:
+            req.add_header("If-None-Match", '"' + hit[0].digest + '"')
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as res:
                 text, etag = res.read(16 << 20), res.headers.get("ETag") or ""
         except urllib.error.HTTPError as e:
             if e.code == 304 and hit:
-                with self._lock:
-                    self._cache[url] = (hit[0], hit[1], self._clock())
-                return hit[0]
+                self._keep(url, replace(hit[0], off=off), keep_dynamic)
+                return hit[0].values
             try:
                 err = json.loads(e.read(1 << 16) or b"{}")
             except ValueError:
                 err = {}
             raise SecretsError(err.get("error") or f"{e.code} {e.reason}", e.code, err.get("code")) from None
         v = Values._of(json.loads(text))
-        with self._lock:
-            # Never kept: dynamic credentials (they end with their lease; with dynamic=false there
-            # are none, only their names) or a key that didn't resolve (the digest may not move
-            # when the link recovers).
-            if (v.dynamic and not keep_dynamic) or v.problems:
-                self._cache.pop(url, None)
-            else:
-                if url not in self._cache and 0 < self.cache_size <= len(self._cache):
-                    del self._cache[min(self._cache, key=lambda k: self._cache[k][2])]
-                self._cache[url] = (v, etag.removeprefix("W/").strip('"'), self._clock())
+        etag = etag.removeprefix("W/").strip('"')
+        v.digest = v.digest or etag
+        self._keep(url, _Held(values=v, digest=etag, off=off), keep_dynamic)
         return v
 
     def resolve(self, env: str, consumer: str, path: str = "") -> Values:
@@ -407,6 +504,9 @@ class Client:
         last: Optional[str] = None
         leases: List[str] = []
         renewed = time.monotonic()
+        # The digest moved, so a kept answer is the old one: only what changed since the values
+        # this watch holds (``…/resolve`` has no delta route, so a consumer resolves the folder).
+        answer = _Held()
         while not stop.is_set():
             # A long poll: a change arrives within a second or two; ``every`` paces a server
             # without them. It never outlasts the next renewal.
@@ -419,7 +519,7 @@ class Client:
                 if stop.is_set():
                     break  # stopped while the poll was held: nothing more is called back
                 if now != last:
-                    v = self.resolve(env, consumer, path) if consumer else self.values(env, path, fresh=True)
+                    v = self.resolve(env, consumer, path) if consumer else self._delta_values(env, path, answer)
                     before, last = last, now
                     if v.problems:
                         if before is None:

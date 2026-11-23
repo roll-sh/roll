@@ -2422,6 +2422,20 @@ async fn the_checkup_names_what_needs_attention() {
     assert_eq!(kinds(&root), ["everything", "never_expires"], "{list}");
     assert_eq!(kinds(&wide_id), ["narrower"], "{list}");
     assert!(kinds(&fit_id).is_empty(), "{list}");
+
+    // The hourly look keeps what it saw: the first only remembers; a token made broad since is new,
+    // on the operator's alert feed with its fix; looking again finds nothing new.
+    assert_eq!(d.access.checkup_alerts_every(0).unwrap(), 0, "what was already there isn't news");
+    let (_, broad) = d.token(json!([{ "product": "*", "resources": "*", "actions": { "admin": "allow" } }]), json!({})).await;
+    assert!(d.access.checkup_alerts_every(0).unwrap() >= 2);
+    let (_, feed) = d.call(OPERATOR, Method::GET, "/v1/access/alerts?after=0", None).await;
+    let mut new: Vec<&str> = feed["events"].as_array().unwrap().iter().filter(|e| e["kind"] == "checkup_finding" && e["grant"] == broad.as_str()).map(|e| e["finding"].as_str().unwrap()).collect();
+    new.sort_unstable();
+    assert_eq!(new, ["everything", "never_expires"], "{feed}");
+    let before = feed["next"].as_i64().unwrap();
+    d.access.checkup_alerts_every(0).unwrap();
+    let (_, again) = d.call(OPERATOR, Method::GET, &format!("/v1/access/alerts?after={before}"), None).await;
+    assert!(!again["events"].as_array().unwrap().iter().any(|e| e["grant"] == broad.as_str()), "not again: {again}");
 }
 
 /// A person hears of their own tokens by mail (GitHub mails a token's owner): when one is about to
@@ -2802,6 +2816,9 @@ async fn a_decoy_token_allows_nothing_and_gives_its_user_away() {
     let (_, feed) = d.call(OPERATOR, Method::GET, "/v1/access/alerts?after=0", None).await;
     let decoys: Vec<&Value> = feed["events"].as_array().unwrap().iter().filter(|e| e["kind"] == "decoy_used").collect();
     assert_eq!((decoys.len(), decoys[0]["grant"].as_str(), decoys[0]["route"].as_str()), (1, Some(id.as_str()), Some("/v1/workspace/projects")), "{feed}");
+    // Its owner hears it on their own feed too.
+    let (_, hers) = d.as_user("usr_alice", Method::GET, "/v1/access/alerts?last=20", None).await;
+    assert!(hers["events"].as_array().unwrap().iter().any(|e| e["kind"] == "decoy_used" && e["grant"] == id.as_str()), "her newest (the access page's): {hers}");
 }
 
 /// docs/members.md, "Evaluation": a person's session is the grant of their roles, decided by the
@@ -3037,7 +3054,7 @@ async fn agent_activity_by_tool_and_connection() {
             client: None,
         });
     }
-    let jumps = d.access.store.failure_jumps(now).unwrap();
+    let jumps = d.access.store.failure_jumps(now, &|_| false).unwrap();
     assert_eq!((jumps.len(), jumps[0]["tool"].as_str(), jumps[0]["failed"].as_i64()), (1, Some("flaky_tool"), Some(12)), "{jumps:?}");
     // Alerted once (kept for the operator's feed), not again within six hours.
     assert_eq!(d.access.activity_alerts().await.unwrap(), 1);
@@ -3045,5 +3062,7 @@ async fn agent_activity_by_tool_and_connection() {
     let (_, feed) = d.call(OPERATOR, Method::GET, "/v1/access/alerts?after=0", None).await;
     assert_eq!((feed["events"][0]["kind"].as_str(), feed["events"][0]["tool"].as_str(), feed["next"].as_i64()), (Some("tool_failing"), Some("flaky_tool"), Some(1)), "{feed}");
     let (_, theirs) = d.as_user("usr_ada", Method::GET, "/v1/access/alerts?after=0", None).await;
-    assert_eq!((theirs["events"].as_array().map(Vec::len), theirs["next"].as_i64()), (Some(0), Some(1)), "a person's connections get none: {theirs}");
+    assert_eq!(theirs["events"].as_array().map(Vec::len), Some(0), "not about their tokens: {theirs}");
+    let (_, head) = d.as_user("usr_ada", Method::GET, "/v1/access/alerts?latest=1", None).await;
+    assert_eq!(head["next"], 0, "their own newest, which says nothing of others' alerts: {head}");
 }

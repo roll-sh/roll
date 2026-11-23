@@ -175,6 +175,11 @@ pub fn open(args: &crate::Args, home: &std::path::Path, auth: &crate::auth::Auth
             if let Ok(Err(e)) = tokio::task::spawn_blocking(move || a2.store.prune(days)).await {
                 tracing::warn!(error = %e, "pruning the access store");
             }
+            // The checkup's new findings, for the operator's alert feed (one node an hour).
+            let a3 = a.clone();
+            if let Ok(Err(e)) = tokio::task::spawn_blocking(move || a3.checkup_alerts()).await {
+                tracing::warn!(error = %e, "looking for the checkup's new findings");
+            }
             // Tokens about to expire, once a day, where approvals go.
             if let Err(e) = a.expiry_digest().await {
                 tracing::warn!(error = %e, "posting tokens about to expire");

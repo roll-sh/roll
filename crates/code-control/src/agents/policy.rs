@@ -84,6 +84,7 @@ pub(crate) fn agent_may(command: &Command, current: Option<(RuntimeMode, Interac
         Command::EndpointSet { .. } | Command::EndpointRemove { .. } | Command::EndpointCheck { .. } => owner_only("change or check a machine's endpoints"),
         // roll's relay sends it from roll secrets; the command route refuses it from anyone.
         Command::EndpointKey { .. } => Err("endpoint.key comes from roll's relay only".into()),
+        Command::GatewayUpstreamKey { .. } => Err("gateway.upstream_key comes from roll's relay only".into()),
         // Where the owner's AI requests go, its keys and its bill are the owner's.
         Command::GatewayConfigure { .. }
         | Command::GatewayKey { .. }

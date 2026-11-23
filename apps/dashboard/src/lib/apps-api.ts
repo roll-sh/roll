@@ -621,6 +621,8 @@ export interface EnvironmentPut {
   firewall?: FirewallRule[] | null;
   headers?: HeaderRule[] | null;
   /** Paths another service of the project answers (its environment of the same name); null or [] for none. */
+  /** Its own redirects on any service: `_redirects` lines (301 by default, 302, 303, 307, 308); null: none. */
+  redirects?: string | null;
   routes?: RouteRule[] | null;
   /** Its uptime checks (at most 5), or null for none. */
   checks?: UptimeCheck[] | null;
@@ -770,6 +772,8 @@ export interface Environment extends EnvironmentSummary {
   /** Headers its answers carry. */
   headers?: HeaderRule[];
   /** Paths another service of the project answers. */
+  /** Its own redirects, `_redirects` lines. */
+  redirects?: string;
   routes?: RouteRule[];
   checks?: UptimeCheck[];
   /** How each check stands on its owner. */
@@ -835,6 +839,8 @@ export interface Plan {
   edge?: { name: string; kind: "netlify" | "vercel"; file: string; paths: string[]; excluded?: string[] }[];
   /** roll's Next.js adapter is in the image: its instances share ISR, fetch and "use cache" entries. */
   next_cache?: boolean;
+  /** Its Node build writes source maps: it starts with `--enable-source-maps`. */
+  source_maps?: boolean;
 }
 
 export interface RootCandidate {
@@ -972,7 +978,7 @@ export interface Vulnerability {
  * OpenSearch-flavor cluster's `OPENSEARCH_URL`, `OPENSEARCH_USERNAME`, `OPENSEARCH_PASSWORD`). `service`: another web service of the project, its `<NAME>_URL`
  * (private) and `<NAME>_PUBLIC_URL`.
  */
-export type LinkKind = "postgres" | "redis" | "bucket" | "stream" | "queue" | "nosql" | "search" | "service";
+export type LinkKind = "postgres" | "redis" | "bucket" | "stream" | "queue" | "nosql" | "search" | "service" | "tasks";
 
 export interface Link {
   kind: LinkKind;
@@ -1146,6 +1152,10 @@ export interface UptimeCheckState {
   ms: number | null;
   error: string | null;
   down_since: number | null;
+  /** A browser check's last failure kept (its screenshot and Playwright trace), as the owner knows. */
+  failure_at?: number;
+  /** A preview's: the deployment this result is of (production's browser checks, run on each of its heads). */
+  deployment?: string;
 }
 
 /** A heartbeat: something outside roll pings its URL at least every `every_s` (60–604800); one not come within that and `grace_s` (default 300) is `heartbeat.missed`. */
@@ -1539,8 +1549,9 @@ export const appsApi = {
   removeDrain: (project: string, id: string) => call<null>("DELETE", `/v1/apps/projects/${enc(project)}/drains/${enc(id)}`),
   limits: (project: string) => call<SpendLimits>("GET", `/v1/apps/projects/${enc(project)}/limits`),
   /** The project's image signing rule: cosign public keys and whether image services must meet them. */
-  signing: (project: string) => call<{ keys: string[]; required: boolean }>("GET", `/v1/apps/projects/${enc(project)}/signing`),
-  setSigning: (project: string, body: { keys: string[]; required?: boolean }) => call<{ keys: string[]; required: boolean }>("PUT", `/v1/apps/projects/${enc(project)}/signing`, body),
+  /** `roll_key`: the public key that signs the project's builds' provenance. */
+  signing: (project: string) => call<{ keys: string[]; required: boolean; roll_key: string }>("GET", `/v1/apps/projects/${enc(project)}/signing`),
+  setSigning: (project: string, body: { keys: string[]; required?: boolean }) => call<{ keys: string[]; required: boolean; roll_key: string }>("PUT", `/v1/apps/projects/${enc(project)}/signing`, body),
   deleteSigning: (project: string) => call<void>("DELETE", `/v1/apps/projects/${enc(project)}/signing`),
   /** A month's use by service and environment (this one by default), most costly first. */
   projectUsage: (project: string, month?: string) => call<ProjectUsage>("GET", `/v1/apps/projects/${enc(project)}/usage${qs({ month })}`),
@@ -1572,6 +1583,8 @@ export const appsApi = {
   commits: (id: string, e: string, d: string) => call<DeployCommits>("GET", `${dep(id, e, d)}/commits`),
   slo: (id: string, e: string) => call<SloReport>("GET", `${env(id, e)}/slo`),
   sbom: (id: string, e: string, d: string) => call<unknown>("GET", `${dep(id, e, d)}/sbom`),
+  /** Its image's signed SLSA provenance (a DSSE envelope), when roll built it. */
+  provenance: (id: string, e: string, d: string) => call<{ payloadType: string; payload: string; signatures: { keyid: string; sig: string }[] }>("GET", `${dep(id, e, d)}/provenance`),
   /** A failed deployment explained by its repo owner's model: kept, unless `again` asks anew (charged again). */
   explain: (id: string, e: string, d: string, again = false) => call<Explanation>("POST", `${dep(id, e, d)}/explain${qs({ again })}`),
   vulnerabilities: (id: string, e: string, d: string) => call<{ scan: ScanSummary | null; vulnerabilities: Vulnerability[] }>("GET", `${dep(id, e, d)}/vulnerabilities`),
@@ -1648,6 +1661,16 @@ export const appsApi = {
       throw new Error(data?.error ?? `${res.status} ${res.statusText}`.trim());
     }
     return { tar: await res.blob(), instance: res.headers.get("x-roll-instance") };
+  },
+  /** A browser check's last failure: its screenshot (PNG) or Playwright trace (zip). */
+  checkFailure: async (id: string, e: string, check: string, which: "screenshot" | "trace"): Promise<Blob> => {
+    const res = await fetch(`${ROLL_API}${env(id, e)}/checks/${encodeURIComponent(check)}/${which}`, withSession({ headers: apiHeaders(), cache: "no-store" }));
+    onApiStatus(res.status);
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      throw new Error(data?.error ?? `${res.status} ${res.statusText}`.trim());
+    }
+    return res.blob();
   },
   /** A tar written under the directory `path` in a running instance (`PUT …/files`, admin: what's written runs next). */
   uploadFiles: async (id: string, e: string, path: string, tar: Blob, instance?: string): Promise<{ instance: string; path: string }> => {

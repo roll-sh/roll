@@ -18,8 +18,8 @@ description:
     C(no_log), so set C(no_log=true) on any task whose arguments or result print a value.
   - Keys holding a dynamic credential (a lease) are left out by default and no credential is issued
     for them, since nothing renews a lease during a play. See O(dynamic).
-  - Answers are kept in memory for O(cache_ttl) seconds, then revalidated by digest (a 304 while
-    unchanged). Ansible templates each task in its own worker process, so the cache spans the
+  - Answers are kept in memory for O(cache_ttl) seconds, then revalidated by digest and each key's
+    stamp (nothing while unchanged, only the changed keys after a change). Ansible templates each task in its own worker process, so the cache spans the
     lookups of one task (several keys of a folder, a loop), not the whole play. Nothing is ever
     written to disk.
 options:

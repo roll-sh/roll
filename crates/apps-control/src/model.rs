@@ -1874,6 +1874,9 @@ pub struct Environment {
     /// Paths another service of the project answers ([]: none).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub routes: Vec<Route>,
+    /// Its own redirects, `_redirects` lines (`crate::site_rules::EnvRedirects`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redirects: Option<String>,
     /// Its uptime checks ([]: none), and how each stands on its owner.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub checks: Vec<Check>,
@@ -2488,6 +2491,14 @@ pub struct CheckState {
     pub ms: Option<u64>,
     pub error: Option<String>,
     pub down_since: Option<i64>,
+    /// When a browser check's last failure was kept: its screenshot and Playwright trace
+    /// (`…/checks/{name}/screenshot`, `…/trace`), as this node knows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_at: Option<i64>,
+    /// A preview's: the deployment this result is of (production's browser checks run once on
+    /// each deployment going live there); none yet for it while it's another's or absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deployment: Option<String>,
 }
 
 impl Route {
@@ -3020,6 +3031,9 @@ pub enum LinkKind {
     /// Another web service of the project: its private and public URLs (apps' own, not a
     /// [`crate::integrations::Resources`] kind).
     Service,
+    /// A roll tasks tenant: an API key of its own per link and the tenant's signing keys, so the
+    /// service publishes messages and verifies what's delivered to it.
+    Tasks,
 }
 
 impl LinkKind {
@@ -3029,7 +3043,7 @@ impl LinkKind {
         matches!(self, LinkKind::Postgres | LinkKind::Redis | LinkKind::Nosql | LinkKind::Bucket | LinkKind::Stream | LinkKind::Queue)
     }
 
-    pub const ALL: [LinkKind; 8] = [LinkKind::Postgres, LinkKind::Redis, LinkKind::Bucket, LinkKind::Stream, LinkKind::Queue, LinkKind::Nosql, LinkKind::Search, LinkKind::Service];
+    pub const ALL: [LinkKind; 9] = [LinkKind::Postgres, LinkKind::Redis, LinkKind::Bucket, LinkKind::Stream, LinkKind::Queue, LinkKind::Nosql, LinkKind::Search, LinkKind::Service, LinkKind::Tasks];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -3041,6 +3055,7 @@ impl LinkKind {
             LinkKind::Nosql => "nosql",
             LinkKind::Search => "search",
             LinkKind::Service => "service",
+            LinkKind::Tasks => "tasks",
         }
     }
 

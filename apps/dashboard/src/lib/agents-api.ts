@@ -1380,6 +1380,8 @@ export type Command =
   | { type: "gateway.configure"; settings: GatewaySettings }
   /** An upstream's key: sealed to this daemon (`sealUpstreamKey`), or cleared. */
   | { type: "gateway.key"; upstream: string; key?: KeyChange }
+  /** An upstream's `roll://` key from roll secrets, sealed to the gateway's daemon: roll's relay sends it, never a browser. */
+  | { type: "gateway.upstream_key"; upstream: string; key: RefKey }
   /** Mint a client key sealed to `seal_key` (answers `gateway_client`); the relay sends it on joining. */
   | { type: "gateway.client.issue"; name: string; machine?: MachineId; seal_key: string }
   | { type: "gateway.client.revoke"; client: string }
@@ -2389,6 +2391,7 @@ export const commandD: Decoder<Command> = tagged("type", {
   "endpoint.key": cmd<"endpoint.key">(obj({ endpoint: str, key: refKeyD })),
   "gateway.configure": cmd<"gateway.configure">(obj({ settings: gatewaySettingsD })),
   "gateway.key": cmd<"gateway.key">(obj({ upstream: str, key: optional(keyChangeD) })),
+  "gateway.upstream_key": cmd<"gateway.upstream_key">(obj({ upstream: str, key: refKeyD })),
   "gateway.client.issue": cmd<"gateway.client.issue">(obj({ name: str, machine: optional(str), seal_key: str })),
   "gateway.client.revoke": cmd<"gateway.client.revoke">(obj({ client: str })),
   "gateway.test": cmd<"gateway.test">(obj({ upstream: optional(str) })),

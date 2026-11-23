@@ -533,6 +533,27 @@
     }
   },
   {
+    "type": "gateway.upstream_key",
+    "upstream": "anthropic",
+    "key": {
+      "type": "set",
+      "sealed": {
+        "v": 1,
+        "epk": "3p7bfXt9wbTTW2HC7OQ1Nz-DQ8hbeGdNrfx-FG-IK08",
+        "nonce": "AAECAwQFBgcICQoL",
+        "ct": "bm90IGEgcmVhbCBrZXksIGp1c3QgYSBzaGFwZQ"
+      }
+    }
+  },
+  {
+    "type": "gateway.upstream_key",
+    "upstream": "anthropic",
+    "key": {
+      "type": "refused",
+      "reason": "maker unreachable: usr_ada, who chose it, can no longer reveal production:/ or can no longer sign in"
+    }
+  },
+  {
     "type": "gateway.client.issue",
     "name": "Ada's sandbox",
     "machine": "mch_fedcba0987654321",

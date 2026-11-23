@@ -51,6 +51,10 @@ impl<'a> P<'a> {
     }
 
     fn value(&mut self) -> Option<Value> {
+        // past the execution's memory limit: the exact reader takes over and fails at once
+        if crate::guard::over_budget() {
+            return None;
+        }
         match self.peek()? {
             b'{' => self.object(),
             b'[' => self.array(),

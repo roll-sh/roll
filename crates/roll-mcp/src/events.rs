@@ -116,13 +116,13 @@ const FEEDS: &[Feed] = &[
     },
     Feed {
         name: "access.alert",
-        description: "roll alerted the operator: a tool is failing (tool_failing: its server errors jumped), a decoy token was used (decoy_used: someone found where it was planted), or a leaked token or secret was revoked (token_revoked, secret_revoked: where it was found). The operator's connections only. Filter by kinds and tool.",
+        description: "roll alerted the operator: a tool is failing (tool_failing: its server errors jumped), a decoy token was used (decoy_used: someone found where it was planted), a leaked token or secret was revoked (token_revoked, secret_revoked: where it was found), or the checkup found something new about a token (checkup_finding: gone broad, unused, roaming…, with its fix). The operator's connections hear every alert; a person's own connections hear those about their own tokens. Filter by kinds and tool.",
         tool: "access_activity",
         product: "access",
         path: &[],
         after: "/v1/access/alerts?limit=100&after=",
         latest: "/v1/access/alerts?latest=1",
-        filters: &[("kinds", "kind", "Only these kinds (tool_failing, decoy_used, token_revoked, secret_revoked); all when left out"), ("tool", "tool", "Only alerts about this tool")],
+        filters: &[("kinds", "kind", "Only these kinds (tool_failing, decoy_used, token_revoked, secret_revoked, checkup_finding); all when left out"), ("tool", "tool", "Only alerts about this tool")],
         payload: || {
             json!({ "type": "object", "properties": {
                 "seq": { "type": "integer" },
@@ -139,18 +139,21 @@ const FEEDS: &[Feed] = &[
                 "ip": { "type": ["string", "null"] },
                 "what": { "type": "string", "description": "Another product's secret or an enterprise app, revoked" },
                 "found_at": { "type": "string", "description": "Where a leaked one was found" },
+                "finding": { "type": "string", "description": "The checkup's kind (everything, never_expires, unused, narrower, roams…)" },
+                "why": { "type": "string" },
+                "fix": { "type": "string", "description": "tighten, expire, revoke, limit_addresses, rotate_client or approve" },
             } })
         },
     },
     Feed {
         name: "secrets.event",
-        description: "Something happened to a project's secrets: a secret leaked or a scan found one, a rotation or sync failed, a value request waiting or decided, a placeholder echoed or sent to the wrong place, production left unprotected, an environment or the project deleted or recovered. Never a value. Give the project; filter by kinds (secret.leaked, or request.* for a family) and environment.",
+        description: "Something happened to a project's secrets: a value changed or was deleted (names and versions), a secret leaked or a scan found one, a rotation worked or failed, a sync failed, an environment's protection or a folder's policy changed, a value request waiting or decided, a placeholder echoed or sent to the wrong place, production left unprotected, an environment or the project deleted or recovered. Never a value. Give the project; filter by kinds (secret.changed, or secret.* for a family) and environment.",
         tool: "secrets_audit",
         product: "secrets",
         path: &[("project", "The project (prj_…)")],
         after: "/v1/secrets/projects/{project}/events?limit=100&after=",
         latest: "/v1/secrets/projects/{project}/events?latest=1",
-        filters: &[("kinds", "kind", "Only these kinds (secret.leaked, rotation.failed, or request.* for a family); all when left out"), ("environment", "environment", "Only this environment's")],
+        filters: &[("kinds", "kind", "Only these kinds (secret.changed, rotation.failed, or secret.* for a family); all when left out"), ("environment", "environment", "Only this environment's")],
         payload: || {
             json!({ "type": "object", "properties": {
                 "seq": { "type": "integer" },

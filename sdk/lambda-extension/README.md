@@ -192,9 +192,10 @@ first.
 ## Caching
 
 - **A folder without dynamic credentials** is kept for `ROLL_CACHE_TTL` (the Go client's
-  `CacheTTL`). After that, the extension asks roll again with the folder's digest. While the
-  folder hasn't changed, roll answers 304: nothing is decrypted, issued or audited, and the kept
-  values stay for another TTL.
+  `CacheTTL`). After that, the extension asks roll what changed since, with the folder's digest
+  and each key's stamp (`…/values/delta`). While the folder hasn't changed, nothing is decrypted
+  or issued and the kept values stay for another TTL; after a change only the changed keys come
+  back. An older rolld without the route gets a conditional read (a 304 while unchanged).
 - **A folder holding a dynamic credential** (a Postgres login per lease, AWS keys) is never kept
   past its lease. The values answer doesn't say when a lease ends, so the extension renews each
   lease once, right after the read, to learn it. It then keeps the folder until a fifth of the

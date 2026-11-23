@@ -212,7 +212,8 @@ impl Access {
         let id = sub_id(n.grant_id, n.url, n.name, n.arguments);
         let t = self.event_transport()?;
         let sealed = t.seal(&id, n.secret).map_err(Error::Internal)?;
-        let now = code_sql::now_ms();
+        // The database's clock, as claims compare a subscription's times on it.
+        let now = self.store.db.now_ms()?;
         let expires = now + n.ttl_ms.clamp(MIN_TTL_MS, MAX_TTL_MS);
         let args = canonical(n.arguments);
         self.store.db.write(|c| {

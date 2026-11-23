@@ -15,6 +15,9 @@ GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/logs
 POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/rollout
 GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/vulnerabilities
 GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/sbom
+GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/provenance
+GET /v1/apps/services/{id}/environments/{env}/checks/{check}/screenshot
+GET /v1/apps/services/{id}/environments/{env}/checks/{check}/trace
 GET /v1/apps/services/{id}/environments/{env}/domains
 POST /v1/apps/services/{id}/environments/{env}/domains
 PATCH /v1/apps/services/{id}/environments/{env}/domains/{host}

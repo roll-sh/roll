@@ -2399,6 +2399,12 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "endpoint::key_change_is_keep")]
         key: KeyChange,
     },
+    /// An upstream's `roll://` key from roll secrets ([`RefKey`], sealed with
+    /// [`gateway::upstream_ref_context`]): sent by roll's relay alone (it refuses one from anyone
+    /// else). Kept in memory; a refusal leaves the upstream with no key and bars its provider.
+    /// Replies once applied.
+    #[serde(rename = "gateway.upstream_key")]
+    GatewayUpstreamKey { upstream: String, key: RefKey },
     /// Mint a client key and answer it sealed to `seal_key` (the machine that will use it, as its
     /// `roll-gateway` endpoint's key: [`IssuedClient`]). The gateway keeps only its hash. A
     /// machine's earlier client is revoked.

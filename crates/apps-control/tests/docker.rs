@@ -1723,6 +1723,18 @@ async fn a_browser_check_runs_in_chromium() {
     call(&w.api, "PUT", &base, Some(check("await page.getByRole('heading', { name: 'Goodbye' }).waitFor({ timeout: 2000 })")), "application/json", None).await;
     let failed = pass(1).await;
     assert!(failed["failures"].as_u64() == Some(1) && failed["error"].as_str().is_some_and(|e| e.contains("Goodbye")), "{failed}");
+    // Its screenshot and trace came out of the stopped container.
+    let file = |which: &'static str| {
+        let (api, base) = (w.api.clone(), base.clone());
+        async move {
+            let r = api.oneshot(Request::get(format!("{base}/checks/home/{which}")).body(Body::empty()).unwrap()).await.unwrap();
+            (r.status(), r.into_body().collect().await.unwrap().to_bytes().to_vec())
+        }
+    };
+    let (st, png) = file("screenshot").await;
+    assert!(st == StatusCode::OK && png.starts_with(b"\x89PNG"), "{st} {} bytes", png.len());
+    let (st, zip) = file("trace").await;
+    assert!(st == StatusCode::OK && zip.starts_with(b"PK"), "{st} {} bytes", zip.len());
     assert_eq!(delete_for_good(&w.api, &id).await.0, StatusCode::NO_CONTENT);
     let _ = std::process::Command::new("docker").args(["rmi", &format!("roll-apps-{id}:browser-check-{}", apps_control::browser::PLAYWRIGHT.replace('.', "-"))]).output();
     w.apps.shutdown().await;

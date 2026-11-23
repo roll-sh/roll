@@ -36,11 +36,13 @@ public sealed class RollSecretsClient : IDisposable
     private readonly Relogin? _login;
     private readonly SemaphoreSlim _whoami = new(1, 1);
     private readonly ConcurrentDictionary<string, Cached> _cache = new();
+    // A rolld without `…/values/delta`: reads are full (conditional, with CacheTtl).
+    private volatile bool _noDelta;
     private volatile string? _token;
     private volatile string? _project;
 
-    /// <summary>A Values answer kept by CacheTtl, with the digest it was read against.</summary>
-    private sealed record Cached(SecretValues Values, string Etag, DateTimeOffset At);
+    /// <summary>A Values answer kept by CacheTtl, with its digest and stamps, and when it was asked.</summary>
+    private sealed record Cached(Held Held, DateTimeOffset At);
 
     /// <summary>What one request answered: its status, its body and its ETag.</summary>
     private sealed record Answer(HttpStatusCode Status, byte[] Body, string? Etag);
@@ -241,13 +243,13 @@ public sealed class RollSecretsClient : IDisposable
     /// <summary><paramref name="env"/>'s values under <paramref name="path"/> (<c>""</c> for the root), references resolved.</summary>
     public async Task<SecretValues> ValuesAsync(string env, string path = "", CancellationToken ct = default)
     {
-        string url = await EnvAsync(env, ct).ConfigureAwait(false) + "/values" + Query(path);
+        string e = await EnvAsync(env, ct).ConfigureAwait(false);
         if (_cacheTtl <= TimeSpan.Zero)
         {
-            using var d = await CallAsync(HttpMethod.Get, url, null, ct).ConfigureAwait(false);
+            using var d = await CallAsync(HttpMethod.Get, e + "/values" + Query(path), null, ct).ConfigureAwait(false);
             return SecretValues.Parse(d.RootElement);
         }
-        return await CachedAsync(url, ct).ConfigureAwait(false);
+        return await CachedAsync(e, Query(path), ct).ConfigureAwait(false);
     }
 
     /// <summary>A fresh read (a watch that saw the digest move): a kept answer for the folder goes.</summary>
@@ -260,34 +262,154 @@ public sealed class RollSecretsClient : IDisposable
         return v;
     }
 
-    /// <summary>From memory within CacheTtl, else revalidated with the digest (a 304 keeps the values).</summary>
-    private async Task<SecretValues> CachedAsync(string url, CancellationToken ct)
+    /// <summary>
+    /// From memory within CacheTtl, else asks for what changed since the kept answer
+    /// (<c>…/values/delta</c>; the full set when nothing is kept). Where that fails, a conditional
+    /// read: a 304 keeps the values. <paramref name="e"/> is the environment's route,
+    /// <paramref name="q"/> the query.
+    /// </summary>
+    private async Task<SecretValues> CachedAsync(string e, string q, CancellationToken ct)
     {
+        string url = e + "/values" + q;
         _cache.TryGetValue(url, out var hit);
         if (hit is not null && _clock.GetUtcNow() - hit.At < _cacheTtl)
         {
-            return hit.Values;
+            return hit.Held.Values!;
+        }
+        bool off = hit?.Held.Off ?? false;
+        if (!off && !_noDelta)
+        {
+            var h = hit?.Held.Copy() ?? new Held();
+            var dv = await TryDeltaAsync(e + "/values/delta" + q, h, ct).ConfigureAwait(false);
+            if (dv is not null)
+            {
+                Keep(url, h);
+                return dv;
+            }
+            off = h.Off;
         }
         string sep = url.Contains('?') ? "&" : "?";
-        var a = await AuthedAsync(t => SendAsync(t, HttpMethod.Get, url + sep + "digest=1", null, hit?.Etag, TimeSpan.Zero, ct), ct).ConfigureAwait(false);
+        string? tag = hit is not null && hit.Held.Digest.Length > 0 ? hit.Held.Digest : null;
+        var a = await AuthedAsync(t => SendAsync(t, HttpMethod.Get, url + sep + "digest=1", null, tag, TimeSpan.Zero, ct), ct).ConfigureAwait(false);
         if (a.Status == HttpStatusCode.NotModified && hit is not null)
         {
-            _cache[url] = hit with { At = _clock.GetUtcNow() };
-            return hit.Values;
+            var k = hit.Held.Copy();
+            k.Off = off;
+            Keep(url, k);
+            return k.Values!;
         }
         using var d = Json.Parse(a.Body);
         var v = SecretValues.Parse(d.RootElement);
-        // Never kept: dynamic credentials (they end with their lease), a key that didn't resolve (the
-        // digest may not move when the link recovers), or an answer with nothing to revalidate by.
-        if (v.Dynamic.Count > 0 || v.Problems.Count > 0 || string.IsNullOrEmpty(a.Etag))
+        // Never kept: an answer with nothing to revalidate by.
+        if (string.IsNullOrEmpty(a.Etag))
+        {
+            _cache.TryRemove(url, out _);
+            return v;
+        }
+        var kept = new Held { Values = v.Digest.Length > 0 ? v : v.With(new Dictionary<string, string>(v.Values), a.Etag), Digest = a.Etag, Off = off };
+        Keep(url, kept);
+        return kept.Values;
+    }
+
+    /// <summary>
+    /// Keeps an answer for CacheTtl, unless it holds dynamic credentials (they end with their
+    /// lease) or a key that didn't resolve (the digest may not move when the link recovers).
+    /// </summary>
+    private void Keep(string url, Held h)
+    {
+        if (h.Values is null || h.Values.Dynamic.Count > 0 || h.Values.Problems.Count > 0)
         {
             _cache.TryRemove(url, out _);
         }
         else
         {
-            _cache[url] = new Cached(v, a.Etag, _clock.GetUtcNow());
+            _cache[url] = new Cached(h, _clock.GetUtcNow());
         }
-        return v;
+    }
+
+    /// <summary>
+    /// <see cref="ReadDeltaAsync"/>, or null where it fails and the caller reads in full instead:
+    /// a rolld without the route (404, 405) from then on, a claim past what it takes (413) for
+    /// that folder, anything else this once. A cancelled read is thrown.
+    /// </summary>
+    private async Task<SecretValues?> TryDeltaAsync(string url, Held h, CancellationToken ct)
+    {
+        try
+        {
+            return await ReadDeltaAsync(url, h, ct).ConfigureAwait(false);
+        }
+        catch (RollSecretsException e) when (!ct.IsCancellationRequested)
+        {
+            if (e.Status is 404 or 405)
+            {
+                _noDelta = true;
+            }
+            else if (e.Status == 413)
+            {
+                h.Off = true;
+            }
+            return null;
+        }
+        catch (Exception) when (!ct.IsCancellationRequested)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Asks <paramref name="url"/> (<c>…/values/delta?…</c>) for what changed since the answer
+    /// <paramref name="h"/> holds and merges it in, leaving the new answer in <paramref name="h"/>:
+    /// the full set when it holds nothing it may claim (nothing yet, problems, no basis) or when
+    /// rolld answers it. On any failure <paramref name="h"/> holds nothing, so the next claim asks
+    /// for the full set.
+    /// </summary>
+    private async Task<SecretValues> ReadDeltaAsync(string url, Held h, CancellationToken ct)
+    {
+        byte[] claim = h.Values is not null && h.Basis.Length > 0 && h.Values.Problems.Count == 0
+            ? Json.Write(("digest", h.Digest), ("basis", h.Basis), ("stamps", h.Stamps))
+            : Json.Write();
+        JsonDocument d;
+        try
+        {
+            d = await CallAsync(HttpMethod.Post, url, claim, ct).ConfigureAwait(false);
+        }
+        catch
+        {
+            h.Clear();
+            throw;
+        }
+        using (d)
+        {
+            var o = d.RootElement;
+            var v = SecretValues.Parse(o);
+            var stamps = o.TryGetProperty("stamps", out var s) ? Json.StringMap(s) : new Dictionary<string, string>();
+            var values = new Dictionary<string, string>(v.Values);
+            if (o.TryGetProperty("delta", out var delta) && delta.ValueKind == JsonValueKind.True && h.Values is not null)
+            {
+                values = new Dictionary<string, string>(h.Values.Values);
+                var kept = new Dictionary<string, string>(h.Stamps);
+                foreach (var k in Json.Strings(o, "removed"))
+                {
+                    values.Remove(k);
+                    kept.Remove(k);
+                }
+                foreach (var (k, x) in v.Values)
+                {
+                    values[k] = x;
+                }
+                foreach (var (k, x) in stamps)
+                {
+                    kept[k] = x;
+                }
+                stamps = kept;
+            }
+            v = v.With(values, Json.Str(o, "digest") ?? "");
+            h.Values = v;
+            h.Digest = v.Digest;
+            h.Basis = Json.Str(o, "basis") ?? "";
+            h.Stamps = stamps;
+            return v;
+        }
     }
 
     /// <summary>
@@ -428,8 +550,30 @@ public sealed class RollSecretsClient : IDisposable
     /// <summary><see cref="Watch(string, WatchOptions)"/> at the root with the defaults.</summary>
     public SecretsWatch Watch(string env, Action<SecretValues> onChange) => Watch(env, new WatchOptions { OnChange = onChange });
 
-    internal Task<SecretValues> LoadAsync(string env, WatchOptions o, CancellationToken ct) =>
-        o.Consumer is { } consumer ? ResolveAsync(env, o.Path, consumer, ct) : FreshValuesAsync(env, o.Path, ct);
+    /// <summary>
+    /// A watch's read after the digest moved: as the consumer (<c>…/resolve</c> has no delta
+    /// route, so the whole folder), else only what changed since the answer <paramref name="h"/>
+    /// holds. Any failure of the delta reads in full (a rolld without the route: from then on).
+    /// </summary>
+    internal async Task<SecretValues> LoadAsync(string env, WatchOptions o, Held h, CancellationToken ct)
+    {
+        if (o.Consumer is { } consumer)
+        {
+            return await ResolveAsync(env, o.Path, consumer, ct).ConfigureAwait(false);
+        }
+        if (!h.Off && !_noDelta)
+        {
+            string e = await EnvAsync(env, ct).ConfigureAwait(false);
+            var v = await TryDeltaAsync(e + "/values/delta" + Query(o.Path), h, ct).ConfigureAwait(false);
+            if (v is not null)
+            {
+                // The newest answer: a kept one for the folder goes.
+                _cache.TryRemove(e + "/values" + Query(o.Path), out _);
+                return v;
+            }
+        }
+        return await FreshValuesAsync(env, o.Path, ct).ConfigureAwait(false);
+    }
 
     // Workload identities.
 
@@ -517,4 +661,29 @@ public sealed class RollSecretsClient : IDisposable
 
     /// <summary>Names the API and the project, never the token.</summary>
     public override string ToString() => $"RollSecretsClient {{ {_api}{(_project is { } p ? ", " + p : "")} }}";
+}
+
+/// <summary>
+/// A folder's last answer with every key's stamp, so a read after a change asks only for what
+/// changed (<c>…/values/delta</c>, docs/secrets.md "Delta reads"): what a watch keeps, and what
+/// CacheTtl keeps. <see cref="Off"/>: the folder's claim is past what rolld takes (a 413); its
+/// reads are full.
+/// </summary>
+internal sealed class Held
+{
+    public SecretValues? Values;
+    public string Digest = "";
+    public string Basis = "";
+    public IReadOnlyDictionary<string, string> Stamps = new Dictionary<string, string>();
+    public bool Off;
+
+    public Held Copy() => new() { Values = Values, Digest = Digest, Basis = Basis, Stamps = Stamps, Off = Off };
+
+    public void Clear()
+    {
+        Values = null;
+        Digest = "";
+        Basis = "";
+        Stamps = new Dictionary<string, string>();
+    }
 }

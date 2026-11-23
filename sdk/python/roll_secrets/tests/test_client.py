@@ -406,3 +406,71 @@ class OneKeyReads(unittest.TestCase):
         with self.assertRaises(roll_secrets.SecretsError) as e:
             c.stored_value("staging", "NOPE", path="/api")
         self.assertEqual(e.exception.status, 404)
+
+
+class Delta(BaseHTTPRequestHandler):
+    """rolld's delta route as a watcher sees it: each key's stamp is its version, the basis is
+    fixed, and a claim with it gets only the keys whose stamp moved; ``route`` off is an older
+    rolld (a 404)."""
+
+    state = {"values": {"A": "1", "B": "2"}, "versions": {"A": 1, "B": 1}, "route": True, "deltas": [], "full": 0}
+
+    def log_message(self, *_):
+        pass
+
+    def answer(self, code, body):
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(body).encode())
+
+    def digest(self):
+        return "d" + "".join(f"{k}{v}" for k, v in sorted(Delta.state["versions"].items()))
+
+    def do_GET(self):
+        u = urllib.parse.urlsplit(self.path)
+        if u.path.endswith("/digest"):
+            return self.answer(200, {"digest": self.digest()})
+        Delta.state["full"] += 1
+        self.answer(200, {"values": dict(Delta.state["values"]), "problems": [], "leases": [], "dynamic": [], "linked": []})
+
+    def do_POST(self):
+        s = Delta.state
+        claim = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if not s["route"] or not self.path.endswith("/values/delta"):
+            return self.answer(404, {"error": "no route"})
+        stamps = {k: str(v) for k, v in s["versions"].items()}
+        held = claim.get("stamps") or {}
+        delta = claim.get("basis") == "b1"
+        keys = [k for k in s["values"] if not delta or held.get(k) != stamps[k]]
+        removed = [k for k in held if k not in s["values"]] if delta else []
+        s["deltas"].append(sorted(keys))
+        self.answer(200, {"delta": delta, "digest": self.digest(), "basis": "b1", "values": {k: s["values"][k] for k in keys}, "removed": removed, "stamps": {k: stamps[k] for k in keys}, "problems": [], "leases": [], "dynamic": [], "linked": []})
+
+
+class AWatchDelta(unittest.TestCase):
+    def test_a_change_reads_through_the_delta_and_an_older_rolld_reads_in_full(self):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Delta)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        c = roll_secrets.Client(f"http://127.0.0.1:{server.server_address[1]}", "rlt_x", project="prj_1")
+        s, seen, stop = Delta.state, [], threading.Event()
+        got = [threading.Event() for _ in range(3)]
+
+        def on_change(v):
+            seen.append(dict(v.values))
+            got[len(seen) - 1].set()
+
+        watching = threading.Thread(target=c.watch, args=("production", on_change), kwargs={"every": 0.01, "stop": stop})
+        watching.start()
+        self.addCleanup(watching.join)
+        self.addCleanup(stop.set)
+        self.assertTrue(got[0].wait(5))
+        s["values"]["B"], s["versions"]["B"] = "3", 2
+        self.assertTrue(got[1].wait(5))
+        self.assertEqual((seen[1], s["deltas"], s["full"]), ({"A": "1", "B": "3"}, [["A", "B"], ["B"]], 0), "only B came back, merged into what the watch held")
+
+        s["route"] = False
+        s["values"]["A"], s["versions"]["A"] = "9", 2
+        self.assertTrue(got[2].wait(5))
+        self.assertEqual((seen[2], s["full"]), ({"A": "9", "B": "3"}, 1), "a 404 reads in full")

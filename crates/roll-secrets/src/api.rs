@@ -1076,7 +1076,7 @@ async fn import_dotenv(State(s): S, Who(c): Who, Path((project, env)): Path<(Str
             let r = s.open_request(&project, &env, b, &c)?;
             return Ok(json!({ "request": r, "skipped": skipped }));
         }
-        let a = s.batch(&project, &env, b, &c)?;
+        let a = s.batch_via(&project, &env, b, crate::write::Via::Import, &c)?;
         Ok(json!({ "change": a.change, "items": a.items, "warnings": a.warnings, "skipped": skipped }))
     })
     .await?;

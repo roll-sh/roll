@@ -2049,7 +2049,8 @@ async fn nothing_reaches_an_environment_its_caller_cannot_read() {
     // resource (that's an admin's), nor see the fingerprint of what it can't reveal.
     let t = api.token(json!({ "name": "dev", "environments": ["development"], "actions": ["read", "reveal", "write", "delete"] }));
     let token = Some(t.as_str());
-    let (s, _) = api.req(Method::DELETE, "/environments/development", None, token).await;
+    // The token's own scope names development: deleting it is confirmed.
+    let (s, _) = api.req(Method::DELETE, "/environments/development?confirm=development", None, token).await;
     assert_eq!(s, StatusCode::OK, "kept for the window");
     let (s, _) = api.req(Method::POST, "/environments", Some(json!({ "slug": "development", "base": "production" })), token).await;
     assert_eq!(s, StatusCode::FORBIDDEN);
@@ -7042,6 +7043,36 @@ async fn deleting_a_protected_environment_that_asks_for_approvals_is_a_change_re
     assert_eq!(api.ok(Method::GET, "/v1/secrets/deleted", None).await[0]["environment"], "production");
 }
 
+/// Decide, then revoke: an environment's delete that its write refuses (here an ephemeral one based
+/// on it meanwhile) revokes none of what it issued and is no event; the delete that goes revokes it
+/// all, with its `env.deleted`.
+#[tokio::test]
+async fn an_environment_delete_its_write_refuses_revokes_nothing() {
+    let api = Api::new().await;
+    api.ok(Method::PUT, &format!("/v1/workspace/projects/{}/resources/bucket/assets", api.project), Some(json!({ "x": 0, "y": 0 }))).await;
+    let link = |field: &str, mode: &str| json!({ "link": { "kind": "bucket", "ref": "assets", "field": field, "mode": mode } });
+    api.ok(Method::PUT, "/environments/production/secrets/AWS_ACCESS_KEY_ID", Some(link("access_key_id", "managed"))).await;
+    api.ok(Method::PUT, "/environments/production/secrets/TEMP_KEY", Some(link("access_key_id", "dynamic"))).await;
+    api.ok(Method::POST, "/environments/production/resolve", Some(json!({ "consumer": "app:web" }))).await;
+    let live = api.fake.live_keys.lock().unwrap().clone();
+    assert_eq!(live.len(), 2, "a managed key and a lease: {live:?}");
+    api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true, "approvals": 1 }))).await;
+    let (_, r) = api.call(Method::DELETE, "/environments/production?confirm=production", None).await;
+    let id = r["request"]["id"].as_str().unwrap().to_string();
+    let reviewer = api.token(json!({ "name": "lead", "actions": ["read", "admin", "write", "delete"] }));
+    api.req(Method::POST, &format!("/environments/production/requests/{id}/review"), Some(json!({ "verdict": "approve" })), Some(&reviewer)).await;
+    api.ok(Method::POST, "/environments", Some(json!({ "slug": "pv-1", "base": "production", "ttl_minutes": 60 }))).await;
+    let (s, e) = api.call(Method::POST, &format!("/environments/production/requests/{id}/apply"), None).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{e}");
+    assert_eq!(*api.fake.live_keys.lock().unwrap(), live, "refused: nothing revoked");
+    assert!(api.ok(Method::GET, "/leases", None).await.as_array().unwrap().iter().all(|l| l["revoked_at"].is_null()));
+    assert_eq!(api.ok(Method::GET, "/events?kinds=env.deleted", None).await["events"], json!([]), "nor an event");
+    api.ok(Method::DELETE, "/environments/pv-1", None).await;
+    assert_eq!(api.ok(Method::POST, &format!("/environments/production/requests/{id}/apply"), None).await["state"], "applied");
+    assert!(api.fake.live_keys.lock().unwrap().is_empty(), "deleted: what it issued is revoked");
+    assert_eq!(api.ok(Method::GET, "/events?kinds=env.deleted", None).await["events"].as_array().unwrap().len(), 1);
+}
+
 #[tokio::test]
 async fn a_project_holding_only_a_registered_resource_needs_a_secrets_admins_confirmation() {
     let api = Api::new().await;
@@ -7261,4 +7292,55 @@ async fn a_permission_change_since_the_answer_held_gets_the_full_set() {
     assert_eq!((s, d["delta"].as_bool()), (StatusCode::OK, Some(false)), "{d}");
     assert_eq!(d["values"]["A"], "1");
     assert!(d["problems"].as_array().unwrap().iter().any(|p| p["key"] == "R"), "{d}");
+}
+
+#[tokio::test]
+async fn a_change_is_one_event_at_its_audit_rows_seq_naming_keys_and_versions_never_a_value() {
+    let api = Api::new().await;
+    let (a, b, p) = ("sk_live_changedA0123456789", "sk_live_changedB0123456789", "sk_live_changedP0123456789");
+    let start = api.ok(Method::GET, "/events?latest=1", None).await["next"].as_i64().unwrap();
+    // A bulk write is one row naming its keys, so one event; then production, a delete, and a
+    // policy change (not a value: `access.changed`).
+    let bulk = api.ok(Method::POST, "/environments/staging/changes", Some(json!({ "ops": [{ "op": "set", "key": "A", "value": a }, { "op": "set", "key": "B", "value": b }] }))).await;
+    api.set("production", "STRIPE_KEY", p).await;
+    api.ok(Method::DELETE, "/environments/staging/secrets/A", None).await;
+    api.ok(Method::PUT, "/environments/staging/policy", Some(json!({ "protected": true, "approvals": 0 }))).await;
+
+    let all = api.ok(Method::GET, &format!("/events?after={start}"), None).await;
+    let events = all["events"].as_array().unwrap();
+    let got: Vec<(&str, Option<&str>)> = events.iter().map(|e| (e["kind"].as_str().unwrap(), e["environment"].as_str())).collect();
+    assert_eq!(got, [("secret.changed", Some("staging")), ("secret.changed", Some("production")), ("secret.deleted", Some("staging")), ("access.changed", Some("staging"))], "{all}");
+    let change = bulk["change"]["seq"].as_i64().unwrap();
+    assert_eq!(events[0]["data"]["keys"], json!(["A", "B"]));
+    assert_eq!((&events[0]["data"]["versions"], &events[0]["data"]["via"], &events[0]["data"]["change"]), (&json!({ "A": 1, "B": 1 }), &json!("write"), &json!(change)));
+    assert_eq!((&events[2]["key"], &events[2]["data"]["version"]), (&json!("A"), &json!(2)));
+    // At its audit row's place in the chain.
+    let audit = api.ok(Method::GET, "/audit?action=secrets.write", None).await;
+    let row = audit.as_array().unwrap().iter().find(|r| r["summary"].as_str().unwrap().starts_with(&format!("#{change} "))).unwrap();
+    assert_eq!(row["seq"], events[0]["seq"]);
+    let text = all.to_string();
+    assert!(![a, b, p, "changedA", "changedB", "changedP"].iter().any(|v| text.contains(v)), "{text}");
+
+    // Filtered by family, and left out where the reader can't read.
+    let kinds = api.ok(Method::GET, &format!("/events?after={start}&kinds=secret.*"), None).await;
+    assert_eq!(kinds["events"].as_array().unwrap().iter().map(|e| e["kind"].as_str().unwrap()).collect::<Vec<_>>(), ["secret.changed", "secret.changed", "secret.deleted"]);
+    let token = api.token(json!({ "environments": ["staging"], "actions": ["read"] }));
+    let (_, mine) = api.req(Method::GET, &format!("/events?after={start}&kinds=secret.changed"), None, Some(&token)).await;
+    assert_eq!(mine["events"].as_array().unwrap().iter().map(|e| e["environment"].as_str().unwrap()).collect::<Vec<_>>(), ["staging"], "{mine}");
+}
+
+#[tokio::test]
+async fn a_rotation_now_is_rotation_succeeded_with_the_keys_new_version() {
+    let api = Api::new().await;
+    api.ok(Method::PUT, &format!("/v1/workspace/projects/{}/resources/bucket/assets", api.project), Some(json!({ "x": 0, "y": 0 }))).await;
+    let link = json!({ "kind": "bucket", "ref": "assets", "field": "secret_access_key", "mode": "managed" });
+    api.ok(Method::PUT, "/environments/staging/secrets/AWS_SECRET_ACCESS_KEY", Some(json!({ "link": link }))).await;
+    let start = api.ok(Method::GET, "/events?latest=1", None).await["next"].as_i64().unwrap();
+    api.ok(Method::POST, "/environments/staging/secrets/AWS_SECRET_ACCESS_KEY/rotate", None).await;
+    let events = api.ok(Method::GET, &format!("/events?after={start}"), None).await["events"].clone();
+    let got: Vec<(&str, &Value)> = events.as_array().unwrap().iter().map(|e| (e["kind"].as_str().unwrap(), &e["data"]["via"])).collect();
+    assert_eq!(got, [("secret.changed", &json!("rotation")), ("rotation.succeeded", &Value::Null)], "{events}");
+    let done = &events[1];
+    assert_eq!((&done["key"], &done["data"]["version"], &done["data"]["scheduled"]), (&json!("AWS_SECRET_ACCESS_KEY"), &json!(2), &json!(false)), "{done}");
+    assert!(!events.to_string().contains("sk-2"));
 }

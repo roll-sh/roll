@@ -276,11 +276,13 @@ fn cs_to_string(_: &mut Vm, a: &mut [Value]) -> VR {
 }
 
 fn cs_chars(vm: &mut Vm, a: &mut [Value]) -> VR {
+    crate::guard::check_new_elements(with_cs(&a[0], java::utf16_len))?;
     let items: Vec<Value> = with_cs(&a[0], |s| s.encode_utf16().map(|u| Value::Int(u as i32)).collect());
     crate::stream::int_stream(vm, items)
 }
 
 fn cs_code_points(vm: &mut Vm, a: &mut [Value]) -> VR {
+    crate::guard::check_new_elements(with_cs(&a[0], |s| s.chars().count()))?;
     let items: Vec<Value> = with_cs(&a[0], |s| s.chars().map(|c| Value::Int(c as i32)).collect());
     crate::stream::int_stream(vm, items)
 }
@@ -536,7 +538,7 @@ fn str_replace(_: &mut Vm, a: &mut [Value]) -> VR {
     let src = s(&a[0]);
     if target.is_empty() {
         // Java inserts the replacement between every char and at both ends
-        crate::guard::check_string(src.len().saturating_mul(repl.len() + 1).saturating_add(repl.len()))?;
+        crate::guard::check_new_string(src.len().saturating_mul(repl.len() + 1).saturating_add(repl.len()))?;
         let mut out = String::with_capacity(src.len() * (repl.len() + 1) + repl.len());
         out.push_str(&repl);
         for c in src.chars() {
@@ -547,15 +549,16 @@ fn str_replace(_: &mut Vm, a: &mut [Value]) -> VR {
     }
     if repl.len() > target.len() {
         let bound = src.len().saturating_add((src.len() / target.len()).saturating_mul(repl.len() - target.len()));
-        if bound > crate::guard::max_object_bytes() {
+        if bound > crate::guard::max_object_bytes() || !crate::guard::fits(bound) {
             let n = src.matches(target.as_str()).count();
-            crate::guard::check_string(src.len().saturating_add(n.saturating_mul(repl.len() - target.len())))?;
+            crate::guard::check_new_string(src.len().saturating_add(n.saturating_mul(repl.len() - target.len())))?;
         }
     }
     Ok(Value::string(src.replace(target.as_str(), &repl)))
 }
 
 fn str_to_char_array(_: &mut Vm, a: &mut [Value]) -> VR {
+    crate::guard::check_array(java::utf16_len(s(&a[0])) as u64, 2)?;
     let v: Vec<u16> = s(&a[0]).encode_utf16().collect();
     Ok(Value::obj(Obj::Array(JArray::from_data(Ty::CHAR, ArrayData::Char(v)))))
 }
@@ -798,6 +801,7 @@ fn str_copy_value_of3(_: &mut Vm, a: &mut [Value]) -> VR {
 }
 
 fn str_get_chars(_: &mut Vm, a: &mut [Value]) -> VR {
+    crate::guard::check_array(with_cs(&a[0], java::utf16_len) as u64, 2)?;
     let src: Vec<u16> = with_cs(&a[0], |s| s.encode_utf16().collect());
     let (b, e, db) = (int(&a[1]), int(&a[3 - 1]), int(&a[4]));
     let Value::Obj(o) = &a[3] else { return Err(npe("dst is null")) };
@@ -867,6 +871,7 @@ fn split_on_token(src: &str, token: &str, mut limit: i32) -> Result<Vec<String>,
     while limit != 1 {
         match src[pos..].find(token) {
             Some(i) => {
+                crate::guard::poll()?;
                 out.push(src[pos..pos + i].to_string());
                 pos += i + token.len();
             }
@@ -878,19 +883,19 @@ fn split_on_token(src: &str, token: &str, mut limit: i32) -> Result<Vec<String>,
     Ok(out)
 }
 
-fn string_array(items: Vec<String>) -> Value {
-    let v: Vec<Value> = items.into_iter().map(Value::string).collect();
-    Value::obj(Obj::Array(JArray::from_data(Ty::STRING, ArrayData::Ref(v))))
+fn string_array(items: Vec<String>) -> VR {
+    let v = crate::guard::string_values(items)?;
+    Ok(Value::obj(Obj::Array(JArray::from_data(Ty::STRING, ArrayData::Ref(v)))))
 }
 
 fn str_split_on_token(_: &mut Vm, a: &mut [Value]) -> VR {
     let t = string(&a[1], "length()")?.clone();
-    Ok(string_array(split_on_token(s(&a[0]), t.as_str(), -1)?))
+    string_array(split_on_token(s(&a[0]), t.as_str(), -1)?)
 }
 
 fn str_split_on_token2(_: &mut Vm, a: &mut [Value]) -> VR {
     let t = string(&a[1], "length()")?.clone();
-    Ok(string_array(split_on_token(s(&a[0]), t.as_str(), int(&a[2]))?))
+    string_array(split_on_token(s(&a[0]), t.as_str(), int(&a[2]))?)
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -2128,7 +2133,10 @@ fn sb_set_length(_: &mut Vm, a: &mut [Value]) -> VR {
         t.frames = frames(builder_frames(a[0].class(), "setLength"));
         return Err(t);
     }
-    crate::guard::check_string(n as usize)?;
+    // growing pads the builder to `n` chars, a size known before it is allocated
+    if n as usize > with_sb(&a[0], |s| s.len()) {
+        crate::guard::check_new_string(n as usize)?;
+    }
     with_sb(&a[0], |s| {
         if s.is_ascii() {
             if (n as usize) <= s.len() {
