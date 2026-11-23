@@ -143,6 +143,18 @@ pub fn open(args: &crate::Args, home: &std::path::Path, auth: &crate::auth::Auth
     // People's sessions from allowed networks only: the same client address the evaluator reads.
     let a = access.clone();
     auth.set_client_ip(Arc::new(move |req| roll_access::evaluate::client_ip(req, &a.config)));
+    // A tool whose server errors jumped: the admins mailed (one node, once in six hours per tool).
+    let a = access.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(300));
+        loop {
+            tick.tick().await;
+            let a = a.clone();
+            if let Ok(Err(e)) = tokio::task::spawn_blocking(move || a.activity_alerts()).await {
+                tracing::warn!(error = %e, "checking agent activity for failure jumps");
+            }
+        }
+    });
     // Old audit rows, decided approvals, spent codes and expired secrets go once an hour.
     let a = access.clone();
     tokio::spawn(async move {
