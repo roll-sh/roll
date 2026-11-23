@@ -3469,6 +3469,11 @@ impl Cursor {
     /// The head entry (not a tombstone) into `batch` under its first `ulen` key bytes (the
     /// user key), by reference; the cursor stays on it.
     fn push_head(&self, ulen: usize, batch: &mut batch::RowBatch) {
+        if let Cursor::Level { block: Some(b), .. } = self
+            && b.is_cols()
+        {
+            return self.push_head_col(ulen, batch);
+        }
         match self {
             Cursor::Mem { buf, .. } => {
                 let (k, v) = buf.front().expect("a head entry");
@@ -3476,15 +3481,18 @@ impl Cursor {
             }
             Cursor::Level { block, pos, .. } => {
                 let b = block.as_ref().expect("a head entry");
-                match b.is_cols() {
-                    false => b.push_value(pos, &pos.key()[..ulen], batch),
-                    true => {
-                        let buf = batch.buf_block(b);
-                        b.push_col(pos, &pos.key()[..ulen], buf, batch);
-                    }
-                }
+                b.push_value(pos, &pos.key()[..ulen], batch);
             }
         }
+    }
+
+    /// `push_head` of a column block's row (format 5), not made.
+    #[cold]
+    #[inline(never)]
+    fn push_head_col(&self, ulen: usize, batch: &mut batch::RowBatch) {
+        let Cursor::Level { block: Some(b), pos, .. } = self else { unreachable!("a column block") };
+        let buf = batch.buf_block(b);
+        b.push_col(pos, &pos.key()[..ulen], buf, batch);
     }
 
     /// Entries of the current block from the head on into `batch`, under their user keys,
@@ -3493,12 +3501,15 @@ impl Cursor {
     /// of a key after the last row pushed, a version at or before `ts`, not a deletion, and
     /// (`resolve`) without out-of-line values. Up to `max`; how many, and the last version.
     fn run_into(&mut self, ts: u64, bound: Option<&[u8]>, resolve: bool, batch: &mut batch::RowBatch, max: usize) -> (usize, u64) {
+        // (A column block's out of line at once, nothing live but the arguments.)
+        if let Cursor::Level { block: Some(b), .. } = self
+            && b.is_cols()
+        {
+            return self.run_into_cols(ts, bound, batch, max);
+        }
         let Cursor::Level { block: Some(b), pos, end, whole, .. } = self else {
             return (0, 0);
         };
-        if b.is_cols() {
-            return Cursor::run_into_cols(b, pos, *whole, end, ts, bound, batch, max);
-        }
         let (mut n, mut last) = (0, 0);
         // (Every entry of the block in range and no other source's entry before the block's
         // end: the rows after one pushed go a run at a time, `Block::run_rows`. With another
@@ -3541,9 +3552,13 @@ impl Cursor {
 
     /// `run_into` of a column block (format 5): its rows into the batch not made (`Block::
     /// run_rows_col`; none of them is stored out of line, none a deletion).
+    #[cold]
     #[inline(never)]
-    #[allow(clippy::too_many_arguments)]
-    fn run_into_cols(b: &Arc<sst::Block>, pos: &mut sst::BlockPos, whole: bool, end: &[u8], ts: u64, bound: Option<&[u8]>, batch: &mut batch::RowBatch, max: usize) -> (usize, u64) {
+    fn run_into_cols(&mut self, ts: u64, bound: Option<&[u8]>, batch: &mut batch::RowBatch, max: usize) -> (usize, u64) {
+        let Cursor::Level { block: Some(b), pos, end, whole, .. } = self else {
+            return (0, 0);
+        };
+        let (whole, end) = (*whole, end.as_slice());
         let (mut n, mut last) = (0, 0);
         let runs = (whole || end.is_empty()) && bound.is_none();
         let buf = batch.buf_block(b);
