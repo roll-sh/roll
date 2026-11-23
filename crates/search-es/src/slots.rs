@@ -26,7 +26,10 @@
 //!
 //! A caller that must do slow work between deciding and starting (a migration reads the remote's
 //! definitions and creates the index before its `_reindex`) [`Slots::reserve`]s: the slot is
-//! held from then on, and the same cluster's next [`Slots::try_take`] uses it.
+//! held from then on, and the same cluster's next [`Slots::try_take`] uses it. A reservation is
+//! the cluster's, not the call's: another `try_take` of the same cluster meanwhile (the tenant's
+//! own remote `_reindex`) uses it instead, and the reserving caller then takes or waits as anyone
+//! does. That costs only the cluster itself a slot it already holds, never another owner.
 //!
 //! A successful take wakes the next waiters too, so slots that free together all find a taker,
 //! and so does dropping a waiter that no longer counts. A waiter's check runs under the pool's
@@ -45,6 +48,8 @@ pub const PASSIVE_GRACE: Duration = Duration::from_secs(3);
 
 type Check = Arc<dyn Fn() -> bool + Send + Sync>;
 type Wake = Arc<dyn Fn() + Send + Sync>;
+/// Where a pool reads the time ([`Instant::now`]; tests turn it by hand).
+pub type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
 
 /// What a pool lets run at once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,10 +88,10 @@ impl Waiter {
         self.alive.is_none()
     }
 
-    fn counts(&self) -> bool {
+    fn counts(&self, now: Instant) -> bool {
         match &self.alive {
-            Some(check) => check() && self.woken.is_none_or(|t| t.elapsed() < WAKE_DEADLINE),
-            None => self.asked.elapsed() < RETRY_WINDOW,
+            Some(check) => check() && self.woken.is_none_or(|t| now.saturating_duration_since(t) < WAKE_DEADLINE),
+            None => now.saturating_duration_since(self.asked) < RETRY_WINDOW,
         }
     }
 
@@ -133,8 +138,9 @@ pub enum Full {
 /// A pool of slots.
 pub struct Slots {
     caps: Caps,
-    /// [`PASSIVE_GRACE`] (tests shorten it).
+    /// [`PASSIVE_GRACE`].
     grace: Duration,
+    clock: Clock,
     state: parking_lot::Mutex<State>,
 }
 
@@ -210,12 +216,16 @@ impl Drop for Permit {
 
 impl Slots {
     pub fn new(caps: Caps) -> Arc<Slots> {
-        Self::with_grace(caps, PASSIVE_GRACE)
+        Self::with_clock(caps, Arc::new(Instant::now))
     }
 
-    /// A pool whose 429'd callers' places hold a slot for `grace`.
-    pub fn with_grace(caps: Caps, grace: Duration) -> Arc<Slots> {
-        Arc::new(Slots { caps, grace, state: Default::default() })
+    /// A pool that reads the time from `clock`.
+    pub fn with_clock(caps: Caps, clock: Clock) -> Arc<Slots> {
+        Arc::new(Slots { caps, grace: PASSIVE_GRACE, clock, state: Default::default() })
+    }
+
+    fn now(&self) -> Instant {
+        (self.clock)()
     }
 
     pub fn caps(&self) -> Caps {
@@ -225,10 +235,11 @@ impl Slots {
     /// Drops the waiters that no longer count, and skips the 429'd callers' places whose grace
     /// ran out: whether any changed.
     fn prune(&self, st: &mut State) -> bool {
+        let now = self.now();
         let before = st.waiting.len();
-        st.waiting.retain(Waiter::counts);
+        st.waiting.retain(|w| w.counts(now));
         let mut changed = st.waiting.len() != before;
-        for w in st.waiting.iter_mut().filter(|w| w.passive() && w.woken.is_some_and(|t| t.elapsed() >= self.grace)) {
+        for w in st.waiting.iter_mut().filter(|w| w.passive() && w.woken.is_some_and(|t| now.saturating_duration_since(t) >= self.grace)) {
             w.woken = None;
             w.skipped = true;
             changed = true;
@@ -250,12 +261,13 @@ impl Slots {
             return Some(Full::Node(self.caps.node));
         }
         let free = self.caps.node - st.running;
+        let now = self.now();
         let State { owners, clusters, waiting, .. } = st;
         let mut held = 0;
         for w in waiting.iter_mut().take_while(|w| !w.is(key, owner, passive)) {
             if eligible(owners, clusters, self.caps, w) {
                 if w.passive() {
-                    w.woken.get_or_insert_with(Instant::now);
+                    w.woken.get_or_insert(now);
                 }
                 held += 1;
                 if held >= free {
@@ -301,11 +313,11 @@ impl Slots {
         Ok(Reservation(permit))
     }
 
-    fn queue(st: &mut State, key: &str, owner: &str, alive: Option<Check>, wake: Option<Wake>) {
+    fn queue(st: &mut State, now: Instant, key: &str, owner: &str, alive: Option<Check>, wake: Option<Wake>) {
         let passive = alive.is_none();
         match st.waiting.iter_mut().find(|w| w.is(key, owner, passive)) {
             Some(w) => {
-                w.asked = Instant::now();
+                w.asked = now;
                 w.skipped = false;
                 if alive.is_some() {
                     w.alive = alive;
@@ -314,7 +326,7 @@ impl Slots {
                     w.wake = wake;
                 }
             }
-            None => st.waiting.push_back(Waiter { key: key.to_string(), owner: owner.to_string(), alive, asked: Instant::now(), wake, woken: None, skipped: false }),
+            None => st.waiting.push_back(Waiter { key: key.to_string(), owner: owner.to_string(), alive, asked: now, wake, woken: None, skipped: false }),
         }
     }
 
@@ -342,7 +354,8 @@ impl Slots {
         };
         // A 429'd caller refused for its own cluster's cap waits for none of the node's slots.
         if !(passive && matches!(why, Full::Cluster(_))) {
-            Self::queue(&mut st, key, owner, alive, wake);
+            let now = self.now();
+            Self::queue(&mut st, now, key, owner, alive, wake);
         }
         drop(st);
         if pruned {
@@ -376,19 +389,27 @@ impl Slots {
     }
 
     /// Holds each free slot for the first eligible waiters, one each, and wakes those that are
-    /// newly holding one.
+    /// newly holding one. A 429'd caller's place that held a slot someone else took since (a
+    /// place ahead of it came back) holds none now, so its grace starts again when it next does.
     fn wake_next(&self) {
         let wakes: Vec<Wake> = {
             let mut guard = self.state.lock();
             self.prune(&mut guard);
+            let now = self.now();
             let st = &mut *guard;
             let free = self.caps.node.saturating_sub(st.running);
             let State { owners, clusters, waiting, .. } = st;
             let mut wakes = Vec::new();
-            for w in waiting.iter_mut().filter(|w| eligible(owners, clusters, self.caps, w)).take(free) {
-                if w.woken.is_none() {
-                    w.woken = Some(Instant::now());
-                    wakes.extend(w.wake.clone());
+            let mut held = 0;
+            for w in waiting.iter_mut().filter(|w| eligible(owners, clusters, self.caps, w)) {
+                if held < free {
+                    held += 1;
+                    if w.woken.is_none() {
+                        w.woken = Some(now);
+                        wakes.extend(w.wake.clone());
+                    }
+                } else if w.passive() {
+                    w.woken = None;
                 }
             }
             wakes
@@ -406,6 +427,13 @@ mod tests {
 
     fn caps(node: usize, owner: usize) -> Caps {
         Caps { node, owner, cluster: owner }
+    }
+
+    /// A clock turned by hand: the time, and how to move it on.
+    fn hand_clock() -> (Clock, impl Fn(Duration)) {
+        let (start, past) = (Instant::now(), Arc::new(parking_lot::Mutex::new(Duration::ZERO)));
+        let read = past.clone();
+        (Arc::new(move || start + *read.lock()), move |d: Duration| *past.lock() += d)
     }
 
     fn waiter(woken: &Arc<AtomicUsize>) -> (Check, Wake) {
@@ -475,8 +503,8 @@ mod tests {
     /// and a slot held for it goes to the next caller once its short grace is over.
     #[test]
     fn a_refused_request_that_never_retries_holds_a_freed_slot_only_briefly() {
-        let grace = Duration::from_millis(500);
-        let slots = Slots::with_grace(Caps { node: 1, owner: 1, cluster: 1 }, grace);
+        let (clock, pass) = hand_clock();
+        let slots = Slots::with_clock(Caps { node: 1, owner: 1, cluster: 1 }, clock);
         let bob = slots.try_take("blog", "bob").unwrap();
         // Bob's own cluster asking again waits for no slot of the node's (it holds its cap).
         assert_eq!(slots.try_take("blog", "bob").unwrap_err(), Full::Cluster(1));
@@ -487,8 +515,9 @@ mod tests {
         assert_eq!(slots.queued(), ["m1", "shop"], "one place per owner, none for a cluster at its cap");
         // Bob's task ends: the slot is held for Mallory's place, briefly.
         drop(bob);
+        pass(PASSIVE_GRACE - Duration::from_millis(1));
         assert_eq!(slots.try_take("shop", "dave").unwrap_err(), Full::Queue);
-        std::thread::sleep(grace + Duration::from_millis(100));
+        pass(Duration::from_millis(1));
         let _dave = slots.try_take("shop", "dave").expect("Mallory's grace is over");
         assert_eq!(slots.queued(), ["m1"], "Mallory keeps her position, skipped until she asks again");
     }
@@ -498,13 +527,13 @@ mod tests {
     /// migration's reservation holds its slot until its `_reindex` takes it.
     #[test]
     fn a_retrier_past_its_grace_keeps_its_turn_and_a_reservation_holds_the_slot() {
-        let grace = Duration::from_millis(500);
-        let slots = Slots::with_grace(Caps { node: 1, owner: 2, cluster: 2 }, grace);
+        let (clock, pass) = hand_clock();
+        let slots = Slots::with_clock(Caps { node: 1, owner: 2, cluster: 2 }, clock);
         let bob = slots.try_take("blog", "bob").unwrap();
         assert_eq!(slots.try_take("shop", "alice").unwrap_err(), Full::Node(1));
         assert_eq!(slots.try_take("wiki", "dave").unwrap_err(), Full::Node(1));
         drop(bob);
-        std::thread::sleep(grace + Duration::from_millis(100));
+        pass(PASSIVE_GRACE + Duration::from_secs(1));
         // Alice asked first: back after her grace, the slot is still hers before Dave's.
         let reserved = slots.reserve("shop", "alice").expect("Alice's turn");
         assert_eq!(slots.try_take("wiki", "dave").unwrap_err(), Full::Node(1));

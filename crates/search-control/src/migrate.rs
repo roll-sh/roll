@@ -199,6 +199,10 @@ fn remote_error(host: &str, e: search_es::EsError) -> ControlError {
     if e.kind == "circuit_breaking_exception" || e.reason().starts_with("Remote responded with a chunk that was too large") {
         return ControlError::Invalid(format!("the answer from {host} is larger than roll reads here at once (roll's limit)"));
     }
+    // roll's own names haven't resolved yet (just after a restart): try again shortly.
+    if e.status == 503 && e.reason() == search_es::egress::NOT_READY {
+        return ControlError::Busy(e.reason().to_string());
+    }
     let transport = matches!(&*e.kind, "connect_exception" | "unknown_host_exception" | "s_s_l_handshake_exception" | "socket_timeout_exception" | "i_o_exception");
     if transport {
         return ControlError::Invalid(format!("couldn't reach the remote at {host}"));
@@ -348,6 +352,10 @@ impl Control {
         // doesn't resolve fails later, at a call, through `remote_error`.)
         let refused = |e: search_es::EsError| {
             let reason = e.reason();
+            // roll's own names haven't resolved yet (just after a restart): try again shortly.
+            if e.status == 503 {
+                return ControlError::Busy(reason.to_string());
+            }
             if reason.contains("private address") || reason.contains("may not reach") || reason.contains("blocked in") || reason.contains("not whitelisted") {
                 ControlError::Invalid(format!("couldn't reach the remote at {host}"))
             } else {
@@ -536,6 +544,12 @@ impl Control {
     /// tasks the migration starts need it), read and written under the settings lock.
     async fn whitelist_host(&self, id: &str, r: &Remote) -> Result<SearchCluster> {
         let pattern = format!("{}:{}", r.host.to_ascii_lowercase().trim_end_matches('.'), r.port);
+        // Already there (a later call for copies still waiting): no write, which would save and
+        // apply the cluster's spec again.
+        let current = self.get(id).await?;
+        if current.reindex_whitelist.contains(&pattern) {
+            return Ok(current);
+        }
         self.update_with(id, crate::store::Caps::NONE, |c| {
             if c.reindex_whitelist.contains(&pattern) {
                 return Ok(());
@@ -703,7 +717,9 @@ impl Control {
         }
         let (status, v) = self.call_json(c, "POST", &path, Some(&body)).await;
         if status == 429 {
-            // Another copy took the last slot meanwhile: the empty copy goes, the index waits.
+            // Its reservation was used meanwhile by another remote `_reindex` of this cluster
+            // (reservations are the cluster's, not the call's: `search_es::slots::Reservation`), and
+            // no slot was free: the empty copy goes, the index waits.
             progress.removing = true;
             let (deleted, _) = self.call_json(c, "DELETE", &format!("/{}", urlencoding::encode(dest)), None).await;
             if deleted != 200 {
@@ -711,7 +727,7 @@ impl Control {
             }
             progress.created = false;
             names.remove(dest);
-            return Ok(json!({ "queued": true, "reason": "every task slot was taken meanwhile" }));
+            return Ok(json!({ "queued": true, "reason": "another copy of this cluster took its task slot meanwhile" }));
         }
         let Some(task) = v["task"].as_str().filter(|_| status == 200) else {
             let reason = v.pointer("/error/reason").and_then(Value::as_str).unwrap_or("starting the reindex failed");

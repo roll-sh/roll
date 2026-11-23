@@ -4818,6 +4818,9 @@ async fn a_migration_is_bounded() {
     let source = json!({ "host": e.es, "username": old, "password": old_pw });
     let started = e.post("/v1/search/clusters/dst/migrate", json!({ "source": source, "indices": [{ "index": "a" }, { "index": "b" }, { "index": "c" }], "requests_per_second": 0.0001 })).await;
     let rows = started["indices"].as_array().unwrap();
+    // Each copy reserves a task slot before reading the remote's definitions, and its `_reindex`
+    // uses that reservation: with two slots per cluster, `b` starts only because `a`'s
+    // reservation became `a`'s task rather than being held besides it.
     assert!(rows[0]["task"].is_string() && rows[1]["task"].is_string(), "{started}");
     assert_eq!((rows[2]["queued"].as_bool(), rows[2]["created"].as_bool()), (Some(true), None), "{started}");
     let (_, c) = e.call(Method::POST, "/v1/search/clusters/dst/request", Some(json!({ "method": "HEAD", "path": "/c" }))).await;
@@ -4827,7 +4830,7 @@ async fn a_migration_is_bounded() {
         e.call(Method::POST, "/v1/search/clusters/dst/request", Some(json!({ "method": "POST", "path": format!("/_tasks/{t}/_cancel") }))).await;
         e.call(Method::POST, "/v1/search/clusters/dst/request", Some(json!({ "method": "GET", "path": format!("/_tasks/{t}?wait_for_completion=true&timeout=10s") }))).await;
     }
-    // The slots are free again: the waiting index starts.
+    // The slots are free again (no reservation outlived its copy): the waiting index starts.
     let again = e.post("/v1/search/clusters/dst/migrate", json!({ "source": source, "indices": [{ "index": "c" }] })).await;
     assert!(again["indices"][0]["task"].is_string(), "{again}");
 }
