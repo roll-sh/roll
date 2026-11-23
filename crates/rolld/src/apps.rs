@@ -638,17 +638,9 @@ impl Resources for RollResources {
 
     async fn link_vars(&self, kind: LinkKind, r#ref: &str) -> anyhow::Result<Vec<(String, String)>> {
         match kind {
-            // A tasks tenant: where its API is (as roll previews' tenant branch names it) and its
-            // signing keys, read at each deploy (a rotation's next key goes out before it's used).
-            LinkKind::Tasks => {
-                let keys = self.tasks_call(axum::http::Method::GET, format!("{}/v1/tasks/keys", tasks_prefix(r#ref)), None).await.map_err(|e| anyhow::anyhow!("tasks tenant {}: {e}", r#ref))?;
-                let base = format!("{}{}", self.api.0.trim_end_matches('/'), tasks_prefix(r#ref));
-                Ok(vec![
-                    ("ROLL_TASKS_URL".into(), base),
-                    ("ROLL_TASKS_SIGNING_KEY".into(), keys["current"].as_str().unwrap_or_default().to_string()),
-                    ("ROLL_TASKS_NEXT_SIGNING_KEY".into(), keys["next"].as_str().unwrap_or_default().to_string()),
-                ])
-            }
+            // A tasks tenant: where its API is (as roll previews' tenant branch names it). Its
+            // signing keys only the link's own key reads ([`Resources::link_vars_as`]).
+            LinkKind::Tasks => Ok(vec![("ROLL_TASKS_URL".into(), format!("{}{}", self.api.0.trim_end_matches('/'), tasks_prefix(r#ref)))]),
             LinkKind::Postgres => {
                 let c = self.postgres.clone().ok_or_else(|| anyhow::anyhow!("roll postgres isn't on this node"))?;
                 let r = r#ref.to_string();
@@ -687,12 +679,31 @@ impl Resources for RollResources {
     /// A bucket's, a stream's or a search cluster's link gets credentials of its own (a key named
     /// for the service; a search key has data access only, never the cluster's password), made once, revoked when the link goes; only those are kept with the link, and
     /// what's read (an endpoint, NoSQL's login, a database's URL) is read again at each deploy.
+    /// A tasks tenant's signing keys, read at each deploy as the tenant (its link's own key, over
+    /// rolld's API: the tenant's routes take its own keys), so a rotation's next key goes out
+    /// before it's used.
+    async fn link_vars_as(&self, kind: LinkKind, r#ref: &str, minted: &[(String, String)]) -> anyhow::Result<Vec<(String, String)>> {
+        let mut vars = self.link_vars(kind, r#ref).await?;
+        if kind != LinkKind::Tasks {
+            return Ok(vars);
+        }
+        let token = minted.iter().find(|(k, _)| k == "ROLL_TASKS_TOKEN").map(|(_, v)| v.clone()).ok_or_else(|| anyhow::anyhow!("the tasks link has no key of its own: link it again"))?;
+        let (base, _, http) = &self.api;
+        let resp = http.get(format!("{}{}/v1/tasks/keys", base.trim_end_matches('/'), tasks_prefix(r#ref))).bearer_auth(token).send().await?;
+        anyhow::ensure!(resp.status().is_success(), "tasks tenant {}: its keys answered {}", r#ref, resp.status());
+        let keys: serde_json::Value = resp.json().await?;
+        vars.push(("ROLL_TASKS_SIGNING_KEY".into(), keys["current"].as_str().unwrap_or_default().to_string()));
+        vars.push(("ROLL_TASKS_NEXT_SIGNING_KEY".into(), keys["next"].as_str().unwrap_or_default().to_string()));
+        Ok(vars)
+    }
+
     async fn link(&self, kind: LinkKind, r#ref: &str, service: &str, options: &apps_control::integrations::LinkOptions) -> anyhow::Result<Option<apps_control::integrations::Minted>> {
         // A tasks tenant: an API key of the service's own, never the tenant's first one.
         if kind == LinkKind::Tasks {
             let k = self.tasks_call(axum::http::Method::POST, format!("/_roll/tenants/{}/keys", urlencoding::encode(r#ref)), Some(serde_json::json!({ "name": format!("roll apps {service}") }))).await?;
             let (Some(id), Some(token)) = (k["id"].as_str(), k["token"].as_str()) else { anyhow::bail!("roll tasks made no key") };
-            return Ok(Some(apps_control::integrations::Minted { vars: vec![("ROLL_TASKS_TOKEN".into(), token.to_string())], kept: serde_json::json!({ "tasks_key": id }).to_string() }));
+            // Kept (sealed, as every link's) with its token: the tenant's routes take its own keys.
+            return Ok(Some(apps_control::integrations::Minted { vars: vec![("ROLL_TASKS_TOKEN".into(), token.to_string())], kept: serde_json::json!({ "tasks_key": id, "token": token }).to_string() }));
         }
         if !matches!(kind, LinkKind::Bucket | LinkKind::Stream | LinkKind::Nosql | LinkKind::Search | LinkKind::Queue) {
             return Ok(None);
@@ -740,9 +751,19 @@ impl Resources for RollResources {
 
     async fn unlink(&self, kind: LinkKind, r#ref: &str, kept: &str) -> anyhow::Result<()> {
         if kind == LinkKind::Tasks {
-            let id = serde_json::from_str::<serde_json::Value>(kept).ok().and_then(|v| v["tasks_key"].as_str().map(str::to_string));
-            let Some(id) = id else { return Ok(()) };
-            return self.tasks_call(axum::http::Method::DELETE, format!("{}/v1/tasks/api-keys/{}", tasks_prefix(r#ref), urlencoding::encode(&id)), None).await.map(|_| ());
+            let kept: serde_json::Value = serde_json::from_str(kept).unwrap_or_default();
+            let Some(id) = kept["tasks_key"].as_str() else { return Ok(()) };
+            let path = format!("{}/v1/tasks/api-keys/{}", tasks_prefix(r#ref), urlencoding::encode(id));
+            // As the tenant, with the key itself; a link kept before its token was, as the operator.
+            return match kept["token"].as_str() {
+                Some(token) => {
+                    let (base, _, http) = &self.api;
+                    let resp = http.delete(format!("{}{path}", base.trim_end_matches('/'))).bearer_auth(token).send().await?;
+                    anyhow::ensure!(resp.status().is_success() || resp.status() == reqwest::StatusCode::NOT_FOUND, "tasks tenant {}: deleting its key answered {}", r#ref, resp.status());
+                    Ok(())
+                }
+                None => self.tasks_call(axum::http::Method::DELETE, path, None).await.map(|_| ()),
+            };
         }
         let Some(p) = crate::secrets::link_provider(&self.products, kind.as_str()) else { return Ok(()) };
         let handles: Vec<serde_json::Value> = serde_json::from_str(kept).unwrap_or_default();
@@ -1156,9 +1177,11 @@ mod tests {
     }
 
     /// A roll tasks tenant's link gets an API key of its own (never the tenant's first), its URL
-    /// as roll previews' tenant branch names it and its signing keys; unlinking deletes the key.
+    /// as roll previews' tenant branch names it, and its signing keys read with that key (the
+    /// tenant's routes take only its own keys); unlinking deletes the key.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_tasks_link_gets_a_key_of_its_own_and_the_signing_keys() {
+        use axum::response::IntoResponse;
         let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let (s1, s2) = (seen.clone(), seen.clone());
         let router = axum::Router::new()
@@ -1166,19 +1189,30 @@ mod tests {
                 s1.lock().unwrap().push(format!("key {t} {}", b["name"]));
                 (axum::http::StatusCode::CREATED, axum::Json(serde_json::json!({ "id": "key_9", "name": b["name"], "token": "rtk_own" })))
             }))
-            .route("/t/{id}/v1/tasks/keys", get(|| async { axum::Json(serde_json::json!({ "current": "whsec_now", "next": "whsec_next", "rotated_at": 1 })) }))
+            .route("/t/{id}/v1/tasks/keys", get(|h: axum::http::HeaderMap| async move {
+                // As real roll tasks: the tenant's own key, or a 401.
+                match h.get("authorization").and_then(|v| v.to_str().ok()) {
+                    Some("Bearer rtk_own") => axum::Json(serde_json::json!({ "current": "whsec_now", "next": "whsec_next", "rotated_at": 1 })).into_response(),
+                    _ => axum::http::StatusCode::UNAUTHORIZED.into_response(),
+                }
+            }))
             .route("/t/{id}/v1/tasks/api-keys/{key}", delete(move |axum::extract::Path((t, k)): axum::extract::Path<(String, String)>| async move {
                 s2.lock().unwrap().push(format!("deleted {t} {k}"));
                 axum::http::StatusCode::NO_CONTENT
             }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(axum::serve(listener, router.clone()).into_future());
         let products = crate::secrets::Api::default();
         products.set(router);
-        let r = RollResources { postgres: None, redis: None, api: ("http://127.0.0.1:7070".into(), None, reqwest::Client::new()), products, branches: None };
+        let r = RollResources { postgres: None, redis: None, api: (base.clone(), None, reqwest::Client::new()), products, branches: None };
         let m = r.link(LinkKind::Tasks, "shop", "svc_a", &Default::default()).await.unwrap().expect("a key of its own");
         assert_eq!(m.vars, [("ROLL_TASKS_TOKEN".to_string(), "rtk_own".to_string())]);
-        let vars: std::collections::BTreeMap<String, String> = r.link_vars(LinkKind::Tasks, "shop").await.unwrap().into_iter().collect();
-        assert_eq!(vars.get("ROLL_TASKS_URL").map(String::as_str), Some("http://127.0.0.1:7070/t/shop"));
+        let vars: std::collections::BTreeMap<String, String> = r.link_vars_as(LinkKind::Tasks, "shop", &m.vars).await.unwrap().into_iter().collect();
+        assert_eq!(vars.get("ROLL_TASKS_URL"), Some(&format!("{base}/t/shop")));
         assert_eq!((vars.get("ROLL_TASKS_SIGNING_KEY").map(String::as_str), vars.get("ROLL_TASKS_NEXT_SIGNING_KEY").map(String::as_str)), (Some("whsec_now"), Some("whsec_next")));
+        // Listing what it sets reads no key with anyone's credentials.
+        assert_eq!(r.link_vars(LinkKind::Tasks, "shop").await.unwrap().len(), 1);
         r.unlink(LinkKind::Tasks, "shop", &m.kept).await.unwrap();
         assert_eq!(*seen.lock().unwrap(), [r#"key shop "roll apps svc_a""#, "deleted shop key_9"]);
     }
