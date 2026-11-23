@@ -351,7 +351,7 @@ impl search_es::remote::links::Links for InflatedRemote {
             let groups: Vec<String> = (0..self.groups).map(|i| format!(r#"[["h{i}"],[["q",[["{one}",20000]]]]]"#)).collect();
             format!(r#"{{"__roll_esql_part":{{"shards":1,"enrich":[],"columns":[["host","keyword"],["latency","double"]],"groups":[{}]}}}}"#, groups.join(","))
         };
-        Ok(search_es::rest::EsResponse { status: 200, headers: vec![("content-type".into(), "application/json".into())], body: body.into(), head: false })
+        Ok(search_es::rest::EsResponse { status: 200, headers: vec![("content-type".into(), "application/json".into())], body: body.into(), head: false, stream: None })
     }
 }
 
