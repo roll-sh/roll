@@ -767,10 +767,29 @@ pub fn decode_cols(
     // (The batch's parts borrowed apart: the loops keep them in registers.)
     let ColBatch { cols, bufs, ext: exts, own, .. } = out;
     let cols = &mut cols[..upto];
-    match batch.col_runs().is_empty() {
-        true => decode_rows::<false>(batch, rows, types, missing, cols, bufs, exts, own, upto),
-        false => decode_rows::<true>(batch, rows, types, missing, cols, bufs, exts, own, upto),
+    match batch.has_col_rows() {
+        false => decode_rows::<false>(batch, rows, types, missing, cols, bufs, exts, own, upto),
+        true => decode_mixed(batch, rows, types, missing, cols, bufs, exts, own, upto),
     }
+}
+
+/// `decode_rows` of a batch with rows of column blocks (out of line: the walk of one
+/// without them compiles as before).
+#[cold]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn decode_mixed(
+    batch: &RowBatch,
+    rows: std::ops::Range<usize>,
+    types: &[DataType],
+    missing: &[Value],
+    cols: &mut [Option<Col>],
+    bufs: &mut Vec<Bytes>,
+    exts: &mut Vec<u32>,
+    own: &mut Vec<u8>,
+    upto: usize,
+) -> Result<()> {
+    decode_rows::<true>(batch, rows, types, missing, cols, bufs, exts, own, upto)
 }
 
 /// `decode_cols`' rows (`MIXED`: some are column blocks' (format 5), copied from their columns
@@ -799,7 +818,7 @@ fn decode_rows<const MIXED: bool>(
     let all_left = match plan {
         Some((mut steps, strs)) => {
             for (r, i) in rows.clone().enumerate() {
-                let (bytes, inbuf) = batch.value_in(i);
+                let (bytes, inbuf) = batch.value_in_plain(i);
                 let buf = match (strs, inbuf) {
                     (true, Some((b, at))) => {
                         let last = bufs.last().unwrap();
@@ -822,7 +841,7 @@ fn decode_rows<const MIXED: bool>(
         None => true,
     };
     let mut row = |r: usize, i: usize| -> Result<()> {
-        let (bytes, inbuf) = batch.value_in(i);
+        let (bytes, inbuf) = if MIXED { batch.value_in(i) } else { batch.value_in_plain(i) };
         let ext = matches!(bytes.first(), Some(&(ROW_HEADER_EXT | ROW_HEADER_TID_EXT)));
         if ext {
             exts.push(r as u32);

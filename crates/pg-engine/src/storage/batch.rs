@@ -164,8 +164,33 @@ impl RowBatch {
         if i == 0 { 0 } else { self.ents[i - 1].key_end as usize }
     }
 
+    /// Whether some row is a column block's (`lazy`): the accessors then go the way that
+    /// makes it (`*_lazy`), a jump at their start; without, they are what they were before
+    /// format 5.
+    #[inline(always)]
+    pub fn has_col_rows(&self) -> bool {
+        !self.lazy.is_empty()
+    }
+
     /// Row `i`'s key and value.
     pub fn get(&self, i: usize) -> (&[u8], &[u8]) {
+        if self.has_col_rows() {
+            return self.get_lazy(i);
+        }
+        let e = self.ents[i];
+        let k = &self.keys[self.key_start(i)..e.key_end as usize];
+        let (o, l) = (e.off as usize, e.len as usize);
+        let v = match e.buf {
+            OWN => &self.own[o..o + l],
+            b => &self.bufs[b as usize][o..o + l],
+        };
+        (k, v)
+    }
+
+    /// `get` of a batch with rows of column blocks.
+    #[cold]
+    #[inline(never)]
+    fn get_lazy(&self, i: usize) -> (&[u8], &[u8]) {
         let e = self.ents[i];
         let k = &self.keys[self.key_start(i)..e.key_end as usize];
         let (o, l) = (e.off as usize, e.len as usize);
@@ -183,6 +208,31 @@ impl RowBatch {
     /// the batch's own buffer, valid until it is cleared).
     #[inline]
     pub fn value_in(&self, i: usize) -> (&[u8], Option<(&Bytes, usize)>) {
+        if self.has_col_rows() {
+            return self.value_in_lazy(i);
+        }
+        self.value_in_plain(i)
+    }
+
+    /// `value_in` of a batch without rows of column blocks (`has_col_rows` false: a reader
+    /// that checked it once for the batch).
+    #[inline]
+    pub fn value_in_plain(&self, i: usize) -> (&[u8], Option<(&Bytes, usize)>) {
+        let e = self.ents[i];
+        let (o, l) = (e.off as usize, e.len as usize);
+        match e.buf {
+            OWN => (&self.own[o..o + l], None),
+            b => {
+                let buf = &self.bufs[b as usize];
+                (&buf[o..o + l], Some((buf, o)))
+            }
+        }
+    }
+
+    /// `value_in` of a batch with rows of column blocks.
+    #[cold]
+    #[inline(never)]
+    fn value_in_lazy(&self, i: usize) -> (&[u8], Option<(&Bytes, usize)>) {
         let e = self.ents[i];
         let (o, l) = (e.off as usize, e.len as usize);
         match e.buf {
@@ -245,10 +295,8 @@ impl RowBatch {
         let (o, l) = (e.off as usize, e.len as usize);
         let v = match e.buf {
             OWN => Bytes::copy_from_slice(&self.own[o..o + l]),
-            b => match &self.bufs[b as usize] {
-                buf if o + l <= buf.len() => buf.slice(o..o + l),
-                _ => self.lazy_row(i).clone(),
-            },
+            b if self.has_col_rows() && o + l > self.bufs[b as usize].len() => self.lazy_row(i).clone(),
+            b => self.bufs[b as usize].slice(o..o + l),
         };
         Some((k, v))
     }
