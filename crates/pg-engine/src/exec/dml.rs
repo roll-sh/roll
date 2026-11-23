@@ -4540,6 +4540,9 @@ impl InsertNode {
         let r = match r {
             Err(e) if at_flush => {
                 self.copy_err.get_or_insert(e);
+                if let Some(l) = &self.copy_load {
+                    l.clashed();
+                }
                 Ok(None)
             }
             r => r,
@@ -4576,6 +4579,9 @@ impl InsertNode {
                 // (heap_multi_insert counts the buffer's rows as it is flushed.)
                 self.flush_plain_counts(ctx);
                 if let Some(e) = self.copy_err.take() {
+                    if let Some(l) = &self.copy_load {
+                        l.flush_failed(ctx);
+                    }
                     return Err(e);
                 }
             }
@@ -4990,8 +4996,11 @@ impl Node for InsertNode {
             };
             let Some(src) = next else {
                 self.flush_plain_counts(ctx);
-                // (The last buffer's flush.)
+                // (The last buffer's flush: its rows stay, dead, when it fails.)
                 if let Some(e) = self.copy_err.take() {
+                    if let Some(l) = &self.copy_load {
+                        l.flush_failed(ctx);
+                    }
                     return Err(e);
                 }
                 self.done = true;

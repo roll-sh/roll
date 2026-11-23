@@ -66,6 +66,11 @@ impl<'a> Tids<'a> {
     pub fn to_vec(self) -> Vec<Tid> {
         self.iter().collect()
     }
+
+    /// Packed, 6 bytes a TID (`Leaf::push_packed` takes them so).
+    pub fn bytes(&self) -> &'a [u8] {
+        self.0
+    }
 }
 
 const HEAD: usize = 3;
@@ -211,20 +216,6 @@ impl Leaf {
         (0..self.len()).map(|i| self.get(i))
     }
 
-    /// The first item for which `f` is false (`slice::partition_point`).
-    pub fn partition_point(&self, mut f: impl FnMut(ItemRef) -> bool) -> usize {
-        let (mut lo, mut hi) = (0, self.len());
-        while lo < hi {
-            let mid = (lo + hi) / 2;
-            if f(self.get(mid)) {
-                lo = mid + 1;
-            } else {
-                hi = mid;
-            }
-        }
-        lo
-    }
-
     pub fn set_dead(&mut self, i: usize) {
         self.unplain();
         let a = self.at[i] as usize;
@@ -249,9 +240,11 @@ impl Leaf {
         }
         self.buf.push(dead as u8);
         self.buf.extend_from_slice(&(tids.len() as u16).to_le_bytes());
-        for &(b, o) in tids {
-            self.buf.extend_from_slice(&b.to_le_bytes());
-            self.buf.extend_from_slice(&o.to_le_bytes());
+        let t = self.buf.len();
+        self.buf.resize(t + 6 * tids.len(), 0);
+        for (c, &(b, o)) in self.buf[t..].as_chunks_mut::<6>().0.iter_mut().zip(tids) {
+            c[..4].copy_from_slice(&b.to_le_bytes());
+            c[4..].copy_from_slice(&o.to_le_bytes());
         }
         self.buf.extend_from_slice(k);
         self.live += !dead as u32;
@@ -262,6 +255,40 @@ impl Leaf {
     pub fn push_parts(&mut self, dead: bool, tids: &[Tid], k: &[u8]) {
         let a = self.encode(dead, tids, k);
         self.at.push(a);
+    }
+
+    /// An empty page laid out item by item, with room for `bytes` of items and `n` items: a
+    /// pass that lays a page out anew (deduplication, a split) appends to it, then `plain`.
+    pub fn with_capacity(bytes: usize, n: usize) -> Leaf {
+        Leaf { buf: Vec::with_capacity(bytes), at: Vec::with_capacity(n), garbage: 0, live: 0, stride: 0 }
+    }
+
+    /// The bytes its items take laid out item by item (`with_capacity` for a copy).
+    pub fn packed_len(&self) -> usize {
+        match self.stride {
+            0 => self.buf.len() - self.garbage,
+            _ => self.buf.len() + HEAD * self.len(),
+        }
+    }
+
+    /// Append item `i` of `from` as it is (its LP_DEAD mark, TIDs and key), unpacked into
+    /// nothing owned.
+    pub fn push_from(&mut self, from: &Leaf, i: usize) {
+        let it = from.get(i);
+        self.push_packed(it.dead, it.tids.0, it.key.as_bytes());
+    }
+
+    /// Append an item of these TIDs, packed (`Tids::bytes`), and key encoding.
+    pub fn push_packed(&mut self, dead: bool, tids: &[u8], k: &[u8]) {
+        self.unplain();
+        let a = self.buf.len();
+        assert!(a + HEAD + tids.len() + k.len() <= u32::MAX as usize, "leaf page bytes");
+        self.buf.push(dead as u8);
+        self.buf.extend_from_slice(&((tids.len() / 6) as u16).to_le_bytes());
+        self.buf.extend_from_slice(tids);
+        self.buf.extend_from_slice(k);
+        self.live += !dead as u32;
+        self.at.push(a as u32);
     }
 
     pub fn insert(&mut self, i: usize, it: &Item) {

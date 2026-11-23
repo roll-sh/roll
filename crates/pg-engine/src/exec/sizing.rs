@@ -691,6 +691,9 @@ impl Defer {
 struct Batch {
     rows: Vec<Pending>,
     bytes: usize,
+    /// A row of it failed its unique or exclusion check (`CopyLoad::clashed`): the rows
+    /// after it wait without index entries.
+    clashed: bool,
 }
 
 /// A COPY's multi-insert buffer: by database instance, table and transaction.
@@ -2842,7 +2845,12 @@ pub fn inserted_with(
     // COPY's multi-insert buffer: the row waits for its batch.
     let mut parts = Some((exts, entries, gist));
     if with_batch((db.instance, t.oid, txn), |b| {
-        let (exts, entries, gist) = parts.take().expect("parts");
+        let (exts, mut entries, mut gist) = parts.take().expect("parts");
+        // (After a clash in the buffer, the flush's error stops before their entries.)
+        if b.clashed {
+            entries.clear();
+            gist.clear();
+        }
         b.rows.push(Pending { key: key.to_vec(), len, exts, entries, gist });
     })
     .is_some()
@@ -6372,6 +6380,9 @@ pub struct CopyLoad {
     held: std::cell::Cell<bool>,
     /// Storing held rows failed: the load's error.
     failed: std::cell::RefCell<Option<crate::error::Error>>,
+    /// The statement fails as its buffer is flushed (`flush_failed`): its rows are modelled,
+    /// not stored or stamped.
+    failing: std::cell::Cell<bool>,
 }
 
 impl CopyLoad {
@@ -6432,6 +6443,7 @@ impl CopyLoad {
             toast: t.toast,
             held: Default::default(),
             failed: Default::default(),
+            failing: Default::default(),
         }
     }
 
@@ -6477,6 +6489,21 @@ impl CopyLoad {
         self.failed.take().map_or(Ok(full), Err)
     }
 
+    /// A row of the buffer failed its unique or exclusion check (its heap tuple waits with
+    /// the index entries made before the clash): the rows after it wait without entries, as
+    /// the flush's error stops ExecInsertIndexTuples at the clashing row.
+    pub fn clashed(&self) {
+        with_batch(self.batch_key(), |b| b.clashed = true);
+    }
+
+    /// The buffer's flush fails the statement (a unique or exclusion violation in it): its
+    /// rows went into the heap before their index entries (CopyMultiInsertBufferFlush's
+    /// heap_multi_insert), so they stay as dead tuples, placed as the flush places them.
+    pub fn flush_failed(&self, ctx: &ExecCtx) {
+        self.failing.set(true);
+        self.flush(ctx);
+    }
+
     fn batch_key(&self) -> BatchKey {
         (self.db.instance, self.key.0, self.key.1)
     }
@@ -6484,6 +6511,7 @@ impl CopyLoad {
     fn flush(&self, ctx: &ExecCtx) {
         let Some(rows) = with_batch(self.batch_key(), |b| {
             b.bytes = 0;
+            b.clashed = false;
             std::mem::take(&mut b.rows)
         }) else {
             return;
@@ -6522,7 +6550,7 @@ impl CopyLoad {
             d.modelled += rows.len();
         }
         drop(rf);
-        self.model(vec![rows], true, xid, cid, Some(ctx));
+        self.model(vec![rows], true, xid, cid, (!self.failing.get()).then_some(ctx));
     }
 
     /// Put rows in the model as they went in: each batch a multi-insert (`multi`; its tuples
@@ -6622,18 +6650,25 @@ impl CopyLoad {
 /// heap (`untrack`) as they leave it, placed as they went in (a multi-insert's pages ahead
 /// of its rows, the free space single inserts fill first), then let go. Only the heap's
 /// pages are placed: the table's model (its TIDs, indexes, TOAST) is dropped next.
-/// Also the rows' btree entries, in their order: (index, key's prefix, tuple size), for the
-/// btrees' estimates (`est_inserted`).
-fn past_model(heap: &mut Heap, btrees: &FastMap<u32, Btree>, d: &mut Defer, mode: &mut InsertMode) -> (EstHeap, Vec<(u32, u128, usize)>) {
+/// Also the rows' btree entries, in their order: (index, key's prefix, tuple size, whether
+/// a non-unique index holds the key already), for the btrees' estimates (`est_inserted`).
+fn past_model(heap: &mut Heap, btrees: &FastMap<u32, Btree>, d: &mut Defer, mode: &mut InsertMode) -> (EstHeap, Vec<(u32, u128, usize, bool)>) {
     // (The rows' keys aren't kept by the model: it goes.)
     let mut entries = Vec::new();
     let mut placed: Vec<(Vec<u8>, Tid)> = Vec::new();
+    // (Each non-unique index's keys (their prefixes, as the estimate has them), the model's
+    // and those entered since: an entry under a key the index holds adds a heap TID to it,
+    // where the estimate's guess from its leaf's counts (`BtEst::insert`) would take a load's
+    // first repeats of its keys for new ones.)
+    let mut keys: FastMap<u32, FastSet<u128>> = FastMap::default();
     for rows in std::mem::take(&mut d.batches) {
         for p in &rows {
             for (ix, k) in &p.entries {
                 if let Some(b) = btrees.get(ix) {
                     let (sort, size) = k.sort_and_size(b.opts.nkey);
-                    entries.push((*ix, btest::key_prefix(sort), size));
+                    let prefix = btest::key_prefix(sort);
+                    let dup = !b.opts.unique && !keys.entry(*ix).or_insert_with(|| model_keys(b)).insert(prefix);
+                    entries.push((*ix, prefix, size, dup));
                 }
             }
         }
@@ -6656,13 +6691,25 @@ fn past_model(heap: &mut Heap, btrees: &FastMap<u32, Btree>, d: &mut Defer, mode
     (est, entries)
 }
 
+/// The key prefixes (`btest::key_prefix` of their key attributes) of a modelled btree's
+/// entries.
+fn model_keys(b: &Btree) -> FastSet<u128> {
+    let mut out = FastSet::default();
+    for blk in b.leaf_pages(None, None) {
+        if let Some(v) = b.leaf_view(blk) {
+            out.extend((0..v.len()).map(|i| btest::key_prefix(v.key(i))));
+        }
+    }
+    out
+}
+
 /// Entries the btrees' models didn't take before table `t` went past the model's size (a
 /// load's rows waiting for its end, `past_model`) go in their estimates.
-fn est_inserted(db: &Database, t: u32, entries: Vec<(u32, u128, usize)>) {
+fn est_inserted(db: &Database, t: u32, entries: Vec<(u32, u128, usize, bool)>) {
     let mut rf = db.relfiles.of(t).write();
-    for (ix, key, size) in entries {
+    for (ix, key, size, dup) in entries {
         if let Some(b) = rf.est_btrees.get_mut(&ix) {
-            b.insert(key, size, false);
+            b.insert(key, size, dup);
         }
     }
     if let Some(e) = rf.estimated.get_mut(&t) {

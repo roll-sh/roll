@@ -148,6 +148,33 @@ fn copy_past_the_model() {
     });
 }
 
+/// A COPY whose rows past its first few wait for its end and take the table past the model
+/// (`sizing::past_model`) gives the btree estimate their entries knowing which keys the index
+/// holds already. 20,000 rows over 2,000 keys repeating every 2,000 rows (each key's 10 heap
+/// TIDs in posting lists): PostgreSQL 18.6's `ix_a` is 303,104 bytes (37 pages), as the model
+/// has it. The estimate took each key's first repeats for new keys (3.7x PostgreSQL's size
+/// at 1M rows).
+#[test]
+fn copy_past_the_model_repeated_keys() {
+    let pages = |limit: usize| {
+        let dir = tempfile::tempdir().unwrap();
+        let eng = open(dir.path());
+        with_max_versions(limit, || {
+            pg_engine::exec::sizing::with_defer_after(100, || {
+                let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+                run(&mut s, "CREATE TABLE ix (id int PRIMARY KEY, a int NOT NULL, b text) WITH (autovacuum_enabled = off);\nCREATE INDEX ix_a ON ix (a)");
+                let data: String = (1..=20000).map(|i| format!("{i}\t{}\tv{i}\n", (i * 7919) % 2000)).collect();
+                s.query_copy("COPY ix FROM STDIN", data.as_bytes()).unwrap();
+                rows(&mut s, "SELECT pg_relation_size('ix_a') / 8192")[0].clone()
+            })
+        })
+    };
+    assert_eq!(pages(100_000), "[Int8(37)]");
+    let est = pages(5000);
+    let n: i64 = est.trim_start_matches("[Int8(").trim_end_matches(")]").parse().unwrap();
+    assert!((35..=39).contains(&n), "estimated pages {est}");
+}
+
 /// COPY through the transaction's sink (`Txn::open_sink`): rows and entries written as
 /// sorted runs and linked at commit, into a table with an index; a cursor declared before
 /// doesn't see them, statements after do; a failed COPY leaves nothing; writes over the

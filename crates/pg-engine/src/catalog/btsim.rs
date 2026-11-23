@@ -17,6 +17,9 @@ const PAGE_SPACE: usize = BLCKSZ - PAGE_HEADER - SPECIAL;
 const MAX_ITEM: usize = 2704;
 const NONLEAF_FILLFACTOR: usize = 70;
 const SINGLEVAL_FILLFACTOR: usize = 96;
+/// A descent's path from the root: (page, downlink) per level (no allocation for a tree of
+/// up to eight levels).
+type Path = smallvec::SmallVec<[(u32, usize); 8]>;
 /// A heap TID appended to a pivot tuple (MAXALIGN(sizeof(ItemPointerData))).
 const PIVOT_TID: usize = 8;
 /// A pivot tuple with no key attributes ("minus infinity").
@@ -336,12 +339,6 @@ impl Tids {
         *self = v.into();
     }
 
-    fn into_vec(self) -> Vec<Tid> {
-        match self {
-            Tids::One(t) => vec![t],
-            Tids::Many(v) => v.into(),
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -760,7 +757,9 @@ impl Btree {
             return Ordering::Greater;
         };
         let n = p.natts.min(self.opts.nkey);
-        match key.cmp_keys(pk, n) {
+        // (The kept attributes' encodings as one run of bytes: self-delimiting, they compare
+        // as the attributes do one by one.)
+        match key.key_bytes(n).cmp(pk.key_bytes(n)) {
             Ordering::Equal => {}
             x => return x,
         }
@@ -889,18 +888,29 @@ impl Btree {
 
     /// The descent to the leaf (`key`, `tid`) goes on, with the path: (page, downlink) per
     /// level.
-    fn descend_for(&self, root: u32, key: &Key, tid: Tid) -> (u32, Vec<(u32, usize)>) {
-        let mut stack: Vec<(u32, usize)> = Vec::new();
+    fn descend_for(&self, root: u32, key: &Key, tid: Tid) -> (u32, Path) {
+        let mut stack = Path::new();
         let mut blk = root;
+        // (The key's first n attributes' bytes for each n a pivot keeps, read once: what
+        // `cmp_pivot` compares.)
+        let nkey = self.opts.nkey;
+        let kb = key.key_bytes(nkey);
+        let ends: smallvec::SmallVec<[usize; 4]> = (0..=nkey).map(|n| key.key_bytes(n).len()).collect();
+        let above = |pv: &Pivot| -> bool {
+            let Some(pk) = &pv.key else { return true };
+            let n = pv.natts.min(nkey);
+            match kb[..ends[n]].cmp(pk.key_bytes(n)) {
+                Ordering::Equal => n < nkey || pv.tid.is_none_or(|t| tid > t),
+                x => x == Ordering::Greater,
+            }
+        };
+        debug_assert!(self.pages[root as usize].as_ref().is_none_or(|p| p.inner.iter().all(|(pv, _)| above(pv) == (self.cmp_pivot(key, tid, pv) == Ordering::Greater))));
         loop {
             let p = self.pages[blk as usize].as_ref().expect("btree page");
             if p.leaf {
                 return (blk, stack);
             }
-            let i = p
-                .inner
-                .partition_point(|(pv, _)| self.cmp_pivot(key, tid, pv) == Ordering::Greater)
-                .saturating_sub(1);
+            let i = p.inner.partition_point(|(pv, _)| above(pv)).saturating_sub(1);
             stack.push((blk, i));
             blk = p.inner[i].1;
         }
@@ -968,14 +978,15 @@ impl Btree {
     /// leaf `blk` on to the right while the key's entries go on.
     fn kill_dead_duplicates(&mut self, mut blk: u32, key: &Key, dead: &dyn Fn(Tid) -> bool) {
         let nkey = self.opts.nkey;
+        let kb = key.key_bytes(nkey);
         loop {
             let p = self.page(blk);
-            let mut i = p.items.partition_point(|it| it.key.cmp_keys(key, nkey) == Ordering::Less);
+            let mut i = p.items.partition_point_keys(nkey, |k, _| k < kb);
             while i < p.items.len() {
-                let it = p.items.get(i);
-                if it.key.cmp_keys(key, nkey) != Ordering::Equal {
+                if p.items.key_bytes(i, nkey) != kb {
                     return;
                 }
+                let it = p.items.get(i);
                 if !it.dead && it.tids.iter().all(dead) {
                     p.items.set_dead(i);
                 }
@@ -1026,7 +1037,8 @@ impl Btree {
     /// blocks that are dead too. False when the leaf has no LP_DEAD item.
     fn simple_delete(&mut self, blk: u32, hint: &InsertHint) -> bool {
         let p = self.page(blk);
-        if p.items.iter().any(|it| it.dead) {
+        // (Its count of items not LP_DEAD says whether there are any.)
+        if p.items.live() < p.items.len() {
             let blocks: std::collections::HashSet<u32> = p
                 .items
                 .iter()
@@ -1203,8 +1215,8 @@ impl Btree {
         // none LP_DEAD (the deletion pass before it took them): the pass would lay every item
         // out again as it is. Their sizes are what it would leave, without taking them out
         // and putting them back.)
-        if p.items.iter().all(|it| !it.dead)
-            && (1..p.items.len()).all(|i| p.items.get(i - 1).key.keep_natts(p.items.get(i).key, nkey) <= nkey)
+        if p.items.live() == p.items.len()
+            && (1..p.items.len()).all(|i| p.items.key_bytes(i - 1, nkey) != p.items.key_bytes(i, nkey))
         {
             p.used = p.items.iter().map(|it| it.size()).sum();
             return;
@@ -1215,34 +1227,36 @@ impl Btree {
             && newkey.keep_natts(p.items.get(p.items.len() - 1).key, nkey) > nkey;
         let mut deduplicate = true;
         let mut nmaxitems = 0;
-        let mut nintervals = 0;
-        let mut out: Vec<Item> = Vec::with_capacity(p.items.len());
-        let mut pending: Option<(Key, Vec<Tid>, usize)> = None;
-        let finish = |pending: Option<(Key, Vec<Tid>, usize)>,
-                      out: &mut Vec<Item>,
-                      nintervals: &mut usize| {
-            if let Some((k, tids, nitems)) = pending {
-                if nitems > 1 {
-                    *nintervals += 1;
-                }
-                out.push(Item::posting(k, tids));
-            }
+        // (The page laid out anew from its packed items, none taken out as owned ones: the
+        // pending posting list is its first item's key and the TIDs gathered so far.)
+        let old = std::mem::take(&mut p.items);
+        let mut out = Leaf::with_capacity(old.packed_len(), old.len());
+        let mut used = 0;
+        // (The pending list's key and TIDs, packed as the page keeps them.)
+        let mut tids: Vec<u8> = Vec::new();
+        let mut base: Option<&KeyBytes> = None;
+        let emit = |out: &mut Leaf, used: &mut usize, k: &KeyBytes, tids: &[u8]| {
+            out.push_packed(false, tids, k.as_bytes());
+            let n = tids.len() / 6;
+            *used += if n > 1 { maxalign(k.size() + 6 * n) } else { k.size() };
         };
-        for it in p.items.take() {
-            if let Some((base, tids, nitems)) = &mut pending
+        for i in 0..old.len() {
+            let it = old.get(i);
+            if let Some(b) = base
                 && deduplicate
-                && base.keep_natts(&it.key, nkey) > nkey
+                && b.keep_natts(it.key, nkey) > nkey
             {
-                if maxalign(base.size() + (tids.len() + it.tids.len()) * 6) <= maxposting {
-                    tids.extend_from_slice(&it.tids);
-                    *nitems += 1;
+                if maxalign(b.size() + tids.len() + it.tids.len() * 6) <= maxposting {
+                    tids.extend_from_slice(it.tids.bytes());
                     continue;
                 }
-                if tids.len() > 50 {
+                if tids.len() > 50 * 6 {
                     nmaxitems += 1;
                 }
             }
-            finish(pending.take(), &mut out, &mut nintervals);
+            if let Some(b) = base {
+                emit(&mut out, &mut used, b, &tids);
+            }
             if singleval {
                 if nmaxitems == 5 {
                     let leftfree = PAGE_SPACE - (newitemsz + PIVOT_TID);
@@ -1254,31 +1268,37 @@ impl Btree {
                     singleval = false;
                 }
             }
-            pending = Some((it.key, it.tids.into_vec(), 1));
+            base = Some(it.key);
+            tids.clear();
+            tids.extend_from_slice(it.tids.bytes());
         }
-        finish(pending.take(), &mut out, &mut nintervals);
+        if let Some(b) = base {
+            emit(&mut out, &mut used, b, &tids);
+        }
+        out.plain();
         let p = self.page(blk);
-        p.used = out.iter().map(|i| i.size()).sum();
-        p.items.put(&out);
+        p.used = used;
+        p.items = out;
     }
 
     /// _bt_split on a leaf, then the downlink into the parent.
-    fn split_leaf(&mut self, blk: u32, pos: usize, new: Item, stack: Vec<(u32, usize)>) {
+    fn split_leaf(&mut self, blk: u32, pos: usize, new: Item, stack: Path) {
         let nkey = self.opts.nkey;
         let fillfactor = self.opts.fillfactor;
-        // (The page's items, unpacked while the split is chosen and made.)
-        let mut all: Vec<Item> = self.page(blk).items.take();
+        // (The page's items, read packed while the split is chosen; the halves are copied
+        // from them.)
+        let items = std::mem::take(&mut self.page(blk).items);
         let p = self.pages[blk as usize].as_ref().expect("btree page");
         let rightmost = p.right.is_none();
         let (firstright, newonleft) = {
-            let items = &all;
-            let at = |v: V| -> &Item {
+            let items = &items;
+            let at = |v: V| -> &KeyBytes {
                 match v {
-                    V::New => &new,
-                    V::Orig(i) => &items[i],
+                    V::New => &new.key,
+                    V::Orig(i) => items.get(i).key,
                 }
             };
-            let keep = |a: V, b: V| at(a).key.keep_natts(&at(b).key, nkey);
+            let keep = |a: V, b: V| at(a).keep_natts(at(b), nkey);
             let afternew = |s: &SplitState| -> Option<bool> {
                 // _bt_afternewitemoff.
                 if nkey == 1 || s.newitemoff == 0 {
@@ -1298,8 +1318,8 @@ impl Btree {
                     let k = keep(V::Orig(n - 1), V::New);
                     return (k > 1 && k <= nkey).then_some(true);
                 }
-                let prev = &items[s.newitemoff - 1];
-                let (lo, hi) = (prev.tids[0], new.tids[0]);
+                let prev = items.get(s.newitemoff - 1);
+                let (lo, hi) = (prev.tids.first(), new.tids[0]);
                 let adjacent = lo.0 == hi.0 || (lo.0 + 1 == hi.0 && hi.1 == 1);
                 if prev.tids.len() > 1 || !adjacent {
                     return None;
@@ -1317,7 +1337,7 @@ impl Btree {
                 is_rightmost: rightmost,
                 hk: p.high.as_ref().map(|h| h.size),
                 sizes: items.iter().map(|i| i.size()).collect(),
-                posting: items.iter().map(|i| i.posting_bytes()).collect(),
+                posting: items.iter().map(|i| i.size() - i.key.size()).collect(),
                 newitemoff: pos,
                 newitemsz: new.size(),
                 fillfactor,
@@ -1337,8 +1357,9 @@ impl Btree {
                     })
             })
         };
-        all.insert(pos, new);
-        // Position of firstright in the combined list.
+        // Position of firstright in the combined list (the page's items with the new one at
+        // `pos`).
+        let total = items.len() + 1;
         let cut = if newonleft || firstright > pos {
             firstright + 1
         } else {
@@ -1350,49 +1371,76 @@ impl Btree {
             cut
         };
         // (Items too big for the page's model can leave a half empty: keep one each side.)
-        let cut = cut.clamp(1, all.len().saturating_sub(1).max(1));
-        let right_items = all.split_off(cut);
-        let lastleft = all.last().expect("left half").clone();
-        let firstright_item = right_items.first().expect("right half").clone();
-        let keepn = lastleft.key.keep_natts(&firstright_item.key, nkey);
+        let cut = cut.clamp(1, (total - 1).max(1));
+        // (Entry c of the combined list: the new item, or which of the page's.)
+        let orig = |c: usize| -> Option<usize> {
+            match c.cmp(&pos) {
+                Ordering::Less => Some(c),
+                Ordering::Equal => None,
+                Ordering::Greater => Some(c - 1),
+            }
+        };
+        let key_at = |c: usize| -> &KeyBytes { orig(c).map_or(&*new.key, |i| items.get(i).key) };
+        let (lastleft, firstright_key) = (key_at(cut - 1), key_at(cut));
+        let lastleft_tid = orig(cut - 1).map_or_else(|| new.tids.last().copied(), |i| Some(items.get(i).tids.last()));
+        let keepn = lastleft.keep_natts(firstright_key, nkey);
         let high = if keepn <= nkey {
             Pivot {
-                key: Some(firstright_item.key.clone()),
+                key: Some(firstright_key.to_key()),
                 natts: keepn,
                 tid: None,
-                size: firstright_item.key.prefix_size(keepn),
+                size: firstright_key.prefix_size(keepn),
             }
         } else {
             Pivot {
-                key: Some(firstright_item.key.clone()),
+                key: Some(firstright_key.to_key()),
                 natts: nkey,
-                tid: lastleft.tids.last().copied(),
-                size: firstright_item.key.prefix_size(nkey) + PIVOT_TID,
+                tid: lastleft_tid,
+                size: firstright_key.prefix_size(nkey) + PIVOT_TID,
             }
         };
+        let half = |range: std::ops::Range<usize>| -> (Leaf, usize) {
+            let mut l = Leaf::with_capacity(items.packed_len() / 2 + 64, range.len());
+            let mut used = 0;
+            for c in range {
+                match orig(c) {
+                    Some(i) => {
+                        l.push_from(&items, i);
+                        used += items.get(i).size();
+                    }
+                    None => {
+                        l.push(&new);
+                        used += new.size();
+                    }
+                }
+            }
+            l.plain();
+            (l, used)
+        };
+        let (right_items, right_used) = half(cut..total);
+        let (left_items, left_used) = half(0..cut);
         let old = self.page(blk);
         let old_high = old.high.take();
         let old_right = old.right;
-        let mut right = BPage {
+        let right = BPage {
             leaf: true,
-            used: right_items.iter().map(|i| i.size()).sum(),
-            items: Leaf::default(),
+            used: right_used,
+            items: right_items,
             inner: Vec::new(),
             high: old_high,
             right: old_right,
         };
-        right.items.put(&right_items);
         let rblk = self.alloc(right);
         let left = self.page(blk);
-        left.used = all.iter().map(|i| i.size()).sum();
-        left.items.put(&all);
+        left.used = left_used;
+        left.items = left_items;
         left.high = Some(high.clone());
         left.right = Some(rblk);
         self.insert_parent(blk, rblk, high, stack);
     }
 
     /// _bt_insert_parent: the downlink to a new right sibling.
-    fn insert_parent(&mut self, left: u32, right: u32, pivot: Pivot, mut stack: Vec<(u32, usize)>) {
+    fn insert_parent(&mut self, left: u32, right: u32, pivot: Pivot, mut stack: Path) {
         let Some((pblk, idx)) = stack.pop() else {
             // The root split: a new root above.
             let root = BPage {
