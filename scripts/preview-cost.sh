@@ -114,7 +114,7 @@ PG=$(api POST /v1/projects '{"name":"shop-db"}' | jq_ "d['id']")
 PG_PARENT_EP=$(api GET "/v1/projects/$PG" | jq_ "[b['endpoint']['id'] for b in d['branches'] if b['parent_id'] is None][0]")
 api POST "/v1/endpoints/$PG_PARENT_EP/query" '{"sql":"CREATE TABLE users (id int PRIMARY KEY, email text); INSERT INTO users VALUES (1, '"'"'ada@example.com'"'"')"}' >/dev/null
 api POST "/v1/streams/$STREAM/topics" '{"name":"clicks","partitions":3}' >/dev/null
-api POST /_roll/tenants '{"id":"work"}' >/dev/null
+WORK_TOKEN=$(api POST /_roll/tenants '{"id":"work"}' | jq_ "d['token']")
 # Data in the parents, so the branches have something to share: 20 MiB of objects, 20,000 keys.
 KEY=$(api POST /v1/storage/keys '{"name":"e2e","permission":"admin"}')
 export AWS_ACCESS_KEY_ID=$(echo "$KEY" | jq_ "d['id']") AWS_SECRET_ACCESS_KEY=$(echo "$KEY" | jq_ "d['secret_access_key']") AWS_DEFAULT_REGION=us-east-1
@@ -288,7 +288,10 @@ echo "$APP_ENV" | grep -qxF 'GREETING=hello ${USER}' || { echo "a plain value's 
 # its deliveries verify.
 BRANCH_TASKS=$(echo "$P" | jq_ "[r['ref'] for r in d['resources'] if r['kind']=='tasks'][0]")
 TASKS_SK=$(echo "$APP_ENV" | sed -n 's/^ROLL_TASKS_SIGNING_KEY=//p')
-[ -n "$TASKS_SK" ] && [ "$TASKS_SK" = "$(api GET "/t/$BRANCH_TASKS/v1/tasks/keys" | jq_ "d['current']")" ] && [ "$TASKS_SK" != "$(api GET /t/work/v1/tasks/keys | jq_ "d['current']")" ] || { echo "the preview's service should hold its tasks tenant's own signing key"; exit 1; }
+keys_of() { curl -sf -H "Authorization: Bearer $2" "http://$API/t/$1/v1/tasks/keys" | jq_ "d['current']"; }
+OWN_TASKS_KEY=$(keys_of "$BRANCH_TASKS" "$(echo "$APP_ENV" | sed -n 's/^ROLL_TASKS_TOKEN=//p')")
+PROD_TASKS_KEY=$(keys_of work "$WORK_TOKEN")
+[ -n "$TASKS_SK" ] && [ "$TASKS_SK" = "$OWN_TASKS_KEY" ] && [ "$TASKS_SK" != "$PROD_TASKS_KEY" ] || { echo "the preview's service should hold its tasks tenant's own signing key (own $([ "$TASKS_SK" = "$OWN_TASKS_KEY" ] && echo yes || echo no), production's $([ "$TASKS_SK" = "$PROD_TASKS_KEY" ] && echo yes || echo no))"; exit 1; }
 # Its bucket's key reaches only its branch: production's bucket (the parent) refuses it, as every
 # credential a preview's code holds is the branch's own (search's data-only key below too).
 PV_AK=$(echo "$APP_ENV" | sed -n 's/^AWS_ACCESS_KEY_ID=//p'); PV_SK=$(echo "$APP_ENV" | sed -n 's/^AWS_SECRET_ACCESS_KEY=//p')
