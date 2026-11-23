@@ -645,6 +645,10 @@ pub trait SpanReader: Send + Sync {
 }
 
 /// A terminal's stream, both ways (a hijacked Docker exec).
+/// A laptop's process standing in for a service (`roll preview swap`): the HTTP/2 connection its
+/// tunnel carries, which the laptop serves.
+pub type Laptop = hyper::client::conn::http2::SendRequest<axum::body::Body>;
+
 pub trait ShellIo: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
 impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> ShellIo for T {}
 
@@ -874,6 +878,14 @@ pub trait Apps: Send + Sync {
     async fn forward(&self, _preview: &str, _service: &str, _port: u16) -> anyhow::Result<Option<Box<dyn ShellIo>>> {
         Ok(None)
     }
+    /// Whether `service` can be swapped for a laptop's process here (`roll preview swap`): roll's
+    /// runtime serves its requests itself; roll apps' services are roll apps'.
+    async fn can_swap(&self, _preview: &str, _service: &str) -> anyhow::Result<bool> {
+        Ok(false)
+    }
+    /// The service's requests go to `to` while it's there, instead of its container; `None` gives
+    /// them back.
+    fn swap(&self, _preview: &str, _service: &str, _to: Option<Laptop>) {}
     /// A tar's files written under `dir` in the running service (started if it sleeps). `false`
     /// where this backend has none here.
     async fn write_files(&self, _preview: &str, _service: &str, _dir: &str, _tar: bytes::Bytes) -> anyhow::Result<bool> {
