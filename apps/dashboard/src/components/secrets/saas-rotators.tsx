@@ -5,9 +5,15 @@ import { Select } from "../agents/ui/select";
 import { useSecrets } from "./secrets-page";
 import { ActorMark, ago, button, card, dangerButton, ErrorNote, errorText, field, ghost, primary, Section, useLoad } from "./ui";
 
+/**
+ * A target field: text, a comma-separated `list`, a `number`, or one of `options`; `optional` ones
+ * may stay empty (the server's default).
+ */
+type TargetField = { name: string; label: string; placeholder: string; optional?: boolean; kind?: "list" | "number"; options?: string[] };
+
 /** Each vendor's target fields and what its credential is (docs/secrets.md, "SaaS rotators"). */
-const VENDORS: Record<SaasVendor, { label: string; credential: string; fields: { name: string; label: string; placeholder: string }[] }> = {
-  sendgrid: { label: "SendGrid", credential: "API key that may manage API keys", fields: [{ name: "scopes", label: "Scopes (optional, comma-separated)", placeholder: "mail.send" }] },
+const VENDORS: Record<SaasVendor, { label: string; credential: string; fields: TargetField[] }> = {
+  sendgrid: { label: "SendGrid", credential: "API key that may manage API keys", fields: [{ name: "scopes", label: "Scopes (optional, comma-separated)", placeholder: "mail.send", optional: true, kind: "list" }] },
   twilio: { label: "Twilio", credential: "Auth Token (or SK…:secret)", fields: [{ name: "account_sid", label: "Account SID", placeholder: "AC…" }] },
   okta: {
     label: "Okta",
@@ -35,6 +41,27 @@ const VENDORS: Record<SaasVendor, { label: string; credential: string; fields: {
       { name: "app_client_id", label: "Client id of the app to rotate", placeholder: "client id" },
     ],
   },
+  gitlab: {
+    label: "GitLab",
+    credential: "Access token (api scope, Maintainer or Owner)",
+    fields: [
+      { name: "host", label: "Host (optional)", placeholder: "gitlab.com", optional: true },
+      { name: "project", label: "Project id or path", placeholder: "group/project" },
+      { name: "scopes", label: "Scopes (comma-separated)", placeholder: "read_api", kind: "list" },
+      { name: "access_level", label: "Access level (optional)", placeholder: "40", optional: true, kind: "number" },
+      { name: "expires_days", label: "Expires after days (optional)", placeholder: "365", optional: true, kind: "number" },
+    ],
+  },
+  openai: { label: "OpenAI", credential: "Admin API key", fields: [{ name: "project_id", label: "Project id", placeholder: "proj_…" }] },
+  datadog: {
+    label: "Datadog",
+    credential: "API key:application key",
+    fields: [
+      { name: "site", label: "Site (optional)", placeholder: "datadoghq.com", optional: true },
+      { name: "key", label: "Keys to rotate", placeholder: "api", options: ["api", "application"] },
+      { name: "scopes", label: "Scopes (optional, application keys)", placeholder: "dashboards_read", optional: true, kind: "list" },
+    ],
+  },
 };
 
 /** What's shown of a target: its values, never the credential (the API doesn't have it to give). */
@@ -60,18 +87,19 @@ export function SaasRotators() {
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
   const spec = VENDORS[vendor];
-  const ok = /^[A-Za-z0-9_-]{1,64}$/.test(name) && credential.trim() !== "" && spec.fields.every((f) => f.name === "scopes" || (target[f.name] ?? "").trim() !== "");
+  const ok = /^[A-Za-z0-9_-]{1,64}$/.test(name) && credential.trim() !== "" && spec.fields.every((f) => f.optional || (target[f.name] ?? f.options?.[0] ?? "").trim() !== "");
 
   const add = async () => {
     setBusy(true);
     setError(null);
     const t: Record<string, unknown> = {};
     for (const f of spec.fields) {
-      const v = (target[f.name] ?? "").trim();
-      if (f.name === "scopes") {
-        const scopes = v.split(",").map((s) => s.trim()).filter(Boolean);
-        if (scopes.length) t.scopes = scopes;
-      } else t[f.name] = v;
+      const v = (target[f.name] ?? f.options?.[0] ?? "").trim();
+      if (f.kind === "list") {
+        const items = v.split(",").map((s) => s.trim()).filter(Boolean);
+        if (items.length) t[f.name] = items;
+      } else if (v === "" && f.optional) continue;
+      else t[f.name] = f.kind === "number" ? Number(v) : v;
     }
     try {
       await api.addSaasRotator({ name, vendor, target: t, credential: credential.trim() });
@@ -102,7 +130,7 @@ export function SaasRotators() {
       }
     >
       <p className="mb-2 text-[11.5px] text-muted">
-        roll issues keys at SendGrid, Twilio, Okta, Entra or Auth0 itself, with a credential you register here, and revokes the old key after the grace period. Auth0 replaces a secret at once, so it has no grace period. Link a key to one from Link a resource.
+        roll issues keys at SendGrid, Twilio, Okta, Entra, Auth0, GitLab, OpenAI or Datadog itself, with a credential you register here, and revokes the old key after the grace period. Auth0 replaces a secret at once, so it has no grace period. Link a key to one from Link a resource.
       </p>
       <ErrorNote error={error ?? list.error} onDismiss={error ? () => setError(null) : undefined} className="mb-2" />
       {adding && (
@@ -130,12 +158,19 @@ export function SaasRotators() {
               className="w-44"
             />
           </div>
-          {spec.fields.map((f) => (
-            <label key={f.name} className="w-56">
-              <span className="mb-1 block text-[11px] font-medium text-subtle">{f.label}</span>
-              <input value={target[f.name] ?? ""} onChange={(e) => setTarget((t) => ({ ...t, [f.name]: e.target.value }))} placeholder={f.placeholder} spellCheck={false} className={`${field} font-mono text-[12px]`} />
-            </label>
-          ))}
+          {spec.fields.map((f) =>
+            f.options ? (
+              <div key={f.name}>
+                <span className="mb-1 block text-[11px] font-medium text-subtle">{f.label}</span>
+                <Select label={f.label} value={target[f.name] ?? f.options[0]} onChange={(v) => setTarget((t) => ({ ...t, [f.name]: v }))} options={f.options.map((o) => ({ value: o, label: o }))} className="w-40" />
+              </div>
+            ) : (
+              <label key={f.name} className="w-56">
+                <span className="mb-1 block text-[11px] font-medium text-subtle">{f.label}</span>
+                <input value={target[f.name] ?? ""} onChange={(e) => setTarget((t) => ({ ...t, [f.name]: e.target.value }))} placeholder={f.placeholder} inputMode={f.kind === "number" ? "numeric" : undefined} spellCheck={false} className={`${field} font-mono text-[12px]`} />
+              </label>
+            ),
+          )}
           <label className="min-w-64 flex-1">
             <span className="mb-1 block text-[11px] font-medium text-subtle">{spec.credential} (kept sealed)</span>
             <input type="password" autoComplete="off" value={credential} onChange={(e) => setCredential(e.target.value)} spellCheck={false} className={`${field} font-mono text-[12px]`} />

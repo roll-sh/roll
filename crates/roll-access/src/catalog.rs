@@ -1673,6 +1673,8 @@ static ROWS: &[Row] = &[
     row("*", "/v1/apps/services/{id}/", "apps", M, one(PG, "service")),
     // A restore puts a deleted service's deployments live again, production's too: a deploy.
     row("POST", "/v1/apps/services/{id}/restore", "apps", DEPLOY, one(PG, "service")).env(EnvFrom::Fixed("production")),
+    // Moving a service to another project: admin on it (and, asked inside, on it there too).
+    row("POST", "/v1/apps/services/{id}/move", "apps", ADMIN, one(PG, "service")),
     // `variables_from` copies another environment's values into this one: reveal there too.
     // A new heartbeat's ping URL (its token) is in the PUT's answer, once: a credential.
     // Setting or lifting a deploy freeze is admin (lifting one would get past it).

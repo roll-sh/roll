@@ -532,6 +532,15 @@ pub enum AppsCmd {
         #[arg(long, short = 'y')]
         yes: bool,
     },
+    /// Move a service to another project of the same owner (`--to`, its name or id): refused,
+    /// naming what ties it here (links, routes, roll:// references, a private network, sandboxes);
+    /// its live environments redeploy there.
+    Move {
+        #[command(flatten)]
+        target: Target,
+        #[arg(long, value_name = "PROJECT")]
+        to: String,
+    },
     /// Restore a deleted service as it was (within 48 hours of its delete); `--list`: the
     /// deleted services, and when each goes for good.
     Restore {
@@ -3621,6 +3630,11 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 return Ok(());
             }
             all
+        }
+        AppsCmd::Move { target, to } => {
+            let svc = service(api, &target).await?;
+            let project = project_id(api, &to).await?;
+            api.post(&format!("/v1/apps/services/{}/move", enc(&s(&svc["id"]))), json!({ "project": project })).await?
         }
         AppsCmd::Restore { target, list: false } => {
             let Some(d) = deleted_service(api, &target).await? else {

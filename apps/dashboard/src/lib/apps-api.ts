@@ -1526,6 +1526,8 @@ export const appsApi = {
   update: (id: string, patch: ServicePatch) => call<Service>("PATCH", svc(id), patch),
   /** Deletes it until it's restored (48 hours); a deleted service's delete deletes it for good. */
   remove: (id: string) => call<null>("DELETE", svc(id)),
+  /** Move it to another project of the same owner (refused, naming them, while it's tied to its own). */
+  move: (id: string, project: string) => call<{ id: string; project: string; redeployed: { environment: string; deployment: string }[] }>("POST", `${svc(id)}/move`, { project }),
   deletedServices: (project?: string) => call<DeletedService[]>("GET", `/v1/apps/services${qs({ project, deleted: "true" })}`),
   restoreService: (id: string) => call<Service>("POST", `${svc(id)}/restore`),
 
