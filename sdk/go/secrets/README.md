@@ -27,8 +27,8 @@ otp, err = secrets.TOTPAt(v.Values["REGISTRY_TOTP"], time.Now())
 // An encryption key (docs/secrets.md, "Encryption keys"): the key stays in roll.
 cards := c.Transit("cards")
 ct, err := cards.Encrypt(ctx, []byte(cardNumber), "order:42")
-// Read per request? Keep answers 30 s, then revalidate (a 304 while unchanged), at most
-// 100 folders.
+// Read per request? Keep answers 30 s, then ask for what changed since (`…/values/delta`:
+// nothing while unchanged, only the changed keys after a change), at most 100 folders.
 c.CacheTTL, c.CacheSize = 30*time.Second, 100
 
 // An OIDC token that changes (a rotated file, one a cloud mints): asked for at each login.
