@@ -1187,8 +1187,10 @@ look (an old repo, a wiki page, a backup's config):
   holds it learns nothing, and the gate checks it before anything else (the idle-token rule would
   otherwise retire a token nobody uses).
 - Each use is written on the token (`last_used_at`, `last_used_ip`), to the audit log
-  (`source: "decoy"`, the route and the client), and mailed to its owner and every admin (once an
-  hour per decoy and person). A decoy can't be turned into a working token.
+  (`source: "decoy"`, the route and the client), mailed to its owner and every admin (once an
+  hour per decoy and person), and kept on the operator's alert feed (`GET /v1/access/alerts`, MCP
+  Events' `access.alert`, `decoy_used`, once an hour per decoy across nodes). A decoy can't be
+  turned into a working token.
 - It's checksummed like any `rlt_`, so scanners report a leaked decoy too (roll revokes it, which
   ends the trap: plant another).
 - roll secrets plants them as decoy keys (docs/secrets.md, "Decoys"). rolld mints each with
