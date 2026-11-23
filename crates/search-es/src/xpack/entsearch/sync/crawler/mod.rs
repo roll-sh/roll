@@ -1041,7 +1041,7 @@ impl Crawl<'_, '_> {
     /// its `additional_urls`, and the documents those pages got under their own URLs this crawl
     /// are deleted where `may_delete` allows their origin (never when the purge is skipped).
     /// How many it deleted.
-    async fn apply_aliases(&mut self, may_delete: &dyn Fn(&str) -> bool) -> Result<u64, Stop> {
+    async fn apply_aliases(&mut self, may_delete: &(dyn Fn(&str) -> bool + Sync)) -> Result<u64, Stop> {
         let mut body = String::new();
         for (k, (canonical, pages)) in std::mem::take(&mut self.aliases) {
             if !self.indexed.contains(&k) {
