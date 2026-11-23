@@ -100,6 +100,7 @@ function Form({
   const [pages, setPages] = useState((saved.github.pages ?? []).join(", "));
   const [widths, setWidths] = useState((saved.github.widths ?? []).join(", "));
   const [openapi, setOpenapi] = useState(saved.github.openapi ?? "");
+  const [storybook, setStorybook] = useState(saved.github.storybook ?? "");
   const [endpoints, setEndpoints] = useState((saved.github.endpoints ?? []).join(", "));
   const [routeBudgets, setRouteBudgets] = useState(routeBudgetLines(saved.github.budget?.routes));
   // Selectors can hold commas: one per line.
@@ -157,7 +158,7 @@ function Form({
     );
   };
 
-  useEffect(() => setError(null), [s, branches, paths, ignorePaths, skipAuthors, pages, widths, openapi, endpoints, routeBudgets, states, hide, env, perBranch]);
+  useEffect(() => setError(null), [s, branches, paths, ignorePaths, skipAuthors, pages, widths, openapi, storybook, endpoints, routeBudgets, states, hide, env, perBranch]);
 
   const next: PreviewSettings = {
     ...s,
@@ -171,6 +172,7 @@ function Form({
       pages: words(pages),
       widths: words(widths).map(Number),
       openapi: openapi.trim() || null,
+      storybook: storybook.trim() || null,
       endpoints: words(endpoints),
       budget: { ...(s.github.budget ?? { load_ms: 0, bytes: 0 }), routes: parseRouteBudgets(routeBudgets).routes },
       states: parseStates(states),
@@ -596,6 +598,11 @@ function Form({
         {s.github.screenshot && (
           <Field label="API document" note="A path of the first service's serving its OpenAPI document as JSON: its operations are compared with main's, a removed one named as breaking.">
             <input value={openapi} onChange={(e) => setOpenapi(e.target.value)} placeholder="/openapi.json" className={`${field} h-8 w-full font-mono text-[12px]`} spellCheck={false} />
+          </Field>
+        )}
+        {s.github.screenshot && (
+          <Field label="Storybook" note="The service that serves the preview's Storybook, and its path when not /: each story (up to 40) is taken alone, compared with main's and reviewed like a page.">
+            <input value={storybook} onChange={(e) => setStorybook(e.target.value)} placeholder="web:/storybook/" className={`${field} h-8 w-full font-mono text-[12px]`} spellCheck={false} />
           </Field>
         )}
         {s.github.screenshot && (

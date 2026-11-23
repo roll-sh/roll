@@ -62,6 +62,9 @@ tokio-rustls.workspace = true
 tokio-util = { workspace = true, features = ["io"] }
 # `roll apps ssh`: a shell in an instance, over a WebSocket.
 futures.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
 tokio-tungstenite = { workspace = true, features = ["rustls-tls-native-roots"] }
 unicode-width.workspace = true
 url.workspace = true

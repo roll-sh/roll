@@ -1005,6 +1005,12 @@ impl Store {
 
     /// A page as it was last kept (its picture, what went wrong while it loaded, its checks), to
     /// keep again at a new head.
+    /// The stories kept from the last run that took them (`story:<id>` pages).
+    pub fn kept_story_pages(&self, id: &str) -> Result<Vec<crate::ports::PageShot>> {
+        let paths: Vec<String> = self.db.read(|c| c.query("SELECT path FROM page_shots WHERE preview_id = ? AND path LIKE 'story:%' ORDER BY path", [id], |r| r.get(0)))?;
+        Ok(paths.iter().filter_map(|p| self.kept_page(id, p).ok().flatten()).collect())
+    }
+
     pub fn kept_page(&self, id: &str, path: &str) -> Result<Option<crate::ports::PageShot>> {
         use base64::Engine as _;
         let row: Option<(String, i64, Option<String>)> = self.db.read(|c| c.query_row("SELECT png, errors, report FROM page_shots WHERE preview_id = ? AND path = ?", [id, path], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional())?;
@@ -3256,6 +3262,7 @@ impl Store {
         // What the holder read against main's, for this head only (a push reads it again), and
         // whether it compared at this head at all (errors; routes too with traces).
         let new_errors = self.runtime_fact::<crate::NewErrors>(&r.id, "new_errors")?.filter(|f| f.head == r.head);
+        let served_secrets = self.runtime_fact::<crate::ServedSecrets>(&r.id, "served_secrets")?.filter(|f| f.head == r.build()).map(|f| f.secrets).unwrap_or_default();
         let slower_routes = if settings.traces { self.runtime_fact::<crate::SlowerRoutes>(&r.id, "slower_routes")?.filter(|f| f.head == r.head) } else { None };
         let compared_at = |kind: &str| -> Result<bool> { Ok(self.runtime_fact::<String>(&r.id, kind)?.as_deref() == Some(r.head.as_str())) };
         let regressions_compared = compared_at("compared_errors")? && (!settings.traces || compared_at("compared_routes")?);
@@ -3356,6 +3363,7 @@ impl Store {
             page_links,
             slower_routes,
             new_errors,
+            served_secrets,
             regressions,
             regressions_accepted,
             regressions_compared,

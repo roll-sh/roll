@@ -436,6 +436,68 @@ const moves = async (sessionId, first) => {
   const again = await send("Page.captureScreenshot", { format: "png" }, sessionId).catch(() => null);
   return !!again && again.data !== first.data;
 };
+// Storybook's stories ($STORIES: where the service serves Storybook, "/" or "/storybook/";
+// Chromatic's stories), in a run of their own: its index (`index.json`, Storybook 7 and later;
+// `stories.json` before), the first 40 stories (docs left out), each loaded alone
+// (`iframe.html?id=…&viewMode=story`) at the desktop width and captured clipped to what it
+// rendered (with a margin, at most 1280 by 2000), to $OUT.story.<n>.png; which story each is and
+// what went wrong while it rendered, to $OUT.stories.json. 100 s in all. The index is the
+// preview's code's: roll checks each id again.
+const STORY_ID = /^[a-z0-9][a-z0-9-]{0,99}--[a-z0-9][a-z0-9-]{0,99}$/;
+const ROOT_BOX = `JSON.stringify((() => {
+  const root = document.querySelector("#storybook-root") || document.querySelector("#root");
+  if (!root || !root.firstElementChild) return null;
+  let x1 = Infinity, y1 = Infinity, x2 = -Infinity, y2 = -Infinity;
+  for (const el of root.children) {
+    const b = el.getBoundingClientRect();
+    if (b.width <= 0 || b.height <= 0) continue;
+    x1 = Math.min(x1, b.left + scrollX); y1 = Math.min(y1, b.top + scrollY);
+    x2 = Math.max(x2, b.right + scrollX); y2 = Math.max(y2, b.bottom + scrollY);
+  }
+  return x2 > x1 && y2 > y1 ? { x: x1, y: y1, w: x2 - x1, h: y2 - y1 } : null;
+})())`;
+const stories = async (sessionId) => {
+  const base = new URL(process.env.STORIES, process.env.URL);
+  let entries = [];
+  for (const name of ["index.json", "stories.json"]) {
+    try {
+      const r = await fetch(new URL(name, base), { signal: AbortSignal.timeout(10000) });
+      const text = r.ok ? await r.text() : "";
+      if (!text || text.length > 8 << 20) continue;
+      const j = JSON.parse(text);
+      entries = Object.values((j && (j.entries || j.stories)) || {});
+      if (entries.length) break;
+    } catch {}
+  }
+  const picked = entries.filter((e) => e && typeof e.id === "string" && STORY_ID.test(e.id) && (e.type == null || e.type === "story")).slice(0, 40);
+  const out = [];
+  const until = Date.now() + 100000;
+  for (const e of picked) {
+    if (Date.now() > until) break;
+    const before = errors.length + failed.length;
+    const done = once("Page.loadEventFired");
+    await send("Page.navigate", { url: new URL(`iframe.html?id=${e.id}&viewMode=story`, base).href }, sessionId);
+    await Promise.race([done, sleep(10000)]);
+    // A story renders after the load: until its root holds something, 3 s at most.
+    let box = null;
+    for (let i = 0; i < 30 && !box; i++) {
+      const r = await check({ expression: ROOT_BOX, returnByValue: true }, sessionId);
+      try {
+        box = JSON.parse(r?.result?.value || "null");
+      } catch {}
+      if (!box) await sleep(100);
+    }
+    await still(sessionId);
+    const m = 8;
+    const ok = box && [box.x, box.y, box.w, box.h].every(Number.isFinite);
+    const clip = ok ? { x: Math.max(0, box.x - m), y: Math.max(0, box.y - m), width: Math.min(box.w + 2 * m, 1280), height: Math.min(box.h + 2 * m, 2000), scale: 1 } : null;
+    const shot = await send("Page.captureScreenshot", clip ? { format: "png", clip, captureBeyondViewport: true } : { format: "png" }, sessionId).catch(() => null);
+    if (!shot) continue;
+    fs.writeFileSync(`${process.env.OUT}.story.${out.length}.png`, Buffer.from(shot.data, "base64"));
+    out.push({ id: e.id, errors: errors.length + failed.length - before });
+  }
+  fs.writeFileSync(process.env.OUT + ".stories.json", JSON.stringify(out));
+};
 (async () => {
   const { targetId } = await send("Target.createTarget", { url: "about:blank" });
   const { sessionId } = await send("Target.attachToTarget", { targetId, flatten: true });
@@ -447,9 +509,43 @@ const moves = async (sessionId, first) => {
   });
   await send("Runtime.enable", {}, sessionId);
   await send("Network.enable", {}, sessionId);
+  // What the pages served (documents, the origin's own scripts, fetch and XHR answers), for roll
+  // to look for the preview's secret values in (this run is never given them): at most 40
+  // bodies, 2 MiB each and 8 MiB in all, to $OUT.bodies.json. Paths only, never a query.
+  const served = [];
+  let servedBytes = 0;
+  const servedWanted = new Map();
+  const origin = new URL(process.env.URL).origin;
+  listeners.add((m) => {
+    const p = m.params || {};
+    if (m.method === "Network.responseReceived" && ["Document", "Script", "XHR", "Fetch"].includes(p.type) && p.response?.status < 400) {
+      try {
+        const u = new URL(p.response.url);
+        if (u.origin === origin) servedWanted.set(p.requestId, u.pathname);
+      } catch {}
+    } else if (m.method === "Network.loadingFinished" && servedWanted.has(p.requestId)) {
+      const path = servedWanted.get(p.requestId);
+      servedWanted.delete(p.requestId);
+      // Each path once (a reload serves it again).
+      if (served.length >= 40 || servedBytes >= 8 << 20 || (p.encodedDataLength || 0) > 4 << 20 || served.some((x) => x.path === path)) return;
+      send("Network.getResponseBody", { requestId: p.requestId }, sessionId)
+        .then((b) => {
+          const bytes = Buffer.from(b.body || "", b.base64Encoded ? "base64" : "utf8");
+          if (bytes.length > 2 << 20 || served.length >= 40 || servedBytes + bytes.length > 8 << 20 || served.some((x) => x.path === path)) return;
+          servedBytes += bytes.length;
+          served.push({ path: path.slice(0, 200), b64: bytes.toString("base64") });
+        })
+        .catch(() => {});
+    }
+  });
   mainFrame = (await send("Page.getFrameTree", {}, sessionId)).frameTree.frame.id;
   // In the checks' world, made with each document before its first script.
   await send("Page.addScriptToEvaluateOnNewDocument", { source: VITALS, worldName: WORLD }, sessionId).catch(() => null);
+  if (process.env.STORIES) {
+    await stories(sessionId);
+    chrome.kill();
+    process.exit(0);
+  }
   const loaded = once("Page.loadEventFired");
   await send("Page.navigate", { url: process.env.URL }, sessionId);
   await Promise.race([loaded, sleep(45000)]);
@@ -599,6 +695,8 @@ const moves = async (sessionId, first) => {
     }
   } catch {}
   fs.writeFileSync(process.env.OUT + ".crops.json", JSON.stringify(crops));
+  await sleep(200);
+  fs.writeFileSync(process.env.OUT + ".bodies.json", JSON.stringify(served));
   chrome.kill();
   process.exit(0);
 })().catch((e) => {

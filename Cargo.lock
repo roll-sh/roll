@@ -7377,6 +7377,9 @@ dependencies = [
  "getrandom 0.4.3",
  "hkdf",
  "hmac 0.12.1",
+ "http-body-util",
+ "hyper 1.12.0",
+ "hyper-util",
  "ignore",
  "libc",
  "model-gateway",
@@ -7591,6 +7594,7 @@ dependencies = [
 name = "roll-previews"
 version = "0.1.0"
 dependencies = [
+ "aho-corasick",
  "anyhow",
  "async-trait",
  "axum",

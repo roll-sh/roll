@@ -969,6 +969,24 @@ thirty-fourth review found them in the clear.
 
 ## Safety
 
+- **Secret values in what a preview serves** (Netlify's secrets scan). A preview's pages are
+  read by whoever opens it (a public one by anyone), and its code can put what it was given in
+  them: a server-rendered page, a bundle built with a server variable, an API answer. The first
+  page's screenshot run keeps what its pages served (documents, the origin's own scripts, fetch
+  and XHR answers, each path once and never its query; 40 bodies, 2 MiB each, 8 MiB in all) and
+  hands it to roll, which looks in it for the preview's secret values: roll secrets' values (a
+  `plain` one's URL password only), its branches' credentials, and its own variables named like
+  a credential. A value meant for the browser (`NEXT_PUBLIC_`, `VITE_`, `PUBLIC_`, `REACT_APP_`,
+  `NUXT_PUBLIC_`, `EXPO_PUBLIC_`, `GATSBY_`, `VUE_APP_`, `STORYBOOK_`) isn't one, nor one under 8
+  characters. The run is never given the values (the page's code shares its container), and
+  what was served is dropped once looked in. Each one found is named by the name the preview gets
+  it as, with where (`served_secrets: [{key, path}]`, for the run's head): on the record, first
+  on the sheet's verdict strip ("1 secret value in what it serves") and in a box under it, in
+  `roll preview show`, in the activity when it changes, and in the pull request comment
+  ("**Secret values in what it serves:** `STRIPE_KEY` in `/assets/app.js`"), never the value
+  (checked in the screenshot image: a page's document, its script and its fetch answer kept by
+  path, the query left out; live: `scripts/preview-cost.sh`'s service serves its environment at
+  `/env.txt`, and the record names `DATABASE_URL` there without the password).
 - **Forks.** A change with `trusted: false` (a PR from a fork) gets a preview only for a head a
   writer approved (`approve-run`, roll code's rule). A new push un-approves it. Its services
   stop, and it waits as `awaiting_approval` with its data branches kept. This also fixes roll
@@ -1439,6 +1457,23 @@ egress included, removed with each connection. `a_shell_in_a_previews_service_is
 live preview's container through `roll preview shell` and reads its `ROLL_PREVIEW` back, puts a
 file in with `roll preview cp` and brings it back, and reads the service through `roll preview
 forward` (no relay left after).
+A service can also be swapped for a process on a laptop (Signadot's local sandboxes,
+Telepresence's intercepts): `roll preview swap <preview> 3000 --service web` opens
+`…/swap?service=web`, a WebSocket carrying one HTTP/2 connection the laptop serves, and while
+it's open every request for that service goes there instead of its container: its visitors',
+and its other services' (they reach it by its URL). The laptop's process works against the
+preview's data and services (`roll preview connect`, `roll preview env`) and is debugged there,
+with no deploy in between. The CLI sends each request to `127.0.0.1:<port>` as that host (a dev
+server's host check passes; `x-forwarded-host` keeps the preview's) and says each on stderr. The
+request is the one the container would get: past the preview's gate, roll's access cookie and
+bypass secret taken out. A WebSocket from the preview isn't carried (501). One laptop at a
+time per service (409), on the preview's holder; it's admin (the laptop gets the preview's
+visitors' requests), and the activity says who swapped it and when it was given back. Ctrl-C,
+a dropped connection or the preview going gives it back to its container. A roll apps service
+is served by roll apps' proxy, so it can't be swapped (409).
+`a_swapped_service_is_answered_by_the_laptop_until_given_back`; `scripts/preview-cost.sh` swaps
+the live preview's web for a local server, reads it through the preview's host, and reads the
+container again once it's given back.
 
 ### Traces
 
@@ -1779,6 +1814,7 @@ type Preview = {
   page_links?: { checked: number; broken: { path: string; status: number }[] } | null;
   slower_routes?: { branch: string; routes: { name: string; count: number; p50_ms: number; main_p50_ms: number; grew?: GrewSpan | null; budget_ms?: number | null }[] } | null;
   new_errors?: { branch: string; total: number; errors: { service: string; title: string }[] } | null;
+  served_secrets?: { key: string; path: string }[]; // its secret values its pages serve at its head: names and where, never values
   regressions?: "check" | "required" | null;
   regressions_accepted?: { head: string; by: string; at: number } | null;
   regressions_compared?: boolean;     // compared with main's preview at its head (errors; routes too with traces)
@@ -1813,7 +1849,7 @@ type Settings = {
   max_usd_month: number;              // 0: no cap; once the month's cost reaches it, new previews wait
   secrets: { base: string; allow_production: boolean };      // "development", false
   env: Record<string, string>;        // overrides every service gets
-  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[]; hide: string[]; budget: { load_ms: number; bytes: number }; openapi?: string; endpoints?: string[]; states?: {name, page, steps}[]; browsers?: ("firefox" | "webkit" | "webkit-phone")[] };   // all true but screenshot; pages, hide: []; budget 0s (none); openapi: the first service's OpenAPI JSON path, compared with main's; endpoints: up to 5 GET paths timed against main's
+  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[]; hide: string[]; budget: { load_ms: number; bytes: number }; openapi?: string; endpoints?: string[]; states?: {name, page, steps}[]; storybook?: string /* "web" or "web:/storybook/" */; browsers?: ("firefox" | "webkit" | "webkit-phone")[] };   // all true but screenshot; pages, hide: []; budget 0s (none); openapi: the first service's OpenAPI JSON path, compared with main's; endpoints: up to 5 GET paths timed against main's
   access: "link" | "team" | "public"; // "link": a preview's URLs need its link; "team": a person signed in to roll who may open the project
   visual_review: "off" | "check" | "required";   // the roll/visual review; required also blocks landing in roll ("off")
   feedback: boolean;                  // a feedback button on its pages for people who came in through roll (true)
@@ -1997,6 +2033,21 @@ type Settings = {
     `total` `number` → `string`"). The shapes stay with the comparison: a preview's
     `page_speed` doesn't carry them (live: the change's `/openapi.json` loses
     `paths./users/{id}`).
+    Its Storybook's stories too (Chromatic's stories): with `github.storybook` (`web`, or
+    `web:/storybook/` when the service serves it under a path: a static build or `storybook
+    dev`), that service's run reads Storybook's index (`index.json`, Storybook 7 and later;
+    `stories.json` before), and takes the first 40 stories (docs left out) in a run of its own
+    beside the screenshot's, in the service's network and locked down the same way. Each story is
+    loaded alone (`iframe.html?id=…&viewMode=story`) at the desktop width, waited for until its
+    root holds something (3 s at most), and captured clipped to what it rendered (an 8 px margin,
+    at most 1280 by 2000; 256 KiB a PNG), 100 s in all. Each is a page of its own (`story:<id>`,
+    "Stories" on the sheet, labelled `button / primary`), with what went wrong while it rendered,
+    compared with main's same story and reviewed like a page. A story gone from Storybook goes
+    from the preview. The index is the preview's code's: an id Storybook wouldn't make
+    (`components-button--primary`) is dropped. A Storybook on another service is kept with that
+    service's pages while it runs what it ran (TurboSnap), and taken at once when the rule is
+    turned on (checked in the screenshot image: a docs entry and a bad id skipped, a 600 by 120
+    card captured as 616 by 136 with its console error counted).
     Page states too (Chromatic's interaction tests, Percy's scripted snapshots): much of what a
     change touches shows only after a click (a cart open, a dialog, a form's errors). A project
     names up to 3 (`github.states`: a name, a page of the first service's, and 1 to 10 steps:
@@ -2491,24 +2542,38 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Endpoint answers compared with main's by shape, in review** (Signadot's SmartTests): a
-   field gone or a type widened in a JSON answer, on the verdict strip, the sheet, the change page
-   and the pull request comment.
-2. **Storybook stories as snapshots** (Chromatic): each story taken, compared with main's and
-   reviewed like a page, with TurboSnap's skip.
-3. **A process on a laptop standing in for one service** (Signadot local sandboxes,
-   Telepresence): the preview's other services and data reach it, the reverse of
-   `roll preview forward`.
-4. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
+1. **Secret values in what a preview serves, in review** (Netlify's secrets scan): the first
+   page's run keeps what its pages served (documents, the origin's scripts, fetch and XHR answers;
+   40 bodies, 8 MiB), and roll looks in them for the preview's secret values: each found named
+   with where on the record, the sheet, `roll preview show`, the activity and the pull request
+   comment, never the value.
+2. **A note or an error into a fix** (Vercel Comments' "Create issue", Netlify's drawer): a page
+   note or an error group made a roll work item, or handed to a coding agent, with its crop,
+   console context and the preview's link.
+3. **A preview's data from the sheet** (Neon's Tables, Supabase's table editor): a branch's tables
+   read as the branch's own role (so masks hold), a few rows a page.
+4. **Feature flags on a preview** (Vercel's Flags Explorer): per-preview values, and a reviewer's
+   own override from the page's toolbar.
+5. **Restore points for a preview's data** (Neon's snapshots): save the branches now, put them back
+   after a test run.
+6. **A workload identity for `roll.toml` services** (Vercel's OIDC federation): roll apps' `pv-`
+   instances have one; runtime services don't.
+7. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
    (3.3 s in its log) and its masking, which needs that compute up: pg-control's to shorten.
-5. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+8. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-6. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+9. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-7. **Watch: pg-control's recovery to a time seconds old** (unowned).
+10. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-23, late night: a service swapped for a process on a laptop (#842: `roll preview swap`, checked live through the preview's host and back).
+
+Landed 2026-11-23, night: Storybook stories as snapshots (#837: each story a page, compared with main's and reviewed).
+
+Landed 2026-11-23, evening, later: endpoint answers compared with main's by shape (#834: a field gone or a type widened; live, `/openapi.json` loses `paths./users/{id}`).
 
 Landed 2026-11-23, evening: feedback notes that carry the page's uncaught errors, failed requests and browser (#823, checked in headless Chromium).
 

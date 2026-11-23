@@ -174,6 +174,7 @@ Preview = {state: "creating" | "running" | "sleeping" | "failed", url: string | 
                           diff_url?: string /* the same for where it differs from the default branch's, when it does */,
                           expires_at?: number /* ms: when it goes (its TTL, or a keep, running out), once a day away */,
                           browser_checks?: [{service, name, state}] /* production's browser checks on this head: pending, passed or failed */,
+                          served_secrets?: [{key, path}] /* its secret values its pages serve: names and where, never values */,
                           browser_checks_rule?: "check" | "required" /* the project's rule: the roll/browser-checks status; required also a blocker */,
                           earlier?: [{service, head, url, own_data}] /* earlier pushes still reachable, newest first; own_data: on its own copy of the data, as its head left it (else the preview's) */,
                           visual_change?: {since, percent, phone_percent?} /* how much the first service's page changed since the screenshot at an earlier head */,

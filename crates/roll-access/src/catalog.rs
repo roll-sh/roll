@@ -1810,6 +1810,9 @@ static ROWS: &[Row] = &[
     // A port of a preview's service on a laptop (`roll preview forward`): any port it listens on,
     // past its access: admin, as roll apps' tunnel is.
     row("GET", "/v1/previews/{id}/forward", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // A laptop's process standing in for a preview's service (`roll preview swap`): it gets the
+    // preview's requests, its visitors' included: admin, as the shell is.
+    row("GET", "/v1/previews/{id}/swap", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     row("PUT", "/v1/previews/{id}/files", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     // The mail a preview's services sent, caught and never delivered (previews-next): it can hold
     // copies of production's people, so reveal, as the preview's env is.
