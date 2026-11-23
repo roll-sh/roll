@@ -1444,9 +1444,9 @@ impl Engine {
                 let snap = format!("{name}-{}", crate::label_part(old.strip_prefix("cs_").unwrap_or(old), 10));
                 Some(async move { (res, branch, b.snapshot(&res.parent, branch, &snap).await, snap) })
             });
-            // Each copy made is recorded before the first failure is said, so none is left
-            // unrecorded (a later pass takes the missing ones; a product finds its own by name).
-            let mut failed = None;
+            // Each copy made is recorded. One that fails doesn't hold the push up (the copies are
+            // for the earlier push, not this head): it's said, and that push shares the preview's
+            // data for that product (its `own_data` names only the ones it has).
             for (res, branch, made, snap) in futures::future::join_all(jobs).await {
                 let key = format!("{}:{}", res.kind.as_str(), res.parent);
                 match made {
@@ -1457,12 +1457,10 @@ impl Engine {
                     }
                     Ok(None) => {}
                     Err(e) => {
-                        failed.get_or_insert_with(|| anyhow::anyhow!("keeping {key}'s data for its earlier push: {e:#}"));
+                        warn!(preview = %r.id, error = %e, "previews: keeping {key}'s data for its earlier push");
+                        self.store.log(&r.id, &format!("couldn't keep {key}'s data as {} left it: its earlier push shares the preview's ({e:#})", short(old)))?;
                     }
                 }
-            }
-            if let Some(e) = failed {
-                return Err(e);
             }
         }
         Ok(took)
