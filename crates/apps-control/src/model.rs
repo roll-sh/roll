@@ -2537,6 +2537,10 @@ pub struct CheckState {
     /// `requests`), against its budgets.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metrics: Option<serde_json::Value>,
+    /// A browser check's last pass that was over its budgets, and how: a verdict of its own,
+    /// never down (no incident, no `check.down`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub over_budget: Option<String>,
 }
 
 impl Route {
