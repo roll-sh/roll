@@ -5544,8 +5544,13 @@ answers `{events: [], next}` at the head, for a follower that starts from now. `
 the row's own write, under the head's row lock (on Postgres a second writer waits for it, or loses a
 serializable race and runs again; on SQLite there's one writer). Rows therefore commit in `seq`
 order, and a follower past 7 has already been able to see 6. Never number events from a Postgres
-sequence: sequence values commit out of order, and a follower would skip one forever. `next` is past
-the rows read, the ones a filter left out too. The event's kind and data aren't in the row's hash;
+sequence: sequence values commit out of order, and a follower would skip one forever. The feed reads
+the head (`audit_heads.seq`) before the page, and reads only rows up to it: every row up to the head
+has committed, and a row committed after it is past it. `next` is past the rows read, the ones a
+filter or the caller's grant left out too, and a page short of `limit` answers `next` at the head, so
+a follower of a rare kind (`secret.leaked`, while every write is a `secret.changed`) never walks the
+same rows twice. A kind filter is an index range (`audit_event_kinds`: project, event, seq). The
+event's kind and data aren't in the row's hash;
 the row is. `nodes.rs`'s `two_nodes_writing_events_never_leave_a_gap_a_follower_has_passed` checks it
 on Postgres.
 
@@ -5565,7 +5570,11 @@ restore, request, promote, rollback, rotation and environment rename goes throug
 in its own audit row: one per change, never one per key, so a bulk write of 40 keys is one
 `secret.changed`. `via` says how it came about: `write`, `import` (a `.env` file), `restore` (a
 backup), `answer` (a secret request answered), `request` (a change request applied), `promote`,
-`rollback`, `rotation`, or `rename` (references to a renamed environment rewritten). Live and dynamic
+`rollback`, `rotation`, or `rename` (references to a renamed environment rewritten). A change across
+folders (a batch whose operations name their own folders, or its rollback) is recorded at path `/`, and its event names its keys by
+folder (`folders: {"/app": ["DB_URL"], "/db": ["X"]}`, names only): a reader of any one of those
+folders sees it, trimmed to the folders it may read and their keys (`keys`, `deleted`, `versions`,
+`folders`), so it never learns a key's name in a folder it can't read. Live and dynamic
 links store no value, so a resource's own credential changing is no `secret.changed` (a live link's
 `rotate` is `rotation.succeeded`). Keys have no trash: a deleted key's versions stay in its history
 (its value until retention or a purge), and a rollback brings it back. Role changes in a project are
@@ -5574,8 +5583,8 @@ roll-workspace's records, not secrets' audit rows: they're the workspace's own f
 
 | Kind | When | `data` |
 | --- | --- | --- |
-| `secret.changed` | a change added, changed, linked or rotated stored values (a change that only edits comments, tags or expiry isn't one) | `via`, `change` (its number in the history), `version` (one key) or `versions` (`{key: version}`), `keys` when the row names more (the change's other keys only had their metadata edited or were deleted), `deleted` (keys the same change deleted) |
-| `secret.deleted` | a change only deleted keys (a folder's delete too) | `via`, `change`, `version` or `versions` (the delete's) |
+| `secret.changed` | a change added, changed, linked or rotated stored values (a change that only edits comments, tags or expiry isn't one) | `via`, `change` (its number in the history), `version` (one key) or `versions` (`{key: version}`), `keys` when the row names more (the change's other keys only had their metadata edited or were deleted), `deleted` (keys the same change deleted), `folders` (a change across folders) |
+| `secret.deleted` | a change only deleted keys (a folder's delete too) | `via`, `change`, `version` or `versions` (the delete's), `folders` (a change across folders) |
 | `secret.leaked` | a stored value turned up in a roll code repository (a change's added lines or a scan; in the project holding the value, once a day for the same keys and repo), or GitHub's secret scanning found a placeholder (`secrets.placeholders.end`) | `repo` (and `project`, the repo's, when the value came from another's shared folder), or `placeholder`, `consumer`, `reason` |
 | `scan.finding` | `roll secrets scan` or roll MCP's credential guard (`POST …/leaks`) matched values: a row per folder | `candidates`, `matched`, `guard` |
 | `rotation.failed` | a managed key's scheduled rotation failed: once as a failing run starts (health's `rotation_failing` until one works) | `reason` |

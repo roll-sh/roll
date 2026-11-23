@@ -473,6 +473,33 @@ api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d]" | grep -q 
 for _ in $(seq 1 30); do [ "$(docker ps -aq --filter name=roll-previews-fwd- | wc -l)" = 0 ] && break; sleep 0.5; done
 [ "$(docker ps -aq --filter name=roll-previews-fwd- | wc -l)" = 0 ] || { echo "a forward's relay should go with its connection"; exit 1; }
 
+say "a service swapped for a process on this machine (roll preview swap): the preview's host reaches it, then the container again"
+SWAP_PORT=${PREVIEW_E2E_PORTS:-27}978
+SWAP_DIR=$(mktemp -d)
+echo "from the laptop" > "$SWAP_DIR/index.html"
+python3 -m http.server "$SWAP_PORT" --bind 127.0.0.1 --directory "$SWAP_DIR" >/dev/null 2>&1 &
+SWAP_SRV=$!
+ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview swap "$PV" "$SWAP_PORT" --service web 2>"$HOME_DIR/swap.log" &
+SWAP_PID=$!
+SWAPPED=""
+for _ in $(seq 1 100); do
+  SWAPPED=$(curl -s --max-time 10 -b "$JAR" -H "Host: $HOST" "http://$API/index.html")
+  [ "$SWAPPED" = "from the laptop" ] && break
+  sleep 0.2
+done
+kill "$SWAP_PID" 2>/dev/null || true; wait "$SWAP_PID" 2>/dev/null || true
+kill "$SWAP_SRV" 2>/dev/null || true; wait "$SWAP_SRV" 2>/dev/null || true
+rm -rf "$SWAP_DIR"
+[ "$SWAPPED" = "from the laptop" ] || { echo "a swapped service should be answered by this machine's process: $SWAPPED ($(cat "$HOME_DIR/swap.log"))"; exit 1; }
+BACK=""
+for _ in $(seq 1 100); do
+  BACK=$(curl -s --max-time 10 -b "$JAR" -H "Host: $HOST" "http://$API/index.html")
+  [ -n "$BACK" ] && [ "$BACK" != "from the laptop" ] && break
+  sleep 0.2
+done
+[ -n "$BACK" ] && [ "$BACK" != "from the laptop" ] || { echo "given back, the container should answer again: $BACK"; exit 1; }
+api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d]" | grep -q "swapped web for a process on their machine" || { echo "the activity should say web was swapped"; exit 1; }
+
 say "traces: with the project's traces on, the service gets OpenTelemetry's variables, spans it posts are the preview's traces, and an error naming one opens it"
 api PUT "/v1/previews/projects/$PRJ/settings" '{"traces":true}' >/dev/null
 # It restarts with them (its deploy's fingerprint): the env it writes at start says so.
