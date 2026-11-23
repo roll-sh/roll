@@ -158,6 +158,47 @@ pub(crate) fn stand_in_indexes(t: &Table) -> Option<&'static [Arc<Index>]> {
     stand_in_of(t).map(sys_indexes)
 }
 
+/// get_actual_variable_range of stand-in table `t`'s column `col`: the least or greatest of
+/// its catalog's rows' values there, when one of Postgres's btree indexes on the catalog has it
+/// as its first column (None otherwise, as for a table without such an index). A comparison
+/// past the histogram's ends, or a merge join's scan fractions, then see the catalog's actual
+/// range: `pg_class.oid < 1` selects nothing rather than the histogram's cutoff, so a merge
+/// join of pg_constraint.confrelid (all 0 in initdb's statistics) against pg_class.oid is
+/// costed as the full scan Postgres costs it, not stopping after a few rows.
+pub(super) fn sys_column_end(t: &Table, col: usize, min: bool, ctx: &ExecCtx) -> Option<Value> {
+    let st = stand_in_of(t)?;
+    let leads = |ix: &Arc<Index>| matches!(ix.columns.first().map(|c| &c.key), Some(IndexKey::Column(k)) if *k == col);
+    if !sys_indexes(st).iter().any(leads) {
+        return None;
+    }
+    let mut out: Option<Value> = None;
+    let mut see = |x: &Value| {
+        if x.is_null() {
+            return;
+        }
+        let better = out.as_ref().is_none_or(|o| {
+            let ord = crate::exec::agg::cmp_rows(std::slice::from_ref(x), std::slice::from_ref(o));
+            if min { ord.is_lt() } else { ord.is_gt() }
+        });
+        if better {
+            out = Some(x.clone());
+        }
+    };
+    if crate::catalog::system::rows_cacheable(st) {
+        let rows = crate::catalog::system::rows_shared(st, ctx).ok()?;
+        for c in rows.chunks() {
+            for i in 0..c.len() {
+                c.with_value(i, col, &mut see);
+            }
+        }
+    } else {
+        for r in crate::catalog::system::rows(st, ctx).ok()? {
+            see(&r[col]);
+        }
+    }
+    out
+}
+
 /// Whether stand-in table `t`'s column `col` is the one key of a unique index of its
 /// catalog's (examine_variable's isunique).
 pub(crate) fn sys_unique_col(t: &Table, col: usize) -> bool {

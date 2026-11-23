@@ -2276,6 +2276,11 @@ impl<'c, 'a> Planner<'c, 'a> {
             return r.clone();
         }
         let t = &v.table;
+        if syscat::stand_in_of(t).is_some() {
+            let r = syscat::sys_column_end(t, v.col, min, self.ctx);
+            self.ends.borrow_mut().insert(key, r.clone());
+            return r;
+        }
         let indexed = self
             .cat
             .table_indexes(t)
