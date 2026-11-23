@@ -14682,8 +14682,17 @@ keys 2.61 / 2.62 s. TPC-H SF1 load 2,058.7 -> 1,337.3 MB (c1, the same spill cod
 **Cost when it spills**: the same table at 64 MB (each participant spills once) takes 4.316 ->
 4.909 and 3.243 -> 3.945 G (+13.7%, +21.6%), two pairs. The step's peak drops only 11-32 MB at that
 size. The runs are written once and read once, twice for a unique index (its check, then the run).
-PostgreSQL's external sort makes the same trade. All roll arms ran at the default 64 MB (the
-benchmark settings give PostgreSQL and pgrust 256 MB), so roll's numbers are at the stricter limit.
+PostgreSQL's external sort makes the same trade. Roll ran at its default 64 MB, PostgreSQL and
+pgrust at the benchmark settings' 256 MB. Roll at 256 MB as well (`cand/a302-2`): pgbench -i
+peaks at 710.2 MB and the TPC-H load at 1,558.2 MB (PostgreSQL 632.9 / 1,026.0). Like for like,
+roll is still behind on both loads.
+
+**`cand/a302-2`**: the change rebased onto origin's `3b57f35a5` after `cand/a300` landed (its INSERT
+… SELECT runs and sink sort in `txn/` and `exec/dml.rs`; the rebase was clean). The bulk sink's
+`write_fresh` is now a loop over `fresh_run` / `FreshRun::push` / `add_fresh_run`. Agent 300's
+steps took two alternating pairs against the base: COPY in +0.09%, INSERT … SELECT +0.10%, COPY
+into `bulkp` +0.04%, into `bulks` +0.05% user instructions, every row, ctid hash and size equal.
+All four are under the coordinator's 0.2% bound, so there is no `#[inline]` or kept old function.
 
 Test: `tests/big_tables.rs` `parallel_index_builds` runs a third round in which every participant
 spills every 1,024 rows (`parscan::with_build_spill_bytes`; `index_build_spills` counts the runs,
@@ -14699,10 +14708,14 @@ plus query memory: the hash joins and aggregates of q9/q18 against work_mem (not
 row at 1M rows. Things to try: cached heads instead of `Source::head` per compare, a callback that
 isn't `dyn`, records written in one copy, and the unique check done in the run's own pass. Wall
 time was not resolved on these days (6-7 foreign cores on lane C).
-(3) The block cache fills to its budget during a load (about 1.1 GB of the TPC-H load's peak).
-PostgreSQL's COPY and CREATE INDEX use ring buffers (16 MB / 256 KB), so its shared buffers stay at
-the 793 MB the load's reads leave. Agent 270's ring covers bulk reads, not what a load writes and
-compacts.
+(3) ~~The block cache during a load~~ Measured and dropped (BENCH "The block cache during a
+load"). The cache holds about 930 MB at the TPC-H load's peak: 2,063 MB at a 2 GB cache, 1,136 at
+256 MB. It isn't the load's written blocks (writes don't go into the cache) but its reads. During
+the COPYs these are autovacuum's VACUUM / ANALYZE. In the index phase they are the builds' scans,
+which reach the same peak without autovacuum. Caching them is what makes the load cheap: a load
+whose blocks can't stay cached took 663.6 G user instructions against 591.3 G (+12%), and q01
+after it 16.2 G against 7.35 (an empty cache: 19.0 G). A ring would lose both, so it fails the
+gate. What would cut the peak and keep the CPU is a cheaper cached form of lineitem, not a ring.
 (4) The idle session's allocator pages (about 200 KB of its 270 KB), above.
 (5) The serial build's memory (`max_parallel_maintenance_workers = 0`, or a maintenance_work_mem
 under 64 MB) was not looked at. Spilled runs don't count in pg_stat_database's
@@ -14712,7 +14725,9 @@ Verification: quick-check with `QC_CHECKED=1` and `QC_TESTS=big_tables` on `ffef
 `ff72a4b50`): build and Clippy (16 warnings, none new in changed files), 424 tests in 21
 binaries, the same with `--profile verify-checked`, the crash step (seeds 1-3 x 2, power cut),
 regress 51,148 / 51,150 with 0 newly differing, isolation 1,647 / 1,648, pg_dump_tap 14,609
-passed.
+passed. `cand/a302-2` (the same code over `3b57f35a5`, `9ed9a6f1b`): the same quick-check, 425
+tests in 21 binaries and again verify-checked, the crash step, regress 51,148 / 51,150 with 0
+newly differing, isolation 1,647 / 1,648, pg_dump_tap 14,609 passed.
 
 ## Point and range reads, round 6: 32 clients, idle footprint (agent 250)
 

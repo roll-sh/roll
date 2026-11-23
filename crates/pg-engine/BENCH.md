@@ -296,8 +296,11 @@ touched; no server's page cache counts). Roll's VmHWM is in the second table. Se
 PostgreSQL 18.6 and pgrust `shared_buffers` = the cache column, `maintenance_work_mem=256MB`,
 `max_wal_size=8GB`, `checkpoint_timeout=30min`, `max_connections=1100`,
 `max_parallel_workers_per_gather=2`, `max_parallel_workers=8` (pgrust also `io_method=sync`,
-`max_stack_depth=60000`). Roll is `--cache-mb` = the cache column and `--password pw`, with
-maintenance_work_mem at its default of 64 MB. pgrust is its published (PGO) image. One run a
+`max_stack_depth=60000`). Roll is `--cache-mb` = the cache column and `--password pw`.
+**maintenance_work_mem**: PostgreSQL and pgrust 256 MB in every cell; roll 64 MB (its default)
+in every cell but the two rows marked "roll at 256 MB"; the bulk script sets 256 MB on its
+database for all three. Only index builds read it: pgbench -i's primary keys, the TPC-H load's
+indexes, the bulk script's two CREATE INDEXes. pgrust is its published (PGO) image. One run a
 cell, the same day (2026-11-23 afternoon). Every hold read 2-7.6 foreign cores on its lane, so
 the throughput columns say where each server was, not how fast it is. Roll is **head**, plain
 dist of `58ad4d95d`, and **c2**, the change over it (plain dist; `cand/a302` is the same
@@ -310,11 +313,13 @@ code rebased over `ff72a4b50`), in the cells it changes.
 | 1 idle session | A | 2 GB | 9.1 |  | 115.8 | 239.8 | 12.7x | 26.4x |
 | 100 idle sessions (end 36.2 / 246.6 / 482.1) | A | 2 GB | 38.1 |  | 246.6 | 541.9 | 6.5x | 14.2x |
 | 1,000 idle sessions (end 276.6 / 1,438.9 / 2,954.7) | A | 2 GB | 296.1 |  | 1,438.9 | 2,996.8 | 4.9x | 10.1x |
-| pgbench -i, scale 32 | A | 2 GB | **731.5** / 763.5 | 511.9 (c1 511.3) | 632.9 | 837.4 | 0.87x -> 1.24x | 1.14x -> 1.64x |
+| pgbench -i, scale 32 (roll at 64 MB) | A | 2 GB | **731.5** / 763.5 | 511.9 (c1 511.3) | 632.9 | 837.4 | 0.87x -> 1.24x | 1.14x -> 1.64x |
+| pgbench -i, scale 32, roll at 256 MB (`cand/a302-2`, primary keys 2.26 s) | A | 2 GB |  | **710.2** | 632.9 | 837.4 | 0.89x | 1.18x |
 | select-only, 8 clients, scale 32 (39,565 / 35,726 / 53,884 tps) | A | 2 GB | 439.4 |  | 606.4 | 747.4 | 1.38x | 1.70x |
 | select-only, 32 clients (49,709 / 20,920 / 28,860 tps) | A | 2 GB | 450.1 |  | 638.5 | 836.1 | 1.42x | 1.86x |
 | TPC-B-like, 32 clients, scale 32 (1,339 / 1,286 / 845 tps) | A | 2 GB | 180.3 |  | 336.8 | 537.7 | 1.87x | 2.98x |
-| TPC-H SF1 load (`bench tpch-load`) | C | 2 GB | **2,110.5** / 2,058.7 | 1,337.3 (c1 1,352.7) | 1,026.0 | 1,249.0 | 0.49x -> 0.77x | 0.59x -> 0.93x |
+| TPC-H SF1 load (`bench tpch-load`; roll at 64 MB) | C | 2 GB | **2,110.5** / 2,058.7 | **1,337.3** (c1 1,352.7) | 1,026.0 | 1,249.0 | 0.49x -> 0.77x | 0.59x -> 0.93x |
+| TPC-H SF1 load, roll at 256 MB (`cand/a302-2`) | C | 2 GB |  | **1,558.2** | 1,026.0 | 1,249.0 | 0.66x | 0.80x |
 | TPC-H SF1, the 22 queries once (42.7 / 46.5 / 23.5 s) | C | 2 GB | 1,576.5 |  | 1,726.8 | 2,020.3 | 1.10x | 1.28x |
 | TPC-H SF1, the 22 once (61.4 / 23.8 / 28.0 s) | C | 256 MB | **462.3** |  | 390.1 | 679.0 | 0.84x | 1.47x |
 | the 1M-row bulk script (16.7 / 16.8 / 11.4 s) | C | 2 GB | 239.2 |  | 359.0 | 518.3 | 1.50x | 2.17x |
@@ -342,6 +347,54 @@ Roll's VmHWM / VmRSS at the end, MB (head): idle 1 / 100 / 1,000: 32.6 / 60.0 / 
 | the same | RssAnon | 32.6 | 31.7 | 31.8 |
 
 Verify builds map 9-10 MB more binary than dist. Anon is the comparable number.
+
+The two "roll at 256 MB" rows ran the next evening (`cand/a302-2`, plain dist over origin's
+`3b57f35a5`, one run each, 5.5-6.9 foreign cores). Like for like, roll is behind PostgreSQL on both
+loads. At 256 MB each of three participants holds 85 MB before it spills: +198 MB on pgbench -i
+and +221 MB on the TPC-H load against roll at 64 MB.
+
+### `cand/a302-2`: the COPY sink's path (lane C, agent 300's `bulkx.sh`, `JOIN=1`)
+
+`write_fresh` (the bulk sink's run) became a loop over `Runs::fresh_run`, `FreshRun::push` and
+`Runs::add_fresh_run`. Plain dist builds: **b25**, origin's `3b57f35a5` (`cand/a300` landed), and
+**n25**, `cand/a302-2` on it. Two alternating pairs, each one `tools/lane.sh` hold (foreign load
+7.0 cores), steps `copy_in insert_select check2 ctids2 pk_setup copy_pk checkp ctidsp sx_setup
+copy_sx checks`. G user instructions of the server's cgroup, counters at 100% of their windows:
+
+| step | b25 | n25 | Δ |
+|---|---|---|---:|
+| COPY in (bare table) | 6.456 / 6.456 | 6.461 / 6.462 | +0.09% |
+| INSERT … SELECT | 5.128 / 5.128 | 5.133 / 5.133 | +0.10% |
+| COPY into `bulkp` (primary key + secondary index) | 26.802 / 26.803 | 26.813 / 26.814 | +0.04% |
+| COPY into `bulks` (one secondary index) | 19.030 / 19.038 | 19.041 / 19.046 | +0.05% |
+
+Rows, sums, the ctid hashes (`fc801150f9235279cbea45f12f8ee039`) and the sizes (`bulk2`
+68,272,128, `bulkp` / `bulks` 68,747,264, `bulkp_pkey` 22,429,696, `bulkp_a` / `bulks_a`
+9,625,600) are equal in all four runs. Every step is under the 0.2% bound, so the push stays as it is.
+
+### The block cache during a load (measured, not changed)
+
+The TPC-H SF1 load on origin's `a869d6b98` (plain dist), roll alone on lane C:
+- **Peak anon by cache size.** At 2 GB the load peaks at 2,063-2,140 MB; at a 256 MB cache, 1,136-1,230 MB.
+- **Where the cache fills.** By the end of lineitem's COPY, anon is 1,034 MB with autovacuum on and
+  127 MB with `-c autovacuum=off`: autovacuum's VACUUM / ANALYZE between the 60 COPYs fill the cache.
+  The peak doesn't move without them (2,111 MB): the index builds' reads of lineitem fill it as much.
+- **The cost of not caching**, as `perf stat -G` user instructions of the server's cgroup (`~/.cache/a302/coldq2.sh`):
+
+| | cache 2 GB | cache 256 MB |
+|---|---:|---:|
+| the load | 591.27 G (137.7 s) | 663.61 G (148.0 s) |
+| q01 right after the load | 7.35 G (0.73 s) | 16.21 G |
+| q06 right after it | 5.18 G | 14.03 G |
+| q01 after a restart (empty cache) | 18.99 G (4.07 s) | 19.03 G |
+
+The cache saves its own reads. A load whose blocks can't stay cached runs 72 G (+12%) more:
+lineitem is decompressed again by each of its three index builds and by VACUUM. A first query
+after it pays 11.6 G more on q01. A ring for the load's reads would trade about 0.9 GB of peak
+for both costs. That fails the gate (the first query may not lose more than the load saves), so
+nothing was changed. PostgreSQL's ring keeps its shared buffers small because its pages are
+plain: it reads lineitem back from the page cache, which anon+shmem doesn't count (its cgroup
+peak with the page cache was 2,887 MB against roll's 2,588 in the first table).
 
 ### Index builds with and without spilling (lane C, `~/.cache/a302/ixgate.sh`)
 
