@@ -1363,8 +1363,10 @@ A link is `{kind, ref, field, mode, options}`:
       deploy, or a wake that resolves at runtime, fails;
     - agents sandboxes copying from it: they lose those values;
     - its syncs, which stop: the copies they pushed stay at their targets until removed there;
-    - workload identities and roll-access tokens whose scope names it (their names only for a
-      project admin; anyone else sees that one is there);
+    - workload identities and roll-access tokens whose scope names it and that reach it, judged as
+      reach judges them (a person's own token only within their own projects, so another person's
+      "every project, `staging`" token isn't named here); their names only for a project admin,
+      and anyone else sees that one is there;
   - a protected environment whose policy asks for approvals (`approvals` ≥ 1) is deleted through a
     change request with those approvals and every folder policy in it (`"action":
     "delete_environment"`, answered 202 `{request}`), exactly as deleting one of its folders is;
@@ -2952,6 +2954,7 @@ roll secrets scan    [PATH…] | --staged [--allow-unstored]    # this project's
 roll secrets scan    --store [KEY=]FILE:LINE                   # move one such credential in; prints what to write instead
 roll secrets render  config.tpl [--out config.yml [--watch --exec CMD]]   # ${KEY} filled in
 roll secrets export  [--format dotenv|json|shell|yaml|docker|kubernetes] [--name N --namespace NS]
+roll secrets mount   .env [--format dotenv|json]               # a named pipe each read of which gets the current values ("A local .env")
 roll secrets envs    ls | add NAME [--base ENV --ephemeral] | rename OLD NEW | rm NAME [--yes] | recover NAME | order A B C
 roll secrets history [KEY]   roll secrets rollback --to SEQ | --at TIME
 roll secrets diff    --from development --to staging | --file .env   # two environments, or a local copy
@@ -3080,6 +3083,41 @@ roll completions bash|zsh|fish|powershell
   worst case: every byte can start a value); about 1.2 GB/s with a handful of values. Unmasked,
   the same `cat` runs at about 3.5 GB/s. No command prints anywhere near that, so masking costs a
   real command nothing it notices; memory stays under 30 MB.
+
+### A local `.env`
+
+Many tools read only a file: Next.js, Vite, Prisma, Compose's `env_file`, an IDE's run
+configuration. `roll secrets mount .env` gives them one that is never on disk, as 1Password
+Environments' local `.env` and Doppler's `run --mount` do:
+
+```sh
+roll secrets mount .env -e development            # in one terminal (or a unit); Ctrl-C removes it
+npx prisma migrate dev                            # in another: reads .env as usual
+```
+
+- `.env` is a named pipe (`mkfifo`, 0600) served from the `roll` process
+  (`crates/roll-cli/src/secrets/mount.rs`). Each open of it gets the folder's values as they are
+  now, written once (`--format dotenv`, quoted as `export`'s; or `json`, one object), and then the
+  pipe closes. Nothing is written anywhere else: no temporary file, no value in a log, an error or
+  a command line.
+- The values come from the local agent's cache ("A local agent"): the folder's digest is followed,
+  so a change reaches the next read without logging in again. A folder with a key that doesn't
+  resolve doesn't start; one that stops resolving gives a read a `#` comment naming the keys
+  (dotenv) or nothing (json), never part of the folder.
+- It logs in as every `roll secrets` command does. Once roll refuses it (a 401 after logging in
+  again, a 403 or a 404 for the folder: the token revoked, the environment deleted) it removes the
+  pipe and exits non-zero with roll's refusal. Ctrl-C, SIGTERM and SIGHUP remove it too.
+- The path must not exist: a regular file there is never overwritten (`roll secrets import .env`
+  then delete it, if it holds values). A pipe an earlier mount left (killed with SIGKILL) is taken
+  over; it's known by its device and inode under `$XDG_STATE_HOME/roll/mounts`. A pipe another
+  mount still serves, or one no mount made, is refused.
+- In a git work tree, a path git doesn't ignore (`git check-ignore`) is added to the work tree's
+  `.gitignore`, and the mount says so.
+- **Watchers.** A dev server that watches `.env` and reloads on a change event can loop on a pipe
+  (its read is an event too, as 1Password documents for Vite). Run such a server with `roll run --
+  npm run dev` instead (Vite takes `VITE_*` variables from its environment too: no file at all), or
+  keep the pipe out of the directory it watches for env files (Vite's `envDir`).
+- Not on Windows (no named pipe a tool can open as a file): `roll run` there.
 
 ### Docker builds and Compose
 
@@ -3272,9 +3310,10 @@ cluster, instead of a key pasted into it: the Inference tab's "A roll secret", o
   copied count: a key of the folder that doesn't resolve for an untrusted read (`${production.X}`,
   production being protected, or a reference to a deleted environment) stops nothing that didn't
   copy it, and a copied one that doesn't resolve is left unset and named with why
-  (`secrets_unset`). An environment deleted but still in its recovery window holds the sandbox's
-  create and start (they wait), so recovering it brings the values back; once it's purged, the
-  sandbox starts without them (`secrets_dropped`). A sandbox made before
+  (`secrets_unset`). An environment deleted but still in its recovery window, or one of a project
+  deleted but still in its window, holds the sandbox's create and start (they wait), so recovering
+  it brings the values back; once it's purged or the window has closed, the sandbox starts without
+  them (`secrets_dropped`). A sandbox made before
   `secrets_from` was kept only has its maker asked whether they can still act (`maker_acts`), and
   keeps what it was made with; delete it and make another to get fresh reads
   (docs/code/http-api.md, "Sandboxes").

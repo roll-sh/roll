@@ -2,6 +2,7 @@
 //! environment variables, and a command run with them in its environment, without files.
 
 mod local_agent;
+mod mount;
 mod repo;
 
 use crate::Api;
@@ -846,6 +847,18 @@ pub enum Secrets {
     /// Serve the environment's values to apps on this machine from 127.0.0.1, cached and kept
     /// current, as the Lambda extension does (a sidecar or a unit; docs/secrets.md, "A local agent").
     Agent(local_agent::LocalAgent),
+    /// Serve the environment's values as a named pipe at a path (`.env`) for tools that only read a
+    /// file: each read gets the current values, and nothing is on disk (docs/secrets.md, "A local
+    /// `.env`").
+    ///
+    /// The pipe is 0600 and served from this process until Ctrl-C, SIGTERM or roll refusing the
+    /// login, which remove it. In a git work tree, a path git doesn't ignore is added to
+    /// `.gitignore`.
+    ///
+    /// A dev server that watches `.env` (Vite) can loop on a pipe: run it with `roll run -- <command>`
+    /// instead, or keep the pipe out of the directory it watches (Vite's `envDir`). Not on Windows:
+    /// use `roll run` there.
+    Mount(mount::Mount),
 }
 
 #[derive(Subcommand)]
@@ -2102,6 +2115,10 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
     // The agent finds its project itself and serves until stopped.
     if let Secrets::Agent(a) = cmd {
         return local_agent::run(api, &args, a).await;
+    }
+    // So does a mount.
+    if let Secrets::Mount(m) = cmd {
+        return mount::run(api, &args, m).await;
     }
     // An export is checked on this machine, against keys saved earlier. A `prj_…` id needs no
     // server; a name is looked up.
@@ -3501,7 +3518,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("Revoked {id}");
             }
         },
-        Secrets::Keygen { .. } | Secrets::Key(_) | Secrets::Unseal { .. } | Secrets::Find { .. } | Secrets::Recover { .. } | Secrets::Doctor | Secrets::Health { all: true, .. } | Secrets::Issuer { .. } | Secrets::Agent(_) => unreachable!("handled before a project is picked"),
+        Secrets::Keygen { .. } | Secrets::Key(_) | Secrets::Unseal { .. } | Secrets::Find { .. } | Secrets::Recover { .. } | Secrets::Doctor | Secrets::Health { all: true, .. } | Secrets::Issuer { .. } | Secrets::Agent(_) | Secrets::Mount(_) => unreachable!("handled before a project is picked"),
         Secrets::Backup { to, out } => {
             let v = c.call(Method::POST, &format!("{}/backup", c.base()), Some(json!({ "recipient": to }))).await?;
             let text = serde_json::to_string_pretty(&v)?;
