@@ -2003,6 +2003,10 @@ pub struct FirewallRule {
     /// request without it counts by its address.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+    /// Kinds of client from roll's managed lists ([`crate::bots`]): `ai`, `search`, `preview`,
+    /// `tools`, `verified`, `spoofed`; any of them matches.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bots: Vec<String>,
 }
 
 /// A named part of a request a firewall rule reads ([`FirewallRule::header`]): there, or there
@@ -2050,6 +2054,8 @@ pub struct Asked<'a> {
     pub ip: Option<std::net::IpAddr>,
     pub headers: &'a axum::http::HeaderMap,
     pub query: Option<&'a str>,
+    /// What [`crate::bots`] made of its client.
+    pub bot: Option<crate::bots::Bot>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2128,8 +2134,13 @@ impl FirewallRule {
                 m.check(what, lower)?;
             }
         }
-        if self.path.is_none() && self.methods.is_empty() && self.user_agent.is_none() && self.ips.is_empty() && self.header.is_none() && self.cookie.is_none() && self.query.is_none() {
-            return bad("a rule matches on a path, methods, a user agent, addresses, a header, a cookie or a query parameter");
+        if self.bots.len() > crate::bots::KINDS.len() || self.bots.iter().any(|b| !crate::bots::KINDS.contains(&b.as_str())) {
+            return bad("bots are any of ai, search, preview, tools, verified, spoofed");
+        }
+        self.bots.sort();
+        self.bots.dedup();
+        if self.path.is_none() && self.methods.is_empty() && self.user_agent.is_none() && self.ips.is_empty() && self.header.is_none() && self.cookie.is_none() && self.query.is_none() && self.bots.is_empty() {
+            return bad("a rule matches on a path, methods, a user agent, addresses, a header, a cookie, a query parameter or bots");
         }
         if self.action == FirewallAction::Challenge && !self.methods.is_empty() && self.methods.iter().any(|m| m != "GET") {
             return bad("a challenge is a page a browser opens: GET only");
@@ -2174,7 +2185,8 @@ impl FirewallRule {
             let pairs: Vec<(String, String)> = url::form_urlencoded::parse(a.query.unwrap_or("").as_bytes()).map(|(k, v)| (k.into_owned(), v.into_owned())).collect();
             m.takes(pairs.iter().filter(|(k, _)| *k == m.name).map(|(_, v)| v.as_str()))
         });
-        path_ok && method_ok && ua_ok && ip_ok && header_ok && cookie_ok && query_ok
+        let bots_ok = self.bots.is_empty() || a.bot.is_some_and(|b| self.bots.iter().any(|k| b.is(k)));
+        path_ok && method_ok && ua_ok && ip_ok && header_ok && cookie_ok && query_ok && bots_ok
     }
 
     /// A limit's client by its `key` (a header's or cookie's value, hashed: never kept as it

@@ -182,9 +182,12 @@ impl Prices {
         let mb = run.memory_mb as f64 + run.sidecars.iter().map(|s| s.memory_mb as f64).sum::<f64>();
         let hour = cpu * 3600.0 * self.cpu_second + mb * 1_048_576.0 / 1e9 * 3600.0 * self.gb_second;
         let floor = if run.kind == crate::model::RunType::Cron { 0 } else { run.min_instances };
+        // Floors by the clock: the highest of them, for the hours it holds (as a ceiling).
+        let busiest = run.schedule_scale.iter().map(|w| w.min_instances).max().unwrap_or(0).max(floor);
         serde_json::json!({
             "instance_hour": round(hour),
             "idle_hour": round(hour * floor as f64),
+            "scheduled_idle_hour": (busiest > floor).then(|| round(hour * busiest as f64)),
             "month": { "least": round(hour * floor as f64 * HOURS_A_MONTH), "most": round(hour * run.max_instances as f64 * HOURS_A_MONTH) },
             "scales_to_zero": floor == 0,
             "currency": "USD",
