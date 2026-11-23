@@ -16,10 +16,12 @@
 //!
 //! `… --example bench -- stampede 100,1000 [keys] [workers] [pool]`: that many identities (each
 //! its own principal, as pods' workload logins are) watching one folder of `keys` keys (9,000 plus
-//! 900 references by default), each holding its digest, then one key's change. Two lines per
-//! count, to the point every identity has the new digest and values: its conditional read
-//! (`If-None-Match`, now a miss: the first digest after the change), then its read (`digest=1`,
-//! as `roll run --watch` asks). `workers` requests at once (64), and on Postgres a pool of `pool`
+//! 900 references by default), each holding its digest and its values' stamps, then one key's
+//! change. Three lines per count, to the point every identity has the new digest and values: its
+//! conditional read (`If-None-Match`, now a miss: the first digest after the change), its full
+//! read (`digest=1`, as watchers asked before delta reads), then its delta read (`…/values/delta`
+//! with the stamps it holds, as `roll run --watch` asks now: the changed key and the one that
+//! references it). `workers` requests at once (64), and on Postgres a pool of `pool`
 //! connections (4, rolld's for secrets). Each line: wall seconds, this process's CPU seconds and,
 //! with `BENCH_DB_CGROUP` (the database container's cgroup directory), the database's; CPU
 //! milliseconds per identity; errors (a read that failed, or answered the old state).
@@ -346,14 +348,23 @@ fn stampede(ns: &[usize], n: usize, workers: usize, pool: usize) {
         let pods: Vec<Caller> = (0..count).map(|i| Caller::consumer(&format!("workload:r{round}-pod{i:04}"))).collect();
         let before = s.digest(&project, "production", "/", &pods[0]).unwrap();
         each(&pods, &|p| s.digest(&project, "production", "/", p).is_ok_and(|d| d == before));
+        // What each identity holds: its answer's digest, basis and stamps (the same for each).
+        let full = s.values_delta(&project, "production", "/", &Default::default(), true, &pods[0]).unwrap();
+        assert!(!full.delta && full.stamps.len() == n + n / 10 && full.basis.is_some(), "the full set with every key's stamp");
+        let held = roll_secrets::Held { digest: full.digest.clone(), basis: full.basis.clone().unwrap(), stamps: full.stamps.clone().into_iter().collect() };
         let value = format!("rotated-{round}");
         s.batch(&project, "production", Batch { path: None, message: None, ops: vec![set("K00000".into(), value.clone())], if_seq: None }, &c).unwrap();
-        let steps: [(&str, Poll<'_>); 2] = [
+        let r0 = format!("{value}/x");
+        let steps: [(&str, Poll<'_>); 3] = [
             ("conditional read (miss)", &|p| matches!(s.unchanged(&project, "production", "/", &before, true, p), Ok(None))),
             ("read (digest=1)", &|p| {
                 let digest = s.digest(&project, "production", "/", p);
                 let v = s.values_for(&project, "production", "/", true, None, true, p);
                 digest.is_ok_and(|d| d != before) && v.is_ok_and(|v| v.values.len() == n + n / 10 && v.values["K00000"].expose() == value)
+            }),
+            ("delta read", &|p| {
+                let d = s.values_delta(&project, "production", "/", &held, true, p);
+                d.is_ok_and(|d| d.delta && d.digest != before && d.removed.is_empty() && d.values.values.len() == 2 && d.values.values["K00000"].expose() == value && d.values.values["R00000"].expose() == r0)
             }),
         ];
         for (step, f) in steps {

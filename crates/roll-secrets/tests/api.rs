@@ -7141,3 +7141,65 @@ async fn the_events_feed_answers_in_commit_order_filtered_by_kind_environment_an
     assert!(head >= seqs[4]);
     assert_eq!(api.ok(Method::GET, &format!("/events?after={head}"), None).await["events"], json!([]));
 }
+
+/// A watcher's delta read (docs/secrets.md, "Delta reads"): after one key changes and another
+/// goes, it gets that key, what references it and a live link's key (read again, as a full read
+/// would), the gone key's name, and their new stamps, with the folder's whole `links`; it's
+/// audited as an export naming only those keys. Sent back as it now is, it's nothing.
+#[tokio::test]
+async fn a_watchers_delta_returns_what_changed_and_is_audited() {
+    let api = Api::new().await;
+    for (k, v) in [("A", "1"), ("B", "2"), ("C", "3"), ("R", "${A}-x")] {
+        api.set("production", k, v).await;
+    }
+    api.ok(Method::PUT, &format!("/v1/workspace/projects/{}/resources/bucket/assets", api.project), Some(json!({ "x": 0, "y": 0 }))).await;
+    api.ok(Method::PUT, "/environments/production/secrets/L", Some(json!({ "link": { "kind": "bucket", "ref": "assets", "field": "url", "mode": "live" } }))).await;
+    let tok = api.token(json!({ "environments": ["production"], "actions": ["read", "reveal"] }));
+    let delta = |held: Value| api.req(Method::POST, "/environments/production/values/delta", Some(held), Some(&tok));
+    let (s, full) = delta(json!({})).await;
+    assert_eq!((s, full["delta"].as_bool()), (StatusCode::OK, Some(false)), "{full}");
+    assert_eq!(full["values"].as_object().unwrap().keys().collect::<Vec<_>>(), ["A", "B", "C", "L", "R"]);
+    assert_eq!(full["stamps"].as_object().map(|s| s.len()), Some(5), "{full}");
+
+    api.set("production", "A", "10").await;
+    api.ok(Method::DELETE, "/environments/production/secrets/C", None).await;
+    let held = |a: &Value| json!({ "digest": a["digest"], "basis": a["basis"], "stamps": a["stamps"] });
+    let (s, d) = delta(held(&full)).await;
+    assert_eq!((s, d["delta"].as_bool()), (StatusCode::OK, Some(true)), "{d}");
+    assert_eq!((d["values"]["A"].clone(), d["values"]["L"].clone(), d["values"]["R"].clone(), d["removed"].clone()), (json!("10"), full["values"]["L"].clone(), json!("10-x"), json!(["C"])));
+    assert_eq!(d["stamps"].as_object().unwrap().keys().collect::<Vec<_>>(), ["A", "L", "R"]);
+    assert_eq!((d["links"].clone(), d["linked"].clone()), (full["links"].clone(), json!(["L"])), "{d}");
+    assert_ne!(d["stamps"]["A"], full["stamps"]["A"]);
+    let (_, now) = api.req(Method::GET, "/environments/production/digest", None, Some(&tok)).await;
+    assert_eq!(d["digest"], now["digest"]);
+    let audit = api.ok(Method::GET, "/audit?action=secrets.export", None).await;
+    assert_eq!(audit[0]["keys"], json!(["A", "L", "R"]), "{}", audit[0]);
+
+    let mut kept = full["stamps"].as_object().unwrap().clone();
+    kept.remove("C");
+    kept.extend(d["stamps"].as_object().unwrap().clone());
+    let (_, again) = delta(json!({ "digest": d["digest"], "basis": d["basis"], "stamps": kept })).await;
+    assert_eq!((again["delta"].as_bool(), again["values"].clone(), again["removed"].clone()), (Some(true), json!({}), json!([])), "{again}");
+    assert_eq!(full["links"], json!([{ "name": "L", "kind": "bucket", "ref": "assets" }]));
+}
+
+/// A delta can't vouch for what a permission decided: once the token may no longer reveal the
+/// environment a reference reads, the same claim gets the full set, which says so.
+#[tokio::test]
+async fn a_permission_change_since_the_answer_held_gets_the_full_set() {
+    let api = Api::new().await;
+    api.set("staging", "S", "upstream").await;
+    api.set("production", "A", "1").await;
+    api.set("production", "R", "${staging.S}").await;
+    let tok = api.token(json!({ "environments": ["production", "staging"], "actions": ["read", "reveal"] }));
+    let delta = |held: Value| api.req(Method::POST, "/environments/production/values/delta", Some(held), Some(&tok));
+    let (_, full) = delta(json!({})).await;
+    assert_eq!(full["values"], json!({ "A": "1", "R": "upstream" }), "{full}");
+
+    let narrower = roll_secrets::access::rule(&api.project, Some(vec!["production".into()]), None, &[roll_secrets::Action::Read, roll_secrets::Action::Reveal]);
+    api.gate.tokens.lock().unwrap().get_mut(&tok).unwrap().scope = Arc::new(roll_auth::scope::Scope(vec![narrower]));
+    let (s, d) = delta(json!({ "digest": full["digest"], "basis": full["basis"], "stamps": full["stamps"] })).await;
+    assert_eq!((s, d["delta"].as_bool()), (StatusCode::OK, Some(false)), "{d}");
+    assert_eq!(d["values"]["A"], "1");
+    assert!(d["problems"].as_array().unwrap().iter().any(|p| p["key"] == "R"), "{d}");
+}
