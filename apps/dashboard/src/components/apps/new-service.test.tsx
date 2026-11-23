@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { WorkspaceProject } from "@/lib/workspace-api";
 import { NewServiceSheet } from "./new-service";
 
-const apps = vi.hoisted(() => ({ plan: vi.fn(), roots: vi.fn(async () => ({ roots: [] })), create: vi.fn() }));
+const apps = vi.hoisted(() => ({ plan: vi.fn(), roots: vi.fn(async () => ({ roots: [] })), create: vi.fn(), quote: vi.fn(async () => null) }));
 vi.mock("@/lib/apps-api", async (orig) => ({ ...(await orig<typeof import("@/lib/apps-api")>()), appsApi: apps }));
 const code = vi.hoisted(() => ({ repos: vi.fn(), github: vi.fn() }));
 vi.mock("@/lib/code-api", async (orig) => ({ ...(await orig<typeof import("@/lib/code-api")>()), codeApi: code }));

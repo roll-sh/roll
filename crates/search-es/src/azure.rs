@@ -9,8 +9,9 @@
 //! by default), or `endpoint` as given, with a secondary one for `location_mode` reads.
 //!
 //! The endpoints are the tenant's choice, so the client is built as AGENTS.md requires for any
-//! such URL: names resolve to public addresses only ([`roll_net::PublicOnly`]), private IP
-//! literals and `localhost` are refused ([`roll_net::literal_private_host`]), no redirect is
+//! such URL, through the node's egress check ([`crate::egress`]): names resolve to public
+//! addresses only, never to one the node denies; private and denied IP literals and `localhost`
+//! are refused; no redirect is
 //! followed, no proxy is used, and every response body is read up to a bound. Errors carry no
 //! URL (a SAS token is in it) and no credential.
 
@@ -100,7 +101,7 @@ impl LocationMode {
 
 /// A blob endpoint a tenant names: http(s), a host, maybe a path (an emulator's account), no
 /// credentials, query or fragment.
-fn endpoint_url(raw: &str, allow_private: bool) -> Result<reqwest::Url, String> {
+fn endpoint_url(raw: &str, egress: &crate::egress::Egress) -> Result<reqwest::Url, String> {
     let u = reqwest::Url::parse(raw.trim()).map_err(|_| format!("invalid endpoint [{raw}]"))?;
     if !matches!(u.scheme(), "http" | "https") || u.host_str().is_none_or(str::is_empty) {
         return Err(format!("invalid endpoint [{raw}]"));
@@ -108,16 +109,17 @@ fn endpoint_url(raw: &str, allow_private: bool) -> Result<reqwest::Url, String> 
     if !u.username().is_empty() || u.password().is_some() || u.query().is_some() || u.fragment().is_some() {
         return Err(format!("endpoint [{raw}] must be a scheme, host, port and path only"));
     }
-    if !allow_private && roll_net::literal_private_host(&u) {
-        return Err(format!("endpoint [{raw}] is a private address"));
+    match egress.check_url(&u) {
+        Err(crate::egress::Refused::Private(_)) => Err(format!("endpoint [{raw}] is a private address")),
+        Err(e) => Err(format!("endpoint [{raw}]: {e}")),
+        Ok(()) => Ok(u),
     }
-    Ok(u)
 }
 
 /// The account's primary and secondary blob endpoints, from the client's `endpoint_suffix`,
 /// `endpoint` and `secondary_endpoint`, with Elasticsearch's checks (`AzureStorageSettings`,
 /// `AzureClientProvider`). `None` for the secondary: there is none.
-pub fn endpoints(account: &str, suffix: Option<&str>, primary: Option<&str>, secondary: Option<&str>, mode: LocationMode, allow_private: bool) -> Result<(reqwest::Url, Option<reqwest::Url>), String> {
+pub fn endpoints(account: &str, suffix: Option<&str>, primary: Option<&str>, secondary: Option<&str>, mode: LocationMode, egress: &crate::egress::Egress) -> Result<(reqwest::Url, Option<reqwest::Url>), String> {
     let given = |v: Option<&str>| v.map(str::trim).filter(|v| !v.is_empty()).map(str::to_string);
     let (suffix, primary, secondary) = (given(suffix), given(primary), given(secondary));
     if suffix.is_some() && primary.is_some() {
@@ -130,7 +132,7 @@ pub fn endpoints(account: &str, suffix: Option<&str>, primary: Option<&str>, sec
         return Err(format!("A primary endpoint is required when setting a secondary endpoint for account [{account}]"));
     }
     let (primary, secondary) = match primary {
-        Some(p) => (endpoint_url(&p, allow_private)?, secondary.map(|s| endpoint_url(&s, allow_private)).transpose()?),
+        Some(p) => (endpoint_url(&p, egress)?, secondary.map(|s| endpoint_url(&s, egress)).transpose()?),
         None => {
             if !valid_account(account) {
                 return Err(format!("invalid account name [{account}]"));
@@ -139,8 +141,8 @@ pub fn endpoints(account: &str, suffix: Option<&str>, primary: Option<&str>, sec
             if suffix.is_empty() || suffix.len() > 200 || !suffix.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'.' || c == b'-') || suffix.starts_with('.') {
                 return Err(format!("invalid endpoint_suffix [{suffix}]"));
             }
-            let p = endpoint_url(&format!("https://{account}.blob.{suffix}"), allow_private)?;
-            let s = endpoint_url(&format!("https://{account}-secondary.blob.{suffix}"), allow_private)?;
+            let p = endpoint_url(&format!("https://{account}.blob.{suffix}"), egress)?;
+            let s = endpoint_url(&format!("https://{account}-secondary.blob.{suffix}"), egress)?;
             (p, Some(s))
         }
     };
@@ -181,19 +183,26 @@ enum Kind {
 }
 
 impl Client {
-    /// A client for `container`. Private addresses are refused (as literals here, resolved ones
-    /// at connect time) unless `allow_private`.
-    pub fn new(account: &str, auth: Auth, primary: reqwest::Url, secondary: Option<reqwest::Url>, mode: LocationMode, container: &str, allow_private: bool) -> Result<Client, Error> {
+    /// The URLs it connects to as written (names reach the egress resolver; literals don't, so
+    /// callers check these with [`crate::egress::Egress::check_url_now`]).
+    pub fn endpoints(&self) -> Vec<&reqwest::Url> {
+        std::iter::once(&self.primary).chain(self.secondary.as_ref()).collect()
+    }
+
+    /// A client for `container`. Addresses `egress` refuses are refused (as literals here,
+    /// resolved ones at connect time).
+    pub fn new(account: &str, auth: Auth, primary: reqwest::Url, secondary: Option<reqwest::Url>, mode: LocationMode, container: &str, egress: &crate::egress::Egress) -> Result<Client, Error> {
         if !valid_container(container) {
             return Err(err("InvalidContainerName", format!("invalid container name [{container}]")));
         }
-        if !allow_private && (roll_net::literal_private_host(&primary) || secondary.as_ref().is_some_and(roll_net::literal_private_host)) {
-            return Err(err("PrivateAddress", "the endpoint is a private address"));
+        for u in std::iter::once(&primary).chain(secondary.as_ref()) {
+            match egress.check_url(u) {
+                Err(crate::egress::Refused::Private(_)) => return Err(err("PrivateAddress", "the endpoint is a private address")),
+                Err(e) => return Err(err("DeniedAddress", format!("the endpoint: {e}"))),
+                Ok(()) => {}
+            }
         }
-        let mut b = reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).read_timeout(READ_IDLE).redirect(reqwest::redirect::Policy::none()).no_proxy();
-        if !allow_private {
-            b = b.dns_resolver(std::sync::Arc::new(roll_net::PublicOnly));
-        }
+        let b = reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).read_timeout(READ_IDLE).redirect(reqwest::redirect::Policy::none()).no_proxy().dns_resolver(egress.resolver());
         let http = b.build().map_err(|e| err("ClientError", e.to_string()))?;
         Ok(Client { http, account: account.to_string(), auth, primary, secondary, mode, container: container.to_string() })
     }
@@ -475,15 +484,16 @@ mod tests {
 
     #[test]
     fn settings_check_as_elasticsearch_does() {
+        let e = |private: bool| crate::egress::Egress::of(|_| None, private).unwrap();
         assert_eq!(LocationMode::parse("Primary_Then_Secondary"), Ok(LocationMode::PrimaryThenSecondary));
         assert_eq!(LocationMode::parse("bogus").unwrap_err(), "No enum constant org.elasticsearch.repositories.azure.LocationMode.BOGUS");
-        let (p, s) = endpoints("acct", None, None, None, LocationMode::PrimaryOnly, false).unwrap();
+        let (p, s) = endpoints("acct", None, None, None, LocationMode::PrimaryOnly, &e(false)).unwrap();
         assert_eq!((p.as_str(), s.unwrap().as_str()), ("https://acct.blob.core.windows.net/", "https://acct-secondary.blob.core.windows.net/"));
-        assert!(endpoints("acct", Some("x.net"), Some("https://e.example.com"), None, LocationMode::PrimaryOnly, false).unwrap_err().starts_with("Both an endpoint suffix as well as a primary endpoint"));
-        assert!(endpoints("acct", None, None, Some("https://e.example.com"), LocationMode::PrimaryOnly, false).unwrap_err().starts_with("A primary endpoint is required"));
-        assert!(endpoints("acct", None, Some("https://e.example.com"), None, LocationMode::SecondaryOnly, false).unwrap_err().starts_with("Unable to configure an AzureClient using a secondary location"));
-        assert!(endpoints("acct", None, Some("http://127.0.0.1:10000/devstoreaccount1"), None, LocationMode::PrimaryOnly, false).is_err());
-        assert!(endpoints("acct", None, Some("http://127.0.0.1:10000/devstoreaccount1"), None, LocationMode::PrimaryOnly, true).is_ok());
+        assert!(endpoints("acct", Some("x.net"), Some("https://e.example.com"), None, LocationMode::PrimaryOnly, &e(false)).unwrap_err().starts_with("Both an endpoint suffix as well as a primary endpoint"));
+        assert!(endpoints("acct", None, None, Some("https://e.example.com"), LocationMode::PrimaryOnly, &e(false)).unwrap_err().starts_with("A primary endpoint is required"));
+        assert!(endpoints("acct", None, Some("https://e.example.com"), None, LocationMode::SecondaryOnly, &e(false)).unwrap_err().starts_with("Unable to configure an AzureClient using a secondary location"));
+        assert!(endpoints("acct", None, Some("http://127.0.0.1:10000/devstoreaccount1"), None, LocationMode::PrimaryOnly, &e(false)).is_err());
+        assert!(endpoints("acct", None, Some("http://127.0.0.1:10000/devstoreaccount1"), None, LocationMode::PrimaryOnly, &e(true)).is_ok());
         assert!(Auth::new("acct", Some("a2V5"), Some("sv=1&sig=x")).unwrap_err().starts_with("Both a secret as well as a shared access token"));
         let e = Auth::new("acct", Some("not base64 SECRETKEY!"), None).unwrap_err();
         assert!(!e.contains("SECRETKEY"), "{e}");
@@ -494,7 +504,7 @@ mod tests {
     /// a query (canonicalized resource `/<account><path>\n<param>:<value>`).
     #[test]
     fn shared_key_signs_the_documented_string() {
-        let c = Client::new("acct", Auth::Key(b"key".to_vec()), reqwest::Url::parse("https://acct.blob.core.windows.net").unwrap(), None, LocationMode::PrimaryOnly, "snaps", false).unwrap();
+        let c = Client::new("acct", Auth::Key(b"key".to_vec()), reqwest::Url::parse("https://acct.blob.core.windows.net").unwrap(), None, LocationMode::PrimaryOnly, "snaps", &crate::egress::Egress::of(|_| None, false).unwrap()).unwrap();
         let url = c.url(&c.primary, "a/b c", &[("comp", "block"), ("blockid", "QQ==")]);
         assert_eq!(url.as_str(), "https://acct.blob.core.windows.net/snaps/a/b%20c?comp=block&blockid=QQ%3D%3D");
         let headers = vec![("x-ms-version".to_string(), VERSION.to_string()), ("x-ms-date".to_string(), "Mon, 01 Jan 2024 00:00:00 GMT".to_string())];

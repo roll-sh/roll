@@ -1327,6 +1327,10 @@ the owner's own, set on the owner's own machines, and a sandbox is one owner's m
     reason}` instead. The daemon drops the key, the providers get none from their next process, and
     the endpoint's `error` says why ("roll secrets: maker unreachable: …"). Until the first key
     arrives, the error says it's waiting for the relay.
+  - **Only on a refusal.** A refusal is roll secrets refusing (`code_control::Refused`), or the
+    binding gone from `agent_endpoint_refs`. When roll secrets can't answer (starting after a
+    rolld restart, a database failover, a timeout), nothing is sent: the daemon keeps the key it
+    holds, and the relay asks again after 1 s, doubling up to the minute.
   - **Relay only.** The relay refuses an `endpoint.key` sent to `…/commands` (403), from anyone.
 - **Reported, never the key**: `MachineConfig.endpoints` (`EndpointInfo`) has the spec, where the
   key comes from (`none`, `sealed`, `reference`), the models it listed and the last check's error.

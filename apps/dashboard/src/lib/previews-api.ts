@@ -378,6 +378,15 @@ export interface EndpointTime {
   main_ms: number | null;
   /** Slower than main's by half again and by more than 20 ms (roll code's change view says so). */
   slower?: boolean;
+  /** What its JSON answer lost against main's: a field gone (`now: null`) or a type widened. */
+  shape_changes?: ShapeChange[];
+}
+
+export interface ShapeChange {
+  /** `users[].email`: `[]` an array's elements, `*` an object keyed by ids. */
+  path: string;
+  main: string;
+  now: string | null;
 }
 
 /** Slower than main's by half again and by more than 20 ms (`EndpointAgainst::slower`). */

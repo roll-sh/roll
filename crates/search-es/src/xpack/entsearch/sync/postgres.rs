@@ -1,9 +1,9 @@
 //! The `postgresql` connector: every table of a schema with a primary key, read in key order in
 //! one read-only snapshot per table, a bounded page at a time.
 //!
-//! The host is the tenant's choice: it is resolved here and refused when any of its addresses is
-//! private (unless the node allows private hosts), and the connection goes to the address that
-//! was checked. A row's `_id` is `{database}_{schema}_{table}_{key values joined by _}`; its
+//! The host is the tenant's choice: it is resolved through the node's egress check
+//! ([`crate::egress`]: no private address unless the node allows private hosts, never one the
+//! node denies), and the connection goes to an address that was checked. A row's `_id` is `{database}_{schema}_{table}_{key values joined by _}`; its
 //! columns are fields `{schema}_{table}_{column}`, next to `database`, `schema`, `table` and
 //! `_timestamp`. With an `incremental_column`, incremental syncs read only rows at or after the
 //! cursor the last sync left (that column's maximum in its snapshot, per table).
@@ -41,8 +41,9 @@
 
 use super::config::Values;
 use super::{DOC_BYTES_MAX, PAGE_BYTES, PAGE_DOCS, Sink, Stop};
+use crate::egress::Egress;
 use crate::json::Value;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -81,21 +82,10 @@ fn ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
-/// The host's first address, refusing a private one.
-async fn resolve(host: &str, port: u16, allow_private: bool) -> Result<SocketAddr, String> {
-    let addrs: Vec<SocketAddr> = match host.parse::<IpAddr>() {
-        Ok(ip) => vec![SocketAddr::new(ip, port)],
-        Err(_) => tokio::time::timeout(CONNECT_TIMEOUT, tokio::net::lookup_host((host, port)))
-            .await
-            .map_err(|_| format!("resolving [{host}] timed out"))?
-            .map_err(|_| format!("[{host}] doesn't resolve"))?
-            .collect(),
-    };
-    let addr = addrs.first().copied().ok_or_else(|| format!("[{host}] doesn't resolve"))?;
-    if !allow_private && addrs.iter().any(|a| roll_net::private_ip(a.ip())) {
-        return Err(format!("[{host}] is a private address: connectors only reach public ones"));
-    }
-    Ok(addr)
+/// The host's first address the node's egress rules let a connector reach.
+async fn resolve(host: &str, port: u16, egress: &Egress) -> Result<SocketAddr, String> {
+    let addrs = egress.resolve(host, port).await.map_err(super::refused)?;
+    addrs.first().copied().ok_or_else(|| format!("[{host}] doesn't resolve"))
 }
 
 fn tls_config(ca: Option<&str>) -> Result<rustls::ClientConfig, String> {
@@ -376,7 +366,7 @@ impl Drop for Conn {
     }
 }
 
-async fn connect(v: &Values, allow_private: bool) -> Result<Conn, String> {
+async fn connect(v: &Values, egress: &Egress) -> Result<Conn, String> {
     let host = v.need("host")?;
     let port = u16::try_from(v.int("port", 5432)?).map_err(|_| "the connector's [port] is out of range".to_string())?;
     let mut cfg = tokio_postgres::Config::new();
@@ -384,7 +374,7 @@ async fn connect(v: &Values, allow_private: bool) -> Result<Conn, String> {
     if let Some(p) = v.text("password") {
         cfg.password(p);
     }
-    let addr = resolve(&host, port, allow_private).await?;
+    let addr = resolve(&host, port, egress).await?;
     let tcp = tokio::time::timeout(CONNECT_TIMEOUT, tokio::net::TcpStream::connect(addr))
         .await
         .map_err(|_| format!("connecting to [{host}] timed out"))?
@@ -516,13 +506,13 @@ async fn tables(conn: &Conn, sink: &Sink<'_>, schema: &str, wanted: &[String], i
 }
 
 /// Syncs the configured tables; the new cursor (`{"tables": {"schema.table": value}}`).
-pub async fn sync(v: &Values, sink: &mut Sink<'_>, full: bool, cursor: &Value, allow_private: bool) -> Result<Value, Stop> {
+pub async fn sync(v: &Values, sink: &mut Sink<'_>, full: bool, cursor: &Value, egress: &Egress) -> Result<Value, Stop> {
     let database = v.need("database")?;
     let schema = v.text("schema").unwrap_or_else(|| "public".into());
     let incremental_col = v.text("incremental_column");
     let fetch = (v.int("fetch_size", 50)?.clamp(1, PAGE_DOCS as i64)) as usize;
     let mut conn = tokio::select! {
-        c = connect(v, allow_private) => c?,
+        c = connect(v, egress) => c?,
         s = sink.stopped() => return Err(s),
     };
     let (tables, skipped) = tables(&conn, sink, &schema, &v.list("tables"), incremental_col.as_deref()).await?;

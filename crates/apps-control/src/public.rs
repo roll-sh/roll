@@ -1555,9 +1555,9 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
             }
             crate::live::Verdict::Deny => return by("firewall", page(StatusCode::FORBIDDEN, "Not allowed", "This service doesn't answer this request.")),
             // A rule's own limit (Vercel's rate-limit rules): its bucket per client, before anything wakes.
-            crate::live::Verdict::Limit(bucket, limit) => {
-                if let Err(wait) = apps.live(service, env).take_token_in(bucket, crate::live::client_ip(client.as_deref()), &limit) {
-                    let mut r = page(StatusCode::TOO_MANY_REQUESTS, "Slow down", "Too many requests from your address. Try again in a moment.");
+            crate::live::Verdict::Limit(bucket, limit, keyed) => {
+                if let Err(wait) = apps.live(service, env).take_token_in(bucket, crate::live::client_ip(client.as_deref()), keyed, &limit) {
+                    let mut r = page(StatusCode::TOO_MANY_REQUESTS, "Slow down", if keyed.is_some() { "Too many requests with this key. Try again in a moment." } else { "Too many requests from your address. Try again in a moment." });
                     if let Ok(v) = HeaderValue::from_str(&(wait.as_secs_f64().ceil() as u64).max(1).to_string()) {
                         r.headers_mut().insert(header::RETRY_AFTER, v);
                     }
@@ -1836,6 +1836,14 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
                 return with_feedback(feedback, serve_site(&apps, &live, &t, SiteRequest::of(&req), service, env, began).await);
             }
             Ok(t) => {
+                // A web service's middleware first, on the paths it names (its `next()` comes
+                // back to this deployment).
+                if !t.edge.is_empty()
+                    && !req.headers().contains_key(VIA_EDGE)
+                    && let Some((target, name, next)) = apps.edge_for(service, env, &t, req.uri().path()).await
+                {
+                    return crate::edge::to_function(apps.clone(), target, env.to_string(), name, next, req).await;
+                }
                 again = Some(Again::Deployment(Box::new(t.clone())));
                 live.acquire_deployment(t).await
             }
@@ -1861,6 +1869,13 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
                 return r;
             }
             Ok(Some(t)) => {
+                // A web service's middleware first, before anything wakes for it.
+                if !t.edge.is_empty()
+                    && !req.headers().contains_key(VIA_EDGE)
+                    && let Some((target, name, next)) = apps.edge_for(service, env, &t, req.uri().path()).await
+                {
+                    return crate::edge::to_function(apps.clone(), target, env.to_string(), name, next, req).await;
+                }
                 again = Some(Again::Route(t.clone()));
                 live.acquire_preferring(t, affine.as_deref()).await
             }

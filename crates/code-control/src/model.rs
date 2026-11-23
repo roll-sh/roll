@@ -591,6 +591,18 @@ pub struct PreviewEndpoint {
     pub main_ms: Option<u32>,
     /// Slower than the branch's by half again and by more than 20 ms.
     pub slower: bool,
+    /// What its JSON answer lost against the branch's: fields gone, types widened.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shape_changes: Vec<PreviewShapeChange>,
+}
+
+/// A field of an endpoint's JSON answer the branch's has and this one doesn't (`now: None`), or
+/// whose type widened.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewShapeChange {
+    pub path: String,
+    pub main: String,
+    pub now: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
