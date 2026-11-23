@@ -20445,6 +20445,24 @@ performance gate: planning and EXPLAIN only (a collation name per group column a
 equivalence class of a join group, a procost lookup per user
 aggregate); not measured, as a change of that size isn't measurable against the lanes' noise.
 
+### Second candidate (`cand/a296-2`, on `cand/a296`: it extends the first's Project builder changes in `explain.rs`)
+
+- **A partitioned table's member scans compute the projection over its Append**
+  (apply_scanjoin_target_to_paths): each member's cost has the target list's evaluation and its
+  width the projection's; the engine charged it on the Append alone (update:16-20, inherit:44-46,
+  insert:13, :20, identity:33, generated_virtual:41-48).
+- **XMLTABLE's scan is as wide as the columns read, at their types' widths** (set_rel_width), with
+  per-column widths for the nodes above; it was the record's 32 (xml:181-212, 19 blocks).
+- **A grouping sets aggregation returns the GROUP BY keys the select list lacks** (the processed
+  target list's resjunk entries), as a plain GROUP BY does (groupingsets: 13 blocks).
+- Golden `a296_plans2` (recorded from 18.6).
+
+Regression files' EXPLAINs (full pass, `out-d3`, against the first candidate's `out-c9`, both on
+2026-11-23 with `out-pg2`): 48 more match, none newly differ (1,788 -> 1,740: catalog 700, errors
+39, cost 497, width 176, rows 148, display 88, extra-node 55, sort-agg 14, other shapes 11,
+join-order 8, scan 4). TPC-H: 22 of 22 plans identical in text, costs x1.000. No performance gate
+(EXPLAIN only).
+
 Not done, found:
 - **Stable I/O casts the engine folds** (enum:22/23, age(timestamp), date 'today' casts,
   xmlserialize, JSON_SERIALIZE ... RETURNING bytea: ~25 one-row Results 0.01 for 0.02): the
