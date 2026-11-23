@@ -1,8 +1,9 @@
 //! robots.txt as RFC 9309 reads it, for the product token `roll-crawler`: the groups naming it
 //! (or `*` when none does), longest match wins with `Allow` winning a tie, `*` and `$` in
-//! patterns, and `Crawl-delay` and `Sitemap:` lines, which the RFC leaves to crawlers. A
-//! group's rules compile into one anchored `RegexSet`, so checking a URL is linear in it whatever
-//! the file holds.
+//! patterns, and `Crawl-delay` and `Sitemap:` lines, which the RFC leaves to crawlers. A rule
+//! is matched by finding its literal pieces (the text between `*`s) left to right, which is
+//! exact for patterns of `*` alone and linear in the URL per rule, however many stars it has; a
+//! group holds at most [`MAX_RULES`] rules.
 
 use super::url::normalize_percent;
 
@@ -12,15 +13,44 @@ pub const TOKEN: &str = "roll-crawler";
 pub const MAX_BYTES: usize = 512 << 10;
 /// A rule with more literal bytes than this can't match any URL the crawler fetches.
 const MAX_LITERAL: usize = 8 << 10;
-/// What the compiled rules may cost: a file past it disallows its origin.
-const SET_BYTES: usize = 16 << 20;
+/// The most rules the groups for roll hold: a file with more disallows its origin.
+pub const MAX_RULES: usize = 5000;
+
+#[derive(Debug)]
+struct Rule {
+    allow: bool,
+    /// The pattern's length in octets (the longest match wins).
+    len: usize,
+    /// The literal text between `*`s; the first must start the URI.
+    pieces: Vec<String>,
+    /// A final `$`: the last piece must end the URI.
+    anchored: bool,
+}
+
+impl Rule {
+    fn matches(&self, uri: &str) -> bool {
+        let Some((first, rest)) = self.pieces.split_first() else { return true };
+        if !uri.starts_with(first.as_str()) {
+            return false;
+        }
+        let mut at = first.len();
+        let Some((last, middle)) = rest.split_last() else {
+            return !self.anchored || at == uri.len();
+        };
+        for piece in middle {
+            match uri[at..].find(piece.as_str()) {
+                Some(i) => at += i + piece.len(),
+                None => return false,
+            }
+        }
+        if self.anchored { uri.len() >= at + last.len() && uri.ends_with(last.as_str()) } else { uri[at..].contains(last.as_str()) }
+    }
+}
 
 /// What an origin's robots.txt allows.
 #[derive(Debug, Default)]
 pub struct Robots {
-    /// Each rule's `(allow, length)`, in the order of `set`'s patterns.
-    rules: Vec<(bool, usize)>,
-    set: Option<regex::RegexSet>,
+    rules: Vec<Rule>,
     /// Nothing is allowed (robots.txt couldn't be read: a 5xx, a timeout, a network error).
     disallow_all: bool,
     pub crawl_delay: Option<f64>,
@@ -94,21 +124,28 @@ impl Robots {
         let ours = |g: &Group| g.agents.iter().any(|a| a == TOKEN);
         let mine: Vec<&Group> = if groups.iter().any(ours) { groups.iter().filter(|g| ours(g)).collect() } else { groups.iter().filter(|g| g.agents.iter().any(|a| a == "*")).collect() };
         let elastic_crawler_group = !groups.iter().any(ours) && groups.iter().any(|g| g.agents.iter().any(|a| a == "elastic-crawler"));
-        let mut rules = Vec::new();
-        let mut patterns = Vec::new();
-        for (allow, p) in mine.iter().flat_map(|g| g.rules.iter()) {
-            if let Some(re) = to_regex(p) {
-                rules.push((*allow, p.len()));
-                patterns.push(re);
-            }
+        let rules: Vec<Rule> = mine.iter().flat_map(|g| g.rules.iter()).filter_map(|(allow, p)| rule(*allow, p)).collect();
+        if rules.len() > MAX_RULES {
+            return Robots { disallow_all: true, sitemaps, ..Robots::default() };
         }
         let crawl_delay = mine.iter().find_map(|g| g.delay);
-        let set = match regex::RegexSetBuilder::new(&patterns).size_limit(SET_BYTES).dfa_size_limit(2 << 20).build() {
-            Ok(set) => Some(set),
-            // Rules too costly to compile: nothing of the origin is fetched.
-            Err(_) => return Robots { disallow_all: true, sitemaps, ..Robots::default() },
-        };
-        Robots { rules, set, disallow_all: false, crawl_delay, sitemaps, elastic_crawler_group }
+        Robots { rules, disallow_all: false, crawl_delay, sitemaps, elastic_crawler_group }
+    }
+
+    /// What the rules hold in memory, roughly.
+    pub fn bytes(&self) -> u64 {
+        self.rules.iter().map(|r| 64 + r.pieces.iter().map(|p| p.len() as u64 + 24).sum::<u64>()).sum::<u64>() + self.sitemaps.iter().map(|s| s.len() as u64 + 24).sum::<u64>()
+    }
+
+    /// Whether the file disallows the root, so (unless an allow rule says otherwise) the whole
+    /// site: as often a mistake of a deploy as a decision.
+    pub fn disallows_root(&self) -> bool {
+        !self.allows("/")
+    }
+
+    /// How many rules a URL is checked against.
+    pub fn rule_count(&self) -> usize {
+        self.rules.len()
     }
 
     /// Whether `uri` (a path and query) may be fetched.
@@ -119,11 +156,10 @@ impl Robots {
         if uri == "/robots.txt" {
             return true;
         }
-        let Some(set) = &self.set else { return true };
         let uri = normalize_percent(uri);
         let mut best: Option<(usize, bool)> = None;
-        for i in set.matches(&uri).iter() {
-            let (allow, len) = self.rules[i];
+        for r in self.rules.iter().filter(|r| r.matches(&uri)) {
+            let (allow, len) = (r.allow, r.len);
             best = match best {
                 Some((l, a)) if l > len || (l == len && a) => Some((l, a)),
                 _ => Some((len, allow)),
@@ -150,33 +186,19 @@ fn normalize_pattern(p: &str) -> String {
     normalize_percent(&enc)
 }
 
-/// A pattern (`*` any run, a final `$` the end) as a regex anchored at the URI's start, runs of
-/// `*` collapsed; `None` for one with more literal bytes than any URL can hold.
-fn to_regex(pattern: &str) -> Option<String> {
-    let (pattern, anchored) = match pattern.strip_suffix('$') {
+/// A pattern (`*` any run, a final `$` the end) as its literal pieces; `None` for one with more
+/// literal bytes than any URL can hold.
+fn rule(allow: bool, pattern: &str) -> Option<Rule> {
+    let len = pattern.len();
+    let (body, anchored) = match pattern.strip_suffix('$') {
         Some(p) => (p, true),
         None => (pattern, false),
     };
-    if pattern.bytes().filter(|b| *b != b'*').count() > MAX_LITERAL {
+    if body.bytes().filter(|b| *b != b'*').count() > MAX_LITERAL {
         return None;
     }
-    let mut re = String::from("^");
-    let mut star = false;
-    for ch in pattern.chars() {
-        if ch == '*' {
-            if !star {
-                re.push_str(".*");
-            }
-            star = true;
-            continue;
-        }
-        star = false;
-        re.push_str(&regex::escape(ch.encode_utf8(&mut [0u8; 4])));
-    }
-    if anchored {
-        re.push('$');
-    }
-    Some(re)
+    let pieces = body.split('*').map(str::to_string).collect();
+    Some(Rule { allow, len, pieces, anchored })
 }
 
 #[cfg(test)]
@@ -221,6 +243,17 @@ mod tests {
         assert_eq!((more.crawl_delay, more.sitemaps.len(), more.elastic_crawler_group), (Some(2.5), 1, true));
         assert!(more.allows("/anything"));
         assert!(!Robots::unreachable().allows("/") && Robots::allow_all().allows("/"));
+        // A rule of thousands of stars costs one pass over the URL, as does a file of the most
+        // rules a group may hold.
+        let stars = format!("User-agent: *\nDisallow: /{}b\n", "*a".repeat(8000));
+        let hostile = Robots::parse(&stars.repeat(60));
+        let uri = format!("/{}", "a".repeat(2040));
+        let started = std::time::Instant::now();
+        for _ in 0..100 {
+            assert!(hostile.allows(&uri));
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "{:?}", started.elapsed());
+        assert!(!Robots::parse(&"User-agent: *\nDisallow: /x\n".repeat(MAX_RULES + 1)).allows("/y"), "too many rules");
         // A byte order mark doesn't hide the first group.
         assert!(!Robots::parse("\u{feff}User-agent: *\nDisallow: /\n").allows("/x"));
     }

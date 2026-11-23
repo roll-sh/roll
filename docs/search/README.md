@@ -1413,8 +1413,9 @@ deterministic (#396).
    `/v1/search/site-verifications` routes), the `crawl-test` route, its MCP tool and CLI, and the
    dashboard's URL box and "crawl a site" empty state; then extraction rules (CSS selectors on the
    arena DOM), incremental crawls with `If-Modified-Since`, and the docs preset (phase 3).
-   Charset detection beyond UTF-8, fetching several origins at once, the public suffix list for
-   sites, and seeding `roll.crawler.blocked_hosts` with the fleet's own names are open too.
+   Charset detection beyond UTF-8, fetching several origins at once, per-site politeness by
+   address rather than name, fleet-wide per-owner limits, and seeding `roll.crawler.blocked_hosts`
+   with the fleet's own names are open too.
 14. **Semantic search on OpenSearch-flavor clusters** (design in
    [opensearch-neural.md](opensearch-neural.md); AWS OpenSearch neural search):
    `neural`, `neural_sparse` and `agentic` are names only (`meta/aliases.rs`); ML Commons

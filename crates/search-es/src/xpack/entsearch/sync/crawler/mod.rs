@@ -52,6 +52,17 @@ const PAGE_PARSE_TIME: Duration = Duration::from_secs(10);
 const FUNNEL_MIN: u64 = 10;
 /// The pages that may name one canonical URL as theirs.
 const MAX_ALIASES: usize = 100;
+/// What deciding whether URLs may be fetched (crawl rules, robots.txt) may cost one crawl: past
+/// it, the crawl ends `completed` with `limit_reached: rule_matching_time`.
+const MATCH_BUDGET: Duration = Duration::from_secs(30);
+/// URLs listed or linked between two yields to the runtime.
+const YIELD_EVERY: usize = 256;
+/// A kept document is struck out only once it is also this old (a node setting, 7 days by
+/// default): three crawls that didn't look at it closely are no proof.
+pub const STRIKE_MIN_AGE: &str = "roll.crawler.strike_min_age";
+/// One-off: the next full crawl deletes what it proves gone even past the purge guards, then
+/// turns itself off. For a site that really removed more than half its pages.
+pub const FORCE_PURGE: &str = "force_purge";
 
 /// The mappings of an index a crawl creates (crawler.md, "Documents").
 pub fn mappings() -> Value {
@@ -142,9 +153,18 @@ struct Crawl<'s, 'a> {
     /// URLs indexed under themselves this crawl, and the pages naming each as canonical.
     indexed: HashSet<u64>,
     aliases: HashMap<u64, (Link, Vec<Link>)>,
-    /// Redirects followed or refused, and how many led to each target.
+    /// Redirects of documents re-checked by the purge, and how many led to each target.
     redirects: u64,
     redirect_targets: HashMap<u64, u64>,
+    /// Whether the purge's re-check is running (only its redirects count above).
+    rechecking: bool,
+    /// Pages indexed per origin this crawl (the per-origin purge guard's denominator).
+    indexed_by_origin: HashMap<String, u64>,
+    /// Time spent deciding whether URLs may be fetched.
+    match_time: Duration,
+    /// robots.txt files held, charged to the request breaker.
+    robots_held: crate::breaker::Reservation,
+    strike_min_age: Duration,
     visited: u64,
     budget: u64,
     budget_name: &'static str,
@@ -177,17 +197,26 @@ pub async fn sync(cid: &str, v: &Values, sink: &mut Sink<'_>, full: bool, cursor
     let (budget, budget_name) = if unverified < asked { (unverified, "unverified_domain_max_unique_url_count") } else { (asked, "max_unique_url_count") };
     let floor = interval(cluster, MIN_REQUEST_INTERVAL, 500).max(interval(cluster, UNVERIFIED_MIN_INTERVAL, 1000));
     let per_day = number(cluster, UNVERIFIED_CRAWLS_PER_DAY, 4);
-    count_crawl(cluster, cid, per_day).await?;
-    // The same limit per owner and site across the node, whatever connector or cluster asks.
-    let owner = cluster.config.owner.clone().unwrap_or_else(|| format!("cluster {}", cluster.name));
+    // The same limit per owner and site across the node, whatever connector or cluster asks
+    // (a node without owners counts every cluster as one owner), checked before either count
+    // is spent.
+    let owner = cluster.config.owner.clone().unwrap_or_else(|| "(no owner)".to_string());
     let mut sites: Vec<String> = plan.domains.iter().filter_map(|d| Link::parse(&format!("{}/", d.origin), None)).map(|l| hosts::site_of(&l)).collect();
     sites.sort();
     sites.dedup();
-    if let Err((site, next)) = hosts::record_crawl(&owner, &sites, per_day, crate::time::now_millis()) {
-        return Err(Stop::Failed(format!(
+    let refused = |site: String, next: i64| {
+        Stop::Failed(format!(
             "an unverified site is crawled at most {per_day} times in 24 hours by one owner ({UNVERIFIED_CRAWLS_PER_DAY}): [{site}] can be crawled again after {}",
             chrono::DateTime::from_timestamp_millis(next).unwrap_or_default().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-        )));
+        ))
+    };
+    let now = crate::time::now_millis();
+    if let Err((site, next)) = hosts::check_crawl(&owner, &sites, per_day, now) {
+        return Err(refused(site, next));
+    }
+    count_crawl(cluster, cid, per_day).await?;
+    if let Err((site, next)) = hosts::record_crawl(&owner, &sites, per_day, now) {
+        return Err(refused(site, next));
     }
     let blocked = cluster.config.node_setting(BLOCKED_HOSTS).map(|b| b.split(',').map(|h| h.trim().trim_start_matches('.').to_ascii_lowercase()).filter(|h| !h.is_empty()).collect()).unwrap_or_default();
     let index = sink.index.clone();
@@ -196,6 +225,8 @@ pub async fn sync(cid: &str, v: &Values, sink: &mut Sink<'_>, full: bool, cursor
     let started_at = chrono::DateTime::from_timestamp_millis(started_ms).unwrap_or_default().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let duration = Duration::from_secs(plan.limits.get(L::Duration));
     let page = sink.new_page();
+    let robots_held = sink.reserve();
+    let force_purge = v.bool(FORCE_PURGE, false);
     let sink_deadline = sink.deadline.checked_sub(Duration::from_secs(60)).unwrap_or(sink.deadline);
     let mut c = Crawl {
         sink,
@@ -215,6 +246,11 @@ pub async fn sync(cid: &str, v: &Values, sink: &mut Sink<'_>, full: bool, cursor
         aliases: HashMap::new(),
         redirects: 0,
         redirect_targets: HashMap::new(),
+        rechecking: false,
+        indexed_by_origin: HashMap::new(),
+        match_time: Duration::ZERO,
+        robots_held,
+        strike_min_age: interval(cluster, STRIKE_MIN_AGE, 7 * DAY_MS as u64),
         visited: 0,
         budget,
         budget_name,
@@ -225,8 +261,11 @@ pub async fn sync(cid: &str, v: &Values, sink: &mut Sink<'_>, full: bool, cursor
         stats: Stats::default(),
         limit_reached: None,
     };
-    let result = c.run(cursor, before).await;
+    let result = c.run(cursor, before, force_purge).await;
     c.write_stats();
+    if force_purge && result.is_ok() {
+        clear_force_purge(cluster, cid).await;
+    }
     result
 }
 
@@ -292,12 +331,15 @@ fn is_html(content_type: &str, body: &[u8]) -> bool {
 }
 
 impl Crawl<'_, '_> {
-    async fn run(&mut self, cursor: &Value, before: u64) -> Result<Value, Stop> {
+    async fn run(&mut self, cursor: &Value, before: u64, force_purge: bool) -> Result<Value, Stop> {
         // robots.txt of every domain first: its sitemaps seed the crawl.
         let origins: Vec<String> = self.plan.domains.iter().map(|d| d.origin.clone()).collect();
         let mut sitemaps: Vec<(Link, usize)> = self.plan.sitemaps.iter().cloned().map(|l| (l, 0)).collect();
         for o in origins {
             let r = self.load_robots(&o).await?;
+            // Held while the crawl runs: charged to the request breaker, or the origin is
+            // treated as unreachable.
+            let r = if self.robots_held.add(r.bytes(), "crawled robots.txt").is_ok() { r } else { Robots::unreachable() };
             if r.elastic_crawler_group {
                 self.stats.elastic_crawler_groups.push(o.clone());
             }
@@ -312,7 +354,7 @@ impl Crawl<'_, '_> {
         self.read_sitemaps(sitemaps).await?;
         while let Some((link, depth)) = self.queue.pop_front() {
             if Instant::now() >= self.deadline {
-                self.limit_reached = Some("max_duration");
+                self.limit_reached.get_or_insert("max_duration");
                 break;
             }
             if self.visited >= self.budget {
@@ -327,7 +369,7 @@ impl Crawl<'_, '_> {
             self.tick().await?;
         }
         self.flush().await?;
-        self.purge(cursor, before).await
+        self.purge(cursor, before, force_purge).await
     }
 
     /// Writes the crawl's counts into the job's metadata (the heartbeat sends them).
@@ -404,24 +446,65 @@ impl Crawl<'_, '_> {
         }
     }
 
-    /// Queues `link` at `depth` if it may be fetched and fits.
+    /// Whether the frontier is full.
+    fn queue_full(&self) -> bool {
+        self.queue.len() >= self.plan.limits.usize(L::QueueSize)
+    }
+
+    /// [`Crawl::verdict`], timed against [`MATCH_BUDGET`]: past it the crawl's deadline comes
+    /// now, so it ends `completed`.
+    fn judge(&mut self, link: &Link) -> Verdict {
+        let started = Instant::now();
+        let v = self.verdict(link);
+        self.match_time += started.elapsed();
+        if self.match_time > MATCH_BUDGET && self.deadline > started {
+            self.limit_reached.get_or_insert("rule_matching_time");
+            self.deadline = Instant::now();
+        }
+        v
+    }
+
+    /// Queues `link` at `depth` if it fits and may be fetched. The cheap checks (depth, seen,
+    /// room) come before the crawl rules and robots.txt.
     fn enqueue(&mut self, link: Link, depth: u64) {
         if depth > self.plan.limits.get(L::Depth) || self.known.contains(&link.hash64()) {
             return;
         }
-        match self.verdict(&link) {
+        if self.queue_full() {
+            self.stats.dropped_links += 1;
+            return;
+        }
+        match self.judge(&link) {
             Verdict::Allowed => {}
             v => {
                 self.count(v);
                 return;
             }
         }
-        if self.queue.len() >= self.plan.limits.usize(L::QueueSize) {
-            self.stats.dropped_links += 1;
-            return;
-        }
         self.known.insert(link.hash64());
         self.queue.push_back((link, depth));
+    }
+
+    /// Queues many URLs: a sitemap's or a page's. Stops when the frontier fills (the rest are
+    /// dropped and counted) or the deadline passes, and yields to the runtime as it goes.
+    async fn enqueue_all(&mut self, links: impl IntoIterator<Item = Link>, depth: u64) -> Result<(), Stop> {
+        for (i, l) in links.into_iter().enumerate() {
+            if Instant::now() >= self.deadline {
+                break;
+            }
+            if self.queue_full() {
+                self.stats.dropped_links += 1;
+                continue;
+            }
+            self.enqueue(l, depth);
+            if i % YIELD_EVERY == YIELD_EVERY - 1 {
+                tokio::task::yield_now().await;
+                if let Some(s) = self.sink.stop_reason() {
+                    return Err(s);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Sleeps until `at`, or the crawl's deadline if that comes first.
@@ -434,8 +517,9 @@ impl Crawl<'_, '_> {
 
     /// Waits for `link`'s turn: one request at a time per origin, spaced by the larger of its
     /// `Crawl-delay` and the node's interval, and one at a time per site across every crawl on
-    /// the node. No wait outlasts the crawl's deadline, which then ends it.
-    async fn wait_turn(&mut self, link: &Link) -> Result<(), Stop> {
+    /// the node. No wait outlasts the crawl's deadline: a turn that would come after it is not
+    /// taken (`false`), and the request isn't made.
+    async fn wait_turn(&mut self, link: &Link) -> Result<bool, Stop> {
         let origin = link.origin();
         let delay = self.robots.get(&origin).and_then(|r| r.crawl_delay).map(|d| Duration::from_secs_f64(d.min(86_400.0))).unwrap_or_default();
         let gap = self.floor.max(delay);
@@ -447,17 +531,23 @@ impl Crawl<'_, '_> {
         let site = hosts::site_of(link);
         while let Some(at) = hosts::turn(&site, self.floor) {
             if Instant::now() >= self.deadline {
-                break;
+                return Ok(false);
             }
             self.sleep_until(at).await?;
         }
+        if Instant::now() >= self.deadline {
+            return Ok(false);
+        }
         self.next_at.insert(origin, Instant::now() + gap);
-        Ok(())
+        Ok(true)
     }
 
-    /// One polite request; `clean`: every hop before it was at the credential's origin.
-    async fn get(&mut self, link: &Link, clean: bool, max: usize) -> Result<Result<fetch::Response, fetch::Failure>, Stop> {
-        self.wait_turn(link).await?;
+    /// One polite request; `clean`: every hop before it was at the credential's origin. `None`
+    /// when its turn would come after the crawl's deadline: nothing was sent.
+    async fn get(&mut self, link: &Link, clean: bool, max: usize) -> Result<Option<Result<fetch::Response, fetch::Failure>>, Stop> {
+        if !self.wait_turn(link).await? {
+            return Ok(None);
+        }
         let r = tokio::select! {
             r = self.fetcher.get(link, clean, max) => r,
             s = self.sink.stopped() => return Err(s),
@@ -466,7 +556,7 @@ impl Crawl<'_, '_> {
             self.sink.read(resp.wire_bytes);
             self.stats.fetched_bytes += resp.wire_bytes;
         }
-        Ok(r)
+        Ok(Some(r))
     }
 
     fn on_auth_origin(&self, link: &Link) -> bool {
@@ -475,21 +565,24 @@ impl Crawl<'_, '_> {
 
     /// An origin's robots.txt (RFC 9309 section 2.3.1): a 2xx is read, a 4xx (but 429) allows
     /// everything, and a 5xx, a 429, a timeout or a network error disallows the origin for this
-    /// crawl. Redirects are followed up to five times, to other origins too (`http` to `https`,
+    /// crawl. Redirects are followed up to five times within the same site (`http` to `https`,
     /// the apex to `www`), each hop's address checked and the credential never sent after a hop
-    /// leaves its origin; more is unreachable.
+    /// leaves its origin; more, or a hop to another site, is unreachable, and so is a turn that
+    /// would come after the crawl's deadline.
     async fn load_robots(&mut self, origin: &str) -> Result<Robots, Stop> {
         let Some(mut at) = Link::parse(&format!("{origin}/robots.txt"), None) else { return Ok(Robots::unreachable()) };
+        let site = hosts::site_of(&at);
         let mut clean = true;
         for _ in 0..=ROBOTS_REDIRECTS {
             let host = at.url().host_str().unwrap_or_default().to_ascii_lowercase();
-            if self.fetcher.refused(&at) || self.blocked.iter().any(|b| host == *b || host.ends_with(&format!(".{b}"))) {
+            if self.fetcher.refused(&at) || self.blocked.iter().any(|b| host == *b || host.ends_with(&format!(".{b}"))) || hosts::site_of(&at) != site {
                 return Ok(Robots::unreachable());
             }
             let resp = match self.get(&at, clean, robots::MAX_BYTES).await? {
-                Ok(r) => r,
+                None => return Ok(Robots::unreachable()),
+                Some(Ok(r)) => r,
                 // Too large: what was read can't be trusted to be whole, so nothing is allowed.
-                Err(_) => return Ok(Robots::unreachable()),
+                Some(Err(_)) => return Ok(Robots::unreachable()),
             };
             return Ok(match resp.status {
                 200..=299 => Robots::parse(&String::from_utf8_lossy(&resp.body)),
@@ -523,7 +616,7 @@ impl Crawl<'_, '_> {
                 c.stats.sitemap_errors += 1;
                 return;
             }
-            match c.verdict(&link) {
+            match c.judge(&link) {
                 Verdict::Allowed => todo.push((link, level)),
                 v => c.count(v),
             }
@@ -535,11 +628,15 @@ impl Crawl<'_, '_> {
         queue.reverse();
         let mut todo = queue;
         while let Some((link, level)) = todo.pop() {
+            if Instant::now() >= self.deadline || self.queue_full() {
+                break;
+            }
             read += 1;
             let max = self.plan.limits.usize(L::ResponseSize);
             let clean = self.on_auth_origin(&link);
             let body = match self.get(&link, clean, max).await? {
-                Ok(r) if (200..300).contains(&r.status) => r.body,
+                None => break,
+                Some(Ok(r)) if (200..300).contains(&r.status) => r.body,
                 _ => {
                     self.stats.sitemap_errors += 1;
                     continue;
@@ -553,9 +650,10 @@ impl Crawl<'_, '_> {
             let parsed = sitemap::gunzip(body, max).and_then(|xml| sitemap::parse(&xml));
             match parsed {
                 Ok(sitemap::Sitemap::Pages(locs)) => {
-                    for l in locs.iter().filter_map(|l| Link::parse(l, None)) {
-                        self.enqueue(l, 1);
-                    }
+                    drop(held);
+                    self.enqueue_all(locs.iter().filter_map(|l| Link::parse(l, None)), 1).await?;
+                    self.tick().await?;
+                    continue;
                 }
                 Ok(sitemap::Sitemap::Index(locs)) if level < SITEMAP_INDEX_LEVELS => {
                     let mut more = Vec::new();
@@ -589,8 +687,10 @@ impl Crawl<'_, '_> {
         let max = self.plan.limits.usize(L::ResponseSize);
         let resp = loop {
             let r = match self.get(&at, clean, max).await? {
-                Ok(r) => r,
-                Err(f) => {
+                // Its turn came after the deadline: not checked, so it proves nothing.
+                None => return Ok(()),
+                Some(Ok(r)) => r,
+                Some(Err(f)) => {
                     self.error(f.class());
                     self.kept.insert(src);
                     return Ok(());
@@ -608,9 +708,11 @@ impl Crawl<'_, '_> {
                     };
                     // Every way a redirect ends short of a page is only a strike: a login, a
                     // maintenance page or a moved site redirects everything at once.
-                    self.redirects += 1;
-                    *self.redirect_targets.entry(next.hash64()).or_default() += 1;
-                    match self.verdict(&next) {
+                    if self.rechecking {
+                        self.redirects += 1;
+                        *self.redirect_targets.entry(next.hash64()).or_default() += 1;
+                    }
+                    match self.judge(&next) {
                         Verdict::Allowed => {}
                         v => {
                             if v == Verdict::OutOfDomain {
@@ -653,6 +755,11 @@ impl Crawl<'_, '_> {
                 }
             }
         };
+        // A redirect to a URL of the crawl: the page lives there now, and the old URL's document
+        // takes strikes until it is deleted (a site moving to trailing slashes keeps no copies).
+        if at.hash64() != src {
+            self.kept.insert(src);
+        }
         if !is_html(&resp.content_type, &resp.body) {
             // Not a page (roll indexes HTML only), or an error page served as text: a strike.
             self.error("unsupported_content_type");
@@ -674,46 +781,66 @@ impl Crawl<'_, '_> {
         // Off the async worker, against a deadline: a page can't hold a core past it.
         let (url, limits) = (at.clone(), self.plan.limits.clone());
         let deadline = (Instant::now() + PAGE_PARSE_TIME).min(self.deadline.max(Instant::now() + Duration::from_secs(1)));
-        let parsed = tokio::task::spawn_blocking(move || {
+        let parse = tokio::task::spawn_blocking(move || {
             let r = html::read_page(&text, held, &url, &tags, &limits, deadline);
             (r, text)
-        })
-        .await;
+        });
+        // A cancel doesn't wait for the parse (it ends at its own deadline, and its result is
+        // dropped).
+        let parsed = tokio::select! {
+            p = parse => p,
+            s = self.sink.stopped() => return Err(s),
+        };
         let (result, text) = match parsed {
             Ok(r) => r,
             Err(_) => return self.failed(src, &at, "the page's parse stopped on an internal error"),
         };
-        let (page, held) = match result {
+        let (mut page, held) = match result {
             Ok(p) => p,
             Err(why) => return self.failed(src, &at, &why),
         };
+        // A canonical URL is honoured only once the crawl has fetched it and indexed it as
+        // itself: then this page is one of its `additional_urls`, not a document of its own.
+        // Until then the page is stored under its own URL, and the canonical one is queued,
+        // ahead of the page's links.
+        let canonical = if page.noindex { None } else { page.canonical.clone().filter(|c| c != &at) };
+        let canonical = match canonical {
+            Some(c) if self.judge(&c) == Verdict::Allowed => Some(c),
+            _ => None,
+        };
+        if let Some(c) = &canonical
+            && !self.indexed.contains(&c.hash64())
+        {
+            self.enqueue(c.clone(), depth);
+        }
         if !page.nofollow {
-            for l in page.follow.iter().cloned() {
-                if Instant::now() >= self.deadline {
-                    break;
-                }
-                self.enqueue(l, depth + 1);
-            }
+            let follow = std::mem::take(&mut page.follow);
+            self.enqueue_all(follow, depth + 1).await?;
         }
         if page.noindex {
             self.gone.insert(src);
             return Ok(());
         }
-        // A canonical URL is honoured only once the crawl has fetched it and indexed it as
-        // itself: then this page is one of its `additional_urls`, not a document of its own.
-        // Until then the page is stored under its own URL, and the canonical one is queued.
-        if let Some(c) = page.canonical.clone().filter(|c| c != &at && self.verdict(c) == Verdict::Allowed) {
+        if let Some(c) = canonical {
+            let indexed = self.indexed.contains(&c.hash64());
             let entry = self.aliases.entry(c.hash64()).or_insert_with(|| (c.clone(), Vec::new()));
             if entry.1.len() < MAX_ALIASES && !entry.1.contains(&at) {
                 entry.1.push(at.clone());
             }
-            if self.indexed.contains(&c.hash64()) {
+            if indexed {
                 self.gone.insert(src);
                 return Ok(());
             }
-            self.enqueue(c, depth);
+        }
+        // A page with no title and no text (a soft 404 served as 200 everywhere) would empty
+        // the document it refreshes: a strike instead.
+        if page.title.is_empty() && page.body.is_empty() {
+            self.error("empty_page");
+            self.kept.insert(src);
+            return Ok(());
         }
         self.indexed.insert(at.hash64());
+        *self.indexed_by_origin.entry(at.origin()).or_default() += 1;
         let primary = at;
         let doc = document(&primary, None, page, self.plan.full_html.then_some(text), &self.started_at);
         let id = primary.id();
@@ -740,21 +867,28 @@ impl Crawl<'_, '_> {
 
     /// The purge of a crawl that ended. Documents the crawl didn't refresh are fetched again
     /// (within its limits) and deleted when something proves them gone: a 404 or 410,
-    /// `noindex`, a URL now excluded by the crawl's domains, rules or robots.txt. Errors (5xx,
-    /// other 4xx, timeouts, network errors, an unreadable robots.txt) and signs that may only be
-    /// an outage (a redirect off the crawl or onto a URL it already has, a body that isn't HTML)
-    /// keep a document, until three full crawls in a row kept it. Nothing is deleted when more
-    /// than half the index's documents weren't refreshed (gone, kept or unchecked: a site down,
-    /// behind a login, in maintenance or wrongly deployed), or when most redirects led to one URL.
-    /// The new cursor holds the starts of the last two full crawls.
-    async fn purge(&mut self, cursor: &Value, before: u64) -> Result<Value, Stop> {
+    /// `noindex`, a URL now excluded by the crawl's domains, rules or robots.txt (but a robots.txt
+    /// that disallows the whole site is a strike: a deploy's mistake as often as a decision).
+    /// Errors (5xx, other 4xx, timeouts, network errors, an unreadable robots.txt) and signs that
+    /// may only be an outage (a redirect off the crawl or onto a URL it already has, a body that
+    /// isn't HTML, an empty page, a URL that moved) keep a document, until three full crawls in a
+    /// row kept it and it is a week old. Nothing is deleted when more than half the index's
+    /// documents weren't refreshed (gone, kept or unchecked), or when most redirects of re-checked
+    /// documents led to one URL; nothing of an origin is deleted when more than half of its
+    /// documents weren't refreshed. `force_purge` lifts the guards once. The new cursor holds the
+    /// starts of the last two full crawls.
+    async fn purge(&mut self, cursor: &Value, before: u64, force: bool) -> Result<Value, Stop> {
         let cluster = self.sink.cluster;
         let index = self.sink.index.clone();
         let mut crawls: Vec<String> = cursor.get("full_crawls").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default();
         let strike_before = (crawls.len() >= 2).then(|| crawls[crawls.len() - 2].clone()).and_then(|t| ms_of(&t));
+        let old_enough = crate::time::now_millis() - self.strike_min_age.as_millis() as i64;
         let _ = internal::call(cluster, "POST", &format!("/{}/_refresh", enc(&index)), None).await;
-        let mut delete: Vec<String> = Vec::new();
+        // Ids to delete, with their origins.
+        let mut delete: Vec<(String, String)> = Vec::new();
         let (mut gone, mut kept, mut struck, mut unchecked) = (0u64, 0u64, 0u64, 0u64);
+        // Per origin: stale documents seen, and how many of them weren't refreshed.
+        let mut origins: HashMap<String, (u64, u64)> = HashMap::new();
         let mut recheck: Vec<(String, Link, Option<i64>)> = Vec::new();
         let max_recheck = self.plan.limits.usize(L::QueueSize);
         let listing = |e: crate::error::EsError| Stop::Failed(format!("listing [{index}] for the purge failed: {}", e.reason()));
@@ -762,15 +896,21 @@ impl Crawl<'_, '_> {
         let mut page = internal::call(cluster, "POST", &format!("/{}/_search?scroll=2m", enc(&index)), Some(&first)).await.map_err(listing)?;
         let mut scroll = page.get("_scroll_id").and_then(Value::as_str).map(str::to_string);
         // What this crawl learnt of one stale document.
-        let mut settle = |c: &Self, id: String, k: u64, last: Option<i64>, delete: &mut Vec<String>| {
-            if c.gone.contains(&k) {
+        let mut settle = |c: &Self, id: String, link: &Link, last: Option<i64>, delete: &mut Vec<(String, String)>, origins: &mut HashMap<String, (u64, u64)>| {
+            let k = link.hash64();
+            let (proven, strike) = (c.gone.contains(&k), c.kept.contains(&k));
+            if !proven && !strike {
+                return;
+            }
+            origins.entry(link.origin()).or_default().1 += 1;
+            if proven {
                 gone += 1;
-                delete.push(id);
-            } else if c.kept.contains(&k) {
+                delete.push((id, link.origin()));
+            } else {
                 kept += 1;
-                if strike_before.is_some_and(|s| last.is_some_and(|l| l < s)) {
+                if strike_before.is_some_and(|s| last.is_some_and(|l| l < s && l < old_enough)) {
                     struck += 1;
-                    delete.push(id);
+                    delete.push((id, link.origin()));
                 }
             }
         };
@@ -784,12 +924,14 @@ impl Crawl<'_, '_> {
                 let Some(link) = h.pointer(&["_source", "url"]).and_then(Value::as_str).and_then(|u| Link::parse(u, None)) else { continue };
                 let last = h.pointer(&["_source", "last_crawled_at"]).and_then(Value::as_str).and_then(ms_of);
                 let k = link.hash64();
+                origins.entry(link.origin()).or_default().0 += 1;
                 if self.gone.contains(&k) || self.kept.contains(&k) {
-                    settle(self, id.to_string(), k, last, &mut delete);
+                    settle(self, id.to_string(), &link, last, &mut delete, &mut origins);
                 } else if recheck.len() < max_recheck {
                     recheck.push((id.to_string(), link, last));
                 } else {
                     unchecked += 1;
+                    origins.entry(link.origin()).or_default().1 += 1;
                 }
             }
             self.sink.check().await?;
@@ -803,20 +945,26 @@ impl Crawl<'_, '_> {
             let _ = internal::call(cluster, "DELETE", "/_search/scroll", Some(&obj! { "scroll_id" => crate::arr![sid] })).await;
         }
         // The rest is fetched again, within the crawl's limits.
+        self.rechecking = true;
         for (id, link, last) in recheck {
+            let k = link.hash64();
             if self.visited >= self.budget || Instant::now() >= self.deadline {
                 unchecked += 1;
+                origins.entry(link.origin()).or_default().1 += 1;
                 continue;
             }
-            let k = link.hash64();
-            match self.verdict(&link) {
+            match self.judge(&link) {
                 Verdict::Allowed => {
                     if !self.known.insert(k) {
                         unchecked += 1;
+                        origins.entry(link.origin()).or_default().1 += 1;
                         continue;
                     }
-                    self.visit(link, self.plan.limits.get(L::Depth)).await?;
+                    self.visit(link.clone(), self.plan.limits.get(L::Depth)).await?;
                     self.tick().await?;
+                }
+                Verdict::RobotsDisallowed if self.robots.get(&link.origin()).is_some_and(Robots::disallows_root) => {
+                    self.kept.insert(k);
                 }
                 Verdict::OutOfDomain | Verdict::RuleDenied | Verdict::RobotsDisallowed | Verdict::Limit => {
                     self.gone.insert(k);
@@ -826,34 +974,55 @@ impl Crawl<'_, '_> {
                 }
                 Verdict::Blocked | Verdict::OriginSkipped => {
                     unchecked += 1;
+                    origins.entry(link.origin()).or_default().1 += 1;
                     continue;
                 }
             }
-            settle(self, id, k, last, &mut delete);
+            settle(self, id, &link, last, &mut delete, &mut origins);
         }
+        self.rechecking = false;
         self.flush().await?;
-        self.apply_aliases().await?;
         let not_refreshed = gone + kept + unchecked;
         let funnel = self.redirect_targets.values().max().copied().unwrap_or(0);
-        let skip = if not_refreshed > 0 && not_refreshed * 2 > before {
+        let skip = if force {
+            None
+        } else if not_refreshed > 0 && not_refreshed * 2 > before {
             Some(format!("{not_refreshed} of the index's {before} documents weren't refreshed ({gone} gone, {kept} kept by errors or redirects, {unchecked} unchecked): nothing was deleted"))
         } else if self.redirects >= FUNNEL_MIN && funnel * 2 > self.redirects {
-            Some(format!("{funnel} of {} redirects led to one URL, as a login or maintenance page does: nothing was deleted", self.redirects))
+            Some(format!("{funnel} of {} redirects of re-checked documents led to one URL, as a login or maintenance page does: nothing was deleted", self.redirects))
         } else {
             None
         };
+        // An origin with most of its documents not refreshed keeps them all.
+        let held_origins: Vec<String> = if force {
+            Vec::new()
+        } else {
+            let mut held: Vec<String> = origins.iter().filter(|(o, (stale, nr))| *nr > 0 && nr * 2 > stale + self.indexed_by_origin.get(*o).copied().unwrap_or(0)).map(|(o, _)| o.clone()).collect();
+            held.sort();
+            held
+        };
+        let may_delete = |origin: &str| skip.is_none() && !held_origins.iter().any(|o| o == origin);
+        let alias_deletes = self.apply_aliases(&may_delete).await?;
         let m = &mut self.sink.counters.metadata;
         m.insert("gone_document_count".into(), (gone as i64).into());
         m.insert("kept_document_count".into(), (kept as i64).into());
         m.insert("purge_unchecked_count".into(), (unchecked as i64).into());
         m.insert("purge_skipped".into(), skip.is_some().into());
-        match skip {
+        m.insert("alias_deleted_count".into(), (alias_deletes as i64).into());
+        if force {
+            m.insert("purge_forced".into(), true.into());
+        }
+        if !held_origins.is_empty() && skip.is_none() {
+            m.insert("purge_skipped_origins".into(), Value::Arr(held_origins.iter().cloned().map(Value::from).collect()));
+        }
+        match &skip {
             Some(why) => {
-                m.insert("purge_skipped_reason".into(), why.into());
+                m.insert("purge_skipped_reason".into(), why.clone().into());
             }
             None => {
                 m.insert("deleted_after_three_kept_crawls_count".into(), (struck as i64).into());
-                for chunk in delete.chunks(500) {
+                let ids: Vec<String> = delete.into_iter().filter(|(_, o)| may_delete(o.as_str())).map(|(id, _)| id).collect();
+                for chunk in ids.chunks(500) {
                     let mut body = String::new();
                     for id in chunk {
                         body.push_str(&obj! { "delete" => obj! { "_id" => id.clone() } }.to_json());
@@ -870,8 +1039,9 @@ impl Crawl<'_, '_> {
 
     /// Canonical URLs the crawl fetched and indexed as themselves: the pages naming each go in
     /// its `additional_urls`, and the documents those pages got under their own URLs this crawl
-    /// are deleted.
-    async fn apply_aliases(&mut self) -> Result<(), Stop> {
+    /// are deleted where `may_delete` allows their origin (never when the purge is skipped).
+    /// How many it deleted.
+    async fn apply_aliases(&mut self, may_delete: &dyn Fn(&str) -> bool) -> Result<u64, Stop> {
         let mut body = String::new();
         for (k, (canonical, pages)) in std::mem::take(&mut self.aliases) {
             if !self.indexed.contains(&k) {
@@ -883,12 +1053,17 @@ impl Crawl<'_, '_> {
             body.push('\n');
             body.push_str(&obj! { "doc" => obj! { "additional_urls" => Value::Arr(urls.into_iter().map(Value::from).collect()) } }.to_json());
             body.push('\n');
-            for p in pages.iter().filter(|p| self.indexed.contains(&p.hash64())) {
+            for p in pages.iter().filter(|p| self.indexed.contains(&p.hash64()) && may_delete(p.origin().as_str())) {
                 body.push_str(&obj! { "delete" => obj! { "_id" => p.id() } }.to_json());
                 body.push('\n');
             }
         }
-        if body.is_empty() { Ok(()) } else { self.bulk(body).await }
+        if body.is_empty() {
+            return Ok(0);
+        }
+        let before = self.sink.counters.deleted;
+        self.bulk(body).await?;
+        Ok(self.sink.counters.deleted - before)
     }
 
     /// A `_bulk` of updates and deletes of the crawler's own documents, into its index (as
@@ -900,6 +1075,22 @@ impl Crawl<'_, '_> {
         self.sink.counters.deleted += n as u64;
         self.sink.check().await
     }
+}
+
+/// Turns `force_purge` off again after the crawl that used it.
+async fn clear_force_purge(cluster: &Cluster, cid: &str) {
+    let cid = cid.to_string();
+    let _ = cluster
+        .update(move |st| {
+            let Some(Value::Obj(mut c)) = st.metadata.xpack.get(super::CONNECTORS, &cid).cloned() else { return Ok(()) };
+            if let Some(Value::Obj(cfg)) = c.get_mut("configuration")
+                && let Some(Value::Obj(e)) = cfg.get_mut(FORCE_PURGE)
+            {
+                e.insert("value".into(), false.into());
+            }
+            store::put(st, super::CONNECTORS, &cid, Value::Obj(c), crate::time::now_millis()).map(|_| ())
+        })
+        .await;
 }
 
 fn ms_of(t: &str) -> Option<i64> {

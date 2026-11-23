@@ -119,7 +119,12 @@ pub fn convert(yaml: &str, connector: Option<&str>) -> anyhow::Result<Import> {
                 values.insert(k.clone(), v.clone());
             }
             "sitemap_discovery_disabled" => {
-                values.insert("sitemap_discovery".into(), json!(!v.as_bool().unwrap_or(false)));
+                let disabled = match v {
+                    Value::Bool(b) => *b,
+                    Value::String(s) => s.trim().eq_ignore_ascii_case("true"),
+                    _ => bail!("[sitemap_discovery_disabled] is true or false"),
+                };
+                values.insert("sitemap_discovery".into(), json!(!disabled));
             }
             "full_html_extraction_enabled" => {
                 snippet.insert(k.clone(), v.clone());

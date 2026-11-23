@@ -224,7 +224,7 @@ async fn a_site_crawled_end_to_end() {
     a.redirect("/to-b", &b.url("/landing"));
     b.page("/landing", "<p>bee landing</p>");
 
-    let c = cluster(&[("roll.crawler.unverified.max_crawls_per_day", "8")]).await;
+    let c = cluster(&[("roll.crawler.unverified.max_crawls_per_day", "8"), ("roll.crawler.strike_min_age", "1ms")]).await;
     let values = format!(r#"{{"urls":"{}","auth_origin":"{}","auth_header":"{SECRET}"}}"#, a.url("/"), a.base);
     let snippet = format!(r#"{{"domains":[{{"url":"{}","exclude_tags":["header"],"crawl_rules":[{{"policy":"deny","type":"begins","pattern":"/blog"}}]}},{{"url":"{}"}}]}}"#, a.base, b.base);
     crawler(&c, &values, Some(&snippet)).await;
@@ -289,6 +289,23 @@ async fn a_site_crawled_end_to_end() {
     // An unverified domain's daily limit.
     let job = crawl(&c).await;
     assert!(at(&job, "error").as_str().is_some_and(|e| e.contains("at most 8 times")), "{job:?}");
+}
+
+/// A sitemap of 50,000 pages against a frontier of 10: the rest are dropped and counted without
+/// being checked one by one.
+#[tokio::test]
+async fn a_huge_sitemap_stops_at_a_full_frontier() {
+    let site = Site::start().await;
+    site.set("/robots.txt", 200, &[], format!("Sitemap: {}\n", site.url("/s.xml")));
+    let locs: String = (0..50_000).map(|i| format!("<url><loc>{}</loc></url>", site.url(&format!("/p{i}")))).collect();
+    site.set("/s.xml", 200, &[("Content-Type", "application/xml")], format!("<urlset>{locs}</urlset>"));
+    site.page("/", "<p>home</p>");
+    let c = cluster(&[]).await;
+    crawler(&c, &format!(r#"{{"urls":"{}","max_unique_url_count":5}}"#, site.url("/")), Some(r#"{"url_queue_size_limit":10}"#)).await;
+    let started = std::time::Instant::now();
+    let job = crawl(&c).await;
+    assert_eq!(at(&job, "status").as_str(), Some("completed"), "{job:?}");
+    assert!(num(&job, "metadata.dropped_link_count") >= 49_000 && started.elapsed() < Duration::from_secs(60), "{job:?} in {:?}", started.elapsed());
 }
 
 /// Without `allow_private_hosts`, a start URL on loopback is refused before any request.

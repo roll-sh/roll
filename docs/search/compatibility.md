@@ -1569,12 +1569,14 @@ taken over by roll's crawler. Where roll's differs ([crawler.md](crawler.md)):
   origin for the crawl, as a 5xx does; redirects are followed up to 5 times, to other origins too.
 - **The purge** deletes a document only for proof the page is gone (a 404 or 410, `noindex`, a URL
   now excluded by the crawl's domains, rules or robots.txt). Errors (5xx, other 4xx, timeouts,
-  network errors, an unreadable robots.txt) and what may only be an outage (a redirect off the
-  crawl or onto a URL it already has, a body that isn't HTML) keep it, until three full crawls in a
-  row kept it. A crawl that didn't refresh more than half the index's documents, or whose redirects
-  mostly led to one URL, deletes nothing (`metadata.purge_skipped`), so an outage, an expired login
-  redirecting to SSO, or a maintenance page can't empty the index. Open Crawler deletes anything
-  that doesn't answer 200.
+  network errors, a robots.txt that's unreadable or disallows the whole site) and what may only be
+  an outage (a redirect off the crawl, onto a URL it already has or onto a new one, a body that
+  isn't HTML, an empty page) keep it, until three full crawls in a row kept it and it's a week
+  old. A crawl that didn't refresh more than half the index's documents, or whose re-checked
+  redirects mostly led to one URL, deletes nothing (`metadata.purge_skipped`), and nothing of an
+  origin most of whose documents weren't refreshed, so an outage, an expired login redirecting to
+  SSO, or a maintenance page can't empty the index. `force_purge` lifts the guards once. Open
+  Crawler deletes anything that doesn't answer 200.
 - **Canonical URLs** are honoured only once the crawl has fetched the canonical URL and indexed it
   as itself; until then a page is stored under its own URL. Open Crawler stores a page under its
   canonical URL at once.

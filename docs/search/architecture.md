@@ -843,13 +843,16 @@ credentials and branches' adoption all apply unchanged; the crawler adds:
   as it nests more than 512 elements deep, parsed off the async workers against a deadline, and
   read without recursion; nothing in a page runs. Documents keep Open Crawler's fields and ids.
 - **Purge**: only a full crawl that ends `completed` deletes, and only for proof that a page is
-  gone; errors and outage-like signs (redirects off the crawl or onto one URL, non-HTML bodies)
-  keep a document for up to three full crawls in a row, and a crawl that didn't refresh most of the
-  index, or whose redirects mostly led to one URL, deletes nothing.
+  gone; errors and outage-like signs (redirects, non-HTML bodies, empty pages, a robots.txt that
+  disallows everything) keep a document for three full crawls in a row and a week, and a crawl
+  that didn't refresh most of the index or of an origin, or whose re-checked redirects mostly led
+  to one URL, deletes nothing there (`force_purge` lifts this once). Deciding whether URLs may be
+  fetched has a 30-second budget a crawl.
 - **Unverified domains** (all of them until domain verification lands): 1,000 URLs a crawl, a
   second between requests to one site across every crawl on the node, 4 crawls a day per connector
-  and per owner and site (`crawler/hosts.rs`, node memory outside cluster state; verification
-  moves it to roll's catalogue, fleet-wide) (`roll.crawler.unverified.*`). `roll.crawler.enabled`
+  and per owner and site, a site being a registrable domain by the public suffix list
+  (`crawler/hosts.rs`, node memory outside cluster state; verification moves it to roll's
+  catalogue, fleet-wide) (`roll.crawler.unverified.*`). `roll.crawler.enabled`
   turns crawlers off on a node.
 
 ## On the fleet (roll cloud)

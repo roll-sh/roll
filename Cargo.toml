@@ -224,6 +224,8 @@ ammonia = "4"
 quick-xml = "0.41"
 # roll search's web crawler parses pages with the WHATWG algorithm (`xpack/entsearch/sync/crawler/html.rs`).
 html5ever = "0.40"
+# roll search's web crawler: a URL's site (registrable domain) for per-site crawl limits.
+psl = "2"
 crc-fast = "1"
 httpdate = "1"
 ipnet = "2"

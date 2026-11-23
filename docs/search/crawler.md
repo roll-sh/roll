@@ -97,11 +97,19 @@ ever sees JSON.
    product token `roll-crawler` (or `*` when there's no group for it), and honoured always: like
    Open Crawler, nothing configures it away. A 4xx means everything is allowed. A 5xx, a timeout or
    a network error means the origin is disallowed for this crawl, as the RFC asks. Redirects are
-   followed for robots.txt up to 5 times, to other origins too (`http` to `https`, the apex to
+   followed for robots.txt up to 5 times within the same site (`http` to `https`, the apex to
    `www`), each hop's address checked and the credential not sent after a hop leaves its origin;
-   more is unreachable. A leading byte order mark is ignored. The rules compile into one anchored
-   `RegexSet`, so a hostile file can't make checking a URL expensive; a file too costly to compile
-   disallows its origin. `Crawl-delay` is honoured, up to the crawl's deadline.
+   more, or a hop to another site, is unreachable. A leading byte order mark is ignored. A rule is
+   matched by finding the literal text between its `*`s left to right, which is exact for `*`
+   patterns and linear in the URL per rule; a group of more than 5,000 rules disallows its origin,
+   and the files are charged to the request breaker. `Crawl-delay` is honoured, up to the crawl's
+   deadline: a request whose turn would come after it isn't made.
+
+   Deciding whether URLs may be fetched (crawl rules and robots.txt) has a budget of 30 seconds a
+   crawl; past it the crawl ends `completed` with `limit_reached: rule_matching_time`. The cheap
+   checks (depth, seen, a full frontier) come first, a sitemap stops being read once the frontier
+   is full, and long lists of links yield to the runtime as they're queued. Tenant regex rules
+   match a URL's bytes with Unicode off, each in an equal share of a 10 MiB budget.
 
    Unlike Open Crawler, a site's `Elastic-Crawler` group doesn't apply to roll, whose token is
    `roll-crawler`. A crawl that finds such a group and no `roll-crawler` group names the origin in
@@ -260,16 +268,22 @@ the page is gone:
 - **Deleted:** a 404 or a 410, a `noindex` page, a URL now excluded by the crawl's domains, crawl
   rules or robots.txt, and a page naming as canonical a URL the crawl indexed.
 - **Kept:** 5xx responses, other 4xx (401, 403), timeouts, network errors, an origin whose
-  robots.txt couldn't be read, and signs that may only be an outage: a redirect off the crawl (a
-  login), onto a URL the crawl already has (a maintenance page), or a body that isn't HTML. The
-  document's `last_crawled_at` stays as it was. A document kept this way through three full crawls
-  in a row is deleted on the third, and the job's metadata names the count.
+  robots.txt couldn't be read or disallows the whole site, and signs that may only be an outage: a
+  redirect off the crawl (a login), onto a URL the crawl already has (a maintenance page) or onto
+  a new one (the page moved), a body that isn't HTML, or a page with no title and no text (a soft
+  404). The document's `last_crawled_at` stays as it was. A document kept this way through three
+  full crawls in a row, and at least a week old (`roll.crawler.strike_min_age`), is deleted, and
+  the job's metadata names the count.
 - **Purge skipped:** when more than half of the index's documents weren't refreshed by the crawl
-  (gone, kept or not re-checked), or when ten redirects or more mostly led to one URL. A site that
-  is down, behind an expired login, in maintenance or wrongly deployed then loses nothing, however
-  many crawls it lasts. The job ends `completed` with `metadata.purge_skipped: true` and its
-  reason. (A site that really removes more than half its pages at once keeps the old documents
-  until they're deleted by hand.)
+  (gone, kept or not re-checked), or when ten redirects or more of re-checked documents mostly led
+  to one URL. And per origin: nothing of an origin more than half of whose documents weren't
+  refreshed is deleted (`metadata.purge_skipped_origins`), so one domain of a crawl that ships
+  `Disallow: /` or 404s everywhere keeps its documents. A site that is down, behind an expired
+  login, in maintenance or wrongly deployed then loses nothing, however many crawls it lasts. The
+  job ends `completed` with `metadata.purge_skipped: true` and its reason. Pages that name an
+  indexed canonical URL lose their own documents only when the purge runs.
+- **Forced:** the connector's `force_purge` field lifts the guards for the next full crawl, then
+  turns itself off: for a site that really removed more than half its pages.
 
 Unseen documents are found with a `last_crawled_at` range query over the crawler's own index, and
 re-fetched with the same politeness. The re-check counts against `max_unique_url_count` and

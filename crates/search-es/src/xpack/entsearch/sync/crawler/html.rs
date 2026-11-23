@@ -169,6 +169,12 @@ impl Builder {
                 let mut n = self.nodes.borrow_mut();
                 Self::attach(&mut n, parent, c, before);
                 n[c].depth = depth;
+                // A template's contents (never attached themselves) sit at its depth.
+                if let Data::Element { template, .. } = n[c].data
+                    && template != NONE
+                {
+                    n[template].depth = depth;
+                }
             }
             NodeOrText::AppendText(t) => {
                 let prev = {
@@ -292,10 +298,12 @@ impl TreeSink for Builder {
             return;
         }
         let mut n = self.nodes.borrow_mut();
+        let depth = n[*new_parent].depth + 1;
         let mut c = n[*node].first;
         while c != NONE {
             let next = n[c].next;
             Self::attach(&mut n, *new_parent, c, NONE);
+            n[c].depth = n[c].depth.max(depth);
             c = next;
         }
     }
@@ -672,6 +680,10 @@ mod tests {
         let started = std::time::Instant::now();
         let deadline = started + std::time::Duration::from_secs(60);
         let err = parse(&"<div>".repeat(2_000_000), Reservation::new(budget.clone()), deadline).err().unwrap();
+        assert!(err.contains("more than 512 deep") && started.elapsed() < std::time::Duration::from_secs(10), "{err} after {:?}", started.elapsed());
+        // Templates don't start the count again.
+        let templates = format!("{}<template>", "<div>".repeat(500)).repeat(2000);
+        let err = parse(&templates, Reservation::new(budget.clone()), deadline).err().unwrap();
         assert!(err.contains("more than 512 deep") && started.elapsed() < std::time::Duration::from_secs(10), "{err} after {:?}", started.elapsed());
         let p = read(&format!("<p>top</p>{}deep", "<div>".repeat(MAX_DEPTH - 8)), &[]);
         assert_eq!(p.body, "top deep");

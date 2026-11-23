@@ -9,22 +9,18 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 const DAY_MS: i64 = 86_400_000;
-/// Second-level labels under a two-letter country code that are public suffixes themselves.
-const SECOND_LEVEL: &[&str] = &["co", "com", "net", "org", "gov", "ac", "edu", "or", "ne", "go", "gob", "nic"];
 
-/// The site `link` belongs to: an approximation of its registrable domain without the public
-/// suffix list (the last two labels, or three under `co.uk`-style suffixes). An IP literal is
-/// its own site, with its port.
+/// The site `link` belongs to: its registrable domain by the public suffix list (private
+/// suffixes included, so each `*.github.io` site is its own). An IP literal is its own site,
+/// with its port; a host that is a public suffix itself is its own site.
 pub fn site_of(link: &Link) -> String {
     let url = link.url();
     let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
     if host.parse::<std::net::IpAddr>().is_ok() || host.starts_with('[') {
         return format!("{host}:{}", url.port_or_known_default().unwrap_or(0));
     }
-    let labels: Vec<&str> = host.trim_end_matches('.').split('.').collect();
-    let n = labels.len();
-    let keep = if n >= 3 && labels[n - 1].len() == 2 && SECOND_LEVEL.contains(&labels[n - 2]) { 3 } else { 2 };
-    labels[n.saturating_sub(keep)..].join(".")
+    let host = host.trim_end_matches('.');
+    psl::domain_str(host).unwrap_or(host).to_string()
 }
 
 #[derive(Default)]
@@ -38,20 +34,30 @@ fn state() -> &'static parking_lot::Mutex<State> {
     &STATE
 }
 
-/// Records a crawl of `sites` by `owner` at `now_ms`; or, when one of them has had `per_day`
-/// crawls by that owner in 24 hours, records nothing and names it and when the next may start.
-pub fn record_crawl(owner: &str, sites: &[String], per_day: u64, now_ms: i64) -> Result<(), (String, i64)> {
-    let mut st = state().lock();
+/// The first of `sites` that has had `per_day` crawls by `owner` in the 24 hours before
+/// `now_ms`, and when the next may start.
+fn full(st: &mut State, owner: &str, sites: &[String], per_day: u64, now_ms: i64) -> Option<(String, i64)> {
     st.crawls.retain(|_, v| {
         v.retain(|t| *t > now_ms - DAY_MS);
         !v.is_empty()
     });
-    for site in sites {
-        if let Some(v) = st.crawls.get(&(owner.to_string(), site.clone()))
-            && v.len() as u64 >= per_day
-        {
-            return Err((site.clone(), v.iter().min().copied().unwrap_or(now_ms) + DAY_MS));
-        }
+    sites.iter().find_map(|site| {
+        let v = st.crawls.get(&(owner.to_string(), site.clone()))?;
+        (v.len() as u64 >= per_day).then(|| (site.clone(), v.iter().min().copied().unwrap_or(now_ms) + DAY_MS))
+    })
+}
+
+/// Whether a crawl of `sites` by `owner` may start, recording nothing.
+pub fn check_crawl(owner: &str, sites: &[String], per_day: u64, now_ms: i64) -> Result<(), (String, i64)> {
+    full(&mut state().lock(), owner, sites, per_day, now_ms).map_or(Ok(()), Err)
+}
+
+/// Records a crawl of `sites` by `owner` at `now_ms`; or, when one of them has had `per_day`
+/// crawls by that owner in 24 hours, records nothing and names it and when the next may start.
+pub fn record_crawl(owner: &str, sites: &[String], per_day: u64, now_ms: i64) -> Result<(), (String, i64)> {
+    let mut st = state().lock();
+    if let Some(f) = full(&mut st, owner, sites, per_day, now_ms) {
+        return Err(f);
     }
     for site in sites {
         st.crawls.entry((owner.to_string(), site.clone())).or_default().push(now_ms);
@@ -85,6 +91,8 @@ mod tests {
         let site = |u: &str| site_of(&Link::parse(u, None).unwrap());
         assert_eq!(site("https://docs.Example.com/x"), "example.com");
         assert_eq!(site("https://a.b.example.co.uk/"), "example.co.uk");
+        assert_eq!(site("https://alice.github.io/x"), "alice.github.io");
+        assert_eq!(site("https://shop.bob.me.uk/"), "bob.me.uk");
         assert_eq!(site("http://127.0.0.1:8080/"), "127.0.0.1:8080");
         let sites = vec!["victim.example".to_string()];
         assert!(record_crawl("owner-a", &sites, 2, 1_000).is_ok() && record_crawl("owner-a", &sites, 2, 2_000).is_ok());

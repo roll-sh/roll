@@ -111,13 +111,13 @@ impl Limits {
 /// (`Crawler::Utils.url_pattern`): `\A<domain>` then the pattern, matched against the whole URL.
 pub struct CrawlRule {
     pub allow: bool,
-    re: regex::Regex,
+    re: regex::bytes::Regex,
     pub describe: String,
 }
 
 impl CrawlRule {
     pub fn matches(&self, url: &str) -> bool {
-        self.re.is_match(url)
+        self.re.is_match(url.as_bytes())
     }
 }
 
@@ -156,7 +156,8 @@ const DOMAIN_KEYS: &[&str] = &["url", "seed_urls", "sitemap_urls", "exclude_tags
 const MAX_DOMAINS: usize = 100;
 const MAX_LISTED: usize = 10_000;
 /// Crawl rules in one crawl, across its domains, and what compiling them all may cost: each rule's
-/// regex gets an equal share of [`RULES_BYTES`].
+/// regex gets an equal share of [`RULES_BYTES`] (at most 1 MiB). Rules match a normalised URL's
+/// bytes with Unicode off, so `.` is one byte, not a UTF-8 automaton, and the share is enough.
 const MAX_RULES: usize = 1000;
 const RULES_BYTES: usize = 10 << 20;
 const MAX_PATTERN: usize = 2 << 10;
@@ -214,7 +215,7 @@ fn compile_rule(origin: &str, r: &Value, at: &str, size_limit: usize) -> Result<
         }
         t => return Err(format!("{at} has type [{t}]: begins, ends, contains or regex")),
     };
-    let re = regex::RegexBuilder::new(&format!("\\A{}(?:{body})", regex::escape(origin))).size_limit(size_limit).dfa_size_limit(64 << 10).build().map_err(|e| format!("{at}'s pattern [{pattern}] doesn't compile: {e}"))?;
+    let re = regex::bytes::RegexBuilder::new(&format!("\\A{}(?:{body})", regex::escape(origin))).unicode(false).size_limit(size_limit).dfa_size_limit(64 << 10).build().map_err(|e| format!("{at}'s pattern [{pattern}] doesn't compile: {e}"))?;
     Ok(CrawlRule { allow, re, describe: format!("{} {} {pattern}", if allow { "allow" } else { "deny" }, text("type")?) })
 }
 
@@ -270,7 +271,7 @@ pub fn plan(fields: &Fields, snippet: Option<&Value>, ceilings: &Ceilings) -> Re
     if total_rules > MAX_RULES {
         return Err(format!("the crawl has {total_rules} crawl rules: at most {MAX_RULES} across its domains"));
     }
-    let size_limit = (RULES_BYTES / total_rules.max(1)).max(16 << 10);
+    let size_limit = (RULES_BYTES / total_rules.max(1)).min(1 << 20);
     let add_domain = |domains: &mut Vec<Domain>, origin: String| -> usize {
         match domains.iter().position(|d| d.origin == origin) {
             Some(i) => i,

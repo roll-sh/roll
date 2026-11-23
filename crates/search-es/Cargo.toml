@@ -67,6 +67,7 @@ hickory-resolver.workspace = true
 # The web crawler (`xpack::entsearch::sync::crawler`): pages parsed as browsers parse them into an
 # arena DOM, and sitemaps read without a tree or entities.
 html5ever.workspace = true
+psl.workspace = true
 quick-xml.workspace = true
 tokio.workspace = true
 # The `postgresql` connector (`xpack::entsearch::sync::postgres`): TLS through rustls with ring.

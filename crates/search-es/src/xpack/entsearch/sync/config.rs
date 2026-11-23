@@ -92,6 +92,10 @@ const CRAWLER: &[FieldDef] = &[
     // Sensitive too: some sites take a token as the username with no password.
     f("auth_username", "Basic auth username", Ty::Str, empty, false, true),
     f("auth_password", "Basic auth password", Ty::Str, empty, false, true),
+    FieldDef {
+        tooltip: Some("Once: the next full crawl deletes what it proves gone even when most of the site changed (the purge guards are lifted), then this turns itself off."),
+        ..f("force_purge", "Purge past the guards once", Ty::Bool, || Value::Bool(false), false, false)
+    },
 ];
 
 fn schema_of(service: &str) -> &'static [FieldDef] {
