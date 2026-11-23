@@ -39,6 +39,7 @@ pub fn router(access: Arc<Access>) -> Router {
         .route("/v1/access/approvals/{id}/approve", post(approve))
         .route("/v1/access/approvals/{id}/deny", post(deny))
         .route("/v1/access/audit", get(audit))
+        .route("/v1/access/activity", get(activity))
         .route("/v1/access/audit/sinks", get(sinks).post(create_sink))
         .route("/v1/access/audit/sinks/{id}", axum::routing::delete(delete_sink))
         .route("/v1/access/audit/sinks/{id}/retry", post(retry_sink))
@@ -1359,6 +1360,29 @@ async fn set_policy(State(a): S, ext: Extensions, Json(p): Json<crate::Policy>) 
 }
 
 /// The audit log; `?format=jsonl`: one event per line, as a download (what a SIEM or `jq` reads).
+#[derive(Deserialize)]
+struct ActivityQuery {
+    days: Option<i64>,
+}
+
+/// `GET /v1/access/activity?days=`: how agents used roll's MCP server lately (1-30 days, default 7):
+/// per tool, per connection and per day, from the audit log. A person sees only their own
+/// connections', as with the audit log.
+async fn activity(State(a): S, ext: Extensions, Query(q): Query<ActivityQuery>) -> crate::Result<Json<Value>> {
+    let days = q.days.unwrap_or(7);
+    if !(1..=30).contains(&days) {
+        return Err(Error::BadRequest("days is 1-30".into()));
+    }
+    let since = code_sql::now_ms() - days * 86_400_000;
+    let grants = match who(&a, &ext)?.mine().map(str::to_string) {
+        Some(user) => Some(grants_of(&a, &user).await?.into_iter().collect::<Vec<_>>()),
+        None => None,
+    };
+    let mut v = blocking(a.clone(), move |a| a.store.tool_activity(since, grants.as_deref())).await?;
+    v["days_asked"] = json!(days);
+    Ok(Json(v))
+}
+
 async fn audit(State(a): S, ext: Extensions, Query(mut q): Query<AuditQuery>) -> crate::Result<Response> {
     let format = q.format.clone();
     if format.as_deref().is_some_and(|f| f != "jsonl" && f != "csv") {

@@ -146,6 +146,18 @@ export interface NewGrant {
   decoy?: boolean;
 }
 
+/** One tool's calls in `GET /v1/access/activity`. */
+export type ToolActivity = { tool: string; calls: number; denied: number; failed: number; avg_ms: number; max_ms: number; last_at: number };
+/** How agents used roll's MCP server lately (`GET /v1/access/activity`). */
+export type Activity = {
+  since: number;
+  days_asked: number;
+  calls: number;
+  tools: ToolActivity[];
+  connections: { grant: string | null; name: string | null; calls: number; denied: number; failed: number; tools: number; last_at: number }[];
+  days: { day: number; calls: number; denied: number; failed: number }[];
+};
+
 /** A token that needs attention (`GET /v1/access/checkup`). */
 export interface Checkup {
   grant: { id: string; name: string; kind: Grant["kind"]; last_used_at: number | null; expires_at: number | null; created_at: number };
@@ -761,6 +773,7 @@ export const accessApi = {
   revoke: (id: string) => call<Grant>("DELETE", token(id)),
   /** The live tokens that need attention, each with its findings and their fixes. */
   checkup: () => call<Checkup[]>("GET", "/v1/access/checkup"),
+  activity: (days = 7) => call<Activity>("GET", `/v1/access/activity?days=${days}`),
   /** The networks it's been used from (/24s and /48s), newest first. */
   networks: (id: string) => call<{ network: string; first_at: number; last_at: number }[]>("GET", `${token(id)}/networks`),
   /** What an agent connected with this token is offered over MCP (`tools/list`, `prompts/list`). */
