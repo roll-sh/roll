@@ -1522,7 +1522,8 @@ every rotation. It works as a rotator does: it rotates every `rotate_days` or on
 old key is revoked after `grace_minutes`. `secret` is the vendor's secret (masked) and `id` is
 the key's or secret's id at the vendor (plain). Keys of one environment linked to the same
 registration share one issue: linking `TWILIO_API_KEY` to `id` and `TWILIO_API_SECRET` to `secret`
-gives one Twilio key.
+gives one Twilio key. Each rotation is `rotation.succeeded` on the events feed, and a scheduled one
+the vendor refuses is `rotation.failed` (and `rotation_failing` in health), as for every managed key.
 
 Registering checks the credential with the vendor first, read only, so a credential the vendor
 refuses, or one that can't manage keys, is refused at once (400, naming the vendor and the status)
@@ -1531,7 +1532,11 @@ instead of at the first rotation:
 - Twilio: one page of the account's keys;
 - Okta: the app's secrets;
 - Entra: sign in, then the application;
-- Auth0: sign in, then the client.
+- Auth0: sign in, then the client;
+- GitLab: one page of the project's or group's access tokens (listing them takes the role that
+  makes them);
+- OpenAI: one page of the project's service accounts;
+- Datadog: one page of the API keys, or of the credential's user's application keys.
 
 | `vendor` | `target` | `credential` | Issue | Revoke |
 | --- | --- | --- | --- | --- |
@@ -1540,6 +1545,9 @@ instead of at the first rotation:
 | `okta` | `{domain: "acme.okta.com", app_id}` | an API token (`SSWS`) that may manage the app | `POST https://{domain}/api/v1/apps/{app_id}/credentials/secrets` → `id`, `client_secret` | `POST …/secrets/{id}/lifecycle/deactivate`, then `DELETE …/secrets/{id}` |
 | `entra` | `{tenant, client_id, object_id}` | a client secret of `client_id`, an app with `Application.ReadWrite.OwnedBy` that owns `object_id` (or `Application.ReadWrite.All`) | a client credentials token at `https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token` (scope `https://graph.microsoft.com/.default`), then `POST https://graph.microsoft.com/v1.0/applications/{object_id}/addPassword {passwordCredential: {displayName}}` → `keyId`, `secretText` | `POST …/removePassword {keyId}` |
 | `auth0` | `{domain: "acme.us.auth0.com", client_id, app_client_id}` | the client secret of `client_id`, a machine-to-machine app of the Management API with `update:client_keys` | a client credentials token at `https://{domain}/oauth/token` (audience `https://{domain}/api/v2/`), then `POST https://{domain}/api/v2/clients/{app_client_id}/rotate-secret` → `client_secret` (`id` is the app's client id) | nothing |
+| `gitlab` | `{host?: "gitlab.com", project: "123" \| "group/project"` or `group: "456" \| "group", scopes: ["read_api", …], access_level?: 10-40 (50 for a group; default 40), expires_days?: 1-400 (default 365)}` | an access token with the `api` scope of a Maintainer or Owner of the project or group | `POST https://{host}/api/v4/{projects\|groups}/{id}/access_tokens {name, scopes, access_level, expires_at}` (`PRIVATE-TOKEN`) → `id`, `token` | `DELETE …/access_tokens/{id}` |
+| `openai` | `{project_id: "proj_…"}` | an organization Admin API key | `POST https://api.openai.com/v1/organization/projects/{project_id}/service_accounts {name}` (Bearer) → `id`, `api_key.value` (`id` is the service account's) | `DELETE …/service_accounts/{id}` (the account and its key) |
+| `datadog` | `{site?: "datadoghq.com", key: "api" \| "application", scopes?: string[]}` (scopes for application keys only; none: the user's permissions) | `<API key>:<application key>`, the application key allowed to manage the kind that rotates (`api_keys_write`, or `user_app_keys`) | `POST https://api.{site}/api/v2/api_keys` or `…/current_user/application_keys` `{data: {type, attributes: {name, scopes?}}}` (`DD-API-KEY`, `DD-APPLICATION-KEY`) → `data.id`, `data.attributes.key` | `DELETE …/api_keys/{id}` or `…/current_user/application_keys/{id}` |
 
 - **Auth0 has no grace period.** `rotate-secret` replaces the app's secret at once: the old one
   stops working the moment roll rotates, whatever `grace_minutes` says, so services must pick up
@@ -1550,11 +1558,26 @@ instead of at the first rotation:
   app once per environment, or link one environment. Okta also refuses a new secret while the app
   already has two; a rotation then fails and shows in health.
 - Entra passwords get Microsoft's default lifetime (two years); set `rotate_days` below it.
+- **GitLab tokens are made new, not rotated in place.** GitLab's rotate endpoint
+  (`POST …/access_tokens/{id}/rotate`) revokes the old token the moment it answers, so every
+  consumer still holding it would fail until it reloads. roll makes a new token with the same
+  scopes and role instead, and revokes the old one after `grace_minutes`, as for every other
+  vendor. Each token is a new bot member of the project or group, which GitLab removes with the
+  token. A token expires after `expires_days` (GitLab needs a date; an instance may cap it lower
+  than 365): set `rotate_days` below it. `host` is a hostname (no IP literal, no port).
+- **OpenAI keys belong to service accounts.** Each rotation adds a service account to the project
+  and keeps its key; revoking deletes the account, which ends the key. For a key that leaked,
+  rotate it, then end the retired key's lease (`DELETE …/leases/{id}`, or Revoke in the
+  dashboard's leases) to delete the old account at once instead of after the grace period.
+- **Datadog's site is one of its own:** `datadoghq.com`, `us3.datadoghq.com`, `us5.datadoghq.com`,
+  `datadoghq.eu`, `ap1.datadoghq.com`, `ap2.datadoghq.com` or `ddog-gov.com`; the API is
+  `api.<site>`. Application keys belong to the user (or service account) whose application key is
+  in the credential.
 
 Requests go out from rolld's guarded client, as a rotator's calls do: HTTPS to a public address, no
 redirects, a 15-second timeout, at most 64 KiB of answer. The hosts are the vendors' own, except
-Okta's and Auth0's tenant domains, which must be hostnames (no IP literal, no port) and then pass
-the same guard. The credential is sealed with the project's data key, bound to the registration's
+Okta's and Auth0's tenant domains and a self-managed GitLab's host, which must be hostnames (no IP
+literal, no port) and then pass the same guard; Datadog's site must be one of its documented ones. The credential is sealed with the project's data key, bound to the registration's
 id, vendor and target, so a row pointed at another host no longer opens; it's never answered,
 logged or audited, and the list shows the vendor and target only. A vendor's answer is never part
 of an error: errors name the vendor, the step and the status (`okta answered 401 issuing a key`).
@@ -6006,7 +6029,7 @@ type ProjectFindings = { project: string; project_name: string; findings: Findin
 type Finding = { issue: "decoy_used" | "production_unprotected" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "unplaced" | "operator_made" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string; decoy?: Decoy }; // decoy: on decoy_used only (an admin's session's or the operator's), the key's Decoy
 type Rotation = { environment: string; path: string; keys: string[]; kind: string; ref: string; name: string; rotate_days: number | null; rotate_window: string | null; grace_minutes: number; issued_at: number | null; next_due: number | null; last_error: string | null; failed_at: number | null };
 type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
-type SaasRotator = { id: string; name: string; vendor: "sendgrid" | "twilio" | "okta" | "entra" | "auth0"; target: Record<string, unknown>; created_at: number; created_by: string };
+type SaasRotator = { id: string; name: string; vendor: "sendgrid" | "twilio" | "okta" | "entra" | "auth0" | "gitlab" | "openai" | "datadog"; target: Record<string, unknown>; created_at: number; created_by: string };
 type KubernetesCluster = { id: string; name: string; api_url: string; has_ca: boolean; created_at: number; created_by: string };
 type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
 type NewValueRequest = { keys: string[]; note?: string; ttl_minutes?: number /* 5–43200, default 10080 */; answers?: number /* 1–10, default 1 */ };
