@@ -41,6 +41,24 @@ pub struct Import {
     pub notes: Vec<String>,
 }
 
+/// A YAML boolean, YAML 1.1's words included (`yes`, `on`…), which serde_yaml reads as text.
+fn yaml_bool(v: &Value) -> Option<bool> {
+    match v {
+        Value::Bool(b) => Some(*b),
+        Value::Number(n) => match n.as_i64() {
+            Some(1) => Some(true),
+            Some(0) => Some(false),
+            _ => None,
+        },
+        Value::String(s) => match s.trim().to_ascii_lowercase().as_str() {
+            "true" | "yes" | "y" | "on" | "1" => Some(true),
+            "false" | "no" | "n" | "off" | "0" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn origin(url: &str) -> anyhow::Result<String> {
     let u = reqwest::Url::parse(url.trim()).with_context(|| format!("domains[].url [{url}] isn't a URL"))?;
     Ok(match u.port() {
@@ -119,11 +137,7 @@ pub fn convert(yaml: &str, connector: Option<&str>) -> anyhow::Result<Import> {
                 values.insert(k.clone(), v.clone());
             }
             "sitemap_discovery_disabled" => {
-                let disabled = match v {
-                    Value::Bool(b) => *b,
-                    Value::String(s) => s.trim().eq_ignore_ascii_case("true"),
-                    _ => bail!("[sitemap_discovery_disabled] is true or false"),
-                };
+                let Some(disabled) = yaml_bool(v) else { bail!("[sitemap_discovery_disabled] is true or false") };
                 values.insert("sitemap_discovery".into(), json!(!disabled));
             }
             "full_html_extraction_enabled" => {

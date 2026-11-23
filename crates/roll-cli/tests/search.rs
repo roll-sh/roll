@@ -365,7 +365,7 @@ async fn crawler_import_reads_an_open_crawler_config() {
     let yml = e.home.join("crawler.yml");
     std::fs::write(
         &yml,
-        "output_sink: elasticsearch\noutput_index: docs\nmax_crawl_depth: 3\nsitemap_discovery_disabled: true\nmax_title_size: 500\nlog_level: debug\n\
+        "output_sink: elasticsearch\noutput_index: docs\nmax_crawl_depth: 3\nsitemap_discovery_disabled: yes\nmax_title_size: 500\nlog_level: debug\n\
          elasticsearch:\n  host: https://es.example\n  api_key: es-key-5521\n\
          domains:\n  - url: https://docs.example.com\n    seed_urls: [https://docs.example.com/start]\n    crawl_rules:\n      - {policy: deny, type: begins, pattern: /private}\n\
          \x20   auth: {type: raw, header: 'Bearer crawl-token-8812'}\n    extraction_rulesets: [{url_filters: []}]\n  - url: https://blog.example.com\n",

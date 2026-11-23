@@ -68,6 +68,7 @@ hickory-resolver.workspace = true
 # arena DOM, and sitemaps read without a tree or entities.
 html5ever.workspace = true
 psl.workspace = true
+regex-automata.workspace = true
 quick-xml.workspace = true
 tokio.workspace = true
 # The `postgresql` connector (`xpack::entsearch::sync::postgres`): TLS through rustls with ring.

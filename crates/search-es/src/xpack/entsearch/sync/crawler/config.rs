@@ -3,7 +3,7 @@
 //! `exclude_tags`, limits), validated against the node's ceilings. A value over a ceiling fails
 //! validation; nothing is lowered silently.
 
-use super::url::{Link, origin_of};
+use super::url::Link;
 use crate::json::Value;
 
 /// Open Crawler's limits, with its names and defaults (roll's own default where crawler.md
@@ -109,15 +109,19 @@ impl Limits {
 
 /// One of Open Crawler's crawl rules, compiled as Open Crawler builds it
 /// (`Crawler::Utils.url_pattern`): `\A<domain>` then the pattern, matched against the whole URL.
+/// It is a fully built DFA (no lazy cache that can give up, no NFA simulation), so matching costs
+/// one step per URL byte; a rule whose DFA doesn't fit its share of [`RULES_BYTES`] is refused.
 pub struct CrawlRule {
     pub allow: bool,
-    re: regex::bytes::Regex,
+    dfa: regex_automata::dfa::dense::DFA<Vec<u32>>,
     pub describe: String,
 }
 
 impl CrawlRule {
     pub fn matches(&self, url: &str) -> bool {
-        self.re.is_match(url.as_bytes())
+        use regex_automata::dfa::Automaton;
+        let input = regex_automata::Input::new(url.as_bytes()).anchored(regex_automata::Anchored::Yes);
+        matches!(self.dfa.try_search_fwd(&input), Ok(Some(_)))
     }
 }
 
@@ -155,9 +159,9 @@ impl Plan {
 const DOMAIN_KEYS: &[&str] = &["url", "seed_urls", "sitemap_urls", "exclude_tags", "crawl_rules", "extraction_rulesets"];
 const MAX_DOMAINS: usize = 100;
 const MAX_LISTED: usize = 10_000;
-/// Crawl rules in one crawl, across its domains, and what compiling them all may cost: each rule's
-/// regex gets an equal share of [`RULES_BYTES`] (at most 1 MiB). Rules match a normalised URL's
-/// bytes with Unicode off, so `.` is one byte, not a UTF-8 automaton, and the share is enough.
+/// Crawl rules in one crawl, across its domains, and what their DFAs may hold: each rule gets an
+/// equal share of [`RULES_BYTES`] (at most 1 MiB). Rules match a normalised URL's bytes with
+/// Unicode off, so `.` is one byte, not a UTF-8 automaton, and an ordinary rule's DFA is a few KiB.
 const MAX_RULES: usize = 1000;
 const RULES_BYTES: usize = 10 << 20;
 const MAX_PATTERN: usize = 2 << 10;
@@ -174,7 +178,8 @@ pub fn domain_origin(text: &str) -> Result<String, String> {
     if url.query().is_some() || url.fragment().is_some() || !matches!(url.path(), "" | "/") {
         return Err(format!("a domain is a scheme, host and port only, not [{text}]"));
     }
-    Ok(origin_of(&url))
+    // As links are: no trailing dot on the host.
+    Link::from_url(url).map(|l| l.origin()).ok_or_else(|| format!("[{text}] isn't an http or https URL"))
 }
 
 /// Open Crawler's `pattern_with_wildcard`: the text literal, `*` any run.
@@ -215,8 +220,20 @@ fn compile_rule(origin: &str, r: &Value, at: &str, size_limit: usize) -> Result<
         }
         t => return Err(format!("{at} has type [{t}]: begins, ends, contains or regex")),
     };
-    let re = regex::bytes::RegexBuilder::new(&format!("\\A{}(?:{body})", regex::escape(origin))).unicode(false).size_limit(size_limit).dfa_size_limit(64 << 10).build().map_err(|e| format!("{at}'s pattern [{pattern}] doesn't compile: {e}"))?;
-    Ok(CrawlRule { allow, re, describe: format!("{} {} {pattern}", if allow { "allow" } else { "deny" }, text("type")?) })
+    use regex_automata::{dfa::dense, nfa::thompson, util::syntax};
+    let dfa = dense::Builder::new()
+        .configure(dense::Config::new().start_kind(regex_automata::dfa::StartKind::Anchored).dfa_size_limit(Some(size_limit)).determinize_size_limit(Some(size_limit * 4)))
+        .syntax(syntax::Config::new().unicode(false).utf8(false))
+        .thompson(thompson::Config::new().nfa_size_limit(Some(size_limit)))
+        .build(&format!("\\A{}(?:{body})", regex::escape(origin)))
+        .map_err(|e| {
+            if e.is_size_limit_exceeded() {
+                format!("{at}'s pattern [{pattern}] needs more than its share of the rules' memory ({} KiB): simplify it", size_limit >> 10)
+            } else {
+                format!("{at}'s pattern [{pattern}] doesn't compile: {e}")
+            }
+        })?;
+    Ok(CrawlRule { allow, dfa, describe: format!("{} {} {pattern}", if allow { "allow" } else { "deny" }, text("type")?) })
 }
 
 fn strings(v: &Value, at: &str, max: usize) -> Result<Vec<String>, String> {
@@ -436,6 +453,28 @@ mod tests {
         assert!(snippet_problem(&obj(r#"{"domains":[{"url":"https://e.com","auth":{"type":"basic"}}]}"#), &ceilings()).unwrap().contains("sealed"));
         assert!(snippet_problem(&obj(r#"{"output_sink":"console"}"#), &ceilings()).unwrap().contains("output_sink"));
         assert!(snippet_problem(&obj(r#"{"domains":[{"url":"https://e.com/docs"}]}"#), &ceilings()).is_some());
+        // A trailing dot is the same domain.
+        assert_eq!(domain_origin("https://Example.com.").unwrap(), "https://example.com");
+    }
+
+    /// Crawl rules are DFAs: a rule whose automaton can't fit its share is refused when the
+    /// snippet is validated, and matching an accepted one costs one step per URL byte, however
+    /// the pattern nests.
+    #[test]
+    fn crawl_rule_matching_is_linear() {
+        let rules = |patterns: &[&str]| {
+            let list: Vec<String> = patterns.iter().map(|p| format!(r#"{{"policy":"deny","type":"regex","pattern":{}}}"#, Value::from(*p).to_json())).collect();
+            obj(&format!(r#"{{"domains":[{{"url":"https://e.com","crawl_rules":[{}]}}]}}"#, list.join(",")))
+        };
+        let e = snippet_problem(&rules(&["/[ab]*a[ab]{24}"]), &ceilings()).unwrap();
+        assert!(e.contains("crawl_rules[0]") && e.contains("share"), "{e}");
+        let p = plan(&fields(&[]), Some(&rules(&["/(?:(?:a?){20}){20}b", "/(?:.*a){20}b", "/(?:a|aa)*c"])), &ceilings()).unwrap();
+        let d = &p.domains[0];
+        search_test_support::assert_linear("crawl rules against a URL", 2048, |n| Link::parse(&format!("https://e.com/{}", "a".repeat(n)), None).unwrap(), |l| {
+            for _ in 0..20 {
+                assert!(d.rule_for(&l).is_none());
+            }
+        });
         assert!(snippet_problem(&obj(r#"{"domains":[{"url":"https://e.com","seed_urls":["https://other.com/"]}]}"#), &ceilings()).unwrap().contains("isn't on the domain"));
     }
 }

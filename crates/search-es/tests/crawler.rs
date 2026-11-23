@@ -302,10 +302,105 @@ async fn a_huge_sitemap_stops_at_a_full_frontier() {
     site.page("/", "<p>home</p>");
     let c = cluster(&[]).await;
     crawler(&c, &format!(r#"{{"urls":"{}","max_unique_url_count":5}}"#, site.url("/")), Some(r#"{"url_queue_size_limit":10}"#)).await;
-    let started = std::time::Instant::now();
     let job = crawl(&c).await;
     assert_eq!(at(&job, "status").as_str(), Some("completed"), "{job:?}");
-    assert!(num(&job, "metadata.dropped_link_count") >= 49_000 && started.elapsed() < Duration::from_secs(60), "{job:?} in {:?}", started.elapsed());
+    // The work: once the frontier is full, the rest is counted, never checked against the rules.
+    assert!(num(&job, "metadata.dropped_link_count") >= 49_000 && num(&job, "metadata.checked_url_count") < 100, "{job:?}");
+}
+
+/// The purge's guards and strikes across two domains: one domain 404 everywhere keeps its
+/// documents (per origin); a URL that moved, and an empty page, take strikes and go after three
+/// crawls; most of a site failing keeps everything, aliases included; `Disallow: /` is a strike,
+/// not proof; and `force_purge` deletes past the guards once, then turns itself off.
+#[tokio::test]
+async fn purge_guards_and_strikes() {
+    let (a, b) = (Site::start().await, Site::start().await);
+    let links: String = ["/a1", "/a2", "/a3", "/a4", "/a5", "/a6", "/a7", "/a8", "/old", "/e", "/dup", "/dup2"].iter().map(|l| format!(r#"<a href="{l}">x</a>"#)).collect();
+    a.page("/", &format!("<p>home</p>{links}"));
+    for i in 1..=8 {
+        a.page(&format!("/a{i}"), &format!("<p>page {i}</p>"));
+    }
+    a.page("/old", "<p>old</p>");
+    a.page("/e", "<p>e</p>");
+    a.page("/dup", &format!(r#"<link rel="canonical" href="{}"><p>home again</p>"#, a.url("/")));
+    a.page("/dup2", &format!(r#"<link rel="canonical" href="{}"><p>two</p>"#, a.url("/c2")));
+    a.page("/c2", "<p>two</p>");
+    let b_pages = |b: &Site| {
+        b.page("/", r#"<p>b</p><a href="/b1">1</a><a href="/b2">2</a>"#);
+        b.page("/b1", "<p>b1</p>");
+        b.page("/b2", "<p>b2</p>");
+    };
+    b_pages(&b);
+    let c = cluster(&[("roll.crawler.unverified.max_crawls_per_day", "10"), ("roll.crawler.strike_min_age", "1ms")]).await;
+    crawler(&c, &format!(r#"{{"urls":"{}"}}"#, a.url("/")), Some(&format!(r#"{{"domains":[{{"url":"{}"}},{{"url":"{}"}}]}}"#, a.base, b.base))).await;
+
+    // 1: canonical URLs. /dup names the home page, indexed first; /dup2 names /c2, fetched after it.
+    let job = crawl(&c).await;
+    assert_eq!((at(&job, "status").as_str(), num(&job, "metadata.alias_deleted_count")), (Some("completed"), 1), "{job:?}");
+    assert!(doc(&c, &a.url("/dup")).await.is_none() && doc(&c, &a.url("/dup2")).await.is_none());
+    assert_eq!(at(&doc(&c, &a.url("/c2")).await.unwrap(), "additional_urls.0").as_str(), Some(a.url("/dup2").as_str()));
+    assert_eq!(at(&doc(&c, &a.url("/")).await.unwrap(), "additional_urls.0").as_str(), Some(a.url("/dup").as_str()));
+
+    // 2: B is 404 everywhere: its documents stay (per origin). /old moved, /e is empty: strikes.
+    for p in ["/", "/b1", "/b2"] {
+        b.set(p, 404, &[], "gone");
+    }
+    a.set("/old", 301, &[("Location", "/new")], "");
+    a.page("/new", "<p>new</p>");
+    a.page("/e", "<html></html>");
+    let job = crawl(&c).await;
+    assert_eq!((at(&job, "metadata.purge_skipped"), at(&job, "metadata.purge_skipped_origins.0").as_str()), (&Value::Bool(false), Some(b.base.as_str())), "{job:?}");
+    assert!(doc(&c, &b.url("/b1")).await.is_some() && doc(&c, &a.url("/old")).await.is_some() && doc(&c, &a.url("/e")).await.is_some() && doc(&c, &a.url("/new")).await.is_some());
+
+    // 3: most of A fails: nothing is deleted, the alias's own document included.
+    b_pages(&b);
+    for i in 1..=8 {
+        a.set(&format!("/a{i}"), 503, &[], "busy");
+    }
+    let job = crawl(&c).await;
+    assert_eq!((at(&job, "metadata.purge_skipped"), num(&job, "metadata.alias_deleted_count")), (&Value::Bool(true), 0), "{job:?}");
+    assert!(doc(&c, &a.url("/dup2")).await.is_some());
+
+    // 4: `Disallow: /` keeps every document of A as a strike, none as gone.
+    for i in 1..=8 {
+        a.page(&format!("/a{i}"), &format!("<p>page {i}</p>"));
+    }
+    a.set("/robots.txt", 200, &[], "User-agent: *\nDisallow: /\n");
+    let job = crawl(&c).await;
+    assert_eq!(num(&job, "metadata.gone_document_count"), 0, "{job:?}");
+    assert!(num(&job, "metadata.kept_document_count") >= 13, "{job:?}");
+    assert!(doc(&c, &a.url("/a1")).await.is_some());
+
+    // 5: A back: /old and /e were kept by crawls 2 to 5, and go.
+    a.set("/robots.txt", 404, &[], "");
+    let job = crawl(&c).await;
+    assert_eq!(num(&job, "metadata.deleted_after_three_kept_crawls_count"), 2, "{job:?}");
+    assert!(doc(&c, &a.url("/old")).await.is_none() && doc(&c, &a.url("/e")).await.is_none() && doc(&c, &a.url("/new")).await.is_some());
+
+    // 6: B gone for good: `force_purge` deletes past the per-origin guard once, then turns off.
+    for p in ["/", "/b1", "/b2"] {
+        b.set(p, 404, &[], "gone");
+    }
+    assert_eq!(call(&c, "PUT", "/_connector/site/_configuration", Some(r#"{"values":{"force_purge":true}}"#)).await.0, 200);
+    let job = crawl(&c).await;
+    assert_eq!(at(&job, "metadata.purge_forced"), &Value::Bool(true), "{job:?}");
+    assert!(doc(&c, &b.url("/b1")).await.is_none());
+    let (_, conn, _) = call(&c, "GET", "/_connector/site", None).await;
+    assert_eq!(at(&conn, "configuration.force_purge.value"), &Value::Bool(false), "{conn:?}");
+}
+
+/// A request whose turn would come after the crawl's deadline isn't made: a `Crawl-delay` of 30 s
+/// and `max_duration` of 1 s fetch robots.txt and nothing else.
+#[tokio::test]
+async fn no_request_after_the_deadline() {
+    let site = Site::start().await;
+    site.set("/robots.txt", 200, &[], "User-agent: *\nCrawl-delay: 30\n");
+    site.page("/", "<p>home</p>");
+    let c = cluster(&[]).await;
+    crawler(&c, &format!(r#"{{"urls":"{}"}}"#, site.url("/")), Some(r#"{"max_duration":1}"#)).await;
+    let job = crawl(&c).await;
+    assert_eq!((at(&job, "status").as_str(), at(&job, "metadata.limit_reached").as_str()), (Some("completed"), Some("max_duration")), "{job:?}");
+    assert_eq!(site.requests().iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(), ["/robots.txt"]);
 }
 
 /// Without `allow_private_hosts`, a start URL on loopback is refused before any request.

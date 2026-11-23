@@ -127,6 +127,8 @@ struct Stats {
     dropped_links: u64,
     skipped_origin_urls: u64,
     sitemap_errors: u64,
+    /// URLs checked against the crawl rules and robots.txt.
+    checked_urls: u64,
     errors: Map,
     elastic_crawler_groups: Vec<String>,
 }
@@ -150,6 +152,9 @@ struct Crawl<'s, 'a> {
     /// after three full crawls in a row.
     gone: HashSet<u64>,
     kept: HashSet<u64>,
+    /// Of `gone`: URLs the crawl's own configuration now leaves out (its domains, crawl rules,
+    /// URL limits). No outage causes that, so they don't count against the purge guards.
+    excluded: HashSet<u64>,
     /// URLs indexed under themselves this crawl, and the pages naming each as canonical.
     indexed: HashSet<u64>,
     aliases: HashMap<u64, (Link, Vec<Link>)>,
@@ -218,7 +223,7 @@ pub async fn sync(cid: &str, v: &Values, sink: &mut Sink<'_>, full: bool, cursor
     if let Err((site, next)) = hosts::record_crawl(&owner, &sites, per_day, now) {
         return Err(refused(site, next));
     }
-    let blocked = cluster.config.node_setting(BLOCKED_HOSTS).map(|b| b.split(',').map(|h| h.trim().trim_start_matches('.').to_ascii_lowercase()).filter(|h| !h.is_empty()).collect()).unwrap_or_default();
+    let blocked = cluster.config.node_setting(BLOCKED_HOSTS).map(|b| b.split(',').map(|h| h.trim().trim_start_matches('.').trim_end_matches('.').to_ascii_lowercase()).filter(|h| !h.is_empty()).collect()).unwrap_or_default();
     let index = sink.index.clone();
     let before = doc_count(cluster, &index).await;
     let started_ms = crate::time::now_millis();
@@ -242,6 +247,7 @@ pub async fn sync(cid: &str, v: &Values, sink: &mut Sink<'_>, full: bool, cursor
         queue: VecDeque::new(),
         gone: HashSet::new(),
         kept: HashSet::new(),
+        excluded: HashSet::new(),
         indexed: HashSet::new(),
         aliases: HashMap::new(),
         redirects: 0,
@@ -263,8 +269,11 @@ pub async fn sync(cid: &str, v: &Values, sink: &mut Sink<'_>, full: bool, cursor
     };
     let result = c.run(cursor, before, force_purge).await;
     c.write_stats();
-    if force_purge && result.is_ok() {
-        clear_force_purge(cluster, cid).await;
+    if force_purge
+        && result.is_ok()
+        && let Err(e) = clear_force_purge(cluster, cid).await
+    {
+        c.sink.counters.metadata.insert("force_purge_reset_error".into(), super::capped(format!("[{FORCE_PURGE}] couldn't be turned off again, so the next full crawl forces its purge too: {e}")).into());
     }
     result
 }
@@ -320,6 +329,28 @@ async fn count_crawl(cluster: &Cluster, cid: &str, per_day: u64) -> Result<(), S
 async fn doc_count(cluster: &Cluster, index: &str) -> u64 {
     let _ = internal::call(cluster, "POST", &format!("/{}/_refresh", enc(index)), None).await;
     internal::call(cluster, "GET", &format!("/{}/_count", enc(index)), None).await.ok().and_then(|v| v.get("count").and_then(Value::as_i64)).unwrap_or(0).max(0) as u64
+}
+
+/// What [`Crawl::enqueue_all`] takes: links a page gave, or a sitemap's text.
+trait ToLink {
+    fn to_link(self) -> Option<Link>;
+}
+
+impl ToLink for Link {
+    fn to_link(self) -> Option<Link> {
+        Some(self)
+    }
+}
+
+impl ToLink for String {
+    fn to_link(self) -> Option<Link> {
+        Link::parse(&self, None)
+    }
+}
+
+/// A host as it is compared with `roll.crawler.blocked_hosts`: lowercase, no trailing dot.
+fn plain_host(link: &Link) -> String {
+    link.url().host_str().unwrap_or_default().trim_end_matches('.').to_ascii_lowercase()
 }
 
 fn is_html(content_type: &str, body: &[u8]) -> bool {
@@ -387,6 +418,7 @@ impl Crawl<'_, '_> {
         m.insert("dropped_link_count".into(), n(s.dropped_links));
         m.insert("skipped_origin_url_count".into(), n(s.skipped_origin_urls));
         m.insert("sitemap_error_count".into(), n(s.sitemap_errors));
+        m.insert("checked_url_count".into(), n(s.checked_urls));
         m.insert("error_count".into(), Value::Obj(s.errors.clone()));
         if !s.elastic_crawler_groups.is_empty() {
             m.insert("robots_elastic_crawler_group_ignored".into(), Value::Arr(s.elastic_crawler_groups.iter().cloned().map(Value::from).collect()));
@@ -417,7 +449,7 @@ impl Crawl<'_, '_> {
             return Verdict::Limit;
         }
         let Some(domain) = self.plan.domain(link) else { return Verdict::OutOfDomain };
-        let host = link.url().host_str().unwrap_or_default().to_ascii_lowercase();
+        let host = plain_host(link);
         if self.fetcher.refused(link) || self.blocked.iter().any(|b| host == *b || host.ends_with(&format!(".{b}"))) {
             return Verdict::Blocked;
         }
@@ -454,6 +486,7 @@ impl Crawl<'_, '_> {
     /// [`Crawl::verdict`], timed against [`MATCH_BUDGET`]: past it the crawl's deadline comes
     /// now, so it ends `completed`.
     fn judge(&mut self, link: &Link) -> Verdict {
+        self.stats.checked_urls += 1;
         let started = Instant::now();
         let v = self.verdict(link);
         self.match_time += started.elapsed();
@@ -487,16 +520,19 @@ impl Crawl<'_, '_> {
 
     /// Queues many URLs: a sitemap's or a page's. Stops when the frontier fills (the rest are
     /// dropped and counted) or the deadline passes, and yields to the runtime as it goes.
-    async fn enqueue_all(&mut self, links: Vec<Link>, depth: u64) -> Result<(), Stop> {
+    async fn enqueue_all<T: ToLink + Send>(&mut self, links: Vec<T>, depth: u64) -> Result<(), Stop> {
         for (i, l) in links.into_iter().enumerate() {
             if Instant::now() >= self.deadline {
                 break;
             }
+            // Full: the rest is counted, not parsed or checked.
             if self.queue_full() {
                 self.stats.dropped_links += 1;
                 continue;
             }
-            self.enqueue(l, depth);
+            if let Some(l) = l.to_link() {
+                self.enqueue(l, depth);
+            }
             if i % YIELD_EVERY == YIELD_EVERY - 1 {
                 tokio::task::yield_now().await;
                 if let Some(s) = self.sink.stop_reason() {
@@ -574,7 +610,7 @@ impl Crawl<'_, '_> {
         let site = hosts::site_of(&at);
         let mut clean = true;
         for _ in 0..=ROBOTS_REDIRECTS {
-            let host = at.url().host_str().unwrap_or_default().to_ascii_lowercase();
+            let host = plain_host(&at);
             if self.fetcher.refused(&at) || self.blocked.iter().any(|b| host == *b || host.ends_with(&format!(".{b}"))) || hosts::site_of(&at) != site {
                 return Ok(Robots::unreachable());
             }
@@ -650,10 +686,9 @@ impl Crawl<'_, '_> {
             let parsed = sitemap::gunzip(body, max).and_then(|xml| sitemap::parse(&xml));
             match parsed {
                 Ok(sitemap::Sitemap::Pages(locs)) => {
+                    // Parsed one at a time as they're queued, the charge held until then.
+                    self.enqueue_all(locs, 1).await?;
                     drop(held);
-                    let links: Vec<Link> = locs.iter().filter_map(|l| Link::parse(l, None)).collect();
-                    drop(locs);
-                    self.enqueue_all(links, 1).await?;
                     self.tick().await?;
                     continue;
                 }
@@ -888,7 +923,7 @@ impl Crawl<'_, '_> {
         let _ = internal::call(cluster, "POST", &format!("/{}/_refresh", enc(&index)), None).await;
         // Ids to delete, with their origins.
         let mut delete: Vec<(String, String)> = Vec::new();
-        let (mut gone, mut kept, mut struck, mut unchecked) = (0u64, 0u64, 0u64, 0u64);
+        let (mut gone, mut kept, mut struck, mut unchecked, mut excluded) = (0u64, 0u64, 0u64, 0u64, 0u64);
         // Per origin: stale documents seen, and how many of them weren't refreshed.
         let mut origins: HashMap<String, (u64, u64)> = HashMap::new();
         let mut recheck: Vec<(String, Link, Option<i64>)> = Vec::new();
@@ -902,6 +937,11 @@ impl Crawl<'_, '_> {
             let k = link.hash64();
             let (proven, strike) = (c.gone.contains(&k), c.kept.contains(&k));
             if !proven && !strike {
+                return;
+            }
+            if c.excluded.contains(&k) {
+                excluded += 1;
+                delete.push((id, link.origin()));
                 return;
             }
             origins.entry(link.origin()).or_default().1 += 1;
@@ -948,7 +988,14 @@ impl Crawl<'_, '_> {
         }
         // The rest is fetched again, within the crawl's limits.
         self.rechecking = true;
-        for (id, link, last) in recheck {
+        for (n, (id, link, last)) in recheck.into_iter().enumerate() {
+            // Verdicts that fetch nothing still take time: yield, and notice a cancel.
+            if n % YIELD_EVERY == YIELD_EVERY - 1 {
+                tokio::task::yield_now().await;
+                if let Some(s) = self.sink.stop_reason() {
+                    return Err(s);
+                }
+            }
             let k = link.hash64();
             if self.visited >= self.budget || Instant::now() >= self.deadline {
                 unchecked += 1;
@@ -968,7 +1015,11 @@ impl Crawl<'_, '_> {
                 Verdict::RobotsDisallowed if self.robots.get(&link.origin()).is_some_and(Robots::disallows_root) => {
                     self.kept.insert(k);
                 }
-                Verdict::OutOfDomain | Verdict::RuleDenied | Verdict::RobotsDisallowed | Verdict::Limit => {
+                Verdict::OutOfDomain | Verdict::RuleDenied | Verdict::Limit => {
+                    self.gone.insert(k);
+                    self.excluded.insert(k);
+                }
+                Verdict::RobotsDisallowed => {
                     self.gone.insert(k);
                 }
                 Verdict::RobotsUnreachable => {
@@ -1007,6 +1058,7 @@ impl Crawl<'_, '_> {
         let alias_deletes = self.apply_aliases(&may_delete).await?;
         let m = &mut self.sink.counters.metadata;
         m.insert("gone_document_count".into(), (gone as i64).into());
+        m.insert("excluded_document_count".into(), (excluded as i64).into());
         m.insert("kept_document_count".into(), (kept as i64).into());
         m.insert("purge_unchecked_count".into(), (unchecked as i64).into());
         m.insert("purge_skipped".into(), skip.is_some().into());
@@ -1080,9 +1132,9 @@ impl Crawl<'_, '_> {
 }
 
 /// Turns `force_purge` off again after the crawl that used it.
-async fn clear_force_purge(cluster: &Cluster, cid: &str) {
+async fn clear_force_purge(cluster: &Cluster, cid: &str) -> Result<(), String> {
     let cid = cid.to_string();
-    let _ = cluster
+    cluster
         .update(move |st| {
             let Some(Value::Obj(mut c)) = st.metadata.xpack.get(super::CONNECTORS, &cid).cloned() else { return Ok(()) };
             if let Some(Value::Obj(cfg)) = c.get_mut("configuration")
@@ -1092,7 +1144,8 @@ async fn clear_force_purge(cluster: &Cluster, cid: &str) {
             }
             store::put(st, super::CONNECTORS, &cid, Value::Obj(c), crate::time::now_millis()).map(|_| ())
         })
-        .await;
+        .await
+        .map_err(|e| e.reason().to_string())
 }
 
 fn ms_of(t: &str) -> Option<i64> {

@@ -36,8 +36,8 @@ enum Data {
 
 struct Node {
     data: Data,
-    /// Elements above it when it was attached.
-    depth: u32,
+    /// For a template's contents (never attached themselves): the template.
+    host: usize,
     parent: usize,
     first: usize,
     last: usize,
@@ -47,7 +47,7 @@ struct Node {
 
 impl Node {
     fn new(data: Data) -> Node {
-        Node { data, depth: 0, parent: NONE, first: NONE, last: NONE, prev: NONE, next: NONE }
+        Node { data, host: NONE, parent: NONE, first: NONE, last: NONE, prev: NONE, next: NONE }
     }
 }
 
@@ -150,6 +150,17 @@ impl Builder {
         }
     }
 
+    /// How many nodes are above `i` and `i` itself, up to the document (through a template's
+    /// contents to the template), counting at most [`MAX_DEPTH`].
+    fn depth(n: &[Node], mut i: usize) -> usize {
+        let mut d = 0;
+        while i != NONE && i != DETACHED && d < MAX_DEPTH {
+            d += 1;
+            i = if n[i].parent != NONE { n[i].parent } else { n[i].host };
+        }
+        d
+    }
+
     /// Adds `child` under `parent` before `before` (or last), merging text with the text before
     /// it.
     fn insert(&self, parent: usize, before: usize, child: NodeOrText<usize>) {
@@ -161,20 +172,13 @@ impl Builder {
                 if c == DETACHED {
                     return;
                 }
-                let depth = self.nodes.borrow()[parent].depth + 1;
-                if depth as usize > MAX_DEPTH {
+                // Counted on the tree as it is now, every time: the adoption agency moves open
+                // elements under fresh copies, so no depth stored at an earlier append holds.
+                if Self::depth(&self.nodes.borrow(), parent) >= MAX_DEPTH {
                     self.fail(format!("the page nests elements more than {MAX_DEPTH} deep"));
                     return;
                 }
-                let mut n = self.nodes.borrow_mut();
-                Self::attach(&mut n, parent, c, before);
-                n[c].depth = depth;
-                // A template's contents (never attached themselves) sit at its depth.
-                if let Data::Element { template, .. } = n[c].data
-                    && template != NONE
-                {
-                    n[template].depth = depth;
-                }
+                Self::attach(&mut self.nodes.borrow_mut(), parent, c, before);
             }
             NodeOrText::AppendText(t) => {
                 let prev = {
@@ -228,7 +232,11 @@ impl TreeSink for Builder {
     fn create_element(&self, name: QualName, attrs: Vec<Attribute>, flags: ElementFlags) -> usize {
         let cost: usize = attrs.iter().map(|a| a.name.local.len() + a.value.len() + 16).sum();
         let template = if flags.template { self.push(Data::Other, 0) } else { NONE };
-        self.push(Data::Element { name, attrs, template }, cost as u64)
+        let el = self.push(Data::Element { name, attrs, template }, cost as u64);
+        if template != NONE && template != DETACHED && el != DETACHED {
+            self.nodes.borrow_mut()[template].host = el;
+        }
+        el
     }
 
     fn create_comment(&self, _text: StrTendril) -> usize {
@@ -298,12 +306,10 @@ impl TreeSink for Builder {
             return;
         }
         let mut n = self.nodes.borrow_mut();
-        let depth = n[*new_parent].depth + 1;
         let mut c = n[*node].first;
         while c != NONE {
             let next = n[c].next;
             Self::attach(&mut n, *new_parent, c, NONE);
-            n[c].depth = n[c].depth.max(depth);
             c = next;
         }
     }
@@ -677,14 +683,17 @@ mod tests {
     #[test]
     fn deep_pages_fail_fast() {
         let budget = search_aggs::memory::MemoryBudget::new(u64::MAX);
-        let started = std::time::Instant::now();
-        let deadline = started + std::time::Duration::from_secs(60);
-        let err = parse(&"<div>".repeat(2_000_000), Reservation::new(budget.clone()), deadline).err().unwrap();
-        assert!(err.contains("more than 512 deep") && started.elapsed() < std::time::Duration::from_secs(10), "{err} after {:?}", started.elapsed());
-        // Templates don't start the count again.
+        // A deadline that never comes first: the work itself must stop at the cap. CPU time,
+        // not wall time, so a loaded host can't fail it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3600);
+        let nested = "<div>".repeat(2_000_000);
+        // Neither the adoption agency's fresh copies nor templates start the count again.
+        let adoption = format!("{}<a><b><div></a>", "<div>".repeat(500)).repeat(400);
         let templates = format!("{}<template>", "<div>".repeat(500)).repeat(2000);
-        let err = parse(&templates, Reservation::new(budget.clone()), deadline).err().unwrap();
-        assert!(err.contains("more than 512 deep") && started.elapsed() < std::time::Duration::from_secs(10), "{err} after {:?}", started.elapsed());
+        for page in [&nested, &adoption, &templates] {
+            let (err, cpu) = search_test_support::cpu_time(|| parse(page, Reservation::new(budget.clone()), deadline).err().unwrap());
+            assert!(err.contains("more than 512 deep") && cpu < std::time::Duration::from_secs(5), "{err} after {cpu:?} of CPU");
+        }
         let p = read(&format!("<p>top</p>{}deep", "<div>".repeat(MAX_DEPTH - 8)), &[]);
         assert_eq!(p.body, "top deep");
     }

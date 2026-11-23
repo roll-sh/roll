@@ -226,6 +226,8 @@ quick-xml = "0.41"
 html5ever = "0.40"
 # roll search's web crawler: a URL's site (registrable domain) for per-site crawl limits.
 psl = "2"
+# Crawl rules as fully built DFAs (`search-es` `xpack/entsearch/sync/crawler/config.rs`).
+regex-automata = "0.4"
 crc-fast = "1"
 httpdate = "1"
 ipnet = "2"

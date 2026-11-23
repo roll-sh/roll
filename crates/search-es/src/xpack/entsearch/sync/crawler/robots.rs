@@ -53,6 +53,8 @@ pub struct Robots {
     rules: Vec<Rule>,
     /// Nothing is allowed (robots.txt couldn't be read: a 5xx, a timeout, a network error).
     disallow_all: bool,
+    /// The rules disallow `/`.
+    root_disallowed: bool,
     pub crawl_delay: Option<f64>,
     pub sitemaps: Vec<String>,
     /// The file has a group for Open Crawler's `Elastic-Crawler` and none for roll's token.
@@ -129,7 +131,9 @@ impl Robots {
             return Robots { disallow_all: true, sitemaps, ..Robots::default() };
         }
         let crawl_delay = mine.iter().find_map(|g| g.delay);
-        Robots { rules, disallow_all: false, crawl_delay, sitemaps, elastic_crawler_group }
+        let mut r = Robots { rules, disallow_all: false, root_disallowed: false, crawl_delay, sitemaps, elastic_crawler_group };
+        r.root_disallowed = !r.allows("/");
+        r
     }
 
     /// What the rules hold in memory, roughly.
@@ -140,12 +144,7 @@ impl Robots {
     /// Whether the file disallows the root, so (unless an allow rule says otherwise) the whole
     /// site: as often a mistake of a deploy as a decision.
     pub fn disallows_root(&self) -> bool {
-        !self.allows("/")
-    }
-
-    /// How many rules a URL is checked against.
-    pub fn rule_count(&self) -> usize {
-        self.rules.len()
+        self.root_disallowed
     }
 
     /// Whether `uri` (a path and query) may be fetched.
@@ -197,7 +196,10 @@ fn rule(allow: bool, pattern: &str) -> Option<Rule> {
     if body.bytes().filter(|b| *b != b'*').count() > MAX_LITERAL {
         return None;
     }
-    let pieces = body.split('*').map(str::to_string).collect();
+    // Runs of `*` are one `*`: empty pieces between them would only cost memory.
+    let parts: Vec<&str> = body.split('*').collect();
+    let last = parts.len() - 1;
+    let pieces = parts.iter().enumerate().filter(|(i, p)| *i == 0 || *i == last || !p.is_empty()).map(|(_, p)| p.to_string()).collect();
     Some(Rule { allow, len, pieces, anchored })
 }
 
@@ -247,12 +249,14 @@ mod tests {
         // rules a group may hold.
         let stars = format!("User-agent: *\nDisallow: /{}b\n", "*a".repeat(8000));
         let hostile = Robots::parse(&stars.repeat(60));
-        let uri = format!("/{}", "a".repeat(2040));
-        let started = std::time::Instant::now();
-        for _ in 0..100 {
-            assert!(hostile.allows(&uri));
-        }
-        assert!(started.elapsed() < std::time::Duration::from_secs(5), "{:?}", started.elapsed());
+        search_test_support::assert_linear("a robots.txt of starred rules against a URL", 256, |n| format!("/{}", "a".repeat(n)), |uri| {
+            for _ in 0..20 {
+                assert!(hostile.allows(&uri));
+            }
+        });
+        // A run of stars is one piece of work, not one per star.
+        let runs = Robots::parse(&format!("User-agent: *\nDisallow: /{}x\n", "*".repeat(400_000)));
+        assert!(runs.bytes() < 4096 && !runs.allows("/ax") && runs.allows("/a"), "{}", runs.bytes());
         assert!(!Robots::parse(&"User-agent: *\nDisallow: /x\n".repeat(MAX_RULES + 1)).allows("/y"), "too many rules");
         // A byte order mark doesn't hide the first group.
         assert!(!Robots::parse("\u{feff}User-agent: *\nDisallow: /\n").allows("/x"));

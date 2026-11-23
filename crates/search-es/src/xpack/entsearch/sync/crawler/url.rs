@@ -34,6 +34,12 @@ impl Link {
             return None;
         }
         url.set_fragment(None);
+        // `example.com.` is `example.com`: one origin, one id, one blocked-hosts match.
+        if let Some(h) = url.host_str().filter(|h| h.len() > 1 && h.ends_with('.')).map(|h| h.trim_end_matches('.').to_string())
+            && url.set_host(Some(&h)).is_err()
+        {
+            return None;
+        }
         let path = normalize_percent(url.path());
         if path != url.path() {
             url.set_path(&path);
@@ -169,6 +175,7 @@ mod tests {
         assert_eq!(norm("HTTP://Example.COM:80/a/./b/../c?x=1#f"), "http://example.com/a/c?x=1");
         assert_eq!(norm("https://example.com:443"), "https://example.com/");
         assert_eq!(norm("https://example.com:8443/"), "https://example.com:8443/");
+        assert_eq!(norm("https://Internal.Example./x"), "https://internal.example/x");
         assert_eq!(norm("https://example.com/%7euser/%e2%82%ac?q=%41%2f"), "https://example.com/~user/%E2%82%AC?q=A%2F");
         assert_eq!(norm("https://example.com/a%2Fb"), "https://example.com/a%2Fb");
         assert_eq!(norm("https://example.com/caf\u{e9}"), "https://example.com/caf%C3%A9");
