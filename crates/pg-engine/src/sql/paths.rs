@@ -2106,9 +2106,26 @@ struct Want {
     limit: Option<(f64, f64)>,
     /// Columns (over the table row) a merge join could use an ordering by.
     merge: Vec<Expr>,
+    /// The collation each of `merge` is equated under, by name (its equivalence class's,
+    /// ec_collation): an index ordering by another one is no merge join's (None, or none
+    /// given: not collatable, or not known).
+    merge_coll: Vec<Option<String>>,
 }
 
 impl Want {
+    /// Whether an ordering by `e` under collation `ident` (an index column's) is one a merge
+    /// join could use: `e` is one of `merge`, equated under that collation when both are
+    /// known (an equivalence class's collation must be the index's, as a pathkey's).
+    fn merges(&self, e: &Expr, ident: Option<&str>) -> bool {
+        self.merge.iter().enumerate().any(|(i, m)| {
+            same_key(m, e)
+                && match (self.merge_coll.get(i).and_then(Option::as_deref), ident) {
+                    (Some(a), Some(b)) => a == b,
+                    _ => true,
+                }
+        })
+    }
+
     /// The planner cares about fast-start plans (tuple_fraction > 0).
     fn startup(&self) -> bool {
         matches!(self.limit, Some((c, _)) if c != 0.0)
@@ -3327,8 +3344,7 @@ fn index_pathkeys(rel: &Rel, ii: &IndexInfo, backward: bool, w: &Want) -> Vec<Pa
         };
         // Only keys the query sorts or merges by have an equivalence class to be a
         // pathkey of (a boolean one fixed by a clause has none: past it).
-        if !want.iter().any(|x| x.matches(k, pk.ident.as_deref())) && !w.merge.iter().any(|m| same_key(m, k))
-        {
+        if !want.iter().any(|x| x.matches(k, pk.ident.as_deref())) && !w.merges(k, pk.ident.as_deref()) {
             if bool_const(rel, k) {
                 continue;
             }
@@ -3350,7 +3366,7 @@ fn index_pathkeys(rel: &Rel, ii: &IndexInfo, backward: bool, w: &Want) -> Vec<Pa
                 .iter()
                 .find(|x| x.matches(&k.expr, k.ident.as_deref()))
                 .is_some_and(|x| x.desc);
-            k.cmp == 0 && k.coll == 0 && k.desc == right_desc && w.merge.iter().any(|m| same_key(m, &k.expr))
+            k.cmp == 0 && k.coll == 0 && k.desc == right_desc && w.merges(&k.expr, k.ident.as_deref())
         })
         .count();
     keys.truncate(ordering.max(merging));
@@ -5934,6 +5950,7 @@ impl Planner<'_, '_> {
         if let Plan::Scan(s) = p {
             if plannable(s) {
                 let want = Want {
+                    merge_coll: Vec::new(),
                     keys: Vec::new(),
                     limit: lim,
                     merge: Vec::new(),
@@ -6457,6 +6474,7 @@ impl Planner<'_, '_> {
             return Vec::new();
         }
         let want = Want {
+            merge_coll: Vec::new(),
             keys: Vec::new(),
             limit: None,
             merge,
@@ -6556,7 +6574,7 @@ impl Planner<'_, '_> {
         } else {
             Vec::new()
         };
-        let want = Want { keys, limit: None, merge };
+        let want = Want { keys, limit: None, merge, merge_coll: Vec::new() };
         let Some(rel) = self.rel(s, &scan_needed) else {
             return false;
         };
@@ -6998,6 +7016,7 @@ impl Planner<'_, '_> {
         }
         let idents: Vec<Option<String>> = mapped.iter().map(|e| derived_collation(&s.table, e)).collect();
         let want = Want {
+            merge_coll: Vec::new(),
             merge: Vec::new(),
             keys: mapped
                 .into_iter()

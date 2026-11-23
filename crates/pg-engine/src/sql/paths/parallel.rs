@@ -464,6 +464,7 @@ impl Planner<'_, '_> {
         // them along with the plain ones, for the orderings found useful.
         let want = match &useful.0 {
             Some(u) => Want {
+                merge_coll: Vec::new(),
                 keys: u.0.clone(),
                 limit: None,
                 merge: u.1.clone(),
@@ -600,6 +601,19 @@ fn agg_transfn(oid: u32) -> Option<(u32, bool)> {
     m.get(&oid).copied()
 }
 
+/// The transition state a call keeps, as find_compatible_trans shares them: its transition
+/// function with the inputs (and a user aggregate's initial value); None: one of its own.
+fn state_key(a: &crate::sql::plan::AggCall, inputs: String) -> Option<(u32, String)> {
+    match &a.user {
+        Some(u) if u.trans_fn != 0 => Some((u.trans_fn, format!("{inputs}|{:?}", u.init))),
+        Some(_) => None,
+        None => match agg_transfn(a.def.sig.oid) {
+            Some((t, false)) if t != 0 => Some((t, inputs)),
+            _ => None,
+        },
+    }
+}
+
 /// The transition states a level's aggregates keep (preprocess_aggrefs: equal calls share
 /// one, and so do calls of one transition function over the same inputs, unless a final
 /// function writes its state) and their transition space (get_agg_clause_costs, per state).
@@ -616,11 +630,7 @@ pub fn agg_transitions(aggs: &[crate::sql::plan::AggCall]) -> (usize, f64) {
             continue;
         }
         calls.push(call);
-        if a.user.is_none()
-            && let Some((t, false)) = agg_transfn(oid)
-            && t != 0
-        {
-            let k = (t, inputs);
+        if let Some(k) = state_key(a, inputs) {
             if states.contains(&k) {
                 continue;
             }
@@ -743,25 +753,22 @@ pub fn agg_clause_costs(aggs: &[crate::sql::plan::AggCall], split: AggSplit) -> 
         // functions' procost, 100 for a SQL or PL one.)
         if split != AggSplit::Partial && has_final {
             per_group += match &a.user {
-                Some(u) => u.final_.as_ref().map_or(CPU_OPERATOR_COST, qual_cost),
+                Some(u) => u.final_cost,
                 None => CPU_OPERATOR_COST,
             };
         }
         per_group += a.direct.iter().map(qual_cost).sum::<f64>();
-        // (The transition state, unless an earlier call's is shared.)
-        if a.user.is_none()
-            && let Some((t, false)) = agg_transfn(oid)
-            && t != 0
-        {
-            let k = (t, inputs);
+        // (The transition state, unless an earlier call's is shared: find_compatible_trans,
+        // the same transition function, initial value and inputs.)
+        if let Some(k) = state_key(a, inputs) {
             if states.contains(&k) {
                 continue;
             }
             states.push(k);
         }
         per_row += match &a.user {
-            Some(u) if !u.internal => qual_cost(&u.trans).max(CPU_OPERATOR_COST),
-            _ => CPU_OPERATOR_COST,
+            Some(u) => u.trans_cost,
+            None => CPU_OPERATOR_COST,
         };
         match split {
             AggSplit::Final => {

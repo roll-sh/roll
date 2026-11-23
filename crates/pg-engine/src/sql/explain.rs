@@ -501,6 +501,9 @@ impl std::fmt::Debug for ColInfo {
 
 #[derive(Clone, Debug, Default)]
 struct ExNode {
+    /// Cost in `total_cost` that isn't this node's own, shown without it: a FROM
+    /// subquery's scan setrefs removes, which its parent pays for (cost_subqueryscan).
+    hidden_cost: f64,
     /// The resjunk GROUP BY keys a level's grouping returns (`group_tops`): the sorts and
     /// limits above it return them too (`carry_group_junk`).
     junk_keys: Vec<String>,
@@ -3320,6 +3323,18 @@ fn tableoid_first(n: &mut ExNode) {
 
 /// The inheritance trees a plan reads whose parent takes no name of its own (an Append of
 /// one member, dropped): each a range table entry all the same.
+/// Whether an inheritance Append's members are partitions (a partitioned table's): its
+/// first table scan's table has a partition bound.
+fn partition_members(p: &Plan) -> bool {
+    fn first_scan(p: &Plan) -> Option<&ScanPlan> {
+        match p {
+            Plan::Scan(s) => Some(s),
+            _ => plan_inputs(p).into_iter().find_map(|c| first_scan(c)),
+        }
+    }
+    first_scan(p).is_some_and(|s| s.table.partbound.is_some())
+}
+
 fn inh_parents(p: &Plan) -> usize {
     // (Its members are range table entries too, the ones pruning removes as well.)
     let own = match p {
@@ -4612,6 +4627,55 @@ fn balanced(s: &str) -> bool {
     depth == 0
 }
 
+/// A set-returning call's cost per evaluation: the call with its arguments, a CREATE
+/// FUNCTION function's at its procost.
+fn srf_call_cost(cat: &crate::catalog::Catalog, s: &crate::sql::plan::SrfCall) -> f64 {
+    let call = costs::qual_cost(&Expr::Call(s.func.clone(), s.args.clone(), s.ty.clone()));
+    match cat.functions.get(&s.func.oid).filter(|f| f.returns_set) {
+        Some(f) => {
+            let own = costs::qual_cost(&Expr::Call(s.func.clone(), Vec::new(), s.ty.clone()));
+            call - own + f.procost() as f64 * costs::CPU_OPERATOR_COST
+        }
+        None => call,
+    }
+}
+
+/// cost_qual_eval of a projection's expression over a ProjectSet's output (`ps` over an
+/// input `iw` columns wide, calling `srfs`), as the expression of the level's target list
+/// it stands for: the ProjectSet's expressions in place of its columns, and each call in
+/// them costed as the ProjectSet costs it (then a column).
+fn cost_over_srfs(cat: &crate::catalog::Catalog, e: &Expr, ps: &[Expr], srfs: &[crate::sql::plan::SrfCall], iw: usize) -> f64 {
+    let mut calls = 0.0;
+    let mut call = |i: usize, t: DataType| {
+        calls += srfs.get(i).map_or(0.0, |s| srf_call_cost(cat, s));
+        Expr::Col(0, t)
+    };
+    let level = e
+        .clone()
+        .transform(&mut |x| {
+            Ok(match x {
+                Expr::Col(j, t) => match ps.get(j) {
+                    Some(p) => p
+                        .clone()
+                        .transform(&mut |y| {
+                            Ok(match y {
+                                Expr::Srf(i, t) => call(i, t),
+                                Expr::Col(k, t) if k >= iw => call(k - iw, t),
+                                // (An input column, and a call's value once costed: no cost of their own.)
+                                Expr::Col(_, t) => Expr::Col(0, t),
+                                y => y,
+                            })
+                        })
+                        .unwrap_or_else(|_| Expr::Col(0, t)),
+                    None => Expr::Col(0, t),
+                },
+                x => x,
+            })
+        })
+        .unwrap_or_else(|_| e.clone());
+    costs::qual_cost(&level) + calls
+}
+
 /// A ProjectSet whose calls are all built-ins pg_proc has returning no set: its input and
 /// its target list with the calls in place.
 fn single_row_calls(p: &Plan) -> Option<(&Arc<Plan>, Vec<Expr>)> {
@@ -5821,6 +5885,16 @@ impl Builder<'_, '_> {
             self.pop_level();
         }
         self.depth -= apart as usize;
+        // (A set operation's FROM subquery whose columns the query doesn't read: its scan,
+        // removed, costs cpu_tuple_cost a row, cost_subqueryscan.)
+        if let Plan::SetOp { sub: Some(_), .. } = &**p
+            && self.needed.get(&addr(p)).is_some_and(|m| !m.is_empty() && m.iter().all(|x| !x))
+            && b.node.hidden_cost == 0.0
+        {
+            let x = b.node.rows * costs::CPU_TUPLE_COST;
+            b.node.total_cost += x;
+            b.node.hidden_cost += x;
+        }
         // (The MIN / MAX InitPlans the node's expressions run: their costs are its own.)
         if let Some(level) = self.inits.last_mut() {
             for i in level.iter_mut().skip(inits_before) {
@@ -6078,6 +6152,15 @@ impl Builder<'_, '_> {
                     // (Its scan trivial, the order it offers is still the subquery's: its
                     // ORDER BY's keys, truncate_useless_pathkeys.)
                     let mut b = self.convert(input);
+                    // (cost_subqueryscan charges cpu_tuple_cost a row unless the query reads
+                    // the subquery's columns as they are, trivial_pathtarget; setrefs drops
+                    // the scan either way when it returns the physical target list. Taken
+                    // here when the query reads none of them: `count(*)` over it.)
+                    if self.needed.get(&key).is_some_and(|m| !m.is_empty() && m.iter().all(|x| !x)) {
+                        let x = b.node.rows * costs::CPU_TUPLE_COST;
+                        b.node.total_cost += x;
+                        b.node.hidden_cost += x;
+                    }
                     if let Some(sp) = path {
                         let map: Vec<usize> = (0..b.exported.len()).collect();
                         self.take_sub_path(&mut b, &map, sp);
@@ -6716,6 +6799,7 @@ impl Builder<'_, '_> {
             Plan::Project { input, exprs } => {
                 let under_filter = FILTER_OVER_WINDOW.with(|f| f.replace(false));
                 let foreign_top = FOREIGN_TOP.with(|f| f.replace(false));
+                let append_member = APPEND_MEMBER.with(|f| f.replace(false));
                 // (The target list over windows: the input columns it reads, in order.)
                 let tl: Vec<usize> = match &**input {
                     Plan::Window { input: wi, .. } => {
@@ -6860,7 +6944,12 @@ impl Builder<'_, '_> {
                 // inject_projection_plan.)
                 let param_append = matches!(&**input, Plan::Join { kind: JoinKind::Inner, left, right, params, nleft: 0, cond: None, hash: None, .. }
                     if matches!(&**left, Plan::One) && !params.is_empty() && matches!(&**right, Plan::Append { .. }));
-                let append_above = (self.o.verbose && matches!(&**input, Plan::Append { inh: Some(_), .. })
+                // (A partitioned table's Append takes the projection into its members,
+                // apply_scanjoin_target_to_paths; an inheritance tree's has it above.)
+                // (A whole row is the members' to return too: no projection, tlist_same_exprs.)
+                let computing = exprs.iter().any(|e| !matches!(e, Expr::Col(..)) && !crate::sql::binder::is_whole_row(e));
+                let append_above = (matches!(&**input, Plan::Append { inh: Some(_), .. })
+                    && (self.o.verbose || !partition_members(input) && !append_member && computing)
                     || matches!(&**input, Plan::Append { inh: None, .. })
                     || param_append)
                     && c.node.node_type == "Append"
@@ -6932,6 +7021,7 @@ impl Builder<'_, '_> {
                     };
                 // (inject_projection_plan copies the subplan's costs and width.)
                 let injected = (append_above && param_append).then_some((c.node.startup_cost, c.node.total_cost, c.node.width));
+                let mut projection = false;
                 if sort_above
                     || append_above
                     || matches!(&**input, Plan::ProjectSet { .. })
@@ -6944,9 +7034,10 @@ impl Builder<'_, '_> {
                     r.width = child.width;
                     r.cols = child.cols.clone();
                     r.startup_cost = child.startup_cost;
-                    // (create_projection_path: cpu_tuple_cost per row, besides the target
-                    // list's evaluation below.)
-                    r.total_cost = child.total_cost + child.rows * costs::CPU_TUPLE_COST;
+                    // (create_projection_path: cpu_tuple_cost per row with the target list's
+                    // evaluation, added below in one step as it does.)
+                    r.total_cost = child.total_cost;
+                    projection = true;
                     r.key = child.key;
                     r.children.push(child.child("Outer"));
                     c.node = r;
@@ -7228,9 +7319,22 @@ impl Builder<'_, '_> {
                     }
                 }
                 c.node.cols = cols;
-                // (cost_qual_eval: a called function's procost too.)
-                let per: f64 = exprs.iter().map(costs::qual_cost).sum();
-                c.node.total_cost += c.node.rows * per;
+                // (cost_qual_eval: a called function's procost too. Over a ProjectSet, the
+                // level's target list with the calls in it, as split_pathtarget_at_srfs
+                // left it: the calls' costs count again.)
+                let per: f64 = match &**input {
+                    Plan::ProjectSet { input: pi, exprs: ps, srfs } if c.node.node_type == "Result" => {
+                        let cat = self.ctx.catalog();
+                        let iw = super::binder::plan_width(pi);
+                        exprs.iter().map(|e| cost_over_srfs(&cat, e, ps, srfs, iw)).sum()
+                    }
+                    _ => exprs.iter().map(costs::qual_cost).sum(),
+                };
+                if projection {
+                    c.node.total_cost += (costs::CPU_TUPLE_COST + per) * c.node.rows;
+                } else {
+                    c.node.total_cost += c.node.rows * per;
+                }
                 for pt in c.node.partials_mut() {
                     pt.total_cost += pt.rows * per;
                 }
@@ -7418,17 +7522,7 @@ impl Builder<'_, '_> {
                     .fold(1.0f64, f64::max);
                 // (Each call's own cost, its arguments' and a CREATE FUNCTION function's
                 // procost: the target list reads the calls' values.)
-                let user_cost: f64 = srfs
-                    .iter()
-                    .map(|s| {
-                        let call = costs::qual_cost(&Expr::Call(s.func.clone(), s.args.clone(), s.ty.clone()));
-                        let own = costs::qual_cost(&Expr::Call(s.func.clone(), Vec::new(), s.ty.clone()));
-                        match user(s) {
-                            Some(f) => call - own + f.procost() as f64 * costs::CPU_OPERATOR_COST,
-                            None => call,
-                        }
-                    })
-                    .sum();
+                let user_cost: f64 = srfs.iter().map(|s| srf_call_cost(&cat, s)).sum();
                 let calls: Vec<Expr> = exprs
                     .iter()
                     .map(|e| {
@@ -7670,15 +7764,15 @@ impl Builder<'_, '_> {
                 // (VERBOSE: a projection over an inheritance tree merged in order is its
                 // members' to compute, each over its own columns; a Result above returns
                 // the query's columns when those aren't the members'.)
+                // (So without VERBOSE: the Result over the merged members is only that.)
                 let mut result_out: Option<Vec<String>> = None;
-                if self.o.verbose
-                    && c.node.node_type == "Result"
+                if c.node.node_type == "Result"
                     && merge_appended(input)
                     && let Plan::Project { input: pin, exprs } = &**input
                     && matches!(&**pin, Plan::Append { inh: Some(_), .. })
                     && c.node.children.len() == 1
                     && c.node.children[0].node_type == "Append"
-                    && c.node.output.len() == exprs.len()
+                    && (!self.o.verbose || c.node.output.len() == exprs.len())
                     && let Some(parent) = self.refnames.get(&addr(pin)).map(|n| format!("{}.", quote_ident(n)))
                 {
                     let extra: Vec<String> = c
@@ -11849,7 +11943,9 @@ impl Builder<'_, '_> {
             if own_level {
                 self.inits.push(Vec::new());
             }
+            APPEND_MEMBER.with(|f| f.set(!inh));
             let mut c = self.node(a);
+            APPEND_MEMBER.with(|f| f.set(false));
             if own_level {
                 let mut inits = std::mem::take(&mut c.node.initplans);
                 inits.extend(self.inits.pop().unwrap_or_default());
@@ -13391,7 +13487,8 @@ impl Builder<'_, '_> {
         n.width = c.node.width;
         n.cols = c.node.cols.clone();
         n.startup_cost = c.node.startup_cost;
-        n.total_cost = c.node.total_cost + c.node.rows * costs::CPU_TUPLE_COST;
+        // (A hidden charge for the scan it is: this one.)
+        n.total_cost = c.node.total_cost - c.node.hidden_cost + c.node.rows * costs::CPU_TUPLE_COST;
         let child = std::mem::take(&mut c.node);
         n.children.push(child.child("Subquery"));
         c.node = n;
@@ -13997,20 +14094,74 @@ impl Builder<'_, '_> {
         }
         let mut part_in = c.node.partial.take();
         let mut part_others = std::mem::take(&mut c.node.partials);
-        // A scan feeding the aggregation returns only the columns it uses.
+        // A scan feeding the aggregation returns the grouping's input target
+        // (make_group_input_target): the group keys, an expression computed there at its
+        // type's width, and the columns the aggregates read (a whole row as a tuple
+        // header and its columns).
         if c.node.is_scan() && c.node.cols.len() == c.exported.len() {
             let mut used = std::collections::BTreeSet::new();
-            let mut add = |e: &Expr| used.extend(e.columns());
-            groups.iter().for_each(&mut add);
+            let mut exprs: Vec<&Expr> = Vec::new();
+            let mut extra = 0u32;
+            for g in groups {
+                match g {
+                    Expr::Col(j, _) => {
+                        used.insert(*j);
+                    }
+                    Expr::Const(..) => {}
+                    g if !exprs.iter().any(|x| x.same_as(g)) => {
+                        exprs.push(g);
+                        extra += type_width(&g.ty());
+                    }
+                    _ => {}
+                }
+            }
+            let table = match &**input {
+                Plan::Scan(sc) => Some(sc.table.clone()),
+                _ => None,
+            };
+            let mut rows_seen: Vec<Expr> = Vec::new();
+            let mut add = |e: &Expr, used: &mut std::collections::BTreeSet<usize>, extra: &mut u32| {
+                let mut skip: Vec<*const Expr> = Vec::new();
+                e.walk(&mut |x| {
+                    if skip.contains(&(x as *const Expr)) {
+                        return;
+                    }
+                    match x {
+                        Expr::Row(items, DataType::Row(rt))
+                            if table.as_ref().is_some_and(|t| t.rowtype == rt.oid && rt.oid != 0)
+                                && crate::sql::binder::is_whole_row(x)
+                                && items.iter().all(|i| matches!(i, Expr::Col(j, _) if *j < c.node.cols.len())) =>
+                        {
+                            skip.extend(items.iter().map(|i| i as *const Expr));
+                            if !rows_seen.iter().any(|r| r.same_as(x)) {
+                                rows_seen.push(x.clone());
+                                *extra += 24 + items
+                                    .iter()
+                                    .map(|i| match i {
+                                        Expr::Col(j, _) => c.node.cols[*j].width,
+                                        _ => 0,
+                                    })
+                                    .sum::<u32>();
+                            }
+                        }
+                        Expr::Col(j, _) => {
+                            used.insert(*j);
+                        }
+                        _ => {}
+                    }
+                });
+            };
             for a in aggs {
-                a.args.iter().chain(&a.direct).chain(&a.filter).for_each(&mut add);
-                a.order_by.iter().for_each(|k| add(&k.expr));
+                for e in a.args.iter().chain(&a.direct).chain(&a.filter).chain(a.order_by.iter().map(|k| &k.expr)) {
+                    add(e, &mut used, &mut extra);
+                }
             }
             c.node.width = used
                 .iter()
                 .filter_map(|i| c.node.cols.get(*i))
                 .map(|c| c.width)
-                .sum();
+                .sum::<u32>()
+                + extra;
             if let Some(pi) = &mut part_in {
                 pi.width = c.node.width;
             }
@@ -14882,13 +15033,8 @@ impl Builder<'_, '_> {
                 all.retain(|i| !redundant.get(*i).copied().unwrap_or(false));
                 // (A hashed grouping shows a key its input computes as the expression:
                 // show_agg_keys deparses the child's target list.)
-                let computed = |i: usize| match (groups.get(i), &**input) {
-                    (Some(Expr::Col(j, _)), Plan::Project { exprs, input: pin }) => exprs.get(*j).is_some_and(|e| match e {
-                        Expr::Col(k, _) => agg_result(pin, *k),
-                        Expr::Const(..) => false,
-                        _ => true,
-                    }),
-                    (Some(Expr::Col(j, _)), p) => agg_result(p, *j),
+                let computed = |i: usize| match groups.get(i) {
+                    Some(Expr::Col(j, _)) => input_computes(input, *j),
                     _ => false,
                 };
                 let shown: Vec<String> = all
@@ -18349,6 +18495,9 @@ thread_local! {
     /// Converting the projection under a top one that only drops resjunk columns, over a
     /// foreign join or upper relation: it is the level's top (`foreign_junk`).
     static FOREIGN_TOP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Converting a UNION ALL appendrel's member: an inheritance tree under it is flattened
+    /// into the appendrel, its members computing the projection (no Result over its Append).
+    static APPEND_MEMBER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Converting the members of a Merge Append (`merge_appended`).
     static MERGE_MEMBERS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Explaining a partitionwise join's child joins (a sub-partitioned partition's own
@@ -19277,7 +19426,10 @@ impl Render<'_> {
             let _ = write!(
                 self.w.buf,
                 "  (cost={:.2}..{:.2} rows={:.0} width={})",
-                n.startup_cost, n.total_cost, n.rows, n.width
+                n.startup_cost,
+                n.total_cost - n.hidden_cost,
+                n.rows,
+                n.width
             );
         }
         if self.o.analyze {
@@ -19885,7 +20037,7 @@ impl Render<'_> {
             self.w
                 .prop("Startup Cost", &format!("{:.2}", n.startup_cost), true);
             self.w
-                .prop("Total Cost", &format!("{:.2}", n.total_cost), true);
+                .prop("Total Cost", &format!("{:.2}", n.total_cost - n.hidden_cost), true);
             self.w.prop("Plan Rows", &format!("{:.0}", n.rows), true);
             self.w.prop("Plan Width", &n.width.to_string(), true);
         }
@@ -22637,6 +22789,21 @@ fn plan_partitions(details: &mut [Detail], parts: u32) {
 /// Whether output `j` of `p` is an aggregate's result its aggregation node computes (seen
 /// through a subquery's plain projections and filters), which a node above deparses as
 /// the aggregate itself.
+/// Whether column `j` of a hashed grouping's input is a value the input node computes (a
+/// projection's expression, through a subquery's level not shown and filters), which
+/// show_agg_keys deparses as the expression, not as a reference.
+fn input_computes(p: &Plan, j: usize) -> bool {
+    match p {
+        Plan::Project { exprs, input } => exprs.get(j).is_some_and(|e| match e {
+            Expr::Col(k, _) => agg_result(input, *k),
+            Expr::Const(..) => false,
+            _ => true,
+        }),
+        Plan::Barrier { input, secure: false, .. } | Plan::Filter { input, .. } => input_computes(input, j),
+        p => agg_result(p, j),
+    }
+}
+
 fn agg_result(p: &Plan, j: usize) -> bool {
     match p {
         Plan::Agg { groups, sets: None, aggs, .. } => j >= groups.len() && j < groups.len() + aggs.len(),

@@ -190,6 +190,9 @@ pub fn col_stats_of<'c>(cat: &'c Catalog, v: &VarRef) -> Option<&'c ColStats> {
 pub fn col_width(cat: &Catalog, t: &Table, col: usize) -> u32 {
     match col_stats(cat, t.oid, col) {
         Some(s) if s.width > 0 => s.width as u32,
+        // (A domain's column has no typmod of its own, atttypmod -1: get_typavgwidth's
+        // default for a varying type, whatever the base's typmod.)
+        _ if t.columns[col].domain.is_some() => type_width(&t.columns[col].ty.without_typmod()),
         _ => type_width(&t.columns[col].ty),
     }
 }
@@ -925,6 +928,8 @@ impl Est<'_> {
                     0.5
                 }
             }
+            // (IS JSON is a JsonIsPredicate, no function: boolvarsel's default.)
+            Expr::Call(d, _, _) if d.oid == 0 && d.name == "IS JSON" => 0.5,
             // function_selectivity: a function called by name (not an operator), without a
             // support function, has its default.
             Expr::Call(d, _, _) if d.name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') => 0.3333333,
@@ -1518,7 +1523,7 @@ impl Est<'_> {
                             };
                             if negate { 1.0 - sel } else { sel }
                         }
-                        "~~" | "~~*" | "~" | "~*" => DEFAULT_MATCH_SEL,
+                        "~~" | "~~*" | "~" | "~*" | "^@" => DEFAULT_MATCH_SEL,
                         "!~~" | "!~~*" | "!~" | "!~*" => 1.0 - DEFAULT_MATCH_SEL,
                         o if ineq(o).is_some() => DEFAULT_INEQ_SEL,
                         _ => 0.5,
@@ -1535,12 +1540,13 @@ impl Est<'_> {
                 }
                 (1.0 - self.eq_const(&var, c.as_ref()) - nf).clamp(0.0, 1.0)
             }
-            "~~" | "~~*" | "~" | "~*" | "!~~" | "!~~*" | "!~" | "!~*" => {
+            "~~" | "~~*" | "~" | "~*" | "!~~" | "!~~*" | "!~" | "!~*" | "^@" => {
                 let negate = op.starts_with('!');
                 let ptype = match op.trim_start_matches('!') {
                     "~~" => Ptype::Like,
                     "~~*" => Ptype::LikeIc,
                     "~" => Ptype::Regex,
+                    "^@" => Ptype::Prefix,
                     _ => Ptype::RegexIc,
                 };
                 match (varonleft, &c) {
@@ -1856,6 +1862,8 @@ pub enum Ptype {
     LikeIc,
     Regex,
     RegexIc,
+    /// `^@` (starts_with): prefixsel.
+    Prefix,
 }
 
 /// What a pattern says about the start of the strings it matches.
@@ -1985,6 +1993,8 @@ fn regex_selectivity(patt: &[u8], fixed_prefix_len: usize) -> f64 {
 /// pattern_fixed_prefix: (status, prefix, the rest's selectivity).
 pub fn pattern_prefix(patt: &str, ptype: Ptype) -> (PrefixStatus, String, f64) {
     match ptype {
+        // (pattern_fixed_prefix's Pattern_Type_Prefix: the pattern is the prefix.)
+        Ptype::Prefix => (PrefixStatus::Partial, patt.to_string(), 1.0),
         Ptype::Like | Ptype::LikeIc => {
             let ci = ptype == Ptype::LikeIc;
             let b = patt.as_bytes();
@@ -2113,6 +2123,7 @@ impl Est<'_> {
                     crate::sql::func::string::like_match(t, &p, Some('\\'), ptype == Ptype::LikeIc)
                         .unwrap_or(false)
                 }
+                Ptype::Prefix => t.starts_with(p.as_str()),
                 Ptype::Regex | Ptype::RegexIc => {
                     use crate::types::regex as rx;
                     let mut cflags = rx::REG_ADVANCED;
@@ -2343,6 +2354,24 @@ pub fn qual_startup(e: &Expr) -> f64 {
 pub fn qual_cost(e: &Expr) -> f64 {
     let mut n = 0.0;
     e.walk(&mut |x| match x {
+        // (anytextcat / textanycat are SQL functions the planner inlines, `$1::text || $2`:
+        // textcat, and the other side's cast to text unless a constant folds it.)
+        Expr::Call(d, args, _) if d.name == "||" && d.args.iter().any(|t| matches!(t, DataType::AnyNonArray)) => {
+            n += 1.0;
+            for a in args {
+                let from = a.ty();
+                if from == DataType::Text || matches!(a, Expr::Const(..)) {
+                    continue;
+                }
+                if io_cast(&from, &DataType::Text) {
+                    n += 2.0;
+                } else if !binary_coercible(&from, &DataType::Text) {
+                    n += 1.0;
+                }
+            }
+        }
+        // (IS JSON is a JsonIsPredicate, which cost_qual_eval charges nothing of its own.)
+        Expr::Call(d, ..) if d.oid == 0 && d.name == "IS JSON" => {}
         // (Its function's procost: 10 or 100 for some built-ins, the text search, XML and
         // privilege functions.)
         Expr::Call(d, ..) => n += builtin_proc(d.oid).map_or(1.0, |(_, _, cost)| cost),
@@ -2506,6 +2535,11 @@ pub fn material_cost(startup: f64, total: f64, rows: f64, width: u32) -> (f64, f
 
 /// A built-in function's proretset, prorows and procost, as pg_proc has them (None: not one
 /// of PostgreSQL's).
+/// A built-in function's procost (1 when it isn't known).
+pub fn procost(oid: u32) -> f64 {
+    builtin_proc(oid).map_or(1.0, |(_, _, cost)| cost)
+}
+
 fn builtin_proc(oid: u32) -> Option<(bool, f64, f64)> {
     static PROCS: std::sync::OnceLock<std::collections::HashMap<u32, (bool, f64, f64)>> = std::sync::OnceLock::new();
     PROCS

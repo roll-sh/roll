@@ -370,7 +370,7 @@ impl Planner<'_, '_> {
             return false;
         }
         let rel = self.sys_rel(*table, filter.as_ref(), needed);
-        let want = Want { merge: Vec::new(), keys: Vec::new(), limit: lim };
+        let want = Want { merge: Vec::new(), merge_coll: Vec::new(), keys: Vec::new(), limit: lim };
         let chosen = self.choose(&rel, &want, 0);
         let mut s = stand_in_scan(rel.table.clone(), filter.clone());
         s.written = rel.written.as_ref().clone();
@@ -410,6 +410,7 @@ impl Planner<'_, '_> {
             .map(|(_, (_, ty))| costs::type_width(ty))
             .sum();
         let want = Want {
+            merge_coll: Vec::new(),
             merge: Vec::new(),
             keys: mapped
                 .into_iter()

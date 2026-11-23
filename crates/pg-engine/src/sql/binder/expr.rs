@@ -6042,6 +6042,9 @@ impl Binder<'_, '_> {
                         inverse: None,
                         combine: None,
                         internal: true,
+                        trans_fn: spec_fn(&u, |a| a.transfn),
+                        trans_cost: self.func_cost(spec_fn(&u, |a| a.transfn)),
+                        final_cost: self.func_cost(spec_fn(&u, |a| a.finalfn)),
                     },
                 ),
                 None => (def, self.user_agg(&u, &arg_types, &res.ret, loc)?),
@@ -6316,6 +6319,9 @@ impl Binder<'_, '_> {
                 inverse: Some(inverse),
                 combine: None,
                 internal: false,
+                trans_fn: spec.mtransfn,
+                trans_cost: self.func_cost(spec.mtransfn),
+                final_cost: self.func_cost(spec.mfinalfn),
             }))
         } else {
             None
@@ -6338,7 +6344,23 @@ impl Binder<'_, '_> {
             inverse: None,
             combine,
             internal: false,
+            trans_fn: spec.transfn,
+            trans_cost: self.func_cost(spec.transfn),
+            final_cost: self.func_cost(spec.finalfn),
         })
+    }
+
+    /// get_func_cost times cpu_operator_cost: a function's procost (a CREATE FUNCTION one's,
+    /// else the built-in's); 0 for no function.
+    fn func_cost(&self, oid: u32) -> f64 {
+        if oid == 0 {
+            return 0.0;
+        }
+        let procost = match self.cat.functions.get(&oid) {
+            Some(f) => f.procost() as f64,
+            None => crate::sql::costs::procost(oid),
+        };
+        procost * crate::sql::costs::CPU_OPERATOR_COST
     }
 
     /// The built-in aggregate whose internal transition and final functions (over an
@@ -10262,4 +10284,9 @@ fn unorderable(ty: &DataType) -> bool {
         DataType::Row(rt) => rt.fields.iter().any(|(_, t)| unorderable(t)),
         _ => ty.category() == crate::types::Category::Geometric,
     }
+}
+
+/// One of a user aggregate's support functions (0 when it has no aggregate entry).
+fn spec_fn(u: &crate::catalog::Function, f: impl Fn(&crate::catalog::AggSpec) -> u32) -> u32 {
+    u.agg.as_deref().map_or(0, f)
 }

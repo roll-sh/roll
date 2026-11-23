@@ -1482,6 +1482,7 @@ impl Tree<'_, '_, '_> {
                     work_filter: None,
                     deferred: None,
                     inline: None,
+                    inline_level: None,
                     values: false,
                 });
                 self.q().ctes.push(Cte {
@@ -1525,6 +1526,7 @@ impl Tree<'_, '_, '_> {
                 work_filter: None,
                 deferred: None,
                 inline: None,
+                inline_level: None,
                 values: false,
             });
             self.q().ctes.push(Cte {

@@ -861,6 +861,12 @@ pub struct UserAgg {
     /// `internal` state (intagg's `int_agg_state AS 'array_agg_transfn'`): the call runs as
     /// that aggregate (its `AggDef::make`), and `trans` / `final_` are never evaluated.
     pub internal: bool,
+    /// The transition function's oid (two calls with the same one, initial value and inputs
+    /// share a state) and get_func_cost of the transition and final functions times
+    /// cpu_operator_cost: their procost, not an inlined body's (get_agg_clause_costs).
+    pub trans_fn: u32,
+    pub trans_cost: f64,
+    pub final_cost: f64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

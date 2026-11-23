@@ -111,6 +111,7 @@ impl Planner<'_, '_> {
     fn member_path(&self, rel: &Rel, keys: &[Expr], dirs: &[(bool, bool)], colls: &[u32], width: u32, startup: bool, limit: Option<f64>, remote: bool) -> Option<Path> {
         // (Less the keys a clause of the member equates with a constant: redundant.)
         let want = Want {
+            merge_coll: Vec::new(),
             keys: keys
                 .iter()
                 .zip(dirs.iter().zip(colls))
@@ -121,7 +122,8 @@ impl Planner<'_, '_> {
                     nulls_first: *nulls_first,
                     cmp: 0,
                     coll: *coll,
-                    ident: None,
+                    // (The member's key sorts under the collation the parent's derives.)
+                    ident: super::derived_collation(&rel.table, e),
                 })
                 .collect(),
             limit: None,
@@ -193,6 +195,7 @@ impl Planner<'_, '_> {
         let (mut a_total, mut rows, mut width, mut a_disabled) = (0.0, 0.0, 0u32, 0u32);
         for (l, rel) in found.iter().zip(&rels) {
             let plain = Want {
+                merge_coll: Vec::new(),
                 keys: Vec::new(),
                 limit: None,
                 merge: Vec::new(),
@@ -247,6 +250,11 @@ impl Planner<'_, '_> {
                 m_run += o.total - o.startup;
                 m_disabled += o.disabled;
                 ps.push(o);
+            }
+            // (generate_orderedappend_paths merges in the orders its members' own paths
+            // have, all_child_pathkeys: none when every member would be sorted.)
+            if ps.iter().all(|o| matches!(o.kind, PathKind::Sort(_))) {
+                continue;
             }
             let st = m_startup + cmp * n * logn;
             let mut merged = Path {

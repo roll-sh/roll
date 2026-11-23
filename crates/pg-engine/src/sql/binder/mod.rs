@@ -703,6 +703,9 @@ pub(crate) struct CteDef {
     pub no_returning: bool,
     /// inline_cte: its query, put in place of each reference as a subquery.
     pub inline: Option<std::sync::Arc<Plan>>,
+    /// The inlined query stays a query level of its own (as a FROM subquery that isn't
+    /// pulled up: `Barrier`), with its ORDER BY's length.
+    pub inline_level: Option<Option<usize>>,
     /// A plan-time error of its query (`Binder::defer_plan`): raised where it is read.
     pub deferred: Option<crate::error::Error>,
     /// The recursive term's CYCLE check over its work table's row (`NOT is_cycle`): a

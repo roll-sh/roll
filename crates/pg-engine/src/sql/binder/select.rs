@@ -506,6 +506,18 @@ impl Binder<'_, '_> {
                 && !crate::sql::paths::plan_volatile_deep(&plan)
                 && !crate::exec::reads_enclosing(&plan, 0))
             .then(|| Arc::new(plan.clone()));
+            // (Inlined, it is a FROM subquery: one Postgres doesn't pull up keeps its level.)
+            let inline_level = (inline.is_some()
+                && (grouping_sets_subquery(&plan)
+                    || optimize::unsafe_outputs(&plan).iter().any(|u| *u)
+                    || own_query_level(q, &plan))
+                && self.deps.is_none()
+                && self.refs.is_none()
+                && !self.unplanned)
+                .then(|| match inner(q) {
+                    Some(NodeEnum::SelectStmt(s)) if !s.sort_clause.is_empty() => Some(s.sort_clause.len()),
+                    _ => None,
+                });
             self.ctes.last_mut().unwrap().push(CteDef {
                 name: cte.ctename.clone(),
                 id,
@@ -515,6 +527,7 @@ impl Binder<'_, '_> {
                 used: std::cell::Cell::new(false),
                 no_returning,
                 inline,
+                inline_level,
                 work_filter: None,
                 deferred,
                 values: matches!(inner(q), Some(NodeEnum::SelectStmt(s)) if !s.values_lists.is_empty()),
@@ -684,6 +697,7 @@ impl Binder<'_, '_> {
             used: std::cell::Cell::new(false),
             no_returning: false,
             inline: None,
+            inline_level: None,
             work_filter,
             deferred: None,
             values: false,
@@ -4644,12 +4658,38 @@ impl Binder<'_, '_> {
                         for (col, n) in cols.iter_mut().zip(&colnames) {
                             col.name = n.clone();
                         }
-                        let mut rel = derived_rel(alias.as_deref().unwrap_or(&rv.relname), &cols, 0);
+                        let refname = alias.as_deref().unwrap_or(&rv.relname).to_string();
+                        let mut rel = derived_rel(&refname, &cols, 0);
                         if c.values {
                             mark_opaque_records(&mut rel);
                         }
+                        let inline_level = c.inline_level;
                         let mut q = (**q).clone();
                         self.restamp_rti(&mut q);
+                        // (Its range table entry is the reference's, named as it: a subquery
+                        // level of its own scanned by that name.)
+                        let names: Vec<String> = cols.iter().map(|c| c.name.clone()).collect();
+                        mark_subquery_windows(&mut q, &Arc::new((refname.clone(), names.clone())));
+                        let q = match inline_level {
+                            Some(sorted) => {
+                                rel.whole_var = true;
+                                Plan::Barrier {
+                                    input: Arc::new(q),
+                                    alias: refname,
+                                    cols: names,
+                                    secure: false,
+                                    path: None,
+                                    sorted,
+                                    rti: self.next_rti(),
+                                    copies: Vec::new(),
+                                }
+                            }
+                            None => {
+                                let mut q = q;
+                                union_alias(&mut q, &refname);
+                                q
+                            }
+                        };
                         return Ok((q, rel));
                     }
                     c.used.set(true);

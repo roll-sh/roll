@@ -538,6 +538,12 @@ struct Search<'s, 'c, 'a> {
     needed: Vec<bool>,
     /// Equivalence class of each group column (a singleton unless equated).
     ec: Vec<usize>,
+    /// Each class's collation by name (ec_collation), at its number: the one its clauses
+    /// compare under (None: not collatable, or a singleton). Clauses of another collation
+    /// make no class with it (process_equivalence keeps them apart).
+    ec_coll: Vec<Option<String>>,
+    /// Each group column's collation by name, when it is a table's column (`plan_col_collation`).
+    col_coll: Vec<Option<String>>,
     /// The join type of a two-leaf outer / semi / anti group (Inner: freely reordered).
     kind: JoinKind,
     rels: Vec<JRel>,
@@ -771,6 +777,58 @@ pub(crate) fn user_eq_props(cat: &crate::catalog::Catalog, d: &FuncDef) -> Optio
         })
     };
     Some((op.merges && member(403, 3), op.hashes && member(405, 1), op.commutator != 0))
+}
+
+/// The collation, by name, an equality of group columns `a` and `b` compares under
+/// (its inputcollid, as select_common_collation derives it): a COLLATE written over either,
+/// else a column's collation other than "default", else "default"; None: not collatable.
+fn clause_collation(colls: &[Option<String>], a: &Expr, b: &Expr) -> Option<String> {
+    if !a.ty().collatable() {
+        return None;
+    }
+    let mut implicit = None;
+    for e in [a, b] {
+        let mut x = e;
+        while let Expr::Collate(inner, c, l) = x {
+            if *l != crate::sql::binder::IMPLICIT_COLLATE {
+                return Some(c.clone());
+            }
+            implicit = implicit.or(Some(c.clone()).filter(|c| c != "default"));
+            x = inner;
+        }
+        if let Some(c) = key_col(x).and_then(|g| colls.get(g).cloned().flatten())
+            && c != "default"
+        {
+            implicit = implicit.or(Some(c));
+        }
+    }
+    Some(implicit.unwrap_or_else(|| a.ty().default_collation().unwrap_or("default").to_string()))
+}
+
+/// A plan's output column `c`'s collation by name when it is a table's column, through
+/// projections, filters, sorts, limits, subqueries and appends (its declared one, else its
+/// type's), or a COLLATE written there; None otherwise.
+fn plan_col_collation(p: &Plan, c: usize) -> Option<String> {
+    match p {
+        Plan::Project { input, exprs } => match exprs.get(c)? {
+            Expr::Col(j, _) => plan_col_collation(input, *j),
+            Expr::Collate(_, n, l) if *l != crate::sql::binder::IMPLICIT_COLLATE => Some(n.clone()),
+            Expr::Collate(x, n, _) => match &**x {
+                Expr::Col(j, _) => plan_col_collation(input, *j).or(Some(n.clone())),
+                _ => Some(n.clone()),
+            },
+            _ => None,
+        },
+        Plan::Filter { input, .. } | Plan::Sort { input, .. } | Plan::Limit { input, .. } | Plan::Barrier { input, .. } => {
+            plan_col_collation(input, c)
+        }
+        Plan::Append { inputs, .. } => plan_col_collation(inputs.first()?, c),
+        Plan::Scan(s) => {
+            let col = s.table.columns.get(c)?;
+            Some(col.collation.as_deref().or(col.ty.default_collation())?.to_string())
+        }
+        _ => None,
+    }
 }
 
 fn key_col(e: &Expr) -> Option<usize> {
@@ -2108,27 +2166,33 @@ impl Search<'_, '_, '_> {
     fn leaf_want(&self, l: usize, r: &Rel) -> Want {
         let leaf = &self.leaves[l];
         let set = 1u32 << l;
-        let merge: Vec<Expr> = (0..leaf.ncols)
+        let merge_cols: Vec<usize> = (0..leaf.ncols)
             .filter(|k| {
                 let g = leaf.off + k;
                 self.ec_has_other(g, set)
             })
             .filter(|k| *k < r.table.columns.len())
-            .map(|k| Expr::Col(k, r.table.columns[k].ty.clone()))
             .collect();
+        let merge: Vec<Expr> = merge_cols.iter().map(|&k| Expr::Col(k, r.table.columns[k].ty.clone())).collect();
+        let merge_coll: Vec<Option<String>> =
+            merge_cols.iter().map(|&k| self.ec_coll.get(self.ec[leaf.off + k]).cloned().flatten()).collect();
         let mut keys = Vec::new();
         for q in self.query_keys() {
             let col = (0..leaf.ncols.min(r.table.columns.len()))
                 .find(|k| self.ec[leaf.off + k] == q.ec);
             match col {
-                Some(k) => keys.push(PathKey {
-                    expr: Expr::Col(k, r.table.columns[k].ty.clone()),
-                    desc: q.desc,
-                    nulls_first: q.nulls_first,
-                    cmp: 0,
-                    coll: 0,
-                    ident: None,
-                }),
+                Some(k) => {
+                    // (The ORDER BY's column's collation: its class's, the same.)
+                    let expr = Expr::Col(k, r.table.columns[k].ty.clone());
+                    keys.push(PathKey {
+                        ident: super::derived_collation(&r.table, &expr),
+                        expr,
+                        desc: q.desc,
+                        nulls_first: q.nulls_first,
+                        cmp: 0,
+                        coll: 0,
+                    })
+                }
                 None => break,
             }
         }
@@ -2136,6 +2200,7 @@ impl Search<'_, '_, '_> {
             keys,
             limit: None,
             merge,
+            merge_coll,
         }
     }
 
@@ -2176,8 +2241,16 @@ impl Search<'_, '_, '_> {
                 .iter()
                 .filter_map(|k| {
                     let c = col_of(k.ec)?;
+                    let col = Expr::Col(c, self.col_type(leaf.off + c));
+                    // (In its class's collation: a COLLATE when the column's is another.)
+                    let expr = match self.ec_coll.get(k.ec).cloned().flatten() {
+                        Some(e) if self.col_coll.get(leaf.off + c).cloned().flatten().is_some_and(|o| o != e) => {
+                            Expr::Collate(Box::new(col), e, -1)
+                        }
+                        _ => col,
+                    };
                     Some(SortKey {
-                        expr: Expr::Col(c, self.col_type(leaf.off + c)),
+                        expr,
                         desc: k.desc,
                         nulls_first: k.nulls_first,
                         using: None,
@@ -2381,8 +2454,20 @@ impl Search<'_, '_, '_> {
     /// class, unless that is a `name = text` class whose C order isn't the column's (its
     /// index or ORDER BY sorts under its own collation: an EC of its own).
     fn order_ec(&self, g: usize) -> usize {
+        self.ec_under(g, self.col_coll.get(g).and_then(Option::as_deref))
+    }
+
+    /// Column `g`'s class for an order under collation `coll` (by name; None: not known): a
+    /// class of its own when its class is equated under another collation (an order of
+    /// `t` isn't one of `t COLLATE "C"`'s class, and the other way round).
+    fn ec_under(&self, g: usize, coll: Option<&str>) -> usize {
         let ec = self.ec[g];
         if self.ec_name_text(ec) && !self.c_ordered(g) {
+            return self.ec.len() + g;
+        }
+        if let (Some(c), Some(o)) = (self.ec_coll[ec].as_deref(), coll)
+            && c != o
+        {
             return self.ec.len() + g;
         }
         ec
@@ -2413,7 +2498,10 @@ impl Search<'_, '_, '_> {
             }
             match &k.expr {
                 Expr::Col(c, _) => out.push(GKey {
-                    ec: self.order_ec(off + c),
+                    ec: match k.ident.as_deref() {
+                        Some(i) => self.ec_under(off + c, Some(i)),
+                        None => self.order_ec(off + c),
+                    },
                     desc: k.desc,
                     nulls_first: k.nulls_first,
                 }),
@@ -3354,7 +3442,7 @@ impl Search<'_, '_, '_> {
                 .filter_map(col)
                 .map(|c| Expr::Col(c, rel.table.columns[c].ty.clone()))
                 .collect();
-            let want = Want { keys: Vec::new(), limit: None, merge };
+            let want = Want { keys: Vec::new(), limit: None, merge, merge_coll: Vec::new() };
             let best = self.pl.paths(&rel, &want).into_iter().min_by(|a, b| {
                 (a.disabled, a.total, a.startup).partial_cmp(&(b.disabled, b.total, b.startup)).unwrap_or(std::cmp::Ordering::Equal)
             })?;
@@ -9047,6 +9135,18 @@ impl Planner<'_, '_> {
             leaf_of,
             needed: needed.to_vec(),
             ec: (0..gw).collect(),
+            ec_coll: vec![None; gw],
+            col_coll: {
+                let mut v = vec![None; gw];
+                for (lp, off) in &raw_leaves {
+                    for c in 0..crate::sql::binder::plan_width(lp) {
+                        if let Some(x) = v.get_mut(off + c) {
+                            *x = plan_col_collation(lp, c);
+                        }
+                    }
+                }
+                v
+            },
             kind,
             rels: Vec::new(),
             startup: order.is_some_and(|o| matches!(o.limit, Some((c, _)) if c != 0.0) || (o.hint && self.group_limit.get())),
@@ -9276,8 +9376,16 @@ impl Planner<'_, '_> {
                 if [ex, ey].iter().any(|e| ec_coll.get(e).is_some_and(|k| *k != coll)) {
                     continue;
                 }
+                // (By identity: `a.t = b.t` and `a.t COLLATE "C" = b.t COLLATE "C"` are
+                // classes of their own, though both compare bytes in a C database.)
+                let ident = clause_collation(&s.col_coll, a, b);
+                if ident.is_some() && [ex, ey].iter().any(|&e| s.ec_coll[e].is_some() && s.ec_coll[e] != ident) {
+                    continue;
+                }
                 ec_coll.insert(ex, coll.clone());
                 ec_coll.insert(ey, coll);
+                s.ec_coll[ex] = ident.clone();
+                s.ec_coll[ey] = ident;
                 if ex != ey {
                     for e in s.ec.iter_mut() {
                         if *e == ey {

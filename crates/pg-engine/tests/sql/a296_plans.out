@@ -1,0 +1,236 @@
+> create table a296n (one int)
+-- CREATE TABLE
+
+> insert into a296n values (1), (3), (1)
+-- INSERT 0 3
+
+> create function a296_tf(int8, int4) returns int8 as 'select $1 + $2' language sql strict immutable
+-- CREATE FUNCTION
+
+> create function a296_ff(int8) returns int8 as 'select $1 * 2' language sql strict immutable
+-- CREATE FUNCTION
+
+> create aggregate a296_sum(int4) (stype = int8, sfunc = a296_tf, initcond = '0')
+-- CREATE AGGREGATE
+
+> create aggregate a296_dbl(int4) (stype = int8, sfunc = a296_tf, finalfunc = a296_ff, initcond = '0')
+-- CREATE AGGREGATE
+
+> explain select a296_sum(one) from a296n
+QUERY PLAN:text
+Aggregate  (cost=673.00..673.01 rows=1 width=8)
+  ->  Seq Scan on a296n  (cost=0.00..35.50 rows=2550 width=4)
+-- EXPLAIN
+
+> explain select a296_sum(one), a296_dbl(one) from a296n
+QUERY PLAN:text
+Aggregate  (cost=673.25..673.26 rows=1 width=16)
+  ->  Seq Scan on a296n  (cost=0.00..35.50 rows=2550 width=4)
+-- EXPLAIN
+
+> select a296_sum(one), a296_dbl(one) from a296n
+a296_sum:int8 | a296_dbl:int8
+5 | 10
+-- SELECT 1
+
+> explain select abs(unnest(array[1, 2, null, -3]))
+QUERY PLAN:text
+Result  (cost=0.00..0.10 rows=4 width=4)
+  ->  ProjectSet  (cost=0.00..0.04 rows=4 width=4)
+        ->  Result  (cost=0.00..0.01 rows=1 width=0)
+-- EXPLAIN
+
+> explain select generate_series(1, 3) as x, generate_series(1, 3) + 1 as xp1
+QUERY PLAN:text
+Result  (cost=0.00..0.09 rows=3 width=8)
+  ->  ProjectSet  (cost=0.00..0.03 rows=3 width=4)
+        ->  Result  (cost=0.00..0.01 rows=1 width=0)
+-- EXPLAIN
+
+> create table a296c (t text, x int) with (autovacuum_enabled = off)
+-- CREATE TABLE
+
+> create table a296d (t text, y int) with (autovacuum_enabled = off)
+-- CREATE TABLE
+
+> insert into a296c select 'v' || (i % 500), i from generate_series(1, 1000) i
+-- INSERT 0 1000
+
+> insert into a296d select 'v' || (i % 700), i from generate_series(1, 1000) i
+-- INSERT 0 1000
+
+> create index a296c_t on a296c (t collate "C")
+-- CREATE INDEX
+
+> create index a296d_t on a296d (t collate "C")
+-- CREATE INDEX
+
+> analyze a296c
+-- ANALYZE
+
+> analyze a296d
+-- ANALYZE
+
+> set enable_hashjoin = off
+-- SET
+
+> set enable_nestloop = off
+-- SET
+
+> explain select * from a296c join a296d on a296c.t = a296d.t
+QUERY PLAN:text
+Merge Join  (cost=131.66..158.65 rows=1466 width=16)
+  Merge Cond: (a296c.t = a296d.t)
+  ->  Sort  (cost=65.83..68.33 rows=1000 width=8)
+        Sort Key: a296c.t
+        ->  Seq Scan on a296c  (cost=0.00..16.00 rows=1000 width=8)
+  ->  Sort  (cost=65.83..68.33 rows=1000 width=8)
+        Sort Key: a296d.t
+        ->  Seq Scan on a296d  (cost=0.00..16.00 rows=1000 width=8)
+-- EXPLAIN
+
+> explain select * from a296c join a296d on a296c.t collate "C" = a296d.t collate "C"
+QUERY PLAN:text
+Merge Join  (cost=0.55..142.59 rows=1466 width=16)
+  Merge Cond: ((a296c.t)::text = (a296d.t)::text)
+  ->  Index Scan using a296c_t on a296c  (cost=0.28..58.83 rows=1000 width=8)
+  ->  Materialize  (cost=0.28..61.77 rows=1000 width=8)
+        ->  Index Scan using a296d_t on a296d  (cost=0.28..59.27 rows=1000 width=8)
+-- EXPLAIN
+
+> explain select * from a296c join a296d on a296c.t = a296d.t order by a296c.t collate "C"
+QUERY PLAN:text
+Sort  (cost=235.74..239.41 rows=1466 width=48)
+  Sort Key: a296c.t COLLATE "C"
+  ->  Merge Join  (cost=131.66..158.65 rows=1466 width=48)
+        Merge Cond: (a296c.t = a296d.t)
+        ->  Sort  (cost=65.83..68.33 rows=1000 width=8)
+              Sort Key: a296c.t
+              ->  Seq Scan on a296c  (cost=0.00..16.00 rows=1000 width=8)
+        ->  Sort  (cost=65.83..68.33 rows=1000 width=8)
+              Sort Key: a296d.t
+              ->  Seq Scan on a296d  (cost=0.00..16.00 rows=1000 width=8)
+-- EXPLAIN
+
+> reset enable_hashjoin
+-- RESET
+
+> reset enable_nestloop
+-- RESET
+
+> create table a296p (t text, v int) partition by range (t)
+-- CREATE TABLE
+
+> create table a296p1 partition of a296p for values from ('a') to ('m')
+-- CREATE TABLE
+
+> create table a296p2 partition of a296p for values from ('m') to ('zzzz')
+-- CREATE TABLE
+
+> insert into a296p select chr(97 + i % 26) || i, i from generate_series(1, 2000) i
+-- INSERT 0 2000
+
+> create index on a296p1 (t collate "C")
+-- CREATE INDEX
+
+> create index on a296p2 (t collate "C")
+-- CREATE INDEX
+
+> analyze a296p
+-- ANALYZE
+
+> explain select * from a296p order by t limit 10
+QUERY PLAN:text
+Limit  (cost=84.22..84.24 rows=10 width=9)
+  ->  Sort  (cost=84.22..89.22 rows=2000 width=9)
+        Sort Key: a296p.t
+        ->  Append  (cost=0.00..41.00 rows=2000 width=9)
+              ->  Seq Scan on a296p1 a296p_1  (cost=0.00..14.23 rows=923 width=9)
+              ->  Seq Scan on a296p2 a296p_2  (cost=0.00..16.77 rows=1077 width=9)
+-- EXPLAIN
+
+> explain (costs off) select * from a296p order by t collate "C" limit 10
+QUERY PLAN:text
+Limit
+  ->  Merge Append
+        Sort Key: a296p.t COLLATE "C"
+        ->  Index Scan using a296p1_t_idx on a296p1 a296p_1
+        ->  Index Scan using a296p2_t_idx on a296p2 a296p_2
+-- EXPLAIN
+
+> explain select 'a' || g, g || 'b' from generate_series(1, 3) g
+QUERY PLAN:text
+Function Scan on generate_series g  (cost=0.00..0.08 rows=3 width=64)
+-- EXPLAIN
+
+> create domain a296dom as char(2)
+-- CREATE DOMAIN
+
+> create table a296m (a a296dom, b char(2), js text) with (autovacuum_enabled = off)
+-- CREATE TABLE
+
+> explain select * from a296m
+QUERY PLAN:text
+Seq Scan on a296m  (cost=0.00..17.80 rows=780 width=76)
+-- EXPLAIN
+
+> explain select count(b), b || 'x' from a296m group by b || 'x'
+QUERY PLAN:text
+HashAggregate  (cost=25.60..28.60 rows=200 width=40)
+  Group Key: ((b)::text || 'x'::text)
+  ->  Seq Scan on a296m  (cost=0.00..21.70 rows=780 width=44)
+-- EXPLAIN
+
+> explain select * from a296m where js is json
+QUERY PLAN:text
+Seq Scan on a296m  (cost=0.00..17.80 rows=390 width=76)
+  Filter: (js IS JSON)
+-- EXPLAIN
+
+> explain select r, count(*) from (select random() r from generate_series(1, 10)) ss group by r
+QUERY PLAN:text
+HashAggregate  (cost=0.18..0.28 rows=10 width=16)
+  Group Key: random()
+  ->  Function Scan on generate_series  (cost=0.00..0.13 rows=10 width=8)
+-- EXPLAIN
+
+> create table a296s (s text) with (autovacuum_enabled = off)
+-- CREATE TABLE
+
+> insert into a296s select chr(65 + i % 26) || 'orth' || i from generate_series(1, 2600) i
+-- INSERT 0 2600
+
+> analyze a296s
+-- ANALYZE
+
+> explain select count(*) from a296s where s ^@ 'Wo'
+QUERY PLAN:text
+Aggregate  (cost=46.76..46.77 rows=1 width=8)
+  ->  Seq Scan on a296s  (cost=0.00..46.50 rows=105 width=0)
+        Filter: (s ^@ 'Wo'::text)
+-- EXPLAIN
+
+> create table a296i (a int, b text) with (autovacuum_enabled = off)
+-- CREATE TABLE
+
+> create table a296i2 () inherits (a296i)
+-- CREATE TABLE
+
+> explain select a, length(b) from a296i
+QUERY PLAN:text
+Result  (cost=0.00..44.94 rows=1271 width=8)
+  ->  Append  (cost=0.00..29.06 rows=1271 width=36)
+        ->  Seq Scan on a296i a296i_1  (cost=0.00..0.00 rows=1 width=36)
+        ->  Seq Scan on a296i2 a296i_2  (cost=0.00..22.70 rows=1270 width=36)
+-- EXPLAIN
+
+> explain select count(*) from (select x from a296c union select length(t) from a296c) ss
+QUERY PLAN:text
+Aggregate  (cost=94.50..94.51 rows=1 width=8)
+  ->  HashAggregate  (cost=49.50..69.50 rows=2000 width=4)
+        Group Key: a296c.x
+        ->  Append  (cost=0.00..44.50 rows=2000 width=4)
+              ->  Seq Scan on a296c  (cost=0.00..16.00 rows=1000 width=4)
+              ->  Seq Scan on a296c a296c_1  (cost=0.00..18.50 rows=1000 width=4)
+-- EXPLAIN
+
