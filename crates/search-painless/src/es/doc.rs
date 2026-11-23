@@ -551,7 +551,7 @@ pub fn field_of(vm: &mut Vm, name: &str) -> Result<DocField, Thrown> {
     if !vm.st.has_doc {
         return Ok(empty_field(name));
     }
-    let mut dv = DocValues::default();
+    let mut dv = crate::host::HostBuf::default();
     match crate::guard::paused(|| vm.host.field_values(name, &mut dv)) {
         Ok(true) => {}
         Ok(false) => return Ok(empty_field(name)),
@@ -1075,7 +1075,8 @@ fn doc_entry_set(_: &mut Vm, _: &mut [Value]) -> VR {
 /// `params._fields[name]`: the stored field's values.
 pub fn stored_field(vm: &mut Vm, k: &Value) -> VR {
     let name = k.to_java_string();
-    match crate::guard::paused(|| vm.host.stored_field(&name)) {
+    // the values become the script's: charged as the host makes them
+    match vm.host.stored_field(&name) {
         Ok(Some(vals)) => Ok(es_value(EsObj::FieldLookup(Rc::from(vals)))),
         Ok(None) => Err(super::es_iae(
             format!("No field found for [{name}] in mapping"),

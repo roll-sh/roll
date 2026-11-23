@@ -228,6 +228,32 @@ impl HostError {
     }
 }
 
+/// A doc-values buffer filled by the host outside the execution's account ([`crate::guard::paused`]),
+/// held by engine code only for the call that reads it: what the host put in was never charged,
+/// so it is freed outside the account too.
+#[derive(Default)]
+pub struct HostBuf(DocValues);
+
+impl std::ops::Deref for HostBuf {
+    type Target = DocValues;
+    fn deref(&self) -> &DocValues {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for HostBuf {
+    fn deref_mut(&mut self) -> &mut DocValues {
+        &mut self.0
+    }
+}
+
+impl Drop for HostBuf {
+    fn drop(&mut self) {
+        let dv = std::mem::take(&mut self.0);
+        crate::guard::paused(|| drop(dv));
+    }
+}
+
 /// A host's memory breaker refused the bytes its scripts hold (see [`Host::script_memory`]).
 #[derive(Debug, Clone)]
 pub struct MemoryRefused {

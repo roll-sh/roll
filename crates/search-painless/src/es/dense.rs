@@ -971,7 +971,7 @@ fn element_name(e: VectorElement) -> &'static str {
 
 /// The field's vector of the document the binding is built on (`field.get()`).
 fn first_vector(vm: &mut Vm, field: &str) -> Result<(Option<Vector>, VectorElement), Thrown> {
-    let mut dv = DocValues::default();
+    let mut dv = crate::host::HostBuf::default();
     if vm.st.has_doc {
         match crate::guard::paused(|| vm.host.field_values(field, &mut dv)) {
             Ok(true) => {}

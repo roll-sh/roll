@@ -493,3 +493,70 @@ fn host_allocations_are_not_the_scripts() {
     inst.set_params(&json!({}));
     assert_eq!(inst.execute_f64(&mut LargeSource).unwrap(), (8 << 20) as f64);
 }
+
+/// A host that hands scripts fresh data on every call: a 64 KiB `_source` and stored field.
+struct FreshData;
+
+impl Host for FreshData {
+    fn source(&mut self) -> Option<Value> {
+        Some(Value::from_json_map(&json!({ "body": "x".repeat(64 << 10) })))
+    }
+    fn stored_field(&mut self, _field: &str) -> Result<Option<Vec<Value>>, HostError> {
+        Ok(Some(vec![Value::string("y".repeat(64 << 10))]))
+    }
+}
+
+/// Data a host hands over can't be turned into room: keeping `params._source` over and over
+/// keeps one document (it is parsed once per execution), and reading and dropping host data in
+/// a loop gives the script nothing to grow into. Each loop ends with the limit's failure while
+/// the thread holds little more than the limit.
+#[test]
+fn host_data_gives_no_room() {
+    let e = limited(4 << 20);
+    for src in [
+        "List l = []; while (true) { l.add(params._source); }",
+        "List l = []; while (true) { def s = params._source; s.body = s.body + 'z'; l.add(new int[1024]); }",
+        "List l = []; while (true) { def f = params._fields['f']; l.add(new int[1024]); }",
+    ] {
+        let script = e.compile(src, Context::Score).unwrap();
+        let mut inst = script.instance();
+        inst.set_params(&json!({}));
+        let (r, grew) = peak_growth(|| inst.execute_f64(&mut FreshData).map_err(|e| e.to_response()));
+        let err = r.unwrap_err();
+        assert_eq!(cause(&err).0, "painless_error", "{src}: {err}");
+        assert!(err["error"]["caused_by"]["reason"].as_str().unwrap().starts_with("script allocation limit exceeded"), "{src}: {err}");
+        assert!(grew < 10 << 20, "{src}: the thread held {grew} bytes");
+    }
+}
+
+/// A host whose doc values come from another script (a runtime field's), keeping what it
+/// returns.
+struct RuntimeField<'a> {
+    script: &'a search_painless::Script,
+    kept: Vec<Value>,
+}
+
+impl Host for RuntimeField<'_> {
+    fn field_values(&mut self, _field: &str, out: &mut DocValues) -> Result<bool, HostError> {
+        let v = self.script.instance().execute(&mut NoHost).unwrap();
+        self.kept.push(v);
+        out.clear(DocKind::Long);
+        out.longs.push(1);
+        Ok(true)
+    }
+}
+
+/// What a script run inside a host call (a runtime field's) holds at its end counts against
+/// the execution that called the host, while the host's own buffers don't.
+#[test]
+fn scripts_inside_host_calls_count() {
+    let e = limited(4 << 20);
+    let inner = e.compile("String s = 'x'; while (s.length() < 1024 * 1024) { s = s + s; } return s", Context::PainlessTest).unwrap();
+    let outer = e.compile("List l = []; for (int i = 0; i < 100; ++i) { l.add(field('rt')); } return 1", Context::Score).unwrap();
+    let mut inst = outer.instance();
+    inst.set_params(&json!({}));
+    let mut host = RuntimeField { script: &inner, kept: Vec::new() };
+    let err = inst.execute_f64(&mut host).unwrap_err().to_response();
+    assert_eq!(cause(&err).0, "painless_error", "{err}");
+    assert!(host.kept.len() < 10, "{} runtime values kept", host.kept.len());
+}

@@ -1673,12 +1673,15 @@ the rest are skipped by the tests' own prerequisites.
   opt-in guard, `script.painless.max_allocation_bytes.context.<context>.limit`, counts every
   allocation the script's bytecode makes and never gives any back. roll counts what the
   execution holds: what its code and the library calls it makes allocate (`def` conversions
-  included, but not what the host allocates for itself, such as a lazily parsed `_source` or a
-  segment's fielddata), minus what it frees. So a script can churn through temporaries far
-  beyond the limit, as long as it doesn't keep them. The bound is approximate. Freeing data the
-  execution didn't make (`params`, a parsed `_source`) gives it room too, and a script run
-  inside another one (a runtime field another script reads) has an account of its own. So one
-  thread holds at most about twice the limit, plus any such freed data. Past the limit roll answers like that guard: a
+  and stored fields it reads included), minus what it frees. What the host allocates for itself
+  (doc-values buffers, a segment's fielddata) doesn't count. A document's `_source` is parsed
+  once per document, as Elasticsearch's `SourceLookup` does, so changes persist across reads.
+  It's charged, but left out of the limit. So a script can churn through temporaries far beyond
+  the limit, as long as it doesn't keep them. Freeing data the execution didn't make (`params`,
+  `_source`, an earlier document's leftovers) gives it no room. A script run inside another one
+  (a runtime field another script reads) counts against the caller once it ends. While it runs,
+  it also has an account of its own, so one thread holds at most about twice the limit plus the
+  document's `_source`. Past the limit roll answers like that guard: a
   `script_exception` caused by an uncatchable `painless_error`, `script allocation limit
   exceeded: allocation of [N] bytes brings the running total to [T] bytes, over the limit of
   [L] bytes`, without a script portion. Both guards apply in every context (`_execute`,

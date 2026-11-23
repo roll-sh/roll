@@ -328,7 +328,8 @@ pub fn check_bytes(bytes: u64) -> Result<(), Thrown> {
     if bytes > MAX_OBJECT.get() as u64 {
         return Err(out_of_memory("Java heap space"));
     }
-    if bytes as i64 > ROOM.get() {
+    let room = ROOM.get();
+    if bytes as i64 > room || room > CAP.get() {
         return refill(bytes as i64);
     }
     Ok(())
@@ -379,7 +380,14 @@ thread_local! {
     /// Bytes the running execution may still allocate before its account is looked at.
     /// [`Counting`] subtracts every allocation on this thread and adds every free back.
     static ROOM: Cell<i64> = const { Cell::new(IDLE_ROOM) };
+    /// The room last handed out: frees can push [`ROOM`] above it only by giving back what was
+    /// allocated before, possibly data the execution didn't make, so the account is looked at
+    /// then too (one unsigned compare covers both, see [`memory_exhausted`]).
+    static CAP: Cell<i64> = const { Cell::new(i64::MAX) };
     static ACCOUNT: Cell<Account> = const { Cell::new(Account::IDLE) };
+    /// What every closed scope on this thread held at its end, summed: a host call that ran a
+    /// script (a runtime field's) passes the script's memory on through [`paused`].
+    static NESTED: Cell<i64> = const { Cell::new(0) };
 }
 
 #[derive(Clone, Copy)]
@@ -388,8 +396,14 @@ struct Account {
     active: bool,
     /// Bytes the execution may hold (`i64::MAX`: no limit).
     limit: i64,
-    /// Room handed to [`ROOM`] since the execution began: what it holds is `granted - ROOM`.
+    /// Room handed to [`ROOM`] since the execution began, plus what was forgiven: the execution
+    /// holds `granted - ROOM` against its limit.
     granted: i64,
+    /// Frees of data the execution didn't make: they give it no room (`granted` was raised by
+    /// them), but they are real, so the host hears them (`granted - ROOM - forgiven`).
+    forgiven: i64,
+    /// Data the host handed the script that is charged but left out of the limit ([`hosted`]).
+    exempt: i64,
     /// What it held when the account was last looked at.
     checked: i64,
     /// What it held when it was last reported to the host.
@@ -397,7 +411,12 @@ struct Account {
 }
 
 impl Account {
-    const IDLE: Account = Account { active: false, limit: i64::MAX, granted: IDLE_ROOM, checked: 0, reported: 0 };
+    const IDLE: Account = Account { active: false, limit: i64::MAX, granted: IDLE_ROOM, forgiven: 0, exempt: 0, checked: 0, reported: 0 };
+
+    /// What the execution really holds: its allocations minus all its frees.
+    fn net(&self, room: i64) -> i64 {
+        self.granted.wrapping_sub(room).wrapping_sub(self.forgiven)
+    }
 }
 
 /// A global allocator that keeps the running execution's account (see the module docs). Hosts
@@ -455,6 +474,7 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Counting<A> {
 /// keeps counts against the outer one.
 pub struct MemoryScope {
     prev_room: i64,
+    prev_cap: i64,
     prev: Account,
     /// The account is this thread's: a scope can't move to another.
     _thread: std::marker::PhantomData<*const ()>,
@@ -466,19 +486,20 @@ impl MemoryScope {
         let limit = if limit == 0 { i64::MAX } else { limit.min(i64::MAX as u64) as i64 };
         let room = limit.min(STEP);
         let prev_room = ROOM.replace(room);
-        let prev = ACCOUNT.replace(Account { active: true, limit, granted: room, checked: 0, reported: 0 });
-        MemoryScope { prev_room, prev, _thread: std::marker::PhantomData }
+        let prev_cap = CAP.replace(room);
+        let prev = ACCOUNT.replace(Account { active: true, limit, granted: room, forgiven: 0, exempt: 0, checked: 0, reported: 0 });
+        MemoryScope { prev_room, prev_cap, prev, _thread: std::marker::PhantomData }
     }
 
-    /// Bytes the execution holds now (allocations minus frees since it began).
+    /// Bytes the execution really holds now (allocations minus frees since it began).
     pub fn held() -> i64 {
-        ACCOUNT.get().granted.wrapping_sub(ROOM.get())
+        ACCOUNT.get().net(ROOM.get())
     }
 
     /// What the execution holds that the host has not been told about yet, marked as told.
     pub fn unreported() -> i64 {
         let mut a = ACCOUNT.get();
-        let held = a.granted.wrapping_sub(ROOM.get());
+        let held = a.net(ROOM.get());
         let delta = held.wrapping_sub(a.reported);
         a.reported = held;
         ACCOUNT.set(a);
@@ -490,30 +511,51 @@ impl Drop for MemoryScope {
     fn drop(&mut self) {
         let held = MemoryScope::held();
         ACCOUNT.set(self.prev);
+        CAP.set(self.prev_cap);
         ROOM.set(self.prev_room.wrapping_sub(held));
+        NESTED.set(NESTED.get().wrapping_add(held));
     }
 }
 
 /// Runs a call into the host outside the running execution's account: what the host allocates
-/// or frees for itself (a lazily parsed `_source`, a segment's fielddata, doc-values buffers)
-/// is not the script's.
+/// or frees for itself (doc-values buffers the instance keeps, a segment's fielddata) is not the
+/// script's. Only for calls whose allocations the script can't keep: they are never charged,
+/// so they must never be freed inside an execution either. What a script the call runs (a
+/// runtime field's) holds at its end still counts.
 #[inline(always)]
 pub fn paused<R>(f: impl FnOnce() -> R) -> R {
-    struct Restore(i64);
+    struct Restore(i64, i64);
     impl Drop for Restore {
         #[inline(always)]
         fn drop(&mut self) {
-            ROOM.set(self.0);
+            ROOM.set(self.0.wrapping_sub(NESTED.get().wrapping_sub(self.1)));
         }
     }
-    let _restore = Restore(ROOM.get());
+    let _restore = Restore(ROOM.get(), NESTED.get());
     f()
 }
 
-/// Whether the running execution has used up its room: the interpreter then calls [`refill`].
+/// Runs a call into the host whose result the script may keep (a document's `_source`): what it
+/// allocates is charged, so frees of it give back what was charged, and the host hears it as
+/// the script's, but the running execution's limit leaves it out. Callers make sure the result
+/// is made once per document, or the exemption would grow with every call.
+pub fn hosted<R>(f: impl FnOnce() -> R) -> R {
+    let before = ROOM.get();
+    let r = f();
+    let grew = before.wrapping_sub(ROOM.get());
+    let mut a = ACCOUNT.get();
+    if a.active && grew > 0 {
+        a.exempt = a.exempt.saturating_add(grew);
+        ACCOUNT.set(a);
+    }
+    r
+}
+
+/// Whether the running execution's account needs a look: its room is used up, or frees gave
+/// back more than the room last handed out. The interpreter then calls [`refill`].
 #[inline(always)]
 pub fn memory_exhausted() -> bool {
-    ROOM.get() < 0
+    (ROOM.get() as u64) > CAP.get() as u64
 }
 
 /// Looks at the account before `need` more bytes are allocated (0: after allocations): fails
@@ -527,7 +569,15 @@ pub fn refill(need: i64) -> Result<(), Thrown> {
         return Ok(());
     }
     let room = ROOM.get();
-    let held = a.granted.wrapping_sub(room);
+    let mut held = a.granted.wrapping_sub(room);
+    // frees beyond what the execution allocated returned data it didn't make (`params`, the
+    // previous execution's leftovers): real for the host, no room for this execution
+    if held < 0 {
+        a.forgiven = a.forgiven.wrapping_sub(held);
+        a.granted = room;
+        held = 0;
+    }
+    let held = held.saturating_sub(a.exempt).max(0);
     let total = held.saturating_add(need);
     if total > a.limit {
         let bytes = if need > 0 { need } else { held.wrapping_sub(a.checked) };
@@ -544,6 +594,7 @@ pub fn refill(need: i64) -> Result<(), Thrown> {
     a.checked = held;
     ACCOUNT.set(a);
     ROOM.set(new_room);
+    CAP.set(new_room);
     Ok(())
 }
 

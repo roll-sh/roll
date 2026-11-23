@@ -736,7 +736,7 @@ fn random_binding(vm: &mut Vm, a: &[Value], field: bool) -> Result<Rc<RandomScor
         let field_name = if field { Some(a[1].to_java_string()) } else { None };
         if let Some(f) = &field_name {
             // the doc values are looked up first
-            let mut dv = crate::host::DocValues::default();
+            let mut dv = crate::host::HostBuf::default();
             match crate::guard::paused(|| vm.host.doc_values(f, &mut dv)) {
                 Ok(true) => {}
                 Ok(false) => {
@@ -747,7 +747,7 @@ fn random_binding(vm: &mut Vm, a: &[Value], field: bool) -> Result<Rc<RandomScor
                 Err(e) => return Err(super::doc::host_error(e)),
             }
         }
-        let (shard, index) = crate::guard::paused(|| vm.host.shard());
+        let (shard, index) = vm.host.shard();
         if index.is_empty() {
             let outer = if field { "script.ScoreScriptUtils$RandomScoreField.<init>(ScoreScriptUtils.java:54)" } else { "script.ScoreScriptUtils$RandomScoreDoc.<init>(ScoreScriptUtils.java:78)" };
             return Err(es_iae("index name can not be looked up!", &["script.ScoreScript._getIndex(ScoreScript.java:179)", outer]));

@@ -521,6 +521,10 @@ pub struct State {
     /// persistent `$cancelPoll` counter, which the `@script_aware` augmentations (`each`,
     /// `findAll`, `forEachRemaining`, stream reductions…) decrement once per element.
     pub cancel_poll: u32,
+    /// The current document's `params._source`, parsed once per document as Elasticsearch's
+    /// `SourceLookup` does: changes a script makes to it stay for its later reads, and each read
+    /// is not a fresh copy.
+    pub source: Option<Value>,
 }
 
 impl State {
@@ -556,11 +560,13 @@ impl State {
             alloc_total: 0,
             cancellable: false,
             cancel_poll: CANCELLATION_POLL_INTERVAL,
+            source: None,
         }
     }
 
     /// Resets per-document state before an execution.
     pub fn begin_document(&mut self) {
+        self.source = None;
         self.emitted.clear();
         self.emitted_fields.clear();
         self.emit_chars = 0;
