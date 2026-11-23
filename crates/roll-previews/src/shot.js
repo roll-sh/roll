@@ -526,11 +526,12 @@ const stories = async (sessionId) => {
     } else if (m.method === "Network.loadingFinished" && servedWanted.has(p.requestId)) {
       const path = servedWanted.get(p.requestId);
       servedWanted.delete(p.requestId);
-      if (served.length >= 40 || servedBytes >= 8 << 20 || (p.encodedDataLength || 0) > 4 << 20) return;
+      // Each path once (a reload serves it again).
+      if (served.length >= 40 || servedBytes >= 8 << 20 || (p.encodedDataLength || 0) > 4 << 20 || served.some((x) => x.path === path)) return;
       send("Network.getResponseBody", { requestId: p.requestId }, sessionId)
         .then((b) => {
           const bytes = Buffer.from(b.body || "", b.base64Encoded ? "base64" : "utf8");
-          if (bytes.length > 2 << 20 || served.length >= 40 || servedBytes + bytes.length > 8 << 20) return;
+          if (bytes.length > 2 << 20 || served.length >= 40 || servedBytes + bytes.length > 8 << 20 || served.some((x) => x.path === path)) return;
           servedBytes += bytes.length;
           served.push({ path: path.slice(0, 200), b64: bytes.toString("base64") });
         })
