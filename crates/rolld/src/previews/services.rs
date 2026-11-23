@@ -893,6 +893,16 @@ impl roll_previews::ports::Apps for Services {
         self.runtime.forward(preview, service, port).await
     }
 
+    /// A `roll.toml` service can stand in for a laptop's process (roll apps' services are served by
+    /// roll apps' proxy).
+    async fn can_swap(&self, preview: &str, service: &str) -> anyhow::Result<bool> {
+        Ok(self.apps.find(preview, service).await?.is_none())
+    }
+
+    fn swap(&self, preview: &str, service: &str, to: Option<roll_previews::ports::Laptop>) {
+        self.runtime.swap(preview, service, to);
+    }
+
     /// A `roll.toml` service's files (roll apps' services have their own, on `pv-…`).
     async fn read_files(&self, preview: &str, service: &str, path: &str) -> anyhow::Result<Option<roll_previews::ports::FileStream>> {
         if self.apps.find(preview, service).await?.is_some() {

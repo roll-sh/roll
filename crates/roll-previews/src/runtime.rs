@@ -173,6 +173,8 @@ const DOMAINS_FOR: Duration = Duration::from_secs(10);
 
 pub struct Runtime {
     cfg: RuntimeConfig,
+    /// Services swapped for a laptop's process (`roll preview swap`), by preview and service.
+    swaps: Mutex<HashMap<(String, String), crate::ports::Laptop>>,
     /// Projects' own preview domains' bases, and when they were read (every request is matched
     /// against them, so the store is read at most every [`DOMAINS_FOR`]).
     domains: Mutex<(Option<std::time::Instant>, Arc<std::collections::HashSet<String>>)>,
@@ -364,6 +366,7 @@ impl Runtime {
             intercepts: OnceLock::new(),
             intercepting: Mutex::new(HashMap::new()),
             requests: Mutex::new(HashMap::new()),
+            swaps: Mutex::new(HashMap::new()),
             client: Client::builder(TokioExecutor::new()).build_http(),
         })
     }
@@ -1061,6 +1064,11 @@ impl Runtime {
     }
 
     async fn proxy_to(self: &Arc<Self>, preview: &str, service: &str, mut req: Request, feedback: bool) -> Response {
+        // Swapped for a laptop's process: its requests go there, not to the container.
+        let laptop = self.swaps.lock().get(&(preview.to_string(), service.to_string())).cloned();
+        if let Some(laptop) = laptop {
+            return self.to_laptop(laptop, req, feedback).await;
+        }
         let mut retried = false;
         let addr = loop {
             let addr = match self.ready(preview, service, self.cfg.wait).await {
@@ -1143,6 +1151,44 @@ impl Runtime {
             Ok(Some((current, _))) if page => (service, Some(current)),
             Ok(Some((_, true))) => (format!("{service}@{}", asked.unwrap_or_default()), None),
             _ => (service, None),
+        }
+    }
+
+    /// A request for a swapped service, over the laptop's HTTP/2 connection (`roll preview swap`):
+    /// as the container would get it (its gate passed, roll's own headers and cookies taken
+    /// out). A WebSocket isn't carried.
+    async fn to_laptop(&self, mut laptop: crate::ports::Laptop, mut req: Request, feedback: bool) -> Response {
+        if is_upgrade(req.headers()) {
+            return (StatusCode::NOT_IMPLEMENTED, "this service is swapped for a laptop's process, which takes no WebSocket from the preview").into_response();
+        }
+        let host = req.headers().get(header::HOST).cloned();
+        let authority = host.as_ref().and_then(|h| h.to_str().ok()).filter(|h| h.parse::<axum::http::uri::Authority>().is_ok()).unwrap_or("preview").to_string();
+        let pq = req.uri().path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| "/".into());
+        let Ok(uri) = format!("http://{authority}{pq}").parse::<Uri>() else {
+            return (StatusCode::BAD_REQUEST, "bad request").into_response();
+        };
+        *req.uri_mut() = uri;
+        *req.version_mut() = axum::http::Version::HTTP_2;
+        strip_hop_by_hop(req.headers_mut(), false);
+        req.headers_mut().remove(header::HOST);
+        req.headers_mut().remove(BYPASS_HEADER);
+        if let Some(h) = host {
+            req.headers_mut().insert(HeaderName::from_static("x-forwarded-host"), h);
+        }
+        req.headers_mut().insert(HeaderName::from_static("x-forwarded-proto"), HeaderValue::from_str(&self.cfg.scheme).unwrap_or(HeaderValue::from_static("http")));
+        if feedback {
+            req.headers_mut().insert(header::ACCEPT_ENCODING, HeaderValue::from_static("identity"));
+        }
+        if laptop.ready().await.is_err() {
+            return (StatusCode::BAD_GATEWAY, "the laptop standing in for this service went").into_response();
+        }
+        match laptop.send_request(req).await {
+            Ok(r) => {
+                let mut r = r.map(Body::new);
+                strip_hop_by_hop(r.headers_mut(), false);
+                if feedback { add_feedback(r) } else { r }
+            }
+            Err(e) => (StatusCode::BAD_GATEWAY, format!("the laptop standing in for this service didn't answer: {e}")).into_response(),
         }
     }
 
@@ -1521,6 +1567,18 @@ impl Apps for Runtime {
     /// A relay in the service's network namespace (`--network container:<it>`, as screenshots
     /// join it): busybox's `nc` to `127.0.0.1:<port>` there, its stdio the connection. Removed
     /// when the connection is dropped.
+    async fn can_swap(&self, _preview: &str, _service: &str) -> anyhow::Result<bool> {
+        Ok(true)
+    }
+
+    fn swap(&self, preview: &str, service: &str, to: Option<crate::ports::Laptop>) {
+        let key = (preview.to_string(), service.to_string());
+        match to {
+            Some(l) => self.swaps.lock().insert(key, l),
+            None => self.swaps.lock().remove(&key),
+        };
+    }
+
     async fn forward(&self, preview: &str, service: &str, port: u16) -> anyhow::Result<Option<Box<dyn crate::ports::ShellIo>>> {
         let me = self.me.upgrade().ok_or_else(|| anyhow::anyhow!("the preview runtime is stopping"))?;
         let name = me.shell_container(preview, service).await?;
@@ -2484,6 +2542,79 @@ mod tests {
         let host: &'static str = Box::leak(format!("WEB-{short}-PR1-SHOP.preview.test.:7070").into_boxed_str());
         let gone = get(host).await;
         assert!(gone.starts_with("HTTP/1.1 410") && gone.contains("http://web-pr1-shop.preview.test") && gone.contains("x-robots-tag: noindex"), "{gone}");
+    }
+
+    /// A service swapped for a laptop's process (`roll preview swap`) gets its requests over the
+    /// laptop's HTTP/2 connection, roll's own cookie and secret taken out; given back, its
+    /// container answers again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_swapped_service_is_answered_by_the_laptop_until_given_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&code_sql::Target::Sqlite(dir.path().join("p.db")), Default::default()).unwrap());
+        let new = crate::store::New {
+            project_id: "prj_1".into(),
+            key: "pr1".into(),
+            project_name: "shop".into(),
+            repo: "acme/web".into(),
+            change_id: Some("chg_1".into()),
+            branch: None,
+            number: Some(1),
+            title: "t".into(),
+            github_pr: Some(1),
+            head: "cs_1".into(),
+            trusted: true,
+            state: crate::State::Ready,
+            expires_at: None,
+            created_by: "roll".into(),
+        };
+        let (row, _) = store.create(&new).unwrap();
+        store.want_service(&row.id, "web", "acme/web", "cs_1", 512, &|h| format!("http://{h}.preview.test")).unwrap();
+        let (secret, _) = store.rotate_bypass("prj_1").unwrap();
+        let rt = Runtime::new(RuntimeConfig { domain: "preview.test".into(), ..RuntimeConfig::default() }, Arc::new(code_preview::docker::Docker), Arc::new(NoTrees), store);
+        // The container.
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        rt.pretend_running(&row.id, "web", upstream.local_addr().unwrap());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut s, _)) = upstream.accept().await else { return };
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let _ = s.read(&mut buf).await;
+                    let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\nConnection: close\r\n\r\ncontainer").await;
+                });
+            }
+        });
+        // The laptop: an HTTP/2 server on one end of a pipe, saying what it was asked.
+        let (ours, theirs) = tokio::io::duplex(64 << 10);
+        tokio::spawn(async move {
+            let svc = hyper::service::service_fn(|r: hyper::Request<hyper::body::Incoming>| async move {
+                let said = format!("laptop saw {} {} bypass={}", r.uri().path(), r.headers().get("x-forwarded-host").and_then(|h| h.to_str().ok()).unwrap_or(""), r.headers().contains_key(BYPASS_HEADER));
+                Ok::<_, std::convert::Infallible>(hyper::Response::new(axum::body::Body::from(said)))
+            });
+            let _ = hyper::server::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new()).serve_connection(hyper_util::rt::TokioIo::new(theirs), svc).await;
+        });
+        let (laptop, conn) = hyper::client::conn::http2::handshake(hyper_util::rt::TokioExecutor::new(), hyper_util::rt::TokioIo::new(ours)).await.unwrap();
+        tokio::spawn(conn);
+        let app = axum::Router::new().fallback(|| async { "api" }).layer(axum::middleware::from_fn_with_state(rt.clone(), route));
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        let get = || {
+            let req = format!("GET /cart HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nx-roll-preview-bypass: {secret}\r\nConnection: close\r\n\r\n");
+            async move {
+                let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+                s.write_all(req.as_bytes()).await.unwrap();
+                let mut out = String::new();
+                s.read_to_string(&mut out).await.unwrap();
+                out
+            }
+        };
+        assert!(get().await.ends_with("\r\n\r\ncontainer"));
+        rt.swap(&row.id, "web", Some(laptop));
+        let swapped = get().await;
+        assert!(swapped.ends_with("laptop saw /cart web-pr1-shop.preview.test bypass=false"), "{swapped}");
+        rt.swap(&row.id, "web", None);
+        assert!(get().await.ends_with("\r\n\r\ncontainer"), "given back");
     }
 
     /// Skew protection: a request naming an earlier push (its header, `?dpl=`, or the cookie its

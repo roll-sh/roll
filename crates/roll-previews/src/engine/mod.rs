@@ -177,6 +177,8 @@ pub struct Engine {
     forwards_said: Mutex<HashMap<(String, String, String, u16), i64>>,
     /// What ends a preview's forwarded connections when it goes, by preview.
     forwards_end: Mutex<HashMap<String, tokio::sync::watch::Sender<bool>>>,
+    /// Services swapped for a laptop's process (`roll preview swap`): by preview and service, who.
+    swaps: Mutex<HashMap<(String, String), String>>,
     /// Each preview's recent spans (`traces.rs`), and what reads an OTLP request into them
     /// (rolld: roll apps' reader); unset, the intake answers 404.
     traces: Mutex<traces::Kept>,
@@ -339,6 +341,7 @@ impl Engine {
             forwards: Mutex::new(HashMap::new()),
             forwards_said: Mutex::new(HashMap::new()),
             forwards_end: Mutex::new(HashMap::new()),
+            swaps: Mutex::new(HashMap::new()),
             started_stamp: drains::now_stamp(),
         })
     }

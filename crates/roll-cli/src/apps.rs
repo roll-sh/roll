@@ -1681,7 +1681,7 @@ pub(crate) async fn tunnels(url: String, headers: Vec<(String, String)>, l: toki
 }
 
 /// One local connection over one tunnel, until either side closes.
-async fn carry(req: tokio_tungstenite::tungstenite::handshake::client::Request, conn: tokio::net::TcpStream) -> anyhow::Result<()> {
+pub(crate) async fn carry(req: tokio_tungstenite::tungstenite::handshake::client::Request, conn: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin) -> anyhow::Result<()> {
     use futures::{SinkExt, StreamExt};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_tungstenite::tungstenite::{Error as WsError, Message};
@@ -1690,7 +1690,7 @@ async fn carry(req: tokio_tungstenite::tungstenite::handshake::client::Request, 
         e => anyhow::anyhow!("{e}"),
     })?;
     let (mut tx, mut rx) = ws.split();
-    let (mut rd, mut wr) = conn.into_split();
+    let (mut rd, mut wr) = tokio::io::split(conn);
     let mut buf = vec![0u8; 64 << 10];
     // An empty message ends a direction (a half-close); the tunnel ends when both have.
     let (mut from_local, mut from_service) = (true, true);
