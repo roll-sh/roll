@@ -4157,6 +4157,21 @@ impl Scan {
         &mut self,
         batch: &mut batch::RowBatch,
         max: usize,
+        put_back: Option<&mut dyn FnMut(&[u8], Bytes) -> Result<Bytes>>,
+    ) -> Result<()> {
+        let r = self.fill_batch_in(batch, max, put_back);
+        // (Rows of column blocks made for a batch that doesn't take them unmade.)
+        if batch.has_col_rows() && !batch.takes_col_rows() {
+            batch.make_rows();
+        }
+        r
+    }
+
+    #[inline(always)]
+    fn fill_batch_in(
+        &mut self,
+        batch: &mut batch::RowBatch,
+        max: usize,
         mut put_back: Option<&mut dyn FnMut(&[u8], Bytes) -> Result<Bytes>>,
     ) -> Result<()> {
         let (first, target) = (batch.len(), batch.len() + max);
@@ -6388,7 +6403,10 @@ mod tests {
                 let (lo, hi) = (key(0), key(n));
                 // Batches: rows and columns.
                 let mut sc = s.scan(&lo, &hi, ts);
+                // (A batch that takes rows of column blocks unmade: their columns decoded from the
+                // blocks, then the rows made and read.)
                 let mut b = batch::RowBatch::default();
+                b.take_col_rows(true);
                 let mut cb = cols::ColBatch::default();
                 let missing = vec![Value::Null; types.len()];
                 loop {
@@ -6397,14 +6415,17 @@ mod tests {
                     if b.is_empty() {
                         break;
                     }
-                    for i in 0..b.len() {
-                        let (k, v) = b.get(i);
-                        out.push(format!("b {k:?} {v:?} {:?}", b.value_bytes(i)));
-                    }
                     cols::decode_cols(&b, 0..b.len(), &[true, true, false, true, true, true, true, true], &types, &missing, &mut cb).unwrap();
                     for i in 0..b.len() {
                         let vs: Vec<String> = cb.cols.iter().zip(&types).map(|(c, t)| c.as_ref().map_or("-".into(), |c| format!("{:?}", c.value(&cb, i, t).unwrap()))).collect();
                         out.push(format!("c {}", vs.join(",")));
+                    }
+                    if b.has_col_rows() {
+                        b.make_rows();
+                    }
+                    for i in 0..b.len() {
+                        let (k, v) = b.get(i);
+                        out.push(format!("b {k:?} {v:?} {:?}", b.value_bytes(i)));
                     }
                 }
                 for r in s.scan(&lo, &hi, ts) {

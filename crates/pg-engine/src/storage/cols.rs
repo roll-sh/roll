@@ -820,7 +820,7 @@ fn decode_rows<const MIXED: bool>(
     let all_left = match plan {
         Some((mut steps, strs)) => {
             for (r, i) in rows.clone().enumerate() {
-                let (bytes, inbuf) = batch.value_in_plain(i);
+                let (bytes, inbuf) = batch.value_in(i);
                 let buf = match (strs, inbuf) {
                     (true, Some((b, at))) => {
                         let last = bufs.last().unwrap();
@@ -843,7 +843,7 @@ fn decode_rows<const MIXED: bool>(
         None => true,
     };
     let mut row = |r: usize, i: usize| -> Result<()> {
-        let (bytes, inbuf) = if MIXED { batch.value_in(i) } else { batch.value_in_plain(i) };
+        let (bytes, inbuf) = if MIXED { batch.value_in_any(i) } else { batch.value_in(i) };
         let ext = matches!(bytes.first(), Some(&(ROW_HEADER_EXT | ROW_HEADER_TID_EXT)));
         if ext {
             exts.push(r as u32);

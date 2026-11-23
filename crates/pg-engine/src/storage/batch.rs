@@ -57,6 +57,8 @@ pub struct RowBatch {
     lazy: Vec<(u32, Arc<super::sst::Block>)>,
     cruns: Vec<ColRun>,
     lrows: Vec<(u32, OnceLock<Bytes>)>,
+    /// Fills may leave rows of column blocks unmade (`take_col_rows`).
+    cols_ok: bool,
 }
 
 /// Rows `at..at + n` of a batch are rows `row..row + n` of the column block of buffer `buf`.
@@ -164,19 +166,55 @@ impl RowBatch {
         if i == 0 { 0 } else { self.ents[i - 1].key_end as usize }
     }
 
-    /// Whether some row is a column block's (`lazy`): the accessors then go the way that
-    /// makes it (`*_lazy`), a jump at their start; without, they are what they were before
-    /// format 5.
+    /// Whether some row is a column block's (`lazy`): only in a batch that takes them
+    /// (`take_col_rows`), until `make_rows`.
     #[inline(always)]
     pub fn has_col_rows(&self) -> bool {
         !self.lazy.is_empty()
     }
 
+    /// Whether a fill may leave rows of column blocks unmade in it (`take_col_rows`).
+    #[inline(always)]
+    pub fn takes_col_rows(&self) -> bool {
+        self.cols_ok
+    }
+
+    /// Let fills leave rows of column blocks unmade (format 5): the reader takes their columns
+    /// (`cols::decode_cols`) and calls `make_rows` before it reads one of them by index (`get`,
+    /// `value_in`, `take`, `peek`: they read rows made, as before format 5). Kept by `clear`.
+    pub fn take_col_rows(&mut self, on: bool) {
+        self.cols_ok = on;
+    }
+
+    /// Every row of a column block made, each run's into one buffer (`has_col_rows` false
+    /// after): a fill's for a batch that doesn't take them, a reader's that does before it
+    /// reads rows by index.
+    #[cold]
+    #[inline(never)]
+    pub fn make_rows(&mut self) {
+        for run in std::mem::take(&mut self.cruns) {
+            let blk = self.col_block(run.buf).expect("a row of a column block").clone();
+            let (a, n) = (run.at as usize, run.n as usize);
+            let mut buf = Vec::with_capacity(self.ents[a..a + n].iter().map(|e| e.len as usize).sum());
+            let mut at = Vec::with_capacity(n);
+            for j in 0..n {
+                at.push(buf.len());
+                blk.row_into(run.row as usize + j, None, &mut buf);
+            }
+            let b = self.bufs.len() as u32;
+            self.bufs.push(Bytes::from(buf));
+            for (j, o) in at.into_iter().enumerate() {
+                let e = &mut self.ents[a + j];
+                e.buf = b;
+                e.off = o as u32;
+            }
+        }
+        self.lazy.clear();
+        self.lrows.clear();
+    }
+
     /// Row `i`'s key and value.
     pub fn get(&self, i: usize) -> (&[u8], &[u8]) {
-        if self.has_col_rows() {
-            return self.get_lazy(i);
-        }
         let e = self.ents[i];
         let k = &self.keys[self.key_start(i)..e.key_end as usize];
         let (o, l) = (e.off as usize, e.len as usize);
@@ -187,37 +225,10 @@ impl RowBatch {
         (k, v)
     }
 
-    /// `get` of a batch with rows of column blocks.
-    #[cold]
-    #[inline(never)]
-    fn get_lazy(&self, i: usize) -> (&[u8], &[u8]) {
-        let e = self.ents[i];
-        let k = &self.keys[self.key_start(i)..e.key_end as usize];
-        let (o, l) = (e.off as usize, e.len as usize);
-        let v = match e.buf {
-            OWN => &self.own[o..o + l],
-            b => match self.bufs[b as usize].get(o..o + l) {
-                Some(v) => v,
-                None => self.lazy_row(i),
-            },
-        };
-        (k, v)
-    }
-
     /// Row `i`'s value with the buffer holding it and where in it (None: a copied value, in
     /// the batch's own buffer, valid until it is cleared).
-    #[inline(always)]
-    pub fn value_in(&self, i: usize) -> (&[u8], Option<(&Bytes, usize)>) {
-        if self.has_col_rows() {
-            return self.value_in_lazy(i);
-        }
-        self.value_in_plain(i)
-    }
-
-    /// `value_in` of a batch without rows of column blocks (`has_col_rows` false: a reader
-    /// that checked it once for the batch).
     #[inline]
-    pub fn value_in_plain(&self, i: usize) -> (&[u8], Option<(&Bytes, usize)>) {
+    pub fn value_in(&self, i: usize) -> (&[u8], Option<(&Bytes, usize)>) {
         let e = self.ents[i];
         let (o, l) = (e.off as usize, e.len as usize);
         match e.buf {
@@ -229,10 +240,11 @@ impl RowBatch {
         }
     }
 
-    /// `value_in` of a batch with rows of column blocks.
+    /// `value_in` of a batch that may hold rows of column blocks (`cols::decode_cols`' general
+    /// rows of one): such a row made alone, kept for the batch (`lazy_row`).
     #[cold]
     #[inline(never)]
-    fn value_in_lazy(&self, i: usize) -> (&[u8], Option<(&Bytes, usize)>) {
+    pub fn value_in_any(&self, i: usize) -> (&[u8], Option<(&Bytes, usize)>) {
         let e = self.ents[i];
         let (o, l) = (e.off as usize, e.len as usize);
         match e.buf {
@@ -295,7 +307,6 @@ impl RowBatch {
         let (o, l) = (e.off as usize, e.len as usize);
         let v = match e.buf {
             OWN => Bytes::copy_from_slice(&self.own[o..o + l]),
-            b if self.has_col_rows() && o + l > self.bufs[b as usize].len() => self.lazy_row(i).clone(),
             b => self.bufs[b as usize].slice(o..o + l),
         };
         Some((k, v))

@@ -789,6 +789,9 @@ struct Reader<'c> {
 
 impl<'c> Reader<'c> {
     fn new(src: &'c mut Source, batch: &'c mut RowBatch, left: usize) -> Reader<'c> {
+        // (Rows of column blocks (format 5) left unmade: `Pre` decodes their columns from the
+        // blocks; a row read by index is made first, `make_rows`.)
+        batch.take_col_rows(true);
         Reader { src, batch, cur: None, left, done: false, skip: Vec::new(), skip_from: 0 }
     }
 
@@ -847,6 +850,9 @@ impl<'c> Reader<'c> {
                         self.done = true;
                         return None;
                     }
+                    if pre.is_none() && self.batch.has_col_rows() {
+                        self.batch.make_rows();
+                    }
                 }
                 let i = self.batch.pos();
                 if let Some(pre) = pre.as_deref_mut() {
@@ -854,6 +860,10 @@ impl<'c> Reader<'c> {
                         self.skip.clear();
                         self.skip_from = i;
                         pre.mark(self.batch, i..self.batch.len(), &mut self.skip);
+                        // (Rows of column blocks made once `Pre` decoded them: returned by index.)
+                        if self.batch.has_col_rows() {
+                            self.batch.make_rows();
+                        }
                     }
                     let fate = self.skip[i - self.skip_from];
                     *passed = fate == PASSED;
@@ -1859,6 +1869,10 @@ fn partial_chunk<'d>(
             }
             pre.eval_nums();
             pre.fates(&mut fates);
+            // (Rows of column blocks made: the row path reads them by index.)
+            if scan.batch.has_col_rows() {
+                scan.batch.make_rows();
+            }
             let mut taken = 0;
             for (r, i) in run.enumerate() {
                 use super::vector::Tri;
