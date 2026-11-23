@@ -879,6 +879,43 @@ impl Access {
         }
     }
 
+    /// The checkup's new findings since its last look (a token gone broad, unused, roaming…), kept
+    /// for the operator's feed as `checkup_finding`: one node an hour (claimed in the store) runs
+    /// the operator's checkup and compares it with the set it kept last time. The first look only
+    /// keeps the set (what was already there isn't news). At most 20 a look. How many.
+    pub fn checkup_alerts(&self) -> Result<usize> {
+        self.checkup_alerts_every(50 * 60_000)
+    }
+
+    /// [`Access::checkup_alerts`], looking again only after `every_ms` (on any node).
+    pub fn checkup_alerts_every(&self, every_ms: i64) -> Result<usize> {
+        const KEY: &str = "checkup_seen";
+        let now = code_sql::now_ms();
+        if !self.store.claim_alert("checkup_scan", now, every_ms)? {
+            return Ok(0);
+        }
+        let rows = api::checkup_rows(self, &api::Who::Operator)?;
+        let mut current = std::collections::BTreeSet::new();
+        let mut found = Vec::new();
+        for r in &rows {
+            for f in r["findings"].as_array().into_iter().flatten() {
+                let key = format!("{}:{}", r["grant"]["id"].as_str().unwrap_or_default(), f["kind"].as_str().unwrap_or_default());
+                current.insert(key.clone());
+                found.push((key, r, f));
+            }
+        }
+        let before = self.store.setting(KEY)?;
+        self.store.set_setting(KEY, &serde_json::json!(current))?;
+        let Some(before) = before else { return Ok(0) };
+        let before: std::collections::BTreeSet<String> = before.as_array().into_iter().flatten().filter_map(|v| v.as_str().map(str::to_string)).collect();
+        let mut sent = 0;
+        for (_, r, f) in found.into_iter().filter(|(k, ..)| !before.contains(k)).take(20) {
+            self.alert("checkup_finding", serde_json::json!({ "grant": r["grant"]["id"], "name": r["grant"]["name"], "finding": f["kind"], "why": f["why"], "fix": f["fix"] }));
+            sent += 1;
+        }
+        Ok(sent)
+    }
+
     /// Tools whose server errors jumped lately ([`store::Store::failure_jumps`]): each kept for the
     /// operator's feed (`access.alert`), mailed to every admin and posted where approvals go. One
     /// node sends each (claimed in the store), at most once every six hours per tool. How many.
