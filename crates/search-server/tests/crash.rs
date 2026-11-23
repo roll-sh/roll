@@ -3,6 +3,10 @@
 //! `_primary_term` it was acknowledged with, every acknowledged delete gone. Writes that were
 //! in flight at the kill may or may not have happened (their ids are not checked).
 
+// Spawned tasks hold the node's request futures, which hold reqwest's HTTP/2 client state (h2,
+// on in builds with crates that enable it); their `Send` proof nests past the default 128.
+#![recursion_limit = "256"]
+
 mod common;
 
 use std::collections::HashMap;

@@ -673,6 +673,10 @@ impl Code {
             "change" => self.db.change(id).ok()??.repo_id,
             "thread" => self.readable_thread(&Caller::Admin, id).ok()?.0.id,
             "work" => self.db.work(id).ok()??.repo_id,
+            // `GET /v1/code/documents/{id}`: a change or a work item, by its id's prefix.
+            "document" if id.starts_with("chg_") => self.db.change(id).ok()??.repo_id,
+            "document" if id.starts_with("wi_") => self.db.work(id).ok()??.repo_id,
+            "document" if id.starts_with("f.") => id.split('.').nth(1)?.to_string(),
             _ => return None,
         };
         let r = self.db.repo_by_id(&repo_id).ok()??;

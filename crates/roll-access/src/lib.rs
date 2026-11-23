@@ -611,8 +611,6 @@ pub struct Access {
     pub(crate) github_keys: leaks::GithubKeys,
     /// OAuth registrations lately, per network (open registration's limit).
     pub(crate) registrations: std::sync::Mutex<Window>,
-    /// Callback URLs each connection asked roll to verify lately (MCP Events' webhooks).
-    pub(crate) event_verifies: std::sync::Mutex<Window>,
     /// How OIDC issuers' keys are fetched for trusted machine clients: rolld's guarded client.
     /// Unset: only clients with pinned keys sign in that way.
     pub oidc_fetch: std::sync::OnceLock<Arc<dyn roll_oidc::Fetch + Send + Sync>>,
@@ -644,7 +642,7 @@ impl Access {
 
     /// On a database already open (tests: `code_sql::Db::open_or_test`, so they run on Postgres too).
     pub fn with_db(db: code_sql::Db, config: Config, resolvers: Resolvers) -> Result<Arc<Access>> {
-        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), nodes: Default::default(), revokers: Default::default(), decoy_hooks: Default::default(), limiter: Default::default(), sinks: Default::default(), event_hooks: Default::default(), people: Default::default(), workspace: Default::default(), mail_gate: Default::default(), github_keys: Default::default(), registrations: Default::default(), event_verifies: Default::default(), oidc_fetch: Default::default(), oidc_keys: Default::default(), sign_ins: Default::default(), device_starts: Default::default(), device_guesses: Default::default(), policy_cache: Default::default() }))
+        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), nodes: Default::default(), revokers: Default::default(), decoy_hooks: Default::default(), limiter: Default::default(), sinks: Default::default(), event_hooks: Default::default(), people: Default::default(), workspace: Default::default(), mail_gate: Default::default(), github_keys: Default::default(), registrations: Default::default(), oidc_fetch: Default::default(), oidc_keys: Default::default(), sign_ins: Default::default(), device_starts: Default::default(), device_guesses: Default::default(), policy_cache: Default::default() }))
     }
 
     /// The resource of `kind` named `id`, with its project and environment filled in.
@@ -1283,6 +1281,11 @@ pub struct Policy {
     /// (`?readonly=1`, whatever the client asks).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub mcp_read_only: bool,
+    /// roll's MCP server takes only grants (a token, an OAuth connection): the admin token, an
+    /// admin's session and an open daemon are answered with OAuth's challenge, so every agent is
+    /// held by the controls above.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mcp_require_grant: bool,
     /// The OAuth clients that may connect (empty: any), as Atlassian's admins list the AI clients
     /// their site allows. Each is a host (`claude.ai`, `*.example.com`: a client whose metadata
     /// document is there, or whose redirects all go there), an exact `https://` URL (a metadata

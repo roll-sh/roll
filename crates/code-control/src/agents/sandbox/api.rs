@@ -115,14 +115,15 @@ async fn create(State(code): S, caller: Caller, ext: axum::http::Extensions, Pat
     }
     .ok_or_else(|| Error::Invalid(format!("size is one of {}", cfg.sizes.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", "))))?
     .clone();
-    let mut env = parse_env(b.get("env"))?;
+    let env = parse_env(b.get("env"))?;
     let backend = code.sandboxes.backend.clone().ok_or_else(|| Error::Unavailable("sandboxes aren't set up on this server".into()))?;
     let sealer = code.ai.sealer.as_ref().ok_or_else(|| Error::Unprocessable("sandboxes need ROLL_SECRET_KEY on the server".into()))?;
     let (id, machine_id, token) = (crate::new_id("sbx"), crate::new_id("mch"), new_machine_token());
     // `secrets: {project, environment}`: an environment of a project with one of the owner's
     // repos on its canvas (docs/secrets.md), under the env given explicitly. Managing the owner
-    // isn't enough: the caller must be able to reveal the environment themselves, and roll secrets
-    // is asked again before each start whether they still may (only where they came from is kept).
+    // isn't enough: the caller must be able to reveal the environment themselves. Only where they
+    // came from is kept, never the values: the reconciler reads them again as the caller may at
+    // each create and start.
     let (mut secrets_by, mut secrets_from) = (None, None);
     if let Some(sec) = b.get("secrets").filter(|v| !v.is_null()) {
         let field = |k: &str| sec.get(k).and_then(Value::as_str).filter(|s| !s.is_empty());
@@ -137,14 +138,8 @@ async fn create(State(code): S, caller: Caller, ext: axum::http::Extensions, Pat
         secrets_by = Some(revealed.by);
         let as_json: serde_json::Map<String, Value> = revealed.values.into_iter().map(|(k, v)| (k, Value::String(v))).collect();
         let values = parse_env(Some(&Value::Object(as_json))).map_err(|e| Error::Invalid(format!("the secrets of {environment} can't all go in a sandbox: {e}")))?;
-        let mut keys = Vec::new();
-        for (k, v) in values {
-            // The owner's own variable of that name wins, and isn't the copier's to take back.
-            if let std::collections::btree_map::Entry::Vacant(e) = env.entry(k.clone()) {
-                e.insert(v);
-                keys.push(k);
-            }
-        }
+        // The owner's own variable of that name wins, and isn't the copier's to take back.
+        let keys = values.into_keys().filter(|k| !env.contains_key(k)).collect();
         secrets_from = Some(store::SecretsFrom { project: revealed.project, environment: environment.to_string(), keys });
     }
     let api_url = cfg.api_url.clone().unwrap_or_else(|| code.config.api_url.clone());

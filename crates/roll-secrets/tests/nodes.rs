@@ -371,3 +371,72 @@ fn two_nodes_sweeping_a_deleted_project_close_its_log_once_and_purge_it_once() {
         assert_eq!(db.read(move |c| c.query_row(&sql, [p.as_str()], |r| r.get::<_, i64>(0))).unwrap(), 0, "{t}");
     }
 }
+
+#[test]
+fn two_nodes_writing_events_never_leave_a_gap_a_follower_has_passed() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
+    let ws = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
+    let project = ws.create("", "shop", "", None).unwrap().id;
+    let (a, b) = (node(dir.path(), ws.clone()), node(dir.path(), ws));
+    let value = "sk_live_eventsrace0123456789";
+    let caller = Caller::operator();
+    a.batch(&project, "production", Batch { path: None, message: None, ops: vec![set("STRIPE_KEY", value)], if_seq: None }, &caller).unwrap();
+
+    // On each node, scans (group-committed reads: `scan.finding`), policy changes (writes:
+    // `production.unprotected` each time it goes) and plain changes (rows with no event) race,
+    // while a follower on each node reads the feed after its cursor.
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let writers: Vec<_> = [a.clone(), b.clone()]
+        .into_iter()
+        .flat_map(|s| [(s.clone(), 0), (s.clone(), 1), (s.clone(), 2), (s, 3)])
+        .map(|(s, role)| {
+            let project = project.clone();
+            std::thread::spawn(move || {
+                let caller = Caller::operator();
+                for i in 0..15 {
+                    match role {
+                        0 | 1 => drop(s.scan(&project, &[value.to_string()], &caller).unwrap()),
+                        2 => {
+                            let p = |protected: bool| serde_json::from_value::<roll_secrets::Policy>(serde_json::json!({ "protected": protected })).unwrap();
+                            s.set_policy(&project, "production", p(true), &caller).unwrap();
+                            s.set_policy(&project, "production", p(false), &caller).unwrap();
+                        }
+                        _ => drop(s.batch(&project, "staging", Batch { path: None, message: None, ops: vec![set("N", &i.to_string())], if_seq: None }, &caller).unwrap()),
+                    }
+                }
+            })
+        })
+        .collect();
+    let follow = |s: Arc<Secrets>, done: Arc<std::sync::atomic::AtomicBool>, project: String| {
+        std::thread::spawn(move || {
+            let (mut seen, mut after) = (Vec::new(), 0);
+            loop {
+                let last = done.load(std::sync::atomic::Ordering::SeqCst);
+                let page = s.events(&project, roll_secrets::EventsQuery { after: Some(after), limit: Some(7), ..Default::default() }, &Caller::operator()).unwrap();
+                seen.extend(page.events.iter().map(|e| e.seq));
+                after = page.next;
+                if last && page.events.is_empty() {
+                    return seen;
+                }
+            }
+        })
+    };
+    let followers = [follow(a.clone(), done.clone(), project.clone()), follow(b.clone(), done.clone(), project.clone())];
+    for w in writers {
+        w.join().unwrap();
+    }
+    done.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    // Everything, read once at the end: 60 scans, and an unprotection each time production went
+    // from protected to not (how often depends on how the two nodes' changes interleaved).
+    let page = a.events(&project, roll_secrets::EventsQuery { limit: Some(500), ..Default::default() }, &caller).unwrap();
+    assert_eq!(page.events.iter().filter(|e| e.kind == "scan.finding").count(), 60);
+    assert!(page.events.iter().any(|e| e.kind == "production.unprotected"));
+    let all: Vec<i64> = page.events.iter().map(|e| e.seq).collect();
+    // A follower never moved past an event that committed later: it saw every one, in order.
+    for f in followers {
+        assert_eq!(f.join().unwrap(), all);
+    }
+    assert!(b.verify_audit(&project, Default::default(), &caller).unwrap().ok);
+}

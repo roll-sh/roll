@@ -75,21 +75,46 @@ pub(super) fn secret_shapes(ty: &str, settings: &Settings) -> EsResult<()> {
     Ok(())
 }
 
-/// Moves a type's credentials out of `settings`, as the cluster stores them (sealed when it
-/// can). A reference (`roll://…`, [`super::refs`]) isn't a value: it stays in the settings.
-pub(super) fn take_secrets(cluster: &crate::Cluster, ty: &str, settings: &mut Settings) -> BTreeMap<String, String> {
+/// Moves a type's credentials out of `settings`, sealed as the cluster stores them. A reference
+/// (`roll://…`, [`super::refs`]) isn't a value: it stays in the settings. A node without a
+/// sealing key refuses a pasted value rather than keep it in the clear: a reference (through
+/// roll's API) or a key on the node are the ways to give one there.
+pub(super) fn take_secrets(cluster: &crate::Cluster, ty: &str, settings: &mut Settings) -> EsResult<BTreeMap<String, String>> {
     let mut out = BTreeMap::new();
     for k in secret_names(ty) {
         if settings.get(k).is_some_and(|v| crate::secret_refs::classify(cluster, v) != crate::secret_refs::Setting::Value) {
             continue;
         }
+        if settings.get(k).is_some_and(|v| !v.is_empty()) && !crate::seal::may_store(cluster) {
+            return Err(EsError::new(
+                400,
+                "settings_exception",
+                format!("[{k}] would be stored in the clear: this node has no sealing key (ROLL_SECRET_KEY). Give it as a roll secrets reference (roll://ENV/KEY) through roll's API (PUT /v1/search/clusters/{{id}}/repositories/{{name}}), or have the operator set ROLL_SECRET_KEY"),
+            ));
+        }
         if let Some(v) = settings.remove(k)
             && let Some(v) = v.as_str().filter(|v| !v.is_empty())
         {
-            out.insert(k.to_string(), crate::seal::seal_given(cluster, secret_kind(ty), v));
+            out.insert(k.to_string(), crate::seal::seal_given(cluster, secret_kind(ty), v)?);
         }
     }
-    out
+    Ok(out)
+}
+
+/// Seals repositories' credentials still in the clear (registered on a node without a key),
+/// for [`crate::seal::seal_leftovers`].
+pub(crate) fn seal_stored_secrets(md: &mut crate::meta::Metadata, sealer: Option<&crate::seal::Sealer>) {
+    let Some(sealer) = sealer else { return };
+    for r in md.repositories.values_mut() {
+        if r.secrets.values().all(|v| crate::seal::is_sealed(v)) {
+            continue;
+        }
+        let r = std::sync::Arc::make_mut(r);
+        let kind = secret_kind(&r.ty);
+        for v in r.secrets.values_mut().filter(|v| !crate::seal::is_sealed(v)) {
+            *v = sealer.seal_text(kind, v);
+        }
+    }
 }
 
 /// `GoogleCloudStorageRepository`'s first check, before the blob store's own settings.

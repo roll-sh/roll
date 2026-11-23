@@ -12,8 +12,8 @@ use serde_json::{Value, json};
 const MCP: &str = "/v1/code/mcp";
 
 /// The tools docs/code/mcp.md lists.
-const TOOLS: [&str; 71] = [
-    "list_repos", "search_code", "read_file", "list_tree", "log", "blame", "get_changeset", "compare", "create_change", "revise_change", "land", "get_change",
+const TOOLS: [&str; 73] = [
+    "list_repos", "search", "fetch", "search_code", "read_file", "list_tree", "log", "blame", "get_changeset", "compare", "create_change", "revise_change", "land", "get_change",
     "list_changes", "claim_work", "heartbeat_work", "release_work", "complete_work", "list_work", "create_work", "comment", "review", "queue_status",
     "request_ai_review", "list_agent_machines", "list_agent_threads", "create_agent_thread", "send_agent_message", "respond_agent_request",
     "interrupt_agent_thread", "publish_agent_thread", "create_agent_project", "claim_agent_work", "list_agent_automations", "save_agent_automation",
@@ -28,8 +28,8 @@ const TOOLS: [&str; 71] = [
 /// `agent_tools_work_in_roll_code_like_their_routes` and `automation_tools_map_onto_their_routes`).
 const AGENT_TOOLS: usize = 24;
 /// The ones that only read (`readOnlyHint`).
-const READ_ONLY: [&str; 29] = [
-    "list_repos", "search_code", "read_file", "list_tree", "log", "blame", "get_changeset", "compare", "get_change", "list_changes", "list_work", "queue_status", "list_refs",
+const READ_ONLY: [&str; 31] = [
+    "list_repos", "search", "fetch", "search_code", "read_file", "list_tree", "log", "blame", "get_changeset", "compare", "get_change", "list_changes", "list_work", "queue_status", "list_refs",
     "get_commit_statuses", "get_work", "get_ai_review_pricing", "get_review_usage", "list_ai_reviews", "get_reviewer", "get_review_rules",
     "get_repo_audit", "get_agent_automation_catalog", "list_agent_sandboxes", "get_agent_sandbox_usage",
     "list_agent_machines", "list_agent_threads", "list_agent_automations", "list_agent_automation_runs", "get_agent_automation_run",
@@ -711,6 +711,86 @@ async fn tools_map_onto_their_routes() {
     }
 }
 
+/// `search` and `fetch` (ChatGPT's deep research): a query finds the changes and work items of the
+/// caller's own repos that mention it, any case, each with an id `fetch` reads in full and its roll
+/// URL; someone else's public repo stays out and its ids are not found; LIKE's wildcards are text.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn search_and_fetch_read_your_own_repos() {
+    let a = app(Some("root"));
+    let root = Some("root");
+    let ok = |method: &'static str, path: String, body: Value| {
+        let a = &a;
+        async move {
+            let (s, v) = a.req(method, &path, Some(body), root).await;
+            assert!(s.is_success(), "{method} {path}: {s} {v}");
+            v
+        }
+    };
+    let mut tokens = Vec::new();
+    for (owner, kind, repo, visibility) in [("acme", "org", "api", "private"), ("eve", "user", "pub", "public")] {
+        a.req("POST", "/v1/code/owners", Some(json!({ "name": owner, "kind": kind })), root).await;
+        let (_, t) = a.req("POST", &format!("/v1/code/owners/{owner}/tokens"), Some(json!({ "name": "t" })), root).await;
+        tokens.push(t["token"].as_str().unwrap().to_string());
+        a.req("POST", "/v1/code/repos", Some(json!({ "owner": owner, "name": repo, "visibility": visibility })), root).await;
+        let p = format!("/v1/code/repos/{owner}/{repo}");
+        ok("POST", format!("{p}/land"), json!({ "message": "m", "files": { "a.txt": { "content": "a\n" } } })).await;
+        ok("POST", format!("{p}/work"), json!({ "title": format!("{owner}: flaky Login test"), "body": "fails on CI 1 in 10" })).await;
+    }
+    let (_, w) = a.req("GET", "/v1/code/repos/acme/api/work/1", None, root).await;
+    let ch = ok("POST", "/v1/code/repos/acme/api/changes".into(), json!({ "title": "Retry the probe", "body": "fixes the flaky login test", "base": "main", "message": "m", "files": { "a.txt": { "content": "b\n" } } })).await;
+    let (wid, chid) = (w["id"].as_str().unwrap().to_string(), ch["id"].as_str().unwrap().to_string());
+
+    let mut acme = Client::new(&a, Some(&tokens[0]));
+    acme.initialize("2025-06-18").await;
+    let found = acme.tool("search", json!({ "query": "LOGIN" })).await;
+    let mut ids: Vec<&str> = found["results"].as_array().unwrap().iter().map(|r| r["id"].as_str().unwrap()).collect();
+    ids.sort_unstable();
+    let mut want = vec![chid.as_str(), wid.as_str()];
+    want.sort_unstable();
+    assert_eq!(ids, want, "acme's own, not eve's public item: {found}");
+    let hit = found["results"].as_array().unwrap().iter().find(|r| r["id"] == chid.as_str()).unwrap();
+    let (cn, wn) = (&ch["number"], &w["number"]);
+    assert!(hit["url"].as_str().unwrap().ends_with(&format!("/acme/api/changes/{cn}")) && hit["text"].as_str().unwrap().contains("flaky login"), "{hit}");
+    let doc = acme.tool("fetch", json!({ "id": chid })).await;
+    assert_eq!((doc["title"].as_str(), doc["text"].as_str(), doc["metadata"]["kind"].as_str()), (Some(format!("acme/api #{cn}: Retry the probe").as_str()), Some("fixes the flaky login test"), Some("change")), "{doc}");
+    let doc = acme.tool("fetch", json!({ "id": wid })).await;
+    assert!(doc["url"].as_str().unwrap().ends_with(&format!("/acme/api/work#w{wn}")) && doc["text"] == "fails on CI 1 in 10", "{doc}");
+    assert!(acme.tool("search", json!({ "query": "%" })).await["results"].as_array().unwrap().is_empty(), "a wildcard is text");
+
+    // A scoped grant (the operator's caller, narrowed) keeps its repos before the page is cut: newer
+    // matches elsewhere don't push its own out of a one-result page.
+    let narrowed = a.code.search_documents(&code_control::Caller::Admin, "login", None, 1, &|repo: &str| repo == "acme/api").await.unwrap();
+    assert_eq!(narrowed["results"][0]["repo"], "acme/api", "{narrowed}");
+    // Text whose lowercase is the same length but shifted (İ grows, ẞ shrinks) is still snippeted.
+    ok("POST", "/v1/code/repos/acme/api/work".into(), json!({ "title": "unicode", "body": "İ éclair ẞ" })).await;
+    let found = acme.tool("search", json!({ "query": "éclair" })).await;
+    assert_eq!(found["results"].as_array().map(Vec::len), Some(1), "found, no panic: {found}");
+
+    // Files, from each repo's index: a match with its line, an id fetch reads around it.
+    ok("POST", "/v1/code/repos/acme/api/land".into(), json!({ "message": "m", "files": { "src/auth.rs": { "content": "fn a() {}\nfn retry_login_probe() {}\n" } } })).await;
+    // The first search builds the repo's index; until it's built the repo is skipped (timeout or
+    // indexing), so ask until it answers.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let files = loop {
+        let v = acme.tool("search", json!({ "query": "retry_login", "kinds": "files" })).await;
+        if v["skipped"].as_array().is_some_and(Vec::is_empty) || std::time::Instant::now() > deadline {
+            break v;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    };
+    let hit = &files["results"][0];
+    assert_eq!((hit["kind"].as_str(), hit["path"].as_str(), hit["line"].as_u64(), files["skipped"].as_array().map(Vec::len)), (Some("file"), Some("src/auth.rs"), Some(2), Some(0)), "{files}");
+    let doc = acme.tool("fetch", json!({ "id": hit["id"] })).await;
+    assert!(doc["text"].as_str().unwrap().contains("fn retry_login_probe") && doc["metadata"]["path"] == "src/auth.rs", "{doc}");
+
+    let mut eve = Client::new(&a, Some(&tokens[1]));
+    eve.initialize("2025-06-18").await;
+    assert!(eve.tool_err("fetch", json!({ "id": hit["id"] })).await.starts_with("not found"), "another owner's file");
+    let theirs = eve.tool("search", json!({ "query": "login" })).await;
+    assert_eq!(theirs["results"].as_array().map(Vec::len), Some(1), "{theirs}");
+    assert!(eve.tool_err("fetch", json!({ "id": chid })).await.starts_with("not found"));
+}
+
 /// Lockdown (`?lockdown=1` or `X-MCP-Lockdown: 1`), as roll's own /v1/mcp has it: on a public repo,
 /// a comment by someone who can't push comes back withheld, a writer's stays, and a connection
 /// without lockdown reads both. An unknown value is refused rather than read as off.
@@ -1025,7 +1105,7 @@ async fn every_tool_is_authorized_like_its_route() {
                     _ => assert!(text.starts_with("not found"), "{ctx}"),
                 }
             }
-            assert_eq!(seen.len(), TOOLS.len() - AGENT_TOOLS - 4, "every repo tool is checked (list_repos, create_repo and get_review_usage below; get_ai_review_pricing is public)");
+            assert_eq!(seen.len(), TOOLS.len() - AGENT_TOOLS - 6, "every repo tool is checked (list_repos, create_repo and get_review_usage below; get_ai_review_pricing is public; search and fetch read only the caller's own repos: routes.rs's documents matrix)");
         }
         // The list is the route's: only what the caller may read, so the private repo isn't in it.
         let listed = c.tool("list_repos", json!({})).await;

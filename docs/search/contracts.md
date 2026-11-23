@@ -81,6 +81,14 @@ people work in it at once.
   libm does not guarantee) and `foldhash` (fixed-seed term hashing in the indexing buffer).
 - `search-es` uses `flate2` (workspace dependency, pure-Rust backend) only to inflate the bundled
   PPL grammar (`assets/ppl_grammar.json.gz`, 253 KB as JSON) that `_plugins/_ppl/_grammar` serves.
+- `search-embed` (the built-in multilingual-e5-small) uses `tokenizers` (Hugging Face's,
+  Apache-2.0, `fancy-regex` only) for XLM-RoBERTa's tokenizer, `safetensors` to read the weights
+  and `gemm` (no default features: single-threaded) for its float products; its 8-bit products
+  are its own kernels. Not candle: candle 0.11 runs its own spinning worker threads beside any
+  pool it's called from, which a pinned, CPU-metered node pool can't have.
+- `search-server` uses `reqwest` (rustls) only to fetch the embedding model's weights from the
+  operator's URL (`embed.rs`), and `libc` for `clock_gettime(CLOCK_THREAD_CPUTIME_ID)` and
+  `sched_setaffinity` there (a job's CPU time, pinned workers).
 
 
 ## Performance rules
@@ -1219,7 +1227,15 @@ pub struct ClusterConfig { pub name, pub dialect: Dialect /* Elasticsearch|OpenS
                           pub node_settings: Vec<(String, String)> /* -E k=v: node.attr.*, node.processors, .. */, pub test_features: bool,
                           pub host_metrics: bool /* false: node stats report synthetic figures (shared nodes must not leak the host) */,
                           pub default_repository: Option<String> /* roll's default snapshot repository's name (api::snapshots::install_default_repository) */,
-                          pub file_service_tokens: bool /* read <path.conf>/service_tokens; search-server sets it in dev mode or for clusters named in roll.security.service_token_file.clusters */ }
+                          pub file_service_tokens: bool /* read <path.conf>/service_tokens; search-server sets it in dev mode or for clusters named in roll.security.service_token_file.clusters */,
+                          pub embedder: Option<Arc<dyn xpack::inference::local::Embedder>> /* the node's model pool: runs E5 for the `elasticsearch`
+                                                          service; None: E5 answers as without ML nodes */ }
+#[async_trait] pub trait xpack::inference::local::Embedder: Send + Sync {
+    fn available(&self) -> bool;                                                  // false: turned off (answers as without ML nodes)
+    async fn embed(&self, tenant: Tenant { cluster /* its name on the node */, owner /* catalog owner; None: the operator */ },
+                   prefix: &'static str /* applied at tokenize time */, texts: Vec<String>, timeout: Duration /* NO_DEADLINE: none */)
+        -> Result<Vec<Vec<f32>>, EmbedError /* Off | QueueFull (429 es_rejected_execution_exception) | TooLarge (400) | TimedOut (408) | Failed (500) */>;
+}
                           // + fn node_setting(key) -> Option<&str>; fn processors() -> usize
 impl Cluster { async fn open(ClusterConfig, Arc<dyn MetaStore>) -> Result<Cluster>; async fn in_memory(name) -> Cluster;
                fn state(&self) -> Arc<meta::ClusterState>;                        // published metadata (immutable snapshot)
@@ -1498,7 +1514,10 @@ pub struct NodeConfig { pub node_name, pub node_id: Option<String> /* lease iden
                                                           and a wake makes room first */,
                         pub unload_memory_only: bool /* false: with a StoreProvider whose data() is None, idle and budget unloads skip
                                                         clusters holding documents (they'd lose them; warned once); explicit unload still
-                                                        unloads. true: tests / throwaway nodes */ }
+                                                        unloads. true: tests / throwaway nodes */,
+                        pub embedder: Option<Arc<embed::EmbedPool>> /* the node's E5 pool, copied into every ClusterConfig; its
+                                                        resident_bytes() count against memory_budget; Node::take_inference_cpu() hands each
+                                                        cluster's CPU time to the meter */ }
 #[async_trait] pub trait LifecycleHooks { async fn loaded(&self, &Arc<Cluster>); async fn unloading(&self, &Arc<Cluster>); }
 impl Node { fn new(catalog, stores, cfg) -> Arc<Node>; fn with_hooks(..); fn set_leases(Arc<dyn Leases>) /* before the first request */;
             async fn open(spec) -> Result<Arc<Loaded>> /* Err downcasts to node::OpenError { error: EsError } for refusals */;

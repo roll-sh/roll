@@ -129,6 +129,7 @@ fn reads() -> Vec<(&'static str, String)> {
     vec![
         repo(""),
         repo("/refs"),
+        repo("/landings"),
         repo("/tree/main"),
         repo("/tree/main/"),
         repo("/tree/main/docs"),
@@ -149,6 +150,11 @@ fn reads() -> Vec<(&'static str, String)> {
         ("GET", "/v1/code/changes/{change}".into()),
         ("GET", "/v1/code/work/{work}".into()),
     ]
+}
+
+/// A change or work item as a document (`fetch`): the caller's own repos only, public or not.
+fn documents() -> [(&'static str, String); 2] {
+    [("GET", "/v1/code/documents/{change}".into()), ("GET", "/v1/code/documents/{work}".into())]
 }
 
 /// Routes that write to a repo (`Code::writable`, `writable_change`, `writable_work`).
@@ -259,6 +265,23 @@ async fn every_repo_route_follows_the_auth_matrix() {
         }
     }
     assert!(n > 400, "{n} requests");
+    // Documents are the caller's own knowledge: someone else's public repo is 404 too.
+    for (_, path) in documents() {
+        for (who, token, want) in [
+            ("admin", Some(ADMIN), [OK, OK]),
+            ("owner", acme, [OK, OK]),
+            ("agent", agent, [OK, OK]),
+            ("review app installed on priv", app_in, [NOT_FOUND, OK]),
+            ("review app installed on pub", app_out, [OK, NOT_FOUND]),
+            ("another owner", other, [NOT_FOUND, NOT_FOUND]),
+            ("anonymous", None, [NOT_FOUND, NOT_FOUND]),
+        ] {
+            for (repo, want) in [("pub", want[0]), ("priv", want[1])] {
+                let p = w.path(repo, &path);
+                assert_eq!(call(a, "GET", &p, None, token).await, want, "{who}: GET {p}");
+            }
+        }
+    }
 
     // The owner itself: managed by its own token (and admin), not by its agents or anyone else.
     for (method, path) in owner_writes() {
@@ -296,7 +319,7 @@ async fn every_repo_route_follows_the_auth_matrix() {
     }
     // Listings and owner pages answer everyone (filtered).
     for token in [Some(ADMIN), acme, agent, app_in, other, None] {
-        for path in ["/v1/code/owners", "/v1/code/owners/acme", "/v1/code/repos", "/v1/code/repos?owner=acme", "/v1/code/names/acme/pub"] {
+        for path in ["/v1/code/owners", "/v1/code/owners/acme", "/v1/code/repos", "/v1/code/repos?owner=acme", "/v1/code/names/acme/pub", "/v1/code/search?q=c"] {
             assert_eq!(call(a, "GET", path, None, token).await, OK, "{token:?} {path}");
         }
     }
@@ -309,7 +332,7 @@ async fn every_repo_route_follows_the_auth_matrix() {
 async fn bad_tokens_are_401_on_every_route() {
     let w = world().await;
     let a = &w.a;
-    let mut routes: Vec<(&str, String)> = reads().into_iter().chain(writes()).chain(manages()).chain(owner_writes()).collect();
+    let mut routes: Vec<(&str, String)> = reads().into_iter().chain(documents()).chain(writes()).chain(manages()).chain(owner_writes()).collect();
     routes.extend([
         ("GET", "/v1/code/owners/acme/tokens".into()),
         ("GET", "/v1/code/owners".into()),
@@ -318,6 +341,7 @@ async fn bad_tokens_are_401_on_every_route() {
         ("GET", "/v1/code/repos".into()),
         ("POST", "/v1/code/repos".into()),
         ("GET", "/v1/code/names/acme/pub".into()),
+        ("GET", "/v1/code/search?q=c".into()),
         ("GET", "/v1/code/github/installations".into()),
     ]);
     for token in ["rlc_0000", "rla_0000", "hunter2", w.revoked.as_str()] {

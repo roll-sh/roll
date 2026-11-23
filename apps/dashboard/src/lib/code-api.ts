@@ -414,7 +414,7 @@ export interface PreviewEnvironment {
   /** When it goes (ms: its TTL, or a keep, running out), once that's a day away. */
   expires_at?: number;
   /** Earlier pushes still reachable (newest first). */
-  earlier?: { service: string; head: string; url: string }[];
+  earlier?: { service: string; head: string; url: string; own_data?: boolean }[];
   /** How much the first service's page changed since the screenshot at an earlier head. */
   visual_change?: { since: string; percent: number };
   /** How fast that page loaded (timed with its screenshot), and its load at the head before. */
@@ -1114,12 +1114,16 @@ export interface ReviewProvider {
   base_url: string | null;
   model: string | null;
   secondary_model: string | null;
-  key_last4: string;
+  /** A key pasted here (sealed): its last four characters. */
+  key_last4: string | null;
+  /** A key in roll secrets: `roll://ENV[/folder]/KEY`, read as whoever set it on every review. */
+  key_ref: string | null;
   updated_at: number;
 }
 
 export interface ReviewProviderInput {
   provider?: AiProvider;
+  /** The key, or a `roll://ENV[/folder]/KEY` reference you may reveal. */
   api_key: string;
   base_url?: string;
   model?: string;

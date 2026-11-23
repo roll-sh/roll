@@ -726,7 +726,7 @@ async fn private_network_on_docker(closed: bool) {
     std::thread::sleep(Duration::from_millis(500));
     assert!(docker(&["run", "-d", "--name", &format!("{srv}-web"), "--network", &format!("container:{srv}"), "busybox:1.37", "sh", "-c", "mkdir /www; echo private-hello > /www/index.html; exec httpd -f -p 10.9.0.1:8080 -h /www"]).0);
     let url = format!("/v1/apps/services/{id}/environments/{env}/private-network");
-    let (st, v) = call(&w.api, "PUT", &url, Some(json!({"secret": format!("roll://{env}/WG"), "routes": [{"name": "db.corp.internal", "target": "10.9.0.1:8080"}]})), "application/json", None).await;
+    let (st, v) = call(&w.api, "PUT", &url, Some(json!({"secret": format!("roll://{env}/WG"), "routes": [{"name": "db.acme.corp", "target": "10.9.0.1:8080"}]})), "application/json", None).await;
     assert_eq!((st, v["status"].as_str()), (StatusCode::OK, Some("running")), "{v}");
     // From the network the environment's instances are on, by the route's name.
     let instances = if closed { apps_control::closed_network_name(&w.project, "staging") } else { net.clone() };
@@ -736,7 +736,7 @@ async fn private_network_on_docker(closed: bool) {
     };
     let mut got = String::new();
     for _ in 0..30 {
-        let out = std::process::Command::new("docker").args(["run", "--rm", "--network", &instances, "busybox:1.37", "wget", "-qO-", "-T", "3", "http://db.corp.internal:8080/"]).output().unwrap();
+        let out = std::process::Command::new("docker").args(["run", "--rm", "--network", &instances, "busybox:1.37", "wget", "-qO-", "-T", "3", "http://db.acme.corp:8080/"]).output().unwrap();
         got = format!("{}{}", String::from_utf8_lossy(&out.stdout).trim(), String::from_utf8_lossy(&out.stderr).trim());
         if got == "private-hello" {
             break;
@@ -811,7 +811,8 @@ async fn a_tailscale_private_network_reaches_a_host_on_the_tailnet() {
         assert!(child.wait().unwrap().success());
     };
     let key = Arc::new(parking_lot::Mutex::new(String::new()));
-    let Some(w) = docker_world_secrets(None, |_| {}, Arc::new(Ts(key.clone()))).await else { return };
+    // (Private addresses allowed: the control server is a container here.)
+    let Some(w) = docker_world_secrets(None, |c| c.allow_private = true, Arc::new(Ts(key.clone()))).await else { return };
     let (id, _) = deploy_container(&w, "tail").await;
     let net = apps_control::network_name(&w.project, "production");
     let hs = format!("roll-apps-tstest-{}-hs", std::process::id());
@@ -855,11 +856,11 @@ async fn a_tailscale_private_network_reaches_a_host_on_the_tailnet() {
         std::thread::sleep(Duration::from_secs(1));
     }
     let url = format!("/v1/apps/services/{id}/environments/production/private-network");
-    let body = json!({"kind": "tailscale", "secret": "roll://production/TS", "login_server": format!("http://{hs}:8080"), "routes": [{"name": "api.corp.internal", "target": format!("{cust_ip}:8080")}]});
+    let body = json!({"kind": "tailscale", "secret": "roll://production/TS", "login_server": format!("http://{hs}:8080"), "routes": [{"name": "api.acme.corp", "target": format!("{cust_ip}:8080")}]});
     let (st, v) = call(&w.api, "PUT", &url, Some(body), "application/json", None).await;
     let mut got = String::new();
     for _ in 0..60 {
-        let out = std::process::Command::new("docker").args(["run", "--rm", "--network", &net, "busybox:1.37", "wget", "-qO-", "-T", "3", "http://api.corp.internal:8080/"]).output().unwrap();
+        let out = std::process::Command::new("docker").args(["run", "--rm", "--network", &net, "busybox:1.37", "wget", "-qO-", "-T", "3", "http://api.acme.corp:8080/"]).output().unwrap();
         got = format!("{}{}", String::from_utf8_lossy(&out.stdout).trim(), String::from_utf8_lossy(&out.stderr).trim());
         if got == "tailnet-hello" || st != StatusCode::OK {
             break;
@@ -868,12 +869,42 @@ async fn a_tailscale_private_network_reaches_a_host_on_the_tailnet() {
     }
     let peer = format!("roll-apps-peer-{}-production", id.trim_start_matches("svc_"));
     let caps = docker(&["inspect", "-f", "{{.HostConfig.CapAdd}} {{.HostConfig.CapDrop}}", &peer]).1;
+    let env_vars = docker(&["inspect", "-f", "{{json .Config.Env}}", &peer]).1;
     call(&w.api, "DELETE", &url, None, "application/json", None).await;
     cleanup();
     delete_for_good(&w.api, &id).await;
     assert_eq!((st, v["status"].as_str()), (StatusCode::OK, Some("running")), "{v}");
     assert_eq!(got, "tailnet-hello", "through the tailnet");
     assert!(!caps.contains("NET_ADMIN") && caps.contains("ALL"), "no capability at all: {caps}");
+    assert!(env_vars.contains("--shields-up"), "the tailnet can't connect in: {env_vars}");
+}
+
+/// A tunnel to another port of the app on real Docker (a debugger's, `roll apps proxy --port`):
+/// reached inside the instance's own network namespace by a relay, whatever the app publishes.
+/// The app's own port stands in for the debugger's here (busybox's httpd answers only one).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_tunnel_reaches_a_port_inside_the_instance() {
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    let Some(w) = docker_world().await else { return };
+    let (id, _) = deploy_container(&w, "dial").await;
+    let port = w.apps.live(&id, "production").template().and_then(|t| t.run.port).unwrap_or(8080);
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let at = l.local_addr().unwrap();
+    tokio::spawn(axum::serve(l, w.api.clone()).into_future());
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{at}/v1/apps/services/{id}/environments/production/tunnel?port={port}")).await.unwrap();
+    ws.send(Message::Binary(b"GET / HTTP/1.0\r\n\r\n".to_vec().into())).await.unwrap();
+    let mut got = Vec::new();
+    while let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_secs(10), ws.next()).await {
+        match m {
+            Message::Binary(b) if b.is_empty() => break,
+            Message::Binary(b) => got.extend_from_slice(&b),
+            _ => break,
+        }
+    }
+    let text = String::from_utf8_lossy(&got).to_string();
+    delete_for_good(&w.api, &id).await;
+    assert!(text.contains("200") && text.contains("cold"), "through the relay in its namespace: {text}");
 }
 
 /// A sandbox on real Docker: a command's output and exit code, one killed in the container at

@@ -700,7 +700,9 @@ fn print_preview(p: &Value) {
     }
     for x in p["earlier"].as_array().into_iter().flatten() {
         let rev = s(&x["revision"]);
-        println!("earlier  {} at {}  {}", s(&x["service"]), rev.trim_start_matches("cs_").chars().take(10).collect::<String>(), s(&x["share_url"]));
+        let own: Vec<&str> = x["own_data"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+        let own = if own.is_empty() { String::new() } else { format!("  (own data: {})", own.join(", ")) };
+        println!("earlier  {} at {}  {}{own}", s(&x["service"]), rev.trim_start_matches("cs_").chars().take(10).collect::<String>(), s(&x["share_url"]));
     }
     for svc in p["services"].as_array().into_iter().flatten() {
         // The link with the access token when the preview is private: the one that opens it.

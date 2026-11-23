@@ -372,9 +372,11 @@ pub struct Intercept {
 pub struct SecretVar {
     pub name: String,
     pub value: String,
-    /// It's a linked resource's address as rolld sees it (`Values.linked`: `127.0.0.1`, a
-    /// node's own host name): apps rewrites it for the container, as its own links.
-    pub linked: bool,
+    /// The resource it's linked to, `(kind, ref)` (`Values.links`: `("postgres", "main")`). Its
+    /// value is an address as rolld sees it (`127.0.0.1`, a node's own host name): apps rewrites it
+    /// for the container, as its own links, and leaves it out of an environment with data of its
+    /// own when it links a resource apps links there itself.
+    pub link: Option<(String, String)>,
     /// Only for runtimes (roll secrets' `sensitive` keys, Vercel's sensitive variables): it goes
     /// to builds and instances, and no answer ever holds it, as a sealed variable (shown
     /// `sealed`, left out of `…/variables/values` for everyone, references to it sealed too).
@@ -386,6 +388,9 @@ pub struct SecretVar {
     /// decides whether a deployment is stale, never the placeholder's text (a new one each time).
     pub binding: Option<String>,
 }
+
+/// A link's options, as roll secrets' links take them (`roll_secrets::links::Link::options`).
+pub type LinkOptions = serde_json::Map<String, serde_json::Value>;
 
 /// Who asks for variables' values: what rolld's gate put on the request.
 #[derive(Clone, Copy, Default)]
@@ -429,8 +434,17 @@ pub trait Resources: Send + Sync {
     /// A new link's own credentials, made once when the link is made and kept sealed with it
     /// (a search cluster's API key for this service): `None` for a kind whose variables are
     /// read fresh with [`Resources::link_vars`] (a database's own URL).
-    async fn link(&self, _kind: LinkKind, _ref: &str, _service: &str) -> anyhow::Result<Option<Minted>> {
+    ///
+    /// `options` narrow what's made, as roll secrets' link options say (a search key's `names`,
+    /// its indices, and `permission`, `read` or `append`).
+    async fn link(&self, _kind: LinkKind, _ref: &str, _service: &str, _options: &LinkOptions) -> anyhow::Result<Option<Minted>> {
         Ok(None)
+    }
+    /// A search cluster's data stream for a log drain made or kept as asked: roll apps' index
+    /// template for `logs-roll.apps-*` (ECS mappings, no ILM policy, compressed), the stream, and
+    /// its retention (`retention_days`). Run as the operator; the drain's own key only appends.
+    async fn log_stream(&self, _cluster: &str, _stream: &str, _retention_days: u32) -> anyhow::Result<()> {
+        anyhow::bail!("roll search isn't on this node")
     }
     /// Revoke what [`Resources::link`] made (`kept`: what it said to keep, a key's id) when
     /// the link goes.

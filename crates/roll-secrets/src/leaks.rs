@@ -3,10 +3,12 @@
 //! decrypted and no value leaves this module.
 
 use crate::access::{Action, Caller, Scope};
+use crate::events::{Event, Kind};
 use crate::{Error, Result, Secrets};
 use code_sql::OptionalExtension;
 use serde::Serialize;
-use std::collections::{BTreeSet, HashMap};
+use serde_json::json;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// Candidates shorter than this (in characters) are never matched: `true` and `8080` are values
 /// too.
@@ -19,6 +21,16 @@ pub struct Leak {
     /// The environment's slug.
     pub environment: String,
     pub path: String,
+}
+
+/// A candidate that is a stored value, and where the value is: its project (another's, for a
+/// folder shared with this one) and that project's environment.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Match {
+    index: usize,
+    leak: Leak,
+    project: String,
+    env: String,
 }
 
 /// The most candidates one scan takes (`POST …/leaks`).
@@ -53,11 +65,26 @@ impl Secrets {
         let found: Vec<Found> = self
             .matches(project, candidates, Some(&caller.principal), caller.runtime)?
             .into_iter()
-            .filter(|(_, l)| !l.environment.contains('/') && caller.allows(Action::Reveal, &Scope::at(project, &l.environment, &l.path)))
-            .map(|(index, leak)| Found { index, leak })
+            .filter(|m| !m.leak.environment.contains('/') && caller.allows(Action::Reveal, &Scope::at(project, &m.leak.environment, &m.leak.path)))
+            .map(|m| Found { index: m.index, leak: m.leak })
             .collect();
-        let keys: Vec<String> = found.iter().map(|f| f.leak.key.clone()).collect::<BTreeSet<_>>().into_iter().collect();
-        self.audit_now(project, caller, if guard { "secrets.guard" } else { "secrets.scan" }, None, None, &keys, &format!("scanned {} candidates: {} matched", candidates.len(), found.len()));
+        let action = if guard { "secrets.guard" } else { "secrets.scan" };
+        let summary = format!("scanned {} candidates: {} matched", candidates.len(), found.len());
+        if found.is_empty() {
+            self.audit_now(project, caller, action, None, None, &[], &summary);
+            return Ok(found);
+        }
+        // A row per folder it matched in, each the feed's `scan.finding`: a reader of the feed
+        // sees only the environments it may read.
+        let mut at: BTreeMap<(&str, &str), BTreeSet<String>> = BTreeMap::new();
+        for f in &found {
+            at.entry((f.leak.environment.as_str(), f.leak.path.as_str())).or_default().insert(f.leak.key.clone());
+        }
+        for ((env, path), keys) in at {
+            let keys: Vec<String> = keys.into_iter().collect();
+            let event = Event::new(Kind::ScanFinding, json!({ "candidates": candidates.len(), "matched": found.len(), "guard": guard }));
+            self.audit_now_event(project, caller, action, Some(env), Some(path), &keys, &summary, Some(event));
+        }
         Ok(found)
     }
 
@@ -73,12 +100,47 @@ impl Secrets {
     /// Personal values count too: one pushed into code leaked as much as a shared one.
     pub fn leak_matches(&self, project: &str, candidates: &[String]) -> Result<Vec<(usize, Leak)>> {
         // roll code's scans: a sensitive value pushed into code leaked like any other.
-        self.matches(project, candidates, None, true)
+        Ok(self.matches(project, candidates, None, true)?.into_iter().map(|m| (m.index, m.leak)).collect())
+    }
+
+    /// [`leak_matches`](Self::leak_matches) for roll code's checks of `repo` (a change, or a scan
+    /// of the repo): each folder a value leaked from gets a `secrets.leaked` row (the feed's
+    /// `secret.leaked`) in the project that holds it, once a day for the same keys and repo (the
+    /// same change is checked again whenever it's read anew).
+    pub fn leaks_in_code(&self, project: &str, candidates: &[String], repo: &str) -> Result<Vec<(usize, Leak)>> {
+        let found = self.matches(project, candidates, None, true)?;
+        let mut at: BTreeMap<(&str, &str, &str), BTreeSet<String>> = BTreeMap::new();
+        for m in &found {
+            at.entry((m.project.as_str(), m.env.as_str(), m.leak.path.as_str())).or_default().insert(m.leak.key.clone());
+        }
+        if !at.is_empty() {
+            let (mac, now) = (self.keys()?, self.db.now_ms()?);
+            let code = Caller::consumer("roll:code");
+            for ((holder, env, path), keys) in at {
+                let keys: Vec<String> = keys.into_iter().collect();
+                let mark = format!("leak:{repo}:{env}:{path}:{}", keys.join(","));
+                let mut data = json!({ "repo": repo });
+                if holder != project {
+                    data["project"] = json!(project);
+                }
+                let summary = format!("{} found in roll code repo {repo}: rotate and remove it from the code", keys.join(", "));
+                let res = self.db.write(|c| {
+                    if crate::events::fresh(c, holder, &mark, now)? {
+                        crate::audit::record_event(c, mac, holder, &code, "secrets.leaked", Some(env), Some(path), &keys, &summary, now, Event::new(Kind::SecretLeaked, data.clone()))?;
+                    }
+                    Ok::<_, Error>(())
+                });
+                if let Err(e) = res {
+                    tracing::warn!(project = holder, repo, "recording a leak found in code failed: {e}");
+                }
+            }
+        }
+        Ok(found.into_iter().map(|m| (m.index, m.leak)).collect())
     }
 
     /// The matches, among personal values only `owner`'s when one is given; sensitive values only
     /// with `sensitive` (never a test of a person's guess against one).
-    fn matches(&self, project: &str, candidates: &[String], owner: Option<&str>, sensitive: bool) -> Result<Vec<(usize, Leak)>> {
+    fn matches(&self, project: &str, candidates: &[String], owner: Option<&str>, sensitive: bool) -> Result<Vec<Match>> {
         if !candidates.iter().any(|c| c.chars().count() >= MIN_LEN) {
             return Ok(Vec::new());
         }
@@ -91,7 +153,7 @@ impl Secrets {
         // project that has rows to match.
         let rows = self.db.read(|c| {
             c.query(
-                "SELECT s.key, e.slug, s.path, s.fp, s.project_id, s.tags FROM secrets s JOIN environments e ON e.id = s.env_id
+                "SELECT s.key, e.slug, s.path, s.fp, s.project_id, s.tags FROM secrets s JOIN environments e ON e.id = s.env_id AND e.forgotten_at IS NULL
                  WHERE s.value IS NOT NULL AND (CAST(? AS TEXT) IS NULL OR s.owner = '' OR s.owner = ?)
                    AND (s.project_id = ? OR (s.owner = '' AND EXISTS (SELECT 1 FROM exports x WHERE x.env_id = s.env_id AND x.path = s.path AND x.to_project = ?)))",
                 code_sql::params![owner, owner, project, project],
@@ -100,7 +162,7 @@ impl Secrets {
         })?;
         let rows: Vec<(Leak, String, String)> = rows.into_iter().filter(|(_, _, _, tags)| sensitive || !crate::names::sensitive(&crate::from_json::<Vec<String>>(tags))).map(|(l, fp, p, _)| (l, fp, p)).collect();
         let mut fps: HashMap<String, HashMap<String, Vec<usize>>> = HashMap::new();
-        let mut out: Vec<(usize, Leak)> = vec![];
+        let mut out: Vec<Match> = vec![];
         for (mut l, fp, p) in rows {
             if !fps.contains_key(&p) {
                 let dek = self.project(&p)?;
@@ -111,11 +173,12 @@ impl Secrets {
                 fps.insert(p.clone(), by_fp);
             }
             let Some(hits) = fps[&p].get(&fp) else { continue };
+            let env = l.environment.clone();
             if p != project {
                 let name = self.workspace.get(roll_workspace::Scope::All, &p).map(|x| x.name).unwrap_or_else(|_| p.clone());
                 l.environment = format!("{name}/{}", l.environment);
             }
-            out.extend(hits.iter().map(|i| (*i, l.clone())));
+            out.extend(hits.iter().map(|i| Match { index: *i, leak: l.clone(), project: p.clone(), env: env.clone() }));
         }
         out.sort();
         out.dedup();

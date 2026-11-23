@@ -264,6 +264,8 @@ fn binding(project: &str, s: &roll_secrets::SecretSync) -> Json {
         "status": s.status,
         "error": s.error,
         "last_synced_at": s.last_synced_at,
+        // Branches copied after this hold the key as it was then, and no sync follows them.
+        "bound_at": s.created_at,
     })
 }
 

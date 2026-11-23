@@ -374,13 +374,17 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 [ "$EARLY_GOT" = "site feature 1" ] || { echo "feature 1's earlier push should serve it at $EARLY, not '$EARLY_GOT'"; exit 1; }
+# On its own copy of the project's Redis (roll apps' rollback of that build with the copy's
+# variables, taking no traffic).
+EARLY_OWN=$(api GET "/v1/previews/$GPV" | jq_ "','.join(([e for e in d.get('earlier', []) if e['service'] == 'site'] + [{}])[0].get('own_data', []))")
+case ",$EARLY_OWN," in *,redis,*) ;; *) echo "feature 1's earlier push should run on its own copy of the Redis data: '$EARLY_OWN'"; exit 1;; esac
 GCOUNT=$(git_preview | python3 -c "import sys,ast; print(len(ast.literal_eval(sys.stdin.read())))")
 [ "$GCOUNT" = 1 ] || { echo "the same push twice should keep one preview: $(git_preview)"; exit 1; }
 gitc push -q origin :refs/heads/feature
 hook_push 0000000000000000000000000000000000000000 "" >/dev/null
 for _ in $(seq 1 240); do [ "$(git_preview)" = "[]" ] && break; sleep 0.5; done
 [ "$(git_preview)" = "[]" ] || { echo "deleting the branch should delete its preview: $(git_preview)"; exit 1; }
-GIT_SAID="made and serving in $((T8 - T7)) ms; moved by the next push (the same preview), the first push's build still serving at its own deployment URL; deleted with the branch"
+GIT_SAID="made and serving in $((T8 - T7)) ms; moved by the next push (the same preview), the first push's build still serving at its own deployment URL, on its own copy of the data ($EARLY_OWN); deleted with the branch"
 
 say "a pull request of the Git URL service: a same-repo one names its branch's preview; a fork's runs only once a writer approves its head; a close deletes it"
 pr_event() { # pr_event <action> <number> <head branch> <sha> <head repo id> [hook]: GitHub's pull_request event

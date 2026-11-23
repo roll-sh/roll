@@ -58,7 +58,7 @@ impl Api {
 
     /// Call a product's route as the operator: its status and JSON answer, whatever the status.
     /// Runs on the store's blocking threads.
-    fn call_status(&self, method: Method, path: &str, body: Option<Json>) -> roll_secrets::Result<(axum::http::StatusCode, Json)> {
+    pub(crate) fn call_status(&self, method: Method, path: &str, body: Option<Json>) -> roll_secrets::Result<(axum::http::StatusCode, Json)> {
         self.call_status_as(method, path, body, |e| {
             e.insert(roll_auth::Operator);
         })
@@ -1429,6 +1429,11 @@ fn closed_consumer(project: &str, env: &str) -> String {
     format!("apps:{project}/{env}")
 }
 
+/// `Values.links` as roll apps' `SecretVar::link`: each linked key's `(kind, ref)`.
+fn app_links(links: Vec<roll_secrets::Linked>) -> std::collections::HashMap<String, (String, String)> {
+    links.into_iter().map(|l| (l.name, (l.kind, l.r#ref))).collect()
+}
+
 /// A CA kept no closer than this to its end: a newer one is asked for, and apps redeploys to it.
 const CA_RENEW_MS: i64 = 3 * 3_600_000;
 
@@ -1480,14 +1485,15 @@ impl apps_control::integrations::SecretSource for ForApps {
             if let Some(k) = v.dynamic.first().filter(|_| !untrusted) {
                 anyhow::bail!("{k} in {env} is a dynamic credential, which ends with its lease: link it as managed or live for a service");
             }
-            // Linked keys are addresses as rolld sees them: apps rewrites them for the container.
-            let linked: std::collections::HashSet<String> = v.linked.into_iter().collect();
+            // Linked keys are addresses as rolld sees them: apps rewrites them for the container,
+            // and leaves out of an environment with data of its own those that reach what it branched.
+            let links = app_links(v.links);
             // Sensitive keys (and keys holding one through a reference) are flagged: apps seals
             // them and never shows them, not even to whoever may reveal the environment.
             let sensitive: std::collections::HashSet<String> = v.sensitive.into_iter().collect();
             // Link fields that aren't credentials (a host, a port): apps' logs may show these.
             let plain: std::collections::HashSet<String> = v.plain.into_iter().collect();
-            Ok(v.values.into_iter().map(|(name, value)| apps_control::integrations::SecretVar { binding: None, linked: linked.contains(&name), sensitive: sensitive.contains(&name), plain: plain.contains(&name), value: value.expose().to_string(), name }).collect())
+            Ok(v.values.into_iter().map(|(name, value)| apps_control::integrations::SecretVar { binding: None, link: links.get(&name).cloned(), sensitive: sensitive.contains(&name), plain: plain.contains(&name), value: value.expose().to_string(), name }).collect())
         })
         .await?
     }
@@ -1512,8 +1518,8 @@ impl apps_control::integrations::SecretSource for ForApps {
             // (`values_without_bound`), and so is a key whose value references one.
             if asked.as_deref() == Some("") {
                 let v = secrets.values_without_bound(&project, &env, "/", &format!("app:{service}"), false, &roll_secrets::Caller::consumer(&format!("app:{service}")))?;
-                let sensitive: std::collections::HashSet<String> = v.sensitive.into_iter().collect();
-                let vars = v.values.into_iter().map(|(name, value)| apps_control::integrations::SecretVar { binding: None, linked: false, sensitive: sensitive.contains(&name), plain: false, value: value.expose().to_string(), name }).collect();
+                let (sensitive, links): (std::collections::HashSet<String>, _) = (v.sensitive.into_iter().collect(), app_links(v.links));
+                let vars = v.values.into_iter().map(|(name, value)| apps_control::integrations::SecretVar { binding: None, link: links.get(&name).cloned(), sensitive: sensitive.contains(&name), plain: false, value: value.expose().to_string(), name }).collect();
                 return Ok(apps_control::integrations::ClosedSecrets { vars, notice: Some(format!("keys bound to hosts withheld: no one who may reveal {env} closed it")) });
             }
             let maker = match asked {
@@ -1545,13 +1551,13 @@ impl apps_control::integrations::SecretSource for ForApps {
                     .collect();
                 // The rest without decrypting a bound key, or resolving a reference to one.
                 let v = secrets.values_without_bound(&project, &env, "/", &format!("app:{service}"), false, &caller)?;
-                let (linked, sensitive, plain): (std::collections::HashSet<String>, std::collections::HashSet<String>, std::collections::HashSet<String>) = (v.linked.into_iter().collect(), v.sensitive.into_iter().collect(), v.plain.into_iter().collect());
+                let (links, sensitive, plain): (_, std::collections::HashSet<String>, std::collections::HashSet<String>) = (app_links(v.links), v.sensitive.into_iter().collect(), v.plain.into_iter().collect());
                 let mut vars: Vec<apps_control::integrations::SecretVar> = v
                     .values
                     .into_iter()
-                    .map(|(name, value)| apps_control::integrations::SecretVar { binding: None, linked: linked.contains(&name), sensitive: sensitive.contains(&name), plain: plain.contains(&name), value: value.expose().to_string(), name })
+                    .map(|(name, value)| apps_control::integrations::SecretVar { binding: None, link: links.get(&name).cloned(), sensitive: sensitive.contains(&name), plain: plain.contains(&name), value: value.expose().to_string(), name })
                     .collect();
-                vars.extend(bound.into_iter().map(|(name, hosts)| apps_control::integrations::SecretVar { binding: Some(hosts), linked: false, sensitive: false, plain: false, value: "rlph_(made at deploy)".into(), name }));
+                vars.extend(bound.into_iter().map(|(name, hosts)| apps_control::integrations::SecretVar { binding: Some(hosts), link: None, sensitive: false, plain: false, value: "rlph_(made at deploy)".into(), name }));
                 return Ok(apps_control::integrations::ClosedSecrets { vars, notice: None });
             }
             // Two days: past one CA renewal (they're made again with each), so an environment
@@ -1564,8 +1570,8 @@ impl apps_control::integrations::SecretSource for ForApps {
                 // instead), the rest read as they would be, and said. Any other refusal surfaces.
                 Err(roll_secrets::Error::MakerUnreachable(why)) => {
                     let v = secrets.values_without_bound(&project, &env, "/", &format!("app:{service}"), false, &caller)?;
-                    let sensitive: std::collections::HashSet<String> = v.sensitive.into_iter().collect();
-                    let vars = v.values.into_iter().map(|(name, value)| apps_control::integrations::SecretVar { binding: None, linked: false, sensitive: sensitive.contains(&name), plain: false, value: value.expose().to_string(), name }).collect();
+                    let (sensitive, links): (std::collections::HashSet<String>, _) = (v.sensitive.into_iter().collect(), app_links(v.links));
+                    let vars = v.values.into_iter().map(|(name, value)| apps_control::integrations::SecretVar { binding: None, link: links.get(&name).cloned(), sensitive: sensitive.contains(&name), plain: false, value: value.expose().to_string(), name }).collect();
                     let notice = format!("keys bound to hosts withheld: {maker}, who closed {env}, can no longer reveal it ({why}); whoever may sets its egress again to turn them back on");
                     return Ok(apps_control::integrations::ClosedSecrets { vars, notice: Some(notice) });
                 }
@@ -1582,7 +1588,7 @@ impl apps_control::integrations::SecretSource for ForApps {
             if let Some(k) = v.dynamic.first().filter(|_| !untrusted) {
                 anyhow::bail!("{k} in {env} is a dynamic credential, which ends with its lease: link it as managed or live for a service");
             }
-            let linked: std::collections::HashSet<String> = v.linked.into_iter().collect();
+            let links = app_links(v.links);
             let sensitive: std::collections::HashSet<String> = v.sensitive.into_iter().collect();
             let plain: std::collections::HashSet<String> = v.plain.into_iter().collect();
             // Each placeholder's binding: what its staleness is judged by.
@@ -1595,7 +1601,7 @@ impl apps_control::integrations::SecretSource for ForApps {
                     (p.key.clone(), h.join(","))
                 })
                 .collect();
-            Ok(apps_control::integrations::ClosedSecrets { vars: v.values.into_iter().map(|(name, value)| apps_control::integrations::SecretVar { binding: bindings.get(&name).cloned(), linked: linked.contains(&name), sensitive: sensitive.contains(&name), plain: plain.contains(&name), value: value.expose().to_string(), name }).collect(), notice: None })
+            Ok(apps_control::integrations::ClosedSecrets { vars: v.values.into_iter().map(|(name, value)| apps_control::integrations::SecretVar { binding: bindings.get(&name).cloned(), link: links.get(&name).cloned(), sensitive: sensitive.contains(&name), plain: plain.contains(&name), value: value.expose().to_string(), name }).collect(), notice: None })
         })
         .await?
     }
@@ -2148,6 +2154,25 @@ impl code_control::SecretEnv for ForCode {
         .await?
     }
 
+    /// As roll secrets reads for `by` now (`values_as_maker`: the check and the read in one), what a
+    /// sandbox it copied into starts with. Never a protected environment or an unresolved reference.
+    async fn reveal_as(&self, by: &str, project: &str, environment: &str, consumer: &str) -> anyhow::Result<Vec<(String, String)>> {
+        let (secrets, _) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting"))?;
+        let (by, project, environment, consumer) = (by.to_string(), project.to_string(), environment.to_string(), consumer.to_string());
+        tokio::task::spawn_blocking(move || {
+            let (slug, path) = environment.split_once(':').unwrap_or((&environment, "/"));
+            let v = secrets.values_as_maker(&by, &project, slug, path, &consumer).map_err(|e| match e {
+                roll_secrets::Error::Forbidden(m) | roll_secrets::Error::NotFound(m) | roll_secrets::Error::MakerUnreachable(m) => code_control::Refused(m).into(),
+                e => anyhow::Error::from(e),
+            })?;
+            if let Some(p) = v.problems.first() {
+                anyhow::bail!("{} of {slug} didn't resolve ({}: {})", v.problems.len(), p.key, p.problem);
+            }
+            Ok(v.values.into_iter().map(|(k, v)| (k, v.expose().to_string())).collect())
+        })
+        .await?
+    }
+
     /// The first project with the repo on its canvas that may reach it and has validity checks on
     /// asks (and keeps, and audits, as `roll:code`); none: nothing is asked.
     async fn validity(&self, repo: &str, found: Vec<(String, Option<String>)>) -> anyhow::Result<Vec<code_control::model::CredentialValidity>> {
@@ -2178,7 +2203,7 @@ impl code_control::SecretEnv for ForCode {
         tokio::task::spawn_blocking(move || {
             let mut out = Vec::new();
             for p in ws.projects_of(roll_workspace::Kind::Repo.as_str(), &r)?.into_iter().filter(|p| secrets.counts_for_repo(p, &r)) {
-                out.extend(secrets.leak_matches(&p, &candidates)?.into_iter().map(|(i, l)| (i, l.key, l.environment, l.path)));
+                out.extend(secrets.leaks_in_code(&p, &candidates, &r)?.into_iter().map(|(i, l)| (i, l.key, l.environment, l.path)));
             }
             Ok(out)
         })
@@ -2209,6 +2234,40 @@ impl code_control::SecretEnv for ForCode {
         .map_err(|e| code_control::Error::Internal(e.into()))?
         .map_err(for_code)?;
         Ok(code_control::StoredCredential { project: s.project, environment: s.environment, path: s.path, change: s.change, request: s.request })
+    }
+
+    /// An owner's reviewer key that's a `roll://` reference: bound to whoever sets it
+    /// (`Secrets::bind_ref` for `code:review:<owner>`), never a runtime read.
+    async fn bind_owner_key(&self, owner: &str, reference: &str, asker: &code_control::SecretsAsker) -> code_control::Result<String> {
+        let secrets = self.secrets()?;
+        let (owner, reference, asker) = (owner.to_string(), reference.to_string(), asker.clone());
+        tokio::task::spawn_blocking(move || {
+            let caller = secrets.caller_of(asker.operator, asker.user.as_ref(), asker.grant.as_ref()).map_err(|e| match e {
+                // A roll code owner token is no one to roll secrets.
+                Error::Unauthorized(_) => code_control::Error::Forbidden("a roll:// key is set by someone roll secrets knows: a session, the operator token or a roll token (rlt_…) that may reveal it".into()),
+                e => for_code(e),
+            })?;
+            let maker = secrets.bind_ref(&roll_secrets::ResourceRef::code_owner(&owner), &reference, &caller).map_err(|e| match e {
+                roll_secrets::Refusal::NotAllowed(_) | roll_secrets::Refusal::MakerUnreachable(_) | roll_secrets::Refusal::NotTrusted(_) | roll_secrets::Refusal::Protected(_) => code_control::Error::Forbidden(e.to_string()),
+                roll_secrets::Refusal::Failed(e) => for_code(e),
+                e => code_control::Error::Invalid(e.to_string()),
+            })?;
+            Ok(serde_json::to_value(&maker).map_err(|e| code_control::Error::Internal(e.into()))?.as_str().unwrap_or_default().to_string())
+        })
+        .await
+        .map_err(|e| code_control::Error::Internal(e.into()))?
+    }
+
+    /// That key for a review, as its maker may read it now (audited as `code:review:<owner>`).
+    async fn owner_key(&self, owner: &str, reference: &str, maker: &str) -> anyhow::Result<code_control::CredentialValue> {
+        let secrets = self.secrets().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let maker: roll_secrets::Maker = serde_json::from_value(serde_json::Value::String(maker.to_string()))?;
+        let (owner, reference) = (owner.to_string(), reference.to_string());
+        tokio::task::spawn_blocking(move || {
+            let v = secrets.resolve_as(&roll_secrets::ResourceRef::code_owner(&owner), &reference, &maker).map_err(|e| anyhow::anyhow!("{e}"))?;
+            Ok(code_control::CredentialValue(v.value.expose().to_string()))
+        })
+        .await?
     }
 }
 
@@ -2600,7 +2659,7 @@ mod tests {
         let apps = super::ForApps::default();
         apps.set(secrets.clone(), ws.clone());
         let got = apps.resolve(&project, "production", "svc_web").await.unwrap();
-        assert_eq!(got.iter().map(|v| (v.name.as_str(), v.value.as_str(), v.linked, v.sensitive)).collect::<Vec<_>>(), [("DB_URL", "postgres://db/shop", false, false), ("PAYMENTS_KEY", "sk_live_x", false, true)]);
+        assert_eq!(got.iter().map(|v| (v.name.as_str(), v.value.as_str(), v.link.is_some(), v.sensitive)).collect::<Vec<_>>(), [("DB_URL", "postgres://db/shop", false, false), ("PAYMENTS_KEY", "sk_live_x", false, true)]);
         assert!(apps.resolve(&project, "pr-9", "svc_web").await.unwrap().is_empty());
         assert!(apps.resolve("prj_gone", "production", "svc_web").await.unwrap().is_empty());
         // Seeing them in the clear in apps is roll secrets' call: the operator may, a stranger's

@@ -88,6 +88,7 @@ interface Form {
   alertCpu: string;
   /** Alerts on its own gauges, one a line (`queue_depth > 100 for 5m`). */
   alertMetrics: string;
+  alertAnomaly: boolean;
   rolloutSteps: string;
   rolloutStep: string;
   rolloutErrors: string;
@@ -203,6 +204,7 @@ export function formOf(s: Service): Form {
     alertLogCount: str(s.run.alerts?.log_count ?? 10),
     alertCpu: str(s.run.alerts?.cpu_pct ?? 0),
     alertMetrics: (s.run.alerts?.metrics ?? []).map(metricAlertLine).join("\n"),
+    alertAnomaly: !!s.run.alerts?.anomaly,
     rolloutSteps: (s.run.rollout?.steps ?? []).join(", "),
     rolloutStep: str(s.run.rollout?.step_s),
     rolloutErrors: str(s.run.rollout?.error_pct),
@@ -313,8 +315,9 @@ export function patchOf(s: Service, f: Form): ServicePatch {
     run.oidc_audiences = list.length ? list : null;
   }
   if (f.memoryTarget !== before.memoryTarget) run.memory_target = num(f.memoryTarget);
-  if (f.alertMemory !== before.alertMemory || f.alertErrors !== before.alertErrors || f.alertP95 !== before.alertP95 || f.alertCapacity !== before.alertCapacity || f.alertLog !== before.alertLog || f.alertLogCount !== before.alertLogCount || f.alertCpu !== before.alertCpu || f.alertMetrics !== before.alertMetrics)
+  if (f.alertMemory !== before.alertMemory || f.alertErrors !== before.alertErrors || f.alertP95 !== before.alertP95 || f.alertCapacity !== before.alertCapacity || f.alertLog !== before.alertLog || f.alertLogCount !== before.alertLogCount || f.alertCpu !== before.alertCpu || f.alertMetrics !== before.alertMetrics || f.alertAnomaly !== before.alertAnomaly)
     run.alerts = {
+      ...(f.alertAnomaly ? { anomaly: true } : {}),
       cpu_pct: Number(f.alertCpu) || 0,
       metrics: metricAlerts(f.alertMetrics),
       memory_pct: Number(f.alertMemory) || 0,
@@ -874,6 +877,12 @@ export function SettingsTab({
                     </Field>
                   </>
                 )}
+                <Field label="Alert when it's unusual for the hour" hint="traffic dropping, errors or p95 rising against the same hour over the last four weeks">
+                  <select value={form.alertAnomaly ? "on" : "off"} onChange={(e) => set("alertAnomaly", e.target.value === "on")} className={`${input} w-full`}>
+                    <option value="off">Off</option>
+                    <option value="on">On</option>
+                  </select>
+                </Field>
                 <Field label="Alert: over capacity (%)" hint="of five minutes' requests finding every instance busy at max instances; 0 off">
                   {t("alertCapacity", "10")}
                 </Field>

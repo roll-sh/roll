@@ -440,7 +440,7 @@ impl RollResources {
     /// now, and (`label`: the credential's name in the product) each credential issued once,
     /// its handles kept to revoke, and which variables those are. None: a kind that has no
     /// provider.
-    async fn provided(&self, kind: LinkKind, r#ref: &str, label: Option<String>) -> anyhow::Result<Option<Provided>> {
+    async fn provided(&self, kind: LinkKind, r#ref: &str, label: Option<String>, options: apps_control::integrations::LinkOptions) -> anyhow::Result<Option<Provided>> {
         use roll_secrets::links::{Link, Mode};
         let Some(p) = crate::secrets::link_provider(&self.products, kind.as_str()) else { return Ok(None) };
         let r = r#ref.to_string();
@@ -452,7 +452,7 @@ impl RollResources {
             let mut made = || -> anyhow::Result<()> {
                 for (field, mode) in p.suggested_for(&r) {
                     let Some(f) = fields.iter().find(|f| f.field == field) else { continue };
-                    let link = Link { kind: kind.as_str().to_string(), r#ref: r.clone(), field: field.to_string(), mode, options: Default::default() };
+                    let link = Link { kind: kind.as_str().to_string(), r#ref: r.clone(), field: field.to_string(), mode, options: options.clone() };
                     let value = match (mode, &label) {
                         (Mode::Live, _) => p.read(&r, field, &link)?,
                         // Listing what a link sets: only what's read, never a credential made.
@@ -646,7 +646,7 @@ impl Resources for RollResources {
                 })
                 .await
             }
-            LinkKind::Bucket | LinkKind::Stream | LinkKind::Nosql | LinkKind::Search | LinkKind::Queue => match self.provided(kind, r#ref, None).await? {
+            LinkKind::Bucket | LinkKind::Stream | LinkKind::Nosql | LinkKind::Search | LinkKind::Queue => match self.provided(kind, r#ref, None, Default::default()).await? {
                 Some(p) => Ok(p.vars),
                 None => anyhow::bail!("links to {} aren't wired on this node yet", kind.as_str()),
             },
@@ -657,16 +657,49 @@ impl Resources for RollResources {
     /// A bucket's, a stream's or a search cluster's link gets credentials of its own (a key named
     /// for the service; a search key has data access only, never the cluster's password), made once, revoked when the link goes; only those are kept with the link, and
     /// what's read (an endpoint, NoSQL's login, a database's URL) is read again at each deploy.
-    async fn link(&self, kind: LinkKind, r#ref: &str, service: &str) -> anyhow::Result<Option<apps_control::integrations::Minted>> {
+    async fn link(&self, kind: LinkKind, r#ref: &str, service: &str, options: &apps_control::integrations::LinkOptions) -> anyhow::Result<Option<apps_control::integrations::Minted>> {
         if !matches!(kind, LinkKind::Bucket | LinkKind::Stream | LinkKind::Nosql | LinkKind::Search | LinkKind::Queue) {
             return Ok(None);
         }
-        let Some(p) = self.provided(kind, r#ref, Some(format!("roll apps {service}"))).await? else { return Ok(None) };
+        // Its options (a search key's indices and access) go to the product's provider as roll
+        // secrets' links would give them.
+        let Some(p) = self.provided(kind, r#ref, Some(format!("roll apps {service}")), options.clone()).await? else { return Ok(None) };
         if p.issued.is_empty() {
             return Ok(None);
         }
         let vars = p.vars.into_iter().filter(|(k, _)| p.issued.contains(k)).collect();
         Ok(Some(apps_control::integrations::Minted { vars, kept: p.handles.to_string() }))
+    }
+
+    /// A log drain's data stream on a roll search cluster, through search's console as the
+    /// operator (its owner node on a fleet): roll apps' template for `logs-roll.apps-*` (ECS
+    /// mappings without Elastic's `logs@settings`, so no ILM policy keeps them forever), the
+    /// stream (there already is fine) and its retention.
+    async fn log_stream(&self, cluster: &str, stream: &str, retention_days: u32) -> anyhow::Result<()> {
+        let (api, path, stream) = (self.products.clone(), format!("/v1/search/clusters/{cluster}/request"), stream.to_string());
+        blocking(move || {
+            let console = |method: &str, at: &str, body: serde_json::Value| -> anyhow::Result<(u64, String)> {
+                let (st, v) = api.call_status(axum::http::Method::POST, &path, Some(serde_json::json!({ "method": method, "path": at, "body": body }))).map_err(|e| anyhow::anyhow!("{e}"))?;
+                anyhow::ensure!(st.is_success(), "roll search answered {st}: {}", v["error"].as_str().unwrap_or_default());
+                Ok((v["status"].as_u64().unwrap_or(0), v["body"].as_str().unwrap_or_default().chars().take(300).collect()))
+            };
+            let template = serde_json::json!({
+                "index_patterns": ["logs-roll.apps-*"],
+                "priority": 200,
+                "data_stream": {},
+                "composed_of": ["logs@mappings", "ecs@mappings"],
+                "template": { "settings": { "index.codec": "best_compression", "index.mapping.ignore_malformed": true }, "lifecycle": { "data_retention": "30d" } },
+                "_meta": { "managed_by": "roll apps" },
+            });
+            let (s, b) = console("PUT", "/_index_template/roll-apps-logs", template)?;
+            anyhow::ensure!(s == 200, "its index template: {s} {b}");
+            let (s, b) = console("PUT", &format!("/_data_stream/{stream}"), serde_json::Value::Null)?;
+            anyhow::ensure!(s == 200 || b.contains("resource_already_exists_exception"), "the data stream: {s} {b}");
+            let (s, b) = console("PUT", &format!("/_data_stream/{stream}/_lifecycle"), serde_json::json!({ "data_retention": format!("{retention_days}d") }))?;
+            anyhow::ensure!(s == 200, "its retention: {s} {b}");
+            Ok(())
+        })
+        .await
     }
 
     async fn unlink(&self, kind: LinkKind, r#ref: &str, kept: &str) -> anyhow::Result<()> {
@@ -1035,7 +1068,7 @@ mod tests {
         let products = crate::secrets::Api::default();
         products.set(router);
         let r = RollResources { postgres: None, redis: None, api: (String::new(), None, reqwest::Client::new()), products, branches: None };
-        let m = r.link(LinkKind::Bucket, "photos", "svc_a").await.unwrap().expect("credentials of its own");
+        let m = r.link(LinkKind::Bucket, "photos", "svc_a", &Default::default()).await.unwrap().expect("credentials of its own");
         // Only what it issued is kept with the link: the rest is read at each deploy.
         assert_eq!(m.vars.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(), ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"]);
         let mut vars: std::collections::BTreeMap<String, String> = r.link_vars(LinkKind::Bucket, "photos").await.unwrap().into_iter().collect();
@@ -1074,7 +1107,7 @@ mod tests {
         let products = crate::secrets::Api::default();
         products.set(router);
         let r = RollResources { postgres: None, redis: None, api: (String::new(), None, reqwest::Client::new()), products, branches: None };
-        let m = r.link(LinkKind::Queue, "orders", "svc_a").await.unwrap().expect("a user of its own");
+        let m = r.link(LinkKind::Queue, "orders", "svc_a", &Default::default()).await.unwrap().expect("a user of its own");
         let url = &m.vars.iter().find(|(k, _)| k == "AMQP_URL").expect("AMQP_URL").1;
         assert!(url.starts_with("amqp://roll-") && url.ends_with("@127.0.0.1:5672/orders") && !url.contains("admin"), "{url}");
         r.unlink(LinkKind::Queue, "orders", &m.kept).await.unwrap();
