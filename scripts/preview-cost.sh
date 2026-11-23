@@ -284,6 +284,11 @@ FOLLOWED=$(python3 -c 'import sys,urllib.parse as u; e=dict(l.split("=",1) for l
 [ "$FOLLOWED" = ok ] || { echo "a secrets link to the branched parent should give the branch's password: $FOLLOWED"; exit 1; }
 echo "$APP_ENV" | grep -qx 'PAYMENTS_KEY=sk_test_from_staging_42' || { echo "roll://staging/PAYMENTS_TEST_KEY should be staging's value: $(echo "$APP_ENV" | grep '^PAYMENTS_KEY=' | cut -c1-40)"; exit 1; }
 echo "$APP_ENV" | grep -qxF 'GREETING=hello ${USER}' || { echo "a plain value's \${ should stay as it is: $(echo "$APP_ENV" | grep '^GREETING=')"; exit 1; }
+# Its tasks tenant's own webhook signing keys (roll apps' `tasks` link names them), not production's:
+# its deliveries verify.
+BRANCH_TASKS=$(echo "$P" | jq_ "[r['ref'] for r in d['resources'] if r['kind']=='tasks'][0]")
+TASKS_SK=$(echo "$APP_ENV" | sed -n 's/^ROLL_TASKS_SIGNING_KEY=//p')
+[ -n "$TASKS_SK" ] && [ "$TASKS_SK" = "$(api GET "/t/$BRANCH_TASKS/v1/tasks/keys" | jq_ "d['current']")" ] && [ "$TASKS_SK" != "$(api GET /t/work/v1/tasks/keys | jq_ "d['current']")" ] || { echo "the preview's service should hold its tasks tenant's own signing key"; exit 1; }
 # Its bucket's key reaches only its branch: production's bucket (the parent) refuses it, as every
 # credential a preview's code holds is the branch's own (search's data-only key below too).
 PV_AK=$(echo "$APP_ENV" | sed -n 's/^AWS_ACCESS_KEY_ID=//p'); PV_SK=$(echo "$APP_ENV" | sed -n 's/^AWS_SECRET_ACCESS_KEY=//p')
