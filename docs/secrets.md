@@ -20,7 +20,8 @@ environments that inherit from a base environment instead of copying it.
 - CLI: `roll secrets …` and `roll run` in `crates/roll-cli/src/secrets.rs`.
 - Tests: `crates/roll-secrets/tests/api.rs` (the router in process, on SQLite or Postgres),
   `crates/roll-secrets/tests/nodes.rs` (two stores racing on one database),
-  `crates/roll-cli/tests/secrets.rs` (`roll run`, with `--watch`, against roll secrets in process),
+  `crates/roll-cli/tests/secrets.rs` (`roll run`, with `--watch`, and `roll secrets agent` against
+  roll secrets in process),
   `crates/rolld/tests/secrets.rs` (each product's link against the real rolld, and a sealed start),
   `apps/dashboard/src/lib/secrets-*.test.ts`. `pnpm test:secrets` runs them (`--docker`: on
   Postgres, and the Postgres link).
@@ -476,6 +477,117 @@ dynamic credential is kept only within its lease. It logs in as a workload ident
 signs for the function's own role (`GetWebIdentityToken`, IAM's outbound identity federation: the
 account's own issuer, `sub` the role's ARN), so neither the function nor its configuration holds a
 roll token; `ROLL_TOKEN` otherwise. Not yet run against a real account (its README, "Gaps").
+## A local agent
+`roll secrets agent` is the Lambda extension's surface for every other machine (EC2, ECS, a
+Kubernetes pod's sidecar, a VM, a laptop), as AWS's Secrets Manager Agent is for Secrets Manager.
+It's a subcommand of the `roll` binary (`crates/roll-cli/src/secrets/local_agent.rs`): nothing else
+to install. An app moves between it and the Lambda extension unchanged:
+
+- It listens on **127.0.0.1 only** (`--port`, 2773 by default as the extension's; `0` picks one and
+  prints it). There's no flag for another address: values never leave the machine (or the pod).
+- `GET /secrets?env=production&path=/` answers the folder's values as a JSON object, `GET
+  /secrets/{KEY}?env=…&path=…` one value as text, and `GET /health` 200 while the agent's login
+  works (503 otherwise). `env` defaults to the agent's `-e` (or `ROLL_ENV`, or the directory's
+  setup), `path` to its `--path`, else `/`. Errors are `{"error", "code"}`, naming keys and folders,
+  never a value: 404 `not_found`, 409 `unresolved` (`/secrets` answers a folder only when every key
+  resolves), 403 `withheld` for a key this login isn't given (sensitive, or an untrusted
+  caller's), roll's own 403, 404, 409, 423 and 429, and 502 for anything else. Every answer is
+  `Cache-Control: no-store`.
+- **The request token.** Every request but `/health` carries `X-Roll-Token` (the extension's header)
+  with the contents of `--token-file` (`ROLL_AGENT_TOKEN_FILE`; by default
+  `$XDG_RUNTIME_DIR/roll/agent-token`), which the agent makes with 32 random bytes, 0600, when it
+  doesn't exist (`ROLL_AGENT_TOKEN` gives the value itself instead). Without it, or with another,
+  the answer is a 401 that says nothing more. A server-side request forgery in the app (a URL it
+  fetches for a user) can make it ask `127.0.0.1:2773` but can't add the header, so it reads
+  nothing; a request that came through a proxy (`Forwarded`, `X-Forwarded-For`) is refused too, as
+  AWS's agent refuses it. `/health` needs no token, so a probe can ask it, and says only `ok` and the version.
+- **Logging in.** As every `roll secrets` command does: a workload identity (`ROLL_IDENTITY`) with
+  the platform's OIDC token in a file it refreshes (`ROLL_OIDC_TOKEN_FILE`: Kubernetes' projected
+  service account token, ECS's or EC2's web identity token, GitHub's), read again at each login. The
+  login renews itself a quarter of its life before it ends, and logs in again at once on a 401;
+  a login that fails leaves the current one in use while it lasts. `ROLL_TOKEN` (a scoped token)
+  works too, for development. An identity that's a preview's or a sandbox's reads as untrusted:
+  roll decides that from the login, and the agent asks for nothing more.
+- **The cache.** The first read of a folder goes to roll (`…/values?digest=1`); after that the
+  agent follows the folder's digest (`…/digest?since=&wait=25`, the long poll the Kubernetes
+  operator uses, which decrypts, issues and audits nothing) and reads the values again only when it
+  moved, so a change reaches the agent within a second or so and an app's read is answered from
+  memory. Each answered poll confirms the folder for another `--ttl` (`ROLL_CACHE_TTL`, 300 s); a
+  folder roll hasn't confirmed for that long (roll unreachable) is read from roll again on its next
+  request, and `--ttl 0` turns the cache off. `--cache-size` (`ROLL_CACHE_SIZE`, 1000) caps the
+  folders kept; past it, the one read longest ago goes. `--prefetch production:/,staging:/api`
+  (`ROLL_PREFETCH`) reads folders before the agent answers. A folder with a key that doesn't
+  resolve is never kept. A folder holding a dynamic credential is kept only within its leases: the
+  agent renews each lease when it keeps the folder (that's when it learns when the lease ends), then
+  every 10 minutes or at half its life, as `roll run --watch` does, and stops keeping the folder
+  when a renewal fails or a fifth of the soonest lease's life is left. Nothing is written to disk
+  but the token file.
+- **Logs** go to stderr: a line per request without its query string (`GET /secrets/DATABASE_URL 200
+  1ms`), folders that changed, lease ids and roll's error messages, never a value.
+
+The token file is 0600, so the agent runs as the app's own user (or both get one `ROLL_AGENT_TOKEN`).
+A systemd unit, with the token file under `/run/roll`:
+
+```ini
+[Unit]
+Description=roll secrets agent
+After=network-online.target
+
+[Service]
+Environment=ROLL_API_URL=https://api.roll.example ROLL_IDENTITY=idn_… ROLL_OIDC_TOKEN_FILE=/run/roll/oidc-token
+ExecStart=/usr/local/bin/roll secrets -p shop -e production agent --token-file /run/roll/agent-token --prefetch production:/
+User=shop
+RuntimeDirectory=roll
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+
+A Kubernetes sidecar (the identity is the pod's service account, `system:serviceaccount:shop:web`,
+made as in "Workload identities"; the token file sits in a volume only the pod's two containers
+share, and both run as one user so the app can read it). The kubelet's `httpGet` probes come from
+the node and can't reach the pod's 127.0.0.1: probe with `exec` if the image has a client.
+
+```yaml
+spec:
+  serviceAccountName: web
+  securityContext: { runAsUser: 10001, runAsGroup: 10001 }
+  volumes:
+    - name: roll-oidc
+      projected:
+        sources:
+          - serviceAccountToken: { audience: roll, expirationSeconds: 3600, path: token }
+    - name: roll-agent
+      emptyDir: { medium: Memory }
+  initContainers:
+    - name: roll-secrets-agent
+      image: ghcr.io/roll-sh/roll:latest       # any image with the roll binary
+      restartPolicy: Always                    # a native sidecar: up before the app starts
+      args: [secrets, -p, shop, -e, production, agent, --token-file, /run/roll/agent-token, --prefetch, "production:/"]
+      env:
+        - { name: ROLL_API_URL, value: https://api.roll.example }
+        - { name: ROLL_IDENTITY, value: idn_… }
+        - { name: ROLL_OIDC_TOKEN_FILE, value: /var/run/secrets/roll/token }
+      volumeMounts:
+        - { name: roll-oidc, mountPath: /var/run/secrets/roll, readOnly: true }
+        - { name: roll-agent, mountPath: /run/roll }
+  containers:
+    - name: web
+      image: shop/web
+      volumeMounts:
+        - { name: roll-agent, mountPath: /run/roll, readOnly: true }
+```
+
+The app reads as on Lambda, with the header from the file:
+
+```sh
+curl -sH "X-Roll-Token: $(cat /run/roll/agent-token)" http://127.0.0.1:2773/secrets/DATABASE_URL
+```
+
+Tests: `crates/roll-cli/tests/secrets.rs` (`the_local_agent_answers_only_requests_that_carry_its_token`,
+`a_change_reaches_the_local_agents_cache_through_the_digest`); the identity login's renewal is
+`relogin_tests` in `crates/roll-cli/src/secrets.rs`, which the agent shares.
 ## Customer-managed keys
 A project's data key can be wrapped once more by a KMS key in the customer's own AWS account, as
 Infisical's external KMS does (`PUT …/kms {key: "arn:aws:kms:…"}`, `roll secrets kms set ARN`;
@@ -2784,6 +2896,7 @@ roll secrets history [KEY]   roll secrets rollback --to SEQ | --at TIME
 roll secrets diff    --from development --to staging | --file .env   # two environments, or a local copy
 roll secrets promote --from development --to staging [KEY…]
 roll secrets audit   [--key KEY] [--format csv|jsonl] | verify [--since TIME] [--file F --jwks F]
+roll secrets events  [--kinds K,…] [--env ENV] [--after SEQ] [--follow]   # the events feed ("Events")
 roll secrets syncs   ls | add KIND --target name=value… | run ID | rm ID
 roll secrets sinks   ls | add URL [--from-start] [--format splunk|datadog|bearer] (token on stdin) | rm ID
 roll secrets purge   KEY [--before N]        roll secrets retention 365|forever
@@ -5341,6 +5454,58 @@ every delivery), writes each batch as an object `roll-secrets/audit/<sink>/<deli
   audit `id`, through roll streams in process: consumers react as it's written. A retried batch can
   produce an event again, so a consumer dedupes by key.
 
+### Events
+
+`GET …/events?after=<seq>&limit=&kinds=&environment=` is what happened in a project that someone (an
+agent, a script) acts on, in order after a cursor: a follower asks with its last `next` instead of
+polling health or the audit log. roll MCP's Events serve it as `secrets.event` (poll, push and
+webhooks, with a `project` argument; docs/mcp.md, "Events"). It answers
+`{events: [{seq, at, kind, environment?, key?, data}], next}`; `?latest=1` (never with `after`: 400)
+answers `{events: [], next}` at the head, for a follower that starts from now. `limit` is 1–500
+(default 100).
+
+**The cursor.** An event is an audit row that carries one (`audit.event`, `audit.event_data`), so
+`seq` is the row's number in the project's chain ("Tamper evidence"): taken from `audit_heads` in
+the row's own write, under the head's row lock (on Postgres a second writer waits for it, or loses a
+serializable race and runs again; on SQLite there's one writer). Rows therefore commit in `seq`
+order, and a follower past 7 has already been able to see 6. Never number events from a Postgres
+sequence: sequence values commit out of order, and a follower would skip one forever. `next` is past
+the rows read, the ones a filter left out too. The event's kind and data aren't in the row's hash;
+the row is. `nodes.rs`'s `two_nodes_writing_events_never_leave_a_gap_a_follower_has_passed` checks it
+on Postgres.
+
+**Filtered by the route.** `kinds` (exact, or a family as `request.*`) and `environment` (which needs
+`read` there) are applied here, and every event in an environment the caller may not read (its
+grant asked for each one, as the audit log does) is left out, so roll-access lets a token limited to
+some environments call it (`filters_itself`). `decoy.used` is only for those who see decoys. A
+deleted project's feed stays readable through its recovery window, so a follower sees
+`project.deleted` and `project.recovered`.
+
+**Never a value.** `data` holds names, ids, counts and reasons, and always `actor`; `path` and `keys`
+(when there's more than one; one is `key`) come from the row. Never a value, a hash of one, or its
+length.
+
+| Kind | When | `data` |
+| --- | --- | --- |
+| `secret.leaked` | a stored value turned up in a roll code repository (a change's added lines or a scan; in the project holding the value, once a day for the same keys and repo), or GitHub's secret scanning found a placeholder (`secrets.placeholders.end`) | `repo` (and `project`, the repo's, when the value came from another's shared folder), or `placeholder`, `consumer`, `reason` |
+| `scan.finding` | `roll secrets scan` or roll MCP's credential guard (`POST …/leaks`) matched values: a row per folder | `candidates`, `matched`, `guard` |
+| `rotation.failed` | a managed key's scheduled rotation failed: once as a failing run starts (health's `rotation_failing` until one works) | `reason` |
+| `request.pending` | a change request or a secret request opened | `request`, `type` (`change` or `value`), `expires_at` (a secret request's) |
+| `request.decided` | a change request approved or rejected (once its state moves) or closed; a secret request answered or cancelled | `request`, `type`, `state` |
+| `sync.failed` | a sync's push failed | `sync`, `target`, `reason` |
+| `decoy.used` | a decoy's credential was used (as often as its alert) | `decoy`, `route`, `ip` |
+| `maker.unreachable` | whoever chose a reference, set up placeholders or made a sync can no longer reach it (once a day per maker and consumer) | `maker`, `consumer`, `reason` |
+| `placeholder.echoed` | a host echoed a placeholder's value back | `placeholder`, `consumer`, `host` |
+| `placeholder.wrong_consumer` | another consumer's proxy sent a placeholder | `placeholder`, `consumer`, `by`, `more_by`, `count` |
+| `placeholder.wrong_host` | a placeholder went to hosts its key isn't bound to | `placeholder`, `consumer`, `hosts`, `more_hosts`, `count` |
+| `production.unprotected` | `production` went from protected to not (health's `production_unprotected`) | |
+| `env.deleted`, `env.recovered` | a standard environment was deleted (kept for its recovery window; ephemeral ones, previews', aren't events), or recovered within it | `purge_at` (deleted) |
+| `project.deleted`, `project.recovered` | the workspace project was deleted (its recovery window starts), or recovered | `purge_at` (deleted) |
+
+Rows that don't happen once (a leak found
+on every check of the same change, a maker noticed on every use) are deduplicated through
+`event_marks`, claimed in the row's own write, so two nodes never both write one.
+
 ### Tamper evidence
 
 Audit rows sit in the same database as everything else, so someone who can write it could edit or
@@ -5593,6 +5758,7 @@ isn't in the workspace is 404.
 | `PUT /identities/{id}/jwks` | `{jwks}` | `Identity` (admin; a person's): its pinned keys replaced, its id kept (400 for an `aws` one) |
 | `POST /v1/secrets/login` | `{identity, token}` or `{identity, aws: {method, url, headers, body}}` | `{token, expires_at, project, identity}` (public; `aws`: a signed `GetCallerIdentity`, "AWS IAM") |
 | `GET /audit?env=&key=&actor=&action=&before=&since=&limit=&digests=&format=` | | `AuditEntry[]` newest first, or CSV/JSONL with `format`; `digests=false` leaves out `audit.digest` rows |
+| `GET /events?after=&limit=&kinds=&environment=&latest=` | | `{events: SecretsEvent[], next}` in commit order after the cursor (`limit` 1–500, default 100; `kinds` comma-separated, a family as `request.*`, 400 for an unknown one; `environment` needs read there); `latest=1` answers `{events: [], next}` at the head, 400 with `after` ("Events") |
 | `GET /required` | | `Required[]` |
 | `PUT /required` | `Required[]` | `Required[]` (replaces the list; `admin`) |
 | `GET /shares` | | `Share[]` newest first |
@@ -5748,6 +5914,7 @@ type Environment = {
   branches?: Branch[]; // an ephemeral one's branched resources (absent: none)
 };
 type Branch = { kind: string; parent: string }; // a resource a preview branched: links to it aren't followed
+type Linked = { name: string; kind: string; ref: string }; // a linked key and what it links (Values.links)
 type Followed = { name: string; kind: string; parent: string; field: string }; // a key left out for roll previews to set from its branch
 type Ensure = Omit<NewEnvironment, "slug"> & { replace?: boolean }; // PUT /environments/{env}; branches: replaces the list, absent keeps it
 type NewEnvironment = {
@@ -5782,8 +5949,8 @@ type Change = { seq: number; environment: string; path: string; message: string;
 type ChangeDetail = Change & { items: Item[]; state?: { key: string; path: string; version: number; fp: string; comment: string; tags: string[]; link: Link | null; at: number }[] };
 // what: added | changed | deleted | comment | tags | link | rotated
 type Version = { version: number; seq: number; op: "set" | "delete"; what: string[]; purged: boolean; fp: string | null; comment: string; tags: string[]; link: Link | null; at: number; by: string };
-type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[]; plain?: string[]; withheld: string[]; sensitive: string[]; followed: Followed[]; placeholders?: Placeholder[] }; // placeholders: keys bound to hosts answered as rlph_… in values (a resolve that asked); plain: of linked, keys whose link field isn't a credential (a host, a port), which a consumer hiding secret values in logs may show (every other value is a secret); followed: keys linked to what the ephemeral environment's preview branched, not in values; leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
-type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[]; plain?: string[]; followed: Followed[]; digest?: string }; // plain: as above; digest (with ?digest=1, not with seq or at): the folder's `…/digest`, taken just before this read; leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
+type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[]; links?: Linked[]; plain?: string[]; withheld: string[]; sensitive: string[]; followed: Followed[]; placeholders?: Placeholder[] }; // links: linked's keys with what each links, {name, kind, ref} (the provider's resource kind and the resource; names only), so a consumer that replaces some resources with its own (roll apps' environments with data of their own) leaves out only the keys reaching those; placeholders: keys bound to hosts answered as rlph_… in values (a resolve that asked); plain: of linked, keys whose link field isn't a credential (a host, a port), which a consumer hiding secret values in logs may show (every other value is a secret); followed: keys linked to what the ephemeral environment's preview branched, not in values; leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
+type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[]; links?: Linked[]; plain?: string[]; followed: Followed[]; digest?: string }; // plain, links: as above; digest (with ?digest=1, not with seq or at): the folder's `…/digest`, taken just before this read; leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
 type Grid = { path: string; environments: string[]; rows: { key: string; cells: Record<string, Cell | null>; status: "same" | "different" | "missing"; required: boolean }[]; folders: string[]; previews: number };
 type Reach = { environment: string; path: string; key: string | null; protected: boolean; untrusted: boolean; tokens: Holder[]; identities: Holder[]; syncs: { id: string; kind: string; target: unknown; last_synced_at: number | null }[]; placeholders: { id: string; key: string; consumer: string; maker: string | null; through: string; expires_at: number }[]; projects: string[]; imported_by: string[]; truncated: boolean; readers: { actor: string; last_at: number; reads: number }[]; uncounted: string }; // untrusted: checks, sandboxes and previews may read it (not protected)
 type Holder = { id: string; name: string; actions: Action[]; expires_at: number | null; last_used_at: number | null; created_by: string };
@@ -5858,8 +6025,9 @@ tokens(id PK, project_id, name, hash UNIQUE, prefix, environments, paths, action
 identities(id PK, project_id, name, issuer, audience, subject, claims, environments, paths,
        actions, ttl_minutes, created_at, created_by, last_used_at, last_subject)
 audit(id INTEGER PK, project_id, at, actor, action, env_id, path, keys, summary, ip, approval,
-      seq, hash, digest)  -- UNIQUE (project_id, seq); digest: an audit.digest row's JWS
+      seq, hash, digest, event, event_data)  -- UNIQUE (project_id, seq); digest: an audit.digest row's JWS; event: the feed's kind ("Events")
 audit_heads(project_id PK, seq, hash, at, digest_seq, digest_at, start_seq, mac)  -- mac: HMAC under ROLL_SECRET_KEY
+event_marks(project_id, mark, at, PRIMARY KEY (project_id, mark))  -- events written once a day
 audit_keys(kid PK, sealed_dek, private BLOB, x, legacy, created_at, retired_at, pulled_at)
       -- the digest key (Ed25519): private sealed with kid + legacy as AAD, wiped when pulled;
       -- legacy: issuer kids whose RS256 digests from before it count

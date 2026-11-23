@@ -1,7 +1,7 @@
 //! Forwarding requests to a key's owner, and accepting forwarded requests.
 
 use crate::cluster::{Cluster, Guard, Node, Route};
-use crate::sign::{self, CLIENT_HEADER, Carried, DECIDED_HEADER, HEADERS, HOP_HEADER, UNAVAILABLE_HEADER, VerifyError};
+use crate::sign::{self, ACTING_HEADER, CLIENT_HEADER, Carried, DECIDED_HEADER, HEADERS, HOP_HEADER, UNAVAILABLE_HEADER, VerifyError};
 use crate::{Error, Result};
 use axum::body::{Body, HttpBody};
 use axum::extract::{ConnectInfo, OriginalUri, Request, State};
@@ -30,6 +30,8 @@ pub struct Forwarded {
     pub client: Option<String>,
     /// The grant whose access decision the first node made ([`Decided`]).
     pub decided: Option<String>,
+    /// The grant roll's own work acts for there ([`Acting`]): the gate acts for it here too.
+    pub acting: Option<String>,
 }
 
 /// Set by the node that decided a request's access (roll-access's evaluator, for a grant): a
@@ -37,21 +39,30 @@ pub struct Forwarded {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Decided(pub String);
 
-/// What a forward carries past this node: the client's address and the access decision.
+/// Set by roll-access's evaluator on roll's own work for a grant (`roll_auth::ActAs`, which has no
+/// token to forward): a forward carries it signed, as [`Forwarded::acting`], so the owner acts for
+/// the same grant (and looks it up again, as it is now).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Acting(pub String);
+
+/// What a forward carries past this node: the client's address, the access decision and the grant
+/// roll acts for.
 #[derive(Clone, Debug, Default)]
 struct Carry {
     client: Option<String>,
     decided: Option<String>,
+    acting: Option<String>,
 }
 
 impl Carry {
     fn of(ext: &axum::http::Extensions) -> Carry {
         let decided = ext.get::<Decided>().map(|d| d.0.clone()).or_else(|| ext.get::<Forwarded>().and_then(|f| f.decided.clone()));
-        Carry { client: client_from(ext), decided }
+        let acting = ext.get::<Acting>().map(|a| a.0.clone()).or_else(|| ext.get::<Forwarded>().and_then(|f| f.acting.clone()));
+        Carry { client: client_from(ext), decided, acting }
     }
 
     fn signed(&self) -> Carried<'_> {
-        Carried { client: self.client.as_deref(), decided: self.decided.as_deref() }
+        Carried { client: self.client.as_deref(), decided: self.decided.as_deref(), acting: self.acting.as_deref() }
     }
 }
 
@@ -601,7 +612,7 @@ fn verify_request(cluster: &Cluster, req: &Request) -> std::result::Result<Forwa
     let node = cluster.verify(req.headers(), req.method(), &pq)?;
     let get = |h: &str| req.headers().get(h).and_then(|v| v.to_str().ok()).filter(|s| !s.is_empty());
     let hops = get(HOP_HEADER).map_or(Ok(0), |h| h.parse::<u8>()).map_err(|_| VerifyError::Malformed(HOP_HEADER))?;
-    Ok(Forwarded { node, hops, client: get(CLIENT_HEADER).map(str::to_string), decided: get(DECIDED_HEADER).map(str::to_string) })
+    Ok(Forwarded { node, hops, client: get(CLIENT_HEADER).map(str::to_string), decided: get(DECIDED_HEADER).map(str::to_string), acting: get(ACTING_HEADER).map(str::to_string) })
 }
 
 /// Middleware for the API router (`axum::middleware::from_fn_with_state(cluster,

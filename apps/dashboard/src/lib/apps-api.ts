@@ -146,7 +146,7 @@ export interface Run {
   volume?: { mount: string; size_gb: number; backups?: { every_hours: number; keep: number } };
   /** Metric alerts (`alert.*` events), over five minutes; each 0 is off. */
   /** log_match: text its output holds log_count times in five minutes (alert.log). */
-  alerts?: { memory_pct: number; error_pct: number; p95_ms: number; capacity_pct?: number; log_match?: string; log_count?: number; cpu_pct?: number; metrics?: MetricAlert[] };
+  alerts?: { memory_pct: number; error_pct: number; p95_ms: number; capacity_pct?: number; log_match?: string; log_count?: number; cpu_pct?: number; metrics?: MetricAlert[]; /** The last hour against the same hour of the week over four weeks: alert.anomaly. */ anomaly?: boolean };
   /** Its service level objective: `objective`% of requests not 5xx (and of minutes under `latency_ms` at p95) over `window_days`; `alert.slo` when its budget burns fast. */
   slo?: Slo;
   /** Its own Prometheus endpoint, scraped every 15 s on each running instance (port: the app's own by default). */
@@ -1265,6 +1265,7 @@ export interface NotifyTarget {
 }
 
 export type NotifyEvent =
+  | "alert.anomaly"
   | "deploy.failed"
   | "deploy.base_updated"
   | "rollout.waiting"
@@ -1532,6 +1533,10 @@ export const appsApi = {
   deleteFormSubmission: (id: string, e: string, form: string, sub: string) => call<null>("DELETE", `${env(id, e)}/forms/${encodeURIComponent(form)}/submissions/${encodeURIComponent(sub)}`),
   removeDrain: (project: string, id: string) => call<null>("DELETE", `/v1/apps/projects/${enc(project)}/drains/${enc(id)}`),
   limits: (project: string) => call<SpendLimits>("GET", `/v1/apps/projects/${enc(project)}/limits`),
+  /** The project's image signing rule: cosign public keys and whether image services must meet them. */
+  signing: (project: string) => call<{ keys: string[]; required: boolean }>("GET", `/v1/apps/projects/${enc(project)}/signing`),
+  setSigning: (project: string, body: { keys: string[]; required?: boolean }) => call<{ keys: string[]; required: boolean }>("PUT", `/v1/apps/projects/${enc(project)}/signing`, body),
+  deleteSigning: (project: string) => call<void>("DELETE", `/v1/apps/projects/${enc(project)}/signing`),
   /** A month's use by service and environment (this one by default), most costly first. */
   projectUsage: (project: string, month?: string) => call<ProjectUsage>("GET", `/v1/apps/projects/${enc(project)}/usage${qs({ month })}`),
   setLimits: (project: string, body: { alert_usd: number | null; hard_usd: number | null }) => call<SpendLimits>("PUT", `/v1/apps/projects/${enc(project)}/limits`, body),

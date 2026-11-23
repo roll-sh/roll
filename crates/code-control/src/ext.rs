@@ -48,6 +48,14 @@ pub trait Runner: Send + Sync {
     async fn remove_leftovers(&self) {}
 }
 
+/// Whether the grant rolld's gate put on a request (and a person's session grant beside it) may
+/// read a repo, as roll-access decides it, the repo's workspace projects resolved: a request that
+/// reads many repos at once (`GET /v1/code/search`) keeps only those before it cuts to a page, so
+/// the gate's filter afterwards never empties a page that had answers.
+pub trait GrantReach: Send + Sync {
+    fn reads(&self, ext: &axum::http::Extensions, repo: &str) -> bool;
+}
+
 /// Who asks for an environment's values, as rolld's gate put them on the request: roll secrets
 /// answers as it would a request of theirs to it.
 #[derive(Clone, Copy, Default)]

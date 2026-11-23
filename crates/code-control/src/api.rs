@@ -101,6 +101,8 @@ pub fn router(code: Arc<Code>) -> Router {
         .route("/v1/code/owners/{owner}/tokens", post(create_token).get(list_tokens))
         .route("/v1/code/owners/{owner}/tokens/{id}", axum::routing::delete(revoke_token))
         .route("/v1/code/repos", get(list_repos).post(create_repo))
+        .route("/v1/code/search", get(search_documents))
+        .route("/v1/code/documents/{id}", get(get_document))
         .route(&repo(""), get(get_repo).patch(update_repo).delete(delete_repo))
         .route(&repo("/refs"), get(refs))
         .route(&repo("/landings"), get(landings))
@@ -353,6 +355,29 @@ async fn delete_repo(State(code): S, caller: Caller, Path((owner, repo)): Path<(
 }
 
 // ── reading ──
+
+#[derive(Deserialize)]
+struct SearchQuery {
+    q: String,
+    kinds: Option<String>,
+    limit: Option<usize>,
+}
+
+/// Changes and work items in the caller's own repos that mention `q`: the `search` tool's route
+/// (ChatGPT's deep research), each result with its id for `GET /v1/code/documents/{id}`.
+async fn search_documents(State(code): S, caller: Caller, ext: axum::http::Extensions, Q(q): Q<SearchQuery>) -> Result<Json<Value>> {
+    // A scoped grant (the operator's caller here, narrowed by the gate) keeps only the repos it may
+    // read before the page is cut.
+    let reach = code.grant_reach.get().filter(|_| roll_auth::Grant::on(&ext).is_some()).cloned();
+    let reads = |repo: &str| reach.as_ref().is_none_or(|r| r.reads(&ext, repo));
+    Ok(Json(code.search_documents(&caller, &q.q, q.kinds.as_deref(), q.limit.unwrap_or(20), &reads).await?))
+}
+
+/// One change (`chg_…`) or work item (`wi_…`) of the caller's own repos as a document: the
+/// `fetch` tool's route.
+async fn get_document(State(code): S, caller: Caller, Path(id): Path<String>) -> Result<Json<Value>> {
+    Ok(Json(code.document(&caller, &id).await?))
+}
 
 #[derive(Deserialize)]
 struct LandingsQuery {

@@ -330,6 +330,7 @@ dependencies = [
  "hyper-util",
  "ipnet",
  "object_store",
+ "p256",
  "parking_lot",
  "percent-encoding",
  "pg-storage",

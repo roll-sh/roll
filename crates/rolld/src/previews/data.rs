@@ -341,6 +341,18 @@ impl Brancher for Redis {
         self.branch(parent, name, mode).await
     }
 
+    /// A branch of the preview's own branch: an earlier push's data (redis-control branches any
+    /// database, and keeps a parent's history while its branches use it).
+    async fn snapshot(&self, _parent: &str, branch: &str, name: &str) -> anyhow::Result<Option<Branched>> {
+        self.branch(branch, name, Mode::Branch).await.map(Some)
+    }
+
+    /// Its parent is the preview's branch it was copied from (gone after a reset: the guard then
+    /// reads the copy's own `parent_id`).
+    async fn delete_snapshot(&self, _parent: &str, from: &str, snapshot: &str, _kept: Option<&str>, name: &str) -> anyhow::Result<()> {
+        self.delete(from, snapshot, name).await
+    }
+
     async fn delete(&self, parent: &str, branch: &str, name: &str) -> anyhow::Result<()> {
         let d = match self.0.get(&format!("/v1/redis/databases/{}", seg(branch))).await {
             Ok(d) => d,
@@ -459,6 +471,17 @@ impl Brancher for Nosql {
         }
     }
 
+    /// A branch of the preview's own database: an earlier push's data. A NoSQL branch inherits
+    /// its parent's masking policy, so the copy reads masked as the preview's branch does (and
+    /// goes when the rules change).
+    async fn snapshot(&self, _parent: &str, branch: &str, name: &str) -> anyhow::Result<Option<Branched>> {
+        self.branch(branch, name, Mode::Branch).await.map(Some)
+    }
+
+    async fn delete_snapshot(&self, _parent: &str, from: &str, snapshot: &str, _kept: Option<&str>, name: &str) -> anyhow::Result<()> {
+        self.delete(from, snapshot, name).await
+    }
+
     async fn delete(&self, parent: &str, branch: &str, name: &str) -> anyhow::Result<()> {
         let d = match self.0.get(&format!("/v1/nosql/databases/{}", seg(branch))).await {
             Ok(d) => d,
@@ -564,6 +587,17 @@ impl Brancher for Bucket {
         self.branch(parent, name, mode).await
     }
 
+    /// A branch of the preview's branch bucket (reads resolve through every ancestor), with a
+    /// key of its own: an earlier push's files as its head left them. roll storage refuses to
+    /// delete a bucket with branches, so copies always go first (eviction, reset, teardown).
+    async fn snapshot(&self, _parent: &str, branch: &str, name: &str) -> anyhow::Result<Option<Branched>> {
+        self.branch(branch, name, Mode::Branch).await.map(Some)
+    }
+
+    async fn delete_snapshot(&self, _parent: &str, from: &str, snapshot: &str, _kept: Option<&str>, name: &str) -> anyhow::Result<()> {
+        self.delete(from, snapshot, name).await
+    }
+
     async fn delete(&self, parent: &str, branch: &str, name: &str) -> anyhow::Result<()> {
         anyhow::ensure!(branch == bucket_name(parent, name) && branch != parent, "refusing to delete bucket {branch}: it isn't {parent}'s branch {name}");
         let b = match self.0.get(&format!("/v1/storage/buckets/{}", seg(branch))).await {
@@ -657,6 +691,17 @@ impl Brancher for Stream {
     async fn reset(&self, parent: &str, branch: &str, _kept: Option<&str>, name: &str, mode: Mode) -> anyhow::Result<Branched> {
         self.delete(parent, branch, name).await?;
         self.branch(parent, name, mode).await
+    }
+
+    /// A branch of the preview's own stream (any stream branches: a new stream whose chunk rows
+    /// name the parent's objects, independent after), with a key of its own.
+    async fn snapshot(&self, _parent: &str, branch: &str, name: &str) -> anyhow::Result<Option<Branched>> {
+        self.branch(branch, name, Mode::Branch).await.map(Some)
+    }
+
+    /// Its `branch_of` is the preview's stream it was copied from (unchecked once that's gone).
+    async fn delete_snapshot(&self, _parent: &str, from: &str, snapshot: &str, _kept: Option<&str>, name: &str) -> anyhow::Result<()> {
+        self.delete(from, snapshot, name).await
     }
 
     async fn delete(&self, parent: &str, branch: &str, name: &str) -> anyhow::Result<()> {
@@ -1007,6 +1052,21 @@ impl Brancher for Search {
         self.retire(parent, branch, kept).await?;
         self.delete(parent, branch, name).await?;
         self.branch(parent, name, mode).await
+    }
+
+    /// A branch of the preview's own branch cluster (roll search branches any cluster; its
+    /// manifests share the branch's segments, the masked ones rewritten and expunged, never the
+    /// parent's originals), with a data key of its own. Never with `at`: a point-in-time branch
+    /// replays the log, which could rebuild what masking removed.
+    async fn snapshot(&self, _parent: &str, branch: &str, name: &str) -> anyhow::Result<Option<Branched>> {
+        self.branch(branch, name, Mode::Branch).await.map(Some)
+    }
+
+    /// As the preview's branch goes: its data key revoked, its password changed, then deleted;
+    /// its parent is the branch it was copied from (`parent_id` stays when that's gone).
+    async fn delete_snapshot(&self, _parent: &str, from: &str, snapshot: &str, kept: Option<&str>, name: &str) -> anyhow::Result<()> {
+        self.retire(from, snapshot, kept).await?;
+        self.delete(from, snapshot, name).await
     }
 
     /// roll search keeps a deleted cluster restorable with its keys and password: so first the

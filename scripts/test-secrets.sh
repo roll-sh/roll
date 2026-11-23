@@ -18,7 +18,7 @@ source scripts/lib/gate.sh
 
 RUST_PATHS=(crates/roll-secrets crates/roll-secrets-ref crates/roll-oidc crates/roll-workspace crates/rolld/src/secrets.rs crates/rolld/src/secrets
             crates/rolld/tests/secrets.rs crates/rolld/tests/auth.rs crates/roll-access/src/catalog.rs crates/roll-access/src/prefix-reviewed.txt
-            crates/roll-cli/src/secrets.rs crates/roll-cli/src/mask.rs crates/roll-cli/tests/secrets.rs
+            crates/roll-cli/src/secrets.rs crates/roll-cli/src/secrets crates/roll-cli/src/mask.rs crates/roll-cli/tests/secrets.rs
             Cargo.toml Cargo.lock scripts/test-secrets.sh scripts/lib/gate.sh)
 WEB_PATHS_SECRETS=(apps/dashboard/src/lib apps/dashboard/src/components/secrets apps/dashboard/package.json apps/dashboard/vitest.config.mts
                    pnpm-lock.yaml scripts/test-secrets.sh)

@@ -425,6 +425,8 @@ const OPEN_WORLD: [&str; 9] = ["request_ai_review", "create_agent_thread", "send
 /// the routers declare to a row here or a line in `no-tool.txt` saying why it has no tool.
 pub const ROUTES: &[(&str, &str, &str)] = &[
     ("list_repos", "GET", "/v1/code/repos"),
+    ("search", "GET", "/v1/code/search"),
+    ("fetch", "GET", "/v1/code/documents/{id}"),
     ("search_code", "GET", "/v1/code/repos/{owner}/{repo}/search"),
     ("read_file", "GET", "/v1/code/repos/{owner}/{repo}/blob/{rev}/{*path}"),
     ("read_file", "GET", "/v1/code/repos/{owner}/{repo}"),
@@ -546,6 +548,22 @@ fn every_tool() -> Vec<Value> {
             "The repositories this caller can read, as `owner/repo` (`full_name`) with each one's default branch and description: where to start before naming a repo.",
             json!({ "owner": s("Only this owner's repositories") }),
             &[],
+            true,
+        ),
+        tool(
+            "search",
+            "Search changes and work items",
+            "Changes and work items in your own repos whose title or text mentions the query (any case), most recently updated first, and with kinds=files the files whose content holds it (from each repo's index; repos not searched are listed in skipped): each with an id for fetch, a title, a URL and a snippet. For one repo's code with regex or paths, use search_code.",
+            json!({ "query": s("Words to look for (1-200 characters; 3 or more for files)"), "kinds": s("Comma-separated: changes, work, files (default changes,work)") }),
+            &["query"],
+            true,
+        ),
+        tool(
+            "fetch",
+            "Fetch a change or work item",
+            "One search result in full: its title, whole text (a file: the lines around its match), URL and metadata (repo, number, state, author or labels; a file's path, revision and lines).",
+            json!({ "id": s("An id from search (chg_…, wi_… or f.…)") }),
+            &["id"],
             true,
         ),
         tool(
@@ -1353,6 +1371,14 @@ async fn run(c: &Call<'_>, name: &str, args: &Value) -> std::result::Result<Outc
             pass(c.get(&format!("{base}/tree/{}/{path}", seg(&rev))).await)
         }
         "list_repos" => pass(c.get(&format!("/v1/code/repos{}", query(&[("owner", opt(args, "owner"))]))).await),
+        "search" => {
+            let q = str_arg(args, "query").ok_or_else(|| fail("query is required"))?;
+            pass(c.get(&format!("/v1/code/search{}", query(&[("q", Some(q.to_string())), ("kinds", opt(args, "kinds"))]))).await)
+        }
+        "fetch" => {
+            let id = str_arg(args, "id").ok_or_else(|| fail("id is required"))?;
+            pass(c.get(&format!("/v1/code/documents/{}", seg(id))).await)
+        }
         "log" => {
             let base = c.repo(args)?;
             let limit = opt(args, "limit").or(Some("30".into()));

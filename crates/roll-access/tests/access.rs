@@ -119,7 +119,7 @@ struct Daemon {
 /// What the stand-in products saw: the operator's marker and a grant.
 fn seen(ext: &axum::http::Extensions) -> Value {
     let approved = roll_auth::Approved::on(ext).map(|a| json!({ "id": &*a.id, "by": a.by.iter().map(|b| &**b).collect::<Vec<_>>(), "until": a.until }));
-    json!({ "operator": roll_auth::Operator::on(ext), "grant": roll_auth::Grant::on(ext).map(|g| g.id.to_string()), "approved": approved })
+    json!({ "operator": roll_auth::Operator::on(ext), "grant": roll_auth::Grant::on(ext).map(|g| g.id.to_string()), "approved": approved, "acting": ext.get::<roll_cluster::Acting>().map(|a| a.0.clone()) })
 }
 
 fn postgres() -> Router {
@@ -542,14 +542,39 @@ async fn escalation_paths_are_shut() {
     // A signed hop from a node that decided it for this grant: no second approval, and the
     // client's address is the one that node saw. A hop that names another grant is decided again.
     let (fleet, grant) = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "delete": "ask" } }]), json!({ "ip_allow": ["10.1.2.0/24"] })).await;
-    let hop = |decided: &str| Some(roll_cluster::Forwarded { node: "n1".into(), hops: 1, client: Some("10.1.2.3".into()), decided: Some(decided.into()) });
+    let hop = |decided: &str| Some(roll_cluster::Forwarded { node: "n1".into(), hops: 1, client: Some("10.1.2.3".into()), decided: Some(decided.into()), acting: None });
     let (s, out) = d.raw(&fleet, Method::DELETE, "/v1/projects/pa", Body::empty(), &[], hop(&grant)).await;
     assert_eq!((s, out["grant"].as_str()), (StatusCode::OK, Some(grant.as_str())), "{out}");
     let (_, out) = d.raw(&fleet, Method::DELETE, "/v1/projects/pa", Body::empty(), &[], hop("tok_other")).await;
     assert_eq!(out["code"], "approval_pending", "{out}");
-    let stranger = Some(roll_cluster::Forwarded { node: "n1".into(), hops: 1, client: Some("192.0.2.9".into()), decided: Some(grant.clone()) });
+    let stranger = Some(roll_cluster::Forwarded { node: "n1".into(), hops: 1, client: Some("192.0.2.9".into()), decided: Some(grant.clone()), acting: None });
     let (_, out) = d.raw(&fleet, Method::DELETE, "/v1/projects/pa", Body::empty(), &[], stranger).await;
     assert_eq!(out["code"], "ip_not_allowed", "{out}");
+
+    // roll's own work for a grant (ActAs: an MCP Events delivery reading a feed, no token) is marked
+    // for a forward to carry signed, and the owner, acting for the hop's grant again, serves it as
+    // that grant. A token's own request is never marked.
+    let acting = |id: String, hop: Option<roll_cluster::Forwarded>| {
+        let d = &d;
+        async move {
+            let mut req = Request::builder().method(Method::GET).uri("/v1/previews/pv1").body(Body::empty()).unwrap();
+            req.extensions_mut().insert(roll_auth::ActAs(id.as_str().into()));
+            if let Some(f) = hop {
+                req.extensions_mut().insert(f);
+            }
+            let resp = d.router.clone().oneshot(req).await.unwrap();
+            let status = resp.status();
+            (status, serde_json::from_slice::<Value>(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap_or(Value::Null))
+        }
+    };
+    let (viewer, viewer_id) = d.token(json!([{ "product": "previews", "resources": "*", "actions": { "read": "allow" } }]), json!({})).await;
+    let (s, out) = acting(viewer_id.clone(), None).await;
+    assert_eq!((s, out["grant"].as_str(), out["acting"].as_str()), (StatusCode::OK, Some(viewer_id.as_str()), Some(viewer_id.as_str())), "{out}");
+    let (_, out) = d.raw(&viewer, Method::GET, "/v1/previews/pv1", Body::empty(), &[], None).await;
+    assert!(out["grant"].is_string() && out["acting"].is_null(), "{out}");
+    let owner_hop = Some(roll_cluster::Forwarded { node: "n1".into(), hops: 1, client: None, decided: Some(viewer_id.clone()), acting: Some(viewer_id.clone()) });
+    let (s, out) = acting(viewer_id.clone(), owner_hop).await;
+    assert_eq!((s, out["grant"].as_str(), out["acting"].as_str()), (StatusCode::OK, Some(viewer_id.as_str()), Some(viewer_id.as_str())), "on the owner: {out}");
 }
 
 /// An `ask` action waits for a person: approved, the request runs as sent (once); denied, it's

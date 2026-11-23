@@ -425,7 +425,7 @@ first, so they can't hide what runs, and anything that makes or changes credenti
 - A route whose product filters its answer per environment and path itself, asking the caller's
   `Grant` for each finding, can be matched by rules limited to some environments or paths too
   (`Row::filters_itself`): a token for staging would get staging's findings, never production's,
-  rather than a 403. Secrets' health and leak scan have it; secrets' cross-project routes
+  rather than a 403. Secrets' health, leak scan and events feed have it; secrets' cross-project routes
   (`GET /v1/secrets/search`, `GET /v1/secrets/findings`) take any grant and keep each project's
   results only where it may read. An approval on such a route is approved once (a rule from it
   would drop the token's environments).
@@ -663,7 +663,12 @@ take only signed requests, so nobody outside the cluster can put a path there. O
   (`x-roll-code-decided: <grant id>`, `roll_cluster::Decided`). For that grant the owner doesn't
   ask a person a second time, and doesn't log the request again; it still denies whatever the
   grant's rules deny there, and a revoked token stops there too. A hop from a node that didn't
-  decide it (a public listener in front of the tasks leader) is decided in full.
+  decide it (a public listener in front of the tasks leader) is decided in full;
+- roll's own work for a grant (`roll_auth::ActAs`: an MCP Events webhook delivery reading its feed)
+  has no token to forward, so the hop names the grant (`x-roll-code-acting: <grant id>`,
+  `roll_cluster::Acting`, signed with a tag of its own) and the owner's gate acts for it again
+  (rolld's `act_as_from_hop`: only from a verified hop, never beside a token), looking the grant up
+  as it is now.
 
 ### People's sessions
 

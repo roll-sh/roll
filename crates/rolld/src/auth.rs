@@ -312,6 +312,19 @@ pub fn route_patterns(router: &axum::Router) -> Vec<String> {
     out
 }
 
+/// A hop another node signed for roll's own work for a grant (`roll_cluster::Forwarded::acting`:
+/// an MCP Events delivery reading a feed whose route runs on its owner here) is that work here too:
+/// the gate acts for the grant, looked up again as it is now. Only a verified hop carries it
+/// (`accept_forwarded` refuses an unsigned `x-roll-code-*` header), and never beside a token.
+pub async fn act_as_from_hop(mut req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    if !req.headers().contains_key(axum::http::header::AUTHORIZATION)
+        && let Some(grant) = req.extensions().get::<roll_cluster::Forwarded>().and_then(|f| f.acting.clone())
+    {
+        req.extensions_mut().insert(roll_auth::ActAs(grant.into()));
+    }
+    next.run(req).await
+}
+
 #[cfg(test)]
 mod tests {
     use roll_auth::Access;

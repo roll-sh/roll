@@ -2653,8 +2653,8 @@ impl EnvLive {
     /// A one-off console (`roll apps run -it`, Heroku's `heroku run bash`): a fresh container of
     /// the live deployment, with its variables and on its network, no port and no volume, its own
     /// `cpu` and `memory_mb` when asked; it waits (`sleep`) for the terminal opened in it.
-    pub async fn start_console(self: &Arc<Self>, cpu: Option<f64>, memory_mb: Option<u32>) -> anyhow::Result<ConsoleBox> {
-        let mut tpl = (*self.template().ok_or_else(|| anyhow::anyhow!("no deployment"))?).clone();
+    pub async fn start_console(self: &Arc<Self>, of: Option<Arc<Template>>, cpu: Option<f64>, memory_mb: Option<u32>) -> anyhow::Result<ConsoleBox> {
+        let mut tpl = (*of.or_else(|| self.template()).ok_or_else(|| anyhow::anyhow!("no deployment"))?).clone();
         // Kept up while the terminal is open (a day at most: the shell's idle limit ends it first).
         tpl.spec.command = Some("exec sleep 86400".into());
         tpl.spec.port = None;

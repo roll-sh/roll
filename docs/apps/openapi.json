@@ -886,6 +886,99 @@
         "x-roll-action": "deploy* (as above)"
       }
     },
+    "/v1/apps/projects/{project}/signing": {
+      "delete": {
+        "description": "Answers 204.",
+        "operationId": "deleteProjectsProjectSigning",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "204"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Delete signing",
+        "tags": [
+          "projects"
+        ],
+        "x-roll-action": "admin"
+      },
+      "get": {
+        "description": "Answers `{ keys: string[], required: boolean }` (none set: no keys, not required).",
+        "operationId": "getProjectsProjectSigning",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`{ keys: string[], required: boolean }` (none set: no keys, not required)"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Get signing",
+        "tags": [
+          "projects"
+        ],
+        "x-roll-action": "read"
+      },
+      "put": {
+        "description": "Answers `{ keys, required }` (with `required`, an image service's deploy needs its pinned digest's cosign signature by one of the keys, or fails before switching; roll's builds pass).",
+        "operationId": "putProjectsProjectSigning",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "description": "`{ keys, required? }` (1–10 P-256 public keys in PEM, cosign.pub; `required` true by default)"
+        },
+        "responses": {
+          "200": {
+            "description": "`{ keys, required }` (with `required`, an image service's deploy needs its pinned digest's cosign signature by one of the keys, or fails before switching; roll's builds pass)"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Set signing",
+        "tags": [
+          "projects"
+        ],
+        "x-roll-action": "admin (which images may run)"
+      }
+    },
     "/v1/apps/projects/{project}/status-page": {
       "delete": {
         "description": "Answers 204: taken down.",
@@ -1976,7 +2069,7 @@
     },
     "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/rollback": {
       "post": {
-        "description": "Answers 202 `Deployment`.",
+        "description": "Answers 202 `Deployment` (a view's `url` is its own).",
         "operationId": "postServicesIdEnvironmentsEnvDeploysDepRollback",
         "parameters": [
           {
@@ -2012,11 +2105,11 @@
               }
             }
           },
-          "description": "`{ keep_variables? }` (default false: the variables come back as they were when it was live); `X-Roll-Override: 1` puts a never-live `ready` build live during a freeze, audited"
+          "description": "`{ keep_variables? }` (default false: the variables come back as they were when it was live); `X-Roll-Override: 1` puts a never-live `ready` build live during a freeze, audited; or `{ no_traffic: true, variables: {NAME: value} }`: a view of `dep` at its own URL with some of the environment's variables given values of its own (1–50 of its names, each ≤ 64 KiB; `variables` without `no_traffic`, or `no_traffic` without `variables`, is a 400): sealed, never listed, never put live (no `deploy.ready`), not counted toward what's kept, pruned a day after its URL was last visited"
         },
         "responses": {
           "202": {
-            "description": "202 `Deployment`"
+            "description": "202 `Deployment` (a view's `url` is its own)"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
@@ -4091,7 +4184,7 @@
     },
     "/v1/apps/services/{id}/environments/{env}/shell": {
       "get": {
-        "description": "Answers a terminal: binary both ways, text `{\"resize\":[cols,rows]}`; `console=true` makes it a fresh container of the live deployment running `command` (a login shell without one), sized by `cpu` (0.25–8) and `memory_mb` (256–16384), removed when it closes (`command`, `cpu`, `memory_mb` without `console`: 400).",
+        "description": "Answers a terminal: binary both ways, text `{\"resize\":[cols,rows]}`; `console=true` makes it a fresh container of the live deployment (or, with `deployment`, of another kept one's image and settings) running `command` (a login shell without one), sized by `cpu` (0.25–8) and `memory_mb` (256–16384), removed when it closes (`command`, `cpu`, `memory_mb` without `console`: 400).",
         "operationId": "getServicesIdEnvironmentsEnvShell",
         "parameters": [
           {
@@ -4123,7 +4216,7 @@
         },
         "responses": {
           "200": {
-            "description": "a terminal: binary both ways, text `{\"resize\":[cols,rows]}`; `console=true` makes it a fresh container of the live deployment running `command` (a login shell without one), sized by `cpu` (0.25–8) and `memory_mb` (256–16384), removed when it closes (`command`, `cpu`, `memory_mb` without `console`: 400)"
+            "description": "a terminal: binary both ways, text `{\"resize\":[cols,rows]}`; `console=true` makes it a fresh container of the live deployment (or, with `deployment`, of another kept one's image and settings) running `command` (a login shell without one), sized by `cpu` (0.25–8) and `memory_mb` (256–16384), removed when it closes (`command`, `cpu`, `memory_mb` without `console`: 400)"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
@@ -4166,7 +4259,7 @@
               }
             }
           },
-          "description": "`{ instance?, cols?, rows?, console?, command?, cpu?, memory_mb? }` (a console as on the WebSocket)"
+          "description": "`{ instance?, cols?, rows?, console?, command?, cpu?, memory_mb?, deployment? }` (a console as on the WebSocket; `deployment`: another kept deployment's image and settings, 404 another environment's, 409 never built or cleaned up)"
         },
         "responses": {
           "201": {
@@ -4541,7 +4634,7 @@
     },
     "/v1/apps/services/{id}/environments/{env}/tunnel": {
       "get": {
-        "description": "Answers one TCP connection to the web service's own port, binary both ways (`roll apps proxy`); wakes an instance and holds it while open; at most 20 per environment (409); 409 for a worker, a cron service or a static site.",
+        "description": "Answers one TCP connection to the web service's own port, or with `port` another port of the app (a debugger's; reached inside its instance by a relay in its network namespace, published or not), binary both ways (`roll apps proxy`); wakes an instance and holds it while open; at most 20 per environment (409); 409 for a worker, a cron service or a static site.",
         "operationId": "getServicesIdEnvironmentsEnvTunnel",
         "parameters": [
           {
@@ -4573,7 +4666,7 @@
         },
         "responses": {
           "200": {
-            "description": "one TCP connection to the web service's own port, binary both ways (`roll apps proxy`); wakes an instance and holds it while open; at most 20 per environment (409); 409 for a worker, a cron service or a static site"
+            "description": "one TCP connection to the web service's own port, or with `port` another port of the app (a debugger's; reached inside its instance by a relay in its network namespace, published or not), binary both ways (`roll apps proxy`); wakes an instance and holds it while open; at most 20 per environment (409); 409 for a worker, a cron service or a static site"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"

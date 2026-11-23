@@ -35,6 +35,8 @@ export type Environment = {
 export type Branch = { kind: string; parent: string };
 /** A key left out because it links a branched resource: roll previews sets `name` from its branch's `field`. */
 export type Followed = { name: string; kind: string; parent: string; field: string };
+/** A linked key and what it links: the provider's resource kind and the resource. Names only. */
+export type Linked = { name: string; kind: string; ref: string };
 /** `PUT …/environments/{env}`: what it should be; `replace` also deletes its other own keys at `path`; `branches` replaces the list (absent keeps it). */
 export type Ensure = Omit<NewEnvironment, "slug"> & { replace?: boolean };
 export type Ensured = { environment: Environment; created: boolean; change: Change | null };
@@ -157,7 +159,7 @@ export type Problem = { key: string; problem: string };
 /** `plain`: of `linked`, keys whose link field isn't a credential (a host, a port): logs may show them; every other value is a secret. */
 /** `GET …/secrets/{key}/totp`: a TOTP key's code (a credential), valid until `expires_at` (ms: the end of its step). */
 export type Totp = { code: string; expires_at: number; period: number };
-export type Values = { values: Record<string, string>; problems: Problem[]; leases: string[]; dynamic: string[]; linked: string[]; plain?: string[]; withheld?: string[]; sensitive?: string[]; followed?: Followed[]; placeholders?: Placeholder[]; digest?: string };
+export type Values = { values: Record<string, string>; problems: Problem[]; leases: string[]; dynamic: string[]; linked: string[]; links?: Linked[]; plain?: string[]; withheld?: string[]; sensitive?: string[]; followed?: Followed[]; placeholders?: Placeholder[]; digest?: string };
 export type CellSource = "own" | "import" | "base";
 /** `misfit`: the typed-key rule the stored value breaks (shown only to whoever may reveal it). */
 export type Cell = { fp: string; version: number; updated_at: number; link: Link | null; reference: boolean; source: CellSource; comment: boolean; personal: boolean; misfit?: string; expires_at?: number };
@@ -384,6 +386,29 @@ export type Approval = { id: string; by?: string[]; until?: number };
 /** `since`: rows at or after this time (ms); `before`: rows older than this id. */
 export type AuditFilter = { env?: string; key?: string; actor?: string; action?: string; before?: number; since?: number; limit?: number; digests?: boolean };
 export type AuditFormat = "csv" | "jsonl";
+/** What a project's events feed says happened (docs/secrets.md, "Events"); a family is `request.*`. */
+export type SecretsEventKind =
+  | "secret.leaked"
+  | "scan.finding"
+  | "rotation.failed"
+  | "request.pending"
+  | "request.decided"
+  | "sync.failed"
+  | "decoy.used"
+  | "maker.unreachable"
+  | "placeholder.echoed"
+  | "placeholder.wrong_consumer"
+  | "placeholder.wrong_host"
+  | "production.unprotected"
+  | "env.deleted"
+  | "env.recovered"
+  | "project.deleted"
+  | "project.recovered";
+/** One event: `seq` is the audit chain's row number, so events come in commit order. `data` holds names, ids, counts and reasons (always `actor`; `path` and `keys` when the row has them), never a value. */
+export type SecretsEvent = { seq: number; at: number; kind: SecretsEventKind; environment?: string; key?: string; data: Record<string, unknown> };
+/** `latest: true` answers no events and the head (never with `after`); `limit` 1–500 (100). */
+export type EventsQuery = { after?: number; limit?: number; kinds?: (SecretsEventKind | `${string}.*`)[]; environment?: string; latest?: boolean };
+export type EventPage = { events: SecretsEvent[]; next: number };
 /** An audit stream to a SIEM: signed batches of new rows, in order. */
 /** `format`: how a batch goes (`roll` signed JSON; `splunk`, `datadog` and `bearer` carry a token that is never shown). */
 export type SinkFormat = "roll" | "splunk" | "datadog" | "bearer";

@@ -352,12 +352,45 @@ impl roll_previews::ports::Apps for RollApps {
 
     /// The `pv-` environment's live deployment: its git commit and its own URL (roll apps'
     /// deployment URL; none for a worker, a service with a volume, or a roll apps without `url`).
-    async fn live_build(&self, preview: &str, service: &str) -> Option<(String, String)> {
+    async fn live_build(&self, preview: &str, service: &str) -> Option<roll_previews::ports::LiveBuild> {
         let (id, env) = self.find(preview, service).await.ok()??;
         let path = Self::env_path(&id, &env);
         let dep = s(&self.api.get(&path).await.ok()?["active"]["id"])?;
         let d = self.api.get(&format!("{path}/deploys/{}", seg(&dep))).await.ok()?;
-        Some((s(&d["revision"])?, s(&d["url"])?))
+        Some(roll_previews::ports::LiveBuild { id: dep, revision: s(&d["revision"])?, url: s(&d["url"])? })
+    }
+
+    /// roll apps' rollback of `deployment` taking no traffic, with the copy's variables in place
+    /// of the ones roll set (`plain`, and each link to a branched parent from `branches`, as a
+    /// deploy sets them; only names the environment has, which roll apps requires), polled until
+    /// it's ready (a minute at most): its own URL.
+    async fn view_build(&self, preview: &str, service: &str, deployment: &str, plain: &[(String, String)], branches: &[roll_previews::ports::BranchVars]) -> anyhow::Result<Option<String>> {
+        let Some((id, env)) = self.find(preview, service).await? else { return Ok(None) };
+        let path = Self::env_path(&id, &env);
+        let mut set: serde_json::Map<String, Value> = plain.iter().map(|(k, v)| (k.clone(), json!(v))).collect();
+        let links = self.api.get(&format!("/v1/apps/services/{}/links", seg(&id))).await.unwrap_or(Value::Null);
+        for l in links.as_array().into_iter().flatten() {
+            let Some((_, _, vars)) = branches.iter().find(|(k, parent, _)| l["kind"] == k.as_str() && l["ref"] == parent.as_str()) else { continue };
+            let prefix = l["prefix"].as_str().unwrap_or("");
+            for name in l["vars"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+                let plain = name.strip_prefix(prefix).unwrap_or(name);
+                set.insert(name.to_string(), json!(link_value(plain, vars).unwrap_or_default()));
+            }
+        }
+        let has = self.api.get(&format!("{path}/variables/values")).await?;
+        set.retain(|k, _| has.get(k).is_some());
+        anyhow::ensure!(!set.is_empty(), "its environment has none of the copy's variables");
+        let made = self.api.post(&format!("{path}/deploys/{}/rollback", seg(deployment)), json!({ "no_traffic": true, "variables": set })).await?;
+        let dep = s(&made["id"]).ok_or_else(|| anyhow::anyhow!("a rollback without an id"))?;
+        for _ in 0..60 {
+            let d = self.api.get(&format!("{path}/deploys/{}", seg(&dep))).await?;
+            match d["status"].as_str() {
+                Some("ready" | "active") => return Ok(s(&d["url"])),
+                Some(st @ ("failed" | "canceled" | "superseded")) => anyhow::bail!("its build on the copy {st}: {}", d["error"].as_str().unwrap_or("")),
+                _ => tokio::time::sleep(std::time::Duration::from_secs(1)).await,
+            }
+        }
+        anyhow::bail!("its build on the copy wasn't ready within a minute")
     }
 
     /// The `pv-` environment's latest minute (roll apps' metrics): cores, and resident bytes.
@@ -766,8 +799,12 @@ impl roll_previews::ports::Apps for Services {
         if matches!(self.apps.find(preview, service).await, Ok(Some(_))) { self.apps.metrics(preview, service).await } else { self.runtime.metrics(preview, service).await }
     }
 
-    async fn live_build(&self, preview: &str, service: &str) -> Option<(String, String)> {
+    async fn live_build(&self, preview: &str, service: &str) -> Option<roll_previews::ports::LiveBuild> {
         if matches!(self.apps.find(preview, service).await, Ok(Some(_))) { self.apps.live_build(preview, service).await } else { None }
+    }
+
+    async fn view_build(&self, preview: &str, service: &str, deployment: &str, plain: &[(String, String)], branches: &[roll_previews::ports::BranchVars]) -> anyhow::Result<Option<String>> {
+        if matches!(self.apps.find(preview, service).await, Ok(Some(_))) { self.apps.view_build(preview, service, deployment, plain, branches).await } else { Ok(None) }
     }
 
     /// roll apps groups its own; a `roll.toml` service's are grouped here, from its last

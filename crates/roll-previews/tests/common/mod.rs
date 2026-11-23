@@ -187,7 +187,7 @@ impl Brancher for FakeData {
         self.branch(parent, name, mode).await.map(Some)
     }
     async fn snapshot(&self, parent: &str, branch: &str, name: &str) -> anyhow::Result<Option<Branched>> {
-        if self.kind != Kind::Postgres {
+        if !matches!(self.kind, Kind::Postgres | Kind::Redis) {
             return Ok(None);
         }
         anyhow::ensure!(self.branches.lock().contains(branch), "no branch {branch} to copy");
@@ -260,6 +260,8 @@ pub struct FakeApps {
     pub woken: Mutex<Vec<(String, String)>>,
     /// The build each service runs now, by service: (git commit, its own URL).
     pub live: Mutex<HashMap<String, (String, String)>>,
+    /// Builds started again on an earlier push's copy: (service, deployment, the variables).
+    pub views: Mutex<Vec<(String, String, Vars)>>,
     /// What a service answers on its health path (unset: the backend can't tell).
     pub answers: Mutex<Option<(u16, String)>>,
     /// How many health checks find the service still starting (asked again later).
@@ -388,8 +390,12 @@ impl Apps for FakeApps {
     async fn metrics(&self, _: &str, service: &str) -> Option<(f64, u64)> {
         self.metrics.lock().get(service).copied()
     }
-    async fn live_build(&self, _: &str, service: &str) -> Option<(String, String)> {
-        self.live.lock().get(service).cloned()
+    async fn live_build(&self, _: &str, service: &str) -> Option<roll_previews::ports::LiveBuild> {
+        self.live.lock().get(service).cloned().map(|(revision, url)| roll_previews::ports::LiveBuild { id: format!("dep_{revision}"), revision, url })
+    }
+    async fn view_build(&self, _: &str, service: &str, deployment: &str, plain: &[(String, String)], _: &[roll_previews::ports::BranchVars]) -> anyhow::Result<Option<String>> {
+        self.views.lock().push((service.to_string(), deployment.to_string(), plain.to_vec()));
+        Ok(Some(format!("https://view-{deployment}--pv-x.apps.test")))
     }
     async fn errors(&self, preview: &str, service: &str, _: i64, _: Option<&roll_previews::engine::ErrorMasks<'_>>) -> roll_previews::Result<Vec<roll_previews::ErrorGroup>> {
         // `pv_…/web` (one preview's) over `web` (every preview's).

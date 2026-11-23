@@ -767,6 +767,8 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     // roll code's agents relay acts on a caller's behalf through the gate too.
     if let Some(c) = &code {
         c.code.relay_through(gated.clone());
+        // Searches across repos keep a scoped grant's repos before cutting a page.
+        c.code.set_grant_reach(std::sync::Arc::new(access::CodeReach(access.clone())));
     }
     // MCP Events' webhooks: each due subscription's feed read through the gate as its grant.
     roll_mcp::events::spawn_deliveries(gated.clone(), access.clone(), mcp_config.products.clone());
@@ -793,8 +795,10 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     if let Some((rt, _)) = &preview_hosts {
         router = router.layer(axum::middleware::from_fn_with_state(rt.clone(), roll_previews::runtime::route));
     }
-    // In a cluster, requests from other nodes are verified first.
+    // In a cluster, requests from other nodes are verified first; a verified hop of roll's own work
+    // for a grant (an MCP Events delivery sent on to a repo's owner) is that work here too.
     if cluster.backend_name() != "memory" {
+        router = router.layer(axum::middleware::from_fn(auth::act_as_from_hop));
         router = router.layer(axum::middleware::from_fn_with_state(cluster.clone(), roll_cluster::accept_forwarded));
     }
     // roll cloud's public listeners (ROLL_EDGE); the internal API gains /healthz.
