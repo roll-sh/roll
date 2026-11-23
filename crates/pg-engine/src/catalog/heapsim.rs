@@ -1455,17 +1455,30 @@ impl Heap {
     }
 
     /// The root of the HOT chain `tid` is in: the line pointer the indexes point to (a
-    /// bitmap heap scan reads the TIDs they give, in that order).
+    /// bitmap heap scan reads the TIDs they give, in that order). Back through each heap-only
+    /// version's previous one on its page while that one's HOT link names it (as
+    /// heap_hot_search_buffer checks the chain it follows forward), to a version that isn't
+    /// heap-only or to the redirect pruning left at the root.
     pub fn hot_root(&self, tid: Tid) -> Tid {
         let mut cur = tid;
-        for _ in 0..u16::MAX {
-            let Some(t) = self.tuple(cur) else { return cur };
+        let Some(mut t) = self.tuple(cur) else { return cur };
+        for _ in 0..MAX_HEAP_TUPLES {
             if !t.heap_only {
                 return cur;
             }
-            match self.prev_of(cur) {
-                Some(p) if p.0 == cur.0 && p != cur => cur = p,
-                _ => return cur,
+            let p = match t.prev_off {
+                0 | FAR_PREV => return cur,
+                off => (cur.0, off),
+            };
+            if p == cur {
+                return cur;
+            }
+            match self.tuple(p) {
+                // (The redirect pruning left at the chain's root, or a line pointer freed.)
+                None => return p,
+                // (A slot freed and taken by another version since: not this chain's.)
+                Some(pt) if !pt.hot_updated() || pt.next != cur.1 => return cur,
+                Some(pt) => (cur, t) = (p, pt),
             }
         }
         cur
@@ -2296,6 +2309,13 @@ impl Heap {
                 }
                 p.lps.set(off - 1, st);
             }
+            // (A redirect's target leads back to the root, as `read_shape` restores it: the
+            // versions between are freed, and their line pointers taken by later versions.)
+            for &(off, st) in changes.iter() {
+                if let Lp::Redirect(to) = st {
+                    p.lps.update(to as usize - 1, |t| t.prev_off = off as u16);
+                }
+            }
             p.repair();
         }
         self.forget_deleted(freed);
@@ -3091,6 +3111,38 @@ mod tests {
             h.vacuum(&Vis::new(&xids), 1, false, Skip::None, false);
             assert_visible_count(&h, 3);
         }
+    }
+
+    /// Rows updated HOT again and again on one page, pruned between: each row's chain root
+    /// stays the line pointer its index entries name (its first, a redirect once pruned), as
+    /// in PostgreSQL, though the line pointers its pruned versions had are taken by later
+    /// ones (a version's way back once led into another's and round a cycle to the walk's
+    /// bound: 1.9 M user instructions a TPC-B transaction under bitmap heap scans).
+    #[test]
+    fn hot_roots_survive_pruning() {
+        let xids = Xids::new(10, |_| {});
+        let mut h = Heap::new(100);
+        let mut mode = InsertMode::single();
+        let x0 = xids.assign();
+        let keys: Vec<Vec<u8>> = (0..4u8).map(|i| vec![b'k', i]).collect();
+        let roots: Vec<Tid> = keys.iter().map(|k| h.insert(k, 120, x0, 0, &mut mode)).collect();
+        xids.finish(x0, true);
+        let mut hot = 0;
+        for i in 0..2000usize {
+            let x = xids.assign();
+            let k = &keys[i * 7 % keys.len()];
+            hot += h.update(k, k, 120 + i % 5 * 8, x, true, &Vis::new(&xids)).1 as usize;
+            xids.finish(x, true);
+            if i % 3 == 0 {
+                h.prune_opt(0, &Vis::new(&xids));
+            }
+            for (k, root) in keys.iter().zip(&roots) {
+                let tid = h.tid_of(k).unwrap();
+                assert_eq!(h.hot_root(tid), *root, "{k:?} at {tid:?}, update {i}");
+            }
+        }
+        assert!(hot > 1900, "{hot} HOT updates");
+        assert_eq!(h.nblocks(), 1);
     }
 
     /// The lock-free reader state agrees with the model through writes, pruning and VACUUM:
