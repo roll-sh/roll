@@ -10721,11 +10721,71 @@ golden and big_tables (verify build). Rebased onto `94dc5c2ed` (upstream touched
 `tools/quick-check.sh` with `QC_CHECKED=1` of both candidates on it (`53609aab1`) green, the same
 counts.
 
-**Left:**
-1. The btree model still costs ~8,000 instructions a random-order entry (verify build): the
+**Second candidate: a held load's index entries wait; a fresh-unique COPY through the sink**
+(`cand/a298-4`: one code commit on `cand/a298-3`, first pushed as `cand/a298-2` on a stale base; `exec/sizing.rs`, `sizing/btest.rs`, `exec/dml.rs`,
+`btsim.rs`). A COPY whose rows are held (`Txn::hold_rows`, the sink: indexes that check no rows)
+placed every batch's rows in the heap's model and their entries in the btrees' exact models as
+the batch was stored, for the table's first 400,000 rows (`CopyLoad::model`); past that the
+models go and the btrees' shapes go on as estimates (`untrack`, `BtEst::from_model`). The
+btree half of that work (14% of the step through the sink, after the first candidate) bought
+nothing a COPY of more rows keeps. Now, as `Defer`'s waiting rows do: the heap's model still
+places each batch (the rows are stored once, with their TIDs); the entries of rows past the
+load's first `DEFER_AFTER` (10,000) wait, packed per index in their order (`Waiting`: TID and key
+encoding end to end, ~17 bytes an int4 entry), and go into the models when the statement ends
+(`finish_waiting`; each btree gets the same entries in the same order, so the same tree), or,
+when the table goes past the model's size, into the estimates with the duplicate flags of the
+first candidate (`est_entries_of`); a failed load's go into the models (`Drop`), and a batch
+placed without holding places those waiting first. An estimate of an index the model had no
+entry in takes its tuples' size from the entries (`BtEst::sized_by`). Until the statement ends
+the index models stay as the first rows left them, as with `Defer`'s rows (another session's
+pg_relation_size of the index reads that). Then the sink condition takes a
+multi-insert COPY's unique indexes that `FreshUnique` answers for (empty as it starts: their
+checks read the statement's own keys, then the index once another transaction has ended), as
+agent 287 measured it (dropped then at +11% instructions: the exact model of the held rows'
+entries).
+
+Results (BENCH "Bulk writes, round 24"; plain dist, n1 = the first candidate with a measuring
+switch for the sink condition, n3 = this candidate with the same switch, measured with it on as
+`n3-sink`; the candidate has the condition without the switch; two alternating pairs):
+- COPY of 1M rows into `bulkp` (primary key and a secondary index): 31.715 x4 -> 29.405 / 29.405
+  G user instructions (-7.3%; from b0's 31.692: -7.2%; PostgreSQL 18.6's 24.70: 1.19x), cycles
+  30.2-41.0 -> 19.7-24.0 G (under 4.4-7.7 foreign cores), bytes written 345.5 -> 110.1 MB (-68%),
+  VmHWM 271-308 -> 249 MB; `bulkp_a` 9,625,600 and `bulkp_pkey` 22,429,696 bytes on both (the
+  estimate after 10,000 rows' exact entries, as the waiting path had it); rows, the ctid hash and
+  the heap's size equal.
+- COPY into `bulks` (one secondary index, held already): 22.441 / 22.442 -> 20.354 / 20.354
+  (-9.3%; from b0's 23.864: -14.7%; PostgreSQL's 18.92: 1.08x); `bulks_a` 9,641,984 (the exact
+  model's) -> 9,625,600 bytes (PostgreSQL 9,650,176). A first version that let every entry wait
+  (no exact first rows) read 20.33 but 9,281,536 bytes (-3.8% against PostgreSQL: an estimate
+  built from an empty model): replaced by this one.
+- The default path (`bulkp` without the switch, rows waiting): 31.715 -> 31.733 / 31.747.
+- The whole bulk script once, n1 against n3: all steps 44.762 -> 44.806 (+0.10%), COPY in 6.478 ->
+  6.467 (-0.17%), INSERT … SELECT 5.101 -> 5.149 in that run, 5.100 on both in two pairs after it
+  (the step's spread), ANALYZE +0.85% (0.004 G, its spread), every other step within ±0.3%; rows
+  and the ctid hash equal.
+With the switch on, golden, big_tables, crash_bulk and txn_spill passed (verify build) before
+the candidate dropped the switch. Verification: `tools/quick-check.sh` with `QC_CHECKED=1` on
+`74145626d` (both candidates on `99e4b81af`): Clippy 16 warnings, none new in a changed file; 395
+tests in 12 binaries, again built `--profile verify-checked`; regress 51,148 / 51,150, 0 newly
+differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed; then `crash_bulk` (6) and
+`txn_spill` under `--profile verify-checked` (quick-check doesn't map them). The candidate's
+own build (c2, its commit's tree, no switch) in two more pairs against n1: `bulkp` 29.403 /
+29.405, `bulks` 20.366 / 20.365, the same sizes, rows and ctids. Rebased onto `94dc5c2ed` (upstream touched no file of this change but HANDOFF):
+`tools/quick-check.sh` with `QC_CHECKED=1` of both candidates on it (`53609aab1`) green, the same
+counts.
+
+**Left (G user instructions, against PostgreSQL 18.6):**
+1. COPY into `bulkp` 29.4 against 24.7: per row the unique key's lock and `FreshUnique`'s set
+   (`lock_unique_key` ~4.5% of the default path's step), the background compaction of the sink's
+   runs (~14% of the step), `inserted_with` and the size model, the sink's flush (sort, zstd,
+   the writer). Not measured through the sink after this change: a profile of n3-sink.
+2. COPY into `bulks` 20.35 against 18.92.
+3. The btree model still costs ~8,000 instructions a random-order entry (verify build): the
    descent (two inner levels, a key-bytes compare a pivot) and `insert_pos` are now most of it.
-2. Index estimates past the model guess a new key from the leaf's counts for writes one row at
-   a time (`untracked_write`); only the waiting rows' entries know.
+   It runs for a held load's first 10,000 rows and for loads that stay within the model.
+4. Stored rows for indexed tables (`CopyRow::Stored` needs index values from the stored bytes
+   and the model's placement with entries), and INSERT … SELECT 5.10 against 4.31 (the brief's
+   item 3): not started.
 
 ## Bulk writes, round 23: COPY into unique indexes without reading them (agent 287)
 

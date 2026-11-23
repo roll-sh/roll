@@ -655,6 +655,25 @@ in each): a secondary index of `bulk1m.tsv`'s `a` (100,000 keys, each four times
 7.18 -> 3.79 G; ascending primary keys 3.47 -> 2.81 G. The trees' image hashes equal before and
 after, also for a mixed run (text keys, duplicates, LP_DEAD marks, bottom-up deletion, VACUUM).
 
+### `cand/a298-4`: a held load's index entries wait; a fresh-unique COPY through the sink
+
+**n1** (the first candidate with a measuring switch for the sink condition, off) against **n3**
+(this candidate with the same switch; `n3-sink` with it on, which is the candidate's behaviour),
+the same steps, two alternating pairs, each pair one lane.sh hold (foreign load 4.4-7.7 cores):
+
+| step | n1 | n3 | n3-sink | written MB (n1 / n3-sink) | index bytes (n3-sink; PostgreSQL 18.6) |
+|---|---|---|---|---|---|
+| COPY into `bulkp` | 31.715 x4 | 31.733 / 31.747 | 29.405 / 29.405 (-7.3%) | 345.5 / 110.1 | `bulkp_a` 9,625,600 (9,650,176); `bulkp_pkey` 22,429,696 (22,487,040) |
+| COPY into `bulks` | 22.441 / 22.442 | 20.354 / 20.354 (-9.3%) | 20.365 / 20.367 | 90.8 | `bulks_a` 9,625,600 (9,650,176) |
+
+Cycles of the `bulkp` COPY 30.2-41.0 (n1) and 19.7-24.0 G (n3-sink), VmHWM 271-308 and 249 MB.
+The candidate's own build (**c2**, no switch), two more pairs against n1: `bulkp` 29.403 /
+29.405, `bulks` 20.366 / 20.365 (n1 31.715 x2, 22.436 / 22.442), the same sizes, rows and ctids.
+A first version letting every held entry wait (n2): `bulks` 20.33, `bulks_a` 9,281,536 bytes
+(-3.8%), replaced. The whole script once, n1 against n3: all steps 44.762 -> 44.806 (+0.10%), COPY
+in -0.17%, INSERT … SELECT +0.94% in that run and 5.100 on both builds in two pairs after it,
+every other step within ±0.3% but ANALYZE +0.85% (0.004 G); rows and the ctid hash equal.
+
 ## Bulk writes, round 23: COPY into unique indexes without reading them (2026-11-22, agent 287)
 
 HANDOFF "Bulk writes, round 23" has what changed. Lane C, agent 246's `bulkx.sh` with `JOIN=1`
