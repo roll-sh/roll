@@ -487,7 +487,7 @@ impl Crawl<'_, '_> {
 
     /// Queues many URLs: a sitemap's or a page's. Stops when the frontier fills (the rest are
     /// dropped and counted) or the deadline passes, and yields to the runtime as it goes.
-    async fn enqueue_all(&mut self, links: impl IntoIterator<Item = Link>, depth: u64) -> Result<(), Stop> {
+    async fn enqueue_all(&mut self, links: Vec<Link>, depth: u64) -> Result<(), Stop> {
         for (i, l) in links.into_iter().enumerate() {
             if Instant::now() >= self.deadline {
                 break;
@@ -651,7 +651,9 @@ impl Crawl<'_, '_> {
             match parsed {
                 Ok(sitemap::Sitemap::Pages(locs)) => {
                     drop(held);
-                    self.enqueue_all(locs.iter().filter_map(|l| Link::parse(l, None)), 1).await?;
+                    let links: Vec<Link> = locs.iter().filter_map(|l| Link::parse(l, None)).collect();
+                    drop(locs);
+                    self.enqueue_all(links, 1).await?;
                     self.tick().await?;
                     continue;
                 }
