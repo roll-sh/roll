@@ -2320,8 +2320,9 @@ async fn a_shared_value_opens_as_many_times_as_allowed_and_the_server_never_hold
 
 /// docs/accounts.md, "Offboarding": a disabled person (an admin, SCIM) keeps their memberships,
 /// but what they handed out ends anyway. Their one-time share refuses to open (it checks its
-/// maker), and rolld's offboarding hook revokes their dynamic credential now, not at its TTL.
-/// Enabled again, they get nothing back.
+/// maker), and rolld's offboarding hook revokes their dynamic credential now, not at its TTL,
+/// checking only the projects holding what they made: never root's unrelated project with root's
+/// own open share. Enabled again, they get nothing back.
 #[tokio::test]
 async fn a_disabled_persons_share_refuses_to_open_and_their_leases_are_revoked() {
     use base64::Engine as _;
@@ -2340,11 +2341,16 @@ async fn a_disabled_persons_share_refuses_to_open_and_their_leases_are_revoked()
     let (s, share) = api.as_ada(Method::POST, &at("/shares"), Some(json!({ "ciphertext": blob, "note": "for the contractor" }))).await;
     assert_eq!(s, StatusCode::CREATED, "{share}");
     let open = format!("/v1/secrets/shares/{}/open", share["id"].as_str().unwrap());
+    let (_, unrelated) = api.signed_in("root", true, Method::POST, "/v1/workspace/projects", Some(json!({ "name": "root-shop" }))).await;
+    let (s, e) = api.signed_in("root", true, Method::POST, &format!("/v1/secrets/projects/{}/shares", unrelated["id"].as_str().unwrap()), Some(json!({ "ciphertext": blob }))).await;
+    assert_eq!(s, StatusCode::CREATED, "{e}");
 
     *api.people.disabled.lock().unwrap() = true;
     assert_eq!(api.call(Method::POST, &open, None).await.0, StatusCode::NOT_FOUND, "a disabled maker's share ends unopened");
     assert!(api.fake.live_keys.lock().unwrap().contains(&key), "until the hook runs, the credential is live");
+    let rechecks = api.secrets.metrics().unwrap().member_rechecks;
     api.secrets.person_offboarded("usr_ada").unwrap();
+    assert_eq!(api.secrets.metrics().unwrap().member_rechecks, rechecks + 1, "only her own project is checked, not root's");
     assert!(!api.fake.live_keys.lock().unwrap().contains(&key), "revoked now, not at its TTL");
     let leases = api.ok(Method::GET, "/leases", None).await;
     assert!(leases.as_array().unwrap().iter().all(|l| !l["revoked_at"].is_null()), "{leases}");
@@ -6635,6 +6641,41 @@ async fn members_reach_secrets_by_their_role() {
     assert_eq!((s, e["code"].as_str()), (StatusCode::CONFLICT, Some("approval_required")), "{e}");
     // A project bob isn't in is a 404 for him, as the workspace answers.
     assert_eq!(get("bob", format!("/v1/secrets/projects/{}/environments/development/secrets", api.project)).await.0, StatusCode::NOT_FOUND);
+}
+
+/// A project as it's made, nothing protected by hand (#688): a developer on the default role works
+/// in development and staging but never reveals production, and a check (an untrusted resolve)
+/// reads staging but is refused production, even through the operator.
+#[tokio::test]
+async fn a_fresh_projects_production_is_out_of_a_developers_and_a_checks_reach() {
+    let api = Api::new().await;
+    let (_, p) = api.as_ada(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "fresh" }))).await;
+    let fresh = p["id"].as_str().unwrap().to_string();
+    let at = |rest: &str| format!("/v1/secrets/projects/{fresh}{rest}");
+    let (s, e) = api.as_ada(Method::PUT, &at("/environments/production/secrets/KEY"), Some(json!({ "value": "fake-prod-value" }))).await;
+    assert!(s.is_success(), "{e}");
+    api.join(&fresh, "bob", "developer", None).await;
+
+    for env in ["development", "staging"] {
+        let value = format!("fake-{env}-value");
+        let (s, e) = api.signed_in("bob", false, Method::PUT, &at(&format!("/environments/{env}/secrets/KEY")), Some(json!({ "value": value }))).await;
+        assert!(s.is_success(), "{env}: {e}");
+        let (s, v) = api.signed_in("bob", false, Method::GET, &at(&format!("/environments/{env}/secrets/KEY/value")), None).await;
+        assert_eq!((s, v["value"].as_str()), (StatusCode::OK, Some(value.as_str())), "{env}: {v}");
+    }
+    let (s, v) = api.signed_in("bob", false, Method::GET, &at("/environments/production/secrets/KEY/value"), None).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
+    assert!(!v.to_string().contains("fake-prod-value"));
+
+    let check = |env: &str| {
+        let (api, path) = (&api, at(&format!("/environments/{env}/resolve")));
+        async move { api.call(Method::POST, &path, Some(json!({ "consumer": "check:fresh/web#1", "untrusted": true }))).await }
+    };
+    let (s, r) = check("staging").await;
+    assert_eq!((s, r["values"]["KEY"].as_str()), (StatusCode::OK, Some("fake-staging-value")), "{r}");
+    let (s, r) = check("production").await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{r}");
+    assert!(!r.to_string().contains("fake-prod-value"));
 }
 
 /// A project whose production isn't protected (made before new ones started with it protected) is

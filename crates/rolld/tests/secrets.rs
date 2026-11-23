@@ -472,9 +472,6 @@ async fn apps_shows_a_staging_reference_to_production_only_to_who_may_reveal_pro
     assert!(s == 403 && e.contains("roll secrets"), "{s} {e}");
 }
 
-/// Reach names the roll apps services that read a folder (rolld's `ReachHolders`): one deploying
-/// the environment reads its root, and one whose `roll://` variable names a key of a subfolder
-/// reads that folder too.
 /// A roll apps log drain into roll search, end to end: rolld makes the drain's data stream (roll
 /// apps' template, the stream, its retention) through search's console as the operator, mints a
 /// key that may only append to that stream through the search link's provider, and the drain's
@@ -622,6 +619,11 @@ async fn a_repository_key_follows_rotation_and_a_branch_gets_no_protected_key() 
     assert!(!t.contains(&secret), "{t}");
 }
 
+/// Reach names the roll apps services that read a folder (rolld's `ReachHolders`): one deploying
+/// the environment reads its root, and one whose `roll://` variable names a key of a subfolder
+/// reads that folder too. It opens no variable: a write-only one whose sealed value no key opens
+/// doesn't stop it, and a reference set before roll apps kept them beside the values is marked
+/// once, when the store opens.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reach_names_the_services_that_read_a_folder() {
     // With search: the harness reads every rolld's search address.
@@ -635,9 +637,16 @@ async fn reach_names_the_services_that_read_a_folder() {
         let env = format!("/v1/apps/services/{}/environments/production", svc["id"].as_str().unwrap());
         r.call(reqwest::Method::PUT, &env, Some(json!({}))).await;
         if name == "worker" {
-            r.call(reqwest::Method::PATCH, &format!("{env}/variables"), Some(json!({ "set": { "TOKEN": "roll://production/api/API_TOKEN" } }))).await;
+            r.call(reqwest::Method::PATCH, &format!("{env}/variables"), Some(json!({ "set": { "TOKEN": "roll://production/api/API_TOKEN", "SIGNING_KEY": "fake-signing-key" }, "seal": ["SIGNING_KEY"] }))).await;
         }
     }
+    let home = r.home.clone();
+    drop(r);
+    let db = rusqlite::Connection::open(home.path().join("apps.db")).unwrap();
+    db.execute("UPDATE variables SET reference = NULL WHERE name = 'TOKEN'", []).unwrap();
+    assert_eq!(db.execute("UPDATE variables SET sealed = 'not-a-sealed-value' WHERE name = 'SIGNING_KEY' AND write_only = 1", []).unwrap(), 1);
+    drop(db);
+    let r = Rolld::start_in(home, "apps,search", false, &[], "/v1/info").await;
     let through = |reach: &Value| -> Vec<(String, String)> { reach["services"].as_array().unwrap().iter().map(|s| (s["name"].as_str().unwrap().to_string(), s["through"].as_str().unwrap().to_string())).collect() };
     let root = r.get(&format!("{secrets}/production/reach?path=/")).await;
     assert_eq!(through(&root), [("web".to_string(), "production:/".to_string()), ("worker".to_string(), "production:/".to_string())], "{root}");
