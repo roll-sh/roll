@@ -39,5 +39,18 @@ PUT /v1/apps/services/{id}/environments/{env} closed_by     the operator's and r
 PUT /v1/apps/services/{id}/environments/{env} preview_host  roll previews sets it on its own environments
 PUT /v1/apps/services/{id}/environments/{env} feedback      roll previews sets it on its own environments (400 on another)
 POST /v1/secrets/projects/{project}/environments branches   an ephemeral environment's branched resources: roll previews' and the operator's
-PUT /v1/previews/projects/{project}/settings env            values every preview's services get, API keys among them: sets a credential (keys go in roll secrets, read through secrets.base)
-PUT /v1/previews/projects/{project}/settings env_for        per-branch variable values, API keys among them: sets a credential (as env)
+PUT /v1/previews/projects/{project}/settings access         who may open a project's previews (public too): a person's
+PUT /v1/previews/projects/{project}/settings secrets        which roll secrets environment previews read, production's included: a person's
+PUT /v1/previews/projects/{project}/settings env            values every preview's services get, API keys among them: a person's (keys go in roll secrets)
+PUT /v1/previews/projects/{project}/settings env_for        per-branch variable values, API keys among them: a person's (as env)
+PUT /v1/previews/projects/{project}/settings egress         what previews' code may reach outside roll: a person's
+PUT /v1/previews/projects/{project}/settings egress_hosts   hosts outside roll previews' code may reach: a person's
+PUT /v1/previews/projects/{project}/settings egress_forks   what a fork's preview may reach: a person's
+PUT /v1/previews/projects/{project}/settings masking        how production's data is masked in previews: a person's (previews_mask_suggestions reads what isn't)
+PUT /v1/previews/projects/{project}/settings visual_review  a gate on landing: a person's
+PUT /v1/previews/projects/{project}/settings regressions    a gate on landing: a person's
+PUT /v1/previews/projects/{project}/settings mail           deliver sends previews' mail to real people: a person's
+PUT /v1/previews/projects/{project}/settings github         what's posted to GitHub and measured there: a person's
+PUT /v1/previews/projects/{project}/settings seed           a job run with the preview's secrets: a person's
+PUT /v1/previews/projects/{project}/settings release        a job run with the preview's secrets at each head: a person's
+PUT /v1/previews/projects/{project}/settings teardown       a job run with the preview's secrets: a person's

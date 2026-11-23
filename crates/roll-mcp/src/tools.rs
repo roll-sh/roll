@@ -1695,21 +1695,8 @@ static TOOLS: &[Tool] = &[
             b("warm", Ty::Bool, "Wake the services as soon as a new head is deployed"),
             b("crons", Ty::Bool, "Scheduled work (roll apps' crons, scheduled commands and calls) runs in previews too; off by default: deployed, schedule off"),
             b("browser_checks", Ty::Str, "Production's browser checks on each preview head: report (shown), check (the roll/browser-checks status) or required (also keeps a change from landing)"),
-            b("secrets", Ty::Obj, "{base, allow_production}: the roll secrets environment its services read (\"development\"), and whether that may be a protected one (false)"),
-            b("github", Ty::Obj, "What goes to GitHub and is measured: {comment, status, deployment, screenshot, baseline, pages, hide, budget {load_ms, bytes}, openapi?, endpoints? (up to 5 GET paths timed against main's), states?, storybook?, browsers? (firefox, webkit, webkit-phone)}"),
-            b("access", Ty::Str, "Who opens a preview's URLs: link (its link), team (a person signed in to roll who may open the project) or public"),
-            b("visual_review", Ty::Str, "off, check (the roll/visual status) or required (it also keeps a change from landing)"),
-            b("egress", Ty::Str, "What its services' code may reach: open, or roll (roll's products only, plus egress_hosts)"),
-            b("egress_hosts", Ty::Arr, "With egress roll: hosts outside roll still reachable (api.stripe.com, *.sentry.io; at most 20)"),
-            b("egress_forks", Ty::Str, "What a fork's preview reaches when egress is open: roll (the default) or open"),
-            b("regressions", Ty::Str, "Against main's preview: off, check (the roll/regressions status) or required (a blocker)"),
-            b("mail", Ty::Str, "catch (kept by roll, never delivered: previews_list_mail) or deliver"),
             b("traces", Ty::Bool, "roll.toml services get the OpenTelemetry SDK's variables"),
             bnull("data_at", Ty::Str, "Branch the data as of then: -24h, -30m, -7d or an RFC 3339 time; clear it for now"),
-            bnull("seed", Ty::Obj, "A job run once on fresh data: {image, run, timeout_s?, memory_mb?}; clear it for none"),
-            bnull("release", Ty::Obj, "A job run at each new head before its services deploy (migrations): {image, run, timeout_s?, memory_mb?}; clear it for none"),
-            bnull("teardown", Ty::Obj, "A job run once when a preview goes: {image, run, timeout_s?, memory_mb?}; clear it for none"),
-            b("masking", Ty::Obj, "How branched data is masked: {\"postgres:<ref>\": {\"schema.table.column\": \"email\"}, \"nosql:<ref>\": {\"ks.table.column\": \"mask_default()\"}, \"search:<ref>\": {\"index.field\": \"redact\"|\"remove\"|\"email\"}} (previews_mask_suggestions finds what isn't)"),
         ],
     ),
     t("previews_visitors", "Who opened a preview", "The last 8 people signed in to roll who opened a preview (team access), by handle, latest first. Share links and the CI bypass aren't people and aren't listed.", "previews", "GET", "/v1/previews/{id}/visitors", &[req("id", "Preview id")]),
@@ -2002,10 +1989,11 @@ mod tests {
         assert!(unmarked.is_empty(), "removes or replaces something but isn't destructive (mark it .destructive() or .undoable()): {unmarked:?}");
         assert_eq!(def("workspace_remove_resource")["annotations"]["destructiveHint"], false);
         // A project's preview rules from an agent are only the operational ones: who may open the
-        // previews, production secrets, egress, variables, masking, the visual review's gate and the
-        // jobs (which run with the preview's secrets) stay a person's, so the closed schema refuses them.
+        // previews, production secrets, egress, variables, masking, the visual review's and
+        // regressions' gates, real mail and the jobs (which run with the preview's secrets) stay a
+        // person's, so the closed schema refuses them (no-field.txt says so per field).
         let rules = all().iter().find(|t| t.name == "previews_set_rules").unwrap();
-        for field in ["access", "secrets", "egress", "egress_hosts", "egress_forks", "env", "env_for", "masking", "visual_review", "github", "seed", "release", "teardown"] {
+        for field in ["access", "secrets", "egress", "egress_hosts", "egress_forks", "env", "env_for", "masking", "visual_review", "regressions", "mail", "github", "seed", "release", "teardown"] {
             assert!(rules.request(&json!({ "project": "prj_a", field: "x" })).is_err(), "previews_set_rules takes {field}");
         }
         assert!(rules.request(&json!({ "project": "prj_a", "ttl_hours": 24 })).is_ok());
