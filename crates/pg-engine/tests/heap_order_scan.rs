@@ -2,6 +2,7 @@
 //! moved, rows put in free space) stream them in heap order (`exec::heaporder`), holding only
 //! the displaced rows: what they return is what `ORDER BY ctid` returns, in and out of
 //! transactions, under LIMIT, counted, and while the scan feeds an UPDATE of its own table.
+//! A small table's rows are held from the first read and returned from there: the same.
 
 use pg_engine::engine::{Engine, EngineOptions};
 use pg_engine::exec::scan::{HEAP_ORDER_HELD, HEAP_ORDER_STREAMED};
@@ -41,12 +42,18 @@ fn out(s: &mut Session, sql: &str) -> Vec<String> {
 }
 
 fn same_as_ctid_order(s: &mut Session, what: &str) {
+    same_as_ctid_order_of(s, "t", what);
+}
+
+fn same_as_ctid_order_of(s: &mut Session, t: &str, what: &str) {
     for (q, oracle) in [
         ("SELECT a, b FROM t", "SELECT a, b FROM t ORDER BY ctid"),
         ("SELECT a FROM t WHERE b > 5", "SELECT a FROM t WHERE b > 5 ORDER BY ctid"),
         ("SELECT a, ctid FROM t LIMIT 37", "SELECT a, ctid FROM t ORDER BY ctid LIMIT 37"),
         ("SELECT count(*) FROM t WHERE b % 3 = 1", "SELECT count(*) FROM (SELECT b FROM t ORDER BY ctid) x WHERE b % 3 = 1"),
     ] {
+        let (q, oracle) = (q.replace(" t", &format!(" {t}")), oracle.replace(" t", &format!(" {t}")));
+        let (q, oracle) = (q.as_str(), oracle.as_str());
         let (got, want) = (out(s, q), out(s, oracle));
         assert!(!want.is_empty(), "{what}: {oracle} returned nothing");
         assert_eq!(got, want, "{what}: {q}");
@@ -100,4 +107,27 @@ fn run() {
     same_as_ctid_order(&mut s, "after updating every row");
     s.query("ROLLBACK").unwrap();
     same_as_ctid_order(&mut s, "rolled back");
+
+    // A small table (held whole from the first read), its rows moved by updates; a prepared
+    // statement's generic plan filtering on `$1` (the filter's kernel takes the parameter's
+    // value), as an UPDATE's scan and a plain one.
+    s.query("CREATE TABLE u (a int, b int, pad text)").unwrap();
+    s.query("INSERT INTO u SELECT i, i % 11, repeat('x', 20) FROM generate_series(1, 300) i").unwrap();
+    s.query("UPDATE u SET b = b + 1 WHERE a % 7 = 0").unwrap();
+    s.query("UPDATE u SET b = b + 1 WHERE a <= 30").unwrap();
+    let streamed = HEAP_ORDER_STREAMED.load(Relaxed);
+    same_as_ctid_order_of(&mut s, "u", "small");
+    assert_eq!(HEAP_ORDER_STREAMED.load(Relaxed), streamed, "a small table's rows held, not streamed");
+    s.query("PREPARE up(int, int) AS UPDATE u SET b = b + $2 WHERE a = $1 RETURNING a, b").unwrap();
+    s.query("PREPARE sel(int) AS SELECT a FROM u WHERE b = $1").unwrap();
+    s.query("SET plan_cache_mode = force_generic_plan").unwrap();
+    for i in 1..=12 {
+        let a = i * 23 % 300 + 1;
+        let want = out(&mut s, &format!("SELECT a, b + {i} FROM u WHERE a = {a}"));
+        assert_eq!(out(&mut s, &format!("EXECUTE up({a}, {i})")), want, "generic UPDATE of a = {a}");
+        let want = out(&mut s, &format!("SELECT a FROM u WHERE b = {} ORDER BY ctid", i % 11));
+        assert_eq!(out(&mut s, &format!("EXECUTE sel({})", i % 11)), want, "generic SELECT of b = {}", i % 11);
+    }
+    s.query("RESET plan_cache_mode").unwrap();
+    same_as_ctid_order_of(&mut s, "u", "small, after the prepared updates");
 }

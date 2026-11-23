@@ -705,6 +705,26 @@ pub fn compile(e: &Expr) -> Option<K> {
     compile_node(e)
 }
 
+/// `compile` of `e` with the statement's parameters (`$n`) taken as the constants they are
+/// for this execution (`ExecCtx::param`, which `eval` reads them from): a prepared
+/// statement's generic plan (`WHERE bid = $1`) compiles as its custom plan does. Only for a
+/// kernel made and dropped within one execution (a node's, made again after `park`).
+pub fn compile_bound(e: &Expr, ctx: &super::ExecCtx) -> Option<K> {
+    let mut params = false;
+    e.walk(&mut |x| params |= matches!(x, Expr::Param(..)));
+    if !params {
+        return compile(e);
+    }
+    let bound = e
+        .clone()
+        .transform(&mut |x| match x {
+            Expr::Param(i, t) => Ok(Expr::Const(ctx.param(i)?, t)),
+            x => Ok(x),
+        })
+        .ok()?;
+    compile(&bound)
+}
+
 fn compile_node(e: &Expr) -> Option<K> {
     Some(match e {
         Expr::Col(i, _) => K::Col(*i),

@@ -2651,6 +2651,11 @@ pub static POINT_PICKS: crate::counter::Counter = crate::counter::Counter::new()
 #[doc(hidden)]
 pub static ROWS_FROM_INDEX_ENTRIES: crate::counter::Counter = crate::counter::Counter::new();
 
+/// Most rows (and their bytes) a heap-order scan holds from its first read of a range,
+/// returning them from there instead of reading it again (`next_heap_ordered`).
+const HELD_ROWS: usize = 1024;
+const HELD_BYTES: usize = 256 << 10;
+
 /// Heap-order scans streamed (`ScanNode::next_heap_ordered`), and the displaced rows they
 /// held, for tests.
 #[doc(hidden)]
@@ -4038,6 +4043,11 @@ impl ScanNode {
                     // unless it is written meanwhile.)
                     let est = super::sizing::estimated_order(&self.plan.table, ctx).map(|e| e.1);
                     let mut last = None;
+                    // (A small table's rows held as they are read, while they are few, and
+                    // returned from here by TID: no second read of the range. pgbench's
+                    // branches and tellers, scanned by every UPDATE of theirs.)
+                    let mut held: Vec<super::heaporder::Held> = Vec::new();
+                    let (mut hold, mut held_bytes) = (est.is_none(), 0usize);
                     // (The batch's rows read where they are.)
                     while self.next_plain(ctx)? {
                         ctx.check()?;
@@ -4061,11 +4071,42 @@ impl ScanNode {
                                 return Ok(None);
                             };
                             tids.push(t);
+                            if hold {
+                                let (k, v) = self.rb.peek().expect("a row");
+                                held_bytes += k.len() + v.len();
+                                if held.len() < HELD_ROWS && held_bytes <= HELD_BYTES {
+                                    held.push((t, k.to_vec(), self.rb.value_bytes(self.rb.pos())));
+                                } else {
+                                    hold = false;
+                                    held = Vec::new();
+                                }
+                            }
                             if self.rb.remaining() <= 1 {
                                 break;
                             }
                             self.rb.advance();
                         }
+                    }
+                    if hold {
+                        // (Every row held: by TID, as the merge returns them; TIDs are distinct.
+                        // The TIDs sorted with the rows' places, each row then moved once.)
+                        if !held.is_sorted_by_key(|r| r.0) {
+                            let mut order: Vec<(u64, u32)> = held.iter().enumerate().map(|(i, r)| (r.0, i as u32)).collect();
+                            order.sort_unstable();
+                            let mut slots: Vec<Option<super::heaporder::Held>> = held.into_iter().map(Some).collect();
+                            held = order.iter().filter_map(|&(_, i)| slots[i as usize].take()).collect();
+                        }
+                        self.restart();
+                        self.hstream = Some(Box::new(Stream::Merge {
+                            bits: Vec::new(),
+                            early_bits: Vec::new(),
+                            pos: usize::MAX,
+                            ready: None,
+                            early: held.into(),
+                            late: Default::default(),
+                            ranks: Vec::new(),
+                        }));
+                        continue;
                     }
                     let (bits, early_bits) = displaced(&tids);
                     let ranks = if est.is_some() { tids } else { Vec::new() };
@@ -4285,7 +4326,7 @@ impl ScanNode {
 
     /// Whether this scan's rows go through `LazyScan` (decided once): a plain sequential
     /// scan, its filter one with a kernel, no row locks, system columns or index entries.
-    fn lazy_scan(&mut self) -> Option<&mut LazyScan> {
+    fn lazy_scan(&mut self, ctx: &ExecCtx) -> Option<&mut LazyScan> {
         if self.lazy.is_none() {
             let p = &self.plan;
             let plain = self.ios_cols.is_none()
@@ -4297,7 +4338,7 @@ impl ScanNode {
                 && matches!(p.access, Access::Seq | Access::Unplanned)
                 && p.mark.is_none()
                 && !p.sys;
-            let filter = p.filter.as_ref().filter(|_| plain).and_then(super::kernel::compile);
+            let filter = p.filter.as_ref().filter(|_| plain).and_then(|f| super::kernel::compile_bound(f, ctx));
             self.lazy = Some(filter.map(|f| {
                 let d = super::parscan::Decode {
                     need: self.need.as_deref().map(Arc::from),
@@ -4330,12 +4371,12 @@ impl ScanNode {
     /// doesn't go that way (a row with out-of-line values, or of a table whose reads are
     /// noted: `sizing::note_read`); Some((None, _)) when the filter rejects it; else the row,
     /// and whether the filter was decided on it.
-    fn lazy_row(&mut self, key: &[u8], bytes: &[u8]) -> Result<Option<(Option<Row>, bool)>> {
+    fn lazy_row(&mut self, key: &[u8], bytes: &[u8], ctx: &ExecCtx) -> Result<Option<(Option<Row>, bool)>> {
         let t = self.plan.table.oid;
         if crate::storage::toast::has_external(bytes) || super::sizing::tracked(t) {
             return Ok(None);
         }
-        let Some(LazyScan { d, buf, cmps }) = self.lazy_scan() else {
+        let Some(LazyScan { d, buf, cmps }) = self.lazy_scan(ctx) else {
             return Ok(None);
         };
         // (Comparisons over the stored values first: a row they reject is never read.)
@@ -4362,7 +4403,7 @@ impl ScanNode {
         let t = self.plan.table.oid;
         if !crate::storage::toast::has_external(bytes)
             && !super::sizing::tracked(t)
-            && let Some(LazyScan { d, buf, cmps }) = self.lazy_scan()
+            && let Some(LazyScan { d, buf, cmps }) = self.lazy_scan(ctx)
         {
             if let Some(c) = cmps
                 && let Some(pass) = row_data_fast(bytes).and_then(|d| c.passes(d))
@@ -4412,13 +4453,13 @@ impl ScanNode {
     /// The scan's filter decided by its kernel (None: left to `eval`) for the stored row
     /// `bytes` (an index scan's rows, their conditions checked again; a row whose filter reads
     /// a few of its columns): over the stored values first (`StoredCmps`), else over `row`.
-    fn filter_kernel(&mut self, bytes: &[u8], row: Option<&Row>) -> Option<bool> {
+    fn filter_kernel(&mut self, bytes: &[u8], row: Option<&Row>, ctx: &ExecCtx) -> Option<bool> {
         let stored = self.ios_cols.is_none() && !crate::storage::toast::has_external(bytes);
         let plan = &self.plan;
         let (k, cmps) = self
             .kfilter
             .get_or_insert_with(|| {
-                plan.filter.as_ref().and_then(super::kernel::compile).map(|k| {
+                plan.filter.as_ref().and_then(|f| super::kernel::compile_bound(f, ctx)).map(|k| {
                     let c = super::kernel::StoredCmps::of(&k);
                     (k, c)
                 })
@@ -5447,7 +5488,7 @@ impl Node for ScanNode {
             && self.keys.is_none()
             && self.only.is_none()
             && self.sample.is_none()
-            && (self.plan.filter.is_none() || self.lazy_scan().is_some())
+            && (self.plan.filter.is_none() || self.lazy_scan(ctx).is_some())
         {
             self.heap_mode(ctx);
             self.any_order = self.in_order == Some(false) && self.sorted.is_none() && self.hstream.is_none();
@@ -5458,7 +5499,7 @@ impl Node for ScanNode {
             // (The rest of the batch counted with it: all of it without a filter, else when
             // the filter is a kernel's, which nothing it calls can observe the order of.)
             let filtered = self.plan.filter.is_some();
-            let run = if !filtered || self.lazy_scan().is_some() { self.pass_run(ctx, !filtered) } else { 0 };
+            let run = if !filtered || self.lazy_scan(ctx).is_some() { self.pass_run(ctx, !filtered) } else { 0 };
             let rows = 1 + run as u64;
             let (kept, read) = match filtered {
                 false => (Ok(rows), rows),
@@ -6217,7 +6258,7 @@ impl ScanNode {
         // (pgvector's): the filter first, over its own columns, and the rest decoded only
         // for the rows it keeps. (Not where a fetched row takes a predicate lock first.)
         // A plain sequential scan's row read in place, the filter's kernel first (`LazyScan`).
-        let lazy = match self.lazy_row(key, bytes)? {
+        let lazy = match self.lazy_row(key, bytes, ctx)? {
             Some((None, _)) => {
                 ctx.filtered(self.key);
                 return Ok(None);
@@ -6228,40 +6269,45 @@ impl ScanNode {
         let mut prefiltered = false;
         // (A row with out-of-line values: the filter's columns decoded once, for both.)
         let mut probed: Option<(Row, Rc<[bool]>)> = None;
-        if lazy.is_none()
+        let early = lazy.is_none()
             && self.ios_cols.is_none()
             && !self.implied
-            && let Some(fm) = self.prefilter_mask().or_else(|| self.external_prefilter(bytes))
-            && !predicate_locked(&self.plan.table, ctx)
             && self.plan.filter.is_some()
-        {
-            let ext = self.toast.is_some() && crate::storage::toast::has_external(bytes);
-            // (Decided over the stored values, nothing decoded: `StoredCmps`; else over the
-            // filter's columns by its kernel, else `eval`.)
-            match self.filter_kernel(bytes, None) {
+            && !predicate_locked(&self.plan.table, ctx);
+        // (Decided over the stored values, nothing decoded: `StoredCmps`. Any scan's row,
+        // an UPDATE's or a locking clause's too: pgbench's `UPDATE pgbench_branches ... WHERE
+        // bid = $1` reads its table's every row by a sequential scan.)
+        if early {
+            match self.filter_kernel(bytes, None, ctx) {
                 Some(false) => {
                     ctx.filtered(self.key);
                     return Ok(None);
                 }
                 Some(true) => prefiltered = true,
-                None => {
-                    let probe = match ext {
-                        true => self.row_ext(key, bytes, Some(&fm), None, ctx)?,
-                        false => scan_row_need(&self.plan, key, bytes, &fm, ctx)?,
-                    };
-                    let pass = match self.filter_kernel(bytes, Some(&probe)) {
-                        Some(p) => p,
-                        None => eval_bool(self.plan.filter.as_ref().expect("a filter"), &probe, ctx)?,
-                    };
-                    if !pass {
-                        ctx.filtered(self.key);
-                        return Ok(None);
-                    }
-                    prefiltered = true;
-                    if ext {
-                        probed = Some((probe, fm));
-                    }
-                }
+                None => {}
+            }
+        }
+        // (Else over the filter's columns by its kernel, else `eval`.)
+        if early
+            && !prefiltered
+            && let Some(fm) = self.prefilter_mask().or_else(|| self.external_prefilter(bytes))
+        {
+            let ext = self.toast.is_some() && crate::storage::toast::has_external(bytes);
+            let probe = match ext {
+                true => self.row_ext(key, bytes, Some(&fm), None, ctx)?,
+                false => scan_row_need(&self.plan, key, bytes, &fm, ctx)?,
+            };
+            let pass = match self.filter_kernel(bytes, Some(&probe), ctx) {
+                Some(p) => p,
+                None => eval_bool(self.plan.filter.as_ref().expect("a filter"), &probe, ctx)?,
+            };
+            if !pass {
+                ctx.filtered(self.key);
+                return Ok(None);
+            }
+            prefiltered = true;
+            if ext {
+                probed = Some((probe, fm));
             }
         }
         let mut row = match (lazy, &self.ios_cols, probed) {
@@ -6322,7 +6368,7 @@ impl ScanNode {
         if !prefiltered
             && !self.implied
             && self.plan.filter.is_some()
-            && !match self.filter_kernel(bytes, Some(&row)) {
+            && !match self.filter_kernel(bytes, Some(&row), ctx) {
                 Some(pass) => pass,
                 None => eval_bool(self.plan.filter.as_ref().expect("a filter"), &row, ctx)?,
             }
