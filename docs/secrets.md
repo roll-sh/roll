@@ -6296,6 +6296,26 @@ adds roll-access's grant lookup or the accounts' and workspace's.
 
 ## Next
 
+**State, 2026-11-23 05:20.** Landed since 19:25, each with main's CI green (most after a check of the merged tree, since main moved about ten commits an hour and the merge queue's CI runs only `cargo test --lib`):
+- #720 (fcafbf9fc): item 2, an environment's delete is kept for the recovery window, and a protected one's is a change request.
+- #732 (de8f381a4): the events feed (`GET …/projects/{project}/events`), roll MCP's `secrets.event`.
+- #743 (b19e0e201): agent-host's `pi_compaction` passes in the shared gate set (item 10).
+- #744 (6010d6093): item 7, linked fields carry `{kind, ref}`. roll apps' branch environments drop only links to what they branch.
+- #762 (aafd32f2f): item 8, `roll secrets agent`, the Lambda extension's surface on any machine (127.0.0.1, `X-Roll-Token`, digest-followed cache).
+- #772 (296e5064e): item 10, the agents end-to-end run starts rolld on port 0 and reads `--addr-file`.
+- #754 (2bb91aff8): delta reads for watchers. After a one-key change at 1,000 watchers on a 9,900-key folder, 216 → 7.7 CPU-s on SQLite and 214 → 15 on Postgres.
+- #681 (90dd155df): members v1.1 phase 1, groups and SCIM Groups.
+
+In flight:
+- item 6B, an agents endpoint's key as a `roll://` reference (#763). `Reference::parse` moves into `crates/roll-secrets-ref`, so agent-proto doesn't link roll-secrets.
+- the thirty-sixth product review (cold, read only).
+
+Next after those:
+- **Item 6C** (the model gateway's upstreams as `roll://`, on #763's ref crate).
+- **Delta reads for the rest** (S each): the Kubernetes operator, the CSI provider and the Lambda extension don't use `Watch`, so they still read whole folders. `Watch` with a consumer goes through `/resolve`. The Python, Java, .NET and Ruby clients still need their deltas. The server's full-set fallback keeps all of them working.
+- **A fresh project's developer can't reveal production** has no test of its own (item 9's last gap).
+- **Gate flakes under load** (another product's tests, seen on every secrets gate tonight at loads of 55–93): roll-cluster's Postgres lease and routing tests, code-control's `the_merge_queue_continues_a_dead_owners_batch` and `an_idle_sandbox_sleeps_and_a_command_wakes_it`. Each passes alone. Raised with their owners, not fixed here.
+
 **State, 2026-11-22 19:25.** Landed since 07:55, each with main's CI green:
 - #665 (57deeb0d1): a placeholder swaps only for its own consumer; references never smuggle a bound key's value; fallbacks skip bound keys before decrypting.
 - #697 (a74036a64): item 4, an offboarded person's leases, shares and sandboxes end with them.
