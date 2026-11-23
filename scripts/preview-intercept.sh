@@ -132,7 +132,12 @@ sock, ca, port, auth, path = sys.argv[1:]
 s = socket.socket(socket.AF_UNIX); s.connect(sock)
 s.sendall(f"echo.localhost:{port}\n".encode())
 ctx = ssl.create_default_context(cafile=ca)
-t = ctx.wrap_socket(s, server_hostname="echo.localhost")
+try:
+    t = ctx.wrap_socket(s, server_hostname="echo.localhost")
+except (ssl.SSLError, OSError) as e:
+    # Refused before TLS: a CA that ended (its bound hosts shrank) until the new one is minted.
+    print("cut " + type(e).__name__)
+    sys.exit(0)
 t.sendall(f"GET {path} HTTP/1.1\r\nHost: echo.localhost\r\nAuthorization: {auth}\r\nConnection: close\r\n\r\n".encode())
 out = b""
 try:
@@ -167,13 +172,17 @@ say "a host that echoes the key back: roll secrets' scrub stops it, and the plac
 ECHOED=$(through "Bearer $PLACEHOLDER" /echo)
 case "$ECHOED" in *"$KEY_VALUE"*) echo "an echoed key reached the preview's service"; exit 1;; esac
 case "$ECHOED" in 502*|cut*|"200 ") ;; *) echo "an echo should be stopped (a 502, or the connection cut), not: ${ECHOED:0:120}"; exit 1;; esac
+# The placeholder is ended: refused (403) while the CA still stands, or, once ending it shrank
+# the key's bound hosts and so ended the CA (roll secrets' #705), the connection is cut (with no
+# other live placeholder there's nothing to intercept, so no new CA). Never the key.
 AFTER=""
 for _ in $(seq 1 20); do
   AFTER=$(through "Bearer $PLACEHOLDER")
-  case "$AFTER" in 403*) break;; esac
+  case "$AFTER" in 403*|cut*) break;; esac
   sleep 0.5
 done
-case "$AFTER" in 403*) ;; *) echo "the echoed placeholder should be ended (403 after), not: ${AFTER:0:120}"; exit 1;; esac
+case "$AFTER" in *"$KEY_VALUE"*) echo "the ended placeholder still reached the key"; exit 1;; esac
+case "$AFTER" in 403*|cut*) ;; *) echo "the echoed placeholder should be ended (403, or the connection cut), not: ${AFTER:0:120}"; exit 1;; esac
 ACT=$(api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d]")
 echo "$ACT" | grep -q "echoed STRIPE_KEY" || { echo "the activity should say the host echoed STRIPE_KEY: $ACT"; exit 1; }
 echo "$ACT" | grep -q "$KEY_VALUE" && { echo "the activity should never show the key"; exit 1; }

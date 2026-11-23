@@ -73,6 +73,8 @@ fn lease_row(r: &code_sql::Row<'_>) -> code_sql::Result<Lease> {
 
 /// The longest a dynamic credential lives, renewals included (from when it was issued).
 const LEASE_LIFE_MAX: i64 = 30 * 86_400_000;
+/// Who runs scheduled rotations.
+const ROTATION: &str = "roll:rotation";
 
 /// What one sweep did.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -370,7 +372,8 @@ impl Secrets {
                 }
                 // Every folder that links it live reads a new value now: their digests move.
                 self.source_changed(&link.kind, &link.r#ref)?;
-                self.audit_now(project, caller, "secrets.rotate", Some(slug), Some(&path), &[key.to_string()], &format!("rotated {} {}'s credential", link.kind, link.r#ref));
+                let event = crate::events::Event::new(crate::events::Kind::RotationSucceeded, serde_json::json!({ "mode": "live", "scheduled": caller.principal == ROTATION }));
+                self.audit_now_event(project, caller, "secrets.rotate", Some(slug), Some(&path), &[key.to_string()], &format!("rotated {} {}'s credential", link.kind, link.r#ref), Some(event));
                 Ok(Applied { change: None, items: vec![], warnings: vec![], request: None })
             }
             Mode::Dynamic => Err(Error::BadRequest(format!("{key} is dynamic: every resolve issues a fresh credential"))),
@@ -408,7 +411,17 @@ impl Secrets {
                         let v = issued.parts.get(&l.field).cloned().ok_or_else(|| Error::Link(format!("{} didn't issue {}", l.kind, l.field)))?;
                         items.push(Item { path: p, key: k, owner: String::new(), action: ItemAction::Set { value: Some(v), comment: None, tags: None, link: None, link_state: Some(new_state.clone()), expires_at: None } });
                     }
-                    let r = crate::write::apply(c, &dek, self.keys()?, &env, &items, "rotate", &format!("rotated {} {}", link.kind, link.r#ref), caller, now)?;
+                    let keys: Vec<String> = items.iter().map(|i| i.key.clone()).collect();
+                    let r = crate::write::apply(c, &dek, self.keys()?, &env, &items, crate::write::Via::Rotation, &format!("rotated {} {}", link.kind, link.r#ref), caller, now)?;
+                    // The partner of `rotation.failed`, in the rotation's own transaction (its
+                    // value change is the row before, `secret.changed` via rotation).
+                    let version: i64 = c.query_row("SELECT version FROM secrets WHERE env_id = ? AND path = ? AND key = ? AND owner = ''", [&env.id, &path, key], |x| x.get(0))?;
+                    let mut data = serde_json::json!({ "mode": "managed", "version": version, "change": r.0.seq, "scheduled": caller.principal == ROTATION });
+                    if keys.len() > 1 {
+                        data["sharing"] = serde_json::json!(keys);
+                    }
+                    let event = crate::events::Event::new(crate::events::Kind::RotationSucceeded, data);
+                    crate::audit::record_event(c, self.keys()?, project, caller, "secrets.rotation_succeeded", Some(slug), Some(&path), &[key.to_string()], &format!("rotated {key} to version {version}"), now, event)?;
                     if let (None, Some(h)) = (&old, state.as_ref().and_then(|s| s.get("handle"))) {
                         retire(c, &env, &link, h, &caller.principal, now + link.grace_minutes() as i64 * 60_000, now)?;
                     }
@@ -495,7 +508,7 @@ impl Secrets {
             if next > now || !seen.insert(cred) {
                 continue;
             }
-            match self.rotate(&project, &slug, &path, &key, &Caller::consumer("roll:rotation")) {
+            match self.rotate(&project, &slug, &path, &key, &Caller::consumer(ROTATION)) {
                 Ok(_) => out.rotated += 1,
                 Err(e) => {
                     out.failed += 1;

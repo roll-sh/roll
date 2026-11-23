@@ -639,7 +639,7 @@ impl Engine {
                 }
                 if !gone.is_empty() {
                     let still: std::collections::BTreeSet<String> = self.store.pinned(&r.id)?.into_iter().map(|p| p.revision).collect();
-                    self.drop_pinned_data(&r.id, |d| !still.contains(&d.revision)).await?;
+                    self.drop_pinned_data_or_say(&r.id, |d| !still.contains(&d.revision)).await?;
                 }
             }
             // On roll apps, the head it ran stays reachable at that build's own URL (roll apps
@@ -658,7 +658,7 @@ impl Engine {
                     // Not kept (no URL of its own, or the new head is live already): its copies
                     // of the data go, nothing would use them.
                     let old = old.to_string();
-                    self.drop_pinned_data(&r.id, |d| d.revision == old).await?;
+                    self.drop_pinned_data_or_say(&r.id, |d| d.revision == old).await?;
                 }
                 if let Some(live) = live {
                     // On its own copy of the data where one was kept: the same build again,
@@ -681,7 +681,7 @@ impl Engine {
                     };
                     if own.is_none() && has_copy {
                         let old = old.to_string();
-                        self.drop_pinned_data(&r.id, |d| d.revision == old).await?;
+                        self.drop_pinned_data_or_say(&r.id, |d| d.revision == old).await?;
                     }
                     self.store.pin_build(&r.id, &spec.name, old, own.as_deref().unwrap_or(&live.url))?;
                 }
@@ -1444,9 +1444,9 @@ impl Engine {
                 let snap = format!("{name}-{}", crate::label_part(old.strip_prefix("cs_").unwrap_or(old), 10));
                 Some(async move { (res, branch, b.snapshot(&res.parent, branch, &snap).await, snap) })
             });
-            // Each copy made is recorded before the first failure is said, so none is left
-            // unrecorded (a later pass takes the missing ones; a product finds its own by name).
-            let mut failed = None;
+            // Each copy made is recorded. One that fails doesn't hold the push up (the copies are
+            // for the earlier push, not this head): it's said, and that push shares the preview's
+            // data for that product (its `own_data` names only the ones it has).
             for (res, branch, made, snap) in futures::future::join_all(jobs).await {
                 let key = format!("{}:{}", res.kind.as_str(), res.parent);
                 match made {
@@ -1457,15 +1457,25 @@ impl Engine {
                     }
                     Ok(None) => {}
                     Err(e) => {
-                        failed.get_or_insert_with(|| anyhow::anyhow!("keeping {key}'s data for its earlier push: {e:#}"));
+                        warn!(preview = %r.id, error = %e, "previews: keeping {key}'s data for its earlier push");
+                        self.store.log(&r.id, &format!("couldn't keep {key}'s data as {} left it: its earlier push shares the preview's ({e:#})", short(old)))?;
                     }
                 }
             }
-            if let Some(e) = failed {
-                return Err(e);
-            }
         }
         Ok(took)
+    }
+
+    /// [`Self::drop_pinned_data`] where nothing depends on it going now (copies no push uses
+    /// any more): a failure is said and doesn't hold the push up. The copy stays recorded, so
+    /// the next eviction or the preview's teardown deletes it. A reset, changed masks and the
+    /// teardown use the strict one: a copy masked by older rules must never stay reachable.
+    async fn drop_pinned_data_or_say(&self, id: &str, which: impl Fn(&crate::store::PinnedData) -> bool) -> anyhow::Result<()> {
+        if let Err(e) = self.drop_pinned_data(id, which).await {
+            warn!(preview = %id, error = %e, "previews: deleting an earlier push's copy");
+            self.store.log(id, &format!("couldn't delete an earlier push's copy of its data yet: tried again later ({e:#})"))?;
+        }
+        Ok(())
     }
 
     /// Delete the earlier pushes' data `which` picks (the branch first, then its record, so a

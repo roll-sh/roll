@@ -1382,10 +1382,29 @@ async fn an_earlier_push_runs_on_its_own_copy_of_the_data() {
     let copies = |e: &Env| e.engine.store.pinned_data(&p.id).unwrap().into_iter().map(|d| d.revision).collect::<Vec<_>>();
     assert_eq!(copies(&e), ["cs_7b", "cs_7b", "cs_7c", "cs_7c", "cs_7d", "cs_7d"], "Postgres and Redis");
     assert!(!e.pg.branches.lock().iter().chain(e.redis.branches.lock().iter()).any(|b| b.ends_with("-7a")), "{:?}", e.pg.branches.lock());
+    // An evicted copy that can't be deleted (its product down) doesn't hold the push up: it stays
+    // recorded, deleted later.
+    e.pg.fail_snapshot_deletes.store(1, Ordering::SeqCst);
+    e.code.edit("chg_od", |c| c.head = "cs_7e2".into());
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    let v = e.engine.store.preview(&p.id).unwrap();
+    assert!(v.state == State::Ready && v.head == "cs_7e2", "{:?} {}", v.state, v.head);
+    assert!(copies(&e).contains(&"cs_7b".to_string()), "cs_7b's Postgres copy stays recorded: {:?}", copies(&e));
     // A reset replaces the data: the copies of the old go with it.
     e.engine.reset(&p.id, Vec::new()).unwrap();
     e.engine.pass().await.unwrap();
     assert!(copies(&e).is_empty());
+    // A copy that fails doesn't hold the push up: said, and that push shares the preview's data
+    // for that product.
+    e.pg.fail_snapshots.store(1, Ordering::SeqCst);
+    e.code.edit("chg_od", |c| c.head = "cs_7f".into());
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    let v = e.engine.store.preview(&p.id).unwrap();
+    assert!(v.state == State::Ready && v.head == "cs_7f", "{:?} {}", v.state, v.head);
+    assert_eq!(v.earlier.iter().find(|x| x.revision == "cs_7e2").map(|x| x.own_data.clone()), Some(vec![roll_previews::Kind::Redis]));
+    assert!(e.engine.store.activity(&p.id).unwrap().iter().any(|a| a.message.starts_with("couldn't keep postgres:prj_db's data")));
 }
 
 /// A preview whose egress goes through its proxy ("Roll only") gets the keys bound to hosts as

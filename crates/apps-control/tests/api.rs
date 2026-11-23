@@ -249,6 +249,12 @@ struct World {
     _dir: tempfile::TempDir,
 }
 
+/// A route's raw answer (not JSON): its status and bytes.
+async fn call_raw(r: &axum::Router, method: &str, path: &str) -> (StatusCode, Vec<u8>) {
+    let resp = r.clone().oneshot(Request::builder().method(method).uri(path).body(Body::empty()).unwrap()).await.unwrap();
+    (resp.status(), resp.into_body().collect().await.unwrap().to_bytes().to_vec())
+}
+
 async fn world() -> World {
     world_with(|_| {}).await
 }
@@ -2086,6 +2092,34 @@ async fn changes_are_an_audit_trail_without_values() {
     let kinds: Vec<&str> = all.as_array().unwrap().iter().map(|e| e["kind"].as_str().unwrap()).collect();
     assert!(kinds.contains(&"deploy.active") && kinds.contains(&"audit.settings"), "{kinds:?}");
     assert!(!all.to_string().contains("sk-s3cr3t"));
+}
+
+/// An environment's own redirects (Vercel's project redirects) on any service: exact paths and
+/// patterns answered by the proxy (the query kept), anything else on to the app; a rule roll
+/// doesn't take is refused by its line.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_environments_redirects_answer_before_the_app() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "web", json!({"port": 80, "min_instances": 1})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    let (st, e) = call(&w.api, "PUT", &base, Some(json!({"redirects": "/ok /fine\n/x /y 200"}))).await;
+    assert!(st == StatusCode::BAD_REQUEST && e.to_string().contains("line 2"), "{e}");
+    let (st, e) = call(&w.api, "PUT", &base, Some(json!({"redirects": "/old /new 308\n/blog/* /posts/:splat"}))).await;
+    assert_eq!((st, e["redirects"].as_str().map(|r| r.lines().count())), (StatusCode::OK, Some(2)), "{e}");
+    let h = host(&svc["environments"][0]["url"]);
+    let go = |path: &'static str| {
+        let (public, h) = (w.public.clone(), h.clone());
+        async move {
+            let r = public.oneshot(Request::get(path).header("host", h.as_str()).body(Body::empty()).unwrap()).await.unwrap();
+            (r.status(), r.headers().get("location").map(|v| v.to_str().unwrap().to_string()))
+        }
+    };
+    assert_eq!(go("/old?a=1").await, (StatusCode::PERMANENT_REDIRECT, Some("/new?a=1".into())));
+    assert_eq!(go("/blog/2026/hi").await, (StatusCode::MOVED_PERMANENTLY, Some("/posts/2026/hi".into())));
+    assert_eq!(go("/elsewhere").await, (StatusCode::OK, None), "on to the app");
+    call(&w.api, "PUT", &base, Some(json!({"redirects": null}))).await;
+    assert_eq!(go("/old").await.0, StatusCode::OK, "gone with them");
 }
 
 /// A spend spike (AWS Cost Anomaly Detection's): a project with limits whose last hour cost three
@@ -4119,7 +4153,7 @@ async fn an_uptime_check_goes_down_and_comes_back() {
 /// token (which then opens nothing), and a script that throws is `check.down` saying why.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_browser_check_runs_its_script_past_the_password() {
-    let w = world().await;
+    let w = world_full(|_| {}, true, |_| {}).await;
     *w.fake.check_pages.lock() = Some(w.public.clone());
     let (svc, _) = image_service(&w, "web", json!({"port": 80, "min_instances": 1})).await;
     let id = svc["id"].as_str().unwrap().to_string();
@@ -4157,7 +4191,59 @@ async fn a_browser_check_runs_its_script_past_the_password() {
     pass(1).await;
     let down = pass(2).await;
     assert_eq!((down["up"].as_bool(), down["error"].as_str()), (Some(false), Some("new Error('no heading')")), "{down}");
+    // Its failure's screenshot and trace are kept, and said to be.
+    assert!(down["failure_at"].as_i64().is_some(), "{down}");
+    let (st, png) = call_raw(&w.api, "GET", &format!("{base}/checks/home/screenshot")).await;
+    assert_eq!((st, png.as_slice()), (StatusCode::OK, &b"\x89PNG fake"[..]));
+    assert_eq!(call_raw(&w.api, "GET", &format!("{base}/checks/home/trace")).await.1, b"PK fake");
+    assert_eq!(call_raw(&w.api, "GET", &format!("{base}/checks/other/trace")).await.0, StatusCode::NOT_FOUND);
     assert_eq!(w.fake.build_trees.lock().len(), 1, "still the one image");
+}
+
+/// A preview's head runs production's browser checks once (Vercel's deployment checks; roll
+/// previews folds them into its status): each result names its deployment, and a new head's
+/// replaces the last one's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_previews_head_runs_productions_browser_checks() {
+    let w = world().await;
+    *w.fake.check_pages.lock() = Some(w.public.clone());
+    let (svc, _) = image_service(&w, "web", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let prod = format!("/v1/apps/services/{id}/environments/production");
+    let check = |script: &str| json!({"checks": [{"name": "home", "path": "/", "every_s": 3600, "browser": script}]});
+    call(&w.api, "PUT", &prod, Some(check("await page.title()"))).await;
+    let pv = format!("/v1/apps/services/{id}/environments/pv-1");
+    assert_eq!(call(&w.api, "PUT", &pv, Some(json!({"ephemeral": true}))).await.0, StatusCode::OK);
+    let head = |w: &World| {
+        let (api, pv) = (w.api.clone(), pv.clone());
+        async move {
+            let (_, d) = call(&api, "POST", &format!("{pv}/deploys"), Some(json!({}))).await;
+            d["id"].as_str().unwrap().to_string()
+        }
+    };
+    let result_for = |dep: String| {
+        let (api, pv) = (w.api.clone(), pv.clone());
+        async move {
+            for _ in 0..500 {
+                let st = call(&api, "GET", &pv, None).await.1["check_states"][0].clone();
+                if st["deployment"] == dep.as_str() && !st["up"].is_null() {
+                    return st;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            panic!("no result for {dep}");
+        }
+    };
+    let d1 = head(&w).await;
+    settled(&w, &id, "pv-1", &d1).await;
+    let st = result_for(d1.clone()).await;
+    assert_eq!((st["name"].as_str(), st["up"].as_bool(), st["status"].as_u64()), (Some("home"), Some(true), Some(200)), "{st}");
+    // Production's check changes and the next head fails it, at once (no second try).
+    call(&w.api, "PUT", &prod, Some(check("throw new Error('no sign-in button')"))).await;
+    let d2 = head(&w).await;
+    settled(&w, &id, "pv-1", &d2).await;
+    let st = result_for(d2).await;
+    assert_eq!((st["up"].as_bool(), st["error"].as_str()), (Some(false), Some("new Error('no sign-in button')")), "{st}");
 }
 
 /// A rollout that checks first (`rollout.checks`, Checkly's deployment checks): the environment's
@@ -9085,9 +9171,18 @@ async fn a_closed_environment_uses_its_keys_without_seeing_them() {
     let (was, minted_before) = (e["active"]["id"].clone(), minted());
     *vault.1.lock() = "FAKECA3".into();
     w.apps.cron_pass(t + 11 * 60_000).await;
-    let tpl = w.apps.live(&id, "staging").template().unwrap();
-    let bundle = tpl.spec.files.iter().find(|(p, _)| p == apps_control::deploy::INTERCEPT_CA).map(|(_, c)| c.clone()).unwrap_or_default();
-    assert!(bundle.contains("FAKECA3") && !bundle.contains("FAKECA2"), "{bundle}");
+    // The template is made again as the pass's renewal finishes: read until it has.
+    let mut bundle = String::new();
+    for _ in 0..250 {
+        let tpl = w.apps.live(&id, "staging").template().unwrap();
+        bundle = tpl.spec.files.iter().find(|(p, _)| p == apps_control::deploy::INTERCEPT_CA).map(|(_, c)| c.clone()).unwrap_or_default();
+        if bundle.contains("FAKECA3") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let tail: String = bundle.lines().rev().take(4).collect::<Vec<_>>().join(" | ");
+    assert!(bundle.contains("FAKECA3") && !bundle.contains("FAKECA2"), "its last lines: {tail}");
     assert_eq!((minted() > minted_before, call(&w.api, "GET", &format!("{base}/staging"), None).await.1["active"]["id"].clone()), (true, was), "a placeholder made again, no deploy");
     assert!(call(&w.api, "DELETE", &format!("{base}/staging"), None).await.0.is_success());
     assert!(vault.0.lock().contains(&format!("end {}/staging", w.project)), "{:?}", vault.0.lock());

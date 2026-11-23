@@ -621,6 +621,8 @@ export interface EnvironmentPut {
   firewall?: FirewallRule[] | null;
   headers?: HeaderRule[] | null;
   /** Paths another service of the project answers (its environment of the same name); null or [] for none. */
+  /** Its own redirects on any service: `_redirects` lines (301 by default, 302, 303, 307, 308); null: none. */
+  redirects?: string | null;
   routes?: RouteRule[] | null;
   /** Its uptime checks (at most 5), or null for none. */
   checks?: UptimeCheck[] | null;
@@ -770,6 +772,8 @@ export interface Environment extends EnvironmentSummary {
   /** Headers its answers carry. */
   headers?: HeaderRule[];
   /** Paths another service of the project answers. */
+  /** Its own redirects, `_redirects` lines. */
+  redirects?: string;
   routes?: RouteRule[];
   checks?: UptimeCheck[];
   /** How each check stands on its owner. */
@@ -974,7 +978,7 @@ export interface Vulnerability {
  * OpenSearch-flavor cluster's `OPENSEARCH_URL`, `OPENSEARCH_USERNAME`, `OPENSEARCH_PASSWORD`). `service`: another web service of the project, its `<NAME>_URL`
  * (private) and `<NAME>_PUBLIC_URL`.
  */
-export type LinkKind = "postgres" | "redis" | "bucket" | "stream" | "queue" | "nosql" | "search" | "service";
+export type LinkKind = "postgres" | "redis" | "bucket" | "stream" | "queue" | "nosql" | "search" | "service" | "tasks";
 
 export interface Link {
   kind: LinkKind;
@@ -1148,6 +1152,10 @@ export interface UptimeCheckState {
   ms: number | null;
   error: string | null;
   down_since: number | null;
+  /** A browser check's last failure kept (its screenshot and Playwright trace), as the owner knows. */
+  failure_at?: number;
+  /** A preview's: the deployment this result is of (production's browser checks, run on each of its heads). */
+  deployment?: string;
 }
 
 /** A heartbeat: something outside roll pings its URL at least every `every_s` (60–604800); one not come within that and `grace_s` (default 300) is `heartbeat.missed`. */
@@ -1650,6 +1658,16 @@ export const appsApi = {
       throw new Error(data?.error ?? `${res.status} ${res.statusText}`.trim());
     }
     return { tar: await res.blob(), instance: res.headers.get("x-roll-instance") };
+  },
+  /** A browser check's last failure: its screenshot (PNG) or Playwright trace (zip). */
+  checkFailure: async (id: string, e: string, check: string, which: "screenshot" | "trace"): Promise<Blob> => {
+    const res = await fetch(`${ROLL_API}${env(id, e)}/checks/${encodeURIComponent(check)}/${which}`, withSession({ headers: apiHeaders(), cache: "no-store" }));
+    onApiStatus(res.status);
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      throw new Error(data?.error ?? `${res.status} ${res.statusText}`.trim());
+    }
+    return res.blob();
   },
   /** A tar written under the directory `path` in a running instance (`PUT …/files`, admin: what's written runs next). */
   uploadFiles: async (id: string, e: string, path: string, tar: Blob, instance?: string): Promise<{ instance: string; path: string }> => {

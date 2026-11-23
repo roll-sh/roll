@@ -310,7 +310,8 @@ export function checkUpstream(u: UpstreamSpec): { upstream: UpstreamSpec } | { e
   const base_url = text(u.base_url)?.replace(/\/+$/, "");
   const region = text(u.region);
   const project = text(u.project);
-  const key_ref = text(u.key_ref);
+  // A roll secrets reference is kept exactly as typed (roll's relay parses it); a 1Password one is trimmed.
+  const key_ref = u.key_ref?.trim().startsWith("roll://") ? u.key_ref : text(u.key_ref);
   if (base_url) {
     const e = checkUrl(base_url);
     if (e) return { error: e };
@@ -332,7 +333,9 @@ export function checkUpstream(u: UpstreamSpec): { upstream: UpstreamSpec } | { e
     if (!/^[a-z0-9_-]{1,128}$/.test(k) || bytes(v) > GATEWAY_LIMITS.header || CONTROL.test(v)) return { error: `${JSON.stringify(k)} isn't a header name and value on one line` };
     if (RESERVED_HEADERS.has(k)) return { error: `${k} is set by the gateway (put a key in the key field)` };
   }
-  if (key_ref && (!key_ref.startsWith("op://") || key_ref.length > 512 || /\s/.test(key_ref))) return { error: "a 1Password reference looks like op://vault/item/field" };
+  if (key_ref && (!(key_ref.startsWith("op://") || key_ref.startsWith("roll://")) || key_ref.length > 512 || /\s/.test(key_ref))) {
+    return { error: "a key reference is a 1Password one (op://vault/item/field) or roll secrets' (roll://ENV/KEY)" };
+  }
   const out: UpstreamSpec = { id: u.id, name, kind: u.kind };
   if (base_url) out.base_url = base_url;
   if (region) out.region = region;

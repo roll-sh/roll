@@ -95,6 +95,7 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
   useEffect(() => setHdr(hdrText), [hdrText]);
   const routeText = formatRoutes(env.routes ?? []);
   const [routes, setRoutes] = useState(routeText);
+  const [redirects, setRedirects] = useState(env.redirects ?? "");
   useEffect(() => setRoutes(routeText), [routeText]);
   const rateText = env.rate_limit ? String(env.rate_limit.per_minute) : "";
   const [rate, setRate] = useState(rateText);
@@ -726,6 +727,29 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
             />
           </div>
         )}
+
+        <div className="px-5 py-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-[13px] font-medium">Redirects</p>
+              <p className="mt-1 text-[12px] text-muted">
+                One a line, as <code className="font-mono">_redirects</code> takes them: <code className="font-mono">/old /new 308</code>, <code className="font-mono">/blog/* /posts/:splat</code>. 301 unless a line says 302, 303, 307 or 308; answered before anything wakes.
+              </p>
+            </div>
+            <button className={btn} disabled={busy || redirects === (env.redirects ?? "")} onClick={() => runner.run("redirects", () => appsApi.putEnvironment(service.id, env.name, { redirects: redirects.trim() ? redirects : null }))}>
+              Save
+            </button>
+          </div>
+          <textarea
+            value={redirects}
+            onChange={(e) => setRedirects(e.target.value)}
+            rows={Math.min(10, Math.max(2, redirects.split("\n").length))}
+            placeholder={"/old-pricing /pricing 308\n/blog/* /posts/:splat"}
+            spellCheck={false}
+            aria-label="Redirects, one a line"
+            className={`${input} mt-2 w-full font-mono text-[12px]`}
+          />
+        </div>
 
         {service.run.type === "web" && service.run.public !== false && (
           <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">

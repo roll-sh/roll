@@ -190,6 +190,8 @@ pub fn link_target(kind: &str) -> Option<(&'static str, &'static str)> {
         "queue" => ("queues", "vhost"),
         "nosql" => ("nosql", "nosql-database"),
         "search" => ("search", "cluster"),
+        // A tasks tenant: an API key of the link's own and its signing keys.
+        "tasks" => ("tasks", "tasks"),
         // Another service's URLs: no credential, but held to the same `reveal` as the rest.
         "service" => ("apps", "service"),
         // Not a link: a repo apps reads (`apps_repo`).

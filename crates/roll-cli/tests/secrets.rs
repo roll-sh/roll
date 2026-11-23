@@ -100,6 +100,7 @@ struct Server {
     secrets: Arc<roll_secrets::Secrets>,
     projects: Arc<roll_workspace::Workspace>,
     polls: Arc<Polls>,
+    tokens: Tokens,
     _dir: tempfile::TempDir,
 }
 
@@ -138,9 +139,9 @@ async fn start() -> Server {
     let tokens = Tokens::default();
     let polls = Arc::new(Polls::default());
     let access = axum::Router::new().route("/v1/access/tokens", axum::routing::post(create_token)).with_state(tokens.clone());
-    let router = roll_workspace::router(ws).merge(roll_secrets::router(served)).merge(access).layer(axum::middleware::from_fn_with_state(tokens, gate)).layer(axum::middleware::from_fn_with_state(polls.clone(), flaky_digest));
+    let router = roll_workspace::router(ws).merge(roll_secrets::router(served)).merge(access).layer(axum::middleware::from_fn_with_state(tokens.clone(), gate)).layer(axum::middleware::from_fn_with_state(polls.clone(), flaky_digest));
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-    Server { api, secrets, projects, polls, _dir: dir }
+    Server { api, secrets, projects, polls, tokens, _dir: dir }
 }
 
 #[tokio::test]
@@ -808,8 +809,8 @@ async fn roll_secrets_recover_brings_a_deleted_project_back_by_name() {
     assert!(roll(&api, &[], &["secrets", "recover", "shop"], None).await.code != Some(0), "nothing left to recover");
 }
 
-/// `roll secrets agent` on port 0 for `shop`'s production: its address once it listens, and what
-/// it has logged so far.
+/// `roll secrets agent` on port 0 for `shop`'s production, with `env` set (its login): its address
+/// once it listens, and what it has logged so far.
 struct LocalAgent {
     url: String,
     token: String,
@@ -817,7 +818,7 @@ struct LocalAgent {
     _child: tokio::process::Child,
 }
 
-async fn local_agent(s: &Server) -> LocalAgent {
+async fn local_agent(s: &Server, env: &[(&str, &str)]) -> LocalAgent {
     use tokio::io::AsyncBufReadExt;
     let token_file = s._dir.path().join("run").join("agent-token");
     let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_roll"))
@@ -828,6 +829,7 @@ async fn local_agent(s: &Server) -> LocalAgent {
         .env_remove("ROLL_ENV")
         .env_remove("ROLL_ADMIN_TOKEN")
         .env_remove("ROLL_AGENT_TOKEN")
+        .envs(env.iter().copied())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -869,7 +871,7 @@ async fn local_agent(s: &Server) -> LocalAgent {
 async fn the_local_agent_answers_only_requests_that_carry_its_token() {
     let s = start().await;
     ok(&s.api, &[], &["secrets", "-p", "shop", "-e", "production", "set", "GREETING=fake-hello", "PORT=5432"], None).await;
-    let a = local_agent(&s).await;
+    let a = local_agent(&s, &[]).await;
     let http = reqwest::Client::new();
     for token in [None, Some("fake-wrong-token")] {
         let mut req = http.get(format!("{}/secrets/GREETING", a.url));
@@ -903,7 +905,7 @@ async fn a_change_reaches_the_local_agents_cache_through_the_digest() {
     let s = start().await;
     let at = ["secrets", "-p", "shop", "-e", "production"];
     ok(&s.api, &[], &[&at[..], &["set", "GREETING=fake-one"]].concat(), None).await;
-    let a = local_agent(&s).await;
+    let a = local_agent(&s, &[]).await;
     let http = reqwest::Client::new();
     let read = || async { http.get(format!("{}/secrets/GREETING", a.url)).header("X-Roll-Token", &a.token).send().await.unwrap().text().await.unwrap() };
     let reads = || s.polls.reads.load(Ordering::SeqCst);
@@ -920,6 +922,36 @@ async fn a_change_reaches_the_local_agents_cache_through_the_digest() {
     }
     assert_eq!(read().await, "fake-two");
     assert_eq!(reads() - before, 2, "the agent read the change once, and the app's read after it is from memory");
+}
+
+/// Once roll refuses the agent's login (its token revoked), the agent stops answering from memory
+/// at its next poll's answer, though its TTL is an hour: the app gets roll's refusal, not the
+/// values it kept.
+#[tokio::test]
+async fn a_revoked_logins_local_agent_answers_a_refusal_within_one_poll() {
+    let s = start().await;
+    let at = ["secrets", "-p", "shop", "-e", "production"];
+    ok(&s.api, &[], &[&at[..], &["set", "GREETING=fake-one"]].concat(), None).await;
+    let token = ok(&s.api, &[], &["secrets", "-p", "shop", "tokens", "create", "agent", "--for-env", "production"], None).await.trim().to_string();
+    let a = local_agent(&s, &[("ROLL_TOKEN", &token)]).await;
+    let http = reqwest::Client::new();
+    let read = || async {
+        let r = http.get(format!("{}/secrets/GREETING", a.url)).header("X-Roll-Token", &a.token).send().await.unwrap();
+        (r.status().as_u16(), r.text().await.unwrap())
+    };
+    assert_eq!(read().await, (200, "fake-one".to_string()));
+    assert!(s.tokens.lock().unwrap().remove(&token).is_some());
+    // A change ends the poll in flight at once; the next poll, or the read after the move, is
+    // refused, and the folder is dropped.
+    ok(&s.api, &[], &[&at[..], &["set", "OTHER=fake-two"]].concat(), None).await;
+    let started = std::time::Instant::now();
+    while !a.log.lock().unwrap().contains("roll refused") {
+        assert!(started.elapsed() < std::time::Duration::from_secs(20), "the agent kept the folder: {}", a.log.lock().unwrap());
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let (status, body) = read().await;
+    assert_eq!(status, 403, "{body}");
+    assert!(body.contains("refused the agent's login") && !body.contains("fake-"), "{body}");
 }
 
 /// `envs rm` says what a delete would do before it's confirmed, and what the server did: a

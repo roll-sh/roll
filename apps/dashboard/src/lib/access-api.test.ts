@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { describeAskRule, redirectRegistered, stepUpId, broadRule, installLink, accessRequest, approversText, parseApprovers, deciderName, describeApprovalRule, gateProgress, rememberable, proposedRule, approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, githubIdentity, githubStep, presetFor, presetRules, publicJwk, rulesOf, trustedLabel, statusOf, toolsetCost, pickArea, waitsForAdmin, withToolsets, type Approval, type Preset, idpFromForm, tieForAgents, untieForAgents } from "./access-api";
+import { describeAlert, describeAskRule, redirectRegistered, stepUpId, broadRule, installLink, accessRequest, approversText, parseApprovers, deciderName, describeApprovalRule, gateProgress, rememberable, proposedRule, approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, githubIdentity, githubStep, presetFor, presetRules, publicJwk, rulesOf, trustedLabel, statusOf, toolsetCost, pickArea, waitsForAdmin, withToolsets, type Approval, type Preset, idpFromForm, tieForAgents, untieForAgents } from "./access-api";
 
 const presets: Preset[] = [
   { id: "read-only", name: "Read only", description: "", rules: [{ product: "*", resources: "*", actions: { read: "allow" } }] },
@@ -283,5 +283,19 @@ describe("redirectRegistered", () => {
     expect(redirectRegistered(uris, "http://127.0.0.1:50123/other")).toBe(false);
     expect(redirectRegistered(uris, "https://app.example.com:8443/cb")).toBe(false);
     expect(redirectRegistered(uris, "http://localhost:43111/cb")).toBe(false);
+  });
+});
+
+describe("describeAlert", () => {
+  it("says each kind of alert in a sentence, linking the token when it's about one", () => {
+    expect(describeAlert({ seq: 1, at: 0, kind: "tool_failing", tool: "apps_logs", calls: 40, failed: 20, rate_pct: 50, usual_pct: 2 })).toEqual({
+      text: "apps_logs is failing: 20 of 40 calls in 15 minutes were server errors (50%, usually 2%).",
+      grant: null,
+    });
+    expect(describeAlert({ seq: 2, at: 0, kind: "decoy_used", grant: "tok_d", name: "aws creds", route: "/v1/projects", ip: "203.0.113.9" })).toEqual({
+      text: 'The decoy "aws creds" was used to call /v1/projects from 203.0.113.9.',
+      grant: "tok_d",
+    });
+    expect(describeAlert({ seq: 3, at: 0, kind: "checkup_finding", grant: "tok_b", name: "ci", why: "it never expires" }).text).toBe('"ci": it never expires.');
   });
 });

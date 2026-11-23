@@ -17,6 +17,38 @@ pub const PLAYWRIGHT: &str = "1.65.1";
 const RUNNER: &str = include_str!("browser/run.mjs");
 /// What the container runs.
 const COMMAND: &str = "exec node /roll-check/run.mjs";
+/// Where the runner leaves a failure's screenshot and trace.
+const KEEP: &str = "/tmp/roll-check";
+/// A failure's files, as kept and served.
+pub const SCREENSHOT: &str = "screenshot.png";
+pub const TRACE: &str = "trace.zip";
+
+/// Where a check's last failure's files are kept in object storage (`env` `None`: all of a
+/// service's).
+pub fn failure_prefix(service: &str, env: Option<&str>, check: Option<&str>) -> String {
+    match (env, check) {
+        (Some(e), Some(c)) => format!("apps/checks/{service}/{e}/{c}/"),
+        (Some(e), None) => format!("apps/checks/{service}/{e}/"),
+        _ => format!("apps/checks/{service}/"),
+    }
+}
+
+/// The screenshot and trace in a run's kept archive.
+fn failure_files(tar: &[u8]) -> Vec<(&'static str, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut a = tar::Archive::new(tar);
+    let Ok(entries) = a.entries() else { return out };
+    for mut e in entries.flatten() {
+        let name = e.path().ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
+        let Some(which) = [SCREENSHOT, TRACE].into_iter().find(|w| name.as_deref() == Some(*w)) else { continue };
+        let mut buf = Vec::new();
+        use std::io::Read;
+        if e.read_to_end(&mut buf).is_ok() && !buf.is_empty() {
+            out.push((which, buf));
+        }
+    }
+    out
+}
 
 /// The checker image's Dockerfile.
 pub fn dockerfile() -> String {
@@ -45,7 +77,7 @@ fn result(lines: &[String]) -> Result<Option<u16>, String> {
 impl Apps {
     /// The service's checker image, built the first time (and again after a restart, from the
     /// builder's cache).
-    async fn checker_image(self: &Arc<Self>, service: &str, log: &crate::logs::LogSink) -> anyhow::Result<String> {
+    async fn checker_image(self: &Arc<Self>, service: &str, log: &crate::logs::LogSink, cancel: &tokio_util::sync::CancellationToken) -> anyhow::Result<String> {
         let tag = format!("roll-apps-{service}:browser-check-{}", PLAYWRIGHT.replace('.', "-"));
         if self.checker_images.lock().contains(&tag) {
             return Ok(tag);
@@ -70,17 +102,17 @@ impl Apps {
             egress: None,
             priority: false,
         };
-        let image = self.deps.builder.build(&job, log, tokio_util::sync::CancellationToken::new()).await?;
+        let image = self.deps.builder.build(&job, log, cancel.clone()).await?;
         self.checker_images.lock().insert(image.clone());
         Ok(image)
     }
 
     /// One browser check of `service`'s `env` at `url` (its public URL and the check's path):
-    /// the page's status, or why it failed.
-    pub(crate) async fn run_browser_check(self: &Arc<Self>, service: &str, env: &str, url: &str, c: &Check) -> Result<Option<u16>, String> {
+    /// the page's status, or why it failed. `cancel` ends it (its container still removed).
+    pub(crate) async fn run_browser_check(self: &Arc<Self>, service: &str, env: &str, url: &str, c: &Check, cancel: &tokio_util::sync::CancellationToken) -> Result<Option<u16>, String> {
         let Some(base) = self.cfg.otlp_base.clone() else { return Err("this node has no apps listener address for browser checks".into()) };
         let log = self.logs.sink(format!("env:{service}/{env}"), crate::logs::Stream::System);
-        let image = self.checker_image(service, &log).await.map_err(|e| format!("roll's browser couldn't be built: {e:#}"))?;
+        let image = self.checker_image(service, &log, cancel).await.map_err(|e| format!("roll's browser couldn't be built: {e:#}"))?;
         let token = roll_auth::credentials::new_secret("rlc_");
         self.check_tokens.lock().insert(token.clone(), (service.to_string(), env.to_string()));
         // Its own log, read for the result after (and then forgotten).
@@ -103,15 +135,98 @@ impl Apps {
         }
         let live = self.live(service, env);
         // The browser's own start and close on top of the check's timeout.
-        let ran = live.run_checker(&image, COMMAND, vars, Duration::from_secs(c.timeout_s as u64 + 30), self.logs.sink(key.clone(), crate::logs::Stream::Stdout)).await;
+        let ran = live.run_checker(&image, COMMAND, vars, Duration::from_secs(c.timeout_s as u64 + 30), self.logs.sink(key.clone(), crate::logs::Stream::Stdout), KEEP, cancel.clone()).await;
         self.check_tokens.lock().remove(&token);
         let lines: Vec<String> = self.logs.tail(&key, 50, None).await.into_iter().map(|l| l.text).collect();
         self.logs.forget(&key);
-        match ran {
-            Ok(exit) if exit.timed_out => Err(format!("it didn't finish within {} s", c.timeout_s + 30)),
-            Ok(_) => result(&lines),
-            Err(e) => Err(format!("roll's browser didn't start: {e:#}")),
+        let (verdict, kept) = match ran {
+            Ok(exit) if exit.canceled => (Err("canceled".to_string()), None),
+            Ok(exit) if exit.timed_out => (Err(format!("it didn't finish within {} s", c.timeout_s + 30)), None),
+            Ok(exit) => (result(&lines), exit.kept),
+            Err(e) => (Err(format!("roll's browser didn't start: {e:#}")), None),
+        };
+        // A failure's screenshot and trace kept, in place of the last one's.
+        if verdict.is_err()
+            && let (Some(tar), Some(objects)) = (kept, self.deps.objects.clone())
+        {
+            let files = failure_files(&tar);
+            if !files.is_empty() {
+                let prefix = failure_prefix(service, Some(env), Some(&c.name));
+                let _ = objects.delete_prefix(&prefix).await;
+                for (name, bytes) in files {
+                    let _ = objects.put(&format!("{prefix}{name}"), bytes.into()).await;
+                }
+                self.check_failures.lock().insert(format!("{}/{}", crate::env_key(service, env), c.name), code_sql::now_ms());
+            }
         }
+        verdict
+    }
+
+    /// A browser check's last failure's screenshot or trace (`which`: [`SCREENSHOT`], [`TRACE`]).
+    pub async fn check_failure_file(self: &Arc<Self>, service: &str, env: &str, check: &str, which: &str) -> crate::Result<Vec<u8>> {
+        self.service_env(service, env).await?;
+        let objects = self.deps.objects.clone().ok_or_else(|| crate::Error::NotFound("this node keeps no check failures".into()))?;
+        let key = format!("{}{which}", failure_prefix(service, Some(env), Some(check)));
+        match objects.get(&key).await {
+            Ok(Some(b)) => Ok(b.to_vec()),
+            _ => Err(crate::Error::NotFound(format!("no failure of the check {check} is kept"))),
+        }
+    }
+
+    /// A service's (or one environment's) kept check failures deleted, with it.
+    pub(crate) async fn drop_check_failures(self: &Arc<Self>, service: &str, env: Option<&str>) {
+        if let Some(objects) = self.deps.objects.clone() {
+            let _ = objects.delete_prefix(&failure_prefix(service, env, None)).await;
+        }
+        let key = match env {
+            Some(e) => format!("{}/", crate::env_key(service, e)),
+            None => format!("{service}/"),
+        };
+        self.check_failures.lock().retain(|k, _| !k.starts_with(&key));
+    }
+
+    /// A preview's head (a pv- environment's deployment that just went live): the production
+    /// environment's browser checks, once each, against its own URL (Vercel's deployment checks;
+    /// roll previews folds them into its status). Each result names its deployment, and a newer
+    /// head's run replaces this one's.
+    pub(crate) fn spawn_preview_checks(self: &Arc<Self>, service: &str, env: &str, deployment: &str) {
+        let (this, service, env, deployment) = (self.clone(), service.to_string(), env.to_string(), deployment.to_string());
+        tokio::spawn(async move {
+            let sid = service.clone();
+            let Ok(prod) = this.db(move |s| s.environment(&sid, "production")).await else { return };
+            let checks: Vec<Check> = prod.checks.into_iter().filter(|c| c.browser.is_some()).collect();
+            if checks.is_empty() {
+                return;
+            }
+            let (sid, en) = (service.clone(), env.clone());
+            let Ok(row) = this.db(move |s| s.environment(&sid, &en)).await else { return };
+            let url = this.url(&format!("{}--{}", deployment.trim_start_matches("dep_"), row.slug));
+            let key = |c: &Check| format!("{}/{}", crate::env_key(&service, &env), c.name);
+            // The last head's results go before this one's run starts.
+            for c in &checks {
+                this.check_states.lock().insert(key(c), crate::checks::Run { running: true, deployment: Some(deployment.clone()), started_at: code_sql::now_ms(), ..Default::default() });
+                this.check_failures.lock().remove(&key(c));
+            }
+            for c in &checks {
+                let began = std::time::Instant::now();
+                let started = code_sql::now_ms();
+                let got = this.run_browser_check(&service, &env, &format!("{}{}", url.trim_end_matches('/'), c.path), c, &tokio_util::sync::CancellationToken::new()).await;
+                let mut runs = this.check_states.lock();
+                let r = runs.entry(key(c)).or_default();
+                // A newer head started meanwhile: its own run decides.
+                if r.deployment.as_deref() != Some(deployment.as_str()) {
+                    continue;
+                }
+                r.running = false;
+                r.last_at = started;
+                r.ms = began.elapsed().as_millis() as u64;
+                match got {
+                    Ok(status) => (r.status, r.error, r.failures, r.down_since) = (status, None, 0, None),
+                    Err(why) => (r.status, r.error, r.failures, r.down_since) = (None, Some(why), 1, Some(code_sql::now_ms())),
+                }
+            }
+            this.changed(&service);
+        });
     }
 
     /// Whether a request names a browser check's token for this environment: roll's own visit,

@@ -88,6 +88,8 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}` | | `Deployment` | read |
 | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/logs?follow=&tail=` | | `LogLine[]` or SSE (ends with the deploy: an `end` event, then the stream closes, so a follower stops instead of reading it again; a job's and a run's log end the same way) | read |
 | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/sbom` | | its image's SBOM, CycloneDX JSON (`application/vnd.cyclonedx+json`, as a download) from the same scan; 404 when it wasn't scanned, the SBOM was over 8 MiB, or the deployment was pruned | read |
+| `GET /v1/apps/services/{id}/environments/{env}/checks/{check}/screenshot` | | a browser check's last failure as the page looked (`image/png`); 404 when none is kept ("Browser checks") | read |
+| `GET /v1/apps/services/{id}/environments/{env}/checks/{check}/trace` | | its Playwright trace (`application/zip`, a download: `npx playwright show-trace`); 404 when none is kept | read |
 | `POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/explain?again=` | | `Explanation`: why a failed deployment failed, read from its error, plan, steps and the newest lines of its build log and output (masked as they're written) by the model of the owner of the service's roll code repo (their own provider, else the server's within their cap; metered on their roll code usage as `explain`). Kept with the deployment and answered again without a model call, unless `again=1` (at most once a minute; one question a deployment at a time). 409 when it didn't fail, it was asked anew less than a minute ago or is being asked now, the service doesn't deploy from a roll code repo, the server has no model, or the owner has none or is past their cap; 503 when the model gave no answer | write |
 | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/vulnerabilities?severity=` | | `{ scan: ScanSummary \| null, vulnerabilities: Vulnerability[] }`: its image's known vulnerabilities, most severe first (then those with a fix), at most 2,000 (the counts are of all); `severity` keeps those at it or worse; a pruned deployment's list is empty, its counts kept | read |
 | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/commits` | | `DeployCommits`: what a repo deployment brings over the live one (for the live one: the one live before it), along its first parents, newest first, at most 50 | read |
@@ -531,6 +533,7 @@ type EnvironmentPut = {
    *  only. null: none. */
   firewall?: { action: "allow" | "deny" | "limit" | "challenge"; path?: string; methods?: string[]; user_agent?: string; ips?: string[]; header?: FieldMatch; cookie?: FieldMatch; query?: FieldMatch; per_minute?: number /* limit's: 1–100000 a client */; burst?: number /* limit's (default a minute's worth) */ }[] | null;
   headers?: { path?: string; set: Record<string, string>; replace?: boolean }[] | null; // at most 20; the app's own header wins unless replace; no framing or x-roll-* names
+  redirects?: string | null; // its own redirects on any service: _redirects lines, each 301 (default), 302, 303, 307 or 308 to a path or another site's URL, patterns and conditions as a static site's; up to 20,000 on exact paths (looked up, winning over patterns) and 2,000 others, 1 MiB; a line that isn't one is a 400 naming it; empty or null: none (README, "Routes to other services")
   routes?: { path: string; service: string }[] | null; // at most 20: a path (a prefix ends in *) another service of the project answers, by name (not this one; 400 for one the project hasn't), its environment of the same name, the path and query as they came; the first that takes a path decides; checked after this environment's gates, past the target's
   checks?: { name: string /* a-z, 0-9, -, unique, ≤32 */; path: string; every_s?: number /* 30–3600, default 60 */; timeout_s?: number /* 1–60, default 10 */; status?: number /* the one it expects; default any 2xx/3xx */; contains?: string /* ≤200, its answer holds it */; browser?: string /* a browser check: a Playwright script (≤16 KiB, the body of an async function given page, context and url; it fails by throwing) run in Chromium after the page loads at path; every_s 300–3600, timeout_s 1–120 (README, "Browser checks") */ }[] | null; // uptime checks, at most 5: each GET'd through the environment's own proxy on its owner (past its gates, as a schedule's call); two failures in a row are check.down, the next pass alert.resolved; a check wakes a scale-to-zero service; null: none
   pause_schedule?: { windows: { from: string /* "fri 19:00" */; to: string }[]; timezone?: string } | null; // paused by the clock: as a window starts the environment is paused (as PUT {paused: true}), as it ends it's resumed, only what the schedule paused; a person's pause or resume inside a window holds until it ends; null: none
@@ -558,7 +561,7 @@ type Environment = EnvironmentSummary & {
   next_run_at: number | null; // a cron service's next scheduled run, once deployed
   volume_used?: { bytes: number; at: number }; // how full its volume was when last measured (hourly, on its owner), when it has one
   checks?: Check[];         // its uptime checks (as the PUT's)
-  check_states?: { name: string; up: boolean | null /* null: not tried yet; false once down */; failures: number; last_at: number | null; status: number | null; ms: number | null; error: string | null; down_since: number | null }[]; // on its owner
+  check_states?: { name: string; up: boolean | null /* null: not tried yet; false once down */; failures: number; last_at: number | null; status: number | null; ms: number | null; error: string | null; down_since: number | null; failure_at?: number /* a browser check's last failure kept: …/checks/{name}/screenshot and /trace */; deployment?: string /* a preview's: the deployment this result is of (production's browser checks run once on each of its heads; another or none: not run for the live one yet) */ }[]; // on its owner
   heartbeats?: { name: string; every_s: number; grace_s: number; added_at: number }[]; // as the PUT's (never a token)
   heartbeat_states?: { name: string; last_ping_at: number | null; due_at: number /* before the grace */; missed: boolean }[];
   heartbeat_urls?: Record<string, string>; // only in the answer to the PUT that added them: each new heartbeat's ping URL, shown once (a credential: left out for a caller that may not reveal)
@@ -601,6 +604,7 @@ type Environment = EnvironmentSummary & {
   rate_limit: { per_minute: number; burst: number | null } | null; // each client's requests a minute (null: no limit)
   firewall: { action: "allow" | "deny" | "limit" | "challenge"; path?: string; methods?: string[]; user_agent?: string; per_minute?: number; burst?: number }[]; // its rules, in order
   headers?: { path?: string; set: Record<string, string>; replace?: boolean }[]; // headers its answers carry (names lower case)
+  redirects?: string;       // its own redirects (as the PUT's)
   routes?: { path: string; service: string }[]; // paths another service of the project answers
   scaling: { backlog: number | null; wanted: number } | null; // a worker following its work: the backlog last read (every 10 s) and the instances it wants
   wait_for_ci: boolean;
@@ -712,7 +716,7 @@ type Plan = {
 };
 
 /** Wired on a node today: postgres (DATABASE_URL), redis (REDIS_URL, REDIS_REST_URL/TOKEN) and search. */
-type LinkKind = "postgres" | "redis" | "bucket" | "stream" | "queue" | "nosql" | "search" | "service";
+type LinkKind = "postgres" | "redis" | "bucket" | "stream" | "queue" | "nosql" | "search" | "service" | "tasks";
 type Link = { kind: LinkKind; ref: string; prefix: string; vars: string[]; indices?: string[] /* a search link's key's indices */; access?: "read" | "append" };
 // `search`: `ref` is a roll search cluster (id or name). The link makes a data-only credential of
 // its own, once (never the cluster's password): ELASTICSEARCH_URL and ELASTICSEARCH_API_KEY, or on
@@ -723,6 +727,11 @@ type Link = { kind: LinkKind; ref: string; prefix: string; vars: string[]; indic
 // `service`: `ref` is another web service of the project (its id); `URL` is
 // `http://<name>.<env>.internal:<port>` in the linking environment, `PUBLIC_URL` its public URL
 // when it has one there. The prefix defaults to its name (`API_`). A service's links go with it.
+// `tasks`: `ref` is a roll tasks tenant (`default` for rolld's own). The link makes an API key of its
+// own, once (`ROLL_TASKS_TOKEN`, kept sealed; unlinking deletes it), and each deploy reads
+// `ROLL_TASKS_URL` (the tenant's API base, `/v1/tasks` under it) and the tenant's Standard Webhooks
+// signing keys (`ROLL_TASKS_SIGNING_KEY`, and `ROLL_TASKS_NEXT_SIGNING_KEY` for a rotation), the
+// names roll previews' tenant branch sets. A scoped token needs `reveal` on roll tasks.
 
 type Variables = { vars: { name: string; masked: string; source: "service" | "secret" | "link" | "roll" | "reference"; reference?: string /* a reference variable's template, `${{ api.KEY }}` */; sealed?: true /* never shown again: masked "••••••••" whatever its length */; file?: string /* kept as a file at this path in its instances */; runtime_only?: true /* only its instances get it, never a build's steps */ }[] };
 // A value set with `${{ VAR }}` / `${{ service.VAR }}` is a reference, filled in at each deploy;

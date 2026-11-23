@@ -1200,6 +1200,10 @@ impl Apps {
             live.forget_gate();
             // What the old deployment answered isn't this one's.
             self.responses.clear(&crate::env_key(&d.service, &d.environment));
+            // A preview's head: production's browser checks on it ([`crate::browser`]).
+            if env.ephemeral {
+                self.spawn_preview_checks(&d.service, &d.environment, &d.id);
+            }
             Ok(())
         }
         .await;
@@ -1271,9 +1275,12 @@ impl Apps {
             let row = self.db(move |s| s.environment(&sid, &en)).await?;
             let url = self.url(&format!("{}--{}", id.trim_start_matches("dep_"), row.slug));
             for c in row.checks.iter().filter(|c| c.browser.is_some()) {
+                anyhow::ensure!(self.owns(service), "this node no longer holds the service; the node that took it over deploys");
                 self.step(service, id, &format!("check_{}", c.name)).await;
                 let at = format!("{}{}", url.trim_end_matches('/'), c.path);
-                match self.run_browser_check(service, &row.name, &at, c).await {
+                let ran = self.run_browser_check(service, &row.name, &at, c, cancel).await;
+                anyhow::ensure!(!cancel.is_cancelled(), "canceled");
+                match ran {
                     Ok(_) => sys.line(format!("canary: browser check {} passed on the new deployment", c.name)),
                     Err(why) => {
                         sys.line(format!("canary: rolled back before any requests: browser check {} failed: {why}", c.name));

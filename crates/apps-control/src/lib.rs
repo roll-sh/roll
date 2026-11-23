@@ -352,6 +352,8 @@ pub struct Apps {
     pub(crate) check_tokens: Mutex<HashMap<String, (String, String)>>,
     /// The checker images built on this node ([`browser`]).
     pub(crate) checker_images: Mutex<std::collections::HashSet<String>>,
+    /// When each browser check's last failure was kept, by `<service>/<env>/<check>`.
+    pub(crate) check_failures: Mutex<HashMap<String, i64>>,
     /// A pass of daily rescans is running, and when live deployments were last looked at for
     /// one ([`vulns`]).
     pub(crate) rescanning: std::sync::atomic::AtomicBool,
@@ -701,6 +703,7 @@ impl Apps {
             check_states: Mutex::new(HashMap::new()),
             check_tokens: Mutex::new(HashMap::new()),
             checker_images: Mutex::new(std::collections::HashSet::new()),
+            check_failures: Mutex::new(HashMap::new()),
             rescanning: Default::default(),
             rescan_looked: Default::default(),
             errors_seen: Mutex::new(HashMap::new()),
@@ -1600,6 +1603,7 @@ impl Apps {
         if let Ok(gone) = self.db(move |s| s.drop_next_cache(&sid, None, true)).await {
             self.drop_cache_objects(gone);
         }
+        self.drop_check_failures(id, None).await;
         let sid = id.to_string();
         self.db(move |s| s.delete_service(&sid)).await?;
         // Its hostnames name nothing now.
@@ -1860,7 +1864,15 @@ impl Apps {
             firewall: r.firewall.clone(),
             headers: r.headers.clone(),
             routes: r.routes.clone(),
-            check_states: self.check_states_of(&r.service, &r.name, &r.checks),
+            redirects: r.redirects.clone(),
+            // A preview's are production's browser checks, run on each of its heads.
+            check_states: if r.ephemeral {
+                let sid = r.service.clone();
+                let prod: Vec<crate::model::Check> = self.db(move |s| s.environment(&sid, "production")).await.map(|p| p.checks.into_iter().filter(|c| c.browser.is_some()).collect()).unwrap_or_default();
+                self.check_states_of(&r.service, &r.name, &prod)
+            } else {
+                self.check_states_of(&r.service, &r.name, &r.checks)
+            },
             checks: r.checks.clone(),
             heartbeat_states: self.heartbeat_states_of(&r.service, &r.name, &r.heartbeats).await,
             heartbeats: r.heartbeats.clone(),
@@ -1951,7 +1963,7 @@ impl Apps {
                 settings.push(json!({ "field": format!("run.{k}"), "from": x, "to": y, "put": { "run": { k: x } } }));
             }
         }
-        for k in ["wait_for_ci", "follow_tag", "redeploy_on_secrets", "traces", "vitals", "report", "egress", "allow_ips", "rate_limit", "firewall", "headers", "routes", "checks", "log_retention_days", "approvals"] {
+        for k in ["wait_for_ci", "follow_tag", "redeploy_on_secrets", "traces", "vitals", "report", "egress", "allow_ips", "rate_limit", "firewall", "headers", "routes", "redirects", "checks", "log_retention_days", "approvals"] {
             let (x, y) = (a.get(k).cloned().unwrap_or(Value::Null), b.get(k).cloned().unwrap_or(Value::Null));
             if x != y {
                 settings.push(json!({ "field": k, "from": x, "to": y, "put": { k: x } }));
@@ -2001,7 +2013,7 @@ impl Apps {
     pub async fn put_environment_by(self: &Arc<Self>, service: &str, env: &str, body: Value, by: Option<String>) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "checks", "heartbeats", "split", "mirror", "snippets", "config", "freeze", "pause_schedule", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host", "log_retention_days", "approvals", "badge", "closed_by", "data", "scheduled"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "redirects", "checks", "heartbeats", "split", "mirror", "snippets", "config", "freeze", "pause_schedule", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host", "log_retention_days", "approvals", "badge", "closed_by", "data", "scheduled"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -2151,6 +2163,16 @@ impl Apps {
             Some(_) => return Err(Error::BadRequest("config is an object (or null)".into())),
         };
         // Snippets: HTML of its own in every page (null or []: none).
+        let redirects = match o.get("redirects") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(Value::String(t)) if t.trim().is_empty() => Some(None),
+            Some(Value::String(t)) => {
+                crate::site_rules::EnvRedirects::check(t).map_err(Error::BadRequest)?;
+                Some(Some(t.clone()))
+            }
+            Some(_) => return Err(Error::BadRequest("redirects is _redirects lines as a string, or null".into())),
+        };
         let snippets = match o.get("snippets") {
             None => None,
             Some(Value::Null) => Some(Vec::new()),
@@ -2519,6 +2541,12 @@ impl Apps {
             self.db(move |s| s.set_runtime_config(&sid, &e, c2.as_ref())).await?;
             self.changed(service);
         }
+        if let Some(text) = redirects {
+            let (sid, e) = (service.to_string(), env.to_string());
+            self.db(move |s| s.set_redirects(&sid, &e, text.as_deref())).await?;
+            self.live(service, env).forget_gate();
+            self.changed(service);
+        }
         if let Some(all) = snippets {
             let (sid, e) = (service.to_string(), env.to_string());
             self.db(move |s| s.set_snippets(&sid, &e, &all)).await?;
@@ -2778,6 +2806,7 @@ impl Apps {
         if let Ok(gone) = self.db(move |s| s.drop_next_cache(&sid, Some(&e), true)).await {
             self.drop_cache_objects(gone);
         }
+        self.drop_check_failures(service, Some(env)).await;
         let (sid, e) = (service.to_string(), env.to_string());
         self.db(move |s| s.delete_environment(&sid, &e)).await?;
         // Its peer after the row (a check in flight finishes first; none starts again).
@@ -3060,7 +3089,9 @@ impl Apps {
         let mut next_cache = false;
         if !deployment.is_empty() && !env.egress.closed() {
             let d = deployment.to_string();
-            let adapter = self.db(move |s| s.deployment(&d)).await.ok().and_then(|d| d.plan).is_some_and(|p| p["next_cache"] == true);
+            // Never a view's with values of its own: what it caches (from a copy's data) would be
+            // the environment's, shared with every deployment.
+            let adapter = self.db(move |s| Ok(s.deployment(&d)?.plan.is_some_and(|p| p["next_cache"] == true) && s.deploy_overrides(&d)?.is_none())).await.unwrap_or(false);
             if adapter && let Some((url, token)) = self.next_cache_vars(&svc.id, &env.name).await? {
                 vars.insert(crate::next_cache::URL_VAR.into(), (url, "roll"));
                 vars.insert(crate::next_cache::TOKEN_VAR.into(), (token, "roll"));
@@ -4230,7 +4261,8 @@ impl Apps {
             pages: row.pages,
             preview: row.ephemeral,
             headers: row.headers,
-            routes: row.routes, traces, vitals: row.vitals, challenge_key, split: row.split, mirror: row.mirror, snippets: snippets_of(&row.snippets) });
+            routes: row.routes, traces, vitals: row.vitals, challenge_key, split: row.split, mirror: row.mirror, snippets: snippets_of(&row.snippets),
+            redirects: row.redirects.as_deref().map(crate::site_rules::EnvRedirects::parse).filter(|r| !r.is_empty()).map(Arc::new) });
         live.set_gate(g.clone(), seen);
         Ok(g)
     }

@@ -559,7 +559,7 @@ impl Secrets {
             }
             audit::record(c, self.keys()?, project, caller, "environment.create", Some(&env.slug), None, &[], &format!("created {} environment {}", kind.as_str(), env.slug), now)?;
             if !items.is_empty() {
-                crate::write::apply(c, &dek, self.keys()?, &env, &items.items, "write", "created with the environment", caller, now)?;
+                crate::write::apply(c, &dek, self.keys()?, &env, &items.items, crate::write::Via::Write, "created with the environment", caller, now)?;
             }
             one(c, env)
         });
@@ -668,12 +668,17 @@ impl Secrets {
             }
             c.execute("UPDATE environments SET protected = ?, approvals = ?, approvers = ? WHERE id = ?", params![p.protected as i64, approvals, json(&approvers), env.id])?;
             let summary = if p.protected { format!("protected, {approvals} approval{}", if approvals == 1 { "" } else { "s" }) } else { "unprotected".into() };
-            // Health's `production_unprotected`, as it starts.
-            if slug == crate::PRODUCTION && env.protected && !p.protected {
-                let event = crate::events::Event::new(crate::events::Kind::ProductionUnprotected, serde_json::json!({}));
-                audit::record_event(c, self.keys()?, project, caller, "environment.policy", Some(slug), None, &[], &summary, now, event)?;
+            // Health's `production_unprotected`, as it starts; otherwise who may change what moved.
+            let event = if slug == crate::PRODUCTION && env.protected && !p.protected {
+                Some(crate::events::Event::new(crate::events::Kind::ProductionUnprotected, serde_json::json!({})))
+            } else if (env.protected, env.approvals, &env.approvers) != (p.protected, approvals, &approvers) {
+                Some(crate::events::Event::new(crate::events::Kind::AccessChanged, serde_json::json!({ "what": "environment", "protected": p.protected, "approvals": approvals })))
             } else {
-                audit::record(c, self.keys()?, project, caller, "environment.policy", Some(slug), None, &[], &summary, now)?;
+                None
+            };
+            match event {
+                Some(event) => audit::record_event(c, self.keys()?, project, caller, "environment.policy", Some(slug), None, &[], &summary, now, event)?,
+                None => audit::record(c, self.keys()?, project, caller, "environment.policy", Some(slug), None, &[], &summary, now)?,
             }
             let env = by_id(c, &env.id)?;
             one(c, env)
@@ -804,7 +809,7 @@ impl Secrets {
             if !folders.contains(&path) {
                 return Err(Error::NotFound(format!("no folder {path}")));
             }
-            let change = if items.is_empty() { None } else { Some(crate::write::apply(c, &dek, self.keys()?, &env, &items, "write", &format!("deleted folder {path}"), caller, now)?.0) };
+            let change = if items.is_empty() { None } else { Some(crate::write::apply(c, &dek, self.keys()?, &env, &items, crate::write::Via::Write, &format!("deleted folder {path}"), caller, now)?.0) };
             for f in folders.iter().filter(|f| under(f)) {
                 c.execute("DELETE FROM folders WHERE env_id = ? AND path = ?", [&env.id, f])?;
                 c.execute("DELETE FROM imports WHERE env_id = ? AND path = ?", [&env.id, f])?;
@@ -949,7 +954,7 @@ fn rewrite_references(c: &Conn<'_>, dek: &crate::crypto::Dek, mac: &crate::Keyri
     }
     for (env_id, items) in by_env {
         let env = by_id(c, &env_id)?;
-        crate::write::apply(c, dek, mac, &env, &items, "rename", &format!("references to {from} now point at {to}"), caller, now)?;
+        crate::write::apply(c, dek, mac, &env, &items, crate::write::Via::Rename, &format!("references to {from} now point at {to}"), caller, now)?;
     }
     Ok(())
 }

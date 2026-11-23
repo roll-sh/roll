@@ -24,7 +24,7 @@ const SOURCE_TONE: Record<VariableSource, string> = {
  * a stream and a search cluster credentials of their own (a search key has data access only), a
  * NoSQL database its login, another service its URLs.
  */
-export const LINKABLE: Partial<Record<ResourceView["kind"], LinkKind>> = { postgres: "postgres", redis: "redis", bucket: "bucket", stream: "stream", nosql: "nosql", search: "search", service: "service" };
+export const LINKABLE: Partial<Record<ResourceView["kind"], LinkKind>> = { postgres: "postgres", redis: "redis", bucket: "bucket", stream: "stream", nosql: "nosql", search: "search", queue: "queue", tasks: "tasks", service: "service" };
 
 /** `sealSet`: the seal was chosen by hand (a secret-looking name no longer decides it). */
 type Edit = { name: string; value: string; seal?: boolean; sealSet?: boolean };
