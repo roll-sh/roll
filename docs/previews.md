@@ -130,7 +130,9 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   earlier push connects there, so a migration that renamed a column doesn't break the code
   before it. A copy that fails (its product down, a stream's tail slow to reach object storage)
   doesn't hold the push up: it's said in the activity, and that push shares the preview's data
-  for that product (`own_data` names only the copies it has). A copy's bytes count in the preview's cost, budget and `max_bytes` with its
+  for that product (`own_data` names only the copies it has). An evicted push's copy that can't
+  be deleted is said and deleted later (the next eviction, or the teardown); a reset, changed masks
+  and the teardown wait for theirs. A copy's bytes count in the preview's cost, budget and `max_bytes` with its
   branches'. A copy goes with its push, and with the data it copied (a reset, or masking rules
   that changed: never served less masked than the rules say). Products that can't branch a
   branch share the preview's. A NoSQL copy inherits its branch's masking policy (a read policy,
@@ -2431,9 +2433,10 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **A copy that fails doesn't hold the push up, in review**: a product's copy failing (down, or
-   a stream's tail slow to reach object storage) failed the whole push, though the copies are
-   only for the earlier push; now it's said and that push shares the preview's data for it.
+1. **An evicted copy that can't be deleted doesn't hold the push up, in review**: its delete
+   failing (the product down) failed the push; now it's said and retried at the next eviction or
+   the teardown. A reset, changed masks and the teardown still wait, so a copy masked by older
+   rules never stays reachable.
 2. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
@@ -2444,6 +2447,8 @@ Ranked by what a person notices first. Done so far:
 4. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
 5. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-23 morning, later: a copy that fails doesn't hold the push up (#783), and `preview-intercept.sh`'s echo step allowing the cut that follows roll secrets' #705.
 
 Landed 2026-11-23 morning: what the earlier pushes' copies hold, said apart on the sheet and in `roll preview show` (#776, found in the 2026-11-23 review pack).
 

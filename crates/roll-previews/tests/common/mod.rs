@@ -135,6 +135,8 @@ pub struct FakeData {
     pub fail_next: AtomicUsize,
     /// How many earlier-push copies to fail next.
     pub fail_snapshots: AtomicUsize,
+    /// How many deletes of an earlier push's copy to fail next.
+    pub fail_snapshot_deletes: AtomicUsize,
     /// What `schema` answers: (the parent's lines, the branch's).
     pub schema: Mutex<Option<(Vec<String>, Vec<String>)>>,
     /// What reading a branch alone finds (unset: its parent's lines, as a branch is when it's made).
@@ -156,6 +158,7 @@ impl FakeData {
             made: AtomicUsize::new(0),
             fail_next: AtomicUsize::new(0),
             fail_snapshots: AtomicUsize::new(0),
+            fail_snapshot_deletes: AtomicUsize::new(0),
             schema: Mutex::new(None),
             masks: Mutex::new(Vec::new()),
             at: Mutex::new(Vec::new()),
@@ -201,6 +204,13 @@ impl Brancher for FakeData {
         let id = format!("{parent}~{name}");
         self.branches.lock().insert(id.clone());
         Ok(Some(Branched::plain(id)))
+    }
+    async fn delete_snapshot(&self, parent: &str, _from: &str, snapshot: &str, _kept: Option<&str>, name: &str) -> anyhow::Result<()> {
+        if self.fail_snapshot_deletes.load(Ordering::SeqCst) > 0 {
+            self.fail_snapshot_deletes.fetch_sub(1, Ordering::SeqCst);
+            anyhow::bail!("the product is down");
+        }
+        self.delete(parent, snapshot, name).await
     }
     async fn mask(&self, _parent: &str, branch: &str, _kept: Option<&str>, columns: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
         self.masks.lock().push((branch.to_string(), columns.clone()));
