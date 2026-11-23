@@ -341,7 +341,12 @@ async fn a_visual_change_waits_for_someone_to_accept_it_at_each_head() {
 async fn production_browser_checks_on_a_preview_are_read_after_its_head_is_up() {
     use roll_previews::ports::BrowserCheckResult;
     let e = env(json!({ "enabled": true }));
-    let check = |passed, error: Option<&str>| BrowserCheckResult { name: "checkout".into(), passed, error: error.map(str::to_string) };
+    let check = |passed, error: Option<&str>| BrowserCheckResult {
+        name: "checkout".into(),
+        passed,
+        error: error.map(str::to_string),
+        files: (passed == Some(false)).then(|| roll_previews::BrowserCheckFiles { service_id: "svc_web".into(), environment: "pv-x".into() }),
+    };
     e.apps.browser.lock().insert("web".into(), vec![check(None, None)]);
     e.code.open(change("chg_bc", 6));
     e.engine.pass().await.unwrap();
@@ -354,6 +359,9 @@ async fn production_browser_checks_on_a_preview_are_read_after_its_head_is_up() 
     e.engine.pass().await.unwrap();
     assert_eq!(state(&e), [("checkout".to_string(), roll_previews::CheckState::Failed, Some("Timeout 5000ms exceeded\\u{1b}[31m".to_string()))], "printable");
     assert!(e.code.last_report("chg_bc").browser_checks.iter().any(|c| c.name == "checkout" && c.state == roll_previews::CheckState::Failed), "the change hears it");
+    // Where its screenshot and trace are, for the sheet's links.
+    let files = e.engine.store.preview(&p.id).unwrap().browser_checks[0].files.clone();
+    assert_eq!(files.map(|f| (f.service_id, f.environment)), Some(("svc_web".to_string(), "pv-x".to_string())));
     // And followers of the events, once a head.
     e.engine.pass().await.unwrap();
     let said = e.engine.store.events(0, 500).unwrap().into_iter().filter(|x| x.preview == p.id && x.kind == "browser_checks_failed").count();
