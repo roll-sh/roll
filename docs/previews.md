@@ -133,7 +133,9 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   `report` (the default) shows them; `check` also posts `roll/browser-checks` on the head (pending
   while one runs, failing while one failed: for GitHub's branch protection); `required` also keeps
   the change from landing in roll (a `browser` blocker in `Code::blockers`, from the project's rule,
-  never the change's) until they pass at its head.
+  never the change's) until they pass at its head. Live: `scripts/preview-apps.sh` gives production two
+  browser checks, one the preview's page passes and one whose script throws, and the preview
+  reads `home` passed and `cart` failed with its error.
 - **Earlier pushes** (Vercel's per-push URLs): when a change's own service is redeployed at a new
   head, the head it ran stays reachable at `<service>-<head>-<slug>`, on the preview's same data,
   behind the same link, asleep until opened; the last 3 per service (an older one's container
@@ -2449,9 +2451,8 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Browser checks in the event feed, in review**: `browser_checks_passed` and
-   `browser_checks_failed`, once a head, so an agent following roll MCP's Events hears that
-   production's checks failed on a preview without polling it.
+1. **Production's browser checks checked live, in review**: `preview-apps.sh` runs them for
+   real on the preview's head (roll apps' checker image) and expects one passed, one failed.
 2. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
@@ -2462,6 +2463,8 @@ Ranked by what a person notices first. Done so far:
 4. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
 5. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-23, early afternoon: browser checks in the event feed (#807: `browser_checks_passed`, `browser_checks_failed`, once a head).
 
 Landed 2026-11-23, midday: the project's `browser_checks` rule (#802: `check` posts `roll/browser-checks`, `required` also a roll blocker), and a preview's tasks tenant giving its services its own webhook signing keys (#801, for roll apps' #792).
 
