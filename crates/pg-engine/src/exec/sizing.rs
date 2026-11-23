@@ -2549,6 +2549,82 @@ pub fn inserted_stored_modelled(t: &Table, key: &[u8], len: usize, ctx: &ExecCtx
     Ok(StoredPlace::Modelled(Some(tid)))
 }
 
+/// `inserted_stored_modelled` of a run of rows (`rows`: each one's key and tuple length, at
+/// most `TOAST_THRESHOLD`) under one lock, in their order: how many went in, their TIDs
+/// pushed to `tids` (None for a row the table's heap went before, as `inserted_with` leaves
+/// it). Fewer than `rows` when the table went past the model's size with the last of them
+/// (or was already past it: 0): the rest go in its estimate (`inserted_stored_past`). None:
+/// the rows go one by one (`inserted_stored_modelled`: a COPY's multi-insert buffer, a load
+/// deferring its model).
+pub fn inserted_stored_run(t: &Table, rows: &[(&[u8], usize)], ctx: &ExecCtx, tids: &mut Vec<Option<Tid>>) -> Result<Option<usize>> {
+    if !ensure(t, &[], ctx)? {
+        return Ok(Some(0));
+    }
+    let txn = ctx.txn.borrow().id;
+    let db = &ctx.sess.db;
+    if with_batch((db.instance, t.oid, txn), |_| ()).is_some() {
+        return Ok(None);
+    }
+    let xid = ctx.txn.borrow_mut().cur_xid();
+    let cid = ctx.txn.borrow_mut().output_cid();
+    let xids = db.xids();
+    let v = vis_of(xids, t, ctx);
+    let (n, big) = {
+        let mut rf = db.relfiles.of(t.oid).write();
+        let RelFiles { heaps, bulk, .. } = &mut *rf;
+        let b = bulk.get_mut(&(t.oid, txn));
+        if b.as_ref().is_some_and(|b| b.defer.is_some()) {
+            return Ok(None);
+        }
+        let Some(heap) = heaps.get_mut(&t.oid) else {
+            // (One row as `inserted_stored_modelled` leaves it; the next run asks again.)
+            tids.push(None);
+            return Ok(Some(1));
+        };
+        let mut single = InsertMode::single();
+        let mode = match b {
+            Some(b) => &mut b.mode,
+            None => &mut single,
+        };
+        let before = tids.len();
+        let big = heap.insert_run(rows, xid, cid, mode, &v, max_versions(), |tid| tids.push(Some(tid)));
+        (tids.len() - before, big)
+    };
+    if big {
+        untrack(db, t, None);
+    }
+    Ok(Some(n))
+}
+
+/// `inserted_stored` of a run of rows (`rows`: keys and tuple lengths, each at most
+/// `TOAST_THRESHOLD`) into table `t`'s estimate under one lock, each row that begins a run
+/// of the heap order's places keyed as `stored_run_key` keys it. False: the table is
+/// modelled (nothing done).
+pub fn inserted_stored_past(t: &Table, rows: &[(&[u8], usize)], ctx: &ExecCtx) -> bool {
+    let txn = ctx.txn.borrow().id;
+    let fillfactor = heap_fillfactor(t);
+    let mut rf = ctx.sess.db.relfiles.of(t.oid).write();
+    if !rf.untracked.contains(&t.oid) {
+        return false;
+    }
+    let RelFiles { estimated, bulk, .. } = &mut *rf;
+    let Some(e) = estimated.get_mut(&t.oid) else {
+        return true;
+    };
+    for &(key, len) in rows {
+        debug_assert!(len <= TOAST_THRESHOLD);
+        let tid = e.add_in(len, fillfactor, Some((&mut *bulk, (t.oid, txn))), Put::Row(None));
+        if e.placed(None, tid, t.has_rowid())
+            && let Some(r) = e.runs.last_mut()
+            && r.0.is_empty()
+        {
+            r.0 = key.to_vec();
+        }
+    }
+    estkeep::touched(&ctx.sess.db, e);
+    true
+}
+
 /// The row `inserted_stored` took, which began a run of the heap order's places, went in
 /// under `key`.
 pub fn stored_run_key(t: &Table, key: &[u8], db: &Database) {

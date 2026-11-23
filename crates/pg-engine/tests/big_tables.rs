@@ -949,6 +949,13 @@ ALTER TABLE dnn ALTER COLUMN a SET NOT NULL",
         let e = s.query("INSERT INTO dnn SELECT * FROM src").unwrap_err();
         assert!(format!("{e:?}").contains("violates not-null constraint"), "{e:?}");
         assert_eq!(rows(&mut s, "SELECT count(*) FROM dnn"), ["[Int8(0)]"]);
+        // (The rows before the failing one went in, as dead tuples, as the decoded path's.)
+        run(&mut s, "CREATE TABLE dnn2 (LIKE dnn INCLUDING ALL)");
+        assert!(s.query("INSERT INTO dnn2 SELECT * FROM src WHERE id > 0").is_err());
+        assert_eq!(
+            rows(&mut s, "SELECT pg_relation_size('dnn') = pg_relation_size('dnn2'), pg_relation_size('dnn') > 0, (SELECT n_tup_ins FROM pg_stat_user_tables WHERE relname = 'dnn') = (SELECT n_tup_ins FROM pg_stat_user_tables WHERE relname = 'dnn2')"),
+            ["[Bool(true), Bool(true), Bool(true)]"]
+        );
     });
 }
 

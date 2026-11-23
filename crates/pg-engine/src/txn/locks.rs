@@ -2036,7 +2036,9 @@ impl LockManager {
     /// `xid`) of transaction `owner` into its compact set, standing for its in-progress index
     /// entry. Only while nobody else holds or wants the key: false, take it the usual way
     /// (`acquire`, which first moves another's compact hold into the main table). `row_key`:
-    /// the entry's heap tuple (named by the CONTEXT of a wait for it).
+    /// the entry's heap tuple (named by the CONTEXT of a wait for it). `xact_held`: the
+    /// holder's transaction lock is in the main table already (`hold_xact`).
+    #[allow(clippy::too_many_arguments)]
     pub fn hold_compact_unique_key(
         &self,
         key: &[u8],
@@ -2045,12 +2047,15 @@ impl LockManager {
         holder: u64,
         xid: u64,
         row_key: Option<&[u8]>,
+        xact_held: bool,
     ) -> bool {
         let mut s = self.state.lock();
         if s.locks.contains_key(key) || s.bulk.values().any(|b| b.segs.iter().any(|g| g.ukeys.get(key).is_some())) {
             return false;
         }
-        Self::hold_xact(&mut s, holder, owner, proc, xid);
+        if !xact_held {
+            Self::hold_xact(&mut s, holder, owner, proc, xid);
+        }
         let b = s.bulk.entry(owner).or_insert_with(|| BulkLocks { proc, segs: Vec::new() });
         let done = b.seg(holder, xid).ukeys.insert_with(key, 0, compact_row_payload(key, row_key));
         if done {

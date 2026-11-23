@@ -222,6 +222,15 @@ pub fn index_value_prefix(t: &Table, ix: &Index, keyvals: &[Value], colls: &[Opt
     k
 }
 
+/// `index_value_prefix` appended to `out` (a unique key's lock key).
+pub fn index_value_prefix_into(out: &mut Vec<u8>, t: &Table, ix: &Index, keyvals: &[Value], colls: &[Option<KeyColl>]) {
+    crate::storage::keys::put_u32(out, t.oid);
+    crate::storage::keys::put_u32(out, ix.id);
+    for (i, (v, c)) in keyvals.iter().zip(&ix.columns).enumerate() {
+        encode_index_value(out, v, c.desc, c.nulls_first, colls.get(i).and_then(Option::as_ref));
+    }
+}
+
 pub fn lock_mode(m: RowMark) -> RowLockMode {
     match m {
         RowMark::Update => RowLockMode::Update,

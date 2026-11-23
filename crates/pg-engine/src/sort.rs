@@ -210,10 +210,13 @@ fn flag_sort<T>(v: &mut [T], mut d: usize, key: impl Fn(&T) -> [u64; 2] + Copy, 
             next[b] += 1;
         }
     }
+    // (A bucket in order already, as a load's rows and ascending keys are among an index's
+    // entries in no order, is left as it is: one pass instead of a pass a byte.)
     let mut at = 0;
     for &c in &count {
-        if c > 1 {
-            flag_sort(&mut v[at..at + c], d + 1, key, cmp);
+        let b = &mut v[at..at + c];
+        if c > 1 && !b.is_sorted_by(|x, y| cmp(x, y).is_le()) {
+            flag_sort(b, d + 1, key, cmp);
         }
         at += c;
     }

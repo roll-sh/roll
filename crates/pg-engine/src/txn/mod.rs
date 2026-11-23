@@ -744,6 +744,30 @@ impl Database {
         self.nextval(&seq)
     }
 
+    /// `nextval_by_one` taken `n` times, the values pushed to `out`: those logged ahead
+    /// already under one lock.
+    pub fn nextval_by_one_n(&self, oid: u32, n: usize, seq: impl Fn() -> Sequence, out: &mut Vec<i64>) -> Result<()> {
+        let end = out.len() + n;
+        while out.len() < end {
+            {
+                let mut seqs = self.seqs.lock();
+                if let Some(st) = seqs.get_mut(&oid)
+                    && st.is_called
+                {
+                    while out.len() < end && st.last < st.logged_to {
+                        st.last += 1;
+                        st.log_cnt = if st.log_cnt < ROWID_CACHE { 32 } else { st.log_cnt - ROWID_CACHE };
+                        out.push(st.last);
+                    }
+                }
+            }
+            if out.len() < end {
+                out.push(self.nextval_by_one(oid, &seq)?);
+            }
+        }
+        Ok(())
+    }
+
     /// nextval() of a sequence with CACHE n: up to n values taken at once (fewer where
     /// it reaches its limit), the session handing out the rest.
     pub fn nextval_batch(&self, seq: &Sequence, n: i64) -> Result<Vec<i64>> {
@@ -1281,11 +1305,42 @@ struct Sink {
     runs_ok: bool,
 }
 
+/// The distinct first 8 bytes (table and index) of a sink's keys, in order (None: a key
+/// shorter, or more than 255 of them).
+fn sink_prefixes(ents: &[(u32, u32, u32)], data: &[u8]) -> Option<Vec<[u8; 8]>> {
+    let mut p: Vec<[u8; 8]> = Vec::new();
+    let mut last = None;
+    for e in ents {
+        let k = data.get(e.0 as usize..(e.0 + e.1) as usize)?;
+        let q: [u8; 8] = k.get(..8)?.try_into().ok()?;
+        if last == Some(q) {
+            continue;
+        }
+        last = Some(q);
+        if !p.contains(&q) {
+            if p.len() == 255 {
+                return None;
+            }
+            p.push(q);
+        }
+    }
+    p.sort_unstable();
+    Some(p)
+}
+
 impl Sink {
     fn push(&mut self, k: &[u8], v: &[u8]) {
         self.ents.push((self.data.len() as u32, k.len() as u32, v.len() as u32));
         self.data.extend_from_slice(k);
         self.data.extend_from_slice(v);
+    }
+
+    /// `push` of a value that is `head` then `rest`.
+    fn push_parts(&mut self, k: &[u8], head: &[u8], rest: &[u8]) {
+        self.ents.push((self.data.len() as u32, k.len() as u32, (head.len() + rest.len()) as u32));
+        self.data.extend_from_slice(k);
+        self.data.extend_from_slice(head);
+        self.data.extend_from_slice(rest);
     }
 }
 
@@ -2269,6 +2324,31 @@ impl TxnState {
         self.maybe_spill()
     }
 
+    /// `put_fresh` of a value that is `head` then `rest`: into an open sink as it is (no
+    /// key or value made for it), unless the load holds or measures its rows.
+    pub fn put_fresh_parts(&mut self, key: &[u8], head: &[u8], rest: &[u8]) -> Result<()> {
+        if !self.read_only
+            && self.held.is_none()
+            && self.loading.is_none()
+            && let Some(s) = &mut self.sink
+        {
+            if !self.loads.is_empty() {
+                let t = key_table(key);
+                self.loads.retain(|l| l.0 != t);
+            }
+            s.push_parts(key, head, rest);
+            self.wrote = true;
+            if s.data.len() + 12 * s.ents.len() >= self.db.store.txn_spill_bytes() {
+                return self.flush_sink(false);
+            }
+            return Ok(());
+        }
+        let mut v = Vec::with_capacity(head.len() + rest.len());
+        v.extend_from_slice(head);
+        v.extend_from_slice(rest);
+        self.put_fresh(key.to_vec(), v)
+    }
+
     /// A bulk load (COPY FROM) whose rows and entries nothing reads before it ends opens a
     /// sink: its fresh writes (`put_fresh`) are kept as bytes and go to disk as sorted runs,
     /// linked at commit, instead of through the write buffer and its journal (a map insert
@@ -2439,16 +2519,33 @@ impl TxnState {
                 // (By each key's first 16 bytes, a byte at a time (`sort::radix_sort_by`: the
                 // index entries of a column in no order, not only rows in key order), then the
                 // keys themselves where those tie. Keys are unique: one order.)
+                // (A key's first 8 bytes are its table and index: the sink's few such prefixes
+                // ranked, the 16 bytes are a prefix's rank and the 15 bytes after it, which hold
+                // a row's whole key or an int index entry's, so fewer keys tie. Zeros past a
+                // key's end order as its end does; ties go to the keys. Keys under 8 bytes, or
+                // more than 255 prefixes: the first 16 bytes.)
+                let prefixes = sink_prefixes(&s.ents, &data);
                 let words = |k: &[u8]| {
                     let mut b = [0u8; 16];
-                    let n = k.len().min(16);
-                    b[..n].copy_from_slice(&k[..n]);
+                    match &prefixes {
+                        Some(p) => {
+                            let at = p.iter().position(|q| q[..] == k[..8]).expect("a ranked prefix");
+                            b[0] = at as u8;
+                            let n = (k.len() - 8).min(15);
+                            b[1..1 + n].copy_from_slice(&k[8..8 + n]);
+                        }
+                        None => {
+                            let n = k.len().min(16);
+                            b[..n].copy_from_slice(&k[..n]);
+                        }
+                    }
                     [u64::from_be_bytes(b[..8].try_into().unwrap()), u64::from_be_bytes(b[8..].try_into().unwrap())]
                 };
                 let mut order: Vec<([u64; 2], u32)> = s.ents.iter().enumerate().map(|(i, e)| (words(key(e)), i as u32)).collect();
                 crate::sort::radix_sort_by(&mut order, |o| o.0, |a, b| {
                     a.0.cmp(&b.0).then_with(|| key(&s.ents[a.1 as usize]).cmp(key(&s.ents[b.1 as usize])))
                 });
+                debug_assert!(order.windows(2).all(|w| key(&s.ents[w[0].1 as usize]) < key(&s.ents[w[1].1 as usize])), "the sink's keys in order");
                 let ts = self.position() as u64 + 1;
                 self.journal.push((Vec::new(), None));
                 self.derived.clear();
@@ -3504,7 +3601,9 @@ impl TxnState {
             let xid = self.cur_xid();
             let proc = self.lock_proc();
             self.table_used = true;
-            if self.db.locks.hold_compact_unique_key(key, self.id, proc, holder, xid, row_key) {
+            // (The transaction's own lock is in the main table once it has its id: `cur_xid`.)
+            let xact_held = holder == self.id && self.xid != 0 && self.xact_locks.contains(&self.id);
+            if self.db.locks.hold_compact_unique_key(key, self.id, proc, holder, xid, row_key, xact_held) {
                 // (As `lock` and `hold_unique_key` do: the transaction's own lock, which
                 // waiting for it waits on, and its subtransaction's.)
                 if !self.xact_locks.contains(&self.id) {

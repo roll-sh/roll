@@ -1603,6 +1603,14 @@ impl Heap {
         first
     }
 
+    /// The free space RelationGetBufferForTuple wants on a page for a tuple of `len` bytes
+    /// (`save`: `save_free`).
+    fn target_free(len: usize, save: usize) -> usize {
+        let len = maxalign(len);
+        let nearly_empty = MAX_HEAP_TUPLE_SIZE - (MAX_HEAP_TUPLES / 8 * ITEM_ID);
+        if len + save > nearly_empty { len.max(nearly_empty) } else { len + save }
+    }
+
     /// RelationGetBufferForTuple: the page a tuple of `len` bytes goes on.
     fn get_buffer(
         &mut self,
@@ -1612,15 +1620,8 @@ impl Heap {
         mut bi: Option<&mut Bistate>,
         num_pages: usize,
     ) -> u32 {
-        let len = maxalign(len);
         let num_pages = num_pages.max(1);
-        let save = self.save_free();
-        let nearly_empty = MAX_HEAP_TUPLE_SIZE - (MAX_HEAP_TUPLES / 8 * ITEM_ID);
-        let target_free = if len + save > nearly_empty {
-            len.max(nearly_empty)
-        } else {
-            len + save
-        };
+        let target_free = Self::target_free(len, self.save_free());
         let _ = other;
         let mut target = match bi.as_deref() {
             Some(b) if b.current.is_some() => b.current,
@@ -1738,6 +1739,65 @@ impl Heap {
         self.placed(key, tid);
         self.keyed(key, tid);
         tid
+    }
+
+    /// `insert` of `rows` (keys and tuple lengths) one after another, as an INSERT … SELECT
+    /// inserts them, each followed by `settle_left(v)` and handed to `placed`, until the heap
+    /// holds more than `max` versions (true: that row went in, the rest didn't). The same
+    /// pages, TIDs and keys as `insert` gives: a row that fits on the page the row before went
+    /// on (`get_buffer`'s target, which takes it) goes there without the lookups, and the
+    /// page's prune hint is published once its run of rows is in (or before `settle_left`
+    /// would settle a page), as nothing reads it under the lock meanwhile.
+    pub fn insert_run(&mut self, rows: &[(&[u8], usize)], xmin: u64, cid: u32, mode: &mut InsertMode, v: &Vis, max: usize, mut placed: impl FnMut(Tid)) -> bool {
+        if mode.frozen {
+            for &(key, len) in rows {
+                placed(self.insert(key, len, xmin, cid, mode));
+                self.settle_left(v);
+                if self.versions > max {
+                    return true;
+                }
+            }
+            return false;
+        }
+        let save = self.save_free();
+        // (The page the row before went on, and whether its hint waits to be published.)
+        let mut cur: Option<(u32, bool)> = None;
+        let mut big = false;
+        for &(key, len) in rows {
+            let blk = match cur {
+                Some((b, _)) if Self::target_free(len, save) <= self.pages[b as usize].heap_free() => {
+                    self.note_size();
+                    b
+                }
+                _ => {
+                    if let Some((b, true)) = cur.take() {
+                        self.visible_pages.changed();
+                        self.publish_page(b);
+                    }
+                    self.get_buffer(len, None, mode.use_fsm, mode.bistate.as_mut(), 1)
+                }
+            };
+            let tid = self.put_quiet(blk, Tup { cid, ..Self::new_tup(len, xmin) }, false);
+            cur = Some((blk, true));
+            self.placed(key, tid);
+            self.keyed(key, tid);
+            placed(tid);
+            if self.settle_due(v) {
+                self.visible_pages.changed();
+                self.publish_page(blk);
+                cur = Some((blk, false));
+            }
+            self.settle_left(v);
+            if self.versions > max {
+                big = true;
+                break;
+            }
+        }
+        if let Some((b, true)) = cur {
+            self.visible_pages.changed();
+            self.publish_page(b);
+        }
+        big
     }
 
     /// heap_multi_insert (a COPY batch), by command `cid`: rows of these keys and tuple
@@ -2064,6 +2124,13 @@ impl Heap {
     /// once their versions are settled for everyone: pages nobody reads again (an
     /// insert-only table's) still take the small form. (Writers call it: a version or two
     /// written, a page or two settled.)
+    /// Whether `settle_left(v)` would settle a page now.
+    fn settle_due(&self, v: &Vis) -> bool {
+        self.left.front().is_some_and(|&b| {
+            self.pages.get(b as usize).is_none_or(|p| p.settle_at < v.horizon || p.settle_at == u64::MAX)
+        })
+    }
+
     pub fn settle_left(&mut self, v: &Vis) {
         for _ in 0..2 {
             let Some(&b) = self.left.front() else { return };

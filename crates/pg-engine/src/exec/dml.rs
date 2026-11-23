@@ -791,12 +791,15 @@ pub struct Entering<'a> {
 /// The lock of a unique key (`locks::UNIQUE_KEY`): per key value, or the whole index under a
 /// nondeterministic collation (equal keys needn't be equal bytes).
 fn unique_lock_key(t: &Table, bix: &BoundIndex, vals: &[Value], nondet: bool) -> Vec<u8> {
-    let mut lock_key = vec![0, 0, 0, 0, 0, 0, 0, crate::txn::locks::UNIQUE_KEY];
     if nondet {
+        let mut lock_key = vec![0, 0, 0, 0, 0, 0, 0, crate::txn::locks::UNIQUE_KEY];
         lock_key.extend(index_prefix(t.oid, bix.index.id));
-    } else {
-        lock_key.extend(index_value_prefix(t, &bix.index, vals, &bix.colls));
+        return lock_key;
     }
+    // (The tag, then the key's prefix made in place: one allocation.)
+    let mut lock_key = Vec::with_capacity(48);
+    lock_key.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, crate::txn::locks::UNIQUE_KEY]);
+    super::scan::index_value_prefix_into(&mut lock_key, t, &bix.index, vals, &bix.colls);
     lock_key
 }
 
@@ -880,12 +883,11 @@ fn find_conflict(
         // (A fresh index's key, its lock ours: this statement's rows hold it, or, once
         // another transaction has ended since the statement began, a committed row.)
         if let Some(f) = entering.and_then(|e| e.fresh).filter(|f| f.covers(bix)) {
+            if !f.others_ended(ctx) {
+                return Ok(f.enter(&lock_key).then(Vec::new));
+            }
             if f.holds(&lock_key) {
                 return Ok(Some(Vec::new()));
-            }
-            if !f.others_ended(ctx) {
-                f.add(&lock_key);
-                return Ok(None);
             }
         }
         let Some(dkey) = committed_conflict(t, bix, vals, own, &nondet, ctx)? else {
@@ -3797,6 +3799,26 @@ impl FreshUnique {
         keys.table.find(h, |&(o, l)| &keys.bytes[o as usize..(o + l) as usize] == k).is_some()
     }
 
+    /// `holds`, and the key added when it doesn't (one hash for both).
+    fn enter(&self, lock_key: &[u8]) -> bool {
+        let k = &lock_key[8..];
+        let keys = &mut *self.keys.borrow_mut();
+        let h = std::hash::BuildHasher::hash_one(&keys.hasher, k);
+        let FreshKeys { bytes, table, hasher } = keys;
+        match table.entry(
+            h,
+            |&(o, l)| &bytes[o as usize..(o + l) as usize] == k,
+            |&(o, l)| std::hash::BuildHasher::hash_one(&*hasher, &bytes[o as usize..(o + l) as usize]),
+        ) {
+            hashbrown::hash_table::Entry::Occupied(_) => true,
+            hashbrown::hash_table::Entry::Vacant(v) => {
+                v.insert((bytes.len() as u32, k.len() as u32));
+                bytes.extend_from_slice(k);
+                false
+            }
+        }
+    }
+
     fn add(&self, lock_key: &[u8]) {
         let k = &lock_key[8..];
         let keys = &mut *self.keys.borrow_mut();
@@ -4023,7 +4045,7 @@ pub struct InsertNode {
     fresh: Option<FreshUnique>,
 }
 
-/// Rows INSERT … SELECT copied as stored (`StoredInsert::insert`), for tests.
+/// Rows INSERT … SELECT copied as stored (`StoredInsert::flush`), for tests.
 #[doc(hidden)]
 pub static STORED_INSERTS: crate::counter::Counter = crate::counter::Counter::new();
 
@@ -4086,22 +4108,9 @@ impl StoredInsert {
         }
     }
 
-    /// A stored row of the source in (`plain_counts` counting it): false when it can't go in
-    /// as stored (a NULL in a NOT NULL column, a value out of line or long enough that it
-    /// might go out of line, a row stored before a column was added), for the caller to
-    /// insert decoded.
-    fn insert(&self, plan: &InsertPlan, bytes: &[u8], plain_counts: &std::cell::Cell<i64>, ctx: &ExecCtx) -> Result<bool> {
-        if crate::storage::toast::has_external(bytes) {
-            return Ok(false);
-        }
-        let done = self.insert_data(plan, super::scan::row_data(bytes)?, plain_counts, ctx)?;
-        if done {
-            STORED_INSERTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
-        Ok(done)
-    }
-
-    /// `insert` of a row's stored values (its bytes after the header), none out of line.
+    /// A row's stored values (its bytes after the header, none out of line) in
+    /// (`plain_counts` counting it): false when it can't go in as stored (`stored_len`), for
+    /// the caller to insert decoded.
     fn insert_data(&self, plan: &InsertPlan, data: &[u8], plain_counts: &std::cell::Cell<i64>, ctx: &ExecCtx) -> Result<bool> {
         let t = &plan.rules.table;
         if !self.estimated.get() {
@@ -4169,7 +4178,175 @@ impl StoredInsert {
         txn.put_fresh(dkey, row)?;
         Ok(true)
     }
+
+    /// The tuple length of a row's stored values `data` when it can go in as stored (None: a
+    /// NULL in a NOT NULL column, a value out of line or long enough that it might go out of
+    /// line, a row stored before a column was added), as `insert_data` checks and sizes it.
+    fn stored_len(&self, data: &[u8]) -> Result<Option<usize>> {
+        let mut pos = 0;
+        if crate::storage::sst::get_varint(data, &mut pos)? as usize != self.types.len() {
+            return Ok(None);
+        }
+        // (Sized and checked in one pass: no NULL in a NOT NULL column, and `toast::encode`
+        // keeps a value whose encoding is under 128 bytes in line.)
+        let not_null = &self.not_null;
+        let fits = |c: usize, tag: u8, bytes: usize| bytes < 128 && !(tag == crate::storage::row::tag::NULL && not_null[c]);
+        Ok(crate::storage::row::stored_tuple_len_with(data, &self.types, &self.none, fits)
+            .filter(|&len| len <= super::sizing::TOAST_THRESHOLD))
+    }
+
+    /// An INSERT … SELECT's stored row (its bytes as the source stored them) staged to go in
+    /// with the rows staged before it (`flush`): false when it can't go in as stored, for the
+    /// caller to insert decoded once the staged rows are in.
+    fn stage(&self, bytes: &[u8], staged: &mut Staged) -> Result<bool> {
+        if crate::storage::toast::has_external(bytes) {
+            return Ok(false);
+        }
+        let data = super::scan::row_data(bytes)?;
+        let Some(len) = self.stored_len(data)? else {
+            return Ok(false);
+        };
+        staged.data.extend_from_slice(data);
+        staged.rows.push((staged.data.len() as u32, len as u32));
+        Ok(true)
+    }
+
+    /// The staged rows in, in their order, as `insert` puts each in: their row ids taken
+    /// together, placed in the model as a run (`sizing::inserted_stored_run`) while the
+    /// table is modelled, then in its estimate as a run (`inserted_stored_past`), each stored
+    /// once with its TID while modelled (straight into an open sink: `put_fresh_parts`).
+    fn flush(&self, plan: &InsertPlan, staged: &mut Staged, plain_counts: &std::cell::Cell<i64>, ctx: &ExecCtx) -> Result<()> {
+        if staged.rows.is_empty() {
+            return Ok(());
+        }
+        let r = self.flush_staged(plan, staged, plain_counts, ctx);
+        // (Staged rows go in once, whether or not that failed.)
+        staged.data.clear();
+        staged.rows.clear();
+        r
+    }
+
+    fn flush_staged(&self, plan: &InsertPlan, staged: &mut Staged, plain_counts: &std::cell::Cell<i64>, ctx: &ExecCtx) -> Result<()> {
+        let n = staged.rows.len();
+        let t = &plan.rules.table;
+        let db = &ctx.sess.db;
+        let Staged { data, rows, ids, keys, tids } = staged;
+        ids.clear();
+        db.nextval_by_one_n(t.oid, n, || crate::session::ddl::rowid_sequence(t), ids)?;
+        let prefix = index_prefix(t.oid, 0);
+        let mut ends = Vec::with_capacity(n);
+        keys.clear();
+        for &id in ids.iter() {
+            keys.extend_from_slice(&prefix);
+            encode_value(keys, &Value::Int8(id), false);
+            ends.push(keys.len());
+        }
+        let key = |i: usize| &keys[if i == 0 { 0 } else { ends[i - 1] }..ends[i]];
+        let value = |i: usize| &data[if i == 0 { 0 } else { rows[i - 1].0 as usize }..rows[i].0 as usize];
+        let runs: Vec<(&[u8], usize)> = (0..n).map(|i| (key(i), rows[i].1 as usize)).collect();
+        // (Each row's TID, None: stored without one.)
+        tids.clear();
+        // (Rows from this one on go one by one: `flush_rest`.)
+        let mut rest = None;
+        let mut i = 0;
+        while i < n {
+            if !self.estimated.get() {
+                self.estimated.set(super::sizing::is_estimated(t.oid, db));
+            }
+            if !self.estimated.get() {
+                match super::sizing::inserted_stored_run(t, &runs[i..], ctx, tids)? {
+                    Some(k) => {
+                        i += k;
+                        if i < n {
+                            self.estimated.set(true);
+                        }
+                    }
+                    None => {
+                        // (One by one, as `insert_data` places each.)
+                        let tid = match super::sizing::inserted_stored_modelled(t, runs[i].0, runs[i].1, ctx)? {
+                            super::sizing::StoredPlace::Modelled(tid) => tid,
+                            super::sizing::StoredPlace::Estimated => {
+                                self.estimated.set(true);
+                                if super::sizing::inserted_stored(t, runs[i].1, ctx) == Some(true) {
+                                    super::sizing::stored_run_key(t, runs[i].0, db);
+                                }
+                                None
+                            }
+                        };
+                        tids.push(tid);
+                        i += 1;
+                    }
+                }
+                continue;
+            }
+            if !super::sizing::inserted_stored_past(t, &runs[i..], ctx) {
+                // (Modelled again under it: what's left goes in one by one, as rows the
+                // source handed out next, under row ids of their own.)
+                rest = Some(i);
+                break;
+            }
+            tids.resize(n, None);
+            i = n;
+        }
+        let xid = ctx.txn.borrow_mut().cur_xid();
+        let mut txn = ctx.txn.borrow_mut();
+        let mut head = Vec::with_capacity(31);
+        for (i, tid) in tids.iter().enumerate() {
+            head.clear();
+            match tid {
+                Some((block, off)) => {
+                    head.push(crate::storage::row::ROW_HEADER_TID);
+                    crate::storage::sst::put_varint(&mut head, xid);
+                    crate::storage::sst::put_varint(&mut head, *block as u64);
+                    crate::storage::sst::put_varint(&mut head, *off as u64);
+                }
+                None => {
+                    head.push(crate::storage::row::ROW_HEADER);
+                    crate::storage::sst::put_varint(&mut head, xid);
+                }
+            }
+            txn.put_fresh_parts(key(i), &head, value(i))?;
+        }
+        drop(txn);
+        plain_counts.set(plain_counts.get() + tids.len() as i64);
+        STORED_INSERTS.fetch_add(tids.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        if let Some(from) = rest {
+            return self.flush_rest(plan, data, rows, from, plain_counts, ctx);
+        }
+        Ok(())
+    }
+
+    /// `flush`'s rows from the `from`th on one by one (`insert_data`), each decoded and
+    /// inserted where it can't go in as stored.
+    #[cold]
+    fn flush_rest(&self, plan: &InsertPlan, data: &[u8], rows: &[(u32, u32)], from: usize, plain_counts: &std::cell::Cell<i64>, ctx: &ExecCtx) -> Result<()> {
+        for i in from..rows.len() {
+            let v = &data[if i == 0 { 0 } else { rows[i - 1].0 as usize }..rows[i].0 as usize];
+            if self.insert_data(plan, v, plain_counts, ctx)? {
+                STORED_INSERTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            } else {
+                InsertNode::plain_row(plan, plain_counts, None, crate::storage::row::decode_row(v)?, ctx)?;
+            }
+        }
+        Ok(())
+    }
 }
+
+/// An INSERT … SELECT's stored rows staged to go in together (`StoredInsert::stage`,
+/// `flush`), and the flush's buffers.
+#[derive(Default)]
+struct Staged {
+    /// The rows' stored values, end to end.
+    data: Vec<u8>,
+    /// Each row's end in `data` and its tuple length.
+    rows: Vec<(u32, u32)>,
+    ids: Vec<i64>,
+    keys: Vec<u8>,
+    tids: Vec<Option<crate::catalog::heapsim::Tid>>,
+}
+
+/// Rows an INSERT … SELECT stages before it puts them in (`Staged`).
+const STAGED_ROWS: usize = 256;
 
 impl InsertNode {
     pub fn new(plan: super::planref::PlanRef<InsertPlan>, ctx: &ExecCtx) -> Result<Self> {
@@ -4615,8 +4792,12 @@ impl InsertNode {
         let InsertNode { plan, source, stored, plain_counts, sink, source_done, .. } = self;
         let Some(Some(si)) = stored.as_ref() else { return Ok(()) };
         let (plan, plain_counts): (&InsertPlan, &std::cell::Cell<i64>) = (plan, plain_counts);
+        // (Rows staged go in before anything else does: a decoded row, the sink opening, the
+        // source's end or error.)
+        let mut staged = Staged::default();
         let mut each = |s: super::Stored<'_>| -> Result<bool> {
             if *sink == Some(false) && ctx.processed.get() >= SINK_AFTER {
+                si.flush(plan, &mut staged, plain_counts, ctx)?;
                 let mut txn = ctx.txn.borrow_mut();
                 *sink = txn.open_sink().then_some(true);
                 if sink.is_some() {
@@ -4625,20 +4806,27 @@ impl InsertNode {
             }
             match s {
                 super::Stored::Bytes(b) => {
-                    if !si.insert(plan, b, plain_counts, ctx)? {
+                    if !si.stage(b, &mut staged)? {
                         return Ok(false);
+                    }
+                    if staged.rows.len() >= STAGED_ROWS {
+                        si.flush(plan, &mut staged, plain_counts, ctx)?;
                     }
                 }
                 super::Stored::Cols(..) => return Ok(false),
                 super::Stored::Row(r) => {
+                    si.flush(plan, &mut staged, plain_counts, ctx)?;
                     Self::plain_row(plan, plain_counts, None, r, ctx)?;
                 }
             }
             ctx.processed.set(ctx.processed.get() + 1);
             Ok(true)
         };
-        *source_done = source.each_stored(&mut each, ctx)?.is_some();
-        Ok(())
+        let done = source.each_stored(&mut each, ctx);
+        drop(each);
+        let flushed = si.flush(plan, &mut staged, plain_counts, ctx);
+        *source_done = done?.is_some();
+        flushed
     }
 
     /// A plain COPY's or INSERT … SELECT's row (`plain`): what `insert_new` does for a table without
