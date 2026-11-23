@@ -1620,6 +1620,11 @@ async fn a_leaked_token_is_revoked() {
     let (_, log) = d.call(OPERATOR, Method::GET, &format!("/v1/access/audit?grant={id}"), None).await;
     assert!(log.as_array().unwrap().iter().any(|e| e["source"] == "leak" && e["decision"] == "revoke"), "{log}");
     assert!(d.access.revoke_leaked(&found, "again").unwrap().is_empty(), "once");
+    // The operator's feed has it (which token and where it was found, never the secret).
+    let (_, feed) = d.call(OPERATOR, Method::GET, "/v1/access/alerts?after=0", None).await;
+    let e = &feed["events"][0];
+    assert_eq!((e["kind"].as_str(), e["grant"].as_str(), e["found_at"].as_str()), (Some("token_revoked"), Some(id.as_str()), Some("acme/site .env at 1a2b3c4d5e6f")), "{feed}");
+    assert!(!feed.to_string().contains(&token), "never the secret");
 
     // Another product's secret (apps' deploy hooks) found the same way goes to its revoker.
     let hook = roll_access::new_secret("rlk_");
@@ -2792,6 +2797,11 @@ async fn a_decoy_token_allows_nothing_and_gives_its_user_away() {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
     assert!(told.iter().any(|t| t.starts_with("usr_root: A decoy token was used")) && told.iter().any(|t| t.starts_with("usr_alice: A decoy token was used")), "{told:?}");
+    // On the operator's feed once an hour, however often it's tried.
+    d.call(&token, Method::GET, "/v1/workspace/projects", None).await;
+    let (_, feed) = d.call(OPERATOR, Method::GET, "/v1/access/alerts?after=0", None).await;
+    let decoys: Vec<&Value> = feed["events"].as_array().unwrap().iter().filter(|e| e["kind"] == "decoy_used").collect();
+    assert_eq!((decoys.len(), decoys[0]["grant"].as_str(), decoys[0]["route"].as_str()), (1, Some(id.as_str()), Some("/v1/workspace/projects")), "{feed}");
 }
 
 /// docs/members.md, "Evaluation": a person's session is the grant of their roles, decided by the
