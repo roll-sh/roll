@@ -47,6 +47,7 @@ fn rows_table(rows: &[Value]) -> Option<String> {
     if rows.len() < MIN_ROWS || !rows.iter().all(Value::is_object) {
         return None;
     }
+    // Columns as first seen (a row's fields come in key order).
     let mut columns: Vec<&str> = Vec::new();
     for r in rows.iter().filter_map(Value::as_object) {
         for k in r.keys() {
@@ -100,7 +101,7 @@ mod tests {
         let t = render(&v);
         assert_eq!(
             t,
-            "next: \"c2\"\nitems: 3 rows, tab-separated:\nid\tname\treplicas\tpaused\ttags\tnote\nsvc_1\tweb\t2\tfalse\t[\"a\"]\t\nsvc_2\t\"tab\\there\"\t\ttrue\t\t\"\"\nsvc_3\t\"\\\"quoted\\\"\"\t1\tfalse\t\t"
+            "next: \"c2\"\nitems: 3 rows, tab-separated:\nid\tname\tpaused\treplicas\ttags\tnote\nsvc_1\tweb\tfalse\t2\t[\"a\"]\t\nsvc_2\t\"tab\\there\"\ttrue\t\t\t\"\"\nsvc_3\t\"\\\"quoted\\\"\"\tfalse\t1\t\t"
         );
         assert!(t.len() < serde_json::to_string(&v).unwrap().len());
         // One row, two lists, or anything that isn't shorter stays JSON.
