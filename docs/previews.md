@@ -129,7 +129,11 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   up. They're on the record (`browser_checks`), the sheet (what failed, the check's own words
   made printable), `roll preview show` and the pull request comment ("Production's browser checks
   on this head: **1 failed** (`web: checkout`), 2 passed": names only). The screenshot and trace
-  of a failure stay roll apps' (`read` on the service).
+  of a failure stay roll apps' (`read` on the service). The project's `browser_checks` rule:
+  `report` (the default) shows them; `check` also posts `roll/browser-checks` on the head (pending
+  while one runs, failing while one failed: for GitHub's branch protection); `required` also keeps
+  the change from landing in roll (a `browser` blocker in `Code::blockers`, from the project's rule,
+  never the change's) until they pass at its head.
 - **Earlier pushes** (Vercel's per-push URLs): when a change's own service is redeployed at a new
   head, the head it ran stays reachable at `<service>-<head>-<slug>`, on the preview's same data,
   behind the same link, asleep until opened; the last 3 per service (an older one's container
@@ -1714,6 +1718,7 @@ type Preview = {
   earlier: {service: string; revision: string; url: string; share_url: string | null; at: number; own_data: string[]}[]; // earlier pushes, still reachable; own_data: the products it has its own copy of (as its head left them)
   copies: {count: number; bytes: number; usd_month: number}; // the earlier pushes' own copies of its data, said apart (counted in cost)
   browser_checks: {service: string; name: string; state: "pending" | "passed" | "failed"; error: string | null}[]; // production's browser checks on this head (roll apps)
+  browser_checks_rule: "check" | "required" | null; // the project's rule for them, when it's more than showing them
   goes_at: number | null;             // when it goes (TTL, keep or expiry running out), once a day away (or a quarter of a shorter TTL)
   reported_by: string | null;         // the project that reports a Git URL branch's pull request, when another one does (one voice per pull request)
   desired: "active" | "deleted";
@@ -1790,6 +1795,7 @@ type Settings = {
   warm: boolean;                      // wake the change's services as soon as a new head is deployed (true)
   crons: boolean;                     // roll apps' crons and scheduled commands run on their schedule in previews (false)
   regressions: "off" | "check" | "required";   // roll/regressions against main's preview: posted (check), or a blocker (required) ("off")
+  browser_checks: "report" | "check" | "required"; // production's browser checks: shown; a roll/browser-checks status; also a blocker
   mail: "catch" | "deliver";          // services' mail to roll's catcher, never delivered ("catch")
   traces: boolean;                    // roll.toml services get the OpenTelemetry SDK's variables (false)
   data_at: string | null;             // branch the data as of then: "-24h", "-30m", "-7d" or an RFC 3339 time (null: now)
@@ -2443,10 +2449,8 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Production's browser checks on each preview, in review** (roll apps' #790): read after the
-   head is up, on the record, the sheet, `roll preview show` and the PR comment. Next after it:
-   a project rule `browser_checks: report | required`, where `required` holds roll's landing (a
-   blocker) and GitHub's `roll/preview` until they pass.
+1. **Required browser checks, in review**: the project's `browser_checks` rule (`report`,
+   `check`: the `roll/browser-checks` status, `required`: also a roll blocker).
 2. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
@@ -2457,6 +2461,8 @@ Ranked by what a person notices first. Done so far:
 4. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
 5. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-23, late morning: production's browser checks on each preview head, on the record, the sheet, `roll preview show` and the PR comment (#791, on roll apps' #790).
 
 Landed 2026-11-23, mid-morning: an evicted push's copy that can't be deleted doesn't hold the push up (#788).
 

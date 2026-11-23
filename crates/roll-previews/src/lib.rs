@@ -352,6 +352,8 @@ pub struct Preview {
     /// Production's browser checks on this head (roll apps runs them on a preview's deployment as
     /// it goes live): each one's state, read until each has run.
     pub browser_checks: Vec<BrowserCheck>,
+    /// The project's rule for them (`check`, `required`), when it's more than showing them.
+    pub browser_checks_rule: Option<String>,
     /// The earlier pushes' own copies of its data: how many, what they hold and keep costing
     /// (counted in `cost` with its branches').
     pub copies: Copies,

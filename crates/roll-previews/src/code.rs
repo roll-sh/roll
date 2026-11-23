@@ -203,6 +203,7 @@ impl CodeSource {
                     cls: v.now.cls,
                 }),
                 visual_change: p.visual_change.as_ref().map(|v| code_control::model::PreviewVisualChange { since: v.since.clone(), percent: v.percent, phone_percent: v.phone_percent }),
+                browser_checks_rule: p.browser_checks_rule.clone(),
                 browser_checks: p
                     .browser_checks
                     .iter()

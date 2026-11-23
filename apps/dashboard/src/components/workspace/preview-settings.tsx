@@ -571,6 +571,13 @@ function Form({
         >
           <Choice value={s.regressions ?? "off"} options={["off", "check", "required"]} onChange={(v) => set("regressions", v)} labels={{ off: "Off", check: "A check", required: "Required to land" }} />
         </Field>
+        <Field
+          group
+          label="Production's browser checks"
+          note="roll apps runs a service's production browser checks once on each preview head. A check posts the roll/browser-checks status (pending while they run, failing while one fails); required also keeps the change from landing in roll until they pass."
+        >
+          <Choice value={s.browser_checks ?? "report"} options={["report", "check", "required"]} onChange={(v) => set("browser_checks", v)} labels={{ report: "Shown", check: "A check", required: "Required to land" }} />
+        </Field>
         {s.github.screenshot && (
           <Field label="Other pages" note="Taken with / at each push and compared the same way (up to 10: /pricing, or another service's, admin:/users).">
             <input value={pages} onChange={(e) => setPages(e.target.value)} placeholder="/ only" className={`${field} h-8 w-full font-mono text-[12px]`} spellCheck={false} />
