@@ -1501,18 +1501,6 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::patch;
-    use serde_json::json;
-
-    #[test]
-    fn set_flags_build_a_nested_patch() {
-        let p = patch(&["enabled=true".into(), "secrets.base=staging".into(), "branches=[\"feat/*\"]".into(), "max_previews=3".into()]).unwrap();
-        assert_eq!(p, json!({ "enabled": true, "secrets": { "base": "staging" }, "branches": ["feat/*"], "max_previews": 3 }));
-    }
-}
-
 /// `roll preview swap`: the tunnel carries one HTTP/2 connection the preview opens toward this
 /// side, and each request on it is sent to 127.0.0.1:<port> (as that host, so a dev server's host
 /// check passes; `x-forwarded-host` keeps the preview's), each said on stderr.
@@ -1558,4 +1546,16 @@ async fn swap_to(url: String, headers: Vec<(String, String)>, port: u16) -> anyh
         r = tunnel => r?,
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::patch;
+    use serde_json::json;
+
+    #[test]
+    fn set_flags_build_a_nested_patch() {
+        let p = patch(&["enabled=true".into(), "secrets.base=staging".into(), "branches=[\"feat/*\"]".into(), "max_previews=3".into()]).unwrap();
+        assert_eq!(p, json!({ "enabled": true, "secrets": { "base": "staging" }, "branches": ["feat/*"], "max_previews": 3 }));
+    }
 }
