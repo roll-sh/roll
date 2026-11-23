@@ -738,13 +738,19 @@ alone, as at the gate.
   rebinding).
 - Results come back as `structuredContent` (the route's JSON; arrays as `{"items": […]}`) and a
   `text` block of the same JSON, compact (no indentation: a model reads it the same, and a nested
-  list answer is about 40% smaller than pretty-printed), cut at 48 KiB (inline in Claude Code, which moves an answer past 50,000 characters or
+  list answer is about 40% smaller than pretty-printed). A list of objects (the answer, or its one
+  list beside `key: value` lines for its other fields) is a tab-separated table instead, whose
+  header names each column once: a plain string as itself, `null` empty, anything else (an empty or
+  quoted string, one with a tab or a line break, a list, an object) as compact JSON, so a cell never
+  spills. Whichever of the two is shorter is sent; on the sweep's recorded answers a list of 20 or
+  more rows came out about 40% smaller (the audit log 53%, apps' usage 74%), and rows with big nested
+  fields gain little. `structuredContent` stays the exact JSON for clients that read it. The text is
+  cut at 48 KiB (inline in Claude Code, which moves an answer past 50,000 characters or
   its default 25,000 tokens to a file, even for dense JSON), saying so and that the tool can be asked for less. Binary content comes back base64 (`content_b64`). An image (a preview's screenshot: PNG, JPEG or WebP, up to
   4 MiB) comes back as MCP image content the agent can look at.
 - Characters a person can't see but a model reads are escaped in the `text` block: tag characters
   (ASCII smuggled as U+E0000–E007F), zero-width and bidi controls, and variation selectors. They
-  appear as JSON escapes (`\u200b`), so the text still parses to the same value, and
-  `structuredContent` stays exact. Results carry other people's text (review comments, a
+  appear as JSON escapes (`\u200b`), and `structuredContent` stays exact. Results carry other people's text (review comments, a
   preview's notes and mail, task messages, objects), and instructions hidden that way stay
   visible to the model.
 - A route refusing a call is a result with `isError: true`, and its text says why ("not allowed:
@@ -1393,9 +1399,9 @@ ahead of every hosted server checked on 2026-07-28, events, tasks, apps, skills 
 gaps are in how results read and how roll is distributed):
 
 1. **Results that cost fewer tokens.** Compact text (#804; a nested list answer about 40%
-   smaller). A continuation past the 48 KiB cut needs roll to keep the answer (2026-07-28 is
-   stateless) or each route's own cursor, which the cut's note already points to; rows as a
-   table for flat lists (while `structuredContent` stays exact) is the next measurable step.
+   smaller), and lists of objects as tables (this PR; 20+ rows about 40% smaller than compact
+   JSON). A continuation past the 48 KiB cut needs roll to keep the answer (2026-07-28 is
+   stateless) or each route's own cursor, which the cut's note already points to.
 2. **Errors that suggest a fix (#805).** An unknown argument's error lists what the tool takes
    and the nearest name ("did you mean \"status\"?"); an unknown tool names the nearest one the
    connection has; `?tools=` names the nearest for a name it doesn't know. Next for it: the nearest
