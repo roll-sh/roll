@@ -246,6 +246,53 @@ async fn the_daemon_hosts_the_gateway_with_sealed_keys() {
     assert!(!db.windows(client_key.expose().len()).any(|w| w == client_key.expose().as_bytes()), "the client key is never stored");
 }
 
+/// An upstream's `roll://` key (docs/code/gateway.md, "Upstreams"): the daemon never reads it, it
+/// takes what roll's relay sends (`gateway.upstream_key`, sealed with its own context). When roll
+/// secrets refuses it, that upstream gets no key and the request doesn't go on to another key of
+/// the same provider (a second upstream at the same host), and `gateway.status` says why; once
+/// the relay sends the value again, it's used.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refused_roll_key_fails_its_upstream_closed_without_another_key_of_its_provider() {
+    let (upstream, seen) = mock_anthropic().await;
+    let home = tempfile::tempdir().unwrap();
+    let host = open(home.path(), vec![FakeProvider::new("claude")]).await;
+    let seal_key = host.info().await.seal_key.unwrap();
+    let port = free_port().await;
+    let mut s = settings(&upstream, port);
+    s.upstreams[0].key_ref = Some("roll://production/ANTHROPIC_KEY".into());
+    s.upstreams.push(UpstreamSpec { id: "anthropic-2".into(), name: "Anthropic, second key".into(), key_ref: None, ..s.upstreams[0].clone() });
+    assert_eq!(run(&host, Command::GatewayConfigure { settings: Box::new(s) }).await, Reply::Ok);
+    wait_gateway(&host, "listened", |g| matches!(g.run, GatewayRun::Running { .. })).await;
+    let second = agent_host::endpoints::seal_with(&seal_key, &agent_host::gateway::upstream_key_context("anthropic-2"), UPSTREAM_KEY).unwrap();
+    assert_eq!(run(&host, Command::GatewayKey { upstream: "anthropic-2".into(), key: KeyChange::Set { sealed: second } }).await, Reply::Ok);
+    let member = agent_host::endpoints::SealKey::generate();
+    let Reply::GatewayClient(issued) = run(&host, issue(&member.public(), "mch_member")).await else { panic!("no client") };
+    let client_key = member.open(gateway_limits::ENDPOINT_ID, &issued.sealed).unwrap();
+
+    // roll secrets refused it: no key for it, and none of its provider's.
+    let reason = "maker unreachable: usr_ada, who chose it, can no longer reveal production:/ or can no longer sign in";
+    let refused = Command::GatewayUpstreamKey { upstream: "anthropic".into(), key: RefKey::Refused { reason: reason.into() } };
+    assert_eq!(run(&host, refused).await, Reply::Ok);
+    let before = seen.lock().unwrap().keys.len();
+    let (status, body) = ask(port, client_key.expose(), &[]).await;
+    assert_eq!(status, 502, "{body}");
+    assert!(body.to_string().contains("no other key of its provider"), "{body}");
+    assert_eq!(seen.lock().unwrap().keys.len(), before, "neither key of the provider was sent anything");
+    let Reply::GatewayStatus(st) = run(&host, Command::GatewayStatus {}).await else { panic!("no status") };
+    let h = st.upstreams.iter().find(|u| u.upstream == "anthropic").unwrap();
+    assert!(h.last_error.as_deref().is_some_and(|e| e.contains("can no longer reveal")), "{h:?}");
+
+    // The relay's box: only with its own context, then used.
+    let as_sealed_key = agent_host::endpoints::seal_with(&seal_key, &agent_host::gateway::upstream_key_context("anthropic"), UPSTREAM_KEY).unwrap();
+    let r = run(&host, Command::GatewayUpstreamKey { upstream: "anthropic".into(), key: RefKey::Set { sealed: as_sealed_key } }).await;
+    assert!(matches!(r, Reply::Error(ReplyError { code: ErrorCode::Invalid, .. })), "{r:?}");
+    let from_roll = agent_host::endpoints::seal_with(&seal_key, &agent_host::gateway::upstream_ref_context("anthropic"), UPSTREAM_KEY).unwrap();
+    assert_eq!(run(&host, Command::GatewayUpstreamKey { upstream: "anthropic".into(), key: RefKey::Set { sealed: from_roll } }).await, Reply::Ok);
+    let (status, body) = ask(port, client_key.expose(), &[]).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(gateway(&host).await.unwrap().keys[0], UpstreamKey { upstream: "anthropic".into(), key: KeyState::Reference });
+}
+
 /// `hello` follows the run state: a port taken by something else is `failed` with why, and a
 /// gateway turned off is `stopped`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

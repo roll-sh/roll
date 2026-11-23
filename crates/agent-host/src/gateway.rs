@@ -5,7 +5,10 @@
 //!   settings and its upstreams' keys. The settings and the keys are kept in `agent.db` (mode 0600)
 //!   under [`SETTING`], the way endpoints keep theirs: a key arrives sealed to this daemon with
 //!   the context [`upstream_key_context`] (so an endpoint's box never opens as an upstream's key, nor
-//!   the other way round), or is read from 1Password on this machine (`key_ref`, memory only).
+//!   the other way round), or is read from 1Password on this machine (`key_ref`, memory only), or
+//!   for a `roll://` `key_ref` is sent by roll's relay from roll secrets, sealed with
+//!   `upstream_ref_context` (`gateway.upstream_key`, memory only; never read here). A refusal
+//!   leaves the upstream with no key and bars its provider (`Gateway::refuse_keys`).
 //!   The gateway's own data (client key hashes, usage, the request log) is `<home>/gateway/gateway.db`.
 //!   Management is daemon commands only (`orchestrator/gateway.rs`): the gateway has no management
 //!   HTTP API, so nothing can download a key.
@@ -23,7 +26,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
-pub use agent_proto::gateway::upstream_key_context;
+pub use agent_proto::gateway::{upstream_key_context, upstream_ref_context};
+
+/// A `roll://` key's state until roll's relay sends it.
+pub const WAITING: &str = "waiting for roll's relay to send this key from roll secrets";
 
 /// The store key of the hosted gateway's settings and upstream keys.
 pub const SETTING: &str = "gateway";
@@ -56,12 +62,14 @@ impl std::fmt::Debug for Stored {
     }
 }
 
-/// A 1Password reference read for an upstream: the reference it was read from, and its value or
-/// why it couldn't be read.
+/// A reference read for an upstream: the reference it was read from, and its value or why it
+/// couldn't be read. `refused`: roll secrets said its maker can't read it (a `roll://` key), so
+/// its provider is barred, not only the upstream.
 #[derive(Clone, Debug)]
 pub struct Resolved {
     pub reference: String,
     pub value: Result<Secret, String>,
+    pub refused: bool,
 }
 
 /// The gateway while this daemon hosts it.
@@ -91,6 +99,11 @@ impl Hosted {
         keys
     }
 
+    /// Upstreams whose `roll://` key roll secrets refused, with why (`Gateway::refuse_keys`).
+    pub fn refused(&self) -> HashMap<String, String> {
+        self.refs.iter().filter(|(_, r)| r.refused).filter_map(|(id, r)| Some((id.clone(), r.value.as_ref().err()?.clone()))).collect()
+    }
+
     /// What `hello` says about it (never a key). An upstream's 1Password reference that couldn't
     /// be read shows as that upstream's key state `none`, and in the log.
     pub fn info(&self) -> GatewayInfo {
@@ -114,11 +127,17 @@ impl Hosted {
 }
 
 /// Reads the settings' 1Password references, reusing what `previous` read for the same
-/// reference (a reference is read again only when it changes or failed).
+/// reference (a reference is read again only when it changes or failed). A `roll://` one is never
+/// read here: what roll's relay sent for the same reference is kept, else it waits for the relay.
 pub async fn resolve_refs(settings: &GatewaySettings, previous: &BTreeMap<String, Resolved>) -> BTreeMap<String, Resolved> {
     let mut refs = BTreeMap::new();
     for u in &settings.upstreams {
         let Some(reference) = &u.key_ref else { continue };
+        if u.roll_ref().is_some() {
+            let kept = previous.get(&u.id).filter(|r| &r.reference == reference).cloned();
+            refs.insert(u.id.clone(), kept.unwrap_or_else(|| Resolved { reference: reference.clone(), value: Err(WAITING.into()), refused: false }));
+            continue;
+        }
         let kept = previous.get(&u.id).filter(|r| &r.reference == reference && r.value.is_ok()).cloned();
         let resolved = match kept {
             Some(r) => r,
@@ -127,7 +146,7 @@ pub async fn resolve_refs(settings: &GatewaySettings, previous: &BTreeMap<String
                 if let Err(e) = &value {
                     tracing::warn!(upstream = %u.id, "the gateway upstream's key: {e}");
                 }
-                Resolved { reference: reference.clone(), value }
+                Resolved { reference: reference.clone(), value, refused: false }
             }
         };
         refs.insert(u.id.clone(), resolved);

@@ -4048,7 +4048,10 @@ Agent's templates do).
   the same project. roll code's relay reads it as them after each of the machine's `hello`s (a
   digest each time, the value only when it moved) and sends it sealed to the daemon, never kept.
   Once they can't read it, the daemon is told why and the endpoint has no key. The model
-  gateway's upstreams still keep their own copies (`op://`, `env:`, a file).
+  gateway's upstream keys can be one too (an upstream's `key_ref`, docs/code/gateway.md
+  "Upstreams"). They're bound on `gateway.configure`, read as the host machine
+  (`agent:<machine>`), and sent the same way. A refusal leaves the upstream with no key and bars
+  its provider, so no other key of it is tried.
 - **Who reads it.** The product asks rolld in process (`resolve_as` or `resolve_for`), naming the workspace resource that needs the value: a replication target
   resolves for the source bucket that replicates through it. The project is the one whose canvas
   holds that resource *and* that stands for it (`Workspace::trusts`): a person's canvas only
@@ -6408,12 +6411,11 @@ Newest entries first; older State and Ranked entries follow further down, as his
    - reviewer provider keys (code-control's own table): **done**, `bind_ref` for `code:review:<owner>`;
    - agents' endpoints (pasted or `op://`): **done**, `bind_ref` for `agent:<machine>`, sent sealed
      by the relay (`endpoint.key`);
-   - the model gateway's upstreams (`env:`/file).
+   - the model gateway's upstreams (`env:`/file): **done**, `agent:<machine>`, sent as `gateway.upstream_key`.
 
    A leaked model key, the commonest leak, gets no reach, health, validity check or rotation.
    Bind with `bind_ref` and read with `resolve_as`. The daemon resolves over its machine link.
-   Left for the upstreams: the endpoints' way (`code-control/src/agents/endpoint_refs.rs`), at
-   `gateway.key` with its upstream's context.
+   All three are done (#733, #763, and this item's part C).
 7. **apps' environments with their own data drop every linked key** (S). `Values.linked` gains
    `{name, kind, ref}`, so apps drops only what it branched.
 8. **A local agent outside Lambda** (S–M): the Lambda extension's surface as a sidecar.
