@@ -6643,6 +6643,41 @@ async fn members_reach_secrets_by_their_role() {
     assert_eq!(get("bob", format!("/v1/secrets/projects/{}/environments/development/secrets", api.project)).await.0, StatusCode::NOT_FOUND);
 }
 
+/// A project as it's made, nothing protected by hand (#688): a developer on the default role works
+/// in development and staging but never reveals production, and a check (an untrusted resolve)
+/// reads staging but is refused production, even through the operator.
+#[tokio::test]
+async fn a_fresh_projects_production_is_out_of_a_developers_and_a_checks_reach() {
+    let api = Api::new().await;
+    let (_, p) = api.as_ada(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "fresh" }))).await;
+    let fresh = p["id"].as_str().unwrap().to_string();
+    let at = |rest: &str| format!("/v1/secrets/projects/{fresh}{rest}");
+    let (s, e) = api.as_ada(Method::PUT, &at("/environments/production/secrets/KEY"), Some(json!({ "value": "fake-prod-value" }))).await;
+    assert!(s.is_success(), "{e}");
+    api.join(&fresh, "bob", "developer", None).await;
+
+    for env in ["development", "staging"] {
+        let value = format!("fake-{env}-value");
+        let (s, e) = api.signed_in("bob", false, Method::PUT, &at(&format!("/environments/{env}/secrets/KEY")), Some(json!({ "value": value }))).await;
+        assert!(s.is_success(), "{env}: {e}");
+        let (s, v) = api.signed_in("bob", false, Method::GET, &at(&format!("/environments/{env}/secrets/KEY/value")), None).await;
+        assert_eq!((s, v["value"].as_str()), (StatusCode::OK, Some(value.as_str())), "{env}: {v}");
+    }
+    let (s, v) = api.signed_in("bob", false, Method::GET, &at("/environments/production/secrets/KEY/value"), None).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
+    assert!(!v.to_string().contains("fake-prod-value"));
+
+    let check = |env: &str| {
+        let (api, path) = (&api, at(&format!("/environments/{env}/resolve")));
+        async move { api.call(Method::POST, &path, Some(json!({ "consumer": "check:fresh/web#1", "untrusted": true }))).await }
+    };
+    let (s, r) = check("staging").await;
+    assert_eq!((s, r["values"]["KEY"].as_str()), (StatusCode::OK, Some("fake-staging-value")), "{r}");
+    let (s, r) = check("production").await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{r}");
+    assert!(!r.to_string().contains("fake-prod-value"));
+}
+
 /// A project whose production isn't protected (made before new ones started with it protected) is
 /// never changed silently: Health says so and names what reaches it (owners and admins, a developer
 /// who names it, a check that read it), a developer's default still leaves it out, and protecting it

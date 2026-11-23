@@ -6419,7 +6419,6 @@ In flight:
 Next after those:
 - **Item 6C** (the model gateway's upstreams as `roll://`, on #763's ref crate).
 - **Delta reads for the rest** (S each): the Kubernetes operator, the CSI provider and the Lambda extension don't use `Watch`, so they still read whole folders. `Watch` with a consumer goes through `/resolve`. The server's full-set fallback keeps all of them working.
-- **A fresh project's developer can't reveal production** has no test of its own (item 9's last gap).
 - **Gate flakes under load** (another product's tests, seen on every secrets gate tonight at loads of 55–93): roll-cluster's Postgres lease and routing tests, code-control's `the_merge_queue_continues_a_dead_owners_batch` and `an_idle_sandbox_sleeps_and_a_command_wakes_it`. Each passes alone. They're roll code's and roll-cluster's tests, so they aren't fixed here.
 
 **State, 2026-11-22 19:25.** Landed since 07:55, each with main's CI green:
