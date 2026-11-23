@@ -6315,4 +6315,118 @@ mod tests {
         assert_eq!(after[1..], before[1..], "{before:?} -> {after:?}");
         check_at(&s, &model, s.visible_ts(), "compacted");
     }
+
+    /// A store made with column blocks (format 5) reads every row as a store without them
+    /// (format 4) holding the same writes: scans by batch (rows and columns), by row and in
+    /// reverse, point reads one at a time and sorted, a unique key's probe; its manifest says 5.
+    #[test]
+    fn column_blocks_read_as_rows() {
+        use crate::types::{Value, numeric::Numeric};
+        let key = |i: u32| {
+            let mut k = vec![0, 0, 0, 9, 0, 0, 0, 0];
+            k.extend_from_slice(&(i as u64).to_be_bytes());
+            k
+        };
+        let row = |i: u32, g: u32| {
+            let num = |s: String| Value::numeric(Numeric::parse_pg(&s).unwrap());
+            let vals = vec![
+                Value::Int4(i as i32),
+                num(format!("{}.{:02}", i * 37 % 9000, (i + g) % 100)),
+                Value::Text(["A", "N", "R"][(i % 3) as usize].into()),
+                Value::Text("x".repeat((i * 13 % 90) as usize).into()),
+                Value::Date(9000 + (i % 2000) as i32),
+                if i % 4 == 1 { Value::Null } else { Value::Bool(i % 4 == 0) },
+                Value::Int8(i as i64 * g as i64),
+                Value::Float8(i as f64 / 7.0),
+            ];
+            let mut b = vec![row::ROW_HEADER];
+            sst::put_varint(&mut b, 100 + g as u64);
+            b.extend(row::encode_row(&vals));
+            Bytes::from(b)
+        };
+        let types = [
+            crate::types::DataType::Int4,
+            crate::types::DataType::Numeric(-1),
+            crate::types::DataType::Text,
+            crate::types::DataType::Text,
+            crate::types::DataType::Date,
+            crate::types::DataType::Bool,
+            crate::types::DataType::Int8,
+            crate::types::DataType::Float8,
+        ];
+        let n = 6000u32;
+        let mut seen: Vec<Vec<String>> = Vec::new();
+        for on in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let o = || StoreOptions { memtable_bytes: 256 << 10, sync: false, background: false, target_file_bytes: 1 << 20, colblocks: on, ..Default::default() };
+            let mut s = Store::open(dir.path(), o()).unwrap();
+            for c in (0..n).collect::<Vec<_>>().chunks(500) {
+                s.commit(c.iter().map(|&i| (key(i), Some(row(i, 0)))).collect(), |_| Ok(())).unwrap();
+            }
+            s.flush_memtables().unwrap();
+            s.compact().unwrap();
+            // (Rows updated and deleted after: L0 over the column blocks, then a reopen.)
+            s.commit((0..n).filter(|i| i % 7 == 3).map(|i| (key(i), Some(row(i, 1)))).collect(), |_| Ok(())).unwrap();
+            s.commit((0..n).filter(|i| i % 11 == 5).map(|i| (key(i), None)).collect(), |_| Ok(())).unwrap();
+            s.flush_memtables().unwrap();
+            s.close().unwrap();
+            drop(s);
+            s = Store::open(dir.path(), o()).unwrap();
+            let mut out: Vec<String> = Vec::new();
+            for phase in 0..2 {
+                let ts = s.visible_ts();
+                let (lo, hi) = (key(0), key(n));
+                // Batches: rows and columns.
+                let mut sc = s.scan(&lo, &hi, ts);
+                let mut b = batch::RowBatch::default();
+                let mut cb = cols::ColBatch::default();
+                let missing = vec![Value::Null; types.len()];
+                loop {
+                    b.clear();
+                    sc.fill_batch(&mut b, 300).unwrap();
+                    if b.is_empty() {
+                        break;
+                    }
+                    for i in 0..b.len() {
+                        let (k, v) = b.get(i);
+                        out.push(format!("b {k:?} {v:?} {:?}", b.value_bytes(i)));
+                    }
+                    cols::decode_cols(&b, 0..b.len(), &[true, true, false, true, true, true, true, true], &types, &missing, &mut cb).unwrap();
+                    for i in 0..b.len() {
+                        let vs: Vec<String> = cb.cols.iter().zip(&types).map(|(c, t)| c.as_ref().map_or("-".into(), |c| format!("{:?}", c.value(&cb, i, t).unwrap()))).collect();
+                        out.push(format!("c {}", vs.join(",")));
+                    }
+                }
+                for r in s.scan(&lo, &hi, ts) {
+                    out.push(format!("s {:?}", r.unwrap()));
+                }
+                for r in s.scan_rev(&lo, &hi, ts) {
+                    out.push(format!("r {:?}", r.unwrap()));
+                }
+                for i in (0..n + 3).step_by(17) {
+                    out.push(format!("g {:?}", s.get(&key(i), ts).unwrap()));
+                }
+                let keys: Vec<Vec<u8>> = (0..n).step_by(5).map(key).collect();
+                let mut pr = s.point_reader(ts, false);
+                out.push(format!("m {:?}", pr.get_sorted(&keys, true).unwrap()));
+                for i in (0..n).step_by(97) {
+                    let mut got = Vec::new();
+                    let f = s.first_to(&mut pr, &key(i), &key(i + 40), &mut |v| got.extend_from_slice(v)).unwrap();
+                    out.push(format!("f {} {got:?}", matches!(f, point::First::Row(..))));
+                }
+                if phase == 0 {
+                    // Compacted (the column blocks and the newer rows merged), read again.
+                    s.compact().unwrap();
+                }
+            }
+            let m: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.path().join("MANIFEST")).unwrap()).unwrap();
+            assert_eq!(m["format"], if on { sst::FORMAT_COLS } else { sst::FORMAT_DICT }, "colblocks {on}");
+            assert_eq!(s.view().l1.iter().any(|f| f.meta.cols), on);
+            seen.push(out);
+        }
+        assert_eq!(seen[0].len(), seen[1].len());
+        for (a, b) in seen[0].iter().zip(&seen[1]) {
+            assert_eq!(a, b);
+        }
+    }
 }
