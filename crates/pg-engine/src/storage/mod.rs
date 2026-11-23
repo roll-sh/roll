@@ -3415,7 +3415,7 @@ impl Cursor {
     }
 
     /// `head`'s key alone (a column block's row not made).
-    #[inline]
+    #[inline(always)]
     fn head_key(&self) -> Option<&[u8]> {
         match self {
             Cursor::Mem { buf, .. } => buf.front().map(|(k, _)| k.as_slice()),
@@ -3435,7 +3435,7 @@ impl Cursor {
 
     /// `head`'s key, and whether its entry has a value (Some) stored out of line (true),
     /// without making a column block's row.
-    #[inline]
+    #[inline(always)]
     fn head_meta(&self) -> Option<(&[u8], Option<bool>)> {
         match self {
             Cursor::Mem { buf, .. } => buf.front().map(|(k, v)| (k.as_slice(), v.as_deref().map(toast::has_external))),
@@ -3672,6 +3672,7 @@ impl Cursor {
 }
 
 /// How many of the ranked sources `rank` (heads ascending) have a head below `k`.
+#[inline(always)]
 fn rank_of(sources: &[Cursor], rank: &[usize], k: &[u8]) -> usize {
     rank.iter().take_while(|&&j| sources[j].head_key().is_some_and(|h| h < k)).count()
 }
