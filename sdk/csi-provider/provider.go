@@ -1,8 +1,9 @@
 package main
 
 // Mount: a SecretProviderClass's parameters say which project, environment and folder, and how
-// the pod logs in; the answer is files the driver writes into the pod's volume. Nothing is kept
-// between mounts and no value is ever logged or put in an error.
+// the pod logs in; the answer is files the driver writes into the pod's volume. Between mounts
+// only a login's recent answers are kept, in memory, for that login alone (answerCache), and no
+// value is ever logged or put in an error.
 
 import (
 	"bytes"
@@ -37,6 +38,58 @@ type provider struct {
 	// logins are pods' recent logins, by their service account token (hashed): a pod's rotation
 	// polls and its siblings' mounts don't each log in (an identity takes 120 logins a minute).
 	logins loginCache
+	// answers are those logins' recent answers, so a rotation poll reads only what changed.
+	answers answerCache
+}
+
+// answerCache keeps, per login (a pod's service account token or a node's roll token, hashed) and
+// project, a client whose cache holds the folders that login's mounts read, with every key's
+// stamp. Every mount still asks roll, for what changed since (`…/values/delta`, docs/secrets.md
+// "Delta reads"): an unchanged folder decrypts nothing, a changed one only its changed keys, and
+// roll answers the full set whenever it can't prove the delta exact. An answer is never used for
+// another login: each pod logs in as its own service account. An entry unused for answersKeep
+// goes, and at most answersMax are kept.
+type answerCache struct {
+	mu sync.Mutex
+	m  map[string]*answers
+}
+
+type answers struct {
+	mu   sync.Mutex // one mount at a time: the client's token is set for each
+	c    *secrets.Client
+	used time.Time
+}
+
+const (
+	answersKeep = loginReuse
+	answersMax  = 4096
+	// The folders one login's mounts read.
+	answersFolders = 16
+)
+
+func (a *answerCache) get(key, api string, h *http.Client, now time.Time) *answers {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.m == nil {
+		a.m = map[string]*answers{}
+	}
+	// A mount holding an entry that goes keeps using it; the next one starts afresh.
+	for k, x := range a.m {
+		if now.Sub(x.used) >= answersKeep {
+			delete(a.m, k)
+		}
+	}
+	e := a.m[key]
+	if e == nil {
+		if len(a.m) >= answersMax {
+			a.m = map[string]*answers{}
+		}
+		// CacheTTL only turns the cache on: every mount asks roll.
+		e = &answers{c: &secrets.Client{API: api, HTTP: h, CacheTTL: time.Nanosecond, CacheSize: answersFolders}}
+		a.m[key] = e
+	}
+	e.used = now
+	return e
 }
 
 // loginCache keeps a login's roll token for loginReuse after it was made, at most loginsMax of
@@ -235,13 +288,18 @@ func (s *provider) Mount(ctx context.Context, req *mountRequest) (*mountResponse
 		if err != nil {
 			return nil, err
 		}
+		// Whose answers these are: the pod's login, or the node's token.
+		who := key
+		if who == "" {
+			who = loginKey(p.api, "", c.Token)
+		}
 		project := p.project
 		if project == "" {
 			if project, err = c.ProjectID(ctx); err != nil {
 				return nil, fmt.Errorf("finding the project: %w", err)
 			}
 		}
-		a, err = s.values(ctx, c, project, p)
+		a, err = s.values(ctx, c, project, p, who)
 		// A remembered login the server refuses: log in again, once.
 		if errors.Is(err, errRefused) && key != "" && attempt == 0 {
 			s.logins.forget(key)
@@ -297,8 +355,41 @@ func (s *provider) client(ctx context.Context, p params, attrs, ref map[string]s
 }
 
 // values reads the folder strictly: a key that doesn't resolve fails the mount (the pod keeps
-// what it had on a rotation) instead of a file with a hole in it.
-func (s *provider) values(ctx context.Context, c *secrets.Client, project string, p params) (*answer, error) {
+// what it had on a rotation) instead of a file with a hole in it. Without dynamic credentials
+// (which are issued afresh for each mount) it reads what changed since who's last answer.
+func (s *provider) values(ctx context.Context, c *secrets.Client, project string, p params, who string) (*answer, error) {
+	if !p.dynamic {
+		if a, err := s.delta(ctx, c, project, p, who); a != nil || err != nil {
+			return a, err
+		}
+	}
+	return s.strict(ctx, c, project, p)
+}
+
+// delta reads the folder through who's kept answers (answerCache). An answer with a key that
+// didn't resolve is nil: the strict read says which, and fails the mount.
+func (s *provider) delta(ctx context.Context, c *secrets.Client, project string, p params, who string) (*answer, error) {
+	e := s.answers.get(who+"\x00"+project, p.api, s.http, time.Now())
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.c.Token, e.c.Project = c.Token, project
+	v, err := e.c.Values(ctx, p.environment, p.path, secrets.WithoutDynamic())
+	if err != nil {
+		var re *secrets.Error
+		if errors.As(err, &re) && re.Status == http.StatusUnauthorized {
+			return nil, fmt.Errorf("reading %s:%s: %w", p.environment, p.path, errRefused)
+		}
+		// roll's errors name keys, never values.
+		return nil, fmt.Errorf("reading %s:%s: %w", p.environment, p.path, err)
+	}
+	if len(v.Problems) > 0 {
+		return nil, nil
+	}
+	return &answer{Values: v.Values, Dynamic: v.Dynamic, Withheld: v.Withheld, Digest: v.Digest}, nil
+}
+
+// strict is one strict read of the folder: nothing is answered unless every key resolves.
+func (s *provider) strict(ctx context.Context, c *secrets.Client, project string, p params) (*answer, error) {
 	q := url.Values{"path": {p.path}, "strict": {"1"}, "digest": {"1"}, "dynamic": {strconv.FormatBool(p.dynamic)}}
 	u := fmt.Sprintf("%s/v1/secrets/projects/%s/environments/%s/values?%s", p.api, url.PathEscape(project), url.PathEscape(p.environment), q.Encode())
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)

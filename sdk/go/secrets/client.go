@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -37,9 +38,9 @@ type Client struct {
 	// HTTP is the client requests go through; http.DefaultClient when nil.
 	HTTP *http.Client
 	// CacheTTL keeps Values answers this long and answers from memory meanwhile; after that it asks
-	// again with the digest they were read against, and an unchanged folder costs a 304 that reads,
-	// issues and audits nothing. A folder holding dynamic credentials is never kept (they end with
-	// their lease). Zero: off.
+	// again with the answer's digest and every key's stamp (`…/values/delta`): an unchanged folder
+	// costs what a 304 does, and a changed one only its changed keys. A folder holding dynamic
+	// credentials is never kept (they end with their lease). Zero: off.
 	CacheTTL time.Duration
 	// CacheSize caps how many folders CacheTTL keeps; past it, the one read longest ago goes. Zero:
 	// no cap.
@@ -54,13 +55,14 @@ type Client struct {
 
 	cacheMu sync.Mutex
 	cache   map[string]cached
+	// noDelta: a rolld without `…/values/delta`; reads are full (conditional, with CacheTTL).
+	noDelta atomic.Bool
 }
 
-// cached is a Values answer kept by CacheTTL, with the digest it was read against.
+// cached is a Values answer kept by CacheTTL, with its digest and stamps, and when it was asked.
 type cached struct {
-	values *Values
-	etag   string
-	at     time.Time
+	held
+	at time.Time
 }
 
 // Problem is a key that didn't resolve (a reference to nothing, a cycle, a link that failed).
@@ -80,6 +82,11 @@ type Values struct {
 	Dynamic  []string          `json:"dynamic"`
 	Linked   []string          `json:"linked"`
 	Followed []Followed        `json:"followed,omitempty"`
+	// Withheld are sensitive keys left out: only roll's runtimes and syncs read them.
+	Withheld []string `json:"withheld,omitempty"`
+	// Digest is the folder's digest the values were read against, when the read asked for it (a
+	// cached or delta read does).
+	Digest string `json:"digest,omitempty"`
 }
 
 // String names the keys only, never a value: a Values printed or logged with %v or %+v.
@@ -278,23 +285,23 @@ func (c *Client) Values(ctx context.Context, env, path string, opts ...ValuesOpt
 	if err != nil {
 		return nil, err
 	}
-	u := e + "/values" + query(path)
+	q := query(path)
 	if o.noDynamic {
 		if path == "" {
-			u += "?dynamic=false"
+			q += "?dynamic=false"
 		} else {
-			u += "&dynamic=false"
+			q += "&dynamic=false"
 		}
 	}
 	if c.CacheTTL > 0 {
-		v, err := c.cachedValues(ctx, u, o.noDynamic)
+		v, err := c.cachedValues(ctx, e, q, o.noDynamic)
 		if err != nil {
 			return nil, err
 		}
 		return v.clone(), nil
 	}
 	var v Values
-	return &v, c.call(ctx, http.MethodGet, u, nil, &v)
+	return &v, c.call(ctx, http.MethodGet, e+"/values"+q, nil, &v)
 }
 
 // Change is one change to an environment: its number in the project, who made it and when.
@@ -517,14 +524,15 @@ func (c *Client) freshValues(ctx context.Context, env, path string) (*Values, er
 	return &v, nil
 }
 
-// held is what a watch keeps of a folder's last answer: its values and every key's stamp, so a
-// read after a change asks only for what changed (`…/values/delta`, docs/secrets.md "Delta reads").
+// held is a folder's last answer with every key's stamp, so a read after a change asks only for
+// what changed (`…/values/delta`, docs/secrets.md "Delta reads"): what a watch keeps, and what
+// CacheTTL keeps.
 type held struct {
 	values *Values
 	digest string
 	basis  string
 	stamps map[string]string
-	// off: a rolld without the route; reads are full.
+	// off: the folder's claim is past what rolld takes (a 413); its reads are full.
 	off bool
 }
 
@@ -539,27 +547,33 @@ type deltaAnswer struct {
 	Stamps  map[string]string `json:"stamps"`
 }
 
-// deltaValues is freshValues through the delta route: with an answer h holds (no problems, a
-// basis), only what changed, merged into it; otherwise, or when rolld answers the full set, the
-// whole answer, kept in h. A rolld without the route: freshValues from then on.
-func (c *Client) deltaValues(ctx context.Context, env, path string, h *held) (*Values, error) {
-	if h.off {
-		return c.freshValues(ctx, env, path)
-	}
-	e, err := c.env(ctx, env)
-	if err != nil {
-		return nil, err
-	}
+// errNoRoute is a rolld without `…/values/delta`, and errTooBig a claim past what it takes: both
+// read in full instead.
+var (
+	errNoRoute = errors.New("rolld has no delta reads")
+	errTooBig  = errors.New("the claim is past what rolld takes")
+)
+
+// readDelta asks u (`…/values/delta?…`) for what changed since the answer h holds and merges it
+// in, leaving the new answer in h: the full set when h holds nothing it may claim (nothing yet,
+// problems, no basis) or when rolld answers it. On any failure h holds nothing, so the next claim
+// asks for the full set.
+func (c *Client) readDelta(ctx context.Context, u string, h *held) (*Values, error) {
 	claim := map[string]any{}
 	if h.values != nil && h.basis != "" && len(h.values.Problems) == 0 {
 		claim = map[string]any{"digest": h.digest, "basis": h.basis, "stamps": h.stamps}
 	}
 	var a deltaAnswer
-	if err := c.call(ctx, http.MethodPost, e+"/values/delta"+query(path), claim, &a); err != nil {
+	if err := c.call(ctx, http.MethodPost, u, claim, &a); err != nil {
+		*h = held{}
 		var re *Error
-		if errors.As(err, &re) && (re.Status == http.StatusNotFound || re.Status == http.StatusMethodNotAllowed || re.Status == http.StatusRequestEntityTooLarge) {
-			*h = held{off: true}
-			return c.freshValues(ctx, env, path)
+		if errors.As(err, &re) {
+			switch re.Status {
+			case http.StatusNotFound, http.StatusMethodNotAllowed:
+				return nil, errNoRoute
+			case http.StatusRequestEntityTooLarge:
+				return nil, errTooBig
+			}
 		}
 		return nil, err
 	}
@@ -586,12 +600,38 @@ func (c *Client) deltaValues(ctx context.Context, env, path string, h *held) (*V
 		a.Values.Values = values
 	}
 	v := a.Values
+	v.Digest = a.Digest
 	*h = held{values: &v, digest: a.Digest, basis: a.Basis, stamps: stamps}
-	// The newest answer: a kept one for the folder goes.
-	c.cacheMu.Lock()
-	delete(c.cache, e+"/values"+query(path))
-	c.cacheMu.Unlock()
-	return v.clone(), nil
+	return &v, nil
+}
+
+// deltaValues is freshValues through the delta route, keeping the answer in h. Any failure of the
+// delta reads in full (a rolld without the route: from then on).
+func (c *Client) deltaValues(ctx context.Context, env, path string, h *held) (*Values, error) {
+	if !h.off && !c.noDelta.Load() {
+		e, err := c.env(ctx, env)
+		if err != nil {
+			return nil, err
+		}
+		v, err := c.readDelta(ctx, e+"/values/delta"+query(path), h)
+		if err == nil {
+			// The newest answer: a kept one for the folder goes.
+			c.cacheMu.Lock()
+			delete(c.cache, e+"/values"+query(path))
+			c.cacheMu.Unlock()
+			return v.clone(), nil
+		}
+		if ctx.Err() != nil {
+			return nil, err
+		}
+		switch {
+		case errors.Is(err, errNoRoute):
+			c.noDelta.Store(true)
+		case errors.Is(err, errTooBig):
+			h.off = true
+		}
+	}
+	return c.freshValues(ctx, env, path)
 }
 
 // clone is a copy the caller may change without changing what CacheTTL keeps.
@@ -606,33 +646,81 @@ func (v *Values) clone() *Values {
 	out.Dynamic = append([]string(nil), v.Dynamic...)
 	out.Linked = append([]string(nil), v.Linked...)
 	out.Followed = append([]Followed(nil), v.Followed...)
+	out.Withheld = append([]string(nil), v.Withheld...)
 	return &out
 }
 
-// cachedValues answers from memory within CacheTTL, else revalidates with the digest (a 304
-// keeps the values) or reads them again. noDynamic: read with `dynamic=false`, so naming dynamic
-// keys holds no credential.
-func (c *Client) cachedValues(ctx context.Context, path string, noDynamic bool) (*Values, error) {
+// cachedValues answers from memory within CacheTTL, else asks for what changed since the kept
+// answer (`…/values/delta`; the full set when nothing is kept). Where that fails, a conditional
+// read: a 304 keeps the values. e is the environment's route, q the query; noDynamic: read with
+// `dynamic=false`, so naming dynamic keys holds no credential.
+func (c *Client) cachedValues(ctx context.Context, e, q string, noDynamic bool) (*Values, error) {
 	now := time.Now
 	if c.Now != nil {
 		now = c.Now
 	}
+	key := e + "/values" + q
 	c.cacheMu.Lock()
-	hit, ok := c.cache[path]
+	hit, ok := c.cache[key]
 	c.cacheMu.Unlock()
 	if ok && now().Sub(hit.at) < c.CacheTTL {
 		return hit.values, nil
 	}
+	off := hit.off
+	if !off && !c.noDelta.Load() {
+		h := hit.held
+		v, err := c.readDelta(ctx, e+"/values/delta"+q, &h)
+		if err == nil {
+			c.keep(key, cached{held: h, at: now()}, noDynamic)
+			return v, nil
+		}
+		if ctx.Err() != nil {
+			return nil, err
+		}
+		// Any failure reads in full below.
+		switch {
+		case errors.Is(err, errNoRoute):
+			c.noDelta.Store(true)
+		case errors.Is(err, errTooBig):
+			off = true
+		}
+	}
 	var out *Values
 	err := c.authed(ctx, func(token string) (err error) {
-		out, err = c.revalidate(ctx, token, path, hit, ok, now, noDynamic)
+		out, err = c.revalidate(ctx, token, key, hit, ok, now, noDynamic, off)
 		return err
 	})
 	return out, err
 }
 
-// revalidate is one conditional read of path with token: a 304 keeps hit's values.
-func (c *Client) revalidate(ctx context.Context, token, path string, hit cached, ok bool, now func() time.Time, noDynamic bool) (*Values, error) {
+// keep keeps an answer for CacheTTL, unless it holds dynamic credentials (they end with their
+// lease; with `dynamic=false` there are none, only their names) or a key that didn't resolve (the
+// digest may not move when the link recovers). Past CacheSize, the folder read longest ago goes.
+func (c *Client) keep(key string, k cached, noDynamic bool) {
+	c.cacheMu.Lock()
+	defer c.cacheMu.Unlock()
+	if (len(k.values.Dynamic) > 0 && !noDynamic) || len(k.values.Problems) > 0 {
+		delete(c.cache, key)
+		return
+	}
+	if c.cache == nil {
+		c.cache = map[string]cached{}
+	}
+	if _, kept := c.cache[key]; !kept && c.CacheSize > 0 && len(c.cache) >= c.CacheSize {
+		oldest := ""
+		for k, x := range c.cache {
+			if oldest == "" || x.at.Before(c.cache[oldest].at) {
+				oldest = k
+			}
+		}
+		delete(c.cache, oldest)
+	}
+	c.cache[key] = k
+}
+
+// revalidate is one conditional read of path with token: a 304 keeps hit's values. off: the
+// folder's claims are past what rolld takes, kept with the answer.
+func (c *Client) revalidate(ctx context.Context, token, path string, hit cached, ok bool, now func() time.Time, noDynamic, off bool) (*Values, error) {
 	sep := "?"
 	if strings.Contains(path, "?") {
 		sep = "&"
@@ -644,8 +732,8 @@ func (c *Client) revalidate(ctx context.Context, token, path string, hit cached,
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	if ok && hit.etag != "" {
-		req.Header.Set("If-None-Match", `"`+hit.etag+`"`)
+	if ok && hit.digest != "" {
+		req.Header.Set("If-None-Match", `"`+hit.digest+`"`)
 	}
 	h := c.HTTP
 	if h == nil {
@@ -657,10 +745,8 @@ func (c *Client) revalidate(ctx context.Context, token, path string, hit cached,
 	}
 	defer res.Body.Close()
 	if res.StatusCode == http.StatusNotModified && ok {
-		c.cacheMu.Lock()
-		hit.at = now()
-		c.cache[path] = hit
-		c.cacheMu.Unlock()
+		hit.at, hit.off = now(), off
+		c.keep(path, hit, noDynamic)
 		return hit.values, nil
 	}
 	data, err := io.ReadAll(io.LimitReader(res.Body, 16<<20))
@@ -683,28 +769,10 @@ func (c *Client) revalidate(ctx context.Context, token, path string, hit cached,
 		return nil, err
 	}
 	etag := strings.Trim(strings.TrimPrefix(res.Header.Get("ETag"), "W/"), `"`)
-	c.cacheMu.Lock()
-	// Never kept: dynamic credentials (they end with their lease; with `dynamic=false` there are
-	// none, only their names) or a key that didn't resolve (the digest may not move when the link
-	// recovers).
-	if (len(v.Dynamic) > 0 && !noDynamic) || len(v.Problems) > 0 {
-		delete(c.cache, path)
-	} else {
-		if c.cache == nil {
-			c.cache = map[string]cached{}
-		}
-		if _, kept := c.cache[path]; !kept && c.CacheSize > 0 && len(c.cache) >= c.CacheSize {
-			oldest := ""
-			for k, x := range c.cache {
-				if oldest == "" || x.at.Before(c.cache[oldest].at) {
-					oldest = k
-				}
-			}
-			delete(c.cache, oldest)
-		}
-		c.cache[path] = cached{values: &v, etag: etag, at: now()}
+	if v.Digest == "" {
+		v.Digest = etag
 	}
-	c.cacheMu.Unlock()
+	c.keep(path, cached{held: held{values: &v, digest: etag, off: off}, at: now()}, noDynamic)
 	return &v, nil
 }
 
@@ -796,7 +864,8 @@ func (c *Client) Renew(ctx context.Context, lease string, ttlMinutes int) (*Leas
 // Watch is what Client.Watch follows and how often.
 type Watch struct {
 	Path string
-	// Consumer, when set, resolves as it (Resolve) instead of reading (Values).
+	// Consumer, when set, resolves as it (Resolve) instead of reading (Values). `…/resolve` has no
+	// delta reads, so each change resolves the whole folder.
 	Consumer string
 	// Every is how often the digest is checked (default 5 s).
 	Every time.Duration

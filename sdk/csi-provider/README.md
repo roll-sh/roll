@@ -4,7 +4,10 @@ A pod's volume gets a roll secrets environment's values as files, with no Kubern
 in etcd. Each pod logs in with its own service account token through a workload identity. A
 login is reused for 5 minutes by mounts with the same token (rotation polls, a pod's other
 volumes), so a scale-up stays within an identity's 120 logins a minute; a token roll refuses is
-dropped and the pod logs in again.
+dropped and the pod logs in again. A login's last answers are kept in memory for as long, for
+that login alone, so a rotation poll after a change reads only the keys that changed
+(`…/values/delta`); every mount still asks roll, and reads strictly. With `dynamic: "true"`, each
+mount reads in full.
 See docs/secrets.md, "Kubernetes".
 Standard library only: the driver's gRPC is served over Go 1.24's unencrypted HTTP/2, with the
 protocol's seven messages encoded in `wire.go`.
