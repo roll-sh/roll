@@ -1,6 +1,7 @@
 //! `roll secrets …` and `roll run` (docs/secrets.md, "Consumption"): a project's secrets and
 //! environment variables, and a command run with them in its environment, without files.
 
+mod local_agent;
 mod repo;
 
 use crate::Api;
@@ -628,9 +629,10 @@ pub enum Secrets {
     #[command(subcommand)]
     Gateways(GatewaysCmd),
     /// Vendor credentials roll issues and revokes keys with (SendGrid, Twilio, Okta, Entra,
-    /// Auth0): list, add (the credential on stdin), remove.
+    /// Auth0, GitLab, OpenAI, Datadog, Cloudflare, Databricks, Confluent): list, add (the
+    /// credential on stdin), remove.
     #[command(subcommand)]
-    Saas(SaasCmd),
+    Saas(Box<SaasCmd>),
     /// Kubernetes clusters that issue short-lived service account tokens per lease (link kind
     /// `kubernetes`): list, add (the admin token on stdin), remove. Not `kubernetes`, which pulls
     /// an environment into a cluster.
@@ -805,6 +807,21 @@ pub enum Secrets {
         #[arg(long)]
         revoke: Option<String>,
     },
+    /// What happened that someone acts on, in order (never values): a leaked value, a failing
+    /// rotation or sync, a request waiting. `--follow` keeps reading as more happen.
+    Events {
+        /// Only these kinds, comma-separated (`secret.leaked,request.*`).
+        #[arg(long)]
+        kinds: Option<String>,
+        /// Only this environment's.
+        #[arg(long)]
+        env: Option<String>,
+        /// After this cursor (an earlier line's seq); from the start without it, from now with `--follow`.
+        #[arg(long)]
+        after: Option<i64>,
+        #[arg(long)]
+        follow: bool,
+    },
     /// Who read and changed what (never values). `audit verify` checks it wasn't tampered with.
     #[command(args_conflicts_with_subcommands = true)]
     Audit {
@@ -826,6 +843,9 @@ pub enum Secrets {
         #[command(subcommand)]
         cmd: IssuerCmd,
     },
+    /// Serve the environment's values to apps on this machine from 127.0.0.1, cached and kept
+    /// current, as the Lambda extension does (a sidecar or a unit; docs/secrets.md, "A local agent").
+    Agent(local_agent::LocalAgent),
 }
 
 #[derive(Subcommand)]
@@ -954,15 +974,18 @@ pub enum Envs {
         #[arg(long)]
         name: Option<String>,
     },
-    /// Delete an environment (`--label k=v`: every ephemeral one with that label).
+    /// Delete an environment (`--label k=v`: every ephemeral one with that label). A standard one
+    /// is kept for the recovery window (`envs recover`); first it says what it would break.
     Rm {
         slug: Option<String>,
         #[arg(long)]
         label: Option<String>,
-        /// Confirm deleting a protected environment.
+        /// Confirm deleting an environment that's protected or that something reads.
         #[arg(long)]
         yes: bool,
     },
+    /// Bring back a deleted environment within its recovery window.
+    Recover { slug: String },
     /// Put the standard environments in this order.
     Order { slugs: Vec<String> },
     /// Writes need a change request with this many approvals: to the whole environment, or with
@@ -1140,13 +1163,20 @@ pub enum SaasCmd {
     Ls,
     /// Register a vendor credential, read from stdin (never an argument). Each vendor takes its
     /// own flags: sendgrid `--scope`…; twilio `--account-sid`; okta `--domain --app-id`; entra
-    /// `--tenant --client-id --object-id`; auth0 `--domain --client-id --app-client-id`.
+    /// `--tenant --client-id --object-id`; auth0 `--domain --client-id --app-client-id`; gitlab
+    /// `[--host] --gitlab-project|--gitlab-group --scope… [--access-level] [--expires-days]`; openai
+    /// `--openai-project`; datadog `[--site] --key api|application [--scope…]`; cloudflare
+    /// `[--account-id] --template`; databricks `--host [--lifetime-days]`; confluent `--owner
+    /// [--resource [--confluent-environment]]`. Datadog's credential is `<API key>:<application
+    /// key>`, Confluent's `KEY:SECRET`.
     Add {
         name: String,
-        /// sendgrid, twilio, okta, entra or auth0.
+        /// sendgrid, twilio, okta, entra, auth0, gitlab, openai, datadog, cloudflare, databricks or
+        /// confluent.
         #[arg(long)]
         vendor: String,
-        /// A scope each SendGrid key gets (none: full access).
+        /// A scope each key gets: SendGrid's (none: full access), GitLab's (one at least) or a
+        /// Datadog application key's (none: its user's permissions).
         #[arg(long = "scope", num_args = 1)]
         scopes: Vec<String>,
         #[arg(long)]
@@ -1167,6 +1197,49 @@ pub enum SaasCmd {
         /// The Auth0 app whose secret rotates.
         #[arg(long)]
         app_client_id: Option<String>,
+        /// A self-managed GitLab's host (default gitlab.com), or a Databricks workspace's.
+        #[arg(long)]
+        host: Option<String>,
+        /// The GitLab project whose access tokens rotate: its id or group/project.
+        #[arg(long = "gitlab-project")]
+        gitlab_project: Option<String>,
+        /// The GitLab group whose access tokens rotate: its id or path.
+        #[arg(long = "gitlab-group")]
+        gitlab_group: Option<String>,
+        /// Each GitLab token's role: 10 guest, 20 reporter, 30 developer, 40 maintainer (the
+        /// default), 50 owner (groups).
+        #[arg(long)]
+        access_level: Option<u8>,
+        /// Each GitLab token's lifetime in days (default 365).
+        #[arg(long)]
+        expires_days: Option<u16>,
+        /// The OpenAI project (proj_…) whose service account keys rotate.
+        #[arg(long = "openai-project")]
+        openai_project: Option<String>,
+        /// Datadog's site (default datadoghq.com; datadoghq.eu, us3.datadoghq.com…).
+        #[arg(long)]
+        site: Option<String>,
+        /// Which Datadog keys rotate: api or application.
+        #[arg(long)]
+        key: Option<String>,
+        /// The Cloudflare account whose tokens rotate (none: your user's).
+        #[arg(long)]
+        account_id: Option<String>,
+        /// The Cloudflare token whose policies each new token copies.
+        #[arg(long)]
+        template: Option<String>,
+        /// Each Databricks token's lifetime in days (default 90).
+        #[arg(long)]
+        lifetime_days: Option<u16>,
+        /// The Confluent service account or user (sa-…, u-…) whose keys rotate.
+        #[arg(long)]
+        owner: Option<String>,
+        /// The Confluent resource the keys are for (lkc-…; none: Cloud API keys).
+        #[arg(long)]
+        resource: Option<String>,
+        /// The Confluent environment of --resource (env-…).
+        #[arg(long = "confluent-environment")]
+        confluent_environment: Option<String>,
     },
     Rm { id: String },
 }
@@ -1980,23 +2053,34 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
     // A deleted project isn't in the workspace: it's found among the recoverable ones.
     if let Secrets::Recover { project } = &cmd {
         let deleted = api.get("/v1/secrets/deleted").await?;
-        let rows = deleted.as_array().cloned().unwrap_or_default();
+        // Deleted environments of live projects are in the same list, with `environment`: they're
+        // listed apart and recovered with `envs recover`.
+        let (envs, rows): (Vec<Value>, Vec<Value>) = deleted.as_array().cloned().unwrap_or_default().into_iter().partition(|p| p["environment"].is_string());
         let Some(given) = project else {
             if json_out {
                 println!("{}", serde_json::to_string_pretty(&deleted)?);
-            } else if rows.is_empty() {
+                return Ok(());
+            }
+            if rows.is_empty() {
                 println!("no deleted project you can recover");
             }
-            if !json_out {
-                for p in &rows {
-                    println!("{:<20} {:<18} recoverable until {}", s(&p["name"]), s(&p["project"]), chrono::DateTime::from_timestamp_millis(p["purge_at"].as_i64().unwrap_or(0)).map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default());
-                }
+            for p in &rows {
+                println!("{:<20} {:<18} recoverable until {}", s(&p["name"]), s(&p["project"]), utc_ms(p["purge_at"].as_i64().unwrap_or(0)));
+            }
+            if !envs.is_empty() {
+                println!("\nDeleted environments (`roll secrets -p <project> envs recover <env>`):");
+            }
+            for e in &envs {
+                println!("{:<20} {:<18} recoverable until {}", format!("{}/{}", s(&e["name"]), s(&e["environment"])), s(&e["project"]), utc_ms(e["purge_at"].as_i64().unwrap_or(0)));
             }
             return Ok(());
         };
         let found: Vec<&Value> = rows.iter().filter(|p| p["project"] == given.as_str() || p["name"] == given.as_str()).collect();
         let id = match found.as_slice() {
             [one] => s(&one["project"]),
+            [] if envs.iter().any(|e| e["project"] == given.as_str() || e["name"] == given.as_str()) => {
+                bail!("{given} isn't deleted, but some of its environments are: `roll secrets -p {given} envs recover <env>` (`roll secrets recover` lists them)")
+            }
             [] => bail!("no deleted project {given} you can recover (`roll secrets recover` lists them)"),
             _ => bail!("{} deleted projects are named {given}: give its prj_… id", found.len()),
         };
@@ -2014,6 +2098,10 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
     // A gateway runs with its own credential, in no project's name.
     if let Secrets::Gateways(GatewaysCmd::Up { gateway, allow, allow_file, token_file, identity, oidc_token_file }) = &cmd {
         return gateway_up(api, gateway.clone(), allow.clone(), allow_file.clone(), token_file.clone(), identity.clone(), oidc_token_file.clone()).await;
+    }
+    // The agent finds its project itself and serves until stopped.
+    if let Secrets::Agent(a) = cmd {
+        return local_agent::run(api, &args, a).await;
     }
     // An export is checked on this machine, against keys saved earlier. A `prj_…` id needs no
     // server; a name is looked up.
@@ -2989,7 +3077,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("Removed {id}");
             }
         },
-        Secrets::Saas(a) => match a {
+        Secrets::Saas(a) => match *a {
             SaasCmd::Ls => {
                 let v = c.call(Method::GET, &format!("{}/saas", c.base()), None).await?;
                 if json_out {
@@ -3000,15 +3088,24 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     println!("{}  {:<16} {:<9} {}", s(&r["id"]), s(&r["name"]), s(&r["vendor"]), target.join(" "));
                 }
             }
-            SaasCmd::Add { name, vendor, scopes, account_sid, domain, app_id, tenant, client_id, object_id, app_client_id } => {
+            SaasCmd::Add { name, vendor, scopes, account_sid, domain, app_id, tenant, client_id, object_id, app_client_id, host, gitlab_project, gitlab_group, access_level, expires_days, openai_project, site, key, account_id, template, lifetime_days, owner, resource, confluent_environment } => {
                 let mut target = serde_json::Map::new();
                 if !scopes.is_empty() {
                     target.insert("scopes".into(), json!(scopes));
                 }
-                for (k, v) in [("account_sid", account_sid), ("domain", domain), ("app_id", app_id), ("tenant", tenant), ("client_id", client_id), ("object_id", object_id), ("app_client_id", app_client_id)] {
+                for (k, v) in [("account_sid", account_sid), ("domain", domain), ("app_id", app_id), ("tenant", tenant), ("client_id", client_id), ("object_id", object_id), ("app_client_id", app_client_id), ("host", host), ("project", gitlab_project), ("group", gitlab_group), ("project_id", openai_project), ("site", site), ("key", key), ("account_id", account_id), ("template", template), ("owner", owner), ("resource", resource), ("environment", confluent_environment)] {
                     if let Some(v) = v {
                         target.insert(k.into(), json!(v));
                     }
+                }
+                if let Some(n) = access_level {
+                    target.insert("access_level".into(), json!(n));
+                }
+                if let Some(n) = expires_days {
+                    target.insert("expires_days".into(), json!(n));
+                }
+                if let Some(n) = lifetime_days {
+                    target.insert("lifetime_days".into(), json!(n));
                 }
                 // The vendor credential mints keys: never an argument.
                 if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
@@ -3404,7 +3501,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("Revoked {id}");
             }
         },
-        Secrets::Keygen { .. } | Secrets::Key(_) | Secrets::Unseal { .. } | Secrets::Find { .. } | Secrets::Recover { .. } | Secrets::Doctor | Secrets::Health { all: true, .. } | Secrets::Issuer { .. } => unreachable!("handled before a project is picked"),
+        Secrets::Keygen { .. } | Secrets::Key(_) | Secrets::Unseal { .. } | Secrets::Find { .. } | Secrets::Recover { .. } | Secrets::Doctor | Secrets::Health { all: true, .. } | Secrets::Issuer { .. } | Secrets::Agent(_) => unreachable!("handled before a project is picked"),
         Secrets::Backup { to, out } => {
             let v = c.call(Method::POST, &format!("{}/backup", c.base()), Some(json!({ "recipient": to }))).await?;
             let text = serde_json::to_string_pretty(&v)?;
@@ -3830,6 +3927,39 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("{}  {:<8} {:<12} {:<24} {}  {state}", s(&l["id"]), s(&l["kind"]), s(&l["environment"]), s(&l["key"]), s(&l["consumer"]));
             }
         }
+        Secrets::Events { kinds, env, after, follow } => {
+            let mut filter = String::new();
+            if let Some(k) = &kinds {
+                filter.push_str(&format!("&kinds={}", enc(k)));
+            }
+            if let Some(e) = &env {
+                filter.push_str(&format!("&environment={}", enc(e)));
+            }
+            let mut after = match after {
+                Some(a) => a,
+                None if follow => c.call(Method::GET, &format!("{}/events?latest=1", c.base()), None).await?["next"].as_i64().unwrap_or(0),
+                None => 0,
+            };
+            loop {
+                let v = c.call(Method::GET, &format!("{}/events?after={after}&limit=500{filter}", c.base()), None).await?;
+                let events = v["events"].as_array().cloned().unwrap_or_default();
+                for e in &events {
+                    if json_out {
+                        println!("{e}");
+                    } else {
+                        let at = [&e["environment"], &e["key"]].iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(" ");
+                        println!("{:<8} {:<8} {:<28} {:<24} {}", e["seq"], ago(e["at"].as_i64().unwrap_or(0)), s(&e["kind"]), at, e["data"]);
+                    }
+                }
+                after = v["next"].as_i64().unwrap_or(after);
+                if events.is_empty() {
+                    if !follow {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
+            }
+        }
         Secrets::Audit { cmd: Some(AuditCmd::Key { .. }), .. } => unreachable!("handled above"),
         Secrets::Audit { cmd: Some(AuditCmd::Verify { since, .. }), .. } => {
             let q = since.as_deref().map(parse_time).transpose()?.map(|t| format!("?since={t}")).unwrap_or_default();
@@ -4080,12 +4210,45 @@ async fn envs(c: &Client<'_>, e: Envs, json_out: bool) -> anyhow::Result<()> {
         Envs::Rm { slug, label, yes } => match (slug, label) {
             (_, Some(l)) => c.call(Method::DELETE, &format!("{base}/environments?label={}", enc(&l)), None).await?,
             (Some(sl), None) => {
-                let q = if yes { format!("?confirm={}", enc(&sl)) } else { String::new() };
-                c.call(Method::DELETE, &format!("{}{q}", c.env(&sl)), None).await?;
-                json!({ "deleted": [sl] })
+                // What it would do first: what breaks, and whether it needs a confirm.
+                let preview = c.call(Method::GET, &format!("{}/deletion", c.env(&sl)), None).await?;
+                let mut confirm = yes;
+                if preview["confirm"] == true && !yes {
+                    print_deletion(&preview);
+                    if !(std::io::IsTerminal::is_terminal(&std::io::stdin()) && ask(&format!("Delete {sl}?"))?) {
+                        bail!("not deleted: run `roll secrets envs rm {sl} --yes` to delete it");
+                    }
+                    confirm = true;
+                }
+                let q = if confirm { format!("?confirm={}", enc(&sl)) } else { String::new() };
+                let v = c.call(Method::DELETE, &format!("{}{q}", c.env(&sl)), None).await?;
+                if json_out {
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                    return Ok(());
+                }
+                if let Some(r) = v.get("request").filter(|r| r.is_object()) {
+                    println!("Opened change request {} to delete {sl}: it's deleted once it has {} approval{} and is applied (`roll secrets requests apply {} -e {sl}`)", s(&r["id"]), preview["approvals"], if preview["approvals"] == 1 { "" } else { "s" }, s(&r["id"]));
+                } else if let Some(at) = v["purge_at"].as_i64() {
+                    println!("Deleted {sl}: kept until {}; `roll secrets envs recover {sl}` brings it back", utc_ms(at));
+                } else {
+                    println!("Deleted {sl}");
+                }
+                return Ok(());
             }
             (None, None) => bail!("envs rm <slug> or --label key=value"),
         },
+        Envs::Recover { slug } => {
+            let v = c.call(Method::POST, &format!("{}/recover", c.env(&slug)), Some(json!({}))).await?;
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&v)?);
+                    return Ok(());
+            }
+            println!("Recovered {slug} with its secrets");
+            if let Some(failed) = v["rotation_failed"].as_array().filter(|f| !f.is_empty()) {
+                eprintln!("warning: these managed links didn't get a new credential; rotate them: {}", failed.iter().map(s).collect::<Vec<_>>().join(", "));
+            }
+            return Ok(());
+        }
         Envs::Order { slugs } => c.call(Method::PUT, &format!("{base}/environments/order"), Some(json!({ "order": slugs }))).await?,
         Envs::Protect { slug, approvals, folder: Some(folder), approvers } => {
             let p = c.call(Method::PUT, &format!("{}/folder-policies?path={}", c.env(&slug), enc(&folder)), Some(json!({ "approvals": approvals, "approvers": approvers }))).await?;
@@ -5109,6 +5272,43 @@ async fn approve_table(api: &Api, all: &mut setup::File, f: &repo::Found) -> any
     Ok(())
 }
 
+/// `2026-11-30 05:00 UTC`.
+fn utc_ms(at: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(at).map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default()
+}
+
+/// An environment's deletion preview (`GET …/deletion`), on stderr: what goes, for how long, and
+/// what stops working.
+fn print_deletion(p: &Value) {
+    let env = s(&p["environment"]);
+    eprintln!("Deleting {env}: its {} secret{} become unreadable, kept {} days (`roll secrets envs recover {env}`).", p["secrets"], if p["secrets"] == 1 { "" } else { "s" }, p["window_days"]);
+    let breaks = p["breaks"].as_array().cloned().unwrap_or_default();
+    if !breaks.is_empty() {
+        eprintln!("These stop working until it's recovered or they're changed:");
+    }
+    for b in &breaks {
+        let name = b["name"].as_str().unwrap_or("(name for admins)");
+        let at = match (b["key"].as_str(), s(&b["path"])) {
+            (Some(k), p) if p == "/" => format!("/{k}"),
+            (Some(k), p) => format!("{p}/{k}"),
+            (None, p) => p,
+        };
+        let line = match b["via"].as_str().unwrap_or_default() {
+            "service" => format!("service {name} ({})", s(&b["environment"])),
+            "sandbox" => format!("sandbox {name}, which copies from {}:{at} (it loses those values)", s(&b["environment"])),
+            "sync" => format!("sync to {name} (what it pushed stays there)"),
+            "identity" => format!("identity {name}"),
+            "token" => format!("token {name}"),
+            "import" => format!("{}{}:{at} (imports it)", b["project"].as_str().map(|p| format!("{p}/")).unwrap_or_default(), s(&b["environment"])),
+            _ => format!("{}:{at}", s(&b["environment"])),
+        };
+        eprintln!("  {line}");
+    }
+    if p["needs_request"] == true {
+        eprintln!("{env} needs {} approval{}: deleting it opens a change request.", p["approvals"], if p["approvals"] == 1 { "" } else { "s" });
+    }
+}
+
 /// A yes or no on the terminal (default no).
 fn ask(question: &str) -> anyhow::Result<bool> {
     use std::io::Write;
@@ -5647,7 +5847,9 @@ fn render(tpl: &str, get: impl Fn(&str) -> Option<String>) -> Result<String, Vec
 
 /// The variables `roll run` adds: the environment's resolved values, minus the ones the shell
 /// already sets (unless `--override`). Fails on a problem unless `--allow-unresolved`.
-async fn run_env(c: &Client<'_>, at: &At, r: &Run) -> anyhow::Result<(Vec<Var>, Vec<String>, Digests)> {
+/// `held`: the folder's last answer under `--watch` (its values, stamps, digest and basis), so a
+/// read after a change asks only for what changed (`…/values/delta`).
+async fn run_env(c: &Client<'_>, at: &At, r: &Run, held: &mut Option<Value>) -> anyhow::Result<(Vec<Var>, Vec<String>, Digests)> {
     let digest = if r.watch { "&digest=1" } else { "" };
     let codes = if r.totp_codes { "&codes=1" } else { "" };
     let path = format!("{}/values?{}{digest}{codes}", c.env(&at.env), c.q());
@@ -5660,7 +5862,9 @@ async fn run_env(c: &Client<'_>, at: &At, r: &Run) -> anyhow::Result<(Vec<Var>, 
         files.push(crate::secret_refs::parse_env_file(&text, file)?);
     }
     let refs: Vec<crate::secret_refs::Ref> = files.iter().flatten().filter_map(|(_, v)| crate::secret_refs::Ref::parse(v).transpose()).collect::<anyhow::Result<_>>()?;
-    let v = match (c.api.answer(Method::GET, &path, None).await, &r.fallback) {
+    // `codes=1` moves without the digest: always the full read.
+    let read = if r.watch && !r.totp_codes { read_delta(c, &format!("{}/values/delta?{}", c.env(&at.env), c.q()), &path, held).await } else { c.api.answer(Method::GET, &path, None).await };
+    let v = match (read, &r.fallback) {
         (Ok(Ok(v)), _) => v,
         // Refused (a revoked token, no such environment): never the fallback.
         (Ok(Err((status, message))), _) if !status.is_server_error() => bail!("{message}"),
@@ -5711,6 +5915,44 @@ async fn run_env(c: &Client<'_>, at: &At, r: &Run) -> anyhow::Result<(Vec<Var>, 
         }
     }
     Ok((with_env_files(values, &files, &resolved, r)?, leases, follow))
+}
+
+/// A watch's read of a folder's values (`get`) through its delta route (`delta`): with the answer
+/// it holds (no problems, a basis), only what changed, merged into it; otherwise, or when rolld
+/// answers the full set, the whole answer, kept for next time. A rolld without the route: `get`.
+async fn read_delta(c: &Client<'_>, delta: &str, get: &str, held: &mut Option<Value>) -> anyhow::Result<Result<Value, (reqwest::StatusCode, String)>> {
+    let claim = match held.as_ref() {
+        Some(h) if h["problems"].as_array().is_some_and(|p| p.is_empty()) && h["basis"].is_string() => json!({ "digest": h["digest"], "basis": h["basis"], "stamps": h["stamps"] }),
+        _ => json!({}),
+    };
+    let d = match c.api.answer(Method::POST, delta, Some(claim)).await? {
+        Ok(d) => d,
+        Err((reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::METHOD_NOT_ALLOWED | reqwest::StatusCode::PAYLOAD_TOO_LARGE, _)) => {
+            *held = None;
+            return c.api.answer(Method::GET, get, None).await;
+        }
+        Err(e) => return Ok(Err(e)),
+    };
+    // A delta's values and stamps are the changed keys': the rest are the held answer's.
+    let merged = match held.take() {
+        Some(h) if d["delta"] == true => {
+            let mut values = h["values"].as_object().cloned().unwrap_or_default();
+            let mut stamps = h["stamps"].as_object().cloned().unwrap_or_default();
+            for gone in d["removed"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+                values.remove(gone);
+                stamps.remove(gone);
+            }
+            values.extend(d["values"].as_object().cloned().unwrap_or_default());
+            stamps.extend(d["stamps"].as_object().cloned().unwrap_or_default());
+            let mut m = d;
+            m["values"] = Value::Object(values);
+            m["stamps"] = Value::Object(stamps);
+            m
+        }
+        _ => d,
+    };
+    *held = Some(merged.clone());
+    Ok(Ok(merged))
 }
 
 /// `roll run` started from the fallback file (`why`: what rolld didn't answer): the values kept
@@ -5894,10 +6136,11 @@ pub async fn run_command(api: &Api, r: Run) -> anyhow::Result<()> {
     // Never in an outage either: a repo can't route a protected environment's values to its code.
     refuse_protected(api, &project, &at).await?;
     let c = Client { project, api, at: at.clone() };
-    let (env, leases, follow) = run_env(&c, &at, &r).await?;
+    let mut held = None;
+    let (env, leases, follow) = run_env(&c, &at, &r, &mut held).await?;
     let streams = crate::mask::Streams::choose(r.mask, r.no_mask);
     if r.watch {
-        return watch(&c, &at, &r, env, leases, follow, streams).await;
+        return watch(&c, &at, &r, env, leases, follow, streams, held).await;
     }
     if streams.any() {
         return run_masked(&r, &env, streams).await;
@@ -6011,7 +6254,8 @@ fn spawn_masked(r: &Run, env: &[Var], streams: crate::mask::Streams) -> anyhow::
     crate::mask::spawn(&r.command, &pairs, &conceal, streams).with_context(|| format!("running {}", r.command[0]))
 }
 
-async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<Var>, mut leases: Vec<String>, follow: Digests, streams: crate::mask::Streams) -> anyhow::Result<()> {
+#[allow(clippy::too_many_arguments)]
+async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<Var>, mut leases: Vec<String>, follow: Digests, streams: crate::mask::Streams, mut held: Option<Value>) -> anyhow::Result<()> {
     // The environment's digest, and every referenced one's (an env file's `roll://…`), as the
     // first read's answers gave them (started from a fallback: one that reloads at the first
     // answer).
@@ -6068,7 +6312,7 @@ async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<Var>, mut leases: 
                     }
                     let which = moved(c, &last, &now);
                     last = now.clone();
-                    match run_env(c, at, r).await {
+                    match run_env(c, at, r, &mut held).await {
                         Ok((next, next_leases, next_follow)) => {
                             eprintln!("roll run: {which} changed, restarting {}", r.command[0]);
                             env = next;

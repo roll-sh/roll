@@ -134,8 +134,8 @@ class RollSecretsSpringTest {
             ConfigurableApplicationContext app = start(rolld.url(), "roll-secrets:production/api", "--roll.secrets.refresh=true");
             ConfigurableEnvironment env = app.getEnvironment();
             assertEquals("postgres://fake-db-url/one", env.getProperty("DB_URL"));
-            // One read at startup: the watch's first.
-            assertEquals(1, rolld.seen().stream().filter(r -> r.contains("/values")).count(), rolld.seen().toString());
+            // One read at startup: the watch's first (in full: this rolld has no delta route).
+            assertEquals(1, rolld.seen().stream().filter(r -> r.startsWith("GET ") && r.contains("/values")).count(), rolld.seen().toString());
 
             rolld.put("DB_URL", "postgres://fake-db-url/two");
             rolld.put("API_KEY", "fake-api-key");

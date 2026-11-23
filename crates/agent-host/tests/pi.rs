@@ -454,9 +454,10 @@ fn golden_in(name: &str, events: &[ProviderEvent], cwd: Option<&Path>) {
         return;
     }
     let expected = std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("{} is missing; run with ROLL_FIXTURES=write", path.display()));
-    if expected != actual {
-        let (e, a): (Vec<_>, Vec<_>) = (expected.lines().collect(), actual.lines().collect());
-        let at = e.iter().zip(&a).position(|(x, y)| x != y).unwrap_or(e.len().min(a.len()));
+    let (e, a): (Vec<_>, Vec<_>) = (expected.lines().collect(), actual.lines().collect());
+    let same = |x: &&str, y: &&str| x == y || matches!((serde_json::from_str::<Value>(x), serde_json::from_str::<Value>(y)), (Ok(x), Ok(y)) if same_json(&x, &y));
+    if e.len() != a.len() || !e.iter().zip(&a).all(|(x, y)| same(x, y)) {
+        let at = e.iter().zip(&a).position(|(x, y)| !same(x, y)).unwrap_or(e.len().min(a.len()));
         panic!(
             "{name}: events differ from {} at event {}\nexpected: {}\n  actual: {}\n(ROLL_FIXTURES=write regenerates)",
             path.display(),
@@ -464,6 +465,21 @@ fn golden_in(name: &str, events: &[ProviderEvent], cwd: Option<&Path>) {
             e.get(at).unwrap_or(&"<end>"),
             a.get(at).unwrap_or(&"<end>"),
         );
+    }
+}
+
+/// Equal JSON, floats within 1e-12 of each other (relative): a cost parsed from a transcript can
+/// land one ulp away when serde_json's `float_roundtrip` is on, as it is in the shared gate build
+/// (the search crates turn it on).
+fn same_json(e: &Value, a: &Value) -> bool {
+    match (e, a) {
+        (Value::Number(x), Value::Number(y)) if x.is_f64() || y.is_f64() => match (x.as_f64(), y.as_f64()) {
+            (Some(x), Some(y)) => (x - y).abs() <= 1e-12 * x.abs().max(y.abs()),
+            _ => false,
+        },
+        (Value::Array(x), Value::Array(y)) => x.len() == y.len() && x.iter().zip(y).all(|(x, y)| same_json(x, y)),
+        (Value::Object(x), Value::Object(y)) => x.len() == y.len() && x.iter().all(|(k, v)| y.get(k).is_some_and(|w| same_json(v, w))),
+        _ => e == a,
     }
 }
 

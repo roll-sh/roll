@@ -201,6 +201,16 @@ pub trait Runtime: Send + Sync {
     async fn remote_digest(&self, image: &str, login: Option<&RegistryLogin>) -> anyhow::Result<String> {
         crate::registry::Registry::new(None)?.digest(image, login).await
     }
+    /// A pinned image's cosign signature verified with one of `keys` (PEM public keys) from its
+    /// registry ([`crate::registry::Registry::verify_cosign`]): which key, or why none.
+    /// A local image's content digest (`sha256:…`, its config's), for provenance; None where the
+    /// runtime can't say.
+    async fn image_id(&self, _image: &str) -> Option<String> {
+        None
+    }
+    async fn verify_signature(&self, pinned: &str, keys: &[String], login: Option<&RegistryLogin>) -> anyhow::Result<usize> {
+        crate::registry::Registry::new(None)?.verify_cosign(pinned, keys, login).await
+    }
     /// Make the instance, ready to start; nothing runs yet.
     async fn create(&self, spec: &InstanceSpec) -> anyhow::Result<()>;
     /// Start a created (or stopped) instance and say where its port answers. Its output goes
@@ -372,6 +382,11 @@ pub trait Runtime: Send + Sync {
     /// each stream kept to `max` bytes (the rest read and dropped), killed after `timeout`.
     async fn exec_output(&self, _name: &str, _command: &str, _timeout: std::time::Duration, _max: usize) -> anyhow::Result<ExecOutput> {
         anyhow::bail!("this runtime can't run a command in a container")
+    }
+    /// A connection to `port` inside a running instance (any port, any network: its own
+    /// namespace's loopback), as a byte stream.
+    async fn dial(&self, _name: &str, _port: u16) -> anyhow::Result<Box<dyn ShellStream>> {
+        anyhow::bail!("this runtime can't reach an instance's other ports")
     }
     async fn resize_shell(&self, _shell: &str, _cols: u16, _rows: u16) -> anyhow::Result<()> {
         Ok(())

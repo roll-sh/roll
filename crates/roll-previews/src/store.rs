@@ -612,6 +612,8 @@ pub struct PinnedData {
     pub name: String,
     pub r#ref: String,
     pub kept: Option<String>,
+    /// The preview's branch it was copied from.
+    pub source: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -766,6 +768,10 @@ impl Store {
                 db.add_column("services", col, "TEXT")?;
             }
         }
+        // Skew protection (`roll.toml` `skew_protection`), as of its last deploy.
+        if !db.has_column("services", "skew")? {
+            db.add_column("services", "skew", "INTEGER NOT NULL DEFAULT 0")?;
+        }
         // Who made a share link (`usr_…`: a person, or the person behind their token; none for the
         // operator), and when it was last asked whether they still may.
         if !db.has_column("shares", "maker")? {
@@ -795,7 +801,8 @@ impl Store {
         }
         // The branch's own schema lines as it was made (JSON), for `schema::diff_since`.
         // What an earlier push's copy of the data holds and costs (read with the branches').
-        for (col, ty) in [("bytes", "INTEGER NOT NULL DEFAULT 0"), ("usd_month", "REAL NOT NULL DEFAULT 0"), ("spent_usd", "REAL NOT NULL DEFAULT 0")] {
+        // And the branch it was copied from (its delete's guard, for products that check it).
+        for (col, ty) in [("bytes", "INTEGER NOT NULL DEFAULT 0"), ("usd_month", "REAL NOT NULL DEFAULT 0"), ("spent_usd", "REAL NOT NULL DEFAULT 0"), ("source", "TEXT NOT NULL DEFAULT ''")] {
             if !db.has_column("pinned_data", col)? {
                 db.add_column("pinned_data", col, ty)?;
             }
@@ -1016,6 +1023,40 @@ impl Store {
     pub fn set_healthy(&self, id: &str, name: &str, revision: &str) -> Result<()> {
         self.db.write(|c| {
             c.execute("UPDATE services SET healthy = ? WHERE preview_id = ? AND name = ?", params![revision, id, name])?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    pub fn set_service_skew(&self, id: &str, name: &str, on: bool) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("UPDATE services SET skew = ? WHERE preview_id = ? AND name = ?", params![on as i64, id, name])?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// A service with skew protection on: the revision its host serves, and whether `asked` is
+    /// one of its earlier pushes a request may still reach (kept, and replaced less than
+    /// [`SKEW_WINDOW_MS`] ago). `None` when it's off.
+    pub fn skew(&self, id: &str, name: &str, asked: Option<&str>) -> Result<Option<(String, bool)>> {
+        let since = self.now_ms()? - SKEW_WINDOW_MS;
+        self.db.read(|c| {
+            let current = c
+                .query_row("SELECT revision FROM services WHERE preview_id = ? AND name = ? AND skew = 1 AND revision IS NOT NULL AND revision <> ''", params![id, name], |r| r.get::<_, String>(0))
+                .optional()?;
+            let Some(current) = current else { return Ok::<_, Error>(None) };
+            let earlier = match asked {
+                Some(a) if a != current => c.query_row("SELECT 1 FROM pinned WHERE preview_id = ? AND service = ? AND revision = ? AND at >= ?", params![id, name, a, since], |_| Ok(())).optional()?.is_some(),
+                _ => false,
+            };
+            Ok(Some((current, earlier)))
+        })
+    }
+
+    /// An earlier push as if it had been replaced `ms` earlier.
+    #[cfg(test)]
+    pub(crate) fn age_pinned(&self, id: &str, service: &str, revision: &str, ms: i64) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("UPDATE pinned SET at = at - ? WHERE preview_id = ? AND service = ? AND revision = ?", params![ms, id, service, revision])?;
             Ok::<_, Error>(())
         })
     }
@@ -2604,9 +2645,9 @@ impl Store {
     /// The data kept for earlier pushes: a snapshot of a branch per head ([`PinnedData`]).
     pub fn pinned_data(&self, id: &str) -> Result<Vec<PinnedData>> {
         Ok(self.db.read(|c| {
-            c.query("SELECT revision, kind, parent, name, ref, kept FROM pinned_data WHERE preview_id = ? ORDER BY at", [id], |r| {
+            c.query("SELECT revision, kind, parent, name, ref, kept, source FROM pinned_data WHERE preview_id = ? ORDER BY at", [id], |r| {
                 let kind: String = r.get(1)?;
-                Ok(PinnedData { revision: r.get(0)?, kind: Kind::parse(&kind).unwrap_or(Kind::Postgres), parent: r.get(2)?, name: r.get(3)?, r#ref: r.get(4)?, kept: r.get(5)? })
+                Ok(PinnedData { revision: r.get(0)?, kind: Kind::parse(&kind).unwrap_or(Kind::Postgres), parent: r.get(2)?, name: r.get(3)?, r#ref: r.get(4)?, kept: r.get(5)?, source: r.get(6)? })
             })
         })?)
     }
@@ -2615,9 +2656,9 @@ impl Store {
         let now = self.now_ms()?;
         self.db.write(|c| {
             c.execute(
-                "INSERT INTO pinned_data (preview_id, revision, kind, parent, name, ref, kept, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
-                 ON CONFLICT (preview_id, revision, kind, parent) DO UPDATE SET name = excluded.name, ref = excluded.ref, kept = excluded.kept",
-                params![id, d.revision, d.kind.as_str(), d.parent, d.name, d.r#ref, d.kept, now],
+                "INSERT INTO pinned_data (preview_id, revision, kind, parent, name, ref, kept, at, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT (preview_id, revision, kind, parent) DO UPDATE SET name = excluded.name, ref = excluded.ref, kept = excluded.kept, source = excluded.source",
+                params![id, d.revision, d.kind.as_str(), d.parent, d.name, d.r#ref, d.kept, now, d.source],
             )?;
             Ok::<_, Error>(())
         })
@@ -2651,6 +2692,14 @@ impl Store {
     /// `<service>@<revision>`, whose containers go.
     pub fn pin(&self, id: &str, service: &str, revision: &str, url: &dyn Fn(&str) -> String) -> Result<Vec<String>> {
         self.pin_at(id, service, revision, None, url)
+    }
+
+    /// The earlier pushes of `revision` kept at their backend's own URL ([`Store::pin_build`]).
+    pub fn unpin_builds(&self, id: &str, revision: &str) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("DELETE FROM pinned WHERE preview_id = ? AND revision = ? AND host LIKE 'apps:%'", params![id, revision])?;
+            Ok::<_, Error>(())
+        })
     }
 
     /// [`Store::pin`] for a build its backend keeps at a URL of its own (roll apps' deployment
@@ -3090,7 +3139,7 @@ impl Store {
     pub fn pinned(&self, id: &str) -> Result<Vec<crate::Pinned>> {
         Ok(self.db.read(|c| {
             c.query("SELECT service, revision, url, at FROM pinned WHERE preview_id = ? ORDER BY at DESC", [id], |r| {
-                Ok(crate::Pinned { service: r.get(0)?, revision: r.get(1)?, url: r.get(2)?, share_url: None, at: r.get(3)? })
+                Ok(crate::Pinned { service: r.get(0)?, revision: r.get(1)?, url: r.get(2)?, share_url: None, at: r.get(3)?, own_data: Vec::new() })
             })
         })?)
     }
@@ -3206,6 +3255,7 @@ impl Store {
         let closed = settings.egress_for(r.trusted) == crate::settings::EgressRule::Roll;
         let on_apps = self.runtime_fact::<crate::AppsIntercepted>(&r.id, "intercepted_apps")?.filter(|_| closed);
         let timeline = self.runtime_fact::<crate::Timeline>(&r.id, "timeline")?.filter(|t| t.head == r.head);
+        let browser_checks = self.runtime_fact::<crate::BrowserChecks>(&r.id, "browser_checks")?.filter(|b| b.head == r.head).map(|b| b.checks).unwrap_or_default();
         let intercepted = match (self.runtime_fact::<crate::Intercepted>(&r.id, "intercepted")?.filter(|x| !x.keys.is_empty()), on_apps) {
             (Some(x), on_apps) => Some(crate::Intercepted { on_apps, ..x }),
             (None, Some(a)) => Some(crate::Intercepted { on_apps: Some(a), ..Default::default() }),
@@ -3229,8 +3279,14 @@ impl Store {
             Some(at) => Some(self.link_at(&r.id, at, Some("diff=base"))?),
             None => None,
         };
+        let copies = self.pinned_data(&r.id)?;
+        let held = self.pinned_usage(&r.id)?;
+        let copies_total = crate::Copies { count: held.len(), bytes: held.iter().map(|x| x.0).sum(), usd_month: (held.iter().map(|x| x.1).sum::<f64>() * 10_000.0).round() / 10_000.0 };
         let earlier = self.pinned(&r.id)?.into_iter().map(|mut p| {
             p.share_url = Some(share(&p.url));
+            p.own_data = copies.iter().filter(|d| d.revision == p.revision).map(|d| d.kind).collect();
+            p.own_data.sort();
+            p.own_data.dedup();
             p
         });
         let earlier = earlier.collect();
@@ -3276,6 +3332,13 @@ impl Store {
             goes_at,
             reported_by,
             earlier,
+            browser_checks,
+            browser_checks_rule: match settings.browser_checks {
+                crate::settings::BrowserChecksRule::Report => None,
+                crate::settings::BrowserChecksRule::Check => Some("check".into()),
+                crate::settings::BrowserChecksRule::Required => Some("required".into()),
+            },
+            copies: copies_total,
             screenshot_at,
             visual_change,
             phone_screenshot,
@@ -3359,6 +3422,9 @@ pub struct BaseRow {
 pub const SHARES_MAX: usize = 20;
 
 /// Earlier pushes kept reachable per service.
+/// How long after it was replaced an earlier push still answers requests that name it (skew
+/// protection), as roll apps' window.
+pub const SKEW_WINDOW_MS: i64 = 24 * 3600 * 1000;
 pub const PINNED_KEEP: usize = 3;
 
 /// An earlier push its preview no longer keeps ([`Store::gone_push`]): whose it was, and the
@@ -3583,11 +3649,12 @@ mod tests {
         let (_dir, store) = store();
         let (row, _) = store.create(&new("chg_copy")).unwrap();
         let before = store.cost(&row).unwrap();
-        let d = PinnedData { revision: "cs_1".into(), kind: Kind::Postgres, parent: "prj_db".into(), name: "pv-x-1".into(), r#ref: "br_1".into(), kept: None };
+        let d = PinnedData { revision: "cs_1".into(), kind: Kind::Postgres, parent: "prj_db".into(), name: "pv-x-1".into(), r#ref: "br_1".into(), kept: None, source: "br_0".into() };
         store.add_pinned_data(&row.id, &d).unwrap();
         store.set_pinned_usage(&row.id, &d, &crate::ports::Usage { bytes: 3 << 20, storage_usd_month: 0.5, active_usd_hour: 0.0, month_to_date_usd: 0.25 }).unwrap();
         let after = store.cost(&row).unwrap();
         assert_eq!(after.bytes - before.bytes, 3 << 20);
+        assert_eq!(store.preview(&row.id).unwrap().copies, crate::Copies { count: 1, bytes: 3 << 20, usd_month: 0.5 }, "and said apart");
         assert!((after.sleeping_usd_month - before.sleeping_usd_month - 0.5).abs() < 1e-9);
         assert!(after.month_to_date_usd - before.month_to_date_usd >= 0.25);
     }

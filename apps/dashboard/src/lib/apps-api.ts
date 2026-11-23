@@ -146,7 +146,7 @@ export interface Run {
   volume?: { mount: string; size_gb: number; backups?: { every_hours: number; keep: number } };
   /** Metric alerts (`alert.*` events), over five minutes; each 0 is off. */
   /** log_match: text its output holds log_count times in five minutes (alert.log). */
-  alerts?: { memory_pct: number; error_pct: number; p95_ms: number; capacity_pct?: number; log_match?: string; log_count?: number; cpu_pct?: number; metrics?: MetricAlert[] };
+  alerts?: { memory_pct: number; error_pct: number; p95_ms: number; capacity_pct?: number; log_match?: string; log_count?: number; cpu_pct?: number; metrics?: MetricAlert[]; /** The last hour against the same hour of the week over four weeks: alert.anomaly. */ anomaly?: boolean };
   /** Its service level objective: `objective`% of requests not 5xx (and of minutes under `latency_ms` at p95) over `window_days`; `alert.slo` when its budget burns fast. */
   slo?: Slo;
   /** Its own Prometheus endpoint, scraped every 15 s on each running instance (port: the app's own by default). */
@@ -155,7 +155,7 @@ export interface Run {
   log_metrics?: { name: string; pattern: string }[];
   /** A gradual rollout: the new deployment takes each percent of `steps` for `step_s`, rolled
    *  back by a 5xx share of `error_pct` or more (worse than the old one); no steps: at once. */
-  rollout?: { steps: number[]; step_s: number; error_pct: number; /** Each step waits for a person once it passes. */ manual?: boolean; /** With run.slo: a step fails past this burn rate (default 14.4). */ slo_burn?: number; /** A step fails when the new deployment's p95 is this many percent above the old one's. */ p95_pct?: number; /** false: the old instances stop before the new ones start (two never run at once). */ overlap?: boolean };
+  rollout?: { steps: number[]; step_s: number; error_pct: number; /** Each step waits for a person once it passes. */ manual?: boolean; /** With run.slo: a step fails past this burn rate (default 14.4). */ slo_burn?: number; /** A step fails when the new deployment's p95 is this many percent above the old one's. */ p95_pct?: number; /** false: the old instances stop before the new ones start (two never run at once). */ overlap?: boolean; /** The environment's browser checks run against the new deployment's own URL before it takes requests; one that fails rolls it back. */ checks?: boolean };
   /** The app speaks HTTP/2 without TLS (a gRPC server). */
   h2c?: boolean;
   /** With h2c: the gRPC service whose grpc.health.v1 check must answer SERVING ("" the whole server). */
@@ -621,6 +621,8 @@ export interface EnvironmentPut {
   firewall?: FirewallRule[] | null;
   headers?: HeaderRule[] | null;
   /** Paths another service of the project answers (its environment of the same name); null or [] for none. */
+  /** Its own redirects on any service: `_redirects` lines (301 by default, 302, 303, 307, 308); null: none. */
+  redirects?: string | null;
   routes?: RouteRule[] | null;
   /** Its uptime checks (at most 5), or null for none. */
   checks?: UptimeCheck[] | null;
@@ -770,6 +772,8 @@ export interface Environment extends EnvironmentSummary {
   /** Headers its answers carry. */
   headers?: HeaderRule[];
   /** Paths another service of the project answers. */
+  /** Its own redirects, `_redirects` lines. */
+  redirects?: string;
   routes?: RouteRule[];
   checks?: UptimeCheck[];
   /** How each check stands on its owner. */
@@ -833,6 +837,10 @@ export interface Plan {
   functions?: string[];
   /** A static site's edge functions: run before its files on their paths by its `-fn` service. */
   edge?: { name: string; kind: "netlify" | "vercel"; file: string; paths: string[]; excluded?: string[] }[];
+  /** roll's Next.js adapter is in the image: its instances share ISR, fetch and "use cache" entries. */
+  next_cache?: boolean;
+  /** Its Node build writes source maps: it starts with `--enable-source-maps`. */
+  source_maps?: boolean;
 }
 
 export interface RootCandidate {
@@ -970,7 +978,7 @@ export interface Vulnerability {
  * OpenSearch-flavor cluster's `OPENSEARCH_URL`, `OPENSEARCH_USERNAME`, `OPENSEARCH_PASSWORD`). `service`: another web service of the project, its `<NAME>_URL`
  * (private) and `<NAME>_PUBLIC_URL`.
  */
-export type LinkKind = "postgres" | "redis" | "bucket" | "stream" | "queue" | "nosql" | "search" | "service";
+export type LinkKind = "postgres" | "redis" | "bucket" | "stream" | "queue" | "nosql" | "search" | "service" | "tasks";
 
 export interface Link {
   kind: LinkKind;
@@ -1130,6 +1138,10 @@ export interface UptimeCheck {
   timeout_s?: number;
   status?: number;
   contains?: string;
+  /** A browser check: a Playwright script run in Chromium against `path` (the body of an async function given `page`, `context` and `url`; it fails by throwing). At most 16 KiB; every 300–3600 s, timeout 1–120 s. */
+  browser?: string;
+  /** A browser check's performance budgets: its lab metrics past any fail it. */
+  budgets?: { lcp_ms?: number; cls?: number; ttfb_ms?: number; kb?: number; requests?: number };
 }
 
 export interface UptimeCheckState {
@@ -1142,6 +1154,14 @@ export interface UptimeCheckState {
   ms: number | null;
   error: string | null;
   down_since: number | null;
+  /** A browser check's last failure kept (its screenshot and Playwright trace), as the owner knows. */
+  failure_at?: number;
+  /** A preview's: the deployment this result is of (production's browser checks, run on each of its heads). */
+  deployment?: string;
+  /** A browser check's lab metrics from its last run. */
+  metrics?: { lcp_ms: number; cls: number; ttfb_ms: number; kb: number; requests: number };
+  /** Its last pass was over its budgets, and how (never down). */
+  over_budget?: string;
 }
 
 /** A heartbeat: something outside roll pings its URL at least every `every_s` (60–604800); one not come within that and `grace_s` (default 300) is `heartbeat.missed`. */
@@ -1265,6 +1285,7 @@ export interface NotifyTarget {
 }
 
 export type NotifyEvent =
+  | "alert.anomaly"
   | "deploy.failed"
   | "deploy.base_updated"
   | "rollout.waiting"
@@ -1272,6 +1293,7 @@ export type NotifyEvent =
   | "crash_loop"
   | "deploy.active"
   | "spend.alert"
+  | "spend.spike"
   | "spend.limit"
   | "alert.memory"
   | "alert.cpu"
@@ -1506,6 +1528,8 @@ export const appsApi = {
   update: (id: string, patch: ServicePatch) => call<Service>("PATCH", svc(id), patch),
   /** Deletes it until it's restored (48 hours); a deleted service's delete deletes it for good. */
   remove: (id: string) => call<null>("DELETE", svc(id)),
+  /** Move it to another project of the same owner (refused, naming them, while it's tied to its own). */
+  move: (id: string, project: string) => call<{ id: string; project: string; redeployed: { environment: string; deployment: string }[] }>("POST", `${svc(id)}/move`, { project }),
   deletedServices: (project?: string) => call<DeletedService[]>("GET", `/v1/apps/services${qs({ project, deleted: "true" })}`),
   restoreService: (id: string) => call<Service>("POST", `${svc(id)}/restore`),
 
@@ -1532,6 +1556,11 @@ export const appsApi = {
   deleteFormSubmission: (id: string, e: string, form: string, sub: string) => call<null>("DELETE", `${env(id, e)}/forms/${encodeURIComponent(form)}/submissions/${encodeURIComponent(sub)}`),
   removeDrain: (project: string, id: string) => call<null>("DELETE", `/v1/apps/projects/${enc(project)}/drains/${enc(id)}`),
   limits: (project: string) => call<SpendLimits>("GET", `/v1/apps/projects/${enc(project)}/limits`),
+  /** The project's image signing rule: cosign public keys and whether image services must meet them. */
+  /** `roll_key`: the public key that signs the project's builds' provenance. */
+  signing: (project: string) => call<{ keys: string[]; required: boolean; roll_key: string }>("GET", `/v1/apps/projects/${enc(project)}/signing`),
+  setSigning: (project: string, body: { keys: string[]; required?: boolean }) => call<{ keys: string[]; required: boolean; roll_key: string }>("PUT", `/v1/apps/projects/${enc(project)}/signing`, body),
+  deleteSigning: (project: string) => call<void>("DELETE", `/v1/apps/projects/${enc(project)}/signing`),
   /** A month's use by service and environment (this one by default), most costly first. */
   projectUsage: (project: string, month?: string) => call<ProjectUsage>("GET", `/v1/apps/projects/${enc(project)}/usage${qs({ month })}`),
   setLimits: (project: string, body: { alert_usd: number | null; hard_usd: number | null }) => call<SpendLimits>("PUT", `/v1/apps/projects/${enc(project)}/limits`, body),
@@ -1562,6 +1591,8 @@ export const appsApi = {
   commits: (id: string, e: string, d: string) => call<DeployCommits>("GET", `${dep(id, e, d)}/commits`),
   slo: (id: string, e: string) => call<SloReport>("GET", `${env(id, e)}/slo`),
   sbom: (id: string, e: string, d: string) => call<unknown>("GET", `${dep(id, e, d)}/sbom`),
+  /** Its image's signed SLSA provenance (a DSSE envelope), when roll built it. */
+  provenance: (id: string, e: string, d: string) => call<{ payloadType: string; payload: string; signatures: { keyid: string; sig: string }[] }>("GET", `${dep(id, e, d)}/provenance`),
   /** A failed deployment explained by its repo owner's model: kept, unless `again` asks anew (charged again). */
   explain: (id: string, e: string, d: string, again = false) => call<Explanation>("POST", `${dep(id, e, d)}/explain${qs({ again })}`),
   vulnerabilities: (id: string, e: string, d: string) => call<{ scan: ScanSummary | null; vulnerabilities: Vulnerability[] }>("GET", `${dep(id, e, d)}/vulnerabilities`),
@@ -1638,6 +1669,16 @@ export const appsApi = {
       throw new Error(data?.error ?? `${res.status} ${res.statusText}`.trim());
     }
     return { tar: await res.blob(), instance: res.headers.get("x-roll-instance") };
+  },
+  /** A browser check's last failure: its screenshot (PNG) or Playwright trace (zip). */
+  checkFailure: async (id: string, e: string, check: string, which: "screenshot" | "trace"): Promise<Blob> => {
+    const res = await fetch(`${ROLL_API}${env(id, e)}/checks/${encodeURIComponent(check)}/${which}`, withSession({ headers: apiHeaders(), cache: "no-store" }));
+    onApiStatus(res.status);
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      throw new Error(data?.error ?? `${res.status} ${res.statusText}`.trim());
+    }
+    return res.blob();
   },
   /** A tar written under the directory `path` in a running instance (`PUT …/files`, admin: what's written runs next). */
   uploadFiles: async (id: string, e: string, path: string, tar: Blob, instance?: string): Promise<{ instance: string; path: string }> => {

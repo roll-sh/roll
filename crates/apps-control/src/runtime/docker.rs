@@ -696,6 +696,10 @@ impl Runtime for Docker {
         true
     }
 
+    async fn image_id(&self, image: &str) -> Option<String> {
+        docker(&["image", "inspect", "-f", "{{.Id}}", image]).await.ok().map(|s| s.trim().to_string()).filter(|s| s.starts_with("sha256:"))
+    }
+
     async fn pull(&self, image: &str, log: &LogSink, login: Option<&super::RegistryLogin>) -> anyhow::Result<String> {
         log.line(format!("pulling {image}"));
         // A private registry's login goes to dockerd with this pull only (never `docker login`,
@@ -1176,6 +1180,46 @@ impl Runtime for Docker {
         let mount = format!("{name}:/data:ro");
         let out = docker(&["run", "--rm", "--network", "none", "--label", &format!("{LABEL}=usage"), "-v", &mount, VOLUME_IMAGE, "du", "-skx", "/data"]).await.ok()?;
         out.split_whitespace().next()?.parse::<u64>().ok().map(|kib| kib * 1024)
+    }
+
+    async fn dial(&self, name: &str, port: u16) -> anyhow::Result<Box<dyn super::ShellStream>> {
+        anyhow::ensure!(name.starts_with(super::PREFIX), "{name} isn't a roll apps instance");
+        // A relay in the instance's own network namespace (whatever network it's on, closed
+        // ones too), its stdin and stdout one connection to the port on its loopback: the link
+        // relays' pinned socat, no capability, gone with the connection.
+        let target = self.network_container(name).await.unwrap_or_else(|| name.to_string());
+        let mut child = Command::new("docker")
+            .args(["run", "-i", "--rm", "--network", &format!("container:{target}"), "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--read-only", "--memory", "32m", "--pids-limit", "16", "--label", &format!("{LABEL}.role=dial")])
+            .args([super::links::IMAGE, "-", &format!("TCP:127.0.0.1:{port}")])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .context("running the relay")?;
+        let (stdin, stdout) = (child.stdin.take().context("no stdin")?, child.stdout.take().context("no stdout")?);
+        // The child lives as long as the stream (dropping the stream ends it).
+        struct Dialed {
+            io: tokio::io::Join<tokio::process::ChildStdout, tokio::process::ChildStdin>,
+            _child: tokio::process::Child,
+        }
+        impl tokio::io::AsyncRead for Dialed {
+            fn poll_read(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>, buf: &mut tokio::io::ReadBuf<'_>) -> std::task::Poll<std::io::Result<()>> {
+                std::pin::Pin::new(&mut self.io).poll_read(cx, buf)
+            }
+        }
+        impl tokio::io::AsyncWrite for Dialed {
+            fn poll_write(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>, buf: &[u8]) -> std::task::Poll<std::io::Result<usize>> {
+                std::pin::Pin::new(&mut self.io).poll_write(cx, buf)
+            }
+            fn poll_flush(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+                std::pin::Pin::new(&mut self.io).poll_flush(cx)
+            }
+            fn poll_shutdown(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+                std::pin::Pin::new(&mut self.io).poll_shutdown(cx)
+            }
+        }
+        Ok(Box::new(Dialed { io: tokio::io::join(stdout, stdin), _child: child }))
     }
 
     async fn exec_output(&self, name: &str, command: &str, timeout: Duration, max: usize) -> anyhow::Result<super::ExecOutput> {

@@ -698,9 +698,18 @@ fn print_preview(p: &Value) {
     if let Some(t) = timeline_line(p) {
         println!("{t}");
     }
+    for c in p["browser_checks"].as_array().into_iter().flatten() {
+        let state = match s(&c["state"]).as_str() {
+            "pending" => "running".to_string(),
+            other => other.to_string(),
+        };
+        println!("browser check  {}/{}  {state}{}", s(&c["service"]), s(&c["name"]), c["error"].as_str().map(|e| format!(": {}", e.lines().next().unwrap_or(""))).unwrap_or_default());
+    }
     for x in p["earlier"].as_array().into_iter().flatten() {
         let rev = s(&x["revision"]);
-        println!("earlier  {} at {}  {}", s(&x["service"]), rev.trim_start_matches("cs_").chars().take(10).collect::<String>(), s(&x["share_url"]));
+        let own: Vec<&str> = x["own_data"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+        let own = if own.is_empty() { String::new() } else { format!("  (own data: {})", own.join(", ")) };
+        println!("earlier  {} at {}  {}{own}", s(&x["service"]), rev.trim_start_matches("cs_").chars().take(10).collect::<String>(), s(&x["share_url"]));
     }
     for svc in p["services"].as_array().into_iter().flatten() {
         // The link with the access token when the preview is private: the one that opens it.
@@ -709,6 +718,9 @@ fn print_preview(p: &Value) {
     }
     for r in p["resources"].as_array().into_iter().flatten() {
         println!("  {:<8} {} → {} ({}, {})", s(&r["kind"]), s(&r["parent"]), r["ref"].as_str().unwrap_or("…"), s(&r["state"]), bytes(r["bytes"].as_f64().unwrap_or(0.0)));
+    }
+    if let Some(n) = p["copies"]["count"].as_u64().filter(|n| *n > 0) {
+        println!("  earlier pushes' copies: {n}, {}, {}/month", bytes(p["copies"]["bytes"].as_f64().unwrap_or(0.0)), usd(&p["copies"]["usd_month"]));
     }
     let c = &p["cost"];
     println!("cost: {}/month asleep, {}/hour in use, {} this month", usd(&c["sleeping_usd_month"]), usd(&c["active_usd_hour"]), usd(&c["month_to_date_usd"]));

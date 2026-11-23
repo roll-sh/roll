@@ -10,6 +10,7 @@ publish.workspace = true
 search-codec.workspace = true
 search-embed.workspace = true
 search-es.workspace = true
+search-painless.workspace = true
 search-index.workspace = true
 search-store.workspace = true
 anyhow.workspace = true

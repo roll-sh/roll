@@ -452,6 +452,59 @@ async function perIndexCall(id: string, route: { method: string; path: string },
   return { status: res.status, body: await res.text() };
 }
 
+/**
+ * A streaming REST request through the console (`_inference/…/_stream`): the control plane passes
+ * the cluster's server-sent events through as they come (`text/event-stream`), and each piece of
+ * text goes to `onText` as it arrives. An error the cluster answered before streaming comes in the
+ * console's JSON envelope and throws its reason. `signal` aborts the request, which closes the
+ * cluster's upstream call too.
+ */
+export async function esStream(id: string, req: { method: string; path: string; body: string }, onText: (text: string) => void, signal?: AbortSignal): Promise<void> {
+  const payload = JSON.stringify({ method: req.method, path: req.path, body: JSON.parse(req.body) });
+  const res = await fetch(`${ROLL_API}/v1/search/clusters/${encodeURIComponent(id)}/request`, withSession({ method: "POST", headers: apiHeaders(payload), body: payload, cache: "no-store", signal }));
+  onApiStatus(res.status);
+  const type = res.headers.get("content-type") ?? "";
+  if (type.startsWith("text/event-stream") && res.body) {
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      onText(decoder.decode(value, { stream: true }));
+    }
+    onText(decoder.decode());
+    return;
+  }
+  const text = await res.text();
+  let envelope: ConsoleResponse | null = null;
+  try {
+    envelope = JSON.parse(text) as ConsoleResponse;
+  } catch {
+    // Not the console's envelope: a control-plane error.
+  }
+  if (!res.ok || !envelope) {
+    const err = (() => {
+      try {
+        return JSON.parse(text) as { error?: string };
+      } catch {
+        return null;
+      }
+    })();
+    throw new Error(err?.error ?? `HTTP ${res.status}`);
+  }
+  if (envelope.status >= 400) {
+    let parsed: unknown = envelope.body;
+    try {
+      parsed = JSON.parse(envelope.body);
+    } catch {
+      // Plain text.
+    }
+    throw new Error(esReason(parsed, envelope.status));
+  }
+  // A node that answered the stream whole: the same events, at once.
+  onText(envelope.body);
+}
+
 /** [`esRaw`]'s parsed response. */
 export async function esJson<T = unknown>(id: string, method: Method, path: string, body?: unknown): Promise<T> {
   return (await esRaw<T>(id, method, path, body)).value;

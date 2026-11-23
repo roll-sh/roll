@@ -152,6 +152,8 @@ export interface Preview {
   /** Its first page's own links that are broken (status 0: no answer), of those checked. */
   page_links?: { checked: number; broken: { path: string; status: number }[] } | null;
   /** Its routes (from its traces) clearly slower than main's preview's, as its holder last read them. */
+  /** The project's rule for production's browser checks (`check`, `required`), when it's more than showing them. */
+  browser_checks_rule?: "check" | "required" | null;
   /** The project's rule for regressions against main (`check`, `required`). */
   regressions?: "check" | "required" | null;
   /** Who accepted its regressions at its head. */
@@ -174,8 +176,12 @@ export interface Preview {
   /** Its error groups main's preview doesn't have, as its holder last read them. */
   new_errors?: { branch: string; total: number; errors: { service: string; title: string }[] } | null;
   slower_routes?: { branch: string; routes: { name: string; count: number; p50_ms: number; main_p50_ms: number; grew?: GrewSpan | null; /** Its budget, when it's over it. */ budget_ms?: number | null }[] } | null;
-  /** Earlier pushes of the change's services, still reachable on the same data (newest first). */
-  earlier?: { service: string; revision: string; url: string; share_url: string | null; at: number }[];
+  /** Earlier pushes of the change's services, still reachable (newest first), each on its own copy of the data where `own_data` names products. */
+  earlier?: { service: string; revision: string; url: string; share_url: string | null; at: number; own_data?: string[] }[];
+  /** Production's browser checks on this head (roll apps runs them as its deployment goes live). */
+  browser_checks?: { service: string; name: string; state: "pending" | "passed" | "failed"; error: string | null; files?: { service_id: string; environment: string } | null }[];
+  /** The earlier pushes' own copies of the data: how many, their bytes and a month of keeping them (in `cost`). */
+  copies?: { count: number; bytes: number; usd_month: number };
   /** When its screenshot was taken (`screenshot` below), if it has one. */
   screenshot_at?: number | null;
   last_reset_at: number | null;
@@ -421,6 +427,7 @@ export interface PreviewSettings {
   visual_review?: "off" | "check" | "required";
   /** `check` posts `roll/regressions`, failing while a change has routes slower than main's preview or errors main's doesn't have. */
   regressions?: "off" | "check" | "required";
+  browser_checks?: "report" | "check" | "required";
   /** `catch` (default): services send mail to roll's catcher, listed on the preview, never delivered; `deliver`: the project's own mail settings. */
   mail?: "catch" | "deliver";
   /** Its `roll.toml` services get the OpenTelemetry SDK's variables, their spans kept on the preview a few hours. */
@@ -655,7 +662,7 @@ export type ErrorGroup = { service: string; fingerprint: string; kind: string; t
 
 /** A running service's use right now: cores of CPU, resident bytes (an instance's, on roll apps), and the MB it runs with. */
 /** Something that happened to a preview (`GET /v1/previews/events`). */
-export type PreviewEvent = { seq: number; at: number; kind: "created" | "ready" | "failed" | "visual_change" | "deleted"; project: string; preview: string; change: string | null; data: { head?: string } };
+export type PreviewEvent = { seq: number; at: number; kind: "created" | "ready" | "failed" | "visual_change" | "browser_checks_passed" | "browser_checks_failed" | "deleted"; project: string; preview: string; change: string | null; data: { head?: string } };
 export type ServiceMetrics = { service: string; cpu: number; memory_bytes: number; memory_mb: number };
 
 /** One of a preview's recent traces: its root span's name and service, when (ms), how long, how many spans, whether any failed. */

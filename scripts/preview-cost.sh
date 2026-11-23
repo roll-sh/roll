@@ -79,7 +79,7 @@ RSS0=$(ps -o rss= -p "$PID")
 say "a repo with a service, and one of each data resource"
 api POST /v1/code/owners '{"name":"acme","kind":"org"}' >/dev/null
 api POST /v1/code/repos '{"owner":"acme","name":"web","source":"native"}' >/dev/null
-TOML='[preview]\nimage = \"'"$IMAGE"'\"\nrun = \"env > env.txt && python -m http.server $PORT\"\nport = 8000\nhealth = \"/\"\nmemory = 128\ncpus = 0.25\npages = [\"/index.html\"]\n[[preview.states]]\nname = \"repo-tab\"\npage = \"/\"\nsteps = [{ press = \"Tab\" }]\n'
+TOML='[preview]\nimage = \"'"$IMAGE"'\"\nrun = \"env > env.txt && python -m http.server $PORT\"\nport = 8000\nhealth = \"/\"\nskew_protection = true\nmemory = 128\ncpus = 0.25\npages = [\"/index.html\"]\n[[preview.states]]\nname = \"repo-tab\"\npage = \"/\"\nsteps = [{ press = \"Tab\" }]\n'
 # The service's API, as an OpenAPI document (github.openapi): the change removes one operation and adds one.
 OPENAPI_MAIN='{\"paths\":{\"/users\":{\"get\":{\"parameters\":[{\"name\":\"limit\",\"in\":\"query\",\"schema\":{\"type\":\"integer\"}}]}},\"/users/{id}\":{\"delete\":{}}}}'
 OPENAPI_CHG='"openapi.json":{"content":"{\"paths\":{\"/users\":{\"get\":{\"parameters\":[{\"name\":\"limit\",\"in\":\"query\",\"required\":true,\"schema\":{\"type\":\"integer\"}}]}},\"/orders\":{\"post\":{}}}}"}'
@@ -114,7 +114,7 @@ PG=$(api POST /v1/projects '{"name":"shop-db"}' | jq_ "d['id']")
 PG_PARENT_EP=$(api GET "/v1/projects/$PG" | jq_ "[b['endpoint']['id'] for b in d['branches'] if b['parent_id'] is None][0]")
 api POST "/v1/endpoints/$PG_PARENT_EP/query" '{"sql":"CREATE TABLE users (id int PRIMARY KEY, email text); INSERT INTO users VALUES (1, '"'"'ada@example.com'"'"')"}' >/dev/null
 api POST "/v1/streams/$STREAM/topics" '{"name":"clicks","partitions":3}' >/dev/null
-api POST /_roll/tenants '{"id":"work"}' >/dev/null
+WORK_TOKEN=$(api POST /_roll/tenants '{"id":"work"}' | jq_ "d['token']")
 # Data in the parents, so the branches have something to share: 20 MiB of objects, 20,000 keys.
 KEY=$(api POST /v1/storage/keys '{"name":"e2e","permission":"admin"}')
 export AWS_ACCESS_KEY_ID=$(echo "$KEY" | jq_ "d['id']") AWS_SECRET_ACCESS_KEY=$(echo "$KEY" | jq_ "d['secret_access_key']") AWS_DEFAULT_REGION=us-east-1
@@ -284,6 +284,14 @@ FOLLOWED=$(python3 -c 'import sys,urllib.parse as u; e=dict(l.split("=",1) for l
 [ "$FOLLOWED" = ok ] || { echo "a secrets link to the branched parent should give the branch's password: $FOLLOWED"; exit 1; }
 echo "$APP_ENV" | grep -qx 'PAYMENTS_KEY=sk_test_from_staging_42' || { echo "roll://staging/PAYMENTS_TEST_KEY should be staging's value: $(echo "$APP_ENV" | grep '^PAYMENTS_KEY=' | cut -c1-40)"; exit 1; }
 echo "$APP_ENV" | grep -qxF 'GREETING=hello ${USER}' || { echo "a plain value's \${ should stay as it is: $(echo "$APP_ENV" | grep '^GREETING=')"; exit 1; }
+# Its tasks tenant's own webhook signing keys (roll apps' `tasks` link names them), not production's:
+# its deliveries verify.
+BRANCH_TASKS=$(echo "$P" | jq_ "[r['ref'] for r in d['resources'] if r['kind']=='tasks'][0]")
+TASKS_SK=$(echo "$APP_ENV" | sed -n 's/^ROLL_TASKS_SIGNING_KEY=//p')
+keys_of() { curl -sf -H "Authorization: Bearer $2" "http://$API/t/$1/v1/tasks/keys" | jq_ "d['current']"; }
+OWN_TASKS_KEY=$(keys_of "$BRANCH_TASKS" "$(echo "$APP_ENV" | sed -n 's/^ROLL_TASKS_TOKEN=//p')")
+PROD_TASKS_KEY=$(keys_of work "$WORK_TOKEN")
+[ -n "$TASKS_SK" ] && [ "$TASKS_SK" = "$OWN_TASKS_KEY" ] && [ "$TASKS_SK" != "$PROD_TASKS_KEY" ] || { echo "the preview's service should hold its tasks tenant's own signing key (own $([ "$TASKS_SK" = "$OWN_TASKS_KEY" ] && echo yes || echo no), production's $([ "$TASKS_SK" = "$PROD_TASKS_KEY" ] && echo yes || echo no))"; exit 1; }
 # Its bucket's key reaches only its branch: production's bucket (the parent) refuses it, as every
 # credential a preview's code holds is the branch's own (search's data-only key below too).
 PV_AK=$(echo "$APP_ENV" | sed -n 's/^AWS_ACCESS_KEY_ID=//p'); PV_SK=$(echo "$APP_ENV" | sed -n 's/^AWS_SECRET_ACCESS_KEY=//p')
@@ -678,6 +686,8 @@ done
 PAGE=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/")
 [ "$PAGE" = 'preview of change 1, third<script>console.error("boom")</script> <nav><a href="/gone">a page that went</a></nav>' ] || { echo "a push that touches code should redeploy: the page says $PAGE"; exit 1; }
 KEPT="kept $(bare "$RUNS" | cut -c1-10) through a docs-only push; redeployed at $(bare "$CODE_HEAD" | cut -c1-10)"
+# How that push came up: its data step takes the earlier push's copies (every product's).
+STEPS3=$(api GET "/v1/previews/$PV" | jq_ "(lambda t: ' · '.join('%s %d ms' % (s['step'], s['at'] - (t['steps'][i - 1]['at'] if i else t['started_at'])) for i, s in enumerate(t['steps']) if s['step'] != 'ready'))(d['timeline']) if d.get('timeline') else ''")
 # The push before stays reachable at a URL of its own, on the same data (Vercel's per-push URLs).
 EARLIER_URL=$(api GET "/v1/previews/$PV" | jq_ "((d.get('earlier') or [{}])[0]).get('share_url') or ''")
 [ -n "$EARLIER_URL" ] || { echo "the previous push should stay reachable"; api GET "/v1/previews/$PV" | jq_ "d.get('earlier')"; exit 1; }
@@ -691,6 +701,15 @@ for _ in $(seq 1 120); do
   sleep 0.5
 done
 [ "$EARLIER_PAGE" = "preview of change 1, again" ] || { echo "the earlier push should serve its own page: $EARLIER_PAGE"; exit 1; }
+# Skew protection (`skew_protection = true`): on the head's own host, a request naming the push
+# before reaches it; a page load gets the current push and the cookie naming it.
+EARLIER_REV=$(api GET "/v1/previews/$PV" | jq_ "d['earlier'][0]['revision']")
+SKEWED=$(curl -sS -b "$JAR" -H "Host: $HOST" -H "x-deployment-id: $EARLIER_REV" "http://$API/")
+[ "$SKEWED" = "preview of change 1, again" ] || { echo "a request naming the push before should reach it: $SKEWED"; exit 1; }
+SKEW_LOAD=$(curl -sS -D - -b "$JAR" -H "Host: $HOST" -H "Sec-Fetch-Dest: document" -H "x-deployment-id: $EARLIER_REV" "http://$API/")
+CODE_REV=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/env.txt" | sed -n 's/^ROLL_DEPLOYMENT=//p')
+case "$SKEW_LOAD" in *"__roll_dpl=$CODE_REV;"*"preview of change 1, third"*) ;; *) echo "a page load should get the current push ($CODE_REV) and its cookie: $SKEW_LOAD"; exit 1;; esac
+[ -n "$CODE_REV" ] && [ "$CODE_REV" != "$EARLIER_REV" ] || { echo "the app should know its push as ROLL_DEPLOYMENT: '$CODE_REV'"; exit 1; }
 # It runs on its own copy of the data (taken before the next head's data step): a table the
 # preview's branch gets now isn't in the earlier push's.
 db_of() { curl -sS -b "$1" -H "Host: $2" "http://$API/env.txt" | sed -n 's/^DATABASE_URL=//p' | sed 's#host.docker.internal#127.0.0.1#'; }
@@ -701,6 +720,37 @@ EARLIER_DB=$(db_of "$EJAR" "$EARLIER_HOST")
 psql_q "$LIVE_DB" "CREATE TABLE after_third (id int)" >/dev/null
 OWN_DATA="$(psql_q "$EARLIER_DB" "SELECT to_regclass('public.after_third') IS NULL") / $(psql_q "$LIVE_DB" "SELECT to_regclass('public.after_third') IS NOT NULL")"
 [ "$OWN_DATA" = "t / t" ] || { echo "a table the preview's branch got after the push shouldn't be in the earlier push's copy (earlier absent / live present): $OWN_DATA"; exit 1; }
+# Its Redis too: a database of its own.
+redis_of() { curl -sS -b "$1" -H "Host: $2" "http://$API/env.txt" | sed -n 's/^REDIS_URL=//p'; }
+LIVE_REDIS=$(redis_of "$JAR" "$HOST")
+EARLIER_REDIS=$(redis_of "$EJAR" "$EARLIER_HOST")
+[ -n "$EARLIER_REDIS" ] && [ "$EARLIER_REDIS" != "$LIVE_REDIS" ] || { echo "the earlier push should have a Redis database of its own: '$EARLIER_REDIS' / '$LIVE_REDIS'"; exit 1; }
+OWN_DATA="$OWN_DATA; Redis its own"
+# And its search cluster (a branch of the preview's, masked as it is): the cluster its data key
+# names (`base64(<id>@<cluster>:<key>)`; every cluster answers at the node's one URL).
+es_of() { curl -sS -b "$1" -H "Host: $2" "http://$API/env.txt" | sed -n 's/^ELASTICSEARCH_API_KEY=//p' | python3 -c "import base64,sys; k=sys.stdin.read().strip(); print(base64.b64decode(k).decode().split(':')[0].rsplit('@',1)[-1] if k else '')"; }
+LIVE_ES=$(es_of "$JAR" "$HOST")
+EARLIER_ES=$(es_of "$EJAR" "$EARLIER_HOST")
+[ -n "$EARLIER_ES" ] && [ "$EARLIER_ES" != "$LIVE_ES" ] || { echo "the earlier push should have a search cluster of its own: '$EARLIER_ES' / '$LIVE_ES'"; exit 1; }
+OWN_DATA="$OWN_DATA, search its own"
+# And its bucket (a branch of the preview's, with a key of its own).
+bucket_of() { curl -sS -b "$1" -H "Host: $2" "http://$API/env.txt" | sed -n 's/^S3_BUCKET=//p'; }
+LIVE_BUCKET=$(bucket_of "$JAR" "$HOST")
+EARLIER_BUCKET=$(bucket_of "$EJAR" "$EARLIER_HOST")
+[ -n "$EARLIER_BUCKET" ] && [ "$EARLIER_BUCKET" != "$LIVE_BUCKET" ] || { echo "the earlier push should have a bucket of its own: '$EARLIER_BUCKET' / '$LIVE_BUCKET'"; exit 1; }
+OWN_DATA="$OWN_DATA, bucket its own"
+# And its stream (a branch of the preview's: its own SASL user).
+stream_of() { curl -sS -b "$1" -H "Host: $2" "http://$API/env.txt" | sed -n 's/^KAFKA_SASL_USERNAME=//p'; }
+LIVE_STREAM=$(stream_of "$JAR" "$HOST")
+EARLIER_STREAM=$(stream_of "$EJAR" "$EARLIER_HOST")
+[ -n "$EARLIER_STREAM" ] && [ "$EARLIER_STREAM" != "$LIVE_STREAM" ] || { echo "the earlier push should have a stream of its own: '$EARLIER_STREAM' / '$LIVE_STREAM'"; exit 1; }
+OWN_DATA="$OWN_DATA, stream its own"
+# And its NoSQL database: a branch of the preview's, still masked (it inherits the read policy).
+nosql_of() { curl -sS -b "$1" -H "Host: $2" "http://$API/env.txt" | sed -n 's/^CASSANDRA_USERNAME=//p'; }
+[ "$(nosql_of "$EJAR" "$EARLIER_HOST")" != "$(nosql_of "$JAR" "$HOST")" ] || { echo "the earlier push should have a NoSQL database of its own"; exit 1; }
+NOSQL_COPY_MASK=$(api GET /v1/nosql/databases | jq_ "[x.get('masking', {}).get('app.users.email', '') for x in (d if isinstance(d, list) else d.get('databases', [])) if x['name'].startswith('pv-') and x['id'] != '$BRANCH_NOSQL'][0] if [x for x in (d if isinstance(d, list) else d.get('databases', [])) if x['name'].startswith('pv-') and x['id'] != '$BRANCH_NOSQL'] else 'no copy'")
+[ "$NOSQL_COPY_MASK" = "$MASKED" ] || { echo "the earlier push's NoSQL copy should be masked as the preview's branch is ($MASKED), not '$NOSQL_COPY_MASK'"; exit 1; }
+OWN_DATA="$OWN_DATA, NoSQL its own and masked"
 
 # Screenshots stayed on through the pushes: the page's change since the head before is known.
 VISUAL=""
@@ -1055,6 +1105,15 @@ TEARDOWN=$(sed 's/\x1b\[[0-9;]*m//g' "$HOME_DIR/rolld.log" | grep -c "the teardo
 PARENTS_OK=$( (api GET "/v1/redis/databases/$REDIS" | jq_ "d['id']"; api GET /v1/storage/buckets/assets | jq_ "d['name']"; api GET "/v1/nosql/databases/$NOSQL" | jq_ "d['id']"; api GET "/v1/search/clusters/$SEARCH" | jq_ "d['id']") | wc -l)
 SEARCH_BRANCH_GONE=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${ROLL_ADMIN_TOKEN:-}" "http://$API/v1/search/clusters/$BRANCH_SEARCH")
 [ "$SEARCH_BRANCH_GONE" = 404 ] || { echo "the search branch should be gone after landing ($SEARCH_BRANCH_GONE)"; exit 1; }
+# Nor an earlier push's copy of it.
+BUCKETS_LEFT=$(api GET /v1/storage/buckets | jq_ "len([b for b in (d if isinstance(d, list) else d.get('buckets', [])) if b['name'].startswith('assets-')])")
+[ "$BUCKETS_LEFT" = 0 ] || { echo "no bucket branch of the preview's (nor an earlier push's copy) should outlive it: $BUCKETS_LEFT"; exit 1; }
+NOSQL_LEFT=$(api GET /v1/nosql/databases | jq_ "len([x for x in (d if isinstance(d, list) else d.get('databases', [])) if x['name'].startswith('pv-')])")
+[ "$NOSQL_LEFT" = 0 ] || { echo "no NoSQL database of the preview's (nor an earlier push's copy) should outlive it: $NOSQL_LEFT"; exit 1; }
+STREAMS_LEFT=$(api GET /v1/streams | jq_ "len([x for x in (d if isinstance(d, list) else d.get('streams', [])) if x['name'].startswith('pv-')])")
+[ "$STREAMS_LEFT" = 0 ] || { echo "no stream of the preview's (nor an earlier push's copy) should outlive it: $STREAMS_LEFT"; exit 1; }
+SEARCH_LEFT=$(api GET /v1/search/clusters | jq_ "len([c for c in (d if isinstance(d, list) else d.get('clusters', [])) if c['name'].startswith('pv-')])")
+[ "$SEARCH_LEFT" = 0 ] || { echo "no search cluster of the preview's should outlive it: $SEARCH_LEFT"; exit 1; }
 BRANCHES_LEFT=$(api GET /v1/redis/databases | jq_ "len([x for x in d if x['name'].startswith('pv-')])")
 # The Postgres branch and every earlier push's copy of it went with the preview.
 PG_LEFT=$(api GET "/v1/projects/$PG" | jq_ "len([b for b in d['branches'] if b['name'].startswith('pv-')])")
@@ -1070,7 +1129,8 @@ cat <<EOF
 | Change opened → preview ready ($(echo "$P" | jq_ "len(d['resources'])") branches made, the service deployed) | $((T1 - T0)) ms |
 | The preview's bucket key: its branch / production's bucket | $OWN_LS / $PARENT_LS |
 | … step by step (its timeline: data, setup, deploy, checks) | $STEPS |
-| An earlier push's own copy of the data: a table made after it is absent there / present in the preview's | $OWN_DATA |
+| An earlier push's own copy of the data: a table made after it is absent there / present in the preview's; its Redis, search, bucket, stream and NoSQL | $OWN_DATA |
+| A push whose earlier head keeps copies of every branch: its timeline | $STEPS3 |
 | What a follower of the events hears (\`GET /v1/previews/events\`, roll MCP's Events) | $EVENTS |
 | Search: a sync of the parent's connector on the parent / asked of the branch (inherited, waits for adoption) | $PSTATE / $BSTATE |
 | Parent bucket bytes / the branch's own bytes after writing 1 MiB / objects the branch sees | $PARENT_OBJECTS / $BRANCH_OBJECTS / $BRANCH_SEES |
@@ -1122,8 +1182,9 @@ cat <<EOF
 | Accessibility of the test page (it has no lang and no title) | $A11Y; new against main: $A11Y_NEW |
 | The first page's speed, timed with its screenshot | $SPEED |
 | The push before, at its own URL | ${EARLIER_HOST%%.*}: its own page, on the same data |
+| A page loaded before the push (skew protection): a request naming it on the head's host / a page load | the push before's page / the current one, with the cookie __roll_dpl=$(bare "$CODE_REV" | cut -c1-10)… |
 | Search: products.name in the branch / in the parent / the branch's term dictionary | $ES_READ / $ES_PARENT / $ES_TERMS |
 | Search: the branch's data-only ELASTICSEARCH_API_KEY reads / makes a key | $KEY_READ / $KEY_MINT |
 | Search: an address in an array of objects / under a dotted key / in an index named logs.2024, in the branch | $ES_DEEP / $ES_DOTTED |
-| After landing: parents present / preview Redis branches left / Postgres branches left (earlier pushes' copies too) | $PARENTS_OK of 4 / $BRANCHES_LEFT / $PG_LEFT |
+| After landing: parents present / preview Redis branches left / Postgres branches left / search clusters left / bucket branches left / streams left / NoSQL left (earlier pushes' copies too) | $PARENTS_OK of 4 / $BRANCHES_LEFT / $PG_LEFT / $SEARCH_LEFT / $BUCKETS_LEFT / $STREAMS_LEFT / $NOSQL_LEFT |
 EOF

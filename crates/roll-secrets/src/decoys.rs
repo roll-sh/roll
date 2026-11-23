@@ -172,7 +172,7 @@ impl Secrets {
         // transaction: never a decoy key without its mark. It's also the plant's only record past
         // the key's ordinary `secrets.write` (who and when, on [`Decoy`]): an audit row of its own
         // would leave a gap right after that write in a token's view.
-        let written = self.commit_then(project, env, vec![item], &[(0, 0)], "write", "", None, true, caller, &|c, e, _, now| {
+        let written = self.commit_then(project, env, vec![item], &[(0, 0)], crate::write::Via::Write, "", None, true, caller, &|c, e, _, now| {
             let id = current(c, &e.id, &path, &key, "")?.ok_or_else(|| Error::Internal(format!("{key} wasn't written")))?.id;
             c.execute(
                 "INSERT INTO decoys (id, project_id, env_id, secret_id, path, key, kind, ref, created_by, created_at, uses) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
@@ -225,7 +225,8 @@ impl Secrets {
             let text = format!("decoy {key} in {slug}:{path} was used{from}, calling {route}");
             let mut who = Caller::consumer("roll:decoys");
             who.ip = ip.clone();
-            audit::record(c, self.keys()?, &project, &who, "secrets.alert.decoy_used", Some(&slug), Some(&path), std::slice::from_ref(&key), &text, now)?;
+            let event = crate::events::Event::new(crate::events::Kind::DecoyUsed, json!({ "decoy": id, "route": route, "ip": ip }));
+            audit::record_event(c, self.keys()?, &project, &who, "secrets.alert.decoy_used", Some(&slug), Some(&path), std::slice::from_ref(&key), &text, now, event)?;
             if notify {
                 let link = web.as_ref().map(|w| format!("{}/dashboard/projects/{project}/secrets?env={slug}&tab=activity", w.trim_end_matches('/')));
                 let mut said = format!("roll secrets: {text}. Whoever used it found it where it was planted: cut them off and rotate what sits beside it.");

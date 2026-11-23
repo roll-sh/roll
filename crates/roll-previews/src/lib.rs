@@ -349,6 +349,14 @@ pub struct Preview {
     /// Earlier pushes of the change's services, still reachable (newest first; the last
     /// [`store::PINNED_KEEP`] per service).
     pub earlier: Vec<Pinned>,
+    /// Production's browser checks on this head (roll apps runs them on a preview's deployment as
+    /// it goes live): each one's state, read until each has run.
+    pub browser_checks: Vec<BrowserCheck>,
+    /// The project's rule for them (`check`, `required`), when it's more than showing them.
+    pub browser_checks_rule: Option<String>,
+    /// The earlier pushes' own copies of its data: how many, what they hold and keep costing
+    /// (counted in `cost` with its branches').
+    pub copies: Copies,
     /// When its screenshot was taken (`GET …/screenshot`), if it has one.
     pub screenshot_at: Option<i64>,
     /// How much the page changed since the screenshot at an earlier head (`GET
@@ -729,7 +737,9 @@ impl PageA11y {
 
 /// Something that happened to a preview, for followers (`GET /v1/previews/events`, roll MCP's
 /// event feeds): `created`, `ready` (up after a push or its first deploy; never a sleeping one
-/// waking), `failed`, `visual_change` (a visual change waits for review, once a head) or `deleted`. Ids and kinds only: `data` holds the head.
+/// waking), `failed`, `visual_change` (a visual change waits for review, once a head),
+/// `browser_checks_passed` or `browser_checks_failed` (production's browser checks have all run on
+/// the head, once a head) or `deleted`. Ids and kinds only: `data` holds the head.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Event {
     pub seq: i64,
@@ -1158,8 +1168,54 @@ pub struct LeaseRow {
     pub expires_at: i64,
 }
 
-/// An earlier push of a change's service, still reachable at a URL of its own (on the preview's
-/// data, asleep until opened).
+/// A browser check's state on a preview's head.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CheckState {
+    /// Not run on this head's deployment yet.
+    Pending,
+    Passed,
+    Failed,
+}
+
+/// One of production's browser checks, run on a preview's head (roll apps' `checks[].browser`).
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct BrowserCheck {
+    pub service: String,
+    pub name: String,
+    pub state: CheckState,
+    /// What failed (the check's own words, made printable and cut).
+    pub error: Option<String>,
+    /// Where its failure's screenshot and Playwright trace are kept (roll apps': `GET
+    /// /v1/apps/services/{service_id}/environments/{environment}/checks/{name}/screenshot` and
+    /// `/trace`, `read` on that service), when they were.
+    pub files: Option<BrowserCheckFiles>,
+}
+
+/// A roll apps service and environment a browser check's failure files are kept under.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct BrowserCheckFiles {
+    pub service_id: String,
+    pub environment: String,
+}
+
+/// The browser checks read for `head` (a runtime fact; a new head reads its own).
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct BrowserChecks {
+    pub head: String,
+    pub checks: Vec<BrowserCheck>,
+}
+
+/// What the earlier pushes' own copies of a preview's data add up to.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct Copies {
+    pub count: usize,
+    pub bytes: i64,
+    pub usd_month: f64,
+}
+
+/// An earlier push of a change's service, still reachable at a URL of its own (asleep until
+/// opened; on its own copy of the data where `own_data` names products).
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Pinned {
     pub service: String,
@@ -1170,6 +1226,9 @@ pub struct Pinned {
     pub share_url: Option<String>,
     /// When it stopped being the latest.
     pub at: i64,
+    /// The data products it has its own copy of (as its head left them); the rest it shares with
+    /// the preview.
+    pub own_data: Vec<Kind>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

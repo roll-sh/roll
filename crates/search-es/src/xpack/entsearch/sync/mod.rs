@@ -16,13 +16,14 @@ pub mod json_scan;
 pub mod postgres;
 pub mod rules;
 pub mod s3;
-pub mod slots;
 
 use super::connectors::{CONNECTORS, SYNC_JOBS};
 use super::now_nanos_string;
 use crate::cluster::Cluster;
 use crate::json::{Map, Value};
+use crate::egress::{Egress, Refused};
 use crate::obj;
+use crate::slots::{Caps, Slots};
 use crate::xpack::{internal, store};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -49,8 +50,11 @@ const HEARTBEAT: Duration = Duration::from_secs(10);
 const STALE_MS: i64 = 5 * 60_000;
 /// Syncs running at once on one cluster.
 const MAX_RUNNING: usize = 2;
+/// The node's sync slots ([`crate::slots`]): each sync holds a page and, in a full sync, up to
+/// `MAX_SEEN` ids' hashes.
+pub const SLOTS: Caps = Caps { node: 4, owner: 2, cluster: MAX_RUNNING };
 /// How often a pending job waiting for one of the node's slots is looked at again anyway (a
-/// slot that frees wakes the next waiter's scheduler: [`slots`]).
+/// slot that frees wakes the next waiter's scheduler: [`crate::slots`]).
 const SLOT_RETRY_MS: i64 = 60_000;
 const DEFAULT_MAX_DURATION_MS: i64 = 6 * 3_600_000;
 const DEFAULT_MAX_DOCS: u64 = 20_000_000;
@@ -66,8 +70,8 @@ pub const DOC_BYTES_MAX: usize = 10 << 20;
 #[derive(Default)]
 pub struct Syncs {
     running: parking_lot::Mutex<HashSet<String>>,
-    /// The cluster's key, owner and slot pool ([`slots`]), set by its first [`run_due`].
-    identity: std::sync::OnceLock<(String, String, Arc<slots::Slots>)>,
+    /// The cluster's key, owner and slot pool ([`crate::slots`]), set by its first [`run_due`].
+    identity: std::sync::OnceLock<(String, String, Arc<Slots>)>,
 }
 
 impl Syncs {
@@ -192,6 +196,21 @@ pub fn next_due(cluster: &Cluster, st: &crate::meta::ClusterState, syncs: Option
     due
 }
 
+/// How a connector says the node's egress rules refused its host: as reindex from remote does,
+/// but a private address names the connectors' rule.
+fn refused(e: Refused) -> String {
+    match e {
+        Refused::Private(h) => format!("[{h}] is a private address: connectors only reach public ones"),
+        other => other.to_string(),
+    }
+}
+
+/// The process's sync slots, shared by every cluster on the node ([`SLOTS`]).
+pub fn node_slots() -> &'static Arc<Slots> {
+    static NODE: std::sync::LazyLock<Arc<Slots>> = std::sync::LazyLock::new(|| Slots::new(SLOTS));
+    &NODE
+}
+
 /// The scheduler's turn: settles what is due and starts pending syncs.
 pub async fn run_due(cluster: &Cluster, now: i64) {
     let Some(handle) = cluster.handle() else { return };
@@ -284,10 +303,10 @@ pub async fn run_due(cluster: &Cluster, now: i64) {
         })
         .await;
     let pending = pending_jobs(cluster, &cluster.state(), syncs);
-    // A slot of the node's, in turn with every other cluster ([`slots`]).
+    // A slot of the node's, in turn with every other cluster ([`crate::slots`]).
     let key = cluster.name.clone();
-    let owner = cluster.config.owner.clone().unwrap_or_else(|| format!("cluster {key}"));
-    let pool = cluster.config.connector_slots.clone().unwrap_or_else(|| slots::node().clone());
+    let owner = crate::slots::owner_of(cluster.config.owner.as_deref(), &key);
+    let pool = cluster.config.connector_slots.clone().unwrap_or_else(|| node_slots().clone());
     let _ = syncs.identity.set((key.clone(), owner.clone(), pool.clone()));
     if pending.is_empty() {
         pool.leave(&key);
@@ -320,7 +339,7 @@ pub async fn run_due(cluster: &Cluster, now: i64) {
 /// Runs a claimed slot's sync (`work`) as a task of its own and, however it ends (a panic
 /// included), frees the slot and the node's permit, settles a job it left unfinished, and wakes
 /// the scheduler for the next pending job.
-async fn supervise(cluster: Arc<Cluster>, job: String, cid: String, permit: Option<slots::Permit>, work: impl std::future::Future<Output = ()> + Send + 'static) {
+async fn supervise(cluster: Arc<Cluster>, job: String, cid: String, permit: Option<crate::slots::Permit>, work: impl std::future::Future<Output = ()> + Send + 'static) {
     /// Frees the slot even if this task is dropped (the runtime shutting down).
     struct Slot(Arc<Cluster>, String);
     impl Drop for Slot {
@@ -648,7 +667,7 @@ async fn sync(cluster: &Arc<Cluster>, job_id: &str, cid: &str, principal: Option
         _ => None,
     };
     let setting = |k: &str, d: u64| cluster.config.node_setting(k).and_then(|v| v.parse::<u64>().ok()).filter(|n| *n > 0).unwrap_or(d);
-    let allow_private = cluster.config.node_setting(ALLOW_PRIVATE).is_some_and(|v| v.eq_ignore_ascii_case("true"));
+    let egress = Egress::of_cluster(cluster, ALLOW_PRIVATE);
     let max_ms = cluster
         .config
         .node_setting(MAX_SYNC_DURATION)
@@ -675,9 +694,9 @@ async fn sync(cluster: &Arc<Cluster>, job_id: &str, cid: &str, principal: Option
     let cursor = connector.get("sync_cursor").cloned().unwrap_or(Value::Null);
     let advanced = rules::advanced(&filtering).cloned();
     let result = match service.as_str() {
-        "postgresql" => postgres::sync(&values, &mut sink, full, &cursor, allow_private).await,
-        crawler::SERVICE => crawler::sync(cid, &values, &mut sink, full, &cursor, advanced.as_ref(), allow_private).await,
-        _ => s3::sync(&values, &mut sink, full, &cursor, advanced.as_ref(), allow_private).await,
+        "postgresql" => postgres::sync(&values, &mut sink, full, &cursor, &egress).await,
+        crawler::SERVICE => crawler::sync(cid, &values, &mut sink, full, &cursor, advanced.as_ref(), &egress).await,
+        _ => s3::sync(&values, &mut sink, full, &cursor, advanced.as_ref(), &egress).await,
     };
     let cursor = result.map_err(|s| match s {
         Stop::Failed(e) => Stop::Failed(values.scrub(&e)),

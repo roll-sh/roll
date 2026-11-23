@@ -7,7 +7,7 @@
  * revealed value for as long as it's shown and no longer.
  */
 
-import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Hosts, PlaceholderRecord, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Totp, Share, NewShare, ValueRequest, NewValueRequest, NewToken, AuditEntry, AuditFilter, AuditVerification, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, SaasRotator, NewSaasRotator, AwsRole, Finding, ProjectFindings, SyncPreview, FileDiff, OutsideDatabase, Directory, NewDirectory, SnowflakeAccount, NewSnowflakeAccount, AtlasProject, NewAtlasProject, AwsUser, CloudAccount, NewCloudAccount, KubernetesCluster, NewKubernetesCluster, SignedCertificate, CaCertificate, Ca, AcmeSettings, NewAcmeKey, SshCa, HostCertificate, UserCertificate, TransitKey, TransitPublicKey, Rotation, FolderPolicy, Reach, GitHubApp, SinkFormat, Gateway, MadeGateway, NewDecoy, CutOff, CutOffRequest, ValidityProbe, CheckedCredential, DeletedProject, Recovered, EnvironmentDeletion, EnvironmentDeleted, RecoveredEnvironment } from "@roll/secrets/types";
+import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, HeldValues, ValuesDelta, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Hosts, PlaceholderRecord, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Totp, Share, NewShare, ValueRequest, NewValueRequest, NewToken, AuditEntry, AuditFilter, AuditVerification, AuditFormat, EventsQuery, EventPage, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, SaasRotator, NewSaasRotator, AwsRole, Finding, ProjectFindings, SyncPreview, FileDiff, OutsideDatabase, Directory, NewDirectory, SnowflakeAccount, NewSnowflakeAccount, AtlasProject, NewAtlasProject, AwsUser, CloudAccount, NewCloudAccount, KubernetesCluster, NewKubernetesCluster, SignedCertificate, CaCertificate, Ca, AcmeSettings, NewAcmeKey, SshCa, HostCertificate, UserCertificate, TransitKey, TransitPublicKey, Rotation, FolderPolicy, Reach, GitHubApp, SinkFormat, Gateway, MadeGateway, NewDecoy, CutOff, CutOffRequest, ValidityProbe, CheckedCredential, DeletedProject, Recovered, EnvironmentDeletion, EnvironmentDeleted, RecoveredEnvironment } from "@roll/secrets/types";
 import type { Grant } from "./access-api";
 import { withSession } from "./code-token";
 import { grantFor, tokenOf } from "./secrets-tokens";
@@ -163,6 +163,8 @@ export function secretsApi(project: string) {
     rotate: (env: string, key: string, path = "/") => req<Applied>("POST", `${K(env, key)}/rotate${qs({ path })}`),
 
     values: (env: string, path = "/", resolve = true) => req<Values>("GET", `${E(env)}/values${qs({ path, resolve: resolve ? undefined : "false" })}`),
+    /** What changed since the values a watcher holds (`held`: its last answer's digest, basis and stamps; `{}` for the full set with stamps). */
+    valuesDelta: (env: string, held: HeldValues, path = "/") => req<ValuesDelta>("POST", `${E(env)}/values/delta${qs({ path })}`, held),
     /** The environment's values as a file (`dotenv`, `json`, `shell`, `yaml`): text, not JSON. */
     /** `seq`: the folder's own values as they were after that change (as written then). */
     exportText: (env: string, format: ExportFormat, path = "/", seq?: number) => text(`${E(env)}/values${qs({ path, format, seq })}`),
@@ -244,6 +246,8 @@ export function secretsApi(project: string) {
     audit: (f: AuditFilter = {}) => req<AuditEntry[]>("GET", `${P}/audit${qs(f)}`),
     /** The audit log with these filters as a file (up to 10,000 rows): text, not JSON. */
     auditText: (f: AuditFilter, format: AuditFormat) => text(`${P}/audit${qs({ ...f, before: undefined, limit: undefined, digests: undefined, format })}`),
+    /** The project's events after a cursor, in commit order, filtered by the server (kinds, environment, the caller's access). */
+    events: (q: EventsQuery = {}) => req<EventPage>("GET", `${P}/events${qs({ after: q.after, limit: q.limit, kinds: q.kinds?.join(","), environment: q.environment, latest: q.latest ? 1 : undefined })}`),
     /** Walks the audit log's hash chain and checks roll's signed digests (from the last before `since`). */
     verifyAudit: (since?: number) => req<AuditVerification>("GET", `${P}/audit/verify${qs({ since })}`),
     sinks: () => req<Sink[]>("GET", `${P}/audit/sinks`),

@@ -15,24 +15,46 @@ use code_sql::params;
 
 impl Secrets {
     /// `user` lost rights in roll (docs/accounts.md, "Offboarding"): disabled, no longer an admin,
-    /// or deleted. [`Secrets::member_changed`] for every project holding something they could
-    /// have made that nothing checks again (an open share, a live lease, a shared folder), which
-    /// covers their projects and those they reached as an admin. Their sessions' grant sees
-    /// nothing once they're disabled, so those end. Safe to run twice; nothing comes back when
-    /// they're enabled again.
+    /// or deleted. [`Secrets::member_changed`] for every project holding something they made that
+    /// nothing checks again (an open share, a live lease, a shared folder, a key bound to hosts),
+    /// themselves or through a token or identity of theirs, and for their memberships' projects:
+    /// never a project only others made things in. Their sessions' grant sees nothing once they're
+    /// disabled, so those end. Safe to run twice; nothing comes back when they're enabled again.
     pub fn person_offboarded(&self, user: &str) -> Result<()> {
         if !is_person(user) {
             return Ok(());
         }
-        let projects: Vec<String> = self.db.read(|c| {
+        // Who made each, by project: rows naming them, or naming a token or an identity (whose
+        // chain may end with them: `made_by`, asked once for each). Others' own rows and the
+        // operator's are never read.
+        let made: Vec<(String, String)> = self.db.read(|c| {
             c.query(
-                "SELECT project_id FROM shares WHERE ciphertext IS NOT NULL
-                 UNION SELECT project_id FROM leases WHERE revoked_at IS NULL
-                 UNION SELECT e.project_id FROM exports x JOIN environments e ON e.id = x.env_id",
-                (),
-                |r| r.get(0),
+                "SELECT project_id, created_by FROM shares WHERE ciphertext IS NOT NULL AND (created_by = ?1 OR created_by LIKE 'token:%' OR created_by LIKE 'identity:%')
+                 UNION SELECT project_id, issued_by FROM leases WHERE revoked_at IS NULL AND (issued_by = ?1 OR issued_by LIKE 'token:%' OR issued_by LIKE 'identity:%')
+                 UNION SELECT project_id, consumer FROM leases WHERE revoked_at IS NULL AND (consumer = ?1 OR consumer LIKE 'token:%' OR consumer LIKE 'identity:%')
+                 UNION SELECT e.project_id, x.created_by FROM exports x JOIN environments e ON e.id = x.env_id WHERE x.created_by = ?1 OR x.created_by LIKE 'token:%' OR x.created_by LIKE 'identity:%'
+                 UNION SELECT project_id, set_by FROM key_hosts WHERE set_by = ?1 OR set_by LIKE 'token:%' OR set_by LIKE 'identity:%'",
+                [user],
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
         })?;
+        let mut theirs: std::collections::HashMap<String, bool> = Default::default();
+        let mut projects = std::collections::BTreeSet::new();
+        for (project, by) in made {
+            let mine = match theirs.get(&by) {
+                Some(m) => *m,
+                None => {
+                    let m = self.made_by(&by, user)?;
+                    theirs.insert(by, m);
+                    m
+                }
+            };
+            if mine {
+                projects.insert(project);
+            }
+        }
+        let memberships = self.workspace.memberships_of(user).map_err(|e| crate::Error::Internal(format!("reading an offboarded person's memberships: {e}")))?;
+        projects.extend(memberships.into_iter().map(|m| m.project));
         let mut failed = None;
         for project in projects {
             if let Err(e) = self.member_changed(&project, user) {
@@ -74,6 +96,7 @@ impl Secrets {
         if manages && member {
             return Ok(());
         }
+        crate::metrics::Counters::add(&self.counters.member_rechecks, 1);
         // A key they bound stops counting for its hosts (`binder_reaches`): the project's consumers'
         // interception CAs are checked at their next ask, and one naming such a host ends.
         self.db.write(|c| c.execute(&format!("{}project_id = ?)", crate::intercept::RECHECK_HOLDERS), [project]))?;

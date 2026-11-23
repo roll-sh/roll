@@ -93,8 +93,16 @@ dependencies = [
 name = "agent-proto"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
+ "base64 0.22.1",
+ "curve25519-dalek",
+ "hkdf",
+ "rand 0.8.8",
+ "roll-secrets-ref",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "zeroize",
 ]
 
 [[package]]
@@ -275,6 +283,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 name = "apps-build"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "serde",
  "serde_json",
  "serde_yaml_ng",
@@ -322,6 +331,7 @@ dependencies = [
  "hyper-util",
  "ipnet",
  "object_store",
+ "p256",
  "parking_lot",
  "percent-encoding",
  "pg-storage",
@@ -330,6 +340,7 @@ dependencies = [
  "roll-cluster",
  "roll-fetch",
  "roll-intercept",
+ "roll-secrets-ref",
  "roll-workspace",
  "rustls-native-certs",
  "s3-image",
@@ -7318,6 +7329,7 @@ dependencies = [
  "roll-auth",
  "roll-net",
  "roll-oidc",
+ "roll-workspace",
  "rustls-pki-types",
  "rustls-webpki 0.103.15",
  "serde",
@@ -7654,6 +7666,7 @@ dependencies = [
  "roll-keyshares",
  "roll-oidc",
  "roll-secrets-chain",
+ "roll-secrets-ref",
  "roll-workspace",
  "rsa",
  "rustls-pki-types",
@@ -7684,6 +7697,10 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
 ]
+
+[[package]]
+name = "roll-secrets-ref"
+version = "0.1.0"
 
 [[package]]
 name = "roll-workspace"
@@ -7805,6 +7822,7 @@ dependencies = [
  "s3-server",
  "s3-store",
  "search-control",
+ "search-painless",
  "search-server",
  "search-store",
  "serde",
@@ -8682,6 +8700,7 @@ dependencies = [
  "search-embed",
  "search-es",
  "search-index",
+ "search-painless",
  "search-store",
  "serde_json",
  "sha2 0.10.9",

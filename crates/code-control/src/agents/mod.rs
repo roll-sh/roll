@@ -16,6 +16,7 @@ pub mod docs;
 pub mod endpoints;
 pub mod gateway;
 mod code;
+pub mod endpoint_refs;
 mod link;
 mod policy;
 mod pull;

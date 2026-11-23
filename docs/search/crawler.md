@@ -108,8 +108,10 @@ ever sees JSON.
    Deciding whether URLs may be fetched (crawl rules and robots.txt) has a budget of 30 seconds a
    crawl; past it the crawl ends `completed` with `limit_reached: rule_matching_time`. The cheap
    checks (depth, seen, a full frontier) come first, a sitemap stops being read once the frontier
-   is full, and long lists of links yield to the runtime as they're queued. Tenant regex rules
-   match a URL's bytes with Unicode off, each in an equal share of a 10 MiB budget.
+   is full, and long lists of links yield to the runtime as they're queued (the job's
+   `metadata.checked_url_count` counts the checks). Crawl rules are fully built DFAs over a URL's
+   bytes with Unicode off, one step per byte whatever the pattern; a rule whose DFA doesn't fit its
+   equal share of a 10 MiB budget fails validation.
 
    Unlike Open Crawler, a site's `Elastic-Crawler` group doesn't apply to roll, whose token is
    `roll-crawler`. A crawl that finds such a group and no `roll-crawler` group names the origin in
@@ -144,10 +146,13 @@ ever sees JSON.
 Every URL is the tenant's choice, so fetching follows AGENTS.md's rule for such URLs and goes
 further:
 
-- **Public addresses only.** Every request goes through a client built on `roll_net::PublicOnly`.
-  Names resolve to public addresses, and `roll_net::literal_private_host` refuses IP literals and
-  `localhost`. No proxy is used. `roll.connectors.allow_private_hosts` lifts this for local
-  development only, as it does for other connectors.
+- **Public addresses only.** Every request goes through roll's one egress check
+  (`search-es` `egress.rs`), as every other outbound call of roll search does: names resolve
+  through its resolver to public addresses that are neither the node's own nor in the operator's
+  deny lists, addresses written out and `localhost` are checked before connecting, and nothing
+  goes out until the node has resolved its own names. No proxy is used.
+  `roll.connectors.allow_private_hosts` lifts the private-address rule for local development
+  only, as it does for other connectors.
 - **Redirects are followed by hand.** The client follows none itself. The crawler follows up to
   `max_redirects` (10), and each hop is a new URL checked like a link: public address, domains,
   crawl rules, robots.txt. A redirect leaving the crawl's domains ends there, and the source URL is
@@ -271,11 +276,13 @@ the page is gone:
   robots.txt couldn't be read or disallows the whole site, and signs that may only be an outage: a
   redirect off the crawl (a login), onto a URL the crawl already has (a maintenance page) or onto
   a new one (the page moved), a body that isn't HTML, or a page with no title and no text (a soft
-  404). The document's `last_crawled_at` stays as it was. A document kept this way through three
-  full crawls in a row, and at least a week old (`roll.crawler.strike_min_age`), is deleted, and
-  the job's metadata names the count.
+  404). The document's `last_crawled_at` stays as it was. A document this crawl kept, which also
+  wasn't refreshed by the two full crawls before it (they kept it or didn't get to it) and is at
+  least a week old (`roll.crawler.strike_min_age`), is deleted, and the job's metadata names the
+  count.
 - **Purge skipped:** when more than half of the index's documents weren't refreshed by the crawl
-  (gone, kept or not re-checked), or when ten redirects or more of re-checked documents mostly led
+  (gone, kept or not re-checked; documents the crawl's own configuration now leaves out, by its
+  domains, rules or URL limits, don't count, so removing a domain does purge it), or when ten redirects or more of re-checked documents mostly led
   to one URL. And per origin: nothing of an origin more than half of whose documents weren't
   refreshed is deleted (`metadata.purge_skipped_origins`), so one domain of a crawl that ships
   `Disallow: /` or 404s everywhere keeps its documents. A site that is down, behind an expired

@@ -18,7 +18,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 source scripts/lib/gate.sh
 
-RUST_PATHS=(crates/agent-proto crates/agent-host crates/model-gateway crates/code-control/src/agents
+RUST_PATHS=(crates/agent-proto crates/roll-secrets-ref crates/agent-host crates/model-gateway crates/code-control/src/agents
             crates/code-control/tests/{agents,agents_code,agents_gateway,automations,linear,mcp,routes,coverage_map}.rs crates/code-control/tests/common
             crates/roll-cli/src/agent.rs crates/roll-cli/tests/agent.rs crates/roll-cli/src/gateway.rs crates/roll-cli/tests/gateway.rs crates/roll-cli/Cargo.toml
             docs/code/test-coverage.md Cargo.toml Cargo.lock scripts/test-agents.sh scripts/lib/gate.sh)

@@ -48,6 +48,14 @@ pub trait Runner: Send + Sync {
     async fn remove_leftovers(&self) {}
 }
 
+/// Whether the grant rolld's gate put on a request (and a person's session grant beside it) may
+/// read a repo, as roll-access decides it, the repo's workspace projects resolved: a request that
+/// reads many repos at once (`GET /v1/code/search`) keeps only those before it cuts to a page, so
+/// the gate's filter afterwards never empties a page that had answers.
+pub trait GrantReach: Send + Sync {
+    fn reads(&self, ext: &axum::http::Extensions, repo: &str) -> bool;
+}
+
 /// Who asks for an environment's values, as rolld's gate put them on the request: roll secrets
 /// answers as it would a request of theirs to it.
 #[derive(Clone, Copy, Default)]
@@ -61,6 +69,15 @@ impl<'a> Asker<'a> {
     pub fn on(ext: &'a axum::http::Extensions) -> Asker<'a> {
         Asker { operator: roll_auth::Operator::on(ext), user: ext.get::<roll_auth::SignedIn>(), grant: roll_auth::Grant::on(ext) }
     }
+}
+
+/// A copied environment read again ([`SecretEnv::reveal_as`]): its values, and the keys that
+/// didn't resolve for this reader with why (names and reasons only, never a value). The reader
+/// decides which of them matter: a sandbox, only the ones it copied.
+#[derive(Default)]
+pub struct Reread {
+    pub values: Vec<(String, String)>,
+    pub unresolved: Vec<(String, String)>,
 }
 
 /// An environment's values, who revealed them (who made the copy, as roll secrets records a
@@ -106,9 +123,12 @@ pub trait SecretEnv: Send + Sync {
     }
     /// `environment` of `project` (a [`Revealed`]'s) read again as `by` (its copier) may now, for
     /// `consumer` (`sandbox:<id>`), as code nobody vetted reads it: asked at each create and start
-    /// of a sandbox, so a rotated value reaches it. [`Refused`] when they may no longer reveal it;
-    /// the check and the read are one call.
-    async fn reveal_as(&self, by: &str, project: &str, environment: &str, consumer: &str) -> anyhow::Result<Vec<(String, String)>> {
+    /// of a sandbox, so a rotated value reaches it. A key that doesn't resolve for that reader (a
+    /// reference to a protected or deleted environment) is in [`Reread::unresolved`], not an
+    /// error. [`Refused`] when they may no longer reveal it, or the environment is gone for good;
+    /// any other error (one deleted but still recoverable) leaves the answer open. The check and
+    /// the read are one call.
+    async fn reveal_as(&self, by: &str, project: &str, environment: &str, consumer: &str) -> anyhow::Result<Reread> {
         let _ = (by, project, environment, consumer);
         Err(Refused("roll secrets can't read as its copier".into()).into())
     }
@@ -158,6 +178,26 @@ pub trait SecretEnv: Send + Sync {
     /// more, it's gone…), never a value.
     async fn owner_key(&self, owner: &str, reference: &str, maker: &str) -> anyhow::Result<CredentialValue> {
         let _ = (owner, reference, maker);
+        anyhow::bail!("roll secrets isn't on this server")
+    }
+    /// `asker` sets an endpoint's key on owner `owner`'s agent machine `machine` (its name) to
+    /// `reference`, a `roll://` reference: roll secrets checks they may reveal it for
+    /// `agent:<machine>` (through the same project as [`SecretEnv::bind_owner_key`]) and answers
+    /// who to keep as its maker. Errors as there.
+    async fn bind_machine_key(&self, owner: &str, machine: &str, reference: &str, asker: &SecretsAsker) -> crate::Result<String> {
+        let _ = (owner, machine, reference, asker);
+        Err(crate::Error::Unprocessable("roll:// keys need roll secrets on this server".into()))
+    }
+    /// That key's value now, read as `maker` may (re-checked, audited as `agent:<machine>`), to
+    /// seal to the machine's daemon. The error says why, never a value.
+    async fn machine_key(&self, owner: &str, machine: &str, reference: &str, maker: &str) -> anyhow::Result<CredentialValue> {
+        let _ = (owner, machine, reference, maker);
+        anyhow::bail!("roll secrets isn't on this server")
+    }
+    /// The digest of what [`SecretEnv::machine_key`] would read, refused exactly as it would be
+    /// (no value, not audited): checked often, the value read only when it moves.
+    async fn machine_key_digest(&self, owner: &str, machine: &str, reference: &str, maker: &str) -> anyhow::Result<String> {
+        let _ = (owner, machine, reference, maker);
         anyhow::bail!("roll secrets isn't on this server")
     }
 }

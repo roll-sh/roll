@@ -1135,6 +1135,187 @@ async fn endpoint_profiles_keep_no_key_and_sealed_keys_pass_through() {
     assert_eq!(pending.await.unwrap(), (StatusCode::OK, json!({ "type": "ok" })));
 }
 
+/// roll secrets as far as an endpoint's `roll://` key goes: one reference, bound to whoever sets
+/// it on machine `box`, readable while they may still reveal it (`gone`: they can't any more).
+#[derive(Default)]
+struct EndpointKeys {
+    gone: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl code_control::SecretEnv for EndpointKeys {
+    async fn for_repo(&self, _: &str, _: &str, _: &str) -> anyhow::Result<Vec<(String, String)>> {
+        anyhow::bail!("not in this test")
+    }
+    async fn for_owner(&self, _: &str, _: &str, _: &str, _: &str, _: code_control::Asker<'_>) -> anyhow::Result<code_control::Revealed> {
+        anyhow::bail!("not in this test")
+    }
+    async fn leaks(&self, _: &str, _: Vec<String>) -> anyhow::Result<Vec<(usize, String, String, String)>> {
+        Ok(Vec::new())
+    }
+    async fn bind_machine_key(&self, owner: &str, machine: &str, reference: &str, _: &code_control::SecretsAsker) -> code_control::Result<String> {
+        match (owner, machine, reference) {
+            ("acme", "box", "roll://production/ANTHROPIC_KEY") => Ok("usr_ada".into()),
+            _ => Err(code_control::Error::Forbidden(format!("usr_ada may not reveal {reference}"))),
+        }
+    }
+    async fn machine_key(&self, owner: &str, machine: &str, reference: &str, maker: &str) -> anyhow::Result<code_control::CredentialValue> {
+        self.machine_key_digest(owner, machine, reference, maker).await?;
+        Ok(code_control::CredentialValue("sk-ant-from-roll-secrets".into()))
+    }
+    async fn machine_key_digest(&self, owner: &str, machine: &str, reference: &str, maker: &str) -> anyhow::Result<String> {
+        assert_eq!((owner, machine, reference, maker), ("acme", "box", "roll://production/ANTHROPIC_KEY", "usr_ada"));
+        if self.gone.load(std::sync::atomic::Ordering::SeqCst) {
+            anyhow::bail!("maker unreachable: usr_ada, who chose it, can no longer reveal production:/ or can no longer sign in");
+        }
+        Ok("digest-1".into())
+    }
+}
+
+/// An endpoint's key can be a roll secrets reference (docs/code/agents.md, "Endpoints"): the relay
+/// binds it to whoever sets it (refusing what roll secrets refuses, and an `endpoint.key` from
+/// anyone but itself), then sends the value sealed to the daemon after its `hello`, opened only
+/// with the daemon's key. Once the maker can't read it, the relay says why and the daemon gets no
+/// key.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_endpoints_roll_key_reaches_the_daemon_sealed_while_its_maker_may_read_it() {
+    let w = std::sync::Arc::new(world().await);
+    let secrets = std::sync::Arc::new(EndpointKeys::default());
+    w.a.code.set_secret_env(secrets.clone());
+    let (id, minted) = w.machine("box").await;
+    let (mut d, _) = Daemon::connect(&w.url, &minted).await;
+    let path = format!("/v1/code/agents/acme/machines/{id}/commands");
+    let spec = |r: &str| json!({ "id": "cliproxy", "name": "CLIProxyAPI", "kind": "cliproxy", "base_url": "http://100.64.0.7:8317", "providers": ["claude"], "key_ref": r });
+    let set = |cid: &str, r: &str| json!({ "id": cid, "command": { "type": "endpoint.set", "endpoint": spec(r) } });
+
+    let (s, v) = w.req("POST", &path, Some(set("r0", " roll://production/ANTHROPIC_KEY")), &w.owner).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
+    let (s, v) = w.req("POST", &path, Some(set("r1", "roll://production/OTHER_KEY")), &w.owner).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "roll secrets says who may choose it: {v}");
+    let forged = json!({ "id": "r2", "command": { "type": "endpoint.key", "endpoint": "cliproxy", "key": { "type": "refused", "reason": "x" } } });
+    assert_eq!(w.req("POST", &path, Some(forged), &w.owner).await.0, StatusCode::FORBIDDEN);
+    let pending = {
+        let (w, path, body) = (w.clone(), path.clone(), set("r3", "roll://production/ANTHROPIC_KEY"));
+        tokio::spawn(async move { w.req("POST", &path, Some(body), &w.owner).await })
+    };
+    let Some(RelayFrame::Command { id: cid, command, .. }) = d.recv().await else { panic!("no endpoint.set") };
+    assert_eq!(cid, "r3", "nothing refused went out");
+    let Command::EndpointSet { endpoint, .. } = *command else { panic!("not endpoint.set: {command:?}") };
+    assert_eq!(endpoint.roll_ref(), Some("roll://production/ANTHROPIC_KEY"));
+
+    // The daemon keeps it and says so in its hello: the relay then sends the value, sealed to it.
+    let seal = agent_host::endpoints::SealKey::generate();
+    let base = SettingsBase {
+        worktree_dir: "/home/me/.local/share/roll/agent/worktrees".into(),
+        branch_prefix: "roll".into(),
+        clone_dir: None,
+        pull_every: 60,
+        max_depth: 3,
+        max_children: 6,
+        git_name: None,
+        git_email: None,
+    };
+    let shown = agent_proto::EndpointInfo { spec: endpoint, key: agent_proto::KeyState::Reference, models: vec![], checked_at: None, error: None };
+    let config = MachineConfig { set: Default::default(), base, providers: vec![], config_path: "/home/me/config.toml".into(), endpoints: vec![shown], gateway: None, registry: None };
+    let hello = DaemonFrame::Hello { protocol: agent_proto::PROTOCOL, info: MachineInfo { settings: Some(Box::new(config)), seal_key: Some(seal.public()), ..info() } };
+    d.send(&hello).await;
+    d.send(&DaemonFrame::Reply { id: "r3".into(), result: Reply::Ok }).await;
+    assert_eq!(pending.await.unwrap(), (StatusCode::OK, json!({ "type": "ok" })));
+    let Some(RelayFrame::Command { id: cid, command, by, .. }) = d.recv().await else { panic!("no endpoint.key") };
+    let Command::EndpointKey { endpoint, key: agent_proto::RefKey::Set { sealed } } = *command else { panic!("not a key: {command:?}") };
+    assert_eq!((endpoint.as_str(), by.as_str()), ("cliproxy", "roll"));
+    assert!(!serde_json::to_string(&sealed).unwrap().contains("sk-ant"));
+    let opened = seal.open_with(&agent_proto::SealedSecret::ref_context("cliproxy"), &sealed).unwrap();
+    assert_eq!(opened.expose(), "sk-ant-from-roll-secrets");
+    assert!(seal.open("cliproxy", &sealed).is_err(), "never opens as a browser-sealed key");
+    d.send(&DaemonFrame::Reply { id: cid, result: Reply::Ok }).await;
+
+    // Its maker can't read it any more: at the next hello, the daemon is told why, with no key.
+    secrets.gone.store(true, std::sync::atomic::Ordering::SeqCst);
+    d.send(&hello).await;
+    let Some(RelayFrame::Command { command, .. }) = d.recv().await else { panic!("no refusal") };
+    let Command::EndpointKey { key: agent_proto::RefKey::Refused { reason }, .. } = *command else { panic!("not a refusal: {command:?}") };
+    assert!(reason.contains("can no longer reveal"), "{reason}");
+}
+
+/// The model gateway's upstream key can be a roll secrets reference too (docs/code/gateway.md,
+/// "Upstreams"): `gateway.configure` binds it to the sender (refusing what roll secrets refuses,
+/// and a `gateway.upstream_key` from anyone but the relay); after the host's `hello` the value goes
+/// sealed to it with the upstream's own context, and once the maker can't read it the next
+/// `hello` sends the refusal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_gateway_upstreams_roll_key_reaches_the_host_sealed_while_its_maker_may_read_it() {
+    let w = std::sync::Arc::new(world().await);
+    let secrets = std::sync::Arc::new(EndpointKeys::default());
+    w.a.code.set_secret_env(secrets.clone());
+    let (id, minted) = w.machine("box").await;
+    let (mut d, _) = Daemon::connect(&w.url, &minted).await;
+    let path = format!("/v1/code/agents/acme/machines/{id}/commands");
+    let upstream = |r: &str| agent_proto::UpstreamSpec {
+        id: "anthropic".into(),
+        name: "Anthropic".into(),
+        kind: agent_proto::UpstreamKind::Anthropic,
+        base_url: None,
+        region: None,
+        project: None,
+        models: vec![],
+        responses: false,
+        headers: vec![],
+        allow_private: false,
+        key_ref: Some(r.into()),
+        disabled: false,
+    };
+    let configure = |cid: &str, r: &str| {
+        let settings = agent_proto::GatewaySettings { upstreams: vec![upstream(r)], ..Default::default() };
+        json!({ "id": cid, "command": serde_json::to_value(Command::GatewayConfigure { settings: Box::new(settings) }).unwrap() })
+    };
+
+    let (s, v) = w.req("POST", &path, Some(configure("g0", "roll://production/OTHER_KEY")), &w.owner).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "roll secrets says who may choose it: {v}");
+    let forged = json!({ "id": "g1", "command": { "type": "gateway.upstream_key", "upstream": "anthropic", "key": { "type": "refused", "reason": "x" } } });
+    assert_eq!(w.req("POST", &path, Some(forged), &w.owner).await.0, StatusCode::FORBIDDEN);
+    let pending = {
+        let (w, path, body) = (w.clone(), path.clone(), configure("g2", "roll://production/ANTHROPIC_KEY"));
+        tokio::spawn(async move { w.req("POST", &path, Some(body), &w.owner).await })
+    };
+    let Some(RelayFrame::Command { id: cid, command, .. }) = d.recv().await else { panic!("no gateway.configure") };
+    assert_eq!(cid, "g2", "nothing refused went out");
+    let Command::GatewayConfigure { settings } = *command else { panic!("not gateway.configure: {command:?}") };
+
+    // The host runs it and says so in its hello: the relay then sends the value, sealed to it.
+    let seal = agent_host::endpoints::SealKey::generate();
+    let base = SettingsBase {
+        worktree_dir: "/home/me/.local/share/roll/agent/worktrees".into(),
+        branch_prefix: "roll".into(),
+        clone_dir: None,
+        pull_every: 60,
+        max_depth: 3,
+        max_children: 6,
+        git_name: None,
+        git_email: None,
+    };
+    let gateway = agent_proto::GatewayInfo { settings: *settings, keys: vec![], clients: vec![], run: Default::default() };
+    let config = MachineConfig { set: Default::default(), base, providers: vec![], config_path: "/home/me/config.toml".into(), endpoints: vec![], gateway: Some(Box::new(gateway)), registry: None };
+    let hello = DaemonFrame::Hello { protocol: agent_proto::PROTOCOL, info: MachineInfo { settings: Some(Box::new(config)), seal_key: Some(seal.public()), ..info() } };
+    d.send(&hello).await;
+    d.send(&DaemonFrame::Reply { id: "g2".into(), result: Reply::Ok }).await;
+    assert_eq!(pending.await.unwrap(), (StatusCode::OK, json!({ "type": "ok" })));
+    let Some(RelayFrame::Command { id: cid, command, by, .. }) = d.recv().await else { panic!("no gateway.upstream_key") };
+    let Command::GatewayUpstreamKey { upstream, key: agent_proto::RefKey::Set { sealed } } = *command else { panic!("not a key: {command:?}") };
+    assert_eq!((upstream.as_str(), by.as_str()), ("anthropic", "roll"));
+    let opened = seal.open_with(&agent_proto::gateway::upstream_ref_context("anthropic"), &sealed).unwrap();
+    assert_eq!(opened.expose(), "sk-ant-from-roll-secrets");
+    assert!(seal.open_with(&agent_proto::gateway::upstream_key_context("anthropic"), &sealed).is_err(), "never opens as a browser-sealed key");
+    d.send(&DaemonFrame::Reply { id: cid, result: Reply::Ok }).await;
+
+    // Its maker can't read it any more: at the next hello, the host is told why, with no key.
+    secrets.gone.store(true, std::sync::atomic::Ordering::SeqCst);
+    d.send(&hello).await;
+    let Some(RelayFrame::Command { command, .. }) = d.recv().await else { panic!("no refusal") };
+    let Command::GatewayUpstreamKey { key: agent_proto::RefKey::Refused { reason }, .. } = *command else { panic!("not a refusal: {command:?}") };
+    assert!(reason.contains("can no longer reveal"), "{reason}");
+}
+
 /// The pickers' roll code rows (`GET …/lookup/code/{repos,agents}`): the owner's repos (newest
 /// first, found by name or `owner/name`) and its agents (the `agent:<name>` tokens an automation
 /// acts as, never another owner's), always current, for who manages the owner.

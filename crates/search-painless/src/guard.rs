@@ -19,8 +19,25 @@
 //! - **Object size.** A script-controlled size (`new int[n]`, a doubling string, `addAll` of a
 //!   list onto itself) is checked with [`check_bytes`] against a per-object cap before memory is
 //!   allocated, and fails like the JVM: an uncatchable `OutOfMemoryError`.
+//! - **Memory per execution.** One object under the cap proves nothing about the total: a
+//!   128 MiB string added to a list a thousand times is 125 GiB. Each execution opens a
+//!   [`MemoryScope`], an account of the bytes it holds against the operator's limit
+//!   ([`crate::Settings::max_execution_bytes`]). The host's global allocator is wrapped in
+//!   [`Counting`], which subtracts every allocation on the thread from the account's room and
+//!   adds every free back: one add per call, no atomics, so values that die give their bytes
+//!   back and the account is what the execution holds, not what it ever allocated. Sizes a
+//!   script controls are checked against the room before they are allocated ([`check_bytes`]);
+//!   small allocations are caught when the interpreter next leaves its arithmetic loop
+//!   ([`memory_exhausted`]). Host calls run outside the account ([`paused`]) unless their result
+//!   is the script's ([`hosted`]); frees of data the execution didn't make can offset its own
+//!   allocations but never take its balance below zero, so they never let it grow the thread by
+//!   more than the limit. Past the limit the script fails like Elasticsearch 9.5's own
+//!   per-execution guard (`script.painless.max_allocation_bytes`): an uncatchable
+//!   `painless_error`.
 
+use std::alloc::{GlobalAlloc, Layout};
 use std::cell::{Cell, RefCell};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::types::cls;
 use crate::value::{JIndexMap, Value};
@@ -205,7 +222,54 @@ pub fn too_long(len: usize) -> bool {
         note_out_of_memory();
         return true;
     }
+    over_budget()
+}
+
+/// For code that cannot return an error: whether the running execution is past its memory
+/// limit (the failure is recorded and surfaces after the library call, see [`take_pending`]).
+#[inline(always)]
+pub fn over_budget() -> bool {
+    if memory_exhausted()
+        && let Err(t) = refill(0)
+    {
+        note_thrown(t);
+        return true;
+    }
     false
+}
+
+/// For code that cannot return an error, before it allocates `bytes` it knows of: whether they
+/// fit (if not, the failure is recorded and surfaces after the library call).
+pub fn reserve_or_note(bytes: u64) -> bool {
+    match check_bytes(bytes) {
+        Ok(()) => true,
+        Err(t) => {
+            note_thrown(t);
+            false
+        }
+    }
+}
+
+/// Looks at the running execution's account from inside a library loop that builds many
+/// objects in one call (a split's pieces, a parsed document's nodes): past the limit the call
+/// fails there, not after it has built them all. One thread-local load and compare.
+#[inline(always)]
+pub fn poll() -> Result<(), Thrown> {
+    if memory_exhausted() {
+        return refill(0);
+    }
+    Ok(())
+}
+
+/// Strings built by library code as values, looking at the account as they are made.
+pub fn string_values(items: Vec<String>) -> Result<Vec<Value>, Thrown> {
+    check_new_elements(items.len())?;
+    let mut out = Vec::with_capacity(items.len());
+    for s in items {
+        poll()?;
+        out.push(Value::string(s));
+    }
+    Ok(out)
 }
 
 /// Clears the recorded failure and returns it as the error to throw.
@@ -260,11 +324,321 @@ pub fn out_of_memory(message: &str) -> Thrown {
 /// The JVM refuses arrays longer than this outright.
 pub const MAX_ARRAY_LENGTH: u64 = i32::MAX as u64 - 2;
 
-/// Checks that an object of `bytes` bytes may be created.
+/// Checks that an object of `bytes` bytes may be created: under the per-object cap, and within
+/// what the running execution may still hold.
 #[inline]
 pub fn check_bytes(bytes: u64) -> Result<(), Thrown> {
     if bytes > MAX_OBJECT.get() as u64 {
         return Err(out_of_memory("Java heap space"));
+    }
+    let room = ROOM.get();
+    if bytes as i64 > room || room > CAP.get() {
+        return refill(bytes as i64);
+    }
+    Ok(())
+}
+
+// ----------------------------------------------------------------------------------- memory
+
+/// Default for [`crate::Settings::max_execution_bytes`] until the host sets its own
+/// ([`set_default_max_execution_bytes`]).
+pub const DEFAULT_EXECUTION_BYTES: u64 = 64 << 20;
+
+static DEFAULT_EXECUTION: AtomicU64 = AtomicU64::new(DEFAULT_EXECUTION_BYTES);
+
+/// Sets the per-execution memory limit engines created afterwards default to (the node's
+/// setting; 0: no limit).
+///
+/// # Panics
+///
+/// When a limit is set but the process's global allocator isn't wrapped in [`Counting`]: the
+/// limit would silently bound nothing.
+pub fn set_default_max_execution_bytes(bytes: u64) {
+    assert!(bytes == 0 || counting_installed(), "a Painless memory limit needs the global allocator wrapped in search_painless::Counting");
+    DEFAULT_EXECUTION.store(bytes, Ordering::Relaxed);
+}
+
+/// Whether the global allocator keeps executions' accounts ([`Counting`]): an allocation inside
+/// a scope moves it.
+pub fn counting_installed() -> bool {
+    let _scope = MemoryScope::enter(0);
+    let before = MemoryScope::held();
+    let probe = std::hint::black_box(Box::new([0u8; 64]));
+    let moved = MemoryScope::held() != before;
+    drop(probe);
+    moved
+}
+
+pub fn default_max_execution_bytes() -> u64 {
+    DEFAULT_EXECUTION.load(Ordering::Relaxed)
+}
+
+/// How much an execution may grow between two looks at its account (and reports to its host).
+const STEP: i64 = 1 << 20;
+
+/// Room outside executions: far from 0 either way, so nothing looks at the account.
+const IDLE_ROOM: i64 = i64::MAX / 4;
+
+thread_local! {
+    /// Bytes the running execution may still allocate before its account is looked at.
+    /// [`Counting`] subtracts every allocation on this thread and adds every free back.
+    static ROOM: Cell<i64> = const { Cell::new(IDLE_ROOM) };
+    /// The room last handed out: frees can push [`ROOM`] above it only by giving back what was
+    /// allocated before, possibly data the execution didn't make, so the account is looked at
+    /// then too (one unsigned compare covers both, see [`memory_exhausted`]).
+    static CAP: Cell<i64> = const { Cell::new(i64::MAX) };
+    static ACCOUNT: Cell<Account> = const { Cell::new(Account::IDLE) };
+    /// What every closed scope on this thread held at its end, summed: a host call that ran a
+    /// script (a runtime field's) passes the script's memory on through [`paused`].
+    static NESTED: Cell<i64> = const { Cell::new(0) };
+    /// Host calls running ([`paused`], [`hosted`]): the account isn't looked at inside them
+    /// (an execution they start opens its own).
+    static HOSTING: Cell<u32> = const { Cell::new(0) };
+}
+
+#[derive(Clone, Copy)]
+struct Account {
+    /// An execution is running.
+    active: bool,
+    /// Bytes the execution may hold (`i64::MAX`: no limit).
+    limit: i64,
+    /// Room handed to [`ROOM`] since the execution began, plus what was forgiven: the execution
+    /// holds `granted - ROOM` against its limit.
+    granted: i64,
+    /// Frees of data the execution didn't make: they give it no room (`granted` was raised by
+    /// them), but they are real, so the host hears them (`granted - ROOM - forgiven`).
+    forgiven: i64,
+    /// Data the host handed the script that is charged but left out of the limit ([`hosted`]).
+    exempt: i64,
+    /// What it held when the account was last looked at.
+    checked: i64,
+    /// What it held when it was last reported to the host.
+    reported: i64,
+}
+
+impl Account {
+    const IDLE: Account = Account { active: false, limit: i64::MAX, granted: IDLE_ROOM, forgiven: 0, exempt: 0, checked: 0, reported: 0 };
+
+    /// What the execution really holds: its allocations minus all its frees.
+    fn net(&self, room: i64) -> i64 {
+        self.granted.wrapping_sub(room).wrapping_sub(self.forgiven)
+    }
+}
+
+/// A global allocator that keeps the running execution's account (see the module docs). Hosts
+/// that run scripts wrap their allocator in it; without it executions are only bounded per
+/// object.
+pub struct Counting<A>(pub A);
+
+#[inline(always)]
+fn take(bytes: usize) {
+    ROOM.set(ROOM.get().wrapping_sub(bytes as i64));
+}
+
+#[inline(always)]
+fn give(bytes: usize) {
+    ROOM.set(ROOM.get().wrapping_add(bytes as i64));
+}
+
+// SAFETY: every call is forwarded to the wrapped allocator unchanged; the counter is a
+// thread-local cell with a constant initializer and no destructor, which is usable at any time
+// on any thread and never allocates.
+unsafe impl<A: GlobalAlloc> GlobalAlloc for Counting<A> {
+    #[inline]
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let p = unsafe { self.0.alloc(layout) };
+        if !p.is_null() {
+            take(layout.size());
+        }
+        p
+    }
+    #[inline]
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        let p = unsafe { self.0.alloc_zeroed(layout) };
+        if !p.is_null() {
+            take(layout.size());
+        }
+        p
+    }
+    #[inline]
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        give(layout.size());
+        unsafe { self.0.dealloc(ptr, layout) }
+    }
+    #[inline]
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        let p = unsafe { self.0.realloc(ptr, layout, new_size) };
+        // a failed realloc leaves the old block as it was
+        if !p.is_null() {
+            take(new_size.wrapping_sub(layout.size()));
+        }
+        p
+    }
+}
+
+/// The account of one execution, open while it is alive. Scopes nest: what an inner execution
+/// keeps counts against the outer one.
+pub struct MemoryScope {
+    prev_room: i64,
+    prev_cap: i64,
+    prev_hosting: u32,
+    prev: Account,
+    /// The account is this thread's: a scope can't move to another.
+    _thread: std::marker::PhantomData<*const ()>,
+}
+
+impl MemoryScope {
+    /// Opens an account of `limit` bytes (0: unlimited, still counted for the host).
+    pub fn enter(limit: u64) -> MemoryScope {
+        let limit = if limit == 0 { i64::MAX } else { limit.min(i64::MAX as u64) as i64 };
+        let room = limit.min(STEP);
+        let prev_room = ROOM.replace(room);
+        let prev_cap = CAP.replace(room);
+        let prev_hosting = HOSTING.replace(0);
+        let prev = ACCOUNT.replace(Account { active: true, limit, granted: room, forgiven: 0, exempt: 0, checked: 0, reported: 0 });
+        MemoryScope { prev_room, prev_cap, prev_hosting, prev, _thread: std::marker::PhantomData }
+    }
+
+    /// Bytes the execution really holds now (allocations minus frees since it began).
+    pub fn held() -> i64 {
+        ACCOUNT.get().net(ROOM.get())
+    }
+
+    /// What the execution holds that the host has not been told about yet, marked as told.
+    pub fn unreported() -> i64 {
+        let mut a = ACCOUNT.get();
+        let held = a.net(ROOM.get());
+        let delta = held.wrapping_sub(a.reported);
+        a.reported = held;
+        ACCOUNT.set(a);
+        delta
+    }
+}
+
+impl Drop for MemoryScope {
+    fn drop(&mut self) {
+        let held = MemoryScope::held();
+        ACCOUNT.set(self.prev);
+        CAP.set(self.prev_cap);
+        HOSTING.set(self.prev_hosting);
+        ROOM.set(self.prev_room.wrapping_sub(held));
+        NESTED.set(NESTED.get().wrapping_add(held));
+    }
+}
+
+/// Runs code outside the running execution's account: what it allocates or frees (a host's
+/// doc-values buffers and caches, a segment's fielddata) is not the script's. Nothing built
+/// inside may reach the script or be freed inside an execution, since it was never charged: the
+/// result is `Copy`, a host's error goes through [`crate::host::call`], anything else through
+/// [`crate::vm::recharged`]. What a script started inside (a runtime field's) holds at its end
+/// still counts.
+#[inline(always)]
+pub fn paused<R: Copy>(f: impl FnOnce() -> R) -> R {
+    outside(f)
+}
+
+/// [`paused`] for a value made outside the account on purpose, to leave the execution: an error
+/// an execution hands its host, so an execution a host call started leaves its caller nothing.
+#[inline(always)]
+pub fn outside<R>(f: impl FnOnce() -> R) -> R {
+    struct Restore(i64, i64);
+    impl Drop for Restore {
+        #[inline(always)]
+        fn drop(&mut self) {
+            ROOM.set(self.0.wrapping_sub(NESTED.get().wrapping_sub(self.1)));
+            HOSTING.set(HOSTING.get() - 1);
+        }
+    }
+    HOSTING.set(HOSTING.get() + 1);
+    let _restore = Restore(ROOM.get(), NESTED.get());
+    f()
+}
+
+/// Runs a call into the host whose result the script may keep (a document's `_source`): what it
+/// allocates is charged, so frees of it give back what was charged, and the host hears it as
+/// the script's, but the running execution's limit leaves it out. Callers make sure the result
+/// is made once per document, or the exemption would grow with every call.
+pub fn hosted<R>(f: impl FnOnce() -> R) -> R {
+    struct Hosting;
+    impl Drop for Hosting {
+        fn drop(&mut self) {
+            HOSTING.set(HOSTING.get() - 1);
+        }
+    }
+    let before = MemoryScope::held();
+    HOSTING.set(HOSTING.get() + 1);
+    let hosting = Hosting;
+    let r = f();
+    drop(hosting);
+    let grew = MemoryScope::held().wrapping_sub(before);
+    let mut a = ACCOUNT.get();
+    if a.active && grew > 0 {
+        a.exempt = a.exempt.saturating_add(grew);
+        ACCOUNT.set(a);
+    }
+    r
+}
+
+/// Whether the running execution's account needs a look: its room is used up, or frees gave
+/// back more than the room last handed out. The interpreter then calls [`refill`].
+#[inline(always)]
+pub fn memory_exhausted() -> bool {
+    (ROOM.get() as u64) > CAP.get() as u64
+}
+
+/// Looks at the account before `need` more bytes are allocated (0: after allocations): fails
+/// past the limit, and otherwise hands the execution more room.
+#[cold]
+#[inline(never)]
+pub fn refill(need: i64) -> Result<(), Thrown> {
+    let mut a = ACCOUNT.get();
+    if !a.active {
+        ROOM.set(IDLE_ROOM);
+        return Ok(());
+    }
+    // inside a host call the account isn't the script's to look at (the call restores the room)
+    if HOSTING.get() > 0 {
+        return Ok(());
+    }
+    let room = ROOM.get();
+    let mut held = a.granted.wrapping_sub(room);
+    // frees beyond what the execution allocated returned data it didn't make (`params`, the
+    // previous execution's leftovers): real for the host, no room for this execution
+    if held < 0 {
+        a.forgiven = a.forgiven.wrapping_sub(held);
+        a.granted = room;
+        held = 0;
+    }
+    let held = held.saturating_sub(a.exempt).max(0);
+    let total = held.saturating_add(need);
+    if total > a.limit {
+        let bytes = if need > 0 { need } else { held.wrapping_sub(a.checked) };
+        let mut t = crate::vm::painless_error(format!(
+            "script allocation limit exceeded: allocation of [{bytes}] bytes brings the running total to [{total}] bytes, over the limit of [{}] bytes",
+            a.limit
+        ));
+        // reported without a script portion, as Elasticsearch reports its own guard
+        t.offset = Some(u32::MAX);
+        return Err(t);
+    }
+    let new_room = a.limit.saturating_sub(held).min(need.saturating_add(STEP));
+    a.granted = a.granted.wrapping_add(new_room.wrapping_sub(room));
+    a.checked = held;
+    ACCOUNT.set(a);
+    ROOM.set(new_room);
+    CAP.set(new_room);
+    Ok(())
+}
+
+/// Checks that an object may grow to `bytes` bytes: under the per-object cap. What it has grown
+/// by is in the execution's account already, which is looked at if it ran out.
+#[inline]
+fn check_growth(bytes: u64) -> Result<(), Thrown> {
+    if bytes > MAX_OBJECT.get() as u64 {
+        return Err(out_of_memory("Java heap space"));
+    }
+    if memory_exhausted() {
+        return refill(0);
     }
     Ok(())
 }
@@ -277,20 +651,48 @@ pub fn check_array(len: u64, elem_bytes: u64) -> Result<(), Thrown> {
     check_bytes(16u64.saturating_add(len.saturating_mul(elem_bytes)))
 }
 
-/// Checks that a string may grow to `len` UTF-16 units (`String`, `StringBuilder`).
+/// Checks a new string of `len` UTF-16 units, before it is built: under the object cap and
+/// within what the running execution may still hold.
+#[inline]
+pub fn check_new_string(len: usize) -> Result<(), Thrown> {
+    if len as u64 > MAX_ARRAY_LENGTH {
+        return Err(out_of_memory("Requested array size exceeds VM limit"));
+    }
+    check_bytes(len as u64)
+}
+
+/// Whether `bytes` more fit in the running execution's room without looking at its account.
+#[inline]
+pub fn fits(bytes: usize) -> bool {
+    (bytes as i64) <= ROOM.get()
+}
+
+/// Checks that a string being built may grow to `len` UTF-16 units (`String`, `StringBuilder`).
 #[inline]
 pub fn check_string(len: usize) -> Result<(), Thrown> {
     if len as u64 > MAX_ARRAY_LENGTH {
         return Err(out_of_memory("Requested array size exceeds VM limit"));
     }
     // Java strings are Latin-1 or UTF-16; charge one byte per unit like a Latin-1 string
-    check_bytes(len as u64)
+    check_growth(len as u64)
 }
 
-/// Checks that a collection may hold `len` elements (a reference each, as a Java collection's
-/// backing array).
+/// Checks that a collection may grow to `len` elements (a reference each, as a Java
+/// collection's backing array).
 #[inline]
 pub fn check_elements(len: usize) -> Result<(), Thrown> {
+    if len < 4096 {
+        return Ok(());
+    }
+    if len as u64 > MAX_ARRAY_LENGTH {
+        return Err(out_of_memory("Requested array size exceeds VM limit"));
+    }
+    check_growth(16u64.saturating_add((len as u64).saturating_mul(std::mem::size_of::<Value>() as u64)))
+}
+
+/// Checks a new collection of `len` elements, before it is filled.
+#[inline]
+pub fn check_new_elements(len: usize) -> Result<(), Thrown> {
     if len < 4096 {
         return Ok(());
     }
@@ -354,6 +756,7 @@ impl JavaSb {
             len >> coder
         };
         let bytes = (cap as u64) << coder;
+        // the JDK allocates the new buffer before copying the old one into it
         check_bytes(16 + bytes)?;
         self.bytes = bytes as i32;
         self.coder = coder;

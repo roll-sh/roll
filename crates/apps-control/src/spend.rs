@@ -234,6 +234,45 @@ impl Apps {
                     tracing::warn!(project = %project, usd, "apps: a project reached its spend limit; its services are stopped");
                 }
             }
+            self.judge_spike(&project, &name, code_sql::now_ms() / 3_600_000 - 1).await;
+        }
+    }
+
+    /// A spend spike (AWS Cost Anomaly Detection's): `hour`'s cost at least [`SPIKE_USD`] and
+    /// [`SPIKE_TIMES`] the median of the same hour of the week over the last four weeks, with two
+    /// weeks of history at least; `spend.spike` once for it.
+    async fn judge_spike(self: &Arc<Self>, project: &str, name: &str, hour: i64) {
+        let p = project.to_string();
+        let Ok((first, costs)) = self
+            .db(move |s| {
+                let cost = |h: i64| -> Result<crate::store::UsageAdd> {
+                    let (rows, gone) = s.project_usage_rows(&p, h, h + 1)?;
+                    Ok(rows.into_iter().map(|r| r.4).fold(gone, |a, u| a.plus(&u)))
+                };
+                Ok((s.project_first_hour(&p)?, (0..=4).map(|k| cost(hour - k * 168)).collect::<Result<Vec<_>>>()?))
+            })
+            .await
+        else {
+            return;
+        };
+        if first.is_none_or(|f| f > hour - 2 * 168) {
+            return;
+        }
+        let usd: Vec<f64> = costs.iter().map(|u| self.cfg.prices.cost(u)).collect();
+        // The weeks it existed in only (an hour before its first counts for nothing, not $0).
+        let mut past: Vec<f64> = (1..=4).filter(|k| first.is_some_and(|f| hour - k * 168 >= f)).map(|k| usd[k as usize]).collect();
+        past.sort_by(|a, b| a.total_cmp(b));
+        let usual = match past.len() {
+            0 | 1 => return,
+            n if n % 2 == 0 => (past[n / 2 - 1] + past[n / 2]) / 2.0,
+            n => past[n / 2],
+        };
+        if usd[0] < SPIKE_USD || usd[0] < usual * SPIKE_TIMES {
+            return;
+        }
+        let (p, d) = (project.to_string(), json!({ "project": project, "project_name": name, "usd": round(usd[0]), "usual_usd": round(usual), "hour": hour }));
+        if let Ok(true) = self.db(move |s| s.spend_spiked(&p, hour, &d)).await {
+            tracing::info!(project = %project, usd = usd[0], usual, "apps: a project's spending spiked");
         }
     }
 
@@ -255,6 +294,11 @@ impl Apps {
         *self.capped.lock() = ids;
     }
 }
+
+/// A spike is an hour of at least this many dollars,
+pub const SPIKE_USD: f64 = 1.0;
+/// and this many times its usual.
+pub const SPIKE_TIMES: f64 = 3.0;
 
 fn round(x: f64) -> f64 {
     (x * 100.0).round() / 100.0

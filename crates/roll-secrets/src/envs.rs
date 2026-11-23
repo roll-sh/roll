@@ -559,7 +559,7 @@ impl Secrets {
             }
             audit::record(c, self.keys()?, project, caller, "environment.create", Some(&env.slug), None, &[], &format!("created {} environment {}", kind.as_str(), env.slug), now)?;
             if !items.is_empty() {
-                crate::write::apply(c, &dek, self.keys()?, &env, &items.items, "write", "created with the environment", caller, now)?;
+                crate::write::apply(c, &dek, self.keys()?, &env, &items.items, crate::write::Via::Write, "created with the environment", caller, now)?;
             }
             one(c, env)
         });
@@ -668,7 +668,18 @@ impl Secrets {
             }
             c.execute("UPDATE environments SET protected = ?, approvals = ?, approvers = ? WHERE id = ?", params![p.protected as i64, approvals, json(&approvers), env.id])?;
             let summary = if p.protected { format!("protected, {approvals} approval{}", if approvals == 1 { "" } else { "s" }) } else { "unprotected".into() };
-            audit::record(c, self.keys()?, project, caller, "environment.policy", Some(slug), None, &[], &summary, now)?;
+            // Health's `production_unprotected`, as it starts; otherwise who may change what moved.
+            let event = if slug == crate::PRODUCTION && env.protected && !p.protected {
+                Some(crate::events::Event::new(crate::events::Kind::ProductionUnprotected, serde_json::json!({})))
+            } else if (env.protected, env.approvals, &env.approvers) != (p.protected, approvals, &approvers) {
+                Some(crate::events::Event::new(crate::events::Kind::AccessChanged, serde_json::json!({ "what": "environment", "protected": p.protected, "approvals": approvals })))
+            } else {
+                None
+            };
+            match event {
+                Some(event) => audit::record_event(c, self.keys()?, project, caller, "environment.policy", Some(slug), None, &[], &summary, now, event)?,
+                None => audit::record(c, self.keys()?, project, caller, "environment.policy", Some(slug), None, &[], &summary, now)?,
+            }
             let env = by_id(c, &env.id)?;
             one(c, env)
         })
@@ -676,8 +687,9 @@ impl Secrets {
 
     /// Delete an environment. An ephemeral one goes at once, with everything in it (its leases
     /// revoked first). A standard one is kept for the recovery window (deleted_envs.rs): asked to
-    /// confirm with `?confirm=<slug>` when it's protected or something else reads it (the 409
-    /// names what breaks), and, where its policy asks for approvals, opened as a change request.
+    /// confirm with `?confirm=<slug>` when it's protected or anything reads it (a key, a folder, a
+    /// service, a sandbox, a sync, an identity or a token: the 409 names what breaks), and, where
+    /// its policy asks for approvals, opened as a change request.
     pub fn delete_environment(&self, project: &str, slug: &str, confirm: Option<&str>, caller: &Caller) -> Result<crate::deleted_envs::Deletion> {
         caller.need(Action::Delete, &Scope::env(project, slug))?;
         let dek = self.project(project)?;
@@ -687,7 +699,7 @@ impl Secrets {
             return Ok(crate::deleted_envs::Deletion::Erased);
         }
         self.db.read(|c| deletable(c, project, &env))?;
-        let breaks = self.db.read(|c| crate::deleted_envs::breaks(c, &dek, &env))?;
+        let breaks = self.env_breaks(&env, &dek, caller)?;
         if (env.protected || !breaks.is_empty()) && confirm != Some(slug) {
             return Err(Error::Conflict("confirm_required", crate::deleted_envs::refusal(&env, &breaks, self.window_days())));
         }
@@ -797,7 +809,7 @@ impl Secrets {
             if !folders.contains(&path) {
                 return Err(Error::NotFound(format!("no folder {path}")));
             }
-            let change = if items.is_empty() { None } else { Some(crate::write::apply(c, &dek, self.keys()?, &env, &items, "write", &format!("deleted folder {path}"), caller, now)?.0) };
+            let change = if items.is_empty() { None } else { Some(crate::write::apply(c, &dek, self.keys()?, &env, &items, crate::write::Via::Write, &format!("deleted folder {path}"), caller, now)?.0) };
             for f in folders.iter().filter(|f| under(f)) {
                 c.execute("DELETE FROM folders WHERE env_id = ? AND path = ?", [&env.id, f])?;
                 c.execute("DELETE FROM imports WHERE env_id = ? AND path = ?", [&env.id, f])?;
@@ -942,7 +954,7 @@ fn rewrite_references(c: &Conn<'_>, dek: &crate::crypto::Dek, mac: &crate::Keyri
     }
     for (env_id, items) in by_env {
         let env = by_id(c, &env_id)?;
-        crate::write::apply(c, dek, mac, &env, &items, "rename", &format!("references to {from} now point at {to}"), caller, now)?;
+        crate::write::apply(c, dek, mac, &env, &items, crate::write::Via::Rename, &format!("references to {from} now point at {to}"), caller, now)?;
     }
     Ok(())
 }

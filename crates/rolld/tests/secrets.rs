@@ -13,7 +13,8 @@
 //! And roll apps (`ForApps`): what a service got from roll secrets is shown only as roll secrets
 //! would show it to whoever asks.
 //!
-//! And reach (`ReachHolders`): the services that read a folder.
+//! And reach (`ReachHolders`): the services that read a folder, and the ones an environment's delete
+//! would break.
 
 mod common;
 
@@ -471,9 +472,6 @@ async fn apps_shows_a_staging_reference_to_production_only_to_who_may_reveal_pro
     assert!(s == 403 && e.contains("roll secrets"), "{s} {e}");
 }
 
-/// Reach names the roll apps services that read a folder (rolld's `ReachHolders`): one deploying
-/// the environment reads its root, and one whose `roll://` variable names a key of a subfolder
-/// reads that folder too.
 /// A roll apps log drain into roll search, end to end: rolld makes the drain's data stream (roll
 /// apps' template, the stream, its retention) through search's console as the operator, mints a
 /// key that may only append to that stream through the search link's provider, and the drain's
@@ -498,9 +496,134 @@ async fn an_apps_drain_appends_to_its_own_search_data_stream() {
     assert!(doc["@timestamp"].is_string() && doc["event"]["dataset"] == "roll.apps", "an ECS document: {found}");
     let life: Value = as_owner(reqwest::Method::GET, "/_data_stream/logs-roll.apps-web/_lifecycle").send().await.unwrap().json().await.unwrap();
     assert_eq!(life["data_streams"][0]["lifecycle"]["data_retention"], "7d", "{life}");
+    // Its key (never shown) is listed live, and revoked with the drain.
+    let name = format!("roll apps drain:{}", p.id);
+    let drain_keys = || {
+        let (req, name) = (as_owner(reqwest::Method::GET, "/_security/api_key"), name.clone());
+        async move {
+            let v: Value = req.send().await.unwrap().json().await.unwrap();
+            v["api_keys"].as_array().unwrap_or_else(|| panic!("{v}")).iter().filter(|k| k["name"] == name.as_str()).map(|k| k["invalidated"] == true).collect::<Vec<_>>()
+        }
+    };
+    assert_eq!(drain_keys().await, [false], "the drain's key");
     r.call(reqwest::Method::DELETE, &format!("{drains}/{}", d["id"].as_str().unwrap()), None).await;
+    assert!(drain_keys().await.iter().all(|&invalidated| invalidated), "the deleted drain's key still works");
 }
 
+/// An apps service's search link with `indices` and `access: read` (roll secrets' search link
+/// provider, as `names` and `permission`) gets a key that reads those indices only, and
+/// unlinking revokes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_apps_search_link_is_narrowed_and_unlinking_revokes_it() {
+    let r = Rolld::start("apps,search", false).await;
+    let p = Project::new(&r).await;
+    let sc = r.post("/v1/search/clusters", json!({ "name": "logs" })).await;
+    let id = sc["id"].as_str().unwrap();
+    r.call(reqwest::Method::PUT, &format!("/v1/workspace/projects/{}/resources/search/{id}", p.id), Some(json!({ "x": 0, "y": 0 }))).await;
+    let (url, owner, password) = (sc["url"].as_str().unwrap(), sc["username"].as_str().unwrap(), sc["password"].as_str().unwrap());
+    for index in ["logs-app", "audit"] {
+        let put = r.http.put(format!("{url}/{index}/_doc/1?refresh=true")).basic_auth(owner, Some(password)).json(&json!({ "m": "hi" })).send().await.unwrap();
+        assert_eq!(put.status().as_u16(), 201);
+    }
+    let svc = r.post("/v1/apps/services", json!({ "project": p.id, "name": "web", "source": { "kind": "upload" } })).await;
+    let svc = svc["id"].as_str().unwrap();
+    r.call(reqwest::Method::PUT, &format!("/v1/apps/services/{svc}/environments/production"), Some(json!({}))).await;
+    let link = format!("/v1/apps/services/{svc}/links/search/{id}");
+    let l = r.call(reqwest::Method::PUT, &link, Some(json!({ "indices": ["logs-app"], "access": "read" }))).await;
+    assert_eq!((&l["indices"], &l["access"]), (&json!(["logs-app"]), &json!("read")), "{l}");
+    let vars = r.get(&format!("/v1/apps/services/{svc}/environments/production/variables/values")).await;
+    let key = vars["ELASTICSEARCH_API_KEY"].as_str().unwrap_or_else(|| panic!("{vars}")).to_string();
+    let send = |m: reqwest::Method, path: &str| {
+        let req = r.http.request(m, format!("{url}{path}")).header("authorization", format!("ApiKey {key}")).json(&json!({}));
+        async move { req.send().await.unwrap().status().as_u16() }
+    };
+    assert_eq!(send(reqwest::Method::POST, "/logs-app/_search").await, 200);
+    assert_eq!(send(reqwest::Method::PUT, "/logs-app/_doc/2").await, 403);
+    assert_eq!(send(reqwest::Method::POST, "/audit/_search").await, 403);
+    r.call(reqwest::Method::DELETE, &link, None).await;
+    assert_eq!(send(reqwest::Method::POST, "/logs-app/_search").await, 401, "unlinked, its key is revoked");
+}
+
+/// A snapshot repository on roll storage whose credentials are `roll://` references (#361): a
+/// rotation of the keys they name is followed (snapshots keep working once the old key is
+/// revoked), and a branch of the cluster, an untrusted copy, reads a repository with staging's key
+/// but is refused production's (protected), without the key in the answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_repository_key_follows_rotation_and_a_branch_gets_no_protected_key() {
+    let env = [("ROLL_SECRET_KEY", "fake-deployment-key-for-the-repository-test-00000"), ("ROLL_SEARCH_REPOSITORY_ALLOW_PRIVATE", "1")];
+    let r = Rolld::start_in(Arc::new(tempfile::tempdir().unwrap()), "storage,search", false, &env, "/v1/info").await;
+    let p = Project::new(&r).await;
+    r.post("/v1/storage/buckets", json!({ "name": "backups" })).await;
+    p.link("bucket", "backups", &[("REPO_REGION", "region", "live"), ("REPO_KEY_ID", "access_key_id", "managed"), ("REPO_SECRET", "secret_access_key", "managed")]).await;
+    let sc = r.post("/v1/search/clusters", json!({ "name": "data" })).await;
+    let id = sc["id"].as_str().unwrap();
+    r.call(reqwest::Method::PUT, &format!("/v1/workspace/projects/{}/resources/search/{id}", p.id), Some(json!({ "x": 0, "y": 0 }))).await;
+    let settings = json!({
+        "bucket": "backups",
+        "endpoint": r.get("/v1/storage").await["endpoint"],
+        "path_style_access": true,
+        "region": p.value("REPO_REGION").await,
+        "access_key": "roll://production/REPO_KEY_ID",
+        "secret_key": "roll://production/REPO_SECRET",
+    });
+    r.call(reqwest::Method::PUT, &format!("/v1/search/clusters/{id}/repositories/backups"), Some(json!({ "type": "s3", "settings": settings }))).await;
+    let url = sc["url"].as_str().unwrap();
+    let as_user = |user: String, password: String, path: String, body: Value| {
+        let req = r.http.put(format!("{url}{path}")).basic_auth(user, Some(password)).json(&body);
+        async move {
+            let a = req.send().await.unwrap();
+            (a.status().as_u16(), a.text().await.unwrap())
+        }
+    };
+    let owner = (sc["username"].as_str().unwrap().to_string(), sc["password"].as_str().unwrap().to_string());
+    let (s, t) = as_user(owner.0.clone(), owner.1.clone(), "/notes/_doc/1?refresh=true".into(), json!({ "m": "kept" })).await;
+    assert_eq!(s, 201, "{t}");
+    let snapshot = |user: (String, String), repo: &str, name: &str| as_user(user.0, user.1, format!("/_snapshot/{repo}/{name}?wait_for_completion=true"), json!({}));
+    let (s, t) = snapshot(owner.clone(), "backups", "s1").await;
+    assert!(s == 200 && t.contains("\"SUCCESS\""), "{s} {t}");
+    let old = p.value("REPO_SECRET").await;
+    p.rotate("REPO_SECRET").await;
+    p.revoke_retired().await;
+    assert_ne!(p.value("REPO_SECRET").await, old);
+    let (s, t) = snapshot(owner.clone(), "backups", "s2").await;
+    assert!(s == 200 && t.contains("\"SUCCESS\""), "after the rotation: {s} {t}");
+    // The same, with staging's own key (staging isn't protected).
+    let ops: Vec<Value> = [("REPO_KEY_ID", "access_key_id"), ("REPO_SECRET", "secret_access_key")]
+        .iter()
+        .map(|(key, field)| json!({ "op": "set", "key": key, "link": { "kind": "bucket", "ref": "backups", "field": field, "mode": "managed" } }))
+        .collect();
+    r.post(&format!("/v1/secrets/projects/{}/environments/staging/changes", p.id), json!({ "ops": ops })).await;
+    let mut staging = settings.clone();
+    staging["base_path"] = json!("staging");
+    staging["access_key"] = json!("roll://staging/REPO_KEY_ID");
+    staging["secret_key"] = json!("roll://staging/REPO_SECRET");
+    r.call(reqwest::Method::PUT, &format!("/v1/search/clusters/{id}/repositories/staged"), Some(json!({ "type": "s3", "settings": staging }))).await;
+    let (s, t) = snapshot(owner.clone(), "staged", "s3").await;
+    assert!(s == 200 && t.contains("\"SUCCESS\""), "{s} {t}");
+    // A branch keeps both repositories (read only) and reads them as an untrusted copy:
+    // with staging's key, never production's (protected).
+    let b = r.post(&format!("/v1/search/clusters/{id}/branches"), json!({ "name": "data-dev" })).await;
+    let (user, password) = (b["username"].as_str().unwrap().to_string(), b["password"].as_str().unwrap().to_string());
+    let listed = |repo: &str| {
+        let req = r.http.get(format!("{url}/_snapshot/{repo}/_all")).basic_auth(&user, Some(&password));
+        async move {
+            let a = req.send().await.unwrap();
+            (a.status().as_u16(), a.text().await.unwrap())
+        }
+    };
+    let (s, t) = listed("staged").await;
+    assert!(s == 200 && t.contains("\"s3\""), "a branch reads with staging's key: {s} {t}");
+    let (s, t) = listed("backups").await;
+    assert!(s != 200 && !t.contains("\"s2\""), "a branch read with production's key: {s} {t}");
+    let secret = p.value("REPO_SECRET").await;
+    assert!(!t.contains(&secret), "{t}");
+}
+
+/// Reach names the roll apps services that read a folder (rolld's `ReachHolders`): one deploying
+/// the environment reads its root, and one whose `roll://` variable names a key of a subfolder
+/// reads that folder too. It opens no variable: a write-only one whose sealed value no key opens
+/// doesn't stop it, and a reference set before roll apps kept them beside the values is marked
+/// once, when the store opens.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reach_names_the_services_that_read_a_folder() {
     // With search: the harness reads every rolld's search address.
@@ -514,13 +637,39 @@ async fn reach_names_the_services_that_read_a_folder() {
         let env = format!("/v1/apps/services/{}/environments/production", svc["id"].as_str().unwrap());
         r.call(reqwest::Method::PUT, &env, Some(json!({}))).await;
         if name == "worker" {
-            r.call(reqwest::Method::PATCH, &format!("{env}/variables"), Some(json!({ "set": { "TOKEN": "roll://production/api/API_TOKEN" } }))).await;
+            r.call(reqwest::Method::PATCH, &format!("{env}/variables"), Some(json!({ "set": { "TOKEN": "roll://production/api/API_TOKEN", "SIGNING_KEY": "fake-signing-key" }, "seal": ["SIGNING_KEY"] }))).await;
         }
     }
+    let home = r.home.clone();
+    drop(r);
+    let db = rusqlite::Connection::open(home.path().join("apps.db")).unwrap();
+    db.execute("UPDATE variables SET reference = NULL WHERE name = 'TOKEN'", []).unwrap();
+    assert_eq!(db.execute("UPDATE variables SET sealed = 'not-a-sealed-value' WHERE name = 'SIGNING_KEY' AND write_only = 1", []).unwrap(), 1);
+    drop(db);
+    let r = Rolld::start_in(home, "apps,search", false, &[], "/v1/info").await;
     let through = |reach: &Value| -> Vec<(String, String)> { reach["services"].as_array().unwrap().iter().map(|s| (s["name"].as_str().unwrap().to_string(), s["through"].as_str().unwrap().to_string())).collect() };
     let root = r.get(&format!("{secrets}/production/reach?path=/")).await;
     assert_eq!(through(&root), [("web".to_string(), "production:/".to_string()), ("worker".to_string(), "production:/".to_string())], "{root}");
     let api = r.get(&format!("{secrets}/production/reach?path=/api")).await;
     assert_eq!(through(&api), [("worker".to_string(), "roll://production/api/API_TOKEN".to_string())], "{api}");
     assert!(!api.to_string().contains("fake-api-token"), "names, never a value");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_environments_delete_names_the_services_that_read_it_and_needs_a_confirm() {
+    let r = Rolld::start("apps,search", false).await;
+    let project = Project::new(&r).await.id;
+    let envs = format!("/v1/secrets/projects/{project}/environments");
+    r.call(reqwest::Method::PUT, &format!("{envs}/staging/secrets/LOG_LEVEL"), Some(json!({ "value": "debug" }))).await;
+    let svc = r.post("/v1/apps/services", json!({ "project": project, "name": "web", "source": { "kind": "upload" } })).await;
+    r.call(reqwest::Method::PUT, &format!("/v1/apps/services/{}/environments/staging", svc["id"].as_str().unwrap()), Some(json!({}))).await;
+    let preview = r.get(&format!("{envs}/staging/deletion")).await;
+    assert_eq!(preview["confirm"], true, "something reads it: {preview}");
+    assert!(preview["breaks"].as_array().unwrap().iter().any(|b| b["via"] == "service" && b["name"] == "web" && b["id"] == svc["id"]), "{preview}");
+    assert!(!preview.to_string().contains("debug"), "names, never a value");
+    let delete = |q: &str| r.http.delete(format!("{}{envs}/staging{q}", r.api)).bearer_auth(TOKEN).send();
+    let refused = delete("").await.unwrap();
+    assert_eq!(refused.status(), 409);
+    assert!(refused.text().await.unwrap().contains("service web"));
+    assert_eq!(delete("?confirm=staging").await.unwrap().status(), 200);
 }

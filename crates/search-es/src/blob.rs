@@ -31,6 +31,11 @@ macro_rules! each {
 }
 
 impl Store {
+    /// The URLs the store connects to as written ([`s3::Client::endpoints`]).
+    pub fn endpoints(&self) -> Vec<&reqwest::Url> {
+        each!(self, c => c.endpoints())
+    }
+
     /// The object at `key`, or `None` when there is none. More than `max` bytes is an error.
     pub async fn get(&self, key: &str, max: usize) -> Result<Option<Bytes>, Error> {
         each!(self, c => c.get(key, max).await)

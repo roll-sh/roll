@@ -14,6 +14,7 @@ import {
   migrateApi,
   partial,
   queuedPicks,
+  QUEUED_RETRY_MS,
   queueRetryDelay,
   retryableStart,
   shouldStartQueued,
@@ -73,14 +74,22 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
    * page; dropped once nothing waits, or the panel closes). */
   const waiting = useRef<Omit<MigrateRequest, "indices"> | null>(null);
   const starting = useRef(false);
-  /** Bumped 10s after an attempt that started nothing (the node's slots were all taken), so
-   * the waiting copies are asked about again without a busy loop. */
+  /** Bumped `QUEUED_RETRY_MS` after an attempt that left copies waiting, or after a backoff
+   * when an attempt failed: the only thing that starts the next attempt, besides copies ending. */
   const [nudge, setNudge] = useState(0);
-  /** Attempts in a row that failed or started nothing (the pause before the next grows). */
+  /** Attempts in a row that failed (429 or 5xx; the pause before the next grows). */
   const failures = useRef(0);
+  /** The one pending ask-again timer: replaced (never added to) by each attempt, so a copy ending
+   * mid-wait can't leave a second chain of asks running, nor cut a failure's backoff short. */
+  const retry = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const askAgain = (ms: number) => {
+    clearTimeout(retry.current);
+    retry.current = setTimeout(() => setNudge((n) => n + 1), ms);
+  };
   useEffect(
     () => () => {
       waiting.current = null;
+      clearTimeout(retry.current);
     },
     [],
   );
@@ -166,29 +175,36 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
   // Waiting copies start as earlier ones end (roll creates a copy only when it can start it).
   const states = Object.fromEntries(Object.entries(progress).map(([t, p]) => [t, p.state]));
   const ready = started !== null && shouldStartQueued(started, states);
+  // Read through refs: an answer replaces `started`, and that alone mustn't start the next
+  // attempt (each attempt calls the remote and keeps the cluster's migration slot busy).
+  const startedRef = useRef(started);
+  startedRef.current = started;
+  const onChangedRef = useRef(onChanged);
+  onChangedRef.current = onChanged;
   useEffect(() => {
+    const rows = startedRef.current;
     const options = waiting.current;
-    if (!ready || !started || !options || starting.current) return;
+    if (!ready || !rows || !options || starting.current) return;
     starting.current = true;
+    clearTimeout(retry.current);
     (async () => {
       try {
-        const r = await migrateApi.start(cluster.id, { ...options, indices: queuedPicks(started) });
+        const r = await migrateApi.start(cluster.id, { ...options, indices: queuedPicks(rows) });
         setStarted((rows) => {
           const next = rows ? mergeStarted(rows, r.indices) : rows;
           if (next && !next.some((x) => x.queued)) waiting.current = null;
           return next;
         });
-        if (r.indices.every((x) => x.queued)) {
-          setTimeout(() => setNudge((n) => n + 1), queueRetryDelay(failures.current++));
-        } else {
-          failures.current = 0;
-        }
-        onChanged();
+        // Roll answered: errors aren't piling up, and a copy still waiting keeps its turn by asking
+        // again soon.
+        failures.current = 0;
+        if (r.indices.some((x) => x.queued)) askAgain(QUEUED_RETRY_MS);
+        onChangedRef.current();
       } catch (e) {
         const status = e instanceof ApiError ? e.status : undefined;
         if (retryableStart(status)) {
           // Busy or a deadline (roll answered 429 or 5xx): ask again later rather than stall.
-          setTimeout(() => setNudge((n) => n + 1), queueRetryDelay(failures.current++));
+          askAgain(queueRetryDelay(failures.current++));
         } else {
           waiting.current = null;
           setError(e instanceof Error ? e.message : String(e));
@@ -197,8 +213,8 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
         starting.current = false;
       }
     })();
-    // `nudge` asks again after an attempt that started nothing.
-  }, [ready, started, cluster.id, onChanged, nudge]);
+    // `nudge` asks again after an attempt that left copies waiting or failed.
+  }, [ready, cluster.id, nudge]);
 
   const allEnded = started !== null && running.length === 0 && !started.some((x) => x.queued);
   useEffect(() => {

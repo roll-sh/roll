@@ -3,6 +3,7 @@
 # One `METHOD route  reason` a line, as the catalogue spells the route; `*` for a row of every method.
 # A line may name a route an open PR is about to add, so that PR's gate passes when it lands.
 GET /v1/access/approvals/decided                                               an MCP Events feed (access.approval): events/poll and webhooks read it, access_wait_approval waits on one
+GET /v1/access/alerts                                                          an MCP Events feed (access.alert): a failing tool, read by events/poll, streams and webhooks
 GET /v1/access/catalog                                                         the dashboard's (the permission catalogue; tools carry their own actions)
 GET /v1/access/oauth/clients                                                   the dashboard's (the OAuth clients a person registered)
 GET /v1/access/oauth/clients/{id}                                              the dashboard's (one registered OAuth client)
@@ -136,6 +137,8 @@ POST /v1/secrets/projects/{project}/environments/{env}/resolve                 a
 DELETE /v1/secrets/projects/{project}/environments/{env}/secrets/{name}/hosts  a person's call: the hosts a key's value may go to through a placeholder (#520)
 PUT /v1/secrets/projects/{project}/environments/{env}/secrets/{name}/hosts     a person's call: the hosts a key's value may go to through a placeholder (#520)
 POST /v1/secrets/projects/{project}/environments/{env}/secrets/{name}/purge    a person's call (a secret's history gone for good)
+POST /v1/secrets/projects/{project}/environments/{env}/values/delta             a runtime client's read: a watcher's delta since the values it holds (secrets_get_values reads them)
+GET /v1/secrets/projects/{project}/events                                      an MCP Events feed (secrets.event), mapped by roll MCP's feed table
 POST /v1/secrets/projects/{project}/gateways                                   an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/gateways/{id}                            an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/github-apps                                an outside integration's setup: an admin's, with its credentials
@@ -202,9 +205,12 @@ POST /v1/tasks/keys/rotate                                                     a
 POST /v1/tasks/publish/{*destination}                                          the data plane (clients' own protocol)
 DELETE /v1/tasks/topics/{name}/endpoints                                       covered by tasks_set_topic (a topic's endpoints, whole)
 POST /v1/tasks/topics/{name}/endpoints                                         covered by tasks_set_topic (a topic's endpoints, whole)
+GET /v1/workspace/projects/{id}/events                                         an MCP Events feed (workspace.event), mapped by roll MCP's feed table
 PUT /v1/workspace/projects/{id}/homes/{product}/{ref}                          an admin's: where a product's resource lives for the project (#501)
 GET /v1/workspace/projects/{id}/invites                                        a person's call: invites are a signed-in person's (#501)
 DELETE /v1/workspace/projects/{id}/invites/{invite}                            a person's call: invites are a signed-in person's (#501)
 DELETE /v1/workspace/projects/{id}/members/me                                  a person's call: leaving a project is the person's own (#501)
 GET /v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}/files            raw bytes, not JSON: apps_sandbox_exec reads and writes files (cat, a heredoc)
+GET /v1/apps/services/{id}/environments/{env}/checks/{check}/screenshot        a PNG, not JSON: the check's state says its error and when its failure was kept
+GET /v1/apps/services/{id}/environments/{env}/checks/{check}/trace             a Playwright trace archive, not JSON: for `npx playwright show-trace`
 PUT /v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}/files            raw bytes, not JSON: apps_sandbox_exec reads and writes files (cat, a heredoc)

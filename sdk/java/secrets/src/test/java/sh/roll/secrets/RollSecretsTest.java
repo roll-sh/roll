@@ -198,8 +198,8 @@ class RollSecretsTest {
     }
 
     /**
-     * Values are kept for cacheTtl, revalidated with their digest (a 304 keeps them), and never
-     * kept when they hold dynamic credentials.
+     * Values are kept for cacheTtl, revalidated with their digest (a 304 keeps them; here a rolld
+     * without delta reads), and never kept when they hold dynamic credentials.
      */
     @Test
     void valuesAreCachedAndRevalidatedWithTheirDigest() throws Exception {
@@ -207,6 +207,10 @@ class RollSecretsTest {
         List<String> dynamic = new ArrayList<>();
         List<String> asked = new ArrayList<>();
         try (FakeRolld rolld = new FakeRolld(r -> {
+            if (r.path.endsWith("/values/delta")) {
+                r.answer(404, Map.of("error", "no route"));
+                return;
+            }
             String tag = r.header("If-None-Match");
             synchronized (asked) {
                 asked.add(String.valueOf(tag));
@@ -242,6 +246,76 @@ class RollSecretsTest {
             assertEquals("2", c.values("production").get("A"));
             assertEquals("2", c.values("production").get("A"));
             assertEquals(4, asked.size(), "a change, then dynamic credentials read every time");
+        }
+    }
+
+    /**
+     * After a one-key change a watch reads only what changed ({@code …/values/delta}: each key's
+     * stamp is its version, the basis fixed) and hands on the whole folder; an older rolld (a 404
+     * on the route) is read in full.
+     */
+    @Test
+    void aWatchReadsAChangeThroughTheDeltaAndAnOlderRolldInFull() throws Exception {
+        Map<String, String> values = new java.util.TreeMap<>(Map.of("A", "1", "B", "2"));
+        Map<String, Integer> versions = new java.util.TreeMap<>(Map.of("A", 1, "B", 1));
+        boolean[] route = {true};
+        List<List<String>> deltas = new ArrayList<>();
+        AtomicInteger full = new AtomicInteger();
+        try (FakeRolld rolld = new FakeRolld(r -> {
+            synchronized (values) {
+                StringBuilder digest = new StringBuilder("d");
+                versions.forEach((k, v) -> digest.append(k).append(v));
+                if (r.path.equals(ENV + "/digest")) {
+                    r.answer(200, Map.of("digest", digest.toString()));
+                } else if (r.path.equals(ENV + "/values")) {
+                    full.incrementAndGet();
+                    r.answer(200, FakeRolld.values(new java.util.LinkedHashMap<>(values), List.of()));
+                } else if (r.path.equals(ENV + "/values/delta") && route[0]) {
+                    Map<String, Object> claim = r.json();
+                    boolean delta = "b1".equals(claim.get("basis"));
+                    Map<String, Object> held = Json.obj(claim, "stamps") == null ? Map.of() : Json.obj(claim, "stamps");
+                    Map<String, Object> changed = new java.util.LinkedHashMap<>();
+                    Map<String, Object> stamps = new java.util.LinkedHashMap<>();
+                    values.forEach((k, v) -> {
+                        String stamp = String.valueOf(versions.get(k));
+                        if (!delta || !stamp.equals(held.get(k))) {
+                            changed.put(k, v);
+                            stamps.put(k, stamp);
+                        }
+                    });
+                    deltas.add(new ArrayList<>(changed.keySet()));
+                    Map<String, Object> a = FakeRolld.values(changed, List.of());
+                    a.put("delta", delta);
+                    a.put("digest", digest.toString());
+                    a.put("basis", "b1");
+                    a.put("removed", List.of());
+                    a.put("stamps", stamps);
+                    r.answer(200, a);
+                } else {
+                    r.answer(404, Map.of("error", "not found"));
+                }
+            }
+        })) {
+            RollSecrets c = RollSecrets.builder(k -> null).api(rolld.url()).token("rlt_fake").project("prj_a").build();
+            BlockingQueue<Map<String, String>> seen = new LinkedBlockingQueue<>();
+            try (Watch w = c.watch("production", WatchOptions.of(v -> seen.add(v.values())).every(Duration.ofMillis(20)))) {
+                assertEquals(Map.of("A", "1", "B", "2"), seen.poll(5, TimeUnit.SECONDS));
+                synchronized (values) {
+                    values.put("B", "3");
+                    versions.put("B", 2);
+                }
+                assertEquals(Map.of("A", "1", "B", "3"), seen.poll(5, TimeUnit.SECONDS));
+                synchronized (values) {
+                    assertEquals(List.of(List.of("A", "B"), List.of("B")), deltas, "only B came back, merged into what the watch held");
+                    assertEquals(0, full.get());
+                    route[0] = false;
+                    values.put("A", "9");
+                    versions.put("A", 2);
+                }
+                assertEquals(Map.of("A", "9", "B", "3"), seen.poll(5, TimeUnit.SECONDS));
+                assertEquals(1, full.get(), "a 404 reads in full");
+                assertTrue(w.running());
+            }
         }
     }
 

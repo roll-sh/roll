@@ -96,8 +96,16 @@ pub struct Fake {
     pub commands_made: Mutex<Vec<(String, f64, u32)>>,
     /// Each command run in a container without a terminal (`exec_output`): the container, the command.
     pub commands_run: Mutex<Vec<(String, String)>>,
+    /// Where a browser check's page is loaded (the apps listener's router; `crate::browser`): its
+    /// runner, faked, GETs the check's URL there with the run's token, then fails if the script
+    /// says `throw`, saying the rest of that line.
+    pub check_pages: Mutex<Option<axum::Router>>,
     /// Each closed network's interception: whether its egress proxies have one.
     pub intercepted: Mutex<std::collections::HashMap<String, bool>>,
+    /// Each `dial` to another port of an instance: the instance and the port.
+    pub dialed: Mutex<Vec<(String, u16)>>,
+    /// Images whose cosign signature verifies, by name (without the digest), and with which key.
+    pub signatures: Mutex<std::collections::HashMap<String, usize>>,
     /// Private networks' peers as they run now, by name.
     pub peers: Mutex<std::collections::HashMap<String, super::PeerSpec>>,
     /// Each closed network's interception as its proxies have it now (which CA they serve).
@@ -434,6 +442,29 @@ impl Runtime for Fake {
         Ok(self.pinned(image))
     }
 
+    /// Another port of a running instance: an echo (what's written comes back), recorded.
+    async fn dial(&self, name: &str, port: u16) -> anyhow::Result<Box<dyn super::ShellStream>> {
+        anyhow::ensure!(self.instances.lock().get(name).is_some_and(|i| i.state == FakeState::Running), "{name} isn't running");
+        self.dialed.lock().push((name.to_string(), port));
+        let (ours, theirs) = tokio::io::duplex(64 << 10);
+        tokio::spawn(async move {
+            let (mut r, mut w) = tokio::io::split(theirs);
+            let _ = tokio::io::copy(&mut r, &mut w).await;
+        });
+        Ok(Box::new(ours))
+    }
+
+    /// A digest of its name: the same image, the same digest.
+    async fn image_id(&self, image: &str) -> Option<String> {
+        use sha2::{Digest, Sha256};
+        Some(format!("sha256:{}", hex::encode(Sha256::digest(image.as_bytes()))))
+    }
+
+    async fn verify_signature(&self, pinned: &str, keys: &[String], _login: Option<&super::RegistryLogin>) -> anyhow::Result<usize> {
+        let name = pinned.split_once('@').map_or(pinned, |(n, _)| n);
+        self.signatures.lock().get(name).copied().filter(|i| *i < keys.len()).ok_or_else(|| anyhow::anyhow!("{name} has no cosign signature by those keys"))
+    }
+
     async fn create(&self, spec: &InstanceSpec) -> anyhow::Result<()> {
         self.counts.creates.fetch_add(1, Ordering::SeqCst);
         if let Some(c) = &spec.command {
@@ -461,6 +492,45 @@ impl Runtime for Fake {
         for sc in &spec.sidecars {
             let names: Vec<&str> = sc.vars.iter().map(|(k, _)| k.as_str()).collect();
             log.renamed(&super::sidecar_name(name, &sc.name)).line(format!("sidecar {} running {} with {}", sc.name, sc.image, names.join(",")));
+        }
+        // A browser check's runner ([`Fake::check_pages`]).
+        if let Some(url) = var(&spec, "ROLL_CHECK_URL").and_then(|u| url::Url::parse(u).ok()) {
+            let router = self.check_pages.lock().clone();
+            let (token, script) = (var(&spec, "ROLL_CHECK_TOKEN").unwrap_or("").to_string(), var(&spec, "ROLL_CHECK_SCRIPT").unwrap_or("").to_string());
+            use base64::Engine;
+            let script = String::from_utf8(base64::engine::general_purpose::STANDARD.decode(script).unwrap_or_default()).unwrap_or_default();
+            let status = match router {
+                Some(r) => {
+                    use tower::ServiceExt;
+                    let req = Request::builder().uri(url.path()).header("host", url.host_str().unwrap_or("")).header("x-roll-check", token).body(axum::body::Body::empty())?;
+                    r.oneshot(req).await.map(|r| r.status().as_u16()).ok()
+                }
+                None => None,
+            };
+            let line = match (status, script.lines().find_map(|l| l.trim().strip_prefix("throw "))) {
+                (Some(s), _) if !(200..400).contains(&s) => format!(r#"ROLL-CHECK {{"ok":false,"status":{s},"error":"answered {s}"}}"#),
+                (Some(s), Some(why)) => {
+                    // A failure leaves its screenshot and trace, as the runner does.
+                    let mut b = tar::Builder::new(Vec::new());
+                    for (file, body) in [("roll-check/screenshot.png", &b"\x89PNG fake"[..]), ("roll-check/trace.zip", &b"PK fake"[..])] {
+                        let mut h = tar::Header::new_gnu();
+                        h.set_size(body.len() as u64);
+                        h.set_mode(0o644);
+                        h.set_cksum();
+                        b.append_data(&mut h, file, body)?;
+                    }
+                    self.copied.lock().insert((name.to_string(), "/tmp/roll-check".to_string()), b.into_inner()?);
+                    format!("ROLL-CHECK {}", serde_json::json!({ "ok": false, "status": s, "error": why }))
+                }
+                (Some(s), None) => format!(r#"ROLL-CHECK {{"ok":true,"status":{s}}}"#),
+                (None, _) => "chromium: no page".to_string(),
+            };
+            log.line(line);
+            let mut m = self.instances.lock();
+            let i = m.get_mut(name).expect("exists");
+            i.state = FakeState::Stopped;
+            i.exited.send_replace(Some(0));
+            return Ok(None);
         }
         // A job: `FAKE_EXIT`, or a command `exit <code>` (a pre-deploy command, a cron run);
         // `exit <code> until try <n>` exits 0 from its `ROLL_TASK_ATTEMPT` n on (a flaky task).
@@ -684,7 +754,8 @@ impl Runtime for Fake {
     }
 
     async fn copy_from(&self, name: &str, path: &str) -> anyhow::Result<super::VolumeStream> {
-        anyhow::ensure!(self.state(name) == Some(FakeState::Running), "{name} isn't running");
+        // A stopped one's own files (a browser check's kept failure) can be read too, as Docker's.
+        anyhow::ensure!(self.state(name) == Some(FakeState::Running) || self.copied.lock().contains_key(&(name.to_string(), path.to_string())), "{name} isn't running");
         let copied = self.copied.lock();
         // A path copied in itself, or a file in a tar copied into its directory (as `docker cp`
         // reads it back out).

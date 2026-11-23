@@ -203,7 +203,22 @@ impl CodeSource {
                     cls: v.now.cls,
                 }),
                 visual_change: p.visual_change.as_ref().map(|v| code_control::model::PreviewVisualChange { since: v.since.clone(), percent: v.percent, phone_percent: v.phone_percent }),
-                earlier: p.earlier.iter().map(|x| code_control::model::PreviewEarlier { service: x.service.clone(), head: x.revision.clone(), url: x.url.clone() }).collect(),
+                browser_checks_rule: p.browser_checks_rule.clone(),
+                browser_checks: p
+                    .browser_checks
+                    .iter()
+                    .map(|c| code_control::model::PreviewBrowserCheck {
+                        service: c.service.clone(),
+                        name: c.name.clone(),
+                        state: match c.state {
+                            crate::CheckState::Pending => "pending",
+                            crate::CheckState::Passed => "passed",
+                            crate::CheckState::Failed => "failed",
+                        }
+                        .into(),
+                    })
+                    .collect(),
+                earlier: p.earlier.iter().map(|x| code_control::model::PreviewEarlier { service: x.service.clone(), head: x.revision.clone(), url: x.url.clone(), own_data: !x.own_data.is_empty() }).collect(),
                 // Only a public preview's: the comment is readable by whoever reads the pull request.
                 screenshot_url: (s.access == crate::settings::Access::Public)
                     .then(|| p.screenshot_link.clone())
@@ -248,6 +263,7 @@ pub fn service_of(repo: &str, p: &PreviewSpec) -> ServiceSpec {
         cpus: p.cpus,
         env: p.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
         health: p.health.clone(),
+        skew_protection: p.skew_protection,
         states: p.states.clone(),
         pages: p.pages.clone(),
         hide: p.hide.clone(),

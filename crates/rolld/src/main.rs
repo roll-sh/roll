@@ -7,8 +7,10 @@ use std::path::PathBuf;
 use tracing::info;
 
 /// mimalloc hands freed memory back to the OS; the system allocator on macOS keeps it.
+/// `Counting` keeps each Painless execution's memory account (an add per call on a
+/// thread-local counter).
 #[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+static GLOBAL: search_painless::Counting<mimalloc::MiMalloc> = search_painless::Counting(mimalloc::MiMalloc);
 
 /// `mi_option_purge_delay` (libmimalloc-sys doesn't export the constant).
 const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
@@ -656,6 +658,14 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     }
     // Someone disabled, no longer an admin or deleted: roll secrets' hook below, from the outbox.
     let offboarding = accounts.clone();
+    // A person who can't sign in any more is `member.deactivated` in each project's events feed.
+    {
+        let ws = workspace.clone();
+        offboarding.on_offboarded(Box::new(move |user| ws.person_deactivated(user).map(|_| ()).map_err(|e| e.to_string())));
+    }
+    // SCIM's groups are the workspace's (docs/members-v1-1.md): a person's grant reads their
+    // group roles in the same query as their memberships.
+    accounts.set_directory(std::sync::Arc::new(workspace::Directory(workspace.clone())));
     let people = secrets::People { accounts, code: code.as_ref().map(|c| c.code.clone()), search: search.as_ref().map(|s| s.control.clone()) };
     workspace.set_owners(std::sync::Arc::new(people.clone()));
     // Members' handles and addresses, and invite links to the dashboard (docs/members.md).
@@ -767,6 +777,8 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     // roll code's agents relay acts on a caller's behalf through the gate too.
     if let Some(c) = &code {
         c.code.relay_through(gated.clone());
+        // Searches across repos keep a scoped grant's repos before cutting a page.
+        c.code.set_grant_reach(std::sync::Arc::new(access::CodeReach(access.clone())));
     }
     // MCP Events' webhooks: each due subscription's feed read through the gate as its grant.
     roll_mcp::events::spawn_deliveries(gated.clone(), access.clone(), mcp_config.products.clone());
@@ -793,8 +805,10 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     if let Some((rt, _)) = &preview_hosts {
         router = router.layer(axum::middleware::from_fn_with_state(rt.clone(), roll_previews::runtime::route));
     }
-    // In a cluster, requests from other nodes are verified first.
+    // In a cluster, requests from other nodes are verified first; a verified hop of roll's own work
+    // for a grant (an MCP Events delivery sent on to a repo's owner) is that work here too.
     if cluster.backend_name() != "memory" {
+        router = router.layer(axum::middleware::from_fn(auth::act_as_from_hop));
         router = router.layer(axum::middleware::from_fn_with_state(cluster.clone(), roll_cluster::accept_forwarded));
     }
     // roll cloud's public listeners (ROLL_EDGE); the internal API gains /healthz.

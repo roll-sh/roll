@@ -1,0 +1,638 @@
+[
+ {
+  "method": "PUT",
+  "path": "/_inference/completion/fx-c-ok",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-c-ok\",\"task_type\":\"completion\",\"service\":\"openai\",\"service_settings\":{\"model_id\":\"m\",\"url\":\"$M/ok/v1/chat/completions\",\"rate_limit\":{\"requests_per_minute\":500}}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/ok/v1/chat/completions",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer sk-stream"
+     ],
+     [
+      "Content-Length",
+      "83"
+     ],
+     [
+      "Host",
+      "roll-rag1-mock:8080"
+     ],
+     [
+      "Connection",
+      "Keep-Alive"
+     ],
+     [
+      "User-Agent",
+      "Apache-HttpAsyncClient/4.1.5 (Java/27)"
+     ]
+    ],
+    "body": "{\"messages\":[{\"content\":\"how big\",\"role\":\"user\"}],\"model\":\"m\",\"n\":1,\"stream\":false}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"id\": \"c1\", \"object\": \"chat.completion\", \"model\": \"m\", \"choices\": [{\"index\": 0, \"message\": {\"role\": \"assistant\", \"content\": \"ok\"}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 1, \"completion_tokens\": 1, \"total_tokens\": 2}}"
+    }
+   }
+  ],
+  "body": "{\"service\":\"openai\",\"service_settings\":{\"api_key\":\"sk-stream\",\"model_id\":\"m\",\"url\":\"$M/ok/v1/chat/completions\"}}"
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/completion/fx-c-ok/_stream",
+  "status": 200,
+  "answer": "﻿event: message\ndata: {\"completion\":[{\"delta\":\"Hel\"}]}\n\n﻿event: message\ndata: {\"completion\":[{\"delta\":\"lo\"}]}\n\n﻿event: message\ndata: [DONE]\n\n",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/ok/v1/chat/completions",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer sk-stream"
+     ],
+     [
+      "Content-Length",
+      "117"
+     ],
+     [
+      "Host",
+      "roll-rag1-mock:8080"
+     ],
+     [
+      "Connection",
+      "Keep-Alive"
+     ],
+     [
+      "User-Agent",
+      "Apache-HttpAsyncClient/4.1.5 (Java/27)"
+     ]
+    ],
+    "body": "{\"messages\":[{\"content\":\"hi\",\"role\":\"user\"}],\"model\":\"m\",\"n\":1,\"stream\":true,\"stream_options\":{\"include_usage\":true}}",
+    "response": {
+     "status": 200,
+     "ctype": "text/event-stream",
+     "headers": [],
+     "pieces": [
+      "data: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"m\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"\"}, \"finish_reason\": null}]}\n\n",
+      "data: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"m\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Hel\"}, \"finish_reason\": null}]}\n\n",
+      "data: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"m\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"lo\"}, \"finish_reason\": null}]}\n\n",
+      "data: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"m\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}]}\n\ndata: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"m\", \"choices\": [], \"usage\": {\"prompt_tokens\": 3, \"completion_tokens\": 2, \"total_tokens\": 5}}\n\ndata: [DONE]\n\n"
+     ]
+    }
+   }
+  ],
+  "body": "{\"input\":\"hi\"}"
+ },
+ {
+  "method": "DELETE",
+  "path": "/_inference/completion/fx-c-ok",
+  "status": 200,
+  "answer": "{\"acknowledged\":true,\"pipelines\":[],\"indexes\":[]}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/completion/fx-c-err",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-c-err\",\"task_type\":\"completion\",\"service\":\"openai\",\"service_settings\":{\"model_id\":\"m\",\"url\":\"$M/err/v1/chat/completions\",\"rate_limit\":{\"requests_per_minute\":500}}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/err/v1/chat/completions",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer sk-stream"
+     ],
+     [
+      "Content-Length",
+      "83"
+     ],
+     [
+      "Host",
+      "roll-rag1-mock:8080"
+     ],
+     [
+      "Connection",
+      "Keep-Alive"
+     ],
+     [
+      "User-Agent",
+      "Apache-HttpAsyncClient/4.1.5 (Java/27)"
+     ]
+    ],
+    "body": "{\"messages\":[{\"content\":\"how big\",\"role\":\"user\"}],\"model\":\"m\",\"n\":1,\"stream\":false}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"id\": \"c1\", \"object\": \"chat.completion\", \"model\": \"m\", \"choices\": [{\"index\": 0, \"message\": {\"role\": \"assistant\", \"content\": \"ok\"}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 1, \"completion_tokens\": 1, \"total_tokens\": 2}}"
+    }
+   }
+  ],
+  "body": "{\"service\":\"openai\",\"service_settings\":{\"api_key\":\"sk-stream\",\"model_id\":\"m\",\"url\":\"$M/err/v1/chat/completions\"}}"
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/completion/fx-c-err/_stream",
+  "status": 200,
+  "answer": "﻿event: message\ndata: {\"completion\":[{\"delta\":\"Hel\"}]}\n\n﻿event: error\ndata: {\"error\":{\"root_cause\":[{\"type\":\"illegal_state_exception\",\"reason\":\"Failed to find required field [choices] in OpenAI chat completions response\"}],\"type\":\"illegal_state_exception\",\"reason\":\"Failed to find required field [choices] in OpenAI chat completions response\"},\"status\":500}\n\n",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/err/v1/chat/completions",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer sk-stream"
+     ],
+     [
+      "Content-Length",
+      "117"
+     ],
+     [
+      "Host",
+      "roll-rag1-mock:8080"
+     ],
+     [
+      "Connection",
+      "Keep-Alive"
+     ],
+     [
+      "User-Agent",
+      "Apache-HttpAsyncClient/4.1.5 (Java/27)"
+     ]
+    ],
+    "body": "{\"messages\":[{\"content\":\"hi\",\"role\":\"user\"}],\"model\":\"m\",\"n\":1,\"stream\":true,\"stream_options\":{\"include_usage\":true}}",
+    "response": {
+     "status": 200,
+     "ctype": "text/event-stream",
+     "headers": [],
+     "pieces": [
+      "data: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"m\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"\"}, \"finish_reason\": null}]}\n\n",
+      "data: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"m\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Hel\"}, \"finish_reason\": null}]}\n\n",
+      "data: {\"error\": {\"message\": \"boom upstream\", \"type\": \"server_error\", \"code\": null}}\n\n",
+      "data: [DONE]\n\n"
+     ]
+    }
+   }
+  ],
+  "body": "{\"input\":\"hi\"}"
+ },
+ {
+  "method": "DELETE",
+  "path": "/_inference/completion/fx-c-err",
+  "status": 200,
+  "answer": "{\"acknowledged\":true,\"pipelines\":[],\"indexes\":[]}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/completion/fx-c-cut",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-c-cut\",\"task_type\":\"completion\",\"service\":\"openai\",\"service_settings\":{\"model_id\":\"m\",\"url\":\"$M/cut/v1/chat/completions\",\"rate_limit\":{\"requests_per_minute\":500}}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/cut/v1/chat/completions",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer sk-stream"
+     ],
+     [
+      "Content-Length",
+      "83"
+     ],
+     [
+      "Host",
+      "roll-rag1-mock:8080"
+     ],
+     [
+      "Connection",
+      "Keep-Alive"
+     ],
+     [
+      "User-Agent",
+      "Apache-HttpAsyncClient/4.1.5 (Java/27)"
+     ]
+    ],
+    "body": "{\"messages\":[{\"content\":\"how big\",\"role\":\"user\"}],\"model\":\"m\",\"n\":1,\"stream\":false}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"id\": \"c1\", \"object\": \"chat.completion\", \"model\": \"m\", \"choices\": [{\"index\": 0, \"message\": {\"role\": \"assistant\", \"content\": \"ok\"}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 1, \"completion_tokens\": 1, \"total_tokens\": 2}}"
+    }
+   }
+  ],
+  "body": "{\"service\":\"openai\",\"service_settings\":{\"api_key\":\"sk-stream\",\"model_id\":\"m\",\"url\":\"$M/cut/v1/chat/completions\"}}"
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/completion/fx-c-cut/_stream",
+  "status": 200,
+  "answer": "﻿event: message\ndata: {\"completion\":[{\"delta\":\"Hel\"}]}\n\n﻿event: error\ndata: {\"error\":{\"root_cause\":[{\"type\":\"connection_closed_exception\",\"reason\":\"Premature end of chunk coded message body: closing chunk expected\"}],\"type\":\"connection_closed_exception\",\"reason\":\"Premature end of chunk coded message body: closing chunk expected\"},\"status\":500}\n\n",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/cut/v1/chat/completions",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer sk-stream"
+     ],
+     [
+      "Content-Length",
+      "117"
+     ],
+     [
+      "Host",
+      "roll-rag1-mock:8080"
+     ],
+     [
+      "Connection",
+      "Keep-Alive"
+     ],
+     [
+      "User-Agent",
+      "Apache-HttpAsyncClient/4.1.5 (Java/27)"
+     ]
+    ],
+    "body": "{\"messages\":[{\"content\":\"hi\",\"role\":\"user\"}],\"model\":\"m\",\"n\":1,\"stream\":true,\"stream_options\":{\"include_usage\":true}}",
+    "response": {
+     "status": 200,
+     "ctype": "text/event-stream",
+     "headers": [],
+     "pieces": [
+      "data: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"m\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"\"}, \"finish_reason\": null}]}\n\n",
+      "data: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"m\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Hel\"}, \"finish_reason\": null}]}\n\n"
+     ],
+     "cut": true
+    }
+   }
+  ],
+  "body": "{\"input\":\"hi\"}"
+ },
+ {
+  "method": "DELETE",
+  "path": "/_inference/completion/fx-c-cut",
+  "status": 200,
+  "answer": "{\"acknowledged\":true,\"pipelines\":[],\"indexes\":[]}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/chat_completion/fx-cc-ok",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-cc-ok\",\"task_type\":\"chat_completion\",\"service\":\"openai\",\"service_settings\":{\"model_id\":\"m\",\"url\":\"$M/ok/v1/chat/completions\",\"rate_limit\":{\"requests_per_minute\":500}}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/ok/v1/chat/completions",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer sk-stream"
+     ],
+     [
+      "Content-Length",
+      "122"
+     ],
+     [
+      "Host",
+      "roll-rag1-mock:8080"
+     ],
+     [
+      "Connection",
+      "Keep-Alive"
+     ],
+     [
+      "User-Agent",
+      "Apache-HttpAsyncClient/4.1.5 (Java/27)"
+     ]
+    ],
+    "body": "{\"messages\":[{\"content\":\"how big\",\"role\":\"user\"}],\"model\":\"m\",\"n\":1,\"stream\":true,\"stream_options\":{\"include_usage\":true}}",
+    "response": {
+     "status": 200,
+     "ctype": "text/event-stream",
+     "headers": [],
+     "pieces": [
+      "data: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"m\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"\"}, \"finish_reason\": null}]}\n\n",
+      "data: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"m\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Hel\"}, \"finish_reason\": null}]}\n\n",
+      "data: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"m\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"lo\"}, \"finish_reason\": null}]}\n\n",
+      "data: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"m\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}]}\n\ndata: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"m\", \"choices\": [], \"usage\": {\"prompt_tokens\": 3, \"completion_tokens\": 2, \"total_tokens\": 5}}\n\ndata: [DONE]\n\n"
+     ]
+    }
+   }
+  ],
+  "body": "{\"service\":\"openai\",\"service_settings\":{\"api_key\":\"sk-stream\",\"model_id\":\"m\",\"url\":\"$M/ok/v1/chat/completions\"}}"
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/chat_completion/fx-cc-ok/_stream",
+  "status": 200,
+  "answer": "﻿event: message\ndata: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"\",\"role\":\"assistant\"},\"index\":0}],\"model\":\"m\",\"object\":\"chat.completion.chunk\"}\n\n﻿event: message\ndata: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"Hel\"},\"index\":0}],\"model\":\"m\",\"object\":\"chat.completion.chunk\"}\n\n﻿event: message\ndata: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"lo\"},\"index\":0}],\"model\":\"m\",\"object\":\"chat.completion.chunk\"}\n\n﻿event: message\ndata: {\"id\":\"c1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"index\":0}],\"model\":\"m\",\"object\":\"chat.completion.chunk\"}\n\n﻿event: message\ndata: {\"id\":\"c1\",\"choices\":[],\"model\":\"m\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":2,\"prompt_tokens\":3,\"total_tokens\":5}}\n\n﻿event: message\ndata: [DONE]\n\n",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/ok/v1/chat/completions",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer sk-stream"
+     ],
+     [
+      "Content-Length",
+      "117"
+     ],
+     [
+      "Host",
+      "roll-rag1-mock:8080"
+     ],
+     [
+      "Connection",
+      "Keep-Alive"
+     ],
+     [
+      "User-Agent",
+      "Apache-HttpAsyncClient/4.1.5 (Java/27)"
+     ]
+    ],
+    "body": "{\"messages\":[{\"content\":\"hi\",\"role\":\"user\"}],\"model\":\"m\",\"n\":1,\"stream\":true,\"stream_options\":{\"include_usage\":true}}",
+    "response": {
+     "status": 200,
+     "ctype": "text/event-stream",
+     "headers": [],
+     "pieces": [
+      "data: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"m\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"\"}, \"finish_reason\": null}]}\n\n",
+      "data: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"m\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Hel\"}, \"finish_reason\": null}]}\n\n",
+      "data: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"m\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"lo\"}, \"finish_reason\": null}]}\n\n",
+      "data: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"m\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}]}\n\ndata: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"m\", \"choices\": [], \"usage\": {\"prompt_tokens\": 3, \"completion_tokens\": 2, \"total_tokens\": 5}}\n\ndata: [DONE]\n\n"
+     ]
+    }
+   }
+  ],
+  "body": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"
+ },
+ {
+  "method": "DELETE",
+  "path": "/_inference/chat_completion/fx-cc-ok",
+  "status": 200,
+  "answer": "{\"acknowledged\":true,\"pipelines\":[],\"indexes\":[]}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/chat_completion/fx-cc-err",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-cc-err\",\"task_type\":\"chat_completion\",\"service\":\"openai\",\"service_settings\":{\"model_id\":\"m\",\"url\":\"$M/err/v1/chat/completions\",\"rate_limit\":{\"requests_per_minute\":500}}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/err/v1/chat/completions",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer sk-stream"
+     ],
+     [
+      "Content-Length",
+      "122"
+     ],
+     [
+      "Host",
+      "roll-rag1-mock:8080"
+     ],
+     [
+      "Connection",
+      "Keep-Alive"
+     ],
+     [
+      "User-Agent",
+      "Apache-HttpAsyncClient/4.1.5 (Java/27)"
+     ]
+    ],
+    "body": "{\"messages\":[{\"content\":\"how big\",\"role\":\"user\"}],\"model\":\"m\",\"n\":1,\"stream\":true,\"stream_options\":{\"include_usage\":true}}",
+    "response": {
+     "status": 200,
+     "ctype": "text/event-stream",
+     "headers": [],
+     "pieces": [
+      "data: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"m\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"\"}, \"finish_reason\": null}]}\n\n",
+      "data: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"m\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Hel\"}, \"finish_reason\": null}]}\n\n",
+      "data: {\"error\": {\"message\": \"boom upstream\", \"type\": \"server_error\", \"code\": null}}\n\n",
+      "data: [DONE]\n\n"
+     ]
+    }
+   }
+  ],
+  "body": "{\"service\":\"openai\",\"service_settings\":{\"api_key\":\"sk-stream\",\"model_id\":\"m\",\"url\":\"$M/err/v1/chat/completions\"}}"
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/chat_completion/fx-cc-err/_stream",
+  "status": 200,
+  "answer": "﻿event: message\ndata: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"\",\"role\":\"assistant\"},\"index\":0}],\"model\":\"m\",\"object\":\"chat.completion.chunk\"}\n\n﻿event: message\ndata: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"Hel\"},\"index\":0}],\"model\":\"m\",\"object\":\"chat.completion.chunk\"}\n\n﻿event: error\ndata: {\"error\":{\"message\":\"Received an error response for request from inference entity id [fx-cc-err]. Error message: [boom upstream]\",\"type\":\"server_error\"}}\n\n",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/err/v1/chat/completions",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer sk-stream"
+     ],
+     [
+      "Content-Length",
+      "117"
+     ],
+     [
+      "Host",
+      "roll-rag1-mock:8080"
+     ],
+     [
+      "Connection",
+      "Keep-Alive"
+     ],
+     [
+      "User-Agent",
+      "Apache-HttpAsyncClient/4.1.5 (Java/27)"
+     ]
+    ],
+    "body": "{\"messages\":[{\"content\":\"hi\",\"role\":\"user\"}],\"model\":\"m\",\"n\":1,\"stream\":true,\"stream_options\":{\"include_usage\":true}}",
+    "response": {
+     "status": 200,
+     "ctype": "text/event-stream",
+     "headers": [],
+     "pieces": [
+      "data: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"m\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"\"}, \"finish_reason\": null}]}\n\n",
+      "data: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"m\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Hel\"}, \"finish_reason\": null}]}\n\n",
+      "data: {\"error\": {\"message\": \"boom upstream\", \"type\": \"server_error\", \"code\": null}}\n\n",
+      "data: [DONE]\n\n"
+     ]
+    }
+   }
+  ],
+  "body": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"
+ },
+ {
+  "method": "DELETE",
+  "path": "/_inference/chat_completion/fx-cc-err",
+  "status": 200,
+  "answer": "{\"acknowledged\":true,\"pipelines\":[],\"indexes\":[]}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/chat_completion/fx-cc-cut",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-cc-cut\",\"task_type\":\"chat_completion\",\"service\":\"openai\",\"service_settings\":{\"model_id\":\"m\",\"url\":\"$M/cut/v1/chat/completions\",\"rate_limit\":{\"requests_per_minute\":500}}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/cut/v1/chat/completions",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer sk-stream"
+     ],
+     [
+      "Content-Length",
+      "122"
+     ],
+     [
+      "Host",
+      "roll-rag1-mock:8080"
+     ],
+     [
+      "Connection",
+      "Keep-Alive"
+     ],
+     [
+      "User-Agent",
+      "Apache-HttpAsyncClient/4.1.5 (Java/27)"
+     ]
+    ],
+    "body": "{\"messages\":[{\"content\":\"how big\",\"role\":\"user\"}],\"model\":\"m\",\"n\":1,\"stream\":true,\"stream_options\":{\"include_usage\":true}}",
+    "response": {
+     "status": 200,
+     "ctype": "text/event-stream",
+     "headers": [],
+     "pieces": [
+      "data: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"m\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"\"}, \"finish_reason\": null}]}\n\n",
+      "data: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"m\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Hel\"}, \"finish_reason\": null}]}\n\n"
+     ],
+     "cut": true
+    }
+   }
+  ],
+  "body": "{\"service\":\"openai\",\"service_settings\":{\"api_key\":\"sk-stream\",\"model_id\":\"m\",\"url\":\"$M/cut/v1/chat/completions\"}}"
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/chat_completion/fx-cc-cut/_stream",
+  "status": 200,
+  "answer": "﻿event: message\ndata: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"\",\"role\":\"assistant\"},\"index\":0}],\"model\":\"m\",\"object\":\"chat.completion.chunk\"}\n\n﻿event: message\ndata: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"Hel\"},\"index\":0}],\"model\":\"m\",\"object\":\"chat.completion.chunk\"}\n\n﻿event: error\ndata: {\"error\":{\"code\":\"internal_server_error\",\"message\":\"Premature end of chunk coded message body: closing chunk expected\",\"type\":\"connection_closed_exception\"}}\n\n",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/cut/v1/chat/completions",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer sk-stream"
+     ],
+     [
+      "Content-Length",
+      "117"
+     ],
+     [
+      "Host",
+      "roll-rag1-mock:8080"
+     ],
+     [
+      "Connection",
+      "Keep-Alive"
+     ],
+     [
+      "User-Agent",
+      "Apache-HttpAsyncClient/4.1.5 (Java/27)"
+     ]
+    ],
+    "body": "{\"messages\":[{\"content\":\"hi\",\"role\":\"user\"}],\"model\":\"m\",\"n\":1,\"stream\":true,\"stream_options\":{\"include_usage\":true}}",
+    "response": {
+     "status": 200,
+     "ctype": "text/event-stream",
+     "headers": [],
+     "pieces": [
+      "data: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"m\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"\"}, \"finish_reason\": null}]}\n\n",
+      "data: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"m\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Hel\"}, \"finish_reason\": null}]}\n\n"
+     ],
+     "cut": true
+    }
+   }
+  ],
+  "body": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"
+ },
+ {
+  "method": "DELETE",
+  "path": "/_inference/chat_completion/fx-cc-cut",
+  "status": 200,
+  "answer": "{\"acknowledged\":true,\"pipelines\":[],\"indexes\":[]}",
+  "upstream": []
+ }
+]

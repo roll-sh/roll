@@ -187,6 +187,17 @@ impl Code {
                 _ => {}
             }
         }
+        // The project's previews require production's browser checks to pass (`browser_checks =
+        // "required"`): failing, still running, or not yet run at its head, it waits.
+        if let Some(e) = c.preview.as_ref().and_then(|p| p.environment.as_ref()).filter(|e| e.browser_checks_rule.as_deref() == Some("required")) && !e.browser_checks.is_empty() {
+            let current = e.head.as_deref().is_none_or(|h| h == c.head);
+            let failed: Vec<String> = e.browser_checks.iter().filter(|x| x.state == "failed").map(|x| format!("{}: {}", x.service, x.name)).collect();
+            if !current || e.browser_checks.iter().any(|x| x.state == "pending") {
+                out.push(Blocker::new("browser", "production's browser checks haven't finished on its preview's head yet"));
+            } else if !failed.is_empty() {
+                out.push(Blocker::new("browser", format!("production's browser checks failed on its preview: {}", failed.join(", "))));
+            }
+        }
         // The project's previews keep regressions against main from landing (`regressions =
         // "required"`): routes slower or errors new, until someone other than the author accepts them.
         if let Some(e) = c.preview.as_ref().and_then(|p| p.environment.as_ref()).filter(|e| e.regressions.as_deref() == Some("required")) {

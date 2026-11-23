@@ -347,6 +347,10 @@ pub enum AppsCmd {
         /// 3) and ` sum` after it; repeat for more, `none` clears them.
         #[arg(long, value_name = "RULE")]
         alert_metric: Vec<String>,
+        /// `on`: alert when traffic drops or errors or p95 rise against the same hour over the
+        /// last four weeks; `off`.
+        #[arg(long, value_name = "on|off")]
+        alert_anomaly: Option<String>,
         #[arg(long)]
         schedule: Option<String>,
         /// The zone a cron schedule's fields are in (IANA: `Europe/Budapest`).
@@ -418,6 +422,10 @@ pub enum AppsCmd {
         /// `roll apps rollout advance|all|abort` decides.
         #[arg(long)]
         rollout_manual: Option<bool>,
+        /// The environment's browser checks run against a new deployment's own URL before it
+        /// takes any requests, and one that fails rolls it back (`true`), or not.
+        #[arg(long)]
+        rollout_checks: Option<bool>,
         /// `false`: the old instances stop before the new ones start, so two never run at once
         /// (a bot, a scheduler); `true` (the default): the new ones start beside them.
         #[arg(long, value_name = "BOOL")]
@@ -523,6 +531,15 @@ pub enum AppsCmd {
         target: Target,
         #[arg(long, short = 'y')]
         yes: bool,
+    },
+    /// Move a service to another project of the same owner (`--to`, its name or id): refused,
+    /// naming what ties it here (links, routes, roll:// references, a private network, sandboxes);
+    /// its live environments redeploy there.
+    Move {
+        #[command(flatten)]
+        target: Target,
+        #[arg(long, value_name = "PROJECT")]
+        to: String,
     },
     /// Restore a deleted service as it was (within 48 hours of its delete); `--list`: the
     /// deleted services, and when each goes for good.
@@ -668,9 +685,13 @@ pub enum AppsCmd {
     Proxy {
         #[command(flatten)]
         target: Target,
-        /// The port here (default: the service's own).
+        /// The port here (default: the service's own, or `--port`).
         #[arg(long)]
         local_port: Option<u16>,
+        /// Another port of the app than its own, reached inside its instance (a debugger's 9229,
+        /// JMX, pprof), as Fly's `fly proxy` and Heroku's `ps:forward`.
+        #[arg(long)]
+        port: Option<u16>,
     },
     /// A shell in a running instance (a web service asleep is woken and kept up while it's
     /// open); leave with `exit` or Ctrl-D.
@@ -713,6 +734,10 @@ pub enum AppsCmd {
         /// Tasks running at once (1–10; default ten, or fewer tasks).
         #[arg(long)]
         parallelism: Option<u32>,
+        /// With `-i`: a console in another kept deployment's image (one that won't come up, to see
+        /// why), as Fly's `fly console --image`.
+        #[arg(long, requires = "interactive")]
+        deployment: Option<String>,
         #[arg(trailing_var_arg = true, required_unless_present = "interactive", allow_hyphen_values = true)]
         command: Vec<String>,
     },
@@ -1252,6 +1277,21 @@ pub enum AppsCmd {
         #[arg(long)]
         hard: Option<f64>,
     },
+    /// The project's image signing rule (Binary Authorization): `--key cosign.pub` (repeated)
+    /// requires its image services' images to carry a cosign signature by one of them,
+    /// `--not-required` keeps the keys without enforcing, `--remove` drops the rule; alone, it
+    /// shows it. Admin.
+    Signing {
+        #[command(flatten)]
+        target: Target,
+        /// A public key file in PEM (cosign generate-key-pair's cosign.pub).
+        #[arg(long = "key", value_name = "FILE", conflicts_with = "remove")]
+        keys: Vec<PathBuf>,
+        #[arg(long, requires = "keys")]
+        not_required: bool,
+        #[arg(long)]
+        remove: bool,
+    },
     /// This month's use and what it costs.
     Usage {
         #[command(flatten)]
@@ -1381,6 +1421,13 @@ pub enum AppsCmd {
         /// No routes to other services.
         #[arg(long)]
         no_routes: bool,
+        /// Its own redirects, from a file of `_redirects` lines (`/old /new 308`, `/blog/* /posts/:splat`),
+        /// on any kind of service; the file replaces the environment's.
+        #[arg(long, value_name = "FILE", conflicts_with = "no_redirects")]
+        redirects: Option<std::path::PathBuf>,
+        /// No redirects of its own.
+        #[arg(long)]
+        no_redirects: bool,
         /// Its own page (an HTML file, at most 64 KiB) for the 502, 503 and 504 visitors get
         /// while the app can't answer or wake (Heroku's error page).
         #[arg(long, value_name = "HTML_FILE")]
@@ -1593,10 +1640,13 @@ fn secret_env_file(name: &str) -> bool {
 }
 
 /// `…/tunnel` for each connection to `127.0.0.1:local`: its bytes copied both ways.
-async fn proxy(api: &Api, env: &str, what: &str, port: u16, local: u16) -> anyhow::Result<()> {
+async fn proxy(api: &Api, env: &str, what: &str, port: u16, local: u16, other: bool) -> anyhow::Result<()> {
     let l = tokio::net::TcpListener::bind(("127.0.0.1", local)).await.map_err(|e| anyhow::anyhow!("127.0.0.1:{local} is taken ({e}): pick another with --local-port"))?;
     eprintln!("127.0.0.1:{local} → {what}:{port} (Ctrl-C ends it)");
-    let (url, headers) = tunnel_to(api, env);
+    let (mut url, headers) = tunnel_to(api, env);
+    if other {
+        url.push_str(&format!("?port={port}"));
+    }
     tokio::select! {
         r = tunnels(url, headers, l) => r,
         _ = tokio::signal::ctrl_c() => Ok(()),
@@ -3137,10 +3187,10 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, alert_cpu, alert_metric, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, build_timeout, build_size, submodules, submodule_repos, lfs, otel, rollout, rollout_step, rollout_errors, rollout_manual, overlap, h2c, health_grpc, scale, public, drain, cpu_target, busy_cpu, memory_target, latency_target, oidc_audience, push, restart, restart_tries, affinity, tcp, udp, rollback_on_crash, rebuild_on_base, block_on } => {
+        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, alert_cpu, alert_metric, alert_anomaly, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, build_timeout, build_size, submodules, submodule_repos, lfs, otel, rollout, rollout_step, rollout_errors, rollout_manual, rollout_checks, overlap, h2c, health_grpc, scale, public, drain, cpu_target, busy_cpu, memory_target, latency_target, oidc_audience, push, restart, restart_tries, affinity, tcp, udp, rollback_on_crash, rebuild_on_base, block_on } => {
             let svc = service(api, &target).await?;
             // The service's rollout with what was given replaced (the API takes it whole).
-            let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() || rollout_manual.is_some() || overlap.is_some() {
+            let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() || rollout_manual.is_some() || rollout_checks.is_some() || overlap.is_some() {
                 let mut r = svc["run"]["rollout"].as_object().cloned().unwrap_or_default();
                 match rollout.as_deref() {
                     None => {}
@@ -3160,6 +3210,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 }
                 if let Some(m) = rollout_manual {
                     r.insert("manual".into(), json!(m));
+                }
+                if let Some(c) = rollout_checks {
+                    r.insert("checks".into(), json!(c));
                 }
                 if let Some(o) = overlap {
                     r.insert("overlap".into(), json!(o));
@@ -3247,7 +3300,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 body.insert("build".into(), Value::Object(build));
             }
             // The service's alerts with what was given replaced (the API takes them whole).
-            let alerts = if alert_memory.is_some() || alert_errors.is_some() || alert_p95.is_some() || alert_log.is_some() || alert_log_count.is_some() || alert_cpu.is_some() || !alert_metric.is_empty() {
+            let alerts = if alert_memory.is_some() || alert_errors.is_some() || alert_p95.is_some() || alert_log.is_some() || alert_log_count.is_some() || alert_cpu.is_some() || !alert_metric.is_empty() || alert_anomaly.is_some() {
                 let mut a = svc["run"]["alerts"].as_object().cloned().unwrap_or_default();
                 if !alert_metric.is_empty() {
                     let rules = alert_metric.iter().filter(|r| *r != "none").map(|r| metric_alert(r)).collect::<anyhow::Result<Vec<_>>>()?;
@@ -3257,6 +3310,16 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                     if let Some(v) = v {
                         a.insert(k.into(), v);
                     }
+                }
+                match alert_anomaly.as_deref() {
+                    None => {}
+                    Some("on") => {
+                        a.insert("anomaly".into(), json!(true));
+                    }
+                    Some("off") => {
+                        a.remove("anomaly");
+                    }
+                    Some(o) => anyhow::bail!("--alert-anomaly is on or off: {o}"),
                 }
                 match alert_log.as_deref() {
                     None => {}
@@ -3567,6 +3630,11 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 return Ok(());
             }
             all
+        }
+        AppsCmd::Move { target, to } => {
+            let svc = service(api, &target).await?;
+            let project = project_id(api, &to).await?;
+            api.post(&format!("/v1/apps/services/{}/move", enc(&s(&svc["id"]))), json!({ "project": project })).await?
         }
         AppsCmd::Restore { target, list: false } => {
             let Some(d) = deleted_service(api, &target).await? else {
@@ -4029,14 +4097,17 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             let query = instance.map(|i| format!("&instance={}", enc(&i))).unwrap_or_default();
             return ssh(api, &env_path(&svc, &target.env), &query).await;
         }
-        AppsCmd::Proxy { target, local_port } => {
+        AppsCmd::Proxy { target, local_port, port: other } => {
             let svc = service(api, &target).await?;
-            let port = svc["run"]["port"].as_u64().unwrap_or(8080) as u16;
-            return proxy(api, &env_path(&svc, &target.env), &format!("{}/{}", s(&svc["name"]), target.env), port, local_port.unwrap_or(port)).await;
+            let port = other.unwrap_or(svc["run"]["port"].as_u64().unwrap_or(8080) as u16);
+            return proxy(api, &env_path(&svc, &target.env), &format!("{}/{}", s(&svc["name"]), target.env), port, local_port.unwrap_or(port), other.is_some()).await;
         }
-        AppsCmd::Run { target, interactive: true, cpu, memory, command, .. } => {
+        AppsCmd::Run { target, interactive: true, cpu, memory, command, deployment, .. } => {
             let svc = service(api, &target).await?;
             let mut query = "&console=true".to_string();
+            if let Some(d) = deployment {
+                query.push_str(&format!("&deployment={}", enc(&d)));
+            }
             if !command.is_empty() {
                 query.push_str(&format!("&command={}", enc(&shell_join(&command))));
             }
@@ -4878,6 +4949,29 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 json!({ "page": p, "incidents": inc["incidents"] })
             }
         }
+        AppsCmd::Signing { target, keys, not_required, remove } => {
+            let svc = service(api, &target).await?;
+            let path = format!("/v1/apps/projects/{}/signing", enc(&s(&svc["project"])));
+            let v = if remove {
+                api.call(reqwest::Method::DELETE, &path, None).await?;
+                json!({ "keys": [], "required": false })
+            } else if !keys.is_empty() {
+                let pems = keys.iter().map(|k| std::fs::read_to_string(k).with_context(|| format!("reading {}", k.display()))).collect::<anyhow::Result<Vec<_>>>()?;
+                api.call(reqwest::Method::PUT, &path, Some(json!({ "keys": pems, "required": !not_required }))).await?
+            } else {
+                api.get(&path).await?
+            };
+            if !json_out {
+                let n = v["keys"].as_array().map_or(0, Vec::len);
+                println!("{}", match (n, v["required"].as_bool().unwrap_or(false)) {
+                    (0, _) => "no signing rule: any image deploys".to_string(),
+                    (n, true) => format!("image services' images must be signed by one of {n} key(s)"),
+                    (n, false) => format!("{n} key(s) kept, not required"),
+                });
+                return Ok(());
+            }
+            v
+        }
         AppsCmd::Limits { target, alert, hard } => {
             let svc = service(api, &target).await?;
             let path = format!("/v1/apps/projects/{}/limits", enc(&s(&svc["project"])));
@@ -4934,7 +5028,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, data, wait_for_ci, run, follow_tag, redeploy_on_secrets, vitals, egress, egress_host, private, open, signed_in, maintenance, serve, pause, resume, resume_deploys, hold, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, route, no_routes, error_page, maintenance_page, roll_pages, freeze, unfreeze, rotate_config, set } => {
+        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, data, wait_for_ci, run, follow_tag, redeploy_on_secrets, vitals, egress, egress_host, private, open, signed_in, maintenance, serve, pause, resume, resume_deploys, hold, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, route, no_routes, redirects, no_redirects, error_page, maintenance_page, roll_pages, freeze, unfreeze, rotate_config, set } => {
             let svc = service(api, &target).await?;
             if rotate_config {
                 let e = api.post(&format!("{}/config/rotate", env_path(&svc, &target.env)), json!({})).await?;
@@ -5033,6 +5127,12 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 body.insert("routes".into(), Value::Array(rs));
             } else if no_routes {
                 body.insert("routes".into(), Value::Null);
+            }
+            if let Some(f) = &redirects {
+                let text = std::fs::read_to_string(f).map_err(|e| anyhow::anyhow!("{}: {e}", f.display()))?;
+                body.insert("redirects".into(), json!(text));
+            } else if no_redirects {
+                body.insert("redirects".into(), Value::Null);
             }
             let mut pages = serde_json::Map::new();
             for (k, f) in [("error", &error_page), ("maintenance", &maintenance_page)] {

@@ -341,6 +341,18 @@ impl Brancher for Redis {
         self.branch(parent, name, mode).await
     }
 
+    /// A branch of the preview's own branch: an earlier push's data (redis-control branches any
+    /// database, and keeps a parent's history while its branches use it).
+    async fn snapshot(&self, _parent: &str, branch: &str, name: &str) -> anyhow::Result<Option<Branched>> {
+        self.branch(branch, name, Mode::Branch).await.map(Some)
+    }
+
+    /// Its parent is the preview's branch it was copied from (gone after a reset: the guard then
+    /// reads the copy's own `parent_id`).
+    async fn delete_snapshot(&self, _parent: &str, from: &str, snapshot: &str, _kept: Option<&str>, name: &str) -> anyhow::Result<()> {
+        self.delete(from, snapshot, name).await
+    }
+
     async fn delete(&self, parent: &str, branch: &str, name: &str) -> anyhow::Result<()> {
         let d = match self.0.get(&format!("/v1/redis/databases/{}", seg(branch))).await {
             Ok(d) => d,
@@ -459,6 +471,17 @@ impl Brancher for Nosql {
         }
     }
 
+    /// A branch of the preview's own database: an earlier push's data. A NoSQL branch inherits
+    /// its parent's masking policy, so the copy reads masked as the preview's branch does (and
+    /// goes when the rules change).
+    async fn snapshot(&self, _parent: &str, branch: &str, name: &str) -> anyhow::Result<Option<Branched>> {
+        self.branch(branch, name, Mode::Branch).await.map(Some)
+    }
+
+    async fn delete_snapshot(&self, _parent: &str, from: &str, snapshot: &str, _kept: Option<&str>, name: &str) -> anyhow::Result<()> {
+        self.delete(from, snapshot, name).await
+    }
+
     async fn delete(&self, parent: &str, branch: &str, name: &str) -> anyhow::Result<()> {
         let d = match self.0.get(&format!("/v1/nosql/databases/{}", seg(branch))).await {
             Ok(d) => d,
@@ -564,6 +587,17 @@ impl Brancher for Bucket {
         self.branch(parent, name, mode).await
     }
 
+    /// A branch of the preview's branch bucket (reads resolve through every ancestor), with a
+    /// key of its own: an earlier push's files as its head left them. roll storage refuses to
+    /// delete a bucket with branches, so copies always go first (eviction, reset, teardown).
+    async fn snapshot(&self, _parent: &str, branch: &str, name: &str) -> anyhow::Result<Option<Branched>> {
+        self.branch(branch, name, Mode::Branch).await.map(Some)
+    }
+
+    async fn delete_snapshot(&self, _parent: &str, from: &str, snapshot: &str, _kept: Option<&str>, name: &str) -> anyhow::Result<()> {
+        self.delete(from, snapshot, name).await
+    }
+
     async fn delete(&self, parent: &str, branch: &str, name: &str) -> anyhow::Result<()> {
         anyhow::ensure!(branch == bucket_name(parent, name) && branch != parent, "refusing to delete bucket {branch}: it isn't {parent}'s branch {name}");
         let b = match self.0.get(&format!("/v1/storage/buckets/{}", seg(branch))).await {
@@ -657,6 +691,17 @@ impl Brancher for Stream {
     async fn reset(&self, parent: &str, branch: &str, _kept: Option<&str>, name: &str, mode: Mode) -> anyhow::Result<Branched> {
         self.delete(parent, branch, name).await?;
         self.branch(parent, name, mode).await
+    }
+
+    /// A branch of the preview's own stream (any stream branches: a new stream whose chunk rows
+    /// name the parent's objects, independent after), with a key of its own.
+    async fn snapshot(&self, _parent: &str, branch: &str, name: &str) -> anyhow::Result<Option<Branched>> {
+        self.branch(branch, name, Mode::Branch).await.map(Some)
+    }
+
+    /// Its `branch_of` is the preview's stream it was copied from (unchecked once that's gone).
+    async fn delete_snapshot(&self, _parent: &str, from: &str, snapshot: &str, _kept: Option<&str>, name: &str) -> anyhow::Result<()> {
+        self.delete(from, snapshot, name).await
     }
 
     async fn delete(&self, parent: &str, branch: &str, name: &str) -> anyhow::Result<()> {
@@ -811,7 +856,17 @@ impl Brancher for Tasks {
 
     async fn connect(&self, _parent: &str, branch: &str, kept: Option<&str>) -> anyhow::Result<Vec<(String, String)>> {
         let kept: Value = kept.and_then(|k| serde_json::from_str(k).ok()).ok_or_else(|| anyhow::anyhow!("the tenant {branch} has no key: reset it"))?;
-        Ok(kept.as_object().into_iter().flatten().filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string()))).collect())
+        let mut vars: Vec<(String, String)> = kept.as_object().into_iter().flatten().filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string()))).collect();
+        // Its own webhook signing keys (roll apps' `tasks` link names them): the preview verifies
+        // its tenant's deliveries with these, never production's. Read at each start, so a
+        // rotation reaches the next one.
+        // The tenant's own route, as the tenant (its token, the one its services hold).
+        let token = s(&kept["ROLL_TASKS_TOKEN"]).ok_or_else(|| anyhow::anyhow!("the tenant {branch} has no token: reset it"))?;
+        let keys = self.api.get_as(&format!("/t/{}/v1/tasks/keys", seg(branch)), &token).await.map_err(|e| anyhow::anyhow!("reading the tenant {branch}'s signing keys: {e:#}"))?;
+        for (name, field) in [("ROLL_TASKS_SIGNING_KEY", "current"), ("ROLL_TASKS_NEXT_SIGNING_KEY", "next")] {
+            vars.push((name.to_string(), s(&keys[field]).ok_or_else(|| anyhow::anyhow!("the tenant {branch} has no {field} signing key"))?));
+        }
+        Ok(vars)
     }
 
     async fn usage(&self, _parent: &str, _branch: &str) -> anyhow::Result<Usage> {
@@ -1007,6 +1062,21 @@ impl Brancher for Search {
         self.retire(parent, branch, kept).await?;
         self.delete(parent, branch, name).await?;
         self.branch(parent, name, mode).await
+    }
+
+    /// A branch of the preview's own branch cluster (roll search branches any cluster; its
+    /// manifests share the branch's segments, the masked ones rewritten and expunged, never the
+    /// parent's originals), with a data key of its own. Never with `at`: a point-in-time branch
+    /// replays the log, which could rebuild what masking removed.
+    async fn snapshot(&self, _parent: &str, branch: &str, name: &str) -> anyhow::Result<Option<Branched>> {
+        self.branch(branch, name, Mode::Branch).await.map(Some)
+    }
+
+    /// As the preview's branch goes: its data key revoked, its password changed, then deleted;
+    /// its parent is the branch it was copied from (`parent_id` stays when that's gone).
+    async fn delete_snapshot(&self, _parent: &str, from: &str, snapshot: &str, kept: Option<&str>, name: &str) -> anyhow::Result<()> {
+        self.retire(from, snapshot, kept).await?;
+        self.delete(from, snapshot, name).await
     }
 
     /// roll search keeps a deleted cluster restorable with its keys and password: so first the
@@ -1223,6 +1293,84 @@ mod tests {
         search.retire("srch_p", "srch_b", Some(&serde_json::json!({ "OPENSEARCH_USERNAME": "pv@pv-x" }).to_string())).await.unwrap();
         search.delete("srch_p", "srch_b", "pv-x").await.unwrap();
         assert_eq!(revoked.lock().unwrap().clone(), ["key_1", "pv", "password", "cluster"].map(String::from).to_vec());
+    }
+
+    /// Previews' masking over a real roll search (in process): on a branch of a seeded cluster,
+    /// no original value is left in `_source`, `_terms_enum` or a terms aggregation on the
+    /// `.keyword`, for a text field, an address inside an array of objects, a field under a dotted
+    /// key and an index whose name has a dot; the parent keeps every original.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_masked_search_branch_shows_no_original_value() {
+        use roll_previews::ports::Brancher as _;
+        use serde_json::{Value, json};
+        let home = tempfile::tempdir().unwrap();
+        let mut cfg = search_control::SearchConfig::local(home.path().to_path_buf());
+        cfg.gc_interval = None;
+        cfg.unsealed_secrets = true;
+        let es = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        cfg.http_port = es.local_addr().unwrap().port();
+        let control = search_control::Control::new(cfg, search_store::test_objects("previews-mask")).await.unwrap();
+        tokio::spawn(search_server::serve(es, control.node.clone(), search_server::ListenOptions::default()));
+        let api = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = api.local_addr().unwrap();
+        let router = search_control::api::router(control.clone());
+        tokio::spawn(async move { axum::serve(api, router).await });
+        let http = reqwest::Client::new();
+        let post = |path: String, body: Value| {
+            let req = http.post(format!("http://{addr}{path}")).json(&body);
+            async move {
+                let r = req.send().await.unwrap();
+                let (status, v) = (r.status(), r.json::<Value>().await.unwrap());
+                assert!(status.is_success(), "{path}: {status} {v}");
+                v
+            }
+        };
+        // One REST request on a cluster through the operator's console: its JSON body.
+        let rest = |cluster: &str, method: &'static str, path: &str, body: Value| {
+            let call = post(format!("/v1/search/clusters/{cluster}/request"), json!({ "method": method, "path": path, "body": body }));
+            let path = path.to_string();
+            async move {
+                let v = call.await;
+                assert!(v["status"].as_u64().is_some_and(|s| s < 300), "{method} {path}: {v}");
+                serde_json::from_str::<Value>(v["body"].as_str().unwrap()).unwrap()
+            }
+        };
+        post("/v1/search/clusters".into(), json!({ "name": "shop" })).await;
+        let originals = ["Alice Original", "1 Secret St", "2 Hidden Rd", "alice@corp.example", "alice-secret-login"];
+        rest(
+            "shop",
+            "PUT",
+            "/people/_doc/1?refresh=true",
+            json!({ "name": "Alice Original", "contacts": [{ "address": "1 Secret St" }, { "address": "2 Hidden Rd" }], "meta.email": "alice@corp.example" }),
+        )
+        .await;
+        rest("shop", "PUT", "/logs.2024/_doc/1?refresh=true", json!({ "user": "alice-secret-login" })).await;
+        let branch = post("/v1/search/clusters/shop/branches".into(), json!({ "name": "pv-mask" })).await["id"].as_str().unwrap().to_string();
+        let fields: std::collections::BTreeMap<String, String> =
+            [("people.name", "redact"), ("people.contacts.address", "redact"), ("people.meta.email", "email"), ("logs.2024.user", "redact")].map(|(k, v)| (k.to_string(), v.to_string())).into();
+        super::Search(super::super::Api::new(addr)).mask("shop", &branch, None, &fields).await.unwrap();
+
+        // Everything the branch can show of those fields, as one text.
+        let shown = |cluster: String| async move {
+            let mut out = vec![rest(&cluster, "POST", "/people,logs.2024/_search", json!({})).await];
+            for (path, field) in [("/people/_terms_enum", "name.keyword"), ("/people/_terms_enum", "contacts.address.keyword"), ("/people/_terms_enum", "meta.email.keyword"), ("/logs.2024/_terms_enum", "user.keyword")] {
+                out.push(rest(&cluster, "POST", path, json!({ "field": field })).await);
+            }
+            let aggs = json!({ "size": 0, "aggs": { "n": { "terms": { "field": "name.keyword" } }, "a": { "terms": { "field": "contacts.address.keyword" } }, "e": { "terms": { "field": "meta.email.keyword" } } } });
+            out.push(rest(&cluster, "POST", "/people/_search", aggs).await);
+            out.push(rest(&cluster, "POST", "/logs.2024/_search", json!({ "size": 0, "aggs": { "u": { "terms": { "field": "user.keyword" } } } })).await);
+            Value::Array(out).to_string()
+        };
+        let masked = shown(branch.clone()).await;
+        for o in originals {
+            assert!(!masked.contains(o), "the branch still shows {o:?}: {masked}");
+        }
+        assert!(masked.contains("[masked]") && masked.contains("@example.invalid"), "{masked}");
+        let parent = shown("shop".into()).await;
+        for o in originals {
+            assert!(parent.contains(o), "the parent lost {o:?}: {parent}");
+        }
+        control.shutdown().await.unwrap();
     }
 
     #[test]

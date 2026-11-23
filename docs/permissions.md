@@ -425,7 +425,7 @@ first, so they can't hide what runs, and anything that makes or changes credenti
 - A route whose product filters its answer per environment and path itself, asking the caller's
   `Grant` for each finding, can be matched by rules limited to some environments or paths too
   (`Row::filters_itself`): a token for staging would get staging's findings, never production's,
-  rather than a 403. Secrets' health and leak scan have it; secrets' cross-project routes
+  rather than a 403. Secrets' health, leak scan and events feed have it; secrets' cross-project routes
   (`GET /v1/secrets/search`, `GET /v1/secrets/findings`) take any grant and keep each project's
   results only where it may read. An approval on such a route is approved once (a rule from it
   would drop the token's environments).
@@ -663,7 +663,12 @@ take only signed requests, so nobody outside the cluster can put a path there. O
   (`x-roll-code-decided: <grant id>`, `roll_cluster::Decided`). For that grant the owner doesn't
   ask a person a second time, and doesn't log the request again; it still denies whatever the
   grant's rules deny there, and a revoked token stops there too. A hop from a node that didn't
-  decide it (a public listener in front of the tasks leader) is decided in full.
+  decide it (a public listener in front of the tasks leader) is decided in full;
+- roll's own work for a grant (`roll_auth::ActAs`: an MCP Events webhook delivery reading its feed)
+  has no token to forward, so the hop names the grant (`x-roll-code-acting: <grant id>`,
+  `roll_cluster::Acting`, signed with a tag of its own) and the owner's gate acts for it again
+  (rolld's `act_as_from_hop`: only from a verified hop, never beside a token), looking the grant up
+  as it is now.
 
 ### People's sessions
 
@@ -1074,8 +1079,9 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
   whatever its URL asks (the operator's own connection isn't held). `mcp_require_grant` takes agents only as
   grants: the admin token, an admin's session and an open daemon get a 401 with OAuth's challenge at
   `/v1/mcp` (as Stripe's MCP server refuses full-access keys from 2027-01-11), so no agent connects
-  past these controls. A quiet call (a completion, an MCP Events
-  webhook delivery reading for its grant) that `agents_ask` covers is refused, nobody asked. `oauth_clients` lists the
+  past these controls. A quiet call (a completion, `roll_find`'s lookups, an MCP Events
+  webhook delivery reading for its grant) that `agents_ask` covers is refused, nobody asked; only
+  the credential guard's scan, whose answer reaches nobody, isn't held. `oauth_clients` lists the
   OAuth clients that may connect (empty: any): a host (`claude.ai`, `*.example.com`), an exact
   `https://` URL, `localhost`, an app scheme (`cursor:`) or `device`; a registered client matches
   only when every redirect it registered does (docs/mcp.md, "Authorization"). One left out gets
@@ -1182,8 +1188,10 @@ look (an old repo, a wiki page, a backup's config):
   holds it learns nothing, and the gate checks it before anything else (the idle-token rule would
   otherwise retire a token nobody uses).
 - Each use is written on the token (`last_used_at`, `last_used_ip`), to the audit log
-  (`source: "decoy"`, the route and the client), and mailed to its owner and every admin (once an
-  hour per decoy and person). A decoy can't be turned into a working token.
+  (`source: "decoy"`, the route and the client), mailed to its owner and every admin (once an
+  hour per decoy and person), and kept on the operator's alert feed (`GET /v1/access/alerts`, MCP
+  Events' `access.alert`, `decoy_used`, once an hour per decoy across nodes). A decoy can't be
+  turned into a working token.
 - It's checksummed like any `rlt_`, so scanners report a leaked decoy too (roll revokes it, which
   ends the trap: plant another).
 - roll secrets plants them as decoy keys (docs/secrets.md, "Decoys"). rolld mints each with
@@ -1347,6 +1355,7 @@ classify, so the check skips them):
 | `/v1/code/review-apps` | review apps' own tokens |
 | `/v1/accounts` | people's accounts (docs/accounts.md): sign-in, sessions and invites are a person's, never a token's |
 | `/v1/workspace/invites` | a person's own project invites (docs/members.md): listing, accepting and declining take their session, never a token |
+| `/v1/workspace/groups` | groups (docs/members-v1-1.md): making, changing and filling them is the operator's and roll's admins' (D12); a person's session lists the groups it's in and those with a role on a project it manages; never a token |
 | `/v1/code/mcp` | roll code's MCP server calls roll code without the gate; grants use `/v1/mcp` |
 | `/v1/access/approvals/{id}/approve` and `/deny`, `/v1/access/oauth/authorize`, `/v1/access/oauth/devices/{code}`, `/v1/access/notify`, `/v1/access/policy`, `/v1/access/audit/sinks` | the operator decides |
 

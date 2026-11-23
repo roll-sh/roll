@@ -182,7 +182,7 @@ struct Crawl<'s, 'a> {
 }
 
 /// Runs a crawl; the new sync cursor.
-pub async fn sync(cid: &str, v: &Values, sink: &mut Sink<'_>, full: bool, cursor: &Value, advanced: Option<&Value>, allow_private: bool) -> Result<Value, Stop> {
+pub async fn sync(cid: &str, v: &Values, sink: &mut Sink<'_>, full: bool, cursor: &Value, advanced: Option<&Value>, egress: &crate::egress::Egress) -> Result<Value, Stop> {
     let cluster = sink.cluster;
     if cluster.config.node_setting(ENABLED).is_some_and(|v| v.eq_ignore_ascii_case("false")) {
         return Err(Stop::Failed(format!("web crawlers are turned off on this node ({ENABLED})")));
@@ -193,9 +193,9 @@ pub async fn sync(cid: &str, v: &Values, sink: &mut Sink<'_>, full: bool, cursor
     let int = |k: &str| -> Result<Option<i64>, String> { v.text(k).map(|s| s.parse::<i64>().map_err(|_| format!("the connector's [{k}] isn't a number"))).transpose() };
     let fields = Fields { urls: v.list("urls"), sitemap_urls: v.list("sitemap_urls"), sitemap_discovery: v.bool("sitemap_discovery", true), max_crawl_depth: int("max_crawl_depth")?, max_unique_url_count: int("max_unique_url_count")? };
     let plan = config::plan(&fields, advanced, &ceilings(cluster)).map_err(Stop::Failed)?;
-    let auth = auth(v, allow_private).map_err(Stop::Failed)?;
+    let auth = auth(v, egress.allow_private()).map_err(Stop::Failed)?;
     let auth_origin = auth.as_ref().map(|a| a.origin.clone());
-    let fetcher = Fetcher::new(allow_private, auth).map_err(Stop::Failed)?;
+    let fetcher = Fetcher::new(egress.clone(), auth).map_err(Stop::Failed)?;
     // Unverified domains' limits (domain verification comes later: every domain is unverified).
     let unverified = number(cluster, UNVERIFIED_MAX_URLS, 1000);
     let asked = plan.limits.get(L::UniqueUrls);

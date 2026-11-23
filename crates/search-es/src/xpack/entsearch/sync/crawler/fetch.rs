@@ -1,7 +1,9 @@
-//! One HTTP request of a crawl. Every URL is the tenant's choice, so the client resolves names
-//! to public addresses only ([`roll_net::PublicOnly`]), refuses private literals
-//! ([`roll_net::literal_private_host`]), uses no proxy and follows no redirect (the crawler
-//! follows them by hand, checking each hop like a link). A response is read up to a cap that
+//! One HTTP request of a crawl. Every URL is the tenant's choice, so every request goes through
+//! roll's one egress check ([`crate::egress::Egress`]): names resolve through its resolver
+//! (public addresses only, and never the node's own or the operator's denied ones), addresses
+//! written out are checked before connecting, nothing goes out until the node knows its own
+//! addresses, no proxy is used and no redirect is followed (the crawler follows them by hand,
+//! checking each hop like a link). A response is read up to a cap that
 //! counts decompressed bytes, so a compression bomb stops there; headers are capped too.
 
 use super::url::{Link, origin_of};
@@ -145,24 +147,23 @@ pub struct Response {
 
 pub struct Fetcher {
     http: reqwest::Client,
-    allow_private: bool,
+    egress: crate::egress::Egress,
     auth: Option<Auth>,
     ua: String,
 }
 
 impl Fetcher {
-    pub fn new(allow_private: bool, auth: Option<Auth>) -> Result<Fetcher, String> {
-        let mut b = reqwest::Client::builder()
+    pub fn new(egress: crate::egress::Egress, auth: Option<Auth>) -> Result<Fetcher, String> {
+        let http = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .read_timeout(SOCKET_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
             .http1_max_headers(128)
-            .no_proxy();
-        if !allow_private {
-            b = b.dns_resolver(std::sync::Arc::new(roll_net::PublicOnly));
-        }
-        let http = b.build().map_err(|e| format!("the crawler's HTTP client: {e}"))?;
-        Ok(Fetcher { http, allow_private, auth, ua: user_agent() })
+            .no_proxy()
+            .dns_resolver(egress.resolver())
+            .build()
+            .map_err(|e| format!("the crawler's HTTP client: {e}"))?;
+        Ok(Fetcher { http, egress, auth, ua: user_agent() })
     }
 
     /// Whether `link` may get the credential: its origin is exactly the credential's, the chain
@@ -173,19 +174,21 @@ impl Fetcher {
         let url = link.url();
         let host = url.host_str().unwrap_or_default().trim_start_matches('[').trim_end_matches(']');
         let loopback = host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback()) || host.eq_ignore_ascii_case("localhost");
-        let secure = url.scheme() == "https" || (self.allow_private && loopback);
+        let secure = url.scheme() == "https" || (self.egress.allow_private() && loopback);
         (clean && secure && origin_of(url) == a.origin).then_some(a.header.as_str())
     }
 
-    /// Whether `link`'s address is one the crawler may fetch from.
+    /// Whether `link`'s host is an address (or `localhost`) the crawler may not connect to, by
+    /// what the node knows now; names are checked as they resolve.
     pub fn refused(&self, link: &Link) -> bool {
-        !self.allow_private && roll_net::literal_private_host(link.url())
+        self.egress.check_url(link.url()).is_err()
     }
 
     /// One request, no redirect followed, within [`REQUEST_TIMEOUT`]. `clean`: every hop
     /// before this one was at the credential's origin.
     pub async fn get(&self, link: &Link, clean: bool, max: usize) -> Result<Response, Failure> {
-        if self.refused(link) {
+        // Checked again with the node's names resolved afresh, failing closed until they are.
+        if self.egress.check_url_now(link.url()).await.is_err() {
             return Err(Failure::Refused);
         }
         match tokio::time::timeout(REQUEST_TIMEOUT, self.request(link, clean, max)).await {
@@ -259,14 +262,15 @@ mod tests {
     #[test]
     fn the_credential_stays_on_its_origin() {
         let auth = || Some(Auth { origin: "https://docs.example.com".into(), header: "Bearer t".into() });
-        let f = Fetcher::new(false, auth()).unwrap();
+        let egress = |allow_private| crate::egress::Egress::of(|_| None, allow_private).unwrap();
+        let f = Fetcher::new(egress(false), auth()).unwrap();
         let l = |s: &str| Link::parse(s, None).unwrap();
         assert_eq!(f.credential_for(&l("https://docs.example.com/a"), true), Some("Bearer t"));
         assert_eq!(f.credential_for(&l("https://docs.example.com/a"), false), None, "after another origin");
         assert_eq!(f.credential_for(&l("http://docs.example.com/a"), true), None, "never over http");
         assert_eq!(f.credential_for(&l("https://docs.example.com:8443/a"), true), None);
         assert_eq!(f.credential_for(&l("https://evil.docs.example.com/a"), true), None);
-        let dev = Fetcher::new(true, Some(Auth { origin: "http://127.0.0.1:9".into(), header: "x".into() })).unwrap();
+        let dev = Fetcher::new(egress(true), Some(Auth { origin: "http://127.0.0.1:9".into(), header: "x".into() })).unwrap();
         assert_eq!(dev.credential_for(&l("http://127.0.0.1:9/a"), true), Some("x"), "loopback under allow_private_hosts");
         assert!(f.refused(&l("http://169.254.169.254/latest")) && !dev.refused(&l("http://127.0.0.1:9/")));
     }

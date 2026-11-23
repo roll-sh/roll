@@ -16,13 +16,14 @@
 //! Not supported: Vertex AI's Model Garden providers (`provider` other than `google`, `url`,
 //! `streaming_url`).
 
-use super::{Config, answer_json, learned, missing_field, ordered, path_segment, sse_data, take_secret};
+use super::{Config, answer_json, learned, missing_field, ordered, path_segment, take_secret};
 use crate::cluster::Cluster;
 use crate::error::{EsError, EsResult};
 use crate::json::{Map, Value};
 use crate::obj;
 use crate::xpack::inference::http::{self, Call};
 use crate::xpack::inference::results::{Ranked, Results};
+use crate::xpack::inference::stream::{Decode, Streaming};
 use crate::xpack::inference::settings::{Reader, validation};
 use crate::xpack::inference::{Endpoint, Request, TaskType};
 use sha2::Digest;
@@ -309,11 +310,11 @@ fn vertex_host(cluster: &Cluster, ep: &Endpoint) -> EsResult<String> {
     Ok(super::base_url(cluster, "googlevertexai", &host))
 }
 
-async fn vertex_send(cluster: &Cluster, ep: &Endpoint, url: String, body: &Value, timeout: Duration) -> EsResult<http::Answer> {
+async fn vertex_send(cluster: &Cluster, ep: &Endpoint, url: String, body: &Value, timeout: Duration, stream: bool) -> EsResult<http::Answer> {
     let token = access_token(cluster, ep, timeout).await?;
     let headers = vec![("Content-Type".to_string(), "application/json;charset=utf-8".to_string()), ("Authorization".to_string(), format!("Bearer {token}"))];
     let call = Call::json(&ep.id, url.clone(), headers, body, timeout, ep.requests_per_minute());
-    let answer = http::post(cluster, &call).await?;
+    let answer = if stream { http::post_stream(cluster, &call).await? } else { http::post(cluster, &call).await? };
     http::check_google(&ep.id, &url, &answer, VERTEX)?;
     Ok(answer)
 }
@@ -363,7 +364,7 @@ pub async fn infer_vertex(cluster: &Cluster, ep: &Endpoint, req: &Request) -> Es
             let model = path_segment(ss_str(ep, "model_id").unwrap_or_default());
             let url = format!("{}/v1/projects/{project}/locations/{location}/publishers/google/models/{model}:predict", vertex_host(cluster, ep)?);
             let body = obj! { "instances" => Value::Arr(instances), "parameters" => Value::Obj(params) };
-            let v = answer_json("googlevertexai", &vertex_send(cluster, ep, url, &body, req.timeout).await?)?;
+            let v = answer_json("googlevertexai", &vertex_send(cluster, ep, url, &body, req.timeout, false).await?)?;
             let preds = v.get("predictions").and_then(Value::as_array).ok_or_else(|| missing_field("predictions", "Google Vertex AI embeddings"))?;
             let vectors: Vec<Value> = preds.iter().map(|p| p.pointer(&["embeddings", "values"]).cloned().unwrap_or(Value::Null)).collect();
             super::float_vectors(&vectors, req.input.len(), "Google Vertex AI embeddings")
@@ -383,7 +384,7 @@ pub async fn infer_vertex(cluster: &Cluster, ep: &Endpoint, req: &Request) -> Es
             }
             let base = super::base_url(cluster, "googlevertexai.rank", "https://discoveryengine.googleapis.com");
             let url = format!("{base}/v1/projects/{project}/locations/global/rankingConfigs/default_ranking_config:rank");
-            let v = answer_json("googlevertexai", &vertex_send(cluster, ep, url, &Value::Obj(body), req.timeout).await?)?;
+            let v = answer_json("googlevertexai", &vertex_send(cluster, ep, url, &Value::Obj(body), req.timeout, false).await?)?;
             let what = "Google Vertex AI rerank";
             let records = v.get("records").and_then(Value::as_array).ok_or_else(|| missing_field("records", what))?;
             let mut out = Vec::with_capacity(records.len());
@@ -401,7 +402,7 @@ pub async fn infer_vertex(cluster: &Cluster, ep: &Endpoint, req: &Request) -> Es
         TaskType::Completion => {
             let input = super::one_input(req, "Google VertexAI chat completion")?;
             let body = gemini_body(&[obj! { "role" => "user", "parts" => crate::arr![obj! { "text" => input }] }], None, &ts, &Map::new());
-            let v = answer_json("googlevertexai", &vertex_send(cluster, ep, gemini_url(cluster, ep, false)?, &body, req.timeout).await?)?;
+            let v = answer_json("googlevertexai", &vertex_send(cluster, ep, gemini_url(cluster, ep, false)?, &body, req.timeout, false).await?)?;
             Ok(Results::Completion(vec![candidate_text(&v).ok_or_else(|| missing_field("candidates", "Google Vertex AI completion"))?]))
         }
         other => Err(crate::xpack::inference::unsupported_task(other, "googlevertexai")),
@@ -444,17 +445,20 @@ fn candidate_text(v: &Value) -> Option<String> {
     Some(parts.iter().filter_map(|p| p.get("text").and_then(Value::as_str)).collect())
 }
 
-fn gemini_completion_events(raw: &[u8]) -> Vec<Value> {
-    let deltas: Vec<Value> = sse_data(raw).into_iter().filter_map(|(_, d)| crate::json::parse(d.as_bytes()).ok().flatten()).filter_map(|c| candidate_text(&c)).filter(|t| !t.is_empty()).map(|t| obj! { "delta" => t }).collect();
-    if deltas.is_empty() { vec![] } else { vec![obj! { "completion" => Value::Arr(deltas) }] }
+/// A streamed Gemini completion's text, one `completion` event per read.
+fn gemini_completion_decoder() -> Decode {
+    Box::new(|events: &[(Option<String>, String)]| -> EsResult<Vec<Value>> {
+        let deltas: Vec<Value> = events.iter().filter_map(|(_, d)| crate::json::parse(d.as_bytes()).ok().flatten()).filter_map(|c| candidate_text(&c)).filter(|t| !t.is_empty()).map(|t| obj! { "delta" => t }).collect();
+        Ok(if deltas.is_empty() { vec![] } else { vec![obj! { "completion" => Value::Arr(deltas) }] })
+    })
 }
 
-pub async fn stream_completion_vertex(cluster: &Cluster, ep: &Endpoint, req: &Request) -> EsResult<Vec<Value>> {
+pub async fn stream_completion_vertex(cluster: &Cluster, ep: &Endpoint, req: &Request) -> EsResult<Streaming> {
     let ts = effective_vertex(ep, req)?;
     let input = super::one_input(req, "Google VertexAI chat completion")?;
     let body = gemini_body(&[obj! { "role" => "user", "parts" => crate::arr![obj! { "text" => input }] }], None, &ts, &Map::new());
-    let answer = vertex_send(cluster, ep, gemini_url(cluster, ep, true)?, &body, req.timeout).await?;
-    Ok(gemini_completion_events(&answer.body))
+    let answer = vertex_send(cluster, ep, gemini_url(cluster, ep, true)?, &body, req.timeout, true).await?;
+    Streaming::open(answer, gemini_completion_decoder())
 }
 
 /// A message's text: its string content or its text parts.
@@ -466,7 +470,7 @@ fn text_of(m: &Value) -> String {
     }
 }
 
-pub async fn stream_chat_vertex(cluster: &Cluster, ep: &Endpoint, body: &Value, timeout: Duration) -> EsResult<Vec<Value>> {
+pub async fn stream_chat_vertex(cluster: &Cluster, ep: &Endpoint, body: &Value, timeout: Duration) -> EsResult<Streaming> {
     let req = super::openai::unified_request(body)?;
     let mut contents = Vec::new();
     let mut system = Vec::new();
@@ -481,9 +485,14 @@ pub async fn stream_chat_vertex(cluster: &Cluster, ep: &Endpoint, body: &Value, 
     }
     let system = (!system.is_empty()).then(|| obj! { "parts" => Value::Arr(system) });
     let b = gemini_body(&contents, system, &ep.task_settings, &req);
-    let answer = vertex_send(cluster, ep, gemini_url(cluster, ep, true)?, &b, timeout).await?;
+    let answer = vertex_send(cluster, ep, gemini_url(cluster, ep, true)?, &b, timeout, true).await?;
+    Streaming::open(answer, Box::new(gemini_chat_events))
+}
+
+/// A streamed Gemini chat's chunks in the unified API's shape.
+fn gemini_chat_events(events: &[(Option<String>, String)]) -> EsResult<Vec<Value>> {
     let mut out = Vec::new();
-    for (_, d) in sse_data(&answer.body) {
+    for (_, d) in events {
         let Some(c) = crate::json::parse(d.as_bytes()).ok().flatten() else { continue };
         let Some(id) = c.get("responseId").cloned() else {
             return Err(EsError::status(400, "Failed to send Google VertexAI chat completion request. Cause: Required [responseId]"));
@@ -542,11 +551,11 @@ fn url_query_value(s: &str) -> String {
     out
 }
 
-async fn studio_send(cluster: &Cluster, ep: &Endpoint, action: &str, sse: bool, body: &Value, timeout: Duration) -> EsResult<http::Answer> {
+async fn studio_send(cluster: &Cluster, ep: &Endpoint, action: &str, stream: bool, body: &Value, timeout: Duration) -> EsResult<http::Answer> {
     let key = ep.secret(cluster, "api_key")?.unwrap_or_default();
-    let url = studio_url(cluster, ep, action, &key, sse);
+    let url = studio_url(cluster, ep, action, &key, stream);
     let call = Call::json(&ep.id, url.clone(), super::json_headers(), body, timeout, ep.requests_per_minute());
-    let answer = http::post(cluster, &call).await?;
+    let answer = if stream { http::post_stream(cluster, &call).await? } else { http::post(cluster, &call).await? };
     http::check_google(&ep.id, &url, &answer, STUDIO)?;
     Ok(answer)
 }
@@ -600,8 +609,8 @@ pub async fn infer_studio(cluster: &Cluster, ep: &Endpoint, req: &Request) -> Es
     }
 }
 
-pub async fn stream_completion_studio(cluster: &Cluster, ep: &Endpoint, req: &Request) -> EsResult<Vec<Value>> {
+pub async fn stream_completion_studio(cluster: &Cluster, ep: &Endpoint, req: &Request) -> EsResult<Streaming> {
     let input = super::one_input(req, "Google AI Studio completion")?;
     let answer = studio_send(cluster, ep, "streamGenerateContent", true, &studio_completion_body(input), req.timeout).await?;
-    Ok(gemini_completion_events(&answer.body))
+    Streaming::open(answer, gemini_completion_decoder())
 }

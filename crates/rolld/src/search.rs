@@ -22,6 +22,12 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::info;
 
+/// `--search-request-memory-max`: refused at startup unless it's a byte size, a percentage above
+/// 0 and at most 100, or -1.
+fn request_memory_max(v: &str) -> Result<String, String> {
+    search_control::request_max_limit(v, 1 << 30).map(|_| v.trim().to_string())
+}
+
 #[derive(Args, Clone, Debug)]
 pub struct SearchArgs {
     /// Disable roll search.
@@ -54,10 +60,21 @@ pub struct SearchArgs {
     /// Local disk cache for segments, in bytes.
     #[arg(long = "search-cache-bytes", env = "ROLL_SEARCH_CACHE_BYTES", default_value_t = 10 << 30)]
     pub search_cache_bytes: u64,
-    /// Memory all loaded clusters may hold together, in MiB (0: no budget). Past it the least
-    /// recently used idle clusters unload.
+    /// Memory loaded clusters and their requests may hold together, in MiB (0: no budget for
+    /// loaded clusters, and half of the host's memory for both). Past it in resident memory the
+    /// least recently used idle clusters unload; a request (aggregations, ES|QL, kept results)
+    /// that would take residents and requests past it fails with `circuit_breaking_exception`.
     #[arg(long = "search-memory-mb", env = "ROLL_SEARCH_MEMORY_MB", default_value_t = 0)]
     pub search_memory_mb: u64,
+    /// The most one cluster's `request` circuit breaker may allow, whatever its
+    /// `indices.breaker.request.limit`: a byte size (`512mb`) or a percentage of the node's memory
+    /// for requests (default `25%`; `-1`: no maximum).
+    #[arg(long = "search-request-memory-max", env = "ROLL_SEARCH_REQUEST_MEMORY_MAX", default_value = "25%", value_parser = request_memory_max)]
+    pub search_request_memory_max: String,
+    /// Memory one Painless script execution may hold, in MiB (0: no limit). Tenants can't
+    /// raise it; past it the script fails with a `painless_error`.
+    #[arg(long = "search-script-memory-mb", env = "ROLL_SEARCH_SCRIPT_MEMORY_MB", default_value_t = 64)]
+    pub search_script_memory_mb: u64,
     /// Request body bytes all clusters together may have in flight on this node, in MiB (0: no
     /// node budget). Each cluster's own budget (twice its `max_body_mb`) is charged to it too;
     /// past it, requests get 429.
@@ -130,11 +147,13 @@ pub struct SearchArgs {
     /// value: `24h`, `90m`), so a remote that answers slowly forever can't hold a task.
     #[arg(long = "search-reindex-max-duration", env = "ROLL_SEARCH_REINDEX_MAX_DURATION", default_value = "24h")]
     pub search_reindex_max_duration: String,
-    /// Networks reindex from remote never reaches, whatever name leads there (CIDRs or
-    /// addresses, comma-separated): the fleet's own networks. This node's public addresses
-    /// are added on their own.
-    #[arg(long = "search-reindex-deny", env = "ROLL_SEARCH_REINDEX_DENY")]
-    pub search_reindex_deny: Option<String>,
+    /// Networks no outbound call of roll search reaches, whatever name leads there (CIDRs or
+    /// addresses, comma-separated): reindex from remote and migration, connectors, inference
+    /// services, watches and snapshot repositories. The fleet's own networks go here; this
+    /// node's public addresses are added on their own. `--search-reindex-deny` and
+    /// `ROLL_SEARCH_REINDEX_DENY` are its old names.
+    #[arg(long = "search-egress-deny", alias = "search-reindex-deny", env = "ROLL_SEARCH_EGRESS_DENY")]
+    pub search_egress_deny: Option<String>,
     /// The longest one request that searches may run on this node, in seconds (0: no cap),
     /// counted once for all its shards and phases. A request's own larger `timeout` is lowered
     /// to it; past it a search answers with what it collected, `timed_out: true`
@@ -267,6 +286,8 @@ impl Search {
         cfg.defaults.idle_timeout_s = args.search_idle_unload_s as i64;
         cfg.cache_bytes = args.search_cache_bytes;
         cfg.memory_budget = (args.search_memory_mb > 0).then_some(args.search_memory_mb << 20);
+        // every cluster's script engine is made after this
+        search_painless::set_default_max_execution_bytes(args.search_script_memory_mb << 20);
         cfg.max_in_flight_bytes = (args.search_max_in_flight_body_mb > 0).then(|| usize::try_from(args.search_max_in_flight_body_mb << 20).unwrap_or(usize::MAX));
         cfg.sync_objects |= args.search_sync_objects;
         cfg.history_retention = Duration::from_secs(args.search_history_s);
@@ -280,6 +301,7 @@ impl Search {
         }
         cfg.audit.retention = Duration::from_secs(args.search_audit_retention_days.max(1) * 86_400);
         cfg.audit.max_bytes = args.search_audit_max_mb.max(1) << 20;
+        cfg.node_settings.push((search_control::SEARCH_REQUEST_MAX_LIMIT.to_string(), args.search_request_memory_max.trim().to_string()));
         cfg.embed = embed_config(home, args)?;
         if args.search_repository_allow_private {
             cfg.node_settings.push((search_control::S3_ALLOW_PRIVATE.to_string(), "true".to_string()));
@@ -310,7 +332,8 @@ impl Search {
         }
         // Reindex from remote never reads this node's own endpoints: a tenant's whitelist naming
         // them would read other tenants' clusters through roll (fleet nodes' addresses are
-        // private, refused unless private hosts are allowed).
+        // private, refused unless private hosts are allowed). The addresses below cover every
+        // other outbound call too (search_es::egress).
         let mut blocked = vec![format!("{}:*", public_host.to_ascii_lowercase())];
         if let Some(d) = &cfg.domain {
             blocked.push(format!("{d}:*"));
@@ -323,9 +346,10 @@ impl Search {
         // The same endpoints by address, checked on the address a connection uses: a name
         // spelled another way, an IP literal or any DNS name pointing here leads nowhere.
         // Private addresses are refused anyway unless private hosts are allowed (development).
-        let mut deny: Vec<String> = args.search_reindex_deny.as_deref().map(|d| d.split(',').map(str::trim).filter(|x| !x.is_empty()).map(str::to_string).collect()).unwrap_or_default();
+        let given = args.search_egress_deny.clone().or_else(|| std::env::var("ROLL_SEARCH_REINDEX_DENY").ok());
+        let mut deny: Vec<String> = given.as_deref().map(|d| d.split(',').map(str::trim).filter(|x| !x.is_empty()).map(str::to_string).collect()).unwrap_or_default();
         for n in &deny {
-            anyhow::ensure!(search_control::reindex_deny_net_ok(n), "--search-reindex-deny: [{n}] isn't an address or network");
+            anyhow::ensure!(search_control::egress_deny_net_ok(n), "--search-egress-deny: [{n}] isn't an address or network");
         }
         let mut names: Vec<String> = vec![public_host.to_string()];
         names.extend(cfg.domain.clone());
@@ -333,7 +357,7 @@ impl Search {
         names.extend(cfg.domain.as_deref().map(|d| format!("roll-reindex-probe.{d}")));
         names.extend(cfg.public_url.as_deref().and_then(|u| reqwest::Url::parse(u).ok()).and_then(|u| u.host_str().map(str::to_string)));
         // Resolved again on every connection (every 30s at most), so the check follows them.
-        cfg.node_settings.push((search_control::REINDEX_DENY_NAMES.to_string(), names.join(",")));
+        cfg.node_settings.push((search_control::EGRESS_DENY_NAMES.to_string(), names.join(",")));
         // And their addresses now, for literals (which never reach the resolver).
         for name in names {
             let name = name.trim_start_matches('[').trim_end_matches(']').to_string();
@@ -346,7 +370,7 @@ impl Search {
         deny.sort();
         deny.dedup();
         if !deny.is_empty() {
-            cfg.node_settings.push((search_control::REINDEX_DENY_ADDRESSES.to_string(), deny.join(",")));
+            cfg.node_settings.push((search_control::EGRESS_DENY_ADDRESSES.to_string(), deny.join(",")));
         }
         let client = search_server::ClientAddresses::new(args.search_client_ip_header.as_deref(), args.search_trusted_proxies.as_deref())?;
         let mut opts = search_server::ListenOptions { proxy_protocol: args.search_proxy_protocol, client, ..Default::default() };
