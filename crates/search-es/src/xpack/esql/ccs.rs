@@ -889,8 +889,12 @@ fn bits_f64(v: &Value) -> Result<f64, String> {
     v.as_str().and_then(|s| s.parse::<u64>().ok()).map(f64::from_bits).ok_or_else(|| "a bad double".into())
 }
 
-/// The most centroids a quantile state may have: 20 × `QuantileStates`' compression of 1000.
-const QUANTILE_MAX_CENTROIDS: usize = 20_000;
+/// How many values a quantile state's digest keeps sorted before it merges them: `HybridDigest`'s
+/// `round(compression) * 20`. Below it a digest sends each value once with a weight of 1, and a
+/// merging digest sends fewer centroids than that.
+fn quantile_sorting_max() -> i64 {
+    search_aggs::format::java_round(super::value::QUANTILE_COMPRESSION).saturating_mul(20)
+}
 
 /// Encodes an aggregation state.
 pub fn encode_acc(a: &Acc) -> Value {
@@ -988,11 +992,11 @@ pub fn decode_acc(v: &Value) -> Result<Acc, String> {
             acc
         }
         "q" => {
-            // A digest of compression 1000 has at most 20,000 centroids, whose weights sum to a
-            // count. Below 20,000 values it is still a sorting digest, which sends each value
-            // with a weight of 1: a larger weight there would push that many values.
+            // At most [`quantile_sorting_max`] centroids, whose weights sum to a count; below
+            // that many values every weight is 1 (a larger one would push that many values).
+            let sorting_max = quantile_sorting_max();
             let centroids = list(1)?;
-            if centroids.len() > QUANTILE_MAX_CENTROIDS {
+            if centroids.len() as i64 > sorting_max {
                 return Err("a quantile state with too many centroids".into());
             }
             let mut parsed = Vec::with_capacity(centroids.len());
@@ -1003,13 +1007,12 @@ pub fn decode_acc(v: &Value) -> Result<Acc, String> {
                 total = total.checked_add(count).ok_or("centroid weights past a count")?;
                 parsed.push((bits_f64(&c[0])?, count as u64));
             }
-            if total < QUANTILE_MAX_CENTROIDS as i64 && parsed.iter().any(|&(_, n)| n != 1) {
+            if total < sorting_max && parsed.iter().any(|&(_, n)| n != 1) {
                 return Err("a sorting quantile state with a weight other than 1".into());
             }
-            let mut d = search_aggs::metrics::tdigest::TDigest::new(1000.0, false);
-            for (mean, count) in parsed {
-                d.add_weighted(mean, count).map_err(|_| "a bad centroid mean")?;
-            }
+            // Built as a merge adds a digest: one past the sorting size is a merging digest at
+            // once, never sorted values first.
+            let d = search_aggs::metrics::tdigest::TDigest::from_centroids(super::value::QUANTILE_COMPRESSION, total as u64, &parsed).map_err(|_| "a bad centroid mean")?;
             Acc::Quantile(Box::new(d))
         }
         "wf" => Acc::Welford { n: u64::try_from(int(1)?).map_err(|_| "a bad count")?, mean: bits_f64(at(2)?)?, m2: bits_f64(at(3)?)? },
