@@ -590,7 +590,7 @@ async fn a_host_that_renders_apps_gets_the_table_view() {
     let ui_of = |list: &Value, name: &str| list["tools"].as_array().unwrap().iter().find(|t| t["name"] == name).map(|t| t["_meta"]["ui"]["resourceUri"].clone()).unwrap_or(Value::Null);
     assert_eq!(ui_of(&tools, "postgres_query"), "ui://roll/table", "{tools}");
     assert_eq!(ui_of(&tools, "postgres_delete_project"), Value::Null, "only tools that read rows");
-    let view = rpc("resources/read", json!({ "uri": "ui://roll/table" }), Some(session)).await;
+    let view = rpc("resources/read", json!({ "uri": "ui://roll/table" }), Some(session.clone())).await;
     assert_eq!(view["contents"][0]["mimeType"], "text/html;profile=mcp-app", "{view}");
     assert!(view["contents"][0]["text"].as_str().unwrap().contains("ui/initialize"));
     // A host that didn't declare them: no UI.
