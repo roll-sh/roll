@@ -1,6 +1,7 @@
 //! `roll secrets …` and `roll run` (docs/secrets.md, "Consumption"): a project's secrets and
 //! environment variables, and a command run with them in its environment, without files.
 
+mod local_agent;
 mod repo;
 
 use crate::Api;
@@ -841,6 +842,9 @@ pub enum Secrets {
         #[command(subcommand)]
         cmd: IssuerCmd,
     },
+    /// Serve the environment's values to apps on this machine from 127.0.0.1, cached and kept
+    /// current, as the Lambda extension does (a sidecar or a unit; docs/secrets.md, "A local agent").
+    Agent(local_agent::LocalAgent),
 }
 
 #[derive(Subcommand)]
@@ -2029,6 +2033,10 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
     // A gateway runs with its own credential, in no project's name.
     if let Secrets::Gateways(GatewaysCmd::Up { gateway, allow, allow_file, token_file, identity, oidc_token_file }) = &cmd {
         return gateway_up(api, gateway.clone(), allow.clone(), allow_file.clone(), token_file.clone(), identity.clone(), oidc_token_file.clone()).await;
+    }
+    // The agent finds its project itself and serves until stopped.
+    if let Secrets::Agent(a) = cmd {
+        return local_agent::run(api, &args, a).await;
     }
     // An export is checked on this machine, against keys saved earlier. A `prj_…` id needs no
     // server; a name is looked up.
@@ -3419,7 +3427,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("Revoked {id}");
             }
         },
-        Secrets::Keygen { .. } | Secrets::Key(_) | Secrets::Unseal { .. } | Secrets::Find { .. } | Secrets::Recover { .. } | Secrets::Doctor | Secrets::Health { all: true, .. } | Secrets::Issuer { .. } => unreachable!("handled before a project is picked"),
+        Secrets::Keygen { .. } | Secrets::Key(_) | Secrets::Unseal { .. } | Secrets::Find { .. } | Secrets::Recover { .. } | Secrets::Doctor | Secrets::Health { all: true, .. } | Secrets::Issuer { .. } | Secrets::Agent(_) => unreachable!("handled before a project is picked"),
         Secrets::Backup { to, out } => {
             let v = c.call(Method::POST, &format!("{}/backup", c.base()), Some(json!({ "recipient": to }))).await?;
             let text = serde_json::to_string_pretty(&v)?;
