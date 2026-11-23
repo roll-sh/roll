@@ -338,6 +338,9 @@ export class DemoGateway {
     }
     if (machine !== this.host || !this.settings) return missing;
     switch (c.type) {
+      // roll's relay sends it from roll secrets; the demo has no relay.
+      case "gateway.upstream_key":
+        return bad("gateway.upstream_key comes from roll's relay only");
       case "gateway.key": {
         if (!this.settings.upstreams?.some((u) => u.id === c.upstream)) return { type: "error", code: "not_found", message: `no upstream ${c.upstream}` };
         // The demo can't open a sealed key (only the daemon can): it notes that one is set.

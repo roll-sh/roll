@@ -487,6 +487,11 @@ fn commands() -> Vec<Command> {
         Command::GatewayConfigure { settings: Box::new(gateway_settings()) },
         Command::GatewayKey { upstream: "anthropic".into(), key: KeyChange::Set { sealed: sealed() } },
         Command::GatewayKey { upstream: "openrouter".into(), key: KeyChange::Clear },
+        Command::GatewayUpstreamKey { upstream: "anthropic".into(), key: RefKey::Set { sealed: sealed() } },
+        Command::GatewayUpstreamKey {
+            upstream: "anthropic".into(),
+            key: RefKey::Refused { reason: "maker unreachable: usr_ada, who chose it, can no longer reveal production:/ or can no longer sign in".into() },
+        },
         Command::GatewayClientIssue { name: "Ada's sandbox".into(), machine: Some(mch()), seal_key: "hSDwCYkwp1R0i33ctD73Wg2_Og0mOBr066SpjqqbTmo".into() },
         Command::GatewayClientRevoke { client: "gwc_5f1d2c3b4a596877".into() },
         Command::GatewayTest { upstream: None },
@@ -549,6 +554,7 @@ fn covered_command(c: &Command) {
         | Command::EndpointKey { .. }
         | Command::GatewayConfigure { .. }
         | Command::GatewayKey { .. }
+        | Command::GatewayUpstreamKey { .. }
         | Command::GatewayClientIssue { .. }
         | Command::GatewayClientRevoke { .. }
         | Command::GatewayTest { .. }
@@ -1356,7 +1362,7 @@ fn every_variant_of_every_tagged_enum_is_sampled() {
     let tags = |v: serde_json::Value, key: &str| -> std::collections::BTreeSet<String> {
         v.as_array().unwrap().iter().map(|x| x[key].as_str().unwrap().to_string()).collect()
     };
-    assert_eq!(tags(serde_json::to_value(commands()).unwrap(), "type").len(), 56, "commands");
+    assert_eq!(tags(serde_json::to_value(commands()).unwrap(), "type").len(), 57, "commands");
     assert_eq!(tags(serde_json::to_value(replies()).unwrap(), "type").len(), 20, "replies");
     assert_eq!(tags(serde_json::to_value(entities()).unwrap(), "kind").len(), 8, "entities");
     let bodies: std::collections::BTreeSet<String> = entities()

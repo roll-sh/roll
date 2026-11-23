@@ -224,6 +224,29 @@ For a request asking for model `m`:
 
 - **Keys.** A key is sealed to the gateway's daemon in the browser (`roll-seal-v1`, associated data
   `roll-gateway-upstream:<id>`), or read from 1Password on that computer (`key_ref`).
+- **Keys from roll secrets.** `key_ref` may instead be a roll secrets reference
+  (`roll://ENV[/folder]/KEY`), exactly as `roll_secrets::Reference::parse` (from
+  `roll-secrets-ref`) reads it in `UpstreamSpec::check`. The daemon never reads it itself; it works
+  as an agents endpoint's `roll://` key does (docs/code/agents.md, "Endpoints";
+  `code-control/src/agents/endpoint_refs.rs`).
+  - **Bound on `gateway.configure`.** The relay has roll secrets bind every such upstream's
+    reference to the command's sender (`Secrets::bind_ref`). The reader is the host machine,
+    `agent:<machine name>` in reach and the audit log, the same reader as its endpoints. The maker is
+    kept in `agent_endpoint_refs` under `upstream:<id>`, which only the relay writes. A sender roll
+    secrets refuses gets the 403, and nothing reaches the host. `gateway.remove` drops them.
+  - **Sent sealed.** After each `hello` and once a minute, the relay reads each one as its maker may
+    now (`digest_as`, then `resolve_as` when it moved). It sends the value sealed to the daemon's
+    `seal_key` with `roll-gateway-upstream-ref:<id>`, so it never opens as a browser-sealed key.
+    The command is `gateway.upstream_key {upstream, key: {type: set, sealed}}`, from `roll`. The
+    relay keeps no copy, and the daemon holds it in memory only. Until it arrives, the upstream has
+    no key.
+  - **Failing closed.** When the maker can no longer reveal it, the relay sends
+    `{type: refused, reason}`. The upstream then gets no key (`Gateway::refuse_keys`), and a
+    request doesn't go on to another upstream of the same provider (`route::same_provider`, as
+    after a 429): another key of that provider is never the way around a key that was taken away.
+    Upstreams of other providers still take over. `gateway.status` shows the reason as the
+    upstream's `last_error`, and the request fails with 502.
+  - **Relay only.** The relay refuses a `gateway.upstream_key` sent to `…/commands` (403).
 - **Private addresses.** Private, loopback and tailnet addresses are refused, whether written out or
   resolved, unless the upstream allows them (`allow_private`, for a model server on the owner's
   network). The client follows no redirects.
@@ -320,6 +343,7 @@ These are daemon commands on the gateway's machine, all owner-only. Agent tokens
 |---|---|
 | `gateway.configure {settings}` | Replace the settings, apply them live, and send `hello` with `MachineConfig.gateway` |
 | `gateway.key {upstream, key}` | Set or clear an upstream's sealed key |
+| `gateway.upstream_key {upstream, key}` | An upstream's `roll://` key from roll secrets, sealed, or why it's refused (roll's relay only) |
 | `gateway.client.issue {name, machine, seal_key}` | Mint a client key and answer it sealed to `seal_key` (`IssuedClient`) |
 | `gateway.client.revoke {client}` | Revoke a client key |
 | `gateway.test {upstream?}` | Check one upstream, or all of them |
