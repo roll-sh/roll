@@ -2613,13 +2613,15 @@ impl EnvLive {
             tpl.spec.aliases.clear();
         }
         tpl.spec.vars.extend(vars.iter().cloned());
-        self.run_template(tpl, name, log, timeout, cancel).await
+        self.run_template(tpl, name, log, timeout, cancel, None).await
     }
 
     /// A browser check's container (`crate::browser`): roll's checker `image` on the live
     /// deployment's network with `vars` only (none of the app's), no port, volume, sidecar or
     /// name of its own there, 1 vCPU and 1 GiB, to its exit or `timeout`; metered to the service.
-    pub async fn run_checker(self: &Arc<Self>, image: &str, command: &str, vars: Vec<(String, String)>, timeout: Duration, log: LogSink) -> anyhow::Result<Exit> {
+    /// What it left at `keep` comes back in [`Exit::kept`].
+    #[allow(clippy::too_many_arguments)]
+    pub async fn run_checker(self: &Arc<Self>, image: &str, command: &str, vars: Vec<(String, String)>, timeout: Duration, log: LogSink, keep: &str, cancel: tokio_util::sync::CancellationToken) -> anyhow::Result<Exit> {
         let mut tpl = (*self.template().ok_or_else(|| anyhow::anyhow!("no deployment"))?).clone();
         let s = &mut tpl.spec;
         (s.image, s.command, s.vars, s.port, s.volume, s.idle_stop_s, s.registry, s.health) = (image.to_string(), Some(command.to_string()), vars, None, None, None, None, None);
@@ -2628,10 +2630,10 @@ impl EnvLive {
         s.files.clear();
         s.sidecars.clear();
         (s.cpu, s.memory_mb, tpl.run.cpu, tpl.run.memory_mb) = (1.0, 1024, 1.0, 1024);
-        self.run_template(tpl, None, Some(log), timeout, tokio_util::sync::CancellationToken::new()).await
+        self.run_template(tpl, None, Some(log), timeout, cancel, Some(keep)).await
     }
 
-    async fn run_template(self: &Arc<Self>, tpl: Template, name: Option<String>, log: Option<LogSink>, timeout: Duration, cancel: tokio_util::sync::CancellationToken) -> anyhow::Result<Exit> {
+    async fn run_template(self: &Arc<Self>, tpl: Template, name: Option<String>, log: Option<LogSink>, timeout: Duration, cancel: tokio_util::sync::CancellationToken, keep: Option<&str>) -> anyhow::Result<Exit> {
         let inst = self.make_run(&tpl, name).await?;
         let log = log.unwrap_or_else(|| self.log.instance(&inst.name, &inst.deployment));
         let began = Instant::now();
@@ -2654,9 +2656,24 @@ impl EnvLive {
         // With its sidecars' size: they run beside it.
         let (side_cpu, side_mb) = tpl.spec.sidecars_size();
         self.meter.lock().sample(now_ms(), secs * (tpl.run.cpu + side_cpu) * 0.5, ((tpl.run.memory_mb + side_mb) as u64) << 20, secs, 1);
+        // What it was asked to keep, from the stopped container, bounded.
+        let kept = match keep {
+            Some(path) => match self.runtime.copy_from(&inst.name, path).await {
+                Ok(stream) => {
+                    use tokio::io::AsyncReadExt;
+                    let mut buf = Vec::new();
+                    match stream.take(MAX_KEPT + 1).read_to_end(&mut buf).await {
+                        Ok(_) if buf.len() as u64 <= MAX_KEPT => Some(buf),
+                        _ => None,
+                    }
+                }
+                Err(_) => None,
+            },
+            None => None,
+        };
         self.runtime.remove(&inst.name).await;
         let (code, timed_out, canceled) = ran?;
-        Ok(Exit { deployment: tpl.deployment.clone(), container: inst.name.clone(), code, timed_out, canceled })
+        Ok(Exit { deployment: tpl.deployment.clone(), container: inst.name.clone(), code, timed_out, canceled, kept })
     }
 }
 
@@ -2732,7 +2749,13 @@ pub struct Exit {
     pub code: Option<i32>,
     pub timed_out: bool,
     pub canceled: bool,
+    /// What a run kept at the path it was asked to keep, copied out after it stopped: a tar
+    /// archive, at most [`MAX_KEPT`] (a browser check's failure: `crate::browser`).
+    pub kept: Option<Vec<u8>>,
 }
+
+/// The most a run's kept files may be.
+pub const MAX_KEPT: u64 = 24 << 20;
 
 #[cfg(test)]
 mod tests {

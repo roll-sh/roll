@@ -4,6 +4,7 @@
 // requests are fetched there by Playwright, every other host directly by the browser), carrying
 // ROLL_CHECK_TOKEN so the environment's gates let it in as they let roll's uptime checks. The
 // last line is the result: `ROLL-CHECK {"ok":…,"status":…,"error":…,"ms":…}`.
+import { mkdirSync } from 'node:fs'
 import { chromium } from '/roll-check/node_modules/playwright-core/index.mjs'
 
 const env = process.env
@@ -18,13 +19,18 @@ function say(result) {
   console.log('ROLL-CHECK ' + JSON.stringify({ ...result, ms: Date.now() - started }))
 }
 
+// A failure's screenshot and trace go here; roll copies them out after the run.
+const KEEP = '/tmp/roll-check'
 let browser
+let context
+let page
 let status = null
 let code = 0
 try {
   browser = await chromium.launch({ timeout })
-  const context = await browser.newContext({ userAgent: 'Mozilla/5.0 (X11; Linux x86_64) roll-browser-check/1.0 (Playwright)' })
+  context = await browser.newContext({ userAgent: 'Mozilla/5.0 (X11; Linux x86_64) roll-browser-check/1.0 (Playwright)' })
   context.setDefaultTimeout(timeout)
+  await context.tracing.start({ screenshots: true, snapshots: true })
   // The environment's own host through roll, fetched here (never by the browser, so neither its
   // address nor the token is the page's): every other host as the browser reaches it.
   if (env.ROLL_CHECK_PROXY) {
@@ -38,13 +44,14 @@ try {
       await route.fulfill({ response })
     })
   }
-  const page = await context.newPage()
+  page = await context.newPage()
   const resp = await page.goto(url, { timeout, waitUntil: 'load' })
   status = resp ? resp.status() : null
   const want = Number(env.ROLL_CHECK_STATUS) || 0
   if (want ? status !== want : !(status >= 200 && status < 400)) throw new Error(`answered ${status}`)
   if (env.ROLL_CHECK_CONTAINS && !(await page.content()).includes(env.ROLL_CHECK_CONTAINS)) throw new Error(`the page doesn't say "${env.ROLL_CHECK_CONTAINS}"`)
   if (script.trim()) await new AsyncFunction('page', 'context', 'url', script)(page, context, url)
+  await context.tracing.stop()
   say({ ok: true, status })
 } catch (e) {
   code = 1
@@ -52,6 +59,11 @@ try {
   const lines = String((e && e.message) || e).split('\n')
   const waiting = lines.find((l) => l.trim().startsWith('- waiting for '))
   say({ ok: false, status, error: (waiting ? `${lines[0]} (${waiting.trim().slice(2)})` : lines[0]).slice(0, 300) })
+  try {
+    mkdirSync(KEEP, { recursive: true })
+    if (page) await page.screenshot({ path: `${KEEP}/screenshot.png`, timeout: 5000 }).catch(() => {})
+    if (context) await context.tracing.stop({ path: `${KEEP}/trace.zip` }).catch(() => {})
+  } catch {}
 } finally {
   await browser?.close().catch(() => {})
 }
