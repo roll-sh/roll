@@ -203,6 +203,12 @@ impl PointReader {
                 Some(First::None)
             } else if uk < start || key_ts(k) > ts {
                 None
+            } else if block.is_cols() {
+                // (A column block's row made alone: `value_ref` would make all of them.)
+                block.value(pos).map(|v| {
+                    f(&v);
+                    First::Row(Vec::new(), Bytes::new())
+                })
             } else {
                 block.value_ref(pos).map(|v| {
                     f(v);
@@ -394,6 +400,11 @@ impl PointReader {
                 && let Some(span) = block.value_span(bpos)
             {
                 found.push((st.i, plan[pi - 1].0, span));
+                continue;
+            }
+            if block.is_cols() {
+                // (A column block's row (never stored out of line), made alone.)
+                out[st.i] = block.value(bpos);
                 continue;
             }
             match block.value_ref(bpos) {
