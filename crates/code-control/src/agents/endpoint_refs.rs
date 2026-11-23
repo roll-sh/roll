@@ -18,6 +18,10 @@
 //! - **Failing closed.** A refusal (the maker removed or demoted, the key gone) is sent too: the
 //!   daemon drops the key it held, and the endpoint's `error` (an upstream's status) says why. An
 //!   upstream's refusal also bars its provider in the gateway: no other key of it is tried.
+//! - **Only on a refusal.** A refusal is roll secrets' [`crate::Refused`], or the slot's binding
+//!   gone from `agent_endpoint_refs`. Anything else (roll secrets starting after a restart, a
+//!   database that didn't answer) sends nothing: the daemon keeps what it holds, and the slot is
+//!   asked again soon ([`RETRY`], doubling up to [`EVERY`]).
 
 use super::store::MachineRow;
 use crate::model::Owner;
@@ -47,6 +51,10 @@ CREATE TABLE IF NOT EXISTS agent_endpoint_refs (
 /// How often a connected machine's `roll://` keys are checked again without a `hello`: a
 /// rotation, or a maker who can't read the key any more, reaches the daemon within this.
 const EVERY: Duration = Duration::from_secs(60);
+
+/// How soon a slot roll secrets couldn't answer for is asked again (then twice as long, up to
+/// [`EVERY`]).
+const RETRY: Duration = Duration::from_secs(1);
 
 /// Where a `roll://` key is used on a machine.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -128,14 +136,17 @@ enum Sent {
 pub(super) fn follow(code: Arc<Code>, machine: MachineRow, mut info: tokio::sync::watch::Receiver<Option<MachineInfo>>) {
     tokio::spawn(async move {
         let mut sent: HashMap<Slot, Sent> = HashMap::new();
+        let mut retry = Duration::ZERO;
         loop {
             let now = info.borrow_and_update().clone();
-            if let Some(i) = now {
-                keep(&code, &machine, &i, &mut sent).await;
-            }
+            let unsure = match now {
+                Some(i) => keep(&code, &machine, &i, &mut sent).await,
+                None => false,
+            };
+            retry = if unsure { (retry * 2).clamp(RETRY, EVERY) } else { Duration::ZERO };
             tokio::select! {
                 changed = info.changed() => if changed.is_err() { return },
-                _ = tokio::time::sleep(EVERY) => {}
+                _ = tokio::time::sleep(if unsure { retry } else { EVERY }) => {}
             }
         }
     });
@@ -149,61 +160,88 @@ fn wanted(info: &MachineInfo) -> Vec<(Slot, String)> {
     endpoints.chain(upstreams).collect()
 }
 
-async fn keep(code: &Code, machine: &MachineRow, info: &MachineInfo, sent: &mut HashMap<Slot, Sent>) {
+/// Whether a slot is left to ask again soon: roll couldn't tell what to send, or the daemon
+/// didn't take it.
+async fn keep(code: &Code, machine: &MachineRow, info: &MachineInfo, sent: &mut HashMap<Slot, Sent>) -> bool {
     let wanted = wanted(info);
     sent.retain(|slot, _| wanted.iter().any(|(w, _)| w == slot));
-    let (Some(seal_key), false) = (info.seal_key.as_deref(), wanted.is_empty()) else { return };
+    let (Some(seal_key), false) = (info.seal_key.as_deref(), wanted.is_empty()) else { return false };
     let owner = match code.db.owner_by_id(&machine.owner_id) {
         Ok(Some(o)) => o,
-        _ => return,
+        Ok(None) => return false,
+        Err(_) => return true,
     };
+    let mut unsure = false;
     for (slot, reference) in wanted {
-        let (now, key) = read(code, &owner, machine, &slot, &reference, seal_key, sent.get(&slot)).await;
-        let Some(key) = key else { continue };
+        let (now, key) = match read(code, &owner, machine, &slot, &reference, seal_key, sent.get(&slot)).await {
+            Now::Same => continue,
+            Now::Unsure(why) => {
+                tracing::info!(machine = %machine.id, slot = %slot.row(), error = %why, "roll couldn't read a roll:// key: the daemon keeps what it holds");
+                unsure = true;
+                continue;
+            }
+            Now::Send(now, key) => (now, key),
+        };
         let (id, command) = match &slot {
             Slot::Endpoint(e) => (format!("refkey-{e}-{}", super::api::random_hex(6)), Command::EndpointKey { endpoint: e.clone(), key }),
             Slot::Upstream(u) => (format!("refkey-up-{u}-{}", super::api::random_hex(6)), Command::GatewayUpstreamKey { upstream: u.clone(), key }),
         };
         match code.machine_command(machine, id, "roll".into(), command, None).await {
             // Tried again at the next `hello` or check.
-            Reply::Error(e) => tracing::info!(machine = %machine.id, slot = %slot.row(), error = %e.message, "sending a roll:// key"),
+            Reply::Error(e) => {
+                tracing::info!(machine = %machine.id, slot = %slot.row(), error = %e.message, "sending a roll:// key");
+                unsure = true;
+            }
             _ => {
                 sent.insert(slot, now);
             }
         }
     }
+    unsure
 }
 
-/// What to send for one slot now (`None`: what was sent still holds).
-async fn read(code: &Code, owner: &Owner, machine: &MachineRow, slot: &Slot, reference: &str, seal_key: &str, was: Option<&Sent>) -> (Sent, Option<RefKey>) {
+/// What to do for one slot now.
+enum Now {
+    /// What was sent still holds.
+    Same,
+    /// roll couldn't tell (why): nothing is sent, and the daemon keeps what it holds.
+    Unsure(String),
+    Send(Sent, RefKey),
+}
+
+async fn read(code: &Code, owner: &Owner, machine: &MachineRow, slot: &Slot, reference: &str, seal_key: &str, was: Option<&Sent>) -> Now {
     let refused = |reason: String| {
         let now = Sent::Refused(reference.to_string(), reason.clone());
-        let key = (was != Some(&now)).then_some(RefKey::Refused { reason });
-        (now, key)
+        if was == Some(&now) { Now::Same } else { Now::Send(now, RefKey::Refused { reason }) }
+    };
+    // Only roll secrets' refusal is one.
+    let failed = |e: anyhow::Error| match e.downcast::<crate::Refused>() {
+        Ok(r) => refused(r.0),
+        Err(e) => Now::Unsure(format!("{e:#}")),
     };
     let Some(secrets) = code.secret_env.get() else { return refused("roll secrets isn't on this server".into()) };
     let maker = match bound(code, &machine.id, slot) {
         Ok(Some((r, maker))) if r == reference => maker,
         Ok(_) => return refused(format!("nobody roll knows chose {reference} for this key: set it again from roll")),
-        Err(e) => return refused(format!("roll couldn't read who chose {reference}: {e}")),
+        Err(e) => return Now::Unsure(format!("reading who chose {reference}: {e}")),
     };
     let digest = match secrets.machine_key_digest(&owner.name, &machine.name, reference, &maker).await {
         Ok(d) => d,
-        Err(e) => return refused(format!("{e:#}")),
+        Err(e) => return failed(e),
     };
     if was == Some(&Sent::Value(reference.to_string(), digest.clone())) {
-        return (Sent::Value(reference.to_string(), digest), None);
+        return Now::Same;
     }
     let value = match secrets.machine_key(&owner.name, &machine.name, reference, &maker).await {
         Ok(v) => v,
-        Err(e) => return refused(format!("{e:#}")),
+        Err(e) => return failed(e),
     };
     let context = match slot {
         Slot::Endpoint(e) => SealedSecret::ref_context(e),
         Slot::Upstream(u) => agent_proto::gateway::upstream_ref_context(u),
     };
     match agent_proto::seal::seal_with(seal_key, &context, &value.0) {
-        Ok(sealed) => (Sent::Value(reference.to_string(), digest), Some(RefKey::Set { sealed })),
+        Ok(sealed) => Now::Send(Sent::Value(reference.to_string(), digest), RefKey::Set { sealed }),
         Err(e) => refused(format!("couldn't seal the key to this machine: {e}")),
     }
 }

@@ -245,7 +245,9 @@ For a request asking for model `m`:
     request doesn't go on to another upstream of the same provider (`route::same_provider`, as
     after a 429): another key of that provider is never the way around a key that was taken away.
     Upstreams of other providers still take over. `gateway.status` shows the reason as the
-    upstream's `last_error`, and the request fails with 502.
+    upstream's `last_error`, and the request fails with 502. Only a refusal is sent as one: when
+    roll secrets can't answer (starting, a database failover), the host keeps the key it holds
+    (docs/code/agents.md, "Endpoints").
   - **Relay only.** The relay refuses a `gateway.upstream_key` sent to `…/commands` (403).
 - **Private addresses.** Private, loopback and tailnet addresses are refused, whether written out or
   resolved, unless the upstream allows them (`allow_private`, for a model server on the owner's

@@ -189,16 +189,18 @@ pub trait SecretEnv: Send + Sync {
         Err(crate::Error::Unprocessable("roll:// keys need roll secrets on this server".into()))
     }
     /// That key's value now, read as `maker` may (re-checked, audited as `agent:<machine>`), to
-    /// seal to the machine's daemon. The error says why, never a value.
+    /// seal to the machine's daemon. The error says why, never a value: [`Refused`] when roll
+    /// secrets refuses it (the daemon drops the key it held); any other error (roll secrets
+    /// starting, a database that didn't answer) leaves the answer open.
     async fn machine_key(&self, owner: &str, machine: &str, reference: &str, maker: &str) -> anyhow::Result<CredentialValue> {
         let _ = (owner, machine, reference, maker);
-        anyhow::bail!("roll secrets isn't on this server")
+        Err(Refused("roll secrets isn't on this server".into()).into())
     }
     /// The digest of what [`SecretEnv::machine_key`] would read, refused exactly as it would be
     /// (no value, not audited): checked often, the value read only when it moves.
     async fn machine_key_digest(&self, owner: &str, machine: &str, reference: &str, maker: &str) -> anyhow::Result<String> {
         let _ = (owner, machine, reference, maker);
-        anyhow::bail!("roll secrets isn't on this server")
+        Err(Refused("roll secrets isn't on this server".into()).into())
     }
 }
 
