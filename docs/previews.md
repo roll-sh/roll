@@ -2523,21 +2523,20 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Storybook stories as snapshots, in review** (Chromatic): each story taken alone, clipped to
-   what it renders, compared with main's and reviewed like a page (`github.storybook`).
-2. **A process on a laptop standing in for one service** (Signadot local sandboxes,
-   Telepresence): the preview's other services and data reach it, the reverse of
-   `roll preview forward`.
-3. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
+1. **A service swapped for a process on a laptop, in review** (Signadot's local sandboxes,
+   Telepresence): `roll preview swap`, the preview's requests for it served from the laptop.
+2. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
    (3.3 s in its log) and its masking, which needs that compute up: pg-control's to shorten.
-4. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+3. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+4. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-6. **Watch: pg-control's recovery to a time seconds old** (unowned).
+5. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-23, night: Storybook stories as snapshots (#837: each story a page, compared with main's and reviewed).
 
 Landed 2026-11-23, evening, later: endpoint answers compared with main's by shape (#834: a field gone or a type widened; live, `/openapi.json` loses `paths./users/{id}`).
 
