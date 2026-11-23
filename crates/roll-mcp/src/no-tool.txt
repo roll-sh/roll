@@ -205,6 +205,7 @@ POST /v1/tasks/keys/rotate                                                     a
 POST /v1/tasks/publish/{*destination}                                          the data plane (clients' own protocol)
 DELETE /v1/tasks/topics/{name}/endpoints                                       covered by tasks_set_topic (a topic's endpoints, whole)
 POST /v1/tasks/topics/{name}/endpoints                                         covered by tasks_set_topic (a topic's endpoints, whole)
+GET /v1/workspace/projects/{id}/events                                         an MCP Events feed (workspace.event), mapped by roll MCP's feed table
 PUT /v1/workspace/projects/{id}/homes/{product}/{ref}                          an admin's: where a product's resource lives for the project (#501)
 GET /v1/workspace/projects/{id}/invites                                        a person's call: invites are a signed-in person's (#501)
 DELETE /v1/workspace/projects/{id}/invites/{invite}                            a person's call: invites are a signed-in person's (#501)

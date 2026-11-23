@@ -63,6 +63,11 @@ pub struct Settings {
     /// errors main's doesn't have (`slower_routes`, `new_errors`); `required` also keeps it from
     /// landing in roll until they're gone or someone other than its author accepts them.
     pub regressions: RegressionsRule,
+    /// Production's browser checks on each preview head (roll apps' `checks[].browser`): `report`
+    /// (the default) shows them; `check` also posts `roll/browser-checks`, pending while they run
+    /// and failing while one fails; `required` also keeps the change from landing in roll until
+    /// they pass at its head.
+    pub browser_checks: BrowserChecksRule,
     /// `catch` (the default): services send mail to roll's catcher (`SMTP_*` are roll's, mail
     /// providers' API keys are removed), listed on the preview, never delivered; `deliver`: the
     /// project's own mail settings reach previews.
@@ -156,6 +161,15 @@ pub enum EgressRule {
     #[default]
     Open,
     Roll,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BrowserChecksRule {
+    #[default]
+    Report,
+    Check,
+    Required,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -398,6 +412,7 @@ impl Default for Settings {
             access: Access::Link,
             visual_review: VisualReviewRule::Off,
             regressions: RegressionsRule::Off,
+            browser_checks: BrowserChecksRule::Report,
             mail: MailRule::Catch,
             traces: false,
             egress: EgressRule::Open,

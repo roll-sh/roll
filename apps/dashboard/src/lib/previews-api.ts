@@ -152,6 +152,8 @@ export interface Preview {
   /** Its first page's own links that are broken (status 0: no answer), of those checked. */
   page_links?: { checked: number; broken: { path: string; status: number }[] } | null;
   /** Its routes (from its traces) clearly slower than main's preview's, as its holder last read them. */
+  /** The project's rule for production's browser checks (`check`, `required`), when it's more than showing them. */
+  browser_checks_rule?: "check" | "required" | null;
   /** The project's rule for regressions against main (`check`, `required`). */
   regressions?: "check" | "required" | null;
   /** Who accepted its regressions at its head. */
@@ -425,6 +427,7 @@ export interface PreviewSettings {
   visual_review?: "off" | "check" | "required";
   /** `check` posts `roll/regressions`, failing while a change has routes slower than main's preview or errors main's doesn't have. */
   regressions?: "off" | "check" | "required";
+  browser_checks?: "report" | "check" | "required";
   /** `catch` (default): services send mail to roll's catcher, listed on the preview, never delivered; `deliver`: the project's own mail settings. */
   mail?: "catch" | "deliver";
   /** Its `roll.toml` services get the OpenTelemetry SDK's variables, their spans kept on the preview a few hours. */
@@ -659,7 +662,7 @@ export type ErrorGroup = { service: string; fingerprint: string; kind: string; t
 
 /** A running service's use right now: cores of CPU, resident bytes (an instance's, on roll apps), and the MB it runs with. */
 /** Something that happened to a preview (`GET /v1/previews/events`). */
-export type PreviewEvent = { seq: number; at: number; kind: "created" | "ready" | "failed" | "visual_change" | "deleted"; project: string; preview: string; change: string | null; data: { head?: string } };
+export type PreviewEvent = { seq: number; at: number; kind: "created" | "ready" | "failed" | "visual_change" | "browser_checks_passed" | "browser_checks_failed" | "deleted"; project: string; preview: string; change: string | null; data: { head?: string } };
 export type ServiceMetrics = { service: string; cpu: number; memory_bytes: number; memory_mb: number };
 
 /** One of a preview's recent traces: its root span's name and service, when (ms), how long, how many spans, whether any failed. */

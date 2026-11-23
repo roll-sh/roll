@@ -3295,6 +3295,11 @@ impl Store {
             reported_by,
             earlier,
             browser_checks,
+            browser_checks_rule: match settings.browser_checks {
+                crate::settings::BrowserChecksRule::Report => None,
+                crate::settings::BrowserChecksRule::Check => Some("check".into()),
+                crate::settings::BrowserChecksRule::Required => Some("required".into()),
+            },
             copies: copies_total,
             screenshot_at,
             visual_change,

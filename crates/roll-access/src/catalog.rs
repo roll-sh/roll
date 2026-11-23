@@ -1042,6 +1042,8 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/access/audit", "access", R, Tgt::Product),
     row("GET", "/v1/access/activity", "access", R, Tgt::Product),
     row("GET", "/v1/access/alerts", "access", R, Tgt::Product),
+    // Any connection may tell the operator what was hard (it changes nothing; capped an hour).
+    row("POST", "/v1/access/feedback", "access", R, Tgt::AnyGrant),
     row("GET", "/v1/access/oauth/clients", "access", R, Tgt::Product),
     row("GET", "/v1/access/oauth/clients/{id}", "access", R, Tgt::Product),
     row("GET", "/v1/access/oauth/step-ups/{id}", "access", R, Tgt::Product),
@@ -1062,6 +1064,9 @@ static ROWS: &[Row] = &[
     // member's own. A home changes which project stands for a resource: admin on the project, and
     // admin outright on the resource ([`placement`]).
     row("GET", "/v1/workspace/projects/{id}/members", "workspace", R, one(&["id"], "project")),
+    // The project's events feed (member, group role and invite changes), for whoever sees its
+    // members; an invite's address only for its admins. roll MCP's `workspace.event`.
+    row("GET", "/v1/workspace/projects/{id}/events", "workspace", R, one(&["id"], "project")),
     row("PATCH", "/v1/workspace/projects/{id}/members/{user}", "workspace", ADMIN, one(&["id"], "project")),
     row("DELETE", "/v1/workspace/projects/{id}/members/{user}", "workspace", ADMIN, one(&["id"], "project")),
     row("DELETE", "/v1/workspace/projects/{id}/members/me", "workspace", R, one(&["id"], "project")),

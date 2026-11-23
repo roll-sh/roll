@@ -177,6 +177,10 @@ export type Alert = {
   finding?: string;
   why?: string;
   fix?: string;
+  /** agent_feedback: what it was doing, what happened, what it expected. */
+  title?: string;
+  text?: string;
+  description?: string | null;
 };
 
 /** An alert in one sentence, and the token it's about (for a link), if any. */
@@ -193,6 +197,8 @@ export function describeAlert(a: Alert): { text: string; grant: string | null } 
       return { text: `${a.what} was revoked: it was found in ${a.found_at}.`, grant: null };
     case "checkup_finding":
       return { text: `"${a.name}": ${a.why}.`, grant };
+    case "agent_feedback":
+      return { text: `Feedback from ${a.name ? `"${a.name}"` : "an agent"}${a.tool ? ` on ${a.tool}` : ""}: ${a.title} — ${a.text}${a.description ? ` (expected: ${a.description})` : ""}`, grant };
     default:
       return { text: a.kind, grant };
   }

@@ -352,6 +352,10 @@ pub struct PreviewEnvironment {
     /// (`pending`, `passed`, `failed`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub browser_checks: Vec<PreviewBrowserCheck>,
+    /// The project's rule for them (`check`: the `roll/browser-checks` status; `required`: also a
+    /// blocker), when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_checks_rule: Option<String>,
     /// How much the first service's page changed since the screenshot at an earlier head.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visual_change: Option<PreviewVisualChange>,

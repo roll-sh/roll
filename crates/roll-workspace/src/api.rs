@@ -85,6 +85,7 @@ pub fn router(ws: Arc<Workspace>) -> Router {
         .route("/v1/workspace/projects/{id}", get(get_one).patch(update).delete(delete_project))
         .route("/v1/workspace/projects/{id}/resources/{kind}/{ref}", put(place).delete(remove))
         .route("/v1/workspace/projects/{id}/members", get(members))
+        .route("/v1/workspace/projects/{id}/events", get(events))
         .route("/v1/workspace/projects/{id}/members/me", delete(leave))
         .route("/v1/workspace/projects/{id}/members/{user}", patch(set_role).delete(remove_member))
         .route("/v1/workspace/projects/{id}/invites", get(invites).post(invite))
@@ -219,6 +220,13 @@ async fn remove(State(ws): S, me: Caller, Path((id, kind, r#ref)): Path<(String,
 async fn members(State(ws): S, me: Caller, Path(id): Path<String>) -> crate::Result<Response> {
     let emails = me.actor().manages(&id);
     Ok(Json(blocking(ws, move |ws| ws.members(me.scope(), &id, emails)).await?).into_response())
+}
+
+/// `?after=&limit=&kinds=&latest=1` (docs/workspace.md, "Events"): whoever sees the members, with
+/// an invite's address only for those who see it there.
+async fn events(State(ws): S, me: Caller, Path(id): Path<String>, Query(q): Query<crate::EventsQuery>) -> crate::Result<Response> {
+    let emails = me.actor().manages(&id);
+    Ok(Json(blocking(ws, move |ws| ws.events(me.scope(), &id, q, emails)).await?).into_response())
 }
 
 /// `{role?, environments?}`: a missing role keeps the current one, and `"environments": null`

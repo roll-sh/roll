@@ -129,9 +129,12 @@ pub struct NodeConfig {
     /// `None`: no node budget.
     pub max_in_flight_bytes: Option<usize>,
     /// Memory all loaded clusters together may hold (indexing buffers, in-heap segments,
-    /// version maps; [`Usage::resident_bytes`]). Past it, the least recently used clusters with
-    /// no request in flight are unloaded, and waking another cluster first makes room.
-    /// `None`: no node budget.
+    /// version maps; [`Usage::resident_bytes`]) and what their requests hold
+    /// ([`Node::request_memory`]), together. Past it, the least recently used clusters with no
+    /// request in flight are unloaded (requests can't be), and waking another cluster first makes
+    /// room; a request that would take residents and requests past it fails with
+    /// `circuit_breaking_exception`. `None`: no node budget for loaded clusters, and half of the
+    /// host's memory for residents and requests.
     pub memory_budget: Option<u64>,
     /// Memory documents being inverted may add to the indexing buffers of every cluster at once
     /// (`search_index::buffer::AnalysisBudget`); past it a document is refused with a 429
@@ -394,6 +397,12 @@ pub struct Node {
     pub unloads: AtomicU64,
     /// Every cluster's security audit log.
     pub audit: Arc<crate::audit::AuditLogs>,
+    /// What requests on every cluster hold together (aggregations, ES|QL, kept results),
+    /// whatever the tenants set their `request` breakers to: one budget with the loaded clusters'
+    /// resident memory, the operator's `memory_budget` (or else half of the host's memory,
+    /// [`search_es::breaker::Breakers::node_budget`]). The reaper tells it what clusters hold
+    /// resident ([`Node::enforce_memory`]); requests get the rest.
+    pub request_memory: Arc<search_es::breaker::MemoryBudget>,
     /// Request body bytes in flight across clusters (`NodeConfig::max_in_flight_bytes`).
     body_bytes: Arc<ByteBudget>,
     /// Memory documents being inverted may add to every cluster's buffers at once
@@ -1027,9 +1036,12 @@ impl Node {
             n => n,
         };
         let audit = crate::audit::AuditLogs::new(stores.data(), cfg.audit.clone());
-        let reindex = search_es::api::remote::RemoteNode::from_settings(&cfg.node_settings);
+        let request_memory = search_es::breaker::Breakers::node_budget(cfg.memory_budget);
+        // Reindex from remote's own budgets are part of the node's: children of it.
+        let reindex = search_es::api::remote::RemoteNode::from_settings_under(&cfg.node_settings, Some(request_memory.clone()));
         Arc::new(Node {
             audit,
+            request_memory,
             body_bytes: ByteBudget::new(cfg.max_in_flight_bytes.unwrap_or(usize::MAX)),
             analysis: search_index::buffer::AnalysisBudget::new(cfg.analysis_limit()),
             reindex,
@@ -1284,6 +1296,9 @@ impl Node {
         let wake_time = started.elapsed();
         tracing::debug!(cluster = name, ms = wake_time.as_secs_f64() * 1e3, shards = recovery.shards, records = recovery.records, "cluster loaded");
         self.wakes.fetch_add(1, Ordering::Relaxed);
+        // What the newcomer holds resident counts against requests at once (the reaper
+        // recounts every cluster on its next round).
+        self.request_memory.add_held_elsewhere(persist::resident_bytes(&cluster));
         let loaded = Arc::new(Loaded {
             cluster,
             data,
@@ -1353,6 +1368,7 @@ impl Node {
         cfg.default_repository = self.cfg.default_repository.clone().filter(|_| data_store.is_some());
         cfg.file_service_tokens = self.reads_file_service_tokens(&spec.name);
         cfg.audit = Some(search_es::xpack::security::audit::AuditLog(self.audit.clone()));
+        cfg.request_memory = Some(self.request_memory.clone());
         cfg.reindex_node = Some(self.reindex.clone());
         let mut cluster = Cluster::open(cfg, store).await?;
         *cluster.reindex_whitelist.write() = spec.reindex_whitelist.clone();
@@ -1783,7 +1799,14 @@ impl Node {
     async fn enforce_memory_with(&self, room: u64, commit: bool) -> Vec<String> {
         let loaded: Vec<Arc<Loaded>> = self.clusters.read().values().filter_map(|s| s.get().cloned()).collect();
         if loaded.is_empty() {
+            self.request_memory.set_held_elsewhere(self.cfg.embedder.as_ref().map_or(0, |e| e.resident_bytes()));
             return Vec::new();
+        }
+        // Kept async results past their keep-alive go (and give their memory back) even on a
+        // cluster nobody calls.
+        let now = search_es::time::now_millis();
+        for l in &loaded {
+            l.cluster.xpack.results.sweep(now);
         }
         let mut sizes: Vec<(Arc<Loaded>, u64)> = loaded.into_iter().map(|l| {
             let r = persist::resident_bytes(&l.cluster);
@@ -1800,17 +1823,21 @@ impl Node {
             }
         }
         let mut evicted = Vec::new();
-        let Some(budget) = self.cfg.memory_budget else { return evicted };
-        // The embedding model and its running batches are the node's, and stay: clusters make
-        // room for them.
+        // One budget: what the clusters and the node's embedding model (its batches included)
+        // hold resident leaves the rest to requests.
         let mut total: u64 = sizes.iter().map(|(_, r)| *r).sum::<u64>() + self.cfg.embedder.as_ref().map_or(0, |e| e.resident_bytes());
-        if total.saturating_add(room) <= budget {
+        self.request_memory.set_held_elsewhere(total);
+        let Some(budget) = self.cfg.memory_budget else { return evicted };
+        // Residents and requests share the budget, and requests can't be evicted: idle clusters
+        // make room for both.
+        let over = |total: u64| total.saturating_add(self.request_memory.used()).saturating_add(room) > budget;
+        if !over(total) {
             return evicted;
         }
         // Clusters holding scrolls or points in time go last.
         sizes.sort_by_key(|(l, _)| (l.pinned(), l.last_used.load(Ordering::SeqCst)));
         for (l, r) in sizes {
-            if total.saturating_add(room) <= budget {
+            if !over(total) {
                 break;
             }
             // A running task (a reindex from remote, a by-query run in the background) would be
@@ -1821,6 +1848,7 @@ impl Node {
             if self.unload_with(&l.name, true, Some(&l)).await {
                 tracing::info!(cluster = &*l.name, resident = r, total, budget, "unloaded a cluster to stay within the node's memory budget");
                 total = total.saturating_sub(r);
+                self.request_memory.set_held_elsewhere(total);
                 evicted.push(l.name.to_string());
             }
         }

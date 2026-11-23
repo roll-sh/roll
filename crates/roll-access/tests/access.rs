@@ -3066,3 +3066,22 @@ async fn agent_activity_by_tool_and_connection() {
     let (_, head) = d.as_user("usr_ada", Method::GET, "/v1/access/alerts?latest=1", None).await;
     assert_eq!(head["next"], 0, "their own newest, which says nothing of others' alerts: {head}");
 }
+
+/// An agent's feedback (`access_send_feedback`): kept on the alert feed for the operator, marked as
+/// a model's words (lockdown withholds them), and capped at 20 an hour per connection.
+#[tokio::test]
+async fn an_agent_sends_feedback() {
+    let d = Daemon::new(50);
+    let (token, grant) = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }]), json!({})).await;
+    let note = json!({ "task": "list the projects", "actual": "postgres_list_projects answered 502", "expected": "the project list", "tool": "postgres_list_projects" });
+    let (s, kept) = d.call(&token, Method::POST, "/v1/access/feedback", Some(note.clone())).await;
+    assert_eq!((s, kept["kept"].as_bool()), (StatusCode::OK, Some(true)), "{kept}");
+    let (_, feed) = d.call(OPERATOR, Method::GET, "/v1/access/alerts?after=0", None).await;
+    let e = &feed["events"][0];
+    assert_eq!((e["kind"].as_str(), e["grant"].as_str(), e["title"].as_str(), e["outside"].as_bool()), (Some("agent_feedback"), Some(grant.as_str()), Some("list the projects"), Some(true)), "{feed}");
+    for _ in 0..19 {
+        assert_eq!(d.call(&token, Method::POST, "/v1/access/feedback", Some(note.clone())).await.0, StatusCode::OK);
+    }
+    assert_eq!(d.call(&token, Method::POST, "/v1/access/feedback", Some(note)).await.0, StatusCode::TOO_MANY_REQUESTS, "20 an hour");
+    assert_eq!(d.call(&token, Method::POST, "/v1/access/feedback", Some(json!({ "task": "", "actual": "x" }))).await.0, StatusCode::BAD_REQUEST);
+}

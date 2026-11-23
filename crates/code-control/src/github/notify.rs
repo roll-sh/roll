@@ -198,9 +198,10 @@ pub(super) async fn preview(code: &Code, hub: &Hub, c: &Change) -> Result<()> {
     let visual = env.and_then(|e| e.visual_review.as_ref()).map(visual_status);
     let speed = env.and_then(speed_status);
     let regressions = env.and_then(regressions_status);
+    let browser = env.and_then(browser_checks_status);
     // Statuses go out when they change for this head, not on every wake and sleep.
     let state_key = format!("pv-state:{}", c.id);
-    let state_now = format!("{sha}:{status:?}:{deploy:?}:{description}:{visual:?}:{speed:?}:{regressions:?}");
+    let state_now = format!("{sha}:{status:?}:{deploy:?}:{description}:{visual:?}:{speed:?}:{regressions:?}:{browser:?}");
     if mark(code, &state_key)?.as_deref() == Some(state_now.as_str()) {
         return Ok(());
     }
@@ -267,6 +268,12 @@ pub(super) async fn preview(code: &Code, hub: &Hub, c: &Change) -> Result<()> {
         && let Some((state, why)) = &regressions
     {
         hub.client.create_status(l.installation_id, &l.owner, &l.repo, &sha, state, "roll/regressions", Some(why), log_url.as_deref()).await.map_err(gh)?;
+    }
+    // Production's browser checks on the preview's head (Vercel's Deployment Checks).
+    if rules.status
+        && let Some((state, why)) = &browser
+    {
+        hub.client.create_status(l.installation_id, &l.owner, &l.repo, &sha, state, "roll/browser-checks", Some(why), log_url.as_deref()).await.map_err(gh)?;
     }
     // The deployment: one per head, its status following the preview; the last one goes
     // inactive when the preview is removed.
@@ -477,6 +484,24 @@ fn regressions_status(e: &crate::model::PreviewEnvironment) -> Option<(&'static 
         (r, 0) => ("failure", format!("{} slower than {branch}", count(r, "route", "routes"))),
         (0, e) => ("failure", format!("{} against {branch}", count(e, "new error", "new errors"))),
         (r, e) => ("failure", format!("{} slower, {} against {branch}", count(r, "route", "routes"), count(e, "new error", "new errors"))),
+    })
+}
+
+/// The `roll/browser-checks` status, with the project's `browser_checks` rule (`check`,
+/// `required`) and checks to run: pending while any runs, failing while any failed.
+fn browser_checks_status(e: &crate::model::PreviewEnvironment) -> Option<(&'static str, String)> {
+    e.browser_checks_rule.as_ref()?;
+    if e.browser_checks.is_empty() {
+        return None;
+    }
+    let n = |st: &str| e.browser_checks.iter().filter(|c| c.state == st).count();
+    let total = e.browser_checks.len();
+    Some(if n("pending") > 0 {
+        ("pending", format!("{} of {total} production browser checks running", n("pending")))
+    } else if n("failed") > 0 {
+        ("failure", format!("{} of {total} production browser checks failed", n("failed")))
+    } else {
+        ("success", format!("{total} production browser checks passed"))
     })
 }
 
@@ -1128,6 +1153,7 @@ mod preview_tests {
             expires_at: None,
             earlier: Vec::new(),
             browser_checks: Vec::new(),
+            browser_checks_rule: None,
             visual_change: None,
             page_speed: None,
             page_health: None,
@@ -1171,6 +1197,15 @@ mod preview_tests {
             "a name can't close its code span or add a link"
         );
         assert_eq!(browser_checks_line(&[]), None);
+        let mut ruled = p.environment.clone().unwrap();
+        assert_eq!(browser_checks_status(&ruled), None, "no rule, no status");
+        ruled.browser_checks_rule = Some("check".into());
+        ruled.browser_checks = vec![bc("home", "passed"), bc("checkout", "pending")];
+        assert_eq!(browser_checks_status(&ruled).map(|x| x.0), Some("pending"));
+        ruled.browser_checks[1].state = "failed".into();
+        assert_eq!(browser_checks_status(&ruled), Some(("failure", "1 of 2 production browser checks failed".to_string())));
+        ruled.browser_checks[1].state = "passed".into();
+        assert_eq!(browser_checks_status(&ruled).map(|x| x.0), Some("success"));
         let v = |percent: f64| crate::model::PreviewVisualChange { since: "cs_1a2b3c4d5e6f".into(), percent, phone_percent: None };
         assert_eq!(visual_line(&v(12.34)), "The page changed 12.3% since `1a2b3c4d5e` (its share of pixels).\n\n");
         assert_eq!(visual_line(&v(0.0)), "The page looks the same as at `1a2b3c4d5e`.\n\n");
