@@ -14,6 +14,7 @@
 
 pub mod api;
 pub mod challenge;
+pub mod bots;
 pub mod backups;
 pub mod browser;
 pub mod moving;
@@ -426,6 +427,8 @@ pub struct Apps {
     /// edge functions were said not to run (once each).
     pub(crate) edge_key: Mutex<Option<Vec<u8>>>,
     pub(crate) edge_noted: Mutex<std::collections::HashSet<String>>,
+    /// Crawlers' addresses checked against their operators' DNS ([`bots`]).
+    pub(crate) bots_verified: bots::Verified,
     /// Password tries per environment and client, in the last ten minutes ([`password`]).
     pub(crate) password_tries: Mutex<HashMap<password::Client, (i64, u32)>>,
     /// Shells open over HTTP (the dashboard's terminal), by id.
@@ -744,6 +747,7 @@ impl Apps {
             scrape_errors: Mutex::new(Default::default()),
             edge_key: Mutex::new(None),
             edge_noted: Mutex::new(Default::default()),
+            bots_verified: Default::default(),
             password_tries: Mutex::new(HashMap::new()),
             looping: Mutex::new(std::collections::HashSet::new()),
             metric_streaks: Mutex::new(std::collections::HashMap::new()),

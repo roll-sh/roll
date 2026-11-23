@@ -1762,7 +1762,7 @@ impl Apps {
                 false => log.line("build.size: this node's builds share its BuildKit, unsized (it applies on the fleet's builders)"),
             }
         }
-        let job = BuildJob {
+        let mut job = BuildJob {
             service: svc.id.clone(),
             deployment: d.id.clone(),
             context,
@@ -1784,6 +1784,14 @@ impl Apps {
         // The same inputs built before in this project (Railway's skipped builds): the same tree,
         // Dockerfile, target and build variables, and its image still kept. Never with `no_cache`.
         let build_key = if job.no_cache { None } else { Some(build_key(&job, &plan.dockerfile, self.deps.builder.name()).await?) };
+        // Next's deployment id, from the same inputs as the build's key (it's left out of it): a
+        // reused image's pages, or a cached build step's, name the id this deployment records,
+        // which skew protection follows (`skew.rs`).
+        if plan.framework.as_deref() == Some("next") && !job.env.iter().any(|(k, _)| k == apps_build::NEXT_DEPLOYMENT_ID) {
+            let id = format!("nb_{}", build_key.as_deref().map_or_else(|| d.id.trim_start_matches("dep_").to_string(), |k| k[..20].to_string()));
+            job.env.push((apps_build::NEXT_DEPLOYMENT_ID.into(), id.clone()));
+            plan_json["next_deployment_id"] = json!(id);
+        }
         let reused = match build_key.clone() {
             Some(k) => {
                 let p = svc.project.clone();
