@@ -889,7 +889,7 @@ async fn deploy_sbom(State(apps): S, Path((id, env, dep)): Path<(String, String,
 
 /// `POST /v1/apps/services/{id}/move {project}`: to another project of the same owner.
 async fn move_service(State(apps): S, Path(id): Path<String>, ext: Extensions, Json(body): Json<Value>) -> R {
-    Ok(Json(apps.move_service(&id, body, roll_auth::Grant::on(&ext), actor(&ext)).await?).into_response())
+    Ok(Json(apps.move_service(&id, body, [roll_auth::Grant::on(&ext), roll_auth::SessionGrant::on(&ext)], actor(&ext)).await?).into_response())
 }
 
 /// `GET …/deploys/{dep}/provenance`: its image's signed SLSA provenance (a DSSE envelope).

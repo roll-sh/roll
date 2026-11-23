@@ -57,9 +57,10 @@ impl Apps {
         Ok(why)
     }
 
-    /// `POST /v1/apps/services/{id}/move {project}`. `grant`: a scoped token's, which must allow
-    /// admin on the service as it would be in the target project too.
-    pub async fn move_service(self: &Arc<Self>, id: &str, body: Value, grant: Option<&roll_auth::Grant>, actor: Option<String>) -> Result<Value> {
+    /// `POST /v1/apps/services/{id}/move {project, secrets?}`. `grants`: a scoped token's and a
+    /// person's session's, each of which must allow admin on the target project's apps (what
+    /// making a service there takes), not only on this service wherever it is.
+    pub async fn move_service(self: &Arc<Self>, id: &str, body: Value, grants: [Option<&roll_auth::Grant>; 2], actor: Option<String>) -> Result<Value> {
         let target = body["project"].as_str().filter(|p| !p.is_empty()).ok_or_else(|| Error::BadRequest("project is the project to move it to".into()))?.to_string();
         let sid = id.to_string();
         let svc = self.db(move |s| s.service(&sid)).await?;
@@ -75,37 +76,89 @@ impl Apps {
         if from.owner != to.owner {
             return Err(Error::Forbidden("a service moves only to another project of the same owner".into()));
         }
-        if let Some(g) = grant {
-            let there = roll_auth::scope::Resource { product: "apps".into(), id: Some(svc.id.clone()), project: Some(target.clone()), ..Default::default() };
+        // Admin on apps in the target project, as making a service there takes: a rule on this
+        // service's id alone would match it in any project.
+        let there = roll_auth::scope::Resource { product: "apps".into(), id: None, project: Some(target.clone()), ..Default::default() };
+        for g in grants.into_iter().flatten() {
             if g.allows(&there, roll_auth::scope::Action::Admin) != roll_auth::scope::Outcome::Allow {
-                return Err(Error::Forbidden(format!("moving it needs admin on it in {}", to.name)));
+                return Err(Error::Forbidden(format!("moving it needs admin on apps in {}", to.name)));
             }
         }
-        let blockers = self.move_blockers(&svc).await?;
+        let mut blockers = self.move_blockers(&svc).await?;
+        // Routes in the target project that name a service of its name would start sending to it.
+        let (t, n) = (target.clone(), svc.name.clone());
+        let routed: Vec<String> = self
+            .db(move |s| {
+                let mut out = Vec::new();
+                for o in s.services(Some(&t))? {
+                    if s.environments(&o.id)?.iter().any(|e| e.routes.iter().any(|r| r.service == n)) {
+                        out.push(o.name);
+                    }
+                }
+                Ok(out)
+            })
+            .await?;
+        blockers.extend(routed.into_iter().map(|o| format!("{o}'s route there to a service named {}", svc.name)));
         if !blockers.is_empty() {
             return Err(Error::Conflict(format!("{} can't move while it has {}: remove them, move it, then set them up in {}", svc.name, blockers.join("; "), to.name)));
         }
+        // Its environments' secrets are its project's: after the move they're the target's.
+        // Named first, and moved only when the caller says so.
+        let sid = svc.id.clone();
+        let envs = self.db(move |s| s.environments(&sid)).await?;
+        let mut secrets = std::collections::BTreeSet::new();
+        for e in &envs {
+            if let Ok(vars) = self.deps.secrets.resolve(&svc.project, &e.name, &svc.id).await {
+                secrets.extend(vars.into_iter().map(|v| v.name));
+            }
+        }
+        if !secrets.is_empty() && body["secrets"] != "switch" {
+            return Err(Error::Conflict(format!(
+                "its environments get {}'s secrets {}: after the move they get {}'s of those names, or none (move with {{\"secrets\": \"switch\"}} to go ahead)",
+                from.name,
+                secrets.into_iter().collect::<Vec<_>>().join(", "),
+                to.name
+            )));
+        }
+        // An incident its checks opened ends on the old project's status page first.
+        for e in &envs {
+            for c in &e.checks {
+                if self.check_states_of(&svc.id, &e.name, std::slice::from_ref(c)).first().is_some_and(|st| st.up == Some(false)) {
+                    self.status_incident(&svc.id, crate::status_page::check_key(&svc.id, &e.name, &c.name), false).await;
+                }
+            }
+        }
         let (sid, old, new, name) = (svc.id.clone(), svc.project.clone(), target.clone(), svc.name.clone());
         self.db(move |s| s.move_service(&sid, &old, &new, &name)).await?;
-        // Its card goes along (where it was on the old canvas).
+        // Its card goes along (where it was on the old canvas), and its home: what it was made
+        // through is the project it's in now.
         let at = ws.get(roll_workspace::Scope::All, &svc.project).ok().and_then(|p| p.resources.into_iter().find(|r| r.kind == roll_workspace::Kind::Service && r.r#ref == svc.id)).map_or((0.0, 0.0), |r| (r.x, r.y));
         if let Err(e) = ws.place(roll_workspace::Scope::All, &target, roll_workspace::Kind::Service, &svc.id, at.0, at.1) {
             tracing::warn!(service = %svc.id, error = %e, "apps: a moved service's canvas card didn't move");
         }
+        if roll_auth::roles::decisions::HOMES
+            && let Err(e) = ws.set_home(&roll_workspace::Actor::operator(), &target, roll_workspace::Kind::Service, &svc.id, false)
+        {
+            tracing::warn!(service = %svc.id, error = %e, "apps: a moved service's home didn't move");
+        }
         self.changed(&svc.id);
-        // Each live environment onto the new project's network and rules.
-        let sid = svc.id.clone();
-        let envs = self.db(move |s| s.environments(&sid)).await?;
+        // Each live environment onto the new project's network and rules: its live deployment
+        // again, never holding later pushes (the old project's networks go when nothing runs on
+        // them, by the network sweep, never under instances still serving).
         let mut redeployed = Vec::new();
+        let mut failed = Vec::new();
         for e in envs.iter().filter(|e| e.active.is_some()) {
             let active = e.active.clone().unwrap_or_default();
             match self.rollback(&svc.id, &e.name, &active, Some("roll".into()), true, true).await {
-                Ok(d) => redeployed.push(json!({ "environment": e.name, "deployment": d.id })),
-                Err(err) => tracing::warn!(service = %svc.id, env = %e.name, error = %err, "apps: a moved service's environment didn't redeploy"),
+                Ok(d) => {
+                    let (sid, en, did) = (svc.id.clone(), e.name.clone(), d.id.clone());
+                    let _ = self.db(move |s| s.clear_hold_if(&sid, &en, &did)).await;
+                    redeployed.push(json!({ "environment": e.name, "deployment": d.id }));
+                }
+                Err(err) => failed.push(json!({ "environment": e.name, "error": err.to_string() })),
             }
-            self.drop_network_if_unused(&svc.project, &e.name, &svc.id).await;
         }
         self.audit("service.moved", &svc.id, "", actor, json!({ "from": svc.project, "to": target })).await;
-        Ok(json!({ "id": svc.id, "project": target, "redeployed": redeployed }))
+        Ok(json!({ "id": svc.id, "project": target, "redeployed": redeployed, "failed": failed }))
     }
 }

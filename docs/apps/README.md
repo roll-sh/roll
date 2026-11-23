@@ -2087,14 +2087,20 @@ Render's, Vercel's and Heroku's transfers) moves a service to another project of
 What only means something in its old project is refused first, each named in the 409: links
 either way (their credentials were made for this project's consumer), routes either way (by name
 in the old project), `roll://` references in its variables or Git login (the old project's
-secrets), a private network and running sandboxes (on the old project's network). Then, in one
-write, what it used so far stays the old project's month (as when a service is deleted, so moving
-never brings a spend down) and it joins the new one, its canvas card moving with it; a service of
-its name there is a 409. Every live environment then redeploys its live deployment (a rollback to
-itself) onto the new project's network and rules (its signing rule, egress, spend limits), and the
-old project's networks it was the last service on go. Its domains, variables, environments and
-history go with it. Admin on the service, and a scoped token's admin on it in the target project
-too; another owner's project is a 403. `api.rs::a_service_moves_to_another_project`.
+secrets), a private network and running sandboxes (on the old project's network), and routes in
+the target project to a service of its name. Its environments' project secrets are named next: they
+become the target project's of those names (or none), so the move goes ahead only with `{"secrets":
+"switch"}`. An incident its checks opened ends on the old project's status page. Then, in one write
+(links checked again there), what it used so far stays the old project's month (as when a service
+is deleted, so moving never brings a spend down), it joins the new one, and its previews' hostnames
+move to the target's preview domain (a label taken there is a 409); its canvas card and its home go
+with it. Every live environment then redeploys its live deployment onto the new project's network
+and rules (its signing rule, egress, spend limits) without holding later pushes; an environment
+that didn't is in the answer's `failed`. The old project's networks go once nothing runs on them.
+Its domains, variables, environments and history go with it. Admin on the service, and admin on
+apps in the target project for a scoped token or a person's session (a rule on the service's id
+alone would match it anywhere); another owner's project is a 403.
+`api.rs::a_service_moves_to_another_project`.
 
 ## Duplicating a service
 

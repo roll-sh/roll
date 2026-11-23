@@ -5469,7 +5469,7 @@
     },
     "/v1/apps/services/{id}/move": {
       "post": {
-        "description": "Answers `{ id, project, redeployed: { environment, deployment }[] }`; 409 naming what ties it to its project (links either way, routes either way, `roll://` references, a private network, running sandboxes) or a service of its name there; 403 for another owner's project or a scoped token without admin on it there (README, \"Moving a service\").",
+        "description": "Answers `{ id, project, redeployed: { environment, deployment }[], failed: { environment, error }[] }`; 409 naming what ties it to its project (links either way, routes either way, routes there to its name, `roll://` references, a private network, running sandboxes, project secrets without `switch`), a service of its name or a preview label taken there; 403 for another owner's project, or a scoped token or session without admin on apps there (README, \"Moving a service\").",
         "operationId": "postServicesIdMove",
         "parameters": [
           {
@@ -5489,11 +5489,11 @@
               }
             }
           },
-          "description": "`{ project }` (another project of the same owner)"
+          "description": "`{ project, secrets?: \"switch\" }` (another project of the same owner; `switch`: its environments' project secrets become the target's)"
         },
         "responses": {
           "200": {
-            "description": "`{ id, project, redeployed: { environment, deployment }[] }`; 409 naming what ties it to its project (links either way, routes either way, `roll://` references, a private network, running sandboxes) or a service of its name there; 403 for another owner's project or a scoped token without admin on it there (README, \"Moving a service\")"
+            "description": "`{ id, project, redeployed: { environment, deployment }[], failed: { environment, error }[] }`; 409 naming what ties it to its project (links either way, routes either way, routes there to its name, `roll://` references, a private network, running sandboxes, project secrets without `switch`), a service of its name or a preview label taken there; 403 for another owner's project, or a scoped token or session without admin on apps there (README, \"Moving a service\")"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"

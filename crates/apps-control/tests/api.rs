@@ -5487,9 +5487,19 @@ async fn a_service_moves_to_another_project() {
     let (st, e) = call(&w.api, "POST", &mv, Some(json!({"project": other}))).await;
     assert!(st == StatusCode::CONFLICT && e.to_string().contains("API_KEY"), "{st} {e}");
     call(&w.api, "PATCH", &format!("{env}/variables"), Some(json!({"unset": ["API_KEY"]}))).await;
+    // A token with admin on this service alone can't take it into another project.
+    let scope: roll_auth::scope::Scope = serde_json::from_value(json!([{"product": "apps", "resources": [{"id": id}], "actions": {"admin": "allow"}}])).unwrap();
+    let grant = roll_auth::Grant { id: "tok_m".into(), name: "ci".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(scope), user: None, ask_otherwise: false };
+    let mut req = Request::builder().method("POST").uri(&mv).header("content-type", "application/json").body(Body::from(json!({"project": other}).to_string())).unwrap();
+    req.extensions_mut().insert(grant);
+    req.extensions_mut().insert(roll_auth::Operator);
+    assert_eq!(w.api.clone().oneshot(req).await.unwrap().status(), StatusCode::FORBIDDEN);
     let (st, moved) = call(&w.api, "POST", &mv, Some(json!({"project": other}))).await;
     assert_eq!((st, moved["project"].as_str()), (StatusCode::OK, Some(other.as_str())), "{moved}");
     assert_eq!(moved["redeployed"][0]["environment"], "production", "{moved}");
+    // Its redeploy holds nothing: the next push still goes live.
+    let e = call(&w.api, "GET", &env, None).await.1;
+    assert!(e["held"] != true, "{e}");
     assert_eq!(call(&w.api, "GET", &format!("/v1/apps/services/{id}"), None).await.1["project"], other.as_str());
     let card = w.ws.get(roll_workspace::Scope::All, &other).unwrap().resources.into_iter().any(|r| r.kind == roll_workspace::Kind::Service && r.r#ref == id);
     assert!(card, "its card moved");

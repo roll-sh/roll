@@ -1260,6 +1260,19 @@ impl Store {
             if taken {
                 return Err(Error::Conflict(format!("that project already has a service named {name}")));
             }
+            // Links either way, again here: one made since they were read holds it too.
+            let linked = c.query_row("SELECT 1 FROM links WHERE service = ? OR (kind = 'service' AND ref = ?) LIMIT 1", params![id, id], |_| Ok(())).optional()?.is_some();
+            if linked {
+                return Err(Error::Conflict("a link was made to or from it meanwhile: remove it first".into()));
+            }
+            // Its previews' hostnames are the project's preview domain's: theirs in the target too.
+            let clash = c
+                .query_row("SELECT h.label FROM preview_hosts h WHERE h.service = ? AND EXISTS (SELECT 1 FROM preview_hosts o WHERE o.project = ? AND o.label = h.label)", params![id, to], |r| r.get::<_, String>(0))
+                .optional()?;
+            if let Some(label) = clash {
+                return Err(Error::Conflict(format!("its preview hostname {label} is taken in that project")));
+            }
+            c.execute("UPDATE preview_hosts SET project = ? WHERE service = ?", params![to, id])?;
             c.execute(
                 "INSERT INTO project_usage (project, hour, cpu_seconds, gb_seconds, requests, egress_bytes, build_seconds, stored_gb_hours) \
                  SELECT ?, u.hour, SUM(u.cpu_seconds), SUM(u.gb_seconds), SUM(u.requests), SUM(u.egress_bytes), SUM(u.build_seconds), SUM(u.stored_gb_hours) \
@@ -1276,6 +1289,12 @@ impl Store {
                 _ => Ok(()),
             }
         })
+    }
+
+    /// An environment's hold lifted only while it's `deployment`'s (one roll set, nobody's since).
+    pub fn clear_hold_if(&self, service: &str, env: &str, deployment: &str) -> Result<()> {
+        self.db.execute("UPDATE environments SET held_by = NULL WHERE service = ? AND name = ? AND held_by = ?", params![service, env, deployment])?;
+        Ok(())
     }
 
     pub fn delete_service(&self, id: &str) -> Result<()> {
