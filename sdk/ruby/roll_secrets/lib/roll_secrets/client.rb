@@ -16,9 +16,9 @@ module RollSecrets
     attr_accessor :relogin # :nodoc:
 
     # +cache_ttl+ (seconds) keeps +values+ answers that long and answers from memory meanwhile;
-    # after that it asks again with the digest they were read against, and an unchanged folder costs
-    # a 304 that reads, issues and audits nothing. A folder holding dynamic credentials is never kept
-    # (they end with their lease). +clock+ is for tests.
+    # after that it asks again with the answer's digest and every key's stamp (+…/values/delta+): an
+    # unchanged folder costs what a 304 does, and a changed one only its changed keys. A folder
+    # holding dynamic credentials is never kept (they end with their lease). +clock+ is for tests.
     def initialize(api, token, project: nil, timeout: 30.0, cache_ttl: 0.0, clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) })
       @api = api.to_s.sub(%r{/+\z}, "")
       @token = token
@@ -28,6 +28,8 @@ module RollSecrets
       @clock = clock
       @cache = {}
       @cache_lock = Mutex.new
+      # A rolld without +…/values/delta+: reads are full (conditional, with cache_ttl).
+      @no_delta = false
       @project_lock = Mutex.new
       @relogin = nil
     end
@@ -53,13 +55,14 @@ module RollSecrets
     # +env+'s values under +path+ (the root by default), references resolved. +fresh+ skips
     # +cache_ttl+ (a watch that saw the digest move reads anew).
     def values(env, path: "", fresh: false)
-      url = env_path(env) + "/values" + query(path)
+      e = env_path(env)
+      url = e + "/values" + query(path)
       if @cache_ttl <= 0 || fresh
         v = Values.of(call("GET", url))
         @cache_lock.synchronize { @cache.delete(url) } if fresh
         return v
       end
-      Marshal.load(Marshal.dump(cached(url)))
+      Marshal.load(Marshal.dump(cached(e, query(path))))
     end
 
     # +env+'s values as +consumer+ (+app:web+), what a running service gets: dynamic credentials'
@@ -105,11 +108,14 @@ module RollSecrets
       leases = []
       renewed = 0.0
       waited = 0.0
+      # The digest moved, so a kept answer is the old one: only what changed since the values this
+      # watch holds (+…/resolve+ has no delta route, so a consumer resolves the folder).
+      answer = Held.empty
       until stop.set?
         begin
           now = digest(env, path: path)
           if now != last
-            v = consumer ? resolve(env, consumer, path: path) : values(env, path: path, fresh: true)
+            v = consumer ? resolve(env, consumer, path: path) : delta_values(env, path, answer)
             before = last
             last = now
             unless v.problems.empty?
@@ -171,34 +177,123 @@ module RollSecrets
       end
     end
 
-    # Kept for +cache_ttl+, then revalidated with the digest (a 304 keeps them).
-    def cached(url)
+    # Kept for +cache_ttl+, then asks for what changed since the kept answer (+…/values/delta+; the
+    # full set when nothing is kept). Where that fails, a conditional read: a 304 keeps the values.
+    # +e+ is the environment's route, +q+ the query.
+    def cached(e, q)
+      url = e + "/values" + q
       hit = @cache_lock.synchronize { @cache[url] }
-      return hit[0] if hit && @clock.call - hit[2] < @cache_ttl
-      authed { |token| revalidate(url, token, hit) }
+      return hit[0].values if hit && @clock.call - hit[1] < @cache_ttl
+      off = hit ? hit[0].off : false
+      if !off && !@no_delta
+        h = hit ? hit[0].dup : Held.empty
+        v = try_delta(e + "/values/delta" + q, h)
+        if v
+          keep(url, h)
+          return v
+        end
+        off = h.off
+      end
+      authed { |token| revalidate(url, token, hit, off) }
     end
 
-    # One conditional read of +url+ with +token+: a 304 keeps +hit+'s values.
-    def revalidate(url, token, hit)
+    # One conditional read of +url+ with +token+: a 304 keeps +hit+'s values. +off+: the folder's
+    # claims are past what rolld takes, kept with the answer.
+    def revalidate(url, token, hit, off)
       headers = {}
       headers["Authorization"] = "Bearer #{token}" unless token.to_s.empty?
-      headers["If-None-Match"] = "\"#{hit[1]}\"" if hit && !hit[1].empty?
+      headers["If-None-Match"] = "\"#{hit[0].digest}\"" if hit && !hit[0].digest.empty?
       status, text, etag, reason = request("GET", @api + url + (url.include?("?") ? "&" : "?") + "digest=1", headers, nil)
       if status == 304 && hit
-        @cache_lock.synchronize { @cache[url] = [hit[0], hit[1], @clock.call] }
-        return hit[0]
+        k = hit[0].dup
+        k.off = off
+        keep(url, k)
+        return k.values
       end
       raise error(status, reason, text) unless status.between?(200, 299)
       v = Values.of(JSON.parse(text))
+      etag = etag.to_s.delete_prefix("W/").delete('"')
+      v = v.with(v.values, etag) if v.digest.empty?
+      keep(url, Held.new(v, etag, "", {}, off))
+      v
+    end
+
+    # Keeps an answer for +cache_ttl+, unless it holds dynamic credentials (they end with their
+    # lease) or a key that didn't resolve (the digest may not move when the link recovers).
+    def keep(url, held)
       @cache_lock.synchronize do
-        # Never kept: dynamic credentials (they end with their lease) or a key that didn't resolve
-        # (the digest may not move when the link recovers).
-        if !v.dynamic.empty? || !v.problems.empty?
+        if !held.values.dynamic.empty? || !held.values.problems.empty?
           @cache.delete(url)
         else
-          @cache[url] = [v, etag.to_s.delete_prefix("W/").delete('"'), @clock.call]
+          @cache[url] = [held, @clock.call]
         end
       end
+    end
+
+    # A fresh read of the values through the delta route, keeping the answer in +held+. Any failure
+    # of the delta reads in full (a rolld without the route: from then on).
+    def delta_values(env, path, held)
+      if !held.off && !@no_delta
+        e = env_path(env)
+        v = try_delta(e + "/values/delta" + query(path), held)
+        if v
+          # The newest answer: a kept one for the folder goes.
+          @cache_lock.synchronize { @cache.delete(e + "/values" + query(path)) }
+          return Marshal.load(Marshal.dump(v))
+        end
+      end
+      values(env, path: path, fresh: true)
+    end
+
+    # +read_delta+, or nil where it fails and the caller reads in full instead: a rolld without the
+    # route (404, 405) from then on, a claim past what it takes (413) for that folder, anything else
+    # this once.
+    def try_delta(url, held)
+      read_delta(url, held)
+    rescue SecretsError => e
+      if [404, 405].include?(e.status)
+        @no_delta = true
+      elsif e.status == 413
+        held.off = true
+      end
+      nil
+    rescue StandardError
+      nil
+    end
+
+    # Asks +url+ (+…/values/delta?…+) for what changed since the answer +held+ holds and merges it
+    # in, leaving the new answer in +held+: the full set when it holds nothing it may claim (nothing
+    # yet, problems, no basis) or when rolld answers it. On any failure +held+ holds nothing, so the
+    # next claim asks for the full set.
+    def read_delta(url, held)
+      claim = {}
+      if held.values && !held.basis.empty? && held.values.problems.empty?
+        claim = { "digest" => held.digest, "basis" => held.basis, "stamps" => held.stamps }
+      end
+      begin
+        a = call("POST", url, claim) || {}
+      rescue StandardError
+        held.clear!
+        raise
+      end
+      v = Values.of(a)
+      stamps = (a["stamps"] || {}).to_h
+      values = v.values
+      if a["delta"] == true && held.values
+        values = held.values.values.dup
+        kept = held.stamps.dup
+        (a["removed"] || []).each do |k|
+          values.delete(k)
+          kept.delete(k)
+        end
+        values.merge!(v.values)
+        stamps = kept.merge!(stamps)
+      end
+      v = v.with(values, a["digest"].to_s)
+      held.values = v
+      held.digest = v.digest
+      held.basis = a["basis"].to_s
+      held.stamps = stamps
       v
     end
 
