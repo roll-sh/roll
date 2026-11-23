@@ -25,7 +25,8 @@
 # Run each suite against a fresh engine where the counts matter: some suites leave databases and
 # roles behind that others' catalog queries list (metaqueries above all).
 # Logical replication PostgreSQL <-> roll is tools/bench/repl/e2e.sh. tests/clients/STATUS.md
-# "Round 8" has the table and what each difference was.
+# "Round 9" has the table and what each difference was (TypeORM's 12 pgvector tests fail on
+# the reference image, which has no pgvector: the environment's).
 set -eu
 if ! docker info > /dev/null 2>&1; then exec sg docker -c "exec $0 $*"; fi
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -38,7 +39,7 @@ ENGINE=${COMPAT_ENGINE:-127.0.0.1:55839}
 export PG_HOST=${PG%:*} PG_PORT=${PG##*:} ENGINE_HOST=${ENGINE%:*} ENGINE_PORT=${ENGINE##*:}
 
 # The suites and the arguments each runs with.
-SUITES="django sqlalchemy sqla_psycopg sqla_asyncpg activerecord prisma drizzle drizzlekit asyncpg pgx spring alembic pgrestore metaqueries hibernate"
+SUITES="django sqlalchemy sqla_psycopg sqla_asyncpg activerecord prisma drizzle drizzlekit asyncpg pgx spring alembic pgrestore metaqueries hibernate knex typeorm"
 args() {
   case $1 in
     django) echo "backends migrations schema queries aggregation postgres_tests basic expressions model_fields
