@@ -353,6 +353,9 @@ impl EnvRedirects {
             if !matches!(r.status, 301 | 302 | 303 | 307 | 308) {
                 return Err(format!("redirects, line {}: an environment's redirects are 301, 302, 303, 307 or 308 (a static site's own _redirects also rewrites)", n + 1));
             }
+            if service_target(&r.to).is_some() {
+                return Err(format!("redirects, line {}: a redirect goes to a path or another site's URL (routes send a path to a service)", n + 1));
+            }
             if is_exact(r) { exact += 1 } else { patterns += 1 }
         }
         if exact > MAX_EXACT || patterns > MAX_REDIRECTS {
@@ -432,6 +435,7 @@ mod tests {
         assert_eq!(r.find("/docs", None, &v), Some((301, "https://docs.acme.dev".into())));
         assert_eq!(r.find("/other", None, &v), None);
         assert!(EnvRedirects::check("/a /b 200").unwrap_err().contains("line 1"), "no rewrites");
+        assert!(EnvRedirects::check("/a service:api/x 301").is_err(), "no service: targets");
         assert!(EnvRedirects::check("/ok /b\nnonsense").unwrap_err().contains("line 2"));
         let bulk: String = (0..=MAX_EXACT).map(|i| format!("/p{i} /q{i}\n")).collect();
         assert!(EnvRedirects::check(&bulk).is_err(), "past the limit");

@@ -69,13 +69,21 @@ fn metrics(lines: &[String]) -> Option<serde_json::Value> {
 }
 
 /// A run's result as the runner says it (`ROLL-CHECK {…}`, its last such line).
-fn result(lines: &[String]) -> Result<Option<u16>, String> {
+/// A run that passed: the page's status, and how it's over its budgets if it is (its own verdict:
+/// the page answered and the script passed).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Passed {
+    pub status: Option<u16>,
+    pub over_budget: Option<String>,
+}
+
+fn result(lines: &[String]) -> Result<Passed, String> {
     let Some(v) = lines.iter().rev().find_map(|l| l.strip_prefix("ROLL-CHECK ")).and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok()) else {
         return Err("the browser didn't say how the check went".into());
     };
     let status = v["status"].as_u64().map(|s| s as u16);
     match v["ok"].as_bool() {
-        Some(true) => Ok(status),
+        Some(true) => Ok(Passed { status, over_budget: v["over_budget"].as_str().map(str::to_string) }),
         _ => Err(v["error"].as_str().unwrap_or("the check failed").to_string()),
     }
 }
@@ -115,7 +123,9 @@ impl Apps {
 
     /// One browser check of `service`'s `env` at `url` (its public URL and the check's path):
     /// the page's status, or why it failed. `cancel` ends it (its container still removed).
-    pub(crate) async fn run_browser_check(self: &Arc<Self>, service: &str, env: &str, url: &str, c: &Check, cancel: &tokio_util::sync::CancellationToken) -> Result<Option<u16>, String> {
+    /// `head`: a preview's run of that deployment, whose metrics and failure are kept only while
+    /// it's still the run the check's state is of.
+    pub(crate) async fn run_browser_check(self: &Arc<Self>, service: &str, env: &str, url: &str, c: &Check, cancel: &tokio_util::sync::CancellationToken, head: Option<&str>) -> Result<Passed, String> {
         let Some(base) = self.cfg.otlp_base.clone() else { return Err("this node has no apps listener address for browser checks".into()) };
         let log = self.logs.sink(format!("env:{service}/{env}"), crate::logs::Stream::System);
         let image = self.checker_image(service, &log, cancel).await.map_err(|e| format!("roll's browser couldn't be built: {e:#}"))?;
@@ -148,9 +158,15 @@ impl Apps {
         self.check_tokens.lock().remove(&token);
         let lines: Vec<String> = self.logs.tail(&key, 50, None).await.into_iter().map(|l| l.text).collect();
         self.logs.forget(&key);
-        // Its lab metrics, whichever way it went.
-        if let Some(m) = metrics(&lines) {
-            self.check_metrics.lock().insert(format!("{}/{}", crate::env_key(service, env), c.name), m);
+        let state_key = format!("{}/{}", crate::env_key(service, env), c.name);
+        // A newer head's run decides a preview's check: this one keeps nothing.
+        let current = head.is_none_or(|d| self.check_states.lock().get(&state_key).is_some_and(|r| r.deployment.as_deref() == Some(d)));
+        // Its lab metrics, whichever way it went (none measured: none shown).
+        if current {
+            match metrics(&lines) {
+                Some(m) => self.check_metrics.lock().insert(state_key.clone(), m),
+                None => self.check_metrics.lock().remove(&state_key),
+            };
         }
         let (verdict, kept) = match ran {
             Ok(exit) if exit.canceled => (Err("canceled".to_string()), None),
@@ -160,6 +176,7 @@ impl Apps {
         };
         // A failure's screenshot and trace kept, in place of the last one's.
         if verdict.is_err()
+            && current
             && let (Some(tar), Some(objects)) = (kept, self.deps.objects.clone())
         {
             let files = failure_files(&tar);
@@ -197,6 +214,12 @@ impl Apps {
         };
         self.check_failures.lock().retain(|k, _| !k.starts_with(&key));
         self.check_metrics.lock().retain(|k, _| !k.starts_with(&key));
+        self.check_states.lock().retain(|k, _| !k.starts_with(&key));
+        if let Some(e) = env
+            && let Some(run) = self.preview_check_runs.lock().remove(&crate::env_key(service, e))
+        {
+            run.cancel();
+        }
     }
 
     /// A preview's head (a pv- environment's deployment that just went live): the production
@@ -205,6 +228,11 @@ impl Apps {
     /// head's run replaces this one's.
     pub(crate) fn spawn_preview_checks(self: &Arc<Self>, service: &str, env: &str, deployment: &str) {
         let (this, service, env, deployment) = (self.clone(), service.to_string(), env.to_string(), deployment.to_string());
+        // A newer head ends the last one's run (its Chromium containers go).
+        let cancel = tokio_util::sync::CancellationToken::new();
+        if let Some(old) = self.preview_check_runs.lock().insert(crate::env_key(&service, &env), cancel.clone()) {
+            old.cancel();
+        }
         tokio::spawn(async move {
             let sid = service.clone();
             let Ok(prod) = this.db(move |s| s.environment(&sid, "production")).await else { return };
@@ -224,7 +252,10 @@ impl Apps {
             for c in &checks {
                 let began = std::time::Instant::now();
                 let started = code_sql::now_ms();
-                let got = this.run_browser_check(&service, &env, &format!("{}{}", url.trim_end_matches('/'), c.path), c, &tokio_util::sync::CancellationToken::new()).await;
+                if cancel.is_cancelled() {
+                    return;
+                }
+                let got = this.run_browser_check(&service, &env, &format!("{}{}", url.trim_end_matches('/'), c.path), c, &cancel, Some(&deployment)).await;
                 let mut runs = this.check_states.lock();
                 let r = runs.entry(key(c)).or_default();
                 // A newer head started meanwhile: its own run decides.
@@ -234,8 +265,10 @@ impl Apps {
                 r.running = false;
                 r.last_at = started;
                 r.ms = began.elapsed().as_millis() as u64;
+                // A preview fails what production would: over a budget too.
                 match got {
-                    Ok(status) => (r.status, r.error, r.failures, r.down_since) = (status, None, 0, None),
+                    Ok(Passed { status, over_budget: None }) => (r.status, r.error, r.failures, r.down_since) = (status, None, 0, None),
+                    Ok(Passed { status, over_budget: Some(why) }) => (r.status, r.error, r.failures, r.down_since) = (status, Some(why), 1, Some(code_sql::now_ms())),
                     Err(why) => (r.status, r.error, r.failures, r.down_since) = (None, Some(why), 1, Some(code_sql::now_ms())),
                 }
             }
@@ -255,7 +288,8 @@ mod tests {
     #[test]
     fn the_runner_says_how_it_went() {
         let l = |s: &str| vec!["chromium started".to_string(), s.to_string()];
-        assert_eq!(super::result(&l(r#"ROLL-CHECK {"ok":true,"status":200,"ms":812}"#)), Ok(Some(200)));
+        assert_eq!(super::result(&l(r#"ROLL-CHECK {"ok":true,"status":200,"ms":812}"#)), Ok(super::Passed { status: Some(200), over_budget: None }));
+        assert_eq!(super::result(&l(r#"ROLL-CHECK {"ok":true,"status":200,"over_budget":"over its budget: LCP 3 ms > 1 ms"}"#)).unwrap().over_budget.as_deref(), Some("over its budget: LCP 3 ms > 1 ms"));
         assert_eq!(super::result(&l(r#"ROLL-CHECK {"ok":false,"status":200,"error":"locator('h1') not visible"}"#)), Err("locator('h1') not visible".into()));
         assert!(super::result(&l("Segmentation fault")).is_err());
         assert!(super::dockerfile().contains("playwright-core@1.65.1") && super::dockerfile().starts_with("FROM mcr.microsoft.com/playwright:v1.65.1-noble"));

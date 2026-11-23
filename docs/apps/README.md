@@ -2530,10 +2530,12 @@ trace.playwright.dev), Settings' links beside the error, the check's `failure_at
 
 Each run also measures the page in the same Chromium (Lighthouse's lab metrics, Netlify's
 Lighthouse plugin): its largest contentful paint and cumulative layout shift as Chromium records
-them, its time to first byte, its weight (every response's body) and its requests, all in the
-check's `metrics` and on Settings' line. `budgets` (`{lcp_ms, cls, ttfb_ms, kb, requests}`, any of
-them) fail the check past one, saying which (`over its budget: LCP 3210 ms > 2500 ms`), so a change
-that bloats a page fails its preview's check as it would a broken flow.
+them, its time to first byte, its weight (every response's encoded body as the network carried
+it, a stream's never waited for) and its requests, all in the check's `metrics` and on Settings'
+line. Past one of its `budgets` (`{lcp_ms, cls, ttfb_ms, kb, requests}`, any of them) is a verdict
+of its own, `over_budget` (`over its budget: LCP 3210 ms > 2500 ms`): on an uptime check it's said
+on its state but never down (the page answered: no `check.down`, no status page incident), while a
+preview head's or a canary's check fails on it, as on a broken flow.
 
 On a preview (Vercel's deployment checks with Checkly): each deployment that goes live in a pv-
 environment runs the production environment's browser checks once, against its own URL, so a
@@ -2589,7 +2591,8 @@ and pass (roll built them from the source), and keyless signatures (Fulcio, Reko
 each image roll builds gets a signed in-toto statement of what it was built from and how: the
 source and revision, the base images' digests the build resolved, the plan's provider and
 framework, the Dockerfile's SHA-256 and the build variables' names (never their values), roll's
-builder, the deployment and when, with the image's own digest as its subject. It's signed as a
+builder, the deployment and when, with the image's digest as its subject (on a node Docker's
+image ID, its config's digest, which is what runs there; the fleet's builds have none yet). It's signed as a
 DSSE envelope with a P-256 key roll keeps for the project (sealed; its public key is the signing
 view's `roll_key`, made the first time it's asked for) and kept with the image, so a deployment
 that reused an earlier build's image has that build's. `GET …/deploys/{dep}/provenance`
