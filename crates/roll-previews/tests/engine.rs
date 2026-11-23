@@ -1386,6 +1386,16 @@ async fn an_earlier_push_runs_on_its_own_copy_of_the_data() {
     e.engine.reset(&p.id, Vec::new()).unwrap();
     e.engine.pass().await.unwrap();
     assert!(copies(&e).is_empty());
+    // A copy that fails doesn't hold the push up: said, and that push shares the preview's data
+    // for that product.
+    e.pg.fail_snapshots.store(1, Ordering::SeqCst);
+    e.code.edit("chg_od", |c| c.head = "cs_7f".into());
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    let v = e.engine.store.preview(&p.id).unwrap();
+    assert!(v.state == State::Ready && v.head == "cs_7f", "{:?} {}", v.state, v.head);
+    assert_eq!(v.earlier.iter().find(|x| x.revision == "cs_7e").map(|x| x.own_data.clone()), Some(vec![roll_previews::Kind::Redis]));
+    assert!(e.engine.store.activity(&p.id).unwrap().iter().any(|a| a.message.starts_with("couldn't keep postgres:prj_db's data")));
 }
 
 /// A preview whose egress goes through its proxy ("Roll only") gets the keys bound to hosts as

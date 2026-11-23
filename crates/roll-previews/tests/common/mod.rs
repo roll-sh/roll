@@ -133,6 +133,8 @@ pub struct FakeData {
     pub parents: HashSet<String>,
     pub made: AtomicUsize,
     pub fail_next: AtomicUsize,
+    /// How many earlier-push copies to fail next.
+    pub fail_snapshots: AtomicUsize,
     /// What `schema` answers: (the parent's lines, the branch's).
     pub schema: Mutex<Option<(Vec<String>, Vec<String>)>>,
     /// What reading a branch alone finds (unset: its parent's lines, as a branch is when it's made).
@@ -153,6 +155,7 @@ impl FakeData {
             parents: parents.iter().map(|s| s.to_string()).collect(),
             made: AtomicUsize::new(0),
             fail_next: AtomicUsize::new(0),
+            fail_snapshots: AtomicUsize::new(0),
             schema: Mutex::new(None),
             masks: Mutex::new(Vec::new()),
             at: Mutex::new(Vec::new()),
@@ -191,6 +194,10 @@ impl Brancher for FakeData {
             return Ok(None);
         }
         anyhow::ensure!(self.branches.lock().contains(branch), "no branch {branch} to copy");
+        if self.fail_snapshots.load(Ordering::SeqCst) > 0 {
+            self.fail_snapshots.fetch_sub(1, Ordering::SeqCst);
+            anyhow::bail!("the product is down");
+        }
         let id = format!("{parent}~{name}");
         self.branches.lock().insert(id.clone());
         Ok(Some(Branched::plain(id)))
