@@ -83,14 +83,33 @@ impl RowBatch {
         }
     }
 
-    /// Row `i` of a column block: its bytes, made when first wanted.
+    /// Row `i` of a column block: its bytes, made when first wanted, with the other rows of
+    /// its run (`col_runs`) in one buffer, each a slice of it (a reader of one row reads the
+    /// others next).
     #[cold]
     #[inline(never)]
     fn lazy_row(&self, i: usize) -> &Bytes {
-        let e = self.ents[i];
-        let (_, blk) = self.lazy.iter().rev().find(|(b, _)| *b == e.buf).expect("a row of a column block");
-        let (row, cell) = &self.lrows[i];
-        cell.get_or_init(|| blk.row_at(*row as usize, e.len as usize))
+        let (_, cell) = &self.lrows[i];
+        if let Some(b) = cell.get() {
+            return b;
+        }
+        let k = self.cruns.partition_point(|r| (r.at + r.n) as usize <= i);
+        let run = self.cruns[k];
+        let blk = self.col_block(run.buf).expect("a row of a column block");
+        let (a, n) = (run.at as usize, run.n as usize);
+        let mut buf = Vec::with_capacity(self.ents[a..a + n].iter().map(|e| e.len as usize).sum());
+        let mut ends = Vec::with_capacity(n);
+        for j in 0..n {
+            blk.row_into(run.row as usize + j, None, &mut buf);
+            ends.push(buf.len());
+        }
+        let all = Bytes::from(buf);
+        let mut s = 0;
+        for (j, e) in ends.into_iter().enumerate() {
+            let _ = self.lrows[a + j].1.set(all.slice(s..e));
+            s = e;
+        }
+        self.lrows[i].1.get().expect("made above")
     }
 
     /// The rows from column blocks, in order.
