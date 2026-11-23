@@ -432,7 +432,8 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
     let web_url = std::env::var("ROLL_WEB_URL").ok().filter(|u| !u.trim().is_empty());
     // Syncs' webhooks go to private addresses only where roll code's may (local development).
     let allow_private = args.code_webhook_allow_private.unwrap_or(open);
-    let opts = roll_secrets::Options { keyring, key_source, links: links(api.clone()), syncs: syncs::kinds(api.clone(), allow_private), open, trust_forwarded_for: args.code_trust_forwarded_for, web_url, deliver: Some(Arc::new(syncs::AuditDeliver::new(allow_private, api))),
+    let guard = people.search.clone().map(|search| Arc::new(SearchGuard { workspace: workspace.clone(), search }));
+    let opts = roll_secrets::Options { keyring, key_source, links: links(api.clone(), guard), syncs: syncs::kinds(api.clone(), allow_private), open, trust_forwarded_for: args.code_trust_forwarded_for, web_url, deliver: Some(Arc::new(syncs::AuditDeliver::new(allow_private, api))),
         // Grants are looked up when a sync made by one pushes; identities' logins mint workload tokens.
         grants: Some(access.clone() as Arc<dyn roll_auth::Grants>),
         workloads: Some(Arc::new(Workloads(access.clone()))),
@@ -595,13 +596,13 @@ pub fn link_provider(api: &Api, kind: &str) -> Option<Arc<dyn LinkProvider>> {
         "queue" => Some(Arc::new(Queue(api.clone()))),
         // A data-only key of the cluster's own (`ELASTICSEARCH_API_KEY`, or an OpenSearch-flavor
         // cluster's internal user), never its password.
-        "search" => Some(Arc::new(Search(api.clone(), Default::default()))),
+        "search" => Some(Arc::new(Search(api.clone(), Default::default(), None))),
         _ => None,
     }
 }
 
 /// The link providers of every product rolld serves.
-fn links(api: Api) -> Links {
+fn links(api: Api, search: Option<Arc<SearchGuard>>) -> Links {
     let mut l = Links::default();
     l.register(Arc::new(Postgres(api.clone())));
     l.register(Arc::new(Redis(api.clone())));
@@ -609,7 +610,7 @@ fn links(api: Api) -> Links {
     l.register(Arc::new(Bucket(api.clone())));
     l.register(Arc::new(Nosql(api.clone())));
     l.register(Arc::new(Queue(api.clone())));
-    l.register(Arc::new(Search(api, Default::default())));
+    l.register(Arc::new(Search(api, Default::default(), search)));
     l
 }
 
@@ -1086,7 +1087,40 @@ impl LinkProvider for Queue {
 /// Never the cluster's own password, which rotating would take from everyone else.
 /// The product's API, and clusters' flavors as last read (`(when, flavor)`), so naming a
 /// cluster's fields for one request asks roll search once.
-struct Search(Api, std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, String)>>);
+/// The guard, when rolld has roll search and the workspace ([`SearchGuard`]).
+struct Search(Api, std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, String)>>, Option<Arc<SearchGuard>>);
+
+/// A search cluster a person owns is linked only from the project it's at home in, and only while
+/// they're in that project (docs/members.md): otherwise its owner, outside the project, would
+/// read whatever the project's links write into it. A project trusts a cluster through its home or
+/// as one of its owners' own, so this is the cluster owned by a stranger and homed there (homed
+/// before homes handed clusters over, or set by hand), or its owner removed since. Checked when a
+/// link is written and on every read and issue; a failed lookup is a no.
+pub struct SearchGuard {
+    pub workspace: Arc<roll_workspace::Workspace>,
+    pub search: Arc<search_control::Control>,
+}
+
+impl SearchGuard {
+    fn check(&self, r#ref: &str) -> roll_secrets::Result<()> {
+        let refused = || Error::Forbidden(format!("search cluster {ref} belongs to someone who isn't in the project it's at home in: it can't be linked", ref = r#ref));
+        let id = match self.search.store.id_of(r#ref) {
+            Ok(Some(id)) => id,
+            Ok(None) => return Ok(()),
+            Err(_) => return Err(refused()),
+        };
+        let owner = match self.search.store.owner_of(&id) {
+            Ok(Some(Some(owner))) => owner,
+            Ok(_) => return Ok(()),
+            Err(_) => return Err(refused()),
+        };
+        match self.workspace.home_of(roll_workspace::Kind::Search, &id) {
+            Ok(None) => Ok(()),
+            Ok(Some(home)) if self.workspace.reaches(&home, &owner).unwrap_or(false) => Ok(()),
+            _ => Err(refused()),
+        }
+    }
+}
 
 const SEARCH_FIELDS: &[Field] = &[
     live("url", "URL", false, "ELASTICSEARCH_URL"),
@@ -1186,6 +1220,9 @@ impl LinkProvider for Search {
         self.0.call(Method::GET, &format!("/v1/search/clusters/{}", enc(r#ref)), None).ok()?["name"].as_str().map(Into::into)
     }
     fn read(&self, r#ref: &str, field: &str, _: &Link) -> roll_secrets::Result<Value> {
+        if let Some(g) = &self.2 {
+            g.check(r#ref)?;
+        }
         let c = self.0.call(Method::GET, &format!("/v1/search/clusters/{}", enc(r#ref)), None)?;
         match field {
             "port" => Ok(Value::new(c["port"].to_string())),
@@ -1196,6 +1233,9 @@ impl LinkProvider for Search {
         // Never admin: a leaked app key can't make more keys or users. `data` (indices,
         // templates, pipelines, lifecycle) unless the link narrows it ([`Search::key_options`]).
         let (access, names) = Self::key_options(link)?;
+        if let Some(g) = &self.2 {
+            g.check(r#ref)?;
+        }
         let mut body = json!({ "name": label.chars().take(64).collect::<String>(), "access": access });
         if let Some(n) = &names {
             body["indices"] = json!(n);
@@ -1221,6 +1261,9 @@ impl LinkProvider for Search {
     /// say its flavor is taken at its word later, at the first issue.
     fn check(&self, link: &Link) -> roll_secrets::Result<()> {
         let (access, _) = Self::key_options(link)?;
+        if let Some(g) = &self.2 {
+            g.check(&link.r#ref)?;
+        }
         let c = self.0.call(Method::GET, &format!("/v1/search/clusters/{}", enc(&link.r#ref)), None)?;
         if c["flavor"].as_str() == Some("opensearch") && access == "append" {
             return Err(Error::BadRequest("an OpenSearch cluster has no append keys (its index action also overwrites): link data with names".into()));
@@ -2578,7 +2621,7 @@ mod tests {
             let opts = roll_secrets::Options {
                 keyring: Ok(roll_secrets::Keyring::new(&"k".repeat(32), None).unwrap()),
                 key_source: roll_secrets::KeySource::Env,
-                links: super::links(api),
+                links: super::links(api, None),
                 syncs: Default::default(),
                 open: true,
                 trust_forwarded_for: false,

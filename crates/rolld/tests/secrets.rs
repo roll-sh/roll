@@ -424,6 +424,42 @@ async fn a_workspace_delete_asks_roll_secrets_first_and_keeps_the_secrets_for_it
     assert_eq!(p.value("API_KEY").await, "kept-through-the-window");
 }
 
+/// A search cluster a person owns links only from the project it's at home in, while they're in
+/// it: owned by someone outside the project and homed there (set up in the stores, as a home made
+/// before homes handed clusters over could be), nothing links it, and a link made while they were
+/// in stops resolving once they leave. The refusal never carries the value.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_search_cluster_links_only_while_its_owner_is_in_its_home_project() {
+    let r = Rolld::start("search", false).await;
+    let p = Project::new(&r).await;
+    let sc = r.post("/v1/search/clusters", json!({ "name": "theirs" })).await;
+    let id = sc["id"].as_str().unwrap().to_string();
+    let url = sc["url"].as_str().unwrap().to_string();
+    r.call(reqwest::Method::PUT, &format!("/v1/workspace/projects/{}/resources/search/{id}", p.id), Some(json!({ "x": 0, "y": 0 }))).await;
+    r.call(reqwest::Method::PUT, &format!("/v1/workspace/projects/{}/homes/search/{id}", p.id), None).await;
+    // Then a person owns it, and is in the project for now.
+    let open = |path: std::path::PathBuf| {
+        let c = rusqlite::Connection::open(path).unwrap();
+        c.busy_timeout(Duration::from_secs(5)).unwrap();
+        c
+    };
+    let (search, ws) = (open(r.home.path().join("search").join("search.db")), open(r.home.path().join("workspace.db")));
+    search.execute("UPDATE search_clusters SET owner = 'usr_ex' WHERE id = ?1", [&id]).unwrap();
+    ws.execute("INSERT INTO members (project_id, user_id, role, environments, added_by, added_at) VALUES (?1, 'usr_ex', 'developer', NULL, 'operator', 0)", [&p.id]).unwrap();
+    p.link("search", &id, &[("ELASTICSEARCH_URL", "url", "live")]).await;
+    assert_eq!(p.value("ELASTICSEARCH_URL").await, url);
+    // They leave: the link stops resolving, and no new one is made.
+    ws.execute("DELETE FROM members WHERE project_id = ?1 AND user_id = 'usr_ex'", [&p.id]).unwrap();
+    let a = r.http.get(format!("{}/v1/secrets/projects/{}/environments/production/values?path=/", r.api, p.id)).bearer_auth(TOKEN).send().await.unwrap();
+    let (status, body) = (a.status(), a.text().await.unwrap());
+    assert!(!body.contains(&url), "{status} {body}");
+    assert!(!status.is_success() || serde_json::from_str::<Value>(&body).unwrap()["values"]["ELASTICSEARCH_URL"].is_null(), "{status} {body}");
+    let link = json!({ "ops": [{ "op": "set", "key": "ELASTICSEARCH_URL_2", "link": { "kind": "search", "ref": id, "field": "url", "mode": "live" } }] });
+    let a = r.http.post(format!("{}/v1/secrets/projects/{}/environments/production/changes", r.api, p.id)).bearer_auth(TOKEN).json(&link).send().await.unwrap();
+    let (status, body) = (a.status(), a.text().await.unwrap());
+    assert!(status == 403 && !body.contains(&url), "{status} {body}");
+}
+
 /// roll apps shows a service's values from roll secrets only as roll secrets would show them to
 /// the asker: a token that may reveal staging, but not production, gets a 403 for staging's
 /// values and shell once a staging key references production (the service reads it), and can't
