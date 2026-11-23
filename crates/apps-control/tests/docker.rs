@@ -182,7 +182,7 @@ async fn docker_world_secrets(netns: Option<bool>, setup: impl FnOnce(&mut AppsC
         resources: Arc::new(LoopbackDb),
         resolver: dns.clone(),
         tls: Arc::new(apps_control::integrations::NoTls),
-        objects: None,
+        objects: Some(pg_storage::Objects::new(&pg_storage::StorageConfig::Local(dir.path().join("objects"))).unwrap()),
         cluster,
         workspace: Some(ws.clone()),
     };
@@ -1603,6 +1603,11 @@ async fn builds_and_answers_in(w: &World, name: &str, files: &[(&str, &str)], wa
         let lines: Vec<&str> = log.as_array().into_iter().flatten().filter_map(|l| l["text"].as_str()).collect();
         panic!("{name}: {x}\n{}", lines.join("\n"));
     }
+    // Its signed provenance names the image Docker built, by its digest.
+    let (st, p) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys/{dep}/provenance"), None, "application/json", None).await;
+    use base64::Engine;
+    let statement: Value = serde_json::from_slice(&base64::engine::general_purpose::STANDARD.decode(p["payload"].as_str().unwrap_or_default()).unwrap_or_default()).unwrap_or_default();
+    assert!(st == StatusCode::OK && statement["subject"][0]["digest"]["sha256"].as_str().is_some_and(|d| d.len() == 64), "{name}: {st} {statement}");
     let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None, "application/json", None).await;
     let host = env["url"].as_str().unwrap().trim_start_matches("http://").split(':').next().unwrap().to_string();
     let resp = w.public.clone().oneshot(Request::get("/").header("host", host.as_str()).body(Body::empty()).unwrap()).await.unwrap();
@@ -1632,6 +1637,119 @@ class H(http.server.BaseHTTPRequestHandler):
 http.server.HTTPServer(('0.0.0.0', int(os.environ['PORT'])), H).serve_forever()
 "),
     ], "python otel True", json!({"otel": true}), traces).await;
+    w.apps.shutdown().await;
+}
+
+/// A real Next 16 app shares its cache through roll (roll's adapter, `next_cache`): a `"use cache"`
+/// value made by one instance is what the next one serves after a sleep, and `revalidateTag` on
+/// any instance makes it again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_next_apps_cache_outlives_its_instance() {
+    // The apps listener, where instances reach the cache: served for real.
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let Some(w) = docker_world_with(None, |c| c.otlp_base = Some(format!("http://127.0.0.1:{port}"))).await else { return };
+    let app = w.public.clone();
+    tokio::spawn(async move { axum::serve(listener, app.into_make_service()).await });
+    let (id, host) = deploy_tree_with(&w, "next-cache", &[
+        ("package.json", r#"{"name": "n", "version": "1.0.0", "scripts": {"build": "next build", "start": "next start"}, "dependencies": {"next": "16.4.6", "react": "19.3.1", "react-dom": "19.3.1"}}"#),
+        ("next.config.mjs", "export default { cacheComponents: true };\n"),
+        ("app/layout.js", "export default function Layout({ children }) { return <html><body>{children}</body></html> }\n"),
+        ("app/page.js", "export default function Page() { return <p>home</p> }\n"),
+        ("app/stamp/route.js", "import { cacheTag } from 'next/cache';\nasync function stamp() { 'use cache'; cacheTag('stamp'); return String(Date.now()) + '-' + Math.random() }\nexport async function GET() { return new Response(await stamp()) }\n"),
+        ("app/revalidate/route.js", "import { revalidateTag } from 'next/cache';\nexport async function POST() { revalidateTag('stamp', { expire: 0 }); return new Response('ok') }\n"),
+    ], json!({})).await;
+    let fetch = |method: &'static str, path: &'static str| {
+        let req = Request::builder().method(method).uri(path).header("host", host.as_str()).body(Body::empty()).unwrap();
+        let public = w.public.clone();
+        async move {
+            let r = public.oneshot(req).await.unwrap();
+            let st = r.status();
+            (st, String::from_utf8(r.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap())
+        }
+    };
+    let (st, first) = fetch("GET", "/stamp").await;
+    assert_eq!(st, StatusCode::OK, "{first}");
+    assert_eq!(fetch("GET", "/stamp").await.1, first, "cached");
+    // Asleep: the next request starts another instance, which serves what the first one made.
+    w.apps.live(&id, "production").sleep().await;
+    assert_eq!(fetch("GET", "/stamp").await.1, first, "the cache outlived its instance");
+    assert_eq!(fetch("POST", "/revalidate").await.1, "ok");
+    // Next marks the tag once the route has answered: read until it's made again.
+    let mut again = String::new();
+    for _ in 0..40 {
+        again = fetch("GET", "/stamp").await.1;
+        if again != first {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    assert!(again != first && !again.is_empty(), "made again after revalidateTag: {again}");
+    assert_eq!(delete_for_good(&w.api, &id).await.0, StatusCode::NO_CONTENT);
+    w.apps.shutdown().await;
+}
+
+/// A browser check in real Chromium (roll's checker image: Playwright's with the pinned library):
+/// its script finds the page's heading past the environment's password, and one that looks for
+/// what isn't there fails saying so.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_browser_check_runs_in_chromium() {
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let Some(w) = docker_world_with(None, |c| c.otlp_base = Some(format!("http://127.0.0.1:{port}"))).await else { return };
+    let app = w.public.clone();
+    tokio::spawn(async move { axum::serve(listener, app.into_make_service()).await });
+    let (id, _) = deploy_tree(&w, "browsed", &[
+        ("package.json", r#"{"name": "n", "version": "1.0.0", "scripts": {"start": "node server.js"}}"#),
+        ("server.js", "require('http').createServer((q, r) => { r.setHeader('content-type', 'text/html'); r.end('<title>t</title><h1>Hello roll</h1><script>document.body.append(Object.assign(document.createElement(\"p\"), {textContent: \"ran\"}))</script>') }).listen(process.env.PORT)"),
+    ]).await;
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    let check = |script: &str| json!({"access": {"password": "correct horse"}, "checks": [{"name": "home", "path": "/", "every_s": 300, "timeout_s": 60, "browser": script}]});
+    let (st, e) = call(&w.api, "PUT", &base, Some(check("await page.getByRole('heading', { name: 'Hello roll' }).waitFor(); await page.getByText('ran').waitFor()")), "application/json", None).await;
+    assert_eq!(st, StatusCode::OK, "{e}");
+    let t0 = code_sql::now_ms() + 3_600_000;
+    let pass = |n: i64| {
+        let (w, base) = (&w, base.clone());
+        async move {
+            w.apps.cron_pass(t0 + n * 301_000).await;
+            // The first builds roll's checker image: minutes.
+            for _ in 0..6000 {
+                let st = call(&w.api, "GET", &base, None, "application/json", None).await.1["check_states"][0].clone();
+                if st["last_at"].as_i64() == Some(t0 + n * 301_000) {
+                    return st;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            panic!("pass {n} never came back");
+        }
+    };
+    let up = pass(0).await;
+    assert_eq!((up["up"].as_bool(), up["status"].as_u64()), (Some(true), Some(200)), "{up}");
+    // Its lab metrics, as Chromium measured them.
+    assert!(up["metrics"]["lcp_ms"].as_u64().is_some_and(|l| l > 0) && up["metrics"]["requests"].as_u64() >= Some(1), "{up}");
+    call(&w.api, "PUT", &base, Some(check("await page.getByRole('heading', { name: 'Goodbye' }).waitFor({ timeout: 2000 })")), "application/json", None).await;
+    let failed = pass(1).await;
+    assert!(failed["failures"].as_u64() == Some(1) && failed["error"].as_str().is_some_and(|e| e.contains("Goodbye")), "{failed}");
+    // Its screenshot and trace came out of the stopped container.
+    let file = |which: &'static str| {
+        let (api, base) = (w.api.clone(), base.clone());
+        async move {
+            let r = api.oneshot(Request::get(format!("{base}/checks/home/{which}")).body(Body::empty()).unwrap()).await.unwrap();
+            (r.status(), r.into_body().collect().await.unwrap().to_bytes().to_vec())
+        }
+    };
+    let (st, png) = file("screenshot").await;
+    assert!(st == StatusCode::OK && png.starts_with(b"\x89PNG"), "{st} {} bytes", png.len());
+    let (st, zip) = file("trace").await;
+    assert!(st == StatusCode::OK && zip.starts_with(b"PK"), "{st} {} bytes", zip.len());
+    // A budget the page can't meet is its own verdict, saying which: never down.
+    let mut over = check("await page.title()");
+    over["checks"][0]["budgets"] = json!({"lcp_ms": 1});
+    assert_eq!(call(&w.api, "PUT", &base, Some(over), "application/json", None).await.0, StatusCode::OK);
+    let over = pass(2).await;
+    assert!(over["up"] == true && over["over_budget"].as_str().is_some_and(|e| e.contains("over its budget: LCP")), "{over}");
+    assert_eq!(delete_for_good(&w.api, &id).await.0, StatusCode::NO_CONTENT);
+    let _ = std::process::Command::new("docker").args(["rmi", &format!("roll-apps-{id}:browser-check-{}", apps_control::browser::PLAYWRIGHT.replace('.', "-"))]).output();
     w.apps.shutdown().await;
 }
 

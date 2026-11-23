@@ -638,8 +638,6 @@ pub struct Access {
     pub(crate) github_keys: leaks::GithubKeys,
     /// OAuth registrations lately, per network (open registration's limit).
     pub(crate) registrations: std::sync::Mutex<Window>,
-    /// Callback URLs each connection asked roll to verify lately (MCP Events' webhooks).
-    pub(crate) event_verifies: std::sync::Mutex<Window>,
     /// How OIDC issuers' keys are fetched for trusted machine clients: rolld's guarded client.
     /// Unset: only clients with pinned keys sign in that way.
     pub oidc_fetch: std::sync::OnceLock<Arc<dyn roll_oidc::Fetch + Send + Sync>>,
@@ -671,7 +669,7 @@ impl Access {
 
     /// On a database already open (tests: `code_sql::Db::open_or_test`, so they run on Postgres too).
     pub fn with_db(db: code_sql::Db, config: Config, resolvers: Resolvers) -> Result<Arc<Access>> {
-        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), nodes: Default::default(), revokers: Default::default(), decoy_hooks: Default::default(), limiter: Default::default(), sinks: Default::default(), event_hooks: Default::default(), people: Default::default(), workspace: Default::default(), mail_gate: Default::default(), github_keys: Default::default(), registrations: Default::default(), event_verifies: Default::default(), oidc_fetch: Default::default(), oidc_keys: Default::default(), sign_ins: Default::default(), device_starts: Default::default(), device_guesses: Default::default(), policy_cache: Default::default() }))
+        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), nodes: Default::default(), revokers: Default::default(), decoy_hooks: Default::default(), limiter: Default::default(), sinks: Default::default(), event_hooks: Default::default(), people: Default::default(), workspace: Default::default(), mail_gate: Default::default(), github_keys: Default::default(), registrations: Default::default(), oidc_fetch: Default::default(), oidc_keys: Default::default(), sign_ins: Default::default(), device_starts: Default::default(), device_guesses: Default::default(), policy_cache: Default::default() }))
     }
 
     /// The resource of `kind` named `id`, with its project and environment filled in.
@@ -854,6 +852,7 @@ impl Access {
             if let Some(revoked) = foreign {
                 if let Some(what) = revoked {
                     tracing::warn!(what = %what, at = %found_at, "a leaked secret was revoked");
+                    self.alert("secret_revoked", serde_json::json!({ "what": what, "found_at": found_at }));
                     self.store.audit(&store::AuditEvent {
                         id: new_id("aud"),
                         at: code_sql::now_ms(),
@@ -887,6 +886,7 @@ impl Access {
             // An enterprise app's secret: dropped with its tokens until the operator rotates it.
             if let Some(app) = self.revoke_leaked_app(s, &format!("found in {found_at}"))? {
                 tracing::warn!(app = %app.client_id, at = %found_at, "a leaked enterprise app secret was revoked");
+                self.alert("secret_revoked", serde_json::json!({ "what": format!("enterprise app {} ({})", app.name, app.client_id), "found_at": found_at }));
                 self.store.audit(&store::AuditEvent {
                     id: new_id("aud"),
                     at: code_sql::now_ms(),
@@ -911,6 +911,7 @@ impl Access {
             }
             if let Some(g) = self.store.revoke_leaked(s, &format!("found in {found_at}"))? {
                 tracing::warn!(grant = %g.id, name = %g.name, at = %found_at, "a leaked token was revoked");
+                self.alert_for("token_revoked", serde_json::json!({ "grant": g.id, "name": g.name, "found_at": found_at }), g.user.as_deref());
                 self.tell(
                     g.user.as_deref(),
                     None,
@@ -954,6 +955,96 @@ impl Access {
         let n = self.store.setting("notify").ok()??;
         let (i, c) = (n["chat"]["install"].as_str()?, n["chat"]["channel"].as_str()?);
         Some((i.to_string(), c.to_string()))
+    }
+
+    /// Keep an alert for the operator's feed (`access.alert`); a failure to keep it is logged, never
+    /// the caller's error (what it alerts about already happened).
+    fn alert(&self, kind: &str, data: serde_json::Value) {
+        self.alert_for(kind, data, None);
+    }
+
+    /// [`Access::alert`], about a person's own token: on their feed too.
+    fn alert_for(&self, kind: &str, data: serde_json::Value, user: Option<&str>) {
+        if let Err(e) = self.store.record_alert(kind, &data, user) {
+            tracing::warn!(error = %e, kind, "keeping an alert for the operator's feed");
+        }
+    }
+
+    /// The checkup's new findings since its last look (a token gone broad, unused, roaming…), kept
+    /// for the operator's feed as `checkup_finding`: one node an hour (claimed in the store) runs
+    /// the operator's checkup and compares it with the set it kept last time. The first look only
+    /// keeps the set (what was already there isn't news). At most 20 a look. How many.
+    pub fn checkup_alerts(&self) -> Result<usize> {
+        self.checkup_alerts_every(50 * 60_000)
+    }
+
+    /// [`Access::checkup_alerts`], looking again only after `every_ms` (on any node).
+    pub fn checkup_alerts_every(&self, every_ms: i64) -> Result<usize> {
+        const KEY: &str = "checkup_seen";
+        let now = code_sql::now_ms();
+        if !self.store.claim_alert("checkup_scan", now, every_ms)? {
+            return Ok(0);
+        }
+        let rows = api::checkup_rows(self, &api::Who::Operator)?;
+        let mut current = std::collections::BTreeSet::new();
+        let mut found = Vec::new();
+        for r in &rows {
+            for f in r["findings"].as_array().into_iter().flatten() {
+                let key = format!("{}:{}", r["grant"]["id"].as_str().unwrap_or_default(), f["kind"].as_str().unwrap_or_default());
+                current.insert(key.clone());
+                found.push((key, r, f));
+            }
+        }
+        let before = self.store.setting(KEY)?;
+        self.store.set_setting(KEY, &serde_json::json!(current))?;
+        let Some(before) = before else { return Ok(0) };
+        let before: std::collections::BTreeSet<String> = before.as_array().into_iter().flatten().filter_map(|v| v.as_str().map(str::to_string)).collect();
+        let mut sent = 0;
+        for (_, r, f) in found.into_iter().filter(|(k, ..)| !before.contains(k)).take(20) {
+            let user = r["grant"]["id"].as_str().and_then(|id| self.store.get(id).ok()).and_then(|g| g.user);
+            self.alert_for("checkup_finding", serde_json::json!({ "grant": r["grant"]["id"], "name": r["grant"]["name"], "finding": f["kind"], "why": f["why"], "fix": f["fix"] }), user.as_deref());
+            sent += 1;
+        }
+        Ok(sent)
+    }
+
+    /// Tools whose server errors jumped lately ([`store::Store::failure_jumps`]): each kept for the
+    /// operator's feed (`access.alert`), mailed to every admin and posted where approvals go. One
+    /// node sends each (claimed in the store), at most once every six hours per tool. How many.
+    pub async fn activity_alerts(self: &Arc<Self>) -> Result<usize> {
+        // The store's reads and writes off the async workers; the mail and the chat post after.
+        let me = self.clone();
+        let due = tokio::task::spawn_blocking(move || -> Result<Vec<(String, String, String)>> {
+            let now = code_sql::now_ms();
+            let every = 6 * 3_600_000;
+            let recent = |tool: &str| me.store.alerted_within(&format!("activity_alert:{tool}"), now, every).unwrap_or(false);
+            let mut due = Vec::new();
+            for j in me.store.failure_jumps(now, &recent)? {
+                let tool = j["tool"].as_str().unwrap_or_default().to_string();
+                if !me.store.claim_alert(&format!("activity_alert:{tool}"), now, every)? {
+                    continue;
+                }
+                let pct = |r: &serde_json::Value| (r.as_f64().unwrap_or(0.0) * 100.0).round() as i64;
+                let (rate, usual) = (pct(&j["rate"]), pct(&j["usual"]));
+                me.alert("tool_failing", serde_json::json!({ "tool": tool, "calls": j["calls"], "failed": j["failed"], "rate_pct": rate, "usual_pct": usual }));
+                let line = format!("{tool} answered {} of its {} calls in the last 15 minutes with a server error ({rate}%; usually {usual}%).", j["failed"], j["calls"]);
+                let subject = format!("roll MCP: {tool} is failing ({rate}% of calls)");
+                due.push((tool, subject, line));
+            }
+            Ok(due)
+        })
+        .await
+        .map_err(|e| Error::Internal(e.to_string()))??;
+        let link = format!("Agent activity: {}/dashboard/access", self.web_url());
+        for (tool, subject, line) in &due {
+            self.tell_admins(&format!("activity_alert:{tool}"), subject.clone(), format!("{line}\n\n{link}"));
+            if let Some((chat, (install, channel))) = self.chat.get().cloned().zip(self.chat_target())
+                && let Err(e) = chat.notice(install, channel, format!("roll MCP: {line} {link}")).await
+            {
+                tracing::warn!(error = %e, "posting a failing tool where approvals go");
+            }
+        }
+        Ok(due.len())
     }
 
     /// Once a day, where approvals go: the live tokens that expire within a week (GitHub mails a
@@ -1160,6 +1251,13 @@ impl Access {
             g.id,
         );
         let key = format!("decoy:{}", g.id);
+        // Kept for the operator's feed at most once an hour per decoy (on any node): one prober
+        // can trip it many times.
+        let (now, alert_key) = (code_sql::now_ms(), format!("alert_{key}"));
+        // A read first: a flood of tries costs no write each once it's been kept this hour.
+        if !self.store.alerted_within(&alert_key, now, 3_600_000).unwrap_or(true) && self.store.claim_alert(&alert_key, now, 3_600_000).unwrap_or(false) {
+            self.alert_for("decoy_used", serde_json::json!({ "grant": g.id, "name": g.name, "route": route.chars().take(200).collect::<String>(), "ip": ip }), g.user.as_deref());
+        }
         self.tell(g.user.as_deref(), Some((&key, 3_600_000)), subject.clone(), text.clone());
         self.tell_admins(&key, subject, text);
         let used = DecoyUse { grant: g.id.clone(), ip, route: route.chars().take(200).collect(), at: code_sql::now_ms() };

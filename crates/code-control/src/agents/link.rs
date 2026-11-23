@@ -115,7 +115,15 @@ pub(crate) async fn serve(code: Arc<Code>, machine: MachineRow, mut socket: WebS
     let welcome = RelayFrame::Welcome { machine: MachineId(machine.id.clone()), owner: owner.name.clone(), resume_from };
     // A new sandbox joins the owner's gateway when the owner said so (in the background).
     super::gateway::sandbox_hello(&code, &machine);
-    let ended = if socket.send(text(&welcome)).await.is_ok() { run(&code, &machine, &mut socket, attached.rx, &attached.close).await } else { End::Gone };
+    // Endpoints with a `roll://` key get it sealed after each hello, while this link is up.
+    let (hellos, heard_hello) = tokio::sync::watch::channel(Some(info));
+    let ended = if socket.send(text(&welcome)).await.is_ok() {
+        super::endpoint_refs::follow(code.clone(), machine.clone(), heard_hello);
+        run(&code, &machine, &mut socket, attached.rx, &attached.close, &hellos).await
+    } else {
+        End::Gone
+    };
+    drop(hellos);
     match ended {
         End::Revoked => close(socket, CLOSE_REVOKED, "the machine was revoked").await,
         End::Replaced => close(socket, CLOSE_REPLACED, "replaced by a newer connection").await,
@@ -144,7 +152,14 @@ enum End {
     Failed,
 }
 
-async fn run(code: &Arc<Code>, machine: &MachineRow, socket: &mut WebSocket, mut rx: tokio::sync::mpsc::Receiver<RelayFrame>, close: &Closer) -> End {
+async fn run(
+    code: &Arc<Code>,
+    machine: &MachineRow,
+    socket: &mut WebSocket,
+    mut rx: tokio::sync::mpsc::Receiver<RelayFrame>,
+    close: &Closer,
+    hellos: &tokio::sync::watch::Sender<Option<agent_proto::MachineInfo>>,
+) -> End {
     let hub = code.agents.hub(&machine.owner_id);
     let mut ping = tokio::time::interval_at(tokio::time::Instant::now() + PING_EVERY, PING_EVERY);
     let mut heard = tokio::time::Instant::now();
@@ -224,6 +239,7 @@ async fn run(code: &Arc<Code>, machine: &MachineRow, socket: &mut WebSocket, mut
                             Ok(None) => return End::Revoked,
                             Err(e) => tracing::warn!(machine = %machine.id, error = %e, "agent link: saving hello"),
                         }
+                        hellos.send_replace(Some(info));
                     }
                     DaemonFrame::Pong => {}
                 }

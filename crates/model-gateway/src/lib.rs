@@ -110,6 +110,10 @@ pub(crate) struct Inner {
     /// (to an answer's headers, between two reads of a stream): [`net::FIRST_BYTE_TIMEOUT`] and
     /// [`net::IDLE_TIMEOUT`] but in tests.
     pub(crate) timeouts: Mutex<(Duration, Duration)>,
+    /// Upstreams whose key the owner's key store refused (a `roll://` key whose maker can no
+    /// longer read it), with why: no key is used for them, and none of their provider's either
+    /// ([`Gateway::refuse_keys`]).
+    pub(crate) refused: Mutex<HashMap<String, String>>,
 }
 
 impl Gateway {
@@ -153,6 +157,7 @@ impl Gateway {
             retention,
             vertex_token_uri: Mutex::new(None),
             timeouts: Mutex::new((net::FIRST_BYTE_TIMEOUT, net::IDLE_TIMEOUT)),
+            refused: Mutex::new(HashMap::new()),
         };
         Ok(Gateway { inner: Arc::new(inner) })
     }
@@ -164,6 +169,14 @@ impl Gateway {
     ///
     /// Settings that don't pass [`GatewaySettings::check`] change nothing: the gateway keeps
     /// serving as it was, and the state says why it didn't take them.
+    /// Upstreams (by id) whose key was refused where it's kept, with why (replaces the last
+    /// call's). Such an upstream gets no key, and a request never goes on to another upstream of
+    /// its provider instead ([`route::same_provider`]): another key of the same provider is never
+    /// the way around a key that was taken away. `gateway.status` says why for each.
+    pub fn refuse_keys(&self, refused: HashMap<String, String>) {
+        *self.inner.refused.lock().unwrap() = refused;
+    }
+
     pub async fn apply(&self, settings: GatewaySettings, keys: HashMap<String, Secret>) -> GatewayRun {
         let settings = match settings.check() {
             Ok(s) => s,
@@ -253,6 +266,9 @@ impl Gateway {
             .map(|u| {
                 let mut h = self.inner.health.health(&u.id, now);
                 (h.requests_hour, h.p50_ms) = self.stats_of(&u.id, now);
+                if let Some(why) = self.inner.refused.lock().unwrap().get(&u.id) {
+                    h.last_error = Some(format!("its key can't be used: {why}"));
+                }
                 h
             })
             .collect();

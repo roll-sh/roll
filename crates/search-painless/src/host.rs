@@ -228,8 +228,80 @@ impl HostError {
     }
 }
 
+/// Calls the host outside the running execution's account ([`crate::guard::paused`]). An error
+/// it returns was built there, uncharged: the script gets a charged copy, and the original is
+/// freed outside the account too, so a script that catches and drops it gets back only what was
+/// charged.
+#[inline(always)]
+pub(crate) fn call<T: Copy>(f: impl FnOnce() -> Result<T, HostError>) -> Result<T, HostError> {
+    let mut failed = None;
+    let ok = crate::guard::paused(|| match f() {
+        Ok(v) => Some(v),
+        Err(e) => {
+            failed = Some(e);
+            None
+        }
+    });
+    match (ok, failed) {
+        (Some(v), _) => Ok(v),
+        (None, Some(e)) => {
+            let copy = HostError { kind: e.kind, reason: e.reason.clone(), frames: e.frames.clone() };
+            crate::guard::paused(|| drop(e));
+            Err(copy)
+        }
+        (None, None) => unreachable!(),
+    }
+}
+
+/// A doc-values buffer filled by the host outside the execution's account ([`crate::guard::paused`]),
+/// held by engine code only for the call that reads it: what the host put in was never charged,
+/// so it is freed outside the account too.
+#[derive(Default)]
+pub struct HostBuf(DocValues);
+
+impl std::ops::Deref for HostBuf {
+    type Target = DocValues;
+    fn deref(&self) -> &DocValues {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for HostBuf {
+    fn deref_mut(&mut self) -> &mut DocValues {
+        &mut self.0
+    }
+}
+
+impl Drop for HostBuf {
+    fn drop(&mut self) {
+        let dv = std::mem::take(&mut self.0);
+        crate::guard::paused(|| drop(dv));
+    }
+}
+
+/// A host's memory breaker refused the bytes its scripts hold (see [`Host::script_memory`]).
+#[derive(Debug, Clone)]
+pub struct MemoryRefused {
+    /// The breaker's message (`[request] Data too large, …`).
+    pub reason: String,
+    pub wanted: u64,
+    pub limit: u64,
+}
+
 /// Per-document data a running script reads.
 pub trait Host {
+    /// The bytes this host's script executions hold changed by `delta` (negative: they gave some
+    /// back). Called when a running execution has grown by about a MiB since the last call and
+    /// when an execution ends with a different amount than it last reported, so a host sees what
+    /// its scripts hold across executions (values kept in `params` or a scripted metric's state)
+    /// and at the peak of each one. Hosts that answer to a memory breaker (a search's `request`
+    /// breaker) reserve it there and refuse past its limit; the script then fails with a
+    /// `circuit_breaking_exception`.
+    fn script_memory(&mut self, delta: i64) -> Result<(), MemoryRefused> {
+        let _ = delta;
+        Ok(())
+    }
+
     /// `_score` of the current document.
     fn score(&mut self) -> f64 {
         0.0

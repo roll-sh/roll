@@ -31,16 +31,22 @@
   .card .what { font-family: ui-monospace, "Geist Mono", monospace; font-size: 12px; color: var(--muted); }
   button { justify-self: start; font: inherit; font-size: 12px; padding: 5px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--fg); cursor: pointer; }
   button:hover { border-color: var(--muted); }
+  .live { color: var(--muted); font-size: 12px; margin-left: auto; display: inline-flex; align-items: center; gap: 6px; }
+  .live[data-on]::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); animation: pulse 1.6s ease-out infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+  @media (prefers-reduced-motion: reduce) { .live[data-on]::before { animation: none; } }
 </style>
 </head>
 <body>
 <main>
-  <header><h1 id="title">roll</h1><span class="count" id="count"></span></header>
+  <header><h1 id="title">roll</h1><span class="count" id="count"></span><span class="live" id="live"></span></header>
   <div id="view"><p class="note">Waiting for the result…</p></div>
 </main>
 <script>
 // roll's MCP App view (io.modelcontextprotocol/ui): a tool's result as a table. It talks to its
-// host only (JSON-RPC over postMessage), has no network, and writes every value as text.
+// host only (JSON-RPC over postMessage), has no network, and writes every value as text. The only
+// tool it calls is the read roll names on an answer that's still changing (`_meta["roll/pending"]`),
+// through the host, until the answer settles.
 (() => {
   let next = 1;
   const pending = new Map();
@@ -141,6 +147,37 @@
     resize();
   }
 
+  // An answer still changing: read it again (the read roll named, through the host and so the
+  // gate) every 2 s, slowing to 10 s, paused while the view is hidden; stop when it settles, on
+  // an error, or after 10 minutes, leaving the last answer shown.
+  let canCall = false, generation = 0, timer = 0, started = 0, delay = 2000, last = null;
+  const live = (text, on) => { const l = document.getElementById("live"); l.textContent = text; if (on) l.dataset.on = ""; else delete l.dataset.on; };
+  const clock = () => new Date().toISOString().slice(11, 19) + " UTC";
+  function follow(result, fresh) {
+    clearTimeout(timer);
+    const gen = fresh ? ++generation : generation;
+    if (fresh) { started = Date.now(); delay = 2000; live("", false); }
+    const again = result && result._meta && result._meta["roll/pending"];
+    if (!again || typeof again.tool !== "string") { if (!fresh) live(`settled ${clock()}`, false); return; }
+    if (!canCall) return;
+    if (Date.now() - started > 600000) return live("stopped refreshing after 10 minutes", false);
+    live(`live · ${clock()}`, true);
+    const read = () => {
+      if (gen !== generation) return;
+      if (document.hidden) return document.addEventListener("visibilitychange", read, { once: true });
+      request("tools/call", { name: again.tool, arguments: again.arguments || {} })
+        .then((r) => {
+          if (gen !== generation) return;
+          if (!r || r.isError) return live("stopped refreshing: the read failed", false);
+          render(r, tool);
+          follow(r, false);
+        })
+        .catch(() => { if (gen === generation) live("stopped refreshing: the host refused the call", false); });
+    };
+    timer = setTimeout(read, delay);
+    delay = Math.min(delay * 1.5, 10000);
+  }
+
   let tool = "";
   window.addEventListener("message", (e) => {
     if (e.source !== window.parent) return;
@@ -150,7 +187,7 @@
       const p = pending.get(m.id); pending.delete(m.id);
       return m.error ? p.reject(m.error) : p.resolve(m.result);
     }
-    if (m.method === "ui/notifications/tool-result") render(m.params, tool);
+    if (m.method === "ui/notifications/tool-result") { last = m.params; render(last, tool); follow(last, true); }
     if (m.method === "ui/notifications/host-context-changed" && m.params && m.params.theme) document.documentElement.dataset.theme = m.params.theme;
   });
 
@@ -161,6 +198,9 @@
       const ctx = (r && r.hostContext) || {};
       if (ctx.theme) document.documentElement.dataset.theme = ctx.theme;
       canOpen = !!(r && r.hostCapabilities && r.hostCapabilities.openLinks);
+      canCall = !!(r && r.hostCapabilities && r.hostCapabilities.serverTools);
+      // A result that came before the handshake finished.
+      if (last && canCall) follow(last, true);
       if (ctx.toolInfo && ctx.toolInfo.tool) tool = ctx.toolInfo.tool.name || tool;
       notify("ui/notifications/initialized", {});
       resize();

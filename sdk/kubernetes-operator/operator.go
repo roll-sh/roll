@@ -52,6 +52,40 @@ type operator struct {
 	wake    chan struct{}
 	seen    map[string]watchTarget // what the last pass reconciled, by namespace/name
 	watches map[string]*watchState
+
+	// readers hold each RollSecret's last answer, by namespace/name (see reader).
+	readers map[string]*reader
+}
+
+// reader is the client a RollSecret's values are read through. Its cache holds the last answer
+// with every key's stamp, so a read after the digest moved asks only for what changed
+// (`…/values/delta`, docs/secrets.md "Delta reads"); rolld answers the full set whenever it
+// can't prove the delta exact, and any failure of the delta reads in full. In memory only: a
+// restarted operator reads each folder in full once.
+type reader struct {
+	as string // the login, RollSecret, project, environment and folder it reads
+	c  *secrets.Client
+}
+
+// read is rs's values, read with c's token through rs's reader.
+func (o *operator) read(ctx context.Context, rs *rollSecret, l login, c *secrets.Client) (*secrets.Values, error) {
+	as := strings.Join([]string{l.key(), rs.Metadata.UID, c.Project, rs.Spec.Environment, rs.Spec.Path}, "\x00")
+	key := rs.Metadata.Namespace + "/" + rs.Metadata.Name
+	o.mu.Lock()
+	if o.readers == nil {
+		o.readers = map[string]*reader{}
+	}
+	r := o.readers[key]
+	if r == nil || r.as != as {
+		// CacheTTL only turns the cache on: every read asks rolld, and the operator reads only once
+		// the digest moved.
+		r = &reader{as: as, c: &secrets.Client{API: c.API, Project: c.Project, HTTP: c.HTTP, CacheTTL: time.Nanosecond, CacheSize: 1}}
+		o.readers[key] = r
+	}
+	o.mu.Unlock()
+	// Passes run one at a time, so nothing else uses r meanwhile.
+	r.c.Token = c.Token
+	return r.c.Values(ctx, rs.Spec.Environment, rs.Spec.Path)
 }
 
 // What a RollSecret's watch long-polls: its environment and folder, as its login reads them,
@@ -300,7 +334,7 @@ func (o *operator) reconcile(ctx context.Context, rs *rollSecret) rollStatus {
 		return st
 	}
 
-	v, err := c.Values(ctx, rs.Spec.Environment, rs.Spec.Path)
+	v, err := o.read(ctx, rs, l, c)
 	if err != nil {
 		return fail(err)
 	}
@@ -434,6 +468,16 @@ func (o *operator) pass(ctx context.Context) error {
 	}
 	o.mu.Lock()
 	o.seen = map[string]watchTarget{}
+	// A RollSecret that's gone takes its last answer with it.
+	listed := map[string]bool{}
+	for _, rs := range list.Items {
+		listed[rs.Metadata.Namespace+"/"+rs.Metadata.Name] = true
+	}
+	for key := range o.readers {
+		if !listed[key] {
+			delete(o.readers, key)
+		}
+	}
 	o.mu.Unlock()
 	defer o.rearm(ctx)
 	for i := range list.Items {

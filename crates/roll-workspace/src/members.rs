@@ -11,6 +11,7 @@
 //! rolld writes it to roll's audit log and acts on removals (D7's revocations) from there, after
 //! the write, so a crash between the two loses nothing.
 
+use crate::events::{self, Kind as Event};
 use crate::{Error, Kind, Result, Scope, Workspace, not_found, owner_of};
 use code_sql::{Conn, OptionalExtension, params};
 use roll_auth::roles::{self, Role};
@@ -112,6 +113,18 @@ pub trait People: Send + Sync {
     fn mail(&self, email: &str, subject: &str, text: &str) {
         let _ = (email, subject, text);
     }
+    /// Whether SSO connection `connection`'s SCIM groups are on now (its provider keeps its
+    /// groups, so roll's routes don't delete them).
+    fn scim_groups_on(&self, connection: &str) -> bool {
+        let _ = connection;
+        false
+    }
+    /// Whether SSO connection `connection` is gone for sure (a failed lookup is a no): its groups
+    /// are then dropped by [`Workspace::sweep_groups`].
+    fn connection_gone(&self, connection: &str) -> bool {
+        let _ = connection;
+        false
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -168,7 +181,7 @@ impl Actor {
         self.manages(project) && ok(&self.grant) && ok(&self.session)
     }
 
-    fn scope(&self) -> Scope<'_> {
+    pub(crate) fn scope(&self) -> Scope<'_> {
         match &self.user {
             Some(u) => Scope::Member(u),
             None => Scope::All,
@@ -215,7 +228,11 @@ pub struct MemberEvent {
     pub id: String,
     pub at: i64,
     /// `member.invite`, `member.invite_revoke`, `member.accept`, `member.decline`, `member.role`,
-    /// `member.remove`, `member.leave`, `home.set`.
+    /// `member.remove`, `member.leave`, `home.set`; a group's `group.create`, `group.update`,
+    /// `group.delete`, `group.member_add`, `group.member_remove`, `group.role` and
+    /// `group.role_remove` (a server-wide one has no project); and `group.lost`, one per person
+    /// and project a group change may have narrowed or cut off (`subject`), made from the group's
+    /// event after its write.
     pub action: String,
     pub project: String,
     pub actor: String,
@@ -226,6 +243,11 @@ pub struct MemberEvent {
 }
 
 impl MemberEvent {
+    /// The projects a `group.lost` names (where its person no longer holds what the group gave).
+    pub fn lost_projects(&self) -> Vec<String> {
+        self.detail.get("projects").and_then(|p| serde_json::from_value(p.clone()).ok()).unwrap_or_default()
+    }
+
     /// The person who left the project, when they were removed or left.
     pub fn removal(&self) -> Option<&str> {
         matches!(self.action.as_str(), "member.remove" | "member.leave").then_some(self.subject.as_deref()).flatten()
@@ -240,14 +262,14 @@ fn hash_token(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
 }
 
-fn random(n: usize) -> String {
+pub(crate) fn random(n: usize) -> String {
     const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
     let mut b = vec![0u8; n];
     getrandom::fill(&mut b).expect("system randomness");
     b.iter().map(|x| ALPHABET[(x & 31) as usize] as char).collect()
 }
 
-fn check_envs(role: Role, environments: &Option<Vec<String>>) -> Result<()> {
+pub(crate) fn check_envs(role: Role, environments: &Option<Vec<String>>) -> Result<()> {
     let Some(envs) = environments else { return Ok(()) };
     if role != Role::Developer {
         return Err(Error::BadRequest("only a developer's role is narrowed to environments".into()));
@@ -263,11 +285,11 @@ fn parse_role(s: &str) -> Result<Role> {
     Role::parse(s).ok_or_else(|| Error::BadRequest(format!("unknown role {s:?}: one of viewer, developer, admin, owner")))
 }
 
-fn envs_json(e: &Option<Vec<String>>) -> Option<String> {
+pub(crate) fn envs_json(e: &Option<Vec<String>>) -> Option<String> {
     e.as_ref().map(|e| serde_json::to_string(e).expect("JSON"))
 }
 
-fn envs_of(s: Option<String>) -> Option<Vec<String>> {
+pub(crate) fn envs_of(s: Option<String>) -> Option<Vec<String>> {
     s.and_then(|s| serde_json::from_str(&s).ok())
 }
 
@@ -277,7 +299,7 @@ fn normal_email(e: &str) -> Result<String> {
     if ok { Ok(e) } else { Err(Error::BadRequest("email isn't an email address".into())) }
 }
 
-fn record(c: &Conn<'_>, now: i64, action: &str, project: &str, actor: &Actor, subject: Option<&str>, detail: Value) -> Result<()> {
+pub(crate) fn record(c: &Conn<'_>, now: i64, action: &str, project: &str, actor: &Actor, subject: Option<&str>, detail: Value) -> Result<()> {
     c.execute(
         "INSERT INTO member_events (id, at, action, project_id, actor, subject, detail, ip) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         params![format!("mev_{}", random(16)), now, action, project, actor.id, subject, detail.to_string(), actor.ip],
@@ -371,8 +393,14 @@ impl Workspace {
         self.on_event.write().expect("on_event").push(f);
     }
 
-    fn person(&self, user: &str) -> Option<Person> {
+    pub(crate) fn person(&self, user: &str) -> Option<Person> {
         self.people.get().and_then(|p| p.person(user))
+    }
+
+    /// `user`'s handle as the members list shows it (their id when they can't sign in), looked up
+    /// before a write: an account is another database's.
+    pub(crate) fn handle(&self, user: &str) -> String {
+        self.person(user).map_or_else(|| user.to_string(), |p| p.handle)
     }
 
     /// The owners of `project` who can sign in now.
@@ -380,18 +408,48 @@ impl Workspace {
         Ok(self.owners_of(project)?.into_iter().filter(|o| self.person(o).is_some()).collect())
     }
 
-    /// `user`'s memberships, for their session's grant: one indexed read, never cached.
+    /// `user`'s memberships, for their session's grant: their own and their groups' roles
+    /// (docs/members-v1-1.md, "Roles add up"), in one indexed read, never cached. Their own come
+    /// first, then group roles by project, up to [`PROJECTS_MAX`] distinct projects (only SCIM
+    /// can put someone past it; roll's own writes refuse to).
     pub fn memberships_of(&self, user: &str) -> Result<Vec<roles::Membership>> {
-        Ok(self.db.read(|c| {
-            c.query("SELECT project_id, role, environments FROM members WHERE user_id = ? ORDER BY project_id", [user], |r| {
-                let role: String = r.get(1)?;
-                Ok(roles::Membership { project: r.get(0)?, role: Role::parse(&role).unwrap_or(Role::Viewer), environments: envs_of(r.get(2)?) })
-            })
-        })?)
+        let rows: Vec<(String, String, Option<String>, bool)> = self.db.read(|c| {
+            c.query(
+                "SELECT project_id, role, environments, 0 AS via FROM members WHERE user_id = ?1 \
+                 UNION ALL SELECT gr.project_id, gr.role, gr.environments, 1 AS via FROM group_members gm JOIN group_roles gr ON gr.group_id = gm.group_id WHERE gm.user_id = ?1 \
+                 ORDER BY via, project_id",
+                [user],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? == 1)),
+            )
+        })?;
+        let mut projects: HashSet<String> = HashSet::new();
+        let mut capped = false;
+        let mut out = Vec::with_capacity(rows.len());
+        for (project, role, environments, via_group) in rows {
+            if !projects.contains(&project) {
+                if projects.len() as i64 >= PROJECTS_MAX {
+                    capped = true;
+                    continue;
+                }
+                projects.insert(project.clone());
+            }
+            let role = if via_group { crate::groups::group_role(&role) } else { Role::parse(&role).unwrap_or(Role::Viewer) };
+            out.push(roles::Membership { project, role, environments: envs_of(environments) });
+        }
+        if capped {
+            // Only SCIM can put someone here (roll's own writes refuse): never silent.
+            tracing::warn!(user = %user, code = "too_many_projects", max = PROJECTS_MAX, "workspace: a person's groups reach more projects than a grant holds; those past the cap are left out");
+        }
+        Ok(out)
     }
 
-    /// `user`'s role in `project`, if they're a member.
+    /// `user`'s highest role in `project`, through their membership or a group (what lists show).
     pub fn role_in(&self, project: &str, user: &str) -> Result<Option<Role>> {
+        self.db.read(|c| crate::groups::effective_role(c, project, user))
+    }
+
+    /// `user`'s own membership's role in `project`, groups aside (the last owner, the member list).
+    pub fn direct_role(&self, project: &str, user: &str) -> Result<Option<Role>> {
         Ok(self.db.read(|c| role_of(c, project, user))?.map(|(r, _)| r))
     }
 
@@ -453,6 +511,7 @@ impl Workspace {
         let role = parse_role(role)?;
         check_envs(role, &environments)?;
         let signing = self.signing_owners(project)?;
+        let handle = self.handle(user);
         let now = self.db.now_ms()?;
         self.db.write(|c| {
             owner_of(c, actor.scope(), project)?;
@@ -465,6 +524,10 @@ impl Workspace {
             }
             c.execute("UPDATE members SET role = ?, environments = ? WHERE project_id = ? AND user_id = ?", params![role.as_str(), envs_json(&environments), project, user])?;
             record(c, now, "member.role", project, actor, Some(user), json!({ "old": { "role": old, "environments": old_envs }, "new": { "role": role, "environments": environments } }))?;
+            if (old, &old_envs) != (role, &environments) {
+                let data = json!({ "user": user, "handle": handle, "from": { "role": old, "environments": old_envs }, "to": { "role": role, "environments": environments } });
+                events::emit(c, project, now, Event::MemberRoleChanged, user, &actor.id, data)?;
+            }
             revoke_invites_beyond(c, now, project, user, Some((role, environments.clone())), actor)?;
             Ok(())
         })?;
@@ -477,10 +540,19 @@ impl Workspace {
     pub fn remove_member(&self, actor: &Actor, project: &str, user: &str) -> Result<()> {
         let leaving = actor.user.as_deref() == Some(user);
         let signing = self.signing_owners(project)?;
+        let handle = self.handle(user);
         let now = self.db.now_ms()?;
         self.db.write(|c| {
             owner_of(c, actor.scope(), project)?;
-            let Some((role, envs)) = role_of(c, project, user)? else { return Err(Error::NotFound(format!("{user} isn't a member of {project}"))) };
+            let Some((role, envs)) = role_of(c, project, user)? else {
+                // In only through groups: leaving is the groups' (their admins or identity provider).
+                let via: Vec<String> = c.query("SELECT g.name FROM group_members gm JOIN group_roles gr ON gr.group_id = gm.group_id JOIN groups g ON g.id = gm.group_id WHERE gr.project_id = ? AND gm.user_id = ? ORDER BY g.name", [project, user], |r| r.get(0))?;
+                if !via.is_empty() {
+                    let who = if leaving { "you're" } else { "they're" };
+                    return Err(Error::Conflict(format!("{who} in this project only through the group {}: ask roll's operator or an admin to change the group", via.join(", "))));
+                }
+                return Err(Error::NotFound(format!("{user} isn't a member of {project}")));
+            };
             if !leaving && !actor.may_grant(project, role, envs.as_deref()) {
                 return Err(Error::Forbidden(format!("you can't remove a {}: it's more than your own role gives", role.as_str())));
             }
@@ -491,6 +563,8 @@ impl Workspace {
             revoke_invites_beyond(c, now, project, user, None, actor)?;
             let action = if leaving { "member.leave" } else { "member.remove" };
             record(c, now, action, project, actor, Some(user), json!({ "role": role, "environments": envs }))?;
+            let data = json!({ "user": user, "handle": handle, "role": role, "environments": envs, "reason": if leaving { "left" } else { "removed" } });
+            events::emit(c, project, now, Event::MemberRemoved, user, &actor.id, data)?;
             Ok(())
         })?;
         self.run_events();
@@ -506,6 +580,11 @@ impl Workspace {
         let email = normal_email(email)?;
         if !actor.may_grant(project, role, environments.as_deref()) {
             return Err(Error::Forbidden(format!("you can't invite a {}: it's more than your own role gives", role.as_str())));
+        }
+        // Nobody invites themselves: a role held through a group would become their own, and
+        // outlast the identity provider taking them out of the group.
+        if actor.user.as_deref().and_then(|u| self.person(u)).and_then(|p| p.email).is_some_and(|e| e.eq_ignore_ascii_case(&email)) {
+            return Err(Error::Forbidden("you can't invite yourself: a project admin who isn't you invites you".into()));
         }
         // Checksummed and prefixed (`rlv_`), so the credential guard and leak scanning know it.
         let token = roll_auth::credentials::new_secret("rlv_");
@@ -530,12 +609,18 @@ impl Workspace {
                     return Err(Error::Conflict(format!("{email} has a pending invite as {r}, which is more than your own role gives: someone who may give it revokes it first")));
                 }
             }
+            let old: Vec<(String, String, Option<String>)> = c.query("SELECT id, role, environments FROM project_invites WHERE project_id = ? AND email = ? AND state = 'pending'", [project, email.as_str()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
             c.execute("UPDATE project_invites SET state = 'revoked' WHERE project_id = ? AND email = ? AND state = 'pending'", [project, email.as_str()])?;
+            for (old, r, e) in old {
+                revoked(c, now, project, &old, &r, envs_of(e), "replaced", &actor.id)?;
+            }
             c.execute(
                 "INSERT INTO project_invites (id, project_id, token_hash, email, role, environments, state, created_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)",
                 params![id, project, hash_token(&token), email, role.as_str(), envs_json(&environments), actor.id, now, now + INVITE_TTL_MS],
             )?;
             record(c, now, "member.invite", project, actor, None, json!({ "invite": id, "email": email, "role": role, "environments": environments }))?;
+            let data = json!({ "invite": id, "email": email, "role": role, "environments": environments, "expires_at": now + INVITE_TTL_MS });
+            events::emit(c, project, now, Event::InviteSent, &id, &actor.id, data)?;
             Ok(c.query_row("SELECT name FROM projects WHERE id = ?", [project], |r| r.get::<_, String>(0))?)
         })?;
         self.run_events();
@@ -563,11 +648,12 @@ impl Workspace {
             owner_of(c, actor.scope(), project)?;
             let found: Option<(String, Option<String>)> = c.query_row("SELECT role, environments FROM project_invites WHERE id = ? AND project_id = ? AND state = 'pending'", [invite, project], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
             let Some((role, envs)) = found else { return Err(Error::NotFound(format!("no pending invite {invite}"))) };
-            if !actor.may_grant(project, parse_role(&role)?, envs_of(envs).as_deref()) {
+            if !actor.may_grant(project, parse_role(&role)?, envs_of(envs.clone()).as_deref()) {
                 return Err(Error::Forbidden(format!("you can't revoke an invite as {role}: it's more than your own role gives")));
             }
             c.execute("UPDATE project_invites SET state = 'revoked' WHERE id = ?", [invite])?;
             record(c, now, "member.invite_revoke", project, actor, None, json!({ "invite": invite }))?;
+            revoked(c, now, project, invite, &role, envs_of(envs.clone()), "revoked", &actor.id)?;
             Ok(())
         })?;
         self.run_events();
@@ -595,7 +681,9 @@ impl Workspace {
         // The same answer for every way it can fail: an invite can't be used to learn who has an
         // account, or which addresses were invited.
         let gone = || Error::NotFound("this invite was used, revoked or has expired, or it's for another address".into());
-        let email = self.person(user).and_then(|p| p.email).ok_or_else(gone)?.to_ascii_lowercase();
+        let person = self.person(user);
+        let handle = person.as_ref().map_or_else(|| user.to_string(), |p| p.handle.clone());
+        let email = person.and_then(|p| p.email).ok_or_else(gone)?.to_ascii_lowercase();
         let now = self.db.now_ms()?;
         // Accepting gives the role the invite names: only while whoever invited may still give it
         // (removed, demoted, disabled, an admin no longer one, a token revoked: none of it stands).
@@ -605,7 +693,11 @@ impl Workspace {
         let checked = match &pending {
             Some((id, role, envs, by)) if accept => {
                 let project: String = self.db.read(|c| c.query_row("SELECT project_id FROM project_invites WHERE id = ?", [id.as_str()], |r| r.get(0)))?;
-                let still = Role::parse(role).is_some_and(|r| self.inviter(by).is_some_and(|a| a.may_grant(&project, r, envs_of(envs.clone()).as_deref())));
+                let inviter = self.inviter(by);
+                if inviter.as_ref().and_then(|a| a.user.as_deref()) == Some(user) {
+                    return Err(Error::Forbidden("an invite you made yourself can't be accepted: a project admin who isn't you invites you".into()));
+                }
+                let still = Role::parse(role).is_some_and(|r| inviter.is_some_and(|a| a.may_grant(&project, r, envs_of(envs.clone()).as_deref())));
                 if !still {
                     return Err(Error::Forbidden("whoever invited you can no longer give this role: ask a project admin for a new invite".into()));
                 }
@@ -631,19 +723,30 @@ impl Workspace {
             if !accept {
                 c.execute("UPDATE project_invites SET state = 'revoked', used_by = ?, used_at = ? WHERE id = ?", params![user, now, id])?;
                 record(c, now, "member.decline", &project, &actor, Some(user), json!({ "invite": id }))?;
+                let data = json!({ "invite": id, "role": role, "environments": envs_of(envs), "reason": "declined", "user": user, "handle": handle });
+                events::emit(c, &project, now, Event::InviteRevoked, &id, user, data)?;
                 return Ok(project);
             }
             if role_of(c, &project, user)?.is_some() {
                 return Err(Error::Conflict("you're a member of this project already: an admin changes your role".into()));
             }
             let members: i64 = c.query_row("SELECT COUNT(*) FROM members WHERE project_id = ?", [project.as_str()], |r| r.get(0))?;
-            let projects: i64 = c.query_row("SELECT COUNT(*) FROM members WHERE user_id = ?", [user], |r| r.get(0))?;
+            // Their projects through groups count too.
+            let projects: i64 = c.query_row(
+                "SELECT COUNT(*) FROM (SELECT project_id FROM members WHERE user_id = ?1 UNION SELECT gr.project_id FROM group_members gm JOIN group_roles gr ON gr.group_id = gm.group_id WHERE gm.user_id = ?1) x",
+                [user],
+                |r| r.get(0),
+            )?;
             if members >= MEMBERS_MAX || projects >= PROJECTS_MAX {
                 return Err(Error::Conflict(format!("a project has at most {MEMBERS_MAX} members, and a person is in at most {PROJECTS_MAX} projects")));
             }
             c.execute("INSERT INTO members (project_id, user_id, role, environments, added_by, added_at) VALUES (?, ?, ?, ?, ?, ?)", params![project, user, role, envs, invited_by, now])?;
             c.execute("UPDATE project_invites SET state = 'used', used_by = ?, used_at = ? WHERE id = ?", params![user, now, id])?;
-            record(c, now, "member.accept", &project, &actor, Some(user), json!({ "invite": id, "role": role, "environments": envs_of(envs) }))?;
+            record(c, now, "member.accept", &project, &actor, Some(user), json!({ "invite": id, "role": role, "environments": envs_of(envs.clone()) }))?;
+            let data = json!({ "invite": id, "user": user, "handle": handle, "role": role, "environments": envs_of(envs.clone()) });
+            events::emit(c, &project, now, Event::InviteAccepted, &id, user, data)?;
+            let data = json!({ "user": user, "handle": handle, "role": role, "environments": envs_of(envs.clone()), "via": "invite", "invite": id, "invited_by": invited_by });
+            events::emit(c, &project, now, Event::MemberAdded, user, user, data)?;
             Ok(project)
         })?;
         self.run_events();
@@ -678,7 +781,7 @@ impl Workspace {
                 Some(_) if only_if_none => return Ok(false),
                 Some(from) => {
                     if let Some(user) = &actor.user
-                        && !matches!(role_of(c, &from, user)?, Some((Role::Admin | Role::Owner, _)))
+                        && !matches!(crate::groups::effective_role(c, &from, user)?, Some(Role::Admin | Role::Owner))
                     {
                         return Err(Error::Forbidden(format!("{} {} is at home in another project: only its admins move it", kind.as_str(), r#ref)));
                     }
@@ -704,13 +807,32 @@ impl Workspace {
     /// don't run one at once, and done once every hook took it. rolld also calls this now and
     /// then, for what a crash left.
     pub fn run_events(&self) {
-        if self.on_event.read().expect("on_event").is_empty() {
-            return;
+        // One round after a request's write: a group's fan-out is worked off by rolld's tick
+        // ([`Workspace::drain_events`]), never inside the request.
+        self.run_events_once();
+    }
+
+    /// Rounds of [`Workspace::run_events`] until nothing is due, at most `rounds` (rolld's tick).
+    pub fn drain_events(&self, rounds: usize) {
+        for _ in 0..rounds {
+            if self.run_events_once() == 0 {
+                break;
+            }
         }
-        let Ok(now) = self.db.now_ms() else { return };
+    }
+
+    /// One round of [`Workspace::run_events`]: how many events it claimed.
+    fn run_events_once(&self) -> usize {
+        if self.on_event.read().expect("on_event").is_empty() {
+            return 0;
+        }
+        let Ok(now) = self.db.now_ms() else { return 0 };
         let claimed = self.db.write(|c| {
             let due: Vec<MemberEvent> = c.query(
-                "SELECT id, at, action, project_id, actor, subject, detail, ip FROM member_events WHERE done = 0 AND (claimed_at IS NULL OR claimed_at < ?) ORDER BY at, id LIMIT 50",
+                // Members' own events first: a big group's fan-out never holds up a removal (what
+                // ends its person's shares and leases).
+                "SELECT id, at, action, project_id, actor, subject, detail, ip FROM member_events WHERE done = 0 AND (claimed_at IS NULL OR claimed_at < ?) \
+                 ORDER BY CASE WHEN action LIKE 'group.%' THEN 1 ELSE 0 END, at, id LIMIT 50",
                 [now - 60_000],
                 |r| {
                     let detail: String = r.get(6)?;
@@ -722,9 +844,22 @@ impl Workspace {
             }
             Ok::<_, Error>(due)
         });
-        let Ok(claimed) = claimed else { return };
+        let Ok(claimed) = claimed else { return 0 };
+        let n = claimed.len();
         let hooks = self.on_event.read().expect("on_event");
         for e in claimed {
+            // A group's event first becomes one `group.lost` per person and project it cut off,
+            // a page per round; its own hooks (the audit) run once that's done.
+            if e.detail.get("fanout") == Some(&Value::Bool(true)) {
+                match self.fan_out(&e) {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(err) => {
+                        tracing::warn!(event = %e.id, error = %err, "workspace: a group event's fan-out failed; it's tried again");
+                        continue;
+                    }
+                }
+            }
             let mut ok = true;
             for f in hooks.iter() {
                 if let Err(err) = f(&e) {
@@ -736,6 +871,7 @@ impl Workspace {
                 let _ = self.db.write(|c| c.execute("UPDATE member_events SET done = 1 WHERE id = ?", [e.id.as_str()]));
             }
         }
+        n
     }
 
     /// Whether `project` trusts `kind ref` through its home or its owners' resources
@@ -787,20 +923,64 @@ impl Workspace {
         let now = self.db.now_ms()?;
         let actor = Actor { id: "accounts".into(), ip, ..Default::default() };
         let n = self.db.write(|c| {
-            let projects: Vec<(String, String)> = c.query("SELECT project_id, role FROM members WHERE user_id = ?", [user], |r| Ok((r.get(0)?, r.get(1)?)))?;
-            for (project, role) in &projects {
+            let projects: Vec<(String, String, Option<String>)> = c.query("SELECT project_id, role, environments FROM members WHERE user_id = ?", [user], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            for (project, role, envs) in &projects {
                 c.execute("DELETE FROM members WHERE project_id = ? AND user_id = ?", [project.as_str(), user])?;
                 record(c, now, "member.remove", project, &actor, Some(user), json!({ "role": role, "why": "account deleted" }))?;
+                let data = json!({ "user": user, "handle": user, "role": role, "environments": envs_of(envs.clone()), "reason": "offboarded" });
+                events::emit(c, project, now, Event::MemberRemoved, user, &actor.id, data)?;
             }
-            let invites: Vec<(String, String)> = c.query("SELECT id, project_id FROM project_invites WHERE created_by = ? AND state = 'pending'", [user], |r| Ok((r.get(0)?, r.get(1)?)))?;
-            for (id, project) in &invites {
+            // Their groups too, each a `group.member_remove`.
+            let groups: Vec<String> = c.query("SELECT group_id FROM group_members WHERE user_id = ?", [user], |r| r.get(0))?;
+            for g in &groups {
+                crate::groups::remove_members(c, now, g, &actor, &[user.to_string()])?;
+            }
+            let invites: Vec<(String, String, String, Option<String>)> = c.query("SELECT id, project_id, role, environments FROM project_invites WHERE created_by = ? AND state = 'pending'", [user], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+            for (id, project, role, envs) in &invites {
                 c.execute("UPDATE project_invites SET state = 'revoked' WHERE id = ?", [id.as_str()])?;
                 record(c, now, "member.invite_revoke", project, &actor, Some(user), json!({ "invite": id, "why": "its inviter's account was deleted" }))?;
+                revoked(c, now, project, id, role, envs_of(envs.clone()), "inviter_offboarded", &actor.id)?;
             }
             Ok::<_, Error>(projects.len())
         })?;
         self.run_events();
         Ok(n)
+    }
+
+    /// `user` lost rights in roll (roll accounts' offboarding outbox: disabled by an admin or SCIM,
+    /// no longer an admin): when they can't sign in now, a `member.deactivated` in each project
+    /// they reach, directly or through a group, in one write. Their memberships stay (they count
+    /// for nothing until the account is enabled again). Run again after another hook failed, a
+    /// project whose latest event about them already says so gets no second one. How many
+    /// projects it wrote to.
+    pub fn person_deactivated(&self, user: &str) -> Result<usize> {
+        if self.person(user).is_some() {
+            return Ok(0);
+        }
+        let now = self.db.now_ms()?;
+        self.db.write(|c| {
+            let rows: Vec<(String, String, i64)> = c.query(
+                "SELECT project_id, role, 0 FROM members WHERE user_id = ?1 UNION ALL \
+                 SELECT gr.project_id, gr.role, 1 FROM group_members gm JOIN group_roles gr ON gr.group_id = gm.group_id WHERE gm.user_id = ?1",
+                [user],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?;
+            let mut best: std::collections::BTreeMap<String, Role> = std::collections::BTreeMap::new();
+            for (project, role, via) in rows {
+                let role = if via == 1 { crate::groups::group_role(&role) } else { Role::parse(&role).unwrap_or(Role::Viewer) };
+                let e = best.entry(project).or_insert(role);
+                *e = (*e).max(role);
+            }
+            let mut n = 0;
+            for (project, role) in best {
+                if events::last_about(c, &project, user)?.as_deref() == Some(Event::MemberDeactivated.as_str()) {
+                    continue;
+                }
+                events::emit(c, &project, now, Event::MemberDeactivated, user, "accounts", json!({ "user": user, "handle": user, "role": role }))?;
+                n += 1;
+            }
+            Ok::<_, Error>(n)
+        })
     }
 
     /// An invite's token was found leaked (roll-access's leak scanning, `rlv_`): it stops working.
@@ -810,10 +990,11 @@ impl Workspace {
         let actor = Actor { id: "roll:leak".into(), ..Default::default() };
         self.db
             .write(|c| {
-                let found: Option<(String, String)> = c.query_row("SELECT id, project_id FROM project_invites WHERE token_hash = ? AND state = 'pending'", [hash_token(token)], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
-                let Some((id, project)) = found else { return Ok(None) };
+                let found: Option<(String, String, String, Option<String>)> = c.query_row("SELECT id, project_id, role, environments FROM project_invites WHERE token_hash = ? AND state = 'pending'", [hash_token(token)], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()?;
+                let Some((id, project, role, envs)) = found else { return Ok(None) };
                 c.execute("UPDATE project_invites SET state = 'revoked' WHERE id = ?", [id.as_str()])?;
                 record(c, now, "member.invite_revoke", &project, &actor, None, json!({ "invite": id, "why": "leaked" }))?;
+                revoked(c, now, &project, &id, &role, envs_of(envs), "leaked", &actor.id)?;
                 Ok::<_, Error>(Some(format!("invite {id} to project {project}")))
             })
             .ok()
@@ -864,13 +1045,21 @@ fn revoke_invites_beyond(c: &Conn<'_>, now: i64, project: &str, user: &str, role
         s.outcome(&Target::One(Resource { project: Some(project.into()), ..Resource::new("workspace", project) }), Action::Admin) == Outcome::Allow
     });
     for (id, r, e) in pending {
-        let kept = manages && rules.as_ref().is_some_and(|s| Role::parse(&r).is_some_and(|r| roles::may_grant(s, project, r, envs_of(e).as_deref())));
+        let kept = manages && rules.as_ref().is_some_and(|s| Role::parse(&r).is_some_and(|r| roles::may_grant(s, project, r, envs_of(e.clone()).as_deref())));
         if !kept {
             c.execute("UPDATE project_invites SET state = 'revoked' WHERE id = ?", [id.as_str()])?;
             record(c, now, "member.invite_revoke", project, actor, Some(user), json!({ "invite": id, "why": "its inviter's role no longer gives it" }))?;
+            revoked(c, now, project, &id, &r, envs_of(e), "inviter_role", &actor.id)?;
         }
     }
     Ok(())
+}
+
+/// `invite.revoked` in the feed, in the revoking write.
+#[allow(clippy::too_many_arguments)]
+fn revoked(c: &Conn<'_>, now: i64, project: &str, invite: &str, role: &str, environments: Option<Vec<String>>, reason: &str, actor: &str) -> Result<()> {
+    let data = json!({ "invite": invite, "role": role, "environments": environments, "reason": reason });
+    events::emit(c, project, now, Event::InviteRevoked, invite, actor, data).map(|_| ())
 }
 
 /// `workspace-members`: every project's maker becomes its owner, so everyone keeps what they had.
@@ -898,7 +1087,7 @@ pub(crate) fn put_aside(c: &Conn<'_>, project: &str) -> Result<()> {
     for t in ["members", "project_invites", "homes"] {
         c.execute(&format!("DELETE FROM {t} WHERE project_id = ?"), [project])?;
     }
-    Ok(())
+    crate::groups::put_aside(c, project)
 }
 
 /// A restored project's members and homes, back as they were (a home another project took since
@@ -916,5 +1105,5 @@ pub(crate) fn bring_back(c: &Conn<'_>, project: &str) -> Result<()> {
 pub(crate) fn forget_aside(c: &Conn<'_>, project: &str) -> Result<()> {
     c.execute("DELETE FROM deleted_members WHERE project_id = ?", [project])?;
     c.execute("DELETE FROM deleted_homes WHERE project_id = ?", [project])?;
-    Ok(())
+    crate::groups::forget_aside(c, project)
 }

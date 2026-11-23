@@ -42,7 +42,7 @@ impl Apps {
     /// deployment again (a rollback to itself: its own image and settings, never frozen, nothing
     /// staged since going live but variables) to hand the environment's instances a new one: an OIDC address reads nothing from now on (it
     /// mints the service's cloud tokens; until the redeploy is live they get none), a trace token
-    /// takes nothing (a new one is made), a runtime config address is rotated (the old one reads
+    /// takes nothing (a new one is made), a Next.js cache address reads nothing and its cache is emptied, a runtime config address is rotated (the old one reads
     /// until the redeploy is live). What was revoked, if it was live.
     pub fn revoke_leaked_address(self: &Arc<Self>, token: &str) -> Option<String> {
         let hash = crate::public::token_hash(token);
@@ -56,6 +56,10 @@ impl Apps {
         let (service, env, what) = if let Some((s, e)) = self.store.drop_oidc_by_hash(&hash).ok()? {
             self.oidc_tokens.lock().retain(|k, _| !k.starts_with(&format!("{s}/{e}/")));
             (s, e, "OIDC address")
+        } else if let Some(((s, e), gone)) = self.store.drop_next_cache_token(&hash).ok()? {
+            // What it wrote could be anyone's: emptied; the redeploy gets a new one.
+            self.drop_cache_objects(gone);
+            (s, e, "Next.js cache address")
         } else if let Some((s, e)) = self.store.replace_trace_token_by_hash(&hash).ok()? {
             (s, e, "trace intake")
         } else if let Some((s, e)) = self.store.runtime_config_by_hash(&hash).ok()? {

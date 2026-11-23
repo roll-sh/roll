@@ -119,6 +119,9 @@ pub struct PreviewSpec {
     pub port: u16,
     /// A path the service answers 2xx/3xx on once it works: a preview is ready only then.
     pub health: Option<String>,
+    /// A page loaded before a push keeps reaching the push that served it (roll previews' skew
+    /// protection, as roll apps' `run.skew_protection`).
+    pub skew_protection: bool,
     /// roll Postgres project (`prj_…`) whose `main` each preview branches.
     pub postgres: Option<String>,
     /// roll Redis database (`rdb_…`) each preview branches.
@@ -240,6 +243,7 @@ struct RawPreview {
     run: String,
     port: u16,
     health: Option<String>,
+    skew_protection: Option<bool>,
     postgres: Option<String>,
     redis: Option<String>,
     auto: Option<bool>,
@@ -341,6 +345,7 @@ impl RollToml {
                         Some(_) => return Err(format!("{FILE} {at}: health is a path starting with / (at most 200 characters, no spaces)")),
                         None => None,
                     },
+                    skew_protection: p.skew_protection.unwrap_or(false),
                     postgres: p.postgres,
                     redis: p.redis,
                     auto: p.auto.unwrap_or(true),

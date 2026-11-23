@@ -26,6 +26,10 @@ async fn env() -> Env {
     let mut cfg = SearchConfig::local(home.clone());
     cfg.http_port = listener.local_addr().unwrap().port();
     cfg.gc_interval = None;
+    // Elasticsearch's test inference services (`inference test` without a model), whose key is
+    // kept as given on a node without a sealer.
+    cfg.node_settings.push(("roll.inference.test_services".into(), "true".into()));
+    cfg.unsealed_secrets = true;
     let control = Control::new(cfg, search_store::test_objects("cli")).await.unwrap();
     tokio::spawn(search_server::serve(listener, control.node.clone(), search_server::ListenOptions::default()));
     let api_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -297,8 +301,9 @@ async fn api_keys() {
     assert_eq!(e.roll(&["search", "keys", "list", "oskeyed"]).await.trim(), "no keys");
 }
 
-/// Relevance tuning from the CLI: synonyms from a Solr-format file, a ruleset and its test, an
-/// index setting, an explanation, and a read-only key narrowed to one index.
+/// Relevance tuning from the CLI: synonyms from a Solr-format file, a ruleset and its test, a
+/// document added and deleted, an index setting, an explanation, a read-only key narrowed to one
+/// index, then the ruleset and synonyms set listed and deleted.
 #[tokio::test]
 async fn relevance_tuning() {
     let e = env().await;
@@ -313,6 +318,14 @@ async fn relevance_tuning() {
     e.roll(&["search", "docs", "put", "shop", "items", "1", r#"{"title":"red sofa"}"#, "--refresh"]).await;
     let hits = e.roll_json(&["search", "index", "search", "shop", "items", "--q", "title:couch"]).await;
     assert_eq!(hits["hits"]["total"]["value"], 1, "{hits}");
+    // A document under a new id, then deleted.
+    let added = e.roll_json(&["search", "docs", "add", "shop", "items", r#"{"title":"blue couch"}"#, "--refresh"]).await;
+    assert_eq!(added["result"], "created", "{added}");
+    let blue = || e.roll_json(&["search", "index", "search", "shop", "items", "--q", "title:blue"]);
+    assert_eq!(blue().await["hits"]["total"]["value"], 1);
+    let out = e.roll(&["search", "docs", "delete", "shop", "items", added["_id"].as_str().unwrap(), "--refresh"]).await;
+    assert!(out.contains("\"result\" : \"deleted\""), "{out}");
+    assert_eq!(blue().await["hits"]["total"]["value"], 0);
     let out = e.roll(&["search", "explain", "shop", "items", "1", "--q", "title:couch"]).await;
     assert!(out.contains("\"matched\" : true"), "{out}");
     e.roll(&["search", "rules", "put", "shop", "promos", r#"[{"rule_id":"r","type":"pinned","criteria":[{"type":"exact","metadata":"q","values":["sofa"]}],"actions":{"ids":["1"]}}]"#]).await;
@@ -331,11 +344,23 @@ async fn relevance_tuning() {
     let auth = format!("ApiKey {key}");
     assert_eq!(http.post(format!("{url}/items/_search")).header("Authorization", &auth).json(&serde_json::json!({})).send().await.unwrap().status().as_u16(), 200);
     assert_eq!(http.put(format!("{url}/items/_doc/2")).header("Authorization", &auth).json(&serde_json::json!({"t": 1})).send().await.unwrap().status().as_u16(), 403);
+    // Listed, and deleted: a ruleset at once, a synonyms set once no analyzer uses it.
+    let rules = e.roll_json(&["search", "rules", "list", "shop"]).await;
+    assert_eq!(rules["results"][0]["ruleset_id"], "promos", "{rules}");
+    e.roll(&["search", "rules", "delete", "shop", "promos"]).await;
+    assert_eq!(e.roll_json(&["search", "rules", "list", "shop"]).await["count"], 0);
+    let sets = e.roll_json(&["search", "synonyms", "list", "shop"]).await;
+    assert_eq!((&sets["results"][0]["synonyms_set"], &sets["results"][0]["count"]), (&serde_json::json!("furniture"), &serde_json::json!(1)), "{sets}");
+    let out = e.roll_with(&["search", "synonyms", "delete", "shop", "furniture"], None).await;
+    assert!(!out.status.success() && String::from_utf8_lossy(&out.stdout).contains("items"), "a set the items analyzer uses: {out:?}");
+    e.roll(&["search", "index", "delete", "shop", "items"]).await;
+    e.roll(&["search", "synonyms", "delete", "shop", "furniture"]).await;
+    assert_eq!(e.roll_json(&["search", "synonyms", "list", "shop"]).await["count"], 0);
 }
 
 /// `roll search inference`: the built-in endpoints are listed, a create without a key in the
-/// environment stops before anything is sent (the key never goes on the command line), and an
-/// unknown endpoint is named.
+/// environment stops before anything is sent (the key never goes on the command line), an
+/// endpoint is tested on some text, and an unknown endpoint is named.
 #[tokio::test]
 async fn inference_endpoints() {
     let e = env().await;
@@ -345,6 +370,11 @@ async fn inference_endpoints() {
     let out = e.roll_with(&["search", "inference", "create", "sem", "emb", "--model", "m", "--api-key-env", "ROLL_TEST_NO_SUCH_KEY"], None).await;
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("set ROLL_TEST_NO_SUCH_KEY"), "{out:?}");
+    // `test` runs an endpoint on some text: an embedding's size.
+    let endpoint = r#"{"service":"text_embedding_test_service","service_settings":{"model":"m","dimensions":4,"similarity":"cosine","api_key":"fake-key"}}"#;
+    e.roll(&["search", "request", "sem", "PUT", "/_inference/text_embedding/emb", endpoint]).await;
+    let out = e.roll(&["search", "inference", "test", "sem", "emb", "rolling hills"]).await;
+    assert_eq!(out.trim(), "4 dimensions");
     let out = e.roll_with(&["search", "inference", "delete", "sem", "nope"], None).await;
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("nope"), "{out:?}");

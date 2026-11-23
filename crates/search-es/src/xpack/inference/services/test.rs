@@ -12,6 +12,7 @@ use crate::json::{Map, Value};
 use crate::obj;
 use crate::xpack::inference::results::{Ranked, Results, Sparse};
 use crate::xpack::inference::settings::validation;
+use crate::xpack::inference::stream::Streaming;
 use crate::xpack::inference::{Endpoint, Request, TaskType, unsupported_task};
 
 /// One of the plugin's services.
@@ -276,20 +277,20 @@ impl Kind {
         }
     }
 
-    pub fn stream_completion(self, ep: &Endpoint, req: &Request) -> EsResult<Vec<Value>> {
+    pub fn stream_completion(self, ep: &Endpoint, req: &Request) -> EsResult<Streaming> {
         if self != Kind::Streaming || ep.task != TaskType::Completion {
             return Err(unsupported_task(ep.task, self.name()));
         }
-        Ok(req.input.iter().map(|s| obj! { "completion" => crate::arr![obj! { "delta" => s.to_uppercase() }] }).collect())
+        Ok(Streaming::Ready(req.input.iter().map(|s| obj! { "completion" => crate::arr![obj! { "delta" => s.to_uppercase() }] }).collect()))
     }
 
-    pub fn stream_chat(self, ep: &Endpoint, body: &Value) -> EsResult<Vec<Value>> {
+    pub fn stream_chat(self, ep: &Endpoint, body: &Value) -> EsResult<Streaming> {
         if self != Kind::Streaming || ep.task != TaskType::ChatCompletion {
             return Err(unsupported_task(ep.task, self.name()));
         }
         let req = super::openai::unified_request(body)?;
-        Ok(req
-            .get("messages")
+        Ok(Streaming::Ready(
+            req.get("messages")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
@@ -302,7 +303,8 @@ impl Kind {
                     "object" => "chat.completion.chunk",
                 }
             })
-            .collect())
+            .collect(),
+        ))
     }
 }
 

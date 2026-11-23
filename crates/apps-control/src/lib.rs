@@ -15,7 +15,11 @@
 pub mod api;
 pub mod challenge;
 pub mod backups;
+pub mod browser;
+pub mod moving;
+pub mod provenance;
 pub mod build_cache;
+pub mod next_cache;
 pub mod hooks;
 pub mod tags;
 pub mod sites;
@@ -345,6 +349,17 @@ pub struct Apps {
     pub(crate) forms_seen: Mutex<HashMap<String, (i64, u32)>>,
     /// Uptime checks' last results here, on the owner ([`checks`]), by environment and name.
     pub(crate) check_states: Mutex<HashMap<String, checks::Run>>,
+    /// Browser checks running now: each one's token, and its service and environment
+    /// ([`browser`]).
+    pub(crate) check_tokens: Mutex<HashMap<String, (String, String)>>,
+    /// The checker images built on this node ([`browser`]).
+    pub(crate) checker_images: Mutex<std::collections::HashSet<String>>,
+    /// When each browser check's last failure was kept, by `<service>/<env>/<check>`.
+    pub(crate) check_failures: Mutex<HashMap<String, i64>>,
+    /// Each browser check's last lab metrics, by `<service>/<env>/<check>`.
+    pub(crate) check_metrics: Mutex<HashMap<String, serde_json::Value>>,
+    /// Each preview environment's running head checks, ended by the next head's.
+    pub(crate) preview_check_runs: Mutex<HashMap<String, tokio_util::sync::CancellationToken>>,
     /// A pass of daily rescans is running, and when live deployments were last looked at for
     /// one ([`vulns`]).
     pub(crate) rescanning: std::sync::atomic::AtomicBool,
@@ -692,6 +707,11 @@ impl Apps {
             events_seen: Mutex::new(HashMap::new()),
             forms_seen: Mutex::new(HashMap::new()),
             check_states: Mutex::new(HashMap::new()),
+            check_tokens: Mutex::new(HashMap::new()),
+            checker_images: Mutex::new(std::collections::HashSet::new()),
+            check_failures: Mutex::new(HashMap::new()),
+            check_metrics: Mutex::new(HashMap::new()),
+            preview_check_runs: Mutex::new(HashMap::new()),
             rescanning: Default::default(),
             rescan_looked: Default::default(),
             errors_seen: Mutex::new(HashMap::new()),
@@ -1226,6 +1246,9 @@ impl Apps {
             Some(_) => return Err(Error::BadRequest("tags is 1–100 tags, or left out".into())),
         };
         let n = self.responses.purge(&env_key(service, env), paths.as_deref(), tags.as_deref());
+        // Next.js's cache too, its tags as given (Next's are case-sensitive).
+        let next_tags: Option<Vec<String>> = tags.as_ref().map(|_| body["tags"].as_array().into_iter().flatten().filter_map(|t| t.as_str()).map(|t| t.trim().to_string()).collect());
+        self.purge_next_cache(service, env, paths.as_deref(), next_tags.as_deref()).await;
         Ok(json!({ "purged": n }))
     }
 
@@ -1572,6 +1595,8 @@ impl Apps {
         for d in deps {
             if let Some(img) = &d.image {
                 self.deps.builder.remove_image(img).await;
+                let i = img.clone();
+                let _ = self.db(move |s| s.drop_provenance(&i)).await;
                 if let Some(k) = sites::key(img) {
                     self.drop_site(&k).await;
                 }
@@ -1584,6 +1609,11 @@ impl Apps {
         }
         let sid = id.to_string();
         let domains = self.db(move |s| s.custom_domains_of(&sid, None)).await?;
+        let sid = id.to_string();
+        if let Ok(gone) = self.db(move |s| s.drop_next_cache(&sid, None, true)).await {
+            self.drop_cache_objects(gone);
+        }
+        self.drop_check_failures(id, None).await;
         let sid = id.to_string();
         self.db(move |s| s.delete_service(&sid)).await?;
         // Its hostnames name nothing now.
@@ -1844,7 +1874,15 @@ impl Apps {
             firewall: r.firewall.clone(),
             headers: r.headers.clone(),
             routes: r.routes.clone(),
-            check_states: self.check_states_of(&r.service, &r.name, &r.checks),
+            redirects: r.redirects.clone(),
+            // A preview's are production's browser checks, run on each of its heads.
+            check_states: if r.ephemeral {
+                let sid = r.service.clone();
+                let prod: Vec<crate::model::Check> = self.db(move |s| s.environment(&sid, "production")).await.map(|p| p.checks.into_iter().filter(|c| c.browser.is_some()).collect()).unwrap_or_default();
+                self.check_states_of(&r.service, &r.name, &prod)
+            } else {
+                self.check_states_of(&r.service, &r.name, &r.checks)
+            },
             checks: r.checks.clone(),
             heartbeat_states: self.heartbeat_states_of(&r.service, &r.name, &r.heartbeats).await,
             heartbeats: r.heartbeats.clone(),
@@ -1935,7 +1973,7 @@ impl Apps {
                 settings.push(json!({ "field": format!("run.{k}"), "from": x, "to": y, "put": { "run": { k: x } } }));
             }
         }
-        for k in ["wait_for_ci", "follow_tag", "redeploy_on_secrets", "traces", "vitals", "report", "egress", "allow_ips", "rate_limit", "firewall", "headers", "routes", "checks", "log_retention_days", "approvals"] {
+        for k in ["wait_for_ci", "follow_tag", "redeploy_on_secrets", "traces", "vitals", "report", "egress", "allow_ips", "rate_limit", "firewall", "headers", "routes", "redirects", "checks", "log_retention_days", "approvals"] {
             let (x, y) = (a.get(k).cloned().unwrap_or(Value::Null), b.get(k).cloned().unwrap_or(Value::Null));
             if x != y {
                 settings.push(json!({ "field": k, "from": x, "to": y, "put": { k: x } }));
@@ -1985,7 +2023,7 @@ impl Apps {
     pub async fn put_environment_by(self: &Arc<Self>, service: &str, env: &str, body: Value, by: Option<String>) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "checks", "heartbeats", "split", "mirror", "snippets", "config", "freeze", "pause_schedule", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host", "log_retention_days", "approvals", "badge", "closed_by", "data", "scheduled"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "redirects", "checks", "heartbeats", "split", "mirror", "snippets", "config", "freeze", "pause_schedule", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host", "log_retention_days", "approvals", "badge", "closed_by", "data", "scheduled"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -2135,6 +2173,16 @@ impl Apps {
             Some(_) => return Err(Error::BadRequest("config is an object (or null)".into())),
         };
         // Snippets: HTML of its own in every page (null or []: none).
+        let redirects = match o.get("redirects") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(Value::String(t)) if t.trim().is_empty() => Some(None),
+            Some(Value::String(t)) => {
+                crate::site_rules::EnvRedirects::check(t).map_err(Error::BadRequest)?;
+                Some(Some(t.clone()))
+            }
+            Some(_) => return Err(Error::BadRequest("redirects is _redirects lines as a string, or null".into())),
+        };
         let snippets = match o.get("snippets") {
             None => None,
             Some(Value::Null) => Some(Vec::new()),
@@ -2503,6 +2551,12 @@ impl Apps {
             self.db(move |s| s.set_runtime_config(&sid, &e, c2.as_ref())).await?;
             self.changed(service);
         }
+        if let Some(text) = redirects {
+            let (sid, e) = (service.to_string(), env.to_string());
+            self.db(move |s| s.set_redirects(&sid, &e, text.as_deref())).await?;
+            self.live(service, env).forget_gate();
+            self.changed(service);
+        }
         if let Some(all) = snippets {
             let (sid, e) = (service.to_string(), env.to_string());
             self.db(move |s| s.set_snippets(&sid, &e, &all)).await?;
@@ -2758,6 +2812,11 @@ impl Apps {
         // would go with it.
         self.drop_branches(service, env, None).await;
         self.drop_sandboxes(service, Some(env)).await;
+        let (sid, e) = (service.to_string(), env.to_string());
+        if let Ok(gone) = self.db(move |s| s.drop_next_cache(&sid, Some(&e), true)).await {
+            self.drop_cache_objects(gone);
+        }
+        self.drop_check_failures(service, Some(env)).await;
         let (sid, e) = (service.to_string(), env.to_string());
         self.db(move |s| s.delete_environment(&sid, &e)).await?;
         // Its peer after the row (a check in flight finishes first; none starts again).
@@ -3034,6 +3093,21 @@ impl Apps {
                 config_url = true;
             }
         }
+        // Next.js's cache across instances (`next_cache`), for a build with roll's adapter in it;
+        // its token sealed, as a credential. Never a closed environment's: a fork's code would
+        // fill the fetch cache trusted deployments read.
+        let mut next_cache = false;
+        if !deployment.is_empty() && !env.egress.closed() {
+            let d = deployment.to_string();
+            // Never a view's with values of its own: what it caches (from a copy's data) would be
+            // the environment's, shared with every deployment.
+            let adapter = self.db(move |s| Ok(s.deployment(&d)?.plan.is_some_and(|p| p["next_cache"] == true) && s.deploy_overrides(&d)?.is_none())).await.unwrap_or(false);
+            if adapter && let Some((url, token)) = self.next_cache_vars(&svc.id, &env.name).await? {
+                vars.insert(crate::next_cache::URL_VAR.into(), (url, "roll"));
+                vars.insert(crate::next_cache::TOKEN_VAR.into(), (token, "roll"));
+                next_cache = true;
+            }
+        }
         // A site's functions service: where its edge functions' `context.next()` reaches the
         // site (this listener, as instances reach it; `crate::edge`), set at start so the runtime
         // makes it reachable.
@@ -3057,6 +3131,9 @@ impl Apps {
         let (sid, e) = (svc.id.clone(), env.name.clone());
         let (links, own_data, branches) = self.db(move |s| Ok((s.links_minted(&sid)?, s.env_data(&sid, &e)?, s.env_branches(&sid, &e)?))).await?;
         let mut branch_notices = Vec::new();
+        // The resources it links itself: in an environment with data of its own, each is its
+        // branch or left out, so roll secrets' links to them are left out too.
+        let own_links: BTreeSet<(&'static str, String)> = links.iter().filter(|l| l.0 != LinkKind::Service).map(|l| (l.0.as_str(), l.1.clone())).collect();
         for (kind, r, prefix, minted) in links {
             // A preview (an ephemeral environment) never gets a resource's production variables:
             // roll previews sets the branched ones itself, by name; another service's URLs stay.
@@ -3088,7 +3165,11 @@ impl Apps {
                         vars.insert(format!("{prefix}{k}"), (v, "link"));
                     }
                 }
-                Err(e) => tracing::warn!(service = %svc.id, kind = kind.as_str(), r#ref = %r, error = %e, "apps: a link's variables couldn't be read"),
+                Err(e) => {
+                    tracing::warn!(service = %svc.id, kind = kind.as_str(), r#ref = %r, error = %e, "apps: a link's variables couldn't be read");
+                    // Said in the deploy's own log too: its variables are left out of it.
+                    branch_notices.push(format!("{} {r}'s variables are left out: {e}", kind.as_str()));
+                }
             }
         }
         let mut sensitive = BTreeSet::new();
@@ -3110,10 +3191,11 @@ impl Apps {
                     if let Some(b) = &s.binding {
                         placeholders.insert(s.name.clone(), b.clone());
                     }
-                    // An environment with data of its own never gets a linked resource's
-                    // credentials or address through roll secrets: they name the resource itself
-                    // (production's database), and its branches come through its own links.
-                    if own_data && s.linked {
+                    // An environment with data of its own never gets, through roll secrets, the
+                    // credentials or address of a resource it links itself: they name the resource
+                    // (production's database), and its branches come through its own links. Links
+                    // to anything else (a SaaS key, an outside database) stay.
+                    if own_data && s.link.as_ref().is_some_and(|(k, r)| own_links.iter().any(|(ok, or)| ok == k && or == r)) {
                         parents.push(s.name);
                         continue;
                     }
@@ -3125,11 +3207,11 @@ impl Apps {
                         plain_secrets.insert(s.name.clone());
                     }
                     // A linked resource's address, rewritten for the container as apps' own links.
-                    let v = if s.linked { self.deps.runtime.reach(&s.value) } else { s.value };
+                    let v = if s.link.is_some() { self.deps.runtime.reach(&s.value) } else { s.value };
                     vars.insert(s.name, (v, "secret"));
                 }
                 if !parents.is_empty() {
-                    notices.push(format!("{} from roll secrets' links left out: {} has data of its own, and they reach the resources themselves (its branches come through its own links)", parents.join(", "), env.name));
+                    notices.push(format!("{} from roll secrets' links left out: {} has data of its own, and they reach resources it links itself (its branches come through its own links)", parents.join(", "), env.name));
                 }
             }
             Err(e) => return Err(Error::Internal(format!("the project's {} secrets couldn't be read: {e}", env.name))),
@@ -3141,6 +3223,9 @@ impl Apps {
         }
         if config_url {
             sealed.insert("ROLL_CONFIG_URL".into());
+        }
+        if next_cache {
+            sealed.insert(crate::next_cache::TOKEN_VAR.into());
         }
         // A web service's instances ask to stay awake for work after an answer (`ROLL_AWAKE_URL`),
         // with the environment's instance token: sealed, as the OIDC address.
@@ -3228,6 +3313,17 @@ impl Apps {
         sealed.extend(sensitive.into_iter().filter(|k| vars.get(k).is_some_and(|(_, s)| *s == "secret")));
         // Reference variables, one level deep: against what resolved above, and other services'.
         let unresolved = self.fill_references(svc, &env.name, &mut vars, &mut sealed).await;
+        // A Node build with source maps: its stacks name the source's lines (joined to the app's
+        // own `NODE_OPTIONS`; the agent's below joins after it).
+        if !deployment.is_empty() {
+            let d = deployment.to_string();
+            if self.db(move |s| s.deployment(&d)).await.ok().and_then(|d| d.plan).is_some_and(|p| p["source_maps"] == true) {
+                let own = vars.get("NODE_OPTIONS").map(|(v, _)| v.trim().to_string()).filter(|v| !v.is_empty());
+                if !own.as_deref().is_some_and(|v| v.split_whitespace().any(|w| w == "--enable-source-maps")) {
+                    vars.insert("NODE_OPTIONS".into(), (own.map_or_else(|| "--enable-source-maps".to_string(), |v| format!("{v} --enable-source-maps")), "roll"));
+                }
+            }
+        }
         // The build's OpenTelemetry agent (`build.otel`), started only while its traces go to
         // roll: last, joined to the app's own value of the same variable.
         if trace_endpoint && !deployment.is_empty() {
@@ -3645,7 +3741,13 @@ impl Apps {
     /// resource can't be read now keeps what it made.
     async fn link_values(self: &Arc<Self>, service: &ServiceRow, kind: LinkKind, r#ref: &str, env: &str, minted: Option<integrations::Minted>) -> anyhow::Result<Vec<(String, String)>> {
         let Some(m) = minted else { return self.link_vars(service, kind, r#ref, env).await };
-        let mut out = self.link_vars(service, kind, r#ref, env).await.unwrap_or_default();
+        let mut out = match kind {
+            LinkKind::Service => self.link_vars(service, kind, r#ref, env).await.unwrap_or_default(),
+            // A tasks link's keys are only read with its own: without them it fails, said in the
+            // deploy's log, never deployed half (a URL and a token, no keys to check deliveries).
+            LinkKind::Tasks => self.deps.resources.link_vars_as(kind, r#ref, &m.vars).await?,
+            _ => self.deps.resources.link_vars_as(kind, r#ref, &m.vars).await.unwrap_or_default(),
+        };
         for (k, v) in m.vars {
             match out.iter_mut().find(|(have, _)| *have == k) {
                 Some(slot) => slot.1 = v,
@@ -4179,7 +4281,8 @@ impl Apps {
             pages: row.pages,
             preview: row.ephemeral,
             headers: row.headers,
-            routes: row.routes, traces, vitals: row.vitals, challenge_key, split: row.split, mirror: row.mirror, snippets: snippets_of(&row.snippets) });
+            routes: row.routes, traces, vitals: row.vitals, challenge_key, split: row.split, mirror: row.mirror, snippets: snippets_of(&row.snippets),
+            redirects: row.redirects.as_deref().map(crate::site_rules::EnvRedirects::parse).filter(|r| !r.is_empty()).map(Arc::new) });
         live.set_gate(g.clone(), seen);
         Ok(g)
     }

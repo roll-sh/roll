@@ -14,6 +14,9 @@ import {
   byConcern,
   FIX_LABEL,
   type Checkup,
+  type Activity,
+  type Alert,
+  describeAlert,
   productName,
   withToolsets,
   APPROVABLE,
@@ -53,6 +56,8 @@ export function AccessOverview() {
   const { data: grants, error, refresh } = usePoll(() => accessApi.tokens(), 10_000);
   const { data: me } = usePoll(() => accessApi.me(), 60_000);
   const { data: checkup, refresh: recheck } = usePoll(() => accessApi.checkup(), 60_000);
+  const { data: activity } = usePoll(() => accessApi.activity().catch(() => null), 60_000);
+  const { data: alerts } = usePoll(() => accessApi.latestAlerts().catch(() => null), 60_000);
   // Machine clients: every one for the operator, a person's own for them (a token is refused: the
   // panel stays hidden). Their grants are listed with them, not among the tokens.
   const { data: machines, refresh: remachine } = usePoll(() => accessApi.machineClients().catch(() => null), 30_000);
@@ -84,6 +89,8 @@ export function AccessOverview() {
             }}
           />
         )}
+        {activity && activity.calls > 0 && <AgentActivity activity={activity} />}
+        {alerts && alerts.length > 0 && <Alerts list={alerts} />}
         {grants === null && !error ? <Connecting /> : <Grants grants={(grants ?? []).filter((g) => !machineGrants.has(g.id))} refresh={refresh} />}
         {machines && (
           <MachineClients
@@ -308,6 +315,104 @@ function Attention({ list, refresh }: { list: Checkup[]; refresh: () => Promise<
         <div className="px-5 pb-3">
           <ErrorNote error={error} />
         </div>
+      )}
+    </Panel>
+  );
+}
+
+/**
+ * How agents used the MCP server lately (`GET /v1/access/activity`), as Cloudflare's and Stripe's
+ * MCP dashboards show it: the busiest tools with what was refused or failed and how slow they were
+ * (the 95th percentile).
+ * A person's are their own connections'.
+ */
+function AgentActivity({ activity }: { activity: Activity }) {
+  const [all, setAll] = useState(false);
+  const shown = activity.tools.slice(0, all ? undefined : 8);
+  const refused = activity.tools.reduce((n, t) => n + t.denied, 0);
+  const failed = activity.tools.reduce((n, t) => n + t.failed, 0);
+  return (
+    <Panel title={`Agent activity (${activity.days_asked} days)`}>
+      <p className="px-5 pt-3 text-[12px] text-muted">
+        <span className="font-mono text-fg">{activity.calls.toLocaleString()}</span> tool calls from {activity.connections.length}{" "}
+        {activity.connections.length === 1 ? "connection" : "connections"}
+        {refused > 0 && (
+          <>
+            , <span className="font-mono text-fg">{refused.toLocaleString()}</span> refused
+          </>
+        )}
+        {failed > 0 && (
+          <>
+            , <span className="font-mono text-fg">{failed.toLocaleString()}</span> failed
+          </>
+        )}
+        .
+      </p>
+      <div className="overflow-x-auto px-5 py-3">
+        <table className="w-full text-[12px]">
+          <thead className="text-left text-muted">
+            <tr>
+              <th className="py-1 pr-3 font-normal">Tool</th>
+              <th className="py-1 pr-3 text-right font-normal">Calls</th>
+              <th className="py-1 pr-3 text-right font-normal">Refused</th>
+              <th className="py-1 pr-3 text-right font-normal">Failed</th>
+              <th className="py-1 pr-3 text-right font-normal">p95</th>
+              <th className="py-1 text-right font-normal">Last</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-line">
+            {shown.map((t) => (
+              <tr key={t.tool}>
+                <td className="max-w-[220px] truncate py-1.5 pr-3 font-mono">{t.tool}</td>
+                <td className="py-1.5 pr-3 text-right font-mono">{t.calls.toLocaleString()}</td>
+                <td className="py-1.5 pr-3 text-right font-mono text-muted">{t.denied || ""}</td>
+                <td className="py-1.5 pr-3 text-right font-mono text-muted">{t.failed || ""}</td>
+                <td className="py-1.5 pr-3 text-right font-mono text-muted">{t.p95_ms ?? t.avg_ms} ms</td>
+                <td className="py-1.5 text-right text-muted">{relative(t.last_at)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {activity.tools.length > shown.length && (
+        <button onClick={() => setAll(true)} className="block w-full border-t border-line px-5 py-2 text-left text-[12px] text-accent hover:underline">
+          {activity.tools.length - shown.length} more tools
+        </button>
+      )}
+    </Panel>
+  );
+}
+
+/**
+ * What roll alerted the operator about lately (`GET /v1/access/alerts`, the feed an agent hears as
+ * `access.alert`): a failing tool, a decoy used, leaked tokens revoked, the checkup's news. Newest
+ * first; an alert about a token links to it. A person sees those about their own tokens.
+ */
+function Alerts({ list }: { list: Alert[] }) {
+  const [all, setAll] = useState(false);
+  const shown = list.slice(0, all ? undefined : 5);
+  return (
+    <Panel title="Alerts">
+      <ul className="divide-y divide-line">
+        {shown.map((a) => {
+          const { text, grant } = describeAlert(a);
+          return (
+            <li key={a.seq} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 px-5 py-2.5 text-[12px]">
+              <span className="min-w-0 flex-1">{text}</span>
+              {grant && (
+                <Link href={`/dashboard/access/tokens/${encodeURIComponent(grant)}`} className="text-accent hover:underline">
+                  Open token
+                </Link>
+              )}
+              <span className="text-muted">{relative(a.at)}</span>
+            </li>
+          );
+        })}
+      </ul>
+      {list.length > shown.length && (
+        <button onClick={() => setAll(true)} className="block w-full border-t border-line px-5 py-2 text-left text-[12px] text-accent hover:underline">
+          {list.length - shown.length} more
+        </button>
       )}
     </Panel>
   );

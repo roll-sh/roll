@@ -376,6 +376,13 @@ pub struct ConsoleResponse {
 /// Longest response body the console returns.
 pub const CONSOLE_MAX_BODY: usize = 4 << 20;
 
+/// What a console request answers: the cluster's answer in the console's envelope, or, for an
+/// answer the cluster streams (`_inference/…/_stream`), that stream as it comes.
+pub enum ConsoleAnswer {
+    Whole(ConsoleResponse),
+    Stream { status: u16, headers: Vec<(String, String)>, body: search_es::rest::Streamed },
+}
+
 /// What an "always on" idle timeout becomes on the node (a century).
 const ALWAYS_ON: Duration = Duration::from_secs(100 * 365 * 86_400);
 
@@ -1202,8 +1209,11 @@ impl Control {
     /// A new cluster with `parent`'s indices, as they are now or as they were at `at` (Unix
     /// seconds, within the history window). Instant: the branch's commit points name the
     /// parent's segments, nothing is copied. Settings and the owner come from the parent (settings
-    /// unless given), and the branch counts toward the owner's `caps`; a branch of a cluster with
-    /// no owner counts toward `made_by`, the person making it (none for the operator's). In a
+    /// unless given), but not its `reindex_whitelist`: the remotes the parent reads from are the
+    /// parent's (a branch whitelists its own). The parent's CORS origins, IP allowlist and
+    /// browser rate stay; its browser keys don't. The branch counts toward the owner's `caps`; a
+    /// branch of a cluster with no owner counts toward `made_by`, the person making it (none for
+    /// the operator's). In a
     /// fleet, call it on the node holding the parent (the API forwards there): a loaded parent
     /// is committed first, so the branch sees every acknowledged write. `parent` is the cluster
     /// the caller was checked against: it is read again by its id, never its name, so a cluster
@@ -1229,6 +1239,8 @@ impl Control {
                 // Its first load marks what it inherits (`search_es::branch`).
                 inherit_pending: true,
                 made_by: made_by.filter(|_| p.owner.is_none()).map(str::to_string),
+                // The remotes the parent may read from aren't the branch's.
+                reindex_whitelist: Vec::new(),
                 ..p.clone()
             },
             o,
@@ -2312,7 +2324,7 @@ impl Control {
     /// for metering like any client's.
     /// Runs a console request (`method`, `path`, `headers` as [`ConsoleRequest`] has them) with
     /// `body` ([`ConsoleRequest::body_in`]).
-    pub async fn request(&self, id: &str, method: &str, path: &str, headers: Vec<(String, String)>, body: Bytes) -> Result<ConsoleResponse> {
+    pub async fn request(&self, id: &str, method: &str, path: &str, headers: Vec<(String, String)>, body: Bytes) -> Result<ConsoleAnswer> {
         let c = self.get(id).await?;
         let shown = method;
         let method = method.trim().to_ascii_uppercase();
@@ -2332,6 +2344,9 @@ impl Control {
         req.body = body;
         let started = std::time::Instant::now();
         let resp = self.call(&c, req).await;
+        if let Some(body) = resp.stream.clone() {
+            return Ok(ConsoleAnswer::Stream { status: resp.status, headers: resp.headers, body });
+        }
         let took_ms = started.elapsed().as_millis() as u64;
         let is_json = resp.headers.iter().any(|(k, v)| k.eq_ignore_ascii_case("content-type") && v.contains("json"));
         let truncated = !resp.head && method != "HEAD" && resp.body.len() > CONSOLE_MAX_BODY;
@@ -2346,7 +2361,7 @@ impl Control {
             }
             String::from_utf8_lossy(&resp.body[..end]).into_owned()
         };
-        Ok(ConsoleResponse { status: resp.status, headers: resp.headers, body, json: is_json && !truncated, took_ms, truncated })
+        Ok(ConsoleAnswer::Whole(ConsoleResponse { status: resp.status, headers: resp.headers, body, json: is_json && !truncated, took_ms, truncated }))
     }
 
     // --- metering ---------------------------------------------------------------------------

@@ -649,12 +649,39 @@ impl Replacement {
         caps: &mut Captures,
         out: &mut String,
     ) -> Result<bool> {
+        Ok(self.replace_within(re, text, all, caps, out, usize::MAX)?.unwrap_or(true))
+    }
+
+    /// [`Replacement::replace`] holding `out` to `limit` bytes as it is built: `None` (and
+    /// nothing past the limit appended) when the result would be longer.
+    pub fn replace_within(
+        &self,
+        re: &JavaRegex,
+        text: &str,
+        all: bool,
+        caps: &mut Captures,
+        out: &mut String,
+        limit: usize,
+    ) -> Result<Option<bool>> {
         let mut finder = Finder::new();
         let groups = self.uses_groups();
         let mut last = 0;
         let mut any = false;
         while let Some((s, e)) = finder.next(re, text, caps, groups) {
             any = true;
+            // A bad replacement fails once something matched, as Java's does.
+            let parts = self.parts.as_ref().map_err(Clone::clone)?;
+            // What this match appends: the text before it and the replacement.
+            let rep: usize = parts
+                .iter()
+                .map(|p| match p {
+                    RepPart::Lit(l) => l.len(),
+                    RepPart::Group(g) => caps.get(*g).map_or(0, |(s, e)| e - s),
+                })
+                .sum();
+            if out.len() + (s - last) + rep > limit {
+                return Ok(None);
+            }
             out.push_str(&text[last..s]);
             self.append(text, caps, out)?;
             last = e;
@@ -662,8 +689,11 @@ impl Replacement {
                 break;
             }
         }
+        if out.len() + (text.len() - last) > limit {
+            return Ok(None);
+        }
         out.push_str(&text[last..]);
-        Ok(any)
+        Ok(Some(any))
     }
 }
 

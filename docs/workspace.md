@@ -79,6 +79,11 @@ project_invites(id, project_id, token_hash UNIQUE, email, role, environments,
         created_by, created_at, expires_at, used_by, used_at)
 homes(kind, ref, project_id, set_by, set_at, PRIMARY KEY (kind, ref))
 member_events(id, at, action, project_id, actor, subject, detail, ip, claimed_at, done)
+groups(id, name, description, source, external_id, created_by, created_at, UNIQUE (source, name))
+group_members(group_id, user_id, added_by, added_at, PRIMARY KEY (group_id, user_id))
+group_roles(project_id, group_id, role, environments, added_by, added_at, PRIMARY KEY (group_id, project_id))
+deleted_group_roles(...the same columns..., PRIMARY KEY (project_id, group_id))
+group_fanout(event_id, user_id, PRIMARY KEY (event_id, user_id))  -- who a group event may have cut off
 ```
 
 Projects from before owners become the operator's: a one-time migration moves the old tables
@@ -89,7 +94,15 @@ a project deletes its members, invites and homes in the same write.
 `member_events` is the outbox: every membership change records its event in its own transaction,
 and rolld acts on it after the write (roll's audit log, `product=workspace`; a removal revokes the
 person's tokens confined to the project, D7), claiming each for a minute first and retrying until
-it's done.
+it's done. A group change that may cut people off (a role removed or narrowed, people taken out,
+the group deleted) keeps them in `group_fanout` in its write; the outbox then looks at them 500 at
+a time and writes one `group.lost` per person, naming the projects where what they hold now (their
+own role or another group's) no longer covers what the group gave. Someone still there with as
+much gets none. The group event's own hooks run once that's done. A `group.lost` revokes the
+person's tokens confined to each project only where they reach it in no other way, and roll
+secrets checks what they made. Members' own events are claimed before groups', so a big group's
+fan-out never holds up a removal; a request runs one round of the outbox, and rolld's tick works
+off the rest.
 
 - A project id is `prj_` followed by 12 random characters of lowercase base32.
 - Times are unix milliseconds.
@@ -121,6 +134,7 @@ Bodies are JSON. Every error is `{"error": string}`, plus a `code` when a produc
 | `PUT /v1/workspace/projects/{id}/resources/{kind}/{ref}` | `{x, y}` | `Resource` |
 | `DELETE /v1/workspace/projects/{id}/resources/{kind}/{ref}` | | 204 |
 | `GET /v1/workspace/projects/{id}/members` | | `Member[]` (emails only for its admins) |
+| `GET /v1/workspace/projects/{id}/events?after=&limit=&kinds=&latest=1` | | `{events: [{seq, at, kind, data}], next}` ([Events](#events)) |
 | `PATCH /v1/workspace/projects/{id}/members/{user}` | `{role?, environments?}` | `Member` |
 | `DELETE /v1/workspace/projects/{id}/members/{user}` | | 204 |
 | `DELETE /v1/workspace/projects/{id}/members/me` | | 204: leave |
@@ -132,6 +146,17 @@ Bodies are JSON. Every error is `{"error": string}`, plus a `code` when a produc
 | `GET /v1/workspace/invites` | | the signed-in person's pending `Invite[]` |
 | `POST /v1/workspace/invites/{token}/accept` | | `Member` |
 | `POST /v1/workspace/invites/{token}/decline` | | 204 |
+| `GET /v1/workspace/projects/{id}/groups` | | `GroupRole[]` |
+| `PUT /v1/workspace/projects/{id}/groups/{group}` | `{role, environments?}` | `GroupRole` |
+| `DELETE /v1/workspace/projects/{id}/groups/{group}` | | 204 |
+| `GET /v1/workspace/groups` | | `Group[]` the caller sees, by name |
+| `POST /v1/workspace/groups` | `{name, description?}` | 201 `Group` |
+| `GET /v1/workspace/groups/{group}` | | `Group` |
+| `PATCH /v1/workspace/groups/{group}` | `{name?, description?}` | `Group` |
+| `DELETE /v1/workspace/groups/{group}` | | 204 |
+| `GET /v1/workspace/groups/{group}/members?after=&limit=` | | `GroupMember[]`, by user id, up to 500 |
+| `PUT /v1/workspace/groups/{group}/members/{user}` | | 204 |
+| `DELETE /v1/workspace/groups/{group}/members/{user}` | | 204 |
 
 - `PUT` adds the resource, moves it on the canvas, or moves it from another project of the same
   owner, in one write.
@@ -181,6 +206,90 @@ docs/members.md is the design; these are its v1 routes.
 - A new invite to an address replaces a pending one only when the caller may give the role it
   names (409 otherwise); a member removed or demoted loses the pending invites their role no longer
   gives, in the same write.
+
+### Groups
+
+docs/members-v1-1.md is the design; these are its phase 1 routes (groups and SCIM groups; not
+time-boxed elevation).
+
+- `Group`: `{id, name, description, source, external_id?, members, created_by, created_at, yours?}`. `id`
+  is `grp_` and 12 random characters of lowercase base32; `source` is `roll`, or
+  `scim:<SSO connection>` for a group an identity provider keeps over SCIM (docs/accounts.md);
+  `members` is how many people are in it; `yours` (a person's list only) says the caller is in it.
+- `GroupRole`: `{project, group, name, source, role, environments, members, added_by, added_at}`.
+  `role` is `viewer`, `developer` or `admin`: a group never holds `owner` (D10, a 400).
+- `GroupMember`: `{user, handle, email?, added_at}`; `email` only for the operator.
+- A person's rules on a project are the union of their own membership's and each of their groups'
+  roles there, read in one query on every request (never cached). `Project.role` is the highest.
+  A project a person reaches only through a group lists for them as any other.
+- `POST`, `PATCH`, `DELETE /v1/workspace/groups…` and its members are the operator's and roll's
+  admins' (D12; a person gets 403). A SCIM group's name and members are its provider's: 403
+  `{code: "managed"}`; deleting one works once its connection's SCIM groups are off.
+- `GET /v1/workspace/groups` (and one group, and its members) shows the operator every group, and a
+  person the groups they're in and those with a role on a project they're an admin of; any other
+  is a 404.
+- `PUT …/groups/{group}` needs `admin` on the project; the role, and the one it replaces, must be
+  covered by the caller's own rules (403 `forbidden`), and a person must be in the group (D11: the
+  operator, or a project admin who is in the group). "The operator" is the operator itself or an
+  admin's session: a scoped token (an operator's too) never gives a group a role, nor makes or
+  changes groups. `DELETE` needs the old role covered.
+- A SCIM group's members are its provider's while its connection's SCIM groups are on. While
+  they're off, the operator may take people out of it (not add them); once the connection is
+  removed, its groups go (rolld's tick drops any a crash left behind).
+- Someone in a project only through a group can't leave it (`DELETE …/members/me`) or be removed
+  from it as a member: 409 naming the group, which roll's operator or an admin changes.
+- Nobody invites themselves (403), and an invite its own maker would accept is refused: a role
+  held through a group never turns into a direct one by itself.
+- A deleted account leaves its groups too (one `group.member_remove` each).
+- Limits, each a 409 `{code: "limit"}` naming it: 10,000 groups; 10,000 people in a group; 100 groups
+  a person is in; 200 projects a group has a role on; 50 groups with a role on a project; 1,000
+  projects in a person's grant (any member who'd pass it refuses the group role).
+- A deleted project's group roles are kept apart with it (`deleted_group_roles`) and come back with
+  `Workspace::restore`, except those of groups deleted since (dropped, each a `group.role_remove`
+  in the audit log).
+
+### Events
+
+`GET …/projects/{id}/events?after=<seq>&limit=&kinds=` is what changed in who holds a role on a
+project, in order after a cursor: a follower asks with its last `next` instead of polling the
+members list. It's what roll MCP's `workspace.event` reads (mapped by roll MCP's feed table), as
+`secrets.event` reads roll secrets' feed (docs/secrets.md, "Events"). It answers
+`{events: [{seq, at, kind, data}], next}`. `limit` is 1–500 (default 100). `kinds` is
+comma-separated: exact names, or a family as `member.*`; an unknown one is a 400. `?latest=1`
+answers `{events: [], next}` at the head, for a follower that starts from now (with `after`: 400).
+
+- **Who reads it:** whoever sees the project's members (`R` on the project in the catalogue:
+  its members, and admins); anyone else gets the members route's 404. Its rows aren't per
+  environment, so nothing is filtered by one.
+- **The cursor.** Each event is written in the change's own write, and its `seq` is taken there
+  from the project's head row (`project_event_heads`), incremented under its row lock (a second
+  writer on Postgres waits for it, or loses a serializable race and runs again; SQLite has one
+  writer). Rows therefore commit in `seq` order, and a follower past 7 has already been able to
+  see 6. Never a Postgres sequence: its values commit out of order, and a follower would skip one
+  forever. `next` is past every row read; a page a `kinds` filter cut short moves it to the head.
+  `tests/api.rs`'s `two_nodes_changing_roles_never_leave_a_gap_a_follower_has_passed` checks it
+  (on Postgres too, with `ROLL_CODE_TEST_DATABASE`).
+- **Never a secret.** `data` holds person and group ids, handles, group names, roles and
+  environments, reasons, and always `actor`. Never a token or code; an invite's `email` only for
+  the project's admins, who see it in the invites list.
+- A deleted project's feed goes with it (404), and comes back with it on a restore, going on from
+  its cursor; it's dropped for good when the project is (`Workspace::forget_deleted`, or past
+  91 days).
+
+| Kind | When | `data` |
+| --- | --- | --- |
+| `member.added` | the project's maker (`via: "created"`), or an invite accepted (`via: "invite"`, right after its `invite.accepted`) | `user`, `handle`, `role`, `environments`, `via`, `invite` and `invited_by` (an invite's) |
+| `member.removed` | someone was removed (`reason: "removed"`), left (`left`), or their account was deleted (`offboarded`: one in each project they were a member of) | `user`, `handle`, `role`, `environments`, `reason` |
+| `member.role_changed` | a member's role or environments changed (a change to the same role is none) | `user`, `handle`, `from` and `to` (`{role, environments}`) |
+| `member.deactivated` | a person's account can't sign in any more (an admin or SCIM disabled it; roll accounts' offboarding outbox): one in each project they reach, directly or through a group. They stay members (counting for nothing) until it's enabled again; a deleted account is `member.removed` | `user`, `handle` (their id: the account can't be looked up), `role` (their highest there) |
+| `group.role_set` | a group was given a role on the project (`from: null`), or its role changed | `group`, `name`, `from`, `to` |
+| `group.role_removed` | a group's role was taken away (`reason: "removed"`), or the group was deleted (`group_deleted`, also when it was deleted while the project was and the project came back) | `group`, `name`, `role`, `environments`, `reason` |
+| `invite.sent` | an invite was made | `invite`, `email` (admins only), `role`, `environments`, `expires_at` |
+| `invite.accepted` | an invite was accepted | `invite`, `user`, `handle`, `role`, `environments` |
+| `invite.revoked` | an invite stopped working unused: `reason` is `revoked`, `replaced` (a new invite to the same address), `declined` (with `user`, `handle`), `inviter_role` (its inviter's role no longer gives it), `inviter_offboarded` or `leaked` | `invite`, `role`, `environments`, `reason` |
+
+A group's members coming and going changes what its people hold here too, but those are the
+group's records (roll's audit log), not the project's: they aren't events here.
 
 ## Shapes
 

@@ -20,7 +20,8 @@ environments that inherit from a base environment instead of copying it.
 - CLI: `roll secrets …` and `roll run` in `crates/roll-cli/src/secrets.rs`.
 - Tests: `crates/roll-secrets/tests/api.rs` (the router in process, on SQLite or Postgres),
   `crates/roll-secrets/tests/nodes.rs` (two stores racing on one database),
-  `crates/roll-cli/tests/secrets.rs` (`roll run`, with `--watch`, against roll secrets in process),
+  `crates/roll-cli/tests/secrets.rs` (`roll run`, with `--watch`, and `roll secrets agent` against
+  roll secrets in process),
   `crates/rolld/tests/secrets.rs` (each product's link against the real rolld, and a sealed start),
   `apps/dashboard/src/lib/secrets-*.test.ts`. `pnpm test:secrets` runs them (`--docker`: on
   Postgres, and the Postgres link).
@@ -476,6 +477,122 @@ dynamic credential is kept only within its lease. It logs in as a workload ident
 signs for the function's own role (`GetWebIdentityToken`, IAM's outbound identity federation: the
 account's own issuer, `sub` the role's ARN), so neither the function nor its configuration holds a
 roll token; `ROLL_TOKEN` otherwise. Not yet run against a real account (its README, "Gaps").
+## A local agent
+`roll secrets agent` is the Lambda extension's surface for every other machine (EC2, ECS, a
+Kubernetes pod's sidecar, a VM, a laptop), as AWS's Secrets Manager Agent is for Secrets Manager.
+It's a subcommand of the `roll` binary (`crates/roll-cli/src/secrets/local_agent.rs`): nothing else
+to install. An app moves between it and the Lambda extension unchanged:
+
+- It listens on **127.0.0.1 only** (`--port`, 2773 by default as the extension's; `0` picks one and
+  prints it). There's no flag for another address: values never leave the machine (or the pod).
+- `GET /secrets?env=production&path=/` answers the folder's values as a JSON object, `GET
+  /secrets/{KEY}?env=…&path=…` one value as text, and `GET /health` 200 while the agent's login
+  works (503 otherwise). `env` defaults to the agent's `-e` (or `ROLL_ENV`, or the directory's
+  setup), `path` to its `--path`, else `/`. Errors are `{"error", "code"}`, naming keys and folders,
+  never a value: 404 `not_found`, 409 `unresolved` (`/secrets` answers a folder only when every key
+  resolves), 403 `withheld` for a key this login isn't given (sensitive, or an untrusted
+  caller's), roll's own 403, 404, 409, 423 and 429 (its 401, the agent's login refused after
+  logging in again, as a 403), and 502 for anything else. Every answer is
+  `Cache-Control: no-store`.
+- **The request token.** Every request but `/health` carries `X-Roll-Token` (the extension's header)
+  with the contents of `--token-file` (`ROLL_AGENT_TOKEN_FILE`; by default
+  `$XDG_RUNTIME_DIR/roll/agent-token`), which the agent makes with 32 random bytes, 0600, when it
+  doesn't exist (`ROLL_AGENT_TOKEN` gives the value itself instead). Without it, or with another,
+  the answer is a 401 that says nothing more. A server-side request forgery in the app (a URL it
+  fetches for a user) can make it ask `127.0.0.1:2773` but can't add the header, so it reads
+  nothing; a request that came through a proxy (`Forwarded`, `X-Forwarded-For`) is refused too, as
+  AWS's agent refuses it. `/health` needs no token, so a probe can ask it, and says only `ok` and the version.
+- **Logging in.** As every `roll secrets` command does: a workload identity (`ROLL_IDENTITY`) with
+  the platform's OIDC token in a file it refreshes (`ROLL_OIDC_TOKEN_FILE`: Kubernetes' projected
+  service account token, ECS's or EC2's web identity token, GitHub's), read again at each login. The
+  login renews itself a quarter of its life before it ends, and logs in again at once on a 401;
+  a login that fails leaves the current one in use while it lasts. `ROLL_TOKEN` (a scoped token)
+  works too, for development. An identity that's a preview's or a sandbox's reads as untrusted:
+  roll decides that from the login, and the agent asks for nothing more.
+- **The cache.** The first read of a folder goes to roll (`…/values?digest=1`); after that the
+  agent follows the folder's digest (`…/digest?since=&wait=25`, the long poll the Kubernetes
+  operator uses, which decrypts, issues and audits nothing) and reads the values again only when it
+  moved, so a change reaches the agent within a second or so and an app's read is answered from
+  memory. Each answered poll confirms the folder for another `--ttl` (`ROLL_CACHE_TTL`, 300 s); a
+  folder roll hasn't confirmed for that long (roll unreachable) is read from roll again on its next
+  request, and `--ttl 0` turns the cache off. Only no answer, or a 5xx, keeps a folder until its
+  TTL: once roll refuses it (a 401 after logging in again, or a 403 or 404 on the poll or on the
+  read after the digest moved: the login revoked, or no longer allowed to reveal the folder) the
+  agent drops it at once, so the app's next request gets roll's refusal rather than the values. `--cache-size` (`ROLL_CACHE_SIZE`, 1000) caps the
+  folders kept; past it, the one read longest ago goes. `--prefetch production:/,staging:/api`
+  (`ROLL_PREFETCH`) reads folders before the agent answers. A folder with a key that doesn't
+  resolve is never kept. A folder holding a dynamic credential is kept only within its leases: the
+  agent renews each lease when it keeps the folder (that's when it learns when the lease ends), then
+  every 10 minutes or at half its life, as `roll run --watch` does, and stops keeping the folder
+  when a renewal fails or a fifth of the soonest lease's life is left. Nothing is written to disk
+  but the token file.
+- **Logs** go to stderr: a line per request without its query string (`GET /secrets/DATABASE_URL 200
+  1ms`), folders that changed, lease ids and roll's error messages, never a value.
+
+The token file is 0600, so the agent runs as the app's own user (or both get one `ROLL_AGENT_TOKEN`).
+A systemd unit, with the token file under `/run/roll`:
+
+```ini
+[Unit]
+Description=roll secrets agent
+After=network-online.target
+
+[Service]
+Environment=ROLL_API_URL=https://api.roll.example ROLL_IDENTITY=idn_… ROLL_OIDC_TOKEN_FILE=/run/roll/oidc-token
+ExecStart=/usr/local/bin/roll secrets -p shop -e production agent --token-file /run/roll/agent-token --prefetch production:/
+User=shop
+RuntimeDirectory=roll
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+
+A Kubernetes sidecar (the identity is the pod's service account, `system:serviceaccount:shop:web`,
+made as in "Workload identities"; the token file sits in a volume only the pod's two containers
+share, and both run as one user so the app can read it). The kubelet's `httpGet` probes come from
+the node and can't reach the pod's 127.0.0.1: probe with `exec` if the image has a client.
+
+```yaml
+spec:
+  serviceAccountName: web
+  securityContext: { runAsUser: 10001, runAsGroup: 10001 }
+  volumes:
+    - name: roll-oidc
+      projected:
+        sources:
+          - serviceAccountToken: { audience: roll, expirationSeconds: 3600, path: token }
+    - name: roll-agent
+      emptyDir: { medium: Memory }
+  initContainers:
+    - name: roll-secrets-agent
+      image: ghcr.io/roll-sh/roll:latest       # any image with the roll binary
+      restartPolicy: Always                    # a native sidecar: up before the app starts
+      args: [secrets, -p, shop, -e, production, agent, --token-file, /run/roll/agent-token, --prefetch, "production:/"]
+      env:
+        - { name: ROLL_API_URL, value: https://api.roll.example }
+        - { name: ROLL_IDENTITY, value: idn_… }
+        - { name: ROLL_OIDC_TOKEN_FILE, value: /var/run/secrets/roll/token }
+      volumeMounts:
+        - { name: roll-oidc, mountPath: /var/run/secrets/roll, readOnly: true }
+        - { name: roll-agent, mountPath: /run/roll }
+  containers:
+    - name: web
+      image: shop/web
+      volumeMounts:
+        - { name: roll-agent, mountPath: /run/roll, readOnly: true }
+```
+
+The app reads as on Lambda, with the header from the file:
+
+```sh
+curl -sH "X-Roll-Token: $(cat /run/roll/agent-token)" http://127.0.0.1:2773/secrets/DATABASE_URL
+```
+
+Tests: `crates/roll-cli/tests/secrets.rs` (`the_local_agent_answers_only_requests_that_carry_its_token`,
+`a_change_reaches_the_local_agents_cache_through_the_digest`,
+`a_revoked_logins_local_agent_answers_a_refusal_within_one_poll`); the identity login's renewal is
+`relogin_tests` in `crates/roll-cli/src/secrets.rs`, which the agent shares.
 ## Customer-managed keys
 A project's data key can be wrapped once more by a KMS key in the customer's own AWS account, as
 Infisical's external KMS does (`PUT …/kms {key: "arn:aws:kms:…"}`, `roll secrets kms set ARN`;
@@ -717,7 +834,8 @@ environments and approvals"). Teams add, rename, reorder and delete their own en
   for the recovery window, read by nobody, and revokes what it issued at once (see "When a secret,
   an environment or the project goes"). It takes `?confirm=<slug>` when the environment is
   protected or anything else reads it (409 `confirm_required`, naming every value that references
-  it and every folder, here or in another project, that imports from it); a protected one whose
+  it, every folder, here or in another project, that imports from it, and the services, sandboxes,
+  syncs, identities and tokens that read it); a protected one whose
   policy asks for approvals is deleted through a change request. `GET …/environments/{env}/deletion`
   says all that before anyone asks. An ephemeral environment goes at once. The last standard
   environment can't be deleted, nor one an ephemeral environment is based on.
@@ -1237,17 +1355,27 @@ A link is `{kind, ref, field, mode, options}`:
 - **Deleting a standard environment** keeps it for the same recovery window as a project
   (`ROLL_SECRETS_DELETE_WINDOW_DAYS`, 7 days unless set), as Google Secret Manager's delayed
   destruction and Azure Key Vault's soft delete do:
-  - first the refusal says what breaks: `${staging.X}` in another environment of the project, and
-    folders here or in other projects that import from it (409 `confirm_required` until
-    `?confirm=<slug>`; also asked of every protected environment). Names only, never a value;
+  - first the refusal says what breaks, and anything that does asks for `?confirm=<slug>` (409
+    `confirm_required`; also asked of every protected environment). Names only, never a value:
+    - `${staging.X}` in another environment of the project, and folders here or in other projects
+      that import from it;
+    - roll apps services that deploy from it or read it through a `roll://` variable: their next
+      deploy, or a wake that resolves at runtime, fails;
+    - agents sandboxes copying from it: they lose those values;
+    - its syncs, which stop: the copies they pushed stay at their targets until removed there;
+    - workload identities and roll-access tokens whose scope names it (their names only for a
+      project admin; anyone else sees that one is there);
   - a protected environment whose policy asks for approvals (`approvals` ≥ 1) is deleted through a
     change request with those approvals and every folder policy in it (`"action":
     "delete_environment"`, answered 202 `{request}`), exactly as deleting one of its folders is;
     applying it (`delete` there) is the delete, and an admin's `bypass` is audited as any other.
     With `approvals: 0` (a new project's `production`) the confirmed delete is direct;
-  - then what it issued is revoked (leases, managed credentials, placeholders, and the interception
-    CAs that named their hosts), its one-time shares and secret requests end, and its decoys end.
-    The delete is audited (`environment.delete`: who, and the window's end);
+  - one write decides: it checks again that the environment may go (no ephemeral environment based
+    on it, a change request still approved), marks it deleted, ends its placeholders (and the
+    interception CAs that named their hosts), one-time shares, secret requests and decoys, and is
+    audited (`environment.delete`: who, and the window's end). Only then is what it issued revoked
+    (leases and managed credentials, each kept as a due lease the sweeper retries if its product
+    doesn't answer). A delete that write refuses revokes nothing;
   - through the window nobody reads it: every route answers 404 for it, it's left out of listings,
     search, health, insights, syncs and rotations, and a reference to it is a problem that says so
     ("references staging, which was deleted; recover it or change the reference"). Its slug stays
@@ -1291,8 +1419,9 @@ A link is `{kind, ref, field, mode, options}`:
     an admin of its secrets by their grant as it is now, or the person whose namespace it is while
     they were still one of its owners when it was deleted, so an owner can undo an admin's delete
     of their project; membership kept from the delete never lets anyone else in;
-    `GET /v1/secrets/deleted` lists what the caller may recover, as do
-    the dashboard's Home, "Recently deleted", and `roll secrets recover [project]`). The workspace
+    `GET /v1/secrets/deleted` lists what the caller may recover, as do the dashboard's Home,
+    "Recently deleted", and `roll secrets recover [project]`, which lists deleted environments
+    under their own heading: `roll secrets envs recover <env>` brings one back). The workspace
     keeps a deleted project, its canvas and members apart for this (`deleted_projects`, at most
     91 days), and recovering brings them back.
     Recovering claims the project on the secrets side first (one write: a close on another node
@@ -1393,7 +1522,8 @@ every rotation. It works as a rotator does: it rotates every `rotate_days` or on
 old key is revoked after `grace_minutes`. `secret` is the vendor's secret (masked) and `id` is
 the key's or secret's id at the vendor (plain). Keys of one environment linked to the same
 registration share one issue: linking `TWILIO_API_KEY` to `id` and `TWILIO_API_SECRET` to `secret`
-gives one Twilio key.
+gives one Twilio key. Each rotation is `rotation.succeeded` on the events feed, and a scheduled one
+the vendor refuses is `rotation.failed` (and `rotation_failing` in health), as for every managed key.
 
 Registering checks the credential with the vendor first, read only, so a credential the vendor
 refuses, or one that can't manage keys, is refused at once (400, naming the vendor and the status)
@@ -1402,7 +1532,14 @@ instead of at the first rotation:
 - Twilio: one page of the account's keys;
 - Okta: the app's secrets;
 - Entra: sign in, then the application;
-- Auth0: sign in, then the client.
+- Auth0: sign in, then the client;
+- GitLab: one page of the project's or group's access tokens (listing them takes the role that
+  makes them);
+- OpenAI: one page of the project's service accounts;
+- Datadog: one page of the API keys, or of the credential's user's application keys;
+- Cloudflare: the template token (read as each rotation will);
+- Databricks: the identity's tokens (`GET /api/2.0/token/list`);
+- Confluent: one page of the owner's API keys.
 
 | `vendor` | `target` | `credential` | Issue | Revoke |
 | --- | --- | --- | --- | --- |
@@ -1411,6 +1548,12 @@ instead of at the first rotation:
 | `okta` | `{domain: "acme.okta.com", app_id}` | an API token (`SSWS`) that may manage the app | `POST https://{domain}/api/v1/apps/{app_id}/credentials/secrets` → `id`, `client_secret` | `POST …/secrets/{id}/lifecycle/deactivate`, then `DELETE …/secrets/{id}` |
 | `entra` | `{tenant, client_id, object_id}` | a client secret of `client_id`, an app with `Application.ReadWrite.OwnedBy` that owns `object_id` (or `Application.ReadWrite.All`) | a client credentials token at `https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token` (scope `https://graph.microsoft.com/.default`), then `POST https://graph.microsoft.com/v1.0/applications/{object_id}/addPassword {passwordCredential: {displayName}}` → `keyId`, `secretText` | `POST …/removePassword {keyId}` |
 | `auth0` | `{domain: "acme.us.auth0.com", client_id, app_client_id}` | the client secret of `client_id`, a machine-to-machine app of the Management API with `update:client_keys` | a client credentials token at `https://{domain}/oauth/token` (audience `https://{domain}/api/v2/`), then `POST https://{domain}/api/v2/clients/{app_client_id}/rotate-secret` → `client_secret` (`id` is the app's client id) | nothing |
+| `gitlab` | `{host?: "gitlab.com", project: "123" \| "group/project"` or `group: "456" \| "group", scopes: ["read_api", …], access_level?: 10-40 (50 for a group; default 40), expires_days?: 1-400 (default 365)}` | an access token with the `api` scope of a Maintainer or Owner of the project or group | `POST https://{host}/api/v4/{projects\|groups}/{id}/access_tokens {name, scopes, access_level, expires_at}` (`PRIVATE-TOKEN`) → `id`, `token` | `DELETE …/access_tokens/{id}` |
+| `openai` | `{project_id: "proj_…"}` | an organization Admin API key | `POST https://api.openai.com/v1/organization/projects/{project_id}/service_accounts {name}` (Bearer) → `id`, `api_key.value` (`id` is the service account's) | `DELETE …/service_accounts/{id}` (the account and its key) |
+| `datadog` | `{site?: "datadoghq.com", key: "api" \| "application", scopes?: string[]}` (scopes for application keys only; none: the user's permissions) | `<API key>:<application key>`, the application key allowed to manage the kind that rotates (`api_keys_write`, or `user_app_keys`) | `POST https://api.{site}/api/v2/api_keys` or `…/current_user/application_keys` `{data: {type, attributes: {name, scopes?}}}` (`DD-API-KEY`, `DD-APPLICATION-KEY`) → `data.id`, `data.attributes.key` | `DELETE …/api_keys/{id}` or `…/current_user/application_keys/{id}` |
+| `cloudflare` | `{account_id?, template}` (no `account_id`: the user's tokens) | an API token that may manage API tokens (`API Tokens Write` on the user or the account) | `GET https://api.cloudflare.com/client/v4/{user\|accounts/{account_id}}/tokens/{template}`, then `POST …/tokens {name, policies, condition?}` with the template's policies (permission groups by id) and condition (Bearer) → `result.id`, `result.value` | `DELETE …/tokens/{id}` |
+| `databricks` | `{host: "dbc-a1b2c3d4-e5f6.cloud.databricks.com", lifetime_days?: 1-730 (default 90)}` | a personal access token of the identity whose tokens rotate (a service principal's, ideally) | `POST https://{host}/api/2.0/token/create {comment, lifetime_seconds}` (Bearer) → `token_value`, `token_info.token_id` | `POST /api/2.0/token/delete {token_id}` |
+| `confluent` | `{owner: "sa-…" \| "u-…", resource?: "lkc-…", environment?: "env-…"}` (no `resource`: a Cloud API key) | a Cloud API key as `KEY:SECRET` that may manage `owner`'s keys (OrganizationAdmin, or AccountAdmin of the owner) | `POST https://api.confluent.cloud/iam/v2/api-keys {spec: {display_name, owner: {id}, resource?: {id, environment?}}}` (basic auth) → `id` (the key), `spec.secret` | `DELETE …/api-keys/{id}` |
 
 - **Auth0 has no grace period.** `rotate-secret` replaces the app's secret at once: the old one
   stops working the moment roll rotates, whatever `grace_minutes` says, so services must pick up
@@ -1421,11 +1564,41 @@ instead of at the first rotation:
   app once per environment, or link one environment. Okta also refuses a new secret while the app
   already has two; a rotation then fails and shows in health.
 - Entra passwords get Microsoft's default lifetime (two years); set `rotate_days` below it.
+- **GitLab tokens are made new, not rotated in place.** GitLab's rotate endpoint
+  (`POST …/access_tokens/{id}/rotate`) revokes the old token the moment it answers, so every
+  consumer still holding it would fail until it reloads. roll makes a new token with the same
+  scopes and role instead, and revokes the old one after `grace_minutes`, as for every other
+  vendor. Each token is a new bot member of the project or group, which GitLab removes with the
+  token. A token expires after `expires_days` (GitLab needs a date; an instance may cap it lower
+  than 365): set `rotate_days` below it. `host` is a hostname (no IP literal, no port).
+- **OpenAI keys belong to service accounts.** Each rotation adds a service account to the project
+  and keeps its key; revoking deletes the account, which ends the key. For a key that leaked,
+  rotate it, then end the retired key's lease (`DELETE …/leases/{id}`, or Revoke in the
+  dashboard's leases) to delete the old account at once instead of after the grace period.
+- **Datadog's site is one of its own:** `datadoghq.com`, `us3.datadoghq.com`, `us5.datadoghq.com`,
+  `datadoghq.eu`, `ap1.datadoghq.com`, `ap2.datadoghq.com` or `ddog-gov.com`; the API is
+  `api.<site>`. Application keys belong to the user (or service account) whose application key is
+  in the credential.
+- **Cloudflare tokens are made new, not rolled.** Cloudflare's roll (`PUT …/tokens/{id}/value`)
+  keeps a token's policies but ends its old value the moment it answers, which breaks every
+  consumer still holding it, as GitLab's rotate would. roll makes a new token instead, copying the
+  policies and conditions of `template` (a token you keep for that, which may be disabled; edit
+  it in Cloudflare and the next rotation follows), and deletes the old one after `grace_minutes`.
+  A template roll can't read, or one without policies, fails the rotation (`rotation.failed`).
+- **Databricks: personal access tokens, not OAuth secrets.** Every Databricks workspace on every
+  cloud takes them, and every consumer (the CLI, SDKs, JDBC/ODBC, `DATABRICKS_TOKEN`) uses one
+  as is; a service principal's OAuth secret is account-level, and each consumer must exchange it
+  for a token. A new token belongs to the credential's identity, so register a service principal's
+  token. Each lasts `lifetime_days` (a workspace may cap it lower): set `rotate_days` below it.
+  `host` is a hostname (no IP literal, no port).
+- **Confluent: link `CONFLUENT_API_KEY` to `id` and `CONFLUENT_API_SECRET` to `secret`.** They
+  share one key, and a new one can take a moment to work on a cluster: keep `grace_minutes` above
+  a few minutes.
 
 Requests go out from rolld's guarded client, as a rotator's calls do: HTTPS to a public address, no
 redirects, a 15-second timeout, at most 64 KiB of answer. The hosts are the vendors' own, except
-Okta's and Auth0's tenant domains, which must be hostnames (no IP literal, no port) and then pass
-the same guard. The credential is sealed with the project's data key, bound to the registration's
+Okta's and Auth0's tenant domains, a self-managed GitLab's host and a Databricks workspace's host,
+which must be hostnames (no IP literal, no port) and then pass the same guard; Datadog's site must be one of its documented ones. The credential is sealed with the project's data key, bound to the registration's
 id, vendor and target, so a row pointed at another host no longer opens; it's never answered,
 logged or audited, and the list shows the vendor and target only. A vendor's answer is never part
 of an error: errors name the vendor, the step and the status (`okta answered 401 issuing a key`).
@@ -2779,7 +2952,7 @@ roll secrets scan    [PATH…] | --staged [--allow-unstored]    # this project's
 roll secrets scan    --store [KEY=]FILE:LINE                   # move one such credential in; prints what to write instead
 roll secrets render  config.tpl [--out config.yml [--watch --exec CMD]]   # ${KEY} filled in
 roll secrets export  [--format dotenv|json|shell|yaml|docker|kubernetes] [--name N --namespace NS]
-roll secrets envs    ls | add NAME [--base ENV --ephemeral] | rename OLD NEW | rm NAME | order A B C
+roll secrets envs    ls | add NAME [--base ENV --ephemeral] | rename OLD NEW | rm NAME [--yes] | recover NAME | order A B C
 roll secrets history [KEY]   roll secrets rollback --to SEQ | --at TIME
 roll secrets diff    --from development --to staging | --file .env   # two environments, or a local copy
 roll secrets promote --from development --to staging [KEY…]
@@ -2864,7 +3037,8 @@ roll completions bash|zsh|fish|powershell
   carries, which the server takes just before that read (asked for, since it costs about as much
   as the read): a write that lands while the command's values are
   being read (or re-read, or newly referenced) is still a change, never folded into what it
-  compares against. The message names the folders that moved (`production:/ changed`). A change
+  compares against. After a change it reads only what changed (`…/values/delta`, "Delta reads"),
+  merged into what it holds. The message names the folders that moved (`production:/ changed`). A change
   that doesn't resolve keeps the running command. A live link's resource rotated through roll
   moves the digest of every folder that links it (a password changed outside roll can't).
 - `roll secrets edit` opens the folder's own keys as a `.env` in `$EDITOR` (a 0600 file under
@@ -3094,7 +3268,13 @@ cluster, instead of a key pasted into it: the Inference tab's "A roll secret", o
   create and at each start roll code reads them again as the maker may now
   (`Secrets::values_as_maker`: the check and the read in one call, untrusted, not a runtime), so a
   rotated value reaches it at its next start. Once the maker may not (`maker_unreachable` or not
-  allowed), the sandbox starts without those variables (`secrets_dropped`). A sandbox made before
+  allowed), the sandbox starts without those variables (`secrets_dropped`). Only the variables it
+  copied count: a key of the folder that doesn't resolve for an untrusted read (`${production.X}`,
+  production being protected, or a reference to a deleted environment) stops nothing that didn't
+  copy it, and a copied one that doesn't resolve is left unset and named with why
+  (`secrets_unset`). An environment deleted but still in its recovery window holds the sandbox's
+  create and start (they wait), so recovering it brings the values back; once it's purged, the
+  sandbox starts without them (`secrets_dropped`). A sandbox made before
   `secrets_from` was kept only has its maker asked whether they can still act (`maker_acts`), and
   keeps what it was made with; delete it and make another to get fresh reads
   (docs/code/http-api.md, "Sandboxes").
@@ -3930,8 +4110,15 @@ Agent's templates do).
   that can't read it any more says why instead of running. No canvas holds a roll code owner, so
   its project is the one whose canvas holds one of the owner's repositories and stands for it,
   named in the reference when there are several. Pasted keys are still sealed in roll code's own
-  table. The agents' endpoints and gateway upstreams still keep their own copies (`op://`,
-  `env:`, a file).
+  table. An agent machine's endpoint key can be one too (an endpoint's `key_ref`,
+  docs/code/agents.md "Endpoints"). It's bound to whoever sets it for `agent:<machine>`, through
+  the same project. roll code's relay reads it as them after each of the machine's `hello`s (a
+  digest each time, the value only when it moved) and sends it sealed to the daemon, never kept.
+  Once they can't read it, the daemon is told why and the endpoint has no key. The model
+  gateway's upstream keys can be one too (an upstream's `key_ref`, docs/code/gateway.md
+  "Upstreams"). They're bound on `gateway.configure`, read as the host machine
+  (`agent:<machine>`), and sent the same way. A refusal leaves the upstream with no key and bars
+  its provider, so no other key of it is tried.
 - **Who reads it.** The product asks rolld in process (`resolve_as` or `resolve_for`), naming the workspace resource that needs the value: a replication target
   resolves for the source bucket that replicates through it. The project is the one whose canvas
   holds that resource *and* that stands for it (`Workspace::trusts`): a person's canvas only
@@ -4672,7 +4859,9 @@ may no longer manage the project, and the one-time shares they made end and the 
 issued to them are revoked once they're no longer a member. Their personal overrides stay (only
 they read them, and they can't). When their account is disabled (an admin, SCIM), stops being an
 admin's or is deleted, rolld calls `Secrets::person_offboarded`, which runs the same hook in every
-project holding an open share, a live lease or a shared folder: a disabled person counts as no
+project holding an open share, a live lease, a shared folder or a key bound to hosts they made
+(themselves, or a token or identity of theirs) and in their memberships' projects, never one only
+others made things in (`SecretsMemberRechecks` counts them): a disabled person counts as no
 member anywhere (docs/accounts.md, "Offboarding"). Enabled again, they get nothing back.
 
 So removing or demoting a member stops or narrows what they made at once. rolld asks roll-accounts
@@ -4733,7 +4922,9 @@ credentials as the tokens list does. Names and metadata only, never a value:
   it, or their account is `gone`). They still know what they read: rotate it.
 
 roll secrets knows no product: rolld answers which services and sandboxes hold a project's
-secrets (`reach::Holders`, from roll apps' and roll code's stores; names and references only).
+secrets (`reach::Holders`, from roll apps' and roll code's stores; names and references only:
+roll apps keeps each variable's `roll://` text beside its sealed value when it's set, so reach
+opens no value, write-only ones included).
 - **Where it goes by itself**: syncs of that folder (and that key), projects the folder is shared
   with, and this project's folders that import it.
 - **Where it goes by itself** also counts folders that import it and environments based on it
@@ -5365,15 +5556,30 @@ some environments call it (`filters_itself`). `decoy.used` is only for those who
 deleted project's feed stays readable through its recovery window, so a follower sees
 `project.deleted` and `project.recovered`.
 
-**Never a value.** `data` holds names, ids, counts and reasons, and always `actor`; `path` and `keys`
-(when there's more than one; one is `key`) come from the row. Never a value, a hash of one, or its
-length.
+**Never a value.** `data` holds names, ids, versions, counts and reasons, and always `actor`; `path`
+and `keys` (when there's more than one; one is `key`) come from the row. Never a value, a hash of
+one, or its length.
+
+**Value changes.** Every change to stored values (`apply` in `write.rs`, which every write, import,
+restore, request, promote, rollback, rotation and environment rename goes through) carries its event
+in its own audit row: one per change, never one per key, so a bulk write of 40 keys is one
+`secret.changed`. `via` says how it came about: `write`, `import` (a `.env` file), `restore` (a
+backup), `answer` (a secret request answered), `request` (a change request applied), `promote`,
+`rollback`, `rotation`, or `rename` (references to a renamed environment rewritten). Live and dynamic
+links store no value, so a resource's own credential changing is no `secret.changed` (a live link's
+`rotate` is `rotation.succeeded`). Keys have no trash: a deleted key's versions stay in its history
+(its value until retention or a purge), and a rollback brings it back. Role changes in a project are
+roll-workspace's records, not secrets' audit rows: they're the workspace's own feed
+(docs/workspace.md, "Events"; roll MCP's `workspace.event`).
 
 | Kind | When | `data` |
 | --- | --- | --- |
+| `secret.changed` | a change added, changed, linked or rotated stored values (a change that only edits comments, tags or expiry isn't one) | `via`, `change` (its number in the history), `version` (one key) or `versions` (`{key: version}`), `keys` when the row names more (the change's other keys only had their metadata edited or were deleted), `deleted` (keys the same change deleted) |
+| `secret.deleted` | a change only deleted keys (a folder's delete too) | `via`, `change`, `version` or `versions` (the delete's) |
 | `secret.leaked` | a stored value turned up in a roll code repository (a change's added lines or a scan; in the project holding the value, once a day for the same keys and repo), or GitHub's secret scanning found a placeholder (`secrets.placeholders.end`) | `repo` (and `project`, the repo's, when the value came from another's shared folder), or `placeholder`, `consumer`, `reason` |
 | `scan.finding` | `roll secrets scan` or roll MCP's credential guard (`POST …/leaks`) matched values: a row per folder | `candidates`, `matched`, `guard` |
 | `rotation.failed` | a managed key's scheduled rotation failed: once as a failing run starts (health's `rotation_failing` until one works) | `reason` |
+| `rotation.succeeded` | a rotation worked, scheduled or `--now`: a managed key's new credential (the row right after its `secret.changed` via `rotation`, in the same transaction), or a live link's resource credential reset | `mode` (`managed` or `live`), `scheduled`, `version` and `change` (managed), `sharing` (the keys holding the same credential, when more than one) |
 | `request.pending` | a change request or a secret request opened | `request`, `type` (`change` or `value`), `expires_at` (a secret request's) |
 | `request.decided` | a change request approved or rejected (once its state moves) or closed; a secret request answered or cancelled | `request`, `type`, `state` |
 | `sync.failed` | a sync's push failed | `sync`, `target`, `reason` |
@@ -5383,6 +5589,7 @@ length.
 | `placeholder.wrong_consumer` | another consumer's proxy sent a placeholder | `placeholder`, `consumer`, `by`, `more_by`, `count` |
 | `placeholder.wrong_host` | a placeholder went to hosts its key isn't bound to | `placeholder`, `consumer`, `hosts`, `more_hosts`, `count` |
 | `production.unprotected` | `production` went from protected to not (health's `production_unprotected`) | |
+| `access.changed` | an environment's protection or approvals changed (not its notify URL alone; `production.unprotected` instead when that's what it did), or a folder's change policy was set or removed | `what` (`environment` or `folder`), `protected` (an environment's), `approvals` (0: a folder's policy removed) |
 | `env.deleted`, `env.recovered` | a standard environment was deleted (kept for its recovery window; ephemeral ones, previews', aren't events), or recovered within it | `purge_at` (deleted) |
 | `project.deleted`, `project.recovered` | the workspace project was deleted (its recovery window starts), or recovered | `purge_at` (deleted) |
 
@@ -5573,7 +5780,7 @@ isn't in the workspace is 404.
 | `PUT /environments/{env}` | `Ensure` | 201 or 200 `{environment, created, change}` (409 `mismatch`; `branches` on a standard environment is a 400, an addition by anyone but roll previews or the operator a 403) |
 | `PATCH /environments/{env}` | `{slug?, name?, expires_at?, max_age_days?}` | `Environment` |
 | `DELETE /environments/{env}?confirm=` | | 204 for an ephemeral one; 200 `{environment, deleted_at, purge_at}` for a standard one, kept for the window; 202 `{request}` when its policy asks for approvals (409 `confirm_required`, naming what breaks, until `confirm` repeats the slug of a protected or referenced one) |
-| `GET /environments/{env}/deletion` | | `{environment, secrets, window_days, confirm, needs_request, approvals, breaks: {project?, environment, path, key?, via: "reference" \| "import"}[]}` (`delete`) |
+| `GET /environments/{env}/deletion` | | `{environment, secrets, window_days, confirm, needs_request, approvals, breaks: {project?, environment, path, key?, via: "reference" \| "import" \| "service" \| "sandbox" \| "sync" \| "identity" \| "token", name?, id?}[]}` (`delete`; `name`: the service, sandbox, identity or token's, or a sync's `kind target`; an identity's or token's `name` and `id` only for a project admin) |
 | `POST /environments/{env}/recover` | | `{project, environment, recovered_at, rotated, rotation_failed: string[]}`: a deleted environment back within its window (`admin`; audited as `environment.recover`) |
 | `PUT /environments/{env}/policy` | `{protected, approvals?, approvers?, notify_url?}` | `Environment` |
 | `GET /environments/{env}/folder-policies` | | `FolderPolicy[]` |
@@ -5607,6 +5814,7 @@ isn't in the workspace is 404.
 | `PUT /environments/{env}/secrets/{key}/hosts?path=` | `Hosts` | `Hosts` (`admin`; a shared key of the folder itself, not a dynamic link's; see "Using a key without seeing it") |
 | `DELETE /environments/{env}/secrets/{key}/hosts?path=` | | 204 (`admin`); 404 when it isn't bound |
 | `GET /environments/{env}/values?path=&format=&resolve=&dynamic=&strict=&digest=&codes=&name=&namespace=&seq=&at=` | | `Values` (`codes=1`: `<KEY>_CODE` beside each TOTP key, never a 304; `dynamic=false`: a dynamic key is left out, named in `dynamic`, instead of a fresh credential; `strict=1`: any problem is a 409 `unresolved` naming the keys, so a reader keeps what it had; `digest=1`: the folder's `…/digest`, taken just before the read, as `digest`; with `seq`: as stored after that change, `seq` in the answer), or text with `format`: `dotenv`, `shell`, `json`, `yaml`, `docker` (`--env-file`; a value with a line break is a 400 naming the key) or `kubernetes` (a Secret named `name`, default the environment, in `namespace`); with `digest=1` or `If-None-Match` an `ETag` (the digest), and `If-None-Match` with the digest still current is a 304 that decrypts and issues nothing, and writes one `secrets.revalidate` row a day per caller and folder (so health and insights still see the folder read) (never for a folder holding a dynamic credential unless `dynamic=false`: a lease ends without moving the digest) |
+| `POST /environments/{env}/values/delta?path=&dynamic=` | `{digest?, basis?, stamps?: {KEY: stamp}}` (what the watcher holds; `{}` for none; at most 4 MiB, else a 413) | `ValuesDelta` (`reveal`, as `…/values`; see "Delta reads"): `delta: true` with only the keys whose stamp differs from the one held (and every live link's, read again), the names held that the folder no longer answers in `removed`, the changed keys' `stamps`, and every list as the whole folder's; or `delta: false`, the full set as `…/values?digest=1` answers it with every key's stamp, whenever the delta can't be proven exact (nothing held, another `basis`, a dynamic credential a read would issue, stamps that couldn't be worked out). Audited as `secrets.export` naming the keys returned; nothing changed is a `secrets.revalidate` row a day, as a 304. A held key or stamp of the wrong shape is a 400 |
 | `GET /environments/{env}/insights?path=` | | `Insights` (read) |
 | `GET /environments/{env}/reach?path=&key=` | | `Reach` (a project admin's): tokens and identities that reach it, syncs, live leases and attributed shares, projects it's shared with, folders that import it, readers in 30 days, `frozen` |
 | `POST /environments/{env}/reach/cut-off?path=&key=` | `{why, tokens?, identities?, leases?, placeholders?, shares?, syncs?, freeze?}` | `CutOff`: what was cut, what was left to the operator (`skipped`: tokens reaching beyond the project) and what failed, with why (a project admin's; idempotent) |
@@ -5642,7 +5850,7 @@ isn't in the workspace is 404.
 | `PUT /identities/{id}/jwks` | `{jwks}` | `Identity` (admin; a person's): its pinned keys replaced, its id kept (400 for an `aws` one) |
 | `POST /v1/secrets/login` | `{identity, token}` or `{identity, aws: {method, url, headers, body}}` | `{token, expires_at, project, identity}` (public; `aws`: a signed `GetCallerIdentity`, "AWS IAM") |
 | `GET /audit?env=&key=&actor=&action=&before=&since=&limit=&digests=&format=` | | `AuditEntry[]` newest first, or CSV/JSONL with `format`; `digests=false` leaves out `audit.digest` rows |
-| `GET /events?after=&limit=&kinds=&environment=&latest=` | | `{events: SecretsEvent[], next}` in commit order after the cursor (`limit` 1–500, default 100; `kinds` comma-separated, a family as `request.*`, 400 for an unknown one; `environment` needs read there); `latest=1` answers `{events: [], next}` at the head, 400 with `after` ("Events") |
+| `GET /events?after=&limit=&kinds=&environment=&latest=` | | `{events: SecretsEvent[], next}` in commit order after the cursor (`limit` 1–500, default 100; `kinds` comma-separated, a family as `request.*` (`secret.*` is `secret.changed`, `secret.deleted` and `secret.leaked`), 400 for an unknown one; `environment` needs read there); `latest=1` answers `{events: [], next}` at the head, 400 with `after` ("Events") |
 | `GET /required` | | `Required[]` |
 | `PUT /required` | `Required[]` | `Required[]` (replaces the list; `admin`) |
 | `GET /shares` | | `Share[]` newest first |
@@ -5798,6 +6006,7 @@ type Environment = {
   branches?: Branch[]; // an ephemeral one's branched resources (absent: none)
 };
 type Branch = { kind: string; parent: string }; // a resource a preview branched: links to it aren't followed
+type Linked = { name: string; kind: string; ref: string }; // a linked key and what it links (Values.links)
 type Followed = { name: string; kind: string; parent: string; field: string }; // a key left out for roll previews to set from its branch
 type Ensure = Omit<NewEnvironment, "slug"> & { replace?: boolean }; // PUT /environments/{env}; branches: replaces the list, absent keeps it
 type NewEnvironment = {
@@ -5832,8 +6041,9 @@ type Change = { seq: number; environment: string; path: string; message: string;
 type ChangeDetail = Change & { items: Item[]; state?: { key: string; path: string; version: number; fp: string; comment: string; tags: string[]; link: Link | null; at: number }[] };
 // what: added | changed | deleted | comment | tags | link | rotated
 type Version = { version: number; seq: number; op: "set" | "delete"; what: string[]; purged: boolean; fp: string | null; comment: string; tags: string[]; link: Link | null; at: number; by: string };
-type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[]; plain?: string[]; withheld: string[]; sensitive: string[]; followed: Followed[]; placeholders?: Placeholder[] }; // placeholders: keys bound to hosts answered as rlph_… in values (a resolve that asked); plain: of linked, keys whose link field isn't a credential (a host, a port), which a consumer hiding secret values in logs may show (every other value is a secret); followed: keys linked to what the ephemeral environment's preview branched, not in values; leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
-type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[]; plain?: string[]; followed: Followed[]; digest?: string }; // plain: as above; digest (with ?digest=1, not with seq or at): the folder's `…/digest`, taken just before this read; leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
+type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[]; links?: Linked[]; plain?: string[]; withheld: string[]; sensitive: string[]; followed: Followed[]; placeholders?: Placeholder[] }; // links: linked's keys with what each links, {name, kind, ref} (the provider's resource kind and the resource; names only), so a consumer that replaces some resources with its own (roll apps' environments with data of their own) leaves out only the keys reaching those; placeholders: keys bound to hosts answered as rlph_… in values (a resolve that asked); plain: of linked, keys whose link field isn't a credential (a host, a port), which a consumer hiding secret values in logs may show (every other value is a secret); followed: keys linked to what the ephemeral environment's preview branched, not in values; leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
+type ValuesDelta = Values & { delta: boolean; digest: string; basis?: string; removed: string[]; stamps: Record<string, string> }; // delta: only the keys changed since the answer held are in values (and their stamps in stamps), removed the names it no longer answers, every list the folder's whole; not delta: the full set, every key's stamp; basis (sent back with the next claim) absent when the stamps couldn't be worked out
+type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[]; links?: Linked[]; plain?: string[]; followed: Followed[]; digest?: string }; // plain, links: as above; digest (with ?digest=1, not with seq or at): the folder's `…/digest`, taken just before this read; leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
 type Grid = { path: string; environments: string[]; rows: { key: string; cells: Record<string, Cell | null>; status: "same" | "different" | "missing"; required: boolean }[]; folders: string[]; previews: number };
 type Reach = { environment: string; path: string; key: string | null; protected: boolean; untrusted: boolean; tokens: Holder[]; identities: Holder[]; syncs: { id: string; kind: string; target: unknown; last_synced_at: number | null }[]; placeholders: { id: string; key: string; consumer: string; maker: string | null; through: string; expires_at: number }[]; projects: string[]; imported_by: string[]; truncated: boolean; readers: { actor: string; last_at: number; reads: number }[]; uncounted: string }; // untrusted: checks, sandboxes and previews may read it (not protected)
 type Holder = { id: string; name: string; actions: Action[]; expires_at: number | null; last_used_at: number | null; created_by: string };
@@ -5844,7 +6054,7 @@ type ProjectFindings = { project: string; project_name: string; findings: Findin
 type Finding = { issue: "decoy_used" | "production_unprotected" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "unplaced" | "operator_made" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string; decoy?: Decoy }; // decoy: on decoy_used only (an admin's session's or the operator's), the key's Decoy
 type Rotation = { environment: string; path: string; keys: string[]; kind: string; ref: string; name: string; rotate_days: number | null; rotate_window: string | null; grace_minutes: number; issued_at: number | null; next_due: number | null; last_error: string | null; failed_at: number | null };
 type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
-type SaasRotator = { id: string; name: string; vendor: "sendgrid" | "twilio" | "okta" | "entra" | "auth0"; target: Record<string, unknown>; created_at: number; created_by: string };
+type SaasRotator = { id: string; name: string; vendor: "sendgrid" | "twilio" | "okta" | "entra" | "auth0" | "gitlab" | "openai" | "datadog" | "cloudflare" | "databricks" | "confluent"; target: Record<string, unknown>; created_at: number; created_by: string };
 type KubernetesCluster = { id: string; name: string; api_url: string; has_ca: boolean; created_at: number; created_by: string };
 type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
 type NewValueRequest = { keys: string[]; note?: string; ttl_minutes?: number /* 5–43200, default 10080 */; answers?: number /* 1–10, default 1 */ };
@@ -5945,6 +6155,7 @@ and `product`. Numbers only: never a value, a key's name or a project.
 | `SecretsSyncsPushed`, `SecretsSyncFailures` | Sync pushes that worked and that failed |
 | `SecretsRotations`, `SecretsRotationFailures` | Scheduled rotations that worked and that failed |
 | `SecretsKmsRefusals` | A customer's KMS refusing to open a project's data key |
+| `SecretsMemberRechecks` | Projects checked again because a member lost rights there (removed, demoted, offboarded): an offboarding checks only the projects holding what the person made and their memberships' |
 | `SecretsLeasesLive`, `SecretsSyncsFailing`, `SecretsRotationsFailing` | Gauges: leases not ended, syncs whose last push failed, credentials whose last rotation failed |
 
 Each node counts what it did, so sum the counters across nodes. The gauges read the store every
@@ -6038,7 +6249,8 @@ ran on about 4.7 of the 12 cores: a digest is computed inside a database read, a
 readers or 4 Postgres connections bound it. Now it is one computation per node and answer set.
 What's left is each identity's read of its own values (182–233 ms each across all runs; the read
 didn't change, and the after runs ran under lower load), on 5.5–7 cores: it is bound by the same
-4 connections, and it is per reader by design.
+4 connections, and it is per reader by design. A watcher's read after a change is now a delta of
+7–18 ms ("Delta reads").
 
 `tests/nodes.rs` (`a_digest_one_node_keeps_moves_at_once_with_what_another_node_changes`) keeps
 a digest on one node and changes things on another: a write, an import, a write to the imported
@@ -6049,6 +6261,73 @@ still covers 304s, and a product changing its own password.
 
 Every lookup by key inside a request is a hash map (a grid of ~11k keys over 5 environments took
 3.07 s before that, 0.43 s after, on a debug build).
+
+### Delta reads
+
+After one key changes, each watcher used to read the whole folder again: at 1,000 pods on a
+9,900-key folder that was the 137–213 CPU-seconds above, per change. A watcher (`roll run
+--watch`, every runtime client's watch and cache) now keeps its last answer with each key's **stamp** and,
+when the digest moves, asks `POST …/values/delta` for what changed since it, sending back the
+digest, the basis and the stamps it holds.
+
+- **A stamp per key, from rows.** A digest's computation (once per node and answer set, as above)
+  also works out each key's stamp: a hash of its line in the digest (row id, version, source
+  environment, link, a live link's generation and keyed value fingerprint) and, in order, each of
+  its references' stamps or why one reaches nothing (no access, nothing there). Every write moves
+  a key's version, so a stamp moves whenever the value a read answers for the key would. It's
+  never derived from a stored value. A node keeps at most 2,000,000 keys' stamps; past that a
+  digest keeps none.
+- **The client says what it holds.** The server remembers no watcher's state. It compares the
+  claimed stamps with its own in memory, then reads, decrypts and resolves only the keys whose
+  stamp differs (each by key, a few indexed rows, references by key too; the folder once past 64)
+  and every live link's (read again, as a full read would). Names the client holds that the folder
+  no longer answers come back in `removed`. The claim is checked for shape (keys that are keys,
+  16-hex stamps) and bounded by its bytes (4 MiB). A claimed stamp only ever withholds a value
+  from its own caller.
+- **The full set whenever it isn't provably exact.** The **basis** is what the answer depends on
+  beyond the rows: every permission the digest asked and freeze it read past, with their answers
+  (an import's or a base's environment, a reference's folder as reading and as revealing),
+  whose own values it holds, whether the caller is untrusted or a runtime, the folder's required
+  and typed keys, and the freezes of the project and what it imports. A different basis gets the
+  full set. So does a folder whose stamps couldn't be worked out: a followed key (a preview's
+  branched resource), a reference cycle or a chain past 8, a referenced folder whose import a
+  caller may read but not reveal, anything that failed to read. A folder holding a dynamic
+  credential gets the full set, so a read still issues a fresh one as before (with
+  `dynamic=false` such keys are left out and named, as in `…/values`). A client holding an answer
+  with problems sends nothing, and gets the full set.
+- **Audited as reads.** A delta is `secrets.export` by the caller, naming only the keys it
+  returned; a claim that matches the folder as it is (nothing changed) writes the one
+  `secrets.revalidate` row a day a 304 does. It counts against the read quota as a read.
+  Untrusted callers read as they do for `…/values` (no protected environment).
+
+Where a full read's time went, one identity at a time on the bench's folder (main at `5c35bb7cb`,
+release, wall per identity, SQLite / Postgres): reading the folder's rows 60 / 56 ms; decrypting and
+resolving 9,900 values 102 / 101 ms, which includes reading the folder a second time for its
+references; problems for required and typed keys 36 / 30 ms; the audit row naming 9,900 keys
+20 / 4 ms; and over HTTP, the JSON 11 / 8 ms. Every part grows with the folder, so a delta touches
+only the keys that changed.
+
+The stampede bench (above) now also has every identity hold its answer's stamps and, after the
+change, times each one's delta read (it gets the changed key and the one that references it).
+Measured 2026-11-22 on ai-server as above (pinned to 12 CPUs, the database on 6 others, rolld's 4
+connections on Postgres), three rounds of main and this change alternated, SQLite and Postgres,
+under load averages of 44 to 90. Medians for 1,000 identities, CPU-seconds of rolld plus the
+database, wall in brackets; no run had an error.
+
+| | each identity's full read (main) | each identity's delta read |
+| --- | --- | --- |
+| SQLite | 216 s (58 s) | 7.7 s (1.3 s) |
+| Postgres | 158 + 56 s (41 s) | 11.2 + 3.7 s (3.7 s) |
+
+That's 205–219 ms of CPU per identity down to 7–18 ms, across all runs. The first digest after the
+change, which now also works out the stamps, cost the same as before: 0.3 s on SQLite and 0.6–0.8
++ 0.9–1.0 s on Postgres, for all 1,000.
+
+`a_watchers_delta_returns_what_changed_and_is_audited` and
+`a_permission_change_since_the_answer_held_gets_the_full_set` (`tests/api.rs`) and
+`roll_run_watch_reads_a_change_through_a_delta` (`roll-cli/tests/secrets.rs`) cover it, and each
+runtime client has a watch test against its own fake rolld that reads a one-key change through the
+route and falls back to a full read on a 404 (an older rolld).
 
 ### Large changes
 
@@ -6113,6 +6392,56 @@ adds roll-access's grant lookup or the accounts' and workspace's.
 
 ## Next
 
+**State, 2026-11-23 16:50.** The thirty-fifth review is done: item 6B (#763, 5583dfbfd; `Reference::parse` moved into `crates/roll-secrets-ref`, so agent-proto, the `roll` binary and the gateway don't link roll-secrets) and 6C (#794, dbb4d65af; a refused upstream key fails closed without trying another key of that provider) landed. Also #778, the 05:20 entry below.
+
+The thirty-sixth product review (2026-11-23, cold, read only, against 5430a1b0d) found no live security bug. Its top items were seams where the night's fixes meet each other:
+1. A sandbox stopped on any broken key in its folder, not just the ones it copies.
+2. An environment's delete warning didn't name the services, sandboxes, syncs, identities and tokens that read it.
+3. The events feed had no value changes.
+4. Reach unsealed every roll apps variable to find references.
+5. The CLI didn't follow #720.
+6. `roll secrets agent` kept serving after a 403.
+7. An environment delete revoked credentials before deciding.
+8. Offboarding walked every project.
+9. Five SaaS rotators against AWS's twenty.
+
+Landed since, each with main's CI green and most after a check of the merged tree:
+- #796 (cd59a6cc8): items 1 and 6. A sandbox fails only the keys it copies; a deleted environment in its window is "unsure", so a recovery brings values back. The local agent drops a refused folder at once.
+- #793 (1815bac01): item 3. `secret.changed`, `secret.deleted`, `rotation.succeeded` and `access.changed`, each in the change's own audit row.
+- #798 (ccd0fcdbd): items 2, 5 and 7. The deletion preview names every reader and any break needs `confirm`. `envs rm` previews and says what happened, and `envs recover` exists. The delete decides in one write, then revokes.
+- #816 (efafbcac6): items 4 and 8. roll apps keeps a `reference` column, so reach opens no value. Offboarding reads only the person's rows (`SecretsMemberRechecks`).
+- #819 (3dd33c1d5): item 9, part 1. GitLab (create, then revoke), OpenAI project service accounts and Datadog keys.
+- #800 (e9d6e59b5) and #803 (d40c853b1): delta reads in the operator, CSI provider and Lambda extension, and in the Python, Java, .NET and Ruby clients. All six SDKs and the Go consumers now read only what changed.
+- #813 (8b2470590): roll workspace's project events feed (members, groups, invites) for roll MCP's `workspace.event`. It uses the same cursor rule as secrets' feed.
+
+In flight:
+- item 9, part 2 (Cloudflare, Databricks, Confluent);
+- a test that a fresh project's developer can't reveal production (the thirty-fifth's last gap).
+
+Left from the thirty-sixth:
+- item 10 (time-boxed access for people) and item 13 (the root of trust beyond AWS KMS) are the user's call;
+- item 12 (search's clear passwords without `ROLL_SECRET_KEY`) is roll search's, raised with them;
+- `Watch` with a consumer still reads `/resolve` whole, because there's no delta route there.
+
+**State, 2026-11-23 05:20.** Landed since 19:25, each with main's CI green (most after a check of the merged tree, since main moved about ten commits an hour and the merge queue's CI runs only `cargo test --lib`):
+- #720 (fcafbf9fc): item 2, an environment's delete is kept for the recovery window, and a protected one's is a change request.
+- #732 (de8f381a4): the events feed (`GET …/projects/{project}/events`), roll MCP's `secrets.event`.
+- #743 (b19e0e201): agent-host's `pi_compaction` passes in the shared gate set (item 10).
+- #744 (6010d6093): item 7, linked fields carry `{kind, ref}`. roll apps' branch environments drop only links to what they branch.
+- #762 (aafd32f2f): item 8, `roll secrets agent`, the Lambda extension's surface on any machine (127.0.0.1, `X-Roll-Token`, digest-followed cache).
+- #772 (296e5064e): item 10, the agents end-to-end run starts rolld on port 0 and reads `--addr-file`.
+- #754 (2bb91aff8): delta reads for watchers. After a one-key change at 1,000 watchers on a 9,900-key folder, 216 → 7.7 CPU-s on SQLite and 214 → 15 on Postgres.
+- #681 (90dd155df): members v1.1 phase 1, groups and SCIM Groups.
+
+In flight:
+- item 6B, an agents endpoint's key as a `roll://` reference (#763). `Reference::parse` moves into `crates/roll-secrets-ref`, so agent-proto doesn't link roll-secrets.
+- the thirty-sixth product review (cold, read only).
+
+Next after those:
+- **Item 6C** (the model gateway's upstreams as `roll://`, on #763's ref crate).
+- **Delta reads for the rest** (S each): the Kubernetes operator, the CSI provider and the Lambda extension don't use `Watch`, so they still read whole folders. `Watch` with a consumer goes through `/resolve`. The server's full-set fallback keeps all of them working.
+- **Gate flakes under load** (another product's tests, seen on every secrets gate tonight at loads of 55–93): roll-cluster's Postgres lease and routing tests, code-control's `the_merge_queue_continues_a_dead_owners_batch` and `an_idle_sandbox_sleeps_and_a_command_wakes_it`. Each passes alone. They're roll code's and roll-cluster's tests, so they aren't fixed here.
+
 **State, 2026-11-22 19:25.** Landed since 07:55, each with main's CI green:
 - #665 (57deeb0d1): a placeholder swaps only for its own consumer; references never smuggle a bound key's value; fallbacks skip bound keys before decrypting.
 - #697 (a74036a64): item 4, an offboarded person's leases, shares and sandboxes end with them.
@@ -6133,7 +6462,7 @@ In flight:
 - agent-host's `pi_compaction` in the shared gate set (item 10).
 
 New since the ranking:
-- **Delta reads for watchers** (performance, M). After a change each pod still reads all its values: about 190 CPU-s per change at 1,000 pods, bound by the database connections. A watcher holding digest X asks for what changed since X and gets only the changed keys.
+- **Delta reads for watchers** (performance, M; building in `feature/secrets-delta-reads`). After a change each pod still reads all its values: about 190 CPU-s per change at 1,000 pods, bound by the database connections. A watcher holding digest X asks for what changed since X and gets only the changed keys ("Delta reads").
 - **Item 6, parts B and C** (agents' endpoints and the model gateway's upstreams as `roll://`): a relay-side maker table, an `agent:<machine>` resource, the value sealed to the daemon after each `hello`, `EndpointSpec::check` taking `roll://`.
 
 **State, 2026-11-22 07:55.** The thirty-fifth review's ranking below still stands. Since it:
@@ -6199,17 +6528,13 @@ Newest entries first; older State and Ranked entries follow further down, as his
    or a disable stops the copier's running sandboxes (#697).
 6. **roll's own AI and chat credentials can't be `roll://` references** (integration, M):
    - reviewer provider keys (code-control's own table): **done**, `bind_ref` for `code:review:<owner>`;
-   - agents' endpoints (pasted or `op://`);
-   - the model gateway's upstreams (`env:`/file).
+   - agents' endpoints (pasted or `op://`): **done**, `bind_ref` for `agent:<machine>`, sent sealed
+     by the relay (`endpoint.key`);
+   - the model gateway's upstreams (`env:`/file): **done**, `agent:<machine>`, sent as `gateway.upstream_key`.
 
    A leaked model key, the commonest leak, gets no reach, health, validity check or rotation.
    Bind with `bind_ref` and read with `resolve_as`. The daemon resolves over its machine link.
-   Left for the endpoints and upstreams: the relay binds a `roll://` `key_ref` at `endpoint.set`
-   (and `gateway.key`) to the sender, for `agent:<machine>` (a `ResourceRef` like
-   `code_owner`'s, through the machine owner's project), keeps the maker in its own table, and
-   after each `hello` sends the value sealed to the daemon's `seal_key` (`open_with`'s context
-   names the endpoint); the daemon keeps it in memory, as `op://`. `EndpointSpec::check` then
-   takes `roll://` too (fixtures, `agents-api.ts`).
+   All three are done (#733, #763, and this item's part C).
 7. **apps' environments with their own data drop every linked key** (S). `Values.linked` gains
    `{name, kind, ref}`, so apps drops only what it branched.
 8. **A local agent outside Lambda** (S–M): the Lambda extension's surface as a sidecar.
@@ -6551,7 +6876,8 @@ Other threads, from the #603 review: roll apps' renewal and restart fixes (H1–
   - search: `fix/search-security-1120` and #318;
   - roll code: done, #627 (4af6bb3b5). Webhooks' and review apps' URLs are sealed, nothing is made
     without `ROLL_SECRET_KEY`, and an upgraded database keeps no clear URL or secret.
-- **Item 6: designed**, in [members-v1-1.md](members-v1-1.md) (docs only, not built). Groups hold
+- **Item 6: phase 1 built** (groups and SCIM `Groups`, D10–D12 and D18 as option (a)); elevation is
+  still designed only, in [members-v1-1.md](members-v1-1.md). Groups hold
   viewer, developer or admin roles on projects (never owner), and roles add up, read in one query
   with the session grant. SCIM `Groups` is opt-in per connection. A member's time-boxed elevation is
   a roll-access `ELEVATE` approval with the two-person rule. It lapses at `until` with nothing to

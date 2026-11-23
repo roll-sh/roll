@@ -17,6 +17,7 @@ pub mod datasources;
 pub mod exec;
 pub mod fulltext;
 pub mod functions;
+pub mod memory;
 pub mod parser;
 pub mod profile;
 pub mod promql;
@@ -295,9 +296,10 @@ fn body_time_zone(ctx: &Ctx, m: &Map) -> EsResult<Option<String>> {
     }
 }
 
-/// Runs a request: the JSON response and the table (for text formats). A linked remote's part
+/// Runs a request: the JSON response and the table (for text formats), both charged to `mem`
+/// until it drops (after the response is rendered). A linked remote's part
 /// ([`ccs::requested`]) runs as one and answers its result for the coordinating cluster.
-async fn run(ctx: &Ctx<'_>, req: &Request, body: &Value, part: Option<std::sync::Arc<ccs::Part>>) -> EsResult<(Map, exec::Table)> {
+async fn run(ctx: &Ctx<'_>, req: &Request, body: &Value, part: Option<std::sync::Arc<ccs::Part>>, mem: &memory::Memory) -> EsResult<(Map, exec::Table)> {
     // A remote's part runs only what it is, as this cluster parses it ([`ccs::admit_part`]): its
     // shape, its `ENRICH`es' `monitor_enrich` here (the `remote_cluster` privilege the link
     // carries) and their policies.
@@ -323,7 +325,7 @@ async fn run(ctx: &Ctx<'_>, req: &Request, body: &Value, part: Option<std::sync:
     };
     let remotes = if part.is_some() { None } else { ccs::Ccs::of(ctx, body, &req.params) };
     let is_part = part.clone();
-    let (mut out, table, stats) = ccs::part_scope(part, ccs::scope(remotes, run_query(ctx, req))).await?;
+    let (mut out, table, stats) = ccs::part_scope(part, ccs::scope(remotes, run_query(ctx, req, mem))).await?;
     if let Some(p) = is_part {
         // Defensive: `admit_part` runs only `STATS` parts the executor answers with states;
         // one that didn't would be read as no groups, so it's an error, never empty.
@@ -354,7 +356,7 @@ async fn run(ctx: &Ctx<'_>, req: &Request, body: &Value, part: Option<std::sync:
     Ok((out, table))
 }
 
-async fn run_query(ctx: &Ctx<'_>, req: &Request) -> EsResult<(Map, exec::Table, exec::Stats)> {
+async fn run_query(ctx: &Ctx<'_>, req: &Request, mem: &memory::Memory) -> EsResult<(Map, exec::Table, exec::Stats)> {
     let started = std::time::Instant::now();
     let start_ms = ctx.now_ms;
     let kibana = ctx.request.header("x-elastic-product-origin").is_some_and(|o| o.eq_ignore_ascii_case("kibana"));
@@ -385,7 +387,7 @@ async fn run_query(ctx: &Ctx<'_>, req: &Request) -> EsResult<(Map, exec::Table, 
     let used = telemetry::Used::of(&q, &ctx.state());
     let column_metadata = q.settings.column_metadata;
     let approximation = q.settings.approximation || req.approximation;
-    let result = exec::execute(ctx.cluster, q, req.filter.clone(), &mut w).await;
+    let result = exec::execute(ctx.cluster, q, req.filter.clone(), &mut w, mem).await;
     telemetry.record(kibana, Some(&used), result.is_err(), started.elapsed().as_millis() as i64);
     // Warnings recorded before a failure (the implicit limit's, added while analyzing) go out
     // with the error, as Elasticsearch's do.
@@ -457,6 +459,8 @@ async fn run_query(ctx: &Ctx<'_>, req: &Request) -> EsResult<(Map, exec::Table, 
         union_types(all, &stats.original_types);
     }
     out.insert("columns".into(), columns);
+    // Charged before it is built; it stays charged until the response is rendered.
+    mem.hold(memory::json_estimate(&table), memory::REUSED_ARRAYS)?.keep();
     out.insert("values".into(), exec::values_json_in(&table, req.columnar, tz.as_ref()));
     if req.profile {
         out.insert("profile".into(), profile::build(ctx.cluster, start_ms, took.as_nanos() as i64, unmapped, &shape, &stats, &table));
@@ -492,7 +496,7 @@ fn union_types(columns: &mut Value, original: &[(String, Vec<String>)]) {
 }
 
 /// The response in the requested format (`txt`, `csv`, `tsv` are rendered here).
-fn reply(ctx: &Ctx, out: Map, table: &exec::Table) -> EsResult<Reply> {
+fn reply(ctx: &Ctx, out: Map, table: &exec::Table, mem: &memory::Memory) -> EsResult<Reply> {
     let format = ctx.query("format").map(str::to_ascii_lowercase).or_else(|| {
         ctx.request.header("accept").and_then(|a| {
             let a = a.to_ascii_lowercase();
@@ -513,6 +517,8 @@ fn reply(ctx: &Ctx, out: Map, table: &exec::Table) -> EsResult<Reply> {
             if f != "csv" && ctx.query("delimiter").is_some() {
                 return Err(EsError::illegal_argument(format!("parameter: [delimiter] can only be used with the format [csv] for request [{}]", ctx.path)));
             }
+            // The cells and the body, charged before they are built.
+            mem.hold(memory::text_estimate(table), memory::REUSED_ARRAYS)?.keep();
             let names: Vec<String> = table.cols.iter().map(|c| c.name.clone()).collect();
             let rows: Vec<Vec<String>> = table.rows.iter().map(|r| r.iter().enumerate().map(|(i, v)| exec::cell_text(v, table.cols[i].ty, f)).collect()).collect();
             let header = !(f == "csv" && ctx.query("header") == Some("absent"));
@@ -533,8 +539,9 @@ pub async fn query(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let mut body = ctx.body()?.unwrap_or_else(Value::object);
     let part = ccs::requested(ctx, &mut body)?;
     let req = parse_request(ctx, &body, false)?;
-    let (out, table) = run(ctx, &req, &body, part).await?;
-    reply(ctx, out, &table)
+    let mem = memory::Memory::for_query(ctx.cluster);
+    let (out, table) = run(ctx, &req, &body, part, &mem).await?;
+    reply(ctx, out, &table, &mem)
 }
 
 fn with_id(id: &str, running: bool, out: &Map) -> Value {
@@ -550,21 +557,27 @@ fn with_id(id: &str, running: bool, out: &Map) -> Value {
 pub async fn async_query(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let body = ctx.body()?.unwrap_or_else(Value::object);
     let req = parse_request(ctx, &body, true)?;
-    let (out, table) = run(ctx, &req, &body, None).await?;
+    let mem = memory::Memory::for_query(ctx.cluster);
+    let (out, table) = run(ctx, &req, &body, None, &mem).await?;
     // Every query completes before answering; it is kept only when asked to be.
     if !req.keep_on_completion {
         let mut m = Map::with_capacity(out.len() + 1);
         m.insert("is_running".into(), false.into());
         m.extend(out);
-        return reply(ctx, m, &table);
+        return reply(ctx, m, &table, &mem);
     }
     let id = async_results::async_id(&ctx.cluster.node.id);
     ctx.cluster.xpack.results.put(
         id.clone(),
         Entry { kind: Kind::Esql, response: Value::Obj(out.clone()), start_ms: ctx.now_ms, expiration_ms: ctx.now_ms + req.keep_alive, bytes: 0, extra: Value::Null, owner: crate::xpack::async_results::owner(ctx) },
         ctx.now_ms,
-    );
-    Reply::ok(with_id(&id, false, &out))
+    )?;
+    // The stored copy is the store's (charged there); `out` moves into the reply.
+    let mut m = Map::with_capacity(out.len() + 2);
+    m.insert("id".into(), id.into());
+    m.insert("is_running".into(), false.into());
+    m.extend(out);
+    Reply::ok(Value::Obj(m))
 }
 
 fn not_found(id: &str) -> EsError {
@@ -575,7 +588,7 @@ pub fn async_get(ctx: &Ctx) -> EsResult<Reply> {
     let id = ctx.path_param("id").unwrap_or_default();
     // An id that doesn't decode is a bad request, before any lookup.
     async_results::check_id(id)?;
-    let Some(e) = crate::xpack::async_results::get_own(ctx, id, Kind::Esql) else { return Err(not_found(id)) };
+    let Some(e) = crate::xpack::async_results::get_own(ctx, id, Kind::Esql)? else { return Err(not_found(id)) };
     if let Some(k) = ctx.query("keep_alive") {
         let ms = crate::units::TimeValue::parse(k, "keep_alive")?.as_millis();
         ctx.cluster.xpack.results.touch(id, ctx.now_ms + ms);

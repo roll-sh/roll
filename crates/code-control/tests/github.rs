@@ -715,6 +715,8 @@ async fn connect_import_webhooks_and_mirror() {
             screenshot_url: None,
             expires_at: None,
             earlier: Vec::new(),
+            browser_checks: Vec::new(),
+            browser_checks_rule: None,
             visual_change: None,
             page_speed: None,
             page_health: None,

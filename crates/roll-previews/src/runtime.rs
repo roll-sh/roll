@@ -1124,6 +1124,28 @@ impl Runtime {
         if feedback { add_feedback(resp) } else { resp }
     }
 
+    /// Skew protection (`roll.toml` `skew_protection`; Vercel's): a request a page loaded before a
+    /// push makes, naming the push that served it, goes to that push's own service (`web@<rev>`,
+    /// as its own URL would, past the same gate), while it's kept and for a day after it was
+    /// replaced. A page load always gets the current push, and a cookie naming it, so a reload
+    /// moves a visitor on. The cookie is roll's: the app never sees it.
+    fn skew(&self, preview: &str, service: String, req: &mut Request) -> (String, Option<String>) {
+        let cookie = take_cookies(req, SKEW_COOKIE).pop();
+        if service.contains('@') {
+            return (service, None);
+        }
+        let page = req.method() == axum::http::Method::GET && is_page_load(req);
+        let asked = if page { None } else { skew_asked(req, cookie) };
+        if !page && asked.is_none() {
+            return (service, None);
+        }
+        match self.store.skew(preview, &service, asked.as_deref()) {
+            Ok(Some((current, _))) if page => (service, Some(current)),
+            Ok(Some((_, true))) => (format!("{service}@{}", asked.unwrap_or_default()), None),
+            _ => (service, None),
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn pretend_running(&self, preview: &str, service: &str, addr: SocketAddr) {
         let live = self.live(preview, service);
@@ -1227,6 +1249,53 @@ pub const SCREENSHOT_MAX: usize = 2 << 20;
 /// pages'), each at most this, and everything it writes: every PNG it can take, in base64, and
 /// those lines.
 const SHOT_REPORT_MAX: usize = 4 << 20;
+/// A story's PNG, at most (one clipped to what it renders).
+const STORY_MAX: usize = 256 << 10;
+/// A stories run's output: its report, and its PNGs as base64.
+const STORIES_OUTPUT_MAX: usize = crate::settings::MAX_STORIES * STORY_MAX * 4 / 3 + (64 << 10);
+/// A stories run, at most (its own 100 s, and the browser's start).
+const STORIES_FOR: Duration = Duration::from_secs(150);
+
+/// `docker run` for a browser run in container `name`'s network (its page at
+/// `127.0.0.1:<port>`), locked down: the page is the preview's code.
+fn shot_args(shot: &str, name: &str, port: u16) -> Vec<String> {
+    let mut args: Vec<String> = vec!["run".into(), "--rm".into(), "-i".into(), "--name".into(), shot.to_string(), "--network".into(), format!("container:{name}")];
+    // Cleaned up with the runtime's own containers after a crash.
+    args.extend(["--label".into(), format!("{}=preview", code_preview::docker::LABEL)]);
+    if let Some(l) = code_preview::docker::home_label() {
+        args.extend(["--label".into(), l]);
+    }
+    // No capabilities, no new privileges, nothing written but /tmp.
+    args.extend(["--cap-drop".into(), "ALL".into(), "--security-opt".into(), "no-new-privileges".into(), "--read-only".into(), "--tmpfs".into(), "/tmp:rw,size=256m".into()]);
+    args.extend(code_preview::docker::limits(1024, 1.0));
+    args.extend(["--env".into(), format!("URL=http://127.0.0.1:{port}/"), "--env".into(), "OUT=/tmp/s.png".into(), "--env".into(), "HOME=/tmp".into()]);
+    args.extend(["--env".into(), format!("ROLL_SHOT_JS={SHOT_JS}")]);
+    args
+}
+
+/// What a stories run said (`[{id, errors}]`), and its PNGs a line each, in that order: each
+/// story once, by an id roll accepts, with a PNG of at most [`STORY_MAX`] bytes, at most
+/// [`crate::settings::MAX_STORIES`]. The run is the preview's code: nothing else is taken.
+fn story_shots<'a>(said: &str, pngs: impl Iterator<Item = &'a str>) -> Vec<crate::ports::PageShot> {
+    use base64::Engine as _;
+    #[derive(serde::Deserialize)]
+    struct Said {
+        id: String,
+        #[serde(default)]
+        errors: u32,
+    }
+    let said: Vec<Said> = serde_json::from_str(said.trim()).unwrap_or_default();
+    let mut out: Vec<crate::ports::PageShot> = Vec::new();
+    for (s, b64) in said.into_iter().zip(pngs).take(crate::settings::MAX_STORIES) {
+        let path = format!("story:{}", s.id);
+        let Ok(png) = base64::engine::general_purpose::STANDARD.decode(b64.trim()) else { continue };
+        if !crate::settings::story_id_ok(&s.id) || !png.starts_with(b"\x89PNG") || png.len() > STORY_MAX || out.iter().any(|p| p.path == path) {
+            continue;
+        }
+        out.push(crate::ports::PageShot { path, png, errors: s.errors.min(10_000), report: Default::default() });
+    }
+    out
+}
 const SHOT_OUTPUT_MAX: usize = (crate::settings::MAX_PAGES + 2) * SCREENSHOT_MAX * 4 / 3 + 3 * SHOT_REPORT_MAX + crate::store::CROPS_PER_RUN * crate::store::CROP_MAX * 4 / 3 + (64 << 10);
 
 /// The header automation sends a project's bypass secret in (docs/previews.md, "Safety").
@@ -1685,17 +1754,8 @@ impl Runtime {
             code_preview::docker::docker(&["pull", "--quiet", &self.cfg.screenshot_image]).await?;
         }
         let shot = format!("roll-previews-shot-{}", name.trim_start_matches("roll-previews-"));
-        let mut args: Vec<String> = vec!["run".into(), "--rm".into(), "-i".into(), "--name".into(), shot.clone(), "--network".into(), format!("container:{name}")];
-        // Cleaned up with the runtime's own containers after a crash.
-        args.extend(["--label".into(), format!("{}=preview", code_preview::docker::LABEL)]);
-        if let Some(l) = code_preview::docker::home_label() {
-            args.extend(["--label".into(), l]);
-        }
-        // The page is the preview's code: no capabilities, no new privileges, nothing written but /tmp.
-        args.extend(["--cap-drop".into(), "ALL".into(), "--security-opt".into(), "no-new-privileges".into(), "--read-only".into(), "--tmpfs".into(), "/tmp:rw,size=256m".into()]);
-        args.extend(code_preview::docker::limits(1024, 1.0));
-        args.extend(["--env".into(), format!("URL=http://127.0.0.1:{port}/"), "--env".into(), "OUT=/tmp/s.png".into(), "--env".into(), "HOME=/tmp".into()]);
-        args.extend(["--env".into(), format!("ROLL_SHOT_JS={SHOT_JS}"), "--env".into(), "AXE=/tmp/axe.js".into()]);
+        let mut args = shot_args(&shot, name, port);
+        args.extend(["--env".into(), "AXE=/tmp/axe.js".into()]);
         let pages: Vec<&String> = opts
             .pages
             .iter()
@@ -1761,7 +1821,14 @@ impl Runtime {
             let r = if opts.browsers.is_empty() { None } else { Some(self.other_browsers(name, port, opts).await) };
             (r, started.elapsed().as_millis() as u64)
         };
-        let (run, (more, browsers_ms)) = tokio::join!(tokio::time::timeout(within, docker_with_input(&argv, AXE_JS.as_bytes(), SHOT_OUTPUT_MAX)), browsers_run);
+        // Its Storybook's stories, in a run of their own alongside (`github.storybook`).
+        let stories_run = async {
+            match opts.stories.as_deref().filter(|p| crate::settings::page_path_ok(p) && p.ends_with('/')) {
+                Some(at) => Some(self.stories_in(name, port, at).await),
+                None => None,
+            }
+        };
+        let (run, (more, browsers_ms), stories) = tokio::join!(tokio::time::timeout(within, docker_with_input(&argv, AXE_JS.as_bytes(), SHOT_OUTPUT_MAX)), browsers_run, stories_run);
         let out = match run {
             Ok(Ok(out)) => out,
             // Its container outlives a docker CLI that gave up on it (too much output).
@@ -1807,9 +1874,49 @@ impl Runtime {
             Some(Err(e)) => tracing::warn!(container = name, error = %e, "previews: other browsers' screenshots"),
             None => {}
         }
+        // The stories, best effort too.
+        match stories {
+            Some(Ok(s)) => shot.pages.extend(s),
+            Some(Err(e)) => tracing::warn!(container = name, error = %e, "previews: Storybook's stories"),
+            None => {}
+        }
         // How long it took, and the other browsers' run within it.
         tracing::info!(container = name, pages = pages.len(), run_ms = chromium.elapsed().as_millis() as u64, browsers_ms, "previews: screenshot run");
         Ok(shot)
+    }
+
+    /// A service's Storybook stories (`github.storybook`; Chromatic's stories), served at `at`: a
+    /// run of their own in its network, locked down as the screenshot's is, each story a page
+    /// (`story:<id>`).
+    async fn stories_in(&self, name: &str, port: u16, at: &str) -> anyhow::Result<Vec<crate::ports::PageShot>> {
+        let shot = format!("roll-previews-story-{}", name.trim_start_matches("roll-previews-"));
+        let mut args = shot_args(&shot, name, port);
+        args.extend(["--env".into(), format!("STORIES={at}")]);
+        args.extend([
+            self.cfg.screenshot_image.clone(),
+            "sh".into(),
+            "-c".into(),
+            format!(
+                "{} >/dev/null 2>&1; (cat /tmp/s.png.stories.json 2>/dev/null || true) && for n in $(seq 0 {}); do echo; base64 -w0 /tmp/s.png.story.$n.png 2>/dev/null || true; done",
+                self.cfg.screenshot_command,
+                crate::settings::MAX_STORIES - 1
+            ),
+        ]);
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = match tokio::time::timeout(STORIES_FOR, docker_with_input(&argv, Vec::new(), STORIES_OUTPUT_MAX)).await {
+            Ok(Ok(out)) => out,
+            Ok(Err(e)) => {
+                code_preview::docker::remove(&shot).await;
+                return Err(e);
+            }
+            Err(_) => {
+                code_preview::docker::remove(&shot).await;
+                anyhow::bail!("its stories took over {} s", STORIES_FOR.as_secs());
+            }
+        };
+        let mut lines = out.split('\n');
+        let said = lines.next().filter(|l| l.len() <= SHOT_REPORT_MAX).unwrap_or("");
+        Ok(story_shots(said, lines))
     }
 
     /// The first page in the other browsers `opts.browsers` names (`browser:<name>` pages), in the
@@ -2248,7 +2355,8 @@ async fn serve(rt: Arc<Runtime>, preview: String, service: String, mut req: Requ
         return rt.feedback_notes(&preview, &path).await;
     }
     let feedback = target.is_some() && req.method() == axum::http::Method::GET && is_page_load(&req);
-    match rt.cluster.get().cloned() {
+    let (service, skew_cookie) = rt.skew(&preview, service, &mut req);
+    let resp = match rt.cluster.get().cloned() {
         Some(cluster) => {
             let rt2 = rt.clone();
             cluster
@@ -2260,7 +2368,33 @@ async fn serve(rt: Arc<Runtime>, preview: String, service: String, mut req: Requ
                 .await
         }
         None => rt.proxy(&preview, &service, req, feedback).await,
+    };
+    with_skew_cookie(resp, skew_cookie, rt.cfg.scheme == "https")
+}
+
+/// The cookie a skew-protected service's page load gets: the push that answered it.
+const SKEW_COOKIE: &str = "__roll_dpl";
+
+/// The push a request that isn't a page load names: `x-deployment-id`, a `dpl` query parameter,
+/// or the cookie its page load got (the app's `ROLL_DEPLOYMENT`, as roll apps').
+fn skew_asked(req: &Request, cookie: Option<String>) -> Option<String> {
+    let ok = |s: &str| (!s.is_empty() && s.len() <= 100 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')).then(|| s.to_string());
+    if let Some(d) = req.headers().get("x-deployment-id").and_then(|v| v.to_str().ok()) {
+        return ok(d);
     }
+    if let Some(q) = req.uri().query()
+        && let Some((_, d)) = url::form_urlencoded::parse(q.as_bytes()).find(|(k, _)| k == "dpl")
+    {
+        return ok(&d);
+    }
+    cookie.as_deref().and_then(ok)
+}
+
+fn with_skew_cookie(mut resp: Response, push: Option<String>, secure: bool) -> Response {
+    if let Some(v) = push.and_then(|p| HeaderValue::from_str(&format!("{SKEW_COOKIE}={p}; Path=/; HttpOnly; SameSite=Lax{}", if secure { "; Secure" } else { "" })).ok()) {
+        resp.headers_mut().append(header::SET_COOKIE, v);
+    }
+    resp
 }
 
 #[cfg(test)]
@@ -2437,6 +2571,81 @@ mod tests {
         assert!(gone.starts_with("HTTP/1.1 410") && gone.contains("http://web-pr1-shop.preview.test") && gone.contains("x-robots-tag: noindex"), "{gone}");
     }
 
+    /// Skew protection: a request naming an earlier push (its header, `?dpl=`, or the cookie its
+    /// page load got) reaches that push while it's kept and for a day after it was replaced; a
+    /// page load gets the current push and the cookie; off, nothing moves; the app never sees
+    /// roll's cookie.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_request_naming_an_earlier_push_goes_to_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&code_sql::Target::Sqlite(dir.path().join("p.db")), Default::default()).unwrap());
+        let new = crate::store::New {
+            project_id: "prj_1".into(),
+            key: "pr1".into(),
+            project_name: "shop".into(),
+            repo: "acme/web".into(),
+            change_id: Some("chg_1".into()),
+            branch: None,
+            number: Some(1),
+            title: "t".into(),
+            github_pr: Some(1),
+            head: "cs_3".into(),
+            trusted: true,
+            state: crate::State::Ready,
+            expires_at: None,
+            created_by: "roll".into(),
+        };
+        let (row, _) = store.create(&new).unwrap();
+        let url = |h: &str| format!("http://{h}.preview.test");
+        store.want_service(&row.id, "web", "acme/web", "cs_3", 512, &url).unwrap();
+        store.pin(&row.id, "web", "cs_1", &url).unwrap();
+        store.pin(&row.id, "web", "cs_2", &url).unwrap();
+        store.age_pinned(&row.id, "web", "cs_1", crate::store::SKEW_WINDOW_MS + 1).unwrap();
+        store.set_service_skew(&row.id, "web", true).unwrap();
+        store.put_settings("prj_1", &crate::Settings { access: crate::settings::Access::Public, ..Default::default() }).unwrap();
+        let rt = Runtime::new(RuntimeConfig { domain: "preview.test".into(), ..RuntimeConfig::default() }, Arc::new(code_preview::docker::Docker), Arc::new(NoTrees), store);
+        // Each push's container says which it is, and whether roll's cookie reached it.
+        for (service, said) in [("web", "cs_3"), ("web@cs_2", "cs_2"), ("web@cs_1", "cs_1")] {
+            let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            rt.pretend_running(&row.id, service, upstream.local_addr().unwrap());
+            tokio::spawn(async move {
+                loop {
+                    let Ok((mut s, _)) = upstream.accept().await else { return };
+                    tokio::spawn(async move {
+                        let mut buf = vec![0u8; 4096];
+                        let n = s.read(&mut buf).await.unwrap_or(0);
+                        let body = format!("{said}{}", if String::from_utf8_lossy(&buf[..n]).contains("__roll_dpl") { " and the cookie" } else { "" });
+                        let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await;
+                    });
+                }
+            });
+        }
+        let app = axum::Router::new().fallback(|| async { "api" }).layer(axum::middleware::from_fn_with_state(rt.clone(), route));
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        let get = |path: &str, headers: &str| {
+            let req = format!("GET {path} HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\n{headers}Connection: close\r\n\r\n");
+            async move {
+                let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+                s.write_all(req.as_bytes()).await.unwrap();
+                let mut out = String::new();
+                s.read_to_string(&mut out).await.unwrap();
+                out
+            }
+        };
+        assert!(get("/api", "Cookie: a=1; __roll_dpl=cs_2\r\n").await.ends_with("\r\n\r\ncs_2"), "the cookie, kept from the app");
+        assert!(get("/api", "x-deployment-id: cs_2\r\n").await.ends_with("\r\n\r\ncs_2"));
+        assert!(get("/assets/app.js?dpl=cs_2", "").await.ends_with("\r\n\r\ncs_2"));
+        assert!(get("/api", "x-deployment-id: cs_1\r\n").await.ends_with("\r\n\r\ncs_3"), "replaced over a day ago");
+        assert!(get("/api", "x-deployment-id: cs_9\r\n").await.ends_with("\r\n\r\ncs_3"), "never kept");
+        let page = get("/", "Sec-Fetch-Dest: document\r\nCookie: __roll_dpl=cs_2\r\n").await;
+        assert!(page.ends_with("\r\n\r\ncs_3") && page.contains("set-cookie: __roll_dpl=cs_3; Path=/; HttpOnly"), "a page load: the current push, {page}");
+        rt.store.set_service_skew(&row.id, "web", false).unwrap();
+        let off = get("/api", "x-deployment-id: cs_2\r\n").await;
+        assert!(off.ends_with("\r\n\r\ncs_3") && !get("/", "Sec-Fetch-Dest: document\r\n").await.contains("__roll_dpl"), "off: {off}");
+    }
+
     /// The tag goes in as the page streams: before `</body>` even when a chunk splits it, at the
     /// end of a page without one, and once.
     #[test]
@@ -2453,6 +2662,20 @@ mod tests {
         assert_eq!(run(r#"[{"path":"/pricing","errors":2},{"path":"/pricing"}]"#, &[&png, &png]), [pricing()], "once");
         assert_eq!(run(r#"[{"path":"/pricing","errors":99999}]"#, &[&png]), [("/pricing".to_string(), 10_000)], "bounded");
         assert_eq!(run("not json", &[&png]), []);
+    }
+
+    /// A stories run's report is the preview's code's: each story once, by an id Storybook would
+    /// make, with a PNG within the cap; anything else is dropped.
+    #[test]
+    fn a_stories_runs_pages_are_stories_it_can_name_each_once() {
+        use base64::Engine as _;
+        let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+        let (png, junk, big) = (b64(b"\x89PNG\r\n\x1a\n..."), b64(b"not a png"), b64(&[b"\x89PNG".as_slice(), &vec![0u8; STORY_MAX]].concat()));
+        let said = r#"[{"id":"button--primary","errors":2},{"id":"../x--y"},{"id":"button--primary"},{"id":"card--empty"},{"id":"card--big"},{"id":"card--full"}]"#;
+        let pngs = [&png, &png, &png, &junk, &big, &png];
+        let got: Vec<(String, u32)> = story_shots(said, pngs.iter().map(|s| s.as_str())).into_iter().map(|p| (p.path, p.errors)).collect();
+        assert_eq!(got, [("story:button--primary".to_string(), 2), ("story:card--full".to_string(), 0)]);
+        assert!(story_shots("not json", [png.as_str()].into_iter()).is_empty());
     }
 
     #[test]

@@ -881,8 +881,11 @@ impl HybridDigest {
         if self.merging.is_some() {
             return Ok(());
         }
-        let s = self.sorting.as_ref().map_or(0, |s| s.values.len() as i64);
-        if s.wrapping_add(size as i64) >= self.max_sorting_size {
+        // Unsigned and saturating: a weight near `u64::MAX` must switch to the merging digest,
+        // never wrap below the threshold and push that many values. A threshold that wrapped
+        // negative (a huge compression) switches at once, as Java's does.
+        let s = self.sorting.as_ref().map_or(0, |s| s.values.len() as u64);
+        if self.max_sorting_size <= 0 || s.saturating_add(size) >= self.max_sorting_size as u64 {
             let mut m = Box::new(MergingDigest::new(self.compression)?);
             if let Some(sorting) = self.sorting.take() {
                 for &v in &sorting.values {
@@ -938,6 +941,20 @@ impl TDigest {
         if high_accuracy { TDigest::Avl(Box::new(AvlTreeDigest::new(compression))) } else { TDigest::Hybrid(HybridDigest::new(compression)) }
     }
 
+    /// What the digest holds outside its own slot (its arrays' capacities).
+    pub fn heap_bytes(&self) -> usize {
+        let f = size_of::<f64>();
+        match self {
+            TDigest::Hybrid(h) => {
+                h.sorting.as_ref().map_or(0, |s| s.values.capacity() * f)
+                    + h.merging.as_ref().map_or(0, |m| {
+                        size_of::<MergingDigest>() + (m.weight.capacity() + m.mean.capacity() + m.temp_weight.capacity() + m.temp_mean.capacity()) * f + m.order.capacity() * size_of::<u32>()
+                    })
+            }
+            TDigest::Avl(a) => size_of::<AvlTreeDigest>() + a.means.capacity() * f + a.counts.capacity() * size_of::<u64>(),
+        }
+    }
+
     /// An empty digest of the same type and compression (`createUsingParamsFrom`).
     pub fn empty_like(&self) -> TDigest {
         match self {
@@ -963,6 +980,15 @@ impl TDigest {
             TDigest::Hybrid(h) => h.add(x, w),
             TDigest::Avl(a) => a.add(x, w),
         }
+    }
+
+    /// A digest of `compression` holding `centroids` (weights summing to `size`), built as
+    /// [`TDigest::merge`] adds another's: one reservation for the whole digest, so one past the
+    /// sorting digest's size goes straight to the merging digest.
+    pub fn from_centroids(compression: f64, size: u64, centroids: &[(f64, u64)]) -> Result<TDigest> {
+        let mut h = HybridDigest::new(compression);
+        h.add_centroids(size, centroids)?;
+        Ok(TDigest::Hybrid(h))
     }
 
     /// `add(TDigestState other)`.
@@ -1231,5 +1257,15 @@ mod tests {
         let mut r = JavaRandom::new(42);
         assert_eq!(r.next_int(100), 30);
         assert_eq!(r.next_double(), 0.05466526274716077);
+    }
+
+    /// A weight past `i64::MAX` (a histogram's count, a remote's centroid) switches to the
+    /// merging digest instead of wrapping below the threshold and pushing that many values.
+    #[test]
+    fn a_huge_weight_switches_to_the_merging_digest() {
+        let mut d = HybridDigest::new(1000.0);
+        d.add(1.0, 1).unwrap();
+        d.reserve(i64::MAX as u64).unwrap();
+        assert!(d.merging.is_some() && d.sorting.is_none());
     }
 }

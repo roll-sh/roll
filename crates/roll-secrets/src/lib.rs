@@ -97,7 +97,7 @@ pub use leaks::Leak;
 pub use found::{FoundStored, FoundTarget};
 pub use links::{Link, LinkProvider, Links, Mode, Planted};
 pub use metrics::Metrics;
-pub use read::{Followed, Grid, Problem, Secret, Source, Values, Version};
+pub use read::{Delta, Followed, Grid, Held, Linked, Problem, Secret, Source, Values, Version};
 pub use requests::{Request, RequestValue, Review, Verdict};
 pub use exports::Export;
 pub use decoys::{Decoy, NewDecoy};

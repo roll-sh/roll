@@ -120,6 +120,44 @@ pub fn ise(msg: impl Into<String>) -> Thrown {
 pub fn uoe() -> Thrown {
     Throw::new(cls::UNSUPPORTED_OPERATION_EXCEPTION, None)
 }
+/// A copy of an exception built outside the running execution's account
+/// ([`crate::guard::paused`]), charged as it is made; the original is freed outside the account
+/// too. (Library exceptions only: a script's own exception object isn't carried over.)
+pub fn recharged(t: Thrown) -> Thrown {
+    let copy = Box::new(Throw {
+        class: t.class,
+        message: t.message.clone(),
+        frames: t.frames.clone(),
+        offset: t.offset,
+        catchable: t.catchable,
+        es_type: t.es_type,
+        metadata: t.metadata.clone(),
+        object: None,
+        status: t.status,
+        es_root: t.es_root,
+        cause_fields: t.cause_fields.clone(),
+        error_offset: t.error_offset,
+    });
+    crate::guard::paused(|| drop(t));
+    copy
+}
+
+/// A memory breaker of the host refused what the script holds: a `circuit_breaking_exception`
+/// the script cannot catch, reported like the regex breaker's.
+pub fn memory_refused(e: crate::host::MemoryRefused) -> Thrown {
+    let mut t = Throw::new(cls::RUNTIME_EXCEPTION, Some(e.reason));
+    t.catchable = false;
+    t.offset = Some(u32::MAX);
+    t.es_type = Some("circuit_breaking_exception");
+    t.es_root = true;
+    t.cause_fields = vec![
+        ("bytes_wanted".into(), serde_json::json!(e.wanted)),
+        ("bytes_limit".into(), serde_json::json!(e.limit)),
+        ("durability".into(), serde_json::json!("TRANSIENT")),
+    ];
+    t
+}
+
 /// A failed [`crate::Host::check_cancelled`] poll (a search timeout or cancellation). Like
 /// Elasticsearch's `TimeExceededException` / `TaskCancelledException` raised outside the
 /// script's frames, a script's `catch` can't swallow it: it must stop the script.
@@ -505,6 +543,10 @@ pub struct State {
     /// persistent `$cancelPoll` counter, which the `@script_aware` augmentations (`each`,
     /// `findAll`, `forEachRemaining`, stream reductions…) decrement once per element.
     pub cancel_poll: u32,
+    /// The current document's `params._source`, parsed once per document as Elasticsearch's
+    /// `SourceLookup` does: changes a script makes to it stay for its later reads, and each read
+    /// is not a fresh copy.
+    pub source: Option<Value>,
 }
 
 impl State {
@@ -540,11 +582,13 @@ impl State {
             alloc_total: 0,
             cancellable: false,
             cancel_poll: CANCELLATION_POLL_INTERVAL,
+            source: None,
         }
     }
 
     /// Resets per-document state before an execution.
     pub fn begin_document(&mut self) {
+        self.source = None;
         self.emitted.clear();
         self.emitted_fields.clear();
         self.emit_chars = 0;
@@ -611,7 +655,7 @@ impl<'a> Vm<'a> {
             self.st.cancel_poll -= 1;
             if self.st.cancel_poll == 0 {
                 self.st.cancel_poll = CANCELLATION_POLL_INTERVAL;
-                self.host.check_cancelled().map_err(cancelled_error)?;
+                crate::host::call(|| self.host.check_cancelled()).map_err(cancelled_error)?;
             }
         }
         let base = self.stack.len();
@@ -801,7 +845,20 @@ impl<'a> Vm<'a> {
         if let Some(t) = crate::guard::take_pending() {
             return Err(t);
         }
-        self.host.check_cancelled().map_err(cancelled_error)
+        crate::host::call(|| self.host.check_cancelled()).map_err(cancelled_error)
+    }
+
+    /// The execution has used up the room its account gave it: past the limit it fails,
+    /// otherwise it gets more room and the host hears what it holds now.
+    #[cold]
+    #[inline(never)]
+    fn memory_poll(&mut self) -> Result<(), Thrown> {
+        crate::guard::refill(0)?;
+        let delta = crate::guard::MemoryScope::unreported();
+        if delta != 0 {
+            self.host.script_memory(delta).map_err(memory_refused)?;
+        }
+        Ok(())
     }
 
     /// `$checkAllocBytes`: the running total (a Java `long`) over the limit fails the script.
@@ -992,7 +1049,12 @@ impl<'a> Vm<'a> {
         macro_rules! slow {
             ($insn:expr) => {{
                 *pc_ref = pc_now!();
-                if let Some(exit) = self.slow(func, base, $insn, pc_ref, counter)? {
+                let exit = self.slow(func, base, $insn, pc_ref, counter)?;
+                // everything that allocates runs here: look at the account once its room is gone
+                if crate::guard::memory_exhausted() {
+                    self.memory_poll()?;
+                }
+                if let Some(exit) = exit {
                     return Ok(exit);
                 }
                 // SAFETY: `slow` leaves a valid instruction index
@@ -1277,7 +1339,7 @@ impl<'a> Vm<'a> {
                     } else if let Value::Obj(o) = v
                         && let Obj::Es(crate::es::EsObj::LazyScore) = &**o
                     {
-                        let x = self.host.score();
+                        let x = crate::guard::paused(|| self.host.score());
                         double_op!(d, x)
                     } else if !matches!(v, Value::Obj(_)) {
                         let v = v.clone();

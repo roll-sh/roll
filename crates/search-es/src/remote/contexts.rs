@@ -284,10 +284,11 @@ async fn close_parts(ctx: &Ctx<'_>, parts: &[Part], pit: bool) -> usize {
     freed
 }
 
-/// Holds the parts' buffered hits on the request breaker (the last reservation released).
+/// Holds the parts' buffered hits on the request breaker, at what their trees hold in memory
+/// (the last reservation released), for as long as the context lives: kept contexts count
+/// against the cluster's share of the node's budget.
 fn hold_buffers(ctx: &Ctx, st: &mut State) -> EsResult<()> {
-    let mut buf = Vec::new();
-    let bytes: u64 = st.parts.iter().flat_map(|p| p.buffer.iter()).map(|h| crate::breaker::estimate_hit(h, &mut buf)).sum();
+    let bytes: u64 = st.parts.iter().flat_map(|p| p.buffer.iter()).map(|h| crate::breaker::json_bytes(h) as u64).sum();
     st.held = None;
     let mut r = crate::breaker::Reservation::new(ctx.cluster.breakers.request(ctx.cluster, &ctx.state()));
     r.add(bytes, "<cross_cluster_scroll>")?;

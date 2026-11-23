@@ -91,7 +91,7 @@ pub(crate) async fn call_or_task(ctx: &Arc<Ctx>, name: &str, args: Value) -> Res
             // So is one that waits for something by design, answering before it's over.
             let over = crate::tools::all().iter().find(|t| t.name == name).and_then(|t| t.until);
             let waits = done.as_ref().is_some_and(|r| {
-                (r["structuredContent"]["status"] == "approval_pending" && r["structuredContent"]["approval"].is_string())
+                crate::waiting_approval(&r["structuredContent"]).is_some()
                     || over.is_some_and(|f| r["isError"] != true && !f(&r["structuredContent"]))
             });
             if !waits {
@@ -147,7 +147,7 @@ async fn run(ctx: Arc<Ctx>, access: Arc<roll_access::Access>, hash: String, mut 
                     return;
                 };
                 let s = &result["structuredContent"];
-                if s["status"] == "approval_pending" && let Some(approval) = s["approval"].as_str() {
+                if let Some(approval) = crate::waiting_approval(s) {
                     // A person decides: show where (once per approval: its key is the approval's own,
                     // so a request already shown isn't asked again), then call again with the
                     // approval, which waits for the decision and runs the call once it's allowed.

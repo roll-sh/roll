@@ -135,7 +135,18 @@ impl CodeSource {
                     api: b.api.as_ref().map(|t| code_control::model::PreviewTextDiff { added: t.added.clone(), removed: t.removed.clone(), added_n: t.added_n, removed_n: t.removed_n }),
                     api_breaking: b.api_breaking.clone(),
                     api_unread: b.api_unread,
-                    endpoints: b.endpoints.iter().map(|x| code_control::model::PreviewEndpoint { path: x.path.clone(), ms: x.ms, status: x.status, main_ms: x.main_ms, slower: x.slower() }).collect(),
+                    endpoints: b
+                        .endpoints
+                        .iter()
+                        .map(|x| code_control::model::PreviewEndpoint {
+                            path: x.path.clone(),
+                            ms: x.ms,
+                            status: x.status,
+                            main_ms: x.main_ms,
+                            slower: x.slower(),
+                            shape_changes: x.shape_changes.iter().map(|c| code_control::model::PreviewShapeChange { path: c.path.clone(), main: c.main.clone(), now: c.now.clone() }).collect(),
+                        })
+                        .collect(),
                     seo_added: b.seo_added }),
                 regressions: p.regressions.clone(),
                 regressions_accepted_by: p.regressions_accepted.as_ref().map(|a| a.by.clone()),
@@ -203,6 +214,21 @@ impl CodeSource {
                     cls: v.now.cls,
                 }),
                 visual_change: p.visual_change.as_ref().map(|v| code_control::model::PreviewVisualChange { since: v.since.clone(), percent: v.percent, phone_percent: v.phone_percent }),
+                browser_checks_rule: p.browser_checks_rule.clone(),
+                browser_checks: p
+                    .browser_checks
+                    .iter()
+                    .map(|c| code_control::model::PreviewBrowserCheck {
+                        service: c.service.clone(),
+                        name: c.name.clone(),
+                        state: match c.state {
+                            crate::CheckState::Pending => "pending",
+                            crate::CheckState::Passed => "passed",
+                            crate::CheckState::Failed => "failed",
+                        }
+                        .into(),
+                    })
+                    .collect(),
                 earlier: p.earlier.iter().map(|x| code_control::model::PreviewEarlier { service: x.service.clone(), head: x.revision.clone(), url: x.url.clone(), own_data: !x.own_data.is_empty() }).collect(),
                 // Only a public preview's: the comment is readable by whoever reads the pull request.
                 screenshot_url: (s.access == crate::settings::Access::Public)
@@ -248,6 +274,7 @@ pub fn service_of(repo: &str, p: &PreviewSpec) -> ServiceSpec {
         cpus: p.cpus,
         env: p.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
         health: p.health.clone(),
+        skew_protection: p.skew_protection,
         states: p.states.clone(),
         pages: p.pages.clone(),
         hide: p.hide.clone(),

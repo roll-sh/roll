@@ -74,6 +74,18 @@ func TestAWorkloadLogsInReadsSealedValuesAndWatchesForChanges(t *testing.T) {
 			w.WriteHeader(http.StatusUnauthorized)
 		case r.URL.Path == "/v1/secrets/projects/prj_a/environments/production/digest":
 			write(map[string]string{"digest": digest})
+		case r.URL.Path == "/v1/secrets/projects/prj_a/environments/production/values/delta":
+			// A claim holding A's stamp gets only A (and GONE's name): the rest stays as held.
+			var b struct {
+				Basis  string            `json:"basis"`
+				Stamps map[string]string `json:"stamps"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&b)
+			if b.Basis == "b1" && b.Stamps["A"] != "" && b.Stamps["B"] != "" {
+				write(map[string]any{"delta": true, "digest": digest, "basis": "b1", "values": map[string]string{"A": value}, "removed": []string{"GONE"}, "stamps": map[string]string{"A": digest}, "problems": []any{}, "leases": []string{}})
+				return
+			}
+			write(map[string]any{"delta": false, "digest": digest, "basis": "b1", "values": map[string]string{"A": value, "B": "kept", "GONE": "x"}, "stamps": map[string]string{"A": digest, "B": "s", "GONE": "s"}, "problems": []any{}, "leases": []string{}})
 		case r.URL.Path == "/v1/secrets/projects/prj_a/environments/production/values":
 			write(map[string]any{"values": map[string]string{"A": value}, "problems": []any{}, "leases": []string{}})
 		case r.URL.Path == "/v1/secrets/projects/prj_a/environments/production/resolve":
@@ -112,6 +124,11 @@ func TestAWorkloadLogsInReadsSealedValuesAndWatchesForChanges(t *testing.T) {
 	seen := make(chan string, 4)
 	go func() {
 		_ = c.Watch(ctx, "production", Watch{Every: 10 * time.Millisecond, OnChange: func(v *Values) error {
+			// After a delta, what didn't change is still there and what's gone isn't.
+			if _, gone := v.Values["GONE"]; v.Values["B"] != "kept" || (gone && v.Values["A"] != "one") {
+				seen <- fmt.Sprintf("%v", v.Values)
+				return nil
+			}
 			seen <- v.Values["A"]
 			return nil
 		}})
@@ -144,8 +161,8 @@ func TestAWorkloadLogsInReadsSealedValuesAndWatchesForChanges(t *testing.T) {
 	}
 }
 
-// Values are kept for CacheTTL, revalidated with their digest (a 304 keeps them), and never kept
-// when they hold dynamic credentials.
+// Values are kept for CacheTTL, revalidated with their digest (a 304 keeps them; here a rolld
+// without delta reads), and never kept when they hold dynamic credentials.
 func TestValuesAreCachedAndRevalidatedWithTheirDigest(t *testing.T) {
 	var mu sync.Mutex
 	digest, dynamic, value := "d1", []string{}, "1"
@@ -153,6 +170,10 @@ func TestValuesAreCachedAndRevalidatedWithTheirDigest(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
+		if strings.HasSuffix(r.URL.Path, "/values/delta") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		tag := r.Header.Get("If-None-Match")
 		asked = append(asked, tag)
 		if r.URL.Query().Get("digest") != "1" {
@@ -250,6 +271,10 @@ func TestSetAndDeleteWriteOneKeyAndDropTheCache(t *testing.T) {
 		answer := func(status int, v any) {
 			w.WriteHeader(status)
 			_ = json.NewEncoder(w).Encode(v)
+		}
+		if strings.HasSuffix(r.URL.Path, "/values/delta") {
+			answer(404, map[string]string{"error": "no route"}) // a rolld without delta reads
+			return
 		}
 		if strings.HasSuffix(r.URL.Path, "/values") {
 			reads++

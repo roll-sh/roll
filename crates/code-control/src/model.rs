@@ -348,6 +348,14 @@ pub struct PreviewEnvironment {
     /// Earlier pushes still reachable (newest first): the service, the changeset it runs, its URL.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub earlier: Vec<PreviewEarlier>,
+    /// Production's browser checks on this head: each one's service, name and state
+    /// (`pending`, `passed`, `failed`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub browser_checks: Vec<PreviewBrowserCheck>,
+    /// The project's rule for them (`check`: the `roll/browser-checks` status; `required`: also a
+    /// blocker), when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_checks_rule: Option<String>,
     /// How much the first service's page changed since the screenshot at an earlier head.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visual_change: Option<PreviewVisualChange>,
@@ -583,6 +591,18 @@ pub struct PreviewEndpoint {
     pub main_ms: Option<u32>,
     /// Slower than the branch's by half again and by more than 20 ms.
     pub slower: bool,
+    /// What its JSON answer lost against the branch's: fields gone, types widened.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shape_changes: Vec<PreviewShapeChange>,
+}
+
+/// A field of an endpoint's JSON answer the branch's has and this one doesn't (`now: None`), or
+/// whose type widened.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewShapeChange {
+    pub path: String,
+    pub main: String,
+    pub now: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -664,6 +684,13 @@ pub struct PreviewVisualChange {
     /// The same at a phone's width, when both screenshots had one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phone_percent: Option<f64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewBrowserCheck {
+    pub service: String,
+    pub name: String,
+    pub state: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

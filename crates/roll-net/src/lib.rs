@@ -52,7 +52,9 @@ pub fn private_ip(ip: IpAddr) -> bool {
             if s[0] == 0x2001 && s[1] == 0 {
                 return true;
             }
-            v.is_loopback() || v.is_unspecified() || v.is_multicast() || (s[0] & 0xfe00) == 0xfc00 || (s[0] & 0xffc0) == 0xfe80 || s[0] == 0x2001 && s[1] == 0xdb8
+            // Unique local (fc00::/7), link-local (fe80::/10) and the deprecated site-local
+            // (fec0::/10), which some networks still route internally.
+            v.is_loopback() || v.is_unspecified() || v.is_multicast() || (s[0] & 0xfe00) == 0xfc00 || (s[0] & 0xffc0) == 0xfe80 || (s[0] & 0xffc0) == 0xfec0 || s[0] == 0x2001 && s[1] == 0xdb8
         }
     }
 }
@@ -97,7 +99,7 @@ mod tests {
         for ip in [v4(127, 0, 0, 1), v4(10, 1, 2, 3), v4(172, 16, 0, 1), v4(192, 168, 1, 1), v4(169, 254, 169, 254), v4(100, 64, 0, 1), v4(0, 0, 0, 0), v4(198, 18, 0, 1), v4(198, 19, 255, 254), v4(192, 88, 99, 1)] {
             assert!(private_ip(ip), "{ip}");
         }
-        for s in ["::1", "fc00::1", "fe80::1", "64:ff9b::a9fe:a9fe", "2002:7f00:1::", "::7f00:1", "::a9fe:a9fe", "2001:0:4136:e378:8000:63bf:3fff:fdd2"] {
+        for s in ["::1", "fc00::1", "fe80::1", "fec0::1", "feff::1", "64:ff9b::a9fe:a9fe", "2002:7f00:1::", "::7f00:1", "::a9fe:a9fe", "2001:0:4136:e378:8000:63bf:3fff:fdd2"] {
             assert!(private_ip(s.parse().unwrap()), "{s}");
         }
         assert!(private_ip(IpAddr::V6(Ipv4Addr::new(10, 0, 0, 1).to_ipv6_mapped())));

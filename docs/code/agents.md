@@ -1301,6 +1301,37 @@ the owner's own, set on the owner's own machines, and a sandbox is one owner's m
   (`key_ref`, `op://vault/item/field`). The daemon reads it with the `op` CLI on the machine
   (30 s, its value only in memory) at start, when the endpoint is set and on each check. A reference
   isn't a secret, so it travels in the clear.
+- **roll secrets**: `key_ref` may instead be a roll secrets reference (`roll://ENV[/folder]/KEY`,
+  exactly as `roll_secrets::Reference::parse` reads it, in `EndpointSpec::check`; ` roll://…` is an
+  error, never trimmed into one). The daemon never reads it itself.
+  (`code-control/src/agents/endpoint_refs.rs`.)
+  - **Bound on `endpoint.set`.** The relay has roll secrets bind it to the command's sender
+    (`Secrets::bind_ref` for `agent:<machine name>`, through the project whose canvas holds one of
+    the owner's repositories and stands for it; a roll code owner token is no one to roll secrets,
+    so it's a session, the operator token or a roll token). It keeps the maker in
+    `agent_endpoint_refs`, which only the relay writes. A sender who may not reveal it gets the 403
+    and nothing reaches the machine.
+  - **Sent sealed after each `hello`.** While the machine's link is up, the relay reads every such
+    endpoint its `hello` reports as the maker may now: `digest_as` each time, `resolve_as`
+    (audited, `agent:<machine>` in reach) only when the value moved. It sends the value sealed to
+    the daemon's `seal_key`, with `SealedSecret::ref_context` (`roll-endpoint-ref:<id>`, so it never
+    opens as a browser-sealed key). The command is `endpoint.key {endpoint, key: {type: set,
+    sealed}}`, from `roll`.
+    - It does so on the link's first `hello`, when a `hello` reports a new reference, and when the
+      once-a-minute check finds the value rotated.
+    - The relay drops the value once sealed: it never stores, logs or returns it.
+    - The daemon keeps it in memory only, as a 1Password value. A restarted daemon gets it again
+      after its first `hello`.
+  - **Failing closed.** When the maker can no longer reveal it (removed, demoted, signed out for
+    good), or the key is gone, the next `hello` or check sends `endpoint.key {type: refused,
+    reason}` instead. The daemon drops the key, the providers get none from their next process, and
+    the endpoint's `error` says why ("roll secrets: maker unreachable: …"). Until the first key
+    arrives, the error says it's waiting for the relay.
+  - **Only on a refusal.** A refusal is roll secrets refusing (`code_control::Refused`), or the
+    binding gone from `agent_endpoint_refs`. When roll secrets can't answer (starting after a
+    rolld restart, a database failover, a timeout), nothing is sent: the daemon keeps the key it
+    holds, and the relay asks again after 1 s, doubling up to the minute.
+  - **Relay only.** The relay refuses an `endpoint.key` sent to `…/commands` (403), from anyone.
 - **Reported, never the key**: `MachineConfig.endpoints` (`EndpointInfo`) has the spec, where the
   key comes from (`none`, `sealed`, `reference`), the models it listed and the last check's error.
   The UI shows "Key set (never shown)" with Replace and Remove; it never shows any part of a key.
@@ -1328,7 +1359,8 @@ row in each provider's card (`ProviderEndpointRow`: its own login, a compatible 
 endpoint…; switching sends `endpoint.set` with `key: keep`). The editor (`EndpointEditor`) checks
 the spec with `checkEndpoint` before sending and shows the daemon's `invalid`; a provider that can't
 speak the kind is disabled with the reason; the key field is a password field, swapped for an
-`op://` reference by "From 1Password", and emptied once sent. An old daemon (no seal key) or an
+`op://` or `roll://` reference by "From a reference", and emptied once sent; a `roll://` key shows as
+"roll secrets: roll://…". An old daemon (no seal key) or an
 offline computer is read-only; an asleep sandbox stays editable (a command wakes it). Owner settings
 list the profiles (`EndpointProfilesSection`: the editor without a key, "Default for new
 sandboxes", and Apply to machines…, which takes the key once and seals it to each picked machine).
@@ -1362,7 +1394,7 @@ dashboard or desktop app already decides, or features roll doesn't have.
 | T3 setting | roll | Where |
 |---|---|---|
 | Providers: enabled, display name, binary path, home path (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`), launch args, environment | on/off, binary, extra arguments, environment (home paths are variables); names are the daemon's | machine |
-| Provider secrets (API keys, `secretProviders`, sensitive env) | endpoints: keys sealed to the daemon from roll, or a 1Password reference read on the machine ("Endpoints"); `config.toml` stays the machine's own | machine (sealed) |
+| Provider secrets (API keys, `secretProviders`, sensitive env) | endpoints: keys sealed to the daemon from roll, a 1Password reference read on the machine, or a roll secrets reference the relay sends sealed ("Endpoints"); `config.toml` stays the machine's own | machine (sealed) |
 | Custom models (`customModels`), hidden models, model order | custom models; hiding and ordering: not applicable (the picker sorts favourites first) | machine |
 | Claude's "Auto-compact after" (`autoCompactWindow`), idle compaction (`idleCompaction`, per instance over Providers > Advanced) | `auto_compact_window`, `idle_compaction` on the provider (Claude), over the machine's `idle_compaction` | machine |
 | Favourite models (`favorites`) and roll's recent models | `favorite_models`, `recent_models` (localStorage is the cache; `agents-models.ts`) | owner |

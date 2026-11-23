@@ -17,7 +17,9 @@
 //!   (`secrets_from`) and who copied them (`secrets_by`) are kept. At each create and start they
 //!   are read again as that person or token may now, so a rotated value reaches the sandbox, and
 //!   the backend starts it with them ([`SandboxBackend::start_with`]); once they may not, without
-//!   them (`secrets_dropped`). A backend that can't change an instance's env starts it as it was
+//!   them (`secrets_dropped`). A copied variable that doesn't resolve for its copier (a reference
+//!   to a protected environment) is left unset and named (`secrets_unset`); a key of the folder it
+//!   didn't copy never matters. A backend that can't change an instance's env starts it as it was
 //!   made, or not at all once its copier may not. A sandbox from before `secrets_from` was kept
 //!   only has its copier's right asked again, and keeps what it was made with.
 

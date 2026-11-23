@@ -58,6 +58,12 @@ pub fn upstream_key_context(upstream: &str) -> String {
     format!("roll-gateway-upstream:{upstream}")
 }
 
+/// The associated data roll's relay seals an upstream's `roll://` key with
+/// (`gateway.upstream_key`): not [`upstream_key_context`], so one never opens as the other.
+pub fn upstream_ref_context(upstream: &str) -> String {
+    format!("roll-gateway-upstream-ref:{upstream}")
+}
+
 /// An API a request or an upstream speaks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -160,7 +166,9 @@ pub struct UpstreamSpec {
     /// owner's network). Off: such addresses are refused, literal or resolved.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub allow_private: bool,
-    /// The key is read on the gateway's machine from 1Password (`op://…`) instead of sealed.
+    /// The key is read on the gateway's machine from 1Password (`op://…`), or comes from roll
+    /// secrets (`roll://ENV[/folder]/KEY`: roll's relay sends it sealed to the daemon,
+    /// `gateway.upstream_key`), instead of being sealed once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_ref: Option<String>,
     /// Kept but not used.
@@ -360,7 +368,16 @@ impl UpstreamSpec {
         self.base_url = text(self.base_url.take()).map(|u| u.trim_end_matches('/').to_string());
         self.region = text(self.region.take());
         self.project = text(self.project.take());
-        self.key_ref = text(self.key_ref.take());
+        // roll secrets' own parser decides, on the value as sent (` roll://…` is an error, never
+        // trimmed into a reference).
+        let roll = match self.key_ref.as_deref().map(roll_secrets_ref::Reference::parse) {
+            Some(Err(e)) => return Err(format!("key_ref: {e}")),
+            Some(Ok(r)) => r.is_some(),
+            None => false,
+        };
+        if !roll {
+            self.key_ref = text(self.key_ref.take());
+        }
         match &self.base_url {
             Some(u) => check_url(u)?,
             None if self.kind.needs_base_url() => return Err(format!("{} needs a base URL", self.kind.label())),
@@ -404,11 +421,17 @@ impl UpstreamSpec {
             }
         }
         if let Some(r) = &self.key_ref
-            && (!r.starts_with("op://") || r.len() > 512 || r.chars().any(|c| c.is_control() || c.is_whitespace()))
+            && (r.len() > 512 || (!roll && (!r.starts_with("op://") || r.chars().any(|c| c.is_control() || c.is_whitespace()))))
         {
-            return Err("a 1Password reference looks like op://vault/item/field".into());
+            return Err("a key reference is a 1Password one (op://vault/item/field) or roll secrets' (roll://ENV/KEY)".into());
         }
         Ok(self)
+    }
+
+    /// Its `key_ref` when that's a roll secrets reference (`roll_secrets::Reference::parse`, from
+    /// `roll-secrets-ref`, says so): roll's relay sends its value; the daemon never reads it.
+    pub fn roll_ref(&self) -> Option<&str> {
+        self.key_ref.as_deref().filter(|r| matches!(roll_secrets_ref::Reference::parse(r), Ok(Some(_))))
     }
 
     /// Whether it serves `model` by its patterns (an empty list: decided by what it lists).
@@ -837,6 +860,13 @@ mod tests {
         assert!(bad(UpstreamKind::Anthropic, |u| u.responses = true).contains("Responses"));
         let ok = UpstreamSpec { region: Some("us-east-1".into()), models: vec!["anthropic.claude-*".into()], ..upstream(UpstreamKind::Bedrock) };
         assert!(ok.check().is_ok());
+        // A key reference: 1Password's, or exactly a roll secrets one (never trimmed into one).
+        assert!(bad(UpstreamKind::Anthropic, |u| u.key_ref = Some("vault/item".into())).contains("op://"));
+        assert!(bad(UpstreamKind::Anthropic, |u| u.key_ref = Some(" roll://production/ANTHROPIC_KEY".into())).contains("roll://"));
+        let roll = UpstreamSpec { key_ref: Some("roll://production/ANTHROPIC_KEY".into()), ..upstream(UpstreamKind::Anthropic) }.check().unwrap();
+        assert_eq!(roll.roll_ref(), Some("roll://production/ANTHROPIC_KEY"));
+        let op = UpstreamSpec { key_ref: Some(" op://vault/item/key ".into()), ..upstream(UpstreamKind::Anthropic) }.check().unwrap();
+        assert_eq!((op.key_ref.as_deref(), op.roll_ref()), (Some("op://vault/item/key"), None));
     }
 
     #[test]

@@ -202,6 +202,8 @@ pub struct ServiceSpec {
     pub env: Vec<(String, String)>,
     /// A path that answers 2xx/3xx once the service works (`roll.toml` `health`).
     pub health: Option<String>,
+    /// A page loaded before a push keeps reaching that push (`roll.toml` `skew_protection`).
+    pub skew_protection: bool,
     /// Page states its screenshots reach, from its `roll.toml` (`[[preview.states]]`).
     pub states: Vec<crate::settings::StateRule>,
     /// More of its own pages, and selectors blanked in screenshots, from its `roll.toml`.
@@ -368,6 +370,9 @@ pub struct ShotOptions {
     /// The open notes' elements to crop in the first service's run (Vercel's comments show what
     /// they're about), at most [`crate::store::CROPS_PER_RUN`].
     pub crops: Vec<CropAsk>,
+    /// Where the service serves Storybook (`/`, `/storybook/`; `github.storybook`): its stories
+    /// are taken too, each a page (`story:<id>`).
+    pub stories: Option<String>,
 }
 
 /// One more page of a [`Shot`]: its path, its PNG, and what went wrong while it loaded.
@@ -449,6 +454,28 @@ pub trait Source: Send + Sync {
 }
 
 /// What a service should run. (No `Debug`: `vars` holds the branches' passwords.)
+/// A browser check's result on the service's live deployment, where its backend runs them on
+/// previews (roll apps: production's browser checks, once on each head).
+#[derive(Clone, Debug, PartialEq)]
+pub struct BrowserCheckResult {
+    pub name: String,
+    /// `None`: not run on the live deployment yet.
+    pub passed: Option<bool>,
+    pub error: Option<String>,
+    /// Where its backend keeps the failure's screenshot and trace, when it kept them.
+    pub files: Option<crate::BrowserCheckFiles>,
+}
+
+/// The build a service runs now, where its backend keeps each build at a URL of its own.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LiveBuild {
+    /// Its deployment (roll apps' `dep_…`).
+    pub id: String,
+    /// Its git commit.
+    pub revision: String,
+    pub url: String,
+}
+
 #[derive(Clone)]
 pub struct Target {
     pub project: String,
@@ -736,8 +763,20 @@ pub trait Apps: Send + Sync {
     /// The build the service runs now, `(its git commit, its own URL)`, where the backend keeps
     /// each build reachable at a URL of its own (roll apps' deployment URLs): kept as an earlier
     /// push when a new head replaces it. None where it doesn't (the runtime keeps its own).
-    async fn live_build(&self, _preview: &str, _service: &str) -> Option<(String, String)> {
+    async fn live_build(&self, _preview: &str, _service: &str) -> Option<LiveBuild> {
         None
+    }
+    /// Production's browser checks on the service's live deployment, each with its result once
+    /// it has run there; `None` where the backend runs none for it.
+    async fn browser_checks(&self, _preview: &str, _service: &str) -> Option<Vec<BrowserCheckResult>> {
+        None
+    }
+    /// A build like `deployment` (an earlier head's), taking no traffic, with `plain` and the
+    /// branches' `branches` in place of the environment's own (an earlier push's own copy of the
+    /// data): its own URL once it's ready. `None` where the backend can't (it then shares the
+    /// preview's data).
+    async fn view_build(&self, _preview: &str, _service: &str, _deployment: &str, _plain: &[(String, String)], _branches: &[BranchVars]) -> anyhow::Result<Option<String>> {
+        Ok(None)
     }
     /// Its errors in the last `minutes`, grouped (none where the backend can't tell when a line
     /// was written). Text the backend cuts before grouping it is masked first with `masks`' values

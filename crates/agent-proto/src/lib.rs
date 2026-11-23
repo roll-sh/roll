@@ -64,9 +64,10 @@ pub mod endpoint;
 pub mod gateway;
 pub mod identity;
 pub mod registry;
+pub mod seal;
 
 pub use endpoint::{
-    EndpointCheck, EndpointInfo, EndpointKind, EndpointModel, EndpointProfile, EndpointSpec, KeyChange, KeyState, SEAL_VERSION, SealedSecret, endpoint_limits,
+    EndpointCheck, EndpointInfo, EndpointKind, EndpointModel, EndpointProfile, EndpointSpec, KeyChange, KeyState, RefKey, SEAL_VERSION, SealedSecret, endpoint_limits,
 };
 pub use gateway::{
     Attempt, CircuitState, ClientSeen, GatewayClient, GatewayInfo, GatewayJoin, GatewayMember, GatewayPlan, GatewayRun, GatewaySettings, GatewayStatus, GatewayUrl,
@@ -2368,6 +2369,11 @@ pub enum Command {
     /// Ask the endpoint for its models now (answers `endpoint_checked`, and keeps what it lists).
     #[serde(rename = "endpoint.check")]
     EndpointCheck { endpoint: String },
+    /// An endpoint's `roll://` key from roll secrets ([`RefKey`]): sent by roll's relay alone (it
+    /// refuses one from anyone else), sealed to this daemon. Kept in memory; replies once the
+    /// providers have it and `hello` says the endpoint's state.
+    #[serde(rename = "endpoint.key")]
+    EndpointKey { endpoint: String, key: RefKey },
     /// Install an agent of the ACP registry on the machine (docs/code/agents.md, "The ACP
     /// registry"): the daemon fetches the registry, downloads and checks the agent (or installs
     /// its package with the machine's own `npm`/`uv`) into its own directory, and offers it as the
@@ -2393,6 +2399,12 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "endpoint::key_change_is_keep")]
         key: KeyChange,
     },
+    /// An upstream's `roll://` key from roll secrets ([`RefKey`], sealed with
+    /// [`gateway::upstream_ref_context`]): sent by roll's relay alone (it refuses one from anyone
+    /// else). Kept in memory; a refusal leaves the upstream with no key and bars its provider.
+    /// Replies once applied.
+    #[serde(rename = "gateway.upstream_key")]
+    GatewayUpstreamKey { upstream: String, key: RefKey },
     /// Mint a client key and answer it sealed to `seal_key` (the machine that will use it, as its
     /// `roll-gateway` endpoint's key: [`IssuedClient`]). The gateway keeps only its hash. A
     /// machine's earlier client is revoked.
