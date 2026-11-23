@@ -422,6 +422,34 @@ async fn a_previews_metrics_are_what_its_running_services_use() {
     assert!(matches!(e.engine.metrics("pv_nope").await, Err(roll_previews::Error::NotFound(_))));
 }
 
+/// A secret value its pages serve (Netlify's secrets scan) is named on its record and in its
+/// activity, with where, never the value; one meant for the browser (`NEXT_PUBLIC_…`) or a user
+/// name isn't.
+#[tokio::test]
+async fn a_secret_value_its_pages_serve_is_named_on_its_record() {
+    let e = env(json!({ "enabled": true, "github": { "screenshot": true } }));
+    e.secrets.values.lock().push(("STRIPE_KEY".into(), "sk_test_51Hx9abc".into()));
+    e.secrets.values.lock().push(("NEXT_PUBLIC_MAPS_KEY".into(), "pk_maps_123456".into()));
+    e.secrets.values.lock().push(("PGUSER".into(), "pv_role_abcdef".into()));
+    let mut png = Vec::new();
+    image::RgbaImage::new(4, 4).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    *e.apps.shot.lock() = Some(png);
+    *e.apps.served.lock() = vec![("/assets/app.js".into(), b"const k = 'sk_test_51Hx9abc', m = 'pk_maps_123456', u = 'pv_role_abcdef';".to_vec())];
+    e.code.open(change("chg_ss", 5));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_ss").unwrap().unwrap();
+    let served = |e: &Env| e.engine.store.preview(&p.id).unwrap().served_secrets;
+    for _ in 0..3000 {
+        if !served(&e).is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(served(&e), [roll_previews::ServedSecret { key: "STRIPE_KEY".into(), path: "/assets/app.js".into() }]);
+    let said: Vec<String> = e.engine.store.activity(&p.id).unwrap().into_iter().map(|a| a.message).filter(|m| m.contains("serve secret values")).collect();
+    assert!(said.len() == 1 && said[0].contains("STRIPE_KEY in /assets/app.js") && !said[0].contains("sk_test"), "{said:?}");
+}
+
 /// A preview's errors are its services' groups, newest first, named by service, with a secret its
 /// code printed shown as `***` in the title and the sample (as its logs are), a value a cut split
 /// included; its values are read only when there's an error (counting reads none), and a

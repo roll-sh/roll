@@ -377,6 +377,9 @@ pub struct PreviewEnvironment {
     /// Its error groups (from its services' output) that main's preview doesn't have.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new_errors: Option<PreviewNewErrors>,
+    /// Its secret values its pages serve, by name and path (never the value).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub served_secrets: Vec<PreviewServedSecret>,
     /// How much its page differs from the project's preview of the default branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_change: Option<PreviewBaseChange>,
@@ -542,6 +545,13 @@ pub struct PreviewBaseChange {
     /// the branch's.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub endpoints: Vec<PreviewEndpoint>,
+}
+
+/// One of a preview's secret values its pages serve: its name and where.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewServedSecret {
+    pub key: String,
+    pub path: String,
 }
 
 /// Error groups the branch's preview doesn't have: how many, and the most frequent few. A title

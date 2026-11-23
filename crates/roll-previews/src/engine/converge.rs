@@ -1043,7 +1043,8 @@ impl Engine {
             other => other,
         };
         match taken {
-            Ok(Some(shot)) => {
+            Ok(Some(mut shot)) => {
+                self.check_served(r, &mut shot).await;
                 // Kept under the entry that asked for each (`/pricing`, or `web:/pricing`).
                 let mut pages: Vec<crate::ports::PageShot> = shot
                     .pages

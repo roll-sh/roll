@@ -1,7 +1,7 @@
 import { checkSummary, endpointSlower, type Preview } from "./previews-api";
 
 /** A section of the preview's sheet a verdict item jumps to. */
-export type VerdictTarget = "services" | "visual" | "api" | "schema" | "checks" | "endpoints" | "routes" | "errors";
+export type VerdictTarget = "secrets" | "services" | "visual" | "api" | "schema" | "checks" | "endpoints" | "routes" | "errors";
 
 export interface VerdictItem {
   target: VerdictTarget;
@@ -17,6 +17,8 @@ const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? o
  * section. Empty when nothing is new. Built only from the preview's record. */
 export function verdict(p: Preview): VerdictItem[] {
   const out: VerdictItem[] = [];
+  const served = p.served_secrets?.length ?? 0;
+  if (served) out.push({ target: "secrets", text: `${plural(served, "secret value")} in what it serves`, tone: "danger" });
   const failed = p.services.filter((s) => s.state === "failed").length;
   if (failed) out.push({ target: "services", text: `${plural(failed, "service")} failed`, tone: "danger" });
   const breaking = p.base_change?.api_breaking?.length ?? 0;

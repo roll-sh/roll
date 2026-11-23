@@ -969,6 +969,24 @@ thirty-fourth review found them in the clear.
 
 ## Safety
 
+- **Secret values in what a preview serves** (Netlify's secrets scan). A preview's pages are
+  read by whoever opens it (a public one by anyone), and its code can put what it was given in
+  them: a server-rendered page, a bundle built with a server variable, an API answer. The first
+  page's screenshot run keeps what its pages served (documents, the origin's own scripts, fetch
+  and XHR answers, each path once and never its query; 40 bodies, 2 MiB each, 8 MiB in all) and
+  hands it to roll, which looks in it for the preview's secret values: roll secrets' values (a
+  `plain` one's URL password only), its branches' credentials, and its own variables named like
+  a credential. A value meant for the browser (`NEXT_PUBLIC_`, `VITE_`, `PUBLIC_`, `REACT_APP_`,
+  `NUXT_PUBLIC_`, `EXPO_PUBLIC_`, `GATSBY_`, `VUE_APP_`, `STORYBOOK_`) isn't one, nor a user name
+  (`PGUSER`, `SMTP_USERNAME`), nor one under 8 characters. The run is never given the values (the page's code shares its container), and
+  what was served is dropped once looked in. Each one found is named by the name the preview gets
+  it as, with where (`served_secrets: [{key, path}]`, for the run's head): on the record, first
+  on the sheet's verdict strip ("1 secret value in what it serves") and in a box under it, in
+  `roll preview show`, in the activity when it changes, and in the pull request comment
+  ("**Secret values in what it serves:** `STRIPE_KEY` in `/assets/app.js`"), never the value
+  (checked in the screenshot image: a page's document, its script and its fetch answer kept by
+  path, the query left out; live: `scripts/preview-cost.sh`'s service serves its environment at
+  `/env.txt`, and the record names `DATABASE_URL` there without the password).
 - **Forks.** A change with `trusted: false` (a PR from a fork) gets a preview only for a head a
   writer approved (`approve-run`, roll code's rule). A new push un-approves it. Its services
   stop, and it waits as `awaiting_approval` with its data branches kept. This also fixes roll
@@ -1599,6 +1617,15 @@ land on the change.
   team session, through roll), from the change's feedback reviews (`roll_previews::notes` reads back the shape the
   dashboard posts and nothing else; dismissed ones don't show), the latest 50. Each note says
   who and when, and outlines its element on hover; all of it is text, never HTML.
+- A note or an error becomes a fix to make (Vercel Comments' "Create issue", Netlify's drawer):
+  the note's sheet (opened from its Reply or Resolve) and each error group on the sheet's Errors
+  tab have "Make a work item". It's made in the preview's repo as the person looking (roll code's
+  `POST …/work`; someone without write on the repo gets its refusal), where roll's agents claim
+  work too. A note's item takes the note's first line as its title and its whole review as its
+  body (the page and its link, the element, the note, what went wrong on the page), labelled
+  `preview-feedback`, and the note gets a reply naming the item. An error's item takes its service
+  and title, and its sample as the preview shows it (masked), in a block nothing in it can close,
+  labelled `preview-error` (`lib/preview-work.ts`).
 - A note is resolved from the page too (Vercel Comments): its Resolve opens roll
   (`?fb_resolve=<review id>`), where the sheet shows the note and anyone on the project resolves
   it (`POST …/notes/{review}/resolve`, kept by previews: roll code's comment reviews aren't
@@ -1796,6 +1823,7 @@ type Preview = {
   page_links?: { checked: number; broken: { path: string; status: number }[] } | null;
   slower_routes?: { branch: string; routes: { name: string; count: number; p50_ms: number; main_p50_ms: number; grew?: GrewSpan | null; budget_ms?: number | null }[] } | null;
   new_errors?: { branch: string; total: number; errors: { service: string; title: string }[] } | null;
+  served_secrets?: { key: string; path: string }[]; // its secret values its pages serve at its head: names and where, never values
   regressions?: "check" | "required" | null;
   regressions_accepted?: { head: string; by: string; at: number } | null;
   regressions_compared?: boolean;     // compared with main's preview at its head (errors; routes too with traces)
@@ -2523,18 +2551,34 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **A service swapped for a process on a laptop, in review** (Signadot's local sandboxes,
-   Telepresence): `roll preview swap`, the preview's requests for it served from the laptop.
-2. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
+1. **A note or an error made a work item, in review** (Vercel Comments' "Create issue"): on the
+   note's sheet and each error group, in the preview's repo, where roll's agents claim work too.
+2. **A preview's page read through roll, for agents** (Vercel MCP's `web_fetch_vercel_url`; roll
+   MCP's ask): `GET …/fetch?path=` answering its status, a few headers and its text, bounded, with
+   roll's own access to the preview (no share link), its own host only, `GET`/`HEAD` only;
+   `reveal`, as its mail is. roll MCP maps it as `previews_fetch`.
+3. **A preview's data from the sheet** (Neon's Tables, Supabase's table editor): a branch's tables
+   read as the branch's own role (so masks hold), a few rows a page.
+4. **Feature flags on a preview** (Vercel's Flags Explorer): per-preview values, and a reviewer's
+   own override from the page's toolbar.
+5. **Restore points for a preview's data** (Neon's snapshots): save the branches now, put them back
+   after a test run.
+6. **A workload identity for `roll.toml` services** (Vercel's OIDC federation): roll apps' `pv-`
+   instances have one; runtime services don't.
+7. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
    (3.3 s in its log) and its masking, which needs that compute up: pg-control's to shorten.
-3. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+8. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-4. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+9. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-5. **Watch: pg-control's recovery to a time seconds old** (unowned).
+10. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-23, near midnight: secret values in what a preview serves (#846: named with where, never the value; live, `DATABASE_URL` in `/env.txt`).
+
+Landed 2026-11-23, late night: a service swapped for a process on a laptop (#842: `roll preview swap`, checked live through the preview's host and back).
 
 Landed 2026-11-23, night: Storybook stories as snapshots (#837: each story a page, compared with main's and reviewed).
 

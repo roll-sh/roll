@@ -707,6 +707,9 @@ fn print_preview(p: &Value) {
     if let Some(t) = timeline_line(p) {
         println!("{t}");
     }
+    for x in p["served_secrets"].as_array().into_iter().flatten() {
+        println!("serves a secret value  {} at {}", s(&x["key"]), s(&x["path"]));
+    }
     for c in p["browser_checks"].as_array().into_iter().flatten() {
         let state = match s(&c["state"]).as_str() {
             "pending" => "running".to_string(),

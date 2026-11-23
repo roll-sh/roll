@@ -1295,6 +1295,34 @@ pub const SCREENSHOT_MAX: usize = 2 << 20;
 /// pages'), each at most this, and everything it writes: every PNG it can take, in base64, and
 /// those lines.
 const SHOT_REPORT_MAX: usize = 4 << 20;
+/// The line of what a run's pages served (`$OUT.bodies.json`: 8 MiB as base64, and JSON).
+const BODIES_LINE_MAX: usize = 12 << 20;
+
+/// What a run's pages served (`[{path, b64}]`), bounded again: at most 40 bodies and 8 MiB, each
+/// under a path. The pages are the preview's code: nothing of it is kept, only looked in.
+fn served_bodies(line: Option<&str>) -> Vec<(String, Vec<u8>)> {
+    use base64::Engine as _;
+    #[derive(serde::Deserialize)]
+    struct Served {
+        path: String,
+        b64: String,
+    }
+    let Some(line) = line.filter(|l| l.len() <= BODIES_LINE_MAX) else { return Vec::new() };
+    let all: Vec<Served> = serde_json::from_str(line.trim()).unwrap_or_default();
+    let mut total = 0;
+    let mut out = Vec::new();
+    for s in all.into_iter().take(40) {
+        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(s.b64) else { continue };
+        total += bytes.len();
+        if total > 8 << 20 {
+            break;
+        }
+        if s.path.starts_with('/') {
+            out.push((s.path.chars().filter(|c| !c.is_control() && *c != '`').take(200).collect(), bytes));
+        }
+    }
+    out
+}
 /// A story's PNG, at most (one clipped to what it renders).
 const STORY_MAX: usize = 256 << 10;
 /// A stories run's output: its report, and its PNGs as base64.
@@ -1342,7 +1370,7 @@ fn story_shots<'a>(said: &str, pngs: impl Iterator<Item = &'a str>) -> Vec<crate
     }
     out
 }
-const SHOT_OUTPUT_MAX: usize = (crate::settings::MAX_PAGES + 2) * SCREENSHOT_MAX * 4 / 3 + 3 * SHOT_REPORT_MAX + crate::store::CROPS_PER_RUN * crate::store::CROP_MAX * 4 / 3 + (64 << 10);
+const SHOT_OUTPUT_MAX: usize = BODIES_LINE_MAX + (crate::settings::MAX_PAGES + 2) * SCREENSHOT_MAX * 4 / 3 + 3 * SHOT_REPORT_MAX + crate::store::CROPS_PER_RUN * crate::store::CROP_MAX * 4 / 3 + (64 << 10);
 
 /// The header automation sends a project's bypass secret in (docs/previews.md, "Safety").
 pub const BYPASS_HEADER: &str = "x-roll-preview-bypass";
@@ -1861,7 +1889,8 @@ impl Runtime {
             format!(
                 "cat > /tmp/axe.js; {} >/dev/null 2>&1 && base64 -w0 /tmp/s.png && echo && (cat /tmp/s.png.json 2>/dev/null || true) && echo && (base64 -w0 /tmp/s.png.phone.png 2>/dev/null || true) \
                  && echo && (cat /tmp/s.png.pages.json 2>/dev/null || true) && for n in 0 1 2 3 4 5 6 7 8 9; do echo; base64 -w0 /tmp/s.png.$n.png 2>/dev/null || true; done \
-                 && echo && (cat /tmp/s.png.crops.json 2>/dev/null || true) && for n in 0 1 2 3 4 5 6 7 8 9; do echo; base64 -w0 /tmp/s.png.crop.$n.png 2>/dev/null || true; done",
+                 && echo && (cat /tmp/s.png.crops.json 2>/dev/null || true) && for n in 0 1 2 3 4 5 6 7 8 9; do echo; base64 -w0 /tmp/s.png.crop.$n.png 2>/dev/null || true; done \
+                 && echo && (cat /tmp/s.png.bodies.json 2>/dev/null || true)",
                 self.cfg.screenshot_command
             ),
         ]);
@@ -1913,6 +1942,8 @@ impl Runtime {
         // Ten page lines, then what the crops said and their PNGs.
         let page_lines: Vec<&str> = lines.by_ref().take(10).collect();
         let crops_said = report(lines.next());
+        let crop_lines: Vec<&str> = lines.by_ref().take(10).collect();
+        let bodies = served_bodies(lines.next());
         let asked: Vec<&str> = crops.iter().filter_map(|c| c["note"].as_str()).collect();
         let mut shot = crate::ports::Shot {
             png,
@@ -1924,7 +1955,8 @@ impl Runtime {
             api: crate::openapi::lines(speed),
             phone,
             pages: page_shots(&pages, said, page_lines.into_iter()),
-            crops: note_crops(&asked, crops_said, lines),
+            crops: note_crops(&asked, crops_said, crop_lines.into_iter()),
+            bodies,
         };
         // The other browsers', best effort: Chromium's screenshot stands.
         match more {
