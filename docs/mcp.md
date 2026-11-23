@@ -205,7 +205,8 @@ what it saw last time, at most 20 a look; the first look only remembers). Previe
 `previews_list`, its project's events only, as the gate filters the list). roll code: `code.landed`
 (each change landed on one repo, with its change, ref, changeset and author; `GET
 /v1/code/repos/{owner}/{repo}/landings`, read from the store's durable land log, tied to
-`code_list_refs`). roll secrets: `secrets.event` (a leak or scan finding, a failed rotation or sync,
+`code_list_refs`). roll secrets: `secrets.event` (a value changed or deleted, a leak or scan finding, a rotation that
+worked or failed, a failed sync, an environment's protection or a folder's policy changed,
 a value request waiting or decided, a placeholder misused, production left unprotected, an
 environment or the project deleted or recovered; never a value; `GET
 /v1/secrets/projects/{project}/events`, tied to `secrets_audit`; secrets keeps an env-limited
