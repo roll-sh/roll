@@ -323,20 +323,20 @@ const PROMPTS: &[Prompt] = &[
         needs: &["code_create_repo", "code_land", "apps_create_service", "apps_wait_deploy", "apps_deploy_logs", "apps_get_environment"],
         text: |a| {
             format!(
-                "Build the app I describe in this chat and put it live in project {project}. I have no git here: roll \
-                 holds the code. First code_create_repo under owner {owner}, named {name} (private unless I say). \
-                 Write the smallest app that does what I asked and runs as one container (a Dockerfile, or a \
+                "Build the app I describe in this chat and put it live in project {project}. I have no git here: \
+                 roll holds the code. First code_create_repo under owner {owner}, named {name} (private unless I \
+                 say). Write the smallest app that does what I asked and runs as one container (a Dockerfile, or a \
                  package.json, requirements.txt or go.mod roll apps can build from; it listens on $PORT), and land \
-                 it with code_land: repo {owner}/{name}, base the head code_create_repo answered, a message, and \
-                 files. Never put a credential in a file: a value I give you goes in later as a variable \
+                 it with code_land: repo {owner}/{name}, a message and files, and no base (the repo is empty). \
+                 Never put a credential in a file: a value I give you goes in later as a variable \
                  (apps_set_variables) or stays in roll secrets. Then apps_create_service in project {project}, \
                  named {name}, with a source of kind \"repo\" whose repo is {owner}/{name} as one \"owner/name\" \
-                 string: a new service has no users yet, so its first deploy is production's. Follow it with apps_wait_deploy. If the build \
-                 or start fails, read apps_deploy_logs, fix the files, land again (base: the changeset the last \
-                 land answered) and wait again; after three failed tries, stop and show me the error. When it's \
-                 live, tell me its URL (apps_get_environment) and what you built. Changes after that are lands \
-                 into {owner}/{name}: production follows its default branch, so say what each one changes \
-                 before you land it.",
+                 string: a new service has no users yet, so its first deploy is production's. Follow it with \
+                 apps_wait_deploy. If the build or start fails, read apps_deploy_logs, fix the files, land again \
+                 (base: the changeset the last land answered) and wait again; after three failed tries, stop and \
+                 show me the error. When it's live, tell me its URL (apps_get_environment) and what you built. \
+                 Changes after that are lands into {owner}/{name}: production follows its default branch, so say \
+                 what each one changes before you land it.",
                 project = a("project"),
                 owner = a("owner"),
                 name = a("name"),
