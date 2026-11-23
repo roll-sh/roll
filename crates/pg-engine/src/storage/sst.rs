@@ -2046,6 +2046,7 @@ impl Block {
     /// (less its version, when stored), made in the batch: no `BlockPos` key per entry. `pos`
     /// ends on the first entry not taken (or past the end). How many it took, and the last
     /// one's version.
+    #[inline(always)]
     pub fn run_rows(&self, pos: &mut BlockPos, ts: u64, max: usize, resolve: bool, batch: &mut super::batch::RowBatch) -> (usize, u64) {
         debug_assert!(!self.is_cols());
         self.run_rows_in::<false>(pos, ts, max, resolve, batch, 0)
