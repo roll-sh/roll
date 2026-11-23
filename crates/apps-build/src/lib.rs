@@ -343,6 +343,22 @@ pub fn plan(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
             p.functions.push("edge".into());
         }
         p.edge = found;
+    } else if !own_dockerfile && p.start.is_some() && overrides.builder != Builder::Functions {
+        // Middleware for any web service (Vercel's Routing Middleware, Netlify's edge functions on
+        // a server's routes): the same files, run before the service by its functions service.
+        // Next.js runs its own middleware.ts.
+        let (mut found, notes) = edge::find(tree);
+        if p.framework.as_deref() == Some("next") {
+            found.retain(|f| f.kind != edge::EdgeKind::Vercel);
+        }
+        p.notes.extend(notes);
+        for f in &found {
+            p.notes.push(format!("{}: an edge function on {}, run before the service by its functions service (Run its functions)", f.file, f.paths.join(", ")));
+        }
+        if !found.is_empty() {
+            p.functions.push("edge".into());
+        }
+        p.edge = found;
     }
     // Vercel's crons, whatever builds it (a Next.js app's usually).
     if let Some(text) = tree.read("vercel.json").and_then(|b| String::from_utf8(b).ok()) {

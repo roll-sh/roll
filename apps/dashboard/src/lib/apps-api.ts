@@ -18,6 +18,17 @@ export interface Prices {
   stored_gb_month: number;
 }
 
+/** What a service would cost at most (`POST /v1/apps/quote`), in US dollars at roll's prices. */
+export interface Quote {
+  instance_hour: number;
+  idle_hour: number;
+  month: { least: number; most: number };
+  scales_to_zero: boolean;
+  currency: "USD";
+  note: string;
+  prices: Prices;
+}
+
 export interface Overview {
   services: Service[];
   runtime: "docker" | "fargate";
@@ -1513,6 +1524,7 @@ export interface LogQuery {
 export const appsApi = {
   overview: () => call<Overview>("GET", "/v1/apps"),
   plan: (req: PlanRequest) => call<Plan>("POST", "/v1/apps/plan", req),
+  quote: (run: Partial<Run>) => call<Quote>("POST", "/v1/apps/quote", { run }),
   /** The folders of a repo's or a Git URL's tree that build on their own (a monorepo's apps). */
   roots: (req: { repo: string } | { git: string; branch?: string; git_login?: { username: string; password: string } }) => call<{ roots: RootCandidate[] }>("POST", "/v1/apps/plan", { ...req, roots: true }),
   /** The project as roll.toml: `databases` names what its services link (`{"postgres:<id>": "db"}`). */
