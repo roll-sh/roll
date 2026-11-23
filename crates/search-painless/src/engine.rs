@@ -901,7 +901,9 @@ impl<'s> Instance<'s> {
             Err(panic) => {
                 self.stack.clear();
                 self.state.begin_document();
-                return Err(ScriptError::internal(&prog.source, &*panic));
+                let e = crate::guard::outside(|| ScriptError::internal(&prog.source, &*panic));
+                drop(panic);
+                return Err(e);
             }
         };
         // a recursion that could not report its overflow (map key hashing, …) fails the run
@@ -909,20 +911,24 @@ impl<'s> Instance<'s> {
             Some(t) if r.is_ok() => Err(t),
             _ => r,
         };
+        // the error the host gets is made outside the account and the exception freed inside
+        // it, as is this document's `_source`: an execution a host call started (a runtime
+        // field's) leaves its caller neither
+        let r = match r {
+            Ok(v) => Ok(v),
+            Err(t) => Err(crate::guard::outside(|| script.runtime_error(&t))),
+        };
+        self.state.source = None;
         // the host hears what the execution keeps (values stored in `params`, a scripted
         // metric's state, caches), or gives back
         let delta = crate::guard::MemoryScope::unreported();
         drop(memory);
-        let r = match delta {
+        match delta {
             0 => r,
             _ => match host.script_memory(delta) {
-                Err(e) if r.is_ok() => Err(crate::vm::memory_refused(e)),
+                Err(e) if r.is_ok() => Err(script.runtime_error(&crate::vm::memory_refused(e))),
                 _ => r,
             },
-        };
-        match r {
-            Ok(v) => Ok(v),
-            Err(t) => Err(script.runtime_error(&t)),
         }
     }
 }

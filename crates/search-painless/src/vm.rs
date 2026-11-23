@@ -120,6 +120,28 @@ pub fn ise(msg: impl Into<String>) -> Thrown {
 pub fn uoe() -> Thrown {
     Throw::new(cls::UNSUPPORTED_OPERATION_EXCEPTION, None)
 }
+/// A copy of an exception built outside the running execution's account
+/// ([`crate::guard::paused`]), charged as it is made; the original is freed outside the account
+/// too. (Library exceptions only: a script's own exception object isn't carried over.)
+pub fn recharged(t: Thrown) -> Thrown {
+    let copy = Box::new(Throw {
+        class: t.class,
+        message: t.message.clone(),
+        frames: t.frames.clone(),
+        offset: t.offset,
+        catchable: t.catchable,
+        es_type: t.es_type,
+        metadata: t.metadata.clone(),
+        object: None,
+        status: t.status,
+        es_root: t.es_root,
+        cause_fields: t.cause_fields.clone(),
+        error_offset: t.error_offset,
+    });
+    crate::guard::paused(|| drop(t));
+    copy
+}
+
 /// A memory breaker of the host refused what the script holds: a `circuit_breaking_exception`
 /// the script cannot catch, reported like the regex breaker's.
 pub fn memory_refused(e: crate::host::MemoryRefused) -> Thrown {
@@ -633,7 +655,7 @@ impl<'a> Vm<'a> {
             self.st.cancel_poll -= 1;
             if self.st.cancel_poll == 0 {
                 self.st.cancel_poll = CANCELLATION_POLL_INTERVAL;
-                crate::guard::paused(|| self.host.check_cancelled()).map_err(cancelled_error)?;
+                crate::host::call(|| self.host.check_cancelled()).map_err(cancelled_error)?;
             }
         }
         let base = self.stack.len();
@@ -823,7 +845,7 @@ impl<'a> Vm<'a> {
         if let Some(t) = crate::guard::take_pending() {
             return Err(t);
         }
-        crate::guard::paused(|| self.host.check_cancelled()).map_err(cancelled_error)
+        crate::host::call(|| self.host.check_cancelled()).map_err(cancelled_error)
     }
 
     /// The execution has used up the room its account gave it: past the limit it fails,
@@ -834,7 +856,7 @@ impl<'a> Vm<'a> {
         crate::guard::refill(0)?;
         let delta = crate::guard::MemoryScope::unreported();
         if delta != 0 {
-            crate::guard::paused(|| self.host.script_memory(delta)).map_err(memory_refused)?;
+            self.host.script_memory(delta).map_err(memory_refused)?;
         }
         Ok(())
     }

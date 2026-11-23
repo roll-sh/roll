@@ -495,14 +495,25 @@ fn host_allocations_are_not_the_scripts() {
 }
 
 /// A host that hands scripts fresh data on every call: a 64 KiB `_source` and stored field.
-struct FreshData;
+/// After 3,000 calls it has nothing more, so a broken guard fails the test's assertions
+/// instead of taking the machine's memory.
+struct FreshData {
+    calls: u32,
+}
+
+impl FreshData {
+    fn more(&mut self) -> bool {
+        self.calls += 1;
+        self.calls <= 3000
+    }
+}
 
 impl Host for FreshData {
     fn source(&mut self) -> Option<Value> {
-        Some(Value::from_json_map(&json!({ "body": "x".repeat(64 << 10) })))
+        self.more().then(|| Value::from_json_map(&json!({ "body": "x".repeat(64 << 10) })))
     }
     fn stored_field(&mut self, _field: &str) -> Result<Option<Vec<Value>>, HostError> {
-        Ok(Some(vec![Value::string("y".repeat(64 << 10))]))
+        Ok(self.more().then(|| vec![Value::string("y".repeat(64 << 10))]))
     }
 }
 
@@ -521,7 +532,7 @@ fn host_data_gives_no_room() {
         let script = e.compile(src, Context::Score).unwrap();
         let mut inst = script.instance();
         inst.set_params(&json!({}));
-        let (r, grew) = peak_growth(|| inst.execute_f64(&mut FreshData).map_err(|e| e.to_response()));
+        let (r, grew) = peak_growth(|| inst.execute_f64(&mut FreshData { calls: 0 }).map_err(|e| e.to_response()));
         let err = r.unwrap_err();
         assert_eq!(cause(&err).0, "painless_error", "{src}: {err}");
         assert!(err["error"]["caused_by"]["reason"].as_str().unwrap().starts_with("script allocation limit exceeded"), "{src}: {err}");
@@ -559,4 +570,76 @@ fn scripts_inside_host_calls_count() {
     let err = inst.execute_f64(&mut host).unwrap_err().to_response();
     assert_eq!(cause(&err).0, "painless_error", "{err}");
     assert!(host.kept.len() < 10, "{} runtime values kept", host.kept.len());
+}
+
+/// A host whose doc values fail with a 64 KiB reason, for the first 500 reads.
+struct FailingField {
+    calls: u32,
+}
+
+impl Host for FailingField {
+    fn doc_values(&mut self, _field: &str, out: &mut DocValues) -> Result<bool, HostError> {
+        self.calls += 1;
+        if self.calls > 500 {
+            out.clear(DocKind::Long);
+            out.longs.push(1);
+            return Ok(true);
+        }
+        Err(HostError::illegal_argument("x".repeat(64 << 10)))
+    }
+}
+
+/// A host's error is built outside the account: a script that catches and drops it in a loop
+/// gets back only what the copy it was handed cost, and still meets the limit.
+#[test]
+fn caught_host_errors_give_no_room() {
+    let e = limited(4 << 20);
+    let script = e.compile("List l = []; while (true) { try { def v = doc['body'].value; } catch (Exception x) {} l.add(new byte[200]); }", Context::Score).unwrap();
+    let mut inst = script.instance();
+    inst.set_params(&json!({}));
+    let (r, grew) = peak_growth(|| inst.execute_f64(&mut FailingField { calls: 0 }).map_err(|e| e.to_response()));
+    let err = r.unwrap_err();
+    assert_eq!(cause(&err).0, "painless_error", "{err}");
+    assert!(grew < 10 << 20, "the thread held {grew} bytes");
+}
+
+/// A host whose `field()` reads a runtime field: another script on a host of its own (with an
+/// 8 MiB `_source`), whose errors it lets go as `on_script_error: continue` does, charging what
+/// its scripts hold to a breaker like a search's.
+struct LenientRuntime<'a> {
+    script: &'a search_painless::Script,
+    held: i64,
+}
+
+impl Host for LenientRuntime<'_> {
+    fn field_values(&mut self, _field: &str, out: &mut DocValues) -> Result<bool, HostError> {
+        let mut inst = self.script.instance();
+        inst.set_params(&json!({}));
+        let _ = inst.execute(&mut LargeSource);
+        out.clear(DocKind::Long);
+        out.longs.push(1);
+        Ok(true)
+    }
+    fn script_memory(&mut self, delta: i64) -> Result<(), MemoryRefused> {
+        self.held += delta;
+        Ok(())
+    }
+}
+
+/// An execution a host call starts leaves its caller nothing it doesn't keep: not its error
+/// (a runtime field throwing a 64 KiB message on every document), nor the `_source` it read,
+/// which its own limit leaves out.
+#[test]
+fn runtime_fields_leave_their_caller_nothing() {
+    let e = limited(4 << 20);
+    let throws = e.compile("String s = 'x'; while (s.length() < 65536) { s = s + s; } throw new IllegalArgumentException(s);", Context::Score).unwrap();
+    let reads = e.compile("return params['_source']['big'].length()", Context::Score).unwrap();
+    for (inner, n) in [(&throws, 1000), (&reads, 3)] {
+        let outer = e.compile(&format!("for (int i = 0; i < {n}; ++i) {{ field('rt'); }} return 1"), Context::Score).unwrap();
+        let mut inst = outer.instance();
+        inst.set_params(&json!({}));
+        let mut host = LenientRuntime { script: inner, held: 0 };
+        assert_eq!(inst.execute_f64(&mut host).map_err(|e| e.to_response()).unwrap(), 1.0);
+        assert!(host.held < 1 << 20, "the breaker holds {}", host.held);
+    }
 }

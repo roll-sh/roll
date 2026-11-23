@@ -228,6 +228,31 @@ impl HostError {
     }
 }
 
+/// Calls the host outside the running execution's account ([`crate::guard::paused`]). An error
+/// it returns was built there, uncharged: the script gets a charged copy, and the original is
+/// freed outside the account too, so a script that catches and drops it gets back only what was
+/// charged.
+#[inline(always)]
+pub(crate) fn call<T: Copy>(f: impl FnOnce() -> Result<T, HostError>) -> Result<T, HostError> {
+    let mut failed = None;
+    let ok = crate::guard::paused(|| match f() {
+        Ok(v) => Some(v),
+        Err(e) => {
+            failed = Some(e);
+            None
+        }
+    });
+    match (ok, failed) {
+        (Some(v), _) => Ok(v),
+        (None, Some(e)) => {
+            let copy = HostError { kind: e.kind, reason: e.reason.clone(), frames: e.frames.clone() };
+            crate::guard::paused(|| drop(e));
+            Err(copy)
+        }
+        (None, None) => unreachable!(),
+    }
+}
+
 /// A doc-values buffer filled by the host outside the execution's account ([`crate::guard::paused`]),
 /// held by engine code only for the call that reads it: what the host put in was never charged,
 /// so it is freed outside the account too.

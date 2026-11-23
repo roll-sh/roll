@@ -737,7 +737,7 @@ fn random_binding(vm: &mut Vm, a: &[Value], field: bool) -> Result<Rc<RandomScor
         if let Some(f) = &field_name {
             // the doc values are looked up first
             let mut dv = crate::host::HostBuf::default();
-            match crate::guard::paused(|| vm.host.doc_values(f, &mut dv)) {
+            match crate::host::call(|| vm.host.doc_values(f, &mut dv)) {
                 Ok(true) => {}
                 Ok(false) => {
                     let mut t = super::doc::no_field(f);

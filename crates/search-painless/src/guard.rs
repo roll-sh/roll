@@ -28,7 +28,10 @@
 //!   back and the account is what the execution holds, not what it ever allocated. Sizes a
 //!   script controls are checked against the room before they are allocated ([`check_bytes`]);
 //!   small allocations are caught when the interpreter next leaves its arithmetic loop
-//!   ([`memory_exhausted`]). Past the limit the script fails like Elasticsearch 9.5's own
+//!   ([`memory_exhausted`]). Host calls run outside the account ([`paused`]) unless their result
+//!   is the script's ([`hosted`]); frees of data the execution didn't make can offset its own
+//!   allocations but never take its balance below zero, so they never let it grow the thread by
+//!   more than the limit. Past the limit the script fails like Elasticsearch 9.5's own
 //!   per-execution guard (`script.painless.max_allocation_bytes`): an uncatchable
 //!   `painless_error`.
 
@@ -388,6 +391,9 @@ thread_local! {
     /// What every closed scope on this thread held at its end, summed: a host call that ran a
     /// script (a runtime field's) passes the script's memory on through [`paused`].
     static NESTED: Cell<i64> = const { Cell::new(0) };
+    /// Host calls running ([`paused`], [`hosted`]): the account isn't looked at inside them
+    /// (an execution they start opens its own).
+    static HOSTING: Cell<u32> = const { Cell::new(0) };
 }
 
 #[derive(Clone, Copy)]
@@ -475,6 +481,7 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Counting<A> {
 pub struct MemoryScope {
     prev_room: i64,
     prev_cap: i64,
+    prev_hosting: u32,
     prev: Account,
     /// The account is this thread's: a scope can't move to another.
     _thread: std::marker::PhantomData<*const ()>,
@@ -487,8 +494,9 @@ impl MemoryScope {
         let room = limit.min(STEP);
         let prev_room = ROOM.replace(room);
         let prev_cap = CAP.replace(room);
+        let prev_hosting = HOSTING.replace(0);
         let prev = ACCOUNT.replace(Account { active: true, limit, granted: room, forgiven: 0, exempt: 0, checked: 0, reported: 0 });
-        MemoryScope { prev_room, prev_cap, prev, _thread: std::marker::PhantomData }
+        MemoryScope { prev_room, prev_cap, prev_hosting, prev, _thread: std::marker::PhantomData }
     }
 
     /// Bytes the execution really holds now (allocations minus frees since it began).
@@ -512,25 +520,36 @@ impl Drop for MemoryScope {
         let held = MemoryScope::held();
         ACCOUNT.set(self.prev);
         CAP.set(self.prev_cap);
+        HOSTING.set(self.prev_hosting);
         ROOM.set(self.prev_room.wrapping_sub(held));
         NESTED.set(NESTED.get().wrapping_add(held));
     }
 }
 
-/// Runs a call into the host outside the running execution's account: what the host allocates
-/// or frees for itself (doc-values buffers the instance keeps, a segment's fielddata) is not the
-/// script's. Only for calls whose allocations the script can't keep: they are never charged,
-/// so they must never be freed inside an execution either. What a script the call runs (a
-/// runtime field's) holds at its end still counts.
+/// Runs code outside the running execution's account: what it allocates or frees (a host's
+/// doc-values buffers and caches, a segment's fielddata) is not the script's. Nothing built
+/// inside may reach the script or be freed inside an execution, since it was never charged: the
+/// result is `Copy`, a host's error goes through [`crate::host::call`], anything else through
+/// [`crate::vm::recharged`]. What a script started inside (a runtime field's) holds at its end
+/// still counts.
 #[inline(always)]
-pub fn paused<R>(f: impl FnOnce() -> R) -> R {
+pub fn paused<R: Copy>(f: impl FnOnce() -> R) -> R {
+    outside(f)
+}
+
+/// [`paused`] for a value made outside the account on purpose, to leave the execution: an error
+/// an execution hands its host, so an execution a host call started leaves its caller nothing.
+#[inline(always)]
+pub fn outside<R>(f: impl FnOnce() -> R) -> R {
     struct Restore(i64, i64);
     impl Drop for Restore {
         #[inline(always)]
         fn drop(&mut self) {
             ROOM.set(self.0.wrapping_sub(NESTED.get().wrapping_sub(self.1)));
+            HOSTING.set(HOSTING.get() - 1);
         }
     }
+    HOSTING.set(HOSTING.get() + 1);
     let _restore = Restore(ROOM.get(), NESTED.get());
     f()
 }
@@ -540,9 +559,18 @@ pub fn paused<R>(f: impl FnOnce() -> R) -> R {
 /// the script's, but the running execution's limit leaves it out. Callers make sure the result
 /// is made once per document, or the exemption would grow with every call.
 pub fn hosted<R>(f: impl FnOnce() -> R) -> R {
-    let before = ROOM.get();
+    struct Hosting;
+    impl Drop for Hosting {
+        fn drop(&mut self) {
+            HOSTING.set(HOSTING.get() - 1);
+        }
+    }
+    let before = MemoryScope::held();
+    HOSTING.set(HOSTING.get() + 1);
+    let hosting = Hosting;
     let r = f();
-    let grew = before.wrapping_sub(ROOM.get());
+    drop(hosting);
+    let grew = MemoryScope::held().wrapping_sub(before);
     let mut a = ACCOUNT.get();
     if a.active && grew > 0 {
         a.exempt = a.exempt.saturating_add(grew);
@@ -566,6 +594,10 @@ pub fn refill(need: i64) -> Result<(), Thrown> {
     let mut a = ACCOUNT.get();
     if !a.active {
         ROOM.set(IDLE_ROOM);
+        return Ok(());
+    }
+    // inside a host call the account isn't the script's to look at (the call restores the room)
+    if HOSTING.get() > 0 {
         return Ok(());
     }
     let room = ROOM.get();
