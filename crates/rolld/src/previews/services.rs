@@ -893,6 +893,15 @@ impl roll_previews::ports::Apps for Services {
         self.runtime.forward(preview, service, port).await
     }
 
+    /// A `roll.toml` service's page, read through the runtime (roll apps' services answer at their
+    /// own URL, on `pv-…`).
+    async fn fetch(&self, preview: &str, service: &str, path: &str, head: bool) -> anyhow::Result<Option<roll_previews::ports::Fetched>> {
+        if self.apps.find(preview, service).await?.is_some() {
+            return Ok(None);
+        }
+        self.runtime.fetch(preview, service, path, head).await
+    }
+
     /// A `roll.toml` service can stand in for a laptop's process (roll apps' services are served by
     /// roll apps' proxy).
     async fn can_swap(&self, preview: &str, service: &str) -> anyhow::Result<bool> {
