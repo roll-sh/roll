@@ -1136,6 +1136,9 @@ impl Runtime {
         }
         let page = req.method() == axum::http::Method::GET && is_page_load(req);
         let asked = if page { None } else { skew_asked(req, cookie) };
+        if !page && asked.is_none() {
+            return (service, None);
+        }
         match self.store.skew(preview, &service, asked.as_deref()) {
             Ok(Some((current, _))) if page => (service, Some(current)),
             Ok(Some((_, true))) => (format!("{service}@{}", asked.unwrap_or_default()), None),

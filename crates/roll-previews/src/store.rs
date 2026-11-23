@@ -1043,7 +1043,7 @@ impl Store {
             let current = c
                 .query_row("SELECT revision FROM services WHERE preview_id = ? AND name = ? AND skew = 1 AND revision IS NOT NULL AND revision <> ''", params![id, name], |r| r.get::<_, String>(0))
                 .optional()?;
-            let Some(current) = current else { return Ok(None) };
+            let Some(current) = current else { return Ok::<_, Error>(None) };
             let earlier = match asked {
                 Some(a) if a != current => c.query_row("SELECT 1 FROM pinned WHERE preview_id = ? AND service = ? AND revision = ? AND at >= ?", params![id, name, a, since], |_| Ok(())).optional()?.is_some(),
                 _ => false,
