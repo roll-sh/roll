@@ -638,10 +638,23 @@ alone, as at the gate.
     with roll's approval page to open. A deploy or a job (`apps_get_deploy`, `apps_get_job` and their
     `apps_wait_*` twins) shows too: an object's own fields (status, commit) above its list (the
     steps).
+  - **Views that refresh themselves:** an answer that's still changing (a deploy building, a job
+    or a tasks run running, a preview being made, a call waiting for a person) carries
+    `_meta["roll/pending"]`, `{tool, arguments}`: the read that shows it again. That's the tool's
+    own `until` (what MCP tasks wait on), or the one of the waiting tool on the same `GET` route
+    (`apps_get_deploy` refreshes as `apps_wait_deploy` waits). Any wait in its arguments is cut short
+    (20 s, `10s`). A call waiting for a person names `access_wait_approval` on its approval, when the
+    connection has that tool. In a host with `serverTools`, the view calls that read through the
+    host every 2 s, slowing to 10 s, paused while it's hidden. It stops when the answer settles, when
+    a read fails (the last answer stays), or after 10 minutes. The header says it's live (an accent
+    dot, still under reduced motion) or when it settled. Unlike Vercel's deployment card, roll
+    needs no tool only the app sees: the read is an ordinary tool, decided by the gate as the
+    connection's, and a test holds every tool roll can name there to `GET`.
     - **Declaring it:** a 2026-07-28 request on itself; in `initialize`, the session id carries it
       (`~ui.` after its prefix), as URL elicitation does.
-    - **Safety:** the view has no network (its resource declares no domains), writes every value
-      as text, and calls no tools. It only asks the host to open an `http(s)` link roll answered.
+    - **Safety:** the view has no network (its resource declares no domains) and writes every value
+      as text. The only tool it calls is the read roll named on a changing answer, with roll's
+      arguments. Otherwise it only asks the host to open an `http(s)` link roll answered.
       An approval is never decided from a view, because an agent's token could drive it.
     - **Checked:** `a_host_that_renders_apps_gets_the_table_view` (roll-mcp); the table in
       ext-apps' reference host (`examples/basic-host` v2.0.4, `users-live/host-shot.mjs`); the
