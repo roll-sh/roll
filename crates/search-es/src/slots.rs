@@ -111,9 +111,10 @@ struct State {
     owners: HashMap<String, usize>,
     clusters: HashMap<String, usize>,
     waiting: VecDeque<Waiter>,
-    /// Slots reserved by cluster ([`Slots::reserve`]), counted in the holds above, that its next
-    /// [`Slots::try_take`] uses.
-    reserved: HashMap<String, usize>,
+    /// Slots reserved by cluster ([`Slots::reserve`]), counted in the holds above under the
+    /// owner that reserved each (one entry per reservation), that its next [`Slots::try_take`]
+    /// uses.
+    reserved: HashMap<String, Vec<String>>,
 }
 
 /// Whether `w` could take a slot now: its owner under its cap, and its cluster too (a 429'd
@@ -173,15 +174,14 @@ impl std::fmt::Debug for Reservation {
 impl Drop for Reservation {
     fn drop(&mut self) {
         let mut st = self.0.slots.state.lock();
-        match st.reserved.get_mut(&self.0.key) {
-            Some(n) => {
-                *n -= 1;
-                if *n == 0 {
-                    st.reserved.remove(&self.0.key);
-                }
-            }
-            // Used: the permit that took it frees the slot.
-            None => self.0.armed = false,
+        // Unused while its owner's entry is still there: dropping it frees the slot. Used, the
+        // permit that took it (under this owner) frees it.
+        let unused = st.reserved.get_mut(&self.0.key).and_then(|owners| owners.iter().position(|o| *o == self.0.owner).map(|i| owners.swap_remove(i))).is_some();
+        if st.reserved.get(&self.0.key).is_some_and(Vec::is_empty) {
+            st.reserved.remove(&self.0.key);
+        }
+        if !unused {
+            self.0.armed = false;
         }
     }
 }
@@ -309,7 +309,7 @@ impl Slots {
     /// uses it; refused as [`Slots::try_take`] is.
     pub fn reserve(self: &Arc<Self>, key: &str, owner: &str) -> Result<Reservation, Full> {
         let permit = self.take_or_wait(key, owner, None, None)?;
-        *self.state.lock().reserved.entry(key.to_string()).or_default() += 1;
+        self.state.lock().reserved.entry(key.to_string()).or_default().push(owner.to_string());
         Ok(Reservation(permit))
     }
 
@@ -333,13 +333,13 @@ impl Slots {
     fn take_or_wait(self: &Arc<Self>, key: &str, owner: &str, alive: Option<Check>, wake: Option<Wake>) -> Result<Permit, Full> {
         let passive = alive.is_none();
         let mut st = self.state.lock();
-        // A slot this cluster reserved is its.
-        if passive && let Some(n) = st.reserved.get_mut(key) {
-            *n -= 1;
-            if *n == 0 {
+        // A slot this cluster reserved is its, held under the owner that reserved it (the counts
+        // went up under that owner, whatever owner this call names).
+        if passive && let Some(reserver) = st.reserved.get_mut(key).and_then(Vec::pop) {
+            if st.reserved.get(key).is_some_and(Vec::is_empty) {
                 st.reserved.remove(key);
             }
-            return Ok(Permit { slots: self.clone(), key: key.to_string(), owner: owner.to_string(), armed: true });
+            return Ok(Permit { slots: self.clone(), key: key.to_string(), owner: reserver, armed: true });
         }
         let pruned = self.prune(&mut st);
         let Some(why) = self.refusal(&mut st, key, owner, passive) else {
@@ -372,6 +372,11 @@ impl Slots {
     /// The slots `key` holds now.
     pub fn held(&self, key: &str) -> usize {
         self.state.lock().clusters.get(key).copied().unwrap_or(0)
+    }
+
+    /// The slots `owner`'s clusters hold now.
+    pub fn held_by(&self, owner: &str) -> usize {
+        self.state.lock().owners.get(owner).copied().unwrap_or(0)
     }
 
     /// `key` wants no slot any more (nothing pending): it leaves the queue, and the next waiter
@@ -546,6 +551,23 @@ mod tests {
         // A reservation dropped unused frees its slot.
         drop(slots.reserve("wiki", "dave").expect("Dave's turn"));
         assert_eq!(slots.held("wiki"), 0);
+    }
+
+    /// A reservation taken by a call naming another owner (the migration names the cluster's
+    /// catalog owner, the `_reindex` its loaded config's): the slot stays counted under the owner
+    /// that reserved it, and both owners' counts return to zero.
+    #[test]
+    fn a_reservation_used_under_another_owner_is_released_under_its_own() {
+        let slots = Slots::new(Caps { node: 4, owner: 2, cluster: 2 });
+        let reserved = slots.reserve("shop", "alice").unwrap();
+        let task = slots.try_take("shop", "cluster shop").expect("the reserved slot");
+        assert_eq!((slots.held_by("alice"), slots.held_by("cluster shop"), slots.held("shop")), (1, 0, 1));
+        drop(reserved);
+        drop(task);
+        assert_eq!((slots.held_by("alice"), slots.held_by("cluster shop"), slots.held("shop")), (0, 0, 0));
+        // Unused, it's released under its owner too.
+        drop(slots.reserve("shop", "alice").unwrap());
+        assert_eq!((slots.held_by("alice"), slots.held("shop")), (0, 0));
     }
 
     /// A waiter whose job stopped being runnable (canceled, its connector gone) without the
