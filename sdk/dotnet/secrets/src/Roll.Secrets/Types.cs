@@ -59,14 +59,21 @@ public sealed record Lease(
 /// </summary>
 public sealed class SecretValues
 {
-    internal SecretValues(IDictionary<string, string> values, IList<Problem> problems, IList<string> leases, IList<string> dynamic, IList<string> linked)
+    internal SecretValues(IDictionary<string, string> values, IList<Problem> problems, IList<string> leases, IList<string> dynamic, IList<string> linked,
+        IList<string>? withheld = null, string? digest = null)
     {
         Values = new ReadOnlyDictionary<string, string>(new Dictionary<string, string>(values));
         Problems = problems.ToArray();
         Leases = leases.ToArray();
         Dynamic = dynamic.ToArray();
         Linked = linked.ToArray();
+        Withheld = withheld?.ToArray() ?? Array.Empty<string>();
+        Digest = digest ?? "";
     }
+
+    /// <summary>These values with <paramref name="values"/> in place of their own, read against <paramref name="digest"/>.</summary>
+    internal SecretValues With(IDictionary<string, string> values, string digest) =>
+        new(values, Problems.ToList(), Leases.ToList(), Dynamic.ToList(), Linked.ToList(), Withheld.ToList(), digest);
 
     /// <summary>An answer's values, or <paramref name="plain"/> in place of its <c>values</c> (a sealed resolve's, opened).</summary>
     internal static SecretValues Parse(JsonElement o, IDictionary<string, string>? plain = null)
@@ -80,7 +87,8 @@ public sealed class SecretValues
                 problems.Add(new Problem(Json.Str(p, "key") ?? "", Json.Str(p, "problem") ?? ""));
             }
         }
-        return new SecretValues(values, problems, Json.Strings(o, "leases"), Json.Strings(o, "dynamic"), Json.Strings(o, "linked"));
+        return new SecretValues(values, problems, Json.Strings(o, "leases"), Json.Strings(o, "dynamic"), Json.Strings(o, "linked"),
+            Json.Strings(o, "withheld"), Json.Str(o, "digest"));
     }
 
     /// <summary>Every key's value.</summary>
@@ -103,6 +111,15 @@ public sealed class SecretValues
 
     /// <summary>Keys that come from a link to a resource.</summary>
     public IReadOnlyList<string> Linked { get; }
+
+    /// <summary>Sensitive keys left out: only roll's runtimes and syncs read them.</summary>
+    public IReadOnlyList<string> Withheld { get; }
+
+    /// <summary>
+    /// The folder's digest the values were read against, when the read asked for it (a cached or
+    /// delta read does); <c>""</c> otherwise.
+    /// </summary>
+    public string Digest { get; }
 
     /// <summary>Names keys, never values.</summary>
     public override string ToString() =>
@@ -163,7 +180,7 @@ internal static class Json
         return map;
     }
 
-    /// <summary>An object of strings and numbers.</summary>
+    /// <summary>An object of strings, numbers and maps of strings.</summary>
     public static byte[] Write(params (string Name, object? Value)[] fields)
     {
         using var buf = new MemoryStream();
@@ -184,6 +201,14 @@ internal static class Json
                         break;
                     case long l:
                         w.WriteNumber(name, l);
+                        break;
+                    case IReadOnlyDictionary<string, string> m:
+                        w.WriteStartObject(name);
+                        foreach (var (k, v) in m)
+                        {
+                            w.WriteString(k, v);
+                        }
+                        w.WriteEndObject();
                         break;
                     default:
                         throw new ArgumentException($"can't write {value.GetType().Name}");

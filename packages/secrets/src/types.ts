@@ -278,7 +278,9 @@ export type ChangeRequest = {
   action?: "delete_environment";
 };
 /** Something that stops working when an environment goes: a value elsewhere in the project that references it (`key`), or a folder here or in another project (`project`) that imports from it. Names only. */
-export type EnvironmentBreak = { project?: string; environment: string; path: string; key?: string; via: "reference" | "import" };
+/** What stops working when an environment goes: a key referencing it, a folder importing it, a roll apps service or agents sandbox reading it, a sync of it, or an identity or token whose scope names it.
+ * `name`: the service, sandbox, identity or token's, or a sync's `kind target` (an identity's or token's, and its `id`, only for a project admin). */
+export type EnvironmentBreak = { project?: string; environment: string; path: string; key?: string; via: "reference" | "import" | "service" | "sandbox" | "sync" | "identity" | "token"; name?: string; id?: string };
 /** `GET …/environments/{env}/deletion`: what deleting it would do, before it's asked. */
 export type EnvironmentDeletion = { environment: string; secrets: number; window_days: number; confirm: boolean; needs_request: boolean; approvals: number; breaks: EnvironmentBreak[] };
 /** `DELETE …/environments/{env}`: null for an ephemeral one (gone), the window for a standard one, or the change request that deletes a protected one once approved. */

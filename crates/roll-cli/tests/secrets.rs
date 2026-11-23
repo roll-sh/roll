@@ -953,3 +953,23 @@ async fn a_revoked_logins_local_agent_answers_a_refusal_within_one_poll() {
     assert_eq!(status, 403, "{body}");
     assert!(body.contains("refused the agent's login") && !body.contains("fake-"), "{body}");
 }
+
+/// `envs rm` says what a delete would do before it's confirmed, and what the server did: a
+/// protected environment with approvals opens a change request; another is kept for the window
+/// and `envs recover` brings it back (`recover` lists it apart from projects).
+#[tokio::test]
+async fn envs_rm_previews_and_says_what_happened_and_envs_recover_brings_one_back() {
+    let Server { api, .. } = start().await;
+    ok(&api, &[], &["secrets", "-p", "shop", "-e", "staging", "set", "HOST=db.internal"], None).await;
+    ok(&api, &[], &["secrets", "-p", "shop", "envs", "protect", "production", "--approvals", "1"], None).await;
+    let unconfirmed = roll(&api, &[], &["secrets", "-p", "shop", "envs", "rm", "production"], None).await;
+    assert!(unconfirmed.code != Some(0) && unconfirmed.stderr.contains("Deleting production") && unconfirmed.stderr.contains("--yes"), "{}", unconfirmed.stderr);
+    let requested = ok(&api, &[], &["secrets", "-p", "shop", "envs", "rm", "production", "--yes"], None).await;
+    assert!(requested.contains("Opened change request") && requested.contains("1 approval"), "{requested}");
+    let kept = ok(&api, &[], &["secrets", "-p", "shop", "envs", "rm", "staging"], None).await;
+    assert!(kept.contains("kept until") && kept.contains("roll secrets envs recover staging"), "{kept}");
+    let listed = ok(&api, &[], &["secrets", "recover"], None).await;
+    assert!(listed.contains("Deleted environments") && listed.contains("shop/staging"), "{listed}");
+    ok(&api, &[], &["secrets", "-p", "shop", "envs", "recover", "staging"], None).await;
+    assert!(ok(&api, &[], &["secrets", "-p", "shop", "-e", "staging", "get", "HOST"], None).await.contains("db.internal"));
+}
