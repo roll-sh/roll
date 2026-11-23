@@ -3159,6 +3159,17 @@ async fn an_s3_repository_bounds_and_checks_what_a_bucket_holds() {
     expect("value bomb", es(reqwest::Method::GET, "/_snapshot/backup/_all", None).await, 500, "values");
     bucket.objects.lock().unwrap().remove(&format!("prod/roll/index-{generation}"));
 
+    // Elasticsearch's repository at base path `roll`, under a roll repository at the bucket's
+    // root (whose own files would be under `roll/`): neither a cleanup nor a snapshot touches it.
+    let root = json!({"type": "s3", "settings": {"bucket": "backups", "endpoint": endpoint, "path_style_access": true}});
+    assert_eq!(es(reqwest::Method::PUT, "/_snapshot/root", Some(root)).await.0, 200);
+    put("roll/index.latest".into(), 20i64.to_be_bytes().to_vec());
+    put("roll/indices/Xq/0/__a".into(), b"shard data".to_vec());
+    expect("cleanup", es(reqwest::Method::POST, "/_snapshot/root/_cleanup", None).await, 500, "isn't roll's");
+    expect("snapshot", es(reqwest::Method::PUT, "/_snapshot/root/s?wait_for_completion=true", Some(json!({"indices": "docs"}))).await, 500, "isn't roll's");
+    assert_eq!(object("roll/index.latest"), 20i64.to_be_bytes());
+    assert_eq!(object("roll/indices/Xq/0/__a"), b"shard data");
+
     // A listing that never ends.
     bucket.endless.store(true, std::sync::atomic::Ordering::Relaxed);
     let cleanup = tokio::time::timeout(Duration::from_secs(60), es(reqwest::Method::POST, "/_snapshot/backup/_cleanup", None)).await;

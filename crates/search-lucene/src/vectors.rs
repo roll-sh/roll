@@ -9,6 +9,7 @@ use crate::codec;
 use crate::fields::{FieldInfos, VectorEncoding};
 use crate::input::Input;
 use crate::{Id, Result, corrupt};
+use std::collections::HashSet;
 
 pub const META_CODEC: &str = "Lucene99FlatVectorsFormatMeta";
 pub const DATA_CODEC: &str = "Lucene99FlatVectorsFormatData";
@@ -36,6 +37,10 @@ impl VectorEntry {
     }
 }
 
+/// What the entries read from `.vemf` may hold per byte of the file, at most (an entry takes
+/// at least 27 bytes of it): [`crate::held_per_byte`].
+pub const HELD_PER_BYTE: u64 = crate::held_per_byte(2 * std::mem::size_of::<(u32, VectorEntry)>(), 27);
+
 /// `.vemf`'s entries (footer checked first). `suffix`: the per-field format's
 /// (`ES94HnswScalarQuantizedVectorsFormat_0`).
 pub fn read_meta(file: &[u8], id: &Id, suffix: &str, fields: &FieldInfos) -> Result<Vec<VectorEntry>> {
@@ -43,6 +48,7 @@ pub fn read_meta(file: &[u8], id: &Id, suffix: &str, fields: &FieldInfos) -> Res
     let mut inp = Input::new(codec::body(file)?);
     codec::check_index_header(&mut inp, META_CODEC, 0, 0, id, suffix)?;
     let mut out = Vec::new();
+    let mut seen = HashSet::new();
     loop {
         let number = inp.i32()?;
         if number == -1 {
@@ -78,6 +84,9 @@ pub fn read_meta(file: &[u8], id: &Id, suffix: &str, fields: &FieldInfos) -> Res
             }
             inp.skip(blocks as usize * 21)?;
             inp.i64()?;
+        }
+        if !seen.insert(info.number) {
+            return corrupt(format!("vector field [{}] listed twice", info.name));
         }
         let e = VectorEntry { field: info.number, encoding, data_offset, data_length, dims, size: size as u32, docs_offset, docs_length, dense_rank_power };
         if (e.size as u64).checked_mul(e.vector_bytes() as u64) != Some(data_length) {

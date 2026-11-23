@@ -19,9 +19,12 @@
 //! sizes are capped by the caller, and every file's CodecUtil checksum is checked
 //! ([`codec::check_footer`], [`codec::Checksum`] for files read as a stream). What a segment's
 //! read holds is charged through [`segment::Files::charge`] before it's fetched or allocated:
-//! small files read whole, stream windows, decompressed chunks, live docs and the doc values
-//! ranges kept; only codec headers of a few dozen bytes go uncharged. No reader does I/O: they
-//! parse byte slices, so the caller decides how bytes arrive and what they cost.
+//! small files while they're read whole, and what parsing them may build (a bound per byte of
+//! the file, each module's `HELD_PER_BYTE`) until the read ends; stream windows; decompressed
+//! chunks; live docs; the doc values and vector ranges kept; and each document's vectors until
+//! it's handed over. Only codec headers of a few dozen bytes aren't. The commit and `.si` files
+//! are read by the caller, which charges them with [`segments::HELD_PER_BYTE`]. No reader does
+//! I/O: they parse byte slices, so the caller decides how bytes arrive and what they cost.
 
 pub mod codec;
 pub mod compound;
@@ -34,6 +37,16 @@ pub mod segment;
 pub mod segments;
 pub mod stored;
 pub mod vectors;
+
+/// What a reader's output may hold per byte of the file it read, at most, given what one item
+/// holds (`item`, map slots counted twice for the tables' spare room) and the fewest bytes of
+/// the file one takes (`min_bytes`). Strings bound it from below: an empty one takes a byte of
+/// the file (its length) and a `String`; a name kept twice (a map's key) costs its bytes again.
+pub(crate) const fn held_per_byte(item: usize, min_bytes: usize) -> u64 {
+    let per_item = item / min_bytes + 1;
+    let per_string = std::mem::size_of::<String>();
+    (if per_item > per_string { per_item } else { per_string }) as u64 + 2
+}
 
 /// What reading a file can fail with.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

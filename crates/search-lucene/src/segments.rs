@@ -9,6 +9,7 @@
 use crate::codec;
 use crate::input::Input;
 use crate::{Error, Id, Result, corrupt};
+use std::collections::HashSet;
 
 /// `org.apache.lucene.util.Version`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -69,6 +70,11 @@ pub struct SegmentInfos {
     pub user_data: Vec<(String, String)>,
 }
 
+/// What a commit's or a `.si`'s parsed form may hold per byte of the file, at most (a segment
+/// takes at least 50 bytes of `segments_N`, and a `.si` is longer than that):
+/// [`crate::held_per_byte`].
+pub const HELD_PER_BYTE: u64 = crate::held_per_byte(std::mem::size_of::<SegmentCommit>() + std::mem::size_of::<SegmentInfo>(), 50);
+
 /// The generation in a `segments_N` file name.
 pub fn generation_of(file_name: &str) -> Option<i64> {
     let g = file_name.strip_prefix("segments_")?;
@@ -100,6 +106,8 @@ pub fn read_commit(file: &[u8], generation: i64) -> Result<SegmentInfos> {
     }
     let min_segment_version = if count > 0 { Some(Version::read_vints(&mut inp)?) } else { None };
     let mut segments = Vec::with_capacity(count as usize);
+    // Lucene never lists a segment twice: a commit that does would have it read again and again.
+    let (mut names, mut ids) = (HashSet::with_capacity(count as usize), HashSet::with_capacity(count as usize));
     for _ in 0..count {
         let name = inp.string()?.to_string();
         let id = inp.id()?;
@@ -133,6 +141,9 @@ pub fn read_commit(file: &[u8], generation: i64) -> Result<SegmentInfos> {
             dv_update_files.push((field, inp.strings()?));
         }
         validate_name(&name)?;
+        if !names.insert(name.clone()) || !ids.insert(id) {
+            return corrupt(format!("segment [{name}] is listed twice"));
+        }
         segments.push(SegmentCommit { name, id, codec, del_gen, del_count, field_infos_gen, dv_gen, soft_del_count, field_infos_files, dv_update_files });
     }
     let user_data = inp.string_map()?;

@@ -25,10 +25,13 @@
 //!   `CopyTarget::index`), as every write of a node that lost a cluster does. A task that panics
 //!   marks its indices failed on the way out, so no owner retries it forever.
 //! - **Bounds.** Memory a shard's read holds is charged to the `request` breaker before it is
-//!   fetched or allocated: the commit, `.si` and other small files (at most 64 MiB each) while
-//!   they're held, read windows, decompressed chunks, live docs, and the doc values and vector
-//!   ranges kept; only codec headers of a few dozen bytes aren't. Each document is charged from
-//!   the moment it is read until it is indexed (at most [`IN_FLIGHT`] wait in the channel, every one of them
+//!   fetched or allocated: the commit, each `.si` and the segment's other small files (at most
+//!   64 MiB each) while they're held and what parsing them may build (a bound per byte of the
+//!   file) while it's kept, read windows, decompressed chunks, live docs, the doc values and
+//!   vector ranges kept, and each document's decoded vectors; only codec headers of a few dozen
+//!   bytes aren't. A `_source` read as SMILE or CBOR, or parsed to put vectors back, is charged
+//!   as its tree is built. Each document is charged from the moment it is read until it is
+//!   indexed (at most [`IN_FLIGHT`] wait in the channel, every one of them
 //!   charged, so the channel's memory is the breaker's, not a count's); a stored fields chunk may
 //!   not decompress past `http.max_content_length` plus a margin; every Lucene file read is
 //!   checksummed; sequence numbers must be in `[0, 2^62)` and primary terms and versions at
@@ -838,17 +841,25 @@ fn source_json(raw: &[u8], budget: &Arc<search_aggs::memory::MemoryBudget>) -> R
             let v = crate::xcontent::smile::parse(raw, crate::xcontent::smile::Limits { depth: 200, charge: &mut charge })?;
             Ok(Bytes::from(v.to_json()))
         }
-        Some(0xBF | 0xA0..=0xBB) => crate::xcontent::cbor::read_cbor(raw).map(|v| Bytes::from(v.to_json())),
+        Some(0xBF | 0xA0..=0xBB) => {
+            let mut held = crate::breaker::Reservation::new(budget.clone());
+            let mut charge = |n: usize| held.add(n as u64, "<elasticsearch_restore>").map_err(|e| e.reason().to_string());
+            crate::xcontent::cbor::read_cbor_charged(raw, &mut charge).map(|v| Bytes::from(v.to_json()))
+        }
         _ => Err("a _source that isn't JSON, SMILE or CBOR".into()),
     }
 }
 
 /// Puts the vectors `_source` left out back into it: appended as the last fields of a JSON
 /// object when they're top-level fields, so the rest of the source keeps its bytes.
-fn with_vectors(source: Bytes, vectors: &[(&str, Vec<f32>)]) -> Result<Bytes, String> {
+fn with_vectors(source: Bytes, vectors: &[(&str, Vec<f32>)], budget: &Arc<search_aggs::memory::MemoryBudget>) -> Result<Bytes, String> {
     if vectors.is_empty() {
         return Ok(source);
     }
+    // The parsed tree is charged before it is built, as repository data's is.
+    let mut held = crate::breaker::Reservation::new(budget.clone());
+    let values = super::s3::json_values(&source);
+    held.add((values * std::mem::size_of::<Value>() * 2 + source.len()) as u64, "<elasticsearch_restore>").map_err(|e| e.reason().to_string())?;
     let parsed = crate::json::parse(&source).map_err(|e| e.to_string())?.ok_or("an empty _source")?;
     let Value::Obj(mut top) = parsed else { return Err("a _source that isn't an object".into()) };
     let render = |v: &[f32]| Value::Arr(v.iter().map(|x| Value::Num(crate::json::Number::Float(*x as f64))).collect());
@@ -976,8 +987,10 @@ async fn restore_shard(cluster: &crate::Cluster, job: &Job, ix: &IndexJob, shard
         if len > SMALL_FILE as u64 {
             return Err(EsError::new(500, "snapshot_restore_exception", format!("[{repo_name}] [{commit_name}] is larger than [{SMALL_FILE}] bytes")));
         }
-        // Small files are charged while they're held, from before they're fetched.
-        d.held.add(len, "<elasticsearch_restore>")?;
+        // Small files are charged from before they're fetched while they're held, and what
+        // their parse may build for as long as it's kept.
+        let built = len.saturating_mul(search_lucene::segments::HELD_PER_BYTE);
+        d.held.add(len.saturating_add(built), "<elasticsearch_restore>")?;
         let bytes = d.fetch(&commit_name, 0, len as usize)?;
         let commit = search_lucene::segments::read_commit(&bytes, generation).map_err(|e| map(d, &commit_name, e));
         drop(bytes);
@@ -989,7 +1002,8 @@ async fn restore_shard(cluster: &crate::Cluster, job: &Job, ix: &IndexJob, shard
             if len > SMALL_FILE as u64 {
                 return Err(map(d, &si_name, search_lucene::Error::Unsupported("too large".into())));
             }
-            d.held.add(len, "<elasticsearch_restore>")?;
+            let built = len.saturating_mul(search_lucene::segments::HELD_PER_BYTE);
+            d.held.add(len.saturating_add(built), "<elasticsearch_restore>")?;
             let raw = d.fetch(&si_name, 0, len as usize)?;
             let si = search_lucene::segments::read_segment_info(&raw, &seg.id).map_err(|e| map(d, &si_name, e));
             drop(raw);
@@ -1005,7 +1019,7 @@ async fn restore_shard(cluster: &crate::Cluster, job: &Job, ix: &IndexJob, shard
                 let Some(raw) = doc.source else {
                     return Err(search_lucene::Error::Unsupported(format!("document [{id}] has no stored _source")));
                 };
-                let source = source_json(raw, &budget2).and_then(|s| with_vectors(s, &doc.vectors)).map_err(|e| search_lucene::Error::Corrupt(format!("the _source of [{id}]: {e}")))?;
+                let source = source_json(raw, &budget2).and_then(|s| with_vectors(s, &doc.vectors, &budget2)).map_err(|e| search_lucene::Error::Corrupt(format!("the _source of [{id}]: {e}")))?;
                 if source.len() > source_max {
                     return Err(search_lucene::Error::Unsupported(format!("the _source of [{id}] is [{}] bytes, more than http.max_content_length [{source_max}]", source.len())));
                 }
@@ -1036,6 +1050,8 @@ async fn restore_shard(cluster: &crate::Cluster, job: &Job, ix: &IndexJob, shard
             };
             let name = format!("{}.*", seg.name);
             let read = segment::read(d, seg, &si, &vectors, &limits, &mut on_doc);
+            drop(si);
+            d.held.release(built);
             if let Err(e) = read {
                 return Err(match tripped.take() {
                     Some(t) => t,
@@ -1149,6 +1165,8 @@ mod tests {
 
     #[test]
     fn vectors_go_back_at_the_end_keeping_the_source_bytes() {
+        let b = search_aggs::memory::MemoryBudget::new(u64::MAX);
+        let with_vectors = |s: Bytes, v: &[(&str, Vec<f32>)]| with_vectors(s, v, &b);
         let src = Bytes::from_static(b"{\"a\": 1, \"b\":{\"c\":2} }");
         let out = with_vectors(src.clone(), &[("v", vec![0.5, -1.0, 0.1])]).unwrap();
         assert_eq!(&out[..], b"{\"a\": 1, \"b\":{\"c\":2} ,\"v\":[0.5,-1.0,0.1]}");

@@ -307,7 +307,18 @@ impl Bucket {
     /// The newest repository data (`None`: no snapshot was ever written here).
     pub(super) async fn read_data(&self) -> EsResult<Option<RepositoryData>> {
         let latest = self.store.get(&format!("{}index.latest", self.prefix), 64).await.map_err(|e| self.fail("reading index.latest", e))?;
-        let mut generation = latest.and_then(|b| std::str::from_utf8(&b).ok().and_then(|t| t.trim().parse::<i64>().ok())).unwrap_or(0).max(0);
+        // An `index.latest` roll didn't write (Elasticsearch's, at a `base_path` ending in
+        // `roll`, is 8 binary bytes) means the prefix is someone else's: never read as empty,
+        // or a cleanup would delete their files and a snapshot overwrite their generation.
+        let mut generation = match latest {
+            None => 0,
+            Some(b) => match std::str::from_utf8(&b).ok().and_then(|t| t.trim().parse::<i64>().ok()).filter(|g| *g >= 0) {
+                Some(g) => g,
+                None => {
+                    return Err(failed(&self.name, format!("[{}index.latest] isn't roll's (another program, such as Elasticsearch, keeps a repository there): roll neither reads nor writes it", self.prefix)));
+                }
+            },
+        };
         let mut found = match generation {
             0 => None,
             g => self.data_at(g).await?,
@@ -1093,11 +1104,14 @@ pub(super) async fn present_shards(ctx: &Ctx<'_>, repo: &str, r: &Repository) ->
 
 /// `_cleanup`: `(bytes, objects)` deleted.
 pub(super) async fn cleanup(ctx: &Ctx<'_>, repo: &str, r: &Repository) -> EsResult<(u64, u64)> {
-    let bucket = refresh(ctx.cluster, repo, r).await?;
+    let bucket = Bucket::open(ctx.cluster, repo, r).await?;
+    let latest = bucket.read_data().await?;
+    store_copy(ctx.cluster, r, latest.clone()).await?;
     if !ctx.cluster.snapshot_data.running_in(repo, None).is_empty() {
         return Err(EsError::illegal_state(format!("Cannot cleanup [{repo}] - a snapshot is currently running")));
     }
-    let data = ctx.state().metadata.repository_data.get(&r.location_key()).map(|d| (**d).clone()).unwrap_or_default();
+    // With no repository data read, nothing under the prefix is known to be roll's.
+    let Some(data) = latest else { return Ok((0, 0)) };
     bucket.cleanup(&data).await
 }
 

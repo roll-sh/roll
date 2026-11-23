@@ -146,19 +146,41 @@ fn be_bytes_to_decimal(mag: &[u8]) -> String {
 
 /// Reads one CBOR data item.
 pub fn read_cbor(input: &[u8]) -> Result<Value, String> {
-    let mut r = Reader { s: input, pos: 0, depth: 0 };
+    let mut r = Reader { s: input, pos: 0, depth: 0, built: 0, charge: None };
     r.item()
 }
 
-struct Reader<'a> {
+/// [`read_cbor`], calling `charge` with the bytes the tree takes as it is built (in steps of
+/// [`super::smile::STEP`], before they're built): an error stops the read.
+pub fn read_cbor_charged(input: &[u8], charge: &mut dyn FnMut(usize) -> Result<(), String>) -> Result<Value, String> {
+    let mut r = Reader { s: input, pos: 0, depth: 0, built: 0, charge: Some(charge) };
+    r.item()
+}
+
+struct Reader<'a, 'c> {
     s: &'a [u8],
     pos: usize,
     depth: usize,
+    /// Bytes charged ahead and not yet built.
+    built: usize,
+    charge: Option<&'c mut dyn FnMut(usize) -> Result<(), String>>,
 }
 
 const BREAK: u8 = 0xff;
 
-impl<'a> Reader<'a> {
+impl<'a> Reader<'a, '_> {
+    /// `n` bytes about to be built: charged a step ahead.
+    fn build(&mut self, n: usize) -> Result<(), String> {
+        let Some(charge) = &mut self.charge else { return Ok(()) };
+        if n > self.built {
+            let step = (n - self.built).max(super::smile::STEP);
+            charge(step)?;
+            self.built += step;
+        }
+        self.built -= n;
+        Ok(())
+    }
+
     fn byte(&mut self) -> Result<u8, String> {
         let b = *self.s.get(self.pos).ok_or("Unexpected end-of-input in CBOR content")?;
         self.pos += 1;
@@ -189,7 +211,12 @@ impl<'a> Reader<'a> {
 
     fn string_chunks(&mut self, major: u8, info: u8) -> Result<Vec<u8>, String> {
         match self.arg(info)? {
-            Some(n) => Ok(self.take(n)?.to_vec()),
+            Some(n) => {
+                let b = self.take(n)?;
+                // The bytes, and what they become (base64 or a string).
+                self.build(2 * b.len())?;
+                Ok(b.to_vec())
+            }
             None => {
                 let mut out = Vec::new();
                 loop {
@@ -201,7 +228,9 @@ impl<'a> Reader<'a> {
                         return Err("Invalid chunk in indefinite-length CBOR string".into());
                     }
                     let n = self.arg(b & 0x1f)?.ok_or("Nested indefinite-length CBOR string")?;
-                    out.extend_from_slice(self.take(n)?);
+                    let piece = self.take(n)?;
+                    self.build(2 * piece.len())?;
+                    out.extend_from_slice(piece);
                 }
             }
         }
@@ -213,6 +242,8 @@ impl<'a> Reader<'a> {
             return Err("CBOR nesting too deep".into());
         }
         let b = self.byte()?;
+        // The value and its slot in its array or map (with a key).
+        self.build(3 * std::mem::size_of::<Value>())?;
         let (major, info) = (b >> 5, b & 0x1f);
         let v = match major {
             0 => Value::from(self.arg(info)?.ok_or("Invalid indefinite-length integer")?),

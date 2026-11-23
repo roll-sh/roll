@@ -748,3 +748,38 @@ async fn a_planted_index_latest_leaves_rolls_snapshots_alone() {
     assert_eq!(s, 200, "{v:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A location Elasticsearch's snapshots were read from, wiped to be roll's: the copy listed
+/// before goes with them, and roll creates, clones and deletes there.
+#[tokio::test]
+async fn a_wiped_elasticsearch_location_is_rolls_again() {
+    let dir = std::env::temp_dir().join(format!("roll-es-wiped-{}", std::process::id()));
+    let loc = dir.join("x");
+    std::fs::create_dir_all(&loc).unwrap();
+    let es = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/es-snapshots/es-9.5.5");
+    for f in std::fs::read_dir(&es).unwrap() {
+        let f = f.unwrap();
+        if f.file_type().unwrap().is_file() {
+            std::fs::copy(f.path(), loc.join(f.file_name())).unwrap();
+        }
+    }
+    let mut cfg = ClusterConfig::new("es-wiped");
+    cfg.node_settings.push(("path.repo".into(), dir.display().to_string()));
+    let c = Cluster::open(cfg, Arc::new(MemoryStore::new())).await.unwrap();
+    assert_eq!(call(&c, "PUT", "/_snapshot/x", Some(r#"{"type":"fs","settings":{"location":"x"}}"#)).await.0, 200);
+    let names = |v: &Value| -> Vec<String> { at(v, "snapshots").as_array().unwrap().iter().map(|s| at(s, "snapshot").as_str().unwrap().to_string()).collect() };
+    let (s, v) = call(&c, "GET", "/_snapshot/x/_all", None).await;
+    assert_eq!((s, names(&v)), (200, vec!["snap-1".to_string()]), "{v:?}");
+    std::fs::remove_dir_all(&loc).unwrap();
+    std::fs::create_dir_all(&loc).unwrap();
+    call(&c, "PUT", "/i/_doc/1?refresh=true", Some(r#"{"a":1}"#)).await;
+    let (s, v) = call(&c, "PUT", "/_snapshot/x/s1?wait_for_completion=true", Some(r#"{"indices":"i"}"#)).await;
+    assert_eq!(s, 200, "{v:?}");
+    let (s, v) = call(&c, "PUT", "/_snapshot/x/s1/_clone/s2", Some(r#"{"indices":"i"}"#)).await;
+    assert_eq!(s, 200, "{v:?}");
+    let (s, v) = call(&c, "DELETE", "/_snapshot/x/s2", None).await;
+    assert_eq!(s, 200, "{v:?}");
+    let (s, v) = call(&c, "GET", "/_snapshot/x/_all", None).await;
+    assert_eq!((s, names(&v)), (200, vec!["s1".to_string()]), "{v:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

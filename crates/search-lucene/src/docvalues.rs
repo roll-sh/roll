@@ -48,6 +48,10 @@ impl NumericEntry {
 }
 
 /// `.dvm`'s numeric entries by field number (footer checked first).
+/// What the entries read from `.dvm` may hold per byte of the file, at most (a numeric entry
+/// takes at least 36 bytes of it, its table as many as it holds): [`crate::held_per_byte`].
+pub const HELD_PER_BYTE: u64 = crate::held_per_byte(2 * std::mem::size_of::<(u32, NumericEntry)>(), 36);
+
 pub fn read_meta(file: &[u8], id: &Id, suffix: &str, fields: &FieldInfos) -> Result<Vec<(u32, NumericEntry)>> {
     codec::check_footer(file)?;
     let mut inp = Input::new(codec::body(file)?);

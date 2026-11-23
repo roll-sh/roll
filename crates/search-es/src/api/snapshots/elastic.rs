@@ -244,7 +244,12 @@ pub(super) async fn open(cluster: &crate::Cluster, name: &str, r: &Repository) -
     match src.get("index.latest", 64).await? {
         Some(b) if b.len() == 8 => {}
         Some(_) => return Err(damaged(name, "index.latest", "it isn't an 8-byte generation")),
-        None => return Ok(None),
+        None => {
+            // Elasticsearch's repository is gone (the location wiped for roll): its copy goes too,
+            // or it would list snapshots that aren't there and keep roll from writing.
+            forget_copy(cluster, &src.location).await?;
+            return Ok(None);
+        }
     }
     // A location roll keeps snapshots at stays roll's: an `index.latest` someone put there
     // mustn't hide them (or stop a bucket's `roll/` from being read).
@@ -626,6 +631,24 @@ pub(super) async fn sync(cluster: &crate::Cluster, name: &str, r: &Repository) -
     Ok(Some((src, data)))
 }
 
+/// Drops the cluster's copy of location `key` when it is Elasticsearch's (checked again inside
+/// the update).
+async fn forget_copy(cluster: &crate::Cluster, key: &str) -> EsResult<()> {
+    let elastic = |st: &ClusterState, key: &str| st.metadata.repository_data.get(key).is_some_and(|d| d.elastic);
+    if !elastic(&cluster.state(), key) {
+        return Ok(());
+    }
+    let key = key.to_string();
+    cluster
+        .update(move |st| {
+            if elastic(st, &key) {
+                st.metadata.repository_data.remove(&key);
+            }
+            Ok(())
+        })
+        .await
+}
+
 /// Makes `copy` the cluster's copy of location `key`'s contents, unless roll keeps snapshots
 /// there: decided in the same state update, so a roll snapshot recorded while the Elasticsearch
 /// repository was being read (it took the check in [`open`] before) is never replaced. Whether
@@ -708,6 +731,18 @@ mod tests {
         // With nothing of roll's there, the copy goes in.
         assert!(store_copy(&c, "fs:/x".into(), es).await.unwrap());
         assert!(c.state().metadata.repository_data["fs:/x"].elastic);
+    }
+
+    #[test]
+    fn the_uuid_comes_from_index_ns_start() {
+        let head = br#"{"min_version":"7.12.0","uuid":"KT2vatFNQMKN8UPw_S7RJQ","cluster_id":"ZIvC"#;
+        assert_eq!(head_uuid(head), Some("KT2vatFNQMKN8UPw_S7RJQ"));
+        // Cut inside a character after the uuid, or before its end.
+        let mut cut = head.to_vec();
+        cut.extend_from_slice(&"é".as_bytes()[..1]);
+        assert_eq!(head_uuid(&cut), Some("KT2vatFNQMKN8UPw_S7RJQ"));
+        assert_eq!(head_uuid(&head[..40]), None);
+        assert_eq!(head_uuid(b"DFL\0\x01\x02"), None);
     }
 
     #[test]

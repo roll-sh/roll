@@ -1123,7 +1123,7 @@ pub async fn create(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let _ = expand;
     validate_snapshot_name(&repo, &snap)?;
     if elastic_repository(ctx, &repo).await? {
-        return Err(EsError::illegal_argument(format!("[{repo}] cannot create snapshot in a readonly repository: Elasticsearch wrote this repository, and roll never writes where Elasticsearch keeps its snapshots")));
+        return Err(elastic_read_only(&repo, "create snapshot"));
     }
     let now = ctx.now_ms;
     let r2 = repo.clone();
@@ -1140,7 +1140,7 @@ pub async fn create(ctx: &Ctx<'_>) -> EsResult<Reply> {
             // A copy of Elasticsearch's that arrived after the check above: roll's snapshot never
             // joins it.
             if st.metadata.repository_data.get(&key).is_some_and(|d| d.elastic) {
-                return Err(EsError::illegal_argument(format!("[{r2}] cannot create snapshot in a readonly repository: Elasticsearch wrote this repository, and roll never writes where Elasticsearch keeps its snapshots")));
+                return Err(elastic_read_only(&r2, "create snapshot"));
             }
             if st.metadata.repository_data.get(&key).is_some_and(|d| d.find(&snap).is_some()) {
                 return Err(EsError::new(400, "snapshot_name_already_in_use_exception", format!(

@@ -55,6 +55,11 @@ impl FieldInfo {
     }
 }
 
+/// What the field infos read from `.fnm` may hold per byte of the file, at most: a field takes
+/// at least 16 bytes of it and is held as its [`FieldInfo`] and a slot in each map; its name and
+/// attributes are strings ([`crate::held_per_byte`]).
+pub const HELD_PER_BYTE: u64 = crate::held_per_byte(std::mem::size_of::<FieldInfo>() + 2 * (std::mem::size_of::<(u32, usize)>() + std::mem::size_of::<(String, usize)>()), 16);
+
 /// A segment's fields, found by number or name in constant time (a file may list many: other
 /// readers look a field up for each entry they read).
 #[derive(Clone, Debug, Default, PartialEq)]

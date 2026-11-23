@@ -155,7 +155,7 @@ impl Files for Damaged {
 fn fdt_offset(root: &Path, s: &segments::SegmentCommit) -> u64 {
     let cfe = std::fs::read(root.join("_0.cfe")).unwrap();
     let cfs_len = std::fs::metadata(root.join("_0.cfs")).unwrap().len();
-    search_lucene::compound::read_entries(&cfe, &s.id, cfs_len).unwrap().into_iter().find(|e| e.suffix == ".fdt").unwrap().offset
+    search_lucene::compound::read_entries(&cfe, &s.id, cfs_len).unwrap()[".fdt"].offset
 }
 
 #[test]
