@@ -260,26 +260,37 @@ fn granted(g: &roll_auth::Grant, project: &str, slug: &str, path: &str) -> Vec<A
 }
 
 impl Secrets {
+    /// roll-access's live tokens (not workload logins) with a rule that can name `project`: the
+    /// only ones [`Secrets::token_actions`] can find reaching it.
+    pub(crate) fn tokens_naming(&self, project: &str) -> Result<Vec<roll_auth::Grant>> {
+        match &self.workloads {
+            Some(w) => w.grants_naming(project),
+            None => Ok(vec![]),
+        }
+    }
+
+    /// What token `g` may do at `slug:path` of `project`, as each of its requests is judged here: a
+    /// person's own token only within their own projects. Empty: it reaches nothing here, and
+    /// nothing names it (nor its person). Reach and an environment's delete both ask this.
+    pub(crate) fn token_actions(&self, g: &roll_auth::Grant, project: &str, slug: &str, path: &str) -> Vec<Action> {
+        let Ok(grants) = self.grant_grants(g) else { return vec![] };
+        ACTIONS.into_iter().filter(|a| grants.allows(*a, &Scope::at(project, slug, path))).collect()
+    }
+
     /// Reach of `slug:path` (one key's, with `key`). A project admin's: it lists the project's
     /// credentials, as the tokens list does.
     pub fn reach(&self, project: &str, slug: &str, path: &str, key: Option<&str>, caller: &Caller) -> Result<Reach> {
         caller.need(Action::Admin, &Scope::project(project))?;
         let path = names::path(path)?;
         let now = self.db.now_ms()?;
-        // roll-access's live tokens (not workload logins: those are their identities, below).
-        let all = match &self.workloads {
-            Some(w) => w.grants()?,
-            None => vec![],
-        };
         // A project's admin cuts off only what stays inside the project; the operator, anything.
         let operator = caller.grants.everything();
-        let (clients, tokens): (Vec<_>, Vec<_>) = all
+        // roll-access's live tokens (not workload logins: those are their identities, below).
+        let (clients, tokens): (Vec<_>, Vec<_>) = self
+            .tokens_naming(project)?
             .into_iter()
             .filter_map(|g| {
-                // As each of its requests is judged here: a person's own token only within their own
-                // projects (a token that reaches nothing here isn't listed, nor its name or person).
-                let grants = self.grant_grants(&g).ok()?;
-                let actions: Vec<Action> = ACTIONS.into_iter().filter(|a| grants.allows(*a, &Scope::at(project, slug, &path))).collect();
+                let actions = self.token_actions(&g, project, slug, &path);
                 let skipped = (!operator && !crate::access::confined_to(&g, project)).then_some(BEYOND);
                 let oauth = g.kind == roll_auth::GrantKind::Oauth;
                 (!actions.is_empty()).then(|| (oauth, Holder { id: g.id.to_string(), name: g.name.to_string(), actions, expires_at: None, last_used_at: None, created_by: g.user.as_deref().unwrap_or("operator").to_string(), disabled_at: None, skipped }))

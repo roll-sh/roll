@@ -1363,8 +1363,10 @@ A link is `{kind, ref, field, mode, options}`:
       deploy, or a wake that resolves at runtime, fails;
     - agents sandboxes copying from it: they lose those values;
     - its syncs, which stop: the copies they pushed stay at their targets until removed there;
-    - workload identities and roll-access tokens whose scope names it (their names only for a
-      project admin; anyone else sees that one is there);
+    - workload identities and roll-access tokens whose scope names it and that reach it, judged as
+      reach judges them (a person's own token only within their own projects, so another person's
+      "every project, `staging`" token isn't named here); their names only for a project admin,
+      and anyone else sees that one is there;
   - a protected environment whose policy asks for approvals (`approvals` ≥ 1) is deleted through a
     change request with those approvals and every folder policy in it (`"action":
     "delete_environment"`, answered 202 `{request}`), exactly as deleting one of its folders is;
@@ -3308,9 +3310,10 @@ cluster, instead of a key pasted into it: the Inference tab's "A roll secret", o
   copied count: a key of the folder that doesn't resolve for an untrusted read (`${production.X}`,
   production being protected, or a reference to a deleted environment) stops nothing that didn't
   copy it, and a copied one that doesn't resolve is left unset and named with why
-  (`secrets_unset`). An environment deleted but still in its recovery window holds the sandbox's
-  create and start (they wait), so recovering it brings the values back; once it's purged, the
-  sandbox starts without them (`secrets_dropped`). A sandbox made before
+  (`secrets_unset`). An environment deleted but still in its recovery window, or one of a project
+  deleted but still in its window, holds the sandbox's create and start (they wait), so recovering
+  it brings the values back; once it's purged or the window has closed, the sandbox starts without
+  them (`secrets_dropped`). A sandbox made before
   `secrets_from` was kept only has its maker asked whether they can still act (`maker_acts`), and
   keeps what it was made with; delete it and make another to get fresh reads
   (docs/code/http-api.md, "Sandboxes").
@@ -5574,6 +5577,13 @@ webhooks, with a `project` argument; docs/mcp.md, "Events"). It answers
 `{events: [{seq, at, kind, environment?, key?, data}], next}`; `?latest=1` (never with `after`: 400)
 answers `{events: [], next}` at the head, for a follower that starts from now. `limit` is 1–500
 (default 100).
+
+The dashboard's Events tab (`components/secrets/events.tsx`, `lib/secrets-events.ts`) is a person's
+view of it. It opens at `?latest=1` and polls after that `next` every 5 s while it's in view,
+following each `next` as answered. The feed only reads forward, so the tab goes back by windows of
+chain rows before the oldest row it holds: `after=hi-w` up to `hi`. A window of 500 rows or fewer is
+answered whole. A wider one whose `next` falls short of `hi` is narrowed and read again, so no
+events are skipped. The kind chips and the environment filter are `kinds=` and `environment=`.
 
 **The cursor.** An event is an audit row that carries one (`audit.event`, `audit.event_data`), so
 `seq` is the row's number in the project's chain ("Tamper evidence"): taken from `audit_heads` in

@@ -1568,7 +1568,9 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
             false => None,
         };
         let asked = crate::model::Asked { method: req.method().as_str(), path: &path, user_agent: &ua, ip, headers: req.headers(), query: req.uri().query(), bot };
-        let verdict = gate.firewall_verdict(&asked);
+        let mut hits = Vec::new();
+        let verdict = gate.firewall_verdict(&asked, &mut hits);
+        apps.live(service, env).count_hits(&hits);
         match verdict {
             crate::live::Verdict::Allow => {}
             // A browser with this hour's pass goes on (the cookie is roll's: the app never sees it);
