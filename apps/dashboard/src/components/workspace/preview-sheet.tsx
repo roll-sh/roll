@@ -926,7 +926,7 @@ function Screenshot({
         <div className="mb-1.5 space-y-0.5">
           {(() => {
             const all = ["/", ...pages.map((x) => x.path)];
-            const groups = (["Pages", "Views", "States"] as const).map((g) => [g, all.filter((x) => pageGroup(x) === g)] as const).filter(([, xs]) => xs.length);
+            const groups = (["Pages", "Views", "States", "Stories"] as const).map((g) => [g, all.filter((x) => pageGroup(x) === g)] as const).filter(([, xs]) => xs.length);
             return groups.map(([g, xs]) => (
               <div key={g} className="flex items-start gap-1" role="group" aria-label={g}>
                 {groups.length > 1 && <span className="w-12 shrink-0 pt-1 text-[10.5px] text-subtle">{g}</span>}
@@ -1073,7 +1073,8 @@ export function TextAgainst({ diff, branch, what = "words" }: { diff: TextDiff; 
 }
 
 /** The project's endpoints timed on the preview's data (`github.endpoints`: the median of 10
- * GETs) against main's, the clearly slower ones in red. */
+ * GETs) against main's, the clearly slower ones in red, and what each JSON answer lost (a field
+ * gone, a type widened) under it. */
 export function Endpoints({ items, branch }: { items: EndpointTime[]; branch: string }) {
   if (!items.length) return null;
   return (
@@ -1084,6 +1085,15 @@ export function Endpoints({ items, branch }: { items: EndpointTime[]; branch: st
           <li key={e.path} className={endpointSlower(e) ? "text-danger" : "text-fg"}>
             GET {e.path} {e.ms} ms{e.main_ms != null ? ` (${branch} ${e.main_ms} ms)` : ""}
             {e.status === 0 ? ", no answer" : e.status >= 400 ? `, ${e.status}` : ""}
+            {!!e.shape_changes?.length && (
+              <ul className="ml-3 text-danger" aria-label={`What its answer lost against ${branch}`}>
+                {e.shape_changes.map((c) => (
+                  <li key={c.path} className="break-words">
+                    {c.path} {c.now == null ? "gone" : `${c.main} → ${c.now}`}
+                  </li>
+                ))}
+              </ul>
+            )}
           </li>
         ))}
       </ul>

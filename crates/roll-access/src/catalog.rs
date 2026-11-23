@@ -1733,6 +1733,7 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/apps", "apps", R, Tgt::Product),
     // A plan or an import of a roll code repo reads it: read there too.
     row("POST", "/v1/apps/plan", "apps", R, Tgt::AnyGrant).lends(Lend::Each(apps_repo)),
+    row("POST", "/v1/apps/quote", "apps", R, Tgt::AnyGrant),
     row("POST", "/v1/apps/import", "apps", R, Tgt::AnyGrant).lends(Lend::Each(apps_repo)),
     row("GET", "/v1/apps/projects/{project}/services", "apps", R, one(&["project"], "project")),
     row("GET", "/v1/apps/services/{id}/environments/{env}/variables/values", "apps", REVEAL, one(PG, "service")).env(EnvFrom::Param("env")),

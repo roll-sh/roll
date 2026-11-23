@@ -226,7 +226,10 @@ const API = OPENAPI && `(async () => {
 })()`;
 // The project's endpoints ($ENDPOINTS, GET paths on the page's own origin): each timed as the
 // median of 10 GETs after one to warm up, its last status kept (0: no answer), at most 2 s a
-// request and 20 s in all (an endpoint past that is timed with what it answered).
+// request and 20 s in all (an endpoint past that is timed with what it answered). The warm-up's
+// JSON answer (up to 1 MiB) is read for its shape: one `path types` line per field ("users[].email
+// string", "total number|null"), an empty array as "[]", an object keyed by ids as `*`, at most
+// 100 lines, 8 levels, 20 elements an array and 100 keys an object. Values are never kept.
 const ENDPOINTS = (() => {
   try {
     return JSON.parse(process.env.ENDPOINTS || "[]").filter((p) => typeof p === "string" && /^\/[^\s#"'`]{0,199}$/.test(p)).slice(0, 5);
@@ -236,14 +239,48 @@ const ENDPOINTS = (() => {
 })();
 const TIMES = ENDPOINTS.length > 0 && `(async () => {
   const until = performance.now() + 20000;
-  const get = async (path) => {
+  const shapeOf = (v) => {
+    const types = new Map();
+    const add = (p, t) => {
+      if (!types.has(p)) {
+        if (types.size >= 100) return false;
+        types.set(p, new Set());
+      }
+      types.get(p).add(t);
+      return true;
+    };
+    const tick = String.fromCharCode(96);
+    const key = (k) => [...String(k)].filter((c) => c >= " " && c !== tick && c !== String.fromCharCode(127)).join("").slice(0, 60) || "?";
+    const idLike = (k) => /^[0-9]+$/.test(k) || /^[0-9a-fA-F-]{8,}$/.test(k);
+    const at = (p, k) => (p === "$" ? k : p + "." + k);
+    const walk = (x, p, depth) => {
+      const t = x === null ? "null" : Array.isArray(x) ? (x.length ? "array" : "[]") : typeof x;
+      if (!["object", "array", "[]", "string", "number", "boolean", "null"].includes(t)) return;
+      if (!add(p, t) || depth >= 8) return;
+      if (t === "array") for (const e of x.slice(0, 20)) walk(e, p + "[]", depth + 1);
+      else if (t === "object") {
+        const ks = Object.keys(x).slice(0, 100);
+        const ids = ks.length > 0 && ks.every(idLike);
+        for (const k of ks) walk(x[k], at(p, ids ? "*" : key(k)), depth + 1);
+      }
+    };
+    walk(v, "$", 0);
+    return [...types].map(([p, ts]) => p + " " + [...ts].sort().join("|")).sort();
+  };
+  const get = async (path, shape) => {
     const c = new AbortController();
     const t = setTimeout(() => c.abort(), 2000);
     const at = performance.now();
     try {
       const r = await fetch(new URL(path, location.origin), { credentials: "same-origin", cache: "no-store", signal: c.signal });
-      await r.arrayBuffer();
-      return { ms: performance.now() - at, status: r.status };
+      const body = await r.arrayBuffer();
+      let s;
+      if (shape && /json/i.test(r.headers.get("content-type") || "") && body.byteLength <= 1048576) {
+        try {
+          s = shapeOf(JSON.parse(new TextDecoder().decode(body)));
+        } catch {}
+      }
+      return { ms: performance.now() - at, status: r.status, shape: s };
     } catch {
       return { ms: performance.now() - at, status: 0 };
     } finally {
@@ -253,7 +290,7 @@ const TIMES = ENDPOINTS.length > 0 && `(async () => {
   const out = [];
   for (const path of ${JSON.stringify(ENDPOINTS)}) {
     if (performance.now() > until) break;
-    await get(path);
+    const warm = await get(path, true);
     const runs = [];
     let status = 0;
     for (let i = 0; i < 10 && performance.now() < until; i++) {
@@ -263,7 +300,7 @@ const TIMES = ENDPOINTS.length > 0 && `(async () => {
     }
     if (!runs.length) continue;
     runs.sort((a, b) => a - b);
-    out.push({ path, ms: Math.round(runs[Math.floor(runs.length / 2)]), status });
+    out.push(Object.assign({ path, ms: Math.round(runs[Math.floor(runs.length / 2)]), status }, warm.shape ? { shape: warm.shape } : {}));
   }
   return JSON.stringify(out);
 })()`;
@@ -399,6 +436,68 @@ const moves = async (sessionId, first) => {
   const again = await send("Page.captureScreenshot", { format: "png" }, sessionId).catch(() => null);
   return !!again && again.data !== first.data;
 };
+// Storybook's stories ($STORIES: where the service serves Storybook, "/" or "/storybook/";
+// Chromatic's stories), in a run of their own: its index (`index.json`, Storybook 7 and later;
+// `stories.json` before), the first 40 stories (docs left out), each loaded alone
+// (`iframe.html?id=…&viewMode=story`) at the desktop width and captured clipped to what it
+// rendered (with a margin, at most 1280 by 2000), to $OUT.story.<n>.png; which story each is and
+// what went wrong while it rendered, to $OUT.stories.json. 100 s in all. The index is the
+// preview's code's: roll checks each id again.
+const STORY_ID = /^[a-z0-9][a-z0-9-]{0,99}--[a-z0-9][a-z0-9-]{0,99}$/;
+const ROOT_BOX = `JSON.stringify((() => {
+  const root = document.querySelector("#storybook-root") || document.querySelector("#root");
+  if (!root || !root.firstElementChild) return null;
+  let x1 = Infinity, y1 = Infinity, x2 = -Infinity, y2 = -Infinity;
+  for (const el of root.children) {
+    const b = el.getBoundingClientRect();
+    if (b.width <= 0 || b.height <= 0) continue;
+    x1 = Math.min(x1, b.left + scrollX); y1 = Math.min(y1, b.top + scrollY);
+    x2 = Math.max(x2, b.right + scrollX); y2 = Math.max(y2, b.bottom + scrollY);
+  }
+  return x2 > x1 && y2 > y1 ? { x: x1, y: y1, w: x2 - x1, h: y2 - y1 } : null;
+})())`;
+const stories = async (sessionId) => {
+  const base = new URL(process.env.STORIES, process.env.URL);
+  let entries = [];
+  for (const name of ["index.json", "stories.json"]) {
+    try {
+      const r = await fetch(new URL(name, base), { signal: AbortSignal.timeout(10000) });
+      const text = r.ok ? await r.text() : "";
+      if (!text || text.length > 8 << 20) continue;
+      const j = JSON.parse(text);
+      entries = Object.values((j && (j.entries || j.stories)) || {});
+      if (entries.length) break;
+    } catch {}
+  }
+  const picked = entries.filter((e) => e && typeof e.id === "string" && STORY_ID.test(e.id) && (e.type == null || e.type === "story")).slice(0, 40);
+  const out = [];
+  const until = Date.now() + 100000;
+  for (const e of picked) {
+    if (Date.now() > until) break;
+    const before = errors.length + failed.length;
+    const done = once("Page.loadEventFired");
+    await send("Page.navigate", { url: new URL(`iframe.html?id=${e.id}&viewMode=story`, base).href }, sessionId);
+    await Promise.race([done, sleep(10000)]);
+    // A story renders after the load: until its root holds something, 3 s at most.
+    let box = null;
+    for (let i = 0; i < 30 && !box; i++) {
+      const r = await check({ expression: ROOT_BOX, returnByValue: true }, sessionId);
+      try {
+        box = JSON.parse(r?.result?.value || "null");
+      } catch {}
+      if (!box) await sleep(100);
+    }
+    await still(sessionId);
+    const m = 8;
+    const ok = box && [box.x, box.y, box.w, box.h].every(Number.isFinite);
+    const clip = ok ? { x: Math.max(0, box.x - m), y: Math.max(0, box.y - m), width: Math.min(box.w + 2 * m, 1280), height: Math.min(box.h + 2 * m, 2000), scale: 1 } : null;
+    const shot = await send("Page.captureScreenshot", clip ? { format: "png", clip, captureBeyondViewport: true } : { format: "png" }, sessionId).catch(() => null);
+    if (!shot) continue;
+    fs.writeFileSync(`${process.env.OUT}.story.${out.length}.png`, Buffer.from(shot.data, "base64"));
+    out.push({ id: e.id, errors: errors.length + failed.length - before });
+  }
+  fs.writeFileSync(process.env.OUT + ".stories.json", JSON.stringify(out));
+};
 (async () => {
   const { targetId } = await send("Target.createTarget", { url: "about:blank" });
   const { sessionId } = await send("Target.attachToTarget", { targetId, flatten: true });
@@ -413,6 +512,11 @@ const moves = async (sessionId, first) => {
   mainFrame = (await send("Page.getFrameTree", {}, sessionId)).frameTree.frame.id;
   // In the checks' world, made with each document before its first script.
   await send("Page.addScriptToEvaluateOnNewDocument", { source: VITALS, worldName: WORLD }, sessionId).catch(() => null);
+  if (process.env.STORIES) {
+    await stories(sessionId);
+    chrome.kill();
+    process.exit(0);
+  }
   const loaded = once("Page.loadEventFired");
   await send("Page.navigate", { url: process.env.URL }, sessionId);
   await Promise.race([loaded, sleep(45000)]);
