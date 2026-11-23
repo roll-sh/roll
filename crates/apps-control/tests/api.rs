@@ -5380,6 +5380,25 @@ async fn builds_share_a_remote_cache_for_turborepo_and_nx() {
     assert!(!w.fake.build_vars.lock().last().unwrap().iter().any(|k| k.starts_with("TURBO_")));
 }
 
+/// Readable Node stack traces: a Node build that writes source maps starts with
+/// `--enable-source-maps`, after the app's own `NODE_OPTIONS`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_build_with_source_maps_starts_with_them() {
+    let w = world().await;
+    w.code.push("e6e6e6e6e6e6", "site", &[("package.json", r#"{"name":"site","scripts":{"build":"esbuild src/index.ts --bundle --platform=node --sourcemap --outfile=dist/index.js","start":"node dist/index.js"},"devDependencies":{"esbuild":"0.25.0"}}"#), ("src/index.ts", "")]);
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "site", "source": {"kind": "repo", "repo": "acme/site"} }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    call(&w.api, "PATCH", &format!("{env}/variables"), Some(json!({"set": {"FAKE_ECHO": "NODE_OPTIONS", "NODE_OPTIONS": "--max-old-space-size=200"}}))).await;
+    let (_, d) = call(&w.api, "POST", &format!("{env}/redeploy"), Some(json!({}))).await;
+    let d = settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
+    assert_eq!(d["plan"]["source_maps"], true, "{d}");
+    let (_, body) = visit_deployment(&w, &host(&svc["environments"][0]["url"]), d["id"].as_str().unwrap()).await;
+    assert_eq!(body["vars"]["NODE_OPTIONS"], "--max-old-space-size=200 --enable-source-maps", "{body}");
+}
+
 /// Next.js across instances and after sleep (Vercel's ISR and Data Cache, OpenNext's): a Next 16
 /// build gets roll's adapter and its instances the cache's address and token (sealed); what one
 /// writes another reads, a deployment's pages its own and the fetch cache every deployment's; an

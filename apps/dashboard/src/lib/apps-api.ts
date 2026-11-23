@@ -835,6 +835,8 @@ export interface Plan {
   edge?: { name: string; kind: "netlify" | "vercel"; file: string; paths: string[]; excluded?: string[] }[];
   /** roll's Next.js adapter is in the image: its instances share ISR, fetch and "use cache" entries. */
   next_cache?: boolean;
+  /** Its Node build writes source maps: it starts with `--enable-source-maps`. */
+  source_maps?: boolean;
 }
 
 export interface RootCandidate {
