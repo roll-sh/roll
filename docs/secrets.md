@@ -5509,7 +5509,8 @@ backup), `answer` (a secret request answered), `request` (a change request appli
 links store no value, so a resource's own credential changing is no `secret.changed` (a live link's
 `rotate` is `rotation.succeeded`). Keys have no trash: a deleted key's versions stay in its history
 (its value until retention or a purge), and a rollback brings it back. Role changes in a project are
-roll-workspace's records, not secrets' audit rows, so they aren't events here yet.
+roll-workspace's records, not secrets' audit rows: they're the workspace's own feed
+(docs/workspace.md, "Events"; roll MCP's `workspace.event`).
 
 | Kind | When | `data` |
 | --- | --- | --- |
