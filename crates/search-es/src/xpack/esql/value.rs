@@ -1542,7 +1542,8 @@ impl Acc {
             // `WelfordAlgorithm.add(mean, m2, count)`: the parallel combination.
             (Acc::Welford { n, mean, m2 }, Acc::Welford { n: n2, mean: mean2, m2: m22 }) => {
                 if n2 > 0 {
-                    let total = *n + n2;
+                    // Counts a remote sent: saturating, never wrapping.
+                    let total = n.saturating_add(n2);
                     let delta = mean2 - *mean;
                     *m2 += m22 + delta * delta * (*n as f64) * (n2 as f64) / total as f64;
                     *mean += delta * n2 as f64 / total as f64;
@@ -1566,7 +1567,7 @@ impl Acc {
             // reservoir stands for (A-Res: the largest `rand^(1/w)` keys).
             (Acc::Sample { n, seen, buf, heap }, Acc::Sample { seen: seen2, buf: other, .. }) => {
                 use rand::Rng;
-                let total = *seen + seen2;
+                let total = seen.saturating_add(seen2);
                 let (w1, w2) = (*seen as f64 / buf.len().max(1) as f64, seen2 as f64 / other.len().max(1) as f64);
                 let mut keyed: Vec<(f64, V)> = std::mem::take(buf).into_iter().map(|v| (w1, v)).chain(other.into_iter().map(|v| (w2, v))).map(|(w, v)| (rand::thread_rng().r#gen::<f64>().powf(1.0 / w.max(f64::MIN_POSITIVE)), v)).collect();
                 if let Some(n) = *n {

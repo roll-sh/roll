@@ -1963,10 +1963,11 @@ impl Pipeline {
         Ok(self.run_charged(rows, w)?.0)
     }
 
-    /// Whether a stage can drop rows or columns (the page's charge may then be past what the
-    /// rows hold).
+    /// Whether a stage can drop rows or columns, or rebuilds its rows (`GROK`, `DISSECT`, `ENRICH`,
+    /// `LOOKUP JOIN`, an `EVAL` that replaces a column): the page's charge may then be past what
+    /// the rows hold.
     fn shrinks(&self) -> bool {
-        self.stages.iter().any(|(s, _, _)| matches!(s, Stage::Where(_) | Stage::Project(_) | Stage::Sample(_)))
+        self.stages.iter().any(|(s, _, proj)| proj.is_some() || !matches!(s, Stage::Eval(_) | Stage::MvExpand(_)))
     }
 
     /// [`Pipeline::run`], handing back the page's charge with the rows: a caller that keeps
@@ -2316,8 +2317,14 @@ impl Grouper {
     }
 
     /// Merges another cluster's group (`key`, `accs` as [`Grouper::into_groups`] gave them) into
-    /// this one's: its states must be the ones this grouper's aggregations make.
-    pub(super) fn merge_group(&mut self, key: &[V], accs: Vec<Acc>) -> Result<(), String> {
+    /// this one's: its states must be the ones this grouper's aggregations make. What the merge
+    /// grows the group's states by is charged.
+    pub(super) fn merge_group(&mut self, key: &[V], accs: Vec<Acc>) -> EsResult<()> {
+        self.merge_checked(key, accs).map_err(|why| EsError::illegal_state(format!("a cluster's STATS state roll can't merge: {why}")))?;
+        self.held.check()
+    }
+
+    fn merge_checked(&mut self, key: &[V], accs: Vec<Acc>) -> Result<(), String> {
         if key.len() != self.keys.len() || accs.len() != self.specs.len() {
             return Err("a group of another shape".into());
         }
@@ -2345,7 +2352,9 @@ impl Grouper {
         let refs: Vec<&V> = key.iter().collect();
         let g = self.group_of(&refs);
         for ((s, have), a) in self.specs.iter().zip(self.groups[g].accs.iter_mut()).zip(accs) {
+            let before = memory::acc_heap(have);
             have.merge(&s.func, a).map_err(str::to_string)?;
+            self.held.note(memory::acc_heap(have).saturating_sub(before));
         }
         Ok(())
     }
@@ -5017,10 +5026,10 @@ fn run_rest_charged(src: &Src<'_>, mut t: Table, charged: Option<memory::Held>, 
             c if is_row_wise(c) => {
                 let (p, out) = build_pipeline(src, std::slice::from_ref(c), t.cols.clone())?;
                 // What the command builds joins the table's charge as it is built; one that
-                // drops rows or columns gives back what they held.
+                // drops or rebuilds rows gives back what the old ones held.
                 t.rows = p.run_on(std::mem::take(&mut t.rows), w, &mut held)?;
                 t.cols = out;
-                if matches!(c, Cmd::Where(_) | Cmd::Keep(_) | Cmd::Drop(_) | Cmd::Sample(_)) {
+                if p.shrinks() {
                     held.set(memory::rows_bytes(&t.rows))?;
                 }
                 continue;

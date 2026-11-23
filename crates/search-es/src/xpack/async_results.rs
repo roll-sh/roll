@@ -146,15 +146,25 @@ impl Inner {
         }
     }
 
-    /// Drops the entries that expire first until `need` more bytes and one more entry fit.
-    fn make_room(&mut self, need: usize) {
-        while !self.entries.is_empty() && (self.entries.len() >= MAX_ENTRIES || self.bytes + need > MAX_BYTES) {
-            let Some(k) = self.entries.iter().min_by_key(|(_, e)| e.expiration_ms).map(|(k, _)| k.clone()) else { break };
-            if let Some(e) = self.entries.remove(&k) {
-                self.bytes -= e.bytes;
-                self.note(&k);
-            }
+    /// The entries that expire first, dropped until `need` more bytes and one more entry fit,
+    /// and what they hold.
+    fn victims(&self, need: usize) -> (Vec<String>, usize) {
+        let fits = |n: usize, bytes: usize| n < MAX_ENTRIES && bytes + need <= MAX_BYTES;
+        if fits(self.entries.len(), self.bytes) {
+            return (Vec::new(), 0);
         }
+        let mut by_expiry: Vec<(&String, &Entry)> = self.entries.iter().collect();
+        by_expiry.sort_by_key(|(_, e)| e.expiration_ms);
+        let (mut n, mut freed, mut out) = (self.entries.len(), 0, Vec::new());
+        for (k, e) in by_expiry {
+            if fits(n, self.bytes - freed) {
+                break;
+            }
+            out.push(k.clone());
+            n -= 1;
+            freed += e.bytes;
+        }
+        (out, freed)
     }
 }
 
@@ -256,6 +266,26 @@ impl Results {
         }
     }
 
+    /// Makes room for `need` more bytes and charges them (settled first): what the entries pushed
+    /// out held moves over to the new one, so only the rest is reserved, and a refusal pushes
+    /// nobody out. The caller adds `need` to `bytes`.
+    fn charge_in(&self, g: &mut Inner, need: usize) -> crate::error::EsResult<()> {
+        self.settle(g);
+        let (out, freed) = g.victims(need);
+        let more = need.saturating_sub(freed);
+        if let Some(b) = self.budget.get() {
+            b.reserve(more as u64, "<async_result>").map_err(crate::search::aggs::agg_error)?;
+        }
+        for k in out {
+            if let Some(e) = g.entries.remove(&k) {
+                g.bytes -= e.bytes;
+                g.note(&k);
+            }
+        }
+        g.charged += more;
+        Ok(())
+    }
+
     /// Stores `entry` under `id`, charged to the budget; refused (and not stored) when larger
     /// than the store or when the breaker refuses it.
     pub fn put(&self, id: String, mut entry: Entry, now: i64) -> crate::error::EsResult<()> {
@@ -269,18 +299,12 @@ impl Results {
             g.bytes -= old.bytes;
             g.note(&id);
         }
-        self.settle(&mut g);
-        // Charged before anything is pushed out: a refusal evicts nobody.
-        if let Some(b) = self.budget.get()
-            && let Err(e) = b.reserve(entry.bytes as u64, "<async_result>")
-        {
+        if let Err(e) = self.charge_in(&mut g, entry.bytes) {
             self.flag(&g);
-            return Err(crate::search::aggs::agg_error(e));
+            return Err(e);
         }
-        g.make_room(entry.bytes);
-        self.settle(&mut g);
         g.bytes += entry.bytes;
-        g.charged += entry.bytes;
+        self.settle(&mut g);
         g.note(&id);
         g.entries.insert(id, entry);
         self.flag(&g);
@@ -316,15 +340,11 @@ impl Results {
         if !g.deferred.contains_key(id) {
             return Ok(g.entries.get(id).cloned());
         }
-        // Charged before anything is pushed out: a refusal evicts nobody (and it stays deferred).
-        if let Some(b) = self.budget.get() {
-            b.reserve(entry.bytes as u64, "<async_result>").map_err(crate::search::aggs::agg_error)?;
-        }
+        // A refusal evicts nobody, and it stays deferred.
+        self.charge_in(&mut g, entry.bytes)?;
         g.deferred.remove(id);
-        g.make_room(entry.bytes);
-        self.settle(&mut g);
         g.bytes += entry.bytes;
-        g.charged += entry.bytes;
+        self.settle(&mut g);
         g.entries.insert(id.to_string(), entry.clone());
         self.flag(&g);
         Ok(Some(entry))
@@ -439,18 +459,15 @@ impl Results {
             self.flag(&g);
             return;
         }
-        self.settle(&mut g);
-        // Charged before anything is pushed out: without room it evicts nobody.
-        if self.budget.get().is_some_and(|b| b.reserve(entry.bytes as u64, "<async_result>").is_err()) {
-            // No room now: it stays stored, read back when asked for ([`Results::admit`]).
+        if self.charge_in(&mut g, entry.bytes).is_err() {
+            // No room now: it evicted nobody and stays stored, read back when asked for
+            // ([`Results::admit`]).
             g.deferred.insert(id, (entry.kind, entry.expiration_ms));
             self.flag(&g);
             return;
         }
-        g.make_room(entry.bytes);
-        self.settle(&mut g);
         g.bytes += entry.bytes;
-        g.charged += entry.bytes;
+        self.settle(&mut g);
         g.entries.insert(id, entry);
         self.flag(&g);
     }
@@ -515,11 +532,17 @@ mod tests {
 
     #[test]
     fn bounded() {
+        // A breaker with room for the store's entries and no more: a put that pushes one out
+        // reuses its charge.
+        let one = entry_bytes(&entry(Kind::Search, 1000));
+        let budget = search_aggs::memory::MemoryBudget::new((MAX_ENTRIES * one + one / 2) as u64);
         let r = Results::default();
+        r.charge_to(budget.clone());
         for i in 0..(MAX_ENTRIES + 10) {
             r.put(format!("{i}"), entry(Kind::Search, 1000 + i as i64), 0).unwrap();
         }
         assert_eq!(r.len(), MAX_ENTRIES);
+        assert_eq!(budget.used() as usize, MAX_ENTRIES * one);
         assert!(r.get("0", Kind::Search, 1).is_none());
         assert!(r.get(&format!("{}", MAX_ENTRIES + 9), Kind::Search, 1).is_some());
         assert_ne!(new_id(), new_id());

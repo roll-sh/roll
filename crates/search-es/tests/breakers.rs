@@ -322,3 +322,50 @@ async fn esql_eval_output_is_charged_as_each_row_is_built() {
     let (_, stats) = call(&c, "GET", "/_nodes/stats/breaker?filter_path=nodes.*.breakers.request", None).await;
     assert_eq!(at(&stats, "nodes.*.breakers.request.estimated_size_in_bytes").as_i64(), Some(0));
 }
+
+/// A remote that answers every `STATS` part with `groups` groups, each holding one quantile state
+/// of a single centroid weighing 20,000: a few bytes to send, a merging digest to decode.
+struct InflatedRemote {
+    groups: usize,
+}
+
+#[async_trait::async_trait]
+impl search_es::remote::links::Links for InflatedRemote {
+    fn target(&self, _address: &str) -> Option<String> {
+        Some("far".into())
+    }
+
+    async fn may_link(&self, _local: &str, _target: &str) -> bool {
+        true
+    }
+
+    async fn has_credentials(&self, _local: &str, _alias: &str) -> bool {
+        true
+    }
+
+    async fn send(&self, _local: &str, _alias: &str, _target: &str, req: EsRequest) -> Result<search_es::rest::EsResponse, search_es::error::EsError> {
+        let body = if req.uri.contains("_field_caps") {
+            r#"{"indices":["logs"],"fields":{"host":{"keyword":{"type":"keyword","metadata_field":false,"searchable":true,"aggregatable":true}},"latency":{"double":{"type":"double","metadata_field":false,"searchable":true,"aggregatable":true}}}}"#.to_string()
+        } else {
+            let one = 1.0f64.to_bits();
+            let groups: Vec<String> = (0..self.groups).map(|i| format!(r#"[["h{i}"],[["q",[["{one}",20000]]]]]"#)).collect();
+            format!(r#"{{"__roll_esql_part":{{"shards":1,"enrich":[],"columns":[["host","keyword"],["latency","double"]],"groups":[{}]}}}}"#, groups.join(","))
+        };
+        Ok(search_es::rest::EsResponse { status: 200, headers: vec![("content-type".into(), "application/json".into())], body: body.into(), head: false })
+    }
+}
+
+#[tokio::test]
+async fn a_remotes_states_are_charged_as_decoded() {
+    let mut cfg = ClusterConfig::new("near");
+    cfg.links = Some(Arc::new(InflatedRemote { groups: 200 }));
+    let c = Cluster::open(cfg, Arc::new(MemoryStore::new())).await.unwrap();
+    let (s, v) = call(&c, "PUT", "/_cluster/settings", Some(br#"{"persistent":{"cluster.remote.far.seeds":["far"],"cluster.remote.far.skip_unavailable":false,"indices.breaker.request.limit":"5mb"}}"#)).await;
+    assert_eq!(s, 200, "{v:?}");
+    // About 14 KB of answer; decoded, 200 digests of about 133 KB each.
+    let (s, v) = call(&c, "POST", "/_query", Some(br#"{"query":"FROM far:logs | STATS m = MEDIAN(latency) BY host"}"#)).await;
+    assert_eq!((s, at(&v, "error.type").as_str()), (429, Some("circuit_breaking_exception")), "{v:?}");
+    assert!(at(&v, "error.reason").as_str().unwrap().starts_with("[request] Data too large, data for [<remote_cluster_response>]"), "{v:?}");
+    let (_, stats) = call(&c, "GET", "/_nodes/stats/breaker?filter_path=nodes.*.breakers.request", None).await;
+    assert_eq!(at(&stats, "nodes.*.breakers.request.estimated_size_in_bytes").as_i64(), Some(0));
+}

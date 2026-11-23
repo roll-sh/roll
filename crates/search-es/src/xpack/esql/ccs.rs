@@ -988,19 +988,27 @@ pub fn decode_acc(v: &Value) -> Result<Acc, String> {
             acc
         }
         "q" => {
-            // A digest of compression 1000 has at most 20,000 centroids (its exact values),
-            // whose weights sum to a count.
+            // A digest of compression 1000 has at most 20,000 centroids, whose weights sum to a
+            // count. Below 20,000 values it is still a sorting digest, which sends each value
+            // with a weight of 1: a larger weight there would push that many values.
             let centroids = list(1)?;
             if centroids.len() > QUANTILE_MAX_CENTROIDS {
                 return Err("a quantile state with too many centroids".into());
             }
-            let mut d = search_aggs::metrics::tdigest::TDigest::new(1000.0, false);
+            let mut parsed = Vec::with_capacity(centroids.len());
             let mut total: i64 = 0;
             for c in centroids {
                 let c = c.as_array().filter(|c| c.len() == 2).ok_or("a bad centroid")?;
                 let count = c[1].as_i64().filter(|n| *n > 0).ok_or("a bad centroid weight")?;
                 total = total.checked_add(count).ok_or("centroid weights past a count")?;
-                d.add_weighted(bits_f64(&c[0])?, count as u64).map_err(|_| "a bad centroid mean")?;
+                parsed.push((bits_f64(&c[0])?, count as u64));
+            }
+            if total < QUANTILE_MAX_CENTROIDS as i64 && parsed.iter().any(|&(_, n)| n != 1) {
+                return Err("a sorting quantile state with a weight other than 1".into());
+            }
+            let mut d = search_aggs::metrics::tdigest::TDigest::new(1000.0, false);
+            for (mean, count) in parsed {
+                d.add_weighted(mean, count).map_err(|_| "a bad centroid mean")?;
             }
             Acc::Quantile(Box::new(d))
         }
@@ -1082,11 +1090,13 @@ pub fn enrich_fields(st: &crate::meta::ClusterState, cmds: &[Cmd], part: &Part) 
 /// against the coordinating cluster's aggregations, when they merge).
 /// `max_columns`: the most columns it may have (its schema's, and what its cluster's own lookup
 /// indices may add).
-pub fn decode_answer(v: &Value, mode: Mode, max_columns: usize) -> Result<Answer, String> {
+/// `charge` holds what each decoded state takes (a quantile state's digest is far larger than its
+/// text) before the next is built.
+pub fn decode_answer(v: &Value, mode: Mode, max_columns: usize, charge: &mut dyn FnMut(u64) -> EsResult<()>) -> Result<Answer, Unreadable> {
     let p = v.get(PART_FIELD).ok_or("no part in the answer")?;
     let columns = p.get("columns").and_then(Value::as_array).ok_or("no columns")?;
     if columns.len() > max_columns {
-        return Err(format!("more than [{max_columns}] columns"));
+        return Err(format!("more than [{max_columns}] columns").into());
     }
     let mut cols = Vec::new();
     for c in columns {
@@ -1109,7 +1119,7 @@ pub fn decode_answer(v: &Value, mode: Mode, max_columns: usize) -> Result<Answer
                 for (x, c) in r.iter().zip(&cols) {
                     let v = decode_v(x, true)?;
                     if !super::value::fits(c.ty, &v) {
-                        return Err(format!("a value that isn't of its column's type [{}]", c.ty.name()));
+                        return Err(format!("a value that isn't of its column's type [{}]", c.ty.name()).into());
                     }
                     row.push(v);
                 }
@@ -1127,7 +1137,9 @@ pub fn decode_answer(v: &Value, mode: Mode, max_columns: usize) -> Result<Answer
                 }
                 let mut accs = Vec::new();
                 for x in g[1].as_array().ok_or("bad states")? {
-                    accs.push(decode_acc(x)?);
+                    let acc = decode_acc(x)?;
+                    charge(super::memory::acc_heap(&acc) as u64).map_err(Unreadable::Refused)?;
+                    accs.push(acc);
                 }
                 groups.push((key, accs));
             }
@@ -1135,6 +1147,26 @@ pub fn decode_answer(v: &Value, mode: Mode, max_columns: usize) -> Result<Answer
         }
     }
     Ok(out)
+}
+
+/// Why a remote's answer isn't taken: it doesn't decode, or what it holds once decoded is
+/// refused by the breaker.
+#[derive(Debug)]
+pub enum Unreadable {
+    Bad(String),
+    Refused(EsError),
+}
+
+impl From<String> for Unreadable {
+    fn from(why: String) -> Unreadable {
+        Unreadable::Bad(why)
+    }
+}
+
+impl From<&str> for Unreadable {
+    fn from(why: &str) -> Unreadable {
+        Unreadable::Bad(why.to_string())
+    }
 }
 
 /// The concrete indices' shard count on `cluster` (`_clusters.details.*._shards.total`).
@@ -1442,9 +1474,10 @@ pub async fn run(cluster: &crate::cluster::Cluster, ccs: &Ccs, q: &Query, filter
                 w.add(msg);
             }
         }
-        match decode_answer(&v, cut.mode, schema.len() + metadata.len() + MAX_RESOURCE_COLUMNS) {
+        match decode_answer(&v, cut.mode, schema.len() + metadata.len() + MAX_RESOURCE_COLUMNS, &mut |b| held.add(b, "<remote_cluster_response>")) {
             Ok(a) => outcomes.push((leg.alias.clone(), leg.indices.clone(), Outcome::Done(a))),
-            Err(why) => return Err(unreadable(&leg.alias, &why)),
+            Err(Unreadable::Bad(why)) => return Err(unreadable(&leg.alias, &why)),
+            Err(Unreadable::Refused(e)) => return Err(e),
         }
     }
     if let Some((name, at, mut cs)) = missing.into_iter().next() {
@@ -1570,7 +1603,7 @@ pub async fn run(cluster: &crate::cluster::Cluster, ccs: &Ccs, q: &Query, filter
                 }
                 held.add((p.groups.len() as u64).saturating_mul(64), "<remote_cluster_response>")?;
                 for (key, accs) in p.groups {
-                    g.merge_group(&key, accs).map_err(|why| EsError::illegal_state(format!("a cluster's STATS state roll can't merge: {why}")))?;
+                    g.merge_group(&key, accs)?;
                 }
             }
             g.finish(w)?
@@ -1918,14 +1951,16 @@ mod tests {
         assert!(decode_acc(&crate::arr!["q", Value::Arr((0..20_001).map(|_| crate::arr![m.clone(), 1]).collect())]).is_err());
         // One huge weight alone goes to the merging digest, never a loop of pushes.
         assert!(decode_acc(&crate::arr!["q", crate::arr![crate::arr![m.clone(), i64::MAX]]]).is_ok());
+        // Below 20,000 values a digest sends each value once: a weight would push that many.
+        assert!(decode_acc(&crate::arr!["q", crate::arr![crate::arr![m.clone(), 19_999]]]).is_err());
         let wide = obj! { PART_FIELD => obj! { "columns" => crate::arr![crate::arr!["a", "long"]], "rows" => crate::arr![crate::arr![1, 2]] } };
-        assert!(decode_answer(&wide, Mode::Rows, 10).is_err());
+        assert!(decode_answer(&wide, Mode::Rows, 10, &mut |_| Ok(())).is_err());
         let bad_type = obj! { PART_FIELD => obj! { "columns" => crate::arr![crate::arr!["a", "nope"]], "rows" => crate::arr![] } };
-        assert!(decode_answer(&bad_type, Mode::Rows, 10).is_err());
+        assert!(decode_answer(&bad_type, Mode::Rows, 10, &mut |_| Ok(())).is_err());
         let text_in_long = obj! { PART_FIELD => obj! { "columns" => crate::arr![crate::arr!["a", "long"]], "rows" => crate::arr![crate::arr!["x"]] } };
-        assert!(decode_answer(&text_in_long, Mode::Rows, 10).is_err());
+        assert!(decode_answer(&text_in_long, Mode::Rows, 10, &mut |_| Ok(())).is_err());
         let one = obj! { PART_FIELD => obj! { "columns" => crate::arr![crate::arr!["a", "long"]], "rows" => crate::arr![], "enrich" => crate::arr![] } };
-        assert!(decode_answer(&one, Mode::Rows, 1).is_ok() && decode_answer(&one, Mode::Rows, 0).is_err(), "at most the columns it may have");
+        assert!(decode_answer(&one, Mode::Rows, 1, &mut |_| Ok(())).is_ok() && decode_answer(&one, Mode::Rows, 0, &mut |_| Ok(())).is_err(), "at most the columns it may have");
         // Every value's cost is counted before parsing, however small it was to send.
         assert_eq!(json_elements(b"[1,1,1]"), 4);
         assert_eq!(json_elements(br#"["a,b",[]]"#), 4);

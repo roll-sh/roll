@@ -1249,4 +1249,14 @@ mod tests {
         assert_eq!(r.next_int(100), 30);
         assert_eq!(r.next_double(), 0.05466526274716077);
     }
+
+    /// A weight past `i64::MAX` (a histogram's count, a remote's centroid) switches to the
+    /// merging digest instead of wrapping below the threshold and pushing that many values.
+    #[test]
+    fn a_huge_weight_switches_to_the_merging_digest() {
+        let mut d = HybridDigest::new(1000.0);
+        d.add(1.0, 1).unwrap();
+        d.add(1.0, i64::MAX as u64).unwrap();
+        assert!(d.merging.is_some() && d.sorting.is_none());
+    }
 }
