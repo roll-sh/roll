@@ -182,7 +182,16 @@ impl DocHost {
             }
         };
         let doc = self.doc;
-        let vals = self.rt_leaves[i].1.values(doc).map_err(|e| HostError::illegal_argument(super::runtime::innermost_reason(&e)))?;
+        let leaf = &mut self.rt_leaves[i].1;
+        let vals = leaf.values(doc).map_err(|e| {
+            let reason = super::runtime::innermost_reason(&e);
+            // the breaker refusing what the field keeps stays a breaker refusal for the script
+            // reading it (uncatchable, 429), not an exception it may catch
+            match e.status == 429 && leaf.refused() {
+                true => HostError { kind: "circuit_breaking_exception", reason, frames: Vec::new() },
+                false => HostError::illegal_argument(reason),
+            }
+        })?;
         super::runtime::fill_doc_values(ev.field.ty, &vals, out);
         Ok(true)
     }

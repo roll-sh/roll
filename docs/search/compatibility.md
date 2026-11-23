@@ -1852,9 +1852,12 @@ the rest are skipped by the tests' own prerequisites.
   reading it leaves out the part of the document's `_source` it keeps. That part is measured as
   what dropping the `_source` didn't free, so data the field took out of the `_source` can go
   uncharged up to one document's `_source` per field. A lenient runtime field
-  (`on_script_error: continue`) skips the documents its script fails on, but not these limits
-  or the breaker: as in Elasticsearch, which catches only exceptions there, those still fail
-  the request. Past the limit roll answers like that guard: a
+  (`on_script_error: continue`) skips the documents its script fails on. That includes this
+  limit's `painless_error`, as Elasticsearch 9.5.5 skips a document for any failure there, a
+  `painless_error` or a stack overflow too. Only failures that aren't the script's stop the
+  request: the breaker refusing what the field keeps (429), and a cancelled or timed-out
+  search. After a refusal the field's script runs no more, on any document. Past the limit roll
+  answers like that guard: a
   `script_exception` caused by an uncatchable `painless_error`, `script allocation limit
   exceeded: allocation of [N] bytes brings the running total to [T] bytes, over the limit of
   [L] bytes`, without a script portion. Both guards apply in every context (`_execute`,

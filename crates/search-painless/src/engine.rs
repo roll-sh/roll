@@ -945,17 +945,25 @@ impl<'s> Instance<'s> {
         if crate::guard::MemoryScope::enclosed() {
             // the enclosing execution is charged the change
             memory.close(charged - self.passed_on);
-        } else {
-            // this execution's own host heard it (`delta`): an enclosing execution later is
-            // charged only what changes after
-            memory.close(0);
+            self.passed_on = charged;
+            return r;
         }
-        self.passed_on = charged;
+        memory.close(0);
+        // this execution's own host hears it (`delta`): once it has, an enclosing execution
+        // later is charged only what changes after; a refused report moves nothing (counting
+        // it again later is the safe side)
         match delta {
-            0 => r,
+            0 => {
+                self.passed_on = charged;
+                r
+            }
             _ => match host.script_memory(delta) {
+                Ok(()) => {
+                    self.passed_on = charged;
+                    r
+                }
                 Err(e) if r.is_ok() => Err(script.runtime_error(&crate::vm::memory_refused(e))),
-                _ => r,
+                Err(_) => r,
             },
         }
     }

@@ -408,12 +408,16 @@ async fn runtime_field_memory_is_charged_to_the_breaker_once() {
     let limit = |mb: u32| format!(r#"{{"persistent":{{"indices.breaker.request.limit":"{mb}mb"}}}}"#);
     assert_eq!(call(&c, "PUT", "/_cluster/settings", &limit(8)).await.0, 200);
     for script in [r#"{"source":"doc['rt'].value * 2"}"#, r#"{"lang":"expression","source":"doc['rt'].value"}"#] {
-        let (_, v) = call(&c, "POST", "/rtk/_search", &search(script)).await;
-        // the expression reads the runtime field through the host, whose failures reach it as
-        // `illegal_argument_exception`s with the breaker's message
+        let (status, v) = call(&c, "POST", "/rtk/_search", &search(script)).await;
         let body = v.to_json();
-        assert!(body.contains("[request] Data too large, data for [<script>]"), "{script}: {body}");
+        assert_eq!(status, 429, "{script}: {body}");
+        assert!(body.contains("circuit_breaking_exception") && body.contains("[request] Data too large, data for [<script>]"), "{script}: {body}");
     }
+    // a sort on a runtime field runs its script on every document, whatever matched: the
+    // refusal ends the search even though the one matching document was read before it
+    let sort = r#"{"query":{"ids":{"values":["0"]}},"runtime_mappings":{"rk":{"type":"keyword","script":{"source":"params.keep.add(new byte[1048576]); emit('a')","params":{"keep":[]}}}},"sort":[{"rk":"asc"}]}"#;
+    let (status, v) = call(&c, "POST", "/rtk/_search", sort).await;
+    assert_eq!(status, 429, "{}", v.to_json());
     // a lenient field (`on_script_error: continue`) skips documents its script fails on, but
     // not the breaker's refusal
     let lenient = r#"{"size":0,"runtime_mappings":{"rt":{"type":"long","on_script_error":"continue","script":{"source":"params.keep.add(new byte[1048576]); emit(1)","params":{"keep":[]}}}},"aggs":{"t":{"terms":{"field":"rt"}}}}"#;

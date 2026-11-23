@@ -98,16 +98,14 @@ impl std::fmt::Display for ScriptError {
 impl std::error::Error for ScriptError {}
 
 impl ScriptError {
-    /// Whether a script's own error handling can't swallow this failure: Elasticsearch's
-    /// `on_script_error: continue` catches `Exception`s, not `PainlessError` (the loop and
-    /// memory limits), the JVM's errors, a memory circuit breaker or the search's cancellation
-    /// and timeout. (The regex limit's circuit breaker is an ordinary exception.)
+    /// Whether `on_script_error: continue` must not swallow this failure. Elasticsearch 9.5.5
+    /// skips the document for anything a script throws, `painless_error`, `painless_explain_error`
+    /// and a stack overflow included (checked on the reference image), so this is only what
+    /// isn't the script's: roll's memory breaker refusing what the script keeps (the only 429 a
+    /// script fails with, see [`crate::Host::script_memory`]) and the search's cancellation or
+    /// timeout.
     pub fn uncatchable(&self) -> bool {
-        match self.cause_type.as_str() {
-            "painless_error" | "out_of_memory_error" | "stack_overflow_error" | "task_cancelled_exception" | "time_exceeded_exception" => true,
-            "circuit_breaking_exception" => !self.cause_reason.as_deref().is_some_and(|r| r.starts_with("[scripting]")),
-            _ => false,
-        }
+        self.status == 429 || matches!(self.cause_type.as_str(), "task_cancelled_exception" | "time_exceeded_exception")
     }
 
     /// The `caused_by` object.
