@@ -62,6 +62,31 @@ const VENDORS: Record<SaasVendor, { label: string; credential: string; fields: T
       { name: "scopes", label: "Scopes (optional, application keys)", placeholder: "dashboards_read", optional: true, kind: "list" },
     ],
   },
+  cloudflare: {
+    label: "Cloudflare",
+    credential: "API token that may manage API tokens",
+    fields: [
+      { name: "account_id", label: "Account id (optional; none: your user's tokens)", placeholder: "account id", optional: true },
+      { name: "template", label: "Template token id (its policies are copied)", placeholder: "token id" },
+    ],
+  },
+  databricks: {
+    label: "Databricks",
+    credential: "Personal access token of the identity whose tokens rotate",
+    fields: [
+      { name: "host", label: "Workspace host", placeholder: "dbc-a1b2c3d4-e5f6.cloud.databricks.com" },
+      { name: "lifetime_days", label: "Lifetime in days (optional)", placeholder: "90", optional: true, kind: "number" },
+    ],
+  },
+  confluent: {
+    label: "Confluent Cloud",
+    credential: "Cloud API key as KEY:SECRET",
+    fields: [
+      { name: "owner", label: "Owner", placeholder: "sa-…" },
+      { name: "resource", label: "Resource (optional; none: Cloud API keys)", placeholder: "lkc-…", optional: true },
+      { name: "environment", label: "Environment (optional, with a resource)", placeholder: "env-…", optional: true },
+    ],
+  },
 };
 
 /** What's shown of a target: its values, never the credential (the API doesn't have it to give). */
@@ -130,7 +155,7 @@ export function SaasRotators() {
       }
     >
       <p className="mb-2 text-[11.5px] text-muted">
-        roll issues keys at SendGrid, Twilio, Okta, Entra, Auth0, GitLab, OpenAI or Datadog itself, with a credential you register here, and revokes the old key after the grace period. Auth0 replaces a secret at once, so it has no grace period. Link a key to one from Link a resource.
+        roll issues keys at SendGrid, Twilio, Okta, Entra, Auth0, GitLab, OpenAI, Datadog, Cloudflare, Databricks or Confluent itself, with a credential you register here, and revokes the old key after the grace period. Auth0 replaces a secret at once, so it has no grace period. Link a key to one from Link a resource.
       </p>
       <ErrorNote error={error ?? list.error} onDismiss={error ? () => setError(null) : undefined} className="mb-2" />
       {adding && (

@@ -263,6 +263,7 @@ pub fn service_of(repo: &str, p: &PreviewSpec) -> ServiceSpec {
         cpus: p.cpus,
         env: p.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
         health: p.health.clone(),
+        skew_protection: p.skew_protection,
         states: p.states.clone(),
         pages: p.pages.clone(),
         hide: p.hide.clone(),

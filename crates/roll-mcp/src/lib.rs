@@ -28,6 +28,7 @@
 pub mod ask;
 pub mod card;
 pub mod events;
+pub mod find;
 pub mod guard;
 /// Lockdown is roll-auth's, so roll code's own MCP server withholds the same text.
 pub use roll_auth::lockdown;
@@ -397,6 +398,7 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
     if pick.picks() {
         let mut known: Vec<String> = tools::all().iter().map(|t| t.name.to_string()).collect();
         known.extend(m.sets.iter().flat_map(|s| s.tools()).filter_map(|t| t["name"].as_str().map(str::to_string)));
+        known.push(find::NAME.to_string());
         let unknown = pick.unknown(&known);
         if !unknown.is_empty() {
             let near: Vec<String> = unknown.iter().filter_map(|u| tools::nearest(u, known.iter().map(String::as_str)).map(|n| format!("{u} → {n}"))).collect();
@@ -835,6 +837,9 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
             },
             "tools/list" => {
                 let mut tools = if ctx.search { search::listed(&ctx.tools()) } else { ctx.tools() };
+                if !ctx.search && ctx.pick.keeps(find::NAME) {
+                    tools.push(find::definition());
+                }
                 // A host that renders MCP Apps shows the tools that answer rows in roll's table.
                 if ctx.ui && !ctx.search {
                     ui::attach(&mut tools);
@@ -864,6 +869,22 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                     rpc_result(id, search::find(&ctx.tools(), &args))
                 } else if !args.is_object() {
                     rpc_error(id, -32602, "arguments must be an object")
+                } else if name == find::NAME && !ctx.search && ctx.pick.keeps(find::NAME) {
+                    // Each list and read in it is a tool call of the caller's own, through the gate.
+                    let names = tool_names(ctx);
+                    let has = |t: &str| names.iter().any(|n| n == t);
+                    // The inspector sees roll_find's own call and answer (its lists are its parts).
+                    let found = match inspect_call(ctx, find::NAME, &args).await {
+                        Some(refused) => refused,
+                        None => {
+                            let found = find::run(&args, has, |tool, a, quiet| {
+                                let ctx = ctx.clone();
+                                async move { call_as(&ctx, tool, a, quiet.then_some(find::NAME)).await }
+                            });
+                            finish_result(ctx, find::NAME, found.await).await
+                        }
+                    };
+                    rpc_result(id, found)
                 } else if let Some(Err(why)) = (ctx.modern && !ctx.search).then(|| ctx.usable_tools().into_iter().find(|t| t["name"] == name.as_str()).map_or(Ok(()), |t| modern::check_params(&t, &args, &ctx.headers))) {
                     rpc_error(id, modern::HEADER_MISMATCH, format!("Header mismatch: {why}"))
                 } else if ctx.readonly && !tool_names(ctx).contains(&name) {
@@ -878,7 +899,7 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                     let answered = if tasks::on(ctx) { tasks::call_or_task(ctx, &name, args).await } else { Ok(call(ctx, &name, args).await) };
                     match answered {
                         Err(task) => rpc_result(id, task),
-                        Ok(Some(r)) if ctx.url_elicitation && r["structuredContent"]["status"] == "approval_pending" && r["structuredContent"]["url"].as_str().is_some_and(|u| !u.is_empty()) => {
+                        Ok(Some(r)) if ctx.url_elicitation && waiting_approval(&r["structuredContent"]).is_some() && r["structuredContent"]["url"].as_str().is_some_and(|u| !u.is_empty()) => {
                             // 2026-07-28 asks for it in the result (Multi Round-Trip Requests);
                             // earlier revisions as URL elicitation's error.
                             if ctx.modern { rpc_result(id, modern::approval_input_required(&r)) } else { approval_elicitation(id, &r) }
@@ -927,7 +948,7 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                 // A roll code file, read through the tool as the caller (the gate decides, the audit log has it).
                 Some(uri) if resources::code_file_of(uri).is_some() && tool_names(ctx).iter().any(|t| t == "code_read_file") => {
                     let (repo, path) = resources::code_file_of(uri).unwrap_or_default();
-                    match call_as(ctx, "code_read_file", json!({ "repo": repo, "path": path }), false).await {
+                    match call_as(ctx, "code_read_file", json!({ "repo": repo, "path": path }), None).await {
                         Some(r) if r["isError"] != true => rpc_result(id, resources::code_file(uri, &r["structuredContent"])),
                         Some(r) => {
                             let code = if r["structuredContent"]["http_status"] == 404 { -32002 } else { -32603 };
@@ -994,7 +1015,7 @@ async fn complete(ctx: &Arc<Ctx>, params: &Value) -> Result<Value, String> {
         return empty;
     }
     let others = params["context"]["arguments"].clone();
-    let Some(answer) = call_as(ctx, src.tool, (src.args)(&others), true).await else { return empty };
+    let Some(answer) = call_as(ctx, src.tool, (src.args)(&others), Some("completion/complete")).await else { return empty };
     if answer["isError"] == true {
         return empty;
     }
@@ -1027,7 +1048,7 @@ async fn ask_for_missing(ctx: &Arc<Ctx>, name: &str, args: &mut Value, params: &
         return None;
     }
     // The choices, read through the gate with the caller's token (never asking a person).
-    let answer = call_as(ctx, src.tool, (src.args)(args), true).await?;
+    let answer = call_as(ctx, src.tool, (src.args)(args), Some("completion/complete")).await?;
     if answer["isError"] == true {
         return None;
     }
@@ -1278,16 +1299,79 @@ pub(crate) fn server_icon() -> Value {
 
 /// Run a tool: one of ours, or a fronted set's.
 async fn call(ctx: &Arc<Ctx>, name: &str, args: Value) -> Option<Value> {
-    call_as(ctx, name, args, false).await
+    call_as(ctx, name, args, None).await
 }
 
-/// [`call`], `quiet` for a completion (an `ask` is refused, never put to a person).
-async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: bool) -> Option<Value> {
+/// The operator's inspector on a call before it runs: `Some` is the refusal to answer instead.
+async fn inspect_call(ctx: &Arc<Ctx>, name: &str, args: &Value) -> Option<Value> {
+    let i = ctx.m.config.inspector.as_ref()?;
+    let who = match &ctx.principal {
+        Principal::Grant(g) => json!({ "grant": g.id.to_string(), "name": g.name.to_string() }),
+        Principal::Operator => json!({ "operator": true }),
+    };
+    let look = json!({ "phase": "call", "tool": name, "arguments": roll_access::redact::value(args, tool_product(name)), "connection": who, "client": ctx.client.as_deref() });
+    if let Verdict::Block(why) = i.inspect(look).await {
+        tracing::info!(tool = name, "the operator's inspector refused a call");
+        return Some(tool_error(format!("not run: the operator's inspector refused this call ({why})"), json!({ "refused": "inspector", "reason": why })));
+    }
+    None
+}
+
+/// What every answer the model reads goes through last: hidden text made visible, then the
+/// operator's inspector (withheld, or shown with its note first).
+async fn finish_result(ctx: &Arc<Ctx>, name: &str, mut result: Value) -> Value {
+    // Whoever made the result (a fronted set builds its own: roll code's reviews and files),
+    // what's hidden in its text stays visible.
+    if let Some(content) = result["content"].as_array_mut() {
+        for c in content.iter_mut().filter(|c| c["type"] == "text") {
+            if let Some(t) = c["text"].as_str() {
+                c["text"] = Value::String(visible(t));
+            }
+        }
+    }
+    // And the result before the model reads it: withheld, or shown with its note first.
+    if let Some(i) = &ctx.m.config.inspector {
+        let text: String = result["content"].as_array().into_iter().flatten().filter_map(|c| c["text"].as_str()).collect::<Vec<_>>().join("\n");
+        let structured = serde_json::to_string(&result["structuredContent"]).unwrap_or_default();
+        // A credential a tool reveals never leaves roll for the scanner: what it answered isn't sent.
+        let reveals = tools::all().iter().find(|t| t.name == name).is_some_and(|t| t.actions().contains(&Action::Reveal));
+        let look = if reveals {
+            json!({ "phase": "result", "tool": name, "isError": result["isError"] == true, "text": Value::Null, "structuredContent": Value::Null, "withheld": "a revealed credential" })
+        } else {
+            json!({ "phase": "result", "tool": name, "isError": result["isError"] == true, "text": cut(text, false), "structuredContent": if structured.len() <= INSPECT_MAX { result["structuredContent"].clone() } else { Value::Null } })
+        };
+        match i.inspect(look).await {
+            Verdict::Allow => {}
+            Verdict::Block(why) => {
+                tracing::info!(tool = name, "the operator's inspector withheld a result");
+                result = tool_error(format!("withheld: the operator's inspector found this result unsafe to show ({why})"), json!({ "withheld": "inspector", "reason": why }));
+            }
+            Verdict::Note(note) => {
+                result["_meta"]["roll/inspector"] = json!(note);
+                if let Some(content) = result["content"].as_array_mut() {
+                    content.insert(0, json!({ "type": "text", "text": format!("Note from the operator's inspector: {note}") }));
+                }
+            }
+        }
+    }
+    result
+}
+
+/// [`call`], quiet for what looks something up on its own (a completion, `roll_find`'s lists,
+/// audited as `<quiet>:<tool>`): an `ask` is refused, never put to a person.
+async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: Option<&str>) -> Option<Value> {
+    let label = quiet;
+    let quiet = label.is_some();
     let redacted = roll_access::redact::value(&args, tool_product(name));
     let mut ext = Extensions::new();
     // The audit log says a completion was one (a person typing), not the agent listing.
-    let tool: Arc<str> = if quiet { format!("completion/complete:{name}").into() } else { name.into() };
-    ext.insert(McpCall { tool, args: Arc::new(redacted), ip: ctx.ip, elicits: ctx.url_elicitation, client: ctx.client.clone(), quiet, unattended: false });
+    let tool: Arc<str> = match label {
+        Some(l) => format!("{l}:{name}").into(),
+        None => name.into(),
+    };
+    // A lookup's answer still reaches the person or the model: the policy's `agents_ask` holds it
+    // as it holds the agent's own calls, and refuses rather than asks (`unattended`).
+    ext.insert(McpCall { tool, args: Arc::new(redacted), ip: ctx.ip, elicits: ctx.url_elicitation, client: ctx.client.clone(), quiet, unattended: quiet });
     let started = std::time::Instant::now();
     // A credential headed where people and other agents read it is refused before it's sent
     // (guard.rs): a data-loss check, not a permission (the gate decides those).
@@ -1310,18 +1394,10 @@ async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: bool) -> Option
     }
     // The gate decides (and audits) every call a grant makes; the MCP layer refuses nothing itself.
     let mut outside: &[&str] = &[];
-    // The operator's inspector sees the call before it runs (a completion's quiet probe excepted).
-    let inspector = ctx.m.config.inspector.clone().filter(|_| !quiet);
-    if let Some(i) = &inspector {
-        let who = match &ctx.principal {
-            Principal::Grant(g) => json!({ "grant": g.id.to_string(), "name": g.name.to_string() }),
-            Principal::Operator => json!({ "operator": true }),
-        };
-        let look = json!({ "phase": "call", "tool": name, "arguments": roll_access::redact::value(&args, tool_product(name)), "connection": who, "client": ctx.client.as_deref() });
-        if let Verdict::Block(why) = i.inspect(look).await {
-            tracing::info!(tool = name, "the operator's inspector refused a call");
-            return Some(tool_error(format!("not run: the operator's inspector refused this call ({why})"), json!({ "refused": "inspector", "reason": why })));
-        }
+    // The operator's inspector sees the call before it runs (a quiet lookup's parts excepted: it
+    // sees the tool that made them, `roll_find`).
+    if !quiet && let Some(refused) = inspect_call(ctx, name, &args).await {
+        return Some(refused);
     }
     let (mut result, route) = if let Some(t) = tools::all().iter().find(|t| t.name == name) {
         outside = t.outside;
@@ -1350,39 +1426,8 @@ async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: bool) -> Option
             content.insert(0, json!({ "type": "text", "text": text }));
         }
     }
-    // Whoever made the result (a fronted set builds its own: roll code's reviews and files),
-    // what's hidden in its text stays visible.
-    if let Some(content) = result["content"].as_array_mut() {
-        for c in content.iter_mut().filter(|c| c["type"] == "text") {
-            if let Some(t) = c["text"].as_str() {
-                c["text"] = Value::String(visible(t));
-            }
-        }
-    }
-    // And the result before the model reads it: withheld, or shown with its note first.
-    if let Some(i) = &inspector {
-        let text: String = result["content"].as_array().into_iter().flatten().filter_map(|c| c["text"].as_str()).collect::<Vec<_>>().join("\n");
-        let structured = serde_json::to_string(&result["structuredContent"]).unwrap_or_default();
-        // A credential a tool reveals never leaves roll for the scanner: what it answered isn't sent.
-        let reveals = tools::all().iter().find(|t| t.name == name).is_some_and(|t| t.actions().contains(&Action::Reveal));
-        let look = if reveals {
-            json!({ "phase": "result", "tool": name, "isError": result["isError"] == true, "text": Value::Null, "structuredContent": Value::Null, "withheld": "a revealed credential" })
-        } else {
-            json!({ "phase": "result", "tool": name, "isError": result["isError"] == true, "text": cut(text, false), "structuredContent": if structured.len() <= INSPECT_MAX { result["structuredContent"].clone() } else { Value::Null } })
-        };
-        match i.inspect(look).await {
-            Verdict::Allow => {}
-            Verdict::Block(why) => {
-                tracing::info!(tool = name, "the operator's inspector withheld a result");
-                result = tool_error(format!("withheld: the operator's inspector found this result unsafe to show ({why})"), json!({ "withheld": "inspector", "reason": why }));
-            }
-            Verdict::Note(note) => {
-                result["_meta"]["roll/inspector"] = json!(note);
-                if let Some(content) = result["content"].as_array_mut() {
-                    content.insert(0, json!({ "type": "text", "text": format!("Note from the operator's inspector: {note}") }));
-                }
-            }
-        }
+    if !quiet {
+        result = finish_result(ctx, name, result).await;
     }
     // The operator's calls don't pass the evaluator: the audit row is written here.
     if let (Principal::Operator, Some(access)) = (&ctx.principal, &ctx.m.config.access) {
@@ -1670,6 +1715,14 @@ async fn run(ctx: &Arc<Ctx>, t: &tools::Tool, args: &Value, ext: Extensions) -> 
         Err(e) => match e {},
     };
     outcome(t.name, resp).await
+}
+
+/// The approval a call waits on, when roll's gate answered it so ([`outcome`]: a refusal with
+/// `approval_pending`, its `http_status` kept). A product's own successful answer can't pose as
+/// one (it has no `http_status`), so no product chooses the approval a view, a task or a client's
+/// approval prompt follows.
+pub(crate) fn waiting_approval(s: &Value) -> Option<&str> {
+    (s["status"] == "approval_pending" && s["http_status"].is_u64()).then(|| s["approval"].as_str()).flatten()
 }
 
 /// A tool's MCP result from its route's answer.

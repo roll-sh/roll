@@ -1922,17 +1922,22 @@ fn run_stage(stage: &Stage, in_cols: usize, rows: Vec<Vec<V>>, w: &mut Warnings,
             }
         }
         Stage::MvExpand(i) => {
-            for r in rows {
-                match r.get(*i) {
+            for mut r in rows {
+                // The values move out first: each row copies the other columns only.
+                match r.get_mut(*i).map(std::mem::take) {
                     Some(V::Multi(vs)) => {
                         for v in vs {
                             let mut n = r.clone();
-                            n[*i] = v.clone();
+                            n[*i] = v;
                             grown.add(memory::row_bytes(&n))?;
                             out.push(n);
                         }
                     }
-                    _ => out.push(r),
+                    Some(v) => {
+                        r[*i] = v;
+                        out.push(r);
+                    }
+                    None => out.push(r),
                 }
             }
         }
@@ -1964,10 +1969,10 @@ impl Pipeline {
     }
 
     /// Whether a stage can drop rows or columns, or rebuilds its rows (`GROK`, `DISSECT`, `ENRICH`,
-    /// `LOOKUP JOIN`, an `EVAL` that replaces a column): the page's charge may then be past what
-    /// the rows hold.
+    /// `LOOKUP JOIN`, `MV_EXPAND`, an `EVAL` that replaces a column): the page's charge may then
+    /// be past what the rows hold. Only an `EVAL` that appends keeps every row it was given.
     fn shrinks(&self) -> bool {
-        self.stages.iter().any(|(s, _, proj)| proj.is_some() || !matches!(s, Stage::Eval(_) | Stage::MvExpand(_)))
+        self.stages.iter().any(|(s, _, proj)| proj.is_some() || !matches!(s, Stage::Eval(_)))
     }
 
     /// [`Pipeline::run`], handing back the page's charge with the rows: a caller that keeps
