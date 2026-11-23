@@ -14818,6 +14818,55 @@ through `start_parallel_index` too; it is serial now when its range is short of 
 open-ended range (`aid >= $1`) still meets the whole index: a scan under a LIMIT reads chunks ahead of
 what it returns. `p.limit` is the scan's own; a Limit node above it isn't seen there. Not done.
 
+## The heap model's HOT-chain roots after pruning (agent 299)
+
+Found in a TPC-B-like run of round 15 (pair 3's new2 run): the connection threads spent 24% of the
+run's user instructions in `Lps::get` (16.0%), `Heap::prev_of` (4.7%) and `sizing::row_roots` (3.3%),
+from a bitmap heap scan's roots (`bitmap_rows` -> `row_roots` -> `Heap::hot_root`); whether a run meets
+it depends on the plan autoanalyze gives the tellers' or branches' UPDATE (a bloated small table's can
+be a bitmap heap scan, as in PostgreSQL). With bitmap heap scans forced (`SET LOCAL enable_indexscan =
+off, enable_seqscan = off` in a TPC-B script, `~/.cache/a299/bench/sql/tpcbbm.sql`): 2.44 M user
+instructions a transaction, 77% in `row_roots`, ~1 M a call: `hot_root` ran to its bound (65,535 steps).
+
+**Why.** `hot_root` walks from a version back through `prev_off` (the version it replaced on its page)
+to the chain's root, the line pointer the indexes name. Pruning (heap_page_prune) makes the root a
+redirect to the first surviving version and frees the dead ones between (as PostgreSQL does), but left
+that version's `prev_off` naming the freed line pointer before it. A later version takes that line
+pointer (`put` reuses free ones), and the walk goes on into it: into another row's chain (a wrong root)
+or round a cycle to the bound. `read_shape` (a heap restored after a clean restart) already points a
+redirect's target back at the redirect ("as `update` and pruning leave it"); pruning didn't.
+
+**What changed** (one commit, `catalog/heapsim.rs`, the in-memory model only; `write_shape` keeps no
+`prev_off`):
+
+- `prune_page`: each redirect it sets leads its target back to it (`prev_off` = the root), as
+  `read_shape` restores it.
+- `hot_root`: steps back only while the earlier version's HOT link (`next`, HEAP_HOT_UPDATED) names the
+  current one, as heap_hot_search_buffer checks each step of the chain it follows forward (a prior
+  xmax against the next xmin); bounded by MaxHeapTuplesPerPage.
+
+The roots are PostgreSQL's (the redirect at the row's first line pointer) where they were a freed or
+another row's line pointer before: a bitmap heap scan's row order and EXPLAIN's pages follow them.
+
+Test `catalog::heapsim::tests::hot_roots_survive_pruning`: four rows on one page, 2,000 HOT updates with
+pruning every third: after each, every row's root is its first line pointer.
+
+**Measured** (lane A, `fixed.sh` with the forced-bitmap script: 48k transactions at 32 clients after
+`pgbench -i -s 32`, the cgroup's counts over the run; plain dist, `g1` = `47381f462`, `gh` = it + this
+commit; two alternating pairs, 4.6 and 5.7 foreign cores on the lane's 8 CPUs): user instructions a
+transaction 2,473,874 -> 684,658 (-72.3%) and 2,546,491 -> 825,098 (-67.6%); user cycles 2.65 M -> 1.80
+M and 2.67 M -> 1.88 M (-32%, -29%); tps 2,447 -> 4,006 and 1,972 -> 3,517. The heap model's share of the
+run's user instructions 63% -> under 1% (`Lps::get` 48.2% -> 0.4%). TPC-B with its own plans isn't
+measured again: the commit changes only the walk and the redirects pruning sets, and a run meets the walk
+only when an UPDATE's plan is a bitmap heap scan (round 15's pair 3). Not gated on PGO (no inlining aim).
+
+Verification: `tools/quick-check.sh` with `QC_CHECKED=1` and `QC_TESTS="big_tables heap_order_scan"` on
+`747bef421` (on `ff72a4b50`): 11 test binaries, clippy 16 warnings, none new in a changed file, 371
+tests in 8 binaries (the lib's unit tests with the new one, big_tables, heap_order_scan, kept_plans,
+models_kept, golden, wire, wire_waits), the same 371 built `--profile verify-checked`, regress 51,148 /
+51,150 (0 newly differing), isolation 1,647 / 1,648, pg_dump_tap 14,609. The new test wasn't run against
+the code before the change.
+
 ## Short write transactions, round 14: the standing table at the right scale, an UPDATE's sequential scan of a small hot table (agent 295)
 
 BENCH.md "Short write transactions, round 14" has the tables. Plain dist builds: `base0` = `4b0f41516`

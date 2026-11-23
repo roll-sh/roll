@@ -1951,6 +1951,21 @@ Select-only off the lane (CPUs 2,3,20,21; one run each, 6 s): 43,926 / 43,800 us
 (point reads don't take the parallel paths). In 12-round runs of round 15 (below) g1's 100-row range
 read 340.6k and its sum 630.8k.
 
+## The heap model's HOT-chain roots after pruning (2026-11-23, agent 299)
+
+Lane A, `fixed.sh` with a TPC-B script whose UPDATEs run as bitmap heap scans (`SET LOCAL enable_indexscan
+= off, enable_seqscan = off`; `~/.cache/a299/bench/sql/tpcbbm.sql`), 48k transactions at 32 clients after
+`pgbench -i -s 32`, the server cgroup's counts over the run. Plain dist: `g1` = `47381f462`, `gh` = it +
+the commit. Two alternating pairs (g1 first, then gh first):
+
+| count a transaction | pair 1 | pair 2 |
+|---|---:|---:|
+| user instructions | 2,473,874 / 684,658 -72.3% | 2,546,491 / 825,098 -67.6% |
+| user cycles | 2,652,277 / 1,803,919 -32.0% | 2,671,448 / 1,884,894 -29.4% |
+| kernel instructions | 452,392 / 412,985 | 460,411 / 429,082 |
+| tps | 2,447 / 4,006 | 1,972 / 3,517 |
+| foreign cores (lane's 8 CPUs) | 4.55 | 5.67 |
+
 ## Short write transactions, round 14: the one-statement scripts' scale, an UPDATE's sequential scan of a small hot table (2026-11-23, agent 295)
 
 Lane A (servers on CPUs 6,7,24,25, pgbench on 8,9,26,27), one table or one pair a `tools/lane.sh` hold,
