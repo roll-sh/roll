@@ -17,6 +17,7 @@ pub(crate) struct Counters {
     pub rotations: AtomicU64,
     pub rotation_failures: AtomicU64,
     pub kms_refusals: AtomicU64,
+    pub member_rechecks: AtomicU64,
 }
 
 impl Counters {
@@ -43,6 +44,9 @@ pub struct Metrics {
     pub rotation_failures: u64,
     /// A customer's KMS refusing to open a project's data key.
     pub kms_refusals: u64,
+    /// Projects whose holdings were checked again because a member lost rights there (removed,
+    /// demoted, offboarded): what offboardings cost.
+    pub member_rechecks: u64,
     /// Gauges: leases not yet ended, syncs whose last push failed, and credentials whose last
     /// scheduled rotation failed.
     pub leases_live: u64,
@@ -73,6 +77,7 @@ impl Secrets {
             rotations: get(&c.rotations),
             rotation_failures: get(&c.rotation_failures),
             kms_refusals: get(&c.kms_refusals),
+            member_rechecks: get(&c.member_rechecks),
             leases_live,
             syncs_failing,
             rotations_failing,

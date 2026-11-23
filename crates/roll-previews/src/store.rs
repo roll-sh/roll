@@ -768,6 +768,10 @@ impl Store {
                 db.add_column("services", col, "TEXT")?;
             }
         }
+        // Skew protection (`roll.toml` `skew_protection`), as of its last deploy.
+        if !db.has_column("services", "skew")? {
+            db.add_column("services", "skew", "INTEGER NOT NULL DEFAULT 0")?;
+        }
         // Who made a share link (`usr_…`: a person, or the person behind their token; none for the
         // operator), and when it was last asked whether they still may.
         if !db.has_column("shares", "maker")? {
@@ -1019,6 +1023,40 @@ impl Store {
     pub fn set_healthy(&self, id: &str, name: &str, revision: &str) -> Result<()> {
         self.db.write(|c| {
             c.execute("UPDATE services SET healthy = ? WHERE preview_id = ? AND name = ?", params![revision, id, name])?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    pub fn set_service_skew(&self, id: &str, name: &str, on: bool) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("UPDATE services SET skew = ? WHERE preview_id = ? AND name = ?", params![on as i64, id, name])?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// A service with skew protection on: the revision its host serves, and whether `asked` is
+    /// one of its earlier pushes a request may still reach (kept, and replaced less than
+    /// [`SKEW_WINDOW_MS`] ago). `None` when it's off.
+    pub fn skew(&self, id: &str, name: &str, asked: Option<&str>) -> Result<Option<(String, bool)>> {
+        let since = self.now_ms()? - SKEW_WINDOW_MS;
+        self.db.read(|c| {
+            let current = c
+                .query_row("SELECT revision FROM services WHERE preview_id = ? AND name = ? AND skew = 1 AND revision IS NOT NULL AND revision <> ''", params![id, name], |r| r.get::<_, String>(0))
+                .optional()?;
+            let Some(current) = current else { return Ok::<_, Error>(None) };
+            let earlier = match asked {
+                Some(a) if a != current => c.query_row("SELECT 1 FROM pinned WHERE preview_id = ? AND service = ? AND revision = ? AND at >= ?", params![id, name, a, since], |_| Ok(())).optional()?.is_some(),
+                _ => false,
+            };
+            Ok(Some((current, earlier)))
+        })
+    }
+
+    /// An earlier push as if it had been replaced `ms` earlier.
+    #[cfg(test)]
+    pub(crate) fn age_pinned(&self, id: &str, service: &str, revision: &str, ms: i64) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("UPDATE pinned SET at = at - ? WHERE preview_id = ? AND service = ? AND revision = ?", params![ms, id, service, revision])?;
             Ok::<_, Error>(())
         })
     }
@@ -1759,7 +1797,7 @@ impl Store {
         let row: Option<(Option<String>, Option<String>)> = self.db.read(|c| c.query_row("SELECT speed, prev_speed FROM screenshots WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?))).optional())?;
         let Some((now, before)) = row else { return Ok(None) };
         let parse = |s: Option<String>| s.and_then(|s| serde_json::from_str::<crate::PageSpeed>(&s).ok());
-        Ok(parse(now).map(|now| crate::PageSpeedView { now, before: parse(before) }))
+        Ok(parse(now).map(|now| crate::PageSpeedView { now: now.without_shapes(), before: parse(before).map(crate::PageSpeed::without_shapes) }))
     }
 
     /// How much the page changed since the screenshot before (its head, in basis points).
@@ -3201,12 +3239,20 @@ impl Store {
             api_unread: b.api_unread,
             endpoints: f.speed.as_ref().map(|now| {
                 let main = b.speed.as_ref().map(|s| s.endpoints.as_slice()).unwrap_or_default();
-                now.endpoints.iter().map(|e| crate::EndpointAgainst { path: e.path.clone(), ms: e.ms, status: e.status, main_ms: main.iter().find(|m| m.path == e.path).map(|m| m.ms) }).collect()
+                now.endpoints
+                    .iter()
+                    .map(|e| {
+                        let m = main.iter().find(|m| m.path == e.path);
+                        let ok = |s: u16| (200..300).contains(&s);
+                        let shape_changes = m.filter(|m| ok(m.status) && ok(e.status)).map(|m| crate::shape_changes(&e.shape, &m.shape)).unwrap_or_default();
+                        crate::EndpointAgainst { path: e.path.clone(), ms: e.ms, status: e.status, main_ms: m.map(|m| m.ms), shape_changes }
+                    })
+                    .collect()
             }).unwrap_or_default(),
         });
         let first_unstable = page_health.as_ref().is_some_and(|h| h.unstable);
         let visual_review = self.visual_review(&r, settings.visual_review, settings.github.visual_threshold, base_change.as_ref(), &pages, first_unstable, f.head)?;
-        let page_speed = f.speed.map(|now| crate::PageSpeedView { now, before: f.prev_speed });
+        let page_speed = f.speed.map(|now| crate::PageSpeedView { now: now.without_shapes(), before: f.prev_speed.map(crate::PageSpeed::without_shapes) });
         // What the holder read against main's, for this head only (a push reads it again), and
         // whether it compared at this head at all (errors; routes too with traces).
         let new_errors = self.runtime_fact::<crate::NewErrors>(&r.id, "new_errors")?.filter(|f| f.head == r.head);
@@ -3384,6 +3430,9 @@ pub struct BaseRow {
 pub const SHARES_MAX: usize = 20;
 
 /// Earlier pushes kept reachable per service.
+/// How long after it was replaced an earlier push still answers requests that name it (skew
+/// protection), as roll apps' window.
+pub const SKEW_WINDOW_MS: i64 = 24 * 3600 * 1000;
 pub const PINNED_KEEP: usize = 3;
 
 /// An earlier push its preview no longer keeps ([`Store::gone_push`]): whose it was, and the

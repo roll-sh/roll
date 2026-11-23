@@ -103,6 +103,10 @@ impl EnvSource for Engine {
         set(&mut env, "PORT", spec.port.to_string());
         set(&mut env, "ROLL_REPO", svc.repo.clone());
         set(&mut env, "ROLL_CHANGESET", rev.clone());
+        // What a request names to reach this push again (`x-deployment-id`, `?dpl=`), as roll apps'.
+        if !rev.is_empty() {
+            set(&mut env, "ROLL_DEPLOYMENT", rev.clone());
+        }
         if let Some(c) = &r.change_id {
             set(&mut env, "ROLL_CHANGE", c.clone());
         }

@@ -282,7 +282,7 @@ async fn a_third_concurrent_task_is_refused() {
         call(&c, "POST", &format!("/_tasks/{t}/_cancel"), "").await;
         call(&c, "GET", &format!("/_tasks/{t}?wait_for_completion=true&timeout=10s"), "").await;
     }
-    assert_eq!(c.remote_running.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(c.remote.tasks.held(&c.name), 0);
 }
 
 /// A page's cost is charged to the node's budget before anything is built from it: under a small
@@ -339,7 +339,7 @@ async fn a_denied_address_is_refused_by_name_or_literal() {
     }
     let (s, v, text) = call(&c, "POST", "/_reindex", &reindex(&format!("http://localhost.:{port}"), "")).await;
     assert_eq!((s, at(&v, "error.type").as_str()), (500, Some("connect_exception")), "{text}");
-    assert!(text.contains("an address reindex from remote may not reach"), "{text}");
+    assert!(text.contains("an address roll may not reach"), "{text}");
     assert!(seen.lock().unwrap().is_empty(), "a request reached a denied address");
 }
 

@@ -128,13 +128,14 @@ pub(super) fn base_path(settings: &Settings) -> EsResult<()> {
     Ok(())
 }
 
-pub(super) fn allow_private(cluster: &crate::Cluster) -> bool {
-    cluster.config.node_setting(ALLOW_PRIVATE).is_some_and(|v| v.eq_ignore_ascii_case("true"))
+/// The node's egress rules for repositories ([`crate::egress`], private hosts with [`ALLOW_PRIVATE`]).
+pub(super) fn egress(cluster: &crate::Cluster) -> crate::egress::Egress {
+    crate::egress::Egress::of_cluster(cluster, ALLOW_PRIVATE)
 }
 
 fn location(cluster: &crate::Cluster, s: &Settings) -> Result<Location, String> {
     let region = s.get("region").filter(|r| !r.is_empty()).unwrap_or("us-east-1").to_string();
-    let endpoint = client::endpoint(s.get("endpoint"), s.get("protocol"), &region, allow_private(cluster))?;
+    let endpoint = client::endpoint(s.get("endpoint"), s.get("protocol"), &region, &egress(cluster))?;
     Ok(Location { endpoint, bucket: s.get("bucket").unwrap_or_default().to_string(), region, path_style: s.get("path_style_access").is_some_and(|v| v == "true") })
 }
 
@@ -145,7 +146,7 @@ fn s3_client(cluster: &crate::Cluster, name: &str, r: &Repository, creds: &super
         (Some(a), Some(s)) => Some(Credentials { access_key: a.to_string(), secret_key: s.to_string(), session_token: creds.get("session_token").map(str::to_string) }),
         _ => None,
     };
-    client::Client::new(at, creds, allow_private(cluster)).map_err(|e| failed(name, e))
+    client::Client::new(at, creds, &egress(cluster)).map_err(|e| failed(name, e))
 }
 
 /// `<base_path>/roll/`: where a repository keeps everything.
@@ -242,6 +243,17 @@ impl Bucket {
             "azure" => super::cloud::azure_store(cluster, name, r, &creds)?,
             _ => (crate::blob::Store::S3(s3_client(cluster, name, r, &creds)?), transfer::sizes(cluster, &r.settings)),
         };
+        // An address written in an endpoint (or a key file's `token_uri`) never reaches the
+        // resolver: checked against the node's own names as they resolve now, failing closed
+        // until they have, before anything connects.
+        let egress = egress(cluster);
+        for url in store.endpoints() {
+            egress.check_url_now(url).await.map_err(|e| match e {
+                // Not the tenant's mistake: try again, as reindex from remote says it.
+                crate::egress::Refused::NotReady => EsError::java(503, "connect_exception", crate::egress::NOT_READY),
+                e => repository_exception(name, "cannot create blob store").caused_by(EsError::illegal_argument(format!("the endpoint: {e}"))),
+            })?;
+        }
         let prefix = prefix(r);
         let st = cluster.state();
         let budget = cluster.breakers.request(cluster, &st);

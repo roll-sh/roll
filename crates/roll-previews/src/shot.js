@@ -226,7 +226,10 @@ const API = OPENAPI && `(async () => {
 })()`;
 // The project's endpoints ($ENDPOINTS, GET paths on the page's own origin): each timed as the
 // median of 10 GETs after one to warm up, its last status kept (0: no answer), at most 2 s a
-// request and 20 s in all (an endpoint past that is timed with what it answered).
+// request and 20 s in all (an endpoint past that is timed with what it answered). The warm-up's
+// JSON answer (up to 1 MiB) is read for its shape: one `path types` line per field ("users[].email
+// string", "total number|null"), an empty array as "[]", an object keyed by ids as `*`, at most
+// 100 lines, 8 levels, 20 elements an array and 100 keys an object. Values are never kept.
 const ENDPOINTS = (() => {
   try {
     return JSON.parse(process.env.ENDPOINTS || "[]").filter((p) => typeof p === "string" && /^\/[^\s#"'`]{0,199}$/.test(p)).slice(0, 5);
@@ -236,14 +239,48 @@ const ENDPOINTS = (() => {
 })();
 const TIMES = ENDPOINTS.length > 0 && `(async () => {
   const until = performance.now() + 20000;
-  const get = async (path) => {
+  const shapeOf = (v) => {
+    const types = new Map();
+    const add = (p, t) => {
+      if (!types.has(p)) {
+        if (types.size >= 100) return false;
+        types.set(p, new Set());
+      }
+      types.get(p).add(t);
+      return true;
+    };
+    const tick = String.fromCharCode(96);
+    const key = (k) => [...String(k)].filter((c) => c >= " " && c !== tick && c !== String.fromCharCode(127)).join("").slice(0, 60) || "?";
+    const idLike = (k) => /^[0-9]+$/.test(k) || /^[0-9a-fA-F-]{8,}$/.test(k);
+    const at = (p, k) => (p === "$" ? k : p + "." + k);
+    const walk = (x, p, depth) => {
+      const t = x === null ? "null" : Array.isArray(x) ? (x.length ? "array" : "[]") : typeof x;
+      if (!["object", "array", "[]", "string", "number", "boolean", "null"].includes(t)) return;
+      if (!add(p, t) || depth >= 8) return;
+      if (t === "array") for (const e of x.slice(0, 20)) walk(e, p + "[]", depth + 1);
+      else if (t === "object") {
+        const ks = Object.keys(x).slice(0, 100);
+        const ids = ks.length > 0 && ks.every(idLike);
+        for (const k of ks) walk(x[k], at(p, ids ? "*" : key(k)), depth + 1);
+      }
+    };
+    walk(v, "$", 0);
+    return [...types].map(([p, ts]) => p + " " + [...ts].sort().join("|")).sort();
+  };
+  const get = async (path, shape) => {
     const c = new AbortController();
     const t = setTimeout(() => c.abort(), 2000);
     const at = performance.now();
     try {
       const r = await fetch(new URL(path, location.origin), { credentials: "same-origin", cache: "no-store", signal: c.signal });
-      await r.arrayBuffer();
-      return { ms: performance.now() - at, status: r.status };
+      const body = await r.arrayBuffer();
+      let s;
+      if (shape && /json/i.test(r.headers.get("content-type") || "") && body.byteLength <= 1048576) {
+        try {
+          s = shapeOf(JSON.parse(new TextDecoder().decode(body)));
+        } catch {}
+      }
+      return { ms: performance.now() - at, status: r.status, shape: s };
     } catch {
       return { ms: performance.now() - at, status: 0 };
     } finally {
@@ -253,7 +290,7 @@ const TIMES = ENDPOINTS.length > 0 && `(async () => {
   const out = [];
   for (const path of ${JSON.stringify(ENDPOINTS)}) {
     if (performance.now() > until) break;
-    await get(path);
+    const warm = await get(path, true);
     const runs = [];
     let status = 0;
     for (let i = 0; i < 10 && performance.now() < until; i++) {
@@ -263,7 +300,7 @@ const TIMES = ENDPOINTS.length > 0 && `(async () => {
     }
     if (!runs.length) continue;
     runs.sort((a, b) => a - b);
-    out.push({ path, ms: Math.round(runs[Math.floor(runs.length / 2)]), status });
+    out.push(Object.assign({ path, ms: Math.round(runs[Math.floor(runs.length / 2)]), status }, warm.shape ? { shape: warm.shape } : {}));
   }
   return JSON.stringify(out);
 })()`;

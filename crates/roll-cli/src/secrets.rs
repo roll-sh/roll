@@ -629,9 +629,10 @@ pub enum Secrets {
     #[command(subcommand)]
     Gateways(GatewaysCmd),
     /// Vendor credentials roll issues and revokes keys with (SendGrid, Twilio, Okta, Entra,
-    /// Auth0, GitLab, OpenAI, Datadog): list, add (the credential on stdin), remove.
+    /// Auth0, GitLab, OpenAI, Datadog, Cloudflare, Databricks, Confluent): list, add (the
+    /// credential on stdin), remove.
     #[command(subcommand)]
-    Saas(SaasCmd),
+    Saas(Box<SaasCmd>),
     /// Kubernetes clusters that issue short-lived service account tokens per lease (link kind
     /// `kubernetes`): list, add (the admin token on stdin), remove. Not `kubernetes`, which pulls
     /// an environment into a cluster.
@@ -1164,11 +1165,14 @@ pub enum SaasCmd {
     /// own flags: sendgrid `--scope`…; twilio `--account-sid`; okta `--domain --app-id`; entra
     /// `--tenant --client-id --object-id`; auth0 `--domain --client-id --app-client-id`; gitlab
     /// `[--host] --gitlab-project|--gitlab-group --scope… [--access-level] [--expires-days]`; openai
-    /// `--openai-project`; datadog `[--site] --key api|application [--scope…]`. Datadog's
-    /// credential is `<API key>:<application key>`.
+    /// `--openai-project`; datadog `[--site] --key api|application [--scope…]`; cloudflare
+    /// `[--account-id] --template`; databricks `--host [--lifetime-days]`; confluent `--owner
+    /// [--resource [--confluent-environment]]`. Datadog's credential is `<API key>:<application
+    /// key>`, Confluent's `KEY:SECRET`.
     Add {
         name: String,
-        /// sendgrid, twilio, okta, entra, auth0, gitlab, openai or datadog.
+        /// sendgrid, twilio, okta, entra, auth0, gitlab, openai, datadog, cloudflare, databricks or
+        /// confluent.
         #[arg(long)]
         vendor: String,
         /// A scope each key gets: SendGrid's (none: full access), GitLab's (one at least) or a
@@ -1193,7 +1197,7 @@ pub enum SaasCmd {
         /// The Auth0 app whose secret rotates.
         #[arg(long)]
         app_client_id: Option<String>,
-        /// A self-managed GitLab's host (default gitlab.com).
+        /// A self-managed GitLab's host (default gitlab.com), or a Databricks workspace's.
         #[arg(long)]
         host: Option<String>,
         /// The GitLab project whose access tokens rotate: its id or group/project.
@@ -1218,6 +1222,24 @@ pub enum SaasCmd {
         /// Which Datadog keys rotate: api or application.
         #[arg(long)]
         key: Option<String>,
+        /// The Cloudflare account whose tokens rotate (none: your user's).
+        #[arg(long)]
+        account_id: Option<String>,
+        /// The Cloudflare token whose policies each new token copies.
+        #[arg(long)]
+        template: Option<String>,
+        /// Each Databricks token's lifetime in days (default 90).
+        #[arg(long)]
+        lifetime_days: Option<u16>,
+        /// The Confluent service account or user (sa-…, u-…) whose keys rotate.
+        #[arg(long)]
+        owner: Option<String>,
+        /// The Confluent resource the keys are for (lkc-…; none: Cloud API keys).
+        #[arg(long)]
+        resource: Option<String>,
+        /// The Confluent environment of --resource (env-…).
+        #[arg(long = "confluent-environment")]
+        confluent_environment: Option<String>,
     },
     Rm { id: String },
 }
@@ -3055,7 +3077,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("Removed {id}");
             }
         },
-        Secrets::Saas(a) => match a {
+        Secrets::Saas(a) => match *a {
             SaasCmd::Ls => {
                 let v = c.call(Method::GET, &format!("{}/saas", c.base()), None).await?;
                 if json_out {
@@ -3066,12 +3088,12 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     println!("{}  {:<16} {:<9} {}", s(&r["id"]), s(&r["name"]), s(&r["vendor"]), target.join(" "));
                 }
             }
-            SaasCmd::Add { name, vendor, scopes, account_sid, domain, app_id, tenant, client_id, object_id, app_client_id, host, gitlab_project, gitlab_group, access_level, expires_days, openai_project, site, key } => {
+            SaasCmd::Add { name, vendor, scopes, account_sid, domain, app_id, tenant, client_id, object_id, app_client_id, host, gitlab_project, gitlab_group, access_level, expires_days, openai_project, site, key, account_id, template, lifetime_days, owner, resource, confluent_environment } => {
                 let mut target = serde_json::Map::new();
                 if !scopes.is_empty() {
                     target.insert("scopes".into(), json!(scopes));
                 }
-                for (k, v) in [("account_sid", account_sid), ("domain", domain), ("app_id", app_id), ("tenant", tenant), ("client_id", client_id), ("object_id", object_id), ("app_client_id", app_client_id), ("host", host), ("project", gitlab_project), ("group", gitlab_group), ("project_id", openai_project), ("site", site), ("key", key)] {
+                for (k, v) in [("account_sid", account_sid), ("domain", domain), ("app_id", app_id), ("tenant", tenant), ("client_id", client_id), ("object_id", object_id), ("app_client_id", app_client_id), ("host", host), ("project", gitlab_project), ("group", gitlab_group), ("project_id", openai_project), ("site", site), ("key", key), ("account_id", account_id), ("template", template), ("owner", owner), ("resource", resource), ("environment", confluent_environment)] {
                     if let Some(v) = v {
                         target.insert(k.into(), json!(v));
                     }
@@ -3081,6 +3103,9 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 }
                 if let Some(n) = expires_days {
                     target.insert("expires_days".into(), json!(n));
+                }
+                if let Some(n) = lifetime_days {
+                    target.insert("lifetime_days".into(), json!(n));
                 }
                 // The vendor credential mints keys: never an argument.
                 if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
