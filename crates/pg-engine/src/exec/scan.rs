@@ -4064,6 +4064,11 @@ impl ScanNode {
                     // branches and tellers, scanned by every UPDATE of theirs.)
                     let mut held: Vec<super::heaporder::Held> = Vec::new();
                     let (mut hold, mut held_bytes) = (est.is_none(), 0usize);
+                    // (Rows the filter rejects over their stored values, as `emit` would: left
+                    // out of what is held, counted once the held rows are what returns. An
+                    // UPDATE's `WHERE tid = $1` keeps one row of pgbench_tellers' 320.)
+                    let early = hold && self.early_filter(ctx);
+                    let mut rejected = 0u32;
                     // (The batch's rows read where they are.)
                     while self.next_plain(ctx)? {
                         ctx.check()?;
@@ -4087,7 +4092,9 @@ impl ScanNode {
                                 return Ok(None);
                             };
                             tids.push(t);
-                            if hold {
+                            if hold && early && self.stored_rejects() {
+                                rejected += 1;
+                            } else if hold {
                                 let (k, v) = self.rb.peek().expect("a row");
                                 held_bytes += k.len() + v.len();
                                 if held.len() < HELD_ROWS && held_bytes <= HELD_BYTES {
@@ -4104,6 +4111,10 @@ impl ScanNode {
                         }
                     }
                     if hold {
+                        for _ in 0..rejected {
+                            self.count_row(ctx);
+                            ctx.filtered(self.key);
+                        }
                         // (Every row held: by TID, as the merge returns them; TIDs are distinct.
                         // The TIDs sorted with the rows' places, each row then moved once.)
                         if !held.is_sorted_by_key(|r| r.0) {
@@ -4464,6 +4475,40 @@ impl ScanNode {
             self.prefilter = Some(mask.map(Rc::from));
         }
         self.prefilter.clone().flatten()
+    }
+
+    /// Whether `emit` would decide this scan's filter over a row's stored values before
+    /// anything else it does with the row (its `early` path): a filter, no index-only columns,
+    /// no predicate locks (SSI locks a fetched row first), not implied by the key range, no
+    /// fetch to note (a sequential scan's).
+    /// Made ready here: the filter's kernel (`kfilter`), and whether it has stored-value
+    /// comparisons.
+    fn early_filter(&mut self, ctx: &ExecCtx) -> bool {
+        let plan = &self.plan;
+        if plan.filter.is_none()
+            || plan.index.is_some()
+            || self.keys.is_some()
+            || self.ios_cols.is_some()
+            || self.implied
+            || predicate_locked(&plan.table, ctx)
+        {
+            return false;
+        }
+        let k = self.kfilter.get_or_insert_with(|| {
+            plan.filter.as_ref().and_then(|f| super::kernel::compile_bound(f, ctx)).map(|k| {
+                let c = super::kernel::StoredCmps::of(&k);
+                (k, c)
+            })
+        });
+        matches!(k, Some((_, Some(_))))
+    }
+
+    /// Whether the filter's stored-value comparisons (`StoredCmps`, `filter_kernel`'s first
+    /// step) reject the row `rb` holds now; false when they don't decide it.
+    fn stored_rejects(&mut self) -> bool {
+        let Some(Some((_, Some(c)))) = &self.kfilter else { return false };
+        let Some((_, v)) = self.rb.peek() else { return false };
+        !crate::storage::toast::has_external(v) && row_data_fast(v).and_then(|d| c.passes(d)) == Some(false)
     }
 
     /// The scan's filter decided by its kernel (None: left to `eval`) for the stored row
