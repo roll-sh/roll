@@ -277,6 +277,8 @@ pub struct FakeApps {
     pub woken: Mutex<Vec<(String, String)>>,
     /// The build each service runs now, by service: (git commit, its own URL).
     pub live: Mutex<HashMap<String, (String, String)>>,
+    /// Each service's browser checks on its live deployment.
+    pub browser: Mutex<HashMap<String, Vec<roll_previews::ports::BrowserCheckResult>>>,
     /// Builds started again on an earlier push's copy: (service, deployment, the variables).
     pub views: Mutex<Vec<(String, String, Vars)>>,
     /// What a service answers on its health path (unset: the backend can't tell).
@@ -406,6 +408,9 @@ impl Apps for FakeApps {
     }
     async fn metrics(&self, _: &str, service: &str) -> Option<(f64, u64)> {
         self.metrics.lock().get(service).copied()
+    }
+    async fn browser_checks(&self, _: &str, service: &str) -> Option<Vec<roll_previews::ports::BrowserCheckResult>> {
+        self.browser.lock().get(service).cloned()
     }
     async fn live_build(&self, _: &str, service: &str) -> Option<roll_previews::ports::LiveBuild> {
         self.live.lock().get(service).cloned().map(|(revision, url)| roll_previews::ports::LiveBuild { id: format!("dep_{revision}"), revision, url })
