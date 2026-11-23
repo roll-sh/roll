@@ -5467,6 +5467,45 @@
         "x-roll-action": "write"
       }
     },
+    "/v1/apps/services/{id}/move": {
+      "post": {
+        "description": "Answers `{ id, project, redeployed: { environment, deployment }[] }`; 409 naming what ties it to its project (links either way, routes either way, `roll://` references, a private network, running sandboxes) or a service of its name there; 403 for another owner's project or a scoped token without admin on it there (README, \"Moving a service\").",
+        "operationId": "postServicesIdMove",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "description": "`{ project }` (another project of the same owner)"
+        },
+        "responses": {
+          "200": {
+            "description": "`{ id, project, redeployed: { environment, deployment }[] }`; 409 naming what ties it to its project (links either way, routes either way, `roll://` references, a private network, running sandboxes) or a service of its name there; 403 for another owner's project or a scoped token without admin on it there (README, \"Moving a service\")"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Move service",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "admin"
+      }
+    },
     "/v1/apps/services/{id}/registry": {
       "delete": {
         "description": "Answers `Service`.",

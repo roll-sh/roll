@@ -1251,6 +1251,33 @@ impl Store {
     }
 
     /// Remove a service and everything that belongs to it (deployments' history included).
+    /// A service moved to project `to` in one write: what it used so far stays project `from`'s
+    /// (as when it's deleted: the month's spend never moves with it), and a service of `to`
+    /// already named `name` is a conflict.
+    pub fn move_service(&self, id: &str, from: &str, to: &str, name: &str) -> Result<()> {
+        self.db.write(|c| {
+            let taken = c.query_row("SELECT 1 FROM services WHERE project = ? AND name = ? AND id <> ?", params![to, name, id], |_| Ok(())).optional()?.is_some();
+            if taken {
+                return Err(Error::Conflict(format!("that project already has a service named {name}")));
+            }
+            c.execute(
+                "INSERT INTO project_usage (project, hour, cpu_seconds, gb_seconds, requests, egress_bytes, build_seconds, stored_gb_hours) \
+                 SELECT ?, u.hour, SUM(u.cpu_seconds), SUM(u.gb_seconds), SUM(u.requests), SUM(u.egress_bytes), SUM(u.build_seconds), SUM(u.stored_gb_hours) \
+                 FROM usage u WHERE u.service = ? GROUP BY u.hour \
+                 ON CONFLICT (project, hour) DO UPDATE SET cpu_seconds = project_usage.cpu_seconds + excluded.cpu_seconds, \
+                 gb_seconds = project_usage.gb_seconds + excluded.gb_seconds, requests = project_usage.requests + excluded.requests, \
+                 egress_bytes = project_usage.egress_bytes + excluded.egress_bytes, build_seconds = project_usage.build_seconds + excluded.build_seconds, \
+                 stored_gb_hours = project_usage.stored_gb_hours + excluded.stored_gb_hours",
+                params![from, id],
+            )?;
+            c.execute("DELETE FROM usage WHERE service = ?", [id])?;
+            match c.execute("UPDATE services SET project = ? WHERE id = ? AND project = ?", params![to, id, from])? {
+                0 => Err(Error::Conflict("the service moved meanwhile".into())),
+                _ => Ok(()),
+            }
+        })
+    }
+
     pub fn delete_service(&self, id: &str) -> Result<()> {
         self.db.write(|c| {
             // What it used stays its project's (spend limits, the month's bill): deleting a

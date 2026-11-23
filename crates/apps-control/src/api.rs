@@ -84,6 +84,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route("/v1/apps/services/{id}/git-login", put(put_git_login).delete(delete_git_login))
         .route("/v1/apps/services/{id}/github", put(put_github).delete(delete_github))
         .route("/v1/apps/services/{id}/environments", get(environments))
+        .route("/v1/apps/services/{id}/move", post(move_service))
         .route(env, get(get_env).put(put_env).delete(delete_env))
         .route(&format!("{env}/deploys"), get(deploys).post(create_deploy).layer(DefaultBodyLimit::max(apps.cfg.upload_max)))
         .route(&format!("{env}/deploys/{{dep}}"), get(get_deploy))
@@ -884,6 +885,11 @@ async fn deploy_sbom(State(apps): S, Path((id, env, dep)): Path<(String, String,
     let body = apps.sbom(&id, &env, &dep).await?;
     let file = format!("attachment; filename=\"{dep}.cdx.json\"");
     Ok(([(axum::http::header::CONTENT_TYPE, "application/vnd.cyclonedx+json".to_string()), (axum::http::header::CONTENT_DISPOSITION, file)], body).into_response())
+}
+
+/// `POST /v1/apps/services/{id}/move {project}`: to another project of the same owner.
+async fn move_service(State(apps): S, Path(id): Path<String>, ext: Extensions, Json(body): Json<Value>) -> R {
+    Ok(Json(apps.move_service(&id, body, roll_auth::Grant::on(&ext), actor(&ext)).await?).into_response())
 }
 
 /// `GET …/deploys/{dep}/provenance`: its image's signed SLSA provenance (a DSSE envelope).
