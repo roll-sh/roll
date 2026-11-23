@@ -29,6 +29,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | Route | Body | Answer | action |
 | --- | --- | --- | --- |
 | `GET /v1/apps` | | `Overview` | read |
+| `POST /v1/apps/quote` | `{ run?: Run }` (as `NewService`'s, checked as it is) | `Quote`: what a service run so costs at most, before it's made | read |
 | `POST /v1/apps/plan` | `PlanRequest` | `Plan`; with `roots: true` (a repo or a Git URL, no `root`): `{ roots: { root, provider, framework? }[] }`, the folders up to three levels down that build on their own (a start command, a framework or a Dockerfile: no library package, docs or dependencies), at most 20 | read |
 | `POST /v1/apps/projects/{project}/export` | `{ databases? }` (`{"postgres:<ref>": "db"}`: the names of the databases its services link, as the caller lists them; one not named is named after its ref) | `{ roll_toml, notes }`: its services (source, branch, the run settings that differ from a new service's), the postgres and redis databases they link, variables by name only in its header; read back with the parser `roll up --all` uses before it's answered; 409 for a project with no service | read |
 | `GET /v1/apps/projects/{project}/status-page` | | `{ title, url, items }`: the project's public status page; 404 without one | read |
@@ -209,6 +210,12 @@ type Overview = {
 };
 
 type Prices = { cpu_second: number; gb_second: number; egress_gb: number; build_minute: number; stored_gb_month: number /* what roll stores: logs kept past the first week (an environment's 30 or 90 days) and build caches (shared by the services that build from one), metered hourly as stored_gb_hours */ };
+
+/** A ceiling in US dollars at this node's `prices`: an instance's hour at its whole CPU and memory
+ * (its sidecars' too; instances are metered on what they use, at most these). Nothing runs while it
+ * sleeps; `min_instances` always do (a cron service's only during a run). Egress, builds and
+ * stored logs are extra. */
+type Quote = { instance_hour: number; idle_hour: number /* min_instances' */; month: { least: number; most: number /* max_instances' all month */ }; scales_to_zero: boolean; currency: "USD"; note: string; prices: Prices };
 
 type Source =
   | { kind: "repo"; repo: string /* owner/name in roll code (GitHub repos are mirrored there) */; root?: string }
