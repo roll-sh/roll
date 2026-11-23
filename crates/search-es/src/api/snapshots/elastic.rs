@@ -367,7 +367,8 @@ fn head_uuid(head: &[u8]) -> Option<&str> {
 /// blob's length and the repository uuid it starts with haven't changed.
 pub(super) async fn read_data(cluster: &crate::Cluster, src: &Source) -> EsResult<Arc<EsData>> {
     let latest = src.get("index.latest", 64).await?.ok_or_else(|| repository_exception(&src.repo, "the Elasticsearch repository's [index.latest] is gone"))?;
-    let mut generation = i64::from_be_bytes(latest[..8].try_into().map_err(|_| damaged(&src.repo, "index.latest", "short"))?);
+    // Read again since `open` looked: it may have changed meanwhile.
+    let mut generation = i64::from_be_bytes(latest.get(..8).and_then(|b| b.try_into().ok()).ok_or_else(|| damaged(&src.repo, "index.latest", "short"))?);
     if !(0..i64::MAX - PROBES).contains(&generation) {
         return Err(damaged(&src.repo, "index.latest", format!("generation [{generation}]")));
     }

@@ -166,6 +166,51 @@ pub(super) async fn verify(cluster: &crate::Cluster, name: &str, r: &Repository)
     bucket.verify().await
 }
 
+/// What a repository's prefix holds ([`Bucket::contents`]).
+pub(super) enum Contents {
+    /// Roll's repository data (`None`: nothing yet).
+    Roll(Option<RepositoryData>),
+    /// Someone else's repository: why roll thinks so.
+    Foreign(String),
+}
+
+/// Refuses a bucket location holding someone else's repository under roll's prefix (before
+/// registering it, analysing it): whether the bucket can be reached is left to the caller's own
+/// checks.
+pub(super) async fn refuse_foreign(cluster: &crate::Cluster, name: &str, r: &Repository) -> EsResult<()> {
+    let Ok(bucket) = Bucket::open(cluster, name, r).await else { return Ok(()) };
+    match bucket.contents().await {
+        Ok(Contents::Foreign(why)) => Err(bucket.foreign(&why)),
+        _ => Ok(()),
+    }
+}
+
+/// Whether `rel` (a key under a repository's prefix) is one roll writes there and its cleanup
+/// may delete: `index-<n>`, `tests-<uuid>`, `indices/<uuid>/<shard>/snap-<uuid>.json` and
+/// `indices/<uuid>/<shard>/<segment id, 32 hex>-<docs>.<n>.gz`. Anything else under the prefix
+/// (another program's files, a repository nested there) is never touched.
+fn roll_key(rel: &str) -> bool {
+    let digits = |s: &str| !s.is_empty() && s.len() <= 19 && s.bytes().all(|b| b.is_ascii_digit());
+    if let Some(g) = rel.strip_prefix("index-") {
+        return digits(g);
+    }
+    if let Some(u) = rel.strip_prefix("tests-") {
+        return valid_uuid(u);
+    }
+    let Some(rest) = rel.strip_prefix("indices/") else { return false };
+    let mut parts = rest.split('/');
+    let (Some(uuid), Some(shard), Some(file), None) = (parts.next(), parts.next(), parts.next(), parts.next()) else { return false };
+    if !valid_uuid(uuid) || !digits(shard) {
+        return false;
+    }
+    if let Some(snap) = file.strip_prefix("snap-").and_then(|f| f.strip_suffix(".json")) {
+        return valid_uuid(snap);
+    }
+    let Some((segment, n)) = file.strip_suffix(".gz").and_then(|f| f.rsplit_once('.')) else { return false };
+    let Some((id, docs)) = segment.split_once('-') else { return false };
+    id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()) && digits(docs) && digits(n)
+}
+
 /// A shard snapshot's contents in the bucket.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct ShardBlobs {
@@ -304,20 +349,60 @@ impl Bucket {
         Ok(Some(data))
     }
 
-    /// The newest repository data (`None`: no snapshot was ever written here).
+    /// The newest repository data (`None`: no snapshot was ever written here); an error when the
+    /// prefix holds someone else's repository ([`Bucket::contents`]).
     pub(super) async fn read_data(&self) -> EsResult<Option<RepositoryData>> {
+        match self.contents().await? {
+            Contents::Roll(data) => Ok(data),
+            Contents::Foreign(why) => Err(self.foreign(&why)),
+        }
+    }
+
+    /// What writing where someone else keeps a repository answers.
+    fn foreign(&self, why: &str) -> EsError {
+        failed(&self.name, format!("{why}: another program, such as Elasticsearch, keeps a repository under [{}], and roll neither reads nor writes there", self.prefix))
+    }
+
+    /// Whose repository the prefix holds. Never "empty" when it isn't, or a cleanup would
+    /// delete another program's files and a snapshot write over its generations:
+    /// - an `index.latest` that isn't roll's (a decimal generation; Elasticsearch's, at a
+    ///   `base_path` ending in `roll`, is 8 binary bytes) is someone else's;
+    /// - without one (Elasticsearch writes none when it finds its generation by listing, or
+    ///   before its first snapshot ends), a `snap-` or `meta-` blob at the root, an `index-N`
+    ///   roll doesn't name so (or `index-0`, which roll never writes), or a newest `index-N`
+    ///   that isn't gzip are someone else's.
+    pub(super) async fn contents(&self) -> EsResult<Contents> {
         let latest = self.store.get(&format!("{}index.latest", self.prefix), 64).await.map_err(|e| self.fail("reading index.latest", e))?;
-        // An `index.latest` roll didn't write (Elasticsearch's, at a `base_path` ending in
-        // `roll`, is 8 binary bytes) means the prefix is someone else's: never read as empty,
-        // or a cleanup would delete their files and a snapshot overwrite their generation.
         let mut generation = match latest {
-            None => 0,
             Some(b) => match std::str::from_utf8(&b).ok().and_then(|t| t.trim().parse::<i64>().ok()).filter(|g| *g >= 0) {
                 Some(g) => g,
-                None => {
-                    return Err(failed(&self.name, format!("[{}index.latest] isn't roll's (another program, such as Elasticsearch, keeps a repository there): roll neither reads nor writes it", self.prefix)));
-                }
+                None => return Ok(Contents::Foreign(format!("[{}index.latest] isn't roll's", self.prefix))),
             },
+            None => {
+                for what in ["snap-", "meta-"] {
+                    let listed = self.store.list(&format!("{}{what}", self.prefix)).await.map_err(|e| self.fail("listing the repository", e))?;
+                    if let Some((key, _)) = listed.first() {
+                        return Ok(Contents::Foreign(format!("[{key}] isn't roll's")));
+                    }
+                }
+                let listed = self.store.list(&format!("{}index-", self.prefix)).await.map_err(|e| self.fail("listing the repository", e))?;
+                let mut newest: Option<i64> = None;
+                for (key, _) in &listed {
+                    let g = key.strip_prefix(&self.prefix).and_then(|r| r.strip_prefix("index-")).filter(|g| !g.is_empty() && g.bytes().all(|b| b.is_ascii_digit())).and_then(|g| g.parse::<i64>().ok());
+                    match g {
+                        Some(g) if g > 0 => newest = newest.max(Some(g)),
+                        _ => return Ok(Contents::Foreign(format!("[{key}] isn't roll's"))),
+                    }
+                }
+                if let Some(g) = newest {
+                    let key = format!("{}index-{g}", self.prefix);
+                    let head = self.store.get(&key, DATA_MAX).await.map_err(|e| self.fail("reading the repository data", e))?;
+                    if head.is_some_and(|b| !b.starts_with(&[0x1f, 0x8b])) {
+                        return Ok(Contents::Foreign(format!("[{key}] isn't roll's repository data")));
+                    }
+                }
+                newest.unwrap_or(0)
+            }
         };
         let mut found = match generation {
             0 => None,
@@ -332,7 +417,7 @@ impl Bucket {
                 None => break,
             }
         }
-        Ok(found)
+        Ok(Contents::Roll(found))
     }
 
     /// Commits `data` (generation `previous + 1`): fails when another writer committed that
@@ -371,6 +456,11 @@ impl Bucket {
             Ok::<_, client::Error>(back)
         };
         let unreachable = |cause: EsError| unreachable(&self.name, &self.prefix, cause);
+        // No test object goes where someone else keeps a repository (an unreachable bucket
+        // fails the check below instead).
+        if let Ok(Contents::Foreign(why)) = self.contents().await {
+            return Err(self.foreign(&why));
+        }
         if self.read_only {
             let path = self.prefix.trim_end_matches('/');
             return match self.store.list(&format!("{}index-", self.prefix)).await {
@@ -580,9 +670,12 @@ impl Bucket {
         let (mut bytes, mut count) = (0, 0);
         for (key, size) in listed {
             let Some(rel) = key.strip_prefix(&self.prefix) else { continue };
+            if !roll_key(rel) {
+                continue;
+            }
             let stale = match rel.strip_prefix("index-").and_then(|g| g.parse::<i64>().ok()) {
                 Some(g) => g + 1 < data.generation,
-                None => rel.starts_with("tests-") || (rel.starts_with("indices/") && !referenced.contains(&key)),
+                None => rel.starts_with("tests-") || !referenced.contains(&key),
             };
             if stale && self.store.delete(&key).await.is_ok() {
                 bytes += size;

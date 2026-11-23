@@ -749,6 +749,10 @@ pub async fn put_repository(ctx: &Ctx<'_>) -> EsResult<Reply> {
     if repo.settings.get("readonly").is_none() && crate::branch::inherited_location(ctx.cluster, &ctx.state(), &repo) {
         repo.settings.set("readonly", "true");
     }
+    // A location where someone else keeps a repository under roll's prefix isn't registered.
+    if repo.in_bucket() && verify {
+        s3::refuse_foreign(ctx.cluster, &name, &repo).await?;
+    }
     let registering = name.clone();
     // A bucket is checked once registered (a write, a read and a delete); a repository that
     // fails stays registered, as on Elasticsearch, and the error is the answer.
@@ -1134,7 +1138,7 @@ pub async fn create(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let build = move |st: &mut ClusterState| {
             let Some(r) = st.metadata.repositories.get(&r2).cloned() else { return Err(repository_missing(&r2)) };
             if r.read_only() {
-                return Err(EsError::illegal_argument(format!("[{r2}] cannot create snapshot in a readonly repository")));
+                return Err(repository_exception(&r2, "cannot create snapshot in a readonly repository"));
             }
             let key = r.location_key();
             // A copy of Elasticsearch's that arrived after the check above: roll's snapshot never
@@ -1278,16 +1282,30 @@ const STATES: &[&str] = &["IN_PROGRESS", "SUCCESS", "FAILED", "PARTIAL", "INCOMP
 /// `GET _snapshot/{repository}/{snapshot}`.
 pub async fn get(ctx: &Ctx<'_>) -> EsResult<Reply> {
     ctx.validate_timeouts()?;
-    let repos = match_repositories(&ctx.state().metadata, &ctx.list_param("repository").unwrap_or_default())?;
+    let exprs = ctx.list_param("repository").unwrap_or_default();
+    let repos = match_repositories(&ctx.state().metadata, &exprs)?;
+    // As Elasticsearch's: a repository that can't be read fails a request naming it alone, and
+    // is a failure beside the others' snapshots in one naming several.
+    let several = exprs.len() != 1 || exprs.iter().any(|e| e == "_all" || e.contains('*'));
+    let mut failures = Map::new();
     // A bucket's snapshots may come from other clusters: its data is read first.
     for name in &repos {
-        if elastic_repository(ctx, name).await? {
-            continue;
-        }
-        if let Some(r) = s3::bucket_repository(&ctx.state(), name) {
-            s3::refresh(ctx.cluster, name, &r).await?;
+        let read = async {
+            if !elastic_repository(ctx, name).await?
+                && let Some(r) = s3::bucket_repository(&ctx.state(), name)
+            {
+                s3::refresh(ctx.cluster, name, &r).await?;
+            }
+            Ok::<_, EsError>(())
+        };
+        if let Err(e) = read.await {
+            if !several {
+                return Err(e);
+            }
+            failures.insert(name.clone(), e.to_value(false));
         }
     }
+    let repos: Vec<String> = repos.into_iter().filter(|r| !failures.contains_key(r)).collect();
     let st = ctx.state();
     let snaps = ctx.list_param("snapshot").unwrap_or_default();
     let verbose = ctx.bool_param("verbose", true)?;
@@ -1375,10 +1393,19 @@ pub async fn get(ctx: &Ctx<'_>) -> EsResult<Reply> {
         .map(|(r, s)| snapshot_info(ctx, include_repository.then_some(r.as_str()), s, verbose, index_names, index_details))
         .collect();
     // OpenSearch's `GetSnapshotsResponse` has no paging counts.
-    if crate::opensearch::active() {
-        return Reply::ok(obj! { "snapshots" => Value::Arr(page) });
+    let mut out = obj! { "snapshots" => Value::Arr(page) };
+    if !failures.is_empty()
+        && let Value::Obj(m) = &mut out
+    {
+        m.insert("failures".into(), Value::Obj(failures));
     }
-    Reply::ok(obj! { "snapshots" => Value::Arr(page), "total" => total, "remaining" => total - skip - take })
+    if let Value::Obj(m) = &mut out
+        && !crate::opensearch::active()
+    {
+        m.insert("total".into(), Value::from(total));
+        m.insert("remaining".into(), Value::from(total - skip - take));
+    }
+    Reply::ok(out)
 }
 
 /// `DELETE _snapshot/{repository}/{snapshot}`.

@@ -2045,8 +2045,15 @@ the rest are skipped by the tests' own prerequisites.
   `repository_verification_exception` when the bucket can't be reached; the repository stays
   registered, as on Elasticsearch). Its layout is roll's own
   (`<base_path>/roll/`), so Elasticsearch can't read roll's snapshots (roll reads Elasticsearch's:
-  below);
-  `_cleanup` deletes what no snapshot references, `_verify_integrity` checks every shard
+  below). Someone else's repository under that prefix (an `index.latest` that isn't a decimal
+  generation; without one, `snap-` or `meta-` blobs at its root, an `index-0`, or a newest
+  `index-N` that isn't roll's gzip) is never read or written: `PUT` with `verify` refuses to
+  register the repository, and reads, snapshots, `_verify`, `_analyze` and `_cleanup` answer
+  500 `repository_exception` (listing several repositories reports it under `failures` and
+  lists the others' snapshots);
+  `_cleanup` deletes what no snapshot references, and only objects of the names roll writes
+  (`index-N`, `tests-<uuid>`, its shard files and chunks under `indices/`; nothing when the
+  bucket holds no repository data), `_verify_integrity` checks every shard
   snapshot is in the bucket. Not supported: `chunk_size`, `server_side_encryption`,
   `canned_acl`, `storage_class` (accepted, not applied), throttling of bucket traffic, `gcs` and
   `azure`.
@@ -2057,7 +2064,9 @@ the rest are skipped by the tests' own prerequisites.
   network route to the old cluster is needed (reindex from remote is the live path). A
   repository whose base path holds Elasticsearch's `index.latest` is Elasticsearch's, unless roll
   keeps snapshots there (snapshots recorded for the location, or a bucket's `roll/`), which stay
-  roll's whatever someone puts beside them:
+  roll's whatever someone puts beside them. Whose it is is decided each time it's read: a
+  location whose `index.latest` is gone (wiped to be reused) is roll's again, and the snapshots
+  listed from it go:
   - **Listing** (`GET _snapshot/{repo}/_all`, `_cat/snapshots`) answers from its `index-N` and
     each snapshot's `SnapshotInfo` (`snap-<uuid>.dat`): names, uuids, states, indices, data
     streams, times, shard counts, metadata. `_status` reports one small file per shard (the

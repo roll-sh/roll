@@ -28,9 +28,12 @@
 //!   fetched or allocated: the commit, each `.si` and the segment's other small files (at most
 //!   64 MiB each) while they're held and what parsing them may build (a bound per byte of the
 //!   file) while it's kept, read windows, decompressed chunks, live docs, the doc values and
-//!   vector ranges kept, and each document's decoded vectors; only codec headers of a few dozen
-//!   bytes aren't. A `_source` read as SMILE or CBOR, or parsed to put vectors back, is charged
-//!   as its tree is built. Each document is charged from the moment it is read until it is
+//!   vector ranges kept, and each document's decoded vectors. A `_source` read as SMILE or CBOR,
+//!   or parsed to put vectors back, is charged as its tree is built, and so are the vectors put
+//!   back as they're rendered. What isn't: codec headers of a few dozen bytes, and bookkeeping
+//!   that grows with the fields asked for rather than with the data (the names of the vector
+//!   fields and their magnitudes, the doc values wanted, a document's per-field scale, the sets
+//!   that refuse a duplicate while a file is parsed, a map's entries while it's collected). Each document is charged from the moment it is read until it is
 //!   indexed (at most [`IN_FLIGHT`] wait in the channel, every one of them
 //!   charged, so the channel's memory is the breaker's, not a count's); a stored fields chunk may
 //!   not decompress past `http.max_content_length` plus a margin; every Lucene file read is
@@ -867,6 +870,9 @@ fn with_vectors(source: Bytes, vectors: &[(&str, Vec<f32>)], budget: &Arc<search
     if missing.is_empty() {
         return Ok(source);
     }
+    // And the vectors as they're rendered: a value per dimension, or its text.
+    let rendered: usize = missing.iter().map(|(_, v)| v.len() * (std::mem::size_of::<Value>() + 24)).sum();
+    held.add((rendered + source.len()) as u64, "<elasticsearch_restore>").map_err(|e| e.reason().to_string())?;
     if missing.iter().all(|(p, _)| !p.contains('.'))
         && let Some(end) = source.iter().rposition(|b| *b == b'}')
     {

@@ -22,8 +22,12 @@
 //! small files while they're read whole, and what parsing them may build (a bound per byte of
 //! the file, each module's `HELD_PER_BYTE`) until the read ends; stream windows; decompressed
 //! chunks; live docs; the doc values and vector ranges kept; and each document's vectors until
-//! it's handed over. Only codec headers of a few dozen bytes aren't. The commit and `.si` files
-//! are read by the caller, which charges them with [`segments::HELD_PER_BYTE`]. No reader does
+//! it's handed over. The commit and `.si` files are read by the caller, which charges them with
+//! [`segments::HELD_PER_BYTE`]. What isn't charged: codec headers of a few dozen bytes, and
+//! bookkeeping that grows with the fields asked for rather than with the data (the vector field
+//! and magnitude names, the doc values wanted, a document's per-field scale), the sets that
+//! refuse a duplicate while a file is parsed and a map's entries while it's collected (both
+//! within the bound charged for that file). No reader does
 //! I/O: they parse byte slices, so the caller decides how bytes arrive and what they cost.
 
 pub mod codec;

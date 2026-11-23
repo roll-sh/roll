@@ -3169,6 +3169,23 @@ async fn an_s3_repository_bounds_and_checks_what_a_bucket_holds() {
     expect("snapshot", es(reqwest::Method::PUT, "/_snapshot/root/s?wait_for_completion=true", Some(json!({"indices": "docs"}))).await, 500, "isn't roll's");
     assert_eq!(object("roll/index.latest"), 20i64.to_be_bytes());
     assert_eq!(object("roll/indices/Xq/0/__a"), b"shard data");
+    // Elasticsearch finding its generation by listing writes no `index.latest`: its `index-N` and
+    // shard files under the prefix still make it someone else's. Registering it is refused;
+    // registered anyway (no `verify`), it is neither written nor cleaned, and a listing of every
+    // repository reports it beside the others' snapshots.
+    put("nested/roll/index-5".into(), br#"{"min_version":"7.12.0","uuid":"u","snapshots":[]}"#.to_vec());
+    put("nested/roll/indices/Xq/0/__b".into(), b"shard data".to_vec());
+    let nested = json!({"type": "s3", "settings": {"bucket": "backups", "base_path": "nested", "endpoint": endpoint, "path_style_access": true}});
+    expect("register", es(reqwest::Method::PUT, "/_snapshot/nested", Some(nested.clone())).await, 500, "isn't roll's");
+    expect("not registered", es(reqwest::Method::GET, "/_snapshot/nested", None).await, 404, "repository_missing_exception");
+    assert_eq!(es(reqwest::Method::PUT, "/_snapshot/nested?verify=false", Some(nested)).await.0, 200);
+    expect("cleanup without index.latest", es(reqwest::Method::POST, "/_snapshot/nested/_cleanup", None).await, 500, "isn't roll's");
+    expect("snapshot without index.latest", es(reqwest::Method::PUT, "/_snapshot/nested/s?wait_for_completion=true", Some(json!({"indices": "docs"}))).await, 500, "isn't roll's");
+    let (s, v) = es(reqwest::Method::GET, "/_snapshot/_all/_all", None).await;
+    expect("listing", (s, v.clone()), 200, "isn't roll's");
+    assert!(v["failures"]["nested"].is_object() && v["snapshots"].as_array().is_some_and(|a| a.iter().any(|s| s["snapshot"] == "one")), "{v}");
+    assert_eq!(object("nested/roll/indices/Xq/0/__b"), b"shard data");
+    assert!(bucket.keys("nested/").len() == 2, "{:?}", bucket.keys("nested/"));
 
     // A listing that never ends.
     bucket.endless.store(true, std::sync::atomic::Ordering::Relaxed);
