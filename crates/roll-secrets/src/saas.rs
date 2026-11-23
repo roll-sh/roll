@@ -7,8 +7,8 @@
 //!
 //! Requests go out through rolld ([`Deliver::request`]): HTTPS to a public address, no redirects,
 //! the answer bounded, a timeout. Hosts are the vendors' own, except Okta's and Auth0's tenant
-//! domains and a self-managed GitLab's host, which are checked as hostnames and then go through
-//! the same guard; Datadog's site is one of its documented ones. The credential is
+//! domains, a self-managed GitLab's host and a Databricks workspace's, which are checked as
+//! hostnames and then go through the same guard; Datadog's site is one of its documented ones. The credential is
 //! sealed with the project's data key, bound to the registration's vendor and target, so a row
 //! pointed somewhere else no longer opens. Errors name the vendor and the status, never what a
 //! vendor answered.
@@ -99,6 +99,38 @@ pub enum Vendor {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         scopes: Vec<String>,
     },
+    /// The credential is an API token that may manage API tokens (`API Tokens Write`, the user's or
+    /// `account_id`'s). Each key is a new token with `template`'s policies and conditions; the old
+    /// one is deleted after the grace period (not Cloudflare's roll, which ends the old value at
+    /// once).
+    Cloudflare {
+        /// An account whose account-owned tokens rotate (none: the user's own tokens).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account_id: Option<String>,
+        /// The id of the token whose policies each new token copies (it may be disabled).
+        template: String,
+    },
+    /// The credential is a personal access token (or a service principal's) on the workspace
+    /// `host`; each key is a new token of the same identity, `lifetime_days` long.
+    Databricks {
+        host: String,
+        #[serde(default = "databricks_days")]
+        lifetime_days: u16,
+    },
+    /// The credential is a Cloud API key as `KEY:SECRET` of an OrganizationAdmin (or one that may
+    /// manage `owner`'s keys). Each key is a new API key of `owner` for `resource` (a Kafka cluster,
+    /// Schema Registry…, in `environment`), or a Cloud API key when `resource` is left out.
+    Confluent {
+        owner: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resource: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        environment: Option<String>,
+    },
+}
+
+fn databricks_days() -> u16 {
+    90
 }
 
 /// Which of Datadog's keys a registration rotates.
@@ -141,6 +173,9 @@ impl Vendor {
             Vendor::Gitlab { .. } => "gitlab",
             Vendor::Openai { .. } => "openai",
             Vendor::Datadog { .. } => "datadog",
+            Vendor::Cloudflare { .. } => "cloudflare",
+            Vendor::Databricks { .. } => "databricks",
+            Vendor::Confluent { .. } => "confluent",
         }
     }
 
@@ -213,6 +248,23 @@ impl Vendor {
                     return bad("a datadog target is {site?: one of Datadog's sites (datadoghq.com, us3.datadoghq.com, us5.datadoghq.com, datadoghq.eu, ap1.datadoghq.com, ap2.datadoghq.com, ddog-gov.com), key: \"api\" | \"application\", scopes?: [\"dashboards_read\", …] (application keys only)}");
                 }
             }
+            Vendor::Cloudflare { account_id, template } => {
+                if !account_id.as_deref().is_none_or(id_ok) || !id_ok(template) {
+                    return bad("a cloudflare target is {account_id?: the account whose tokens rotate (none: your user's), template: the id of the token whose policies each new token copies}");
+                }
+            }
+            Vendor::Databricks { host, lifetime_days } => {
+                *host = host.trim().to_ascii_lowercase();
+                if !hostname(host) || !(1..=730).contains(&*lifetime_days) {
+                    return bad("a databricks target is {host: the workspace's host (dbc-a1b2c3d4-e5f6.cloud.databricks.com), lifetime_days?: 1-730 (default 90)}");
+                }
+            }
+            Vendor::Confluent { owner, resource, environment } => {
+                let ok = id_ok(owner) && resource.as_deref().is_none_or(id_ok) && environment.as_deref().is_none_or(id_ok) && (resource.is_some() || environment.is_none());
+                if !ok {
+                    return bad("a confluent target is {owner: the service account or user (sa-…, u-…), resource?: lkc-… or another resource (none: a Cloud API key), environment?: env-… (with resource)}");
+                }
+            }
         }
         Ok(self)
     }
@@ -230,6 +282,11 @@ impl Vendor {
             Vendor::Openai { project_id } => project_id.clone(),
             Vendor::Datadog { site, key: DatadogKey::Api, .. } => format!("API keys on {site}"),
             Vendor::Datadog { site, key: DatadogKey::Application, .. } => format!("application keys on {site}"),
+            Vendor::Cloudflare { account_id: Some(a), template } => format!("like {template} in account {a}"),
+            Vendor::Cloudflare { template, .. } => format!("like {template}"),
+            Vendor::Databricks { host, .. } => host.clone(),
+            Vendor::Confluent { owner, resource: Some(r), .. } => format!("{owner} on {r}"),
+            Vendor::Confluent { owner, .. } => format!("{owner} (Cloud API keys)"),
         }
     }
 
@@ -250,6 +307,9 @@ impl Vendor {
             Vendor::Openai { .. } => ("OPENAI_API_KEY", "OPENAI_SERVICE_ACCOUNT_ID"),
             Vendor::Datadog { key: DatadogKey::Api, .. } => ("DD_API_KEY", "DD_API_KEY_ID"),
             Vendor::Datadog { key: DatadogKey::Application, .. } => ("DD_APP_KEY", "DD_APP_KEY_ID"),
+            Vendor::Cloudflare { .. } => ("CLOUDFLARE_API_TOKEN", "CLOUDFLARE_API_TOKEN_ID"),
+            Vendor::Databricks { .. } => ("DATABRICKS_TOKEN", "DATABRICKS_TOKEN_ID"),
+            Vendor::Confluent { .. } => ("CONFLUENT_API_SECRET", "CONFLUENT_API_KEY"),
         };
         FIELDS.iter().cloned().zip([secret, id]).map(|(f, suggest)| Field { suggest, ..f }).collect()
     }
@@ -570,6 +630,60 @@ pub(crate) fn issue(d: &dyn Deliver, vendor: &Vendor, credential: &Value, label:
             let a: A = parse(vendor, step, &answer.unwrap_or_default())?;
             (a.data.attributes.key, a.data.id)
         }
+        Vendor::Cloudflare { .. } => {
+            #[derive(Deserialize)]
+            struct Made {
+                id: String,
+                value: Value,
+            }
+            #[derive(Deserialize)]
+            struct A {
+                result: Made,
+            }
+            let auth = [("authorization", &bearer(credential))];
+            let mut body = cloudflare_template(d, vendor, credential, step)?;
+            body["name"] = json!(label);
+            let answer = send(d, vendor, step, "POST", &cloudflare_tokens(vendor), &auth, Some((JSON_TYPE, &Value::new(body.to_string()))), false)?;
+            let a: A = parse(vendor, step, &answer.unwrap_or_default())?;
+            (a.result.value, a.result.id)
+        }
+        Vendor::Databricks { host, lifetime_days } => {
+            #[derive(Deserialize)]
+            struct Info {
+                token_id: String,
+            }
+            #[derive(Deserialize)]
+            struct A {
+                token_value: Value,
+                token_info: Info,
+            }
+            let body = Value::new(json!({ "comment": label, "lifetime_seconds": u64::from(*lifetime_days) * 86_400 }).to_string());
+            let answer = send(d, vendor, step, "POST", &format!("https://{host}/api/2.0/token/create"), &[("authorization", &bearer(credential))], Some((JSON_TYPE, &body)), false)?;
+            let a: A = parse(vendor, step, &answer.unwrap_or_default())?;
+            (a.token_value, a.token_info.token_id)
+        }
+        Vendor::Confluent { owner, resource, environment } => {
+            #[derive(Deserialize)]
+            struct Spec {
+                secret: Value,
+            }
+            #[derive(Deserialize)]
+            struct A {
+                id: String,
+                spec: Spec,
+            }
+            let mut spec = json!({ "display_name": label, "owner": { "id": owner } });
+            if let Some(r) = resource {
+                spec["resource"] = json!({ "id": r });
+                if let Some(e) = environment {
+                    spec["resource"]["environment"] = json!(e);
+                }
+            }
+            let body = Value::new(json!({ "spec": spec }).to_string());
+            let answer = send(d, vendor, step, "POST", CONFLUENT_KEYS, &[("authorization", &confluent_auth(credential)?)], Some((JSON_TYPE, &body)), false)?;
+            let a: A = parse(vendor, step, &answer.unwrap_or_default())?;
+            (a.spec.secret, a.id)
+        }
     };
     if secret.expose().is_empty() {
         return Err(Error::Link(format!("{} answered an empty secret", vendor.name())));
@@ -625,6 +739,16 @@ pub(crate) fn revoke(d: &dyn Deliver, vendor: &Vendor, credential: &Value, handl
             };
             send(d, vendor, step, "DELETE", &format!("https://api.{site}/api/v2/{path}/{id}"), &[("dd-api-key", &api), ("dd-application-key", &app)], None, true)?;
         }
+        Vendor::Cloudflare { .. } => {
+            send(d, vendor, step, "DELETE", &format!("{}/{id}", cloudflare_tokens(vendor)), &[("authorization", &bearer(credential))], None, true)?;
+        }
+        Vendor::Databricks { host, .. } => {
+            let body = Value::new(json!({ "token_id": id }).to_string());
+            send(d, vendor, step, "POST", &format!("https://{host}/api/2.0/token/delete"), &[("authorization", &bearer(credential))], Some((JSON_TYPE, &body)), true)?;
+        }
+        Vendor::Confluent { .. } => {
+            send(d, vendor, step, "DELETE", &format!("{CONFLUENT_KEYS}/{id}"), &[("authorization", &confluent_auth(credential)?)], None, true)?;
+        }
         Vendor::Auth0 { .. } => unreachable!("returned above"),
     }
     Ok(())
@@ -677,8 +801,60 @@ pub(crate) fn probe(d: &dyn Deliver, vendor: &Vendor, credential: &Value) -> Res
             };
             send(d, vendor, step, "GET", &format!("https://api.{site}/api/v2/{path}?page%5Bsize%5D=1"), &[("dd-api-key", &api), ("dd-application-key", &app)], None, false)?;
         }
+        Vendor::Cloudflare { .. } => {
+            // The template, read: what every rotation copies.
+            cloudflare_template(d, vendor, credential, step)?;
+        }
+        Vendor::Databricks { host, .. } => {
+            send(d, vendor, step, "GET", &format!("https://{host}/api/2.0/token/list"), &[("authorization", &bearer(credential))], None, false)?;
+        }
+        Vendor::Confluent { owner, .. } => {
+            send(d, vendor, step, "GET", &format!("{CONFLUENT_KEYS}?spec.owner={owner}&page_size=1"), &[("authorization", &confluent_auth(credential)?)], None, false)?;
+        }
     }
     Ok(())
+}
+
+const CONFLUENT_KEYS: &str = "https://api.confluent.cloud/iam/v2/api-keys";
+
+/// A Cloudflare registration's tokens: the user's, or the account's.
+fn cloudflare_tokens(vendor: &Vendor) -> String {
+    match vendor {
+        Vendor::Cloudflare { account_id: Some(a), .. } => format!("https://api.cloudflare.com/client/v4/accounts/{a}/tokens"),
+        Vendor::Cloudflare { .. } => "https://api.cloudflare.com/client/v4/user/tokens".into(),
+        _ => unreachable!("only Cloudflare has tokens there"),
+    }
+}
+
+/// A new token's body from the template's: its policies (each permission group by id) and its
+/// conditions, nothing else (not its name, status or expiry).
+fn cloudflare_template(d: &dyn Deliver, vendor: &Vendor, credential: &Value, step: &str) -> Result<Json> {
+    let Vendor::Cloudflare { template, .. } = vendor else { unreachable!("only Cloudflare has templates") };
+    let answer = send(d, vendor, step, "GET", &format!("{}/{template}", cloudflare_tokens(vendor)), &[("authorization", &bearer(credential))], None, false)?;
+    let t: Json = parse(vendor, step, &answer.unwrap_or_default())?;
+    let unexpected = || Error::Link(format!("cloudflare answered something roll didn't expect {step}"));
+    let policies = t["result"]["policies"].as_array().filter(|p| !p.is_empty()).ok_or_else(unexpected)?;
+    let policies = policies
+        .iter()
+        .map(|p| {
+            let groups = p["permission_groups"].as_array().ok_or_else(unexpected)?.iter().map(|g| g["id"].as_str().map(|id| json!({ "id": id })).ok_or_else(unexpected)).collect::<Result<Vec<_>>>()?;
+            Ok(json!({ "effect": p["effect"], "resources": p["resources"], "permission_groups": groups }))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut body = json!({ "policies": policies });
+    if let Some(c) = t["result"].get("condition").filter(|c| !c.is_null()) {
+        body["condition"] = c.clone();
+    }
+    Ok(body)
+}
+
+/// Basic auth for Confluent Cloud from `KEY:SECRET`.
+fn confluent_auth(credential: &Value) -> Result<Value> {
+    use base64::Engine;
+    match credential.expose().split_once(':') {
+        Some((k, s)) if !k.is_empty() && !s.is_empty() => Ok(Value::new(format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(credential.expose())))),
+        _ => Err(Error::Link("a confluent credential is a Cloud API key as KEY:SECRET".into())),
+    }
 }
 
 const OPENAI_PROJECTS: &str = "https://api.openai.com/v1/organization/projects";

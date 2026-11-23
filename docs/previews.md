@@ -1566,6 +1566,17 @@ land on the change.
 - roll posts it as a `comment` review on the change ("**Feedback on the preview** · `/checkout`
   linked to the preview · `button.pay`", then the note), which reaches the pull request like any
   review. The page's own names are kept to one inert line each.
+- A note carries what went wrong on the page (Netlify's drawer, Jam): the script sends the page's
+  uncaught errors and rejected promises since it loaded, and the requests answered 400 or more,
+  as the browser's own resource timings tell them (earlier ones too, before it loaded; roll's own
+  `/__roll/` ones left out), each a path and a status, never a query. At most 5 of each, each cut
+  to 200 characters, plus the browser (`Chrome 131 on macOS`, from the user agent). Nothing of
+  the page's is wrapped (`console`, `fetch`), so its devtools stay its own, and a
+  `console.error` the page catches isn't sent. The browser goes on the note's `<sub>` line.
+  Errors and requests go in a folded "On the page: 1 error, 2 failed requests" block after it,
+  so `roll_previews::notes` never reads them as the note. They go only if the person keeps them:
+  the form in roll lists them, with a box to leave them out (a page's own words can hold what a
+  public pull request shouldn't).
 - The button also lists what's been said about the page already (Vercel's comment pins): the
   proxy answers `/__roll/feedback.json?path=…` for the same visitors only (link access or a
   team session, through roll), from the change's feedback reviews (`roll_previews::notes` reads back the shape the
@@ -2466,29 +2477,29 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Skew protection for `roll.toml` services, in review**: a page loaded before a push keeps
-   reaching that push (`skew_protection = true`).
-2. **Feedback notes that carry the reviewer's context** (Netlify's drawer, Jam): the browser,
-   its console errors and failed requests on that page, sent with the note and shown with it on
-   the change.
-3. **Endpoint responses compared with main's by shape** (Signadot's SmartTests): a field gone or
+1. **Feedback notes that carry the reviewer's context, in review** (Netlify's drawer, Jam): the
+   page's uncaught errors, its failed requests and the browser, sent with the note when the
+   person keeps them, folded on the change.
+2. **Endpoint responses compared with main's by shape** (Signadot's SmartTests): a field gone or
    a type changed in a JSON answer, on the sheet's verdict strip and the pull request comment
    (values differ by design: main's preview has its own data).
-4. **Storybook stories as snapshots** (Chromatic): each story taken, compared with main's and
+3. **Storybook stories as snapshots** (Chromatic): each story taken, compared with main's and
    reviewed like a page, with TurboSnap's skip.
-5. **A process on a laptop standing in for one service** (Signadot local sandboxes,
+4. **A process on a laptop standing in for one service** (Signadot local sandboxes,
    Telepresence): the preview's other services and data reach it, the reverse of
    `roll preview forward`.
-6. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
+5. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
    (3.3 s in its log) and its masking, which needs that compute up: pg-control's to shorten.
-7. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+6. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-8. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+7. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-9. **Watch: pg-control's recovery to a time seconds old** (unowned).
+8. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-23, late afternoon: skew protection for `roll.toml` services (#822: a page loaded before a push keeps reaching that push; checked live).
 
 Landed 2026-11-23, mid-afternoon: a failed browser check's screenshot and trace from the sheet (#815: the record names where roll apps keeps them).
 
