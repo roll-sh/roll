@@ -14629,6 +14629,91 @@ the loop. (2) The ring's per-block cost: three hash lookups a recycled block (`e
 looks the key up twice and then removes it). One `entry` would do. It is worth about 0.4% on
 scan-bound queries at small caches.
 
+## Memory, round 1: the footprint table, parallel index builds in maintenance_work_mem (agent 302, 2026-11-23)
+
+BENCH.md "Memory, round 1" has the tables. Plain dist builds (`tools/dist.sh`): **head**, origin's
+`58ad4d95d`, and **c2**, the change over it (`cand/a302` is the same code rebased over
+`ff72a4b50`).
+
+**The idle-footprint "regression" was two metrics.** Agent 250's 34.8 MB for 100 idle sessions
+was the container cgroup's anon+shmem (`footprint.sh`'s `idle100_mb`); its own log has VmRSS
+56.9-57.3 MB for the same runs. Agents 279 and 291 reported VmRSS (47-48 MB, trust, no
+statement), which includes 21-23 MB of the mapped binary. On agent 250's harness head reads
+36.2 MB anon+shmem (VmRSS 58.8-59.3), +1.4 MB over 250's. Anon was flat at 36.8-37.4 MB
+across four verify builds from 2026-11-16 to 2026-11-22 (quick-check binaries left in
+`~/.cache/qc-a24x/a28x/a29x`). No bisect: there is nothing a third bigger to find.
+
+**Where an idle session's 270 KB goes** (1,000 sessions: 277 MB anon+shmem, 268 KB a session).
+Each connection thread has its own mimalloc v2 segment. In one of them, about 25 size-class
+pages hold a live block each, with 8 KB of each page touched: about 200 KB. Live heap is about 60 KB
+a session (16 KB read buffer and 8 KB output buffer, the session and its settings), and the touched
+stack is 52 KB. Purging freed pages at once (`MIMALLOC_PURGE_DELAY=0`) gives back only 1.2 MB of 100
+sessions, so the pages are pinned by live blocks, not left free. `~/.cache/a302/segmap.py` reads
+the resident pages per segment and slice from `/proc/<pid>/pagemap`. Roll is still 5.2x under
+PostgreSQL 18.6 and 10.7x under pgrust at 1,000 sessions, so nothing was changed here.
+
+**Kept (`cand/a302`): a parallel btree build spills past its share of maintenance_work_mem.**
+The table found roll behind PostgreSQL in three cells. The largest was the TPC-H SF1 load: peak
+2,110 MB against 1,026. A heap profile (`--features heapprof`) put about 1 GB of that peak in
+`parbuild`: each participant kept every entry (key bytes and a 24-byte `Ent`) and every measure
+key (40 bytes, plus a boxed rest for keys past 16 bytes) until the end, about 157 bytes a row
+for lineitem's indexes and 120 for `pgbench_accounts_pkey` (384 MB at scale 32). Most of the
+remaining ~1.1 GB is the block cache, which holds up to its 2 GB budget. PostgreSQL's participants each
+sort in `maintenance_work_mem / participants` and write runs past it (`_bt_parallel_scan_and_sort`).
+
+Now a participant does the same. Every 1,024 rows it checks what it holds (`Gathered::held`).
+Past its share (at least 4 MB: a tiny setting would make hundreds of open runs), it sorts its
+entries and measure keys and writes each to a run file (`RunFile`). The files go in the store's
+spill directory (`build-N/`), which the store empties at open after a crash and the build
+removes when it ends (`SpillDir`). The leader then merges the in-memory lists with the runs: the
+measure through a heap of iterators (`merge_runs`, `key_run`), and the unique check and the
+index run through a streaming merge (`Source`, `merge_entries`, `duplicate_in_runs`, which
+copies the last checked entry). When no participant spilled, the merges are the old in-memory
+ones (`merge_sorted`, `duplicate_in`, `put_runs`'s linear merge). A first version that used the
+streaming merge for both cases cost CREATE INDEX +4.0% and CREATE UNIQUE INDEX +5.9% user
+instructions with nothing spilled; it was replaced. `Txn::put_index_run` now takes its entries
+pushed one at a time (`Runs::fresh_run`, `FreshRun::push`, `Runs::add_fresh_run`), so they can
+come from files. `write_fresh`, the bulk sink's, is a loop over the same three functions.
+
+Results: pgbench -i at scale 32 peak anon+shmem 763.5 -> 511.9 MB (PostgreSQL 632.9), primary
+keys 2.61 / 2.62 s. TPC-H SF1 load 2,058.7 -> 1,337.3 MB (c1, the same spill code, 1,352.7; PostgreSQL 1,026.0, pgrust
+1,249.0). The 1M-row CREATE INDEX / CREATE UNIQUE INDEX with nothing spilled (maintenance_work_mem
+256 MB) took 4.405 -> 4.355 and 3.38 -> 3.333 G user instructions (-1.1%, -1.4%), two pairs each.
+**Cost when it spills**: the same table at 64 MB (each participant spills once) takes 4.316 ->
+4.909 and 3.243 -> 3.945 G (+13.7%, +21.6%), two pairs. The step's peak drops only 11-32 MB at that
+size. The runs are written once and read once, twice for a unique index (its check, then the run).
+PostgreSQL's external sort makes the same trade. All roll arms ran at the default 64 MB (the
+benchmark settings give PostgreSQL and pgrust 256 MB), so roll's numbers are at the stricter limit.
+
+Test: `tests/big_tables.rs` `parallel_index_builds` runs a third round in which every participant
+spills every 1,024 rows (`parscan::with_build_spill_bytes`; `index_build_spills` counts the runs,
+more than 10). It gets the same index answers, pg_class numbers and unique-violation errors as the
+serial build. `copy_stored_rows` in the same binary fails now and then when the binary runs in
+parallel. It reads the process-wide `STORED_COPY_ROWS`, which concurrent COPYs also bump, and it
+passes alone and with `--test-threads 1`. That race predates this change.
+
+**Left**, by size:
+(1) TPC-H SF1 at a 256 MB cache: roll peaks at 462 MB against PostgreSQL's 390. That is the cache
+plus query memory: the hash joins and aggregates of q9/q18 against work_mem (not profiled).
+(2) The spill path's CPU. Two streaming merges plus reading and writing take about 600 instructions a
+row at 1M rows. Things to try: cached heads instead of `Source::head` per compare, a callback that
+isn't `dyn`, records written in one copy, and the unique check done in the run's own pass. Wall
+time was not resolved on these days (6-7 foreign cores on lane C).
+(3) The block cache fills to its budget during a load (about 1.1 GB of the TPC-H load's peak).
+PostgreSQL's COPY and CREATE INDEX use ring buffers (16 MB / 256 KB), so its shared buffers stay at
+the 793 MB the load's reads leave. Agent 270's ring covers bulk reads, not what a load writes and
+compacts.
+(4) The idle session's allocator pages (about 200 KB of its 270 KB), above.
+(5) The serial build's memory (`max_parallel_maintenance_workers = 0`, or a maintenance_work_mem
+under 64 MB) was not looked at. Spilled runs don't count in pg_stat_database's
+temp_files / temp_bytes as PostgreSQL's do.
+
+Verification: quick-check with `QC_CHECKED=1` and `QC_TESTS=big_tables` on `ffef9d813` (over
+`ff72a4b50`): build and Clippy (16 warnings, none new in changed files), 424 tests in 21
+binaries, the same with `--profile verify-checked`, the crash step (seeds 1-3 x 2, power cut),
+regress 51,148 / 51,150 with 0 newly differing, isolation 1,647 / 1,648, pg_dump_tap 14,609
+passed.
+
 ## Point and range reads, round 6: 32 clients, idle footprint (agent 250)
 
 BENCH.md "Point and range reads, round 6" has the tables. Base `6d3b7e9e5`, built plain dist

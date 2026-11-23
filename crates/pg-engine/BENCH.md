@@ -285,6 +285,84 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Memory, round 1: the footprint table, parallel index builds in maintenance_work_mem (2026-11-23, agent 302)
+
+HANDOFF "Memory, round 1" has what changed and why. Harness `~/.cache/a302/mem.sh`: one server in
+a container on the lane's server CPUs (8 GiB, swap off, cpu-shares 2, host network), restarted
+before each cell; clients in a container of the PostgreSQL 18.6 image on the lane's client CPUs.
+**Memory is the server cgroup's anon+shmem, sampled every 0.2 s over the cell (peak)**, the
+same measure for all three servers (PostgreSQL's shared buffers count as shmem as they are
+touched; no server's page cache counts). Roll's VmHWM is in the second table. Settings:
+PostgreSQL 18.6 and pgrust `shared_buffers` = the cache column, `maintenance_work_mem=256MB`,
+`max_wal_size=8GB`, `checkpoint_timeout=30min`, `max_connections=1100`,
+`max_parallel_workers_per_gather=2`, `max_parallel_workers=8` (pgrust also `io_method=sync`,
+`max_stack_depth=60000`). Roll is `--cache-mb` = the cache column and `--password pw`, with
+maintenance_work_mem at its default of 64 MB. pgrust is its published (PGO) image. One run a
+cell, the same day (2026-11-23 afternoon). Every hold read 2-7.6 foreign cores on its lane, so
+the throughput columns say where each server was, not how fast it is. Roll is **head**, plain
+dist of `58ad4d95d`, and **c2**, the change over it (plain dist; `cand/a302` is the same
+code rebased over `ff72a4b50`), in the cells it changes.
+
+### Peak memory, MB (anon+shmem of the server's cgroup)
+
+| cell | lane | cache | roll head | roll c2 | PostgreSQL 18.6 | pgrust | roll ÷PG | roll ÷pgrust |
+|---|---|---|---:|---:|---:|---:|---:|---:|
+| 1 idle session | A | 2 GB | 9.1 |  | 115.8 | 239.8 | 12.7x | 26.4x |
+| 100 idle sessions (end 36.2 / 246.6 / 482.1) | A | 2 GB | 38.1 |  | 246.6 | 541.9 | 6.5x | 14.2x |
+| 1,000 idle sessions (end 276.6 / 1,438.9 / 2,954.7) | A | 2 GB | 296.1 |  | 1,438.9 | 2,996.8 | 4.9x | 10.1x |
+| pgbench -i, scale 32 | A | 2 GB | **731.5** / 763.5 | 511.9 (c1 511.3) | 632.9 | 837.4 | 0.87x -> 1.24x | 1.14x -> 1.64x |
+| select-only, 8 clients, scale 32 (39,565 / 35,726 / 53,884 tps) | A | 2 GB | 439.4 |  | 606.4 | 747.4 | 1.38x | 1.70x |
+| select-only, 32 clients (49,709 / 20,920 / 28,860 tps) | A | 2 GB | 450.1 |  | 638.5 | 836.1 | 1.42x | 1.86x |
+| TPC-B-like, 32 clients, scale 32 (1,339 / 1,286 / 845 tps) | A | 2 GB | 180.3 |  | 336.8 | 537.7 | 1.87x | 2.98x |
+| TPC-H SF1 load (`bench tpch-load`) | C | 2 GB | **2,110.5** / 2,058.7 | 1,337.3 (c1 1,352.7) | 1,026.0 | 1,249.0 | 0.49x -> 0.77x | 0.59x -> 0.93x |
+| TPC-H SF1, the 22 queries once (42.7 / 46.5 / 23.5 s) | C | 2 GB | 1,576.5 |  | 1,726.8 | 2,020.3 | 1.10x | 1.28x |
+| TPC-H SF1, the 22 once (61.4 / 23.8 / 28.0 s) | C | 256 MB | **462.3** |  | 390.1 | 679.0 | 0.84x | 1.47x |
+| the 1M-row bulk script (16.7 / 16.8 / 11.4 s) | C | 2 GB | 239.2 |  | 359.0 | 518.3 | 1.50x | 2.17x |
+
+Bold: roll behind PostgreSQL. Above 1x roll is lower. Two numbers in a roll cell are two runs.
+Select-only and TPC-B-like ran prepared (`-M prepared`), -j 4, 3 s of warm-up and 10 s
+measured. The idle cells hold pgbench sessions of `SELECT 1; \sleep 60 s` (password auth),
+measured 8 s after all of them connected. The bulk script is agent 246's steps (COPY in, CREATE
+INDEX, CREATE UNIQUE INDEX, COPY out, INSERT … SELECT, UPDATE half, DELETE a quarter, VACUUM,
+ANALYZE, count, TRUNCATE, DROP), with maintenance_work_mem 256 MB set on the database for all
+three.
+
+Roll's VmHWM / VmRSS at the end, MB (head): idle 1 / 100 / 1,000: 32.6 / 60.0 / 315.3 (RSS 32.6
+/ 58.9 / 296.9, of it 21-23 MB the mapped binary); pgbench -i 789.9 (c2 549.0); select-only 8 /
+32: 474.8 / 486.2; TPC-B-like 217.8; TPC-H load 2,141.3 (c2 1,379.2, c1 1,387.9); TPC-H at 2 GB
+1,611.8, at 256 MB 497.1; bulk 280.8.
+
+### The idle footprint against earlier numbers (100 sessions, lane A)
+
+| harness | what it reads | 11-16 verify (`qc-a240`) | 11-22 verify (`qc-a293`) | head (dist) |
+|---|---|---:|---:|---:|
+| agent 250's (`fp250.sh`: docker, password, `SELECT 1`, 25 s) | cgroup anon+shmem | 36.77 | 37.37 | 36.18 / 36.20 (250's: 34.8) |
+| the same | VmRSS | 69.6 | 70.4 | 57.7-59.3 (250's: 56.9-57.3) |
+| agents 279/291's (`idle.py`: native, trust, no statement, 6 s) | VmRSS | 58.4 | 57.8 | 48.8 (279/291: 47-48) |
+| the same | RssAnon | 32.6 | 31.7 | 31.8 |
+
+Verify builds map 9-10 MB more binary than dist. Anon is the comparable number.
+
+### Index builds with and without spilling (lane C, `~/.cache/a302/ixgate.sh`)
+
+Roll alone, cache 2 GB, `bulk1m.tsv` COPYed into `bulk (id int, a int, b text, c float8)`. Then
+`CREATE INDEX bulk_a ON bulk (a)` and `CREATE UNIQUE INDEX bulk_id ON bulk (id)`, each in its own
+`perf stat -G <the server's cgroup>` window (G user instructions). The step's peak anon+shmem
+is sampled every 0.1 s. Index sizes (9,478,144 / 22,487,040 bytes), relpages, reltuples and
+index scans' sums are equal in every run.
+
+| maintenance_work_mem | step | head | c2 | Δ instructions | peak MB head -> c2 |
+|---|---|---|---|---:|---|
+| 256 MB (no spill) | CREATE INDEX | 4.405 / 4.405 | 4.355 / 4.355 | -1.1% | 226.0 / 182.3 -> 198.9 / 178.6 |
+| 256 MB (no spill) | CREATE UNIQUE INDEX | 3.386 / 3.376 | 3.333 / 3.333 | -1.4% | 164.1 / 175.1 -> 172.0 / 175.4 |
+| 64 MB (each participant spills once) | CREATE INDEX | 4.316 / 4.316 | 4.909 / 4.909 (c1 / c2) | +13.7% | 166.6 / 170.6 -> 155.4 / 155.7 |
+| 64 MB | CREATE UNIQUE INDEX | 3.243 / 3.240 | 3.946 / 3.945 (c1 / c2) | +21.6% | 165.0 / 177.7 -> 137.1 / 145.7 |
+
+c1 is the first version of the change, with the same spill path. It used the streaming merges
+with nothing spilled too, and cost +4.0% / +5.9% at 256 MB (4.583 / 3.582 G), so it was replaced
+by c2. Foreign load was 2.9-6.8 cores by lane.sh. Instruction counts repeat within 0.3%.
+pgbench -i at scale 32 (default 64 MB, lane A): primary keys 2.61 s (head) and 2.62 s (c2).
+
 ## Analytic CPU, round 13: q09's rows over the lookup stages, unique probes (2026-11-22, agent 294)
 
 HANDOFF "Analytic CPU, round 13" has what changed. Plain dist builds (`tools/dist.sh`): **b0**
