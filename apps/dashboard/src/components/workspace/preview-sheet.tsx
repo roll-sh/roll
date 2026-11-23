@@ -5,6 +5,7 @@ import { codeApi } from "@/lib/code-api";
 import { Confirm } from "@/components/ui";
 import { TerminalScreen } from "@/components/terminal-screen";
 import { endpointSlower, type EndpointTime, a11yWords, checkSummary, seoWords, duration, followLogs, followShell, downloadFiles, openUrl, pageGroup, pageLabel, previewsApi, noteCropUrl, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewVisitor, type PreviewKind, type PreviewShare, type RequestLine, type ServiceMetrics, type ErrorGroup, type TraceSummary, type TraceSpan, type RouteTime, type Repeated } from "@/lib/previews-api";
+import { workFromError, workFromNote } from "@/lib/preview-work";
 import { verdict, type VerdictTarget } from "@/lib/preview-verdict";
 import { isProblem, logFilter, logLevel } from "@/lib/preview-logs";
 import { formatBytes } from "@/lib/roll-api";
@@ -136,7 +137,7 @@ export function PreviewSheet({
             )}
             {resolve && p.change && (
               <div className="mb-3">
-                <NoteThread previewId={p.id} change={p.change} review={resolve} onDone={onFeedbackPosted} />
+                <NoteThread previewId={p.id} change={p.change} review={resolve} where={p} onDone={onFeedbackPosted} />
               </div>
             )}
             {p.state === "awaiting_approval" &&
@@ -1272,8 +1273,11 @@ export function ApiBreaking({ items }: { items: string[] }) {
 /** A note from the preview's page with its replies (Vercel Comments' threads): anyone on the
  * project replies (a comment review naming the note, which the page lists under it) or resolves
  * it (`POST …/notes/{review}/resolve`, kept by previews), and the page stops listing it. */
-function NoteThread({ previewId, change, review, onDone }: { previewId: string; change: string; review: string; onDone?: () => void }) {
+function NoteThread({ previewId, change, review, where, onDone }: { previewId: string; change: string; review: string; where: Pick<Preview, "repo" | "number">; onDone?: () => void }) {
   const [note, setNote] = useState<string | null>(null);
+  // The note's whole review (the page, the element, what went wrong there), for a work item.
+  const [whole, setWhole] = useState<string | null>(null);
+  const [made, setMade] = useState<number | null>(null);
   const [replies, setReplies] = useState<{ id: string; by: string; text: string }[]>([]);
   const [reply, setReply] = useState("");
   const [state, setState] = useState<"idle" | "busy" | "done">("idle");
@@ -1302,6 +1306,7 @@ function NoteThread({ previewId, change, review, onDone }: { previewId: string; 
         const r = all.find((x) => x.id === review);
         if (!r) return setError("That note isn't on this change.");
         setNote(r.body.split("\n\n")[1] ?? r.body);
+        setWhole(r.body);
         setReplies(
           all
             .filter((x) => !x.dismissed && replyOf(x.body)?.note === review)
@@ -1374,7 +1379,38 @@ function NoteThread({ previewId, change, review, onDone }: { previewId: string; 
         >
           {state === "busy" ? "Working…" : "Resolve"}
         </button>
+        {where.repo && (
+          <button
+            type="button"
+            disabled={state === "busy" || whole === null || made !== null}
+            title="A work item in the repo, with the note and its page: someone, or an agent, picks it up"
+            onClick={async () => {
+              if (!where.repo || whole === null) return;
+              setState("busy");
+              try {
+                const item = await codeApi.createWork(where.repo, workFromNote(where, review, whole));
+                setMade(item.number);
+                await codeApi.submitReview(change, { verdict: "comment", body: replyBody(review, `Made work item #${item.number} from this note.`) });
+                await load();
+              } catch (e) {
+                setError(errorText(e));
+              } finally {
+                setState("idle");
+              }
+            }}
+            className={button}
+          >
+            {made !== null ? `Work item #${made}` : "Make a work item"}
+          </button>
+        )}
       </div>
+      {made !== null && where.repo && (
+        <p className="mt-1 text-right text-[11px]">
+          <a href={`/${where.repo}/work`} className="text-accent hover:underline">
+            Open the repo's work
+          </a>
+        </p>
+      )}
     </div>
   );
 }
@@ -1789,12 +1825,51 @@ function Errors({ preview: p }: { preview: Preview }) {
                   <pre className="rise max-h-[40vh] overflow-auto border-t border-line px-2.5 py-2 font-mono text-[10.5px] leading-relaxed whitespace-pre-wrap text-soft [scrollbar-width:thin]">{g.sample}</pre>
                 )}
                 {shown && g.trace && <ErrorTrace preview={p} trace={g.trace} />}
+                {shown && p.repo && <ErrorWork preview={p} group={g} />}
               </li>
             );
           })}
         </ul>
       )}
     </>
+  );
+}
+
+/** An error group made a work item in the preview's repo (its sample as the preview shows it,
+ * masked): someone, or an agent, picks it up. */
+function ErrorWork({ preview: p, group }: { preview: Preview; group: ErrorGroup }) {
+  const [state, setState] = useState<"idle" | "busy" | { made: number } | { error: string }>("idle");
+  if (typeof state === "object" && "made" in state)
+    return (
+      <p className="border-t border-line px-2.5 py-1.5 text-[11px] text-soft">
+        Work item #{state.made}
+        {" · "}
+        <a href={`/${p.repo}/work`} className="text-accent hover:underline">
+          open the repo's work
+        </a>
+      </p>
+    );
+  return (
+    <div className="flex items-center justify-end gap-2 border-t border-line px-2.5 py-1.5 text-[11px]">
+      {typeof state === "object" && "error" in state && <span className="mr-auto text-danger">{state.error}</span>}
+      <button
+        type="button"
+        disabled={state === "busy"}
+        onClick={async () => {
+          if (!p.repo) return;
+          setState("busy");
+          try {
+            const item = await codeApi.createWork(p.repo, workFromError(p, group));
+            setState({ made: item.number });
+          } catch (e) {
+            setState({ error: errorText(e) });
+          }
+        }}
+        className="h-6 rounded-md border border-line-2 px-2 text-fg hover:bg-white/[0.05] disabled:opacity-40"
+      >
+        {state === "busy" ? "Making…" : "Make a work item"}
+      </button>
+    </div>
   );
 }
 

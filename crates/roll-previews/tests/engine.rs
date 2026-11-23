@@ -423,16 +423,18 @@ async fn a_previews_metrics_are_what_its_running_services_use() {
 }
 
 /// A secret value its pages serve (Netlify's secrets scan) is named on its record and in its
-/// activity, with where, never the value; one meant for the browser (`NEXT_PUBLIC_…`) isn't.
+/// activity, with where, never the value; one meant for the browser (`NEXT_PUBLIC_…`) or a user
+/// name isn't.
 #[tokio::test]
 async fn a_secret_value_its_pages_serve_is_named_on_its_record() {
     let e = env(json!({ "enabled": true, "github": { "screenshot": true } }));
     e.secrets.values.lock().push(("STRIPE_KEY".into(), "sk_test_51Hx9abc".into()));
     e.secrets.values.lock().push(("NEXT_PUBLIC_MAPS_KEY".into(), "pk_maps_123456".into()));
+    e.secrets.values.lock().push(("PGUSER".into(), "pv_role_abcdef".into()));
     let mut png = Vec::new();
     image::RgbaImage::new(4, 4).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
     *e.apps.shot.lock() = Some(png);
-    *e.apps.served.lock() = vec![("/assets/app.js".into(), b"const k = 'sk_test_51Hx9abc', m = 'pk_maps_123456';".to_vec())];
+    *e.apps.served.lock() = vec![("/assets/app.js".into(), b"const k = 'sk_test_51Hx9abc', m = 'pk_maps_123456', u = 'pv_role_abcdef';".to_vec())];
     e.code.open(change("chg_ss", 5));
     e.engine.pass().await.unwrap();
     let p = e.engine.store.row_by_change("chg_ss").unwrap().unwrap();
