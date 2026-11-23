@@ -8629,7 +8629,7 @@ dependencies = [
  "crc32fast",
  "miniz_oxide 0.9.1",
  "serde_json",
- "thiserror",
+ "thiserror 2.0.21",
  "zstd 0.14.3",
 ]
 
