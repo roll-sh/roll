@@ -4,7 +4,9 @@
 //! (`Crawler::Data::CrawlResult::HTML`, `ContentEngine::Transformer` and `::Utils`): title,
 //! body text with `data-elastic-include`/`-exclude` and `exclude_tags`, meta tags, links,
 //! headings, the canonical URL and robots directives. Nothing in the page runs. Reading never
-//! recurses, and nothing below [`MAX_DEPTH`] elements is read.
+//! recurses. html5ever puts no limit on nesting, and each element it opens scans its stack of open
+//! elements, so a page that nests deeper than [`MAX_DEPTH`] elements stops the parse and fails the
+//! page, and a parse is fed in small chunks against a deadline ([`read_page`]).
 
 use super::config::{L, Limits};
 use super::url::Link;
@@ -34,6 +36,8 @@ enum Data {
 
 struct Node {
     data: Data,
+    /// Elements above it when it was attached.
+    depth: u32,
     parent: usize,
     first: usize,
     last: usize,
@@ -43,7 +47,7 @@ struct Node {
 
 impl Node {
     fn new(data: Data) -> Node {
-        Node { data, parent: NONE, first: NONE, last: NONE, prev: NONE, next: NONE }
+        Node { data, depth: 0, parent: NONE, first: NONE, last: NONE, prev: NONE, next: NONE }
     }
 }
 
@@ -79,11 +83,16 @@ impl Builder {
             return false;
         }
         if let Err(e) = self.held.borrow_mut().add(bytes, "crawled page") {
-            *self.tripped.borrow_mut() = Some(e.reason().to_string());
-            self.stop.set(true);
+            self.fail(e.reason().to_string());
             return false;
         }
         true
+    }
+
+    /// Stops building: the page fails with `why`.
+    fn fail(&self, why: String) {
+        *self.tripped.borrow_mut() = Some(why);
+        self.stop.set(true);
     }
 
     fn push(&self, data: Data, cost: u64) -> usize {
@@ -149,9 +158,17 @@ impl Builder {
         }
         match child {
             NodeOrText::AppendNode(c) => {
-                if c != DETACHED {
-                    Self::attach(&mut self.nodes.borrow_mut(), parent, c, before);
+                if c == DETACHED {
+                    return;
                 }
+                let depth = self.nodes.borrow()[parent].depth + 1;
+                if depth as usize > MAX_DEPTH {
+                    self.fail(format!("the page nests elements more than {MAX_DEPTH} deep"));
+                    return;
+                }
+                let mut n = self.nodes.borrow_mut();
+                Self::attach(&mut n, parent, c, before);
+                n[c].depth = depth;
             }
             NodeOrText::AppendText(t) => {
                 let prev = {
@@ -285,8 +302,9 @@ impl TreeSink for Builder {
 }
 
 /// Parses `html`, charging what it builds to `held`: an error (the breaker's reason) once the
-/// page costs more than the breaker allows. The charge stays on `held` while the DOM lives.
-pub fn parse(html: &str, held: Reservation) -> Result<(Dom, Reservation), String> {
+/// page costs more than the breaker allows, nests deeper than [`MAX_DEPTH`], or is still parsing
+/// at `deadline`. The charge stays on `held` while the DOM lives.
+pub fn parse(html: &str, held: Reservation, deadline: std::time::Instant) -> Result<(Dom, Reservation), String> {
     let nodes = vec![Node::new(Data::Document), Node::new(Data::Other)];
     let builder = Builder { nodes: RefCell::new(nodes), held: RefCell::new(held), tripped: RefCell::new(None), stop: Cell::new(false) };
     let mut opts = html5ever::ParseOpts::default();
@@ -295,7 +313,11 @@ pub fn parse(html: &str, held: Reservation) -> Result<(Dom, Reservation), String
     let mut parser = html5ever::parse_document(builder, opts);
     let mut rest = html;
     while !rest.is_empty() {
-        let mut at = rest.len().min(16 << 10);
+        if std::time::Instant::now() >= deadline {
+            parser.tokenizer.sink.sink.fail("the page took too long to parse".into());
+            break;
+        }
+        let mut at = rest.len().min(4 << 10);
         while !rest.is_char_boundary(at) {
             at += 1;
         }
@@ -589,8 +611,8 @@ fn set_field(fields: &mut Vec<(String, String)>, name: &str, v: String) {
 
 /// Parses `html` (charged to `held`) and reads it as the page at `url`. The DOM never outlives
 /// this call: its strings aren't `Send`, so it can't be held across a crawl's awaits.
-pub fn read_page(html: &str, held: Reservation, url: &Link, exclude_tags: &[String], limits: &Limits) -> Result<(Page, Reservation), String> {
-    let (dom, held) = parse(html, held)?;
+pub fn read_page(html: &str, held: Reservation, url: &Link, exclude_tags: &[String], limits: &Limits, deadline: std::time::Instant) -> Result<(Page, Reservation), String> {
+    let (dom, held) = parse(html, held, deadline)?;
     Ok((dom.read(url, exclude_tags, limits), held))
 }
 
@@ -600,7 +622,7 @@ mod tests {
 
     fn read(html: &str, exclude: &[&str]) -> Page {
         let budget = search_aggs::memory::MemoryBudget::new(u64::MAX);
-        let (dom, _held) = parse(html, Reservation::new(budget)).unwrap();
+        let (dom, _held) = parse(html, Reservation::new(budget), std::time::Instant::now() + std::time::Duration::from_secs(30)).unwrap();
         let limits = super::super::config::plan(
             &super::super::config::Fields { urls: vec!["https://e.com/".into()], sitemap_urls: vec![], sitemap_discovery: true, max_crawl_depth: None, max_unique_url_count: None },
             None,
@@ -641,11 +663,17 @@ mod tests {
         assert_eq!(limit_bytes("héllo world".into(), 7), "hél…");
     }
 
-    /// Ten thousand nested elements parse, and reading stops at MAX_DEPTH without recursing.
+    /// html5ever scans its open elements for each element it opens: a 10 MB page of two million
+    /// nested `<div>`s (hours of work uncapped) fails at MAX_DEPTH in a moment, while a page
+    /// nested to just under it reads.
     #[test]
-    fn deep_pages_are_read_to_the_cap() {
-        let html = format!("<body>{}deep{}</body>", "<div>".repeat(10_000), "</div>".repeat(10_000));
-        let p = read(&format!("<p>top</p>{html}"), &[]);
-        assert_eq!(p.body, "top", "text below depth {MAX_DEPTH} isn't read");
+    fn deep_pages_fail_fast() {
+        let budget = search_aggs::memory::MemoryBudget::new(u64::MAX);
+        let started = std::time::Instant::now();
+        let deadline = started + std::time::Duration::from_secs(60);
+        let err = parse(&"<div>".repeat(2_000_000), Reservation::new(budget.clone()), deadline).err().unwrap();
+        assert!(err.contains("more than 512 deep") && started.elapsed() < std::time::Duration::from_secs(10), "{err} after {:?}", started.elapsed());
+        let p = read(&format!("<p>top</p>{}deep", "<div>".repeat(MAX_DEPTH - 8)), &[]);
+        assert_eq!(p.body, "top deep");
     }
 }

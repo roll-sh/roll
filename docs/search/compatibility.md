@@ -1566,18 +1566,26 @@ taken over by roll's crawler. Where roll's differs ([crawler.md](crawler.md)):
 - **robots.txt** is read for the product token `roll-crawler`, not `Elastic-Crawler`: a site's
   `Elastic-Crawler` group doesn't apply (the job's `metadata.robots_elastic_crawler_group_ignored`
   names the origins that have one and no `roll-crawler` group). A 429 for robots.txt disallows the
-  origin for the crawl, as a 5xx does; a redirect to another origin counts as no robots.txt.
+  origin for the crawl, as a 5xx does; redirects are followed up to 5 times, to other origins too.
 - **The purge** deletes a document only for proof the page is gone (a 404 or 410, `noindex`, a URL
-  now excluded by crawl rules or robots.txt, a redirect out of the crawl). 5xx responses, timeouts,
-  network errors and an unreadable robots.txt keep it, until three full crawls in a row kept it;
-  a crawl where more than half the index's documents were kept by errors deletes nothing
-  (`metadata.purge_skipped`). Open Crawler deletes anything that doesn't answer 200. Other 4xx
-  (401, 403) keep a document too, so an expired credential can't empty the index.
+  now excluded by the crawl's domains, rules or robots.txt). Errors (5xx, other 4xx, timeouts,
+  network errors, an unreadable robots.txt) and what may only be an outage (a redirect off the
+  crawl or onto a URL it already has, a body that isn't HTML) keep it, until three full crawls in a
+  row kept it. A crawl that didn't refresh more than half the index's documents, or whose redirects
+  mostly led to one URL, deletes nothing (`metadata.purge_skipped`), so an outage, an expired login
+  redirecting to SSO, or a maintenance page can't empty the index. Open Crawler deletes anything
+  that doesn't answer 200.
+- **Canonical URLs** are honoured only once the crawl has fetched the canonical URL and indexed it
+  as itself; until then a page is stored under its own URL. Open Crawler stores a page under its
+  canonical URL at once.
+- **Deep pages**: a page nesting more than 512 elements deep is a failed document.
 - **Limits** keep Open Crawler's names and defaults, except `max_unique_url_count` (10,000, not
   100,000) and `max_duration` (6 hours, not 24), and each has a node ceiling: a value over it fails
-  validation. Until domain verification lands every domain is unverified: at most 1,000 URLs a
-  crawl, a second between requests and 4 crawls a day. A crawl fetches one URL at a time
-  (`threads_per_crawl` doesn't apply).
+  validation. A connector holds at most 1,000 crawl rules across its domains. Until domain
+  verification lands every domain is unverified: at most 1,000 URLs a crawl, a second between
+  requests to one site across every crawl on the node, and 4 crawls a day per connector and per
+  owner and site on the node. A crawl fetches one URL at a time (`threads_per_crawl` doesn't
+  apply).
 - **Credentials** are the connector's sealed `auth_header` or basic auth, sent only to
   `auth_origin` over https, never after a redirect to another origin; one per connector.
   `http_auth_allowed`, proxies and `domains[].auth` in the snippet aren't taken (the CLI import

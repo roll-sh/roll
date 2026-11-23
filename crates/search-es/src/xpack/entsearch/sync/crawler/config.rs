@@ -155,7 +155,11 @@ impl Plan {
 const DOMAIN_KEYS: &[&str] = &["url", "seed_urls", "sitemap_urls", "exclude_tags", "crawl_rules", "extraction_rulesets"];
 const MAX_DOMAINS: usize = 100;
 const MAX_LISTED: usize = 10_000;
+/// Crawl rules in one crawl, across its domains, and what compiling them all may cost: each rule's
+/// regex gets an equal share of [`RULES_BYTES`].
 const MAX_RULES: usize = 1000;
+const RULES_BYTES: usize = 10 << 20;
+const MAX_PATTERN: usize = 2 << 10;
 
 /// A domain's URL as Open Crawler takes it: `scheme://host[:port]`, nothing else. Its origin.
 pub fn domain_origin(text: &str) -> Result<String, String> {
@@ -183,7 +187,7 @@ fn needs_backtracking(p: &str) -> bool {
     ["(?=", "(?!", "(?<=", "(?<!", "\\k<"].iter().any(|s| p.contains(s)) || p.as_bytes().windows(2).any(|w| w[0] == b'\\' && w[1].is_ascii_digit() && w[1] != b'0')
 }
 
-fn compile_rule(origin: &str, r: &Value, at: &str) -> Result<CrawlRule, String> {
+fn compile_rule(origin: &str, r: &Value, at: &str, size_limit: usize) -> Result<CrawlRule, String> {
     let Value::Obj(m) = r else { return Err(format!("{at} is an object with [policy], [type] and [pattern]")) };
     if let Some(k) = m.keys().find(|k| !matches!(k.as_str(), "policy" | "type" | "pattern")) {
         return Err(format!("{at} has an unknown key [{k}]"));
@@ -195,6 +199,9 @@ fn compile_rule(origin: &str, r: &Value, at: &str) -> Result<CrawlRule, String> 
         p => return Err(format!("{at} has policy [{p}]: allow or deny")),
     };
     let pattern = text("pattern")?;
+    if pattern.len() > MAX_PATTERN {
+        return Err(format!("{at}'s pattern is longer than {MAX_PATTERN} bytes"));
+    }
     let body = match text("type")? {
         "begins" => wildcard(pattern),
         "ends" => format!(".*{}\\z", wildcard(pattern)),
@@ -207,7 +214,7 @@ fn compile_rule(origin: &str, r: &Value, at: &str) -> Result<CrawlRule, String> 
         }
         t => return Err(format!("{at} has type [{t}]: begins, ends, contains or regex")),
     };
-    let re = regex::RegexBuilder::new(&format!("\\A{}(?:{body})", regex::escape(origin))).size_limit(1 << 20).build().map_err(|e| format!("{at}'s pattern [{pattern}] doesn't compile: {e}"))?;
+    let re = regex::RegexBuilder::new(&format!("\\A{}(?:{body})", regex::escape(origin))).size_limit(size_limit).dfa_size_limit(64 << 10).build().map_err(|e| format!("{at}'s pattern [{pattern}] doesn't compile: {e}"))?;
     Ok(CrawlRule { allow, re, describe: format!("{} {} {pattern}", if allow { "allow" } else { "deny" }, text("type")?) })
 }
 
@@ -258,6 +265,12 @@ pub fn plan(fields: &Fields, snippet: Option<&Value>, ceilings: &Ceilings) -> Re
     let mut seeds = Vec::new();
     let mut sitemaps = Vec::new();
     let mut full_html = false;
+    // Every domain's rules share one budget.
+    let total_rules: usize = snippet.and_then(|s| s.get("domains")).and_then(Value::as_array).map_or(0, |ds| ds.iter().filter_map(|d| d.get("crawl_rules").and_then(Value::as_array)).map(Vec::len).sum());
+    if total_rules > MAX_RULES {
+        return Err(format!("the crawl has {total_rules} crawl rules: at most {MAX_RULES} across its domains"));
+    }
+    let size_limit = (RULES_BYTES / total_rules.max(1)).max(16 << 10);
     let add_domain = |domains: &mut Vec<Domain>, origin: String| -> usize {
         match domains.iter().position(|d| d.origin == origin) {
             Some(i) => i,
@@ -318,12 +331,9 @@ pub fn plan(fields: &Fields, snippet: Option<&Value>, ceilings: &Ceilings) -> Re
                         }
                         if let Some(r) = d.get("crawl_rules") {
                             let Value::Arr(rules) = r else { return Err(format!("[{at}.crawl_rules] is an array")) };
-                            if rules.len() > MAX_RULES {
-                                return Err(format!("[{at}.crawl_rules] has more than {MAX_RULES} rules"));
-                            }
                             let mut out = Vec::with_capacity(rules.len());
                             for (j, r) in rules.iter().enumerate() {
-                                out.push(compile_rule(&origin, r, &format!("[{at}.crawl_rules[{j}]]"))?);
+                                out.push(compile_rule(&origin, r, &format!("[{at}.crawl_rules[{j}]]"), size_limit)?);
                             }
                             domains[di].rules = out;
                         }

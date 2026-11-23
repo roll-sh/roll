@@ -1,8 +1,9 @@
 //! roll's web crawler (`roll_web_crawler`, docs/search/crawler.md) against fixture sites the test
 //! serves on loopback (`roll.connectors.allow_private_hosts`): a crawl end to end (robots.txt,
 //! sitemaps, canonical URLs, nofollow, redirects off the crawl, the credential kept on its
-//! origin, crawl rules, the purge through an outage, the daily limit), and hostile sites (a
-//! compression bomb, a million-node page, an endless calendar, a sitemap declaring entities).
+//! origin, crawl rules, the purge through outages that redirect everything, the daily limit),
+//! hostile sites (a compression bomb, a million-node page, an endless calendar, a sitemap
+//! declaring entities), and one crawl without `allow_private_hosts`, refusing loopback.
 
 use search_es::json::{Value, parse};
 use search_es::xpack::entsearch::sync::crawler::url::Link;
@@ -31,15 +32,15 @@ struct Site {
     base: String,
     routes: Arc<Mutex<HashMap<String, Resp>>>,
     log: Log,
-    /// Every request answers 503 (robots.txt too).
-    down: Arc<Mutex<bool>>,
+    /// Every request but robots.txt and the target itself redirects here (a login, maintenance).
+    redirect_all: Arc<Mutex<Option<String>>>,
 }
 
 impl Site {
     async fn start() -> Site {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
-        let site = Site { base, routes: Arc::default(), log: Arc::default(), down: Arc::default() };
+        let site = Site { base, routes: Arc::default(), log: Arc::default(), redirect_all: Arc::default() };
         let s = site.clone();
         tokio::spawn(async move {
             loop {
@@ -58,10 +59,10 @@ impl Site {
                     let target = head.split_whitespace().nth(1).unwrap_or("/").to_string();
                     let auth = head.lines().find_map(|l| l.split_once(':').filter(|(k, _)| k.eq_ignore_ascii_case("authorization")).map(|(_, v)| v.trim().to_string()));
                     s.log.lock().unwrap().push((target.clone(), auth));
-                    let r = if *s.down.lock().unwrap() {
-                        Resp { status: 503, headers: vec![], body: b"down".to_vec() }
-                    } else {
-                        s.routes.lock().unwrap().get(&target).cloned().unwrap_or(Resp { status: 404, headers: vec![], body: b"no".to_vec() })
+                    let away = s.redirect_all.lock().unwrap().clone().filter(|to| target != "/robots.txt" && !to.ends_with(&target));
+                    let r = match away {
+                        Some(to) => Resp { status: 302, headers: vec![("Location".into(), to)], body: vec![] },
+                        None => s.routes.lock().unwrap().get(&target).cloned().unwrap_or(Resp { status: 404, headers: vec![], body: b"no".to_vec() }),
                     };
                     let mut out = format!("HTTP/1.1 {} X\r\nContent-Length: {}\r\nConnection: close\r\n", r.status, r.body.len());
                     for (k, v) in &r.headers {
@@ -208,7 +209,7 @@ async fn a_site_crawled_end_to_end() {
     a.page(
         "/",
         r#"<html><head><title>Home</title></head><body><header>site nav</header><p>welcome home</p>
-        <a href="/a">a</a><a href="/dup">dup</a><a href="/nofollow-page">nf</a><a href="/noindex">ni</a><a href="/blog/post">blog</a>
+        <a href="/a">a</a><a href="/canon">canon</a><a href="/dup">dup</a><a href="/nofollow-page">nf</a><a href="/noindex">ni</a><a href="/blog/post">blog</a>
         <a href="/private/x">private</a><a href="/off">off</a><a href="/to-b">b</a><a rel="nofollow" href="/hidden">hidden</a></body></html>"#,
     );
     a.page("/a", "<title>Page A</title><h1>Alpha</h1><p>alpha text</p>");
@@ -223,7 +224,7 @@ async fn a_site_crawled_end_to_end() {
     a.redirect("/to-b", &b.url("/landing"));
     b.page("/landing", "<p>bee landing</p>");
 
-    let c = cluster(&[("roll.crawler.unverified.max_crawls_per_day", "5")]).await;
+    let c = cluster(&[("roll.crawler.unverified.max_crawls_per_day", "8")]).await;
     let values = format!(r#"{{"urls":"{}","auth_origin":"{}","auth_header":"{SECRET}"}}"#, a.url("/"), a.base);
     let snippet = format!(r#"{{"domains":[{{"url":"{}","exclude_tags":["header"],"crawl_rules":[{{"policy":"deny","type":"begins","pattern":"/blog"}}]}},{{"url":"{}"}}]}}"#, a.base, b.base);
     crawler(&c, &values, Some(&snippet)).await;
@@ -233,7 +234,7 @@ async fn a_site_crawled_end_to_end() {
     // The first crawl.
     let job = crawl(&c).await;
     assert_eq!(at(&job, "status").as_str(), Some("completed"), "{job:?}");
-    assert_eq!(num(&job, "indexed_document_count"), 7, "/, /a, /canon (from /dup), /nofollow-page, /via-noindex, /from-sitemap, B's /landing: {job:?}");
+    assert_eq!(num(&job, "indexed_document_count"), 7, "/, /a, /canon, /nofollow-page, /via-noindex, /from-sitemap, B's /landing: {job:?}");
     assert_eq!((num(&job, "metadata.redirected_away_count"), num(&job, "metadata.crawl_rule_excluded_count")), (1, 1), "{job:?}");
     for path in ["/never", "/hidden", "/blog/post", "/private/x"] {
         assert_eq!(a.hits(path), 0, "{path} isn't fetched");
@@ -244,9 +245,10 @@ async fn a_site_crawled_end_to_end() {
     assert_eq!(at(&home, "title").as_str(), Some("Home"));
     assert!(at(&home, "body").as_str().is_some_and(|b| b.contains("welcome home") && !b.contains("site nav")), "{home:?}");
     assert_eq!((at(&home, "url_scheme").as_str(), num(&home, "url_port")), (Some("http"), a.base.rsplit(':').next().unwrap().parse().unwrap()));
+    // /dup names /canon, which the crawl fetched as itself: /dup is one of its additional URLs.
     let canon = doc(&c, &a.url("/canon")).await.unwrap();
     assert_eq!(at(&canon, "additional_urls.0").as_str(), Some(a.url("/dup").as_str()), "{canon:?}");
-    assert_eq!(a.hits("/canon"), 0, "the canonical URL isn't fetched again");
+    assert!(doc(&c, &a.url("/dup")).await.is_none());
     let (_, m, _) = call(&c, "GET", "/content-site/_mapping", None).await;
     assert_eq!((at(&m, "content-site.mappings.properties.url.type").as_str(), at(&m, "content-site.mappings.properties.last_crawled_at.type").as_str()), (Some("keyword"), Some("date")));
     // The credential went to its origin only: never to B, which A redirected to.
@@ -269,16 +271,36 @@ async fn a_site_crawled_end_to_end() {
     assert_eq!((num(&job, "deleted_document_count"), num(&job, "metadata.deleted_after_three_kept_crawls_count")), (1, 1), "{job:?}");
     assert!(doc(&c, &a.url("/a")).await.is_none());
 
-    // The whole site down (robots.txt too): most documents are kept by errors, so the purge is
-    // skipped and nothing is deleted.
-    *a.down.lock().unwrap() = true;
+    // An expired login: every page redirects off the crawl. Three crawls in a row would strike
+    // every document out; the purge is skipped each time, since most weren't refreshed.
+    *a.redirect_all.lock().unwrap() = Some(off.url("/login"));
+    for _ in 0..3 {
+        let job = crawl(&c).await;
+        assert_eq!((at(&job, "status").as_str(), at(&job, "metadata.purge_skipped"), num(&job, "deleted_document_count")), (Some("completed"), &Value::Bool(true), 0), "{job:?}");
+    }
+    assert!(doc(&c, &a.url("/")).await.is_some() && doc(&c, &a.url("/canon")).await.is_some());
+    assert!(off.requests().is_empty());
+    // Maintenance: every page redirects to one page of the site.
+    a.page("/maintenance", "<p>back soon</p>");
+    *a.redirect_all.lock().unwrap() = Some(a.url("/maintenance"));
     let job = crawl(&c).await;
-    assert_eq!((at(&job, "status").as_str(), at(&job, "metadata.purge_skipped")), (Some("completed"), &Value::Bool(true)), "{job:?}");
-    assert_eq!(num(&job, "deleted_document_count"), 0);
-    assert!(doc(&c, &a.url("/")).await.is_some());
+    assert_eq!((at(&job, "metadata.purge_skipped"), num(&job, "deleted_document_count")), (&Value::Bool(true), 0), "{job:?}");
+    assert!(doc(&c, &a.url("/")).await.is_some() && doc(&c, &a.url("/nofollow-page")).await.is_some());
     // An unverified domain's daily limit.
     let job = crawl(&c).await;
-    assert!(at(&job, "error").as_str().is_some_and(|e| e.contains("at most 5 times")), "{job:?}");
+    assert!(at(&job, "error").as_str().is_some_and(|e| e.contains("at most 8 times")), "{job:?}");
+}
+
+/// Without `allow_private_hosts`, a start URL on loopback is refused before any request.
+#[tokio::test]
+async fn a_private_address_is_never_fetched() {
+    let site = Site::start().await;
+    site.page("/", "<p>internal</p>");
+    let c = cluster(&[("roll.connectors.allow_private_hosts", "false")]).await;
+    crawler(&c, &format!(r#"{{"urls":"{}"}}"#, site.url("/")), None).await;
+    let job = crawl(&c).await;
+    assert_eq!((at(&job, "status").as_str(), num(&job, "indexed_document_count"), num(&job, "metadata.blocked_url_count")), (Some("completed"), 0, 1), "{job:?}");
+    assert!(site.requests().is_empty(), "{:?}", site.requests());
 }
 
 #[tokio::test]

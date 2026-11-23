@@ -1,6 +1,8 @@
 //! robots.txt as RFC 9309 reads it, for the product token `roll-crawler`: the groups naming it
 //! (or `*` when none does), longest match wins with `Allow` winning a tie, `*` and `$` in
-//! patterns, and `Crawl-delay` and `Sitemap:` lines, which the RFC leaves to crawlers.
+//! patterns, and `Crawl-delay` and `Sitemap:` lines, which the RFC leaves to crawlers. A
+//! group's rules compile into one anchored `RegexSet`, so checking a URL is linear in it whatever
+//! the file holds.
 
 use super::url::normalize_percent;
 
@@ -8,12 +10,17 @@ use super::url::normalize_percent;
 pub const TOKEN: &str = "roll-crawler";
 /// The most of a robots.txt read (RFC 9309 asks for at least 500 KiB).
 pub const MAX_BYTES: usize = 512 << 10;
+/// A rule with more literal bytes than this can't match any URL the crawler fetches.
+const MAX_LITERAL: usize = 8 << 10;
+/// What the compiled rules may cost: a file past it disallows its origin.
+const SET_BYTES: usize = 16 << 20;
 
 /// What an origin's robots.txt allows.
 #[derive(Debug, Default)]
 pub struct Robots {
-    /// `(allow, pattern)`, normalised.
-    rules: Vec<(bool, String)>,
+    /// Each rule's `(allow, length)`, in the order of `set`'s patterns.
+    rules: Vec<(bool, usize)>,
+    set: Option<regex::RegexSet>,
     /// Nothing is allowed (robots.txt couldn't be read: a 5xx, a timeout, a network error).
     disallow_all: bool,
     pub crawl_delay: Option<f64>,
@@ -47,7 +54,7 @@ impl Robots {
         let mut sitemaps = Vec::new();
         // Whether the current group still takes user-agent lines.
         let mut open = false;
-        for line in text.lines() {
+        for line in text.strip_prefix('\u{feff}').unwrap_or(text).lines() {
             let line = line.split('#').next().unwrap_or_default().trim();
             let Some((key, value)) = line.split_once(':') else { continue };
             let (key, value) = (key.trim().to_ascii_lowercase(), value.trim());
@@ -87,13 +94,21 @@ impl Robots {
         let ours = |g: &Group| g.agents.iter().any(|a| a == TOKEN);
         let mine: Vec<&Group> = if groups.iter().any(ours) { groups.iter().filter(|g| ours(g)).collect() } else { groups.iter().filter(|g| g.agents.iter().any(|a| a == "*")).collect() };
         let elastic_crawler_group = !groups.iter().any(ours) && groups.iter().any(|g| g.agents.iter().any(|a| a == "elastic-crawler"));
-        Robots {
-            rules: mine.iter().flat_map(|g| g.rules.iter().cloned()).collect(),
-            disallow_all: false,
-            crawl_delay: mine.iter().find_map(|g| g.delay),
-            sitemaps,
-            elastic_crawler_group,
+        let mut rules = Vec::new();
+        let mut patterns = Vec::new();
+        for (allow, p) in mine.iter().flat_map(|g| g.rules.iter()) {
+            if let Some(re) = to_regex(p) {
+                rules.push((*allow, p.len()));
+                patterns.push(re);
+            }
         }
+        let crawl_delay = mine.iter().find_map(|g| g.delay);
+        let set = match regex::RegexSetBuilder::new(&patterns).size_limit(SET_BYTES).dfa_size_limit(2 << 20).build() {
+            Ok(set) => Some(set),
+            // Rules too costly to compile: nothing of the origin is fetched.
+            Err(_) => return Robots { disallow_all: true, sitemaps, ..Robots::default() },
+        };
+        Robots { rules, set, disallow_all: false, crawl_delay, sitemaps, elastic_crawler_group }
     }
 
     /// Whether `uri` (a path and query) may be fetched.
@@ -104,16 +119,15 @@ impl Robots {
         if uri == "/robots.txt" {
             return true;
         }
+        let Some(set) = &self.set else { return true };
         let uri = normalize_percent(uri);
         let mut best: Option<(usize, bool)> = None;
-        for (allow, pattern) in &self.rules {
-            if matches(pattern, &uri) {
-                let len = pattern.len();
-                best = match best {
-                    Some((l, a)) if l > len || (l == len && a) => Some((l, a)),
-                    _ => Some((len, *allow)),
-                };
-            }
+        for i in set.matches(&uri).iter() {
+            let (allow, len) = self.rules[i];
+            best = match best {
+                Some((l, a)) if l > len || (l == len && a) => Some((l, a)),
+                _ => Some((len, allow)),
+            };
         }
         best.is_none_or(|(_, allow)| allow)
     }
@@ -136,39 +150,33 @@ fn normalize_pattern(p: &str) -> String {
     normalize_percent(&enc)
 }
 
-/// Whether `pattern` (`*` any run, a final `$` the end) matches the start of `uri`, without
-/// backtracking past the last `*` (linear in the URI for each star).
-fn matches(pattern: &str, uri: &str) -> bool {
+/// A pattern (`*` any run, a final `$` the end) as a regex anchored at the URI's start, runs of
+/// `*` collapsed; `None` for one with more literal bytes than any URL can hold.
+fn to_regex(pattern: &str) -> Option<String> {
     let (pattern, anchored) = match pattern.strip_suffix('$') {
         Some(p) => (p, true),
         None => (pattern, false),
     };
-    let (p, s) = (pattern.as_bytes(), uri.as_bytes());
-    let (mut i, mut j) = (0usize, 0usize);
-    let mut star: Option<(usize, usize)> = None;
-    loop {
-        if i == p.len() && (!anchored || j == s.len()) {
-            return true;
-        }
-        if i < p.len() && p[i] == b'*' {
-            star = Some((i, j));
-            i += 1;
-            continue;
-        }
-        if i < p.len() && j < s.len() && p[i] == s[j] {
-            i += 1;
-            j += 1;
-            continue;
-        }
-        match star {
-            Some((si, sj)) if sj < s.len() => {
-                star = Some((si, sj + 1));
-                i = si + 1;
-                j = sj + 1;
-            }
-            _ => return false,
-        }
+    if pattern.bytes().filter(|b| *b != b'*').count() > MAX_LITERAL {
+        return None;
     }
+    let mut re = String::from("^");
+    let mut star = false;
+    for ch in pattern.chars() {
+        if ch == '*' {
+            if !star {
+                re.push_str(".*");
+            }
+            star = true;
+            continue;
+        }
+        star = false;
+        re.push_str(&regex::escape(ch.encode_utf8(&mut [0u8; 4])));
+    }
+    if anchored {
+        re.push('$');
+    }
+    Some(re)
 }
 
 #[cfg(test)]
@@ -213,5 +221,7 @@ mod tests {
         assert_eq!((more.crawl_delay, more.sitemaps.len(), more.elastic_crawler_group), (Some(2.5), 1, true));
         assert!(more.allows("/anything"));
         assert!(!Robots::unreachable().allows("/") && Robots::allow_all().allows("/"));
+        // A byte order mark doesn't hide the first group.
+        assert!(!Robots::parse("\u{feff}User-agent: *\nDisallow: /\n").allows("/x"));
     }
 }

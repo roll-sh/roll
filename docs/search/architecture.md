@@ -839,13 +839,17 @@ credentials and branches' adoption all apply unchanged; the crawler adds:
   per origin spaced by the larger of `Crawl-delay` and `roll.crawler.min_request_interval`, and
   every byte counted against `roll.connectors.max_bytes_per_second`.
 - **Pages** (`html.rs`): `html5ever` builds an arena DOM charged per node and text run to the
-  request breaker as it is built (a page over the breaker is one failed document), read without
-  recursion to a depth of 512; nothing in a page runs. Documents keep Open Crawler's fields and ids.
+  request breaker as it is built (a page over the breaker is one failed document), failed as soon
+  as it nests more than 512 elements deep, parsed off the async workers against a deadline, and
+  read without recursion; nothing in a page runs. Documents keep Open Crawler's fields and ids.
 - **Purge**: only a full crawl that ends `completed` deletes, and only for proof that a page is
-  gone; errors keep a document for up to three full crawls in a row, and a crawl where most
-  documents fail deletes nothing.
+  gone; errors and outage-like signs (redirects off the crawl or onto one URL, non-HTML bodies)
+  keep a document for up to three full crawls in a row, and a crawl that didn't refresh most of the
+  index, or whose redirects mostly led to one URL, deletes nothing.
 - **Unverified domains** (all of them until domain verification lands): 1,000 URLs a crawl, a
-  second between requests, 4 crawls a day (`roll.crawler.unverified.*`). `roll.crawler.enabled`
+  second between requests to one site across every crawl on the node, 4 crawls a day per connector
+  and per owner and site (`crawler/hosts.rs`, node memory outside cluster state; verification
+  moves it to roll's catalogue, fleet-wide) (`roll.crawler.unverified.*`). `roll.crawler.enabled`
   turns crawlers off on a node.
 
 ## On the fleet (roll cloud)

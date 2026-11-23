@@ -1405,13 +1405,16 @@ deterministic (#396).
    Crawler's semantics on the linear-time `regex` crate; canonical URLs, robots meta,
    `rel=nofollow`, `data-elastic-include`/`-exclude`; fetching through `roll_net::PublicOnly` with
    redirects checked hop by hop and the credential bound to one origin; pages parsed by
-   `html5ever` into a DOM charged to the request breaker; a purge an outage can't empty; the
-   limits with node ceilings; unverified-domain limits; and `roll search crawler import` for an
+   `html5ever` into a DOM charged to the request breaker and capped at 512 levels; a purge that
+   outages, expired logins and maintenance redirects can't empty (it's skipped when most documents
+   weren't refreshed); the limits with node ceilings; unverified-domain limits per owner and site
+   on a node; and `roll search crawler import` for an
    Open Crawler YAML file. Left: domain verification (phase 2: higher limits, the
    `/v1/search/site-verifications` routes), the `crawl-test` route, its MCP tool and CLI, and the
    dashboard's URL box and "crawl a site" empty state; then extraction rules (CSS selectors on the
    arena DOM), incremental crawls with `If-Modified-Since`, and the docs preset (phase 3).
-   Charset detection beyond UTF-8 and fetching several origins at once are open too.
+   Charset detection beyond UTF-8, fetching several origins at once, the public suffix list for
+   sites, and seeding `roll.crawler.blocked_hosts` with the fleet's own names are open too.
 14. **Semantic search on OpenSearch-flavor clusters** (design in
    [opensearch-neural.md](opensearch-neural.md); AWS OpenSearch neural search):
    `neural`, `neural_sparse` and `agentic` are names only (`meta/aliases.rs`); ML Commons

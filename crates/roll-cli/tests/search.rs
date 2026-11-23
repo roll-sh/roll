@@ -365,7 +365,7 @@ async fn crawler_import_reads_an_open_crawler_config() {
     let yml = e.home.join("crawler.yml");
     std::fs::write(
         &yml,
-        "output_sink: elasticsearch\noutput_index: docs\nmax_crawl_depth: 3\nmax_title_size: 500\nlog_level: debug\n\
+        "output_sink: elasticsearch\noutput_index: docs\nmax_crawl_depth: 3\nsitemap_discovery_disabled: true\nmax_title_size: 500\nlog_level: debug\n\
          elasticsearch:\n  host: https://es.example\n  api_key: es-key-5521\n\
          domains:\n  - url: https://docs.example.com\n    seed_urls: [https://docs.example.com/start]\n    crawl_rules:\n      - {policy: deny, type: begins, pattern: /private}\n\
          \x20   auth: {type: raw, header: 'Bearer crawl-token-8812'}\n    extraction_rulesets: [{url_filters: []}]\n  - url: https://blog.example.com\n",
@@ -384,6 +384,7 @@ async fn crawler_import_reads_an_open_crawler_config() {
     let cfg = &c["configuration"];
     assert_eq!((cfg["auth_header"]["value"].as_str(), cfg["auth_origin"]["value"].as_str()), (Some("********"), Some("https://docs.example.com")));
     assert_eq!(cfg["urls"]["value"].as_str(), Some("https://docs.example.com/start,https://blog.example.com/"));
+    assert_eq!(cfg["sitemap_discovery"]["value"].as_bool(), Some(false));
     let active = &c["filtering"][0]["active"]["advanced_snippet"]["value"];
     assert_eq!((active["domains"][0]["crawl_rules"][0]["pattern"].as_str(), active["max_title_size"].as_i64()), (Some("/private"), Some(500)), "{c}");
     assert!(active["domains"][0].get("auth").is_none());

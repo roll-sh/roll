@@ -88,6 +88,9 @@ pub fn convert(yaml: &str, connector: Option<&str>) -> anyhow::Result<Import> {
                                     }
                                     other => bail!("domains[{i}].auth has type [{other}]: basic or raw"),
                                 }
+                                if !o.starts_with("https://") {
+                                    bail!("domains[{i}] has credentials on {o}: roll sends a credential only over https");
+                                }
                                 values.insert("auth_origin".into(), json!(o));
                                 notes.push(format!("domains[{i}].auth moved to the connector's sealed auth_* fields, sent only to {o}"));
                                 credentialed = Some(o);
@@ -114,6 +117,9 @@ pub fn convert(yaml: &str, connector: Option<&str>) -> anyhow::Result<Import> {
             "output_index" => output_index = v.as_str().map(str::to_string),
             "max_crawl_depth" | "max_unique_url_count" => {
                 values.insert(k.clone(), v.clone());
+            }
+            "sitemap_discovery_disabled" => {
+                values.insert("sitemap_discovery".into(), json!(!v.as_bool().unwrap_or(false)));
             }
             "full_html_extraction_enabled" => {
                 snippet.insert(k.clone(), v.clone());

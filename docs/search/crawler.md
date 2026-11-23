@@ -96,11 +96,16 @@ ever sees JSON.
 3. **Robots.txt** follows RFC 9309. It is fetched once per origin per crawl, parsed under the
    product token `roll-crawler` (or `*` when there's no group for it), and honoured always: like
    Open Crawler, nothing configures it away. A 4xx means everything is allowed. A 5xx, a timeout or
-   a network error means the origin is disallowed for this crawl, as the RFC asks. Redirects to the
-   same origin are followed for robots.txt up to 5 times. `Crawl-delay` is honoured.
+   a network error means the origin is disallowed for this crawl, as the RFC asks. Redirects are
+   followed for robots.txt up to 5 times, to other origins too (`http` to `https`, the apex to
+   `www`), each hop's address checked and the credential not sent after a hop leaves its origin;
+   more is unreachable. A leading byte order mark is ignored. The rules compile into one anchored
+   `RegexSet`, so a hostile file can't make checking a URL expensive; a file too costly to compile
+   disallows its origin. `Crawl-delay` is honoured, up to the crawl's deadline.
 
    Unlike Open Crawler, a site's `Elastic-Crawler` group doesn't apply to roll, whose token is
-   `roll-crawler`. The import step warns when it finds such a group.
+   `roll-crawler`. A crawl that finds such a group and no `roll-crawler` group names the origin in
+   `metadata.robots_elastic_crawler_group_ignored`.
 4. **Visit, breadth first by depth.** The frontier is a FIFO per depth. Each URL is normalised (see
    "Documents"), checked against the limits, the domains, the crawl rules and robots.txt, and then
    fetched (see "Fetching").
@@ -113,8 +118,10 @@ ever sees JSON.
 5. **Extract.** An HTML page becomes a document, and its links feed the frontier unless the page
    says `nofollow`. Directives follow Open Crawler's crawler directives:
    - `<meta name="robots">` with `noindex` and `nofollow`, and `rel="nofollow"` on links.
-   - `<link rel="canonical">`. The document is stored under the canonical URL, and the other URLs
-     go in `additional_urls`.
+   - `<link rel="canonical">`, honoured only for a canonical URL the crawl fetched and indexed as
+     itself: the page naming it then goes in that document's `additional_urls` and gets no
+     document of its own. Until the canonical URL is fetched (it is queued), the page is stored
+     under its own URL, so no page can take over another's document.
    - `data-elastic-include` and `data-elastic-exclude`, nestable, which choose the text that is
      indexed.
    - `<meta class="elastic" name=… content=…>`, which becomes a field.
@@ -170,7 +177,7 @@ works in a minute:
 |---|---|---|
 | URLs per crawl | 1,000 | `max_unique_url_count`, up to the operator's ceiling |
 | Interval between requests | at least 1 s | at least `roll.crawler.min_request_interval` |
-| Crawls per day | 4 | by schedule |
+| Crawls per day | 4, per owner and site | by schedule |
 
 To verify a domain, the owner proves control in one of two ways:
 
@@ -228,8 +235,11 @@ browsers parse them. Parsing builds a small arena DOM because extraction rules n
 the charge-what-you-build rule, each node and text run is charged to the request breaker as the tree
 builder makes it, and the charge is held until the document is serialised into the page body. A
 page of a million empty `<p>` tags trips `circuit_breaking_exception` for that URL, which is counted
-as a failed document, rather than growing the node. Page depth is capped at 512 elements, so a page
-can't recurse the serialiser. Nothing in the page runs: no scripts, no styles, no external fetches.
+as a failed document, rather than growing the node. html5ever puts no limit on nesting and scans its
+stack of open elements for every element it opens, so the tree builder fails a page as soon as it
+nests more than 512 elements deep (a failed document), and a parse runs off the async workers, fed
+in 4 KiB chunks against a 10-second deadline. Reading the DOM never recurses. Nothing in the page
+runs: no scripts, no styles, no external fetches.
 
 Extraction rules use Open Crawler's ruleset shape (`url_filters`, then `rules` with `action`
 `extract` or `set`, `field_name`, `selector`, `join_as`, `value`, `source` `html` or `url`):
@@ -247,13 +257,19 @@ don't answer 200. A site that is down during the purge, or a CDN serving 503s fo
 the index. roll keeps Open Crawler's re-check and deletes a document only for something that proves
 the page is gone:
 
-- **Deleted:** a 404 or a 410, a `noindex` page, a URL now excluded by crawl rules or robots.txt,
-  and a redirect to a URL outside the crawl.
-- **Kept:** 5xx responses, timeouts, network errors, and an origin whose robots.txt couldn't be
-  read. The document's `last_crawled_at` stays as it was. A document kept this way through three
-  full crawls in a row is deleted on the third, and the job's metadata names the count.
-- **Purge skipped:** when more than half of the previous crawl's documents fail with errors that
-  keep them. Then the job ends `completed` with `metadata.purge_skipped: true` and its reason.
+- **Deleted:** a 404 or a 410, a `noindex` page, a URL now excluded by the crawl's domains, crawl
+  rules or robots.txt, and a page naming as canonical a URL the crawl indexed.
+- **Kept:** 5xx responses, other 4xx (401, 403), timeouts, network errors, an origin whose
+  robots.txt couldn't be read, and signs that may only be an outage: a redirect off the crawl (a
+  login), onto a URL the crawl already has (a maintenance page), or a body that isn't HTML. The
+  document's `last_crawled_at` stays as it was. A document kept this way through three full crawls
+  in a row is deleted on the third, and the job's metadata names the count.
+- **Purge skipped:** when more than half of the index's documents weren't refreshed by the crawl
+  (gone, kept or not re-checked), or when ten redirects or more mostly led to one URL. A site that
+  is down, behind an expired login, in maintenance or wrongly deployed then loses nothing, however
+  many crawls it lasts. The job ends `completed` with `metadata.purge_skipped: true` and its
+  reason. (A site that really removes more than half its pages at once keeps the old documents
+  until they're deleted by hand.)
 
 Unseen documents are found with a `last_crawled_at` range query over the crawler's own index, and
 re-fetched with the same politeness. The re-check counts against `max_unique_url_count` and

@@ -89,7 +89,8 @@ const CRAWLER: &[FieldDef] = &[
     f("max_unique_url_count", "Maximum URLs per crawl", Ty::Int, || Value::from(10_000), false, false),
     FieldDef { tooltip: Some("The one origin (https://host[:port]) the credential is sent to, never another, never over plain http."), ..f("auth_origin", "Credential origin", Ty::Str, empty, false, false) },
     FieldDef { tooltip: Some("A whole Authorization header value, such as Bearer ..."), ..f("auth_header", "Authorization header", Ty::Str, empty, false, true) },
-    f("auth_username", "Basic auth username", Ty::Str, empty, false, false),
+    // Sensitive too: some sites take a token as the username with no password.
+    f("auth_username", "Basic auth username", Ty::Str, empty, false, true),
     f("auth_password", "Basic auth password", Ty::Str, empty, false, true),
 ];
 
