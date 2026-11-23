@@ -14037,6 +14037,105 @@ user (`a234-rref2`): 1,881 / 1,881 units, newly differing 0, i.e. 51,148 / 51,15
 Run regress references as the image's user, not `--user 1000:1000`. No planner change: the
 difftest guard was not run.
 
+## Read path, round 9: small index ranges without workers; where a point select's cycles go (agent 301)
+
+BENCH.md "Read path, round 9" has the tables. Harness `~/.cache/a301/bench` (agent 289's pgbench
+library: one server in a container on the lane's server CPUs, `pgbench -i -s 32`, `-M prepared`,
+10 s runs, counts from `perf stat -a -C <server CPUs> -G <server cgroup>` over 8 s; `uarch.sh` /
+`upair.sh` add microarchitecture events, `rpair.sh` alternating pairs of any cells, `sql/r100.sql`
+and `sql/r1000.sql` the range reads: `SELECT abalance FROM pgbench_accounts WHERE aid BETWEEN :aid
+AND :aid + 99` (+ 999), an index scan of the primary key of a 3.2 M-row table). Base `58ad4d95d`,
+candidate on `ff72a4b50`. Every lane read 4.4-6.6 foreign cores of its 8 CPUs all session; the
+server CPUs alone 0.3-1.95 (named with each number in BENCH).
+
+**Kept (`cand/a301`): a btree range smaller than min_parallel_index_scan_size is read on this
+thread** (`ScanNode::start_parallel_index`, `Store::range_size_at_least`). On a table past the
+heap model every single-range btree index scan started the parallel workers, whatever its size:
+its first and last entries sought, then `keyed_cuts` sought a key for each of the workers' chunks
+(`ParScan::chunks`: 64 a worker, 192 with two workers and the leader, each a `Scan` over every
+source), and the chunks went to the workers. With `-M prepared` the generic plan's estimate (16,000
+rows for `BETWEEN $1 AND $1 + 99`) is no guide. pgbench's 100-row range took 2.8-3.7 M user
+instructions and 1.2 ms of CPU, 1,900-2,650 tps at 8 clients against pgrust's 12,500 (its user
+time 169 µs). PostgreSQL plans no workers for an index scan that reads fewer pages than
+min_parallel_index_scan_size (64 pages by default); the range is now measured so: its files'
+blocks over it (decompressed, `BULK_RATIO` times their stored bytes, as `bulk_range` counts them)
+against the setting's bytes, a binary search in each file's block index. A range a memtable holds
+keys of whose files hold less is counted instead, by its first 4,096 entries (`MIN_INDEX_ENTRIES`).
+The setting at 0 keeps the workers for every range (as before). Results, statistics and EXPLAIN
+are the serial scan's as before (the workers' rows come in the same order, and EXPLAIN ANALYZE
+never ran them). A first version counted every range's first 4,096 entries: 40% of a 1,000-row
+read's instructions went to the count (the profile's `start_parallel`), so the blocks decide first.
+
+Gates (plain dist, 3 alternating pairs, lane B, 8 clients; base -> candidate):
+- 100 rows: user instructions 3.66 M / 3.66 M / 2.84 M -> 339 k / 349 k / 347 k (-90.7, -90.5,
+  -87.8%), user cycles -90.8 / -91.4 / -88.3%, tps 1,893 -> 17,901, 1,888 -> 18,467, 2,654 ->
+  15,669, p99 14.2 -> 1.24, 13.9 -> 1.43, 9.9 -> 2.93 ms.
+- 1,000 rows: user instructions 7.05 M / 6.97 M / 5.92 M -> 2.29 M / 2.28 M / 2.31 M (-67.5, -67.3,
+  -61.0%), cycles -78.6 / -78.7 / -73.7%, tps 1,199 -> 4,415, 1,111 -> 4,541, 1,538 -> 4,854, p99
+  24.3 -> 7.6, 25.2 -> 7.5, 18.4 -> 5.9 ms.
+- Point selects (one pair, lane A, 8 clients): 39.3 k -> 40.2 k user instructions, 102 k -> 105 k
+  cycles; the base's own runs that day spread 39.3-41.4 k. No point scan reaches the changed code
+  (`point` scans never start workers); the base is older by agent 296's planner commits.
+Against pgrust the same afternoon (same lane and settings, one run a cell): 100 rows 339-349 k user
+instructions and 435-459 k cycles against 436 k and 527 k (tps 15.7-18.5 k against 12.5 k); 1,000
+rows 2.28-2.31 M and 1.79-1.86 M against 2.05 M and 1.74 M (tps 4,415-4,854 against 4,551).
+
+**Where a point select's cycles go (plain dist against pgrust, item 1 of the brief).** Select-only
+at 8 clients (one run a cell, lane A, 1.0-1.7 foreign cores on the server CPUs): roll 39.3-41.4 k
+user instructions and 94-107 k cycles a read, pgrust 39.9-43.0 k and 73-79 k. The cycles
+instructions don't explain are the front end's, not data: per read, cycles with no uop delivered
+26.6 k against 15.4 k, instruction-cache miss stalls (`icache_16b.ifdata_stall`) 17-21 k against
+11.8 k, iTLB tag stalls (`icache_64b.iftag_stall`) 13-15 k against 9.6 k, instructions that missed
+the iTLB 251-265 against 117; uops mostly from the legacy decoders, not the uop cache (roll 94%, pgrust 98%).
+Data misses are level or lower: L1 misses 791 against 1,170, L2 185 against 195, LLC 36 against
+33, cross-core HITM loads 4 against 5.6 (no false sharing worth a change: per-function, no lock
+or counter stands out). Branch misses 123-144 against 54-61 (70 against 22 of them mispredicted
+calls: indirect calls, spread thin, no site above 0.4% of the misses); locked instructions 212
+against 136 (Arc counts and locks across the statement's life: `planned_as`, `bound_as`, the
+transaction's drop, `shared_search_path`, `log_sent`, none above ~6% of them); store-buffer-full
+stalls 5.2 k against 2.6 k. At 32 clients the same picture (120 k cycles against 92 k). The PGO
+build's lead (agent 250: 41% fewer cycles, 21% fewer instructions) is mostly this: its layout and
+inlining shrink the code a read runs through.
+
+**Measured and dropped** (patches in `~/.cache/a301/patches/`):
+- *Hot functions first* (`dropped-order0.txt`: lld's `--symbol-ordering-file` with the 1,441
+  functions sampled under select-only, TPC-B, 100- and 1,000-row ranges, hottest first: 2.8 MB at
+  the start of `.text` instead of spread over 40 MB). Select-only at 8 clients, 3 pairs: user
+  cycles -4.4, -0.3, -1.4%; iTLB misses and instruction-cache stalls unchanged (the kernel's
+  recvfrom / sendto and switches between them evict the read's code either way). Not enough to
+  keep a profile-made list of mangled names up to date.
+- *Hot text on huge pages* (`dropped-huge-text.patch`, with the ordering and `-z
+  max-page-size=0x200000`: the first 4 MB of text copied onto anonymous transparent huge pages and
+  moved over the file's mapping at start). This kernel has no `CONFIG_READ_ONLY_THP_FOR_FS`, so
+  only an anonymous copy can be huge, and on this host only 1 of 3 starts got huge pages (THP
+  allocations fall back more often than not). Where it did: iTLB misses 284 -> 181, iTLB stalls
+  12.4 k -> 9.2 k, cycles -4.9% (one pair); where it didn't, nothing. Costs 4 MB of anonymous memory
+  (the idle footprint's measure, 36.8 MB at 100 sessions, +11%) and perf can't name the moved code.
+  For the user to decide, not kept.
+- *More warmup*: 30 s instead of 2 changes neither select-only (38.2 k / 96.9 k against 39.4 k /
+  94.2 k) nor the old 100-row range (1.21 ms of user CPU against 1.32): the default block cache
+  (a quarter of the container's 8 GB, three quarters of that for blocks: 1.5 GB) holds the table.
+
+**Left:**
+1. A point select's front end: 5-10 k cycles a read of instruction-cache and iTLB misses more
+   than pgrust. Huge text pages (above, a user decision on 4 MB), or making the read's code
+   smaller: the error paths out of line (agent 250's c3: plain -1.8% cycles on ranges, PGO +2%
+   instructions), fewer distinct functions on the path. Measure with `upair.sh` / `ua2.env`
+   (front-end counts in one run).
+2. 1,000-row ranges: 2.29 M user instructions against pgrust's 2.05 M (2.2 k a row past the first
+   100 against 1.8 k): in the profile `Scan::fill_batch_with`, `Cursor::take`, `Scan::position`,
+   `Block::read` and the row's fetch (`fetch_dense_ref`) per entry, `WireSink::row_stored`.
+3. The 4,096-entry count for ranges memtables hold keys of: a memtable's entries in the range
+   could be measured by its size per key instead.
+
+Verification: `tools/quick-check.sh` on `ac656202e` (on `ff72a4b50`) with `QC_TESTS="big_tables
+parallel_scan"`: Clippy 16 warnings, none new in a changed file; 437 tests in 25 binaries (the diff
+maps `storage/` to the storage and crash binaries); crash_random seeds 1-3 x 2 and
+power_cut_at_every_point; regress 51,148 / 51,150, 0 newly differing; isolation 1,647 / 1,648;
+pg_dump_tap 14,609 passed. No assertions or catalog counts touched (no `QC_CHECKED`). The first
+version (every range's first 4,096 entries counted, `7bde5c7bc`) passed the same with 129 tests in 9
+binaries.
+
 ## Read path, round 8: block seeks without the keys before the one found (agent 277)
 
 BENCH.md "Read path, round 8" has the tables. Base `1c0a79d67` (cand/a275 and cand/a276 landed).

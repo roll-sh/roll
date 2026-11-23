@@ -917,6 +917,50 @@ Against the numbers that stand (agent 260's same-day runs, 2026-11-19): all step
 PostgreSQL's 52.33 (0.892x) and pgrust's 44.92 (1.039x); INSERT … SELECT 5.11 against PostgreSQL's
 4.31; COPY in 8.74 against PostgreSQL's 6.48 and pgrust's 4.97. Not re-run on PostgreSQL or pgrust.
 
+## Read path, round 9: small index ranges without workers; a point select's front end (2026-11-23, agent 301)
+
+HANDOFF "Read path, round 9" has what changed. pgbench (PostgreSQL 18.6's), `-s 32`, `-M prepared`,
+8 clients, 10 s runs, harness `~/.cache/a301/bench`; counts per statement over the server's
+cgroup (user instructions iu, user cycles cu). Lanes read 4.4-6.6 foreign cores of their 8 CPUs all
+afternoon; fc is the foreign load on the server CPUs alone in that run (the 1.0 rule was met by
+few runs: every pair agrees in direction, by far more than the lanes' spread).
+
+Range reads (`aid BETWEEN :aid AND :aid + 99`, + 999; an index scan of the primary key), lane B,
+plain dist (`tools/dist.sh`), base `58ad4d95d` and candidate (`cand/a301` on `ff72a4b50`),
+alternating pairs:
+
+| pair | rows | base iu | cand iu | base cu | cand cu | base tps | cand tps | p99 ms | fc base / cand |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 100 | 3,664,108 | 339,430 | 4,738,177 | 434,865 | 1,893 | 17,901 | 14.2 -> 1.24 | 1.00 / 1.07 |
+| 2 | 100 | 3,656,682 | 349,037 | 5,185,982 | 448,018 | 1,888 | 18,467 | 13.9 -> 1.43 | 0.91 / 1.21 |
+| 3 | 100 | 2,840,469 | 346,757 | 3,926,036 | 458,951 | 2,654 | 15,669 | 9.9 -> 2.93 | 0.50 / 1.43 |
+| 1 | 1,000 | 7,047,237 | 2,289,135 | 8,410,999 | 1,799,732 | 1,199 | 4,415 | 24.3 -> 7.65 | 0.55 / 1.42 |
+| 2 | 1,000 | 6,970,654 | 2,281,489 | 8,428,083 | 1,793,362 | 1,111 | 4,541 | 25.2 -> 7.46 | 0.77 / 1.50 |
+| 3 | 1,000 | 5,916,972 | 2,309,282 | 7,049,320 | 1,857,350 | 1,538 | 4,854 | 18.4 -> 5.93 | 0.33 / 1.14 |
+
+pgrust (same lane and settings, one run a cell, fc 1.5-1.6): 100 rows 435,926 iu, 527,010 cu, 12,504
+tps, p99 4.58 ms; 1,000 rows 2,050,797 iu, 1,736,867 cu, 4,551 tps, p99 6.77 ms. Point selects
+(lane A, one pair, plain dist): base 39,318 iu / 102,454 cu / 46,419 tps, candidate 40,150 / 104,892
+/ 49,235 (fc 1.34 / 1.20; base's own runs that day 39.3-41.4 k iu).
+
+Select-only at 8 clients, per read, one run a cell (lane A, `uarch.sh` and `ua2.env`; plain dist
+`58ad4d95d` and pgrust; fc 1.0-1.7):
+
+| | roll | pgrust |
+|---|---|---|
+| user instructions / cycles | 39.3-41.4 k / 94-107 k | 39.9-43.0 k / 73-79 k |
+| cycles with no uop delivered | 26.6 k | 15.4 k |
+| i-cache miss stalls / iTLB tag stalls | 17.0-21.2 k / 13.1-15.3 k | 11.8 k / 9.6 k |
+| instructions missing the iTLB | 251-265 | 117 |
+| L1 / L2 / LLC load misses, HITM | 791 / 185 / 36, 4.0 | 1,170 / 195 / 33, 5.6 |
+| branch misses (mispredicted calls) | 123-144 (70-78) | 54-61 (22) |
+| locked loads, store-buffer-full stall cycles | 212, 5.2 k | 136, 2.6 k |
+
+Dropped, select-only at 8 clients: hot functions first (lld symbol ordering), 3 pairs: cycles -4.4,
+-0.3, -1.4%, iTLB misses 252-265 -> 269-291; hot text on huge pages (one binary, the env switch on
+or off, 3 pairs): cycles -4.9% where the 2 MB pages were granted (1 of 3 starts; iTLB misses 284 ->
+181), +4.4 / +2.1% where not.
+
 ## Read path, round 8: block seeks (2026-11-21, agent 277)
 
 HANDOFF "Read path, round 8" has what changed. Plain dist builds (`tools/dist.sh`): **b1** origin's
