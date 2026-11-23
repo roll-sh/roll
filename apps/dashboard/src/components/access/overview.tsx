@@ -386,7 +386,7 @@ function AgentActivity({ activity }: { activity: Activity }) {
 /**
  * What roll alerted the operator about lately (`GET /v1/access/alerts`, the feed an agent hears as
  * `access.alert`): a failing tool, a decoy used, leaked tokens revoked, the checkup's news. Newest
- * first; an alert about a token links to it.
+ * first; an alert about a token links to it. A person sees those about their own tokens.
  */
 function Alerts({ list }: { list: Alert[] }) {
   const [all, setAll] = useState(false);

@@ -2816,6 +2816,9 @@ async fn a_decoy_token_allows_nothing_and_gives_its_user_away() {
     let (_, feed) = d.call(OPERATOR, Method::GET, "/v1/access/alerts?after=0", None).await;
     let decoys: Vec<&Value> = feed["events"].as_array().unwrap().iter().filter(|e| e["kind"] == "decoy_used").collect();
     assert_eq!((decoys.len(), decoys[0]["grant"].as_str(), decoys[0]["route"].as_str()), (1, Some(id.as_str()), Some("/v1/workspace/projects")), "{feed}");
+    // Its owner hears it on their own feed too.
+    let (_, hers) = d.as_user("usr_alice", Method::GET, "/v1/access/alerts?after=0", None).await;
+    assert!(hers["events"].as_array().unwrap().iter().any(|e| e["kind"] == "decoy_used" && e["grant"] == id.as_str()), "{hers}");
 }
 
 /// docs/members.md, "Evaluation": a person's session is the grant of their roles, decided by the
@@ -3059,5 +3062,5 @@ async fn agent_activity_by_tool_and_connection() {
     let (_, feed) = d.call(OPERATOR, Method::GET, "/v1/access/alerts?after=0", None).await;
     assert_eq!((feed["events"][0]["kind"].as_str(), feed["events"][0]["tool"].as_str(), feed["next"].as_i64()), (Some("tool_failing"), Some("flaky_tool"), Some(1)), "{feed}");
     let (_, theirs) = d.as_user("usr_ada", Method::GET, "/v1/access/alerts?after=0", None).await;
-    assert_eq!((theirs["events"].as_array().map(Vec::len), theirs["next"].as_i64()), (Some(0), Some(1)), "a person's connections get none: {theirs}");
+    assert_eq!(theirs["events"].as_array().map(Vec::len), Some(0), "not about their tokens: {theirs}");
 }
