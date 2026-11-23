@@ -901,6 +901,9 @@ pub struct Settings { max_size_in_bytes, cache_max_size, cache_expire, max_compi
                       regex_enabled: RegexEnabled /* True|False|Limited */, regex_limit_factor, max_loop_counter,
                       max_object_bytes /* 256 MiB: largest array/string/collection a script builds → out_of_memory_error */,
                       stack_bytes /* 1 MiB of native stack per execution → stack_overflow_error */,
+                      max_execution_bytes /* memory one execution may hold (operator's; default from
+                                             set_default_max_execution_bytes, 64 MiB) → painless_error,
+                                             counted by the host's #[global_allocator] Counting<A> wrapper */,
                       max_allocation_bytes: Vec<(Context, u64)> /* script.painless.max_allocation_bytes.context.<c>.limit;
                                                                    empty = -1b (off) */ }
 pub enum Context { PainlessTest, Score, Filter, Field, Update, UpdateByQuery, Reindex, Ingest, ProcessorConditional,
@@ -948,6 +951,9 @@ impl Instance { fn set_params(&mut self, &Json); fn set_params_value(&mut self, 
                 fn set_cancellable(&mut self, bool) }   // search contexts (score, filter, fields, sort, aggs, runtime
                 // fields) when the search binds a cancellation check: no max_loop_counter, Host::check_cancelled every
                 // 1,000 loop iterations instead (Elasticsearch 9.5); off for _execute and write scripts
+                // fn set_result_accounting(&mut self, bool): keep a second reference to each result until the next
+                // execution (hosts charging a breaker per document); results must then be dropped on its thread
+pub fn counting_installed() -> bool;   // set_default_max_execution_bytes(n > 0) panics without Counting
 pub trait Host {   // every method has a default; implement what the context needs
     fn score(&mut self) -> f64;
     fn doc_values(&mut self, field: &str, out: &mut DocValues) -> Result<bool, HostError>;   // Ok(false): unmapped
@@ -959,6 +965,9 @@ pub trait Host {   // every method has a default; implement what the context nee
     fn doc_id(&mut self) -> i32; fn shard(&mut self) -> (i32, String); fn now_millis(&mut self) -> i64;
     fn stored_field(&mut self, field: &str) -> Result<Option<Vec<Value>>, HostError>;   // params._fields[f]: None = unmapped
     fn check_cancelled(&mut self) -> Result<(), HostError>;   // cancellable instances: Err stops the script
+    fn script_memory(&mut self, delta: i64) -> Result<(), MemoryRefused>;   // what the host's executions hold moved by
+                // delta (each ~MiB of growth and at each end): search hosts charge the request breaker, Err fails the
+                // script with circuit_breaking_exception
     fn with_vector(&mut self, field, f: &mut dyn FnMut(&VectorView)) -> Result<Option<bool>, HostError>;
         // zero-copy dense_vector for the vector score functions (Ok(None): use doc_values)
 }

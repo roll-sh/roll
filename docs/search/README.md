@@ -37,6 +37,7 @@ pnpm dev                                # dashboard: /dashboard/search
 | `--search-proxy-protocol`                          | off               | PROXY protocol headers (behind an NLB or HAProxy) |
 | `--search-client-ip-header` (`ROLL_SEARCH_CLIENT_IP_HEADER`), `--search-trusted-proxies` (`ROLL_SEARCH_TRUSTED_PROXIES`) | | the header a trusted proxy writes the client's address in (`CF-Connecting-IP`), believed only from those CIDRs; for IP allowlists (architecture.md, "Client addresses and IP allowlists") |
 | `--search-history` (`ROLL_SEARCH_HISTORY`)         | `86400`           | point-in-time branching window, seconds (0: off) |
+| `--search-script-memory-mb` (`ROLL_SEARCH_SCRIPT_MEMORY_MB`) | `64` | memory one Painless execution may hold, MiB (0: no limit); tenants can't raise it (compatibility.md, "Painless memory per execution") |
 | `--search-gc-interval`                             | `3600`            | garbage collection of unreferenced objects (0: off; one node per bucket) |
 | `--search-deleted-retention-days` (`ROLL_SEARCH_DELETED_RETENTION_DAYS`) | `7` | days a deleted cluster can be restored, its storage billed meanwhile (0: deleted at once) |
 | `--search-test-features`                           | off               | publish Elasticsearch's test features (YAML suites through `--cluster-hook`; test deployments only) |

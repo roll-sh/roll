@@ -336,7 +336,10 @@ impl ScriptedMetricScripts for Scripted {
 impl ScriptedMetricState for ScriptedState {
     fn set_segment(&mut self, seg: &search_index::SegmentContext) -> search_aggs::Result<()> {
         let s = self.map.painless().ok_or_else(|| AggError::illegal_argument("not a painless script"))?;
-        let mut leaf = Leaf::new(s, &self.params, DocHost::new(self.table.clone(), seg.clone(), self.shard, self.index.clone()).with_id_fielddata(self.id_fielddata));
+        // the state outlives the segment: so does what its executions keep on the breaker
+        let memory = self.leaf.as_mut().and_then(Leaf::take_memory);
+        let host = DocHost::new(self.table.clone(), seg.clone(), self.shard, self.index.clone()).with_id_fielddata(self.id_fielddata).with_memory(memory);
+        let mut leaf = Leaf::new(s, &self.params, host);
         leaf.set_var("state", self.state.clone());
         self.leaf = Some(leaf);
         Ok(())
