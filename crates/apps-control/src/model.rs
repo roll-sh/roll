@@ -2488,6 +2488,10 @@ pub struct CheckState {
     pub ms: Option<u64>,
     pub error: Option<String>,
     pub down_since: Option<i64>,
+    /// When a browser check's last failure was kept: its screenshot and Playwright trace
+    /// (`…/checks/{name}/screenshot`, `…/trace`), as this node knows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_at: Option<i64>,
 }
 
 impl Route {

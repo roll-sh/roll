@@ -1148,6 +1148,8 @@ export interface UptimeCheckState {
   ms: number | null;
   error: string | null;
   down_since: number | null;
+  /** A browser check's last failure kept (its screenshot and Playwright trace), as the owner knows. */
+  failure_at?: number;
 }
 
 /** A heartbeat: something outside roll pings its URL at least every `every_s` (60–604800); one not come within that and `grace_s` (default 300) is `heartbeat.missed`. */
@@ -1650,6 +1652,16 @@ export const appsApi = {
       throw new Error(data?.error ?? `${res.status} ${res.statusText}`.trim());
     }
     return { tar: await res.blob(), instance: res.headers.get("x-roll-instance") };
+  },
+  /** A browser check's last failure: its screenshot (PNG) or Playwright trace (zip). */
+  checkFailure: async (id: string, e: string, check: string, which: "screenshot" | "trace"): Promise<Blob> => {
+    const res = await fetch(`${ROLL_API}${env(id, e)}/checks/${encodeURIComponent(check)}/${which}`, withSession({ headers: apiHeaders(), cache: "no-store" }));
+    onApiStatus(res.status);
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      throw new Error(data?.error ?? `${res.status} ${res.statusText}`.trim());
+    }
+    return res.blob();
   },
   /** A tar written under the directory `path` in a running instance (`PUT …/files`, admin: what's written runs next). */
   uploadFiles: async (id: string, e: string, path: string, tar: Blob, instance?: string): Promise<{ instance: string; path: string }> => {

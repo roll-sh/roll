@@ -15,6 +15,8 @@ import {
   FIX_LABEL,
   type Checkup,
   type Activity,
+  type Alert,
+  describeAlert,
   productName,
   withToolsets,
   APPROVABLE,
@@ -55,6 +57,7 @@ export function AccessOverview() {
   const { data: me } = usePoll(() => accessApi.me(), 60_000);
   const { data: checkup, refresh: recheck } = usePoll(() => accessApi.checkup(), 60_000);
   const { data: activity } = usePoll(() => accessApi.activity().catch(() => null), 60_000);
+  const { data: alerts } = usePoll(() => accessApi.latestAlerts().catch(() => null), 60_000);
   // Machine clients: every one for the operator, a person's own for them (a token is refused: the
   // panel stays hidden). Their grants are listed with them, not among the tokens.
   const { data: machines, refresh: remachine } = usePoll(() => accessApi.machineClients().catch(() => null), 30_000);
@@ -87,6 +90,7 @@ export function AccessOverview() {
           />
         )}
         {activity && activity.calls > 0 && <AgentActivity activity={activity} />}
+        {alerts && alerts.length > 0 && <Alerts list={alerts} />}
         {grants === null && !error ? <Connecting /> : <Grants grants={(grants ?? []).filter((g) => !machineGrants.has(g.id))} refresh={refresh} />}
         {machines && (
           <MachineClients
@@ -373,6 +377,41 @@ function AgentActivity({ activity }: { activity: Activity }) {
       {activity.tools.length > shown.length && (
         <button onClick={() => setAll(true)} className="block w-full border-t border-line px-5 py-2 text-left text-[12px] text-accent hover:underline">
           {activity.tools.length - shown.length} more tools
+        </button>
+      )}
+    </Panel>
+  );
+}
+
+/**
+ * What roll alerted the operator about lately (`GET /v1/access/alerts`, the feed an agent hears as
+ * `access.alert`): a failing tool, a decoy used, leaked tokens revoked, the checkup's news. Newest
+ * first; an alert about a token links to it.
+ */
+function Alerts({ list }: { list: Alert[] }) {
+  const [all, setAll] = useState(false);
+  const shown = list.slice(0, all ? undefined : 5);
+  return (
+    <Panel title="Alerts">
+      <ul className="divide-y divide-line">
+        {shown.map((a) => {
+          const { text, grant } = describeAlert(a);
+          return (
+            <li key={a.seq} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 px-5 py-2.5 text-[12px]">
+              <span className="min-w-0 flex-1">{text}</span>
+              {grant && (
+                <Link href={`/dashboard/access/tokens/${encodeURIComponent(grant)}`} className="text-accent hover:underline">
+                  Open token
+                </Link>
+              )}
+              <span className="text-muted">{relative(a.at)}</span>
+            </li>
+          );
+        })}
+      </ul>
+      {list.length > shown.length && (
+        <button onClick={() => setAll(true)} className="block w-full border-t border-line px-5 py-2 text-left text-[12px] text-accent hover:underline">
+          {list.length - shown.length} more
         </button>
       )}
     </Panel>

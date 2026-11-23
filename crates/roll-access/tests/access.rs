@@ -2422,6 +2422,20 @@ async fn the_checkup_names_what_needs_attention() {
     assert_eq!(kinds(&root), ["everything", "never_expires"], "{list}");
     assert_eq!(kinds(&wide_id), ["narrower"], "{list}");
     assert!(kinds(&fit_id).is_empty(), "{list}");
+
+    // The hourly look keeps what it saw: the first only remembers; a token made broad since is new,
+    // on the operator's alert feed with its fix; looking again finds nothing new.
+    assert_eq!(d.access.checkup_alerts_every(0).unwrap(), 0, "what was already there isn't news");
+    let (_, broad) = d.token(json!([{ "product": "*", "resources": "*", "actions": { "admin": "allow" } }]), json!({})).await;
+    assert!(d.access.checkup_alerts_every(0).unwrap() >= 2);
+    let (_, feed) = d.call(OPERATOR, Method::GET, "/v1/access/alerts?after=0", None).await;
+    let mut new: Vec<&str> = feed["events"].as_array().unwrap().iter().filter(|e| e["kind"] == "checkup_finding" && e["grant"] == broad.as_str()).map(|e| e["finding"].as_str().unwrap()).collect();
+    new.sort_unstable();
+    assert_eq!(new, ["everything", "never_expires"], "{feed}");
+    let before = feed["next"].as_i64().unwrap();
+    d.access.checkup_alerts_every(0).unwrap();
+    let (_, again) = d.call(OPERATOR, Method::GET, &format!("/v1/access/alerts?after={before}"), None).await;
+    assert!(!again["events"].as_array().unwrap().iter().any(|e| e["grant"] == broad.as_str()), "not again: {again}");
 }
 
 /// A person hears of their own tokens by mail (GitHub mails a token's owner): when one is about to

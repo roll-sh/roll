@@ -3,8 +3,58 @@
 //! `stack_overflow_error`, an `out_of_memory_error`, or the host's cancellation) and leave the
 //! engine usable.
 
-use search_painless::{Context, DocKind, DocValues, Engine, Host, HostError, Lang, NoHost, Settings, Value};
+use search_painless::{Context, DocKind, DocValues, Engine, Host, HostError, Lang, MemoryRefused, NoHost, Settings, Value};
 use serde_json::{json, Value as Json};
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
+
+/// The allocator wrapper a host installs to keep executions' memory accounts, over one that
+/// records this thread's peak.
+#[global_allocator]
+static ALLOC: search_painless::Counting<Peak> = search_painless::Counting(Peak);
+
+struct Peak;
+
+thread_local! {
+    static LIVE: Cell<i64> = const { Cell::new(0) };
+    static PEAK: Cell<i64> = const { Cell::new(0) };
+}
+
+fn moved(delta: i64) {
+    let live = LIVE.get() + delta;
+    LIVE.set(live);
+    PEAK.set(PEAK.get().max(live));
+}
+
+// SAFETY: forwards to the system allocator; the counters are const thread-locals without
+// destructors.
+unsafe impl GlobalAlloc for Peak {
+    unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+        moved(l.size() as i64);
+        unsafe { System.alloc(l) }
+    }
+    unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+        moved(-(l.size() as i64));
+        unsafe { System.dealloc(p, l) }
+    }
+    unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
+        moved(n as i64 - l.size() as i64);
+        unsafe { System.realloc(p, l, n) }
+    }
+}
+
+/// Runs `f`, and how far this thread's live bytes rose above where they started.
+fn peak_growth<T>(f: impl FnOnce() -> T) -> (T, i64) {
+    let start = LIVE.get();
+    PEAK.set(start);
+    let r = f();
+    (r, PEAK.get() - start)
+}
+
+/// An engine whose executions may hold `bytes`.
+fn limited(bytes: u64) -> Engine {
+    Engine::new(Settings { max_compilations_rate: None, max_execution_bytes: bytes, ..Settings::default() })
+}
 
 /// An engine whose objects may not exceed 1 MiB, so the size checks trip without the test
 /// allocating much.
@@ -316,5 +366,280 @@ fn allocation_limit_per_context() {
     let mut inst = s.instance();
     for _ in 0..3 {
         assert_eq!(inst.execute(&mut NoHost).unwrap().to_java_string(), "15");
+    }
+}
+
+/// The security review's script, scaled down: every copy is under the object cap, together
+/// they would be 1 GiB (125 GiB with its 128 MiB string). The execution's account refuses it
+/// the way Elasticsearch 9.5's per-execution guard does, and the thread never holds much more
+/// than the limit.
+#[test]
+fn memory_per_execution_is_bounded() {
+    let e = limited(4 << 20);
+    let src = "String s = 'x'; while (s.length() < 1024 * 1024) { s = s + s; } List l = new ArrayList(); for (int i = 0; i < 1000; i++) { l.add(s + i); } return l.size();";
+    let (r, grew) = peak_growth(|| run(&e, src));
+    let err = r.unwrap_err();
+    assert_eq!(err["error"]["type"], "script_exception", "{err}");
+    assert_eq!(err["error"]["script_stack"], json!(["<<< unknown portion of script >>>"]));
+    assert_eq!(err["error"]["root_cause"][0]["type"], "painless_error");
+    let (kind, reason) = cause(&err);
+    assert_eq!(kind, "painless_error");
+    let reason = reason.unwrap();
+    assert!(reason.starts_with("script allocation limit exceeded: allocation of [") && reason.ends_with("bytes, over the limit of [4194304] bytes"), "{reason}");
+    assert!(grew < 8 << 20, "the thread held {grew} bytes");
+}
+
+/// What an execution holds counts, not what it allocated: 128 MiB of temporaries and a list of
+/// a thousand strings in a 4 MiB account, run again and again.
+#[test]
+fn memory_under_the_limit_is_unaffected() {
+    let e = limited(4 << 20);
+    let script = e.compile("String s = 'x'; while (s.length() < 64 * 1024) { s = s + s; } int n = 0; for (int i = 0; i < 2000; i++) { String t = s + i; n += t.length(); } List l = []; for (int i = 0; i < 1000; i++) { l.add('v' + i); } return n + l.size();", Context::PainlessTest).unwrap();
+    let mut inst = script.instance();
+    let digits: i64 = (0..2000).map(|i: i64| i.to_string().len() as i64).sum();
+    for _ in 0..3 {
+        assert_eq!(inst.execute(&mut NoHost).unwrap().to_java_string(), (2000 * 65536 + digits + 1000).to_string());
+    }
+}
+
+/// A host that adds up what executions report, refusing past a limit like a search's
+/// `request` breaker.
+struct Breaker {
+    held: i64,
+    limit: i64,
+}
+
+impl Host for Breaker {
+    fn script_memory(&mut self, delta: i64) -> Result<(), MemoryRefused> {
+        self.held += delta;
+        if self.held > self.limit {
+            return Err(MemoryRefused { reason: format!("[request] Data too large, data for [<script>] would be [{}b]", self.held), wanted: self.held as u64, limit: self.limit as u64 });
+        }
+        Ok(())
+    }
+}
+
+/// Each execution has its own account, so a script run per document is also charged to its
+/// host what it keeps from one execution to the next (here in a scripted metric's state), and
+/// nothing for what it returns or throws away.
+#[test]
+fn hosts_hear_what_executions_keep() {
+    let e = limited(4 << 20);
+    let returns = e.compile("String t = 'x'; while (t.length() < 64 * 1024) { t = t + t; } return t + 'y'", Context::PainlessTest).unwrap();
+    let mut inst = returns.instance();
+    inst.set_result_accounting(true);
+    let mut host = Breaker { held: 0, limit: 1 << 20 };
+    for _ in 0..1000 {
+        let v = inst.execute(&mut host).unwrap();
+        assert_eq!(v.to_java_string().len(), 65537);
+    }
+    assert!(host.held < 1 << 20, "{}", host.held);
+
+    let keeps = e.compile("if (!state.containsKey('l')) { state.l = []; } state.l.add(new int[16384]);", Context::AggsMap).unwrap();
+    let mut inst = keeps.instance();
+    inst.set_var("state", Value::from_json_map(&json!({})));
+    let mut host = Breaker { held: 0, limit: 10 << 20 };
+    let runs = (0..1000).position(|_| inst.execute(&mut host).is_err()).expect("the breaker refuses");
+    // 64 KiB a document: well past one execution's account, refused near the breaker's limit
+    assert!((100..200).contains(&runs), "{runs}");
+    let err = inst.execute(&mut host).unwrap_err().to_response();
+    assert_eq!(cause(&err).0, "circuit_breaking_exception", "{err}");
+}
+
+/// Library calls that build many objects in one call look at the account as they go: a split,
+/// a regex split and a parsed document stop near the limit, not after building it all
+/// (a 2 MiB string of `a,` splits into a million strings, about 100 MiB).
+#[test]
+fn bulk_builders_stop_near_the_limit() {
+    let e = limited(4 << 20);
+    let input = "String s = 'a,'; while (s.length() < 2 * 1024 * 1024) { s = s + s; }";
+    for (what, src) in [
+        ("splitOnToken", format!("{input} return s.splitOnToken(',').length;")),
+        ("Pattern.split", format!("{input} return /,/.split(s).length;")),
+        ("Json.load", "StringBuilder b = new StringBuilder('['); for (int i = 0; i < 500000; i++) { b.append('1,'); } b.append('1]'); return Json.load(b.toString()).size();".to_string()),
+    ] {
+        let (r, grew) = peak_growth(|| run(&e, &src));
+        let err = r.unwrap_err();
+        assert_eq!(cause(&err).0, "painless_error", "{what}: {err}");
+        assert!(grew < 8 << 20, "{what}: the thread held {grew} bytes");
+    }
+}
+
+/// A size known before it is allocated is checked against the room first.
+#[test]
+fn known_sizes_are_refused_before_allocating() {
+    let e = limited(4 << 20);
+    let (r, grew) = peak_growth(|| run(&e, "StringBuilder b = new StringBuilder(); b.setLength(250000000); return b.length()"));
+    assert_eq!(cause(&r.unwrap_err()).0, "painless_error");
+    assert!(grew < 1 << 20, "the thread held {grew} bytes");
+}
+
+/// A host whose `_source` is parsed lazily, when a script first reads it.
+struct LargeSource;
+
+impl Host for LargeSource {
+    fn source(&mut self) -> Option<Value> {
+        Some(Value::from_json_map(&json!({ "big": "x".repeat(8 << 20) })))
+    }
+}
+
+/// What the host allocates for itself during an execution (a lazily parsed `_source` larger
+/// than the limit) isn't the script's: Elasticsearch runs these scripts.
+#[test]
+fn host_allocations_are_not_the_scripts() {
+    let e = limited(4 << 20);
+    let script = e.compile("return params['_source']['big'].length()", Context::Score).unwrap();
+    let mut inst = script.instance();
+    inst.set_params(&json!({}));
+    assert_eq!(inst.execute_f64(&mut LargeSource).unwrap(), (8 << 20) as f64);
+}
+
+/// A host that hands scripts fresh data on every call: a 64 KiB `_source` and stored field.
+/// After 3,000 calls it has nothing more, so a broken guard fails the test's assertions
+/// instead of taking the machine's memory.
+struct FreshData {
+    calls: u32,
+}
+
+impl FreshData {
+    fn more(&mut self) -> bool {
+        self.calls += 1;
+        self.calls <= 3000
+    }
+}
+
+impl Host for FreshData {
+    fn source(&mut self) -> Option<Value> {
+        self.more().then(|| Value::from_json_map(&json!({ "body": "x".repeat(64 << 10) })))
+    }
+    fn stored_field(&mut self, _field: &str) -> Result<Option<Vec<Value>>, HostError> {
+        Ok(self.more().then(|| vec![Value::string("y".repeat(64 << 10))]))
+    }
+}
+
+/// Data a host hands over can't be turned into room: keeping `params._source` over and over
+/// keeps one document (it is parsed once per execution), and reading and dropping host data in
+/// a loop gives the script nothing to grow into. Each loop ends with the limit's failure while
+/// the thread holds little more than the limit.
+#[test]
+fn host_data_gives_no_room() {
+    let e = limited(4 << 20);
+    for src in [
+        "List l = []; while (true) { l.add(params._source); }",
+        "List l = []; while (true) { def s = params._source; s.body = s.body + 'z'; l.add(new int[1024]); }",
+        "List l = []; while (true) { def f = params._fields['f']; l.add(new int[1024]); }",
+    ] {
+        let script = e.compile(src, Context::Score).unwrap();
+        let mut inst = script.instance();
+        inst.set_params(&json!({}));
+        let (r, grew) = peak_growth(|| inst.execute_f64(&mut FreshData { calls: 0 }).map_err(|e| e.to_response()));
+        let err = r.unwrap_err();
+        assert_eq!(cause(&err).0, "painless_error", "{src}: {err}");
+        assert!(err["error"]["caused_by"]["reason"].as_str().unwrap().starts_with("script allocation limit exceeded"), "{src}: {err}");
+        assert!(grew < 10 << 20, "{src}: the thread held {grew} bytes");
+    }
+}
+
+/// A host whose doc values come from another script (a runtime field's), keeping what it
+/// returns.
+struct RuntimeField<'a> {
+    script: &'a search_painless::Script,
+    kept: Vec<Value>,
+}
+
+impl Host for RuntimeField<'_> {
+    fn field_values(&mut self, _field: &str, out: &mut DocValues) -> Result<bool, HostError> {
+        let v = self.script.instance().execute(&mut NoHost).unwrap();
+        self.kept.push(v);
+        out.clear(DocKind::Long);
+        out.longs.push(1);
+        Ok(true)
+    }
+}
+
+/// What a script run inside a host call (a runtime field's) holds at its end counts against
+/// the execution that called the host, while the host's own buffers don't.
+#[test]
+fn scripts_inside_host_calls_count() {
+    let e = limited(4 << 20);
+    let inner = e.compile("String s = 'x'; while (s.length() < 1024 * 1024) { s = s + s; } return s", Context::PainlessTest).unwrap();
+    let outer = e.compile("List l = []; for (int i = 0; i < 100; ++i) { l.add(field('rt')); } return 1", Context::Score).unwrap();
+    let mut inst = outer.instance();
+    inst.set_params(&json!({}));
+    let mut host = RuntimeField { script: &inner, kept: Vec::new() };
+    let err = inst.execute_f64(&mut host).unwrap_err().to_response();
+    assert_eq!(cause(&err).0, "painless_error", "{err}");
+    assert!(host.kept.len() < 10, "{} runtime values kept", host.kept.len());
+}
+
+/// A host whose doc values fail with a 64 KiB reason, for the first 500 reads.
+struct FailingField {
+    calls: u32,
+}
+
+impl Host for FailingField {
+    fn doc_values(&mut self, _field: &str, out: &mut DocValues) -> Result<bool, HostError> {
+        self.calls += 1;
+        if self.calls > 500 {
+            out.clear(DocKind::Long);
+            out.longs.push(1);
+            return Ok(true);
+        }
+        Err(HostError::illegal_argument("x".repeat(64 << 10)))
+    }
+}
+
+/// A host's error is built outside the account: a script that catches and drops it in a loop
+/// gets back only what the copy it was handed cost, and still meets the limit.
+#[test]
+fn caught_host_errors_give_no_room() {
+    let e = limited(4 << 20);
+    let script = e.compile("List l = []; while (true) { try { def v = doc['body'].value; } catch (Exception x) {} l.add(new byte[200]); }", Context::Score).unwrap();
+    let mut inst = script.instance();
+    inst.set_params(&json!({}));
+    let (r, grew) = peak_growth(|| inst.execute_f64(&mut FailingField { calls: 0 }).map_err(|e| e.to_response()));
+    let err = r.unwrap_err();
+    assert_eq!(cause(&err).0, "painless_error", "{err}");
+    assert!(grew < 10 << 20, "the thread held {grew} bytes");
+}
+
+/// A host whose `field()` reads a runtime field: another script on a host of its own (with an
+/// 8 MiB `_source`), whose errors it lets go as `on_script_error: continue` does, charging what
+/// its scripts hold to a breaker like a search's.
+struct LenientRuntime<'a> {
+    script: &'a search_painless::Script,
+    held: i64,
+}
+
+impl Host for LenientRuntime<'_> {
+    fn field_values(&mut self, _field: &str, out: &mut DocValues) -> Result<bool, HostError> {
+        let mut inst = self.script.instance();
+        inst.set_params(&json!({}));
+        let _ = inst.execute(&mut LargeSource);
+        out.clear(DocKind::Long);
+        out.longs.push(1);
+        Ok(true)
+    }
+    fn script_memory(&mut self, delta: i64) -> Result<(), MemoryRefused> {
+        self.held += delta;
+        Ok(())
+    }
+}
+
+/// An execution a host call starts leaves its caller nothing it doesn't keep: not its error
+/// (a runtime field throwing a 64 KiB message on every document), nor the `_source` it read,
+/// which its own limit leaves out.
+#[test]
+fn runtime_fields_leave_their_caller_nothing() {
+    let e = limited(4 << 20);
+    let throws = e.compile("String s = 'x'; while (s.length() < 65536) { s = s + s; } throw new IllegalArgumentException(s);", Context::Score).unwrap();
+    let reads = e.compile("return params['_source']['big'].length()", Context::Score).unwrap();
+    for (inner, n) in [(&throws, 1000), (&reads, 3)] {
+        let outer = e.compile(&format!("for (int i = 0; i < {n}; ++i) {{ field('rt'); }} return 1"), Context::Score).unwrap();
+        let mut inst = outer.instance();
+        inst.set_params(&json!({}));
+        let mut host = LenientRuntime { script: inner, held: 0 };
+        assert_eq!(inst.execute_f64(&mut host).map_err(|e| e.to_response()).unwrap(), 1.0);
+        assert!(host.held < 1 << 20, "the breaker holds {}", host.held);
     }
 }

@@ -5,8 +5,35 @@
 
 use search_es::json::{Value, parse};
 use search_es::{Cluster, EsRequest};
+use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, Instant};
+
+/// Painless executions keep their memory accounts through `Counting`, as in rolld. Under it, a
+/// cap on what the whole process holds: a script that got past its limit aborts this test
+/// instead of taking the machine's memory.
+#[global_allocator]
+static ALLOC: search_painless::Counting<Capped> = search_painless::Counting(Capped);
+
+struct Capped;
+
+static LIVE: AtomicI64 = AtomicI64::new(0);
+const PROCESS_CAP: i64 = 8 << 30;
+
+// SAFETY: forwards to the system allocator, or fails an allocation past the cap.
+unsafe impl GlobalAlloc for Capped {
+    unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+        if LIVE.fetch_add(l.size() as i64, Ordering::Relaxed) + l.size() as i64 > PROCESS_CAP {
+            return std::ptr::null_mut();
+        }
+        unsafe { System.alloc(l) }
+    }
+    unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+        LIVE.fetch_sub(l.size() as i64, Ordering::Relaxed);
+        unsafe { System.dealloc(p, l) }
+    }
+}
 
 async fn call(c: &Cluster, method: &str, uri: &str, body: &str) -> (u16, Value) {
     let mut r = if body.is_empty() { EsRequest::new(method, uri) } else { EsRequest::json(method, uri, body.to_string()) };
@@ -282,4 +309,82 @@ async fn max_sim_stops_at_the_request_timeout() {
     let (status, v) = call(&c, "POST", "/rv/_search", &query).await;
     assert_eq!(status, 200, "{}", v.to_json());
     assert_eq!(at(&v, &["timed_out"]).as_bool(), Some(true), "{}", v.to_json());
+}
+
+/// The script from the security review of `21708aef1`: each copy is under the per-object cap,
+/// together they are 125 GiB. Elasticsearch 9.5.5 runs out of heap and exits on it; with its
+/// per-execution guard on (`script.painless.max_allocation_bytes.context.<context>.limit:
+/// 64mb`) it answers the responses below. roll's node limit (64 MiB hosted) answers the same,
+/// in `_execute` and in the other contexts, with its own byte counts in the brackets.
+#[tokio::test]
+async fn painless_memory_is_bounded_per_execution() {
+    let c = Cluster::in_memory("limits").await;
+    call(&c, "PUT", "/i/_doc/1?refresh=true", r#"{"a":1}"#).await;
+    let unknown = r#""script_stack":["<<< unknown portion of script >>>"]"#;
+    let guard = r#"{"type":"painless_error","reason":"script allocation limit exceeded: allocation of [33554464] bytes brings the running total to [67109628] bytes, over the limit of [67108864] bytes"}"#;
+    let script_exception = |src: &str| format!(r#"{{"root_cause":[{guard}],"type":"script_exception","reason":"runtime error",{unknown},"script":{},"lang":"painless","caused_by":{guard}}}"#, serde_json::json!(src));
+    let body = |src: &str| serde_json::json!({ "script": { "source": src } }).to_string();
+    let exploit = |end: &str| format!("String s = \"x\"; while (s.length() < 128 * 1024 * 1024) {{ s = s + s; }} List l = new ArrayList(); for (int i = 0; i < 1000; i++) {{ l.add(s + i); }} {end}");
+
+    let src = exploit("return l.size();");
+    let (status, v) = call(&c, "POST", "/_scripts/painless/_execute", &body(&src)).await;
+    assert_eq!(status, 400);
+    assert_like_es(&v, &format!(r#"{{"error":{},"status":400}}"#, script_exception(&src)));
+
+    let src = exploit("ctx._source.n = l.size();");
+    let (status, v) = call(&c, "POST", "/i/_update/1", &body(&src)).await;
+    assert_eq!(status, 400);
+    let cause = script_exception(&src).replacen(&format!(r#""root_cause":[{guard}],"#), "", 1);
+    assert_like_es(&v, &format!(r#"{{"error":{{"root_cause":[{{"type":"illegal_argument_exception","reason":"failed to execute script"}}],"type":"illegal_argument_exception","reason":"failed to execute script","caused_by":{cause}}},"status":400}}"#));
+
+    let src = exploit("ctx.n = l.size();");
+    let pipeline = serde_json::json!({ "pipeline": { "processors": [{ "script": { "source": src } }] }, "docs": [{ "_source": { "a": 1 } }] });
+    let (status, v) = call(&c, "POST", "/_ingest/pipeline/_simulate", &pipeline.to_string()).await;
+    assert_eq!(status, 200);
+    assert_like_es(&v, &format!(r#"{{"docs":[{{"error":{}}}]}}"#, script_exception(&src)));
+    // the node is fine afterwards
+    let (status, _) = call(&c, "POST", "/_scripts/painless/_execute", r#"{"script":{"source":"return 1"}}"#).await;
+    assert_eq!(status, 200);
+}
+
+/// `got` equals Elasticsearch's response `es` but for the numbers in brackets.
+fn assert_like_es(got: &Value, es: &str) {
+    fn blank(s: &str) -> serde_json::Value {
+        let mut out = String::new();
+        let mut rest = s;
+        while let Some(i) = rest.find('[') {
+            out.push_str(&rest[..=i]);
+            rest = &rest[i + 1..];
+            let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+            if digits > 0 && rest[digits..].starts_with(']') {
+                out.push('N');
+                rest = &rest[digits..];
+            }
+        }
+        out.push_str(rest);
+        serde_json::from_str(&out).unwrap()
+    }
+    assert_eq!(blank(&got.to_json()), blank(es), "{}", got.to_json());
+}
+
+/// A scripted metric's state outlives each segment's script host, and so does what its map
+/// script keeps on the `request` breaker: 2.5 MiB a segment fits a 4 MiB breaker, both segments'
+/// together don't (roll's own; Elasticsearch charges scripts to no breaker).
+#[tokio::test]
+async fn scripted_metric_state_stays_charged_across_segments() {
+    let c = Cluster::in_memory("limits").await;
+    call(&c, "PUT", "/sm", r#"{"settings":{"number_of_shards":1,"number_of_replicas":0}}"#).await;
+    for batch in 0..2 {
+        let bulk: String = (0..40).map(|i| format!("{{\"index\":{{\"_id\":\"{batch}-{i}\"}}}}\n{{\"n\":{i}}}\n")).collect();
+        let (status, v) = call(&c, "POST", "/sm/_bulk?refresh=true", &bulk).await;
+        assert_eq!(status, 200, "{}", v.to_json());
+    }
+    let (_, v) = call(&c, "GET", "/sm/_stats/segments", "").await;
+    assert!(at(&v, &["indices", "sm", "primaries", "segments", "count"]).as_i64().unwrap_or(0) >= 2, "{}", v.to_json());
+    let (status, _) = call(&c, "PUT", "/_cluster/settings", r#"{"persistent":{"indices.breaker.request.limit":"4mb"}}"#).await;
+    assert_eq!(status, 200);
+    let agg = r#"{"size":0,"aggs":{"kept":{"scripted_metric":{"init_script":"state.l = []","map_script":"state.l.add(new int[16384])","combine_script":"return state.l.size()","reduce_script":"return states.size()"}}}}"#;
+    let (_, v) = call(&c, "POST", "/sm/_search", agg).await;
+    let body = v.to_json();
+    assert!(body.contains("circuit_breaking_exception") && body.contains("data for [<script>]"), "{body}");
 }
