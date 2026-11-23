@@ -856,7 +856,17 @@ impl Brancher for Tasks {
 
     async fn connect(&self, _parent: &str, branch: &str, kept: Option<&str>) -> anyhow::Result<Vec<(String, String)>> {
         let kept: Value = kept.and_then(|k| serde_json::from_str(k).ok()).ok_or_else(|| anyhow::anyhow!("the tenant {branch} has no key: reset it"))?;
-        Ok(kept.as_object().into_iter().flatten().filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string()))).collect())
+        let mut vars: Vec<(String, String)> = kept.as_object().into_iter().flatten().filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string()))).collect();
+        // Its own webhook signing keys (roll apps' `tasks` link names them): the preview verifies
+        // its tenant's deliveries with these, never production's. Read at each start, so a
+        // rotation reaches the next one.
+        // The tenant's own route, as the tenant (its token, the one its services hold).
+        let token = s(&kept["ROLL_TASKS_TOKEN"]).ok_or_else(|| anyhow::anyhow!("the tenant {branch} has no token: reset it"))?;
+        let keys = self.api.get_as(&format!("/t/{}/v1/tasks/keys", seg(branch)), &token).await.map_err(|e| anyhow::anyhow!("reading the tenant {branch}'s signing keys: {e:#}"))?;
+        for (name, field) in [("ROLL_TASKS_SIGNING_KEY", "current"), ("ROLL_TASKS_NEXT_SIGNING_KEY", "next")] {
+            vars.push((name.to_string(), s(&keys[field]).ok_or_else(|| anyhow::anyhow!("the tenant {branch} has no {field} signing key"))?));
+        }
+        Ok(vars)
     }
 
     async fn usage(&self, _parent: &str, _branch: &str) -> anyhow::Result<Usage> {
