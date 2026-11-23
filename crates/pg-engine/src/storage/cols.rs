@@ -734,6 +734,30 @@ pub fn decode_cols(
     missing: &[Value],
     out: &mut ColBatch,
 ) -> Result<()> {
+    // (A batch with rows of column blocks goes out of line at once, nothing live but the
+    // arguments: the walk of one without them compiles as it did.)
+    if batch.has_col_rows() {
+        return decode_cols_mixed(batch, rows, need, types, missing, out);
+    }
+    decode_cols_in::<false>(batch, rows, need, types, missing, out)
+}
+
+/// `decode_cols` of a batch with rows of column blocks (format 5).
+#[cold]
+#[inline(never)]
+fn decode_cols_mixed(batch: &RowBatch, rows: std::ops::Range<usize>, need: &[bool], types: &[DataType], missing: &[Value], out: &mut ColBatch) -> Result<()> {
+    decode_cols_in::<true>(batch, rows, need, types, missing, out)
+}
+
+#[inline(always)]
+fn decode_cols_in<const MIXED: bool>(
+    batch: &RowBatch,
+    rows: std::ops::Range<usize>,
+    need: &[bool],
+    types: &[DataType],
+    missing: &[Value],
+    out: &mut ColBatch,
+) -> Result<()> {
     let ncols = need.len().min(types.len());
     let len = rows.len();
     out.cols.resize_with(ncols.max(out.cols.len()), || None);
@@ -767,29 +791,7 @@ pub fn decode_cols(
     // (The batch's parts borrowed apart: the loops keep them in registers.)
     let ColBatch { cols, bufs, ext: exts, own, .. } = out;
     let cols = &mut cols[..upto];
-    match batch.has_col_rows() {
-        false => decode_rows::<false>(batch, rows, types, missing, cols, bufs, exts, own, upto),
-        true => decode_mixed(batch, rows, types, missing, cols, bufs, exts, own, upto),
-    }
-}
-
-/// `decode_rows` of a batch with rows of column blocks (out of line: the walk of one
-/// without them compiles as before).
-#[cold]
-#[inline(never)]
-#[allow(clippy::too_many_arguments)]
-fn decode_mixed(
-    batch: &RowBatch,
-    rows: std::ops::Range<usize>,
-    types: &[DataType],
-    missing: &[Value],
-    cols: &mut [Option<Col>],
-    bufs: &mut Vec<Bytes>,
-    exts: &mut Vec<u32>,
-    own: &mut Vec<u8>,
-    upto: usize,
-) -> Result<()> {
-    decode_rows::<true>(batch, rows, types, missing, cols, bufs, exts, own, upto)
+    decode_rows::<MIXED>(batch, rows, types, missing, cols, bufs, exts, own, upto)
 }
 
 /// `decode_cols`' rows (`MIXED`: some are column blocks' (format 5), copied from their columns
