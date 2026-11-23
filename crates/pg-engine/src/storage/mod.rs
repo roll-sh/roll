@@ -6375,7 +6375,7 @@ mod tests {
                 Value::Text(["A", "N", "R"][(i % 3) as usize].into()),
                 Value::Text("x".repeat((i * 13 % 90) as usize).into()),
                 Value::Date(9000 + (i % 2000) as i32),
-                if i % 4 == 1 { Value::Null } else { Value::Bool(i % 4 == 0) },
+                if i % 4 == 1 { Value::Null } else { Value::Bool(i.is_multiple_of(4)) },
                 Value::Int8(i as i64 * g as i64),
                 Value::Float8(i as f64 / 7.0),
             ];

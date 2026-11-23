@@ -318,8 +318,8 @@ fn encode_in(rows: &[&[u8]], vbase: usize, out: &mut Vec<u8>) -> bool {
         if let Some(w) = fixed_width(t) {
             dir.extend_from_slice(&[1, t, w, any_null as u8]);
             put_nulls(&mut pay);
-            for r in 0..n {
-                match nulls[r] {
+            for (r, &null) in nulls.iter().enumerate() {
+                match null {
                     true => pay.extend(std::iter::repeat_n(0, w as usize)),
                     false => pay.extend_from_slice(&val(r, c)[1..]),
                 }
@@ -337,8 +337,8 @@ fn encode_in(rows: &[&[u8]], vbase: usize, out: &mut Vec<u8>) -> bool {
                 dir.extend_from_slice(&[w, any_null as u8]);
                 put_nulls(&mut pay);
                 let mut it = parts.iter();
-                for r in 0..n {
-                    let x = if nulls[r] { 0 } else { it.next().unwrap().1 };
+                for &null in &nulls {
+                    let x = if null { 0 } else { it.next().unwrap().1 };
                     pay.extend_from_slice(&x.to_le_bytes()[..w as usize]);
                 }
                 continue;
@@ -397,11 +397,10 @@ fn encode_in(rows: &[&[u8]], vbase: usize, out: &mut Vec<u8>) -> bool {
             dir.extend_from_slice(&[4, t, ow, any_null as u8]);
             put_nulls(&mut pay);
             let mut o = 0usize;
-            for r in 0..=n {
+            pay.extend_from_slice(&0u32.to_le_bytes()[..ow as usize]);
+            for b in &bodies {
+                o += b.len();
                 pay.extend_from_slice(&(o as u32).to_le_bytes()[..ow as usize]);
-                if r < n {
-                    o += bodies[r].len();
-                }
             }
             for b in &bodies {
                 pay.extend_from_slice(b);
