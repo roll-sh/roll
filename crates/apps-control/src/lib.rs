@@ -16,6 +16,7 @@ pub mod api;
 pub mod challenge;
 pub mod backups;
 pub mod browser;
+pub mod provenance;
 pub mod build_cache;
 pub mod next_cache;
 pub mod hooks;

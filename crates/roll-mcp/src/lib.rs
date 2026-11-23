@@ -1334,7 +1334,7 @@ async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: bool) -> Option
     // In lockdown, an outside record's text never reaches the model: withheld in the structured
     // answer, and the text block (a fronted set may write its own) rebuilt from what's left.
     if ctx.lockdown && lockdown::withhold(&mut result["structuredContent"]) + lockdown::withhold_fields(&mut result["structuredContent"], outside) > 0 {
-        let text = cut(serde_json::to_string_pretty(&result["structuredContent"]).unwrap_or_default(), true);
+        let text = cut(serde_json::to_string(&result["structuredContent"]).unwrap_or_default(), true);
         if let Some(content) = result["content"].as_array_mut() {
             content.retain(|c| c["type"] != "text");
             content.insert(0, json!({ "type": "text", "text": text }));
@@ -1701,7 +1701,9 @@ async fn outcome(tool: &str, resp: Response) -> Value {
         return tool_error(text, data);
     }
     let (text, structured) = match json {
-        Some(v) => (cut(serde_json::to_string_pretty(&v).unwrap_or_default(), true), if v.is_object() { v } else { json!({ "items": v }) }),
+        // Compact: a model reads JSON without its indentation, which is about a third of a
+        // pretty-printed answer's tokens (and leaves more under the cut).
+        Some(v) => (cut(serde_json::to_string(&v).unwrap_or_default(), true), if v.is_object() { v } else { json!({ "items": v }) }),
         None if bytes.is_empty() => ("done".to_string(), json!({ "ok": true })),
         None => match std::str::from_utf8(&bytes) {
             Ok(s) => (cut(s.to_string(), false), json!({ "content_type": ct, "bytes": bytes.len() })),

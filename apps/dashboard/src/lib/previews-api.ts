@@ -176,6 +176,8 @@ export interface Preview {
   slower_routes?: { branch: string; routes: { name: string; count: number; p50_ms: number; main_p50_ms: number; grew?: GrewSpan | null; /** Its budget, when it's over it. */ budget_ms?: number | null }[] } | null;
   /** Earlier pushes of the change's services, still reachable (newest first), each on its own copy of the data where `own_data` names products. */
   earlier?: { service: string; revision: string; url: string; share_url: string | null; at: number; own_data?: string[] }[];
+  /** Production's browser checks on this head (roll apps runs them as its deployment goes live). */
+  browser_checks?: { service: string; name: string; state: "pending" | "passed" | "failed"; error: string | null }[];
   /** The earlier pushes' own copies of the data: how many, their bytes and a month of keeping them (in `cost`). */
   copies?: { count: number; bytes: number; usd_month: number };
   /** When its screenshot was taken (`screenshot` below), if it has one. */

@@ -161,8 +161,8 @@ func TestAWorkloadLogsInReadsSealedValuesAndWatchesForChanges(t *testing.T) {
 	}
 }
 
-// Values are kept for CacheTTL, revalidated with their digest (a 304 keeps them), and never kept
-// when they hold dynamic credentials.
+// Values are kept for CacheTTL, revalidated with their digest (a 304 keeps them; here a rolld
+// without delta reads), and never kept when they hold dynamic credentials.
 func TestValuesAreCachedAndRevalidatedWithTheirDigest(t *testing.T) {
 	var mu sync.Mutex
 	digest, dynamic, value := "d1", []string{}, "1"
@@ -170,6 +170,10 @@ func TestValuesAreCachedAndRevalidatedWithTheirDigest(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
+		if strings.HasSuffix(r.URL.Path, "/values/delta") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		tag := r.Header.Get("If-None-Match")
 		asked = append(asked, tag)
 		if r.URL.Query().Get("digest") != "1" {
@@ -267,6 +271,10 @@ func TestSetAndDeleteWriteOneKeyAndDropTheCache(t *testing.T) {
 		answer := func(status int, v any) {
 			w.WriteHeader(status)
 			_ = json.NewEncoder(w).Encode(v)
+		}
+		if strings.HasSuffix(r.URL.Path, "/values/delta") {
+			answer(404, map[string]string{"error": "no route"}) // a rolld without delta reads
+			return
 		}
 		if strings.HasSuffix(r.URL.Path, "/values") {
 			reads++

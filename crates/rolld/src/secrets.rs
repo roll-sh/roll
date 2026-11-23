@@ -2165,20 +2165,33 @@ impl code_control::SecretEnv for ForCode {
     }
 
     /// As roll secrets reads for `by` now (`values_as_maker`: the check and the read in one), what a
-    /// sandbox it copied into starts with. Never a protected environment or an unresolved reference.
-    async fn reveal_as(&self, by: &str, project: &str, environment: &str, consumer: &str) -> anyhow::Result<Vec<(String, String)>> {
+    /// sandbox it copied into starts with. Never a protected environment or an unresolved reference:
+    /// those keys come back as unresolved, for the sandbox to leave out the ones it copied. An
+    /// environment deleted but still in its recovery window leaves the answer open (a recovery
+    /// brings the values back); one purged is refused.
+    async fn reveal_as(&self, by: &str, project: &str, environment: &str, consumer: &str) -> anyhow::Result<code_control::Reread> {
         let (secrets, _) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting"))?;
         let (by, project, environment, consumer) = (by.to_string(), project.to_string(), environment.to_string(), consumer.to_string());
         tokio::task::spawn_blocking(move || {
             let (slug, path) = environment.split_once(':').unwrap_or((&environment, "/"));
-            let v = secrets.values_as_maker(&by, &project, slug, path, &consumer).map_err(|e| match e {
-                roll_secrets::Error::Forbidden(m) | roll_secrets::Error::NotFound(m) | roll_secrets::Error::MakerUnreachable(m) => code_control::Refused(m).into(),
-                e => anyhow::Error::from(e),
-            })?;
-            if let Some(p) = v.problems.first() {
-                anyhow::bail!("{} of {slug} didn't resolve ({}: {})", v.problems.len(), p.key, p.problem);
-            }
-            Ok(v.values.into_iter().map(|(k, v)| (k, v.expose().to_string())).collect())
+            let v = match secrets.values_as_maker(&by, &project, slug, path, &consumer) {
+                Ok(v) => v,
+                Err(roll_secrets::Error::MakerUnreachable(m)) => return Err(code_control::Refused(m).into()),
+                Err(e) => {
+                    return Err(match secrets.environment_standing(&project, slug)? {
+                        roll_secrets::deleted_envs::Standing::Kept { .. } => anyhow::anyhow!("{slug} is deleted and kept for its recovery window: its values come back if it's recovered"),
+                        roll_secrets::deleted_envs::Standing::Gone => code_control::Refused(format!("{slug} no longer exists")).into(),
+                        roll_secrets::deleted_envs::Standing::Live => match e {
+                            roll_secrets::Error::Forbidden(m) | roll_secrets::Error::NotFound(m) => code_control::Refused(m).into(),
+                            e => anyhow::Error::from(e),
+                        },
+                    });
+                }
+            };
+            Ok(code_control::Reread {
+                values: v.values.into_iter().map(|(k, v)| (k, v.expose().to_string())).collect(),
+                unresolved: v.problems.into_iter().map(|p| (p.key, p.problem)).collect(),
+            })
         })
         .await?
     }

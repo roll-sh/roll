@@ -449,6 +449,16 @@ pub trait Source: Send + Sync {
 }
 
 /// What a service should run. (No `Debug`: `vars` holds the branches' passwords.)
+/// A browser check's result on the service's live deployment, where its backend runs them on
+/// previews (roll apps: production's browser checks, once on each head).
+#[derive(Clone, Debug, PartialEq)]
+pub struct BrowserCheckResult {
+    pub name: String,
+    /// `None`: not run on the live deployment yet.
+    pub passed: Option<bool>,
+    pub error: Option<String>,
+}
+
 /// The build a service runs now, where its backend keeps each build at a URL of its own.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LiveBuild {
@@ -747,6 +757,11 @@ pub trait Apps: Send + Sync {
     /// each build reachable at a URL of its own (roll apps' deployment URLs): kept as an earlier
     /// push when a new head replaces it. None where it doesn't (the runtime keeps its own).
     async fn live_build(&self, _preview: &str, _service: &str) -> Option<LiveBuild> {
+        None
+    }
+    /// Production's browser checks on the service's live deployment, each with its result once
+    /// it has run there; `None` where the backend runs none for it.
+    async fn browser_checks(&self, _preview: &str, _service: &str) -> Option<Vec<BrowserCheckResult>> {
         None
     }
     /// A build like `deployment` (an earlier head's), taking no traffic, with `plain` and the

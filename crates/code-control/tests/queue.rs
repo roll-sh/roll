@@ -538,6 +538,7 @@ async fn blockers_keep_changes_out_of_the_queue() {
             screenshot_url: None,
             expires_at: None,
             earlier: Vec::new(),
+            browser_checks: Vec::new(),
             visual_change: None,
             page_speed: None,
             page_health: None,

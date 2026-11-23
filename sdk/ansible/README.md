@@ -67,8 +67,9 @@ API's URL. This way no long-lived token sits in CI.
   `dynamic=true` the lookup includes them. Use that only for work that finishes before the
   credential's TTL runs out.
 - **Values are cached in memory for `cache_ttl` seconds (default 30).** During that time, reads of
-  the same folder are answered from memory. After that, the plugin asks roll again with the
-  folder's digest, and roll answers 304 while nothing has changed. Ansible templates each task in a
+  the same folder are answered from memory. After that, the plugin asks roll what changed since
+  (the folder's digest and each key's stamp): nothing while nothing has changed, only the changed
+  keys after a change. Ansible templates each task in a
   separate worker process, so the cache covers the lookups of one task (several keys of one folder,
   or a loop), not the whole play. A workload identity also logs in once per worker. The plugin
   never writes a value to disk.

@@ -534,6 +534,8 @@ struct Reveals {
     removed: std::sync::atomic::AtomicBool,
     /// `DATABASE_URL` was rotated to this.
     rotated: Mutex<Option<String>>,
+    /// Keys of development that don't resolve for an untrusted read now, and why.
+    unresolved: Mutex<Vec<(String, String)>>,
 }
 
 impl Reveals {
@@ -561,9 +563,11 @@ impl code_control::SecretEnv for Reveals {
         }
         Err(code_control::Refused(format!("{by} may no longer reveal development")).into())
     }
-    async fn reveal_as(&self, by: &str, project: &str, environment: &str, _: &str) -> anyhow::Result<Vec<(String, String)>> {
+    async fn reveal_as(&self, by: &str, project: &str, environment: &str, _: &str) -> anyhow::Result<code_control::Reread> {
         if (by, project, environment) == ("usr_ada", "prj_acme", "development") && !self.removed.load(std::sync::atomic::Ordering::SeqCst) {
-            return Ok(vec![("DATABASE_URL".into(), self.database_url())]);
+            let unresolved = self.unresolved.lock().clone();
+            let values = if unresolved.iter().any(|(k, _)| k == "DATABASE_URL") { vec![] } else { vec![("DATABASE_URL".into(), self.database_url())] };
+            return Ok(code_control::Reread { values, unresolved });
         }
         Err(code_control::Refused(format!("{by} may no longer reveal development")).into())
     }
@@ -1105,4 +1109,31 @@ async fn a_rotated_value_reaches_the_sandbox_at_its_next_start() {
     assert_eq!(env("DATABASE_URL"), None);
     assert_eq!(env("ANTHROPIC_API_KEY").as_deref(), Some("sk-ant-owner-key"), "the owner's own env stays");
     assert!(env("ROLL_AGENT_TOKEN").is_some_and(|t| t.starts_with("rlm_")), "it keeps its machine token");
+}
+
+/// A key of the copied folder that doesn't resolve for the copier (a reference to production,
+/// which is protected) stops nothing it didn't copy: the sandbox starts with what it copied and
+/// doesn't name the other key. Once a key it copied doesn't resolve, it starts without that one
+/// and says which and why.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sandbox_leaves_out_only_the_copied_keys_that_dont_resolve() {
+    let instances = Arc::new(Instances::default());
+    let backend = instances.clone();
+    let w = world(move |c| c.backend = Some(BackendConfig::External(ExternalBackend(backend)))).await;
+    let secrets = Arc::new(Reveals::default());
+    w.a.code.set_secret_env(secrets.clone());
+    let protected = |k: &str| (k.to_string(), "references production, which is protected".to_string());
+    secrets.unresolved.lock().push(protected("STRIPE_KEY"));
+    let id = w.create_as("usr_ada", json!({ "name": "box", "secrets": { "project": "acme", "environment": "development" } })).await;
+    let s = w.until(&id, "running", status_is("running")).await;
+    let env = |k: &str| instances.0.lock()[&id].1.get(k).cloned();
+    assert_eq!(env("DATABASE_URL").as_deref(), Some("postgres://dev-only"));
+    assert!(s["secrets_unset"].is_null() && !s.to_string().contains("STRIPE_KEY"), "{s}");
+
+    secrets.unresolved.lock().push(protected("DATABASE_URL"));
+    let s = w.restart(&id).await;
+    assert_eq!(env("DATABASE_URL"), None);
+    let unset = s["secrets_unset"].as_str().unwrap_or_default();
+    assert!(unset.contains("DATABASE_URL (references production, which is protected)") && !unset.contains("STRIPE_KEY"), "{s}");
+    assert!(s["secrets_dropped"].is_null(), "{s}");
 }

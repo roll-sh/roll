@@ -147,13 +147,13 @@ const FEEDS: &[Feed] = &[
     },
     Feed {
         name: "secrets.event",
-        description: "Something happened to a project's secrets: a secret leaked or a scan found one, a rotation or sync failed, a value request waiting or decided, a placeholder echoed or sent to the wrong place, production left unprotected, an environment or the project deleted or recovered. Never a value. Give the project; filter by kinds (secret.leaked, or request.* for a family) and environment.",
+        description: "Something happened to a project's secrets: a value changed or was deleted (names and versions), a secret leaked or a scan found one, a rotation worked or failed, a sync failed, an environment's protection or a folder's policy changed, a value request waiting or decided, a placeholder echoed or sent to the wrong place, production left unprotected, an environment or the project deleted or recovered. Never a value. Give the project; filter by kinds (secret.changed, or secret.* for a family) and environment.",
         tool: "secrets_audit",
         product: "secrets",
         path: &[("project", "The project (prj_…)")],
         after: "/v1/secrets/projects/{project}/events?limit=100&after=",
         latest: "/v1/secrets/projects/{project}/events?latest=1",
-        filters: &[("kinds", "kind", "Only these kinds (secret.leaked, rotation.failed, or request.* for a family); all when left out"), ("environment", "environment", "Only this environment's")],
+        filters: &[("kinds", "kind", "Only these kinds (secret.changed, rotation.failed, or secret.* for a family); all when left out"), ("environment", "environment", "Only this environment's")],
         payload: || {
             json!({ "type": "object", "properties": {
                 "seq": { "type": "integer" },

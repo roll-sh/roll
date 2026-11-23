@@ -817,7 +817,7 @@ async fn internal_local(code: Arc<Code>, repo_id: String, what: &'static str, re
             let Some(q) = v["q"].as_str() else { return Error::Invalid("a search needs q".into()).into_response() };
             let per_repo = v["per_repo"].as_u64().unwrap_or(5).clamp(1, 20) as usize;
             match code.repo_by_id(&repo_id) {
-                Ok(r) => match code.search_code(&r, q, false, false, None, per_repo, None).await {
+                Ok(r) => match code.file_search_one(&r, q, per_repo).await {
                     Ok(v) => axum::Json(v).into_response(),
                     Err(e) => e.into_response(),
                 },

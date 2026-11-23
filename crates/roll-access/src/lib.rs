@@ -926,27 +926,39 @@ impl Access {
     /// operator's feed (`access.alert`), mailed to every admin and posted where approvals go. One
     /// node sends each (claimed in the store), at most once every six hours per tool. How many.
     pub async fn activity_alerts(self: &Arc<Self>) -> Result<usize> {
-        let now = code_sql::now_ms();
-        let mut sent = 0;
-        for j in self.store.failure_jumps(now)? {
-            let tool = j["tool"].as_str().unwrap_or_default().to_string();
-            if !self.store.claim_alert(&format!("activity_alert:{tool}"), now, 6 * 3_600_000)? {
-                continue;
+        // The store's reads and writes off the async workers; the mail and the chat post after.
+        let me = self.clone();
+        let due = tokio::task::spawn_blocking(move || -> Result<Vec<(String, String, String)>> {
+            let now = code_sql::now_ms();
+            let every = 6 * 3_600_000;
+            let recent = |tool: &str| me.store.alerted_within(&format!("activity_alert:{tool}"), now, every).unwrap_or(false);
+            let mut due = Vec::new();
+            for j in me.store.failure_jumps(now, &recent)? {
+                let tool = j["tool"].as_str().unwrap_or_default().to_string();
+                if !me.store.claim_alert(&format!("activity_alert:{tool}"), now, every)? {
+                    continue;
+                }
+                let pct = |r: &serde_json::Value| (r.as_f64().unwrap_or(0.0) * 100.0).round() as i64;
+                let (rate, usual) = (pct(&j["rate"]), pct(&j["usual"]));
+                me.alert("tool_failing", serde_json::json!({ "tool": tool, "calls": j["calls"], "failed": j["failed"], "rate_pct": rate, "usual_pct": usual }));
+                let line = format!("{tool} answered {} of its {} calls in the last 15 minutes with a server error ({rate}%; usually {usual}%).", j["failed"], j["calls"]);
+                let subject = format!("roll MCP: {tool} is failing ({rate}% of calls)");
+                due.push((tool, subject, line));
             }
-            let pct = |r: &serde_json::Value| (r.as_f64().unwrap_or(0.0) * 100.0).round() as i64;
-            let (rate, usual) = (pct(&j["rate"]), pct(&j["usual"]));
-            self.alert("tool_failing", serde_json::json!({ "tool": tool, "calls": j["calls"], "failed": j["failed"], "rate_pct": rate, "usual_pct": usual }));
-            let line = format!("{tool} answered {} of its {} calls in the last 15 minutes with a server error ({rate}%; usually {usual}%).", j["failed"], j["calls"]);
-            let link = format!("Agent activity: {}/dashboard/access", self.web_url());
-            self.tell_admins(&format!("activity_alert:{tool}"), format!("roll MCP: {tool} is failing ({rate}% of calls)"), format!("{line}\n\n{link}"));
+            Ok(due)
+        })
+        .await
+        .map_err(|e| Error::Internal(e.to_string()))??;
+        let link = format!("Agent activity: {}/dashboard/access", self.web_url());
+        for (tool, subject, line) in &due {
+            self.tell_admins(&format!("activity_alert:{tool}"), subject.clone(), format!("{line}\n\n{link}"));
             if let Some((chat, (install, channel))) = self.chat.get().cloned().zip(self.chat_target())
                 && let Err(e) = chat.notice(install, channel, format!("roll MCP: {line} {link}")).await
             {
                 tracing::warn!(error = %e, "posting a failing tool where approvals go");
             }
-            sent += 1;
         }
-        Ok(sent)
+        Ok(due.len())
     }
 
     /// Once a day, where approvals go: the live tokens that expire within a week (GitHub mails a
@@ -1155,7 +1167,9 @@ impl Access {
         let key = format!("decoy:{}", g.id);
         // Kept for the operator's feed at most once an hour per decoy (on any node): one prober
         // can trip it many times.
-        if self.store.claim_alert(&format!("alert_{key}"), code_sql::now_ms(), 3_600_000).unwrap_or(false) {
+        let (now, alert_key) = (code_sql::now_ms(), format!("alert_{key}"));
+        // A read first: a flood of tries costs no write each once it's been kept this hour.
+        if !self.store.alerted_within(&alert_key, now, 3_600_000).unwrap_or(true) && self.store.claim_alert(&alert_key, now, 3_600_000).unwrap_or(false) {
             self.alert_for("decoy_used", serde_json::json!({ "grant": g.id, "name": g.name, "route": route.chars().take(200).collect::<String>(), "ip": ip }), g.user.as_deref());
         }
         self.tell(g.user.as_deref(), Some((&key, 3_600_000)), subject.clone(), text.clone());

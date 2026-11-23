@@ -71,6 +71,15 @@ impl<'a> Asker<'a> {
     }
 }
 
+/// A copied environment read again ([`SecretEnv::reveal_as`]): its values, and the keys that
+/// didn't resolve for this reader with why (names and reasons only, never a value). The reader
+/// decides which of them matter: a sandbox, only the ones it copied.
+#[derive(Default)]
+pub struct Reread {
+    pub values: Vec<(String, String)>,
+    pub unresolved: Vec<(String, String)>,
+}
+
 /// An environment's values, who revealed them (who made the copy, as roll secrets records a
 /// maker: `usr_…`, `token:…`, `operator`), and the project they're from (its id).
 pub struct Revealed {
@@ -114,9 +123,12 @@ pub trait SecretEnv: Send + Sync {
     }
     /// `environment` of `project` (a [`Revealed`]'s) read again as `by` (its copier) may now, for
     /// `consumer` (`sandbox:<id>`), as code nobody vetted reads it: asked at each create and start
-    /// of a sandbox, so a rotated value reaches it. [`Refused`] when they may no longer reveal it;
-    /// the check and the read are one call.
-    async fn reveal_as(&self, by: &str, project: &str, environment: &str, consumer: &str) -> anyhow::Result<Vec<(String, String)>> {
+    /// of a sandbox, so a rotated value reaches it. A key that doesn't resolve for that reader (a
+    /// reference to a protected or deleted environment) is in [`Reread::unresolved`], not an
+    /// error. [`Refused`] when they may no longer reveal it, or the environment is gone for good;
+    /// any other error (one deleted but still recoverable) leaves the answer open. The check and
+    /// the read are one call.
+    async fn reveal_as(&self, by: &str, project: &str, environment: &str, consumer: &str) -> anyhow::Result<Reread> {
         let _ = (by, project, environment, consumer);
         Err(Refused("roll secrets can't read as its copier".into()).into())
     }
