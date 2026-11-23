@@ -2028,6 +2028,30 @@ session thread's user instructions by `perf stat --per-thread` over a 14 s run l
 the difference in selects; CPUs 4 and 22): base (`c4ad9402d`) 38,025 / 38,948 / 37,578, the stack
 (`e974a84e1`) 37,624 / 39,504 / 37,995 user instructions a select, alternated.
 
+## A scan's workers: one rule for small reads; a small table's UPDATE scan (2026-11-23, agent 305)
+
+HANDOFF "A scan's workers: one rule ..." and "Short write transactions, round 16" have what changed.
+Plain dist builds (`tools/dist.sh`): **b0** = `a869d6b98`'s code (cand/a299-r and cand/a299-3 landed),
+**u1** = b0 + the one rule, **t1** = u1 + the small table's filter in the held pass. Lane A through
+`tools/lane.sh`, one pair a hold, harness `~/.cache/a305/bench` (299's, with `cycle.sh`: TPC-B rounds of
+7,040 transactions at 32 clients, each followed by each read at 8 clients, `-M prepared`, the server
+cgroup's counts per read). The lane carried 6.1-7.1 foreign cores of its 8 CPUs in every hold (over the
+1.0 rule in all of them; the counts per operation hold under it, tps and cycles are readings).
+
+Reads, 2 alternating pairs (one round of 7,040 TPC-B transactions after `pgbench -i -s 32`, then 5 s of
+each read; user instructions a read, b0 -> u1):
+
+| read | pair 1 | pair 2 |
+|---|---|---|
+| `aid >= $1 ORDER BY aid LIMIT 100`, its sum() | 7,968,991 -> 472,478 (-94.1%) | 7,939,715 -> 472,313 (-94.1%) |
+| 100-row BETWEEN | 330,266 -> 332,319 (+0.6%) | 330,714 -> 332,331 (+0.5%) |
+| 1,000-row BETWEEN | 2,280,965 -> 2,283,222 (+0.1%) | 2,281,866 -> 2,282,661 (+0.0%) |
+| select-only | 45,186 -> 46,846 | 47,082 -> 45,345 |
+
+The 100-row read's +0.5% was the settings looked up by name per scan in u1; the committed form reads them
+from the session's derived settings (not measured again: a hash lookup and a parse of the setting
+per scan, ~2 k instructions, are gone).
+
 ## Range reads of a big table: a short key range serial (2026-11-23, agent 299)
 
 Lane A, harness `~/.cache/a299/bench` (`mixed.sh`: a fresh server, `pgbench -i -s 32`, rounds of 40k

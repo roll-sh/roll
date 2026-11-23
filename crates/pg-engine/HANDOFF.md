@@ -14995,6 +14995,68 @@ failed: all passed.
 Not this round's: roll's `VACUUM (VERBOSE)` sends none of PostgreSQL's INFO lines (agent 205's
 note, still open).
 
+## A scan's workers: one rule for small reads, a LIMIT's and an EXISTS's rows (agent 305)
+
+Agents 299 (`cand/a299-r`, landed: "Range reads of a big table" above) and 301 (`cand/a301`, commit
+`ac656202e`, not landed: it conflicted in `exec/scan.rs`; its HANDOFF / BENCH section "Read path, round 9"
+is carried over below with its measurements) fixed one fault twice: on a table past the heap model,
+every single-range scan of an index (or of a primary key's key range) started the parallel workers,
+whatever it would read. 299 kept a range "narrower than its relation and under 512 kB stored (64 kB
+inline)" serial; 301 kept a btree range "smaller than min_parallel_index_scan_size" serial. Neither
+covered the open-ended range a LIMIT reads a few rows of (`aid >= $1 ORDER BY aid LIMIT 100`: 7.9 M user
+instructions a read, below).
+
+**One rule now** (`ScanNode::reads_little`, `Store::range_at_least`, `ExecCtx::scan_bound`), as
+PostgreSQL decides it (compute_parallel_worker against the pages the scan reads, a LIMIT's plan paying
+the fraction of the scan's cost it reads):
+
+- A btree index range, or a key range of a table narrower than its keys (a primary key's BETWEEN: an
+  Index Scan in PostgreSQL's plan), that reads fewer bytes than min_parallel_index_scan_size (pages of
+  8 kB, the setting's value: 301's semantics; 0 keeps the workers for every range) stays serial, in
+  `start_parallel_index` and in `start_parallel` (the inline aggregating path as well: 299's separate
+  64 kB threshold is gone).
+- A table's whole scan is decided as before (the heap's own sizes), unless it is read for fewer rows
+  than it returns: then against min_parallel_table_scan_size.
+- A scan read for `n` rows, a LIMIT's (+ OFFSET, without WITH TIES; through projections, as
+  ExecSetTupleBound walks) or a sub-select's (`collect`'s limit: an EXISTS reads 1 row, a scalar
+  sub-select 2), counts `n` / the rows the planner expects of it (`ScanPlan::est`) of its size: an
+  open-ended range under LIMIT 100 of a 3.2 M-row table is serial; a LIMIT over most of a scan keeps
+  its workers. The bound goes from the Limit (or `nodes::open_bounded`) to the scan by the scan plan's
+  address, so no other scan opened meanwhile takes it.
+- The size: the files' blocks over the range decompressed (`BULK_RATIO` times their stored bytes, 301's
+  measure, as `bulk_range` counts them), stopping when it reaches the bytes asked; then the memtables:
+  when their whole sizes can't reach it, nothing is walked; else their entries in the range, at most
+  4,096 (more: taken as big). 299 counted only files (a range only a memtable held was always small);
+  301 counted a merged scan's first 4,096 entries whenever a memtable held a key of the range.
+- The settings are read from the session's derived settings (`Hot::min_parallel_pages`), not looked up
+  by name per scan.
+
+Results, statistics and EXPLAIN are the serial scan's as before (EXPLAIN never showed these workers; a
+parallel scan returned its chunks in the serial order).
+
+Test (`parallel_scan`, in `parallel_fetches_match_serial`, the 420,000-row table there): with two
+workers per gather, a 840-row BETWEEN of an index, an open-ended range of it under `ORDER BY ... LIMIT
+100`, and an EXISTS over it start no workers; the open-ended range's `sum()` alone does.
+
+**Measured** (BENCH "A scan's workers: one rule ..."; plain dist, lane A at 6.2-6.4 foreign cores, two
+alternating pairs, `a869d6b98`'s code -> the rule, user instructions a read): `aid >= $1 ORDER BY aid LIMIT
+100`'s sum() 7.97 M / 7.94 M -> 472 k / 472 k (-94%); the 100-row BETWEEN 330.3 k / 330.7 k -> 332.3 k /
+332.3 k (+0.6%: the settings looked up by name per scan in that build, read from the derived settings
+since); the 1,000-row BETWEEN 2,281 k / 2,282 k -> 2,283 k / 2,283 k (level); select-only level (45.2 k /
+47.1 k -> 46.8 k / 45.3 k). Not gated on PGO (no inlining aim).
+
+Verification: `tools/quick-check.sh` with `QC_CHECKED=1` and `QC_TESTS="parallel_scan big_tables heap_order_scan"` on
+`937ce674e` (this change and round 16's, on `3b57f35a5`): 29 test binaries, clippy 16 warnings, none new in a changed
+file, 438 tests in 25 binaries (parallel_scan with the new cases, big_tables, heap_order_scan, golden, wire, the storage
+and crash binaries among them), the same 438 built `--profile verify-checked`, `crash_random` seeds 1-3 x 2 rounds and
+`power_cut_at_every_point`, regress 51,148 / 51,150 (0 newly differing; no planner change: EXPLAIN and TPC-H's plans
+are untouched), isolation 1,647 / 1,648, pg_dump_tap 14,609.
+
+Carried over: 301's section "Read path, round 9" (below) and its BENCH section stand as measured on its
+own form of the rule (`ac656202e`); its point-select findings (the plain build's extra cycles are
+instruction fetch: i-cache and iTLB; a linker ordering file and 2 MB code pages measured and dropped)
+are unchanged.
+
 ## Range reads of a big table: a short key range keeps the serial path (agent 299)
 
 Found while gating round 15's L0 merge on range reads (BENCH.md "Short write transactions, round 15",
