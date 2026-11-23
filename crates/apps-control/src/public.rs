@@ -45,6 +45,10 @@ pub fn router(apps: Arc<Apps>) -> axum::Router {
             if req.uri().path().starts_with(crate::build_cache::PATH) && req.uri().path()[crate::build_cache::PATH.len()..].starts_with('/') {
                 return crate::build_cache::serve(apps, req).await;
             }
+            // Next.js's cache across instances, with the environment's token.
+            if req.uri().path().starts_with(crate::next_cache::PATH) && req.uri().path()[crate::next_cache::PATH.len()..].starts_with('/') {
+                return crate::next_cache::serve(apps, req).await;
+            }
             // An edge function's `context.next()` ([`crate::edge`]): signed, any host.
             if req.uri().path().starts_with(crate::edge::NEXT) {
                 return crate::edge::next(apps, req).await;

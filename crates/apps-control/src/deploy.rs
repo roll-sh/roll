@@ -3079,6 +3079,7 @@ impl Apps {
             self.logs_expired.store(now, std::sync::atomic::Ordering::Relaxed);
             self.expire_logs_pass(&services, now).await;
             self.build_cache_pass(&services, now).await;
+            self.next_cache_pass(now).await;
         }
         if now - self.intercepts_checked.load(std::sync::atomic::Ordering::Relaxed) >= 60_000 {
             self.intercepts_checked.store(now, std::sync::atomic::Ordering::Relaxed);

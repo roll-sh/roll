@@ -833,6 +833,8 @@ export interface Plan {
   functions?: string[];
   /** A static site's edge functions: run before its files on their paths by its `-fn` service. */
   edge?: { name: string; kind: "netlify" | "vercel"; file: string; paths: string[]; excluded?: string[] }[];
+  /** roll's Next.js adapter is in the image: its instances share ISR, fetch and "use cache" entries. */
+  next_cache?: boolean;
 }
 
 export interface RootCandidate {

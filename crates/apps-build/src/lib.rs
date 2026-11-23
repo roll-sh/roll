@@ -22,6 +22,7 @@ mod golang;
 mod java;
 mod node;
 pub mod otel;
+pub mod next_cache;
 pub mod packages;
 mod php;
 pub mod imports;
@@ -147,6 +148,9 @@ pub struct Plan {
     /// The OpenTelemetry agent the build added (`node`, `python`; [`otel`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub otel: Option<String>,
+    /// roll's Next.js adapter is in the image ([`next_cache`]): its instances share a cache.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub next_cache: bool,
 }
 
 /// The images a Dockerfile builds on (its `FROM`s), for watching them move: not its own stages,
@@ -361,6 +365,18 @@ pub fn plan(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
             }
         }
     }
+    // A Next server's caches shared by its instances (not a static export, not its own Dockerfile).
+    if p.provider == Provider::Node && p.framework.as_deref() == Some("next") && !own_dockerfile {
+        let pkg: serde_json::Value = tree.read("package.json").and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        match next_cache::adapters(&pkg) {
+            Ok(()) => {
+                p.dockerfile = next_cache::add(&p.dockerfile);
+                p.next_cache = true;
+                p.notes.push("next: roll's adapter shares its ISR, fetch and \"use cache\" entries between instances and across sleep".into());
+            }
+            Err(why) => p.notes.push(why),
+        }
+    }
     if !overrides.packages.is_empty() {
         if own_dockerfile {
             p.notes.push("packages: not added to the tree's own Dockerfile (it installs what it needs)".into());
@@ -535,6 +551,7 @@ impl Draft {
             functions: Vec::new(),
             edge: Vec::new(),
             otel: None,
+            next_cache: false,
         }
     }
 }
