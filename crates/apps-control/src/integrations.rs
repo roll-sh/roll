@@ -431,6 +431,12 @@ pub trait Resources: Send + Sync {
     /// The variables a link to this resource injects, under their unprefixed names
     /// (`DATABASE_URL`, `REDIS_URL`, …). An error when the resource doesn't exist.
     async fn link_vars(&self, kind: LinkKind, r#ref: &str) -> anyhow::Result<Vec<(String, String)>>;
+    /// What a link sets, read with the credentials it made for itself (`minted`'s variables):
+    /// what only its own key may read (a tasks tenant's signing keys). By default
+    /// [`Resources::link_vars`].
+    async fn link_vars_as(&self, kind: LinkKind, r#ref: &str, _minted: &[(String, String)]) -> anyhow::Result<Vec<(String, String)>> {
+        self.link_vars(kind, r#ref).await
+    }
     /// A new link's own credentials, made once when the link is made and kept sealed with it
     /// (a search cluster's API key for this service): `None` for a kind whose variables are
     /// read fresh with [`Resources::link_vars`] (a database's own URL).

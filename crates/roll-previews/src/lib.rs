@@ -349,6 +349,11 @@ pub struct Preview {
     /// Earlier pushes of the change's services, still reachable (newest first; the last
     /// [`store::PINNED_KEEP`] per service).
     pub earlier: Vec<Pinned>,
+    /// Production's browser checks on this head (roll apps runs them on a preview's deployment as
+    /// it goes live): each one's state, read until each has run.
+    pub browser_checks: Vec<BrowserCheck>,
+    /// The project's rule for them (`check`, `required`), when it's more than showing them.
+    pub browser_checks_rule: Option<String>,
     /// The earlier pushes' own copies of its data: how many, what they hold and keep costing
     /// (counted in `cost` with its branches').
     pub copies: Copies,
@@ -1159,6 +1164,33 @@ pub struct LeaseRow {
     pub lease: String,
     pub issued_at: i64,
     pub expires_at: i64,
+}
+
+/// A browser check's state on a preview's head.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CheckState {
+    /// Not run on this head's deployment yet.
+    Pending,
+    Passed,
+    Failed,
+}
+
+/// One of production's browser checks, run on a preview's head (roll apps' `checks[].browser`).
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct BrowserCheck {
+    pub service: String,
+    pub name: String,
+    pub state: CheckState,
+    /// What failed (the check's own words, made printable and cut).
+    pub error: Option<String>,
+}
+
+/// The browser checks read for `head` (a runtime fact; a new head reads its own).
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct BrowserChecks {
+    pub head: String,
+    pub checks: Vec<BrowserCheck>,
 }
 
 /// What the earlier pushes' own copies of a preview's data add up to.

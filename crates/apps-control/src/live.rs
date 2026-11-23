@@ -400,6 +400,8 @@ pub struct Gate {
     pub file_headers: Vec<crate::model::HeaderRule>,
     /// Paths another service answers, the first that takes a path deciding.
     pub routes: Vec<crate::model::Route>,
+    /// Its own redirects, answered before anything wakes.
+    pub redirects: Option<Arc<crate::site_rules::EnvRedirects>>,
     /// Traces are on: the proxy adds its own span to each request's trace.
     pub traces: bool,
     /// Its pages carry roll's Web Vitals tag.

@@ -621,6 +621,8 @@ export interface EnvironmentPut {
   firewall?: FirewallRule[] | null;
   headers?: HeaderRule[] | null;
   /** Paths another service of the project answers (its environment of the same name); null or [] for none. */
+  /** Its own redirects on any service: `_redirects` lines (301 by default, 302, 303, 307, 308); null: none. */
+  redirects?: string | null;
   routes?: RouteRule[] | null;
   /** Its uptime checks (at most 5), or null for none. */
   checks?: UptimeCheck[] | null;
@@ -770,6 +772,8 @@ export interface Environment extends EnvironmentSummary {
   /** Headers its answers carry. */
   headers?: HeaderRule[];
   /** Paths another service of the project answers. */
+  /** Its own redirects, `_redirects` lines. */
+  redirects?: string;
   routes?: RouteRule[];
   checks?: UptimeCheck[];
   /** How each check stands on its owner. */
@@ -974,7 +978,7 @@ export interface Vulnerability {
  * OpenSearch-flavor cluster's `OPENSEARCH_URL`, `OPENSEARCH_USERNAME`, `OPENSEARCH_PASSWORD`). `service`: another web service of the project, its `<NAME>_URL`
  * (private) and `<NAME>_PUBLIC_URL`.
  */
-export type LinkKind = "postgres" | "redis" | "bucket" | "stream" | "queue" | "nosql" | "search" | "service";
+export type LinkKind = "postgres" | "redis" | "bucket" | "stream" | "queue" | "nosql" | "search" | "service" | "tasks";
 
 export interface Link {
   kind: LinkKind;
@@ -1136,6 +1140,8 @@ export interface UptimeCheck {
   contains?: string;
   /** A browser check: a Playwright script run in Chromium against `path` (the body of an async function given `page`, `context` and `url`; it fails by throwing). At most 16 KiB; every 300–3600 s, timeout 1–120 s. */
   browser?: string;
+  /** A browser check's performance budgets: its lab metrics past any fail it. */
+  budgets?: { lcp_ms?: number; cls?: number; ttfb_ms?: number; kb?: number; requests?: number };
 }
 
 export interface UptimeCheckState {
@@ -1150,6 +1156,10 @@ export interface UptimeCheckState {
   down_since: number | null;
   /** A browser check's last failure kept (its screenshot and Playwright trace), as the owner knows. */
   failure_at?: number;
+  /** A preview's: the deployment this result is of (production's browser checks, run on each of its heads). */
+  deployment?: string;
+  /** A browser check's lab metrics from its last run. */
+  metrics?: { lcp_ms: number; cls: number; ttfb_ms: number; kb: number; requests: number };
 }
 
 /** A heartbeat: something outside roll pings its URL at least every `every_s` (60–604800); one not come within that and `grace_s` (default 300) is `heartbeat.missed`. */
@@ -1543,8 +1553,9 @@ export const appsApi = {
   removeDrain: (project: string, id: string) => call<null>("DELETE", `/v1/apps/projects/${enc(project)}/drains/${enc(id)}`),
   limits: (project: string) => call<SpendLimits>("GET", `/v1/apps/projects/${enc(project)}/limits`),
   /** The project's image signing rule: cosign public keys and whether image services must meet them. */
-  signing: (project: string) => call<{ keys: string[]; required: boolean }>("GET", `/v1/apps/projects/${enc(project)}/signing`),
-  setSigning: (project: string, body: { keys: string[]; required?: boolean }) => call<{ keys: string[]; required: boolean }>("PUT", `/v1/apps/projects/${enc(project)}/signing`, body),
+  /** `roll_key`: the public key that signs the project's builds' provenance. */
+  signing: (project: string) => call<{ keys: string[]; required: boolean; roll_key: string }>("GET", `/v1/apps/projects/${enc(project)}/signing`),
+  setSigning: (project: string, body: { keys: string[]; required?: boolean }) => call<{ keys: string[]; required: boolean; roll_key: string }>("PUT", `/v1/apps/projects/${enc(project)}/signing`, body),
   deleteSigning: (project: string) => call<void>("DELETE", `/v1/apps/projects/${enc(project)}/signing`),
   /** A month's use by service and environment (this one by default), most costly first. */
   projectUsage: (project: string, month?: string) => call<ProjectUsage>("GET", `/v1/apps/projects/${enc(project)}/usage${qs({ month })}`),
@@ -1576,6 +1587,8 @@ export const appsApi = {
   commits: (id: string, e: string, d: string) => call<DeployCommits>("GET", `${dep(id, e, d)}/commits`),
   slo: (id: string, e: string) => call<SloReport>("GET", `${env(id, e)}/slo`),
   sbom: (id: string, e: string, d: string) => call<unknown>("GET", `${dep(id, e, d)}/sbom`),
+  /** Its image's signed SLSA provenance (a DSSE envelope), when roll built it. */
+  provenance: (id: string, e: string, d: string) => call<{ payloadType: string; payload: string; signatures: { keyid: string; sig: string }[] }>("GET", `${dep(id, e, d)}/provenance`),
   /** A failed deployment explained by its repo owner's model: kept, unless `again` asks anew (charged again). */
   explain: (id: string, e: string, d: string, again = false) => call<Explanation>("POST", `${dep(id, e, d)}/explain${qs({ again })}`),
   vulnerabilities: (id: string, e: string, d: string) => call<{ scan: ScanSummary | null; vulnerabilities: Vulnerability[] }>("GET", `${dep(id, e, d)}/vulnerabilities`),

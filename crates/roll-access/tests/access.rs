@@ -2817,8 +2817,8 @@ async fn a_decoy_token_allows_nothing_and_gives_its_user_away() {
     let decoys: Vec<&Value> = feed["events"].as_array().unwrap().iter().filter(|e| e["kind"] == "decoy_used").collect();
     assert_eq!((decoys.len(), decoys[0]["grant"].as_str(), decoys[0]["route"].as_str()), (1, Some(id.as_str()), Some("/v1/workspace/projects")), "{feed}");
     // Its owner hears it on their own feed too.
-    let (_, hers) = d.as_user("usr_alice", Method::GET, "/v1/access/alerts?after=0", None).await;
-    assert!(hers["events"].as_array().unwrap().iter().any(|e| e["kind"] == "decoy_used" && e["grant"] == id.as_str()), "{hers}");
+    let (_, hers) = d.as_user("usr_alice", Method::GET, "/v1/access/alerts?last=20", None).await;
+    assert!(hers["events"].as_array().unwrap().iter().any(|e| e["kind"] == "decoy_used" && e["grant"] == id.as_str()), "her newest (the access page's): {hers}");
 }
 
 /// docs/members.md, "Evaluation": a person's session is the grant of their roles, decided by the
@@ -3054,7 +3054,7 @@ async fn agent_activity_by_tool_and_connection() {
             client: None,
         });
     }
-    let jumps = d.access.store.failure_jumps(now).unwrap();
+    let jumps = d.access.store.failure_jumps(now, &|_| false).unwrap();
     assert_eq!((jumps.len(), jumps[0]["tool"].as_str(), jumps[0]["failed"].as_i64()), (1, Some("flaky_tool"), Some(12)), "{jumps:?}");
     // Alerted once (kept for the operator's feed), not again within six hours.
     assert_eq!(d.access.activity_alerts().await.unwrap(), 1);
@@ -3063,4 +3063,6 @@ async fn agent_activity_by_tool_and_connection() {
     assert_eq!((feed["events"][0]["kind"].as_str(), feed["events"][0]["tool"].as_str(), feed["next"].as_i64()), (Some("tool_failing"), Some("flaky_tool"), Some(1)), "{feed}");
     let (_, theirs) = d.as_user("usr_ada", Method::GET, "/v1/access/alerts?after=0", None).await;
     assert_eq!(theirs["events"].as_array().map(Vec::len), Some(0), "not about their tokens: {theirs}");
+    let (_, head) = d.as_user("usr_ada", Method::GET, "/v1/access/alerts?latest=1", None).await;
+    assert_eq!(head["next"], 0, "their own newest, which says nothing of others' alerts: {head}");
 }

@@ -237,7 +237,15 @@ impl Store {
         if let Some(k) = kept.as_ref().filter(|k| self.fresh(k, Instant::now())) {
             return Ok(k.read.clone());
         }
-        let read = Arc::new(self.fetch(f).await?);
+        let read = match self.fetch(f).await {
+            Ok(r) => Arc::new(r),
+            Err(e) => {
+                if refused(&e) {
+                    *kept = None;
+                }
+                return Err(e);
+            }
+        };
         *kept = self.keep(&read).await;
         if kept.is_some() {
             self.follow(f, &slot);
@@ -359,13 +367,23 @@ impl Store {
                                 return;
                             }
                         }
+                        Err(e) if refused(&e) => {
+                            *slot.kept.lock().await = None;
+                            eprintln!("roll secrets agent: {f} changed, and roll refused reading it ({e:#}); not kept (its next request gets roll's answer)");
+                            return;
+                        }
                         Err(e) => {
                             eprintln!("roll secrets agent: {f} changed, but reading it failed ({e:#}); kept as it was until its TTL");
                             tokio::time::sleep(RETRY).await;
                         }
                     },
+                    Err(e) if refused(&e) => {
+                        *slot.kept.lock().await = None;
+                        eprintln!("roll secrets agent: following {f}: roll refused it ({e:#}); not kept (its next request gets roll's answer)");
+                        return;
+                    }
                     Err(e) => {
-                        eprintln!("roll secrets agent: following {f}: {e:#}");
+                        eprintln!("roll secrets agent: following {f}: {e:#}; kept until its TTL");
                         tokio::time::sleep(RETRY).await;
                     }
                 },
@@ -379,6 +397,17 @@ impl Store {
         let v = tokio::time::timeout(Duration::from_secs(40), self.api.call(Method::GET, &url, None)).await.map_err(|_| anyhow::anyhow!("no answer in 40 s"))??;
         Ok(v["digest"].as_str().unwrap_or_default().to_string())
     }
+}
+
+/// roll's answer, when it answered with an error status.
+fn roll_status(e: &anyhow::Error) -> Option<u16> {
+    e.chain().find_map(|c| c.downcast_ref::<crate::ApiStatus>()).map(|s| s.status.as_u16())
+}
+
+/// roll said no to this login for the folder: a 401 (after logging in again), a 403 or a 404. A
+/// folder roll refuses isn't kept a moment longer; only no answer, or a 5xx, keeps it until its TTL.
+fn refused(e: &anyhow::Error) -> bool {
+    matches!(roll_status(e), Some(401 | 403 | 404))
 }
 
 struct Agent {
@@ -434,7 +463,9 @@ fn folder(a: &Agent, q: &HashMap<String, String>) -> Result<Folder, Refusal> {
 }
 
 /// The folder's values, or the answer that says why not: roll's 403, 404, 409, 423 and 429 as
-/// they are, anything else a 502. roll's messages name keys and folders, never values.
+/// they are, its 401 (the agent's login refused, after logging in again) a 403 (the agent's own
+/// 401 is a request without its token), anything else a 502. roll's messages name keys and
+/// folders, never values.
 async fn values(a: &Agent, f: &Folder) -> Result<Arc<Read>, Refusal> {
     let failed = |status: StatusCode, message: String| {
         eprintln!("roll secrets agent: {f}: {message}");
@@ -451,7 +482,10 @@ async fn values(a: &Agent, f: &Folder) -> Result<Arc<Read>, Refusal> {
     match tokio::time::timeout(READ_TIMEOUT, a.store.read(f)).await {
         Ok(Ok(r)) => Ok(r),
         Ok(Err(e)) => {
-            let status = e.chain().find_map(|c| c.downcast_ref::<crate::ApiStatus>()).map(|s| s.status.as_u16()).filter(|s| [403, 404, 409, 423, 429].contains(s));
+            let status = match roll_status(&e) {
+                Some(401) => return Err(failed(StatusCode::FORBIDDEN, format!("roll refused the agent's login: {e:#}"))),
+                s => s.filter(|s| [403, 404, 409, 423, 429].contains(s)),
+            };
             Err(failed(status.and_then(|s| StatusCode::from_u16(s).ok()).unwrap_or(StatusCode::BAD_GATEWAY), format!("{e:#}")))
         }
         Err(_) => Err(failed(StatusCode::BAD_GATEWAY, format!("no answer from roll in {} s", READ_TIMEOUT.as_secs()))),

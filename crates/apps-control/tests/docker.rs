@@ -1603,6 +1603,11 @@ async fn builds_and_answers_in(w: &World, name: &str, files: &[(&str, &str)], wa
         let lines: Vec<&str> = log.as_array().into_iter().flatten().filter_map(|l| l["text"].as_str()).collect();
         panic!("{name}: {x}\n{}", lines.join("\n"));
     }
+    // Its signed provenance names the image Docker built, by its digest.
+    let (st, p) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys/{dep}/provenance"), None, "application/json", None).await;
+    use base64::Engine;
+    let statement: Value = serde_json::from_slice(&base64::engine::general_purpose::STANDARD.decode(p["payload"].as_str().unwrap_or_default()).unwrap_or_default()).unwrap_or_default();
+    assert!(st == StatusCode::OK && statement["subject"][0]["digest"]["sha256"].as_str().is_some_and(|d| d.len() == 64), "{name}: {st} {statement}");
     let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None, "application/json", None).await;
     let host = env["url"].as_str().unwrap().trim_start_matches("http://").split(':').next().unwrap().to_string();
     let resp = w.public.clone().oneshot(Request::get("/").header("host", host.as_str()).body(Body::empty()).unwrap()).await.unwrap();
@@ -1720,6 +1725,8 @@ async fn a_browser_check_runs_in_chromium() {
     };
     let up = pass(0).await;
     assert_eq!((up["up"].as_bool(), up["status"].as_u64()), (Some(true), Some(200)), "{up}");
+    // Its lab metrics, as Chromium measured them.
+    assert!(up["metrics"]["lcp_ms"].as_u64().is_some_and(|l| l > 0) && up["metrics"]["requests"].as_u64() >= Some(1), "{up}");
     call(&w.api, "PUT", &base, Some(check("await page.getByRole('heading', { name: 'Goodbye' }).waitFor({ timeout: 2000 })")), "application/json", None).await;
     let failed = pass(1).await;
     assert!(failed["failures"].as_u64() == Some(1) && failed["error"].as_str().is_some_and(|e| e.contains("Goodbye")), "{failed}");
@@ -1735,6 +1742,12 @@ async fn a_browser_check_runs_in_chromium() {
     assert!(st == StatusCode::OK && png.starts_with(b"\x89PNG"), "{st} {} bytes", png.len());
     let (st, zip) = file("trace").await;
     assert!(st == StatusCode::OK && zip.starts_with(b"PK"), "{st} {} bytes", zip.len());
+    // A budget the page can't meet fails it, saying which.
+    let mut over = check("await page.title()");
+    over["checks"][0]["budgets"] = json!({"lcp_ms": 1});
+    assert_eq!(call(&w.api, "PUT", &base, Some(over), "application/json", None).await.0, StatusCode::OK);
+    let failed = pass(2).await;
+    assert!(failed["error"].as_str().is_some_and(|e| e.contains("over its budget: LCP")), "{failed}");
     assert_eq!(delete_for_good(&w.api, &id).await.0, StatusCode::NO_CONTENT);
     let _ = std::process::Command::new("docker").args(["rmi", &format!("roll-apps-{id}:browser-check-{}", apps_control::browser::PLAYWRIGHT.replace('.', "-"))]).output();
     w.apps.shutdown().await;

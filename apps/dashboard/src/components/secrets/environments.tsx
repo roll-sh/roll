@@ -722,11 +722,32 @@ function AddEnvironment({ onAdd }: { onAdd: (slug: string, name: string) => Prom
   );
 }
 
-/** `staging:/DB_URL`, `other/dev:/shared (imports it)`. */
+/** `staging:/DB_URL`, `other/dev:/shared (imports it)`, `web (production)`, `vercel prj_1`. */
 function breakPlace(b: EnvironmentBreak) {
   const at = b.key ? (b.path === "/" ? `/${b.key}` : `${b.path}/${b.key}`) : b.path;
-  return `${b.project ? `${b.project}/` : ""}${b.environment}:${at}${b.key ? "" : " (imports it)"}`;
+  const name = b.name ?? "(its name is for admins)";
+  switch (b.via) {
+    case "service":
+      return `${name} (${b.environment})`;
+    case "sandbox":
+      return `${name}, copying ${b.environment}:${b.path}`;
+    case "sync":
+    case "identity":
+    case "token":
+      return name;
+    default:
+      return `${b.project ? `${b.project}/` : ""}${b.environment}:${at}${b.key ? "" : " (imports it)"}`;
+  }
 }
+
+/** The delete dialog's groups, in this order: what each kind loses. */
+const BREAK_KINDS: { via: EnvironmentBreak["via"][]; title: string; note?: string }[] = [
+  { via: ["reference", "import"], title: "Keys and folders" },
+  { via: ["service"], title: "Services", note: "their next deploy fails" },
+  { via: ["sandbox"], title: "Sandboxes", note: "they lose the values they copy" },
+  { via: ["sync"], title: "Syncs", note: "they stop; what they pushed stays at their targets" },
+  { via: ["identity", "token"], title: "Identities and tokens", note: "their scope names it" },
+];
 
 function DeleteEnvironment({ env, project, onClose, onDelete }: { env: Environment | null; project: string; onClose: () => void; onDelete: (e: Environment, confirm?: string) => Promise<void> }) {
   const { api } = useSecrets();
@@ -794,11 +815,28 @@ function DeleteEnvironment({ env, project, onClose, onDelete }: { env: Environme
           <span className={label}>
             {breaks.length === 1 ? "This stops working" : `These ${breaks.length} stop working`} until it's restored or they're changed:
           </span>
-          <ul className="mt-1 max-h-36 overflow-auto rounded-lg border border-line-2 px-2.5 py-1.5 font-mono text-[11.5px] text-soft">
-            {breaks.map((b) => (
-              <li key={breakPlace(b)}>{breakPlace(b)}</li>
-            ))}
-          </ul>
+          <div className="mt-1 max-h-48 overflow-auto rounded-lg border border-line-2 px-2.5 py-1.5 text-[11.5px]">
+            {BREAK_KINDS.map((k) => {
+              const these = breaks.filter((b) => k.via.includes(b.via));
+              if (these.length === 0) return null;
+              return (
+                <div key={k.title} className="py-0.5">
+                  <div className="text-muted">
+                    {k.title}
+                    {k.note && `: ${k.note}`}
+                  </div>
+                  <ul className="font-mono text-soft">
+                    {these.map((b, i) => (
+                      <li key={`${b.via}:${b.id ?? breakPlace(b)}:${i}`}>
+                        {b.via === "identity" || b.via === "token" ? `${b.via} ` : ""}
+                        {breakPlace(b)}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
       {preview?.needs_request && (
@@ -809,7 +847,7 @@ function DeleteEnvironment({ env, project, onClose, onDelete }: { env: Environme
       {needType && e && (
         <label className="block">
           <span className={label}>
-            {e.protected ? `${e.name} is protected.` : "Other keys read it."} Type <span className="font-mono text-fg">{e.slug}</span> to delete it from {project}.
+            {e.protected ? `${e.name} is protected.` : "Something reads it."} Type <span className="font-mono text-fg">{e.slug}</span> to delete it from {project}.
           </span>
           <input autoFocus value={typed} onChange={(ev) => setTyped(ev.target.value)} className={`${field} font-mono`} />
         </label>

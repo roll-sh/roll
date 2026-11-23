@@ -3217,6 +3217,7 @@ impl Store {
         let closed = settings.egress_for(r.trusted) == crate::settings::EgressRule::Roll;
         let on_apps = self.runtime_fact::<crate::AppsIntercepted>(&r.id, "intercepted_apps")?.filter(|_| closed);
         let timeline = self.runtime_fact::<crate::Timeline>(&r.id, "timeline")?.filter(|t| t.head == r.head);
+        let browser_checks = self.runtime_fact::<crate::BrowserChecks>(&r.id, "browser_checks")?.filter(|b| b.head == r.head).map(|b| b.checks).unwrap_or_default();
         let intercepted = match (self.runtime_fact::<crate::Intercepted>(&r.id, "intercepted")?.filter(|x| !x.keys.is_empty()), on_apps) {
             (Some(x), on_apps) => Some(crate::Intercepted { on_apps, ..x }),
             (None, Some(a)) => Some(crate::Intercepted { on_apps: Some(a), ..Default::default() }),
@@ -3293,6 +3294,12 @@ impl Store {
             goes_at,
             reported_by,
             earlier,
+            browser_checks,
+            browser_checks_rule: match settings.browser_checks {
+                crate::settings::BrowserChecksRule::Report => None,
+                crate::settings::BrowserChecksRule::Check => Some("check".into()),
+                crate::settings::BrowserChecksRule::Required => Some("required".into()),
+            },
             copies: copies_total,
             screenshot_at,
             visual_change,

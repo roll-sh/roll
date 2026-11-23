@@ -121,6 +121,17 @@ CREATE TABLE IF NOT EXISTS build_cache_artifacts (
     used_at INTEGER NOT NULL,
     PRIMARY KEY (project, ns, hash)
 ) WITHOUT ROWID;
+-- Provenance on roll's builds (`provenance`): each project's signing key (PKCS#8, sealed) and its
+-- public key, made once; each built image's signed statement (a DSSE envelope).
+CREATE TABLE IF NOT EXISTS provenance_keys (
+    project TEXT PRIMARY KEY,
+    sealed TEXT NOT NULL,
+    public TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS image_provenance (
+    image TEXT PRIMARY KEY,
+    envelope TEXT NOT NULL
+);
 -- Next.js's cache across an environment's instances (`next_cache`): their token, sealed, found by
 -- its hash on each request; its entries, each one's bytes in object storage under a key of its
 -- own upload's (`scope` is a deployment's, or `data` for Next's fetch cache, which every
@@ -727,6 +738,8 @@ pub struct EnvRow {
     /// Who last set its egress (a person, their token's user, the operator): a closed
     /// environment's placeholders are made by them. None: set before it was kept.
     pub egress_by: Option<String>,
+    /// Its own redirects (`crate::site_rules::EnvRedirects`'s text), any kind of service.
+    pub redirects: Option<String>,
     /// Its deploys are reported to the Git host (commit statuses, GitHub Deployments); false:
     /// someone else reports them (roll previews for its `pv-` environments).
     pub report: bool,
@@ -865,7 +878,7 @@ fn name_taken(name: &str, deleted: Option<i64>) -> String {
         Some(_) => format!("a deleted service named {name} holds the name: restore it, or delete it again to delete it for good"),
     }
 }
-const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress, vitals, routes, report, checks, heartbeats, split, freeze, mirror, pause_schedule, snippets, log_retention_days, approvals, badge, egress_by";
+const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress, vitals, routes, report, checks, heartbeats, split, freeze, mirror, pause_schedule, snippets, log_retention_days, approvals, badge, egress_by, redirects";
 /// A deployment [`Store::prune_deployments`] pruned, with its image when nothing else names it.
 pub struct Pruned {
     pub id: String,
@@ -956,6 +969,7 @@ fn env_row(r: &code_sql::Row<'_>) -> code_sql::Result<EnvRow> {
         approvals: r.get::<_, Option<i64>>(37)?.unwrap_or(0) as u32,
         badge: r.get::<_, i64>(38)? != 0,
         egress_by: r.get(39)?,
+        redirects: r.get(40)?,
     })
 }
 
@@ -1127,6 +1141,7 @@ impl Store {
         db.add_column("visit_tickets", "login", "TEXT")?;
         db.add_column("visit_sessions", "login", "TEXT")?;
         db.add_column("environments", "routes", "TEXT")?;
+        db.add_column("environments", "redirects", "TEXT")?;
         db.add_column("environments", "checks", "TEXT")?;
         db.add_column("environments", "heartbeats", "TEXT")?;
         db.add_column("environments", "split", "TEXT")?;
@@ -1378,7 +1393,7 @@ impl Store {
                     None => None,
                 };
                 c.execute(
-                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL)"),
+                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL)"),
                     params![service, env, branch.flatten(), ephemeral.unwrap_or(false) as i64, slug, port, now],
                 )?;
             }
@@ -2953,6 +2968,32 @@ impl Store {
         })
     }
 
+    /// A project's provenance key (PKCS#8 DER) and its public key (PEM), made the first time.
+    pub fn provenance_key(&self, project: &str) -> Result<(Vec<u8>, String)> {
+        let what = format!("provenance:{project}");
+        let (der, public) = crate::provenance::new_key();
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let sealed = self.sealer.seal(&what, &b64.encode(&der));
+        self.db.execute("INSERT INTO provenance_keys (project, sealed, public) VALUES (?, ?, ?) ON CONFLICT (project) DO NOTHING", params![project, sealed, public])?;
+        let (kept, public): (String, String) = self.db.query_row("SELECT sealed, public FROM provenance_keys WHERE project = ?", [project], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let der = b64.decode(self.sealer.open(&what, &kept)?).map_err(|e| Error::Internal(e.to_string()))?;
+        Ok((der, public))
+    }
+
+    /// A project's provenance public key, if it has one yet.
+    pub fn provenance_public(&self, project: &str) -> Result<Option<String>> {
+        Ok(self.db.query_row("SELECT public FROM provenance_keys WHERE project = ?", [project], |r| r.get(0)).optional()?)
+    }
+
+    pub fn put_provenance(&self, image: &str, envelope: &str) -> Result<()> {
+        self.db.execute("INSERT INTO image_provenance (image, envelope) VALUES (?, ?) ON CONFLICT (image) DO UPDATE SET envelope = excluded.envelope", params![image, envelope])?;
+        Ok(())
+    }
+
+    pub fn provenance(&self, image: &str) -> Result<Option<String>> {
+        Ok(self.db.query_row("SELECT envelope FROM image_provenance WHERE image = ?", [image], |r| r.get(0)).optional()?)
+    }
+
     /// An environment's Next.js cache token, made the first time it's asked for.
     pub fn next_cache_token(&self, service: &str, env: &str) -> Result<String> {
         let token = roll_auth::credentials::new_secret("rlr_");
@@ -3584,6 +3625,11 @@ impl Store {
     pub fn set_pause_schedule(&self, service: &str, env: &str, p: Option<&crate::freeze::PauseSchedule>) -> Result<()> {
         let j = p.map(|p| serde_json::to_string(p).expect("a schedule serializes"));
         self.db.execute("UPDATE environments SET pause_schedule = ? WHERE service = ? AND name = ?", params![j, service, env])?;
+        Ok(())
+    }
+
+    pub fn set_redirects(&self, service: &str, env: &str, text: Option<&str>) -> Result<()> {
+        self.db.execute("UPDATE environments SET redirects = ? WHERE service = ? AND name = ?", params![text, service, env])?;
         Ok(())
     }
 

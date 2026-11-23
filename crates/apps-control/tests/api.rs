@@ -2094,6 +2094,34 @@ async fn changes_are_an_audit_trail_without_values() {
     assert!(!all.to_string().contains("sk-s3cr3t"));
 }
 
+/// An environment's own redirects (Vercel's project redirects) on any service: exact paths and
+/// patterns answered by the proxy (the query kept), anything else on to the app; a rule roll
+/// doesn't take is refused by its line.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_environments_redirects_answer_before_the_app() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "web", json!({"port": 80, "min_instances": 1})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    let (st, e) = call(&w.api, "PUT", &base, Some(json!({"redirects": "/ok /fine\n/x /y 200"}))).await;
+    assert!(st == StatusCode::BAD_REQUEST && e.to_string().contains("line 2"), "{e}");
+    let (st, e) = call(&w.api, "PUT", &base, Some(json!({"redirects": "/old /new 308\n/blog/* /posts/:splat"}))).await;
+    assert_eq!((st, e["redirects"].as_str().map(|r| r.lines().count())), (StatusCode::OK, Some(2)), "{e}");
+    let h = host(&svc["environments"][0]["url"]);
+    let go = |path: &'static str| {
+        let (public, h) = (w.public.clone(), h.clone());
+        async move {
+            let r = public.oneshot(Request::get(path).header("host", h.as_str()).body(Body::empty()).unwrap()).await.unwrap();
+            (r.status(), r.headers().get("location").map(|v| v.to_str().unwrap().to_string()))
+        }
+    };
+    assert_eq!(go("/old?a=1").await, (StatusCode::PERMANENT_REDIRECT, Some("/new?a=1".into())));
+    assert_eq!(go("/blog/2026/hi").await, (StatusCode::MOVED_PERMANENTLY, Some("/posts/2026/hi".into())));
+    assert_eq!(go("/elsewhere").await, (StatusCode::OK, None), "on to the app");
+    call(&w.api, "PUT", &base, Some(json!({"redirects": null}))).await;
+    assert_eq!(go("/old").await.0, StatusCode::OK, "gone with them");
+}
+
 /// A spend spike (AWS Cost Anomaly Detection's): a project with limits whose last hour cost three
 /// times what that hour of the week usually does (and $1 at least) gets `spend.spike` once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -3482,7 +3510,8 @@ async fn a_project_that_requires_signed_images_refuses_unsigned_ones() {
     assert_eq!(call(&w.api, "POST", &sandboxes, Some(json!({"image": "python:3.13-slim"}))).await.0, StatusCode::FORBIDDEN);
     assert_eq!(call(&w.api, "POST", &sandboxes, None).await.0, StatusCode::CREATED);
     assert_eq!(call(&w.api, "DELETE", &signing, None).await.0, StatusCode::NO_CONTENT);
-    assert_eq!(call(&w.api, "GET", &signing, None).await.1, json!({"keys": [], "required": false}));
+    let gone = call(&w.api, "GET", &signing, None).await.1;
+    assert_eq!((&gone["keys"], &gone["required"]), (&json!([]), &json!(false)), "{gone}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -4170,6 +4199,52 @@ async fn a_browser_check_runs_its_script_past_the_password() {
     assert_eq!(call_raw(&w.api, "GET", &format!("{base}/checks/home/trace")).await.1, b"PK fake");
     assert_eq!(call_raw(&w.api, "GET", &format!("{base}/checks/other/trace")).await.0, StatusCode::NOT_FOUND);
     assert_eq!(w.fake.build_trees.lock().len(), 1, "still the one image");
+}
+
+/// A preview's head runs production's browser checks once (Vercel's deployment checks; roll
+/// previews folds them into its status): each result names its deployment, and a new head's
+/// replaces the last one's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_previews_head_runs_productions_browser_checks() {
+    let w = world().await;
+    *w.fake.check_pages.lock() = Some(w.public.clone());
+    let (svc, _) = image_service(&w, "web", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let prod = format!("/v1/apps/services/{id}/environments/production");
+    let check = |script: &str| json!({"checks": [{"name": "home", "path": "/", "every_s": 3600, "browser": script}]});
+    call(&w.api, "PUT", &prod, Some(check("await page.title()"))).await;
+    let pv = format!("/v1/apps/services/{id}/environments/pv-1");
+    assert_eq!(call(&w.api, "PUT", &pv, Some(json!({"ephemeral": true}))).await.0, StatusCode::OK);
+    let head = |w: &World| {
+        let (api, pv) = (w.api.clone(), pv.clone());
+        async move {
+            let (_, d) = call(&api, "POST", &format!("{pv}/deploys"), Some(json!({}))).await;
+            d["id"].as_str().unwrap().to_string()
+        }
+    };
+    let result_for = |dep: String| {
+        let (api, pv) = (w.api.clone(), pv.clone());
+        async move {
+            for _ in 0..500 {
+                let st = call(&api, "GET", &pv, None).await.1["check_states"][0].clone();
+                if st["deployment"] == dep.as_str() && !st["up"].is_null() {
+                    return st;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            panic!("no result for {dep}");
+        }
+    };
+    let d1 = head(&w).await;
+    settled(&w, &id, "pv-1", &d1).await;
+    let st = result_for(d1.clone()).await;
+    assert_eq!((st["name"].as_str(), st["up"].as_bool(), st["status"].as_u64()), (Some("home"), Some(true), Some(200)), "{st}");
+    // Production's check changes and the next head fails it, at once (no second try).
+    call(&w.api, "PUT", &prod, Some(check("throw new Error('no sign-in button')"))).await;
+    let d2 = head(&w).await;
+    settled(&w, &id, "pv-1", &d2).await;
+    let st = result_for(d2).await;
+    assert_eq!((st["up"].as_bool(), st["error"].as_str()), (Some(false), Some("new Error('no sign-in button')")), "{st}");
 }
 
 /// A rollout that checks first (`rollout.checks`, Checkly's deployment checks): the environment's
@@ -5390,6 +5465,40 @@ async fn builds_share_a_remote_cache_for_turborepo_and_nx() {
     let (_, d) = call(&w.api, "POST", &format!("{env}/deploys"), Some(json!({"closed": true}))).await;
     settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
     assert!(!w.fake.build_vars.lock().last().unwrap().iter().any(|k| k.starts_with("TURBO_")));
+}
+
+/// Provenance on roll's builds (SLSA v1): a build's image has a DSSE envelope whose statement names
+/// the source, revision and image digest, signed with the project's `roll_key`; an image roll
+/// didn't build has none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_build_has_signed_provenance() {
+    use base64::Engine;
+    use p256::ecdsa::signature::Verifier;
+    use p256::pkcs8::DecodePublicKey;
+    let w = world().await;
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "site", "source": {"kind": "repo", "repo": "acme/site"} }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let dep = svc["environments"][0]["latest"]["id"].as_str().unwrap().to_string();
+    let d = settled(&w, &id, "production", &dep).await;
+    let (st, env) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys/{dep}/provenance"), None).await;
+    assert_eq!(st, StatusCode::OK, "{env}");
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let payload = b64.decode(env["payload"].as_str().unwrap()).unwrap();
+    let statement: Value = serde_json::from_slice(&payload).unwrap();
+    assert_eq!(statement["predicateType"], "https://slsa.dev/provenance/v1");
+    assert_eq!(statement["subject"][0]["name"], d["image"], "{statement}");
+    assert_eq!(statement["predicate"]["buildDefinition"]["externalParameters"]["source"]["repo"], "acme/site");
+    assert_eq!(statement["predicate"]["runDetails"]["metadata"]["invocationId"], dep.as_str());
+    let (_, signing) = call(&w.api, "GET", &format!("/v1/apps/projects/{}/signing", w.project), None).await;
+    let key = p256::ecdsa::VerifyingKey::from_public_key_pem(signing["roll_key"].as_str().unwrap()).unwrap();
+    let sig = p256::ecdsa::Signature::from_der(&b64.decode(env["signatures"][0]["sig"].as_str().unwrap()).unwrap()).unwrap();
+    assert!(key.verify(&apps_control::provenance::pae(apps_control::provenance::PAYLOAD_TYPE, &payload), &sig).is_ok(), "signed with the project's roll key");
+    // An image roll didn't build has none.
+    let (img, d) = image_service(&w, "api", json!({"port": 80})).await;
+    let iid = img["id"].as_str().unwrap();
+    let (st, _) = call(&w.api, "GET", &format!("/v1/apps/services/{iid}/environments/production/deploys/{}/provenance", d["id"].as_str().unwrap()), None).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
 }
 
 /// Readable Node stack traces: a Node build that writes source maps starts with
@@ -9097,9 +9206,18 @@ async fn a_closed_environment_uses_its_keys_without_seeing_them() {
     let (was, minted_before) = (e["active"]["id"].clone(), minted());
     *vault.1.lock() = "FAKECA3".into();
     w.apps.cron_pass(t + 11 * 60_000).await;
-    let tpl = w.apps.live(&id, "staging").template().unwrap();
-    let bundle = tpl.spec.files.iter().find(|(p, _)| p == apps_control::deploy::INTERCEPT_CA).map(|(_, c)| c.clone()).unwrap_or_default();
-    assert!(bundle.contains("FAKECA3") && !bundle.contains("FAKECA2"), "{bundle}");
+    // The template is made again as the pass's renewal finishes: read until it has.
+    let mut bundle = String::new();
+    for _ in 0..250 {
+        let tpl = w.apps.live(&id, "staging").template().unwrap();
+        bundle = tpl.spec.files.iter().find(|(p, _)| p == apps_control::deploy::INTERCEPT_CA).map(|(_, c)| c.clone()).unwrap_or_default();
+        if bundle.contains("FAKECA3") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let tail: String = bundle.lines().rev().take(4).collect::<Vec<_>>().join(" | ");
+    assert!(bundle.contains("FAKECA3") && !bundle.contains("FAKECA2"), "its last lines: {tail}");
     assert_eq!((minted() > minted_before, call(&w.api, "GET", &format!("{base}/staging"), None).await.1["active"]["id"].clone()), (true, was), "a placeholder made again, no deploy");
     assert!(call(&w.api, "DELETE", &format!("{base}/staging"), None).await.0.is_success());
     assert!(vault.0.lock().contains(&format!("end {}/staging", w.project)), "{:?}", vault.0.lock());

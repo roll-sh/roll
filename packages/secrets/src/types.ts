@@ -278,7 +278,9 @@ export type ChangeRequest = {
   action?: "delete_environment";
 };
 /** Something that stops working when an environment goes: a value elsewhere in the project that references it (`key`), or a folder here or in another project (`project`) that imports from it. Names only. */
-export type EnvironmentBreak = { project?: string; environment: string; path: string; key?: string; via: "reference" | "import" };
+/** What stops working when an environment goes: a key referencing it, a folder importing it, a roll apps service or agents sandbox reading it, a sync of it, or an identity or token whose scope names it.
+ * `name`: the service, sandbox, identity or token's, or a sync's `kind target` (an identity's or token's, and its `id`, only for a project admin). */
+export type EnvironmentBreak = { project?: string; environment: string; path: string; key?: string; via: "reference" | "import" | "service" | "sandbox" | "sync" | "identity" | "token"; name?: string; id?: string };
 /** `GET …/environments/{env}/deletion`: what deleting it would do, before it's asked. */
 export type EnvironmentDeletion = { environment: string; secrets: number; window_days: number; confirm: boolean; needs_request: boolean; approvals: number; breaks: EnvironmentBreak[] };
 /** `DELETE …/environments/{env}`: null for an ephemeral one (gone), the window for a standard one, or the change request that deletes a protected one once approved. */
@@ -396,9 +398,12 @@ export type AuditFilter = { env?: string; key?: string; actor?: string; action?:
 export type AuditFormat = "csv" | "jsonl";
 /** What a project's events feed says happened (docs/secrets.md, "Events"); a family is `request.*`. */
 export type SecretsEventKind =
+  | "secret.changed"
+  | "secret.deleted"
   | "secret.leaked"
   | "scan.finding"
   | "rotation.failed"
+  | "rotation.succeeded"
   | "request.pending"
   | "request.decided"
   | "sync.failed"
@@ -408,11 +413,12 @@ export type SecretsEventKind =
   | "placeholder.wrong_consumer"
   | "placeholder.wrong_host"
   | "production.unprotected"
+  | "access.changed"
   | "env.deleted"
   | "env.recovered"
   | "project.deleted"
   | "project.recovered";
-/** One event: `seq` is the audit chain's row number, so events come in commit order. `data` holds names, ids, counts and reasons (always `actor`; `path` and `keys` when the row has them), never a value. */
+/** One event: `seq` is the audit chain's row number, so events come in commit order. `data` holds names, ids, versions, counts and reasons (always `actor`; `path` and `keys` when the row has them), never a value. `secret.changed` and `secret.deleted` carry `via`, `change` and `version` or `versions`. */
 export type SecretsEvent = { seq: number; at: number; kind: SecretsEventKind; environment?: string; key?: string; data: Record<string, unknown> };
 /** `latest: true` answers no events and the head (never with `after`); `limit` 1–500 (100). */
 export type EventsQuery = { after?: number; limit?: number; kinds?: (SecretsEventKind | `${string}.*`)[]; environment?: string; latest?: boolean };

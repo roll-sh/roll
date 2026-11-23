@@ -50,6 +50,12 @@ export function ChecksPanel({ service, env, runner }: { service: string; env: En
                   every {c.every_s ?? 60}s
                   {st?.last_at ? ` · ${st.status ?? "no answer"}${st.ms != null ? ` in ${st.ms} ms` : ""}, ${since(st.last_at, Date.now())}` : ""}
                 </span>
+                {st?.metrics && (
+                  <span className="w-full font-mono text-[11.5px] text-subtle">
+                    LCP {st.metrics.lcp_ms} ms · CLS {st.metrics.cls} · TTFB {st.metrics.ttfb_ms} ms · {st.metrics.kb} KiB · {st.metrics.requests} requests
+                    {c.budgets ? ` (budgets: ${Object.entries(c.budgets).map(([k, v]) => `${k} ${v}`).join(", ")})` : ""}
+                  </span>
+                )}
                 {st?.error && <span className="w-full truncate text-[11.5px] text-danger">{st.error}</span>}
                 {c.browser && st?.failure_at != null && (
                   <span className="flex w-full gap-3 text-[11.5px]">

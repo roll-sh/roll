@@ -36,6 +36,9 @@ const FILE_BUDGET: Duration = Duration::from_secs(3);
 const LINE_CHARS: usize = 300;
 /// Lines a file document answers around its match.
 const FILE_LINES: usize = 400;
+/// Code indexes a file search starts building at once on a node (repos never searched before):
+/// the rest are skipped as `indexing` and start on later searches.
+const MAX_BUILDS: usize = 2;
 
 /// Which kinds a search covers (`kinds=changes,work,files`; changes and work items by default).
 #[derive(Clone, Copy)]
@@ -296,10 +299,24 @@ impl Code {
         (out, skipped)
     }
 
+    /// One repo's part of a file search, here (its owner): its index's answer. A repo never
+    /// indexed is skipped as indexing, and only a couple of builds start at once: one search across
+    /// hundreds of repos never builds them all together.
+    pub(crate) async fn file_search_one(&self, r: &RepoRow, q: &str, per_repo: usize) -> Result<Value> {
+        let index = self.ai.index.as_ref().ok_or_else(|| Error::Unprocessable("code search is off on this server".into()))?;
+        if self.head(r)?.is_some() && index.repo(&r.id).map_err(Error::Internal)?.head().map_err(Error::Internal)?.is_none() {
+            if self.ai.building.lock().len() < MAX_BUILDS {
+                let _ = self.index_ready(r, Duration::ZERO).await;
+            }
+            return Err(Error::Indexing);
+        }
+        self.search_code(r, q, false, false, None, per_repo, None).await
+    }
+
     /// One repo's file search, on its owner: its index's answer, or why there's none.
     async fn repo_file_search(&self, r: &RepoRow, q: &str) -> std::result::Result<Value, &'static str> {
         if self.cluster().is_none() {
-            return self.search_code(r, q, false, false, None, PER_REPO, None).await.map_err(|e| match e {
+            return self.file_search_one(r, q, PER_REPO).await.map_err(|e| match e {
                 Error::Indexing => "indexing",
                 Error::Unprocessable(_) => "off",
                 _ => "error",
@@ -374,6 +391,9 @@ impl Code {
         let to = (from + FILE_LINES - 1).min(lines.len());
         let body = lines.get(from - 1..to).unwrap_or_default().join("\n");
         let rev = crate::cs_id(&cs);
+        // Text at a revision off the default branch (a fork's change) may be an outsider's: marked
+        // so, lockdown withholds it.
+        let on_default = self.head(&r)?.is_some_and(|h| self.store.is_ancestor(&r.id, &cs, &h).unwrap_or(false));
         Ok(json!({
             "id": id,
             "title": format!("{}: {path}", r.full_name()),
@@ -381,7 +401,7 @@ impl Code {
             "url": format!("{}/blob/{rev}/{path}#L{line}", self.web_url(&r)),
             "metadata": { "kind": "file", "repo": r.full_name(), "path": path, "rev": rev, "line": line, "from": from, "to": to, "lines": lines.len() },
             "repo": r.full_name(),
-            "outside": false,
+            "outside": !on_default,
         }))
     }
 }

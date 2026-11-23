@@ -121,6 +121,19 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
     preview stands for the new head (its status, comment and `roll preview wait`) and says which
     one it `runs`. `paths` alone never skips a deploy: another service of the repo may run what
     it leaves out. The next push that touches anything else, measured from what runs, redeploys.
+- **Production's browser checks** (Vercel's Deployment Checks with Checkly): roll apps runs a
+  service's production browser checks (`checks[].browser`, a Playwright script) once on each
+  preview head's deployment as it goes live (#790). The preview reads them from the `pv-`
+  environment's `check_states`, a result counting only when it's of the live deployment, each
+  pass from when the head is up until each has run, or 5 minutes after; they never hold `ready`
+  up. They're on the record (`browser_checks`), the sheet (what failed, the check's own words
+  made printable), `roll preview show` and the pull request comment ("Production's browser checks
+  on this head: **1 failed** (`web: checkout`), 2 passed": names only). The screenshot and trace
+  of a failure stay roll apps' (`read` on the service). The project's `browser_checks` rule:
+  `report` (the default) shows them; `check` also posts `roll/browser-checks` on the head (pending
+  while one runs, failing while one failed: for GitHub's branch protection); `required` also keeps
+  the change from landing in roll (a `browser` blocker in `Code::blockers`, from the project's rule,
+  never the change's) until they pass at its head.
 - **Earlier pushes** (Vercel's per-push URLs): when a change's own service is redeployed at a new
   head, the head it ran stays reachable at `<service>-<head>-<slug>`, on the preview's same data,
   behind the same link, asleep until opened; the last 3 per service (an older one's container
@@ -130,7 +143,9 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   earlier push connects there, so a migration that renamed a column doesn't break the code
   before it. A copy that fails (its product down, a stream's tail slow to reach object storage)
   doesn't hold the push up: it's said in the activity, and that push shares the preview's data
-  for that product (`own_data` names only the copies it has). A copy's bytes count in the preview's cost, budget and `max_bytes` with its
+  for that product (`own_data` names only the copies it has). An evicted push's copy that can't
+  be deleted is said and deleted later (the next eviction, or the teardown); a reset, changed masks
+  and the teardown wait for theirs. A copy's bytes count in the preview's cost, budget and `max_bytes` with its
   branches'. A copy goes with its push, and with the data it copied (a reset, or masking rules
   that changed: never served less masked than the rules say). Products that can't branch a
   branch share the preview's. A NoSQL copy inherits its branch's masking policy (a read policy,
@@ -320,7 +335,7 @@ database's or a stream's lease, storage's metadata owner) wherever the reconcile
 | `nosql` | `nosql_control::Control::branch` (`schema_only` for `schema`) | `nosql_control::Control::reset`: same id, endpoint and credentials | The SSTables it wrote | Zero copy. Masking policies are inherited. |
 | `stream` | `branch`: `POST /v1/streams/{s}/branches` on the parent's owner, a new stream with the parent's topics and configs whose partitions share the parent's chunks as of the branch (same offsets, nothing copied) and its committed group offsets. `schema`: a new stream with the parent's topics and configs, no records | Delete and branch again | The chunks it wrote (`own_bytes`; what it shares stays the parent's) | Zero copy. Retention, compaction and deletes on either side delete only objects no stream references, so a branch outlives its parent. A transaction open at the branch is aborted in it. See the broker's README, "Branches". |
 | `queue` | A vhost with the parent vhost's definitions (exchanges, queues, bindings, policies), no messages | Delete and branch again | Nothing (a vhost suspends after 5 minutes) | A branch never holds production messages. |
-| `tasks` | A new tenant with no messages and no schedules | Delete and create again | Its own SQLite file | Copied schedules would call production endpoints, so they never are. |
+| `tasks` | A new tenant with no messages and no schedules | Delete and create again | Its own SQLite file | Copied schedules would call production endpoints, so they never are. Its services get the tenant's own URL, token and webhook signing keys (`ROLL_TASKS_SIGNING_KEY`, `ROLL_TASKS_NEXT_SIGNING_KEY`, read at each start), so its deliveries verify; roll apps' `tasks` link (#792) names them. |
 | `search` | `search_control::Control::branch` (zero copy) | Delete and branch again | Segments it wrote | Field masks rewrite the branch's documents, then expunge what they replaced; mapping changes are schema changes. |
 
 Safety rules every adapter follows:
@@ -1702,6 +1717,8 @@ type Preview = {
   runs: string | null;                // the earlier head its services run (later pushes touched only ignored paths)
   earlier: {service: string; revision: string; url: string; share_url: string | null; at: number; own_data: string[]}[]; // earlier pushes, still reachable; own_data: the products it has its own copy of (as its head left them)
   copies: {count: number; bytes: number; usd_month: number}; // the earlier pushes' own copies of its data, said apart (counted in cost)
+  browser_checks: {service: string; name: string; state: "pending" | "passed" | "failed"; error: string | null}[]; // production's browser checks on this head (roll apps)
+  browser_checks_rule: "check" | "required" | null; // the project's rule for them, when it's more than showing them
   goes_at: number | null;             // when it goes (TTL, keep or expiry running out), once a day away (or a quarter of a shorter TTL)
   reported_by: string | null;         // the project that reports a Git URL branch's pull request, when another one does (one voice per pull request)
   desired: "active" | "deleted";
@@ -1778,6 +1795,7 @@ type Settings = {
   warm: boolean;                      // wake the change's services as soon as a new head is deployed (true)
   crons: boolean;                     // roll apps' crons and scheduled commands run on their schedule in previews (false)
   regressions: "off" | "check" | "required";   // roll/regressions against main's preview: posted (check), or a blocker (required) ("off")
+  browser_checks: "report" | "check" | "required"; // production's browser checks: shown; a roll/browser-checks status; also a blocker
   mail: "catch" | "deliver";          // services' mail to roll's catcher, never delivered ("catch")
   traces: boolean;                    // roll.toml services get the OpenTelemetry SDK's variables (false)
   data_at: string | null;             // branch the data as of then: "-24h", "-30m", "-7d" or an RFC 3339 time (null: now)
@@ -2431,9 +2449,8 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **A copy that fails doesn't hold the push up, in review**: a product's copy failing (down, or
-   a stream's tail slow to reach object storage) failed the whole push, though the copies are
-   only for the earlier push; now it's said and that push shares the preview's data for it.
+1. **Required browser checks, in review**: the project's `browser_checks` rule (`report`,
+   `check`: the `roll/browser-checks` status, `required`: also a roll blocker).
 2. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
@@ -2444,6 +2461,12 @@ Ranked by what a person notices first. Done so far:
 4. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
 5. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-23, late morning: production's browser checks on each preview head, on the record, the sheet, `roll preview show` and the PR comment (#791, on roll apps' #790).
+
+Landed 2026-11-23, mid-morning: an evicted push's copy that can't be deleted doesn't hold the push up (#788).
+
+Landed 2026-11-23 morning, later: a copy that fails doesn't hold the push up (#783), and `preview-intercept.sh`'s echo step allowing the cut that follows roll secrets' #705.
 
 Landed 2026-11-23 morning: what the earlier pushes' copies hold, said apart on the sheet and in `roll preview show` (#776, found in the 2026-11-23 review pack).
 
