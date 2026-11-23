@@ -881,7 +881,8 @@ RESHAPED=$(api GET "/v1/previews/$PV" | jq_ "' | '.join('%s %s' % (c['path'], c.
 # writes its environment to): named with where, never the value.
 SERVED=$(api GET "/v1/previews/$PV" | jq_ "' '.join(sorted(set('%s@%s' % (x['key'], x['path']) for x in d.get('served_secrets') or [])))")
 case " $SERVED " in *" DATABASE_URL@/env.txt "*) ;; *) echo "the preview's record should name DATABASE_URL in /env.txt: $SERVED"; exit 1;; esac
-api GET "/v1/previews/$PV" | grep -q "$(echo "$APP_DB" | sed -E 's#^postgres://[^:]+:([^@]+)@.*#\1#')" && { echo "the record must never carry a served value"; exit 1; }
+SERVED_PW=$(echo "$APP_DB" | sed -nE 's#^postgres://[^:]+:([^@]+)@.*#\1#p')
+[ -n "$SERVED_PW" ] && api GET "/v1/previews/$PV" | grep -qF "$SERVED_PW" && { echo "the record must never carry a served value"; exit 1; }
 case "$WORDS" in "+['preview of change 1"*"-['main']") ;; *) echo "the page's words should be compared with main's: $WORDS"; exit 1;; esac
 MAIN_LOAD=$(api GET "/v1/previews/$PV" | jq_ "d['base_change'].get('load_ms')")
 case "$MAIN_LOAD" in [0-9]*) ;; *) echo "the comparison with main should carry main's load time: $MAIN_LOAD"; exit 1;; esac
