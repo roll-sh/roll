@@ -848,7 +848,10 @@ this: they get no secrets, or all of them.
   connection is cut before those bytes. An encoded body (which can't be checked): a 502. An echo
   ends the placeholder (`Secrets::echoed`: an alert audited, the environment's notice queued) and
   says so in the activity ("echo.localhost echoed STRIPE_KEY back in its response: stopped, and its
-  placeholder ended"). `roll-intercept`'s port: `Interception::filter` answers a `Filtered` with a
+  placeholder ended"). After that the placeholder is refused (a 403) while the CA stands; ending
+  it shrinks the key's bound hosts, which ends the CA (roll secrets' #705), and with no other live
+  placeholder there's nothing left to intercept, so connections are then cut. Either way it never
+  reaches the key. `roll-intercept`'s port: `Interception::filter` answers a `Filtered` with a
   `ResponseScrub`, so roll apps' closed environments get the same. Swapped requests and refusals
   are counted in the preview's activity, never their values or placeholders.
 
