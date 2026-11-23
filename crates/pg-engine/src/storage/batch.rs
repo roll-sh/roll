@@ -280,7 +280,7 @@ impl RowBatch {
 
     /// A row (not the first) whose key is the last row's first `shared` bytes and then
     /// `suffix`, its value `bufs[buf][off..off + len]` (`buf_index`).
-    #[inline]
+    #[inline(always)]
     pub fn push_shared(&mut self, shared: usize, suffix: &[u8], buf: u32, off: usize, len: usize) {
         let prev = self.key_start(self.ents.len() - 1);
         self.keys.extend_from_within(prev..prev + shared);
@@ -290,7 +290,7 @@ impl RowBatch {
 
     /// A row whose key is `key`'s first `n` bytes, its value `bufs[buf][off..off + len]`
     /// (`buf_index`): the key's bytes moved as one fixed-size copy, then cut back.
-    #[inline]
+    #[inline(always)]
     pub fn push_key<const K: usize>(&mut self, key: &[u8; K], n: usize, buf: u32, off: usize, len: usize) {
         let start = self.keys.len();
         self.keys.extend_from_slice(key);

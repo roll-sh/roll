@@ -791,14 +791,14 @@ fn decode_rows<const MIXED: bool>(
     let len = rows.len();
     let mut covered: Vec<bool> = Vec::new();
     let sort_odd = MIXED && gather_runs(batch, &rows, len, cols, bufs, own, missing, &mut covered)?;
-    // (Rows the typed walk didn't take, in order: the general walk's.)
+    // (Rows the typed walk didn't take, in order: the general walk's. A batch with rows of
+    // column blocks takes its others the general way: the typed walk keeps its one caller,
+    // and the compiler inlines it there, as before format 5.)
     let mut left: Vec<u32> = Vec::new();
-    let all_left = match walk_plan(cols, types) {
+    let plan = if MIXED { None } else { walk_plan(cols, types) };
+    let all_left = match plan {
         Some((mut steps, strs)) => {
             for (r, i) in rows.clone().enumerate() {
-                if MIXED && covered[r] {
-                    continue;
-                }
                 let (bytes, inbuf) = batch.value_in(i);
                 let buf = match (strs, inbuf) {
                     (true, Some((b, at))) => {
