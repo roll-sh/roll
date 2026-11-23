@@ -2477,29 +2477,29 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Skew protection for `roll.toml` services, in review**: a page loaded before a push keeps
-   reaching that push (`skew_protection = true`).
-2. **Feedback notes that carry the reviewer's context** (Netlify's drawer, Jam): the browser,
-   its console errors and failed requests on that page, sent with the note and shown with it on
-   the change.
-3. **Endpoint responses compared with main's by shape** (Signadot's SmartTests): a field gone or
+1. **Feedback notes that carry the reviewer's context, in review** (Netlify's drawer, Jam): the
+   page's uncaught errors, its failed requests and the browser, sent with the note when the
+   person keeps them, folded on the change.
+2. **Endpoint responses compared with main's by shape** (Signadot's SmartTests): a field gone or
    a type changed in a JSON answer, on the sheet's verdict strip and the pull request comment
    (values differ by design: main's preview has its own data).
-4. **Storybook stories as snapshots** (Chromatic): each story taken, compared with main's and
+3. **Storybook stories as snapshots** (Chromatic): each story taken, compared with main's and
    reviewed like a page, with TurboSnap's skip.
-5. **A process on a laptop standing in for one service** (Signadot local sandboxes,
+4. **A process on a laptop standing in for one service** (Signadot local sandboxes,
    Telepresence): the preview's other services and data reach it, the reverse of
    `roll preview forward`.
-6. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
+5. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
    (3.3 s in its log) and its masking, which needs that compute up: pg-control's to shorten.
-7. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+6. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-8. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+7. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-9. **Watch: pg-control's recovery to a time seconds old** (unowned).
+8. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-23, late afternoon: skew protection for `roll.toml` services (#822: a page loaded before a push keeps reaching that push; checked live).
 
 Landed 2026-11-23, mid-afternoon: a failed browser check's screenshot and trace from the sheet (#815: the record names where roll apps keeps them).
 
