@@ -225,7 +225,7 @@ pub(super) fn served_keyed(secrets: &[(String, String)], plain: &[String], own: 
         PUBLIC.iter().any(|p| u.starts_with(p))
     };
     let mut out: Vec<(String, String)> = Vec::new();
-    for (k, v) in secrets.iter() {
+    for (k, v) in secrets.iter().filter(|(k, _)| !public(k)) {
         if plain.contains(k) {
             out.extend(url_password(v).into_iter().map(|p| (k.clone(), p)));
         } else {
