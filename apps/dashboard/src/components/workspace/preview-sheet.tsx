@@ -235,6 +235,24 @@ export function PreviewSheet({
               <p className="text-[11.5px] text-subtle">No services: a repo in this project runs here once its roll.toml has a [preview] section.</p>
             )}
             {(p.state === "ready" || p.state === "sleeping") && p.trusted && <Promote preview={p} />}
+            {!!p.browser_checks?.length && (
+              <>
+                <Label>Browser checks</Label>
+                <ul className="space-y-1" title="Production's browser checks, run on this head's deployment as it went live (roll apps)">
+                  {p.browser_checks.map((c) => (
+                    <li key={`${c.service}/${c.name}`} className="text-[12px]">
+                      <div className="flex items-center gap-2">
+                        <span className={`size-1.5 shrink-0 rounded-full ${c.state === "passed" ? "bg-ok" : c.state === "failed" ? "bg-danger" : "bg-accent motion-safe:animate-pulse"}`} />
+                        <span className="min-w-0 truncate">{c.name}</span>
+                        <span className="shrink-0 text-subtle">{c.service}</span>
+                        <span className={`ml-auto shrink-0 font-mono text-[11px] ${c.state === "failed" ? "text-danger" : "text-subtle"}`}>{c.state === "pending" ? "running" : c.state}</span>
+                      </div>
+                      {c.error && <p className="mt-0.5 ml-3.5 font-mono text-[10.5px] break-words text-subtle">{c.error}</p>}
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
             {!!p.earlier?.length && (
               <>
                 <Label>Earlier pushes</Label>

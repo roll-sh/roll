@@ -936,6 +936,10 @@ pub fn env_name(preview_id: &str) -> String {
     branch_name(preview_id)
 }
 
+/// How long after a head is up its browser checks are read for (roll apps runs them once as the
+/// deployment goes live).
+pub const BROWSER_CHECKS_FOR_MS: i64 = 5 * 60_000;
+
 fn short(rev: &str) -> &str {
     let rev = rev.strip_prefix("cs_").unwrap_or(rev);
     &rev[..rev.len().min(10)]

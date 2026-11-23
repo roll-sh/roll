@@ -121,6 +121,15 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
     preview stands for the new head (its status, comment and `roll preview wait`) and says which
     one it `runs`. `paths` alone never skips a deploy: another service of the repo may run what
     it leaves out. The next push that touches anything else, measured from what runs, redeploys.
+- **Production's browser checks** (Vercel's Deployment Checks with Checkly): roll apps runs a
+  service's production browser checks (`checks[].browser`, a Playwright script) once on each
+  preview head's deployment as it goes live (#790). The preview reads them from the `pv-`
+  environment's `check_states`, a result counting only when it's of the live deployment, each
+  pass from when the head is up until each has run, or 5 minutes after; they never hold `ready`
+  up. They're on the record (`browser_checks`), the sheet (what failed, the check's own words
+  made printable), `roll preview show` and the pull request comment ("Production's browser checks
+  on this head: **1 failed** (`web: checkout`), 2 passed": names only). The screenshot and trace
+  of a failure stay roll apps' (`read` on the service).
 - **Earlier pushes** (Vercel's per-push URLs): when a change's own service is redeployed at a new
   head, the head it ran stays reachable at `<service>-<head>-<slug>`, on the preview's same data,
   behind the same link, asleep until opened; the last 3 per service (an older one's container
@@ -1704,6 +1713,7 @@ type Preview = {
   runs: string | null;                // the earlier head its services run (later pushes touched only ignored paths)
   earlier: {service: string; revision: string; url: string; share_url: string | null; at: number; own_data: string[]}[]; // earlier pushes, still reachable; own_data: the products it has its own copy of (as its head left them)
   copies: {count: number; bytes: number; usd_month: number}; // the earlier pushes' own copies of its data, said apart (counted in cost)
+  browser_checks: {service: string; name: string; state: "pending" | "passed" | "failed"; error: string | null}[]; // production's browser checks on this head (roll apps)
   goes_at: number | null;             // when it goes (TTL, keep or expiry running out), once a day away (or a quarter of a shorter TTL)
   reported_by: string | null;         // the project that reports a Git URL branch's pull request, when another one does (one voice per pull request)
   desired: "active" | "deleted";
@@ -2433,10 +2443,10 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **An evicted copy that can't be deleted doesn't hold the push up, in review**: its delete
-   failing (the product down) failed the push; now it's said and retried at the next eviction or
-   the teardown. A reset, changed masks and the teardown still wait, so a copy masked by older
-   rules never stays reachable.
+1. **Production's browser checks on each preview, in review** (roll apps' #790): read after the
+   head is up, on the record, the sheet, `roll preview show` and the PR comment. Next after it:
+   a project rule `browser_checks: report | required`, where `required` holds roll's landing (a
+   blocker) and GitHub's `roll/preview` until they pass.
 2. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
@@ -2447,6 +2457,8 @@ Ranked by what a person notices first. Done so far:
 4. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
 5. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-23, mid-morning: an evicted push's copy that can't be deleted doesn't hold the push up (#788).
 
 Landed 2026-11-23 morning, later: a copy that fails doesn't hold the push up (#783), and `preview-intercept.sh`'s echo step allowing the cut that follows roll secrets' #705.
 
