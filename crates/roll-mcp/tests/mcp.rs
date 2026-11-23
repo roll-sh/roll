@@ -378,6 +378,7 @@ async fn search_mode_finds_and_runs_through_the_same_checks() {
     let listed = names(&rpc(at(""), "tools/list", json!({})).await);
     assert!(listed.contains(&"roll_find_tools".into()) && listed.contains(&"roll_run_read".into()) && !listed.iter().any(|n| n.starts_with("postgres_")), "{listed:?}");
     assert!(!listed.contains(&"roll_run".into()), "a reader has nothing to run that changes things: {listed:?}");
+    assert!(listed.contains(&"roll_find".into()), "finding a resource by name works in search mode too: {listed:?}");
     let found = rpc(at(""), "tools/call", json!({ "name": "roll_find_tools", "arguments": { "query": "list postgres projects" } })).await;
     assert_eq!(found["structuredContent"]["tools"][0]["name"], "postgres_list_projects", "{found}");
     assert!(found["structuredContent"]["tools"][0]["inputSchema"].is_object());

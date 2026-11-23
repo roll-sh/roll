@@ -100,8 +100,8 @@ that use them.
 ### Search mode
 
 With every product on, a node lists about 500 tools (~56k tokens), past VS Code's
-and Cursor's limits. `/v1/mcp?tools=search` (or `X-MCP-Tools: search`) lists the access tools plus three
-tools instead, about 1.8k tokens whatever runs (the three are ~500). This is the pattern of Cloudflare's code mode and
+and Cursor's limits. `/v1/mcp?tools=search` (or `X-MCP-Tools: search`) lists the access tools, `roll_find`
+(a resource by name or link, see [Finding a resource](#finding-a-resource)) and three tools instead, about 1.8k tokens whatever runs (the three are ~500). This is the pattern of Cloudflare's code mode and
 GitHub's dynamic toolsets, applied to a stateless server:
 
 | Tool | What it does |
@@ -149,7 +149,7 @@ for it, and it goes with toolsets (`?toolsets=postgres&readonly=1`).
 
 ### Finding a resource
 
-`roll_find` (on every connection but search mode's, read-only) finds any roll resource by its name
+`roll_find` (on every connection, search mode's too; read-only) finds any roll resource by its name
 or part of it ("checkout-db"), part of its id, or a roll dashboard link a person pasted, as Neon's
 `search` and Linear's pasted URLs do. It has no route of its own: a name is looked up in each
 product's list tool the connection has (projects, services, repos, Postgres, Redis, NoSQL, search

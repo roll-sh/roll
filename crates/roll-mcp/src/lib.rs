@@ -267,8 +267,9 @@ async fn toolset_costs(State(m): State<Mcp>, ext: Extensions) -> Response {
             }));
         }
     }
-    // Search mode's own tools (`?tools=search`): listed in place of every product's.
-    let meta: Vec<Value> = search::listed(&ctx.tools()).into_iter().filter(|t| t["name"].as_str().is_some_and(|n| [search::FIND, search::RUN_READ, search::RUN].contains(&n))).collect();
+    // Search mode's own tools (`?tools=search`): listed in place of every product's, `roll_find` too.
+    let mut meta: Vec<Value> = search::listed(&ctx.tools()).into_iter().filter(|t| t["name"].as_str().is_some_and(|n| [search::FIND, search::RUN_READ, search::RUN].contains(&n))).collect();
+    meta.push(find::definition());
     let search = json!({
         "tools": meta.len(),
         "read_only": meta.iter().filter(|t| t["annotations"]["readOnlyHint"] == true).count(),
@@ -838,7 +839,8 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
             },
             "tools/list" => {
                 let mut tools = if ctx.search { search::listed(&ctx.tools()) } else { ctx.tools() };
-                if !ctx.search && ctx.pick.keeps(find::NAME) {
+                // In search mode too: finding a resource by name is what a client with few tools needs.
+                if ctx.pick.keeps(find::NAME) {
                     tools.push(find::definition());
                 }
                 // A host that renders MCP Apps shows the tools that answer rows in roll's table.
@@ -870,7 +872,7 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                     rpc_result(id, search::find(&ctx.tools(), &args))
                 } else if !args.is_object() {
                     rpc_error(id, -32602, "arguments must be an object")
-                } else if name == find::NAME && !ctx.search && ctx.pick.keeps(find::NAME) {
+                } else if name == find::NAME && ctx.pick.keeps(find::NAME) {
                     // Each list and read in it is a tool call of the caller's own, through the gate.
                     let names = tool_names(ctx);
                     let has = |t: &str| names.iter().any(|n| n == t);
