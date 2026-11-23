@@ -199,7 +199,7 @@ impl RowBatch {
             let mut at = Vec::with_capacity(n);
             for j in 0..n {
                 at.push(buf.len());
-                blk.row_into(run.row as usize + j, None, &mut buf);
+                blk.row_into(run.row as usize + j, &mut buf);
             }
             let b = self.bufs.len() as u32;
             self.bufs.push(Bytes::from(buf));

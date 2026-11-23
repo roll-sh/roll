@@ -2059,6 +2059,12 @@ impl Block {
         self.run_rows_in::<true>(pos, ts, max, false, batch, cbuf)
     }
 
+    /// Row `r` of a column block onto `out`, made from its columns.
+    pub fn row_into(&self, r: usize, out: &mut Vec<u8>) {
+        let c = self.cols.as_ref().expect("a column block");
+        c.dir.row(&self.data, r, out);
+    }
+
     /// Row `r` of a column block (`len` bytes), made alone from its columns.
     pub fn row_at(&self, r: usize, len: usize) -> Bytes {
         let c = self.cols.as_ref().expect("a column block");
