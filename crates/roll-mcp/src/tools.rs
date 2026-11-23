@@ -1317,7 +1317,8 @@ static TOOLS: &[Tool] = &[
         b("maintenance", Ty::Any, "true, {message} or false: answer a maintenance page instead of the app"),
         b("allow_ips", Ty::Arr, "Only these addresses get in: [cidr or {cidr, description}]"),
         b("rate_limit", Ty::Obj, "{per_minute, burst?}: requests a client address may make"),
-        b("firewall", Ty::Arr, "[{action: allow|deny|limit|challenge, path?, methods?, user_agent?, per_minute?, burst?}], first match wins; limit holds a client to per_minute (1-100000) on what it matches; challenge lets in a browser that passed a proof of work this hour (GET only)"),
+        b("firewall", Ty::Arr, "[{action: allow|deny|limit|challenge, path?, methods?, user_agent?, ips? (cidrs), header?|cookie?|query? ({name, contains?}), bots? (ai, search, preview, tools, verified, spoofed: roll's lists of crawlers, assistants' fetchers, link previews and HTTP tools; verified: a crawler its operator's DNS vouches for; spoofed: one claiming such a name from elsewhere), per_minute?, burst?, key? (limit's client: ip, header:<name> or cookie:<name>)}], first match wins; limit holds a client to per_minute (1-100000) on what it matches; challenge lets in a browser that passed a proof of work this hour (GET only), and a verified search engine"),
+
         bnull("routes", Ty::Arr, "[{path, service}] (at most 20): a path (a prefix ends in *) another service of the project answers, by name; clear it for none"),
         bnull("redirects", Ty::Str, "its own redirects on any service, _redirects lines: `/old /new 308`, `/blog/* /posts/:splat` (301 unless 302, 303, 307 or 308); clear it for none"),
         bnull("egress", Ty::Any, "{mode: roll|open, hosts?}: roll lets its code reach roll and only these hosts (at most 20, *. for subdomains), from the next deploy; clear it for open"),
@@ -1763,7 +1764,8 @@ mod tests {
                 '{' | '[' | '(' => depth += 1,
                 '}' | ']' | ')' if depth == 0 => break,
                 '}' | ']' | ')' => depth -= 1,
-                ',' if depth == 0 => {
+                // Inline bodies part fields with `,`, TypeScript types with `;`.
+                ',' | ';' if depth == 0 => {
                     segs.push(std::mem::take(&mut cur));
                     continue;
                 }
@@ -1782,6 +1784,42 @@ mod tests {
                 (!name.is_empty() && name.starts_with(|c: char| c.is_ascii_lowercase()) && (rest.is_empty() || rest.starts_with(':'))).then_some(name)
             })
             .collect()
+    }
+
+    /// The body a contract names by type (`` `EnvironmentPut` ``): its `type X = { … }` in the same
+    /// contract, comments taken out, so its fields are checked as an inline body's are.
+    fn named_body(doc: &str, body: &str) -> Option<String> {
+        let name = body.trim().strip_prefix('`')?.split('`').next()?;
+        if !name.starts_with(|c: char| c.is_ascii_uppercase()) || !name.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return None;
+        }
+        let start = doc.find(&format!("type {name} = {{"))? + format!("type {name} = ").len();
+        // Comments out first: `/* … */` and `// …` to the end of the line.
+        let (mut out, mut rest) = (String::new(), &doc[start..]);
+        let mut depth = 0usize;
+        while let Some(c) = rest.chars().next() {
+            if rest.starts_with("/*") {
+                rest = rest.find("*/").map_or("", |e| &rest[e + 2..]);
+                continue;
+            }
+            if rest.starts_with("//") {
+                rest = rest.find('\n').map_or("", |e| &rest[e..]);
+                continue;
+            }
+            out.push(c);
+            rest = &rest[c.len_utf8()..];
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
     }
 
     /// A tool takes every body field and query parameter its route's contract lists, or
@@ -1829,7 +1867,7 @@ mod tests {
                 }
                 let tools: Vec<&Tool> = all().iter().filter(|t| t.method == method && norm(t.path) == norm(&path)).collect();
                 for t in tools.iter().filter(|t| !t.params.iter().any(|p| p.at == At::RawJson)) {
-                    let body = if matches!(method, "POST" | "PUT" | "PATCH") { body_fields(&body) } else { Vec::new() };
+                    let body = if matches!(method, "POST" | "PUT" | "PATCH") { body_fields(&named_body(doc, &body).unwrap_or_else(|| body.clone())) } else { Vec::new() };
                     for field in body.into_iter().chain(queries.iter().cloned()) {
                         if t.params.iter().any(|p| p.name == field) {
                             taken.insert((method.to_string(), norm(&path), field));
@@ -1845,6 +1883,8 @@ mod tests {
         assert!(stale.is_empty(), "no-field.txt lines for fields a tool takes now: remove them:\n{}", stale.join("\n"));
         assert_eq!(body_fields("{ from, message?, expect?: string, files?: {[name]: path | null} }"), ["from", "message", "expect", "files"]);
         assert_eq!(body_fields("{ url, headers? } or { bucket, prefix?, … } (prose `{ x }`)"), ["url", "headers", "bucket", "prefix"]);
+        let doc = "type Put = {\n  a?: string; // b: no, c\n  d: { e: number } /* f: g */;\n};";
+        assert_eq!(body_fields(&named_body(doc, "`Put` (as is)").unwrap()), ["a", "d"]);
     }
 
     #[test]
