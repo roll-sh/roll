@@ -19,6 +19,7 @@ export function ChecksPanel({ service, env, runner }: { service: string; env: En
   const [every, setEvery] = useState("60");
   const [contains, setContains] = useState("");
   const [script, setScript] = useState("");
+  const [outside, setOutside] = useState(false);
   const save = (next: UptimeCheck[]) => runner.run("checks", () => appsApi.putEnvironment(service, env.name, { checks: next.length ? next : null }));
   const ok = NAME.test(name) && !checks.some((c) => c.name === name) && path.startsWith("/") && !/\s/.test(path) && Number(every) >= (script.trim() ? 300 : 30) && Number(every) <= 3600 && script.length <= 16384 && checks.length < 5;
   const busy = runner.busy !== null;
@@ -43,7 +44,8 @@ export function ChecksPanel({ service, env, runner }: { service: string; env: En
                 <i className={`size-1.5 rounded-full ${tone}`} aria-label={st?.up === false ? "down" : st?.up ? "up" : "not tried yet"} />
                 <span className="font-medium">{c.name}</span>
                 <code className="min-w-0 flex-1 truncate font-mono text-[12px]">
-                  {c.browser ? "Browser" : "GET"} {c.path}
+                  {c.browser ? "Browser" : "GET"} {c.from === "public" ? `${c.host ?? "its URL"} ` : ""}{c.path}
+                  {c.from === "public" ? " · from outside" : ""}
                   {c.contains ? ` · contains ${JSON.stringify(c.contains)}` : ""}
                 </code>
                 <span className="text-[11.5px] text-subtle">
@@ -80,7 +82,7 @@ export function ChecksPanel({ service, env, runner }: { service: string; env: En
         className="flex flex-wrap gap-2 px-5 py-4"
         onSubmit={(e) => {
           e.preventDefault();
-          void save([...checks, { name, path: path.trim(), every_s: Number(every), ...(contains.trim() ? { contains: contains.trim() } : {}), ...(script.trim() ? { browser: script, timeout_s: 60 } : {}) }]).then((r) => {
+          void save([...checks, { name, path: path.trim(), every_s: Number(every), ...(contains.trim() ? { contains: contains.trim() } : {}), ...(script.trim() ? { browser: script, timeout_s: 60 } : outside ? { from: "public" as const } : {}) }]).then((r) => {
             if (!r) return;
             setName("");
             setPath("/");
@@ -92,6 +94,9 @@ export function ChecksPanel({ service, env, runner }: { service: string; env: En
         <input value={name} onChange={(e) => setName(e.target.value.toLowerCase())} placeholder="health" aria-label="Check name" spellCheck={false} className={`${input} w-32 font-mono text-[12px]`} />
         <input value={path} onChange={(e) => setPath(e.target.value)} placeholder="/healthz" aria-label="Path" spellCheck={false} className={`${input} min-w-40 flex-1 font-mono text-[12px]`} />
         <input value={contains} onChange={(e) => setContains(e.target.value)} placeholder="its answer contains (optional)" aria-label="Contains" spellCheck={false} className={`${input} w-52 text-[12px]`} />
+        <label className="flex items-center gap-1.5 text-[12px] text-muted" title="over the internet, as a visitor's request: its DNS, a custom domain's TLS and the edge">
+          <input type="checkbox" checked={outside} disabled={!!script.trim()} onChange={(e) => setOutside(e.target.checked)} /> from outside
+        </label>
         <select value={every} onChange={(e) => setEvery(e.target.value)} aria-label="Every" className={`${input} w-28 text-[12px]`}>
           {[["30", "30 s"], ["60", "1 min"], ["300", "5 min"], ["900", "15 min"], ["3600", "1 h"]].map(([v, l]) => (
             <option key={v} value={v}>

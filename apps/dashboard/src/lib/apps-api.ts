@@ -399,6 +399,8 @@ export interface FirewallRule {
   action: "allow" | "deny" | "limit" | "challenge";
   per_minute?: number;
   burst?: number;
+  /** `limit`'s client: `ip` (default), `header:<name>` or `cookie:<name>` (a request without it counts by address). */
+  key?: string;
   /** A path, or a prefix ending in `*`. */
   path?: string;
   methods?: string[];
@@ -417,7 +419,7 @@ export interface FieldMatch {
   contains?: string;
 }
 
-/** Firewall rules as typed, one a line: `deny /admin/*`, `deny method=DELETE,PUT`, `allow /admin/health`, `deny ip=203.0.113.0/24`, `deny header=X-Bot`, `deny query=debug:1`, `deny ua=BadBot` (`ua=` last: the rest of the line). */
+/** Firewall rules as typed, one a line: `deny /admin/*`, `limit 100 /api/* key=header:x-api-key`, `deny method=DELETE,PUT`, `allow /admin/health`, `deny ip=203.0.113.0/24`, `deny header=X-Bot`, `deny query=debug:1`, `deny ua=BadBot` (`ua=` last: the rest of the line). */
 export function parseFirewall(text: string): FirewallRule[] {
   return text
     .split("\n")
@@ -450,6 +452,7 @@ export function parseFirewall(text: string): FirewallRule[] {
         else if (t.startsWith("header=")) rule.header = field(t.slice(7));
         else if (t.startsWith("cookie=")) rule.cookie = field(t.slice(7));
         else if (t.startsWith("query=")) rule.query = field(t.slice(6));
+        else if (t.startsWith("key=")) rule.key = t.slice(4);
         else if (t.startsWith("/")) rule.path = t;
       }
       return rule;
@@ -470,6 +473,7 @@ export function formatFirewall(rules: FirewallRule[]): string {
         field("header", r.header),
         field("cookie", r.cookie),
         field("query", r.query),
+        r.key ? `key=${r.key}` : undefined,
         // Last: it takes the rest of the line.
         r.user_agent ? `ua=${r.user_agent}` : undefined,
       ]
@@ -1142,6 +1146,10 @@ export interface UptimeCheck {
   browser?: string;
   /** A browser check's performance budgets: its lab metrics past any fail it. */
   budgets?: { lcp_ms?: number; cls?: number; ttfb_ms?: number; kb?: number; requests?: number };
+  /** `public`: fetched over the internet as a visitor's request (DNS, a custom domain's TLS, the edge, its gates); default: through roll's own proxy. */
+  from?: "roll" | "public";
+  /** A public check's host: one of its active custom domains (none: its own URL). */
+  host?: string;
 }
 
 export interface UptimeCheckState {
