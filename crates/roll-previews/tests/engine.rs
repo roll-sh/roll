@@ -353,7 +353,7 @@ async fn production_browser_checks_on_a_preview_are_read_after_its_head_is_up() 
     e.apps.browser.lock().insert("web".into(), vec![check(Some(false), Some("Timeout 5000ms exceeded\u{1b}[31m"))]);
     e.engine.pass().await.unwrap();
     assert_eq!(state(&e), [("checkout".to_string(), roll_previews::CheckState::Failed, Some("Timeout 5000ms exceeded\\u{1b}[31m".to_string()))], "printable");
-    assert!(e.code.last_report("chg_bc").browser_checks.iter().any(|c| c.name == "checkout" && c.state == "failed"), "the change hears it");
+    assert!(e.code.last_report("chg_bc").browser_checks.iter().any(|c| c.name == "checkout" && c.state == roll_previews::CheckState::Failed), "the change hears it");
 }
 
 /// What happened to previews, for followers: made, up, gone, in the order it happened, from any
