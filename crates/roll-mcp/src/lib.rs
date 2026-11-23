@@ -28,6 +28,7 @@
 pub mod ask;
 pub mod card;
 pub mod events;
+pub mod find;
 pub mod guard;
 /// Lockdown is roll-auth's, so roll code's own MCP server withholds the same text.
 pub use roll_auth::lockdown;
@@ -835,6 +836,9 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
             },
             "tools/list" => {
                 let mut tools = if ctx.search { search::listed(&ctx.tools()) } else { ctx.tools() };
+                if !ctx.search && ctx.pick.keeps(find::NAME) {
+                    tools.push(find::definition());
+                }
                 // A host that renders MCP Apps shows the tools that answer rows in roll's table.
                 if ctx.ui && !ctx.search {
                     ui::attach(&mut tools);
@@ -864,6 +868,15 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                     rpc_result(id, search::find(&ctx.tools(), &args))
                 } else if !args.is_object() {
                     rpc_error(id, -32602, "arguments must be an object")
+                } else if name == find::NAME && !ctx.search && ctx.pick.keeps(find::NAME) {
+                    // Each list and read in it is a tool call of the caller's own, through the gate.
+                    let names = tool_names(ctx);
+                    let has = |t: &str| names.iter().any(|n| n == t);
+                    let found = find::run(&args, has, |tool, a, quiet| {
+                        let ctx = ctx.clone();
+                        async move { call_as(&ctx, tool, a, quiet.then_some(find::NAME)).await }
+                    });
+                    rpc_result(id, found.await)
                 } else if let Some(Err(why)) = (ctx.modern && !ctx.search).then(|| ctx.usable_tools().into_iter().find(|t| t["name"] == name.as_str()).map_or(Ok(()), |t| modern::check_params(&t, &args, &ctx.headers))) {
                     rpc_error(id, modern::HEADER_MISMATCH, format!("Header mismatch: {why}"))
                 } else if ctx.readonly && !tool_names(ctx).contains(&name) {
@@ -927,7 +940,7 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                 // A roll code file, read through the tool as the caller (the gate decides, the audit log has it).
                 Some(uri) if resources::code_file_of(uri).is_some() && tool_names(ctx).iter().any(|t| t == "code_read_file") => {
                     let (repo, path) = resources::code_file_of(uri).unwrap_or_default();
-                    match call_as(ctx, "code_read_file", json!({ "repo": repo, "path": path }), false).await {
+                    match call_as(ctx, "code_read_file", json!({ "repo": repo, "path": path }), None).await {
                         Some(r) if r["isError"] != true => rpc_result(id, resources::code_file(uri, &r["structuredContent"])),
                         Some(r) => {
                             let code = if r["structuredContent"]["http_status"] == 404 { -32002 } else { -32603 };
@@ -994,7 +1007,7 @@ async fn complete(ctx: &Arc<Ctx>, params: &Value) -> Result<Value, String> {
         return empty;
     }
     let others = params["context"]["arguments"].clone();
-    let Some(answer) = call_as(ctx, src.tool, (src.args)(&others), true).await else { return empty };
+    let Some(answer) = call_as(ctx, src.tool, (src.args)(&others), Some("completion/complete")).await else { return empty };
     if answer["isError"] == true {
         return empty;
     }
@@ -1027,7 +1040,7 @@ async fn ask_for_missing(ctx: &Arc<Ctx>, name: &str, args: &mut Value, params: &
         return None;
     }
     // The choices, read through the gate with the caller's token (never asking a person).
-    let answer = call_as(ctx, src.tool, (src.args)(args), true).await?;
+    let answer = call_as(ctx, src.tool, (src.args)(args), Some("completion/complete")).await?;
     if answer["isError"] == true {
         return None;
     }
@@ -1278,15 +1291,21 @@ pub(crate) fn server_icon() -> Value {
 
 /// Run a tool: one of ours, or a fronted set's.
 async fn call(ctx: &Arc<Ctx>, name: &str, args: Value) -> Option<Value> {
-    call_as(ctx, name, args, false).await
+    call_as(ctx, name, args, None).await
 }
 
-/// [`call`], `quiet` for a completion (an `ask` is refused, never put to a person).
-async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: bool) -> Option<Value> {
+/// [`call`], quiet for what looks something up on its own (a completion, `roll_find`'s lists,
+/// audited as `<quiet>:<tool>`): an `ask` is refused, never put to a person.
+async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: Option<&str>) -> Option<Value> {
+    let label = quiet;
+    let quiet = label.is_some();
     let redacted = roll_access::redact::value(&args, tool_product(name));
     let mut ext = Extensions::new();
     // The audit log says a completion was one (a person typing), not the agent listing.
-    let tool: Arc<str> = if quiet { format!("completion/complete:{name}").into() } else { name.into() };
+    let tool: Arc<str> = match label {
+        Some(l) => format!("{l}:{name}").into(),
+        None => name.into(),
+    };
     ext.insert(McpCall { tool, args: Arc::new(redacted), ip: ctx.ip, elicits: ctx.url_elicitation, client: ctx.client.clone(), quiet, unattended: false });
     let started = std::time::Instant::now();
     // A credential headed where people and other agents read it is refused before it's sent
@@ -1336,6 +1355,10 @@ async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: bool) -> Option
     // challenge for clients that step up (`handle`).
     if let Some(challenge) = step_up_challenge(ctx, &result) {
         result["_meta"]["mcp/www_authenticate"] = json!([challenge]);
+    }
+    // An MCP Apps view reads a changing answer again (a deploy building, an approval pending).
+    if ctx.ui && !ctx.search && !quiet {
+        ui::mark_pending(name, &args, &mut result, |t| tool_names(ctx).iter().any(|n| n == t));
     }
     // In lockdown, an outside record's text never reaches the model: withheld in the structured
     // answer, and the text block (a fronted set may write its own) rebuilt from what's left.

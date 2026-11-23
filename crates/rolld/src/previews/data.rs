@@ -1295,6 +1295,84 @@ mod tests {
         assert_eq!(revoked.lock().unwrap().clone(), ["key_1", "pv", "password", "cluster"].map(String::from).to_vec());
     }
 
+    /// Previews' masking over a real roll search (in process): on a branch of a seeded cluster,
+    /// no original value is left in `_source`, `_terms_enum` or a terms aggregation on the
+    /// `.keyword`, for a text field, an address inside an array of objects, a field under a dotted
+    /// key and an index whose name has a dot; the parent keeps every original.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_masked_search_branch_shows_no_original_value() {
+        use roll_previews::ports::Brancher as _;
+        use serde_json::{Value, json};
+        let home = tempfile::tempdir().unwrap();
+        let mut cfg = search_control::SearchConfig::local(home.path().to_path_buf());
+        cfg.gc_interval = None;
+        cfg.unsealed_secrets = true;
+        let es = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        cfg.http_port = es.local_addr().unwrap().port();
+        let control = search_control::Control::new(cfg, search_store::test_objects("previews-mask")).await.unwrap();
+        tokio::spawn(search_server::serve(es, control.node.clone(), search_server::ListenOptions::default()));
+        let api = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = api.local_addr().unwrap();
+        let router = search_control::api::router(control.clone());
+        tokio::spawn(async move { axum::serve(api, router).await });
+        let http = reqwest::Client::new();
+        let post = |path: String, body: Value| {
+            let req = http.post(format!("http://{addr}{path}")).json(&body);
+            async move {
+                let r = req.send().await.unwrap();
+                let (status, v) = (r.status(), r.json::<Value>().await.unwrap());
+                assert!(status.is_success(), "{path}: {status} {v}");
+                v
+            }
+        };
+        // One REST request on a cluster through the operator's console: its JSON body.
+        let rest = |cluster: &str, method: &'static str, path: &str, body: Value| {
+            let call = post(format!("/v1/search/clusters/{cluster}/request"), json!({ "method": method, "path": path, "body": body }));
+            let path = path.to_string();
+            async move {
+                let v = call.await;
+                assert!(v["status"].as_u64().is_some_and(|s| s < 300), "{method} {path}: {v}");
+                serde_json::from_str::<Value>(v["body"].as_str().unwrap()).unwrap()
+            }
+        };
+        post("/v1/search/clusters".into(), json!({ "name": "shop" })).await;
+        let originals = ["Alice Original", "1 Secret St", "2 Hidden Rd", "alice@corp.example", "alice-secret-login"];
+        rest(
+            "shop",
+            "PUT",
+            "/people/_doc/1?refresh=true",
+            json!({ "name": "Alice Original", "contacts": [{ "address": "1 Secret St" }, { "address": "2 Hidden Rd" }], "meta.email": "alice@corp.example" }),
+        )
+        .await;
+        rest("shop", "PUT", "/logs.2024/_doc/1?refresh=true", json!({ "user": "alice-secret-login" })).await;
+        let branch = post("/v1/search/clusters/shop/branches".into(), json!({ "name": "pv-mask" })).await["id"].as_str().unwrap().to_string();
+        let fields: std::collections::BTreeMap<String, String> =
+            [("people.name", "redact"), ("people.contacts.address", "redact"), ("people.meta.email", "email"), ("logs.2024.user", "redact")].map(|(k, v)| (k.to_string(), v.to_string())).into();
+        super::Search(super::super::Api::new(addr)).mask("shop", &branch, None, &fields).await.unwrap();
+
+        // Everything the branch can show of those fields, as one text.
+        let shown = |cluster: String| async move {
+            let mut out = vec![rest(&cluster, "POST", "/people,logs.2024/_search", json!({})).await];
+            for (path, field) in [("/people/_terms_enum", "name.keyword"), ("/people/_terms_enum", "contacts.address.keyword"), ("/people/_terms_enum", "meta.email.keyword"), ("/logs.2024/_terms_enum", "user.keyword")] {
+                out.push(rest(&cluster, "POST", path, json!({ "field": field })).await);
+            }
+            let aggs = json!({ "size": 0, "aggs": { "n": { "terms": { "field": "name.keyword" } }, "a": { "terms": { "field": "contacts.address.keyword" } }, "e": { "terms": { "field": "meta.email.keyword" } } } });
+            out.push(rest(&cluster, "POST", "/people/_search", aggs).await);
+            out.push(rest(&cluster, "POST", "/logs.2024/_search", json!({ "size": 0, "aggs": { "u": { "terms": { "field": "user.keyword" } } } })).await);
+            Value::Array(out).to_string()
+        };
+        let masked = shown(branch.clone()).await;
+        for o in originals {
+            assert!(!masked.contains(o), "the branch still shows {o:?}: {masked}");
+        }
+        assert!(masked.contains("[masked]") && masked.contains("@example.invalid"), "{masked}");
+        let parent = shown("shop".into()).await;
+        for o in originals {
+            assert!(parent.contains(o), "the parent lost {o:?}: {parent}");
+        }
+        control.shutdown().await.unwrap();
+    }
+
     #[test]
     fn a_search_mapping_becomes_lines() {
         let v = serde_json::json!({

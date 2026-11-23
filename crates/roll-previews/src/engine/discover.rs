@@ -88,12 +88,18 @@ impl Engine {
                     None => crate::CheckState::Pending,
                 };
                 let error = c.error.filter(|_| state == crate::CheckState::Failed).map(|e| crate::schema::printable(&e));
-                checks.push(crate::BrowserCheck { service: svc.name.clone(), name: crate::schema::printable(&c.name), state, error });
+                let files = c.files.filter(|_| state == crate::CheckState::Failed);
+                checks.push(crate::BrowserCheck { service: svc.name.clone(), name: crate::schema::printable(&c.name), state, error, files });
             }
         }
         let fact = crate::BrowserChecks { head: r.head.clone(), checks };
         if had.as_ref() != Some(&fact) {
             let _ = self.store.set_runtime_fact(&r.id, "browser_checks", Some(&fact));
+            // Once they've all run: an event for followers (roll MCP's Events), once a head.
+            if !fact.checks.is_empty() && fact.checks.iter().all(|c| c.state != crate::CheckState::Pending) {
+                let kind = if fact.checks.iter().any(|c| c.state == crate::CheckState::Failed) { "browser_checks_failed" } else { "browser_checks_passed" };
+                let _ = self.store.emit_once(&r.id, kind, &r.head);
+            }
             if let Ok(row) = self.store.row(&r.id) {
                 self.report(row).await;
             }

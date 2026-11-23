@@ -2477,6 +2477,58 @@ mod tests {
         assert!(super::search_parts(&json!({ "id": "x" })).is_err());
     }
 
+    /// A search link narrowed by `names` and `permission` refuses a key roll search made wider
+    /// than asked (another access, other indices, or one that doesn't say) and deletes it; the
+    /// key asked for is kept.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_search_link_refuses_and_deletes_a_wider_key() {
+        use super::LinkProvider as _;
+        use axum::routing::{delete, post};
+        let answer: Arc<Mutex<Json>> = Arc::new(Mutex::new(Json::Null));
+        let asked: Arc<Mutex<Vec<Json>>> = Default::default();
+        let deleted: Arc<Mutex<Vec<String>>> = Default::default();
+        let (a, q, d) = (answer.clone(), asked.clone(), deleted.clone());
+        let router = axum::Router::new()
+            .route(
+                "/v1/search/clusters/{id}/keys",
+                post(move |axum::Json(body): axum::Json<Json>| {
+                    q.lock().unwrap().push(body);
+                    let v = a.lock().unwrap().clone();
+                    async move { axum::Json(v) }
+                }),
+            )
+            .route(
+                "/v1/search/clusters/{id}/keys/{key}",
+                delete(move |axum::extract::Path((_, key)): axum::extract::Path<(String, String)>| {
+                    d.lock().unwrap().push(key);
+                    async { axum::http::StatusCode::NO_CONTENT }
+                }),
+            );
+        let api = super::Api::default();
+        api.set(router);
+        let search = super::Search(api, Default::default());
+        let link: super::Link = serde_json::from_value(json!({ "kind": "search", "ref": "srch_logs", "field": "api_key", "mode": "managed", "options": { "names": ["logs-app"], "permission": "read" } })).unwrap();
+        let issue = |made: Json| {
+            *answer.lock().unwrap() = made;
+            let (search, link) = (&search, &link);
+            tokio::task::block_in_place(|| search.issue("srch_logs", "api_key", link, "roll secrets ELASTICSEARCH_API_KEY", None).map(|i| i.handle))
+        };
+        for wider in [
+            json!({ "id": "k_data", "access": "data", "indices": ["logs-app"], "api_key": "x" }),
+            json!({ "id": "k_all", "access": "read", "indices": ["*"], "api_key": "x" }),
+            json!({ "id": "k_mute", "api_key": "x" }),
+        ] {
+            let e = issue(wider.clone()).expect_err("a wider key is refused");
+            assert!(e.to_string().contains("refused (and deleted)"), "{e}");
+            assert!(!e.to_string().contains("\"x\""), "no key in the error: {e}");
+        }
+        assert_eq!(*deleted.lock().unwrap(), ["k_data", "k_all", "k_mute"]);
+        assert_eq!(asked.lock().unwrap()[0]["access"], "read");
+        assert_eq!(asked.lock().unwrap()[0]["indices"], json!(["logs-app"]));
+        assert_eq!(issue(json!({ "id": "k_ok", "access": "read", "indices": ["logs-app"], "api_key": "x" })).unwrap(), json!({ "id": "k_ok" }));
+        assert_eq!(deleted.lock().unwrap().len(), 3, "the key asked for is kept");
+    }
+
     /// roll queues in process (a broker with an AMQP listener, mq-control's routes behind the
     /// links' `Api`) and roll secrets with rolld's providers, a vhost `orders` and the operator's
     /// project `shop` with it on the canvas.

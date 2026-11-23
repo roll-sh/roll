@@ -737,7 +737,9 @@ impl PageA11y {
 
 /// Something that happened to a preview, for followers (`GET /v1/previews/events`, roll MCP's
 /// event feeds): `created`, `ready` (up after a push or its first deploy; never a sleeping one
-/// waking), `failed`, `visual_change` (a visual change waits for review, once a head) or `deleted`. Ids and kinds only: `data` holds the head.
+/// waking), `failed`, `visual_change` (a visual change waits for review, once a head),
+/// `browser_checks_passed` or `browser_checks_failed` (production's browser checks have all run on
+/// the head, once a head) or `deleted`. Ids and kinds only: `data` holds the head.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Event {
     pub seq: i64,
@@ -1184,6 +1186,17 @@ pub struct BrowserCheck {
     pub state: CheckState,
     /// What failed (the check's own words, made printable and cut).
     pub error: Option<String>,
+    /// Where its failure's screenshot and Playwright trace are kept (roll apps': `GET
+    /// /v1/apps/services/{service_id}/environments/{environment}/checks/{name}/screenshot` and
+    /// `/trace`, `read` on that service), when they were.
+    pub files: Option<BrowserCheckFiles>,
+}
+
+/// A roll apps service and environment a browser check's failure files are kept under.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct BrowserCheckFiles {
+    pub service_id: String,
+    pub environment: String,
 }
 
 /// The browser checks read for `head` (a runtime fact; a new head reads its own).

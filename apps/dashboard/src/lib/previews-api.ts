@@ -179,7 +179,7 @@ export interface Preview {
   /** Earlier pushes of the change's services, still reachable (newest first), each on its own copy of the data where `own_data` names products. */
   earlier?: { service: string; revision: string; url: string; share_url: string | null; at: number; own_data?: string[] }[];
   /** Production's browser checks on this head (roll apps runs them as its deployment goes live). */
-  browser_checks?: { service: string; name: string; state: "pending" | "passed" | "failed"; error: string | null }[];
+  browser_checks?: { service: string; name: string; state: "pending" | "passed" | "failed"; error: string | null; files?: { service_id: string; environment: string } | null }[];
   /** The earlier pushes' own copies of the data: how many, their bytes and a month of keeping them (in `cost`). */
   copies?: { count: number; bytes: number; usd_month: number };
   /** When its screenshot was taken (`screenshot` below), if it has one. */
@@ -662,7 +662,7 @@ export type ErrorGroup = { service: string; fingerprint: string; kind: string; t
 
 /** A running service's use right now: cores of CPU, resident bytes (an instance's, on roll apps), and the MB it runs with. */
 /** Something that happened to a preview (`GET /v1/previews/events`). */
-export type PreviewEvent = { seq: number; at: number; kind: "created" | "ready" | "failed" | "visual_change" | "deleted"; project: string; preview: string; change: string | null; data: { head?: string } };
+export type PreviewEvent = { seq: number; at: number; kind: "created" | "ready" | "failed" | "visual_change" | "browser_checks_passed" | "browser_checks_failed" | "deleted"; project: string; preview: string; change: string | null; data: { head?: string } };
 export type ServiceMetrics = { service: string; cpu: number; memory_bytes: number; memory_mb: number };
 
 /** One of a preview's recent traces: its root span's name and service, when (ms), how long, how many spans, whether any failed. */
