@@ -1214,6 +1214,35 @@
         "x-roll-action": "read"
       }
     },
+    "/v1/apps/quote": {
+      "post": {
+        "description": "Answers `Quote`: what a service run so costs at most, before it's made.",
+        "operationId": "postQuote",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "description": "`{ run?: Run }` (as `NewService`'s, checked as it is)"
+        },
+        "responses": {
+          "200": {
+            "description": "`Quote`: what a service run so costs at most, before it's made"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Quote",
+        "tags": [
+          "quote"
+        ],
+        "x-roll-action": "read"
+      }
+    },
     "/v1/apps/services": {
       "get": {
         "description": "Answers `Service[]`; `deleted=true`: `{id, project, name, deleted_at, purge_at}[]` (unix ms, newest first), the deleted services kept for a restore until `purge_at`, 48 hours after the delete.",

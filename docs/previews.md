@@ -1830,7 +1830,7 @@ type Settings = {
   max_usd_month: number;              // 0: no cap; once the month's cost reaches it, new previews wait
   secrets: { base: string; allow_production: boolean };      // "development", false
   env: Record<string, string>;        // overrides every service gets
-  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[]; hide: string[]; budget: { load_ms: number; bytes: number }; openapi?: string; endpoints?: string[]; states?: {name, page, steps}[]; browsers?: ("firefox" | "webkit" | "webkit-phone")[] };   // all true but screenshot; pages, hide: []; budget 0s (none); openapi: the first service's OpenAPI JSON path, compared with main's; endpoints: up to 5 GET paths timed against main's
+  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[]; hide: string[]; budget: { load_ms: number; bytes: number }; openapi?: string; endpoints?: string[]; states?: {name, page, steps}[]; storybook?: string /* "web" or "web:/storybook/" */; browsers?: ("firefox" | "webkit" | "webkit-phone")[] };   // all true but screenshot; pages, hide: []; budget 0s (none); openapi: the first service's OpenAPI JSON path, compared with main's; endpoints: up to 5 GET paths timed against main's
   access: "link" | "team" | "public"; // "link": a preview's URLs need its link; "team": a person signed in to roll who may open the project
   visual_review: "off" | "check" | "required";   // the roll/visual review; required also blocks landing in roll ("off")
   feedback: boolean;                  // a feedback button on its pages for people who came in through roll (true)
@@ -2014,6 +2014,21 @@ type Settings = {
     `total` `number` → `string`"). The shapes stay with the comparison: a preview's
     `page_speed` doesn't carry them (live: the change's `/openapi.json` loses
     `paths./users/{id}`).
+    Its Storybook's stories too (Chromatic's stories): with `github.storybook` (`web`, or
+    `web:/storybook/` when the service serves it under a path: a static build or `storybook
+    dev`), that service's run reads Storybook's index (`index.json`, Storybook 7 and later;
+    `stories.json` before), and takes the first 40 stories (docs left out) in a run of its own
+    beside the screenshot's, in the service's network and locked down the same way. Each story is
+    loaded alone (`iframe.html?id=…&viewMode=story`) at the desktop width, waited for until its
+    root holds something (3 s at most), and captured clipped to what it rendered (an 8 px margin,
+    at most 1280 by 2000; 256 KiB a PNG), 100 s in all. Each is a page of its own (`story:<id>`,
+    "Stories" on the sheet, labelled `button / primary`), with what went wrong while it rendered,
+    compared with main's same story and reviewed like a page. A story gone from Storybook goes
+    from the preview. The index is the preview's code's: an id Storybook wouldn't make
+    (`components-button--primary`) is dropped. A Storybook on another service is kept with that
+    service's pages while it runs what it ran (TurboSnap), and taken at once when the rule is
+    turned on (checked in the screenshot image: a docs entry and a bad id skipped, a 600 by 120
+    card captured as 616 by 136 with its console error counted).
     Page states too (Chromatic's interaction tests, Percy's scripted snapshots): much of what a
     change touches shows only after a click (a cart open, a dialog, a form's errors). A project
     names up to 3 (`github.states`: a name, a page of the first service's, and 1 to 10 steps:
@@ -2508,24 +2523,23 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Endpoint answers compared with main's by shape, in review** (Signadot's SmartTests): a
-   field gone or a type widened in a JSON answer, on the verdict strip, the sheet, the change page
-   and the pull request comment.
-2. **Storybook stories as snapshots** (Chromatic): each story taken, compared with main's and
-   reviewed like a page, with TurboSnap's skip.
-3. **A process on a laptop standing in for one service** (Signadot local sandboxes,
+1. **Storybook stories as snapshots, in review** (Chromatic): each story taken alone, clipped to
+   what it renders, compared with main's and reviewed like a page (`github.storybook`).
+2. **A process on a laptop standing in for one service** (Signadot local sandboxes,
    Telepresence): the preview's other services and data reach it, the reverse of
    `roll preview forward`.
-4. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
+3. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
    (3.3 s in its log) and its masking, which needs that compute up: pg-control's to shorten.
-5. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+4. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-6. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-7. **Watch: pg-control's recovery to a time seconds old** (unowned).
+6. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-23, evening, later: endpoint answers compared with main's by shape (#834: a field gone or a type widened; live, `/openapi.json` loses `paths./users/{id}`).
 
 Landed 2026-11-23, evening: feedback notes that carry the page's uncaught errors, failed requests and browser (#823, checked in headless Chromium).
 

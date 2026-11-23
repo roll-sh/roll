@@ -1,6 +1,6 @@
 import { ChevronRight, FileText, GitBranch, Image, LoaderCircle, Plus, Terminal } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { appsApi, parseEnv, SERVICE_NAME, type Plan, type RootCandidate, type Service, type ServiceType, type Source } from "@/lib/apps-api";
+import { appsApi, parseEnv, SERVICE_NAME, type Plan, type Quote, type RootCandidate, type Service, type ServiceType, type Source } from "@/lib/apps-api";
 import { codeApi, type GithubInstallation, type Owner, type Repo } from "@/lib/code-api";
 import type { WorkspaceProject } from "@/lib/workspace-api";
 import { freeSpot, KIND_LABEL, resourceKey, suggestName, type ResourceView } from "@/lib/workspace-resources";
@@ -77,6 +77,19 @@ export function NewServiceSheet({
   const [port, setPort] = useState("");
   const [health, setHealth] = useState("");
   const [kind, setKind] = useState<ServiceType>("web");
+  // What it costs at most with roll's defaults, said before it's made.
+  const [quote, setQuote] = useState<Quote | null>(null);
+  useEffect(() => {
+    if (kind === "cron") return setQuote(null);
+    let live = true;
+    appsApi.quote({ type: kind }).then(
+      (q) => live && setQuote(q),
+      () => live && setQuote(null),
+    );
+    return () => {
+      live = false;
+    };
+  }, [kind]);
   const [schedule, setSchedule] = useState("");
   const [env, setEnv] = useState("");
   // The project's databases and storage, linked before the first deploy (their variables are in it).
@@ -506,7 +519,15 @@ export function NewServiceSheet({
         {error && <p className="mt-3 rounded-lg border border-danger/40 bg-danger/10 px-2.5 py-2 text-[11.5px] text-danger">{error}</p>}
       </div>
       <div className="flex items-center gap-2 border-t border-line px-3 py-2">
-        <span className="mr-auto text-[11px] text-subtle">{from === "upload" ? "Nothing is made until you run it." : from === "file" ? "A project's roll.toml, or a Compose file." : "Deploys to production when it's made."}</span>
+        <span className="mr-auto text-[11px] text-subtle">
+          {from === "upload" ? "Nothing is made until you run it." : from === "file" ? "A project's roll.toml, or a Compose file." : "Deploys to production when it's made."}
+          {quote && from !== "file" && (
+            <span className="font-mono" title={quote.note}>
+              {" "}
+              {quote.scales_to_zero ? "Free while asleep" : `$${quote.idle_hour.toFixed(3)}/h idle`}, at most ${quote.month.most.toFixed(2)}/mo.
+            </span>
+          )}
+        </span>
         <button onClick={onClose} className="rounded-md px-2 py-1 text-[11.5px] text-muted hover:bg-white/[0.05] hover:text-fg">
           {from === "upload" ? "Done" : "Cancel"}
         </button>

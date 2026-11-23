@@ -5294,10 +5294,12 @@ fn firewall_rule(line: &str) -> anyhow::Result<Value> {
                 Some((name, contains)) => json!({ "name": name, "contains": contains }),
                 None => json!({ "name": v }),
             };
+        } else if let Some(k) = w.strip_prefix("key=") {
+            rule["key"] = json!(k);
         } else if w.starts_with('/') {
             rule["path"] = json!(w);
         } else {
-            anyhow::bail!("{w:?} in {line:?}: a path (/…), method=…, ip=…, header=…, cookie=…, query=…, or ua=…");
+            anyhow::bail!("{w:?} in {line:?}: a path (/…), method=…, ip=…, header=…, cookie=…, query=…, key=…, or ua=…");
         }
     }
     Ok(rule)

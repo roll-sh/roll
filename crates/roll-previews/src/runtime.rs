@@ -1295,6 +1295,53 @@ pub const SCREENSHOT_MAX: usize = 2 << 20;
 /// pages'), each at most this, and everything it writes: every PNG it can take, in base64, and
 /// those lines.
 const SHOT_REPORT_MAX: usize = 4 << 20;
+/// A story's PNG, at most (one clipped to what it renders).
+const STORY_MAX: usize = 256 << 10;
+/// A stories run's output: its report, and its PNGs as base64.
+const STORIES_OUTPUT_MAX: usize = crate::settings::MAX_STORIES * STORY_MAX * 4 / 3 + (64 << 10);
+/// A stories run, at most (its own 100 s, and the browser's start).
+const STORIES_FOR: Duration = Duration::from_secs(150);
+
+/// `docker run` for a browser run in container `name`'s network (its page at
+/// `127.0.0.1:<port>`), locked down: the page is the preview's code.
+fn shot_args(shot: &str, name: &str, port: u16) -> Vec<String> {
+    let mut args: Vec<String> = vec!["run".into(), "--rm".into(), "-i".into(), "--name".into(), shot.to_string(), "--network".into(), format!("container:{name}")];
+    // Cleaned up with the runtime's own containers after a crash.
+    args.extend(["--label".into(), format!("{}=preview", code_preview::docker::LABEL)]);
+    if let Some(l) = code_preview::docker::home_label() {
+        args.extend(["--label".into(), l]);
+    }
+    // No capabilities, no new privileges, nothing written but /tmp.
+    args.extend(["--cap-drop".into(), "ALL".into(), "--security-opt".into(), "no-new-privileges".into(), "--read-only".into(), "--tmpfs".into(), "/tmp:rw,size=256m".into()]);
+    args.extend(code_preview::docker::limits(1024, 1.0));
+    args.extend(["--env".into(), format!("URL=http://127.0.0.1:{port}/"), "--env".into(), "OUT=/tmp/s.png".into(), "--env".into(), "HOME=/tmp".into()]);
+    args.extend(["--env".into(), format!("ROLL_SHOT_JS={SHOT_JS}")]);
+    args
+}
+
+/// What a stories run said (`[{id, errors}]`), and its PNGs a line each, in that order: each
+/// story once, by an id roll accepts, with a PNG of at most [`STORY_MAX`] bytes, at most
+/// [`crate::settings::MAX_STORIES`]. The run is the preview's code: nothing else is taken.
+fn story_shots<'a>(said: &str, pngs: impl Iterator<Item = &'a str>) -> Vec<crate::ports::PageShot> {
+    use base64::Engine as _;
+    #[derive(serde::Deserialize)]
+    struct Said {
+        id: String,
+        #[serde(default)]
+        errors: u32,
+    }
+    let said: Vec<Said> = serde_json::from_str(said.trim()).unwrap_or_default();
+    let mut out: Vec<crate::ports::PageShot> = Vec::new();
+    for (s, b64) in said.into_iter().zip(pngs).take(crate::settings::MAX_STORIES) {
+        let path = format!("story:{}", s.id);
+        let Ok(png) = base64::engine::general_purpose::STANDARD.decode(b64.trim()) else { continue };
+        if !crate::settings::story_id_ok(&s.id) || !png.starts_with(b"\x89PNG") || png.len() > STORY_MAX || out.iter().any(|p| p.path == path) {
+            continue;
+        }
+        out.push(crate::ports::PageShot { path, png, errors: s.errors.min(10_000), report: Default::default() });
+    }
+    out
+}
 const SHOT_OUTPUT_MAX: usize = (crate::settings::MAX_PAGES + 2) * SCREENSHOT_MAX * 4 / 3 + 3 * SHOT_REPORT_MAX + crate::store::CROPS_PER_RUN * crate::store::CROP_MAX * 4 / 3 + (64 << 10);
 
 /// The header automation sends a project's bypass secret in (docs/previews.md, "Safety").
@@ -1765,17 +1812,8 @@ impl Runtime {
             code_preview::docker::docker(&["pull", "--quiet", &self.cfg.screenshot_image]).await?;
         }
         let shot = format!("roll-previews-shot-{}", name.trim_start_matches("roll-previews-"));
-        let mut args: Vec<String> = vec!["run".into(), "--rm".into(), "-i".into(), "--name".into(), shot.clone(), "--network".into(), format!("container:{name}")];
-        // Cleaned up with the runtime's own containers after a crash.
-        args.extend(["--label".into(), format!("{}=preview", code_preview::docker::LABEL)]);
-        if let Some(l) = code_preview::docker::home_label() {
-            args.extend(["--label".into(), l]);
-        }
-        // The page is the preview's code: no capabilities, no new privileges, nothing written but /tmp.
-        args.extend(["--cap-drop".into(), "ALL".into(), "--security-opt".into(), "no-new-privileges".into(), "--read-only".into(), "--tmpfs".into(), "/tmp:rw,size=256m".into()]);
-        args.extend(code_preview::docker::limits(1024, 1.0));
-        args.extend(["--env".into(), format!("URL=http://127.0.0.1:{port}/"), "--env".into(), "OUT=/tmp/s.png".into(), "--env".into(), "HOME=/tmp".into()]);
-        args.extend(["--env".into(), format!("ROLL_SHOT_JS={SHOT_JS}"), "--env".into(), "AXE=/tmp/axe.js".into()]);
+        let mut args = shot_args(&shot, name, port);
+        args.extend(["--env".into(), "AXE=/tmp/axe.js".into()]);
         let pages: Vec<&String> = opts
             .pages
             .iter()
@@ -1841,7 +1879,14 @@ impl Runtime {
             let r = if opts.browsers.is_empty() { None } else { Some(self.other_browsers(name, port, opts).await) };
             (r, started.elapsed().as_millis() as u64)
         };
-        let (run, (more, browsers_ms)) = tokio::join!(tokio::time::timeout(within, docker_with_input(&argv, AXE_JS.as_bytes(), SHOT_OUTPUT_MAX)), browsers_run);
+        // Its Storybook's stories, in a run of their own alongside (`github.storybook`).
+        let stories_run = async {
+            match opts.stories.as_deref().filter(|p| crate::settings::page_path_ok(p) && p.ends_with('/')) {
+                Some(at) => Some(self.stories_in(name, port, at).await),
+                None => None,
+            }
+        };
+        let (run, (more, browsers_ms), stories) = tokio::join!(tokio::time::timeout(within, docker_with_input(&argv, AXE_JS.as_bytes(), SHOT_OUTPUT_MAX)), browsers_run, stories_run);
         let out = match run {
             Ok(Ok(out)) => out,
             // Its container outlives a docker CLI that gave up on it (too much output).
@@ -1887,9 +1932,49 @@ impl Runtime {
             Some(Err(e)) => tracing::warn!(container = name, error = %e, "previews: other browsers' screenshots"),
             None => {}
         }
+        // The stories, best effort too.
+        match stories {
+            Some(Ok(s)) => shot.pages.extend(s),
+            Some(Err(e)) => tracing::warn!(container = name, error = %e, "previews: Storybook's stories"),
+            None => {}
+        }
         // How long it took, and the other browsers' run within it.
         tracing::info!(container = name, pages = pages.len(), run_ms = chromium.elapsed().as_millis() as u64, browsers_ms, "previews: screenshot run");
         Ok(shot)
+    }
+
+    /// A service's Storybook stories (`github.storybook`; Chromatic's stories), served at `at`: a
+    /// run of their own in its network, locked down as the screenshot's is, each story a page
+    /// (`story:<id>`).
+    async fn stories_in(&self, name: &str, port: u16, at: &str) -> anyhow::Result<Vec<crate::ports::PageShot>> {
+        let shot = format!("roll-previews-story-{}", name.trim_start_matches("roll-previews-"));
+        let mut args = shot_args(&shot, name, port);
+        args.extend(["--env".into(), format!("STORIES={at}")]);
+        args.extend([
+            self.cfg.screenshot_image.clone(),
+            "sh".into(),
+            "-c".into(),
+            format!(
+                "{} >/dev/null 2>&1; (cat /tmp/s.png.stories.json 2>/dev/null || true) && for n in $(seq 0 {}); do echo; base64 -w0 /tmp/s.png.story.$n.png 2>/dev/null || true; done",
+                self.cfg.screenshot_command,
+                crate::settings::MAX_STORIES - 1
+            ),
+        ]);
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = match tokio::time::timeout(STORIES_FOR, docker_with_input(&argv, Vec::new(), STORIES_OUTPUT_MAX)).await {
+            Ok(Ok(out)) => out,
+            Ok(Err(e)) => {
+                code_preview::docker::remove(&shot).await;
+                return Err(e);
+            }
+            Err(_) => {
+                code_preview::docker::remove(&shot).await;
+                anyhow::bail!("its stories took over {} s", STORIES_FOR.as_secs());
+            }
+        };
+        let mut lines = out.split('\n');
+        let said = lines.next().filter(|l| l.len() <= SHOT_REPORT_MAX).unwrap_or("");
+        Ok(story_shots(said, lines))
     }
 
     /// The first page in the other browsers `opts.browsers` names (`browser:<name>` pages), in the
@@ -2708,6 +2793,20 @@ mod tests {
         assert_eq!(run(r#"[{"path":"/pricing","errors":2},{"path":"/pricing"}]"#, &[&png, &png]), [pricing()], "once");
         assert_eq!(run(r#"[{"path":"/pricing","errors":99999}]"#, &[&png]), [("/pricing".to_string(), 10_000)], "bounded");
         assert_eq!(run("not json", &[&png]), []);
+    }
+
+    /// A stories run's report is the preview's code's: each story once, by an id Storybook would
+    /// make, with a PNG within the cap; anything else is dropped.
+    #[test]
+    fn a_stories_runs_pages_are_stories_it_can_name_each_once() {
+        use base64::Engine as _;
+        let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+        let (png, junk, big) = (b64(b"\x89PNG\r\n\x1a\n..."), b64(b"not a png"), b64(&[b"\x89PNG".as_slice(), &vec![0u8; STORY_MAX]].concat()));
+        let said = r#"[{"id":"button--primary","errors":2},{"id":"../x--y"},{"id":"button--primary"},{"id":"card--empty"},{"id":"card--big"},{"id":"card--full"}]"#;
+        let pngs = [&png, &png, &png, &junk, &big, &png];
+        let got: Vec<(String, u32)> = story_shots(said, pngs.iter().map(|s| s.as_str())).into_iter().map(|p| (p.path, p.errors)).collect();
+        assert_eq!(got, [("story:button--primary".to_string(), 2), ("story:card--full".to_string(), 0)]);
+        assert!(story_shots("not json", [png.as_str()].into_iter()).is_empty());
     }
 
     #[test]

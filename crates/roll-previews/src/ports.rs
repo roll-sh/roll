@@ -370,6 +370,9 @@ pub struct ShotOptions {
     /// The open notes' elements to crop in the first service's run (Vercel's comments show what
     /// they're about), at most [`crate::store::CROPS_PER_RUN`].
     pub crops: Vec<CropAsk>,
+    /// Where the service serves Storybook (`/`, `/storybook/`; `github.storybook`): its stories
+    /// are taken too, each a page (`story:<id>`).
+    pub stories: Option<String>,
 }
 
 /// One more page of a [`Shot`]: its path, its PNG, and what went wrong while it loaded.

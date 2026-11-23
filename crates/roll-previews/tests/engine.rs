@@ -1877,6 +1877,41 @@ async fn a_service_that_didnt_change_keeps_its_pages() {
     assert_eq!(runs("web"), web_before + 1, "after a reset its pages are taken again");
 }
 
+/// A Storybook another service serves (`github.storybook`): its stories are pages of their own
+/// (`story:<id>`), kept with the rest of that service's pages while it runs what it ran.
+#[tokio::test]
+async fn a_storybooks_stories_are_pages_kept_while_its_service_doesnt_change() {
+    let e = env(json!({ "enabled": true, "github": { "screenshot": true, "storybook": "web:/sb/" } }));
+    let mut png = Vec::new();
+    image::RgbaImage::new(4, 4).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    *e.apps.shot.lock() = Some(png);
+    let runs = |svc: &str| e.apps.shot_services.lock().iter().filter(|s| *s == svc).count();
+    let mut c = change("chg_sb", 3);
+    c.repo = "acme/api".into();
+    e.code.open(c);
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_sb").unwrap().unwrap();
+    let stories = |e: &Env| e.engine.store.preview(&p.id).unwrap().pages.iter().filter(|x| x.path.starts_with("story:")).map(|x| x.path.clone()).collect::<Vec<_>>();
+    for _ in 0..3000 {
+        if stories(&e).len() == 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(stories(&e), ["story:button--primary", "story:button--secondary"]);
+    let web_before = runs("web");
+    // A push to api: web runs what it ran, so its stories are kept, not taken again.
+    e.code.edit("chg_sb", |c| c.head = "cs_4b".into());
+    e.engine.pass().await.unwrap();
+    for _ in 0..3000 {
+        if e.engine.store.screenshot_head(&p.id).unwrap().as_deref() == Some("cs_4b") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!((runs("web"), stories(&e).len()), (web_before, 2), "kept with web's other pages");
+}
+
 /// A note left with the page's Feedback button gets a picture of its element: the next screenshot
 /// run crops it by its selector (only selectors roll accepts, from the preview's code), keeps it
 /// with the note and lists it; a note already cropped isn't asked again, and one whose element
