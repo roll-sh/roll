@@ -673,3 +673,67 @@ async fn an_environments_delete_names_the_services_that_read_it_and_needs_a_conf
     assert!(refused.text().await.unwrap().contains("service web"));
     assert_eq!(delete("?confirm=staging").await.unwrap().status(), 200);
 }
+
+/// An environment's deletion preview names only the tokens that reach it, judged as reach judges
+/// them (real roll-access): another person's token whose rule is "every project, `staging`" reaches
+/// nothing in a project they aren't in, so it isn't named there and asks for no confirm; it is in
+/// their own project's, and the operator's token of the same rule is in both.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_environments_delete_names_only_the_tokens_that_reach_it() {
+    const DASHBOARD: &str = "https://roll.sh";
+    let home = Arc::new(tempfile::tempdir().unwrap());
+    let outbox = home.path().join("outbox");
+    let r = Rolld::start_in(home, "search", false, &[("ROLL_ACCOUNTS_OUTBOX", outbox.to_str().unwrap()), ("ROLL_DASHBOARD_ORIGIN", DASHBOARD)], "/v1/info").await;
+    let theirs = Project::new(&r).await.id;
+    let cookie = sign_in(&r, &outbox).await;
+    let session = r.http.get(format!("{}/v1/accounts/session", r.api)).header("cookie", &cookie).send().await.unwrap().json::<Value>().await.unwrap();
+    let csrf = session["csrf"].as_str().unwrap().to_string();
+    let as_ada = |path: &str, body: Value| {
+        let req = r.http.post(format!("{}{path}", r.api)).header("cookie", &cookie).header("origin", DASHBOARD).header("x-roll-csrf", &csrf).json(&body);
+        async move {
+            let a = req.send().await.unwrap();
+            let status = a.status();
+            let v: Value = a.json().await.unwrap_or_default();
+            assert!(status.is_success(), "{status} {v}");
+            v
+        }
+    };
+    let hers = as_ada("/v1/workspace/projects", json!({ "name": "notes" })).await["id"].as_str().unwrap().to_string();
+    let staging = json!([{ "product": "secrets", "resources": "*", "environments": ["staging"], "actions": { "read": "allow" } }]);
+    as_ada("/v1/access/tokens", json!({ "name": "ada-staging-ci", "rules": staging })).await;
+    for p in [&theirs, &hers] {
+        r.call(reqwest::Method::PUT, &format!("/v1/secrets/projects/{p}/environments/staging/secrets/LOG_LEVEL"), Some(json!({ "value": "debug" }))).await;
+    }
+    let tokens = |preview: &Value| -> Vec<String> { preview["breaks"].as_array().unwrap().iter().filter(|b| b["via"] == "token").map(|b| b["name"].as_str().unwrap().to_string()).collect() };
+
+    let preview = r.get(&format!("/v1/secrets/projects/{theirs}/environments/staging/deletion")).await;
+    assert_eq!((tokens(&preview), &preview["confirm"]), (vec![], &json!(false)), "{preview}");
+    let delete = |q: &str| r.http.delete(format!("{}/v1/secrets/projects/{theirs}/environments/staging{q}", r.api)).bearer_auth(TOKEN).send();
+    let preview = r.get(&format!("/v1/secrets/projects/{hers}/environments/staging/deletion")).await;
+    assert_eq!(tokens(&preview), ["ada-staging-ci"], "it reaches her own project's: {preview}");
+
+    r.post("/v1/access/tokens", json!({ "name": "fleet-staging-ci", "rules": staging })).await;
+    let preview = r.get(&format!("/v1/secrets/projects/{theirs}/environments/staging/deletion")).await;
+    assert_eq!((tokens(&preview), &preview["confirm"]), (vec!["fleet-staging-ci".to_string()], &json!(true)), "{preview}");
+    assert_eq!(delete("").await.unwrap().status(), 409);
+    assert_eq!(delete("?confirm=staging").await.unwrap().status(), 200);
+}
+
+/// Invite `ada@example.com` with the operator's token and sign in by email code (from the
+/// outbox): the session cookie, as `name=value`.
+async fn sign_in(r: &Rolld, outbox: &std::path::Path) -> String {
+    let invite = r.post("/v1/accounts/invites", json!({ "email": "ada@example.com" })).await;
+    let start: Value = r.http.post(format!("{}/v1/accounts/email/start", r.api)).json(&json!({ "email": "ada@example.com", "invite": invite["token"] })).send().await.unwrap().json().await.unwrap();
+    let mut code = None;
+    for _ in 0..200 {
+        let mails = std::fs::read_dir(outbox).into_iter().flatten().flatten().filter(|e| !e.file_name().to_string_lossy().starts_with('.'));
+        code = mails.filter_map(|e| serde_json::from_slice::<Value>(&std::fs::read(e.path()).ok()?).ok()).find_map(|m| m["subject"].as_str().filter(|s| s.contains("sign-in code")).map(|s| s[..6].to_string()));
+        if code.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let verify = r.http.post(format!("{}/v1/accounts/email/verify", r.api)).json(&json!({ "challenge": start["challenge"], "code": code.expect("a sign-in mail") })).send().await.unwrap();
+    assert_eq!(verify.status(), 200);
+    verify.headers()["set-cookie"].to_str().unwrap().split(';').next().unwrap().to_string()
+}
