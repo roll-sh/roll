@@ -409,7 +409,7 @@ export function describePending(p: Pending): string | null {
 
 export interface FirewallRule {
   /** `limit`: let in at `per_minute` a client, a 429 past it. */
-  action: "allow" | "deny" | "limit" | "challenge";
+  action: "allow" | "deny" | "limit" | "challenge" | "log";
   per_minute?: number;
   burst?: number;
   /** `limit`'s client: `ip` (default), `header:<name>` or `cookie:<name>` (a request without it counts by address). */
@@ -445,7 +445,7 @@ export function parseFirewall(text: string): FirewallRule[] {
     .filter((l) => l && !l.startsWith("#"))
     .map((l) => {
       const [action, ...words] = l.split(/\s+/);
-      const rule: FirewallRule = { action: action === "allow" ? "allow" : action === "limit" ? "limit" : action === "challenge" ? "challenge" : "deny" };
+      const rule: FirewallRule = { action: action === "allow" ? "allow" : action === "limit" ? "limit" : action === "challenge" ? "challenge" : action === "log" ? "log" : "deny" };
       let rest = words;
       // `limit N[:BURST] …`
       if (rule.action === "limit") {
@@ -793,6 +793,8 @@ export interface Environment extends EnvironmentSummary {
   rate_limit?: { per_minute: number; burst?: number | null } | null;
   /** Its firewall rules, in order. */
   firewall?: FirewallRule[];
+  /** Requests each rule matched in the last 24 hours, in their order. */
+  firewall_hits?: number[];
   /** Headers its answers carry. */
   headers?: HeaderRule[];
   /** Paths another service of the project answers. */
