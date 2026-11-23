@@ -146,6 +146,24 @@ const FEEDS: &[Feed] = &[
         },
     },
     Feed {
+        name: "workspace.event",
+        description: "Who holds a role on a project changed: a member added, removed (left, removed or offboarded), deactivated or given another role; a group given a role or losing it; an invite sent, accepted or revoked. Never a token or code (an invite's email only for the project's admins). Give the project; filter by kinds (member.removed, or member.* for a family).",
+        tool: "workspace_list_members",
+        product: "workspace",
+        path: &[("project", "The project (prj_…)")],
+        after: "/v1/workspace/projects/{project}/events?limit=100&after=",
+        latest: "/v1/workspace/projects/{project}/events?latest=1",
+        filters: &[("kinds", "kind", "Only these kinds (member.added, member.removed, member.role_changed, member.deactivated, group.role_set, group.role_removed, invite.sent, invite.accepted, invite.revoked, or member.* for a family); all when left out")],
+        payload: || {
+            json!({ "type": "object", "properties": {
+                "seq": { "type": "integer" },
+                "at": { "type": "integer", "description": "Unix milliseconds" },
+                "kind": { "type": "string" },
+                "data": { "type": "object", "description": "Person and group ids, handles, roles and environments, reasons, and the actor; never a secret" },
+            } })
+        },
+    },
+    Feed {
         name: "secrets.event",
         description: "Something happened to a project's secrets: a value changed or was deleted (names and versions), a secret leaked or a scan found one, a rotation worked or failed, a sync failed, an environment's protection or a folder's policy changed, a value request waiting or decided, a placeholder echoed or sent to the wrong place, production left unprotected, an environment or the project deleted or recovered. Never a value. Give the project; filter by kinds (secret.changed, or secret.* for a family) and environment.",
         tool: "secrets_audit",
