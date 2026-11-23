@@ -3510,7 +3510,8 @@ async fn a_project_that_requires_signed_images_refuses_unsigned_ones() {
     assert_eq!(call(&w.api, "POST", &sandboxes, Some(json!({"image": "python:3.13-slim"}))).await.0, StatusCode::FORBIDDEN);
     assert_eq!(call(&w.api, "POST", &sandboxes, None).await.0, StatusCode::CREATED);
     assert_eq!(call(&w.api, "DELETE", &signing, None).await.0, StatusCode::NO_CONTENT);
-    assert_eq!(call(&w.api, "GET", &signing, None).await.1, json!({"keys": [], "required": false}));
+    let gone = call(&w.api, "GET", &signing, None).await.1;
+    assert_eq!((&gone["keys"], &gone["required"]), (&json!([]), &json!(false)), "{gone}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -5464,6 +5465,40 @@ async fn builds_share_a_remote_cache_for_turborepo_and_nx() {
     let (_, d) = call(&w.api, "POST", &format!("{env}/deploys"), Some(json!({"closed": true}))).await;
     settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
     assert!(!w.fake.build_vars.lock().last().unwrap().iter().any(|k| k.starts_with("TURBO_")));
+}
+
+/// Provenance on roll's builds (SLSA v1): a build's image has a DSSE envelope whose statement names
+/// the source, revision and image digest, signed with the project's `roll_key`; an image roll
+/// didn't build has none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_build_has_signed_provenance() {
+    use base64::Engine;
+    use p256::ecdsa::signature::Verifier;
+    use p256::pkcs8::DecodePublicKey;
+    let w = world().await;
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "site", "source": {"kind": "repo", "repo": "acme/site"} }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let dep = svc["environments"][0]["latest"]["id"].as_str().unwrap().to_string();
+    let d = settled(&w, &id, "production", &dep).await;
+    let (st, env) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys/{dep}/provenance"), None).await;
+    assert_eq!(st, StatusCode::OK, "{env}");
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let payload = b64.decode(env["payload"].as_str().unwrap()).unwrap();
+    let statement: Value = serde_json::from_slice(&payload).unwrap();
+    assert_eq!(statement["predicateType"], "https://slsa.dev/provenance/v1");
+    assert_eq!(statement["subject"][0]["name"], d["image"], "{statement}");
+    assert_eq!(statement["predicate"]["buildDefinition"]["externalParameters"]["source"]["repo"], "acme/site");
+    assert_eq!(statement["predicate"]["runDetails"]["metadata"]["invocationId"], dep.as_str());
+    let (_, signing) = call(&w.api, "GET", &format!("/v1/apps/projects/{}/signing", w.project), None).await;
+    let key = p256::ecdsa::VerifyingKey::from_public_key_pem(signing["roll_key"].as_str().unwrap()).unwrap();
+    let sig = p256::ecdsa::Signature::from_der(&b64.decode(env["signatures"][0]["sig"].as_str().unwrap()).unwrap()).unwrap();
+    assert!(key.verify(&apps_control::provenance::pae(apps_control::provenance::PAYLOAD_TYPE, &payload), &sig).is_ok(), "signed with the project's roll key");
+    // An image roll didn't build has none.
+    let (img, d) = image_service(&w, "api", json!({"port": 80})).await;
+    let iid = img["id"].as_str().unwrap();
+    let (st, _) = call(&w.api, "GET", &format!("/v1/apps/services/{iid}/environments/production/deploys/{}/provenance", d["id"].as_str().unwrap()), None).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
 }
 
 /// Readable Node stack traces: a Node build that writes source maps starts with

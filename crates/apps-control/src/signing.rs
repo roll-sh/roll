@@ -16,7 +16,11 @@ impl Apps {
     pub async fn signing(self: &Arc<Self>, project: &str) -> Result<Value> {
         let p = project.to_string();
         let (keys, required) = self.db(move |s| s.project_signing(&p)).await?.unwrap_or_default();
-        Ok(json!({ "keys": keys, "required": required }))
+        // roll's own key for the project's builds' provenance (`crate::provenance`), made here if
+        // it has none yet, so it can be pinned before the first build.
+        let p = project.to_string();
+        let roll_key = self.db(move |s| s.provenance_key(&p).map(|(_, public)| public)).await?;
+        Ok(json!({ "keys": keys, "required": required, "roll_key": roll_key }))
     }
 
     /// `PUT /v1/apps/projects/{project}/signing`: `{ keys, required? }` (required by default).

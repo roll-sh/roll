@@ -1549,8 +1549,9 @@ export const appsApi = {
   removeDrain: (project: string, id: string) => call<null>("DELETE", `/v1/apps/projects/${enc(project)}/drains/${enc(id)}`),
   limits: (project: string) => call<SpendLimits>("GET", `/v1/apps/projects/${enc(project)}/limits`),
   /** The project's image signing rule: cosign public keys and whether image services must meet them. */
-  signing: (project: string) => call<{ keys: string[]; required: boolean }>("GET", `/v1/apps/projects/${enc(project)}/signing`),
-  setSigning: (project: string, body: { keys: string[]; required?: boolean }) => call<{ keys: string[]; required: boolean }>("PUT", `/v1/apps/projects/${enc(project)}/signing`, body),
+  /** `roll_key`: the public key that signs the project's builds' provenance. */
+  signing: (project: string) => call<{ keys: string[]; required: boolean; roll_key: string }>("GET", `/v1/apps/projects/${enc(project)}/signing`),
+  setSigning: (project: string, body: { keys: string[]; required?: boolean }) => call<{ keys: string[]; required: boolean; roll_key: string }>("PUT", `/v1/apps/projects/${enc(project)}/signing`, body),
   deleteSigning: (project: string) => call<void>("DELETE", `/v1/apps/projects/${enc(project)}/signing`),
   /** A month's use by service and environment (this one by default), most costly first. */
   projectUsage: (project: string, month?: string) => call<ProjectUsage>("GET", `/v1/apps/projects/${enc(project)}/usage${qs({ month })}`),
@@ -1582,6 +1583,8 @@ export const appsApi = {
   commits: (id: string, e: string, d: string) => call<DeployCommits>("GET", `${dep(id, e, d)}/commits`),
   slo: (id: string, e: string) => call<SloReport>("GET", `${env(id, e)}/slo`),
   sbom: (id: string, e: string, d: string) => call<unknown>("GET", `${dep(id, e, d)}/sbom`),
+  /** Its image's signed SLSA provenance (a DSSE envelope), when roll built it. */
+  provenance: (id: string, e: string, d: string) => call<{ payloadType: string; payload: string; signatures: { keyid: string; sig: string }[] }>("GET", `${dep(id, e, d)}/provenance`),
   /** A failed deployment explained by its repo owner's model: kept, unless `again` asks anew (charged again). */
   explain: (id: string, e: string, d: string, again = false) => call<Explanation>("POST", `${dep(id, e, d)}/explain${qs({ again })}`),
   vulnerabilities: (id: string, e: string, d: string) => call<{ scan: ScanSummary | null; vulnerabilities: Vulnerability[] }>("GET", `${dep(id, e, d)}/vulnerabilities`),
