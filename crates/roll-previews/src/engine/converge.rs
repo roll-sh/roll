@@ -1430,18 +1430,36 @@ impl Engine {
         }
         let kept = self.store.pinned_data(&r.id)?;
         let name = branch_name(&r.id);
+        let resources = self.store.resources(&r.id)?;
         for old in &olds {
-            for res in self.store.resources(&r.id)? {
-                let (Some(branch), Ok(b)) = (&res.r#ref, self.brancher(res.kind)) else { continue };
+            // Every product's copy at once (they're independent; a stream's waits for its tail to
+            // reach object storage): the push waits for the slowest, not their sum.
+            let jobs = resources.iter().filter_map(|res| {
+                let (Some(branch), Ok(b)) = (&res.r#ref, self.brancher(res.kind)) else { return None };
                 if kept.iter().any(|d| &d.revision == old && d.kind == res.kind && d.parent == res.parent) {
-                    continue;
+                    return None;
                 }
                 let snap = format!("{name}-{}", crate::label_part(old.strip_prefix("cs_").unwrap_or(old), 10));
+                Some(async move { (res, branch, b.snapshot(&res.parent, branch, &snap).await, snap) })
+            });
+            // Each copy made is recorded before the first failure is said, so none is left
+            // unrecorded (a later pass takes the missing ones; a product finds its own by name).
+            let mut failed = None;
+            for (res, branch, made, snap) in futures::future::join_all(jobs).await {
                 let key = format!("{}:{}", res.kind.as_str(), res.parent);
-                if let Some(made) = b.snapshot(&res.parent, branch, &snap).await.map_err(|e| anyhow::anyhow!("keeping {key}'s data for its earlier push: {e:#}"))? {
-                    self.store.add_pinned_data(&r.id, &crate::store::PinnedData { revision: old.clone(), kind: res.kind, parent: res.parent.clone(), name: snap, r#ref: made.r#ref, kept: made.kept, source: branch.clone() })?;
-                    self.store.log(&r.id, &format!("kept {key}'s data as {} left it, for its earlier push", short(old)))?;
+                match made {
+                    Ok(Some(made)) => {
+                        self.store.add_pinned_data(&r.id, &crate::store::PinnedData { revision: old.clone(), kind: res.kind, parent: res.parent.clone(), name: snap, r#ref: made.r#ref, kept: made.kept, source: branch.clone() })?;
+                        self.store.log(&r.id, &format!("kept {key}'s data as {} left it, for its earlier push", short(old)))?;
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        failed.get_or_insert_with(|| anyhow::anyhow!("keeping {key}'s data for its earlier push: {e:#}"));
+                    }
                 }
+            }
+            if let Some(e) = failed {
+                return Err(e);
             }
         }
         Ok(())
