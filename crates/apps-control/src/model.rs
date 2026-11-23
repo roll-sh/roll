@@ -2389,6 +2389,27 @@ pub struct Check {
     /// it fails by throwing. At most 16 KiB; every 300–3600 s, timeout 1–120 s.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser: Option<String>,
+    /// A browser check's performance budgets (Lighthouse's, Netlify's): the page's lab metrics
+    /// past any of them fail it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budgets: Option<Budgets>,
+}
+
+/// A browser check's budgets, each optional: its largest contentful paint, cumulative layout
+/// shift, time to first byte, weight (every response's body) and requests.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Budgets {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lcp_ms: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cls: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttfb_ms: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kb: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requests: Option<u32>,
 }
 
 impl Check {
@@ -2407,6 +2428,19 @@ impl Check {
         }
         if !self.path.starts_with('/') || self.path.starts_with("//") || self.path.len() > 2000 || !self.path.bytes().all(|b| b.is_ascii_graphic()) {
             return bad("a check's path is an absolute path, like /healthz");
+        }
+        if let Some(b) = &self.budgets {
+            if self.browser.is_none() {
+                return bad("budgets are a browser check's");
+            }
+            let ok = b.lcp_ms.is_none_or(|v| (1..=120_000).contains(&v))
+                && b.cls.is_none_or(|v| v.is_finite() && (0.0..=10.0).contains(&v))
+                && b.ttfb_ms.is_none_or(|v| (1..=120_000).contains(&v))
+                && b.kb.is_none_or(|v| (1..=1_000_000).contains(&v))
+                && b.requests.is_none_or(|v| (1..=10_000).contains(&v));
+            if !ok {
+                return bad("budgets: lcp_ms and ttfb_ms 1–120000, cls 0–10, kb 1–1000000, requests 1–10000");
+            }
         }
         match &self.browser {
             Some(script) => {
@@ -2499,6 +2533,10 @@ pub struct CheckState {
     /// each deployment going live there); none yet for it while it's another's or absent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deployment: Option<String>,
+    /// A browser check's lab metrics from its last run (`lcp_ms`, `cls`, `ttfb_ms`, `kb`,
+    /// `requests`), against its budgets.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<serde_json::Value>,
 }
 
 impl Route {

@@ -1140,6 +1140,8 @@ export interface UptimeCheck {
   contains?: string;
   /** A browser check: a Playwright script run in Chromium against `path` (the body of an async function given `page`, `context` and `url`; it fails by throwing). At most 16 KiB; every 300–3600 s, timeout 1–120 s. */
   browser?: string;
+  /** A browser check's performance budgets: its lab metrics past any fail it. */
+  budgets?: { lcp_ms?: number; cls?: number; ttfb_ms?: number; kb?: number; requests?: number };
 }
 
 export interface UptimeCheckState {
@@ -1156,6 +1158,8 @@ export interface UptimeCheckState {
   failure_at?: number;
   /** A preview's: the deployment this result is of (production's browser checks, run on each of its heads). */
   deployment?: string;
+  /** A browser check's lab metrics from its last run. */
+  metrics?: { lcp_ms: number; cls: number; ttfb_ms: number; kb: number; requests: number };
 }
 
 /** A heartbeat: something outside roll pings its URL at least every `every_s` (60–604800); one not come within that and `grace_s` (default 300) is `heartbeat.missed`. */

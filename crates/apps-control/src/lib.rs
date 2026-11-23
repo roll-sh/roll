@@ -355,6 +355,8 @@ pub struct Apps {
     pub(crate) checker_images: Mutex<std::collections::HashSet<String>>,
     /// When each browser check's last failure was kept, by `<service>/<env>/<check>`.
     pub(crate) check_failures: Mutex<HashMap<String, i64>>,
+    /// Each browser check's last lab metrics, by `<service>/<env>/<check>`.
+    pub(crate) check_metrics: Mutex<HashMap<String, serde_json::Value>>,
     /// A pass of daily rescans is running, and when live deployments were last looked at for
     /// one ([`vulns`]).
     pub(crate) rescanning: std::sync::atomic::AtomicBool,
@@ -705,6 +707,7 @@ impl Apps {
             check_tokens: Mutex::new(HashMap::new()),
             checker_images: Mutex::new(std::collections::HashSet::new()),
             check_failures: Mutex::new(HashMap::new()),
+            check_metrics: Mutex::new(HashMap::new()),
             rescanning: Default::default(),
             rescan_looked: Default::default(),
             errors_seen: Mutex::new(HashMap::new()),
@@ -3728,7 +3731,11 @@ impl Apps {
     /// resource can't be read now keeps what it made.
     async fn link_values(self: &Arc<Self>, service: &ServiceRow, kind: LinkKind, r#ref: &str, env: &str, minted: Option<integrations::Minted>) -> anyhow::Result<Vec<(String, String)>> {
         let Some(m) = minted else { return self.link_vars(service, kind, r#ref, env).await };
-        let mut out = self.link_vars(service, kind, r#ref, env).await.unwrap_or_default();
+        let mut out = match kind {
+            LinkKind::Service => self.link_vars(service, kind, r#ref, env).await,
+            _ => self.deps.resources.link_vars_as(kind, r#ref, &m.vars).await,
+        }
+        .unwrap_or_default();
         for (k, v) in m.vars {
             match out.iter_mut().find(|(have, _)| *have == k) {
                 Some(slot) => slot.1 = v,
