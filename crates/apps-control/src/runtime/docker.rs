@@ -696,6 +696,10 @@ impl Runtime for Docker {
         true
     }
 
+    async fn image_id(&self, image: &str) -> Option<String> {
+        docker(&["image", "inspect", "-f", "{{.Id}}", image]).await.ok().map(|s| s.trim().to_string()).filter(|s| s.starts_with("sha256:"))
+    }
+
     async fn pull(&self, image: &str, log: &LogSink, login: Option<&super::RegistryLogin>) -> anyhow::Result<String> {
         log.line(format!("pulling {image}"));
         // A private registry's login goes to dockerd with this pull only (never `docker login`,

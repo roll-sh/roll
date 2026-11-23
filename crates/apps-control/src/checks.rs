@@ -29,6 +29,8 @@ pub struct Run {
     pub failures: u32,
     pub down_since: Option<i64>,
     pub running: bool,
+    /// A preview's run: the deployment it's of ([`crate::browser`]'s preview checks).
+    pub deployment: Option<String>,
 }
 
 /// Whether an answer passes: the status it expects (2xx or 3xx unless it says), and its text.
@@ -154,7 +156,8 @@ impl Apps {
                 // Known once a try has come back (an answer, or why there was none).
                 let tried = r.status.is_some() || r.error.is_some();
                 let failure_at = self.check_failures.lock().get(&format!("{}/{}", env_key(service, env), c.name)).copied();
-                CheckState { name: c.name.clone(), up: tried.then_some(r.down_since.is_none()), failures: r.failures, last_at: tried.then_some(r.last_at), status: r.status, ms: tried.then_some(r.ms), error: r.error, down_since: r.down_since, failure_at }
+                let metrics = self.check_metrics.lock().get(&format!("{}/{}", env_key(service, env), c.name)).cloned();
+                CheckState { name: c.name.clone(), up: tried.then_some(r.down_since.is_none()), failures: r.failures, last_at: tried.then_some(r.last_at), status: r.status, ms: tried.then_some(r.ms), error: r.error, down_since: r.down_since, failure_at, deployment: r.deployment, metrics }
             })
             .collect()
     }
@@ -166,7 +169,7 @@ mod tests {
 
     #[test]
     fn an_answer_passes_by_its_status_and_text() {
-        let c = |status: Option<u16>, contains: Option<&str>| Check { name: "x".into(), path: "/".into(), every_s: 60, timeout_s: 10, status, contains: contains.map(String::from), browser: None };
+        let c = |status: Option<u16>, contains: Option<&str>| Check { name: "x".into(), path: "/".into(), every_s: 60, timeout_s: 10, status, contains: contains.map(String::from), browser: None, budgets: None };
         assert!(passes(&c(None, None), 301, b"").is_ok(), "2xx or 3xx by default");
         assert_eq!(passes(&c(None, None), 503, b""), Err("answered 503".into()));
         assert!(passes(&c(Some(204), None), 204, b"").is_ok());

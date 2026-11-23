@@ -7,7 +7,8 @@
 //!
 //! Requests go out through rolld ([`Deliver::request`]): HTTPS to a public address, no redirects,
 //! the answer bounded, a timeout. Hosts are the vendors' own, except Okta's and Auth0's tenant
-//! domains, which are checked as hostnames and then go through the same guard. The credential is
+//! domains and a self-managed GitLab's host, which are checked as hostnames and then go through
+//! the same guard; Datadog's site is one of its documented ones. The credential is
 //! sealed with the project's data key, bound to the registration's vendor and target, so a row
 //! pointed somewhere else no longer opens. Errors name the vendor and the status, never what a
 //! vendor answered.
@@ -63,7 +64,71 @@ pub enum Vendor {
     /// The credential is the client secret of `client_id`, a machine-to-machine app of the
     /// Management API with `update:client_keys`; `app_client_id` is the app whose secret rotates.
     Auth0 { domain: String, client_id: String, app_client_id: String },
+    /// The credential is an access token with the `api` scope of a Maintainer or Owner of `project`
+    /// or `group` (one of them), on gitlab.com or a self-managed `host`. Each key is a new project
+    /// or group access token; the old one is revoked after the grace period (not GitLab's rotate,
+    /// which ends the old token at once).
+    Gitlab {
+        #[serde(default = "gitlab_com")]
+        host: String,
+        /// A project's numeric id or its path (`group/project`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+        /// A group's numeric id or its path.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group: Option<String>,
+        scopes: Vec<String>,
+        /// GitLab's role number (10 guest … 40 maintainer, 50 owner for a group); GitLab's own
+        /// default, 40, when left out.
+        #[serde(default = "gitlab_level")]
+        access_level: u8,
+        /// Each token's lifetime in days (GitLab needs one; 365 is its default cap).
+        #[serde(default = "gitlab_days")]
+        expires_days: u16,
+    },
+    /// The credential is an organization's Admin API key. Each key is the API key of a new
+    /// service account in `project_id`; deleting the old service account revokes its key.
+    Openai { project_id: String },
+    /// The credential is `<API key>:<application key>`, the application key allowed to manage the
+    /// kind of key that rotates (`api_keys_write`, or its user's `user_app_keys`).
+    Datadog {
+        #[serde(default = "datadog_site")]
+        site: String,
+        key: DatadogKey,
+        /// The scopes each application key gets (none: its user's permissions).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        scopes: Vec<String>,
+    },
 }
+
+/// Which of Datadog's keys a registration rotates.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum DatadogKey {
+    /// An organization API key.
+    Api,
+    /// An application key of the user the credential's application key belongs to.
+    Application,
+}
+
+fn gitlab_com() -> String {
+    "gitlab.com".into()
+}
+
+fn gitlab_level() -> u8 {
+    40
+}
+
+fn gitlab_days() -> u16 {
+    365
+}
+
+fn datadog_site() -> String {
+    "datadoghq.com".into()
+}
+
+/// Datadog's documented sites; its API is `api.<site>`.
+const DATADOG_SITES: &[&str] = &["datadoghq.com", "us3.datadoghq.com", "us5.datadoghq.com", "datadoghq.eu", "ap1.datadoghq.com", "ap2.datadoghq.com", "ddog-gov.com"];
 
 impl Vendor {
     pub fn name(&self) -> &'static str {
@@ -73,6 +138,9 @@ impl Vendor {
             Vendor::Okta { .. } => "okta",
             Vendor::Entra { .. } => "entra",
             Vendor::Auth0 { .. } => "auth0",
+            Vendor::Gitlab { .. } => "gitlab",
+            Vendor::Openai { .. } => "openai",
+            Vendor::Datadog { .. } => "datadog",
         }
     }
 
@@ -121,6 +189,30 @@ impl Vendor {
                     return bad("auth0's app_client_id is another app than the one roll signs in as");
                 }
             }
+            Vendor::Gitlab { host, project, group, scopes, access_level, expires_days } => {
+                *host = host.trim().to_ascii_lowercase();
+                let one = match (project.as_deref(), group.as_deref()) {
+                    (Some(p), None) | (None, Some(p)) => gitlab_path(p),
+                    _ => false,
+                };
+                let scopes_ok = !scopes.is_empty() && scopes.len() <= 20 && scopes.iter().all(|s| !s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_lowercase() || c == '_'));
+                let levels: &[u8] = if group.is_some() { &[10, 15, 20, 30, 40, 50] } else { &[10, 15, 20, 30, 40] };
+                if !hostname(host) || !one || !scopes_ok || !levels.contains(&*access_level) || !(1..=400).contains(&*expires_days) {
+                    return bad("a gitlab target is {host?: gitlab.com or your instance's host, project: an id or group/project | group: an id or path, scopes: [\"read_api\", …], access_level?: 10-40 (50 for a group; default 40), expires_days?: 1-400 (default 365)}");
+                }
+            }
+            Vendor::Openai { project_id } => {
+                if !(project_id.starts_with("proj_") && id_ok(project_id)) {
+                    return bad("an openai target is {project_id: proj_…}");
+                }
+            }
+            Vendor::Datadog { site, key, scopes } => {
+                *site = site.trim().to_ascii_lowercase();
+                let scopes_ok = scopes.len() <= 100 && scopes.iter().all(|s| !s.is_empty() && s.len() <= 100 && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'));
+                if !DATADOG_SITES.contains(&site.as_str()) || !scopes_ok || (*key == DatadogKey::Api && !scopes.is_empty()) {
+                    return bad("a datadog target is {site?: one of Datadog's sites (datadoghq.com, us3.datadoghq.com, us5.datadoghq.com, datadoghq.eu, ap1.datadoghq.com, ap2.datadoghq.com, ddog-gov.com), key: \"api\" | \"application\", scopes?: [\"dashboards_read\", …] (application keys only)}");
+                }
+            }
         }
         Ok(self)
     }
@@ -133,6 +225,11 @@ impl Vendor {
             Vendor::Okta { domain, app_id } => format!("{app_id} on {domain}"),
             Vendor::Entra { object_id, tenant, .. } => format!("{object_id} in {tenant}"),
             Vendor::Auth0 { domain, app_client_id, .. } => format!("{app_client_id} on {domain}"),
+            Vendor::Gitlab { host, project: Some(p), .. } => format!("project {p} on {host}"),
+            Vendor::Gitlab { host, group, .. } => format!("group {} on {host}", group.as_deref().unwrap_or_default()),
+            Vendor::Openai { project_id } => project_id.clone(),
+            Vendor::Datadog { site, key: DatadogKey::Api, .. } => format!("API keys on {site}"),
+            Vendor::Datadog { site, key: DatadogKey::Application, .. } => format!("application keys on {site}"),
         }
     }
 
@@ -149,6 +246,10 @@ impl Vendor {
             Vendor::Okta { .. } => ("OKTA_CLIENT_SECRET", "OKTA_CLIENT_SECRET_ID"),
             Vendor::Entra { .. } => ("AZURE_CLIENT_SECRET", "AZURE_CLIENT_SECRET_ID"),
             Vendor::Auth0 { .. } => ("AUTH0_CLIENT_SECRET", "AUTH0_CLIENT_ID"),
+            Vendor::Gitlab { .. } => ("GITLAB_TOKEN", "GITLAB_TOKEN_ID"),
+            Vendor::Openai { .. } => ("OPENAI_API_KEY", "OPENAI_SERVICE_ACCOUNT_ID"),
+            Vendor::Datadog { key: DatadogKey::Api, .. } => ("DD_API_KEY", "DD_API_KEY_ID"),
+            Vendor::Datadog { key: DatadogKey::Application, .. } => ("DD_APP_KEY", "DD_APP_KEY_ID"),
         };
         FIELDS.iter().cloned().zip([secret, id]).map(|(f, suggest)| Field { suggest, ..f }).collect()
     }
@@ -166,6 +267,11 @@ fn hostname(s: &str) -> bool {
 /// An id that goes into a vendor's URL path.
 fn id_ok(s: &str) -> bool {
     !s.is_empty() && s.len() <= 128 && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_".contains(c))
+}
+
+/// A GitLab project or group: its numeric id, or its full path (`group/sub/project`).
+fn gitlab_path(s: &str) -> bool {
+    s.len() <= 1024 && s.split('/').all(|seg| !seg.is_empty() && seg.len() <= 255 && seg != "." && seg != ".." && seg.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)))
 }
 
 fn guid(s: &str) -> bool {
@@ -410,6 +516,60 @@ pub(crate) fn issue(d: &dyn Deliver, vendor: &Vendor, credential: &Value, label:
             let a: A = parse(vendor, step, &answer.unwrap_or_default())?;
             (a.client_secret, app_client_id.clone())
         }
+        Vendor::Gitlab { scopes, access_level, expires_days, .. } => {
+            #[derive(Deserialize)]
+            struct A {
+                id: u64,
+                token: Value,
+            }
+            let body = json!({ "name": label, "scopes": scopes, "access_level": access_level, "expires_at": in_days(*expires_days) });
+            let answer = send(d, vendor, step, "POST", &gitlab_tokens(vendor), &[("private-token", credential)], Some((JSON_TYPE, &Value::new(body.to_string()))), false)?;
+            let a: A = parse(vendor, step, &answer.unwrap_or_default())?;
+            (a.token, a.id.to_string())
+        }
+        Vendor::Openai { project_id } => {
+            #[derive(Deserialize)]
+            struct Key {
+                value: Value,
+            }
+            #[derive(Deserialize)]
+            struct A {
+                id: String,
+                api_key: Key,
+            }
+            let body = Value::new(json!({ "name": label }).to_string());
+            let answer = send(d, vendor, step, "POST", &format!("{OPENAI_PROJECTS}/{project_id}/service_accounts"), &[("authorization", &bearer(credential))], Some((JSON_TYPE, &body)), false)?;
+            let a: A = parse(vendor, step, &answer.unwrap_or_default())?;
+            (a.api_key.value, a.id)
+        }
+        Vendor::Datadog { site, key, scopes } => {
+            #[derive(Deserialize)]
+            struct Attributes {
+                key: Value,
+            }
+            #[derive(Deserialize)]
+            struct Data {
+                id: String,
+                attributes: Attributes,
+            }
+            #[derive(Deserialize)]
+            struct A {
+                data: Data,
+            }
+            let (api, app) = datadog_auth(credential)?;
+            let (path, kind) = match key {
+                DatadogKey::Api => ("api_keys", "api_keys"),
+                DatadogKey::Application => ("current_user/application_keys", "application_keys"),
+            };
+            let mut attributes = json!({ "name": label });
+            if !scopes.is_empty() {
+                attributes["scopes"] = json!(scopes);
+            }
+            let body = Value::new(json!({ "data": { "type": kind, "attributes": attributes } }).to_string());
+            let answer = send(d, vendor, step, "POST", &format!("https://api.{site}/api/v2/{path}"), &[("dd-api-key", &api), ("dd-application-key", &app)], Some((JSON_TYPE, &body)), false)?;
+            let a: A = parse(vendor, step, &answer.unwrap_or_default())?;
+            (a.data.attributes.key, a.data.id)
+        }
     };
     if secret.expose().is_empty() {
         return Err(Error::Link(format!("{} answered an empty secret", vendor.name())));
@@ -450,6 +610,21 @@ pub(crate) fn revoke(d: &dyn Deliver, vendor: &Vendor, credential: &Value, handl
             let body = Value::new(json!({ "keyId": id }).to_string());
             send(d, vendor, step, "POST", &format!("https://graph.microsoft.com/v1.0/applications/{object_id}/removePassword"), &[("authorization", &bearer(&token))], Some((JSON_TYPE, &body)), true)?;
         }
+        Vendor::Gitlab { .. } => {
+            send(d, vendor, step, "DELETE", &format!("{}/{id}", gitlab_tokens(vendor)), &[("private-token", credential)], None, true)?;
+        }
+        Vendor::Openai { project_id } => {
+            // The key is the service account's: deleting the account revokes it.
+            send(d, vendor, step, "DELETE", &format!("{OPENAI_PROJECTS}/{project_id}/service_accounts/{id}"), &[("authorization", &bearer(credential))], None, true)?;
+        }
+        Vendor::Datadog { site, key, .. } => {
+            let (api, app) = datadog_auth(credential)?;
+            let path = match key {
+                DatadogKey::Api => "api_keys",
+                DatadogKey::Application => "current_user/application_keys",
+            };
+            send(d, vendor, step, "DELETE", &format!("https://api.{site}/api/v2/{path}/{id}"), &[("dd-api-key", &api), ("dd-application-key", &app)], None, true)?;
+        }
         Vendor::Auth0 { .. } => unreachable!("returned above"),
     }
     Ok(())
@@ -487,8 +662,51 @@ pub(crate) fn probe(d: &dyn Deliver, vendor: &Vendor, credential: &Value) -> Res
             let token = token(d, vendor, credential)?;
             send(d, vendor, step, "GET", &format!("https://{domain}/api/v2/clients/{app_client_id}?fields=client_id"), &[("authorization", &bearer(&token))], None, false)?;
         }
+        Vendor::Gitlab { .. } => {
+            // Listing the access tokens takes the role that makes them.
+            send(d, vendor, step, "GET", &format!("{}?per_page=1", gitlab_tokens(vendor)), &[("private-token", credential)], None, false)?;
+        }
+        Vendor::Openai { project_id } => {
+            send(d, vendor, step, "GET", &format!("{OPENAI_PROJECTS}/{project_id}/service_accounts?limit=1"), &[("authorization", &bearer(credential))], None, false)?;
+        }
+        Vendor::Datadog { site, key, .. } => {
+            let (api, app) = datadog_auth(credential)?;
+            let path = match key {
+                DatadogKey::Api => "api_keys",
+                DatadogKey::Application => "current_user/application_keys",
+            };
+            send(d, vendor, step, "GET", &format!("https://api.{site}/api/v2/{path}?page%5Bsize%5D=1"), &[("dd-api-key", &api), ("dd-application-key", &app)], None, false)?;
+        }
     }
     Ok(())
+}
+
+const OPENAI_PROJECTS: &str = "https://api.openai.com/v1/organization/projects";
+
+/// A GitLab registration's access tokens: `https://{host}/api/v4/{projects|groups}/{id}/access_tokens`,
+/// a path's slashes encoded as GitLab asks.
+fn gitlab_tokens(vendor: &Vendor) -> String {
+    let Vendor::Gitlab { host, project, group, .. } = vendor else { unreachable!("only GitLab has access tokens") };
+    let (kind, id) = match (project, group) {
+        (Some(p), _) => ("projects", p),
+        (None, Some(g)) => ("groups", g),
+        (None, None) => unreachable!("checked: one of them"),
+    };
+    format!("https://{host}/api/v4/{kind}/{}/access_tokens", id.replace('/', "%2F"))
+}
+
+/// The date `days` from now (UTC), as GitLab's `expires_at` takes it.
+fn in_days(days: u16) -> String {
+    let d = (time::OffsetDateTime::now_utc() + time::Duration::days(i64::from(days))).date();
+    format!("{:04}-{:02}-{:02}", d.year(), u8::from(d.month()), d.day())
+}
+
+/// Datadog's two headers' values from `<API key>:<application key>`.
+fn datadog_auth(credential: &Value) -> Result<(Value, Value)> {
+    match credential.expose().split_once(':') {
+        Some((api, app)) if !api.is_empty() && !app.is_empty() && !app.contains(':') => Ok((Value::new(api), Value::new(app))),
+        _ => Err(Error::Link("a datadog credential is <API key>:<application key>".into())),
+    }
 }
 
 /// Basic auth for Twilio: the account and its Auth Token, or a main API key given as `SK…:secret`.

@@ -62,6 +62,12 @@ pub fn dockerfile() -> String {
     )
 }
 
+/// The lab metrics a run's result says, if it measured them.
+fn metrics(lines: &[String]) -> Option<serde_json::Value> {
+    let v: serde_json::Value = lines.iter().rev().find_map(|l| l.strip_prefix("ROLL-CHECK ")).and_then(|j| serde_json::from_str(j).ok())?;
+    v.get("metrics").filter(|m| m.is_object()).cloned()
+}
+
 /// A run's result as the runner says it (`ROLL-CHECK {…}`, its last such line).
 fn result(lines: &[String]) -> Result<Option<u16>, String> {
     let Some(v) = lines.iter().rev().find_map(|l| l.strip_prefix("ROLL-CHECK ")).and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok()) else {
@@ -133,12 +139,19 @@ impl Apps {
         if let Some(t) = &c.contains {
             vars.push(("ROLL_CHECK_CONTAINS".into(), t.clone()));
         }
+        if let Some(b) = &c.budgets {
+            vars.push(("ROLL_CHECK_BUDGETS".into(), serde_json::to_string(b).unwrap_or_default()));
+        }
         let live = self.live(service, env);
         // The browser's own start and close on top of the check's timeout.
         let ran = live.run_checker(&image, COMMAND, vars, Duration::from_secs(c.timeout_s as u64 + 30), self.logs.sink(key.clone(), crate::logs::Stream::Stdout), KEEP, cancel.clone()).await;
         self.check_tokens.lock().remove(&token);
         let lines: Vec<String> = self.logs.tail(&key, 50, None).await.into_iter().map(|l| l.text).collect();
         self.logs.forget(&key);
+        // Its lab metrics, whichever way it went.
+        if let Some(m) = metrics(&lines) {
+            self.check_metrics.lock().insert(format!("{}/{}", crate::env_key(service, env), c.name), m);
+        }
         let (verdict, kept) = match ran {
             Ok(exit) if exit.canceled => (Err("canceled".to_string()), None),
             Ok(exit) if exit.timed_out => (Err(format!("it didn't finish within {} s", c.timeout_s + 30)), None),
@@ -183,6 +196,51 @@ impl Apps {
             None => format!("{service}/"),
         };
         self.check_failures.lock().retain(|k, _| !k.starts_with(&key));
+        self.check_metrics.lock().retain(|k, _| !k.starts_with(&key));
+    }
+
+    /// A preview's head (a pv- environment's deployment that just went live): the production
+    /// environment's browser checks, once each, against its own URL (Vercel's deployment checks;
+    /// roll previews folds them into its status). Each result names its deployment, and a newer
+    /// head's run replaces this one's.
+    pub(crate) fn spawn_preview_checks(self: &Arc<Self>, service: &str, env: &str, deployment: &str) {
+        let (this, service, env, deployment) = (self.clone(), service.to_string(), env.to_string(), deployment.to_string());
+        tokio::spawn(async move {
+            let sid = service.clone();
+            let Ok(prod) = this.db(move |s| s.environment(&sid, "production")).await else { return };
+            let checks: Vec<Check> = prod.checks.into_iter().filter(|c| c.browser.is_some()).collect();
+            if checks.is_empty() {
+                return;
+            }
+            let (sid, en) = (service.clone(), env.clone());
+            let Ok(row) = this.db(move |s| s.environment(&sid, &en)).await else { return };
+            let url = this.url(&format!("{}--{}", deployment.trim_start_matches("dep_"), row.slug));
+            let key = |c: &Check| format!("{}/{}", crate::env_key(&service, &env), c.name);
+            // The last head's results go before this one's run starts.
+            for c in &checks {
+                this.check_states.lock().insert(key(c), crate::checks::Run { running: true, deployment: Some(deployment.clone()), started_at: code_sql::now_ms(), ..Default::default() });
+                this.check_failures.lock().remove(&key(c));
+            }
+            for c in &checks {
+                let began = std::time::Instant::now();
+                let started = code_sql::now_ms();
+                let got = this.run_browser_check(&service, &env, &format!("{}{}", url.trim_end_matches('/'), c.path), c, &tokio_util::sync::CancellationToken::new()).await;
+                let mut runs = this.check_states.lock();
+                let r = runs.entry(key(c)).or_default();
+                // A newer head started meanwhile: its own run decides.
+                if r.deployment.as_deref() != Some(deployment.as_str()) {
+                    continue;
+                }
+                r.running = false;
+                r.last_at = started;
+                r.ms = began.elapsed().as_millis() as u64;
+                match got {
+                    Ok(status) => (r.status, r.error, r.failures, r.down_since) = (status, None, 0, None),
+                    Err(why) => (r.status, r.error, r.failures, r.down_since) = (None, Some(why), 1, Some(code_sql::now_ms())),
+                }
+            }
+            this.changed(&service);
+        });
     }
 
     /// Whether a request names a browser check's token for this environment: roll's own visit,

@@ -29,6 +29,16 @@ pub enum Deletion {
     Requested(Box<crate::requests::Request>),
 }
 
+/// Where an environment stands ([`Secrets::environment_standing`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Standing {
+    Live,
+    /// Deleted, and kept until `purge_at`: a recovery brings it back.
+    Kept { purge_at: i64 },
+    /// Purged, or never there.
+    Gone,
+}
+
 /// Something that stops working when an environment goes.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Break {
@@ -37,16 +47,34 @@ pub struct Break {
     pub project: Option<String>,
     pub environment: String,
     pub path: String,
-    /// The key whose value references it (`${production.X}`); absent for an import of the folder.
+    /// The key whose value references it (`${production.X}`), or a service's `roll://` reference
+    /// reads; absent for an import of the folder, or what reads all of it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
-    /// `reference` or `import`.
+    /// `reference` or `import` (a key or folder above); `service` (a roll apps service: its
+    /// environment, `path` `/`, or a `roll://` variable, `path` and `key`), `sandbox` (an agents
+    /// sandbox copying `path`), `sync` (to `name`), `identity` or `token` (one whose scope names
+    /// the environment).
     pub via: &'static str,
+    /// What reads it: the service, sandbox, identity or token's name, or a sync's `kind target`
+    /// (a token's or identity's only for a project admin).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
 }
 
 impl Break {
     /// `staging:/db/URL`, `other/dev:/shared (imports it)`.
     fn place(&self) -> String {
+        let name = self.name.as_deref().unwrap_or("(name for admins)");
+        match self.via {
+            "service" => return format!("service {name} ({})", self.environment),
+            "sandbox" => return format!("sandbox {name} (copies {}:{})", self.environment, self.path),
+            "sync" => return format!("sync to {name}"),
+            "identity" | "token" => return format!("{} {name}", self.via),
+            _ => {}
+        }
         let at = match &self.key {
             Some(k) if self.path == "/" => format!("/{k}"),
             Some(k) => format!("{}/{k}", self.path),
@@ -60,9 +88,10 @@ impl Break {
     }
 }
 
-/// What deleting `env` would break: values elsewhere in its project that reference it, and folders
-/// here or in other projects that import from it. Names only, never a value.
-pub(crate) fn breaks(c: &Conn<'_>, dek: &crate::crypto::Dek, env: &EnvRow) -> Result<Vec<Break>> {
+/// What deleting `env` would break, as far as roll secrets' own tables tell: values elsewhere in its
+/// project that reference it, folders here or in other projects that import from it, its syncs
+/// and the workload identities whose scope names it. Names only, never a value.
+fn breaks(c: &Conn<'_>, dek: &crate::crypto::Dek, env: &EnvRow) -> Result<Vec<Break>> {
     let mut out = BTreeSet::new();
     type Row = (String, String, String, String, i64, Option<String>, Option<Vec<u8>>);
     let rows: Vec<Row> = c.query(
@@ -81,7 +110,7 @@ pub(crate) fn breaks(c: &Conn<'_>, dek: &crate::crypto::Dek, env: &EnvRow) -> Re
             (None, None) => false,
         };
         if named {
-            out.insert(Break { project: None, environment: slug, path, key: Some(key), via: "reference" });
+            out.insert(Break { project: None, environment: slug, path, key: Some(key), via: "reference", name: None, id: None });
         }
     }
     let imports: Vec<(String, String, String)> = c.query(
@@ -90,9 +119,34 @@ pub(crate) fn breaks(c: &Conn<'_>, dek: &crate::crypto::Dek, env: &EnvRow) -> Re
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
     for (project, slug, path) in imports {
-        out.insert(Break { project: (project != env.project_id).then_some(project), environment: slug, path, key: None, via: "import" });
+        out.insert(Break { project: (project != env.project_id).then_some(project), environment: slug, path, key: None, via: "import", name: None, id: None });
+    }
+    // Syncs stop (what they pushed stays at their targets).
+    let syncs: Vec<(String, String, String, String)> = c.query("SELECT id, path, kind, target FROM syncs WHERE env_id = ?", [&env.id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+    for (id, path, kind, target) in syncs {
+        out.insert(Break { project: None, environment: env.slug.clone(), path, key: None, via: "sync", name: Some(format!("{kind} {target}")), id: Some(id) });
+    }
+    let identities: Vec<(String, String, Option<String>)> = c.query("SELECT id, name, environments FROM identities WHERE project_id = ? AND disabled_at IS NULL", [&env.project_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    for (id, name, environments) in identities {
+        if environments.is_some_and(|e| crate::from_json::<Vec<String>>(&e).contains(&env.slug)) {
+            out.insert(Break { project: None, environment: env.slug.clone(), path: "/".into(), key: None, via: "identity", name: Some(name), id: Some(id) });
+        }
     }
     Ok(out.into_iter().collect())
+}
+
+/// Whether one of grant `g`'s rules names environment `slug` of `project` (one that covers every
+/// environment doesn't break).
+fn names_env(g: &roll_auth::Grant, project: &str, slug: &str) -> bool {
+    use roll_auth::scope::{Resources, Selector};
+    g.scope.0.iter().any(|r| {
+        (r.product == "secrets" || r.product == "*")
+            && match &r.resources {
+                Resources::All => true,
+                Resources::Some(s) => s.iter().any(|s| matches!(s, Selector::Project { project: p } if p == project)),
+            }
+            && r.environments.as_ref().is_some_and(|e| e.iter().any(|e| e == slug))
+    })
 }
 
 /// The 409 before a delete that needs a confirm: what's protected, what breaks, and the window.
@@ -133,43 +187,90 @@ pub struct Preview {
 }
 
 impl Secrets {
+    /// Everything deleting standard environment `env` breaks: [`breaks`], the roll apps services
+    /// and agents sandboxes that read it (reach's [`crate::reach::Holders`]) and the roll-access
+    /// tokens whose scope names it. A token's or identity's name and id only for a project admin
+    /// (as reach lists them); anyone else sees that one is there.
+    pub(crate) fn env_breaks(&self, env: &EnvRow, dek: &crate::crypto::Dek, caller: &Caller) -> Result<Vec<Break>> {
+        let project = env.project_id.as_str();
+        let mut out: BTreeSet<Break> = self.db.read(|c| breaks(c, dek, env))?.into_iter().collect();
+        if let Some(h) = self.reach_holders.get() {
+            for s in h.services(project).map_err(|e| Error::Internal(format!("listing roll apps' services: {e}")))? {
+                // Its environment deploys from the one of its name; otherwise a variable's reference.
+                let read = if s.environment == env.slug {
+                    Some(("/".to_string(), None))
+                } else {
+                    s.references.iter().find_map(|r| match crate::consumers::Reference::parse(r) {
+                        Ok(Some(r)) if r.env == env.slug && r.project.as_deref().is_none_or(|p| p == project) => Some((r.path, Some(r.key))),
+                        _ => None,
+                    })
+                };
+                if let Some((path, key)) = read {
+                    out.insert(Break { project: None, environment: s.environment, path, key, via: "service", name: Some(s.name), id: Some(s.service) });
+                }
+            }
+            for c in h.sandboxes(project).map_err(|e| Error::Internal(format!("listing agents' sandboxes: {e}")))? {
+                let (e, p) = c.from.split_once(':').unwrap_or((c.from.as_str(), "/"));
+                if e == env.slug {
+                    out.insert(Break { project: None, environment: env.slug.clone(), path: p.to_string(), key: None, via: "sandbox", name: Some(c.name), id: Some(c.id) });
+                }
+            }
+        }
+        if let Some(w) = &self.workloads {
+            for g in w.grants()?.into_iter().filter(|g| names_env(g, project, &env.slug)) {
+                out.insert(Break { project: None, environment: env.slug.clone(), path: "/".into(), key: None, via: "token", name: Some(g.name.to_string()), id: Some(g.id.to_string()) });
+            }
+        }
+        let admin = caller.allows(Action::Admin, &Scope::project(project));
+        Ok(out
+            .into_iter()
+            .map(|mut b| {
+                if !admin && matches!(b.via, "identity" | "token") {
+                    (b.name, b.id) = (None, None);
+                }
+                b
+            })
+            .collect())
+    }
+
     /// What deleting `slug` would do (`delete` there), as its refusal would say it.
     pub fn env_deletion(&self, project: &str, slug: &str, caller: &Caller) -> Result<Preview> {
         caller.need(Action::Delete, &Scope::env(project, slug))?;
         let dek = self.project(project)?;
-        self.db.read(|c| {
+        let (env, secrets) = self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
-            let secrets = c.query_row("SELECT COUNT(*) FROM secrets WHERE env_id = ? AND owner = ''", [&env.id], |r| r.get(0))?;
-            let breaks = if env.kind == envs::Kind::Standard { breaks(c, &dek, &env)? } else { vec![] };
-            let standard = env.kind == envs::Kind::Standard;
-            Ok(Preview {
-                confirm: standard && (env.protected || !breaks.is_empty()),
-                needs_request: standard && env.needs_request(),
-                approvals: env.approvals,
-                window_days: if standard { self.window_days() } else { 0 },
-                environment: env.slug,
-                secrets,
-                breaks,
-            })
+            let secrets: i64 = c.query_row("SELECT COUNT(*) FROM secrets WHERE env_id = ? AND owner = ''", [&env.id], |r| r.get(0))?;
+            Ok::<_, Error>((env, secrets))
+        })?;
+        let standard = env.kind == envs::Kind::Standard;
+        let breaks = if standard { self.env_breaks(&env, &dek, caller)? } else { vec![] };
+        Ok(Preview {
+            confirm: standard && (env.protected || !breaks.is_empty()),
+            needs_request: standard && env.needs_request(),
+            approvals: env.approvals,
+            window_days: if standard { self.window_days() } else { 0 },
+            environment: env.slug,
+            secrets,
+            breaks,
         })
     }
 
-    /// Delete a standard environment into its window (the checks and the confirm are done): what it
-    /// issued is revoked first (a revocation that fails stays as a lease the sweeper retries), then
-    /// one write marks it deleted, ends its placeholders, shares, secret requests and decoys, and
-    /// runs `hook` (a change request's apply marks it applied there; database only, it may re-run).
+    /// Delete a standard environment into its window (the checks and the confirm are done). Decide,
+    /// then revoke: one write re-checks it may go, runs `hook` (a change request's apply checks and
+    /// marks it applied there; database only, it may re-run), marks it deleted, ends its
+    /// placeholders, shares, secret requests and decoys, makes its live leases due and keeps each
+    /// managed credential as a due lease. Only then, outside it, are those revoked: one that fails
+    /// stays due, and the sweeper retries it. A write that fails or is refused revokes nothing.
     pub(crate) fn forget_environment(&self, project: &str, env: &EnvRow, by: &Caller, hook: &dyn Fn(&Conn<'_>) -> Result<()>) -> Result<Deletion> {
-        self.db.read(|c| envs::deletable(c, project, env))?;
-        self.revoke_leases_where("env_id = ?", &env.id);
-        let failed = self.revoke_managed(self.managed_where("env_id = ?", &env.id));
         let now = self.db.now_ms()?;
         let purge_at = now + self.window_days() as i64 * DAY_MS;
-        let consumers: Vec<String> = self.db.write(|c| {
+        let (consumers, due): (Vec<String>, Vec<String>) = self.db.write(|c| {
             let live = envs::by_slug(c, project, &env.slug)?;
             if live.id != env.id {
                 return Err(Error::NotFound(format!("no environment {}", env.slug)));
             }
             envs::deletable(c, project, env)?;
+            hook(c)?;
             c.execute("UPDATE environments SET forgotten_at = ?, purge_at = ?, forgotten_by = ? WHERE id = ? AND forgotten_at IS NULL", params![now, purge_at, by.principal, env.id])?;
             let consumers: Vec<String> = c.query("SELECT DISTINCT consumer FROM placeholders WHERE env_id = ? AND revoked_at IS NULL AND expires_at > ?", params![env.id, now], |r| r.get(0))?;
             c.execute("UPDATE placeholders SET revoked_at = ? WHERE env_id = ? AND revoked_at IS NULL", params![now, env.id])?;
@@ -177,18 +278,28 @@ impl Secrets {
                 c.execute(&format!("DELETE FROM {t} WHERE env_id = ?"), [&env.id])?;
             }
             c.execute("DELETE FROM leases WHERE env_id = ? AND revoked_at IS NOT NULL", [&env.id])?;
-            for (link, handle) in &failed {
+            // What it issued is due now: the sweeper revokes whatever isn't revoked below.
+            c.execute("UPDATE leases SET expires_at = ? WHERE env_id = ? AND revoked_at IS NULL AND expires_at > ?", params![now, env.id, now])?;
+            let mut due: Vec<String> = c.query("SELECT id FROM leases WHERE env_id = ? AND revoked_at IS NULL", [&env.id], |r| r.get(0))?;
+            for (link, state) in crate::sweep::managed_in(c, "env_id = ?", &env.id)? {
+                let Some(handle) = state.get("handle") else { continue };
+                let id = names::new_id("lse", 16);
                 c.execute(
                     "INSERT INTO leases (id, project_id, env_id, key, kind, link, handle, consumer, issued_at, expires_at, revoked_at) VALUES (?, ?, '', '', 'retired', ?, ?, 'roll:revoke', ?, ?, NULL)",
-                    params![names::new_id("lse", 16), project, crate::json(link), crate::json(handle), now, now],
+                    params![id, project, crate::json(&link), crate::json(handle), now, now],
                 )?;
+                due.push(id);
             }
             c.execute("UPDATE decoys SET ended_at = ? WHERE env_id = ? AND ended_at IS NULL", params![now, env.id])?;
             let summary = format!("deleted environment {}: what it issued is revoked, and its secrets, history and requests are kept unreadable until {}, then purged", env.slug, crate::deleted::utc(purge_at));
             audit::record_event(c, self.keys()?, project, by, "environment.delete", Some(&env.slug), None, &[], &summary, now, crate::events::Event::new(crate::events::Kind::EnvDeleted, serde_json::json!({ "purge_at": purge_at })))?;
-            hook(c)?;
-            Ok::<_, Error>(consumers)
+            Ok::<_, Error>((consumers, due))
         })?;
+        for id in due {
+            if let Err(e) = self.revoke_one(&id) {
+                tracing::warn!(project, env = %env.slug, lease = %id, "revoking a deleted environment's credential failed (the sweeper retries): {e}");
+            }
+        }
         self.hosts_changed(consumers.iter().map(String::as_str));
         if let Err(e) = self.end_decoys() {
             tracing::warn!(project, env = %env.slug, "revoking a deleted environment's decoys failed (the sweeper retries): {e}");
@@ -235,6 +346,18 @@ impl Secrets {
             }
         }
         Ok(serde_json::json!({ "project": project, "environment": slug, "recovered_at": now, "rotated": rotated, "rotation_failed": failed }))
+    }
+
+    /// Where `slug` of `project` stands, for a consumer that was refused a read of it and must tell
+    /// "deleted, still recoverable" (wait) from "gone" (let go of what it copied). Checks no
+    /// access and says nothing of what's in it: the consumer was already allowed to name it.
+    pub fn environment_standing(&self, project: &str, slug: &str) -> Result<Standing> {
+        let row: Option<(Option<i64>, Option<i64>)> = self.db.read(|c| c.query_row("SELECT forgotten_at, purge_at FROM environments WHERE project_id = ? AND slug = ?", [project, slug], |r| Ok((r.get(0)?, r.get(1)?))).optional())?;
+        Ok(match row {
+            Some((None, _)) => Standing::Live,
+            Some((Some(_), Some(purge_at))) => Standing::Kept { purge_at },
+            Some((Some(_), None)) | None => Standing::Gone,
+        })
     }
 
     /// Deleted environments in their window that `caller` may recover (`admin` there), in projects

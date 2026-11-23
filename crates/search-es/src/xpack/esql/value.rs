@@ -1228,7 +1228,24 @@ pub enum Acc {
     /// `AVG` is `SUM / COUNT`: whole numbers summed exactly, doubles compensated.
     Avg { int: i128, float: f64, comp: f64, n: i64 },
     MinMax(Option<V>),
-    Collect(Vec<V>),
+    /// `VALUES`: the distinct values in order of first appearance, deduplicated as they arrive
+    /// (Elasticsearch's hash of the values), so memory follows the distinct values: `index` maps
+    /// a value's hash to the first of `out` with it, `chain` links the others (as the `STATS`
+    /// group table does); `heap` is what their strings hold.
+    Values { index: std::collections::HashMap<u64, u32, std::hash::BuildHasherDefault<super::exec::IdHasher>>, chain: Vec<u32>, out: Vec<V>, heap: usize },
+    /// `MEDIAN`, `PERCENTILE`, `MEDIAN_ABSOLUTE_DEVIATION`: the t-digest `QuantileStates` builds
+    /// (compression 1000, hybrid: exact up to 20,000 values, then merging), fed as values arrive.
+    Quantile(Box<TDigest>),
+    /// `STD_DEV`, `VARIANCE`: Welford's online algorithm (`WelfordAlgorithm`) as values arrive.
+    Welford { n: u64, mean: f64, m2: f64 },
+    /// `TOP(field, n, order)`: the best values so far, trimmed back to `n` (a stable sort, so
+    /// equal values keep their arrival order) whenever twice as many have arrived. `n` is `None`
+    /// only for a state built without its parameters (it then keeps every value).
+    Top { n: Option<usize>, desc: bool, buf: Vec<V>, heap: usize },
+    /// `SAMPLE(field, n)`: a uniform reservoir of `n` values (algorithm R).
+    Sample { n: Option<usize>, seen: u64, buf: Vec<V>, heap: usize },
+    /// `FIRST` / `LAST` of the values as they arrive.
+    Edge { first: bool, v: Option<V> },
     /// `WEIGHTED_AVG`: sums of `value * weight` and of weights.
     Weighted(f64, f64),
     /// `PRESENT` / `ABSENT`: rows seen and whether any had a value.
@@ -1268,7 +1285,13 @@ impl Acc {
             "min" | "max" => Acc::MinMax(None),
             "weighted_avg" => Acc::Weighted(0.0, 0.0),
             "present" | "absent" => Acc::Present(0, false),
-            _ => Acc::Collect(Vec::new()),
+            "values" => Acc::Values { index: Default::default(), chain: Vec::new(), out: Vec::new(), heap: 0 },
+            "median" | "percentile" | "median_absolute_deviation" => Acc::Quantile(Box::new(TDigest::new(QUANTILE_COMPRESSION, false))),
+            "std_dev" | "variance" => Acc::Welford { n: 0, mean: 0.0, m2: 0.0 },
+            "top" => Acc::Top { n: None, desc: true, buf: Vec::new(), heap: 0 },
+            "sample" => Acc::Sample { n: None, seen: 0, buf: Vec::new(), heap: 0 },
+            // `last`, and any other: the last value.
+            _ => Acc::Edge { first: name == "first", v: None },
         }
     }
 
@@ -1280,7 +1303,12 @@ impl Acc {
             let threshold = extra.first().and_then(V::as_i64).map_or(DEFAULT_DISTINCT_THRESHOLD, |t| t.max(0) as u64);
             return Acc::Distinct { hll: Box::new(Hll::new(precision_from_threshold(threshold))), ty: arg_ty };
         }
-        Acc::new(name)
+        let n = extra.first().and_then(V::as_i64).map(|n| n.max(0) as usize);
+        match name {
+            "top" => Acc::Top { n, desc: top_desc(extra), buf: Vec::new(), heap: 0 },
+            "sample" => Acc::Sample { n, seen: 0, buf: Vec::new(), heap: 0 },
+            _ => Acc::new(name),
+        }
     }
 
     pub fn add(&mut self, name: &str, v: &V, star: bool) {
@@ -1357,9 +1385,89 @@ impl Acc {
                     }
                 }
             }
-            Acc::Collect(all) => {
+            Acc::Values { index, chain, out, heap } => {
+                use std::hash::Hasher;
                 for x in v.values() {
-                    all.push(x.clone());
+                    let mut h = std::hash::DefaultHasher::new();
+                    super::exec::hash_key(x, &mut h);
+                    let fresh = out.len() as u32;
+                    let head = *index.entry(h.finish()).or_insert(fresh);
+                    if head != fresh {
+                        let mut at = head;
+                        let known = loop {
+                            if super::exec::same_key(&out[at as usize], x) {
+                                break true;
+                            }
+                            match chain[at as usize] {
+                                u32::MAX => break false,
+                                next => at = next,
+                            }
+                        };
+                        if known {
+                            continue;
+                        }
+                        chain[at as usize] = fresh;
+                    }
+                    *heap += super::memory::value_heap(x);
+                    out.push(x.clone());
+                    chain.push(u32::MAX);
+                }
+            }
+            Acc::Quantile(d) => {
+                for x in v.values() {
+                    if let Some(f) = x.as_f64() {
+                        // ES|QL doubles are finite.
+                        let _ = d.add(f);
+                    }
+                }
+            }
+            Acc::Welford { n, mean, m2 } => {
+                for x in v.values().into_iter().filter_map(V::as_f64) {
+                    *n += 1;
+                    let delta = x - *mean;
+                    *mean += delta / *n as f64;
+                    *m2 += delta * (x - *mean);
+                }
+            }
+            Acc::Top { n, desc, buf, heap } => {
+                for x in v.values() {
+                    *heap += super::memory::value_heap(x);
+                    buf.push(x.clone());
+                }
+                if let Some(n) = *n
+                    && buf.len() >= n.saturating_mul(2).max(64)
+                {
+                    top_trim(buf, n, *desc);
+                    *heap = buf.iter().map(super::memory::value_heap).sum();
+                }
+            }
+            Acc::Sample { n, seen, buf, heap } => {
+                use rand::Rng;
+                for x in v.values() {
+                    *seen += 1;
+                    match *n {
+                        Some(n) if buf.len() >= n => {
+                            let j = rand::thread_rng().gen_range(0..*seen);
+                            if (j as usize) < n {
+                                *heap = (*heap + super::memory::value_heap(x)).saturating_sub(super::memory::value_heap(&buf[j as usize]));
+                                buf[j as usize] = x.clone();
+                            }
+                        }
+                        _ => {
+                            *heap += super::memory::value_heap(x);
+                            buf.push(x.clone());
+                        }
+                    }
+                }
+            }
+            Acc::Edge { first, v: kept } => {
+                let vals = v.values();
+                if *first {
+                    if kept.is_none() {
+                        *kept = vals.first().map(|x| (*x).clone());
+                    }
+                } else if let Some(x) = vals.last() {
+                    *kept = Some((*x).clone());
                 }
             }
             Acc::Weighted(..) => {}
@@ -1423,7 +1531,58 @@ impl Acc {
                     }
                 }
             }
-            (Acc::Collect(a), Acc::Collect(b)) => a.extend(b),
+            // The other's distinct values after this one's, each once.
+            (me @ Acc::Values { .. }, Acc::Values { out, .. }) => {
+                for v in out {
+                    me.add(name, &v, false);
+                }
+            }
+            // As Elasticsearch merges digests across nodes.
+            (Acc::Quantile(d), Acc::Quantile(mut o)) => d.merge(&mut o).map_err(|_| "quantile states that don't merge")?,
+            // `WelfordAlgorithm.add(mean, m2, count)`: the parallel combination.
+            (Acc::Welford { n, mean, m2 }, Acc::Welford { n: n2, mean: mean2, m2: m22 }) => {
+                if n2 > 0 {
+                    // Counts a remote sent: saturating, never wrapping.
+                    let total = n.saturating_add(n2);
+                    let delta = mean2 - *mean;
+                    *m2 += m22 + delta * delta * (*n as f64) * (n2 as f64) / total as f64;
+                    *mean += delta * n2 as f64 / total as f64;
+                    *n = total;
+                }
+            }
+            // The other's values after this one's, trimmed back as more arrive.
+            (Acc::Top { n, desc, buf, heap }, Acc::Top { buf: other, .. }) => {
+                for v in other {
+                    *heap += super::memory::value_heap(&v);
+                    buf.push(v);
+                }
+                if let Some(n) = *n
+                    && buf.len() >= n.saturating_mul(2).max(64)
+                {
+                    top_trim(buf, n, *desc);
+                    *heap = buf.iter().map(super::memory::value_heap).sum();
+                }
+            }
+            // Two uniform reservoirs make one: each value kept with a weight of the rows its
+            // reservoir stands for (A-Res: the largest `rand^(1/w)` keys).
+            (Acc::Sample { n, seen, buf, heap }, Acc::Sample { seen: seen2, buf: other, .. }) => {
+                use rand::Rng;
+                let total = seen.saturating_add(seen2);
+                let (w1, w2) = (*seen as f64 / buf.len().max(1) as f64, seen2 as f64 / other.len().max(1) as f64);
+                let mut keyed: Vec<(f64, V)> = std::mem::take(buf).into_iter().map(|v| (w1, v)).chain(other.into_iter().map(|v| (w2, v))).map(|(w, v)| (rand::thread_rng().r#gen::<f64>().powf(1.0 / w.max(f64::MIN_POSITIVE)), v)).collect();
+                if let Some(n) = *n {
+                    keyed.sort_by(|a, b| b.0.total_cmp(&a.0));
+                    keyed.truncate(n);
+                }
+                *buf = keyed.into_iter().map(|(_, v)| v).collect();
+                *heap = buf.iter().map(super::memory::value_heap).sum();
+                *seen = total;
+            }
+            (Acc::Edge { first, v }, Acc::Edge { v: o, .. }) => {
+                if (*first && v.is_none()) || (!*first && o.is_some()) {
+                    *v = o;
+                }
+            }
             (Acc::Weighted(s, t), Acc::Weighted(s2, t2)) => {
                 *s += s2;
                 *t += t2;
@@ -1503,105 +1662,84 @@ impl Acc {
                     V::Bool(if name == "present" { *any } else { !*any })
                 }
             }
-            Acc::Collect(all) => match name {
-                "values" => {
-                    // Distinct values in order of first appearance, as Elasticsearch's hash of
-                    // the values hands them out (`ValuesBytesRefAggregator` / `ValuesLongAggregator`).
-                    let mut seen: std::collections::HashSet<super::exec::GroupKey> = std::collections::HashSet::with_capacity(all.len().min(1024));
-                    let mut out: Vec<V> = Vec::new();
-                    for x in all {
-                        if seen.insert(super::exec::GroupKey::of(x)) {
-                            out.push(x.clone());
-                        }
-                    }
-                    match out.len() {
-                        0 => V::Null,
-                        1 => out.pop().expect("one"),
-                        _ => V::Multi(out),
-                    }
-                }
-                "median" | "percentile" | "median_absolute_deviation" => {
-                    // A t-digest as `QuantileStates` builds it (compression 1000, the hybrid
-                    // digest: exact up to 20000 values, then merging), fed in arrival order.
-                    let pct = match name {
-                        "percentile" => match extra.first().and_then(V::as_f64) {
-                            // Out of range percentiles are null (`percentileParam`).
-                            Some(p) if (0.0..=100.0).contains(&p) => p,
-                            _ => return V::Null,
-                        },
-                        _ => 50.0,
-                    };
-                    let mut d = TDigest::new(QUANTILE_COMPRESSION, false);
-                    for x in all {
-                        if let Some(f) = x.as_f64() {
-                            // ES|QL doubles are finite.
-                            let _ = d.add(f);
-                        }
-                    }
-                    if d.size() == 0 {
-                        return V::Null;
-                    }
-                    if name == "median_absolute_deviation" {
-                        // `InternalMedianAbsoluteDeviation.computeMedianAbsoluteDeviation`.
-                        let median = d.quantile(0.5);
-                        let mut dev = d.empty_like();
-                        for (mean, count) in d.centroids() {
-                            let _ = dev.add_weighted((median - mean).abs(), count);
-                        }
-                        return V::Double(dev.quantile(0.5));
-                    }
-                    V::Double(d.quantile(pct / 100.0))
-                }
-                "std_dev" | "variance" => {
-                    // Welford's online algorithm in arrival order (`WelfordAlgorithm`).
-                    let (mut n, mut mean, mut m2) = (0u64, 0.0f64, 0.0f64);
-                    for x in all.iter().filter_map(V::as_f64) {
-                        n += 1;
-                        let delta = x - mean;
-                        mean += delta / n as f64;
-                        m2 += delta * (x - mean);
-                    }
-                    if n == 0 {
-                        return V::Null;
-                    }
-                    let var = m2 / n as f64;
-                    V::Double(if name == "variance" { var } else { var.sqrt() })
-                }
-                "top" => {
-                    let n = extra.first().and_then(V::as_i64).unwrap_or(1).max(0) as usize;
-                    let desc = extra.get(1).map(V::to_text).is_none_or(|o| !o.eq_ignore_ascii_case("asc"));
-                    let mut xs = all.clone();
-                    xs.sort_by(|a, b| if desc { cmp(b, a) } else { cmp(a, b) });
-                    xs.truncate(n);
-                    match xs.len() {
-                        0 => V::Null,
-                        1 => xs.pop().expect("one"),
-                        _ => V::Multi(xs),
-                    }
-                }
-                "sample" => {
-                    // A uniform sample without replacement, in random order (Elasticsearch keeps
-                    // the values with the smallest random keys and emits them by key).
-                    use rand::seq::SliceRandom;
-                    let n = extra.first().and_then(V::as_i64).unwrap_or(1).max(0) as usize;
-                    let mut xs = all.clone();
-                    let (picked, _) = xs.partial_shuffle(&mut rand::thread_rng(), n);
-                    let mut picked = picked.to_vec();
-                    match picked.len() {
-                        0 => V::Null,
-                        1 => picked.pop().expect("one"),
-                        _ => V::Multi(picked),
-                    }
-                }
-                "first" => all.first().cloned().unwrap_or(V::Null),
-                _ => all.last().cloned().unwrap_or(V::Null),
+            Acc::Values { out, .. } => match out.len() {
+                0 => V::Null,
+                1 => out[0].clone(),
+                _ => V::Multi(out.clone()),
             },
+            Acc::Quantile(d) => {
+                let pct = match name {
+                    "percentile" => match extra.first().and_then(V::as_f64) {
+                        // Out of range percentiles are null (`percentileParam`).
+                        Some(p) if (0.0..=100.0).contains(&p) => p,
+                        _ => return V::Null,
+                    },
+                    _ => 50.0,
+                };
+                if d.size() == 0 {
+                    return V::Null;
+                }
+                let mut d = (**d).clone();
+                if name == "median_absolute_deviation" {
+                    // `InternalMedianAbsoluteDeviation.computeMedianAbsoluteDeviation`.
+                    let median = d.quantile(0.5);
+                    let mut dev = d.empty_like();
+                    for (mean, count) in d.centroids() {
+                        let _ = dev.add_weighted((median - mean).abs(), count);
+                    }
+                    return V::Double(dev.quantile(0.5));
+                }
+                V::Double(d.quantile(pct / 100.0))
+            }
+            Acc::Welford { n, m2, .. } => {
+                if *n == 0 {
+                    return V::Null;
+                }
+                let var = m2 / *n as f64;
+                V::Double(if name == "variance" { var } else { var.sqrt() })
+            }
+            Acc::Top { n, desc, buf, .. } => {
+                let n = n.or_else(|| extra.first().and_then(V::as_i64).map(|n| n.max(0) as usize)).unwrap_or(1);
+                let desc = if extra.is_empty() { *desc } else { top_desc(extra) };
+                let mut xs = buf.clone();
+                top_trim(&mut xs, n, desc);
+                match xs.len() {
+                    0 => V::Null,
+                    1 => xs.pop().expect("one"),
+                    _ => V::Multi(xs),
+                }
+            }
+            Acc::Sample { n, buf, .. } => {
+                // The values with the smallest random keys, in key order: any order is random.
+                use rand::seq::SliceRandom;
+                let n = n.or_else(|| extra.first().and_then(V::as_i64).map(|n| n.max(0) as usize)).unwrap_or(1);
+                let mut xs = buf.clone();
+                let (picked, _) = xs.partial_shuffle(&mut rand::thread_rng(), n);
+                let mut picked = picked.to_vec();
+                match picked.len() {
+                    0 => V::Null,
+                    1 => picked.pop().expect("one"),
+                    _ => V::Multi(picked),
+                }
+            }
+            Acc::Edge { v, .. } => v.clone().unwrap_or(V::Null),
         }
     }
 }
 
 /// `QuantileStates.DEFAULT_COMPRESSION`.
 const QUANTILE_COMPRESSION: f64 = 1000.0;
+
+/// `TOP`'s order parameter: descending unless `asc`.
+fn top_desc(extra: &[V]) -> bool {
+    extra.get(1).map(V::to_text).is_none_or(|o| !o.eq_ignore_ascii_case("asc"))
+}
+
+/// Keeps the best `n` of `xs` in order (a stable sort: equal values keep arrival order).
+fn top_trim(xs: &mut Vec<V>, n: usize, desc: bool) {
+    xs.sort_by(|a, b| if desc { cmp(b, a) } else { cmp(a, b) });
+    xs.truncate(n);
+}
 
 /// One step of Kahan summation (`CompensatedSum.add`).
 fn kahan(sum: &mut f64, comp: &mut f64, x: f64) {

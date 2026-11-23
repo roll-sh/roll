@@ -46,7 +46,10 @@ CREATE TABLE IF NOT EXISTS agent_sandboxes (
     -- each start roll secrets is asked whether secrets_by still may reveal it.
     secrets_from TEXT,
     -- Why the copied values were taken out of it (secrets_by may no longer reveal them).
-    secrets_dropped TEXT
+    secrets_dropped TEXT,
+    -- Which copied variables it last started without, as they don't resolve for secrets_by, and
+    -- why (names only); NULL while they all do.
+    secrets_unset TEXT
 );
 CREATE INDEX IF NOT EXISTS agent_sandboxes_owner ON agent_sandboxes (owner_id, deleted_at);
 CREATE INDEX IF NOT EXISTS agent_sandboxes_machine ON agent_sandboxes (machine_id);
@@ -84,6 +87,7 @@ pub struct SandboxRow {
     pub secrets_by: Option<String>,
     pub secrets_from: Option<SecretsFrom>,
     pub secrets_dropped: Option<String>,
+    pub secrets_unset: Option<String>,
 }
 
 /// The roll secrets environment a sandbox's env has values of, and which of its variables they
@@ -117,7 +121,7 @@ impl SandboxRow {
 }
 
 const COLS: &str = "id, owner_id, machine_id, name, backend, backend_id, size, cpu, memory_gb, disk_gb, hourly_cents, status, desired, sealed, error, \
-                    created_at, updated_at, metered_at, deleted_at, last_active_at, secrets_by, secrets_from, secrets_dropped";
+                    created_at, updated_at, metered_at, deleted_at, last_active_at, secrets_by, secrets_from, secrets_dropped, secrets_unset";
 
 pub(crate) fn status_str(s: SandboxStatus) -> &'static str {
     match s {
@@ -163,6 +167,7 @@ fn row(r: &Row<'_>) -> code_sql::Result<SandboxRow> {
         secrets_by: r.get(20)?,
         secrets_from: r.get::<_, Option<String>>(21)?.and_then(|j| serde_json::from_str(&j).ok()),
         secrets_dropped: r.get(22)?,
+        secrets_unset: r.get(23)?,
     })
 }
 
@@ -246,7 +251,7 @@ pub fn create(db: &code_sql::Db, n: &NewSandbox<'_>) -> code_sql::Result<Created
             return Ok(Created::TooManyMachines);
         }
         c.execute(
-            &format!("INSERT INTO agent_sandboxes ({COLS}) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, 'creating', 'running', ?, NULL, ?, ?, NULL, NULL, ?, ?, ?, NULL)"),
+            &format!("INSERT INTO agent_sandboxes ({COLS}) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, 'creating', 'running', ?, NULL, ?, ?, NULL, NULL, ?, ?, ?, NULL, NULL)"),
             params![
                 n.id,
                 n.owner_id,
@@ -363,6 +368,15 @@ pub fn secrets_dropped(db: &code_sql::Db, id: &str, why: &str) -> code_sql::Resu
     db.write(|c| {
         c.execute("UPDATE agent_sandboxes SET secrets_dropped = ?, updated_at = ? WHERE id = ? AND secrets_dropped IS NULL", params![why, code_sql::now_ms(), id])?;
         get(c, id)
+    })
+}
+
+/// Which copied variables it started without, as they don't resolve, and why (never a value);
+/// `None` once they all do.
+pub fn secrets_unset(db: &code_sql::Db, id: &str, why: Option<&str>) -> code_sql::Result<()> {
+    db.write(|c| {
+        c.execute("UPDATE agent_sandboxes SET secrets_unset = ?, updated_at = ? WHERE id = ?", params![why, code_sql::now_ms(), id])?;
+        Ok(())
     })
 }
 

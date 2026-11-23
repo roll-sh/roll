@@ -106,6 +106,34 @@ export interface GroupRole {
   added_at: number;
 }
 
+/** What a project's events feed holds (docs/workspace.md, "Events"). */
+export const WORKSPACE_EVENT_KINDS = [
+  "member.added",
+  "member.removed",
+  "member.role_changed",
+  "member.deactivated",
+  "group.role_set",
+  "group.role_removed",
+  "invite.sent",
+  "invite.accepted",
+  "invite.revoked",
+] as const;
+export type WorkspaceEventKind = (typeof WORKSPACE_EVENT_KINDS)[number];
+
+export interface WorkspaceEvent {
+  seq: number;
+  at: number;
+  kind: WorkspaceEventKind;
+  /** Ids, handles, group names, roles and reasons, with `actor`; an invite's `email` only for the project's admins. */
+  data: Record<string, unknown> & { actor: string };
+}
+
+export interface WorkspaceEventPage {
+  events: WorkspaceEvent[];
+  /** The cursor for the next call (`after`). */
+  next: number;
+}
+
 export interface RoleRules {
   roles: { role: Role; rules: unknown[] }[];
   products: string[];
@@ -141,6 +169,16 @@ export const workspaceApi = {
   removeMember: (id: string, user: string) => call<null>("DELETE", `${project(id)}/members/${encodeURIComponent(user)}`),
   leave: (id: string) => call<null>("DELETE", `${project(id)}/members/me`),
   roles: () => call<RoleRules>("GET", "/v1/workspace/roles"),
+  /** The project's events after a cursor; `latest` answers no events and the head's cursor. */
+  events: (id: string, q: { after?: number; limit?: number; kinds?: string[]; latest?: boolean } = {}) => {
+    const p = new URLSearchParams();
+    if (q.latest) p.set("latest", "1");
+    if (q.after !== undefined) p.set("after", String(q.after));
+    if (q.limit !== undefined) p.set("limit", String(q.limit));
+    if (q.kinds?.length) p.set("kinds", q.kinds.join(","));
+    const qs = p.toString();
+    return call<WorkspaceEventPage>("GET", `${project(id)}/events${qs ? `?${qs}` : ""}`);
+  },
   /** The groups with a role on the project. */
   projectGroups: (id: string) => call<GroupRole[]>("GET", `${project(id)}/groups`),
   /** Gives the group a role here, or changes the one it has. */

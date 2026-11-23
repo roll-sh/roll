@@ -26,7 +26,8 @@ otp = roll_secrets.totp_at(v.values["REGISTRY_TOTP"])   # or from a seed already
 
 cards = c.transit("cards")                       # an encryption key that stays in roll
 ct = cards.encrypt(card_number, "order:42")
-# Read per request? Keep answers 30 s, then revalidate (a 304 while unchanged).
+# Read per request? Keep answers 30 s, then ask for what changed since (`…/values/delta`:
+# nothing while unchanged, only the changed keys after a change). A watch reads changes the same way.
 c = roll_secrets.Client(api, token, cache_ttl=30)
 
 # Nothing here renews a lease? Issue no dynamic credential: those keys are left out and named in

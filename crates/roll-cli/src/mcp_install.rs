@@ -128,6 +128,37 @@ fn write(path: &Path, text: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// An Agent Plugins 1.0 bundle (agent-plugins.org, the format Stripe, Vercel, Sentry and Datadog
+/// ship): `plugin.json`; `mcp.json` naming roll's server at `url` over streamable HTTP (the spec
+/// defines no auth: the client signs in with OAuth, so nothing secret is written); and
+/// `skills/<name>/SKILL.md` for each skill. A skill's name comes from the server, so one that isn't
+/// an Agent Skills name (lowercase letters, digits, single hyphens, at most 64) is refused before it
+/// becomes a folder. How many skills were written.
+pub fn write_plugin(dir: &Path, url: &str, version: &str, skills: &[(String, String)]) -> anyhow::Result<usize> {
+    let good = |n: &str| n.len() <= 64 && !n.is_empty() && n.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') && !n.starts_with('-') && !n.ends_with('-') && !n.contains("--");
+    if let Some((bad, _)) = skills.iter().find(|(n, _)| !good(n)) {
+        anyhow::bail!("the server named a skill {bad:?}, which isn't an Agent Skills name: nothing written");
+    }
+    let manifest = json!({
+        "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+        "name": "roll",
+        "version": version,
+        "description": "roll's MCP server (every product's tools, through roll's permissions) and its skills: workflows for deploying, debugging and securing what runs on roll.",
+        "homepage": "https://roll.sh",
+        "keywords": ["roll", "mcp", "postgres", "deploy", "previews", "secrets", "search"],
+    });
+    let mcp = json!({
+        "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+        "mcpServers": { "roll": { "type": "streamable-http", "url": url } },
+    });
+    write(&dir.join("plugin.json"), &format!("{}\n", serde_json::to_string_pretty(&manifest)?))?;
+    write(&dir.join("mcp.json"), &format!("{}\n", serde_json::to_string_pretty(&mcp)?))?;
+    for (name, text) in skills {
+        write(&dir.join("skills").join(name).join("SKILL.md"), text)?;
+    }
+    Ok(skills.len())
+}
+
 /// Whether `program` is on PATH.
 pub fn on_path(program: &str) -> bool {
     std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(program).is_file()))
@@ -136,6 +167,24 @@ pub fn on_path(program: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The plugin bundle: the manifest and the MCP entry as the spec has them (no token anywhere),
+    /// each skill in its folder; a skill name that could leave the folder is refused, nothing written.
+    #[test]
+    fn a_plugin_bundle_follows_agent_plugins_1_0() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = "https://api.roll.sh/v1/mcp";
+        let skills = vec![("using-roll".to_string(), "---\nname: using-roll\n---\n".to_string()), ("ship-a-service".to_string(), "---\nname: ship-a-service\n---\n".to_string())];
+        assert_eq!(write_plugin(dir.path(), url, "1.2.3", &skills).unwrap(), 2);
+        let manifest: Value = serde_json::from_str(&std::fs::read_to_string(dir.path().join("plugin.json")).unwrap()).unwrap();
+        assert_eq!((manifest["$schema"].as_str(), manifest["name"].as_str()), (Some("https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"), Some("roll")));
+        let mcp: Value = serde_json::from_str(&std::fs::read_to_string(dir.path().join("mcp.json")).unwrap()).unwrap();
+        assert_eq!(mcp["mcpServers"]["roll"], json!({ "type": "streamable-http", "url": url }));
+        assert!(std::fs::read_to_string(dir.path().join("skills/ship-a-service/SKILL.md")).unwrap().contains("ship-a-service"));
+        let other = tempfile::tempdir().unwrap();
+        assert!(write_plugin(other.path(), url, "1", &[("../escape".into(), "x".into())]).is_err());
+        assert!(!other.path().join("plugin.json").exists(), "nothing written");
+    }
 
     /// Each client found gets roll once, by its own mechanism; what's in its file stays; a second
     /// run changes nothing; a dry run writes nothing.

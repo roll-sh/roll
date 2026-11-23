@@ -96,7 +96,7 @@ export function UpstreamEditor({
       ...(fromOp ? { key_ref: ref } : {}),
       ...(initial?.disabled ? { disabled: true } : {}),
     };
-    if (fromOp && !ref.trim()) return setProblem("Enter the op:// reference, or turn off From 1Password.");
+    if (fromOp && !ref.trim()) return setProblem("Enter the op:// or roll:// reference, or turn off From a reference.");
     const checked = checkUpstream(spec);
     if ("error" in checked) return setProblem(checked.error);
     const change = fromOp ? undefined : clearKey ? null : key.trim() ? key : undefined;
@@ -202,12 +202,17 @@ export function UpstreamEditor({
         <textarea aria-label="Headers" value={headers} onChange={(e) => setHeaders(e.target.value)} rows={1} placeholder="openai-organization: org-…" spellCheck={false} className={cn(field, "h-auto w-full resize-y py-1.5 font-mono text-[12px]")} />
       </Labeled>
       <Labeled
-        label={fromOp ? "Key from 1Password" : preset.key.label}
-        hint={fromOp ? "Read on the gateway's computer with the op CLI. A reference isn't a secret." : typing && !clearKey ? `${preset.key.hint} Sealed to the gateway's computer in your browser; roll only carries it encrypted and never shows it again.` : null}
+        label={fromOp ? "Key from a reference" : preset.key.label}
+        hint={
+          fromOp
+            ? ref.startsWith("roll://")
+              ? "From roll secrets, read as you while you may reveal it, and sent sealed to the gateway's computer. A reference isn't a secret."
+              : "Read on the gateway's computer with the op CLI. A reference isn't a secret."
+            : typing && !clearKey ? `${preset.key.hint} Sealed to the gateway's computer in your browser; roll only carries it encrypted and never shows it again.` : null}
       >
         <div className="flex flex-wrap items-center gap-2">
           {fromOp ? (
-            <input aria-label="1Password reference" value={ref} onChange={(e) => setRef(e.target.value)} placeholder="op://vault/item/field" spellCheck={false} className={cn(field, "min-w-48 flex-1 font-mono text-[12px]")} />
+            <input aria-label="Key reference" value={ref} onChange={(e) => setRef(e.target.value)} placeholder="op://vault/item/field or roll://production/KEY" spellCheck={false} className={cn(field, "min-w-48 flex-1 font-mono text-[12px]")} />
           ) : typing && !clearKey ? (
             <div className="min-w-48 flex-1">
               <KeyInput label={preset.key.label} value={key} onChange={setKey} placeholder={sealed ? "New key" : preset.key.placeholder} multiline={preset.key.multiline} />
@@ -233,8 +238,8 @@ export function UpstreamEditor({
             </span>
           )}
           <label className="ml-auto flex shrink-0 items-center gap-2 text-[12px] text-muted">
-            From 1Password
-            <Switch size="sm" checked={fromOp} onCheckedChange={setFromOp} aria-label="Key from 1Password" />
+            From a reference
+            <Switch size="sm" checked={fromOp} onCheckedChange={setFromOp} aria-label="Key from a reference" />
           </label>
         </div>
       </Labeled>

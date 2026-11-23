@@ -399,7 +399,9 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
         known.extend(m.sets.iter().flat_map(|s| s.tools()).filter_map(|t| t["name"].as_str().map(str::to_string)));
         let unknown = pick.unknown(&known);
         if !unknown.is_empty() {
-            return http_error(StatusCode::BAD_REQUEST, &format!("no tool named {}: tools/list says which there are", unknown.join(", ")));
+            let near: Vec<String> = unknown.iter().filter_map(|u| tools::nearest(u, known.iter().map(String::as_str)).map(|n| format!("{u} → {n}"))).collect();
+            let hint = if near.is_empty() { String::new() } else { format!(" (did you mean: {})", near.join(", ")) };
+            return http_error(StatusCode::BAD_REQUEST, &format!("no tool named {}{hint}: tools/list says which there are", unknown.join(", ")));
         }
     }
     let principal = match roll_auth::Grant::on(&ext) {
@@ -882,7 +884,11 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                             if ctx.modern { rpc_result(id, modern::approval_input_required(&r)) } else { approval_elicitation(id, &r) }
                         }
                         Ok(Some(r)) => rpc_result(id, r),
-                        Ok(None) => rpc_error(id, -32602, format!("unknown tool {name:?}")),
+                        Ok(None) => {
+                            let listed = ctx.usable_tools();
+                            let near = tools::nearest(&name, listed.iter().filter_map(|t| t["name"].as_str())).map(|n| format!(": did you mean {n:?}?")).unwrap_or_default();
+                            rpc_error(id, -32602, format!("unknown tool {name:?}{near}"))
+                        }
                     }
                 }
             }
@@ -1331,10 +1337,14 @@ async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: bool) -> Option
     if let Some(challenge) = step_up_challenge(ctx, &result) {
         result["_meta"]["mcp/www_authenticate"] = json!([challenge]);
     }
+    // An MCP Apps view reads a changing answer again (a deploy building, an approval pending).
+    if ctx.ui && !ctx.search && !quiet {
+        ui::mark_pending(name, &args, &mut result, |t| tool_names(ctx).iter().any(|n| n == t));
+    }
     // In lockdown, an outside record's text never reaches the model: withheld in the structured
     // answer, and the text block (a fronted set may write its own) rebuilt from what's left.
     if ctx.lockdown && lockdown::withhold(&mut result["structuredContent"]) + lockdown::withhold_fields(&mut result["structuredContent"], outside) > 0 {
-        let text = cut(serde_json::to_string_pretty(&result["structuredContent"]).unwrap_or_default(), true);
+        let text = cut(serde_json::to_string(&result["structuredContent"]).unwrap_or_default(), true);
         if let Some(content) = result["content"].as_array_mut() {
             content.retain(|c| c["type"] != "text");
             content.insert(0, json!({ "type": "text", "text": text }));
@@ -1701,7 +1711,9 @@ async fn outcome(tool: &str, resp: Response) -> Value {
         return tool_error(text, data);
     }
     let (text, structured) = match json {
-        Some(v) => (cut(serde_json::to_string_pretty(&v).unwrap_or_default(), true), if v.is_object() { v } else { json!({ "items": v }) }),
+        // Compact: a model reads JSON without its indentation, which is about a third of a
+        // pretty-printed answer's tokens (and leaves more under the cut).
+        Some(v) => (cut(serde_json::to_string(&v).unwrap_or_default(), true), if v.is_object() { v } else { json!({ "items": v }) }),
         None if bytes.is_empty() => ("done".to_string(), json!({ "ok": true })),
         None => match std::str::from_utf8(&bytes) {
             Ok(s) => (cut(s.to_string(), false), json!({ "content_type": ct, "bytes": bytes.len() })),

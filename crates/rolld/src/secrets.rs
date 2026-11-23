@@ -2165,20 +2165,33 @@ impl code_control::SecretEnv for ForCode {
     }
 
     /// As roll secrets reads for `by` now (`values_as_maker`: the check and the read in one), what a
-    /// sandbox it copied into starts with. Never a protected environment or an unresolved reference.
-    async fn reveal_as(&self, by: &str, project: &str, environment: &str, consumer: &str) -> anyhow::Result<Vec<(String, String)>> {
+    /// sandbox it copied into starts with. Never a protected environment or an unresolved reference:
+    /// those keys come back as unresolved, for the sandbox to leave out the ones it copied. An
+    /// environment deleted but still in its recovery window leaves the answer open (a recovery
+    /// brings the values back); one purged is refused.
+    async fn reveal_as(&self, by: &str, project: &str, environment: &str, consumer: &str) -> anyhow::Result<code_control::Reread> {
         let (secrets, _) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting"))?;
         let (by, project, environment, consumer) = (by.to_string(), project.to_string(), environment.to_string(), consumer.to_string());
         tokio::task::spawn_blocking(move || {
             let (slug, path) = environment.split_once(':').unwrap_or((&environment, "/"));
-            let v = secrets.values_as_maker(&by, &project, slug, path, &consumer).map_err(|e| match e {
-                roll_secrets::Error::Forbidden(m) | roll_secrets::Error::NotFound(m) | roll_secrets::Error::MakerUnreachable(m) => code_control::Refused(m).into(),
-                e => anyhow::Error::from(e),
-            })?;
-            if let Some(p) = v.problems.first() {
-                anyhow::bail!("{} of {slug} didn't resolve ({}: {})", v.problems.len(), p.key, p.problem);
-            }
-            Ok(v.values.into_iter().map(|(k, v)| (k, v.expose().to_string())).collect())
+            let v = match secrets.values_as_maker(&by, &project, slug, path, &consumer) {
+                Ok(v) => v,
+                Err(roll_secrets::Error::MakerUnreachable(m)) => return Err(code_control::Refused(m).into()),
+                Err(e) => {
+                    return Err(match secrets.environment_standing(&project, slug)? {
+                        roll_secrets::deleted_envs::Standing::Kept { .. } => anyhow::anyhow!("{slug} is deleted and kept for its recovery window: its values come back if it's recovered"),
+                        roll_secrets::deleted_envs::Standing::Gone => code_control::Refused(format!("{slug} no longer exists")).into(),
+                        roll_secrets::deleted_envs::Standing::Live => match e {
+                            roll_secrets::Error::Forbidden(m) | roll_secrets::Error::NotFound(m) => code_control::Refused(m).into(),
+                            e => anyhow::Error::from(e),
+                        },
+                    });
+                }
+            };
+            Ok(code_control::Reread {
+                values: v.values.into_iter().map(|(k, v)| (k, v.expose().to_string())).collect(),
+                unresolved: v.problems.into_iter().map(|p| (p.key, p.problem)).collect(),
+            })
         })
         .await?
     }
@@ -2462,6 +2475,58 @@ mod tests {
         let os = super::search_parts(&json!({ "id": "roll-key-x", "username": "roll-key-x@logs", "password": "pw" })).unwrap();
         assert_eq!((os["user"].expose(), os["password"].expose()), ("roll-key-x@logs", "pw"));
         assert!(super::search_parts(&json!({ "id": "x" })).is_err());
+    }
+
+    /// A search link narrowed by `names` and `permission` refuses a key roll search made wider
+    /// than asked (another access, other indices, or one that doesn't say) and deletes it; the
+    /// key asked for is kept.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_search_link_refuses_and_deletes_a_wider_key() {
+        use super::LinkProvider as _;
+        use axum::routing::{delete, post};
+        let answer: Arc<Mutex<Json>> = Arc::new(Mutex::new(Json::Null));
+        let asked: Arc<Mutex<Vec<Json>>> = Default::default();
+        let deleted: Arc<Mutex<Vec<String>>> = Default::default();
+        let (a, q, d) = (answer.clone(), asked.clone(), deleted.clone());
+        let router = axum::Router::new()
+            .route(
+                "/v1/search/clusters/{id}/keys",
+                post(move |axum::Json(body): axum::Json<Json>| {
+                    q.lock().unwrap().push(body);
+                    let v = a.lock().unwrap().clone();
+                    async move { axum::Json(v) }
+                }),
+            )
+            .route(
+                "/v1/search/clusters/{id}/keys/{key}",
+                delete(move |axum::extract::Path((_, key)): axum::extract::Path<(String, String)>| {
+                    d.lock().unwrap().push(key);
+                    async { axum::http::StatusCode::NO_CONTENT }
+                }),
+            );
+        let api = super::Api::default();
+        api.set(router);
+        let search = super::Search(api, Default::default());
+        let link: super::Link = serde_json::from_value(json!({ "kind": "search", "ref": "srch_logs", "field": "api_key", "mode": "managed", "options": { "names": ["logs-app"], "permission": "read" } })).unwrap();
+        let issue = |made: Json| {
+            *answer.lock().unwrap() = made;
+            let (search, link) = (&search, &link);
+            tokio::task::block_in_place(|| search.issue("srch_logs", "api_key", link, "roll secrets ELASTICSEARCH_API_KEY", None).map(|i| i.handle))
+        };
+        for wider in [
+            json!({ "id": "k_data", "access": "data", "indices": ["logs-app"], "api_key": "x" }),
+            json!({ "id": "k_all", "access": "read", "indices": ["*"], "api_key": "x" }),
+            json!({ "id": "k_mute", "api_key": "x" }),
+        ] {
+            let e = issue(wider.clone()).expect_err("a wider key is refused");
+            assert!(e.to_string().contains("refused (and deleted)"), "{e}");
+            assert!(!e.to_string().contains("\"x\""), "no key in the error: {e}");
+        }
+        assert_eq!(*deleted.lock().unwrap(), ["k_data", "k_all", "k_mute"]);
+        assert_eq!(asked.lock().unwrap()[0]["access"], "read");
+        assert_eq!(asked.lock().unwrap()[0]["indices"], json!(["logs-app"]));
+        assert_eq!(issue(json!({ "id": "k_ok", "access": "read", "indices": ["logs-app"], "api_key": "x" })).unwrap(), json!({ "id": "k_ok" }));
+        assert_eq!(deleted.lock().unwrap().len(), 3, "the key asked for is kept");
     }
 
     /// roll queues in process (a broker with an AMQP listener, mq-control's routes behind the

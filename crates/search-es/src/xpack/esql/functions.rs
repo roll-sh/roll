@@ -803,8 +803,196 @@ pub fn check(f: F, written: &str, call: &str, at: (usize, usize), args: &[Arg<'_
     Ok(f.result_type(&types))
 }
 
+/// The most a function may build into one string or multi-value from its inputs: Elasticsearch's
+/// 1 MiB for strings (`CONCAT`, `REPEAT`, `REPLACE`). Elasticsearch charges what its other
+/// builders make to the breaker as they make it; roll holds them to 1 MiB or the size of their
+/// largest input, whichever is larger, through [`Built`].
+pub const MAX_BUILT: usize = 1 << 20;
+
+/// Elasticsearch's warning for a string past its limit (`REPLACE`).
+const STRING_TOO_LONG: &str = "java.lang.IllegalArgumentException: Creating strings with more than [1048576] bytes is not supported";
+/// roll's for a multi-value past its limit (Elasticsearch's breaker refuses those instead).
+const MULTI_TOO_LARGE: &str = "java.lang.IllegalArgumentException: Creating multi-values with more than [1048576] bytes is not supported";
+
+/// A builder went past its limit.
+struct TooLarge;
+
+/// What a function builds from its inputs, held to `limit` bytes as it is built: every append
+/// counts its bytes first and fails once past the limit, so no builder allocates past it (a
+/// string counts its bytes, a multi-value each value's slot and string). The limit is
+/// Elasticsearch's 1 MiB where it has one, else 1 MiB or the largest input: no builder grows a
+/// value it was given past that, so nested calls can't compound.
+struct Built {
+    limit: usize,
+    bytes: usize,
+}
+
+impl Built {
+    fn new(limit: usize) -> Built {
+        Built { limit, bytes: 0 }
+    }
+
+    /// A builder roll bounds: 1 MiB, or the largest of `args`.
+    fn over(args: &[V]) -> Built {
+        Built::new(MAX_BUILT.max(args.iter().map(held_bytes).max().unwrap_or(0)))
+    }
+
+    /// A converter of each value of its first argument (its output's slots and strings can
+    /// outgrow the input's, as a long's text does): the input and 1 MiB more. Each nested call
+    /// adds at most 1 MiB, so they can't compound.
+    fn converting(args: &[V]) -> Built {
+        Built::new(args.first().map_or(0, held_bytes).saturating_add(MAX_BUILT))
+    }
+
+    #[inline]
+    fn take(&mut self, n: usize) -> Result<(), TooLarge> {
+        self.bytes = self.bytes.saturating_add(n);
+        if self.bytes > self.limit { Err(TooLarge) } else { Ok(()) }
+    }
+
+    #[inline]
+    fn push_str(&mut self, out: &mut String, s: &str) -> Result<(), TooLarge> {
+        self.take(s.len())?;
+        out.push_str(s);
+        Ok(())
+    }
+
+    #[inline]
+    fn push(&mut self, out: &mut Vec<V>, v: V) -> Result<(), TooLarge> {
+        self.take(size_of::<V>() + super::memory::value_heap(&v))?;
+        out.push(v);
+        Ok(())
+    }
+}
+
+/// What a value holds as [`Built`] counts it.
+fn held_bytes(v: &V) -> usize {
+    match v {
+        V::Str(s) | V::Ip(s) => s.len(),
+        V::Multi(vs) => vs.iter().map(|x| size_of::<V>() + super::memory::value_heap(x)).sum(),
+        _ => 0,
+    }
+}
+
+/// At least the bytes of a value's text (strings exactly, other values 1): an early refusal
+/// from it is never wrong.
+fn text_len_at_least(v: &V) -> usize {
+    match v {
+        V::Str(s) | V::Ip(s) => s.len(),
+        V::Null => 0,
+        _ => 1,
+    }
+}
+
+/// The values of a multi-value or list as `==` compares them (doubles by value: `-0.0` and
+/// `0.0` are one, every NaN its own), with a hash index instead of a scan per value.
+struct EqSet<'a> {
+    index: std::collections::HashMap<u64, u32, std::hash::BuildHasherDefault<super::exec::IdHasher>>,
+    chain: Vec<u32>,
+    vals: Vec<&'a V>,
+}
+
+impl<'a> EqSet<'a> {
+    fn new() -> EqSet<'a> {
+        EqSet { index: Default::default(), chain: Vec::new(), vals: Vec::new() }
+    }
+
+    fn hash(v: &V) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::hash::DefaultHasher::new();
+        std::mem::discriminant(v).hash(&mut h);
+        match v {
+            V::Bool(b) => b.hash(&mut h),
+            V::Int(i) => i.hash(&mut h),
+            V::Long(l) | V::Date(l) => l.hash(&mut h),
+            V::ULong(u) => u.hash(&mut h),
+            V::Double(d) => (if *d == 0.0 { 0.0f64 } else { *d }).to_bits().hash(&mut h),
+            V::Str(s) | V::Ip(s) => s.hash(&mut h),
+            V::Null | V::Multi(_) => {}
+        }
+        h.finish()
+    }
+
+    fn contains(&self, v: &V) -> bool {
+        let Some(&head) = self.index.get(&Self::hash(v)) else { return false };
+        let mut at = head;
+        loop {
+            if self.vals[at as usize] == v {
+                return true;
+            }
+            match self.chain[at as usize] {
+                u32::MAX => return false,
+                next => at = next,
+            }
+        }
+    }
+
+    /// Adds `v`; false when an equal value is already in.
+    fn insert(&mut self, v: &'a V) -> bool {
+        if self.contains(v) {
+            return false;
+        }
+        let fresh = self.vals.len() as u32;
+        let h = Self::hash(v);
+        match self.index.get(&h) {
+            Some(&head) => {
+                let mut at = head;
+                while self.chain[at as usize] != u32::MAX {
+                    at = self.chain[at as usize];
+                }
+                self.chain[at as usize] = fresh;
+            }
+            None => {
+                self.index.insert(h, fresh);
+            }
+        }
+        self.vals.push(v);
+        self.chain.push(u32::MAX);
+        true
+    }
+}
+
+/// The length `URL_ENCODE` builds: unreserved bytes and spaces stay one byte, others take three.
+fn url_encoded_len(s: &str) -> usize {
+    s.bytes().map(|b| if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~' | b' ') { 1 } else { 3 }).sum()
+}
+
+/// [`map_values`] building the multi-value through [`Built`].
+fn map_built(v: &V, mut b: Built, f: impl Fn(&V) -> V) -> Result<V, TooLarge> {
+    match v {
+        V::Null => Ok(V::Null),
+        V::Multi(vs) => {
+            let mut out = Vec::with_capacity(vs.len());
+            for x in vs {
+                let y = f(x);
+                if !y.is_null() {
+                    b.push(&mut out, y)?;
+                }
+            }
+            Ok(multi(out))
+        }
+        other => Ok(f(other)),
+    }
+}
+
+/// `TO_UPPER` / `TO_LOWER` of one string within `limit` (their output can grow: `ß` is `SS`):
+/// the exact length is counted first when the input could pass the limit.
+fn case_within(s: &str, upper: bool, limit: usize) -> Result<String, TooLarge> {
+    if s.len().saturating_mul(3) > limit {
+        let len: usize = if upper { s.chars().flat_map(char::to_uppercase).map(char::len_utf8).sum() } else { s.chars().flat_map(char::to_lowercase).map(char::len_utf8).sum() };
+        if len > limit {
+            return Err(TooLarge);
+        }
+    }
+    Ok(if upper { s.to_uppercase() } else { s.to_lowercase() })
+}
+
 /// Evaluates a call.
 pub fn eval(f: F, args: &[V], types: &[DataType]) -> Result<V, Fail> {
+    eval_call(f, args, types)
+}
+
+fn eval_call(f: F, args: &[V], types: &[DataType]) -> Result<V, Fail> {
     if !f.takes_multi() && args.iter().any(|a| matches!(a, V::Multi(_))) {
         return Err(warn(MULTI));
     }
@@ -976,7 +1164,15 @@ pub fn eval(f: F, args: &[V], types: &[DataType]) -> Result<V, Fail> {
         Length => V::Int(text(0).chars().count() as i32),
         BitLength => V::Int((text(0).len() * 8) as i32),
         ByteLength => V::Int(text(0).len() as i32),
-        Concat => V::Str(args.iter().map(V::to_text).collect()),
+        Concat => {
+            // `Concat.process`: the request fails past 1 MiB (checked against 9.5.5).
+            let mut b = Built::new(MAX_BUILT);
+            let mut out = String::new();
+            for a in args {
+                b.push_str(&mut out, &a.to_text()).map_err(|_| Fail::Error(EsError::new(400, "esql_client_exception", format!("concatenating more than [{MAX_BUILT}] bytes is not supported"))))?;
+            }
+            V::Str(out)
+        }
         Contains => V::Bool(text(0).contains(text(1).as_str())),
         Categorize => V::Str(categorize(&text(0))),
         TopSnippets => {
@@ -991,7 +1187,23 @@ pub fn eval(f: F, args: &[V], types: &[DataType]) -> Result<V, Fail> {
         RTrim => V::Str(text(0).trim_end_matches(java_space).to_string()),
         Trim => V::Str(text(0).trim_matches(java_space).to_string()),
         Reverse => V::Str(text(0).chars().rev().collect()),
-        ToLower | ToUpper => map_values(a0, |v| V::Str(if f == ToLower { v.to_text().to_lowercase() } else { v.to_text().to_uppercase() })),
+        ToLower | ToUpper => {
+            let b = Built::converting(args);
+            let limit = b.limit;
+            let failed = std::cell::Cell::new(false);
+            let out = map_built(a0, b, |v| match case_within(&v.to_text(), f == ToUpper, limit) {
+                Ok(s) => V::Str(s),
+                Err(TooLarge) => {
+                    failed.set(true);
+                    V::Null
+                }
+            })
+            .map_err(|_| warn(MULTI_TOO_LARGE))?;
+            if failed.get() {
+                return Err(warn(STRING_TOO_LONG));
+            }
+            out
+        }
         Left | Right => {
             let s = text(0);
             let n = int(1).unwrap_or(0).max(0) as usize;
@@ -1026,13 +1238,21 @@ pub fn eval(f: F, args: &[V], types: &[DataType]) -> Result<V, Fail> {
             let rep = search_analysis::jregex::Replacement::parse(&text(2), &re);
             let mut out = String::new();
             let mut caps = re.captures();
-            rep.replace(&re, &text(0), true, &mut caps, &mut out).map_err(|e| warn(format!("java.lang.IllegalArgumentException: {}", e.reason)))?;
-            V::Str(out)
+            // Held to 1 MiB as it is built (Elasticsearch's limit and warning).
+            match rep.replace_within(&re, &text(0), true, &mut caps, &mut out, MAX_BUILT).map_err(|e| warn(format!("java.lang.IllegalArgumentException: {}", e.reason)))? {
+                Some(_) => V::Str(out),
+                None => return Err(warn(STRING_TOO_LONG)),
+            }
         }
         Split => {
             let s = text(0);
             let d = text(1);
-            let parts: Vec<V> = s.split(d.as_str()).map(|p| V::Str(p.to_string())).collect();
+            // Each part is a value of its own: held to 1 MiB or the input as they are pushed.
+            let mut b = Built::over(args);
+            let mut parts: Vec<V> = Vec::new();
+            for p in s.split(d.as_str()) {
+                b.push(&mut parts, V::Str(p.to_string())).map_err(|_| warn(MULTI_TOO_LARGE))?;
+            }
             multi(parts)
         }
         Md5 | Sha1 | Sha256 => V::Str(hex(&digest(if f == Md5 { "MD5" } else if f == Sha1 { "SHA-1" } else { "SHA-256" }, text(0).as_bytes()).unwrap_or_default())),
@@ -1042,6 +1262,9 @@ pub fn eval(f: F, args: &[V], types: &[DataType]) -> Result<V, Fail> {
         },
         ToBase64 => {
             use base64::Engine;
+            if text(0).len().div_ceil(3).saturating_mul(4) > Built::over(args).limit {
+                return Err(warn(STRING_TOO_LONG));
+            }
             V::Str(base64::engine::general_purpose::STANDARD.encode(text(0).as_bytes()))
         }
         FromBase64 => {
@@ -1055,7 +1278,15 @@ pub fn eval(f: F, args: &[V], types: &[DataType]) -> Result<V, Fail> {
                 Err(_) => return Err(warn("java.lang.IllegalArgumentException: Input byte array has wrong 4-byte ending unit")),
             }
         }
-        UrlEncode | UrlEncodeComponent => V::Str(url_encode(&text(0), f == UrlEncodeComponent)),
+        UrlEncode | UrlEncodeComponent => {
+            // At most 3 bytes per input byte: the exact length is counted when that could pass.
+            let t = text(0);
+            let limit = Built::over(args).limit;
+            if t.len().saturating_mul(3) > limit && url_encoded_len(&t) > limit {
+                return Err(warn(STRING_TOO_LONG));
+            }
+            V::Str(url_encode(&t, f == UrlEncodeComponent))
+        }
         UrlDecode => V::Str(url_decode(&text(0)).map_err(warn)?),
         // dates
         DateDiff => {
@@ -1193,7 +1424,7 @@ pub fn eval(f: F, args: &[V], types: &[DataType]) -> Result<V, Fail> {
             }
         })?,
         ToString | ToText if ty0.is_grid() => map_values(a0, |v| v.as_i64().map_or(V::Null, |l| V::Str(super::spatial::grid_address(l, ty0)))),
-        ToString | ToText | ToVersion => map_values(a0, |v| V::Str(v.to_text())),
+        ToString | ToText | ToVersion => map_built(a0, Built::converting(args), |v| V::Str(v.to_text())).map_err(|_| warn(MULTI_TOO_LARGE))?,
         // Grid cells are their long encodings; strings are addresses.
         ToGeohash | ToGeotile | ToGeohex => map_try(a0, |v| match v {
             V::Str(s) => super::spatial::grid_parse(s, f.result_type(types)).map(V::Long).map_err(warn),
@@ -1242,15 +1473,11 @@ pub fn eval(f: F, args: &[V], types: &[DataType]) -> Result<V, Fail> {
             pick.cloned().unwrap_or(V::Null)
         }
         MvDedupe => {
-            let mut out: Vec<V> = Vec::new();
             // `MultivalueDedupeDouble` compares with the primitive `==`: `-0.0` and `0.0` are
             // one value, the first kept (unlike group keys and `VALUES`, which hash the bits).
-            for v in a0.values() {
-                if !out.contains(v) {
-                    out.push(v.clone());
-                }
-            }
-            multi(out)
+            let vals = a0.values();
+            let mut seen = EqSet::new();
+            multi(vals.into_iter().filter(|v| seen.insert(v)).cloned().collect())
         }
         MvSort => {
             let desc = args.get(1).is_some_and(|o| o.to_text().eq_ignore_ascii_case("desc"));
@@ -1275,41 +1502,91 @@ pub fn eval(f: F, args: &[V], types: &[DataType]) -> Result<V, Fail> {
             if args.iter().any(V::is_null) {
                 return Ok(V::Null);
             }
-            multi(args.iter().flat_map(V::values).cloned().collect())
-        }
-        MvContains => {
-            let sup = a0.values();
-            V::Bool(args[1].values().iter().all(|x| sup.contains(x)))
-        }
-        MvDifference | MvIntersection | MvUnion => {
-            let (a, b) = (a0.values(), args[1].values());
-            let mut out: Vec<V> = Vec::new();
-            let push = |v: &V, out: &mut Vec<V>| {
-                if !out.contains(v) {
-                    out.push(v.clone());
-                }
-            };
-            match f {
-                MvDifference => a.iter().filter(|x| !b.contains(x)).for_each(|x| push(x, &mut out)),
-                MvIntersection => a.iter().filter(|x| b.contains(x)).for_each(|x| push(x, &mut out)),
-                _ => a.iter().chain(b.iter()).for_each(|x| push(x, &mut out)),
+            let mut b = Built::over(args);
+            let mut out = Vec::new();
+            for v in args.iter().flat_map(V::values) {
+                b.push(&mut out, v.clone()).map_err(|_| warn(MULTI_TOO_LARGE))?;
             }
             multi(out)
         }
-        MvConcat => V::Str(a0.values().iter().map(|v| v.to_text()).collect::<Vec<_>>().join(&text(1))),
+        MvContains => {
+            let sup = a0.values();
+            let mut set = EqSet::new();
+            sup.iter().for_each(|x| {
+                set.insert(x);
+            });
+            V::Bool(args[1].values().iter().all(|x| set.contains(x)))
+        }
+        MvDifference | MvIntersection | MvUnion => {
+            let (a, b) = (a0.values(), args[1].values());
+            let mut in_b = EqSet::new();
+            b.iter().for_each(|x| {
+                in_b.insert(x);
+            });
+            let mut seen = EqSet::new();
+            let mut built = Built::over(args);
+            let mut out: Vec<V> = Vec::new();
+            let picked: Vec<&V> = match f {
+                MvDifference => a.iter().copied().filter(|x| !in_b.contains(x)).collect(),
+                MvIntersection => a.iter().copied().filter(|x| in_b.contains(x)).collect(),
+                _ => a.iter().chain(b.iter()).copied().collect(),
+            };
+            for x in picked {
+                if seen.insert(x) {
+                    built.push(&mut out, x.clone()).map_err(|_| warn(MULTI_TOO_LARGE))?;
+                }
+            }
+            multi(out)
+        }
+        MvConcat => {
+            let vals = a0.values();
+            let delim = text(1);
+            let mut b = Built::over(args);
+            // Refused early when even the shortest texts and the delimiter between each pass.
+            let least = vals.iter().map(|v| text_len_at_least(v)).sum::<usize>().saturating_add(vals.len().saturating_sub(1).saturating_mul(delim.len()));
+            if least > b.limit {
+                return Err(warn(STRING_TOO_LONG));
+            }
+            let mut out = String::new();
+            for (i, v) in vals.iter().enumerate() {
+                if i > 0 {
+                    b.push_str(&mut out, &delim).map_err(|_| warn(STRING_TOO_LONG))?;
+                }
+                b.push_str(&mut out, &v.to_text()).map_err(|_| warn(STRING_TOO_LONG))?;
+            }
+            V::Str(out)
+        }
         MvZip => {
             if a0.is_null() && args[1].is_null() {
                 return Ok(V::Null);
             }
             let delim = if args.len() == 3 { if args[2].is_null() { return Ok(V::Null) } else { text(2) } } else { ",".to_string() };
             let (a, b) = (a0.values(), args[1].values());
-            let out: Vec<V> = (0..a.len().max(b.len()))
-                .map(|i| match (a.get(i), b.get(i)) {
-                    (Some(x), Some(y)) => V::Str(format!("{}{delim}{}", x.to_text(), y.to_text())),
-                    (Some(x), None) | (None, Some(x)) => V::Str(x.to_text()),
-                    _ => V::Null,
-                })
-                .collect();
+            let n = a.len().max(b.len());
+            let mut built = Built::over(args);
+            // Refused early when even the shortest texts and a delimiter per pair pass.
+            let least = a.iter().chain(b.iter()).map(|v| text_len_at_least(v)).sum::<usize>().saturating_add(a.len().min(b.len()).saturating_mul(delim.len()));
+            if least > built.limit {
+                return Err(warn(MULTI_TOO_LARGE));
+            }
+            let mut out: Vec<V> = Vec::with_capacity(n);
+            for i in 0..n {
+                match (a.get(i), b.get(i)) {
+                    (Some(x), Some(y)) => {
+                        // Counted before the pair's string is made.
+                        let (x, y) = (x.to_text(), y.to_text());
+                        let len = x.len() + delim.len() + y.len();
+                        built.take(size_of::<V>() + len).map_err(|_| warn(MULTI_TOO_LARGE))?;
+                        let mut s = String::with_capacity(len);
+                        s.push_str(&x);
+                        s.push_str(&delim);
+                        s.push_str(&y);
+                        out.push(V::Str(s));
+                    }
+                    (Some(x), None) | (None, Some(x)) => built.push(&mut out, V::Str(x.to_text())).map_err(|_| warn(MULTI_TOO_LARGE))?,
+                    _ => built.push(&mut out, V::Null).map_err(|_| warn(MULTI_TOO_LARGE))?,
+                }
+            }
             multi(out)
         }
         MvSum => {

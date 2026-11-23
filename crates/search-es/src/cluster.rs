@@ -148,6 +148,11 @@ pub struct ClusterConfig {
     /// Resolves credentials given as references (`roll://ENV/KEY`, [`crate::secret_refs`]);
     /// `None`: references are refused.
     pub secret_refs: Option<crate::secret_refs::Resolver>,
+    /// The node's budget for what requests hold, shared by every cluster on the node and set by
+    /// its operator, never by a tenant: the parent of the cluster's `request` breaker, whose
+    /// limit is held to [`crate::breaker::REQUEST_MAX_LIMIT`] of it ([`crate::breaker::Breakers::node`]).
+    /// `None`: the `request` breaker alone.
+    pub request_memory: Option<std::sync::Arc<search_aggs::memory::MemoryBudget>>,
     /// Without a [`ClusterConfig::sealer`], store the secrets clients give in the clear rather
     /// than refuse them ([`crate::seal`]): local development and tests only.
     pub unsealed_secrets: bool,
@@ -180,6 +185,7 @@ impl ClusterConfig {
             audit: None,
             embedder: None,
             secret_refs: None,
+            request_memory: None,
             unsealed_secrets: false,
             reindex_node: None,
         }
@@ -609,7 +615,7 @@ impl Cluster {
         crate::api::snapshots::install_default_repository(&mut state.metadata, config.default_repository.as_deref());
         let (changes, _) = tokio::sync::watch::channel(state.version);
         let thread_pools = crate::thread_pool::ThreadPools::new(&config);
-        let remote_node = config.reindex_node.clone().unwrap_or_else(|| crate::api::remote::RemoteNode::from_settings(&config.node_settings));
+        let remote_node = config.reindex_node.clone().unwrap_or_else(|| crate::api::remote::RemoteNode::from_settings_under(&config.node_settings, config.request_memory.clone()));
         // Runtime-field grok runs inside Painless, which reads the static node setting from here.
         if config.node_setting("runtime_fields.grok.watchdog.max_execution_time").is_some() {
             let ms = config
@@ -620,6 +626,10 @@ impl Cluster {
         }
         let analytics = crate::analytics::Analytics::default();
         analytics.sync(&state);
+        let breakers = crate::breaker::Breakers::with_node(config.request_memory.clone(), config.node_setting(crate::breaker::REQUEST_MAX_LIMIT));
+        // Kept async results count against what this cluster's requests may hold.
+        let xpack = crate::xpack::Runtime::default();
+        xpack.results.charge_to(breakers.request_budget().clone());
         Ok(Cluster {
             analytics,
             changes,
@@ -648,8 +658,8 @@ impl Cluster {
             contexts: Default::default(),
             ccs_contexts: Default::default(),
             ingest: Default::default(),
-            xpack: Default::default(),
-            breakers: Default::default(),
+            xpack,
+            breakers,
             remote: remote_node,
             reindex_whitelist: RwLock::new(None),
             thread_pools,

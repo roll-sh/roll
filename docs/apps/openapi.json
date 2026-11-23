@@ -915,7 +915,7 @@
         "x-roll-action": "admin"
       },
       "get": {
-        "description": "Answers `{ keys: string[], required: boolean }` (none set: no keys, not required).",
+        "description": "Answers `{ keys: string[], required: boolean, roll_key: string }` (none set: no keys, not required; `roll_key`: the P-256 public key in PEM that signs the project's builds' provenance, made the first time it's asked for).",
         "operationId": "getProjectsProjectSigning",
         "parameters": [
           {
@@ -929,7 +929,7 @@
         ],
         "responses": {
           "200": {
-            "description": "`{ keys: string[], required: boolean }` (none set: no keys, not required)"
+            "description": "`{ keys: string[], required: boolean, roll_key: string }` (none set: no keys, not required; `roll_key`: the P-256 public key in PEM that signs the project's builds' provenance, made the first time it's asked for)"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
@@ -2151,6 +2151,51 @@
           }
         },
         "summary": "List logs",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "read"
+      }
+    },
+    "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/provenance": {
+      "get": {
+        "description": "Answers its image's SLSA v1 provenance as roll built it, a DSSE envelope (`payloadType` `application/vnd.in-toto+json`, the statement base64 in `payload`, an ECDSA P-256 signature over its PAE): the source and revision, base images' digests, the plan, the Dockerfile's hash, the build variables' names, the image's digest as its subject; verify with the project's `roll_key` (`GET …/projects/{project}/signing`). 404 for an image roll didn't build (an image service's).",
+        "operationId": "getServicesIdEnvironmentsEnvDeploysDepProvenance",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "dep",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "its image's SLSA v1 provenance as roll built it, a DSSE envelope (`payloadType` `application/vnd.in-toto+json`, the statement base64 in `payload`, an ECDSA P-256 signature over its PAE): the source and revision, base images' digests, the plan, the Dockerfile's hash, the build variables' names, the image's digest as its subject; verify with the project's `roll_key` (`GET …/projects/{project}/signing`). 404 for an image roll didn't build (an image service's)"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Get provenance",
         "tags": [
           "services"
         ],
@@ -5420,6 +5465,45 @@
           "services"
         ],
         "x-roll-action": "write"
+      }
+    },
+    "/v1/apps/services/{id}/move": {
+      "post": {
+        "description": "Answers `{ id, project, redeployed: { environment, deployment }[], failed: { environment, error }[] }`; 409 naming what ties it to its project (links either way, routes either way, routes there to its name, `roll://` references, a private network, running sandboxes, project secrets without `switch`), a service of its name or a preview label taken there; 403 for another owner's project, or a scoped token or session without admin on apps there (README, \"Moving a service\").",
+        "operationId": "postServicesIdMove",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "description": "`{ project, secrets?: \"switch\" }` (another project of the same owner; `switch`: its environments' project secrets become the target's)"
+        },
+        "responses": {
+          "200": {
+            "description": "`{ id, project, redeployed: { environment, deployment }[], failed: { environment, error }[] }`; 409 naming what ties it to its project (links either way, routes either way, routes there to its name, `roll://` references, a private network, running sandboxes, project secrets without `switch`), a service of its name or a preview label taken there; 403 for another owner's project, or a scoped token or session without admin on apps there (README, \"Moving a service\")"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Move service",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "admin"
       }
     },
     "/v1/apps/services/{id}/registry": {

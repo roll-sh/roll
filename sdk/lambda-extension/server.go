@@ -16,7 +16,8 @@ import (
 )
 
 // store reads folders through one logged-in client. Folders without dynamic credentials are the
-// client's to keep (CacheTTL, then a conditional read: a 304 decrypts nothing); a folder holding
+// client's to keep (CacheTTL, then a delta read: only what changed since, `…/values/delta`, and
+// an unchanged folder decrypts nothing; a full read against an older rolld); a folder holding
 // dynamic credentials, which the client never keeps, is kept here until a while before its first
 // lease ends, and never past the TTL.
 type store struct {

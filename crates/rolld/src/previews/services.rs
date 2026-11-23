@@ -360,6 +360,28 @@ impl roll_previews::ports::Apps for RollApps {
         Some(roll_previews::ports::LiveBuild { id: dep, revision: s(&d["revision"])?, url: s(&d["url"])? })
     }
 
+    /// The `pv-` environment's `check_states`: production's browser checks, run once on each of
+    /// its heads; a result counts when it's of the live deployment (`deployment`).
+    async fn browser_checks(&self, preview: &str, service: &str) -> Option<Vec<roll_previews::ports::BrowserCheckResult>> {
+        let (id, env) = self.find(preview, service).await.ok()??;
+        let e = self.api.get(&Self::env_path(&id, &env)).await.ok()?;
+        let live = e["active"]["id"].as_str()?.to_string();
+        let states = e["check_states"].as_array().filter(|a| !a.is_empty())?;
+        Some(
+            states
+                .iter()
+                .filter_map(|c| {
+                    let name = s(&c["name"])?;
+                    let ran = c["deployment"].as_str() == Some(live.as_str());
+                    let passed = if ran { c["up"].as_bool() } else { None };
+                    // A failure's screenshot and trace, kept by roll apps under this environment.
+                    let files = (passed == Some(false) && c["failure_at"].is_number()).then(|| roll_previews::BrowserCheckFiles { service_id: id.clone(), environment: env.clone() });
+                    Some(roll_previews::ports::BrowserCheckResult { name, passed, error: s(&c["error"]).filter(|_| passed == Some(false)), files })
+                })
+                .collect(),
+        )
+    }
+
     /// roll apps' rollback of `deployment` taking no traffic, with the copy's variables in place
     /// of the ones roll set (`plain`, and each link to a branched parent from `branches`, as a
     /// deploy sets them; only names the environment has, which roll apps requires), polled until
@@ -801,6 +823,10 @@ impl roll_previews::ports::Apps for Services {
 
     async fn live_build(&self, preview: &str, service: &str) -> Option<roll_previews::ports::LiveBuild> {
         if matches!(self.apps.find(preview, service).await, Ok(Some(_))) { self.apps.live_build(preview, service).await } else { None }
+    }
+
+    async fn browser_checks(&self, preview: &str, service: &str) -> Option<Vec<roll_previews::ports::BrowserCheckResult>> {
+        if matches!(self.apps.find(preview, service).await, Ok(Some(_))) { self.apps.browser_checks(preview, service).await } else { None }
     }
 
     async fn view_build(&self, preview: &str, service: &str, deployment: &str, plain: &[(String, String)], branches: &[roll_previews::ports::BranchVars]) -> anyhow::Result<Option<String>> {

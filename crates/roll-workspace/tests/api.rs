@@ -649,3 +649,118 @@ async fn a_product_may_refuse_a_delete_and_a_deleted_project_comes_back_with_its
     api.ws.forget_deleted(&id).unwrap();
     assert!(matches!(api.ws.restore(&id), Err(roll_workspace::Error::NotFound(_))));
 }
+
+#[tokio::test]
+async fn a_role_change_is_the_next_event_and_after_returns_only_later_ones() {
+    let api = Api::new();
+    let (_, p) = api.call_as(Some("usr_ada"), Method::POST, "/v1/workspace/projects", Some(json!({ "name": "pay" }))).await;
+    let id = p["id"].as_str().unwrap().to_string();
+    let at = |rest: &str| format!("/v1/workspace/projects/{id}{rest}");
+    let (_, inv) = api.call_as(Some("usr_ada"), Method::POST, &at("/invites"), Some(json!({ "email": "bob@example.com", "role": "developer" }))).await;
+    let token = inv["url"].as_str().unwrap().split("token=").nth(1).unwrap().to_string();
+    api.call_as(Some("usr_bob"), Method::POST, &format!("/v1/workspace/invites/{token}/accept"), None).await;
+
+    // The maker joining, the invite sent and accepted, bob joining: the head is at 4.
+    let (s, head) = api.call_as(Some("usr_ada"), Method::GET, &at("/events?latest=1"), None).await;
+    assert_eq!((s, head), (StatusCode::OK, json!({ "events": [], "next": 4 })));
+    for bad in ["/events?latest=1&after=1", "/events?kinds=member.nope"] {
+        assert_eq!(api.call_as(Some("usr_ada"), Method::GET, &at(bad), None).await.0, StatusCode::BAD_REQUEST, "{bad}");
+    }
+
+    let (s, _) = api.call_as(Some("usr_ada"), Method::PATCH, &at("/members/usr_bob"), Some(json!({ "role": "viewer" }))).await;
+    assert_eq!(s, StatusCode::OK);
+    let (_, page) = api.call_as(Some("usr_ada"), Method::GET, &at("/events?after=4"), None).await;
+    let e = &page["events"][0];
+    assert_eq!((page["events"].as_array().unwrap().len(), &page["next"], &e["seq"], &e["kind"]), (1, &json!(5), &json!(5), &json!("member.role_changed")), "{page}");
+    assert_eq!(e["data"], json!({ "user": "usr_bob", "handle": "bob", "from": { "role": "developer", "environments": null }, "to": { "role": "viewer", "environments": null }, "actor": "usr_ada" }));
+
+    // A family, paged; a page cut short by its filter moves the cursor to the head.
+    let (_, page) = api.call_as(Some("usr_ada"), Method::GET, &at("/events?kinds=member.*&limit=2"), None).await;
+    let seqs = |p: &Value| p["events"].as_array().unwrap().iter().map(|e| e["seq"].as_i64().unwrap()).collect::<Vec<_>>();
+    assert_eq!((seqs(&page), &page["next"]), (vec![1, 4], &json!(4)));
+    let (_, page) = api.call_as(Some("usr_ada"), Method::GET, &at("/events?kinds=invite.*&after=3"), None).await;
+    assert_eq!((seqs(&page), &page["next"]), (vec![], &json!(5)));
+}
+
+#[tokio::test]
+async fn a_projects_events_are_for_whoever_sees_its_members() {
+    let api = Api::new();
+    let (_, p) = api.call_as(Some("usr_ada"), Method::POST, "/v1/workspace/projects", Some(json!({ "name": "pay" }))).await;
+    let id = p["id"].as_str().unwrap().to_string();
+    let at = |rest: &str| format!("/v1/workspace/projects/{id}{rest}");
+    let (_, inv) = api.call_as(Some("usr_ada"), Method::POST, &at("/invites"), Some(json!({ "email": "bob@example.com", "role": "viewer" }))).await;
+    let token = inv["url"].as_str().unwrap().split("token=").nth(1).unwrap().to_string();
+    api.call_as(Some("usr_bob"), Method::POST, &format!("/v1/workspace/invites/{token}/accept"), None).await;
+
+    // Someone outside the project gets the members route's 404.
+    for path in ["/members", "/events"] {
+        assert_eq!(api.call_as(Some("usr_eve"), Method::GET, &at(path), None).await.0, StatusCode::NOT_FOUND, "{path}");
+    }
+    // A viewer reads it, without the invite's address; its admin sees it, as in the members list.
+    let sent = |page: &Value| page["events"].as_array().unwrap().iter().find(|e| e["kind"] == "invite.sent").unwrap()["data"].clone();
+    let (s, page) = api.call_as(Some("usr_bob"), Method::GET, &at("/events"), None).await;
+    assert_eq!((s, sent(&page).get("email")), (StatusCode::OK, None), "{page}");
+    assert!(!page.to_string().contains("rlv_"), "never a token: {page}");
+    let (_, page) = api.call_as(Some("usr_ada"), Method::GET, &at("/events"), None).await;
+    assert_eq!(sent(&page)["email"], "bob@example.com");
+}
+
+/// Two nodes changing roles in one project while a follower on each reads after its cursor: rows
+/// commit in `seq` order, so no follower ever passes one that commits later.
+#[test]
+fn two_nodes_changing_roles_never_leave_a_gap_a_follower_has_passed() {
+    use roll_workspace::{Actor, EventsQuery, Scope, Workspace};
+    let dir = tempfile::tempdir().unwrap();
+    let target = code_sql::Target::Sqlite(dir.path().join("workspace.db"));
+    let node = || {
+        let ws = Arc::new(Workspace::new(code_sql::Db::open_or_test(&target, "workspace").unwrap()).unwrap());
+        ws.set_people(Arc::new(People));
+        ws
+    };
+    let (a, b) = (node(), node());
+    let project = a.create("", "race", "", None).unwrap().id;
+    for user in ["bob", "carol"] {
+        let (_, url) = a.invite(&Actor::operator(), &project, &format!("{user}@example.com"), "developer", None).unwrap();
+        a.accept(&format!("usr_{user}"), url.split("token=").nth(1).unwrap(), None).unwrap();
+    }
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let writers: Vec<_> = [(a.clone(), "usr_bob"), (b.clone(), "usr_carol"), (a.clone(), "usr_carol"), (b.clone(), "usr_bob")]
+        .into_iter()
+        .enumerate()
+        .map(|(n, (ws, user))| {
+            let project = project.clone();
+            std::thread::spawn(move || {
+                for i in 0..15 {
+                    let role = if (i + n) % 2 == 0 { "viewer" } else { "admin" };
+                    ws.set_role(&Actor::operator(), &project, user, role, None).unwrap();
+                }
+            })
+        })
+        .collect();
+    let follow = |ws: Arc<Workspace>| {
+        let (done, project) = (done.clone(), project.clone());
+        std::thread::spawn(move || {
+            let (mut seen, mut after) = (Vec::new(), 0);
+            loop {
+                let last = done.load(std::sync::atomic::Ordering::SeqCst);
+                let page = ws.events(Scope::All, &project, EventsQuery { after: Some(after), limit: Some(3), ..Default::default() }, true).unwrap();
+                seen.extend(page.events.iter().map(|e| e.seq));
+                after = page.next;
+                if last && page.events.is_empty() {
+                    return seen;
+                }
+            }
+        })
+    };
+    let followers = [follow(a.clone()), follow(b.clone())];
+    for w in writers {
+        w.join().unwrap();
+    }
+    done.store(true, std::sync::atomic::Ordering::SeqCst);
+    let all: Vec<i64> = a.events(Scope::All, &project, EventsQuery { limit: Some(500), ..Default::default() }, true).unwrap().events.iter().map(|e| e.seq).collect();
+    assert_eq!(all, (1..=all.len() as i64).collect::<Vec<_>>(), "no gaps");
+    assert!(all.len() > 6, "two invites' three events each, then the role changes that changed a role: {}", all.len());
+    for f in followers {
+        assert_eq!(f.join().unwrap(), all);
+    }
+}

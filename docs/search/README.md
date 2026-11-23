@@ -1264,9 +1264,11 @@ deterministic (#396).
    writes made during the copy are lost unless the client double-writes.
 3. **One memory account per request** (landed: Painless per execution in #591, af195cbbe, after
    four reviews: each execution holds at most `--search-script-memory-mb`, and once-per-document
-   scripts charge the `request` breaker; the node-wide body budget in #601. In progress: ES|QL and
-   aggregations against a node budget no tenant setting can raise in #549, and #591's review
-   follow-ups on `fix/search-painless-memory-2`; Elasticsearch charges every request's
+   scripts charge the `request` breaker; the node-wide body budget in #601; ES|QL and aggregations
+   in #549, ab50f8507, after five reviews: pages, groups, remote states and kept results charged to
+   the request breaker as built, under a node budget no tenant setting can raise
+   (`--search-request-memory-max`). In progress: both PRs' review follow-ups
+   (`fix/search-painless-memory-2`, `fix/search-esql-breaker-2`); Elasticsearch charges every request's
    memory to its circuit breakers, ES|QL's blocks included, and Elastic Cloud's per-deployment
    limits hold because of it). roll serves many tenants per node, so a request whose memory the
    breakers don't see is a way for one tenant to stop everyone's searches. Today's reviews found
@@ -1279,9 +1281,9 @@ deterministic (#396).
    raise. Time has its own cap (#530, landed: one limit per request, by-query scans and internal pagers included). Rule: charge what a structure costs as it is
    built, never a multiple of the bytes it came from. Also left: `_bulk`'s own preparation (`bulk_ahead`
    parses each source into a tree) is charged only as the body's `inflight_requests`, for
-   clients' bulks and connector syncs' alike (#318's pages are text until then). Connector pages
-   and the remote-reindex budget (`roll.reindex.remote.memory`) should then become children of
-   #549's node budget, so a node has one memory account for its background egress too.
+   clients' bulks and connector syncs' alike (#318's pages are text until then). The
+   remote-reindex budget (`roll.reindex.remote.memory`) is a child of #549's node budget; connector
+   pages should become one too, so a node has one memory account for its background egress.
 4. **A sweep for the bug classes the 2026-11-19 reviews kept finding** (first pass landed in #434, the follow-up in #492; what
    today's reviews still find is resource accounting, item 3). Four
    independent security reviews (connectors #318, cross-cluster search #347 and its gaps #389,
@@ -1702,10 +1704,11 @@ deterministic (#396).
    load; the TTL is roll cloud's fleet-wide choice.
 28. **CI**: the merge gate runs `search-codec`'s lib tests (`rust (search)`, 54 s on PR #29 with
    main's cache: under the minute, no room for another crate). Test gaps a read-only analysis found on 2026-11-22
-   (main at d9aecc990), ranked; each test goes in `test:search`, not the merge gate (in progress:
-   (2), (3), (4), (7) and (8) on `test/search-gaps-a`, (5), (6), (9), (10), (11) and the e2e
-   file on `test/search-gaps-b`, both in their gates; `persist.rs`'s memory-budget flake on
-   `fix/search-persist-membudget-flake`):
+   (main at d9aecc990), ranked; each test goes in `test:search`, not the merge gate ((2), (3),
+   (4), (7) and (8) landed in #768, 1c2b5e62c, each failing against its guarded line; in progress:
+   (5), (6), (9), (10), (11) and the e2e file on `test/search-gaps-b`, which also found that a
+   drain leaves a running connector sync `in_progress` for 5 minutes on the next owner; `persist.rs`'s memory-budget flake fixed in
+   #766, 9641a1bd6: the test no longer races a second commit, 60 of 60 under load):
    (1) connectors refusing private addresses: every `connectors.rs` cluster sets
    `allow_private_hosts`, so deleting the check fails nothing (being added with the egress fix,
    `a_connector_never_reaches_a_private_address`); (2) a search link refusing and deleting a key
@@ -1720,7 +1723,14 @@ deterministic (#396).
    dashboard's connectors tab and (10) migration wizard as Testing Library flows; (11) `roll
    search docs add|delete`, `synonyms`/`rules list|delete` and `inference test` as lines in the
    existing CLI flows. `rolld/tests/search_cluster_e2e.rs` never runs (no script sets `ROLL_E2E` for
-   it) and `fleet_e2e.rs` covers it: delete it or wire it into `test:search --docker`. (`search-store`'s mass-recovery
+   it) and `fleet_e2e.rs` covers it: delete it or wire it into `test:search --docker`. Tests for (2), (3), (4), (7)
+   and (8), in process: `rolld` `secrets.rs`'s `a_search_link_refuses_and_deletes_a_wider_key`,
+   `previews/data.rs`'s `a_masked_search_branch_shows_no_original_value` (a text field and its
+   `.keyword`, an address in an array of objects, a dotted key, an index `logs.2024`: none in
+   `_source`, `_terms_enum` or a terms aggregation on the branch), `tests/secrets.rs`'s
+   `an_apps_search_link_is_narrowed_and_unlinking_revokes_it` (and the drain's key revoked with the
+   drain) and `a_repository_key_follows_rotation_and_a_branch_gets_no_protected_key`, and
+   `tests/auth.rs`'s `mcp_search_with_a_project_token`. (`search-store`'s mass-recovery
    WAL test flaked on a loaded host: a replay counted itself in the shared replay cache only
    after listing, so one could finish and empty it while the others listed; it now counts first.
    12 of 40 runs on one CPU failed before, 0 of 40 after.) `search-server`'s parked-governor

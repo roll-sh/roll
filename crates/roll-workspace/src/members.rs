@@ -11,6 +11,7 @@
 //! rolld writes it to roll's audit log and acts on removals (D7's revocations) from there, after
 //! the write, so a crash between the two loses nothing.
 
+use crate::events::{self, Kind as Event};
 use crate::{Error, Kind, Result, Scope, Workspace, not_found, owner_of};
 use code_sql::{Conn, OptionalExtension, params};
 use roll_auth::roles::{self, Role};
@@ -388,6 +389,12 @@ impl Workspace {
         self.people.get().and_then(|p| p.person(user))
     }
 
+    /// `user`'s handle as the members list shows it (their id when they can't sign in), looked up
+    /// before a write: an account is another database's.
+    pub(crate) fn handle(&self, user: &str) -> String {
+        self.person(user).map_or_else(|| user.to_string(), |p| p.handle)
+    }
+
     /// The owners of `project` who can sign in now.
     fn signing_owners(&self, project: &str) -> Result<HashSet<String>> {
         Ok(self.owners_of(project)?.into_iter().filter(|o| self.person(o).is_some()).collect())
@@ -496,6 +503,7 @@ impl Workspace {
         let role = parse_role(role)?;
         check_envs(role, &environments)?;
         let signing = self.signing_owners(project)?;
+        let handle = self.handle(user);
         let now = self.db.now_ms()?;
         self.db.write(|c| {
             owner_of(c, actor.scope(), project)?;
@@ -508,6 +516,10 @@ impl Workspace {
             }
             c.execute("UPDATE members SET role = ?, environments = ? WHERE project_id = ? AND user_id = ?", params![role.as_str(), envs_json(&environments), project, user])?;
             record(c, now, "member.role", project, actor, Some(user), json!({ "old": { "role": old, "environments": old_envs }, "new": { "role": role, "environments": environments } }))?;
+            if (old, &old_envs) != (role, &environments) {
+                let data = json!({ "user": user, "handle": handle, "from": { "role": old, "environments": old_envs }, "to": { "role": role, "environments": environments } });
+                events::emit(c, project, now, Event::MemberRoleChanged, user, &actor.id, data)?;
+            }
             revoke_invites_beyond(c, now, project, user, Some((role, environments.clone())), actor)?;
             Ok(())
         })?;
@@ -520,6 +532,7 @@ impl Workspace {
     pub fn remove_member(&self, actor: &Actor, project: &str, user: &str) -> Result<()> {
         let leaving = actor.user.as_deref() == Some(user);
         let signing = self.signing_owners(project)?;
+        let handle = self.handle(user);
         let now = self.db.now_ms()?;
         self.db.write(|c| {
             owner_of(c, actor.scope(), project)?;
@@ -542,6 +555,8 @@ impl Workspace {
             revoke_invites_beyond(c, now, project, user, None, actor)?;
             let action = if leaving { "member.leave" } else { "member.remove" };
             record(c, now, action, project, actor, Some(user), json!({ "role": role, "environments": envs }))?;
+            let data = json!({ "user": user, "handle": handle, "role": role, "environments": envs, "reason": if leaving { "left" } else { "removed" } });
+            events::emit(c, project, now, Event::MemberRemoved, user, &actor.id, data)?;
             Ok(())
         })?;
         self.run_events();
@@ -586,12 +601,18 @@ impl Workspace {
                     return Err(Error::Conflict(format!("{email} has a pending invite as {r}, which is more than your own role gives: someone who may give it revokes it first")));
                 }
             }
+            let old: Vec<(String, String, Option<String>)> = c.query("SELECT id, role, environments FROM project_invites WHERE project_id = ? AND email = ? AND state = 'pending'", [project, email.as_str()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
             c.execute("UPDATE project_invites SET state = 'revoked' WHERE project_id = ? AND email = ? AND state = 'pending'", [project, email.as_str()])?;
+            for (old, r, e) in old {
+                revoked(c, now, project, &old, &r, envs_of(e), "replaced", &actor.id)?;
+            }
             c.execute(
                 "INSERT INTO project_invites (id, project_id, token_hash, email, role, environments, state, created_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)",
                 params![id, project, hash_token(&token), email, role.as_str(), envs_json(&environments), actor.id, now, now + INVITE_TTL_MS],
             )?;
             record(c, now, "member.invite", project, actor, None, json!({ "invite": id, "email": email, "role": role, "environments": environments }))?;
+            let data = json!({ "invite": id, "email": email, "role": role, "environments": environments, "expires_at": now + INVITE_TTL_MS });
+            events::emit(c, project, now, Event::InviteSent, &id, &actor.id, data)?;
             Ok(c.query_row("SELECT name FROM projects WHERE id = ?", [project], |r| r.get::<_, String>(0))?)
         })?;
         self.run_events();
@@ -619,11 +640,12 @@ impl Workspace {
             owner_of(c, actor.scope(), project)?;
             let found: Option<(String, Option<String>)> = c.query_row("SELECT role, environments FROM project_invites WHERE id = ? AND project_id = ? AND state = 'pending'", [invite, project], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
             let Some((role, envs)) = found else { return Err(Error::NotFound(format!("no pending invite {invite}"))) };
-            if !actor.may_grant(project, parse_role(&role)?, envs_of(envs).as_deref()) {
+            if !actor.may_grant(project, parse_role(&role)?, envs_of(envs.clone()).as_deref()) {
                 return Err(Error::Forbidden(format!("you can't revoke an invite as {role}: it's more than your own role gives")));
             }
             c.execute("UPDATE project_invites SET state = 'revoked' WHERE id = ?", [invite])?;
             record(c, now, "member.invite_revoke", project, actor, None, json!({ "invite": invite }))?;
+            revoked(c, now, project, invite, &role, envs_of(envs.clone()), "revoked", &actor.id)?;
             Ok(())
         })?;
         self.run_events();
@@ -651,7 +673,9 @@ impl Workspace {
         // The same answer for every way it can fail: an invite can't be used to learn who has an
         // account, or which addresses were invited.
         let gone = || Error::NotFound("this invite was used, revoked or has expired, or it's for another address".into());
-        let email = self.person(user).and_then(|p| p.email).ok_or_else(gone)?.to_ascii_lowercase();
+        let person = self.person(user);
+        let handle = person.as_ref().map_or_else(|| user.to_string(), |p| p.handle.clone());
+        let email = person.and_then(|p| p.email).ok_or_else(gone)?.to_ascii_lowercase();
         let now = self.db.now_ms()?;
         // Accepting gives the role the invite names: only while whoever invited may still give it
         // (removed, demoted, disabled, an admin no longer one, a token revoked: none of it stands).
@@ -691,6 +715,8 @@ impl Workspace {
             if !accept {
                 c.execute("UPDATE project_invites SET state = 'revoked', used_by = ?, used_at = ? WHERE id = ?", params![user, now, id])?;
                 record(c, now, "member.decline", &project, &actor, Some(user), json!({ "invite": id }))?;
+                let data = json!({ "invite": id, "role": role, "environments": envs_of(envs), "reason": "declined", "user": user, "handle": handle });
+                events::emit(c, &project, now, Event::InviteRevoked, &id, user, data)?;
                 return Ok(project);
             }
             if role_of(c, &project, user)?.is_some() {
@@ -708,7 +734,11 @@ impl Workspace {
             }
             c.execute("INSERT INTO members (project_id, user_id, role, environments, added_by, added_at) VALUES (?, ?, ?, ?, ?, ?)", params![project, user, role, envs, invited_by, now])?;
             c.execute("UPDATE project_invites SET state = 'used', used_by = ?, used_at = ? WHERE id = ?", params![user, now, id])?;
-            record(c, now, "member.accept", &project, &actor, Some(user), json!({ "invite": id, "role": role, "environments": envs_of(envs) }))?;
+            record(c, now, "member.accept", &project, &actor, Some(user), json!({ "invite": id, "role": role, "environments": envs_of(envs.clone()) }))?;
+            let data = json!({ "invite": id, "user": user, "handle": handle, "role": role, "environments": envs_of(envs.clone()) });
+            events::emit(c, &project, now, Event::InviteAccepted, &id, user, data)?;
+            let data = json!({ "user": user, "handle": handle, "role": role, "environments": envs_of(envs.clone()), "via": "invite", "invite": id, "invited_by": invited_by });
+            events::emit(c, &project, now, Event::MemberAdded, user, user, data)?;
             Ok(project)
         })?;
         self.run_events();
@@ -866,25 +896,64 @@ impl Workspace {
         let now = self.db.now_ms()?;
         let actor = Actor { id: "accounts".into(), ip, ..Default::default() };
         let n = self.db.write(|c| {
-            let projects: Vec<(String, String)> = c.query("SELECT project_id, role FROM members WHERE user_id = ?", [user], |r| Ok((r.get(0)?, r.get(1)?)))?;
-            for (project, role) in &projects {
+            let projects: Vec<(String, String, Option<String>)> = c.query("SELECT project_id, role, environments FROM members WHERE user_id = ?", [user], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            for (project, role, envs) in &projects {
                 c.execute("DELETE FROM members WHERE project_id = ? AND user_id = ?", [project.as_str(), user])?;
                 record(c, now, "member.remove", project, &actor, Some(user), json!({ "role": role, "why": "account deleted" }))?;
+                let data = json!({ "user": user, "handle": user, "role": role, "environments": envs_of(envs.clone()), "reason": "offboarded" });
+                events::emit(c, project, now, Event::MemberRemoved, user, &actor.id, data)?;
             }
             // Their groups too, each a `group.member_remove`.
             let groups: Vec<String> = c.query("SELECT group_id FROM group_members WHERE user_id = ?", [user], |r| r.get(0))?;
             for g in &groups {
                 crate::groups::remove_members(c, now, g, &actor, &[user.to_string()])?;
             }
-            let invites: Vec<(String, String)> = c.query("SELECT id, project_id FROM project_invites WHERE created_by = ? AND state = 'pending'", [user], |r| Ok((r.get(0)?, r.get(1)?)))?;
-            for (id, project) in &invites {
+            let invites: Vec<(String, String, String, Option<String>)> = c.query("SELECT id, project_id, role, environments FROM project_invites WHERE created_by = ? AND state = 'pending'", [user], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+            for (id, project, role, envs) in &invites {
                 c.execute("UPDATE project_invites SET state = 'revoked' WHERE id = ?", [id.as_str()])?;
                 record(c, now, "member.invite_revoke", project, &actor, Some(user), json!({ "invite": id, "why": "its inviter's account was deleted" }))?;
+                revoked(c, now, project, id, role, envs_of(envs.clone()), "inviter_offboarded", &actor.id)?;
             }
             Ok::<_, Error>(projects.len())
         })?;
         self.run_events();
         Ok(n)
+    }
+
+    /// `user` lost rights in roll (roll accounts' offboarding outbox: disabled by an admin or SCIM,
+    /// no longer an admin): when they can't sign in now, a `member.deactivated` in each project
+    /// they reach, directly or through a group, in one write. Their memberships stay (they count
+    /// for nothing until the account is enabled again). Run again after another hook failed, a
+    /// project whose latest event about them already says so gets no second one. How many
+    /// projects it wrote to.
+    pub fn person_deactivated(&self, user: &str) -> Result<usize> {
+        if self.person(user).is_some() {
+            return Ok(0);
+        }
+        let now = self.db.now_ms()?;
+        self.db.write(|c| {
+            let rows: Vec<(String, String, i64)> = c.query(
+                "SELECT project_id, role, 0 FROM members WHERE user_id = ?1 UNION ALL \
+                 SELECT gr.project_id, gr.role, 1 FROM group_members gm JOIN group_roles gr ON gr.group_id = gm.group_id WHERE gm.user_id = ?1",
+                [user],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?;
+            let mut best: std::collections::BTreeMap<String, Role> = std::collections::BTreeMap::new();
+            for (project, role, via) in rows {
+                let role = if via == 1 { crate::groups::group_role(&role) } else { Role::parse(&role).unwrap_or(Role::Viewer) };
+                let e = best.entry(project).or_insert(role);
+                *e = (*e).max(role);
+            }
+            let mut n = 0;
+            for (project, role) in best {
+                if events::last_about(c, &project, user)?.as_deref() == Some(Event::MemberDeactivated.as_str()) {
+                    continue;
+                }
+                events::emit(c, &project, now, Event::MemberDeactivated, user, "accounts", json!({ "user": user, "handle": user, "role": role }))?;
+                n += 1;
+            }
+            Ok::<_, Error>(n)
+        })
     }
 
     /// An invite's token was found leaked (roll-access's leak scanning, `rlv_`): it stops working.
@@ -894,10 +963,11 @@ impl Workspace {
         let actor = Actor { id: "roll:leak".into(), ..Default::default() };
         self.db
             .write(|c| {
-                let found: Option<(String, String)> = c.query_row("SELECT id, project_id FROM project_invites WHERE token_hash = ? AND state = 'pending'", [hash_token(token)], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
-                let Some((id, project)) = found else { return Ok(None) };
+                let found: Option<(String, String, String, Option<String>)> = c.query_row("SELECT id, project_id, role, environments FROM project_invites WHERE token_hash = ? AND state = 'pending'", [hash_token(token)], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()?;
+                let Some((id, project, role, envs)) = found else { return Ok(None) };
                 c.execute("UPDATE project_invites SET state = 'revoked' WHERE id = ?", [id.as_str()])?;
                 record(c, now, "member.invite_revoke", &project, &actor, None, json!({ "invite": id, "why": "leaked" }))?;
+                revoked(c, now, &project, &id, &role, envs_of(envs), "leaked", &actor.id)?;
                 Ok::<_, Error>(Some(format!("invite {id} to project {project}")))
             })
             .ok()
@@ -948,13 +1018,21 @@ fn revoke_invites_beyond(c: &Conn<'_>, now: i64, project: &str, user: &str, role
         s.outcome(&Target::One(Resource { project: Some(project.into()), ..Resource::new("workspace", project) }), Action::Admin) == Outcome::Allow
     });
     for (id, r, e) in pending {
-        let kept = manages && rules.as_ref().is_some_and(|s| Role::parse(&r).is_some_and(|r| roles::may_grant(s, project, r, envs_of(e).as_deref())));
+        let kept = manages && rules.as_ref().is_some_and(|s| Role::parse(&r).is_some_and(|r| roles::may_grant(s, project, r, envs_of(e.clone()).as_deref())));
         if !kept {
             c.execute("UPDATE project_invites SET state = 'revoked' WHERE id = ?", [id.as_str()])?;
             record(c, now, "member.invite_revoke", project, actor, Some(user), json!({ "invite": id, "why": "its inviter's role no longer gives it" }))?;
+            revoked(c, now, project, &id, &r, envs_of(e), "inviter_role", &actor.id)?;
         }
     }
     Ok(())
+}
+
+/// `invite.revoked` in the feed, in the revoking write.
+#[allow(clippy::too_many_arguments)]
+fn revoked(c: &Conn<'_>, now: i64, project: &str, invite: &str, role: &str, environments: Option<Vec<String>>, reason: &str, actor: &str) -> Result<()> {
+    let data = json!({ "invite": invite, "role": role, "environments": environments, "reason": reason });
+    events::emit(c, project, now, Event::InviteRevoked, invite, actor, data).map(|_| ())
 }
 
 /// `workspace-members`: every project's maker becomes its owner, so everyone keeps what they had.
