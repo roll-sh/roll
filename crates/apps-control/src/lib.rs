@@ -15,6 +15,7 @@
 pub mod api;
 pub mod challenge;
 pub mod bots;
+pub mod attacks;
 pub mod backups;
 pub mod browser;
 pub mod moving;
