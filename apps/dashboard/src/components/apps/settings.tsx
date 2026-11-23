@@ -93,6 +93,7 @@ interface Form {
   rolloutStep: string;
   rolloutErrors: string;
   rolloutManual: boolean;
+  rolloutChecks: boolean;
   /** The new instances start beside the old ones (false: the old ones stop first). */
   rolloutOverlap: boolean;
   h2c: boolean;
@@ -209,6 +210,7 @@ export function formOf(s: Service): Form {
     rolloutStep: str(s.run.rollout?.step_s),
     rolloutErrors: str(s.run.rollout?.error_pct),
     rolloutManual: !!s.run.rollout?.manual,
+    rolloutChecks: !!s.run.rollout?.checks,
     rolloutOverlap: s.run.rollout?.overlap !== false,
     h2c: !!s.run.h2c,
     healthGrpc: s.run.health_grpc != null,
@@ -332,12 +334,13 @@ export function patchOf(s: Service, f: Form): ServicePatch {
     run.metrics = f.metricsPath.trim() ? { path: f.metricsPath.trim(), ...(num(f.metricsPort) ? { port: Number(f.metricsPort) } : {}) } : null;
   if (f.sloObjective !== before.sloObjective || f.sloLatency !== before.sloLatency || f.sloWindow !== before.sloWindow)
     run.slo = f.sloObjective.trim() ? { objective: Number(f.sloObjective), ...(num(f.sloLatency) ? { latency_ms: Number(f.sloLatency) } : {}), ...(num(f.sloWindow) ? { window_days: Number(f.sloWindow) } : {}) } : null;
-  if (f.rolloutSteps !== before.rolloutSteps || f.rolloutStep !== before.rolloutStep || f.rolloutErrors !== before.rolloutErrors || f.rolloutManual !== before.rolloutManual || f.rolloutOverlap !== before.rolloutOverlap)
+  if (f.rolloutSteps !== before.rolloutSteps || f.rolloutStep !== before.rolloutStep || f.rolloutErrors !== before.rolloutErrors || f.rolloutManual !== before.rolloutManual || f.rolloutChecks !== before.rolloutChecks || f.rolloutOverlap !== before.rolloutOverlap)
     run.rollout = {
       steps: f.rolloutOverlap ? (rolloutSteps(f.rolloutSteps) ?? []) : [],
       step_s: Number(f.rolloutStep) || 120,
       error_pct: Number(f.rolloutErrors) || 5,
       ...(f.rolloutManual ? { manual: true } : {}),
+      ...(f.rolloutChecks ? { checks: true } : {}),
       ...(s.run.rollout?.slo_burn ? { slo_burn: s.run.rollout.slo_burn } : {}),
       ...(s.run.rollout?.p95_pct ? { p95_pct: s.run.rollout.p95_pct } : {}),
       ...(f.rolloutOverlap ? {} : { overlap: false }),
@@ -1019,6 +1022,12 @@ export function SettingsTab({
                     <select value={form.rolloutManual ? "manual" : "timed"} onChange={(e) => set("rolloutManual", e.target.value === "manual")} className={`${input} w-full`}>
                       <option value="timed">Advances by itself</option>
                       <option value="manual">Waits for you</option>
+                    </select>
+                  </Field>
+                  <Field label="Browser checks first" hint="run against the new deployment's own URL before it takes requests; a failure rolls it back">
+                    <select value={form.rolloutChecks ? "on" : "off"} onChange={(e) => set("rolloutChecks", e.target.value === "on")} className={`${input} w-full`}>
+                      <option value="off">Off</option>
+                      <option value="on">On</option>
                     </select>
                   </Field>
                 </>

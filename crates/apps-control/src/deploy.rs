@@ -1164,7 +1164,9 @@ impl Apps {
             log.stream(Stream::System).line("nothing else is running, so it switches at once");
         }
         let prepared = if gradual {
-            live.begin_canary(tpl.clone(), prepared, tpl.run.rollout.steps[0]).await;
+            // With browser checks to pass first, it starts with none of the requests.
+            let first = if tpl.run.rollout.checks { 0 } else { tpl.run.rollout.steps[0] };
+            live.begin_canary(tpl.clone(), prepared, first).await;
             if let Err(e) = self.canary(&svc.id, &d.id, &live, &tpl, log, &cancel).await {
                 live.abort_canary().await;
                 return Err(e);
@@ -1263,6 +1265,23 @@ impl Apps {
             }
         }
         let _unwait = Unwait(self.clone(), id.to_string());
+        // Its browser checks first, against its own URL, before it takes a request.
+        if r.checks {
+            let (sid, en) = (service.to_string(), tpl.spec.env.clone());
+            let row = self.db(move |s| s.environment(&sid, &en)).await?;
+            let url = self.url(&format!("{}--{}", id.trim_start_matches("dep_"), row.slug));
+            for c in row.checks.iter().filter(|c| c.browser.is_some()) {
+                self.step(service, id, &format!("check_{}", c.name)).await;
+                let at = format!("{}{}", url.trim_end_matches('/'), c.path);
+                match self.run_browser_check(service, &row.name, &at, c).await {
+                    Ok(_) => sys.line(format!("canary: browser check {} passed on the new deployment", c.name)),
+                    Err(why) => {
+                        sys.line(format!("canary: rolled back before any requests: browser check {} failed: {why}", c.name));
+                        anyhow::bail!("rolled back before any requests: browser check {} failed: {why}", c.name);
+                    }
+                }
+            }
+        }
         for &share in &r.steps {
             live.set_share(share);
             live.take_served();
