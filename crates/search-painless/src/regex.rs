@@ -2753,7 +2753,12 @@ pub const REGEX_INPUT_AUG: &str = "<regex input>";
 fn input(vm: &Vm, v: &Value) -> Result<String, Thrown> {
     match v {
         Value::Null => Err(null_input(vm.prog.regex_limit_factor > 0, &["java.util.regex.Pattern.matcher(Pattern.java:1182)"])),
-        other => crate::lib_lang::char_seq(other),
+        other => {
+            let text = crate::lib_lang::char_seq(other)?;
+            // the matcher reads a UTF-16 copy of the text: a size known before it is made
+            crate::guard::check_bytes(2 * text.len() as u64)?;
+            Ok(text)
+        }
     }
 }
 
@@ -2839,6 +2844,7 @@ fn split_impl(vm: &mut Vm, re: Arc<Regex>, text: &str, limit: i32) -> Result<Vec
             if index == 0 && index == ms && ms == me {
                 continue;
             }
+            crate::guard::poll()?;
             list.push(String::from_utf16_lossy(&t[index..ms]));
             index = me;
         } else if list.len() as i32 == limit - 1 {
@@ -2860,9 +2866,9 @@ fn split_impl(vm: &mut Vm, re: Arc<Regex>, text: &str, limit: i32) -> Result<Vec
     Ok(list)
 }
 
-fn string_array(items: Vec<String>) -> Value {
-    let vals: Vec<Value> = items.into_iter().map(Value::string).collect();
-    crate::dynamic::array_from(crate::types::Ty::array(cls::STRING, 1), vals)
+fn string_array(items: Vec<String>) -> VR {
+    let vals = crate::guard::string_values(items)?;
+    Ok(crate::dynamic::array_from(crate::types::Ty::array(cls::STRING, 1), vals))
 }
 
 /// The regex limit failing inside `Pattern.split`: its `find` loop's frames.
@@ -2879,14 +2885,14 @@ fn in_split(mut e: Thrown, one_arg: bool) -> Thrown {
 fn p_split(vm: &mut Vm, a: &mut [Value]) -> VR {
     let re = pattern_of(&a[0])?;
     let text = input(vm, &a[1])?;
-    Ok(string_array(split_impl(vm, re, &text, 0).map_err(|e| in_split(e, true))?))
+    string_array(split_impl(vm, re, &text, 0).map_err(|e| in_split(e, true))?)
 }
 
 fn p_split2(vm: &mut Vm, a: &mut [Value]) -> VR {
     let re = pattern_of(&a[0])?;
     let text = input(vm, &a[1])?;
     let limit = crate::lib_lang::int(&a[2]);
-    Ok(string_array(split_impl(vm, re, &text, limit).map_err(|e| in_split(e, false))?))
+    string_array(split_impl(vm, re, &text, limit).map_err(|e| in_split(e, false))?)
 }
 
 fn p_split_as_stream(vm: &mut Vm, a: &mut [Value]) -> VR {
@@ -2901,7 +2907,10 @@ fn p_split_as_stream(vm: &mut Vm, a: &mut [Value]) -> VR {
 /// for empty input.
 pub fn split_stream_parts(vm: &mut Vm, re: Arc<Regex>, text: &str) -> Result<Vec<Value>, Thrown> {
     let parts = split_impl(vm, re, text, 0)?;
-    Ok(if text.is_empty() { vec![Value::str("")] } else { parts.into_iter().map(Value::string).collect() })
+    if text.is_empty() {
+        return Ok(vec![Value::str("")]);
+    }
+    crate::guard::string_values(parts)
 }
 
 fn p_as_predicate(_: &mut Vm, a: &mut [Value]) -> VR {

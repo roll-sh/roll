@@ -23,6 +23,7 @@ mod java;
 mod node;
 pub mod otel;
 pub mod next_cache;
+pub mod source_maps;
 pub mod packages;
 mod php;
 pub mod imports;
@@ -151,6 +152,9 @@ pub struct Plan {
     /// roll's Next.js adapter is in the image ([`next_cache`]): its instances share a cache.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub next_cache: bool,
+    /// Its Node build writes source maps ([`source_maps`]): it starts with `--enable-source-maps`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub source_maps: bool,
 }
 
 /// The images a Dockerfile builds on (its `FROM`s), for watching them move: not its own stages,
@@ -365,6 +369,14 @@ pub fn plan(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
             }
         }
     }
+    // A Node server built with source maps: its stacks name the source's lines.
+    if p.provider == Provider::Node && p.start.as_deref() != Some(static_site::START) {
+        let pkg: serde_json::Value = tree.read("package.json").and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        if let Some(why) = source_maps::emitted(tree, &pkg) {
+            p.source_maps = true;
+            p.notes.push(format!("{why}: it starts with --enable-source-maps, so its stacks name the source's lines"));
+        }
+    }
     // A Next server's caches shared by its instances (not a static export, not its own Dockerfile).
     if p.provider == Provider::Node && p.framework.as_deref() == Some("next") && !own_dockerfile {
         let pkg: serde_json::Value = tree.read("package.json").and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
@@ -552,6 +564,7 @@ impl Draft {
             edge: Vec::new(),
             otel: None,
             next_cache: false,
+            source_maps: false,
         }
     }
 }

@@ -8,6 +8,10 @@ fn cpu_ns() -> u64 {
 
 use search_painless::{Context, DocKind, DocValues, Engine, Host, HostError, Settings};
 
+/// As hosts run scripts: executions keep their memory accounts.
+#[global_allocator]
+static ALLOC: search_painless::Counting<std::alloc::System> = search_painless::Counting(std::alloc::System);
+
 struct Docs {
     doc: i64,
     vector: Vec<f32>,

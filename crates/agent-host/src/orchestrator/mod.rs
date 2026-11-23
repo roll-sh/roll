@@ -677,6 +677,7 @@ impl Host {
             Command::EndpointSet { endpoint, key } => self.endpoint_set(endpoint, key).await,
             Command::EndpointRemove { endpoint } => self.endpoint_remove(&endpoint).await,
             Command::EndpointCheck { endpoint } => self.endpoint_check(&endpoint).await,
+            Command::EndpointKey { endpoint, key } => self.endpoint_key(&endpoint, key).await,
             Command::GatewayConfigure { settings } => self.gateway_configure(*settings).await,
             Command::GatewayKey { upstream, key } => self.gateway_key(&upstream, key).await,
             Command::GatewayClientIssue { name, machine, seal_key } => self.gateway_client_issue(&name, machine, &seal_key).await,

@@ -4,7 +4,8 @@
 //! doesn't stream says `"stream": false`, and whether a streamed one asks for usage.
 
 use super::openai::{message, unified_chunk, unified_request};
-use super::{missing_field, sse_data};
+use super::missing_field;
+use crate::xpack::inference::stream::{Decode, upstream_chat_error};
 use crate::error::EsResult;
 use crate::json::{Map, Value};
 use crate::obj;
@@ -76,21 +77,38 @@ pub fn completion_text(v: &Value, what: &str) -> EsResult<String> {
         .ok_or_else(|| missing_field("choices", what))
 }
 
-/// A streamed completion's text deltas as one `completion` event.
-pub fn completion_events(raw: &[u8]) -> Vec<Value> {
-    let mut deltas = Vec::new();
-    for (_, data) in sse_data(raw) {
-        let Some(chunk) = crate::json::parse(data.as_bytes()).ok().flatten() else { continue };
-        for c in chunk.get("choices").and_then(Value::as_array).into_iter().flatten() {
-            if let Some(t) = c.pointer(&["delta", "content"]).and_then(Value::as_str).filter(|t| !t.is_empty()) {
-                deltas.push(obj! { "delta" => t });
+/// A streamed completion's text deltas, one `completion` event per read. A chunk without
+/// `choices` (an error the upstream sent mid-stream) fails it, as Elasticsearch's response
+/// parser does (`what` names the service in the message).
+pub fn completion_decoder(what: &'static str) -> Decode {
+    Box::new(move |events: &[(Option<String>, String)]| -> EsResult<Vec<Value>> {
+        let mut deltas = Vec::new();
+        for (_, data) in events {
+            let Some(chunk) = crate::json::parse(data.as_bytes()).ok().flatten() else { continue };
+            let Some(choices) = chunk.get("choices").and_then(Value::as_array) else { return Err(missing_field("choices", what)) };
+            for c in choices {
+                if let Some(t) = c.pointer(&["delta", "content"]).and_then(Value::as_str).filter(|t| !t.is_empty()) {
+                    deltas.push(obj! { "delta" => t });
+                }
             }
         }
-    }
-    if deltas.is_empty() { vec![] } else { vec![obj! { "completion" => Value::Arr(deltas) }] }
+        Ok(if deltas.is_empty() { vec![] } else { vec![obj! { "completion" => Value::Arr(deltas) }] })
+    })
 }
 
-/// A streamed chat completion's chunks as `StreamingUnifiedChatCompletionResults` prints them.
-pub fn chat_events(raw: &[u8]) -> Vec<Value> {
-    sse_data(raw).into_iter().filter_map(|(_, d)| crate::json::parse(d.as_bytes()).ok().flatten()).map(|c| unified_chunk(&c)).collect()
+/// A streamed chat completion's chunks as `StreamingUnifiedChatCompletionResults` prints them;
+/// an error chunk ends the stream with the unified API's error.
+pub fn chat_decoder(id: &str) -> Decode {
+    let id = id.to_string();
+    Box::new(move |events: &[(Option<String>, String)]| -> EsResult<Vec<Value>> {
+        let mut out = Vec::new();
+        for (_, d) in events {
+            let Some(c) = crate::json::parse(d.as_bytes()).ok().flatten() else { continue };
+            if let Some(err) = c.get("error").filter(|e| !e.is_null()) {
+                return Err(upstream_chat_error(&id, err));
+            }
+            out.push(unified_chunk(&c));
+        }
+        Ok(out)
+    })
 }

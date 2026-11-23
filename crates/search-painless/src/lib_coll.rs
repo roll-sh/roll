@@ -200,11 +200,16 @@ fn as_map(v: &Value) -> Option<&Rc<JMap>> {
 /// Elements of anything iterable, or `None` if the value is not iterable.
 pub fn elements_opt(vm: &mut Vm, v: &Value) -> Result<Option<Vec<Value>>, Thrown> {
     Ok(Some(match v {
+        // a snapshot copies the collection: its size is known before it is made
         Value::List(l) => {
             l.sync_view();
+            crate::guard::check_new_elements(l.len())?;
             l.v.borrow().clone()
         }
-        Value::Set(s) => s.keys(),
+        Value::Set(s) => {
+            crate::guard::check_new_elements(s.len())?;
+            s.keys()
+        }
         Value::Obj(o) => match &**o {
             Obj::MapView { map, kind } => match kind {
                 ViewKind::Keys => map.keys(),
@@ -222,6 +227,7 @@ pub fn elements_opt(vm: &mut Vm, v: &Value) -> Result<Option<Vec<Value>>, Thrown
             Obj::Iterator(it) => {
                 let mut out = Vec::new();
                 while let Some(x) = it.borrow_mut().next()? {
+                    crate::guard::poll()?;
                     out.push(x);
                 }
                 out
@@ -739,6 +745,7 @@ fn it_join(vm: &mut Vm, a: &mut [Value]) -> VR {
             out.push_str(&sep);
         }
         x.write_java_string(&mut out, 0);
+        crate::guard::check_string(out.len())?;
     }
     Ok(Value::string(out))
 }
@@ -805,6 +812,7 @@ fn coll_add_all(vm: &mut Vm, a: &mut [Value]) -> VR {
                 }
             } else {
                 crate::guard::check_elements(l.len().saturating_add(items.len()))?;
+                crate::guard::check_new_elements(items.len())?;
                 l.v.borrow_mut().extend(items);
                 l.bump();
             }
@@ -1109,6 +1117,7 @@ fn list_add_all_at(vm: &mut Vm, a: &mut [Value]) -> VR {
     }
     let changed = !items.is_empty();
     crate::guard::check_elements(len.saturating_add(items.len()))?;
+    crate::guard::check_new_elements(items.len())?;
     let mut v = l.v.borrow_mut();
     let tail: Vec<Value> = v.split_off(i as usize);
     v.extend(items);
@@ -3337,7 +3346,7 @@ fn col_n_copies(_: &mut Vm, a: &mut [Value]) -> VR {
         return Err(iae(format!("List length = {n}")).with_frames(&["java.base/java.util.Collections.nCopies(Collections.java:5506)"]));
     }
     // Java's copies list is a view of one element; this one holds every copy
-    crate::guard::check_elements(n as usize)?;
+    crate::guard::check_new_elements(n as usize)?;
     Ok(immutable_list(vec![a[1].clone(); n as usize], cls::IMMUTABLE_LIST))
 }
 fn col_replace_all(_: &mut Vm, a: &mut [Value]) -> VR {

@@ -84,6 +84,7 @@ pub(crate) fn plan(tree: &dyn Tree, o: &Overrides) -> Result<Plan, Error> {
         edge: Vec::new(),
         otel: None,
         next_cache: false,
+        source_maps: false,
     })
 }
 

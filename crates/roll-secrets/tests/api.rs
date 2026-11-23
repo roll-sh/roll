@@ -5600,8 +5600,13 @@ async fn a_reference_a_person_chose_reads_only_what_they_may_reveal_now() {
     let review = ResourceRef::code_owner("ada");
     let reviewer = s.bind_ref(&review, "roll://production/DEPLOY_KEY", &as_ada).unwrap();
     assert_eq!(s.resolve_as(&review, "roll://production/DEPLOY_KEY", &reviewer).unwrap().value.expose(), "fake-ada");
+    // One of her agent machines (an endpoint's key): the same project, as `agent:laptop`.
+    let laptop = ResourceRef::agent_machine("ada", "laptop");
+    let on_laptop = s.bind_ref(&laptop, "roll://production/DEPLOY_KEY", &as_ada).unwrap();
+    assert_eq!(s.resolve_as(&laptop, "roll://production/DEPLOY_KEY", &on_laptop).unwrap().value.expose(), "fake-ada");
     let (_, reach) = api.as_ada(Method::GET, &format!("/v1/secrets/projects/{mine}/environments/production/reach?path=/&key=DEPLOY_KEY"), None).await;
-    assert!(reach["readers"].as_array().unwrap().iter().any(|r| r["actor"] == "code:review:ada"), "{reach}");
+    let readers: Vec<&str> = reach["readers"].as_array().unwrap().iter().filter_map(|r| r["actor"].as_str()).collect();
+    assert!(readers.contains(&"code:review:ada") && readers.contains(&"agent:laptop"), "{readers:?}");
     assert!(matches!(s.bind_ref(&ResourceRef::code_owner("bob"), "roll://production/DEPLOY_KEY", &as_ada), Err(Refusal::NoProject(_))));
     let (st, e) = api.as_ada(Method::POST, &format!("/v1/secrets/projects/{mine}/environments/production/changes"), Some(json!({ "ops": [{ "op": "set", "key": "GIT_TOKEN", "value": "fake-git", "tags": ["sensitive"] }] }))).await;
     assert!(st.is_success(), "{e}");
@@ -5615,6 +5620,7 @@ async fn a_reference_a_person_chose_reads_only_what_they_may_reveal_now() {
     assert!(matches!(refused, Refusal::MakerUnreachable(_)), "{refused}");
     let refused = s.resolve_as(&review, "roll://production/DEPLOY_KEY", &reviewer).unwrap_err();
     assert!(matches!(refused, Refusal::MakerUnreachable(_)), "{refused}");
+    assert!(matches!(s.digest_as(&laptop, "roll://production/DEPLOY_KEY", &on_laptop), Err(Refusal::MakerUnreachable(_))));
     let refused = s.resolve_as(&site, "roll://production/GIT_TOKEN", &ada_runtime).unwrap_err();
     assert!(matches!(refused, Refusal::MakerUnreachable(_)) && !refused.to_string().contains("fake-"), "{refused}");
 }

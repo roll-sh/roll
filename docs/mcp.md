@@ -36,7 +36,8 @@ token, through the same gate as any other request. So:
   When a tool's server errors jump (10 or more 5xx answers in 15 minutes, a quarter or more of its
   calls and three times its rate over the day before), every admin is mailed and it's posted where
   approvals go, by one node, at most once in six hours per tool; it's kept for the operator's feed
-  too (`GET /v1/access/alerts`, MCP Events' `access.alert`).
+  too (`GET /v1/access/alerts`, MCP Events' `access.alert`), and the access page lists the latest
+  alerts beside Agent activity (a token's links to it).
 
 roll code had an MCP server of its own at `/v1/code/mcp`, and it stays for roll code owner tokens
 (docs/code/mcp.md). `/v1/mcp` fronts all of its tools under product names (`search_code` is
@@ -197,7 +198,9 @@ A 2026-07-28 client can ask what happened instead of being asked (MCP Events, SE
 agent hears roll's alerts on `access.alert` (`GET /v1/access/alerts`, tied to `access_activity`; a
 person's own connections get none): a failing tool (`tool_failing`), a decoy token used
 (`decoy_used`, once an hour per decoy), and a leaked token or another product's secret revoked
-(`token_revoked`, `secret_revoked`, with where it was found and never the secret). Previews: `previews.event`
+(`token_revoked`, `secret_revoked`, with where it was found and never the secret), and the
+checkup's new findings (`checkup_finding`: one node an hour compares the operator's checkup with
+what it saw last time, at most 20 a look; the first look only remembers). Previews: `previews.event`
 (created, ready, failed, a visual change waiting, deleted; `GET /v1/previews/events`, tied to
 `previews_list`, its project's events only, as the gate filters the list). roll code: `code.landed`
 (each change landed on one repo, with its change, ref, changeset and author; `GET
@@ -838,6 +841,9 @@ previews are listed once those products are on.
 | `workspace_invite_member` | Invite an email address to a project with a role (never more than the caller's own). The answer has the invite link once; the person accepts it by signing in as that address. | `POST /v1/workspace/projects/{id}/invites` |
 | `workspace_set_member_role` | Change a member's role or a developer's environments. Both the old and the new role must be within the caller's own; the last owner can't be demoted. | `PATCH /v1/workspace/projects/{id}/members/{user}` |
 | `workspace_remove_member` | Take a person out of a project: their session and tokens stop reaching it at once, and their tokens confined to it are revoked. The last owner can't be removed. | `DELETE /v1/workspace/projects/{id}/members/{user}` |
+| `workspace_list_groups` | The groups with a role on a project: each one's role, a developer role's environments and its member count. | `GET /v1/workspace/projects/{id}/groups` |
+| `workspace_set_group_role` | Give a group a role on a project (never owner, never more than the caller's own, only a group they may assign); its members get it added to their own. | `PUT /v1/workspace/projects/{id}/groups/{group}` |
+| `workspace_remove_group_role` | Take a group's role on a project away. | `DELETE /v1/workspace/projects/{id}/groups/{group}` |
 | `postgres_list_projects` | Postgres projects with their branches and endpoints. | `GET /v1/projects` |
 | `postgres_get_project` | A Postgres project with its branches and endpoints (connection strings need reveal). | `GET /v1/projects/{project}` |
 | `postgres_create_project` | A new serverless Postgres database (a project with a main branch and endpoint). | `POST /v1/projects` |
@@ -1325,11 +1331,12 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **One feed for what roll tells an admin (this PR).** `access.alert` (#773) also carries a decoy
-   token used (`decoy_used`, at most once an hour per decoy across nodes) and a leaked token or
-   secret revoked (`token_revoked`, `secret_revoked`: which one and where it was found, never the
-   secret). Next for it: the checkup's new findings (a token gone broad or unused since the last
-   look) as `checkup_finding`, once the checkup keeps what it last said.
+1. **Alerts on the access page (this PR).** The dashboard's access overview lists roll's latest
+   alerts (`GET /v1/access/alerts`), newest first, each in one sentence (`describeAlert`), a
+   token's linking to its page; the operator sees what an agent hears on `access.alert`. Next
+   for it: the checkup's news on the feed (#784) is done, so what's left is reach: a person's own
+   alerts (their tokens' decoys and revocations) on their own feed, once alerts carry whose they
+   are.
 2. **MCP Events: more feeds.** All three delivery modes are on main (poll #692, webhook #703,
    push #710) with `apps.event`, `access.approval` (#708), `previews.event` (#719), `code.landed`
    (#739) and `secrets.event` (#751), and fair shares on one clock (#760). Next as products add a
@@ -1355,9 +1362,8 @@ waits on a sibling PR reaching main is last.
    build it in rolld behind a flag; (b) run scripts in a preview-style container, slower to start;
    (c) not now, search mode is enough. Not started until the user picks.
 6. **As siblings land** (`sibling-check.py`, 2026-11-22 13:45, over every open PR): members'
-   groups (#681: `GET /v1/workspace/projects/{id}/groups`, `PUT` and `DELETE …/groups/{group}`;
-   tools `workspace_list_groups`, `workspace_set_group`, `workspace_delete_group` once it lands);
-   roll search's `rolld/tests/auth.rs::mcp_search_with_a_project_token` to review when it opens;
+   groups (#681) mapped in this PR; secrets' delta reads (#754) stay tool-less (a runtime client's
+   read); roll search's `rolld/tests/auth.rs::mcp_search_with_a_project_token` to review when it opens;
    secrets' event feed landed (#751). #485's migration landed with both
    routes kept tool-less on purpose (the remote's credentials go in their bodies). #524 (previews on members) adds no routes
    beyond #501's; #627, #629, #596 and #504 add none. Not a tool: making a search browser key
@@ -1391,7 +1397,7 @@ waits on a sibling PR reaching main is last.
 9. **Landed 2026-11-22 morning:** operator policy for agent connections: `agents_ask` and
    `mcp_lockdown` / `mcp_read_only` (#678), and `oauth_clients`, the OAuth clients that may connect,
    checked at consent, at every token and on every request, nothing revoked (#680). SQL sessions name who sent them (`application_name`: `roll tok_…`, so `postgres_activity` tells
-   an agent's queries apart; #683), and apps' sandbox tools marked open-world (#684). Output schemas for 2026-07-28 clients, learned from the sweep's real answers (#687). MCP Events in poll mode, starting with apps' event log (#692). VS Code's config to its 1.146 files (#694). Client ID metadata documents checked against draft -03, loopback redirects on any port (#696). MCP Events' webhook mode: verified callbacks, Standard Webhooks signing, deliveries read through the gate as the subscriber's grant (`roll_auth::ActAs`), two security reviews (#703); `access.approval`, a connection's approvals as they're decided (#708). Push mode (`events/stream`, #710) and the receiver document in place of the challenge (#712). How long a request waits for a person is the policy's (`approval_wait_minutes`, an approval rule's `wait_minutes`; up to a day, #716). Search's 14 relevance tools (#677) and `secrets_reach`'s new lists in `respond_to_leaked_secret` (#714), both in #717. Agents only as grants when the policy says (`mcp_require_grant`: the admin token gets OAuth's challenge at `/v1/mcp`, #718). `previews.event`, previews' events as an MCP Events feed (#719). Single tools picked or dropped on a connection (`tools=a,b`, `exclude_tools=`, GitHub's headers; #723). `roll mcp install`, roll's server added to the agents found here, OAuth only (#724). The operator's inspector for tool calls and results (`ROLL_MCP_INSPECTOR_URL`; a revealed credential never sent; #725). 2026-07-28's `x-mcp-header` (project, environment and service mirrored and checked) and `application_type` at registration (#728). `code.landed`, roll code's land log as a feed, with feed path arguments; `access.approval`'s webhook deliveries, which never ran (the product filter left access out), fixed with it (#739). `search` and `fetch` for ChatGPT's deep research: the caller's own changes and work items, with roll URLs and lockdown (#745), and files by content across repos (#755; a killed owner's repos skipped in time, #758); MCP Events' fair shares across a person's connections, verifications counted across nodes and claims on the database's clock (#760); agent activity for operators: tool calls per tool, connection and day (#765), with p50/p95 and admins mailed when a tool's server errors jump (#769), posted where approvals go and kept as the operator's feed `access.alert` (#773); `secrets.event`, and fixes from a review of #745/#748 (a scoped grant's page, a snippet panic, document routing; #751). roll's own work for a grant (MCP Events webhook deliveries) carried signed across a forward to the owner (`x-roll-code-acting`, #748). **Landed 2026-11-21:** step-up authorization for OAuth clients (#673: a refusal of a connection's own
+   an agent's queries apart; #683), and apps' sandbox tools marked open-world (#684). Output schemas for 2026-07-28 clients, learned from the sweep's real answers (#687). MCP Events in poll mode, starting with apps' event log (#692). VS Code's config to its 1.146 files (#694). Client ID metadata documents checked against draft -03, loopback redirects on any port (#696). MCP Events' webhook mode: verified callbacks, Standard Webhooks signing, deliveries read through the gate as the subscriber's grant (`roll_auth::ActAs`), two security reviews (#703); `access.approval`, a connection's approvals as they're decided (#708). Push mode (`events/stream`, #710) and the receiver document in place of the challenge (#712). How long a request waits for a person is the policy's (`approval_wait_minutes`, an approval rule's `wait_minutes`; up to a day, #716). Search's 14 relevance tools (#677) and `secrets_reach`'s new lists in `respond_to_leaked_secret` (#714), both in #717. Agents only as grants when the policy says (`mcp_require_grant`: the admin token gets OAuth's challenge at `/v1/mcp`, #718). `previews.event`, previews' events as an MCP Events feed (#719). Single tools picked or dropped on a connection (`tools=a,b`, `exclude_tools=`, GitHub's headers; #723). `roll mcp install`, roll's server added to the agents found here, OAuth only (#724). The operator's inspector for tool calls and results (`ROLL_MCP_INSPECTOR_URL`; a revealed credential never sent; #725). 2026-07-28's `x-mcp-header` (project, environment and service mirrored and checked) and `application_type` at registration (#728). `code.landed`, roll code's land log as a feed, with feed path arguments; `access.approval`'s webhook deliveries, which never ran (the product filter left access out), fixed with it (#739). `search` and `fetch` for ChatGPT's deep research: the caller's own changes and work items, with roll URLs and lockdown (#745), and files by content across repos (#755; a killed owner's repos skipped in time, #758); MCP Events' fair shares across a person's connections, verifications counted across nodes and claims on the database's clock (#760); agent activity for operators: tool calls per tool, connection and day (#765), with p50/p95 and admins mailed when a tool's server errors jump (#769), posted where approvals go and kept as the operator's feed `access.alert` (#773), which also carries decoys used and leaked tokens and secrets revoked (#777); members' groups as tools: list, give and take a group's project role (#781); the checkup's new findings on `access.alert` (#784); `secrets.event`, and fixes from a review of #745/#748 (a scoped grant's page, a snippet panic, document routing; #751). roll's own work for a grant (MCP Events webhook deliveries) carried signed across a forward to the owner (`x-roll-code-acting`, #748). **Landed 2026-11-21:** step-up authorization for OAuth clients (#673: a refusal of a connection's own
    rules records the one rule it needed, `roll:step-up:<id>` in-band and as a 403 to Claude Code
    from 2.1.288, the consent screen adds roll's record to that connection; two security reviews); the instructions name every product by its tool prefix, search mode's tools
    always load, the 48 KiB cut's reason corrected, and Next ranked from the 2026-11-22 comparison

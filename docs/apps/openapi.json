@@ -1678,6 +1678,96 @@
         "x-roll-action": "deploy*"
       }
     },
+    "/v1/apps/services/{id}/environments/{env}/checks/{check}/screenshot": {
+      "get": {
+        "description": "Answers a browser check's last failure as the page looked (`image/png`); 404 when none is kept (\"Browser checks\").",
+        "operationId": "getServicesIdEnvironmentsEnvChecksCheckScreenshot",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "check",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "a browser check's last failure as the page looked (`image/png`); 404 when none is kept (\"Browser checks\")"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Get screenshot",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "read"
+      }
+    },
+    "/v1/apps/services/{id}/environments/{env}/checks/{check}/trace": {
+      "get": {
+        "description": "Answers its Playwright trace (`application/zip`, a download: `npx playwright show-trace`); 404 when none is kept.",
+        "operationId": "getServicesIdEnvironmentsEnvChecksCheckTrace",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "check",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "its Playwright trace (`application/zip`, a download: `npx playwright show-trace`); 404 when none is kept"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Get trace",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "read"
+      }
+    },
     "/v1/apps/services/{id}/environments/{env}/config/rotate": {
       "post": {
         "description": "Answers `Environment`: its runtime config gets a new read token (a leaked `ROLL_CONFIG_URL`); the old address reads until a deployment made after the rotation is live (of the service, or of its site's functions service), so a redeploy finishes it; audited as `audit.config.rotated`. 404 when it has no runtime config; 409 while the last rotation's old address still reads (redeploy first).",

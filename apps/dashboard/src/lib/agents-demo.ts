@@ -2446,6 +2446,9 @@ export class DemoOwner implements AgentsTransport {
       case "gateway.log.body":
         // `command` hands these to the demo gateway before they get here.
         return { type: "error", code: "internal", message: "the demo's gateway answers gateway commands" };
+      // roll's relay sends it from roll secrets; the demo has no relay.
+      case "endpoint.key":
+        return { type: "error", code: "invalid", message: "endpoint.key comes from roll's relay only" };
       case "endpoint.check": {
         const e = this.machines.get(machine)?.info?.settings?.endpoints?.find((x) => x.id === c.endpoint);
         if (!e) return notFound("endpoint");

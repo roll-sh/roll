@@ -30,6 +30,7 @@ pub mod retrievers;
 pub mod semantic;
 pub mod services;
 pub mod settings;
+pub mod stream;
 
 use crate::cluster::Cluster;
 use crate::error::{EsError, EsResult};
@@ -580,10 +581,12 @@ pub async fn stream_route(ctx: &Ctx<'_>) -> EsResult<Reply> {
     stream(ctx, task, &id).await
 }
 
+/// Runs a streamed endpoint: the upstream's answer is sent on as it comes (`stream`), once its
+/// status said it succeeded; a failure before that is an ordinary error answer.
 async fn stream(ctx: &Ctx<'_>, url_task: TaskType, id: &str) -> EsResult<Reply> {
     let (ep, service) = run_target(ctx, url_task, id)?;
     let timeout = timeout(ctx)?;
-    let events = match ep.task {
+    let streaming = match ep.task {
         TaskType::Completion => {
             let req = parse_request(ctx, ep.task, timeout)?;
             service.stream_completion(ctx.cluster, &ep, &req).await?
@@ -594,20 +597,7 @@ async fn stream(ctx: &Ctx<'_>, url_task: TaskType, id: &str) -> EsResult<Reply> 
         }
         other => return Err(EsError::status(400, format!("Streaming is not allowed for service [{}] and task [{}]", ep.service, other.name()))),
     };
-    Ok(Reply::Raw(200, "text/event-stream".into(), sse(&events)))
-}
-
-/// Server-sent events as Elasticsearch's `ServerSentEventsRestActionListener` writes them: each
-/// event starts with a byte order mark, then `event: message` and its `data:`; `[DONE]` last.
-fn sse(events: &[Value]) -> bytes::Bytes {
-    let mut out = String::new();
-    for e in events {
-        out.push_str("\u{feff}event: message\ndata: ");
-        out.push_str(&e.to_json());
-        out.push_str("\n\n");
-    }
-    out.push_str("\u{feff}event: message\ndata: [DONE]\n\n");
-    bytes::Bytes::from(out)
+    Ok(Reply::Stream(200, "text/event-stream".into(), streaming.into_sse(ep.id.clone(), ep.task)))
 }
 
 /// What roll runs an endpoint for from inside a search.

@@ -49,6 +49,13 @@ pub struct Settings {
     /// `OutOfMemoryError` once its heap is exhausted (and Elasticsearch then exits); scripts here
     /// fail with the same `out_of_memory_error` before allocating.
     pub max_object_bytes: usize,
+    /// Memory one execution may hold, in bytes (0: no limit). Not an Elasticsearch setting: the
+    /// node's operator sets it (roll's hosted default is 64 MiB, see
+    /// [`crate::set_default_max_execution_bytes`]), and no tenant setting reaches it. The bytes
+    /// an execution holds are counted by [`crate::Counting`], which the host's global allocator
+    /// must be wrapped in; past the limit the script fails like Elasticsearch's own guard below,
+    /// with a `painless_error`.
+    pub max_execution_bytes: u64,
     /// `script.painless.max_allocation_bytes.context.<context>.limit` (Elasticsearch 9.5): the
     /// contexts whose scripts charge their allocations (boxing, arrays, string concatenation,
     /// lambda captures, sized like a HotSpot heap) against a per-execution limit, failing with
@@ -80,6 +87,7 @@ impl Default for Settings {
             regex_limit_factor: 6,
             max_loop_counter: 1_000_000,
             max_object_bytes: crate::guard::DEFAULT_MAX_OBJECT_BYTES,
+            max_execution_bytes: crate::guard::default_max_execution_bytes(),
             stack_bytes: crate::guard::EXECUTION_STACK,
             max_allocation_bytes: Vec::new(),
         }
@@ -217,6 +225,7 @@ impl Engine {
             || cur.regex_limit_factor != s.regex_limit_factor
             || cur.max_loop_counter != s.max_loop_counter
             || cur.max_object_bytes != s.max_object_bytes
+            || cur.max_execution_bytes != s.max_execution_bytes
             || cur.stack_bytes != s.stack_bytes
             || cur.max_allocation_bytes != s.max_allocation_bytes;
         let rate_changed = cur.max_compilations_rate != s.max_compilations_rate;
@@ -446,7 +455,7 @@ fn compile_on_this_thread(src: &str, ctx: Context, settings: &Settings) -> Resul
     prog.version_allowlist = crate::contexts::version_allowlist(ctx);
     prog.unsigned_long_allowlist = crate::contexts::unsigned_long_allowlist(ctx);
     let statements16 = prog.statements.iter().map(|&b| error::utf16_offset(src, b as usize)).collect();
-    Ok(Script { context: ctx, def, prog, statements16, deterministic: !nondeterministic, fast, max_object: settings.max_object_bytes, stack_bytes: settings.stack_bytes })
+    Ok(Script { context: ctx, def, prog, statements16, deterministic: !nondeterministic, fast, max_object: settings.max_object_bytes, max_execution: settings.max_execution_bytes, stack_bytes: settings.stack_bytes })
 }
 
 /// A compiled Painless script.
@@ -458,8 +467,10 @@ pub struct Script {
     deterministic: bool,
     /// The expression fast path, when the script has its shape ([`crate::fast`]).
     fast: Option<crate::fast::Plan>,
-    /// [`Settings::max_object_bytes`] and [`Settings::stack_bytes`] at compilation.
+    /// [`Settings::max_object_bytes`], [`Settings::max_execution_bytes`] and
+    /// [`Settings::stack_bytes`] at compilation.
     max_object: usize,
+    max_execution: u64,
     stack_bytes: usize,
 }
 
@@ -623,6 +634,11 @@ pub struct Instance<'s> {
     fast: Fast,
     /// This instance already reported a fast-path run to the program.
     fast_ran: bool,
+    /// With [`Instance::set_result_accounting`]: another reference to the last execution's
+    /// result, dropped when the next one starts. A result the host has let go of by then is
+    /// freed inside that execution's account, which balances what the account handed the host
+    /// with it.
+    last: Option<Value>,
 }
 
 /// The instance's specialization of the script's fast path.
@@ -667,7 +683,7 @@ impl<'s> Instance<'s> {
         state.ctx_var = script.def.var_index("ctx").map(|i| i as u32);
         state.field_name = std::rc::Rc::from(script.context.name());
         let fast = if script.fast.is_some() { Fast::Untried } else { Fast::Off };
-        Instance { script, state, stack: Vec::with_capacity(64), fast, fast_ran: false }
+        Instance { script, state, stack: Vec::with_capacity(64), fast, fast_ran: false, last: None }
     }
 
     pub fn script(&self) -> &'s Script {
@@ -714,6 +730,15 @@ impl<'s> Instance<'s> {
     /// (update, ingest) run.
     pub fn set_cancellable(&mut self, on: bool) {
         self.state.cancellable = on;
+    }
+
+    /// Keeps a second reference to each execution's result until the next one starts, so the
+    /// bytes [`Host::script_memory`] reports for a result come back once the host drops it
+    /// (hosts that charge a breaker per document). The result then shares its reference counts
+    /// with the instance: the host must drop it on the instance's thread before the instance
+    /// runs again or moves to another thread. Off by default.
+    pub fn set_result_accounting(&mut self, on: bool) {
+        self.last = on.then_some(Value::Null);
     }
 
     /// Values emitted by a runtime-field script during the last execution.
@@ -847,23 +872,38 @@ impl<'s> Instance<'s> {
     fn run_entry<R>(&mut self, host: &mut dyn Host, read: impl FnOnce(&mut Value) -> R) -> Result<R, ScriptError> {
         let script = self.script;
         let prog = &script.prog;
+        // what the last execution left in the registers and per-document caches is freed
+        // inside this one's account, so a host's running total does not grow by it per document
+        let memory = crate::guard::MemoryScope::enter(script.max_execution);
+        if let Some(last) = &mut self.last {
+            *last = Value::Null;
+        }
         self.state.begin_document();
         self.stack.clear();
         let _scope = crate::guard::StackScope::enter(script.stack_bytes, script.max_object);
         crate::guard::take_pending();
         // a panic is a bug in the engine: it must not unwind into the host (or poison its
         // thread), so it becomes a script error and the instance starts over
-        let (state, stack) = (&mut self.state, &mut self.stack);
+        let (state, stack, last) = (&mut self.state, &mut self.stack, &mut self.last);
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut vm = Vm::new(prog, state, host, stack);
-            vm.call_entry(prog.execute, read)
+            vm.call_entry(prog.execute, |v: &mut Value| {
+                if let Some(last) = last
+                    && v.is_heap()
+                {
+                    *last = v.clone();
+                }
+                read(v)
+            })
         }));
         let r = match r {
             Ok(r) => r,
             Err(panic) => {
                 self.stack.clear();
                 self.state.begin_document();
-                return Err(ScriptError::internal(&prog.source, &*panic));
+                let e = crate::guard::outside(|| ScriptError::internal(&prog.source, &*panic));
+                drop(panic);
+                return Err(e);
             }
         };
         // a recursion that could not report its overflow (map key hashing, …) fails the run
@@ -871,9 +911,24 @@ impl<'s> Instance<'s> {
             Some(t) if r.is_ok() => Err(t),
             _ => r,
         };
-        match r {
+        // the error the host gets is made outside the account and the exception freed inside
+        // it, as is this document's `_source`: an execution a host call started (a runtime
+        // field's) leaves its caller neither
+        let r = match r {
             Ok(v) => Ok(v),
-            Err(t) => Err(script.runtime_error(&t)),
+            Err(t) => Err(crate::guard::outside(|| script.runtime_error(&t))),
+        };
+        self.state.source = None;
+        // the host hears what the execution keeps (values stored in `params`, a scripted
+        // metric's state, caches), or gives back
+        let delta = crate::guard::MemoryScope::unreported();
+        drop(memory);
+        match delta {
+            0 => r,
+            _ => match host.script_memory(delta) {
+                Err(e) if r.is_ok() => Err(script.runtime_error(&crate::vm::memory_refused(e))),
+                _ => r,
+            },
         }
     }
 }

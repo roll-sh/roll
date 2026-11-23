@@ -143,7 +143,7 @@ pub fn memory_size(value: &str, heap: i64) -> Option<u64> {
 impl Breakers {
     /// The `request` breaker with its limit brought up to date.
     pub fn request(&self, cluster: &Cluster, st: &ClusterState) -> Arc<MemoryBudget> {
-        let heap = NodeMetrics::sample(cluster).heap_max;
+        let heap = self.heap(cluster);
         let setting = st.metadata.cluster_setting("indices.breaker.request.limit").unwrap_or("60%");
         let limit = memory_size(setting, heap).or_else(|| memory_size("60%", heap)).unwrap_or(u64::MAX);
         self.request.set_limit(limit);

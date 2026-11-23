@@ -82,7 +82,7 @@ impl Apps {
             // A browser check: its page in Chromium, then its script ([`crate::browser`]).
             Some(_) => {
                 let at = format!("{}{}", url.trim_end_matches('/'), c.path);
-                match self.run_browser_check(service, env, &at, c).await {
+                match self.run_browser_check(service, env, &at, c, &tokio_util::sync::CancellationToken::new()).await {
                     Ok(s) => (s, Ok(())),
                     Err(e) => (None, Err(e)),
                 }
@@ -153,7 +153,8 @@ impl Apps {
                 let r = runs.get(&format!("{}/{}", env_key(service, env), c.name)).cloned().unwrap_or_default();
                 // Known once a try has come back (an answer, or why there was none).
                 let tried = r.status.is_some() || r.error.is_some();
-                CheckState { name: c.name.clone(), up: tried.then_some(r.down_since.is_none()), failures: r.failures, last_at: tried.then_some(r.last_at), status: r.status, ms: tried.then_some(r.ms), error: r.error, down_since: r.down_since }
+                let failure_at = self.check_failures.lock().get(&format!("{}/{}", env_key(service, env), c.name)).copied();
+                CheckState { name: c.name.clone(), up: tried.then_some(r.down_since.is_none()), failures: r.failures, last_at: tried.then_some(r.last_at), status: r.status, ms: tried.then_some(r.ms), error: r.error, down_since: r.down_since, failure_at }
             })
             .collect()
     }

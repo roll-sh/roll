@@ -249,6 +249,12 @@ struct World {
     _dir: tempfile::TempDir,
 }
 
+/// A route's raw answer (not JSON): its status and bytes.
+async fn call_raw(r: &axum::Router, method: &str, path: &str) -> (StatusCode, Vec<u8>) {
+    let resp = r.clone().oneshot(Request::builder().method(method).uri(path).body(Body::empty()).unwrap()).await.unwrap();
+    (resp.status(), resp.into_body().collect().await.unwrap().to_bytes().to_vec())
+}
+
 async fn world() -> World {
     world_with(|_| {}).await
 }
@@ -4119,7 +4125,7 @@ async fn an_uptime_check_goes_down_and_comes_back() {
 /// token (which then opens nothing), and a script that throws is `check.down` saying why.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_browser_check_runs_its_script_past_the_password() {
-    let w = world().await;
+    let w = world_full(|_| {}, true, |_| {}).await;
     *w.fake.check_pages.lock() = Some(w.public.clone());
     let (svc, _) = image_service(&w, "web", json!({"port": 80, "min_instances": 1})).await;
     let id = svc["id"].as_str().unwrap().to_string();
@@ -4157,6 +4163,12 @@ async fn a_browser_check_runs_its_script_past_the_password() {
     pass(1).await;
     let down = pass(2).await;
     assert_eq!((down["up"].as_bool(), down["error"].as_str()), (Some(false), Some("new Error('no heading')")), "{down}");
+    // Its failure's screenshot and trace are kept, and said to be.
+    assert!(down["failure_at"].as_i64().is_some(), "{down}");
+    let (st, png) = call_raw(&w.api, "GET", &format!("{base}/checks/home/screenshot")).await;
+    assert_eq!((st, png.as_slice()), (StatusCode::OK, &b"\x89PNG fake"[..]));
+    assert_eq!(call_raw(&w.api, "GET", &format!("{base}/checks/home/trace")).await.1, b"PK fake");
+    assert_eq!(call_raw(&w.api, "GET", &format!("{base}/checks/other/trace")).await.0, StatusCode::NOT_FOUND);
     assert_eq!(w.fake.build_trees.lock().len(), 1, "still the one image");
 }
 
@@ -5378,6 +5390,25 @@ async fn builds_share_a_remote_cache_for_turborepo_and_nx() {
     let (_, d) = call(&w.api, "POST", &format!("{env}/deploys"), Some(json!({"closed": true}))).await;
     settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
     assert!(!w.fake.build_vars.lock().last().unwrap().iter().any(|k| k.starts_with("TURBO_")));
+}
+
+/// Readable Node stack traces: a Node build that writes source maps starts with
+/// `--enable-source-maps`, after the app's own `NODE_OPTIONS`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_build_with_source_maps_starts_with_them() {
+    let w = world().await;
+    w.code.push("e6e6e6e6e6e6", "site", &[("package.json", r#"{"name":"site","scripts":{"build":"esbuild src/index.ts --bundle --platform=node --sourcemap --outfile=dist/index.js","start":"node dist/index.js"},"devDependencies":{"esbuild":"0.25.0"}}"#), ("src/index.ts", "")]);
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "site", "source": {"kind": "repo", "repo": "acme/site"} }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    call(&w.api, "PATCH", &format!("{env}/variables"), Some(json!({"set": {"FAKE_ECHO": "NODE_OPTIONS", "NODE_OPTIONS": "--max-old-space-size=200"}}))).await;
+    let (_, d) = call(&w.api, "POST", &format!("{env}/redeploy"), Some(json!({}))).await;
+    let d = settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
+    assert_eq!(d["plan"]["source_maps"], true, "{d}");
+    let (_, body) = visit_deployment(&w, &host(&svc["environments"][0]["url"]), d["id"].as_str().unwrap()).await;
+    assert_eq!(body["vars"]["NODE_OPTIONS"], "--max-old-space-size=200 --enable-source-maps", "{body}");
 }
 
 /// Next.js across instances and after sleep (Vercel's ISR and Data Cache, OpenNext's): a Next 16

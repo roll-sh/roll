@@ -14,6 +14,7 @@ use crate::json::{Map, Value};
 use crate::obj;
 use crate::xpack::inference::http::{self, Call};
 use crate::xpack::inference::results::Results;
+use crate::xpack::inference::stream::Streaming;
 use crate::xpack::inference::settings::{Reader, validation};
 use crate::xpack::inference::{Endpoint, Request, TaskType};
 use std::time::Duration;
@@ -177,9 +178,9 @@ fn check(ep: &Endpoint, url: &str, answer: &http::Answer) -> EsResult<()> {
     http::check(&ep.id, url, answer)
 }
 
-async fn send(cluster: &Cluster, ep: &Endpoint, url: String, ts: &Map, body: &Value, timeout: Duration) -> EsResult<http::Answer> {
+async fn send(cluster: &Cluster, ep: &Endpoint, url: String, ts: &Map, body: &Value, timeout: Duration, stream: bool) -> EsResult<http::Answer> {
     let call = Call::json(&ep.id, url.clone(), headers(cluster, ep, ts)?, body, timeout, ep.requests_per_minute());
-    let answer = http::post(cluster, &call).await?;
+    let answer = if stream { http::post_stream(cluster, &call).await? } else { http::post(cluster, &call).await? };
     check(ep, &url, &answer)?;
     Ok(answer)
 }
@@ -230,26 +231,26 @@ pub async fn infer(cluster: &Cluster, ep: &Endpoint, req: &Request) -> EsResult<
                 body.insert("dimensions".into(), d.clone());
             }
             body.insert("encoding_format".into(), "base64".into());
-            let answer = send(cluster, ep, url(cluster, ep, &["embeddings"])?, &ts, &Value::Obj(body), req.timeout).await?;
+            let answer = send(cluster, ep, url(cluster, ep, &["embeddings"])?, &ts, &Value::Obj(body), req.timeout, false).await?;
             super::openai::embeddings(&super::answer_json("azureopenai", &answer)?, req.input.len())
         }
         TaskType::Completion => {
             let input = one_input(req, "Azure OpenAI completion")?;
-            let answer = send(cluster, ep, url(cluster, ep, &["chat", "completions"])?, &ts, &completion_body(input, &ts, false), req.timeout).await?;
+            let answer = send(cluster, ep, url(cluster, ep, &["chat", "completions"])?, &ts, &completion_body(input, &ts, false), req.timeout, false).await?;
             Ok(Results::Completion(vec![oai::completion_text(&super::answer_json("azureopenai", &answer)?, "Azure OpenAI completions")?]))
         }
         other => Err(crate::xpack::inference::unsupported_task(other, "azureopenai")),
     }
 }
 
-pub async fn stream_completion(cluster: &Cluster, ep: &Endpoint, req: &Request) -> EsResult<Vec<Value>> {
+pub async fn stream_completion(cluster: &Cluster, ep: &Endpoint, req: &Request) -> EsResult<Streaming> {
     let ts = effective(ep, req)?;
     let input = one_input(req, "Azure OpenAI completion")?;
-    let answer = send(cluster, ep, url(cluster, ep, &["chat", "completions"])?, &ts, &completion_body(input, &ts, true), req.timeout).await?;
-    Ok(oai::completion_events(&answer.body))
+    let answer = send(cluster, ep, url(cluster, ep, &["chat", "completions"])?, &ts, &completion_body(input, &ts, true), req.timeout, true).await?;
+    Streaming::open(answer, oai::completion_decoder("Azure OpenAI completions"))
 }
 
-pub async fn stream_chat(cluster: &Cluster, ep: &Endpoint, body: &Value, timeout: Duration) -> EsResult<Vec<Value>> {
+pub async fn stream_chat(cluster: &Cluster, ep: &Endpoint, body: &Value, timeout: Duration) -> EsResult<Streaming> {
     let (messages, req) = oai::unified(body)?;
     let ts = ep.task_settings.clone();
     // Azure picks the model from the deployment: a request's `model` isn't sent.
@@ -257,6 +258,6 @@ pub async fn stream_chat(cluster: &Cluster, ep: &Endpoint, body: &Value, timeout
     req.shift_remove("model");
     let style = oai::Style { max_tokens_key: "max_completion_tokens", stream_options: true, user: user(&ts), ..oai::Style::default() };
     let b = oai::body(style, messages, &req, true);
-    let answer = send(cluster, ep, url(cluster, ep, &["chat", "completions"])?, &ts, &b, timeout).await?;
-    Ok(oai::chat_events(&answer.body))
+    let answer = send(cluster, ep, url(cluster, ep, &["chat", "completions"])?, &ts, &b, timeout, true).await?;
+    Streaming::open(answer, oai::chat_decoder(&ep.id))
 }

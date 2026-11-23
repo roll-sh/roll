@@ -503,7 +503,19 @@ impl Runtime for Fake {
             };
             let line = match (status, script.lines().find_map(|l| l.trim().strip_prefix("throw "))) {
                 (Some(s), _) if !(200..400).contains(&s) => format!(r#"ROLL-CHECK {{"ok":false,"status":{s},"error":"answered {s}"}}"#),
-                (Some(s), Some(why)) => format!("ROLL-CHECK {}", serde_json::json!({ "ok": false, "status": s, "error": why })),
+                (Some(s), Some(why)) => {
+                    // A failure leaves its screenshot and trace, as the runner does.
+                    let mut b = tar::Builder::new(Vec::new());
+                    for (file, body) in [("roll-check/screenshot.png", &b"\x89PNG fake"[..]), ("roll-check/trace.zip", &b"PK fake"[..])] {
+                        let mut h = tar::Header::new_gnu();
+                        h.set_size(body.len() as u64);
+                        h.set_mode(0o644);
+                        h.set_cksum();
+                        b.append_data(&mut h, file, body)?;
+                    }
+                    self.copied.lock().insert((name.to_string(), "/tmp/roll-check".to_string()), b.into_inner()?);
+                    format!("ROLL-CHECK {}", serde_json::json!({ "ok": false, "status": s, "error": why }))
+                }
                 (Some(s), None) => format!(r#"ROLL-CHECK {{"ok":true,"status":{s}}}"#),
                 (None, _) => "chromium: no page".to_string(),
             };
@@ -736,7 +748,8 @@ impl Runtime for Fake {
     }
 
     async fn copy_from(&self, name: &str, path: &str) -> anyhow::Result<super::VolumeStream> {
-        anyhow::ensure!(self.state(name) == Some(FakeState::Running), "{name} isn't running");
+        // A stopped one's own files (a browser check's kept failure) can be read too, as Docker's.
+        anyhow::ensure!(self.state(name) == Some(FakeState::Running) || self.copied.lock().contains_key(&(name.to_string(), path.to_string())), "{name} isn't running");
         let copied = self.copied.lock();
         // A path copied in itself, or a file in a tar copied into its directory (as `docker cp`
         // reads it back out).

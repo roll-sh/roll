@@ -3,9 +3,9 @@
 use crate::{Error, Result};
 use std::collections::BTreeMap;
 
-pub const SLUG_MAX: usize = 32;
+// A reference's parser holds them (`roll-secrets-ref`, re-exported as `crate::Reference`).
+pub use roll_secrets_ref::{DEPTH_MAX, KEY_MAX, SEGMENT_MAX, SLUG_MAX};
 pub const ENV_NAME_MAX: usize = 48;
-pub const KEY_MAX: usize = 256;
 pub const VALUE_MAX: usize = 64 * 1024;
 
 /// The tag that makes a key sensitive (docs/secrets.md, "Sensitive keys"): its value reaches only
@@ -17,8 +17,6 @@ pub(crate) fn sensitive<S: AsRef<str>>(tags: &[S]) -> bool {
 }
 pub const COMMENT_MAX: usize = 1000;
 pub const TAGS_MAX: usize = 16;
-pub const SEGMENT_MAX: usize = 64;
-pub const DEPTH_MAX: usize = 8;
 pub const LABELS_MAX: usize = 16;
 pub const MESSAGE_MAX: usize = 500;
 /// The last millisecond of 9999: times callers send (an expiry) stay below it.
@@ -30,11 +28,7 @@ fn bad(m: impl Into<String>) -> Error {
 
 /// 1–32 characters of `[a-z0-9-]`, not starting or ending with `-`.
 pub fn slug(s: &str) -> Result<()> {
-    let ok = (1..=SLUG_MAX).contains(&s.len())
-        && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-        && !s.starts_with('-')
-        && !s.ends_with('-');
-    if ok { Ok(()) } else { Err(bad(format!("an environment slug is 1–{SLUG_MAX} characters of a-z, 0-9 and -, not starting or ending with - (got {s:?})"))) }
+    if roll_secrets_ref::is_slug(s) { Ok(()) } else { Err(bad(format!("an environment slug is 1–{SLUG_MAX} characters of a-z, 0-9 and -, not starting or ending with - (got {s:?})"))) }
 }
 
 pub fn env_name(s: &str) -> Result<()> {
@@ -46,9 +40,7 @@ pub fn env_name(s: &str) -> Result<()> {
 
 /// `[A-Za-z_][A-Za-z0-9_]*`, at most 256 characters: an environment variable's name.
 pub fn key(s: &str) -> Result<()> {
-    let mut b = s.bytes();
-    let first = b.next().is_some_and(|c| c.is_ascii_alphabetic() || c == b'_');
-    if first && s.len() <= KEY_MAX && b.all(|c| c.is_ascii_alphanumeric() || c == b'_') {
+    if roll_secrets_ref::is_key(s) {
         Ok(())
     } else {
         Err(bad(format!("a key is a letter or _ then letters, digits and _, at most {KEY_MAX} characters (got {:?})", truncate(s, 40))))
@@ -114,7 +106,7 @@ pub fn path(p: &str) -> Result<String> {
 }
 
 pub fn segment(s: &str) -> bool {
-    (1..=SEGMENT_MAX).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    roll_secrets_ref::is_segment(s)
 }
 
 /// The parent folders of `path`, root first, not including `path` itself.

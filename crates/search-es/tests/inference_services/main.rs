@@ -13,5 +13,6 @@ mod custom;
 mod google;
 mod mock;
 mod openai_compatible;
+mod streams;
 
 pub use mock::*;

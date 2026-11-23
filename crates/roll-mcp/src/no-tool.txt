@@ -209,8 +209,7 @@ PUT /v1/workspace/projects/{id}/homes/{product}/{ref}                          a
 GET /v1/workspace/projects/{id}/invites                                        a person's call: invites are a signed-in person's (#501)
 DELETE /v1/workspace/projects/{id}/invites/{invite}                            a person's call: invites are a signed-in person's (#501)
 DELETE /v1/workspace/projects/{id}/members/me                                  a person's call: leaving a project is the person's own (#501)
-GET /v1/workspace/projects/{id}/groups                                         no tool yet (members v1.1 part 4: workspace_list_groups)
-PUT /v1/workspace/projects/{id}/groups/{group}                                 no tool yet (members v1.1 part 4: workspace_set_group_role)
-DELETE /v1/workspace/projects/{id}/groups/{group}                              no tool yet (members v1.1 part 4: workspace_remove_group_role)
 GET /v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}/files            raw bytes, not JSON: apps_sandbox_exec reads and writes files (cat, a heredoc)
+GET /v1/apps/services/{id}/environments/{env}/checks/{check}/screenshot        a PNG, not JSON: the check's state says its error and when its failure was kept
+GET /v1/apps/services/{id}/environments/{env}/checks/{check}/trace             a Playwright trace archive, not JSON: for `npx playwright show-trace`
 PUT /v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}/files            raw bytes, not JSON: apps_sandbox_exec reads and writes files (cat, a heredoc)
