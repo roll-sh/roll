@@ -1011,16 +1011,15 @@ mod tests {
         assert_eq!((e.status, e.reason()), (429, "rejected execution of reindex from remote: the cluster runs [2] reindex from remote tasks, the most it may run at once"));
         // Alice's second cluster: her clusters hold her share of the node.
         assert!(node.acquire("a2", "alice").unwrap_err().reason().contains("of this cluster's owner run [2]"));
-        let more = [node.acquire("b", "bob").unwrap(), node.acquire("b", "bob").unwrap()];
+        let (b1, _b2) = (node.acquire("b", "bob").unwrap(), node.acquire("b", "bob").unwrap());
         assert!(node.acquire("c", "carol").unwrap_err().reason().contains("the node runs [4]"));
         assert_eq!(node.tasks.held("c"), 0, "a refusal holds nothing");
-        // Bob's tasks end: Alice's clusters are still at her share, and Bob can't take back the
-        // place Carol waits for.
-        drop(more);
+        // A task of Bob's ends: Alice's clusters are still at her share, and Bob can't take back
+        // the slot Carol waits for.
+        drop(b1);
         assert!(node.acquire("a2", "alice").unwrap_err().reason().contains("owner"));
         assert!(node.acquire("b", "bob").unwrap_err().reason().contains("waiting"));
         let _c = node.acquire("c", "carol").unwrap();
-        let _b = node.acquire("b", "bob").unwrap();
         drop(held);
         assert_eq!((node.tasks.held("a"), node.tasks.held("b"), node.tasks.held("c")), (0, 1, 1));
     }

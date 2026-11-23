@@ -235,6 +235,13 @@ async fn endpoints_cannot_reach_private_addresses_unless_the_node_allows_it() {
     let (s, v, _) = call(&c, "PUT", "/_inference/text_embedding/e", &put).await;
     assert_eq!(s, 400);
     assert!(v.pointer(&["error", "caused_by", "reason"]).and_then(Value::as_str).unwrap().contains("is a private address"), "{v:?}");
+    // Nor an address the node denies (one of its own names leads there).
+    let mut cfg = ClusterConfig::new("d");
+    cfg.node_settings.push(("roll.egress.deny_names".into(), "1.2.3.4".into()));
+    let denied = Cluster::open(cfg, Arc::new(MemoryStore::new())).await.unwrap();
+    let put = r#"{"service":"openai","service_settings":{"api_key":"k","model_id":"m","url":"http://1.2.3.4:9/v1/embeddings"}}"#;
+    let (s, v, _) = call(&denied, "PUT", "/_inference/text_embedding/e", put).await;
+    assert!(s == 400 && format!("{v:?}").contains("is an address roll may not reach"), "{s} {v:?}");
     // Not even the node's own override for a service's host lifts the rule.
     let (s, _, _) = call(&c, "PUT", "/_inference/text_embedding/co", r#"{"service":"cohere","service_settings":{"api_key":"k","model_id":"m"}}"#).await;
     assert_eq!(s, 400);

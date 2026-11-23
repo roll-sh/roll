@@ -343,11 +343,11 @@ impl Control {
         let host = normalize_host(&s.host)?;
         let budget = self.node.reindex().control_budget.clone();
         let rules = self.remote_rules()?.without_whitelist();
-        // An address roll refuses (private, denied, blocked) reads like any remote it can't
-        // reach: no oracle for which names lead where.
+        // An address roll refuses (private, denied, blocked, a name that doesn't resolve) reads
+        // like any remote it can't reach: no oracle for which names lead where.
         let refused = |e: search_es::EsError| {
             let reason = e.reason();
-            if reason.contains("private address") || reason.contains("may not reach") || reason.contains("blocked in") || reason.contains("not whitelisted") {
+            if reason.contains("private address") || reason.contains("may not reach") || reason.contains("blocked in") || reason.contains("not whitelisted") || reason.contains("Name or service not known") {
                 ControlError::Invalid(format!("couldn't reach the remote at {host}"))
             } else {
                 ControlError::Invalid(reason.to_string())

@@ -126,6 +126,12 @@ pub struct Client {
 }
 
 impl Client {
+    /// The URLs it connects to as written (names reach the egress resolver; literals don't, so
+    /// callers check these with [`crate::egress::Egress::check_url_now`]).
+    pub fn endpoints(&self) -> Vec<&reqwest::Url> {
+        vec![&self.at.endpoint]
+    }
+
     /// A client for `at`. Addresses `egress` refuses are refused, as literals here and resolved
     /// ones at connect time.
     pub fn new(at: Location, creds: Option<Credentials>, egress: &crate::egress::Egress) -> Result<Client, Error> {

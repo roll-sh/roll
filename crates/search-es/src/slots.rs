@@ -4,21 +4,26 @@
 //! A pool runs at most [`Caps::node`] holders at once, at most [`Caps::owner`] of them for one
 //! owner (the person a cluster belongs to; a cluster without one counts alone, [`owner_of`]) and
 //! at most [`Caps::cluster`] for one cluster. A cluster that can't get a slot waits in a FIFO
-//! queue. A slot that frees goes to the first waiter whose owner and cluster are under their
-//! caps: that waiter is woken, and nobody behind it (the cluster that just freed the slot
-//! included) may take the slot first. So one owner's clusters can never hold the slots another
+//! queue. Free slots go to the first waiters whose owner and cluster are under their caps, one
+//! each: those waiters are woken, and nobody behind them (the cluster that just freed a slot
+//! included) may take a slot they hold. So one owner's clusters can never hold the slots another
 //! owner waits for.
 //!
-//! A waiter counts only while it still wants a slot, checked whenever the queue is looked at:
-//! - a waiter with a check (a connector scheduler: its cluster is loaded and has a runnable
-//!   pending job) while the check holds;
+//! Two kinds of waiter:
+//! - a connector scheduler ([`Slots::take`]) waits per cluster with a check (its cluster is
+//!   loaded and has a runnable pending job) and a wake; it counts while the check holds, and a
+//!   woken one that doesn't take its slot within [`WAKE_DEADLINE`] loses its place;
 //! - a caller that answers 429 instead of waiting ([`Slots::try_take`], [`Slots::ask`]: a
-//!   `_reindex` request, a migration) while it asked again within [`RETRY_WINDOW`];
+//!   `_reindex` request, a migration) has nothing to wake. Its owner keeps **one** place in the
+//!   queue, whichever of their clusters asked (any of them may use it), while one of them asked
+//!   again within [`RETRY_WINDOW`]; once a slot is held for it, it has only a short grace
+//!   ([`PASSIVE_GRACE`]) to come back for it. A refused request that's never retried (a closed
+//!   tab, or an owner queueing many clusters on purpose) holds a freed slot for that grace at
+//!   most, once per owner.
 //!
-//! and a woken waiter that doesn't take its slot within [`WAKE_DEADLINE`] is dropped, so no
-//! cluster holds up the queue, on purpose or not. A successful take wakes the next waiter too,
-//! so slots that free together all find a taker, and so does dropping a waiter that no longer
-//! counts. A waiter's check runs under the pool's lock, so it must be cheap (a few map lookups).
+//! A successful take wakes the next waiters too, so slots that free together all find a taker,
+//! and so does dropping a waiter that no longer counts. A waiter's check runs under the pool's
+//! lock, so it must be cheap (a few map lookups).
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -28,6 +33,8 @@ use std::time::{Duration, Instant};
 pub const WAKE_DEADLINE: Duration = Duration::from_secs(30);
 /// How long a caller refused with a 429 keeps its place in the queue without asking again.
 pub const RETRY_WINDOW: Duration = Duration::from_secs(60);
+/// How long a slot is held for a 429'd caller's place once it's that place's turn.
+pub const PASSIVE_GRACE: Duration = Duration::from_secs(3);
 
 type Check = Arc<dyn Fn() -> bool + Send + Sync>;
 type Wake = Arc<dyn Fn() + Send + Sync>;
@@ -48,25 +55,40 @@ pub fn owner_of(owner: Option<&str>, cluster: &str) -> String {
     }
 }
 
-/// A cluster waiting for a slot.
+/// A cluster (or, for 429'd callers, an owner) waiting for a slot.
 struct Waiter {
+    /// The cluster that queued it.
     key: String,
     owner: String,
-    /// Whether it still wants a slot; `None`: while it asked within [`RETRY_WINDOW`].
+    /// Whether it still wants a slot; `None`: a 429'd caller's place, while one of its owner's
+    /// clusters asked within [`RETRY_WINDOW`].
     alive: Option<Check>,
     asked: Instant,
     wake: Option<Wake>,
-    /// When it was woken for a slot.
+    /// When a slot was first held for it.
     woken: Option<Instant>,
 }
 
 impl Waiter {
-    fn counts(&self) -> bool {
-        let alive = match &self.alive {
-            Some(check) => check(),
-            None => self.asked.elapsed() < RETRY_WINDOW,
+    fn passive(&self) -> bool {
+        self.alive.is_none()
+    }
+
+    fn counts(&self, grace: Duration) -> bool {
+        let (alive, deadline) = match &self.alive {
+            Some(check) => (check(), WAKE_DEADLINE),
+            None => (self.asked.elapsed() < RETRY_WINDOW, grace),
         };
-        alive && self.woken.is_none_or(|t| t.elapsed() < WAKE_DEADLINE)
+        alive && self.woken.is_none_or(|t| t.elapsed() < deadline)
+    }
+
+    /// Whether this is the place of `key` (of `owner`): a 429'd caller's place is its owner's.
+    fn is(&self, key: &str, owner: &str, passive: bool) -> bool {
+        match (self.passive(), passive) {
+            (true, true) => self.owner == owner,
+            (false, false) => self.key == key,
+            _ => false,
+        }
     }
 }
 
@@ -78,10 +100,10 @@ struct State {
     waiting: VecDeque<Waiter>,
 }
 
-impl State {
-    fn under_caps(&self, caps: Caps, key: &str, owner: &str) -> bool {
-        self.owners.get(owner).copied().unwrap_or(0) < caps.owner && self.clusters.get(key).copied().unwrap_or(0) < caps.cluster
-    }
+/// Whether `w` could take a slot now: its owner under its cap, and its cluster too (a 429'd
+/// caller's place may be used by any of its owner's clusters).
+fn eligible(owners: &HashMap<String, usize>, clusters: &HashMap<String, usize>, caps: Caps, w: &Waiter) -> bool {
+    owners.get(&w.owner).copied().unwrap_or(0) < caps.owner && (w.passive() || clusters.get(&w.key).copied().unwrap_or(0) < caps.cluster)
 }
 
 /// Why a slot wasn't given ([`Slots::try_take`]).
@@ -100,6 +122,8 @@ pub enum Full {
 /// A pool of slots.
 pub struct Slots {
     caps: Caps,
+    /// [`PASSIVE_GRACE`] (tests shorten it).
+    grace: Duration,
     state: parking_lot::Mutex<State>,
 }
 
@@ -143,46 +167,61 @@ impl Drop for Permit {
 
 impl Slots {
     pub fn new(caps: Caps) -> Arc<Slots> {
-        Arc::new(Slots { caps, state: Default::default() })
+        Self::with_grace(caps, PASSIVE_GRACE)
+    }
+
+    /// A pool whose 429'd callers' places hold a slot for `grace`.
+    pub fn with_grace(caps: Caps, grace: Duration) -> Arc<Slots> {
+        Arc::new(Slots { caps, grace, state: Default::default() })
     }
 
     pub fn caps(&self) -> Caps {
         self.caps
     }
 
-    /// Whether a waiter ahead of `key` (all of them, when `key` isn't waiting) could take a slot.
-    fn ahead(&self, st: &State, key: &str) -> bool {
-        st.waiting.iter().take_while(|w| w.key != key).any(|w| st.under_caps(self.caps, &w.key, &w.owner))
-    }
-
     /// Drops the waiters that no longer count: whether any went.
-    fn prune(st: &mut State) -> bool {
+    fn prune(&self, st: &mut State) -> bool {
         let before = st.waiting.len();
-        st.waiting.retain(Waiter::counts);
+        st.waiting.retain(|w| w.counts(self.grace));
         st.waiting.len() != before
     }
 
-    /// Why `key` (of `owner`) wouldn't get a slot now, if it wouldn't.
-    fn refusal(&self, st: &State, key: &str, owner: &str) -> Option<Full> {
+    /// Why `key` (of `owner`; a 429'd caller when `passive`) wouldn't get a slot now, if it
+    /// wouldn't. Each free slot is held for one eligible waiter ahead of it (all of them, when
+    /// it isn't waiting); a 429'd caller's place starts its grace when it's first held one.
+    fn refusal(&self, st: &mut State, key: &str, owner: &str, passive: bool) -> Option<Full> {
         if st.clusters.get(key).copied().unwrap_or(0) >= self.caps.cluster {
-            Some(Full::Cluster(self.caps.cluster))
-        } else if st.owners.get(owner).copied().unwrap_or(0) >= self.caps.owner {
-            Some(Full::Owner(self.caps.owner))
-        } else if st.running >= self.caps.node {
-            Some(Full::Node(self.caps.node))
-        } else if self.ahead(st, key) {
-            Some(Full::Queue)
-        } else {
-            None
+            return Some(Full::Cluster(self.caps.cluster));
         }
+        if st.owners.get(owner).copied().unwrap_or(0) >= self.caps.owner {
+            return Some(Full::Owner(self.caps.owner));
+        }
+        if st.running >= self.caps.node {
+            return Some(Full::Node(self.caps.node));
+        }
+        let free = self.caps.node - st.running;
+        let State { owners, clusters, waiting, .. } = st;
+        let mut held = 0;
+        for w in waiting.iter_mut().take_while(|w| !w.is(key, owner, passive)) {
+            if eligible(owners, clusters, self.caps, w) {
+                if w.passive() {
+                    w.woken.get_or_insert_with(Instant::now);
+                }
+                held += 1;
+                if held >= free {
+                    return Some(Full::Queue);
+                }
+            }
+        }
+        None
     }
 
     /// Whether `key` (of `owner`) would get a slot now.
     pub fn admits(&self, key: &str, owner: &str) -> bool {
         let (admits, pruned) = {
             let mut st = self.state.lock();
-            let pruned = Self::prune(&mut st);
-            (self.refusal(&st, key, owner).is_none(), pruned)
+            let pruned = self.prune(&mut st);
+            (self.refusal(&mut st, key, owner, false).is_none(), pruned)
         };
         // A waiter that went may have stood before one that can take a free slot now.
         if pruned {
@@ -210,8 +249,8 @@ impl Slots {
     pub fn ask(&self, key: &str, owner: &str) -> bool {
         let (admits, pruned) = {
             let mut st = self.state.lock();
-            let pruned = Self::prune(&mut st);
-            let admits = self.refusal(&st, key, owner).is_none();
+            let pruned = self.prune(&mut st);
+            let admits = self.refusal(&mut st, key, owner, true).is_none();
             if !admits {
                 Self::queue(&mut st, key, owner, None, None);
             }
@@ -224,7 +263,8 @@ impl Slots {
     }
 
     fn queue(st: &mut State, key: &str, owner: &str, alive: Option<Check>, wake: Option<Wake>) {
-        match st.waiting.iter_mut().find(|w| w.key == key) {
+        let passive = alive.is_none();
+        match st.waiting.iter_mut().find(|w| w.is(key, owner, passive)) {
             Some(w) => {
                 w.asked = Instant::now();
                 if alive.is_some() {
@@ -239,10 +279,11 @@ impl Slots {
     }
 
     fn take_or_wait(self: &Arc<Self>, key: &str, owner: &str, alive: Option<Check>, wake: Option<Wake>) -> Result<Permit, Full> {
+        let passive = alive.is_none();
         let mut st = self.state.lock();
-        let pruned = Self::prune(&mut st);
-        let Some(why) = self.refusal(&st, key, owner) else {
-            st.waiting.retain(|w| w.key != key);
+        let pruned = self.prune(&mut st);
+        let Some(why) = self.refusal(&mut st, key, owner, passive) else {
+            st.waiting.retain(|w| !w.is(key, owner, passive));
             st.running += 1;
             *st.owners.entry(owner.to_string()).or_default() += 1;
             *st.clusters.entry(key.to_string()).or_default() += 1;
@@ -275,7 +316,7 @@ impl Slots {
         let was = {
             let mut st = self.state.lock();
             let before = st.waiting.len();
-            st.waiting.retain(|w| w.key != key);
+            st.waiting.retain(|w| w.passive() || w.key != key);
             st.waiting.len() != before
         };
         if was {
@@ -283,23 +324,25 @@ impl Slots {
         }
     }
 
-    /// Wakes the first waiter that may take a free slot.
+    /// Holds each free slot for the first eligible waiters, one each, and wakes those that are
+    /// newly holding one.
     fn wake_next(&self) {
-        let wake = {
-            let mut st = self.state.lock();
-            Self::prune(&mut st);
-            if st.running >= self.caps.node {
-                return;
+        let wakes: Vec<Wake> = {
+            let mut guard = self.state.lock();
+            self.prune(&mut guard);
+            let st = &mut *guard;
+            let free = self.caps.node.saturating_sub(st.running);
+            let State { owners, clusters, waiting, .. } = st;
+            let mut wakes = Vec::new();
+            for w in waiting.iter_mut().filter(|w| eligible(owners, clusters, self.caps, w)).take(free) {
+                if w.woken.is_none() {
+                    w.woken = Some(Instant::now());
+                    wakes.extend(w.wake.clone());
+                }
             }
-            let st = &mut *st;
-            let (owners, clusters, caps) = (&st.owners, &st.clusters, self.caps);
-            let under = |w: &Waiter| owners.get(&w.owner).copied().unwrap_or(0) < caps.owner && clusters.get(&w.key).copied().unwrap_or(0) < caps.cluster;
-            st.waiting.iter_mut().find(|w| under(w)).and_then(|w| {
-                w.woken.get_or_insert_with(Instant::now);
-                w.wake.clone()
-            })
+            wakes
         };
-        if let Some(w) = wake {
+        for w in wakes {
             w();
         }
     }
@@ -376,6 +419,26 @@ mod tests {
         assert!(!slots.ask("blog", "bob"), "Carol is ahead");
         let _c = slots.try_take("wiki", "carol").expect("the slot Carol waited for");
         assert_eq!((slots.held("wiki"), slots.held("shop-1"), slots.held("shop-2")), (1, 2, 0));
+    }
+
+    /// 429'd callers that never come back: one owner's clusters share one place in the queue,
+    /// and a slot held for it goes to the next caller once its short grace is over.
+    #[test]
+    fn a_refused_request_that_never_retries_holds_a_freed_slot_only_briefly() {
+        let grace = Duration::from_millis(50);
+        let slots = Slots::with_grace(Caps { node: 1, owner: 1, cluster: 1 }, grace);
+        let bob = slots.try_take("blog", "bob").unwrap();
+        // Mallory's two clusters are refused and never ask again; Dave asks after them.
+        assert_eq!(slots.try_take("m1", "mallory").unwrap_err(), Full::Node(1));
+        assert_eq!(slots.try_take("m2", "mallory").unwrap_err(), Full::Node(1));
+        assert_eq!(slots.try_take("shop", "dave").unwrap_err(), Full::Node(1));
+        assert_eq!(slots.queued(), ["m1", "shop"], "one place per owner");
+        // Bob's task ends: the slot is held for Mallory's place, briefly.
+        drop(bob);
+        assert_eq!(slots.try_take("shop", "dave").unwrap_err(), Full::Queue);
+        std::thread::sleep(grace + Duration::from_millis(20));
+        let _dave = slots.try_take("shop", "dave").expect("Mallory's grace is over");
+        assert!(slots.queued().is_empty());
     }
 
     /// A waiter whose job stopped being runnable (canceled, its connector gone) without the

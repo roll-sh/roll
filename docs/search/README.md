@@ -661,10 +661,13 @@ remote reindex tasks per cluster, 2 per owner across their clusters and 4 per no
 (`roll.reindex.remote.max_per_cluster`, `roll.reindex.remote.max_per_owner`,
 `roll.reindex.remote.max_per_node`; past them a 429 `es_rejected_execution_exception`), and a
 migration's own calls 1 per cluster, 2 per owner and 4 per node. Slots are shared in turn
-(`search_es::slots`, the pool connector syncs use too): a refused cluster keeps its place in line
-while it asks again within a minute, and a slot that frees goes to the first waiter under its
-caps, never back to the cluster that freed it, so one owner's clusters can't hold the slots
-another owner waits for; each
+(`search_es::slots`, the pool connector syncs use too): a refused request's owner keeps one place
+in line, whichever of their clusters asked, while one of them asks again within a minute, and a
+slot that frees is held for the first waiter under its caps, never given back to the cluster that
+freed it, so one owner's clusters can't hold the slots another owner waits for. A place that
+isn't used within 3 seconds of a slot being held for it loses it, so a refused request that's
+never retried (or an owner queueing many clusters on purpose) delays the next caller by 3
+seconds at most; each
 answer is read to at most 16 MiB (`roll.reindex.remote.buffer_limit`; past it Elasticsearch's
 "Remote responded with a chunk that was too large. Use a smaller batch size.") and charged to a
 node-wide budget (`roll.reindex.remote.memory`, 256 MiB) while it's held. A page of hits is never

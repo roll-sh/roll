@@ -183,6 +183,12 @@ enum Kind {
 }
 
 impl Client {
+    /// The URLs it connects to as written (names reach the egress resolver; literals don't, so
+    /// callers check these with [`crate::egress::Egress::check_url_now`]).
+    pub fn endpoints(&self) -> Vec<&reqwest::Url> {
+        std::iter::once(&self.primary).chain(self.secondary.as_ref()).collect()
+    }
+
     /// A client for `container`. Addresses `egress` refuses are refused (as literals here,
     /// resolved ones at connect time).
     pub fn new(account: &str, auth: Auth, primary: reqwest::Url, secondary: Option<reqwest::Url>, mode: LocationMode, container: &str, egress: &crate::egress::Egress) -> Result<Client, Error> {

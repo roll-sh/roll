@@ -2711,6 +2711,20 @@ async fn an_s3_repository_analysis_exercises_the_bucket() {
     assert!(m.keys("broken/roll/temp-analysis-").is_empty(), "the failed analysis left blobs behind");
 }
 
+/// A repository's endpoint written as an address is checked against what the node's own names
+/// resolve to when its client is built, not against a copy that may be empty or stale: a
+/// deny-list name leading to it is refused before anything connects.
+#[tokio::test]
+async fn a_repository_endpoint_at_one_of_the_nodes_own_addresses_is_refused() {
+    let e = env_with(|c| c.node_settings.push((search_control::EGRESS_DENY_NAMES.into(), "1.2.3.4".into()))).await;
+    let (u, p) = creds(&e.post("/v1/search/clusters", json!({"name": "own"})).await);
+    let repo = json!({"type": "s3", "settings": {"bucket": "backups", "endpoint": "http://1.2.3.4:9", "path_style_access": true}});
+    let (s, v) = e.es(&u, &p, reqwest::Method::PUT, "/_snapshot/own?verify=false", Some(repo)).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = e.es(&u, &p, reqwest::Method::POST, "/_snapshot/own/_verify", None).await;
+    assert!(s >= 400 && v.to_string().contains("[1.2.3.4] is an address roll may not reach"), "{s} {v}");
+}
+
 /// An `s3` repository in a tenant's bucket: credentials sign every request and are never shown,
 /// snapshots are incremental, another cluster registering the bucket restores them (ids,
 /// routing, versions and sequence numbers intact), deleting a snapshot keeps what a later one

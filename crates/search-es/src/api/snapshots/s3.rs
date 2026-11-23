@@ -243,6 +243,13 @@ impl Bucket {
             "azure" => super::cloud::azure_store(cluster, name, r, &creds)?,
             _ => (crate::blob::Store::S3(s3_client(cluster, name, r, &creds)?), transfer::sizes(cluster, &r.settings)),
         };
+        // An address written in an endpoint (or a key file's `token_uri`) never reaches the
+        // resolver: checked against the node's own names as they resolve now, failing closed
+        // until they have, before anything connects.
+        let egress = egress(cluster);
+        for url in store.endpoints() {
+            egress.check_url_now(url).await.map_err(|e| repository_exception(name, "cannot create blob store").caused_by(EsError::illegal_argument(format!("the endpoint: {e}"))))?;
+        }
         let prefix = prefix(r);
         let st = cluster.state();
         let budget = cluster.breakers.request(cluster, &st);
