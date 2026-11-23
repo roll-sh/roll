@@ -88,7 +88,8 @@ impl Engine {
                     None => crate::CheckState::Pending,
                 };
                 let error = c.error.filter(|_| state == crate::CheckState::Failed).map(|e| crate::schema::printable(&e));
-                checks.push(crate::BrowserCheck { service: svc.name.clone(), name: crate::schema::printable(&c.name), state, error });
+                let files = c.files.filter(|_| state == crate::CheckState::Failed);
+                checks.push(crate::BrowserCheck { service: svc.name.clone(), name: crate::schema::printable(&c.name), state, error, files });
             }
         }
         let fact = crate::BrowserChecks { head: r.head.clone(), checks };

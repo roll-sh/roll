@@ -248,6 +248,7 @@ export function PreviewSheet({
                         <span className={`ml-auto shrink-0 font-mono text-[11px] ${c.state === "failed" ? "text-danger" : "text-subtle"}`}>{c.state === "pending" ? "running" : c.state}</span>
                       </div>
                       {c.error && <p className="mt-0.5 ml-3.5 font-mono text-[10.5px] break-words text-subtle">{c.error}</p>}
+                      {c.files && <CheckFiles files={c.files} check={c.name} />}
                     </li>
                   ))}
                 </ul>
@@ -608,6 +609,29 @@ export function PreviewSheet({
         )}
       </div>
     </>
+  );
+}
+
+/** A failed browser check's screenshot and Playwright trace, kept by roll apps (`read` on its
+ * service: someone without it gets nothing). */
+function CheckFiles({ files, check }: { files: { service_id: string; environment: string }; check: string }) {
+  const open = async (which: "screenshot" | "trace") => {
+    const blob = await appsApi.checkFailure(files.service_id, files.environment, check, which).catch(() => null);
+    if (!blob) return;
+    const url = URL.createObjectURL(blob);
+    if (which === "screenshot") window.open(url, "_blank", "noopener");
+    else Object.assign(document.createElement("a"), { href: url, download: `${check}-trace.zip` }).click();
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  };
+  return (
+    <span className="mt-0.5 ml-3.5 flex gap-3 text-[11px]">
+      <button type="button" className="text-accent hover:underline" onClick={() => void open("screenshot")}>
+        Screenshot of the failure
+      </button>
+      <button type="button" className="text-accent hover:underline" onClick={() => void open("trace")} title="open it with npx playwright show-trace, or at trace.playwright.dev">
+        Its Playwright trace
+      </button>
+    </span>
   );
 }
 

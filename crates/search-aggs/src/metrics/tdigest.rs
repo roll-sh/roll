@@ -982,6 +982,15 @@ impl TDigest {
         }
     }
 
+    /// A digest of `compression` holding `centroids` (weights summing to `size`), built as
+    /// [`TDigest::merge`] adds another's: one reservation for the whole digest, so one past the
+    /// sorting digest's size goes straight to the merging digest.
+    pub fn from_centroids(compression: f64, size: u64, centroids: &[(f64, u64)]) -> Result<TDigest> {
+        let mut h = HybridDigest::new(compression);
+        h.add_centroids(size, centroids)?;
+        Ok(TDigest::Hybrid(h))
+    }
+
     /// `add(TDigestState other)`.
     pub fn merge(&mut self, other: &mut TDigest) -> Result<()> {
         let size = other.size();
@@ -1256,7 +1265,7 @@ mod tests {
     fn a_huge_weight_switches_to_the_merging_digest() {
         let mut d = HybridDigest::new(1000.0);
         d.add(1.0, 1).unwrap();
-        d.add(1.0, i64::MAX as u64).unwrap();
+        d.reserve(i64::MAX as u64).unwrap();
         assert!(d.merging.is_some() && d.sorting.is_none());
     }
 }
