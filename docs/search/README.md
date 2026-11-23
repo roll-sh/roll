@@ -244,6 +244,12 @@ are then paused too (put them again to resume them).
   and keep running. A step of theirs that writes to an inherited repository is refused like
   any write there, and ILM's `cleanup-snapshot` leaves a snapshot in one alone (it is the
   parent's).
+- The branch's `reindex_whitelist` starts empty: the remotes the parent may read from are the
+  parent's, so a branch reads from a remote only once its owner whitelists it (`PATCH`, or a
+  migration into the branch). The parent's CORS origins, IP allowlist and `browser_per_minute`
+  stay, since a branch usually serves the same pages, but none of its browser keys work there (a
+  key works only on its own cluster, below): a page pointed at a branch, roll previews' included,
+  needs a browser key of the branch's own.
 
 `a_branch_runs_none_of_its_parents_jobs` in the same file covers it.
 
@@ -311,7 +317,8 @@ applications). A web page calls a cluster directly, with no backend of its own i
   create answer only; the list shows what each reaches, its filter, expiry and limit, never a
   secret; revoking refuses any key that isn't a browser key (404); on a deleted cluster a
   browser key of it (its stored security says so) is kept for the restore, which revokes it
-  before it answers (202). Names starting with `.` and a bare `*` are refused; a
+  before it answers (202). Names starting with `.`, a bare `*` and `alias:index` (another
+  cluster's index: browser keys can't search across clusters) are refused; a
   pattern reads every index whose name it matches, hidden ones (`index.hidden`) included, as an
   Elasticsearch role's pattern does. At most 20 browser keys per cluster (409 past it).
 - *A browser key works only on its own cluster.* Its `metadata.roll_browser.cluster` is the
@@ -621,7 +628,7 @@ their own (`search-dev --yaml-test-cluster` sets `127.0.0.1:*`).
 
 The remote is a URL a tenant chose, so every request goes through the guarded client, and the
 node's operator rules apply on top of the whitelist: names resolve to public addresses only
-(`roll_net::PublicOnly`), private literals and `localhost` are refused (rolld's
+(`search_es::egress`), private literals and `localhost` are refused (rolld's
 `--search-reindex-allow-private`, `ROLL_SEARCH_REINDEX_ALLOW_PRIVATE`, lifts both, for local
 development), `reindex.remote.blocklist` refuses what it matches (rolld adds its own endpoints:
 its public host and its clusters' domain, matched in lower case without a trailing dot), no
@@ -630,21 +637,45 @@ to it (percent-decoded, IDNA-mapped, lower case, no trailing dot; a host that wo
 port or the path, with `?`, `#` or `\` in it, is refused), and `source.remote.headers` can't set
 `Host` or a pseudo-header. Names alone can't keep a remote off roll, so rolld also denies
 its endpoints by address: the names it serves on (its public host, the clusters' domain, a name
-under the domain's wildcard, `public_url`'s host: `roll.reindex.remote.deny_names`) are resolved
+under the domain's wildcard, `public_url`'s host: `roll.egress.deny_names`) are resolved
 again at most every 30 seconds (a name that fails to resolve keeps the addresses it had and is
 asked again within 5 seconds; until each has answered once, with an address or "no such name"
 (NXDOMAIN, or no address records: a resolver that fails or times out isn't an answer), no
 connection goes out) and checked on the address each connection uses and on an address
 written in the URL, and the fleet's
-networks given with `--search-reindex-deny` (`ROLL_SEARCH_REINDEX_DENY`, in
-`roll.reindex.remote.deny_addresses`) and those names' addresses at boot are checked on literals in
-any form, IPv4 inside IPv6 (mapped, NAT64, 6to4) included. HTTPS is
+networks given with `--search-egress-deny` (`ROLL_SEARCH_EGRESS_DENY`; `--search-reindex-deny`
+and `ROLL_SEARCH_REINDEX_DENY` are its old names, still read; in `roll.egress.deny_addresses`)
+and those names' addresses at boot are checked on literals in
+any form, IPv4 inside IPv6 (mapped, NAT64, 6to4) included. The deny lists and that readiness
+gate are one node-wide check (`search_es::egress`) that every outbound call to an address a
+tenant chose goes through, not reindex alone: the migration's calls, the `postgresql` and `s3`
+connectors, inference services with a `url`, watches' `http` input and `webhook` action, and
+`s3`, `gcs` and `azure` snapshot repositories with an `endpoint`. Each connects only to
+addresses the check passed (a client built with its resolver, or the address it resolved), and
+refuses a denied one as reindex does (`[host] is an address roll may not reach`), whether its
+own `allow_private` flag is on or not. HTTPS is
 verified against the platform's roots (plus `reindex.ssl.certificate_authorities`: rolld's
 `--search-reindex-ca`, `ROLL_SEARCH_REINDEX_CA`, for a remote with a private CA).
 
 What one tenant can make a node spend is bounded by the operator, never by the tenant: at most 2
-remote reindex tasks per cluster and 4 per node run at once (`roll.reindex.remote.max_per_cluster`,
-`roll.reindex.remote.max_per_node`; past them a 429 `es_rejected_execution_exception`); each
+remote reindex tasks per cluster, 2 per owner across their clusters and 4 per node run at once
+(`roll.reindex.remote.max_per_cluster`, `roll.reindex.remote.max_per_owner`,
+`roll.reindex.remote.max_per_node`; past them a 429 `es_rejected_execution_exception`), and a
+migration's own calls 1 per cluster, 2 per owner and 4 per node. Slots are shared in turn
+(`search_es::slots`, the pool connector syncs use too). A request refused for the node's or its
+owner's cap keeps its owner one place in line, whichever of their clusters asked, while one of
+them asks again within a minute (one refused for its own cluster's cap keeps none: no free slot
+would help it). A slot that frees is held for the first place in line under its caps, never given
+back to the cluster that freed it, so one owner's clusters can't hold the slots another owner
+waits for. A place that doesn't come back within 3 seconds of a slot being held for it is skipped
+(the next place's turn comes) until it asks again, when it's first in line again; so a refused
+request that's never retried, or an owner queueing many clusters on purpose, delays those behind
+it by 3 seconds per owner ahead in line at most. A migration reserves its slot before it reads the
+remote's definitions and creates the copy, and the copy's `_reindex` uses it, so however slow
+the remote is the slot is still there when the copy starts. A reservation is the cluster's, not
+the call's: another remote `_reindex` of the same cluster sent meanwhile uses it instead, and the
+copy then takes or waits for a slot as anyone does (its empty index removed, the index queued
+again). The dashboard asks again for waiting copies every 1.5 seconds. Each
 answer is read to at most 16 MiB (`roll.reindex.remote.buffer_limit`; past it Elasticsearch's
 "Remote responded with a chunk that was too large. Use a smaller batch size.") and charged to a
 node-wide budget (`roll.reindex.remote.memory`, 256 MiB) while it's held. A page of hits is never
@@ -689,7 +720,7 @@ its copy partial, with a button that deletes the partial index so it can be copi
 | method | path | |
 | ------ | ---- | - |
 | POST | `/v1/search/clusters/{id}/migrate/inspect` | `{source: {host, api_key? \| username?, password?}}` → `{remote: {host, version, distribution, cluster_name}, indices: [{index, health, status, docs, size_bytes, primary_size_bytes, primaries, replicas, aliases, aliases_more, aliases_on_roll, exists}], more_indices, data_streams, more_data_streams}` within 60s (`primaries`, `replicas` and `primary_size_bytes` are `null`: the listing asks only for the columns it shows, keeps only those, reads it row by row and lists the first 10,000 indices, with `more_indices` saying how many more there are; each index carries at most 20 alias names, `aliases_more` counting the rest, and at most 100 data streams are named; a listing that names one index twice is refused; everything the answer holds is charged to the control budget until it's sent, 64 KiB at a time; an answer not read within 60s is given back and its connection closed); a remote's refusal is a 400 with its status and `error.type` only (never its body), and every transport failure reads the same (`couldn't reach the remote at <host>`). The operator's rules apply, not the cluster's whitelist. One `inspect` or `migrate` runs per cluster at a time, and 4 per node (429 past them); their answers are capped (1 MiB, an index definition 4 MiB) and drawn from a slice of the node's reindex budget that tasks never use. `write` for roll-access |
-| POST | `/v1/search/clusters/{id}/migrate` | `{source, indices: [{index, dest?}], requests_per_second?, size?}` (at most 100 indices) → `{indices: [{index, dest, task, dropped: [{setting, value, reason}], aliases} \| {index, dest, error}]}`: the remote must answer (`GET /`) before its `host:port` is added to the cluster's `reindex_whitelist` (exactly that host: `normalize_host` refuses anything that isn't a DNS name or an IP literal, so no pattern gets in); then, while a reindex task slot is free, each index's copy is created and its `wait_for_completion=false` reindex started, within 60s; an index past the free slots comes back `{index, dest, queued: true, reason}` with nothing created (the dashboard starts it as earlier copies end); each row says what happened (`created`, `task`), also when the deadline cut it short, and a copy an earlier call already started counts as started; one index's failure doesn't stop the others; an index roll already has is refused, not overwritten, and an alias roll already has is dropped (`aliases.<name>`). `admin` for roll-access: it changes the cluster's whitelist and starts copies as the cluster's own user |
+| POST | `/v1/search/clusters/{id}/migrate` | `{source, indices: [{index, dest?}], requests_per_second?, size?}` (at most 100 indices) → `{indices: [{index, dest, task, dropped: [{setting, value, reason}], aliases} \| {index, dest, error}]}`: the remote must answer (`GET /`) before its `host:port` is added to the cluster's `reindex_whitelist` (exactly that host: `normalize_host` refuses anything that isn't a DNS name or an IP literal, so no pattern gets in); then, while a reindex task slot is free, each index's copy is created and its `wait_for_completion=false` reindex started, within 60s; an index past the free slots comes back `{index, dest, queued: true, reason}` with nothing created (the dashboard starts it as earlier copies end); each row says what happened (`created`, `task`), also when the deadline cut it short, and a copy an earlier call already started counts as started; one index's failure doesn't stop the others; an index roll already has is refused, not overwritten, and an alias roll already has is dropped (`aliases.<name>`). Just after a node starts, until roll's own names have resolved once, it answers 429 "roll hasn't resolved its own addresses yet; try again shortly" (the dashboard asks again). `admin` for roll-access: it changes the cluster's whitelist and starts copies as the cluster's own user |
 
 `crates/search-es/tests/reindex_remote.rs` covers the guard against a hostile mock remote (only
 whitelisted hosts read; a redirect not followed; an oversized page refused, with and without a
@@ -1250,7 +1281,9 @@ deterministic (#396).
    raise. Time has its own cap (#530, landed: one limit per request, by-query scans and internal pagers included). Rule: charge what a structure costs as it is
    built, never a multiple of the bytes it came from. Also left: `_bulk`'s own preparation (`bulk_ahead`
    parses each source into a tree) is charged only as the body's `inflight_requests`, for
-   clients' bulks and connector syncs' alike (#318's pages are text until then).
+   clients' bulks and connector syncs' alike (#318's pages are text until then). The
+   remote-reindex budget (`roll.reindex.remote.memory`) is a child of #549's node budget; connector
+   pages should become one too, so a node has one memory account for its background egress.
 4. **A sweep for the bug classes the 2026-11-19 reviews kept finding** (first pass landed in #434, the follow-up in #492; what
    today's reviews still find is resource accounting, item 3). Four
    independent security reviews (connectors #318, cross-cluster search #347 and its gaps #389,
@@ -1350,7 +1383,8 @@ deterministic (#396).
    web crawler (item 13) on this runner, and alerts on failed syncs through roll's webhooks or
    chat ops (Algolia's connectors notify on failed runs). A whole-product review on 2026-11-22
    found connectors refusing private addresses but not reindex's deny rules, and no per-owner cap on
-   remote reindex slots: being fixed together as one node-wide egress check and owner-fair slots.
+   remote reindex slots: fixed together as one node-wide egress check (`search_es::egress`) and
+   owner-fair slots (`search_es::slots`), "Migrating into roll" above.
 8. **Semantic search with no keys** (landed in #563, d756be014: roll's float build of E5 equals
    Elasticsearch's float deployment, cosine 1.000000 on 68 of 68 cases, and its CPU is billed by the
    cluster's catalog id; left: a RAG sample dataset on it (item 12) and OpenSearch-flavor local

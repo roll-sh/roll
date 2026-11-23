@@ -140,8 +140,9 @@ impl SyncTarget for FakeSync {
 struct Sent(Mutex<Vec<Value>>, Mutex<Option<Value>>, std::sync::atomic::AtomicBool, Mutex<Option<(String, String)>>, Mutex<BTreeMap<(String, String), Value>>, Mutex<Vendors>, FakeSnowflake, FakeAtlas, Mutex<FakeStsLogin>, FakeProviders, FakeKeyVendors);
 
 /// A self-managed GitLab's access tokens for project `acme/web`, OpenAI's service accounts in one
-/// project and Datadog's keys on its EU site, as their docs describe them, each taking only its
-/// admin credential (all obviously fake): the key ids live, every request body, and whether the
+/// project, Datadog's keys on its EU site, an account's Cloudflare API tokens, a Databricks
+/// workspace's tokens and Confluent Cloud's API keys, as their docs describe them, each taking only
+/// its admin credential (all obviously fake): the key ids live, every request body, and whether the
 /// admin credentials still work (`refuse`).
 #[derive(Default)]
 struct FakeKeyVendors {
@@ -154,6 +155,15 @@ struct FakeKeyVendors {
 const GITLAB_TOKENS: &str = "https://gitlab.example.com/api/v4/projects/acme%2Fweb/access_tokens";
 const OPENAI_ACCOUNTS: &str = "https://api.openai.com/v1/organization/projects/proj_rollfake/service_accounts";
 const DATADOG_API: &str = "https://api.datadoghq.eu/api/v2/";
+const CLOUDFLARE_TOKENS: &str = "https://api.cloudflare.com/client/v4/accounts/rollfakeaccount/tokens";
+const DATABRICKS_TOKENS: &str = "https://dbc-rollfake.cloud.databricks.com/api/2.0/token/";
+const CONFLUENT_KEYS: &str = "https://api.confluent.cloud/iam/v2/api-keys";
+
+/// The Cloudflare template's policies, as Cloudflare answers them (permission groups named too).
+fn cloudflare_policies(named: bool) -> Value {
+    let group = if named { json!({ "id": "fakepermissiongroup1", "name": "Workers Scripts Write" }) } else { json!({ "id": "fakepermissiongroup1" }) };
+    json!([{ "effect": "allow", "resources": { "com.cloudflare.api.account.rollfakeaccount": "*" }, "permission_groups": [group] }])
+}
 
 impl FakeKeyVendors {
     fn answer(&self, method: &str, url: &str, headers: &[(&str, &Secret)], body: Option<(&str, &Secret)>) -> Option<(u16, Value)> {
@@ -163,6 +173,13 @@ impl FakeKeyVendors {
             ("gitlab", rest, header("private-token") == "fake-gitlab-admin")
         } else if let Some(rest) = url.strip_prefix(OPENAI_ACCOUNTS) {
             ("openai", rest, header("authorization") == "Bearer fake-openai-admin")
+        } else if let Some(rest) = url.strip_prefix(CLOUDFLARE_TOKENS) {
+            ("cloudflare", rest, header("authorization") == "Bearer fake-cf-admin")
+        } else if let Some(rest) = url.strip_prefix(DATABRICKS_TOKENS) {
+            ("databricks", rest, header("authorization") == "Bearer fake-dbx-admin")
+        } else if let Some(rest) = url.strip_prefix(CONFLUENT_KEYS) {
+            use base64::Engine;
+            ("confluent", rest, header("authorization") == format!("Basic {}", base64::engine::general_purpose::STANDARD.encode("FAKECONFLUENTADMIN:fake-confluent-admin")))
         } else {
             let rest = url.strip_prefix(DATADOG_API)?;
             ("datadog", rest, header("dd-api-key") == "fake-dd-api" && header("dd-application-key") == "fake-dd-app")
@@ -183,7 +200,36 @@ impl FakeKeyVendors {
         Some(match (vendor, method, rest) {
             // Registering checks the credential, read only.
             ("gitlab", "GET", "?per_page=1") | ("openai", "GET", "?limit=1") => (200, json!([])),
-            ("datadog", "GET", "api_keys?page%5Bsize%5D=1" | "current_user/application_keys?page%5Bsize%5D=1") => (200, json!({ "data": [] })),
+            ("datadog", "GET", "api_keys?page%5Bsize%5D=1" | "current_user/application_keys?page%5Bsize%5D=1") | ("confluent", "GET", "?spec.owner=sa-rollfake&page_size=1") => (200, json!({ "data": [] })),
+            ("databricks", "GET", "list") => (200, json!({ "token_infos": [] })),
+            // The template, read at registration and before each new token.
+            ("cloudflare", "GET", "/tmplrollfake") => {
+                (200, json!({ "success": true, "errors": [], "result": { "id": "tmplrollfake", "name": "template", "status": "disabled", "policies": cloudflare_policies(true), "condition": { "request.ip": { "in": ["192.0.2.0/24"] } } } }))
+            }
+            ("cloudflare", "POST", "") => {
+                assert_eq!((&body["policies"], &body["condition"]["request.ip"]["in"][0]), (&cloudflare_policies(false), &json!("192.0.2.0/24")), "the template's policies and condition: {body}");
+                let n = made();
+                live.push(format!("cftokfake{n}"));
+                (200, json!({ "success": true, "errors": [], "result": { "id": format!("cftokfake{n}"), "name": body["name"], "status": "active", "value": format!("fake-cf-token-{n}") } }))
+            }
+            ("databricks", "POST", "create") => {
+                assert_eq!(body["lifetime_seconds"], 30 * 86_400, "{body}");
+                let n = made();
+                live.push(format!("dbxtokfake{n}"));
+                (200, json!({ "token_value": format!("fake-dbx-token-{n}"), "token_info": { "token_id": format!("dbxtokfake{n}"), "comment": body["comment"] } }))
+            }
+            ("databricks", "POST", "delete") => {
+                let id = body["token_id"].as_str().unwrap().to_string();
+                let found = live.contains(&id);
+                live.retain(|k| *k != id);
+                if found { (200, json!({})) } else { (404, json!({ "error_code": "RESOURCE_DOES_NOT_EXIST" })) }
+            }
+            ("confluent", "POST", "") => {
+                assert_eq!((&body["spec"]["owner"], &body["spec"]["resource"]), (&json!({ "id": "sa-rollfake" }), &json!({ "id": "lkc-rollfake", "environment": "env-rollfake" })), "{body}");
+                let n = made();
+                live.push(format!("CONFLUENTFAKE{n}"));
+                (202, json!({ "api_version": "iam/v2", "kind": "ApiKey", "id": format!("CONFLUENTFAKE{n}"), "spec": { "secret": format!("fake-confluent-secret-{n}"), "display_name": body["spec"]["display_name"] } }))
+            }
             ("gitlab", "POST", "") => {
                 assert!(body["expires_at"].as_str().is_some_and(|d| d.len() == 10) && body["scopes"] == json!(["read_api"]), "{body}");
                 let n = made();
@@ -3181,6 +3227,47 @@ async fn datadog_keys_rotate_and_a_refused_rotation_is_rotation_failed() {
     assert_eq!(events["events"][0]["key"], "DD_API_KEY", "{events}");
     assert!(events.to_string().contains("datadog answered 403"), "{events}");
     assert_eq!(api.values("production", "/").await["values"]["DD_API_KEY"], "fake-dd-api_keys-3", "the key in use stays");
+}
+
+#[tokio::test]
+async fn cloudflare_tokens_copy_the_template_and_the_old_one_is_deleted_after_the_grace_period() {
+    let api = Api::new().await;
+    key_vendor(&api, "cloudflare", json!({ "account_id": "rollfakeaccount", "template": "tmplrollfake" }), "fake-cf-admin", "CLOUDFLARE_API_TOKEN").await;
+    assert_eq!(api.values("production", "/").await["values"]["CLOUDFLARE_API_TOKEN"], "fake-cf-token-1");
+    // A new token, not Cloudflare's roll: the old value keeps working through the grace period.
+    api.ok(Method::POST, "/environments/production/secrets/CLOUDFLARE_API_TOKEN/rotate", None).await;
+    assert_eq!(api.values("production", "/").await["values"]["CLOUDFLARE_API_TOKEN"], "fake-cf-token-2");
+    assert_eq!(*api.sent.10.live.lock().unwrap(), ["cftokfake1", "cftokfake2"]);
+    end_grace(&api).await;
+    assert_eq!(*api.sent.10.live.lock().unwrap(), ["cftokfake2"]);
+}
+
+#[tokio::test]
+async fn databricks_tokens_rotate_and_the_old_one_is_revoked_after_the_grace_period() {
+    let api = Api::new().await;
+    let (s, _) = api.call(Method::POST, "/saas", Some(json!({ "name": "dbx", "vendor": "databricks", "target": { "host": "192.168.0.10" }, "credential": "x" }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "a workspace host is a hostname");
+    key_vendor(&api, "databricks", json!({ "host": "dbc-rollfake.cloud.databricks.com", "lifetime_days": 30 }), "fake-dbx-admin", "DATABRICKS_TOKEN").await;
+    assert_eq!(api.values("production", "/").await["values"]["DATABRICKS_TOKEN"], "fake-dbx-token-1");
+    api.ok(Method::POST, "/environments/production/secrets/DATABRICKS_TOKEN/rotate", None).await;
+    assert_eq!(api.values("production", "/").await["values"]["DATABRICKS_TOKEN"], "fake-dbx-token-2");
+    assert_eq!(*api.sent.10.live.lock().unwrap(), ["dbxtokfake1", "dbxtokfake2"]);
+    end_grace(&api).await;
+    assert_eq!(*api.sent.10.live.lock().unwrap(), ["dbxtokfake2"]);
+}
+
+#[tokio::test]
+async fn confluent_api_keys_rotate_for_the_same_owner_and_resource() {
+    let api = Api::new().await;
+    let target = json!({ "owner": "sa-rollfake", "resource": "lkc-rollfake", "environment": "env-rollfake" });
+    let r = key_vendor(&api, "confluent", target, "FAKECONFLUENTADMIN:fake-confluent-admin", "CONFLUENT_API_SECRET").await;
+    api.ok(Method::PUT, "/environments/production/secrets/CONFLUENT_API_KEY", Some(json!({ "link": { "kind": "saas", "ref": r["id"], "field": "id", "mode": "managed" } }))).await;
+    let pair = |v: Value| (v["values"]["CONFLUENT_API_KEY"].clone(), v["values"]["CONFLUENT_API_SECRET"].clone());
+    assert_eq!(pair(api.values("production", "/").await), (json!("CONFLUENTFAKE1"), json!("fake-confluent-secret-1")));
+    api.ok(Method::POST, "/environments/production/secrets/CONFLUENT_API_SECRET/rotate", None).await;
+    assert_eq!(pair(api.values("production", "/").await), (json!("CONFLUENTFAKE2"), json!("fake-confluent-secret-2")));
+    end_grace(&api).await;
+    assert_eq!(*api.sent.10.live.lock().unwrap(), ["CONFLUENTFAKE2"]);
 }
 
 #[tokio::test]
