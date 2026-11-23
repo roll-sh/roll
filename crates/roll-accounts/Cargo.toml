@@ -39,6 +39,7 @@ zeroize.workspace = true
 
 [dev-dependencies]
 rcgen.workspace = true
+roll-workspace.workspace = true
 http-body-util.workspace = true
 url.workspace = true
 tempfile.workspace = true

@@ -15,7 +15,9 @@
 pub mod api;
 pub mod challenge;
 pub mod backups;
+pub mod browser;
 pub mod build_cache;
+pub mod next_cache;
 pub mod hooks;
 pub mod tags;
 pub mod sites;
@@ -345,6 +347,11 @@ pub struct Apps {
     pub(crate) forms_seen: Mutex<HashMap<String, (i64, u32)>>,
     /// Uptime checks' last results here, on the owner ([`checks`]), by environment and name.
     pub(crate) check_states: Mutex<HashMap<String, checks::Run>>,
+    /// Browser checks running now: each one's token, and its service and environment
+    /// ([`browser`]).
+    pub(crate) check_tokens: Mutex<HashMap<String, (String, String)>>,
+    /// The checker images built on this node ([`browser`]).
+    pub(crate) checker_images: Mutex<std::collections::HashSet<String>>,
     /// A pass of daily rescans is running, and when live deployments were last looked at for
     /// one ([`vulns`]).
     pub(crate) rescanning: std::sync::atomic::AtomicBool,
@@ -692,6 +699,8 @@ impl Apps {
             events_seen: Mutex::new(HashMap::new()),
             forms_seen: Mutex::new(HashMap::new()),
             check_states: Mutex::new(HashMap::new()),
+            check_tokens: Mutex::new(HashMap::new()),
+            checker_images: Mutex::new(std::collections::HashSet::new()),
             rescanning: Default::default(),
             rescan_looked: Default::default(),
             errors_seen: Mutex::new(HashMap::new()),
@@ -1226,6 +1235,9 @@ impl Apps {
             Some(_) => return Err(Error::BadRequest("tags is 1–100 tags, or left out".into())),
         };
         let n = self.responses.purge(&env_key(service, env), paths.as_deref(), tags.as_deref());
+        // Next.js's cache too, its tags as given (Next's are case-sensitive).
+        let next_tags: Option<Vec<String>> = tags.as_ref().map(|_| body["tags"].as_array().into_iter().flatten().filter_map(|t| t.as_str()).map(|t| t.trim().to_string()).collect());
+        self.purge_next_cache(service, env, paths.as_deref(), next_tags.as_deref()).await;
         Ok(json!({ "purged": n }))
     }
 
@@ -1584,6 +1596,10 @@ impl Apps {
         }
         let sid = id.to_string();
         let domains = self.db(move |s| s.custom_domains_of(&sid, None)).await?;
+        let sid = id.to_string();
+        if let Ok(gone) = self.db(move |s| s.drop_next_cache(&sid, None, true)).await {
+            self.drop_cache_objects(gone);
+        }
         let sid = id.to_string();
         self.db(move |s| s.delete_service(&sid)).await?;
         // Its hostnames name nothing now.
@@ -2759,6 +2775,10 @@ impl Apps {
         self.drop_branches(service, env, None).await;
         self.drop_sandboxes(service, Some(env)).await;
         let (sid, e) = (service.to_string(), env.to_string());
+        if let Ok(gone) = self.db(move |s| s.drop_next_cache(&sid, Some(&e), true)).await {
+            self.drop_cache_objects(gone);
+        }
+        let (sid, e) = (service.to_string(), env.to_string());
         self.db(move |s| s.delete_environment(&sid, &e)).await?;
         // Its peer after the row (a check in flight finishes first; none starts again).
         self.drop_peer(service, env).await;
@@ -3034,6 +3054,19 @@ impl Apps {
                 config_url = true;
             }
         }
+        // Next.js's cache across instances (`next_cache`), for a build with roll's adapter in it;
+        // its token sealed, as a credential. Never a closed environment's: a fork's code would
+        // fill the fetch cache trusted deployments read.
+        let mut next_cache = false;
+        if !deployment.is_empty() && !env.egress.closed() {
+            let d = deployment.to_string();
+            let adapter = self.db(move |s| s.deployment(&d)).await.ok().and_then(|d| d.plan).is_some_and(|p| p["next_cache"] == true);
+            if adapter && let Some((url, token)) = self.next_cache_vars(&svc.id, &env.name).await? {
+                vars.insert(crate::next_cache::URL_VAR.into(), (url, "roll"));
+                vars.insert(crate::next_cache::TOKEN_VAR.into(), (token, "roll"));
+                next_cache = true;
+            }
+        }
         // A site's functions service: where its edge functions' `context.next()` reaches the
         // site (this listener, as instances reach it; `crate::edge`), set at start so the runtime
         // makes it reachable.
@@ -3057,6 +3090,9 @@ impl Apps {
         let (sid, e) = (svc.id.clone(), env.name.clone());
         let (links, own_data, branches) = self.db(move |s| Ok((s.links_minted(&sid)?, s.env_data(&sid, &e)?, s.env_branches(&sid, &e)?))).await?;
         let mut branch_notices = Vec::new();
+        // The resources it links itself: in an environment with data of its own, each is its
+        // branch or left out, so roll secrets' links to them are left out too.
+        let own_links: BTreeSet<(&'static str, String)> = links.iter().filter(|l| l.0 != LinkKind::Service).map(|l| (l.0.as_str(), l.1.clone())).collect();
         for (kind, r, prefix, minted) in links {
             // A preview (an ephemeral environment) never gets a resource's production variables:
             // roll previews sets the branched ones itself, by name; another service's URLs stay.
@@ -3110,10 +3146,11 @@ impl Apps {
                     if let Some(b) = &s.binding {
                         placeholders.insert(s.name.clone(), b.clone());
                     }
-                    // An environment with data of its own never gets a linked resource's
-                    // credentials or address through roll secrets: they name the resource itself
-                    // (production's database), and its branches come through its own links.
-                    if own_data && s.linked {
+                    // An environment with data of its own never gets, through roll secrets, the
+                    // credentials or address of a resource it links itself: they name the resource
+                    // (production's database), and its branches come through its own links. Links
+                    // to anything else (a SaaS key, an outside database) stay.
+                    if own_data && s.link.as_ref().is_some_and(|(k, r)| own_links.iter().any(|(ok, or)| ok == k && or == r)) {
                         parents.push(s.name);
                         continue;
                     }
@@ -3125,11 +3162,11 @@ impl Apps {
                         plain_secrets.insert(s.name.clone());
                     }
                     // A linked resource's address, rewritten for the container as apps' own links.
-                    let v = if s.linked { self.deps.runtime.reach(&s.value) } else { s.value };
+                    let v = if s.link.is_some() { self.deps.runtime.reach(&s.value) } else { s.value };
                     vars.insert(s.name, (v, "secret"));
                 }
                 if !parents.is_empty() {
-                    notices.push(format!("{} from roll secrets' links left out: {} has data of its own, and they reach the resources themselves (its branches come through its own links)", parents.join(", "), env.name));
+                    notices.push(format!("{} from roll secrets' links left out: {} has data of its own, and they reach resources it links itself (its branches come through its own links)", parents.join(", "), env.name));
                 }
             }
             Err(e) => return Err(Error::Internal(format!("the project's {} secrets couldn't be read: {e}", env.name))),
@@ -3141,6 +3178,9 @@ impl Apps {
         }
         if config_url {
             sealed.insert("ROLL_CONFIG_URL".into());
+        }
+        if next_cache {
+            sealed.insert(crate::next_cache::TOKEN_VAR.into());
         }
         // A web service's instances ask to stay awake for work after an answer (`ROLL_AWAKE_URL`),
         // with the environment's instance token: sealed, as the OIDC address.

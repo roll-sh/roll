@@ -182,7 +182,7 @@ async fn docker_world_secrets(netns: Option<bool>, setup: impl FnOnce(&mut AppsC
         resources: Arc::new(LoopbackDb),
         resolver: dns.clone(),
         tls: Arc::new(apps_control::integrations::NoTls),
-        objects: None,
+        objects: Some(pg_storage::Objects::new(&pg_storage::StorageConfig::Local(dir.path().join("objects"))).unwrap()),
         cluster,
         workspace: Some(ws.clone()),
     };
@@ -877,6 +877,34 @@ async fn a_tailscale_private_network_reaches_a_host_on_the_tailnet() {
     assert_eq!(got, "tailnet-hello", "through the tailnet");
     assert!(!caps.contains("NET_ADMIN") && caps.contains("ALL"), "no capability at all: {caps}");
     assert!(env_vars.contains("--shields-up"), "the tailnet can't connect in: {env_vars}");
+}
+
+/// A tunnel to another port of the app on real Docker (a debugger's, `roll apps proxy --port`):
+/// reached inside the instance's own network namespace by a relay, whatever the app publishes.
+/// The app's own port stands in for the debugger's here (busybox's httpd answers only one).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_tunnel_reaches_a_port_inside_the_instance() {
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    let Some(w) = docker_world().await else { return };
+    let (id, _) = deploy_container(&w, "dial").await;
+    let port = w.apps.live(&id, "production").template().and_then(|t| t.run.port).unwrap_or(8080);
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let at = l.local_addr().unwrap();
+    tokio::spawn(axum::serve(l, w.api.clone()).into_future());
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{at}/v1/apps/services/{id}/environments/production/tunnel?port={port}")).await.unwrap();
+    ws.send(Message::Binary(b"GET / HTTP/1.0\r\n\r\n".to_vec().into())).await.unwrap();
+    let mut got = Vec::new();
+    while let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_secs(10), ws.next()).await {
+        match m {
+            Message::Binary(b) if b.is_empty() => break,
+            Message::Binary(b) => got.extend_from_slice(&b),
+            _ => break,
+        }
+    }
+    let text = String::from_utf8_lossy(&got).to_string();
+    delete_for_good(&w.api, &id).await;
+    assert!(text.contains("200") && text.contains("cold"), "through the relay in its namespace: {text}");
 }
 
 /// A sandbox on real Docker: a command's output and exit code, one killed in the container at
@@ -1604,6 +1632,99 @@ class H(http.server.BaseHTTPRequestHandler):
 http.server.HTTPServer(('0.0.0.0', int(os.environ['PORT'])), H).serve_forever()
 "),
     ], "python otel True", json!({"otel": true}), traces).await;
+    w.apps.shutdown().await;
+}
+
+/// A real Next 16 app shares its cache through roll (roll's adapter, `next_cache`): a `"use cache"`
+/// value made by one instance is what the next one serves after a sleep, and `revalidateTag` on
+/// any instance makes it again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_next_apps_cache_outlives_its_instance() {
+    // The apps listener, where instances reach the cache: served for real.
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let Some(w) = docker_world_with(None, |c| c.otlp_base = Some(format!("http://127.0.0.1:{port}"))).await else { return };
+    let app = w.public.clone();
+    tokio::spawn(async move { axum::serve(listener, app.into_make_service()).await });
+    let (id, host) = deploy_tree_with(&w, "next-cache", &[
+        ("package.json", r#"{"name": "n", "version": "1.0.0", "scripts": {"build": "next build", "start": "next start"}, "dependencies": {"next": "16.4.6", "react": "19.3.1", "react-dom": "19.3.1"}}"#),
+        ("next.config.mjs", "export default { cacheComponents: true };\n"),
+        ("app/layout.js", "export default function Layout({ children }) { return <html><body>{children}</body></html> }\n"),
+        ("app/page.js", "export default function Page() { return <p>home</p> }\n"),
+        ("app/stamp/route.js", "import { cacheTag } from 'next/cache';\nasync function stamp() { 'use cache'; cacheTag('stamp'); return String(Date.now()) + '-' + Math.random() }\nexport async function GET() { return new Response(await stamp()) }\n"),
+        ("app/revalidate/route.js", "import { revalidateTag } from 'next/cache';\nexport async function POST() { revalidateTag('stamp', { expire: 0 }); return new Response('ok') }\n"),
+    ], json!({})).await;
+    let fetch = |method: &'static str, path: &'static str| {
+        let req = Request::builder().method(method).uri(path).header("host", host.as_str()).body(Body::empty()).unwrap();
+        let public = w.public.clone();
+        async move {
+            let r = public.oneshot(req).await.unwrap();
+            let st = r.status();
+            (st, String::from_utf8(r.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap())
+        }
+    };
+    let (st, first) = fetch("GET", "/stamp").await;
+    assert_eq!(st, StatusCode::OK, "{first}");
+    assert_eq!(fetch("GET", "/stamp").await.1, first, "cached");
+    // Asleep: the next request starts another instance, which serves what the first one made.
+    w.apps.live(&id, "production").sleep().await;
+    assert_eq!(fetch("GET", "/stamp").await.1, first, "the cache outlived its instance");
+    assert_eq!(fetch("POST", "/revalidate").await.1, "ok");
+    // Next marks the tag once the route has answered: read until it's made again.
+    let mut again = String::new();
+    for _ in 0..40 {
+        again = fetch("GET", "/stamp").await.1;
+        if again != first {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    assert!(again != first && !again.is_empty(), "made again after revalidateTag: {again}");
+    assert_eq!(delete_for_good(&w.api, &id).await.0, StatusCode::NO_CONTENT);
+    w.apps.shutdown().await;
+}
+
+/// A browser check in real Chromium (roll's checker image: Playwright's with the pinned library):
+/// its script finds the page's heading past the environment's password, and one that looks for
+/// what isn't there fails saying so.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_browser_check_runs_in_chromium() {
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let Some(w) = docker_world_with(None, |c| c.otlp_base = Some(format!("http://127.0.0.1:{port}"))).await else { return };
+    let app = w.public.clone();
+    tokio::spawn(async move { axum::serve(listener, app.into_make_service()).await });
+    let (id, _) = deploy_tree(&w, "browsed", &[
+        ("package.json", r#"{"name": "n", "version": "1.0.0", "scripts": {"start": "node server.js"}}"#),
+        ("server.js", "require('http').createServer((q, r) => { r.setHeader('content-type', 'text/html'); r.end('<title>t</title><h1>Hello roll</h1><script>document.body.append(Object.assign(document.createElement(\"p\"), {textContent: \"ran\"}))</script>') }).listen(process.env.PORT)"),
+    ]).await;
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    let check = |script: &str| json!({"access": {"password": "correct horse"}, "checks": [{"name": "home", "path": "/", "every_s": 300, "timeout_s": 60, "browser": script}]});
+    let (st, e) = call(&w.api, "PUT", &base, Some(check("await page.getByRole('heading', { name: 'Hello roll' }).waitFor(); await page.getByText('ran').waitFor()")), "application/json", None).await;
+    assert_eq!(st, StatusCode::OK, "{e}");
+    let t0 = code_sql::now_ms() + 3_600_000;
+    let pass = |n: i64| {
+        let (w, base) = (&w, base.clone());
+        async move {
+            w.apps.cron_pass(t0 + n * 301_000).await;
+            // The first builds roll's checker image: minutes.
+            for _ in 0..6000 {
+                let st = call(&w.api, "GET", &base, None, "application/json", None).await.1["check_states"][0].clone();
+                if st["last_at"].as_i64() == Some(t0 + n * 301_000) {
+                    return st;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            panic!("pass {n} never came back");
+        }
+    };
+    let up = pass(0).await;
+    assert_eq!((up["up"].as_bool(), up["status"].as_u64()), (Some(true), Some(200)), "{up}");
+    call(&w.api, "PUT", &base, Some(check("await page.getByRole('heading', { name: 'Goodbye' }).waitFor({ timeout: 2000 })")), "application/json", None).await;
+    let failed = pass(1).await;
+    assert!(failed["failures"].as_u64() == Some(1) && failed["error"].as_str().is_some_and(|e| e.contains("Goodbye")), "{failed}");
+    assert_eq!(delete_for_good(&w.api, &id).await.0, StatusCode::NO_CONTENT);
+    let _ = std::process::Command::new("docker").args(["rmi", &format!("roll-apps-{id}:browser-check-{}", apps_control::browser::PLAYWRIGHT.replace('.', "-"))]).output();
     w.apps.shutdown().await;
 }
 

@@ -2656,6 +2656,14 @@ impl Store {
         self.pin_at(id, service, revision, None, url)
     }
 
+    /// The earlier pushes of `revision` kept at their backend's own URL ([`Store::pin_build`]).
+    pub fn unpin_builds(&self, id: &str, revision: &str) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("DELETE FROM pinned WHERE preview_id = ? AND revision = ? AND host LIKE 'apps:%'", params![id, revision])?;
+            Ok::<_, Error>(())
+        })
+    }
+
     /// [`Store::pin`] for a build its backend keeps at a URL of its own (roll apps' deployment
     /// URL): nothing of roll previews' answers for it. Its host is kept as `apps:<host>`, which no
     /// DNS label can be, so roll previews' proxy never takes a request as its.
@@ -3233,6 +3241,8 @@ impl Store {
             None => None,
         };
         let copies = self.pinned_data(&r.id)?;
+        let held = self.pinned_usage(&r.id)?;
+        let copies_total = crate::Copies { count: held.len(), bytes: held.iter().map(|x| x.0).sum(), usd_month: (held.iter().map(|x| x.1).sum::<f64>() * 10_000.0).round() / 10_000.0 };
         let earlier = self.pinned(&r.id)?.into_iter().map(|mut p| {
             p.share_url = Some(share(&p.url));
             p.own_data = copies.iter().filter(|d| d.revision == p.revision).map(|d| d.kind).collect();
@@ -3283,6 +3293,7 @@ impl Store {
             goes_at,
             reported_by,
             earlier,
+            copies: copies_total,
             screenshot_at,
             visual_change,
             phone_screenshot,
@@ -3595,6 +3606,7 @@ mod tests {
         store.set_pinned_usage(&row.id, &d, &crate::ports::Usage { bytes: 3 << 20, storage_usd_month: 0.5, active_usd_hour: 0.0, month_to_date_usd: 0.25 }).unwrap();
         let after = store.cost(&row).unwrap();
         assert_eq!(after.bytes - before.bytes, 3 << 20);
+        assert_eq!(store.preview(&row.id).unwrap().copies, crate::Copies { count: 1, bytes: 3 << 20, usd_month: 0.5 }, "and said apart");
         assert!((after.sleeping_usd_month - before.sleeping_usd_month - 0.5).abs() < 1e-9);
         assert!(after.month_to_date_usd - before.month_to_date_usd >= 0.25);
     }

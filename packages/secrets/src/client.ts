@@ -1,6 +1,6 @@
 import { SecretsError } from "./errors.js";
 import { openSealed } from "./seal.js";
-import type { Deleted, ExportFormat, Lease, Problem, SealedValues, Secret, SecretInfo, Totp, TransitPublicKey, Values, Written } from "./types.js";
+import type { Deleted, ExportFormat, Lease, Problem, SealedValues, Secret, SecretInfo, Totp, TransitPublicKey, Values, ValuesDelta, Written } from "./types.js";
 
 export type ClientOptions = {
   /** rolld's API, e.g. `https://api.roll.example` (no trailing `/v1`). */
@@ -199,6 +199,9 @@ export function createClient(options: ClientOptions) {
   return makeClient(options);
 }
 
+/** What a watch holds of a folder's last answer: its values and every key's stamp. `off`: a rolld without the delta route. */
+type Held = { last: { values: Values; digest: string; basis?: string; stamps: Record<string, string> } | null; off: boolean };
+
 function makeClient(options: ClientOptions, login?: ReturnType<typeof relogin>) {
   const base = options.api.replace(/\/+$/, "");
   const doFetch = options.fetch ?? fetch;
@@ -292,6 +295,44 @@ function makeClient(options: ClientOptions, login?: ReturnType<typeof relogin>) 
       cache.set(url, { values: v, etag, at: now() });
     }
     return v;
+  }
+
+  /**
+   * A watch's read of the values through `…/values/delta`: with the answer it holds (no problems,
+   * a basis), only what changed, merged into it; otherwise, or when rolld answers the full set, the
+   * whole answer, kept for next time. A rolld without the route: fresh reads from then on.
+   */
+  async function deltaValues(environment: string, path: string | undefined, held: Held): Promise<Values> {
+    if (held.off) return values(environment, { path, fresh: true });
+    const e = await env(environment);
+    const h = held.last;
+    const claim = h?.basis && !h.values.problems.length ? { digest: h.digest, basis: h.basis, stamps: h.stamps } : {};
+    let a: Partial<ValuesDelta> & Values;
+    try {
+      a = (await call("POST", `${e}/values/delta${qs({ path })}`, claim)) as ValuesDelta;
+    } catch (err) {
+      if (!(err instanceof SecretsError) || ![404, 405, 413].includes(err.status)) throw err;
+      held.off = true;
+      held.last = null;
+      return values(environment, { path, fresh: true });
+    }
+    // The newest answer: a kept one for the folder goes.
+    cache.delete(`${e}/values${qs({ path })}`);
+    const { delta, digest, basis, removed, stamps, ...v } = a;
+    let kept = stamps ?? {};
+    if (delta && h) {
+      const all = { ...h.values.values };
+      kept = { ...h.stamps };
+      for (const k of removed ?? []) {
+        delete all[k];
+        delete kept[k];
+      }
+      Object.assign(all, v.values);
+      Object.assign(kept, stamps);
+      v.values = all;
+    }
+    held.last = { values: v, digest: digest ?? "", basis, stamps: kept };
+    return structuredClone(v);
   }
 
   const secretUrl = async (environment: string, key: string, path?: string, suffix = "", q: Record<string, string | undefined> = {}) =>
@@ -399,8 +440,10 @@ function makeClient(options: ClientOptions, login?: ReturnType<typeof relogin>) 
     let timer: ReturnType<typeof setTimeout> | undefined;
     let leases: string[] = [];
     let last: string | null = null;
-    // Always a fresh read: the digest moved, so a kept answer is the old one.
-    const load = () => (o.consumer ? resolve(environment, { consumer: o.consumer, path: o.path }) : values(environment, { path: o.path, fresh: true }));
+    // Always a fresh read: the digest moved, so a kept answer is the old one. Only what changed
+    // since the values this watch holds.
+    const held: Held = { last: null, off: false };
+    const load = () => (o.consumer ? resolve(environment, { consumer: o.consumer, path: o.path }) : deltaValues(environment, o.path, held));
     const take = async (v: Values) => {
       if (v.problems.length) throw new SecretsError(`${environment} doesn't resolve: ${v.problems.map((p) => `${p.key}: ${p.problem}`).join("; ")}`, 409, "unresolved");
       leases = v.leases;

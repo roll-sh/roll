@@ -146,7 +146,7 @@ export interface Run {
   volume?: { mount: string; size_gb: number; backups?: { every_hours: number; keep: number } };
   /** Metric alerts (`alert.*` events), over five minutes; each 0 is off. */
   /** log_match: text its output holds log_count times in five minutes (alert.log). */
-  alerts?: { memory_pct: number; error_pct: number; p95_ms: number; capacity_pct?: number; log_match?: string; log_count?: number; cpu_pct?: number; metrics?: MetricAlert[] };
+  alerts?: { memory_pct: number; error_pct: number; p95_ms: number; capacity_pct?: number; log_match?: string; log_count?: number; cpu_pct?: number; metrics?: MetricAlert[]; /** The last hour against the same hour of the week over four weeks: alert.anomaly. */ anomaly?: boolean };
   /** Its service level objective: `objective`% of requests not 5xx (and of minutes under `latency_ms` at p95) over `window_days`; `alert.slo` when its budget burns fast. */
   slo?: Slo;
   /** Its own Prometheus endpoint, scraped every 15 s on each running instance (port: the app's own by default). */
@@ -155,7 +155,7 @@ export interface Run {
   log_metrics?: { name: string; pattern: string }[];
   /** A gradual rollout: the new deployment takes each percent of `steps` for `step_s`, rolled
    *  back by a 5xx share of `error_pct` or more (worse than the old one); no steps: at once. */
-  rollout?: { steps: number[]; step_s: number; error_pct: number; /** Each step waits for a person once it passes. */ manual?: boolean; /** With run.slo: a step fails past this burn rate (default 14.4). */ slo_burn?: number; /** A step fails when the new deployment's p95 is this many percent above the old one's. */ p95_pct?: number; /** false: the old instances stop before the new ones start (two never run at once). */ overlap?: boolean };
+  rollout?: { steps: number[]; step_s: number; error_pct: number; /** Each step waits for a person once it passes. */ manual?: boolean; /** With run.slo: a step fails past this burn rate (default 14.4). */ slo_burn?: number; /** A step fails when the new deployment's p95 is this many percent above the old one's. */ p95_pct?: number; /** false: the old instances stop before the new ones start (two never run at once). */ overlap?: boolean; /** The environment's browser checks run against the new deployment's own URL before it takes requests; one that fails rolls it back. */ checks?: boolean };
   /** The app speaks HTTP/2 without TLS (a gRPC server). */
   h2c?: boolean;
   /** With h2c: the gRPC service whose grpc.health.v1 check must answer SERVING ("" the whole server). */
@@ -833,6 +833,8 @@ export interface Plan {
   functions?: string[];
   /** A static site's edge functions: run before its files on their paths by its `-fn` service. */
   edge?: { name: string; kind: "netlify" | "vercel"; file: string; paths: string[]; excluded?: string[] }[];
+  /** roll's Next.js adapter is in the image: its instances share ISR, fetch and "use cache" entries. */
+  next_cache?: boolean;
 }
 
 export interface RootCandidate {
@@ -1130,6 +1132,8 @@ export interface UptimeCheck {
   timeout_s?: number;
   status?: number;
   contains?: string;
+  /** A browser check: a Playwright script run in Chromium against `path` (the body of an async function given `page`, `context` and `url`; it fails by throwing). At most 16 KiB; every 300–3600 s, timeout 1–120 s. */
+  browser?: string;
 }
 
 export interface UptimeCheckState {
@@ -1265,6 +1269,7 @@ export interface NotifyTarget {
 }
 
 export type NotifyEvent =
+  | "alert.anomaly"
   | "deploy.failed"
   | "deploy.base_updated"
   | "rollout.waiting"
@@ -1272,6 +1277,7 @@ export type NotifyEvent =
   | "crash_loop"
   | "deploy.active"
   | "spend.alert"
+  | "spend.spike"
   | "spend.limit"
   | "alert.memory"
   | "alert.cpu"

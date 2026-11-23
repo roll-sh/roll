@@ -1520,6 +1520,8 @@ struct ShellQuery {
     command: Option<String>,
     cpu: Option<f64>,
     memory_mb: Option<u32>,
+    /// With `console`: another kept deployment's image (one that won't come up).
+    deployment: Option<String>,
 }
 
 /// `GET …/shell` (a WebSocket): a shell in a running instance; see `crate::shell`.
@@ -1528,9 +1530,9 @@ async fn shell(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q)
     apps.check_secret_reveal(&id, &env, asker(&ext)).await?;
     let slot = apps.shell_slot(&id, &env)?;
     let target = if q.console == Some(true) {
-        let t = apps.console_target(&id, &env, crate::shell::ConsoleAsk { command: q.command.clone(), cpu: q.cpu, memory_mb: q.memory_mb }).await?;
+        let t = apps.console_target(&id, &env, crate::shell::ConsoleAsk { command: q.command.clone(), cpu: q.cpu, memory_mb: q.memory_mb, deployment: q.deployment.clone() }).await?;
         // What it runs stays out of the trail (a command line can hold a credential).
-        apps.audit("console.opened", &id, &env, actor(&ext), json!({ "command": q.command.is_some(), "cpu": q.cpu, "memory_mb": q.memory_mb })).await;
+        apps.audit("console.opened", &id, &env, actor(&ext), json!({ "command": q.command.is_some(), "cpu": q.cpu, "memory_mb": q.memory_mb, "deployment": q.deployment })).await;
         t
     } else {
         if q.command.is_some() || q.cpu.is_some() || q.memory_mb.is_some() {
@@ -1569,12 +1571,21 @@ async fn write_files(State(apps): S, Path((id, env)): Path<(String, String)>, Qu
 }
 
 /// `GET …/tunnel` (a WebSocket): one TCP connection to the service's port; see `crate::tunnel`.
-async fn tunnel(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, ws: axum::extract::ws::WebSocketUpgrade) -> R {
+#[derive(Deserialize)]
+struct TunnelQuery {
+    /// Another port of the app than its own (a debugger's 9229, JMX, pprof).
+    port: Option<u16>,
+}
+
+async fn tunnel(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<TunnelQuery>, ext: Extensions, ws: axum::extract::ws::WebSocketUpgrade) -> R {
+    if q.port == Some(0) {
+        return Err(Error::BadRequest("port is 1–65535".into()));
+    }
     let slot = apps.tunnel_slot(&id, &env)?;
     let lease = apps.tunnel_target(&id, &env).await?;
-    apps.audit("tunnel.opened", &id, &env, actor(&ext), json!({})).await;
+    apps.audit("tunnel.opened", &id, &env, actor(&ext), json!({ "port": q.port })).await;
     let ws = ws.max_message_size(1 << 20).max_frame_size(1 << 20);
-    Ok(ws.on_upgrade(move |socket| apps.bridge_tunnel(socket, lease, slot)).into_response())
+    Ok(ws.on_upgrade(move |socket| apps.bridge_tunnel(socket, lease, slot, q.port)).into_response())
 }
 
 #[derive(Deserialize)]
@@ -1588,13 +1599,14 @@ struct OpenSession {
     command: Option<String>,
     cpu: Option<f64>,
     memory_mb: Option<u32>,
+    deployment: Option<String>,
 }
 
 /// `POST …/shell/sessions`: a shell over HTTP (the dashboard's terminal); see `crate::shell`.
 async fn open_session(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
     apps.check_secret_reveal(&id, &env, asker(&ext)).await?;
-    let o: OpenSession = if b.is_empty() { OpenSession { instance: None, cols: None, rows: None, console: false, command: None, cpu: None, memory_mb: None } } else { serde_json::from_slice(&b).map_err(|e| Error::BadRequest(e.to_string()))? };
-    let console = o.console.then(|| crate::shell::ConsoleAsk { command: o.command.clone(), cpu: o.cpu, memory_mb: o.memory_mb });
+    let o: OpenSession = if b.is_empty() { OpenSession { instance: None, cols: None, rows: None, console: false, command: None, cpu: None, memory_mb: None, deployment: None } } else { serde_json::from_slice(&b).map_err(|e| Error::BadRequest(e.to_string()))? };
+    let console = o.console.then(|| crate::shell::ConsoleAsk { command: o.command.clone(), cpu: o.cpu, memory_mb: o.memory_mb, deployment: o.deployment.clone() });
     if console.is_none() && (o.command.is_some() || o.cpu.is_some() || o.memory_mb.is_some()) {
         return Err(Error::BadRequest("command, cpu and memory_mb are a console's (console: true)".into()));
     }

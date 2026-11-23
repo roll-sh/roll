@@ -656,6 +656,9 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     }
     // Someone disabled, no longer an admin or deleted: roll secrets' hook below, from the outbox.
     let offboarding = accounts.clone();
+    // SCIM's groups are the workspace's (docs/members-v1-1.md): a person's grant reads their
+    // group roles in the same query as their memberships.
+    accounts.set_directory(std::sync::Arc::new(workspace::Directory(workspace.clone())));
     let people = secrets::People { accounts, code: code.as_ref().map(|c| c.code.clone()), search: search.as_ref().map(|s| s.control.clone()) };
     workspace.set_owners(std::sync::Arc::new(people.clone()));
     // Members' handles and addresses, and invite links to the dashboard (docs/members.md).

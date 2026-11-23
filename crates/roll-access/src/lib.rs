@@ -611,8 +611,6 @@ pub struct Access {
     pub(crate) github_keys: leaks::GithubKeys,
     /// OAuth registrations lately, per network (open registration's limit).
     pub(crate) registrations: std::sync::Mutex<Window>,
-    /// Callback URLs each connection asked roll to verify lately (MCP Events' webhooks).
-    pub(crate) event_verifies: std::sync::Mutex<Window>,
     /// How OIDC issuers' keys are fetched for trusted machine clients: rolld's guarded client.
     /// Unset: only clients with pinned keys sign in that way.
     pub oidc_fetch: std::sync::OnceLock<Arc<dyn roll_oidc::Fetch + Send + Sync>>,
@@ -644,7 +642,7 @@ impl Access {
 
     /// On a database already open (tests: `code_sql::Db::open_or_test`, so they run on Postgres too).
     pub fn with_db(db: code_sql::Db, config: Config, resolvers: Resolvers) -> Result<Arc<Access>> {
-        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), nodes: Default::default(), revokers: Default::default(), decoy_hooks: Default::default(), limiter: Default::default(), sinks: Default::default(), event_hooks: Default::default(), people: Default::default(), workspace: Default::default(), mail_gate: Default::default(), github_keys: Default::default(), registrations: Default::default(), event_verifies: Default::default(), oidc_fetch: Default::default(), oidc_keys: Default::default(), sign_ins: Default::default(), device_starts: Default::default(), device_guesses: Default::default(), policy_cache: Default::default() }))
+        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), nodes: Default::default(), revokers: Default::default(), decoy_hooks: Default::default(), limiter: Default::default(), sinks: Default::default(), event_hooks: Default::default(), people: Default::default(), workspace: Default::default(), mail_gate: Default::default(), github_keys: Default::default(), registrations: Default::default(), oidc_fetch: Default::default(), oidc_keys: Default::default(), sign_ins: Default::default(), device_starts: Default::default(), device_guesses: Default::default(), policy_cache: Default::default() }))
     }
 
     /// The resource of `kind` named `id`, with its project and environment filled in.
@@ -768,6 +766,7 @@ impl Access {
             if let Some(revoked) = foreign {
                 if let Some(what) = revoked {
                     tracing::warn!(what = %what, at = %found_at, "a leaked secret was revoked");
+                    self.alert("secret_revoked", serde_json::json!({ "what": what, "found_at": found_at }));
                     self.store.audit(&store::AuditEvent {
                         id: new_id("aud"),
                         at: code_sql::now_ms(),
@@ -801,6 +800,7 @@ impl Access {
             // An enterprise app's secret: dropped with its tokens until the operator rotates it.
             if let Some(app) = self.revoke_leaked_app(s, &format!("found in {found_at}"))? {
                 tracing::warn!(app = %app.client_id, at = %found_at, "a leaked enterprise app secret was revoked");
+                self.alert("secret_revoked", serde_json::json!({ "what": format!("enterprise app {} ({})", app.name, app.client_id), "found_at": found_at }));
                 self.store.audit(&store::AuditEvent {
                     id: new_id("aud"),
                     at: code_sql::now_ms(),
@@ -825,6 +825,7 @@ impl Access {
             }
             if let Some(g) = self.store.revoke_leaked(s, &format!("found in {found_at}"))? {
                 tracing::warn!(grant = %g.id, name = %g.name, at = %found_at, "a leaked token was revoked");
+                self.alert("token_revoked", serde_json::json!({ "grant": g.id, "name": g.name, "found_at": found_at }));
                 self.tell(
                     g.user.as_deref(),
                     None,
@@ -868,6 +869,41 @@ impl Access {
         let n = self.store.setting("notify").ok()??;
         let (i, c) = (n["chat"]["install"].as_str()?, n["chat"]["channel"].as_str()?);
         Some((i.to_string(), c.to_string()))
+    }
+
+    /// Keep an alert for the operator's feed (`access.alert`); a failure to keep it is logged, never
+    /// the caller's error (what it alerts about already happened).
+    fn alert(&self, kind: &str, data: serde_json::Value) {
+        if let Err(e) = self.store.record_alert(kind, &data) {
+            tracing::warn!(error = %e, kind, "keeping an alert for the operator's feed");
+        }
+    }
+
+    /// Tools whose server errors jumped lately ([`store::Store::failure_jumps`]): each kept for the
+    /// operator's feed (`access.alert`), mailed to every admin and posted where approvals go. One
+    /// node sends each (claimed in the store), at most once every six hours per tool. How many.
+    pub async fn activity_alerts(self: &Arc<Self>) -> Result<usize> {
+        let now = code_sql::now_ms();
+        let mut sent = 0;
+        for j in self.store.failure_jumps(now)? {
+            let tool = j["tool"].as_str().unwrap_or_default().to_string();
+            if !self.store.claim_alert(&format!("activity_alert:{tool}"), now, 6 * 3_600_000)? {
+                continue;
+            }
+            let pct = |r: &serde_json::Value| (r.as_f64().unwrap_or(0.0) * 100.0).round() as i64;
+            let (rate, usual) = (pct(&j["rate"]), pct(&j["usual"]));
+            self.alert("tool_failing", serde_json::json!({ "tool": tool, "calls": j["calls"], "failed": j["failed"], "rate_pct": rate, "usual_pct": usual }));
+            let line = format!("{tool} answered {} of its {} calls in the last 15 minutes with a server error ({rate}%; usually {usual}%).", j["failed"], j["calls"]);
+            let link = format!("Agent activity: {}/dashboard/access", self.web_url());
+            self.tell_admins(&format!("activity_alert:{tool}"), format!("roll MCP: {tool} is failing ({rate}% of calls)"), format!("{line}\n\n{link}"));
+            if let Some((chat, (install, channel))) = self.chat.get().cloned().zip(self.chat_target())
+                && let Err(e) = chat.notice(install, channel, format!("roll MCP: {line} {link}")).await
+            {
+                tracing::warn!(error = %e, "posting a failing tool where approvals go");
+            }
+            sent += 1;
+        }
+        Ok(sent)
     }
 
     /// Once a day, where approvals go: the live tokens that expire within a week (GitHub mails a
@@ -1074,6 +1110,11 @@ impl Access {
             g.id,
         );
         let key = format!("decoy:{}", g.id);
+        // Kept for the operator's feed at most once an hour per decoy (on any node): one prober
+        // can trip it many times.
+        if self.store.claim_alert(&format!("alert_{key}"), code_sql::now_ms(), 3_600_000).unwrap_or(false) {
+            self.alert("decoy_used", serde_json::json!({ "grant": g.id, "name": g.name, "route": route.chars().take(200).collect::<String>(), "ip": ip }));
+        }
         self.tell(g.user.as_deref(), Some((&key, 3_600_000)), subject.clone(), text.clone());
         self.tell_admins(&key, subject, text);
         let used = DecoyUse { grant: g.id.clone(), ip, route: route.chars().take(200).collect(), at: code_sql::now_ms() };

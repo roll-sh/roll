@@ -471,6 +471,17 @@ impl Brancher for Nosql {
         }
     }
 
+    /// A branch of the preview's own database: an earlier push's data. A NoSQL branch inherits
+    /// its parent's masking policy, so the copy reads masked as the preview's branch does (and
+    /// goes when the rules change).
+    async fn snapshot(&self, _parent: &str, branch: &str, name: &str) -> anyhow::Result<Option<Branched>> {
+        self.branch(branch, name, Mode::Branch).await.map(Some)
+    }
+
+    async fn delete_snapshot(&self, _parent: &str, from: &str, snapshot: &str, _kept: Option<&str>, name: &str) -> anyhow::Result<()> {
+        self.delete(from, snapshot, name).await
+    }
+
     async fn delete(&self, parent: &str, branch: &str, name: &str) -> anyhow::Result<()> {
         let d = match self.0.get(&format!("/v1/nosql/databases/{}", seg(branch))).await {
             Ok(d) => d,
@@ -576,6 +587,17 @@ impl Brancher for Bucket {
         self.branch(parent, name, mode).await
     }
 
+    /// A branch of the preview's branch bucket (reads resolve through every ancestor), with a
+    /// key of its own: an earlier push's files as its head left them. roll storage refuses to
+    /// delete a bucket with branches, so copies always go first (eviction, reset, teardown).
+    async fn snapshot(&self, _parent: &str, branch: &str, name: &str) -> anyhow::Result<Option<Branched>> {
+        self.branch(branch, name, Mode::Branch).await.map(Some)
+    }
+
+    async fn delete_snapshot(&self, _parent: &str, from: &str, snapshot: &str, _kept: Option<&str>, name: &str) -> anyhow::Result<()> {
+        self.delete(from, snapshot, name).await
+    }
+
     async fn delete(&self, parent: &str, branch: &str, name: &str) -> anyhow::Result<()> {
         anyhow::ensure!(branch == bucket_name(parent, name) && branch != parent, "refusing to delete bucket {branch}: it isn't {parent}'s branch {name}");
         let b = match self.0.get(&format!("/v1/storage/buckets/{}", seg(branch))).await {
@@ -669,6 +691,17 @@ impl Brancher for Stream {
     async fn reset(&self, parent: &str, branch: &str, _kept: Option<&str>, name: &str, mode: Mode) -> anyhow::Result<Branched> {
         self.delete(parent, branch, name).await?;
         self.branch(parent, name, mode).await
+    }
+
+    /// A branch of the preview's own stream (any stream branches: a new stream whose chunk rows
+    /// name the parent's objects, independent after), with a key of its own.
+    async fn snapshot(&self, _parent: &str, branch: &str, name: &str) -> anyhow::Result<Option<Branched>> {
+        self.branch(branch, name, Mode::Branch).await.map(Some)
+    }
+
+    /// Its `branch_of` is the preview's stream it was copied from (unchecked once that's gone).
+    async fn delete_snapshot(&self, _parent: &str, from: &str, snapshot: &str, _kept: Option<&str>, name: &str) -> anyhow::Result<()> {
+        self.delete(from, snapshot, name).await
     }
 
     async fn delete(&self, parent: &str, branch: &str, name: &str) -> anyhow::Result<()> {

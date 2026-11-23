@@ -2613,6 +2613,25 @@ impl EnvLive {
             tpl.spec.aliases.clear();
         }
         tpl.spec.vars.extend(vars.iter().cloned());
+        self.run_template(tpl, name, log, timeout, cancel).await
+    }
+
+    /// A browser check's container (`crate::browser`): roll's checker `image` on the live
+    /// deployment's network with `vars` only (none of the app's), no port, volume, sidecar or
+    /// name of its own there, 1 vCPU and 1 GiB, to its exit or `timeout`; metered to the service.
+    pub async fn run_checker(self: &Arc<Self>, image: &str, command: &str, vars: Vec<(String, String)>, timeout: Duration, log: LogSink) -> anyhow::Result<Exit> {
+        let mut tpl = (*self.template().ok_or_else(|| anyhow::anyhow!("no deployment"))?).clone();
+        let s = &mut tpl.spec;
+        (s.image, s.command, s.vars, s.port, s.volume, s.idle_stop_s, s.registry, s.health) = (image.to_string(), Some(command.to_string()), vars, None, None, None, None, None);
+        s.ports.clear();
+        s.aliases.clear();
+        s.files.clear();
+        s.sidecars.clear();
+        (s.cpu, s.memory_mb, tpl.run.cpu, tpl.run.memory_mb) = (1.0, 1024, 1.0, 1024);
+        self.run_template(tpl, None, Some(log), timeout, tokio_util::sync::CancellationToken::new()).await
+    }
+
+    async fn run_template(self: &Arc<Self>, tpl: Template, name: Option<String>, log: Option<LogSink>, timeout: Duration, cancel: tokio_util::sync::CancellationToken) -> anyhow::Result<Exit> {
         let inst = self.make_run(&tpl, name).await?;
         let log = log.unwrap_or_else(|| self.log.instance(&inst.name, &inst.deployment));
         let began = Instant::now();
@@ -2653,8 +2672,8 @@ impl EnvLive {
     /// A one-off console (`roll apps run -it`, Heroku's `heroku run bash`): a fresh container of
     /// the live deployment, with its variables and on its network, no port and no volume, its own
     /// `cpu` and `memory_mb` when asked; it waits (`sleep`) for the terminal opened in it.
-    pub async fn start_console(self: &Arc<Self>, cpu: Option<f64>, memory_mb: Option<u32>) -> anyhow::Result<ConsoleBox> {
-        let mut tpl = (*self.template().ok_or_else(|| anyhow::anyhow!("no deployment"))?).clone();
+    pub async fn start_console(self: &Arc<Self>, of: Option<Arc<Template>>, cpu: Option<f64>, memory_mb: Option<u32>) -> anyhow::Result<ConsoleBox> {
+        let mut tpl = (*of.or_else(|| self.template()).ok_or_else(|| anyhow::anyhow!("no deployment"))?).clone();
         // Kept up while the terminal is open (a day at most: the shell's idle limit ends it first).
         tpl.spec.command = Some("exec sleep 86400".into());
         tpl.spec.port = None;
