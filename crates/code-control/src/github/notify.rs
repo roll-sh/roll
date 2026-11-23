@@ -790,6 +790,28 @@ fn visual_line(v: &crate::model::PreviewVisualChange) -> String {
     }
 }
 
+/// The comment's line on production's browser checks run on this head: how many passed, which
+/// failed (by name; what they printed stays on the sheet), how many are still running.
+fn browser_checks_line(checks: &[crate::model::PreviewBrowserCheck]) -> Option<String> {
+    if checks.is_empty() {
+        return None;
+    }
+    let tidy = |s: &str| s.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ' ' | '.')).take(60).collect::<String>();
+    let count = |st: &str| checks.iter().filter(|c| c.state == st).count();
+    let failed: Vec<String> = checks.iter().filter(|c| c.state == "failed").map(|c| format!("`{}: {}`", tidy(&c.service), tidy(&c.name))).collect();
+    let mut parts = Vec::new();
+    if !failed.is_empty() {
+        parts.push(format!("**{} failed** ({})", failed.len(), failed.join(", ")));
+    }
+    if count("passed") > 0 {
+        parts.push(format!("{} passed", count("passed")));
+    }
+    if count("pending") > 0 {
+        parts.push(format!("{} running", count("pending")));
+    }
+    Some(format!("Production's browser checks on this head: {}.\n\n", parts.join(", ")))
+}
+
 /// The comment's links to earlier pushes (before and after), each saying whether it runs on its
 /// own copy of the data or the preview's.
 fn earlier_line(earlier: &[crate::model::PreviewEarlier]) -> Option<String> {
@@ -891,6 +913,9 @@ pub fn preview_comment_for(p: Option<&Preview>, marker: &str, teardown: Option<&
             }
             if let Some(block) = page_checks(e) {
                 out.push_str(&block);
+            }
+            if let Some(line) = browser_checks_line(&e.browser_checks) {
+                out.push_str(&line);
             }
             if let Some(line) = earlier_line(&e.earlier) {
                 out.push_str(&line);
@@ -1102,6 +1127,7 @@ mod preview_tests {
             screenshot_url: None,
             expires_at: None,
             earlier: Vec::new(),
+            browser_checks: Vec::new(),
             visual_change: None,
             page_speed: None,
             page_health: None,
@@ -1138,6 +1164,13 @@ mod preview_tests {
         let earlier = |url: &str| crate::model::PreviewEarlier { service: "web".into(), head: "cs_1a2b3c4d5e6f".into(), url: url.into(), own_data: true };
         assert_eq!(earlier_line(&[earlier("https://web-1a2b3c4d5e-pr7-shop.preview.roll.site")]).as_deref(), Some("\nEarlier pushes: [web at `1a2b3c4d5e`](https://web-1a2b3c4d5e-pr7-shop.preview.roll.site) (on its own data).\n"));
         assert_eq!(earlier_line(&[earlier("javascript:alert(1)"), earlier("https://x/a)b")]), None, "only plain links");
+        let bc = |name: &str, state: &str| crate::model::PreviewBrowserCheck { service: "web".into(), name: name.into(), state: state.into() };
+        assert_eq!(
+            browser_checks_line(&[bc("checkout`](x)", "failed"), bc("home", "passed"), bc("search", "pending")]).as_deref(),
+            Some("Production's browser checks on this head: **1 failed** (`web: checkoutx`), 1 passed, 1 running.\n\n"),
+            "a name can't close its code span or add a link"
+        );
+        assert_eq!(browser_checks_line(&[]), None);
         let v = |percent: f64| crate::model::PreviewVisualChange { since: "cs_1a2b3c4d5e6f".into(), percent, phone_percent: None };
         assert_eq!(visual_line(&v(12.34)), "The page changed 12.3% since `1a2b3c4d5e` (its share of pixels).\n\n");
         assert_eq!(visual_line(&v(0.0)), "The page looks the same as at `1a2b3c4d5e`.\n\n");

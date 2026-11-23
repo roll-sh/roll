@@ -814,12 +814,8 @@ export const accessApi = {
   /** The live tokens that need attention, each with its findings and their fixes. */
   checkup: () => call<Checkup[]>("GET", "/v1/access/checkup"),
   activity: (days = 7) => call<Activity>("GET", `/v1/access/activity?days=${days}`),
-  /** The newest `n` alerts, newest first (the feed answers oldest first after a place). */
-  latestAlerts: async (n = 20) => {
-    const head = await call<{ next: number }>("GET", "/v1/access/alerts?latest=1");
-    const page = await call<{ events: Alert[] }>("GET", `/v1/access/alerts?after=${Math.max(0, head.next - n)}&limit=${n}`);
-    return page.events.slice().reverse();
-  },
+  /** The caller's newest `n` alerts, newest first (`?last=`: a person's are their own). */
+  latestAlerts: async (n = 20) => (await call<{ events: Alert[] }>("GET", `/v1/access/alerts?last=${n}`)).events.slice().reverse(),
   /** The networks it's been used from (/24s and /48s), newest first. */
   networks: (id: string) => call<{ network: string; first_at: number; last_at: number }[]>("GET", `${token(id)}/networks`),
   /** What an agent connected with this token is offered over MCP (`tools/list`, `prompts/list`). */

@@ -348,6 +348,10 @@ pub struct PreviewEnvironment {
     /// Earlier pushes still reachable (newest first): the service, the changeset it runs, its URL.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub earlier: Vec<PreviewEarlier>,
+    /// Production's browser checks on this head: each one's service, name and state
+    /// (`pending`, `passed`, `failed`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub browser_checks: Vec<PreviewBrowserCheck>,
     /// How much the first service's page changed since the screenshot at an earlier head.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visual_change: Option<PreviewVisualChange>,
@@ -664,6 +668,13 @@ pub struct PreviewVisualChange {
     /// The same at a phone's width, when both screenshots had one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phone_percent: Option<f64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewBrowserCheck {
+    pub service: String,
+    pub name: String,
+    pub state: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -26,6 +26,13 @@ CREATE TABLE IF NOT EXISTS event_marks (
 /// What happened.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
+    /// Stored values written: one event per change (its audit row), naming the keys whose value
+    /// was added, changed, linked or rotated, their new versions and how (`via`). A change that
+    /// only edits comments, tags or expiry isn't one.
+    SecretChanged,
+    /// A change that only deleted keys (one that also wrote values is `secret.changed`, its
+    /// deleted keys under `deleted`).
+    SecretDeleted,
     /// A stored value turned up in a roll code repository (a change or a scan), or a placeholder
     /// in pushed code (GitHub's secret scanning).
     SecretLeaked,
@@ -33,6 +40,9 @@ pub enum Kind {
     ScanFinding,
     /// A managed key's scheduled rotation failed, once per failing run.
     RotationFailed,
+    /// A rotation worked, scheduled or `--now`: a managed key's new version, or a live link's
+    /// resource credential reset.
+    RotationSucceeded,
     /// A change request or a secret request opened.
     RequestPending,
     /// A change request approved, rejected or closed; a secret request answered or cancelled.
@@ -45,6 +55,9 @@ pub enum Kind {
     PlaceholderWrongConsumer,
     PlaceholderWrongHost,
     ProductionUnprotected,
+    /// An environment's protection or approvals, or a folder's change policy, changed
+    /// (`production.unprotected` instead when that's what it did).
+    AccessChanged,
     /// A standard environment deleted (kept for the recovery window), or recovered within it.
     EnvDeleted,
     EnvRecovered,
@@ -53,9 +66,12 @@ pub enum Kind {
 }
 
 pub const KINDS: &[Kind] = &[
+    Kind::SecretChanged,
+    Kind::SecretDeleted,
     Kind::SecretLeaked,
     Kind::ScanFinding,
     Kind::RotationFailed,
+    Kind::RotationSucceeded,
     Kind::RequestPending,
     Kind::RequestDecided,
     Kind::SyncFailed,
@@ -65,6 +81,7 @@ pub const KINDS: &[Kind] = &[
     Kind::PlaceholderWrongConsumer,
     Kind::PlaceholderWrongHost,
     Kind::ProductionUnprotected,
+    Kind::AccessChanged,
     Kind::EnvDeleted,
     Kind::EnvRecovered,
     Kind::ProjectDeleted,
@@ -74,9 +91,12 @@ pub const KINDS: &[Kind] = &[
 impl Kind {
     pub fn as_str(self) -> &'static str {
         match self {
+            Kind::SecretChanged => "secret.changed",
+            Kind::SecretDeleted => "secret.deleted",
             Kind::SecretLeaked => "secret.leaked",
             Kind::ScanFinding => "scan.finding",
             Kind::RotationFailed => "rotation.failed",
+            Kind::RotationSucceeded => "rotation.succeeded",
             Kind::RequestPending => "request.pending",
             Kind::RequestDecided => "request.decided",
             Kind::SyncFailed => "sync.failed",
@@ -86,6 +106,7 @@ impl Kind {
             Kind::PlaceholderWrongConsumer => "placeholder.wrong_consumer",
             Kind::PlaceholderWrongHost => "placeholder.wrong_host",
             Kind::ProductionUnprotected => "production.unprotected",
+            Kind::AccessChanged => "access.changed",
             Kind::EnvDeleted => "env.deleted",
             Kind::EnvRecovered => "env.recovered",
             Kind::ProjectDeleted => "project.deleted",

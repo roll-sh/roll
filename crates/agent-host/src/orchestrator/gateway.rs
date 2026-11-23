@@ -80,6 +80,7 @@ impl Host {
             None => Some(spawn_watcher(self.me.clone(), gw.clone())),
         };
         let hosted = Hosted { gateway: gw, stored, refs, watcher };
+        hosted.gateway.refuse_keys(hosted.refused());
         let run = hosted.gateway.apply(hosted.stored.settings.clone(), hosted.keys()).await;
         tracing::info!("the gateway is {}", describe(&run));
         *self.gateway.live.lock().unwrap() = Some(hosted.clone());
@@ -113,7 +114,7 @@ impl Host {
             }
             KeyChange::Set { sealed } => {
                 if spec.key_ref.is_some() {
-                    return Err(Fail::Invalid(format!("{upstream}'s key is read from 1Password: clear the reference to seal one")));
+                    return Err(Fail::Invalid(format!("{upstream}'s key is a reference: clear it to seal one")));
                 }
                 let opened = self.seal.open_with(&gateway::upstream_key_context(upstream), &sealed).map_err(Fail::Invalid)?;
                 stored.keys.insert(upstream.to_string(), zeroize::Zeroizing::new(opened.expose().to_string()));
@@ -121,6 +122,31 @@ impl Host {
         }
         self.store.put_setting(gateway::SETTING, &stored)?;
         self.gateway_apply(stored).await?;
+        self.publish_info().await;
+        Ok(Reply::Ok)
+    }
+
+    /// `gateway.upstream_key`: an upstream's `roll://` key from roll's relay, or why roll secrets
+    /// won't give it. Kept in memory only; applied at once (a refusal also bars the upstream's
+    /// provider), then `hello`.
+    pub(crate) async fn gateway_upstream_key(&self, upstream: &str, key: RefKey) -> Res<Reply> {
+        let _guard = self.gateway.changing.lock().await;
+        let mut hosted = self.hosted_or_404()?;
+        let reference = match hosted.stored.settings.upstream(upstream) {
+            Some(u) if u.roll_ref().is_some() => u.key_ref.clone().unwrap_or_default(),
+            _ => return Err(Fail::NotFound(format!("upstream {upstream} with a roll:// key"))),
+        };
+        let resolved = match key {
+            RefKey::Set { sealed } => {
+                let opened = self.seal.open_with(&gateway::upstream_ref_context(upstream), &sealed).map_err(Fail::Invalid)?;
+                gateway::Resolved { reference, value: Ok(opened), refused: false }
+            }
+            RefKey::Refused { reason } => gateway::Resolved { reference, value: Err(format!("roll secrets: {}", reason.chars().take(500).collect::<String>())), refused: true },
+        };
+        hosted.refs.insert(upstream.to_string(), resolved);
+        hosted.gateway.refuse_keys(hosted.refused());
+        hosted.gateway.apply(hosted.stored.settings.clone(), hosted.keys()).await;
+        *self.gateway.live.lock().unwrap() = Some(hosted);
         self.publish_info().await;
         Ok(Reply::Ok)
     }

@@ -29,8 +29,9 @@ enum Copied {
     /// still may: as it was made.
     Keep,
     /// The values as their copier reads them now: the variables it was made with
-    /// (`secrets_from.keys`) set, and any gone from the environment since unset.
-    Fresh(EnvChange),
+    /// (`secrets_from.keys`) set, and any gone from the environment since, or that don't resolve
+    /// for its copier, unset; and which didn't resolve and why (names only), for its status.
+    Fresh(EnvChange, Option<String>),
     /// The copier may no longer reveal them (why, without a value): those variables unset, or
     /// `None` for a sandbox made before roll kept which they are.
     TakeOut(String, Option<EnvChange>),
@@ -38,12 +39,15 @@ enum Copied {
     Unsure(String),
 }
 
-/// The change that makes a sandbox's copied variables `values` (as their copier read them now):
-/// only the ones it was made with, each one line of at most 4096 characters (as at create); any
-/// other is unset.
-fn fresh(keys: &[String], values: Vec<(String, String)>) -> EnvChange {
+/// The change that makes a sandbox's copied variables what their copier read now: only the ones
+/// it was made with, each one line of at most 4096 characters (as at create); any other is unset.
+/// And of the ones it was made with, those that didn't resolve (a key it never copied isn't
+/// named, nor does it stop the sandbox), as its status says them.
+fn fresh(keys: &[String], read: crate::Reread) -> (EnvChange, Option<String>) {
+    let unresolved: Vec<String> = read.unresolved.iter().filter(|(k, _)| keys.contains(k)).map(|(k, why)| format!("{k} ({why})")).collect();
+    let unresolved = (!unresolved.is_empty()).then(|| format!("left unset, as they don't resolve for whoever copied them: {}", unresolved.join("; ")));
     let mut set = BTreeMap::new();
-    for (k, v) in values {
+    for (k, v) in read.values {
         if !keys.contains(&k) {
             continue;
         }
@@ -54,7 +58,7 @@ fn fresh(keys: &[String], values: Vec<(String, String)>) -> EnvChange {
         set.insert(k, v);
     }
     let unset = keys.iter().filter(|k| !set.contains_key(*k)).cloned().collect();
-    EnvChange { set, unset }
+    (EnvChange { set, unset }, unresolved)
 }
 
 /// What a backend state means for the sandbox: its status and error. A state in transition
@@ -356,9 +360,13 @@ impl Code {
         if let Some(from) = &s.secrets_from {
             spec.env.retain(|k, _| !from.keys.contains(k));
         }
+        let mut unresolved = None;
         match self.copied(s).await {
             Copied::Keep => {}
-            Copied::Fresh(change) => change.apply(&mut spec.env),
+            Copied::Fresh(change, why) => {
+                change.apply(&mut spec.env);
+                unresolved = Some(why);
+            }
             Copied::Unsure(why) => {
                 self.note(s, SandboxStatus::Creating, Some(why), None, false).await;
                 return None;
@@ -372,6 +380,9 @@ impl Code {
         match b.create(&spec).await {
             Ok(id) => {
                 tracing::info!(sandbox = %s.id, backend = %s.backend, id = %id, "created a sandbox");
+                if let Some(why) = unresolved {
+                    self.secrets_unset(s, why.as_deref());
+                }
                 self.note(s, SandboxStatus::Creating, None, Some(&id), true).await;
                 Some(id)
             }
@@ -404,7 +415,10 @@ impl Code {
             };
         };
         match secrets.reveal_as(by, &from.project, &from.environment, &format!("sandbox:{}", s.id)).await {
-            Ok(values) => Copied::Fresh(fresh(&from.keys, values)),
+            Ok(read) => {
+                let (change, unresolved) = fresh(&from.keys, read);
+                Copied::Fresh(change, unresolved)
+            }
             Err(e) => refused(e).map_or_else(Copied::Unsure, |why| Copied::TakeOut(why, Some(EnvChange { set: BTreeMap::new(), unset: from.keys.clone() }))),
         }
     }
@@ -414,19 +428,20 @@ impl Code {
     /// was made while its copier may, and isn't started once they may not; nor is one that doesn't
     /// say which variables they are (made before that was kept).
     async fn start_sandbox(&self, b: &dyn SandboxBackend, s: &SandboxRow, backend_id: &str) -> Result<(), BackendError> {
-        let (change, why) = match self.copied(s).await {
+        let (change, why, unresolved) = match self.copied(s).await {
             Copied::Keep => return b.start(backend_id).await,
             Copied::Unsure(why) => return Err(BackendError::Transient(why)),
-            Copied::Fresh(change) => (change, None),
-            Copied::TakeOut(why, Some(change)) => (change, Some(why)),
+            Copied::Fresh(change, unresolved) => (change, None, unresolved),
+            Copied::TakeOut(why, Some(change)) => (change, Some(why), None),
             Copied::TakeOut(why, None) => {
                 return Err(BackendError::Permanent(format!("{why}; it was made before roll kept which variables they are, so it isn't started: delete it and make another")));
             }
         };
         let spec = SandboxSpec { id: s.id.clone(), name: s.name.clone(), size: s.size.clone(), env: BTreeMap::new() };
         if b.start_with(backend_id, &spec, &change).await? {
-            if let Some(why) = why {
-                self.secrets_taken_out(s, &why);
+            match why {
+                Some(why) => self.secrets_taken_out(s, &why),
+                None => self.secrets_unset(s, unresolved.as_deref()),
             }
             return Ok(());
         }
@@ -441,6 +456,20 @@ impl Code {
         tracing::info!(sandbox = %s.id, by = s.secrets_by.as_deref().unwrap_or_default(), "{why}");
         if let Err(e) = store::secrets_dropped(self.db.sql(), &s.id, why) {
             tracing::warn!(sandbox = %s.id, error = %e, "recording that a sandbox's copied secrets were taken out");
+        }
+    }
+
+    /// Record which copied variables it started without because they didn't resolve, and why (no
+    /// value in it); `None` once they all do.
+    fn secrets_unset(&self, s: &SandboxRow, why: Option<&str>) {
+        if s.secrets_unset.as_deref() == why {
+            return;
+        }
+        if let Some(why) = why {
+            tracing::info!(sandbox = %s.id, "{why}");
+        }
+        if let Err(e) = store::secrets_unset(self.db.sql(), &s.id, why) {
+            tracing::warn!(sandbox = %s.id, error = %e, "recording a sandbox's copied variables that don't resolve");
         }
     }
 

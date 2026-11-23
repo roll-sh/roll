@@ -335,6 +335,27 @@ async fn a_visual_change_waits_for_someone_to_accept_it_at_each_head() {
     assert!(b.api_unread && b.api.is_none(), "{b:?}");
 }
 
+/// Production's browser checks on a preview's head: read after it's up (never holding it), on the
+/// record and reported to the change, until each has run.
+#[tokio::test]
+async fn production_browser_checks_on_a_preview_are_read_after_its_head_is_up() {
+    use roll_previews::ports::BrowserCheckResult;
+    let e = env(json!({ "enabled": true }));
+    let check = |passed, error: Option<&str>| BrowserCheckResult { name: "checkout".into(), passed, error: error.map(str::to_string) };
+    e.apps.browser.lock().insert("web".into(), vec![check(None, None)]);
+    e.code.open(change("chg_bc", 6));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_bc").unwrap().unwrap();
+    assert_eq!(p.state, State::Ready, "not held up");
+    e.engine.pass().await.unwrap();
+    let state = |e: &Env| e.engine.store.preview(&p.id).unwrap().browser_checks.iter().map(|c| (c.name.clone(), c.state, c.error.clone())).collect::<Vec<_>>();
+    assert_eq!(state(&e), [("checkout".to_string(), roll_previews::CheckState::Pending, None)]);
+    e.apps.browser.lock().insert("web".into(), vec![check(Some(false), Some("Timeout 5000ms exceeded\u{1b}[31m"))]);
+    e.engine.pass().await.unwrap();
+    assert_eq!(state(&e), [("checkout".to_string(), roll_previews::CheckState::Failed, Some("Timeout 5000ms exceeded\\u{1b}[31m".to_string()))], "printable");
+    assert!(e.code.last_report("chg_bc").browser_checks.iter().any(|c| c.name == "checkout" && c.state == roll_previews::CheckState::Failed), "the change hears it");
+}
+
 /// What happened to previews, for followers: made, up, gone, in the order it happened, from any
 /// point (`latest`: from now on).
 #[tokio::test]
