@@ -61,11 +61,13 @@ try {
     }).observe({ type: 'layout-shift', buffered: true })
   })
   page = await context.newPage()
-  // Its weight: every response's body as the page got it.
-  page.on('response', (r) => {
+  // Its weight: every response's encoded body as the network carried it (never a stream's, which
+  // doesn't end, and never held in memory).
+  page.on('requestfinished', (req) => {
     requests += 1
-    pending.push(r.body().then((b) => (bytes += b.length), () => {}))
+    pending.push(req.sizes().then((s) => (bytes += s.responseBodySize), () => {}))
   })
+  page.on('requestfailed', () => (requests += 1))
   const resp = await page.goto(url, { timeout, waitUntil: 'load' })
   status = resp ? resp.status() : null
   const want = Number(env.ROLL_CHECK_STATUS) || 0
@@ -74,7 +76,8 @@ try {
   if (script.trim()) await new AsyncFunction('page', 'context', 'url', script)(page, context, url)
   // A moment for the last paint to be the largest, then what the page measured.
   await page.waitForTimeout(500)
-  await Promise.all(pending)
+  // Sizes of what finished, two seconds at most.
+  await Promise.race([Promise.all(pending), new Promise((r) => setTimeout(r, 2000))])
   const m = await page.evaluate(() => ({ lcp: window.__roll?.lcp || 0, cls: window.__roll?.cls || 0, ttfb: performance.getEntriesByType('navigation')[0]?.responseStart || 0 }))
   metrics = { lcp_ms: Math.round(m.lcp), cls: Math.round(m.cls * 1000) / 1000, ttfb_ms: Math.round(m.ttfb), kb: Math.round(bytes / 1024), requests }
   const over = [
@@ -84,9 +87,10 @@ try {
     ['kb', 'its weight', ' KiB'],
     ['requests', 'its requests', ''],
   ].filter(([k]) => typeof budgets[k] === 'number' && metrics[k] > budgets[k])
-  if (over.length) throw new Error('over its budget: ' + over.map(([k, name, unit]) => `${name} ${metrics[k]}${unit} > ${budgets[k]}${unit}`).join(', '))
   await context.tracing.stop()
-  say({ ok: true, status, metrics })
+  // Over a budget is its own verdict: the page answered and the script passed.
+  const over_budget = over.length ? 'over its budget: ' + over.map(([k, name, unit]) => `${name} ${metrics[k]}${unit} > ${budgets[k]}${unit}`).join(', ') : undefined
+  say({ ok: true, status, metrics, over_budget })
 } catch (e) {
   code = 1
   // Its first line, and what it was waiting for from Playwright's call log.

@@ -1742,12 +1742,12 @@ async fn a_browser_check_runs_in_chromium() {
     assert!(st == StatusCode::OK && png.starts_with(b"\x89PNG"), "{st} {} bytes", png.len());
     let (st, zip) = file("trace").await;
     assert!(st == StatusCode::OK && zip.starts_with(b"PK"), "{st} {} bytes", zip.len());
-    // A budget the page can't meet fails it, saying which.
+    // A budget the page can't meet is its own verdict, saying which: never down.
     let mut over = check("await page.title()");
     over["checks"][0]["budgets"] = json!({"lcp_ms": 1});
     assert_eq!(call(&w.api, "PUT", &base, Some(over), "application/json", None).await.0, StatusCode::OK);
-    let failed = pass(2).await;
-    assert!(failed["error"].as_str().is_some_and(|e| e.contains("over its budget: LCP")), "{failed}");
+    let over = pass(2).await;
+    assert!(over["up"] == true && over["over_budget"].as_str().is_some_and(|e| e.contains("over its budget: LCP")), "{over}");
     assert_eq!(delete_for_good(&w.api, &id).await.0, StatusCode::NO_CONTENT);
     let _ = std::process::Command::new("docker").args(["rmi", &format!("roll-apps-{id}:browser-check-{}", apps_control::browser::PLAYWRIGHT.replace('.', "-"))]).output();
     w.apps.shutdown().await;

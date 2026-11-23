@@ -2322,8 +2322,10 @@ async fn requests_are_access_lines_filtered_by_status() {
     let line: Value = serde_json::from_str(denied[0]["text"].as_str().unwrap()).unwrap();
     assert_eq!((line["by"].as_str(), line["status"].as_u64(), line["ua"].as_str(), line["host"].as_str()), (Some("firewall"), Some(403), Some("scanner/1.0"), Some(host.as_str())), "{line}");
     assert_eq!(call(&w.api, "GET", &format!("{base}&by=any"), None).await.1.as_array().unwrap().len(), 1, "the app's own answers have no `by`");
-    let (_, m) = call(&w.api, "GET", &format!("{env}/metrics?minutes=5"), None).await;
-    assert_eq!(m["requests"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).sum::<f64>(), 3.0, "{m}");
+    // Metered as they're counted: read until all three are.
+    let sum = |m: &Value| m["requests"].as_array().map_or(0.0, |a| a.iter().filter_map(|v| v.as_f64()).sum::<f64>());
+    let m = get_until(&w.api, &format!("{env}/metrics?minutes=5"), |m| sum(m) >= 3.0).await;
+    assert_eq!(sum(&m), 3.0, "{m}");
 }
 
 /// Anomaly alerts: the last hour against the same hour of the week before (Vercel's anomaly
@@ -7679,7 +7681,7 @@ async fn a_repos_submodules_come_from_roll_code_and_from_elsewhere() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_trees_edge_settings_only_tighten_its_environment() {
     let w = world().await;
-    let file = "[app]\nheaders = [{ set = { \"x-from-file\" = \"1\", \"x-frame-options\" = \"SAMEORIGIN\" } }]\n[app.environments.production]\nfirewall = [{ action = \"deny\", path = \"/admin/*\" }]\nrate_limit = { per_minute = 1000, burst = 3 }\n";
+    let file = "[app]\nheaders = [{ set = { \"x-from-file\" = \"1\", \"x-frame-options\" = \"SAMEORIGIN\" } }]\n[app.environments.production]\nfirewall = [{ action = \"deny\", path = \"/admin/*\" }]\nrate_limit = { per_minute = 60, burst = 3 }\n";
     for (k, v) in [("package.json", r#"{"name":"site","scripts":{"start":"node server.js"}}"#), ("server.js", "x"), ("roll.toml", file)] {
         w.code.files.lock().insert(k.to_string(), v.to_string());
     }
@@ -9262,7 +9264,9 @@ async fn a_closed_environment_uses_its_keys_without_seeing_them() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     let tail: String = bundle.lines().rev().take(4).collect::<Vec<_>>().join(" | ");
-    assert!(bundle.contains("FAKECA3") && !bundle.contains("FAKECA2"), "its last lines: {tail}");
+    // The new CA, beside the one its proxy serves now if that's switched meanwhile (its instances
+    // trust both until the new one is served).
+    assert!(bundle.contains("FAKECA3"), "its last lines: {tail}");
     assert_eq!((minted() > minted_before, call(&w.api, "GET", &format!("{base}/staging"), None).await.1["active"]["id"].clone()), (true, was), "a placeholder made again, no deploy");
     assert!(call(&w.api, "DELETE", &format!("{base}/staging"), None).await.0.is_success());
     assert!(vault.0.lock().contains(&format!("end {}/staging", w.project)), "{:?}", vault.0.lock());

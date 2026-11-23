@@ -31,6 +31,8 @@ pub struct Run {
     pub running: bool,
     /// A preview's run: the deployment it's of ([`crate::browser`]'s preview checks).
     pub deployment: Option<String>,
+    /// A browser check's last pass that was over its budgets: how.
+    pub over_budget: Option<String>,
 }
 
 /// Whether an answer passes: the status it expects (2xx or 3xx unless it says), and its text.
@@ -84,8 +86,12 @@ impl Apps {
             // A browser check: its page in Chromium, then its script ([`crate::browser`]).
             Some(_) => {
                 let at = format!("{}{}", url.trim_end_matches('/'), c.path);
-                match self.run_browser_check(service, env, &at, c, &tokio_util::sync::CancellationToken::new()).await {
-                    Ok(s) => (s, Ok(())),
+                // Over a budget isn't down: the page answered. It's said on the check's state.
+                match self.run_browser_check(service, env, &at, c, &tokio_util::sync::CancellationToken::new(), None).await {
+                    Ok(p) => {
+                        self.check_states.lock().entry(key.clone()).or_default().over_budget = p.over_budget;
+                        (p.status, Ok(()))
+                    }
                     Err(e) => (None, Err(e)),
                 }
             }
@@ -157,7 +163,7 @@ impl Apps {
                 let tried = r.status.is_some() || r.error.is_some();
                 let failure_at = self.check_failures.lock().get(&format!("{}/{}", env_key(service, env), c.name)).copied();
                 let metrics = self.check_metrics.lock().get(&format!("{}/{}", env_key(service, env), c.name)).cloned();
-                CheckState { name: c.name.clone(), up: tried.then_some(r.down_since.is_none()), failures: r.failures, last_at: tried.then_some(r.last_at), status: r.status, ms: tried.then_some(r.ms), error: r.error, down_since: r.down_since, failure_at, deployment: r.deployment, metrics }
+                CheckState { name: c.name.clone(), up: tried.then_some(r.down_since.is_none()), failures: r.failures, last_at: tried.then_some(r.last_at), status: r.status, ms: tried.then_some(r.ms), error: r.error, down_since: r.down_since, failure_at, deployment: r.deployment, metrics, over_budget: r.over_budget }
             })
             .collect()
     }

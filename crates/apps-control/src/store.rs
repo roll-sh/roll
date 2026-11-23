@@ -3036,6 +3036,11 @@ impl Store {
         Ok(())
     }
 
+    pub fn drop_provenance(&self, image: &str) -> Result<()> {
+        self.db.execute("DELETE FROM image_provenance WHERE image = ?", [image])?;
+        Ok(())
+    }
+
     pub fn provenance(&self, image: &str) -> Result<Option<String>> {
         Ok(self.db.query_row("SELECT envelope FROM image_provenance WHERE image = ?", [image], |r| r.get(0)).optional()?)
     }
