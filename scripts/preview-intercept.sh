@@ -132,7 +132,12 @@ sock, ca, port, auth, path = sys.argv[1:]
 s = socket.socket(socket.AF_UNIX); s.connect(sock)
 s.sendall(f"echo.localhost:{port}\n".encode())
 ctx = ssl.create_default_context(cafile=ca)
-t = ctx.wrap_socket(s, server_hostname="echo.localhost")
+try:
+    t = ctx.wrap_socket(s, server_hostname="echo.localhost")
+except (ssl.SSLError, OSError) as e:
+    # Refused before TLS: a CA that ended (its bound hosts shrank) until the new one is minted.
+    print("cut " + type(e).__name__)
+    sys.exit(0)
 t.sendall(f"GET {path} HTTP/1.1\r\nHost: echo.localhost\r\nAuthorization: {auth}\r\nConnection: close\r\n\r\n".encode())
 out = b""
 try:
@@ -167,8 +172,10 @@ say "a host that echoes the key back: roll secrets' scrub stops it, and the plac
 ECHOED=$(through "Bearer $PLACEHOLDER" /echo)
 case "$ECHOED" in *"$KEY_VALUE"*) echo "an echoed key reached the preview's service"; exit 1;; esac
 case "$ECHOED" in 502*|cut*|"200 ") ;; *) echo "an echo should be stopped (a 502, or the connection cut), not: ${ECHOED:0:120}"; exit 1;; esac
+# Ending the placeholder shrinks the key's bound hosts, which ends the CA: connections are cut
+# until the converge it kicks mints a new one (ca.pem is read again each time), then 403.
 AFTER=""
-for _ in $(seq 1 20); do
+for _ in $(seq 1 120); do
   AFTER=$(through "Bearer $PLACEHOLDER")
   case "$AFTER" in 403*) break;; esac
   sleep 0.5
