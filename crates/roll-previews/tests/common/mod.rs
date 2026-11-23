@@ -497,6 +497,8 @@ impl Apps for FakeApps {
             .iter()
             .cloned()
             .chain(opts.browsers.iter().filter(|_| !self.no_browsers.load(Ordering::SeqCst)).map(|b| format!("browser:{b}")))
+            // A Storybook with two stories.
+            .chain(opts.stories.iter().flat_map(|_| ["story:button--primary".to_string(), "story:button--secondary".to_string()]))
             .map(|path| roll_previews::ports::PageShot { path, png: png.clone(), errors: 0, report: Default::default() })
             .collect();
         self.crops_asked.lock().extend(opts.crops.iter().map(|c| c.note.clone()));
