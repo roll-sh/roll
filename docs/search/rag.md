@@ -1,8 +1,9 @@
 # Conversational search and RAG: design
 
-`## Next` item 11 in [README.md](README.md). Status: design, nothing built. Depends on three open
-PRs, marked where it matters: browser keys and CORS (#358), E5 run by roll (#563), and one memory
-account per request (#549).
+`## Next` item 11 in [README.md](README.md). Status: phase 1 built (streamed inference, the
+Playground's Chat view); phases 2 and 3 are design. Depends on three open PRs, marked where it
+matters: browser keys and CORS (#358), E5 run by roll (#563), and one memory account per request
+(#549).
 
 ## Where roll is today
 
@@ -13,9 +14,11 @@ account per request (#549).
   streaming only, as in Elasticsearch (`infer` refuses it without `_stream`). Unified chat streams
   already read the provider's token usage (`services/openai.rs` sends
   `stream_options.include_usage`; `services/anthropic.rs` reads `input_tokens`/`output_tokens`).
-- **Streaming isn't real.** `stream` collects every event into a `Vec<Value>` and answers one
-  `Reply::Raw` body (`mod.rs`, `sse`); `Reply` has no streaming variant
-  (`crates/search-es/src/rest/mod.rs`). compatibility.md, "Inference", lists this difference.
+- **Streaming is real (phase 1).** `Reply::Stream` carries a body made as it goes
+  (`rest::ByteStream`), `search-server` sends it chunked, and the console route passes it through.
+  `xpack/inference/stream.rs` reads the upstream piece by piece, bounded (16 MiB a stream, 1 MiB an
+  event, `roll.inference.max_timeout` overall), and a client that goes away closes the upstream
+  request. Before phase 1, `stream` collected every event and answered one body.
 - **Retrieval is served.** `semantic_text`, the `semantic` query, the semantic highlighter (it
   returns the best chunks, `xpack/inference/highlight.rs`), and `rrf`/`linear` with the simplified
   `query`/`fields` form (`xpack/inference/retrievers.rs`).
@@ -32,10 +35,11 @@ account per request (#549).
   texts a request, each charged to the key's rate limits.
 - **Provider keys come from roll secrets.** `POST /v1/search/clusters/{id}/inference/secrets`
   (`crates/rolld/src/secrets/syncs/search.rs`, `roll search inference create --secret`).
-- **The Playground compares retrieval only** (`apps/dashboard/src/lib/search-playground.ts`,
-  `components/search/playground.tsx`). It has keyword, semantic, hybrid and raw modes. It copies a
-  request as curl, Python or JavaScript (`copyAs`), and it runs requests through
-  `/v1/search/clusters/{id}/request` (`lib/search-api.ts`), which answers JSON.
+- **The Playground compares retrieval and chats (phase 1)** (`apps/dashboard/src/lib/search-playground.ts`,
+  `lib/search-chat.ts`, `components/search/playground.tsx`, `playground-chat.tsx`). It has keyword,
+  semantic, hybrid and raw modes and copies a request as curl, Python or JavaScript (`copyAs`); its
+  Chat view runs section 6's flow over composed calls through `/v1/search/clusters/{id}/request`
+  (`lib/search-api.ts`), which answers JSON, or passes a stream through.
 - **The MCP search tools are routes** (`crates/roll-mcp/src/tools.rs`, `search_query` and the rest).
   None of them generates.
 - **The RAG guide does it by hand** ([guides/rag.md](guides/rag.md)). A script searches, builds a

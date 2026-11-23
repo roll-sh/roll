@@ -1282,8 +1282,22 @@ authorized by the one security evaluator (`monitor_inference`, `manage_inference
 parsed as untrusted data: shapes are checked (a rerank index outside the inputs, a missing field
 or a wrong embedding count fail the call).
 
-Differences: streamed answers are read whole before they're sent (the same events, all at the
-end); `rate_limit.requests_per_minute` is enforced per node as Elasticsearch enforces it (a
+Streamed answers (`…/_stream`) go out as they come, each read of the upstream becoming the
+events Elasticsearch makes of it (a completion's text deltas together in one event, a chat
+completion's chunks one event each), and a failure after the stream started ends it with
+`event: error` and no `[DONE]`, in Elasticsearch's error shape for completions and the unified
+API's for chat completions. Checked against a recording of a private Elasticsearch 9.5.5 whose
+mock answered piece by piece, failed with an error chunk and cut its connection
+(`tests/inference_services/streams.rs`). A client that goes away closes the upstream request.
+
+Differences: a stream may hold at most 16 MiB, one event at most 1 MiB, each read must come
+within the request's `timeout` of the one before, and the stream must end within the node's
+`roll.inference.max_timeout` (the request's `timeout`, as in Elasticsearch, otherwise covers only
+the wait for the upstream's status); past any of these it ends with `event: error`, where
+Elasticsearch reads on without a bound. While it streams, the request keeps its cluster's
+concurrency permit (and a browser key's slot), 1 MiB of the cluster's in-flight bytes for its
+buffer, and its latency in the metrics runs to the stream's end. A connection cut inside a body with a `Content-Length`
+reports roll's HTTP client's message. `rate_limit.requests_per_minute` is enforced per node as Elasticsearch enforces it (a
 one-token bucket per cluster and endpoint, requests waiting their turn, timing out when the wait
 would outlast them; a cluster runs on one node at a time, so it is the cluster's limit), and the
 service's own 429s are retried at most twice; a `custom` endpoint's `_update` that changes a

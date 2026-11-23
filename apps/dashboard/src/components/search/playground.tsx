@@ -1,4 +1,5 @@
 import { ChevronRight, Columns2, Search } from "lucide-react";
+import type { SourceFields } from "@/lib/search-chat";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { esJson, esRaw, type Method, type SearchCluster } from "@/lib/search-api";
 import { mappingFields } from "@/lib/search-console";
@@ -36,13 +37,16 @@ import {
 import { useMarkState } from "../mark-state";
 import { Segmented } from "../redis/shared";
 import { btn, input, Panel, primary, useCopy } from "../ui";
+import { Chat } from "./playground-chat";
 import { RequestEditor } from "./request-editor";
 
 /**
  * The Playground tab: one query against two configurations side by side (keyword, semantic,
  * hybrid or a raw body), each hit with its rank, score, passages, how it moved between A and B,
- * and its `_explain` tree; either side copies as curl, Python or JavaScript. Everything is a
- * `_search`, `_explain`, `_mapping` or `_inference` call through the console routes.
+ * and its `_explain` tree; either side copies as curl, Python or JavaScript. Its Chat view
+ * (`playground-chat.tsx`) answers questions from an index's hits through a `chat_completion`
+ * endpoint. Everything is a `_search`, `_explain`, `_mapping` or `_inference` call through the
+ * console routes.
  */
 
 interface Hit {
@@ -66,6 +70,7 @@ interface Target {
 }
 
 const SIDES = ["A", "B"] as const;
+type View = "compare" | "chat";
 const SIZES = [10, 20, 50];
 
 function message(e: unknown) {
@@ -85,6 +90,10 @@ export function Playground({ cluster, onOpenInference }: { cluster: SearchCluste
   const elastic = cluster.flavor !== "opensearch";
   const [targets, setTargets] = useState<Target[] | null>(null);
   const [endpoints, setEndpoints] = useState<string[]>([]);
+  const [chatEndpoints, setChatEndpoints] = useState<string[]>([]);
+  const [view, setView] = useState<View>("compare");
+  /** The Chat view's retrieval: hybrid with rrf where the mapping allows it. */
+  const [chatConfig, setChatConfig] = useState<Config | null>(null);
   const [listError, setListError] = useState<string | null>(null);
   const [index, setIndex] = useState("");
   const [offer, setOffer] = useState<Offer | null>(null);
@@ -113,7 +122,9 @@ export function Playground({ cluster, onOpenInference }: { cluster: SearchCluste
           ...ds.data_streams.map((d): Target => ({ name: d.name, kind: "data stream" })),
         ]);
         // Built-in endpoints need ML nodes, which roll doesn't run.
-        setEndpoints((inf?.endpoints ?? []).filter((e) => e.task_type === "text_embedding" && !e.inference_id.startsWith(".")).map((e) => e.inference_id));
+        const own = (inf?.endpoints ?? []).filter((e) => !e.inference_id.startsWith("."));
+        setEndpoints(own.filter((e) => e.task_type === "text_embedding").map((e) => e.inference_id));
+        setChatEndpoints(own.filter((e) => e.task_type === "chat_completion").map((e) => e.inference_id));
       },
       (e) => alive && setListError(message(e)),
     );
@@ -126,6 +137,7 @@ export function Playground({ cluster, onOpenInference }: { cluster: SearchCluste
   useEffect(() => {
     setOffer(null);
     setConfigs(null);
+    setChatConfig(null);
     setResults([null, null]);
     setMappingError(null);
     if (!index) return;
@@ -138,6 +150,7 @@ export function Playground({ cluster, onOpenInference }: { cluster: SearchCluste
         setOffer(o);
         setCompare(sem.length > 0);
         setConfigs([defaultConfig("keyword", o, sem), defaultConfig(sem.length ? "semantic" : "keyword", o, sem)]);
+        setChatConfig(defaultConfig(sem.length && o.text.length ? "hybrid" : sem.length ? "semantic" : "keyword", o, sem));
       },
       (e) => alive && setMappingError(message(e)),
     );
@@ -225,12 +238,13 @@ export function Playground({ cluster, onOpenInference }: { cluster: SearchCluste
   }, [results, compare]);
 
   const running = results.some((r) => r?.status === "running");
+  const chatting = view === "chat" && elastic;
 
   return (
     <div className="space-y-4">
       <Panel
         title="Playground"
-        aside={<span className="hidden text-[12px] text-subtle sm:inline">keyword, semantic and hybrid search side by side</span>}
+        aside={<span className="hidden text-[12px] text-subtle sm:inline">{chatting ? "answers from an index's hits, with citations" : "keyword, semantic and hybrid search side by side"}</span>}
       >
         <form
           className="flex flex-wrap items-center gap-2 px-5 py-4"
@@ -270,35 +284,49 @@ export function Playground({ cluster, onOpenInference }: { cluster: SearchCluste
               </optgroup>
             )}
           </select>
-          <label className={`${input} flex min-w-0 flex-1 basis-64 items-center gap-2`}>
-            <Search className="size-3.5 shrink-0 text-subtle" strokeWidth={1.5} />
-            <input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Type a query once; both sides search it"
-              aria-label="Query"
-              className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-subtle"
+          {elastic && (
+            <Segmented
+              value={view}
+              options={[
+                { label: "compare", value: "compare" },
+                { label: "chat", value: "chat" },
+              ]}
+              onChange={setView}
             />
-          </label>
-          <select value={size} onChange={(e) => setSize(Number(e.target.value))} className={`${input} font-mono text-[12px]`} aria-label="Hits per side">
-            {SIZES.map((s) => (
-              <option key={s} value={s}>
-                {s} hits
-              </option>
-            ))}
-          </select>
-          <button
-            type="button"
-            onClick={() => setCompare((c) => !c)}
-            aria-pressed={compare}
-            className={`${btn} ${compare ? "border-line-2 text-fg" : ""}`}
-            title="Compare two configurations side by side"
-          >
-            <Columns2 className="size-3.5" strokeWidth={1.5} /> Compare
-          </button>
-          <button type="submit" className={primary} disabled={!configs || !query.trim() || running}>
-            {running ? <span className="shimmer">Searching…</span> : "Search"}
-          </button>
+          )}
+          {!chatting && (
+            <>
+              <label className={`${input} flex min-w-0 flex-1 basis-64 items-center gap-2`}>
+                <Search className="size-3.5 shrink-0 text-subtle" strokeWidth={1.5} />
+                <input
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="Type a query once; both sides search it"
+                  aria-label="Query"
+                  className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-subtle"
+                />
+              </label>
+              <select value={size} onChange={(e) => setSize(Number(e.target.value))} className={`${input} font-mono text-[12px]`} aria-label="Hits per side">
+                {SIZES.map((s) => (
+                  <option key={s} value={s}>
+                    {s} hits
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={() => setCompare((c) => !c)}
+                aria-pressed={compare}
+                className={`${btn} ${compare ? "border-line-2 text-fg" : ""}`}
+                title="Compare two configurations side by side"
+              >
+                <Columns2 className="size-3.5" strokeWidth={1.5} /> Compare
+              </button>
+              <button type="submit" className={primary} disabled={!configs || !query.trim() || running}>
+                {running ? <span className="shimmer">Searching…</span> : "Search"}
+              </button>
+            </>
+          )}
         </form>
         {listError && <p className="border-t border-line px-5 py-3 text-[13px] text-danger">{listError}</p>}
       </Panel>
@@ -306,7 +334,7 @@ export function Playground({ cluster, onOpenInference }: { cluster: SearchCluste
       {!index ? (
         <Panel title="Nothing picked yet">
           <p className="px-5 py-6 text-[13px] text-muted">
-            Pick an index or data stream, type a query, and compare how keyword, semantic and hybrid search rank its documents.
+            Pick an index or data stream, type a query, and compare how keyword, semantic and hybrid search rank its documents{elastic ? ", or chat with them" : ""}.
             {targets && targets.length === 0 && " This cluster has no indices yet: import a file or create one in Indices."}
           </p>
         </Panel>
@@ -318,6 +346,17 @@ export function Playground({ cluster, onOpenInference }: { cluster: SearchCluste
         <p className="px-1 text-[13px] text-subtle">
           <span className="shimmer">Reading the mapping…</span>
         </p>
+      ) : chatting && chatConfig ? (
+        <Chat
+          cluster={cluster}
+          index={index}
+          cfg={chatConfig}
+          fields={chatFields(chatConfig, offer)}
+          settings={<ModeSettings cfg={chatConfig} offer={offer} targets={sem} cluster={cluster} onChange={setChatConfig} onRun={() => {}} onOpenInference={onOpenInference} />}
+          endpoints={chatEndpoints}
+          embed={embed}
+          onOpenInference={onOpenInference}
+        />
       ) : (
         <div className={`grid gap-4 ${compare ? "lg:grid-cols-2" : ""}`}>
           {sides.map((i) => (
@@ -540,6 +579,14 @@ function ModeSettings({
       )}
     </div>
   );
+}
+
+/** What the Chat view shows of a hit, and sends when it has no passages: its title field and
+ * the fields it searches. */
+function chatFields(cfg: Config, offer: Offer): SourceFields {
+  const fields = cfg.mode === "raw" ? offer.text : cfg.fields.length ? cfg.fields : offer.text;
+  const title = titleField(fields) ?? null;
+  return { title, text: [...fields.filter((f) => f !== title), ...(cfg.semantic?.kind === "semantic" ? [cfg.semantic.field] : [])] };
 }
 
 /** The field shown as a hit's title: a text field named like one, else the first text field. */

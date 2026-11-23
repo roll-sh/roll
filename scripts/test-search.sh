@@ -36,7 +36,9 @@ PATHS=(crates/search-* crates/snowball crates/pg-storage crates/roll-cluster cra
        docs/search/compatibility.md .github/workflows/search.yml tests/search
        apps/dashboard/src/lib/search-console.ts apps/dashboard/src/lib/search-docs.ts
        apps/dashboard/src/lib/search-console.test.ts apps/dashboard/src/lib/search-docs.test.ts
-       apps/dashboard/src/lib/search-playground.ts apps/dashboard/src/lib/search-playground.test.ts)
+       apps/dashboard/src/lib/search-playground.ts apps/dashboard/src/lib/search-playground.test.ts
+       apps/dashboard/src/lib/search-chat.ts apps/dashboard/src/lib/search-chat.test.ts
+       apps/dashboard/src/components/search/playground-chat.tsx apps/dashboard/src/components/search/playground-chat.test.tsx)
 STAMP=target/.test-search.hash
 
 force=0 unit_only=0
@@ -64,8 +66,10 @@ cargo test "${CRATES[@]}"
 # time) and run rolld with every product.
 cargo test -p roll-cli -p rolld
 
-# The dashboard's console completion, document helpers, playground requests and audit rows.
-pnpm --filter dashboard exec vitest run src/lib/search-console.test.ts src/lib/search-docs.test.ts src/lib/search-playground.test.ts src/lib/search-audit.test.ts
+# The dashboard's console completion, document helpers, playground requests, audit rows, and the
+# Playground's Chat (its prompt, citations and code; the tab streaming an answer).
+pnpm --filter dashboard exec vitest run src/lib/search-console.test.ts src/lib/search-docs.test.ts src/lib/search-playground.test.ts src/lib/search-audit.test.ts \
+  src/lib/search-chat.test.ts src/components/search/playground-chat.test.tsx
 
 # Minimum pass count for a suite from docs/search/compatibility.md (0 when not set).
 threshold() {
