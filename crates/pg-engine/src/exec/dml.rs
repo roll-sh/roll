@@ -4218,12 +4218,13 @@ impl InsertNode {
             _ => None,
         };
         // A COPY whose rows and entries nothing reads before it ends (COPY's multi-insert
-        // rule, no RETURNING, RLS or unique / exclusion check, plain btree indexes; AFTER
-        // triggers fire once the sink is closed) writes them through the sink, each row once
-        // with its TID: held until its multi-insert batch is placed (`Txn::hold_rows`).
+        // rule, no RETURNING, RLS or unique / exclusion check but those `fresh` answers
+        // without reading the index, plain btree indexes; AFTER triggers fire once the sink
+        // is closed) writes them through the sink, each row once with its TID: held until its
+        // multi-insert batch is placed (`Txn::hold_rows`).
         let bulk = copied.is_some_and(|c| c.multi)
             && rules.table.has_rowid()
-            && rules.indexes.iter().all(|b| b.index.method == "btree" && !checks_rows(b))
+            && rules.indexes.iter().all(|b| b.index.method == "btree" && (!checks_rows(b) || fresh.as_ref().is_some_and(|f| f.covers(b))))
             && model_deferrable(&plan, ctx)
             && !ctx.txn.borrow().sink_open();
         if copied.is_some_and(|c| c.multi) {

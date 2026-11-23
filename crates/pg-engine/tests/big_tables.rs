@@ -148,9 +148,9 @@ fn copy_past_the_model() {
     });
 }
 
-/// A COPY whose rows past its first few wait for its end and take the table past the model
-/// (`sizing::past_model`) gives the btree estimate their entries knowing which keys the index
-/// holds already. 20,000 rows over 2,000 keys repeating every 2,000 rows (each key's 10 heap
+/// A COPY whose rows past its first few wait for its end (or, its rows held, their index
+/// entries) and take the table past the model gives the btree estimates their entries knowing
+/// which keys the index holds already (`sizing::est_entries_of`). 20,000 rows over 2,000 keys repeating every 2,000 rows (each key's 10 heap
 /// TIDs in posting lists): PostgreSQL 18.6's `ix_a` is 303,104 bytes (37 pages), as the model
 /// has it. The estimate took each key's first repeats for new keys (3.7x PostgreSQL's size
 /// at 1M rows).

@@ -6383,6 +6383,40 @@ pub struct CopyLoad {
     /// The statement fails as its buffer is flushed (`flush_failed`): its rows are modelled,
     /// not stored or stamped.
     failing: std::cell::Cell<bool>,
+    /// A held load's btree entries past its first `DEFER_AFTER` rows', per index in their
+    /// order (`Waiting`): the heap's model places each batch's rows as they are stored, the
+    /// btrees' take the entries when the statement ends (`place_waiting`), as `Defer`'s rows
+    /// wait, or the estimates do when the table goes past the model's size (`model`), after
+    /// the shapes the first rows gave the models. Nothing reads a held load's indexes before
+    /// it ends; each btree gets its entries in the same order.
+    waiting: std::cell::RefCell<Vec<Waiting>>,
+    /// Rows of a held load whose entries went into the models as they were placed.
+    entered: std::cell::Cell<usize>,
+}
+
+/// One btree's entries waiting (`CopyLoad::waiting`): each its row's TID (6 bytes) and its
+/// key's encoding (`Key::as_bytes`, which says its own length), end to end.
+struct Waiting {
+    index: u32,
+    bytes: Vec<u8>,
+}
+
+impl Waiting {
+    fn push(&mut self, tid: Tid, key: &Key) {
+        self.bytes.extend_from_slice(&tid.0.to_le_bytes());
+        self.bytes.extend_from_slice(&tid.1.to_le_bytes());
+        self.bytes.extend_from_slice(key.as_bytes());
+    }
+
+    fn each(&self) -> impl Iterator<Item = (Tid, &crate::catalog::btsim::KeyBytes)> {
+        let mut b = self.bytes.as_slice();
+        std::iter::from_fn(move || {
+            let (t, rest) = b.split_at_checked(6)?;
+            let (key, rest) = crate::catalog::btsim::KeyBytes::first_of(rest)?;
+            b = rest;
+            Some(((u32::from_le_bytes([t[0], t[1], t[2], t[3]]), u16::from_le_bytes([t[4], t[5]])), key))
+        })
+    }
 }
 
 impl CopyLoad {
@@ -6444,6 +6478,8 @@ impl CopyLoad {
             held: Default::default(),
             failed: Default::default(),
             failing: Default::default(),
+            waiting: Default::default(),
+            entered: Default::default(),
         }
     }
 
@@ -6585,6 +6621,14 @@ impl CopyLoad {
                 tids = heap.multi_insert(&keyed, xid, cid, mode);
             }
             let mut keys = Vec::with_capacity(rows.len());
+            // (A held load's entries wait; anything else places those waiting first.)
+            let wait = ctx.is_some() && self.held.get() && !self.failing.get() && self.entered.get() >= defer_after();
+            if !wait && let Some(heap) = heaps.get(&table) {
+                self.place_waiting(btrees, heap, &v);
+            }
+            if !wait {
+                self.entered.set(self.entered.get() + rows.len());
+            }
             for (i, p) in rows.into_iter().enumerate() {
                 if !multi {
                     if !p.exts.is_empty() {
@@ -6600,12 +6644,34 @@ impl CopyLoad {
                 let Some(heap) = heaps.get(&table) else {
                     return;
                 };
-                let entries = p.entries.into_iter().map(|(o, k)| (o, k, false)).collect();
-                index_insert(btrees, heap, &v, entries, tids[i]);
+                if wait {
+                    let mut w = self.waiting.borrow_mut();
+                    for (ix, k) in &p.entries {
+                        let at = match w.iter().position(|x| x.index == *ix) {
+                            Some(at) => at,
+                            None => {
+                                w.push(Waiting { index: *ix, bytes: Vec::new() });
+                                w.len() - 1
+                            }
+                        };
+                        w[at].push(tids[i], k);
+                    }
+                } else {
+                    let entries = p.entries.into_iter().map(|(o, k)| (o, k, false)).collect();
+                    index_insert(btrees, heap, &v, entries, tids[i]);
+                }
                 gist_log(gist_logs, &p.gist, tids[i]);
                 keys.push(p.key);
             }
             let big = heaps.get(&table).is_some_and(|h| h.versions() > max_versions());
+            // (Past the model's size: the entries waiting go to the btrees' estimates, after
+            // the shapes the models have now.)
+            let waited = if big {
+                let w = std::mem::take(&mut *self.waiting.borrow_mut());
+                est_entries_of(btrees, w.iter().flat_map(|w| w.each().map(|(_, k)| (w.index, k))))
+            } else {
+                Vec::new()
+            };
             drop(rf);
             let Some(ctx) = ctx else { continue };
             if self.held.get() {
@@ -6619,9 +6685,36 @@ impl CopyLoad {
             }
             if big && let Some(t) = ctx.catalog().tables.get(&table) {
                 untrack(&self.db, t, None);
+                est_inserted(&self.db, t.oid, waited);
                 self.stop_holding(ctx);
                 return;
             }
+        }
+    }
+
+    /// The btree entries waiting (`waiting`) go into the models, in their order.
+    fn place_waiting(&self, btrees: &mut FastMap<u32, Btree>, heap: &Heap, v: &Vis) {
+        let dead = |t: Tid| heap.chain_dead(t, v);
+        for w in std::mem::take(&mut *self.waiting.borrow_mut()) {
+            let Some(bt) = btrees.get_mut(&w.index) else { continue };
+            for (tid, key) in w.each() {
+                bt.insert(key.to_key(), tid, &InsertHint { unchanged: false, dead: &dead });
+            }
+        }
+    }
+
+    /// The statement's end (or its failure): the entries waiting go into the btrees' models
+    /// (a table no longer modelled has taken them in its estimates already, `model`).
+    fn finish_waiting(&self) {
+        if self.waiting.borrow().is_empty() {
+            return;
+        }
+        let v = Vis::new(self.db.xids()).with_multis(&self.db.multis);
+        let mut rf = self.db.relfiles.of(self.key.0).write();
+        let RelFiles { heaps, btrees, .. } = &mut *rf;
+        match heaps.get(&self.key.0) {
+            Some(heap) => self.place_waiting(btrees, heap, &v),
+            None => self.waiting.borrow_mut().clear(),
         }
     }
 
@@ -6642,6 +6735,7 @@ impl CopyLoad {
         if let Some((batches, multi, xid, cid)) = self.take_deferred() {
             self.model(batches, multi, xid, cid, Some(ctx));
         }
+        self.finish_waiting();
         self.failed.take().map_or(Ok(()), Err)
     }
 }
@@ -6654,24 +6748,10 @@ impl CopyLoad {
 /// a non-unique index holds the key already), for the btrees' estimates (`est_inserted`).
 fn past_model(heap: &mut Heap, btrees: &FastMap<u32, Btree>, d: &mut Defer, mode: &mut InsertMode) -> (EstHeap, Vec<(u32, u128, usize, bool)>) {
     // (The rows' keys aren't kept by the model: it goes.)
-    let mut entries = Vec::new();
+    let batches = std::mem::take(&mut d.batches);
+    let entries = est_entries_of(btrees, batches.iter().flatten().flat_map(|p| p.entries.iter().map(|(ix, k)| (*ix, &**k))));
     let mut placed: Vec<(Vec<u8>, Tid)> = Vec::new();
-    // (Each non-unique index's keys (their prefixes, as the estimate has them), the model's
-    // and those entered since: an entry under a key the index holds adds a heap TID to it,
-    // where the estimate's guess from its leaf's counts (`BtEst::insert`) would take a load's
-    // first repeats of its keys for new ones.)
-    let mut keys: FastMap<u32, FastSet<u128>> = FastMap::default();
-    for rows in std::mem::take(&mut d.batches) {
-        for p in &rows {
-            for (ix, k) in &p.entries {
-                if let Some(b) = btrees.get(ix) {
-                    let (sort, size) = k.sort_and_size(b.opts.nkey);
-                    let prefix = btest::key_prefix(sort);
-                    let dup = !b.opts.unique && !keys.entry(*ix).or_insert_with(|| model_keys(b)).insert(prefix);
-                    entries.push((*ix, prefix, size, dup));
-                }
-            }
-        }
+    for rows in batches {
         let tids = if d.multi {
             let lens: Vec<usize> = rows.iter().map(|p| p.len).collect();
             heap.multi_place(&lens, d.xid, mode)
@@ -6691,6 +6771,29 @@ fn past_model(heap: &mut Heap, btrees: &FastMap<u32, Btree>, d: &mut Defer, mode
     (est, entries)
 }
 
+/// Btree entries of a table's rows that its models won't take (it goes past the model's
+/// size), for the estimates (`est_inserted`): (index, key's prefix, tuple size, whether a
+/// non-unique index holds the key already: the model's keys and those before it here, by
+/// their prefixes as the estimate has them). An entry under a key the index holds adds a
+/// heap TID to it, where the estimate's guess from its leaf's counts (`BtEst::insert`) would
+/// take a load's first repeats of its keys for new ones.
+fn est_entries_of<'a>(
+    btrees: &FastMap<u32, Btree>,
+    entries: impl Iterator<Item = (u32, &'a crate::catalog::btsim::KeyBytes)>,
+) -> Vec<(u32, u128, usize, bool)> {
+    let mut out = Vec::new();
+    let mut keys: FastMap<u32, FastSet<u128>> = FastMap::default();
+    for (ix, k) in entries {
+        if let Some(b) = btrees.get(&ix) {
+            let (sort, size) = k.sort_and_size(b.opts.nkey);
+            let prefix = btest::key_prefix(sort);
+            let dup = !b.opts.unique && !keys.entry(ix).or_insert_with(|| model_keys(b)).insert(prefix);
+            out.push((ix, prefix, size, dup));
+        }
+    }
+    out
+}
+
 /// The key prefixes (`btest::key_prefix` of their key attributes) of a modelled btree's
 /// entries.
 fn model_keys(b: &Btree) -> FastSet<u128> {
@@ -6707,6 +6810,14 @@ fn model_keys(b: &Btree) -> FastSet<u128> {
 /// load's rows waiting for its end, `past_model`) go in their estimates.
 fn est_inserted(db: &Database, t: u32, entries: Vec<(u32, u128, usize, bool)>) {
     let mut rf = db.relfiles.of(t).write();
+    // (An index the model had no entry in yet takes its tuples' size from them.)
+    let empty: Vec<u32> = rf.est_btrees.iter().filter(|(_, b)| b.is_empty()).map(|(&i, _)| i).collect();
+    for ix in empty {
+        let (sum, n) = entries.iter().filter(|e| e.0 == ix).fold((0, 0), |a, e| (a.0 + e.2, a.1 + 1));
+        if let Some(b) = rf.est_btrees.get_mut(&ix).filter(|_| n > 0) {
+            b.sized_by(sum as f64 / n as f64);
+        }
+    }
     for (ix, key, size, dup) in entries {
         if let Some(b) = rf.est_btrees.get_mut(&ix) {
             b.insert(key, size, dup);
@@ -6723,6 +6834,8 @@ impl Drop for CopyLoad {
         if let Some((batches, multi, xid, cid)) = self.take_deferred() {
             self.model(batches, multi, xid, cid, None);
         }
+        // (A failed load's rows that went in keep their entries, as PostgreSQL's do.)
+        self.finish_waiting();
         let mut rf = self.db.relfiles.of(self.key.0).write();
         rf.bulk.remove(&self.key);
         if let Some(e) = rf.estimated.get_mut(&self.key.0)

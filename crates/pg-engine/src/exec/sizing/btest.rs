@@ -201,6 +201,17 @@ impl BtEst {
         EstBuilder { dedup, base_sum: base, base_n: 1, ..EstBuilder::new(dedup) }.finish().1
     }
 
+    /// Whether it holds no entry (an empty index's model).
+    pub fn is_empty(&self) -> bool {
+        self.store.iter().all(|l| l.tids == 0.0)
+    }
+
+    /// An estimate of no entries takes the size of its tuples, and of its pivots, from the
+    /// entries about to go in (`sizing::est_inserted`).
+    pub fn sized_by(&mut self, base: f64) {
+        (self.base, self.pivot) = (base, base);
+    }
+
     /// The file's blocks.
     pub fn blocks(&self) -> u32 {
         self.blocks

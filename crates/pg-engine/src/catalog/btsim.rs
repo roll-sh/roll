@@ -191,6 +191,22 @@ impl KeyBytes {
         &self.0
     }
 
+    /// The key whose encoding `b` starts with, and the bytes after it (None: `b` holds no
+    /// well-formed encoding at its start).
+    pub fn first_of(b: &[u8]) -> Option<(&KeyBytes, &[u8])> {
+        let (&natts, &nsizes) = (b.first()?, b.get(1)?);
+        let data = 2 + 2 * (natts as usize + nsizes as usize);
+        let end = match natts {
+            0 => 0,
+            n => {
+                let at = 2 + 2 * (n as usize - 1);
+                u16::from_le_bytes([*b.get(at)?, *b.get(at + 1)?]) as usize
+            }
+        };
+        let (k, rest) = b.split_at_checked(data + end)?;
+        Key::well_formed(k).then(|| (KeyBytes::of(k), rest))
+    }
+
     fn byte(&self, i: usize) -> u8 {
         self.0[i]
     }
