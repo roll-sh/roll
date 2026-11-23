@@ -67,7 +67,7 @@ impl Secrets {
                 c.query(
                     "SELECT o.key, e.slug, s.path FROM secrets o
                      JOIN secrets s ON s.project_id = o.project_id AND s.fp = o.fp AND s.env_id <> o.env_id
-                     JOIN environments e ON e.id = s.env_id
+                     JOIN environments e ON e.id = s.env_id AND e.forgotten_at IS NULL
                      WHERE o.env_id = ? AND o.path = ? AND o.owner = '' AND o.link IS NULL AND COALESCE(o.refs, '[]') = '[]' AND o.fp <> ?
                        AND s.owner = '' AND s.link IS NULL AND COALESCE(s.refs, '[]') = '[]' AND e.protected = 0
                      ORDER BY e.position, e.slug",

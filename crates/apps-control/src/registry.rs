@@ -61,6 +61,73 @@ impl Registry {
         Ok(format!("{}@{digest}", r.name))
     }
 
+    /// A GET on the registry's API for `image`'s repository, anonymous or with a pull token or
+    /// `login`, as [`Registry::digest`] asks.
+    async fn get(&self, r: &ImageRef, path: &str, accept: &str, login: Option<&RegistryLogin>) -> anyhow::Result<reqwest::Response> {
+        if self.base.is_none() && url::Url::parse(&format!("https://{}", r.registry)).ok().and_then(|u| u.host_str().map(|h| crate::net::literal_private(h.trim_start_matches('[').trim_end_matches(']')))).unwrap_or(true) {
+            anyhow::bail!("{} isn't a public registry", r.registry);
+        }
+        let base = self.base.clone().unwrap_or_else(|| format!("https://{}", r.registry));
+        let url = format!("{}/v2/{}/{path}", base.trim_end_matches('/'), r.repo);
+        let mut resp = self.http.get(&url).header("accept", accept).send().await.with_context(|| format!("asking {}", r.registry))?;
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            let challenge = resp.headers().get("www-authenticate").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
+            resp = match (challenge.starts_with("Basic"), login) {
+                (true, Some(l)) => self.http.get(&url).header("accept", accept).basic_auth(&l.username, Some(&l.password)).send().await?,
+                _ => {
+                    let token = self.token(&challenge, login).await.with_context(|| format!("{} asked for a login", r.registry))?;
+                    self.http.get(&url).header("accept", accept).bearer_auth(token).send().await?
+                }
+            };
+        }
+        Ok(resp)
+    }
+
+    /// A pinned image's cosign signature (`cosign sign --key`): the signature manifest beside
+    /// it (`sha256-<hex>.sig`), each simple-signing layer's payload checked against its digest
+    /// and naming exactly this image's digest, its signature (ECDSA P-256, DER) verified with
+    /// one of `keys` (PEM public keys). The key that verified it, or why none did.
+    pub async fn verify_cosign(&self, pinned: &str, keys: &[String], login: Option<&RegistryLogin>) -> anyhow::Result<usize> {
+        use base64::Engine as _;
+        use p256::ecdsa::signature::Verifier;
+        use p256::pkcs8::DecodePublicKey;
+        use sha2::Digest;
+        let (name, digest) = pinned.split_once('@').context("not a pinned image (repo@sha256:…)")?;
+        anyhow::ensure!(digest.starts_with("sha256:") && digest.len() == 71, "not a pinned image (repo@sha256:…)");
+        let verifiers: Vec<p256::ecdsa::VerifyingKey> = keys.iter().map(|k| p256::PublicKey::from_public_key_pem(k.trim()).map(p256::ecdsa::VerifyingKey::from).map_err(|e| anyhow::anyhow!("a signing key isn't a P-256 public key in PEM: {e}"))).collect::<anyhow::Result<_>>()?;
+        let r = ImageRef::parse(name);
+        let tag = format!("manifests/{}.sig", digest.replace(':', "-"));
+        let resp = self.get(&r, &tag, "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json", login).await?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            bail!("{name} has no cosign signature for {digest}");
+        }
+        anyhow::ensure!(resp.status().is_success(), "{} answered {} for {name}'s signature", r.registry, resp.status());
+        let body = resp.bytes().await?;
+        anyhow::ensure!(body.len() <= 256 << 10, "the signature manifest is too large");
+        let manifest: serde_json::Value = serde_json::from_slice(&body)?;
+        for layer in manifest["layers"].as_array().into_iter().flatten().take(16) {
+            let (Some(blob), Some(sig)) = (layer["digest"].as_str(), layer["annotations"]["dev.cosignproject.cosign/signature"].as_str()) else { continue };
+            let resp = self.get(&r, &format!("blobs/{blob}"), "*/*", login).await?;
+            if !resp.status().is_success() {
+                continue;
+            }
+            let payload = resp.bytes().await?;
+            if payload.len() > 64 << 10 || format!("sha256:{}", hex::encode(sha2::Sha256::digest(&payload))) != blob {
+                continue;
+            }
+            let claims: serde_json::Value = serde_json::from_slice(&payload).unwrap_or_default();
+            if claims["critical"]["image"]["docker-manifest-digest"] != digest || claims["critical"]["type"] != "cosign container image signature" {
+                continue;
+            }
+            let Ok(der) = base64::engine::general_purpose::STANDARD.decode(sig) else { continue };
+            let Ok(signature) = p256::ecdsa::Signature::from_der(&der) else { continue };
+            if let Some(i) = verifiers.iter().position(|v| v.verify(&payload, &signature).is_ok()) {
+                return Ok(i);
+            }
+        }
+        bail!("{name}@{digest} isn't signed by any of the project's keys")
+    }
+
     /// A pull token, from a `Bearer realm=…,service=…,scope=…` challenge: anonymous, or for
     /// `login` (Basic to the token service, as `docker login` does).
     async fn token(&self, challenge: &str, login: Option<&RegistryLogin>) -> anyhow::Result<String> {
@@ -201,5 +268,45 @@ mod tests {
         assert_eq!((r.name.as_str(), r.registry.as_str(), r.repo.as_str(), r.reference.as_str()), ("ghcr.io/acme/web", "ghcr.io", "acme/web", "latest"));
         let r = ImageRef::parse("registry.example.com:5000/team/app:v2");
         assert_eq!((r.registry.as_str(), r.repo.as_str(), r.reference.as_str()), ("registry.example.com:5000", "team/app", "v2"));
+    }
+}
+
+#[cfg(test)]
+mod cosign_tests {
+    use super::*;
+    use base64::Engine as _;
+    use p256::ecdsa::signature::Signer;
+    use p256::pkcs8::EncodePublicKey;
+    use sha2::Digest;
+
+    /// A registry with one image's cosign signature, as `cosign sign --key` pushes it.
+    async fn registry(digest: &str, sign_for: &str, key: &p256::ecdsa::SigningKey) -> String {
+        let payload = serde_json::json!({ "critical": { "identity": { "docker-reference": "acme/api" }, "image": { "docker-manifest-digest": sign_for }, "type": "cosign container image signature" }, "optional": null }).to_string();
+        let sig: p256::ecdsa::Signature = key.sign(payload.as_bytes());
+        let blob = format!("sha256:{}", hex::encode(sha2::Sha256::digest(payload.as_bytes())));
+        let manifest = serde_json::json!({ "schemaVersion": 2, "layers": [{ "mediaType": "application/vnd.dev.cosign.simplesigning.v1+json", "digest": blob, "size": payload.len(), "annotations": { "dev.cosignproject.cosign/signature": base64::engine::general_purpose::STANDARD.encode(sig.to_der().as_bytes()) } }] });
+        let tag = format!("/v2/acme/api/manifests/{}.sig", digest.replace(':', "-"));
+        let app = axum::Router::new()
+            .route(&tag, axum::routing::get(move || async move { axum::Json(manifest) }))
+            .route(&format!("/v2/acme/api/blobs/{blob}"), axum::routing::get(move || async move { payload }));
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(axum::serve(l, app).into_future());
+        base
+    }
+
+    #[tokio::test]
+    async fn a_cosign_signature_verifies_only_for_its_digest_and_key() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let key = p256::ecdsa::SigningKey::from_bytes(&[7u8; 32].into()).unwrap();
+        let pem = key.verifying_key().to_public_key_pem(Default::default()).unwrap();
+        let other = p256::ecdsa::SigningKey::from_bytes(&[9u8; 32].into()).unwrap().verifying_key().to_public_key_pem(Default::default()).unwrap();
+        let reg = Registry::new(Some(registry(&digest, &digest, &key).await)).unwrap();
+        let pinned = format!("ghcr.io/acme/api@{digest}");
+        assert_eq!(reg.verify_cosign(&pinned, &[other.clone(), pem.clone()], None).await.unwrap(), 1, "the key that signed it");
+        assert!(reg.verify_cosign(&pinned, &[other], None).await.is_err(), "another key's isn't");
+        // A signature made for another digest, served beside this one, isn't this image's.
+        let reg = Registry::new(Some(registry(&digest, &format!("sha256:{}", "b".repeat(64)), &key).await)).unwrap();
+        assert!(reg.verify_cosign(&pinned, &[pem], None).await.unwrap_err().to_string().contains("isn't signed"));
     }
 }

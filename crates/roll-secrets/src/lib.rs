@@ -38,6 +38,8 @@ pub mod backup;
 pub mod crypto;
 pub mod dotenv;
 mod envs;
+pub mod deleted_envs;
+pub mod events;
 pub mod exports;
 pub mod find;
 mod found;
@@ -89,12 +91,13 @@ pub use crypto::{Keyring, Value};
 pub use audit::{AuditEntry, AuditFilter, VerifyQuery};
 pub use chain::Verification;
 pub use consumers::{Maker, Reference, Refusal, Resolved, ResourceRef};
+pub use events::{EventPage, EventsQuery, FeedEvent};
 pub use envs::{Branch, EnvChange, Ensure, Ensured, Environment, Folder, Import, Kind as EnvironmentKind, NewEnvironment, Policy};
 pub use leaks::Leak;
 pub use found::{FoundStored, FoundTarget};
 pub use links::{Link, LinkProvider, Links, Mode, Planted};
 pub use metrics::Metrics;
-pub use read::{Delta, Followed, Grid, Held, Problem, Secret, Source, Values, Version};
+pub use read::{Delta, Followed, Grid, Held, Linked, Problem, Secret, Source, Values, Version};
 pub use requests::{Request, RequestValue, Review, Verdict};
 pub use exports::Export;
 pub use decoys::{Decoy, NewDecoy};
@@ -525,6 +528,10 @@ impl Secrets {
         db.ensure_schema(audit::SCHEMA)?;
         // The head's MAC (audit.rs, `head_msg`): a head without one isn't roll's.
         db.add_column("audit_heads", "mac", "TEXT")?;
+        // The events feed (events.rs): a row's event, written with it.
+        db.add_column("audit", "event", "TEXT")?;
+        db.add_column("audit", "event_data", "TEXT")?;
+        db.ensure_schema(events::SCHEMA)?;
         // Workload identities (identities.rs); their logins' tokens are roll-access's.
         db.ensure_schema(identities::SCHEMA)?;
         // Secrets' own `rlst_` tokens are gone (roll-access's grants instead); never on main.
@@ -569,6 +576,13 @@ impl Secrets {
         db.add_column("projects", "purge_at", "INTEGER")?;
         db.add_column("projects", "closed_at", "INTEGER")?;
         db.add_column("projects", "purged_at", "INTEGER")?;
+        // A deleted standard environment (envs.rs, `forget_environment`): when, by whom, and its
+        // recovery window's end. Its slug stays taken until the purge.
+        db.add_column("environments", "forgotten_at", "INTEGER")?;
+        db.add_column("environments", "forgotten_by", "TEXT")?;
+        db.add_column("environments", "purge_at", "INTEGER")?;
+        // What a change request does besides changing keys: `delete_environment` (requests.rs).
+        db.add_column("requests", "action", "TEXT")?;
         // Deleted before the window: already erased, waiting only for revocations.
         db.migrate("secrets-deleted-before-the-window", |c| {
             c.execute("UPDATE projects SET closed_at = forgotten_at, purged_at = forgotten_at WHERE forgotten_at IS NOT NULL AND purge_at IS NULL", ())?;

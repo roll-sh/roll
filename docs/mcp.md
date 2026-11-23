@@ -35,7 +35,13 @@ roll code had an MCP server of its own at `/v1/code/mcp`, and it stays for roll 
 (docs/code/mcp.md). `/v1/mcp` fronts all of its tools under product names (`search_code` is
 `code_search`, `land` is `code_land`, `list_agent_machines` is `agents_list_machines`), through the
 gate. Scoped tokens can't call `/v1/code/mcp`: that server calls roll code's routes without the
-gate.
+gate. Two keep their names: `search` and `fetch`, which ChatGPT's deep research and company
+knowledge ask an MCP server for. `search` finds the changes and work items of the caller's own repos
+that mention a query (`GET /v1/code/search`: never someone else's public repo, a scoped token's
+results kept to its repos by the gate), each with an id and its roll URL; `fetch` reads one in full
+(`GET /v1/code/documents/{id}`). Text from someone who can't push is marked `outside`, so lockdown
+withholds it. `?tools=search,fetch` gives a connection just those two (`?tools=search` alone is
+search mode).
 
 ## Connect
 
@@ -182,7 +188,15 @@ A 2026-07-28 client can ask what happened instead of being asked (MCP Events, SE
 `access.approval` (its own approvals as they're decided, `GET /v1/access/approvals/decided`, tied to
 `access_wait_approval`, so every connection has it) instead of holding a call open. Previews: `previews.event`
 (created, ready, failed, a visual change waiting, deleted; `GET /v1/previews/events`, tied to
-`previews_list`, its project's events only, as the gate filters the list). All three of the SEP's delivery modes:
+`previews_list`, its project's events only, as the gate filters the list). roll code: `code.landed`
+(each change landed on one repo, with its change, ref, changeset and author; `GET
+/v1/code/repos/{owner}/{repo}/landings`, read from the store's durable land log, tied to
+`code_list_refs`). roll secrets: `secrets.event` (a leak or scan finding, a failed rotation or sync,
+a value request waiting or decided, a placeholder misused, production left unprotected, an
+environment or the project deleted or recovered; never a value; `GET
+/v1/secrets/projects/{project}/events`, tied to `secrets_audit`; secrets keeps an env-limited
+token to its environments). A type whose route names a resource takes it as a required argument
+(`owner` and `repo` for `code.landed`, `project` for `secrets.event`), filled into the feed's path. All three of the SEP's delivery modes:
 poll (`events/poll`), push (`events/stream`) and webhook (`events/subscribe`, `events/unsubscribe`), below. An event type is a
 feed route read through the gated router with the caller's token, as a tool is, and it's the tool
 for that route's to list and allow (`apps.event` is `apps_events`'s: `GET /v1/apps/events`): a
@@ -193,7 +207,8 @@ No cursor starts from now (`?latest=1`: no events, the newest cursor); one roll 
 a fresh cursor and `truncated: true`, never an error, as the SEP says. `arguments` filter as each
 type's `inputSchema` says: `apps.event` by `kinds` (`deploy.failed`, or a family as `alert.*`),
 `service` and `environment`, `access.approval` by `kinds` (`approved`, `denied`) and `tool`,
-`previews.event` by `kinds` and `project`; `maxEvents` (at
+`previews.event` by `kinds` and `project`, `code.landed` by `ref`, `secrets.event` by `kinds` (a
+family as `request.*`) and `environment`; `maxEvents` (at
 most 100) and `maxAgeMs` are honoured, events older than `maxAgeMs` skipped and marked `truncated`.
 A full page (`hasMore`) means poll again at once; otherwise after `nextPollMs` (15 s).
 
@@ -219,12 +234,15 @@ client's `whsec_` secret (24-64 bytes; sealed to the subscription, never shown a
 reads the feed once as the agent, unattended, so what would refuse or ask a person (the token's
 rules, the policy's `agents_ask`) refuses there, before anything is kept, and nobody is asked. Then the callback proves it wants that
 connection's deliveries: a signed `{"type":"verification","challenge"}` it echoes in a 2xx answer,
-good for a day per connection and URL, at most 5 a connection a minute on a node, each refusal in
+good for a day per connection and URL, at most 5 a connection a minute across every node (counted
+in the shared store, on the database's clock), each refusal in
 the audit log; a callback under a path its https origin's `/.well-known/mcp-webhook-receiver.json`
 names (`{"receivers": ["/hooks/"]}`, read through the same guard) is proved without a challenge (else `-32027 CallbackEndpointError` with a category, never what the endpoint said). A subscription is
 keyed by its connection, URL, event and arguments (canonical JSON), so subscribing again refreshes
 it (the same `sub_…` id, its cursor kept, `deliveryStatus` answered); it lives at most an hour
-unless refreshed, 20 a connection. Every 15 seconds each node claims up to 16 due subscriptions to
+unless refreshed, 20 a connection and 100 a person across all their connections (the operator's
+own tokens have only the per-connection limit; `-32025` says which, `scope`). Every 15 seconds each
+node claims, on the database's clock (nodes' own clocks never decide a claim), up to 16 due subscriptions to
 events whose products it runs, again while each claim finds 16 (for up to a minute), one node
 delivering each (only the claim's holder writes back, so a slow round never moves a cursor back),
 8 at a time in tasks of their own, 40 seconds each, and reads each one's feed once a minute (at
@@ -1208,6 +1226,9 @@ previews are listed once those products are on.
 | `apps_cron_run_logs` | A cron run's output (read: its lines are in the environment's log). | `GET /v1/apps/services/{id}/environments/{env}/runs/{run}/logs` |
 | `apps_cancel_cron_run` | Stop a running cron run (production: deploy). | `POST /v1/apps/services/{id}/environments/{env}/runs/{run}/cancel` |
 | `apps_run_cron` | Run a cron job now (deploy in production). | `POST …/environments/{env}/runs` |
+| `apps_signing` | A project's image signing keys and whether image services must be signed. | `GET /v1/apps/projects/{project}/signing` |
+| `apps_set_signing` | Require image services' images to carry a cosign signature by one of the project's keys (Binary Authorization); admin. | `PUT /v1/apps/projects/{project}/signing` |
+| `apps_delete_signing` | Remove a project's signing rule; admin. | `DELETE /v1/apps/projects/{project}/signing` |
 | `apps_limits` | A project's apps spend limits. | `GET /v1/apps/projects/{project}/limits` |
 | `apps_project_usage` | A month's apps cost by service and environment (previews and deleted services as a row each), most costly first, this month's projected. | `GET /v1/apps/projects/{project}/usage` |
 | `apps_set_limits` | Set a project's monthly apps alert and hard cap (the cap pauses the project; admin). | `PUT /v1/apps/projects/{project}/limits` |
@@ -1220,7 +1241,7 @@ previews are listed once those products are on.
 | `apps_test_notification` | Send a test event now (not retried): whether it arrived. | `POST /v1/apps/projects/{project}/notifications/{nid}/test` |
 | `apps_notification_deliveries` | A notification's last 50 deliveries, newest first: what was sent and whether it arrived. | `GET /v1/apps/projects/{project}/notifications/{nid}/deliveries` |
 | `apps_list_drains` | Where a project's logs are sent (the URL's host only). | `GET /v1/apps/projects/{project}/drains` |
-| `apps_add_drain` | Send every matching service's logs out of roll: an HTTPS endpoint (signed; its signing secret comes back once), an OTLP collector, syslog over TLS, or an S3 bucket (apps #580; the AWS keys go as headers, which the audit log redacts), or the project's own roll storage bucket with nothing to paste (`bucket`, apps #590). | `POST /v1/apps/projects/{project}/drains` |
+| `apps_add_drain` | Send every matching service's logs out of roll: an HTTPS endpoint (signed; its signing secret comes back once), an OTLP collector, syslog over TLS, or an S3 bucket (apps #580; the AWS keys go as headers, which the audit log redacts), or the project's own roll storage bucket with nothing to paste (`bucket`, apps #590), or a data stream of the project's own roll search cluster as ECS documents with an append-only key (`search`). | `POST /v1/apps/projects/{project}/drains` |
 | `apps_update_drain` | Change what a drain sends or its headers: given ones replace (a new URL is a new drain). | `PATCH /v1/apps/projects/{project}/drains/{did}` |
 | `apps_delete_drain` | Stop sending a project's logs there. | `DELETE /v1/apps/projects/{project}/drains/{did}` |
 | `apps_test_drain` | Send one signed test line now (not retried): whether it arrived. | `POST /v1/apps/projects/{project}/drains/{did}/test` |
@@ -1291,22 +1312,19 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **2026-07-28 loose ends (this PR).** `x-mcp-header` on tool arguments a gateway may route on (a project,
-   an environment; SEP-2243), and reading and echoing `application_type` at registration (SEP-837).
-2. **`search` and `fetch` for ChatGPT's deep research.** OpenAI's docs ask for two read-only tools
-   with those names (results with a canonical `url`) for deep research and company knowledge. Over
-   the user's own data, never roll's design docs: roll code's repos (code-index search), work
-   items, preview notes, each with its roll URL; lockdown applies. A tool is one route, and roll code searches one repo at a
-   time: this needs a search route across the caller's repos in code-control first, which
-   in a cluster fans out to each repo's owner node: a design for roll code's API.
-3. **MCP Events: more feeds.** All three delivery modes are on main (poll #692, webhook #703,
-   push #710) with `apps.event` and `access.approval` (#708), and the receiver document (#712). Next: more feeds as their products have
-   a log after a cursor (roll code's durable land log, `Store::land_log`, has no route yet; secrets' events, agreed with secrets: a `project` argument
-   filling the feed's path). From the review: a feed
-   whose route runs on its owner node needs `ActAs` carried across the forward (today's isn't
-   forwarded); claims use each node's clock (a node more than 2 minutes ahead can deliver beside
-   another; the fenced cursor and a stable `webhook-id` keep it to duplicates); fairness is 20
-   subscriptions a connection, not a person or owner, and the verification limit is per node.
+1. **MCP Events: fair shares and one clock (this PR).** From #703's review: a person's connections
+   now share one allowance (100 subscriptions across their tokens and OAuth connections, beside 20
+   a connection), the challenge-verification limit is counted in the shared store across nodes,
+   and delivery claims and their next-due times use the database's clock, so a node whose clock
+   runs ahead can't take a subscription another node still holds.
+2. **MCP Events: more feeds.** All three delivery modes are on main (poll #692, webhook #703,
+   push #710) with `apps.event`, `access.approval` (#708), `previews.event` (#719), `code.landed`
+   (#739) and `secrets.event` (#751). Next as products add a log after a cursor: storage's event
+   notifications (`events::emit` rows), search's cluster health, previews' notes.
+3. **`search` and `fetch` (ChatGPT's deep research).** Changes, work items (#745) and files by
+   content across repos (#755: each repo on its owner's index, `skipped` said; a killed owner's
+   repos come back skipped in time, tested in this PR). Next: preview notes once previews has a
+   text search.
 4. **Decision for the user: list roll's server in the MCP Registry.** GitHub Copilot's "Registry
    only" policy blocks servers missing from the configured registry. Listing needs the `sh.roll`
    namespace proved by DNS or HTTP on roll.sh (`mcp-publisher login dns --domain roll.sh`) and
@@ -1324,7 +1342,8 @@ waits on a sibling PR reaching main is last.
 6. **As siblings land** (`sibling-check.py`, 2026-11-22 13:45, over every open PR): members'
    groups (#681: `GET /v1/workspace/projects/{id}/groups`, `PUT` and `DELETE …/groups/{group}`;
    tools `workspace_list_groups`, `workspace_set_group`, `workspace_delete_group` once it lands);
-   secrets' event feed (agreed; previews' is item 1). #485's migration landed with both
+   roll search's `rolld/tests/auth.rs::mcp_search_with_a_project_token` to review when it opens;
+   secrets' event feed landed (#751). #485's migration landed with both
    routes kept tool-less on purpose (the remote's credentials go in their bodies). #524 (previews on members) adds no routes
    beyond #501's; #627, #629, #596 and #504 add none. Not a tool: making a search browser key
    (#358's create answers the key; `limits.max_body_bytes` has no schema to join).
@@ -1357,7 +1376,7 @@ waits on a sibling PR reaching main is last.
 9. **Landed 2026-11-22 morning:** operator policy for agent connections: `agents_ask` and
    `mcp_lockdown` / `mcp_read_only` (#678), and `oauth_clients`, the OAuth clients that may connect,
    checked at consent, at every token and on every request, nothing revoked (#680). SQL sessions name who sent them (`application_name`: `roll tok_…`, so `postgres_activity` tells
-   an agent's queries apart; #683), and apps' sandbox tools marked open-world (#684). Output schemas for 2026-07-28 clients, learned from the sweep's real answers (#687). MCP Events in poll mode, starting with apps' event log (#692). VS Code's config to its 1.146 files (#694). Client ID metadata documents checked against draft -03, loopback redirects on any port (#696). MCP Events' webhook mode: verified callbacks, Standard Webhooks signing, deliveries read through the gate as the subscriber's grant (`roll_auth::ActAs`), two security reviews (#703); `access.approval`, a connection's approvals as they're decided (#708). Push mode (`events/stream`, #710) and the receiver document in place of the challenge (#712). How long a request waits for a person is the policy's (`approval_wait_minutes`, an approval rule's `wait_minutes`; up to a day, #716). Search's 14 relevance tools (#677) and `secrets_reach`'s new lists in `respond_to_leaked_secret` (#714), both in #717. Agents only as grants when the policy says (`mcp_require_grant`: the admin token gets OAuth's challenge at `/v1/mcp`, #718). `previews.event`, previews' events as an MCP Events feed (#719). Single tools picked or dropped on a connection (`tools=a,b`, `exclude_tools=`, GitHub's headers; #723). `roll mcp install`, roll's server added to the agents found here, OAuth only (#724). The operator's inspector for tool calls and results (`ROLL_MCP_INSPECTOR_URL`; a revealed credential never sent; #725). **Landed 2026-11-21:** step-up authorization for OAuth clients (#673: a refusal of a connection's own
+   an agent's queries apart; #683), and apps' sandbox tools marked open-world (#684). Output schemas for 2026-07-28 clients, learned from the sweep's real answers (#687). MCP Events in poll mode, starting with apps' event log (#692). VS Code's config to its 1.146 files (#694). Client ID metadata documents checked against draft -03, loopback redirects on any port (#696). MCP Events' webhook mode: verified callbacks, Standard Webhooks signing, deliveries read through the gate as the subscriber's grant (`roll_auth::ActAs`), two security reviews (#703); `access.approval`, a connection's approvals as they're decided (#708). Push mode (`events/stream`, #710) and the receiver document in place of the challenge (#712). How long a request waits for a person is the policy's (`approval_wait_minutes`, an approval rule's `wait_minutes`; up to a day, #716). Search's 14 relevance tools (#677) and `secrets_reach`'s new lists in `respond_to_leaked_secret` (#714), both in #717. Agents only as grants when the policy says (`mcp_require_grant`: the admin token gets OAuth's challenge at `/v1/mcp`, #718). `previews.event`, previews' events as an MCP Events feed (#719). Single tools picked or dropped on a connection (`tools=a,b`, `exclude_tools=`, GitHub's headers; #723). `roll mcp install`, roll's server added to the agents found here, OAuth only (#724). The operator's inspector for tool calls and results (`ROLL_MCP_INSPECTOR_URL`; a revealed credential never sent; #725). 2026-07-28's `x-mcp-header` (project, environment and service mirrored and checked) and `application_type` at registration (#728). `code.landed`, roll code's land log as a feed, with feed path arguments; `access.approval`'s webhook deliveries, which never ran (the product filter left access out), fixed with it (#739). `search` and `fetch` for ChatGPT's deep research: the caller's own changes and work items, with roll URLs and lockdown (#745), and files by content across repos (#755); `secrets.event`, and fixes from a review of #745/#748 (a scoped grant's page, a snippet panic, document routing; #751). roll's own work for a grant (MCP Events webhook deliveries) carried signed across a forward to the owner (`x-roll-code-acting`, #748). **Landed 2026-11-21:** step-up authorization for OAuth clients (#673: a refusal of a connection's own
    rules records the one rule it needed, `roll:step-up:<id>` in-band and as a 403 to Claude Code
    from 2.1.288, the consent screen adds roll's record to that connection; two security reviews); the instructions name every product by its tool prefix, search mode's tools
    always load, the 48 KiB cut's reason corrected, and Next ranked from the 2026-11-22 comparison

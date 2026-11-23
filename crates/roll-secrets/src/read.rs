@@ -161,6 +161,11 @@ pub struct Values {
     /// Keys whose value comes from a link to a resource (any mode): a consumer that reaches
     /// resources another way (a container on a private network) knows which addresses to rewrite.
     pub linked: Vec<String>,
+    /// `linked`'s keys with what each links: the provider's kind and the resource. A consumer
+    /// that replaces some resources with its own (roll apps' environments with data of their own)
+    /// leaves out only the keys that reach those. Names only, never a value.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<Linked>,
     /// Of `linked`, the keys whose link field isn't a credential (a host, a port, a user name, a
     /// database): a consumer that hides secret values in logs (roll apps) may show these. Every
     /// other value here is a secret, whatever its name or tags.
@@ -227,6 +232,22 @@ pub struct Delta {
     pub values: Values,
     pub removed: Vec<String>,
     pub stamps: BTreeMap<String, String>,
+}
+
+/// A key whose value comes from a link (`Values.links`).
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct Linked {
+    pub name: String,
+    /// The link provider's resource kind (`postgres`, `bucket`, `search`…).
+    pub kind: String,
+    /// The resource (the link's `ref`).
+    pub r#ref: String,
+}
+
+impl Linked {
+    fn of(name: &str, l: &Link) -> Linked {
+        Linked { name: name.to_string(), kind: l.kind.clone(), r#ref: l.r#ref.clone() }
+    }
 }
 
 /// A key left out because it links a resource the environment's preview branched.
@@ -467,14 +488,14 @@ struct KeyStamp {
     key: Box<str>,
     stamp: u64,
     flags: u8,
+    /// What its link links (kind, resource), for [`Values::links`]: only a linked key's.
+    link: Option<Box<(Box<str>, Box<str>)>>,
 }
 
 /// A key's own value is sensitive.
 const SENSITIVE: u8 = 1;
 /// Its value holds a sensitive one (itself, or through a reference).
 const TAINTED: u8 = 2;
-/// It comes from a link (any mode).
-const LINKED: u8 = 4;
 /// Its link's field isn't a credential.
 const PLAIN: u8 = 8;
 /// A dynamic link's: never in a delta (a read that issues gets the full set).
@@ -796,7 +817,7 @@ fn digest_state(c: &Conn<'_>, project: &str, dead: &crate::exports::Dead) -> Res
     // Each import as (the project it's from, its environment and folder, the whole row).
     let imports = c.query(
         "SELECT i.env_id, i.path, i.position, i.from_env_id, i.from_path, f.project_id, f.slug, f.protected FROM imports i
-         JOIN environments e ON e.id = i.env_id LEFT JOIN environments f ON f.id = i.from_env_id WHERE e.project_id = ? ORDER BY i.env_id, i.path, i.position",
+         JOIN environments e ON e.id = i.env_id LEFT JOIN environments f ON f.id = i.from_env_id AND f.forgotten_at IS NULL WHERE e.project_id = ? ORDER BY i.env_id, i.path, i.position",
         [project],
         |r| {
             let (from, at, of): (String, String, Option<String>) = (r.get(3)?, r.get(4)?, r.get(5)?);
@@ -1337,9 +1358,10 @@ impl Secrets {
         self.audit_now(project, caller, action, Some(slug), Some(&path), &keys, &summary);
         let ours = |e: &&Entry| !followed.iter().any(|f| f.name == e.row.key);
         let dynamic = entries.iter().filter(ours).filter(|e| e.row.link.as_ref().is_some_and(|l| l.mode == Mode::Dynamic)).map(|e| e.row.key.clone()).collect();
-        let linked = entries.iter().filter(ours).filter(|e| e.row.link.is_some()).map(|e| e.row.key.clone()).collect();
+        let links: Vec<Linked> = entries.iter().filter(ours).filter_map(|e| e.row.link.as_ref().map(|l| Linked::of(&e.row.key, l))).collect();
+        let linked = links.iter().map(|l| l.name.clone()).collect();
         let plain = entries.iter().filter(ours).filter(|e| e.row.link.as_ref().is_some_and(|l| self.plain_field(l))).map(|e| e.row.key.clone()).collect();
-        Ok(Values { values, problems, leases, dynamic, linked, plain, withheld, sensitive, followed, placeholders })
+        Ok(Values { values, problems, leases, dynamic, linked, links, plain, withheld, sensitive, followed, placeholders })
     }
 
     /// A folder's own values as they were after change `seq` (or at time `at`): what was stored
@@ -1364,6 +1386,7 @@ impl Secrets {
         let mut values = BTreeMap::new();
         let mut problems = vec![];
         let mut linked = vec![];
+        let mut links = vec![];
         let mut plain = vec![];
         let mut withheld = vec![];
         let mut followed = vec![];
@@ -1387,6 +1410,7 @@ impl Secrets {
             }
             if let Some(l) = &link {
                 linked.push(v.key.clone());
+                links.push(Linked::of(&v.key, l));
                 if self.plain_field(l) {
                     plain.push(v.key.clone());
                 }
@@ -1406,7 +1430,7 @@ impl Secrets {
         }
         let keys: Vec<String> = values.keys().cloned().collect();
         self.audit_now(project, caller, "secrets.export", Some(slug), Some(&path), &keys, &format!("exported {} as of change #{seq}", crate::write::plural(keys.len(), "value")));
-        Ok((seq, Values { values, problems, leases: vec![], dynamic: vec![], linked, plain, withheld, sensitive: vec![], followed, placeholders: vec![] }))
+        Ok((seq, Values { values, problems, leases: vec![], dynamic: vec![], linked, links, plain, withheld, sensitive: vec![], followed, placeholders: vec![] }))
     }
 
     /// What moves when the project's values may have: its change counter and its resources'
@@ -1669,11 +1693,10 @@ impl Secrets {
             let flag = |on: bool, f: u8| if on { f } else { 0 };
             let flags = flag(names::sensitive(&e.row.tags), SENSITIVE)
                 | flag(n.tainted, TAINTED)
-                | flag(link.is_some(), LINKED)
                 | flag(link.is_some_and(|l| self.plain_field(l)), PLAIN)
                 | flag(link.is_some_and(|l| l.mode == Mode::Dynamic), DYNAMIC)
                 | flag(n.volatile, VOLATILE);
-            keys.push(KeyStamp { key: e.row.key.as_str().into(), stamp: n.stamp, flags });
+            keys.push(KeyStamp { key: e.row.key.as_str().into(), stamp: n.stamp, flags, link: link.map(|l| Box::new((l.kind.as_str().into(), l.r#ref.as_str().into()))) });
         }
         let exact = walk.exact && refs_same.get();
         drop(walk);
@@ -1778,7 +1801,9 @@ impl Secrets {
             let named = |f: u8| stamps.keys.iter().filter(|k| k.flags & f != 0).map(|k| k.key.to_string()).collect::<Vec<_>>();
             let withheld = if narrowed.runtime { vec![] } else { named(SENSITIVE) };
             let sensitive = stamps.keys.iter().filter(|k| k.flags & TAINTED != 0 && answered(k)).map(|k| k.key.to_string()).collect();
-            let v = Values { values, problems, leases: vec![], dynamic: named(DYNAMIC), withheld, sensitive, linked: named(LINKED), plain: named(PLAIN), followed: vec![], placeholders: vec![] };
+            let links: Vec<Linked> = stamps.keys.iter().filter_map(|k| k.link.as_ref().map(|l| Linked { name: k.key.to_string(), kind: l.0.to_string(), r#ref: l.1.to_string() })).collect();
+            let linked = links.iter().map(|l| l.name.clone()).collect();
+            let v = Values { values, problems, leases: vec![], dynamic: named(DYNAMIC), withheld, sensitive, linked, links, plain: named(PLAIN), followed: vec![], placeholders: vec![] };
             Delta { delta: true, digest: d.digest.clone(), basis: basis.clone(), removed, stamps: sent, values: v }
         };
         // The stamp the caller holds for a key, if it's the key's now.
@@ -2324,7 +2349,11 @@ impl<'a> Resolver<'a> {
                     let got = if !self.caller.allows(Action::Reveal, &Scope::at(self.project, &env, &path)) {
                         Err(format!("{}: no access to {env}", r.display()))
                     } else if self.env(&env).is_none() {
-                        Err(format!("{}: no environment {env}", r.display()))
+                        if self.s.db.read(|c| crate::deleted_envs::deleted(c, self.project, &env)).unwrap_or(false) {
+                            Err(format!("{}: references {env}, which was deleted; recover it or change the reference", r.display()))
+                        } else {
+                            Err(format!("{}: no environment {env}", r.display()))
+                        }
                     } else {
                         self.lookup(&env, &path, &r.key).map_err(|p| format!("{} {p}", r.display())).and_then(|e| match self.entry(&e) {
                             (v, None) => Ok(v),

@@ -121,7 +121,9 @@ DELETE /v1/secrets/projects/{project}/cloud-accounts/{id}                      a
 POST /v1/secrets/projects/{project}/directories                                an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/directories/{id}                         an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/environments/{env}/decoys                  a person's call (decoys are planted by a person, #392)
+GET /v1/secrets/projects/{project}/environments/{env}/deletion                 the dashboard's (the delete dialog: what goes and breaks; the delete's own 409 names the same)
 GET /v1/secrets/projects/{project}/environments/{env}/digest                   roll run --watch's change signal
+POST /v1/secrets/projects/{project}/environments/{env}/recover                 a person's call: it brings a deleted environment and its secrets back
 PUT /v1/secrets/projects/{project}/environments/{env}/exports                  a person's call: sharing a folder with other projects grants them its values
 DELETE /v1/secrets/projects/{project}/environments/{env}/folder-policies       a person's call: a folder's approvals
 PUT /v1/secrets/projects/{project}/environments/{env}/folder-policies          a person's call: a folder's approvals
@@ -135,6 +137,7 @@ DELETE /v1/secrets/projects/{project}/environments/{env}/secrets/{name}/hosts  a
 PUT /v1/secrets/projects/{project}/environments/{env}/secrets/{name}/hosts     a person's call: the hosts a key's value may go to through a placeholder (#520)
 POST /v1/secrets/projects/{project}/environments/{env}/secrets/{name}/purge    a person's call (a secret's history gone for good)
 POST /v1/secrets/projects/{project}/environments/{env}/values/delta             a runtime client's read: a watcher's delta since the values it holds (secrets_get_values reads them)
+GET /v1/secrets/projects/{project}/events                                      an MCP Events feed (secrets.event), mapped by roll MCP's feed table
 POST /v1/secrets/projects/{project}/gateways                                   an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/gateways/{id}                            an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/github-apps                                an outside integration's setup: an admin's, with its credentials

@@ -43,6 +43,9 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/environments"), get(environments).post(create_environment).delete(delete_by_label))
         .route(&format!("{P}/environments/order"), put(order))
         .route(E, get(environment).put(ensure_environment).patch(update_environment).delete(delete_environment))
+        // A deleted environment's window (deleted_envs.rs): what a delete would do, and recovery.
+        .route(&format!("{E}/deletion"), get(env_deletion))
+        .route(&format!("{E}/recover"), post(recover_environment))
         .route(&format!("{E}/policy"), put(policy))
         .route(&format!("{E}/folder-policies"), get(folder_policies).put(set_folder_policy).delete(delete_folder_policy))
         .route(&format!("{E}/folders"), get(folders).post(create_folder).delete(delete_folder))
@@ -98,6 +101,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route("/v1/secrets/audit/jwks", get(audit_jwks))
         .route("/v1/secrets/audit/key/rotate", post(rotate_audit_key))
         .route(&format!("{P}/audit"), get(audit))
+        .route(&format!("{P}/events"), get(events))
         .route(&format!("{P}/audit/verify"), get(verify_audit))
         .route(&format!("{P}/audit/sinks"), get(sinks).post(create_sink))
         .route(&format!("{P}/audit/sinks/{{id}}"), axum::routing::delete(delete_sink))
@@ -432,9 +436,23 @@ async fn update_environment(State(s): S, Who(c): Who, Path((project, env)): Path
     Ok(ok(blocking(s, move |s| s.update_environment(&project, &env, ch, &c)).await?))
 }
 
-async fn delete_environment(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, Query(q): Q) -> crate::Result<StatusCode> {
-    blocking(s, move |s| s.delete_environment(&project, &env, q.get("confirm").map(String::as_str), &c)).await?;
-    Ok(StatusCode::NO_CONTENT)
+/// 204 for an ephemeral environment (gone), 200 `{environment, deleted_at, purge_at}` for a
+/// standard one (kept for the window), 202 `{request}` where its policy asks for approvals.
+async fn delete_environment(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, Query(q): Q) -> crate::Result<Response> {
+    use crate::deleted_envs::Deletion;
+    Ok(match blocking(s, move |s| s.delete_environment(&project, &env, q.get("confirm").map(String::as_str), &c)).await? {
+        Deletion::Erased => StatusCode::NO_CONTENT.into_response(),
+        Deletion::Kept { environment, deleted_at, purge_at } => ok(json!({ "environment": environment, "deleted_at": deleted_at, "purge_at": purge_at })),
+        Deletion::Requested(r) => (StatusCode::ACCEPTED, Json(json!({ "request": r }))).into_response(),
+    })
+}
+
+async fn env_deletion(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.env_deletion(&project, &env, &c)).await?))
+}
+
+async fn recover_environment(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.recover_environment(&project, &env, &c)).await?))
 }
 
 async fn folder_policies(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>) -> crate::Result<Response> {
@@ -1327,6 +1345,11 @@ async fn answer_value_request(State(s): S, Path(token): Path<String>, parts: Par
     let a: crate::Answer = body(&b)?;
     blocking(s, move |s| s.answer_value_request(&token, a, ip)).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET …/events?after=&limit=&kinds=&environment=&latest=`: the project's events feed (events.rs).
+async fn events(State(s): S, Who(c): Who, Path(project): Path<String>, Query(q): Query<crate::EventsQuery>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.events(&project, q, &c)).await?))
 }
 
 async fn audit(State(s): S, Who(c): Who, Path(project): Path<String>, Query(q): Query<crate::audit::AuditFilter>) -> crate::Result<Response> {

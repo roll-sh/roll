@@ -443,6 +443,59 @@ impl Apps {
         Ok(dep)
     }
 
+    /// `POST …/deploys/{dep}/rollback` with `no_traffic` and `variables`: a view of `dep` (an
+    /// earlier push, roll previews' per-commit links) reached only at its own URL, its image again
+    /// with some of the environment's variables given values of its own (another copy of the
+    /// data). Only names the environment has, sealed with the deployment and never listed; not
+    /// counted toward what's kept, pruned a day after its URL was last visited; nothing switches
+    /// and no one is told to put it live.
+    pub async fn rollback_view(self: &Arc<Self>, service: &str, env: &str, dep: &str, actor: Option<String>, variables: std::collections::BTreeMap<String, String>) -> Result<Deployment> {
+        self.refuse_capped(service)?;
+        self.refuse_paused(service, env).await?;
+        let old = self.deployment(service, env, dep).await?;
+        let Some(image) = old.image.clone() else { return Err(Error::Conflict(format!("{dep} never built an image"))) };
+        if old.pruned_at.is_some() {
+            return Err(Error::Conflict(format!("{dep}'s image was cleaned up; deploy its revision again")));
+        }
+        let (sid, e) = (service.to_string(), env.to_string());
+        let (svc, row) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?))).await?;
+        if old.run.kind != RunType::Web || old.run.volume.is_some() {
+            return Err(Error::BadRequest("a view of a deployment is a web service's without a volume (it runs next to the live one)".into()));
+        }
+        if variables.is_empty() || variables.len() > 50 {
+            return Err(Error::BadRequest("variables is 1–50 of the environment's own names".into()));
+        }
+        // Only names the environment has (the same app pointed at another copy), never new ones.
+        let have: std::collections::HashSet<String> = self.checked_vars(&svc.for_env(&row)?, &row, &old.id).await?.vars.into_iter().map(|(k, _)| k).collect();
+        if let Some(k) = variables.keys().find(|k| !have.contains(*k)) {
+            return Err(Error::BadRequest(format!("{k} isn't one of the environment's variables: a view only gives its own value to one it has")));
+        }
+        if let Some((k, _)) = variables.iter().find(|(_, v)| v.len() > 64 << 10 || v.contains('\0')) {
+            return Err(Error::BadRequest(format!("{k}'s value is at most 64 KiB, without NUL")));
+        }
+        let d = NewDeployment {
+            trigger: Trigger::Rollback,
+            revision: old.revision.clone(),
+            message: format!("A view of {} with its own values", old.id),
+            image: Some(image),
+            plan: old.plan.clone(),
+            rollback_of: Some(old.id.clone()),
+            run: old.run.clone(),
+            upload: None,
+            status: DeployStatus::Queued,
+            actor,
+            no_traffic: true,
+            no_cache: false,
+        };
+        let (sid, e) = (service.to_string(), env.to_string());
+        let made = self.db(move |s| s.create_deployment(&sid, &e, d, "", None)).await?;
+        // Kept before it runs, so its first instance has them.
+        let (did, v) = (made.id.clone(), variables);
+        self.db(move |s| s.set_deploy_overrides(&did, &v)).await?;
+        self.kick(service, env);
+        self.deployment(service, env, &made.id).await
+    }
+
     /// A person deployed (a deploy, a redeploy, a promotion): a hold after a rollback is lifted
     /// (a person's own hold isn't: only `held: false` ends it).
     pub async fn lift_hold(self: &Arc<Self>, service: &str, env: &str) {
@@ -892,6 +945,12 @@ impl Apps {
             Some(img) if matches!(d.trigger, Trigger::Rollback | Trigger::Settings | Trigger::Promote) => {
                 self.db(move |s| s.set_status(&id, &[DeployStatus::Queued, DeployStatus::Building], DeployStatus::Deploying, None)).await?;
                 log.line(format!("using the image of {}", d.rollback_of.as_deref().unwrap_or("the deployment it redeploys")));
+                // An image service's image meets the signing rule as it stands now (it may have
+                // been turned on since that image went live).
+                if matches!(svc.source, Source::Image { .. }) {
+                    let login = self.pull_login(&svc.id, img).await?;
+                    self.check_signed(&svc.project, img, login.as_ref(), log).await?;
+                }
                 (img.clone(), d.run.clone())
             }
             Some(img) => {
@@ -902,6 +961,8 @@ impl Apps {
                 let login = self.pull_login(&sid, img).await?;
                 let pinned = self.deps.runtime.pull(img, log, login.as_ref()).await?;
                 log.line(format!("pinned {pinned}"));
+                // A project that requires signed images: this digest's cosign signature first.
+                self.check_signed(&svc.project, &pinned, login.as_ref(), log).await?;
                 // A preview's defaults (an image service has no roll.toml), frozen with it.
                 let (run, note) = crate::config::preview_defaults(svc.run.clone(), None);
                 if env.ephemeral
@@ -946,6 +1007,11 @@ impl Apps {
             }
             let (id, img, r) = (d.id.clone(), image.clone(), run.clone());
             self.db(move |s| s.set_built(&id, &img, None, Some(&r))).await?;
+        }
+        // A project that requires signed images: every sidecar's too (they run beside the app,
+        // with its values), pinned or not.
+        for sc in &run.sidecars {
+            self.check_signed(&svc.project, &sc.image, None, log).await.map_err(|e| e.context(format!("sidecar {}", sc.name)))?;
         }
         // Its image's known vulnerabilities: before the rollout with `run.block_on` (never a
         // rollback's: it's how out of a bad deploy), else beside it.
@@ -1084,7 +1150,9 @@ impl Apps {
             // Ready, and someone told to put it live (`deploy.ready`), in one write: whoever sees
             // it ready sees the event too.
             let (sid, en, did, data) = (svc.id.clone(), env.name.clone(), d.id.clone(), serde_json::json!({ "revision": d.revision, "url": url }));
-            self.db(move |s| s.set_ready(&did, &sid, &en, &data)).await?;
+            // A view with its own values is never something to put live: no one is told.
+            let view = { let did = d.id.clone(); self.db(move |s| s.deploy_overrides(&did)).await?.is_some() };
+            self.db(move |s| if view { s.set_ready_quiet(&did) } else { s.set_ready(&did, &sid, &en, &data) }).await?;
             log.stream(Stream::System).line(format!("ready, not live: its own URL is {url}; roll back to it to put it live"));
             return Ok(());
         }
@@ -1761,6 +1829,16 @@ impl Apps {
             self.logs.sink(format!("env:{}/{}", svc.id, env.name), Stream::System).line(n.clone());
         }
         let mut vars = resolved.vars;
+        // A view's own values (an earlier push on its own copy of the data) over the
+        // environment's, for the names it overrides.
+        let did = dep.id.clone();
+        if let Some(own) = self.db(move |s| s.deploy_overrides(&did)).await? {
+            for (k, v) in own {
+                if let Some(slot) = vars.iter_mut().find(|(n, _)| *n == k) {
+                    slot.1 = v;
+                }
+            }
+        }
         if run.kind != RunType::Web {
             vars.retain(|(k, _)| k != "PORT");
         }
@@ -2197,6 +2275,40 @@ impl Apps {
 
     /// Metric alerts: the last five finished minutes against the deployment's `run.alerts`. An
     /// alert is an event once, when it starts; it can start again once it has cleared.
+    /// The last hour against the same hour of the week over the last four weeks (their median,
+    /// two weeks at least, enough traffic to tell): requests dropped below a fifth, errors at three
+    /// times their rate (1% at least), or p95 doubled (200 ms at least). What's unusual, or none.
+    async fn anomaly(self: &Arc<Self>, service: &str, env: &str, now_minute: i64) -> Option<serde_json::Value> {
+        let hour = now_minute / 60;
+        let (sid, e) = (service.to_string(), env.to_string());
+        let weeks: Vec<i64> = (1..=4).map(|k| hour - k * 168).collect();
+        let (past, recent) = self.db(move |s| Ok((s.hours_of(&sid, &e, &weeks)?, s.minutes(&sid, &e, now_minute - 60)?))).await.ok()?;
+        if past.len() < 2 {
+            return None;
+        }
+        let median = |mut v: Vec<f64>| {
+            v.sort_by(|a, b| a.total_cmp(b));
+            v[v.len() / 2]
+        };
+        let usual_requests = median(past.iter().map(|p| p.0 as f64).collect());
+        let usual_error_rate = median(past.iter().map(|p| if p.0 > 0 { p.1 as f64 / p.0 as f64 } else { 0.0 }).collect());
+        let usual_p95 = median(past.iter().map(|p| p.2).collect());
+        let recent: Vec<_> = recent.into_iter().filter(|r| r.minute < now_minute).collect();
+        let (requests, errors) = recent.iter().fold((0i64, 0i64), |(q, e), r| (q + r.requests, e + r.errors));
+        if usual_requests >= 100.0 && (requests as f64) < usual_requests / 5.0 {
+            return Some(serde_json::json!({ "kind": "traffic", "value": requests, "usual": usual_requests.round() }));
+        }
+        let rate = if requests > 0 { errors as f64 / requests as f64 } else { 0.0 };
+        if requests >= 50 && errors >= 10 && rate >= 0.01 && rate >= usual_error_rate * 3.0 {
+            return Some(serde_json::json!({ "kind": "errors", "value": (rate * 1000.0).round() / 10.0, "usual": (usual_error_rate * 1000.0).round() / 10.0 }));
+        }
+        let p95 = recent.iter().filter(|r| r.requests > 0).map(|r| r.p95_ms).fold(0.0, f64::max);
+        if requests >= 50 && usual_p95 > 0.0 && p95 >= 200.0 && p95 >= usual_p95 * 2.0 {
+            return Some(serde_json::json!({ "kind": "latency", "value": p95.round(), "usual": usual_p95.round() }));
+        }
+        None
+    }
+
     pub async fn judge_alerts(self: &Arc<Self>, l: &crate::live::EnvLive) {
         let Some(tpl) = l.template() else { return };
         let (a, limit_mb) = (tpl.run.alerts.clone(), tpl.run.memory_mb);
@@ -2261,6 +2373,11 @@ impl Apps {
                 firing.push(("alert.log", serde_json::json!({ "pattern": pat, "count": count, "threshold": a.log_count })));
             }
         }
+        if a.anomaly
+            && let Some(data) = self.anomaly(&l.service, &l.env, now).await
+        {
+            firing.push(("alert.anomaly", data));
+        }
         if let Some(slo) = &tpl.run.slo
             && let Some((indicator, rate, window)) = crate::slo::burning(slo, &all, now)
         {
@@ -2307,7 +2424,7 @@ impl Apps {
                 }
             }
         }
-        for kind in ["alert.memory", "alert.cpu", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "alert.slo"] {
+        for kind in ["alert.memory", "alert.cpu", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "alert.slo", "alert.anomaly"] {
             let key = format!("{}/{}/{kind}", l.service, l.env);
             match firing.iter().find(|(k, _)| *k == kind) {
                 Some((_, data)) => {

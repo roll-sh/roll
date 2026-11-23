@@ -4643,6 +4643,103 @@ async fn suggestions_never_touch_a_name_they_did_not_build() {
     assert!(!names.iter().any(|n| n.starts_with("orders-suggestions-") || n.starts_with("crm-suggestions-")), "{names:?}");
 }
 
+/// The node's embedding pool across tenants, on the tiny made-up model (`search_embed::tiny`):
+/// `semantic_text` with the E5 endpoint end to end, a reindex into it on two workers (a smoke
+/// test: the batches of 10 with no deadline are search-es's `tests/e5.rs`), each cluster's queue capped with Elasticsearch's 429, the per-call cap, an input
+/// with no spaces cut instead of refused, the CPU each cluster's inputs took metered to it, and
+/// the model dropped once idle. (The order of turns is `search_server::embed`'s unit tests'.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_embedding_pool_takes_turns_caps_queues_and_meters_cpu() {
+    use search_server::embed::{EmbedConfig, ModelSource};
+    let model = std::env::temp_dir().join(format!("roll-search-e5-tiny-{}", std::process::id()));
+    search_embed::tiny::write(&model).unwrap();
+    let dir = model.clone();
+    let e = env_with(move |c| {
+        let mut ec = EmbedConfig::new(ModelSource::Dir(dir), c.home.join("models"));
+        ec.unchecked = true;
+        ec.workers = 2;
+        ec.queue_inputs = 72;
+        ec.max_inputs = 100;
+        ec.idle_unload = Duration::from_secs(2);
+        c.embed = Some(ec);
+    })
+    .await;
+    let mut clusters = Vec::new();
+    for name in ["a", "b"] {
+        let c = e.post("/v1/search/clusters", json!({"name": name})).await;
+        clusters.push((c["id"].as_str().unwrap().to_string(), creds(&c)));
+    }
+    let ((a_id, (au, ap)), (b_id, (bu, bp))) = (clusters[0].clone(), clusters[1].clone());
+    let e5 = "/_inference/text_embedding/.multilingual-e5-small-elasticsearch?timeout=120s";
+
+    // semantic_text on the preconfigured endpoint, no key anywhere.
+    let mapping = json!({"mappings": {"properties": {"body": {"type": "semantic_text", "inference_id": ".multilingual-e5-small-elasticsearch"}}}});
+    let (s, v) = e.es(&au, &ap, reqwest::Method::PUT, "/docs", Some(mapping)).await;
+    assert_eq!(s, 200, "{v}");
+    let mut bulk = String::new();
+    for i in 0..20 {
+        bulk.push_str(&format!("{{\"index\":{{\"_id\":\"{i}\"}}}}\n{{\"body\":\"document number {i} about foxes and dogs\"}}\n"));
+    }
+    let r = e.http.post(format!("{}/docs/_bulk?refresh=true", e.es)).basic_auth(&au, Some(&ap)).header("content-type", "application/x-ndjson").body(bulk).send().await.unwrap();
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["errors"], false, "{v}");
+    let (s, v) = e.es(&au, &ap, reqwest::Method::POST, "/docs/_search", Some(json!({"query": {"semantic": {"field": "body", "query": "foxes"}}}))).await;
+    assert_eq!(s, 200, "{v}");
+    assert!(v["hits"]["total"]["value"].as_i64().unwrap() >= 10, "{v}");
+
+    // A reindex into semantic_text through the pool (smoke test).
+    let mut bulk = String::new();
+    for i in 0..200 {
+        bulk.push_str(&format!("{{\"index\":{{\"_id\":\"{i}\"}}}}\n{{\"body\":\"source document {i} on reindexing\"}}\n"));
+    }
+    let r = e.http.post(format!("{}/src/_bulk?refresh=true", e.es)).basic_auth(&au, Some(&ap)).header("content-type", "application/x-ndjson").body(bulk).send().await.unwrap();
+    assert_eq!(r.json::<Value>().await.unwrap()["errors"], false);
+    let (s, v) = e.es(&au, &ap, reqwest::Method::PUT, "/docs2", Some(json!({"mappings": {"properties": {"body": {"type": "semantic_text", "inference_id": ".multilingual-e5-small-elasticsearch"}}}}))).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = e.es(&au, &ap, reqwest::Method::POST, "/_reindex?refresh=true", Some(json!({"source": {"index": "src"}, "dest": {"index": "docs2"}}))).await;
+    assert_eq!((s, v["created"].as_i64(), v["failures"].as_array().map(Vec::len)), (200, Some(200), Some(0)), "{v}");
+    let (s, v) = e.es(&bu, &bp, reqwest::Method::POST, e5, Some(json!({"input": "short"}))).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["text_embedding"][0]["embedding"].as_array().unwrap().len(), 384);
+    // Past a cluster's queue (72 inputs) a call is refused whole, as a full deployment refuses.
+    let many: Vec<String> = (0..73).map(|i| format!("more {i}")).collect();
+    let (s, v) = e.es(&au, &ap, reqwest::Method::POST, e5, Some(json!({"input": many}))).await;
+    assert_eq!((s, v["error"]["type"].as_str(), v["error"]["reason"].as_str()), (429, Some("es_rejected_execution_exception"), Some("inference process queue is full. Unable to execute command")), "{v}");
+    let (s, v) = e.es(&bu, &bp, reqwest::Method::POST, e5, Some(json!({"input": many[..72]}))).await;
+    assert_eq!(s, 200, "{v}");
+    // The model is held on the node's memory while loaded.
+    let pool = e.control.node.cfg.embedder.clone().unwrap();
+    assert!(pool.resident_bytes() > 0);
+
+    // The per-call cap; a long input without a space is cut to its first 512 tokens, not
+    // refused.
+    let many: Vec<String> = (0..101).map(|i| i.to_string()).collect();
+    let (s, v) = e.es(&bu, &bp, reqwest::Method::POST, e5, Some(json!({"input": many}))).await;
+    assert_eq!(s, 400, "{v}");
+    let (s, v) = e.es(&au, &ap, reqwest::Method::POST, e5, Some(json!({"input": "x".repeat(300_000)}))).await;
+    assert_eq!(s, 200, "{v}");
+
+    // Each cluster is billed the CPU its inputs took: a's 220 documents and a 512-token input
+    // more than b's 74 short inputs.
+    e.control.sample().await.unwrap();
+    let ua = e.get(&format!("/v1/search/clusters/{a_id}/usage?days=1")).await;
+    let ub = e.get(&format!("/v1/search/clusters/{b_id}/usage?days=1")).await;
+    let (ca, cb) = (ua["inference_cpu_seconds"].as_f64().unwrap(), ub["inference_cpu_seconds"].as_f64().unwrap());
+    assert!(ca > cb && cb > 0.0, "a {ca}, b {cb}");
+    assert!(ua["cost"]["inference_usd"].as_f64().unwrap() > 0.0, "{ua}");
+
+    // Idle: the model leaves memory.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while pool.loaded() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the model stays loaded while idle");
+    assert_eq!(pool.resident_bytes(), 0);
+    let _ = std::fs::remove_dir_all(&model);
+}
+
 /// A migration's bounds: a host that isn't a name or an address (`https://*`) is refused and
 /// nothing is whitelisted; one migration call runs per cluster at a time (another gets a 429);
 /// and copies past the free task slots wait (`queued`), with nothing created for them.

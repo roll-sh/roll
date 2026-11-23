@@ -713,9 +713,14 @@ environments and approvals"). Teams add, rename, reorder and delete their own en
   change per environment that had a reference, so nothing breaks.
 - **Name**: what the dashboard shows, 1–48 characters.
 - **Position**: the order of the dashboard's columns and of promotion (dev → staging → prod).
-- **Delete** removes the environment's folders, secrets, versions, requests and leases (leases are
-  revoked first). A protected environment can only be deleted with `?confirm=<slug>`. The last
-  standard environment can't be deleted.
+- **Delete** of a standard environment keeps its folders, secrets, versions, changes and requests
+  for the recovery window, read by nobody, and revokes what it issued at once (see "When a secret,
+  an environment or the project goes"). It takes `?confirm=<slug>` when the environment is
+  protected or anything else reads it (409 `confirm_required`, naming every value that references
+  it and every folder, here or in another project, that imports from it); a protected one whose
+  policy asks for approvals is deleted through a change request. `GET …/environments/{env}/deletion`
+  says all that before anyone asks. An ephemeral environment goes at once. The last standard
+  environment can't be deleted, nor one an ephemeral environment is based on.
 
 ### Ephemeral environments (previews)
 
@@ -1228,15 +1233,39 @@ A link is `{kind, ref, field, mode, options}`:
   the project's key and registries (rotators…) can still reach it. A revocation that fails (the
   product or the customer's endpoint is down) stays as a lease that's already due, and the sweeper
   retries it; a purged project keeps its key and registries until its last lease is revoked, then
-  they go too. Nothing it issued outlives it unrevoked. An environment's delete, unlike a project's,
-  still erases its secrets, versions, changes and requests at once (the thirty-fifth review's item 2:
-  a recovery window and a change request for a protected one are planned); a key's delete makes a
-  tombstone version.
+  they go too. Nothing it issued outlives it unrevoked. A key's delete makes a tombstone version.
+- **Deleting a standard environment** keeps it for the same recovery window as a project
+  (`ROLL_SECRETS_DELETE_WINDOW_DAYS`, 7 days unless set), as Google Secret Manager's delayed
+  destruction and Azure Key Vault's soft delete do:
+  - first the refusal says what breaks: `${staging.X}` in another environment of the project, and
+    folders here or in other projects that import from it (409 `confirm_required` until
+    `?confirm=<slug>`; also asked of every protected environment). Names only, never a value;
+  - a protected environment whose policy asks for approvals (`approvals` ≥ 1) is deleted through a
+    change request with those approvals and every folder policy in it (`"action":
+    "delete_environment"`, answered 202 `{request}`), exactly as deleting one of its folders is;
+    applying it (`delete` there) is the delete, and an admin's `bypass` is audited as any other.
+    With `approvals: 0` (a new project's `production`) the confirmed delete is direct;
+  - then what it issued is revoked (leases, managed credentials, placeholders, and the interception
+    CAs that named their hosts), its one-time shares and secret requests end, and its decoys end.
+    The delete is audited (`environment.delete`: who, and the window's end);
+  - through the window nobody reads it: every route answers 404 for it, it's left out of listings,
+    search, health, insights, syncs and rotations, and a reference to it is a problem that says so
+    ("references staging, which was deleted; recover it or change the reference"). Its slug stays
+    its own until the purge (a new environment of that name is a 409 that says when);
+  - `POST …/environments/{env}/recover` (`admin` there) brings it back: references resolve again,
+    dynamic leases are issued afresh on the next read, and managed links get new credentials at once
+    (`rotated`, `rotation_failed`; audited as `environment.recover`). `GET /v1/secrets/deleted`
+    lists it, with `environment`, for those who may recover it, as does Home's "Recently deleted";
+  - after the window, once nothing it issued waits to be revoked, the sweeper purges every row of it
+    in one write with its audit row (`environment.purge`); then it's a 404. An environment of a
+    deleted project waits for its project.
 - **Deleting the workspace project** (`DELETE /v1/workspace/projects/{id}`) can't destroy secrets
   by accident, as AWS Secrets Manager's and Azure Key Vault's waits can't:
   - while the project holds any value, a protected environment (other than `production` with the
     policy every project starts with: no approvals, no approvers), an encryption key, a certificate
-    authority or a workload identity, roll secrets refuses it
+    authority, a workload identity, a registered resource (a rotator, an outside database, a
+    directory, a Snowflake account, an Atlas project, an AWS user or role, a cloud account, a
+    Kubernetes cluster, a GitHub App, a gateway) or an audit sink, roll secrets refuses it
     (`roll_workspace::Workspace::before_delete`): 403 for anyone who may not `admin` the project's
     secrets (asked of the caller's grant, as every secrets route does; the 403 says nothing about
     what it holds), and 409 `project_holds_secrets`, naming what goes, until a secrets admin
@@ -2755,6 +2784,7 @@ roll secrets history [KEY]   roll secrets rollback --to SEQ | --at TIME
 roll secrets diff    --from development --to staging | --file .env   # two environments, or a local copy
 roll secrets promote --from development --to staging [KEY…]
 roll secrets audit   [--key KEY] [--format csv|jsonl] | verify [--since TIME] [--file F --jwks F]
+roll secrets events  [--kinds K,…] [--env ENV] [--after SEQ] [--follow]   # the events feed ("Events")
 roll secrets syncs   ls | add KIND --target name=value… | run ID | rm ID
 roll secrets sinks   ls | add URL [--from-start] [--format splunk|datadog|bearer] (token on stdin) | rm ID
 roll secrets purge   KEY [--before N]        roll secrets retention 365|forever
@@ -5203,7 +5233,8 @@ the requester's). Notices aren't signed: an incoming webhook's URL is its own cr
 notice carries nothing a receiver should act on without opening the request in roll.
 **A new project's `production` starts protected with `approvals: 0`.** Protected means developers'
 default, checks, sandboxes and untrusted previews never reach it, and deleting it takes
-`?confirm=production`. With `approvals: 0`, whoever may write there (an owner, an admin, a
+`?confirm=production` (with `approvals` ≥ 1 the delete is a change request too). With
+`approvals: 0`, whoever may write there (an owner, an admin, a
 developer who names it, a token) still writes directly, so a project with one owner never waits on
 a request for its own changes; `PUT …/policy {"protected": true, "approvals": 1}` turns on the
 two-person rule. `approvals` is 0–10; `{"protected": true}` without it means 1. Before #688 a
@@ -5307,6 +5338,58 @@ every delivery), writes each batch as an object `roll-secrets/audit/<sink>/<deli
   every delivery like a bucket) produces each audit event to that topic as one record, keyed by its
   audit `id`, through roll streams in process: consumers react as it's written. A retried batch can
   produce an event again, so a consumer dedupes by key.
+
+### Events
+
+`GET …/events?after=<seq>&limit=&kinds=&environment=` is what happened in a project that someone (an
+agent, a script) acts on, in order after a cursor: a follower asks with its last `next` instead of
+polling health or the audit log. roll MCP's Events serve it as `secrets.event` (poll, push and
+webhooks, with a `project` argument; docs/mcp.md, "Events"). It answers
+`{events: [{seq, at, kind, environment?, key?, data}], next}`; `?latest=1` (never with `after`: 400)
+answers `{events: [], next}` at the head, for a follower that starts from now. `limit` is 1–500
+(default 100).
+
+**The cursor.** An event is an audit row that carries one (`audit.event`, `audit.event_data`), so
+`seq` is the row's number in the project's chain ("Tamper evidence"): taken from `audit_heads` in
+the row's own write, under the head's row lock (on Postgres a second writer waits for it, or loses a
+serializable race and runs again; on SQLite there's one writer). Rows therefore commit in `seq`
+order, and a follower past 7 has already been able to see 6. Never number events from a Postgres
+sequence: sequence values commit out of order, and a follower would skip one forever. `next` is past
+the rows read, the ones a filter left out too. The event's kind and data aren't in the row's hash;
+the row is. `nodes.rs`'s `two_nodes_writing_events_never_leave_a_gap_a_follower_has_passed` checks it
+on Postgres.
+
+**Filtered by the route.** `kinds` (exact, or a family as `request.*`) and `environment` (which needs
+`read` there) are applied here, and every event in an environment the caller may not read (its
+grant asked for each one, as the audit log does) is left out, so roll-access lets a token limited to
+some environments call it (`filters_itself`). `decoy.used` is only for those who see decoys. A
+deleted project's feed stays readable through its recovery window, so a follower sees
+`project.deleted` and `project.recovered`.
+
+**Never a value.** `data` holds names, ids, counts and reasons, and always `actor`; `path` and `keys`
+(when there's more than one; one is `key`) come from the row. Never a value, a hash of one, or its
+length.
+
+| Kind | When | `data` |
+| --- | --- | --- |
+| `secret.leaked` | a stored value turned up in a roll code repository (a change's added lines or a scan; in the project holding the value, once a day for the same keys and repo), or GitHub's secret scanning found a placeholder (`secrets.placeholders.end`) | `repo` (and `project`, the repo's, when the value came from another's shared folder), or `placeholder`, `consumer`, `reason` |
+| `scan.finding` | `roll secrets scan` or roll MCP's credential guard (`POST …/leaks`) matched values: a row per folder | `candidates`, `matched`, `guard` |
+| `rotation.failed` | a managed key's scheduled rotation failed: once as a failing run starts (health's `rotation_failing` until one works) | `reason` |
+| `request.pending` | a change request or a secret request opened | `request`, `type` (`change` or `value`), `expires_at` (a secret request's) |
+| `request.decided` | a change request approved or rejected (once its state moves) or closed; a secret request answered or cancelled | `request`, `type`, `state` |
+| `sync.failed` | a sync's push failed | `sync`, `target`, `reason` |
+| `decoy.used` | a decoy's credential was used (as often as its alert) | `decoy`, `route`, `ip` |
+| `maker.unreachable` | whoever chose a reference, set up placeholders or made a sync can no longer reach it (once a day per maker and consumer) | `maker`, `consumer`, `reason` |
+| `placeholder.echoed` | a host echoed a placeholder's value back | `placeholder`, `consumer`, `host` |
+| `placeholder.wrong_consumer` | another consumer's proxy sent a placeholder | `placeholder`, `consumer`, `by`, `more_by`, `count` |
+| `placeholder.wrong_host` | a placeholder went to hosts its key isn't bound to | `placeholder`, `consumer`, `hosts`, `more_hosts`, `count` |
+| `production.unprotected` | `production` went from protected to not (health's `production_unprotected`) | |
+| `env.deleted`, `env.recovered` | a standard environment was deleted (kept for its recovery window; ephemeral ones, previews', aren't events), or recovered within it | `purge_at` (deleted) |
+| `project.deleted`, `project.recovered` | the workspace project was deleted (its recovery window starts), or recovered | `purge_at` (deleted) |
+
+Rows that don't happen once (a leak found
+on every check of the same change, a maker noticed on every use) are deduplicated through
+`event_marks`, claimed in the row's own write, so two nodes never both write one.
 
 ### Tamper evidence
 
@@ -5490,7 +5573,9 @@ isn't in the workspace is 404.
 | `GET /environments/{env}` | | `Environment` |
 | `PUT /environments/{env}` | `Ensure` | 201 or 200 `{environment, created, change}` (409 `mismatch`; `branches` on a standard environment is a 400, an addition by anyone but roll previews or the operator a 403) |
 | `PATCH /environments/{env}` | `{slug?, name?, expires_at?, max_age_days?}` | `Environment` |
-| `DELETE /environments/{env}?confirm=` | | 204 |
+| `DELETE /environments/{env}?confirm=` | | 204 for an ephemeral one; 200 `{environment, deleted_at, purge_at}` for a standard one, kept for the window; 202 `{request}` when its policy asks for approvals (409 `confirm_required`, naming what breaks, until `confirm` repeats the slug of a protected or referenced one) |
+| `GET /environments/{env}/deletion` | | `{environment, secrets, window_days, confirm, needs_request, approvals, breaks: {project?, environment, path, key?, via: "reference" \| "import"}[]}` (`delete`) |
+| `POST /environments/{env}/recover` | | `{project, environment, recovered_at, rotated, rotation_failed: string[]}`: a deleted environment back within its window (`admin`; audited as `environment.recover`) |
 | `PUT /environments/{env}/policy` | `{protected, approvals?, approvers?, notify_url?}` | `Environment` |
 | `GET /environments/{env}/folder-policies` | | `FolderPolicy[]` |
 | `PUT /environments/{env}/folder-policies?path=` | `{approvals?, approvers?}` | `FolderPolicy` (`admin`) |
@@ -5559,6 +5644,7 @@ isn't in the workspace is 404.
 | `PUT /identities/{id}/jwks` | `{jwks}` | `Identity` (admin; a person's): its pinned keys replaced, its id kept (400 for an `aws` one) |
 | `POST /v1/secrets/login` | `{identity, token}` or `{identity, aws: {method, url, headers, body}}` | `{token, expires_at, project, identity}` (public; `aws`: a signed `GetCallerIdentity`, "AWS IAM") |
 | `GET /audit?env=&key=&actor=&action=&before=&since=&limit=&digests=&format=` | | `AuditEntry[]` newest first, or CSV/JSONL with `format`; `digests=false` leaves out `audit.digest` rows |
+| `GET /events?after=&limit=&kinds=&environment=&latest=` | | `{events: SecretsEvent[], next}` in commit order after the cursor (`limit` 1–500, default 100; `kinds` comma-separated, a family as `request.*`, 400 for an unknown one; `environment` needs read there); `latest=1` answers `{events: [], next}` at the head, 400 with `after` ("Events") |
 | `GET /required` | | `Required[]` |
 | `PUT /required` | `Required[]` | `Required[]` (replaces the list; `admin`) |
 | `GET /shares` | | `Share[]` newest first |
@@ -5685,7 +5771,7 @@ isn't in the workspace is 404.
 | `GET /transit/{name}/public` | | `TransitPublicKey[]`: `{version, public_key (base64), pem, jwk}` for every version (`read`) |
 | `GET /v1/secrets/whoami` | | `{principal, project?, scopes?}` |
 | `GET /v1/secrets/search?key=` | | `Place[]`: every project, environment and folder holding `key` (`PREFIX*` for a prefix) that the caller may read; never values |
-| `GET /v1/secrets/deleted` | | `DeletedProject[]`: `{project, name, deleted_at, deleted_by, purge_at}` for each deleted project in its recovery window that the caller may recover, soonest purged first |
+| `GET /v1/secrets/deleted` | | `DeletedProject[]`: `{project, name, environment?, deleted_at, deleted_by, purge_at}` for each deleted project, and each deleted environment (`environment`) of a project that isn't, in its recovery window that the caller may recover, soonest purged first |
 | `POST /recover` | | `{project, name, recovered_at, rotated, rotation_failed: string[]}`: a deleted project back, with its workspace project and canvas (`admin`, or the person whose project it was; audited as `project.recover`) |
 
 - 400: a bad slug, path, key, value, body or query.
@@ -5695,7 +5781,8 @@ isn't in the workspace is 404.
 - 404: no such project, environment, folder, secret, version, change, request, lease or token.
 - 410: a secret request answered as often as it allowed, expired or cancelled, or a deleted
   project past its recovery window (`gone`).
-- 409: a slug that is taken (`conflict`), a write to a protected environment
+- 409: a slug that is taken (`conflict`; a deleted environment's too, until its purge), an
+  environment's delete that needs `?confirm=` (`confirm_required`), a write to a protected environment
   (`approval_required`), a request that is `stale`, the last standard environment, a recovered
   project's name taken meanwhile (`name_taken`), and, on the workspace's
   `DELETE /v1/workspace/projects/{id}`, a project that holds secrets without `?confirm=`
@@ -5713,6 +5800,7 @@ type Environment = {
   branches?: Branch[]; // an ephemeral one's branched resources (absent: none)
 };
 type Branch = { kind: string; parent: string }; // a resource a preview branched: links to it aren't followed
+type Linked = { name: string; kind: string; ref: string }; // a linked key and what it links (Values.links)
 type Followed = { name: string; kind: string; parent: string; field: string }; // a key left out for roll previews to set from its branch
 type Ensure = Omit<NewEnvironment, "slug"> & { replace?: boolean }; // PUT /environments/{env}; branches: replaces the list, absent keeps it
 type NewEnvironment = {
@@ -5747,9 +5835,9 @@ type Change = { seq: number; environment: string; path: string; message: string;
 type ChangeDetail = Change & { items: Item[]; state?: { key: string; path: string; version: number; fp: string; comment: string; tags: string[]; link: Link | null; at: number }[] };
 // what: added | changed | deleted | comment | tags | link | rotated
 type Version = { version: number; seq: number; op: "set" | "delete"; what: string[]; purged: boolean; fp: string | null; comment: string; tags: string[]; link: Link | null; at: number; by: string };
-type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[]; plain?: string[]; withheld: string[]; sensitive: string[]; followed: Followed[]; placeholders?: Placeholder[] }; // placeholders: keys bound to hosts answered as rlph_… in values (a resolve that asked); plain: of linked, keys whose link field isn't a credential (a host, a port), which a consumer hiding secret values in logs may show (every other value is a secret); followed: keys linked to what the ephemeral environment's preview branched, not in values; leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
+type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[]; links?: Linked[]; plain?: string[]; withheld: string[]; sensitive: string[]; followed: Followed[]; placeholders?: Placeholder[] }; // links: linked's keys with what each links, {name, kind, ref} (the provider's resource kind and the resource; names only), so a consumer that replaces some resources with its own (roll apps' environments with data of their own) leaves out only the keys reaching those; placeholders: keys bound to hosts answered as rlph_… in values (a resolve that asked); plain: of linked, keys whose link field isn't a credential (a host, a port), which a consumer hiding secret values in logs may show (every other value is a secret); followed: keys linked to what the ephemeral environment's preview branched, not in values; leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
 type ValuesDelta = Values & { delta: boolean; digest: string; basis?: string; removed: string[]; stamps: Record<string, string> }; // delta: only the keys changed since the answer held are in values (and their stamps in stamps), removed the names it no longer answers, every list the folder's whole; not delta: the full set, every key's stamp; basis (sent back with the next claim) absent when the stamps couldn't be worked out
-type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[]; plain?: string[]; followed: Followed[]; digest?: string }; // plain: as above; digest (with ?digest=1, not with seq or at): the folder's `…/digest`, taken just before this read; leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
+type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[]; links?: Linked[]; plain?: string[]; followed: Followed[]; digest?: string }; // plain, links: as above; digest (with ?digest=1, not with seq or at): the folder's `…/digest`, taken just before this read; leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
 type Grid = { path: string; environments: string[]; rows: { key: string; cells: Record<string, Cell | null>; status: "same" | "different" | "missing"; required: boolean }[]; folders: string[]; previews: number };
 type Reach = { environment: string; path: string; key: string | null; protected: boolean; untrusted: boolean; tokens: Holder[]; identities: Holder[]; syncs: { id: string; kind: string; target: unknown; last_synced_at: number | null }[]; placeholders: { id: string; key: string; consumer: string; maker: string | null; through: string; expires_at: number }[]; projects: string[]; imported_by: string[]; truncated: boolean; readers: { actor: string; last_at: number; reads: number }[]; uncounted: string }; // untrusted: checks, sandboxes and previews may read it (not protected)
 type Holder = { id: string; name: string; actions: Action[]; expires_at: number | null; last_used_at: number | null; created_by: string };
@@ -5824,8 +5912,9 @@ tokens(id PK, project_id, name, hash UNIQUE, prefix, environments, paths, action
 identities(id PK, project_id, name, issuer, audience, subject, claims, environments, paths,
        actions, ttl_minutes, created_at, created_by, last_used_at, last_subject)
 audit(id INTEGER PK, project_id, at, actor, action, env_id, path, keys, summary, ip, approval,
-      seq, hash, digest)  -- UNIQUE (project_id, seq); digest: an audit.digest row's JWS
+      seq, hash, digest, event, event_data)  -- UNIQUE (project_id, seq); digest: an audit.digest row's JWS; event: the feed's kind ("Events")
 audit_heads(project_id PK, seq, hash, at, digest_seq, digest_at, start_seq, mac)  -- mac: HMAC under ROLL_SECRET_KEY
+event_marks(project_id, mark, at, PRIMARY KEY (project_id, mark))  -- events written once a day
 audit_keys(kid PK, sealed_dek, private BLOB, x, legacy, created_at, retired_at, pulled_at)
       -- the digest key (Ed25519): private sealed with kid + legacy as AAD, wiped when pulled;
       -- legacy: issuer kids whose RS256 digests from before it count
@@ -6136,8 +6225,10 @@ New since the ranking:
   - item 4, offboarding (`fix/secrets-offboarding`);
   - the stampede measurement (`perf/secrets-change-stampede`);
   - members v1.1 phase 1, groups and SCIM Groups (`feature/members-groups`, option (a)).
+- **Item 2 is on its PR** (`fix/secrets-env-delete-window`): a standard environment's delete is kept
+  for the window and recoverable, a protected one's with approvals is a change request, the 409
+  names what breaks, and `Held` counts registries and sinks.
 - **Next to start, as build slots and disk allow (the server is at 88%):**
-  - item 2, a recoverable environment delete and a protected one's delete as a change request;
   - item 3, reach naming people, clients, services and sandboxes.
 
 **Ranked, 2026-11-22 06:20** (the thirty-fifth product review, cold, on main 6575a213a, against

@@ -122,7 +122,8 @@ pub struct ClusterConfig {
     /// `links` and to [`Self::secret_refs`] (a name can be reused after a delete).
     pub catalog_id: Option<String>,
     /// Who the cluster belongs to, when the host knows: what node-wide fairness counts by
-    /// (connector syncs: [`crate::xpack::entsearch::sync`]). `None`: the cluster counts alone.
+    /// (connector syncs: [`crate::xpack::entsearch::sync`]; the embedding pool's turns:
+    /// [`crate::xpack::inference::local`]). `None`: the cluster counts alone.
     pub owner: Option<String>,
     /// The pool of connector sync slots this cluster takes from (`None`: the process's, shared by
     /// every cluster on the node; tests give clusters a pool of their own).
@@ -140,6 +141,10 @@ pub struct ClusterConfig {
     /// Where the cluster's security audit entries go ([`crate::xpack::security::audit`]);
     /// `None`: it records none.
     pub audit: Option<crate::xpack::security::audit::AuditLog>,
+    /// The node's embedding pool, which runs `multilingual-e5-small` for the `elasticsearch`
+    /// inference service ([`crate::xpack::inference::local`]); `None`: E5 endpoints answer as
+    /// on a cluster without ML nodes.
+    pub embedder: Option<std::sync::Arc<dyn crate::xpack::inference::local::Embedder>>,
     /// Resolves credentials given as references (`roll://ENV/KEY`, [`crate::secret_refs`]);
     /// `None`: references are refused.
     pub secret_refs: Option<crate::secret_refs::Resolver>,
@@ -173,6 +178,7 @@ impl ClusterConfig {
             branch_of: None,
             file_service_tokens: false,
             audit: None,
+            embedder: None,
             secret_refs: None,
             unsealed_secrets: false,
             reindex_node: None,

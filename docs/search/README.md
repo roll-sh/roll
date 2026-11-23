@@ -4,9 +4,11 @@ Elasticsearch-compatible search clusters that cost nothing while idle, wake in m
 branch instantly and keep their data on object storage. Clients speak the Elasticsearch REST API
 (or OpenSearch's): the official clients, searchkick, Laravel Scout and Spring Data work by
 changing the URL. Semantic and hybrid search work as on Elasticsearch 9: `semantic_text` fields
-embed through the model provider you configure (`_inference`: OpenAI or any compatible server,
-Cohere, Anthropic; the key sealed in the cluster), and `rrf`/`linear` retrievers mix them with
-lexical search.
+embed with no key through roll's own multilingual-e5-small (the preconfigured
+`.multilingual-e5-small-elasticsearch` endpoint, run on the node's CPUs as Elasticsearch's ML
+nodes run it), or through the model provider you configure (`_inference`: OpenAI or any
+compatible server, Cohere, Anthropic, …; the key sealed in the cluster), and `rrf`/`linear`
+retrievers mix them with lexical search.
 
 Guides for people building on roll search, one per workload, start with the first query in a
 minute: [guides/](guides/README.md) (site search, e-commerce, logs, RAG, multi-tenant SaaS). This
@@ -43,6 +45,14 @@ pnpm dev                                # dashboard: /dashboard/search
 | `--search-max-always-on-per-person` (`ROLL_SEARCH_MAX_ALWAYS_ON_PER_PERSON`) | `2` | of those, always-on ones (`idle_timeout_s` 0) (0: no cap) |
 | `--search-audit-retention-days` (`ROLL_SEARCH_AUDIT_RETENTION_DAYS`) | `7` | how long each cluster's security audit log keeps its entries |
 | `--search-audit-max-mb` (`ROLL_SEARCH_AUDIT_MAX_MB`) | `32` | audit entries kept per cluster, compressed MiB; past it the oldest go |
+| `--search-embed-model` (`ROLL_SEARCH_EMBED_MODEL`) | `e5`              | `off`: the E5 endpoint answers as Elasticsearch without ML nodes (429), and no weights are fetched |
+| `--search-embed-url` (`ROLL_SEARCH_EMBED_URL`)     | pinned Hugging Face revision | where the model's two files are fetched from, once, into `<home>/search/models` (`<url>/model.safetensors`, `<url>/tokenizer.json`, checked against the pinned SHA-256 digests) |
+| `--search-embed-dir` (`ROLL_SEARCH_EMBED_DIR`)     |                   | read the model's files from this directory instead (air-gapped nodes; same digests) |
+| `--search-embed-workers`, `--search-embed-cpus` (`ROLL_SEARCH_EMBED_WORKERS`, `ROLL_SEARCH_EMBED_CPUS`) | a third of the CPUs, not pinned | the embedding pool's threads, and the CPUs they're pinned to (`0-5,18-23`) |
+| `--search-embed-idle` (`ROLL_SEARCH_EMBED_IDLE`)   | `300`             | seconds without inputs before the model leaves memory |
+| `--search-embed-queue`, `--search-embed-queue-mb` (`ROLL_SEARCH_EMBED_QUEUE`, `ROLL_SEARCH_EMBED_QUEUE_MB`) | `4096`, `64` | inputs, and MiB of them, one cluster may have queued; past either a call gets 429 `es_rejected_execution_exception` |
+| `--search-embed-node-queue-mb` (`ROLL_SEARCH_EMBED_NODE_QUEUE_MB`) | `512` | MiB of inputs every cluster's queues hold together; past it a call gets 429 |
+| `--search-embed-max-inputs` (`ROLL_SEARCH_EMBED_MAX_INPUTS`) | `2048` | inputs per inference call (400 past it); each input is cut to the start its 512 tokens come from, so its length isn't capped |
 | `--no-search`, `--search-only`                     |                   | shorthands for `ROLL_PRODUCTS` without search, or with only search |
 | `--search-public-url` (`ROLL_SEARCH_PUBLIC_URL`)   |                   | the front clients use (a load balancer): cluster URLs name it |
 
@@ -55,6 +65,19 @@ fleet").
 
 Storage is rolld's: `--s3-bucket` (with `--s3-prefix`, `--s3-endpoint`), or `<home>/objects`.
 Local disk under `<home>/search/` holds `search.db` (the control plane's SQLite) and the cache.
+
+The built-in embedding model (`crates/search-embed`, `crates/search-server/src/embed.rs`;
+compatibility.md, "Inference"): `intfloat/multilingual-e5-small` (MIT), in Rust on the CPU (Hugging
+Face's `tokenizers`, and `gemm` on one thread per worker; no Python, no GPU). A node fetches its two
+files (`model.safetensors`, 471 MB, and `tokenizer.json`, 17 MB) once, on the first input any
+cluster sends it, into `<home>/search/models/multilingual-e5-small/<revision>/`, from the pinned
+revision or `--search-embed-url` (a mirror), and checks both against the SHA-256 digests pinned in
+`search_embed::FILES` before loading them. Tenants never choose where weights come from. On an
+air-gapped node copy the two files of that revision into a directory and pass `--search-embed-dir`;
+the same digests are checked. `--search-embed-model off` turns it off. The model loads on first use
+(about a second from the cache) and leaves memory after `--search-embed-idle` seconds without
+inputs, so a node whose clusters don't embed holds nothing. Its memory (about 470 MB while loaded,
+plus the batches running) counts against `--search-memory-mb`: clusters unload to make room for it.
 
 ## Use it
 
@@ -98,7 +121,15 @@ roll search indices settings get app books [--defaults]
 roll search explain app books 1 --q title:dune             # why a document matches, and its score
 ```
 
-Semantic search (or the dashboard's Inference tab):
+Semantic search with roll's own model, no key (Elasticsearch's preconfigured E5 endpoint):
+
+```sh
+roll search request app PUT /articles '{"mappings":{"properties":{"body":{"type":"semantic_text","inference_id":".multilingual-e5-small-elasticsearch"}}}}'
+roll search request app POST '/articles/_doc?refresh=true' '{"body":"Passwords can be reset from the sign-in page."}'
+roll search request app POST /articles/_search '{"query":{"semantic":{"field":"body","query":"elfelejtettem a jelszavam"}}}'
+```
+
+Or through a provider (or the dashboard's Inference tab):
 
 ```sh
 OPENAI_API_KEY=… roll search inference create app emb --model text-embedding-3-small   # key from the environment, sealed in the cluster
@@ -1056,7 +1087,12 @@ commit points. Both count Lucene documents (nested ones included), as `_stats` d
 doesn't jump when the cluster unloads. Stored bytes are re-read from the cluster's commit points after every load and
 unload and every 10 minutes while loaded; storage accrues from a change log, so a sleeping
 cluster adds no rows. A deleted cluster kept for restoring keeps its last size in the log, so its
-storage is billed until it is purged, when its rows go. Prices are AWS list prices in `crates/search-control/src/pricing.rs`, each
+storage is billed until it is purged, when its rows go. Inference on the node's embedding pool
+(the E5 endpoint, `semantic_text` with it) is billed by the CPU it took: each job's thread CPU
+time is measured on its worker and handed to the meter with the requests
+(`inference_cpu_seconds`, priced per vCPU-hour as `usd_per_vcpu_hour`), to the cluster whose
+request runs it: a linked cluster's cross-cluster query that embeds on this cluster, or a
+browser key's search, is billed here (the browser keys of #358 will cap inference per request). Prices are AWS list prices in `crates/search-control/src/pricing.rs`, each
 with its source.
 
 ## Tests
@@ -1298,8 +1334,10 @@ deterministic (#396).
    chat ops (Algolia's connectors notify on failed runs). A whole-product review on 2026-11-22
    found connectors refusing private addresses but not reindex's deny rules, and no per-owner cap on
    remote reindex slots: being fixed together as one node-wide egress check and owner-fair slots.
-8. **Semantic search with no keys** (built in #563, in review: roll's float build of E5 equals
-   Elasticsearch's float deployment, cosine 1.000000 on 64 of 64 cases; Elastic Cloud's `.multilingual-e5-small-elasticsearch`
+8. **Semantic search with no keys** (landed in #563, d756be014: roll's float build of E5 equals
+   Elasticsearch's float deployment, cosine 1.000000 on 68 of 68 cases, and its CPU is billed by the
+   cluster's catalog id; left: a RAG sample dataset on it (item 12) and OpenSearch-flavor local
+   models mapped onto it (item 14); Elastic Cloud's `.multilingual-e5-small-elasticsearch`
    and Elastic Inference Service, Typesense's and Meilisearch's built-in embedding models,
    Algolia's NeuralSearch): every `semantic_text` field and `text_embedding` endpoint on roll needs
    the customer's own provider key today, so the first semantic search means an OpenAI or Cohere
@@ -1362,8 +1400,8 @@ deterministic (#396).
    with no `inference_id` fails, because its default (`.elser-2-elasticsearch`) answers as a
    cluster without ML nodes, the first error anyone copying Elasticsearch's docs hits; and no
    screen is named Discover.
-13. **A web crawler for site search** (design in [crawler.md](crawler.md), ready to build now that
-   #318's runner is on main; Elastic Open Crawler,
+13. **A web crawler for site search** (phase 1 in progress on `feat/search-crawler`: the
+   `roll_web_crawler` connector on #318's runner, in its gate; design in [crawler.md](crawler.md); Elastic Open Crawler,
    Algolia Crawler, DocSearch, Meilisearch's docs-scraper): connectors (#318) sync Postgres and S3;
    getting a website in is the customer's job. A native connector roll runs (`roll_web_crawler`,
    on #318's runner) taking Open Crawler's config, fields and ids, fetching through
@@ -1391,7 +1429,9 @@ deterministic (#396).
    previews send from per-task public IPs on roll cloud, so an allowlisted cluster refuses them. A
    signed link identity an allowlist can admit ("apps service svc_x"), private endpoints, and a
    cluster key the customer holds (design first).
-18. **Logs end to end** (Elastic Observability's managed OTLP intake, OpenSearch Ingestion and the
+18. **Logs end to end** (design in [logs-end-to-end.md](logs-end-to-end.md); roll apps' drain
+   landed in #735, ECS documents into `logs-roll.apps-*` through an `append` key; Elastic
+   Observability's managed OTLP intake, OpenSearch Ingestion and the
    Alerting plugin): no OTLP intake in search, `_plugins/_alerting` isn't served, Watcher has no UI,
    nothing alerts on a cluster's own p99, 5xx or 429s, and Discover has no saved searches or
    visualizations. An OTLP logs and traces intake into data streams also gives roll apps' log drains a
@@ -1586,19 +1626,17 @@ deterministic (#396).
    it, a prefix applies); on a fleet `Control::call` sends search's own in-process requests to the
    cluster's owner (`cluster::to_owner`). Next: an inference endpoint's key from a roll secret (#134, landed), credentials as `roll://ENV/KEY` references read through roll
    secrets' `resolve_for` (#329) for snapshot repositories and connectors, rebuilt when the
-   secret's digest moves, roll.toml declaring a search link (apps' side), and checking search's routes through
-   MCP's search mode (#80) end to end. A flavor switch doesn't carry keys across (an API key isn't
+   secret's digest moves, and checking search's routes through MCP's search mode (#80) end to end.
+   roll.toml declares a search link (`[databases]`, `kind = "search"`), but its entry takes no
+   `indices` or `access` yet (the CLI's `roll apps link search --index --access` does). A flavor switch doesn't carry keys across (an API key isn't
    an OpenSearch user): links made before one are reissued. The fleet test with every product on
    passed (2026-11-13: search 8,077 writes acknowledged and verified, no errors, longest stall
    1.2 s in the rolling restart).
-   Joins the 2026-11-21 category review found, not yet built: an apps link can't be narrowed to
-   index patterns or read-only (`[databases] kind = "search"` takes neither; the keys route does);
-   apps' log drains can't yet land in a roll search data stream (apps is building a drain that writes
-   ECS documents through `_bulk` with a key limited to `create_doc` on its stream: no OTLP needed); previews
-   put a branch's superuser login in `ELASTICSEARCH_URL` beside the data key (fixed in #607: only the
-   data credential, no fallback, and old branches remade with the key revoked and the password
-   rotated first);
-   a cluster's admin password can't be kept as a project secret from roll's API or CLI; and only a
+   Joins the 2026-11-21 category review found: landed since, an apps link narrowed to indices and
+   `read` or `append` (#721, through secrets' `names` and `permission` link options), apps' log
+   drains into a roll search data stream (#735: ECS documents through `_bulk` with an `append` key
+   on `logs-roll.apps-*`), and previews giving a branch only its data credential (#607). Not yet
+   built: a cluster's admin password can't be kept as a project secret from roll's API or CLI; and only a
    unit test covers previews' search branch, and one MCP test search (no create → bulk → query
    flow with a person's scoped token). Project members (roll secrets' #501, on main since
    991d98225): search's API serves a signed-in person only the clusters they own (`SignedIn` is
@@ -1613,7 +1651,26 @@ deterministic (#396).
    the same run) plus ~1 s to load the cluster from S3 and replay its WAL. Search's part is the
    load; the TTL is roll cloud's fleet-wide choice.
 28. **CI**: the merge gate runs `search-codec`'s lib tests (`rust (search)`, 54 s on PR #29 with
-   main's cache: under the minute, no room for another crate). (`search-store`'s mass-recovery
+   main's cache: under the minute, no room for another crate). Test gaps a read-only analysis found on 2026-11-22
+   (main at d9aecc990), ranked; each test goes in `test:search`, not the merge gate (in progress:
+   (2), (3), (4), (7) and (8) on `test/search-gaps-a`, (5), (6), (9), (10), (11) and the e2e
+   file on `test/search-gaps-b`, both in their gates; `persist.rs`'s memory-budget flake on
+   `fix/search-persist-membudget-flake`):
+   (1) connectors refusing private addresses: every `connectors.rs` cluster sets
+   `allow_private_hosts`, so deleting the check fails nothing (being added with the egress fix,
+   `a_connector_never_reaches_a_private_address`); (2) a search link refusing and deleting a key
+   wider than asked (`rolld/src/secrets.rs` ~1207, untested; previews' twin is tested);
+   (3) previews' `Search::mask` end to end (previews' code, sent to that thread); (4) an apps
+   search link narrowed by `names`/`permission` and unlinking revoking its key, and the drain's key
+   401 after the drain is deleted (`rolld/tests/secrets.rs`); (5) owner-node jobs across a drain: a
+   watch, an ILM rollover and a sync running once on the next owner (`cluster.rs`); (6) ES|QL over a
+   remote on another node and a migration reported across a drain (`cluster.rs`); (7) MCP with a
+   person's project token against real search (sent to the MCP thread); (8) `roll://` repository
+   keys following rotation against real roll secrets (`rolld/tests/secrets.rs`); (9) the
+   dashboard's connectors tab and (10) migration wizard as Testing Library flows; (11) `roll
+   search docs add|delete`, `synonyms`/`rules list|delete` and `inference test` as lines in the
+   existing CLI flows. `rolld/tests/search_cluster_e2e.rs` never runs (no script sets `ROLL_E2E` for
+   it) and `fleet_e2e.rs` covers it: delete it or wire it into `test:search --docker`. (`search-store`'s mass-recovery
    WAL test flaked on a loaded host: a replay counted itself in the shared replay cache only
    after listing, so one could finish and empty it while the others listed; it now counts first.
    12 of 40 runs on one CPU failed before, 0 of 40 after.) `search-server`'s parked-governor
@@ -1644,7 +1701,10 @@ deterministic (#396).
    field could shadow the field the filter tests. Security filters (roles, API keys' role
    descriptors, OpenSearch Security's `dls`, a browser key's `filter`) are now built without the
    request's runtime fields on every read path, and a runtime field without a script reads only the
-   `_source` its reader may see. #601 (in review) carries the whole-product
+   `_source` its reader may see. #601 (landed, 27a29ffa6: the console decided on the routed API with
+   reveal-capable grants, an analysis memory budget per document and per node, one sealing path that
+   refuses secrets on a node without `ROLL_SECRET_KEY`, watch secrets bound to their cluster)
+   carried the whole-product
    review's fixes. A third, whole-product review on 2026-11-20 (main at 21708aef1) found no
    cross-tenant reach through branches, links or internal calls. Being fixed: Painless memory per
    execution, aggregation memory across the node (#549), observations keyed by name (a reused

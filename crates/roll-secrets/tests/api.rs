@@ -1328,12 +1328,13 @@ async fn environments_start_as_three_and_can_be_added_renamed_reordered_and_dele
     let envs = api.ok(Method::PUT, "/environments/order", Some(json!({ "order": ["qa", "development", "preprod", "production"] }))).await;
     assert_eq!(slugs(&envs), ["qa", "development", "preprod", "production"]);
     let (s, _) = api.call(Method::DELETE, "/environments/qa", None).await;
-    assert_eq!(s, StatusCode::NO_CONTENT);
+    assert_eq!(s, StatusCode::OK);
+    // Production starts protected: deleting it names it.
+    let (s, e) = api.call(Method::DELETE, "/environments/production", None).await;
+    assert_eq!((s, e["code"].as_str()), (StatusCode::CONFLICT, Some("confirm_required")));
     for slug in ["development", "preprod"] {
         api.call(Method::DELETE, &format!("/environments/{slug}"), None).await;
     }
-    // Production starts protected: deleting it names it.
-    assert_eq!(api.call(Method::DELETE, "/environments/production", None).await.0, StatusCode::BAD_REQUEST);
     let (s, e) = api.call(Method::DELETE, "/environments/production?confirm=production", None).await;
     assert_eq!((s, e["code"].as_str()), (StatusCode::CONFLICT, Some("last_environment")));
 }
@@ -1843,6 +1844,11 @@ async fn links_read_live_values_issue_managed_credentials_rotate_and_lease_dynam
     // Of the linked keys, only the one whose field isn't a credential is plain (a log may show it).
     let all = api.values("production", "/").await;
     assert_eq!(all["plain"], json!(["AWS_ACCESS_KEY_ID"]), "{all}");
+    // Each linked key names what it links (a consumer replacing some resources drops only theirs).
+    let mut links = all["links"].as_array().cloned().unwrap_or_default();
+    links.sort_by_key(|l| l["name"].as_str().unwrap_or_default().to_string());
+    let of = |name: &str| json!({ "name": name, "kind": "bucket", "ref": "assets" });
+    assert_eq!(links, [of("AWS_ACCESS_KEY_ID"), of("AWS_SECRET_ACCESS_KEY"), of("BUCKET_URL")], "{all}");
     let leases = api.ok(Method::GET, "/leases", None).await;
     assert_eq!(leases[0]["kind"], "retired");
     api.ok(Method::DELETE, &format!("/leases/{}", leases[0]["id"].as_str().unwrap()), None).await;
@@ -2042,7 +2048,7 @@ async fn nothing_reaches_an_environment_its_caller_cannot_read() {
     let t = api.token(json!({ "name": "dev", "environments": ["development"], "actions": ["read", "reveal", "write", "delete"] }));
     let token = Some(t.as_str());
     let (s, _) = api.req(Method::DELETE, "/environments/development", None, token).await;
-    assert_eq!(s, StatusCode::NO_CONTENT);
+    assert_eq!(s, StatusCode::OK, "kept for the window");
     let (s, _) = api.req(Method::POST, "/environments", Some(json!({ "slug": "development", "base": "production" })), token).await;
     assert_eq!(s, StatusCode::FORBIDDEN);
     let link = json!({ "link": { "kind": "bucket", "ref": "assets", "field": "url", "mode": "live" } });
@@ -6919,6 +6925,108 @@ async fn past_its_window_a_deleted_project_ends_its_log_at_a_signed_digest_then_
     assert_eq!(api.call(Method::POST, &recover, None).await.0, StatusCode::NOT_FOUND);
 }
 
+#[tokio::test]
+async fn a_deleted_environment_reads_as_gone_its_references_say_so_and_it_comes_back() {
+    let api = Api::new().await;
+    api.set("staging", "DB", "postgres://staging.internal").await;
+    api.set("development", "UPSTREAM", "${staging.DB}").await;
+    // Before anything goes, the refusal and the dialog's preview name what breaks.
+    let pre = api.ok(Method::GET, "/environments/staging/deletion", None).await;
+    assert_eq!((pre["confirm"].as_bool(), pre["window_days"].as_i64()), (Some(true), Some(7)), "{pre}");
+    assert_eq!(pre["breaks"], json!([{ "environment": "development", "path": "/", "key": "UPSTREAM", "via": "reference" }]));
+    let (s, e) = api.call(Method::DELETE, "/environments/staging", None).await;
+    assert_eq!((s, e["code"].as_str()), (StatusCode::CONFLICT, Some("confirm_required")), "{e}");
+    assert!(e["error"].as_str().unwrap().contains("development:/UPSTREAM") && !e.to_string().contains("postgres://"), "{e}");
+    let gone = api.ok(Method::DELETE, "/environments/staging?confirm=staging", None).await;
+    assert_eq!(gone["purge_at"].as_i64().unwrap() - gone["deleted_at"].as_i64().unwrap(), 7 * 86_400_000);
+
+    // Nobody reads it, a reference to it says why, and its slug stays its own.
+    assert_eq!(api.call(Method::GET, "/environments/staging/values?path=/", None).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(slugs(&api.ok(Method::GET, "/environments", None).await), ["development", "production"]);
+    assert_eq!(api.ok(Method::GET, "/v1/secrets/search?key=DB", None).await, json!([]));
+    let v = api.values("development", "/").await;
+    assert!(v["problems"].to_string().contains("references staging, which was deleted; recover it or change the reference"), "{v}");
+    let (s, e) = api.call(Method::POST, "/environments", Some(json!({ "slug": "staging" }))).await;
+    assert!(s == StatusCode::CONFLICT && e["error"].as_str().unwrap().contains("recover"), "{e}");
+    let deleted = api.ok(Method::GET, "/v1/secrets/deleted", None).await;
+    assert_eq!((deleted[0]["environment"].as_str(), deleted[0]["project"].as_str()), (Some("staging"), Some(api.project.as_str())), "{deleted}");
+    assert_eq!(api.as_ada(Method::GET, "/v1/secrets/deleted", None).await.1, json!([]), "not hers to see");
+
+    api.ok(Method::POST, "/environments/staging/recover", None).await;
+    assert_eq!(api.values("development", "/").await["values"]["UPSTREAM"], "postgres://staging.internal");
+    assert_eq!(api.call(Method::POST, "/environments/staging/recover", None).await.0, StatusCode::NOT_FOUND, "not deleted any more");
+    let audit = api.ok(Method::GET, "/audit?action=environment", None).await;
+    let actions: Vec<&str> = audit.as_array().unwrap().iter().map(|e| e["action"].as_str().unwrap()).collect();
+    assert!(actions.contains(&"environment.delete") && actions.contains(&"environment.recover"), "{actions:?}");
+    // A protected environment with no approvals (a new project's production) goes directly once confirmed.
+    assert_eq!(api.call(Method::DELETE, "/environments/production", None).await.0, StatusCode::CONFLICT);
+    assert_eq!(api.call(Method::DELETE, "/environments/production?confirm=production", None).await.0, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn deleting_a_protected_environment_that_asks_for_approvals_is_a_change_request() {
+    let api = Api::new().await;
+    api.set("production", "KEY", "kept").await;
+    api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true, "approvals": 1 }))).await;
+    let (s, r) = api.call(Method::DELETE, "/environments/production?confirm=production", None).await;
+    assert_eq!((s, r["request"]["action"].as_str(), r["request"]["state"].as_str()), (StatusCode::ACCEPTED, Some("delete_environment"), Some("open")), "{r}");
+    let id = r["request"]["id"].as_str().unwrap();
+    assert_eq!(api.values("production", "/").await["values"]["KEY"], "kept", "nothing went yet");
+    let (s, e) = api.call(Method::POST, &format!("/environments/production/requests/{id}/apply"), None).await;
+    assert_eq!((s, e["code"].as_str()), (StatusCode::CONFLICT, Some("approval_required")));
+    let reviewer = api.token(json!({ "name": "lead", "actions": ["read", "admin", "write", "delete"] }));
+    let (s, r) = api.req(Method::POST, &format!("/environments/production/requests/{id}/review"), Some(json!({ "verdict": "approve" })), Some(&reviewer)).await;
+    assert_eq!((s, r["state"].as_str()), (StatusCode::OK, Some("approved")), "{r}");
+    let r = api.ok(Method::POST, &format!("/environments/production/requests/{id}/apply"), None).await;
+    assert_eq!(r["state"], "applied");
+    assert_eq!(api.call(Method::GET, "/environments/production", None).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(api.ok(Method::GET, "/v1/secrets/deleted", None).await[0]["environment"], "production");
+}
+
+#[tokio::test]
+async fn a_project_holding_only_a_registered_resource_needs_a_secrets_admins_confirmation() {
+    let api = Api::new().await;
+    api.ok(Method::POST, "/rotators", Some(json!({ "name": "stripe", "url": "https://rotator.example/stripe?token=t" }))).await;
+    let (s, e) = delete_project(&api, "", None).await;
+    assert_eq!((s, e["code"].as_str()), (StatusCode::CONFLICT, Some("project_holds_secrets")), "{e}");
+    assert!(e["error"].as_str().unwrap().contains("1 rotator"), "{e}");
+    let writer = api.token(json!({ "actions": ["read", "write", "delete"] }));
+    assert_eq!(delete_project(&api, "?confirm=shop", Some(&writer)).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(delete_project(&api, "?confirm=shop", None).await.0, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn past_its_window_a_deleted_environment_is_purged_and_leaves_no_rows() {
+    let api = Api::new().await;
+    api.set("staging", "KEY", "v1").await;
+    api.set("staging", "KEY", "v2").await;
+    api.ok(Method::PUT, "/environments/staging/imports?path=/", Some(json!([{ "environment": "development", "path": "/" }]))).await;
+    let p = api.project.clone();
+    let id: String = api.db.read(move |c| c.query_row("SELECT id FROM environments WHERE project_id = ? AND slug = 'staging'", [p.as_str()], |r| r.get(0))).unwrap();
+    api.ok(Method::DELETE, "/environments/staging", None).await;
+    let sweep = || {
+        let s = api.secrets.clone();
+        async move { tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap() }
+    };
+    let count = |table: &str| {
+        let (sql, e) = (format!("SELECT COUNT(*) FROM {table} WHERE {}", if table == "environments" { "id = ?" } else { "env_id = ?" }), id.clone());
+        api.db.read(move |c| c.query_row(&sql, [e.as_str()], |r| r.get::<_, i64>(0))).unwrap()
+    };
+    sweep().await;
+    assert_eq!((count("secrets"), count("environments")), (1, 1), "nothing goes within the window");
+    let e = id.clone();
+    api.db.write(move |c| c.execute("UPDATE environments SET purge_at = 0 WHERE id = ?", [e.as_str()])).unwrap();
+    sweep().await;
+    for t in ["secrets", "versions", "changes", "folders", "imports", "requests", "leases", "environments"] {
+        assert_eq!(count(t), 0, "{t}");
+    }
+    let audit = api.ok(Method::GET, "/audit?action=environment.purge", None).await;
+    assert_eq!(audit[0]["environment"], "staging", "{audit}");
+    assert_eq!(api.call(Method::POST, "/environments/staging/recover", None).await.0, StatusCode::NOT_FOUND);
+    api.ok(Method::POST, "/environments", Some(json!({ "slug": "staging" }))).await;
+}
+
+
 /// rolld's services and sandboxes as reach asks for them: `web` deploys staging, `api` reads
 /// production through a `roll://` variable, and a sandbox holds development's KEY and OTHER.
 struct FakeHolders;
@@ -6966,40 +7074,113 @@ async fn reach_names_the_people_clients_and_holders_of_a_folder() {
     assert!(!r.to_string().contains("fake-dev"), "names, never a value");
 }
 
+#[tokio::test]
+async fn the_events_feed_answers_in_commit_order_filtered_by_kind_environment_and_access_and_never_holds_a_value() {
+    let api = Api::new().await;
+    let (staging, production) = ("sk_live_feedstaging0123456789", "sk_live_feedproduction987654");
+    api.set("staging", "STRIPE_KEY", staging).await;
+    api.set("production", "STRIPE_KEY", production).await;
+    let start = api.ok(Method::GET, "/events?latest=1", None).await;
+    assert_eq!(start["events"], json!([]));
+    let start = start["next"].as_i64().unwrap();
+    assert!(start > 0, "the head moved with the writes: {start}");
+    assert_eq!(api.call(Method::GET, "/events?latest=1&after=0", None).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(api.call(Method::GET, "/events?kinds=secret", None).await.0, StatusCode::BAD_REQUEST);
+
+    // A scan matching both (a row per environment), production losing its protection, an
+    // environment deleted and recovered.
+    api.ok(Method::POST, "/leaks", Some(json!({ "candidates": [staging, production, "not-a-stored-value-123"] }))).await;
+    api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": false }))).await;
+    api.ok(Method::POST, "/environments", Some(json!({ "slug": "qa" }))).await;
+    api.ok(Method::DELETE, "/environments/qa", None).await;
+    api.ok(Method::POST, "/environments/qa/recover", None).await;
+
+    let all = api.ok(Method::GET, &format!("/events?after={start}"), None).await;
+    let events = all["events"].as_array().unwrap();
+    let got: Vec<(&str, Option<&str>)> = events.iter().map(|e| (e["kind"].as_str().unwrap(), e["environment"].as_str())).collect();
+    assert_eq!(got, [("scan.finding", Some("production")), ("scan.finding", Some("staging")), ("production.unprotected", Some("production")), ("env.deleted", Some("qa")), ("env.recovered", Some("qa"))]);
+    let seqs: Vec<i64> = events.iter().map(|e| e["seq"].as_i64().unwrap()).collect();
+    assert!(seqs.windows(2).all(|w| w[0] < w[1]) && seqs[0] > start, "{seqs:?}");
+    assert_eq!(all["next"], json!(seqs[4]));
+    assert_eq!(events[0]["key"], "STRIPE_KEY");
+    assert_eq!(events[0]["data"]["matched"], 2);
+    // Never a value, or anything made from one: names, kinds, ids, counts and reasons.
+    let text = all.to_string();
+    assert!(!text.contains(staging) && !text.contains(production) && !text.contains("feedstaging") && !text.contains("feedproduction"), "{text}");
+    for e in events {
+        for field in e["data"].as_object().unwrap().keys() {
+            assert!(["actor", "path", "keys", "candidates", "matched", "guard", "purge_at"].contains(&field.as_str()), "{field} in {e}");
+        }
+    }
+
+    // Filtered by the route: kinds (a family too), the environment, and a page at a time.
+    let kinds = |q: &str| {
+        let api = &api;
+        let q = q.to_string();
+        async move { api.ok(Method::GET, &format!("/events?after={start}&{q}"), None).await["events"].as_array().unwrap().iter().map(|e| e["kind"].as_str().unwrap().to_string()).collect::<Vec<_>>() }
+    };
+    assert_eq!(kinds("kinds=scan.*").await, ["scan.finding", "scan.finding"]);
+    assert_eq!(kinds("kinds=env.deleted,production.unprotected").await, ["production.unprotected", "env.deleted"]);
+    assert_eq!(kinds("environment=staging").await, ["scan.finding"]);
+    let page = api.ok(Method::GET, &format!("/events?after={start}&limit=1&kinds=production.unprotected,env.deleted"), None).await;
+    assert_eq!((page["events"].as_array().unwrap().len(), &page["next"]), (1, &json!(seqs[2])));
+    let rest = api.ok(Method::GET, &format!("/events?after={}&kinds=production.unprotected,env.deleted", seqs[2]), None).await;
+    assert_eq!(rest["events"][0]["seq"], json!(seqs[3]));
+
+    // A token that reads only staging: production's and qa's events are left out, and naming
+    // production is a 403.
+    let token = api.token(json!({ "environments": ["staging"], "actions": ["read"] }));
+    let (s, mine) = api.req(Method::GET, &format!("/events?after={start}"), None, Some(&token)).await;
+    assert_eq!(s, StatusCode::OK, "{mine}");
+    let mine: Vec<&str> = mine["events"].as_array().unwrap().iter().map(|e| e["environment"].as_str().unwrap()).collect();
+    assert_eq!(mine, ["staging"]);
+    assert_eq!(api.req(Method::GET, "/events?environment=production", None, Some(&token)).await.0, StatusCode::FORBIDDEN);
+
+    // `latest` is the head, past every event.
+    let head = api.ok(Method::GET, "/events?latest=1", None).await["next"].as_i64().unwrap();
+    assert!(head >= seqs[4]);
+    assert_eq!(api.ok(Method::GET, &format!("/events?after={head}"), None).await["events"], json!([]));
+}
+
 /// A watcher's delta read (docs/secrets.md, "Delta reads"): after one key changes and another
-/// goes, it gets that key and what references it, the gone key's name, and their new stamps;
-/// it's audited as an export naming only those keys. Sent back as it now is, it's nothing.
+/// goes, it gets that key, what references it and a live link's key (read again, as a full read
+/// would), the gone key's name, and their new stamps, with the folder's whole `links`; it's
+/// audited as an export naming only those keys. Sent back as it now is, it's nothing.
 #[tokio::test]
 async fn a_watchers_delta_returns_what_changed_and_is_audited() {
     let api = Api::new().await;
     for (k, v) in [("A", "1"), ("B", "2"), ("C", "3"), ("R", "${A}-x")] {
         api.set("production", k, v).await;
     }
+    api.ok(Method::PUT, &format!("/v1/workspace/projects/{}/resources/bucket/assets", api.project), Some(json!({ "x": 0, "y": 0 }))).await;
+    api.ok(Method::PUT, "/environments/production/secrets/L", Some(json!({ "link": { "kind": "bucket", "ref": "assets", "field": "url", "mode": "live" } }))).await;
     let tok = api.token(json!({ "environments": ["production"], "actions": ["read", "reveal"] }));
     let delta = |held: Value| api.req(Method::POST, "/environments/production/values/delta", Some(held), Some(&tok));
     let (s, full) = delta(json!({})).await;
     assert_eq!((s, full["delta"].as_bool()), (StatusCode::OK, Some(false)), "{full}");
-    assert_eq!(full["values"], json!({ "A": "1", "B": "2", "C": "3", "R": "1-x" }));
-    assert_eq!(full["stamps"].as_object().map(|s| s.len()), Some(4), "{full}");
+    assert_eq!(full["values"].as_object().unwrap().keys().collect::<Vec<_>>(), ["A", "B", "C", "L", "R"]);
+    assert_eq!(full["stamps"].as_object().map(|s| s.len()), Some(5), "{full}");
 
     api.set("production", "A", "10").await;
     api.ok(Method::DELETE, "/environments/production/secrets/C", None).await;
     let held = |a: &Value| json!({ "digest": a["digest"], "basis": a["basis"], "stamps": a["stamps"] });
     let (s, d) = delta(held(&full)).await;
     assert_eq!((s, d["delta"].as_bool()), (StatusCode::OK, Some(true)), "{d}");
-    assert_eq!((d["values"].clone(), d["removed"].clone()), (json!({ "A": "10", "R": "10-x" }), json!(["C"])));
-    assert_eq!(d["stamps"].as_object().unwrap().keys().collect::<Vec<_>>(), ["A", "R"]);
+    assert_eq!((d["values"]["A"].clone(), d["values"]["L"].clone(), d["values"]["R"].clone(), d["removed"].clone()), (json!("10"), full["values"]["L"].clone(), json!("10-x"), json!(["C"])));
+    assert_eq!(d["stamps"].as_object().unwrap().keys().collect::<Vec<_>>(), ["A", "L", "R"]);
+    assert_eq!((d["links"].clone(), d["linked"].clone()), (full["links"].clone(), json!(["L"])), "{d}");
     assert_ne!(d["stamps"]["A"], full["stamps"]["A"]);
     let (_, now) = api.req(Method::GET, "/environments/production/digest", None, Some(&tok)).await;
     assert_eq!(d["digest"], now["digest"]);
     let audit = api.ok(Method::GET, "/audit?action=secrets.export", None).await;
-    assert_eq!(audit[0]["keys"], json!(["A", "R"]), "{}", audit[0]);
+    assert_eq!(audit[0]["keys"], json!(["A", "L", "R"]), "{}", audit[0]);
 
     let mut kept = full["stamps"].as_object().unwrap().clone();
     kept.remove("C");
     kept.extend(d["stamps"].as_object().unwrap().clone());
     let (_, again) = delta(json!({ "digest": d["digest"], "basis": d["basis"], "stamps": kept })).await;
     assert_eq!((again["delta"].as_bool(), again["values"].clone(), again["removed"].clone()), (Some(true), json!({}), json!([])), "{again}");
+    assert_eq!(full["links"], json!([{ "name": "L", "kind": "bucket", "ref": "assets" }]));
 }
 
 /// A delta can't vouch for what a permission decided: once the token may no longer reveal the
