@@ -21,6 +21,8 @@ export function verdict(p: Preview): VerdictItem[] {
   if (failed) out.push({ target: "services", text: `${plural(failed, "service")} failed`, tone: "danger" });
   const breaking = p.base_change?.api_breaking?.length ?? 0;
   if (breaking) out.push({ target: "api", text: `${plural(breaking, "breaking API change")}`, tone: "danger" });
+  const reshaped = p.base_change?.endpoints?.filter((e) => e.shape_changes?.length).length ?? 0;
+  if (reshaped) out.push({ target: "endpoints", text: reshaped === 1 ? "1 endpoint's answer changed shape" : `${reshaped} endpoints' answers changed shape`, tone: "danger" });
   const risks = p.schema_risks?.length ?? 0;
   if (risks) out.push({ target: "schema", text: `${plural(risks, "migration risk")}`, tone: "danger" });
   const added = checkSummary(p).added ?? 0;
