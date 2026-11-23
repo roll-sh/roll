@@ -202,6 +202,8 @@ pub struct ServiceSpec {
     pub env: Vec<(String, String)>,
     /// A path that answers 2xx/3xx once the service works (`roll.toml` `health`).
     pub health: Option<String>,
+    /// A page loaded before a push keeps reaching that push (`roll.toml` `skew_protection`).
+    pub skew_protection: bool,
     /// Page states its screenshots reach, from its `roll.toml` (`[[preview.states]]`).
     pub states: Vec<crate::settings::StateRule>,
     /// More of its own pages, and selectors blanked in screenshots, from its `roll.toml`.

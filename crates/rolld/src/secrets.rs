@@ -1325,9 +1325,9 @@ impl roll_secrets::reach::Holders for ReachHolders {
             }
             for env in apps.store.environments(&svc.id).map_err(|e| e.to_string())? {
                 let last_deployed_at = env.active.as_deref().and_then(|d| apps.store.deployment(d).ok()).map(|d| d.finished_at.unwrap_or(d.created_at));
-                // A variable goes back only when it is a `roll://` reference (its text, as roll
-                // secrets parses it); every other value is dropped here.
-                let references = apps.store.variables(&svc.id, &env.name).map_err(|e| e.to_string())?.into_values().filter(|v| matches!(roll_secrets::Reference::parse(v), Ok(Some(_)))).collect();
+                // Its `roll://` references, as roll apps keeps them beside the values (roll
+                // secrets' parser decided when each was set): no value is opened.
+                let references = apps.store.variable_references(&svc.id, &env.name).map_err(|e| e.to_string())?.into_values().collect();
                 out.push(roll_secrets::reach::ServiceUse { service: svc.id.clone(), name: svc.name.clone(), environment: env.name, last_deployed_at, references });
             }
         }
@@ -2281,7 +2281,7 @@ impl code_control::SecretEnv for ForCode {
         let maker: roll_secrets::Maker = serde_json::from_value(serde_json::Value::String(maker.to_string()))?;
         let (resource, reference) = (roll_secrets::ResourceRef::agent_machine(owner, machine), reference.to_string());
         tokio::task::spawn_blocking(move || {
-            let v = secrets.resolve_as(&resource, &reference, &maker).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let v = secrets.resolve_as(&resource, &reference, &maker).map_err(machine_refusal)?;
             Ok(code_control::CredentialValue(v.value.expose().to_string()))
         })
         .await?
@@ -2292,7 +2292,7 @@ impl code_control::SecretEnv for ForCode {
         let secrets = self.secrets().map_err(|e| anyhow::anyhow!("{e}"))?;
         let maker: roll_secrets::Maker = serde_json::from_value(serde_json::Value::String(maker.to_string()))?;
         let (resource, reference) = (roll_secrets::ResourceRef::agent_machine(owner, machine), reference.to_string());
-        tokio::task::spawn_blocking(move || secrets.digest_as(&resource, &reference, &maker).map_err(|e| anyhow::anyhow!("{e}"))).await?
+        tokio::task::spawn_blocking(move || secrets.digest_as(&resource, &reference, &maker).map_err(machine_refusal)).await?
     }
 
     /// That key for a review, as its maker may read it now (audited as `code:review:<owner>`).
@@ -2329,6 +2329,17 @@ fn bind_for_code(secrets: &Secrets, resource: &roll_secrets::ResourceRef, refere
         e => code_control::Error::Invalid(e.to_string()),
     })?;
     Ok(serde_json::to_value(&maker).map_err(|e| code_control::Error::Internal(e.into()))?.as_str().unwrap_or_default().to_string())
+}
+
+/// Why an agent machine's `roll://` key didn't read, as roll code's relay acts on it: a refusal
+/// (`code_control::Refused`: the daemon drops the key it held) only when roll secrets refused; a
+/// database, a KMS or a product that didn't answer, or too many reads, leave the daemon's key as
+/// it is until the relay asks again (so does "roll secrets is starting", before this is reached).
+fn machine_refusal(e: roll_secrets::Refusal) -> anyhow::Error {
+    match e {
+        roll_secrets::Refusal::Failed(e @ (Error::Db(_) | Error::Internal(_) | Error::Unavailable(_) | Error::TooMany(_) | Error::Link(_))) => e.into(),
+        e => code_control::Refused(e.to_string()).into(),
+    }
 }
 
 /// roll secrets' answer as roll code's API answers it (the same statuses).

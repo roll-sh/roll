@@ -705,7 +705,7 @@ async fn people_are_held_to_their_cluster_caps() {
 #[tokio::test]
 async fn branches() {
     let e = env().await;
-    let c = e.post("/v1/search/clusters", json!({"name": "shop", "max_in_flight": 16})).await;
+    let c = e.post("/v1/search/clusters", json!({"name": "shop", "max_in_flight": 16, "reindex_whitelist": ["es.example.com:443"]})).await;
     let id = c["id"].as_str().unwrap().to_string();
     let (user, pw) = creds(&c);
     // A branch of a cluster that was never written to is empty.
@@ -724,6 +724,8 @@ async fn branches() {
     assert_eq!(b["parent_id"], id.as_str());
     assert_eq!(b["parent_name"], "shop");
     assert_eq!(b["max_in_flight"], 16);
+    // Not the parent's remotes: a branch whitelists its own.
+    assert_eq!((c["reindex_whitelist"].clone(), b["reindex_whitelist"].clone()), (json!(["es.example.com:443"]), json!([])));
     let (bu, bp) = creds(&b);
     assert_ne!(bp, pw);
     // Figures of a branch that never loaded come from its stored state.
@@ -956,6 +958,9 @@ async fn browsers_search_with_browser_keys() {
     assert_eq!(body(&r)["defaults"]["http.cors.allow-origin"], "https://shop.example.com", "{r}");
 
     let made = |k: Value| e.post(&keys, k);
+    // `alias:index` would reach a remote cluster.
+    let (s, v) = e.call(reqwest::Method::POST, &keys, Some(json!({"name": "remote", "indices": ["other:products"]}))).await;
+    assert!(s == 400 && v.to_string().contains("browser keys can't search across clusters"), "{s} {v}");
     let reader = made(json!({"name": "shop page", "indices": ["products"], "filter": {"term": {"public": true}}})).await;
     let runner = made(json!({"name": "app page", "application": "shop-search", "rate_limit": {"per_minute": 3}})).await;
     assert_eq!((reader["rate_limit"]["per_minute"].as_u64(), runner["application"].as_str()), (Some(600), Some("shop-search")));
@@ -2461,7 +2466,7 @@ impl TestBucket {
         }
         let at = search_es::s3::Location { endpoint: reqwest::Url::parse(&endpoint).unwrap(), bucket, region: "us-east-1".into(), path_style: true };
         let creds = keys.map(|(access_key, secret_key)| search_es::s3::Credentials { access_key, secret_key, session_token: None });
-        let client = search_es::s3::Client::new(at, creds, true).unwrap();
+        let client = search_es::s3::Client::new(at, creds, &search_es::egress::Egress::of(|_| None, true).unwrap()).unwrap();
         TestBucket { mock, settings, client, base }
     }
 
@@ -2704,6 +2709,20 @@ async fn an_s3_repository_analysis_exercises_the_bucket() {
     assert!(innermost.starts_with("[broken] node [{") && innermost.ends_with("reported blob not found after it was written"), "{v}");
     assert_eq!(err["root_cause"][0]["reason"].as_str(), Some(innermost), "{v}");
     assert!(m.keys("broken/roll/temp-analysis-").is_empty(), "the failed analysis left blobs behind");
+}
+
+/// A repository's endpoint written as an address is checked against what the node's own names
+/// resolve to when its client is built, not against a copy that may be empty or stale: a
+/// deny-list name leading to it is refused before anything connects.
+#[tokio::test]
+async fn a_repository_endpoint_at_one_of_the_nodes_own_addresses_is_refused() {
+    let e = env_with(|c| c.node_settings.push((search_control::EGRESS_DENY_NAMES.into(), "1.2.3.4".into()))).await;
+    let (u, p) = creds(&e.post("/v1/search/clusters", json!({"name": "own"})).await);
+    let repo = json!({"type": "s3", "settings": {"bucket": "backups", "endpoint": "http://1.2.3.4:9", "path_style_access": true}});
+    let (s, v) = e.es(&u, &p, reqwest::Method::PUT, "/_snapshot/own?verify=false", Some(repo)).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = e.es(&u, &p, reqwest::Method::POST, "/_snapshot/own/_verify", None).await;
+    assert!(s >= 400 && v.to_string().contains("[1.2.3.4] is an address roll may not reach"), "{s} {v}");
 }
 
 /// An `s3` repository in a tenant's bucket: credentials sign every request and are never shown,
@@ -4760,7 +4779,7 @@ async fn a_migration_is_bounded() {
     // `inspect`: no oracle for which names point at roll's own addresses.
     let denied = env_with(|c| {
         c.node_settings.push((search_control::REINDEX_ALLOW_PRIVATE.into(), "true".into()));
-        c.node_settings.push((search_control::REINDEX_DENY_ADDRESSES.into(), "127.0.0.0/8,::1".into()));
+        c.node_settings.push((search_control::EGRESS_DENY_ADDRESSES.into(), "127.0.0.0/8,::1".into()));
     })
     .await;
     denied.post("/v1/search/clusters", json!({ "name": "d" })).await;
@@ -4799,6 +4818,9 @@ async fn a_migration_is_bounded() {
     let source = json!({ "host": e.es, "username": old, "password": old_pw });
     let started = e.post("/v1/search/clusters/dst/migrate", json!({ "source": source, "indices": [{ "index": "a" }, { "index": "b" }, { "index": "c" }], "requests_per_second": 0.0001 })).await;
     let rows = started["indices"].as_array().unwrap();
+    // Each copy reserves a task slot before reading the remote's definitions, and its `_reindex`
+    // uses that reservation: with two slots per cluster, `b` starts only because `a`'s
+    // reservation became `a`'s task rather than being held besides it.
     assert!(rows[0]["task"].is_string() && rows[1]["task"].is_string(), "{started}");
     assert_eq!((rows[2]["queued"].as_bool(), rows[2]["created"].as_bool()), (Some(true), None), "{started}");
     let (_, c) = e.call(Method::POST, "/v1/search/clusters/dst/request", Some(json!({ "method": "HEAD", "path": "/c" }))).await;
@@ -4808,7 +4830,7 @@ async fn a_migration_is_bounded() {
         e.call(Method::POST, "/v1/search/clusters/dst/request", Some(json!({ "method": "POST", "path": format!("/_tasks/{t}/_cancel") }))).await;
         e.call(Method::POST, "/v1/search/clusters/dst/request", Some(json!({ "method": "GET", "path": format!("/_tasks/{t}?wait_for_completion=true&timeout=10s") }))).await;
     }
-    // The slots are free again: the waiting index starts.
+    // The slots are free again (no reservation outlived its copy): the waiting index starts.
     let again = e.post("/v1/search/clusters/dst/migrate", json!({ "source": source, "indices": [{ "index": "c" }] })).await;
     assert!(again["indices"][0]["task"].is_string(), "{again}");
 }

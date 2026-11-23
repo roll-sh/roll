@@ -1,9 +1,10 @@
 //! Requests to inference services.
 //!
 //! An endpoint's URL is chosen by the tenant (OpenAI's `url`, and every service's host when the
-//! node overrides it), so roll's rule for such URLs applies (AGENTS.md): a client that resolves
-//! names to public addresses only ([`roll_net::PublicOnly`]), refuses private IP literals and
-//! `localhost` ([`roll_net::literal_private_host`]), follows no redirects, uses no proxy and reads
+//! node overrides it), so roll's rule for such URLs applies (AGENTS.md), through the node's egress
+//! check ([`crate::egress`]): a client that resolves names to public addresses only, never to one
+//! the node denies, refuses private and denied IP literals and `localhost`, follows no
+//! redirects, uses no proxy and reads
 //! at most [`MAX_RESPONSE`] bytes. The node setting [`ALLOW_PRIVATE`] lifts the address check, for
 //! test clusters whose endpoints call a mock on the same host; it is off unless set.
 //!
@@ -156,30 +157,31 @@ pub async fn post_stream(cluster: &Cluster, call: &Call<'_>) -> EsResult<Answer>
 }
 
 async fn exchange(cluster: &Cluster, call: &Call<'_>, max: usize, stream: bool) -> EsResult<Answer> {
-    let allow_private = cluster.config.node_setting(ALLOW_PRIVATE).is_some_and(|v| v.eq_ignore_ascii_case("true"));
+    let egress = crate::egress::Egress::of_cluster(cluster, ALLOW_PRIVATE);
     let invalid = || EsError::status(400, format!("Invalid host [{}], please check that the URL is correct.", redact(&call.url)));
     let url = reqwest::Url::parse(&call.url).map_err(|_| invalid())?;
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none_or(str::is_empty) {
         return Err(invalid());
     }
-    if !allow_private && roll_net::literal_private_host(&url) {
-        return Err(EsError::status(
-            400,
-            format!(
-                "host [{}] is a private address, which inference endpoints may not connect to unless [{ALLOW_PRIVATE}] is set",
-                url.host_str().unwrap_or_default()
-            ),
-        ));
+    match egress.check_url_now(&url).await {
+        Err(crate::egress::Refused::Private(_)) => {
+            return Err(EsError::status(
+                400,
+                format!(
+                    "host [{}] is a private address, which inference endpoints may not connect to unless [{ALLOW_PRIVATE}] is set",
+                    url.host_str().unwrap_or_default()
+                ),
+            ));
+        }
+        Err(e) => return Err(EsError::status(400, format!("host [{}]: {e}", url.host_str().unwrap_or_default()))),
+        Ok(()) => {}
     }
     let cap = max_timeout(cluster);
     let timeout = call.timeout.min(cap);
-    let mut b = reqwest::Client::builder().connect_timeout(timeout.min(Duration::from_secs(10))).redirect(reqwest::redirect::Policy::none()).no_proxy();
+    let mut b = reqwest::Client::builder().connect_timeout(timeout.min(Duration::from_secs(10))).redirect(reqwest::redirect::Policy::none()).no_proxy().dns_resolver(egress.resolver());
     // A stream's body outlives the request's timeout: its waits are bounded below instead.
     if !stream {
         b = b.timeout(timeout);
-    }
-    if !allow_private {
-        b = b.dns_resolver(std::sync::Arc::new(roll_net::PublicOnly));
     }
     let client = b.build().map_err(|e| EsError::illegal_state(e.to_string()))?;
     let started = Instant::now();

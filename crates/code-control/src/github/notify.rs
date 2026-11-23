@@ -662,6 +662,10 @@ fn page_checks(e: &crate::model::PreviewEnvironment) -> Option<String> {
             if slower > 0 {
                 summary.push(format!("{} slower than {branch}", plural(slower as u64, "endpoint", "endpoints")));
             }
+            let reshaped = b.endpoints.iter().filter(|x| !x.shape_changes.is_empty()).count();
+            if reshaped > 0 {
+                summary.push(if reshaped == 1 { format!("1 endpoint's answer changed shape against {branch}") } else { format!("{reshaped} endpoints' answers changed shape against {branch}") });
+            }
             details.push_str(&endpoints_line(&b.endpoints, &branch));
         }
         // roll's own signed link (a public preview's); nothing in it can end the image's markdown.
@@ -1008,7 +1012,18 @@ fn endpoints_line(endpoints: &[crate::model::PreviewEndpoint], branch: &str) -> 
             let path = x.path.replace('`', "'");
             let main = x.main_ms.map(|m| format!(" ({branch} {m} ms)")).unwrap_or_default();
             let status = if x.status == 0 { ", no answer".to_string() } else if x.status >= 400 { format!(", {}", x.status) } else { String::new() };
-            format!("`GET {path}` {} ms{main}{status}{}", x.ms, if x.slower { ", slower" } else { "" })
+            // The answer's fields, each in a code span nothing in it can close.
+            let field = |s: &str| format!("`{}`", s.chars().filter(|c| !c.is_control() && *c != '`').take(200).collect::<String>());
+            let shape: Vec<String> = x
+                .shape_changes
+                .iter()
+                .map(|c| match &c.now {
+                    None => format!("{} gone", field(&c.path)),
+                    Some(now) => format!("{} {} → {}", field(&c.path), field(&c.main), field(now)),
+                })
+                .collect();
+            let shape = if shape.is_empty() { String::new() } else { format!(", its answer: {}", shape.join(", ")) };
+            format!("`GET {path}` {} ms{main}{status}{}{shape}", x.ms, if x.slower { ", slower" } else { "" })
         })
         .collect();
     format!("Its endpoints against `{branch}`: {}.\n\n", each.join("; "))
@@ -1232,12 +1247,18 @@ mod preview_tests {
         let words = crate::model::PreviewTextDiff { added: vec!["Pay ```now".into()], removed: vec!["Checkout".into()], added_n: 1, removed_n: 1 };
         assert_eq!(text_block(&words, "main"), "**Its words against `main`:**\n\n```diff\n- Checkout\n+ Pay now\n```\n\n");
         let api = crate::model::PreviewTextDiff { added: vec!["POST /orders".into()], removed: vec!["DELETE /users/{id}`x".into()], added_n: 1, removed_n: 1 };
-        let ep = |path: &str, ms, main_ms, slower| crate::model::PreviewEndpoint { path: path.into(), ms, status: 200, main_ms, slower };
+        let ep = |path: &str, ms, main_ms, slower| crate::model::PreviewEndpoint { path: path.into(), ms, status: 200, main_ms, slower, shape_changes: Vec::new() };
         assert_eq!(
             endpoints_line(&[ep("/api/users", 140, Some(40), true), ep("/api/`x`", 12, None, false)], "main"),
             "Its endpoints against `main`: `GET /api/users` 140 ms (main 40 ms), slower; `GET /api/'x'` 12 ms.\n\n",
             "a path can't end its code span"
         );
+        let mut reshaped = ep("/api/users", 40, Some(40), false);
+        reshaped.shape_changes = vec![
+            crate::model::PreviewShapeChange { path: "users[].email`".into(), main: "string".into(), now: None },
+            crate::model::PreviewShapeChange { path: "total".into(), main: "number".into(), now: Some("string".into()) },
+        ];
+        assert_eq!(endpoints_line(&[reshaped], "main"), "Its endpoints against `main`: `GET /api/users` 40 ms (main 40 ms), its answer: `users[].email` gone, `total` `number` → `string`.\n\n");
         assert_eq!(api_line(&api, &[], "main"), "**Its API against `main`:** removes `DELETE /users/{id}x` (breaking for callers of `main`'s); adds `POST /orders`.\n\n", "an operation can't end its code span");
         let same = crate::model::PreviewTextDiff { added: vec![], removed: vec![], added_n: 0, removed_n: 0 };
         assert_eq!(

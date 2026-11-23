@@ -79,7 +79,7 @@ RSS0=$(ps -o rss= -p "$PID")
 say "a repo with a service, and one of each data resource"
 api POST /v1/code/owners '{"name":"acme","kind":"org"}' >/dev/null
 api POST /v1/code/repos '{"owner":"acme","name":"web","source":"native"}' >/dev/null
-TOML='[preview]\nimage = \"'"$IMAGE"'\"\nrun = \"env > env.txt && python -m http.server $PORT\"\nport = 8000\nhealth = \"/\"\nmemory = 128\ncpus = 0.25\npages = [\"/index.html\"]\n[[preview.states]]\nname = \"repo-tab\"\npage = \"/\"\nsteps = [{ press = \"Tab\" }]\n'
+TOML='[preview]\nimage = \"'"$IMAGE"'\"\nrun = \"env > env.txt && python -m http.server $PORT\"\nport = 8000\nhealth = \"/\"\nskew_protection = true\nmemory = 128\ncpus = 0.25\npages = [\"/index.html\"]\n[[preview.states]]\nname = \"repo-tab\"\npage = \"/\"\nsteps = [{ press = \"Tab\" }]\n'
 # The service's API, as an OpenAPI document (github.openapi): the change removes one operation and adds one.
 OPENAPI_MAIN='{\"paths\":{\"/users\":{\"get\":{\"parameters\":[{\"name\":\"limit\",\"in\":\"query\",\"schema\":{\"type\":\"integer\"}}]}},\"/users/{id}\":{\"delete\":{}}}}'
 OPENAPI_CHG='"openapi.json":{"content":"{\"paths\":{\"/users\":{\"get\":{\"parameters\":[{\"name\":\"limit\",\"in\":\"query\",\"required\":true,\"schema\":{\"type\":\"integer\"}}]}},\"/orders\":{\"post\":{}}}}"}'
@@ -701,6 +701,15 @@ for _ in $(seq 1 120); do
   sleep 0.5
 done
 [ "$EARLIER_PAGE" = "preview of change 1, again" ] || { echo "the earlier push should serve its own page: $EARLIER_PAGE"; exit 1; }
+# Skew protection (`skew_protection = true`): on the head's own host, a request naming the push
+# before reaches it; a page load gets the current push and the cookie naming it.
+EARLIER_REV=$(api GET "/v1/previews/$PV" | jq_ "d['earlier'][0]['revision']")
+SKEWED=$(curl -sS -b "$JAR" -H "Host: $HOST" -H "x-deployment-id: $EARLIER_REV" "http://$API/")
+[ "$SKEWED" = "preview of change 1, again" ] || { echo "a request naming the push before should reach it: $SKEWED"; exit 1; }
+SKEW_LOAD=$(curl -sS -D - -b "$JAR" -H "Host: $HOST" -H "Sec-Fetch-Dest: document" -H "x-deployment-id: $EARLIER_REV" "http://$API/")
+CODE_REV=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/env.txt" | sed -n 's/^ROLL_DEPLOYMENT=//p')
+case "$SKEW_LOAD" in *"__roll_dpl=$CODE_REV;"*"preview of change 1, third"*) ;; *) echo "a page load should get the current push ($CODE_REV) and its cookie: $SKEW_LOAD"; exit 1;; esac
+[ -n "$CODE_REV" ] && [ "$CODE_REV" != "$EARLIER_REV" ] || { echo "the app should know its push as ROLL_DEPLOYMENT: '$CODE_REV'"; exit 1; }
 # It runs on its own copy of the data (taken before the next head's data step): a table the
 # preview's branch gets now isn't in the earlier push's.
 db_of() { curl -sS -b "$1" -H "Host: $2" "http://$API/env.txt" | sed -n 's/^DATABASE_URL=//p' | sed 's#host.docker.internal#127.0.0.1#'; }
@@ -838,6 +847,9 @@ API_BREAKING=$(api GET "/v1/previews/$PV" | jq_ "' | '.join(d['base_change'].get
 # Its endpoints timed on the preview's data, against main's (github.endpoints).
 ENDPOINTS=$(api GET "/v1/previews/$PV" | jq_ "' '.join('%s %s %s ms, main %s ms' % (x['path'], x['status'], x['ms'], x['main_ms']) for x in d['base_change'].get('endpoints') or [])")
 case "$ENDPOINTS" in "/openapi.json 200 "*" ms, main "[0-9]*" ms") ;; *) echo "the change's endpoints should be timed against main's: $ENDPOINTS"; exit 1;; esac
+# And its answer's shape against main's: the operation the change removes is a field gone.
+RESHAPED=$(api GET "/v1/previews/$PV" | jq_ "' | '.join('%s %s' % (c['path'], c.get('now') or 'gone') for x in d['base_change'].get('endpoints') or [] for c in x.get('shape_changes') or [])")
+[ "$RESHAPED" = "paths./users/{id} gone" ] || { echo "the change's /openapi.json should lose paths./users/{id} against main's: $RESHAPED"; exit 1; }
 case "$WORDS" in "+['preview of change 1"*"-['main']") ;; *) echo "the page's words should be compared with main's: $WORDS"; exit 1;; esac
 MAIN_LOAD=$(api GET "/v1/previews/$PV" | jq_ "d['base_change'].get('load_ms')")
 case "$MAIN_LOAD" in [0-9]*) ;; *) echo "the comparison with main should carry main's load time: $MAIN_LOAD"; exit 1;; esac
@@ -1133,6 +1145,7 @@ cat <<EOF
 | The first page's words against main's | $WORDS |
 | Its API against main's (from each one's OpenAPI document) / what it breaks in the operations both keep | $API_DIFF / $API_BREAKING |
 | Its endpoints against main's (the median of 10 GETs) | $ENDPOINTS |
+| Its endpoint's answer against main's, by shape | $RESHAPED |
 | SEO basics of the first page | $SEO |
 | /pricing's own checks (against main's /pricing) | $PRICING |
 | The first page's broken links (HEAD only) / new against main | $LINKS / $LINKS_NEW |
@@ -1173,6 +1186,7 @@ cat <<EOF
 | Accessibility of the test page (it has no lang and no title) | $A11Y; new against main: $A11Y_NEW |
 | The first page's speed, timed with its screenshot | $SPEED |
 | The push before, at its own URL | ${EARLIER_HOST%%.*}: its own page, on the same data |
+| A page loaded before the push (skew protection): a request naming it on the head's host / a page load | the push before's page / the current one, with the cookie __roll_dpl=$(bare "$CODE_REV" | cut -c1-10)… |
 | Search: products.name in the branch / in the parent / the branch's term dictionary | $ES_READ / $ES_PARENT / $ES_TERMS |
 | Search: the branch's data-only ELASTICSEARCH_API_KEY reads / makes a key | $KEY_READ / $KEY_MINT |
 | Search: an address in an array of objects / under a dotted key / in an index named logs.2024, in the branch | $ES_DEEP / $ES_DOTTED |

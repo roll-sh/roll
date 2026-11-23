@@ -1536,7 +1536,10 @@ instead of at the first rotation:
 - GitLab: one page of the project's or group's access tokens (listing them takes the role that
   makes them);
 - OpenAI: one page of the project's service accounts;
-- Datadog: one page of the API keys, or of the credential's user's application keys.
+- Datadog: one page of the API keys, or of the credential's user's application keys;
+- Cloudflare: the template token (read as each rotation will);
+- Databricks: the identity's tokens (`GET /api/2.0/token/list`);
+- Confluent: one page of the owner's API keys.
 
 | `vendor` | `target` | `credential` | Issue | Revoke |
 | --- | --- | --- | --- | --- |
@@ -1548,6 +1551,9 @@ instead of at the first rotation:
 | `gitlab` | `{host?: "gitlab.com", project: "123" \| "group/project"` or `group: "456" \| "group", scopes: ["read_api", …], access_level?: 10-40 (50 for a group; default 40), expires_days?: 1-400 (default 365)}` | an access token with the `api` scope of a Maintainer or Owner of the project or group | `POST https://{host}/api/v4/{projects\|groups}/{id}/access_tokens {name, scopes, access_level, expires_at}` (`PRIVATE-TOKEN`) → `id`, `token` | `DELETE …/access_tokens/{id}` |
 | `openai` | `{project_id: "proj_…"}` | an organization Admin API key | `POST https://api.openai.com/v1/organization/projects/{project_id}/service_accounts {name}` (Bearer) → `id`, `api_key.value` (`id` is the service account's) | `DELETE …/service_accounts/{id}` (the account and its key) |
 | `datadog` | `{site?: "datadoghq.com", key: "api" \| "application", scopes?: string[]}` (scopes for application keys only; none: the user's permissions) | `<API key>:<application key>`, the application key allowed to manage the kind that rotates (`api_keys_write`, or `user_app_keys`) | `POST https://api.{site}/api/v2/api_keys` or `…/current_user/application_keys` `{data: {type, attributes: {name, scopes?}}}` (`DD-API-KEY`, `DD-APPLICATION-KEY`) → `data.id`, `data.attributes.key` | `DELETE …/api_keys/{id}` or `…/current_user/application_keys/{id}` |
+| `cloudflare` | `{account_id?, template}` (no `account_id`: the user's tokens) | an API token that may manage API tokens (`API Tokens Write` on the user or the account) | `GET https://api.cloudflare.com/client/v4/{user\|accounts/{account_id}}/tokens/{template}`, then `POST …/tokens {name, policies, condition?}` with the template's policies (permission groups by id) and condition (Bearer) → `result.id`, `result.value` | `DELETE …/tokens/{id}` |
+| `databricks` | `{host: "dbc-a1b2c3d4-e5f6.cloud.databricks.com", lifetime_days?: 1-730 (default 90)}` | a personal access token of the identity whose tokens rotate (a service principal's, ideally) | `POST https://{host}/api/2.0/token/create {comment, lifetime_seconds}` (Bearer) → `token_value`, `token_info.token_id` | `POST /api/2.0/token/delete {token_id}` |
+| `confluent` | `{owner: "sa-…" \| "u-…", resource?: "lkc-…", environment?: "env-…"}` (no `resource`: a Cloud API key) | a Cloud API key as `KEY:SECRET` that may manage `owner`'s keys (OrganizationAdmin, or AccountAdmin of the owner) | `POST https://api.confluent.cloud/iam/v2/api-keys {spec: {display_name, owner: {id}, resource?: {id, environment?}}}` (basic auth) → `id` (the key), `spec.secret` | `DELETE …/api-keys/{id}` |
 
 - **Auth0 has no grace period.** `rotate-secret` replaces the app's secret at once: the old one
   stops working the moment roll rotates, whatever `grace_minutes` says, so services must pick up
@@ -1573,11 +1579,26 @@ instead of at the first rotation:
   `datadoghq.eu`, `ap1.datadoghq.com`, `ap2.datadoghq.com` or `ddog-gov.com`; the API is
   `api.<site>`. Application keys belong to the user (or service account) whose application key is
   in the credential.
+- **Cloudflare tokens are made new, not rolled.** Cloudflare's roll (`PUT …/tokens/{id}/value`)
+  keeps a token's policies but ends its old value the moment it answers, which breaks every
+  consumer still holding it, as GitLab's rotate would. roll makes a new token instead, copying the
+  policies and conditions of `template` (a token you keep for that, which may be disabled; edit
+  it in Cloudflare and the next rotation follows), and deletes the old one after `grace_minutes`.
+  A template roll can't read, or one without policies, fails the rotation (`rotation.failed`).
+- **Databricks: personal access tokens, not OAuth secrets.** Every Databricks workspace on every
+  cloud takes them, and every consumer (the CLI, SDKs, JDBC/ODBC, `DATABRICKS_TOKEN`) uses one
+  as is; a service principal's OAuth secret is account-level, and each consumer must exchange it
+  for a token. A new token belongs to the credential's identity, so register a service principal's
+  token. Each lasts `lifetime_days` (a workspace may cap it lower): set `rotate_days` below it.
+  `host` is a hostname (no IP literal, no port).
+- **Confluent: link `CONFLUENT_API_KEY` to `id` and `CONFLUENT_API_SECRET` to `secret`.** They
+  share one key, and a new one can take a moment to work on a cluster: keep `grace_minutes` above
+  a few minutes.
 
 Requests go out from rolld's guarded client, as a rotator's calls do: HTTPS to a public address, no
 redirects, a 15-second timeout, at most 64 KiB of answer. The hosts are the vendors' own, except
-Okta's and Auth0's tenant domains and a self-managed GitLab's host, which must be hostnames (no IP
-literal, no port) and then pass the same guard; Datadog's site must be one of its documented ones. The credential is sealed with the project's data key, bound to the registration's
+Okta's and Auth0's tenant domains, a self-managed GitLab's host and a Databricks workspace's host,
+which must be hostnames (no IP literal, no port) and then pass the same guard; Datadog's site must be one of its documented ones. The credential is sealed with the project's data key, bound to the registration's
 id, vendor and target, so a row pointed at another host no longer opens; it's never answered,
 logged or audited, and the list shows the vendor and target only. A vendor's answer is never part
 of an error: errors name the vendor, the step and the status (`okta answered 401 issuing a key`).
@@ -4838,7 +4859,9 @@ may no longer manage the project, and the one-time shares they made end and the 
 issued to them are revoked once they're no longer a member. Their personal overrides stay (only
 they read them, and they can't). When their account is disabled (an admin, SCIM), stops being an
 admin's or is deleted, rolld calls `Secrets::person_offboarded`, which runs the same hook in every
-project holding an open share, a live lease or a shared folder: a disabled person counts as no
+project holding an open share, a live lease, a shared folder or a key bound to hosts they made
+(themselves, or a token or identity of theirs) and in their memberships' projects, never one only
+others made things in (`SecretsMemberRechecks` counts them): a disabled person counts as no
 member anywhere (docs/accounts.md, "Offboarding"). Enabled again, they get nothing back.
 
 So removing or demoting a member stops or narrows what they made at once. rolld asks roll-accounts
@@ -4899,7 +4922,9 @@ credentials as the tokens list does. Names and metadata only, never a value:
   it, or their account is `gone`). They still know what they read: rotate it.
 
 roll secrets knows no product: rolld answers which services and sandboxes hold a project's
-secrets (`reach::Holders`, from roll apps' and roll code's stores; names and references only).
+secrets (`reach::Holders`, from roll apps' and roll code's stores; names and references only:
+roll apps keeps each variable's `roll://` text beside its sealed value when it's set, so reach
+opens no value, write-only ones included).
 - **Where it goes by itself**: syncs of that folder (and that key), projects the folder is shared
   with, and this project's folders that import it.
 - **Where it goes by itself** also counts folders that import it and environments based on it
@@ -6029,7 +6054,7 @@ type ProjectFindings = { project: string; project_name: string; findings: Findin
 type Finding = { issue: "decoy_used" | "production_unprotected" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "unplaced" | "operator_made" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string; decoy?: Decoy }; // decoy: on decoy_used only (an admin's session's or the operator's), the key's Decoy
 type Rotation = { environment: string; path: string; keys: string[]; kind: string; ref: string; name: string; rotate_days: number | null; rotate_window: string | null; grace_minutes: number; issued_at: number | null; next_due: number | null; last_error: string | null; failed_at: number | null };
 type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
-type SaasRotator = { id: string; name: string; vendor: "sendgrid" | "twilio" | "okta" | "entra" | "auth0" | "gitlab" | "openai" | "datadog"; target: Record<string, unknown>; created_at: number; created_by: string };
+type SaasRotator = { id: string; name: string; vendor: "sendgrid" | "twilio" | "okta" | "entra" | "auth0" | "gitlab" | "openai" | "datadog" | "cloudflare" | "databricks" | "confluent"; target: Record<string, unknown>; created_at: number; created_by: string };
 type KubernetesCluster = { id: string; name: string; api_url: string; has_ca: boolean; created_at: number; created_by: string };
 type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
 type NewValueRequest = { keys: string[]; note?: string; ttl_minutes?: number /* 5–43200, default 10080 */; answers?: number /* 1–10, default 1 */ };
@@ -6130,6 +6155,7 @@ and `product`. Numbers only: never a value, a key's name or a project.
 | `SecretsSyncsPushed`, `SecretsSyncFailures` | Sync pushes that worked and that failed |
 | `SecretsRotations`, `SecretsRotationFailures` | Scheduled rotations that worked and that failed |
 | `SecretsKmsRefusals` | A customer's KMS refusing to open a project's data key |
+| `SecretsMemberRechecks` | Projects checked again because a member lost rights there (removed, demoted, offboarded): an offboarding checks only the projects holding what the person made and their memberships' |
 | `SecretsLeasesLive`, `SecretsSyncsFailing`, `SecretsRotationsFailing` | Gauges: leases not ended, syncs whose last push failed, credentials whose last rotation failed |
 
 Each node counts what it did, so sum the counters across nodes. The gauges read the store every
@@ -6366,6 +6392,37 @@ adds roll-access's grant lookup or the accounts' and workspace's.
 
 ## Next
 
+**State, 2026-11-23 16:50.** The thirty-fifth review is done: item 6B (#763, 5583dfbfd; `Reference::parse` moved into `crates/roll-secrets-ref`, so agent-proto, the `roll` binary and the gateway don't link roll-secrets) and 6C (#794, dbb4d65af; a refused upstream key fails closed without trying another key of that provider) landed. Also #778, the 05:20 entry below.
+
+The thirty-sixth product review (2026-11-23, cold, read only, against 5430a1b0d) found no live security bug. Its top items were seams where the night's fixes meet each other:
+1. A sandbox stopped on any broken key in its folder, not just the ones it copies.
+2. An environment's delete warning didn't name the services, sandboxes, syncs, identities and tokens that read it.
+3. The events feed had no value changes.
+4. Reach unsealed every roll apps variable to find references.
+5. The CLI didn't follow #720.
+6. `roll secrets agent` kept serving after a 403.
+7. An environment delete revoked credentials before deciding.
+8. Offboarding walked every project.
+9. Five SaaS rotators against AWS's twenty.
+
+Landed since, each with main's CI green and most after a check of the merged tree:
+- #796 (cd59a6cc8): items 1 and 6. A sandbox fails only the keys it copies; a deleted environment in its window is "unsure", so a recovery brings values back. The local agent drops a refused folder at once.
+- #793 (1815bac01): item 3. `secret.changed`, `secret.deleted`, `rotation.succeeded` and `access.changed`, each in the change's own audit row.
+- #798 (ccd0fcdbd): items 2, 5 and 7. The deletion preview names every reader and any break needs `confirm`. `envs rm` previews and says what happened, and `envs recover` exists. The delete decides in one write, then revokes.
+- #816 (efafbcac6): items 4 and 8. roll apps keeps a `reference` column, so reach opens no value. Offboarding reads only the person's rows (`SecretsMemberRechecks`).
+- #819 (3dd33c1d5): item 9, part 1. GitLab (create, then revoke), OpenAI project service accounts and Datadog keys.
+- #800 (e9d6e59b5) and #803 (d40c853b1): delta reads in the operator, CSI provider and Lambda extension, and in the Python, Java, .NET and Ruby clients. All six SDKs and the Go consumers now read only what changed.
+- #813 (8b2470590): roll workspace's project events feed (members, groups, invites) for roll MCP's `workspace.event`. It uses the same cursor rule as secrets' feed.
+
+In flight:
+- item 9, part 2 (Cloudflare, Databricks, Confluent);
+- a test that a fresh project's developer can't reveal production (the thirty-fifth's last gap).
+
+Left from the thirty-sixth:
+- item 10 (time-boxed access for people) and item 13 (the root of trust beyond AWS KMS) are the user's call;
+- item 12 (search's clear passwords without `ROLL_SECRET_KEY`) is roll search's, raised with them;
+- `Watch` with a consumer still reads `/resolve` whole, because there's no delta route there.
+
 **State, 2026-11-23 05:20.** Landed since 19:25, each with main's CI green (most after a check of the merged tree, since main moved about ten commits an hour and the merge queue's CI runs only `cargo test --lib`):
 - #720 (fcafbf9fc): item 2, an environment's delete is kept for the recovery window, and a protected one's is a change request.
 - #732 (de8f381a4): the events feed (`GET …/projects/{project}/events`), roll MCP's `secrets.event`.
@@ -6383,7 +6440,6 @@ In flight:
 Next after those:
 - **Item 6C** (the model gateway's upstreams as `roll://`, on #763's ref crate).
 - **Delta reads for the rest** (S each): the Kubernetes operator, the CSI provider and the Lambda extension don't use `Watch`, so they still read whole folders. `Watch` with a consumer goes through `/resolve`. The server's full-set fallback keeps all of them working.
-- **A fresh project's developer can't reveal production** has no test of its own (item 9's last gap).
 - **Gate flakes under load** (another product's tests, seen on every secrets gate tonight at loads of 55–93): roll-cluster's Postgres lease and routing tests, code-control's `the_merge_queue_continues_a_dead_owners_batch` and `an_idle_sandbox_sleeps_and_a_command_wakes_it`. Each passes alone. They're roll code's and roll-cluster's tests, so they aren't fixed here.
 
 **State, 2026-11-22 19:25.** Landed since 07:55, each with main's CI green:
