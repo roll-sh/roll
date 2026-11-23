@@ -56,6 +56,7 @@ export function ChecksPanel({ service, env, runner }: { service: string; env: En
                     {c.budgets ? ` (budgets: ${Object.entries(c.budgets).map(([k, v]) => `${k} ${v}`).join(", ")})` : ""}
                   </span>
                 )}
+                {st?.over_budget && <span className="w-full truncate text-[11.5px] text-muted">{st.over_budget}</span>}
                 {st?.error && <span className="w-full truncate text-[11.5px] text-danger">{st.error}</span>}
                 {c.browser && st?.failure_at != null && (
                   <span className="flex w-full gap-3 text-[11.5px]">

@@ -1160,6 +1160,8 @@ export interface UptimeCheckState {
   deployment?: string;
   /** A browser check's lab metrics from its last run. */
   metrics?: { lcp_ms: number; cls: number; ttfb_ms: number; kb: number; requests: number };
+  /** Its last pass was over its budgets, and how (never down). */
+  over_budget?: string;
 }
 
 /** A heartbeat: something outside roll pings its URL at least every `every_s` (60–604800); one not come within that and `grace_s` (default 300) is `heartbeat.missed`. */
