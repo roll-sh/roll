@@ -14525,6 +14525,144 @@ failed: all passed.
 Not this round's: roll's `VACUUM (VERBOSE)` sends none of PostgreSQL's INFO lines (agent 205's
 note, still open).
 
+## Short write transactions, round 13: a compaction copies the blocks it would write unchanged (agent 292)
+
+BENCH.md "Short write transactions, round 13" has the pairs. Plain dist builds (`base2` =
+`52feabc3d`, `new3` = it + this round's commit), lane A through `tools/lane.sh`, one pair a hold,
+harness `~/.cache/a292/bench` (290's, with each run's server log and data directory size kept;
+`space.sh` a fixed number of UPDATEs and the files left; the bulk script `~/.cache/a292/bulk`,
+287's). The lane carried 2-5 foreign cores on its 8 CPUs; the pairs counted are those at or under
+0.6 foreign cores on the server CPUs.
+
+**What changed** (one commit): a compaction copies an input L1 block as it is stored (its codec
+byte to its crc: no decompression, no decoding, no re-encoding, compression or hashing) when a full
+rewrite would write its entries unchanged (`Compacted::copy_blocks`). That holds for a block that is
+
+- *clean* (`sst::CleanBlocks`): every user key in one version, none a deletion, none sharing its
+  key with the block before or after. The writer knows this as it writes (a key's second version is
+  the same hash as the one before: `last_user_hash`; a deletion; a block starting with the last
+  key of the block before marks both). Kept in memory with the file's meta (`SstMeta::clean`,
+  `serde(skip)`), not stored: a file of an earlier session, a linked run or a flush's file has
+  none and is written again whole once, which gives it one;
+- without dead entries (`DeadSet::block`);
+- of a file no range deletion or discarded range meets (`Copies`: their entries would be dropped);
+- in a range that holds no key of the newer inputs: every L0 source's head is past the block's last
+  user key, and nothing was taken from them past the block before (the check runs between blocks,
+  before the next one is read);
+- within one table's or index's keys (`part_ends` can't fall inside it).
+
+Its entries are then exactly what the rewrite writes: each key's one version is its newest, kept
+whether it is at or after the horizon, and not a deletion. A block with versions a snapshot still
+held (unclean) is written again by the next compaction, which drops them: copied blocks don't
+strand dead data.
+
+The output takes the input file's dictionary and bloom filter when it has written no block yet
+(`SstWriter::adopt`: blocks held back for training are compressed with the file's dictionary,
+which goes into the output as before), so the copied codec 3 blocks read with it. **Files are
+format 4 as before** (blocks, dictionary, index, filter, footer): the current head and earlier
+format 4 builds read them, no field was added. The output's filter is the input's with the added
+keys' bits set (a superset: no false negative), kept while it is about the size a filter made for
+the output's keys would be (at most twice the bits, at most 60% set); else made again, reading the
+copied blocks' keys (`copied_bloom`). The index takes each copied block's last key and entry count
+(the input's index read again: `SstReader::block_entries`); the meta's min/max ts take the input
+file's range (conservative bounds: `changed_after`, `covers_file`, `touches_file` only read them as
+bounds); entries are exact. A block that a copy would leave the block before small (under a quarter
+of its target) is taken into that block instead, which may grow to twice its target for it
+(`SstWriter::stretch`), so rewritten ranges between copied blocks don't leave more and more small
+blocks.
+
+Test `storage::tests::copied_blocks_compact_as_a_full_rewrite`: two stores, one copying and one
+writing every block again (`StoreOptions::copy_blocks`), over seven rounds of updates, deletions
+and new keys (one with a snapshot held across its compaction): after each round the L1 files hold
+the same entries, every version and deletion, in the same order; with the table in one file ~200
+of ~295 blocks copied a round (1,377 in all), the 92 blocks round 3's snapshot left unclean
+written again in round 4, the copying store's block count within 5% of the other's (it stayed at
+or under it), its outputs with a dictionary where the rewrite's have one, and its reads match the
+model; again with 40 kB files (more than two for the table: outputs that pass from one input file
+into the next), where the two split their outputs in other places (a writer that took a file's
+dictionary knows its size; one holding blocks back for its own estimates it).
+
+**Measured** (BENCH "Short write transactions, round 13"). `UPDATE pgbench_accounts` alone, 8
+clients, 2 clean pairs of new3 against base2: user instructions an UPDATE **-60.4% and -59.6%**
+(283k -> 112k, 290k -> 117k): the flush thread -82.4% and -80.9% (205k -> 36k, 210k -> 40k),
+the connection threads -2.7% and -3.3% (~78k, PostgreSQL's backend 93k); user cycles -37.8% and
+-34.1%; tps +19.3% and +4.6%; p99 -10.7% and +0.5%. Each compaction after the first copies
+44,414-44,415 of the table file's ~45.9k blocks: about 1.5k rewritten, not the third round 12
+estimated (its writes land in a narrow range of the file, not on random blocks). TPC-B-like, one
+clean pair each: 8 clients -5.2% user instructions (tps -1.2%), 32 clients -28.5% (tps +9.3%):
+a run's few compactions move it by a third, one pair doesn't resolve it. After a fixed 480k
+UPDATEs: 62.45 MB of SST files against 61.80 (+1.0%, the L0 files each run left included; 22
+files against 20), the data directory 67.7 MB against 70.2: copied blocks don't strand data.
+The bulk script (lane C, one pair): no compaction of it copies a block (it loads each table once;
+its UPDATE and DELETE touch every block), its steps +0.05 to +0.3% user instructions (the clean
+tracking in `SstWriter::add`, a few instructions an entry: ~15M over its ~3M entries), the
+DELETE's +0.9% (one pair, 2.2-3.7 foreign cores), its scans level, its files the same sizes.
+TPC-H q01/q06 not run: a load writes each table once (linked runs, files without clean blocks),
+so nothing is copied in it, and the bulk script's load and scans read level; the read path is
+unchanged. Not gated on the PGO build (no inlining or function-boundary aim; the compaction's
+per-entry body moved from a closure called through `&mut dyn FnMut` to a method kept out of line
+in both paths).
+
+**A first form, measured and changed**: an output took one input file's dictionary, so an output
+that passed from one input file into the next (TPC-B's: another table's small file before the
+accounts file) wrote the rest of the next file again; some of TPC-B's compactions copied nothing
+(32 clients: -36.7% user instructions in one pair, 8 clients +24.4% in one pair, both under
+1.4-3.2 foreign cores). Now such an output ends there once it holds `PART_MIN` (256 kB), and the
+next takes that file's (`copy_blocks`); every TPC-B compaction after the first copies.
+
+**Item 2, partial compaction (several smaller L1 files a table) on paper, not built.** A batch of
+random UPDATEs (pgbench: ~36k between compactions over 3.2 M rows) touches every part of the
+table: with the table in files of 400k rows each, each gets ~4.5k of them, so each is still an
+input and written again whole; to leave files out the files would have to be about one block
+(~70 rows, one UPDATE every ~89 rows). It removes work only for skewed or append-like writes
+(which already leave L1 files whose range holds no L0 key alone), it means more files, more
+index and filter memory, and more file opens for every scan. Copying blocks removes the untouched
+two thirds for any write pattern within one file, with no layout change: built that.
+
+**Item 3, smaller estimate records: a format change of durable records, not built (design
+below).** The change record (`estkeep::encode_heap_changes`, `BtEst::encode`'s changed leaves)
+is fixed-width little-endian read by position: the heap's scalars ~45 bytes, each changed leaf 76
+bytes (u128 max, four f64s, its slot and its low key), each btree's header 62 bytes. Nothing in it
+can be left out in the same encoding (every field is read in order), and the same key written
+again still adds its bytes to the memtable. A smaller record needs a new tag (0xe3) the current
+head's `restore` doesn't know: it would see an unknown first byte and drop the table's estimate
+(re-estimated, sizes and plans differing from before the restart). Design for the user to decide:
+
+- tag 0xe3 = a change record with varint fields and deltas: the heap scalars as a bitmap of the
+  ones that changed since the last record, then those as varints (an UPDATE past the model changes
+  `writes`, `fill`/`room` or `fresh`: ~6-10 bytes instead of ~45); the moved versions' (key, tid)
+  as varint deltas from the previous one;
+- a changed btree leaf as its slot (varint) and the four counters as signed varint deltas of their
+  values x 1 (they are counts kept as f64: `used`, `tuples`, `tids`, `keys` change by small whole
+  numbers; a non-integral one falls back to the full f64), `max` only when it changed: ~6-8 bytes
+  instead of 76; the header's fields as a changed-fields bitmap too;
+- expected: the estimate's ~291 memtable bytes an UPDATE to ~40-60, the UPDATE's memtable bytes
+  ~462 -> ~220, compactions half as often;
+- one-way: a build before it drops such a table's estimate at restart (no misread: the record is
+  refused, `restore` returns None); a build after reads both tags.
+
+Verification: `tools/quick-check.sh` with `QC_CHECKED=1` and `QC_TESTS="crash_ctids big_tables
+block_format storage_format storage_linked_gc storage_upgrade_batches crash_bulk"` on the rebased
+head `37c069b13` (on `ab7ee825b`): 25 test binaries, clippy 16 warnings, none new in a changed
+file, 412 tests in 21 binaries (the lib's unit tests, big_tables, crash_ctids, crash_bulk, the
+storage format binaries, golden, wire, wire_waits among them), the same 412 built `--profile
+verify-checked`, `crash_random` seeds 1-3 x 2 rounds and `power_cut_at_every_point`, regress
+51,148 / 51,150 (0 newly differing), isolation 1,647 / 1,648, pg_dump_tap 14,609. The first form
+(without the `PART_MIN` cut) passed the same on `5c83d20d8` (on `52feabc3d`).
+
+What is left:
+
+- The flush thread's ~35-40k an UPDATE (from 220-310k): what's left is the third of the blocks an
+  UPDATE batch touches (decoded, merged, compressed) and reading the copied ones (a pread a block,
+  ~3 kB each; one read per run of copied blocks would save syscalls).
+- `reclaim_one` (VACUUM's and quiet moments' rewrite of marked files) could copy the blocks
+  without dead entries the same way: not done.
+- An inherited dictionary stays the one trained from the file's first 256 kB when it was first
+  written; a table whose contents drift keeps compressing with it (no measurable effect here).
+  Retraining when the rewritten share is high is left.
+- Clean bits after a restart: the first compaction of each file writes it whole.
+- Item 3 (above), if the user takes the format change.
+
 ## Short write transactions, round 12: where a big table's one-row UPDATE goes, its recheck, the memtable's key filter, pruning's dead tuples (agent 290)
 
 BENCH.md "Short write transactions, round 12" has the pairs. Base `2c98eac94` (cand/a289-2 landed;

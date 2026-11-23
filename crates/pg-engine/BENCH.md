@@ -1805,6 +1805,73 @@ session thread's user instructions by `perf stat --per-thread` over a 14 s run l
 the difference in selects; CPUs 4 and 22): base (`c4ad9402d`) 38,025 / 38,948 / 37,578, the stack
 (`e974a84e1`) 37,624 / 39,504 / 37,995 user instructions a select, alternated.
 
+## Short write transactions, round 13: a compaction copies the blocks it would write unchanged (2026-11-23, agent 292)
+
+Lane A (servers on CPUs 6,7,24,25, pgbench on 8,9,26,27), one pair a `tools/lane.sh` hold, harness
+`~/.cache/a292/bench` (agent 290's, each run's server log and data directory size kept): a fresh
+server and `pgbench -i -I dtGvp -s 32` for every run, `-M prepared`, 2 s warm-up, then 10 s
+(60 s where said); counts as in round 12 (`conn_iu`: the connection threads' own user instructions,
+`perf stat --per-thread --no-inherit`; `bg_iu`: the rest of the cgroup's, the flush thread;
+`wbytes_per_txn` is io.stat's, which counts every byte twice). Plain dist builds: `base2` =
+`52feabc3d`, `new3` = `52feabc3d` + this round's commit (`0df533789`, the candidate before its
+rebase onto `ab7ee825b`, which changed only `server.rs`). Foreign is the server CPUs' in each
+run; the lane's 8 CPUs carried 2.1-4.9 foreign cores in every hold.
+
+`UPDATE pgbench_accounts` alone, 8 clients, new3 against base2, 3 pairs (pair 1 at 1.2-1.3
+foreign cores, not counted in the Δ column; pairs 2-3 at 0.28-0.58):
+
+| count | pair 1 | pair 2 | pair 3 | Δ (pairs 2, 3) |
+|---|---:|---:|---:|---:|
+| tps | 12,427 / 15,800 | 18,467 / 22,023 | 19,963 / 20,883 | +19.3%, +4.6% |
+| p99_ms | 4.907 / 3.389 | 1.836 / 1.640 | 1.890 / 1.900 | -10.7%, +0.5% |
+| instructions_u | 318,199 / 113,723 | 283,231 / 112,140 | 290,200 / 117,339 | -60.4%, -59.6% |
+| conn_iu | 80,950 / 75,785 | 78,281 / 76,153 | 79,837 / 77,210 | -2.7%, -3.3% |
+| bg_iu | 237,249 / 37,938 | 204,950 / 35,987 | 210,363 / 40,129 | -82.4%, -80.9% |
+| cycles_u | 422,171 / 254,147 | 391,631 / 243,536 | 390,343 / 257,081 | -37.8%, -34.1% |
+| conn_cu | 237,868 / 222,851 | 220,631 / 214,150 | 222,890 / 224,388 | -2.9%, +0.7% |
+| bg_cu | 184,303 / 31,296 | 171,000 / 29,386 | 167,453 / 32,693 | -82.8%, -80.5% |
+| instructions_k | 91,997 / 87,041 | 85,389 / 84,856 | 86,232 / 88,828 | -0.6%, +3.0% |
+| cycles_k | 199,412 / 181,176 | 179,773 / 171,194 | 179,825 / 180,712 | -4.8%, +0.5% |
+| cpu_us_per_txn | 211.9 / 142.6 | 174.5 / 123.8 | 168.3 / 132.4 | -29.1%, -21.3% |
+| wbytes_per_txn | 8,580 / 9,387 | 8,120 / 8,770 | 8,420 / 8,878 | +8.0%, +5.4% |
+| foreign_cores | 1.33 / 1.20 | 0.37 / 0.52 | 0.28 / 0.58 | |
+
+What the compactions did (new3's server log, pair 2): the first after the fixture writes the files
+the fixture left whole (they have no clean blocks: a linked run's and earlier outputs'), the next
+copies 45,881 blocks, every one after 44,414-44,415 of the table file's ~45.9k: about 1.5k blocks
+rewritten a compaction, not the third round 12 estimated (it assumed each UPDATE's write lands on a
+random block; the writes land in a narrow range). The same three pairs against `8ec7dcb8e`
+(cand/a290 before it landed, `new` = this round's first form) under 1.1-3.2 foreign cores:
+instructions_u -66.9%, bg_iu -85.3%, conn_iu -3.2% (medians).
+
+TPC-B-like, one pair each (all four runs at 0.43-0.59 foreign cores):
+
+| count | 8 clients | Δ | 32 clients | Δ |
+|---|---:|---:|---:|---:|
+| tps | 5,786 / 5,714 | -1.2% | 5,021 / 5,486 | +9.3% |
+| p99_ms | 5.096 / 6.193 | +21.5% | 27.439 / 25.452 | -7.2% |
+| instructions_u | 633,730 / 601,089 | -5.2% | 906,586 / 648,273 | -28.5% |
+| cycles_u | 1,265,630 / 1,248,436 | -1.4% | 1,705,222 / 1,441,325 | -15.5% |
+| instructions_k | 329,105 / 339,465 | +3.1% | 363,347 / 348,692 | -4.0% |
+| cpu_us_per_txn | 582.0 / 562.6 | -3.3% | 716.3 / 634.3 | -11.4% |
+| wbytes_per_txn | 10,644 / 11,664 | +9.6% | 10,872 / 10,180 | -6.4% |
+
+(A run's few compactions move its count by a third, round 12: one pair a cell doesn't resolve
+TPC-B. Every compaction after the first copied 23.5k-45.9k blocks.)
+
+Space after a fixed 480,000 UPDATEs (8 clients x 60,000, 20 s to settle; one run each, lane A,
+4.9 foreign cores on the lane): base2 61.80 MB of SST files (20 files), 70.2 MB in all, 17
+compactions; new3 62.45 MB (22 files, +1.0%), 67.7 MB in all, 19 compactions; no dead-entry
+sets in either. (The SST bytes include the L0 files each run had left at its end.)
+
+The bulk script (lane C, one pair, the same builds, joined windows; user instructions in G):
+copy_in 6.470 / 6.481 (+0.2%), create_index 4.390 / 4.404 (+0.3%), create_unique_index 3.374 /
+3.381 (+0.2%), insert_select 5.088 / 5.100 (+0.2%), update_half 11.745 / 11.751 (+0.05%),
+delete_quarter 7.672 / 7.742 (+0.9%), seq_count 0.718 / 0.718, seq_sum 0.332 / 0.331,
+count_after 0.360 / 0.360; no compaction of the script copied a block (it loads each table once,
+and its UPDATE and DELETE touch every block); the data directory's files the same sizes; checks
+equal. The lane carried 6.3 foreign cores (2.2-3.9 on the server CPUs).
+
 ## Short write transactions, round 12: a big table's one-row UPDATE, its recheck, the memtable's key filter (2026-11-22, agent 290)
 
 Lane A (servers on CPUs 6,7,24,25, pgbench on 8,9,26,27), one pair a `tools/lane.sh` hold, harness
