@@ -388,6 +388,11 @@ impl Engine {
             return Err(e);
         }
         self.store.mark_step(&r.id, &r.head, "data")?;
+        // The data as the head the services ran left it, kept for that head's earlier push,
+        // before this head's seed or release changes it: a step of its own when it takes any.
+        if self.snapshot_for_earlier(r).await? {
+            self.store.mark_step(&r.id, &r.head, "copies")?;
+        }
         if reset_any || reset_due || !asked.is_empty() {
             self.store.update(&r.id, |row| {
                 // Only what this converge did: a reset asked for meanwhile stays asked.
@@ -492,10 +497,6 @@ impl Engine {
         let own: Vec<(String, String)> = project_env(&s, r.branch.as_deref()).into_iter().chain(self.store.vars(&r.id)?).collect();
         self.add_masks(&r.id, super::masks::secret_values(&[], &[], &own, &vars));
         self.stale_masks(&r.id);
-
-        // 3a'. The data as the head the services ran left it, kept for that head's earlier push,
-        // before this head's seed or release changes it.
-        self.snapshot_for_earlier(r).await?;
 
         // 3b. The project's seed, once on fresh data, before anything serves it.
         if let Some(seed) = &s.seed
@@ -650,11 +651,39 @@ impl Engine {
                 && r.trusted
                 && let Some(old) = svc.deployed.as_deref().filter(|d| *d != rev && !d.is_empty())
                 && !self.store.pinned(&r.id)?.iter().any(|p| p.service == spec.name && p.revision == old)
-                && let Some((git, url)) = self.apps.live_build(&r.id, &spec.name).await
             {
                 let ran = if repo.starts_with("git:") { Some(old.to_string()) } else { self.source.git_commit(&repo, old).await.ok().flatten() };
-                if ran.as_deref() == Some(git.as_str()) {
-                    self.store.pin_build(&r.id, &spec.name, old, &url)?;
+                let live = self.apps.live_build(&r.id, &spec.name).await.filter(|l| ran.as_deref() == Some(l.revision.as_str()));
+                if live.is_none() {
+                    // Not kept (no URL of its own, or the new head is live already): its copies
+                    // of the data go, nothing would use them.
+                    let old = old.to_string();
+                    self.drop_pinned_data(&r.id, |d| d.revision == old).await?;
+                }
+                if let Some(live) = live {
+                    // On its own copy of the data where one was kept: the same build again,
+                    // taking no traffic, pointed at the copy (roll apps' rollback with variables).
+                    // Else, or if that fails, the build itself, on the preview's data (its copies
+                    // then go: nothing uses them).
+                    let has_copy = self.store.pinned_data(&r.id)?.iter().any(|d| d.revision == old);
+                    let own = if has_copy {
+                        let plain = self.resource_env_at(&r.id, Some(old)).await?;
+                        let branches = self.branch_vars_at(&r.id, Some(old)).await?;
+                        match self.apps.view_build(&r.id, &spec.name, &live.id, &plain, &branches).await {
+                            Ok(url) => url,
+                            Err(e) => {
+                                self.store.log(&r.id, &format!("{}'s earlier push at {} shares the preview's data: its own copy couldn't be put behind it: {e:#}", spec.name, short(old)))?;
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    if own.is_none() && has_copy {
+                        let old = old.to_string();
+                        self.drop_pinned_data(&r.id, |d| d.revision == old).await?;
+                    }
+                    self.store.pin_build(&r.id, &spec.name, old, own.as_deref().unwrap_or(&live.url))?;
                 }
             }
             // A deploy the backend is still on is asked about again (until it's live or fails).
@@ -1390,33 +1419,53 @@ impl Engine {
     /// the next head's seed or release changes it: a copy-on-write branch of each branch whose
     /// product can branch one ([`crate::ports::Brancher::snapshot`]), so old code never runs on
     /// what a newer migration made of its data. Only where the head will be kept (a trusted
-    /// change's own services on the runtime: roll apps' earlier builds keep the variables they
-    /// were deployed with), once a head.
-    async fn snapshot_for_earlier(&self, r: &Row) -> anyhow::Result<()> {
-        if !r.trusted || self.apps.catalog(&r.project_id).await.ok().flatten().is_some_and(|c| !c.is_empty()) {
-            return Ok(());
+    /// change's own services: on the runtime, `env` connects there; on roll apps, the build is
+    /// started again with the copy's variables), once a head.
+    async fn snapshot_for_earlier(&self, r: &Row) -> anyhow::Result<bool> {
+        if !r.trusted {
+            return Ok(false);
         }
         let olds: std::collections::BTreeSet<String> = self.store.services(&r.id)?.into_iter().filter(|s| s.repo == r.repo).filter_map(|s| s.deployed).filter(|d| !d.is_empty() && d != r.build()).collect();
         if olds.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
         let kept = self.store.pinned_data(&r.id)?;
         let name = branch_name(&r.id);
+        let resources = self.store.resources(&r.id)?;
+        let mut took = false;
         for old in &olds {
-            for res in self.store.resources(&r.id)? {
-                let (Some(branch), Ok(b)) = (&res.r#ref, self.brancher(res.kind)) else { continue };
+            // Every product's copy at once (they're independent; a stream's waits for its tail to
+            // reach object storage): the push waits for the slowest, not their sum.
+            let jobs = resources.iter().filter_map(|res| {
+                let (Some(branch), Ok(b)) = (&res.r#ref, self.brancher(res.kind)) else { return None };
                 if kept.iter().any(|d| &d.revision == old && d.kind == res.kind && d.parent == res.parent) {
-                    continue;
+                    return None;
                 }
                 let snap = format!("{name}-{}", crate::label_part(old.strip_prefix("cs_").unwrap_or(old), 10));
+                Some(async move { (res, branch, b.snapshot(&res.parent, branch, &snap).await, snap) })
+            });
+            // Each copy made is recorded before the first failure is said, so none is left
+            // unrecorded (a later pass takes the missing ones; a product finds its own by name).
+            let mut failed = None;
+            for (res, branch, made, snap) in futures::future::join_all(jobs).await {
                 let key = format!("{}:{}", res.kind.as_str(), res.parent);
-                if let Some(made) = b.snapshot(&res.parent, branch, &snap).await.map_err(|e| anyhow::anyhow!("keeping {key}'s data for its earlier push: {e:#}"))? {
-                    self.store.add_pinned_data(&r.id, &crate::store::PinnedData { revision: old.clone(), kind: res.kind, parent: res.parent.clone(), name: snap, r#ref: made.r#ref, kept: made.kept, source: branch.clone() })?;
-                    self.store.log(&r.id, &format!("kept {key}'s data as {} left it, for its earlier push", short(old)))?;
+                match made {
+                    Ok(Some(made)) => {
+                        took = true;
+                        self.store.add_pinned_data(&r.id, &crate::store::PinnedData { revision: old.clone(), kind: res.kind, parent: res.parent.clone(), name: snap, r#ref: made.r#ref, kept: made.kept, source: branch.clone() })?;
+                        self.store.log(&r.id, &format!("kept {key}'s data as {} left it, for its earlier push", short(old)))?;
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        failed.get_or_insert_with(|| anyhow::anyhow!("keeping {key}'s data for its earlier push: {e:#}"));
+                    }
                 }
             }
+            if let Some(e) = failed {
+                return Err(e);
+            }
         }
-        Ok(())
+        Ok(took)
     }
 
     /// Delete the earlier pushes' data `which` picks (the branch first, then its record, so a
@@ -1427,6 +1476,11 @@ impl Engine {
                 b.delete_snapshot(&d.parent, &d.source, &d.r#ref, d.kept.as_deref(), &d.name).await.map_err(|e| anyhow::anyhow!("deleting an earlier push's copy of {}:{}: {e:#}", d.kind.as_str(), d.parent))?;
             }
             self.store.drop_pinned_data(id, &d)?;
+            // A roll apps earlier push started on this copy can't fall back to the preview's
+            // data (its variables are its own): it goes with it.
+            if !self.store.pinned_data(id)?.iter().any(|x| x.revision == d.revision) {
+                self.store.unpin_builds(id, &d.revision)?;
+            }
         }
         Ok(())
     }

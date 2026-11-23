@@ -25,7 +25,8 @@ mod places;
 pub mod policy;
 pub mod recovery;
 mod sudo;
-mod scim;
+pub mod scim;
+pub mod scim_groups;
 pub mod sso;
 mod twofactor;
 
@@ -477,6 +478,9 @@ pub struct Accounts {
     on_offboarded: std::sync::RwLock<Vec<offboarding::OnOffboarded>>,
     /// Sudo mode's window (`sudo::SUDO_MS`; shorter in tests).
     sudo_ms: std::sync::atomic::AtomicI64,
+    /// Where SCIM's groups are kept (rolld: the workspace); none until it's set, and `/Groups`
+    /// stays a SCIM 404 until then.
+    directory: std::sync::RwLock<Option<Arc<dyn scim_groups::Directory>>>,
 }
 
 impl Accounts {
@@ -527,6 +531,10 @@ impl Accounts {
         if !db.has_column("sso_connections", "session_hours")? {
             db.add_column("sso_connections", "session_hours", "INTEGER")?;
         }
+        // Whether a connection's provider keeps groups over SCIM (members v1.1; off when unset).
+        if !db.has_column("sso_connections", "groups")? {
+            db.add_column("sso_connections", "groups", "INTEGER")?;
+        }
         if !db.has_column("sessions", "cap_ms")? {
             db.add_column("sessions", "cap_ms", "INTEGER")?;
         }
@@ -555,7 +563,7 @@ impl Accounts {
         }
         let doh = std::env::var("ROLL_ACCOUNTS_DOH").ok().filter(|u| !u.trim().is_empty()).unwrap_or_else(|| "https://cloudflare-dns.com/dns-query".into());
         let txt: Arc<dyn sso::TxtLookup> = Arc::new(sso::Doh { client: sso_http.clone(), url: doh });
-        Ok(Accounts { db, config, mailer, http, sso_http, sso_discovery: Default::default(), txt: std::sync::RwLock::new(txt), audit: Default::default(), owners, on_deleted: Default::default(), on_offboarded: Default::default(), sudo_ms: std::sync::atomic::AtomicI64::new(sudo::SUDO_MS) })
+        Ok(Accounts { db, config, mailer, http, sso_http, sso_discovery: Default::default(), txt: std::sync::RwLock::new(txt), audit: Default::default(), owners, on_deleted: Default::default(), on_offboarded: Default::default(), sudo_ms: std::sync::atomic::AtomicI64::new(sudo::SUDO_MS), directory: Default::default() })
     }
 
     /// Where SSO domains' TXT records are read (tests answer from a table).

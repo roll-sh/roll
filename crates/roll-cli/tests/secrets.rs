@@ -71,10 +71,12 @@ async fn gate(axum::extract::State(tokens): axum::extract::State<Tokens>, mut re
 }
 
 /// The digest route's requests, and whether it fails (503) for now: what `roll run --watch` polls.
+/// And the values route's reads (`roll secrets agent` reads values only when the digest moved).
 #[derive(Default)]
 struct Polls {
     failing: std::sync::atomic::AtomicBool,
     asked: std::sync::atomic::AtomicUsize,
+    reads: std::sync::atomic::AtomicUsize,
 }
 
 async fn flaky_digest(axum::extract::State(p): axum::extract::State<Arc<Polls>>, req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
@@ -85,6 +87,9 @@ async fn flaky_digest(axum::extract::State(p): axum::extract::State<Arc<Polls>>,
         if p.failing.load(Ordering::SeqCst) {
             return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
         }
+    }
+    if req.uri().path().ends_with("/values") {
+        p.reads.fetch_add(1, Ordering::SeqCst);
     }
     next.run(req).await
 }
@@ -640,6 +645,51 @@ async fn roll_run_watch_restarts_on_a_write_waits_out_failures_and_passes_sigter
     assert_eq!(seen(), "one\nterm\ntwo\nterm\n");
 }
 
+/// `roll run --watch` reads a change through a delta (docs/secrets.md, "Delta reads"): the
+/// restarted command has the new value and the one that didn't change, and the read after the
+/// change is audited as returning only the key that changed.
+#[cfg(unix)]
+#[tokio::test]
+async fn roll_run_watch_reads_a_change_through_a_delta() {
+    use std::time::Duration;
+    let s = start().await;
+    let at = ["secrets", "-p", "shop", "-e", "production"];
+    ok(&s.api, &[], &[&at[..], &["set", "A=one", "B=kept"]].concat(), None).await;
+    let seen_at = s._dir.path().join("seen");
+    let seen = || std::fs::read_to_string(&seen_at).unwrap_or_default();
+    let wait_for = |want: &'static str| {
+        let seen = &seen;
+        async move {
+            let started = std::time::Instant::now();
+            while seen() != want {
+                assert!(started.elapsed() < Duration::from_secs(20), "waited for {want:?}, the command wrote {:?}", seen());
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    };
+    let _roll = tokio::process::Command::new(env!("CARGO_BIN_EXE_roll"))
+        .args(["run", "-p", "shop", "-e", "production", "--watch", "--interval", "1", "--no-mask", "--", "sh", "-c", r#"echo "$A $B" >> "$SEEN"; while :; do sleep 0.05; done"#])
+        .env("ROLL_API_URL", &s.api)
+        .env("SEEN", &seen_at)
+        .env_remove("ROLL_TOKEN")
+        .env_remove("ROLL_PROJECT")
+        .env_remove("ROLL_ENV")
+        .env_remove("ROLL_ADMIN_TOKEN")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    wait_for("one kept\n").await;
+    ok(&s.api, &[], &[&at[..], &["set", "A=two"]].concat(), None).await;
+    wait_for("one kept\ntwo kept\n").await;
+    let project = s.projects.list(roll_workspace::Scope::All).unwrap().into_iter().find(|p| p.name == "shop").unwrap().id;
+    let filter = roll_secrets::AuditFilter { action: Some("secrets.export".into()), ..Default::default() };
+    let reads = s.secrets.audit(&project, filter, &roll_secrets::Caller::operator()).unwrap();
+    assert_eq!(reads[0].keys, ["A"], "{}", reads[0].summary);
+}
+
 /// A token reaches what it's told to, for 90 days: no environment named is refused (or the
 /// directory's own, never a protected one), and forever or everywhere are asked for. `setup` makes
 /// a project that isn't there yet when asked to.
@@ -756,4 +806,118 @@ async fn roll_secrets_recover_brings_a_deleted_project_back_by_name() {
     let host = ok(&api, &[], &["secrets", "-p", "shop", "-e", "production", "get", "HOST", "--raw"], None).await;
     assert_eq!(host.trim(), "db.internal");
     assert!(roll(&api, &[], &["secrets", "recover", "shop"], None).await.code != Some(0), "nothing left to recover");
+}
+
+/// `roll secrets agent` on port 0 for `shop`'s production: its address once it listens, and what
+/// it has logged so far.
+struct LocalAgent {
+    url: String,
+    token: String,
+    log: Arc<std::sync::Mutex<String>>,
+    _child: tokio::process::Child,
+}
+
+async fn local_agent(s: &Server) -> LocalAgent {
+    use tokio::io::AsyncBufReadExt;
+    let token_file = s._dir.path().join("run").join("agent-token");
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_roll"))
+        .args(["secrets", "-p", "shop", "-e", "production", "agent", "--port", "0", "--ttl", "1h", "--token-file", token_file.to_str().unwrap()])
+        .env("ROLL_API_URL", &s.api)
+        .env_remove("ROLL_TOKEN")
+        .env_remove("ROLL_PROJECT")
+        .env_remove("ROLL_ENV")
+        .env_remove("ROLL_ADMIN_TOKEN")
+        .env_remove("ROLL_AGENT_TOKEN")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut lines = tokio::io::BufReader::new(child.stderr.take().unwrap()).lines();
+    let log: Arc<std::sync::Mutex<String>> = Arc::default();
+    let url = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        while let Some(line) = lines.next_line().await.unwrap() {
+            log.lock().unwrap().push_str(&format!("{line}\n"));
+            if let Some(addr) = line.split("listening on ").nth(1) {
+                return format!("http://{}", addr.split_whitespace().next().unwrap());
+            }
+        }
+        panic!("the agent exited: {}", log.lock().unwrap());
+    })
+    .await
+    .expect("the agent listens");
+    let kept = log.clone();
+    tokio::spawn(async move {
+        while let Ok(Some(line)) = lines.next_line().await {
+            kept.lock().unwrap().push_str(&format!("{line}\n"));
+        }
+    });
+    // Made with a random value, readable by its owner only.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&token_file).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+    let token = std::fs::read_to_string(&token_file).unwrap().trim().to_string();
+    LocalAgent { url, token, log, _child: child }
+}
+
+/// An app reads through the agent only with the token the agent was given (a server-side request
+/// forgery can't set the header), in the Lambda extension's shapes; no value is logged.
+#[tokio::test]
+async fn the_local_agent_answers_only_requests_that_carry_its_token() {
+    let s = start().await;
+    ok(&s.api, &[], &["secrets", "-p", "shop", "-e", "production", "set", "GREETING=fake-hello", "PORT=5432"], None).await;
+    let a = local_agent(&s).await;
+    let http = reqwest::Client::new();
+    for token in [None, Some("fake-wrong-token")] {
+        let mut req = http.get(format!("{}/secrets/GREETING", a.url));
+        if let Some(t) = token {
+            req = req.header("X-Roll-Token", t);
+        }
+        let res = req.send().await.unwrap();
+        assert_eq!(res.status(), 401);
+        assert!(!res.text().await.unwrap().contains("fake-hello"));
+    }
+    let res = http.get(format!("{}/secrets/GREETING", a.url)).header("X-Roll-Token", &a.token).send().await.unwrap();
+    assert_eq!((res.status().as_u16(), res.headers()["cache-control"].to_str().unwrap().to_string()), (200, "no-store".to_string()));
+    assert_eq!(res.text().await.unwrap(), "fake-hello");
+    let all: serde_json::Value = http.get(format!("{}/secrets?env=production&path=/", a.url)).header("X-Roll-Token", &a.token).send().await.unwrap().json().await.unwrap();
+    assert_eq!(all, serde_json::json!({ "GREETING": "fake-hello", "PORT": "5432" }));
+    let missing = http.get(format!("{}/secrets/NOPE", a.url)).header("X-Roll-Token", &a.token).send().await.unwrap();
+    assert_eq!(missing.status(), 404);
+    let started = std::time::Instant::now();
+    while !a.log.lock().unwrap().contains("GET /secrets/NOPE 404") && started.elapsed() < std::time::Duration::from_secs(10) {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let log = a.log.lock().unwrap().clone();
+    assert!(log.contains("GET /secrets/GREETING 401") && log.contains("GET /secrets 200") && !log.contains("fake-hello") && !log.contains("env=production"), "{log}");
+}
+
+/// A write reaches the agent through the folder's digest: the agent reads the values again by
+/// itself, and the app's next read is the new value, from memory.
+#[tokio::test]
+async fn a_change_reaches_the_local_agents_cache_through_the_digest() {
+    use std::sync::atomic::Ordering;
+    let s = start().await;
+    let at = ["secrets", "-p", "shop", "-e", "production"];
+    ok(&s.api, &[], &[&at[..], &["set", "GREETING=fake-one"]].concat(), None).await;
+    let a = local_agent(&s).await;
+    let http = reqwest::Client::new();
+    let read = || async { http.get(format!("{}/secrets/GREETING", a.url)).header("X-Roll-Token", &a.token).send().await.unwrap().text().await.unwrap() };
+    let reads = || s.polls.reads.load(Ordering::SeqCst);
+    let before = reads();
+    assert_eq!(read().await, "fake-one");
+    assert_eq!(read().await, "fake-one");
+    assert_eq!(reads() - before, 1, "the second read is from memory");
+    ok(&s.api, &[], &[&at[..], &["set", "GREETING=fake-two"]].concat(), None).await;
+    // Logged once the new values are kept.
+    let started = std::time::Instant::now();
+    while !a.log.lock().unwrap().contains("production:/ changed; read again") {
+        assert!(started.elapsed() < std::time::Duration::from_secs(20), "the agent didn't read the change: {}", a.log.lock().unwrap());
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(read().await, "fake-two");
+    assert_eq!(reads() - before, 2, "the agent read the change once, and the app's read after it is from memory");
 }

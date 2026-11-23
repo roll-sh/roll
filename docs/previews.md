@@ -126,15 +126,18 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   behind the same link, asleep until opened; the last 3 per service (an older one's container
   goes). For comparing before and after. A trusted change's only (an approval is for one head).
   Each runs on its own data: before the next head's seed or release, each branch (Postgres,
-  Redis, search, NoSQL, bucket, stream) is branched again (copy-on-write, masked as the preview's is) as that head left it, and the
+  Redis, search, NoSQL, bucket, stream) is branched again, all at once (measured 2026-11-23 under load 35–58: the push's setup step 3.8–3.9 s against 5.1–5.9 s one after another) (copy-on-write, masked as the preview's is) as that head left it, and the
   earlier push connects there, so a migration that renamed a column doesn't break the code
   before it. A copy's bytes count in the preview's cost, budget and `max_bytes` with its
   branches'. A copy goes with its push, and with the data it copied (a reset, or masking rules
   that changed: never served less masked than the rules say). Products that can't branch a
   branch share the preview's. A NoSQL copy inherits its branch's masking policy (a read policy,
-  not a rewrite). roll apps services share the preview's data too,
-  whose builds keep the variables they were deployed with. A roll apps service's earlier push is that build's own
-  deployment URL (`<deployment>--<slug>` on roll apps' domain, never a project's preview domain;
+  not a rewrite). A roll apps service's earlier push is that build started again, taking no
+  traffic, with its copy's variables (roll apps' `POST …/deploys/{dep}/rollback {no_traffic,
+  variables}`: names the environment has, sealed with that deployment); if that fails, the build
+  itself on the preview's data (said in its activity, its copies dropped), and when a reset or
+  changed masks drop its copy, the push goes with it (its variables can't fall back). Either way
+  it's at a deployment's own URL (`<deployment>--<slug>` on roll apps' domain, never a project's preview domain;
   roll apps' `Deployment.url`), behind the same link (the token once, a cookie for that host) or
   sign-in: asked before the new head deploys, and kept only while the running build is the head
   it ran. roll apps keeps an environment's last 10 builds, so the 3 kept here stay; one it pruned
@@ -168,7 +171,8 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   runs, as before).
 - **How it came up** (Vercel's and Render's deploy steps): each head's timeline is on the
   preview's record (`timeline`: when converging it started, and when each step first finished:
-  `data`, its branches made or kept and masked; `setup`, seed, release and schema read; `deploy`,
+  `data`, its branches made or kept and masked; `copies`, when it took any, the earlier push's
+  own copies of them; `setup`, seed, release and schema read; `deploy`,
   every service live; `checks`, health paths answered; `ready`) and the sheet ("Up in 9.4 s: data
   4.1 s · setup 1.2 s · deploy 3.0 s · checks 0.4 s", the steps so far while it's on its way). A
   push starts a new one; a push that keeps the services shows how little it took.
@@ -1727,7 +1731,7 @@ type Preview = {
   regressions?: "check" | "required" | null;
   regressions_accepted?: { head: string; by: string; at: number } | null;
   regressions_compared?: boolean;     // compared with main's preview at its head (errors; routes too with traces)
-  timeline?: { head: string; started_at: number; steps: { step: "data" | "setup" | "deploy" | "checks" | "ready"; at: number }[] };
+  timeline?: { head: string; started_at: number; steps: { step: "data" | "copies" | "setup" | "deploy" | "checks" | "ready"; at: number }[] };
                                       // how its head came up: each step once, when it first finished
   intercepted?: { keys: { key: string; hosts: string[] }[]; swapped: number; refused: number;
                   on_apps?: { requests: number; swapped: number; refused?: string[] } };
@@ -2421,12 +2425,9 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Earlier pushes on their own data**: each kept
-   push's own copy of the preview's Postgres branch (#726) and its bytes in the cost (#731),
-   Redis's and search's copies (#740), landed; each earlier push saying which data is its own (the
-   sheet, `roll preview show`, the PR comment), in review. Next: roll apps' earlier builds on
-   their copy, once roll apps' `POST …/deploys/{dep}/rollback {no_traffic, variables}` lands
-   (it's building it). Buckets', streams' and NoSQL's copies in review.
+1. **The copies on the timeline, in review**: a `copies` step of its own between data and setup,
+   so a slow product's copy (a stream's waits for its tail to reach object storage) shows as
+   that, not as a slow setup.
 2. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
@@ -2437,6 +2438,8 @@ Ranked by what a person notices first. Done so far:
 4. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
 5. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-22 evening to 2026-11-23: earlier pushes on their own data, for every product a preview branches and for roll apps services (#726 Postgres, #731 their cost, #740 Redis and search, #746 shown on every surface, #752 buckets, streams and NoSQL, #756 roll apps on roll apps' #750), the copies taken all at once (this PR).
 
 Landed 2026-11-22, late afternoon: a preview event feed (#713, roll MCP's ask: `GET /v1/previews/events`, created, ready, failed, visual_change and deleted, each seq taken in the write that made it so; checked live by `scripts/preview-cost.sh`), which roll MCP's Events follow.
 
