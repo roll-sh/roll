@@ -2454,7 +2454,7 @@ mod tests {
         let opts = roll_secrets::Options {
             keyring: Ok(roll_secrets::Keyring::new(&"k".repeat(32), None).unwrap()),
             key_source: roll_secrets::KeySource::Env,
-            links: super::links(super::Api::default()),
+            links: super::links(super::Api::default(), None),
             syncs: Default::default(),
             open: true,
             trust_forwarded_for: false,
@@ -2560,7 +2560,7 @@ mod tests {
             );
         let api = super::Api::default();
         api.set(router);
-        let search = super::Search(api, Default::default());
+        let search = super::Search(api, Default::default(), None);
         let link: super::Link = serde_json::from_value(json!({ "kind": "search", "ref": "srch_logs", "field": "api_key", "mode": "managed", "options": { "names": ["logs-app"], "permission": "read" } })).unwrap();
         let issue = |made: Json| {
             *answer.lock().unwrap() = made;

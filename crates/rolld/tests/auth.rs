@@ -693,7 +693,7 @@ async fn mcp_search_with_a_project_token() {
         assert!(started.elapsed() < Duration::from_secs(60), "rolld didn't answer");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let cookie = sign_in(&http, &api, &home.path().join("outbox")).await;
+    let cookie = sign_in(&http, &api, &home.path().join("outbox"), "ada@example.com").await;
     let session: serde_json::Value = http.get(format!("{api}/v1/accounts/session")).header("cookie", &cookie).send().await.unwrap().json().await.unwrap();
     let csrf = session["csrf"].as_str().unwrap().to_string();
     let as_ada = |method: reqwest::Method, path: String, body: serde_json::Value| {
