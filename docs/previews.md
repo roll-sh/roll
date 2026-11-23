@@ -969,6 +969,24 @@ thirty-fourth review found them in the clear.
 
 ## Safety
 
+- **Secret values in what a preview serves** (Netlify's secrets scan). A preview's pages are
+  read by whoever opens it (a public one by anyone), and its code can put what it was given in
+  them: a server-rendered page, a bundle built with a server variable, an API answer. The first
+  page's screenshot run keeps what its pages served (documents, the origin's own scripts, fetch
+  and XHR answers, each path once and never its query; 40 bodies, 2 MiB each, 8 MiB in all) and
+  hands it to roll, which looks in it for the preview's secret values: roll secrets' values (a
+  `plain` one's URL password only), its branches' credentials, and its own variables named like
+  a credential. A value meant for the browser (`NEXT_PUBLIC_`, `VITE_`, `PUBLIC_`, `REACT_APP_`,
+  `NUXT_PUBLIC_`, `EXPO_PUBLIC_`, `GATSBY_`, `VUE_APP_`, `STORYBOOK_`) isn't one, nor one under 8
+  characters. The run is never given the values (the page's code shares its container), and
+  what was served is dropped once looked in. Each one found is named by the name the preview gets
+  it as, with where (`served_secrets: [{key, path}]`, for the run's head): on the record, first
+  on the sheet's verdict strip ("1 secret value in what it serves") and in a box under it, in
+  `roll preview show`, in the activity when it changes, and in the pull request comment
+  ("**Secret values in what it serves:** `STRIPE_KEY` in `/assets/app.js`"), never the value
+  (checked in the screenshot image: a page's document, its script and its fetch answer kept by
+  path, the query left out; live: `scripts/preview-cost.sh`'s service serves its environment at
+  `/env.txt`, and the record names `DATABASE_URL` there without the password).
 - **Forks.** A change with `trusted: false` (a PR from a fork) gets a preview only for a head a
   writer approved (`approve-run`, roll code's rule). A new push un-approves it. Its services
   stop, and it waits as `awaiting_approval` with its data branches kept. This also fixes roll
@@ -1796,6 +1814,7 @@ type Preview = {
   page_links?: { checked: number; broken: { path: string; status: number }[] } | null;
   slower_routes?: { branch: string; routes: { name: string; count: number; p50_ms: number; main_p50_ms: number; grew?: GrewSpan | null; budget_ms?: number | null }[] } | null;
   new_errors?: { branch: string; total: number; errors: { service: string; title: string }[] } | null;
+  served_secrets?: { key: string; path: string }[]; // its secret values its pages serve at its head: names and where, never values
   regressions?: "check" | "required" | null;
   regressions_accepted?: { head: string; by: string; at: number } | null;
   regressions_compared?: boolean;     // compared with main's preview at its head (errors; routes too with traces)
