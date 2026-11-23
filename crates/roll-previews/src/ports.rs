@@ -237,6 +237,10 @@ pub struct Shot {
     /// [`crate::store::CROP_MAX`] bytes. A note whose element wasn't found is left out.
     #[serde(with = "png_b64::pairs")]
     pub crops: Vec<(String, Vec<u8>)>,
+    /// What its pages served (a path, its bytes), for the engine to look for the preview's secret
+    /// values in ([`crate::served_secrets`]); never kept.
+    #[serde(default, with = "png_b64::pairs")]
+    pub bodies: Vec<(String, Vec<u8>)>,
 }
 
 /// PNG bytes as base64 in JSON (a [`Shot`] from another node).

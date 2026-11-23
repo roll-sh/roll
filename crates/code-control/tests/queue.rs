@@ -547,6 +547,7 @@ async fn blockers_keep_changes_out_of_the_queue() {
             page_links: None,
             slower_routes: None,
             new_errors: None,
+            served_secrets: Vec::new(),
             base_change: None,
             diff_url: None,
             pages: Vec::new(),

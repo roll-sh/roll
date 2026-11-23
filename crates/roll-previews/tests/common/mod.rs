@@ -319,6 +319,8 @@ pub struct FakeApps {
     pub shot_services: Mutex<Vec<String>>,
     /// The notes each screenshot was asked to crop (a `#missing` selector finds nothing).
     pub crops_asked: Mutex<Vec<String>>,
+    /// What the first page's run says its pages served.
+    pub served: Mutex<Vec<(String, Vec<u8>)>>,
     /// Where each drain follower asked to start (`drain_from`'s `since`), and the end the test
     /// writes the followed container's lines into (`(stderr, "<stamp> <text>")`).
     pub drain_since: Mutex<Vec<String>>,
@@ -504,7 +506,7 @@ impl Apps for FakeApps {
         self.crops_asked.lock().extend(opts.crops.iter().map(|c| c.note.clone()));
         let crops = opts.crops.iter().filter(|c| c.selector != "#missing").map(|c| (c.note.clone(), png.clone())).collect();
         let health = self.page_says.lock().clone().map(|said| roll_previews::PageHealth { errors: 1, first_error: Some(said), failed: 0, first_failed: None, unstable: false });
-        Ok(Some(roll_previews::ports::Shot { png, speed: None, health, a11y: None, phone: None, pages, text: None, links: None, api, crops }))
+        Ok(Some(roll_previews::ports::Shot { png, speed: None, health, a11y: None, phone: None, pages, text: None, links: None, api, crops, bodies: self.served.lock().clone() }))
     }
     fn status(&self, p: &str, s: &str) -> Option<ServiceState> {
         self.running.lock().contains(&(p.to_string(), s.to_string())).then_some(ServiceState::Running)

@@ -18,6 +18,8 @@ pub(super) struct Masks {
     /// When the values were last read from roll secrets (0: only a start's or a job's so far).
     read_at: i64,
     values: Vec<String>,
+    /// Those its pages must never serve, by name ([`served_keyed`]).
+    keyed: Vec<(String, String)>,
 }
 
 /// A preview's values to mask, read the first time something asks (`Apps::errors`): a preview
@@ -76,6 +78,7 @@ impl Engine {
         }
         let branches = self.resource_env(id).await.map_err(|e| Error::Conflict(format!("its logs wait for what they must hide: {e:#}")))?;
         let own = project_env(&s, r.branch.as_deref()).into_iter().chain(self.store.vars(id)?).collect::<Vec<_>>();
+        let keyed = served_keyed(&secrets, &plain, &own, &branches);
         let mut values = secret_values(&secrets, &plain, &own, &branches);
         // Roll's own credentials a start gets (its traces intake's token, its SMTP password): from
         // the store, so they're hidden after a restart or a move as well.
@@ -84,8 +87,32 @@ impl Engine {
         let mut all = self.log_masks.lock();
         let m = all.entry(id.to_string()).or_default();
         m.read_at = now;
+        m.keyed = keyed;
         add(&mut m.values, values);
         Ok(m.values.clone())
+    }
+
+    /// Whether its pages served one of its secret values (Netlify's secrets scan): the names and
+    /// paths kept for the run's head (`served_secrets`), said in its activity when they change;
+    /// what was served is dropped. Values that can't be read leave the last answer as it was.
+    pub(super) async fn check_served(&self, r: &Row, shot: &mut crate::ports::Shot) {
+        let bodies = std::mem::take(&mut shot.bodies);
+        let found = if bodies.is_empty() {
+            Vec::new()
+        } else {
+            if self.masks(&r.id).await.is_err() {
+                return;
+            }
+            let keyed = self.log_masks.lock().get(&r.id).map(|m| m.keyed.clone()).unwrap_or_default();
+            crate::served_secrets(&bodies, &keyed)
+        };
+        let fact = crate::ServedSecrets { head: r.build().to_string(), secrets: found };
+        if let Ok(true) = self.store.set_runtime_fact(&r.id, "served_secrets", Some(&fact))
+            && !fact.secrets.is_empty()
+        {
+            let each: Vec<String> = fact.secrets.iter().map(|s| format!("{} in {}", s.key, s.path)).collect();
+            let _ = self.store.log(&r.id, &format!("its pages serve secret values ({}): anyone who opens the preview can read them", each.join(", ")));
+        }
     }
 
     /// A start's or a job's values, masked in the preview's output from now on.
@@ -184,6 +211,35 @@ pub(super) fn secret_values(secrets: &[(String, String)], plain: &[String], own:
         out.extend(url_password(v));
     }
     out.retain(|v| v.lines().any(|l| l.trim().len() >= 6));
+    out
+}
+
+/// What a preview's pages must never serve, by the name it gets each as: roll secrets' values (a
+/// `plain` one's URL password only), the branches' credentials, and its own variables named like a
+/// credential. Never one meant for the browser (`NEXT_PUBLIC_`, `VITE_`, …), nor one under 8
+/// characters (a short value is in pages by chance).
+pub(super) fn served_keyed(secrets: &[(String, String)], plain: &[String], own: &[(String, String)], branches: &[(String, String)]) -> Vec<(String, String)> {
+    const PUBLIC: [&str; 9] = ["NEXT_PUBLIC_", "VITE_", "PUBLIC_", "REACT_APP_", "NUXT_PUBLIC_", "EXPO_PUBLIC_", "GATSBY_", "VUE_APP_", "STORYBOOK_"];
+    let public = |k: &str| {
+        let u = k.to_ascii_uppercase();
+        PUBLIC.iter().any(|p| u.starts_with(p))
+    };
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (k, v) in secrets.iter().filter(|(k, _)| !public(k)) {
+        if plain.contains(k) {
+            out.extend(url_password(v).into_iter().map(|p| (k.clone(), p)));
+        } else {
+            out.push((k.clone(), v.clone()));
+        }
+    }
+    out.extend(own.iter().filter(|(k, _)| credential_name(k) && !public(k)).cloned());
+    for (k, v) in branches {
+        if credential_name(k) {
+            out.push((k.clone(), v.clone()));
+        }
+        out.extend(url_password(v).into_iter().map(|p| (k.clone(), p)));
+    }
+    out.retain(|(_, v)| v.trim().chars().count() >= 8);
     out
 }
 

@@ -199,6 +199,7 @@ impl CodeSource {
                     total: n.total,
                     errors: n.errors.iter().map(|x| code_control::model::PreviewNewError { service: x.service.clone(), title: x.title.clone() }).collect(),
                 }),
+                served_secrets: p.served_secrets.iter().map(|x| code_control::model::PreviewServedSecret { key: x.key.clone(), path: x.path.clone() }).collect(),
                 page_links: p.page_links.as_ref().map(|l| code_control::model::PreviewPageLinks {
                     checked: l.checked,
                     broken: l.broken.iter().map(|b| code_control::model::PreviewBrokenLink { path: b.path.clone(), status: b.status }).collect(),

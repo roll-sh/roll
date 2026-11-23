@@ -684,6 +684,10 @@ fn page_checks(e: &crate::model::PreviewEnvironment) -> Option<String> {
         summary.push(format!("{} against {branch}", plural(n.total as u64, "new error", "new errors")));
         details.push_str(&new_errors_line(n, &branch));
     }
+    if !e.served_secrets.is_empty() {
+        summary.push(format!("serves {}", plural(e.served_secrets.len() as u64, "secret value", "secret values")));
+        details.push_str(&served_line(&e.served_secrets));
+    }
     if let Some(v) = &e.visual_change {
         summary.push(if v.percent <= 0.0 { "unchanged since the push before".into() } else { format!("changed {} since the push before", pct(v.percent)) });
         details.push_str(&visual_line(v));
@@ -968,6 +972,20 @@ pub fn preview_comment_for(p: Option<&Preview>, marker: &str, teardown: Option<&
     out
 }
 
+/// Its secret values its pages serve: each by the name it's given as, and where (never the
+/// value), each in a code span nothing in it can close.
+fn served_line(served: &[crate::model::PreviewServedSecret]) -> String {
+    let each: Vec<String> = served
+        .iter()
+        .map(|s| {
+            let key: String = s.key.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_').take(100).collect();
+            let path: String = s.path.chars().filter(|c| !c.is_control() && *c != '`').take(200).collect();
+            format!("`{key}` in `{path}`")
+        })
+        .collect();
+    format!("**Secret values in what it serves:** {}. Anyone who opens the preview can read them: rotate them, and keep them out of the browser's code.\n\n", each.join(", "))
+}
+
 /// Its error groups the branch's preview doesn't have: how many, by service. Their titles are log
 /// lines (a branch's data can be in them), so they stay in roll (the change page, the sheet),
 /// never in a comment anyone reading the pull request reads.
@@ -1176,6 +1194,7 @@ mod preview_tests {
             page_links: None,
             slower_routes: None,
             new_errors: None,
+            served_secrets: Vec::new(),
             base_change: None,
             diff_url: None,
             pages: Vec::new(),
@@ -1267,6 +1286,8 @@ mod preview_tests {
         );
         let links = crate::model::PreviewPageLinks { checked: 4, broken: vec![crate::model::PreviewBrokenLink { path: "/gone`)".into(), status: 404 }, crate::model::PreviewBrokenLink { path: "/slow".into(), status: 0 }] };
         assert_eq!(links_line(&links), "**Broken links** (of 4 checked on its first page): `/gone` 404, `/slow` no answer.\n\n");
+        let served = [crate::model::PreviewServedSecret { key: "STRIPE_KEY`".into(), path: "/app.js`x".into() }];
+        assert_eq!(served_line(&served), "**Secret values in what it serves:** `STRIPE_KEY` in `/app.jsx`. Anyone who opens the preview can read them: rotate them, and keep them out of the browser's code.\n\n");
         // In the comment, one folded block whose summary is counts only.
         let mut e = p.environment.clone().unwrap();
         (e.page_health, e.page_a11y, e.base_change, e.visual_change, e.page_speed) = (Some(h(2, 1)), Some(a), Some(b), Some(v(12.34)), Some(sp(1200, Some(900))));
