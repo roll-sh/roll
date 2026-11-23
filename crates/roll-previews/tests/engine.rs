@@ -1365,6 +1365,9 @@ async fn an_earlier_push_runs_on_its_own_copy_of_the_data() {
     e.engine.pass().await.unwrap();
     let (_, live) = e.engine.env(&p.id, "web").await.unwrap();
     let (_, earlier) = e.engine.env(&p.id, "web@cs_7a").await.unwrap();
+    // Taken in a step of their own, which the timeline shows.
+    let steps: Vec<String> = e.engine.store.preview(&p.id).unwrap().timeline.map(|t| t.steps.into_iter().map(|s| s.step).collect()).unwrap_or_default();
+    assert!(steps.windows(2).any(|w| w[0] == "data" && w[1] == "copies"), "{steps:?}");
     assert!(db(&earlier).contains("-7a") && db(&earlier) != db(&live), "{} / {}", db(&earlier), db(&live));
     assert!(var(&earlier, "REDIS_URL").contains("-7a") && var(&earlier, "REDIS_URL") != var(&live, "REDIS_URL"), "Redis too");
     // And it says so, wherever its link is shown.
