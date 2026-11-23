@@ -101,7 +101,7 @@ that use them.
 
 With every product on, a node lists about 500 tools (~56k tokens), past VS Code's
 and Cursor's limits. `/v1/mcp?tools=search` (or `X-MCP-Tools: search`) lists the access tools, `roll_find`
-(a resource by name or link, see [Finding a resource](#finding-a-resource)) and three tools instead, about 1.8k tokens whatever runs (the three are ~500). This is the pattern of Cloudflare's code mode and
+(a resource by name or link, see [Finding a resource](#finding-a-resource)) and three tools instead, about 2k tokens whatever runs (the three are ~500, `roll_find` ~150). This is the pattern of Cloudflare's code mode and
 GitHub's dynamic toolsets, applied to a stateless server:
 
 | Tool | What it does |
@@ -1423,11 +1423,12 @@ gaps are in how results read and how roll is distributed):
    again (`_meta["roll/pending"]`, from each tool's `until`), and the view follows it through the
    host until it settles (Vercel's deployment card, with no app-only tool). Next for it: a rollback
    button on a deploy ("More MCP Apps views" below), once a host that renders views is confirmed.
-6. **Find any roll resource by name or dashboard URL (#821, and this PR).** `roll_find`: each product's list
+6. **Find any roll resource by name or dashboard URL (#821, #845, and this PR).** `roll_find`: each product's list
    tool the connection has, quiet and through the gate, matched by name and id, each match naming
    the read that goes on from it; a pasted dashboard link read at once (this PR: query-string
    pages, a change's own page, queues, tokens, approvals; tokens and tasks' queues and topics by
-   name). Next for it: Postgres and streams pages, once their links name a resource.
+   name; #845), in search mode too (this PR). Next for it: Postgres and streams pages, once their
+   links name a resource.
 7. **The files extension** (`io.modelcontextprotocol/files`, experimental, 2026-11-10): uploads to
    a presigned URL and downloads that never pass through the model's context; a prototype once a
    client implements it.
