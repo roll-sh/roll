@@ -388,6 +388,11 @@ impl Engine {
             return Err(e);
         }
         self.store.mark_step(&r.id, &r.head, "data")?;
+        // The data as the head the services ran left it, kept for that head's earlier push,
+        // before this head's seed or release changes it: a step of its own when it takes any.
+        if self.snapshot_for_earlier(r).await? {
+            self.store.mark_step(&r.id, &r.head, "copies")?;
+        }
         if reset_any || reset_due || !asked.is_empty() {
             self.store.update(&r.id, |row| {
                 // Only what this converge did: a reset asked for meanwhile stays asked.
@@ -492,10 +497,6 @@ impl Engine {
         let own: Vec<(String, String)> = project_env(&s, r.branch.as_deref()).into_iter().chain(self.store.vars(&r.id)?).collect();
         self.add_masks(&r.id, super::masks::secret_values(&[], &[], &own, &vars));
         self.stale_masks(&r.id);
-
-        // 3a'. The data as the head the services ran left it, kept for that head's earlier push,
-        // before this head's seed or release changes it.
-        self.snapshot_for_earlier(r).await?;
 
         // 3b. The project's seed, once on fresh data, before anything serves it.
         if let Some(seed) = &s.seed
@@ -1420,17 +1421,18 @@ impl Engine {
     /// what a newer migration made of its data. Only where the head will be kept (a trusted
     /// change's own services: on the runtime, `env` connects there; on roll apps, the build is
     /// started again with the copy's variables), once a head.
-    async fn snapshot_for_earlier(&self, r: &Row) -> anyhow::Result<()> {
+    async fn snapshot_for_earlier(&self, r: &Row) -> anyhow::Result<bool> {
         if !r.trusted {
-            return Ok(());
+            return Ok(false);
         }
         let olds: std::collections::BTreeSet<String> = self.store.services(&r.id)?.into_iter().filter(|s| s.repo == r.repo).filter_map(|s| s.deployed).filter(|d| !d.is_empty() && d != r.build()).collect();
         if olds.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
         let kept = self.store.pinned_data(&r.id)?;
         let name = branch_name(&r.id);
         let resources = self.store.resources(&r.id)?;
+        let mut took = false;
         for old in &olds {
             // Every product's copy at once (they're independent; a stream's waits for its tail to
             // reach object storage): the push waits for the slowest, not their sum.
@@ -1449,6 +1451,7 @@ impl Engine {
                 let key = format!("{}:{}", res.kind.as_str(), res.parent);
                 match made {
                     Ok(Some(made)) => {
+                        took = true;
                         self.store.add_pinned_data(&r.id, &crate::store::PinnedData { revision: old.clone(), kind: res.kind, parent: res.parent.clone(), name: snap, r#ref: made.r#ref, kept: made.kept, source: branch.clone() })?;
                         self.store.log(&r.id, &format!("kept {key}'s data as {} left it, for its earlier push", short(old)))?;
                     }
@@ -1462,7 +1465,7 @@ impl Engine {
                 return Err(e);
             }
         }
-        Ok(())
+        Ok(took)
     }
 
     /// Delete the earlier pushes' data `which` picks (the branch first, then its record, so a
