@@ -5,6 +5,7 @@ import { ROLES, workspaceApi, type Invite, type Member, type Role, type RoleRule
 import { secretsApi } from "@/lib/secrets-api";
 import { controlsFor, describeEnvironments, developerReach, grantable, manages, parseEnvironments, type ReachedEnvironment } from "@/lib/workspace-members";
 import { btn, danger, ErrorNote, input, panel, primary, useCopy } from "../ui";
+import { ProjectGroups } from "./groups";
 
 const ROLE_NOTE: Record<Role, string> = {
   viewer: "Names and history, never a value",
@@ -151,6 +152,8 @@ export function ProjectMembers({ project, onLeft }: { project: WorkspaceProject;
           </ul>
         )}
       </section>
+
+      <ProjectGroups project={project} def={rules?.developer_default ?? "unprotected"} />
 
       {manages(me) && invites.length > 0 && (
         <section className={`${panel} overflow-hidden`}>

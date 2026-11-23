@@ -311,6 +311,8 @@ export interface SsoConnection {
   scim_leaked: string | null;
   /** How long a session it signs in lasts at most, in hours (null: roll's 30 days). */
   session_hours: number | null;
+  /** Its provider keeps groups over SCIM (`/Groups`; off until an admin turns it on). */
+  groups: boolean;
 }
 
 export const accountsApi = {
@@ -387,7 +389,7 @@ export const accountsApi = {
   ssoConnections: () => call<SsoConnection[]>("GET", "/sso"),
   addSso: (c: { name?: string; issuer: string; client_id: string; client_secret: string; domains: string[]; enforce?: boolean; provision?: boolean }) =>
     call<SsoConnection>("POST", "/sso", c),
-  updateSso: (id: string, c: { name?: string; client_id?: string; client_secret?: string; domains?: string[]; enforce?: boolean; provision?: boolean; session_hours?: number }) =>
+  updateSso: (id: string, c: { name?: string; client_id?: string; client_secret?: string; domains?: string[]; enforce?: boolean; provision?: boolean; session_hours?: number; groups?: boolean }) =>
     call<SsoConnection>("PATCH", `/sso/${encodeURIComponent(id)}`, c),
   removeSso: (id: string) => call<null>("DELETE", `/sso/${encodeURIComponent(id)}`),
   /** A SCIM token for the connection (replacing its old one), shown this once. */

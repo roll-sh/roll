@@ -1096,6 +1096,11 @@ impl Store {
         Ok(self.db.read(|c| c.query(&format!("SELECT {GRANT_COLUMNS} FROM {GRANT_FROM} WHERE g.kind <> 'workload' ORDER BY g.created_at DESC, g.id"), (), grant_row))?)
     }
 
+    /// `user`'s tokens and connections that aren't revoked (one indexed read, `grants_user`).
+    pub fn live_of_user(&self, user: &str) -> Result<Vec<Grant>> {
+        Ok(self.db.read(|c| c.query(&format!("SELECT {GRANT_COLUMNS} FROM {GRANT_FROM} WHERE g.user_id = ? AND g.kind <> 'workload' AND g.revoked_at IS NULL ORDER BY g.created_at DESC, g.id"), [user], grant_row))?)
+    }
+
     /// Revoke workload grant `id` (and only a workload grant), with why. Whether it was live.
     pub fn revoke_workload(&self, id: &str, why: &str) -> Result<bool> {
         let now = code_sql::now_ms();

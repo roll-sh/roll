@@ -1,6 +1,7 @@
 # Members v1.1: groups, SCIM groups and time-boxed elevation (design)
 
-Status: **design**, not built. This is item 6 of roll secrets' thirty-fourth product review
+Status: **phase 1 built** (groups, group roles and SCIM `Groups`, with D10–D12 and D18 as option
+(a)); time-boxed elevation (D13–D17) is still a design. This is item 6 of roll secrets' thirty-fourth product review
 (docs/secrets.md, "Next"), and it builds on members v1 ([members.md](members.md), on main since
 #501). members.md's v1.1 also covers apps, previews and search becoming member products (previews
 is built, #524). This document is the other half: who holds a role, besides a person.
@@ -586,8 +587,8 @@ The elevation routes are a person's, like `/v1/workspace/invites`. They go in pe
 - `group_roles` of a deleted project move to `deleted_group_roles` in the delete's write, beside
   `deleted_members` and `deleted_homes`. Nobody's grant names the project while it's deleted.
 - `Workspace::restore` brings them back as they were, except roles of groups deleted since. Those
-  are dropped and listed in the restore's answer (`dropped_groups`), and roll secrets' recovery
-  reports them.
+  are dropped, each a `group.role_remove` in roll's audit log (built: the restore's answer doesn't
+  list them).
 - The elevation policy travels with the project row.
 - Pending elevations on P are denied (`project deleted`), and live ones end in the delete's
   follow-up. They're **not** restored: an approval was for that time, and a recovery days later
