@@ -89,6 +89,9 @@ const WAKE_ROOM: u64 = 1 << 20;
 const MEMORY_CHECK: Duration = Duration::from_secs(2);
 /// Response header naming the node that owns a cluster this node refused.
 pub const OWNER_HEADER: &str = "X-Roll-Search-Owner";
+/// Why a task stopped when its cluster moved to another node ([`Node::hand_over`]): its
+/// `canceled` reason, where Elasticsearch's `_tasks/_cancel` says "by user request".
+pub const HANDED_OVER: &str = "the node handed the cluster over";
 /// Node setting: the clusters, comma-separated, that read service account tokens from
 /// `<path.conf>/service_tokens`. The file is the node's: on a node serving many clusters a
 /// token in it would sign in as `elastic/fleet-server` on every one of them, so only the
@@ -1474,8 +1477,19 @@ impl Node {
         self.unload_with(name, true, None).await
     }
 
+    /// [`Node::unload`] because the cluster's lease is moving to another node (a drain, a
+    /// rebalance): the tasks it stops report [`HANDED_OVER`] as why.
+    pub async fn hand_over(&self, name: &str) -> bool {
+        self.unload_for(name, true, None, HANDED_OVER).await
+    }
+
     /// Unloads `name`; with `only`, just that instance (a reload since is left alone).
     async fn unload_with(&self, name: &str, flush: bool, only: Option<&Arc<Loaded>>) -> bool {
+        self.unload_for(name, flush, only, search_es::tasks::USER_CANCEL_REASON).await
+    }
+
+    /// [`Node::unload_with`], the running tasks reporting `why` they were cancelled.
+    async fn unload_for(&self, name: &str, flush: bool, only: Option<&Arc<Loaded>>, why: &str) -> bool {
         let _t = self.transition(name).await;
         let loaded = {
             let mut map = self.clusters.write();
@@ -1495,13 +1509,16 @@ impl Node {
         };
         // Tasks still running (the cluster was unloaded on purpose: deleted, handed over, put to
         // sleep) would vanish with it: they end now as cancelled, which `_tasks` reports.
-        let cancelled = search_es::api::tasks::cancel_all(&loaded.cluster);
+        let cancelled = search_es::api::tasks::cancel_all(&loaded.cluster, why);
         if !cancelled.is_empty() {
             // They stop between documents; a few seconds at most, so a stuck one can't hold the
             // unload (its writes find the cluster closed below).
             let ended = search_es::api::tasks::wait_for(&loaded.cluster, &cancelled, std::time::Duration::from_secs(5)).await;
             tracing::info!(cluster = name, tasks = cancelled.len(), ended, "cancelled the running tasks of a cluster being unloaded");
         }
+        // Connector syncs stop as `suspended`, for the next load to resume (before the hook
+        // below, which records when the cluster is due next: at once, for such a job).
+        search_es::xpack::entsearch::sync::suspend(&loaded.cluster).await;
         self.hooks.unloading(&loaded.cluster).await;
         // Failed logins the node refuses while it sleeps are recorded as it last asked.
         self.audit.remember(name, search_es::xpack::security::audit::snapshot(&loaded.cluster));

@@ -8,6 +8,12 @@
 //! connector at a time, that claims the job, reads its source a page at a time into a [`Sink`]
 //! (sync rules, bulk indexing, throttling, heartbeats, cancel), deletes what a full sync didn't
 //! see, and records the outcome on the job and the connector.
+//!
+//! When the cluster unloads (handed over to another node, put to sleep, deleted), [`suspend`]
+//! stops its running syncs and records their jobs `suspended`, as Elastic's connector service
+//! does when it shuts down mid-sync. A suspended job waits like a pending one, so whichever node
+//! loads the cluster next resumes it at once rather than calling it abandoned after
+//! [`STALE_MS`].
 
 pub mod config;
 pub mod extract;
@@ -69,6 +75,8 @@ pub const DOC_BYTES_MAX: usize = 10 << 20;
 #[derive(Default)]
 pub struct Syncs {
     running: parking_lot::Mutex<HashSet<String>>,
+    /// The cluster is unloading ([`suspend`]): nothing starts, and running syncs stop.
+    closing: std::sync::atomic::AtomicBool,
     /// The cluster's key, owner and slot pool ([`crate::slots`]), set by its first [`run_due`].
     identity: std::sync::OnceLock<(String, String, Arc<Slots>)>,
 }
@@ -81,6 +89,10 @@ impl Syncs {
 
     fn is_running(&self, connector: &str) -> bool {
         self.running.lock().contains(connector)
+    }
+
+    fn is_closing(&self) -> bool {
+        self.closing.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn begin(&self, connector: &str) -> bool {
@@ -113,6 +125,11 @@ fn instant_ms(v: Option<&Value>) -> Option<i64> {
 
 fn active(status: &str) -> bool {
     matches!(status, "in_progress" | "canceling")
+}
+
+/// A job waiting to start: new, or suspended by the unload of the cluster it ran on.
+fn waiting(status: &str) -> bool {
+    matches!(status, "pending" | "suspended")
 }
 
 /// Connectors with a job in progress.
@@ -178,7 +195,7 @@ pub fn next_due(cluster: &Cluster, st: &crate::meta::ClusterState, syncs: Option
     for (_, j) in st.metadata.xpack.iter(SYNC_JOBS) {
         let cid = connector_of(j);
         match str_of(j, "status") {
-            "pending" if runnable.contains(cid) && !busy.contains(cid) && syncs.is_none_or(|s| !s.is_running(cid)) => match syncs {
+            s if waiting(s) && runnable.contains(cid) && !busy.contains(cid) && syncs.is_none_or(|x| !x.is_running(cid) && !x.is_closing()) => match syncs {
                 Some(s) if !s.has_room() => {}
                 // Not this cluster's turn for a node slot: a slot freeing wakes it.
                 Some(s) if !*turn.get_or_insert_with(|| s.identity.get().is_none_or(|(k, o, pool)| pool.admits(k, o))) => at(crate::time::now_millis() + SLOT_RETRY_MS),
@@ -214,6 +231,9 @@ pub fn node_slots() -> &'static Arc<Slots> {
 pub async fn run_due(cluster: &Cluster, now: i64) {
     let Some(handle) = cluster.handle() else { return };
     let syncs = &cluster.xpack.connector_syncs;
+    if syncs.is_closing() {
+        return;
+    }
     let st = cluster.state();
     // Jobs a node that went away left in progress.
     let orphans: Vec<String> = st
@@ -250,13 +270,19 @@ pub async fn run_due(cluster: &Cluster, now: i64) {
         })
         .collect();
     drop(st);
-    // Nothing to settle: no write (a write would wake the scheduler again).
-    let settle = !(orphans.is_empty() && drafts.is_empty() && fired.is_empty());
+    // Nothing to settle: no write (a write would wake the scheduler again, and costs a
+    // cluster state save on a node).
+    if !(orphans.is_empty() && drafts.is_empty() && fired.is_empty()) {
+        settle(cluster, orphans, drafts, fired, now).await;
+    }
+    start_pending(cluster, &handle).await;
+}
+
+/// [`run_due`]'s write: jobs a node that went away left in progress, validated drafts, and the
+/// jobs schedules that came due make.
+async fn settle(cluster: &Cluster, orphans: Vec<String>, drafts: Vec<(String, Value)>, fired: Vec<(String, &'static str, bool)>, now: i64) {
     let _ = cluster
         .update(move |st| {
-            if !settle {
-                return Ok(());
-            }
             for id in orphans {
                 let Some(j) = st.metadata.xpack.get(SYNC_JOBS, &id).cloned() else { continue };
                 let cid = connector_of(&j).to_string();
@@ -279,7 +305,7 @@ pub async fn run_due(cluster: &Cluster, now: i64) {
             }
             // Schedules that came due make jobs (unless one is already waiting or running).
             let busy = busy_connectors(st);
-            let pending: HashSet<String> = st.metadata.xpack.iter(SYNC_JOBS).filter(|(_, j)| str_of(j, "status") == "pending").map(|(_, j)| connector_of(j).to_string()).collect();
+            let pending: HashSet<String> = st.metadata.xpack.iter(SYNC_JOBS).filter(|(_, j)| waiting(str_of(j, "status"))).map(|(_, j)| connector_of(j).to_string()).collect();
             for (cid, kind, run) in fired {
                 let mut rec = st.metadata.xpack.get(RECORDS, &cid).cloned().unwrap_or_else(|| obj! {});
                 if let Value::Obj(m) = &mut rec {
@@ -301,6 +327,12 @@ pub async fn run_due(cluster: &Cluster, now: i64) {
             Ok(())
         })
         .await;
+}
+
+/// [`run_due`]'s starts: pending (and suspended) jobs, each in a slot of the cluster's and the
+/// node's.
+async fn start_pending(cluster: &Cluster, handle: &Arc<Cluster>) {
+    let syncs = &cluster.xpack.connector_syncs;
     let pending = pending_jobs(cluster, &cluster.state(), syncs);
     // A slot of the node's, in turn with every other cluster ([`crate::slots`]).
     let key = cluster.name.clone();
@@ -310,7 +342,7 @@ pub async fn run_due(cluster: &Cluster, now: i64) {
     if pending.is_empty() {
         pool.leave(&key);
     }
-    let weak = Arc::downgrade(&handle);
+    let weak = Arc::downgrade(handle);
     // What a waiter checks it still wants a slot for: a few of its jobs, each a lookup.
     let wanted: Arc<Vec<(String, String)>> = Arc::new(pending.iter().take(16).map(|(_, j, c)| (j.clone(), c.clone())).collect());
     for (_, job, cid) in pending {
@@ -335,6 +367,46 @@ pub async fn run_due(cluster: &Cluster, now: i64) {
     }
 }
 
+/// The cluster is unloading: nothing starts any more, its running syncs stop, and their jobs are
+/// recorded `suspended` (the connector's `last_sync_status` too) for whichever node loads the
+/// cluster next to resume. Waits a few seconds at most for the syncs to stop: one stuck in its
+/// source's I/O ends when its next write finds the cluster closed.
+pub async fn suspend(cluster: &Cluster) {
+    let syncs = &cluster.xpack.connector_syncs;
+    syncs.closing.store(true, std::sync::atomic::Ordering::SeqCst);
+    let running: HashSet<String> = syncs.running.lock().clone();
+    if running.is_empty() {
+        return;
+    }
+    let _ = cluster
+        .update(move |st| {
+            let (now, t) = (crate::time::now_millis(), now_nanos_string());
+            let jobs: Vec<(String, String)> = st
+                .metadata
+                .xpack
+                .iter(SYNC_JOBS)
+                .filter(|(_, j)| str_of(j, "status") == "in_progress" && str_of(j, "worker_hostname") == WORKER && running.contains(connector_of(j)))
+                .map(|(id, j)| (id.clone(), connector_of(j).to_string()))
+                .collect();
+            for (id, cid) in jobs {
+                let Some(Value::Obj(mut j)) = st.metadata.xpack.get(SYNC_JOBS, &id).cloned() else { continue };
+                j.insert("status".into(), "suspended".into());
+                j.insert("last_seen".into(), t.clone().into());
+                store::put(st, SYNC_JOBS, &id, Value::Obj(j), now)?;
+                if let Some(Value::Obj(mut c)) = st.metadata.xpack.get(CONNECTORS, &cid).cloned() {
+                    c.insert("last_sync_status".into(), "suspended".into());
+                    store::put(st, CONNECTORS, &cid, Value::Obj(c), now)?;
+                }
+            }
+            Ok(())
+        })
+        .await;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while syncs.busy() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
 /// Runs a claimed slot's sync (`work`) as a task of its own and, however it ends (a panic
 /// included), frees the slot and the node's permit, settles a job it left unfinished, and wakes
 /// the scheduler for the next pending job.
@@ -353,7 +425,7 @@ async fn supervise(cluster: Arc<Cluster>, job: String, cid: String, permit: Opti
             .update(move |st| {
                 let Some(Value::Obj(mut j)) = st.metadata.xpack.get(SYNC_JOBS, &job).cloned() else { return Ok(()) };
                 let status = j.get("status").and_then(Value::as_str).unwrap_or_default().to_string();
-                if matches!(status.as_str(), "completed" | "error" | "canceled") {
+                if matches!(status.as_str(), "completed" | "error" | "canceled" | "suspended") {
                     return Ok(());
                 }
                 let outcome = if status == "canceling" { Outcome::Canceled } else { Outcome::Failed(why.into()) };
@@ -373,7 +445,7 @@ async fn supervise(cluster: Arc<Cluster>, job: String, cid: String, permit: Opti
 /// its lock).
 fn startable(cluster: &Cluster, job: &str, cid: &str) -> bool {
     let st = cluster.state();
-    st.metadata.xpack.get(SYNC_JOBS, job).is_some_and(|j| str_of(j, "status") == "pending")
+    st.metadata.xpack.get(SYNC_JOBS, job).is_some_and(|j| waiting(str_of(j, "status")))
         && st.metadata.xpack.get(CONNECTORS, cid).is_some_and(|c| syncs_here(cluster, &st, cid, c))
         && !cluster.xpack.connector_syncs.is_running(cid)
 }
@@ -386,7 +458,7 @@ fn pending_jobs(cluster: &Cluster, st: &crate::meta::ClusterState, syncs: &Syncs
         .metadata
         .xpack
         .iter(SYNC_JOBS)
-        .filter(|(_, j)| str_of(j, "status") == "pending")
+        .filter(|(_, j)| waiting(str_of(j, "status")))
         .filter_map(|(id, j)| {
             let cid = connector_of(j);
             let c = st.metadata.xpack.get(CONNECTORS, cid)?;
@@ -493,6 +565,8 @@ enum Outcome {
 pub enum Stop {
     Canceled,
     Failed(String),
+    /// The cluster is unloading: the job stays `suspended` for the next load ([`suspend`]).
+    Suspended,
 }
 
 impl From<String> for Stop {
@@ -572,13 +646,14 @@ fn settle_connector(st: &mut crate::meta::ClusterState, cid: &str, outcome: &Out
 
 /// One job, start to end.
 async fn run(cluster: &Arc<Cluster>, job_id: &str, cid: &str) {
-    // Claim it: only a job still pending is ours.
+    // Claim it: only a job still waiting is ours. Checked in the update, which `suspend`'s
+    // follows: a job claimed before the cluster started closing is suspended there.
     let (jid, connector_id) = (job_id.to_string(), cid.to_string());
     let me = cluster.clone();
     let claimed = cluster
         .update(move |st| {
             let Some(Value::Obj(mut j)) = st.metadata.xpack.get(SYNC_JOBS, &jid).cloned() else { return Ok(false) };
-            if j.get("status").and_then(Value::as_str) != Some("pending") {
+            if !waiting(j.get("status").and_then(Value::as_str).unwrap_or_default()) || me.xpack.connector_syncs.is_closing() {
                 return Ok(false);
             }
             // A connector waiting to be the cluster's own doesn't start (it stays pending).
@@ -609,6 +684,8 @@ async fn run(cluster: &Arc<Cluster>, job_id: &str, cid: &str) {
         Ok(cursor) => (Outcome::Completed, Some(cursor)),
         Err(Stop::Canceled) => (Outcome::Canceled, None),
         Err(Stop::Failed(e)) => (Outcome::Failed(e), None),
+        // `suspend` recorded the job.
+        Err(Stop::Suspended) => return,
     };
     let total = match outcome {
         Outcome::Completed => count(cluster, cid).await,
@@ -925,15 +1002,18 @@ impl Sink<'_> {
         }
     }
 
-    /// Whether the job is still running (not canceled, not deleted).
-    fn running(&self) -> bool {
-        self.cluster.state().metadata.xpack.get(SYNC_JOBS, &self.job).is_some_and(|j| str_of(j, "status") == "in_progress")
-    }
-
-    /// Why the sync must stop now, if it must: canceled (or deleted), or past its time limit.
+    /// Why the sync must stop now, if it must: canceled (or deleted), its cluster unloading
+    /// ([`suspend`]), or past its time limit.
     fn stop_reason(&self) -> Option<Stop> {
-        if !self.running() {
-            return Some(Stop::Canceled);
+        let st = self.cluster.state();
+        match st.metadata.xpack.get(SYNC_JOBS, &self.job).map(|j| str_of(j, "status")) {
+            Some("in_progress") => {}
+            Some("suspended") => return Some(Stop::Suspended),
+            _ => return Some(Stop::Canceled),
+        }
+        drop(st);
+        if self.cluster.xpack.connector_syncs.is_closing() {
+            return Some(Stop::Suspended);
         }
         (Instant::now() >= self.deadline).then(|| Stop::Failed(format!("the sync ran past its time limit ({MAX_SYNC_DURATION})")))
     }

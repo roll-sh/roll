@@ -211,11 +211,17 @@ pub async fn get(ctx: &Ctx<'_>) -> EsResult<Reply> {
 }
 
 /// Cancels every cancellable running task of `cluster` (the node unloads it: a task's work
-/// would be lost with it, so it ends now as cancelled rather than vanish). The ids it cancelled,
-/// for [`wait_for`].
-pub fn cancel_all(cluster: &crate::Cluster) -> Vec<u64> {
+/// would be lost with it, so it ends now as cancelled rather than vanish), each reporting
+/// `reason` as why. The ids it cancelled, for [`wait_for`].
+pub fn cancel_all(cluster: &crate::Cluster, reason: &str) -> Vec<u64> {
+    let tasks: Vec<_> = cluster.tasks.list().into_iter().filter(|t| t.cancellable).collect();
+    // Every reason first: a slice stops on its parent's flag too, and must already have its own.
+    // A task a client already cancelled keeps its reason.
+    for l in tasks.iter().filter(|t| !t.cancelled.load(std::sync::atomic::Ordering::Relaxed)).filter_map(|t| t.live.as_ref()) {
+        l.set_reason(reason);
+    }
     let mut ids = Vec::new();
-    for t in cluster.tasks.list().into_iter().filter(|t| t.cancellable) {
+    for t in tasks {
         t.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
         if let Some(l) = &t.live {
             l.wake();
