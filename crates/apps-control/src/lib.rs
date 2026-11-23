@@ -358,6 +358,8 @@ pub struct Apps {
     pub(crate) check_failures: Mutex<HashMap<String, i64>>,
     /// Each browser check's last lab metrics, by `<service>/<env>/<check>`.
     pub(crate) check_metrics: Mutex<HashMap<String, serde_json::Value>>,
+    /// Each preview environment's running head checks, ended by the next head's.
+    pub(crate) preview_check_runs: Mutex<HashMap<String, tokio_util::sync::CancellationToken>>,
     /// A pass of daily rescans is running, and when live deployments were last looked at for
     /// one ([`vulns`]).
     pub(crate) rescanning: std::sync::atomic::AtomicBool,
@@ -709,6 +711,7 @@ impl Apps {
             checker_images: Mutex::new(std::collections::HashSet::new()),
             check_failures: Mutex::new(HashMap::new()),
             check_metrics: Mutex::new(HashMap::new()),
+            preview_check_runs: Mutex::new(HashMap::new()),
             rescanning: Default::default(),
             rescan_looked: Default::default(),
             errors_seen: Mutex::new(HashMap::new()),
@@ -1592,6 +1595,8 @@ impl Apps {
         for d in deps {
             if let Some(img) = &d.image {
                 self.deps.builder.remove_image(img).await;
+                let i = img.clone();
+                let _ = self.db(move |s| s.drop_provenance(&i)).await;
                 if let Some(k) = sites::key(img) {
                     self.drop_site(&k).await;
                 }
@@ -3160,7 +3165,11 @@ impl Apps {
                         vars.insert(format!("{prefix}{k}"), (v, "link"));
                     }
                 }
-                Err(e) => tracing::warn!(service = %svc.id, kind = kind.as_str(), r#ref = %r, error = %e, "apps: a link's variables couldn't be read"),
+                Err(e) => {
+                    tracing::warn!(service = %svc.id, kind = kind.as_str(), r#ref = %r, error = %e, "apps: a link's variables couldn't be read");
+                    // Said in the deploy's own log too: its variables are left out of it.
+                    branch_notices.push(format!("{} {r}'s variables are left out: {e}", kind.as_str()));
+                }
             }
         }
         let mut sensitive = BTreeSet::new();
@@ -3733,10 +3742,12 @@ impl Apps {
     async fn link_values(self: &Arc<Self>, service: &ServiceRow, kind: LinkKind, r#ref: &str, env: &str, minted: Option<integrations::Minted>) -> anyhow::Result<Vec<(String, String)>> {
         let Some(m) = minted else { return self.link_vars(service, kind, r#ref, env).await };
         let mut out = match kind {
-            LinkKind::Service => self.link_vars(service, kind, r#ref, env).await,
-            _ => self.deps.resources.link_vars_as(kind, r#ref, &m.vars).await,
-        }
-        .unwrap_or_default();
+            LinkKind::Service => self.link_vars(service, kind, r#ref, env).await.unwrap_or_default(),
+            // A tasks link's keys are only read with its own: without them it fails, said in the
+            // deploy's log, never deployed half (a URL and a token, no keys to check deliveries).
+            LinkKind::Tasks => self.deps.resources.link_vars_as(kind, r#ref, &m.vars).await?,
+            _ => self.deps.resources.link_vars_as(kind, r#ref, &m.vars).await.unwrap_or_default(),
+        };
         for (k, v) in m.vars {
             match out.iter_mut().find(|(have, _)| *have == k) {
                 Some(slot) => slot.1 = v,

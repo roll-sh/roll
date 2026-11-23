@@ -1597,11 +1597,13 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
             _ => turned_away,
         };
     }
-    // Its own redirects (Vercel's project redirects, any kind of service), before anything wakes.
+    // Its own redirects (Vercel's project redirects, any kind of service), before anything wakes:
+    // a GET or HEAD, or any method for a 307 or 308 (which keep it).
+    let reads = matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD);
     if !scheduled
-        && matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD)
         && let Some(rules) = &gate.redirects
         && let Some((status, to)) = rules.find(req.uri().path(), req.uri().query(), &crate::site_rules::Visitor::of(req.headers()))
+        && (reads || matches!(status, 307 | 308))
         && let Ok(loc) = HeaderValue::from_str(&to)
     {
         let mut r = Response::new(Body::empty());
