@@ -107,7 +107,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/cancel` | | `Deployment` | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/rollout` | `{action: "advance" \| "all" \| "abort"}` | 202 `{deployment}`; 409 when it isn't waiting | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/restart` | | 202 `Environment` | deploy* |
-| `POST /v1/apps/services/{id}/environments/{env}/cache/purge` | `{ paths?, tags? }` (1–100 absolute paths, any query, a trailing `*` a prefix; 1–100 tags its answers carried, any case; neither: everything) | `{ purged }`: how many kept answers went (on-demand revalidation, "Public traffic") | deploy* |
+| `POST /v1/apps/services/{id}/environments/{env}/cache/purge` | `{ paths?, tags? }` (1–100 absolute paths, any query, a trailing `*` a prefix; 1–100 tags its answers carried, any case; neither: everything) | `{ purged }`: how many kept answers went (on-demand revalidation, "Public traffic"); a Next app's shared cache too (everything emptied, or those tags and the paths' own expired) | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/instances/{name}/restart` | | `Environment` (a web service's: a fresh instance answers before this one drains; 404 for no such instance, 409 if the fresh one didn't start: this one keeps serving) | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/sleep` | | `Environment` | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/wake` | | `Environment` | write (it starts compute someone pays for; a visitor's request wakes a public environment through the proxy, not this route) |
@@ -703,6 +703,9 @@ type Plan = {
    *  the service sets none. Absent without one, and for a tree's own Dockerfile. A Procfile's `web:`
    *  (`worker:` for a worker) is `start` when the service names none. */
   release?: string;
+  /** roll's Next.js adapter is in the image (a Next 16 server, not its own Dockerfile): its
+   *  instances share ISR, fetch and "use cache" entries (README, "Next.js across instances"). */
+  next_cache?: boolean;
 };
 
 /** Wired on a node today: postgres (DATABASE_URL), redis (REDIS_URL, REDIS_REST_URL/TOKEN) and search. */

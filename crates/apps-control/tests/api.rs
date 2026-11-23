@@ -5281,6 +5281,89 @@ async fn builds_share_a_remote_cache_for_turborepo_and_nx() {
     assert!(!w.fake.build_vars.lock().last().unwrap().iter().any(|k| k.starts_with("TURBO_")));
 }
 
+/// Next.js across instances and after sleep (Vercel's ISR and Data Cache, OpenNext's): a Next 16
+/// build gets roll's adapter and its instances the cache's address and token (sealed); what one
+/// writes another reads, a deployment's pages its own and the fetch cache every deployment's; an
+/// invalidated tag expires an entry at once (a path's own tag too, through a purge) or, with an
+/// expiry, makes it stale; another environment's token reads none of it; a leak empties it; a
+/// closed environment gets none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn next_shares_its_cache_between_instances() {
+    let w = world_full(|_| {}, true, |_| {}).await;
+    w.code.push("e5e5e5e5e5e5", "site", &[("package.json", r#"{"name":"site","scripts":{"build":"next build","start":"next start"},"dependencies":{"next":"16.4.6","react":"19.3.1"}}"#), ("app/page.tsx", "")]);
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "site", "source": {"kind": "repo", "repo": "acme/site"} }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    call(&w.api, "PATCH", &format!("{env}/variables"), Some(json!({"set": {"FAKE_ECHO": "ROLL_NEXT_CACHE_URL,ROLL_NEXT_CACHE_TOKEN"}}))).await;
+    let (_, d) = call(&w.api, "POST", &format!("{env}/redeploy"), Some(json!({}))).await;
+    let d = settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
+    let dep = d["id"].as_str().unwrap().to_string();
+    assert!(d["plan"]["next_cache"] == true && d["plan"]["dockerfile"].as_str().unwrap_or_default().contains("NEXT_ADAPTER_PATH=/opt/roll-next/adapter.js"), "{d}");
+    let (_, body) = visit_deployment(&w, &host(&svc["environments"][0]["url"]), &dep).await;
+    let token = body["vars"]["ROLL_NEXT_CACHE_TOKEN"].as_str().unwrap_or_else(|| panic!("{body}")).to_string();
+    assert!(token.starts_with("rlr_") && body["vars"]["ROLL_NEXT_CACHE_URL"].as_str().unwrap_or_default().ends_with("/_roll/next"), "{body}");
+    assert!(!call(&w.api, "GET", &format!("{env}/variables"), None).await.1.to_string().contains(&token), "sealed");
+    let send = |method: &'static str, path: String, token: String, body: &'static str, headers: Vec<(&'static str, String)>| {
+        let mut b = Request::builder().method(method).uri(format!("/_roll/next{path}")).header("authorization", format!("Bearer {token}"));
+        for (k, v) in headers {
+            b = b.header(k, v);
+        }
+        let (public, req) = (w.public.clone(), b.body(Body::from(body)).unwrap());
+        async move {
+            let r = public.oneshot(req).await.unwrap();
+            let (st, h) = (r.status(), r.headers().clone());
+            (st, h, String::from_utf8(r.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap())
+        }
+    };
+    let tags = |t: &[&str]| percent_encoding::utf8_percent_encode(&serde_json::to_string(t).unwrap(), percent_encoding::NON_ALPHANUMERIC).to_string();
+    let page = format!("/d.{dep}/{}", "a".repeat(64));
+    let data = format!("/data/{}", "b".repeat(64));
+    let soft = || vec![("x-roll-soft-tags", tags(&["_N_T_/layout", "_N_T_/blog/hello"]))];
+    assert_eq!(send("GET", page.clone(), token.clone(), "", soft()).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(send("PUT", page.clone(), token.clone(), "<html>hello</html>", vec![("x-roll-tags", tags(&["posts"]))]).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(send("PUT", data.clone(), token.clone(), "{\"price\":1}", vec![("x-roll-tags", tags(&["prices"])), ("x-roll-expire", "3600".into())]).await.0, StatusCode::NO_CONTENT);
+    let (st, h, b) = send("GET", page.clone(), token.clone(), "", soft()).await;
+    assert_eq!((st, b.as_str(), h.get("x-roll-stale")), (StatusCode::OK, "<html>hello</html>", None));
+    assert_eq!(send("GET", format!("/d.dep_other/{}", "a".repeat(64)), token.clone(), "", vec![]).await.0, StatusCode::NOT_FOUND, "another deployment's pages are its own");
+    assert_eq!(send("GET", "/d.x/..%2F".into(), token.clone(), "", vec![]).await.0, StatusCode::BAD_REQUEST);
+    // `revalidateTag("posts", "max")`: stale, served while it's made again.
+    assert_eq!(send("POST", "/tags".into(), token.clone(), r#"{"tags": ["posts"], "expire": 3600}"#, vec![("content-type", "application/json".into())]).await.0, StatusCode::NO_CONTENT);
+    let (st, h, _) = send("GET", page.clone(), token.clone(), "", soft()).await;
+    assert_eq!((st, h.get("x-roll-stale").map(|v| v.to_str().unwrap())), (StatusCode::OK, Some("1")));
+    // A purge of its path: its own tag expired, gone for every instance.
+    let (st, _) = call(&w.api, "POST", &format!("{env}/cache/purge"), Some(json!({"paths": ["/blog/hello"]}))).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(send("GET", page.clone(), token.clone(), "", soft()).await.0, StatusCode::NOT_FOUND, "revalidatePath");
+    // `revalidateTag("prices")`: expired at once.
+    assert_eq!(send("GET", data.clone(), token.clone(), "", vec![]).await.2, "{\"price\":1}");
+    send("POST", "/tags".into(), token.clone(), r#"{"tags": ["prices"]}"#, vec![]).await;
+    assert_eq!(send("GET", data.clone(), token.clone(), "", vec![]).await.0, StatusCode::NOT_FOUND);
+    // Written again after the invalidation: fresh.
+    send("PUT", data.clone(), token.clone(), "{\"price\":2}", vec![("x-roll-tags", tags(&["prices"]))]).await;
+    assert_eq!(send("GET", data.clone(), token.clone(), "", vec![]).await.2, "{\"price\":2}");
+    // What it holds is metered, hourly.
+    w.apps.cron_pass(code_sql::now_ms() + 3_600_000).await;
+    let stored: f64 = w.apps.store.usage(&id, Some("production"), 0).unwrap().iter().map(|(_, u)| u.stored_gb_hours).sum();
+    assert!(stored > 0.0, "{stored}");
+    // Another environment's token reads none of it; a wrong one nothing at all.
+    let other = w.apps.store.next_cache_token(&id, "staging").unwrap();
+    assert_eq!(send("GET", data.clone(), other, "", vec![]).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(send("GET", data.clone(), "rlr_nope".into(), "", vec![]).await.0, StatusCode::UNAUTHORIZED);
+    // Leaked: stops at once and empties what it could write; the redeploy gets a new one.
+    assert!(w.apps.revoke_leaked_address(&token).is_some());
+    assert_eq!(send("GET", data.clone(), token.clone(), "", vec![]).await.0, StatusCode::UNAUTHORIZED);
+    let fresh = w.apps.store.next_cache_token(&id, "production").unwrap();
+    assert_eq!(send("GET", data.clone(), fresh, "", vec![]).await.0, StatusCode::NOT_FOUND, "emptied");
+    // A closed environment's instances get none (a fork's code would fill the fetch cache).
+    call(&w.api, "PUT", &env, Some(json!({"egress": {"mode": "roll"}}))).await;
+    let (_, d) = call(&w.api, "POST", &format!("{env}/deploys"), Some(json!({"closed": true}))).await;
+    let d = settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
+    let (_, body) = visit_deployment(&w, &host(&svc["environments"][0]["url"]), d["id"].as_str().unwrap()).await;
+    assert!(body["vars"].get("ROLL_NEXT_CACHE_TOKEN").is_none(), "{body}");
+}
+
 /// Deploy approvals (GitHub Environments' required reviewers): with `approvals: 1`, a person's
 /// deploy waits at ready; putting it live without an approval is a 409; its author's approval
 /// and a token's don't count; another person's puts it live.

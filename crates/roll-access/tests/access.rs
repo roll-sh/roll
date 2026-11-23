@@ -2941,3 +2941,22 @@ async fn a_persons_grant_never_homes_or_places_someone_elses_resource() {
     assert_eq!(d.call(OPERATOR, Method::PUT, &place, Some(json!({ "x": 0, "y": 0 }))).await.0, StatusCode::OK);
     assert_eq!(d.as_user("usr_mal", Method::DELETE, &place, None).await.0, StatusCode::NO_CONTENT);
 }
+
+/// Agent activity (`GET /v1/access/activity`): an operator sees every connection's MCP calls by
+/// tool, connection and day, refused ones counted as such; a person sees only their own.
+#[tokio::test]
+async fn agent_activity_by_tool_and_connection() {
+    let d = Daemon::new(50);
+    let (token, grant) = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }]), json!({})).await;
+    assert_eq!(d.via_mcp(&token, Method::GET, "/v1/projects").await, StatusCode::OK);
+    assert_eq!(d.via_mcp(&token, Method::DELETE, "/v1/projects/pa").await, StatusCode::FORBIDDEN);
+    // Audit rows are written after their requests answer: wait until every list has both.
+    let seen = d.audit_until("/v1/access/activity", |v| v["calls"] == 2 && v["tools"][0]["calls"] == 2 && v["connections"][0]["calls"] == 2).await;
+    let tool = &seen["tools"][0];
+    assert_eq!((tool["tool"].as_str(), tool["calls"].as_i64(), tool["denied"].as_i64()), (Some("test_tool"), Some(2), Some(1)), "{seen}");
+    assert_eq!((seen["connections"][0]["grant"].as_str(), seen["days"].as_array().map(Vec::len)), (Some(grant.as_str()), Some(1)), "{seen}");
+    d.people.add("usr_ada", "ada");
+    let (s, theirs) = d.as_user("usr_ada", Method::GET, "/v1/access/activity", None).await;
+    assert_eq!((s, theirs["calls"].as_i64()), (StatusCode::OK, Some(0)), "the operator's token isn't theirs: {theirs}");
+    assert_eq!(d.call(OPERATOR, Method::GET, "/v1/access/activity?days=31", None).await.0, StatusCode::BAD_REQUEST);
+}
