@@ -1875,6 +1875,128 @@ session thread's user instructions by `perf stat --per-thread` over a 14 s run l
 the difference in selects; CPUs 4 and 22): base (`c4ad9402d`) 38,025 / 38,948 / 37,578, the stack
 (`e974a84e1`) 37,624 / 39,504 / 37,995 user instructions a select, alternated.
 
+## Short write transactions, round 14: the one-statement scripts' scale, an UPDATE's sequential scan of a small hot table (2026-11-23, agent 295)
+
+Lane A (servers on CPUs 6,7,24,25, pgbench on 8,9,26,27), one table or one pair a `tools/lane.sh` hold,
+harness `~/.cache/a295/bench` (292's: a fresh server and `pgbench -i -I dtGvp -s 32` for every run,
+`-M prepared`, 2 s warm-up, then 10 s; `conn_iu`: the connection threads' user instructions,
+`perf stat --per-thread --no-inherit`; `bg_iu`: the rest of the cgroup's, the flush thread). New: the
+one-statement scripts with `-D scale=32` (`DSCALE=32`): without it pgbench runs a `-f` script at scale 1
+(`scaling factor: 1` in its log), as rounds 11-13 did. Plain dist builds: `base0` = `4b0f41516`, `new1`
+= it + this round's commit (before its rebase onto `99e4b81af`). The lane carried 4-7 foreign cores on
+its 8 CPUs in every hold; foreign below is the server CPUs'.
+
+Standing table, base0 (`4b0f41516`), one run a cell, one server (table t0 and t5); `-D scale=32` = the one-statement script at the TPC-B scale:
+
+| statement | clients | scale | tps | p99 ms | user instr | conn / flush | user cycles | yields | foreign |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| BEGIN; END | 8 | - | 43,229 | 0.486 | 23,219 | 23238 / -19 | 45,352 | 0.0 | 1.92 |
+| INSERT history | 8 | 1 | 11,512 | 5.473 | 61,344 | 56805 / 4539 | 164,480 | 0.395 | 3.59 |
+| UPDATE tellers | 8 | 1 | 18,347 | 1.921 | 60,023 | - | 156,587 | 0.941 | 2.13 |
+| UPDATE branches | 8 | 1 | 10,776 | 1.941 | 196,173 | 195272 / 901 | 373,560 | 0.847 | 1.18 |
+| UPDATE accounts | 8 | 1 | 13,981 | 4.273 | 118,133 | 81991 / 36142 | 273,274 | 1.505 | 1.49 |
+| INSERT history | 8 | 32 | 27,314 | 1.097 | 55,327 | 49218 / 6109 | 138,203 | 0.438 | 1.11 |
+| UPDATE tellers | 8 | 32 | 20,040 | 1.729 | 76,336 | 73952 / 2384 | 219,341 | 1.141 | 1.27 |
+| UPDATE branches | 8 | 32 | 14,444 | 2.022 | 166,946 | - | 298,523 | 1.754 | 1.43 |
+| UPDATE accounts | 8 | 32 | 13,497 | 3.646 | 244,618 | 94885 / 149733 | 412,251 | 1.265 | 0.93 |
+| TPC-B-like | 8 | 32 | 2,137 | 13.18 | 2,038,805 | 2028134 / 10671 | 2,996,777 | 5.525 | 1.69 |
+| TPC-B-like | 32 | 32 | 3,609 | 41.366 | 497,412 | 324299 / 173113 | 1,311,457 | 2.879 | 1.6 |
+| TPC-B-like (fresh server) | 8 | 32 | 4,548 | 6.606 | 585,763 | - | 1,244,430 | 2.367 | 1.17 |
+
+
+(The 2.04 M TPC-B run: pgbench_tellers' plan was its sequential scan, 2 pages, ~3.8k user instructions
+a row; two more runs of the same sequence read 0.66 M and 0.70 M.)
+
+Off-lane counts (CPUs 2,3,20,21 / 4,5,22,23, one run each; user instructions a statement): UPDATE
+tellers at 1 client while its plan is the sequential scan 1,220,854 -> 642,598 (-47.4%); UPDATE branches
+(scale 1: one row) at 1 client 195,874 -> 128,672 (-34.3%), at 8 clients 196,776 -> 136,266 (-30.7%).
+
+Pairs, base0 / new1 (values first / second build, counts a transaction):
+
+TPC-B-like, 8 clients:
+
+| count | pair 1 | pair 2 |
+| tps | 3320 / 4920 +48.2% | 4960 / 5141 +3.6% |
+| p99_ms | 9.902 / 6.692 -32.4% | 5.532 / 5.485 -0.8% |
+| instructions_u | 591139 / 484914 -18.0% | 596505 / 510255 -14.5% |
+| conn_iu | 478291 / 375465 -21.5% | 494831 / 389224 -21.3% |
+| bg_iu | 112848 / 109449 -3.0% | 101674 / 121031 +19.0% |
+| cycles_u | 1337654 / 1142388 -14.6% | 1297838 / 1162379 -10.4% |
+| instructions_k | 360202 / 332926 -7.6% | 357058 / 345202 -3.3% |
+| cycles_k | 763567 / 687354 -10.0% | 721865 / 699266 -3.1% |
+| sc_sched_yield | 2.043 / 2.181 +6.8% | 2.762 / 2.317 -16.1% |
+| sc_futex | 1.747 / 1.752 +0.3% | 2.002 / 1.852 -7.5% |
+| sc_fdatasync | 0.757 / 0.717 -5.3% | 0.776 / 0.754 -2.8% |
+| switch_voluntary | 8.282 / 7.927 -4.3% | 8.639 / 8.341 -3.4% |
+| switch_involuntary | 3.316 / 3.308 -0.2% | 4.15 / 3.515 -15.3% |
+| syscalls | 21.543 / 20.688 -4.0% | 22.346 / 20.967 -6.2% |
+| cpu_us_per_txn | 681.9 / 618.0 -9.4% | 625.2 / 594.5 -4.9% |
+| wbytes_per_txn | 11174 / 12321 +10.3% | 11773 / 10991 -6.6% |
+| foreign_cores | 1.73 / 1.06  | 0.86 / 0.93  |
+
+TPC-B-like, 32 clients:
+
+| count | pair 1 | pair 2 |
+| tps | 3122 / 2819 -9.7% | 2721 / 2842 +4.4% |
+| p99_ms | 46.304 / 46.007 -0.6% | 45.741 / 46.901 +2.5% |
+| instructions_u | 629885 / 604101 -4.1% | 636707 / 606082 -4.8% |
+| conn_iu | 477869 / 414044 -13.4% | 489398 / 407120 -16.8% |
+| bg_iu | 152016 / 190057 +25.0% | 147309 / 198962 +35.1% |
+| cycles_u | 1542068 / 1533591 -0.5% | 1564928 / 1507606 -3.7% |
+| instructions_k | 369830 / 395042 +6.8% | 368642 / 381097 +3.4% |
+| cycles_k | 805812 / 864999 +7.3% | 822762 / 841068 +2.2% |
+| sc_sched_yield | 2.709 / 2.673 -1.3% | 2.465 / 2.48 +0.6% |
+| sc_futex | 3.901 / 3.85 -1.3% | 3.587 / 3.595 +0.2% |
+| sc_fdatasync | 0.489 / 0.535 +9.4% | 0.525 / 0.555 +5.7% |
+| switch_voluntary | 9.274 / 9.647 +4.0% | 9.179 / 9.329 +1.6% |
+| switch_involuntary | 3.081 / 3.067 -0.5% | 2.838 / 2.857 +0.7% |
+| syscalls | 24.427 / 27.483 +12.5% | 23.359 / 25.49 +9.1% |
+| cpu_us_per_txn | 760.6 / 768.7 +1.1% | 792.4 / 753.3 -4.9% |
+| wbytes_per_txn | 11279 / 14577 +29.2% | 12217 / 12547 +2.7% |
+| foreign_cores | 1.77 / 2.14  | 2.1 / 2.04  |
+
+UPDATE pgbench_branches, 8 clients, scale 32:
+
+| count | pair 1 |
+| tps | 13137 / 15481 +17.8% |
+| p99_ms | 2.269 / 2.336 +3.0% |
+| instructions_u | 217623 / 126008 -42.1% |
+| conn_iu | 217108 / 126215 -41.9% |
+| bg_iu | 515 / -207 -140.2% |
+| cycles_u | 380380 / 280239 -26.3% |
+| instructions_k | 84149 / 75460 -10.3% |
+| cycles_k | 192610 / 172888 -10.2% |
+| sc_sched_yield | 2.308 / 1.465 -36.5% |
+| sc_futex | 2.537 / 2.306 -9.1% |
+| sc_fdatasync | 0.508 / 0.464 -8.7% |
+| switch_voluntary | 2.693 / 2.487 -7.6% |
+| switch_involuntary | 2.226 / 1.558 -30.0% |
+| syscalls | 7.84 / 6.585 -16.0% |
+| cpu_us_per_txn | 189.5 / 153.9 -18.8% |
+| wbytes_per_txn | 4557 / 4392 -3.6% |
+| foreign_cores | 1.36 / 1.37  |
+
+Select-only, 8 clients:
+
+| count | pair 1 |
+| tps | 50454 / 51645 +2.4% |
+| p99_ms | 0.392 / 0.324 -17.3% |
+| instructions_u | 40228 / 39088 -2.8% |
+| conn_iu | 40215 / 39097 -2.8% |
+| bg_iu | 13 / -9 -169.2% |
+| cycles_u | 103402 / 98130 -5.1% |
+| instructions_k | 40704 / 39272 -3.5% |
+| cycles_k | 74391 / 71141 -4.4% |
+| sc_sched_yield | 0.0 / 0.0  |
+| sc_futex | 0.0 / 0.0  |
+| sc_fdatasync | 0.0 / 0.0  |
+| switch_voluntary | 0.972 / 0.945 -2.8% |
+| switch_involuntary | 0.194 / 0.153 -21.1% |
+| syscalls | 2.123 / 2.032 -4.3% |
+| cpu_us_per_txn | 57.5 / 55.7 -3.1% |
+| wbytes_per_txn | 0 / 0  |
+| foreign_cores | 1.8 / 1.12  |
+
 ## Short write transactions, round 13: a compaction copies the blocks it would write unchanged (2026-11-23, agent 292)
 
 Lane A (servers on CPUs 6,7,24,25, pgbench on 8,9,26,27), one pair a `tools/lane.sh` hold, harness

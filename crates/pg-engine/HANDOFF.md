@@ -14610,6 +14610,94 @@ failed: all passed.
 Not this round's: roll's `VACUUM (VERBOSE)` sends none of PostgreSQL's INFO lines (agent 205's
 note, still open).
 
+## Short write transactions, round 14: the standing table at the right scale, an UPDATE's sequential scan of a small hot table (agent 295)
+
+BENCH.md "Short write transactions, round 14" has the tables. Plain dist builds: `base0` = `4b0f41516`
+(round 13 landed), `new1` = it + this round's scan commit (before its rebase onto `99e4b81af`, which
+changed only exec kernels' arithmetic, pipelines and lookups). Lane A through `tools/lane.sh`, one
+table or one pair a hold, harness `~/.cache/a295/bench` (292's, with `-D scale` for the one-statement
+scripts, `fixed.sh` for a fixed number of transactions, and the compaction log below). The lane
+carried 4-7 foreign cores on its 8 CPUs in every hold (1-3.6 on the server CPUs); counts per
+transaction hold under it, tps and p99 are readings.
+
+**The one-statement scripts ran at scale 1 (rounds 11-13).** pgbench sets `:scale` from
+`pgbench_branches` only for its built-in scripts; a `-f` script without `-s` or `-D scale=` gets 1
+(its log says `scaling factor: 1`). So `ua.sql` updated `aid` 1..100,000 of the 3.2 M rows, `ub.sql`
+only `bid = 1` (8 clients on one row), `ut.sql` tellers 1..10. Round 11's per-statement rows for all
+three servers are at scale 1 (comparable with each other, not with TPC-B's statements). Round 13's
+"its writes land in a narrow range of the file" is the first 100k rows: under TPC-B (built in, scale
+32) a compaction rewrites ~19.8k of the accounts file's 45.9k blocks (copies 26,066 and 27,549), the
+one-statement UPDATE 1.4k. At scale 32 (`-D scale=32`) `UPDATE pgbench_accounts` alone is 244.6k user
+instructions on the head, the flush thread 149.7k of it (the connection threads 94.9k), not 117k / 36k.
+
+**Where the head stood** (base0, one run a cell; BENCH has the counts): BEGIN/END 22.7k user
+instructions, the history INSERT 55.3k, UPDATE tellers 76.3k, UPDATE branches 166.9k, UPDATE accounts
+244.6k (scale 32); TPC-B-like 0.51-0.70 M at 8 clients (a fresh server 0.59 M) and 0.50 M at 32.
+One table run read 2.04 M at 8 clients, the connection threads 2.03 M of it: while
+`pgbench_tellers` has 2 pages its plan is a sequential scan (as PostgreSQL's: cost 5.20 against the
+index's 8.17), until its statistics move it to the index scan; each of its 320 rows cost ~3.8k user
+instructions, 1.2 M a statement. `UPDATE pgbench_branches` is always that scan (32 rows, 1 page).
+
+**What changed** (one commit, `cand/a295`). An UPDATE's scan of a small table read every row twice
+and decoded it whole before its filter: per row the heap-order pass (`next_heap_ordered`: a pass for
+the TIDs, then the rows again), the whole row decoded (`scan_row_need`, 19% of the statement) and the
+filter evaluated as an expression (`eval_bool`, 15.7%: `bid = $1` of the generic plan has a
+parameter, which kernels didn't compile).
+
+- `kernel::compile_bound`: a filter's `$n` taken as the constant it is for this execution
+  (`ExecCtx::param`, which `eval` reads it from), so a generic plan's filter compiles as the custom
+  plan's. Used by `ScanNode::filter_kernel` and `lazy_scan`, which nodes make again after `park`
+  (a kept tree's next execution has other parameters).
+- `ScanNode::emit`: the filter over the stored values (`StoredCmps`) first for every scan with a
+  filter not read in place already (`LazyScan`), not only where a prefilter mask exists: an
+  UPDATE's, DELETE's or locking clause's rows too; not where a fetched row takes a predicate lock
+  first (SSI's order, as before). A row it rejects is never decoded. (The same comparison ran
+  before, after the decode.)
+- `next_heap_ordered`: a range of at most 1,024 rows and 256 kB is held from the pass that reads
+  the rows' TIDs and returned from there in TID order (`Stream::Merge` over held rows only), not
+  read a second time; the held rows sorted by (TID, place), each moved once.
+
+Test `heap_order_scan` gained a small table (300 rows, moved by updates): its scans against `ORDER BY
+ctid`, and prepared statements under `plan_cache_mode = force_generic_plan` filtering on `$1` (an
+UPDATE ... RETURNING and a SELECT) against the literal forms.
+
+**Measured** (BENCH "round 14"). Off-lane counts (1 run each, user instructions a statement):
+UPDATE tellers while it is a seq scan (1 client) 1,220,854 -> 642,598 (-47%), UPDATE branches 1 client
+195,874 -> 128,672 (-34%), 8 clients (scale 1, one row) 196,776 -> 136,266 (-31%). Lane pairs, base0
+against new1: TPC-B-like 8 clients, 2 pairs: connection threads -21.5% and -21.3% (478k -> 375k,
+495k -> 389k), all user instructions -18.0% and -14.5%, user cycles -14.6% and -10.4%, tps +48% and
++3.6% (pair 2 at 0.86 / 0.93 foreign cores, pair 1's base run 1.73); 32 clients, 2 pairs (1.8-2.1
+foreign cores): connection threads -13.4% and -16.8%, the flush thread +25% and +35% (a 10 s run
+holds 0-3 compactions), all -4.1% and -4.8%; UPDATE branches at scale 32, 1 pair: -42.1% (217.6k ->
+126.0k), cycles -26.3%, tps +17.8%; select-only 8 clients, 1 pair: 40,228 -> 39,088 (level: not on
+its path). Not gated on PGO (no inlining or function-boundary aim).
+
+What is left of the branches UPDATE (126k; an LBR profile of new1): the scan 56% (the hot range's
+batch 13%, the stored comparisons 5%, the TIDs 3%), commit 11%, the row's update 6%, opening the
+nodes 3%.
+
+Verification: `tools/quick-check.sh` with `QC_CHECKED=1` and `QC_TESTS="heap_order_scan big_tables"` on
+`fca7479dc` (on `99e4b81af`): 13 test binaries, clippy 16 warnings, none new in a changed file, 377
+tests in 10 binaries (big_tables, golden, heap_order_scan, the lib's unit tests, parallel_scan,
+pk_clustered, query_spill, stored_filters, wire, wire_waits), the same 377 built `--profile
+verify-checked`, regress 51,148 / 51,150 (0 newly differing), isolation 1,647 / 1,648, pg_dump_tap
+14,609. Its first run failed only `wire_waits`' transaction_timeout cases ("error communicating with
+the server" for "connection closed": the close race agent 293 measured at 1% under load); the binary
+passed twice run alone, and the whole check passed on the second run.
+
+What is left, by size:
+
+- **A big table's random updates are compacted at ~95-150k user instructions an UPDATE** (scale 32:
+  `UPDATE pgbench_accounts` alone 244.6k on the head, the flush thread 149.7k; TPC-B's flush thread
+  100-200k a transaction). Each compaction rewrites the ~45% of the accounts file's blocks the
+  updates between two compactions meet (block copying covers the rest); zstd compression is ~22% of
+  the statement, `SstWriter::add` 8.7%, `zip_entries` 6.1%, `bloom_set` 5.7%. Levers: fewer L1
+  compactions for a big file (more or merged L0 files before one: L0 -> L0 merges keep the read cost),
+  and the bits a compaction ORs into an adopted filter for keys that came from that file (all of an
+  UPDATE-only table's), which `zip_entries` would have to tell apart.
+- The branches UPDATE's scan (56% of its 126k): the hot range's batch, the TIDs, the comparisons.
+- HOT counts past the model (290's design: a format change of `estkeep`'s records), not built.
+
 ## Short write transactions, round 13: a compaction copies the blocks it would write unchanged (agent 292)
 
 BENCH.md "Short write transactions, round 13" has the pairs. Plain dist builds (`base2` =
