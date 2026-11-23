@@ -354,6 +354,10 @@ async fn production_browser_checks_on_a_preview_are_read_after_its_head_is_up() 
     e.engine.pass().await.unwrap();
     assert_eq!(state(&e), [("checkout".to_string(), roll_previews::CheckState::Failed, Some("Timeout 5000ms exceeded\\u{1b}[31m".to_string()))], "printable");
     assert!(e.code.last_report("chg_bc").browser_checks.iter().any(|c| c.name == "checkout" && c.state == roll_previews::CheckState::Failed), "the change hears it");
+    // And followers of the events, once a head.
+    e.engine.pass().await.unwrap();
+    let said = e.engine.store.events(0, 500).unwrap().into_iter().filter(|x| x.preview == p.id && x.kind == "browser_checks_failed").count();
+    assert_eq!(said, 1);
 }
 
 /// What happened to previews, for followers: made, up, gone, in the order it happened, from any
