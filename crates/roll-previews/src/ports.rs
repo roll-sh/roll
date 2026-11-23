@@ -155,6 +155,12 @@ pub trait Brancher: Send + Sync {
     async fn branch_schema(&self, _parent: &str, _branch: &str) -> anyhow::Result<Option<Vec<String>>> {
         Ok(None)
     }
+    /// A look at the branch's data as its own role, read-only: its tables (`table: None`), or a
+    /// table's first [`crate::BROWSE_ROWS`] rows. `None` where the product has no way to show it
+    /// here yet.
+    async fn browse(&self, _parent: &str, _branch: &str, _table: Option<&str>) -> anyhow::Result<Option<crate::Browse>> {
+        Ok(None)
+    }
 }
 
 /// A change (or branch) as previews see it.
