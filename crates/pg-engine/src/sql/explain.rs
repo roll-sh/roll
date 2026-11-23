@@ -6485,7 +6485,20 @@ impl Builder<'_, '_> {
                 }
                 n.rows = 100.0;
                 n.total_cost = 1.0;
-                n.width = calls.iter().map(|c| type_width(&c.ty)).sum();
+                // (set_rel_width: the columns the query reads, at their types' widths.)
+                let needed = self.needed.get(&key);
+                n.width = match crate::sql::func::xmltable::spec(&calls[0].args) {
+                    Some(spec) => {
+                        n.cols = spec.types.iter().map(|t| ColInfo { width: type_width(t), ..ColInfo::default() }).collect();
+                        spec.types
+                            .iter()
+                            .enumerate()
+                            .filter(|(i, _)| needed.is_none_or(|m| m.get(*i).copied().unwrap_or(true)))
+                            .map(|(_, t)| type_width(t))
+                            .sum()
+                    }
+                    None => calls.iter().map(|c| type_width(&c.ty)).sum(),
+                };
                 Built::passthrough(n, names)
             }
             Plan::FunctionScan {
@@ -7259,10 +7272,11 @@ impl Builder<'_, '_> {
                 let mask = self.needed.get(&addr(p));
                 // (Over a grouping, its target list holds the group keys the select list
                 // doesn't, as resjunk entries.)
+                // (Grouping sets' too: the processed target list's resjunk GROUP BY entries.)
                 let agg_groups = match &**input {
-                    Plan::Agg { groups, sets: None, .. } => Some(groups.len()),
+                    Plan::Agg { groups, .. } => Some(groups.len()),
                     Plan::Filter { input: fi, .. } => match &**fi {
-                        Plan::Agg { groups, sets: None, .. } => Some(groups.len()),
+                        Plan::Agg { groups, .. } => Some(groups.len()),
                         _ => None,
                     },
                     _ => None,
@@ -7334,6 +7348,20 @@ impl Builder<'_, '_> {
                     c.node.total_cost += (costs::CPU_TUPLE_COST + per) * c.node.rows;
                 } else {
                     c.node.total_cost += c.node.rows * per;
+                }
+                // (A partitioned table's Append takes the projection into its members,
+                // apply_scanjoin_target_to_paths: each computes it.)
+                if !projection
+                    && c.node.node_type == "Append"
+                    && matches!(&**input, Plan::Append { inh: Some(_), .. })
+                    && partition_members(input)
+                    && exprs.iter().any(|e| !matches!(e, Expr::Col(..)))
+                {
+                    let w = c.node.width;
+                    for ch in &mut c.node.children {
+                        ch.total_cost += ch.rows * per;
+                        ch.width = w;
+                    }
                 }
                 for pt in c.node.partials_mut() {
                     pt.total_cost += pt.rows * per;

@@ -1,0 +1,59 @@
+> create table a296x (data xml) with (autovacuum_enabled = off)
+-- CREATE TABLE
+
+> explain select x.* from a296x, xmltable('/rows/row' passing data columns id int path '@id', n for ordinality, name text path 'name', size float path 'size') x
+QUERY PLAN:text
+Nested Loop  (cost=0.00..2743.60 rows=136000 width=48)
+  ->  Seq Scan on a296x  (cost=0.00..23.60 rows=1360 width=32)
+  ->  Table Function Scan on "xmltable" x  (cost=0.00..1.00 rows=100 width=48)
+-- EXPLAIN
+
+> explain select x.name from a296x, xmltable('/rows/row' passing data columns id int path '@id', name text path 'name') x
+QUERY PLAN:text
+Nested Loop  (cost=0.00..2743.60 rows=136000 width=32)
+  ->  Seq Scan on a296x  (cost=0.00..23.60 rows=1360 width=32)
+  ->  Table Function Scan on "xmltable" x  (cost=0.00..1.00 rows=100 width=32)
+-- EXPLAIN
+
+> create table a296lp (a int, b text, c numeric) partition by list (a)
+-- CREATE TABLE
+
+> create table a296lp1 partition of a296lp for values in (1)
+-- CREATE TABLE
+
+> create table a296lp2 partition of a296lp for values in (2)
+-- CREATE TABLE
+
+> explain select tableoid::regclass::text, * from a296lp order by 1, 2
+QUERY PLAN:text
+Sort  (cost=145.22..149.47 rows=1700 width=100)
+  Sort Key: (((a296lp.tableoid)::regclass)::text), a296lp.a
+  ->  Append  (cost=0.00..54.00 rows=1700 width=100)
+        ->  Seq Scan on a296lp1 a296lp_1  (cost=0.00..22.75 rows=850 width=100)
+        ->  Seq Scan on a296lp2 a296lp_2  (cost=0.00..22.75 rows=850 width=100)
+-- EXPLAIN
+
+> create table a296g (a int, b int, c int) with (autovacuum_enabled = off)
+-- CREATE TABLE
+
+> explain select sum(c) from a296g group by grouping sets ((a, b), ()) order by 1 desc
+QUERY PLAN:text
+Sort  (cost=60.72..61.23 rows=205 width=16)
+  Sort Key: (sum(c)) DESC
+  ->  MixedAggregate  (cost=0.00..52.85 rows=205 width=16)
+        Hash Key: a, b
+        Group Key: ()
+        ->  Seq Scan on a296g  (cost=0.00..30.40 rows=2040 width=12)
+-- EXPLAIN
+
+> explain select sum(c) from a296g group by rollup (a, b) order by 1
+QUERY PLAN:text
+Sort  (cost=82.59..83.60 rows=405 width=16)
+  Sort Key: (sum(c))
+  ->  MixedAggregate  (cost=0.00..65.05 rows=405 width=16)
+        Hash Key: a, b
+        Hash Key: a
+        Group Key: ()
+        ->  Seq Scan on a296g  (cost=0.00..30.40 rows=2040 width=12)
+-- EXPLAIN
+
