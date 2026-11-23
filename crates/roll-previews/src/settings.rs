@@ -268,6 +268,30 @@ pub struct GithubRule {
     /// browsers): `firefox`, `webkit`, each a page of its own (`browser:<name>`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub browsers: Vec<String>,
+    /// The preview's Storybook (Chromatic's stories): `web`, or `web:/storybook/` when that
+    /// service serves it under a path (a static build or `storybook dev`). Each story, up to
+    /// [`MAX_STORIES`] (docs left out), is taken alone, clipped to what it renders, compared with
+    /// main's and reviewed like a page (`story:<id>`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storybook: Option<String>,
+}
+
+/// The most stories a Storybook's run takes (`github.storybook`).
+pub const MAX_STORIES: usize = 40;
+
+/// `github.storybook`'s service and where it serves Storybook (a path ending in `/`).
+pub fn storybook_entry(e: &str) -> Option<(&str, &str)> {
+    let label = |s: &str| !s.is_empty() && s.len() <= 63 && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    match page_entry(e) {
+        Some((Some(svc), path)) => path.ends_with('/').then_some((svc, path)),
+        _ => label(e).then_some((e, "/")),
+    }
+}
+
+/// A Storybook story's id as Storybook makes them (`components-button--primary`).
+pub fn story_id_ok(id: &str) -> bool {
+    let part = |p: &str| !p.is_empty() && p.len() <= 100 && !p.starts_with('-') && p.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    id.split_once("--").is_some_and(|(a, b)| part(a) && part(b))
 }
 
 /// The browsers `github.browsers` may name (Chromium always takes the screenshot):
@@ -683,6 +707,9 @@ impl Settings {
         if br.iter().enumerate().any(|(i, b)| !BROWSERS.contains(&b.as_str()) || br[..i].contains(b)) {
             return bad(format!("github.browsers: some of {}, each once (Chromium always takes the screenshot)", BROWSERS.join(", ")));
         }
+        if self.github.storybook.as_deref().is_some_and(|s| storybook_entry(s).is_none()) {
+            return bad("github.storybook: the name of the service that serves Storybook (web), and the path it's under when not / (web:/storybook/, ending in /)".into());
+        }
         let eps = &self.github.endpoints;
         if eps.len() > MAX_ENDPOINTS || eps.iter().any(|p| !page_path_ok(p)) || eps.iter().enumerate().any(|(i, p)| eps[..i].contains(p)) {
             return bad(format!("github.endpoints: at most {MAX_ENDPOINTS} different GET paths of the first service's (/api/users), up to 200 characters, no #, quotes or spaces"));
@@ -747,6 +774,10 @@ mod tests {
         let browsers = |b: serde_json::Value| Settings::default().patched(&serde_json::json!({ "github": { "browsers": b } })).is_ok();
         assert!(browsers(serde_json::json!(["firefox", "webkit", "webkit-phone"])));
         assert!(!browsers(serde_json::json!(["chrome"])) && !browsers(serde_json::json!(["webkit", "webkit"])), "the two other browsers, each once");
+        assert_eq!((storybook_entry("web"), storybook_entry("web:/sb/")), (Some(("web", "/")), Some(("web", "/sb/"))));
+        assert!(storybook_entry("web:/sb").is_none() && storybook_entry("Web").is_none() && storybook_entry("web:/a b/").is_none(), "a service, and a path ending in /");
+        assert!(Settings::default().patched(&serde_json::json!({ "github": { "storybook": "web:/x" } })).is_err());
+        assert!(story_id_ok("components-button--primary") && !story_id_ok("button") && !story_id_ok("../x--y") && !story_id_ok("a--"), "Storybook's ids");
     }
 
     #[test]

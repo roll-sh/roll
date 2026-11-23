@@ -926,7 +926,7 @@ function Screenshot({
         <div className="mb-1.5 space-y-0.5">
           {(() => {
             const all = ["/", ...pages.map((x) => x.path)];
-            const groups = (["Pages", "Views", "States"] as const).map((g) => [g, all.filter((x) => pageGroup(x) === g)] as const).filter(([, xs]) => xs.length);
+            const groups = (["Pages", "Views", "States", "Stories"] as const).map((g) => [g, all.filter((x) => pageGroup(x) === g)] as const).filter(([, xs]) => xs.length);
             return groups.map(([g, xs]) => (
               <div key={g} className="flex items-start gap-1" role="group" aria-label={g}>
                 {groups.length > 1 && <span className="w-12 shrink-0 pt-1 text-[10.5px] text-subtle">{g}</span>}
