@@ -1181,7 +1181,8 @@ pub enum SaasCmd {
     /// `--openai-project`; datadog `[--site] --key api|application [--scope…]`; cloudflare
     /// `[--account-id] --template`; databricks `--host [--lifetime-days]`; confluent `--owner
     /// [--resource [--confluent-environment]]`. Datadog's credential is `<API key>:<application
-    /// key>`, Confluent's `KEY:SECRET`.
+    /// key>`, Confluent's `KEY:SECRET`. `--credential-expires` is when the credential itself ends at
+    /// the vendor: health warns two weeks before.
     Add {
         name: String,
         /// sendgrid, twilio, okta, entra, auth0, gitlab, openai, datadog, cloudflare, databricks or
@@ -1253,6 +1254,10 @@ pub enum SaasCmd {
         /// The Confluent environment of --resource (env-…).
         #[arg(long = "confluent-environment")]
         confluent_environment: Option<String>,
+        /// When the registered credential ends at the vendor: a date (2027-03-31), RFC 3339 or how
+        /// long from now (90d).
+        #[arg(long = "credential-expires")]
+        credential_expires: Option<String>,
     },
     Rm { id: String },
 }
@@ -3102,10 +3107,16 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 }
                 for r in v.as_array().into_iter().flatten() {
                     let target: Vec<String> = r["target"].as_object().into_iter().flatten().map(|(k, v)| format!("{k}={}", v.as_str().map(String::from).unwrap_or_else(|| v.to_string()))).collect();
-                    println!("{}  {:<16} {:<9} {}", s(&r["id"]), s(&r["name"]), s(&r["vendor"]), target.join(" "));
+                    let ends = r["credential_expires_at"].as_i64().map(|t| format!("  credential expires {}", day(t))).unwrap_or_default();
+                    println!("{}  {:<16} {:<9} {}{ends}", s(&r["id"]), s(&r["name"]), s(&r["vendor"]), target.join(" "));
                 }
             }
-            SaasCmd::Add { name, vendor, scopes, account_sid, domain, app_id, tenant, client_id, object_id, app_client_id, host, gitlab_project, gitlab_group, access_level, expires_days, openai_project, site, key, account_id, template, lifetime_days, owner, resource, confluent_environment } => {
+            SaasCmd::Add { name, vendor, scopes, account_sid, domain, app_id, tenant, client_id, object_id, app_client_id, host, gitlab_project, gitlab_group, access_level, expires_days, openai_project, site, key, account_id, template, lifetime_days, owner, resource, confluent_environment, credential_expires } => {
+                let credential_expires_at = match credential_expires.as_deref().map(expiry).transpose()? {
+                    Some(None) => anyhow::bail!("--credential-expires is when the credential ends: a date, RFC 3339 or how long from now"),
+                    Some(Some(t)) => Some(t),
+                    None => None,
+                };
                 let mut target = serde_json::Map::new();
                 if !scopes.is_empty() {
                     target.insert("scopes".into(), json!(scopes));
@@ -3130,7 +3141,10 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 }
                 let mut credential = zeroize::Zeroizing::new(String::new());
                 std::io::stdin().read_to_string(&mut credential).context("reading the credential from stdin")?;
-                let body = json!({ "name": name, "vendor": vendor, "target": target, "credential": credential.trim() });
+                let mut body = json!({ "name": name, "vendor": vendor, "target": target, "credential": credential.trim() });
+                if let Some(t) = credential_expires_at {
+                    body["credential_expires_at"] = json!(t);
+                }
                 let v = c.call(Method::POST, &format!("{}/saas", c.base()), Some(body)).await?;
                 if json_out {
                     return print(&v);
