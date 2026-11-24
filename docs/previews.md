@@ -1759,8 +1759,9 @@ land on the change.
   note (`chat_notes`). A message in that thread, from someone the Slack install allows, becomes
   the note's reply on the change, signed "— Ada, in Slack" (the person's Slack name), made as
   the automation through roll's API, and a reply made on the page goes into the thread. What
-  came from Slack is never posted back to it, and a note is posted once. Resolving a note isn't
-  said in its thread yet (a resolve is roll previews' own record, not a review event). The note's format is roll code's (`code_control::review::preview_note`,
+  came from Slack is never posted back to it, and a note is posted once. Resolving a note (roll's
+  Resolve) leaves the reply "Resolved." on the change as the person who resolved it, so the pull
+  request and the note's Slack thread hear it too (`a_pages_notes_by_its_environment_name`). The note's format is roll code's (`code_control::review::preview_note`,
   read back by `roll_previews::notes`). `preview_notes_are_slack_threads_both_ways`.
 - Previews deployed on roll apps go through apps' own proxy, which adds it for its link
   visitors only: under team access (apps' `signed_in` environments) they get none yet.
@@ -2688,8 +2689,8 @@ Ranked by what a person notices first. Done so far:
 
 1. **Notes as Slack threads, in review** (Vercel's comments synced to Slack): `slack.note` and
    the "Preview notes as Slack threads" template, both ways (a note posted, replies in its
-   thread made the note's replies, the page's replies in the thread). Next for it: a resolve
-   said in the thread (a resolve is roll previews' own record, so previews would emit it).
+   thread made the note's replies, the page's replies in the thread, a resolve said there as
+   the note's "Resolved." reply).
 2. **Restore points for the products that only copy** (Redis, search, NoSQL, streams): a point
    is kept only where the product puts a branch back in place, keeping its id (their delete
    guards check it); each needs its control plane's reset `from`, as pg-control's.
