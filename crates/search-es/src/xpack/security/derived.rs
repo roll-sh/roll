@@ -20,8 +20,9 @@
 //!   them: [`DerivedAuth::origins`]).
 //!
 //! **The signing secret** is a parent's `metadata.roll_browser.derive.secret`, sealed under the
-//! node's key with the cluster's id and the key's id as associated data ([`seal_kind`]): a
-//! branch's copy of it (or one moved to another key) doesn't open. It is shown once, by roll's
+//! node's key with the cluster's id and the key's id as associated data ([`seal_kind`]): it opens
+//! only for that key of that cluster (a branch's copy is refused by the node as its browser keys
+//! are; one rebound to the branch's id, or moved to another key, doesn't open). It is shown once, by roll's
 //! create and rotate routes; the API key APIs print it redacted ([`REDACTED`]). Revoking the
 //! parent or rotating its secret refuses every key derived from it with the next request: a
 //! derived key is checked against its parent's stored state on every request, nothing cached.

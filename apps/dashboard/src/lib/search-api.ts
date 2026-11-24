@@ -129,12 +129,24 @@ export interface BrowserKey {
   /** Unix seconds. */
   created_at: number | null;
   expires_at: number | null;
+  /** Whether a backend may derive narrower keys from it with its signing secret (`lib/search-derive`). */
+  derivable?: boolean;
+  /** When its signing secret was made (unix seconds). */
+  secret_rotated_at?: number;
 }
 
-/** A new browser key: `api_key` (sent as `Authorization: ApiKey …`) is shown once. */
+/** A new browser key: `api_key` (sent as `Authorization: ApiKey …`) and a derivable key's `signing_secret` are shown once. */
 export interface NewBrowserKey extends BrowserKey {
   api_key: string;
   url: string;
+  signing_secret?: string;
+}
+
+/** A derivable browser key's new signing secret, shown once: keys derived under the old one stop working. */
+export interface RotatedSigningSecret {
+  id: string;
+  signing_secret: string;
+  secret_rotated_at: number;
 }
 
 export interface BrowserKeyRequest {
@@ -144,6 +156,8 @@ export interface BrowserKeyRequest {
   filter?: Record<string, unknown>;
   expires_in_s?: number;
   rate_limit?: { per_minute?: number; per_ip_per_minute?: number };
+  /** Whether a backend may derive keys from it: the answer has its signing secret. */
+  derivable?: boolean;
 }
 
 export interface BranchRef {
@@ -315,6 +329,7 @@ export const searchApi = {
   browserKeys: (id: string) => call<{ keys: BrowserKey[] }>("GET", `${cl(id)}/browser-keys`),
   createBrowserKey: (id: string, k: BrowserKeyRequest) => call<NewBrowserKey>("POST", `${cl(id)}/browser-keys`, k),
   revokeBrowserKey: (id: string, key: string) => call<null>("DELETE", `${cl(id)}/browser-keys/${encodeURIComponent(key)}`),
+  rotateBrowserKeySecret: (id: string, key: string) => call<RotatedSigningSecret>("POST", `${cl(id)}/browser-keys/${encodeURIComponent(key)}/rotate`),
   /** The remote clusters roll holds credentials for (never wakes the cluster, never the key). */
   remotes: (id: string) => call<{ remotes: RemoteLink[] }>("GET", `${cl(id)}/remotes`),
   /** Links another of the person's clusters as remote `alias` (roll makes its cross-cluster key). */

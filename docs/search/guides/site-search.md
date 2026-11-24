@@ -297,6 +297,87 @@ anyone can copy it out of the page and search `pages` from a script, within its 
 Allowed origins only bind browsers. The limits a browser key works under are listed in
 [../README.md](../README.md), "Search from the browser".
 
+### A key per end customer
+
+If your site serves many customers from one cluster (a SaaS whose customers each search their own
+documents), don't make a browser key for each. Make one *derivable* key, and let your backend sign
+a short-lived, narrower key for each visitor, with no call to roll, as Algolia's secured API keys
+work:
+
+1. Under **Browser keys**, create a key that reaches `pages` and check **Derivable**. Copy its
+   key id from the list, and its **signing secret**, which is shown only once. The secret stays
+   on your backend: it signs any key the parent allows.
+2. When your backend renders a page for a customer, it signs a key for that customer and puts it
+   in the page in place of the browser key. A derived key can only narrow its parent: some of its
+   indices, a filter ANDed with the parent's, an expiry at most 24 hours ahead, and a `user` that
+   gets its own share of the parent's rate limit, so one customer can't use it up.
+
+```js
+// derive.mjs (Node 18+): a key for one customer, signed on your backend
+import { createHmac } from 'node:crypto'
+
+export function deriveKey(secret, params) {
+  const signed = `rdk1.${Buffer.from(JSON.stringify(params)).toString('base64url')}`
+  return `${signed}.${createHmac('sha256', secret).update(signed).digest('base64url')}`
+}
+
+const key = deriveKey(process.env.SIGNING_SECRET, {
+  key: 'Jx2kq3Z0RkKp1M7m0nQv',               // the derivable browser key's id
+  cluster: 'docs',                            // the cluster's name
+  exp: Math.floor(Date.now() / 1000) + 3600,  // an hour from now (24 hours at most)
+  filter: { term: { tenant: 'acme' } },       // ANDed with the parent's filter
+  user: 'acme',                               // its own share of the parent's rate limit
+})
+```
+
+```python
+# derive.py: the same in Python
+import base64, hashlib, hmac, json, time
+
+def b64(b):
+    return base64.urlsafe_b64encode(b).rstrip(b'=').decode()
+
+def derive_key(secret, params):
+    signed = 'rdk1.' + b64(json.dumps(params, separators=(',', ':')).encode())
+    return signed + '.' + b64(hmac.new(secret.encode(), signed.encode(), hashlib.sha256).digest())
+
+key = derive_key(SIGNING_SECRET, {'key': 'Jx2kq3Z0RkKp1M7m0nQv', 'cluster': 'docs',
+                                  'exp': int(time.time()) + 3600,
+                                  'filter': {'term': {'tenant': 'acme'}}, 'user': 'acme'})
+```
+
+```go
+// derive.go: the same in Go, standard library only
+func DeriveKey(secret string, params map[string]any) (string, error) {
+	payload, err := json.Marshal(params)
+	if err != nil {
+		return "", err
+	}
+	signed := "rdk1." + base64.RawURLEncoding.EncodeToString(payload)
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(signed))
+	return signed + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), nil
+}
+```
+
+The page sends the derived key exactly as it sent the browser key (`Authorization: ApiKey …`),
+so the snippet above, Search UI and InstantSearch need no change. Other fields you can set:
+`indices` (some of the parent's, or patterns within its patterns), `origins` (pages it may be
+sent from, among the cluster's allowed origins) and `rate_limit: {"per_minute": n}` (the user's,
+below its share). The cluster refuses a key that would widen its parent with a 401 that names
+the field. To check your own signer, sign the `payload` of
+`crates/search-es/tests/fixtures/derived-key-vector.json` with its `secret`: you get its `key`.
+To try one from a terminal:
+
+```sh
+ROLL_SEARCH_SIGNING_SECRET=rdks_… roll search browser-keys derive docs Jx2kq3Z0RkKp1M7m0nQv \
+  --expires-in 1h --filter '{"term":{"tenant":"acme"}}' --user acme
+```
+
+Revoking the parent stops every key derived from it at once. If the secret leaks, rotate it
+(**Rotate secret** in the list): keys signed with the old one stop working with their next
+request, and your backend signs with the new one from then on.
+
 ### Or keep a backend
 
 If you'd rather not ship a key, put a small endpoint in front of search. Give it a key that can

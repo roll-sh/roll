@@ -52,6 +52,52 @@ pub enum Search {
     /// Web crawlers: `roll_web_crawler` connectors that crawl a site into an index.
     #[command(subcommand)]
     Crawler(Crawler),
+    /// Keys a web page ships: derive one from a derivable browser key, here, with no call to roll.
+    #[command(subcommand)]
+    BrowserKeys(BrowserKeys),
+}
+
+#[derive(Subcommand)]
+pub enum BrowserKeys {
+    /// A key derived from a derivable browser key and signed here with its signing secret
+    /// (`ROLL_SEARCH_SIGNING_SECRET`, never an argument), printed for `Authorization: ApiKey
+    /// <key>`. It only narrows its parent; the cluster refuses one that would widen it.
+    Derive {
+        /// The cluster's name.
+        cluster: String,
+        /// The parent browser key's id.
+        key: String,
+        /// Stop working after this long (90s, 15m, 1h; 24h at most).
+        #[arg(long, default_value = "1h")]
+        expires_in: String,
+        /// Some of the parent's indices (names or patterns within its own).
+        #[arg(long, value_delimiter = ',')]
+        indices: Vec<String>,
+        /// A query (JSON) ANDed with the parent's filter, e.g. '{"term":{"tenant":"acme"}}'.
+        #[arg(long)]
+        filter: Option<String>,
+        /// The end customer it's for: its own share of the parent's rate limit.
+        #[arg(long)]
+        user: Option<String>,
+        /// Pages it may be sent from (some of the cluster's allowed origins).
+        #[arg(long, value_delimiter = ',')]
+        origins: Vec<String>,
+        /// Its user's requests per minute, below the user's share (needs --user).
+        #[arg(long, requires = "user")]
+        per_minute: Option<u64>,
+    },
+}
+
+/// A derived browser key: `rdk1.<payload>.<mac>`, the mac HMAC-SHA256 over `rdk1.<payload>` keyed
+/// with the signing secret as written (search-es `xpack::security::derived`, the site-search guide).
+fn derive_key(secret: &str, payload: &str) -> String {
+    use base64::Engine;
+    use hmac::Mac;
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let signed = format!("rdk1.{}", b64.encode(payload));
+    let mut mac = <hmac::Hmac<sha2::Sha256> as Mac>::new_from_slice(secret.as_bytes()).expect("HMAC takes any key");
+    mac.update(signed.as_bytes());
+    format!("{signed}.{}", b64.encode(mac.finalize().into_bytes()))
 }
 
 #[derive(Subcommand)]
@@ -772,6 +818,36 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
                 json!({ "deleted": id })
             }
         },
+        Search::BrowserKeys(BrowserKeys::Derive { cluster, key, expires_in, indices, filter, user, origins, per_minute }) => {
+            let secret = std::env::var("ROLL_SEARCH_SIGNING_SECRET").ok().filter(|s| !s.is_empty()).context("set ROLL_SEARCH_SIGNING_SECRET to the parent key's signing secret")?;
+            let ttl = crate::storage::duration(&expires_in)?;
+            if !(1..=86_400).contains(&ttl) {
+                bail!("--expires-in: 1s to 24h");
+            }
+            let exp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0) + ttl;
+            let mut payload = json!({ "key": key, "cluster": cluster, "exp": exp });
+            if !indices.is_empty() {
+                payload["indices"] = json!(indices);
+            }
+            if let Some(f) = filter {
+                payload["filter"] = serde_json::from_str(&f).context("--filter: one query as JSON")?;
+            }
+            if let Some(u) = user {
+                payload["user"] = json!(u);
+            }
+            if !origins.is_empty() {
+                payload["origins"] = json!(origins);
+            }
+            if let Some(n) = per_minute {
+                payload["rate_limit"] = json!({ "per_minute": n });
+            }
+            let derived = derive_key(&secret, &payload.to_string());
+            if !as_json {
+                println!("{derived}");
+                return Ok(());
+            }
+            json!({ "api_key": derived, "expires_at": exp })
+        }
         Search::Keys(cmd) => match cmd {
             Keys::List { cluster } => {
                 let c = find(api, &cluster).await?;
@@ -1087,6 +1163,14 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    /// The shared vector the cluster's verifier and the dashboard's helper check too.
+    #[test]
+    fn derived_keys_sign_as_the_cluster_checks() {
+        let v: Value = serde_json::from_str(include_str!("../../search-es/tests/fixtures/derived-key-vector.json")).unwrap();
+        assert_eq!(derive_key(v["secret"].as_str().unwrap(), v["payload"].as_str().unwrap()), v["key"]);
+    }
+
     use super::*;
 
     #[test]
