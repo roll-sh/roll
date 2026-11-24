@@ -126,6 +126,8 @@ impl Secrets {
             }
         }
         if !member {
+            // What they asked to be told of stops at once (the worker would find it at the next event).
+            self.disable_notifications_of(project, user, &format!("{user} is no longer a member of the project"))?;
             let rows: Vec<(String, String)> = self.db.read(|c| c.query("SELECT id, created_by FROM shares WHERE project_id = ? AND ciphertext IS NOT NULL", [project], |r| Ok((r.get(0)?, r.get(1)?))))?;
             let mut ended = vec![];
             for (id, by) in rows {
