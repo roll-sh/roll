@@ -26,8 +26,11 @@ export const familyOf = (kind: SecretsEventKind): Family =>
 /** What the server filters by: no chip on is every kind (no `kinds=`). */
 export type EventsFilter = { families: Family[]; environment?: string };
 
+/** The `kinds=` the chips send: none on is every kind (undefined). */
+export const kindsOf = (families: Family[]): Kinds | undefined => (families.length ? FAMILIES.filter((x) => families.includes(x.id)).flatMap((x) => x.kinds) : undefined);
+
 const query = (f: EventsFilter): EventsQuery => ({
-  kinds: f.families.length ? FAMILIES.filter((x) => f.families.includes(x.id)).flatMap((x) => x.kinds) : undefined,
+  kinds: kindsOf(f.families),
   environment: f.environment,
 });
 
