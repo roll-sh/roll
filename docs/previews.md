@@ -250,9 +250,10 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   their delete guards check. The sheet's Data branches has them (Save now, Restore, Delete);
   `roll preview points <id> [--save [label] | --restore <point> | --delete <point>]`. Checked
   live in `scripts/preview-cost.sh` (a table made after the point is gone once it's put
-  back, on the same `DATABASE_URL`). Measured on this machine (2026-11-24): asked to ready again
-  in 12.8 s, the Postgres branch back in 5.3 s of it (its compute stopped, the point copied in,
-  started again) and the services healthy at 12.3 s. `a_restore_point_puts_the_data_back_without_seeding_again`,
+  back, on the same `DATABASE_URL`). Its services sleep for it and, as after a reset, the preview
+  settles asleep when it was idle (the next visit wakes it) or ready. Measured on this machine
+  (2026-11-24): asked to ready again in 12.8 s, the Postgres branch back in 5.3 s of it (its
+  compute stopped, the point copied in, started again) and the services healthy at 12.3 s. `a_restore_point_puts_the_data_back_without_seeding_again`,
   pg-control's `branches_are_isolated_copies` (a reset from another branch).
 - **Deletion**: when the change lands or closes, or after `ttl` without a push or a visit
   (7 days by default). `DELETE /v1/previews/{id}` deletes it at once. Deletion removes, in this
