@@ -1832,6 +1832,7 @@ type Preview = {
   id: string; project: string; slug: string; repo: string;
   change: string | null; number: number | null; github_pr: number | null; branch: string | null;
   title: string; head: string; trusted: boolean;
+  outside?: true;                    // a fork's preview: its title and its code's words are outside text, which roll MCP's lockdown withholds (its error groups carry it too)
   runs: string | null;                // the earlier head its services run (later pushes touched only ignored paths)
   earlier: {service: string; revision: string; url: string; share_url: string | null; at: number; own_data: string[]}[]; // earlier pushes, still reachable; own_data: the products it has its own copy of (as its head left them)
   copies: {count: number; bytes: number; usd_month: number}; // the earlier pushes' own copies of its data, said apart (counted in cost)
