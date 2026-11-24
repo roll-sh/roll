@@ -22024,3 +22024,46 @@ accepted); whether workers ran was not checked separately.
 2. TRUNCATE (and ALTER TABLE rewrites, item 3 above) seen from a snapshot older than the
    commit: roll's old snapshot still reads the rows, PostgreSQL's reads none (documented as not
    MVCC-safe). Reproduction: `probe3.py` `old-truncate`.
+
+## Snapshots and DDL, the rest (agent 312, 2026-11-24)
+
+What agent 310 found and left ("Differences from PostgreSQL left", "Found and not fixed"), in
+the brief's order. Probes are in `~/.cache/a312/scripts/` (`probe6.py`, prepared transactions;
+`probe7.py`, kept plans), run against PostgreSQL 18.6 (own `a312-pg`,
+`max_prepared_transactions = 10`), the base binary (`cand/a310-2`) and the new one.
+
+### First candidate (`cand/a312`): prepared transactions keep their new indexes
+
+**The bug.** An index that a prepared transaction built (CREATE INDEX, ADD PRIMARY KEY, a
+REINDEX that gave it new entry ids) is one that snapshots older than its COMMIT PREPARED can't
+read: its entries are versions the commit makes. Agent 310's `IndexSince` records such an index
+when its transaction commits, and the planner leaves it out for older snapshots. That record
+came from the transaction's `DdlReads`, which only lived in memory. After a restart between
+PREPARE and COMMIT PREPARED (clean or SIGKILL), the recovered transaction committed without
+it. A snapshot taken after the restart and before the COMMIT PREPARED then planned with the
+index and read nothing through it. probe6.py, 1,000 rows, `enable_seqscan = off`, a REPEATABLE
+READ transaction begun before the COMMIT PREPARED:
+
+| case | PostgreSQL 18.6 | base | now |
+|---|---|---|---|
+| `count(*) WHERE b < 500`, restart (stop or SIGKILL) between PREPARE and COMMIT PREPARED | 499 | **0** | 499 |
+| `WHERE b = 7` there | 7 | **no row** | 7 |
+| the same without a restart; ROLLBACK PREPARED; a prepared REINDEX; a prepared REPEATABLE READ rewrite of a table changed after its snapshot (also with a SIGKILL before COMMIT PREPARED) | as PostgreSQL | as PostgreSQL | as PostgreSQL |
+
+**The fix** (`txn/twophase.rs`). The state record ends with the transaction's new indexes, and
+recovery gives them back to the recovered transaction, whose COMMIT PREPARED records them
+as any commit does. A record written before this change ends before that field and reads as
+none. PREPARE (`detach_prepared`) keeps only those indexes of `DdlReads`. A prepared
+transaction runs no statement, and its commit checks nothing, so it no longer needs:
+- its rewrites' adopted ranges and their read-time pins, which held back garbage collection
+  while it stayed prepared;
+- the indexes its own snapshot couldn't read.
+
+**Checks.**
+- `tests/twophase.rs` `prepared_index_and_older_snapshots_after_a_restart` (499 rows and
+  EXPLAIN using the index afterwards, as PostgreSQL).
+- Isolation spec `roll-prepared-ddl-snapshots` (5 permutations: CREATE INDEX with COMMIT /
+  ROLLBACK PREPARED, a prepared REINDEX, a prepared REPEATABLE READ rewrite). It is 5 / 5
+  against PostgreSQL 18.6 live, with the base binary as well (without a restart the base was
+  right). With agent 310's and 307's DDL specs: 58 / 58.
+- probe6.py: every case as PostgreSQL, the SIGKILL ones included.

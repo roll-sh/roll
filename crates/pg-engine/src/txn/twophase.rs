@@ -270,6 +270,10 @@ impl<'a> Dec<'a> {
             _ => Some(self.bytes()?),
         })
     }
+    /// Whether it read all of the record.
+    pub fn done(&self) -> bool {
+        self.at >= self.b.len()
+    }
     pub fn str(&mut self) -> Result<String> {
         String::from_utf8(self.bytes()?.to_vec()).map_err(|_| corrupt())
     }
@@ -447,6 +451,12 @@ impl crate::txn::TxnState {
             }
             None => e.u8(0),
         }
+        // The indexes it gave new entry ranges, which snapshots older than its COMMIT
+        // PREPARED can't read (`IndexSince`): after a restart too. (Last: a record from before
+        // they were kept ends before them.)
+        let fresh = self.ddl_reads.as_ref().map_or(&[][..], |d| &d.fresh[..]);
+        e.u64(fresh.len() as u64);
+        fresh.iter().for_each(|&(oid, _)| e.u32(oid));
         Ok(e.0)
     }
 
@@ -469,6 +479,14 @@ impl crate::txn::TxnState {
         self.lo_descs.clear();
         self.stmt_catalog = None;
         drop(std::mem::take(&mut self.journal));
+        // (Of what DDL that read the newest rows left, only its new indexes matter now, for
+        // COMMIT PREPARED: it runs no statement, its commit checks nothing, and the pins of
+        // its rewrites' read times would hold back garbage collection.)
+        if let Some(d) = self.ddl_reads.take()
+            && !d.fresh.is_empty()
+        {
+            self.ddl_reads = Some(Box::new(super::DdlReads { fresh: d.fresh, ..Default::default() }));
+        }
     }
 }
 
@@ -575,6 +593,12 @@ pub fn recover(db: &Arc<Database>, b: &[u8]) -> Result<Option<(Info, Txn)>> {
             db.ssi.recover_prepared(id, info.xid, locks.clone(), writes);
             t.sxact = true;
             t.si_locks = locks;
+        }
+    }
+    if !d.done() {
+        let fresh: Vec<(u32, usize)> = (0..d.u64()?).map(|_| Ok((d.u32()?, 0))).collect::<Result<_>>()?;
+        if !fresh.is_empty() {
+            t.ddl_reads = Some(Box::new(super::DdlReads { fresh, ..Default::default() }));
         }
     }
     Ok(Some((info, t)))

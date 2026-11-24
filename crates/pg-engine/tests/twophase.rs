@@ -127,6 +127,42 @@ fn prepared_transactions_survive_a_restart() {
     });
 }
 
+/// An index a prepared transaction built, committed after a restart between PREPARE and COMMIT
+/// PREPARED: a snapshot taken before the COMMIT PREPARED reads the table's rows (roll's index
+/// entries are the commit's, so it plans without the index); 499 as PostgreSQL 18.6 reads
+/// through its index. Before, the state record didn't name the index and the snapshot read
+/// nothing through it. (Without a restart: isolation spec roll-prepared-ddl-snapshots.)
+#[test]
+fn prepared_index_and_older_snapshots_after_a_restart() {
+    on_thread(|| {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let e = engine(dir.path(), 5);
+            let mut s = e.connect(1, "postgres", "postgres", "t").unwrap();
+            let out = run(
+                &mut s,
+                "CREATE TABLE t (a int, b int); INSERT INTO t SELECT g, g FROM generate_series(1, 1000) g;
+                 BEGIN; CREATE INDEX t_b ON t (b); PREPARE TRANSACTION 'g1'",
+            );
+            assert!(!out.contains("ERROR"), "{out}");
+            drop(s);
+            e.shutdown();
+        }
+        let e = engine(dir.path(), 5);
+        let mut old = e.connect(1, "postgres", "postgres", "t").unwrap();
+        let mut s = e.connect(2, "postgres", "postgres", "t").unwrap();
+        let q = "SELECT count(*) FROM t WHERE b < 500";
+        run(&mut old, "SET enable_seqscan = off; SET enable_bitmapscan = off; BEGIN ISOLATION LEVEL REPEATABLE READ; SELECT 1");
+        assert!(!run(&mut s, "COMMIT PREPARED 'g1'").contains("ERROR"));
+        assert_eq!(rows(&mut old, q), ["499"]);
+        run(&mut old, "COMMIT");
+        assert_eq!(rows(&mut old, q), ["499"]);
+        assert!(run(&mut old, &format!("EXPLAIN (COSTS OFF) {q}")).contains("using t_b"));
+        drop((old, s));
+        e.shutdown();
+    });
+}
+
 /// A prepared transaction that changed the cluster-wide catalog (roles) finishes after a
 /// restart, also when other transactions changed roles and databases meanwhile: committed,
 /// its roles are there with what it gave them; rolled back, they aren't.
