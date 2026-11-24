@@ -65,6 +65,27 @@ pub struct Request {
     pub action: Option<String>,
 }
 
+/// One page of `GET …/requests` (with `limit` or `before`; without either the answer is
+/// `requests` alone, as before paging).
+#[derive(Debug, Serialize)]
+pub struct RequestPage {
+    pub requests: Vec<Request>,
+    /// `before` for the next page (`<at>:<id>`); absent at the end.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next: Option<String>,
+}
+
+/// SQL pages one call reads at most when folder reach hides rows, before it answers `next`.
+const REQUEST_PAGES: usize = 10;
+
+fn parse_cursor(s: &str) -> Result<(i64, String)> {
+    s.split_once(':').and_then(|(at, id)| Some((at.parse().ok()?, id.to_string()))).filter(|(_, id)| !id.is_empty()).ok_or_else(|| Error::BadRequest("before is a page's next".into()))
+}
+
+fn cursor_of(c: Option<&(i64, String)>) -> Option<String> {
+    c.map(|(at, id)| format!("{at}:{id}"))
+}
+
 /// A request that deletes its environment.
 pub(crate) const DELETE_ENVIRONMENT: &str = "delete_environment";
 /// A request that rotates its one key's managed credential (a leak in an environment that needs
@@ -239,14 +260,53 @@ fn plan(c: &Conn<'_>, dek: &Dek, env: &EnvRow, items: &[Item]) -> Result<Vec<Ite
 }
 
 impl Secrets {
-    pub fn requests(&self, project: &str, slug: &str, state: Option<&str>, caller: &Caller) -> Result<Vec<Request>> {
+    /// An environment's requests, newest first: up to `limit` (1-200, default 200) the caller may
+    /// read, from before `before` (a page's `next`). `next` is set when more may follow. `state`
+    /// filters in SQL; folder reach after it, so a page is read again (at most
+    /// [`REQUEST_PAGES`] times) until it holds `limit` requests or the list ends.
+    pub fn requests(&self, project: &str, slug: &str, state: Option<&str>, before: Option<&str>, limit: Option<i64>, caller: &Caller) -> Result<RequestPage> {
         let st = self.standing(project, slug, None);
         caller.need(Action::Read, &Scope::env(project, slug))?;
         self.project(project)?;
+        let limit = limit.unwrap_or(200);
+        if !(1..=200).contains(&limit) {
+            return Err(Error::BadRequest("limit is 1 to 200".into()));
+        }
+        let start = before.map(parse_cursor).transpose()?;
         self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
-            let rows = c.query(&format!("SELECT {COLUMNS} FROM requests WHERE env_id = ? ORDER BY at DESC LIMIT 200"), [&env.id], request_row)?;
-            rows.into_iter().filter(|r| state.is_none_or(|s| r.state == s) && caller.allows(Action::Read, &Scope::at(project, slug, &r.path))).map(|r| view(c, &env, r, &st)).collect::<Result<_>>()
+            let mut cursor = start.clone();
+            let mut out = Vec::new();
+            for _ in 0..REQUEST_PAGES {
+                let mut sql = format!("SELECT {COLUMNS} FROM requests WHERE env_id = ?");
+                let mut args = vec![code_sql::Value::Text(env.id.clone())];
+                if let Some(s) = state {
+                    sql.push_str(" AND state = ?");
+                    args.push(code_sql::Value::Text(s.into()));
+                }
+                if let Some((at, id)) = &cursor {
+                    sql.push_str(" AND (at < ? OR (at = ? AND id < ?))");
+                    args.extend([code_sql::Value::Int(*at), code_sql::Value::Int(*at), code_sql::Value::Text(id.clone())]);
+                }
+                sql.push_str(&format!(" ORDER BY at DESC, id DESC LIMIT {limit}"));
+                let rows = c.query(&sql, args, request_row)?;
+                let last_page = (rows.len() as i64) < limit;
+                let n = rows.len();
+                for (i, r) in rows.into_iter().enumerate() {
+                    cursor = Some((r.at, r.id.clone()));
+                    if caller.allows(Action::Read, &Scope::at(project, slug, &r.path)) {
+                        out.push(view(c, &env, r, &st)?);
+                        if out.len() as i64 == limit {
+                            let next = if last_page && i + 1 == n { None } else { cursor_of(cursor.as_ref()) };
+                            return Ok(RequestPage { requests: out, next });
+                        }
+                    }
+                }
+                if last_page {
+                    return Ok(RequestPage { requests: out, next: None });
+                }
+            }
+            Ok(RequestPage { requests: out, next: cursor_of(cursor.as_ref()) })
         })
     }
 
