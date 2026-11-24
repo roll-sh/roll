@@ -425,6 +425,25 @@ export type SecretsEvent = { seq: number; at: number; kind: SecretsEventKind; en
 /** `latest: true` answers no events and the head (never with `after`); `limit` 1–500 (100). */
 export type EventsQuery = { after?: number; limit?: number; kinds?: (SecretsEventKind | `${string}.*`)[]; environment?: string; latest?: boolean };
 export type EventPage = { events: SecretsEvent[]; next: number };
+/** Where a person's notifications go (docs/secrets.md, "Being told"): a channel through one of their own roll code chat installs, or their own account's address (never one named). */
+export type NotificationChannel = { slack: { install: string; channel: string } } | { discord: { install: string; channel: string } } | { email: "own" };
+/** `kinds` left out (or empty) is every kind; `environment` only that one's events. */
+export type NewNotification = { kinds?: (SecretsEventKind | `${string}.*`)[]; environment?: string; channel: NotificationChannel };
+/** A person's own subscription to a project's events. `disabled` once they can no longer read the project or use the install (`error` says which); `error` on an active one is the last delivery given up on. */
+export type SecretsNotification = {
+  id: string;
+  project: string;
+  user: string;
+  kinds: string[];
+  environment?: string;
+  channel: NotificationChannel;
+  state: "active" | "disabled";
+  error?: string;
+  error_at?: number;
+  delivered: number;
+  delivered_at?: number;
+  created_at: number;
+};
 /** An audit stream to a SIEM: signed batches of new rows, in order. */
 /** `format`: how a batch goes (`roll` signed JSON; `splunk`, `datadog` and `bearer` carry a token that is never shown). */
 export type SinkFormat = "roll" | "splunk" | "datadog" | "bearer";
