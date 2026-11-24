@@ -691,8 +691,10 @@ pub trait Issuer: Send + Sync {
 
 /// An agent's run on a service's page (`POST …/try`), as the browser saw it: its picture, the
 /// page's status, the step that found nothing, its visible text and what went wrong on the way.
-#[derive(Clone, Debug, Default)]
+/// Serialised (its PNG as base64) when it's taken on the node a roll apps instance runs on.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Tried {
+    #[serde(with = "png_b64::opt")]
     pub png: Option<Vec<u8>>,
     pub status: u16,
     pub step_failed: Option<String>,
@@ -930,7 +932,7 @@ pub trait Apps: Send + Sync {
         Ok(None)
     }
     /// `path` of the service in a browser, `steps` taken on it (a page state's steps), in the
-    /// service's network (`…/try`). `None` where this backend can't here yet (roll apps').
+    /// service's network (`…/try`). `None` where this backend can't.
     async fn try_page(&self, _preview: &str, _service: &str, _path: &str, _steps: &[crate::settings::Step]) -> anyhow::Result<Option<Tried>> {
         Ok(None)
     }

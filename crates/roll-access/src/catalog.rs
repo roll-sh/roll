@@ -1739,6 +1739,8 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/apps/import", "apps", R, Tgt::AnyGrant).lends(Lend::Each(apps_repo)),
     row("GET", "/v1/apps/projects/{project}/services", "apps", R, one(&["project"], "project")),
     row("GET", "/v1/apps/services/{id}/environments/{env}/variables/values", "apps", REVEAL, one(PG, "service")).env(EnvFrom::Param("env")),
+    // A page past the environment's gates: what its visitors' data shows.
+    row("GET", "/v1/apps/services/{id}/environments/{env}/fetch", "apps", REVEAL, one(PG, "service")).env(EnvFrom::Param("env")),
     // A static site's forms: what people sent through them is theirs to see only with reveal.
     row("GET", "/v1/apps/services/{id}/environments/{env}/forms", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
     row("GET", "/v1/apps/services/{id}/environments/{env}/forms/{form}/submissions", "apps", REVEAL, one(PG, "service")).env(EnvFrom::Param("env")),

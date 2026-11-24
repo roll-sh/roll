@@ -124,6 +124,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/routes"), get(routes))
         .route(&format!("{env}/analytics"), get(analytics))
         .route(&format!("{env}/visit"), post(visit))
+        .route(&format!("{env}/fetch"), get(fetch_page))
         .route(&format!("{env}/vitals"), get(vitals))
         .route(&format!("{env}/app-metrics"), get(app_metrics))
         .route(&format!("{env}/errors"), get(errors))
@@ -1531,6 +1532,19 @@ async fn visit(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Ext
         return Err(Error::Forbidden("signing in to an environment is for a person signed in to roll, not a token".into()));
     };
     ok(json!({ "url": apps.visit_ticket(&id, &env, &user.user, &user.session, &b.to, b.state.as_deref().unwrap_or("")).await? }))
+}
+
+#[derive(Deserialize)]
+struct FetchQuery {
+    path: Option<String>,
+    head: Option<bool>,
+    deployment: Option<String>,
+}
+
+/// One of an environment's pages as roll reads it, past its gates (an agent checking what it
+/// deployed): `{status, url, headers, body, truncated}`.
+async fn fetch_page(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<FetchQuery>) -> R {
+    ok(apps.fetch_page(&id, &env, q.path.as_deref().unwrap_or("/"), q.head.unwrap_or(false), q.deployment.as_deref()).await?)
 }
 
 async fn trace(State(apps): S, Path((id, env, trace)): Path<(String, String, String)>) -> R {

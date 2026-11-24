@@ -1486,10 +1486,12 @@ as its logs are. Its picture is `GET …/try/{run}/screenshot` (`image/png`, kep
 preview's holder; another preview's id gets a 404), asked for only when the text isn't enough.
 Two runs at a time per preview (a third is a 409), each taking one of the node's screenshot
 slots; typed text is never kept or said by previews. Both are `reveal` (its clicks can change the
-preview's own data). A roll apps service's comes next (a 409 now). Checked in the screenshot
-image (a click changed "0 items" to "1 item", a missing selector named, a failed request listed)
-and live in `scripts/preview-cost.sh`. `an_agents_run_on_a_page_answers_what_it_showed_masked`,
-`a_runs_answer_is_bounded`.
+preview's own data). A roll apps service's runs in its instance's network on the node that runs
+it, as its screenshot does (a signed hop on a fleet; a 409 where roll apps can't be joined,
+Fargate). Checked in the screenshot image (a click changed "0 items" to "1 item", a missing selector named, a failed request listed)
+and live in `scripts/preview-cost.sh` and, on roll apps, `scripts/preview-apps.sh`.
+`an_agents_run_on_a_page_answers_what_it_showed_masked`, `a_runs_answer_is_bounded`,
+`an_apps_instance_is_screenshotted_on_its_services_holder`.
 A data branch can be looked at from the sheet too (Neon's Tables, Supabase's table editor): a
 Postgres branch's "Tables" lists the tables its own role can read (with about how many rows), and
 one's first 50 rows, cells as text cut at 200 characters (`…/data/{kind:parent}?table=`). It's
@@ -2671,28 +2673,28 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Agents driving the preview in a browser, in review** (GitHub Copilot's Playwright): `POST
-   …/try`, stateless steps and their picture (roll MCP's `previews_try`); roll apps services next.
-2. **Restore points for a preview's data, in review** (Neon's snapshots): Postgres's branches
+1. **Restore points for a preview's data, in review** (Neon's snapshots): Postgres's branches
    saved and put back in place (pg-control's reset `from`). Next for it: roll MCP's tools, and
    the products that only copy (Redis, search) once their branch can be put back in place.
-3. **One preview of a stack of changes** (Graphite's and Aviator's stacks; Vercel previews a
+2. **One preview of a stack of changes** (Graphite's and Aviator's stacks; Vercel previews a
    branch, never a stack): a change whose base is another open change previews on that change's
    head and data, so a reviewer sees the stack as it will land, and a push below moves the ones
    above.
-4. **Notes as Slack threads** (Vercel's comments synced to Slack): a note on a preview's page
+3. **Notes as Slack threads** (Vercel's comments synced to Slack): a note on a preview's page
    opens a thread in the change's channel through roll's chat ops (docs/code/chatops.md), and a
    reply there replies to the note, both ways.
-5. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
+4. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
    (3.3 s in its log) and its masking, which needs that compute up: pg-control's to shorten.
-6. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+5. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-7. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+6. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-8. **Watch: pg-control's recovery to a time seconds old** (unowned).
+7. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-24, morning, later still: agents drive a preview's page (#885: `POST …/try`, steps in a browser, its text and picture; #893: roll apps services' too, on the node that runs the instance).
 
 Landed 2026-11-24, morning, later: a note says what the reviewer did before it, and the note's form works again after #861 (#879, the toolbar now driven in a browser live).
 

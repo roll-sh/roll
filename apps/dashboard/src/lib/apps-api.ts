@@ -613,6 +613,8 @@ export interface EnvironmentPut {
   attack_mode?: { per_minute: number; minutes?: number } | null;
   /** Attack mode on by hand until then (unix ms, within 24 hours); null ends it. */
   challenge_until?: number | null;
+  /** Paths whose CORS preflights reach the app past its gate; null: none. */
+  preflight?: string[] | null;
   /** false: its schedules don't run (deploys and runs still do). */
   scheduled?: boolean;
   /** Data of its own: a branch of each Postgres and Redis database it links (admin); null goes back. */
@@ -774,6 +776,8 @@ export interface Environment extends EnvironmentSummary {
   signed_in?: boolean;
   /** People GitHub or Google vouches for get in, by domain, email or GitHub organisation. */
   sso?: Sso;
+  /** Paths whose CORS preflights reach the app past its gate. */
+  preflight?: string[];
   /** Visitors may type its password (`access.password`, never returned). */
   password?: boolean;
   /** What its code may reach: roll and the listed hosts (`roll`), or anything (`open`). */
