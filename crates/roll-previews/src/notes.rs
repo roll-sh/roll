@@ -36,6 +36,9 @@ pub struct Reply {
 
 pub const MAX_REPLIES: usize = 20;
 
+/// The reply a resolve leaves on the note (roll's Resolve, [`crate::Engine::resolve_note`]).
+pub const RESOLVED: &str = "Resolved.";
+
 /// The bodies' shapes are roll code's (chat ops carries notes to Slack and back too).
 pub use code_control::review::preview_note::{parse, parse_reply};
 
