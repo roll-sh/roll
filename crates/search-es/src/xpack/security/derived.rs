@@ -457,7 +457,8 @@ mod tests {
             format!("{}{}", ok, "A".repeat(MAX_TOKEN_BYTES)),
         ] {
             let e = split(&bad).err().expect(&bad);
-            assert_eq!(e.reason(), unverified().reason(), "{bad}");
+            let detail = e.meta().iter().find(|(k, _)| k == "additional_unsuccessful_credentials").and_then(|(_, v)| v.as_str()).map(str::to_string);
+            assert_eq!(detail.as_deref(), Some("API key: derived key refused"), "{bad}");
         }
     }
 }
