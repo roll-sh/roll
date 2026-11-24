@@ -78,6 +78,17 @@ impl Brancher for Postgres {
         self.create_from(parent, Some(branch), name, Mode::Branch, None).await.map(Some)
     }
 
+    fn restores(&self) -> bool {
+        true
+    }
+
+    /// pg-control's reset from another branch (`from`: the restore point): same branch,
+    /// endpoint, `DATABASE_URL` and role (made again, same password).
+    async fn restore(&self, parent: &str, branch: &str, _kept: Option<&str>, point: &str, _name: &str, _mode: Mode) -> anyhow::Result<Option<Branched>> {
+        self.0.post(&format!("/v1/projects/{}/branches/{}/reset", seg(parent), seg(branch)), json!({ "from": point })).await?;
+        Ok(Some(Branched { r#ref: branch.to_string(), kept: Some(APP_ROLE.into()) }))
+    }
+
     /// From the parent's history (pg-control's point in time: unix seconds).
     async fn branch_at(&self, parent: &str, name: &str, mode: Mode, at: i64) -> anyhow::Result<Option<Branched>> {
         self.create(parent, name, mode, Some(at)).await.map(Some)

@@ -42,6 +42,9 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/v1/previews/{id}/mail/{mail}", get(mail_raw))
         .route("/v1/previews/{id}/screenshot.png", get(screenshot_link))
         .route("/v1/previews/{id}/reset", post(reset))
+        .route("/v1/previews/{id}/restore-points", get(restore_points).post(save_point))
+        .route("/v1/previews/{id}/restore-points/{point}", axum::routing::delete(delete_point))
+        .route("/v1/previews/{id}/restore-points/{point}/restore", post(restore_point))
         .route("/v1/previews/{id}/data/{resource}", get(browse_data))
         // roll's word for a preview's own service: the address is its credential (rolld's gate
         // lets it through, as the trace intake).
@@ -695,6 +698,46 @@ async fn reset(AxState(e): S, Path(id): Path<String>, b: Bytes) -> crate::Result
     check_id(&id)?;
     let b: ResetBody = body(&b)?;
     blocking(e, move |e| e.reset(&id, b.resources)).await.map(Json)
+}
+
+/// Who's asking, for the preview's activity: a person's handle, a token's name, or the operator.
+fn asker(who: Option<axum::Extension<roll_auth::SignedIn>>, grant: Option<axum::Extension<roll_auth::Grant>>) -> String {
+    match (who, grant) {
+        (Some(axum::Extension(u)), None) => u.handle,
+        (_, Some(axum::Extension(g))) => format!("token:{}", g.name),
+        (None, None) => "operator".into(),
+    }
+}
+
+async fn restore_points(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<Value>> {
+    check_id(&id)?;
+    let points = blocking(e, move |e| e.restore_points(&id)).await?;
+    Ok(Json(serde_json::json!({ "points": points, "max": crate::engine::MAX_POINTS })))
+}
+
+#[derive(Deserialize, Default)]
+struct SavePointBody {
+    #[serde(default)]
+    label: String,
+}
+
+async fn save_point(AxState(e): S, Path(id): Path<String>, who: Option<axum::Extension<roll_auth::SignedIn>>, grant: Option<axum::Extension<roll_auth::Grant>>, b: Bytes) -> crate::Result<Response> {
+    check_id(&id)?;
+    let b: SavePointBody = if b.is_empty() { SavePointBody::default() } else { body(&b)? };
+    let point = e.save_point(&id, &b.label, &asker(who, grant)).await?;
+    Ok((axum::http::StatusCode::CREATED, Json(point)).into_response())
+}
+
+async fn restore_point(AxState(e): S, Path((id, point)): Path<(String, String)>, who: Option<axum::Extension<roll_auth::SignedIn>>, grant: Option<axum::Extension<roll_auth::Grant>>) -> crate::Result<Json<Preview>> {
+    check_id(&id)?;
+    let by = asker(who, grant);
+    blocking(e, move |e| e.restore(&id, &point, &by)).await.map(Json)
+}
+
+async fn delete_point(AxState(e): S, Path((id, point)): Path<(String, String)>) -> crate::Result<axum::http::StatusCode> {
+    check_id(&id)?;
+    e.delete_point(&id, &point).await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
 #[derive(Deserialize)]
