@@ -393,9 +393,14 @@ How it works:
   - its changes from forks (`!trusted`);
   - reviews and review comments whose author can't push: from GitHub by the same
     association, and from roll's own API when the caller may comment but not write (a public
-    repo's reader).
-- In lockdown, every result has the `title`, `body`, `description`, `message` and `text` of those
-  records replaced with a notice, wherever they sit in the answer.
+    repo's reader);
+  - roll previews' fork previews (`!trusted`): the preview, its error groups, traces and spans,
+    route times and logs.
+- In lockdown, every result has the `title`, `body`, `description`, `message`, `text`, `line`,
+  `lines` (each line, so the list keeps its shape), `sample` and `name` of those records replaced
+  with a notice, wherever they sit in the answer: a fork's code chooses its log lines, error
+  samples and route and span names as much as its title. (An `agent_feedback` alert names its
+  connection in `connection`, a person's choice, which stays.)
 - A tool whose answer anyone outside can write names those fields itself (`Tool::outside`):
   `apps_form_submissions` withholds every submission's `fields`, since anyone can submit a site's
   form, and so do `apps_events` and `apps_activity` (a `form.submitted` event names the fields the

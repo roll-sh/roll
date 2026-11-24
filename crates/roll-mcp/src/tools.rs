@@ -89,6 +89,9 @@ pub struct Tool {
     /// Sends no body when no body field is given, for a route that reads a missing body one way
     /// and `{}` another (a transit key's rotate: no body is roll's own new material).
     pub bodiless: bool,
+    /// Arguments of which one must be given (`apps_plan`: repo, git or files): checked before the
+    /// call, and said in `_meta["roll/one_of"]` (a root `anyOf` some clients refuse).
+    pub one_of: &'static [&'static str],
 }
 
 pub enum Built {
@@ -256,7 +259,11 @@ impl Tool {
             "description": self.description,
             "inputSchema": { "type": "object", "properties": props, "required": required, "additionalProperties": false },
             "annotations": { "readOnlyHint": read_only, "destructiveHint": destructive, "idempotentHint": idempotent, "openWorldHint": self.open_world },
-            "_meta": { "roll/product": self.product, "roll/route": format!("{} {}", self.method, self.path), "roll/actions": actions },
+            "_meta": if self.one_of.is_empty() {
+                json!({ "roll/product": self.product, "roll/route": format!("{} {}", self.method, self.path), "roll/actions": actions })
+            } else {
+                json!({ "roll/product": self.product, "roll/route": format!("{} {}", self.method, self.path), "roll/actions": actions, "roll/one_of": self.one_of })
+            },
         })
     }
 
@@ -271,6 +278,9 @@ impl Tool {
                 let near = nearest(k, names.iter().copied()).map(|n| format!(" (did you mean {n:?}?)")).unwrap_or_default();
                 return Err(format!("{}: unknown argument {k:?}{near}; it takes {}", self.name, names.join(", ")));
             }
+        }
+        if !self.one_of.is_empty() && !self.one_of.iter().any(|n| obj.get(*n).is_some_and(|v| !v.is_null())) {
+            return Err(format!("{}: give one of {}", self.name, self.one_of.join(", ")));
         }
         let mut path = self.path.to_string();
         let mut query = url::form_urlencoded::Serializer::new(String::new());
@@ -462,7 +472,7 @@ const OVERRIDE: P = P { name: "override", ty: Ty::Bool, at: At::Header("x-roll-o
 const IN_PROJECT: P = P { name: "workspace_project", ty: Ty::Str, at: At::Header("x-roll-project"), required: false, desc: "Workspace project (prj_…) to put the new resource in" };
 
 const fn t(name: &'static str, title: &'static str, description: &'static str, product: &'static str, method: &'static str, path: &'static str, params: &'static [P]) -> Tool {
-    Tool { name, title, description, product, method, path, params, fixed: None, wrap: None, hint: Hint::Auto, until: None, outside: &[], published: false, open_world: false, bodiless: false }
+    Tool { name, title, description, product, method, path, params, fixed: None, wrap: None, hint: Hint::Auto, until: None, outside: &[], published: false, open_world: false, bodiless: false, one_of: &[] }
 }
 
 /// A value request takes one answer and lasts a day unless asked otherwise: the link is a way to
@@ -529,6 +539,10 @@ impl Tool {
     /// No body unless a body field is given ([`Tool::bodiless`]).
     const fn bodiless(mut self) -> Tool {
         self.bodiless = true;
+        self
+    }
+    const fn one_of(mut self, names: &'static [&'static str]) -> Tool {
+        self.one_of = names;
         self
     }
 
@@ -1479,7 +1493,7 @@ static TOOLS: &[Tool] = &[
     t("apps_diff_environments", "Compare environments", "How an environment differs from another (Railway's environment sync): variables missing, extra or with another value (names only; which differ needs reveal on both), and settings with the body that makes each match. Read on both environments.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/diff", &[SERVICE, ENV, qreq("from", "The environment to compare with")]),
     t("apps_metrics", "Service metrics", "CPU, memory and requests of an environment, and each instance's own last hour (by_instance).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/metrics", &[SERVICE, ENV, q("minutes", Ty::Int, "Window")]),
     t("apps_quote", "Quote a service", "What a service would cost at most a month and an hour, before making it: its run settings (cpu, memory_mb, min_instances, max_instances, type, sidecars) at roll's prices. Sleeping costs nothing; min_instances always run.", "apps", "POST", "/v1/apps/quote", &[b("run", Ty::Obj, "The run settings apps_create_service would take; left out, the defaults")]),
-    t("apps_plan", "Plan a service", "How roll would build and run code (provider, framework, install, build and start commands, port), before making a service: a dry run. Give one of repo (a roll code repo), git (a public Git URL) or files (the files themselves).", "apps", "POST", "/v1/apps/plan", &[b("repo", Ty::Str, "A roll code repo, owner/name"), b("revision", Ty::Str, "With repo: a branch or commit"), b("git", Ty::Str, "Or a public Git URL, read at its branch's head as its deploy would be"), b("branch", Ty::Str, "With git: its branch (default: the default one)"), b("files", Ty::Obj, "Or the files themselves, {path: content}: how an app written in a chat would build"), b("root", Ty::Str, "The app's folder in the repo")]),
+    t("apps_plan", "Plan a service", "How roll would build and run code (provider, framework, install, build and start commands, port), before making a service: a dry run. Give one of repo (a roll code repo), git (a public Git URL) or files (the files themselves).", "apps", "POST", "/v1/apps/plan", &[b("repo", Ty::Str, "A roll code repo, owner/name"), b("revision", Ty::Str, "With repo: a branch or commit"), b("git", Ty::Str, "Or a public Git URL, read at its branch's head as its deploy would be"), b("branch", Ty::Str, "With git: its branch (default: the default one)"), b("files", Ty::Obj, "Or the files themselves, {path: content}: how an app written in a chat would build"), b("root", Ty::Str, "The app's folder in the repo")]).one_of(&["repo", "git", "files"]),
     t("apps_import", "Check a project file", "What a roll.toml, a docker-compose file or another platform's file (Render, Fly, Railway, Heroku) would make, without making anything: the apps with their source, branch, run settings, links and variables, the databases, notes on what isn't carried over, and the file as roll.toml (check it before roll up --all). Give one: a file's text, a roll code repo's root roll.toml, or a public Git repository's.", "apps", "POST", "/v1/apps/import", &[b("roll_toml", Ty::Str, "A roll.toml's text"), b("compose", Ty::Str, "A docker-compose.yml's text"), b("render", Ty::Str, "A Render Blueprint's render.yaml text"), b("fly", Ty::Str, "A fly.toml's text"), b("railway", Ty::Str, "A railway.json or railway.toml's text"), b("heroku", Ty::Str, "A Heroku app.json's text"), b("procfile", Ty::Str, "With heroku: its Procfile's text"), b("repo", Ty::Str, "A roll code repo (owner/name): its root roll.toml"), b("revision", Ty::Str, "With repo: a branch or commit (default: its default branch's head)"), b("git", Ty::Str, "A public Git repository's https URL: its root roll.toml"), b("branch", Ty::Str, "With git: a branch (default: its default branch)")]).open_world(),
     t("apps_export_project", "Export a project file", "A project as a roll.toml: its services (source, branch, run settings that differ from defaults) and the postgres and redis databases they link, variables by name only, never a value. Write it to the repo, check it with apps_import, deploy it with roll up --all.", "apps", "POST", "/v1/apps/projects/{project}/export", &[req("project", "Workspace project"), b("databases", Ty::Obj, "Names for the linked databases, as {\"postgres:<ref>\": \"db\"}")]),
     t("apps_get_environment", "Get an environment", "One environment: its URL, state (running, asleep), live deploy, branch and size; build_closed (its builds get no secret value) and base_updated (base images that moved since its build).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}", &[SERVICE, ENV]),
