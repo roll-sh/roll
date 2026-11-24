@@ -125,6 +125,10 @@ pub struct ClusterConfig {
     /// (connector syncs: [`crate::xpack::entsearch::sync`]; the embedding pool's turns:
     /// [`crate::xpack::inference::local`]). `None`: the cluster counts alone.
     pub owner: Option<String>,
+    /// The owners' verified sites and their crawls of unverified ones, kept by the host outside
+    /// the cluster's state ([`crate::xpack::entsearch::sync::crawler::verify::Sites`]); `None`:
+    /// every site is unverified and crawls are counted on the node.
+    pub sites: Option<std::sync::Arc<dyn crate::xpack::entsearch::sync::crawler::verify::Sites>>,
     /// The pool of connector sync slots this cluster takes from (`None`: the process's, shared by
     /// every cluster on the node; tests give clusters a pool of their own).
     pub connector_slots: Option<std::sync::Arc<crate::slots::Slots>>,
@@ -179,6 +183,7 @@ impl ClusterConfig {
             item_charge: None,
             catalog_id: None,
             owner: None,
+            sites: None,
             connector_slots: None,
             branch_of: None,
             file_service_tokens: false,

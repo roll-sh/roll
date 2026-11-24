@@ -132,6 +132,16 @@ impl Failure {
             Failure::Refused => "refused",
         }
     }
+
+    /// What a person who chose the URL is told: a timeout, a network failure and a refused
+    /// address are all `unreachable`, so the answer can't tell a filtered port from a closed one,
+    /// nor a name that leads to a private or fleet address from one that leads nowhere.
+    pub fn shown(self) -> &'static str {
+        match self {
+            Failure::Timeout | Failure::Network | Failure::Refused => "unreachable",
+            Failure::TooLarge => "too_large",
+        }
+    }
 }
 
 /// A response, its body read.
