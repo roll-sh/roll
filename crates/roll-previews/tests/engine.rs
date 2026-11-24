@@ -2176,7 +2176,7 @@ async fn a_notes_element_is_cropped_by_the_next_screenshot() {
     }
     let crop_of = |id: &str| listed.iter().find(|n| n.id == id).map(|n| n.crop);
     assert_eq!((crop_of("rv_h1"), crop_of("rv_gone"), crop_of("rv_bad")), (Some(true), Some(false), Some(false)));
-    assert_eq!(e.engine.store.note_crop(&p.id, "rv_h1").unwrap(), Some(png));
+    assert_eq!(e.engine.store.note_crop(&p.id, "rv_h1").unwrap(), Some((png, None)), "desktop width: the note says nothing of its viewport");
     assert_eq!(*e.apps.crops_asked.lock(), ["rv_h1", "rv_gone"], "a selector roll refuses is never sent to the page");
     // The next head's run asks only for what has no picture yet.
     e.code.edit("chg_cr", |c| c.head = "cs_5a".into());

@@ -683,7 +683,7 @@ async fn screenshot_link(AxState(e): S, Path(id): Path<String>, Query(q): Query<
             return Ok(None);
         }
         if let Some(n) = &note {
-            return e.store.note_crop(&id, n);
+            return Ok(e.store.note_crop(&id, n)?.map(|(png, _)| png));
         }
         if variant.is_none() {
             return Ok(e.store.screenshot(&id)?.map(|(_, png)| png));
