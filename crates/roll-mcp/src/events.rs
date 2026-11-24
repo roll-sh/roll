@@ -45,7 +45,7 @@ struct Feed {
 const FEEDS: &[Feed] = &[
     Feed {
         name: "apps.event",
-        description: "Something happened to a service: a deploy going live or failing, a crash loop, a failed cron run or job, a memory, error, latency or capacity alert, a domain or a check, or an audit.* change to its settings. Filter by kinds (deploy.failed, or alert.* for a family), service id and environment.",
+        description: "Something happened to a service: a deploy going live or failing, a crash loop, a failed cron run or job, a memory, error, latency or capacity alert, a domain or a check, attack mode turning on by itself (attack.mode), or an audit.* change to its settings. Filter by kinds (deploy.failed, attack.mode, or alert.* for a family), service id and environment.",
         tool: "apps_events",
         product: "apps",
         path: &[],
