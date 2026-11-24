@@ -377,6 +377,35 @@ impl Client {
         Ok(a.permalink)
     }
 
+    /// `users.info`: what a person is called in the workspace (their display name, else their
+    /// real name, else their handle).
+    pub async fn user_name(&self, token: &str, user: &str) -> Result<String, Error> {
+        #[derive(Deserialize, Default)]
+        struct Profile {
+            #[serde(default)]
+            display_name: String,
+            #[serde(default)]
+            real_name: String,
+        }
+        #[derive(Deserialize)]
+        struct User {
+            #[serde(default)]
+            name: String,
+            #[serde(default)]
+            profile: Profile,
+        }
+        #[derive(Deserialize)]
+        struct Answer {
+            user: User,
+        }
+        let a: Answer = self.get(token, "users.info", &[("user", user)]).await?;
+        let u = a.user;
+        Ok([u.profile.display_name, u.profile.real_name, u.name]
+            .into_iter()
+            .find(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| user.to_string()))
+    }
+
     /// One message by `ts`: from `conversations.history` (a top-level message), else from
     /// `conversations.replies` (a reply in a thread). `None` when neither has it.
     pub async fn fetch_message(

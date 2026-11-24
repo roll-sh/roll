@@ -30,7 +30,7 @@ const ANSWER_MODAL: &str = "roll.answer";
 pub(super) fn register(code: &Arc<Code>, r: &Registry) {
     let me = Arc::downgrade(code);
     r.register_trigger(Arc::new(SlackTrigger(me.clone())));
-    for kind in [Kind::Post, Kind::Update, Kind::Reply, Kind::Dm, Kind::Status, Kind::Notify] {
+    for kind in [Kind::Post, Kind::Update, Kind::Reply, Kind::Dm, Kind::Status, Kind::Notify, Kind::Note] {
         r.register_step(Arc::new(SlackStep { kind, code: me.clone() }));
     }
 }
@@ -197,6 +197,8 @@ async fn on_event(code: &Arc<Code>, client: &Client, token: &str, install: &Inst
     match event {
         Event::AppMention(m) | Event::Message(m) if m.bot_id.is_some() || m.user.as_deref() == Some(install.bot_user_id.as_str()) => Handled::Done,
         Event::Message(m) if m.subtype.is_some() => Handled::Done,
+        // A note's thread: its message (a mention there comes as one too) is the note's reply.
+        Event::AppMention(m) if noted(code, install, &m.channel, m.thread_ts.as_deref()).is_some() => Handled::Done,
         Event::AppMention(m) => {
             let user = m.user.clone().unwrap_or_default();
             let prompt = wire::strip_mention(&m.text, &install.bot_user_id);
@@ -209,6 +211,10 @@ async fn on_event(code: &Arc<Code>, client: &Client, token: &str, install: &Inst
         }
         Event::Message(m) => {
             let user = m.user.clone().unwrap_or_default();
+            if let Some(b) = noted(code, install, &m.channel, m.thread_ts.as_deref()) {
+                let text = wire::strip_mention(&m.text, &install.bot_user_id);
+                return note_reply(code, client, token, install, &b, &user, &text, &m.channel, &m.ts).await;
+            }
             if let Some(b) = bound(code, install, &m.channel, m.thread_ts.as_deref()) {
                 let text = wire::strip_mention(&m.text, &install.bot_user_id);
                 return steer(code, client, token, install, &b, &user, &text, &m.channel, &m.ts).await;
@@ -245,6 +251,59 @@ async fn on_event(code: &Arc<Code>, client: &Client, token: &str, install: &Inst
         },
         Event::Other(_) => Handled::Done,
     }
+}
+
+fn noted(code: &Code, install: &Install, channel: &str, thread_ts: Option<&str>) -> Option<super::NoteBinding> {
+    super::note_at(code, &install.id, channel, thread_ts?).ok().flatten()
+}
+
+/// How a reply from Slack ends, on the page: who wrote it, and where. A reply ending so is
+/// never posted back to its thread.
+const FROM_SLACK: &str = ", in Slack";
+
+/// A reply in a note's thread: the note's reply on its change, signed with the person's name.
+#[allow(clippy::too_many_arguments)]
+async fn note_reply(code: &Arc<Code>, client: &Client, token: &str, install: &Install, b: &super::NoteBinding, user: &str, text: &str, channel: &str, ts: &str) -> Handled {
+    if text.trim().is_empty() {
+        return Handled::Done;
+    }
+    if !install.allows(user) {
+        let _ = client.post_ephemeral(token, channel, user, "Only people the roll owner allows can reply to this note from Slack.").await;
+        return Handled::Done;
+    }
+    let key = format!("slack:note-reply:{}:{channel}:{ts}", install.id);
+    if super::mark(code, &key).is_some() {
+        return Handled::Done;
+    }
+    let name = match client.user_name(token, user).await {
+        Ok(n) => n,
+        Err(e) if e.transient() => return Handled::Retry(e.to_string()),
+        Err(_) => "someone".into(),
+    };
+    let body = crate::review::preview_note::reply_body(&b.note, &format!("{}\n\n— {name}{FROM_SLACK}", text.trim()));
+    match super::reply_to_note(code, b, body).await {
+        Ok(()) => {
+            super::set_mark(code, &key, "done");
+            let _ = client.add_reaction(token, channel, ts, "white_check_mark").await;
+            Handled::Done
+        }
+        Err((true, why)) => Handled::Retry(why),
+        Err((false, why)) => {
+            let _ = client.post_ephemeral(token, channel, user, &format!("roll couldn't add that to the note: {why}")).await;
+            Handled::Fail(why)
+        }
+    }
+}
+
+/// A preview note as a Slack message: the page (linked to the preview), the element, the note.
+fn note_text(by: &str, path: &str, selector: &str, link: Option<&str>, note: &str) -> String {
+    let page = match link {
+        Some(url) => format!("<{url}|{path}>"),
+        None => format!("`{path}`"),
+    };
+    let on = if selector.is_empty() { String::new() } else { format!(" · `{selector}`") };
+    let quoted: Vec<String> = note.lines().map(|l| format!("> {l}")).collect();
+    format!("*{by}* left a note on the preview · {page}{on}\n{}\nReplies here are the note's replies.", quoted.join("\n"))
 }
 
 fn bound(code: &Code, install: &Install, channel: &str, thread_ts: Option<&str>) -> Option<super::Binding> {
@@ -418,6 +477,7 @@ enum Kind {
     Dm,
     Status,
     Notify,
+    Note,
 }
 
 struct SlackStep {
@@ -459,6 +519,7 @@ impl SlackStep {
             Kind::Dm => "slack.dm",
             Kind::Status => "slack.status",
             Kind::Notify => "slack.notify",
+            Kind::Note => "slack.note",
         }
     }
 
@@ -490,6 +551,7 @@ impl SlackStep {
                 }),
                 json!(["to"]),
             ),
+            Kind::Note => (props!({ "team": team, "channel": channel("Where notes are posted") }), json!(["channel"])),
         };
         json!({ "type": "object", "properties": props, "required": required, "additionalProperties": false })
     }
@@ -512,6 +574,11 @@ impl StepKind for SlackStep {
                 "Notify in Slack",
                 "Tell a channel or a person about an agent (waiting on you, failed, done), with buttons to answer what it waits on.",
                 &["channel", "ts", "status", "title"],
+            ),
+            Kind::Note => (
+                "Preview notes in Slack",
+                "On a change's review event: a note left on its preview's pages becomes a message in the channel, replies in its thread become the note's replies, and replies and resolving on the page show in the thread. Other reviews are left alone.",
+                &["posted", "channel", "ts", "note"],
             ),
         };
         StepInfo {
@@ -536,6 +603,7 @@ impl StepKind for SlackStep {
             Kind::Dm => need(&c.user, "user").and(need(&c.text, "text")),
             Kind::Status => need(&c.machine, "machine").and(need(&c.thread, "thread")),
             Kind::Notify => need(&c.to, "to"),
+            Kind::Note => need(&c.channel, "channel"),
         }
     }
 
@@ -624,6 +692,7 @@ impl StepKind for SlackStep {
                 let f = Follow { machine, thread, channel, thread_ts, ts: c.ts, once: false };
                 follow::step(ctx, &SlackSurface { client, token }, &install, &f).await
             }
+            Kind::Note => note_step(ctx, &client, &token, &install, c.channel.unwrap_or_default(), &ev).await,
             Kind::Notify => {
                 let (machine, thread) = follow::target(ctx, c.machine, c.thread);
                 let to = c.to.unwrap_or_default();
@@ -646,6 +715,59 @@ impl StepKind for SlackStep {
             }
         }
     }
+}
+
+/// `slack.note` on a review event (`ev`): a new note is posted to `channel` and its thread bound
+/// to it; a reply made on the page goes into the note's thread, and so does resolving it (its
+/// review dismissed). Each is posted once.
+async fn note_step(ctx: &mut StepContext, client: &Client, token: &str, install: &Install, channel: String, ev: &Value) -> StepOutcome {
+    use crate::review::preview_note;
+    let code = ctx.code.clone();
+    let (body, review, change) = (ev["body"].as_str().unwrap_or_default(), ev["id"].as_str().unwrap_or_default(), ev["change"].as_str().unwrap_or_default());
+    let by = ev["reviewer"]["name"].as_str().unwrap_or("someone");
+    let skipped = StepOutcome::Done(json!({ "posted": false }));
+    let once = format!("note:{}", ctx.idempotency_key());
+    if let Some(done) = super::mark(&code, &once).and_then(|m| serde_json::from_str::<Value>(&m).ok()) {
+        return StepOutcome::Done(done);
+    }
+    let post = |m: Message| async move { client.post_message(token, &m).await };
+    let out = if let Some((path, selector, note)) = preview_note::parse(body) {
+        if ev["dismissed"] == true {
+            // Resolved on the page: said in its thread, once.
+            let Ok(Some(b)) = super::note_thread(&code, &install.id, review) else { return skipped };
+            let who = ev["dismissed_by"].as_str().unwrap_or("someone");
+            match post(Message { channel: b.channel.clone(), text: format!("Resolved by *{who}*."), blocks: None, thread_ts: Some(b.thread_ts.clone()) }).await {
+                Ok(p) => json!({ "posted": true, "channel": p.channel, "ts": p.ts, "note": review }),
+                Err(e) => return outcome(e),
+            }
+        } else {
+            let link = preview_note::link(body);
+            let text = note_text(by, &path, &selector, link.as_deref(), &note);
+            match post(Message { channel, text, blocks: None, thread_ts: None }).await {
+                Ok(p) => {
+                    if let Err(e) = super::bind_note(&code, &ctx.owner().id, &install.id, &p.channel, &p.ts, review, change, ctx.automation(), ctx.run_as.as_deref()) {
+                        return StepOutcome::Retry(e.to_string());
+                    }
+                    json!({ "posted": true, "channel": p.channel, "ts": p.ts, "note": review })
+                }
+                Err(e) => return outcome(e),
+            }
+        }
+    } else if let Some((note, reply)) = preview_note::parse_reply(body) {
+        // What came from the thread isn't posted back to it.
+        if reply.ends_with(FROM_SLACK) || ev["dismissed"] == true {
+            return skipped;
+        }
+        let Ok(Some(b)) = super::note_thread(&code, &install.id, &note) else { return skipped };
+        match post(Message { channel: b.channel.clone(), text: format!("*{by}*: {reply}"), blocks: None, thread_ts: Some(b.thread_ts.clone()) }).await {
+            Ok(p) => json!({ "posted": true, "channel": p.channel, "ts": p.ts, "note": note }),
+            Err(e) => return outcome(e),
+        }
+    } else {
+        return skipped;
+    };
+    super::set_mark(&code, &once, &out.to_string());
+    StepOutcome::Done(out)
 }
 
 fn outcome(e: wire::Error) -> StepOutcome {
