@@ -116,8 +116,9 @@ impl PublicCa for RollPublicCa {
     fn check(&self, dns: DnsProvider, credential: &Value, names: &[String]) -> Result<(), String> {
         let cf = self.solver(dns, credential)?;
         Self::block(async {
+            // The zone the order's TXT record goes in (an apex name's zone is the name itself).
             for n in names {
-                cf.zone_for(n.trim_start_matches("*.")).await.map_err(|e| format!("{e:#}"))?;
+                cf.zone_for(&format!("_acme-challenge.{}", n.trim_start_matches("*."))).await.map_err(|e| format!("{e:#}"))?;
             }
             Ok(())
         })

@@ -364,28 +364,37 @@ async fn order_inner(account: &Account, solver: &Solver, names: &[String], timin
         a.challenge(kind.clone()).with_context(|| format!("acme: {kind:?} challenge gone"))?.set_ready().await?;
     }
     let retry = RetryPolicy::new().initial_delay(Duration::from_millis(500)).timeout(timing.timeout);
-    let status = order.poll_ready(&retry).await?;
-    if status != OrderStatus::Ready {
-        // Which names the CA couldn't prove, and what it said about each.
-        let mut unproven = vec![];
-        let mut authzs = order.authorizations();
-        while let Some(Ok(a)) = authzs.next().await {
-            if a.status != AuthorizationStatus::Invalid {
-                continue;
-            }
-            let Identifier::Dns(name) = a.identifier().identifier else { continue };
-            let star = if a.wildcard { "*." } else { "" };
-            let said = a.challenges.iter().find_map(|c| c.error.as_ref()).and_then(|p| p.detail.clone()).unwrap_or_default();
-            unproven.push(format!("{star}{name} ({said})"));
-        }
-        match unproven.is_empty() {
-            true => anyhow::bail!("acme: order is {status:?}, not ready"),
-            false => anyhow::bail!("acme: order is {status:?}: not proven: {}", unproven.join(", ")),
-        }
+    // Not ready: say which names the CA couldn't prove, and what it said about each.
+    match order.poll_ready(&retry).await {
+        Ok(OrderStatus::Ready) => {}
+        Ok(status) => match unproven(&mut order).await {
+            names if names.is_empty() => anyhow::bail!("acme: order is {status:?}, not ready"),
+            names => anyhow::bail!("acme: order is {status:?}: not proven: {}", names.join(", ")),
+        },
+        Err(e) => match unproven(&mut order).await {
+            names if names.is_empty() => return Err(e.into()),
+            names => anyhow::bail!("acme: {e}: not proven: {}", names.join(", ")),
+        },
     }
     let key = order.finalize().await?;
     let chain = order.poll_certificate(&retry).await?;
     Ok(CertPem { chain, key })
+}
+
+/// The names of `order` whose authorization the CA found invalid, each with what it said.
+async fn unproven(order: &mut instant_acme::Order) -> Vec<String> {
+    let mut out = vec![];
+    let mut authzs = order.authorizations();
+    while let Some(Ok(a)) = authzs.next().await {
+        if a.status != AuthorizationStatus::Invalid {
+            continue;
+        }
+        let Identifier::Dns(name) = a.identifier().identifier else { continue };
+        let star = if a.wildcard { "*." } else { "" };
+        let said = a.challenges.iter().find_map(|c| c.error.as_ref()).and_then(|p| p.detail.clone()).unwrap_or_default();
+        out.push(format!("{star}{name} ({said})"));
+    }
+    out
 }
 
 /// A certificate for `names` from `account`'s CA, each name proven through `solver`; the proofs
