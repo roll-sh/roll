@@ -494,10 +494,12 @@ impl Workspace {
     /// As [`Workspace::trusted_by_members`], from a deleted project's kept homes and owners.
     pub(crate) fn trusted_when_deleted(&self, project: &str, namespace: &str, kind: Kind, r#ref: &str) -> bool {
         let home = self.db.read(|c| c.query_row("SELECT 1 FROM deleted_homes WHERE project_id = ? AND kind = ? AND ref = ?", [project, kind.as_str(), r#ref], |r| r.get::<_, i64>(0)).optional());
-        if roles::decisions::HOMES && HOME_KINDS.contains(&kind) && home.ok().flatten().is_some() {
+        let owners = self.owners.get();
+        // As a live home counts ([`Workspace::trusted_with`]): not while it's a person's own.
+        if roles::decisions::HOMES && HOME_KINDS.contains(&kind) && home.ok().flatten().is_some() && !owners.is_some_and(|o| o.has_person_owner(kind, r#ref)) {
             return true;
         }
-        let Some(owners) = self.owners.get() else { return false };
+        let Some(owners) = owners else { return false };
         let kept = self.deleted_members(project).unwrap_or_default();
         kept.iter().filter(|(_, r)| *r == Role::Owner).any(|(o, _)| if o == namespace { owners.trusts(o, kind, r#ref) } else { owners.owns(o, kind, r#ref) })
     }
@@ -1034,10 +1036,18 @@ impl Workspace {
 
     /// [`Workspace::trusted_by_members`] with the project's owners read already.
     fn trusted_with(&self, project: &str, namespace: &str, project_owners: &[String], kind: Kind, r#ref: &str) -> bool {
-        if roles::decisions::HOMES && HOME_KINDS.contains(&kind) && self.home_of(kind, r#ref).ok().flatten().as_deref() == Some(project) {
+        let owners = self.owners.get();
+        // Its home, unless what's there is still a person's own (a home from before members, or
+        // a hand-over not done yet): that grants nothing until it's settled. One owner lookup,
+        // only for a resource at home in the project.
+        if roles::decisions::HOMES
+            && HOME_KINDS.contains(&kind)
+            && self.home_of(kind, r#ref).ok().flatten().as_deref() == Some(project)
+            && !owners.is_some_and(|o| o.has_person_owner(kind, r#ref))
+        {
             return true;
         }
-        let Some(owners) = self.owners.get() else { return false };
+        let Some(owners) = owners else { return false };
         // The person who made the project as before members (an admin's project is the operator's,
         // D9); another owner adds only what's their own, never all of an admin account's reach.
         project_owners.iter().any(|o| if o == namespace { owners.trusts(o, kind, r#ref) } else { owners.owns(o, kind, r#ref) })

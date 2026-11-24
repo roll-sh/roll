@@ -496,11 +496,12 @@ pub type Leads = std::sync::Arc<dyn Fn() -> bool + Send + Sync>;
 /// - A cluster that comes back to life (a failed delete, a restore) after the project it was at
 ///   home in was deleted keeps no home there (`Workspace::drop_kept_homes`).
 /// - What's kept from before is put right at start, before the API listens ([`fix_homes`], then
-///   [`fix_links`]), and the homes again every few minutes (a hand-over that failed is owed, not
-///   forgotten); on a fleet only where `leads` says.
+///   [`fix_links`]), and both again every few minutes ([`passes`]: a hand-over that failed is
+///   owed, not forgotten); on a fleet only where `leads` says. Until it's settled, a home whose
+///   cluster is still a person's grants the project nothing (`Workspace::trusts`).
 /// - Deleting a project at home to live clusters is refused (409), and answered 503 when that
 ///   can't be read: they'd be no one's.
-pub fn members(control: &std::sync::Arc<search_control::Control>, workspace: &std::sync::Arc<roll_workspace::Workspace>, leads: Leads) {
+pub fn members(control: &std::sync::Arc<search_control::Control>, workspace: &std::sync::Arc<roll_workspace::Workspace>) {
     let kind = roll_workspace::Kind::Search;
     // The workspace holds its hooks: they hold it weakly.
     let (c, weak) = (control.clone(), std::sync::Arc::downgrade(workspace));
@@ -595,18 +596,23 @@ pub fn members(control: &std::sync::Arc<search_control::Control>, workspace: &st
             message: format!("project {} is home to {} search cluster(s) ({}): delete them first", d.project.name, live.len(), live.join(", ")),
         })
     }));
-    // The homes pass again every few minutes, after the one at start (main.rs).
-    let (c, weak) = (control.clone(), std::sync::Arc::downgrade(workspace));
+}
+
+/// The homes and links passes again every few minutes, after the ones at start (main.rs), where
+/// `leads` says: [`fix_homes`], then [`fix_links`] (both are safe to repeat).
+pub fn passes(control: &std::sync::Arc<search_control::Control>, workspace: &std::sync::Arc<roll_workspace::Workspace>, secrets: &std::sync::Arc<roll_secrets::Secrets>, leads: Leads) {
+    let (c, weak, sec) = (control.clone(), std::sync::Arc::downgrade(workspace), std::sync::Arc::downgrade(secrets));
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(HOMES_EVERY);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         tick.tick().await;
         loop {
             tick.tick().await;
-            let (c, Some(ws), leads) = (c.clone(), weak.upgrade(), leads.clone()) else { return };
+            let (c, Some(ws), Some(sec), leads) = (c.clone(), weak.upgrade(), sec.upgrade(), leads.clone()) else { return };
             let _ = tokio::task::spawn_blocking(move || {
                 if leads() {
                     fix_homes(&c, &ws);
+                    fix_links(&c, &ws, &sec);
                 }
             })
             .await;
@@ -614,7 +620,7 @@ pub fn members(control: &std::sync::Arc<search_control::Control>, workspace: &st
     });
 }
 
-/// How often the homes pass runs while the node does ([`fix_homes`]).
+/// How often the homes and links passes run while the node does ([`fix_homes`], [`fix_links`]).
 const HOMES_EVERY: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// A node without roll search: it can't tell a cluster's id from a name (`Owners::canonical`

@@ -128,6 +128,10 @@ pub struct SearchCluster {
     /// reindex from remote may read; empty: none. roll's migration adds the host it reads.
     /// Branches start with their parent's.
     pub reindex_whitelist: Vec<String>,
+    /// Only a project's admins and owners change its data (docs/members.md: a developer's
+    /// default reaches what isn't protected). Set on create (default off) and by an admin's
+    /// `PATCH`; clusters from before it are protected; a branch never is.
+    pub protected: bool,
 }
 
 impl SearchCluster {
@@ -408,10 +412,10 @@ CREATE INDEX IF NOT EXISTS search_suggestions_due ON search_suggestions (due_at)
 "#;
 
 const COLS: &str = "id, name, region, flavor, password, idle_timeout_s, max_in_flight, max_body_mb, destructive_requires_name, \
-                    parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, ip_allowlist, cors, browser_per_minute, inherit_pending, reindex_whitelist, made_by";
+                    parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, ip_allowlist, cors, browser_per_minute, inherit_pending, reindex_whitelist, made_by, protected";
 /// What lookups read: [`COLS`] and where the cluster is loaded.
 const READ_COLS: &str = "id, name, region, flavor, password, idle_timeout_s, max_in_flight, max_body_mb, destructive_requires_name, \
-                         parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, loaded_on, own_bytes, wake_at, restored_at, ip_allowlist, cors, browser_per_minute, inherit_pending, reindex_whitelist, made_by";
+                         parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, loaded_on, own_bytes, wake_at, restored_at, ip_allowlist, cors, browser_per_minute, inherit_pending, reindex_whitelist, made_by, protected";
 /// What deleted clusters' reads add to [`READ_COLS`].
 const DELETED_COLS: &str = "deleted_name, deleted_at, purge_at, stored_as, name";
 
@@ -449,16 +453,17 @@ fn row(r: &Row) -> code_sql::Result<SearchCluster> {
         // Unreadable, nothing is whitelisted (reindex from remote refuses every host).
         reindex_whitelist: serde_json::from_str(&r.get::<_, String>(25)?).unwrap_or_default(),
         made_by: r.get(26)?,
+        protected: r.get(27)?,
     })
 }
 
 fn deleted_row(r: &Row) -> code_sql::Result<DeletedCluster> {
     let mut c = row(r)?;
-    // [`DELETED_COLS`] follow [`READ_COLS`]' 27 (0-26).
-    c.name = r.get(27)?;
+    // [`DELETED_COLS`] follow [`READ_COLS`]' 28 (0-27).
+    c.name = r.get(28)?;
     c.loaded_on = None;
     c.wake_at = None;
-    Ok(DeletedCluster { cluster: c, deleted_at: r.get(28)?, purge_at: r.get(29)?, stored_as: r.get(30)?, reserved: r.get(31)? })
+    Ok(DeletedCluster { cluster: c, deleted_at: r.get(29)?, purge_at: r.get(30)?, stored_as: r.get(31)?, reserved: r.get(32)? })
 }
 
 /// What the catalog keeps of an index's query suggestions (`crate::suggestions`): its settings
@@ -587,6 +592,9 @@ impl Store {
         db.ensure_schema("CREATE INDEX IF NOT EXISTS search_clusters_owner ON search_clusters (owner, created_at)")?;
         // Who made a cluster in a workspace project (no owner), for their caps.
         db.add_column("search_clusters", "made_by", "TEXT")?;
+        // Clusters from before members' roles reached them are protected (fail closed: no member
+        // reached them then); a new one says ([`SearchCluster::protected`]).
+        db.add_column("search_clusters", "protected", "INTEGER NOT NULL DEFAULT 1")?;
         // Hand-overs to a workspace project decided (a home set) and not done yet
         // ([`Store::owe_handover`]).
         db.ensure_schema("CREATE TABLE IF NOT EXISTS search_handovers (cluster_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, at INTEGER NOT NULL)")?;
@@ -695,7 +703,7 @@ impl Store {
                 return Ok(Inserted::Over(over));
             }
             x.execute(
-                &format!("INSERT INTO search_clusters ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)"),
+                &format!("INSERT INTO search_clusters ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)"),
                 params![
                     c.id,
                     c.name,
@@ -719,7 +727,8 @@ impl Store {
                     c.browser_per_minute,
                     c.inherit_pending,
                     whitelist_json(&c.reindex_whitelist),
-                    c.made_by
+                    c.made_by,
+                    c.protected
                 ],
             )
             .map(|_| Inserted::Yes)
@@ -749,7 +758,7 @@ impl Store {
             }
             x.execute(
                 "UPDATE search_clusters SET flavor = ?2, password = ?3, idle_timeout_s = ?4, max_in_flight = ?5, max_body_mb = ?6,
-                 destructive_requires_name = ?7, password_rotated_at = ?8, ip_allowlist = ?9, cors = ?10, browser_per_minute = ?11, reindex_whitelist = ?12 WHERE id = ?1",
+                 destructive_requires_name = ?7, password_rotated_at = ?8, ip_allowlist = ?9, cors = ?10, browser_per_minute = ?11, reindex_whitelist = ?12, protected = ?13 WHERE id = ?1",
                 params![
                     c.id,
                     c.flavor,
@@ -762,7 +771,8 @@ impl Store {
                     allowlist_json(&c.ip_allowlist),
                     cors_json(&c.cors),
                     c.browser_per_minute,
-                    whitelist_json(&c.reindex_whitelist)
+                    whitelist_json(&c.reindex_whitelist),
+                    c.protected
                 ],
             )?;
             Ok::<_, code_sql::Error>(Ok(()))
@@ -776,6 +786,12 @@ impl Store {
         Ok(self.db.read(|x| {
             x.query_row(&format!("SELECT id FROM search_clusters WHERE (id = ?1 AND deleting = 0) OR (name = ?1 AND {LIVE}) ORDER BY id = ?1 DESC LIMIT 1"), params![id_or_name], |r| r.get(0)).optional()
         })?)
+    }
+
+    /// Whether cluster `id` is protected ([`SearchCluster::protected`]), synchronously (roll's
+    /// access rules): `None` when there is no such cluster (live or kept for restoring).
+    pub fn protected_of(&self, id: &str) -> anyhow::Result<Option<bool>> {
+        Ok(self.db.read(|x| x.query_row("SELECT protected FROM search_clusters WHERE id = ?1 AND deleting = 0", params![id], |r| r.get(0)).optional())?)
     }
 
     /// Whose cluster `id_or_name` is, synchronously (rolld's workspace owners): `None` when there
@@ -1534,6 +1550,7 @@ mod tests {
             browser_per_minute: None,
             inherit_pending: false,
             reindex_whitelist: Vec::new(),
+            protected: false,
         }
     }
 
@@ -1756,6 +1773,7 @@ mod tests {
         let s = Store::open(&path, Sealer::from_secret("0123456789abcdef0123456789abcdef").unwrap(), None).unwrap();
         let old = s.by_name("old").await.unwrap().unwrap();
         assert_eq!((old.id.as_str(), old.owner.as_deref()), ("srch_o", None), "an earlier cluster is the operator's");
+        assert!(old.protected, "an earlier cluster is protected (no member reached it then)");
         s.delete("srch_o").await.unwrap();
         all(&s).await;
         let _ = std::fs::remove_dir_all(&dir);

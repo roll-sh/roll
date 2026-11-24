@@ -376,6 +376,7 @@ mod tests {
                     browser_per_minute: None,
                     inherit_pending: false,
                     reindex_whitelist: Vec::new(),
+                    protected: false,
                 },
                 crate::store::Caps::NONE,
             )

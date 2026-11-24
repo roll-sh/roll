@@ -238,6 +238,9 @@ pub struct ClusterOptions {
     /// The cluster's `reindex.remote.whitelist`: `host:port` patterns (`*` matches any run of
     /// characters) reindex from remote may read, at most [`MAX_WHITELIST`]; `[]`: none.
     pub reindex_whitelist: Option<Vec<String>>,
+    /// Whether only a project's admins and owners change its data (a developer's default doesn't
+    /// reach it). A branch is never protected.
+    pub protected: Option<bool>,
 }
 
 /// The most patterns a cluster's reindex whitelist holds.
@@ -1152,6 +1155,9 @@ impl Control {
         if let Some(v) = o.destructive_requires_name {
             c.destructive_requires_name = v;
         }
+        if let Some(v) = o.protected {
+            c.protected = v;
+        }
         Ok(c)
     }
 
@@ -1209,6 +1215,7 @@ impl Control {
             browser_per_minute: None,
             inherit_pending: false,
             reindex_whitelist: Vec::new(),
+            protected: false,
         }
     }
 
@@ -1307,6 +1314,8 @@ impl Control {
             },
             o,
         )?;
+        // Never protected, whatever the parent is or the options say (a preview's copy).
+        let c = SearchCluster { protected: false, ..c };
         self.check(&c)?;
         self.check_free(name).await?;
         // Refused by a cap before anything is copied (the insert's count, in its transaction,
@@ -2718,6 +2727,7 @@ mod tests {
             browser_per_minute: None,
             inherit_pending: false,
             reindex_whitelist: vec!["es.example.com:443".into()],
+            protected: false,
         };
         let s = spec_for(&c);
         assert!(s.ip_allowlist.contains("::ffff:203.0.113.9".parse().unwrap()) && !s.ip_allowlist.is_open());

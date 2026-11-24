@@ -684,7 +684,7 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     if let Some(s) = &search {
         s.control.on_branch(search::home_branches(workspace.clone()));
         // A home hands a cluster to its project; a project home to clusters isn't deleted.
-        search::members(&s.control, &workspace, search_leads.clone());
+        search::members(&s.control, &workspace);
         // A remote link works only while whoever linked it may still administer its target, as
         // roll-access decides it now (a removed or demoted member's links stop at once).
         let a = access.clone();
@@ -727,6 +727,8 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
             let (c, ws, sec) = (s.control.clone(), workspace.clone(), secrets.clone());
             tokio::task::spawn_blocking(move || search::fix_links(&c, &ws, &sec));
         }
+        // Both again every few minutes.
+        search::passes(&s.control, &workspace, &secrets, search_leads.clone());
     }
     if let Some(p) = &postgres {
         secrets::tell_postgres_decoys(&p.control, secrets.clone());

@@ -86,6 +86,9 @@ export interface SearchSettings {
   max_in_flight: number;
   max_body_mb: number;
   destructive_requires_name: boolean;
+  /** Only a project's admins and owners change its data (a developer only reads it). Changing it
+   * is an admin's; a branch never is. */
+  protected: boolean;
 }
 
 /** One entry of a cluster's IP allowlist (roll apps' `allow_ips` have the same shape). */

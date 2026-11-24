@@ -376,11 +376,15 @@ pub struct Resolvers {
     /// Per product: the ids of the resources a person owns themselves (search: their clusters),
     /// for a product whose owner stays a source of trust beside projects (docs/members.md).
     pub owned: HashMap<&'static str, OwnedFn>,
-    /// Products whose resources have no environments and are never protected (search's
-    /// clusters): an `unprotected` rule, a developer's default (docs/members.md, D3), reaches them
-    /// whole.
-    pub never_protected: std::collections::HashSet<&'static str>,
+    /// Per product whose resources have no environments (search's clusters): whether resource
+    /// `id` is protected as a whole. An `unprotected` rule, a developer's default (docs/members.md,
+    /// D3), reaches one only when this says `Some(false)`.
+    pub protected_whole: HashMap<&'static str, WholeProtectedFn>,
 }
+
+/// Whether resource `id` is protected as a whole (`None`: not known, so no `unprotected` rule
+/// reaches it).
+pub type WholeProtectedFn = Arc<dyn Fn(&str) -> Option<bool> + Send + Sync>;
 
 /// The workspace project `product`'s resource `id` is in (`None`: not known, or gone).
 pub type ProjectFn = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
@@ -435,10 +439,10 @@ impl Resolvers {
         self.owned.insert(product, Arc::new(f));
     }
 
-    /// Say `product`'s resources have no environments and none is ever protected
-    /// ([`Resolvers::never_protected`]).
-    pub fn unprotected_whole(&mut self, product: &'static str) {
-        self.never_protected.insert(product);
+    /// Register whether `product`'s resources, which have no environments, are protected:
+    /// `f(id)` ([`Resolvers::protected_whole`]).
+    pub fn protected_whole(&mut self, product: &'static str, f: impl Fn(&str) -> Option<bool> + Send + Sync + 'static) {
+        self.protected_whole.insert(product, Arc::new(f));
     }
 
     /// Whether `env` of `product`'s resource `id` is protected, as the product says now.
@@ -714,7 +718,7 @@ impl Access {
             on
         };
         let project = (!projects.is_empty()).then(|| projects.remove(0));
-        let protected = self.resolvers.never_protected.contains(product).then_some(false);
+        let protected = self.resolvers.protected_whole.get(product).and_then(|f| f(&id));
         Resource { product: product.into(), id: Some(id), project, also_in: projects, environment: resolved.and_then(|r| r.environment), protected, ..Default::default() }
     }
 

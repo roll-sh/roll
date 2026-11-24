@@ -412,7 +412,10 @@ evaluator and search's catalogue rows. search adds no role checks of its own.
     their link, and rolling back to one is refused (400), as writing any link by a name is: link
     the key by id again instead.
 
-  A stranger's cluster dropped on the project's canvas reaches nobody through it, and a purged
+  Until it's settled, a home whose cluster is still a person's own grants the project nothing
+  (`Workspace::trusts` skips a home `Owners::has_person_owner` reports), on every node, whenever
+  the pass runs; and only that person or the operator moves it. A stranger's cluster dropped on
+  the project's canvas reaches nobody through it, and a purged
   cluster leaves every canvas. A project still home to live clusters can't be deleted (409); when
   that can't be read, or on a node without roll search, the delete is answered 503. Inside the
 delete's transaction, a home made in the project meanwhile, or one whose cluster came alive
@@ -427,7 +430,12 @@ restore) after its home project was deleted anyway keeps no home there, and is t
   | developer | as viewer, plus write (documents, indices, mappings, synonyms, branches, restores) and reveal (`read` and `append` API keys, browser keys) |
   | admin, owner | everything: settings, the console, `data` and `admin` API keys, the admin password, remotes, migrations, deletes, creates in the project |
 
-  A cluster has no environments and is never protected, so a developer's default reaches it. A
+  A cluster has no environments, but it can be protected as a whole (`protected`, as other
+  products protect production): then only admins and owners change its data, and a developer
+  only reads it (`Resolvers::protected_whole`, read per cluster; unreadable counts as protected).
+  A new cluster isn't protected unless its creator says (`protected` on create); an admin changes
+  it with `PATCH`; clusters made before members are protected (nobody's role reached them then);
+  a branch never is, whatever its parent. A developer's default reaches an unprotected one. A
   bulk that deletes, `delete_by_query`, a lifecycle setting and a `data` key (its role deletes
   indices and sets lifecycle policies) are `delete`, which only admins and owners have.
 - **Anyone else** gets 404 for the cluster, worded as for one that doesn't exist (the name they

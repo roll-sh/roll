@@ -61,10 +61,12 @@ fn resolvers(p: Products<'_>, workspace: Arc<roll_workspace::Workspace>) -> Reso
         r.by_fn("cluster", move |id: &str| s2.store.id_of(id).ok().flatten());
         // A person's own clusters stay theirs beside their projects (docs/members.md): their
         // session reaches each, and their tokens within it.
-        r.owned_fn("search", move |user: &str| search.store.owned_ids(user).unwrap_or_default());
-        // A cluster has no environments and none is protected: a developer's default reaches it
-        // (writes, data keys), and only an admin or owner manages it.
-        r.unprotected_whole("search");
+        let s3 = search.clone();
+        r.owned_fn("search", move |user: &str| s3.store.owned_ids(user).unwrap_or_default());
+        // A cluster has no environments: a developer's default reaches it whole unless it's
+        // protected (its own mark; unreadable counts as protected), and only an admin or owner
+        // manages it.
+        r.protected_whole("search", move |id: &str| search.store.protected_of(id).ok().flatten());
     }
     if let Some(code) = p.code {
         let c = code.clone();

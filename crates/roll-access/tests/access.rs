@@ -205,9 +205,10 @@ impl Daemon {
         // Previews keep each preview's project themselves: `pv_in_<project>` is in `<project>`.
         resolvers.project_fn("previews", |id: &str| id.strip_prefix("pv_in_").map(String::from));
         resolvers.protected_fn("previews", |_, _| Some(false));
-        // Search: bob owns `cl_bobs` himself, and clusters have no protected environments.
+        // Search: bob owns `cl_bobs` himself; clusters have no environments, and only
+        // `cl_foreign` is marked protected.
         resolvers.owned_fn("search", |user: &str| if user == "usr_bob" { vec!["cl_bobs".to_string()] } else { Vec::new() });
-        resolvers.unprotected_whole("search");
+        resolvers.protected_whole("search", |id: &str| Some(id == "cl_foreign"));
         // Metadata documents from 127.0.0.1 (the test's own server) are allowed here only.
         let mut config = Config { locked: true, approval_wait: std::time::Duration::from_millis(wait_ms), metadata_allow_private: true, ..Config::default() };
         configure(&mut config);
@@ -2958,6 +2959,9 @@ async fn a_members_role_decides_what_they_do_to_a_search_cluster() {
     // Made a home of the project, the dropped cluster counts.
     d.workspace.set_home(&roll_workspace::Actor::operator(), &id, search, "cl_foreign", false).unwrap();
     assert_eq!(matrix("usr_bob", "cl_foreign").await, [ok, no, no, no, no, no, no]);
+    // It's protected: a developer only reads it (her default reaches what isn't), an admin all.
+    assert_eq!(matrix("usr_cy", "cl_foreign").await, [ok, no, no, no, no, no, no], "a developer on a protected cluster");
+    assert_eq!(matrix("usr_dee", "cl_foreign").await, [ok; 7], "an admin on a protected cluster");
     // A create in the project is the role's (admin and owner); one naming no project is a person's own.
     let create = |who: &'static str, project: Option<&str>| {
         let (d, cookie) = (&d, format!("roll_session=rls_{who}"));
