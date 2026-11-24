@@ -19,6 +19,7 @@ const ISSUES: { issue: Finding["issue"]; title: string; what: string; serious: b
   { issue: "weak", title: "Weak", what: "Credentials easy to guess: New value replaces one with 48 random characters.", serious: false },
   { issue: "unplaced", title: "No placement", what: "Keys bound to hosts without naming the header or query parameter that carries them: a placeholder may ride in any header, one the host might echo back, and untrusted code's doesn't swap. Bind each again (Authorization: Bearer {} by default).", serious: false },
   { issue: "operator_made", title: "Made as the operator", what: "Syncs and workload identities an admin's session made before roll recorded the person: they'd keep acting after that admin is demoted or can't sign in. Make each again from your session to bind it to you.", serious: false },
+  { issue: "stored_cloud_key", title: "Cloud keys kept in roll", what: "Syncs that sign in to AWS, Google or Azure with a key stored here, when they could sign in without one: the project's AWS role, or roll's issuer through workload identity federation or a federated credential. The key works, but it can leak, expire and needs rotating. Make each sync again without it, then delete the key.", serious: false },
   { issue: "expiring", title: "Expiring", what: "Values that stop working outside roll within two weeks, and SaaS rotators whose own credential does.", serious: false },
   { issue: "certificate_expiring", title: "Certificates ending", what: "Certificates a CA here signed for a CSR that end within two weeks: nothing renews them but whoever asked. Sign a new CSR.", serious: false },
   { issue: "stale", title: "Stale", what: "Unchanged for longer than their environment allows.", serious: false },
@@ -136,7 +137,7 @@ export function HealthView() {
                 <div key={`${f.environment}/${f.path}/${f.key}`} className="flex flex-wrap items-center gap-x-3 gap-y-0.5 px-3 py-1.5 text-[12.5px]">
                   {f.issue === "production_unprotected" ? (
                     <span className="text-fg">{name(f.environment)}</span>
-                  ) : f.issue === "certificate_expiring" || f.issue === "operator_made" || registration(f) ? (
+                  ) : f.issue === "certificate_expiring" || f.issue === "operator_made" || f.issue === "stored_cloud_key" || registration(f) ? (
                     <span className="flex min-w-0 items-center gap-3">
                       <span className="font-mono text-fg">{f.key}</span>
                       <span className="text-subtle">{f.issue === "certificate_expiring" ? `CA ${f.path}` : registration(f) ? "SaaS rotator" : f.environment ? `${name(f.environment)}${f.path === "/" ? "" : ` ${f.path}`}` : ""}</span>

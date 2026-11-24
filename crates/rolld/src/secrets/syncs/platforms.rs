@@ -1960,13 +1960,20 @@ impl SecretsManager {
         if !aws_region(&region) {
             return Err(bad("region is an AWS region (us-east-1)"));
         }
-        let replica_regions = match replicas {
+        // A list, or a comma-separated string (the dashboard's form, `--target`).
+        let replicas: Option<Vec<Json>> = match replicas {
             None | Some(Json::Null) => None,
-            Some(Json::Array(rs)) if rs.len() <= SM_REPLICAS_MAX => {
+            Some(Json::Array(rs)) => Some(rs),
+            Some(Json::String(rs)) => Some(rs.split(',').map(str::trim).filter(|r| !r.is_empty()).map(|r| json!(r)).collect()),
+            Some(_) => return Err(bad("replica_regions is a list of AWS regions")),
+        };
+        let replica_regions = match replicas {
+            Some(rs) if rs.len() > SM_REPLICAS_MAX => return Err(bad(format!("replica_regions lists at most {SM_REPLICAS_MAX} regions"))),
+            Some(rs) => {
                 let rs: std::collections::BTreeSet<String> = rs.iter().map(|r| r.as_str().filter(|r| aws_region(r) && *r != region).map(str::to_string)).collect::<Option<_>>().ok_or_else(|| bad("replica_regions are AWS regions other than region (us-west-2)"))?;
                 Some(rs.into_iter().collect())
             }
-            Some(_) => return Err(bad(format!("replica_regions is a list of at most {SM_REPLICAS_MAX} AWS regions"))),
+            None => None,
         };
         let name = name.unwrap_or_default();
         if !ident(&name, 512, "/_+=.@-") || name.to_ascii_lowercase().starts_with("aws") {
@@ -3075,7 +3082,7 @@ mod tests {
     async fn aws_secrets_manager_keeps_replicas_in_the_listed_regions() {
         let (base, seen) = mock().await;
         let sm = || Arc::new(SecretsManager(http(&base)));
-        let t = |name: &str| json!({ "region": "us-east-1", "secret_name": name, "role": "secrets", "replica_regions": ["us-west-2", "eu-west-1"] });
+        let t = |name: &str| json!({ "region": "us-east-1", "secret_name": name, "role": "secrets", "replica_regions": "us-west-2, eu-west-1" });
         push_as(sm(), t("shop/production"), &[], Some(session())).await.unwrap();
         let created = seen.lock().unwrap().last().unwrap().2.clone();
         assert_eq!(created["AddReplicaRegions"], json!([{ "Region": "eu-west-1" }, { "Region": "us-west-2" }]));
