@@ -52,9 +52,9 @@ pub(crate) fn detect(tree: &dyn Tree, o: &Overrides) -> Result<Option<Draft>, Er
     }
 
     // A framework that builds a static site names the directory its output goes to.
-    let static_build = |framework: &'static str, dir: &'static str, why: String| StaticBuild {
+    let static_build = |framework: &'static str, dir: &str, why: String| StaticBuild {
         framework,
-        dir,
+        dir: dir.to_string(),
         why,
     };
     let fw: Option<Framework> = if has("next") {
@@ -121,6 +121,30 @@ pub(crate) fn detect(tree: &dyn Tree, o: &Overrides) -> Result<Option<Draft>, Er
             "public",
             "gatsby in dependencies: a static site in public".into(),
         )))
+    } else if has("@docusaurus/core") {
+        Some(Framework::Static(static_build(
+            "docusaurus",
+            "build",
+            "@docusaurus/core in dependencies: a static Docusaurus site in build".into(),
+        )))
+    } else if has("@11ty/eleventy") {
+        Some(Framework::Static(static_build(
+            "eleventy",
+            "_site",
+            "@11ty/eleventy in dependencies: a static site in _site".into(),
+        )))
+    } else if has("vitepress") {
+        // `vitepress build docs` writes docs/.vitepress/dist.
+        let root = script("build")
+            .and_then(|b| b.split_whitespace().skip_while(|w| *w != "build").nth(1))
+            .filter(|d| !d.starts_with('-') && crate::tree::valid(d))
+            .map(|d| format!("{}/", d.trim_end_matches('/')))
+            .unwrap_or_default();
+        let dir = format!("{root}.vitepress/dist");
+        Some(Framework::Static(static_build("vitepress", &dir, format!("vitepress in dependencies: a static site in {dir}"))))
+    } else if has("@angular/core") && !has("@angular/ssr") && (has("@angular/build") || has("@angular-devkit/build-angular")) {
+        let dir = angular_output(tree);
+        Some(Framework::Static(static_build("angular", &dir, format!("Angular without @angular/ssr: a static site in {dir}"))))
     } else if has("react-scripts") {
         Some(Framework::Static(static_build(
             "create-react-app",
@@ -146,6 +170,19 @@ pub(crate) fn detect(tree: &dyn Tree, o: &Overrides) -> Result<Option<Draft>, Er
         .map(|(d, label)| Framework::server(d.trim_start_matches("@hapi/"), label, None))
     };
 
+    // `build.output` says where the site's files are, whatever was detected; netlify.toml's
+    // `publish` or vercel.json's `outputDirectory` only for a static build or none detected (a
+    // Next.js app's netlify.toml publishes `.next`, which isn't a site).
+    let publish = match (&o.output, &fw) {
+        (Some(d), _) => Some((d.clone(), "build.output")),
+        (None, None | Some(Framework::Static(_))) => crate::site_configs::publish_dir(tree),
+        (None, _) => None,
+    };
+    let fw = match (publish, fw) {
+        (Some((dir, from)), Some(Framework::Static(s))) => Some(Framework::Static(StaticBuild { why: format!("{} ({from} says its files are in {dir})", s.why), dir, ..s })),
+        (Some((dir, from)), _) => Some(Framework::Static(StaticBuild { framework: "", why: format!("{from}: a static site in {dir}"), dir })),
+        (None, fw) => fw,
+    };
     let (framework, start, output) = match fw {
         Some(Framework::Static(s)) => {
             notes.push(s.why);
@@ -197,7 +234,7 @@ pub(crate) fn detect(tree: &dyn Tree, o: &Overrides) -> Result<Option<Draft>, Er
                 notes.push("a build script and no start script: a static site in dist".into());
                 notes.push("dist/ is served by busybox httpd".into());
                 let rules = static_site::config_rules(tree, &mut notes);
-                return Ok(Some(static_build_draft(node, notes, "", "dist", build, rules)));
+                return Ok(Some(static_build_draft(node, notes, "", "dist".into(), build, rules)));
             }
             if start.is_none() && o.start.is_none() && static_site::index(tree).is_some() {
                 return Ok(None);
@@ -407,8 +444,21 @@ impl Framework {
 
 struct StaticBuild {
     framework: &'static str,
-    dir: &'static str,
+    dir: String,
     why: String,
+}
+
+/// An Angular app's browser files: angular.json's first project's `outputPath` (a string, or
+/// `{base}`), with the application builder's `browser` under it.
+fn angular_output(tree: &dyn Tree) -> String {
+    let json: Option<serde_json::Value> = tree.read("angular.json").and_then(|b| serde_json::from_slice(&b).ok());
+    let project = json.as_ref().and_then(|j| j["projects"].as_object()).and_then(|p| p.iter().next());
+    let path = project.and_then(|(_, p)| {
+        let o = &p["architect"]["build"]["options"]["outputPath"];
+        o.as_str().or_else(|| o["base"].as_str()).map(str::to_string)
+    });
+    let base = path.or_else(|| project.map(|(name, _)| format!("dist/{name}"))).filter(|d| crate::tree::valid(d)).unwrap_or_else(|| "dist".into());
+    format!("{}/browser", base.trim_end_matches('/'))
 }
 
 fn dep_of(framework: &str) -> &str {
@@ -437,7 +487,7 @@ fn static_build_draft(
     node: Setup,
     notes: Vec<String>,
     framework: &'static str,
-    dir: &'static str,
+    dir: String,
     build: Option<String>,
     rules: Option<String>,
 ) -> Draft {
