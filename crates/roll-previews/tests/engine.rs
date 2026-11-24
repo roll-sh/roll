@@ -2161,7 +2161,7 @@ async fn a_notes_element_is_cropped_by_the_next_screenshot() {
     let mut png = Vec::new();
     image::RgbaImage::new(4, 4).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
     *e.apps.shot.lock() = Some(png.clone());
-    let note = |id: &str, selector: &str| roll_previews::notes::Note { id: id.into(), path: "/".into(), selector: selector.into(), note: "look".into(), by: "ada".into(), at: 1, replies: Vec::new(), crop: false };
+    let note = |id: &str, selector: &str| roll_previews::notes::Note { id: id.into(), path: "/".into(), selector: selector.into(), note: "look".into(), by: "ada".into(), at: 1, replies: Vec::new(), crop: false, crop_as: None, seen: Default::default() };
     e.code.feedback.lock().insert("chg_cr".into(), vec![note("rv_h1", "body > h1"), note("rv_gone", "#missing"), note("rv_bad", "h1 { color: red }")]);
     e.code.open(change("chg_cr", 4));
     e.engine.pass().await.unwrap();
@@ -2176,7 +2176,7 @@ async fn a_notes_element_is_cropped_by_the_next_screenshot() {
     }
     let crop_of = |id: &str| listed.iter().find(|n| n.id == id).map(|n| n.crop);
     assert_eq!((crop_of("rv_h1"), crop_of("rv_gone"), crop_of("rv_bad")), (Some(true), Some(false), Some(false)));
-    assert_eq!(e.engine.store.note_crop(&p.id, "rv_h1").unwrap(), Some(png));
+    assert_eq!(e.engine.store.note_crop(&p.id, "rv_h1").unwrap(), Some((png, None)), "desktop width: the note says nothing of its viewport");
     assert_eq!(*e.apps.crops_asked.lock(), ["rv_h1", "rv_gone"], "a selector roll refuses is never sent to the page");
     // The next head's run asks only for what has no picture yet.
     e.code.edit("chg_cr", |c| c.head = "cs_5a".into());
@@ -2404,7 +2404,7 @@ async fn a_pages_notes_by_its_environment_name() {
     e.code.open(change("chg_n", 4));
     e.engine.pass().await.unwrap();
     let p = e.engine.store.row_by_change("chg_n").unwrap().unwrap();
-    let note = |path: &str, text: &str| roll_previews::notes::Note { id: format!("rv_{text}"), path: path.into(), selector: "h1".into(), note: text.into(), by: "ada".into(), at: 1, replies: Vec::new(), crop: false };
+    let note = |path: &str, text: &str| roll_previews::notes::Note { id: format!("rv_{text}"), path: path.into(), selector: "h1".into(), note: text.into(), by: "ada".into(), at: 1, replies: Vec::new(), crop: false, crop_as: None, seen: Default::default() };
     e.code.feedback.lock().insert("chg_n".into(), vec![note("/", "Too big"), note("/about", "Typo")]);
     let env_name = roll_previews::branch_name(&p.id);
     let got = e.engine.notes_for(&env_name, "/").await.unwrap();
@@ -2501,7 +2501,7 @@ async fn a_share_links_guest_leaves_notes_as_a_guest() {
     }
     assert!(matches!(e.engine.guest_note(&p.id, &open, &note).await, Err(roll_previews::Error::Conflict(_))), "ten an hour per link");
     // What a guest sees: their link's notes only.
-    let theirs = roll_previews::notes::Note { id: "rv_c1".into(), path: "/pricing".into(), selector: "button.buy".into(), note: "Too small".into(), by: "guest:Ada".into(), at: 1, replies: Vec::new(), crop: false };
+    let theirs = roll_previews::notes::Note { id: "rv_c1".into(), path: "/pricing".into(), selector: "button.buy".into(), note: "Too small".into(), by: "guest:Ada".into(), at: 1, replies: Vec::new(), crop: false, crop_as: None, seen: Default::default() };
     let team = roll_previews::notes::Note { id: "rv_team".into(), by: "bob".into(), ..theirs.clone() };
     e.code.feedback.lock().insert("chg_g".into(), vec![theirs, team]);
     let seen: Vec<String> = e.engine.guest_notes_of(&p.id, &open.id, "/pricing").await.unwrap().into_iter().map(|n| n.id).collect();
