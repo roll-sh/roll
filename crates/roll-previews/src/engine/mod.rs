@@ -423,6 +423,13 @@ impl Engine {
     }
 
     /// One pass: discover, then converge every preview that's due.
+    /// Whether a screenshot run is queued or running for any preview: one asked for while
+    /// another runs goes again after it, so a caller that writes screenshots itself (a test)
+    /// waits this out first.
+    pub fn shooting(&self) -> bool {
+        !self.shots_running.lock().is_empty()
+    }
+
     pub async fn pass(self: &Arc<Self>) -> Result<()> {
         let _one = self.passing.lock().await;
         if (self.leader)() {

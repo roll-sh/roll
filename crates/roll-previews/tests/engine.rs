@@ -269,6 +269,14 @@ async fn a_visual_change_waits_for_someone_to_accept_it_at_each_head() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     assert_eq!(review().map(|v| v.state), Some(VisualState::Unchanged), "the same as main: nothing to review");
+    // The passes' own screenshot runs are done (a second ask goes again after the first), so
+    // none lands over the pictures this test writes.
+    for _ in 0..3000 {
+        if !e.engine.shooting() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
     // A push whose page looks different waits for someone.
     let chg = e.engine.store.row_by_change("chg_1").unwrap().unwrap();
     let base = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|r| r.change_id.is_none()).unwrap();
