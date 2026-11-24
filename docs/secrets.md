@@ -6640,7 +6640,7 @@ adds roll-access's grant lookup or the accounts' and workspace's.
 
 ## Next
 
-**State, 2026-11-24 06:10.** The thirty-sixth review is done: #830 (3dd33c1d5…99cb3b05e; Cloudflare, Databricks, Confluent) and #825 (the fresh-project production test) landed.
+**State, 2026-11-24 06:10.** The thirty-sixth review is done: #830 (99cb3b05e; Cloudflare, Databricks, Confluent) and #825 (the fresh-project production test) landed.
 
 The thirty-seventh product review (2026-11-23, cold, read only, against efafbcac6) found one live bug, low-medium: an environment's deletion preview named every roll-access token on the server whose rule was "every project, environment `<slug>`". Landed since, each with main's CI green, most after a check of the merged tree:
 - #847 (4d73111dd): items 1 and 9. The preview names only tokens that reach the project, judged as reach does (one shared `token_actions`) and narrowed before resolving. A sandbox copying from a deleted, recoverable project keeps its values.
