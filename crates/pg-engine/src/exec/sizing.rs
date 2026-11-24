@@ -694,6 +694,53 @@ struct Batch {
     /// A row of it failed its unique or exclusion check (`CopyLoad::clashed`): the rows
     /// after it wait without index entries.
     clashed: bool,
+    /// Rows of a table past the model's size waiting to go into its estimates together
+    /// (`Past`).
+    past: Past,
+}
+
+/// A COPY's rows past the model (`untracked_write`'s inserts, nothing out of line), up to
+/// `PAST_ROWS` of them, then placed in the table's estimates under one lock, in their order
+/// (`place_past`): each its key's end in `keys`, its tuple's length and its btree entries.
+#[derive(Default)]
+struct Past {
+    keys: Vec<u8>,
+    rows: Vec<(u32, u32, EstEntries)>,
+    /// The table's heap fillfactor, and whether it is keyed by row ids (each row's key past
+    /// every other's), from the first row.
+    fillfactor: usize,
+    rowid: bool,
+}
+
+/// Rows `Past` holds before they are placed.
+const PAST_ROWS: usize = 256;
+
+/// The rows `past` holds placed in table `table`'s estimates (transaction `txn`'s load) as
+/// `untracked_write` places an insert's: the heap's (`add_in`, `placed`), then the btrees'.
+fn place_past(db: &Database, table: u32, txn: u64, past: &mut Past) {
+    if past.rows.is_empty() {
+        return;
+    }
+    let mut rf = db.relfiles.of(table).write();
+    let RelFiles { estimated, bulk, est_btrees, .. } = &mut *rf;
+    if let Some(e) = estimated.get_mut(&table) {
+        let mut at = 0;
+        for &(end, len, _) in &past.rows {
+            let key = &past.keys[at..end as usize];
+            at = end as usize;
+            let tid = e.add_in(len as usize, past.fillfactor, Some((&mut *bulk, (table, txn))), Put::Row(Some(key)));
+            e.placed(Some(key), tid, past.rowid);
+        }
+        estkeep::touched(db, e);
+    }
+    for (_, _, entries) in past.rows.drain(..) {
+        for (ix, key, size, dup) in entries {
+            if let Some(b) = est_btrees.get_mut(&ix) {
+                b.insert(key, size, dup);
+            }
+        }
+    }
+    past.keys.clear();
 }
 
 /// A COPY's multi-insert buffer: by database instance, table and transaction.
@@ -2637,6 +2684,79 @@ pub fn stored_run_key(t: &Table, key: &[u8], db: &Database) {
     }
 }
 
+/// `untracked_write` of an insert. A multi-insert COPY's row (its batch open, `CopyLoad`)
+/// into a table with indexes, with nothing out of line, waits in the batch's `Past` with the
+/// rows before it, and they go into the estimates together, in their order, as each would
+/// have (`place_past`); any other row goes in at once, after those waiting. (A table without
+/// indexes takes its rows as stored, `inserted_stored`, which goes in at once: none of its
+/// rows waits.)
+fn untracked_insert(
+    t: &Table,
+    indexes: &[BoundIndex],
+    key: &[u8],
+    row: &[Value],
+    vals: Option<&[Option<Vec<Value>>]>,
+    ctx: &ExecCtx,
+    tuple: usize,
+) -> Result<Option<Tid>> {
+    let txn = ctx.txn.borrow().id;
+    let db = &ctx.sess.db;
+    let bkey = (db.instance, t.oid, txn);
+    if !indexes.is_empty() && with_batch(bkey, |_| ()).is_some() {
+        let (len, exts) = layout_len(t, row, ctx, &HashSet::new(), Some(tuple));
+        if exts.is_empty() {
+            let entries = est_entries(t, indexes, row, None, vals, ctx)?;
+            let full = with_batch(bkey, |b| {
+                let p = &mut b.past;
+                if p.rows.is_empty() {
+                    p.fillfactor = heap_fillfactor(t);
+                    p.rowid = t.has_rowid();
+                }
+                p.keys.extend_from_slice(key);
+                p.rows.push((p.keys.len() as u32, len as u32, entries));
+                PAST_WAITING.with(|c| c.set(c.get() + 1));
+                p.rows.len() >= PAST_ROWS
+            });
+            if full == Some(true) {
+                place_batch_past(db, bkey);
+            }
+            return Ok(None);
+        }
+        place_batch_past(db, bkey);
+    }
+    untracked_write(t, indexes, key, row, None, vals, ctx, Some(tuple))
+}
+
+thread_local! {
+    /// Rows waiting in this thread's batches' `Past`s: none, the usual case, and a write to
+    /// an estimate needn't look for them.
+    static PAST_WAITING: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The rows waiting in the batch under `key` placed (`place_past`), before anything else goes
+/// into the table's estimates.
+#[inline]
+fn place_batch_past(db: &Database, key: BatchKey) {
+    if PAST_WAITING.try_with(|c| c.get()).unwrap_or(0) > 0 {
+        place_batch_past_now(db, key);
+    }
+}
+
+#[cold]
+fn place_batch_past_now(db: &Database, key: BatchKey) {
+    // (Taken out of the batch while the shard's lock is held; its room put back.)
+    let Some(mut past) = BATCHES.try_with(|b| b.borrow_mut().iter_mut().find(|(k, _)| *k == key).map(|(_, b)| std::mem::take(&mut b.past))).ok().flatten() else {
+        return;
+    };
+    let _ = PAST_WAITING.try_with(|c| c.set(c.get().saturating_sub(past.rows.len())));
+    place_past(db, key.1, key.2, &mut past);
+    let _ = BATCHES.try_with(|b| {
+        if let Some((_, b)) = b.borrow_mut().iter_mut().find(|(k, _)| *k == key) {
+            b.past = past;
+        }
+    });
+}
+
 fn untracked_write(
     t: &Table,
     indexes: &[BoundIndex],
@@ -2717,7 +2837,8 @@ fn est_entries(
     let text = |v: &Value, ty: &DataType| crate::types::text::format_value(v, ty, fmt);
     let null = Value::Null;
     let mut sort: smallvec::SmallVec<[u8; 64]> = smallvec::SmallVec::new();
-    let mut enc = Vec::new();
+    // (One buffer for the values' encodings, the thread's: not an allocation a row.)
+    let mut enc = EST_ENC.take();
     for (i, bix) in indexes.iter().enumerate() {
         if !have[i] || bix.index.method != "btree" {
             continue;
@@ -2759,7 +2880,14 @@ fn est_entries(
         }
         out.push((bix.index.oid, btest::key_prefix(&sort), size.size(), dup));
     }
+    enc.clear();
+    EST_ENC.set(enc);
     Ok(out)
+}
+
+thread_local! {
+    /// `est_entries`' buffer for a value's encoding.
+    static EST_ENC: std::cell::Cell<Vec<u8>> = const { std::cell::Cell::new(Vec::new()) };
 }
 
 /// A version's btree entries for the estimates (`est_entries`): (index, key's prefix,
@@ -2908,7 +3036,7 @@ pub fn inserted_with(
     if !ensure(t, indexes, ctx)? {
         // (Its TID as the estimate places it, stored with the row: its ctid and its place
         // in heap order.)
-        return untracked_write(t, indexes, key, row, None, vals, ctx, Some(tuple));
+        return untracked_insert(t, indexes, key, row, vals, ctx, tuple);
     }
     let (len, exts) = layout_len(t, row, ctx, &HashSet::new(), Some(tuple));
     if !exts.is_empty() {
@@ -6621,6 +6749,8 @@ impl CopyLoad {
     }
 
     fn flush(&self, ctx: &ExecCtx) {
+        // (Rows past the model waiting go in first: they went in before this batch's.)
+        place_batch_past(&self.db, self.batch_key());
         let Some(rows) = with_batch(self.batch_key(), |b| {
             b.bytes = 0;
             b.clashed = false;
@@ -6907,6 +7037,7 @@ fn est_inserted(db: &Database, t: u32, entries: Vec<(u32, u128, usize, bool)>) {
 impl Drop for CopyLoad {
     fn drop(&mut self) {
         // (A failed command's rows waiting go in as they went in: dead tuples.)
+        place_batch_past(&self.db, self.batch_key());
         if let Some((batches, multi, xid, cid)) = self.take_deferred() {
             self.model(batches, multi, xid, cid, None);
         }

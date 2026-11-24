@@ -741,7 +741,19 @@ pub fn index_values(ix: &BoundIndex, row: &[Value], ctx: &ExecCtx) -> Result<Opt
     {
         return Ok(None);
     }
-    let vals = eval_all(&ix.keys, row, ctx)?;
+    // (An index of columns, the usual one: their values as `eval` gives them, without its
+    // stack check and dispatch a column.)
+    let vals = if ix.keys.iter().all(|k| matches!(k, crate::sql::expr::Expr::Col(..))) {
+        ix.keys
+            .iter()
+            .map(|k| {
+                let crate::sql::expr::Expr::Col(i, _) = k else { unreachable!() };
+                row.get(*i).cloned().ok_or_else(|| crate::error::internal(format!("column #{i} out of range")))
+            })
+            .collect::<Result<Vec<Value>>>()?
+    } else {
+        eval_all(&ix.keys, row, ctx)?
+    };
     // A made operator class's compress function checks the key it is given (intarray's
     // gist__int_ops refuses arrays too big for its ranges).
     if ix.index.columns.iter().any(|c| c.opclass >= crate::catalog::FIRST_USER_OID) {
