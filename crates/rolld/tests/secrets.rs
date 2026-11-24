@@ -506,6 +506,76 @@ async fn a_search_link_made_by_name_is_kept_by_id_at_the_next_start() {
     }
 }
 
+/// A link by name is kept by id only for a cluster the project trusts that existed when the link
+/// was written: once the name is freed, a project developer's own cluster that takes it (on the
+/// canvas, not at home there) isn't trusted, and a cluster at home there that was made, or
+/// restored, after the link's last write isn't the one it meant. Either way the link stays by
+/// name (and fails).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_search_link_by_name_is_never_rekeyed_to_a_cluster_that_took_the_name_later() {
+    let home = Arc::new(tempfile::tempdir().unwrap());
+    let r = Rolld::start_in(home.clone(), "search", false, &[], "/v1/info").await;
+    let p = Project::new(&r).await;
+    let project = p.id.clone();
+    let first = r.post("/v1/search/clusters", json!({ "name": "logs" })).await["id"].as_str().unwrap().to_string();
+    p.link("search", &first, &[("ELASTICSEARCH_URL", "url", "live")]).await;
+    r.call(reqwest::Method::DELETE, &format!("/v1/search/clusters/{first}"), None).await;
+    // The delete frees the name once its commit points are gone.
+    let started = Instant::now();
+    let taken = loop {
+        let a = r.http.post(format!("{}/v1/search/clusters", r.api)).bearer_auth(TOKEN).json(&json!({ "name": "logs" })).send().await.unwrap();
+        if a.status().is_success() {
+            break a.json::<Value>().await.unwrap()["id"].as_str().unwrap().to_string();
+        }
+        assert!(started.elapsed() < Duration::from_secs(30), "the name was never freed: {}", a.status());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    r.call(reqwest::Method::PUT, &format!("/v1/workspace/projects/{project}/resources/search/{taken}"), Some(json!({ "x": 0, "y": 0 }))).await;
+    drop(p);
+    drop(r);
+    let open = |path: std::path::PathBuf| {
+        let c = rusqlite::Connection::open(path).unwrap();
+        c.busy_timeout(Duration::from_secs(5)).unwrap();
+        c
+    };
+    let (secrets, search, ws) = (open(home.path().join("secrets.db")), open(home.path().join("search").join("search.db")), open(home.path().join("workspace.db")));
+    // Stopped: the link names "logs", as an old one did, and was last written long after the
+    // cluster now called that was made (only trust decides). The project is a person's, and the
+    // cluster is one of its developers' own.
+    let n = secrets.execute("UPDATE secrets SET link = replace(link, ?1, '\"ref\":\"logs\"'), updated_at = 9999999999999 WHERE project_id = ?2", [format!("\"ref\":\"{first}\""), project.clone()]).unwrap();
+    assert_eq!(n, 1);
+    ws.execute("UPDATE projects SET owner = 'usr_ada' WHERE id = ?1", [&project]).unwrap();
+    for (user, role) in [("usr_ada", "owner"), ("usr_dev", "developer")] {
+        ws.execute("INSERT INTO members (project_id, user_id, role, environments, added_by, added_at) VALUES (?1, ?2, ?3, NULL, 'operator', 0)", [project.as_str(), user, role]).unwrap();
+    }
+    search.execute("UPDATE search_clusters SET owner = 'usr_dev' WHERE id = ?1", [&taken]).unwrap();
+    let link_ref = || secrets.query_row("SELECT link FROM secrets WHERE project_id = ?1", [&project], |r| r.get::<_, String>(0)).unwrap();
+    // A start's pass over the links, through the line it logs for a link it leaves by name.
+    let refused = |r: &Rolld| {
+        let started = Instant::now();
+        while !std::fs::read_to_string(&r.started.stderr).unwrap_or_default().contains("a roll secrets search link by a name that now names a cluster") {
+            assert!(started.elapsed() < Duration::from_secs(30), "the start's pass never decided the link");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    };
+    let r = Rolld::start_in(home.clone(), "search", false, &[], "/v1/info").await;
+    refused(&r);
+    assert!(link_ref().contains("\"ref\":\"logs\""), "not rekeyed to a cluster the project doesn't trust: {}", link_ref());
+    // At home in the project (trusted), but made after the link's last write.
+    r.call(reqwest::Method::PUT, &format!("/v1/workspace/projects/{project}/homes/search/{taken}"), None).await;
+    drop(r);
+    secrets.execute("UPDATE secrets SET updated_at = 1000 WHERE project_id = ?1", [&project]).unwrap();
+    let r = Rolld::start_in(home.clone(), "search", false, &[], "/v1/info").await;
+    refused(&r);
+    assert!(link_ref().contains("\"ref\":\"logs\""), "not rekeyed to a cluster made after the link: {}", link_ref());
+    drop(r);
+    // Made before it, but restored after it.
+    search.execute("UPDATE search_clusters SET created_at = 0, restored_at = 2 WHERE id = ?1", [&taken]).unwrap();
+    let r = Rolld::start_in(home.clone(), "search", false, &[], "/v1/info").await;
+    refused(&r);
+    assert!(link_ref().contains("\"ref\":\"logs\""), "not rekeyed to a cluster restored after the link: {}", link_ref());
+}
+
 /// roll apps shows a service's values from roll secrets only as roll secrets would show them to
 /// the asker: a token that may reveal staging, but not production, gets a 403 for staging's
 /// values and shell once a staging key references production (the service reads it), and can't

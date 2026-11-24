@@ -766,6 +766,92 @@ async fn mcp_search_with_a_project_token() {
     assert!(listed.iter().any(|n| n.starts_with("search_")) && !listed.iter().any(|n| n.starts_with("postgres_") || n == "secrets_list_environments"), "{listed:?}");
 }
 
+/// A search cluster homed in a project its owner doesn't manage, with no hand-over ever decided for
+/// it (as a person's token could make one before members: a create in someone else's project), is
+/// never handed to that project: at start its home is dropped and the cluster stays its owner's,
+/// and a project's restore that brings such a home back drops it the same way.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_strangers_home_from_before_is_dropped_never_handed_over() {
+    let home = tempfile::tempdir().unwrap();
+    let env = vec![
+        ("ROLL_ADMIN_TOKEN", TOKEN.to_string()),
+        ("ROLL_PRODUCTS", "search".to_string()),
+        ("ROLL_SECRET_KEY", "fake-deployment-key-for-the-strangers-home-test".to_string()),
+        ("ROLL_SECRETS_DELETE_WINDOW_DAYS", "3".to_string()),
+    ];
+    let http = reqwest::Client::builder().timeout(Duration::from_secs(30)).build().unwrap();
+    async fn start(home: &std::path::Path, env: &[(&str, String)], http: &reqwest::Client) -> (Rolld, String) {
+        let mut cmd = rolld(home, &[], env);
+        let started = common::on_any_port(&mut cmd, common::LISTENERS, home);
+        let mut child = cmd.stdout(Stdio::null()).spawn().expect("rolld starts");
+        let api = started.addrs(&mut child).await.url("api");
+        let up = std::time::Instant::now();
+        while !http.get(format!("{api}/v1/info")).bearer_auth(TOKEN).send().await.is_ok_and(|r| r.status().is_success()) {
+            assert!(up.elapsed() < Duration::from_secs(60), "rolld didn't answer");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        (Rolld(child), api)
+    }
+    let op = |api: String, m: reqwest::Method, path: String, body: Option<serde_json::Value>| {
+        let http = http.clone();
+        async move {
+            let mut req = http.request(m, format!("{api}{path}")).bearer_auth(TOKEN);
+            if let Some(b) = body {
+                req = req.json(&b);
+            }
+            let r = req.send().await.unwrap();
+            let status = r.status().as_u16();
+            (status, r.json::<serde_json::Value>().await.unwrap_or_default())
+        }
+    };
+    let (d, api) = start(home.path(), &env, &http).await;
+    let id_of = |v: &serde_json::Value| v["id"].as_str().unwrap().to_string();
+    let p = id_of(&op(api.clone(), reqwest::Method::POST, "/v1/workspace/projects".into(), Some(serde_json::json!({ "name": "p" }))).await.1);
+    let q = id_of(&op(api.clone(), reqwest::Method::POST, "/v1/workspace/projects".into(), Some(serde_json::json!({ "name": "q" }))).await.1);
+    let c1 = id_of(&op(api.clone(), reqwest::Method::POST, "/v1/search/clusters".into(), Some(serde_json::json!({ "name": "c1" }))).await.1);
+    let c2 = id_of(&op(api.clone(), reqwest::Method::POST, "/v1/search/clusters".into(), Some(serde_json::json!({ "name": "c2" }))).await.1);
+    for path in [format!("/v1/workspace/projects/{p}/resources/search/{c1}"), format!("/v1/workspace/projects/{p}/homes/search/{c1}")] {
+        let (s, v) = op(api.clone(), reqwest::Method::PUT, path.clone(), Some(serde_json::json!({ "x": 0, "y": 0 }))).await;
+        assert_eq!(s, 200, "{path}: {v}");
+    }
+    // Q holds a secret, so its delete keeps it for its window (and its recover brings it back).
+    let (s, v) = op(api.clone(), reqwest::Method::PUT, format!("/v1/secrets/projects/{q}/environments/production/secrets/K"), Some(serde_json::json!({ "value": "v" }))).await;
+    assert!(s < 300, "{s} {v}");
+    drop(d);
+    // Stopped: c1 belongs to someone who isn't in p, and no hand-over to p was ever decided.
+    let db = |path: std::path::PathBuf| {
+        let c = rusqlite::Connection::open(path).unwrap();
+        c.busy_timeout(Duration::from_secs(5)).unwrap();
+        c
+    };
+    let (search, ws) = (db(home.path().join("search").join("search.db")), db(home.path().join("workspace.db")));
+    search.execute("UPDATE search_clusters SET owner = 'usr_x', made_by = NULL WHERE id = ?1", [&c1]).unwrap();
+    search.execute("DELETE FROM search_handovers", []).unwrap();
+    let home_of = |c: &str, project: &str| ws.query_row("SELECT 1 FROM homes WHERE kind = 'search' AND ref = ?1 AND project_id = ?2", [c, project], |_| Ok(())).is_ok();
+    let owner_of = |c: &str| search.query_row("SELECT owner FROM search_clusters WHERE id = ?1", [c], |r| r.get::<_, Option<String>>(0)).unwrap();
+    assert!(home_of(&c1, &p));
+    let (_d, api) = start(home.path(), &env, &http).await;
+    let waited = std::time::Instant::now();
+    while home_of(&c1, &p) {
+        assert!(waited.elapsed() < Duration::from_secs(30), "the stranger's home was never dropped");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_eq!(owner_of(&c1).as_deref(), Some("usr_x"), "dropped, never handed over");
+    // A deleted project whose kept homes hold such a cluster: its restore drops that home too.
+    let (s, v) = op(api.clone(), reqwest::Method::DELETE, format!("/v1/workspace/projects/{q}?confirm=q"), None).await;
+    assert_eq!(s, 204, "{v}");
+    search.execute("UPDATE search_clusters SET owner = 'usr_x', made_by = NULL WHERE id = ?1", [&c2]).unwrap();
+    ws.execute("INSERT INTO deleted_homes (kind, ref, project_id, set_by, set_at) VALUES ('search', ?1, ?2, 'operator', 0)", [&c2, &q]).unwrap();
+    let (s, v) = op(api.clone(), reqwest::Method::POST, format!("/v1/secrets/projects/{q}/recover"), Some(serde_json::json!({}))).await;
+    assert_eq!(s, 200, "{v}");
+    let waited = std::time::Instant::now();
+    while home_of(&c2, &q) {
+        assert!(waited.elapsed() < Duration::from_secs(30), "the restored stranger's home was never dropped");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_eq!(owner_of(&c2).as_deref(), Some("usr_x"), "and never handed over");
+}
+
 #[test]
 fn refuses_to_listen_off_loopback_without_a_token() {
     let home = tempfile::tempdir().unwrap();
