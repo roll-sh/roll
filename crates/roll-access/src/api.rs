@@ -343,18 +343,20 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
     };
     let row = found.row;
     let params = found.params.unwrap_or_default();
-    let (a2, q) = (a.clone(), uri.query().map(str::to_string));
-    let params2 = params.clone();
-    let target = tokio::task::spawn_blocking(move || crate::evaluate::target(&a2, row, &params2, q.as_deref(), &axum::http::HeaderMap::new(), person))
-        .await
-        .map_err(|e| Error::Internal(e.to_string()))?;
-    // Decided as the gate decides: the copy a body asks for, and "ask for anything else".
+    // Decided as the gate decides: the request's headers (a create's `X-Roll-Project`), the
+    // project a create's body names, the copy a body asks for, and "ask for anything else".
     let mut headers = axum::http::HeaderMap::new();
     for (k, v) in &c.headers {
         if let (Ok(k), Ok(v)) = (axum::http::HeaderName::try_from(k.as_str()), axum::http::HeaderValue::from_str(v)) {
             headers.insert(k, v);
         }
     }
+    let (a2, q, h) = (a.clone(), uri.query().map(str::to_string), headers.clone());
+    let params2 = params.clone();
+    let mut target = tokio::task::spawn_blocking(move || crate::evaluate::target(&a2, row, &params2, q.as_deref(), &h, person))
+        .await
+        .map_err(|e| Error::Internal(e.to_string()))?;
+    crate::evaluate::project_from_body(row, &mut target, c.body.as_ref()).map_err(Error::BadRequest)?;
     let mut action = row.action_with(&method, &params, c.body.as_ref(), &headers);
     let mut outcome = if matches!(row.target, catalog::Tgt::AnyGrant) { Outcome::Allow } else { scope.outcome(&target, action) };
     if let Some((copied, _, _)) = crate::evaluate::copy_outcome(&a, row, &params, &target, (c.body.as_ref(), uri.query()), &scope).await

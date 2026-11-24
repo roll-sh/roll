@@ -153,6 +153,22 @@ fn invalid_token_because(access: &Access, why: &str) -> Response {
     r
 }
 
+/// A create whose body names its project ([`Row::project_in_body`]): decided by that project when
+/// no `X-Roll-Project` names one, and refused when the two name different projects (never one
+/// silently over the other: the product makes it in the one it reads).
+pub(crate) fn project_from_body(row: &Row, target: &mut Target, body: Option<&Value>) -> Result<(), String> {
+    let (Some(field), Target::Create { project, .. }) = (row.project_in_body, target) else { return Ok(()) };
+    let named = body.and_then(|b| b.get(field)).and_then(Value::as_str).map(|p| p.trim().to_string()).filter(|p| !p.is_empty());
+    match (project.as_deref(), named) {
+        (Some(header), Some(body)) if header != body => Err(format!("X-Roll-Project names {header}, the body's {field} {body}: they must name the same project")),
+        (None, Some(body)) => {
+            *project = Some(body);
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
 /// What a request is about, from its row and path. `person`: a person's grant decides it (their
 /// session, or a token of theirs), which a canvas's project reaches only where it trusts the
 /// resource ([`Access::resource_as`]).
@@ -643,7 +659,7 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
         ctx.audit(Some(row), None, None, "deny", None, StatusCode::BAD_REQUEST);
         return deny(StatusCode::BAD_REQUEST, "repeated_parameter", format!("?{name}= is given more than once"), json!({}));
     }
-    let target = {
+    let mut target = {
         let (a, q, h) = (access.clone(), original.query().map(str::to_string), parts.headers.clone());
         let params = params.clone();
         match tokio::task::spawn_blocking(move || target(&a, row, &params, q.as_deref(), &h, as_user)).await {
@@ -662,6 +678,11 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
         }
     }
     let json_body = buffered.as_ref().and_then(|b| serde_json::from_slice::<Value>(b).ok());
+    // A create that names its project in its body is decided by it (and by nothing else).
+    if let Err(why) = project_from_body(row, &mut target, json_body.as_ref()) {
+        ctx.audit(Some(row), None, None, "deny", None, StatusCode::BAD_REQUEST);
+        return deny(StatusCode::BAD_REQUEST, "bad_request", why, json!({}));
+    }
     // What the request needs: one action, or every action a push's ref updates take.
     let mut needs = vec![match row.act {
         catalog::Act::Raw(f) => f(buffered.as_deref().unwrap_or_default()),

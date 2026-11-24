@@ -288,13 +288,25 @@ struct CreateBody {
     change: Option<String>,
 }
 
-async fn create(AxState(e): S, axum::Extension(visible): axum::Extension<Visible>, who: Option<axum::Extension<roll_auth::SignedIn>>, headers: axum::http::HeaderMap, b: Bytes) -> crate::Result<Response> {
+async fn create(
+    AxState(e): S,
+    axum::Extension(visible): axum::Extension<Visible>,
+    who: Option<axum::Extension<roll_auth::SignedIn>>,
+    decided: Option<axum::Extension<roll_auth::InProject>>,
+    headers: axum::http::HeaderMap,
+    b: Bytes,
+) -> crate::Result<Response> {
     let b: CreateBody = body(&b)?;
     if b.branch.is_some() == b.change.is_some() {
         return Err(Error::BadRequest("give one of branch or change".into()));
     }
-    // roll-access decides a create by the project `X-Roll-Project` names (a member's role there, a
-    // token's rule): the preview is made in that one, never in another the body names.
+    // roll-access decided a create by its project (the body's, or `X-Roll-Project`: a member's
+    // role there, a token's rule): the preview is made in that one, never in another.
+    if let Some(axum::Extension(roll_auth::InProject(p))) = &decided
+        && *p != b.project
+    {
+        return Err(Error::BadRequest(format!("decided for project {p}, the body names {}: they must be the same project", b.project)));
+    }
     if let Some(named) = headers.get("x-roll-project").map(|v| v.to_str().unwrap_or_default().trim())
         && named != b.project
     {

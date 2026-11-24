@@ -88,6 +88,10 @@ pub struct Row {
     /// SQL as the database's superuser only for a grant that may `admin` the endpoint): the gate
     /// asks it quietly, never refusing for it, and says yes with `roll_auth::Capable`.
     pub capable: &'static [Action],
+    /// A create whose project its JSON body names (this top-level field), beside or instead of
+    /// `X-Roll-Project`: the gate decides it by that project, and refuses a body and a header
+    /// that name two (previews' `project`).
+    pub project_in_body: Option<&'static str>,
     /// A JSON body field whose presence makes it `admin` (apps' `freeze`: setting or lifting a
     /// freeze is the same call as going past one).
     pub admin_if_field: Option<&'static [&'static str]>,
@@ -228,7 +232,7 @@ pub type Sources = Vec<(String, Option<String>)>;
 
 impl Row {
     pub fn needs_body(&self) -> bool {
-        self.admin_if_field.is_some() || matches!(self.act, Act::Body(_) | Act::Raw(_)) || matches!(self.copies_from, Some(CopyFrom::Body(_) | CopyFrom::Each(_))) || matches!(self.lends, Some(Lend::Each(_)))
+        self.admin_if_field.is_some() || self.project_in_body.is_some() || matches!(self.act, Act::Body(_) | Act::Raw(_)) || matches!(self.copies_from, Some(CopyFrom::Body(_) | CopyFrom::Each(_))) || matches!(self.lends, Some(Lend::Each(_)))
     }
 
     pub fn action(&self, method: &str, params: &[(String, String)], body: Option<&Value>) -> Action {
@@ -252,7 +256,7 @@ impl Row {
 }
 
 const fn row(method: &'static str, route: &'static str, product: &'static str, act: Act, target: Tgt) -> Row {
-    Row { method, route, product, act, target, env: EnvFrom::None, path_query: None, reveals: &[], copies_from: None, index: None, lends: None, filters_itself: false, filters_index: false, admin_if: None, admin_if_field: None, capable: &[] }
+    Row { method, route, product, act, target, env: EnvFrom::None, path_query: None, reveals: &[], copies_from: None, index: None, lends: None, filters_itself: false, filters_index: false, admin_if: None, admin_if_field: None, capable: &[], project_in_body: None }
 }
 
 const R: Act = Act::Is(Action::Read);
@@ -288,6 +292,10 @@ impl Row {
     }
     const fn path_query(mut self, q: &'static str) -> Row {
         self.path_query = Some(q);
+        self
+    }
+    const fn project_in_body(mut self, field: &'static str) -> Row {
+        self.project_in_body = Some(field);
         self
     }
     const fn capable(mut self, a: &'static [Action]) -> Row {
@@ -1787,7 +1795,8 @@ static ROWS: &[Row] = &[
     // A preview's link carries its access token (`share_url`, also each service's and earlier
     // ones'): the link is a credential, as its QR code is.
     row("GET", "/v1/previews", "previews", R, list("id")).reveals(&["share_url"]),
-    row("POST", "/v1/previews", "previews", W, Tgt::Create { project: None, place: None, id_field: "id" }).env(EnvFrom::Fixed("preview")),
+    // Its project is the body's `project` (or `X-Roll-Project`, which must name the same one).
+    row("POST", "/v1/previews", "previews", W, Tgt::Create { project: None, place: None, id_field: "id" }).env(EnvFrom::Fixed("preview")).project_in_body("project"),
     // Each event is its project's: a member, or a token held to some projects, follows theirs
     // (a deleted preview's event too: its project still resolves).
     row("GET", "/v1/previews/events", "previews", R, Tgt::List { items: Some("events"), id_field: "project", kind: Some("project") }),

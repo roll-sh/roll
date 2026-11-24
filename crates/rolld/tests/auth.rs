@@ -424,8 +424,22 @@ async fn every_control_plane_route_needs_the_operator_token() {
         let refused = v["error"].as_str().is_some_and(|e| e == format!("no project {hers}") || e.starts_with("your role"));
         assert!(!refused, "{path} in her own project: {s} {v}");
     }
-    // A viewer's token does no more through a create than their role does: no preview naming no
-    // project (only a person's own search cluster is made that way), and no branch of the
+    // A preview whose project only its body names (roll MCP's previews_create, the API) is
+    // decided by that project just the same: past the gate in hers, 404 in theirs.
+    let preview_in = |project: String| {
+        let (http, api, wide) = (http.clone(), api.clone(), wide.clone());
+        async move {
+            let r = http.post(format!("{api}/v1/previews")).bearer_auth(wide).json(&serde_json::json!({ "project": project, "repo": "ada/none", "branch": "main" })).send().await.unwrap();
+            (r.status().as_u16(), r.json::<serde_json::Value>().await.unwrap_or_default())
+        }
+    };
+    let (s, v) = preview_in(theirs.clone()).await;
+    assert_eq!((s, v["error"].as_str()), (404, Some(&*format!("no project {theirs}"))), "a body-only preview in a project she isn't in");
+    let (s, v) = preview_in(hers.clone()).await;
+    let refused = s == 403 || v["error"].as_str().is_some_and(|e| e == format!("no project {hers}") || e.starts_with("your role"));
+    assert!(!refused, "a body-only preview in her own project: {s} {v}");
+    // A viewer's token does no more through a create than their role does: no preview in the
+    // project (its body names it: write there, which a viewer hasn't), and no branch of the
     // project's cluster (it takes write there: 404, as for one they can't see).
     let (s, t) = as_person(
         bob.clone(),
@@ -445,7 +459,7 @@ async fn every_control_plane_route_needs_the_operator_token() {
         let (http, api, bobs) = (http.clone(), api.clone(), bobs.clone());
         async move { http.post(format!("{api}{path}")).bearer_auth(bobs).json(&body).send().await.unwrap().status().as_u16() }
     };
-    assert_eq!(as_bobs("/v1/previews", serde_json::json!({ "project": hers, "repo": "ada/none", "branch": "main" })).await, 403, "a viewer's preview with no project named");
+    assert_eq!(as_bobs("/v1/previews", serde_json::json!({ "project": hers, "repo": "ada/none", "branch": "main" })).await, 403, "a viewer's preview in the project");
     assert_eq!(as_bobs("/v1/search/clusters", serde_json::json!({ "name": "vb", "parent": "hers-search" })).await, 404, "a viewer's branch of the project's cluster");
     // Her own cluster put in her project and made at home there is the project's from then on:
     // no owner (she's its maker), and its members reach it.
