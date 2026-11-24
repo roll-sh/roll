@@ -517,6 +517,8 @@ impl Secrets {
         // Who set the notify URL: it's announced to only while they may manage the project.
         db.add_column("environments", "notify_by", "TEXT")?;
         db.add_column("syncs", "checked_at", "INTEGER")?;
+        // What a certificate sync's target calls what it pushed (syncs.rs).
+        db.add_column("syncs", "remote_id", "TEXT")?;
         // Syncs a change marked due (checked_at NULL), found every couple of seconds (syncs.rs).
         db.ensure_schema("CREATE INDEX IF NOT EXISTS syncs_due ON syncs (retry_at) WHERE checked_at IS NULL;")?;
         db.add_column("leases", "path", "TEXT")?;

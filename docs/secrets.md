@@ -2777,6 +2777,50 @@ TLS certificates for services (mTLS between them), with no CA to run.
   the intermediate, whichever is shorter. CRLs and OCSP stay roll's, signed by the intermediate.
   Checked with webpki: a leaf verifies against the root through roll's intermediate.
 
+#### Getting certificates where TLS terminates
+
+A managed `pki` key's certificate can go where TLS terminates (a load balancer, a CDN), as
+Infisical syncs its certificates to ACM, Key Vault and Cloudflare: a **certificate sync** ("Syncs")
+pushes the key's current certificate, its private key and `ca_chain` on issue and again on every
+rotation (the rotation is a change of the folder, so the sync is due within seconds), retried every 5
+minutes after a failure like any sync. Each push replaces the same object at the target, so a
+listener or a hostname keeps serving it; what the target calls it is the sync's `remote_id`.
+
+- `POST …/syncs {environment, path?, kind, target, keys: ["TLS_CERT"]}` (`roll secrets syncs add
+  aws-acm --target region=us-east-1 --target role=certs --keys TLS_CERT`, the Syncs tab's
+  Certificates group; `syncs ls` shows `remote_id`). `keys` names one key of that folder, its own (not imported
+  or inherited), linked `managed` to one of the project's CAs: any other key, more than one, a
+  `prefix` or a dynamic link is refused when the sync is made, and checked again before each push.
+  Which field the key links doesn't matter: the push takes every part of its credential.
+- **Who.** Making one needs `admin` on the folder, as any sync, and `reveal` too: it sends a
+  private key out of roll. Like every sync it pushes as its maker's access now (`sync:<id>`), so a
+  maker who can no longer reveal the key stops it.
+- **Never an untrusted environment.** An ephemeral environment that isn't trusted (a fork's
+  preview) can't have one: code nobody vetted never sends a private key out.
+- **The private key** goes only into the request to the target, over TLS. It's never in the audit
+  row (`sync.push` names the key and `remote_id`), an event, an error (errors carry the platform's
+  status and error code, never its message), a log or a `Debug`.
+
+| Kind | Target | At the target |
+| --- | --- | --- |
+| `aws-acm` | `{region, role}` | `ImportCertificate` (certificate, key, chain), tagged `managed-by=roll-secrets` and `roll-sync=<id>`; each rotation re-imports to the ARN the first import answered, so listeners keep it. An ARN deleted at AWS (ACM won't delete one in use) is imported anew. |
+| `azure-keyvault-cert` | `{vault, certificate, tenant_id, client_id, client_secret_key}` | `POST /certificates/{certificate}/import` with one PEM (certificate, chain, key; `application/x-pem-file`), tagged `managed-by=roll-secrets`: each push is a new version. A certificate of that name without the tag is someone else's: roll never writes to it. |
+| `cloudflare-cert` | `{zone, token_key}` | `POST /zones/{zone}/custom_certificates` once (`sni_custom`, `bundle_method: force`, the chain as given), then `PATCH …/{id}` on each rotation; one deleted at Cloudflare is made again. |
+
+- **AWS signs in as a project role** (`…/aws-roles`, "AWS"), assumed for each push for 15 minutes
+  (by roll's issuer or its ExternalId, whichever the role trusts): no AWS key is stored for the
+  sync. The role's maker must still be able to manage the project. It needs
+  `acm:ImportCertificate` and `acm:AddTagsToCertificate`.
+- **Hosts come from names, never URLs.** ACM is `acm.<region>.amazonaws.com` (`region` is
+  `[a-z0-9-]`), Key Vault `<vault>.vault.azure.net` (3–24 letters, digits and `-`), both through
+  rolld's guarded client (`roll_net::PublicOnly`, no redirects); Cloudflare is
+  `api.cloudflare.com` only (`zone` is 32 hex characters). Key Vault signs in as a service
+  principal (client secret in `client_secret_key`, as `azure-key-vault`); Cloudflare with a token
+  (SSL and Certificates: Edit) in `token_key`.
+- A public client trusts a certificate only if its CA is public; a project CA's certificates are
+  for clients that trust that CA (internal load balancers, mTLS between services, Cloudflare's
+  origin pulls).
+
 ### ACME
 Each CA is an ACME server (RFC 8555), as Vault's PKI is: cert-manager, certbot, Caddy and lego get
 its certificates with no roll client and no roll token. Its directory is
@@ -4514,6 +4558,9 @@ they change: GitHub Actions secrets, GitLab CI/CD variables, Azure DevOps variab
 Railway, Heroku, DigitalOcean App Platform, CircleCI, Bitbucket Pipelines, Terraform Cloud, Cloudflare Workers, AWS Parameter Store and Secrets Manager, Google Secret Manager, Azure Key Vault, a Kubernetes Secret, an endpoint
 of the team's own, or a deploy hook that only hears that something changed; also Cloudflare Pages,
 Supabase Edge Functions, Azure App Configuration and a HashiCorp Vault (or OpenBao) KV secret.
+A certificate kind pushes a `pki` key's certificate, private key and chain where TLS terminates
+instead: AWS Certificate Manager, an Azure Key Vault certificate or a Cloudflare custom certificate
+("Getting certificates where TLS terminates").
 Infisical's "secret syncs" are the reference. roll secrets stays the source of truth: a sync never reads from its
 target, and a value edited there is overwritten at the next
 change of that key. Before one is added, `POST …/syncs/preview` (`roll secrets syncs add … --preview`, the form's
@@ -4537,13 +4584,20 @@ pub trait SyncTarget: Send + Sync {
     // A name the platform keeps for itself (Supabase's `SUPABASE_`): refused on create and preview.
     fn refuses(&self, name: &str) -> Option<String> { None }
     // `push`: the values by target name, which names changed, which were removed, the digest,
-    // the signing secret, the resolved credentials.
+    // the signing secret, the resolved credentials, an AWS session (`aws_role`).
     fn push(&self, target: &Json, push: &Push) -> Result<()>;
+    // A certificate kind: pushes one managed `pki` key's certificate through `push_certificate`.
+    fn certificate(&self) -> bool { false }
+    // A project AWS role (by name) roll assumes for each push (`Push::aws`).
+    fn aws_role(&self, target: &Json) -> Option<String> { None }
+    // `remote`: what the target called it last time; answers what it's called now (`remote_id`).
+    fn push_certificate(&self, target: &Json, push: &Push, cert: &Certificate, remote: Option<&str>) -> Result<String>;
 }
 ```
 
 A sync is `{id: "syn_…", environment, path, kind, target, keys, prefix, status, last_digest,
-last_synced_at, error}`:
+last_synced_at, error, remote_id?}` (`remote_id`: a certificate kind's, what the target calls the
+certificate):
 
 - **What it pushes.** The folder's effective values (own, imported, inherited from a base),
   resolved, as `roll run` gets them. `keys` limits it to some keys (default: all); `prefix` is put
@@ -4586,6 +4640,11 @@ last_synced_at, error}`:
   too (it doesn't include `reveal`, and stopping a sync sends nothing).
 - **Who.** Creating, deleting and running a sync need `admin` on its environment: it sends values
   out of roll. Listing needs `read` and shows the syncs of environments the caller can read.
+- **Certificate kinds** (`SyncTarget::certificate`: `aws-acm`, `azure-keyvault-cert`,
+  `cloudflare-cert`; `GET …/syncs`'s kinds say `certificate: true`) push one key's certificate, not
+  values: `keys` names exactly one key of the sync's own folder linked `managed` to a project CA, with
+  no `prefix`, and the maker needs `reveal` there too. See "Getting certificates where TLS
+  terminates".
 
 | Kind | Target | Pushes |
 | --- | --- | --- |
@@ -4604,6 +4663,9 @@ last_synced_at, error}`:
 | `cloudflare-pages` | `{account, project, environment: "production" \| "preview", token_key}` | a Pages project's environment variables, as `secret_text` |
 | `azure-app-configuration` | `{store, label?, prefix?, tenant_id, client_id, client_secret_key}` | one App Configuration key-value per key, `<prefix><KEY>` under `label` |
 | `vault-kv` | `{address, mount?, path, namespace?, token_key}`, or `role_id, secret_id_key, approle_mount?` instead of `token_key`; `ca_key?` | one Vault (or OpenBao) KV v2 secret holding the folder's keys |
+| `aws-acm` | `{region, role}` (`role`: one of the project's AWS roles, by name); `keys: [KEY]` | one ACM certificate (`ImportCertificate`), re-imported to the same ARN on each rotation |
+| `azure-keyvault-cert` | `{vault, certificate, tenant_id, client_id, client_secret_key}`; `keys: [KEY]` | one Key Vault certificate (PEM import), a new version on each rotation |
+| `cloudflare-cert` | `{zone, token_key}`; `keys: [KEY]` | one custom certificate on a zone, `PATCH`ed on each rotation |
 
 ### `github`
 
@@ -6330,9 +6392,10 @@ type Sync = {
   keys: string[] | null; prefix: string; status: "pending" | "ok" | "error"; error: string | null;
   last_digest: string | null; last_synced_at: number | null; synced: number; // names at the target
   signed: boolean; created_at: number; created_by: string;
+  remote_id?: string; // a certificate kind's: the ACM ARN, Key Vault version or Cloudflare id it pushed to
 };
 type NewSync = { environment: string; path?: string; kind: string; target: Record<string, unknown>; keys?: string[]; prefix?: string };
-type SyncKind = { kind: string; label: string; values: boolean; signed: boolean; fields: { name: string; label: string; required: boolean; placeholder: string }[] };
+type SyncKind = { kind: string; label: string; values: boolean; signed: boolean; certificate: boolean; fields: { name: string; label: string; required: boolean; placeholder: string }[] }; // certificate: keys names one managed pki key
 type AuditEntry = { id: number; seq?: number; hash?: string; at: number; actor: string; action: string; environment: string | null; path: string | null; keys: string[]; summary: string; ip: string | null; approval?: Approval; digest?: string };
 type AuditVerification = { ok: boolean; from: number | null; through: number | null; signed_at: number | null; head: number | null; rows: number; digests: number; unchained: number; broken: { seq?: number; reason: string; detail: string } | null; legacy?: { signer: "issuer key"; digests: number; through: number }; pulled?: { kid: string; pulled_at: number; digests: number; first: number; last: number; countersigned: number | null }[] }; // digests: the ones that vouch (digest key and legacy); pulled: digests on pulled keys, countersigned by the next good digest's own row, or null (a `pulled` break)
 // The approval that let the request through roll-access's gate (docs/permissions.md, "What a
@@ -6373,8 +6436,10 @@ audit_keys(kid PK, sealed_dek, private BLOB, x, legacy, created_at, retired_at, 
       -- the digest key (Ed25519): private sealed with kid + legacy as AAD, wiped when pulled;
       -- legacy: issuer kids whose RS256 digests from before it count
 syncs(id PK, project_id, env_id, path, kind, target, keys, prefix, secret BLOB, status, error,
-      last_digest, state, last_synced_at, running_until, retry_at, checked_at, created_at, created_by)
-      -- secret: the sealed signing secret; state: {name: stamp} of what was pushed (no values)
+      last_digest, state, last_synced_at, running_until, retry_at, checked_at, created_at, created_by,
+      remote_id)
+      -- secret: the sealed signing secret; state: {name: stamp} of what was pushed (no values);
+      -- remote_id: what a certificate kind's target calls what it pushed (an ARN, an id)
 value_requests(id PK, project_id, env_id, path, keys, note, public_key, seal_key BLOB, answers_left,
       created_by, created_at, expires_at, answered_at, cancelled_at, outcome)
       -- seal_key: the request's X25519 secret key, sealed with the data key; NULL once it closes

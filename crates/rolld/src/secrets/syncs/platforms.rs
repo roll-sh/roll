@@ -79,13 +79,28 @@ impl Http {
         Http { guarded: client.clone(), azure_devops: vercel.into(), client, vercel: vercel.into(), cloudflare: cloudflare.into(), ssm: ssm.map(Into::into), render: render.into(), netlify: netlify.into(), fly: format!("{render}/graphql"), railway: format!("{netlify}/graphql/v2"), heroku: vercel.into(), google: vercel.into(), google_token: format!("{vercel}/token"), azure_login: vercel.into(), azure_vault: Some(vercel.into()), circleci: vercel.into(), bitbucket: format!("{vercel}/2.0"), terraform: format!("{vercel}/api/v2"), digitalocean: format!("{vercel}/v2") }
     }
 
+    pub(super) fn client(&self) -> &reqwest::Client {
+        &self.client
+    }
+
+    /// The client with `roll_net::PublicOnly`, for hosts built from a tenant's name.
+    pub(super) fn guarded(&self) -> &reqwest::Client {
+        &self.guarded
+    }
+
+    /// Clients without `PublicOnly`, for tests' mocks on loopback.
+    #[cfg(test)]
+    pub(super) fn plain() -> Http {
+        Http::with_bases("http://unused", "http://unused", None, "http://unused", "http://unused")
+    }
+
     /// Timeouts, no redirects.
     fn builder() -> reqwest::ClientBuilder {
         reqwest::Client::builder().timeout(Duration::from_secs(20)).connect_timeout(Duration::from_secs(10)).redirect(reqwest::redirect::Policy::none()).user_agent("roll-secrets-sync")
     }
 
     /// Send, and read at most [`ANSWER_MAX`] of the answer as JSON (`Null` if it isn't).
-    async fn send(&self, req: reqwest::RequestBuilder, what: &str) -> Result<(reqwest::StatusCode, Json)> {
+    pub(super) async fn send(&self, req: reqwest::RequestBuilder, what: &str) -> Result<(reqwest::StatusCode, Json)> {
         let mut resp = req.send().await.map_err(|e| Error::Link(format!("{what}: {}", e.without_url())))?;
         let status = resp.status();
         let mut body = Vec::new();
@@ -100,22 +115,22 @@ impl Http {
 }
 
 /// A credential roll-secrets resolved for this push.
-fn credential<'a>(p: &'a Push<'_>, key: &str) -> Result<&'a str> {
+pub(super) fn credential<'a>(p: &'a Push<'_>, key: &str) -> Result<&'a str> {
     p.credentials.get(key).map(Value::expose).ok_or_else(|| bad(format!("{key} isn't set in {}:{}", p.environment, p.path)))
 }
 
-fn ident(s: &str, max: usize, extra: &str) -> bool {
+pub(super) fn ident(s: &str, max: usize, extra: &str) -> bool {
     !s.is_empty() && s.len() <= max && s.chars().all(|c| c.is_ascii_alphanumeric() || extra.contains(c))
 }
 
-fn key_field(kind: &str, name: &str, v: Option<String>) -> Result<String> {
+pub(super) fn key_field(kind: &str, name: &str, v: Option<String>) -> Result<String> {
     let v = v.unwrap_or_default();
     roll_secrets::names::key(&v).map_err(|_| bad(format!("a {kind} target's {name} is a key of this environment")))?;
     Ok(v)
 }
 
 /// The keys a target's credential fields name.
-fn credential_keys(t: &Json, fields: &[&str]) -> Vec<String> {
+pub(super) fn credential_keys(t: &Json, fields: &[&str]) -> Vec<String> {
     fields.iter().filter_map(|f| t[*f].as_str().map(|k| k.trim().to_string())).collect()
 }
 
@@ -253,7 +268,7 @@ impl Cloudflare {
 }
 
 /// Cloudflare's error codes, without their messages.
-fn cf_codes(v: &Json) -> String {
+pub(super) fn cf_codes(v: &Json) -> String {
     v["errors"].as_array().into_iter().flatten().filter_map(|e| e["code"].as_i64()).map(|c| c.to_string()).collect::<Vec<_>>().join(",")
 }
 
@@ -2557,6 +2572,7 @@ mod tests {
                 removed: &removed,
                 secret: None,
                 credentials: &credentials,
+                aws: None,
             };
             t.push(&target, &p)
         })
@@ -2985,7 +3001,7 @@ mod tests {
                 let values = BTreeMap::from([("THEIRS".to_string(), Value::new("v-123".to_string()))]);
                 let creds = BTreeMap::from([("AZURE_SECRET".to_string(), Value::new("fake-client-secret".to_string()))]);
                 let changed = vec!["THEIRS".to_string()];
-                let p = Push { sync: "syn_1", project: "prj_1", resources: &BTreeSet::new(), environment: "production", path: "/", digest: "d", at: 0, values: &values, changed: &changed, removed: &[], secret: None, credentials: &creds };
+                let p = Push { sync: "syn_1", project: "prj_1", resources: &BTreeSet::new(), environment: "production", path: "/", digest: "d", at: 0, values: &values, changed: &changed, removed: &[], secret: None, credentials: &creds, aws: None };
                 AzureAppConfig(guarded(&base)).push(&t, &p)
             }
         })
