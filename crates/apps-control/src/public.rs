@@ -1567,7 +1567,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
             true => crate::bots::identify(&apps.bots_verified, apps.deps.resolver.as_ref(), &ua, ip).await,
             false => None,
         };
-        let asked = crate::model::Asked { method: req.method().as_str(), path: &path, user_agent: &ua, ip, headers: req.headers(), query: req.uri().query(), bot };
+        let asked = crate::model::Asked { method: req.method().as_str(), path: &path, raw_path: req.uri().path(), user_agent: &ua, ip, headers: req.headers(), query: req.uri().query(), bot };
         let mut hits = Vec::new();
         let verdict = gate.firewall_verdict(&asked, &mut hits);
         apps.live(service, env).count_hits(&hits);
