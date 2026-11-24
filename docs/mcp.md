@@ -400,9 +400,12 @@ How it works:
     association, and from roll's own API when the caller may comment but not write (a public
     repo's reader);
   - roll previews' fork previews (`!trusted`): the preview, its error groups, traces and spans,
-    route times and logs.
+    route times and logs;
+  - preview notes left by a share link's guests (`guest:<name>`, #911; marked by roll previews,
+    asked for 2026-11-24).
 - In lockdown, every result has the `title`, `body`, `description`, `message`, `text`, `line`,
-  `lines` (each line, so the list keeps its shape), `sample` and `name` of those records replaced
+  `lines` (each line, so the list keeps its shape), `sample`, `name`, `note` and `selector` of
+  those records replaced
   with a notice, wherever they sit in the answer: a fork's code chooses its log lines, error
   samples and route and span names as much as its title. (An `agent_feedback` alert names its
   connection in `connection`, a person's choice, which stays.)
