@@ -3186,7 +3186,9 @@ npx prisma migrate dev                            # in another: reads .env as us
 - `.env` is a named pipe (`mkfifo`, 0600) served from the `roll` process
   (`crates/roll-cli/src/secrets/mount.rs`). Each open of it gets the folder's values as they are
   now, written once (`--format dotenv`, quoted as `export`'s; or `json`, one object), and then the
-  pipe closes. Nothing is written anywhere else: no temporary file, no value in a log, an error or
+  pipe closes. The moment a reader opens it, a new pipe is renamed over the path for the next one,
+  so each reader has a pipe of its own: one that reads slowly still gets exactly one copy, never the
+  next read's appended to it. Nothing is written anywhere else: no temporary file, no value in a log, an error or
   a command line.
 - The values come from the local agent's cache ("A local agent"): the folder's digest is followed,
   so a change reaches the next read without logging in again. A folder with a key that doesn't
