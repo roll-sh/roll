@@ -203,7 +203,7 @@ pub fn start(
         branchers,
         // roll apps' instances are screenshotted where roll apps says they run (`Apps::reachable`):
         // on a fleet, on their service's holder (`fleet`).
-        Arc::new(Services { apps: roll_apps, runtime: runtime.clone(), shots: shots.clone(), fleet: clustered.then(|| cluster.clone()) }),
+        Arc::new(Services { apps: roll_apps, apps_listen: args.apps.listen, runtime: runtime.clone(), shots: shots.clone(), fleet: clustered.then(|| cluster.clone()) }),
         Arc::new(Secrets(api.clone())),
         leader,
     );
