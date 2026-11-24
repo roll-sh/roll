@@ -1766,6 +1766,16 @@ land on the change.
   naming any other review joins nothing), so it reaches the pull request as a GitHub review like
   the note did. The page lists the replies under their note, as text, and `roll preview notes`
   under each note too (live: a reply listed under its note).
+- People are told by mail (Vercel's comment notifications; `note_mail`, on unless turned off):
+  a new note goes to the change's author, a reply to the note's author, and a resolve to the
+  note's author ("bob resolved your note"), each to their own address through roll's accounts
+  (`Accounts::mail_user`, never an address a caller names), and only while they may open the
+  project's previews (as a share link's maker must). Never to a guest (no account), nor to
+  whoever wrote it. roll code tells previews of each review as it's made
+  (`PreviewBackend::reviewed`, after its event); previews keeps what to send (`note_tells`, once
+  per review and person) and its loop sends it, each claimed first so one node does, tried
+  again after 1 and 5 minutes when it couldn't go. GitHub tells a mirrored pull request's
+  people already; this is for a roll-only change. `a_notes_people_are_told_by_mail`.
 - Notes as Slack threads (Vercel's comments in Slack), both ways, through roll code's chat ops
   (docs/code/chatops.md): the "Preview notes as Slack threads" automation template (trigger
   `code` on `review` events, step `slack.note` with a channel) posts each new note as a message
@@ -2718,18 +2728,17 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Grouped visual changes, in review** (Percy's grouped diffs): pages changed the same way
+1. **A note's people told by mail, in review** (Vercel's comment notifications): a new note to
+   the change's author, a reply or a resolve to the note's, through roll's accounts (`note_mail`).
+2. **Grouped visual changes, in review** (Percy's grouped diffs): pages changed the same way
    against main's share a group (`visual::compare`'s signature), accepted together (`…/visual/accept
    {group}`, the sheet's "Accept the N changed the same way", `roll preview accept --group`).
    The first page joins them next.
-2. **A note that shows what the reviewer saw** (Jam's recordings, Netlify's markup): today a
+3. **A note that shows what the reviewer saw** (Jam's recordings, Netlify's markup): today a
    note carries a selector, the last steps, errors and failed requests, and roll's own browser
    crops the element later at desktop width; a phone-only or Safari-only bug has no picture.
    The question is what a visitor's own capture can be trusted for (the page's code could forge
    it): a short replay with inputs masked and a size cap, labelled as the reviewer's.
-3. **A note's author told of replies and its resolve** (Vercel's notifications): GitHub tells a
-   mirrored pull request's people; a roll-only change's reviewer hears nothing. Where it lands
-   (roll's notices, email through accounts, a Slack DM through chat ops) is the question.
 4. **Restore points for the products that only copy** (Redis, search, NoSQL, streams): a point
    is kept only where the product puts a branch back in place, keeping its id (their delete
    guards check it); each needs its control plane's reset `from`, as pg-control's.
@@ -2743,6 +2752,7 @@ Ranked by what a person notices first. Done so far:
 7. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
 8. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
 
 
 
