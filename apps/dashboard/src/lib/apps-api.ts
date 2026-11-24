@@ -24,6 +24,14 @@ export interface Sso {
   allow: string[];
 }
 
+/** What an environment's last week says about a setting, and the body that acts on it. */
+export interface Advice {
+  kind: "memory" | "cpu" | "max_instances" | "min_instances";
+  message: string;
+  set: EnvironmentPut;
+  saving_usd_month?: number;
+}
+
 /** What a service would cost at most (`POST /v1/apps/quote`), in US dollars at roll's prices. */
 export interface Quote {
   instance_hour: number;
@@ -749,6 +757,8 @@ export interface Environment extends EnvironmentSummary {
   schedules?: { name: string; next_run_at: number | null; last: { job: string; status: Job["status"]; started_at: number } | null; last_call?: { at: number; status?: number; ms: number; error?: string } }[];
   /** Its instances keep crashing: three or more in the last ten minutes. */
   crash_loop: { crashes: number; last_at: number; last_error: string } | null;
+  /** Its last cold start on the node serving it: the container up, then the app until it answered. */
+  last_cold_start?: { at: number; ms: number; runtime_ms: number; app_ms: number };
   /** A gradual rollout under way: the new deployment and the percent of requests it takes. */
   canary?: { deployment: string; share: number; /** Its step passed and it waits for a person (`rollout.manual`). */ waiting?: boolean } | null;
   /** Its own run settings over the service's; empty: the service's. */
@@ -928,6 +938,8 @@ export interface Deployment {
   started_at: number | null;
   finished_at: number | null;
   ready_ms: number | null;
+  /** Its image's size, where the runtime says. */
+  image_bytes?: number;
   /** What the app or the build printed when it failed (the step, its last line): only shown here, never sent in a commit status or a notification. */
   error_detail?: string;
   /** How to fix a failure roll knows (a private image's login, more memory, a lockfile): the setting and its command. */
@@ -1770,6 +1782,7 @@ export const appsApi = {
     return data as Deployment;
   },
   metrics: (id: string, e: string, minutes = 60) => call<Metrics>("GET", `${env(id, e)}/metrics${qs({ minutes })}`),
+  advice: (id: string, e: string) => call<{ days: number; minutes: number; advice: Advice[] }>("GET", `${env(id, e)}/advice`),
   /** Errors and latency by route over the last `minutes` (5–60). */
   routes: (id: string, e: string, minutes = 60) => call<RouteStats>("GET", `${env(id, e)}/routes${qs({ minutes })}`),
   analytics: (id: string, e: string, minutes = 1440) => call<Analytics>("GET", `${env(id, e)}/analytics${qs({ minutes })}`),

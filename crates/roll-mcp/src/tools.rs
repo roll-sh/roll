@@ -441,7 +441,7 @@ fn apps_area(method: &str, path: &str) -> Area {
         ["projects", "services"] if read => return Area::Every,
         ["services"] | ["services", "environments"] | ["projects", "services"] => "configure",
         ["services", "environments", s, ..] => match *s {
-            "analytics" | "app-metrics" | "errors" | "logs" | "metrics" | "routes" | "slo" | "traces" | "usage" | "vitals" | "push" | "fetch" => "observe",
+            "analytics" | "app-metrics" | "errors" | "logs" | "metrics" | "routes" | "slo" | "traces" | "usage" | "vitals" | "push" | "fetch" | "advice" => "observe",
             "deploys" | "promote" | "redeploy" | "rollback" | "pending" | "diff" | "jobs" | "runs" | "restart" | "sleep" | "wake" | "instances" | "cache" | "sandboxes" => "deploy",
             "private-network" => "configure",
             "variables" | "domains" | "forms" | "volume" | "config" => "configure",
@@ -1510,6 +1510,7 @@ static TOOLS: &[Tool] = &[
     ),
     t("apps_diff_environments", "Compare environments", "How an environment differs from another (Railway's environment sync): variables missing, extra or with another value (names only; which differ needs reveal on both), and settings with the body that makes each match. Read on both environments.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/diff", &[SERVICE, ENV, qreq("from", "The environment to compare with")]),
     t("apps_fetch", "Read a page", "One of an environment's pages as roll reads it, past its sign-in, password or token (to check what was just deployed): status, a few headers, and the body as text (at most 256 KiB).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/fetch", &[SERVICE, ENV, q("path", Ty::Str, "The page's path, / by default"), q("head", Ty::Bool, "HEAD instead of GET"), q("deployment", Ty::Str, "That deployment's own answer (dep_…) instead of what's live")]),
+    t("apps_advice", "Right-sizing advice", "What an environment's last week says about its settings: memory near its limit, CPU at its limit, requests turned away at max_instances, warm instances idle (with the month's saving), each with the settings body that acts on it.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/advice", &[SERVICE, ENV]),
     t("apps_metrics", "Service metrics", "CPU, memory and requests of an environment, and each instance's own last hour (by_instance).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/metrics", &[SERVICE, ENV, q("minutes", Ty::Int, "Window")]),
     t("apps_quote", "Quote a service", "What a service would cost at most a month and an hour, before making it: its run settings (cpu, memory_mb, min_instances, max_instances, type, sidecars) at roll's prices. Sleeping costs nothing; min_instances always run.", "apps", "POST", "/v1/apps/quote", &[b("run", Ty::Obj, "The run settings apps_create_service would take; left out, the defaults")]),
     t("apps_plan", "Plan a service", "How roll would build and run code (provider, framework, install, build and start commands, port), before making a service: a dry run. Give one of repo (a roll code repo), git (a public Git URL) or files (the files themselves).", "apps", "POST", "/v1/apps/plan", &[b("repo", Ty::Str, "A roll code repo, owner/name"), b("revision", Ty::Str, "With repo: a branch or commit"), b("git", Ty::Str, "Or a public Git URL, read at its branch's head as its deploy would be"), b("branch", Ty::Str, "With git: its branch (default: the default one)"), b("files", Ty::Obj, "Or the files themselves, {path: content}: how an app written in a chat would build"), b("root", Ty::Str, "The app's folder in the repo")]).one_of(&["repo", "git", "files"]),
@@ -1706,7 +1707,20 @@ static TOOLS: &[Tool] = &[
     t("previews_restore", "Put a preview's data back", "Put a restore point's data back in the preview, replacing what's there now: the services sleep meanwhile, the seed doesn't run again, and each branch keeps its endpoint. It can take minutes: follow it with previews_wait, not a fixed wait.", "previews", "POST", "/v1/previews/{id}/restore-points/{point}/restore", &[req("id", "Preview id"), req("point", "Restore point id (rp_…, from previews_list_saved_data)")]),
     t("previews_delete_saved_data", "Delete a restore point", "Delete one of a preview's restore points (its saved data goes).", "previews", "DELETE", "/v1/previews/{id}/restore-points/{point}", &[req("id", "Preview id"), req("point", "Restore point id")]),
     t("previews_tables", "A preview's tables", "What a preview's data branch holds, read as the branch's own role, read-only: its tables with row counts (at most 200), or with table, that table's columns and first 50 rows (cells cut at 200 characters; more says there are others). For checking what a change's migration or seed did. resource is kind:parent as previews_get lists its branches (Postgres for now; a branch not ready or masked yet answers 409). It shows copies of production's data, masked: reveal.", "previews", "GET", "/v1/previews/{id}/data/{resource}", &[req("id", "Preview id"), req("resource", "The branched resource, kind:parent (postgres:prj_…)"), q("table", Ty::Str, "A table: its first rows (schema.table or table)")]),
-    t("previews_share", "Share a preview", "A link for someone outside the team to open a preview for some hours (its token is in this answer only; anyone with the link gets in).", "previews", "POST", "/v1/previews/{id}/shares", &[req("id", "Preview id"), breq("hours", Ty::Int, "How long the link works")]),
+    t(
+        "previews_share",
+        "Share a preview",
+        "A link for someone outside the team to open a preview for some hours (its token is in this answer only; anyone with the link gets in). With notes, its visitors may leave notes on the pages as guests.",
+        "previews",
+        "POST",
+        "/v1/previews/{id}/shares",
+        &[
+            req("id", "Preview id"),
+            breq("hours", Ty::Int, "How long the link works"),
+            b("label", Ty::Str, "Who the link is for, one line (at most 60 characters)"),
+            b("notes", Ty::Bool, "Its visitors may leave notes on the preview's pages as guests (10 an hour per link)"),
+        ],
+    ),
     t("previews_revoke_share", "Revoke a share link", "Stop a preview's share link at once (who it's shared with: previews_list_shares).", "previews", "DELETE", "/v1/previews/{id}/shares/{share}", &[req("id", "Preview id"), req("share", "Share id")]),
     t("previews_settings", "Preview settings", "A project's preview rules: which branches get one, how long they live, private or not, budgets (previews_set_rules changes the operational ones; an admin's).", "previews", "GET", "/v1/previews/projects/{project}/settings", &[req("project", "Workspace project")]),
     t(

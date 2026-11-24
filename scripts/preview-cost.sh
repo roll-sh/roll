@@ -444,6 +444,19 @@ SJAR="$HOME_DIR/cookies-share"
 [ "$(curl -s -o /dev/null -w '%{http_code}' -b "$SJAR" -H "Host: $HOST" "http://$API/")" = 200 ] || { echo "a share link's cookie should open the preview"; exit 1; }
 api DELETE "/v1/previews/$PV/shares/$SHARE_ID" >/dev/null
 [ "$(curl -s -o /dev/null -w '%{http_code}' -b "$SJAR" -H "Host: $HOST" "http://$API/")" = 401 ] || { echo "a revoked share link should stop at once"; exit 1; }
+# A link that takes notes: its guest posts one from the page (the button's guest mode), made on
+# the change as guest:<name>, its words inert; another site's page posts nothing.
+GSHARE=$(api POST "/v1/previews/$PV/shares" '{"hours":1,"label":"Acme review","notes":true}')
+GJAR="$HOME_DIR/cookies-guest"
+curl -s -o /dev/null -c "$GJAR" -H "Host: $HOST" "http://$API/?$(echo "$GSHARE" | jq_ "d['url'].split('/?')[1]")"
+curl -sS -b "$GJAR" -H "Host: $HOST" "http://$API/__roll/feedback.js" | grep -q "const GUEST = true;" || { echo "a link that takes notes should give its guest the button in guest mode"; exit 1; }
+GNOTE='{"name":"Ada","path":"/","selector":"h1","note":"Hi @team, the title is cut off","viewport":"390x844"}'
+[ "$(curl -s -o /dev/null -w '%{http_code}' -b "$GJAR" -H "Host: $HOST" -H "Origin: http://evil.example" -H 'content-type: application/json' -d "$GNOTE" "http://$API/__roll/notes")" = 403 ] || { echo "another site's page should post no note"; exit 1; }
+GUEST_ID=$(curl -sS -b "$GJAR" -H "Host: $HOST" -H "Origin: http://$HOST" -H 'content-type: application/json' -d "$GNOTE" "http://$API/__roll/notes" | jq_ "d['id']")
+GUEST_SAID=$(api GET "/v1/code/changes/$CHG/reviews" | jq_ "[(r['reviewer']['name'], '@\u200bteam' in r['body'], 'Acme review' in r['body']) for r in d if r['id'] == '$GUEST_ID']")
+[ "$GUEST_SAID" = "[('guest:Ada', True, True)]" ] || { echo "the guest's note should be on the change as guest:Ada, its @ inert, the link's label said: $GUEST_SAID"; exit 1; }
+[ "$(curl -sS -b "$GJAR" -H "Host: $HOST" "http://$API/__roll/feedback.json?path=%2F" | jq_ "[n['id'] for n in d]")" = "['$GUEST_ID']" ] || { echo "a guest should see only their link's notes"; exit 1; }
+api DELETE "/v1/previews/$PV/shares/$(echo "$GSHARE" | jq_ "d['id']")" >/dev/null
 CONTAINER="roll-previews-$(echo "$HOST" | cut -d. -f1)"
 STATS=$(docker stats --no-stream --format '{{.MemUsage}} {{.CPUPerc}}' "$CONTAINER")
 RSS1=$(ps -o rss= -p "$PID")
@@ -557,7 +570,7 @@ done
 
 say "a screenshot of the service (github.screenshot), once per head"
 # And /pricing, which the test service doesn't have (a 404 page, one failed request).
-api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"screenshot":true,"pages":["/pricing","web:/","wiki:/"],"widths":[768],"hide":[".clock"],"budget":{"load_ms":60000},"openapi":"/openapi.json","endpoints":["/openapi.json","/env.txt"],"states":[{"name":"tab","page":"/","steps":[{"press":"Tab"}]}],"browsers":["firefox","webkit-phone"]}}' >/dev/null
+api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"screenshot":true,"pages":["/pricing","web:/","wiki:/"],"widths":[768],"hide":[".clock"],"budget":{"load_ms":60000},"openapi":"/openapi.json","endpoints":["/openapi.json","/env.txt"],"states":[{"name":"tab","page":"/","steps":[{"press":"Tab"},{"click":"body"}]}],"browsers":["firefox","webkit-phone"]}}' >/dev/null
 # roll keeps a preview of the default branch (github.baseline): the change's screenshots are
 # compared with its.
 MAINPV=""
@@ -963,6 +976,9 @@ PRICING=$(api GET "/v1/previews/$PV" | jq_ "(lambda p: 'a11y %s, seo %s; new: a1
 case "$PAGES" in *"wiki:/: 0 error(s), "*"% against main"*) ;; *) echo "the wiki service's page should be taken in its own run and compared: $PAGES"; exit 1;; esac
 # A page state (github.states: Tab pressed on /), taken after its step and compared with main's.
 case "$PAGES" in *"state:tab: "*"% against main"*) ;; *) echo "the page state should be taken after its steps and compared: $PAGES"; exit 1;; esac
+# Its click timed to the next paint (INP in the lab), and main's same state's beside it.
+STEP_MS=$(api GET "/v1/previews/$PV" | jq_ "[(isinstance(x.get('step_ms'), int), isinstance((x.get('against') or {}).get('step_ms'), int)) for x in d.get('pages', []) if x['path'] == 'state:tab']")
+[ "$STEP_MS" = "[(True, True)]" ] || { echo "the state's click should be timed to the next paint, main's beside it: $STEP_MS $(api GET "/v1/previews/$PV" | jq_ "[x for x in d.get('pages', []) if x['path'] == 'state:tab']")"; exit 1; }
 # The repo's own page, from its roll.toml (pages = ["/index.html"]), taken with the project's.
 case "$PAGES" in *"/index.html: "*"% against main"*) ;; *) echo "the repo's own page should be taken and compared: $PAGES"; exit 1;; esac
 # And the repo's own, from its roll.toml ([[preview.states]], versioned with its selectors).
@@ -1268,6 +1284,7 @@ cat <<EOF
 | ignore_paths: docs/ | $KEPT |
 | \`[skip preview]\` in the title, then without it | removed, then a new preview |
 | A share link (1 hour): in through it / revoked | 200 / 401 |
+| A guest's note through a link that takes notes (as guest:Ada, `@` inert) / from another site | $GUEST_SAID / 403 |
 | What went wrong while the page loaded (a push whose page logs an error) | $HEALTH; new against main: $ERRORS_NEW |
 | The page's change since the push before (screenshots) | $VISUAL |
 | The phone-width screenshot | $PHONE |
