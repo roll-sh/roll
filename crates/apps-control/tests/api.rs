@@ -690,6 +690,10 @@ async fn a_provider_signs_visitors_in_by_their_domain_or_organisation() {
     assert_eq!((st, hd["location"].to_str().unwrap()), (StatusCode::FOUND, "/pages/home?x=1"));
     let session = hd["set-cookie"].to_str().unwrap().split(';').next().unwrap().to_string();
     assert_eq!(get("/".into(), Some(session.clone())).await.0, StatusCode::OK, "in with the session");
+    // The app is told who, and nothing a visitor sends can say otherwise.
+    let seen = w.public.clone().oneshot(Request::get("/").header("host", h.as_str()).header("cookie", session.as_str()).header("x-roll-visitor", "ceo@acme.com").body(Body::empty()).unwrap()).await.unwrap();
+    let seen: Value = serde_json::from_slice(&seen.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(seen["visitor"], "ann@acme.com", "{seen}");
     assert_eq!(get(path, None).await.0, StatusCode::UNAUTHORIZED, "a ticket opens one session");
     // `@acme.com` gone from allow: Ann's session ends.
     call(&w.api, "PUT", &env, Some(json!({"access": {"sso": {"provider": "github", "allow": ["org:roll-sh"]}}}))).await;

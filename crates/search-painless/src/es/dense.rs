@@ -1226,11 +1226,13 @@ fn score(vm: &mut Vm, a: &[Value], op: VFn) -> VR {
     };
     // the host's own storage first: no copy per document
     let mut lent = None;
-    match crate::host::call(|| vm.host.with_vector(&field, &mut |v| {
+    let read = crate::host::call(|| vm.host.with_vector(&field, &mut |v| {
         lent = Some(run(Impl::of(v.element, v.binary), v.floats, v.bytes, v.magnitude));
-    })) {
-        // a failure was built inside the host call, outside the account
-        Ok(Some(true)) => return lent.unwrap_or_else(|| Err(missing())).map_err(crate::vm::recharged).map(Value::Double),
+    }));
+    // a failure was built inside the host call, outside the account
+    let lent = lent.map(|r| r.map_err(crate::vm::recharged));
+    match read {
+        Ok(Some(true)) => return lent.unwrap_or_else(|| Err(missing())).map(Value::Double),
         Ok(Some(false)) => return Err(missing()),
         Ok(None) => {}
         Err(e) => return Err(super::doc::host_error(e)),

@@ -425,7 +425,7 @@ impl Evaluator {
             }
             None => None,
         };
-        Ok(EvalLeaf { field: self.field.clone(), leaf, seg: seg.clone(), table: self.table.clone() })
+        Ok(EvalLeaf { field: self.field.clone(), leaf, seg: seg.clone(), table: self.table.clone(), refused: None })
     }
 }
 
@@ -687,6 +687,9 @@ pub struct EvalLeaf {
     seg: SegmentContext,
     /// The reader's fields: a field without a script reads the `_source` it may see.
     table: Arc<FieldTable>,
+    /// A failure no script may swallow (the memory breaker refused what the field's script
+    /// keeps, a cancelled search): every later document gets it without running the script.
+    refused: Option<EsError>,
 }
 
 impl EvalLeaf {
@@ -701,12 +704,28 @@ impl EvalLeaf {
         self.collect(doc, false)
     }
 
+    /// Whether the field's script was refused for good (see `refused`).
+    pub fn refused(&self) -> bool {
+        self.refused.is_some()
+    }
+
     fn collect(&mut self, doc: u32, sorted: bool) -> EsResult<Vec<RtValue>> {
+        if let Some(e) = &self.refused {
+            return Err(e.clone());
+        }
         let f = &self.field;
         let mut out = Vec::new();
         match &mut self.leaf {
             Some(l) => {
                 if let Err(e) = l.run_emit(doc) {
+                    // `on_script_error: continue` skips the document, but not a failure that
+                    // isn't the script's (the breaker refusing what it keeps, a cancelled
+                    // search): that one stays, and the script runs no more
+                    if e.uncatchable() {
+                        let e = crate::scripting::script_error(e);
+                        self.refused = Some(e.clone());
+                        return Err(e);
+                    }
                     if f.lenient {
                         return Ok(out);
                     }
