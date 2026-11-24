@@ -639,6 +639,8 @@ impl Apps {
         let id = dep.to_string();
         d.steps = self.db(move |s| s.steps(&id)).await?;
         let id = dep.to_string();
+        d.build_steps = self.db(move |s| s.build_steps(&id)).await?;
+        let id = dep.to_string();
         d.vulnerabilities = self.db(move |s| s.scan(&id)).await?.map(|(sum, _)| sum);
         let id = dep.to_string();
         d.approved_by = self.db(move |s| s.approvals_of(&id)).await?;
@@ -1826,7 +1828,15 @@ impl Apps {
             image
         } else {
         log.line(format!("building with {}", self.deps.builder.name()));
-        match self.deps.builder.build(&job, log, cancel.clone()).await {
+        // Its steps, read from the lines BuildKit writes, kept whether or not it built.
+        let steps = Arc::new(parking_lot::Mutex::new(crate::build_steps::BuildSteps::default()));
+        let built = self.deps.builder.build(&job, &log.collecting(steps.clone()), cancel.clone()).await;
+        let steps = steps.lock().steps();
+        if !steps.is_empty() {
+            let (id, j) = (d.id.clone(), serde_json::to_string(&steps).unwrap_or_default());
+            let _ = self.db(move |s| s.set_build_steps(&id, &j)).await;
+        }
+        match built {
             Ok(i) => i,
             // What failed, as BuildKit said it (the step, its last words), not only its exit code.
             Err(e) if !cancel.is_cancelled() => {
@@ -2465,6 +2475,32 @@ impl Apps {
             if slow >= 3 {
                 let value = rows.iter().map(|r| r.p95_ms).fold(0.0, f64::max).round();
                 firing.push(("alert.latency", serde_json::json!({ "value": value, "threshold": a.p95_ms })));
+            }
+        }
+        // One route's errors or latency: each (route, kind) fires and resolves on its own.
+        if !a.routes.is_empty() {
+            let firing = self.judge_routes(&l.service, &l.env, &a.routes).await;
+            for r in &a.routes {
+                let label = r.label();
+                for kind in ["errors", "latency"] {
+                    let key = format!("{}/{}/alert.route:{label}:{kind}", l.service, l.env);
+                    match firing.iter().find(|(f, k, _)| *f == label && *k == kind) {
+                        Some((_, _, data)) => {
+                            if self.looping.lock().insert(key) {
+                                let (sid, e, dep, d) = (l.service.clone(), l.env.clone(), tpl.deployment.clone(), data.clone());
+                                let _ = self.db(move |s| s.add_event("alert.route", &sid, &e, Some(&dep), &d)).await;
+                                l.log.stream(Stream::System).line(format!("alert: alert.route {data}"));
+                            }
+                        }
+                        None => {
+                            if self.looping.lock().remove(&key) {
+                                let (sid, e, dep, d) = (l.service.clone(), l.env.clone(), tpl.deployment.clone(), serde_json::json!({ "alert": "alert.route", "route": r.route, "method": r.method, "kind": kind }));
+                                let _ = self.db(move |s| s.add_event("alert.resolved", &sid, &e, Some(&dep), &d)).await;
+                                l.log.stream(Stream::System).line(format!("alert: alert.route {label} {kind} resolved"));
+                            }
+                        }
+                    }
+                }
             }
         }
         // Its log-based metrics: the minute's matching lines, as gauges beside its own metrics.
