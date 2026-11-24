@@ -18375,3 +18375,16 @@ protocol: 2–27x PostgreSQL over the wire).
   (lookups by name and oid across DDL, rollbacks and savepoints, recorded from PostgreSQL),
   and debug assertions (`SysTable`'s table order, `triggered_tables` against the full list
   of internal triggers).
+
+## Snapshots and DDL: the cost of agent 310's checks (agent 312, 2026-11-24)
+
+In process, plain dist, lane A server CPUs (6.2-7.6 foreign cores in every hold: instruction
+counts only), (I30 s - I10 s) / (ops30 - ops10), user instructions of the whole process. base
+`9efd42d19` (before agent 310), new = agent 310 + agent 312's items, new2 = new with
+`lock_relation` inlined again and the one-load `IndexSince::pending` check (HANDOFF "Snapshots
+and DDL, the rest").
+
+| case | new vs base (pairs) | new2 vs base (pairs) |
+|---|---|---|
+| point_select (~36,300 instr/op) | +0.72% median (5: +0.37..+0.79) | +0.37% median (3: +0.17, +0.37, +0.69) |
+| short_txn (~255,000 instr/op) | -9.4, -3.3% (noise) | -0.7, +5.1% (noise) |

@@ -22150,3 +22150,85 @@ It is 5 / 5 against PostgreSQL 18.6 live, and the base binary 2 / 5.
 Not modelled: an UPDATE of the index's pg_index row (CLUSTER's `indisclustered`, REPLICA
 IDENTITY) gives that row a new xmin in PostgreSQL; roll keeps the creating one. A table past the
 heap model (`ROLL_MODEL_MAX_VERSIONS`) has no HOT chains to look at, so its flag stays false.
+
+**The cost agent 310 predicted (item 7), measured.** Point selects and short transactions were
+measured in process: `bench --target inproc oltp --clients 1 --only <case>` on a fresh
+100,000-row database each run. perf stat counted the process's user instructions (client and
+engine), and each figure is (I30 s − I10 s) / (ops30 − ops10). Runs were on lane A's server CPUs
+(6, 7, 24, 25) in a container, with `~/.cache/a312/inproc/` holding the scripts and runs. Builds
+were plain dist (`tools/dist.sh --example bench`), alternating pairs, one per lane hold:
+- base: `9efd42d19`, the head before agent 310;
+- new: agent 310's commits and this round's items 1, 2, 3 and 6 (on `57d194f69`);
+- new2: new with the change below.
+
+Every hold had 6.2-7.6 foreign cores on the lane, more than the 1.0 the gates allow. The lanes
+were loaded all evening, so these are instruction counts only; cycles are not used.
+
+| case | arm | pairs | instr/op per pair vs base | median |
+|---|---|---|---|---|
+| point_select (~36,300 instructions) | new | 5 | +0.72, +0.37, +0.79, +0.76, +0.55% | **+0.72%** |
+| point_select | new2 | 3 | +0.37, +0.17, +0.69% | **+0.37%** |
+| short_txn (~255,000; its commit fsyncs) | new | 2 | -9.4, -3.3% | (noise: waiting threads' instructions) |
+| short_txn | new2 | 2 | -0.7, +5.1% | (noise) |
+
+Where it went: a `perf record -e instructions:upp` of each arm, diffed by symbol
+(`inproc/prof.sh`, `symdiff.py`).
+- **`TxnState::lock_relation` was no longer inlined into `perms::lock_some`**, which every
+  statement's locks take: +210 instructions there, -102 in `lock_some`. Agent 310's
+  `refresh_latest_reads()` call had made it too big for LLVM to inline.
+- `Session::bound_as` cost +31 to +50: the kept-plan check this round added for named
+  statements.
+
+The change, in `new2`:
+- `lock_relation` checks `latest_reads.is_some()` inline. `refresh_latest_reads` is `#[cold]`
+  and `#[inline(never)]`, so `lock_relation` is inlined again.
+- `IndexSince::pending` is a flag that is false unless some snapshot may still leave an index
+  out. It is set under the map's lock by a commit with new indexes and by an indcheckxmin, and
+  cleared once `horizon_hint()` is past every time there. `reads_every_index`, `every_index_at`
+  and `IndexSince::usable` start with that one load (plus the transaction's own `ddl_reads`),
+  before any snapshot time is read.
+
+New2's profile no longer has `lock_relation`. **Not resolved:** point select is still +0.17% to
++0.69% (median +0.37%) against base. In the profile diff what is left is spread over
+`bind_scan`, `bind_message`, allocator and scan symbols by ±30-60 each. Some of these moved
+both ways between symbols (`current_role` / `session_role` +60 / -60), which looks like inlining
+moved around. The only deterministic addition left is `bound_as`'s borrow and flag load
+(~+30). A next step: an A/A pair of the base binary against itself on a quiet lane, to tell
+that spread from a cost, and `bound_as` reading the flag inside the borrow it already takes.
+
+### Items 4 and 5: left as they are
+
+**Item 4, old snapshots after TRUNCATE or an ALTER TABLE rewrite: not matched, on purpose.**
+PostgreSQL's snapshot older than the commit reads an empty table (documented as not MVCC-safe);
+roll's reads the rows its snapshot had. Matching would lose data a user could otherwise have:
+- After a rewrite (ALTER COLUMN TYPE, ADD COLUMN with a volatile default, SET LOGGED) the
+  rows still exist. An export or backup reading from an older snapshot would get none of
+  them. pg_dump avoids this by locking every table first; a reader using an exported snapshot
+  without locks doesn't.
+- After TRUNCATE, such a reader's consistent picture loses the table's rows while keeping
+  every row that referenced them.
+
+Results under an older snapshot are a superset of PostgreSQL's (they are what PostgreSQL's
+MVCC would give). The reproduction is `~/.cache/a310/scripts/probe3.py` `old-truncate`.
+
+**Item 5, CLUSTER inside a REPEATABLE READ transaction: not fixed** (results inside that
+transaction only; committed state is right). Reproduction: session 1 runs `BEGIN ISOLATION
+LEVEL REPEATABLE READ; SELECT count(*) FROM t`, session 2 inserts a row, session 1 runs
+`CLUSTER t USING t_a; SELECT count(*) FROM t`. roll gives 1,001 and PostgreSQL 1,000
+(agent 310's difference 1). roll's copy is the transaction's own writes (the newest rows, so
+nothing committed is lost). Showing that transaction its snapshot's rows afterwards needs a
+second view of the table for the rest of the transaction:
+- the snapshot's rows under the new row ids, for its reads, index scans and ctid lookups;
+- its later UPDATE / DELETE of rows changed since the snapshot failing with 40001, as
+  PostgreSQL's does.
+
+That is more than a small change in the shared txn/scan code, so it is left.
+
+### Left
+1. Point select +0.17..0.69% against the pre-310 base (above): an A/A spread check, then
+   `bound_as`.
+2. Item 5 (above).
+3. indcheckxmin: a later UPDATE of the pg_index row (`indisclustered`, `indisreplident`)
+   doesn't move its xmin as PostgreSQL's does; tables past the heap model never get the flag.
+4. Agent 310's difference 2 stays: snapshots older than an index's commit plan without it,
+   where PostgreSQL uses it (results equal).

@@ -1226,7 +1226,7 @@ impl Store {
 
     /// A horizon `gc_horizon` found before, without reading the pins: no newer than the
     /// one it would find now, which is what a scan pruning the memtables' versions needs.
-    fn horizon_hint(&self) -> u64 {
+    pub(crate) fn horizon_hint(&self) -> u64 {
         self.horizon_seen.load(Ordering::Acquire)
     }
 

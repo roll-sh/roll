@@ -1325,17 +1325,46 @@ pub struct IndexSince {
     /// 0: none, or every snapshot's xmin is past it): snapshots whose xmin isn't past it
     /// plan without that index.
     check_xmin: AtomicU64,
+    /// Whether some snapshot may still leave an index out (a time here not yet behind the
+    /// oldest snapshot, or a `check_xmin`): false, every snapshot reads every index, and
+    /// `every_index_at` is this one load (set and cleared under `map`'s lock).
+    pending: AtomicBool,
 }
 
 impl IndexSince {
     /// Whether a snapshot at `ts` reads index `oid`'s entries.
     pub fn usable(&self, oid: u32, ts: u64) -> bool {
-        self.max.load(Ordering::Acquire) <= ts || self.map.lock().get(&oid).is_none_or(|&t| t <= ts)
+        !self.pending.load(Ordering::Acquire)
+            || self.max.load(Ordering::Acquire) <= ts
+            || self.map.lock().get(&oid).is_none_or(|&t| t <= ts)
+    }
+
+    /// Whether some snapshot may still leave an index out (`pending`). `hint`: a horizon the
+    /// store found, no newer than its oldest snapshot now; once every time here is behind it
+    /// and no indcheckxmin is pending, the flag goes back to false.
+    fn pending(&self, hint: u64) -> bool {
+        let settled = || self.max.load(Ordering::Acquire) <= hint && self.check_xmin.load(Ordering::Acquire) == 0;
+        if !self.pending.load(Ordering::Acquire) {
+            return false;
+        }
+        if !settled() {
+            return true;
+        }
+        let _m = self.map.lock();
+        if !settled() {
+            return true;
+        }
+        self.pending.store(false, Ordering::Release);
+        false
     }
 
     /// An index's indcheckxmin was set with pg_index xmin `x` (`Index::check_xmin`).
     pub fn note_check_xmin(&self, x: u64) {
-        self.check_xmin.fetch_max(x, Ordering::AcqRel);
+        if x != 0 {
+            let _m = self.map.lock();
+            self.check_xmin.fetch_max(x, Ordering::AcqRel);
+            self.pending.store(true, Ordering::Release);
+        }
     }
 
     /// `oids` committed at `ts` (under the commit lock, before the catalog naming them is
@@ -1347,6 +1376,7 @@ impl IndexSince {
             m.insert(o, ts);
         }
         self.max.fetch_max(ts, Ordering::AcqRel);
+        self.pending.store(true, Ordering::Release);
     }
 }
 
@@ -1653,6 +1683,11 @@ impl TxnState {
     }
 
     /// `begin_latest_reads` is running: reads see what committed since (`lock_relation`).
+    /// (Out of line: `lock_relation`, which every statement's locks take, stays small enough
+    /// to be inlined into them; it was not with this inside, +0.3% instructions a point
+    /// select.)
+    #[cold]
+    #[inline(never)]
     fn refresh_latest_reads(&mut self) {
         if self.latest_reads.is_some() && self.db.store.visible_ts() != self.snapshot_ts {
             let pin = self.pin_visible();
@@ -1773,6 +1808,10 @@ impl TxnState {
     /// its to run, so the plans kept across statements and sessions (`session::litplan`)
     /// are neither kept nor reused then.
     pub fn reads_every_index(&self) -> bool {
+        // (The usual case before the snapshot's time is read: `every_index_at`.)
+        if self.ddl_reads.is_none() && !self.db.index_since.pending.load(Ordering::Acquire) {
+            return true;
+        }
         let ts = match self.isolation.txn_snapshot() && self.snapshot_fixed {
             true => self.statement_snapshot_ts(),
             false => self.db.store.visible_ts(),
@@ -1784,6 +1823,14 @@ impl TxnState {
     /// every snapshot uses every index whose indcheckxmin is set.
     pub fn every_index_at(&self, ts: u64) -> bool {
         let since = &self.db.index_since;
+        // (No DDL of its own that read the newest rows, and no index some snapshot leaves
+        // out: the usual case, one load.)
+        if self.ddl_reads.is_none() && !since.pending.load(Ordering::Acquire) {
+            return true;
+        }
+        if self.ddl_reads.is_none() && !since.pending(self.db.store.horizon_hint()) {
+            return true;
+        }
         self.ddl_reads.as_ref().is_none_or(|d| d.stale.is_empty())
             && since.max.load(Ordering::Acquire) <= ts
             && match since.check_xmin.load(Ordering::Acquire) {
@@ -4001,7 +4048,7 @@ impl TxnState {
         }
         // (A DDL statement reads what committed while it waited for any lock: ANALYZE's and
         // VACUUM's SHARE UPDATE EXCLUSIVE too, `begin_latest_reads`.)
-        if got {
+        if got && self.latest_reads.is_some() {
             self.refresh_latest_reads();
         }
         Ok(got)
