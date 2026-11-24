@@ -368,7 +368,7 @@ impl Engine {
         let _slot = tokio::time::timeout(std::time::Duration::from_secs(30), self.shooting.clone().acquire_owned()).await.map_err(|_| Error::Conflict("the node's browsers are all busy: try again in a moment".into()))?.map_err(|e| Error::Internal(e.to_string()))?;
         let t = match self.apps.try_page(id, &svc, path, steps).await {
             Ok(Some(t)) => t,
-            Ok(None) => return Err(Error::Conflict(format!("{svc} can't be driven here yet (a roll apps service: next)"))),
+            Ok(None) => return Err(Error::Conflict(format!("{svc} can't be driven here (a roll apps instance roll can't join: Fargate)"))),
             Err(e) => return Err(Error::Conflict(self.mask_text(id, &format!("{e:#}")).await?)),
         };
         let values = self.masks(id).await?;
