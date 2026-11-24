@@ -78,6 +78,7 @@ pub fn router(accounts: Arc<Accounts>) -> Router {
         .route("/v1/accounts/users/{id}/activity", get(user_activity))
         .route("/v1/accounts/sso", get(list_sso).post(add_sso))
         .route("/v1/accounts/sso/start", post(sso_start))
+        .route("/v1/accounts/sso/visit", get(sso_visit))
         .route("/v1/accounts/sso/{id}", axum::routing::patch(update_sso).delete(remove_sso))
         .route("/v1/accounts/sso/{id}/callback", get(sso_callback))
         .route("/v1/accounts/sso/{id}/verify", post(verify_sso))
@@ -513,18 +514,55 @@ async fn sso_start(State(a): S, me: Me, b: Bytes) -> Result<Response> {
     Ok(with_cookies(resp, [cookie(&a, a.config.oauth_cookie(), &started.browser, 10 * 60_000)]))
 }
 
+#[derive(Deserialize)]
+struct SsoVisit {
+    r: String,
+    #[serde(default)]
+    email: Option<String>,
+}
+
+/// A visitor's sign-in through their organisation's SSO (roll apps' `access.sso` with `provider:
+/// "sso"`): their work email first (its domain picks the connection), then on to the provider,
+/// the browser bound as a visit's is. No session of roll's comes of it.
+async fn sso_visit(State(a): S, ip: Ip, Query(q): Query<SsoVisit>) -> Result<Response> {
+    let Some(email) = q.email.as_deref().map(str::trim).filter(|e| !e.is_empty()) else { return Ok(visit_email_page(&q.r, None)) };
+    let started = match a.sso_visit_start(email, &q.r, ip.map(|Extension(roll_auth::ClientIp(i))| i.to_string())).await {
+        Ok(s) => s,
+        Err(Error::BadRequest(m, Some("no_sso" | "throttled" | "provider" | "state"))) => return Ok(visit_email_page(&q.r, Some(&m))),
+        Err(e) => return Err(e),
+    };
+    let mut resp = (StatusCode::SEE_OTHER, [(header::LOCATION, HeaderValue::from_str(&started.url).map_err(|e| Error::Internal(e.to_string()))?)]).into_response();
+    resp.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(with_cookies(resp, [cookie(&a, a.config.visit_cookie(), &started.browser, 10 * 60_000)]))
+}
+
+/// The page asking a visitor for their work email (and why the last one didn't do).
+fn visit_email_page(request: &str, error: Option<&str>) -> Response {
+    let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
+    let error = error.map(|e| format!("<p style=\"color:#d33\">{}</p>", esc(e))).unwrap_or_default();
+    let page = format!(
+        "<!doctype html><meta charset=utf-8><meta name=viewport content=\"width=device-width\"><title>Sign in</title><body style=\"font:15px system-ui;max-width:24rem;margin:15vh auto;padding:0 1rem\"><h1 style=\"font-size:20px\">Sign in with your work account</h1>{error}<form method=get action=\"/v1/accounts/sso/visit\"><input type=hidden name=r value=\"{}\"><input name=email type=email required autofocus autocomplete=email placeholder=\"you@company.com\" style=\"width:100%;padding:8px;font:inherit;box-sizing:border-box\"><button style=\"margin-top:12px;padding:8px 14px;font:inherit\">Continue</button></form>",
+        esc(request)
+    );
+    (StatusCode::OK, [(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-store")], page).into_response()
+}
+
 async fn sso_callback(State(a): S, me: Me, ip: Ip, Path(id): Path<String>, Query(q): Query<Callback>, headers: HeaderMap) -> Response {
     let who = Who::of(ip, &headers).person(me);
     let method = format!("sso:{}", crate::audit::clean_id(&id));
+    // A visitor's sign-in (its own cookie, and no sign-in to roll under way): its failures are
+    // roll's page for them, and the visit's cookie is the browser's binding.
+    let visit = roll_auth::cookie(&headers, a.config.visit_cookie()).map(str::to_string);
+    let signin = roll_auth::cookie(&headers, a.config.oauth_cookie()).map(str::to_string);
+    let back = if visit.is_some() && signin.is_none() { crate::oauth::VISIT_BACK } else { "/signin" };
     let (Some(code), Some(state)) = (q.code, q.state) else {
-        return finish_redirect(&a, &headers, Err(Error::BadRequest("the SSO provider".into(), Some("provider"))), "/signin".into(), true, "", &who).await;
+        return finish_redirect(&a, &headers, Err(Error::BadRequest("the SSO provider".into(), Some("provider"))), back.into(), true, "", &who).await;
     };
-    let browser = roll_auth::cookie(&headers, a.config.oauth_cookie()).map(str::to_string);
-    let done = a.sso_callback(&id, &code, &state, browser).await;
+    let done = a.sso_callback(&id, &code, &state, [signin, visit]).await;
     if let Err(e) = &done {
         tracing::info!(connection = %id, error = %e, "accounts: an SSO sign-in failed");
     }
-    finish_redirect(&a, &headers, done, "/signin".into(), true, &method, &who).await
+    finish_redirect(&a, &headers, done, back.into(), true, &method, &who).await
 }
 
 async fn list_sso(State(a): S, me: Me, op: Op) -> Result<Response> {

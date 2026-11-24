@@ -242,7 +242,8 @@ export function secretsApi(project: string) {
     /** `signing_secret`: for a signed kind, shown once. */
     createSync: (s: NewSync) => req<Sync & { signing_secret?: string }>("POST", `${P}/syncs`, s),
     previewSync: (s: NewSync) => req<SyncPreview>("POST", `${P}/syncs/preview`, s),
-    deleteSync: (id: string) => req<null>("DELETE", `${P}/syncs/${enc(id)}`),
+    /** `remove`: a certificate sync deletes what it pushed at the target first (and stays if that fails). */
+    deleteSync: (id: string, remove = false) => req<null>("DELETE", `${P}/syncs/${enc(id)}${qs({ remove: remove ? "true" : undefined })}`),
     /** `paused: false` resumes a sync a cut-off paused. */
     setSyncPaused: (id: string, paused: boolean) => req<Sync>("PATCH", `${P}/syncs/${enc(id)}`, { paused }),
     /** Pushes every key now; 409 `running` while another push holds it. */
@@ -307,7 +308,7 @@ export function secretsApi(project: string) {
     cas: () => req<Ca[]>("GET", `${P}/cas`),
     addCa: (c: { name: string; domains: string[]; allow_ip?: boolean; max_days?: number; intermediate?: boolean }) => req<Ca>("POST", `${P}/cas`, c),
     /** An intermediate's certificate, signed by the customer's root, and the chain up to that root (PEM): the CA becomes active. */
-    installCaChain: (id: string, b: { certificate: string; chain?: string }) => req<Ca>("PUT", `${P}/cas/${enc(id)}/chain`, b),
+    installCaChain: (id: string, b: { certificate: string; chain?: string; unconstrained?: boolean }) => req<Ca>("PUT", `${P}/cas/${enc(id)}/chain`, b),
     deleteCa: (id: string) => req<null>("DELETE", `${P}/cas/${enc(id)}`),
     /** SSH CAs (ssh links): servers trust their public keys. */
     sshCas: () => req<SshCa[]>("GET", `${P}/ssh-cas`),

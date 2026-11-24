@@ -645,6 +645,8 @@ impl Secrets {
         // An intermediate CA (pki.rs): its CSR while it's pending, then the certificates above it.
         db.add_column("cas", "csr", "TEXT")?;
         db.add_column("cas", "chain", "TEXT")?;
+        // An intermediate installed without name constraints within its domains (pki.rs).
+        db.add_column("cas", "unconstrained", "INTEGER")?;
         // ACME on a CA (acme.rs): whether its bindings' names are pre-authorized.
         db.ensure_schema(acme::SCHEMA)?;
         db.add_column("cas", "acme_preauthorize", "INTEGER")?;

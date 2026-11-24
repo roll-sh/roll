@@ -1710,6 +1710,10 @@ static ROWS: &[Row] = &[
     row("PATCH", "/v1/apps/services/{id}/environments/{env}/", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")),
     row("DELETE", "/v1/apps/services/{id}/environments/{env}/", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")),
     row("DELETE", "/v1/apps/services/{id}/environments/{env}/domains/{host}", "apps", D, one(PG, "service")).env(EnvFrom::Param("env")),
+    // Who's signed in to a gated environment (emails of a provider's visitors), and ending one's
+    // session: it only takes access away.
+    row("GET", "/v1/apps/services/{id}/environments/{env}/visitors", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("DELETE", "/v1/apps/services/{id}/environments/{env}/visitors/{visitor}", "apps", W, one(PG, "service")).env(EnvFrom::Param("env")),
     // A volume's backups: making one changes nothing the app sees (write, production too);
     // restoring one replaces the volume's files (delete, as restoring over a branch is).
     row("POST", "/v1/apps/services/{id}/environments/{env}/volume/backups", "apps", W, one(PG, "service")).env(EnvFrom::Param("env")),

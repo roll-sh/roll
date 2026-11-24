@@ -2161,7 +2161,7 @@ async fn a_notes_element_is_cropped_by_the_next_screenshot() {
     let mut png = Vec::new();
     image::RgbaImage::new(4, 4).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
     *e.apps.shot.lock() = Some(png.clone());
-    let note = |id: &str, selector: &str| roll_previews::notes::Note { id: id.into(), path: "/".into(), selector: selector.into(), note: "look".into(), by: "ada".into(), at: 1, replies: Vec::new(), crop: false };
+    let note = |id: &str, selector: &str| roll_previews::notes::Note { id: id.into(), path: "/".into(), selector: selector.into(), note: "look".into(), by: "ada".into(), at: 1, replies: Vec::new(), crop: false, crop_as: None, seen: Default::default() };
     e.code.feedback.lock().insert("chg_cr".into(), vec![note("rv_h1", "body > h1"), note("rv_gone", "#missing"), note("rv_bad", "h1 { color: red }")]);
     e.code.open(change("chg_cr", 4));
     e.engine.pass().await.unwrap();
@@ -2176,7 +2176,7 @@ async fn a_notes_element_is_cropped_by_the_next_screenshot() {
     }
     let crop_of = |id: &str| listed.iter().find(|n| n.id == id).map(|n| n.crop);
     assert_eq!((crop_of("rv_h1"), crop_of("rv_gone"), crop_of("rv_bad")), (Some(true), Some(false), Some(false)));
-    assert_eq!(e.engine.store.note_crop(&p.id, "rv_h1").unwrap(), Some(png));
+    assert_eq!(e.engine.store.note_crop(&p.id, "rv_h1").unwrap(), Some((png, None)), "desktop width: the note says nothing of its viewport");
     assert_eq!(*e.apps.crops_asked.lock(), ["rv_h1", "rv_gone"], "a selector roll refuses is never sent to the page");
     // The next head's run asks only for what has no picture yet.
     e.code.edit("chg_cr", |c| c.head = "cs_5a".into());
@@ -2404,7 +2404,7 @@ async fn a_pages_notes_by_its_environment_name() {
     e.code.open(change("chg_n", 4));
     e.engine.pass().await.unwrap();
     let p = e.engine.store.row_by_change("chg_n").unwrap().unwrap();
-    let note = |path: &str, text: &str| roll_previews::notes::Note { id: format!("rv_{text}"), path: path.into(), selector: "h1".into(), note: text.into(), by: "ada".into(), at: 1, replies: Vec::new(), crop: false };
+    let note = |path: &str, text: &str| roll_previews::notes::Note { id: format!("rv_{text}"), path: path.into(), selector: "h1".into(), note: text.into(), by: "ada".into(), at: 1, replies: Vec::new(), crop: false, crop_as: None, seen: Default::default() };
     e.code.feedback.lock().insert("chg_n".into(), vec![note("/", "Too big"), note("/about", "Typo")]);
     let env_name = roll_previews::branch_name(&p.id);
     let got = e.engine.notes_for(&env_name, "/").await.unwrap();
@@ -2419,6 +2419,57 @@ async fn a_pages_notes_by_its_environment_name() {
     assert_eq!(*e.code.comments.lock(), [("chg_n".to_string(), "**Reply on the preview** · `rv_Too big`\n\nResolved.".to_string(), "bob".to_string(), false)]);
     assert_eq!(e.engine.open_notes(&p.id).await.unwrap().len(), 1);
     assert!(e.engine.resolve_note(&p.id, "rv_someone else's", "bob").await.is_err());
+}
+
+/// Mail about notes (Vercel's comment notifications): a new note to the change's author, a
+/// reply and a resolve to the note's author, each once, to people only (not a guest, not
+/// whoever wrote it), kept to try again when it couldn't go, and none with the project's
+/// `note_mail` off.
+#[tokio::test]
+async fn a_notes_people_are_told_by_mail() {
+    struct Mailbox(parking_lot::Mutex<Vec<(String, String)>>, std::sync::atomic::AtomicUsize);
+    impl roll_previews::ports::Visitors for Mailbox {
+        fn may_open(&self, _: &str, _: &str, _: &str) -> bool {
+            false
+        }
+        fn mail(&self, handle: &str, _project: &str, subject: &str, _text: &str) -> anyhow::Result<bool> {
+            // The first one fails: tried again.
+            if self.1.fetch_add(1, Ordering::SeqCst) == 0 {
+                anyhow::bail!("SES is down");
+            }
+            self.0.lock().push((handle.into(), subject.into()));
+            Ok(true)
+        }
+    }
+    let e = env(json!({ "enabled": true }));
+    e.code.open(change("chg_m", 3));
+    e.engine.pass().await.unwrap();
+    let mailbox = Arc::new(Mailbox(Default::default(), Default::default()));
+    let _ = e.engine.visitors.set(mailbox.clone());
+    let note = "**Feedback on the preview** · `/cart`\n\nThe total is wrong";
+    let reply = |text: &str| format!("**Reply on the preview** · `rv_n`\n\n{text}");
+    e.engine.tell_on_review("chg_m", "rv_n", "bob", note, "carol", None).unwrap();
+    e.engine.tell_on_review("chg_m", "rv_n", "bob", note, "carol", None).unwrap();
+    e.engine.tell_on_review("chg_m", "rv_r1", "carol", &reply("Fixed in the next push"), "carol", Some("bob")).unwrap();
+    e.engine.tell_on_review("chg_m", "rv_r2", "bob", &reply("Thanks"), "carol", Some("bob")).unwrap();
+    e.engine.tell_on_review("chg_m", "rv_r3", "carol", &reply("Resolved."), "carol", Some("guest:Ada")).unwrap();
+    e.engine.tell_on_review("chg_m", "rv_x", "bob", "LGTM", "carol", None).unwrap();
+    e.engine.tend_tells().await;
+    // One went; the other couldn't, and waits for its retry, one attempt counted.
+    let p = e.engine.store.row_by_change("chg_m").unwrap().unwrap();
+    let (sent, waiting) = (mailbox.0.lock().clone(), e.engine.store.pending_tells(&p.id).unwrap());
+    assert_eq!((sent.len(), waiting.len()), (1, 1), "the note's and the reply's, once each: {sent:?} {waiting:?}");
+    let mut both: Vec<&str> = sent.iter().map(|(to, _)| to.as_str()).chain(waiting.iter().map(|(to, _)| to.as_str())).collect();
+    both.sort();
+    assert_eq!(both, ["bob", "carol"], "the change's author of the note, the note's author of the reply");
+    assert_eq!(waiting[0].1, 1);
+    assert!(sent.iter().all(|(to, s)| (to == "carol" && s.contains("bob left a note")) || (to == "bob" && s.contains("carol replied"))), "{sent:?}");
+    // Off for the project: nothing more.
+    let mut s = e.engine.store.settings(&e.project).unwrap();
+    s.note_mail = false;
+    e.engine.store.put_settings(&e.project, &s).unwrap();
+    e.engine.tell_on_review("chg_m", "rv_y", "dan", note, "carol", None).unwrap();
+    assert_eq!(e.engine.store.pending_tells(&p.id).unwrap().len(), 1, "nothing more queued");
 }
 
 /// A guest's note through a share link that takes notes: on the change as `guest:<name>`, its
@@ -2450,7 +2501,7 @@ async fn a_share_links_guest_leaves_notes_as_a_guest() {
     }
     assert!(matches!(e.engine.guest_note(&p.id, &open, &note).await, Err(roll_previews::Error::Conflict(_))), "ten an hour per link");
     // What a guest sees: their link's notes only.
-    let theirs = roll_previews::notes::Note { id: "rv_c1".into(), path: "/pricing".into(), selector: "button.buy".into(), note: "Too small".into(), by: "guest:Ada".into(), at: 1, replies: Vec::new(), crop: false };
+    let theirs = roll_previews::notes::Note { id: "rv_c1".into(), path: "/pricing".into(), selector: "button.buy".into(), note: "Too small".into(), by: "guest:Ada".into(), at: 1, replies: Vec::new(), crop: false, crop_as: None, seen: Default::default() };
     let team = roll_previews::notes::Note { id: "rv_team".into(), by: "bob".into(), ..theirs.clone() };
     e.code.feedback.lock().insert("chg_g".into(), vec![theirs, team]);
     let seen: Vec<String> = e.engine.guest_notes_of(&p.id, &open.id, "/pricing").await.unwrap().into_iter().map(|n| n.id).collect();

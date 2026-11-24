@@ -444,6 +444,8 @@ fn apps_area(method: &str, path: &str) -> Area {
             "analytics" | "app-metrics" | "errors" | "logs" | "metrics" | "routes" | "slo" | "traces" | "usage" | "vitals" | "push" | "fetch" | "advice" => "observe",
             "deploys" | "promote" | "redeploy" | "rollback" | "pending" | "diff" | "jobs" | "runs" | "restart" | "sleep" | "wake" | "instances" | "cache" | "sandboxes" => "deploy",
             "private-network" => "configure",
+            "visitors" if read => "observe",
+            "visitors" => "configure",
             "variables" | "domains" | "forms" | "volume" | "config" => "configure",
             _ => return Area::Unplaced,
         },
@@ -1274,7 +1276,7 @@ static TOOLS: &[Tool] = &[
     t("secrets_compare", "Compare environments", "Which keys differ between two environments (missing, or a different value by fingerprint; never values).", "secrets", "GET", "/v1/secrets/projects/{project}/compare", &[SECRET_PROJECT, qreq("from", "Environment"), qreq("to", "Environment"), q("path", Ty::Str, "Folder")]),
     t("secrets_rotate", "Rotate a secret", "Make a new value for a secret and switch to it: a generated one, or a managed link's (a database user's password, a cloud key) made where it lives.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/rotate", &[SECRET_PROJECT, ENV, req("name", "Secret name"), q("path", Ty::Str, "Folder")]).open_world().destructive(),
     t("secrets_promote", "Promote secrets", "Copy an environment's secrets into this one (all, or some keys). Into a protected environment it opens a change request for a person instead.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/promote", &[SECRET_PROJECT, ENV, qreq("from", "The environment to copy from"), b("keys", Ty::Arr, "Only these keys"), b("path", Ty::Str, "Folder"), b("message", Ty::Str, "Why")]),
-    t("secrets_list_requests", "Change requests", "An environment's change requests (proposed changes waiting on review).", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/requests", &[SECRET_PROJECT, ENV, q("state", Ty::Str, "open, approved, rejected, applied, closed or stale")]),
+    t("secrets_list_requests", "Change requests", "An environment's change requests (proposed changes waiting on review), newest first. With limit or before, the answer is {requests, next}: pass next as before for the page after.", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/requests", &[SECRET_PROJECT, ENV, q("state", Ty::Choice(&["open", "approved", "rejected", "applied", "closed", "stale"]), "Only requests in this state"), q("limit", Ty::Int, "At most this many (1-200)"), q("before", Ty::Str, "The page after: the last page's next")]),
     t("secrets_get_request", "Get a change request", "One change request on a protected environment: what it changes (keys, fingerprints, never values), who asked, its reviews and whether its approvals are met.", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/requests/{id}", &[SECRET_PROJECT, ENV, req("id", "Request id")]),
     t("secrets_apply_request", "Apply an approved change request", "Apply a change request whose approvals are met, as one change. Applying one that isn't approved (bypass) is a person's: not here.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/requests/{id}/apply", &[SECRET_PROJECT, ENV, req("id", "Request id")]),
     t("secrets_close_request", "Close a change request", "Withdraw a change request without applying it.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/requests/{id}/close", &[SECRET_PROJECT, ENV, req("id", "Request id")]),
@@ -1639,6 +1641,8 @@ static TOOLS: &[Tool] = &[
     t("apps_list_domains", "List domains", "An environment's domains.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/domains", &[SERVICE, ENV]),
     t("apps_add_domain", "Add a domain", "Point a domain at an environment.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/domains", &[SERVICE, ENV, breq("hostname", Ty::Str, "Host name")]),
     t("apps_remove_domain", "Remove a domain", "Remove a domain.", "apps", "DELETE", "/v1/apps/services/{service}/environments/{env}/domains/{host}", &[SERVICE, ENV, req("host", "Host name")]),
+    t("apps_visitors", "Who's signed in", "Who's signed in to a sign-in-gated environment now, newest first: each session's id, who (a provider's verified email or a roll person's id), how (github, google, sso or roll), the access.sso entry that let them in, since and until.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/visitors", &[SERVICE, ENV]),
+    t("apps_end_visit", "Sign a visitor out", "End one visitor's session in a sign-in-gated environment now (its id from apps_visitors): they sign in again to come back, if access still lets them.", "apps", "DELETE", "/v1/apps/services/{service}/environments/{env}/visitors/{visitor}", &[SERVICE, ENV, req("visitor", "The session's id, from apps_visitors")]),
     t("apps_update_domain", "Change a domain", "Redirect a domain to another hostname of the same environment (redirect_to; null serves the app again; no loops or chains), or serve another of the app's ports on it (port; null the main one). A field left out stays.", "apps", "PATCH", "/v1/apps/services/{service}/environments/{env}/domains/{host}", &[SERVICE, ENV, req("host", "Host name"), bnull("redirect_to", Ty::Str, "Another hostname of this environment to redirect to (clear it: serve the app)"), bnull("port", Ty::Int, "Another of the app's ports (clear it: the main one)")]),
     t("apps_preview_domain", "A project's preview domain", "The wildcard a project's preview environments answer under (each by its preview_host), with its DNS state and TLS; 404 when it has none.", "apps", "GET", "/v1/apps/projects/{project}/preview-domain", &[req("project", "Workspace project")]),
     t("apps_set_preview_domain", "Set a project's preview domain", "Give a project's preview environments a wildcard of its own (*.preview.example.com; a new one replaces it): answers the DNS record to add, then apps_verify_preview_domain.", "apps", "POST", "/v1/apps/projects/{project}/preview-domain", &[req("project", "Workspace project"), breq("hostname", Ty::Str, "A wildcard, *.preview.example.com")]),
@@ -1754,6 +1758,7 @@ static TOOLS: &[Tool] = &[
             b("max_bytes", Ty::Int, "At most this much branched data"),
             b("max_usd_month", Ty::Num, "New previews wait once the month's cost reaches it (0: no cap)"),
             b("feedback", Ty::Bool, "A feedback button on its pages for people who came in through roll"),
+            b("note_mail", Ty::Bool, "Mail about notes: a new note to the change's author, a reply or a resolve to the note's author"),
             b("flags", Ty::Arr, "[{name, options}]: feature flags a reviewer may set for their own view from the page's toolbar (sent as x-roll-flags)"),
             b("warm", Ty::Bool, "Wake the services as soon as a new head is deployed"),
             b("crons", Ty::Bool, "Scheduled work (roll apps' crons, scheduled commands and calls) runs in previews too; off by default: deployed, schedule off"),
@@ -1818,8 +1823,6 @@ mod tests {
         const OPEN: &[(&str, &str)] = &[
             // Change names too (`create_token`), not only allow, deny or ask.
             ("access_audit_log", "decision"),
-            // Its route gains a cursor and its states with it (roll secrets).
-            ("secrets_list_requests", "state"),
         ];
         let word = |w: &str| !w.is_empty() && w.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "_-".contains(c));
         let mut prose = Vec::new();

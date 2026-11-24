@@ -705,6 +705,64 @@ async fn sso_signs_people_in_by_their_domain() {
     assert_eq!(a.status, StatusCode::ACCEPTED);
 }
 
+/// A visitor's sign-in through their organisation's SSO (roll apps' `access.sso` with `provider:
+/// "sso"`): a page asks for their work email, whose domain picks the connection; the provider's
+/// verified email and groups go to the product's gate, bound to the browser it began in, and no
+/// account or session of roll's comes of it.
+#[tokio::test]
+async fn a_visitor_signs_in_through_their_organisations_sso() {
+    struct Gate(Mutex<Vec<roll_accounts::Visitor>>);
+    #[async_trait::async_trait]
+    impl roll_accounts::VisitGate for Gate {
+        async fn admit(&self, _request: &str, who: &roll_accounts::Visitor) -> Result<String, String> {
+            self.0.lock().unwrap().push(who.clone());
+            Ok("https://wiki.apps.test/__roll/visit?ticket=t".into())
+        }
+        async fn plausible(&self, request: &str) -> bool {
+            request == "req"
+        }
+    }
+    let env = Env::new().await;
+    let idp = fake_idp().await;
+    let issuer = idp.base.lock().unwrap().clone();
+    let txt = Arc::new(Txt::default());
+    env.accounts.set_txt_lookup(txt.clone());
+    let conn = env.operator(Method::POST, "/v1/accounts/sso", json!({ "name": "Acme Okta", "issuer": issuer, "client_id": "roll-sso", "client_secret": "s3cret", "domains": ["acme.test"] })).await;
+    let id = conn.json["id"].as_str().unwrap().to_string();
+    txt.0.lock().unwrap().insert("_roll-sso.acme.test".into(), vec![conn.json["dns"]["value"].as_str().unwrap().to_string()]);
+    env.operator(Method::POST, &format!("/v1/accounts/sso/{id}/verify"), json!({})).await;
+    let gate = Arc::new(Gate(Mutex::new(Vec::new())));
+    env.accounts.set_visit_gate(gate.clone());
+    assert_eq!(env.accounts.visit_url("sso", "req", false).as_deref(), Some(format!("{API}/v1/accounts/sso/visit?r=req").as_str()));
+    let mut b = Browser::default();
+    // The page asks for their email; one no connection answers for, or a request the product
+    // didn't make, stays on it (and costs no throttle or state).
+    for q in ["r=req", "r=req&email=eve%40elsewhere.test", "r=forged&email=ann%40acme.test"] {
+        let a = env.call(&mut b, Method::GET, &format!("/v1/accounts/sso/visit?{q}"), None).await;
+        assert_eq!((a.status, a.headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok())), (StatusCode::OK, Some("text/html; charset=utf-8")));
+    }
+    let a = env.call(&mut b, Method::GET, "/v1/accounts/sso/visit?r=req&email=Ann%40Acme.test", None).await;
+    assert_eq!(a.status, StatusCode::SEE_OTHER);
+    let q: HashMap<String, String> = url::Url::parse(location(&a)).unwrap().query_pairs().into_owned().collect();
+    assert_eq!(q["login_hint"], "ann@acme.test");
+    idp.seen.lock().unwrap().insert(q["state"].clone(), (q["nonce"].clone(), q["code_challenge"].clone()));
+    *idp.next.lock().unwrap() = json!({ "sub": "00u-ann", "email": "ann@acme.test", "groups": ["Eng", "Ops"] });
+    let callback = url::Url::parse(&q["redirect_uri"]).unwrap().path().to_string();
+    // Another browser with the link: not this sign-in.
+    let stolen = env.call(&mut Browser::default(), Method::GET, &format!("{callback}?code={0}&state={0}", q["state"]), None).await;
+    assert_eq!(stolen.status, StatusCode::SEE_OTHER, "an ordinary failed sign-in, not the visit");
+    assert!(gate.0.lock().unwrap().is_empty());
+    let a = env.call(&mut b, Method::GET, "/v1/accounts/sso/visit?r=req&email=ann%40acme.test", None).await;
+    let q: HashMap<String, String> = url::Url::parse(location(&a)).unwrap().query_pairs().into_owned().collect();
+    idp.seen.lock().unwrap().insert(q["state"].clone(), (q["nonce"].clone(), q["code_challenge"].clone()));
+    let done = env.call(&mut b, Method::GET, &format!("{callback}?code={0}&state={0}", q["state"]), None).await;
+    assert_eq!((done.status, location(&done)), (StatusCode::SEE_OTHER, "https://wiki.apps.test/__roll/visit?ticket=t"));
+    assert!(b.cookies.is_empty(), "no session of roll's, and the visit's cookie gone: {:?}", b.cookies);
+    let who = gate.0.lock().unwrap()[0].clone();
+    assert_eq!((who.provider.as_str(), who.email.as_str(), who.groups.clone()), ("sso", "ann@acme.test", vec!["eng".to_string(), "ops".to_string()]));
+    assert_eq!(who.subject, format!("{id}:00u-ann"));
+}
+
 /// SCIM (docs/accounts.md, "SCIM"): a connection's token lets its provider create people in its
 /// verified domains (never admins, never elsewhere), find them by userName, and deactivate them,
 /// which ends their sessions at once; a new token or a removed connection stops the old one.

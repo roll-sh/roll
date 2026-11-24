@@ -1,6 +1,6 @@
 import { Lock, Rocket, Trash2, Unlock } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { appsApi, formatFirewall, formatHeaders, parseAllowList, parseFirewall, parseHeaders, PRODUCTION, shortSha, type Backup, type Environment, type EnvRunField, type Service, type Snippet, formatRoutes, parseRoutes } from "@/lib/apps-api";
+import { appsApi, formatFirewall, formatHeaders, parseAllowList, parseFirewall, parseHeaders, PRODUCTION, shortSha, type Backup, type Environment, type EnvRunField, type Service, type Snippet, type Sso, type Visitor, formatRoutes, parseRoutes } from "@/lib/apps-api";
 import { Field } from "../redis/shared";
 import { CompareSection } from "./env-compare";
 import { btn, Confirm, CopyButton, danger, input, Panel, primary, useCopy } from "../ui";
@@ -77,7 +77,7 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
   const [freezeWhy, setFreezeWhy] = useState("");
   const [password, setPassword] = useState("");
   // Who a provider lets in (`access.sso`): `@acme.com, org:acme`.
-  const [ssoProvider, setSsoProvider] = useState<"github" | "google">(env.sso?.provider ?? "google");
+  const [ssoProvider, setSsoProvider] = useState<Sso["provider"]>(env.sso?.provider ?? "google");
   const [ssoAllow, setSsoAllow] = useState(env.sso?.allow.join(", ") ?? "");
   const [hook, setHook] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -567,10 +567,10 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
         <div className="space-y-3 px-5 py-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <p className="text-[13px] font-medium">{env.sso ? `Signed in with ${env.sso.provider === "github" ? "GitHub" : "Google"}` : env.signed_in ? "Signed in to roll" : env.password ? "Password" : env.private ? "Private" : "Public"}</p>
+              <p className="text-[13px] font-medium">{env.sso ? `Signed in with ${SSO_NAME[env.sso.provider]}` : env.signed_in ? "Signed in to roll" : env.password ? "Password" : env.private ? "Private" : "Public"}</p>
               <p className="mt-1 text-[12px] text-muted">
                 {env.sso
-                  ? `Only people ${env.sso.provider === "github" ? "GitHub" : "Google"} vouches for get in, roll's or not: ${env.sso.allow.join(", ")}. Anyone else is sent to sign in first, before anything wakes.`
+                  ? `Only people ${SSO_NAME[env.sso.provider]} vouches for get in, roll's or not: ${env.sso.allow.join(", ")}. Anyone else is sent to sign in first, before anything wakes.`
                   : env.signed_in
                   ? "Only people signed in to roll who can open this project get in: anyone else is sent to sign in first, before anything wakes."
                   : env.password
@@ -622,15 +622,16 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
             className="flex flex-wrap items-center gap-2"
             onSubmit={(e) => {
               e.preventDefault();
-              const allow = ssoAllow.split(/[\s,]+/).filter(Boolean);
+              const allow = ssoAllowList(ssoAllow);
               void runner.run("access", () => appsApi.putEnvironment(service.id, env.name, { access: { sso: { provider: ssoProvider, allow } } })).then((r) => r && setLink(null));
             }}
           >
-            <select value={ssoProvider} onChange={(e) => setSsoProvider(e.target.value as "github" | "google")} aria-label="Sign in with" className={`${input} text-[12px]`}>
+            <select value={ssoProvider} onChange={(e) => setSsoProvider(e.target.value as Sso["provider"])} aria-label="Sign in with" className={`${input} text-[12px]`}>
               <option value="google">Google</option>
               <option value="github">GitHub</option>
+              <option value="sso">Their organisation's SSO</option>
             </select>
-            <input value={ssoAllow} onChange={(e) => setSsoAllow(e.target.value)} placeholder={ssoProvider === "github" ? "@acme.com, org:acme, ada@x.com" : "@acme.com, ada@x.com"} aria-label="Who gets in" className={`${input} min-w-48 flex-1 font-mono text-[12px]`} />
+            <input value={ssoAllow} onChange={(e) => setSsoAllow(e.target.value)} placeholder={ssoProvider === "github" ? "@acme.com, org:acme, ada@x.com" : ssoProvider === "sso" ? "@acme.com, group:Engineering@acme.com" : "@acme.com, ada@x.com"} aria-label="Who gets in" className={`${input} min-w-48 flex-1 font-mono text-[12px]`} />
             <button type="submit" className={btn} disabled={busy || !ssoAllow.trim()}>
               {env.sso ? "Change who" : "Let them sign in"}
             </button>
@@ -644,6 +645,7 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
               </div>
             </div>
           )}
+          {(env.sso || env.signed_in) && <SignedInNow service={service.id} env={env.name} />}
         </div>
 
         {service.run.type === "web" && service.run.public !== false && (
@@ -1181,4 +1183,58 @@ function ConfigRow({ service, env, runner, busy }: { service: string; env: Envir
       {bad && <p className="text-[12px] text-danger">{bad}</p>}
     </div>
   );
+}
+
+/** How the environment panel names each `access.sso` provider. */
+const SSO_NAME: Record<Sso["provider"], string> = { github: "GitHub", google: "Google", sso: "their organisation's SSO" };
+
+/** "Who gets in" as `allow` entries: split on commas and new lines, and on spaces too except in a
+ *  `group:` entry (a provider's group name can hold them). */
+/** Who's signed in to a gated environment now (Cloudflare Access's sessions), each with Sign out. */
+function SignedInNow({ service, env }: { service: string; env: string }) {
+  const [visitors, setVisitors] = useState<Visitor[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    appsApi.visitors(service, env).then(
+      (v) => live && setVisitors(v),
+      () => live && setVisitors([]),
+    );
+    return () => {
+      live = false;
+    };
+  }, [service, env]);
+  if (!visitors?.length) return null;
+  const end = (v: Visitor) =>
+    appsApi.endVisit(service, env, v.id).then(
+      () => setVisitors((vs) => (vs ?? []).filter((x) => x.id !== v.id)),
+      (e: unknown) => setError(e instanceof Error ? e.message : String(e)),
+    );
+  return (
+    <div className="rounded-lg border border-line">
+      <p className="border-b border-line px-3 py-2 text-[12px] text-muted">Signed in now · {visitors.length}</p>
+      <ul className="max-h-60 divide-y divide-line overflow-auto">
+        {visitors.map((v) => (
+          <li key={v.id} className="flex items-center gap-3 px-3 py-1.5 text-[12px]">
+            <span className="min-w-0 flex-1 truncate font-mono" title={v.entry ? `let in by ${v.entry}` : undefined}>
+              {v.who}
+            </span>
+            <span className="text-subtle">{v.how}</span>
+            <button type="button" className="rounded-md border border-line px-2 py-0.5 text-[11.5px] hover:bg-panel-2" onClick={() => void end(v)}>
+              Sign out
+            </button>
+          </li>
+        ))}
+      </ul>
+      {error && <p className="border-t border-line px-3 py-2 text-[12px] text-danger">{error}</p>}
+    </div>
+  );
+}
+
+export function ssoAllowList(text: string): string[] {
+  return text
+    .split(/[,\n]+/)
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .flatMap((p) => (p.toLowerCase().startsWith("group:") ? [p] : p.split(/\s+/)));
 }
