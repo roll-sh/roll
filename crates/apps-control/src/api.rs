@@ -120,6 +120,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/variables/values"), get(reveal))
         .route(&format!("{env}/logs"), get(env_logs))
         .route(&format!("{env}/metrics"), get(metrics))
+        .route(&format!("{env}/advice"), get(advice))
         .route(&format!("{env}/slo"), get(slo))
         .route(&format!("{env}/routes"), get(routes))
         .route(&format!("{env}/analytics"), get(analytics))
@@ -1547,6 +1548,11 @@ struct FetchQuery {
 /// deployed): `{status, url, headers, body, truncated}`.
 async fn fetch_page(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<FetchQuery>) -> R {
     ok(apps.fetch_page(&id, &env, q.path.as_deref().unwrap_or("/"), q.head.unwrap_or(false), q.deployment.as_deref()).await?)
+}
+
+/// What its last week says about its settings (`advice.rs`).
+async fn advice(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
+    ok(apps.advice(&id, &env).await?)
 }
 
 async fn trace(State(apps): S, Path((id, env, trace)): Path<(String, String, String)>) -> R {
