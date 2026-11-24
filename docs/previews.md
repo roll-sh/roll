@@ -235,6 +235,23 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
 - **Reset**: `reset_every` (`0` off, or hours) re-branches every data resource from its parent's
   current state on a schedule. `POST /v1/previews/{id}/reset` does it now, for all resources or
   the ones named.
+- **Restore points** (Neon's snapshots, Railway's volume backups): the preview's data saved as it
+  is now and put back later, after a test run, a demo or an agent changed it. `POST
+  …/restore-points` `{label?}` saves one: a copy-on-write branch of each branch whose product
+  puts a branch back in place (`Brancher::restores`: Postgres, pg-control's reset with `from`,
+  so the branch keeps its endpoint, `DATABASE_URL` and role), at most 3 per preview. `POST
+  …/restore-points/{point}/restore` puts the data back on the next converge, as a reset does:
+  the services sleep meanwhile, and the seed doesn't run again (the point holds what it made).
+  A point is masked as the branch was. New masking rules delete the points masked by the old
+  ones, and a point is never put back under rules other than its own. A resource moving to
+  structure-only, or no longer wanted, takes its points with it, and the preview's deletion
+  deletes them all. Saving and putting back say who asked in its activity. Products that only
+  copy (Redis, search) aren't saved: putting their copy in would change the branch's id, which
+  their delete guards check. The sheet's Data branches has them (Save now, Restore, Delete);
+  `roll preview points <id> [--save [label] | --restore <point> | --delete <point>]`. Checked
+  live in `scripts/preview-cost.sh` (a row written after the point is gone once it's put
+  back, on the same `DATABASE_URL`). `a_restore_point_puts_the_data_back_without_seeding_again`,
+  pg-control's `branches_are_isolated_copies` (a reset from another branch).
 - **Deletion**: when the change lands or closes, or after `ttl` without a push or a visit
   (7 days by default). `DELETE /v1/previews/{id}` deletes it at once. Deletion removes, in this
   order: services, the secrets environment, then every data branch. Each step is idempotent, and
@@ -1768,6 +1785,11 @@ dismissed(change_id TEXT PRIMARY KEY, head TEXT NOT NULL, at INTEGER NOT NULL)
 spend(project_id TEXT NOT NULL, month INTEGER NOT NULL, usd REAL NOT NULL, PRIMARY KEY (project_id, month))
 activity(preview_id TEXT NOT NULL, at INTEGER NOT NULL, seq INTEGER NOT NULL, message TEXT NOT NULL,
          PRIMARY KEY (preview_id, seq))   -- newest 200 per preview
+restore_points(preview_id TEXT NOT NULL, point TEXT NOT NULL, label TEXT NOT NULL, by TEXT NOT NULL,
+               at INTEGER NOT NULL, kind TEXT NOT NULL, parent TEXT NOT NULL, name TEXT NOT NULL,
+               ref TEXT NOT NULL, kept TEXT, source TEXT NOT NULL,
+               mask TEXT NOT NULL,         -- the masking rules' digest it was masked by
+               PRIMARY KEY (preview_id, point, kind, parent))   -- a row per branch it holds
 ```
 
 - A preview id is `pv_` followed by 12 random characters of lowercase base32. Times are unix
@@ -1802,6 +1824,10 @@ previews in it), the operator and admins see every project.
 | `POST /v1/previews/{id}/sleep` | | `Preview`: stop its services now |
 | `POST /v1/previews/{id}/wake` | | `Preview`: start its services now |
 | `POST /v1/previews/{id}/reset` | `{resources?: ["postgres:prj_…"]}` | `Preview`: re-branch from the parents |
+| `GET /v1/previews/{id}/restore-points` | | `{points: [{id, label, by, at, data}], max}`: oldest first, `data` the resources it holds (`postgres:prj_…`) |
+| `POST /v1/previews/{id}/restore-points` | `{label?}` (one line, 60 characters at most) | 201 `{id, label, by, at, data}`: its Postgres data saved now; 409 while it isn't ready, past `max`, or with nothing to save |
+| `POST /v1/previews/{id}/restore-points/{point}/restore` | | `Preview`: the data put back as the point left it, on its next converge (no seed); `delete`, as a reset is |
+| `DELETE /v1/previews/{id}/restore-points/{point}` | | 204 |
 | `GET /v1/previews/{id}/screenshot` | | `image/png`: the first service's page at the preview's head (404 when it has none); `?previous=1` the one before, `?view=phone` at a phone's width, `?base=1` the default branch's preview's, `?page=/pricing` another of `github.pages`, `?diff=base` or `?diff=previous` where it differs from that one or the one before (the page faded, changed pixels marked red) |
 | `GET /v1/previews/{id}/screenshot.png?exp=&sig=` | | `image/png` behind a signed, expiring link, without credentials (403 otherwise): the pull request comment's image; `&diff=base` under its own signature, the diff against main |
 | `GET`/`POST /v1/previews/{id}/shares` | `{hours}` (1–720) for a new one | `Share[]` (never a token), or 201 `Share` with `url`, the only time the link is shown; 409 for a public preview or past 20 live ones. A link works only while its maker (the person, or the person behind the token, that made it; not the operator's) may still open the project's previews: an account that still signs in, with a role that reveals a preview. Asked again at most every few minutes while it's used; one whose maker may not ends at once ("ada's share link ended: …" in the activity). `visit::tests::a_signed_in_person_gets_into_a_team_preview` |
@@ -2647,8 +2673,9 @@ Ranked by what a person notices first. Done so far:
 
 1. **Agents driving the preview in a browser, in review** (GitHub Copilot's Playwright): `POST
    …/try`, stateless steps and their picture (roll MCP's `previews_try`); roll apps services next.
-2. **Restore points for a preview's data** (Neon's snapshots): save the branches now, put them back
-   after a test run.
+2. **Restore points for a preview's data, in review** (Neon's snapshots): Postgres's branches
+   saved and put back in place (pg-control's reset `from`). Next for it: roll MCP's tools, and
+   the products that only copy (Redis, search) once their branch can be put back in place.
 3. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
