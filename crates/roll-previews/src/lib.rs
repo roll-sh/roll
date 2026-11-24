@@ -1125,6 +1125,10 @@ pub struct PageCheck {
     /// A page state's step that found nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step: Option<String>,
+    /// A page state's slowest click or typing, to the next paint (ms): Interaction to Next
+    /// Paint in the lab.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_ms: Option<u32>,
 }
 
 /// What a page's session found besides its picture: the first page's checks, for another page.
@@ -1140,6 +1144,9 @@ pub struct PageReport {
     /// taken as it was then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step: Option<String>,
+    /// Its slowest step's time to the next paint (ms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_ms: Option<u32>,
 }
 
 /// A page's checks against main's page at the same path.
@@ -1149,6 +1156,9 @@ pub struct PageAgainst {
     pub links_added: Option<u32>,
     pub seo_added: Option<u32>,
     pub text: Option<TextDiff>,
+    /// Main's same state's slowest step to the next paint (ms), when both timed one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_ms: Option<u32>,
 }
 
 impl PageReport {
@@ -1159,6 +1169,7 @@ impl PageReport {
             links_added: self.links.as_ref().zip(main.links.as_ref()).map(|(a, b)| a.added_since(b)),
             seo_added: self.a11y.as_ref().and_then(|a| a.seo.as_ref()).zip(main.a11y.as_ref().and_then(|a| a.seo.as_ref())).map(|(a, b)| a.added_since(b)),
             text: self.text.as_deref().zip(main.text.as_deref()).map(|(now, then)| crate::visual::text_diff(then, now)),
+            step_ms: main.step_ms.filter(|_| self.step_ms.is_some()),
         }
     }
 }
