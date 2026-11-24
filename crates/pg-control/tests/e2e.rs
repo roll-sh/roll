@@ -610,7 +610,6 @@ async fn branches_are_isolated_copies() {
     let d = h.connect(&db, &dev_ep.id).await;
     assert_eq!(count(&d, "SELECT count(*) FROM t WHERE id > 100000").await, 1, "the point's rows: 100002, not 100003");
     assert!(h.connect_as(&dev.id, &password, &dev_ep.id).await.is_ok(), "its role, same password, after a reset from a point");
-    drop(d);
     h.wait_for_base(&dev.id).await;
 
     // Structure only (previews' `schema` mode): emptied before it exists, so nothing serves or
