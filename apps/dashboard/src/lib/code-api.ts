@@ -293,6 +293,8 @@ export interface Blocker {
   fingerprint?: string;
   /** `secret_unstored`: whether it works, as its provider answered (roll secrets' validity checks, when the project has them on). */
   validity?: CredentialValidity;
+  /** `secret_leak`: where a person may rotate the key (a managed credential, in a project that doesn't rotate leaked keys on its own). */
+  rotate?: { environment: string; folder: string }[];
 }
 
 /** A credential's validity check (docs/secrets.md, "Is it live?"): never its value. */

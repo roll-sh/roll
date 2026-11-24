@@ -2234,13 +2234,13 @@ impl code_control::SecretEnv for ForCode {
         .await?
     }
 
-    async fn leaks(&self, repo: &str, candidates: Vec<String>) -> anyhow::Result<Vec<(usize, String, String, String)>> {
+    async fn leaks(&self, repo: &str, candidates: Vec<String>) -> anyhow::Result<Vec<code_control::FoundLeak>> {
         let (secrets, ws) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting"))?;
         let r = repo.to_string();
         tokio::task::spawn_blocking(move || {
             let mut out = Vec::new();
             for p in ws.projects_of(roll_workspace::Kind::Repo.as_str(), &r)?.into_iter().filter(|p| secrets.counts_for_repo(p, &r)) {
-                out.extend(secrets.leaks_in_code(&p, &candidates, &r)?.into_iter().map(|(i, l)| (i, l.key, l.environment, l.path)));
+                out.extend(secrets.leaks_in_code(&p, &candidates, &r)?.into_iter().map(|(index, l, rotatable)| code_control::FoundLeak { index, key: l.key, environment: l.environment, folder: l.path, rotatable }));
             }
             Ok(out)
         })

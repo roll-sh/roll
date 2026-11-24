@@ -58,7 +58,9 @@ export type NewEnvironment = {
 /** `validity_checks`: whether credentials found in code are checked with their providers (docs/secrets.md, "Is it live?"). */
 /** What deleting the workspace project takes from roll secrets (`holds`: `null` for nothing), and how many days it stays recoverable. */
 export type Deletion = { window_days: number; holds: string | null };
-export type Overview = { project: string; environments: Environment[]; previews: number; history_days: number | null; validity_checks: "on" | "off"; deletion: Deletion };
+/** What a leaked managed key does (docs/secrets.md, "When a value leaks"): `managed` rotates it at once, `off` only reports it. */
+export type LeakRotate = "managed" | "off";
+export type Overview = { project: string; environments: Environment[]; previews: number; history_days: number | null; validity_checks: "on" | "off"; leaks: { rotate: LeakRotate }; deletion: Deletion };
 /** A credential to check: a found value and, for an AWS access key id, the secret access key next to it. */
 export type ValidityProbe = { value: string; pair?: string | null };
 /** What a credential's provider said: never its value. `invalid` is revoked, deleted or never real. */
@@ -274,8 +276,8 @@ export type ChangeRequest = {
   /** What it must pass: the environment's policy (no `path`) and each folder policy covering a key it changes. */
   gates: { path?: string; approvals: number; approvers?: string[]; approved: number }[];
   applied_seq: number | null;
-  /** What it does instead of changing keys: a protected environment's delete, kept for the recovery window once applied. */
-  action?: "delete_environment";
+  /** What it does instead of changing keys: a protected environment's delete, kept for the recovery window once applied, or a leaked key's rotation (its one item), with no grace for the leaked credential. */
+  action?: "delete_environment" | "rotate";
 };
 /** Something that stops working when an environment goes: a value elsewhere in the project that references it (`key`), or a folder here or in another project (`project`) that imports from it. Names only. */
 /** What stops working when an environment goes: a key referencing it, a folder importing it, a roll apps service or agents sandbox reading it, a sync of it, or an identity or token whose scope names it.

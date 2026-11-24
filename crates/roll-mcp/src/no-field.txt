@@ -3,6 +3,7 @@
 # tool's argument nor here (map it, or say why not), and on a line whose field a tool takes now.
 POST /v1/secrets/projects/{project}/environments/{env}/rollback bypass           an admin landing past a protected environment's approvals: a person's call
 POST /v1/secrets/projects/{project}/environments/{env}/requests/{id}/apply bypass   an admin landing past a protected environment's approvals: a person's call
+POST /v1/secrets/projects/{project}/leaks leaked                                 a report that the text was published: it can rotate the project's managed keys, a person's or a scanner's call (the tool checks what it would write)
 POST /v1/secrets/projects/{project}/transit key                                  key material brought in: a credential in a tool's arguments (roll makes one instead)
 POST /v1/secrets/projects/{project}/transit vault_version                        goes with a brought key (above)
 POST /v1/secrets/projects/{project}/transit/{name}/rotate key                    key material brought in: a credential in a tool's arguments (roll makes one instead)

@@ -309,16 +309,18 @@ async fn overview(State(s): S, Who(c): Who, Path(project): Path<String>) -> crat
         let previews = envs.iter().filter(|e| e.kind == crate::envs::Kind::Ephemeral).count();
         let history_days = s.history_days(&project)?;
         let validity_checks = if s.validity_checks(&project)? { "on" } else { "off" };
+        let leaks = json!({ "rotate": s.leak_rotate(&project)? });
         // What deleting the workspace project would take with it, and for how long it's recoverable.
         let deletion = s.deletion(&project)?;
-        Ok(json!({ "project": project, "environments": envs, "previews": previews, "history_days": history_days, "validity_checks": validity_checks, "deletion": deletion }))
+        Ok(json!({ "project": project, "environments": envs, "previews": previews, "history_days": history_days, "validity_checks": validity_checks, "leaks": leaks, "deletion": deletion }))
     })
     .await?;
     Ok(ok(v))
 }
 
-/// `{history_days?, validity_checks?}`: how long old values are kept (`null`: for good), and
-/// whether credentials found in code are checked with their providers (`"on"` or `"off"`).
+/// `{history_days?, validity_checks?, leaks?}`: how long old values are kept (`null`: for good),
+/// whether credentials found in code are checked with their providers (`"on"` or `"off"`), and
+/// what a leaked managed key does (`{rotate: "managed" | "off"}`).
 async fn project_settings(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
     let mut o: serde_json::Map<String, serde_json::Value> = body(&b)?;
     let days = match o.remove("history_days") {
@@ -334,11 +336,25 @@ async fn project_settings(State(s): S, Who(c): Who, Path(project): Path<String>,
         }),
         None => None,
     };
+    let leaks = match o.remove("leaks") {
+        Some(v) => {
+            let mut l = match v {
+                serde_json::Value::Object(l) => l,
+                _ => return Err(Error::BadRequest("leaks is {rotate: \"managed\" | \"off\"}".into())),
+            };
+            let rotate = l.remove("rotate").and_then(|r| r.as_str().and_then(crate::leaks::LeakRotate::parse));
+            match (rotate, l.keys().next()) {
+                (Some(r), None) => Some(r),
+                _ => return Err(Error::BadRequest("leaks is {rotate: \"managed\" | \"off\"}".into())),
+            }
+        }
+        None => None,
+    };
     if let Some(k) = o.keys().next() {
         return Err(Error::BadRequest(format!("unknown field {k}")));
     }
-    if days.is_none() && checks.is_none() {
-        return Err(Error::BadRequest("nothing to change: history_days, validity_checks".into()));
+    if days.is_none() && checks.is_none() && leaks.is_none() {
+        return Err(Error::BadRequest("nothing to change: history_days, validity_checks, leaks".into()));
     }
     let v = blocking(s, move |s| {
         let mut out = serde_json::Map::new();
@@ -347,6 +363,9 @@ async fn project_settings(State(s): S, Who(c): Who, Path(project): Path<String>,
         }
         if let Some(on) = checks {
             out.insert("validity_checks".into(), json!(if s.set_validity_checks(&project, on, &c)? { "on" } else { "off" }));
+        }
+        if let Some(rotate) = leaks {
+            out.insert("leaks".into(), json!({ "rotate": s.set_leak_rotate(&project, rotate, &c)? }));
         }
         Ok(out)
     })
@@ -1391,13 +1410,16 @@ async fn delete_sink(State(s): S, Who(c): Who, Path((project, id)): Path<(String
 #[serde(deny_unknown_fields)]
 struct Scan {
     candidates: Vec<String>,
+    /// The text was published: what it matches is a leak ("When a value leaks").
+    #[serde(default)]
+    leaked: bool,
 }
 
 async fn scan_leaks(State(s): S, Who(c): Who, Path(project): Path<String>, headers: HeaderMap, b: Bytes) -> crate::Result<Response> {
-    let Scan { candidates } = body(&b)?;
+    let Scan { candidates, leaked } = body(&b)?;
     // A credential guard's check of what a tool call would write (roll MCP): audited apart.
     let guard = headers.get("x-roll-guard").is_some_and(|v| v.as_bytes() == b"1");
-    Ok(ok(blocking(s, move |s| s.scan_as(&project, &candidates, &c, guard)).await?))
+    Ok(ok(blocking(s, move |s| s.scan_as(&project, &candidates, &c, guard, leaked)).await?))
 }
 
 async fn all_health(State(s): S, Who(c): Who) -> crate::Result<Response> {
