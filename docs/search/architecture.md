@@ -383,7 +383,9 @@ evaluator and search's catalogue rows. search adds no role checks of its own.
     rewritten to the id that name names, when that cluster is on the link's project's canvas and
     still the project's: at home there, owned by someone in it, or the operator's cluster in the
     operator's project (`Secrets::rekey_links`, audited as `link.rekey`). Any other stays as it is
-    and keeps failing visibly.
+    and keeps failing visibly. Only the current versions are rewritten: older versions of a secret
+    keep the cluster's name in their link, so rolling a key back to a version from before the
+    rekey brings the name back, and it fails visibly until it's linked by id again.
 
   A stranger's cluster dropped on the project's canvas reaches nobody through it, and a purged
   cluster leaves every canvas. A project still home to live clusters can't be deleted (409); when
