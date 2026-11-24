@@ -1,5 +1,5 @@
 import { HorizonMark } from "@roll/brand";
-import { Check, CircleHelp, ExternalLink, Rocket, RotateCcw, X } from "lucide-react";
+import { Check, CircleHelp, ExternalLink, Pin, PinOff, Rocket, RotateCcw, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { appsApi, FUNCTION_ROUTES, runFunctions, deploymentUrl, followChanges, followLog, formatMs, isPending, shortSha, stepDurations, TRIGGER_LABEL, type BuildStep, type Deployment, type DeployCommits, type Environment, type Explanation, type LogLine, type ScanSummary, type Vulnerability } from "@/lib/apps-api";
 import { btn, panel } from "../ui";
@@ -176,6 +176,17 @@ export function Deployments({
                     {d.error_detail && <p className="mt-1 line-clamp-3 break-words font-mono text-[11.5px] text-muted">{d.error_detail}</p>}
                   </div>
                   <div className="flex shrink-0 gap-1" onClick={(e) => e.stopPropagation()}>
+                    {d.image && !d.pruned_at && !isPending(d.status) && (
+                      <button
+                        className={`${btn} ${d.pinned_at ? "" : "opacity-0 group-focus-within:opacity-100 group-hover:opacity-100 max-md:opacity-100"}`}
+                        disabled={runner.busy !== null}
+                        aria-pressed={!!d.pinned_at}
+                        onClick={() => runner.run(`pin:${d.id}`, () => appsApi.pin(service, env.name, d.id, !d.pinned_at))}
+                        title={d.pinned_at ? "Pinned: never pruned, always one rollback away. Unpin" : "Keep it from pruning, so rolling back to it stays instant"}
+                      >
+                        {d.pinned_at ? <PinOff className="size-3.5" /> : <Pin className="size-3.5" />} {d.pinned_at ? "Pinned" : "Pin"}
+                      </button>
+                    )}
                     {isPending(d.status) && (
                       <button
                         className={btn}

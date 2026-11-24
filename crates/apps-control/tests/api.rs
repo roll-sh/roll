@@ -1343,9 +1343,13 @@ async fn old_deployments_are_pruned_past_what_an_environment_keeps() {
         let (_, d) = call(&w.api, "POST", &base, Some(json!({}))).await;
         assert_eq!(settled(&w, &id, "production", d["id"].as_str().unwrap()).await["status"], "failed");
     }
+    // A pinned one is never pruned, whatever its age.
+    let (st, p) = call(&w.api, "POST", &format!("{base}/{}/pin", deps[1]), None).await;
+    assert!(st == StatusCode::OK && p["pinned_at"].is_i64(), "{p}");
     w.apps.prune().await;
     let removed = w.fake.removed.lock().clone();
-    assert!(removed.contains(&old0) && removed.contains(&old1) && !removed.contains(&kept), "{removed:?}");
+    assert!(removed.contains(&old0) && !removed.contains(&old1) && !removed.contains(&kept), "{removed:?}");
+    assert_eq!(call(&w.api, "POST", &format!("{base}/{}/pin", deps[0]), None).await.0, StatusCode::CONFLICT, "a pruned one has nothing to pin");
     let (_, d0) = call(&w.api, "GET", &format!("{base}/{}", deps[0]), None).await;
     assert!(d0["pruned_at"].is_i64(), "{d0}");
     let (st, r) = call(&w.api, "POST", &format!("{base}/{}/rollback", deps[0]), Some(json!({}))).await;
@@ -1356,9 +1360,12 @@ async fn old_deployments_are_pruned_past_what_an_environment_keeps() {
     let last = page.as_array().unwrap().last().unwrap()["created_at"].as_i64().unwrap();
     let (_, older) = call(&w.api, "GET", &format!("{base}?before={last}"), None).await;
     assert!(older.as_array().unwrap().is_empty() && page.as_array().unwrap().len() == 7, "{page}");
-    // Pruned once: a second pass removes nothing again.
+    // Pruned once: a second pass removes nothing again; unpinned, it's pruned as the rest are.
     w.apps.prune().await;
     assert_eq!(w.fake.removed.lock().len(), removed.len());
+    assert_eq!(call(&w.api, "DELETE", &format!("{base}/{}/pin", deps[1]), None).await.0, StatusCode::OK);
+    w.apps.prune().await;
+    assert!(w.fake.removed.lock().contains(&old1));
 }
 
 /// An app that doesn't answer on its port says where it listens instead: on its port but only on

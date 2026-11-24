@@ -97,6 +97,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/checks/{{check}}/trace"), get(check_trace))
         .route(&format!("{env}/deploys/{{dep}}/explain"), post(explain_deploy))
         .route(&format!("{env}/deploys/{{dep}}/approve"), post(approve_deploy))
+        .route(&format!("{env}/deploys/{{dep}}/pin"), post(pin_deploy).delete(unpin_deploy))
         .route(&format!("{env}/deploys/{{dep}}/rollback"), post(rollback))
         .route(&format!("{env}/deploys/{{dep}}/rollout"), post(rollout_action))
         .route(&format!("{env}/rollback"), post(rollback_previous))
@@ -882,6 +883,18 @@ struct VulnQuery {
 #[derive(Deserialize)]
 struct ExplainQuery {
     again: Option<String>,
+}
+
+async fn pin_deploy(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>, ext: Extensions) -> R {
+    let d = apps.pin_deployment(&id, &env, &dep, true).await?;
+    apps.audit("deployment.pinned", &id, &env, actor(&ext), json!({ "deployment": dep })).await;
+    ok(d)
+}
+
+async fn unpin_deploy(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>, ext: Extensions) -> R {
+    let d = apps.pin_deployment(&id, &env, &dep, false).await?;
+    apps.audit("deployment.unpinned", &id, &env, actor(&ext), json!({ "deployment": dep })).await;
+    ok(d)
 }
 
 /// A deployment waiting at ready approved by a person (never a token: an agent's or a CI's

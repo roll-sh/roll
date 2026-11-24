@@ -76,6 +76,9 @@ pub struct Overrides {
     pub start: Option<String>,
     /// A single-page app, whatever the detection says (`None`: detected).
     pub spa: Option<bool>,
+    /// The directory a static build's files are in (Netlify's publish directory, Vercel's output
+    /// directory): a Node app with one is built and that directory served as a static site.
+    pub output: Option<String>,
     /// System packages a generated Dockerfile installs ([`packages`]).
     pub packages: Vec<String>,
     /// The language's OpenTelemetry agent in a generated Dockerfile ([`otel`]).
@@ -524,6 +527,7 @@ impl Overrides {
             build: clean(&self.build),
             start: clean(&self.start),
             spa: self.spa,
+            output: clean(&self.output).map(|d| d.trim_start_matches("./").trim_end_matches('/').to_string()),
             packages: self.packages.clone(),
             otel: self.otel,
             build_env: self.build_env.clone(),
