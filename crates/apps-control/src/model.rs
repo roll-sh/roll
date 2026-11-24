@@ -470,6 +470,11 @@ pub struct Build {
     /// detected; unset: detected (a static build with a client-side router).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spa: Option<bool>,
+    /// The directory a static build's files are in (Netlify's publish directory, Vercel's
+    /// output directory), relative to the build's root: a Node app with one is built and that
+    /// directory served as a static site.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
     /// The tree's own Dockerfile's stage to build (`--target`), for a multi-stage one whose last
     /// stage isn't what runs (Fly's and Render's).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -550,6 +555,9 @@ impl Build {
         if let Some(d) = &self.dockerfile {
             check_rel_path("build.dockerfile", d)?;
         }
+        if let Some(d) = &self.output {
+            check_rel_path("build.output", d.trim_start_matches("./").trim_end_matches('/'))?;
+        }
         for (k, v) in [("install", &self.install), ("build", &self.build), ("start", &self.start)] {
             if v.as_ref().is_some_and(|c| c.len() > 2000 || c.contains('\0')) {
                 return Err(Error::BadRequest(format!("build.{k} is a command of at most 2000 characters")));
@@ -592,6 +600,7 @@ impl Build {
             build: self.build.clone(),
             start: self.start.clone(),
             spa: self.spa,
+            output: self.output.clone(),
             packages: self.packages.clone().unwrap_or_default(),
             otel: self.otel.unwrap_or(false),
             build_env: Vec::new(),

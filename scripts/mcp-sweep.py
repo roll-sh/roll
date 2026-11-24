@@ -28,6 +28,7 @@ except FileNotFoundError:
     published = {}
 record = sys.argv[sys.argv.index("--record") + 1] if "--record" in sys.argv else None
 samples, unfit = {}, []
+links = {}  # a dashboard link a tool answered (MCP's resource_link) -> the tool
 report = sys.argv[sys.argv.index("--report") + 1] if "--report" in sys.argv else None
 calls = []
 
@@ -39,8 +40,9 @@ n = 0
 def rpc(method, params, token=None):
     global n
     n += 1
+    # As a 2025-11-25 client sends it (a current client): answers about one resource link its page.
     req = urllib.request.Request(f"{api}/v1/mcp", data=json.dumps({"jsonrpc": "2.0", "id": n, "method": method, "params": params}).encode(),
-                                 headers={"authorization": f"Bearer {token or tok}", "content-type": "application/json", "accept": "application/json"})
+                                 headers={"authorization": f"Bearer {token or tok}", "content-type": "application/json", "accept": "application/json", "mcp-protocol-version": "2025-11-25"})
     t0 = time.monotonic()
     with urllib.request.urlopen(req, timeout=60) as r:
         out = json.load(r)
@@ -56,6 +58,10 @@ def rpc(method, params, token=None):
         calls.append(entry)
     # What a tool answers, against the output schema it publishes (and kept, with --record).
     res = out.get("result") if isinstance(out, dict) else None
+    if method == "tools/call" and isinstance(res, dict) and not res.get("isError"):
+        for c in res.get("content", []):
+            if c.get("type") == "resource_link":
+                links.setdefault(c.get("uri", ""), params.get("name"))
     if method == "tools/call" and isinstance(res, dict) and not res.get("isError") and isinstance(res.get("structuredContent"), dict):
         name, sc = params.get("name", ""), res["structuredContent"]
         if name in published:
@@ -500,6 +506,18 @@ if not asked:
     no_ask.append("no tool takes a required choice: the pass checks nothing")
 print(f"choice forms: {asked} tools ask for a missing choice with its set, {len(no_ask)} don't")
 fails += [f"choice form {c}" for c in no_ask]
+
+# Dashboard links (`find::page_link`): each one a tool answered reads back, pasted into roll_find, as
+# a resource of the connection's; and the tools that made the fixtures answered some.
+bad_links = []
+for uri, tool in sorted(links.items())[:40]:
+    r = rpc("tools/call", {"name": "roll_find", "arguments": {"query": uri}}).get("result", {})
+    if r.get("isError"):
+        bad_links.append(f"{tool}'s link {uri} doesn't read back: {' '.join(c.get('text', '') for c in r.get('content', []))[:160]}")
+if not links:
+    bad_links.append("no tool answered a dashboard link (resource_link): is the protocol version sent, the dashboard's address set?")
+print(f"links: {len(links)} dashboard links answered, {len(bad_links)} that don't read back")
+fails += [f"link {b}" for b in bad_links]
 
 # The rest of what a client reads: every prompt (its arguments from the fixtures), every resource
 # listed, a project's page, every skill. An error is a failure: they're all read-only.
