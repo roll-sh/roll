@@ -46,7 +46,7 @@ export async function signDerivedKey(secret: string, payload: string): Promise<s
   return `${signed}.${b64url(mac)}`;
 }
 
-/** A derived key for `params`, signed with the parent's signing secret. */
+/** A derived key for `params`, signed with the parent's signing secret (`exp` in whole seconds). */
 export function deriveBrowserKey(secret: string, params: DerivedKeyParams): Promise<string> {
-  return signDerivedKey(secret, JSON.stringify(params));
+  return signDerivedKey(secret, JSON.stringify({ ...params, exp: Math.floor(params.exp) }));
 }

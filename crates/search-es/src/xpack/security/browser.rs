@@ -87,21 +87,22 @@ pub trait ItemCharge: Send + Sync {
     fn refund(&self, key_id: &str, user: User<'_>, client: Option<std::net::IpAddr>);
 }
 
-/// Refuses a name a browser key (or a key derived from one) can't be limited to: not an index
-/// name or a `*` pattern of them, every index (`*`), hidden or system indices, another cluster's.
-pub fn check_index_name(n: &str) -> Result<(), String> {
+/// Why a name can't be one a browser key (or a key derived from one) is limited to, as words
+/// that follow the name: not an index name or a `*` pattern of them, every index (`*`), hidden
+/// or system indices, another cluster's.
+pub fn check_index_name(n: &str) -> Result<(), &'static str> {
     if n.is_empty() || n.len() > 255 || n.contains([',', ' ', '"', '\\', '/', '?', '#']) || n.starts_with(['-', '+', '_']) {
-        return Err(format!("indices: {n:?} isn't an index name or pattern"));
+        return Err("isn't an index name or pattern");
     }
     if n.chars().all(|c| c == '*') {
-        return Err(format!("indices: {n:?} would reach every index, hidden ones included: name the indices or a pattern of them"));
+        return Err("would reach every index, hidden ones included: name the indices or a pattern of them");
     }
     if n.starts_with('.') {
-        return Err(format!("indices: {n:?} is a hidden or system index: a browser key can't reach those"));
+        return Err("is a hidden or system index: a browser key can't reach those");
     }
     // `alias:index` names an index of a remote cluster (cross-cluster search).
     if n.contains(':') {
-        return Err(format!("indices: {n:?}: browser keys can't search across clusters"));
+        return Err("is another cluster's index: browser keys can't search across clusters");
     }
     Ok(())
 }

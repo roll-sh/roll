@@ -336,30 +336,43 @@ applications). A web page calls a cluster directly, with no backend of its own i
     the key's `metadata.roll_browser.derive`, sealed under the deployment's key
     (`search_es::seal`) with the cluster's id and the key's id as associated data: it opens only
     for that key of that cluster (a branch's copy is refused as its browser keys are, and one
-    rebound to the branch's id or moved to another key doesn't open). The API key APIs print and
-    query it as `::es_redacted::` (an update that sends that back keeps it); roll's list says
-    `derivable` and `secret_rotated_at`, never the secret; nothing logs it. `POST
-    …/browser-keys/{key}/rotate` makes a new one (in its answer only): every key derived under the
-    old one is refused from the next request. Revoking the parent refuses all of them at once.
+    rebound to the branch's id or moved to another key doesn't open). The API key APIs print,
+    query and audit it as `::es_redacted::`; an update that sends that back, or leaves `derive`
+    out, keeps it (`"derive": null` removes it). roll's list says `derivable` and
+    `secret_rotated_at`, never the secret; nothing logs it. `POST …/browser-keys/{key}/rotate`
+    makes a new one (in its answer only): every key derived under the old one is refused from the
+    next request. Each secret has a `generation`, and the cluster stores a new secret only as the
+    stored one's next, inside the state update: of two rotations racing, one gets a 409 and its
+    secret is never handed out. Revoking the parent refuses all of them at once.
   - *A derived key* is `rdk1.<payload>.<mac>`: base64url (no padding) of one JSON object, and of
     HMAC-SHA256 over `rdk1.<payload>` keyed with the secret as written. One version, one
     algorithm; nothing in the token picks either. The payload: `key` (the parent's id) and
-    `cluster` (its name, for routing), `exp` (unix seconds, required, at most 24 h ahead), and
-    optionally `indices` (each one of the parent's names, or a `*` pattern within one of its
-    patterns, matched with the glob table: `logs-*` covers `logs-2026*`) or `application` (the
-    parent's own), a `filter` (one query), a `user` (an end customer, Algolia's `userToken`),
+    `cluster` (its name, for routing, and the cluster checking it must be that one), `exp` (unix
+    seconds, required, at most 24 h ahead), and optionally `indices` (each one of the parent's
+    names, or a `*` pattern within one of its patterns, matched with the glob table: `logs-*`
+    covers `logs-2026*`) or `application` (the parent's own), a `filter` (one query on the
+    document itself: `term`, `terms` of values, `range`, `exists`, `ids`, `prefix`, `wildcard`,
+    the `match` family, `simple_query_string` and the geo filters, combined in `bool`,
+    `constant_score` or `nested`; it's built as the owner's filter is, outside the browser
+    policy, so nothing that reads another document or index (terms lookups, indexed shapes,
+    `more_like_this`, joins, `percolate`), runs Painless, renders a template or wraps an encoded
+    query; then Elasticsearch's role-query check and the cluster's own parse), a `user` (an end
+    customer, Algolia's `userToken`),
     `origins` and `rate_limit: {"per_minute": n}` (the user's). Unknown fields, duplicate keys and
     trailing bytes are refused. It goes wherever a browser key goes (`Authorization: ApiKey
     rdk1.…`), so InstantSearch, Searchkit and Search UI need only the string.
   - *Checked on the cluster's owner, every request*, where browser keys are: at most 4 KiB, its
-    payload parsed only from the bytes present (the filter at most 24 levels deep); the parent
-    live (not revoked or expired), a browser key of this cluster (a branch's copy is refused, as
-    for browser keys) and derivable; the mac compared in constant time with the parent's current
-    secret; `exp` within 30 s of skew, at most 24 h ahead and never past the parent's expiry.
-    Then everything must narrow the parent: indices within the parent's, the parent's
-    application only, a `rate_limit` at most a user's share, origins the cluster's CORS allows.
-    Anything else is a 401 naming the field. Nothing is cached: a revoke or rotation holds from
-    the next request.
+    payload parsed only from the bytes present; named for this cluster; the parent live (not
+    revoked or expired), a derivable browser key of this cluster by its catalog id (a branch's
+    copy, or a node without a catalog, has none); the mac compared in constant time with the
+    parent's current secret. Until the mac verifies, every refusal is the same 401 (`API key:
+    derived key refused`), so a key without the secret learns nothing about which clusters a
+    node holds or which keys they have. After it: `exp` within 30 s of skew, at most 24 h ahead
+    and never past the parent's expiry, and everything must narrow the parent (indices within
+    the parent's, the parent's application only, the filter as above at most 24 levels deep, a
+    `rate_limit` at most a user's share, origins the cluster's CORS allows), each refusal a 401
+    naming the field, never a value from the key. The key is verified once per request, nothing
+    cached: a revoke or rotation holds from the next request.
   - *What it may do* is its parent's, narrowed: the principal is the parent's API key with one
     more set of role descriptors every permission must also pass (the derived indices with
     `read`, the derived filter as their document-level `query`), so the indices intersect and
@@ -371,7 +384,9 @@ applications). A web page calls a cluster directly, with no backend of its own i
     parent's own limit, its per-address limits), so the parent's limit is the ceiling of all its
     derived keys together. A `user` gets its own bucket on top: a quarter of the parent's limit,
     or the lower `rate_limit.per_minute` the key asks for, so one end customer can't use the
-    parent up.
+    parent up. These limits, and `origins`, are the cluster owner node's: `search-dev` (one
+    cluster, no catalog) enforces neither for browser keys (their policy still holds there), and
+    refuses derived keys outright (no catalog id to bind their secret to).
   - *Signing*: `apps/dashboard/src/lib/search-derive.ts` (Web Crypto, also for Node, Deno, Bun and
     Workers), the site-search guide's Node, Python and Go snippets, and `roll search browser-keys
     derive` (for testing; the secret from `ROLL_SEARCH_SIGNING_SECRET`). One test vector

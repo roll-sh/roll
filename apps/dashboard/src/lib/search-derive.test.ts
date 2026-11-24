@@ -14,5 +14,8 @@ describe("derived browser keys", () => {
   it("sign as the cluster checks them", async () => {
     expect(await signDerivedKey(vector.secret, vector.payload)).toBe(vector.key);
     expect(await deriveBrowserKey(vector.secret, JSON.parse(vector.payload))).toBe(vector.key);
+    // The cluster reads `exp` as whole seconds: a fractional one (Date.now() / 1000) is floored.
+    const params = JSON.parse(vector.payload);
+    expect(await deriveBrowserKey(vector.secret, { ...params, exp: params.exp + 0.75 })).toBe(vector.key);
   });
 });

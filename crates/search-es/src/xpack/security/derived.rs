@@ -121,40 +121,43 @@ struct Token<'a> {
     claims: Value,
 }
 
+/// A refusal once the signature is verified: only the secret's holder reads why. It names the
+/// field, never a value from the key.
 fn refused(why: impl std::fmt::Display) -> EsError {
     super::unauthorized_credentials(format!("API key: derived key refused: {why}"))
+}
+
+/// The one answer before the signature is verified, whatever failed (the key's form, its
+/// cluster, its parent, the signature): nothing about which clusters a node holds or which keys
+/// they have reaches anyone without the secret.
+fn unverified() -> EsError {
+    super::unauthorized_credentials("API key: derived key refused")
 }
 
 /// Splits and parses a derived key, bounded by its own bytes: one JSON object, no trailing
 /// bytes, no duplicate keys.
 fn split(token: &str) -> EsResult<Token<'_>> {
     if token.len() > MAX_TOKEN_BYTES {
-        return Err(refused(format!("longer than {MAX_TOKEN_BYTES} bytes")));
+        return Err(unverified());
     }
-    let rest = token.strip_prefix(PREFIX).ok_or_else(|| refused("not an rdk1 key"))?;
-    let (payload, mac) = rest.split_once('.').ok_or_else(|| refused("malformed"))?;
+    let rest = token.strip_prefix(PREFIX).ok_or_else(unverified)?;
+    let (payload, mac) = rest.split_once('.').ok_or_else(unverified)?;
     let signed = &token[..PREFIX.len() + payload.len()];
-    let mac = URL_SAFE_NO_PAD.decode(mac).ok().filter(|m| m.len() == 32).ok_or_else(|| refused("malformed signature"))?;
-    let json = URL_SAFE_NO_PAD.decode(payload).map_err(|_| refused("malformed payload"))?;
+    let mac = URL_SAFE_NO_PAD.decode(mac).ok().filter(|m| m.len() == 32).ok_or_else(unverified)?;
+    let json = URL_SAFE_NO_PAD.decode(payload).map_err(|_| unverified())?;
     // Strict on both counts: serde_json refuses trailing bytes, the engine's parser duplicates.
     if serde_json::from_slice::<serde_json::Value>(&json).is_err() {
-        return Err(refused("its payload isn't one JSON object"));
+        return Err(unverified());
     }
     let claims = match crate::json::parse(&json) {
         Ok(Some(v @ Value::Obj(_))) => v,
-        _ => return Err(refused("its payload isn't one JSON object")),
+        _ => return Err(unverified()),
     };
-    const FIELDS: &[&str] = &["key", "cluster", "exp", "indices", "application", "filter", "user", "origins", "rate_limit"];
-    if let Some(k) = claims.as_object().into_iter().flat_map(|m| m.keys()).find(|k| !FIELDS.contains(&k.as_str())) {
-        return Err(refused(format!("unknown field [{k}]")));
-    }
     Ok(Token { signed, mac, claims })
 }
 
-/// Why a derived key can't even be read (`None`: it can, and its cluster verifies it).
-pub fn malformed(token: &str) -> Option<EsError> {
-    split(token).err()
-}
+/// The fields a derived key may hold.
+const FIELDS: &[&str] = &["key", "cluster", "exp", "indices", "application", "filter", "user", "origins", "rate_limit"];
 
 /// The parent key id and cluster name a derived key names, read without verifying it (to route
 /// it to its cluster, which verifies it).
@@ -164,14 +167,13 @@ pub fn names(token: &str) -> Option<(String, String)> {
     Some((s("key")?, s("cluster")?))
 }
 
-/// A parent's signing secret in the clear: sealed under this node's key for its cluster and key
-/// (`None` past any doubt: no key to open it, another binding, or kept in the clear on a node
-/// that doesn't keep secrets so).
-fn signing_secret(cluster: &Cluster, browser: &Value, key_id: &str) -> Option<String> {
+/// A parent's signing secret in the clear: sealed under this node's key for the cluster it's
+/// loaded as (`catalog_id`) and the key (`None` past any doubt: no key to open it, another
+/// binding, or kept in the clear on a node that doesn't keep secrets so).
+fn signing_secret(cluster: &Cluster, browser: &Value, catalog_id: &str, key_id: &str) -> Option<String> {
     let stored = browser.pointer(&[DERIVE, "secret"])?.as_str()?;
-    let made_for = browser.get("cluster")?.as_str()?;
     if crate::seal::is_sealed(stored) {
-        return cluster.config.sealer.as_ref()?.open_text(&seal_kind(made_for, key_id), stored);
+        return cluster.config.sealer.as_ref()?.open_text(&seal_kind(catalog_id, key_id), stored);
     }
     (cluster.config.unsealed_secrets && stored.starts_with(SECRET_PREFIX)).then(|| stored.to_string())
 }
@@ -184,29 +186,40 @@ fn depth(v: &Value) -> usize {
     }
 }
 
-/// Authenticates a derived key: its parent a live derivable browser key of this cluster, its
-/// signature the parent's current secret's (compared in constant time), not expired, and every
-/// field within its parent's. The principal is the parent's API key, narrowed.
+/// Authenticates a derived key: named for this cluster, its parent a live derivable browser key
+/// of this cluster (by its id in roll's catalog: a branch, a restore elsewhere or a node without
+/// a catalog has none of its keys), its signature the parent's current secret's (compared in
+/// constant time), then not expired and every field within its parent's. The principal is the
+/// parent's API key, narrowed. Everything before the signature is refused alike ([`unverified`]).
 pub fn authenticate(cluster: &Cluster, token: &str) -> EsResult<Principal> {
     let t = split(token)?;
     let c = &t.claims;
-    let key_id = c.get("key").and_then(Value::as_str).ok_or_else(|| refused("[key] is required"))?;
+    let key_id = c.get("key").and_then(Value::as_str).ok_or_else(unverified)?;
+    if c.get("cluster").and_then(Value::as_str) != Some(cluster.name.as_str()) {
+        return Err(unverified());
+    }
+    let catalog_id = cluster.config.catalog_id.as_deref().ok_or_else(unverified)?;
     let st = cluster.state();
-    let no_parent = || refused(format!("[{key_id}] isn't a derivable browser key of this cluster"));
-    let Some(k) = st.metadata.xpack.get(KEYS, key_id) else { return Err(no_parent()) };
+    let Some(k) = st.metadata.xpack.get(KEYS, key_id) else { return Err(unverified()) };
     let now_ms = crate::time::now_millis();
     if k.get("invalidated").and_then(Value::as_bool) == Some(true)
         || k.get("expiration").and_then(Value::as_i64).is_some_and(|e| e <= now_ms)
         || k.get("type").and_then(Value::as_str).is_some_and(|t| t != "rest")
     {
-        return Err(no_parent());
+        return Err(unverified());
     }
-    let Some(browser) = k.pointer(&["metadata", METADATA]) else { return Err(no_parent()) };
-    let Some(secret) = signing_secret(cluster, browser, key_id) else { return Err(no_parent()) };
+    let Some(browser) = k.pointer(&["metadata", METADATA]) else { return Err(unverified()) };
+    if browser.get("cluster").and_then(Value::as_str) != Some(catalog_id) {
+        return Err(unverified());
+    }
+    let Some(secret) = signing_secret(cluster, browser, catalog_id, key_id) else { return Err(unverified()) };
     let mut mac = <Hmac<sha2::Sha256> as Mac>::new_from_slice(secret.as_bytes()).expect("HMAC takes any key");
     mac.update(t.signed.as_bytes());
     if mac.verify_slice(&t.mac).is_err() {
-        return Err(refused("its signature isn't its parent's (a rotated secret signs anew)"));
+        return Err(unverified());
+    }
+    if c.as_object().is_some_and(|m| m.keys().any(|k| !FIELDS.contains(&k.as_str()))) {
+        return Err(refused(format!("a field it doesn't know: only {}", FIELDS.join(", "))));
     }
     let derived = narrowed(c, browser, k, now_ms / 1000)?;
     let mut p = super::api_keys::principal_of(key_id, k);
@@ -214,6 +227,33 @@ pub fn authenticate(cluster: &Cluster, token: &str) -> EsResult<Principal> {
         a.derived = Some(Box::new(derived));
     }
     Ok(p)
+}
+
+/// Whether `q` is a filter a derived key may carry: queries on the document itself, combined
+/// with `bool`, `constant_score` and `nested`. Nothing that reads another document or index
+/// (terms lookups, indexed shapes, `more_like_this`, joins, `percolate`), runs Painless
+/// (`script`, `script_score`, `function_score`), renders a template or wraps an encoded query
+/// (`wrapper`): its filter is built as the owner's, outside the browser policy, so each of
+/// those would reach past the parent's own access.
+fn plain_filter(q: &Value) -> bool {
+    let Some((kind, body)) = q.as_object().filter(|m| m.len() == 1).and_then(|m| m.iter().next()) else { return false };
+    let queries = |v: &Value| match v {
+        Value::Arr(a) => a.iter().all(plain_filter),
+        q => plain_filter(q),
+    };
+    let keys = |allowed: &[&str], nested: &[&str]| {
+        body.as_object().is_some_and(|b| b.iter().all(|(k, v)| if nested.contains(&k.as_str()) { queries(v) } else { allowed.contains(&k.as_str()) }))
+    };
+    match kind.as_str() {
+        "term" | "range" | "exists" | "ids" | "prefix" | "wildcard" | "match" | "match_phrase" | "match_phrase_prefix" | "match_bool_prefix" | "multi_match"
+        | "match_all" | "match_none" | "simple_query_string" | "geo_bounding_box" | "geo_distance" | "geo_polygon" => true,
+        // Lists of values only: an object is a lookup of another document.
+        "terms" => body.as_object().is_some_and(|b| b.iter().all(|(k, v)| v.as_array().is_some() || k == "boost" || k == "_name")),
+        "bool" => keys(&["minimum_should_match", "boost", "_name", "adjust_pure_negative"], &["must", "should", "filter", "must_not"]),
+        "constant_score" => body.get("filter").is_some() && keys(&["boost", "_name"], &["filter"]),
+        "nested" => body.get("query").is_some() && keys(&["path", "score_mode", "ignore_unmapped", "boost", "_name"], &["query"]),
+        _ => false,
+    }
 }
 
 /// Checks a signed payload's fields against its parent (`browser`, its `metadata.roll_browser`;
@@ -239,11 +279,11 @@ fn narrowed(c: &Value, browser: &Value, k: &Value, now_s: i64) -> EsResult<Deriv
             let mut out = Vec::with_capacity(list.len());
             for n in list {
                 let n = n.as_str().ok_or_else(|| refused("[indices]: names or patterns"))?;
-                super::browser::check_index_name(n).map_err(refused)?;
+                super::browser::check_index_name(n).map_err(|why| refused(format!("[indices]: a name {why}")))?;
                 // A pattern is within one of the parent's when that one matches it as written: the
                 // parent's `*`s cover the derived pattern's (`logs-*` covers `logs-2026*`).
                 if !parent.iter().any(|p| super::privileges::glob(p, n)) {
-                    return Err(refused(format!("[indices]: [{n}] isn't within its parent's indices")));
+                    return Err(refused("[indices]: a name isn't within its parent's indices"));
                 }
                 out.push(Value::from(n));
             }
@@ -267,6 +307,13 @@ fn narrowed(c: &Value, browser: &Value, k: &Value, now_s: i64) -> EsResult<Deriv
         Some(f @ Value::Obj(m)) if m.len() == 1 => {
             if depth(f) > MAX_FILTER_DEPTH {
                 return Err(refused(format!("[filter] nests deeper than {MAX_FILTER_DEPTH}")));
+            }
+            if !plain_filter(f) {
+                return Err(refused("[filter]: only queries on the document itself (term, terms of values, range, exists, match… in bool, constant_score or nested): no lookups, joins, scripts, templates or wrapped queries"));
+            }
+            // As a role's query is checked when it's put, then as the cluster will build it.
+            if super::users::check_role_query(&f.to_json()).is_err() || crate::query::parse_stored(f).is_err() {
+                return Err(refused("[filter] isn't a query the cluster can build"));
             }
             if let Some(g) = group.as_object_mut() {
                 g.insert("query".into(), f.clone());
@@ -337,15 +384,42 @@ pub fn redact_metadata(md: &mut Value) {
     }
 }
 
-/// An update's `metadata` that sends [`REDACTED`] back keeps the stored key's signing secret.
-pub fn keep_secret(new: &mut Value, stored: &Value) {
-    let Some(kept) = stored.pointer(&["metadata", METADATA, DERIVE, "secret"]).cloned() else { return };
-    let slot = new.as_object_mut().and_then(|m| m.get_mut(METADATA)).and_then(Value::as_object_mut).and_then(|b| b.get_mut(DERIVE)).and_then(Value::as_object_mut);
-    if let Some(d) = slot
-        && d.get("secret").and_then(Value::as_str) == Some(REDACTED)
-    {
-        d.insert("secret".into(), kept);
+/// What an API key update's `metadata` (`k`'s new one; `stored`, the key as stored) does to a
+/// browser key's `derive`, applied inside the state update:
+/// - a `roll_browser` without `derive` keeps the stored one (`"derive": null` removes it);
+/// - `derive.secret` sent back as [`REDACTED`] (as the APIs print it) keeps the stored one;
+/// - a new secret (roll's create and rotate) must be the next `generation` of the stored one, so
+///   of two rotations racing only one is stored: the other is a 409, and its secret is never
+///   given out.
+pub fn on_update(new: &mut Value, stored: &Value) -> EsResult<()> {
+    let kept = stored.pointer(&["metadata", METADATA, DERIVE]).filter(|d| !d.is_null()).cloned();
+    let Some(b) = new.as_object_mut().and_then(|m| m.get_mut(METADATA)).and_then(Value::as_object_mut) else { return Ok(()) };
+    let generation = |d: &Value| d.get("generation").and_then(Value::as_i64).unwrap_or(0);
+    match b.get(DERIVE) {
+        None => {
+            if let Some(d) = kept {
+                b.insert(DERIVE.into(), d);
+            }
+        }
+        Some(Value::Null) => {
+            b.shift_remove(DERIVE);
+        }
+        Some(d) if d.get("secret").and_then(Value::as_str) == Some(REDACTED) => match kept {
+            Some(d) => {
+                b.insert(DERIVE.into(), d);
+            }
+            None => {
+                b.shift_remove(DERIVE);
+            }
+        },
+        Some(d) => {
+            let next = kept.as_ref().map_or(0, generation) + 1;
+            if generation(d) != next {
+                return Err(EsError::new(409, "version_conflict_engine_exception", format!("[{METADATA}.{DERIVE}]: a new signing secret must be generation [{next}]; another took its place")));
+            }
+        }
     }
+    Ok(())
 }
 
 #[cfg(test)]

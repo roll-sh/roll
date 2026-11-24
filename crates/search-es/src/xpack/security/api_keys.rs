@@ -650,7 +650,7 @@ fn apply_update(st: &mut crate::meta::ClusterState, file: &super::FileRoles, id:
         }
         if let Some(md) = &upd.metadata {
             let mut md = md.clone();
-            super::derived::keep_secret(&mut md, &before);
+            super::derived::on_update(&mut md, &before)?;
             m.insert("metadata".into(), md);
         }
         if let Some(e) = upd.expiration {

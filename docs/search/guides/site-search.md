@@ -364,8 +364,10 @@ The page sends the derived key exactly as it sent the browser key (`Authorizatio
 so the snippet above, Search UI and InstantSearch need no change. Other fields you can set:
 `indices` (some of the parent's, or patterns within its patterns), `origins` (pages it may be
 sent from, among the cluster's allowed origins) and `rate_limit: {"per_minute": n}` (the user's,
-below its share). The cluster refuses a key that would widen its parent with a 401 that names
-the field. To check your own signer, sign the `payload` of
+below its share). A filter may only test the document itself (`term`, `terms` of values,
+`range`, `exists`, the `match` queries, in `bool`): no terms lookups, joins or scripts. The
+cluster refuses a key that would widen its parent with a 401 that names the field; a key with a
+wrong signature, or for a parent that isn't derivable, gets a plain `derived key refused`. To check your own signer, sign the `payload` of
 `crates/search-es/tests/fixtures/derived-key-vector.json` with its `secret`: you get its `key`.
 To try one from a terminal:
 

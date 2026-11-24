@@ -2165,6 +2165,10 @@ impl Node {
                 Some(auth::claim(&presented, host_cluster))
             }
         };
+        // Why the cluster refused a derived key, from its one verification: said only once its
+        // signature verified (`derived::authenticate`), so it never names a cluster or a key to
+        // someone without the secret.
+        let derived_why: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
         let failed = || {
             let e = match &presented {
                 Presented::None => unauthorized(format!("missing authentication credentials for REST request [{}]", req.uri)),
@@ -2175,16 +2179,8 @@ impl Node {
                 }
                 Presented::Basic { user, .. } => unauthorized(format!("unable to authenticate user [{user}] for REST request [{}]", req.uri)),
                 Presented::Bearer(_) => unauthorized(ANONYMOUS_REFUSED.into()).with_meta("additional_unsuccessful_credentials", "oauth2 token: invalid token"),
-                // Why, when the cluster is loaded: its own authentication says (never the key).
-                Presented::Derived(token) => {
-                    use search_es::xpack::security::derived;
-                    let loaded = derived::names(token).and_then(|(_, cluster)| self.get_loaded(&cluster));
-                    let refused = derived::malformed(token).or_else(|| loaded.and_then(|l| derived::authenticate(&l.cluster, token).err()));
-                    let why = refused.and_then(|e| {
-                        e.meta().iter().find(|(k, _)| k == "additional_unsuccessful_credentials").and_then(|(_, v)| v.as_str()).map(str::to_string)
-                    });
-                    unauthorized(ANONYMOUS_REFUSED.into()).with_meta("additional_unsuccessful_credentials", why.unwrap_or_else(|| "API key: derived key refused".into()))
-                }
+                Presented::Derived(_) => unauthorized(ANONYMOUS_REFUSED.into())
+                    .with_meta("additional_unsuccessful_credentials", derived_why.borrow().clone().unwrap_or_else(|| "API key: derived key refused".into())),
             };
             reject(e)
         };
@@ -2209,9 +2205,17 @@ impl Node {
         };
         // A principal of the cluster's security, and with it the rate limit of a browser key.
         let native_principal = |loaded: &Loaded| {
-            native.as_deref().and_then(|h| match &link {
-                Some(access) => search_es::xpack::security::authenticate_native_link(&loaded.cluster, h, access),
-                None => search_es::xpack::security::authenticate_native(&loaded.cluster, h),
+            native.as_deref().and_then(|h| match (&link, &presented) {
+                (Some(access), _) => search_es::xpack::security::authenticate_native_link(&loaded.cluster, h, access),
+                (None, Presented::Derived(token)) => match search_es::xpack::security::derived::authenticate(&loaded.cluster, token) {
+                    Ok(p) => Some(p),
+                    Err(e) => {
+                        let why = e.meta().iter().find(|(k, _)| k == "additional_unsuccessful_credentials").and_then(|(_, v)| v.as_str()).map(str::to_string);
+                        *derived_why.borrow_mut() = why;
+                        None
+                    }
+                },
+                (None, _) => search_es::xpack::security::authenticate_native(&loaded.cluster, h),
             })
         };
         // Fast path: a loaded cluster checks against its shared description, no catalog read.

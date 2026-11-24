@@ -1112,8 +1112,8 @@ async fn derived_keys_narrow_their_parent_and_die_with_it() {
     assert!(!listed.to_string().contains(&secret) && !listed.to_string().contains("signing_secret"), "{listed}");
     assert_eq!(listed["keys"].as_array().unwrap().iter().filter(|k| k["derivable"] == true).count(), 1, "{listed}");
     let r = e.post(&format!("{path}/request"), json!({"method": "GET", "path": format!("/_security/api_key?id={pid}"), "body": null})).await;
-    let stored = body(&r)["api_keys"][0]["metadata"]["roll_browser"]["derive"]["secret"].clone();
-    assert_eq!(stored, "::es_redacted::", "{r}");
+    let metadata = body(&r)["api_keys"][0]["metadata"].clone();
+    assert_eq!(metadata["roll_browser"]["derive"]["secret"], "::es_redacted::", "{r}");
 
     let sign = |secret: &str, payload: Value| search_es::xpack::security::derived::sign(secret, &payload.to_string());
     let exp = unix_now() + 600;
@@ -1131,7 +1131,21 @@ async fn derived_keys_narrow_their_parent_and_die_with_it() {
     let paged = sign(&secret, json!({"key": pid, "cluster": "shop", "exp": exp, "origins": ["https://Shop.Example.com:443"]}));
     assert_eq!(as_derived(&e, &paged, reqwest::Method::POST, "/products/_search", Some("https://shop.example.com")).await.0, 200);
 
-    // Every widening, and every way of not being the parent's, is refused.
+    // The owner's own update sends the redacted secret back, as the API printed it: the secret is
+    // kept, and the audit line has neither it nor its sealed form.
+    let r = e.post(&format!("{path}/request"), json!({"method": "PUT", "path": format!("/_security/api_key/{pid}"), "body": {"metadata": metadata}})).await;
+    assert_eq!(r["status"], 200, "{r}");
+    assert_eq!(as_derived(&e, &acme, reqwest::Method::POST, "/products/_search", None).await.0, 200, "the secret survives the round trip");
+    let audit = audit_entries(&e, "shop", "").await;
+    let change = audited(&audit, "security_config_change", |x| x["event.action"] == "change_apikey").expect("the update");
+    assert_eq!(change["change"]["apikey"]["metadata"]["roll_browser"]["derive"]["secret"], "::es_redacted::", "{change}");
+    let text = json!(audit).to_string();
+    assert!(!text.contains("::roll_sealed::") && !text.contains(&secret), "no secret in the audit log");
+
+    // Every widening, and every way of not being the parent's, is refused; until the signature
+    // verifies, all alike.
+    let unverified = "\"API key: derived key refused\"";
+    let plain_only = "only queries on the document itself";
     let base = || json!({"key": pid, "cluster": "shop", "exp": exp});
     let with = |f: &str, v: Value| {
         let mut p = base();
@@ -1145,15 +1159,19 @@ async fn derived_keys_narrow_their_parent_and_die_with_it() {
         (sign(&secret, with("indices", json!([".security"]))), "hidden or system index"),
         (sign(&secret, with("application", json!("shop-search"))), "[application] isn't its parent's"),
         (sign(&secret, with("filter", json!([{"match_all": {}}]))), "[filter]"),
+        // A lookup would read an index the parent can't; a script runs Painless as the owner.
+        (sign(&secret, with("filter", json!({"bool": {"filter": [{"terms": {"tenant": {"index": "other", "id": "5", "path": "tenant"}}}]}}))), plain_only),
+        (sign(&secret, with("filter", json!({"script": {"script": "true"}}))), plain_only),
         (sign(&secret, with("exp", json!(unix_now() + 2 * 86_400))), "ahead"),
         (sign(&secret, with("exp", json!(unix_now() - 120))), "expired"),
         (sign(&secret, json!({"key": pid, "cluster": "shop", "exp": exp, "user": "acme", "rate_limit": {"per_minute": 101}})), "share"),
         (sign(&secret, with("rate_limit", json!({"per_minute": 1}))), "give [user]"),
-        (sign(&secret, with("alg", json!("none"))), "unknown field [alg]"),
-        (sign("rdks_not-the-secret", base()), "signature"),
-        (sign(&secret, with("key", json!(plain["id"]))), "isn't a derivable browser key"),
-        (sign(&secret, with("origins", json!(["https://evil.example"]))), "derived key refused"),
-        (paged.clone(), "derived key refused"),
+        (sign(&secret, with("alg", json!("none"))), "a field it doesn't know"),
+        (sign("rdks_not-the-secret", base()), unverified),
+        (sign(&secret, with("key", json!(plain["id"]))), unverified),
+        (sign(&secret, with("cluster", json!("shop-other"))), unverified),
+        (sign(&secret, with("origins", json!(["https://evil.example"]))), unverified),
+        (paged.clone(), unverified),
     ];
     for (i, (key, why)) in cases.iter().enumerate() {
         let origin = (i == cases.len() - 1).then_some("https://evil.example");
