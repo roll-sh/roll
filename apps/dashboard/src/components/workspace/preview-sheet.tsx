@@ -4,7 +4,7 @@ import { appsApi, followShell as followAppsShell } from "@/lib/apps-api";
 import { codeApi } from "@/lib/code-api";
 import { Confirm } from "@/components/ui";
 import { TerminalScreen } from "@/components/terminal-screen";
-import { endpointSlower, type EndpointTime, a11yWords, checkSummary, seoWords, duration, followLogs, followShell, downloadFiles, openUrl, pageGroup, pageLabel, previewsApi, noteCropUrl, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewVisitor, type PreviewKind, type PreviewShare, type RequestLine, type ServiceMetrics, type ErrorGroup, type TraceSummary, type TraceSpan, type RouteTime, type Repeated } from "@/lib/previews-api";
+import { type RestorePoint, endpointSlower, type EndpointTime, a11yWords, checkSummary, seoWords, duration, followLogs, followShell, downloadFiles, openUrl, pageGroup, pageLabel, previewsApi, noteCropUrl, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewVisitor, type PreviewKind, type PreviewShare, type RequestLine, type ServiceMetrics, type ErrorGroup, type TraceSummary, type TraceSpan, type RouteTime, type Repeated } from "@/lib/previews-api";
 import { workFromError, workFromNote } from "@/lib/preview-work";
 import { verdict, type VerdictTarget } from "@/lib/preview-verdict";
 import { isProblem, logFilter, logLevel } from "@/lib/preview-logs";
@@ -359,6 +359,7 @@ export function PreviewSheet({
               <p className="text-[11.5px] text-subtle">No data branches.</p>
             )}
             {browsing && <DataBrowser key={browsing} previewId={p.id} resource={browsing} />}
+            {!gone && p.resources.some((r) => r.kind === "postgres" && r.ref) && <RestorePoints previewId={p.id} busy={busy} run={run} />}
             {!!p.copies?.count && (
               <p className="mt-1.5 font-mono text-[11px] text-subtle tabular-nums" title="Each earlier push's own copy of the data, as its head left it: counted in the cost above">
                 earlier pushes' copies: {p.copies.count} · {formatBytes(p.copies.bytes)} · {money(p.copies.usd_month)}/mo asleep
@@ -1845,6 +1846,98 @@ function Errors({ preview: p }: { preview: Preview }) {
 
 /** A look at a data branch (Neon's Tables): its tables as the branch's own role sees them, and a
  * table's first rows, read-only, cells as text (the branch's data, masked as the preview's is). */
+/** Restore points (Neon's snapshots): the preview's Postgres data saved now and put back later,
+ * after a test run or a demo changed it. Putting one back is the preview's next converge. */
+function RestorePoints({ previewId, busy, run }: { previewId: string; busy: string | null; run: (key: string, fn: () => Promise<Preview>) => Promise<boolean> }) {
+  const [points, setPoints] = useState<{ points: RestorePoint[]; max: number } | null>(null);
+  const [label, setLabel] = useState("");
+  const [working, setWorking] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const load = () => previewsApi.restorePoints(previewId).then(setPoints, (e) => setError(errorText(e)));
+  useEffect(() => {
+    let live = true;
+    previewsApi.restorePoints(previewId).then(
+      (v) => live && setPoints(v),
+      (e) => live && setError(errorText(e)),
+    );
+    return () => {
+      live = false;
+    };
+  }, [previewId]);
+  const act = async (key: string, fn: () => Promise<unknown>) => {
+    setWorking(key);
+    setError(null);
+    try {
+      await fn();
+      await load();
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setWorking(null);
+    }
+  };
+  const full = !!points && points.points.length >= points.max;
+  return (
+    <>
+      <Label>
+        <span>Restore points</span>
+      </Label>
+      <div className="rounded-lg border border-line-2 bg-raised inset-shadow-highlight">
+        {points?.points.map((pt) => (
+          <div key={pt.id} className="flex items-center gap-2 border-t border-line px-2.5 py-1.5 first:border-t-0">
+            <div className="min-w-0 flex-1 leading-tight">
+              <div className="truncate text-[11.5px]">{pt.label || "Restore point"}</div>
+              <div className="mt-0.5 truncate font-mono text-[10.5px] text-subtle">
+                {since(pt.at)} · {pt.by} · {pt.data.join(", ")}
+              </div>
+            </div>
+            <button
+              disabled={busy !== null || working !== null}
+              onClick={() => run(`restore:${pt.id}`, () => previewsApi.restorePoint(previewId, pt.id))}
+              title="Put the data back as this point left it: its services sleep meanwhile, and the seed doesn't run again"
+              className="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-muted hover:bg-white/[0.06] hover:text-fg disabled:opacity-40"
+            >
+              {busy === `restore:${pt.id}` ? <span className="shimmer">Putting back…</span> : "Restore"}
+            </button>
+            <button
+              disabled={working !== null}
+              onClick={() => act(`delete:${pt.id}`, () => previewsApi.deletePoint(previewId, pt.id))}
+              aria-label={`Delete ${pt.label || pt.id}`}
+              className="grid size-6 shrink-0 place-items-center rounded-md text-muted hover:bg-white/[0.06] hover:text-fg disabled:opacity-40"
+            >
+              <Trash2 className="size-3.5" strokeWidth={1.5} />
+            </button>
+          </div>
+        ))}
+        <form
+          className="flex items-center gap-2 border-t border-line px-2.5 py-1.5 first:border-t-0"
+          onSubmit={(e) => {
+            e.preventDefault();
+            act("save", async () => {
+              await previewsApi.savePoint(previewId, label);
+              setLabel("");
+            });
+          }}
+        >
+          <input
+            value={label}
+            onChange={(e) => setLabel(e.target.value)}
+            maxLength={60}
+            placeholder={full ? `${points?.max} kept at most: delete one first` : "Label (optional), e.g. before the test run"}
+            disabled={full}
+            aria-label="Restore point label"
+            className="h-6 min-w-0 flex-1 bg-transparent text-[11.5px] outline-none placeholder:text-subtle"
+          />
+          <button type="submit" disabled={full || working !== null || !points} className="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-muted hover:bg-white/[0.06] hover:text-fg disabled:opacity-40">
+            {working === "save" ? <span className="shimmer">Saving…</span> : "Save now"}
+          </button>
+        </form>
+      </div>
+      {error && <p className="mt-1 text-[11.5px] break-words text-danger">{error}</p>}
+    </>
+  );
+}
+
 function DataBrowser({ previewId, resource }: { previewId: string; resource: string }) {
   const [tables, setTables] = useState<{ name: string; rows: number }[] | null>(null);
   const [table, setTable] = useState<string | null>(null);
