@@ -451,8 +451,10 @@ pub trait Source: Send + Sync {
         Ok(Vec::new())
     }
     /// A comment on the change (a `comment` review) with `body`, made as `by`: a resolve said as
-    /// the note's reply, a guest's note. Its review's id; `None` where this source can't.
-    async fn comment(&self, _change: &str, _body: &str, _by: &str) -> anyhow::Result<Option<String>> {
+    /// the note's reply, a guest's note. `outside`: its words are someone's outside the team (a
+    /// guest's), marked so on the review (MCP's lockdown withholds them). Its review's id; `None`
+    /// where this source can't.
+    async fn comment(&self, _change: &str, _body: &str, _by: &str, _outside: bool) -> anyhow::Result<Option<String>> {
         Ok(None)
     }
     /// The git commit of a changeset.

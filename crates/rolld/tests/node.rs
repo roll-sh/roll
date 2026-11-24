@@ -82,6 +82,7 @@ async fn every_product_but_postgres_runs_without_docker() {
     assert_eq!(status, 404);
     assert!(body.contains("postgres is off"), "{body}");
     assert_eq!(addrs.get("proxy"), None, "the Postgres proxy doesn't listen");
+    assert!(home.path().join("search/key").is_file(), "no ROLL_SECRET_KEY: search seals clusters' passwords with a key of the node's own");
 }
 
 /// JSON logs: every line is an object with `level`, `target` and `msg`; a request gets an access

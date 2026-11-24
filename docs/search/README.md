@@ -477,8 +477,10 @@ Elasticsearch-flavor.
   Revoking the key on the remote (`DELETE _security/api_key`) cuts the link; `DELETE …/remotes/
   {alias}` removes the settings and credentials and revokes a key roll made, and so does deleting
   the cluster for good (at once with no retention, else when its restore window ends). A cluster
-  holds credentials for at most 20 remotes (409 past that). Without `ROLL_SECRET_KEY` (local
-  development) credentials are stored as given, as every secret search keeps.
+  holds credentials for at most 20 remotes (409 past that). Clusters' own passwords are never
+  stored in the clear: without `ROLL_SECRET_KEY` a single node seals them under a key of its own
+  (`<home>/search/key`), and a fleet needs the key (architecture.md, "Multi-tenancy and
+  authentication").
 - **Execution**: the remote's part runs on the remote cluster's owner node through roll's own
   in-process call or signed fleet forward (`Control::on_owner`, `cluster::to_owner`), never over
   the public endpoint, so neither cluster's IP allowlist applies to it: a client the local

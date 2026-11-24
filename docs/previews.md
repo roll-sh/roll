@@ -1354,7 +1354,9 @@ thirty-fourth review found them in the clear.
   `guest:<name>` (no handle has a colon, so a guest is never mistaken for a team member), in
   the dashboard's shape with "a guest, through the share link "Acme's review"" in its line. A
   guest's words are made inert for a pull request: an `@` can't mention anyone, and no image
-  or HTML renders. At most 10 an hour through one link (429 after). A guest sees only the
+  or HTML renders. They're words from outside the team wherever they're read: the review is
+  made with an outside origin (roll code's review tools mark it), and `GET …/notes` marks a
+  guest's notes and replies `outside`, so MCP's lockdown never hands them to a model. At most 10 an hour through one link (429 after). A guest sees only the
   notes left through their link, with no Reply or Resolve (the team answers in roll, on the
   change, or in Slack); a link without `notes` gives no button, as before.
   `a_share_links_guest_leaves_notes_as_a_guest` and the runtime's link test (the guest's
@@ -2219,6 +2221,13 @@ type Settings = {
     #open: nothing matched`"), the state taken as it was then (checked by hand in the screenshot
     image: a click opening a cart, typing reaching the page's handler, Escape closing it, a missing
     element named; live: a Tab state compared with main's, and one from the repo's `roll.toml`).
+    A state's clicks and typing are timed to the next paint (`step_ms`, the slowest one: its
+    handlers' work and the frame after them, most of what Interaction to Next Paint counts, in the
+    lab; the browser's own Event Timing counts only a person's input, and steps are the checks'),
+    beside main's same state (`against.step_ms`); the sheet says so when a state's is past 200 ms
+    and half again main's (Vercel's Speed Insights' INP, without visitors' own numbers yet). A
+    number the page reports is kept only when it could be a time (a minute at most). Live: the
+    Tab state's click timed on both. `a_screenshot_run_s_pages_are_only_those_asked_for_each_once`.
     Other browsers too (Percy's and Chromatic's browsers; `github.browsers`: `firefox`, `webkit`,
     and `webkit-phone`, WebKit at 390 × 844 at twice the density as a touch device, mobile
     Safari's engine; a picture past 2 MiB is left out so the others still fit):
@@ -2699,9 +2708,10 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Notes from people outside the team, in review** (Netlify's drawer, Vercel's comments): a
-   share link with `notes` gives its visitors the button as guests (`guest:<name>`, inert text,
-   10 an hour per link).
+1. **Interaction to next paint, in review** (Vercel's Speed Insights): a page state's clicks and
+   typing timed to the next paint (`step_ms`) beside main's same state, said on the sheet when
+   past 200 ms and half again main's. Visitors' own numbers (field data from the toolbar's
+   script) next.
 2. **A note that shows what the reviewer saw** (Jam's recordings, Netlify's markup): today a
    note carries a selector, the last steps, errors and failed requests, and roll's own browser
    crops the element later at desktop width; a phone-only or Safari-only bug has no picture.
@@ -2712,22 +2722,23 @@ Ranked by what a person notices first. Done so far:
    (roll's notices, email through accounts, a Slack DM through chat ops) is the question.
 4. **Grouped visual changes** (Percy's grouped diffs, Chromatic's accept all): one header change
    is a separate Accept per page, width, browser, state and story.
-5. **Interaction to next paint and visitors' own numbers** (Vercel's Speed Insights): roll
-   measures LCP and CLS from one lab load; INP from the `states` steps first.
-6. **Restore points for the products that only copy** (Redis, search, NoSQL, streams): a point
+5. **Restore points for the products that only copy** (Redis, search, NoSQL, streams): a point
    is kept only where the product puts a branch back in place, keeping its id (their delete
    guards check it); each needs its control plane's reset `from`, as pg-control's.
-7. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
+6. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
    (3.3 s in its log) and its masking, which needs that compute up: pg-control's to shorten.
-8. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+7. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-9. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+8. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-10. **Watch: pg-control's recovery to a time seconds old** (unowned).
+9. **Watch: pg-control's recovery to a time seconds old** (unowned).
 
+
+
+Landed 2026-11-24, early afternoon: notes from people outside the team (#911: a share link's guests, `guest:<name>`).
 
 Landed 2026-11-24, midday: notes as Slack threads both ways (#904, `slack.note`) and a resolve said on the change (#906).
 
