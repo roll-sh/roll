@@ -2241,7 +2241,8 @@ mod tests {
         // A tool that takes an outside address is marked open-world, or says here why it reaches
         // nothing: two siblings' tools and two of apps' had missed the mark (a crawl test, a
         // certificate renewal, a plan from a Git URL, a domain's DNS check).
-        const ADDRESSES: &[&str] = &["url", "urls", "endpoint", "origin", "domain", "host", "hostname", "webhook", "webhook_url", "base_url", "git", "image", "callback", "issuer", "jwks_uri", "address", "target_url"];
+        // (Not `endpoint`: Postgres's are roll's own computes.)
+        const ADDRESSES: &[&str] = &["url", "urls", "origin", "domain", "host", "hostname", "webhook", "webhook_url", "base_url", "git", "image", "callback", "issuer", "jwks_uri", "address", "target_url"];
         const REACHES_NOTHING: &[(&str, &str)] = &[
             ("tasks_cancel_messages", "url is a filter over stored messages"),
             ("search_verify_site", "answers what to publish; search_check_site_verification reads it"),

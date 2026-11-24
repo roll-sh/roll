@@ -183,7 +183,7 @@ default) and the commands run in it, a managed secret's rotation at its vendor o
 certificate's renewal at its CA, a plan or an import read from a public Git URL, a custom or
 preview domain's DNS check, and search's crawl tests and site checks.
 Every other tool's domain is roll's own (`false`). A tool that takes an outside address (`url`,
-`origin`, `domain`, `host`, `git`, `endpoint`…) is open-world or names in a test why it reaches
+`origin`, `domain`, `host`, `git`…) is open-world or names in a test why it reaches
 nothing (a filter, a stored setting). Search mode's `roll_run` is open-world when any
 tool it may run is; `roll_run_read` never is.
 
@@ -1474,7 +1474,7 @@ From a 2026-11-24 gap review (every tool run as an agent would against a fresh r
    `openWorldHint` (search's crawl test, secrets' certificate renewal, both fixed before landing),
    and so had three of apps' on main: `apps_plan` (reads a public Git URL), `apps_verify_domain`
    and `apps_verify_preview_domain` (a domain's DNS). Marked; and a tool taking an outside address
-   (`url`, `origin`, `domain`, `host`, `git`, `endpoint`…) is now open-world or says why it
+   (`url`, `origin`, `domain`, `host`, `git`…) is now open-world or says why it
    reaches nothing (`REACHES_NOTHING`), so the next one fails a test instead of a review.
 2. **Paging is the products'.** No list route takes a cursor (approvals take `limit` only). History
    and logs are all capped (a `LIMIT`, the latest N, or a retention window), so nothing grows
