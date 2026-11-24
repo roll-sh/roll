@@ -76,6 +76,8 @@ pub struct Inst {
     in_flight: AtomicU32,
     last_used: Mutex<Instant>,
     started_at: Mutex<Option<i64>>,
+    /// How long its last start took the runtime (the container up, before the app answers).
+    runtime_ms: Mutex<Option<f64>>,
     cpu_seen: Mutex<Option<u64>>,
     /// Consecutive crashes (a worker's restart backoff).
     crashes: AtomicU32,
@@ -152,6 +154,7 @@ impl Inst {
             in_flight: AtomicU32::new(0),
             last_used: Mutex::new(Instant::now()),
             started_at: Mutex::new(None),
+            runtime_ms: Mutex::new(None),
             cpu_seen: Mutex::new(None),
             crashes: AtomicU32::new(0),
             done: AtomicBool::new(false),
@@ -677,6 +680,8 @@ pub struct EnvLive {
     /// What its instances did that's an event ([`EnvLive::take_notes`]): scaling out or in (with
     /// why), a crash (with its reason), and the deployment it was of.
     notes: Mutex<Vec<Note>>,
+    /// Its last cold start, in parts.
+    last_cold: Mutex<Option<crate::model::ColdStart>>,
     seq: AtomicU64,
     /// Every instance this process made here (a deploy's being checked isn't in `insts` until
     /// its commit): [`Self::adopt`] never takes one for a previous owner's.
@@ -749,6 +754,7 @@ impl EnvLive {
             failed: Mutex::new(None),
             crashes: Mutex::new(std::collections::VecDeque::new()),
             notes: Mutex::new(Vec::new()),
+            last_cold: Mutex::new(None),
             seq: AtomicU64::new(0),
             mine: Mutex::default(),
             log,
@@ -966,6 +972,7 @@ impl EnvLive {
         }
         *inst.phase.lock() = Phase::Starting;
         let log = self.log.instance(&inst.name, &inst.deployment);
+        let t0 = Instant::now();
         let addr = match self.runtime.start(&inst.name, log).await {
             Ok(a) => a,
             Err(e) => {
@@ -973,6 +980,7 @@ impl EnvLive {
                 return Err(WakeError::Failed(e.to_string()));
             }
         };
+        *inst.runtime_ms.lock() = Some(t0.elapsed().as_secs_f64() * 1000.0);
         *inst.started_at.lock() = Some(now_ms());
         inst.health_fails.store(0, Ordering::SeqCst);
         *inst.cpu_seen.lock() = None;
@@ -1324,7 +1332,11 @@ impl EnvLive {
         };
         let ms = woke.elapsed().as_secs_f64() * 1000.0;
         self.meter.lock().cold_start(now_ms(), ms);
-        self.log.stream(Stream::System).line(format!("cold start: {} answered in {ms:.0} ms", inst.name));
+        // Its parts (Cloud Run's startup latency): the runtime bringing the container up, then the
+        // app until it answers.
+        let runtime = inst.runtime_ms.lock().unwrap_or(0.0).min(ms);
+        *self.last_cold.lock() = Some(crate::model::ColdStart { at: now_ms(), ms: ms.round() as u64, runtime_ms: runtime.round() as u64, app_ms: (ms - runtime).round() as u64 });
+        self.log.stream(Stream::System).line(format!("cold start: {} answered in {ms:.0} ms (the container up in {runtime:.0} ms, the app answering {:.0} ms after)", inst.name, ms - runtime));
         let mut l = self.pick(dep, tpl.run.concurrency, true).ok_or_else(|| WakeError::Failed("the instance stopped again".into()))?;
         l.waited = began.elapsed();
         l.cold = true;
@@ -1333,6 +1345,11 @@ impl EnvLive {
 
     pub fn gate(&self) -> Option<Arc<Gate>> {
         self.gate.lock().clone()
+    }
+
+    /// Its last cold start, in parts (none since this node had it).
+    pub fn last_cold_start(&self) -> Option<crate::model::ColdStart> {
+        *self.last_cold.lock()
     }
 
     /// Counts a request against the rules it matched (their fingerprints).
