@@ -778,6 +778,10 @@ pub async fn put_repository(ctx: &Ctx<'_>) -> EsResult<Reply> {
             Ok(())
         })
         .await?;
+    // Without `verify`, nothing is read or written at registration, as on Elasticsearch.
+    if !verify {
+        return Reply::acknowledged();
+    }
     // A repository Elasticsearch wrote is read only: its snapshots list from its own data, and
     // no test object goes into it.
     if elastic_repository(ctx, &registered_name).await? {
