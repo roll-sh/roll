@@ -21439,6 +21439,48 @@ Not done, found:
 - Subquery Scan widths (remove_unused_subquery_outputs' NULLs at their types' widths), memoize:8,
   subselect:19 rows, the catalog plans (bloat), as agent 288 left them.
 
+## Analytic CPU, round 14: correlated SubPlans run once a parameter value (agent 314)
+
+The standing (above, BENCH "Standing, 2026-11-24") put TPC-H q17 at 1.96x pgrust's instructions.
+q17's SubPlan, `l_quantity < (SELECT 0.2 * avg(l_quantity) FROM lineitem WHERE l_partkey =
+p_partkey)`, sits in the join's filter and ran once for every joined lineitem row: about 6,000
+runs for about 200 parts, each an index scan and an aggregate over ~30 lineitem rows
+(`get_sorted_snap` 13% of the query's samples, the SubPlan's tree under it). PostgreSQL does the
+same (4.60 G); pgrust 2.22 G.
+
+**What changed** (`exec/mod.rs`: `ExecCtx::memo_rows`, `memo_safe`, `memo_expr`): a correlated
+scalar or EXISTS SubPlan of the statement's own query level keeps its rows by its parameters'
+values for the statement (`subplan_memo`, by subquery id, for the plan and snapshot it was made
+for, as `subplan_trees` keeps its tree), and a later run with the same values returns them
+instead of rescanning. Only where nothing can tell the difference:
+- the plan reads the same rows for the same values all through the statement: the statement's
+  snapshot (a SubPlan never sees its own statement's writes: the golden's UPDATE), and only
+  scans, joins, filters, projections, sorts, limits, appends, set operations and built-in
+  aggregates without ORDER BY (no row locks, TABLESAMPLE, catalog, foreign or function scans,
+  CTEs, writes);
+- every expression in it is a column, constant, parameter, boolean or CASE node, or a call of a
+  built-in non-volatile function or operator, casts between plain built-in types: no sub-select,
+  domain check, user function or aggregate (a STABLE PL/pgSQL function may RAISE a NOTICE at each
+  run: the golden checks it still does);
+- parameters of types whose equal values are one value (bool, int2/4/8, oid, date: not numeric,
+  float, text);
+- not under EXPLAIN ANALYZE (it shows each run's loops, as PostgreSQL's SubPlan reruns its plan),
+  not a SQL function's call or a SubPlan inside another (`outer` frames: their values aren't in the
+  key).
+Errors are the same: a run that fails is not remembered, and a value whose sub-select returns
+two rows returns them each time (21000). At most 16,384 values a SubPlan; a memo that found under
+one in 8 of its first 1,024 lookups is dropped (q20's part-supplier pairs never repeat).
+
+**Measured** (BENCH "Analytic CPU, round 14", plain dist, two alternating pairs of the 22): q17
+4.99 -> 2.88 G user instructions (-42.3%), the 22 93.7 -> 91.6 G (-2.2%), every other query level
+(q20 within the +3.6% outlier runs both builds have), every hash equal. Not PGO-built: no existing
+function's boundary or inlining changed (a call to `memo_rows` was added on the correlated path
+only).
+
+**Left:** q17's other half is the scan side (lineitem's parallel scan and the hash join: agent
+311's format 5 scans): plain 2.88 G against pgrust's 2.22 G (PGO not measured with it). q02's SubPlan (min
+supply cost a part, 1,309 runs) repeats too few values to gain; q20's never repeat.
+
 ## The standing on the shipped build, 2026-11-24 (agent 314)
 
 BENCH "Standing, 2026-11-24" is one table of every benchmarked workload with roll PGO

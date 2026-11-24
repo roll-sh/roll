@@ -285,6 +285,55 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Analytic CPU, round 14: correlated SubPlans run once a parameter value (2026-11-24, agent 314)
+
+HANDOFF "Analytic CPU, round 14" has what changed. Lane C, the TPC-H SF1 data and harness of
+"Standing, 2026-11-24" (`~/.cache/a314/bench/tpair.sh`: per build a fresh server on a copy of
+the data, a warm-up run of each query, then each query once in its own perf window of the
+server's cgroup), plain dist builds (`tools/dist.sh`): **b1** origin's `8f3876dab` with the
+standing's docs (`cand/a314`), **n2** the candidate (`cand/a314-2`). One pair a hold, b1 n2 then
+n2 b1; foreign load 5.9-6.0 cores by lane.sh, 2.0-3.2 on the server CPUs: instructions decide.
+Every result hash equal (and PostgreSQL's).
+
+| query | b1 / n2 pair 1 (G) | b1 / n2 pair 2 (G) | % per pair |
+|---|---|---|---|
+| q01 | 7.375 / 7.375 | 7.375 / 7.375 | -0.00, -0.01 |
+| q02 | 2.628 / 2.628 | 2.624 / 2.629 | +0.01, +0.16 |
+| q03 | 4.184 / 4.183 | 4.183 / 4.183 | -0.01, +0.01 |
+| q04 | 1.709 / 1.709 | 1.709 / 1.709 | -0.02, +0.01 |
+| q05 | 3.098 / 3.099 | 3.099 / 3.099 | +0.01, -0.00 |
+| q06 | 5.006 / 5.006 | 5.006 / 5.005 | -0.02, -0.01 |
+| q07 | 3.533 / 3.532 | 3.532 / 3.532 | -0.03, -0.00 |
+| q08 | 1.410 / 1.409 | 1.410 / 1.409 | -0.01, -0.04 |
+| q09 | 7.810 / 7.811 | 7.816 / 7.811 | +0.01, -0.06 |
+| q10 | 7.445 / 7.445 | 7.445 / 7.445 | +0.00, -0.00 |
+| q11 | 0.834 / 0.832 | 0.832 / 0.832 | -0.15, +0.01 |
+| q12 | 5.964 / 5.964 | 5.964 / 5.964 | +0.01, +0.00 |
+| q13 | 4.121 / 4.121 | 4.121 / 4.121 | -0.00, +0.01 |
+| q14 | 1.378 / 1.377 | 1.378 / 1.378 | -0.01, +0.00 |
+| q15 | 4.653 / 4.654 | 4.654 / 4.654 | +0.02, -0.01 |
+| q16 | 2.878 / 2.879 | 2.878 / 2.880 | +0.02, +0.06 |
+| q17 | 4.983 / 2.875 | 4.989 / 2.881 | -42.30, -42.26 |
+| q18 | 15.480 / 15.503 | 15.496 / 15.480 | +0.15, -0.10 |
+| q19 | 0.476 / 0.476 | 0.476 / 0.476 | +0.00, +0.03 |
+| q20 | 1.366 / 1.398 | 1.366 / 1.368 | +2.30, +0.11 |
+| q21 | 6.763 / 6.763 | 6.763 / 6.763 | -0.00, +0.00 |
+| q22 | 0.626 / 0.626 | 0.626 / 0.626 | -0.04, +0.00 |
+| all | 93.72 / 91.67 | 93.74 / 91.62 | -2.19, -2.26 |
+
+- q17 4.98-4.99 -> 2.875-2.881 G (-42.3% in both pairs; the first version, n1, -42.38 / -42.35%
+  in its two pairs): roll PGO's 4.36 G stood at 1.96x pgrust's 2.22 G in the standing. Wall
+  1.1 s -> 0.4 s (a reading).
+- q20 (8,332 SubPlan runs, every pair of part and supplier once): +2.30% / +0.11% here, +1.12% /
+  -0.01% for n1, +0.18% in a third n1 pair; then four runs of q20 on each build in one hold read
+  b1 1.3732 G three times and 1.4226 once, n2 1.3734 G three times (+0.02%) and 1.4229 once: a
+  run of q20 reads ~3.6% more now and then on either build, and the memo's cost there (its first
+  1,024 runs remembered, then dropped) is ~0.02%.
+- The other 20 within +-0.16% (q02, q11, q18 move that much in either direction between runs).
+- Golden `a314_subplan_memo` (recorded from PostgreSQL 18.6): q17's shape, two parameters
+  repeated and NULL, EXISTS under OR, a second row for one value (21000 when that value comes),
+  a STABLE PL/pgSQL function's NOTICE at every run, an UPDATE's SubPlan over the rows it changes.
+
 ## Standing, 2026-11-24: roll PGO and plain against PostgreSQL 18.6 and pgrust (agent 314)
 
 One run a cell of all four servers, the same afternoon (2026-11-24 14:35-18:15 UTC), the same lane
