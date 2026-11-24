@@ -65,7 +65,7 @@ impl Engine {
         // Said on the change too: its pull request and the note's Slack thread hear it. Best
         // effort: the page has it resolved either way.
         let said = code_control::review::preview_note::reply_body(note, crate::notes::RESOLVED);
-        if let Err(e) = self.source.comment(change, &said, by).await {
+        if let Err(e) = self.source.comment(change, &said, by, false).await {
             tracing::warn!(preview = %id, error = %e, "previews: saying a note was resolved on its change");
         }
         Ok(())
@@ -471,7 +471,8 @@ impl Engine {
         }
         let url = self.store.services(id)?.into_iter().next().map(|s| s.url).unwrap_or_default();
         let (by, body) = crate::notes::guest_body(n, &url, id, &share.label).map_err(Error::BadRequest)?;
-        let review = self.source.comment(&change, &body, &by).await.map_err(|e| Error::Internal(format!("{e:#}")))?;
+        // A guest's words: outside the team, wherever the review is read (MCP's lockdown).
+        let review = self.source.comment(&change, &body, &by, true).await.map_err(|e| Error::Internal(format!("{e:#}")))?;
         let review = review.ok_or_else(|| Error::Conflict("this preview's change takes no notes".into()))?;
         self.store.add_guest_note(id, &share.id, &review, now)?;
         self.store.log(id, &format!("{by} left a note through share link {}", share.id))?;

@@ -1354,7 +1354,9 @@ thirty-fourth review found them in the clear.
   `guest:<name>` (no handle has a colon, so a guest is never mistaken for a team member), in
   the dashboard's shape with "a guest, through the share link "Acme's review"" in its line. A
   guest's words are made inert for a pull request: an `@` can't mention anyone, and no image
-  or HTML renders. At most 10 an hour through one link (429 after). A guest sees only the
+  or HTML renders. They're words from outside the team wherever they're read: the review is
+  made with an outside origin (roll code's review tools mark it), and `GET …/notes` marks a
+  guest's notes and replies `outside`, so MCP's lockdown never hands them to a model. At most 10 an hour through one link (429 after). A guest sees only the
   notes left through their link, with no Reply or Resolve (the team answers in roll, on the
   change, or in Slack); a link without `notes` gives no button, as before.
   `a_share_links_guest_leaves_notes_as_a_guest` and the runtime's link test (the guest's
