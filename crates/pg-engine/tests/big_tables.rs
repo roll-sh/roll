@@ -220,6 +220,32 @@ fn copy_through_the_sink() {
     assert_eq!((rows(&mut s, queries[0]), rows(&mut s, queries[1])), before);
 }
 
+/// A sink of a few kilobytes (`txn::sink`): a COPY of 3,000 rows flushes it about a hundred
+/// times; the rows' and the primary key's entries go to runs as they came, the secondary
+/// index's (in no order) wait in chunks, more than 32 of them merged into one on the way, and
+/// go into runs as the sink closes. Index-only scans read what the rows give; a COPY failing
+/// on its last line leaves nothing.
+#[test]
+fn copy_sink_chunks() {
+    let dir = tempfile::tempdir().unwrap();
+    let eng = with_txn_spill_bytes(4096, || open(dir.path()));
+    // (Past the model, as `copy_through_the_sink`: its index-only scans read the entries.)
+    with_max_versions(500, || {
+        let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+        run(&mut s, "CREATE TABLE ck (id int PRIMARY KEY, a int NOT NULL, t text);\nCREATE INDEX ck_a ON ck (a);\nCREATE TABLE ck2 (LIKE ck INCLUDING INDEXES)");
+        let data: String = (1..=3000).map(|i| format!("{i}\t{}\tt{i}\n", (i * 7919) % 1000)).collect();
+        let sunk = pg_engine::txn::SINK_RUNS.load(Ordering::Relaxed);
+        s.query_copy("COPY ck FROM STDIN", data.as_bytes()).unwrap();
+        let runs = pg_engine::txn::SINK_RUNS.load(Ordering::Relaxed) - sunk;
+        assert!(runs > 100, "{runs} runs from the sink");
+        same_both_ways(&mut s, &["SELECT count(*), sum(a) FROM ck WHERE a >= 0", "SELECT a, count(*) FROM ck WHERE a < 5 GROUP BY a ORDER BY a", "SELECT count(*), sum(id) FROM ck WHERE id > 1500"]);
+        assert_eq!(rows(&mut s, "SELECT count(*), sum(a), sum(id) FROM ck"), ["[Int8(3000), Int8(1498500), Int8(4501500)]"]);
+        let bad = format!("{data}3001\tx\tbad\n");
+        assert!(s.query_copy("COPY ck2 FROM STDIN", bad.as_bytes()).is_err());
+        assert_eq!(rows(&mut s, "SELECT count(*) FROM ck2"), ["[Int8(0)]"]);
+    });
+}
+
 /// Parallel btree builds (`session::ddl::parbuild`) give what the serial build gives: the
 /// same entries (index-only scans against the rows), pg_class numbers, and unique errors;
 /// also when each participant spills its sorted runs to files every 1,024 rows.

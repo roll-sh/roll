@@ -4623,12 +4623,11 @@ impl InsertNode {
         };
         // (The sink opens once the rows stored are left alone until the load ends; its writes
         // go to runs once the table is past the model's size, or when its rows are held and
-        // so stored with their TIDs: nothing stamps them then.)
+        // so stored with their TIDs: nothing stamps them then. A held load's from its first
+        // row: its runs then hold all its keys, a run a table or index, none overlapping
+        // another (`txn::sink`); a small load's go to the buffer as it closes.)
         match self.sink {
-            Some(false)
-                if self.copy_load.as_ref().is_some_and(|l| l.rows_wait())
-                    && (ctx.processed.get() >= SINK_AFTER || self.copy_load.as_ref().is_some_and(|l| !l.held())) =>
-            {
+            Some(false) if self.copy_load.as_ref().is_some_and(|l| l.rows_wait()) => {
                 let mut txn = ctx.txn.borrow_mut();
                 self.sink = txn.open_sink().then_some(true);
                 if self.sink.is_some() && self.copy_load.as_ref().is_some_and(|l| l.held()) {

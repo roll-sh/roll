@@ -6,6 +6,7 @@ mod bulklocks;
 pub mod locks;
 pub mod multixact;
 pub mod procs;
+mod sink;
 pub(crate) mod spill;
 pub mod ssi;
 pub mod toast;
@@ -21,6 +22,7 @@ use crate::{bail, err};
 use bytes::Bytes;
 use locks::{LockManager, LockMode, RowLockMode, WaitPolicy, Waits};
 use parking_lot::{Mutex, RwLock};
+use sink::Sink;
 use spill::{Ent, LATEST, Runs};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
@@ -1295,55 +1297,6 @@ fn key_table(key: &[u8]) -> u32 {
     key.get(..4).map_or(0, |b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
 }
 
-/// Fresh writes of a bulk load (`Txn::open_sink`): keys and values back to back in `data`,
-/// each (offset, key length, value length) in `ents`.
-#[derive(Default)]
-struct Sink {
-    data: Vec<u8>,
-    ents: Vec<(u32, u32, u32)>,
-    /// They may go to a run (`Txn::sink_runs_ok`).
-    runs_ok: bool,
-}
-
-/// The distinct first 8 bytes (table and index) of a sink's keys, in order (None: a key
-/// shorter, or more than 255 of them).
-fn sink_prefixes(ents: &[(u32, u32, u32)], data: &[u8]) -> Option<Vec<[u8; 8]>> {
-    let mut p: Vec<[u8; 8]> = Vec::new();
-    let mut last = None;
-    for e in ents {
-        let k = data.get(e.0 as usize..(e.0 + e.1) as usize)?;
-        let q: [u8; 8] = k.get(..8)?.try_into().ok()?;
-        if last == Some(q) {
-            continue;
-        }
-        last = Some(q);
-        if !p.contains(&q) {
-            if p.len() == 255 {
-                return None;
-            }
-            p.push(q);
-        }
-    }
-    p.sort_unstable();
-    Some(p)
-}
-
-impl Sink {
-    fn push(&mut self, k: &[u8], v: &[u8]) {
-        self.ents.push((self.data.len() as u32, k.len() as u32, v.len() as u32));
-        self.data.extend_from_slice(k);
-        self.data.extend_from_slice(v);
-    }
-
-    /// `push` of a value that is `head` then `rest`.
-    fn push_parts(&mut self, k: &[u8], head: &[u8], rest: &[u8]) {
-        self.ents.push((self.data.len() as u32, k.len() as u32, (head.len() + rest.len()) as u32));
-        self.data.extend_from_slice(k);
-        self.data.extend_from_slice(head);
-        self.data.extend_from_slice(rest);
-    }
-}
-
 impl TxnState {
     /// Whether this transaction's reads take SIRead predicate locks: a serializable one SSI
     /// tracks (not a read-only one on a safe snapshot: `ssi::Ssi::register`).
@@ -2360,14 +2313,9 @@ impl TxnState {
             return false;
         }
         self.cur_xid();
-        // (Its room taken at once: grown by doubling, its bytes passed the buffer's size by
-        // up to half again while being copied. Untouched pages cost nothing.)
-        let room = self.db.store.txn_spill_bytes();
-        self.sink = Some(Box::new(Sink {
-            data: Vec::with_capacity(room),
-            ents: Vec::with_capacity(room / 64),
-            runs_ok: false,
-        }));
+        // (Its room a megabyte, then the buffer's size at once: grown by doubling, its bytes
+        // passed the buffer's size by up to half again while being copied.)
+        self.sink = Some(Box::new(Sink::new(self.db.store.txn_spill_bytes())));
         true
     }
 
@@ -2502,66 +2450,24 @@ impl TxnState {
         runs.write(&mut linkable.into_iter(), true)
     }
 
-    /// The sink's writes go in (`open_sink`): sorted, as one linkable run of the spilled
-    /// writes, stamped with a journal place of their own (a placeholder in the journal: no
-    /// snapshot taken before sees them, every one after does), or into the buffer. `last`:
-    /// the sink closes.
+    /// The sink's writes go in (`open_sink`): sorted, as linkable runs of the spilled writes
+    /// (`sink::Sink::flush_runs`: one a table or index), stamped with a journal place of their
+    /// own (a placeholder in the journal: no snapshot taken before sees them, every one after
+    /// does), or into the buffer. `last`: the sink closes.
     fn flush_sink(&mut self, last: bool) -> Result<()> {
         let Some(mut s) = self.sink.take() else {
             return Ok(());
         };
         // (Below a megabyte, or a quarter of the buffer's size, a run isn't worth a file of
-        // the store's.)
-        if s.runs_ok && s.data.len() >= (self.db.store.txn_spill_bytes() / 4).min(1 << 20) {
-            let data = std::mem::take(&mut s.data);
-            {
-                let key = |e: &(u32, u32, u32)| &data[e.0 as usize..(e.0 + e.1) as usize];
-                // (By each key's first 16 bytes, a byte at a time (`sort::radix_sort_by`: the
-                // index entries of a column in no order, not only rows in key order), then the
-                // keys themselves where those tie. Keys are unique: one order.)
-                // (A key's first 8 bytes are its table and index: the sink's few such prefixes
-                // ranked, the 16 bytes are a prefix's rank and the 15 bytes after it, which hold
-                // a row's whole key or an int index entry's, so fewer keys tie. Zeros past a
-                // key's end order as its end does; ties go to the keys. Keys under 8 bytes, or
-                // more than 255 prefixes: the first 16 bytes.)
-                let prefixes = sink_prefixes(&s.ents, &data);
-                let words = |k: &[u8]| {
-                    let mut b = [0u8; 16];
-                    match &prefixes {
-                        Some(p) => {
-                            let at = p.iter().position(|q| q[..] == k[..8]).expect("a ranked prefix");
-                            b[0] = at as u8;
-                            let n = (k.len() - 8).min(15);
-                            b[1..1 + n].copy_from_slice(&k[8..8 + n]);
-                        }
-                        None => {
-                            let n = k.len().min(16);
-                            b[..n].copy_from_slice(&k[..n]);
-                        }
-                    }
-                    [u64::from_be_bytes(b[..8].try_into().unwrap()), u64::from_be_bytes(b[8..].try_into().unwrap())]
-                };
-                let mut order: Vec<([u64; 2], u32)> = s.ents.iter().enumerate().map(|(i, e)| (words(key(e)), i as u32)).collect();
-                crate::sort::radix_sort_by(&mut order, |o| o.0, |a, b| {
-                    a.0.cmp(&b.0).then_with(|| key(&s.ents[a.1 as usize]).cmp(key(&s.ents[b.1 as usize])))
-                });
-                debug_assert!(order.windows(2).all(|w| key(&s.ents[w[0].1 as usize]) < key(&s.ents[w[1].1 as usize])), "the sink's keys in order");
-                let ts = self.position() as u64 + 1;
-                self.journal.push((Vec::new(), None));
-                self.derived.clear();
-                let dir = self.db.store.spill_dir().join(self.id.to_string());
-                let runs = Self::runs_in(&mut self.runs, dir, &self.rdels, self.db.store.compress());
-                let mut items = order.iter().map(|&(_, i)| {
-                    let e = s.ents[i as usize];
-                    let k = (e.0 + e.1) as usize;
-                    (&data[e.0 as usize..k], [&data[k..k + e.2 as usize], &[][..]])
-                });
-                runs.write_fresh(&mut items, self.write_cid, ts, false)?;
-                SINK_RUNS.fetch_add(1, Ordering::Relaxed);
-            }
-            s.ents.clear();
-            s.data = data;
-            s.data.clear();
+        // the store's; once the load has written runs, its last entries go to runs too.)
+        if s.runs_ok && (s.data.len() >= (self.db.store.txn_spill_bytes() / 4).min(1 << 20) || last && s.close_writes_runs()) {
+            let ts = self.position() as u64 + 1;
+            self.journal.push((Vec::new(), None));
+            self.derived.clear();
+            let dir = self.db.store.spill_dir().join(self.id.to_string());
+            let runs = Self::runs_in(&mut self.runs, dir.clone(), &self.rdels, self.db.store.compress());
+            let written = s.flush_runs(runs, &dir, self.write_cid, ts, last)?;
+            SINK_RUNS.fetch_add(written, Ordering::Relaxed);
         } else {
             let data = std::mem::take(&mut s.data);
             for e in std::mem::take(&mut s.ents) {
