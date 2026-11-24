@@ -2045,16 +2045,8 @@ impl Runtime {
         if !endpoints.is_empty() {
             args.extend(["--env".into(), format!("ENDPOINTS={}", serde_json::to_string(&endpoints)?)]);
         }
-        // The notes' elements to crop, checked again (they come from the preview's code).
-        let crops: Vec<serde_json::Value> = opts
-            .crops
-            .iter()
-            .filter(|c| crate::settings::page_path_ok(&c.path) && crate::settings::selector_ok(&c.selector) && !c.note.is_empty() && c.note.len() <= 64)
-            .take(crate::store::CROPS_PER_RUN)
-            .map(|c| serde_json::json!({ "note": c.note, "path": c.path, "selector": c.selector }))
-            .collect();
-        if !crops.is_empty() {
-            args.extend(["--env".into(), format!("CROPS={}", serde_json::to_string(&crops)?)]);
+        if let Some(crops) = crops_env(&opts.crops) {
+            args.extend(["--env".into(), format!("CROPS={crops}")]);
         }
         // The PNG on the first line, the timings (if the command wrote them) on the second, the
         // phone-width PNG (if it took one) on the third, then the other pages: what each said,
@@ -2691,6 +2683,29 @@ async fn serve(rt: Arc<Runtime>, preview: String, service: String, mut req: Requ
     with_skew_cookie(resp, skew_cookie, rt.cfg.scheme == "https")
 }
 
+/// The notes' elements Chromium's run crops ($CROPS), checked again (they come from the preview's
+/// code): as their reviewers saw them, viewport and steps (each step's selector checked), the
+/// other engines' left to the other browsers' run. `None`: none.
+fn crops_env(asks: &[crate::ports::CropAsk]) -> Option<String> {
+    let steps_ok = |c: &crate::ports::CropAsk| {
+        c.steps.iter().all(|s| match s {
+            crate::settings::Step::Click(sel) => crate::settings::selector_ok(sel),
+            crate::settings::Step::Press(k) => matches!(k.as_str(), "Enter" | "Escape"),
+            _ => false,
+        })
+    };
+    let crops: Vec<serde_json::Value> = asks
+        .iter()
+        .filter(|c| c.browser.is_none() && crate::settings::page_path_ok(&c.path) && crate::settings::selector_ok(&c.selector) && !c.note.is_empty() && c.note.len() <= 64)
+        .take(crate::store::CROPS_PER_RUN)
+        .map(|c| {
+            let steps: &[crate::settings::Step] = if steps_ok(c) { &c.steps[..c.steps.len().min(10)] } else { &[] };
+            serde_json::json!({ "note": c.note, "path": c.path, "selector": c.selector, "width": c.width, "height": c.height, "steps": steps })
+        })
+        .collect();
+    (!crops.is_empty()).then(|| serde_json::to_string(&crops).unwrap_or_default())
+}
+
 /// The cookie a skew-protected service's page load gets: the push that answered it.
 const SKEW_COOKIE: &str = "__roll_dpl";
 
@@ -3154,6 +3169,19 @@ mod tests {
         rt.store.set_service_skew(&row.id, "web", false).unwrap();
         let off = get("/api", "x-deployment-id: cs_2\r\n").await;
         assert!(off.ends_with("\r\n\r\ncs_3") && !get("/", "Sec-Fetch-Dest: document\r\n").await.contains("__roll_dpl"), "off: {off}");
+    }
+
+    /// Chromium's crops carry how their reviewers saw the page (viewport, steps); another
+    /// engine's go to the other browsers' run; a step roll's checks refuse sends none.
+    #[test]
+    fn crops_carry_how_their_reviewers_saw_the_page() {
+        use crate::settings::Step;
+        let ask = |note: &str, browser: Option<&str>, steps: Vec<Step>| crate::ports::CropAsk { note: note.into(), path: "/cart".into(), selector: "button.pay".into(), width: Some(390), height: Some(844), steps, browser: browser.map(String::from) };
+        let env: serde_json::Value = serde_json::from_str(&crops_env(&[ask("rv_1", None, vec![Step::Click("li > button".into()), Step::Press("Escape".into())]), ask("rv_2", Some("webkit-phone"), vec![]), ask("rv_3", None, vec![Step::Click("a[href='//x']{".into())])]).unwrap()).unwrap();
+        assert_eq!(env[0], serde_json::json!({ "note": "rv_1", "path": "/cart", "selector": "button.pay", "width": 390, "height": 844, "steps": [{ "click": "li > button" }, { "press": "Escape" }] }));
+        assert_eq!(env.as_array().unwrap().len(), 2, "WebKit's is the other browsers' run's");
+        assert_eq!(env[1]["steps"], serde_json::json!([]), "a step its checks refuse: none of them");
+        assert_eq!(crops_env(&[ask("rv_4", Some("firefox"), vec![])]), None);
     }
 
     /// A screenshot run's other pages are only those asked for, each once, their numbers

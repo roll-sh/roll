@@ -1099,6 +1099,9 @@ CROP=$(head -c 8 "$HOME_DIR/crop.png" | od -An -tx1 | tr -d ' \n')
 # phone's viewport, after their click.
 CROP_AS=$(curl -sS -D - -o /dev/null "http://$API/v1/previews/$PV/notes/$CROP_NOTE/crop" | tr -d '\r' | sed -n 's/^x-roll-crop-as: //Ip')
 [ "$CROP_AS" = "WebKit, 390x844, after 1 step" ] || { echo "the note's crop should be taken as its reviewer saw it: '$CROP_AS'"; exit 1; }
+# And it is (not only said): a crop of the whole page at a phone's width, not the desktop's 1280.
+CROP_W=$(python3 -c "import struct,sys; b=open(sys.argv[1],'rb').read(); print(struct.unpack('>I', b[16:20])[0] if b[:4]==b'\x89PNG' else 0)" "$HOME_DIR/crop.png")
+[ "$CROP_W" -gt 0 ] && [ "$CROP_W" -lt 1280 ] || { echo "the note's crop should be at the reviewer's phone width, not the desktop's: $CROP_W px"; exit 1; }
 
 say "[skip preview] in the title removes the preview; without it, a new one comes"
 api PATCH "/v1/code/changes/$CHG" '{"title":"New page [skip preview]"}' >/dev/null
