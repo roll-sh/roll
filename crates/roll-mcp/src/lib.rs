@@ -1818,14 +1818,19 @@ fn refusal(body: &Value) -> Option<String> {
         Value::String(s) => return said(Some(s.as_str())).map(|s| rejection(&s)),
         e @ Value::Object(_) => {
             let mut parts = Vec::new();
-            let mut at = Some(e);
-            while let Some(e) = at.filter(|_| parts.len() < 4) {
+            let (mut at, mut depth) = (Some(e), 0);
+            while let Some(e) = at.filter(|_| depth < 8 && parts.len() < 4) {
+                depth += 1;
+                at = e.get("caused_by").filter(|c| c.is_object());
                 let reason = said(e["reason"].as_str().or(e["message"].as_str()));
+                // A cause that only repeats what's said already (search's often does) adds nothing.
+                if reason.as_ref().is_some_and(|r| parts.iter().any(|p: &String| p.contains(r.as_str()))) {
+                    continue;
+                }
                 match (said(e["type"].as_str()), reason) {
                     (Some(t), Some(r)) => parts.push(format!("{t}: {r}")),
                     (t, r) => parts.extend(r.or(t)),
                 }
-                at = e.get("caused_by").filter(|c| c.is_object());
             }
             if !parts.is_empty() {
                 return Some(parts.join("; caused by "));
@@ -1880,6 +1885,8 @@ mod refusal_tests {
         let (text, sc) = refused(StatusCode::BAD_REQUEST, es.clone()).await;
         assert_eq!(text, "mapper_parsing_exception: Failed to parse mapping: x; caused by illegal_argument_exception: No handler for type [nope] declared on field [x]");
         assert_eq!(sc["error_object"], es["error"], "the object stays whole");
+        let (text, _) = refused(StatusCode::BAD_REQUEST, json!({ "error": { "type": "mapper_parsing_exception", "reason": "Failed to parse mapping: no type [x]", "caused_by": { "type": "mapper_parsing_exception", "reason": "no type [x]" } } })).await;
+        assert_eq!(text, "mapper_parsing_exception: Failed to parse mapping: no type [x]", "a cause that repeats the reason is left out");
         let (text, _) = refused(StatusCode::NOT_FOUND, json!({ "error": { "type": "index_not_found_exception", "reason": "no such index [nope]" }, "status": 404 })).await;
         assert_eq!(text, "not found: index_not_found_exception: no such index [nope]");
         // axum's refusal of a body: the part about the argument.
