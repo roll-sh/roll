@@ -479,6 +479,8 @@ export type Sync = {
   paused_why: string | null;
   /** A certificate kind's: what the target calls what it pushed (an ACM ARN, a Key Vault certificate's latest version, a Cloudflare custom certificate's id). */
   remote_id?: string;
+  /** A sync that signs in with roll's issuer (workload identity federation, a federated credential): the subject its cloud's trust names, `roll-secrets:<project>:sync:<id>`. */
+  subject?: string;
 };
 /** What a sync would push before it exists (`POST …/syncs/preview`): names only. */
 export type SyncPreview = { names: string[]; credentials: string[]; missing_credentials: string[]; unknown_keys: string[] };
@@ -503,7 +505,7 @@ export type DeletedProject = { project: string; name: string; environment?: stri
 export type Recovered = { project: string; name: string; recovered_at: number; rotated: number; rotation_failed: string[] };
 export type Place = { project: string; project_name: string; environment: string; path: string; key: string; version: number; updated_at: number; linked: boolean };
 /** One thing to fix (`GET …/health`), worst first: where, never a value. */
-export type Finding = { issue: "decoy_used" | "production_unprotected" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "unplaced" | "operator_made" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string; decoy?: Decoy };
+export type Finding = { issue: "decoy_used" | "production_unprotected" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "unplaced" | "operator_made" | "stored_cloud_key" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string; decoy?: Decoy };
 /** One project's findings (`GET /v1/secrets/findings`). */
 export type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
 /** A URL roll calls to issue and revoke a value that lives outside roll (`rotator` links). */
