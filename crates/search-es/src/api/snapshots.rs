@@ -751,7 +751,7 @@ pub async fn put_repository(ctx: &Ctx<'_>) -> EsResult<Reply> {
     }
     // A location where someone else keeps a repository under roll's prefix isn't registered.
     if repo.in_bucket() && verify {
-        s3::refuse_foreign(ctx.cluster, &name, &repo).await?;
+        s3::refuse_foreign(ctx.cluster, &name, &repo, false).await?;
     }
     // A bucket is checked once registered (a write, a read and a delete); a repository that
     // fails stays registered, as on Elasticsearch, and the error is the answer.
@@ -1280,30 +1280,18 @@ const STATES: &[&str] = &["IN_PROGRESS", "SUCCESS", "FAILED", "PARTIAL", "INCOMP
 /// `GET _snapshot/{repository}/{snapshot}`.
 pub async fn get(ctx: &Ctx<'_>) -> EsResult<Reply> {
     ctx.validate_timeouts()?;
-    let exprs = ctx.list_param("repository").unwrap_or_default();
-    let repos = match_repositories(&ctx.state().metadata, &exprs)?;
-    // As Elasticsearch's: a repository that can't be read fails a request naming it alone, and
-    // is a failure beside the others' snapshots in one naming several.
-    let several = exprs.len() != 1 || exprs.iter().any(|e| e == "_all" || e.contains('*'));
-    let mut failures = Map::new();
-    // A bucket's snapshots may come from other clusters: its data is read first.
+    let repos = match_repositories(&ctx.state().metadata, &ctx.list_param("repository").unwrap_or_default())?;
+    // A bucket's snapshots may come from other clusters: its data is read first. One that can't
+    // be read fails the request, as on Elasticsearch 9.5.5 (whose response has no per-repository
+    // failures).
     for name in &repos {
-        let read = async {
-            if !elastic_repository(ctx, name).await?
-                && let Some(r) = s3::bucket_repository(&ctx.state(), name)
-            {
-                s3::refresh(ctx.cluster, name, &r).await?;
-            }
-            Ok::<_, EsError>(())
-        };
-        if let Err(e) = read.await {
-            if !several {
-                return Err(e);
-            }
-            failures.insert(name.clone(), e.to_value(false));
+        if elastic_repository(ctx, name).await? {
+            continue;
+        }
+        if let Some(r) = s3::bucket_repository(&ctx.state(), name) {
+            s3::refresh(ctx.cluster, name, &r).await?;
         }
     }
-    let repos: Vec<String> = repos.into_iter().filter(|r| !failures.contains_key(r)).collect();
     let st = ctx.state();
     let snaps = ctx.list_param("snapshot").unwrap_or_default();
     let verbose = ctx.bool_param("verbose", true)?;
@@ -1391,19 +1379,10 @@ pub async fn get(ctx: &Ctx<'_>) -> EsResult<Reply> {
         .map(|(r, s)| snapshot_info(ctx, include_repository.then_some(r.as_str()), s, verbose, index_names, index_details))
         .collect();
     // OpenSearch's `GetSnapshotsResponse` has no paging counts.
-    let mut out = obj! { "snapshots" => Value::Arr(page) };
-    if !failures.is_empty()
-        && let Value::Obj(m) = &mut out
-    {
-        m.insert("failures".into(), Value::Obj(failures));
+    if crate::opensearch::active() {
+        return Reply::ok(obj! { "snapshots" => Value::Arr(page) });
     }
-    if let Value::Obj(m) = &mut out
-        && !crate::opensearch::active()
-    {
-        m.insert("total".into(), Value::from(total));
-        m.insert("remaining".into(), Value::from(total - skip - take));
-    }
-    Reply::ok(out)
+    Reply::ok(obj! { "snapshots" => Value::Arr(page), "total" => total, "remaining" => total - skip - take })
 }
 
 /// `DELETE _snapshot/{repository}/{snapshot}`.

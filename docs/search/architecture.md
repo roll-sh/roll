@@ -529,9 +529,11 @@ allowlist (a preview's branch included); change it like any setting.
   `index.latest` drops that copy (checked again inside the state update) and is roll's. The
   other way round, a roll bucket repository reads its prefix's contents first
   (`Bucket::contents`): someone else's repository there (an `index.latest` that isn't roll's;
-  without one, root `snap-`/`meta-` blobs, `index-0`, or an `index-N` that isn't gzip) refuses
-  registration, reads, writes, `_verify` and `_analyze`, and `_cleanup` deletes only keys of
-  roll's own shapes, nothing without repository data. A restore creates each index from Elasticsearch's index
+  without one, root `snap-`/`meta-` blobs, `index-0`, an `index-N` that isn't gzip, or a key
+  under `indices/` of a shape roll doesn't write) refuses registration, reads, writes,
+  `_verify` and `_analyze`; `index.latest` is written only at the version read
+  (`put_if`), so another writer's is never overwritten; `_cleanup` deletes, and aborts uploads
+  of, only keys of roll's own shapes, nothing without repository data. A restore creates each index from Elasticsearch's index
   metadata as `PUT <index>` would (no templates), then a task reads each shard's Lucene files
   through `search-lucene` on a blocking thread (ranged reads in 8 MiB windows across a file's
   `.partN` blobs, throttled like any restore; checksums checked as files stream; what is kept

@@ -3190,8 +3190,8 @@ async fn an_s3_repository_bounds_and_checks_what_a_bucket_holds() {
     assert_eq!(object("roll/indices/Xq/0/__a"), b"shard data");
     // Elasticsearch finding its generation by listing writes no `index.latest`: its `index-N` and
     // shard files under the prefix still make it someone else's. Registering it is refused;
-    // registered anyway (no `verify`), it is neither written nor cleaned, and a listing of every
-    // repository reports it beside the others' snapshots.
+    // registered anyway (no `verify`), it is neither written nor cleaned, and a listing across
+    // repositories fails as Elasticsearch's does.
     put("nested/roll/index-5".into(), br#"{"min_version":"7.12.0","uuid":"u","snapshots":[]}"#.to_vec());
     put("nested/roll/indices/Xq/0/__b".into(), b"shard data".to_vec());
     let nested = json!({"type": "s3", "settings": {"bucket": "backups", "base_path": "nested", "endpoint": endpoint, "path_style_access": true}});
@@ -3200,11 +3200,17 @@ async fn an_s3_repository_bounds_and_checks_what_a_bucket_holds() {
     assert_eq!(es(reqwest::Method::PUT, "/_snapshot/nested?verify=false", Some(nested)).await.0, 200);
     expect("cleanup without index.latest", es(reqwest::Method::POST, "/_snapshot/nested/_cleanup", None).await, 500, "isn't roll's");
     expect("snapshot without index.latest", es(reqwest::Method::PUT, "/_snapshot/nested/s?wait_for_completion=true", Some(json!({"indices": "docs"}))).await, 500, "isn't roll's");
-    let (s, v) = es(reqwest::Method::GET, "/_snapshot/_all/_all", None).await;
-    expect("listing", (s, v.clone()), 200, "isn't roll's");
-    assert!(v["failures"]["nested"].is_object() && v["snapshots"].as_array().is_some_and(|a| a.iter().any(|s| s["snapshot"] == "one")), "{v}");
+    expect("listing", es(reqwest::Method::GET, "/_snapshot/_all/_all", None).await, 500, "isn't roll's");
     assert_eq!(object("nested/roll/indices/Xq/0/__b"), b"shard data");
     assert!(bucket.keys("nested/").len() == 2, "{:?}", bucket.keys("nested/"));
+    // Elasticsearch's first snapshot before it's finalized: only its shard files are there.
+    put("mid/roll/indices/Xq/0/__c".into(), b"shard data".to_vec());
+    put("mid/roll/indices/Xq/0/snap-Yz.dat".into(), b"shard snapshot".to_vec());
+    let mid = json!({"type": "s3", "settings": {"bucket": "backups", "base_path": "mid", "endpoint": endpoint, "path_style_access": true}});
+    assert_eq!(es(reqwest::Method::PUT, "/_snapshot/mid?verify=false", Some(mid)).await.0, 200);
+    expect("snapshot beside a first snapshot", es(reqwest::Method::PUT, "/_snapshot/mid/s?wait_for_completion=true", Some(json!({"indices": "docs"}))).await, 500, "isn't roll's");
+    expect("cleanup beside a first snapshot", es(reqwest::Method::POST, "/_snapshot/mid/_cleanup", None).await, 500, "isn't roll's");
+    assert!(bucket.keys("mid/").len() == 2, "{:?}", bucket.keys("mid/"));
 
     // A listing that never ends.
     bucket.endless.store(true, std::sync::atomic::Ordering::Relaxed);

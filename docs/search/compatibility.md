@@ -2163,14 +2163,18 @@ the rest are skipped by the tests' own prerequisites.
   registered, as on Elasticsearch). Its layout is roll's own
   (`<base_path>/roll/`), so Elasticsearch can't read roll's snapshots (roll reads Elasticsearch's:
   below). Someone else's repository under that prefix (an `index.latest` that isn't a decimal
-  generation; without one, `snap-` or `meta-` blobs at its root, an `index-0`, or a newest
-  `index-N` that isn't roll's gzip) is never read or written: `PUT` with `verify` refuses to
-  register the repository, and reads, snapshots, `_verify`, `_analyze` and `_cleanup` answer
-  500 `repository_exception` (listing several repositories reports it under `failures` and
-  lists the others' snapshots);
+  generation; without one, `snap-` or `meta-` blobs at its root, an `index-0`, a newest
+  `index-N` that isn't roll's gzip, or anything under `indices/` roll doesn't name so, such as
+  the shard files of Elasticsearch's first snapshot before it's finalized) is never read or
+  written: `PUT` with `verify` refuses to register the repository, and reads, snapshots,
+  `_verify`, `_analyze` and `_cleanup` answer 500 `repository_exception` (so does listing
+  snapshots across repositories that include it, as Elasticsearch fails such a listing).
+  `index.latest` is only ever replaced at the version roll read, so one someone else writes
+  meanwhile fails the snapshot as a concurrent modification instead of being overwritten;
   `_cleanup` deletes what no snapshot references, and only objects of the names roll writes
-  (`index-N`, `tests-<uuid>`, its shard files and chunks under `indices/`; nothing when the
-  bucket holds no repository data), `_verify_integrity` checks every shard
+  (`index-N` from 1, `tests-<uuid>`, its shard files and chunks under `indices/`; nothing when
+  the bucket holds no repository data), and aborts only its own dangling uploads,
+  `_verify_integrity` checks every shard
   snapshot is in the bucket. Not supported: `chunk_size`, `server_side_encryption`,
   `canned_acl`, `storage_class` (accepted, not applied), throttling of bucket traffic, `gcs` and
   `azure`.

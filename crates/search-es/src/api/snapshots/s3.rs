@@ -176,13 +176,20 @@ pub(super) enum Contents {
 }
 
 /// Refuses a bucket location holding someone else's repository under roll's prefix (before
-/// registering it, analysing it): whether the bucket can be reached is left to the caller's own
-/// checks.
-pub(super) async fn refuse_foreign(cluster: &crate::Cluster, name: &str, r: &Repository) -> EsResult<()> {
-    let Ok(bucket) = Bucket::open(cluster, name, r).await else { return Ok(()) };
+/// registering it, analysing it). When it can't be told (the bucket unreachable, its data
+/// unreadable), `strict` refuses too; otherwise that is left to registration's verification,
+/// which refuses then (the repository stays registered, as on Elasticsearch).
+pub(super) async fn refuse_foreign(cluster: &crate::Cluster, name: &str, r: &Repository, strict: bool) -> EsResult<()> {
+    let bucket = match Bucket::open(cluster, name, r).await {
+        Ok(b) => b,
+        Err(e) if strict => return Err(e),
+        Err(_) => return Ok(()),
+    };
     match bucket.contents().await {
+        Ok(Contents::Roll(_)) => Ok(()),
         Ok(Contents::Foreign(why)) => Err(bucket.foreign(&why)),
-        _ => Ok(()),
+        Err(e) if strict => Err(e),
+        Err(_) => Ok(()),
     }
 }
 
@@ -192,8 +199,9 @@ pub(super) async fn refuse_foreign(cluster: &crate::Cluster, name: &str, r: &Rep
 /// (another program's files, a repository nested there) is never touched.
 fn roll_key(rel: &str) -> bool {
     let digits = |s: &str| !s.is_empty() && s.len() <= 19 && s.bytes().all(|b| b.is_ascii_digit());
+    // Roll's generations start at 1: `index-0` is Elasticsearch's first.
     if let Some(g) = rel.strip_prefix("index-") {
-        return digits(g);
+        return digits(g) && g.parse::<i64>().is_ok_and(|g| g > 0);
     }
     if let Some(u) = rel.strip_prefix("tests-") {
         return valid_uuid(u);
@@ -370,6 +378,19 @@ impl Bucket {
         }
     }
 
+    /// The first `n` bytes of `key` (fewer when it's shorter), `None` when there is none.
+    async fn head(&self, key: &str, n: u64) -> EsResult<Option<Vec<u8>>> {
+        let Some(mut body) = self.store.open(key, Some((0, n))).await.map_err(|e| self.fail("reading the repository data", e))? else { return Ok(None) };
+        let mut out = Vec::new();
+        while let Some(piece) = body.next().await.map_err(|e| self.fail("reading the repository data", e))? {
+            out.extend_from_slice(&piece[..piece.len().min(n as usize - out.len())]);
+            if out.len() as u64 >= n {
+                break;
+            }
+        }
+        Ok(Some(out))
+    }
+
     /// What writing where someone else keeps a repository answers.
     fn foreign(&self, why: &str) -> EsError {
         failed(&self.name, format!("{why}: another program, such as Elasticsearch, keeps a repository under [{}], and roll neither reads nor writes there", self.prefix))
@@ -379,10 +400,12 @@ impl Bucket {
     /// delete another program's files and a snapshot write over its generations:
     /// - an `index.latest` that isn't roll's (a decimal generation; Elasticsearch's, at a
     ///   `base_path` ending in `roll`, is 8 binary bytes) is someone else's;
-    /// - without one (Elasticsearch writes none when it finds its generation by listing, or
-    ///   before its first snapshot ends), a `snap-` or `meta-` blob at the root, an `index-N`
-    ///   roll doesn't name so (or `index-0`, which roll never writes), or a newest `index-N`
-    ///   that isn't gzip are someone else's.
+    /// - without one (Elasticsearch writes none when it finds its generation by listing, and
+    ///   none of its root blobs until its first snapshot is finalized, which may be hours after
+    ///   its shard files went up), a `snap-` or `meta-` blob at the root, an `index-N` roll
+    ///   doesn't name so (or `index-0`, which roll never writes), a newest `index-N` that isn't
+    ///   gzip, or anything under `indices/` roll doesn't name so (Elasticsearch's `__<uuid>`,
+    ///   `snap-<uuid>.dat`, `index-<uuid>`) are someone else's.
     pub(super) async fn contents(&self) -> EsResult<Contents> {
         let latest = self.store.get(&format!("{}index.latest", self.prefix), 64).await.map_err(|e| self.fail("reading index.latest", e))?;
         let mut generation = match latest {
@@ -408,10 +431,15 @@ impl Bucket {
                 }
                 if let Some(g) = newest {
                     let key = format!("{}index-{g}", self.prefix);
-                    let head = self.store.get(&key, DATA_MAX).await.map_err(|e| self.fail("reading the repository data", e))?;
-                    if head.is_some_and(|b| !b.starts_with(&[0x1f, 0x8b])) {
+                    // Its first bytes tell its format, whatever its size.
+                    let head = self.head(&key, 2).await?;
+                    if head.is_some_and(|b| b != [0x1f, 0x8b]) {
                         return Ok(Contents::Foreign(format!("[{key}] isn't roll's repository data")));
                     }
+                }
+                let listed = self.store.list(&format!("{}indices/", self.prefix)).await.map_err(|e| self.fail("listing the repository", e))?;
+                if let Some((key, _)) = listed.iter().find(|(k, _)| !k.strip_prefix(&self.prefix).is_some_and(roll_key)) {
+                    return Ok(Contents::Foreign(format!("[{key}] isn't roll's")));
                 }
                 newest.unwrap_or(0)
             }
@@ -441,6 +469,24 @@ impl Bucket {
         let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         let _ = enc.write_all(data.to_stored().to_json().as_bytes());
         let body = Bytes::from(enc.finish().unwrap_or_default());
+        let concurrent = || {
+            repository_exception(
+                &self.name,
+                format!("concurrent modification of the index-N file, expected current generation [{previous}] but it was not found in the repository: another cluster writes to this repository"),
+            )
+        };
+        // `index.latest` moves only from the version read here, which must be roll's: someone
+        // else's written since this repository's data was read (Elasticsearch finishing its first
+        // snapshot) is never overwritten.
+        let latest_key = format!("{}index.latest", self.prefix);
+        let latest = self.store.get_tagged(&latest_key, 64).await.map_err(|e| self.fail("reading index.latest", e))?;
+        if let Some((b, _)) = &latest {
+            match std::str::from_utf8(b).ok().and_then(|t| t.trim().parse::<i64>().ok()) {
+                Some(g) if (0..=previous).contains(&g) => {}
+                Some(_) => return Err(concurrent()),
+                None => return Err(self.foreign(&format!("[{latest_key}] isn't roll's"))),
+            }
+        }
         let key = format!("{}index-{}", self.prefix, data.generation);
         if !self.store.put_new(&key, body).await.map_err(|e| self.fail("writing the repository data", e))? {
             return Err(repository_exception(
@@ -448,7 +494,10 @@ impl Bucket {
                 format!("concurrent modification of the index-N file, expected current generation [{previous}] but it was not found in the repository: another cluster writes to this repository"),
             ));
         }
-        self.store.put(&format!("{}index.latest", self.prefix), Bytes::from(data.generation.to_string())).await.map_err(|e| self.fail("writing index.latest", e))?;
+        let tag = latest.as_ref().map(|(_, t)| t.as_str());
+        if self.store.put_if(&latest_key, Bytes::from(data.generation.to_string()), tag).await.map_err(|e| self.fail("writing index.latest", e))?.is_none() {
+            return Err(concurrent());
+        }
         // Readers racing this one may still read the previous generation.
         if data.generation > 2 {
             let _ = self.store.delete(&format!("{}index-{}", self.prefix, data.generation - 2)).await;
@@ -468,10 +517,12 @@ impl Bucket {
             Ok::<_, client::Error>(back)
         };
         let unreachable = |cause: EsError| unreachable(&self.name, &self.prefix, cause);
-        // No test object goes where someone else keeps a repository (an unreachable bucket
-        // fails the check below instead).
-        if let Ok(Contents::Foreign(why)) = self.contents().await {
-            return Err(self.foreign(&why));
+        // No test object goes where someone else keeps a repository, nor where that can't be
+        // told.
+        match self.contents().await {
+            Ok(Contents::Roll(_)) => {}
+            Ok(Contents::Foreign(why)) => return Err(self.foreign(&why)),
+            Err(e) => return Err(unreachable(e)),
         }
         if self.read_only {
             let path = self.prefix.trim_end_matches('/');
@@ -654,7 +705,9 @@ impl Bucket {
         let running = self.io.running_uploads();
         let uploads = self.store.list_uploads(&self.prefix, self.upload_cleanup + running.len()).await?;
         let mut aborted = 0;
-        for (key, id) in uploads.into_iter().filter(|(_, id)| !running.contains(id)).take(self.upload_cleanup) {
+        // Only roll's own uploads: anything else under the prefix is someone else's.
+        let roll_upload = |key: &str| key.strip_prefix(&self.prefix).is_some_and(roll_key);
+        for (key, id) in uploads.into_iter().filter(|(k, id)| !running.contains(id) && roll_upload(k)).take(self.upload_cleanup) {
             if self.store.abort(&key, &id).await.is_ok() {
                 aborted += 1;
             }
@@ -1228,6 +1281,18 @@ mod tests {
         let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
         enc.write_all(raw).unwrap();
         enc.finish().unwrap()
+    }
+
+    /// Only keys of the shapes roll writes are its cleanup's to delete: never Elasticsearch's
+    /// (`index-0`, its shard files, a repository nested under the prefix).
+    #[test]
+    fn cleanup_takes_only_rolls_own_keys() {
+        for k in ["index-1", "index-42", "tests-AbC_d-9", "indices/Xq/0/snap-Yz.json", "indices/Xq/3/0123456789abcdef0123456789abcdef-12.0.gz"] {
+            assert!(roll_key(k), "{k}");
+        }
+        for k in ["index-0", "index-", "index-x", "index.latest", "snap-Yz.dat", "meta-Yz.dat", "tests-a/b", "indices/Xq/0/__Yz", "indices/Xq/0/snap-Yz.dat", "indices/Xq/index-Yz", "indices/Xq/0/abc-1.0.gz", "indices/Xq/0/x/snap-Yz.json", "tests-old/roll/index-1"] {
+            assert!(!roll_key(k), "{k}");
+        }
     }
 
     #[test]
