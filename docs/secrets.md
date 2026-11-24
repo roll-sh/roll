@@ -2463,7 +2463,17 @@ Other roll products get tokens from the same issuer, in process only (no route s
 `Secrets::issue(subject, aud, ttl)`. The first is roll apps: each instance of a service gets one
 (as Vercel's OIDC federation gives each deployment), so an app logs in to a cloud, or to roll
 secrets, with no key of its own (docs/apps/README.md; apps delivers the token to its instances).
-- **Subjects.** `Subject::App {project, service, env}` is `sub =
+- **Subjects.** `Subject::Preview {project, preview, service}` is a preview's own service's (roll
+  previews' `roll.toml` services, docs/previews.md): `sub = roll-previews:<project>:<preview>:<service>`,
+  in the preview's environment (`pv-<id>`), with the claims `project`, `preview_id`, `service`,
+  `environment` and `preview: true`. Its prefix is never an app's, so a trust on an app's subject
+  can't match a preview; roll writes no trust that matches every preview of a service (a customer
+  who wants one writes a condition on `roll-previews:<project>:*:<service>` themselves). It's
+  refused here for an untrusted preview, decided from its environment's own `trusted`, and for any
+  environment that isn't a preview's (a standard one named `pv-…` gets none); rolld's
+  `PreviewIssuer` asks that the project stands for the service's repo; each issue is audited as
+  `preview:<preview>:<service>`, never the token (`a_previews_service_gets_a_token_of_its_own_and_a_forks_none`).
+  `Subject::App {project, service, env}` is `sub =
   roll-apps:<project>:<service>:<env>`, plus the claims `project`, `service` and `environment` for
   clouds' attribute mapping (GCP's `attribute.service = assertion.service`; AWS and Azure match
   `sub`). The project and the service are ids (a-z, 0-9,

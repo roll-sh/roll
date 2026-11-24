@@ -105,6 +105,12 @@ pub struct Settings {
     /// names, never as the cookie it's kept in.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub flags: Vec<FlagRule>,
+    /// Who a trusted preview's own services may have roll's word for (Vercel's OIDC federation):
+    /// clouds' relying parties (`sts.amazonaws.com`, a GCP pool provider), at most 5. Each service
+    /// gets `ROLL_OIDC_URL` and `ROLL_OIDC_AUDIENCE` (the first); a token's `sub` is
+    /// `roll-previews:<project>:<preview>:<service>`. Empty: none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub oidc_audiences: Vec<String>,
     /// Wake the change's services as soon as a new head is deployed, so the first visit (often
     /// the pull request comment's link) doesn't wait for a cold start.
     pub warm: bool,
@@ -475,6 +481,7 @@ impl Default for Settings {
             data_at: None,
             feedback: true,
             flags: Vec::new(),
+            oidc_audiences: Vec::new(),
             warm: true,
             crons: false,
             seed: None,
@@ -746,6 +753,10 @@ impl Settings {
             && self.flags.iter().enumerate().all(|(i, f)| {
                 word(&f.name) && !self.flags[..i].iter().any(|g| g.name == f.name) && (1..=10).contains(&f.options.len()) && f.options.iter().enumerate().all(|(j, o)| word(o) && !f.options[..j].contains(o))
             });
+        let auds = &self.oidc_audiences;
+        if auds.len() > 5 || auds.iter().enumerate().any(|(i, a)| a.is_empty() || a.len() > 256 || a.chars().any(|c| c.is_control() || c.is_whitespace()) || auds[..i].contains(a)) {
+            return bad("oidc_audiences: at most 5 different audiences, each 1-256 characters with no spaces (sts.amazonaws.com)".into());
+        }
         if !flags_ok {
             return bad(format!("flags: at most {MAX_FLAGS}, each a name and 1-10 options, every one of 1-60 letters, digits, -, _ or ., each once"));
         }
