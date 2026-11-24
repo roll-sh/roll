@@ -3373,10 +3373,22 @@ npx prisma migrate dev                            # in another: reads .env as us
   so each reader has a pipe of its own: one that reads slowly still gets exactly one copy, never the
   next read's appended to it. Nothing is written anywhere else: no temporary file, no value in a log, an error or
   a command line.
+- **Several readers.** The mount always has a writer waiting on the pipe at the path, so a reader's
+  open never waits, and each reader is served on its own. Readers that open while others are being
+  served (two apps `turbo dev` or `concurrently` starts in one directory, Next.js's workers) each
+  get a whole copy. Two opens at the same instant (before the mount has woken and put the next pipe
+  in place) still share one pipe, and then each gets part of one copy, or one gets all of it and
+  the other nothing: a named pipe can't tell its readers apart, and Linux shows no count of a pipe's
+  readers. Tools that read `.env` at the very same instant are better run with
+  `roll run -- <command>`.
 - The values come from the local agent's cache ("A local agent"): the folder's digest is followed,
-  so a change reaches the next read without logging in again. A folder with a key that doesn't
-  resolve doesn't start; one that stops resolving gives a read a `#` comment naming the keys
-  (dotenv) or nothing (json), never part of the folder.
+  so a change reaches the next read without logging in again. Reads are answered from memory for
+  `--ttl` (`ROLL_CACHE_TTL`, 5 minutes by default; 0 asks roll at every read) after roll last
+  confirmed the folder. A folder with a key that doesn't resolve doesn't start.
+- **A read with no values.** A folder that stops resolving, or no answer from roll past the TTL
+  (offline, a 5xx), gives that read `# roll secrets mount: <why>; no values this read` (dotenv) or
+  `{}` (json), never part of the folder, and the mount prints the same line on stderr. A tool
+  that starts with an empty environment has the reason in its `.env`.
 - It logs in as every `roll secrets` command does. Once roll refuses it (a 401 after logging in
   again, a 403 or a 404 for the folder: the token revoked, the environment deleted) it removes the
   pipe and exits non-zero with roll's refusal. Ctrl-C, SIGTERM and SIGHUP remove it too.
@@ -7031,6 +7043,35 @@ The bench's consumer is an in-process one whose maker is the operator; a token o
 adds roll-access's grant lookup or the accounts' and workspace's.
 
 ## Next
+
+**State, 2026-11-25 00:10.** The thirty-seventh review is done. Landed since 06:10:
+- #880 (c6105209a): a value-less set needs an existing key.
+- #886 (4ea3a51d9): `roll secrets mount` gives each reader its own pipe, one copy per open.
+- #898 (410e8dd74): item 5b, certificate syncs to ACM, Key Vault and Cloudflare.
+- #900 (bcd36b606): item 8b, "notify me" by Slack, Discord or email.
+- #923 (db5752ae7): item 5c, publicly trusted certificates through ACME (dns-01 via Cloudflare), on roll apps' edge ACME client, now shared.
+
+The thirty-eighth product review (2026-11-24, cold, read only) found one live bug, low-medium and only under `leaks.rotate = managed`: a caller who could only reveal a managed key could rotate it with no grace, repeatedly, by reporting it `leaked: true`. Landed since, each with main's CI green and most after a check of the merged tree:
+- #909 (47cea7593): items 1 and 3. A reported leak rotates only where the reporter may write, at most once an hour per key, and a leak request whose key was rotated meanwhile applies as "already rotated".
+- #921 (10dfd86c2): items 2 and 9. An intermediate needs a critical `nameConstraints` within its domains (or an explicit, audited `unconstrained: true`), and `DELETE …/syncs/{id}?remove=true` removes a certificate sync's object at its target.
+- #925 (ab2940875): items 4 and 7. Replacing a SaaS credential moves its maker, and `leaks.rotate` is settable from the CLI and Terraform's `roll_secrets_project`.
+- #945 (925f9aa09): item 5. AWS syncs take a project role, and Google and Azure syncs use workload identity federation through roll's issuer (`sub roll-secrets:<project>:sync:<id>`); Health flags stored cloud keys.
+- #956 (f3da93010): item 6, part 1. SonarQube and Jenkins rotation (Jenkins verifies the new token before revoking the old), and an unknown request `state` is a 400.
+- #927 (707b1e657): listing requests filters `state` in SQL and pages with a cursor, from roll MCP's gap review, mapped by their #933.
+
+With other threads:
+- search's #922 seals cluster passwords always (the thirty-sixth's item 12);
+- search's #808 (create sessions held to the person's session in roll-access's evaluator, our search link's owner guard, `rekey_links`) is reviewed and approved here, and in flight there.
+
+In flight:
+- item 8, `roll secrets mount` serving concurrent readers each a whole copy, and saying so when a read fails;
+- item 10, reach and the deletion preview reading only tokens that can name the project.
+
+Left:
+- item 6's other vendors (Salesforce, Paddle, Palo Alto);
+- Health's "public repo with `leaks.rotate` off" (needs a repo-visibility port);
+- Route 53 and other DNS providers for ACME;
+- a dashboard panel and CLI for public certificates.
 
 **State, 2026-11-24 06:10.** The thirty-sixth review is done: #830 (99cb3b05e; Cloudflare, Databricks, Confluent) and #825 (the fresh-project production test) landed.
 
