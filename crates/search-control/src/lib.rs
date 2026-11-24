@@ -22,6 +22,7 @@ pub mod meter;
 pub mod migrate;
 pub mod pricing;
 pub mod remotes;
+pub mod saas;
 pub mod secret_refs;
 pub mod store;
 pub mod suggestions;
@@ -43,6 +44,8 @@ pub use search_es::xpack::entsearch::sync::ALLOW_PRIVATE as CONNECTORS_ALLOW_PRI
 pub use search_es::xpack::inference::http::ALLOW_PRIVATE as INFERENCE_ALLOW_PRIVATE;
 pub use search_es::api::remote::ALLOW_PRIVATE as REINDEX_ALLOW_PRIVATE;
 pub use search_es::api::remote::MAX_DURATION as REINDEX_MAX_DURATION;
+/// Node setting: the URL roll calls for every Algolia application (tests; an operator's proxy).
+pub use saas::ALGOLIA_URL as MIGRATE_ALGOLIA_URL;
 /// Node settings naming the addresses and names no outbound call reaches (reindex from remote,
 /// migration, connectors, inference, watches, snapshot repositories: [`search_es::egress`]).
 pub use search_es::egress::{DENY_ADDRESSES as EGRESS_DENY_ADDRESSES, DENY_NAMES as EGRESS_DENY_NAMES};

@@ -1,7 +1,7 @@
 // Tests of the dashboard's migration from Elasticsearch or OpenSearch (vitest).
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { aliasOffer, defaultDest, destProblem, displayHost, droppedByReason, mergeStarted, partial, queuedPicks, queueRetryDelay, retryableStart, shouldStartQueued, sourceFrom, sourceProblem, taskPoll, taskProgress, type MigrateStarted, type SourceForm } from "./search-migrate";
+import { aliasOffer, defaultDest, destProblem, displayHost, droppedByReason, mergeStarted, notMappedCount, notMappedGroups, partial, queuedPicks, queueRetryDelay, retryableStart, shouldStartQueued, sourceFrom, sourceProblem, taskPoll, taskProgress, type MigrateStarted, type SaasPlan, type SourceForm } from "./search-migrate";
 
 const form = (f: Partial<SourceForm>): SourceForm => ({ host: "https://es.example:9243", auth: "api_key", apiKey: "", username: "", password: "", ...f });
 
@@ -95,4 +95,22 @@ test("a start of waiting copies that fails is retried, with growing pauses, unle
   assert.ok(retryableStart(429) && retryableStart(503));
   assert.ok(!retryableStart(400) && !retryableStart(403) && !retryableStart(404) && !retryableStart(undefined));
   assert.deepEqual([0, 1, 2, 3, 4, 20].map(queueRetryDelay), [5_000, 10_000, 20_000, 40_000, 60_000, 60_000]);
+});
+
+test("Algolia, Typesense and Meilisearch send their own fields, and only those", () => {
+  const algolia = form({ kind: "algolia", host: "https://ignored.example", appId: " APP1 ", apiKey: " k ", username: "u", password: "p" });
+  assert.deepEqual(sourceFrom(algolia), { kind: "algolia", app_id: "APP1", api_key: "k" });
+  assert.equal(sourceProblem(algolia), null);
+  assert.match(sourceProblem(form({ kind: "algolia", appId: "app.1", apiKey: "k" })) ?? "", /letters and digits/);
+  assert.match(sourceProblem(form({ kind: "algolia", appId: "APP1" })) ?? "", /API key/);
+  assert.deepEqual(sourceFrom(form({ kind: "typesense", host: "https://x.a1.typesense.net", apiKey: "t", username: "u" })), { kind: "typesense", host: "https://x.a1.typesense.net", api_key: "t" });
+  assert.match(sourceProblem(form({ kind: "typesense", host: "https://x.a1.typesense.net" })) ?? "", /API key/);
+  // A Meilisearch without a master key takes no key.
+  assert.deepEqual(sourceFrom(form({ kind: "meilisearch", host: "http://ms.example:7700" })), { kind: "meilisearch", host: "http://ms.example:7700" });
+  assert.equal(sourceProblem(form({ kind: "meilisearch", host: "http://ms.example:7700" })), null);
+  assert.deepEqual(sourceFrom(form({ kind: "opensearch", apiKey: "k" })), { kind: "opensearch", host: "https://es.example:9243", api_key: "k" });
+
+  const plan = { not_mapped: [{ kind: "rule", name: "r1", reason: "x" }, { kind: "setting", name: "ranking", reason: "y" }], not_mapped_more: 3 } as SaasPlan;
+  assert.deepEqual(notMappedGroups(plan).map((g) => g.kind), ["setting", "rule"]);
+  assert.equal(notMappedCount(plan), 5);
 });

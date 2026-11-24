@@ -721,8 +721,8 @@ its copy partial, with a button that deletes the partial index so it can be copi
 
 | method | path | |
 | ------ | ---- | - |
-| POST | `/v1/search/clusters/{id}/migrate/inspect` | `{source: {host, api_key? \| username?, password?}}` → `{remote: {host, version, distribution, cluster_name}, indices: [{index, health, status, docs, size_bytes, primary_size_bytes, primaries, replicas, aliases, aliases_more, aliases_on_roll, exists}], more_indices, data_streams, more_data_streams}` within 60s (`primaries`, `replicas` and `primary_size_bytes` are `null`: the listing asks only for the columns it shows, keeps only those, reads it row by row and lists the first 10,000 indices, with `more_indices` saying how many more there are; each index carries at most 20 alias names, `aliases_more` counting the rest, and at most 100 data streams are named; a listing that names one index twice is refused; everything the answer holds is charged to the control budget until it's sent, 64 KiB at a time; an answer not read within 60s is given back and its connection closed); a remote's refusal is a 400 with its status and `error.type` only (never its body), and every transport failure reads the same (`couldn't reach the remote at <host>`). The operator's rules apply, not the cluster's whitelist. One `inspect` or `migrate` runs per cluster at a time, and 4 per node (429 past them); their answers are capped (1 MiB, an index definition 4 MiB) and drawn from a slice of the node's reindex budget that tasks never use. `write` for roll-access |
-| POST | `/v1/search/clusters/{id}/migrate` | `{source, indices: [{index, dest?}], requests_per_second?, size?}` (at most 100 indices) → `{indices: [{index, dest, task, dropped: [{setting, value, reason}], aliases} \| {index, dest, error}]}`: the remote must answer (`GET /`) before its `host:port` is added to the cluster's `reindex_whitelist` (exactly that host: `normalize_host` refuses anything that isn't a DNS name or an IP literal, so no pattern gets in); then, while a reindex task slot is free, each index's copy is created and its `wait_for_completion=false` reindex started, within 60s; an index past the free slots comes back `{index, dest, queued: true, reason}` with nothing created (the dashboard starts it as earlier copies end); each row says what happened (`created`, `task`), also when the deadline cut it short, and a copy an earlier call already started counts as started; one index's failure doesn't stop the others; an index roll already has is refused, not overwritten, and an alias roll already has is dropped (`aliases.<name>`). Just after a node starts, until roll's own names have resolved once, it answers 429 "roll hasn't resolved its own addresses yet; try again shortly" (the dashboard asks again). `admin` for roll-access: it changes the cluster's whitelist and starts copies as the cluster's own user |
+| POST | `/v1/search/clusters/{id}/migrate/inspect` | `{source: {kind?, host, api_key? \| username?, password?}}` (`kind`: `elasticsearch` (the default) or `opensearch`; `algolia` takes `{kind, app_id, api_key}` instead of a host, `typesense` and `meilisearch` `{kind, host, api_key}`: their rows have `null` health and status, an Algolia replica `replica_of`, and `remote.distribution` names the product) → `{remote: {host, version, distribution, cluster_name}, indices: [{index, health, status, docs, size_bytes, primary_size_bytes, primaries, replicas, aliases, aliases_more, aliases_on_roll, exists}], more_indices, data_streams, more_data_streams}` within 60s (`primaries`, `replicas` and `primary_size_bytes` are `null`: the listing asks only for the columns it shows, keeps only those, reads it row by row and lists the first 10,000 indices, with `more_indices` saying how many more there are; each index carries at most 20 alias names, `aliases_more` counting the rest, and at most 100 data streams are named; a listing that names one index twice is refused; everything the answer holds is charged to the control budget until it's sent, 64 KiB at a time; an answer not read within 60s is given back and its connection closed); a remote's refusal is a 400 with its status and `error.type` only (never its body), and every transport failure reads the same (`couldn't reach the remote at <host>`). The operator's rules apply, not the cluster's whitelist. One `inspect` or `migrate` runs per cluster at a time, and 4 per node (429 past them); their answers are capped (1 MiB, an index definition 4 MiB) and drawn from a slice of the node's reindex budget that tasks never use. `write` for roll-access |
+| POST | `/v1/search/clusters/{id}/migrate` | `{source, indices: [{index, dest?}], requests_per_second?, size?, dry_run?}` (at most 100 indices; `dry_run` only for Algolia, Typesense and Meilisearch, whose rows are `{index, dest, plan: {id_field, docs, mappings, default_fields, synonyms, rules, synonyms_set?, rulesets?, search_template, sort_templates?, not_mapped: [{kind, name, reason}], not_mapped_more, notes}, made: [..], task}` (with `dry_run`, `{plan, mappings, settings, restart}` and nothing made; `restarted: true` when an index an earlier copy made is copied into again; their `size` is at most 1,000 for Algolia; see "From Algolia, Typesense and Meilisearch") → `{indices: [{index, dest, task, dropped: [{setting, value, reason}], aliases} \| {index, dest, error}]}`: the remote must answer (`GET /`) before its `host:port` is added to the cluster's `reindex_whitelist` (exactly that host: `normalize_host` refuses anything that isn't a DNS name or an IP literal, so no pattern gets in); then, while a reindex task slot is free, each index's copy is created and its `wait_for_completion=false` reindex started, within 60s; an index past the free slots comes back `{index, dest, queued: true, reason}` with nothing created (the dashboard starts it as earlier copies end); each row says what happened (`created`, `task`), also when the deadline cut it short, and a copy an earlier call already started counts as started; one index's failure doesn't stop the others; an index roll already has is refused, not overwritten, and an alias roll already has is dropped (`aliases.<name>`). Just after a node starts, until roll's own names have resolved once, it answers 429 "roll hasn't resolved its own addresses yet; try again shortly" (the dashboard asks again). `admin` for roll-access: it changes the cluster's whitelist and starts copies as the cluster's own user |
 
 `crates/search-es/tests/reindex_remote.rs` covers the guard against a hostile mock remote (only
 whitelisted hosts read; a redirect not followed; an oversized page refused, with and without a
@@ -736,16 +736,35 @@ routes' flow (an alias roll has left alone, the whitelist gaining exactly the re
 another host refused); the dashboard's logic is in `apps/dashboard/src/lib/search-migrate.ts`
 (tested beside it, a lost task included).
 
-Phase 2, Algolia (planned, not built): an import that reads an Algolia application through its
-REST API with an admin key the caller gives once (the same guarded client and sealing rules):
-`browse` every record of the picked indices into roll indices (`objectID` as `_id`, with
-mappings inferred from the first pages as the file import does, and Algolia's searchable
-attributes, attributes for faceting and custom ranking turned into `text`, `keyword` and numeric
-fields with `index_options` to match), its synonyms (`synonym`, `onewaysynonym`, `altcorrection`,
-`placeholder`) into roll synonym sets, its rules (conditions on a query pattern, consequences that
-promote, hide or filter) into query rules where Elasticsearch's rule criteria can say the same and
-listed as dropped where they can't, and its replicas into sorts the dashboard records for the
-browser keys. Progress, cancel and the alias switch as above.
+**From Algolia, Typesense and Meilisearch** (`search-control` `saas/`, the guide is
+[guides/migrate-from-algolia.md](guides/migrate-from-algolia.md)). The same two routes take
+`source.kind` `algolia` (`app_id`, `api_key`; the host is fixed, `https://<app>-dsn.algolia.net`,
+which the operator's `roll.migrate.algolia.url` replaces for tests or a proxy), `typesense` or
+`meilisearch` (`host`, `api_key`), through the same guarded client, control slots, deadline and
+budgets. `inspect` lists Algolia's `GET /1/indexes` (a replica carries `replica_of`), Typesense's
+`GET /collections`, Meilisearch's `GET /indexes` and `GET /stats`. `migrate` reads each picked
+index's definition (settings or schema, a few records to see the attributes' types, synonyms,
+rules, Algolia replicas' settings) into a plan: explicit mappings (searchable attributes as text,
+facets and sort attributes as `keyword` sub-fields, Typesense's typed fields, `objectID`/`id`/the
+primary key as `_id`), `index.query.default_field` with the source's weights, an analysis chain
+(case and accents folded, a plural stemmer for `ignorePlurals`, search-time stop words and a
+`synonym_graph` filter reading the synonyms set `<dest>-synonyms`), query rulesets
+`<dest>-rules[-n]` (pins and hides on a query pattern), and a stored mustache template
+`<dest>-search` (`multi_match` with `fuzziness` and `bool_prefix`, the `rule` query, sorts,
+collapse) plus one per Algolia replica. Everything that didn't map is listed with why
+(`not_mapped`, at most 500 entries and a count) and caveats in `notes`; `dry_run` answers the plan
+and makes nothing. The copy is a task registered in the cluster's `_tasks` as
+`indices:data/write/reindex` (progress, cancel and the node's unload as for a reindex), holding one
+of the node's reindex-from-remote task slots; it reads one page at a time (Algolia's `browse`
+cursor, Meilisearch's offset pages, the Typesense export line by line with no line past the
+node's answer limit), charged to the reindex budget, and writes each with `_bulk` before reading
+the next; it stops at a page that fails, as reindex does. Picking the same index again copies into
+the index an earlier attempt made (its `_meta.roll_import`), overwriting by id. The key is held in
+memory by the request and its tasks only; descriptions name the application id or the host.
+`crates/search-control/tests/control.rs` `importing_from_algolia`, `importing_from_typesense`,
+`importing_from_meilisearch`, `saas_keys_are_never_shown` and `a_saas_page_past_the_bound_is_refused`
+cover it against one fake that speaks the three APIs; `roll-cli` `tests/search.rs`
+`migrate_from_meilisearch` the CLI.
 
 **Terraform** (Elastic Cloud's `ec_deployment` and `elasticstack` providers, AWS's
 `aws_opensearch_domain`). roll's provider (`sdk/terraform-provider-roll`, its README has the
@@ -793,8 +812,8 @@ origins (browser search), once they're on main.
 | PUT | `/v1/search/clusters/{id}/remotes/{alias}` | link another cluster of the same owner as remote `alias` (above): `{cluster, skip_unavailable?, access?}` or `{cluster, skip_unavailable?, api_key}` → `{alias, cluster, cluster_id, mode, proxy_address, key_id, minted, skip_unavailable?}`; 404 for a cluster the caller can't link to, missing or not. `admin` on both clusters for roll-access |
 | DELETE | `/v1/search/clusters/{id}/remotes/{alias}` | unlink: the remote's settings and credentials go, a key roll made is revoked (204) |
 | PUT | `/v1/search/clusters/{id}/repositories/{name}` | `PUT _snapshot/{name}` (Elasticsearch's body and query: `verify`), the only way a repository's credential settings can be roll secrets references (`roll://ENV/KEY`): the caller must be able to reveal each (403 if not; 400 for a cluster no project stands for or a key that doesn't exist), and is kept as their maker (architecture.md "Snapshots") → the cluster's answer |
-| POST | `/v1/search/clusters/{id}/migrate/inspect` | list another Elasticsearch or OpenSearch's indices for a migration ("Migrating into roll" above) |
-| POST | `/v1/search/clusters/{id}/migrate` | copy picked indices' definitions and start their reindex tasks (above) |
+| POST | `/v1/search/clusters/{id}/migrate/inspect` | list another Elasticsearch, OpenSearch, Algolia, Typesense or Meilisearch's indices for a migration ("Migrating into roll" above) |
+| POST | `/v1/search/clusters/{id}/migrate` | copy (or, `dry_run`, plan) picked indices' definitions and start their copy tasks (above) |
 | GET, PUT, DELETE | `/v1/search/clusters/{id}/indices/{index}` | Elasticsearch's `GET`/`PUT`/`DELETE /<index>`: mappings, settings and aliases; create (body: `mappings`, `settings`); delete |
 | GET, PUT | `/v1/search/clusters/{id}/indices/{index}/mapping` | `GET`/`PUT /<index>/_mapping` |
 | GET, PUT | `/v1/search/clusters/{id}/indices/{index}/settings` | `GET`/`PUT /<index>/_settings`. A write names one index; the engine refuses private, internal and managed settings to it as to any client (`can not update private setting`). Turns on `index.roll.analytics.enabled` and `index.roll.suggestions.*`. A body naming a lifecycle (`index.lifecycle.*`, OpenSearch ISM's `index_state_management`) is `delete` in roll's permissions, not `write`: its policy can delete the index |
@@ -1261,16 +1280,19 @@ deterministic (#396).
    and never echoed, remote pages charged by what parsing builds; and the dashboard's migration
    wizard: `inspect` lists a remote cluster's indices (fetched by roll, its answer charged until
    it's sent), copies mappings, settings and aliases, reindexes with progress and switches an
-   alias when done. Elastic Cloud restores from other deployments, AWS OpenSearch Service has
-   migration assistants, Algolia and Typesense import from each other): left, Algolia's export
-   (records, synonyms, rules) mapped onto indices, synonym sets and query rules, a Typesense
-   and Meilisearch import (their dump formats onto indices and settings), and catch-up and cutover
-   (AWS OpenSearch Migration Assistant's capture and replay): a copy is one point in time today, so
-   writes made during the copy are lost unless the client double-writes. Offline, with no route
-   to the old cluster: its snapshots restore on roll from the bucket they're in (item 9, #652).
-   In progress (`feature/search-import-saas`): Algolia, Typesense and Meilisearch as migration
-   sources (records, settings mapped where they map, synonyms onto synonyms sets, rules and
-   curations onto query rules, everything that doesn't map listed with its reason).
+   alias when done. Imports from Algolia, Typesense and Meilisearch: `source.kind`
+   on the same routes, records, settings, synonyms and rules mapped onto indices, synonyms sets,
+   query rules and a search template, everything that doesn't map listed with why before the copy
+   starts (`dry_run`), copies as reindex tasks, `roll search migrate`, and
+   [guides/migrate-from-algolia.md](guides/migrate-from-algolia.md). Elastic Cloud restores from
+   other deployments, AWS OpenSearch Service has migration assistants, Typesense and Meilisearch
+   publish Algolia importers): left, Typesense 29's synonym sets and 30's curation sets (listed as
+   not read today), Algolia rule consequences beyond promote and hide (filters and query edits as
+   a search template's rule-driven parameters), a copy that resumes from its last page rather than
+   restarting the index, and catch-up and cutover (AWS OpenSearch Migration Assistant's capture
+   and replay): a copy is one point in time today, so writes made during the copy are lost unless
+   the client double-writes. Offline, with no route to the old cluster: its snapshots restore on
+   roll from the bucket they're in (item 9, #652).
 3. **One memory account per request** (landed: Painless per execution in #591, af195cbbe, after
    four reviews: each execution holds at most `--search-script-memory-mb`, and once-per-document
    scripts charge the `request` breaker; the node-wide body budget in #601; ES|QL and aggregations

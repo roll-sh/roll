@@ -52,6 +52,48 @@ pub enum Search {
     /// Web crawlers: `roll_web_crawler` connectors that crawl a site into an index.
     #[command(subcommand)]
     Crawler(Crawler),
+    /// Copy indices from Elasticsearch, OpenSearch, Algolia, Typesense or Meilisearch into a
+    /// cluster: without --index, list the source's indices; --dry-run shows what each becomes
+    /// and what didn't map; otherwise start the copies (roll's tasks), --wait to follow them.
+    /// The source's key comes from the environment (ALGOLIA_API_KEY, TYPESENSE_API_KEY,
+    /// MEILISEARCH_API_KEY, ELASTICSEARCH_API_KEY; --api-key-env to name another) or stdin
+    /// (--api-key-stdin), never from the command line.
+    Migrate {
+        cluster: String,
+        /// elasticsearch, opensearch, algolia, typesense or meilisearch.
+        #[arg(long, default_value = "elasticsearch")]
+        from: String,
+        /// The source's URL (not Algolia's).
+        #[arg(long)]
+        host: Option<String>,
+        /// Algolia's application id.
+        #[arg(long)]
+        app_id: Option<String>,
+        /// Elasticsearch or OpenSearch: sign in as this user (the password in ELASTICSEARCH_PASSWORD).
+        #[arg(long)]
+        username: Option<String>,
+        /// The environment variable holding the source's key.
+        #[arg(long)]
+        api_key_env: Option<String>,
+        /// Read the source's key from stdin instead.
+        #[arg(long, conflicts_with = "api_key_env")]
+        api_key_stdin: bool,
+        /// An index to copy, `name` or `name=copy-name`; repeat for several.
+        #[arg(long = "index")]
+        indices: Vec<String>,
+        /// Show what each index becomes (mappings, synonyms, rules, what didn't map); make nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Documents per page read from the source.
+        #[arg(long)]
+        size: Option<u32>,
+        /// Documents per second per copy (unthrottled unless set).
+        #[arg(long)]
+        requests_per_second: Option<f64>,
+        /// Follow the copies until they end.
+        #[arg(long)]
+        wait: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -675,6 +717,10 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
             };
         }
         Search::Crawler(Crawler::Import { cluster, file, connector }) => return crate::search_crawler::import(api, as_json, &cluster, &file, connector.as_deref()).await,
+        Search::Migrate { cluster, from, host, app_id, username, api_key_env, api_key_stdin, indices, dry_run, size, requests_per_second, wait } => {
+            let args = crate::search_migrate::Args { cluster, from, host, app_id, username, api_key_env, api_key_stdin, indices, dry_run, size, rps: requests_per_second, wait };
+            return crate::search_migrate::run(api, as_json, args).await;
+        }
         Search::Inference(cmd) => match cmd {
             Inference::List { cluster } => {
                 let c = find(api, &cluster).await?;
