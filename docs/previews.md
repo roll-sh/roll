@@ -2008,7 +2008,6 @@ type Settings = {
   access: "link" | "team" | "public"; // "link": a preview's URLs need its link; "team": a person signed in to roll who may open the project
   visual_review: "off" | "check" | "required";   // the roll/visual review; required also blocks landing in roll ("off")
   feedback: boolean;                  // a feedback button on its pages for people who came in through roll (true)
-  note_mail: boolean;                 // mail about notes: a new one to the change's author, a reply or resolve to the note's (true)
   flags?: {name: string; options: string[]}[]; // feature flags a reviewer sets for their own view from that button's toolbar (x-roll-flags)
   oidc_audiences?: string[];          // clouds a trusted preview's own services may have roll's OIDC token for (ROLL_OIDC_URL), at most 5
   egress: "open" | "roll";            // what its services' code may reach: anything ("open"), or only roll's products on a network with no route out (see "Egress")
@@ -2164,7 +2163,8 @@ type Settings = {
     percent). Pages under review that share one carry it (`visual_review.pages[].group`, only
     when two or more do); the sheet offers "Accept the 4 changed the same way" on the first of
     them, and `…/visual/accept {group}` (`roll preview accept --group`) accepts them in one
-    transaction. The first page isn't grouped (it's compared on its own, at both widths).
+    transaction. The first page joins its group by its desktop picture (its signature on the
+    screenshot's row).
     `the_same_change_on_two_pages_has_one_signature`, `pages_changed_the_same_way_are_accepted_together`.
     A project can set a visual threshold (`github.visual_threshold`, a percent up to 50, as
     Chromatic's `diffThreshold` and Percy's sensitivity): a page that differs from the
@@ -2730,32 +2730,31 @@ Ranked by what a person notices first. Done so far:
 
 1. **A note's people told by mail, in review** (Vercel's comment notifications): a new note to
    the change's author, a reply or a resolve to the note's, through roll's accounts (`note_mail`).
-2. **Grouped visual changes, in review** (Percy's grouped diffs): pages changed the same way
-   against main's share a group (`visual::compare`'s signature), accepted together (`…/visual/accept
-   {group}`, the sheet's "Accept the N changed the same way", `roll preview accept --group`).
-   The first page joins them next.
-3. **A note that shows what the reviewer saw** (Jam's recordings, Netlify's markup): today a
+2. **A note that shows what the reviewer saw** (Jam's recordings, Netlify's markup): today a
    note carries a selector, the last steps, errors and failed requests, and roll's own browser
    crops the element later at desktop width; a phone-only or Safari-only bug has no picture.
    The question is what a visitor's own capture can be trusted for (the page's code could forge
    it): a short replay with inputs masked and a size cap, labelled as the reviewer's.
-4. **Restore points for the products that only copy** (Redis, search, NoSQL, streams): a point
+3. **Restore points for the products that only copy** (Redis, search, NoSQL, streams): a point
    is kept only where the product puts a branch back in place, keeping its id (their delete
    guards check it); each needs its control plane's reset `from`, as pg-control's.
-5. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
+4. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
    (3.3 s in its log) and its masking, which needs that compute up: pg-control's to shorten.
-6. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+5. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-7. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+6. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-8. **Watch: pg-control's recovery to a time seconds old** (unowned).
+7. **Watch: pg-control's recovery to a time seconds old** (unowned).
 
 
 
 
+
+
+Landed 2026-11-24, afternoon, later: guests' notes outside the team's for MCP's lockdown (#916), and pages changed the same way grouped and accepted together (#919; the first page in them with #926).
 
 Landed 2026-11-24, afternoon: a page state's steps timed to the next paint (#915, INP in the lab, against main's).
 
