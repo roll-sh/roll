@@ -398,13 +398,13 @@ async fn crawler_import_reads_an_open_crawler_config() {
         "output_sink: elasticsearch\noutput_index: docs\nmax_crawl_depth: 3\nsitemap_discovery_disabled: yes\nmax_title_size: 500\nlog_level: debug\n\
          elasticsearch:\n  host: https://es.example\n  api_key: es-key-5521\n\
          domains:\n  - url: https://docs.example.com\n    seed_urls: [https://docs.example.com/start]\n    crawl_rules:\n      - {policy: deny, type: begins, pattern: /private}\n\
-         \x20   auth: {type: raw, header: 'Bearer crawl-token-8812'}\n    extraction_rulesets: [{url_filters: []}]\n  - url: https://blog.example.com\n",
+         \x20   auth: {type: raw, header: 'Bearer crawl-token-8812'}\n    extraction_rulesets: [{url_filters: [{type: begins, pattern: /guide}], rules: [{action: extract, field_name: author, selector: '.author', join_as: string, source: html}]}]\n  - url: https://blog.example.com\n",
     )
     .unwrap();
     let out = e.roll(&["search", "crawler", "import", "site", yml.to_str().unwrap()]).await;
     assert!(out.contains("connector  docs") && out.contains("index      content-docs"), "{out}");
     let dropped = out.lines().find(|l| l.starts_with("dropped")).unwrap_or_default();
-    for k in ["output_sink", "log_level", "elasticsearch.host", "elasticsearch.api_key", "domains[0].extraction_rulesets"] {
+    for k in ["output_sink", "log_level", "elasticsearch.host", "elasticsearch.api_key"] {
         assert!(dropped.contains(k), "{k}: {out}");
     }
     assert!(!out.contains("es-key-5521") && !out.contains("crawl-token-8812"), "{out}");
@@ -418,6 +418,7 @@ async fn crawler_import_reads_an_open_crawler_config() {
     let active = &c["filtering"][0]["active"]["advanced_snippet"]["value"];
     assert_eq!((active["domains"][0]["crawl_rules"][0]["pattern"].as_str(), active["max_title_size"].as_i64()), (Some("/private"), Some(500)), "{c}");
     assert!(active["domains"][0].get("auth").is_none());
+    assert_eq!(active["domains"][0]["extraction_rulesets"][0]["rules"][0]["selector"].as_str(), Some(".author"), "extraction rules carried over: {c}");
 
     std::fs::write(&yml, "domains:\n  - url: https://a.example\n    auth: {type: basic, username: u, password: p}\n  - url: https://b.example\n    auth: {type: basic, username: u, password: p}\n").unwrap();
     let out = e.roll_with(&["search", "crawler", "import", "site", yml.to_str().unwrap()], None).await;

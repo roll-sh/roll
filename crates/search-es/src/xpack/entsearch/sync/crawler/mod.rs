@@ -12,6 +12,7 @@ pub mod hosts;
 pub mod html;
 pub mod probe;
 pub mod robots;
+pub mod select;
 pub mod sitemap;
 pub mod url;
 pub mod verify;
@@ -968,11 +969,12 @@ impl Crawl<'_, '_> {
         let text = String::from_utf8_lossy(&body).into_owned();
         drop(body);
         let tags = self.plan.domain(&at).map(|d| d.exclude_tags.clone()).unwrap_or_default();
+        let extraction = self.plan.domain(&at).map(|d| d.extraction.clone()).unwrap_or_default();
         // Off the async worker, against a deadline: a page can't hold a core past it.
         let (url, limits) = (at.clone(), self.plan.limits.clone());
         let deadline = (Instant::now() + PAGE_PARSE_TIME).min(self.deadline.max(Instant::now() + Duration::from_secs(1)));
         let parse = tokio::task::spawn_blocking(move || {
-            let r = html::read_page(&text, held, &url, &tags, &limits, deadline);
+            let r = html::read_page(&text, held, &url, &tags, &extraction, &limits, deadline);
             (r, text)
         });
         // A cancel doesn't wait for the parse (it ends at its own deadline, and its result is
@@ -1346,6 +1348,16 @@ fn document(url: &Link, additional: Option<String>, page: html::Page, full_html:
     let dirs: Vec<&str> = u.path().split('/').collect();
     for (i, key) in ["url_path_dir1", "url_path_dir2", "url_path_dir3"].into_iter().enumerate() {
         put(key, dirs.get(i + 1).map_or(Value::Null, |s| Value::from(*s)));
+    }
+    // Extraction rules' fields, then the page's own (`<meta class="elastic">`,
+    // `data-elastic-name`): neither replaces a field above, and a rule's wins over the page's.
+    for (k, v) in page.extracted {
+        if !d.contains_key(&k) {
+            d.insert(k, match v {
+                html::Extracted::One(s) => Value::from(s),
+                html::Extracted::Many(a) => strs(a),
+            });
+        }
     }
     for (k, v) in page.fields {
         if !d.contains_key(&k) {

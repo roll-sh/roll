@@ -146,10 +146,11 @@ pub async fn test(cluster: &Cluster, connector: Option<&str>, url: &str) -> Resu
     held.add(resp.body.len() as u64 * 2, "crawl-test page").map_err(|e| e.reason().to_string())?;
     let text = String::from_utf8_lossy(&resp.body).into_owned();
     let tags = plan.domain(&at).map(|d| d.exclude_tags.clone()).unwrap_or_default();
+    let extraction = plan.domain(&at).map(|d| d.extraction.clone()).unwrap_or_default();
     let (page_url, limits, full_html) = (at.clone(), plan.limits.clone(), plan.full_html);
     let parse_by = deadline.min(Instant::now() + super::PAGE_PARSE_TIME);
     let parsed = tokio::task::spawn_blocking(move || {
-        let r = html::read_page(&text, held, &page_url, &tags, &limits, parse_by);
+        let r = html::read_page(&text, held, &page_url, &tags, &extraction, &limits, parse_by);
         (r, text)
     })
     .await

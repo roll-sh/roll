@@ -4,8 +4,9 @@
 robots.txt, sitemaps, crawl rules, default fields, the purge, limits and politeness, and
 `roll search crawler import` (`search-es` `xpack/entsearch/sync/crawler/`). Phase 2: domain
 verification with the verified limits and fleet-wide daily counts (`search-control` `sites.rs`),
-`crawl-test` with its MCP tool and CLI, and the dashboard's "crawl a site" box. Phase 3 is to
-come. It runs on the connector runner of #318, which it reuses for jobs, schedules, slots,
+`crawl-test` with its MCP tool and CLI, and the dashboard's "crawl a site" box. Phase 3 has begun:
+extraction rules landed (`crawler/select.rs`), and verification tokens are derived from the owner
+and the site; incremental crawls and the docs preset are to come. It runs on the connector runner of #318, which it reuses for jobs, schedules, slots,
 cancelling, counters and sealed credentials (architecture.md, "Connectors" and "Web crawler").
 Where phase 1 differs from Open Crawler is listed in compatibility.md ("The web crawler").
 
@@ -220,6 +221,20 @@ crawls is the owner's, per site, so neither another cluster nor another host of 
 buys more. Deleting a cluster deletes its verifications (when it is tombstoned, purged or deleted
 outright); a restored cluster starts without them and checks again.
 
+The token isn't kept anywhere but the rows: it is derived, HMAC-SHA256 of the owner and the site
+under a key used for nothing else, derived (HKDF, its own label) from the deployment key, or on a
+single node without one from the node's own key (`<home>/key`), and cut to 22 base64url characters
+(132 bits). So starting a verification again, after every row that named the site is deleted or
+expired, gives the same token, and a published record keeps working. Every check still reads the
+token from its row:
+
+- Rows made before tokens were derived keep their random token, which is published. A new row in
+  another of the owner's clusters reuses a token one of their clusters has verified with, so that
+  record proves the site there in one check; otherwise it takes the derived token.
+- Rotating the deployment key changes every derived token. New starts get the new one; a verified
+  row keeps the token it was proven with, re-checked against it, until it lapses or is deleted,
+  and then the owner publishes the new one.
+
 A verification is re-checked every 30 days (claimed in the catalogue first, so one node of a fleet
 checks it; the claim is kept apart from the result, so a node that dies mid-check only delays it).
 A failed re-check is retried after 1 hour, 6 hours and a day before the verification lapses to the
@@ -315,14 +330,35 @@ nests more than 512 elements deep (a failed document), and a parse runs off the 
 in 4 KiB chunks against a 10-second deadline. Reading the DOM never recurses. Nothing in the page
 runs: no scripts, no styles, no external fetches.
 
-Extraction rules use Open Crawler's ruleset shape (`url_filters`, then `rules` with `action`
-`extract` or `set`, `field_name`, `selector`, `join_as`, `value`, `source` `html` or `url`):
+Extraction rules use Open Crawler's ruleset shape, under each domain's `extraction_rulesets` in the
+advanced snippet (and carried over by `roll search crawler import`):
 
-- `html` selectors are CSS Selectors Level 3, matched with the `selectors` crate against the arena
-  DOM.
-- XPath selectors, which Open Crawler also accepts, fail validation with a clear message in the
-  first slice.
-- `url` selectors are regexes over the URL, with the same linear-time engine as crawl rules.
+- `url_filters`: a ruleset applies to a page whose path one filter takes (`begins`, a path
+  starting with `/`; `ends`; `contains`; `regex`), or to every page when it has none.
+- `rules`, each with `action` (`extract` or `set`), `field_name`, `selector`, `join_as` (`array`
+  or `string`, the values joined with spaces), `source` (`html` or `url`) and, for `set`, `value`:
+  - `extract` from `html`: the text of each element the selector picks (as the body's text is
+    gathered); from `url`: each match of the regex over the URL, its first group when it has one.
+  - `set`: `value` when the selector picks anything (or the regex matches).
+- A field name is lowercase letters, digits and `_`, and never one of the fields every page has,
+  so a rule can't overwrite them; a rule's field wins over the page's own `meta.elastic` and
+  `data-elastic-name` fields, and a later rule's over an earlier one's.
+- Per page, a rule takes at most 100 values of 32 KiB each, and all its rules together 1 MiB. A
+  crawl has at most 100 rulesets and 100 rules, a ruleset at most 20 URL filters.
+
+`html` selectors are CSS Selectors Level 3 without what needs more than an element's ancestors and
+earlier siblings (`crawler/select.rs`, roll's own): types, `#id`, `.class`, attribute selectors
+(`=`, `~=`, `|=`, `^=`, `$=`, `*=`, and `i`), the structural pseudo-classes (`:root`, `:empty`,
+`:first-child`, `:nth-child()`, `:only-of-type` and the rest), `:not()` of one simple selector, and
+the four combinators. A selector is at most 1 KiB, 16 selectors in a list, 32 compound parts across
+it and 16 conditions on one element; `:has()`, states (`:hover`), pseudo-elements, escapes and
+XPath (which Open Crawler also accepts) fail validation, each with its reason. A page's elements are
+indexed once (charged to the request breaker, like its nodes), and a selector list is matched in
+one pass: each element inherits from its parent which parts matched an ancestor and from its
+previous sibling which matched an earlier sibling, so every combinator is a bit test and the work
+is the elements times the parts, never backtracking. A page whose rules can't finish by its parse
+deadline fails. `url` selectors and `regex` filters are regexes with the same linear-time engine
+as crawl rules (no look-around or backreferences).
 
 ## Purge
 
@@ -459,6 +495,9 @@ to see why pages are missing.
 | A project's grant verifies on its own cluster and gets 403 on another project's | `rolld/tests/auth.rs` (`mcp_search_with_a_project_token`) |
 | Re-checks retried, then lapsed, then re-checked for a week | unit test in `search-control/src/store.rs` |
 | Every rolld argument naming a host roll serves reaches `roll.crawler.fleet_names` | unit test in `rolld/src/served_names.rs` |
+| The derived token is the same after a delete and a new start | `search-control/tests/control.rs` (`crawler_verifications_are_each_clusters`) |
+| Extraction rules end to end: a URL filter, `extract` as a string and an array, `set`, a URL group | `crates/search-es/tests/crawler.rs` (`extraction_rules_fill_fields`) |
+| Selector parsing bounds and one-pass matching | unit tests in `crawler/select.rs` |
 | The routes' catalogue rows; the MCP tools | `rolld/tests/auth.rs`; docs/mcp.md and `pnpm test:mcp-sweep` |
 | The dashboard's crawl box | `apps/dashboard/src/components/search/connectors.test.tsx` |
 | `roll search crawler import` | `roll-cli/tests/search.rs` |
@@ -470,4 +509,5 @@ to see why pages are missing.
 2. **Domain verification, `crawl-test` and the dashboard:** the URL box, and a "crawl a site"
    path in the empty state for `## Next` item 12. The site-search guide's "Index your pages"
    becomes three commands.
-3. **Extraction rules, incremental crawls and the docs preset.**
+3. **Extraction rules, incremental crawls and the docs preset.** Extraction rules landed, with the
+   derived verification token; incremental crawls and the docs preset are left.

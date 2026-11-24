@@ -129,11 +129,60 @@ impl CrawlRule {
     }
 }
 
-/// A domain of the crawl: its origin, rules and the tags its pages leave out.
+/// A domain of the crawl: its origin, rules, the tags its pages leave out, and its extraction
+/// rulesets.
 pub struct Domain {
     pub origin: String,
     pub rules: Vec<CrawlRule>,
     pub exclude_tags: Vec<String>,
+    pub extraction: std::sync::Arc<Vec<Ruleset>>,
+}
+
+/// An extraction ruleset (Open Crawler's `extraction_rulesets[]`): its rules apply to a page whose
+/// path one of its URL filters matches, or to every page when it has none.
+pub struct Ruleset {
+    pub filters: Vec<UrlFilter>,
+    pub rules: Vec<Extraction>,
+}
+
+/// Where a ruleset applies: a page's path begins with, ends with or contains a literal, or
+/// matches a regex (the linear-time engine, as crawl rules use).
+pub enum UrlFilter {
+    Begins(String),
+    Ends(String),
+    Contains(String),
+    Regex(regex::Regex),
+}
+
+/// One extraction rule: the field it fills, from what, and how.
+pub struct Extraction {
+    pub field: String,
+    /// `action: set`: this value when the selector finds anything; `extract` (`None`): what it
+    /// finds.
+    pub set: Option<String>,
+    /// `join_as: array`, else `string` (the values joined with spaces).
+    pub array: bool,
+    pub from: Source,
+}
+
+/// What a rule reads: elements a CSS selector picks (their text), or the URL's matches of a regex
+/// (each match's first group, or the whole match).
+pub enum Source {
+    Html(super::select::Selectors),
+    Url(regex::Regex),
+}
+
+impl Ruleset {
+    pub fn applies(&self, link: &Link) -> bool {
+        let path = link.url().path();
+        self.filters.is_empty()
+            || self.filters.iter().any(|f| match f {
+                UrlFilter::Begins(p) => path.starts_with(p.as_str()),
+                UrlFilter::Ends(p) => path.ends_with(p.as_str()),
+                UrlFilter::Contains(p) => path.contains(p.as_str()),
+                UrlFilter::Regex(r) => r.is_match(path),
+            })
+    }
 }
 
 impl Domain {
@@ -161,6 +210,12 @@ impl Plan {
 }
 
 const DOMAIN_KEYS: &[&str] = &["url", "seed_urls", "sitemap_urls", "exclude_tags", "crawl_rules", "extraction_rulesets"];
+/// Extraction rulesets and rules in one crawl, across its domains, and URL filters in one ruleset.
+const MAX_RULESETS: usize = 100;
+const MAX_EXTRACTIONS: usize = 100;
+const MAX_URL_FILTERS: usize = 20;
+/// What a ruleset's regex (a URL filter's or a `url` rule's) may compile to.
+const REGEX_BYTES: usize = 256 << 10;
 const MAX_DOMAINS: usize = 100;
 const MAX_LISTED: usize = 10_000;
 /// Crawl rules in one crawl, across its domains, and what their DFAs may hold: each rule gets an
@@ -242,6 +297,104 @@ fn compile_rule(origin: &str, r: &Value, at: &str, size_limit: usize) -> Result<
     Ok(CrawlRule { allow, dfa, describe: format!("{} {} {pattern}", if allow { "allow" } else { "deny" }, text("type")?) })
 }
 
+fn regex_of(pattern: &str, at: &str) -> Result<regex::Regex, String> {
+    if pattern.len() > MAX_PATTERN {
+        return Err(format!("{at}'s pattern is longer than {MAX_PATTERN} bytes"));
+    }
+    if needs_backtracking(pattern) {
+        return Err(format!("{at}'s regex [{pattern}] uses look-around or a backreference, which roll's linear-time regex engine doesn't run"));
+    }
+    regex::RegexBuilder::new(pattern).size_limit(REGEX_BYTES).dfa_size_limit(REGEX_BYTES).build().map_err(|e| format!("{at}'s regex [{pattern}] doesn't compile: {e}"))
+}
+
+/// A domain's `extraction_rulesets` (Open Crawler's shape: `url_filters` of `type` and
+/// `pattern`, then `rules` of `action`, `field_name`, `selector`, `join_as`, `source` and, for
+/// `set`, `value`), validated; `counts` are the crawl's rulesets and rules so far.
+fn rulesets(v: &Value, at: &str, counts: &mut (usize, usize)) -> Result<Vec<Ruleset>, String> {
+    let Value::Arr(list) = v else { return Err(format!("[{at}] is an array")) };
+    let mut out = Vec::with_capacity(list.len());
+    for (i, rs) in list.iter().enumerate() {
+        let at = format!("{at}[{i}]");
+        let Value::Obj(m) = rs else { return Err(format!("[{at}] is an object with [url_filters] and [rules]")) };
+        if let Some(k) = m.keys().find(|k| !matches!(k.as_str(), "url_filters" | "rules")) {
+            return Err(format!("[{at}] has a key roll's crawler doesn't know: [{k}]"));
+        }
+        counts.0 += 1;
+        if counts.0 > MAX_RULESETS {
+            return Err(format!("the crawl has more than {MAX_RULESETS} extraction rulesets"));
+        }
+        let mut filters = Vec::new();
+        if let Some(f) = m.get("url_filters") {
+            let Value::Arr(fs) = f else { return Err(format!("[{at}.url_filters] is an array")) };
+            if fs.len() > MAX_URL_FILTERS {
+                return Err(format!("[{at}.url_filters] has more than {MAX_URL_FILTERS} entries"));
+            }
+            for (j, f) in fs.iter().enumerate() {
+                let at = format!("[{at}.url_filters[{j}]]");
+                let Value::Obj(f) = f else { return Err(format!("{at} is an object with [type] and [pattern]")) };
+                if let Some(k) = f.keys().find(|k| !matches!(k.as_str(), "type" | "pattern")) {
+                    return Err(format!("{at} has an unknown key [{k}]"));
+                }
+                let pattern = f.get("pattern").and_then(Value::as_str).filter(|p| !p.is_empty()).ok_or_else(|| format!("{at} needs a [pattern]"))?;
+                if pattern.len() > MAX_PATTERN {
+                    return Err(format!("{at}'s pattern is longer than {MAX_PATTERN} bytes"));
+                }
+                filters.push(match f.get("type").and_then(Value::as_str) {
+                    Some("begins") if pattern.starts_with('/') => UrlFilter::Begins(pattern.to_string()),
+                    Some("begins") => return Err(format!("{at}: a [begins] pattern is a path, starting with /")),
+                    Some("ends") => UrlFilter::Ends(pattern.to_string()),
+                    Some("contains") => UrlFilter::Contains(pattern.to_string()),
+                    Some("regex") => UrlFilter::Regex(regex_of(pattern, &at)?),
+                    Some(t) => return Err(format!("{at} has type [{t}]: begins, ends, contains or regex")),
+                    None => return Err(format!("{at} needs a [type]")),
+                });
+            }
+        }
+        let Some(Value::Arr(rs)) = m.get("rules") else { return Err(format!("[{at}] needs [rules], an array")) };
+        let mut rules = Vec::with_capacity(rs.len());
+        for (j, r) in rs.iter().enumerate() {
+            let at = format!("[{at}.rules[{j}]]");
+            counts.1 += 1;
+            if counts.1 > MAX_EXTRACTIONS {
+                return Err(format!("the crawl has more than {MAX_EXTRACTIONS} extraction rules"));
+            }
+            let Value::Obj(r) = r else { return Err(format!("{at} is an object")) };
+            if let Some(k) = r.keys().find(|k| !matches!(k.as_str(), "action" | "field_name" | "selector" | "join_as" | "source" | "value")) {
+                return Err(format!("{at} has an unknown key [{k}]"));
+            }
+            let text = |k: &str| r.get(k).and_then(Value::as_str).ok_or_else(|| format!("{at} needs a string [{k}]"));
+            let field = text("field_name")?;
+            if !super::html::valid_field(field) {
+                return Err(format!("{at}: [{field}] can't be a field: lowercase letters, digits and _, up to 64, not starting with _, and not one of the fields every page has"));
+            }
+            let set = match text("action")? {
+                "extract" if r.contains_key("value") => return Err(format!("{at}: [value] is for action set")),
+                "extract" => None,
+                "set" => Some(match r.get("value") {
+                    Some(Value::Str(s)) => s.clone(),
+                    Some(v @ (Value::Bool(_) | Value::Num(_))) => v.to_json(),
+                    _ => return Err(format!("{at}: action set needs a [value]")),
+                }),
+                a => return Err(format!("{at} has action [{a}]: extract or set")),
+            };
+            let array = match text("join_as")? {
+                "array" => true,
+                "string" => false,
+                j => return Err(format!("{at} has join_as [{j}]: array or string")),
+            };
+            let selector = text("selector")?;
+            let from = match text("source")? {
+                "html" => Source::Html(super::select::Selectors::parse(selector).map_err(|e| format!("{at}'s selector: {e}"))?),
+                "url" => Source::Url(regex_of(selector, &at)?),
+                s => return Err(format!("{at} has source [{s}]: html or url")),
+            };
+            rules.push(Extraction { field: field.to_string(), set, array, from });
+        }
+        out.push(Ruleset { filters, rules });
+    }
+    Ok(out)
+}
+
 fn strings(v: &Value, at: &str, max: usize) -> Result<Vec<String>, String> {
     let Value::Arr(a) = v else { return Err(format!("{at} is an array of strings")) };
     if a.len() > max {
@@ -295,11 +448,12 @@ pub fn plan(fields: &Fields, snippet: Option<&Value>, ceilings: &Ceilings) -> Re
         return Err(format!("the crawl has {total_rules} crawl rules: at most {MAX_RULES} across its domains"));
     }
     let size_limit = (RULES_BYTES / total_rules.max(1)).min(1 << 20);
+    let mut extraction_counts = (0usize, 0usize);
     let add_domain = |domains: &mut Vec<Domain>, origin: String| -> usize {
         match domains.iter().position(|d| d.origin == origin) {
             Some(i) => i,
             None => {
-                domains.push(Domain { origin, rules: Vec::new(), exclude_tags: Vec::new() });
+                domains.push(Domain { origin, rules: Vec::new(), exclude_tags: Vec::new(), extraction: Default::default() });
                 domains.len() - 1
             }
         }
@@ -361,10 +515,8 @@ pub fn plan(fields: &Fields, snippet: Option<&Value>, ceilings: &Ceilings) -> Re
                             }
                             domains[di].rules = out;
                         }
-                        match d.get("extraction_rulesets") {
-                            None => {}
-                            Some(Value::Arr(a)) if a.is_empty() => {}
-                            Some(_) => return Err(format!("[{at}.extraction_rulesets]: extraction rules aren't supported by roll's crawler yet")),
+                        if let Some(r) = d.get("extraction_rulesets") {
+                            domains[di].extraction = std::sync::Arc::new(rulesets(r, &format!("{at}.extraction_rulesets"), &mut extraction_counts)?);
                         }
                     }
                 }

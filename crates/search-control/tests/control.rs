@@ -5203,7 +5203,15 @@ async fn crawler_verifications_are_each_clusters() {
     let theirs = e.ok_as(Some("bob"), Method::GET, &format!("/v1/search/clusters/{bob}/site-verifications"), None).await;
     assert_eq!(theirs["verifications"], json!([]));
     assert_eq!(crawled("bob", bob.clone()).await.as_deref(), Some("unverified_domain_max_unique_url_count"));
-    assert_ne!(start("bob", bob).await["file"]["content"].as_str(), Some(token.as_str()));
+    let bobs = start("bob", bob.clone()).await;
+    let bob_token = bobs["file"]["content"].as_str().unwrap().to_string();
+    assert_ne!(bob_token, token);
+
+    // The token is derived from the owner and the site, not kept in a row: after bob's only row
+    // for the site goes, starting again gives the same token, so what he published still holds.
+    let gone = e.ok_as(Some("bob"), Method::DELETE, &format!("/v1/search/clusters/{bob}/site-verifications/{}", urlencoding::encode(bobs["site"].as_str().unwrap())), None).await;
+    assert!(gone["deleted"].is_string(), "{gone}");
+    assert_eq!(start("bob", bob).await["file"]["content"].as_str(), Some(bob_token.as_str()), "the same token after a delete");
 }
 
 /// The daily limit of unverified crawls is the owner's, kept in the catalogue: a second connector

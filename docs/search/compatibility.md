@@ -1682,7 +1682,10 @@ taken over by roll's crawler. Where roll's differs ([crawler.md](crawler.md)):
   `auth_origin` over https, never after a redirect to another origin; one per connector.
   `http_auth_allowed`, proxies and `domains[].auth` in the snippet aren't taken (the CLI import
   moves `auth` to the sealed fields).
-- **Not yet**: extraction rules (a snippet with any fails validation), XPath, incremental crawls
+- **Extraction rules** are Open Crawler's rulesets; `html` selectors are CSS Selectors Level 3
+  without `:has()`, states, pseudo-elements or escapes (each refused at validation), and a rule's
+  text is gathered as the body's is, not Jsoup's `text()`.
+- **Not yet**: XPath selectors, incremental crawls
   (an incremental job fails), binary content extraction (only `text/html` and
   `application/xhtml+xml` are indexed), `data-elastic-name` and `meta.elastic` beyond 100 fields a
   page, and `full_html` is the page as served, not Jsoup's re-serialisation. Pages are decoded as

@@ -365,7 +365,23 @@ pub struct Page {
     pub nofollow: bool,
     /// `<meta class="elastic">` and `data-elastic-name` fields.
     pub fields: Vec<(String, String)>,
+    /// What the domain's extraction rules found ([`Dom::extract`]).
+    pub extracted: Vec<(String, Extracted)>,
 }
+
+/// What an extraction rule puts in its field: a string (`join_as: string`) or an array.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Extracted {
+    One(String),
+    Many(Vec<String>),
+}
+
+/// Values one rule takes from a page, the bytes of one, and of all a page's rules together.
+const MAX_MATCHES: usize = 100;
+const MAX_VALUE: usize = 32 << 10;
+const MAX_EXTRACTED: usize = 1 << 20;
+/// What indexing an element for selectors costs the breaker.
+const SELECT_COST: u64 = 160;
 
 /// Fields Open Crawler's documents always have (`Constants::RESERVED_FIELD_NAMES`): a page's
 /// own meta tags can't set them.
@@ -377,7 +393,7 @@ const MAX_FIELDS: usize = 100;
 /// Tags whose content isn't text (Open Crawler's `NON_CONTENT_TAGS`).
 const NON_CONTENT: &[&str] = &["object", "script", "style", "svg", "video", "template"];
 
-fn valid_field(name: &str) -> bool {
+pub(crate) fn valid_field(name: &str) -> bool {
     !name.is_empty() && name.len() <= 64 && !name.starts_with('_') && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_') && !RESERVED.contains(&name)
 }
 
@@ -615,6 +631,139 @@ impl Dom {
     }
 }
 
+impl Dom {
+    /// The elements to [`MAX_DEPTH`] in document order as selectors see them (with each one's
+    /// parent's and previous sibling's place in the list), and each one's node. Linear in the
+    /// page: each node is visited once, and once more among its parent's children.
+    fn selectable(&self) -> (Vec<usize>, Vec<SelectInfo>) {
+        let order: Vec<usize> = self.walk(0).into_iter().map(|(i, _)| i).filter(|i| self.element(*i).is_some()).collect();
+        let mut place = vec![NONE; self.nodes.len()];
+        for (k, n) in order.iter().enumerate() {
+            place[*n] = k;
+        }
+        let mut info: Vec<SelectInfo> = Vec::with_capacity(order.len());
+        for &n in &order {
+            let node = &self.nodes[n];
+            let parent = (node.parent != NONE && place[node.parent] != NONE).then(|| place[node.parent]);
+            let is_root = node.parent != NONE && matches!(self.nodes[node.parent].data, Data::Document);
+            let mut p = node.prev;
+            while p != NONE && self.element(p).is_none() {
+                p = self.nodes[p].prev;
+            }
+            let prev = (p != NONE && place[p] != NONE).then(|| place[p]);
+            let mut c = node.first;
+            let mut empty = true;
+            while c != NONE {
+                if matches!(self.nodes[c].data, Data::Element { .. } | Data::Text(_)) {
+                    empty = false;
+                    break;
+                }
+                c = self.nodes[c].next;
+            }
+            info.push(SelectInfo { parent, prev, is_root, empty, index: 1, count: 1, type_index: 1, type_count: 1 });
+        }
+        // Positions among siblings, per parent (the document's children too).
+        for parent in std::iter::once(0).chain(order.iter().copied()) {
+            let mut kids = Vec::new();
+            let mut c = self.nodes[parent].first;
+            while c != NONE {
+                if place[c] != NONE {
+                    kids.push(place[c]);
+                }
+                c = self.nodes[c].next;
+            }
+            let mut of_type: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+            for (i, &k) in kids.iter().enumerate() {
+                let tag = self.element(order[k]).map_or("", |(t, _)| t);
+                let n = of_type.entry(tag).or_default();
+                *n += 1;
+                (info[k].index, info[k].count, info[k].type_index) = (i + 1, kids.len(), *n);
+            }
+            for &k in &kids {
+                info[k].type_count = of_type[self.element(order[k]).map_or("", |(t, _)| t)];
+            }
+        }
+        (order, info)
+    }
+
+    /// The fields `rulesets` (those whose URL filters take `url`) extract from this page, later
+    /// rules replacing earlier ones' values of a field. Selectors are matched in one pass each
+    /// ([`super::select`]), and indexing the elements for them is charged to `held` first; a
+    /// page whose rules can't finish by `deadline` fails.
+    pub fn extract(&self, url: &Link, rulesets: &[super::config::Ruleset], held: &mut Reservation, deadline: std::time::Instant) -> Result<Vec<(String, Extracted)>, String> {
+        use super::config::Source;
+        let rules: Vec<&super::config::Extraction> = rulesets.iter().filter(|r| r.applies(url)).flat_map(|r| &r.rules).collect();
+        let mut out: Vec<(String, Extracted)> = Vec::new();
+        if rules.is_empty() {
+            return Ok(out);
+        }
+        // The elements, indexed once for every selector, when a rule has one.
+        let (order, info) = match rules.iter().any(|r| matches!(r.from, Source::Html(_))) {
+            true => {
+                held.add(self.nodes.len() as u64 * SELECT_COST, "extraction rules").map_err(|e| e.reason().to_string())?;
+                self.selectable()
+            }
+            false => (Vec::new(), Vec::new()),
+        };
+        let attrs: Vec<Vec<(&str, &str)>> = order.iter().map(|n| self.element(*n).map(|(_, a)| a.iter().map(|a| (&*a.name.local, &*a.value)).collect()).unwrap_or_default()).collect();
+        let els: Vec<(super::select::Element<'_>, Option<usize>, Option<usize>)> = order
+            .iter()
+            .zip(&info)
+            .zip(&attrs)
+            .map(|((n, i), a)| {
+                let tag = self.element(*n).map_or("", |(t, _)| t);
+                (super::select::Element { tag, attrs: a, is_root: i.is_root, is_empty: i.empty, index: i.index, count: i.count, type_index: i.type_index, type_count: i.type_count }, i.parent, i.prev)
+            })
+            .collect();
+        let mut total = 0usize;
+        for rule in rules {
+            let (found, mut values) = match &rule.from {
+                Source::Html(sel) => {
+                    let hits = sel.select(&els, || std::time::Instant::now() >= deadline).map_err(|_| "the page's extraction rules ran out of time".to_string())?;
+                    let values = match rule.set {
+                        Some(_) => Vec::new(),
+                        None => hits.iter().take(MAX_MATCHES).map(|k| limit_bytes(self.text(order[*k], &[], false, MAX_VALUE), MAX_VALUE)).filter(|t| !t.is_empty()).collect(),
+                    };
+                    (!hits.is_empty(), values)
+                }
+                Source::Url(re) => {
+                    let s = url.as_str();
+                    let values: Vec<String> = re.captures_iter(s).take(MAX_MATCHES).filter_map(|c| c.get(1).or_else(|| c.get(0))).map(|m| m.as_str().to_string()).filter(|v| !v.is_empty()).collect();
+                    (re.is_match(s), values)
+                }
+            };
+            if let Some(v) = &rule.set {
+                values = if found { vec![v.clone()] } else { Vec::new() };
+            }
+            if values.is_empty() {
+                continue;
+            }
+            total += values.iter().map(String::len).sum::<usize>();
+            if total > MAX_EXTRACTED {
+                break;
+            }
+            let value = if rule.array { Extracted::Many(values) } else { Extracted::One(values.join(" ")) };
+            match out.iter().position(|(f, _)| *f == rule.field) {
+                Some(i) => out[i].1 = value,
+                None => out.push((rule.field.clone(), value)),
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// An element's place for selectors ([`Dom::selectable`]).
+struct SelectInfo {
+    parent: Option<usize>,
+    prev: Option<usize>,
+    is_root: bool,
+    empty: bool,
+    index: usize,
+    count: usize,
+    type_index: usize,
+    type_count: usize,
+}
+
 fn set_field(fields: &mut Vec<(String, String)>, name: &str, v: String) {
     match fields.iter().position(|(n, _)| n == name) {
         Some(i) => fields[i].1 = v,
@@ -623,11 +772,14 @@ fn set_field(fields: &mut Vec<(String, String)>, name: &str, v: String) {
     }
 }
 
-/// Parses `html` (charged to `held`) and reads it as the page at `url`. The DOM never outlives
-/// this call: its strings aren't `Send`, so it can't be held across a crawl's awaits.
-pub fn read_page(html: &str, held: Reservation, url: &Link, exclude_tags: &[String], limits: &Limits, deadline: std::time::Instant) -> Result<(Page, Reservation), String> {
-    let (dom, held) = parse(html, held, deadline)?;
-    Ok((dom.read(url, exclude_tags, limits), held))
+/// Parses `html` (charged to `held`) and reads it as the page at `url`, with the domain's
+/// `extraction` rulesets. The DOM never outlives this call: its strings aren't `Send`, so it can't
+/// be held across a crawl's awaits.
+pub fn read_page(html: &str, held: Reservation, url: &Link, exclude_tags: &[String], extraction: &[super::config::Ruleset], limits: &Limits, deadline: std::time::Instant) -> Result<(Page, Reservation), String> {
+    let (dom, mut held) = parse(html, held, deadline)?;
+    let mut page = dom.read(url, exclude_tags, limits);
+    page.extracted = dom.extract(url, extraction, &mut held, deadline)?;
+    Ok((page, held))
 }
 
 #[cfg(test)]

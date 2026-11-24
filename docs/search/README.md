@@ -1475,10 +1475,11 @@ deterministic (#396).
    count of unverified crawls in the fleet's catalogue), `crawl-test` (one URL through the crawler's path, storing nothing,
    rate-limited per owner) with its MCP tools and `roll search crawler test`/`verify`/`sites`, the
    dashboard's "crawl a site" box in the Connectors tab, and every product's names blocked
-   (`roll.crawler.fleet_names`). Left: a verification token derived from the owner and the site
-   (HMAC), so a published record keeps working after the owner's last row for it goes; then
-   (phase 3) extraction rules (CSS selectors on the arena DOM), incremental crawls with
-   `If-Modified-Since`, and the docs preset; charset detection beyond UTF-8, fetching several
+   (`roll.crawler.fleet_names`); then (phase 3) extraction rules (Open Crawler's rulesets, CSS
+   selectors matched in one pass on the arena DOM, carried over by the import) and a verification
+   token derived from the owner and the site (HMAC), so a published record outlives its rows.
+   Left: incremental crawls with `If-Modified-Since`, and the docs preset; charset detection
+   beyond UTF-8, fetching several
    origins at once, and per-site politeness by address rather than name are open too.
 14. **Semantic search on OpenSearch-flavor clusters** (design in
    [opensearch-neural.md](opensearch-neural.md); AWS OpenSearch neural search):
