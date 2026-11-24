@@ -2183,35 +2183,55 @@ pub(super) fn btree_pages_sorted(
     keys: impl Iterator<Item = MeasureKey>,
     _n: usize,
 ) -> (i32, crate::exec::sizing::btest::BtEst) {
-    let dedup = !bix.index.unique
-        && bix.index.include.is_empty()
-        && types.iter().all(relsize::equal_image)
-        && bix.colls.iter().flatten().all(|k| k.coll.deterministic);
-    let mut b = crate::exec::sizing::btest::EstBuilder::new(dedup);
+    let mut b = BtreeMeasure::new(bix, types);
     let mut group: Option<(MeasureKey, usize)> = None;
-    let mut emit = |g: &MeasureKey, count: usize| {
-        let key = (g.0[0] as u128) << 64 | g.0[1] as u128;
-        let base = g.2 as usize;
-        let mut first = true;
-        relsize::posting_split(base, count, |size, pivot, tids| {
-            b.push(size, pivot, key, tids, first, base);
-            first = false;
-        });
-    };
     for k in keys {
         match &mut group {
-            Some((g, count)) if dedup && g.0 == k.0 && g.1 == k.1 => *count += 1,
+            Some((g, count)) if b.dedup && g.0 == k.0 && g.1 == k.1 => *count += 1,
             _ => {
                 if let Some((g, count)) = group.replace((k, 1)) {
-                    emit(&g, count);
+                    b.group((g.0[0] as u128) << 64 | g.0[1] as u128, g.2, count);
                 }
             }
         }
     }
     if let Some((g, count)) = group {
-        emit(&g, count);
+        b.group((g.0[0] as u128) << 64 | g.0[1] as u128, g.2, count);
     }
     b.finish()
+}
+
+/// `btree_pages_sorted`'s builder, given its keys' groups: each group of keys equal where the
+/// btree deduplicates (`dedup`; else each key its own group), in order.
+pub(super) struct BtreeMeasure {
+    pub(super) dedup: bool,
+    b: crate::exec::sizing::btest::EstBuilder,
+}
+
+impl BtreeMeasure {
+    pub(super) fn new(bix: &crate::sql::plan::BoundIndex, types: &[DataType]) -> BtreeMeasure {
+        let dedup = !bix.index.unique
+            && bix.index.include.is_empty()
+            && types.iter().all(relsize::equal_image)
+            && bix.colls.iter().flatten().all(|k| k.coll.deterministic);
+        BtreeMeasure { dedup, b: crate::exec::sizing::btest::EstBuilder::new(dedup) }
+    }
+
+    /// `count` keys whose sort key's first 16 bytes are `key` (`btest::key_prefix`), each
+    /// index tuple `size` bytes.
+    pub(super) fn group(&mut self, key: u128, size: u32, count: usize) {
+        let base = size as usize;
+        let mut first = true;
+        let b = &mut self.b;
+        relsize::posting_split(base, count, |size, pivot, tids| {
+            b.push(size, pivot, key, tids, first, base);
+            first = false;
+        });
+    }
+
+    pub(super) fn finish(self) -> (i32, crate::exec::sizing::btest::BtEst) {
+        self.b.finish()
+    }
 }
 
 impl Ddl<'_, '_> {

@@ -285,6 +285,50 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Memory, round 2: parallel index builds' lists (2026-11-24, agent 308)
+
+HANDOFF "Memory, round 2" has what changed and why. Plain dist builds (`tools/dist.sh`): **h**,
+origin's `ad12b41b5`, and **n1**, `cand/a308` over it. Roll alone on lane C, in a container (8 GiB,
+swap off), clients on the lane's client CPUs; memory is the server cgroup's peak anon+shmem
+(0.2 s samples), as in "Memory, round 1" (`~/.cache/a308/hp.sh`, its cells). One run a cell
+unless two are given; foreign load 2.5-5.7 cores in every hold.
+
+### Peak memory, MB (maintenance_work_mem 256 MB, 2 GB cache)
+
+| cell | h | n1 | PostgreSQL 18.6 (round 1) |
+|---|---:|---:|---:|
+| pgbench -i, scale 32 | 731.4 (primary keys 1.72 s) | 593.4 / 590.3 (1.77 / 1.23 s) | 632.9 |
+| TPC-H SF1 load (`bench tpch-load`) | 1,581.5 (indexes 26.3 s) | 1,530.4 (23.5 s) | 1,026.0 |
+
+### Index builds (lane C, `~/.cache/a308/ixgate.sh`, 302's: 1M rows of `bulk1m.tsv`)
+
+G user instructions of the server's cgroup per step, two alternating pairs, each pair one
+`tools/lane.sh` hold (foreign load 3.0-4.9 cores: instruction counts only). Index sizes
+(9,478,144 / 22,487,040 bytes), relpages (1,157), reltuples and the sums read through each index
+are equal in every run.
+
+| maintenance_work_mem | step | h | n1 | Δ | step peak MB h -> n1 |
+|---|---|---|---|---:|---|
+| 256 MB (no spill) | CREATE INDEX | 4.347 / 4.347 | 4.014 / 4.014 | -7.7% | 212.3 / 211.8 -> 132.7 / 126.6 |
+| 256 MB (no spill) | CREATE UNIQUE INDEX | 3.333 / 3.328 | 3.112 / 3.120 | -6.5% | 170.3 / 162.0 -> 118.5 / 122.6 |
+| 64 MB (h spills, n1 doesn't) | CREATE INDEX | 4.897 / 4.902 | 3.979 / 3.980 | -18.8% | 143.1 / 146.2 -> 120.0 / 137.6 |
+| 64 MB | CREATE UNIQUE INDEX | 3.946 / 3.946 | 3.010 / 3.011 | -23.7% | 145.6 / 164.4 -> 117.0 / 117.5 |
+| 64 MB, 3M rows (`bulk3m.tsv`: three copies, ids offset; both spill), one pair | CREATE INDEX | 15.027 | 12.866 | -14.4% | 256.1 -> 239.0 |
+| 64 MB, 3M rows | CREATE UNIQUE INDEX | 12.355 | 10.835 | -12.3% | 246.9 -> 237.2 |
+
+### Where the peaks are (`--features heapprof` verify build of `ad12b41b5`)
+
+| cell | peak | live heap at its peak | of it | besides the heap |
+|---|---:|---:|---|---|
+| pgbench -i, 256 MB | 714.6 | 367 | parallel build lists 272 (measure keys 120, entries 72, key bytes 80) | block cache arena ~352 (unmapped after the build); glibc < 4 |
+| TPC-H load, 256 MB | 1,557.9 | 435 | build lists ~334 (measure keys 120 + boxed rests 25, key bytes 96, entries 72, heap tuple sizes ~21) | block cache arena up to ~1,168 |
+| TPC-H 22 queries, 256 MB cache | 463.2 / 463.5 | 182 | | cache 256 |
+| q10 alone, 256 MB cache | 452.1 (444.0 after) | 170 | models 39, SST readers 29.5, hash agg 30, hash join build 19, parallel scan rows queued 17 | cache 256 |
+
+Per query peaks in the 22 (MB, `bench --mem-cgroup`): q01 357-360, q02-q09 368-395, q10 463-471,
+q11 467, q12 389-395, q13 448-456, q14 448-456, q15 421-425, q16 415-420, q17-q22 380-420 (q18 410-420).
+`MIMALLOC_PURGE_DELAY=0` on pgbench -i: peak 634.7, end 34.2 MB (default: 674-726, end 174-202).
+
 ## Memory, round 1: the footprint table, parallel index builds in maintenance_work_mem (2026-11-23, agent 302)
 
 HANDOFF "Memory, round 1" has what changed and why. Harness `~/.cache/a302/mem.sh`: one server in

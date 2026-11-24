@@ -14631,6 +14631,96 @@ the loop. (2) The ring's per-block cost: three hash lookups a recycled block (`e
 looks the key up twice and then removes it). One `entry` would do. It is worth about 0.4% on
 scan-bound queries at small caches.
 
+## Memory, round 2: parallel index builds' lists, where the other peaks are (agent 308, 2026-11-24)
+
+BENCH.md "Memory, round 2" has the tables. Plain dist builds (`tools/dist.sh`): **h**, origin's
+`ad12b41b5`, and **n1**, the change over it (`cand/a308`). Profiles: `--features heapprof` verify
+build of `ad12b41b5`; harness `~/.cache/a308/hp.sh` (agent 302's `mem.sh` cells, roll alone on lane
+C, peak anon+shmem of the server's cgroup) and `ixgate.sh` (302's).
+
+**Where pgbench -i's peak is** (scale 32, maintenance_work_mem 256 MB, 2 GB cache; 714.6 MB on the
+profiled build). About 367 MB of live heap, 272 MB of it the parallel build's lists (measure keys
+120 MB, `Ent`s 72, key bytes 80), and about 352 MB of block cache arena: chunks the cache maps
+itself (`storage/cache/arena.rs`, outside the heap profile), mapped while the build scans
+`pgbench_accounts` and all unmapped when it ends (counted from the arena's `chunk mapped` debug
+lines, `RUST_LOG=pg_engine::storage::cache::arena=debug`). glibc malloc (C code: zstd, ICU) never
+held more than 4 MB (an `LD_PRELOAD` counting shim, `~/.cache/a308/shim/`). With
+`MIMALLOC_PURGE_DELAY=0` the peak is 634.7 MB and the end 34 MB instead of 202: freed huge blocks
+wait for their purge, but that isn't most of the peak.
+
+**maintenance_work_mem is a sum, as PostgreSQL's**: each participant's budget is
+`maintenance_work_mem / (workers + 1)` and `index_workers` drops workers while a share would be
+under 32 MB (plan_create_index_workers). The finished build's lists are freed when it returns
+(its `Gathered`s dropped); the next build's reuse the allocator's freed blocks.
+
+**Kept (`cand/a308`): a parallel btree build takes its measure from its entries** (`parbuild.rs`).
+Each participant kept a measure key per row besides its entry: 40 bytes (`MeasureKey`: the sort
+key's first 16 bytes, a boxed rest past 16 bytes, the tuple size), a second sorted copy of the
+key values, sorted and merged on its own. When every key column is ascending with nulls last and
+without collation keys, an entry's key values are exactly the measure's sort key
+(`encode_index_value` is `encode_value` then), so `Plan::fused` keeps only the index tuple size, 2
+bytes after the entry's key in `data` (`Entries::sized`, and in the spilled runs). The leader's
+final merge, which writes the index run, feeds the measure (`FusedMeasure`, grouping as
+`btree_pages_sorted` does through `vacuum::BtreeMeasure`). Entries come in their keys' order and
+within a key in their rows' (the measure keys came smallest size first), so it is only for
+indexes where equal keys have equal sizes: no INCLUDE columns, every key type equal-image. Others
+(DESC, NULLS FIRST, ICU or nondeterministic collations, INCLUDE, numeric and float keys) keep the
+measure keys. pgbench_accounts_pkey: about 94 bytes a row before (plus Vec growth), 56 now.
+And the lists' capacity: grown by doubling, each list was up to twice what it held when it
+spilled, and each growth left the old buffer to the allocator. Once a participant holds an eighth
+of its budget, `Gathered::reserve` sets each list's room to its share of the budget (the shares
+its rows so far give, plus a check's 1,024 rows), so the lists stay within the budget.
+
+Results (plain dist, h -> n1): pgbench -i at 256 MB peaks at 731.4 -> 593.4 / 590.3 MB (PostgreSQL
+18.6: 632.9), its primary key no longer spills. The TPC-H SF1 load at 256 MB: 1,581.5 -> 1,530.4 MB
+(PostgreSQL 1,026.0): its peak is mostly the block cache (about 1.1 GB; agent 302's "The block
+cache during a load"), and lineitem's builds still spill once each at 256 MB. 1M-row builds
+(`ixgate.sh`, two alternating pairs each, user instructions): at 256 MB (no spill either way)
+CREATE INDEX 4.347 -> 4.014 G (-7.7%), CREATE UNIQUE INDEX 3.333 / 3.328 -> 3.112 / 3.120 G
+(-6.5%); at 64 MB, roll's default, h spills and n1 doesn't (a participant's rows fit its 32 MB):
+4.897 / 4.902 -> 3.979 / 3.980 G (-18.8%) and 3.946 -> 3.010 / 3.011 G (-23.7%). The steps' peaks
+drop 30-85 MB. With 3M rows at 64 MB both spill (one pair): 15.027 -> 12.866 G (-14.4%) and
+12.355 -> 10.835 G (-12.3%). Index sizes, relpages, reltuples and the sums read through each index
+are equal in every run. Foreign load was 3.0-4.9 cores in every hold, so only instruction counts are given.
+Not gated on a PGO build: no function boundary or inlining was changed on purpose; the new
+functions are small and called from the build's loops only.
+
+**TPC-H SF1 at a 256 MB cache** (not changed). The 22 queries peak at 463.2 / 463.5 MB (q10;
+q11 467, q13 / q14 448-456, per `bench --mem-cgroup`); between queries the server holds 375-385
+MB. q10 alone (452.1 MB peak, 444.0 after it) is the cache's 256 MB, a 170 MB heap peak and about
+26 MB else. Of the heap: the restored heap and btree models of the modelled tables 39 MB
+(`kept::lay_out`, `heapsim`, `keymap`, `btsim::read_image`: loaded at open, kept), the SST readers'
+open state 29.5 MB, and the query's own about 65 MB: hash aggregation 30 (group keys, states, the
+table), the hash join's build rows (narrowed `Vec<Value>`s) 19, and parallel scan rows queued for the
+leader 17. Joins and aggregates batch and spill where PostgreSQL's would (`workmem.rs` counts
+PostgreSQL's tuple sizes), but hold their rows as `Value`s, about twice PostgreSQL's MinimalTuples.
+The queued rows: a scan's chunks are consumed in key order through one unbounded channel each,
+and workers run up to two chunks ahead (`AHEAD`), so a slow leader keeps whole chunks of decoded
+rows (PostgreSQL's per-worker queue is 64 kB). Bounding those channels would keep only the front
+chunk's worker producing when the leader is fast, so it wasn't done.
+
+**Left**, by size:
+(1) The TPC-H load's block cache (about 1.1 GB of its 1.53 GB peak): a cheaper cached form of
+lineitem (agent 303's storage format 5), not a ring (302 measured the ring's cost).
+(2) TPC-H at 256 MB: the models (39 MB at SF1, growing with the modelled tables) and SST readers'
+state (30 MB) held besides the cache, and query rows as `Value`s.
+(3) The idle session's allocator pages (agent 302's: about 200 KB of 270 KB): not attempted. They
+are pinned by the session's live blocks across about 25 size classes, so a collection gives back
+almost nothing; it needs the session's long-lived data placed apart from its startup garbage.
+(4) The spill path's CPU (302's ideas), and a unique build's separate duplicate pass: the
+duplicate check over its own merge of every entry before the write's merge (in progress as a
+second candidate).
+(5) Allocator retention after a build or a query (`MIMALLOC_PURGE_DELAY=0`: 202 -> 34 MB after
+pgbench -i; after q10 alone the server holds 444 MB: the 256 MB cache, about 95 MB of live heap
+and about 90 MB freed but not yet given back).
+
+Verification: quick-check with `QC_CHECKED=1` and `QC_TESTS=big_tables` on `c218fd561` (the code of
+`cand/a308`, over `ad12b41b5`): build and Clippy (16 warnings, none new in changed files), 116 tests
+in 7 binaries (`big_tables`' `parallel_index_builds` compares serial, parallel and spill-every-1,024-rows
+builds' answers, pg_class numbers and unique-violation errors), the same with `--profile
+verify-checked`, regress 51,148 / 51,150 with 0 newly differing, isolation 1,647 / 1,648,
+pg_dump_tap 14,609 passed.
+
 ## Memory, round 1: the footprint table, parallel index builds in maintenance_work_mem (agent 302, 2026-11-23)
 
 BENCH.md "Memory, round 1" has the tables. Plain dist builds (`tools/dist.sh`): **head**, origin's

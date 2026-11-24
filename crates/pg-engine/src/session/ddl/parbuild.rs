@@ -27,11 +27,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 /// One participant's index entries: the entry keys back to back in `data`; each entry's
 /// (its key's 16 bytes after the index's prefix, offset, key length | tail length << 16 |
 /// `CHECKED`) in `ents`, sorted by key at the end. Its value, the row's data key, is the
-/// table's prefix and the key's tail (`index_entry_key`).
+/// table's prefix and the key's tail (`index_entry_key`). `sized`: each key is followed in
+/// `data` by its index tuple's size, two bytes (`Plan::fused`).
 #[derive(Default)]
 struct Entries {
     data: Vec<u8>,
     ents: Vec<Ent>,
+    sized: bool,
 }
 
 /// An entry whose key values take part in the unique check (none null, or NULLS NOT
@@ -80,6 +82,15 @@ impl Entries {
         &self.data[e.1 as usize..(e.1 + (e.2 & 0xffff)) as usize]
     }
 
+    /// An entry's index tuple size (`sized`'s; else 0).
+    fn size(&self, e: Ent) -> u32 {
+        if !self.sized {
+            return 0;
+        }
+        let at = (e.1 + (e.2 & 0xffff)) as usize;
+        u16::from_le_bytes([self.data[at], self.data[at + 1]]) as u32
+    }
+
     /// By each key's first 16 bytes past the index's prefix, then the keys themselves where
     /// those tie. (Eight bytes tied for an integer column's keys a few hundred apart, and every
     /// tie read two keys at random places in `data`.) A byte at a time (`radix_sort_by`).
@@ -123,12 +134,31 @@ struct Gathered {
     /// held its share of maintenance_work_mem (`Plan::spill`).
     runs: Vec<RunFile>,
     key_runs: Vec<RunFile>,
+    /// The lists' room was set to what they hold at a spill (`reserve`).
+    reserved: bool,
 }
 
 impl Gathered {
     /// What the entries and measure keys hold in memory.
     fn held(&self) -> usize {
         self.entries.bytes() + self.keys.len() * std::mem::size_of::<super::vacuum::MeasureKey>() + self.long
+    }
+
+    /// Once the entries and measure keys hold an eighth of `budget`, each list's room set to
+    /// its share of the budget as the rows so far split it, and a check's rows past it: grown
+    /// by doubling, a list's capacity was up to twice what it held at a spill, and each
+    /// growth left the buffer before it to the allocator.
+    fn reserve(&mut self, budget: usize) {
+        let (held, rows) = (self.held(), self.entries.ents.len());
+        if self.reserved || held < budget / 8 || rows == 0 {
+            return;
+        }
+        self.reserved = true;
+        let room = |len: usize| ((len as u128 * budget as u128 / held as u128) as usize).saturating_add(len.div_ceil(rows) * (SPILL_CHECK + 64));
+        let e = &mut self.entries;
+        e.data.reserve_exact(room(e.data.len()) - e.data.len());
+        e.ents.reserve_exact(room(e.ents.len()) - e.ents.len());
+        self.keys.reserve_exact(room(self.keys.len()) - self.keys.len());
     }
 
     /// The entries and measure keys sorted, each to a run file in `dir`, and let go.
@@ -140,11 +170,17 @@ impl Gathered {
             for &x in &e.ents {
                 w.write_all(&x.2.to_le_bytes())?;
                 w.write_all(e.key(x))?;
+                if e.sized {
+                    w.write_all(&(e.size(x) as u16).to_le_bytes())?;
+                }
             }
             Ok(())
         })?);
         self.entries.data.clear();
         self.entries.ents.clear();
+        if self.entries.sized {
+            return Ok(());
+        }
         super::vacuum::sort_measure_keys(&mut self.keys);
         let keys = &self.keys;
         self.key_runs.push(RunFile::write(dir, keys.len(), |w| {
@@ -165,8 +201,9 @@ impl Gathered {
 }
 
 /// A sorted run a participant spilled (`Gathered::spill`): `n` records in the build's
-/// directory, removed when this goes. An entry is its lengths word (`Ent`'s third) and key;
-/// a measure key its two prefix words, size, the longer part's length (0: none) and bytes.
+/// directory, removed when this goes. An entry is its lengths word (`Ent`'s third) and key,
+/// then its size (two bytes) when its participant's entries are `sized`; a measure key its two
+/// prefix words, size, the longer part's length (0: none) and bytes.
 struct RunFile {
     path: std::path::PathBuf,
     n: usize,
@@ -197,6 +234,9 @@ impl Drop for RunFile {
 /// A run file's buffer, written and read.
 const RUN_IO: usize = 32 << 10;
 
+/// How many rows a participant reads between its checks of what it holds (and of cancels).
+const SPILL_CHECK: usize = 1024;
+
 /// The least a participant holds before it spills (a small maintenance_work_mem would make
 /// hundreds of runs, each open in the merge).
 const MIN_SPILL: usize = 4 << 20;
@@ -215,19 +255,20 @@ impl Drop for SpillDir {
 /// spilled, its current entry read into `key`.
 enum Source<'a> {
     Mem(&'a Entries, usize),
-    File { r: std::io::BufReader<std::fs::File>, left: usize, key: Vec<u8>, lens: u32, words: [u64; 2] },
+    File { r: std::io::BufReader<std::fs::File>, left: usize, key: Vec<u8>, lens: u32, words: [u64; 2], sized: bool, size: u32 },
 }
 
 impl Source<'_> {
-    fn file(run: &RunFile) -> Result<Source<'static>> {
-        let mut s = Source::File { r: run.open()?, left: run.n, key: Vec::new(), lens: 0, words: [0; 2] };
+    /// A run of entries, `sized` as its participant's (`Entries::sized`).
+    fn file(run: &RunFile, sized: bool) -> Result<Source<'static>> {
+        let mut s = Source::File { r: run.open()?, left: run.n, key: Vec::new(), lens: 0, words: [0; 2], sized, size: 0 };
         s.read()?;
         Ok(s)
     }
 
     /// A file's next entry into its buffer (none left: `left` is 0 and the key empty).
     fn read(&mut self) -> Result<()> {
-        let Source::File { r, left, key, lens, words: w } = self else { return Ok(()) };
+        let Source::File { r, left, key, lens, words: w, sized, size } = self else { return Ok(()) };
         key.clear();
         if *left == 0 {
             return Ok(());
@@ -239,6 +280,11 @@ impl Source<'_> {
         key.resize((*lens & 0xffff) as usize, 0);
         r.read_exact(key)?;
         *w = words(key);
+        if *sized {
+            let mut b = [0u8; 2];
+            r.read_exact(&mut b)?;
+            *size = u16::from_le_bytes(b) as u32;
+        }
         Ok(())
     }
 
@@ -247,6 +293,14 @@ impl Source<'_> {
         match self {
             Source::Mem(e, at) => e.ents.get(*at).map(|&x| (x.0, e.key(x), x.2)),
             Source::File { key, lens, words, .. } => (!key.is_empty()).then_some((*words, key.as_slice(), *lens)),
+        }
+    }
+
+    /// The current entry's index tuple size (`Entries::size`).
+    fn size(&self) -> u32 {
+        match self {
+            Source::Mem(e, at) => e.size(e.ents[*at]),
+            Source::File { size, .. } => *size,
         }
     }
 
@@ -261,8 +315,8 @@ impl Source<'_> {
     }
 }
 
-/// The sources' entries merged in key order, each given to `f` (key, lengths word).
-fn merge_entries(mut srcs: Vec<Source<'_>>, f: &mut dyn FnMut(&[u8], u32) -> Result<()>) -> Result<()> {
+/// The sources' entries merged in key order, each given to `f` (key, lengths word, size).
+fn merge_entries(mut srcs: Vec<Source<'_>>, f: &mut dyn FnMut(&[u8], u32, u32) -> Result<()>) -> Result<()> {
     srcs.retain(|s| s.head().is_some());
     let less = |srcs: &[Source<'_>], a: usize, b: usize| {
         let (x, y) = (srcs[a].head().unwrap(), srcs[b].head().unwrap());
@@ -293,7 +347,7 @@ fn merge_entries(mut srcs: Vec<Source<'_>>, f: &mut dyn FnMut(&[u8], u32) -> Res
     while let Some(&top) = heap.first() {
         {
             let (_, k, lens) = srcs[top].head().unwrap();
-            f(k, lens)?;
+            f(k, lens, srcs[top].size())?;
         }
         srcs[top].advance()?;
         if srcs[top].head().is_none() {
@@ -311,8 +365,10 @@ fn merge_entries(mut srcs: Vec<Source<'_>>, f: &mut dyn FnMut(&[u8], u32) -> Res
 /// The participants' sorted entries in memory and the runs they spilled, as a merge's sources.
 fn sources<'a>(sorted: &'a [Entries], runs: &[RunFile]) -> Result<Vec<Source<'a>>> {
     let mut v: Vec<Source<'a>> = sorted.iter().map(|e| Source::Mem(e, 0)).collect();
+    // (Every participant's entries are sized alike: `Plan::fused`.)
+    let sized = sorted.first().is_some_and(|e| e.sized);
     for r in runs {
-        v.push(Source::file(r)?);
+        v.push(Source::file(r, sized)?);
     }
     Ok(v)
 }
@@ -366,7 +422,7 @@ fn duplicate_in(sorted: &[Entries]) -> Option<&[u8]> {
 fn duplicate_in_runs(srcs: Vec<Source<'_>>) -> Result<Option<Vec<u8>>> {
     let (mut last, mut last_tail, mut n) = (Vec::new(), Vec::new(), 0usize);
     let mut found: Option<(Vec<u8>, Vec<u8>)> = None;
-    merge_entries(srcs, &mut |k, lens| {
+    merge_entries(srcs, &mut |k, lens, _| {
         if lens & CHECKED == 0 {
             return Ok(());
         }
@@ -424,6 +480,47 @@ fn key_run<'a>(run: &RunFile, err: &'a std::cell::RefCell<Option<crate::error::E
     })))
 }
 
+/// A fused build's measure (`Plan::fused`): its entries' key values (the key without the
+/// index's prefix and the row's tail) and sizes, in order, grouped as `btree_pages_sorted`
+/// groups measure keys.
+struct FusedMeasure {
+    m: super::vacuum::BtreeMeasure,
+    /// The current group: its key values (kept only to compare where the btree
+    /// deduplicates), first 16 bytes, size and count.
+    last: Vec<u8>,
+    prefix: u128,
+    size: u32,
+    count: usize,
+}
+
+impl FusedMeasure {
+    fn new(bix: &BoundIndex, types: &[DataType]) -> FusedMeasure {
+        FusedMeasure { m: super::vacuum::BtreeMeasure::new(bix, types), last: Vec::new(), prefix: 0, size: 0, count: 0 }
+    }
+
+    fn push(&mut self, values: &[u8], size: u32) {
+        if self.m.dedup {
+            if self.count > 0 && self.last.as_slice() == values {
+                self.count += 1;
+                return;
+            }
+            self.last.clear();
+            self.last.extend_from_slice(values);
+        }
+        if self.count > 0 {
+            self.m.group(self.prefix, self.size, self.count);
+        }
+        (self.prefix, self.size, self.count) = (crate::exec::sizing::btest::key_prefix(values), size, 1);
+    }
+
+    fn finish(mut self) -> (i32, crate::exec::sizing::btest::BtEst) {
+        if self.count > 0 {
+            self.m.group(self.prefix, self.size, self.count);
+        }
+        self.m.finish()
+    }
+}
+
 /// What every participant needs, shared.
 struct Plan<'a> {
     t: &'a Table,
@@ -447,6 +544,15 @@ struct Plan<'a> {
     /// them it holds first: its share of maintenance_work_mem, as PostgreSQL's participants
     /// sort in theirs (`_bt_parallel_scan_and_sort`). None: a modelled table's (small) build.
     spill: Option<(std::path::PathBuf, usize)>,
+    /// The measure is taken from the entries as they go in (`FusedMeasure`), not from
+    /// measure keys of its own: an entry's key values are its measure key (`key_bytes`) when
+    /// every column is ascending with nulls last and none has collation keys
+    /// (`encode_index_value`). The entries come in their keys' order, and within a key in
+    /// their rows', where the measure takes a key's sizes smallest first: so only where
+    /// equal keys have equal sizes (no INCLUDE columns, every type equal-image). Each
+    /// entry's index tuple size follows its key (`Entries::sized`): 2 bytes a row in place
+    /// of a measure key's 40 and its boxed rest.
+    fused: bool,
 }
 
 impl Plan<'_> {
@@ -495,7 +601,9 @@ impl Plan<'_> {
         let checked = !self.check_nulls || !vals.iter().any(Value::is_null);
         g.entries.push_at(at, dkey.len().saturating_sub(8), checked);
         let k = &g.entries.data[at..];
-        super::table::key_bytes_into(&mut g.sort, &vals);
+        if !self.fused {
+            super::table::key_bytes_into(&mut g.sort, &vals);
+        }
         vals.extend(self.ix.include.iter().map(|&i| row[i].clone()));
         let size = relsize::index_tuple(&self.ix_types, &vals, &text);
         if size > crate::exec::rowsize::INDEX_SIZE_MASK {
@@ -504,9 +612,14 @@ impl Plan<'_> {
         if size > crate::exec::rowsize::BT_MAX_ITEM && g.oversized.as_ref().is_none_or(|o| k < o.0.as_slice()) {
             g.oversized = Some((k.to_vec(), size, dkey.to_vec()));
         }
-        g.keys.push(super::vacuum::measure_key(&g.sort, size));
-        if g.sort.len() > 16 {
-            g.long += g.sort.len();
+        if self.fused {
+            // (Under INDEX_SIZE_MASK, checked above: two bytes.)
+            g.entries.data.extend_from_slice(&(size as u16).to_le_bytes());
+        } else {
+            g.keys.push(super::vacuum::measure_key(&g.sort, size));
+            if g.sort.len() > 16 {
+                g.long += g.sort.len();
+            }
         }
         g.vals = vals;
         match stored {
@@ -534,24 +647,26 @@ impl Plan<'_> {
         progress: (&IndexProgress, &AtomicU64),
     ) -> Result<Gathered> {
         let mut g = Gathered::default();
+        g.entries.sized = self.fused;
         loop {
             let next = chunks.lock().unwrap().pop_front();
             let Some((n, mut chunk)) = next else { break };
             let mut part = Part::default();
             let mut i = 0usize;
             while let Some((dkey, bytes)) = chunk.next()? {
-                if i.is_multiple_of(1024) {
+                if i.is_multiple_of(SPILL_CHECK) {
                     if stop.load(Ordering::Relaxed) {
                         return Ok(g);
                     }
                     check()?;
                     if i > 0 {
-                        progress.0.scanned_now(progress.1.fetch_add(1024, Ordering::Relaxed) + 1024);
+                        progress.0.scanned_now(progress.1.fetch_add(SPILL_CHECK as u64, Ordering::Relaxed) + SPILL_CHECK as u64);
                     }
-                    if let Some((dir, budget)) = &self.spill
-                        && g.held() > *budget
-                    {
-                        g.spill(dir)?;
+                    if let Some((dir, budget)) = &self.spill {
+                        match g.held() > *budget {
+                            true => g.spill(dir)?,
+                            false => g.reserve(*budget),
+                        }
                     }
                 }
                 i += 1;
@@ -771,6 +886,10 @@ impl Ddl<'_, '_> {
             sized: kept.is_none(),
             model,
             spill,
+            fused: !model
+                && ix.include.is_empty()
+                && bix.keys.iter().all(|k| relsize::equal_image(&k.ty()))
+                && ix.columns.iter().enumerate().all(|(i, c)| !c.desc && !c.nulls_first && bix.colls.get(i).is_none_or(Option::is_none)),
         };
         let chunks = Mutex::new(chunks);
         let stop = AtomicBool::new(false);
@@ -834,7 +953,7 @@ impl Ddl<'_, '_> {
             // (The serial build's count of the rows it read, as heap_getnext's.)
             crate::exec::pgstat::count_returned(self.ctx, t.oid, tuples as i64);
             progress.scanned_all(tuples as u64);
-            self.put_runs(&start, &sorted, &runs)?;
+            self.put_runs(&start, &sorted, &runs, None)?;
             progress.loaded(tuples as u64);
             return Ok(Some(ParBuilt::Modelled { rows, tuples, keys: model_keys }));
         }
@@ -856,6 +975,19 @@ impl Ddl<'_, '_> {
                 live
             }
         };
+        if plan.fused {
+            let tuples = sorted.iter().map(|e| e.ents.len()).sum::<usize>() + runs.iter().map(|r| r.n).sum::<usize>();
+            progress.scanned_all(tuples as u64);
+            let mut measure = FusedMeasure::new(bix, &plan.ix_types);
+            self.put_runs(&start, &sorted, &runs, Some(&mut measure))?;
+            drop((sorted, runs));
+            let (pages, est) = measure.finish();
+            if ix.method == "btree" {
+                crate::exec::sizing::btree_estimated(t.oid, ix.oid, est, &self.ctx.sess.db);
+            }
+            progress.loaded(tuples as u64);
+            return Ok(Some(ParBuilt::Measured(RowMeasure::new(rows, live, vec![(ix.oid, pages, tuples as f64)]))));
+        }
         let tuples = keys.iter().map(Vec::len).sum::<usize>() + key_runs.iter().map(|r| r.n).sum::<usize>();
         progress.scanned_all(tuples as u64);
         let (pages, est) = match key_runs.is_empty() {
@@ -877,7 +1009,7 @@ impl Ddl<'_, '_> {
         if ix.method == "btree" {
             crate::exec::sizing::btree_estimated(t.oid, ix.oid, est, &self.ctx.sess.db);
         }
-        self.put_runs(&start, &sorted, &runs)?;
+        self.put_runs(&start, &sorted, &runs, None)?;
         progress.loaded(tuples as u64);
         Ok(Some(ParBuilt::Measured(RowMeasure::new(rows, live, vec![(ix.oid, pages, tuples as f64)]))))
     }
@@ -1086,12 +1218,18 @@ impl Ddl<'_, '_> {
     }
 
     /// The participants' sorted entries merged into one run (`Entries::sort`'s order); with
-    /// the runs they spilled, by `merge_entries`.
-    fn put_runs(&self, start: &[u8], sorted: &[Entries], runs: &[RunFile]) -> Result<()> {
+    /// the runs they spilled, by `merge_entries`. Each entry also goes to `measure`, if any.
+    fn put_runs(&self, start: &[u8], sorted: &[Entries], runs: &[RunFile], mut measure: Option<&mut FusedMeasure>) -> Result<()> {
         if !runs.is_empty() {
             let mut srcs = Some(sources(sorted, runs)?);
             return self.ctx.txn.borrow_mut().put_index_run(start, &mut |emit| {
-                merge_entries(srcs.take().expect("one merge"), &mut |k, lens| emit(k, tail_len(lens)))
+                merge_entries(srcs.take().expect("one merge"), &mut |k, lens, size| {
+                    let tail = tail_len(lens);
+                    if let Some(m) = measure.as_deref_mut() {
+                        m.push(&k[8..k.len() - tail], size);
+                    }
+                    emit(k, tail)
+                })
             });
         }
         self.ctx.txn.borrow_mut().put_index_run(start, &mut |emit| {
@@ -1110,7 +1248,11 @@ impl Ddl<'_, '_> {
                 let Some(m) = min else { return Ok(()) };
                 let x = sorted[m].ents[at[m]];
                 at[m] += 1;
-                emit(sorted[m].key(x), tail_len(x.2))?;
+                let (k, tail) = (sorted[m].key(x), tail_len(x.2));
+                if let Some(f) = measure.as_deref_mut() {
+                    f.push(&k[8..k.len() - tail], sorted[m].size(x));
+                }
+                emit(k, tail)?;
             }
         })
     }
