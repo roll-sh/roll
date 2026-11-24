@@ -9236,6 +9236,51 @@ impl apps_control::integrations::SecretSource for FakeIssuer {
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(Some(format!("jwt.roll-apps:{project}:{service}:{env}.{aud}")))
     }
+    async fn verify_issued(&self, token: &str, aud: &str) -> Option<String> {
+        let (sub, for_aud) = token.strip_prefix("jwt.")?.split_once('.')?;
+        (for_aud == aud).then(|| sub.to_string())
+    }
+}
+
+/// Another service of the project calls a gated one (`access.callers`; Cloud Run's invoker): with
+/// roll's token for this environment as `x-roll-caller`, the services it names get in and the app
+/// is told which; another service, another environment, a token for another audience, or none
+/// stays out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn another_service_calls_a_gated_one_with_rolls_token() {
+    let issuer = Arc::new(FakeIssuer::default());
+    let i2 = issuer.clone();
+    let w = world_full(|_| {}, false, move |d| d.secrets = i2).await;
+    let (api, _) = image_service(&w, "api", json!({"port": 80})).await;
+    let (web, _) = image_service(&w, "web", json!({"port": 80})).await;
+    let (other, _) = image_service(&w, "other", json!({"port": 80})).await;
+    let (api, web, other) = (api["id"].as_str().unwrap().to_string(), web["id"].as_str().unwrap().to_string(), other["id"].as_str().unwrap().to_string());
+    let base = format!("/v1/apps/services/{api}/environments/production");
+    let (st, e) = call(&w.api, "PUT", &base, Some(json!({"access": {"callers": ["web"]}}))).await;
+    assert_eq!((st, &e["callers"]), (StatusCode::OK, &json!(["web"])), "{e}");
+    let h = host(&e["url"]);
+    let aud = format!("roll-apps:{api}/production");
+    let token = |svc: &str, env: &str, aud: &str| format!("jwt.roll-apps:{}:{svc}:{env}.{aud}", w.project);
+    let ask = |t: Option<String>| {
+        let (public, h) = (w.public.clone(), h.clone());
+        async move {
+            let mut r = Request::get("/orders").header("host", h.as_str());
+            if let Some(t) = t {
+                r = r.header("x-roll-caller", t);
+            }
+            let resp = public.oneshot(r.body(Body::empty()).unwrap()).await.unwrap();
+            let st = resp.status();
+            (st, serde_json::from_slice::<Value>(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap_or(Value::Null))
+        }
+    };
+    let (st, seen) = ask(Some(token(&web, "production", &aud))).await;
+    assert_eq!((st, seen["visitor"].as_str()), (StatusCode::OK, Some(format!("roll-apps:{}:{web}:production", w.project).as_str())), "{seen}");
+    assert_eq!(ask(Some(token(&other, "production", &aud))).await.0, StatusCode::UNAUTHORIZED, "a service it doesn't name");
+    assert_eq!(ask(Some(token(&web, "production", "roll-apps:svc_else/production"))).await.0, StatusCode::UNAUTHORIZED, "a token for another environment");
+    assert_eq!(ask(None).await.0, StatusCode::UNAUTHORIZED, "nobody else");
+    call(&w.api, "PUT", &base, Some(json!({"access": {"callers": ["web/staging"]}}))).await;
+    assert_eq!(ask(Some(token(&web, "production", &aud))).await.0, StatusCode::UNAUTHORIZED, "its production isn't its staging");
+    assert_eq!(call(&w.api, "PUT", &base, Some(json!({"access": {"callers": ["Bad Name"]}}))).await.0, StatusCode::BAD_REQUEST);
 }
 
 /// Instances' OIDC tokens (Vercel's OIDC federation): with `run.oidc_audiences`, each instance has
