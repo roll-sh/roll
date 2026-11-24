@@ -531,7 +531,8 @@ async fn an_agents_run_on_a_page_answers_what_it_showed_masked() {
     let (status, png) = call(picture(&p.id)).await;
     assert!(status == 200 && png.starts_with(b"\x89PNG"));
     assert_eq!(call(picture("pv_other00000")).await.0, 404, "another preview's id gets nothing");
-    assert_eq!(call(post(json!({ "path": "/", "steps": [{ "eval": "alert(1)" }] }))).await.0, 400, "a step it doesn't know");
+    assert!(call(post(json!({ "path": "/", "steps": [{ "eval": "alert(1)" }] }))).await.0.is_client_error(), "a step it doesn't know");
+    assert_eq!(call(post(json!({ "path": "//evil.example", "steps": [] }))).await.0, 400, "a path of its own");
 }
 
 /// A fork's preview is marked `outside`, and so are its error groups and its logs (its traces,

@@ -152,6 +152,8 @@ type ErrorsRead = HashMap<(String, i64), (i64, Vec<crate::ErrorGroup>)>;
 type ErrorCountsRead = HashMap<(String, i64), (i64, u64)>;
 
 /// Tokens of roll's issuer answered in the last minute: (preview, service, audience) → (when, token).
+/// Agents' runs' pictures, by run: (preview, when, PNG).
+type TriedPictures = HashMap<String, (String, i64, Vec<u8>)>;
 type OidcIssued = HashMap<(String, String, String), (i64, crate::OidcToken)>;
 
 pub struct Engine {
@@ -187,7 +189,7 @@ pub struct Engine {
     /// Agents' runs going (`…/try`), by preview: at most [`shell::TRIES_AT_ONCE`] each.
     tries_going: Mutex<HashMap<String, Arc<std::sync::atomic::AtomicUsize>>>,
     /// Their pictures, by run: (preview, when, PNG), for [`shell::TRY_KEPT_MS`].
-    tries: Mutex<HashMap<String, (String, i64, Vec<u8>)>>,
+    tries: Mutex<TriedPictures>,
     /// Services swapped for a laptop's process (`roll preview swap`): by preview and service, who.
     swaps: Mutex<HashMap<(String, String), String>>,
     /// Each preview's recent spans (`traces.rs`), and what reads an OTLP request into them
