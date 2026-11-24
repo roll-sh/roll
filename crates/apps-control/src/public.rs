@@ -871,10 +871,12 @@ async fn check_access(apps: &Arc<Apps>, service: &str, env: &str, req: &mut Requ
         }
         let name = crate::visit::cookie(env);
         if let Some(t) = take_cookie(req, &name)
-            && apps.visitor(service, env, &t).await.is_some()
+            && let Some(who) = apps.visitor(service, env, &t).await
         {
-            // In: the environment's shared token (a link they also came in by) stays roll's.
+            // In: the environment's shared token (a link they also came in by) stays roll's. The
+            // app is told who (`x-roll-visitor`, set after every client's `x-roll-*` is gone).
             take_cookie(req, &format!("roll_access_{env}"));
+            req.extensions_mut().insert(VisitorIs(who));
             return None;
         }
         if access.token_hash.is_none() {
@@ -999,6 +1001,11 @@ fn sign_in(apps: &Arc<Apps>, service: &str, env: &str, req: &Request) -> Respons
     }
     page(StatusCode::UNAUTHORIZED, "Sign in to open this", &format!("This environment lets in people signed in to roll who can open its project. <a href=\"{}\">Sign in</a>.", escape(&url)))
 }
+
+/// Who a sign-in-gated environment's session is ([`Apps::visitor`]): a provider's visitor's
+/// email, or a roll person's user id, told to the app as `x-roll-visitor`.
+#[derive(Clone)]
+struct VisitorIs(String);
 
 /// A visitor with no session of an environment that lets a provider sign people in
 /// (`access.sso`): a page load goes to roll's sign-in with that provider, which sends them back
@@ -2015,6 +2022,10 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     let roll_headers: Vec<HeaderName> = req.headers().keys().filter(|k| k.as_str().starts_with("x-roll-")).cloned().collect();
     for k in roll_headers {
         req.headers_mut().remove(k);
+    }
+    // Who a sign-in let in (`access.signed_in` or `access.sso`): roll's to say.
+    if let Some(v) = req.extensions().get::<VisitorIs>().and_then(|v| HeaderValue::from_str(&v.0).ok()) {
+        req.headers_mut().insert(HeaderName::from_static("x-roll-visitor"), v);
     }
     let h = req.headers_mut();
     if let Some(host) = host {
