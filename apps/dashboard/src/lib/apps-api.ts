@@ -24,6 +24,14 @@ export interface Sso {
   allow: string[];
 }
 
+/** What an environment's last week says about a setting, and the body that acts on it. */
+export interface Advice {
+  kind: "memory" | "cpu" | "max_instances" | "min_instances";
+  message: string;
+  set: EnvironmentPut;
+  saving_usd_month?: number;
+}
+
 /** What a service would cost at most (`POST /v1/apps/quote`), in US dollars at roll's prices. */
 export interface Quote {
   instance_hour: number;
@@ -1774,6 +1782,7 @@ export const appsApi = {
     return data as Deployment;
   },
   metrics: (id: string, e: string, minutes = 60) => call<Metrics>("GET", `${env(id, e)}/metrics${qs({ minutes })}`),
+  advice: (id: string, e: string) => call<{ days: number; minutes: number; advice: Advice[] }>("GET", `${env(id, e)}/advice`),
   /** Errors and latency by route over the last `minutes` (5–60). */
   routes: (id: string, e: string, minutes = 60) => call<RouteStats>("GET", `${env(id, e)}/routes${qs({ minutes })}`),
   analytics: (id: string, e: string, minutes = 1440) => call<Analytics>("GET", `${env(id, e)}/analytics${qs({ minutes })}`),

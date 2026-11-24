@@ -1054,15 +1054,28 @@ function ChecksHeading({ p }: { p: Preview }) {
 }
 
 /** Another page's checks (the first page's, read on it too), with what's new against main's. */
+/** A state's slowest step against main's, when it's slower by a noticeable margin (more than
+ * 200 ms to the next paint, INP's "good", and half again main's). */
+export function stepSlower(now: number | null | undefined, main: number | null | undefined): string | null {
+  if (now == null || now <= 200 || (main != null && now < main * 1.5 + 50)) return null;
+  return main != null ? `Its slowest step takes ${now} ms to paint, ${main} ms on main.` : `Its slowest step takes ${now} ms to paint.`;
+}
+
 function PageChecks({ page, branch }: { page: PageCheck; branch: string }) {
   const new_ = (n: number | null | undefined) => (n == null ? "" : n === 0 ? " (none new)" : ` (${n} new)`);
   const a11y = page.a11y ? a11yWords(page.a11y) : [];
   const seo = page.a11y?.seo ? seoWords(page.a11y.seo) : [];
   const broken = page.links?.broken ?? [];
-  if (!page.step && !a11y.length && !seo.length && !broken.length && !page.against?.text?.added_n && !page.against?.text?.removed_n) return null;
+  const slow = stepSlower(page.step_ms, page.against?.step_ms);
+  if (!page.step && !slow && !a11y.length && !seo.length && !broken.length && !page.against?.text?.added_n && !page.against?.text?.removed_n) return null;
   return (
     <div className="mb-1.5 space-y-0.5 text-[11.5px]">
       {page.step && <p className="break-words text-danger">Its steps stopped at {page.step}: taken as it was then.</p>}
+      {slow && (
+        <p className="text-soft" title="Its slowest click or typing, to the next paint (Interaction to Next Paint, in roll's browser)">
+          {slow}
+        </p>
+      )}
       {broken.length > 0 && (
         <p className="break-words text-danger">
           {broken.length} broken {broken.length === 1 ? "link" : "links"}: <span className="font-mono text-[11px]">{broken.map((b) => `${b.path} ${b.status || "no answer"}`).join(", ")}</span>
