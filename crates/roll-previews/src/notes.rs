@@ -255,9 +255,9 @@ mod tests {
         assert_eq!(parse("**Feedback on the preview** · [`/x`](u)\n\n"), None, "no note");
     }
 
-    /// How the reviewer saw the page, from the note's own words: their viewport, and their
-    /// clicks and keys after their last page change (the last 10), never typing or a choice,
-    /// nor a selector roll's checks refuse; a viewport out of bounds is none.
+    /// How the reviewer saw the page, from the note's own words: their viewport, their browser's
+    /// engine, and their clicks and keys after their last page change (the last 10), never typing
+    /// or a choice, nor a selector roll's checks refuse; a viewport out of bounds is none.
     #[test]
     fn a_note_says_how_its_reviewer_saw_the_page() {
         use crate::settings::Step;
@@ -265,7 +265,13 @@ mod tests {
         let seen = super::Seen::of(body);
         assert_eq!((seen.width, seen.height), (Some(390), Some(844)));
         assert_eq!(seen.steps, [Step::Click("li:nth-of-type(2) > button".into()), Step::Click("input.gift".into()), Step::Press("Escape".into())], "only what came after the page change");
-        assert_eq!(seen.label().as_deref(), Some("390x844, after 3 steps"));
+        assert_eq!(seen.browser.as_deref(), Some("webkit-phone"), "every browser on iOS is WebKit at a phone's size");
+        assert_eq!(seen.label().as_deref(), Some("WebKit, 390x844, after 3 steps"));
+        let engine = |sub: &str| super::Seen::of(&format!("**Feedback on the preview** · `/`\n\nx\n\n<sub>{sub}</sub>")).browser;
+        assert_eq!(engine("1280x800 viewport · Firefox 133 on Windows"), Some("firefox".into()));
+        assert_eq!(engine("1280x800 viewport · Safari 18 on macOS"), Some("webkit".into()));
+        assert_eq!(engine("390x844 viewport · Chrome 131 on iOS"), Some("webkit-phone".into()), "Chrome on iOS is WebKit");
+        assert_eq!(engine("1280x800 viewport · Chrome 131 on macOS"), None, "Chromium's: roll's own run");
         assert_eq!(super::Seen::of("**Feedback on the preview** · `/`\n\nx\n\n<sub>99999x1 viewport</sub>"), super::Seen::default(), "a viewport out of bounds is none");
     }
 
