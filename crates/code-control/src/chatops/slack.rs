@@ -692,7 +692,7 @@ impl StepKind for SlackStep {
                 let f = Follow { machine, thread, channel, thread_ts, ts: c.ts, once: false };
                 follow::step(ctx, &SlackSurface { client, token }, &install, &f).await
             }
-            Kind::Note => note_step(ctx, &client, &token, &install, c.channel.unwrap_or_default(), &ev).await,
+            Kind::Note => note_step(ctx, client, &token, &install, c.channel.unwrap_or_default(), &ev).await,
             Kind::Notify => {
                 let (machine, thread) = follow::target(ctx, c.machine, c.thread);
                 let to = c.to.unwrap_or_default();
