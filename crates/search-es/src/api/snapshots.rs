@@ -1284,7 +1284,17 @@ const STATES: &[&str] = &["IN_PROGRESS", "SUCCESS", "FAILED", "PARTIAL", "INCOMP
 /// `GET _snapshot/{repository}/{snapshot}`.
 pub async fn get(ctx: &Ctx<'_>) -> EsResult<Reply> {
     ctx.validate_timeouts()?;
-    let repos = match_repositories(&ctx.state().metadata, &ctx.list_param("repository").unwrap_or_default())?;
+    // OpenSearch's `GetSnapshotsRequest` names one repository, taken literally (checked on
+    // OpenSearch 3.9.0: `_all`, `a,b` and `*` are each `[...] missing`).
+    let repos = if ctx.cluster.dialect == crate::Dialect::OpenSearch {
+        let name = ctx.path_param("repository").unwrap_or_default();
+        if !ctx.state().metadata.repositories.contains_key(name) {
+            return Err(repository_missing(name));
+        }
+        vec![name.to_string()]
+    } else {
+        match_repositories(&ctx.state().metadata, &ctx.list_param("repository").unwrap_or_default())?
+    };
     // A bucket's snapshots may come from other clusters: its data is read first. One that can't
     // be read fails the request, as on Elasticsearch 9.5.5 (whose response has no per-repository
     // failures).

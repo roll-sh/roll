@@ -531,9 +531,12 @@ allowlist (a preview's branch included); change it like any setting.
   (`Bucket::contents`): someone else's repository there (an `index.latest` that isn't roll's;
   without one, root `snap-`/`meta-` blobs, `index-0`, an `index-N` that isn't gzip, or a key
   under `indices/` of a shape roll doesn't write) refuses registration, reads, writes,
-  `_verify` and `_analyze`; `index.latest` is written only at the version read
-  (`put_if`), so another writer's is never overwritten; `_cleanup` deletes, and aborts uploads
-  of, only keys of roll's own shapes, nothing without repository data. A restore creates each index from Elasticsearch's index
+  `_verify` and `_analyze` (the scan of `indices/`, and of uploads in parts, stops at the first
+  foreign key or after 10,000 of roll's); `index-N` is the commit and `index.latest` is written
+  after it only at the version read (`put_if`: another writer's is never overwritten, and roll's
+  `index-N` goes again; a failed write is a warning); a failed snapshot deletes its uploads
+  only when the data shows it isn't recorded; `_cleanup` deletes, and aborts uploads of, only
+  keys of roll's own shapes, nothing without repository data. A restore creates each index from Elasticsearch's index
   metadata as `PUT <index>` would (no templates), then a task reads each shard's Lucene files
   through `search-lucene` on a blocking thread (ranged reads in 8 MiB windows across a file's
   `.partN` blobs, throttled like any restore; checksums checked as files stream; what is kept

@@ -2279,6 +2279,8 @@ struct MockBucket {
     fail_parts: Arc<std::sync::atomic::AtomicBool>,
     /// Writes of `test-blob-*` objects are acknowledged and dropped (an S3 clone that loses them).
     drop_test_blobs: Arc<std::sync::atomic::AtomicBool>,
+    /// Writes of `index.latest` fail (after the `index-N` they name landed).
+    fail_latest: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// A multipart upload in a [`MockBucket`]: its key and parts by number.
@@ -2404,6 +2406,7 @@ impl MockBucket {
                 tagged(StatusCode::OK, m.etag("", &body), Vec::new())
             }
             "PUT" if dropped => tagged(StatusCode::OK, m.etag("", &body), Vec::new()),
+            "PUT" if m.fail_latest.load(Relaxed) && key.ends_with("/index.latest") => StatusCode::FORBIDDEN.into_response(),
             "PUT" => {
                 let mut objects = m.objects.lock().unwrap();
                 let current = objects.get(&key).map(|v| m.etag(&key, v));
@@ -3211,6 +3214,14 @@ async fn an_s3_repository_bounds_and_checks_what_a_bucket_holds() {
     expect("snapshot beside a first snapshot", es(reqwest::Method::PUT, "/_snapshot/mid/s?wait_for_completion=true", Some(json!({"indices": "docs"}))).await, 500, "isn't roll's");
     expect("cleanup beside a first snapshot", es(reqwest::Method::POST, "/_snapshot/mid/_cleanup", None).await, 500, "isn't roll's");
     assert!(bucket.keys("mid/").len() == 2, "{:?}", bucket.keys("mid/"));
+    // `index-N` is the commit: an `index.latest` that can't be written after it leaves the
+    // snapshot listed with every file it needs.
+    bucket.fail_latest.store(true, std::sync::atomic::Ordering::Relaxed);
+    let (s, v) = es(reqwest::Method::PUT, "/_snapshot/backup/late?wait_for_completion=true", Some(json!({"indices": "docs"}))).await;
+    bucket.fail_latest.store(false, std::sync::atomic::Ordering::Relaxed);
+    expect("committed without index.latest", (s, v), 200, "SUCCESS");
+    expect("listed", es(reqwest::Method::GET, "/_snapshot/backup/late", None).await, 200, "SUCCESS");
+    expect("restored", e.es(&u, &p, reqwest::Method::POST, "/_snapshot/backup/late/_restore?wait_for_completion=true", Some(json!({"rename_pattern": "docs", "rename_replacement": "late"}))).await, 200, "late");
 
     // A listing that never ends.
     bucket.endless.store(true, std::sync::atomic::Ordering::Relaxed);

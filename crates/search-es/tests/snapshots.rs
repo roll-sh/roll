@@ -783,3 +783,25 @@ async fn a_wiped_elasticsearch_location_is_rolls_again() {
     assert_eq!((s, names(&v)), (200, vec!["s1".to_string()]), "{v:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// OpenSearch lists one repository's snapshots by its exact name (as OpenSearch 3.9.0 does):
+/// `_all`, a list or a pattern is a missing repository.
+#[tokio::test]
+async fn opensearch_lists_one_repository_by_name() {
+    let dir = std::env::temp_dir().join(format!("roll-os-repos-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut cfg = ClusterConfig::new("os-repos");
+    cfg.dialect = search_es::Dialect::OpenSearch;
+    cfg.node_settings.push(("path.repo".into(), dir.display().to_string()));
+    let c = Cluster::open(cfg, Arc::new(MemoryStore::new())).await.unwrap();
+    for r in ["a", "b"] {
+        let (s, v) = call(&c, "PUT", &format!("/_snapshot/{r}"), Some(&format!(r#"{{"type":"fs","settings":{{"location":"{r}"}}}}"#))).await;
+        assert_eq!(s, 200, "{v:?}");
+    }
+    assert_eq!(call(&c, "GET", "/_snapshot/a/_all", None).await.0, 200);
+    for path in ["/_snapshot/_all/_all", "/_snapshot/a,b/_all", "/_snapshot/*/_all"] {
+        let (s, v) = call(&c, "GET", path, None).await;
+        assert_eq!((s, at(&v, "error.type").as_str()), (404, Some("repository_missing_exception")), "{path}: {v:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

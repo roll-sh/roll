@@ -2164,13 +2164,20 @@ the rest are skipped by the tests' own prerequisites.
   (`<base_path>/roll/`), so Elasticsearch can't read roll's snapshots (roll reads Elasticsearch's:
   below). Someone else's repository under that prefix (an `index.latest` that isn't a decimal
   generation; without one, `snap-` or `meta-` blobs at its root, an `index-0`, a newest
-  `index-N` that isn't roll's gzip, or anything under `indices/` roll doesn't name so, such as
-  the shard files of Elasticsearch's first snapshot before it's finalized) is never read or
-  written: `PUT` with `verify` refuses to register the repository, and reads, snapshots,
-  `_verify`, `_analyze` and `_cleanup` answer 500 `repository_exception` (so does listing
-  snapshots across repositories that include it, as Elasticsearch fails such a listing).
-  `index.latest` is only ever replaced at the version roll read, so one someone else writes
-  meanwhile fails the snapshot as a concurrent modification instead of being overwritten;
+  `index-N` that isn't roll's gzip, or anything under `indices/` roll doesn't name so, finished
+  or still uploading in parts, such as the shard files of Elasticsearch's first snapshot before
+  it's finalized; the scan stops at the first such key, or after 10,000 of roll's own) is never
+  read or written: `PUT` with `verify` refuses to register the repository, and reads,
+  snapshots, `_verify`, `_analyze` and `_cleanup` answer 500 `repository_exception` (so does
+  listing snapshots across repositories that include it, as Elasticsearch fails such a
+  listing; the OpenSearch dialect lists one repository named exactly, as OpenSearch does, so
+  `_all`, a list or a pattern is 404 `repository_missing_exception`). Writing `index-N` commits
+  a snapshot: when `index.latest` can't be written after it, the snapshot stays (readers find
+  it past `index.latest`) and the request answers with a warning, as Elasticsearch only logs
+  it. `index.latest` is only ever replaced at the version roll read, so one someone else writes
+  meanwhile takes roll's `index-N` back out and fails the snapshot as a concurrent modification
+  instead of being overwritten; a snapshot that fails deletes what it uploaded only once the
+  repository data shows it isn't there;
   `_cleanup` deletes what no snapshot references, and only objects of the names roll writes
   (`index-N` from 1, `tests-<uuid>`, its shard files and chunks under `indices/`; nothing when
   the bucket holds no repository data), and aborts only its own dangling uploads,

@@ -385,8 +385,20 @@ impl Client {
 
     /// Every blob under `prefix`, as `(key, size)`, bounded as [`crate::s3::Client::list`]'s.
     pub async fn list(&self, prefix: &str) -> Result<Vec<(String, u64)>, Error> {
-        const PAGE_MAX: usize = 8 << 20;
         let mut out = Vec::new();
+        self.list_while(prefix, &mut |k, size| {
+            out.push((k.to_string(), size));
+            true
+        })
+        .await?;
+        Ok(out)
+    }
+
+    /// Every object under `prefix` in key order, handed to `f` until it answers `false`;
+    /// whether it did. Bounded as [`Self::list`] is.
+    pub async fn list_while(&self, prefix: &str, f: &mut (dyn FnMut(&str, u64) -> bool + Send)) -> Result<bool, Error> {
+        const PAGE_MAX: usize = 8 << 20;
+        let mut count = 0usize;
         let mut key_bytes = 0usize;
         let mut marker = String::new();
         for _ in 0..LIST_PAGES_MAX {
@@ -405,16 +417,19 @@ impl Client {
                 let Some(name) = elements(item, "Name").next().map(xml_unescape) else { continue };
                 let size = elements(item, "Content-Length").next().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
                 key_bytes += name.len();
-                if out.len() >= LIST_ENTRIES_MAX || key_bytes > LIST_KEY_BYTES_MAX {
+                if count >= LIST_ENTRIES_MAX || key_bytes > LIST_KEY_BYTES_MAX {
                     return Err(err("TooLarge", format!("the listing of [{prefix}] holds more than [{LIST_ENTRIES_MAX}] objects or [{LIST_KEY_BYTES_MAX}] bytes of keys")));
                 }
                 if name.starts_with(prefix) {
-                    out.push((name, size));
+                    count += 1;
+                    if !f(&name, size) {
+                        return Ok(true);
+                    }
                 }
             }
             let next = elements(&page, "NextMarker").next().map(xml_unescape).unwrap_or_default();
             if next.is_empty() || next == marker {
-                return Ok(out);
+                return Ok(false);
             }
             marker = next;
         }

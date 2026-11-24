@@ -75,6 +75,12 @@ impl Store {
         each!(self, c => c.list(prefix).await)
     }
 
+    /// Every object under `prefix` in key order, handed to `f` until it answers `false`;
+    /// whether it did. Bounded as [`Store::list`] is.
+    pub async fn list_while(&self, prefix: &str, f: &mut (dyn FnMut(&str, u64) -> bool + Send)) -> Result<bool, Error> {
+        each!(self, c => c.list_while(prefix, f).await)
+    }
+
     /// Uploads in parts in progress under `prefix` (S3 only: the others list none).
     pub async fn list_uploads(&self, prefix: &str, max: usize) -> Result<Vec<(String, String)>, Error> {
         match self {

@@ -329,8 +329,20 @@ impl Client {
 
     /// Every object under `prefix`, as `(key, size)`, bounded as [`crate::s3::Client::list`]'s.
     pub async fn list(&self, prefix: &str) -> Result<Vec<(String, u64)>, Error> {
-        const PAGE_MAX: usize = 4 << 20;
         let mut out = Vec::new();
+        self.list_while(prefix, &mut |k, size| {
+            out.push((k.to_string(), size));
+            true
+        })
+        .await?;
+        Ok(out)
+    }
+
+    /// Every object under `prefix` in key order, handed to `f` until it answers `false`;
+    /// whether it did. Bounded as [`Self::list`] is.
+    pub async fn list_while(&self, prefix: &str, f: &mut (dyn FnMut(&str, u64) -> bool + Send)) -> Result<bool, Error> {
+        const PAGE_MAX: usize = 4 << 20;
+        let mut count = 0usize;
         let mut key_bytes = 0usize;
         let mut token: Option<String> = None;
         for _ in 0..LIST_PAGES_MAX {
@@ -352,17 +364,20 @@ impl Client {
                     _ => 0,
                 };
                 key_bytes += name.len();
-                if out.len() >= LIST_ENTRIES_MAX || key_bytes > LIST_KEY_BYTES_MAX {
+                if count >= LIST_ENTRIES_MAX || key_bytes > LIST_KEY_BYTES_MAX {
                     return Err(err("TooLarge", format!("the listing of [{prefix}] holds more than [{LIST_ENTRIES_MAX}] objects or [{LIST_KEY_BYTES_MAX}] bytes of keys")));
                 }
                 // A server answering more than was asked for is ignored past the prefix.
                 if name.starts_with(prefix) {
-                    out.push((name.to_string(), size));
+                    count += 1;
+                    if !f(name, size) {
+                        return Ok(true);
+                    }
                 }
             }
             let next = v.get("nextPageToken").and_then(serde_json::Value::as_str).filter(|t| !t.is_empty()).map(str::to_string);
             if next.is_none() || next == token {
-                return Ok(out);
+                return Ok(false);
             }
             token = next;
         }

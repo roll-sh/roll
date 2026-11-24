@@ -421,8 +421,20 @@ impl Client {
     /// are, so pages, objects and the bytes of their keys are bounded ([`LIST_PAGES_MAX`],
     /// [`LIST_ENTRIES_MAX`], [`LIST_KEY_BYTES_MAX`]): past one, the listing fails.
     pub async fn list(&self, prefix: &str) -> Result<Vec<(String, u64)>, Error> {
-        const PAGE_MAX: usize = 4 << 20;
         let mut out = Vec::new();
+        self.list_while(prefix, &mut |k, size| {
+            out.push((k.to_string(), size));
+            true
+        })
+        .await?;
+        Ok(out)
+    }
+
+    /// Every object under `prefix` in key order, handed to `f` until it answers `false`;
+    /// whether it did. Bounded as [`Self::list`] is.
+    pub async fn list_while(&self, prefix: &str, f: &mut (dyn FnMut(&str, u64) -> bool + Send)) -> Result<bool, Error> {
+        const PAGE_MAX: usize = 4 << 20;
+        let mut count = 0usize;
         let mut key_bytes = 0usize;
         let mut token: Option<String> = None;
         for _ in 0..LIST_PAGES_MAX {
@@ -440,15 +452,18 @@ impl Client {
                 let key = elements(item, "Key").next().map(xml_unescape).unwrap_or_default();
                 let size = elements(item, "Size").next().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
                 key_bytes += key.len();
-                if out.len() >= LIST_ENTRIES_MAX || key_bytes > LIST_KEY_BYTES_MAX {
+                if count >= LIST_ENTRIES_MAX || key_bytes > LIST_KEY_BYTES_MAX {
                     return Err(err("TooLarge", format!("the listing of [{prefix}] holds more than [{LIST_ENTRIES_MAX}] objects or [{LIST_KEY_BYTES_MAX}] bytes of keys")));
                 }
-                out.push((key, size));
+                count += 1;
+                if !f(&key, size) {
+                    return Ok(true);
+                }
             }
             let truncated = elements(&page, "IsTruncated").next().is_some_and(|t| t.trim() == "true");
             token = elements(&page, "NextContinuationToken").next().map(xml_unescape);
             if !truncated || token.is_none() {
-                return Ok(out);
+                return Ok(false);
             }
         }
         Err(err("TooLarge", format!("the listing of [{prefix}] is more than [{LIST_PAGES_MAX}] pages")))
