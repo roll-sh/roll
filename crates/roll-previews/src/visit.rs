@@ -131,7 +131,7 @@ mod tests {
         }
         /// Ada's note on `/hello`, as roll code names the person who posted it.
         async fn feedback(&self, _: &str) -> anyhow::Result<Vec<crate::notes::Note>> {
-            Ok(vec![crate::notes::Note { id: "rev_1".into(), path: "/hello".into(), selector: "h1".into(), note: "bigger".into(), by: "ada".into(), at: 1, replies: Vec::new(), crop: false, crop_as: None, seen: Default::default() }])
+            Ok(vec![crate::notes::Note { id: "rev_1".into(), path: "/hello".into(), selector: "h1".into(), note: "bigger".into(), by: "ada".into(), at: 1, replies: Vec::new(), crop: false, crop_as: None, seen: Default::default(), outside: false }])
         }
         async fn report(&self, _: &Preview, _: &Settings) {}
         async fn forget(&self, _: &Preview, _: Option<&str>) {}
@@ -356,7 +356,9 @@ mod tests {
         visit(link, "text/html", None).await;
         assert_eq!(opened("a share link opened it"), 1, "once per link per day");
         let shared = cookie.split(';').next().unwrap().to_string();
-        assert_eq!(visit("/hello", "application/json", Some(&shared)).await.0, 200);
+        let (status, _, _, body) = visit("/hello", "application/json", Some(&shared)).await;
+        assert_eq!(status, 200);
+        assert!(body.contains("service saw /hello") && !body.contains("roll_share_"), "the link's cookie never reaches the app (a fork's code could send it out): {body}");
         let (secret, _) = store.rotate_bypass(&project).unwrap();
         let bypass = |path: &str| Request::get(path).header(header::HOST, host).header(crate::runtime::BYPASS_HEADER, &secret).body(axum::body::Body::empty()).unwrap();
         let before = store.activity(&id).unwrap().len();

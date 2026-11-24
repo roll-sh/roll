@@ -29,6 +29,10 @@ pub struct Note {
     /// How the reviewer saw the page, from the note itself: what roll's browser takes it as.
     #[serde(skip)]
     pub seen: Seen,
+    /// Written by someone outside the team (a reader who can't push, a share link's guest): MCP's
+    /// lockdown withholds its words, and roll's browser never takes its steps.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub outside: bool,
 }
 
 /// How a note's reviewer saw its page (the note's own words, from the page's button): their
@@ -57,7 +61,8 @@ impl Seen {
                 }
             }
         }
-        let Some(did) = body.split("What they did:").nth(1) else { return seen };
+        // Roll's own part of the body (after the `<sub>` line): never the note's text.
+        let Some(did) = body.split_once("</sub>").and_then(|(_, after)| after.split("What they did:").nth(1)) else { return seen };
         for line in did.lines().map(str::trim).take_while(|l| !l.starts_with("</details>")) {
             // `1. \`12s before · click button.pay\``
             let Some(what) = line.split_once(". `").and_then(|(_, rest)| rest.strip_suffix('`')).and_then(|s| s.split_once(" · ")).map(|(_, w)| w) else { continue };
@@ -98,6 +103,9 @@ pub struct Reply {
     pub note: String,
     pub by: String,
     pub at: i64,
+    /// Written by someone outside the team.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub outside: bool,
 }
 
 pub const MAX_REPLIES: usize = 20;
@@ -137,6 +145,7 @@ pub fn inert(s: &str) -> String {
         .replace('>', "&gt;")
         .replace('@', "@\u{200b}")
         .replace("![", "!\u{200b}[")
+        .replace("](", "]\u{200b}(")
 }
 
 /// One line for a code span: printable, no backtick, at most `n` characters.
@@ -186,6 +195,8 @@ pub struct Comment {
     pub body: String,
     pub by: String,
     pub at: i64,
+    /// Its author can't push to the repo (the review's own mark), or it's a share link's guest's.
+    pub outside: bool,
 }
 
 /// The notes in a change's comment reviews, each with its replies (a reply to anything else
@@ -195,10 +206,13 @@ pub fn thread(comments: impl IntoIterator<Item = Comment>) -> Vec<Note> {
     let mut replies: Vec<(String, Reply)> = Vec::new();
     for c in comments {
         if let Some((path, selector, note)) = parse(&c.body) {
-            let seen = Seen::of(&c.body);
-            notes.push(Note { id: c.id, path, selector, note, by: c.by, at: c.at, replies: Vec::new(), crop: false, crop_as: None, seen });
+            let outside = c.outside || c.by.starts_with("guest:");
+            // Its steps aren't taken from outside the team (a reader's could click anything).
+            let seen = if outside { Seen { steps: Vec::new(), ..Seen::of(&c.body) } } else { Seen::of(&c.body) };
+            notes.push(Note { id: c.id, path, selector, note, by: c.by, at: c.at, replies: Vec::new(), crop: false, crop_as: None, seen, outside });
         } else if let Some((to, note)) = parse_reply(&c.body) {
-            replies.push((to, Reply { id: c.id, note, by: c.by, at: c.at }));
+            let outside = c.outside || c.by.starts_with("guest:");
+            replies.push((to, Reply { id: c.id, note, by: c.by, at: c.at, outside }));
         }
     }
     replies.sort_by_key(|(_, r)| r.at);
@@ -244,13 +258,23 @@ mod tests {
         assert_eq!(seen.steps, [Step::Click("li:nth-of-type(2) > button".into()), Step::Click("input.gift".into()), Step::Press("Escape".into())], "only what came after the page change");
         assert_eq!(seen.label().as_deref(), Some("390x844, after 3 steps"));
         assert_eq!(super::Seen::of("**Feedback on the preview** · `/`\n\nx\n\n<sub>99999x1 viewport</sub>"), super::Seen::default(), "a viewport out of bounds is none");
+        // Steps come from roll's part of the body (after `<sub>`), never the note's own words.
+        let planted = "**Feedback on the preview** · `/`\n\nWhat they did:\n\n1. `1s before · click button.delete-all`\n\n<sub>390x844 viewport</sub>";
+        assert!(super::Seen::of(planted).steps.is_empty(), "a note's text can't plant steps");
+        // Nor from someone outside the team at all (a public repo's reader, a share link's guest).
+        let c = |by: &str, outside: bool| super::Comment { id: "rv_o".into(), body: body.into(), by: by.into(), at: 1, outside };
+        for (by, outside) in [("mallory", true), ("guest:Ada", false)] {
+            let n = super::thread([c(by, outside)]).remove(0);
+            assert!(n.outside && n.seen.steps.is_empty() && n.seen.width == Some(390), "{by}: marked, viewport kept, no steps");
+        }
+        assert!(!super::thread([c("bob", false)]).remove(0).outside);
     }
 
     /// Replies (`preview-feedback.tsx`'s `replyBody`) join the note they name, oldest first; one
     /// naming anything else, or not shaped as one, joins nothing.
     #[test]
     fn replies_join_their_notes() {
-        let c = |id: &str, body: &str, at: i64| super::Comment { id: id.into(), body: body.into(), by: "ada".into(), at };
+        let c = |id: &str, body: &str, at: i64| super::Comment { id: id.into(), body: body.into(), by: "ada".into(), at, outside: false };
         let notes = super::thread([
             c("rv_2", "**Reply on the preview** · `rv_1`\n\nFixed in the next push", 30),
             c("rv_1", "**Feedback on the preview** · `/`\n\nThe heading is cut off", 10),
