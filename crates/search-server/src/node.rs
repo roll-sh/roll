@@ -2174,7 +2174,7 @@ impl Node {
         // Why the cluster refused a derived key, from its one verification: said only once its
         // signature verified (`derived::authenticate`), so it never names a cluster or a key to
         // someone without the secret.
-        let derived_why: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
+        let derived_why: parking_lot::Mutex<Option<String>> = parking_lot::Mutex::new(None);
         let failed = || {
             let e = match &presented {
                 Presented::None => unauthorized(format!("missing authentication credentials for REST request [{}]", req.uri)),
@@ -2186,7 +2186,7 @@ impl Node {
                 Presented::Basic { user, .. } => unauthorized(format!("unable to authenticate user [{user}] for REST request [{}]", req.uri)),
                 Presented::Bearer(_) => unauthorized(ANONYMOUS_REFUSED.into()).with_meta("additional_unsuccessful_credentials", "oauth2 token: invalid token"),
                 Presented::Derived(_) => unauthorized(ANONYMOUS_REFUSED.into())
-                    .with_meta("additional_unsuccessful_credentials", derived_why.borrow().clone().unwrap_or_else(|| "API key: derived key refused".into())),
+                    .with_meta("additional_unsuccessful_credentials", derived_why.lock().clone().unwrap_or_else(|| "API key: derived key refused".into())),
             };
             reject(e)
         };
@@ -2217,7 +2217,7 @@ impl Node {
                     Ok(p) => Some(p),
                     Err(e) => {
                         let why = e.meta().iter().find(|(k, _)| k == "additional_unsuccessful_credentials").and_then(|(_, v)| v.as_str()).map(str::to_string);
-                        *derived_why.borrow_mut() = why;
+                        *derived_why.lock() = why;
                         None
                     }
                 },
