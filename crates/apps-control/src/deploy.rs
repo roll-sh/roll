@@ -191,7 +191,7 @@ impl Apps {
         }
         let (sid, e, k) = (service.to_string(), env.to_string(), key.map(str::to_string));
         let ours = d.upload.clone().filter(|_| key.is_some());
-        if no_traffic && (svc.run.kind != RunType::Web || svc.run.volume.is_some()) {
+        if no_traffic && (svc.run.kind != RunType::Web || svc.run.one_writer()) {
             return Err(Error::BadRequest("no_traffic is for a web service without a volume (its deployment runs next to the live one)".into()));
         }
         let dep = self.db(move |s| s.create_deployment(&sid, &e, d, "", k.as_deref())).await?;
@@ -459,7 +459,7 @@ impl Apps {
         }
         let (sid, e) = (service.to_string(), env.to_string());
         let (svc, row) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?))).await?;
-        if old.run.kind != RunType::Web || old.run.volume.is_some() {
+        if old.run.kind != RunType::Web || old.run.one_writer() {
             return Err(Error::BadRequest("a view of a deployment is a web service's without a volume (it runs next to the live one)".into()));
         }
         if variables.is_empty() || variables.len() > 50 {
@@ -574,7 +574,7 @@ impl Apps {
     fn deployment_url(&self, svc: &crate::store::ServiceRow, row: &crate::store::EnvRow, d: &Deployment) -> Option<String> {
         // The environment's own run settings (its overrides), as `deployment_template` reads them.
         let run = svc.for_env(row).map_or_else(|_| svc.run.clone(), |s| s.run);
-        let serves = run.public && !run.tcp && !run.udp && d.image.is_some() && d.pruned_at.is_none() && d.status != DeployStatus::Removed && d.run.kind == RunType::Web && d.run.volume.is_none();
+        let serves = run.public && !run.tcp && !run.udp && d.image.is_some() && d.pruned_at.is_none() && d.status != DeployStatus::Removed && d.run.kind == RunType::Web && !d.run.one_writer();
         let waiting = row.approvals > 0 && d.status == DeployStatus::Ready;
         (serves && !waiting).then(|| self.url(&format!("{}--{}", d.id.trim_start_matches("dep_"), row.slug)))
     }
@@ -674,7 +674,7 @@ impl Apps {
             return Ok(false);
         }
         let run = svc.for_env(&row).map(|s| s.run).unwrap_or(svc.run);
-        match run.kind == RunType::Web && run.volume.is_none() {
+        match run.kind == RunType::Web && !run.one_writer() {
             true => Ok(true),
             false => Err(Error::Conflict(format!("{env}'s deploys need {} approval(s) before they go live, and this service's can't wait beside the live one for them", row.approvals))),
         }
@@ -3763,21 +3763,21 @@ pub(crate) enum Held {
 pub(crate) fn hold_of(svc: &crate::store::ServiceRow, e: &crate::store::EnvRow) -> Held {
     // A freeze holds as a person's hold does, saying why.
     if let Some(f) = e.freeze.as_ref().filter(|f| f.on(code_sql::now_ms())) {
-        return match svc.run.kind == RunType::Web && svc.run.volume.is_none() {
+        return match svc.run.kind == RunType::Web && !svc.run.one_writer() {
             true => Held::Ready,
             false => Held::Skip(format!("{}, and this service's can't wait beside the live one", f.says())),
         };
     }
     // Approvals: what automation builds waits at ready for them.
     if e.approvals > 0 {
-        return match svc.run.kind == RunType::Web && svc.run.volume.is_none() {
+        return match svc.run.kind == RunType::Web && !svc.run.one_writer() {
             true => Held::Ready,
             false => Held::Skip(format!("deploys need {} approval(s), and this service's can't wait beside the live one for them", e.approvals)),
         };
     }
     match e.held_by.as_deref() {
         None => Held::No,
-        Some(MANUAL_HOLD) if svc.run.kind == RunType::Web && svc.run.volume.is_none() => Held::Ready,
+        Some(MANUAL_HOLD) if svc.run.kind == RunType::Web && !svc.run.one_writer() => Held::Ready,
         Some(MANUAL_HOLD) => Held::Skip("deploys are held, and this service's can't wait beside the live one: deploy it by hand".into()),
         Some(r) => Held::Skip(format!("deploys are held after the rollback {r}")),
     }

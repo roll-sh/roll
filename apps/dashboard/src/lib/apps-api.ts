@@ -192,7 +192,7 @@ export interface Run {
   suspend_after_s: number;
   sleep_after_s: number;
   /** backups: how often (hours, 0: by hand only) and how many are kept; none: daily, seven. */
-  volume?: { mount: string; size_gb: number; backups?: { every_hours: number; keep: number } };
+  volume?: { mount: string; size_gb: number; /** Every instance mounts it: many instances, overlapping deploys. */ shared?: boolean; backups?: { every_hours: number; keep: number } };
   /** Metric alerts (`alert.*` events), over five minutes; each 0 is off. */
   /** log_match: text its output holds log_count times in five minutes (alert.log). */
   alerts?: { memory_pct: number; error_pct: number; p95_ms: number; capacity_pct?: number; log_match?: string; log_count?: number; cpu_pct?: number; metrics?: MetricAlert[]; /** The last hour against the same hour of the week over four weeks: alert.anomaly. */ anomaly?: boolean; /** One route's 5xx share or p95 over five minutes: alert.route. */ routes?: RouteAlert[] };
