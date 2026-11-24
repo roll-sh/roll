@@ -420,28 +420,75 @@ fn duplicate_in(sorted: &[Entries]) -> Option<&[u8]> {
 
 /// `duplicate_in` over spilled runs too: the entries stream by, the last checked one copied.
 fn duplicate_in_runs(srcs: Vec<Source<'_>>) -> Result<Option<Vec<u8>>> {
-    let (mut last, mut last_tail, mut n) = (Vec::new(), Vec::new(), 0usize);
-    let mut found: Option<(Vec<u8>, Vec<u8>)> = None;
+    let mut d = Dups::default();
     merge_entries(srcs, &mut |k, lens, _| {
-        if lens & CHECKED == 0 {
-            return Ok(());
-        }
-        let (values, tail) = k.split_at(k.len() - tail_len(lens));
-        if n > 0 && last.as_slice() == values {
-            n += 1;
-            if n == 2 && found.as_ref().is_none_or(|f| tail < f.0.as_slice()) {
-                found = Some((tail.to_vec(), last_tail.clone()));
-            }
-        } else {
-            n = 1;
-            last.clear();
-            last.extend_from_slice(values);
-            last_tail.clear();
-            last_tail.extend_from_slice(tail);
-        }
+        d.push(k, lens);
         Ok(())
     })?;
-    Ok(found.map(|f| f.1))
+    Ok(d.first())
+}
+
+/// What the write pass (`Ddl::put_runs`) also looks at in each entry (key, lengths word):
+/// nothing (`()`), or a unique build's duplicates (`Dups`).
+trait Seen {
+    fn push(&mut self, k: &[u8], lens: u32);
+    /// A duplicate was found: the run is given up.
+    fn found(&self) -> bool;
+}
+
+impl Seen for () {
+    fn push(&mut self, _: &[u8], _: u32) {}
+
+    fn found(&self) -> bool {
+        false
+    }
+}
+
+impl Seen for Dups {
+    fn push(&mut self, k: &[u8], lens: u32) {
+        Dups::push(self, k, lens);
+    }
+
+    fn found(&self) -> bool {
+        self.found.is_some()
+    }
+}
+
+/// `duplicate_in`'s duplicate found as merged entries go by (`duplicate_in_runs`, the write
+/// pass: `Ddl::put_runs`): the last checked entry's values and tail copied.
+#[derive(Default)]
+struct Dups {
+    last: Vec<u8>,
+    last_tail: Vec<u8>,
+    n: usize,
+    /// The duplicate found: its second row's tail and its first's.
+    found: Option<(Vec<u8>, Vec<u8>)>,
+}
+
+impl Dups {
+    fn push(&mut self, k: &[u8], lens: u32) {
+        if lens & CHECKED == 0 {
+            return;
+        }
+        let (values, tail) = k.split_at(k.len() - tail_len(lens));
+        if self.n > 0 && self.last.as_slice() == values {
+            self.n += 1;
+            if self.n == 2 && self.found.as_ref().is_none_or(|f| tail < f.0.as_slice()) {
+                self.found = Some((tail.to_vec(), self.last_tail.clone()));
+            }
+        } else {
+            self.n = 1;
+            self.last.clear();
+            self.last.extend_from_slice(values);
+            self.last_tail.clear();
+            self.last_tail.extend_from_slice(tail);
+        }
+    }
+
+    /// The duplicate's first row's tail.
+    fn first(self) -> Option<Vec<u8>> {
+        self.found.map(|f| f.1)
+    }
 }
 
 /// A measure key run's keys, in order; a read error ends them and is kept in `err`.
@@ -939,7 +986,11 @@ impl Ddl<'_, '_> {
             runs.extend(g.runs);
             model_keys.extend(g.model);
         }
-        if ix.unique {
+        // (A fused unique build's duplicates are looked for as its entries are written; first
+        // where an oversized key is reported. A modelled table's build counts the rows it read
+        // before its write, so its duplicate check stays first, as it was.)
+        let fold = ix.unique && oversized.is_none() && plan.fused;
+        if ix.unique && !fold {
             self.unique_check(t, bix, ix, &sorted, &runs)?;
         }
         if let Some((_, n, dkey)) = oversized {
@@ -953,7 +1004,7 @@ impl Ddl<'_, '_> {
             // (The serial build's count of the rows it read, as heap_getnext's.)
             crate::exec::pgstat::count_returned(self.ctx, t.oid, tuples as i64);
             progress.scanned_all(tuples as u64);
-            self.put_runs(&start, &sorted, &runs, None)?;
+            self.put_runs(&start, &sorted, &runs, None, &mut ())?;
             progress.loaded(tuples as u64);
             return Ok(Some(ParBuilt::Modelled { rows, tuples, keys: model_keys }));
         }
@@ -979,7 +1030,18 @@ impl Ddl<'_, '_> {
             let tuples = sorted.iter().map(|e| e.ents.len()).sum::<usize>() + runs.iter().map(|r| r.n).sum::<usize>();
             progress.scanned_all(tuples as u64);
             let mut measure = FusedMeasure::new(bix, &plan.ix_types);
-            self.put_runs(&start, &sorted, &runs, Some(&mut measure))?;
+            let put = match fold {
+                true => {
+                    let mut dups = Dups::default();
+                    let put = self.put_runs(&start, &sorted, &runs, Some(&mut measure), &mut dups);
+                    if let Some(first) = dups.first() {
+                        return Err(self.duplicate_of(t, bix, ix, &first));
+                    }
+                    put
+                }
+                false => self.put_runs(&start, &sorted, &runs, Some(&mut measure), &mut ()),
+            };
+            put?;
             drop((sorted, runs));
             let (pages, est) = measure.finish();
             if ix.method == "btree" {
@@ -1009,7 +1071,7 @@ impl Ddl<'_, '_> {
         if ix.method == "btree" {
             crate::exec::sizing::btree_estimated(t.oid, ix.oid, est, &self.ctx.sess.db);
         }
-        self.put_runs(&start, &sorted, &runs, None)?;
+        self.put_runs(&start, &sorted, &runs, None, &mut ())?;
         progress.loaded(tuples as u64);
         Ok(Some(ParBuilt::Measured(RowMeasure::new(rows, live, vec![(ix.oid, pages, tuples as f64)]))))
     }
@@ -1218,18 +1280,27 @@ impl Ddl<'_, '_> {
     }
 
     /// The participants' sorted entries merged into one run (`Entries::sort`'s order); with
-    /// the runs they spilled, by `merge_entries`. Each entry also goes to `measure`, if any.
-    fn put_runs(&self, start: &[u8], sorted: &[Entries], runs: &[RunFile], mut measure: Option<&mut FusedMeasure>) -> Result<()> {
+    /// the runs they spilled, by `merge_entries`. Each entry also goes to `measure`, if any,
+    /// and to `seen`: a unique build's `Dups`, whose duplicate found gives the run up (an
+    /// error, nothing written), or `()`.
+    fn put_runs<S: Seen>(&self, start: &[u8], sorted: &[Entries], runs: &[RunFile], mut measure: Option<&mut FusedMeasure>, seen: &mut S) -> Result<()> {
+        // (A duplicate ends the run's fill with an error, so the run isn't added.)
+        let given_up = |seen: &S| match seen.found() {
+            true => Err(crate::error::internal("a unique index build's duplicate")),
+            false => Ok(()),
+        };
         if !runs.is_empty() {
             let mut srcs = Some(sources(sorted, runs)?);
             return self.ctx.txn.borrow_mut().put_index_run(start, &mut |emit| {
                 merge_entries(srcs.take().expect("one merge"), &mut |k, lens, size| {
                     let tail = tail_len(lens);
+                    seen.push(k, lens);
                     if let Some(m) = measure.as_deref_mut() {
                         m.push(&k[8..k.len() - tail], size);
                     }
                     emit(k, tail)
-                })
+                })?;
+                given_up(seen)
             });
         }
         self.ctx.txn.borrow_mut().put_index_run(start, &mut |emit| {
@@ -1245,10 +1316,11 @@ impl Ddl<'_, '_> {
                         min = Some(i);
                     }
                 }
-                let Some(m) = min else { return Ok(()) };
+                let Some(m) = min else { return given_up(seen) };
                 let x = sorted[m].ents[at[m]];
                 at[m] += 1;
                 let (k, tail) = (sorted[m].key(x), tail_len(x.2));
+                seen.push(k, x.2);
                 if let Some(f) = measure.as_deref_mut() {
                     f.push(&k[8..k.len() - tail], sorted[m].size(x));
                 }
@@ -1265,13 +1337,24 @@ impl Ddl<'_, '_> {
             false => duplicate_in_runs(sources(sorted, runs)?)?,
         };
         let Some(first) = first else { return Ok(()) };
-        let mut dkey = crate::storage::keys::index_prefix(t.oid, 0);
-        dkey.extend_from_slice(&first);
-        let bytes = self.ctx.txn.borrow().get(&dkey)?;
-        let first = match bytes {
-            Some(b) => super::table::index_values(bix, &crate::exec::scan::decode_table_row(t, &b)?, self)?,
-            None => None,
+        Err(self.duplicate_of(t, bix, ix, &first))
+    }
+
+    /// The unique violation of a duplicate whose first row's data key tail is `first` (or the
+    /// error reading that row).
+    fn duplicate_of(&self, t: &Table, bix: &BoundIndex, ix: &Index, first: &[u8]) -> crate::error::Error {
+        let values = || -> Result<_> {
+            let mut dkey = crate::storage::keys::index_prefix(t.oid, 0);
+            dkey.extend_from_slice(first);
+            let bytes = self.ctx.txn.borrow().get(&dkey)?;
+            Ok(match bytes {
+                Some(b) => super::table::index_values(bix, &crate::exec::scan::decode_table_row(t, &b)?, self)?,
+                None => None,
+            })
         };
-        Err(self.duplicate_key(t, bix, first.as_deref().unwrap_or(&[]), &ix.name))
+        match values() {
+            Ok(first) => self.duplicate_key(t, bix, first.as_deref().unwrap_or(&[]), &ix.name),
+            Err(e) => e,
+        }
     }
 }

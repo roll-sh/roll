@@ -14707,19 +14707,36 @@ state (30 MB) held besides the cache, and query rows as `Value`s.
 (3) The idle session's allocator pages (agent 302's: about 200 KB of 270 KB): not attempted. They
 are pinned by the session's live blocks across about 25 size classes, so a collection gives back
 almost nothing; it needs the session's long-lived data placed apart from its startup garbage.
-(4) The spill path's CPU (302's ideas), and a unique build's separate duplicate pass: the
-duplicate check over its own merge of every entry before the write's merge (in progress as a
-second candidate).
+(4) The spill path's CPU (302's other ideas: cached heads in `merge_entries`, records read in one
+copy).
 (5) Allocator retention after a build or a query (`MIMALLOC_PURGE_DELAY=0`: 202 -> 34 MB after
 pgbench -i; after q10 alone the server holds 444 MB: the 256 MB cache, about 95 MB of live heap
 and about 90 MB freed but not yet given back).
+
+**Kept (`cand/a308-2`, over `cand/a308`): a unique build's duplicates are found in its write
+pass.** A unique parallel build merged all its entries (and read back every spilled run) once to
+look for a duplicate (`duplicate_in`, `duplicate_in_runs`), then again to write them. Where the
+build is fused and no oversized key is reported (that error comes first), the write's merge also
+looks for the duplicate (`Dups`, the same rule: the key whose second row comes first in the
+table's order). One found, the fill ends with an error before the run is added, so nothing is
+written, and the build reports it as before (`duplicate_of`). `put_runs` is generic over what it
+also looks at (`Seen`: `()` or `Dups`): an `Option` checked per entry cost the non-unique builds
++0.35-0.45%. A modelled table's build keeps its check first (it counts the rows it read in
+pg_stat before writing). Plain dist, **n1** (`cand/a308`) -> **n3**, user instructions: CREATE
+UNIQUE INDEX on 1M rows 3.112 -> 2.960 G (-4.9%) at 256 MB and 3.005 / 3.011 -> 2.926 / 2.927
+(-2.7%) at 64 MB, two pairs each; on 3M rows at 64 MB (spilled), 10.905 -> 9.744 (-10.6%), one
+pair. CREATE INDEX level: 4.016 -> 4.015 / 4.017, 3.980 -> 3.980, spilled 12.868 -> 12.886
+(+0.14%). The 256 MB holds read 1.0-1.1 foreign cores, the others 1.8-5.2.
 
 Verification: quick-check with `QC_CHECKED=1` and `QC_TESTS=big_tables` on `c218fd561` (the code of
 `cand/a308`, over `ad12b41b5`): build and Clippy (16 warnings, none new in changed files), 116 tests
 in 7 binaries (`big_tables`' `parallel_index_builds` compares serial, parallel and spill-every-1,024-rows
 builds' answers, pg_class numbers and unique-violation errors), the same with `--profile
 verify-checked`, regress 51,148 / 51,150 with 0 newly differing, isolation 1,647 / 1,648,
-pg_dump_tap 14,609 passed.
+pg_dump_tap 14,609 passed. `cand/a308-2` is both commits rebased (cleanly) onto origin's
+`6b9fcdd49`; its quick-check on `c9585eea2` (the same code): 116 tests in 7 binaries and again
+verify-checked, regress 51,148 / 51,150 with 0 newly differing, isolation 1,647 / 1,648,
+pg_dump_tap 14,609 passed (and on `9e589dc37`, over `ad12b41b5`, the same).
 
 ## Memory, round 1: the footprint table, parallel index builds in maintenance_work_mem (agent 302, 2026-11-23)
 

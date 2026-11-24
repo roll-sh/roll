@@ -316,6 +316,21 @@ are equal in every run.
 | 64 MB, 3M rows (`bulk3m.tsv`: three copies, ids offset; both spill), one pair | CREATE INDEX | 15.027 | 12.866 | -14.4% | 256.1 -> 239.0 |
 | 64 MB, 3M rows | CREATE UNIQUE INDEX | 12.355 | 10.835 | -12.3% | 246.9 -> 237.2 |
 
+`cand/a308-2` (a unique build's duplicates found in its write pass): plain dist **n1** (`cand/a308`)
+-> **n3**, alternating pairs the same way (foreign load 1.0-1.1 cores at 256 MB, 1.8-5.2 else).
+
+| maintenance_work_mem | step | n1 | n3 | Δ |
+|---|---|---|---|---:|
+| 256 MB | CREATE INDEX | 4.016 / 4.016 | 4.015 / 4.017 | 0.0% |
+| 256 MB | CREATE UNIQUE INDEX | 3.112 / 3.112 | 2.960 / 2.960 | -4.9% |
+| 64 MB | CREATE INDEX | 3.980 / 3.980 | 3.980 / 3.980 | 0.0% |
+| 64 MB | CREATE UNIQUE INDEX | 3.005 / 3.011 | 2.926 / 2.927 | -2.7% |
+| 64 MB, 3M rows (spilled), one pair | CREATE INDEX | 12.868 | 12.886 | +0.14% |
+| 64 MB, 3M rows | CREATE UNIQUE INDEX | 10.905 | 9.744 | -10.6% |
+
+A first version (an `Option` of the duplicate check per entry, not a type parameter) cost CREATE
+INDEX +0.45% / +0.35% (4.013-4.015 -> 4.032-4.033, 3.980 -> 3.994).
+
 ### Where the peaks are (`--features heapprof` verify build of `ad12b41b5`)
 
 | cell | peak | live heap at its peak | of it | besides the heap |
