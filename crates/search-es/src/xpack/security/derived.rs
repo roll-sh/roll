@@ -317,9 +317,19 @@ pub fn redacted(k: &Value) -> Option<Value> {
         return None;
     }
     let mut k = k.clone();
-    let d = k.as_object_mut()?.get_mut("metadata")?.as_object_mut()?.get_mut(METADATA)?.as_object_mut()?.get_mut(DERIVE)?.as_object_mut()?;
-    d.insert("secret".into(), Value::from(REDACTED));
+    redact_metadata(k.as_object_mut()?.get_mut("metadata")?);
     Some(k)
+}
+
+/// An API key's `metadata` with its signing secret, if any, replaced by [`REDACTED`] (as the
+/// APIs print it, and the audit log's copy of a create or update).
+pub fn redact_metadata(md: &mut Value) {
+    let slot = md.as_object_mut().and_then(|m| m.get_mut(METADATA)).and_then(Value::as_object_mut).and_then(|b| b.get_mut(DERIVE)).and_then(Value::as_object_mut);
+    if let Some(d) = slot
+        && d.contains_key("secret")
+    {
+        d.insert("secret".into(), Value::from(REDACTED));
+    }
 }
 
 /// An update's `metadata` that sends [`REDACTED`] back keeps the stored key's signing secret.
