@@ -112,6 +112,9 @@ pub struct Visitor {
     /// Google's `hd`: the Workspace domain the account belongs to (none for a consumer account,
     /// whatever its email).
     pub hosted_domain: Option<String>,
+    /// For an organisation's SSO connection (`provider` "sso"): the groups its ID token names
+    /// (`groups`: Okta's, Entra ID's when it sends names), lower case; otherwise none.
+    pub groups: Vec<String>,
 }
 
 /// Where a visitor's sign-in goes (rolld: roll apps). `request` is what the product put in the
@@ -119,6 +122,11 @@ pub struct Visitor {
 #[async_trait::async_trait]
 pub trait VisitGate: Send + Sync {
     async fn admit(&self, request: &str, who: &Visitor) -> std::result::Result<String, String>;
+    /// Whether `request` is one the product made and that's still good (its signature and
+    /// time), checked before a public start costs anything: a throttle or a state row.
+    async fn plausible(&self, _request: &str) -> bool {
+        true
+    }
 }
 
 /// A callback's state row, used up.
@@ -232,12 +240,8 @@ impl Accounts {
         format!("{}/v1/accounts/oauth/{}/callback", self.config.api_url, p.as_str())
     }
 
-    /// Use up a state for the provider named so (`github`, `sso:<id>`).
-    pub(crate) fn take_state_named(&self, provider: &str, state: &str, browser: Option<&str>) -> Result<State> {
-        self.take_state_any(provider, state, &[browser.map(str::to_string), None])
-    }
-
-    /// [`Accounts::take_state_named`], bound to whichever of `browsers` started it.
+    /// Use up a state for the provider named so (`github`, `sso:<id>`), bound to whichever of
+    /// `browsers` (the browser's sign-in and visit cookies) started it.
     pub(crate) fn take_state_any(&self, provider: &str, state: &str, browsers: &[Option<String>; 2]) -> Result<State> {
         let now = self.db.now_ms()?;
         let bad = || Error::BadRequest("the sign-in expired or came from another browser; start again".into(), Some("state"));
@@ -293,7 +297,7 @@ impl Accounts {
         };
         if visit {
             let Some(gate) = self.visit_gate() else { return (Err(Error::NotFound("nothing here takes visitors' sign-ins".into())), back) };
-            let who = Visitor { provider: p.as_str().into(), subject: verified.subject, email: verified.email, login: verified.login, orgs: verified.orgs, hosted_domain: verified.hosted_domain };
+            let who = Visitor { provider: p.as_str().into(), subject: verified.subject, email: verified.email, login: verified.login, orgs: verified.orgs, hosted_domain: verified.hosted_domain, groups: Vec::new() };
             let done = match gate.admit(&st.return_to, &who).await {
                 Ok(to) => Ok(Finished::Visit { to }),
                 Err(why) => Err(Error::Forbidden(why, "visit_denied")),

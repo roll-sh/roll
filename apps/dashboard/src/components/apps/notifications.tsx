@@ -27,6 +27,8 @@ const EVENTS: { value: NotifyEvent; label: string }[] = [
   { value: "scale.out", label: "Scaled out" },
   { value: "scale.in", label: "Scaled in" },
   { value: "instance.crashed", label: "An instance crashed" },
+  { value: "visit.admitted", label: "Someone signed in to a gated environment" },
+  { value: "visit.denied", label: "Someone was turned away from one" },
   { value: "alert.slo", label: "Error budget burning" },
   { value: "alert.log", label: "Log alert" },
   { value: "error.new", label: "New error" },

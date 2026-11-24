@@ -688,6 +688,8 @@ pub struct EnvLive {
     mine: Mutex<std::collections::HashSet<String>>,
     pub log: LogSink,
     pub meter: Mutex<Meter>,
+    /// The minutes of the routes its objective names ([`crate::metrics::RouteMeter`]).
+    pub route_meter: Mutex<crate::metrics::RouteMeter>,
     over_since: Mutex<Option<Instant>>,
     /// A tick is running (the reaper never runs two of one environment at once).
     pub ticking: std::sync::atomic::AtomicBool,
@@ -759,6 +761,7 @@ impl EnvLive {
             mine: Mutex::default(),
             log,
             meter: Mutex::new(Meter::default()),
+            route_meter: Mutex::new(Default::default()),
             over_since: Mutex::new(None),
             ticking: std::sync::atomic::AtomicBool::new(false),
             answering: std::sync::atomic::AtomicBool::new(false),
