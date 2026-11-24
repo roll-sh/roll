@@ -5,6 +5,9 @@
   if (window.__rollFeedback) return;
   window.__rollFeedback = true;
   const TARGET = __ROLL_TARGET__;
+  // The project's flags a reviewer sets for their own view (Vercel's Flags Explorer): kept in a
+  // cookie of this browser's, which roll's proxy turns into the services' `x-roll-flags`.
+  const FLAGS = __ROLL_FLAGS__;
   // What went wrong on the page, sent with a note (the person sees it in roll before posting it):
   // uncaught errors since this script ran, and requests answered 400 or more, earlier ones too
   // (the browser's own resource timings, buffered). Paths only, never a query, each cut short.
@@ -63,7 +66,8 @@ textarea{width:100%;min-height:72px;resize:vertical;padding:8px;border-radius:8p
 </style>
 <div class="box"></div>
 <div class="list" hidden role="list" aria-label="Feedback on this page"></div>
-<div class="bar"><button class="count" type="button" hidden aria-label="Feedback on this page"></button><button class="btn" type="button" aria-label="Leave feedback on this page"><span class="dot"></span>Feedback</button></div>
+<form class="list flags" hidden aria-label="Flags for your view"></form>
+<div class="bar"><button class="count flagbtn" type="button" hidden aria-label="Flags for your view">Flags</button><button class="count" type="button" hidden aria-label="Feedback on this page"></button><button class="btn" type="button" aria-label="Leave feedback on this page"><span class="dot"></span>Feedback</button></div>
 <form class="card" hidden>
   <div class="muted">On <code class="where"></code></div>
   <textarea placeholder="What should change here?" aria-label="Your feedback" required maxlength="4000"></textarea>
@@ -72,6 +76,52 @@ textarea{width:100%;min-height:72px;resize:vertical;padding:8px;border-radius:8p
   const $ = (s) => root.querySelector(s);
   const btn = $(".btn"), form = $("form"), box = $(".box"), note = $("textarea"), where = $(".where"), count = $(".count"), list = $(".list");
   let picking = false, picked = null;
+  // Flags: each a select (the app's own choice, or one of its options); applied for this
+  // browser only, by reloading with the cookie set.
+  const flagBtn = $(".flagbtn"), flagForm = $(".flags");
+  if (Array.isArray(FLAGS) && FLAGS.length) {
+    flagBtn.hidden = false;
+    const now = Object.fromEntries(
+      (document.cookie.split("; ").find((c) => c.startsWith("roll_flags=")) || "roll_flags=")
+        .slice(11)
+        .split("|")
+        .filter(Boolean)
+        .map((p) => p.split(":")),
+    );
+    if (Object.keys(now).length) flagBtn.textContent = `Flags · ${Object.keys(now).length}`;
+    for (const f of FLAGS) {
+      const row = document.createElement("label");
+      row.className = "note";
+      row.style.cssText = "display:flex;gap:8px;align-items:center;justify-content:space-between";
+      const name = document.createElement("code");
+      name.textContent = f.name;
+      const sel = document.createElement("select");
+      sel.name = f.name;
+      sel.style.cssText = "background:#000;color:#ededed;border:1px solid rgba(255,255,255,.14);border-radius:6px;height:24px";
+      for (const v of ["", ...f.options]) {
+        const o = document.createElement("option");
+        o.value = v;
+        o.textContent = v || "the app's own";
+        o.selected = (now[f.name] || "") === v;
+        sel.append(o);
+      }
+      row.append(name, sel);
+      flagForm.append(row);
+    }
+    const apply = document.createElement("div");
+    apply.className = "row";
+    apply.innerHTML = '<button type="submit" class="go">Apply to my view</button>';
+    flagForm.append(apply);
+    flagBtn.addEventListener("click", () => {
+      flagForm.hidden = !flagForm.hidden;
+    });
+    flagForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const pairs = [...flagForm.querySelectorAll("select")].filter((s) => s.value).map((s) => `${s.name}:${s.value}`);
+      document.cookie = pairs.length ? `roll_flags=${pairs.join("|")}; path=/; SameSite=Lax; max-age=2592000` : "roll_flags=; path=/; max-age=0";
+      location.reload();
+    });
+  }
 
   // A short selector a person can read: an id, or the tag, two classes and its place, four levels up.
   const selector = (el) => {
