@@ -1061,7 +1061,7 @@ impl Store {
             }
             x.execute("DELETE FROM search_crawler_sites WHERE owner = ?1 AND status = 'pending' AND created_at < ?2", params![owner, now - PENDING_FOR])?;
             if let Some(v) = x.query_row(&format!("SELECT {VERIFY_COLS} FROM search_crawler_sites WHERE cluster_id = ?1 AND site = ?2"), params![cluster, site], verification_row).optional()? {
-                return Ok(Started::Row(v));
+                return Ok(Started::Row(Box::new(v)));
             }
             let here: i64 = x.query_row("SELECT COUNT(*) FROM search_crawler_sites WHERE cluster_id = ?1 AND status = 'pending'", params![cluster], |r| r.get(0))?;
             if here >= MAX_PENDING_PER_CLUSTER {
@@ -1077,7 +1077,7 @@ impl Store {
                 params![cluster, site, owner, kind, theirs.as_deref().unwrap_or(token), now],
             )?;
             let v = x.query_row(&format!("SELECT {VERIFY_COLS} FROM search_crawler_sites WHERE cluster_id = ?1 AND site = ?2"), params![cluster, site], verification_row)?;
-            Ok(Started::Row(v))
+            Ok(Started::Row(Box::new(v)))
         })?)
     }
 
@@ -1916,7 +1916,7 @@ pub const DEFER_UNTIL: i64 = RECHECK_AFTER + DAY;
 /// What [`Store::start_verification`] did.
 #[derive(Debug)]
 pub enum Started {
-    Row(SiteVerification),
+    Row(Box<SiteVerification>),
     /// Too many pending: the cap, and where it's counted.
     Full(i64, &'static str),
     /// The cluster is deleted or being deleted.
