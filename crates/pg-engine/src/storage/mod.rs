@@ -3384,7 +3384,7 @@ impl Cursor {
                     return None;
                 }
                 let k = pos.key();
-                (*whole || end.is_empty() || k < end.as_slice()).then(|| (k, b.value_ref(pos)))
+                (*whole || end.is_empty() || sst::short_cmp(k, end).is_lt()).then(|| (k, b.value_ref(pos)))
             }
         }
     }
@@ -3417,20 +3417,37 @@ impl Cursor {
         }
     }
 
-    /// Entries of the current block from the head on into `batch`, under their user keys,
-    /// while each is what `Scan::position` would hand out next without looking at another
-    /// source: below `bound` (the other sources' smallest head) and the end, the first entry
-    /// of a key after the last row pushed, a version at or before `ts`, not a deletion, and
-    /// (`resolve`) without out-of-line values. Up to `max`; how many, and the last version.
-    fn run_into(&mut self, ts: u64, bound: Option<&[u8]>, resolve: bool, batch: &mut batch::RowBatch, max: usize) -> (usize, u64) {
+    /// With the head pushed as `batch`'s last row (`push_head`), the cursor still on it: on
+    /// past it, and the entries of the current block after it into `batch`, under their user
+    /// keys, while each is what `Scan::position` would hand out next without looking at
+    /// another source: below `bound` (the other sources' smallest head) and the end, the
+    /// first entry of a key after the last row pushed, a version at or before `ts`, not a
+    /// deletion, and (`resolve`) without out-of-line values. Up to `max`; how many, and the
+    /// last version. `long`: the runs before were long (a run from the head is worth its
+    /// setting up; sources taking turns at every row step on first).
+    fn run_into(&mut self, ts: u64, bound: Option<&[u8]>, resolve: bool, batch: &mut batch::RowBatch, max: usize, long: bool) -> (usize, u64) {
         let Cursor::Level { block: Some(b), pos, end, whole, .. } = self else {
+            self.advance();
             return (0, 0);
         };
-        let (mut n, mut last) = (0, 0);
-        // (Every entry of the block in range and no other source's entry before the block's
-        // end: the rows after one pushed go a run at a time, `Block::run_rows`. With another
-        // source's head (`bound`) the run takes a row or two, as interleaved sources do.)
-        let runs = (*whole || end.is_empty()) && bound.is_none();
+        // (The rows after the head go a run at a time, `Block::run_rows`, up to another
+        // source's head (`bound`, below the end) or, in a block the end falls in, the end;
+        // a row at a time where a run stops.)
+        let stop = match bound {
+            Some(x) => Some(x),
+            None if !*whole && !end.is_empty() => Some(end.as_slice()),
+            None => None,
+        };
+        // (A block of derived values, an index's, goes a row at a time: a run takes none.)
+        let runs = !b.derived();
+        let (mut n, mut last) = match runs && (bound.is_none() || long) {
+            // (From the head as it stands: not decoded again.)
+            true => b.run_rows(pos, ts, max, resolve, batch, stop),
+            false => {
+                b.step(pos);
+                (0, 0)
+            }
+        };
         while n < max && pos.index() < b.len() {
             let k = pos.key();
             if (!*whole && !end.is_empty() && k >= end.as_slice()) || bound.is_some_and(|x| k >= x) || k.len() < 8 {
@@ -3454,7 +3471,7 @@ impl Cursor {
             n += 1;
             last = kts;
             if runs && n < max {
-                let (m, ver) = b.run_rows(pos, ts, max - n, resolve, batch);
+                let (m, ver) = b.run_rows(pos, ts, max - n, resolve, batch, stop);
                 if m > 0 {
                     n += m;
                     last = ver;
@@ -3560,6 +3577,18 @@ impl Cursor {
                 *block = None;
             }
         }
+    }
+}
+
+/// Two of `v`'s elements, mutably (`i` != `j`).
+fn pair_mut<T>(v: &mut [T], i: usize, j: usize) -> (&mut T, &mut T) {
+    assert_ne!(i, j);
+    if i < j {
+        let (a, b) = v.split_at_mut(j);
+        (&mut a[i], &mut b[0])
+    } else {
+        let (a, b) = v.split_at_mut(i);
+        (&mut b[0], &mut a[j])
     }
 }
 
@@ -3710,7 +3739,13 @@ pub struct Scan {
     /// is recorded at its first live key past `dead::MIN_DEAD` of them); None: not looked for.
     dead: Option<(Arc<dead::DeadRanges>, Vec<u8>)>,
     dead_run: u32,
+    /// Whether the merge's sources take turns often enough for `zip` (`ZIP_RUN`): a newer
+    /// version every few dozen rows goes faster as runs of the table's block between them.
+    zip_ok: bool,
 }
+
+/// `Scan::zip` is tried while the rows go fewer than this many at a time from one source.
+const ZIP_RUN: usize = 8;
 
 /// A marked file is written again (`Store::reclaim_dead`) once its dead entries are at least
 /// 1 / `RECLAIM_DEAD` of its entries.
@@ -3826,6 +3861,7 @@ impl Scan {
             rdels: Default::default(),
             dead: None,
             dead_run: 0,
+            zip_ok: true,
         }
     }
 
@@ -3846,6 +3882,7 @@ impl Scan {
             rows: None,
             dead: None,
             dead_run: 0,
+            zip_ok: true,
         }
     }
 
@@ -3914,6 +3951,7 @@ impl Scan {
         self.newer = None;
         self.dead = None;
         self.dead_run = 0;
+        self.zip_ok = true;
         true
     }
 
@@ -4092,26 +4130,99 @@ impl Scan {
             }
             let ulen = k.len().saturating_sub(8);
             // (Two sources or more with a head: their blocks may interleave.)
-            if self.rdels.is_empty() && self.merge.rank.len() > 1 && self.zip(resolve, batch, target - batch.len()) {
+            if self.rdels.is_empty() && self.merge.rank.len() > 1 && self.zip_ok && self.zip(resolve, batch, target - batch.len()) {
                 continue;
             }
             let c = &mut self.merge.sources[i];
             c.push_head(ulen, batch);
-            c.advance();
             // (The rows after it in its block that need no other source: a block at a time;
             // under range deletions a row at a time, each checked.)
             if !self.rdels.is_empty() {
+                c.advance();
                 continue;
             }
             let bound = self.merge.bounded.then_some(self.merge.bound.as_slice());
-            let (n, last) = c.run_into(self.ts, bound, resolve, batch, target - batch.len());
+            let (n, last) = c.run_into(self.ts, bound, resolve, batch, target - batch.len(), !self.zip_ok);
+            self.zip_ok = n < ZIP_RUN;
             if n > 0 {
                 let d = self.decided.get_or_insert_with(Vec::new);
                 d.clear();
                 d.extend_from_slice(batch.last_key().expect("a row"));
                 self.decided_ts = last;
             }
+            // (The other source's head the run stopped at: a newer version or a new key, taken
+            // here.)
+            if self.merge.rank.len() == 2 && batch.len() < target {
+                self.overlay(i, resolve, batch)?;
+            }
         }
+        Ok(())
+    }
+
+    /// With two sources ranked, `i` first, after `i`'s run stopped: the other's head when it
+    /// is what `position` would hand out next, as `position` and `push_head` would take it,
+    /// the versions of its key after it passed on both sides, and the two ranked again. A
+    /// newer version of a row (an UPDATE's in a memtable or an L0 file over the table in L1)
+    /// costs about a row: not three rounds of `position` (the row, the version it replaced,
+    /// the run going on). Anything else (a deletion, a version newer than the snapshot, an
+    /// out-of-line value, range deletions, a dead-range hint looked for) is left to them.
+    fn overlay(&mut self, i: usize, resolve: bool, batch: &mut batch::RowBatch) -> Result<()> {
+        let m = &mut self.merge;
+        if m.cur != Some(i) || m.rank[0] != i || !self.rdels.is_empty() || self.dead.is_some() {
+            return Ok(());
+        }
+        let o = m.rank[1];
+        m.sources[i].fill()?;
+        let (src, oth) = pair_mut(&mut m.sources, i, o);
+        let Some((ho, vo)) = oth.head() else { return Ok(()) };
+        let decided = self.decided.get_or_insert_with(Vec::new);
+        let uk = user_key(ho);
+        if ho.len() < 8 {
+            return Ok(());
+        }
+        // (An older version of the row taken last, as when every row has a newer one: passed.)
+        if uk != decided.as_slice() {
+            let Some(v) = vo else { return Ok(()) };
+            let kts = key_ts(ho);
+            if kts > self.ts
+                || (resolve && toast::has_external(v))
+                || src.head().is_some_and(|(hc, _)| hc < ho)
+                || (!m.end.is_empty() && ho >= m.end.as_slice())
+            {
+                return Ok(());
+            }
+            oth.push_head(uk.len(), batch);
+            decided.clear();
+            decided.extend_from_slice(uk);
+            self.decided_ts = kts;
+            self.skipped = 0;
+        }
+        // (Past the entry taken or passed, and the key's older versions on both sides: no
+        // snapshot of this scan reads them.)
+        oth.advance();
+        for c in [&mut *oth, &mut *src] {
+            c.fill()?;
+            while c.head().is_some_and(|(k, _)| user_key(k) == decided.as_slice()) {
+                c.advance();
+                c.fill()?;
+            }
+        }
+        // (`oth` moved past its head; `src` only when it held the key.)
+        let (a, b) = (src.head().map(|(k, _)| k), oth.head().map(|(k, _)| k));
+        m.rank.clear();
+        m.bound.clear();
+        match (a, b) {
+            (Some(a), Some(b)) => {
+                let (first, second, bk) = if a < b { (i, o, b) } else { (o, i, a) };
+                m.bound.extend_from_slice(bk);
+                m.rank.extend([first, second]);
+            }
+            (Some(_), None) => m.rank.push(i),
+            (None, Some(_)) => m.rank.push(o),
+            (None, None) => {}
+        }
+        m.bounded = m.rank.len() > 1;
+        m.cur = m.rank.first().copied();
         Ok(())
     }
 
@@ -4129,6 +4240,7 @@ impl Scan {
         if !z.moved {
             return false;
         }
+        self.zip_ok = z.rows < ZIP_RUN * z.switches as usize;
         self.merge.cur = None;
         self.decided_ts = z.decided_ts;
         self.skipped = 0;
@@ -5720,7 +5832,29 @@ mod tests {
             }
             assert_eq!(got, expect, "{what}: batches of {max} at {ts}");
         }
+        // Ranges ending inside blocks, batched (a run stops at the end, or at another source's
+        // head before it, whose newer version is taken in place). (None of one 8-byte key and
+        // the next: such a range is a whole relation's to `hot`, kept after a few scans and
+        // trimmed to the gc horizon, which these unpinned snapshots are behind.)
         let keys: Vec<&[u8]> = model.keys().map(|k| k.as_slice()).collect();
+        for (i, m) in [(0, 50), (7, 333), (keys.len() / 3, 97), (keys.len() / 2, 3), (keys.len() / 2, 1000)] {
+            let Some(&start) = keys.get(i) else { continue };
+            let end = keys.get(i + m).map_or(b"\xff".to_vec(), |k| k.to_vec());
+            let want: Vec<_> = expect.iter().filter(|(k, _)| k.as_slice() >= start && k < &end).cloned().collect();
+            for max in [2, 64] {
+                let mut sc = s.scan(start, &end, ts);
+                let (mut b, mut got) = (batch::RowBatch::default(), Vec::new());
+                loop {
+                    b.clear();
+                    sc.fill_batch(&mut b, max).unwrap();
+                    if b.is_empty() {
+                        break;
+                    }
+                    got.extend((0..b.len()).map(|i| (b.get(i).0.to_vec(), b.value_bytes(i))));
+                }
+                assert_eq!(got, want, "{what}: batches of {max} in {start:?}..{end:?} at {ts}");
+            }
+        }
         let got = s.get_versions(&keys, ts).unwrap();
         for (k, g) in keys.iter().zip(got) {
             let want = model_at(&BTreeMap::from([(k.to_vec(), model[*k].clone())]), ts)

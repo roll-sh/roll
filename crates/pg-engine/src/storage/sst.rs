@@ -1887,6 +1887,12 @@ impl Block {
         Block::decode_with(&raw, None, self.rlog).expect("entries of a checked block")
     }
 
+    /// Whether a value of it is derived from its key (an index's entries): `run_rows` takes
+    /// none of those.
+    pub fn derived(&self) -> bool {
+        self.derived
+    }
+
     /// The version every `F_TS` entry has (the block's).
     pub fn version(&self) -> u64 {
         !u64::from_be_bytes(self.ts)
@@ -1894,13 +1900,24 @@ impl Block {
 
     /// The entries after `pos` into `batch` while each is a row (its value stored: not
     /// derived, not a deletion) of a version at or before `ts`, of another user key than the
-    /// row before, and (`resolve`) without out-of-line values; up to `max`. The caller pushed
-    /// `pos`'s entry as `batch`'s last row (under its user key) and knows every entry of the
-    /// block is in range. Each key is the last row's first `shared` bytes and the entry's own
-    /// (less its version, when stored), made in the batch: no `BlockPos` key per entry. `pos`
-    /// ends on the first entry not taken (or past the end). How many it took, and the last
-    /// one's version.
-    pub fn run_rows(&self, pos: &mut BlockPos, ts: u64, max: usize, resolve: bool, batch: &mut super::batch::RowBatch) -> (usize, u64) {
+    /// row before, and (`resolve`) without out-of-line values, whose user key sorts before
+    /// `stop` (another source's head or the scan's end: a key equal to its first bytes stops
+    /// too); up to `max`. The caller pushed `pos`'s entry as `batch`'s last row (under its user
+    /// key) and knows every entry of the block before `stop` is in range. Each key is the last
+    /// row's first `shared` bytes and the entry's own (less its version, when stored), made in
+    /// the batch: no `BlockPos` key per entry. `pos` ends on the first entry not taken (or past
+    /// the end). How many it took, and the last one's version.
+    #[inline]
+    pub fn run_rows(&self, pos: &mut BlockPos, ts: u64, max: usize, resolve: bool, batch: &mut super::batch::RowBatch, stop: Option<&[u8]>) -> (usize, u64) {
+        // (Two loops: without a stop the one runs before it had, which inlines as that one did.)
+        match stop {
+            None => self.run_rows_to::<false>(pos, ts, max, resolve, batch, &[]),
+            Some(s) => self.run_rows_to::<true>(pos, ts, max, resolve, batch, s),
+        }
+    }
+
+    /// `run_rows`, with (`STOP`) or without `stop`.
+    fn run_rows_to<const STOP: bool>(&self, pos: &mut BlockPos, ts: u64, max: usize, resolve: bool, batch: &mut super::batch::RowBatch, stop: &[u8]) -> (usize, u64) {
         let b = &self.data[..];
         let (mut p, mut v) = (pos.next as usize, pos.vnext as usize);
         let mut i = pos.i + 1;
@@ -1911,12 +1928,24 @@ impl Block {
         // (The key being made, when it fits `KEY`: a key's bytes past those it shares with the
         // row before go in as a 16-byte move, the key into the batch as a `KEY`-byte one, each
         // cut back to its length: no copy call per row. Longer keys go the general way.)
-        let mut kb = [0u8; KEY + 16];
+        let mut kb = [0u8; ZK];
         let mut klen = last.len();
         let mut short = klen <= KEY;
         if short {
             kb[..klen].copy_from_slice(last);
         }
+        // (`stop` in a buffer as the keys are, its length, and where the key made last first
+        // differs from it, below it there: a key sharing more than that with the one before is
+        // below `stop` too, so only a key that changes a byte up to there is compared. Not
+        // known, as when the last row's user key begins `stop`: every key is compared.)
+        let mut stop = STOP.then(|| {
+            let s = stop;
+            let mut w = [0u8; ZK];
+            let n = s.len().min(ZK);
+            w[..n].copy_from_slice(&s[..n]);
+            let d = if short { below_at(&kb, &w, klen.min(s.len())) } else { None };
+            (w, s.len(), d.unwrap_or(usize::MAX))
+        });
         let own = self.version() <= ts;
         let mut ver = self.ts;
         let buf = batch.buf_index(&self.data);
@@ -1962,8 +1991,27 @@ impl Block {
                     Some(w) if ukn <= 16 => kb[shared..shared + 16].copy_from_slice(w),
                     _ => kb[shared..nk].copy_from_slice(suffix),
                 }
+                // (Sharing up to `d` exactly, the key's byte there decides, unless equal.)
+                if STOP
+                    && let Some((w, sl, d)) = &mut stop
+                    && shared <= *d
+                    && !(shared == *d && kb[shared] < w[shared])
+                {
+                    match below_at(&kb, w, nk.min(*sl)) {
+                        Some(i) => *d = i,
+                        None => {
+                            p = at;
+                            break;
+                        }
+                    }
+                }
                 batch.push_key::<KEY>(kb[..KEY].try_into().unwrap(), nk, buf, v, len);
             } else {
+                // (A long key against `stop`: left to the caller's merge.)
+                if STOP {
+                    p = at;
+                    break;
+                }
                 batch.push_shared(shared, suffix, buf, v, len);
                 short = nk <= KEY;
                 if short {
@@ -2103,6 +2151,24 @@ impl<'a> ZipSide<'a> {
     }
 }
 
+/// Where `a`'s first `n` bytes first differ from `b`'s when they sort below them there (None:
+/// at or past them, or equal), 8 bytes at a time as `cmp_words`.
+#[inline(always)]
+fn below_at(a: &[u8; ZK], b: &[u8; ZK], n: usize) -> Option<usize> {
+    let n = n.min(ZK);
+    let mut i = 0;
+    while i < n {
+        let x = u64::from_be_bytes(a[i..i + 8].try_into().unwrap());
+        let y = u64::from_be_bytes(b[i..i + 8].try_into().unwrap());
+        if x != y {
+            let at = i + (x ^ y).leading_zeros() as usize / 8;
+            return (at < n && x < y).then_some(at);
+        }
+        i += 8;
+    }
+    None
+}
+
 /// `a`'s first `n` bytes compared with `b`'s, 8 bytes at a time: the last 1-7 as the word they
 /// start, the bytes past `n` shifted out. (A slice comparison of them was a call to memcmp at
 /// every comparison of keys whose length isn't a multiple of 8: a row key is 17 bytes.)
@@ -2191,13 +2257,14 @@ impl<'a> ZipBound<'a> {
 }
 
 /// What `zip_rows` did: the rows it pushed, whether it moved either side, and the user key it
-/// decided last (`Scan::decided`: in `decided`) with that version's commit ts, and the deleted
-/// keys it passed.
+/// decided last (`Scan::decided`: in `decided`) with that version's commit ts, the deleted keys
+/// it passed, and how often the side it took from changed.
 pub struct Zipped {
     pub rows: usize,
     pub moved: bool,
     pub decided_ts: u64,
     pub deleted: u32,
+    pub switches: u32,
 }
 
 /// The most sources `zip_rows` merges.
@@ -2222,7 +2289,7 @@ pub fn zip_rows(
     batch: &mut super::batch::RowBatch,
     decided: &mut Vec<u8>,
 ) -> Zipped {
-    let mut z = Zipped { rows: 0, moved: false, decided_ts: 0, deleted: 0 };
+    let mut z = Zipped { rows: 0, moved: false, decided_ts: 0, deleted: 0, switches: 0 };
     let mut s: smallvec::SmallVec<[ZipSide; ZIP_MAX]> = smallvec::SmallVec::new();
     for (b, p) in srcs.iter() {
         let buf = batch.buf_index(&b.data);
@@ -2260,6 +2327,7 @@ fn zip_n<const N: usize>(
     let mut u = [0u8; ZK];
     let mut ulen = 0;
     let bound = bound.map(ZipBound::new);
+    let mut last = usize::MAX;
     while z.rows < max {
         let mut m = 0;
         for j in 1..N {
@@ -2267,6 +2335,8 @@ fn zip_n<const N: usize>(
                 m = j;
             }
         }
+        z.switches += (m != last) as u32;
+        last = m;
         let x = &mut s[m];
         if bound.as_ref().is_some_and(|bd| bd.past(&x.k, x.klen)) {
             break;
