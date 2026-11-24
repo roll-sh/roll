@@ -998,7 +998,7 @@ async fn a_mounted_env_is_a_pipe_that_follows_changes_and_goes_with_the_login() 
     .await
     .expect("the mount serves");
     let kept = log.clone();
-    tokio::spawn(async move {
+    let logging = tokio::spawn(async move {
         while let Ok(Some(line)) = lines.next_line().await {
             kept.lock().unwrap().push_str(&format!("{line}\n"));
         }
@@ -1014,6 +1014,22 @@ async fn a_mounted_env_is_a_pipe_that_follows_changes_and_goes_with_the_login() 
         async move { tokio::time::timeout(std::time::Duration::from_secs(10), rx).await.expect("the pipe answers").unwrap() }
     };
     assert_eq!(read().await, "GREETING=\"fake one\"\n");
+    // A reader that holds the pipe open a while before it reads (a loaded machine) still gets one
+    // copy, not the next open's appended to it.
+    let slow = {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let path = env_file.clone();
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut f = std::fs::File::open(path).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let mut text = String::new();
+            f.read_to_string(&mut text).unwrap();
+            tx.send(text)
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), rx).await.expect("the pipe answers").unwrap()
+    };
+    assert_eq!(slow, "GREETING=\"fake one\"\n");
     ok(&s.api, &[], &[&at[..], &["set", "GREETING=fake-two"]].concat(), None).await;
     let started = std::time::Instant::now();
     loop {
@@ -1029,6 +1045,8 @@ async fn a_mounted_env_is_a_pipe_that_follows_changes_and_goes_with_the_login() 
     assert!(s.tokens.lock().unwrap().remove(&token).is_some());
     ok(&s.api, &[], &[&at[..], &["set", "OTHER=fake-three"]].concat(), None).await;
     let status = tokio::time::timeout(std::time::Duration::from_secs(20), child.wait()).await.expect("the mount stops").unwrap();
+    // Everything it printed before it exited, to the end of its stderr.
+    tokio::time::timeout(std::time::Duration::from_secs(10), logging).await.expect("its stderr ends").unwrap();
     let log = log.lock().unwrap().clone();
     assert!(!status.success() && log.contains("refused") && !log.contains("fake"), "{log}");
     assert!(std::fs::symlink_metadata(&env_file).is_err(), "the pipe is removed");
