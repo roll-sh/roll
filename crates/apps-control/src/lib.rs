@@ -295,6 +295,8 @@ pub struct Apps {
     pushers: push::Pushers,
     /// Who may still open a project's environments ([`Apps::set_visitors`]).
     pub(crate) visitors: std::sync::OnceLock<Arc<dyn integrations::Visitors>>,
+    /// Where visitors a provider vouches for start signing in (`access.sso`); none: not here.
+    pub(crate) visitor_sign_in: std::sync::OnceLock<Arc<dyn integrations::VisitorSignIn>>,
     /// Log drains whose batch came back (the drainer sends the next).
     drain_done: Arc<Mutex<Vec<String>>>,
     /// Projects whose drains changed on this node: the drainer reads theirs again (only theirs).
@@ -688,6 +690,7 @@ impl Apps {
             explain_failed: Mutex::new(HashMap::new()),
             pushers: push::Pushers::default(),
             visitors: std::sync::OnceLock::new(),
+            visitor_sign_in: std::sync::OnceLock::new(),
             drain_done: Arc::new(Mutex::new(Vec::new())),
             drains_dirty: Mutex::new(Default::default()),
             preview_lines,
@@ -1818,6 +1821,7 @@ impl Apps {
         };
         let gate = self.access(&r.service, &r.name).await?;
         let (private, signed_in, password) = (gate.is_some(), gate.as_ref().is_some_and(|a| a.signed_in), gate.as_ref().is_some_and(|a| a.password_hash.is_some()));
+        let sso = gate.as_ref().and_then(|a| a.sso.clone());
         let (sid, e) = (r.service.clone(), r.name.clone());
         let waiting_for_ci = self.db(move |s| s.ci_waits()).await?.into_iter().find(|(w, _)| w.service == sid && w.env == e).map(|(w, _)| w.sha);
         let (sid, e) = (r.service.clone(), r.name.clone());
@@ -1847,6 +1851,7 @@ impl Apps {
             udp: udp_port.filter(|_| svc.run.udp && svc.run.public && !private && !r.egress.closed()).map(|p| format!("{}:{p}", self.cfg.tcp_host)),
             private,
             signed_in,
+            sso,
             password,
             next_run_at,
             schedules: self.schedule_states(&svc, &r).await,
@@ -2342,7 +2347,7 @@ impl Apps {
             None => None,
             Some(Value::Null) => Some(None),
             Some(Value::Object(a)) => {
-                if let Some(k) = a.keys().find(|k| !["token", "bypass_sha256", "signed_in", "password"].contains(&k.as_str())) {
+                if let Some(k) = a.keys().find(|k| !["token", "bypass_sha256", "signed_in", "password", "sso"].contains(&k.as_str())) {
                     return Err(Error::BadRequest(format!("access.{k} isn't a field")));
                 }
                 let signed_in = match a.get("signed_in") {
@@ -2356,10 +2361,18 @@ impl Apps {
                     Some(Value::String(p)) if (8..=200).contains(&p.chars().count()) => Some(crate::password::hash(p).await.map_err(Error::Internal)?),
                     Some(_) => return Err(Error::BadRequest("access.password is 8–200 characters".into())),
                 };
+                // People a provider vouches for, roll's or not.
+                let sso = match a.get("sso") {
+                    None | Some(Value::Null) => None,
+                    Some(v) => Some(serde_json::from_value::<crate::model::Sso>(v.clone()).map_err(|e| Error::BadRequest(format!("access.sso: {e}")))?.check()?),
+                };
+                if sso.is_some() && self.visitor_sign_in.get().is_none() {
+                    return Err(Error::Conflict("signing visitors in through a provider needs roll's accounts on this node".into()));
+                }
                 let token = match a.get("token") {
-                    None | Some(Value::Null) if signed_in || password.is_some() => None,
+                    None | Some(Value::Null) if signed_in || password.is_some() || sso.is_some() => None,
                     Some(Value::String(t)) if (20..=200).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b)) => Some(t.as_str()),
-                    _ => return Err(Error::BadRequest("access.token is 20–200 of A-Z, a-z, 0-9, - and _ (or access.signed_in is true, or there's a password)".into())),
+                    _ => return Err(Error::BadRequest("access.token is 20–200 of A-Z, a-z, 0-9, - and _ (or access.signed_in is true, or there's a password or sso)".into())),
                 };
                 if signed_in && self.cfg.web_url.is_none() {
                     return Err(Error::Conflict("signing in needs roll's dashboard address on this node (web_url)".into()));
@@ -2369,9 +2382,9 @@ impl Apps {
                     Some(Value::String(h)) if h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()) => Some(h.to_ascii_lowercase()),
                     Some(_) => return Err(Error::BadRequest("access.bypass_sha256 is a SHA-256 in hex".into())),
                 };
-                Some(Some(Access { token_hash: token.map(crate::public::token_hash), bypass_hash: bypass, signed_in, password_hash: password }))
+                Some(Some(Access { token_hash: token.map(crate::public::token_hash), bypass_hash: bypass, signed_in, password_hash: password, sso }))
             }
-            Some(_) => return Err(Error::BadRequest("access is {token?, signed_in?, password?, bypass_sha256?} or null".into())),
+            Some(_) => return Err(Error::BadRequest("access is {token?, signed_in?, password?, sso?, bypass_sha256?} or null".into())),
         };
         // A new environment may start with another's variables (cloning staging from production).
         let variables_from = match o.get("variables_from") {
@@ -4365,6 +4378,11 @@ impl Apps {
     /// Who may still open a project's environments (roll-accounts). Set once.
     pub fn set_visitors(&self, v: Arc<dyn integrations::Visitors>) {
         let _ = self.visitors.set(v);
+    }
+
+    /// Where visitors a provider vouches for start signing in (roll-accounts). Set once.
+    pub fn set_visitor_sign_in(&self, v: Arc<dyn integrations::VisitorSignIn>) {
+        let _ = self.visitor_sign_in.set(v);
     }
 
     /// How email reaches people (roll-accounts' mailer). Set once.

@@ -295,7 +295,9 @@ export function secretsApi(project: string) {
     transitPublicKeys: (name: string) => req<TransitPublicKey[]>("GET", `${P}/transit/${enc(name)}/public`),
     /** The project's certificate authorities (pki links). */
     cas: () => req<Ca[]>("GET", `${P}/cas`),
-    addCa: (c: { name: string; domains: string[]; allow_ip?: boolean; max_days?: number }) => req<Ca>("POST", `${P}/cas`, c),
+    addCa: (c: { name: string; domains: string[]; allow_ip?: boolean; max_days?: number; intermediate?: boolean }) => req<Ca>("POST", `${P}/cas`, c),
+    /** An intermediate's certificate, signed by the customer's root, and the chain up to that root (PEM): the CA becomes active. */
+    installCaChain: (id: string, b: { certificate: string; chain?: string }) => req<Ca>("PUT", `${P}/cas/${enc(id)}/chain`, b),
     deleteCa: (id: string) => req<null>("DELETE", `${P}/cas/${enc(id)}`),
     /** SSH CAs (ssh links): servers trust their public keys. */
     sshCas: () => req<SshCa[]>("GET", `${P}/ssh-cas`),

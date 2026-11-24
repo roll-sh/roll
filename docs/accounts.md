@@ -286,6 +286,20 @@ needs the person signed in (`intent: "link"`).
 
 `return_to` must be a path starting with `/` (not `//`); anything else becomes `/dashboard`.
 
+### Visitors
+
+A product may gate what it serves on GitHub or Google vouching for someone who has no account
+here (roll apps' `access.sso`). `GET /v1/accounts/oauth/{provider}/visit?r=<request>&orgs=1`
+(public; `r` is the product's own request, at most 2048 URL-safe characters, kept as it came)
+starts the same flow as a sign-in, with the same browser-binding cookie, state, PKCE and checks,
+but as a visit (`intent` `visit`, or `visit_orgs` when `orgs=1` asks GitHub for `read:org` too).
+The callback reads the verified email (and for `visit_orgs`, the logins of the organisations from
+`GET /user/orgs`, the first 100) and hands them, with `r`, to the `VisitGate` rolld set
+(`Accounts::set_visit_gate`): its answer is where the browser goes (303), or why not, shown on a
+403 page of roll's own (never the dashboard's sign-in, and never an `?error=` redirect). No
+account is made, no session is issued, no identity is linked, and nothing is recorded as a
+sign-in. `Accounts::visit_url` builds the start's URL for a product.
+
 ### SSO (a company's OpenID Connect provider)
 
 Okta, Entra ID, Google Workspace, JumpCloud or any OpenID Connect provider signs people in, chosen
@@ -734,6 +748,7 @@ type MfaRequired = { status: "mfa_required"; methods: ("totp" | "recovery")[]; c
 | `POST /v1/accounts/email/verify` | `{challenge, code}` | 200 `SignedIn` or `MfaRequired`, with `Set-Cookie`; 400 `{code: "bad_code"}` (wrong, used, expired or too many tries: one answer); 400 `{code: "invite_invalid"}`; 403 `{code: "disabled"}` |
 | `POST /v1/accounts/oauth/{provider}/start` | `{intent?: "signin" \| "link", invite?, return_to?}` | `{url}` and `Set-Cookie` (the browser cookie); 400 `{code: "invite_invalid"}`; 404 provider not configured; `link` needs a session (401) |
 | `GET /v1/accounts/oauth/{provider}/callback` | query `code`, `state` (or `error`) | 303 to the dashboard, see above |
+| `GET /v1/accounts/oauth/{provider}/visit` | query `r` (a product's request), `orgs=1`? | 303 to the provider, with the browser-binding cookie; see "Visitors" |
 | `POST /v1/accounts/sso/start` | `{email, invite?, return_to?}`, or `{intent: "link"}` with a session (csrf) | `{url}` and `Set-Cookie` (the browser cookie); 400 `{code: "no_sso"}` when no connection answers for the email's (verified) domain, `throttled`, `provider` |
 | `GET /v1/accounts/sso/{id}/callback` | query `code`, `state` (or `error`) | 303 to the dashboard; `?error=` `unverified_email`, `domain`, `not_invited`, `link_required`, `linked_elsewhere`, `link_email`, `state` or `provider` |
 | `POST /v1/accounts/signin/passkey/options` | | `{id, publicKey}` for `navigator.credentials.get`: with a session owing a second factor, that person's passkeys; without, any (throttled per address); 503 `{code: "passkeys_off"}` |

@@ -37,7 +37,7 @@ use std::sync::Arc;
 
 pub use api::router;
 pub use mail::{Mail, MailConfig, Mailer};
-pub use oauth::{OAuthApp, Provider, ProviderConfig};
+pub use oauth::{OAuthApp, Provider, ProviderConfig, VisitGate, Visitor};
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS account_deletions (
@@ -481,6 +481,8 @@ pub struct Accounts {
     /// Where SCIM's groups are kept (rolld: the workspace); none until it's set, and `/Groups`
     /// stays a SCIM 404 until then.
     directory: std::sync::RwLock<Option<Arc<dyn scim_groups::Directory>>>,
+    /// Where visitors' sign-ins go (rolld: roll apps' `access.sso`); none: there are none.
+    visit_gate: std::sync::RwLock<Option<Arc<dyn oauth::VisitGate>>>,
 }
 
 impl Accounts {
@@ -563,12 +565,30 @@ impl Accounts {
         }
         let doh = std::env::var("ROLL_ACCOUNTS_DOH").ok().filter(|u| !u.trim().is_empty()).unwrap_or_else(|| "https://cloudflare-dns.com/dns-query".into());
         let txt: Arc<dyn sso::TxtLookup> = Arc::new(sso::Doh { client: sso_http.clone(), url: doh });
-        Ok(Accounts { db, config, mailer, http, sso_http, sso_discovery: Default::default(), txt: std::sync::RwLock::new(txt), audit: Default::default(), owners, on_deleted: Default::default(), on_offboarded: Default::default(), sudo_ms: std::sync::atomic::AtomicI64::new(sudo::SUDO_MS), directory: Default::default() })
+        Ok(Accounts { db, config, mailer, http, sso_http, sso_discovery: Default::default(), txt: std::sync::RwLock::new(txt), audit: Default::default(), owners, on_deleted: Default::default(), on_offboarded: Default::default(), sudo_ms: std::sync::atomic::AtomicI64::new(sudo::SUDO_MS), directory: Default::default(), visit_gate: Default::default() })
     }
 
     /// Where SSO domains' TXT records are read (tests answer from a table).
     pub fn set_txt_lookup(&self, lookup: Arc<dyn sso::TxtLookup>) {
         *self.txt.write().unwrap_or_else(|e| e.into_inner()) = lookup;
+    }
+
+    /// Where visitors' sign-ins (`intent: visit`) go once a provider vouches for them.
+    pub fn set_visit_gate(&self, gate: Arc<dyn oauth::VisitGate>) {
+        *self.visit_gate.write().unwrap_or_else(|e| e.into_inner()) = Some(gate);
+    }
+
+    pub(crate) fn visit_gate(&self) -> Option<Arc<dyn oauth::VisitGate>> {
+        self.visit_gate.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Where a visitor's browser starts signing in with `provider` for a product's `request`
+    /// (`orgs`: GitHub reads their organisations too). None: that provider isn't set up.
+    pub fn visit_url(&self, provider: &str, request: &str, orgs: bool) -> Option<String> {
+        let p = Provider::parse(provider)?;
+        self.config.provider(p)?;
+        let q = |v: &str| percent_encoding::utf8_percent_encode(v, percent_encoding::NON_ALPHANUMERIC).to_string();
+        Some(format!("{}/v1/accounts/oauth/{}/visit?r={}{}", self.config.api_url.trim_end_matches('/'), p.as_str(), q(request), if orgs { "&orgs=1" } else { "" }))
     }
 
     pub(crate) fn txt_lookup(&self) -> Arc<dyn sso::TxtLookup> {

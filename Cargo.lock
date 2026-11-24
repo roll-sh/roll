@@ -7312,6 +7312,7 @@ dependencies = [
  "aes-gcm",
  "anyhow",
  "argon2",
+ "async-trait",
  "aws-config",
  "aws-sdk-sesv2",
  "axum",
