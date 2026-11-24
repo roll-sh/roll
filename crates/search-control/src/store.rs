@@ -351,6 +351,10 @@ pub enum Recorded {
     Full,
 }
 
+/// A cluster's owner, when it was made and when it was last restored (Unix seconds), as
+/// [`Store::owner_and_made`] reads them.
+pub type OwnerAndMade = (Option<String>, i64, Option<i64>);
+
 /// The clusters a person owns, as [`Store::list_owned`] lists them.
 const OWNED: &str = "deleting = 0 AND deleted_at IS NULL AND owner = ?1";
 
@@ -756,7 +760,7 @@ impl Store {
     /// Whose cluster `id` is, when it was made and when it was last restored (Unix seconds), live
     /// or kept for restoring, synchronously (rolld's workspace pass): `None` when there's no such
     /// cluster, an owner of `None` for one that has none.
-    pub fn owner_and_made(&self, id: &str) -> anyhow::Result<Option<(Option<String>, i64, Option<i64>)>> {
+    pub fn owner_and_made(&self, id: &str) -> anyhow::Result<Option<OwnerAndMade>> {
         Ok(self.db.read(|x| {
             x.query_row("SELECT owner, created_at, restored_at FROM search_clusters WHERE id = ?1 AND deleting = 0", params![id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()
         })?)
