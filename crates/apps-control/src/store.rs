@@ -1720,11 +1720,12 @@ impl Store {
     /// A service's audit trail (`audit.*` events), newest first.
     /// A service's events, newest first: the audit trail (what people changed), or (`all`) every
     /// kind (deploys, failures, crash loops, alerts, domains) as one timeline.
-    pub fn activity(&self, service: &str, limit: usize, all: bool) -> Result<Vec<Event>> {
+    /// `before`: only events older than that one's `seq` (the next page back).
+    pub fn activity(&self, service: &str, limit: usize, all: bool, before: Option<i64>) -> Result<Vec<Event>> {
         let only = if all { "" } else { " AND kind LIKE 'audit.%'" };
         Ok(self.db.query(
-            &format!("SELECT seq, at, kind, service, env, deployment, data FROM events WHERE service = ?{only} ORDER BY seq DESC LIMIT ?"),
-            params![service, limit.clamp(1, 500) as i64],
+            &format!("SELECT seq, at, kind, service, env, deployment, data FROM events WHERE service = ?{only} AND seq < ? ORDER BY seq DESC LIMIT ?"),
+            params![service, before.unwrap_or(i64::MAX), limit.clamp(1, 500) as i64],
             |r| {
                 let data: String = r.get(6)?;
                 Ok(Event { seq: r.get(0)?, at: r.get(1)?, kind: r.get(2)?, service: r.get(3)?, environment: r.get(4)?, deployment: r.get(5)?, data: serde_json::from_str(&data).unwrap_or(serde_json::Value::Null) })

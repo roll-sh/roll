@@ -556,10 +556,12 @@ async fn links(State(apps): S, Path(id): Path<String>) -> R {
 struct ActivityQuery {
     /// Every kind of event, not only the audit trail: the service's timeline.
     all: Option<String>,
+    /// Older than this event (its `seq`): the next page back.
+    before: Option<i64>,
 }
 
 async fn activity(State(apps): S, Path(id): Path<String>, Query(q): Query<ActivityQuery>) -> R {
-    ok(apps.activity(&id, truthy(&q.all)).await?)
+    ok(apps.activity(&id, truthy(&q.all), q.before).await?)
 }
 
 async fn put_link(State(apps): S, Path((id, kind, r)): Path<(String, String, String)>, ext: Extensions, b: Bytes) -> R {

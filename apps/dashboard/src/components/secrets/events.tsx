@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Environment, SecretsEvent } from "@/lib/secrets-api";
+import type { Environment, SecretsApi, SecretsEvent } from "@/lib/secrets-api";
 import { eventDetail, eventKeys, FAMILIES, familyOf, older, open, poll, type EventsFetch, type EventsFilter, type Family } from "@/lib/secrets-events";
 import { Select } from "../agents/ui/select";
+import { NotifyMenu } from "./notify";
 import { useSecrets } from "./secrets-page";
 import { ActorMark, ago, Chip, ErrorNote, errorText, ghost, stamp, Teach } from "./ui";
 
@@ -12,7 +13,7 @@ const ALL = "*";
 /** The project's events feed (docs/secrets.md, "Events"): what changed, rotated, was asked for or leaked, newest first and live. */
 export function EventsView() {
   const { api, envs, project } = useSecrets();
-  return <EventsFeed load={api.events} envs={envs} project={project.name} />;
+  return <EventsFeed load={api.events} envs={envs} project={project.name} notify={api} />;
 }
 
 /** Whether the tab is worth polling: its page is visible and the feed is on screen. */
@@ -37,9 +38,9 @@ function useInView(el: React.RefObject<HTMLElement | null>) {
  * The feed itself, on any `events` call (tests hand it a fake). Opening reads the head
  * (`latest=1`) and the events just before it; while in view it polls after the cursor, which is
  * always the last `next` the API answered. Filters go to the server (`kinds=`, `environment=`) and
- * start over.
+ * start over. With `notify`, "Notify me" sits beside the filters, starting from them.
  */
-export function EventsFeed({ load, envs, project }: { load: EventsFetch; envs: Environment[]; project: string }) {
+export function EventsFeed({ load, envs, project, notify }: { load: EventsFetch; envs: Environment[]; project: string; notify?: Pick<SecretsApi, "notifications" | "notify" | "stopNotification"> }) {
   const [families, setFamilies] = useState<Family[]>([]);
   const [env, setEnv] = useState(ALL);
   const [rows, setRows] = useState<SecretsEvent[] | null>(null);
@@ -135,6 +136,7 @@ export function EventsFeed({ load, envs, project }: { load: EventsFetch; envs: E
             {inView ? "Live" : "Paused"}
           </span>
           <Select label="Environment" value={env} onChange={setEnv} options={[{ value: ALL, label: "All environments" }, ...envs.map((e) => ({ value: e.slug, label: e.name }))]} className="w-44" />
+          {notify && <NotifyMenu api={notify} envs={envs} families={families} environment={filter.environment} />}
         </span>
       </div>
       <ErrorNote error={error} onDismiss={() => setError(null)} className="mt-3" />

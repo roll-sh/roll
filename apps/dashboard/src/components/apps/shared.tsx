@@ -138,7 +138,7 @@ const BY: Record<NonNullable<AccessLine["by"]>, string> = {
 };
 
 /** An access line as a person reads it: `GET /path 200 12ms`, a 5xx in red, a cold start's wait. */
-function AccessText({ text, onBlock }: { text: string; onBlock?: (ip: string) => Promise<unknown> }) {
+function AccessText({ text, onBlock, onTrace }: { text: string; onBlock?: (ip: string) => Promise<unknown>; onTrace?: (trace: string) => void }) {
   let a: AccessLine;
   try {
     a = JSON.parse(text) as AccessLine;
@@ -153,6 +153,11 @@ function AccessText({ text, onBlock }: { text: string; onBlock?: (ip: string) =>
         {a.by ? ` · ${BY[a.by] ?? a.by}` : ""}
         {a.ip ? ` · ${a.ip}` : ""}
       </span>
+      {a.trace && onTrace && (
+        <button type="button" className="ml-2 text-[11px] text-subtle underline-offset-2 hover:text-fg hover:underline select-none" onClick={() => onTrace(a.trace!)}>
+          trace
+        </button>
+      )}
       {a.ip && onBlock && (
         <SureButton className="ml-2 text-[11px] text-subtle underline-offset-2 hover:text-fg hover:underline select-none" label={`Block ${a.ip}`} sure={`Block ${a.ip}?`} onSure={() => onBlock(a.ip!)}>
           block
@@ -219,6 +224,7 @@ export function LogView({
   className = "h-[420px]",
   onGroup,
   onBlock,
+  onTrace,
 }: {
   lines: LogLine[];
   columns?: boolean;
@@ -227,6 +233,8 @@ export function LogView({
   onGroup?: () => void;
   /** A request line's address, denied by a firewall rule (shown as "block" beside it). */
   onBlock?: (ip: string) => Promise<unknown>;
+  /** A request line's trace, opened (shown as "trace" beside it). */
+  onTrace?: (trace: string) => void;
 }) {
   const box = useRef<HTMLDivElement>(null);
   const [stuck, setStuck] = useState(true);
@@ -261,7 +269,7 @@ export function LogView({
               </button>
             )}
             {shown.map(({ line, more }, i) => (
-              <LogRow key={keys[i]} line={line} more={more} columns={columns} onGroup={onGroup} onBlock={onBlock} />
+              <LogRow key={keys[i]} line={line} more={more} columns={columns} onGroup={onGroup} onBlock={onBlock} onTrace={onTrace} />
             ))}
           </>
         )}
@@ -293,7 +301,7 @@ export function logKeys(lines: LogLine[]): string[] {
   });
 }
 
-const LogRow = memo(function LogRow({ line: l, more, columns, onGroup, onBlock }: { line: LogLine; more: LogLine[]; columns: boolean; onGroup?: () => void; onBlock?: (ip: string) => Promise<unknown> }) {
+const LogRow = memo(function LogRow({ line: l, more, columns, onGroup, onBlock, onTrace }: { line: LogLine; more: LogLine[]; columns: boolean; onGroup?: () => void; onBlock?: (ip: string) => Promise<unknown>; onTrace?: (trace: string) => void }) {
   return (
     <div className="flex gap-3 px-3 hover:bg-fg/[0.03]">
       <span className="shrink-0 text-subtle tabular-nums select-none">{clock(l.t)}</span>
@@ -308,7 +316,7 @@ const LogRow = memo(function LogRow({ line: l, more, columns, onGroup, onBlock }
         </span>
       )}
       <span className={`min-w-0 flex-1 [overflow-wrap:anywhere] whitespace-pre-wrap ${lineTone(l)}`}>
-        {l.stream === "http" ? <AccessText text={l.text} onBlock={onBlock} /> : l.text}
+        {l.stream === "http" ? <AccessText text={l.text} onBlock={onBlock} onTrace={onTrace} /> : l.text}
         {more.length > 0 && <TraceMore more={more} onGroup={onGroup} />}
       </span>
     </div>

@@ -3338,6 +3338,60 @@ async fn a_leaked_key_in_an_environment_with_approvals_gets_a_change_request_ins
     assert_eq!(api.sent.5.lock().unwrap().live, ["sgk2"], "the leaked key is revoked at once");
 }
 
+/// An approved leak request whose key rotated meanwhile issues nothing: the credential it would
+/// cut with no grace isn't the one that leaked.
+#[tokio::test]
+async fn a_leak_request_whose_key_rotated_meanwhile_is_applied_as_already_rotated() {
+    let api = Api::new().await;
+    sendgrid_in_production(&api).await;
+    api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true, "approvals": 1 }))).await;
+    api.ok(Method::PATCH, "", Some(json!({ "leaks": { "rotate": "managed" } }))).await;
+    leak_in_code(&api, "SG.key-1").await;
+    let open = api.ok(Method::GET, "/environments/production/requests?state=open", None).await;
+    let id = open[0]["id"].as_str().unwrap().to_string();
+    api.ok(Method::POST, "/environments/production/secrets/SENDGRID_API_KEY/rotate", None).await;
+    assert_eq!(api.sent.5.lock().unwrap().live, ["sgk1", "sgk2"], "rotated by hand, with its grace");
+
+    api.ok(Method::POST, &format!("/environments/production/requests/{id}/review"), Some(json!({ "verdict": "approve" }))).await;
+    let r = api.ok(Method::POST, &format!("/environments/production/requests/{id}/apply"), None).await;
+    assert!(r["state"] == "applied" && r["outcome"].as_str().is_some_and(|o| o.starts_with("already rotated")) && r["applied_seq"].is_null(), "{r}");
+    assert_eq!(api.values("production", "/").await["values"]["SENDGRID_API_KEY"], "SG.key-2");
+    assert_eq!(api.sent.5.lock().unwrap().live, ["sgk1", "sgk2"], "nothing issued or revoked");
+}
+
+/// A report that text was published (`leaked: true`) rotates a managed key only for a caller
+/// that could rotate it itself (`write`), and a key rotates for a leak at most once an hour.
+#[tokio::test]
+async fn a_reported_leak_rotates_only_for_a_writer_and_once_an_hour() {
+    let api = Api::new().await;
+    sendgrid_in_production(&api).await;
+    api.ok(Method::PATCH, "", Some(json!({ "leaks": { "rotate": "managed" } }))).await;
+    let start = api.ok(Method::GET, "/events?latest=1", None).await["next"].as_i64().unwrap();
+    let report = |value: &str| json!({ "candidates": [value], "leaked": true });
+
+    let reader = api.token(json!({ "name": "ci", "actions": ["read", "reveal"] }));
+    let (s, found) = api.req(Method::POST, "/leaks", Some(report("SG.key-1")), Some(reader.as_str())).await;
+    assert_eq!((s, &found[0]["key"]), (StatusCode::OK, &json!("SENDGRID_API_KEY")), "{found}");
+    assert_eq!(api.values("production", "/").await["values"]["SENDGRID_API_KEY"], "SG.key-1", "a reader's report rotates nothing");
+    assert_eq!(api.sent.5.lock().unwrap().live, ["sgk1"]);
+
+    let writer = api.token(json!({ "name": "deploy", "actions": ["read", "reveal", "write"] }));
+    api.req(Method::POST, "/leaks", Some(report("SG.key-1")), Some(writer.as_str())).await;
+    assert_eq!(api.values("production", "/").await["values"]["SENDGRID_API_KEY"], "SG.key-2");
+    assert_eq!(api.sent.5.lock().unwrap().live, ["sgk2"], "rotated at once, no grace");
+    // The new value reported too, within the hour: held, and the event says why.
+    api.req(Method::POST, "/leaks", Some(report("SG.key-2")), Some(writer.as_str())).await;
+    assert_eq!(api.values("production", "/").await["values"]["SENDGRID_API_KEY"], "SG.key-2");
+    assert_eq!(api.sent.5.lock().unwrap().made, 2);
+
+    let leaked = api.ok(Method::GET, &format!("/events?after={start}&kinds=secret.leaked"), None).await;
+    let data: Vec<&Value> = leaked["events"].as_array().unwrap().iter().map(|e| &e["data"]).collect();
+    assert_eq!(data.len(), 3, "{leaked}");
+    assert_eq!((&data[0]["reported"], &data[0]["rotatable"], &data[0]["rotating"]), (&json!(true), &json!(true), &Value::Null), "{leaked}");
+    assert_eq!(data[1]["rotating"], json!(["SENDGRID_API_KEY"]));
+    assert_eq!((&data[2]["rotating"], &data[2]["reason"]), (&json!(false), &json!("rotated within the hour")), "{leaked}");
+}
+
 /// Register `vendor` (a refused admin credential first, which isn't kept), link `key` to its
 /// secret in production, managed with `options`, and answer the registration.
 async fn key_vendor(api: &Api, vendor: &str, target: Value, credential: &str, key: &str, options: Value) -> Value {
@@ -8246,4 +8300,91 @@ async fn public_certificates_are_ordered_in_the_background_renewed_and_a_failed_
     assert_eq!(api.values("production", "/").await["values"]["TLS_CERT"], in_use);
     // Linked keys hold it.
     assert_eq!(api.call(Method::DELETE, &format!("/public-certs/{id}"), None).await.0, StatusCode::CONFLICT);
+}
+
+/// What rolld's notifier would send, recorded: chat posts and mails. Only `usr_bob` may use a chat
+/// install, his own Slack one (`ci_fake1`).
+#[derive(Default)]
+struct FakeNotifier {
+    posts: Mutex<Vec<(String, String, String)>>,
+    mails: Mutex<Vec<(String, String, String)>>,
+}
+
+impl roll_secrets::Notifier for FakeNotifier {
+    fn may_use(&self, user: &str, platform: &str, install: &str) -> roll_secrets::Result<bool> {
+        Ok((user, platform, install) == ("usr_bob", "slack", "ci_fake1"))
+    }
+    fn mail_on(&self) -> bool {
+        true
+    }
+    fn chat(&self, install: &str, channel: &str, text: &str) -> roll_secrets::Result<()> {
+        self.posts.lock().unwrap().push((install.into(), channel.into(), text.into()));
+        Ok(())
+    }
+    fn mail(&self, user: &str, subject: &str, text: &str) -> roll_secrets::Result<()> {
+        self.mails.lock().unwrap().push((user.into(), subject.into(), text.into()));
+        Ok(())
+    }
+}
+
+/// docs/secrets.md, "Being told": a person's subscription delivers each matching event once,
+/// through a chat install of their own or to their own address, with names and never a value; a
+/// member who leaves gets nothing more, and their subscription shows it's disabled.
+#[tokio::test]
+async fn a_subscriber_is_told_of_production_changes_once_and_never_a_value() {
+    let api = Api::new().await;
+    let fake = Arc::new(FakeNotifier::default());
+    api.secrets.set_notifier(fake.clone());
+    let (_, p) = api.as_ada(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "team" }))).await;
+    let team = p["id"].as_str().unwrap().to_string();
+    let at = |rest: &str| format!("/v1/secrets/projects/{team}{rest}");
+    api.join(&team, "bob", "admin", None).await;
+    let slack = json!({ "slack": { "install": "ci_fake1", "channel": "C0FAKE01" } });
+    let (s, n) = api.signed_in("bob", false, Method::POST, &at("/notifications"), Some(json!({ "kinds": ["secret.changed"], "environment": "production", "channel": slack }))).await;
+    assert_eq!(s, StatusCode::CREATED, "{n}");
+    assert_eq!((n["user"].as_str(), n["state"].as_str()), (Some("usr_bob"), Some("active")));
+    // Only through an install of one's own, only to one's own address, and only a person's.
+    assert_eq!(api.as_ada(Method::POST, &at("/notifications"), Some(json!({ "channel": slack }))).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(api.as_ada(Method::POST, &at("/notifications"), Some(json!({ "channel": { "email": "someone@example.com" } }))).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(api.call(Method::POST, &at("/notifications"), Some(json!({ "channel": { "email": "own" } }))).await.0, StatusCode::BAD_REQUEST);
+    let (s, m) = api.as_ada(Method::POST, &at("/notifications"), Some(json!({ "kinds": ["secret.*"], "channel": { "email": "own" } }))).await;
+    assert_eq!(s, StatusCode::CREATED, "{m}");
+
+    let values = ["fake-prod-value-7Q2", "fake-dev-value-3K9", "fake-prod-value-8R3"];
+    for (env, value) in [("production", values[0]), ("development", values[1])] {
+        let (s, w) = api.as_ada(Method::PUT, &at(&format!("/environments/{env}/secrets/DB_PASSWORD")), Some(json!({ "value": value }))).await;
+        assert!(s.is_success(), "{s} {w}");
+    }
+    for _ in 0..2 {
+        api.secrets.sweep_notifications().unwrap();
+    }
+    let posts = fake.posts.lock().unwrap().clone();
+    assert_eq!(posts.len(), 1, "production's change, once: {posts:?}");
+    let (install, channel, text) = &posts[0];
+    assert_eq!((install.as_str(), channel.as_str()), ("ci_fake1", "C0FAKE01"));
+    for part in ["secret.changed", "team/production", "DB_PASSWORD", "usr_ada", "view=events"] {
+        assert!(text.contains(part), "{part} in {text}");
+    }
+    let mails = fake.mails.lock().unwrap().clone();
+    assert_eq!(mails.iter().map(|m| m.0.as_str()).collect::<Vec<_>>(), ["usr_ada", "usr_ada"], "both changes, to her own account");
+
+    // Bob leaves: nothing more reaches him, and his subscription says why.
+    assert_eq!(api.as_ada(Method::DELETE, &format!("/v1/workspace/projects/{team}/members/usr_bob"), None).await.0, StatusCode::NO_CONTENT);
+    api.as_ada(Method::PUT, &at("/environments/production/secrets/DB_PASSWORD"), Some(json!({ "value": values[2] }))).await;
+    for _ in 0..2 {
+        api.secrets.sweep_notifications().unwrap();
+    }
+    assert_eq!(fake.posts.lock().unwrap().len(), 1);
+    assert_eq!(fake.mails.lock().unwrap().len(), 3);
+    let (_, all) = api.as_ada(Method::GET, &at("/notifications"), None).await;
+    let his = all.as_array().unwrap().iter().find(|n| n["user"] == "usr_bob").expect("an admin sees every one in the project");
+    assert_eq!(his["state"], "disabled", "{his}");
+    assert!(his["error"].as_str().unwrap().contains("no longer"), "{his}");
+
+    // Never a value, nor anything as long as a hash of one.
+    let sent: Vec<String> = fake.posts.lock().unwrap().iter().map(|p| p.2.clone()).chain(fake.mails.lock().unwrap().iter().flat_map(|m| [m.1.clone(), m.2.clone()])).collect();
+    for t in &sent {
+        assert!(values.iter().all(|v| !t.contains(v)), "{t}");
+        assert!(t.split(|c: char| !c.is_ascii_hexdigit()).all(|w| w.len() < 32), "{t}");
+    }
 }

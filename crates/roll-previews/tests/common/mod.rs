@@ -26,6 +26,8 @@ pub struct FakeCode {
     pub watch: Mutex<Vec<String>>,
     /// The feedback left on changes' preview pages, by change.
     pub feedback: Mutex<HashMap<String, Vec<roll_previews::notes::Note>>>,
+    /// Notes said resolved on their change: (change, note, by).
+    pub resolved: Mutex<Vec<(String, String, String)>>,
     /// The `health` path every service says it has.
     pub health: Mutex<Option<String>>,
     /// The page states every service's `roll.toml` names (`[[preview.states]]`).
@@ -85,6 +87,10 @@ impl Source for FakeCode {
     }
     async fn feedback(&self, change: &str) -> anyhow::Result<Vec<roll_previews::notes::Note>> {
         Ok(self.feedback.lock().get(change).cloned().unwrap_or_default())
+    }
+    async fn note_resolved(&self, change: &str, note: &str, by: &str) -> anyhow::Result<()> {
+        self.resolved.lock().push((change.into(), note.into(), by.into()));
+        Ok(())
     }
     async fn paths_between(&self, _repo: &str, from: &str, to: &str) -> anyhow::Result<Option<Vec<String>>> {
         Ok(self.between.lock().get(&format!("{from}..{to}")).cloned())
