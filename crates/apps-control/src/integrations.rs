@@ -332,6 +332,25 @@ pub trait Visitors: Send + Sync {
     fn session_live(&self, user: &str, session: &str) -> bool;
 }
 
+/// Signing in visitors who needn't be roll's (rolld: roll-accounts' GitHub and Google, as a
+/// visit only; `access.sso`).
+pub trait VisitorSignIn: Send + Sync {
+    /// Where a visitor's browser goes to sign in with `provider` for apps' signed `request`
+    /// (`orgs`: GitHub reads their organisations too). None: that provider isn't set up here.
+    fn start_url(&self, provider: &str, request: &str, orgs: bool) -> Option<String>;
+}
+
+/// Someone a provider vouched for, coming back to [`crate::Apps::admit_visitor`].
+#[derive(Clone, Debug)]
+pub struct SsoVisitor {
+    pub provider: String,
+    pub subject: String,
+    /// Verified, lower case.
+    pub email: String,
+    /// GitHub organisations they're a member of (lower case), when the sign-in read them.
+    pub orgs: Vec<String>,
+}
+
 /// A model that reads a failed deployment (rolld: the owner of the service's roll code repo's
 /// provider, through roll code, metered on their account). Unset: nothing is explained.
 #[async_trait]

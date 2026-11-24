@@ -581,6 +581,10 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     if let Some(a) = &apps {
         a.apps.set_mailbox(std::sync::Arc::new(apps::AccountsMail(accounts.clone())));
         a.apps.set_visitors(std::sync::Arc::new(apps::AccountsVisitors(accounts.clone())));
+        // Visitors a provider vouches for (`access.sso`): roll-accounts signs them in as a
+        // visit only, and roll apps lets them in.
+        a.apps.set_visitor_sign_in(std::sync::Arc::new(apps::AccountsSignIn(accounts.clone())));
+        accounts.set_visit_gate(std::sync::Arc::new(apps::AppsVisitGate(a.apps.clone())));
     }
     // roll previews' team access asks the same accounts, and the workspace for who owns what.
     if let Some((_, engine)) = &preview_hosts {

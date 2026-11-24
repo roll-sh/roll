@@ -863,8 +863,8 @@ async fn check_access(apps: &Arc<Apps>, service: &str, env: &str, req: &mut Requ
     {
         return None;
     }
-    if access.signed_in {
-        // A ticket from roll's dashboard, coming back: the session it opens.
+    if access.signed_in || access.sso.is_some() {
+        // A ticket from roll's dashboard (or a provider's sign-in), coming back: the session it opens.
         if req.uri().path() == crate::visit::PATH {
             let query = req.uri().query().unwrap_or("").to_string();
             return Some(land_visit(apps, service, env, &query).await);
@@ -878,7 +878,10 @@ async fn check_access(apps: &Arc<Apps>, service: &str, env: &str, req: &mut Requ
             return None;
         }
         if access.token_hash.is_none() {
-            return Some(sign_in(apps, service, env, req));
+            return Some(match &access.sso {
+                Some(sso) => sso_sign_in(apps, service, env, sso, req).await,
+                None => sign_in(apps, service, env, req),
+            });
         }
     }
     // A password ([`crate::password`]): its session, or its page's POST.
@@ -896,6 +899,7 @@ async fn check_access(apps: &Arc<Apps>, service: &str, env: &str, req: &mut Requ
         }
     }
     let signed_in = access.signed_in;
+    let sso = access.sso.clone();
     // No way in yet: the password's page, signing in, or the 401.
     let password = access.password_hash.is_some();
     let turned_away = |req: &Request| {
@@ -959,7 +963,11 @@ async fn check_access(apps: &Arc<Apps>, service: &str, env: &str, req: &mut Requ
                 return Some(crate::password::page(StatusCode::UNAUTHORIZED, &to, ""));
             }
         }
-        return Some(if signed_in { sign_in(apps, service, env, req) } else { denied(apps, service, env).await });
+        return Some(match (&sso, signed_in) {
+            (Some(s), _) => sso_sign_in(apps, service, env, s, req).await,
+            (None, true) => sign_in(apps, service, env, req),
+            (None, false) => denied(apps, service, env).await,
+        });
     }
     req.headers_mut().remove(header::COOKIE);
     if !kept.is_empty()
@@ -990,6 +998,39 @@ fn sign_in(apps: &Arc<Apps>, service: &str, env: &str, req: &Request) -> Respons
         return r;
     }
     page(StatusCode::UNAUTHORIZED, "Sign in to open this", &format!("This environment lets in people signed in to roll who can open its project. <a href=\"{}\">Sign in</a>.", escape(&url)))
+}
+
+/// A visitor with no session of an environment that lets a provider sign people in
+/// (`access.sso`): a page load goes to roll's sign-in with that provider, which sends them back
+/// with a ticket; anything else is a 401.
+fn sso_sign_in(apps: &Arc<Apps>, service: &str, env: &str, sso: &crate::model::Sso, req: &Request) -> impl std::future::Future<Output = Response> + Send + use<> {
+    let raw = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("");
+    let host = match raw.rsplit_once(':') {
+        Some((h, p)) if p.bytes().all(|b| b.is_ascii_digit()) => h,
+        _ => raw,
+    }
+    .to_ascii_lowercase();
+    let to = crate::visit::local_path(req.uri().path_and_query().map_or("/", |p| p.as_str()));
+    let page_load = matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD) && req.headers().get(header::ACCEPT).and_then(|a| a.to_str().ok()).is_some_and(|a| a.contains("text/html"));
+    let (apps, service, env, sso) = (apps.clone(), service.to_string(), env.to_string(), sso.clone());
+    async move { sso_redirect(&apps, &service, &env, &sso, &host, &to, page_load).await }
+}
+
+async fn sso_redirect(apps: &Arc<Apps>, service: &str, env: &str, sso: &crate::model::Sso, host: &str, to: &str, page_load: bool) -> Response {
+    let who = if sso.provider == "github" { "GitHub" } else { "Google" };
+    match apps.sso_start(service, env, sso, host, to).await {
+        Some(url) if page_load => match HeaderValue::from_str(&url) {
+            Ok(l) => {
+                let mut r = StatusCode::FOUND.into_response();
+                r.headers_mut().insert(header::LOCATION, l);
+                r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+                r
+            }
+            Err(_) => page(StatusCode::INTERNAL_SERVER_ERROR, "Try again", "The sign-in couldn't be started."),
+        },
+        Some(url) => page(StatusCode::UNAUTHORIZED, "Sign in to open this", &format!("This site lets in people who sign in with {who}. <a href=\"{}\">Sign in</a>.", escape(&url))),
+        None => page(StatusCode::UNAUTHORIZED, "Sign in to open this", &format!("This site lets in people who sign in with {who}, and this node can't sign anyone in with it.")),
+    }
 }
 
 /// `/__roll/visit?ticket=…&to=…` on the environment's own host: the ticket traded for a session
