@@ -1440,12 +1440,14 @@ From a 2026-11-24 gap review (every tool run as an agent would against a fresh r
    column 24" of a body roll built. `access_list_approvals` lacked the route's `limit` and `grant`.
    A cut answer's note sent every tool to look for a page cursor, which no list route takes.
    The first `postgres_query` on a suspended endpoint took 10 s unexplained.
-2. **Choices as JSON Schema `enum`.** About 15 arguments list their values only in prose ("allow,
-   deny or ask", "classic, quorum or stream", apps_rollout's "advance, all or abort"), more inside a
-   description. A model guesses and reads a parse error; with `enum` a client checks the value and
-   the model picks from it. A `Ty` for a fixed set, published in the input schema, checked in
-   `Tool::request`, filled by the sweep, and a test that a route's serde enum and the tool's list
-   agree where the route has one.
+2. **Choices as JSON Schema `enum` (next PR, gating).** 20 arguments listed their values only in
+   prose; a model guessed and read a parse error. `Ty::Choice` publishes the set as `enum` (a
+   client checks it, a model picks from it) and `Tool::request` refuses anything else before the
+   call. Each set is the route's own, read from its parser, and three proses were short of it:
+   queues' exchange types (9, not 5), a policy's `apply_to` (6, not 3), apps' log streams (`http`).
+   Left as text: sets with aliases (apps' log `level`), the audit log's `decision` (change names
+   too), and secrets' request `state` (six states, its route changing with the cursor). Next: a
+   missing required choice asked for in a form, as a missing id is (`ask.rs`).
 3. **Paging is the products'.** No list route takes a cursor (approvals take `limit` only). History
    and logs are all capped (a `LIMIT`, the latest N, or a retention window), so nothing grows
    without bound there; the lists of things people make are whole (buckets, queues, topics,
