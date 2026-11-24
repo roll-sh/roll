@@ -203,7 +203,7 @@ impl Host for Cancelling {
     fn check_cancelled(&mut self) -> Result<(), HostError> {
         self.polls += 1;
         if self.polls > self.cancel_after {
-            return Err(HostError { kind: "task_cancelled_exception", reason: "cancelled".into(), frames: Vec::new() });
+            return Err(HostError { kind: "task_cancelled_exception", reason: "cancelled".into(), frames: Vec::new(), fields: Vec::new() });
         }
         Ok(())
     }

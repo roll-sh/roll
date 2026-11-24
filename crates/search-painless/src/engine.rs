@@ -962,8 +962,12 @@ impl<'s> Instance<'s> {
                     self.passed_on = charged;
                     r
                 }
-                Err(e) if r.is_ok() => Err(script.runtime_error(&crate::vm::memory_refused(e))),
-                Err(_) => r,
+                // the refusal wins over the script's own failure (which a lenient runtime field
+                // would swallow), unless that failure isn't the script's either
+                Err(e) => match r {
+                    Err(x) if x.uncatchable() => Err(x),
+                    _ => Err(script.runtime_error(&crate::vm::memory_refused(e))),
+                },
             },
         }
     }

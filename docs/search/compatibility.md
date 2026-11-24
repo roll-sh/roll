@@ -1855,8 +1855,9 @@ the rest are skipped by the tests' own prerequisites.
   (`on_script_error: continue`) skips the documents its script fails on. That includes this
   limit's `painless_error`, as Elasticsearch 9.5.5 skips a document for any failure there, a
   `painless_error` or a stack overflow too. Only failures that aren't the script's stop the
-  request: the breaker refusing what the field keeps (429), and a cancelled or timed-out
-  search. After a refusal the field's script runs no more, on any document. Past the limit roll
+  request: the breaker refusing what the field keeps (429), even when the script also failed
+  on that document, and a cancelled or timed-out search. After such a failure no script of the
+  search runs again in that segment, a runtime field's or a sort key's (`top_hits` included). Past the limit roll
   answers like that guard: a
   `script_exception` caused by an uncatchable `painless_error`, `script allocation limit
   exceeded: allocation of [N] bytes brings the running total to [T] bytes, over the limit of

@@ -216,11 +216,14 @@ pub struct HostError {
     /// Java frames to report above the script frame (`org.elasticsearch.server@9.5.5/…`),
     /// innermost first.
     pub frames: Vec<String>,
+    /// The exception's own fields after `reason` (a breaker's `bytes_wanted`, `bytes_limit`,
+    /// `durability`).
+    pub fields: Vec<(String, serde_json::Value)>,
 }
 
 impl HostError {
     pub fn illegal_argument(reason: impl Into<String>) -> HostError {
-        HostError { kind: "illegal_argument_exception", reason: reason.into(), frames: Vec::new() }
+        HostError { kind: "illegal_argument_exception", reason: reason.into(), frames: Vec::new(), fields: Vec::new() }
     }
     pub fn with_frames(mut self, frames: &[&str]) -> HostError {
         self.frames = frames.iter().map(|f| f.to_string()).collect();
@@ -245,7 +248,7 @@ pub(crate) fn call<T: Copy>(f: impl FnOnce() -> Result<T, HostError>) -> Result<
     match (ok, failed) {
         (Some(v), _) => Ok(v),
         (None, Some(e)) => {
-            let copy = HostError { kind: e.kind, reason: e.reason.clone(), frames: e.frames.clone() };
+            let copy = e.clone();
             crate::guard::paused(|| drop(e));
             Err(copy)
         }

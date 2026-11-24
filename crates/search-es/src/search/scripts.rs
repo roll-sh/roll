@@ -184,11 +184,22 @@ impl DocHost {
         let doc = self.doc;
         let leaf = &mut self.rt_leaves[i].1;
         let vals = leaf.values(doc).map_err(|e| {
-            let reason = super::runtime::innermost_reason(&e);
-            // the breaker refusing what the field keeps stays a breaker refusal for the script
-            // reading it (uncatchable, 429), not an exception it may catch
-            match e.status == 429 && leaf.refused() {
-                true => HostError { kind: "circuit_breaking_exception", reason, frames: Vec::new() },
+            let mut inner = &e;
+            while let Some(c) = inner.caused_by.as_deref() {
+                inner = c;
+            }
+            // what stopped the field for good (the breaker refusing what it keeps, a cancelled or
+            // timed-out search) stays that for the script reading it: uncatchable, with the
+            // breaker's 429 and fields, not an exception it may catch
+            let kind = match inner.kind.as_ref() {
+                "circuit_breaking_exception" => "circuit_breaking_exception",
+                "task_cancelled_exception" => "task_cancelled_exception",
+                "time_exceeded_exception" => "time_exceeded_exception",
+                _ => "",
+            };
+            let reason = inner.reason().to_string();
+            match leaf.refused() && !kind.is_empty() {
+                true => HostError { kind, reason, frames: Vec::new(), fields: inner.meta().iter().map(|(k, v)| (k.to_string(), crate::scripting::to_serde(v))).collect() },
                 false => HostError::illegal_argument(reason),
             }
         })?;
@@ -535,7 +546,7 @@ fn check_control(ctl: Option<&search_index::search::SearchControl>) -> Result<()
             let kind: &'static str = if kind == "task_cancelled_exception" { "task_cancelled_exception" } else { "time_exceeded_exception" };
             let reason = e.to_string();
             search_index::search::note_interrupted(e);
-            Err(search_painless::HostError { kind, reason, frames: Vec::new() })
+            Err(search_painless::HostError { kind, reason, frames: Vec::new(), fields: Vec::new() })
         }
     }
 }
@@ -1019,6 +1030,9 @@ pub struct Leaf {
     // Field order matters: the instance borrows `script` and must drop first.
     inst: Inst,
     host: DocHost,
+    /// A failure that isn't the script's (the breaker refusing what it holds, a cancelled or
+    /// timed-out search): every later run returns it without running.
+    refused: Option<search_painless::ScriptError>,
     _script: search_painless::Compiled,
 }
 
@@ -1045,7 +1059,7 @@ impl Leaf {
         // SAFETY: `_script` keeps the script alive for as long as the instance exists.
         let inst: search_painless::Instance<'static> = unsafe { std::mem::transmute(s.instance()) };
         let cancellable = host.cancellable;
-        let mut leaf = Leaf { inst: Inst::Painless(inst), host, _script: search_painless::Compiled::Painless(s) };
+        let mut leaf = Leaf { inst: Inst::Painless(inst), host, refused: None, _script: search_painless::Compiled::Painless(s) };
         if let Inst::Painless(i) = &mut leaf.inst {
             i.set_params(params);
             i.set_cancellable(cancellable);
@@ -1064,7 +1078,7 @@ impl Leaf {
                 // SAFETY: `_script` keeps the expression alive for as long as the instance exists.
                 let mut inst: search_painless::expression::Instance<'static> = unsafe { std::mem::transmute(e.instance()) };
                 inst.set_params(&bound.params);
-                Some(Leaf { inst: Inst::Expression(inst), host, _script: search_painless::Compiled::Expression(e) })
+                Some(Leaf { inst: Inst::Expression(inst), host, refused: None, _script: search_painless::Compiled::Expression(e) })
             }
             search_painless::Compiled::Mustache(_) => None,
         }
@@ -1073,27 +1087,41 @@ impl Leaf {
     pub fn run(&mut self, doc: u32, score: f64) -> Result<search_painless::Value, search_painless::ScriptError> {
         self.host.doc = doc;
         self.host.score = score;
-        match &mut self.inst {
-            Inst::Painless(i) => i.execute(&mut self.host),
-            Inst::Expression(i) => i.execute(&mut self.host),
-        }
+        self.sticky(|inst, host| match inst {
+            Inst::Painless(i) => i.execute(host),
+            Inst::Expression(i) => i.execute(host),
+        })
     }
 
     pub fn run_f64(&mut self, doc: u32, score: f64) -> Result<f64, search_painless::ScriptError> {
         self.host.doc = doc;
         self.host.score = score;
-        match &mut self.inst {
-            Inst::Painless(i) => i.execute_f64(&mut self.host),
-            Inst::Expression(i) => i.execute_f64(&mut self.host),
-        }
+        self.sticky(|inst, host| match inst {
+            Inst::Painless(i) => i.execute_f64(host),
+            Inst::Expression(i) => i.execute_f64(host),
+        })
     }
 
     pub fn run_bool(&mut self, doc: u32) -> Result<bool, search_painless::ScriptError> {
         self.host.doc = doc;
-        match &mut self.inst {
-            Inst::Painless(i) => i.execute_bool(&mut self.host),
-            Inst::Expression(i) => i.execute_bool(&mut self.host),
+        self.sticky(|inst, host| match inst {
+            Inst::Painless(i) => i.execute_bool(host),
+            Inst::Expression(i) => i.execute_bool(host),
+        })
+    }
+
+    /// Runs `f` unless an earlier run was refused, keeping a refusal for the runs after it.
+    fn sticky<T>(&mut self, f: impl FnOnce(&mut Inst, &mut DocHost) -> Result<T, search_painless::ScriptError>) -> Result<T, search_painless::ScriptError> {
+        if let Some(e) = &self.refused {
+            return Err(e.clone());
         }
+        let r = f(&mut self.inst, &mut self.host);
+        if let Err(e) = &r
+            && e.uncatchable()
+        {
+            self.refused = Some(e.clone());
+        }
+        r
     }
 
     pub fn set_var(&mut self, name: &str, v: search_painless::Value) {

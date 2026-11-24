@@ -1475,9 +1475,11 @@ impl Instance<'_> {
                 Err(e) => {
                     let breaker = e.kind == "circuit_breaking_exception";
                     let mut err = script_error("runtime error", &self.expr.source, &self.expr.source, 0, e.kind, Some(e.reason), None);
-                    // a runtime field's memory refused by the breaker answers its 429
+                    // a runtime field's memory refused by the breaker answers its 429, with the
+                    // breaker's fields
                     if breaker {
                         err.status = 429;
+                        err.cause_fields = e.fields;
                     }
                     return Err(err);
                 }

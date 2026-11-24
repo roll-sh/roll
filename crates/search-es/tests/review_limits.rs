@@ -412,6 +412,7 @@ async fn runtime_field_memory_is_charged_to_the_breaker_once() {
         let body = v.to_json();
         assert_eq!(status, 429, "{script}: {body}");
         assert!(body.contains("circuit_breaking_exception") && body.contains("[request] Data too large, data for [<script>]"), "{script}: {body}");
+        assert!(body.contains(r#""bytes_limit":8388608"#) && body.contains(r#""durability":"TRANSIENT""#), "{script}: {body}");
     }
     // a sort on a runtime field runs its script on every document, whatever matched: the
     // refusal ends the search even though the one matching document was read before it
@@ -419,11 +420,18 @@ async fn runtime_field_memory_is_charged_to_the_breaker_once() {
     let (status, v) = call(&c, "POST", "/rtk/_search", sort).await;
     assert_eq!(status, 429, "{}", v.to_json());
     // a lenient field (`on_script_error: continue`) skips documents its script fails on, but
-    // not the breaker's refusal
-    let lenient = r#"{"size":0,"runtime_mappings":{"rt":{"type":"long","on_script_error":"continue","script":{"source":"params.keep.add(new byte[1048576]); emit(1)","params":{"keep":[]}}}},"aggs":{"t":{"terms":{"field":"rt"}}}}"#;
-    let (status, v) = call(&c, "POST", "/rtk/_search", lenient).await;
+    // not the breaker's refusal, even when the script also failed
+    for tail in ["emit(1)", "emit(1); throw new IllegalArgumentException('x')"] {
+        let lenient = format!(r#"{{"size":0,"runtime_mappings":{{"rt":{{"type":"long","on_script_error":"continue","script":{{"source":"params.keep.add(new byte[1048576]); {tail}","params":{{"keep":[]}}}}}}}},"aggs":{{"t":{{"terms":{{"field":"rt"}}}}}}}}"#);
+        let (status, v) = call(&c, "POST", "/rtk/_search", &lenient).await;
+        assert_eq!(status, 429, "{tail}: {}", v.to_json());
+        assert!(v.to_json().contains("[request] Data too large, data for [<script>]"), "{tail}: {}", v.to_json());
+    }
+    // a `_script` sort key in `top_hits` runs on every document of the bucket, the last batch
+    // when the segment's collection finishes: its refusal ends the search too
+    let top = r#"{"size":0,"aggs":{"t":{"top_hits":{"size":1,"sort":[{"_script":{"type":"string","script":{"source":"params.keep.add(new byte[1048576]); return 'a'","params":{"keep":[]}}}}]}}}}"#;
+    let (status, v) = call(&c, "POST", "/rtk/_search", top).await;
     assert_eq!(status, 429, "{}", v.to_json());
-    assert!(v.to_json().contains("[request] Data too large, data for [<script>]"), "{}", v.to_json());
     assert_eq!(call(&c, "PUT", "/_cluster/settings", &limit(20)).await.0, 200);
     let (status, v) = call(&c, "POST", "/rtk/_search", &search(r#"{"source":"String s = 'x'; return doc['rt'].value * 2 + s.length();"}"#)).await;
     assert_eq!(status, 200, "{}", v.to_json());
