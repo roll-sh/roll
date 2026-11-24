@@ -853,7 +853,7 @@ impl Workspace {
 
     /// Every home in `project`, as `(kind, ref)`.
     pub fn homes_of_project(&self, project: &str) -> Result<Vec<(String, String)>> {
-        Ok(self.db.read(|c| homes_of(c, project))?)
+        self.db.read(|c| homes_of(c, project))
     }
 
     /// Every ref of `kind` a canvas or a home keeps (live or with a deleted project), with the
