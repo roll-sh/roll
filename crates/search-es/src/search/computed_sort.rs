@@ -43,7 +43,7 @@ impl ComputedSort for ScriptKey {
     fn segment(&self, seg: &SegmentContext) -> search_aggs::Result<Box<dyn SegmentComputedSort>> {
         let host = self.painless.host(seg);
         let leaf = Leaf::from_bound(&self.painless.bound, host).ok_or_else(|| search_aggs::AggError::illegal_argument("sort scripts must be painless"))?;
-        Ok(Box::new(ScriptLeaf { leaf, kind: self.kind }))
+        Ok(Box::new(ScriptLeaf { leaf, kind: self.kind, deferred: false }))
     }
 
     fn render_bytes(&self, b: &[u8]) -> Json {
@@ -58,18 +58,28 @@ impl ComputedSort for ScriptKey {
 struct ScriptLeaf {
     leaf: Leaf,
     kind: &'static str,
+    /// The search fails with the first error: the script runs no more after it.
+    deferred: bool,
+}
+
+impl ScriptLeaf {
+    fn defer(&mut self, e: crate::error::EsError) -> SortVal {
+        self.deferred = true;
+        defer(e);
+        SortVal::Null
+    }
 }
 
 impl SegmentComputedSort for ScriptLeaf {
     fn value(&mut self, doc: u32, score: f32) -> SortVal {
+        if self.deferred {
+            return SortVal::Null;
+        }
         let score = if score.is_nan() { 0.0 } else { f64::from(score) };
         if self.kind == "number" {
             return match self.leaf.run_f64(doc, score) {
                 Ok(v) => SortVal::Double(v),
-                Err(e) => {
-                    defer(crate::scripting::script_error(e));
-                    SortVal::Null
-                }
+                Err(e) => self.defer(crate::scripting::script_error(e)),
             };
         }
         match self.leaf.run(doc, score) {
@@ -79,19 +89,13 @@ impl SegmentComputedSort for ScriptLeaf {
                 if self.kind == "version" {
                     match super::version_field::encode(&s) {
                         Ok(b) => SortVal::Bytes(b),
-                        Err(e) => {
-                            defer(e);
-                            SortVal::Null
-                        }
+                        Err(e) => self.defer(e),
                     }
                 } else {
                     SortVal::Bytes(s.into_bytes())
                 }
             }
-            Err(e) => {
-                defer(crate::scripting::script_error(e));
-                SortVal::Null
-            }
+            Err(e) => self.defer(crate::scripting::script_error(e)),
         }
     }
 }
@@ -168,7 +172,7 @@ impl ComputedSort for RuntimeKey {
 
     fn segment(&self, seg: &SegmentContext) -> search_aggs::Result<Box<dyn SegmentComputedSort>> {
         let leaf = self.ev.leaf(seg).map_err(|e| search_aggs::AggError::new(e.status, e.kind.to_string(), e.reason().to_string()))?;
-        Ok(Box::new(RuntimeLeaf { leaf, reverse: self.reverse }))
+        Ok(Box::new(RuntimeLeaf { leaf, reverse: self.reverse, deferred: false }))
     }
 
     fn render_bytes(&self, b: &[u8]) -> Json {
@@ -182,14 +186,20 @@ impl ComputedSort for RuntimeKey {
 struct RuntimeLeaf {
     leaf: super::runtime::EvalLeaf,
     reverse: bool,
+    /// The search fails with the first error: the field is read no more after it.
+    deferred: bool,
 }
 
 impl SegmentComputedSort for RuntimeLeaf {
     fn value(&mut self, doc: u32, _score: f32) -> SortVal {
         use super::runtime::RtValue as V;
+        if self.deferred {
+            return SortVal::Null;
+        }
         let vals = match self.leaf.values(doc) {
             Ok(v) => v,
             Err(e) => {
+                self.deferred = true;
                 defer(e);
                 return SortVal::Null;
             }

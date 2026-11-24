@@ -397,10 +397,10 @@ export const endpointSlower = (e: EndpointTime) => e.slower ?? (e.main_ms != nul
 /** Which row of the screenshot's chooser a page check goes in: a page, a view of the first one (a
  * width or a browser), or a state (`state:<name>`). */
 export const pageGroup = (path: string): "Pages" | "Views" | "States" | "Stories" =>
-  /^@\d+$/.test(path) || path.startsWith("browser:") ? "Views" : path.startsWith("state:") ? "States" : path.startsWith("story:") ? "Stories" : "Pages";
+  /^@\d+$/.test(path) || path.startsWith("browser:") || path.startsWith("mode:") ? "Views" : path.startsWith("state:") ? "States" : path.startsWith("story:") ? "Stories" : "Pages";
 
 export const pageLabel = (path: string) =>
-  /^@\d+$/.test(path) ? `${path.slice(1)} px` : path.startsWith("story:") ? path.slice(6).replace("--", " / ") : path === "browser:firefox" ? "Firefox" : path === "browser:webkit" ? "WebKit" : path === "browser:webkit-phone" ? "WebKit, phone" : path || "/";
+  /^@\d+$/.test(path) ? `${path.slice(1)} px` : path.startsWith("mode:") ? `${path.slice(5)} mode` : path.startsWith("story:") ? path.slice(6).replace("--", " / ") : path === "browser:firefox" ? "Firefox" : path === "browser:webkit" ? "WebKit" : path === "browser:webkit-phone" ? "WebKit, phone" : path || "/";
 
 /** "1.2 s" or "380 ms". */
 export const duration = (ms: number) => (ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`);
@@ -432,7 +432,7 @@ export interface PreviewSettings {
   secrets: { base: string; allow_production: boolean };
   /** A patch replaces the whole map. */
   env: Record<string, string>;
-  github: { comment: boolean; status: boolean; deployment: boolean; screenshot?: boolean; baseline?: boolean; pages?: string[]; hide?: string[]; budget?: SpeedBudget; visual_threshold?: number; widths?: number[]; openapi?: string | null; endpoints?: string[]; states?: PageState[]; browsers?: ("firefox" | "webkit" | "webkit-phone")[]; storybook?: string | null };
+  github: { comment: boolean; status: boolean; deployment: boolean; screenshot?: boolean; baseline?: boolean; pages?: string[]; hide?: string[]; budget?: SpeedBudget; visual_threshold?: number; widths?: number[]; openapi?: string | null; endpoints?: string[]; states?: PageState[]; browsers?: ("firefox" | "webkit" | "webkit-phone")[]; storybook?: string | null; modes?: { name: string; color_scheme?: "dark" | "light"; locale?: string; timezone?: string }[] };
   /** "link": a preview's URLs need its link (its access token once, then a cookie). "team": only people signed in to roll who may open the project (they sign in on the way; the link's token lets nobody in). */
   access: "link" | "team" | "public";
   /** Chromatic's UI Review: `check` posts `roll/visual`; `required` also keeps a change waiting for one from landing in roll. */
@@ -611,6 +611,12 @@ export const previewsApi = {
   wake: (id: string) => call<Preview>("POST", `${one(id)}/wake`),
   /** Re-branches every resource, or the ones named (`"<kind>:<parent>"`). */
   reset: (id: string, resources?: string[]) => call<Preview>("POST", `${one(id)}/reset`, resources?.length ? { resources } : {}),
+  /** Its restore points (its Postgres data saved, to put back later), oldest first, and how many it may keep. */
+  restorePoints: (id: string) => call<{ points: RestorePoint[]; max: number }>("GET", `${one(id)}/restore-points`),
+  savePoint: (id: string, label: string) => call<RestorePoint>("POST", `${one(id)}/restore-points`, { label }),
+  /** Puts the data back as the point left it (its next converge; the services sleep meanwhile, no seed). */
+  restorePoint: (id: string, point: string) => call<Preview>("POST", `${one(id)}/restore-points/${encodeURIComponent(point)}/restore`),
+  deletePoint: (id: string, point: string) => call<null>("DELETE", `${one(id)}/restore-points/${encodeURIComponent(point)}`),
   /** Its latest requests through roll, newest first (roll's runtime; a roll apps instance's are roll apps'). */
   requests: (id: string) => call<{ requests: RequestLine[] }>("GET", `${one(id)}/requests`),
   /** What its running services use right now (cores of CPU, resident memory, the memory each runs with). */
@@ -720,6 +726,15 @@ export async function followLogs(id: string, service: string, lines: number, onL
 /** A preview's shell's screen: base64 chunks, the scrollback first, then `onClosed`. */
 export function followShell(id: string, sh: string, opts: ScreenHandlers): () => void {
   return followScreen(`${ROLL_API}${one(id)}/shell/sessions/${encodeURIComponent(sh)}/screen`, () => apiHeaders() ?? {}, opts);
+}
+
+/** A restore point: the preview's data saved at `at` (ms), `data` naming what it holds (`<kind>:<parent>`). */
+export interface RestorePoint {
+  id: string;
+  label: string;
+  by: string;
+  at: number;
+  data: string[];
 }
 
 /** A resource as the reset body and the settings name it. */

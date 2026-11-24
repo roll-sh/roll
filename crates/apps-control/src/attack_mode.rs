@@ -81,15 +81,24 @@ impl Apps {
     /// The minute's judgment (on the environment's owner): on by itself once a minute's requests
     /// reach its `per_minute`.
     pub(crate) async fn judge_attack(self: &Arc<Self>, service: &str, env: &str, deployment: &str, last_minute_requests: i64) {
-        let Ok(a) = self.attack(service, env).await else { return };
-        let (Some(mode), now) = (a.mode, code_sql::now_ms()) else { return };
-        if a.on(now) || last_minute_requests < mode.per_minute as i64 {
-            return;
-        }
-        let until = now + mode.minutes as i64 * 60_000;
-        if self.set_attack(service, env, Attack { until: Some(until), ..a }).await.is_err() {
-            return;
-        }
+        let now = code_sql::now_ms();
+        // Read and turned on in one write: a PUT turning it off in between isn't undone.
+        let k = key(service, env);
+        let tripped = self
+            .db(move |s| {
+                s.update_state(&k, |old| {
+                    let a: Attack = old.and_then(|v| serde_json::from_str(v).ok())?;
+                    let mode = a.mode?;
+                    if a.on(now) || last_minute_requests < mode.per_minute as i64 {
+                        return None;
+                    }
+                    serde_json::to_string(&Attack { until: Some(now + mode.minutes as i64 * 60_000), ..a }).ok()
+                })
+            })
+            .await;
+        let Some(a) = tripped.ok().flatten().and_then(|v| serde_json::from_str::<Attack>(&v).ok()) else { return };
+        let (Some(mode), Some(until)) = (a.mode, a.until) else { return };
+        self.live(service, env).forget_gate();
         let data = serde_json::json!({ "requests": last_minute_requests, "per_minute": mode.per_minute, "until": until });
         let (sid, e, dep, d) = (service.to_string(), env.to_string(), deployment.to_string(), data.clone());
         let _ = self.db(move |s| s.add_event("attack.mode", &sid, &e, Some(&dep), &d)).await;

@@ -517,6 +517,8 @@ impl Secrets {
         // Who set the notify URL: it's announced to only while they may manage the project.
         db.add_column("environments", "notify_by", "TEXT")?;
         db.add_column("syncs", "checked_at", "INTEGER")?;
+        // What a certificate sync's target calls what it pushed (syncs.rs).
+        db.add_column("syncs", "remote_id", "TEXT")?;
         // Syncs a change marked due (checked_at NULL), found every couple of seconds (syncs.rs).
         db.ensure_schema("CREATE INDEX IF NOT EXISTS syncs_due ON syncs (retry_at) WHERE checked_at IS NULL;")?;
         db.add_column("leases", "path", "TEXT")?;
@@ -607,6 +609,9 @@ impl Secrets {
             Ok(())
         })?;
         db.add_column("projects", "validity_checks", "INTEGER")?;
+        // What a leaked managed key does (leaks.rs): `managed` rotates it, `off` (NULL) reports it.
+        db.add_column("projects", "leak_rotate", "TEXT")?;
+        db.ensure_schema(leaks::SCHEMA)?;
         db.ensure_schema(alerts::SCHEMA)?;
         db.ensure_schema(decoys::SCHEMA)?;
         db.ensure_schema(intercept::SCHEMA)?;
@@ -621,6 +626,9 @@ impl Secrets {
         db.add_column("saas_rotators", "credential_expires_at", "INTEGER")?;
         db.ensure_schema(transit::SCHEMA)?;
         db.ensure_schema(pki::SCHEMA)?;
+        // An intermediate CA (pki.rs): its CSR while it's pending, then the certificates above it.
+        db.add_column("cas", "csr", "TEXT")?;
+        db.add_column("cas", "chain", "TEXT")?;
         // ACME on a CA (acme.rs): whether its bindings' names are pre-authorized.
         db.ensure_schema(acme::SCHEMA)?;
         db.add_column("cas", "acme_preauthorize", "INTEGER")?;

@@ -115,6 +115,11 @@ P=$(api GET "/v1/previews/$PV")
 ENV="pv-${PV#pv_}"
 URL=$(echo "$P" | jq_ "d['services'][0]['url']")
 say "preview $PV ready in $((T1 - T0)) ms, service url $URL"
+say "its page read through roll (roll MCP's previews_fetch): roll apps serves it behind the preview's link, no token in the answer"
+SVC_NAME=$(echo "$P" | jq_ "d['services'][0]['name']")
+FETCHED=$(curl -s "http://$API/v1/previews/$PV/fetch?path=/&service=$SVC_NAME")
+[ "$(echo "$FETCHED" | jq_ "d.get('status')")" = 200 ] || { echo "a roll apps service's page should read through roll: ${FETCHED:0:300}"; exit 1; }
+echo "$FETCHED" | grep -q roll_access && { echo "the answer must carry no token"; exit 1; }
 say "production's browser checks on the preview's head: home passes, cart fails, said"
 BC=""
 for _ in $(seq 1 300); do
@@ -263,6 +268,11 @@ for _ in $(seq 1 600); do
 done
 [ -n "$BASE" ] || { echo "main's baseline on roll apps should be compared with the change"; api GET "/v1/previews?project=$PRJ" | jq_ "[(p['branch'], p['state'], p.get('screenshot_at')) for p in d]"; exit 1; }
 api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"screenshot":false}}' >/dev/null
+say "an agent's run on the roll apps service's page (roll MCP's previews_try), in its instance's network"
+TRY=$(api POST "/v1/previews/$PV/try" "{\"service\":\"$SVC_NAME\",\"path\":\"/\",\"steps\":[{\"press\":\"Tab\"}]}")
+TRIED=$(echo "$TRY" | jq_ "'%s %s' % (d['status'], len(d['text']) > 0)")
+[ "$TRIED" = "200 True" ] || { echo "an agent's run on a roll apps service should answer its page: ${TRY:0:300}"; exit 1; }
+curl -sf "http://$API/v1/previews/$PV/try/$(echo "$TRY" | jq_ "d['run']")/screenshot" | head -c 8 | od -An -c | grep -q "P   N   G" || { echo "the run's picture should be a PNG"; exit 1; }
 
 say "the feedback button on the roll apps environment, for a visitor through roll (link access)"
 api PUT "/v1/previews/projects/$PRJ/settings" '{"access":"link"}' >/dev/null
@@ -514,6 +524,7 @@ cat <<EOF
 | Change opened → preview ready (Redis branched, roll apps environment made, deploy queued) | $((T1 - T0)) ms |
 | Production's browser checks on the preview's head (roll apps runs them; previews reads them) | $BC |
 | The roll apps service's screenshot (its instance's network) / load / against main's baseline on roll apps / its [app.previews.screenshots] states | $SHOT / $LOAD ms / $BASE / $APPS_STATE |
+| An agent's run on the roll apps service's page (status, text) | $TRIED |
 | The feedback button on the roll apps environment (a visitor through roll) / its notes | tagged / $NOTES |
 | … → its deploy active (a Docker build of the change's commit) | $((T2 - T0)) ms |
 | First request through roll apps (cold) | $((T4 - T3)) ms |

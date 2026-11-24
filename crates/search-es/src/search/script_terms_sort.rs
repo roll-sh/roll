@@ -160,6 +160,8 @@ impl ScriptTerms {
                             let picked = if *max { bytes.max() } else { bytes.min() };
                             vals.push(picked.or_else(|| missing.clone()));
                         }
+                        // a refusal that isn't the script's ends the search, whatever matched
+                        Err(e) if leaf.refused() => return Err(e),
                         Err(e) => {
                             errors.insert((seg.ord, doc), e);
                             vals.push(None);
@@ -178,7 +180,11 @@ impl ScriptTerms {
                     vals.push(None);
                     continue;
                 }
-                let r = leaf.run(doc, 0.0).map_err(crate::scripting::script_error);
+                let r = match leaf.run(doc, 0.0) {
+                    // a refusal that isn't the script's ends the search, whatever matched
+                    Err(e) if e.uncatchable() => return Err(crate::scripting::script_error(e)),
+                    r => r.map_err(crate::scripting::script_error),
+                };
                 match r.and_then(|v| self.bytes_of(&v)) {
                     Ok(b) => vals.push(b),
                     Err(e) => {

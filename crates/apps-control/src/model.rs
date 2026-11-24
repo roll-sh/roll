@@ -280,6 +280,83 @@ pub struct Access {
     pub signed_in: bool,
     /// Its password's argon2id hash ([`crate::password`]), never returned.
     pub password_hash: Option<String>,
+    /// People a provider vouches for, who needn't be roll's ([`Sso`]).
+    pub sso: Option<Sso>,
+    /// Paths whose CORS preflights (`OPTIONS` with `Access-Control-Request-Method`) go to the app
+    /// past the gate (Vercel's OPTIONS Allowlist): a preflight carries no credentials, so a page on
+    /// another of the owner's sites can then call the API with its own.
+    pub preflight: Vec<String>,
+    /// Other services of the project let in with roll's own token for them (Cloud Run's invoker,
+    /// [`Access::callers`] entries: `api`, `api/production`, or an id): `x-roll-caller`.
+    pub callers: Vec<String>,
+}
+
+/// The most `access.callers` entries.
+pub const MAX_CALLERS: usize = 20;
+
+/// The most `access.preflight` paths.
+pub const MAX_PREFLIGHT: usize = 20;
+
+/// Signing visitors in through GitHub or Google (Cloud Run's IAP, Cloudflare Access): anyone whose
+/// verified email, email domain or GitHub organisation is in `allow`, account of roll's or not
+/// (`access.sso`; docs/apps/README.md, "Signing in to an environment").
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Sso {
+    /// `github` or `google`.
+    pub provider: String,
+    /// `@acme.com` (a domain's people), `ada@acme.com` (one person), `org:acme` (a GitHub
+    /// organisation's members; GitHub only). 1–100, kept in lower case.
+    pub allow: Vec<String>,
+}
+
+impl Sso {
+    pub fn check(mut self) -> Result<Sso> {
+        let bad = |m: &str| Err(Error::BadRequest(format!("access.sso: {m}")));
+        if !["github", "google"].contains(&self.provider.as_str()) {
+            return bad("provider is github or google");
+        }
+        if self.allow.is_empty() || self.allow.len() > 100 {
+            return bad("allow is 1–100 entries: @domain, an email, or org:name (GitHub)");
+        }
+        let label = |s: &str| !s.is_empty() && s.len() <= 63 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') && !s.starts_with('-');
+        let domain = |d: &str| d.len() <= 253 && d.contains('.') && d.split('.').all(label);
+        for a in &mut self.allow {
+            *a = a.trim().to_ascii_lowercase();
+            let ok = if let Some(org) = a.strip_prefix("org:") {
+                self.provider == "github" && org.len() <= 39 && label(org)
+            } else if let Some(d) = a.strip_prefix('@') {
+                domain(d)
+            } else {
+                a.split_once('@').is_some_and(|(local, d)| !local.is_empty() && local.len() <= 64 && !local.contains(char::is_whitespace) && domain(d))
+            };
+            if !ok {
+                return bad(&format!("{a:?} isn't @domain, an email, or org:name (org: only with github)"));
+            }
+        }
+        self.allow.sort();
+        self.allow.dedup();
+        Ok(self)
+    }
+
+    /// Whether the sign-in needs GitHub's organisations read.
+    pub fn orgs(&self) -> bool {
+        self.allow.iter().any(|a| a.starts_with("org:"))
+    }
+
+    /// The entry that lets someone in (their verified email, lower case, organisations, and
+    /// Google's `hd`). With Google, a domain's entry also needs the account to be that
+    /// Workspace domain's (`hd`): a consumer account made with a work address isn't.
+    pub fn admits(&self, email: &str, orgs: &[String], hosted_domain: Option<&str>) -> Option<&str> {
+        let domain = email.rsplit_once('@').map(|(_, d)| d)?;
+        self.allow.iter().map(String::as_str).find(|a| match a.strip_prefix("org:") {
+            Some(org) => orgs.iter().any(|o| o == org),
+            None => match a.strip_prefix('@') {
+                Some(d) => d == domain && (self.provider != "google" || hosted_domain.is_some_and(|h| h.eq_ignore_ascii_case(d))),
+                None => *a == email,
+            },
+        })
+    }
 }
 
 /// A private registry's login for a service's image (`PUT …/registry`); the password is sealed
@@ -1794,6 +1871,15 @@ pub struct Environment {
     /// People signed in to roll who may open the project get in (`access.signed_in`).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub signed_in: bool,
+    /// Visitors a provider signs in (`access.sso`): its provider and who it lets in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sso: Option<Sso>,
+    /// Paths whose CORS preflights reach the app past its gate (`access.preflight`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub preflight: Vec<String>,
+    /// Other services of the project let in with roll's token for them (`access.callers`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub callers: Vec<String>,
     /// Visitors may type its password (`access.password`; never returned).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub password: bool,

@@ -152,6 +152,8 @@ type ErrorsRead = HashMap<(String, i64), (i64, Vec<crate::ErrorGroup>)>;
 type ErrorCountsRead = HashMap<(String, i64), (i64, u64)>;
 
 /// Tokens of roll's issuer answered in the last minute: (preview, service, audience) → (when, token).
+/// Agents' runs' pictures, by run: (preview, when, PNG).
+type TriedPictures = HashMap<String, (String, i64, Vec<u8>)>;
 type OidcIssued = HashMap<(String, String, String), (i64, crate::OidcToken)>;
 
 pub struct Engine {
@@ -184,6 +186,10 @@ pub struct Engine {
     forwards_said: Mutex<HashMap<(String, String, String, u16), i64>>,
     /// What ends a preview's forwarded connections when it goes, by preview.
     forwards_end: Mutex<HashMap<String, tokio::sync::watch::Sender<bool>>>,
+    /// Agents' runs going (`…/try`), by preview: at most [`shell::TRIES_AT_ONCE`] each.
+    tries_going: Mutex<HashMap<String, Arc<std::sync::atomic::AtomicUsize>>>,
+    /// Their pictures, by run: (preview, when, PNG), for [`shell::TRY_KEPT_MS`].
+    tries: Mutex<TriedPictures>,
     /// Services swapped for a laptop's process (`roll preview swap`): by preview and service, who.
     swaps: Mutex<HashMap<(String, String), String>>,
     /// Each preview's recent spans (`traces.rs`), and what reads an OTLP request into them
@@ -351,6 +357,8 @@ impl Engine {
             forwards_said: Mutex::new(HashMap::new()),
             forwards_end: Mutex::new(HashMap::new()),
             swaps: Mutex::new(HashMap::new()),
+            tries_going: Mutex::new(HashMap::new()),
+            tries: Mutex::new(HashMap::new()),
             started_stamp: drains::now_stamp(),
         })
     }
@@ -963,6 +971,8 @@ mod discover;
 mod drains;
 mod env;
 mod masks;
+mod points;
+pub use points::MAX_POINTS;
 pub mod shell;
 pub mod traces;
 pub use masks::ErrorMasks;

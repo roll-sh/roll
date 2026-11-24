@@ -388,3 +388,81 @@ async fn scripted_metric_state_stays_charged_across_segments() {
     let body = v.to_json();
     assert!(body.contains("circuit_breaking_exception") && body.contains("data for [<script>]"), "{body}");
 }
+
+/// A runtime field's script keeping 1 MiB a document is charged to the search's `request`
+/// breaker once, whoever reads it: a script on the interpreter (whose execution is charged it and
+/// whose host reports), or one on its fast path or a Lucene expression, which keep no account (the
+/// runtime field's own host reports). 12 documents trip 8 MiB, and don't trip 20 MiB.
+#[tokio::test]
+async fn runtime_field_memory_is_charged_to_the_breaker_once() {
+    let c = Cluster::in_memory("limits").await;
+    let bulk: String = (0..12).map(|i| format!("{{\"index\":{{\"_id\":\"{i}\"}}}}\n{{\"n\":{i}}}\n")).collect();
+    call(&c, "PUT", "/rtk", r#"{"settings":{"number_of_shards":1,"number_of_replicas":0}}"#).await;
+    let (status, v) = call(&c, "POST", "/rtk/_bulk?refresh=true", &bulk).await;
+    assert_eq!(status, 200, "{}", v.to_json());
+    let search = |script: &str| {
+        format!(
+            r#"{{"runtime_mappings":{{"rt":{{"type":"long","script":{{"source":"params.keep.add(new byte[1048576]); emit(1)","params":{{"keep":[]}}}}}}}},"query":{{"script_score":{{"query":{{"match_all":{{}}}},"script":{script}}}}}}}"#
+        )
+    };
+    let limit = |mb: u32| format!(r#"{{"persistent":{{"indices.breaker.request.limit":"{mb}mb"}}}}"#);
+    assert_eq!(call(&c, "PUT", "/_cluster/settings", &limit(8)).await.0, 200);
+    for script in [r#"{"source":"doc['rt'].value * 2"}"#, r#"{"lang":"expression","source":"doc['rt'].value"}"#] {
+        let (status, v) = call(&c, "POST", "/rtk/_search", &search(script)).await;
+        let body = v.to_json();
+        assert_eq!(status, 429, "{script}: {body}");
+        assert!(body.contains("circuit_breaking_exception") && body.contains("[request] Data too large, data for [<script>]"), "{script}: {body}");
+        assert!(body.contains(r#""bytes_limit":8388608"#) && body.contains(r#""durability":"TRANSIENT""#), "{script}: {body}");
+    }
+    // a sort on a runtime field runs its script on every document, whatever matched: the
+    // refusal ends the search even though the one matching document was read before it
+    let sort = r#"{"query":{"ids":{"values":["0"]}},"runtime_mappings":{"rk":{"type":"keyword","script":{"source":"params.keep.add(new byte[1048576]); emit('a')","params":{"keep":[]}}}},"sort":[{"rk":"asc"}]}"#;
+    let (status, v) = call(&c, "POST", "/rtk/_search", sort).await;
+    assert_eq!(status, 429, "{}", v.to_json());
+    assert_eq!(at(&v, &["error", "root_cause", "0", "type"]).as_str(), Some("circuit_breaking_exception"), "{}", v.to_json());
+    // a lenient field (`on_script_error: continue`) skips documents its script fails on, but
+    // not the breaker's refusal, even when the script also failed
+    for tail in ["emit(1)", "emit(1); throw new IllegalArgumentException('x')"] {
+        let lenient = format!(r#"{{"size":0,"runtime_mappings":{{"rt":{{"type":"long","on_script_error":"continue","script":{{"source":"params.keep.add(new byte[1048576]); {tail}","params":{{"keep":[]}}}}}}}},"aggs":{{"t":{{"terms":{{"field":"rt"}}}}}}}}"#);
+        let (status, v) = call(&c, "POST", "/rtk/_search", &lenient).await;
+        assert_eq!(status, 429, "{tail}: {}", v.to_json());
+        assert_eq!(at(&v, &["error", "root_cause", "0", "type"]).as_str(), Some("circuit_breaking_exception"), "{tail}: {}", v.to_json());
+        assert!(v.to_json().contains("[request] Data too large, data for [<script>]"), "{tail}: {}", v.to_json());
+    }
+    // a `_script` sort key in `top_hits` runs on every document of the bucket, the last batch
+    // when the segment's collection finishes: its refusal ends the search too
+    let top = r#"{"size":0,"aggs":{"t":{"top_hits":{"size":1,"sort":[{"_script":{"type":"string","script":{"source":"params.keep.add(new byte[1048576]); return 'a'","params":{"keep":[]}}}}]}}}}"#;
+    let (status, v) = call(&c, "POST", "/rtk/_search", top).await;
+    assert_eq!(status, 429, "{}", v.to_json());
+    assert_eq!(at(&v, &["error", "root_cause", "0", "type"]).as_str(), Some("circuit_breaking_exception"), "{}", v.to_json());
+    assert_eq!(call(&c, "PUT", "/_cluster/settings", &limit(20)).await.0, 200);
+    let (status, v) = call(&c, "POST", "/rtk/_search", &search(r#"{"source":"String s = 'x'; return doc['rt'].value * 2 + s.length();"}"#)).await;
+    assert_eq!(status, 200, "{}", v.to_json());
+    assert_eq!(at(&v, &["_shards", "failed"]).as_i64(), Some(0), "{}", v.to_json());
+    assert_eq!(at(&v, &["hits", "total", "value"]).as_i64(), Some(12), "{}", v.to_json());
+}
+
+/// A sort script that fails stops at its first failure: a `_script` sort, a sort on a runtime
+/// field and a `top_hits` `_script` sort over 200 documents each park one error for the
+/// response (per segment), not one per document under the global lock, evicting other
+/// requests' errors. Other tests park a few meanwhile; one per document would be 200.
+#[tokio::test]
+async fn a_failing_sort_script_stops_at_its_first_failure() {
+    let c = Cluster::in_memory("limits").await;
+    let bulk: String = (0..200).map(|i| format!("{{\"index\":{{\"_id\":\"{i}\"}}}}\n{{\"n\":{i}}}\n")).collect();
+    call(&c, "PUT", "/fails", r#"{"settings":{"number_of_shards":1,"number_of_replicas":0}}"#).await;
+    let (status, v) = call(&c, "POST", "/fails/_bulk?refresh=true", &bulk).await;
+    assert_eq!(status, 200, "{}", v.to_json());
+    let throw = "throw new IllegalArgumentException('sort key failed')";
+    let script_sort = format!(r#"{{"sort":[{{"_script":{{"type":"number","script":"{throw}"}}}}]}}"#);
+    let runtime_sort = format!(r#"{{"runtime_mappings":{{"rn":{{"type":"long","script":"{throw}"}}}},"sort":[{{"rn":"asc"}}]}}"#);
+    let top_hits = format!(r#"{{"size":0,"aggs":{{"t":{{"top_hits":{{"size":1,"sort":[{{"_script":{{"type":"number","script":"{throw}"}}}}]}}}}}}}}"#);
+    for body in [script_sort, runtime_sort, top_hits] {
+        let before = search_es::search::scripts::parked_so_far();
+        let (status, v) = call(&c, "POST", "/fails/_search", &body).await;
+        let parked = search_es::search::scripts::parked_so_far() - before;
+        assert_eq!(status, 400, "{body}: {}", v.to_json());
+        assert!(v.to_json().contains("sort key failed"), "{body}: {}", v.to_json());
+        assert!(parked < 50, "{body}: {parked} errors parked");
+    }
+}

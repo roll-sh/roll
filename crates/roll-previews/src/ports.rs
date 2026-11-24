@@ -69,6 +69,17 @@ pub trait Brancher: Send + Sync {
         Ok(None)
     }
 
+    /// Whether [`Self::restore`] can put a branch back: restore points keep only these products'.
+    fn restores(&self) -> bool {
+        false
+    }
+
+    /// Put `branch` back as `point` (a [`Self::snapshot`] of it) left it, in place where the
+    /// product can (its ref and credentials kept). `None` where it can't.
+    async fn restore(&self, _parent: &str, _branch: &str, _kept: Option<&str>, _point: &str, _name: &str, _mode: Mode) -> anyhow::Result<Option<Branched>> {
+        Ok(None)
+    }
+
     /// Delete a [`Brancher::snapshot`] of branch `from` named `name`. By default as a branch of
     /// `parent` (Postgres: a branch of the project); a product whose branch guard checks the
     /// direct parent checks `from` instead.
@@ -383,6 +394,8 @@ pub struct ShotOptions {
     /// Where the service serves Storybook (`/`, `/storybook/`; `github.storybook`): its stories
     /// are taken too, each a page (`story:<id>`).
     pub stories: Option<String>,
+    /// The first page's modes (`github.modes`): `mode:<name>` in `pages`.
+    pub modes: Vec<crate::settings::ModeRule>,
 }
 
 /// One more page of a [`Shot`]: its path, its PNG, and what went wrong while it loaded.
@@ -676,6 +689,19 @@ pub trait Issuer: Send + Sync {
     async fn issue(&self, project: &str, repo: &str, preview: &str, service: &str, aud: &str, ttl: std::time::Duration) -> anyhow::Result<Option<String>>;
 }
 
+/// An agent's run on a service's page (`POST …/try`), as the browser saw it: its picture, the
+/// page's status, the step that found nothing, its visible text and what went wrong on the way.
+/// Serialised (its PNG as base64) when it's taken on the node a roll apps instance runs on.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct Tried {
+    #[serde(with = "png_b64::opt")]
+    pub png: Option<Vec<u8>>,
+    pub status: u16,
+    pub step_failed: Option<String>,
+    pub text: String,
+    pub errors: Vec<String>,
+}
+
 pub trait ShellIo: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
 impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> ShellIo for T {}
 
@@ -905,10 +931,15 @@ pub trait Apps: Send + Sync {
     async fn forward(&self, _preview: &str, _service: &str, _port: u16) -> anyhow::Result<Option<Box<dyn ShellIo>>> {
         Ok(None)
     }
-    /// `path` of the service, read through roll's own way in (past its gate: no link token, no
-    /// share), `GET` or `HEAD`. `None` where this backend doesn't serve it itself (roll apps'
-    /// services answer at their own URL).
-    async fn fetch(&self, _preview: &str, _service: &str, _path: &str, _head: bool) -> anyhow::Result<Option<Fetched>> {
+    /// `path` of the service in a browser, `steps` taken on it (a page state's steps), in the
+    /// service's network (`…/try`). `None` where this backend can't.
+    async fn try_page(&self, _preview: &str, _service: &str, _path: &str, _steps: &[crate::settings::Step]) -> anyhow::Result<Option<Tried>> {
+        Ok(None)
+    }
+    /// `path` of the service, read through roll's own way in, `GET` or `HEAD`: the runtime's own
+    /// proxy past its gate; a roll apps service through roll apps' proxy at its `url`, with the
+    /// preview's link token (`access`) as a visitor's cookie. `None` where this backend can't.
+    async fn fetch(&self, _preview: &str, _service: &str, _url: &str, _access: Option<&str>, _path: &str, _head: bool) -> anyhow::Result<Option<Fetched>> {
         Ok(None)
     }
     /// Whether `service` can be swapped for a laptop's process here (`roll preview swap`): roll's

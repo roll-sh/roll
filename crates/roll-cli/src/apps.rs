@@ -1363,6 +1363,11 @@ pub enum AppsCmd {
         /// in, then back); its link, if it has one, stops.
         #[arg(long, conflicts_with_all = ["open", "private"])]
         signed_in: bool,
+        /// Only people GitHub or Google vouches for get in, whether roll's or not:
+        /// `github:@acme.com,org:acme` or `google:@acme.com,ada@x.com` (a domain, an email, a
+        /// GitHub organisation).
+        #[arg(long, value_name = "PROVIDER:ALLOW", conflicts_with_all = ["open", "private", "signed_in"])]
+        sso: Option<String>,
         /// Maintenance: its public names answer roll's page (with this note, if given) and
         /// nothing wakes.
         #[arg(long, value_name = "NOTE", num_args = 0..=1, default_missing_value = "", conflicts_with = "serve")]
@@ -5029,7 +5034,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, data, wait_for_ci, run, follow_tag, redeploy_on_secrets, vitals, egress, egress_host, private, open, signed_in, maintenance, serve, pause, resume, resume_deploys, hold, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, route, no_routes, redirects, no_redirects, error_page, maintenance_page, roll_pages, freeze, unfreeze, rotate_config, set } => {
+        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, data, wait_for_ci, run, follow_tag, redeploy_on_secrets, vitals, egress, egress_host, private, open, signed_in, sso, maintenance, serve, pause, resume, resume_deploys, hold, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, route, no_routes, redirects, no_redirects, error_page, maintenance_page, roll_pages, freeze, unfreeze, rotate_config, set } => {
             let svc = service(api, &target).await?;
             if rotate_config {
                 let e = api.post(&format!("{}/config/rotate", env_path(&svc, &target.env)), json!({})).await?;
@@ -5077,6 +5082,10 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             if signed_in {
                 body.insert("access".into(), json!({ "signed_in": true }));
+            }
+            if let Some(s) = sso {
+                let (provider, allow) = s.split_once(':').ok_or_else(|| anyhow::anyhow!("--sso is PROVIDER:ALLOW, as github:@acme.com,org:acme"))?;
+                body.insert("access".into(), json!({ "sso": { "provider": provider, "allow": allow.split(',').map(str::trim).filter(|a| !a.is_empty()).collect::<Vec<_>>() } }));
             }
             if let Some(mode) = egress {
                 body.insert("egress".into(), json!({ "mode": mode, "hosts": egress_host }));

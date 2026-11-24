@@ -17,6 +17,7 @@ pub mod challenge;
 pub mod bots;
 pub mod attacks;
 pub mod attack_mode;
+pub mod visitor_token;
 pub mod backups;
 pub mod browser;
 pub mod moving;
@@ -295,6 +296,8 @@ pub struct Apps {
     pushers: push::Pushers,
     /// Who may still open a project's environments ([`Apps::set_visitors`]).
     pub(crate) visitors: std::sync::OnceLock<Arc<dyn integrations::Visitors>>,
+    /// Where visitors a provider vouches for start signing in (`access.sso`); none: not here.
+    pub(crate) visitor_sign_in: std::sync::OnceLock<Arc<dyn integrations::VisitorSignIn>>,
     /// Log drains whose batch came back (the drainer sends the next).
     drain_done: Arc<Mutex<Vec<String>>>,
     /// Projects whose drains changed on this node: the drainer reads theirs again (only theirs).
@@ -431,6 +434,11 @@ pub struct Apps {
     pub(crate) edge_noted: Mutex<std::collections::HashSet<String>>,
     /// Crawlers' addresses checked against their operators' DNS ([`bots`]).
     pub(crate) bots_verified: bots::Verified,
+    /// Projects' keys for their visitors' tokens, and the tokens made ([`visitor_token`]).
+    pub(crate) visitor_keys: Mutex<HashMap<String, (Vec<u8>, String)>>,
+    pub(crate) visitor_tokens: Mutex<HashMap<String, (String, i64)>>,
+    /// The key visitors' sign-in requests are signed with, once read ([`visit`]).
+    pub(crate) sso_key: Mutex<Option<Vec<u8>>>,
     /// Password tries per environment and client, in the last ten minutes ([`password`]).
     pub(crate) password_tries: Mutex<HashMap<password::Client, (i64, u32)>>,
     /// Shells open over HTTP (the dashboard's terminal), by id.
@@ -688,6 +696,7 @@ impl Apps {
             explain_failed: Mutex::new(HashMap::new()),
             pushers: push::Pushers::default(),
             visitors: std::sync::OnceLock::new(),
+            visitor_sign_in: std::sync::OnceLock::new(),
             drain_done: Arc::new(Mutex::new(Vec::new())),
             drains_dirty: Mutex::new(Default::default()),
             preview_lines,
@@ -750,6 +759,9 @@ impl Apps {
             edge_key: Mutex::new(None),
             edge_noted: Mutex::new(Default::default()),
             bots_verified: Default::default(),
+            visitor_keys: Mutex::new(HashMap::new()),
+            visitor_tokens: Mutex::new(HashMap::new()),
+            sso_key: Mutex::new(None),
             password_tries: Mutex::new(HashMap::new()),
             looping: Mutex::new(std::collections::HashSet::new()),
             metric_streaks: Mutex::new(std::collections::HashMap::new()),
@@ -1818,6 +1830,9 @@ impl Apps {
         };
         let gate = self.access(&r.service, &r.name).await?;
         let (private, signed_in, password) = (gate.is_some(), gate.as_ref().is_some_and(|a| a.signed_in), gate.as_ref().is_some_and(|a| a.password_hash.is_some()));
+        let sso = gate.as_ref().and_then(|a| a.sso.clone());
+        let preflight = gate.as_ref().map(|a| a.preflight.clone()).unwrap_or_default();
+        let callers = gate.as_ref().map(|a| a.callers.clone()).unwrap_or_default();
         let (sid, e) = (r.service.clone(), r.name.clone());
         let waiting_for_ci = self.db(move |s| s.ci_waits()).await?.into_iter().find(|(w, _)| w.service == sid && w.env == e).map(|(w, _)| w.sha);
         let (sid, e) = (r.service.clone(), r.name.clone());
@@ -1847,6 +1862,9 @@ impl Apps {
             udp: udp_port.filter(|_| svc.run.udp && svc.run.public && !private && !r.egress.closed()).map(|p| format!("{}:{p}", self.cfg.tcp_host)),
             private,
             signed_in,
+            sso,
+            preflight,
+            callers,
             password,
             next_run_at,
             schedules: self.schedule_states(&svc, &r).await,
@@ -2037,7 +2055,7 @@ impl Apps {
     pub async fn put_environment_by(self: &Arc<Self>, service: &str, env: &str, body: Value, by: Option<String>) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "redirects", "checks", "heartbeats", "split", "mirror", "snippets", "config", "freeze", "pause_schedule", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host", "log_retention_days", "approvals", "badge", "closed_by", "data", "scheduled", "attack_mode", "challenge_until"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "redirects", "checks", "heartbeats", "split", "mirror", "snippets", "config", "freeze", "pause_schedule", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host", "log_retention_days", "approvals", "badge", "closed_by", "data", "scheduled", "attack_mode", "challenge_until", "preflight"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -2061,6 +2079,19 @@ impl Apps {
             None => None,
             Some(Value::Bool(b)) => Some(*b),
             Some(_) => return Err(Error::BadRequest("paused is a boolean".into())),
+        };
+        // CORS preflights to these paths reach the app past its gate (Vercel's OPTIONS Allowlist);
+        // on its own, so setting it never resends the access's secrets.
+        let preflight: Option<Vec<String>> = match o.get("preflight") {
+            None => None,
+            Some(Value::Null) => Some(Vec::new()),
+            Some(v) => {
+                let p: Vec<String> = serde_json::from_value(v.clone()).map_err(|_| Error::BadRequest("preflight is paths (/api/*), or null".into()))?;
+                if p.len() > crate::model::MAX_PREFLIGHT || p.iter().any(|x| !x.starts_with('/') || x.len() > 512 || x.strip_suffix('*').unwrap_or(x).contains('*')) {
+                    return Err(Error::BadRequest(format!("preflight is at most {} paths, each starting with / (`*` only at its end)", crate::model::MAX_PREFLIGHT)));
+                }
+                Some(p)
+            }
         };
         // Attack mode: when it goes on by itself, and on by hand until a time (null: off).
         let attack_mode: Option<Option<crate::attack_mode::AttackMode>> = match o.get("attack_mode") {
@@ -2342,7 +2373,7 @@ impl Apps {
             None => None,
             Some(Value::Null) => Some(None),
             Some(Value::Object(a)) => {
-                if let Some(k) = a.keys().find(|k| !["token", "bypass_sha256", "signed_in", "password"].contains(&k.as_str())) {
+                if let Some(k) = a.keys().find(|k| !["token", "bypass_sha256", "signed_in", "password", "sso", "callers"].contains(&k.as_str())) {
                     return Err(Error::BadRequest(format!("access.{k} isn't a field")));
                 }
                 let signed_in = match a.get("signed_in") {
@@ -2356,10 +2387,27 @@ impl Apps {
                     Some(Value::String(p)) if (8..=200).contains(&p.chars().count()) => Some(crate::password::hash(p).await.map_err(Error::Internal)?),
                     Some(_) => return Err(Error::BadRequest("access.password is 8–200 characters".into())),
                 };
+                // People a provider vouches for, roll's or not.
+                let sso = match a.get("sso") {
+                    None | Some(Value::Null) => None,
+                    Some(v) => Some(serde_json::from_value::<crate::model::Sso>(v.clone()).map_err(|e| Error::BadRequest(format!("access.sso: {e}")))?.check()?),
+                };
+                if sso.is_some() && self.visitor_sign_in.get().is_none() {
+                    return Err(Error::Conflict("signing visitors in through a provider needs roll's accounts on this node".into()));
+                }
+                // Other services of the project, with roll's token for them.
+                let callers: Vec<String> = match a.get("callers") {
+                    None | Some(Value::Null) => Vec::new(),
+                    Some(v) => serde_json::from_value(v.clone()).map_err(|_| Error::BadRequest("access.callers is services (a name or id, `/env` to name one environment)".into()))?,
+                };
+                let label = |s: &str| !s.is_empty() && s.len() <= 63 && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_');
+                if callers.len() > crate::model::MAX_CALLERS || callers.iter().any(|c| !c.split_once('/').map_or(label(c), |(s, e)| label(s) && label(e))) {
+                    return Err(Error::BadRequest(format!("access.callers is at most {} services: a name or id, `/env` to name one of its environments", crate::model::MAX_CALLERS)));
+                }
                 let token = match a.get("token") {
-                    None | Some(Value::Null) if signed_in || password.is_some() => None,
+                    None | Some(Value::Null) if signed_in || password.is_some() || sso.is_some() || !callers.is_empty() => None,
                     Some(Value::String(t)) if (20..=200).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b)) => Some(t.as_str()),
-                    _ => return Err(Error::BadRequest("access.token is 20–200 of A-Z, a-z, 0-9, - and _ (or access.signed_in is true, or there's a password)".into())),
+                    _ => return Err(Error::BadRequest("access.token is 20–200 of A-Z, a-z, 0-9, - and _ (or access.signed_in is true, or there's a password or sso)".into())),
                 };
                 if signed_in && self.cfg.web_url.is_none() {
                     return Err(Error::Conflict("signing in needs roll's dashboard address on this node (web_url)".into()));
@@ -2369,9 +2417,12 @@ impl Apps {
                     Some(Value::String(h)) if h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()) => Some(h.to_ascii_lowercase()),
                     Some(_) => return Err(Error::BadRequest("access.bypass_sha256 is a SHA-256 in hex".into())),
                 };
-                Some(Some(Access { token_hash: token.map(crate::public::token_hash), bypass_hash: bypass, signed_in, password_hash: password }))
+                // A new way in keeps the paths whose preflights pass (`preflight`, set on its own).
+                let (sid, e) = (service.to_string(), env.to_string());
+                let preflight = self.db(move |s| s.access(&sid, &e)).await.ok().flatten().map(|a| a.preflight).unwrap_or_default();
+                Some(Some(Access { token_hash: token.map(crate::public::token_hash), bypass_hash: bypass, signed_in, password_hash: password, sso, preflight, callers }))
             }
-            Some(_) => return Err(Error::BadRequest("access is {token?, signed_in?, password?, bypass_sha256?} or null".into())),
+            Some(_) => return Err(Error::BadRequest("access is {token?, signed_in?, password?, sso?, callers?, bypass_sha256?} or null".into())),
         };
         // A new environment may start with another's variables (cloning staging from production).
         let variables_from = match o.get("variables_from") {
@@ -2728,6 +2779,13 @@ impl Apps {
             let (sid, e, a) = (service.to_string(), env.to_string(), access.clone());
             self.db(move |s| s.set_access(&sid, &e, a.as_ref())).await?;
             self.set_access_cache(service, env, Some(access));
+        }
+        if let Some(paths) = preflight {
+            let (sid, e) = (service.to_string(), env.to_string());
+            if !self.db(move |s| s.set_preflight(&sid, &e, &paths)).await? {
+                return Err(Error::Conflict("preflight is for an environment with a gate (access): it has none".into()));
+            }
+            self.set_access_cache(service, env, None);
         }
         let mut new_urls = Vec::new();
         if let Some((beats, tokens)) = heartbeats {
@@ -4365,6 +4423,11 @@ impl Apps {
     /// Who may still open a project's environments (roll-accounts). Set once.
     pub fn set_visitors(&self, v: Arc<dyn integrations::Visitors>) {
         let _ = self.visitors.set(v);
+    }
+
+    /// Where visitors a provider vouches for start signing in (roll-accounts). Set once.
+    pub fn set_visitor_sign_in(&self, v: Arc<dyn integrations::VisitorSignIn>) {
+        let _ = self.visitor_sign_in.set(v);
     }
 
     /// How email reaches people (roll-accounts' mailer). Set once.

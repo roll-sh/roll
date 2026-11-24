@@ -85,6 +85,40 @@ pub(crate) enum Finished {
     SignIn { user: String, return_to: String, new: Option<&'static str>, sid: Option<String> },
     /// The identity is now linked to the signed-in user.
     Linked { return_to: String },
+    /// A visitor's sign-in ([`VisitGate`]): no account, no session of roll's; the browser goes
+    /// on to `to`.
+    Visit { to: String },
+}
+
+/// The `back` a visitor's sign-in carries: a failure is a page of roll's, never the dashboard's
+/// sign-in screen (they have no account).
+pub(crate) const VISIT_BACK: &str = "!visit";
+
+/// Someone a provider vouched for, signing in only to visit what another product gates
+/// (`intent: visit`; roll apps' `access.sso`): never an account of roll's.
+#[derive(Clone, Debug)]
+pub struct Visitor {
+    /// `github` or `google`.
+    pub provider: String,
+    /// The provider's own id for them.
+    pub subject: String,
+    /// Verified, lower case.
+    pub email: String,
+    /// GitHub's login, or the email.
+    pub login: String,
+    /// GitHub organisations they're a member of (lower case), when the sign-in asked
+    /// (`read:org`); otherwise none.
+    pub orgs: Vec<String>,
+    /// Google's `hd`: the Workspace domain the account belongs to (none for a consumer account,
+    /// whatever its email).
+    pub hosted_domain: Option<String>,
+}
+
+/// Where a visitor's sign-in goes (rolld: roll apps). `request` is what the product put in the
+/// start's `r`, untouched; the answer is where to send the browser, or why not (shown to them).
+#[async_trait::async_trait]
+pub trait VisitGate: Send + Sync {
+    async fn admit(&self, request: &str, who: &Visitor) -> std::result::Result<String, String>;
 }
 
 /// A callback's state row, used up.
@@ -103,6 +137,10 @@ struct Verified {
     email: String,
     login: String,
     name: Option<String>,
+    /// GitHub's organisations, read only for a visitor's sign-in that asked.
+    orgs: Vec<String>,
+    /// Google's `hd` claim, lower case.
+    hosted_domain: Option<String>,
 }
 
 /// `return_to` if it's a path on the dashboard (`/…`, not `//…` or `/\…`), else `default`.
@@ -154,17 +192,53 @@ impl Accounts {
         Ok(Started { url: url.into(), browser })
     }
 
+    /// Start a visitor's sign-in (`GET …/oauth/{provider}/visit?r=…`): `request` is the product's,
+    /// handed back to the [`VisitGate`] untouched; `orgs`: GitHub asks to read their
+    /// organisations too.
+    pub(crate) fn oauth_visit_start(&self, p: Provider, request: &str, orgs: bool) -> Result<Started> {
+        let cfg = self.config.provider(p).ok_or_else(|| Error::NotFound(format!("sign-in with {} isn't configured", p.as_str())))?;
+        if request.is_empty() || request.len() > 2048 || !request.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.~".contains(&b)) {
+            return Err(Error::BadRequest("r is the product's request, as it gave it".into(), None));
+        }
+        let orgs = orgs && p == Provider::Github;
+        let (state, verifier, nonce, browser) = (hex::encode(random::<32>()), b64url(&random::<32>()), hex::encode(random::<16>()), hex::encode(random::<32>()));
+        let intent = if orgs { "visit_orgs" } else { "visit" };
+        let now = self.db.now_ms()?;
+        self.db.write(|c| {
+            c.execute("DELETE FROM oauth_states WHERE expires_at <= ?", [now])?;
+            c.execute(
+                "INSERT INTO oauth_states (state_hash, provider, intent, user_id, invite_id, verifier, nonce, browser_hash, return_to, created_at, expires_at) VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?)",
+                params![sha256_hex(&state), p.as_str(), intent, verifier, nonce, sha256_hex(&browser), request, now, now + STATE_TTL_MS],
+            )
+        })?;
+        let mut url = url::Url::parse(&cfg.authorize_url).map_err(|e| Error::Internal(format!("{} authorize URL: {e}", p.as_str())))?;
+        {
+            let mut q = url.query_pairs_mut();
+            q.append_pair("response_type", "code")
+                .append_pair("client_id", &cfg.app.client_id)
+                .append_pair("redirect_uri", &self.redirect_uri(p))
+                .append_pair("state", &state)
+                .append_pair("code_challenge", &b64url(&Sha256::digest(verifier.as_bytes())))
+                .append_pair("code_challenge_method", "S256");
+            match p {
+                Provider::Github => q.append_pair("scope", if orgs { "read:user user:email read:org" } else { "read:user user:email" }).append_pair("allow_signup", "false"),
+                Provider::Google => q.append_pair("scope", "openid email profile").append_pair("nonce", &nonce).append_pair("prompt", "select_account"),
+            };
+        }
+        Ok(Started { url: url.into(), browser })
+    }
+
     fn redirect_uri(&self, p: Provider) -> String {
         format!("{}/v1/accounts/oauth/{}/callback", self.config.api_url, p.as_str())
     }
 
-    /// Use up a state for `p`, if it's live and this browser started it.
-    fn take_state(&self, p: Provider, state: &str, browser: Option<&str>) -> Result<State> {
-        self.take_state_named(p.as_str(), state, browser)
-    }
-
     /// Use up a state for the provider named so (`github`, `sso:<id>`).
     pub(crate) fn take_state_named(&self, provider: &str, state: &str, browser: Option<&str>) -> Result<State> {
+        self.take_state_any(provider, state, &[browser.map(str::to_string), None])
+    }
+
+    /// [`Accounts::take_state_named`], bound to whichever of `browsers` started it.
+    pub(crate) fn take_state_any(&self, provider: &str, state: &str, browsers: &[Option<String>; 2]) -> Result<State> {
         let now = self.db.now_ms()?;
         let bad = || Error::BadRequest("the sign-in expired or came from another browser; start again".into(), Some("state"));
         let hash = sha256_hex(state);
@@ -188,7 +262,7 @@ impl Accounts {
             Ok::<_, Error>(row)
         })?;
         let Some((st, browser_hash, expires)) = row else { return Err(bad()) };
-        let same_browser = browser.is_some_and(|b| roll_auth::constant_eq(sha256_hex(b).as_bytes(), browser_hash.as_bytes()));
+        let same_browser = browsers.iter().flatten().any(|b| roll_auth::constant_eq(sha256_hex(b).as_bytes(), browser_hash.as_bytes()));
         if expires <= now || !same_browser {
             return Err(bad());
         }
@@ -197,16 +271,19 @@ impl Accounts {
 
     /// Finish a flow: check the state, trade the code, read the verified identity, and sign in
     /// or link. `Err` carries the `?error=` code; the second value is where to send the browser.
-    pub(crate) async fn oauth_callback(self: &std::sync::Arc<Self>, p: Provider, code: &str, state: &str, browser: Option<String>) -> (Result<Finished>, String) {
+    /// `browsers`: the binding cookies the browser holds (a sign-in's, a visit's); the state's
+    /// must be one of them.
+    pub(crate) async fn oauth_callback(self: &std::sync::Arc<Self>, p: Provider, code: &str, state: &str, browsers: [Option<String>; 2]) -> (Result<Finished>, String) {
         let fallback = "/signin".to_string();
         let this = self.clone();
         let (state, code_owned) = (state.to_string(), code.to_string());
-        let st = match tokio::task::spawn_blocking(move || this.take_state(p, &state, browser.as_deref())).await {
+        let st = match tokio::task::spawn_blocking(move || this.take_state_any(p.as_str(), &state, &browsers)).await {
             Ok(Ok(st)) => st,
             Ok(Err(e)) => return (Err(e), fallback),
             Err(e) => return (Err(Error::Internal(e.to_string())), fallback),
         };
-        let back = if st.intent == "link" { st.return_to.clone() } else { fallback };
+        let visit = st.intent.starts_with("visit");
+        let back = if st.intent == "link" { st.return_to.clone() } else if visit { VISIT_BACK.to_string() } else { fallback };
         let verified = match self.verified_identity(p, &code_owned, &st).await {
             Ok(v) => v,
             Err(e) => {
@@ -214,6 +291,15 @@ impl Accounts {
                 return (Err(e), back);
             }
         };
+        if visit {
+            let Some(gate) = self.visit_gate() else { return (Err(Error::NotFound("nothing here takes visitors' sign-ins".into())), back) };
+            let who = Visitor { provider: p.as_str().into(), subject: verified.subject, email: verified.email, login: verified.login, orgs: verified.orgs, hosted_domain: verified.hosted_domain };
+            let done = match gate.admit(&st.return_to, &who).await {
+                Ok(to) => Ok(Finished::Visit { to }),
+                Err(why) => Err(Error::Forbidden(why, "visit_denied")),
+            };
+            return (done, back);
+        }
         let this = self.clone();
         let done = tokio::task::spawn_blocking(move || this.finish(p, st, verified)).await.unwrap_or_else(|e| Err(Error::Internal(e.to_string())));
         (done, back)
@@ -295,7 +381,16 @@ impl Accounts {
                 let primary = emails.as_array().into_iter().flatten().find(|e| e.get("primary").and_then(Value::as_bool) == Some(true) && e.get("verified").and_then(Value::as_bool) == Some(true));
                 let email = primary.and_then(|e| e.get("email")).and_then(Value::as_str).ok_or_else(|| Error::BadRequest("GitHub has no verified primary email for this account".into(), Some("unverified_email")))?;
                 let name = user.get("name").and_then(Value::as_str).map(str::to_string);
-                Ok(Verified { subject, email: normalize_email(email)?, login, name })
+                // A visitor's sign-in that asked: the organisations they're a member of (the
+                // first hundred), by login.
+                let orgs = match st.intent == "visit_orgs" {
+                    true => {
+                        let list = read_json(get("/user/orgs?per_page=100").await.map_err(|e| failed(&e.without_url().to_string()))?).await.map_err(|e| failed(&e))?;
+                        list.as_array().into_iter().flatten().filter_map(|o| o.get("login").and_then(Value::as_str)).map(str::to_ascii_lowercase).take(100).collect()
+                    }
+                    false => Vec::new(),
+                };
+                Ok(Verified { subject, email: normalize_email(email)?, login, name, orgs, hosted_domain: None })
             }
             Provider::Google => {
                 let id_token = token.get("id_token").and_then(Value::as_str).ok_or_else(|| failed("no ID token"))?;
@@ -318,7 +413,7 @@ impl Accounts {
                 let email = s("email").filter(|_| verified).ok_or_else(|| Error::BadRequest("Google has no verified email for this account".into(), Some("unverified_email")))?;
                 let subject = s("sub").filter(|x| !x.is_empty()).ok_or_else(|| failed("no subject"))?.to_string();
                 let email = normalize_email(email)?;
-                Ok(Verified { subject, login: email.clone(), email, name: s("name").map(str::to_string) })
+                Ok(Verified { subject, login: email.clone(), email, name: s("name").map(str::to_string), orgs: Vec::new(), hosted_domain: s("hd").map(str::to_ascii_lowercase) })
             }
         }
     }

@@ -58,7 +58,6 @@ GET /v1/previews/{id}/errors/count                                             t
 GET /v1/previews/{id}/files                                                    interactive (a shell, files, a forward): an admin's, live
 PUT /v1/previews/{id}/files                                                    interactive (a shell, files, a forward): an admin's, live
 GET /v1/previews/{id}/forward                                                  interactive (a shell, files, a forward): an admin's, live
-GET /v1/previews/{id}/data/{resource}                                          no tool yet: agents query a branch with postgres_query on its endpoint
 GET /v1/previews/{id}/swap                                                     interactive (a laptop's process standing in for a service): an admin's, live
 GET /v1/previews/{id}/notes/{note}/crop                                        the dashboard's (a note's image)
 GET /v1/previews/{id}/qr.png                                                   the dashboard's (a QR code)
@@ -98,7 +97,7 @@ POST /v1/search/clusters/{id}/request                                          t
 POST /v1/search/clusters/{id}/unload                                           the operator's (health, migrations, process control)
 GET /v1/secrets/gateways/{id}/connect                                          interactive (a shell, files, a forward): an admin's, live
 GET /v1/secrets/health                                                         the operator's (health, migrations, process control)
-PATCH /v1/secrets/projects/{project}                                           a person's call: how long old versions are kept (shortening it deletes history)
+PATCH /v1/secrets/projects/{project}                                           a person's call: how long old versions are kept (shortening it deletes history), and whether leaked keys rotate on their own
 POST /v1/secrets/projects/{project}/atlas-projects                             an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/atlas-projects/{id}                      an outside integration's setup: an admin's, with its credentials
 * /v1/secrets/projects/{project}/audit/sinks                                   an outside integration's setup: an admin's, with its credentials
@@ -117,6 +116,7 @@ DELETE /v1/secrets/projects/{project}/cas/{id}                                 a
 PATCH /v1/secrets/projects/{project}/cas/{id}/acme                             an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/cas/{id}/acme/eab                          an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/cas/{id}/acme/eab/{eab}                  an outside integration's setup: an admin's, with its credentials
+PUT /v1/secrets/projects/{project}/cas/{id}/chain                              a person's call: installing a CA chain
 POST /v1/secrets/projects/{project}/cas/{id}/revoke                            an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/cas/{id}/sign                              an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/cloud-accounts                             an outside integration's setup: an admin's, with its credentials

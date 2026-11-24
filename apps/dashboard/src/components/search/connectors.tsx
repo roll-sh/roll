@@ -48,7 +48,8 @@ type SyncJob = {
   error?: string;
 };
 
-const ACTIVE = ["pending", "in_progress", "canceling"];
+// `suspended`: stopped by the cluster moving to another node, which resumes it.
+const ACTIVE = ["pending", "suspended", "in_progress", "canceling"];
 
 /** A connector with its newest job. */
 type Row = { connector: Connector; job: SyncJob | undefined };
@@ -191,7 +192,7 @@ export function ConnectorsTab({ cluster, onOpenConsole }: { cluster: SearchClust
                       <td className="px-3 py-2.5 text-[12px]">
                         {active ? (
                           <span className="text-accent">
-                            <span className="shimmer">{job.status === "canceling" ? "Canceling…" : job.status === "pending" ? "Waiting…" : "Syncing…"}</span>
+                            <span className="shimmer">{job.status === "canceling" ? "Canceling…" : job.status === "pending" || job.status === "suspended" ? "Waiting…" : "Syncing…"}</span>
                           </span>
                         ) : (
                           <span className="text-muted">

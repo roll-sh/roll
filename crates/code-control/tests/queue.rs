@@ -653,9 +653,9 @@ impl code_control::SecretEnv for FakeSecrets {
     async fn for_owner(&self, _: &str, _: &str, _: &str, _: &str, _: code_control::Asker<'_>) -> anyhow::Result<code_control::Revealed> {
         anyhow::bail!("not in this test")
     }
-    async fn leaks(&self, repo: &str, candidates: Vec<String>) -> anyhow::Result<Vec<(usize, String, String, String)>> {
+    async fn leaks(&self, repo: &str, candidates: Vec<String>) -> anyhow::Result<Vec<code_control::FoundLeak>> {
         let hit = candidates.iter().position(|c| c == "sk_live_51Hx9Q2").filter(|_| repo == "acme/api");
-        Ok(hit.map(|i| (i, "STRIPE_KEY".into(), "production".into(), "/".into())).into_iter().collect())
+        Ok(hit.map(|index| code_control::FoundLeak { index, key: "STRIPE_KEY".into(), environment: "production".into(), folder: "/".into(), rotatable: false }).into_iter().collect())
     }
     /// Only STRIPE_KEY is set (in production).
     async fn missing(&self, _: &str, keys: Vec<String>) -> anyhow::Result<Vec<(String, Vec<String>)>> {
@@ -752,7 +752,7 @@ impl code_control::SecretEnv for CheckingSecrets {
     async fn for_owner(&self, _: &str, _: &str, _: &str, _: &str, _: code_control::Asker<'_>) -> anyhow::Result<code_control::Revealed> {
         anyhow::bail!("not in this test")
     }
-    async fn leaks(&self, _: &str, _: Vec<String>) -> anyhow::Result<Vec<(usize, String, String, String)>> {
+    async fn leaks(&self, _: &str, _: Vec<String>) -> anyhow::Result<Vec<code_control::FoundLeak>> {
         Ok(Vec::new())
     }
     async fn validity(&self, _: &str, found: Vec<(String, Option<String>)>) -> anyhow::Result<Vec<code_control::model::CredentialValidity>> {
@@ -815,7 +815,7 @@ impl code_control::SecretEnv for DownSecrets {
     async fn for_owner(&self, _: &str, _: &str, _: &str, _: &str, _: code_control::Asker<'_>) -> anyhow::Result<code_control::Revealed> {
         anyhow::bail!("roll secrets is down")
     }
-    async fn leaks(&self, _: &str, _: Vec<String>) -> anyhow::Result<Vec<(usize, String, String, String)>> {
+    async fn leaks(&self, _: &str, _: Vec<String>) -> anyhow::Result<Vec<code_control::FoundLeak>> {
         anyhow::bail!("roll secrets is down")
     }
 }
@@ -844,10 +844,10 @@ impl code_control::SecretEnv for InProcessSecrets {
     async fn for_owner(&self, _: &str, _: &str, _: &str, _: &str, _: code_control::Asker<'_>) -> anyhow::Result<code_control::Revealed> {
         anyhow::bail!("not in this test")
     }
-    async fn leaks(&self, repo: &str, candidates: Vec<String>) -> anyhow::Result<Vec<(usize, String, String, String)>> {
+    async fn leaks(&self, repo: &str, candidates: Vec<String>) -> anyhow::Result<Vec<code_control::FoundLeak>> {
         let mut out = Vec::new();
         for p in self.1.projects_of("repo", repo)?.into_iter().filter(|p| self.0.counts_for_repo(p, repo)) {
-            out.extend(self.0.leak_matches(&p, &candidates)?.into_iter().map(|(i, l)| (i, l.key, l.environment, l.path)));
+            out.extend(self.0.leak_matches(&p, &candidates)?.into_iter().map(|(index, l)| code_control::FoundLeak { index, key: l.key, environment: l.environment, folder: l.path, rotatable: false }));
         }
         Ok(out)
     }

@@ -1716,8 +1716,7 @@ deterministic (#396).
    (main at d9aecc990), ranked; each test goes in `test:search`, not the merge gate (all landed, each
    failing against its guarded line: (1) with the egress fix in #771, 0d6daf6cc; (2), (3), (4), (7)
    and (8) in #768, 1c2b5e62c; (5), (6), (9), (10), (11) and the unused e2e file's removal in
-   #833, f47d36793, which also found that a drain leaves a running connector sync `in_progress` for
-   5 minutes on the next owner, not yet fixed; `persist.rs`'s memory-budget flake fixed in
+   #833, f47d36793, whose three fleet findings are fixed in #853 (below); `persist.rs`'s memory-budget flake fixed in
    #766, 9641a1bd6: the test no longer races a second commit, 60 of 60 under load):
    (1) connectors refusing private addresses: every `connectors.rs` cluster sets
    `allow_private_hosts`, so deleting the check fails nothing (now
@@ -1766,18 +1765,21 @@ deterministic (#396).
    take over a second, and the test still lost 1 run in 10 (at host loads 63-81; the old build
    passed 10 of 10 there, but at loads 18-50). The suite's minimum (108) holds on a rerun, and
    that load is much harsher than CI's.
-   **Found by the fleet tests (2026-11-23)**: a connector sync running when its cluster's owner
-   drains isn't stopped or settled by the unload (`Node::unload_with` cancels tasks, not
-   `connector_syncs`), so the next owner reads the job `in_progress` with a fresh `last_seen` and
-   marks it `error` only after `STALE_MS` (5 minutes): "Syncing…" in the dashboard and no new sync
-   for that connector until then. `due_jobs_run_once_on_the_next_owner` covers the watch, not the
-   sync, until the unload settles it. And a migration copy the drain stops
-   reports `"canceled": "by user request"` (the unload's cancel), though nobody asked. And ILM
-   doesn't advance on a `search-control` node (a fleet node, no drain; `poll_interval` 1s): an
-   index under a policy whose `hot` phase has `min_age` 0 stays at `new/complete/complete` (15 s
-   checked, though `ilm_run::next_due` says due at once), and a document on its write alias
-   doesn't roll it over (10 s). `ilm_run`'s unit tests call `run` directly, so the node's scheduler
-   path is uncovered; the drain test leaves ILM out until it moves.
+   **Found by the fleet tests (2026-11-23), fixed in #853**: (a) ILM didn't
+   advance on a node. The job scheduler (`opensearch/jobs.rs`) ran the other jobs first, then
+   read ILM's due time again with the clock: an index to move on is due "now", so once the other
+   jobs took a millisecond it was past the run's `now`, never due, and the task looped at once
+   (unit tests ran within one millisecond). The lifecycles' due times are now read at the run's
+   instant (`time::at_sync`), and `sync::run_due` no longer saves the cluster state when it has
+   nothing to settle (it saved it on every scheduler run, which is what took the millisecond).
+   `cluster.rs`'s `ilm_rolls_an_index_over_on_its_own`: `hot` with `min_age` 0 entered by itself,
+   then a rollover after one document. (b) A drain didn't settle a running connector sync: the
+   next owner read it `in_progress` and called it abandoned only after `STALE_MS` (5 minutes).
+   An unload now records it `suspended` (`sync::suspend`, Elastic's connector service on
+   shutdown) and the next load resumes it at once:
+   `a_drain_hands_a_running_sync_to_the_next_owner`. (c) A migration copy a drain stopped said
+   `"canceled": "by user request"`; a handover's cancel now says "the node handed the cluster
+   over" (`search_server::HANDED_OVER`, asserted in `esql_and_a_migration_work_across_nodes`).
 29. **Security**: landed in #632 (53a45bd36), a fix for a bypass a #358 review found: a role's document level
    security filter was evaluated with the request's own `runtime_mappings` in scope, so a runtime
    field could shadow the field the filter tests. Security filters (roles, API keys' role

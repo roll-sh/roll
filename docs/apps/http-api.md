@@ -133,7 +133,8 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/environments/{env}/app-metrics?minutes=` | | `{ minutes, step_minutes, series: { name, kind: "gauge" \| "sum" \| "histogram", unit, attrs: {key, value}[], shows: "value" \| "per_second" \| "mean", points: [ms, number][] }[], cut }`: what the app's OpenTelemetry SDK sent as metrics (5–10,080 minutes, default 60), each series (a name and its attributes; at most 50, the busiest first) at most 60 points: a gauge's last value, a cumulative counter's rate a second, a histogram's mean | read |
 | `GET /v1/apps/services/{id}/environments/{env}/vitals?minutes=` | | `{ minutes, samples, metrics: { lcp?, inp?, cls?, fcp?, ttfb?: { p75, rating: "good" \| "needs-improvement" \| "poor", samples } }, routes: { route, samples, metrics }[], cut }`: what visitors' browsers measured with `vitals: true` (the last 60–10,080 minutes, default 1,440), p75s rated by web.dev's thresholds, overall and for the 20 routes with the most page loads | read |
 | `GET /v1/apps/services/{id}/environments/{env}/analytics?minutes=` | | `Analytics` (the last 60–10,080 minutes, default 1,440): visitors and page views from the access log, no script or cookie | read |
-| `POST /v1/apps/services/{id}/environments/{env}/visit` | `{ to }` | `{ url }`: a one-use ticket (a minute) into a sign-in-gated environment for the person signed in, as the URL that opens `to` (a URL at one of its names: its generated hostname or an active custom domain; 400 otherwise, and for an environment without `access.signed_in`); the dashboard's `/dashboard/apps/visit` asks for it and goes on | a person signed in only (403 for a token); rolld's gate lets in only admins until roll apps serves users |
+| `GET /v1/apps/services/{id}/environments/{env}/fetch?path=&head=&deployment=` | | `{ status, url, headers: { content-type?, content-length?, location?, cache-control?, x-roll-by? }, body: string /* text, at most 256 KiB */, truncated }`: one of its pages (`path`, default `/`) read through its own proxy past its gates (sign-in, password, token, allow list, firewall), as roll's scheduled calls go; `head` a HEAD; `deployment` that deployment's own answer; 30 s at most (503 past it); on the environment's owner | reveal |
+| `POST /v1/apps/services/{id}/environments/{env}/visit` | `{ to, state }` (`state`: the SHA-256 the environment's host sent with its redirect, `?state=`: the ticket opens only in the browser holding that state's cookie; 400 without it) | `{ url }`: a one-use ticket (a minute) into a sign-in-gated environment for the person signed in, as the URL that opens `to` (a URL at one of its names: its generated hostname or an active custom domain; 400 otherwise, and for an environment without `access.signed_in`); the dashboard's `/dashboard/apps/visit` asks for it and goes on | a person signed in only (403 for a token); rolld's gate lets in only admins until roll apps serves users |
 | `GET /v1/apps/services/{id}/environments/{env}/traces?minutes=&min_ms=` | | `{ minutes, traces: TraceSummary[], cut }`: recent traces (5–10,080 minutes, default 60), newest first, at most 100; `min_ms` keeps the slower ones | read |
 | `GET /v1/apps/services/{id}/environments/{env}/traces/{trace}` | | `{ trace, spans: Span[] }` in start order (the last week's); 404 when none | read |
 | `GET /v1/apps/services/{id}/environments/{env}/usage?days=` | | `Usage` | read |
@@ -451,7 +452,7 @@ type EnvironmentPut = {
    *  person may still open the project (a disabled account is turned away). null: public again. */
   /** `bypass_sha256`: the SHA-256 (hex) of an automation's secret (CI's end-to-end tests): a
    *  request with `X-Roll-Preview-Bypass: <secret>` goes in with no cookie or redirect. */
-  access?: { token?: string; signed_in?: boolean; password?: string /* 8–200: visitors type it on roll's page (its argon2id hash only kept; a session cookie for 7 days, ended by a new password; 10 tries a client every 10 minutes) */; bypass_sha256?: string } | null;
+  access?: { token?: string; signed_in?: boolean; password?: string /* 8–200: visitors type it on roll's page (its argon2id hash only kept; a session cookie for 7 days, ended by a new password; 10 tries a client every 10 minutes) */; sso?: { provider: "github" | "google"; allow: string[] /* 1–100: "@acme.com" (a domain's people), "ada@acme.com" (one person), "org:acme" (a GitHub organisation's members; github only); kept in lower case */ } /* people the provider vouches for, roll's or not (409 on a node without roll's accounts) */; callers?: string[] /* other services of the project, by name or id (`/env` for one environment), let in with roll's OIDC token for audience `roll-apps:<service id>/<env>` as `x-roll-caller`; alone, a gate only they pass; at most 20 */; bypass_sha256?: string } | null;
   /** Creating it: start with this environment's variables, except its sealed ones (ignored when it exists). */
   variables_from?: string;
   /** A push deploys only once its commit's checks pass (statuses other than roll apps' own):
@@ -528,6 +529,12 @@ type EnvironmentPut = {
   attack_mode?: { per_minute: number; minutes?: number } | null;
   /** Attack mode on by hand until then (unix ms, within the next 24 hours); null ends it now. */
   challenge_until?: number | null;
+  /** Paths (`/api/*`, at most 20, `*` only at the end) whose CORS preflights (`OPTIONS` with
+   *  `Access-Control-Request-Method`) reach the app past the environment's gate (Vercel's OPTIONS
+   *  Allowlist), so a page on another of its sites can call it with its own credentials; the request
+   *  the preflight clears still meets the gate. Kept when `access` changes; 409 for an environment
+   *  without a gate; null: none. */
+  preflight?: string[] | null;
   /** Its own HTML instead of roll's pages, each at most 64 KiB (400 past it or empty); null goes back
    *  to roll's, a field left out stays. */
   pages?: { error?: string | null; maintenance?: string | null };
@@ -574,6 +581,9 @@ type Environment = EnvironmentSummary & {
   port: number | null;       // locally, the service's own port (ROLL_APPS_PORTS)
   private: boolean;          // its hostnames answer only visitors with its access token, or who signed in
   signed_in?: true;          // people signed in to roll who can open its project get in (access.signed_in)
+  sso?: { provider: "github" | "google"; allow: string[] }; // people GitHub or Google vouches for, by domain, email or GitHub organisation, get in (access.sso)
+  preflight?: string[];       // paths whose CORS preflights reach the app past its gate
+  callers?: string[];         // other services of the project let in with roll's token (access.callers)
   password?: true;           // visitors may type its password (access.password; never returned)
   next_run_at: number | null; // a cron service's next scheduled run, once deployed
   volume_used?: { bytes: number; at: number }; // how full its volume was when last measured (hourly, on its owner), when it has one
@@ -721,6 +731,7 @@ type Plan = {
   /** Datastores the root's manifests have client libraries for ("pg in package.json"): New
    *  service offers to make and link them. Absent when none. */
   uses?: ("postgres" | "redis")[];
+  variables?: string[]; // the names its `.env.example` (or `.env.sample`, `.env.template`, `.env.dist`, `example.env`) declares, at most 100, never their values: New service asks for them, and a deploy's log names those the environment doesn't set
   functions?: string[]; // a static site's function directories the functions builder runs (netlify/functions, api; "edge" with edge functions)
   edge?: { name: string; kind: "netlify" | "vercel"; file: string; paths: string[]; excluded?: string[] }[]; // its edge functions, run before its files on their paths by its <site>-fn service, on Deno
   /** The Procfile's `release:` (Heroku's release phase): the deployment's pre-deploy command when

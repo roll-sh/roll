@@ -1748,6 +1748,12 @@ impl Apps {
         };
         let log = &log;
         let mut plan_json = serde_json::to_value(&plan)?;
+        // What the repo's `.env.example` names and the environment doesn't set: said before the
+        // build, rather than found as a crash after it.
+        let unset: Vec<&String> = plan.variables.iter().filter(|n| !build_env.iter().any(|(k, _)| k == *n) && !runtime_only.contains(*n)).collect();
+        if !unset.is_empty() {
+            log.line(format!("the repo expects variables this environment doesn't set: {} (its example file names them)", unset.iter().map(|n| n.as_str()).collect::<Vec<_>>().join(", ")));
+        }
         // The images it builds on, to watch for their fixes (`watch_bases`).
         let base_text = if plan.provider == apps_build::Provider::Dockerfile { std::fs::read_to_string(context.join(&dockerfile)).unwrap_or_default() } else { plan.dockerfile.clone() };
         let bases = apps_build::base_images(&base_text);

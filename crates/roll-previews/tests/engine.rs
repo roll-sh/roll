@@ -504,6 +504,64 @@ async fn a_secret_value_its_pages_serve_is_named_on_its_record() {
     assert!(said.len() == 1 && said[0].contains("STRIPE_KEY in /assets/app.js") && !said[0].contains("sk_test"), "{said:?}");
 }
 
+/// An agent's run on a page (`POST …/try`): what it showed, masked as logs are, its picture
+/// behind its run's id for a while (another preview's id gets nothing), a bad step refused.
+#[tokio::test]
+async fn an_agents_run_on_a_page_answers_what_it_showed_masked() {
+    use tower::ServiceExt;
+    let e = env(json!({ "enabled": true }));
+    e.secrets.values.lock().push(("STRIPE_KEY".into(), "sk_test_51Hx9abc".into()));
+    e.code.open(change("chg_try", 4));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_try").unwrap().unwrap();
+    *e.apps.tried.lock() = Some(roll_previews::ports::Tried { png: Some(b"\x89PNG...".to_vec()), status: 200, step_failed: None, text: "Cart\nkey sk_test_51Hx9abc".into(), errors: vec!["TypeError".into()] });
+    let call = |req: axum::http::Request<axum::body::Body>| {
+        let router = roll_previews::api::router(e.engine.clone());
+        async move {
+            let resp = router.oneshot(req).await.unwrap();
+            (resp.status(), axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap())
+        }
+    };
+    let post = |body: serde_json::Value| axum::http::Request::post(format!("/v1/previews/{}/try", p.id)).header("content-type", "application/json").body(axum::body::Body::from(body.to_string())).unwrap();
+    let (status, body) = call(post(json!({ "path": "/cart", "steps": [{ "click": "#add" }, { "press": "Enter" }] }))).await;
+    assert_eq!(status, 200);
+    let run: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!((run["status"].clone(), run["text"].clone(), run["errors"].clone()), (json!(200), json!("Cart\nkey ***"), json!(["TypeError"])));
+    let picture = |id: &str| axum::http::Request::get(format!("/v1/previews/{id}/try/{}/screenshot", run["run"].as_str().unwrap())).body(axum::body::Body::empty()).unwrap();
+    let (status, png) = call(picture(&p.id)).await;
+    assert!(status == 200 && png.starts_with(b"\x89PNG"));
+    assert_eq!(call(picture("pv_other00000")).await.0, 404, "another preview's id gets nothing");
+    assert!(call(post(json!({ "path": "/", "steps": [{ "eval": "alert(1)" }] }))).await.0.is_client_error(), "a step it doesn't know");
+    assert_eq!(call(post(json!({ "path": "//evil.example", "steps": [] }))).await.0, 400, "a path of its own");
+}
+
+/// A fork's preview is marked `outside`, and so are its error groups and its logs (its traces,
+/// spans and routes too): its title and what its code wrote are text from people who can't push,
+/// which roll MCP's lockdown keeps from a model; a trusted preview isn't.
+#[tokio::test]
+async fn a_forks_preview_and_its_errors_are_marked_outside() {
+    use tower::ServiceExt;
+    let e = env(json!({ "enabled": true }));
+    e.code.open(change("chg_out", 3));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_out").unwrap().unwrap();
+    let web = e.engine.store.services(&p.id).unwrap()[0].name.clone();
+    let group = roll_previews::ErrorGroup { service: String::new(), fingerprint: "aa".into(), kind: "line".into(), title: "x".into(), count: 1, first_seen: 1, last_seen: 2, sample: "x".into(), trace: None };
+    e.apps.errors.lock().insert(web, vec![group]);
+    let get = |path: String| {
+        let router = roll_previews::api::router(e.engine.clone());
+        async move {
+            let resp = router.oneshot(axum::http::Request::get(path).body(axum::body::Body::empty()).unwrap()).await.unwrap();
+            serde_json::from_slice::<serde_json::Value>(&axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap()).unwrap()
+        }
+    };
+    assert!(get(format!("/v1/previews/{}", p.id)).await.get("outside").is_none());
+    e.engine.store.update(&p.id, |r| r.trusted = false).unwrap();
+    assert_eq!(get(format!("/v1/previews/{}", p.id)).await["outside"], json!(true));
+    assert_eq!(get(format!("/v1/previews/{}/errors?minutes=360", p.id)).await["groups"][0]["outside"], json!(true));
+    assert_eq!(get(format!("/v1/previews/{}/logs", p.id)).await["outside"], json!(true), "its log lines too");
+}
+
 /// A preview's errors are its services' groups, newest first, named by service, with a secret its
 /// code printed shown as `***` in the title and the sample (as its logs are), a value a cut split
 /// included; its values are read only when there's an error (counting reads none), and a
@@ -1184,6 +1242,41 @@ async fn masked_postgres_is_masked_before_it_serves_and_new_rules_reach_it() {
     assert_eq!(e.pg.made.load(Ordering::SeqCst), made + 2);
     assert_eq!(e.pg.masks.lock().len(), 3);
     assert_eq!(e.engine.store.row(&p.id).unwrap().state, State::Ready);
+}
+
+/// A restore point: the data saved (Postgres's, the product that puts a branch back in place),
+/// put back without seeding again, gone when the masking rules change, and with the preview.
+#[tokio::test]
+async fn a_restore_point_puts_the_data_back_without_seeding_again() {
+    let e = env(json!({ "enabled": true, "seed": { "image": "node:22", "run": "node seed.js" }, "masking": { "postgres:prj_db": { "public.users.email": "email" } } }));
+    e.code.open(change("chg_rp", 5));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_rp").unwrap().unwrap();
+    assert_eq!(p.state, State::Ready);
+    let point = e.engine.save_point(&p.id, "before the test run", "ana").await.unwrap();
+    assert_eq!((point.label.as_str(), point.data.clone()), ("before the test run", vec!["postgres:prj_db".to_string()]));
+    let (live, copy) = (format!("prj_db~pv-{}", &p.id[3..]), format!("prj_db~pv-{}-{}", &p.id[3..], &point.id[3..]));
+    assert!(e.pg.branches.lock().contains(&copy), "a copy of the preview's branch");
+    let seeds = e.apps.seeds.lock().len();
+    assert!(seeds > 0);
+    e.engine.restore(&p.id, &point.id, "ana").unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(*e.pg.restored.lock(), [(live, copy.clone())], "the preview's branch put back in place");
+    assert_eq!(e.apps.seeds.lock().len(), seeds, "the point holds what the seed made: it isn't run again");
+    assert_eq!(e.engine.store.row(&p.id).unwrap().state, State::Ready);
+    // Other masking rules: the point, masked by the old ones, goes.
+    let mut s = e.engine.store.settings(&e.project).unwrap();
+    s.masking.insert("postgres:prj_db".into(), [("public.users.name".to_string(), "redact".to_string())].into_iter().collect());
+    e.engine.store.put_settings(&e.project, &s).unwrap();
+    e.engine.store.update(&p.id, |r| r.next_at = 0).unwrap();
+    e.engine.pass().await.unwrap();
+    assert!(e.engine.restore_points(&p.id).unwrap().is_empty() && !e.pg.branches.lock().contains(&copy), "a point masked by older rules is deleted");
+    // And with the preview.
+    let again = e.engine.save_point(&p.id, "", "ana").await.unwrap();
+    e.code.edit("chg_rp", |c| c.open = false);
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    assert!(e.pg.branches.lock().is_empty(), "{again:?}'s copy goes with the preview");
 }
 
 /// The rules dialog's suggestions: an unmasked column that looks like people's data is offered
@@ -1957,6 +2050,33 @@ async fn a_service_that_didnt_change_keeps_its_pages() {
     e.engine.pass().await.unwrap();
     taken(&e.apps, "web", web_before + 1).await;
     assert_eq!(runs("web"), web_before + 1, "after a reset its pages are taken again");
+}
+
+/// The first page in the project's modes (`github.modes`: dark, another language): each a page of
+/// its own (`mode:<name>`), kept and served by the sheet's picture route, as a state's page is.
+#[tokio::test]
+async fn the_first_page_in_each_mode_is_a_page_of_its_own() {
+    use tower::ServiceExt;
+    let e = env(json!({ "enabled": true, "github": { "screenshot": true, "modes": [{ "name": "dark", "color_scheme": "dark" }], "states": [{ "name": "tab", "page": "/", "steps": [{ "press": "Tab" }] }] } }));
+    let mut png = Vec::new();
+    image::RgbaImage::new(4, 4).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    *e.apps.shot.lock() = Some(png);
+    e.code.open(change("chg_md", 3));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_md").unwrap().unwrap();
+    let pages = |e: &Env| e.engine.store.preview(&p.id).unwrap().pages.iter().map(|x| x.path.clone()).collect::<Vec<_>>();
+    for _ in 0..3000 {
+        if pages(&e).contains(&"mode:dark".to_string()) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(pages(&e).contains(&"mode:dark".to_string()), "{:?}", pages(&e));
+    for key in ["mode:dark", "state:tab"] {
+        let req = axum::http::Request::get(format!("/v1/previews/{}/screenshot?page={key}", p.id)).body(axum::body::Body::empty()).unwrap();
+        let resp = roll_previews::api::router(e.engine.clone()).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200, "the sheet's picture of {key}");
+    }
 }
 
 /// A Storybook another service serves (`github.storybook`): its stories are pages of their own

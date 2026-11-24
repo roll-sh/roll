@@ -6,6 +6,11 @@
 //! on `running_until` before its target is called, so two nodes never push one sync at once. A
 //! sync remembers a stamp per name it pushed (ids, versions, fingerprints: never a value), so a
 //! push says what changed and what was removed.
+//!
+//! A certificate kind ([`SyncTarget::certificate`]: `aws-acm`, `azure-keyvault-cert`,
+//! `cloudflare-cert`) pushes one managed `pki` key's certificate, private key and chain instead of
+//! values, on issue and on every rotation, and keeps what the target calls it (`remote_id`: an ARN,
+//! a certificate's id) so a renewal replaces the same one.
 
 use crate::access::{Action, Caller, Everything, Scope};
 use crate::read::Resolver;
@@ -90,6 +95,25 @@ pub struct Push<'a> {
     pub secret: Option<&'a Value>,
     /// The keys [`SyncTarget::credentials`] named and their resolved values (by roll's key).
     pub credentials: &'a BTreeMap<String, Value>,
+    /// A session of the project's AWS role [`SyncTarget::aws_role`] named, for this push only.
+    pub aws: Option<&'a crate::aws::Session>,
+}
+
+/// What a certificate kind pushes: a managed `pki` key's current credential, PEM. Its `Debug`
+/// shows none of it.
+pub struct Certificate {
+    /// roll's key the sync names.
+    pub key: String,
+    pub certificate: Value,
+    pub private_key: Value,
+    /// The issuing CA's certificate and every one above it up to the root.
+    pub chain: Value,
+}
+
+impl std::fmt::Debug for Certificate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Certificate").field("key", &self.key).finish_non_exhaustive()
+    }
 }
 
 /// One kind of outside platform. Calls block (they run on the store's blocking threads). Errors
@@ -131,6 +155,25 @@ pub trait SyncTarget: Send + Sync {
         None
     }
     fn push(&self, target: &Json, push: &Push<'_>) -> Result<()>;
+    /// A kind that pushes one managed `pki` key's certificate, private key and chain instead of
+    /// values: its sync names that key alone in `keys`, and pushes go to
+    /// [`SyncTarget::push_certificate`].
+    fn certificate(&self) -> bool {
+        false
+    }
+    /// The project AWS role (`…/aws-roles`, by name) whose STS session a push needs: roll assumes
+    /// it for each push ([`Push::aws`]), so no long-lived AWS key is kept for the sync.
+    fn aws_role(&self, target: &Json) -> Option<String> {
+        let _ = target;
+        None
+    }
+    /// Push a certificate. `remote`: what the target called it after the last push (`None` the
+    /// first time, or after it was deleted there). Answers what it's called now, kept for the next.
+    /// Errors name the target and the platform's status, never the key or the certificate.
+    fn push_certificate(&self, target: &Json, push: &Push<'_>, cert: &Certificate, remote: Option<&str>) -> Result<String> {
+        let _ = (target, push, cert, remote);
+        Err(Error::BadRequest(format!("{} syncs don't push certificates", self.kind())))
+    }
 }
 
 /// The kinds rolld registered.
@@ -181,6 +224,10 @@ pub struct SecretSync {
     /// an admin resumes it (`PATCH …/syncs/{id}`).
     pub paused_at: Option<i64>,
     pub paused_why: Option<String>,
+    /// A certificate kind's: what the target calls what it pushed (an ACM certificate's ARN, a
+    /// Key Vault certificate's latest version, a Cloudflare custom certificate's id).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_id: Option<String>,
     /// Only in the answer that made it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signing_secret: Option<String>,
@@ -227,6 +274,8 @@ pub struct SyncKind {
     pub label: String,
     pub values: bool,
     pub signed: bool,
+    /// It pushes one managed `pki` key's certificate (named alone in `keys`).
+    pub certificate: bool,
     pub fields: Vec<SyncField>,
 }
 
@@ -238,7 +287,7 @@ struct Row {
     sealed: Option<Vec<u8>>,
 }
 
-const COLUMNS: &str = "s.id, e.slug, s.path, s.kind, s.target, s.keys, s.prefix, s.secret, s.status, s.error, s.last_digest, s.state, s.last_synced_at, s.created_at, s.created_by, s.project_id, s.paused_at, s.paused_why";
+const COLUMNS: &str = "s.id, e.slug, s.path, s.kind, s.target, s.keys, s.prefix, s.secret, s.status, s.error, s.last_digest, s.state, s.last_synced_at, s.created_at, s.created_by, s.project_id, s.paused_at, s.paused_why, s.remote_id";
 
 fn row(r: &code_sql::Row<'_>) -> code_sql::Result<Row> {
     let state: BTreeMap<String, String> = from_json(&r.get::<_, String>(11)?);
@@ -262,6 +311,7 @@ fn row(r: &code_sql::Row<'_>) -> code_sql::Result<Row> {
             created_by: r.get(14)?,
             paused_at: r.get(16)?,
             paused_why: r.get(17)?,
+            remote_id: r.get(18)?,
             signing_secret: None,
         },
         project: r.get(15)?,
@@ -316,11 +366,13 @@ struct Outcome {
     summary: String,
     /// Keys left out (unresolved references, dynamic links), as an error naming them.
     problems: Option<String>,
+    /// What a certificate kind's target calls what it pushed.
+    remote: Option<String>,
 }
 
 impl Secrets {
     pub fn sync_kinds(&self) -> Vec<SyncKind> {
-        self.syncs.kinds().filter(|t| !t.internal()).map(|t| SyncKind { kind: t.kind().into(), label: t.label().into(), values: t.values(), signed: t.signed(), fields: t.fields().to_vec() }).collect()
+        self.syncs.kinds().filter(|t| !t.internal()).map(|t| SyncKind { kind: t.kind().into(), label: t.label().into(), values: t.values(), signed: t.signed(), certificate: t.certificate(), fields: t.fields().to_vec() }).collect()
     }
 
     /// The project's syncs in environments the caller can read.
@@ -343,6 +395,9 @@ impl Secrets {
         caller.need(Action::Admin, &Scope::at(project, &n.environment, &path))?;
         self.project(project)?;
         target.check(project, &self.members(project)?, &n.target)?;
+        if target.certificate() {
+            self.certificate_key(project, &n.environment, &path, &n.keys, n.prefix.as_deref(), &n.kind, caller)?;
+        }
         let creds: BTreeSet<String> = target.credentials(&n.target).into_iter().collect();
         let others: Vec<(String, Json)> = self.db.read(|c| {
             c.query("SELECT s.kind, s.target FROM syncs s JOIN environments e ON e.id = s.env_id AND e.forgotten_at IS NULL WHERE s.project_id = ? AND e.slug = ? AND s.path = ?", params![project, n.environment, path], |x| {
@@ -412,6 +467,9 @@ impl Secrets {
             return Err(Error::BadRequest("prefix is at most 64 characters of [A-Za-z0-9_]".into()));
         }
         target.check(project, &self.members(project)?, &n.target)?;
+        if target.certificate() {
+            self.certificate_key(project, &n.environment, &path, &keys, Some(&prefix), &n.kind, caller)?;
+        }
         for k in target.credentials(&n.target) {
             names::key(&k)?;
             if keys.as_ref().is_some_and(|ks| ks.contains(&k)) {
@@ -463,6 +521,7 @@ impl Secrets {
             created_by: by,
             paused_at: None,
             paused_why: None,
+            remote_id: None,
             signing_secret: secret.map(|s| s.expose().to_string()),
         }))
     }
@@ -600,7 +659,7 @@ impl Secrets {
                 let rows = c.query(
                     &format!("SELECT {COLUMNS}, s.checked_at FROM syncs s JOIN environments e ON e.id = s.env_id AND e.forgotten_at IS NULL WHERE s.paused_at IS NULL AND {live} AND s.running_until <= ? AND s.retry_at <= ? AND COALESCE(s.checked_at, 0) < ?{marked} ORDER BY COALESCE(s.checked_at, 0), s.id LIMIT {CLAIM}"),
                     params![now, now, now],
-                    |r| Ok((row(r)?, r.get::<_, Option<i64>>(18)?)),
+                    |r| Ok((row(r)?, r.get::<_, Option<i64>>(19)?)),
                 )?;
                 for (r, _) in &rows {
                     c.execute("UPDATE syncs SET checked_at = ? WHERE id = ?", params![now, r.info.id])?;
@@ -661,6 +720,11 @@ impl Secrets {
         let ok = outcome.is_ok();
         crate::metrics::Counters::add(if ok { &self.counters.syncs_pushed } else { &self.counters.sync_failures }, 1);
         let res = self.db.write(|c| {
+            // What the target calls the certificate, whether or not the hold was still ours: it
+            // exists there either way, and the next push replaces that one.
+            if let Ok(Outcome { remote: Some(remote), .. }) = &outcome {
+                c.execute("UPDATE syncs SET remote_id = ? WHERE id = ?", params![remote, id])?;
+            }
             match &outcome {
                 Ok(o) => c.execute(
                     "UPDATE syncs SET status = ?, error = ?, last_digest = ?, state = ?, last_synced_at = ?, running_until = 0, retry_at = 0 WHERE id = ? AND running_until = ?",
@@ -731,7 +795,7 @@ impl Secrets {
                         st.push(':');
                         st.push_str(&dek.fingerprint(v.expose()));
                     }
-                    if target.values() {
+                    if target.values() && !target.certificate() {
                         values.insert(n, v);
                     }
                 }
@@ -754,7 +818,7 @@ impl Secrets {
         let problems = (!problems.is_empty()).then(|| clip(format!("not synced: {}", problems.join("; "))));
         if changed.is_empty() && removed.is_empty() && !force {
             resolver.finish(env)?;
-            return Ok(Outcome { digest, state, keys: vec![], summary: String::new(), problems });
+            return Ok(Outcome { digest, state, keys: vec![], summary: String::new(), problems, remote: None });
         }
         // The platform's own credentials, from this environment and folder.
         let mut credentials = BTreeMap::new();
@@ -773,33 +837,95 @@ impl Secrets {
         // Dynamic links are refused, so nothing is issued; record anything that was.
         resolver.finish(env)?;
         let secret = r.sealed.as_ref().map(|ct| dek.open(&secret_aad(project, &r.info.id), ct)).transpose()?;
+        // A certificate kind's key, checked again (its link may have changed since the sync was
+        // made), and its credential's parts.
+        let cert = match target.certificate() {
+            true => Some(self.certificate_parts(project, env, path, r, &entries, &dek)?),
+            false => None,
+        };
+        let session = match target.aws_role(&r.info.target) {
+            Some(role) => Some(self.sync_aws_session(project, &role, &r.info.id)?),
+            None => None,
+        };
         let now = self.db.now_ms()?;
-        target.push(
-            &r.info.target,
-            &Push {
-                sync: &r.info.id,
-                project,
-                resources: &resources,
-                environment: env,
-                path,
-                digest: &digest,
-                at: now,
-                values: &values,
-                changed: &changed,
-                removed: &removed,
-                secret: secret.as_ref(),
-                credentials: &credentials,
-            },
-        )?;
-        let summary = match target.values() {
-            true => format!("pushed {} to {}", crate::write::plural(changed.len(), "value"), r.info.kind),
-            false => format!("told {} about {}", r.info.kind, crate::write::plural(changed.len(), "changed key")),
+        let push = Push {
+            sync: &r.info.id,
+            project,
+            resources: &resources,
+            environment: env,
+            path,
+            digest: &digest,
+            at: now,
+            values: &values,
+            changed: &changed,
+            removed: &removed,
+            secret: secret.as_ref(),
+            credentials: &credentials,
+            aws: session.as_ref(),
+        };
+        let remote = match &cert {
+            Some(cert) => Some(target.push_certificate(&r.info.target, &push, cert, r.info.remote_id.as_deref())?),
+            None => {
+                target.push(&r.info.target, &push)?;
+                None
+            }
+        };
+        let summary = match (&remote, target.values()) {
+            (Some(remote), _) => format!("pushed {}'s certificate to {} ({remote})", cert.as_ref().map(|c| c.key.as_str()).unwrap_or_default(), r.info.kind),
+            (None, true) => format!("pushed {} to {}", crate::write::plural(changed.len(), "value"), r.info.kind),
+            (None, false) => format!("told {} about {}", r.info.kind, crate::write::plural(changed.len(), "changed key")),
         };
         let summary = if removed.is_empty() { summary } else { format!("{summary}, removed {}", removed.len()) };
         // The audit log names roll's keys, not the target's names.
         let keys = changed.iter().chain(&removed).map(|n| n.strip_prefix(r.info.prefix.as_str()).unwrap_or(n).to_string()).collect();
-        Ok(Outcome { digest, state, keys, summary, problems })
+        Ok(Outcome { digest, state, keys, summary, problems, remote })
     }
+
+    /// A certificate kind's sync, on create and preview: it names one key of its own folder, linked
+    /// `managed` to a project CA, with no prefix; its maker may reveal it; and its environment isn't
+    /// an untrusted one (code nobody vetted never sends a private key out of roll).
+    #[allow(clippy::too_many_arguments)]
+    fn certificate_key(&self, project: &str, slug: &str, path: &str, keys: &Option<Vec<String>>, prefix: Option<&str>, kind: &str, caller: &Caller) -> Result<()> {
+        let key = match keys.as_deref() {
+            Some([key]) => key,
+            _ => return Err(Error::BadRequest(format!("a {kind} sync names one key in keys: the one linked to the certificate"))),
+        };
+        if prefix.is_some_and(|p| !p.is_empty()) {
+            return Err(Error::BadRequest(format!("a {kind} sync has no prefix: it pushes a certificate, not names")));
+        }
+        caller.need(Action::Reveal, &Scope::at(project, slug, path))?;
+        let env = self.db.read(|c| envs::by_slug(c, project, slug))?;
+        if env.kind == envs::Kind::Ephemeral && !env.trusted {
+            return Err(Error::BadRequest(format!("{slug} is an untrusted environment: a {kind} sync would send a private key out of roll from code nobody vetted")));
+        }
+        let entries = self.view(project, slug, path, caller, false, Action::Reveal)?;
+        let e = entries.iter().find(|e| e.row.key == *key && e.row.owner.is_empty()).ok_or_else(|| Error::BadRequest(format!("{key} isn't in {slug}:{path}")))?;
+        managed_pki(e, kind)
+    }
+
+    /// The certificate, key and chain of the one key a certificate sync names, opened from its
+    /// managed credential.
+    fn certificate_parts(&self, project: &str, slug: &str, path: &str, r: &Row, entries: &[&crate::read::Entry], dek: &crate::crypto::Dek) -> Result<Certificate> {
+        let key = r.info.keys.as_ref().and_then(|k| k.first()).ok_or_else(|| Error::BadRequest(format!("a {} sync names one key", r.info.kind)))?;
+        let e = entries.iter().find(|e| e.row.key == *key).ok_or_else(|| Error::BadRequest(format!("{key} isn't in {slug}:{path} any more: the {} sync has no certificate to push", r.info.kind)))?;
+        managed_pki(e, &r.info.kind)?;
+        let state: Option<String> = self.db.read(|c| c.query_row("SELECT link_state FROM secrets WHERE id = ?", [&e.row.id], |x| x.get(0)).optional())?.flatten();
+        let state: Json = state.and_then(|s| serde_json::from_str(&s).ok()).ok_or_else(|| Error::BadRequest(format!("{key} has no certificate yet")))?;
+        let mut parts = crate::write::open_parts(dek, project, &state)?;
+        let mut part = |name: &str| parts.remove(name).ok_or_else(|| Error::Internal(format!("{key}'s credential has no {name}")));
+        let (certificate, private_key) = (part("certificate")?, part("private_key")?);
+        let chain = part("ca_chain").or_else(|_| part("ca"))?;
+        Ok(Certificate { key: key.clone(), certificate, private_key, chain })
+    }
+}
+
+/// A key a certificate sync pushes: the folder's own, linked `managed` to a project CA.
+fn managed_pki(e: &crate::read::Entry, kind: &str) -> Result<()> {
+    let ok = e.source == crate::read::Source::Own && e.row.link.as_ref().is_some_and(|l| l.kind == crate::pki::KIND && l.mode == crate::links::Mode::Managed);
+    if !ok {
+        return Err(Error::BadRequest(format!("a {kind} sync pushes a key of its own folder linked managed to a project CA (pki): {} isn't one", e.row.key)));
+    }
+    Ok(())
 }
 
 /// A live link's resource changed its credential: the syncs of projects that link it check their

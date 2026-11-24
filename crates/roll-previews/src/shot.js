@@ -389,6 +389,16 @@ const STATES = (() => {
     return {};
   }
 })();
+// The project's modes ($MODES: name → {color_scheme, locale, timezone}; Chromatic's Modes): the
+// first page taken again in each (`mode:<name>`), the emulation undone after.
+const MODES = (() => {
+  try {
+    const m = JSON.parse(process.env.MODES || "{}");
+    return m && typeof m === "object" ? m : {};
+  } catch {
+    return {};
+  }
+})();
 const KEYS = { Enter: 13, Escape: 27, Tab: 9, ArrowDown: 40, ArrowUp: 38, ArrowLeft: 37, ArrowRight: 39, Space: 32, Backspace: 8 };
 const step = async (sessionId, s, until) => {
   const left = () => Math.max(until - Date.now(), 0);
@@ -498,6 +508,43 @@ const stories = async (sessionId) => {
   }
   fs.writeFileSync(process.env.OUT + ".stories.json", JSON.stringify(out));
 };
+// A run an agent asked for ($TRY: {path, steps}; roll previews' `…/try`): the page loaded, its
+// steps taken as a page state's are (10 at most, 15 s), then its picture to $OUT, and to
+// $OUT.try.json its status, the step that found nothing, its visible text (its own line breaks
+// kept) and what went wrong on the way.
+const tryIt = async (sessionId) => {
+  let t = {};
+  try {
+    t = JSON.parse(process.env.TRY);
+  } catch {}
+  const path = typeof t.path === "string" && /^\/(?!\/)[^\s#"'`\\]{0,199}$/.test(t.path) ? t.path : "/";
+  let status = 0;
+  listeners.add((m) => {
+    if (m.method === "Network.responseReceived" && m.params?.type === "Document" && !status) status = m.params.response?.status || 0;
+  });
+  const done = once("Page.loadEventFired");
+  await send("Page.navigate", { url: new URL(path, process.env.URL).href }, sessionId);
+  await Promise.race([done, sleep(15000)]);
+  await sleep(300);
+  let stepFailed = null;
+  const until = Date.now() + 15000;
+  for (const s of (Array.isArray(t.steps) ? t.steps : []).slice(0, 10)) {
+    if (Date.now() > until) break;
+    stepFailed = await step(sessionId, s || {}, until);
+    if (stepFailed) break;
+    await sleep(150);
+  }
+  await sleep(300);
+  await still(sessionId);
+  const shot = await send("Page.captureScreenshot", { format: "png" }, sessionId).catch(() => null);
+  if (shot) fs.writeFileSync(process.env.OUT, Buffer.from(shot.data, "base64"));
+  const r = await check({ expression: `JSON.stringify(document.body ? String(document.body.innerText || "").slice(0, 40000) : "")`, returnByValue: true }, sessionId);
+  let text = "";
+  try {
+    text = JSON.parse(r?.result?.value || '""');
+  } catch {}
+  fs.writeFileSync(process.env.OUT + ".try.json", JSON.stringify({ status, step_failed: stepFailed, text, errors: [...errors, ...failed].slice(0, 20) }));
+};
 (async () => {
   const { targetId } = await send("Target.createTarget", { url: "about:blank" });
   const { sessionId } = await send("Target.attachToTarget", { targetId, flatten: true });
@@ -543,6 +590,11 @@ const stories = async (sessionId) => {
   await send("Page.addScriptToEvaluateOnNewDocument", { source: VITALS, worldName: WORLD }, sessionId).catch(() => null);
   if (process.env.STORIES) {
     await stories(sessionId);
+    chrome.kill();
+    process.exit(0);
+  }
+  if (process.env.TRY) {
+    await tryIt(sessionId);
     chrome.kill();
     process.exit(0);
   }
@@ -609,13 +661,22 @@ const stories = async (sessionId) => {
   try {
     for (const [n, path] of JSON.parse(process.env.PAGES || "[]").slice(0, 10).entries()) {
       const width = /^@[1-9][0-9]*$/.test(path) ? Number(path.slice(1)) : null;
+      const mode = /^mode:[a-z0-9-]{1,20}$/.test(path) ? MODES[path.slice(5)] : null;
+      if (mode) {
+        if (mode.color_scheme) await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: mode.color_scheme }] }, sessionId).catch(() => null);
+        if (mode.locale) {
+          await send("Emulation.setLocaleOverride", { locale: mode.locale }, sessionId).catch(() => null);
+          await send("Network.setExtraHTTPHeaders", { headers: { "Accept-Language": mode.locale } }, sessionId).catch(() => null);
+        }
+        if (mode.timezone) await send("Emulation.setTimezoneOverride", { timezoneId: mode.timezone }, sessionId).catch(() => null);
+      }
       const state = /^state:[a-z0-9-]{1,40}$/.test(path) ? STATES[path.slice(6)] : null;
       const at = state && typeof state.page === "string" && /^\/(?!\/)[^\s#"'`\\]{0,199}$/.test(state.page) ? state.page : null;
       if (width) await send("Emulation.setDeviceMetricsOverride", { width, height: 900, deviceScaleFactor: 1, mobile: width < 600 }, sessionId);
       else await send("Emulation.clearDeviceMetricsOverride", {}, sessionId);
       const before = errors.length + failed.length;
       const done = once("Page.loadEventFired");
-      await send("Page.navigate", { url: width ? process.env.URL : new URL(at || path, process.env.URL).href }, sessionId);
+      await send("Page.navigate", { url: width || mode ? process.env.URL : new URL(at || path, process.env.URL).href }, sessionId);
       await Promise.race([done, sleep(10000)]);
       await sleep(300);
       // A state's steps, at most 10, 15 s in all; the first that fails ends them.
@@ -634,6 +695,12 @@ const stories = async (sessionId) => {
       const shot = await send("Page.captureScreenshot", { format: "png" }, sessionId);
       fs.writeFileSync(`${process.env.OUT}.${n}.png`, Buffer.from(shot.data, "base64"));
       const page = { path, errors: errors.length + failed.length - before, unstable: await moves(sessionId, shot) };
+      if (mode) {
+        await send("Emulation.setEmulatedMedia", { features: [] }, sessionId).catch(() => null);
+        await send("Emulation.setLocaleOverride", {}, sessionId).catch(() => null);
+        await send("Network.setExtraHTTPHeaders", { headers: {} }, sessionId).catch(() => null);
+        await send("Emulation.setTimezoneOverride", { timezoneId: "" }, sessionId).catch(() => null);
+      }
       if (stepFailed) page.step = stepFailed;
       // The same checks as the first page's, each bounded in time.
       const value = async (expression, wait) => {

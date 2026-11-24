@@ -1312,6 +1312,26 @@ pub const SCREENSHOT_MAX: usize = 2 << 20;
 /// pages'), each at most this, and everything it writes: every PNG it can take, in base64, and
 /// those lines.
 const SHOT_REPORT_MAX: usize = 4 << 20;
+/// An agent's run (`…/try`), at most.
+const TRY_FOR: Duration = Duration::from_secs(60);
+
+/// What a run said (its PNG's base64 on the first line, then `{status, step_failed, text,
+/// errors}`), bounded: the page is the preview's code, so only a PNG within the cap, a status, one
+/// printable line for the step, its text (line breaks kept, cut) and 20 printable lines of errors.
+fn tried(out: &str) -> crate::ports::Tried {
+    use base64::Engine as _;
+    let (b64, said) = out.split_once('\n').unwrap_or((out, ""));
+    let png = base64::engine::general_purpose::STANDARD.decode(b64.trim()).ok().filter(|p| p.starts_with(b"\x89PNG") && p.len() <= SCREENSHOT_MAX);
+    let said: serde_json::Value = serde_json::from_str(said.trim()).unwrap_or_default();
+    let line = |s: &str, n: usize| s.chars().filter(|c| !c.is_control()).take(n).collect::<String>();
+    crate::ports::Tried {
+        png,
+        status: said["status"].as_u64().unwrap_or(0).min(999) as u16,
+        step_failed: said["step_failed"].as_str().map(|s| line(s, 200)),
+        text: said["text"].as_str().unwrap_or("").chars().filter(|c| !c.is_control() || *c == '\n').take(40_000).collect(),
+        errors: said["errors"].as_array().into_iter().flatten().filter_map(|e| e.as_str().map(|e| line(e, 300))).take(20).collect(),
+    }
+}
 /// The line of what a run's pages served (`$OUT.bodies.json`: 8 MiB as base64, and JSON).
 const BODIES_LINE_MAX: usize = 12 << 20;
 
@@ -1562,6 +1582,61 @@ impl IntoResponse for Unavailable {
     }
 }
 
+impl Runtime {
+    /// A running service's container and port, started if it sleeps: where a browser run joins
+    /// its network (a screenshot, an agent's run). `None` off Docker or for a service it doesn't run.
+    async fn running_target(&self, preview: &str, service: &str) -> anyhow::Result<Option<(String, u16)>> {
+        if self.iso.name() != "docker" {
+            return Ok(None);
+        }
+        let Some(host) = self.store.services(preview)?.into_iter().find(|s| s.name == service).map(|s| s.host) else { return Ok(None) };
+        let me = self.me.upgrade().ok_or_else(|| anyhow::anyhow!("the preview runtime is stopping"))?;
+        match me.ready(preview, service, self.cfg.wait).await {
+            Ok(_) => {}
+            Err(Unavailable::Failed(e)) => anyhow::bail!("the service didn't start: {e}"),
+            Err(_) => anyhow::bail!("the service didn't start in time"),
+        }
+        let name = container_name(&host);
+        // The service's own port, as its container says (`sh.roll.code.port`: with `egress: roll`
+        // it's on a network of its own and publishes nothing), else the one the runtime published
+        // (a container made before the label), never whatever else its image exposes.
+        let said = code_preview::docker::docker(&["inspect", "-f", &format!("{{{{index .Config.Labels \"{}.port\"}}}} {{{{range $p, $_ := .HostConfig.PortBindings}}}}{{{{$p}}}} {{{{end}}}}", code_preview::docker::LABEL), &name]).await?;
+        let port = said.split_whitespace().find_map(|p| p.split('/').next().and_then(|p| p.parse::<u16>().ok())).ok_or_else(|| anyhow::anyhow!("the service says no port"))?;
+        Ok(Some((name, port)))
+    }
+
+    /// An agent's run (`…/try`) in container `name`'s network, locked down as a screenshot is: the
+    /// page at `path`, `steps` taken, then what the browser saw ([`tried`]).
+    pub async fn try_in(&self, name: &str, port: u16, path: &str, steps: &[crate::settings::Step]) -> anyhow::Result<crate::ports::Tried> {
+        if code_preview::docker::docker(&["image", "inspect", "--format", "{{.Id}}", &self.cfg.screenshot_image]).await.is_err() {
+            code_preview::docker::docker(&["pull", "--quiet", &self.cfg.screenshot_image]).await?;
+        }
+        // Two may run at once for one preview: each a container of its own.
+        let shot = format!("roll-previews-try-{}", crate::new_id().trim_start_matches("pv_"));
+        let mut args = shot_args(&shot, name, port);
+        args.extend(["--env".into(), format!("TRY={}", serde_json::to_string(&serde_json::json!({ "path": path, "steps": steps }))?)]);
+        args.extend([
+            self.cfg.screenshot_image.clone(),
+            "sh".into(),
+            "-c".into(),
+            format!("{} >/dev/null 2>&1; (base64 -w0 /tmp/s.png 2>/dev/null || true) && echo && (cat /tmp/s.png.try.json 2>/dev/null || true)", self.cfg.screenshot_command),
+        ]);
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = match tokio::time::timeout(TRY_FOR, docker_with_input(&argv, Vec::new(), SCREENSHOT_MAX * 4 / 3 + SHOT_REPORT_MAX)).await {
+            Ok(Ok(out)) => out,
+            Ok(Err(e)) => {
+                code_preview::docker::remove(&shot).await;
+                return Err(e);
+            }
+            Err(_) => {
+                code_preview::docker::remove(&shot).await;
+                anyhow::bail!("the run took over {} s", TRY_FOR.as_secs());
+            }
+        };
+        Ok(tried(&out))
+    }
+}
+
 #[async_trait]
 impl Apps for Runtime {
     async fn deploy(&self, t: &Target) -> anyhow::Result<Option<String>> {
@@ -1663,7 +1738,7 @@ impl Apps for Runtime {
         Ok(true)
     }
 
-    async fn fetch(&self, preview: &str, service: &str, path: &str, head: bool) -> anyhow::Result<Option<crate::ports::Fetched>> {
+    async fn fetch(&self, preview: &str, service: &str, _url: &str, _access: Option<&str>, path: &str, head: bool) -> anyhow::Result<Option<crate::ports::Fetched>> {
         use futures::StreamExt;
         let me = self.me.upgrade().ok_or_else(|| anyhow::anyhow!("the preview runtime is stopping"))?;
         let host = self.store.service_host(preview, service)?.ok_or_else(|| anyhow::anyhow!("no service {service}"))?;
@@ -1802,23 +1877,13 @@ impl Apps for Runtime {
         Ok(Some((status, first)))
     }
 
+    async fn try_page(&self, preview: &str, service: &str, path: &str, steps: &[crate::settings::Step]) -> anyhow::Result<Option<crate::ports::Tried>> {
+        let Some((name, port)) = self.running_target(preview, service).await? else { return Ok(None) };
+        self.try_in(&name, port, path, steps).await.map(Some)
+    }
+
     async fn screenshot(&self, preview: &str, service: &str, opts: &crate::ports::ShotOptions) -> anyhow::Result<Option<crate::ports::Shot>> {
-        if self.iso.name() != "docker" {
-            return Ok(None);
-        }
-        let Some(host) = self.store.services(preview)?.into_iter().find(|s| s.name == service).map(|s| s.host) else { return Ok(None) };
-        let me = self.me.upgrade().ok_or_else(|| anyhow::anyhow!("the preview runtime is stopping"))?;
-        match me.ready(preview, service, self.cfg.wait).await {
-            Ok(_) => {}
-            Err(Unavailable::Failed(e)) => anyhow::bail!("the service didn't start: {e}"),
-            Err(_) => anyhow::bail!("the service didn't start in time"),
-        }
-        let name = container_name(&host);
-        // The service's own port, as its container says (`sh.roll.code.port`: with `egress: roll`
-        // it's on a network of its own and publishes nothing), else the one the runtime published
-        // (a container made before the label), never whatever else its image exposes.
-        let said = code_preview::docker::docker(&["inspect", "-f", &format!("{{{{index .Config.Labels \"{}.port\"}}}} {{{{range $p, $_ := .HostConfig.PortBindings}}}}{{{{$p}}}} {{{{end}}}}", code_preview::docker::LABEL), &name]).await?;
-        let port = said.split_whitespace().find_map(|p| p.split('/').next().and_then(|p| p.parse::<u16>().ok())).ok_or_else(|| anyhow::anyhow!("the service says no port"))?;
+        let Some((name, port)) = self.running_target(preview, service).await? else { return Ok(None) };
         self.screenshot_in(&name, port, opts).await.map(Some)
     }
 
@@ -1893,7 +1958,7 @@ impl Runtime {
         let pages: Vec<&String> = opts
             .pages
             .iter()
-            .filter(|p| crate::settings::page_path_ok(p) || crate::settings::width_entry(p).is_some() || crate::settings::state_entry(p).is_some())
+            .filter(|p| crate::settings::page_path_ok(p) || crate::settings::width_entry(p).is_some() || crate::settings::state_entry(p).is_some() || crate::settings::mode_entry(p).is_some())
             .take(crate::settings::MAX_PAGES)
             .collect();
         args.extend(["--env".into(), format!("PAGES={}", serde_json::to_string(&pages)?)]);
@@ -1911,6 +1976,11 @@ impl Runtime {
                 .collect();
         if !states.is_empty() {
             args.extend(["--env".into(), format!("STATES={}", serde_json::to_string(&states)?)]);
+        }
+        // Each mode's emulation, by name (`shot.js` takes the first page in it).
+        let modes: std::collections::BTreeMap<&str, &crate::settings::ModeRule> = opts.modes.iter().map(|m| (m.name.as_str(), m)).collect();
+        if !modes.is_empty() {
+            args.extend(["--env".into(), format!("MODES={}", serde_json::to_string(&modes)?)]);
         }
         let endpoints: Vec<&String> = opts.endpoints.iter().filter(|p| crate::settings::page_path_ok(p)).take(crate::settings::MAX_ENDPOINTS).collect();
         if !endpoints.is_empty() {
@@ -2829,10 +2899,10 @@ mod tests {
             }
         });
         // Link access (the default): a visitor without the token gets a 401; roll reads the page.
-        let page = rt.fetch(&row.id, "web", "/cart", false).await.unwrap().unwrap();
+        let page = rt.fetch(&row.id, "web", "", None, "/cart", false).await.unwrap().unwrap();
         assert_eq!((page.status, String::from_utf8_lossy(&page.body).to_string(), page.truncated), (200, "<h1>Cart</h1>".to_string(), false));
         assert!(page.headers.iter().any(|(k, v)| k == "content-type" && v == "text/html") && !page.headers.iter().any(|(k, _)| k == "set-cookie"), "{:?}", page.headers);
-        let big = rt.fetch(&row.id, "web", "/big", false).await.unwrap().unwrap();
+        let big = rt.fetch(&row.id, "web", "", None, "/big", false).await.unwrap().unwrap();
         assert_eq!((big.body.len(), big.truncated), (crate::ports::FETCH_MAX, true));
     }
 
@@ -3001,6 +3071,19 @@ mod tests {
         let got: Vec<(String, u32)> = story_shots(said, pngs.iter().map(|s| s.as_str())).into_iter().map(|p| (p.path, p.errors)).collect();
         assert_eq!(got, [("story:button--primary".to_string(), 2), ("story:card--full".to_string(), 0)]);
         assert!(story_shots("not json", [png.as_str()].into_iter()).is_empty());
+    }
+
+    /// A run's answer is the preview's code's: a PNG only within the cap, one printable line for
+    /// the step, the text's own line breaks kept, 20 lines of errors.
+    #[test]
+    fn a_runs_answer_is_bounded() {
+        use base64::Engine as _;
+        let png = base64::engine::general_purpose::STANDARD.encode(b"\x89PNG\r\n\x1a\n...");
+        let errors: Vec<String> = (0..30).map(|i| format!("e{i}\u{1b}[31m")).collect();
+        let said = serde_json::json!({ "status": 404, "step_failed": "click #x:\nnothing", "text": "Cart\nTotal 3\u{7}", "errors": errors });
+        let t = tried(&format!("{png}\n{said}"));
+        assert!(t.png.is_some() && t.status == 404 && t.step_failed.as_deref() == Some("click #x:nothing") && t.text == "Cart\nTotal 3" && t.errors.len() == 20 && t.errors[0] == "e0[31m", "{t:?}");
+        assert!(tried(&format!("bm90IGEgcG5n\n{said}")).png.is_none(), "not a PNG");
     }
 
     #[test]

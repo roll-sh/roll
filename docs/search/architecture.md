@@ -632,7 +632,16 @@ both with Elasticsearch 9.5.5's shapes, validation and state machines
   supervisor task runs each sync as a task of its own: however it ends (a panic included) the
   slot and the node's permit are freed, a job it left unfinished is settled (`error`, or
   `canceled` when it was canceling), and the scheduler is woken, so no bug can pin a cluster or
-  strand a job.
+  strand a job. When the cluster unloads (a drain or another handover, an unload, a delete),
+  `sync::suspend` stops its running syncs and records their jobs `suspended` (the connector's
+  `last_sync_status` too), as Elastic's connector service does when it shuts down mid-sync
+  (Elasticsearch's state machine has `in_progress → suspended → in_progress`). A suspended job
+  waits like a pending one: the cluster's `wake_at` is now, and whichever node loads it next
+  runs it again at once, not after the 5-minute stale check. The run starts over: an incremental
+  sync from the connector's `sync_cursor` (the last completed sync's), a full sync from the
+  beginning, and the suspended run's counters are dropped. A forced unload (a lost lease, failed
+  storage) writes nothing: its syncs stop, and the next owner finds their jobs stale as before.
+  The memory budget never evicts a cluster while a sync runs, as for running tasks.
 - **On a branch, and connectors from before.** Some connectors wait to be made the cluster's
   own (`sync::waits_for_adoption`): none of their jobs becomes due or starts, and their
   schedules make none. They are the connectors a branch inherited (`branch::inherited_connector`,
@@ -901,7 +910,10 @@ applies: every cluster is this node's.
 
 - **Ownership**: a cluster is served by the holder of the lease `search:cluster:<id>`, taken from
   rolld's roll-cluster handle. A cluster is loaded only under a guard of that lease and unloaded
-  when the guard's tenure ends (a handoff, a drain, the lease lost). An owner gives an idle
+  when the guard's tenure ends (a handoff, a drain, the lease lost): its running tasks stop as
+  cancelled with the reason "the node handed the cluster over" (a migration's copy shows it as
+  its `canceled`), and its connector syncs as `suspended` for the next owner to resume
+  ([Connectors](#connectors)). An owner gives an idle
   cluster's lease up (`Cluster::release_if_idle`) once it has unloaded, so a sleeping cluster
   belongs to nobody and costs no node anything.
 - **Requests**: the Elasticsearch REST listener and the edge's `<cluster>.search.<region>.<domain>`

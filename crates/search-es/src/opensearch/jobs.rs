@@ -114,7 +114,10 @@ impl Jobs {
                 crate::xpack::rollup::run_due(&c, now).await;
                 crate::xpack::slm::run_due(&c, now).await;
                 crate::xpack::entsearch::sync::run_due(&c, now).await;
-                if let Some((_, ilm, dsl)) = loaded_due(&c, &shared) {
+                // Due times read at the run's instant: the lifecycles' are relative to the clock
+                // (an index to move on is due "now"), so read after the jobs above took a
+                // millisecond they'd be past `now`, never due, and the task would loop at once.
+                if let Some((_, ilm, dsl)) = crate::time::at_sync(now, || loaded_due(&c, &shared)) {
                     if ilm.is_some_and(|t| t <= now) {
                         shared.ilm_polled.store(now, Ordering::SeqCst);
                         crate::xpack::ilm_run::run(&c, now).await;
@@ -127,7 +130,7 @@ impl Jobs {
                 shared.running.fetch_sub(1, Ordering::SeqCst);
                 // A run whose writes failed (a store refusing) leaves its jobs due: retry them
                 // a little later instead of spinning.
-                let stuck = loaded_due(&c, &shared).is_some_and(|(t, _, _)| t <= now);
+                let stuck = crate::time::at_sync(now, || loaded_due(&c, &shared)).is_some_and(|(t, _, _)| t <= now);
                 drop(c);
                 if stuck {
                     tokio::select! {

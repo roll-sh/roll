@@ -383,15 +383,24 @@ pub enum Secrets {
         /// `workspace-id/environment[/path]`, aws a name prefix (`prod/app/`),
         /// aws-parameter-store and akeyless a path (`/prod/app`), 1password `VAULT` or
         /// `VAULT/ITEM`, bitwarden a project id, gcp `PROJECT[/PREFIX]`, azure a vault's name.
-        /// With `--map`, the part before the mapped name.
+        /// With `--map`, the part before the mapped name; with `--all-environments`, the project.
         #[arg(long)]
         source: Option<String>,
         /// Several environments at once: `dev=development,prd=production` reads `<source>/dev`
-        /// into development, and so on (one change each).
+        /// into development, and so on (one change each). With `--all-environments`, where the
+        /// ones named go instead of the roll environment of their own name.
         #[arg(long, value_delimiter = ',', requires = "from")]
         map: Vec<String>,
-        /// Vault: every secret under the path, each into its own folder (`app/db` → `/db`), one
-        /// change per folder.
+        /// Doppler and Infisical: every environment (Doppler config) the project lists, each into
+        /// its `--map` entry or the roll environment of its own name (`dev_api` → `dev-api`).
+        #[arg(long, requires = "from")]
+        all_environments: bool,
+        /// Create the roll environments a Doppler or Infisical import goes into that don't exist
+        /// (without it, a missing one stops the import before anything is written).
+        #[arg(long, requires = "from")]
+        create_environments: bool,
+        /// Vault and Infisical: every folder under the path, each into its own folder (`app/db`
+        /// → `/db`), one change per folder.
         #[arg(long, requires = "from")]
         recursive: bool,
         /// Replace keys that exist (default: only add new ones).
@@ -1502,6 +1511,22 @@ pub enum CasCmd {
         /// The longest a certificate lives (days, 397 at most; 90 by default).
         #[arg(long)]
         max_days: Option<u32>,
+        /// An intermediate under your own root: prints its CSR (or writes it to --csr) for the root
+        /// to sign; it signs nothing until `roll secrets cas chain` installs the certificate.
+        #[arg(long)]
+        intermediate: bool,
+        /// Where an intermediate's CSR goes (stdout by default).
+        #[arg(long, requires = "intermediate")]
+        csr: Option<std::path::PathBuf>,
+    },
+    /// Install an intermediate's certificate signed by your root (PEM file), with the certificates
+    /// above it up to the root: the CA becomes active.
+    Chain {
+        id: String,
+        certificate: std::path::PathBuf,
+        /// The certificates above it, up to and including the root (PEM file).
+        #[arg(long)]
+        chain: Option<std::path::PathBuf>,
     },
     /// Print a CA's certificate (PEM), for clients to trust.
     Cert { id: String },
@@ -2286,11 +2311,24 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             write(&c, &env, ops, None, request, json_out).await?;
         }
         Secrets::Edit { request } => edit(&c, &env, request, json_out).await?,
-        Secrets::Import { file, from, source, map, recursive, overwrite, request, dry_run, sensitive } => {
+        Secrets::Import { file, from, source, map, all_environments, create_environments, recursive, overwrite, request, dry_run, sensitive } => {
             if let Some(from) = from {
-                anyhow::ensure!(!recursive || (from == "vault" && map.is_empty()), "--recursive reads a Vault KV v2 tree: --from vault --source mount/path");
                 let source = source.unwrap_or_default();
                 let o = ImportOpts { overwrite, request, sensitive, dry_run, message: format!("imported from {from} {}", source.chars().take(200).collect::<String>()) };
+                if let Some(vendor) = crate::import_tree::Vendor::parse(&from) {
+                    anyhow::ensure!(!recursive || vendor == crate::import_tree::Vendor::Infisical, "--recursive reads Vault's and Infisical's folders");
+                    let pairs = map.iter().map(|p| p.split_once('=').map(|(a, b)| (a.to_string(), b.to_string())).with_context(|| format!("{p}: --map is source=environment"))).collect::<anyhow::Result<Vec<_>>>()?;
+                    let which = match (all_environments, pairs.is_empty()) {
+                        (true, _) => crate::import_tree::Which::All(pairs),
+                        (false, true) => crate::import_tree::Which::One { into: c.at.env.clone() },
+                        (false, false) => crate::import_tree::Which::Map(pairs),
+                    };
+                    let one = matches!(which, crate::import_tree::Which::One { .. });
+                    let plan = crate::import_tree::read(&crate::import_tree::Request { vendor, source, which, recursive, into_path: c.at.path.clone() }).await?;
+                    return import_plan(&c, &plan, &o, create_environments, one, json_out).await;
+                }
+                anyhow::ensure!(!all_environments && !create_environments, "--all-environments and --create-environments read Doppler and Infisical projects");
+                anyhow::ensure!(!recursive || (from == "vault" && map.is_empty()), "--recursive reads a Vault KV v2 tree (--from vault --source mount/path) or Infisical's folders");
                 if map.is_empty() {
                     let folders = read_source(&from, &source, recursive).await?;
                     return import_folders(&c, &env, &folders, &o, None, json_out).await;
@@ -3378,8 +3416,8 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     println!("{}  {:<16} {}{}  up to {} days", s(&a["id"]), s(&a["name"]), domains.join(","), if a["allow_ip"] == true { " +IPs" } else { "" }, a["max_days"]);
                 }
             }
-            CasCmd::Add { name, domains, allow_ip, max_days } => {
-                let mut body = json!({ "name": name, "domains": domains, "allow_ip": allow_ip });
+            CasCmd::Add { name, domains, allow_ip, max_days, intermediate, csr } => {
+                let mut body = json!({ "name": name, "domains": domains, "allow_ip": allow_ip, "intermediate": intermediate });
                 if let Some(d) = max_days {
                     body["max_days"] = json!(d);
                 }
@@ -3387,7 +3425,28 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 if json_out {
                     return print(&v);
                 }
+                if intermediate {
+                    match csr {
+                        Some(path) => std::fs::write(&path, s(&v["csr"])).with_context(|| format!("writing {}", path.display()))?,
+                        None => print!("{}", s(&v["csr"])),
+                    }
+                    eprintln!("Made {} ({}), pending: have your root sign its CSR, then `roll secrets cas chain {} cert.pem --chain root.pem`.", s(&v["name"]), s(&v["id"]), s(&v["name"]));
+                    return Ok(());
+                }
                 println!("Made {} ({}): link TLS_CERT, TLS_KEY and TLS_CA to it with options.names; `roll secrets cas cert {}` prints what clients trust.", s(&v["name"]), s(&v["id"]), s(&v["id"]));
+            }
+            CasCmd::Chain { id, certificate, chain } => {
+                let read = |p: &std::path::Path| std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()));
+                let mut body = json!({ "certificate": read(&certificate)? });
+                if let Some(p) = chain {
+                    body["chain"] = json!(read(&p)?);
+                }
+                let v = c.call(Method::PUT, &format!("{}/cas/{}/chain", c.base(), enc(&ca_id(&c, &id).await?)), Some(body)).await?;
+                if json_out {
+                    return print(&v);
+                }
+                let domains: Vec<&str> = v["domains"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                println!("{} is active: it signs for {}; its certificates come with the chain up to your root (ca_chain, TLS_CA_CHAIN).", s(&v["name"]), domains.join(", "));
             }
             CasCmd::Cert { id } => {
                 let v = c.call(Method::GET, &format!("{}/cas", c.base()), None).await?;
@@ -4366,7 +4425,7 @@ struct ImportOpts {
 /// What another manager gives, by folder under the import's path: read here, signed in as the
 /// user is there, and never through roll's server.
 async fn read_source(from: &str, source: &str, recursive: bool) -> anyhow::Result<crate::managers::Folders> {
-    let entries = |m: serde_json::Map<String, Value>| m.into_iter().map(|(key, v)| crate::managers::Entry { key, value: s(&v).to_string(), secret: true }).collect::<Vec<_>>();
+    let entries = |m: serde_json::Map<String, Value>| m.into_iter().map(|(key, v)| crate::managers::Entry { key, value: s(&v).to_string(), secret: true, comment: String::new() }).collect::<Vec<_>>();
     if recursive {
         return Ok(vault_tree(source).await?.into_iter().map(|(folder, m)| (folder, entries(m))).collect());
     }
@@ -4403,7 +4462,7 @@ async fn import_folders(c: &Client<'_>, env: &str, folders: &crate::managers::Fo
             }
             continue;
         }
-        let items: Vec<Value> = entries.iter().map(|e| json!({ "key": e.key, "value": e.value, "sensitive": o.sensitive && e.secret })).collect();
+        let items: Vec<Value> = entries.iter().map(|e| json!({ "key": e.key, "value": e.value, "sensitive": o.sensitive && e.secret, "comment": e.comment })).collect();
         let body = json!({ "json": items, "path": path, "overwrite": o.overwrite, "request": o.request, "message": o.message });
         let v = c.call(Method::POST, &format!("{env}/import"), Some(body)).await.map_err(approval_hint).with_context(|| format!("importing into {path}"))?;
         if single && label.is_none() {
@@ -4434,6 +4493,101 @@ async fn import_folders(c: &Client<'_>, env: &str, folders: &crate::managers::Fo
     Ok(())
 }
 
+/// A Doppler or Infisical import read with its structure (import_tree.rs), written: missing roll
+/// environments created only with `create` (else it stops before writing anything), then each
+/// folder as one change (or change request), then its imports. With `dry_run` the tree is printed
+/// instead: environments, folders, key names, which keys become references and which can't, and
+/// what's left out. Never a value.
+async fn import_plan(c: &Client<'_>, plan: &crate::import_tree::Plan, o: &ImportOpts, create: bool, one: bool, json_out: bool) -> anyhow::Result<()> {
+    anyhow::ensure!(plan.keys() > 0 || plan.environments.iter().flat_map(|e| &e.folders).any(|f| !f.imports.is_empty()), "nothing to import");
+    let listed = c.call(Method::GET, &format!("{}/environments", c.base()), None).await?;
+    let have: Vec<&str> = listed.as_array().into_iter().flatten().filter_map(|e| e["slug"].as_str()).collect();
+    let missing: Vec<&str> = plan.environments.iter().map(|e| e.target.as_str()).filter(|t| !have.contains(t)).collect();
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
+    if o.dry_run {
+        for e in &plan.environments {
+            let state = match (missing.contains(&e.target.as_str()), create) {
+                (false, _) => "",
+                (true, true) => " (new)",
+                (true, false) => " (missing: --create-environments makes it)",
+            };
+            println!("{} → {}{state}", e.source, e.target);
+            for f in &e.folders {
+                println!("  {}: {} key{}", under(&c.at.path, &f.folder), f.keys.len(), plural(f.keys.len()));
+                for k in &f.keys {
+                    let mut notes = vec![];
+                    if !k.refs.is_empty() {
+                        notes.push(format!("references {}", k.refs.join(", ")));
+                    }
+                    if !k.flattened.is_empty() {
+                        notes.push(format!("its current value, not a reference: {}", k.flattened.join("; ")));
+                    }
+                    if !k.comment.is_empty() {
+                        notes.push("with its comment".into());
+                    }
+                    println!("    {}{}", k.key, if notes.is_empty() { String::new() } else { format!("  ({})", notes.join("; ")) });
+                }
+                for i in &f.imports {
+                    println!("    imports {}:{}", i.environment, i.path);
+                }
+                for l in &f.left_out {
+                    println!("    left out: {l}");
+                }
+            }
+        }
+        let folders: usize = plan.environments.iter().map(|e| e.folders.len()).sum();
+        let keys = plan.keys();
+        println!("Dry run: nothing imported ({keys} key{} in {folders} folder{} of {} environment{}).", plural(keys), plural(folders), plan.environments.len(), plural(plan.environments.len()));
+        return Ok(());
+    }
+    anyhow::ensure!(missing.is_empty() || create, "{} not in this project: --create-environments makes {}, or --map them to ones that are", missing.join(", "), if missing.len() == 1 { "it" } else { "them" });
+    for slug in &missing {
+        c.call(Method::POST, &format!("{}/environments", c.base()), Some(json!({ "slug": slug }))).await.with_context(|| format!("creating {slug}"))?;
+        println!("Created {slug}");
+    }
+    for e in &plan.environments {
+        let env = c.env(&e.target);
+        let label = format!("{} → {}", e.source, e.target);
+        let folders: crate::managers::Folders = e
+            .folders
+            .iter()
+            .filter(|f| !f.keys.is_empty())
+            .map(|f| (f.folder.clone(), f.keys.iter().map(|k| crate::managers::Entry { key: k.key.clone(), value: k.value.clone(), secret: true, comment: k.comment.clone() }).collect()))
+            .collect();
+        if !folders.is_empty() {
+            import_folders(c, &env, &folders, o, (!one).then_some(label.as_str()), json_out).await?;
+        }
+        for f in &e.folders {
+            let path = under(&c.at.path, &f.folder);
+            for k in f.keys.iter().filter(|k| !k.flattened.is_empty()) {
+                eprintln!("{label} {path} {}: came in as its current value, which won't follow its source: {}", k.key, k.flattened.join("; "));
+            }
+            for l in &f.left_out {
+                eprintln!("{label} {path}: left out {l}");
+            }
+            if f.imports.is_empty() {
+                continue;
+            }
+            // Added after the folder's own imports, never replacing them.
+            let at = format!("{env}/imports?path={}", enc(&path));
+            let mut list: Vec<Value> = c.call(Method::GET, &at, None).await?.as_array().cloned().unwrap_or_default();
+            let mut added = vec![];
+            for i in &f.imports {
+                let item = json!({ "environment": i.environment, "path": i.path });
+                if !list.iter().any(|x| x["environment"] == item["environment"] && x["path"] == item["path"] && x.get("project").is_none_or(Value::is_null)) {
+                    list.push(item);
+                    added.push(format!("{}:{}", i.environment, i.path));
+                }
+            }
+            if !added.is_empty() {
+                c.call(Method::PUT, &at, Some(Value::Array(list))).await.with_context(|| format!("setting {path}'s imports in {}", e.target))?;
+                println!("{label} {path}: imports {}", added.join(", "));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// An environment's values from another manager's API (or Secrets Manager through the `aws`
 /// CLI), as `{KEY: value}`.
 async fn import_from(from: &str, source: &str) -> anyhow::Result<serde_json::Map<String, Value>> {
@@ -4458,18 +4612,6 @@ async fn import_from(from: &str, source: &str) -> anyhow::Result<serde_json::Map
         out.insert(k.to_string(), Value::String(text));
     };
     match from {
-        "doppler" => {
-            let (project, config) = source.split_once('/').context("--source is project/config")?;
-            let host = env("DOPPLER_API_HOST").unwrap_or_else(|| "https://api.doppler.com".into());
-            let url = format!("{host}/v3/configs/config/secrets/download?project={}&config={}&format=json", enc(project), enc(config));
-            let v = get(http.get(url).bearer_auth(need("DOPPLER_TOKEN")?), format!("doppler {source}")).await?;
-            for (k, val) in v.as_object().into_iter().flatten() {
-                // Doppler's own, describing the config.
-                if !k.starts_with("DOPPLER_") {
-                    put(k, val);
-                }
-            }
-        }
         "vault" => {
             let (mount, path) = source.split_once('/').context("--source is mount/path (KV v2)")?;
             let addr = need("VAULT_ADDR")?;
@@ -4477,19 +4619,6 @@ async fn import_from(from: &str, source: &str) -> anyhow::Result<serde_json::Map
             let v = get(http.get(url).header("x-vault-token", need("VAULT_TOKEN")?), format!("vault {source}")).await?;
             for (k, val) in v["data"]["data"].as_object().into_iter().flatten() {
                 put(k, val);
-            }
-        }
-        "infisical" => {
-            let mut parts = source.splitn(3, '/');
-            let (ws, environment) = (parts.next().unwrap_or_default(), parts.next().context("--source is workspace-id/environment[/path]")?);
-            let path = format!("/{}", parts.next().unwrap_or_default());
-            let api = env("INFISICAL_API_URL").unwrap_or_else(|| "https://app.infisical.com".into());
-            let url = format!("{}/api/v3/secrets/raw?workspaceId={}&environment={}&secretPath={}", api.trim_end_matches('/'), enc(ws), enc(environment), enc(&path));
-            let v = get(http.get(url).bearer_auth(need("INFISICAL_TOKEN")?), format!("infisical {source}")).await?;
-            for x in v["secrets"].as_array().into_iter().flatten() {
-                if let Some(k) = x["secretKey"].as_str() {
-                    put(k, &x["secretValue"]);
-                }
             }
         }
         "aws" => {
@@ -4559,7 +4688,9 @@ async fn syncs(c: &Client<'_>, cmd: Syncs, json_out: bool) -> anyhow::Result<()>
             for x in v["syncs"].as_array().into_iter().flatten() {
                 let when = x["last_synced_at"].as_i64().map(ago).unwrap_or_else(|| "never".into());
                 let err = x["error"].as_str().map(|e| format!("  ({e})")).unwrap_or_default();
-                println!("{}  {:<10} {}:{:<10} {:<8} {} keys, {when}{err}", s(&x["id"]), s(&x["kind"]), s(&x["environment"]), s(&x["path"]), s(&x["status"]), x["synced"]);
+                // A certificate kind's: what the target calls the certificate.
+                let remote = x["remote_id"].as_str().map(|r| format!("  -> {r}")).unwrap_or_default();
+                println!("{}  {:<10} {}:{:<10} {:<8} {} keys, {when}{remote}{err}", s(&x["id"]), s(&x["kind"]), s(&x["environment"]), s(&x["path"]), s(&x["status"]), x["synced"]);
             }
             let kinds: Vec<String> = v["kinds"].as_array().into_iter().flatten().map(|k| s(&k["kind"])).collect();
             eprintln!("Kinds: {}", kinds.join(", "));

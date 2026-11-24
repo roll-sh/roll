@@ -14,6 +14,34 @@
   // Nothing of the page's is wrapped (console, fetch): its devtools stay its own.
   const errors = [], failed = new Map();
   const cut = (s, n) => String(s).replace(/\s+/g, " ").trim().slice(0, n);
+  // What the reviewer did before the note (Jam's user actions): the last 20 clicks (by a
+  // selector), inputs (how many characters, never what), choices, form submits, Enter and Escape,
+  // and page changes, each with how long before the note. Nothing of roll's own toolbar, nor the
+  // element picked for the note. The page's own functions are left as they are (a page change is
+  // noticed by looking at the address twice a second).
+  const steps = [];
+  const step = (what) => {
+    steps.push([Date.now(), cut(what, 120)]);
+    if (steps.length > 20) steps.shift();
+  };
+  const mine = (e) => e.composedPath().includes(host) || picking;
+  const sel = (t) => (t instanceof Element ? selector(t) : "");
+  addEventListener("click", (e) => { if (!mine(e) && e.target instanceof Element) step(`click ${sel(e.target)}`); }, true);
+  addEventListener("change", (e) => {
+    const t = e.target;
+    if (mine(e) || !(t instanceof Element)) return;
+    const kind = t.type === "checkbox" || t.type === "radio" ? (t.checked ? "check" : "uncheck") : t.localName === "select" ? "choose in" : `type ${String(t.value || "").length} characters in`;
+    step(`${kind} ${sel(t)}`);
+  }, true);
+  addEventListener("submit", (e) => { if (!mine(e)) step(`submit ${sel(e.target)}`); }, true);
+  addEventListener("keydown", (e) => { if (!mine(e) && (e.key === "Enter" || e.key === "Escape")) step(`press ${e.key} in ${sel(e.target)}`); }, true);
+  let at = location.pathname;
+  setInterval(() => {
+    if (location.pathname !== at) {
+      at = location.pathname;
+      step(`go to ${at}`);
+    }
+  }, 500);
   const keep = (s) => { if (s && !errors.includes(s)) { errors.push(s); if (errors.length > 5) errors.shift(); } };
   addEventListener("error", (e) => { if (e.message) keep(cut(e.message, 200)); });
   addEventListener("unhandledrejection", (e) => keep(cut(`Unhandled rejection: ${e.reason instanceof Error ? e.reason.message : e.reason}`, 200)));
@@ -74,7 +102,7 @@ textarea{width:100%;min-height:72px;resize:vertical;padding:8px;border-radius:8p
   <div class="row"><button type="button" class="cancel">Cancel</button><button type="submit" class="go">Post in roll</button></div>
 </form>`;
   const $ = (s) => root.querySelector(s);
-  const btn = $(".btn"), form = $("form"), box = $(".box"), note = $("textarea"), where = $(".where"), count = $(".count"), list = $(".list");
+  const btn = $(".btn"), form = $("form.card"), box = $(".box"), note = $("textarea"), where = $(".where"), count = $(".count:not(.flagbtn)"), list = $("div.list");
   let picking = false, picked = null;
   // Flags: each a select (the app's own choice, or one of its options); applied for this
   // browser only, by reloading with the cookie set.
@@ -191,6 +219,7 @@ textarea{width:100%;min-height:72px;resize:vertical;padding:8px;border-radius:8p
       fb_viewport: `${innerWidth}x${innerHeight}`,
       fb_note: note.value.trim(),
       fb_errors: JSON.stringify(errors),
+      fb_steps: JSON.stringify(steps.map(([t, what]) => `${Math.max(0, Math.round((Date.now() - t) / 1000))}s before · ${what}`)),
       fb_requests: JSON.stringify([...failed.values()].slice(-5)),
       fb_ua: navigator.userAgent.slice(0, 300),
     });

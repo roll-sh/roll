@@ -609,6 +609,36 @@ api PUT "/v1/previews/projects/$PRJ/settings" '{"access":"link"}' >/dev/null
 QUERY=$(api GET "/v1/previews/$PV" | jq_ "[x for x in d['services'] if x['name'] == 'web'][0]['share_url'].split('/?')[1]")
 curl -sS -o /dev/null -L -c "$JAR" -b "$JAR" -H "Host: $HOST" "http://$API/?$QUERY" --max-time 120
 
+say "a restore point (roll preview points): saved, a table made after it, put back"
+# A restore point (roll preview points): a table made after it is gone once it's put back, on
+# the same DATABASE_URL (pg-control's reset from the point: same endpoint and role).
+psql_app() { docker run --rm --name roll-previews-psqltest --network host postgres:18-alpine psql "$APP_DB" -Atc "$1" 2>&1 | head -1; }
+POINT=$(api POST "/v1/previews/$PV/restore-points" '{"label":"before the live check"}' | jq_ "d['id']")
+case "$POINT" in rp_*) ;; *) echo "a restore point should be saved: $POINT"; exit 1;; esac
+ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview points "$PV" | grep -q "$POINT" || { echo "roll preview points should list $POINT"; exit 1; }
+psql_app "CREATE TABLE after_the_point (id int)" >/dev/null
+TR0=$(now_ms)
+api POST "/v1/previews/$PV/restore-points/$POINT/restore" >/dev/null
+# Put back: the line is looked for in the whole activity (the services' lines come after it),
+# and the preview settled, ready or asleep (its services slept for it; a visit wakes them).
+PUT_BACK=""
+for _ in $(seq 1 240); do
+  api GET "/v1/previews/$PV/activity" | jq_ "any('back as restore point' in a['message'] for a in d)" | grep -q True && case "$(api GET "/v1/previews/$PV" | jq_ "d['state']")" in ready|sleeping) true;; *) false;; esac && PUT_BACK=yes && break
+  sleep 0.5
+done
+RESTORE_MS=$(( $(now_ms) - TR0 ))
+[ -n "$PUT_BACK" ] || { echo "the restore point should be put back and the preview settled (ready or asleep)"; api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d[:12]]"; exit 1; }
+RESTORED=$(psql_app "SELECT coalesce(to_regclass('public.after_the_point')::text, 'gone') || ' ' || (SELECT email FROM users WHERE id = 1)")
+[ "$RESTORED" = "gone $APP_MASKED" ] || { echo "putting the point back should drop what came after it, still masked, on the same DATABASE_URL: $RESTORED"; api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d[:8]]"; exit 1; }
+api DELETE "/v1/previews/$PV/restore-points/$POINT" >/dev/null
+# Its services slept while the data went back: a visit wakes them, on the same DATABASE_URL.
+for _ in $(seq 1 120); do
+  AFTER_DB=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/env.txt" | sed -n 's/^DATABASE_URL=//p' | sed 's#host.docker.internal#127.0.0.1#')
+  [ -n "$AFTER_DB" ] && break
+  sleep 0.5
+done
+[ "$AFTER_DB" = "$APP_DB" ] || { echo "the service should come back on the same DATABASE_URL after a restore point: ${AFTER_DB%%@*}…"; exit 1; }
+
 say "sleep it"
 api POST "/v1/previews/$PV/sleep" >/dev/null
 for _ in $(seq 1 60); do
@@ -889,6 +919,18 @@ case "$ENDPOINTS" in "/openapi.json 200 "*" ms, main "[0-9]*" ms") ;; *) echo "t
 # And its answer's shape against main's: the operation the change removes is a field gone.
 RESHAPED=$(api GET "/v1/previews/$PV" | jq_ "' | '.join('%s %s' % (c['path'], c.get('now') or 'gone') for x in d['base_change'].get('endpoints') or [] for c in x.get('shape_changes') or [])")
 [ "$RESHAPED" = "paths./users/{id} gone" ] || { echo "the change's /openapi.json should lose paths./users/{id} against main's: $RESHAPED"; exit 1; }
+# The feedback button driven in a real browser (Playwright's image, which the run built by now):
+# in through the preview's link, an element picked and a note written; what it opens roll with
+# names the page, the element and the note. Nothing else drives the page's toolbar end to end.
+# An agent's run on the page (roll MCP's previews_try): a step taken in a browser, the text after
+# it and its picture by the run's id.
+TRY=$(api POST "/v1/previews/$PV/try" '{"service":"web","path":"/","steps":[{"press":"Tab"}]}')
+TRY_SAID=$(echo "$TRY" | jq_ "'%s %s' % (d['status'], 'preview of change 1' in d['text'])")
+[ "$TRY_SAID" = "200 True" ] || { echo "an agent's run should answer the page's status and text: ${TRY:0:300}"; exit 1; }
+curl -sf "http://$API/v1/previews/$PV/try/$(echo "$TRY" | jq_ "d['run']")/screenshot" -o "$HOME_DIR/try.png" && head -c 8 "$HOME_DIR/try.png" | od -An -c | grep -q "P   N   G" || { echo "the run's picture should be a PNG"; exit 1; }
+FB_LINK=$(api GET "/v1/previews/$PV" | jq_ "[x for x in d['services'] if x['name'] == 'web'][0]['share_url']")
+FB_SAID=$(docker run --rm --name roll-previews-fbtest --network host -e LINK="$FB_LINK" -v "$ROOT/scripts/preview-cost/feedback-check.js:/w/check.js:ro" roll-previews-shot:1.64.1 sh -c 'NODE_PATH=$(npm root -g) node /w/check.js' 2>&1 | tail -1)
+case "$FB_SAID" in "/ · "*"a"*" · a live note") ;; *) echo "the page's feedback button should open roll with the page, the element and the note: $FB_SAID"; exit 1;; esac
 # Its secret values in what its pages served (the session fetched /env.txt, which this service
 # writes its environment to): named with where, never the value.
 SERVED=$(api GET "/v1/previews/$PV" | jq_ "' '.join(sorted(set('%s@%s' % (x['key'], x['path']) for x in d.get('served_secrets') or [])))")
@@ -1192,6 +1234,7 @@ cat <<EOF
 | Its endpoints against main's (the median of 10 GETs) | $ENDPOINTS |
 | The branch's tables from the sheet / users.email there | $SHEET_TABLES / $SHEET_EMAIL |
 | Its endpoint's answer against main's, by shape | $RESHAPED |
+| The feedback button in a browser: page · element · note | $FB_SAID |
 | Its secret values in what its pages served (names and where) | $SERVED |
 | SEO basics of the first page | $SEO |
 | /pricing's own checks (against main's /pricing) | $PRICING |
@@ -1210,6 +1253,7 @@ cat <<EOF
 | The migration's risks the preview names | ${RISKS:-} |
 | The teardown as the preview went (its exit code, with the branch's URL) / runs | 3 / $TEARDOWN |
 | The service's Postgres role / its WAL read / users.email as it reads it | $(echo "$APP_DB" | sed -E 's#^postgres://([^:]+):.*#\1#') / refused / $APP_MASKED |
+| A restore point put back (a table made after it gone, same DATABASE_URL, still masked) | $RESTORE_MS ms |
 | Postgres: the parent's data directory / the branch's (a full copy on this disk) | ${PG_PARENT_KB} KiB / ${PG_BRANCH_KB} KiB |
 | First visit (cold start of the service container, image cached) | $((T3 - T2)) ms |
 | Next visit (warm) | $((T5 - T4)) ms |
