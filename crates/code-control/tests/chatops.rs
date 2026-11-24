@@ -76,6 +76,7 @@ async fn mock_api(State(m): State<Arc<Mock>>, uri: Uri, headers: axum::http::Hea
         "chat.postMessage" => json!({ "ok": true, "channel": b["channel"], "ts": ts() }),
         "chat.update" => json!({ "ok": true, "channel": b["channel"], "ts": b["ts"] }),
         "conversations.open" => json!({ "ok": true, "channel": { "id": "D1" } }),
+        "users.info" => json!({ "ok": true, "user": { "name": "ada", "profile": { "display_name": "Ada", "real_name": "Ada Lovelace" } } }),
         "conversations.history" => json!({ "ok": true, "messages": [{ "ts": "1600000000.000100", "user": "UEVE", "text": "the login page 500s" }] }),
         "discord/oauth2/token" => json!({ "access_token": "user-token", "token_type": "Bearer", "guild": { "id": "G1", "name": "Acme Discord" } }),
         p if p.starts_with("discord/") => {
@@ -733,6 +734,72 @@ async fn discord_interactions_are_verified_and_reach_the_inbox() {
 
 /// The dashboard's copy of chat ops' catalog entries (`apps/dashboard/src/lib/chatops-catalog.json`:
 /// its demo and template tests) is what the registry says. `ROLL_FIXTURES=write` rewrites it.
+/// Preview notes as Slack threads (`slack.note`, Vercel's comments in Slack): a note left on a
+/// preview's page is posted to the channel; a reply in its thread is the note's reply on the
+/// change, signed with the person's name and never posted back; a reply on the page goes into
+/// the thread, and so does resolving the note.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn preview_notes_are_slack_threads_both_ways() {
+    let w = world().await;
+    w.install("T1").await;
+    let admin = Some(ADMIN);
+    w.a.req("POST", "/v1/code/repos", Some(json!({ "owner": "acme", "name": "web" })), admin).await;
+    w.a.req("POST", "/v1/code/repos/acme/web/land", Some(json!({ "message": "base", "files": { "index.html": { "content": "<p>hi</p>\n" } } })), admin).await;
+    let (s, c) = w.a.req("POST", "/v1/code/repos/acme/web/changes", Some(json!({ "title": "Checkout", "message": "Checkout", "author": "eve", "base": "main", "files": { "index.html": { "content": "<p>pay</p>\n" } } })), admin).await;
+    assert!(s.is_success(), "{c}");
+    let change = c["id"].as_str().unwrap().to_string();
+    let spec = json!({
+        "name": "Preview notes in Slack",
+        "trigger": { "type": "code", "events": ["review"], "repos": ["acme/web"] },
+        "steps": [{ "id": "note", "kind": "slack.note", "config": { "channel": "C9" } }],
+    });
+    let (s, v) = w.a.req("POST", "/v1/code/agents/acme/automations", Some(spec), Some(&w.owner)).await;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    let posts = || w.mock.calls_to("chat.postMessage");
+    let review = |body: String| {
+        let (a, change) = (&w.a, change.clone());
+        async move { a.req("POST", &format!("/v1/code/changes/{change}/reviews"), Some(json!({ "verdict": "comment", "body": body })), Some(ADMIN)).await.1 }
+    };
+
+    // A note on the page: a message in the channel, its thread bound to the note.
+    let note = review("**Feedback on the preview** · [`/checkout`](https://web-pr1.preview.test/checkout) · `button.pay`\n\nThe button is cut off\n\n<sub>1280x800 · roll preview pv_1</sub>".into()).await;
+    let note_id = note["id"].as_str().unwrap().to_string();
+    until("the note in Slack", || posts().len() == 1).await;
+    let posted = &posts()[0];
+    let text = posted["text"].as_str().unwrap();
+    assert_eq!(posted["channel"], "C9");
+    assert!(text.contains("<https://web-pr1.preview.test/checkout|/checkout> · `button.pay`") && text.contains("> The button is cut off") && !text.contains("<sub>"), "{text}");
+    let thread_ts: String = w.a.code.db.sql().query_row("SELECT thread_ts FROM chat_notes WHERE note = ?", [note_id.as_str()], |r| r.get(0)).unwrap();
+
+    // A reply in the thread from someone the install allows: the note's reply, with their name.
+    let reply = json!({ "type": "event_callback", "team_id": "T1", "event_id": "EvN1", "event_time": 1, "event": {
+        "type": "message", "user": "UADA", "channel": "C9", "text": "Fixed at 768px?", "ts": "1700000099.000001", "thread_ts": thread_ts
+    } })
+    .to_string();
+    assert_eq!(send(&w.a, signed("/v1/code/chat/slack/events", &reply, "application/json", now_s())).await.0, StatusCode::OK);
+    let mut replies = Vec::new();
+    for _ in 0..300 {
+        let (_, v) = w.a.req("GET", &format!("/v1/code/changes/{change}/reviews"), None, admin).await;
+        replies = v.as_array().cloned().unwrap_or_default().into_iter().filter_map(|r| r["body"].as_str().map(str::to_string)).filter(|b| b.starts_with("**Reply on the preview**")).collect::<Vec<_>>();
+        if !replies.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(replies, [format!("**Reply on the preview** · `{note_id}`\n\nFixed at 768px?\n\n— Ada, in Slack")]);
+
+    // A reply on the page goes into the thread; resolving the note is said there too.
+    review(format!("**Reply on the preview** · `{note_id}`\n\nWhich browser?")).await;
+    until("the page's reply in the thread", || posts().iter().any(|p| p["text"].as_str().is_some_and(|t| t.ends_with("Which browser?")))).await;
+    let (s, v) = w.a.req("POST", &format!("/v1/code/changes/{change}/reviews/{note_id}/dismiss"), Some(json!({ "reason": "fixed" })), admin).await;
+    assert!(s.is_success(), "{v}");
+    until("the resolution in the thread", || posts().iter().any(|p| p["text"].as_str().is_some_and(|t| t.starts_with("Resolved by")))).await;
+    let in_thread: Vec<&str> = posts()[1..].iter().map(|p| p["thread_ts"].as_str().unwrap_or_default()).collect();
+    assert!(in_thread.iter().all(|t| *t == thread_ts), "{in_thread:?}");
+    // The reply that came from Slack was never posted back.
+    assert!(!posts().iter().any(|p| p["text"].as_str().is_some_and(|t| t.contains("Fixed at 768px?"))), "{:?}", posts());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_dashboard_has_chat_ops_catalog() {
     let a = app_with(|_| {});
@@ -745,7 +812,7 @@ async fn the_dashboard_has_chat_ops_catalog() {
     for v in triggers.iter_mut().chain(steps.iter_mut()) {
         v.as_object_mut().unwrap().remove("needs_setup");
     }
-    assert_eq!((triggers.len(), steps.len()), (3, 13));
+    assert_eq!((triggers.len(), steps.len()), (3, 14));
     let want = json!({ "triggers": triggers, "steps": steps });
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/dashboard/src/lib/chatops-catalog.json");
     if std::env::var("ROLL_FIXTURES").as_deref() == Ok("write") {

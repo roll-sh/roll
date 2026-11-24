@@ -741,6 +741,10 @@ async fn note_step(ctx: &mut StepContext, client: &Client, token: &str, install:
                 Err(e) => return outcome(e),
             }
         } else {
+            // Posted once per note, whatever else makes its review event again.
+            if matches!(super::note_thread(&code, &install.id, review), Ok(Some(_))) {
+                return skipped;
+            }
             let link = preview_note::link(body);
             let text = note_text(by, &path, &selector, link.as_deref(), &note);
             match post(Message { channel, text, blocks: None, thread_ts: None }).await {

@@ -206,6 +206,26 @@ export const CHATOPS_TEMPLATES: AutomationTemplate[] = [
       );
     },
   },
+  {
+    id: "slack-preview-notes",
+    title: "Preview notes as Slack threads",
+    description: "A note left on a change's preview becomes a message in a channel; replies in its thread are the note's replies, and replies and resolving on the page show in the thread (roll previews).",
+    trigger: "code",
+    steps: ["slack.note"],
+    integration: "slack",
+    build: (ctx) => {
+      const p = ctx.projects.find((x) => x.repo) ?? ctx.projects[0];
+      return spec(
+        "Preview notes in Slack",
+        "Each note on a preview, as a Slack thread both ways.",
+        { type: "code", events: ["review"], repos: p?.repo ? [p.repo] : [] },
+        // The channel is the owner's pick: left empty, so the builder asks for it.
+        [step("note", "slack.note", { channel: "" })],
+        // Only notes and their replies (both bodies say it); the step leaves other reviews alone.
+        { filters: [{ field: "event.data.body", op: "contains", value: "on the preview** · " }] },
+      );
+    },
+  },
 ];
 
 export const TEMPLATES: AutomationTemplate[] = [
