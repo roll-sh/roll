@@ -1384,7 +1384,7 @@
     },
     "/v1/apps/services/{id}/activity": {
       "get": {
-        "description": "Answers `Event[]` (`audit.*`, newest first, 200): who changed what, never a value; `all=1`: every kind (deploys, failures, crash loops, alerts, domains, spend), the service's timeline.",
+        "description": "Answers `Event[]` (`audit.*`, newest first, 200; `before`: older than that event's `seq`, the next page back): who changed what, never a value; `all=1`: every kind (deploys, failures, crash loops, alerts, domains, spend), the service's timeline.",
         "operationId": "getServicesIdActivity",
         "parameters": [
           {
@@ -1398,7 +1398,7 @@
         ],
         "responses": {
           "200": {
-            "description": "`Event[]` (`audit.*`, newest first, 200): who changed what, never a value; `all=1`: every kind (deploys, failures, crash loops, alerts, domains, spend), the service's timeline"
+            "description": "`Event[]` (`audit.*`, newest first, 200; `before`: older than that event's `seq`, the next page back): who changed what, never a value; `all=1`: every kind (deploys, failures, crash loops, alerts, domains, spend), the service's timeline"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"

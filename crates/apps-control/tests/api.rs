@@ -473,6 +473,16 @@ async fn traces_sent_by_instances_read_back() {
     let proxy = spans.iter().find(|s| s["service"] == "roll" && s["name"] == "GET /items/:id").unwrap_or_else(|| panic!("{one}"));
     assert_eq!((proxy["parent"].as_str(), proxy["span"].as_str()), (Some("00f067aa0ba902b7"), seen.split('-').nth(2)), "{one}");
     assert!(spans.iter().any(|s| s["name"] == "roll wake" && s["parent"] == proxy["span"]), "a cold start's wait: {one}");
+    // Its access line names the trace (the line opens its waterfall).
+    let mut access = Vec::new();
+    for _ in 0..50 {
+        access = w.apps.logs.follow(&format!("http:{id}/production"), 50).0.into_iter().map(|l| l.text).collect::<Vec<_>>();
+        if access.iter().any(|l| l.contains(&format!("\"trace\":\"{client_trace}\""))) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(access.iter().any(|l| l.contains(&format!("\"trace\":\"{client_trace}\""))), "the access line carries its trace: {access:?}");
     // Logs into the environment's own log (its level and trace id readable there), metrics as
     // series: a counter's rate a second.
     let logs = json!({ "resourceLogs": [{ "resource": { "attributes": [{ "key": "service.name", "value": { "stringValue": "api" } }] }, "scopeLogs": [{ "logRecords": [
@@ -2215,6 +2225,10 @@ async fn changes_are_an_audit_trail_without_values() {
     let kinds: Vec<&str> = all.as_array().unwrap().iter().map(|e| e["kind"].as_str().unwrap()).collect();
     assert!(kinds.contains(&"deploy.active") && kinds.contains(&"audit.settings"), "{kinds:?}");
     assert!(!all.to_string().contains("sk-s3cr3t"));
+    // The next page back: older than the one before it, none of what came first.
+    let newest = all[0]["seq"].as_i64().unwrap();
+    let (_, back) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/activity?all=1&before={newest}"), None).await;
+    assert!(back.as_array().unwrap().iter().all(|e| e["seq"].as_i64() < Some(newest)) && back.as_array().unwrap().len() == all.as_array().unwrap().len() - 1, "{back}");
 }
 
 /// An environment's own redirects (Vercel's project redirects) on any service: exact paths and
@@ -5529,6 +5543,16 @@ async fn a_crashing_worker_restarts_and_its_crash_loop_is_one_event() {
     let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await;
     assert_eq!(env["crash_loop"]["crashes"], 3, "{env}");
     assert!(env["crash_loop"]["last_error"].as_str().unwrap().contains("137"), "{env}");
+    // Each crash is an event of its own too, with its reason (not only the loop).
+    let mut crashed = Vec::new();
+    for _ in 0..100 {
+        crashed = call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1["events"].as_array().unwrap().iter().filter(|e| e["kind"] == "instance.crashed").cloned().collect();
+        if crashed.len() >= 3 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(crashed.len() >= 3 && crashed[0]["data"]["reason"].as_str().unwrap_or("").contains("137"), "{crashed:?}");
     let mut sent = Vec::new();
     for _ in 0..100 {
         sent = got.lock().iter().filter(|b| b["type"] == "crash_loop").cloned().collect();
@@ -6631,6 +6655,16 @@ async fn a_web_service_scales_on_its_latency() {
     let (_, log) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/logs?tail=50"), None).await;
     assert!(scaled, "a second instance for its p95: {log}");
     assert!(log.to_string().contains("scaled out: p95 at"), "{log}");
+    // An event, with from, to and why (Render's scaling events).
+    let mut out = Value::Null;
+    for _ in 0..100 {
+        out = call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1["events"].as_array().unwrap().iter().find(|e| e["kind"] == "scale.out").cloned().unwrap_or(Value::Null);
+        if !out.is_null() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(out["data"]["to"].as_u64() > out["data"]["from"].as_u64() && out["data"]["reason"].as_str().unwrap_or("").starts_with("p95 at"), "{out}");
 }
 
 /// `run.cpu_target` and `run.memory_target`: a web service whose instances stay over the target

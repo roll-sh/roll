@@ -194,24 +194,44 @@ const ROUTE_SORTS: { key: RouteSort; label: string }[] = [
 ];
 
 /** Errors and latency by route (Vercel's Observability): the last hour's access log, ids folded. */
-/** Recent traces (OpenTelemetry, sent by the app's instances): one opens as a waterfall. */
-function Traces({ service, env, traces }: { service: string; env: string; traces: TraceSummary[] }) {
-  const [open, setOpen] = useState<string | null>(null);
+/** One trace's spans as a waterfall (opened from Traces, or from a request's log line). */
+export function TraceWaterfall({ service, env, trace }: { service: string; env: string; trace: string }) {
   const [spans, setSpans] = useState<Span[] | null>(null);
   useEffect(() => {
-    if (!open) return;
     let alive = true;
     setSpans(null);
-    appsApi.trace(service, env, open).then(
+    appsApi.trace(service, env, trace).then(
       (t) => alive && setSpans(t.spans),
       () => alive && setSpans([]),
     );
     return () => {
       alive = false;
     };
-  }, [service, env, open]);
+  }, [service, env, trace]);
   const start = spans && spans.length ? Math.min(...spans.map((s) => s.start)) : 0;
   const total = spans && spans.length ? Math.max(1, Math.max(...spans.map((s) => s.end)) - start) : 1;
+  return (
+    <div className="space-y-1">
+      {spans === null && <p className="shimmer text-[12px] text-muted">Reading its spans…</p>}
+      {spans?.length === 0 && <p className="text-[12px] text-muted">No spans for it (yet): an app's own spans come with its SDK.</p>}
+      {spans?.map((s) => (
+        <div key={s.span} className="grid grid-cols-[minmax(0,14rem)_1fr_4rem] items-center gap-2 text-[11.5px]">
+          <span className={`truncate font-mono ${s.error ? "text-danger" : "text-muted"}`} title={s.name}>
+            {s.name}
+          </span>
+          <span className="relative h-2 rounded-sm bg-line">
+            <span className={`absolute inset-y-0 rounded-sm ${s.error ? "bg-danger" : "bg-accent"}`} style={{ left: `${((s.start - start) / total) * 100}%`, width: `${Math.max(0.5, ((s.end - s.start) / total) * 100)}%` }} />
+          </span>
+          <span className="text-right font-mono text-subtle">{formatMs((s.end - s.start) / 1e6)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** Recent traces (OpenTelemetry, sent by the app's instances): one opens as a waterfall. */
+function Traces({ service, env, traces }: { service: string; env: string; traces: TraceSummary[] }) {
+  const [open, setOpen] = useState<string | null>(null);
   return (
     <section className={`${panel} overflow-hidden`} aria-label="Traces">
       <div className="border-b border-line px-4 py-2.5">
@@ -229,22 +249,8 @@ function Traces({ service, env, traces }: { service: string; env: string; traces
               <span className="font-mono text-muted">{formatMs(t.ms)}</span>
             </button>
             {open === t.trace && (
-              <div className="space-y-1 px-4 pb-3">
-                {spans === null && <p className="shimmer text-[12px] text-muted">Reading its spans…</p>}
-                {spans?.map((s) => (
-                  <div key={s.span} className="grid grid-cols-[minmax(0,14rem)_1fr_4rem] items-center gap-2 text-[11.5px]">
-                    <span className={`truncate font-mono ${s.error ? "text-danger" : "text-muted"}`} title={s.name}>
-                      {s.name}
-                    </span>
-                    <span className="relative h-2 rounded-sm bg-line">
-                      <span
-                        className={`absolute inset-y-0 rounded-sm ${s.error ? "bg-danger" : "bg-accent"}`}
-                        style={{ left: `${((s.start - start) / total) * 100}%`, width: `${Math.max(0.5, ((s.end - s.start) / total) * 100)}%` }}
-                      />
-                    </span>
-                    <span className="text-right font-mono text-subtle">{formatMs((s.end - s.start) / 1e6)}</span>
-                  </div>
-                ))}
+              <div className="px-4 pb-3">
+                <TraceWaterfall service={service} env={env} trace={t.trace} />
               </div>
             )}
           </li>
