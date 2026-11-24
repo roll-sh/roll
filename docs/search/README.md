@@ -1238,7 +1238,7 @@ deterministic (#396).
 1. **Search from the browser** (landed in #358 after six reviews, its policy enforced in the
    engine on the parsed request: per-cluster CORS, browser keys with rate limits and their own body
    cap, a Browser search section and the site-search guide's browser page; what remains: RAG's
-   chat limits for browser keys (item 11); keys derived without a call to roll (Algolia's
+   chat limits for browser keys (item 11); keys derived without a call to roll (in progress; Algolia's
    `generateSecuredApiKey`, Typesense's `generateScopedSearchKey`, Meilisearch's tenant tokens: a
    SaaS signs a short-lived key per end customer from one parent key, where today it's 20 browser
    keys a cluster and one control-plane call each); browser search on previews (a branch keeps the
@@ -1273,8 +1273,8 @@ deterministic (#396).
    scripts charge the `request` breaker; the node-wide body budget in #601; ES|QL and aggregations
    in #549, ab50f8507, after five reviews: pages, groups, remote states and kept results charged to
    the request breaker as built, under a node budget no tenant setting can raise
-   (`--search-request-memory-max`). In progress: both PRs' review follow-ups
-   (`fix/search-painless-memory-2`, `fix/search-esql-breaker-2`); Elasticsearch charges every request's
+   (`--search-request-memory-max`); both PRs' review follow-ups landed in #824 and #795 (and #894,
+   a failing sort script stops at its first failure). Elasticsearch charges every request's
    memory to its circuit breakers, ES|QL's blocks included, and Elastic Cloud's per-deployment
    limits hold because of it). roll serves many tenants per node, so a request whose memory the
    breakers don't see is a way for one tenant to stop everyone's searches. Today's reviews found
@@ -1430,7 +1430,10 @@ deterministic (#396).
    the restore: segments Lucene 8 wrote (Elasticsearch 7.x indices never merged since), data streams themselves (their backing indices restore), `sparse_vector`
    and `rank_vectors` values and nested dense vectors that Elasticsearch 9 left out of `_source`,
    `_status` file counts from the shard snapshots, and resuming after a takeover from the shard
-   reached rather than from the start of each index.
+   reached rather than from the start of each index. In progress (`fix/search-snapshot-followups`):
+   a snapshot DELETE waits for running snapshots that build on it, as Elasticsearch does, a cap on
+   repository generations, and unreferenced chunks of failed snapshots removed by the next
+   snapshot of their shard.
 10. **Relevance tuning by MCP and Terraform**: `/v1/search` serves synonyms sets, query rulesets
    (and `_test`), writing an index's settings and `_explain` (the routes table), and `roll search`
    has `synonyms`, `rules`, `indices settings` and `explain` and makes `read` and `append` keys on
@@ -1468,13 +1471,16 @@ deterministic (#396).
    outages, expired logins and maintenance redirects can't empty (it's skipped when most documents
    weren't refreshed); the limits with node ceilings; unverified-domain limits per owner and site
    on a node; and `roll search crawler import` for an
-   Open Crawler YAML file. Left: domain verification (phase 2: higher limits, the
-   `/v1/search/site-verifications` routes), the `crawl-test` route, its MCP tool and CLI, and the
-   dashboard's URL box and "crawl a site" empty state; then extraction rules (CSS selectors on the
+   Open Crawler YAML file. In review: phase 2 (#888, round 3 plus a merge of main: site
+   verification per cluster, a DNS TXT record proving a domain and a well-known file proving one
+   origin, with the owner's token shared across their clusters; `crawl-test` with a 75 s deadline,
+   its MCP tool and CLI; the dashboard's URL box and "crawl a site" empty state; the fleet's own
+   names as blocked hosts). After it: a verification token derived from the owner and the site
+   (HMAC), so a published record keeps working after its last row goes; then extraction rules (CSS selectors on the
    arena DOM), incremental crawls with `If-Modified-Since`, and the docs preset (phase 3).
    Charset detection beyond UTF-8, fetching several origins at once, per-site politeness by
    address rather than name, fleet-wide per-owner limits, and seeding `roll.crawler.blocked_hosts`
-   with the fleet's own names are open too.
+   are open too.
 14. **Semantic search on OpenSearch-flavor clusters** (design in
    [opensearch-neural.md](opensearch-neural.md); AWS OpenSearch neural search):
    `neural`, `neural_sparse` and `agentic` are names only (`meta/aliases.rs`); ML Commons
@@ -1711,7 +1717,9 @@ deterministic (#396).
    the cluster's `owner`), so a member of a project whose canvas holds a cluster gets nothing from
    `/v1/search` or the dashboard's Search pages, and `remotes::may_link` compares owners; clusters
    on a project should follow the member's role through `Workspace::trusts`, as secrets and apps
-   do. A member already gets trust in a cluster through its project home (search is one of
+   do. In review: #808 (round 7 plus a merge of main: a member's role in a cluster's project,
+   hand-overs recorded durably, a home moved only by its cluster's owner, roll secrets links never
+   rekeyed to a cluster that took a freed name later). A member already gets trust in a cluster through its project home (search is one of
    roll-workspace's home kinds, and a cluster made through a project gets that project as its home),
    so roll secrets' links work for members; search's own API is what's left.
 27. **Fleet takeover after a SIGKILL**: the fleet test's longest search stall (11.1 s at a
