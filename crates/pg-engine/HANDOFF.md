@@ -10703,8 +10703,11 @@ entries as they came, without the counting sort, and reading those words without
 brought it level. A sequential scan of the loaded table read the same on b0 and n2 (`seq_sum`
 1.160, `seq_count` 0.222 G): the source was not the cause.
 
-Not gated on the PGO build yet: the flush's code moved into new functions (`txn/sink.rs`); see
-"Left".
+Not gated on the PGO build: the flush's code moved into new functions (`txn/sink.rs`), which the
+brief's rule asks a PGO pair for, but no current profile was left on the machine (agent 307's,
+`41de1d3d1`, was gone by then) and a training is 3-3.5 hours a build; two PGO builds of one
+commit differ by about 0.9% (agent 304), more than every step here but the two COPYs into indexed
+tables moved, by -30%.
 
 Verification: `tools/quick-check.sh` with `QC_CHECKED=1` and `QC_TESTS="big_tables txn_spill
 crash_bulk storage_linked_gc"` on `43922ebfd` (the candidate's tree before this line): Clippy 16
@@ -10713,6 +10716,60 @@ verify-checked`; crash_random seeds 1-3 x 2, power_cut_at_every_point; regress 5
 newly differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed. (A first run stopped at the
 new test: its table, within the model, has no visibility map for index-only scans to read
 entries; it runs past the model now, as `copy_through_the_sink` does.)
+
+**Second candidate: a fresh-unique COPY's keys in its key locks; a COPY's rows past the model
+into the estimates together** (`cand/a309-2`: two code commits on `cand/a309`; `txn/mod.rs`,
+`txn/locks.rs`, `txn/bulklocks.rs`, `exec/dml.rs`, `exec/sizing.rs`). After `cand/a309` the step's
+profile (n1, `bulkp`, 19.2 G) had the unique checks at 10.9% and the size model's rows past the
+model at 9.8%.
+- **One set of a fresh-unique COPY's keys.** Each row's check of a primary key `FreshUnique`
+  answers for took the key's lock (`lock_unique_key`: past the transaction's first 2,048 unique
+  keys, its compact set, `bulklocks`, which another session's check of the key finds) and then
+  looked the key up in `FreshUnique`'s own set of the keys this statement entered (agent 287's,
+  about 22 bytes a key), entering it there too: the same keys in two hash sets. When the
+  transaction held no unique key's lock as the COPY started (`exact`: `unique_keys_taken` 0), the
+  keys this statement entered are exactly those whose locks the transaction holds, so the lock
+  answers both: `lock_unique_key_as` reports whether the transaction held the key already
+  (`Taken::Held`: this statement's duplicate, the violation) or took it now (`Taken::New`), from
+  the one probe the compact set makes for the insert (`KeySet::insert_new_with`; a key in the
+  holder's own compact set is taken the usual way as before, so its holder record is as it was).
+  `FreshUnique`'s set stays empty then; with keys held before (an earlier COPY or INSERT of the
+  transaction) it works as before. Other callers don't ask (`report` false): their path is the
+  one before, the held-key probe only where the compact path made it. The same locks, waits and
+  errors (`big_tables::copy_into_fresh_unique_index_waits_for_writers`, golden
+  `a287_copy_unique`).
+- **A COPY's rows past the model together.** Each row of a multi-insert COPY into a table past
+  the model's size went into the table's estimates as it went in (`untracked_write`: the shard's
+  write lock, the fillfactor parsed, the heap estimate's `add_in` and `placed`, the btree
+  estimates' entries, the estimate marked dirty), about 3,100 instructions a row. Now a row of a
+  table with indexes (with nothing out of line) waits in its COPY's batch (`Past`: its key, tuple
+  length and btree entries), and 256 of them go in under one lock, each as before and in their
+  order (`place_past`); the batch's flush, the load's end and a failed load (its drop: the dead
+  tuples) put the rest in, and a row that goes in at once (one with a value out of line) puts
+  those waiting in first. A table without indexes takes its rows as stored (`inserted_stored`,
+  at once), so none of its rows waits. `est_entries` keeps one buffer for the values' encodings
+  (an allocation a row), and `dml::index_values` copies an index's column values without `eval`
+  (its stack check and dispatch a column; the same values, the same out-of-range error).
+
+Results (BENCH "Bulk writes, round 26", second table; plain dist, two alternating pairs each):
+- the keys (n4 = `cand/a309`'s code against n5 = it and the keys): COPY into `bulkp` 18.846 x2 ->
+  18.384 x2 (-2.45%), VmHWM after it 216-222 -> 205-206 MB;
+- the rows past the model and the index values (n5 against n8 = the candidate's code): COPY into
+  `bulkp` 18.386 / 18.387 -> 18.205 / 18.217 (-0.95%), into `bulks` 13.108 / 13.109 -> 12.918 /
+  12.920 (-1.45%), COPY in 6.400 and INSERT … SELECT 4.421 on both. A first version (n7) let the
+  rows of a table without indexes wait too, and each stored row looked for waiting rows first:
+  COPY in 6.400 -> 6.406 (+0.09%); none of those wait now.
+- the two together, against `cand/a309`'s code: `bulkp` 18.846 -> 18.21 (-3.4%; PostgreSQL 18.6's
+  24.70: 0.74x), `bulks` 13.109 -> 12.92 (-1.5%; 18.92: 0.68x).
+Rows, the ctid hashes, the relation and index sizes equal on every run; foreign load 0.4-3.3
+cores by the harness. Not gated on the PGO build (below). Verification: `tools/quick-check.sh`
+with `QC_CHECKED=1` and the same `QC_TESTS` on `c8568d499` (both candidates; the tree before this
+line): Clippy 16 warnings, none new in a changed file; 456 tests in 27 binaries, again built
+`--profile verify-checked`; crash_random seeds 1-3 x 2, power_cut_at_every_point; regress 51,148 /
+51,150, 0 newly differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed. Both candidates
+rebased onto origin's `6b9fcdd49` (upstream touched `txn/mod.rs` in `lock_relation`, apart from
+this change, `storage/cache.rs` and the test build's crate id; the cherry-picks applied as they
+were): the same quick-check on `a0b8a5597`, the same counts.
 
 **Considered, not built:**
 - Keeping a kept segment's entries in the sink's memory until the close instead of chunk files:
@@ -10724,12 +10781,13 @@ entries; it runs past the model now, as `copy_through_the_sink` does.)
   (`SINK_AFTER`), so its first rows' run spans the table (one segment there: alone anyway).
 
 **Left (G user instructions, against PostgreSQL 18.6):**
-1. COPY into `bulkp` 18.85 against 24.70 and `bulks` 13.11 against 18.92: roll is under
-   PostgreSQL now. Of the step (n1's profile, `bulkp`, 19.2 G): the sink's flush 32% (zstd 10.7%,
-   the sort of the secondary index's entries 6.9%, `SstWriter::add` 4.6%, the close's merge 8.7%),
-   the unique checks 10.9% (`cand/a309-2`), the size model 15.8% (the rows past the model 9.8%:
-   `untracked_write`, about 3,100 instructions a row in many small parts: three locks, the btree
-   estimates' entries, `BtEst::insert`), the rows' encoding 14.2%, parsing 8%.
+1. COPY into `bulkp` 18.21 against 24.70 and `bulks` 12.92 against 18.92 (both candidates): roll
+   is under PostgreSQL now. Of the step (n1's profile, `bulkp`, 19.2 G, before the second
+   candidate): the sink's flush 32% (zstd 10.7%, the sort of the secondary index's entries 6.9%,
+   `SstWriter::add` 4.6%, the close's merge 8.7%), the unique checks 10.9% (the lock itself now:
+   the shard's mutex, the main table's probe and the compact set's), the size model 15.8% (the
+   rows past the model 9.8%, less after the second candidate: the entries' encoding and sizes,
+   `BtEst::insert`), the rows' encoding 14.2%, parsing 8%.
 2. A load of many flushes into a table with indexes in order: the transaction's runs merge in
    tiers of 16 linked runs (`spill::LINKED_MERGE_FAN`); with a run a segment, a 1M-row load writes
    about 10, a 10M-row one past 16, and the tier's merged run spans several segments (to L0 at
@@ -10739,7 +10797,7 @@ entries; it runs past the model now, as `copy_through_the_sink` does.)
    (`alone_at_bottom`'s size rule); the merge starts a new run each 64 MB of entries, which
    compresses to well under that.
 4. Stored rows for indexed tables (the brief's item 3): not started.
-5. PGO gate of this change (function boundaries moved): not run.
+5. The PGO gate of both candidates (function boundaries moved): not run, no profile (above).
 
 ## Bulk writes, round 25: INSERT … SELECT's stored rows in runs, a fresh-unique COPY's key path, the sink's sort (agent 300)
 

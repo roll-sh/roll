@@ -957,6 +957,39 @@ both.
 | the size model (`inserted_with`) | 12.7% | 15.8% |
 | parsing (`next_batch`) | 7.0% | 8.0% |
 
+### The second candidate (`cand/a309-2`), two alternating pairs each
+
+**n5**: n4 and the keys from the key locks; **n8**: n5 and the rows past the model together, the
+index values without `eval` (the candidate's code); **n7**: n8 with the rows of tables without
+indexes waiting too (replaced). n4 against n5 ran `pk_setup copy_pk checkp ctidsp` only.
+
+| step | n4 | n5 | n7 | n8 |
+|---|---|---|---|---|
+| COPY in | 6.400 x2 | 6.400 x6 | 6.406 x2 | 6.400 x2 |
+| INSERT … SELECT | 4.421 x2 | 4.421 x6 | 4.421 x2 | 4.421 x2 |
+| COPY into `bulkp` | 18.846 x4 | 18.384-18.387 x8 | 18.197-18.198 x2 | 18.205 / 18.217 |
+| COPY into `bulks` | 13.109-13.110 x2 | 13.108-13.110 x6 | 12.910 x2 | 12.918 / 12.920 |
+
+(n4's COPY in, INSERT … SELECT and `bulks` from its pairs against b0 above.) Rows, the ctid hashes
+and sizes equal on every run; VmHWM after the `bulkp` COPY 216-222 MB (n4), 205-206 (n5).
+
+### The whole bulk script once each (b0, n4), with the indexed variants after it
+
+| step | b0 | n4 | |
+|---|---|---|---|
+| COPY in | 6.461 | 6.400 | -0.94% |
+| CREATE INDEX | 3.638 | 3.638 | |
+| CREATE UNIQUE INDEX | 3.329 | 3.335 | +0.18% (its spread: 3.357-3.388 in rounds 21-24) |
+| COPY out | 3.090 | 3.087 | |
+| INSERT … SELECT | 4.429 | 4.428 | |
+| UPDATE half, DELETE a quarter, VACUUM, ANALYZE, the counts, TRUNCATE, DROP | 23.006 | 23.002 | level |
+| COPY into `bulkp` (after the script) | 27.522 | 18.939 | -31.2% |
+| COPY into `bulks` | 19.031 | 13.103 | -31.1% |
+| all steps | 90.506 | 75.932 | -16.1% |
+
+Rows and the ctid hashes equal; peak cgroup memory 699 / 672 MB, VmHWM 623 / 607 MB. Foreign load
+5.75 cores by lane.sh.
+
 ## Bulk writes, round 25: INSERT … SELECT's stored rows in runs, a fresh-unique COPY's key path, the sink's sort (2026-11-23, agent 300)
 
 HANDOFF "Bulk writes, round 25" has what changed. Lane C, agent 246's `bulkx.sh` with `JOIN=1`
