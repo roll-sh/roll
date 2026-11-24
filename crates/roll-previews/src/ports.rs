@@ -667,6 +667,15 @@ pub struct Fetched {
 /// The most of a page `GET …/fetch` reads.
 pub const FETCH_MAX: usize = 256 << 10;
 
+/// roll's OIDC issuer for a preview's own services (roll secrets', in process: Vercel's OIDC
+/// federation): a token whose `sub` is `roll-previews:<project>:<preview>:<service>`, for `aud`, at
+/// most an hour. roll secrets refuses a fork's preview itself; rolld's checks the project stands
+/// for the service's repo. `None` where the issuer isn't on this server (no public URL).
+#[async_trait]
+pub trait Issuer: Send + Sync {
+    async fn issue(&self, project: &str, repo: &str, preview: &str, service: &str, aud: &str, ttl: std::time::Duration) -> anyhow::Result<Option<String>>;
+}
+
 pub trait ShellIo: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
 impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> ShellIo for T {}
 

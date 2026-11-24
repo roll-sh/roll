@@ -712,6 +712,8 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     // Previews' rules name roll secrets' keys only where their writer may reveal them.
     if let Some(e) = &previews_engine {
         let _ = e.reveal.set(std::sync::Arc::new(previews::SecretsReveal(secrets.clone())));
+        // roll's word for a preview's own services (`oidc_audiences`).
+        let _ = e.issuer.set(std::sync::Arc::new(previews::PreviewIssuer { secrets: secrets.clone(), workspace: workspace.clone() }));
     }
     // Keys a fork's preview never holds: its interception CA and the swap, roll secrets'.
     if let Some((rt, e)) = &preview_hosts {

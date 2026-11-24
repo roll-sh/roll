@@ -171,6 +171,10 @@ pub struct Engine {
     pub git_report: std::sync::OnceLock<Arc<dyn crate::ports::GitReport>>,
     /// The projects' log drains (roll apps'); unset, previews' runtime output goes to none.
     pub drains: std::sync::OnceLock<Arc<dyn crate::ports::Drains>>,
+    /// roll's OIDC issuer for the preview's own services (`oidc_audiences`), when it's here.
+    pub issuer: std::sync::OnceLock<Arc<dyn crate::ports::Issuer>>,
+    /// Tokens issued in the last minute, by preview, service and audience (as roll apps' are).
+    oidc_issued: Mutex<HashMap<(String, String, String), (i64, crate::OidcToken)>>,
     /// Forwarded connections open per preview, and when each (preview, person, service, port)
     /// was last said in the activity (`shell.rs`).
     forwards: Mutex<HashMap<String, Arc<std::sync::atomic::AtomicUsize>>>,
@@ -328,6 +332,8 @@ impl Engine {
             deploying_since: Mutex::new(HashMap::new()),
             passing: tokio::sync::Mutex::new(()),
             drains: std::sync::OnceLock::new(),
+            issuer: std::sync::OnceLock::new(),
+            oidc_issued: Mutex::new(HashMap::new()),
             draining: Mutex::new(HashMap::new()),
             shells: Mutex::new(HashMap::new()),
             traces: Mutex::new(HashMap::new()),
