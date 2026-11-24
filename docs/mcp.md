@@ -1403,6 +1403,10 @@ previews are listed once those products are on.
 | `previews_fetch` | A preview's page read through roll as a visitor gets it, without a share link (Vercel's `web_fetch_vercel_url`): status, a few headers and the text, masked as its logs are, cut at 256 KiB (`path`, `service`, `head`); reveal, since a page can show copies of production's people. `review_preview` uses it on the pages a change touches. | `GET /v1/previews/{id}/fetch` |
 | `previews_try` | A preview's page in a browser in its own network with steps taken on it (`click`, `type`, `press`, `wait`; 10 at most, stateless: the whole way each time), as GitHub Copilot's coding agent drives Playwright: status, the step that found nothing, the visible text after, errors on the way, masked; typed text is redacted from the audit (#887) and never kept by previews; reveal. | `POST /v1/previews/{id}/try` |
 | `previews_try_screenshot` | A `previews_try` run's picture (kept 5 minutes) as an image the agent looks at, asked for only when the text isn't enough. | `GET /v1/previews/{id}/try/{run}/screenshot` |
+| `previews_list_restore_points` | A preview's saved data states (at most 3): label, who and when, what each holds (Postgres branches for now). | `GET /v1/previews/{id}/restore-points` |
+| `previews_create_restore_point` | Save a preview's data before trying something that changes it (`label`); 409 while it isn't ready, when full or with no Postgres branch. | `POST /v1/previews/{id}/restore-points` |
+| `previews_restore` | Put a restore point's data back (destructive: it replaces what's there; the services sleep meanwhile and it can take minutes, so `previews_wait` follows). | `POST /v1/previews/{id}/restore-points/{point}/restore` |
+| `previews_delete_restore_point` | Delete a restore point. | `DELETE /v1/previews/{id}/restore-points/{point}` |
 | `previews_tables` | What a preview's data branch holds, read as the branch's own read-only role: its tables and row counts, or a table's first 50 rows (`resource` is `kind:parent`, Postgres for now); reveal, since it shows masked copies of production's data. | `GET /v1/previews/{id}/data/{resource}` |
 | `previews_sleep` | Stop a preview's services until it's woken. | `POST /v1/previews/{id}/sleep` |
 | `previews_wake` | Start a sleeping preview's services again. | `POST /v1/previews/{id}/wake` |
@@ -1419,7 +1423,7 @@ From a 2026-11-23 comparison (the spec's next release moved to 2027-03-30, SEP-3
 ahead of every hosted server checked on 2026-07-28, events, tasks, apps, skills and step-up, so the
 gaps are in how results read and how roll is distributed):
 
-1. **Coming from the sibling threads, mapped as they land:** roll previews' restore points (list, make, restore, delete; `previews_restore` destructive), with `review_preview` making one before a destructive flow. (roll apps' `apps_fetch`, #890, is on main, and `debug_failing_service` and `ship_from_chat` read pages with it: this PR.)
+1. **Coming from the sibling threads, mapped as they land:** roll previews' restore points (#897): mapped in this PR, `review_preview` making one before a flow that changes data. (roll apps' `apps_fetch`, #890, is on main, and `debug_failing_service` and `ship_from_chat` read pages with it: this PR.)
 2. **After #808 (roll search on members) lands:** `Tool::within_session`'s comment (a create that names a project is held within the person's session now; listing stays as it is) and the members sentence in "With a scoped token" naming search. Waiting on its merge commit.
 3. **More quotes before creating something billable** (Supabase's form, PlanetScale's `confirm`): apps' is `apps_quote` (roll apps #835 on this thread's suggestion; `ship_a_service` and `ship_from_chat` ask it first, #840). Next: Postgres projects and search clusters, as their threads add a quote route.
 4. **MCP Events: more feeds.** All three delivery modes are on main (poll #692, webhook #703,
