@@ -18,10 +18,22 @@ export interface Prices {
   stored_gb_month: number;
 }
 
-/** Signing visitors in through a provider (`access.sso`): `@acme.com`, `ada@acme.com`, `org:acme` (GitHub). */
+/** Signing visitors in through a provider (`access.sso`): `@acme.com`, `ada@acme.com`, `org:acme` (GitHub), `group:eng@acme.com` (`sso`: the organisation's own provider, through roll's SSO connections). */
 export interface Sso {
-  provider: "github" | "google";
+  provider: "github" | "google" | "sso";
   allow: string[];
+}
+
+/** One session in a sign-in-gated environment (`…/visitors`). */
+export interface Visitor {
+  id: string;
+  /** A provider's verified email, or a roll person's id. */
+  who: string;
+  how: "github" | "google" | "sso" | "roll";
+  /** The `access.sso` entry that let a provider's visitor in. */
+  entry: string | null;
+  since: number | null;
+  until: number;
 }
 
 /** What an environment's last week says about a setting, and the body that acts on it. */
@@ -180,7 +192,7 @@ export interface Run {
   suspend_after_s: number;
   sleep_after_s: number;
   /** backups: how often (hours, 0: by hand only) and how many are kept; none: daily, seven. */
-  volume?: { mount: string; size_gb: number; backups?: { every_hours: number; keep: number } };
+  volume?: { mount: string; size_gb: number; /** Every instance mounts it: many instances, overlapping deploys. */ shared?: boolean; backups?: { every_hours: number; keep: number } };
   /** Metric alerts (`alert.*` events), over five minutes; each 0 is off. */
   /** log_match: text its output holds log_count times in five minutes (alert.log). */
   alerts?: { memory_pct: number; error_pct: number; p95_ms: number; capacity_pct?: number; log_match?: string; log_count?: number; cpu_pct?: number; metrics?: MetricAlert[]; /** The last hour against the same hour of the week over four weeks: alert.anomaly. */ anomaly?: boolean; /** One route's 5xx share or p95 over five minutes: alert.route. */ routes?: RouteAlert[] };
@@ -982,6 +994,16 @@ export interface Slo {
   objective: number;
   latency_ms?: number;
   window_days?: number;
+  /** Single routes' own objectives over the same window (at most 5). */
+  routes?: RouteSlo[];
+}
+
+/** One route's objective: a route as Routes names it (or a prefix `/api/*`), one method or all. */
+export interface RouteSlo {
+  route: string;
+  method?: string;
+  objective: number;
+  latency_ms?: number;
 }
 
 /** One indicator over the objective's window: `budget_left` is the share of the budget still unspent (negative once spent). */
@@ -998,6 +1020,8 @@ export interface SloReport {
   availability?: SloIndicator;
   latency?: SloIndicator | null;
   burning?: { indicator: "availability" | "latency"; burn_rate: number; window: "1h" | "6h" } | null;
+  /** Each route's own objective against the window, from its own minutes. */
+  routes?: (RouteSlo & { availability: SloIndicator; latency: SloIndicator | null; burning: SloReport["burning"] })[];
 }
 
 export type Severity = "critical" | "high" | "medium" | "low" | "unknown";
@@ -1405,6 +1429,8 @@ export type NotifyEvent =
   | "alert.capacity"
   | "alert.log"
   | "alert.route"
+  | "visit.admitted"
+  | "visit.denied"
   | "error.new"
   | "error.regressed"
   | "cron.failed"
@@ -1805,6 +1831,10 @@ export const appsApi = {
     return data as Deployment;
   },
   metrics: (id: string, e: string, minutes = 60) => call<Metrics>("GET", `${env(id, e)}/metrics${qs({ minutes })}`),
+  /** Who's signed in to a gated environment now, newest first. */
+  visitors: (id: string, e: string) => call<Visitor[]>("GET", `${env(id, e)}/visitors`),
+  /** End one visitor's session now. */
+  endVisit: (id: string, e: string, visitor: string) => call<null>("DELETE", `${env(id, e)}/visitors/${enc(visitor)}`),
   advice: (id: string, e: string) => call<{ days: number; minutes: number; advice: Advice[] }>("GET", `${env(id, e)}/advice`),
   /** Errors and latency by route over the last `minutes` (5–60). */
   routes: (id: string, e: string, minutes = 60) => call<RouteStats>("GET", `${env(id, e)}/routes${qs({ minutes })}`),

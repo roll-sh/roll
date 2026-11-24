@@ -4,7 +4,9 @@
 //! lets through; the `parent` breaker checks each charge; `_nodes/stats` lists the breakers in
 //! Elasticsearch's order with live numbers. ES|QL and aggregations charge what they build to
 //! `request` and through it to the node's budget, and give it back when the request ends; a
-//! tenant's `request` limit is held to the operator's maximum.
+//! tenant's `request` limit is held to the operator's maximum. `_bulk`'s documents prepared
+//! ahead are charged while held and prepared no further when there's no room, never failing
+//! the request or counting a trip.
 
 use search_es::json::{Value, parse};
 use search_es::{Cluster, ClusterConfig, EsRequest, MemoryStore};
@@ -368,4 +370,27 @@ async fn a_remotes_states_are_charged_as_decoded() {
     assert!(at(&v, "error.reason").as_str().unwrap().starts_with("[request] Data too large, data for [<remote_cluster_response>]"), "{v:?}");
     let (_, stats) = call(&c, "GET", "/_nodes/stats/breaker?filter_path=nodes.*.breakers.request", None).await;
     assert_eq!(at(&stats, "nodes.*.breakers.request.estimated_size_in_bytes").as_i64(), Some(0));
+}
+
+#[tokio::test]
+async fn bulk_documents_prepared_ahead_are_charged_and_never_fail_the_request() {
+    // Room for some of the request's prepared documents, not all of them.
+    let node = search_es::breaker::MemoryBudget::new(256 << 10);
+    let mut cfg = ClusterConfig::new("bulk-ahead");
+    cfg.request_memory = Some(node.clone());
+    let c = Cluster::open(cfg, Arc::new(MemoryStore::new())).await.unwrap();
+    call(&c, "PUT", "/docs", Some(br#"{"mappings":{"properties":{"title":{"type":"text"},"tag":{"type":"keyword"},"n":{"type":"long"}}}}"#)).await;
+    let mut body = String::new();
+    for i in 0..2048 {
+        body += &format!("{{\"index\":{{\"_index\":\"docs\",\"_id\":\"{i}\"}}}}\n{{\"title\":\"a title of document {i}\",\"tag\":\"t{}\",\"n\":{i}}}\n", i % 7);
+    }
+    let (s, v) = call(&c, "POST", "/_bulk?refresh=true", Some(body.as_bytes())).await;
+    assert_eq!((s, at(&v, "errors").as_bool()), (200, Some(false)), "{v:?}");
+    let (_, n) = call(&c, "GET", "/docs/_count", None).await;
+    assert_eq!(at(&n, "count").as_i64(), Some(2048));
+    let (_, stats) = call(&c, "GET", "/_nodes/stats/breaker?filter_path=nodes.*.breakers", None).await;
+    assert_eq!(at(&stats, "nodes.*.breakers.request.estimated_size_in_bytes").as_i64(), Some(0), "{stats:?}");
+    assert_eq!(at(&stats, "nodes.*.breakers.request.tripped").as_i64(), Some(0), "{stats:?}");
+    assert_eq!(at(&stats, "nodes.*.breakers.parent.tripped").as_i64(), Some(0), "{stats:?}");
+    assert_eq!(node.used(), 0);
 }

@@ -46,7 +46,8 @@ impl Engine {
         here.drain(..skip);
         let cropped = self.store.cropped_notes(preview)?;
         for n in &mut here {
-            n.crop = cropped.contains(&n.id);
+            n.crop = cropped.contains_key(&n.id);
+            n.crop_as = cropped.get(&n.id).cloned().flatten();
         }
         Ok(here)
     }

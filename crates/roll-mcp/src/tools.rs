@@ -308,8 +308,10 @@ impl Tool {
                 }
                 continue;
             };
+            // An optional one left empty is no choice, as its routes read it (some clients fill every
+            // field they have).
             if let Ty::Choice(values) = p.ty
-                && !v.as_str().is_some_and(|s| values.contains(&s))
+                && !v.as_str().is_some_and(|s| values.contains(&s) || (s.is_empty() && !p.required))
             {
                 return Err(format!("{}: {} is one of {} (not {v})", self.name, p.name, values.join(", ")));
             }
@@ -444,6 +446,8 @@ fn apps_area(method: &str, path: &str) -> Area {
             "analytics" | "app-metrics" | "errors" | "logs" | "metrics" | "routes" | "slo" | "traces" | "usage" | "vitals" | "push" | "fetch" | "advice" => "observe",
             "deploys" | "promote" | "redeploy" | "rollback" | "pending" | "diff" | "jobs" | "runs" | "restart" | "sleep" | "wake" | "instances" | "cache" | "sandboxes" => "deploy",
             "private-network" => "configure",
+            "visitors" if read => "observe",
+            "visitors" => "configure",
             "variables" | "domains" | "forms" | "volume" | "config" => "configure",
             _ => return Area::Unplaced,
         },
@@ -1601,7 +1605,7 @@ static TOOLS: &[Tool] = &[
     t("apps_test_drain", "Test a log drain", "Send one signed test line now (not retried): whether it arrived.", "apps", "POST", "/v1/apps/projects/{project}/drains/{did}/test", &[req("project", "Workspace project"), req("did", "Drain id")]).open_world(),
     t("apps_pending", "What the next deploy changes", "Before deploying: which variables (names, never values), run settings and project secrets the next deploy changes against what's live.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/pending", &[SERVICE, ENV]),
     t("apps_deploy_commits", "A deploy's commits", "The commits a deploy brings over the one live before it, newest first (at most 50).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/commits", &[SERVICE, ENV, req("deploy", "Deploy id")]),
-    t("apps_deploy_vulnerabilities", "A deploy's vulnerabilities", "Known vulnerabilities in a deploy's image, most severe first, then those with a fix: id (CVE-…, GHSA-…), severity, package, installed and fixed versions, and where (the OS's packages or a lockfile), at most 2,000, with the scan's counts. Use it before promoting a deploy, or to find what to upgrade.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/vulnerabilities", &[SERVICE, ENV, req("deploy", "Deploy id"), q("severity", Ty::Choice(&["critical", "high", "medium", "low"]), "Only this severity or worse")]),
+    t("apps_deploy_vulnerabilities", "A deploy's vulnerabilities", "Known vulnerabilities in a deploy's image, most severe first, then those with a fix: id (CVE-…, GHSA-…), severity, package, installed and fixed versions, and where (the OS's packages or a lockfile), at most 2,000, with the scan's counts. Use it before promoting a deploy, or to find what to upgrade.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/vulnerabilities", &[SERVICE, ENV, req("deploy", "Deploy id"), q("severity", Ty::Choice(&["critical", "high", "medium", "low", "unknown"]), "Only this severity or worse")]),
     t("apps_explain_deploy", "Why did a deploy fail", "Ask why a failed deploy failed: the model of the owner of the service's roll code repo reads its error, plan, steps and the newest lines of its build log and output (masked) and answers what went wrong and what to change. The answer is kept with the deploy and answered again without a model call; again: true asks anew (at most once a minute). 409 when it didn't fail.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/explain", &[SERVICE, ENV, req("deploy", "Deploy id"), q("again", Ty::Bool, "Ask the model anew instead of the kept answer")]).open_world(),
     t("apps_deploy_sbom", "A deploy's software bill of materials", "A deploy's image as a CycloneDX SBOM (JSON) from the same scan as its vulnerabilities: every package and version it ships. 404 when it wasn't scanned or was pruned.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/sbom", &[SERVICE, ENV, req("deploy", "Deploy id")]),
     t("apps_move_service", "Move a service to another project", "Move a service to another project of the same owner (Render's, Vercel's transfers): refused, naming them, while it has links either way, routes either way, roll:// references, a private network or running sandboxes; what it used stays the old project's; every live environment redeploys onto the new project's network and rules. Admin on it, in both projects.", "apps", "POST", "/v1/apps/services/{service}/move", &[SERVICE, breq("project", Ty::Str, "The project to move it to"), b("secrets", Ty::Str, "switch: go ahead though its environments' project secrets become the target project's of those names (the 409 names them)")]),
@@ -1637,6 +1641,8 @@ static TOOLS: &[Tool] = &[
     t("apps_list_domains", "List domains", "An environment's domains.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/domains", &[SERVICE, ENV]),
     t("apps_add_domain", "Add a domain", "Point a domain at an environment.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/domains", &[SERVICE, ENV, breq("hostname", Ty::Str, "Host name")]),
     t("apps_remove_domain", "Remove a domain", "Remove a domain.", "apps", "DELETE", "/v1/apps/services/{service}/environments/{env}/domains/{host}", &[SERVICE, ENV, req("host", "Host name")]),
+    t("apps_visitors", "Who's signed in", "Who's signed in to a sign-in-gated environment now, newest first: each session's id, who (a provider's verified email or a roll person's id), how (github, google, sso or roll), the access.sso entry that let them in, since and until.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/visitors", &[SERVICE, ENV]),
+    t("apps_end_visit", "Sign a visitor out", "End one visitor's session in a sign-in-gated environment now (its id from apps_visitors): they sign in again to come back, if access still lets them.", "apps", "DELETE", "/v1/apps/services/{service}/environments/{env}/visitors/{visitor}", &[SERVICE, ENV, req("visitor", "The session's id, from apps_visitors")]),
     t("apps_update_domain", "Change a domain", "Redirect a domain to another hostname of the same environment (redirect_to; null serves the app again; no loops or chains), or serve another of the app's ports on it (port; null the main one). A field left out stays.", "apps", "PATCH", "/v1/apps/services/{service}/environments/{env}/domains/{host}", &[SERVICE, ENV, req("host", "Host name"), bnull("redirect_to", Ty::Str, "Another hostname of this environment to redirect to (clear it: serve the app)"), bnull("port", Ty::Int, "Another of the app's ports (clear it: the main one)")]),
     t("apps_preview_domain", "A project's preview domain", "The wildcard a project's preview environments answer under (each by its preview_host), with its DNS state and TLS; 404 when it has none.", "apps", "GET", "/v1/apps/projects/{project}/preview-domain", &[req("project", "Workspace project")]),
     t("apps_set_preview_domain", "Set a project's preview domain", "Give a project's preview environments a wildcard of its own (*.preview.example.com; a new one replaces it): answers the DNS record to add, then apps_verify_preview_domain.", "apps", "POST", "/v1/apps/projects/{project}/preview-domain", &[req("project", "Workspace project"), breq("hostname", Ty::Str, "A wildcard, *.preview.example.com")]),
@@ -1807,6 +1813,9 @@ mod tests {
         let call = |action: &str| t.request(&serde_json::json!({ "service": "svc_1", "env": "production", "deploy": "dpl_1", "action": action }));
         assert_eq!(call("go").err().unwrap(), "apps_rollout: action is one of advance, all, abort (not \"go\")");
         assert!(call("abort").is_ok());
+        assert!(call("").is_err(), "a required choice can't be empty");
+        let vulns = super::all().iter().find(|t| t.name == "apps_deploy_vulnerabilities").unwrap();
+        assert!(vulns.request(&serde_json::json!({ "service": "svc_1", "env": "production", "deploy": "dpl_1", "severity": "" })).is_ok(), "an optional one may be");
     }
 
     /// An argument described only as its values ("a, b or c") is a [`Ty::Choice`] with the route's

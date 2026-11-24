@@ -23,6 +23,95 @@ pub struct Note {
     /// Whether a picture of its element is kept (`GET …/notes/{note}/crop`): a screenshot run
     /// cropped it from the page by its selector.
     pub crop: bool,
+    /// How that picture was taken, when as the reviewer saw it ("390x844, after 2 steps").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crop_as: Option<String>,
+    /// How the reviewer saw the page, from the note itself: what roll's browser takes it as.
+    #[serde(skip)]
+    pub seen: Seen,
+}
+
+/// How a note's reviewer saw its page (the note's own words, from the page's button): their
+/// viewport, and the steps on that page roll's browser can take again: clicks (checking a box
+/// is one) and Enter or Escape, after their last page change, the last 10. Typing isn't among
+/// them (the button keeps how many characters, never what), nor a choice in a list.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Seen {
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub steps: Vec<crate::settings::Step>,
+    /// Their browser's engine when it isn't Chromium's ([`crate::settings::BROWSERS`]): every
+    /// browser on iOS is WebKit at a phone's size, Safari elsewhere WebKit, Firefox Firefox.
+    pub browser: Option<String>,
+}
+
+impl Seen {
+    /// Read from a note's body: its `<sub>` line's `390x844 viewport`, and "What they did".
+    pub fn of(body: &str) -> Seen {
+        let mut seen = Seen::default();
+        if let Some(sub) = body.split("<sub>").nth(1).and_then(|s| s.split("</sub>").next()) {
+            for part in sub.split(" · ") {
+                // `Safari 18 on iOS`, `Firefox 133 on Windows` (the button's `browserOf`).
+                if let Some((name, os)) = part.split_once(" on ")
+                    && name.split_once(' ').is_some_and(|(_, v)| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+                {
+                    seen.browser = if os == "iOS" {
+                        Some("webkit-phone".into())
+                    } else if name.starts_with("Safari ") {
+                        Some("webkit".into())
+                    } else if name.starts_with("Firefox ") {
+                        Some("firefox".into())
+                    } else {
+                        None
+                    };
+                }
+                if let Some((w, h)) = part.strip_suffix(" viewport").and_then(|v| v.split_once('x'))
+                    && let (Ok(w), Ok(h)) = (w.parse::<u32>(), h.parse::<u32>())
+                    && (320..=2560).contains(&w)
+                    && (320..=2000).contains(&h)
+                {
+                    (seen.width, seen.height) = (Some(w), Some(h));
+                }
+            }
+        }
+        let Some(did) = body.split("What they did:").nth(1) else { return seen };
+        for line in did.lines().map(str::trim).take_while(|l| !l.starts_with("</details>")) {
+            // `1. \`12s before · click button.pay\``
+            let Some(what) = line.split_once(". `").and_then(|(_, rest)| rest.strip_suffix('`')).and_then(|s| s.split_once(" · ")).map(|(_, w)| w) else { continue };
+            // Another page: what came before was done there.
+            if what.starts_with("go to ") {
+                seen.steps.clear();
+                continue;
+            }
+            let step = if let Some(sel) = what.strip_prefix("click ").or_else(|| what.strip_prefix("check ")).or_else(|| what.strip_prefix("uncheck ")) {
+                crate::settings::selector_ok(sel).then(|| crate::settings::Step::Click(sel.to_string()))
+            } else if let Some(rest) = what.strip_prefix("press ") {
+                rest.split_once(" in ").map(|(k, _)| k).filter(|k| matches!(*k, "Enter" | "Escape")).map(|k| crate::settings::Step::Press(k.to_string()))
+            } else {
+                None
+            };
+            seen.steps.extend(step);
+        }
+        let over = seen.steps.len().saturating_sub(10);
+        seen.steps.drain(..over);
+        seen
+    }
+
+    /// What a crop taken this way says it is: the engine when not Chromium's, the viewport, and
+    /// the steps taken first.
+    pub fn label(&self) -> Option<String> {
+        let (w, h) = (self.width?, self.height?);
+        let engine = match self.browser.as_deref() {
+            Some("webkit" | "webkit-phone") => "WebKit, ",
+            Some("firefox") => "Firefox, ",
+            _ => "",
+        };
+        Some(match self.steps.len() {
+            0 => format!("{engine}{w}x{h}"),
+            1 => format!("{engine}{w}x{h}, after 1 step"),
+            n => format!("{engine}{w}x{h}, after {n} steps"),
+        })
+    }
 }
 
 /// A reply to a note: its own review.
@@ -129,7 +218,8 @@ pub fn thread(comments: impl IntoIterator<Item = Comment>) -> Vec<Note> {
     let mut replies: Vec<(String, Reply)> = Vec::new();
     for c in comments {
         if let Some((path, selector, note)) = parse(&c.body) {
-            notes.push(Note { id: c.id, path, selector, note, by: c.by, at: c.at, replies: Vec::new(), crop: false });
+            let seen = Seen::of(&c.body);
+            notes.push(Note { id: c.id, path, selector, note, by: c.by, at: c.at, replies: Vec::new(), crop: false, crop_as: None, seen });
         } else if let Some((to, note)) = parse_reply(&c.body) {
             replies.push((to, Reply { id: c.id, note, by: c.by, at: c.at }));
         }
@@ -163,6 +253,26 @@ mod tests {
         assert_eq!(parse(bare), Some(("/about".into(), String::new(), "Looks off".into())));
         assert_eq!(parse("LGTM"), None);
         assert_eq!(parse("**Feedback on the preview** · [`/x`](u)\n\n"), None, "no note");
+    }
+
+    /// How the reviewer saw the page, from the note's own words: their viewport, their browser's
+    /// engine, and their clicks and keys after their last page change (the last 10), never typing
+    /// or a choice, nor a selector roll's checks refuse; a viewport out of bounds is none.
+    #[test]
+    fn a_note_says_how_its_reviewer_saw_the_page() {
+        use crate::settings::Step;
+        let body = "**Feedback on the preview** · [`/cart`](https://x/cart) · `button.pay`\n\nToo small\n\n<sub>390x844 viewport · Safari 18 on iOS · roll preview pv_1</sub>\n\n<details><summary>On the page: 6 steps</summary>\n\nWhat they did:\n\n1. `30s before · click a.shop`\n2. `20s before · go to /cart`\n3. `9s before · click li:nth-of-type(2) > button`\n4. `8s before · type 8 characters in #coupon`\n5. `6s before · check input.gift`\n6. `2s before · press Escape in body`\n\n- error: `TypeError: x is undefined`\n\n</details>";
+        let seen = super::Seen::of(body);
+        assert_eq!((seen.width, seen.height), (Some(390), Some(844)));
+        assert_eq!(seen.steps, [Step::Click("li:nth-of-type(2) > button".into()), Step::Click("input.gift".into()), Step::Press("Escape".into())], "only what came after the page change");
+        assert_eq!(seen.browser.as_deref(), Some("webkit-phone"), "every browser on iOS is WebKit at a phone's size");
+        assert_eq!(seen.label().as_deref(), Some("WebKit, 390x844, after 3 steps"));
+        let engine = |sub: &str| super::Seen::of(&format!("**Feedback on the preview** · `/`\n\nx\n\n<sub>{sub}</sub>")).browser;
+        assert_eq!(engine("1280x800 viewport · Firefox 133 on Windows"), Some("firefox".into()));
+        assert_eq!(engine("1280x800 viewport · Safari 18 on macOS"), Some("webkit".into()));
+        assert_eq!(engine("390x844 viewport · Chrome 131 on iOS"), Some("webkit-phone".into()), "Chrome on iOS is WebKit");
+        assert_eq!(engine("1280x800 viewport · Chrome 131 on macOS"), None, "Chromium's: roll's own run");
+        assert_eq!(super::Seen::of("**Feedback on the preview** · `/`\n\nx\n\n<sub>99999x1 viewport</sub>"), super::Seen::default(), "a viewport out of bounds is none");
     }
 
     /// Replies (`preview-feedback.tsx`'s `replyBody`) join the note they name, oldest first; one

@@ -862,6 +862,10 @@ impl Store {
         }
         // Who a share link is for, and whether its visitors may leave notes (as guests).
         // What a page's change against the baseline is (`visual::compare`'s signature).
+        // How a note's crop was taken, when as its reviewer saw it.
+        if !db.has_column("note_crops", "seen")? {
+            db.add_column("note_crops", "seen", "TEXT")?;
+        }
         if !db.has_column("page_shots", "base_sig")? {
             db.add_column("page_shots", "base_sig", "TEXT")?;
         }
@@ -2954,7 +2958,7 @@ impl Store {
 
     /// Keep a note's crop (a PNG of at most [`CROP_MAX`] bytes; a bigger one is dropped), at
     /// most [`CROPS_KEPT`] a preview (the oldest go).
-    pub fn set_note_crop(&self, id: &str, note: &str, png: &[u8]) -> Result<()> {
+    pub fn set_note_crop(&self, id: &str, note: &str, png: &[u8], seen: Option<&str>) -> Result<()> {
         if png.len() > CROP_MAX || !png.starts_with(b"\x89PNG") {
             return Ok(());
         }
@@ -2963,8 +2967,8 @@ impl Store {
         let b64 = base64::engine::general_purpose::STANDARD.encode(png);
         self.db.write(|c| {
             c.execute(
-                "INSERT INTO note_crops (preview_id, note_id, png, at) VALUES (?, ?, ?, ?) ON CONFLICT (preview_id, note_id) DO UPDATE SET png = excluded.png, at = excluded.at",
-                params![id, note, b64, now],
+                "INSERT INTO note_crops (preview_id, note_id, png, at, seen) VALUES (?, ?, ?, ?, ?) ON CONFLICT (preview_id, note_id) DO UPDATE SET png = excluded.png, at = excluded.at, seen = excluded.seen",
+                params![id, note, b64, now, seen],
             )?;
             c.execute(
                 "DELETE FROM note_crops WHERE preview_id = ? AND note_id NOT IN (SELECT note_id FROM note_crops WHERE preview_id = ? ORDER BY at DESC, note_id LIMIT ?)",
@@ -2974,15 +2978,16 @@ impl Store {
         })
     }
 
-    /// The notes of `id` that have a crop.
-    pub fn cropped_notes(&self, id: &str) -> Result<std::collections::HashSet<String>> {
-        Ok(self.db.read(|c| c.query("SELECT note_id FROM note_crops WHERE preview_id = ?", [id], |r| r.get(0)))?.into_iter().collect())
+    /// The notes of `id` that have a crop, with how each was taken when as its reviewer saw it.
+    pub fn cropped_notes(&self, id: &str) -> Result<std::collections::HashMap<String, Option<String>>> {
+        Ok(self.db.read(|c| c.query("SELECT note_id, seen FROM note_crops WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?))))?.into_iter().collect())
     }
 
-    pub fn note_crop(&self, id: &str, note: &str) -> Result<Option<Vec<u8>>> {
+    /// A note's crop, and how it was taken when as its reviewer saw it.
+    pub fn note_crop(&self, id: &str, note: &str) -> Result<Option<(Vec<u8>, Option<String>)>> {
         use base64::Engine as _;
-        let row: Option<String> = self.db.read(|c| c.query_row("SELECT png FROM note_crops WHERE preview_id = ? AND note_id = ?", [id, note], |r| r.get(0)).optional())?;
-        Ok(row.and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok()))
+        let row: Option<(String, Option<String>)> = self.db.read(|c| c.query_row("SELECT png, seen FROM note_crops WHERE preview_id = ? AND note_id = ?", [id, note], |r| Ok((r.get(0)?, r.get(1)?))).optional())?;
+        Ok(row.and_then(|(b64, seen)| base64::engine::general_purpose::STANDARD.decode(b64).ok().map(|png| (png, seen))))
     }
 
     // ── git_pulls: the pull request a Git URL service's preview is of (roll apps' `GitPull`) ──

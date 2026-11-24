@@ -152,8 +152,35 @@ impl MemoryBudget {
         Ok(())
     }
 
+    /// Reserves `bytes` when this budget and its parent have room, and otherwise does nothing:
+    /// no error and no trip counted, for memory an operation only uses while it is to spare
+    /// (work done ahead that the normal path would do anyway).
+    pub fn try_reserve(&self, bytes: u64) -> bool {
+        let before = self.hold(bytes);
+        if (before + bytes).saturating_add(self.held_elsewhere()) > self.limit() {
+            self.unhold(bytes);
+            return false;
+        }
+        if let Some(p) = &self.parent
+            && !p.admit_quietly(before, bytes)
+        {
+            self.unhold(bytes);
+            return false;
+        }
+        true
+    }
+
     /// A child holding `held` asks for `bytes` more.
     fn admit(&self, held: u64, bytes: u64) -> bool {
+        let ok = self.admit_quietly(held, bytes);
+        if !ok {
+            self.tripped.fetch_add(1, Ordering::Relaxed);
+        }
+        ok
+    }
+
+    /// [`MemoryBudget::admit`] without counting a refusal.
+    fn admit_quietly(&self, held: u64, bytes: u64) -> bool {
         let room = self.limit().saturating_sub(self.held_elsewhere());
         let before = self.used.fetch_add(bytes, Ordering::Relaxed);
         let new = before + bytes;
@@ -164,7 +191,6 @@ impl MemoryBudget {
             return true;
         }
         self.used.fetch_sub(bytes, Ordering::Relaxed);
-        self.tripped.fetch_add(1, Ordering::Relaxed);
         false
     }
 

@@ -146,6 +146,37 @@ impl Meter {
     }
 }
 
+/// The minutes of the routes an objective names (`slo.routes`), counted as their requests are
+/// answered (where the access line is written) and written each minute beside the environment's.
+#[derive(Default)]
+pub struct RouteMeter {
+    minutes: std::collections::HashMap<(i64, String), Minute>,
+}
+
+impl RouteMeter {
+    /// A request to the route `label` (`POST /api/checkout`).
+    pub fn request(&mut self, now_ms: i64, label: String, latency_ms: f64, status: u16) {
+        let minute = now_ms / 60_000;
+        let m = self.minutes.entry((minute, label)).or_insert_with(|| Minute::new(minute));
+        m.requests += 1;
+        if status >= 500 {
+            m.errors += 1;
+        }
+        let i = BUCKETS_MS.iter().position(|b| latency_ms <= *b).unwrap_or(15);
+        m.hist[i] += 1;
+    }
+
+    /// The minutes that ended (and, with `all`, the current ones too), to write: each route's
+    /// label and its minute's requests, 5xx and p95.
+    pub fn take(&mut self, now_ms: i64, all: bool) -> Vec<(String, MinuteRow)> {
+        let now = now_ms / 60_000;
+        let done: Vec<(i64, String)> = self.minutes.keys().filter(|(m, _)| all || *m < now).cloned().collect();
+        let mut out: Vec<(String, MinuteRow)> = done.into_iter().filter_map(|k| self.minutes.remove(&k).map(|m| (k.1, m.row()))).collect();
+        out.sort_by(|a, b| (a.1.minute, &a.0).cmp(&(b.1.minute, &b.0)));
+        out
+    }
+}
+
 /// A month's hours, as storage is priced (365 × 24 / 12).
 const HOURS_A_MONTH: f64 = 730.0;
 
@@ -200,6 +231,20 @@ impl Prices {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_routes_minutes_are_counted_apart_and_taken_once_finished() {
+        let mut m = super::RouteMeter::default();
+        m.request(60_000, "POST /checkout/:id".into(), 40.0, 500);
+        m.request(61_000, "POST /checkout/:id".into(), 60.0, 200);
+        m.request(62_000, "/api/*".into(), 120.0, 200);
+        m.request(125_000, "/api/*".into(), 80.0, 200);
+        // Minute 2 is still going at 125 s: only minute 1 is taken, each route on its own.
+        let rows: Vec<(String, i64, i64, i64)> = m.take(125_000, false).into_iter().map(|(r, x)| (r, x.minute, x.requests, x.errors)).collect();
+        assert_eq!(rows, [("/api/*".to_string(), 1, 1, 0), ("POST /checkout/:id".to_string(), 1, 2, 1)]);
+        assert!(m.take(125_000, false).is_empty(), "taken once");
+        assert_eq!(m.take(125_000, true).len(), 1, "a shutdown takes the current one too");
+    }
 
     #[test]
     fn minutes_roll_over_and_idle_costs_nothing() {

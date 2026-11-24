@@ -258,10 +258,10 @@ function NoteCrop({ previewId, note }: { previewId: string; note: string }) {
     let url: string | null = null;
     let live = true;
     noteCropUrl(previewId, note).then(
-      (u) => {
-        url = u;
-        if (live) setSrc(u);
-        else if (u) URL.revokeObjectURL(u);
+      (c) => {
+        url = c?.url ?? null;
+        if (live) setSrc(url);
+        else if (url) URL.revokeObjectURL(url);
       },
       () => {},
     );

@@ -307,41 +307,50 @@ pub const MAX_CALLERS: usize = 20;
 /// The most `access.preflight` paths.
 pub const MAX_PREFLIGHT: usize = 20;
 
-/// Signing visitors in through GitHub or Google (Cloud Run's IAP, Cloudflare Access): anyone whose
-/// verified email, email domain or GitHub organisation is in `allow`, account of roll's or not
-/// (`access.sso`; docs/apps/README.md, "Signing in to an environment").
+/// Signing visitors in through GitHub, Google or their organisation's own identity provider (Cloud
+/// Run's IAP, Cloudflare Access): anyone whose verified email, email domain, GitHub organisation
+/// or provider group is in `allow`, account of roll's or not (`access.sso`; docs/apps/README.md,
+/// "Signing in to an environment").
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Sso {
-    /// `github` or `google`.
+    /// `github`, `google`, or `sso`: the roll SSO connection (Okta, Entra ID) that answers for
+    /// the visitor's email domain.
     pub provider: String,
     /// `@acme.com` (a domain's people), `ada@acme.com` (one person), `org:acme` (a GitHub
-    /// organisation's members; GitHub only). 1–100, kept in lower case.
+    /// organisation's members; GitHub only), `group:engineering@acme.com` (a group acme.com's
+    /// provider names in its ID token, for people whose email is acme.com's: group names aren't
+    /// unique between organisations; `sso` only). 1–100, kept in lower case.
     pub allow: Vec<String>,
 }
 
 impl Sso {
     pub fn check(mut self) -> Result<Sso> {
         let bad = |m: &str| Err(Error::BadRequest(format!("access.sso: {m}")));
-        if !["github", "google"].contains(&self.provider.as_str()) {
-            return bad("provider is github or google");
+        if !["github", "google", "sso"].contains(&self.provider.as_str()) {
+            return bad("provider is github, google or sso (the organisation's own, through roll's SSO connections)");
         }
         if self.allow.is_empty() || self.allow.len() > 100 {
-            return bad("allow is 1–100 entries: @domain, an email, or org:name (GitHub)");
+            return bad("allow is 1–100 entries: @domain, an email, org:name (GitHub) or group:name@domain (sso)");
         }
         let label = |s: &str| !s.is_empty() && s.len() <= 63 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') && !s.starts_with('-');
         let domain = |d: &str| d.len() <= 253 && d.contains('.') && d.split('.').all(label);
         for a in &mut self.allow {
-            *a = a.trim().to_ascii_lowercase();
+            // Unicode lower case, as the visitor's groups are (`Ärzte` is `ärzte`).
+            *a = a.trim().to_lowercase();
             let ok = if let Some(org) = a.strip_prefix("org:") {
                 self.provider == "github" && org.len() <= 39 && label(org)
+            } else if let Some(g) = a.strip_prefix("group:") {
+                // One `@`: the domain's (a name with its own would read an email after it as the domain).
+                let named = g.rsplit_once('@').filter(|(name, d)| !name.trim().is_empty() && name.len() <= 256 && !name.contains('@') && !name.chars().any(char::is_control) && domain(d));
+                self.provider == "sso" && named.is_some()
             } else if let Some(d) = a.strip_prefix('@') {
                 domain(d)
             } else {
                 a.split_once('@').is_some_and(|(local, d)| !local.is_empty() && local.len() <= 64 && !local.contains(char::is_whitespace) && domain(d))
             };
             if !ok {
-                return bad(&format!("{a:?} isn't @domain, an email, or org:name (org: only with github)"));
+                return bad(&format!("{a:?} isn't @domain, an email, org:name (only with github) or group:name@domain (only with sso)"));
             }
         }
         self.allow.sort();
@@ -354,13 +363,16 @@ impl Sso {
         self.allow.iter().any(|a| a.starts_with("org:"))
     }
 
-    /// The entry that lets someone in (their verified email, lower case, organisations, and
-    /// Google's `hd`). With Google, a domain's entry also needs the account to be that
-    /// Workspace domain's (`hd`): a consumer account made with a work address isn't.
-    pub fn admits(&self, email: &str, orgs: &[String], hosted_domain: Option<&str>) -> Option<&str> {
+    /// The entry that lets someone in (their verified email, lower case, organisations, Google's
+    /// `hd`, and their organisation's groups). With Google, a domain's entry also needs the
+    /// account to be that Workspace domain's (`hd`): a consumer account made with a work address
+    /// isn't.
+    pub fn admits(&self, email: &str, orgs: &[String], hosted_domain: Option<&str>, groups: &[String]) -> Option<&str> {
         let domain = email.rsplit_once('@').map(|(_, d)| d)?;
         self.allow.iter().map(String::as_str).find(|a| match a.strip_prefix("org:") {
             Some(org) => orgs.iter().any(|o| o == org),
+            // The group's organisation is its domain's: the visitor's verified email is there.
+            None if a.starts_with("group:") => a.strip_prefix("group:").and_then(|g| g.rsplit_once('@')).is_some_and(|(name, d)| d == domain && groups.iter().any(|g| g == name)),
             None => match a.strip_prefix('@') {
                 Some(d) => d == domain && (self.provider != "google" || hosted_domain.is_some_and(|h| h.eq_ignore_ascii_case(d))),
                 None => *a == email,
@@ -603,6 +615,11 @@ pub enum RunType {
 pub struct Volume {
     pub mount: String,
     pub size_gb: u32,
+    /// Every instance mounts it (Cloud Run's NFS and Cloud Storage mounts): the service scales
+    /// past one, and deploys overlap; writers at once are the app's to coordinate (no SQLite).
+    /// Off: one instance writes it, the old one stopped before the new one starts.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shared: bool,
     /// Its backups' schedule and retention (Fly's snapshot retention, Railway's schedules);
     /// none: one a day, the newest seven kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -863,6 +880,46 @@ pub struct Slo {
     pub latency_ms: Option<u32>,
     #[serde(default = "Slo::default_window")]
     pub window_days: u32,
+    /// Objectives of single routes over the same window (Cloud Monitoring's request-based SLOs
+    /// on a path filter): a checkout held to more than the rest. At most 5.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub routes: Vec<RouteSlo>,
+}
+
+/// One route's objective: a route as [`RouteAlert`] names one, with its own `objective` and
+/// `latency_ms`, judged from its own minutes ([`crate::traffic`]'s route minutes).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RouteSlo {
+    pub route: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    pub objective: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<u32>,
+}
+
+impl RouteSlo {
+    /// The route it judges, as an alert names it (for matching and its label).
+    pub fn route(&self) -> RouteAlert {
+        RouteAlert { route: self.route.clone(), method: self.method.clone(), error_pct: 0, p95_ms: 0 }
+    }
+
+    /// Its objective over `window_days`, as the service's own is judged.
+    pub fn slo(&self, window_days: u32) -> Slo {
+        Slo { objective: self.objective, latency_ms: self.latency_ms, window_days, routes: Vec::new() }
+    }
+}
+
+/// A route as the Routes view names it: a path folded the same way (`/users/42` is
+/// `/users/:id`), a prefix keeping its `/*`, the method in upper case. Whether it's one.
+fn normalize_route(route: &mut String, method: &mut Option<String>) -> bool {
+    *route = match route.strip_suffix("/*") {
+        Some(p) => format!("{}/*", crate::traffic::route_of(p).trim_end_matches('/')),
+        None => crate::traffic::route_of(route),
+    };
+    *method = method.take().map(|m| m.to_ascii_uppercase());
+    method.as_deref().is_none_or(|m| !m.is_empty() && m.len() <= 16 && m.bytes().all(|b| b.is_ascii_uppercase()))
 }
 
 impl Slo {
@@ -1419,6 +1476,12 @@ impl Default for Run {
 }
 
 impl Run {
+    /// One instance writes its volume (one not `shared`): nothing of it runs beside the live
+    /// one, and the old instance stops before the new one starts.
+    pub fn one_writer(&self) -> bool {
+        self.volume.as_ref().is_some_and(|v| !v.shared)
+    }
+
     /// The checked settings, with what the type implies filled in (a worker runs at least one
     /// instance; a volume allows one).
     pub fn normalized(mut self) -> Result<Run> {
@@ -1441,14 +1504,7 @@ impl Run {
             return Err(Error::BadRequest(format!("alerts.routes is at most {MAX_ROUTE_ALERTS} alerts")));
         }
         for r in &mut self.alerts.routes {
-            // A path folds as the Routes view folds it (`/users/42` is `/users/:id`); a prefix keeps its `/*`.
-            r.route = match r.route.strip_suffix("/*") {
-                Some(p) => format!("{}/*", crate::traffic::route_of(p).trim_end_matches('/')),
-                None => crate::traffic::route_of(&r.route),
-            };
-            r.method = r.method.take().map(|m| m.to_ascii_uppercase());
-            let method_ok = r.method.as_deref().is_none_or(|m| !m.is_empty() && m.len() <= 16 && m.bytes().all(|b| b.is_ascii_uppercase()));
-            if !method_ok || r.error_pct > 100 || (r.error_pct == 0 && r.p95_ms == 0) {
+            if !normalize_route(&mut r.route, &mut r.method) || r.error_pct > 100 || (r.error_pct == 0 && r.p95_ms == 0) {
                 return Err(Error::BadRequest("alerts.routes[] is a route (`/api/checkout`, `/users/:id`, `/api/*`), an optional method, and error_pct (1–100) or p95_ms".into()));
             }
         }
@@ -1533,7 +1589,21 @@ impl Run {
         if let Some(s) = &self.slo
             && (!(90.0..=99.999).contains(&s.objective) || !(1..=60).contains(&s.window_days) || s.latency_ms.is_some_and(|ms| !(1..=60_000).contains(&ms)))
         {
-            return bad("slo is {objective: 90–99.999, latency_ms?: 1–60000, window_days?: 1–60}");
+            return bad("slo is {objective: 90–99.999, latency_ms?: 1–60000, window_days?: 1–60, routes?}");
+        }
+        if let Some(s) = &mut self.slo {
+            if s.routes.len() > 5 {
+                return bad("slo.routes is at most 5");
+            }
+            for r in &mut s.routes {
+                if !normalize_route(&mut r.route, &mut r.method) || !(90.0..=99.999).contains(&r.objective) || r.latency_ms.is_some_and(|ms| !(1..=60_000).contains(&ms)) {
+                    return bad("slo.routes[] is {route (`/api/checkout`, `/users/:id`, `/api/*`), method?, objective: 90–99.999, latency_ms?: 1–60000}");
+                }
+            }
+            let labels: Vec<String> = s.routes.iter().map(|r| r.route().label()).collect();
+            if labels.iter().enumerate().any(|(i, l)| labels[..i].contains(l)) {
+                return bad("slo.routes names a route twice");
+            }
         }
         if self.log_metrics.len() > 10 {
             return bad("log_metrics is at most 10");
@@ -1766,10 +1836,12 @@ impl Run {
             {
                 return bad("volume.backups is {every_hours: 0–168 (0: by hand only), keep: 1–90}");
             }
-            self.max_instances = 1;
-            self.min_instances = self.min_instances.min(1);
-            if !self.rollout.steps.is_empty() {
-                return bad("rollout: a service with a volume switches at once (one instance writes it)");
+            if !v.shared {
+                self.max_instances = 1;
+                self.min_instances = self.min_instances.min(1);
+                if !self.rollout.steps.is_empty() {
+                    return bad("rollout: a service with a volume switches at once (one instance writes it; volume.shared lets many)");
+                }
             }
         }
         if self.kind != RunType::Web {
@@ -3587,6 +3659,8 @@ mod tests {
         assert_eq!(run.min_instances, 1, "a worker runs at least one");
         let run = Run::default().merged(Some(&serde_json::json!({"volume": {"mount": "/data", "size_gb": 5}, "max_instances": 4}))).unwrap();
         assert_eq!(run.max_instances, 1, "a volume allows one instance");
+        let shared = Run::default().merged(Some(&serde_json::json!({"volume": {"mount": "/data", "size_gb": 5, "shared": true}, "max_instances": 4, "rollout": {"steps": [10]}}))).unwrap();
+        assert_eq!((shared.max_instances, shared.one_writer(), shared.rollout.steps.clone()), (4, false, vec![10]), "a shared volume: many instances, and deploys overlap");
         assert!(Run::default().merged(Some(&serde_json::json!({"type": "cron"}))).is_err(), "cron needs a schedule");
         assert!(Run::default().merged(Some(&serde_json::json!({"type": "cron", "schedule": "*/5 * * * *"}))).is_ok());
         assert!(Run::default().merged(Some(&serde_json::json!({"cpu": 64}))).is_err());

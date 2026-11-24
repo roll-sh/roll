@@ -5,6 +5,9 @@
 // Stilled as Chromium's capture is (animations and transitions off, the caret hidden, $HIDE
 // blanked). One JSON line per browser on stdout: {browser, errors, png (base64)}; a browser that
 // fails is left out. The page is the preview's code: roll bounds what it reads back.
+// And the open notes' elements whose reviewer's browser was another engine ($CROPS: [{note,
+// path, selector, width?, height?, steps?, browser}], checked by roll), each in that engine at
+// their viewport after their clicks and keys, cropped with a margin: {crop: note, png}.
 const pw = require("playwright-core");
 const HIDE = (() => {
   try {
@@ -17,6 +20,59 @@ const STILL =
   "*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important;scroll-behavior:auto!important}" +
   HIDE.map((x) => x + "{visibility:hidden!important}").join("");
 const sleep = (ms) => new Promise((ok) => setTimeout(ok, ms));
+const CROPS = (() => {
+  try {
+    return JSON.parse(process.env.CROPS || "[]").filter((c) => c && typeof c.note === "string" && typeof c.path === "string" && typeof c.selector === "string" && ["firefox", "webkit", "webkit-phone"].includes(c.browser)).slice(0, 10);
+  } catch {
+    return [];
+  }
+})();
+// A note's element in its reviewer's engine: at their viewport (a phone's for WebKit on iOS),
+// after their clicks and keys (10 s at most; the first that finds nothing ends them).
+const crop = async (c) => {
+  let browser = null;
+  try {
+    const phone = c.browser === "webkit-phone";
+    browser = await pw[phone ? "webkit" : c.browser].launch();
+    const w = Number.isInteger(c.width) && c.width >= 320 && c.width <= 2560 ? c.width : phone ? 390 : 1280;
+    const h = Number.isInteger(c.height) && c.height >= 320 && c.height <= 2000 ? c.height : phone ? 844 : 800;
+    const page = await browser.newPage(phone ? { viewport: { width: w, height: h }, deviceScaleFactor: 2, isMobile: true, hasTouch: true } : { viewport: { width: w, height: h } });
+    if (!/^\/(?!\/)[^\s#"'`\\]{0,199}$/.test(c.path)) return;
+    await page.goto(new URL(c.path, process.env.URL).href, { waitUntil: "load", timeout: 30000 });
+    await sleep(300);
+    const until = Date.now() + 10000;
+    for (const s of (Array.isArray(c.steps) ? c.steps : []).slice(0, 10)) {
+      const left = Math.max(until - Date.now(), 0);
+      if (!left) break;
+      try {
+        if (typeof s.click === "string") await page.click(s.click, { timeout: Math.min(left, 3000) });
+        else if (s.press === "Enter" || s.press === "Escape") await page.keyboard.press(s.press);
+        else break;
+      } catch {
+        break;
+      }
+      await sleep(150);
+    }
+    await sleep(300);
+    await page.addStyleTag({ content: STILL }).catch(() => null);
+    const el = page.locator(c.selector).first();
+    await el.scrollIntoViewIfNeeded({ timeout: 3000 });
+    const b = await el.boundingBox();
+    if (!b || !(b.width > 0 && b.height > 0)) return;
+    // A margin around it, within the page's width (a clip past it is refused), at most 1280 by
+    // 800, from the whole page (it may sit below the fold).
+    const m = 24;
+    const x = Math.max(0, b.x - m), y = Math.max(0, b.y + (await page.evaluate(() => scrollY)) - m);
+    const width = Math.max(1, Math.min(b.width + 2 * m, 1280, w - x));
+    const png = await page.screenshot({ fullPage: true, clip: { x, y, width, height: Math.min(b.height + 2 * m, 800) } });
+    if (png.length > 512 * 1024) return;
+    process.stdout.write(JSON.stringify({ crop: c.note, png: png.toString("base64") }) + "\n");
+  } catch (e) {
+    console.error(`crop ${c.note}: ${e.message}`);
+  } finally {
+    if (browser) await browser.close().catch(() => null);
+  }
+};
 (async () => {
   let browsers = [];
   try {
@@ -49,4 +105,5 @@ const sleep = (ms) => new Promise((ok) => setTimeout(ok, ms));
       if (browser) await browser.close().catch(() => null);
     }
   }
+  for (const c of CROPS) await crop(c);
 })();
