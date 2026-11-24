@@ -364,7 +364,8 @@ async fn every_control_plane_route_needs_the_operator_token() {
     let (s, homed) = ada_does(reqwest::Method::POST, "/v1/search/clusters".into(), Some(serde_json::json!({ "name": "hers-search" })), Some(hers.clone())).await;
     assert_eq!(s, 200, "{homed}");
     // Made in the project, it's the project's (its home), never hers: her caps count it.
-    assert!(homed["owner"].is_null() && homed["made_by"].as_str() == Some(ada.as_str()), "{homed}");
+    let (_, made) = ada_does(reqwest::Method::GET, format!("/v1/search/clusters/{}", homed["id"].as_str().unwrap()), None, None).await;
+    assert!(made["owner"].is_null() && made["made_by"].as_str() == Some(ada.as_str()), "{made}");
     let (s, own) = ada_does(reqwest::Method::POST, "/v1/search/clusters".into(), Some(serde_json::json!({ "name": "adas-own" })), None).await;
     assert_eq!((s, own["owner"].as_str()), (200, Some(ada.as_str())), "{own}");
     let dropped: serde_json::Value = http.post(format!("{api}/v1/search/clusters")).header("authorization", &operator).json(&serde_json::json!({ "name": "ops-dropped" })).send().await.unwrap().json().await.unwrap();
@@ -461,12 +462,12 @@ async fn every_control_plane_route_needs_the_operator_token() {
     };
     assert_eq!(as_bobs("/v1/previews", serde_json::json!({ "project": hers, "repo": "ada/none", "branch": "main" })).await, 403, "a viewer's preview in the project");
     assert_eq!(as_bobs("/v1/search/clusters", serde_json::json!({ "name": "vb", "parent": "hers-search" })).await, 404, "a viewer's branch of the project's cluster");
-    // Her own cluster put in her project and made at home there is the project's from then on:
-    // no owner (she's its maker), and its members reach it.
+    // Her own cluster put in her project and made at home there, by its name, is kept there by its
+    // id and is the project's from then on: no owner (she's its maker), and its members reach it.
     let own_id = own["id"].as_str().unwrap().to_string();
-    let (s, v) = ada_does(reqwest::Method::PUT, format!("/v1/workspace/projects/{hers}/resources/search/{own_id}"), Some(serde_json::json!({ "x": 0, "y": 0 })), None).await;
-    assert_eq!(s, 200, "{v}");
-    let (s, v) = ada_does(reqwest::Method::PUT, format!("/v1/workspace/projects/{hers}/homes/search/{own_id}"), None, None).await;
+    let (s, v) = ada_does(reqwest::Method::PUT, format!("/v1/workspace/projects/{hers}/resources/search/adas-own"), Some(serde_json::json!({ "x": 0, "y": 0 })), None).await;
+    assert_eq!((s, v["ref"].as_str()), (200, Some(own_id.as_str())), "{v}");
+    let (s, v) = ada_does(reqwest::Method::PUT, format!("/v1/workspace/projects/{hers}/homes/search/adas-own"), None, None).await;
     assert_eq!(s, 200, "{v}");
     let (_, homed_own) = ada_does(reqwest::Method::GET, format!("/v1/search/clusters/{own_id}"), None, None).await;
     assert!(homed_own["owner"].is_null() && homed_own["made_by"].as_str() == Some(ada.as_str()), "{homed_own}");

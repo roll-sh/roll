@@ -238,6 +238,13 @@ pub trait Owners: Send + Sync {
     /// admin account is no wider here (docs/members.md, "The canvas rule"). No default: each
     /// implementer says it.
     fn owns(&self, user: &str, kind: Kind, r#ref: &str) -> bool;
+    /// The ref `kind ref` goes by for good: a name resolved to its product's id (a search cluster
+    /// by name), so canvases and homes never keep a name a later resource could take. `None`: no
+    /// such resource, or one this node can't resolve (refused). Default: the ref as given.
+    fn canonical(&self, kind: Kind, r#ref: &str) -> Option<String> {
+        let _ = kind;
+        Some(r#ref.to_string())
+    }
 }
 
 /// The workspace store.
@@ -461,10 +468,14 @@ impl Workspace {
     /// as it is.
     pub fn restore(&self, id: &str) -> Result<Project> {
         let now = self.db.now_ms()?;
+        let mut homes: Vec<(String, String)> = Vec::new();
         let p = self.db.write(|c| {
+            homes.clear();
             if c.query_row("SELECT 1 FROM projects WHERE id = ?", [id], |r| r.get::<_, i64>(0)).optional()?.is_some() {
                 return load(c, id);
             }
+            // Its homes come back: what a product does when something gets a home runs for them.
+            homes = c.query("SELECT kind, ref FROM deleted_homes WHERE project_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?)))?;
             let (owner, name): (String, String) = c.query_row("SELECT owner, name FROM deleted_projects WHERE id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?))).optional()?.ok_or_else(|| not_found(id))?;
             name_free(c, &owner, &name, None).map_err(|_| Error::Conflict(format!("a project named {name} exists now: rename it, then restore this one")))?;
             c.execute(&format!("INSERT INTO projects ({PROJECT_COLUMNS}) SELECT {PROJECT_COLUMNS} FROM deleted_projects WHERE id = ?"), [id])?;
@@ -478,6 +489,13 @@ impl Workspace {
             forget_deleted_rows(c, id)?;
             load(c, id)
         })?;
+        for (kind, r#ref) in &homes {
+            if let Ok(kind) = Kind::parse(kind) {
+                for f in self.on_homed.read().expect("on_homed").iter() {
+                    f(kind, r#ref, id);
+                }
+            }
+        }
         self.run_events();
         Ok(p)
     }
@@ -522,6 +540,15 @@ impl Workspace {
         project.owner.is_empty() || self.trusted_by_members(&project.id, &project.owner, kind, r#ref)
     }
 
+    /// The ref `kind ref` is kept by ([`Owners::canonical`]): its id where the product names it by
+    /// one; a ref the product doesn't know is refused (404).
+    pub fn canonical(&self, kind: Kind, r#ref: &str) -> Result<String> {
+        match self.owners.get() {
+            None => Ok(r#ref.to_string()),
+            Some(o) => o.canonical(kind, r#ref).ok_or_else(|| Error::NotFound(format!("no {} {ref:?} here", kind.as_str()))),
+        }
+    }
+
     /// Whether [`Owners`] says `kind ref` is `user`'s own (their repo, their search cluster): what a
     /// person may put on a canvas, or make a project the home of.
     pub fn owned_by(&self, user: &str, kind: Kind, r#ref: &str) -> bool {
@@ -538,6 +565,8 @@ impl Workspace {
     /// project.
     pub fn place(&self, scope: Scope<'_>, id: &str, kind: Kind, r#ref: &str, x: f64, y: f64) -> Result<Resource> {
         check_ref(r#ref)?;
+        let canonical = self.canonical(kind, r#ref)?;
+        let r#ref = canonical.as_str();
         if !x.is_finite() || !y.is_finite() {
             return Err(Error::BadRequest("x and y must be finite numbers".into()));
         }
@@ -570,6 +599,9 @@ impl Workspace {
 
     /// Take a resource out of project `id`.
     pub fn remove(&self, scope: Scope<'_>, id: &str, kind: Kind, r#ref: &str) -> Result<()> {
+        // By its id where it's known; a ref that no longer resolves is taken off as it's kept.
+        let canonical = self.canonical(kind, r#ref).unwrap_or_else(|_| r#ref.to_string());
+        let r#ref = canonical.as_str();
         self.db.write(|c| {
             owner_of(c, scope, id)?;
             let n = c.execute("DELETE FROM resources WHERE project_id = ? AND kind = ? AND ref = ?", [id, kind.as_str(), r#ref])?;

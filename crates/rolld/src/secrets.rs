@@ -1111,6 +1111,10 @@ impl SearchGuard {
             Ok(None) => return Ok(()),
             Err(_) => return Err(refused()),
         };
+        // By its id only: a name could be taken by another cluster once this one is gone.
+        if id != r#ref {
+            return Err(Error::Forbidden(format!("search cluster {ref}: a link names a cluster by its id, never by a name another cluster could take later", ref = r#ref)));
+        }
         let owner = match self.search.store.owner_of(&id) {
             Ok(Some(Some(owner))) => owner,
             Ok(_) => return Ok(()),
@@ -1439,6 +1443,15 @@ impl roll_workspace::Owners for People {
             roll_workspace::Kind::Repo => roll_secrets::access::owns_repo(p.code_owner.as_deref(), r#ref),
             roll_workspace::Kind::Search => self.search.as_ref().is_some_and(|s| matches!(s.store.owner_of(r#ref), Ok(Some(Some(o))) if o == user)),
             _ => false,
+        }
+    }
+
+    /// A search cluster is kept by its id (a name is resolved; a later cluster could take it). A
+    /// node without roll search can't tell, so it refuses one.
+    fn canonical(&self, kind: roll_workspace::Kind, r#ref: &str) -> Option<String> {
+        match kind {
+            roll_workspace::Kind::Search => self.search.as_ref()?.store.id_of(r#ref).ok().flatten(),
+            _ => Some(r#ref.to_string()),
         }
     }
 }

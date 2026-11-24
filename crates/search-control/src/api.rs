@@ -387,10 +387,23 @@ struct ListQuery {
 
 async fn list(State(c): State<AppState>, caller: Caller, Query(q): Query<ListQuery>) -> Result<Response, ControlError> {
     if q.deleted {
-        let deleted = match &caller {
+        let mut deleted = match &caller {
             Caller::Person(u) => c.list_deleted(Some(u.as_str())).await?,
             _ => caller.keep(c.list_deleted(None).await?, |d| &d.cluster).await,
         };
+        // A parent the caller may not see isn't named, as in a cluster's view.
+        if !caller.is_all() {
+            for d in &mut deleted {
+                let Some(p) = d.cluster.parent_id.clone() else { continue };
+                let seen = match c.store.get(&p).await? {
+                    Some(p) => caller.sees(&p).await,
+                    None => false,
+                };
+                if !seen {
+                    d.cluster.parent_id = None;
+                }
+            }
+        }
         return Ok(Json(deleted).into_response());
     }
     let list = match &caller {
@@ -429,12 +442,12 @@ struct CreateReq {
     opts: ClusterOptions,
 }
 
-async fn create(State(c): State<AppState>, caller: Caller, method: Method, headers: HeaderMap, ext: Extensions, body: bytes::Bytes) -> Result<Response, ControlError> {
+async fn create(State(c): State<AppState>, caller: Caller, method: Method, headers: HeaderMap, body: bytes::Bytes) -> Result<Response, ControlError> {
     let r: CreateReq = serde_json::from_slice(&body).map_err(|e| ControlError::Invalid(format!("invalid request: {e}")))?;
-    // Made in a workspace project (the gate decided it by its `X-Roll-Project` and puts it in that
-    // project): the project's, through its home, never its maker's (who may leave the
-    // project); their caps count it.
-    let in_project = ext.get::<roll_auth::InProject>().is_some();
+    // A person's cluster is theirs as it's made. Made in a workspace project (`X-Roll-Project`),
+    // the gate then makes the project its home, which hands it to the project (rolld's
+    // `on_homed`: no owner, its maker counted for caps); were that to fail, it stays theirs,
+    // never no one's.
     let d = match &r.parent {
         Some(p) => {
             // A branch is cut on the node holding the parent, which commits it first. It is the
@@ -457,8 +470,7 @@ async fn create(State(c): State<AppState>, caller: Caller, method: Method, heade
             d
         }
         None if r.at.is_some() => return Err(ControlError::Invalid("at needs a parent".into())),
-        None if in_project => c.create(&r.name, r.opts, None, caller.user(), caller.caps(&c)).await?,
-        None => c.create(&r.name, r.opts, caller.user(), None, caller.caps(&c)).await?,
+        None => c.create(&r.name, r.opts, caller.user(), caller.caps(&c)).await?,
     };
     Ok(Json(view(&c, &caller, d, true).await?).into_response())
 }

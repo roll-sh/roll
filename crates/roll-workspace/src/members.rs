@@ -765,6 +765,9 @@ impl Workspace {
     /// moves a home that's set. Moving one away from a project takes being its admin too.
     pub fn set_home(&self, actor: &Actor, project: &str, kind: Kind, r#ref: &str, only_if_none: bool) -> Result<()> {
         crate::check_ref(r#ref)?;
+        // Kept by its id, never a name a later resource could take.
+        let canonical = self.canonical(kind, r#ref)?;
+        let r#ref = canonical.as_str();
         if !HOME_KINDS.contains(&kind) {
             // A create placed through a project: it just gets no home.
             if only_if_none {
@@ -819,6 +822,38 @@ impl Workspace {
     /// Every home of `kind`: `(ref, project)`.
     pub fn homes(&self, kind: Kind) -> Result<Vec<(String, String)>> {
         Ok(self.db.read(|c| c.query("SELECT ref, project_id FROM homes WHERE kind = ? ORDER BY ref", [kind.as_str()], |r| Ok((r.get(0)?, r.get(1)?))))?)
+    }
+
+    /// Every ref of `kind` a canvas or a home keeps (live or with a deleted project), with the
+    /// earliest it was placed or made a home (unix ms): what a product checks is still the id it
+    /// stood for.
+    pub fn refs_of(&self, kind: Kind) -> Result<Vec<(String, i64)>> {
+        let k = kind.as_str();
+        Ok(self.db.read(|c| {
+            c.query(
+                "SELECT ref, MIN(at) FROM (SELECT ref, added_at AS at FROM resources WHERE kind = ?1 UNION ALL SELECT ref, added_at FROM deleted_resources WHERE kind = ?1 \
+                 UNION ALL SELECT ref, set_at FROM homes WHERE kind = ?1 UNION ALL SELECT ref, set_at FROM deleted_homes WHERE kind = ?1) t GROUP BY ref ORDER BY ref",
+                params![k],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })?)
+    }
+
+    /// The operator's: every canvas place and home of `kind from` (live or with a deleted project)
+    /// is `kind to`'s from now on; where `to` is there already, `from`'s goes.
+    pub fn rekey(&self, kind: Kind, from: &str, to: &str) -> Result<()> {
+        let k = kind.as_str();
+        self.db.write(|c| {
+            c.execute("DELETE FROM resources WHERE kind = ?1 AND ref = ?2 AND owner IN (SELECT owner FROM resources WHERE kind = ?1 AND ref = ?3)", params![k, from, to])?;
+            c.execute("UPDATE resources SET ref = ?3 WHERE kind = ?1 AND ref = ?2", params![k, from, to])?;
+            c.execute("DELETE FROM deleted_resources WHERE kind = ?1 AND ref = ?2 AND project_id IN (SELECT project_id FROM deleted_resources WHERE kind = ?1 AND ref = ?3)", params![k, from, to])?;
+            c.execute("UPDATE deleted_resources SET ref = ?3 WHERE kind = ?1 AND ref = ?2", params![k, from, to])?;
+            c.execute("DELETE FROM homes WHERE kind = ?1 AND ref = ?2 AND EXISTS (SELECT 1 FROM homes WHERE kind = ?1 AND ref = ?3)", params![k, from, to])?;
+            c.execute("UPDATE homes SET ref = ?3 WHERE kind = ?1 AND ref = ?2", params![k, from, to])?;
+            c.execute("DELETE FROM deleted_homes WHERE kind = ?1 AND ref = ?2 AND project_id IN (SELECT project_id FROM deleted_homes WHERE kind = ?1 AND ref = ?3)", params![k, from, to])?;
+            c.execute("UPDATE deleted_homes SET ref = ?3 WHERE kind = ?1 AND ref = ?2", params![k, from, to])?;
+            Ok::<_, Error>(())
+        })
     }
 
     /// The refs of `kind` at home in `project`.

@@ -687,6 +687,10 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
                 tracing::warn!(cluster = id, error = %e, "taking a purged search cluster off its projects failed");
             }
         }));
+    } else {
+        // Search runs on other nodes of the fleet: this one places and homes no cluster (it can't
+        // tell an id from a name) and leaves deleting a project home to some to them.
+        search::members_off(&workspace);
     }
     // Members' handles and addresses, and invite links to the dashboard (docs/members.md).
     workspace.set_people(std::sync::Arc::new(people.clone()));

@@ -1149,13 +1149,12 @@ impl Control {
         }
     }
 
-    /// A new, empty cluster, `owner`'s (a signed-in person's `usr_…`; `None`: the operator's, or
-    /// a workspace project's). `made_by`: the person who made one with no owner (in a project),
-    /// whose caps count it. Past one of `caps` it is refused (409). Nothing is written to object
-    /// storage until it is first used.
-    pub async fn create(&self, name: &str, o: ClusterOptions, owner: Option<&str>, made_by: Option<&str>, caps: Caps) -> Result<SearchCluster> {
-        let made_by = made_by.filter(|_| owner.is_none()).map(str::to_string);
-        let c = Self::apply(SearchCluster { owner: owner.map(str::to_string), made_by, ..self.fresh(name) }, o)?;
+    /// A new, empty cluster, `owner`'s (a signed-in person's `usr_…`; `None`: the operator's).
+    /// Past one of `caps` for the owner it is refused (409). Nothing is written to object storage
+    /// until it is first used. A home in a workspace project hands it to the project later
+    /// ([`crate::store::Store::disown`]).
+    pub async fn create(&self, name: &str, o: ClusterOptions, owner: Option<&str>, caps: Caps) -> Result<SearchCluster> {
+        let c = Self::apply(SearchCluster { owner: owner.map(str::to_string), ..self.fresh(name) }, o)?;
         self.check(&c)?;
         self.check_free(name).await?;
         self.insert(&c, caps).await?;

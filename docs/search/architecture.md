@@ -364,12 +364,21 @@ evaluator and search's catalogue rows. search adds no role checks of its own.
   project trusts a cluster when the project is its home, or when the cluster belongs to one of the
   project's owners (`Workspace::trusts`). A cluster made with `X-Roll-Project` gets that project as
   its home and has no owner: it's the project's, so whoever made it loses it when they leave
-  the project. A person's own cluster that gets a home (`PUT …/homes`) is handed to the project
-  the same way, as is a branch a person makes, which takes its parent's home. rolld puts older
-  homes right at start: a cluster whose owner is in its home project is handed over, and one
-  homed in a project its owner isn't in loses that home (it's reported). A stranger's cluster
-  dropped on the project's canvas reaches nobody through it, a purged cluster leaves every
-  canvas, and a project still home to live clusters can't be deleted (409).
+  the project. Any cluster that gets a home is handed to the project this way (rolld's
+  `on_homed`): a person's own one homed by hand (`PUT …/homes`), a branch a person makes, which
+  takes its parent's home, and a home that comes back with its project's restore. A create is
+  its maker's until its home hands it over, so a placement that fails leaves it theirs, never no
+  one's. Canvases and homes keep a cluster by its id, never a name another cluster could take
+  once it's gone (a name is resolved as it's placed or homed; a node without roll search places
+  none). rolld puts what's kept from before right at every start:
+  - a ref kept by a name becomes the id of the cluster that name names, if that cluster existed
+    before the ref was placed or homed; otherwise its places and home go;
+  - a homed cluster with an owner who's an admin or owner of the project is handed over;
+  - any other home of an owned cluster goes, and is reported.
+
+  A stranger's cluster dropped on the project's canvas reaches nobody through it, and a purged
+  cluster leaves every canvas. A project still home to live clusters can't be deleted (409); when
+  that can't be read, or on a node without roll search, the delete is answered 503.
 
   | role | what they may do to the project's clusters |
   | --- | --- |

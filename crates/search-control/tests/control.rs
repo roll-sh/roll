@@ -88,10 +88,6 @@ async fn as_person(mut req: axum::extract::Request, next: axum::middleware::Next
         req.extensions_mut().insert(roll_auth::Operator);
         req.extensions_mut().insert(roll_auth::Grant { id: "tok_t".into(), name: "t".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(rules), user: None, ask_otherwise: false });
     }
-    // A create's project, as the gate decided it (`X-Roll-Project`).
-    if let Some(p) = req.headers().get("x-roll-project").and_then(|v| v.to_str().ok()).map(str::to_string) {
-        req.extensions_mut().insert(roll_auth::InProject(p));
-    }
     let who = req.headers().get("x-test-as").and_then(|v| v.to_str().ok()).map(str::to_string);
     if let Some(who) = who {
         let admin = who == "admin";
@@ -690,14 +686,16 @@ async fn people_are_held_to_their_cluster_caps() {
     assert!(e.call_as("admin", Method::GET, "/v1/search", None).await.1["caps"].is_null());
     // Alice's count toward nobody else: bob still makes his.
     assert_eq!(e.call_as("bob", Method::POST, "/v1/search/clusters", Some(create("b1", None))).await.0, 200);
-    // One made in a workspace project (`X-Roll-Project`, which the gate decided) is no one's (the
-    // project's, through its home), and counts toward who made it.
+    // One handed to a workspace project (its home: rolld's `on_homed`) is no one's, and counts
+    // toward who made it.
     for name in ["b2", "b3"] {
-        let r = e.http.post(format!("{}/v1/search/clusters", e.api)).header("x-test-as", "bob").header("x-roll-project", "prj_p").json(&create(name, None)).send().await.unwrap();
-        let v: Value = r.json().await.unwrap();
+        let (s, v) = e.call_as("bob", Method::POST, "/v1/search/clusters", Some(create(name, None))).await;
+        assert_eq!(s, 200, "{v}");
+        assert!(e.control.store.disown(v["id"].as_str().unwrap()).unwrap());
+        let (_, v) = e.call_as("admin", Method::GET, &format!("/v1/search/clusters/{name}"), None).await;
         assert!(v["owner"].is_null() && v["made_by"] == "usr_bob", "{v}");
     }
-    assert_eq!(e.call_as("bob", Method::POST, "/v1/search/clusters", Some(create("b4", None))).await.0, 409, "what bob made in a project counts toward him");
+    assert_eq!(e.call_as("bob", Method::POST, "/v1/search/clusters", Some(create("b4", None))).await.0, 409, "what bob made for a project counts toward him");
 
     // A deleted cluster frees its place (alice: a1, a2, a1-dev and the admin's a1-fix; two go),
     // and restoring one past the cap is the same 409 as a create.
