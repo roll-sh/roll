@@ -5422,6 +5422,7 @@ async fn a_previews_pages_carry_the_feedback_button_for_its_link_visitors() {
     let (st, js) = get("/__roll/feedback.js", "*/*").await;
     assert_eq!(st, StatusCode::OK);
     assert!(js.contains("https://roll.test/dashboard/projects/") && js.contains("previews?preview=abc"), "the note goes to the preview in roll");
+    assert!(!js.contains("__ROLL_") && js.contains("fb_steps"), "roll previews' own button, every blank filled (one left is a syntax error)");
     assert!(!get("/", "application/json").await.1.contains("feedback.js"), "an API call isn't a page");
     // What's been said about a page, from roll previews: none before it's on this node.
     assert_eq!(get("/__roll/feedback.json?path=%2Fpricing", "*/*").await.0, StatusCode::NOT_FOUND);
