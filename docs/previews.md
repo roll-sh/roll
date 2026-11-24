@@ -1908,7 +1908,7 @@ type Settings = {
   max_usd_month: number;              // 0: no cap; once the month's cost reaches it, new previews wait
   secrets: { base: string; allow_production: boolean };      // "development", false
   env: Record<string, string>;        // overrides every service gets
-  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[]; hide: string[]; budget: { load_ms: number; bytes: number }; openapi?: string; endpoints?: string[]; states?: {name, page, steps}[]; storybook?: string /* "web" or "web:/storybook/" */; browsers?: ("firefox" | "webkit" | "webkit-phone")[] };   // all true but screenshot; pages, hide: []; budget 0s (none); openapi: the first service's OpenAPI JSON path, compared with main's; endpoints: up to 5 GET paths timed against main's
+  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[]; hide: string[]; budget: { load_ms: number; bytes: number }; openapi?: string; endpoints?: string[]; states?: {name, page, steps}[]; modes?: {name: string; color_scheme?: "dark" | "light"; locale?: string; timezone?: string}[]; storybook?: string /* "web" or "web:/storybook/" */; browsers?: ("firefox" | "webkit" | "webkit-phone")[] };   // all true but screenshot; pages, hide: []; budget 0s (none); openapi: the first service's OpenAPI JSON path, compared with main's; endpoints: up to 5 GET paths timed against main's
   access: "link" | "team" | "public"; // "link": a preview's URLs need its link; "team": a person signed in to roll who may open the project
   visual_review: "off" | "check" | "required";   // the roll/visual review; required also blocks landing in roll ("off")
   feedback: boolean;                  // a feedback button on its pages for people who came in through roll (true)
@@ -2094,6 +2094,15 @@ type Settings = {
     `total` `number` → `string`"). The shapes stay with the comparison: a preview's
     `page_speed` doesn't carry them (live: the change's `/openapi.json` loses
     `paths./users/{id}`).
+    Its modes too (Chromatic's Modes): with `github.modes` (up to 3, each a name and at least one
+    of a `color_scheme`, `dark` or `light`; a `locale`, `de-DE`, also sent as `Accept-Language`;
+    and a `timezone`, `Europe/Berlin`), the first page is taken again in each, emulated by the
+    browser (`prefers-color-scheme`, the locale and the time zone), the emulation undone after.
+    Each is a page of its own (`mode:dark`, "Views" on the sheet, labelled "dark mode"), compared
+    with main's same mode and reviewed like a page. The sheet's picture route takes every kind of
+    page key a run keeps (`page=` a path, `@768`, `state:`, `browser:`, `mode:` or `story:`; it
+    took only paths and widths before, so a state's, another browser's or a story's picture didn't
+    load). `the_first_page_in_each_mode_is_a_page_of_its_own`.
     Its Storybook's stories too (Chromatic's stories): with `github.storybook` (`web`, or
     `web:/storybook/` when the service serves it under a path: a static build or `storybook
     dev`), that service's run reads Storybook's index (`index.json`, Storybook 7 and later;
