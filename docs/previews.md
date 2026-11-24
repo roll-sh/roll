@@ -2743,23 +2743,32 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **A note in its reviewer's engine, in review** (Jam's recordings): a Safari or Firefox
-   reviewer's note cropped in WebKit or Firefox through the other browsers' run. Next for it:
-   their typing where the button can say what without the value (a field's length, a choice's
-   index).
-2. **Restore points for the products that only copy** (Redis, search, NoSQL, streams): a point
+1. **The fifth review's security fixes, in review** (#943): a share link's cookie kept from the
+   app, outside readers' notes never mailed, replayed or posted raw to Slack, try and fetch of a
+   fork's preview outside, the guest limit taken atomically, guests unable to link.
+2. **roll apps on par, in review**: roll apps' feedback button is previews' own script (a note
+   carries the page's errors and the reviewer's steps there too), and a share link on a preview
+   roll apps serves is a 409 that says why, not a link that answers 401.
+3. **Share links on roll apps** (with roll apps' thread): a port in roll apps' access check that
+   asks previews whether a `roll_share` token is a live link of the environment's preview (its
+   maker still reaching the project), and guests' notes through roll apps' host.
+4. **`note_mail` in the dashboard's rules**: the setting is in the API and roll MCP, not the page.
+5. **`roll preview try`**: an agent's page drive (`…/try`) from the CLI, as `roll preview fetch`.
+6. **A note in its reviewer's engine, typing**: their typing where the button can say what
+   without the value (a field's length, a choice's index).
+7. **Restore points for the products that only copy** (Redis, search, NoSQL, streams): a point
    is kept only where the product puts a branch back in place, keeping its id (their delete
    guards check it); each needs its control plane's reset `from`, as pg-control's.
-3. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
+8. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
    (3.3 s in its log) and its masking, which needs that compute up: pg-control's to shorten.
-4. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+9. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+10. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-6. **Watch: pg-control's recovery to a time seconds old** (unowned).
+11. **Watch: pg-control's recovery to a time seconds old** (unowned).
 
 
 
@@ -2768,6 +2777,8 @@ Ranked by what a person notices first. Done so far:
 
 
 
+
+Landed 2026-11-24, night: a note's element cropped in its reviewer's engine (#938: WebKit for Safari and iOS, Firefox; their viewport, after their clicks).
 
 Landed 2026-11-24, evening, later: a note's element cropped as its reviewer saw it (#932: their viewport, after their clicks).
 
