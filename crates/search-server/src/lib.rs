@@ -47,5 +47,5 @@ pub use allow::{ClientAddresses, IpAllowlist, Origin};
 pub use catalog::{Catalog, ClusterSpec, Credential, MemoryStores, StaticCatalog, StoreProvider, secret_hash};
 pub use http::{ListenOptions, Shutdown, serve, serve_until, spawn};
 pub use lease::{Leases, MemoryLeases, Owner};
-pub use node::{LifecycleHooks, Node, NodeConfig, Observed, Usage};
+pub use node::{HANDED_OVER, LifecycleHooks, Node, NodeConfig, Observed, Usage};
 pub use store::ObjectStores;
