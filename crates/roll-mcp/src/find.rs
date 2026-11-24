@@ -39,6 +39,84 @@ pub const KINDS: &[Kind] = &[
     Kind { kind: "token", list: "access_list_tokens", read: "access_get_token", param: "id", id: &["id"], page: Some("/dashboard/access/tokens/{}") },
 ];
 
+/// The tools whose answer is one resource of a kind with a page: its read and the tool that makes
+/// it. The answer links to the page ([`page_link`]).
+pub const ONE: &[(&str, &str)] = &[
+    ("workspace_get_project", "project"),
+    ("workspace_create_project", "project"),
+    ("apps_get_service", "service"),
+    ("apps_create_service", "service"),
+    ("postgres_get_project", "postgres"),
+    ("postgres_create_project", "postgres"),
+    ("redis_get_database", "redis"),
+    ("redis_create_database", "redis"),
+    ("nosql_get_database", "nosql"),
+    ("nosql_create_database", "nosql"),
+    ("search_get_cluster", "search"),
+    ("search_create_cluster", "search"),
+    ("storage_get_bucket", "bucket"),
+    ("storage_create_bucket", "bucket"),
+    ("streams_get", "stream"),
+    ("streams_create", "stream"),
+    ("queues_create_vhost", "vhost"),
+    ("access_get_token", "token"),
+];
+
+/// Answers about one thing that isn't a [`Kind`] but has a page from its own fields: a deploy (on
+/// its service's page, in its environment) and a change. Each gives the page's path, the thing's
+/// id and how a person names it.
+pub type Place = fn(&Value) -> Option<(String, String, String)>;
+pub const PLACES: &[(&str, Place)] = &[
+    ("apps_get_deploy", deploy_page),
+    ("apps_deploy", deploy_page),
+    ("apps_redeploy", deploy_page),
+    ("apps_rollback", deploy_page),
+    ("apps_rollback_previous", deploy_page),
+    ("apps_promote", deploy_page),
+    ("apps_wait_deploy", deploy_page),
+    ("code_get_change", change_page),
+    ("code_create_change", change_page),
+];
+
+fn seg(s: &str) -> String {
+    percent_encoding::utf8_percent_encode(s, crate::tools::SEGMENT).to_string()
+}
+
+fn text<'a>(v: &'a Value, f: &str) -> Option<&'a str> {
+    v[f].as_str().filter(|s| !s.is_empty())
+}
+
+/// A deployment: its service's page in its environment, where the deployments are.
+fn deploy_page(d: &Value) -> Option<(String, String, String)> {
+    let (id, service, env) = (text(d, "id")?, text(d, "service")?, text(d, "environment")?);
+    Some((format!("/dashboard/apps/{}?env={}", seg(service), seg(env)), id.into(), format!("deploy {id} of {service} ({env})")))
+}
+
+/// A change: `/dashboard/code/<owner>/<repo>/changes/<n>`.
+fn change_page(c: &Value) -> Option<(String, String, String)> {
+    let (repo, n) = (text(c, "repo")?, c["number"].as_u64()?);
+    let (owner, name) = repo.split_once('/')?;
+    Some((format!("/dashboard/code/{}/{}/changes/{n}", seg(owner), seg(name)), format!("{repo}#{n}"), format!("{repo}#{n}")))
+}
+
+/// The dashboard page of the resource `tool` answered with `answer`, as MCP's `resource_link`
+/// (2025-06-18): what the agent gives the person to open. `None` for any other tool, an answer
+/// without the fields its page needs, or no dashboard address (`web`).
+pub fn page_link(tool: &str, answer: &Value, web: &str) -> Option<Value> {
+    let link = |uri: String, name: &str, title: String| json!({ "type": "resource_link", "uri": uri, "name": name, "title": format!("{title} in the roll dashboard"), "mimeType": "text/html" });
+    if let Some((_, place)) = PLACES.iter().find(|(t, _)| *t == tool) {
+        let web = web.trim_end_matches('/');
+        let (path, id, title) = place(answer).filter(|_| !web.is_empty())?;
+        return Some(link(format!("{web}{path}"), &id, title));
+    }
+    let (_, kind) = ONE.iter().find(|(t, _)| *t == tool)?;
+    let k = KINDS.iter().find(|k| k.kind == *kind)?;
+    let id = k.id.iter().find_map(|f| answer[*f].as_str()).filter(|id| !id.is_empty())?;
+    let uri = page_url(k, id, web)?;
+    let name = answer["name"].as_str().filter(|n| !n.is_empty()).unwrap_or(id);
+    Some(link(uri, id, format!("{name} ({})", k.kind)))
+}
+
 /// A dashboard page and the read that shows what it shows: `path` is the page's path up to its
 /// first value (exact when `exact`), `args` fills the read's arguments from the path's segments
 /// after it and the query (`None`: not a page of one thing).
@@ -246,6 +324,43 @@ mod tests {
         assert_eq!(read("https://roll.sh/dashboard/queues/queues?vhost=prod"), Some(("queues_list_queues", json!({ "vhost": "prod" }))));
         for nothing in ["https://roll.sh/dashboard/apps/visit?service=svc_1", "https://roll.sh/dashboard/storage/-/iam", "https://roll.sh/dashboard/code/acme", "https://roll.sh/dashboard/access", "https://roll.sh/dashboard/access/approvals", "https://roll.sh/dashboard/access/approvalsx?id=a", "file:///dashboard/apps/x"] {
             assert!(resolve(nothing).is_none(), "{nothing}");
+        }
+    }
+
+    /// An answer about one resource links to its page: each tool names a kind with a page, its
+    /// answer (as the sweep recorded real ones) carries the kind's id, and the link read back is that
+    /// resource. Other tools, answers without the id and a dashboard with no address link nothing.
+    #[test]
+    fn one_resources_answer_links_its_page() {
+        let schemas: Value = serde_json::from_str(include_str!("output-schemas.json")).unwrap();
+        for (tool, kind) in ONE {
+            assert!(crate::tools::all().iter().any(|t| t.name == *tool), "{tool}");
+            let k = KINDS.iter().find(|k| k.kind == *kind && k.page.is_some()).unwrap_or_else(|| panic!("{kind} has no page"));
+            assert!(k.id.iter().any(|f| schemas[*tool]["properties"].get(*f).is_some()), "{tool}'s answer has no {:?}", k.id);
+        }
+        let link = page_link("apps_create_service", &json!({ "id": "svc_1", "name": "web" }), "https://roll.sh/").unwrap();
+        assert_eq!(link, json!({ "type": "resource_link", "uri": "https://roll.sh/dashboard/apps/svc_1", "name": "svc_1", "title": "web (service) in the roll dashboard", "mimeType": "text/html" }));
+        assert_eq!(resolve(link["uri"].as_str().unwrap()).map(|(p, a)| (p.read, a)), Some(("apps_get_service", json!({ "service": "svc_1" }))));
+        let bucket = page_link("storage_get_bucket", &json!({ "name": "logs" }), "https://roll.sh").unwrap();
+        assert_eq!(bucket["uri"], "https://roll.sh/dashboard/storage/logs");
+        assert!(page_link("apps_list_services", &json!({ "id": "svc_1" }), "https://roll.sh").is_none());
+        assert!(page_link("apps_get_service", &json!({ "error": "no" }), "https://roll.sh").is_none());
+        assert!(page_link("apps_get_service", &json!({ "id": "svc_1" }), "").is_none());
+        // A deploy links to its service's page in its environment; a change to its own page, which
+        // reads back as that change.
+        let deploy = page_link("apps_rollback", &json!({ "id": "dpl_1", "service": "svc_1", "environment": "pr 7", "status": "building" }), "https://roll.sh").unwrap();
+        assert_eq!((&deploy["uri"], &deploy["name"]), (&json!("https://roll.sh/dashboard/apps/svc_1?env=pr%207"), &json!("dpl_1")));
+        assert_eq!(resolve(deploy["uri"].as_str().unwrap()).map(|(p, a)| (p.read, a)), Some(("apps_get_service", json!({ "service": "svc_1" }))));
+        let change = page_link("code_get_change", &json!({ "repo": "acme/api", "number": 12, "title": "x" }), "https://roll.sh").unwrap();
+        assert_eq!(change["uri"], "https://roll.sh/dashboard/code/acme/api/changes/12");
+        assert_eq!(resolve(change["uri"].as_str().unwrap()).map(|(p, a)| (p.read, a)), Some(("code_get_change", json!({ "change": "acme/api#12" }))));
+        assert!(page_link("code_get_change", &json!({ "repo": "acme/api" }), "https://roll.sh").is_none());
+        // Each tool exists: roll's own, or one roll code fronts (docs/code/mcp.md lists them without
+        // the `code_` rolld puts before each).
+        let code = include_str!("../../../docs/code/mcp.md");
+        for (tool, _) in PLACES {
+            let fronted = tool.strip_prefix("code_").is_some_and(|n| code.contains(&format!("| `{n}` |")));
+            assert!(crate::tools::all().iter().any(|t| t.name == *tool) || fronted, "{tool}");
         }
     }
 

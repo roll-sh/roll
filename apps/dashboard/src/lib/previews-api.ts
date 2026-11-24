@@ -461,6 +461,8 @@ export interface PreviewSettings {
   data_at?: string | null;
   /** A feedback button on its pages for people who came in through roll (link access, or a team session). */
   feedback: boolean;
+  /** Mail about notes: a new one to the change's author, a reply or a resolve to the note's. */
+  note_mail: boolean;
   /** Feature flags a reviewer sets for their own view from the page's toolbar. */
   flags?: { name: string; options: string[] }[];
   /** Variables for a family of branches: a branch glob → `{name: value}`, over `env`. */

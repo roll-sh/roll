@@ -212,8 +212,8 @@ async fn with_screenshots_a_baseline_of_the_default_branch_is_kept_to_compare_ch
     assert_eq!(e.engine.store.row_by_change("chg_1").unwrap().map(|r| r.desired), Some(Desired::Active), "the change's preview came back with its repo");
 }
 
-/// Pages changed the same way against main's (Percy's grouped diffs) share a group, accepted
-/// together; a page changed another way is left to review on its own.
+/// Pages changed the same way against main's (Percy's grouped diffs), the first page included,
+/// share a group, accepted together; a page changed another way is left to review on its own.
 #[tokio::test]
 async fn pages_changed_the_same_way_are_accepted_together() {
     let e = env(json!({ "enabled": true, "visual_review": "check", "github": { "screenshot": true } }));
@@ -232,19 +232,21 @@ async fn pages_changed_the_same_way_are_accepted_together() {
     let shots = |paint: &dyn Fn(&str, u32, u32) -> u8| paths.iter().map(|p| roll_previews::ports::PageShot { path: p.clone(), png: png(&|x, y| paint(p, x, y)), errors: 0, report: Default::default() }).collect::<Vec<_>>();
     e.engine.store.set_screenshot(&base.id, "cs_main", &png(&|_, _| 0), None, None).unwrap();
     e.engine.store.set_page_shots(&base.id, "cs_main", &shots(&|_, _, _| 0), &paths).unwrap();
-    // /a and /b gain the same light bar at the top; /c a different one, lower and grey.
-    e.engine.store.set_screenshot(&chg.id, "cs_v1", &png(&|_, _| 0), None, None).unwrap();
+    // The first page, /a and /b gain the same light bar at the top; /c a different one, lower
+    // and grey.
+    e.engine.store.set_screenshot(&chg.id, "cs_v1", &png(&|_, y| if y <= 3 { 255 } else { 0 }), None, None).unwrap();
     e.engine.store.set_page_shots(&chg.id, "cs_v1", &shots(&|p, _, y| match (p, y) { ("/c", 10..=13) => 128, ("/c", _) => 0, (_, 0..=3) => 255, _ => 0 }), &paths).unwrap();
     e.engine.store.compare_with_base(&chg.id, &base.id, "main", None).unwrap();
     let review = || e.engine.store.preview(&chg.id).unwrap().visual_review.unwrap();
     let groups: Vec<(String, Option<String>)> = review().pages.iter().map(|p| (p.path.clone(), p.group.clone())).collect();
     let a = groups.iter().find(|(p, _)| p == "/a").and_then(|(_, g)| g.clone()).expect("/a in a group");
+    assert_eq!(groups.iter().find(|(p, _)| p.is_empty()).map(|(_, g)| g.clone()), Some(Some(a.clone())), "the first page changed the same way: {groups:?}");
     assert_eq!(groups.iter().find(|(p, _)| p == "/b").map(|(_, g)| g.clone()), Some(Some(a.clone())), "/b changed the same way: {groups:?}");
     assert_eq!(groups.iter().find(|(p, _)| p == "/c").map(|(_, g)| g.clone()), Some(None), "a change of its own: {groups:?}");
     assert!(e.engine.accept_visual(&chg.id, "ada", &[], true, None, Some("cs_v1"), Some("group:nothex")).await.is_err());
     e.engine.accept_visual(&chg.id, "ada", &[], true, None, Some("cs_v1"), Some(&format!("group:{a}"))).await.unwrap();
     let waiting: Vec<String> = review().pages.iter().filter(|p| p.by.is_none()).map(|p| p.path.clone()).collect();
-    assert_eq!(waiting, ["/c"], "the two accepted at once; /c still waits");
+    assert_eq!(waiting, ["/c"], "the three accepted at once; /c still waits");
 }
 
 #[tokio::test]
@@ -2417,6 +2419,57 @@ async fn a_pages_notes_by_its_environment_name() {
     assert_eq!(*e.code.comments.lock(), [("chg_n".to_string(), "**Reply on the preview** · `rv_Too big`\n\nResolved.".to_string(), "bob".to_string(), false)]);
     assert_eq!(e.engine.open_notes(&p.id).await.unwrap().len(), 1);
     assert!(e.engine.resolve_note(&p.id, "rv_someone else's", "bob").await.is_err());
+}
+
+/// Mail about notes (Vercel's comment notifications): a new note to the change's author, a
+/// reply and a resolve to the note's author, each once, to people only (not a guest, not
+/// whoever wrote it), kept to try again when it couldn't go, and none with the project's
+/// `note_mail` off.
+#[tokio::test]
+async fn a_notes_people_are_told_by_mail() {
+    struct Mailbox(parking_lot::Mutex<Vec<(String, String)>>, std::sync::atomic::AtomicUsize);
+    impl roll_previews::ports::Visitors for Mailbox {
+        fn may_open(&self, _: &str, _: &str, _: &str) -> bool {
+            false
+        }
+        fn mail(&self, handle: &str, _project: &str, subject: &str, _text: &str) -> anyhow::Result<bool> {
+            // The first one fails: tried again.
+            if self.1.fetch_add(1, Ordering::SeqCst) == 0 {
+                anyhow::bail!("SES is down");
+            }
+            self.0.lock().push((handle.into(), subject.into()));
+            Ok(true)
+        }
+    }
+    let e = env(json!({ "enabled": true }));
+    e.code.open(change("chg_m", 3));
+    e.engine.pass().await.unwrap();
+    let mailbox = Arc::new(Mailbox(Default::default(), Default::default()));
+    let _ = e.engine.visitors.set(mailbox.clone());
+    let note = "**Feedback on the preview** · `/cart`\n\nThe total is wrong";
+    let reply = |text: &str| format!("**Reply on the preview** · `rv_n`\n\n{text}");
+    e.engine.tell_on_review("chg_m", "rv_n", "bob", note, "carol", None).unwrap();
+    e.engine.tell_on_review("chg_m", "rv_n", "bob", note, "carol", None).unwrap();
+    e.engine.tell_on_review("chg_m", "rv_r1", "carol", &reply("Fixed in the next push"), "carol", Some("bob")).unwrap();
+    e.engine.tell_on_review("chg_m", "rv_r2", "bob", &reply("Thanks"), "carol", Some("bob")).unwrap();
+    e.engine.tell_on_review("chg_m", "rv_r3", "carol", &reply("Resolved."), "carol", Some("guest:Ada")).unwrap();
+    e.engine.tell_on_review("chg_m", "rv_x", "bob", "LGTM", "carol", None).unwrap();
+    e.engine.tend_tells().await;
+    // One went; the other couldn't, and waits for its retry, one attempt counted.
+    let p = e.engine.store.row_by_change("chg_m").unwrap().unwrap();
+    let (sent, waiting) = (mailbox.0.lock().clone(), e.engine.store.pending_tells(&p.id).unwrap());
+    assert_eq!((sent.len(), waiting.len()), (1, 1), "the note's and the reply's, once each: {sent:?} {waiting:?}");
+    let mut both: Vec<&str> = sent.iter().map(|(to, _)| to.as_str()).chain(waiting.iter().map(|(to, _)| to.as_str())).collect();
+    both.sort();
+    assert_eq!(both, ["bob", "carol"], "the change's author of the note, the note's author of the reply");
+    assert_eq!(waiting[0].1, 1);
+    assert!(sent.iter().all(|(to, s)| (to == "carol" && s.contains("bob left a note")) || (to == "bob" && s.contains("carol replied"))), "{sent:?}");
+    // Off for the project: nothing more.
+    let mut s = e.engine.store.settings(&e.project).unwrap();
+    s.note_mail = false;
+    e.engine.store.put_settings(&e.project, &s).unwrap();
+    e.engine.tell_on_review("chg_m", "rv_y", "dan", note, "carol", None).unwrap();
+    assert_eq!(e.engine.store.pending_tells(&p.id).unwrap().len(), 1, "nothing more queued");
 }
 
 /// A guest's note through a share link that takes notes: on the change as `guest:<name>`, its

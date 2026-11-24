@@ -491,6 +491,16 @@ impl Backend {
 
 #[async_trait]
 impl PreviewBackend for Backend {
+    async fn reviewed(&self, change: &code_control::model::Change, review: &code_control::review::Review) {
+        let Some(engine) = self.engine.get().and_then(Weak::upgrade) else { return };
+        // A reply's note: whose it is.
+        let note_author = code_control::review::preview_note::parse_reply(&review.body).and_then(|(note, _)| self.source.code.db.review(&note).ok().flatten()).map(|n| n.reviewer.name);
+        if let Err(e) = engine.tell_on_review(&change.id, &review.id, &review.reviewer.name, &review.body, &change.author, note_author.as_deref()) {
+            tracing::warn!(change = %change.id, error = %e, "previews: queueing mail about a note");
+        }
+        self.inner.reviewed(change, review).await;
+    }
+
     async fn create(&self, repo: &RepoRow, change: &code_control::model::Change, dir: &Path) -> anyhow::Result<code_control::model::Preview> {
         let Some((engine, project)) = self.environment_for(repo) else { return self.inner.create(repo, change, dir).await };
         // roll code's own call: the change's preview, whichever project made it (one per change).
