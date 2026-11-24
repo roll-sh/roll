@@ -519,7 +519,7 @@ const stories = async (sessionId) => {
 const tryIt = async (sessionId) => {
   let t = {};
   try {
-    t = JSON.parse(process.env.TRY);
+    t = JSON.parse(process.env.TRY_FILE ? fs.readFileSync(process.env.TRY_FILE, "utf8") : process.env.TRY);
   } catch {}
   const path = typeof t.path === "string" && /^\/(?!\/)[^\s#"'`\\]{0,199}$/.test(t.path) ? t.path : "/";
   let status = 0;

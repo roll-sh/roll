@@ -3,9 +3,10 @@
 //! environment) and the visitor came in through roll (the environment's access cookie), a page
 //! the app serves gets `<script src="/__roll/feedback.js" defer>` before `</body>`, and that
 //! script is served from the preview's own host. It holds no credential: it opens roll's
-//! dashboard, where the signed-in person posts the note on the change. The script and the
-//! tagger are roll previews' (`roll-previews/src/feedback.js`, `runtime.rs` `Tagger`), kept equal
-//! until one copy serves both (docs/apps/README.md, "With the other platform branches").
+//! dashboard, where the signed-in person posts the note on the change. The script is roll
+//! previews' own (`roll-previews/src/feedback.js`: what went wrong on the page and what the
+//! reviewer did go with a note), without what only previews' proxy serves (share links' guests,
+//! a reviewer's flags); the tagger is a copy of previews' `runtime.rs` `Tagger`.
 
 use axum::body::Body;
 use axum::http::{HeaderValue, StatusCode, header};
@@ -19,7 +20,7 @@ pub const NOTES: &str = "/__roll/feedback.json";
 /// The most a list holds.
 const MAX_NOTES: usize = 200;
 const TAG: &[u8] = b"<script src=\"/__roll/feedback.js\" defer></script>";
-const SCRIPT: &str = include_str!("../assets/feedback.js");
+const SCRIPT: &str = include_str!("../../roll-previews/src/feedback.js");
 
 /// Adds the tag to a page as it streams: before the first `</body>` (matched across chunks, in
 /// any case), or at the end of a page without one. Memory stays one chunk.
@@ -139,7 +140,10 @@ pub async fn notes(notes: Option<std::sync::Arc<dyn crate::integrations::Feedbac
 }
 
 pub fn script(target: &str) -> Response {
-    let js = SCRIPT.replace("__ROLL_TARGET__", &serde_json::to_string(target).unwrap_or_else(|_| "\"\"".into()));
+    let js = SCRIPT
+        .replace("__ROLL_TARGET__", &serde_json::to_string(target).unwrap_or_else(|_| "\"\"".into()))
+        .replace("__ROLL_GUEST__", "false")
+        .replace("__ROLL_FLAGS__", "[]");
     ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8"), (header::CACHE_CONTROL, "private, max-age=300")], js).into_response()
 }
 

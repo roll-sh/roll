@@ -435,8 +435,9 @@ impl Engine {
     /// token: the answer is the only time the link is shown. Only where the preview isn't public
     /// (`access: link` or `team`); a public one needs none.
     /// `maker`: who it is (`usr_…`, a person or the person behind their token; none for the
-    /// operator): the link works only while they may still open the project's previews.
-    pub fn share(&self, id: &str, hours: u32, by: &str, maker: Option<&str>, label: &str, notes: bool) -> Result<(crate::Share, String)> {
+    /// operator): the link works only while they may still open the project's previews. Not
+    /// where roll apps serves the preview: its proxy takes the preview's own link, not these.
+    pub async fn share(&self, id: &str, hours: u32, by: &str, maker: Option<&str>, label: &str, notes: bool) -> Result<(crate::Share, String)> {
         if !(1..=KEEP_MAX_HOURS).contains(&hours) {
             return Err(Error::BadRequest(format!("hours: 1 to {KEEP_MAX_HOURS}")));
         }
@@ -450,6 +451,11 @@ impl Engine {
         }
         if !self.store.access(id)?.is_some_and(|a| a.required()) {
             return Err(Error::Conflict("the preview is public: anyone can open it without a link".into()));
+        }
+        // The rule converge follows: a project with services on roll apps runs its previews there.
+        let catalog = self.apps.catalog(&r.project_id).await.map_err(|e| Error::Internal(format!("reading the project's services: {e:#}")))?;
+        if catalog.is_some_and(|c| !c.is_empty()) {
+            return Err(Error::Conflict("roll apps serves this preview, and its proxy takes the preview's own link (`share_url`), not share links".into()));
         }
         let url = self.store.services(id)?.into_iter().next().map(|s| s.url).ok_or_else(|| Error::Conflict("the preview has no service to share yet".into()))?;
         let (share, token) = self.store.create_share(id, self.store.now_ms()? + hours as i64 * 3_600_000, by, maker, label, notes)?;
@@ -466,16 +472,24 @@ impl Engine {
         }
         let r = self.store.row(id)?;
         let change = r.change_id.clone().ok_or_else(|| Error::BadRequest("only a change's preview has notes".into()))?;
-        let now = self.store.now_ms()?;
-        if self.store.guest_notes_since(id, &share.id, now - 3_600_000)? >= crate::notes::GUEST_PER_HOUR {
-            return Err(Error::Conflict(format!("{} notes an hour through one share link: try again later", crate::notes::GUEST_PER_HOUR)));
-        }
         let url = self.store.services(id)?.into_iter().next().map(|s| s.url).unwrap_or_default();
         let (by, body) = crate::notes::guest_body(n, &url, id, &share.label).map_err(Error::BadRequest)?;
+        // Its place in the hour's ten, taken in one write before the note is made: posts at once
+        // can't all pass the count.
+        let slot = self.store.take_guest_slot(id, &share.id, crate::notes::GUEST_PER_HOUR)?.ok_or_else(|| Error::Conflict(format!("{} notes an hour through one share link: try again later", crate::notes::GUEST_PER_HOUR)))?;
         // A guest's words: outside the team, wherever the review is read (MCP's lockdown).
-        let review = self.source.comment(&change, &body, &by, true).await.map_err(|e| Error::Internal(format!("{e:#}")))?;
-        let review = review.ok_or_else(|| Error::Conflict("this preview's change takes no notes".into()))?;
-        self.store.add_guest_note(id, &share.id, &review, now)?;
+        let made = self.source.comment(&change, &body, &by, true).await;
+        let review = match made {
+            Ok(Some(r)) => r,
+            Ok(None) | Err(_) => {
+                let _ = self.store.drop_guest_slot(id, &slot);
+                return Err(match made {
+                    Err(e) => Error::Internal(format!("{e:#}")),
+                    _ => Error::Conflict("this preview's change takes no notes".into()),
+                });
+            }
+        };
+        self.store.fill_guest_slot(id, &slot, &review)?;
         self.store.log(id, &format!("{by} left a note through share link {}", share.id))?;
         Ok(review)
     }
@@ -484,8 +498,14 @@ impl Engine {
     /// tells `note_author` (the note's), "Resolved." saying who resolved it (Vercel's comment
     /// notifications). Not to a guest (no account), nor to whoever wrote it, nor when the
     /// project's `note_mail` is off. Queued: [`Engine::tend_tells`] sends it.
-    pub fn tell_on_review(&self, change: &str, review: &str, by: &str, body: &str, change_author: &str, note_author: Option<&str>) -> Result<()> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn tell_on_review(&self, change: &str, review: &str, by: &str, body: &str, change_author: &str, note_author: Option<&str>, outside: bool) -> Result<()> {
         use code_control::review::preview_note;
+        // A reader who can't push mails nobody (else any public repo's reader could fill an
+        // author's inbox); a share link's guest's note is previews' own, made within its limit.
+        if outside && !by.starts_with("guest:") {
+            return Ok(());
+        }
         let Some(r) = self.store.row_by_change(change)? else { return Ok(()) };
         if !self.store.settings(&r.project_id)?.note_mail {
             return Ok(());
