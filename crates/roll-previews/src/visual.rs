@@ -96,7 +96,9 @@ fn average_hash(img: &RgbaImage, (x0, y0, x1, y1): (u32, u32, u32, u32)) -> (u64
         *cell = if n > 0.0 { sum / n } else { 0.0 };
     }
     let mean = cells.iter().sum::<f64>() / 64.0;
-    (cells.iter().enumerate().fold(0u64, |h, (i, c)| if *c > mean { h | (1 << i) } else { h }), (mean / 16.0) as u8)
+    // Above the mean by a whole step of brightness: a uniform area's cells differ from its mean
+    // only by rounding, which mustn't make bits.
+    (cells.iter().enumerate().fold(0u64, |h, (i, c)| if *c > mean + 1.0 { h | (1 << i) } else { h }), (mean / 16.0) as u8)
 }
 
 /// The diff's largest picture: a screenshot is a viewport (1280 × 800, a phone's 780 × 1688), and
