@@ -1552,7 +1552,8 @@ gives one Twilio key. Each rotation is `rotation.succeeded` on the events feed, 
 the vendor refuses is `rotation.failed` (and `rotation_failing` in health), as for every managed key.
 
 **Keys a vendor ends by itself rotate before that.** GitLab ends each token after `expires_days`,
-Databricks after `lifetime_days`, and Entra a password after Microsoft's two years. A link to one
+Databricks after `lifetime_days`, SonarQube after `expires_days` when one is set, and Entra a
+password after Microsoft's two years. A link to one
 of those needs `rotate_days`, at most the lifetime less 14 days (half the lifetime below 28 days),
 refused at link time otherwise (`gitlab ends these keys after 90 days: set rotate_days (at most
 76)…`). The margin is health's `expiring` window: a rotation on schedule (a weekly `rotate_window`'s
@@ -1599,7 +1600,9 @@ instead of at the first rotation:
 - Datadog: one page of the API keys, or of the credential's user's application keys;
 - Cloudflare: the template token (read as each rotation will);
 - Databricks: the identity's tokens (`GET /api/2.0/token/list`);
-- Confluent: one page of the owner's API keys.
+- Confluent: one page of the owner's API keys;
+- SonarQube: the credential's user's tokens (`GET /api/user_tokens/search`);
+- Jenkins: `GET /whoami/api/json`, which must name `user` (Jenkins answers it for anyone).
 
 | `vendor` | `target` | `credential` | Issue | Revoke |
 | --- | --- | --- | --- | --- |
@@ -1614,6 +1617,8 @@ instead of at the first rotation:
 | `cloudflare` | `{account_id?, template}` (no `account_id`: the user's tokens) | an API token that may manage API tokens (`API Tokens Write` on the user or the account) | `GET https://api.cloudflare.com/client/v4/{user\|accounts/{account_id}}/tokens/{template}`, then `POST …/tokens {name, policies, condition?}` with the template's policies (permission groups by id) and condition (Bearer) → `result.id`, `result.value` | `DELETE …/tokens/{id}` |
 | `databricks` | `{host: "dbc-a1b2c3d4-e5f6.cloud.databricks.com", lifetime_days?: 1-730 (default 90)}` | a personal access token of the identity whose tokens rotate (a service principal's, ideally) | `POST https://{host}/api/2.0/token/create {comment, lifetime_seconds}` (Bearer) → `token_value`, `token_info.token_id` | `POST /api/2.0/token/delete {token_id}` |
 | `confluent` | `{owner: "sa-…" \| "u-…", resource?: "lkc-…", environment?: "env-…"}` (no `resource`: a Cloud API key) | a Cloud API key as `KEY:SECRET` that may manage `owner`'s keys (OrganizationAdmin, or AccountAdmin of the owner) | `POST https://api.confluent.cloud/iam/v2/api-keys {spec: {display_name, owner: {id}, resource?: {id, environment?}}}` (basic auth) → `id` (the key), `spec.secret` | `DELETE …/api-keys/{id}` |
+| `sonarqube` | `{host?: "sonarcloud.io" \| a SonarQube Server's host, kind?: "user" (default) \| "global_analysis" \| "project_analysis", project?: the project's key (project_analysis only), expires_days?: 1-730}` (analysis tokens on a Server only) | a user token of the user whose tokens rotate (for analysis tokens, one who may run analysis there) | `POST https://{host}/api/user_tokens/generate`, form `name, type, projectKey?, expirationDate?` (the token as basic auth's login) → `token` (`id` is the name roll gave it) | `POST …/api/user_tokens/revoke`, form `name` |
+| `jenkins` | `{host: "ci.example.com", user}` | an API token of `user` (Jenkins lets only a user make their own) | `GET https://{host}/crumbIssuer/api/json` (none on a 404), then `POST https://{host}/user/{user}/descriptorByName/jenkins.security.ApiTokenProperty/generateNewToken`, form `newTokenName`, with the crumb (basic auth `user:token`) → `data.tokenUuid`, `data.tokenValue`; then `GET /whoami/api/json` with the new token, which must name `user` | the crumb, then `POST …/ApiTokenProperty/revoke`, form `tokenUuid` |
 
 - **Auth0 has no grace period.** `rotate-secret` replaces the app's secret at once: the old one
   stops working the moment roll rotates, whatever `grace_minutes` says, so services must pick up
@@ -1657,11 +1662,26 @@ instead of at the first rotation:
 - **Confluent: link `CONFLUENT_API_KEY` to `id` and `CONFLUENT_API_SECRET` to `secret`.** They
   share one key, and a new one can take a moment to work on a cluster: keep `grace_minutes` above
   a few minutes.
+- **SonarQube revokes by name.** Each token gets a name of its own (the key's label and a random
+  suffix), which is its `id`. User tokens rotate on SonarQube Cloud (`sonarcloud.io`, the default
+  `host`) and on a SonarQube Server; global and project analysis tokens on a Server only. Tokens
+  are the credential's user's. With `expires_days`, each token ends after that many days (as that
+  day starts in UTC; a server may cap it lower), so a link's `rotate_days` is at most
+  `expires_days` less 14; without it, a token lives until revoked unless the server's maximum
+  lifetime ends it. `host` is a hostname (no IP literal, no port).
+- **Jenkins: a new token is checked before it's kept.** roll signs in with the new token
+  (`whoami` must name `user`) before it stores it, so the old one is revoked after
+  `grace_minutes` only once its replacement is known to work. A new token that doesn't sign in is
+  revoked at once, and the rotation fails with the old token in place (`rotation.failed` for a
+  scheduled one). Every POST carries the controller's CSRF crumb when it issues one. The
+  credential is an API token, not a password: Jenkins exempts requests signed with an API token
+  from its session-bound crumb check. `host` is a hostname (no IP literal, no port; a controller
+  under a path prefix isn't supported yet).
 
 Requests go out from rolld's guarded client, as a rotator's calls do: HTTPS to a public address, no
 redirects, a 15-second timeout, at most 64 KiB of answer. The hosts are the vendors' own, except
-Okta's and Auth0's tenant domains, a self-managed GitLab's host and a Databricks workspace's host,
-which must be hostnames (no IP literal, no port) and then pass the same guard; Datadog's site must be one of its documented ones. The credential is sealed with the project's data key, bound to the registration's
+Okta's and Auth0's tenant domains, a self-managed GitLab's host, a Databricks workspace's host, a
+SonarQube Server's host and a Jenkins controller's host, which must be hostnames (no IP literal, no port) and then pass the same guard; Datadog's site must be one of its documented ones. The credential is sealed with the project's data key, bound to the registration's
 id, vendor and target, so a row pointed at another host no longer opens; it's never answered,
 logged or audited, and the list shows the vendor and target only. A vendor's answer is never part
 of an error: errors name the vendor, the step and the status (`okta answered 401 issuing a key`).
@@ -2800,7 +2820,7 @@ TLS certificates for services (mTLS between them), with no CA to run.
 
 #### Getting certificates where TLS terminates
 
-A managed `pki` key's certificate can go where TLS terminates (a load balancer, a CDN), as
+A managed `pki` or `public_cert` key's certificate can go where TLS terminates (a load balancer, a CDN), as
 Infisical syncs its certificates to ACM, Key Vault and Cloudflare: a **certificate sync** ("Syncs")
 pushes the key's current certificate, its private key and `ca_chain` on issue and again on every
 rotation (the rotation is a change of the folder, so the sync is due within seconds), retried every 5
@@ -2810,7 +2830,7 @@ listener or a hostname keeps serving it; what the target calls it is the sync's 
 - `POST …/syncs {environment, path?, kind, target, keys: ["TLS_CERT"]}` (`roll secrets syncs add
   aws-acm --target region=us-east-1 --target role=certs --keys TLS_CERT`, the Syncs tab's
   Certificates group; `syncs ls` shows `remote_id`). `keys` names one key of that folder, its own (not imported
-  or inherited), linked `managed` to one of the project's CAs: any other key, more than one, a
+  or inherited), linked `managed` to one of the project's CAs or public certificates: any other key, more than one, a
   `prefix` or a dynamic link is refused when the sync is made, and checked again before each push.
   Which field the key links doesn't matter: the push takes every part of its credential.
 - **Who.** Making one needs `admin` on the folder, as any sync, and `reveal` too: it sends a
@@ -2969,6 +2989,86 @@ lego --server https://api.roll.example/v1/secrets/acme/ca_example/directory --ea
 
 Clients that check revocation (and TLS to the directory) trust rolld's public address as any HTTPS
 client does; the certificates themselves chain to the CA's certificate (`roll secrets cas cert NAME`).
+
+### Publicly trusted certificates
+
+A project's own CAs are for its own clients. Endpoints that browsers and other people reach need a
+certificate from a public CA, so roll is also an ACME client, as Vault 2.0's PKI External CA and
+Infisical are. It gets certificates from Let's Encrypt, ZeroSSL or Google Trust Services, proves
+the names with dns-01, renews them, and keys link to the result.
+- **The ACME client is the edge's.** roll apps' edge already orders its own certificates and custom
+  domains' certificates from Let's Encrypt (`roll_edge::acme`). roll secrets orders through the same
+  code (`roll_edge::acme::order`). The only difference is the HTTP client: rolld's guarded one
+  (public addresses only, no redirects, no proxy, at most 1 MiB per answer).
+  roll has no DNS product of its own, so names are proven through the project's DNS provider:
+  Cloudflare for now.
+- `POST …/public-certs {name, directory_url, domains, dns_provider: "cloudflare", dns_credential,
+  eab_kid?, eab_hmac_key?, rotate_days?}` (admin). `directory_url` is one of
+  Let's Encrypt's (`https://acme-v02.api.letsencrypt.org/directory`, staging
+  `https://acme-staging-v02.api.letsencrypt.org/directory`), ZeroSSL's
+  (`https://acme.zerossl.com/v2/DV90`) or Google Trust Services' (`https://dv.acme-v02.api.pki.goog/directory`,
+  test `https://dv.acme-v02.test-api.pki.goog/directory`). The operator allows others with
+  `ROLL_SECRETS_ACME_ALLOW` (comma-separated HTTPS directory URLs).
+  - `domains` are DNS names (1 to 100), including wildcards (`*.example.com`) because dns-01 can
+    prove them. A provider that couldn't prove a wildcard would refuse one.
+  - `dns_credential` is a Cloudflare API token with Zone DNS edit on the names' zones. It's checked
+    before it's kept: the token must see a zone for every name, or the request is a 400 naming the
+    name.
+  - `eab_kid` and `eab_hmac_key` (base64url) are the External Account Binding that ZeroSSL and
+    Google ask for.
+  - The answer is `status: "pending"`. Nothing is ordered during the request.
+- **Orders run in the background.** ACME orders are slow: DNS has to spread
+  (`ROLL_SECRETS_ACME_PROPAGATION_S`, 20 s unless set), then the CA checks. So a job orders, every
+  5 seconds on each node. It claims a due certificate in a write, so only one node orders it, and
+  orders outside any transaction.
+  - It writes an `_acme-challenge` TXT record per name, asks the CA, takes the records down again,
+    and keeps the certificate, its chain and its key sealed with the project's data key.
+  - The project has one ACME account per CA. It's made on the first order (with the EAB, where
+    given) and kept sealed.
+  - A failed order is `status: "failing"` with `last_error` (the CA's problem, or the DNS
+    provider's step and status, never a credential). It's tried again after an hour, or at once when
+    the certificate is changed or renewed.
+  - What the CA signed must name exactly the domains asked for; anything else is refused.
+- **Keys link to it** as the managed link kind `public_cert` (`{kind: "public_cert", ref: "pcr_…",
+  field, mode: "managed"}`, or the dashboard's Link a resource), once it's issued (before that, a
+  409 `not_issued`).
+  - The fields are `certificate` (`TLS_CERT`), `private_key` (`TLS_KEY`, masked), `ca_chain`
+    (`TLS_CA_CHAIN`, the CA's certificates above the leaf) and `fullchain` (`TLS_FULLCHAIN`, the leaf
+    then the chain, as nginx and HAProxy take it).
+  - Every key and environment linked to one registration gets the same certificate. Each key's
+    `expires_at` is the certificate's end, so health's `expiring` and `expired` see it.
+- **Renewal is the registration's.** It renews `rotate_days` after a certificate was issued: by
+  default two thirds of the certificate's lifetime (60 days of Let's Encrypt's 90). It's never later
+  than the lifetime less 14 days, or half the lifetime below 28 days, which is the rule SaaS keys
+  follow. A `rotate_days` over that is a 400 once a certificate's lifetime is known; before the
+  first certificate it's taken as at most that. A link can't set `rotate_days` or `rotate_window`
+  of its own.
+  - Once the new certificate is in, every linked key rotates to it through the managed-link path:
+    a new version, `rotation.succeeded` on the events feed, and syncs pushing it on, a certificate
+    sync to ACM, Key Vault or Cloudflare included ("Getting certificates where TLS terminates"). A key a node didn't
+    reach (it stopped halfway) is rotated on the next pass.
+  - A renewal that fails is `rotation.failed` on every linked key, and health's `rotation_failing`,
+    until one works. The certificate in use keeps working until it ends.
+  - `POST …/public-certs/{id}/renew` (`write`; `secrets_renew_public_cert` over MCP) and a linked
+    key's rotation (`POST …/secrets/{KEY}/rotate`, or the rotation after a leak of its private key)
+    ask for a new certificate now. They answer at once (202, or `warnings` on the key's rotation),
+    and the key changes when the job has the certificate.
+- `PATCH …/public-certs/{id} {name?, domains?, dns_credential?, rotate_days?}` (admin). New domains or a
+  new credential are checked as adding them is, then order a new certificate at once. The CA and the
+  DNS provider never change in place: a new one is another registration. `DELETE` is refused while a
+  key links to it. Its certificates stay valid until they end.
+- **Never answered or logged:** the DNS credential, the EAB key, the account's key and the
+  certificate's private key. The list shows the CA, names, status, serial and dates. The private key
+  reaches people only through a linked key's own reveal routes, and the audit log names the
+  registration, the serial and the end (`public_cert.add`, `.update`, `.renew`, `.issued`,
+  `.failed`, `.delete`).
+- Ordering acts for whoever registered it, as they are now: a registration made by someone who may no
+  longer manage the project stops ordering (`last_error` says so) until an admin registers it again.
+- Checked with Pebble, Let's Encrypt's test CA, and its DNS server, through the edge's own Cloudflare
+  stand-in (`crates/rolld/tests/secrets.rs`, `pnpm test:secrets --docker`). The certificate chains to
+  Pebble's root, a renewal replaces it, and a name the DNS records don't prove fails as
+  `rotation.failed`.
+- Not yet: Route 53 and other DNS providers, and ACME Renewal Information (RFC 9773).
 
 ### SSH certificates
 
@@ -4626,7 +4726,7 @@ they change: GitHub Actions secrets, GitLab CI/CD variables, Azure DevOps variab
 Railway, Heroku, DigitalOcean App Platform, CircleCI, Bitbucket Pipelines, Terraform Cloud, Cloudflare Workers, AWS Parameter Store and Secrets Manager, Google Secret Manager, Azure Key Vault, a Kubernetes Secret, an endpoint
 of the team's own, or a deploy hook that only hears that something changed; also Cloudflare Pages,
 Supabase Edge Functions, Azure App Configuration and a HashiCorp Vault (or OpenBao) KV secret.
-A certificate kind pushes a `pki` key's certificate, private key and chain where TLS terminates
+A certificate kind pushes a `pki` or `public_cert` key's certificate, private key and chain where TLS terminates
 instead: AWS Certificate Manager, an Azure Key Vault certificate or a Cloudflare custom certificate
 ("Getting certificates where TLS terminates").
 Infisical's "secret syncs" are the reference. roll secrets stays the source of truth: a sync never reads from its
@@ -6346,7 +6446,7 @@ isn't in the workspace is 404.
 | `POST /environments/{env}/rollback` | `{to?: seq, at?: ms, message?, bypass?}` | 201 `Applied` |
 | `GET /compare?from=&to=&path=` | | `Compare` |
 | `POST /environments/{env}/promote?from=` | `{path?, keys?, message?}` | 201 `Applied` |
-| `GET /environments/{env}/requests?state=&limit=&before=` | | `Request[]`, newest first (200 at most); with `limit` (1-200) or `before`: `{requests: Request[], next?}`, `next` the next page's `before` while more may follow (`state` filters in SQL, folder reach after it: a page is read again, 10 times at most, until it's full) |
+| `GET /environments/{env}/requests?state=&limit=&before=` | | `Request[]`, newest first (200 at most); with `limit` (1-200) or `before`: `{requests: Request[], next?}`, `next` the next page's `before` while more may follow (`state` filters in SQL, one of `Request.state`'s or a 400, folder reach after it: a page is read again, 10 times at most, until it's full) |
 | `POST /environments/{env}/requests` | `Batch` | 201 `Request` |
 | `GET /environments/{env}/requests/{id}` | | `Request` |
 | `GET /environments/{env}/requests/{id}/values` | | `RequestValue[]` (`reveal`; audited: the value now and the one proposed) |
@@ -6419,6 +6519,11 @@ isn't in the workspace is 404.
 | `POST /saas` | `{name, vendor, target, credential, credential_expires_at?}` (`credential_expires_at`: when the credential ends at the vendor, ms, in the future) | 201 `SaasRotator` (`admin`; never the credential; `credential_expires_at` when given) |
 | `DELETE /saas/{id}` | | 204; 409 while a key links to it or a retired key waits (`admin`) |
 | `PATCH /saas/{id}` | `SaasRotatorChange` | `SaasRotator` (`admin`; a new `credential` is checked with the vendor first, read only, and a refused one is a 400 that changes nothing; a new `credential` makes the caller the registration's `created_by`, so its links act at the replacer's rights from then on, and the audit row names both; a name or date change keeps the maker; never the credential) |
+| `GET /public-certs` | | `PublicCert[]` (`read` on the project; never a credential, the EAB key or the private key) |
+| `POST /public-certs` | `NewPublicCert` | 201 `PublicCert`, `status: "pending"` (`admin`; the DNS credential is checked first, read only: each name's zone; the order is the background job's) |
+| `PATCH /public-certs/{id}` | `PublicCertChange` | `PublicCert` (`admin`; new `domains` or `dns_credential`, checked as adding one checks it, order a new certificate at once; `rotate_days` over the current certificate's lifetime less 14 days is a 400) |
+| `POST /public-certs/{id}/renew` | | 202 `PublicCert` (`write`; ordered in the background, linked keys rotate once it's issued) |
+| `DELETE /public-certs/{id}` | | 204; 409 while a key links to it (`admin`) |
 | `GET /outside-databases` | | `OutsideDatabase[]` (`read` on the project; never the URL) |
 | `POST /outside-databases` | `{name, url, roles?: [a, b], group?, ca?, gateway?}` | 201 `OutsideDatabase` (`admin`; connects and checks the roles first: 400 with the server's reason) |
 | `DELETE /outside-databases/{id}` | | 204; 409 while a key links to it or a retired password waits (`admin`) |
@@ -6576,10 +6681,13 @@ type ProjectFindings = { project: string; project_name: string; findings: Findin
 type Finding = { issue: "decoy_used" | "production_unprotected" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "unplaced" | "operator_made" | "stored_cloud_key" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string; decoy?: Decoy }; // decoy: on decoy_used only (an admin's session's or the operator's), the key's Decoy
 type Rotation = { environment: string; path: string; keys: string[]; kind: string; ref: string; name: string; rotate_days: number | null; rotate_window: string | null; grace_minutes: number; issued_at: number | null; next_due: number | null; last_error: string | null; failed_at: number | null };
 type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
-type SaasRotator = { id: string; name: string; vendor: "sendgrid" | "twilio" | "okta" | "entra" | "auth0" | "gitlab" | "openai" | "datadog" | "cloudflare" | "databricks" | "confluent"; target: Record<string, unknown>; credential_expires_at?: number; created_at: number; created_by: string };
+type SaasRotator = { id: string; name: string; vendor: "sendgrid" | "twilio" | "okta" | "entra" | "auth0" | "gitlab" | "openai" | "datadog" | "cloudflare" | "databricks" | "confluent" | "sonarqube" | "jenkins"; target: Record<string, unknown>; credential_expires_at?: number; created_at: number; created_by: string };
 // PATCH …/saas/{id}: the vendor and target stay. `credential_expires_at`: absent keeps it (a new
 // credential drops the old one's), null clears it, ms in the future sets it.
 type SaasRotatorChange = { name?: string; credential?: string; credential_expires_at?: number | null };
+type PublicCert = { id: string; name: string; directory_url: string; domains: string[]; dns_provider: "cloudflare"; eab_kid?: string; rotate_days?: number; status: "pending" | "issued" | "failing"; serial?: string; not_after?: number; issued_at?: number; renews_at?: number; last_error?: string; failed_at?: number; created_at: number; created_by: string };
+type NewPublicCert = { name: string; directory_url: string; domains: string[]; dns_provider: "cloudflare"; dns_credential: string; eab_kid?: string; eab_hmac_key?: string /* base64url */; rotate_days?: number };
+type PublicCertChange = { name?: string; domains?: string[]; dns_credential?: string; rotate_days?: number | null /* null: the default */ };
 type KubernetesCluster = { id: string; name: string; api_url: string; has_ca: boolean; created_at: number; created_by: string };
 type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
 type NewValueRequest = { keys: string[]; note?: string; ttl_minutes?: number /* 5–43200, default 10080 */; answers?: number /* 1–10, default 1 */ };
@@ -6923,6 +7031,35 @@ The bench's consumer is an in-process one whose maker is the operator; a token o
 adds roll-access's grant lookup or the accounts' and workspace's.
 
 ## Next
+
+**State, 2026-11-25 00:10.** The thirty-seventh review is done. Landed since 06:10:
+- #880 (c6105209a): a value-less set needs an existing key.
+- #886 (4ea3a51d9): `roll secrets mount` gives each reader its own pipe, one copy per open.
+- #898 (410e8dd74): item 5b, certificate syncs to ACM, Key Vault and Cloudflare.
+- #900 (bcd36b606): item 8b, "notify me" by Slack, Discord or email.
+- #923 (db5752ae7): item 5c, publicly trusted certificates through ACME (dns-01 via Cloudflare), on roll apps' edge ACME client, now shared.
+
+The thirty-eighth product review (2026-11-24, cold, read only) found one live bug, low-medium and only under `leaks.rotate = managed`: a caller who could only reveal a managed key could rotate it with no grace, repeatedly, by reporting it `leaked: true`. Landed since, each with main's CI green and most after a check of the merged tree:
+- #909 (47cea7593): items 1 and 3. A reported leak rotates only where the reporter may write, at most once an hour per key, and a leak request whose key was rotated meanwhile applies as "already rotated".
+- #921 (10dfd86c2): items 2 and 9. An intermediate needs a critical `nameConstraints` within its domains (or an explicit, audited `unconstrained: true`), and `DELETE …/syncs/{id}?remove=true` removes a certificate sync's object at its target.
+- #925 (ab2940875): items 4 and 7. Replacing a SaaS credential moves its maker, and `leaks.rotate` is settable from the CLI and Terraform's `roll_secrets_project`.
+- #945 (925f9aa09): item 5. AWS syncs take a project role, and Google and Azure syncs use workload identity federation through roll's issuer (`sub roll-secrets:<project>:sync:<id>`); Health flags stored cloud keys.
+- #956 (f3da93010): item 6, part 1. SonarQube and Jenkins rotation (Jenkins verifies the new token before revoking the old), and an unknown request `state` is a 400.
+- #927 (707b1e657): listing requests filters `state` in SQL and pages with a cursor, from roll MCP's gap review, mapped by their #933.
+
+With other threads:
+- search's #922 seals cluster passwords always (the thirty-sixth's item 12);
+- search's #808 (create sessions held to the person's session in roll-access's evaluator, our search link's owner guard, `rekey_links`) is reviewed and approved here, and in flight there.
+
+In flight:
+- item 8, `roll secrets mount` serving concurrent readers each a whole copy, and saying so when a read fails;
+- item 10, reach and the deletion preview reading only tokens that can name the project.
+
+Left:
+- item 6's other vendors (Salesforce, Paddle, Palo Alto);
+- Health's "public repo with `leaks.rotate` off" (needs a repo-visibility port);
+- Route 53 and other DNS providers for ACME;
+- a dashboard panel and CLI for public certificates.
 
 **State, 2026-11-24 06:10.** The thirty-sixth review is done: #830 (99cb3b05e; Cloudflare, Databricks, Confluent) and #825 (the fresh-project production test) landed.
 

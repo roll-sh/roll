@@ -630,6 +630,16 @@ impl Apps {
         }
     }
 
+    /// `POST`/`DELETE …/deploys/{dep}/pin`: a kept deployment pinned (Heroku's releases kept,
+    /// Vercel's retention exceptions) is never pruned, so its rollback stays instant.
+    pub async fn pin_deployment(self: &Arc<Self>, service: &str, env: &str, dep: &str, on: bool) -> Result<Deployment> {
+        self.deployment(service, env, dep).await?;
+        let id = dep.to_string();
+        self.db(move |s| s.pin_deployment(&id, on)).await?;
+        self.changed(service);
+        self.deployment(service, env, dep).await
+    }
+
     pub async fn deployment(self: &Arc<Self>, service: &str, env: &str, dep: &str) -> Result<Deployment> {
         let id = dep.to_string();
         let mut d = self.db(move |s| s.deployment(&id)).await?;
@@ -1658,8 +1668,9 @@ impl Apps {
             log.line(format!("{} variable(s) only for its instances, left out of the build", runtime_only.len()));
         }
         build_env.extend(cache_vars);
-        // Per deployment (the cache would never hit) or only for the running app.
-        build_env.retain(|(k, _)| k != "ROLL_DEPLOYMENT" && k != "PORT");
+        // Per deployment (the cache would never hit) or only for the running app (its port, its
+        // workers for its instance's size).
+        build_env.retain(|(k, _)| k != "ROLL_DEPLOYMENT" && k != "PORT" && k != "WEB_CONCURRENCY");
         // The commit changes every push: out of the hash and the secrets, or no build would hit
         // the cache. A tree's own Dockerfile still gets it as an `ARG` it declares, which Docker
         // keys its own cache on.

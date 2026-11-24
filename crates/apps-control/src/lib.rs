@@ -3129,8 +3129,12 @@ impl Apps {
     async fn resolve_vars_as(self: &Arc<Self>, svc: &ServiceRow, env: &EnvRow, deployment: &str, read_refs: bool, mint: bool) -> Result<ResolvedVars> {
         let mut vars: BTreeMap<String, (String, &'static str)> = BTreeMap::new();
         let port = svc.run.port.unwrap_or(8080);
+        let run = svc.for_env(env).map_or_else(|_| svc.run.clone(), |s| s.run);
         let roll = [
             ("PORT", port.to_string()),
+            // The app server's workers for its instance's size (Heroku's): gunicorn, uvicorn and
+            // Puma read it; the service's own value wins.
+            ("WEB_CONCURRENCY", run.web_concurrency().to_string()),
             ("ROLL_SERVICE", svc.name.clone()),
             ("ROLL_SERVICE_ID", svc.id.clone()),
             ("ROLL_PROJECT", svc.project.clone()),
@@ -4757,7 +4761,8 @@ impl ResolvedVars {
             .iter()
             // `ROLL_AWAKE_URL` is roll's own on every web service: its arrival isn't a change of
             // the service's to deploy (each deployment gets it).
-            .filter(|(k, _)| !matches!(k.as_str(), "ROLL_DEPLOYMENT" | "ROLL_GIT_COMMIT" | "ROLL_GIT_BRANCH" | "ROLL_AWAKE_URL"))
+            // `WEB_CONCURRENCY` follows `cpu` and `memory_mb`, which are settings a deploy already says.
+            .filter(|(k, _)| !matches!(k.as_str(), "ROLL_DEPLOYMENT" | "ROLL_GIT_COMMIT" | "ROLL_GIT_BRANCH" | "ROLL_AWAKE_URL" | "WEB_CONCURRENCY"))
             // A placeholder is new random text each time it's made: its binding decides.
             .map(|(k, v)| (k.clone(), self.placeholders.get(k).map(|b| format!("placeholder:{b}")).or_else(|| self.ref_texts.get(k).cloned()).unwrap_or_else(|| v.clone())))
             .collect()

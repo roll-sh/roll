@@ -87,6 +87,24 @@ const VENDORS: Record<SaasVendor, { label: string; credential: string; fields: T
       { name: "environment", label: "Environment (optional, with a resource)", placeholder: "env-…", optional: true },
     ],
   },
+  sonarqube: {
+    label: "SonarQube",
+    credential: "User token of the user whose tokens rotate",
+    fields: [
+      { name: "host", label: "SonarQube Server host (optional; none: SonarQube Cloud)", placeholder: "sonarcloud.io", optional: true },
+      { name: "kind", label: "Tokens to rotate", placeholder: "user", options: ["user", "global_analysis", "project_analysis"] },
+      { name: "project", label: "Project key (project analysis tokens)", placeholder: "my-project", optional: true },
+      { name: "expires_days", label: "Expires after days (optional)", placeholder: "90", optional: true, kind: "number" },
+    ],
+  },
+  jenkins: {
+    label: "Jenkins",
+    credential: "API token of the user whose tokens rotate",
+    fields: [
+      { name: "host", label: "Controller host", placeholder: "ci.example.com" },
+      { name: "user", label: "Jenkins user", placeholder: "deploy-bot" },
+    ],
+  },
 };
 
 /** What's shown of a target: its values, never the credential (the API doesn't have it to give). */
@@ -178,7 +196,7 @@ export function SaasRotators() {
       }
     >
       <p className="mb-2 text-[11.5px] text-muted">
-        roll issues keys at SendGrid, Twilio, Okta, Entra, Auth0, GitLab, OpenAI, Datadog, Cloudflare, Databricks or Confluent itself, with a credential you register here, and revokes the old key after the grace period. Auth0 replaces a secret at once, so it has no grace period. Link a key to one from Link a resource. GitLab, Databricks and Entra end their keys by themselves: a link to one rotates at least two weeks before that.
+        roll issues keys at SendGrid, Twilio, Okta, Entra, Auth0, GitLab, OpenAI, Datadog, Cloudflare, Databricks, Confluent, SonarQube or Jenkins itself, with a credential you register here, and revokes the old key after the grace period. Auth0 replaces a secret at once, so it has no grace period. Link a key to one from Link a resource. GitLab, Databricks and Entra end their keys by themselves (SonarQube too, with an expiry): a link to one rotates at least two weeks before that.
       </p>
       <ErrorNote error={error ?? list.error} onDismiss={error ? () => setError(null) : undefined} className="mb-2" />
       {adding && (

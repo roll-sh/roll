@@ -81,6 +81,8 @@ pub struct RequestPage {
 
 /// SQL pages one call reads at most when folder reach hides rows, before it answers `next`.
 const REQUEST_PAGES: usize = 10;
+/// Every state a request is in (`?state=` takes one).
+const STATES: &[&str] = &["open", "approved", "rejected", "applied", "closed", "stale"];
 
 fn parse_cursor(s: &str) -> Result<(i64, String)> {
     s.split_once(':').and_then(|(at, id)| Some((at.parse().ok()?, id.to_string()))).filter(|(_, id)| !id.is_empty()).ok_or_else(|| Error::BadRequest("before is a page's next".into()))
@@ -278,6 +280,12 @@ impl Secrets {
         let limit = limit.unwrap_or(200);
         if !(1..=200).contains(&limit) {
             return Err(Error::BadRequest("limit is 1 to 200".into()));
+        }
+        // A misspelt state would match nothing and look like an empty list.
+        if let Some(s) = state
+            && !STATES.contains(&s)
+        {
+            return Err(Error::BadRequest(format!("state is one of {}", STATES.join(", "))));
         }
         let start = before.map(parse_cursor).transpose()?;
         self.db.read(|c| {
