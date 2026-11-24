@@ -191,7 +191,7 @@ impl Apps {
         }
         let (sid, e, k) = (service.to_string(), env.to_string(), key.map(str::to_string));
         let ours = d.upload.clone().filter(|_| key.is_some());
-        if no_traffic && (svc.run.kind != RunType::Web || svc.run.volume.is_some()) {
+        if no_traffic && (svc.run.kind != RunType::Web || svc.run.one_writer()) {
             return Err(Error::BadRequest("no_traffic is for a web service without a volume (its deployment runs next to the live one)".into()));
         }
         let dep = self.db(move |s| s.create_deployment(&sid, &e, d, "", k.as_deref())).await?;
@@ -459,7 +459,7 @@ impl Apps {
         }
         let (sid, e) = (service.to_string(), env.to_string());
         let (svc, row) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?))).await?;
-        if old.run.kind != RunType::Web || old.run.volume.is_some() {
+        if old.run.kind != RunType::Web || old.run.one_writer() {
             return Err(Error::BadRequest("a view of a deployment is a web service's without a volume (it runs next to the live one)".into()));
         }
         if variables.is_empty() || variables.len() > 50 {
@@ -574,7 +574,7 @@ impl Apps {
     fn deployment_url(&self, svc: &crate::store::ServiceRow, row: &crate::store::EnvRow, d: &Deployment) -> Option<String> {
         // The environment's own run settings (its overrides), as `deployment_template` reads them.
         let run = svc.for_env(row).map_or_else(|_| svc.run.clone(), |s| s.run);
-        let serves = run.public && !run.tcp && !run.udp && d.image.is_some() && d.pruned_at.is_none() && d.status != DeployStatus::Removed && d.run.kind == RunType::Web && d.run.volume.is_none();
+        let serves = run.public && !run.tcp && !run.udp && d.image.is_some() && d.pruned_at.is_none() && d.status != DeployStatus::Removed && d.run.kind == RunType::Web && !d.run.one_writer();
         let waiting = row.approvals > 0 && d.status == DeployStatus::Ready;
         (serves && !waiting).then(|| self.url(&format!("{}--{}", d.id.trim_start_matches("dep_"), row.slug)))
     }
@@ -674,7 +674,7 @@ impl Apps {
             return Ok(false);
         }
         let run = svc.for_env(&row).map(|s| s.run).unwrap_or(svc.run);
-        match run.kind == RunType::Web && run.volume.is_none() {
+        match run.kind == RunType::Web && !run.one_writer() {
             true => Ok(true),
             false => Err(Error::Conflict(format!("{env}'s deploys need {} approval(s) before they go live, and this service's can't wait beside the live one for them", row.approvals))),
         }
@@ -2535,6 +2535,33 @@ impl Apps {
         {
             firing.push(("alert.slo", serde_json::json!({ "indicator": indicator, "burn_rate": (rate * 10.0).round() / 10.0, "window": window, "objective": slo.objective })));
         }
+        // Each route's own objective (its minutes counted by the proxy): its burn judged as the
+        // service's is, firing and clearing on its own.
+        if let Some(slo) = tpl.run.slo.as_ref().filter(|s| !s.routes.is_empty()) {
+            for r in &slo.routes {
+                let label = r.route().label();
+                let (sid, e, lb) = (l.service.clone(), l.env.clone(), label.clone());
+                let rows = self.db(move |s| s.route_minutes(&sid, &e, &lb, now - crate::slo::LONGEST)).await.map(|(m, _)| m).unwrap_or_default();
+                let key = format!("{}/{}/alert.slo:{label}", l.service, l.env);
+                let (sid, e, dep) = (l.service.clone(), l.env.clone(), tpl.deployment.clone());
+                match crate::slo::burning(&r.slo(slo.window_days), &rows, now) {
+                    Some((indicator, rate, window)) => {
+                        if self.looping.lock().insert(key) {
+                            let d = serde_json::json!({ "indicator": indicator, "burn_rate": (rate * 10.0).round() / 10.0, "window": window, "objective": r.objective, "route": r.route, "method": r.method });
+                            l.log.stream(Stream::System).line(format!("alert: alert.slo {d}"));
+                            let _ = self.db(move |s| s.add_event("alert.slo", &sid, &e, Some(&dep), &d)).await;
+                        }
+                    }
+                    None => {
+                        if self.looping.lock().remove(&key) {
+                            let d = serde_json::json!({ "alert": "alert.slo", "route": r.route, "method": r.method });
+                            l.log.stream(Stream::System).line(format!("alert: alert.slo {label} resolved"));
+                            let _ = self.db(move |s| s.add_event("alert.resolved", &sid, &e, Some(&dep), &d)).await;
+                        }
+                    }
+                }
+            }
+        }
         // The app's own gauges: each judgment that finds one past its threshold counts toward its
         // run of minutes; one that doesn't (or finds nothing) starts it again.
         let mut metric_firing: Vec<(String, serde_json::Value)> = Vec::new();
@@ -2574,6 +2601,54 @@ impl Apps {
                         l.log.stream(Stream::System).line(format!("alert: alert.metric {} resolved", m.name));
                     }
                 }
+            }
+        }
+        // A route or a metric taken out of the settings while its alert fired: said to clear once,
+        // so its incident closes (and it can fire again if it comes back).
+        {
+            let prefix = format!("{}/{}/", l.service, l.env);
+            let mut kept: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for r in &a.routes {
+                for kind in ["errors", "latency"] {
+                    kept.insert(format!("{prefix}alert.route:{}:{kind}", r.label()));
+                }
+            }
+            for r in tpl.run.slo.iter().flat_map(|s| &s.routes) {
+                kept.insert(format!("{prefix}alert.slo:{}", r.route().label()));
+            }
+            for m in &a.metrics {
+                kept.insert(format!("{prefix}alert.metric:{}", m.name));
+            }
+            let gone: Vec<String> = self
+                .looping
+                .lock()
+                .iter()
+                .filter(|k| k.strip_prefix(&prefix).is_some_and(|r| r.starts_with("alert.route:") || r.starts_with("alert.slo:") || r.starts_with("alert.metric:")) && !kept.contains(*k))
+                .cloned()
+                .collect();
+            for k in gone {
+                if !self.looping.lock().remove(&k) {
+                    continue;
+                }
+                let rest = &k[prefix.len()..];
+                // `alert.route:<label>:<kind>`, `alert.slo:<label>`, `alert.metric:<name>`; a label is `[METHOD ]<route>`.
+                let route_of = |label: &str| match label.split_once(' ') {
+                    Some((m, r)) if !label.starts_with('/') => (r.to_string(), Some(m.to_string())),
+                    _ => (label.to_string(), None),
+                };
+                let d = if let Some(r) = rest.strip_prefix("alert.route:") {
+                    let (label, kind) = r.rsplit_once(':').unwrap_or((r, ""));
+                    let (route, method) = route_of(label);
+                    serde_json::json!({ "alert": "alert.route", "route": route, "method": method, "kind": kind })
+                } else if let Some(label) = rest.strip_prefix("alert.slo:") {
+                    let (route, method) = route_of(label);
+                    serde_json::json!({ "alert": "alert.slo", "route": route, "method": method })
+                } else {
+                    serde_json::json!({ "alert": "alert.metric", "metric": rest.strip_prefix("alert.metric:").unwrap_or(rest) })
+                };
+                l.log.stream(Stream::System).line(format!("alert: {rest} resolved (no longer set)"));
+                let (sid, e, dep) = (l.service.clone(), l.env.clone(), tpl.deployment.clone());
+                let _ = self.db(move |s| s.add_event("alert.resolved", &sid, &e, Some(&dep), &d)).await;
             }
         }
         for kind in ["alert.memory", "alert.cpu", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "alert.slo", "alert.anomaly"] {
@@ -3688,21 +3763,21 @@ pub(crate) enum Held {
 pub(crate) fn hold_of(svc: &crate::store::ServiceRow, e: &crate::store::EnvRow) -> Held {
     // A freeze holds as a person's hold does, saying why.
     if let Some(f) = e.freeze.as_ref().filter(|f| f.on(code_sql::now_ms())) {
-        return match svc.run.kind == RunType::Web && svc.run.volume.is_none() {
+        return match svc.run.kind == RunType::Web && !svc.run.one_writer() {
             true => Held::Ready,
             false => Held::Skip(format!("{}, and this service's can't wait beside the live one", f.says())),
         };
     }
     // Approvals: what automation builds waits at ready for them.
     if e.approvals > 0 {
-        return match svc.run.kind == RunType::Web && svc.run.volume.is_none() {
+        return match svc.run.kind == RunType::Web && !svc.run.one_writer() {
             true => Held::Ready,
             false => Held::Skip(format!("deploys need {} approval(s), and this service's can't wait beside the live one for them", e.approvals)),
         };
     }
     match e.held_by.as_deref() {
         None => Held::No,
-        Some(MANUAL_HOLD) if svc.run.kind == RunType::Web && svc.run.volume.is_none() => Held::Ready,
+        Some(MANUAL_HOLD) if svc.run.kind == RunType::Web && !svc.run.one_writer() => Held::Ready,
         Some(MANUAL_HOLD) => Held::Skip("deploys are held, and this service's can't wait beside the live one: deploy it by hand".into()),
         Some(r) => Held::Skip(format!("deploys are held after the rollback {r}")),
     }
@@ -3726,7 +3801,7 @@ mod judge_tests {
     #[test]
     fn a_step_that_spends_the_objectives_budget_too_fast_fails() {
         let served = |requests: u64, errors: u64| Served { requests, errors, ..Default::default() };
-        let slo = crate::model::Slo { objective: 99.0, latency_ms: None, window_days: 28 };
+        let slo = crate::model::Slo { objective: 99.0, latency_ms: None, window_days: 28, routes: Vec::new() };
         // 3% of 100 is under the 5% rule, but 3× the 99% objective's budget: past a 2× step.
         assert_eq!(judge(served(100, 3), served(100, 0), 5, None, None), None);
         assert!(judge(served(100, 3), served(100, 0), 5, Some((&slo, 2.0)), None).unwrap().contains("3.0× as fast"));

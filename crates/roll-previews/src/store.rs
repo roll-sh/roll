@@ -88,6 +88,18 @@ CREATE TABLE IF NOT EXISTS shares (
     revoked INTEGER NOT NULL DEFAULT 0,
     opened_day INTEGER
 ) WITHOUT ROWID;
+-- Mail about notes still to send (`Engine::tend_tells`): claimed by `next_at`, dropped once sent.
+CREATE TABLE IF NOT EXISTS note_tells (
+    id TEXT PRIMARY KEY,
+    preview_id TEXT NOT NULL,
+    review_id TEXT NOT NULL,
+    to_handle TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    text TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_at INTEGER NOT NULL,
+    UNIQUE (review_id, to_handle)
+);
 -- The notes guests left through a share link (their reviews on the change).
 CREATE TABLE IF NOT EXISTS guest_notes (
     preview_id TEXT NOT NULL,
@@ -472,6 +484,18 @@ fn hook_row(r: &code_sql::Row<'_>) -> code_sql::Result<Hook> {
 /// How many people [`Store::visitors`] names.
 pub const VISITORS: usize = 8;
 
+/// Mail about a note still to send ([`Store::claim_tells`]).
+#[derive(Clone, Debug)]
+pub struct Tell {
+    pub id: String,
+    pub preview: String,
+    /// Their roll handle.
+    pub to: String,
+    pub subject: String,
+    pub text: String,
+    pub attempts: i64,
+}
+
 /// A live share link, as [`Store::share_live`] finds it.
 #[derive(Clone, Debug)]
 pub struct LiveShare {
@@ -838,6 +862,10 @@ impl Store {
         }
         // Who a share link is for, and whether its visitors may leave notes (as guests).
         // What a page's change against the baseline is (`visual::compare`'s signature).
+        // How a note's crop was taken, when as its reviewer saw it.
+        if !db.has_column("note_crops", "seen")? {
+            db.add_column("note_crops", "seen", "TEXT")?;
+        }
         if !db.has_column("page_shots", "base_sig")? {
             db.add_column("page_shots", "base_sig", "TEXT")?;
         }
@@ -853,7 +881,7 @@ impl Store {
         if !db.has_column("previews", "seed_needed")? {
             db.add_column("previews", "seed_needed", "INTEGER NOT NULL DEFAULT 1")?;
         }
-        for (col, ty) in [("tried", "TEXT"), ("prev_head", "TEXT"), ("prev_png", "TEXT"), ("change_bp", "INTEGER"), ("speed", "TEXT"), ("prev_speed", "TEXT"), ("health", "TEXT"), ("phone_png", "TEXT"), ("prev_phone_png", "TEXT"), ("phone_change_bp", "INTEGER"), ("a11y", "TEXT"), ("base_preview", "TEXT"), ("base_branch", "TEXT"), ("base_change_bp", "INTEGER"), ("base_phone_bp", "INTEGER"), ("base_head", "TEXT"), ("base_speed", "TEXT"), ("base_a11y", "TEXT"), ("base_health", "TEXT"), ("text", "TEXT"), ("base_text", "TEXT"), ("links", "TEXT"), ("base_links", "TEXT"), ("api", "TEXT"), ("base_api", "TEXT"), ("base_api_breaking", "TEXT"), ("base_api_unread", "INTEGER")] {
+        for (col, ty) in [("tried", "TEXT"), ("prev_head", "TEXT"), ("prev_png", "TEXT"), ("change_bp", "INTEGER"), ("speed", "TEXT"), ("prev_speed", "TEXT"), ("health", "TEXT"), ("phone_png", "TEXT"), ("prev_phone_png", "TEXT"), ("phone_change_bp", "INTEGER"), ("a11y", "TEXT"), ("base_preview", "TEXT"), ("base_branch", "TEXT"), ("base_change_bp", "INTEGER"), ("base_phone_bp", "INTEGER"), ("base_head", "TEXT"), ("base_speed", "TEXT"), ("base_a11y", "TEXT"), ("base_health", "TEXT"), ("text", "TEXT"), ("base_text", "TEXT"), ("links", "TEXT"), ("base_links", "TEXT"), ("api", "TEXT"), ("base_api", "TEXT"), ("base_api_breaking", "TEXT"), ("base_api_unread", "INTEGER"), ("base_sig", "TEXT")] {
             if !db.has_column("screenshots", col)? {
                 db.add_column("screenshots", col, ty)?;
             }
@@ -1387,7 +1415,7 @@ impl Store {
             if let Some((project, change, head)) = gone {
                 emit(c, now, "deleted", &project, id, change.as_deref(), &serde_json::json!({ "head": head }))?;
             }
-            for t in ["resources", "services", "pinned", "pinned_data", "restore_points", "shares", "guest_notes", "visit_tickets", "visit_sessions", "visits", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "runtime_facts", "gone_pushes", "previews"] {
+            for t in ["resources", "services", "pinned", "pinned_data", "restore_points", "shares", "guest_notes", "note_tells", "visit_tickets", "visit_sessions", "visits", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "runtime_facts", "gone_pushes", "previews"] {
                 let col = if t == "previews" { "id" } else { "preview_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
             }
@@ -1961,13 +1989,17 @@ impl Store {
             let (a, b) = (b64e.decode(a?).ok()?, b64e.decode(b?).ok()?);
             crate::visual::changed(&b, &a).map(|f| (f * 10_000.0).round() as i64)
         };
-        let (change, phone) = (bp(Some(&ours.png), Some(&theirs.png)), bp(ours.phone.as_ref(), theirs.phone.as_ref()));
-        // The other pages, each against the baseline's page at the same path, with what the
-        // change is (pages changed the same way are grouped for review).
+        // Each page against the baseline's at the same path, with what the change is (pages
+        // changed the same way are grouped for review); the first page too, at desktop width.
         let compared = |a: &String, b: Option<&String>| -> Option<(i64, Option<String>)> {
             let (a, b) = (b64e.decode(a).ok()?, b64e.decode(b?).ok()?);
             crate::visual::compare(&b, &a).map(|(f, sig)| ((f * 10_000.0).round() as i64, sig))
         };
+        let (change, first_sig) = match compared(&ours.png, Some(&theirs.png)) {
+            Some((bp, sig)) => (Some(bp), sig),
+            None => (None, None),
+        };
+        let phone = bp(ours.phone.as_ref(), theirs.phone.as_ref());
         let page_bps: Vec<(String, Option<i64>, Option<String>)> = ours
             .pages
             .iter()
@@ -1998,8 +2030,8 @@ impl Store {
         self.db.write(|c| {
             c.execute(
                 "UPDATE screenshots SET base_preview = ?, base_branch = ?, base_change_bp = ?, base_phone_bp = ?, base_head = ?, base_speed = ?, base_a11y = ?, base_health = ?, base_text = ?, \
-                 base_links = ?, base_api = ?, base_api_breaking = ?, base_api_unread = ? WHERE preview_id = ?",
-                params![base, branch, change, phone, theirs.head, theirs.speed, theirs.a11y, theirs.health, text, theirs.links, api, api_breaking, api_unread, id],
+                 base_links = ?, base_api = ?, base_api_breaking = ?, base_api_unread = ?, base_sig = ? WHERE preview_id = ?",
+                params![base, branch, change, phone, theirs.head, theirs.speed, theirs.a11y, theirs.health, text, theirs.links, api, api_breaking, api_unread, first_sig, id],
             )?;
             for (path, bp, sig) in &page_bps {
                 c.execute("UPDATE page_shots SET base_bp = ?, base_sig = ? WHERE preview_id = ? AND path = ?", params![bp, sig, id, path])?;
@@ -2184,7 +2216,11 @@ impl Store {
                     if g.len() != 12 || !g.bytes().all(|b| b.is_ascii_hexdigit()) {
                         return Err(Error::BadRequest("a group is 12 hex characters (visual_review.pages[].group)".into()));
                     }
-                    let these: Vec<String> = c.query("SELECT path FROM page_shots WHERE preview_id = ? AND base_sig = ?", params![id, g], |r| r.get(0))?;
+                    let mut these: Vec<String> = c.query("SELECT path FROM page_shots WHERE preview_id = ? AND base_sig = ?", params![id, g], |r| r.get(0))?;
+                    let first: Option<String> = c.query_row("SELECT base_sig FROM screenshots WHERE preview_id = ?", [id], |r| r.get(0)).optional()?.flatten();
+                    if first.as_deref() == Some(g) {
+                        these.insert(0, String::new());
+                    }
                     if these.is_empty() {
                         return Err(Error::NotFound(format!("no pages changed as group {g}")));
                     }
@@ -2244,6 +2280,9 @@ impl Store {
         let accepts: Vec<(String, String, String, i64)> = self.db.read(|c| c.query("SELECT path, head, by, at FROM visual_page_accepts WHERE preview_id = ?", [&r.id], |x| Ok((x.get(0)?, x.get(1)?, x.get(2)?, x.get(3)?))))?;
         let accepted = |path: &str| accepts.iter().find(|(p, h, _, _)| p == path && shot.as_deref() == Some(h.as_str())).map(|(_, _, by, at)| (by.clone(), *at));
         let first = base.percent.max(base.phone_percent.unwrap_or(0.0));
+        // What each changed page's change is: the first page's from its row, the others' checks.
+        let first_sig: Option<String> = self.db.read(|c| c.query_row("SELECT base_sig FROM screenshots WHERE preview_id = ?", [&r.id], |x| x.get(0)).optional())?.flatten();
+        let sig_of = |path: &str| if path.is_empty() { first_sig.clone() } else { pages.iter().find(|p| p.path == path).and_then(|p| p.base_group.clone()) };
         let changed: Vec<(String, f64)> =
             std::iter::once((String::new(), first)).chain(pages.iter().filter_map(|p| Some((p.path.clone(), p.base_percent?)))).filter(|(_, pct)| *pct > threshold).collect();
         let reviews: Vec<crate::PageReview> = changed
@@ -2252,8 +2291,7 @@ impl Store {
                 let a = accepted(path);
                 let unstable = if path.is_empty() { first_unstable } else { pages.iter().any(|p| p.path == *path && p.unstable) };
                 // Its group, when another page under review shares it.
-                let sig = pages.iter().find(|p| p.path == *path).and_then(|p| p.base_group.clone());
-                let group = sig.filter(|g| changed.iter().filter(|(q, _)| pages.iter().any(|p| p.path == *q && p.base_group.as_ref() == Some(g))).count() > 1);
+                let group = sig_of(path).filter(|g| changed.iter().filter(|(q, _)| sig_of(q).as_ref() == Some(g)).count() > 1);
                 crate::PageReview { path: path.clone(), percent: *percent, by: a.as_ref().map(|(by, _)| by.clone()), at: a.map(|(_, at)| at), unstable, group }
             })
             .collect();
@@ -2920,7 +2958,7 @@ impl Store {
 
     /// Keep a note's crop (a PNG of at most [`CROP_MAX`] bytes; a bigger one is dropped), at
     /// most [`CROPS_KEPT`] a preview (the oldest go).
-    pub fn set_note_crop(&self, id: &str, note: &str, png: &[u8]) -> Result<()> {
+    pub fn set_note_crop(&self, id: &str, note: &str, png: &[u8], seen: Option<&str>) -> Result<()> {
         if png.len() > CROP_MAX || !png.starts_with(b"\x89PNG") {
             return Ok(());
         }
@@ -2929,8 +2967,8 @@ impl Store {
         let b64 = base64::engine::general_purpose::STANDARD.encode(png);
         self.db.write(|c| {
             c.execute(
-                "INSERT INTO note_crops (preview_id, note_id, png, at) VALUES (?, ?, ?, ?) ON CONFLICT (preview_id, note_id) DO UPDATE SET png = excluded.png, at = excluded.at",
-                params![id, note, b64, now],
+                "INSERT INTO note_crops (preview_id, note_id, png, at, seen) VALUES (?, ?, ?, ?, ?) ON CONFLICT (preview_id, note_id) DO UPDATE SET png = excluded.png, at = excluded.at, seen = excluded.seen",
+                params![id, note, b64, now, seen],
             )?;
             c.execute(
                 "DELETE FROM note_crops WHERE preview_id = ? AND note_id NOT IN (SELECT note_id FROM note_crops WHERE preview_id = ? ORDER BY at DESC, note_id LIMIT ?)",
@@ -2940,15 +2978,16 @@ impl Store {
         })
     }
 
-    /// The notes of `id` that have a crop.
-    pub fn cropped_notes(&self, id: &str) -> Result<std::collections::HashSet<String>> {
-        Ok(self.db.read(|c| c.query("SELECT note_id FROM note_crops WHERE preview_id = ?", [id], |r| r.get(0)))?.into_iter().collect())
+    /// The notes of `id` that have a crop, with how each was taken when as its reviewer saw it.
+    pub fn cropped_notes(&self, id: &str) -> Result<std::collections::HashMap<String, Option<String>>> {
+        Ok(self.db.read(|c| c.query("SELECT note_id, seen FROM note_crops WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?))))?.into_iter().collect())
     }
 
-    pub fn note_crop(&self, id: &str, note: &str) -> Result<Option<Vec<u8>>> {
+    /// A note's crop, and how it was taken when as its reviewer saw it.
+    pub fn note_crop(&self, id: &str, note: &str) -> Result<Option<(Vec<u8>, Option<String>)>> {
         use base64::Engine as _;
-        let row: Option<String> = self.db.read(|c| c.query_row("SELECT png FROM note_crops WHERE preview_id = ? AND note_id = ?", [id, note], |r| r.get(0)).optional())?;
-        Ok(row.and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok()))
+        let row: Option<(String, Option<String>)> = self.db.read(|c| c.query_row("SELECT png, seen FROM note_crops WHERE preview_id = ? AND note_id = ?", [id, note], |r| Ok((r.get(0)?, r.get(1)?))).optional())?;
+        Ok(row.and_then(|(b64, seen)| base64::engine::general_purpose::STANDARD.decode(b64).ok().map(|png| (png, seen))))
     }
 
     // ── git_pulls: the pull request a Git URL service's preview is of (roll apps' `GitPull`) ──
@@ -3174,6 +3213,50 @@ impl Store {
             )
             .optional()
         })?)
+    }
+
+    /// Mail to send about review `review` (once per review and person).
+    pub fn add_tell(&self, id: &str, review: &str, to: &str, subject: &str, text: &str) -> Result<()> {
+        let now = self.now_ms()?;
+        self.db.write(|c| {
+            c.execute(
+                "INSERT INTO note_tells (id, preview_id, review_id, to_handle, subject, text, next_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                params![format!("tel_{}", &new_token()[..12]), id, review, to, subject, text, now],
+            )
+            .map(drop)
+        })?;
+        Ok(())
+    }
+
+    /// Up to `n` tells that are due, each claimed for `hold` ms (another node doesn't send it
+    /// meanwhile).
+    pub fn claim_tells(&self, n: usize, hold: i64) -> Result<Vec<Tell>> {
+        let now = self.now_ms()?;
+        self.db.write(|c| {
+            let due: Vec<Tell> = c.query(
+                "SELECT id, preview_id, to_handle, subject, text, attempts FROM note_tells WHERE next_at <= ? ORDER BY next_at LIMIT ?",
+                params![now, n as i64],
+                |r| Ok(Tell { id: r.get(0)?, preview: r.get(1)?, to: r.get(2)?, subject: r.get(3)?, text: r.get(4)?, attempts: r.get(5)? }),
+            )?;
+            for d in &due {
+                c.execute("UPDATE note_tells SET next_at = ? WHERE id = ?", params![now + hold, d.id])?;
+            }
+            Ok::<_, Error>(due)
+        })
+    }
+
+    /// The mail about a preview's notes still to send: `(to, attempts)`.
+    pub fn pending_tells(&self, id: &str) -> Result<Vec<(String, i64)>> {
+        Ok(self.db.read(|c| c.query("SELECT to_handle, attempts FROM note_tells WHERE preview_id = ? ORDER BY to_handle", [id], |r| Ok((r.get(0)?, r.get(1)?))))?)
+    }
+
+    /// A tell sent (or nobody to tell): gone. Not sent: tried again at `next_at`, or given up.
+    pub fn tell_done(&self, id: &str, retry_at: Option<i64>) -> Result<()> {
+        self.db.write(|c| match retry_at {
+            None => c.execute("DELETE FROM note_tells WHERE id = ?", [id]).map(drop),
+            Some(at) => c.execute("UPDATE note_tells SET attempts = attempts + 1, next_at = ? WHERE id = ?", params![at, id]).map(drop),
+        })?;
+        Ok(())
     }
 
     /// How many notes guests left through share link `share` since `since`.

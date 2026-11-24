@@ -67,6 +67,8 @@ pub struct AppConfig {
     pub watch: Option<Vec<String>>,
     /// A single-page app.
     pub spa: Option<bool>,
+    /// A static build's output directory.
+    pub output: Option<String>,
     /// System packages the generated Dockerfile installs (`["ffmpeg"]`).
     pub packages: Option<Vec<String>>,
     /// Run settings ([`RUN_KEYS`], as the API's `run`).
@@ -318,6 +320,7 @@ mod tests {
             health_path: s.clone(),
             watch: Some(vec![]),
             spa: Some(true),
+            output: s.clone(),
             packages: Some(vec![]),
             run: Some(toml::Table::new()),
             headers: Some(vec![]),

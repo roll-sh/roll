@@ -54,9 +54,14 @@ pub fn missing(def: &Value, args: &Value) -> Option<(String, Source)> {
 }
 
 /// The first argument a tool requires that `args` lacks and that has a fixed set of values (its
-/// schema's `enum`: a role, a rollout's action): the person picks one as they pick an id.
+/// schema's `enum`: a role, a rollout's action): the person picks one as they pick an id. Only
+/// once nothing else it requires is missing, so the retry the choice makes can run.
 pub fn missing_choice(def: &Value, args: &Value) -> Option<(String, Vec<String>)> {
-    def["inputSchema"]["required"].as_array()?.iter().filter_map(Value::as_str).find_map(|p| {
+    let required = def["inputSchema"]["required"].as_array()?.iter().filter_map(Value::as_str);
+    if required.clone().any(|p| blank(args, p) && def["inputSchema"]["properties"][p]["enum"].is_null()) {
+        return None;
+    }
+    required.into_iter().find_map(|p| {
         let values = def["inputSchema"]["properties"][p]["enum"].as_array().filter(|_| blank(args, p))?;
         Some((p.to_string(), values.iter().filter_map(Value::as_str).map(str::to_string).collect()))
     })
@@ -154,7 +159,9 @@ mod tests {
         // A required argument with a fixed set offers the set; one that's given offers nothing.
         let choice = missing_choice(def("apps_rollout"), &json!({ "service": "svc_1", "env": "production", "deploy": "dpl_1" }));
         assert_eq!(choice, Some(("action".into(), vec!["advance".into(), "all".into(), "abort".into()])));
-        assert!(missing_choice(def("apps_rollout"), &json!({ "action": "all" })).is_none());
+        assert!(missing_choice(def("apps_rollout"), &json!({ "service": "svc_1", "action": "all" })).is_none());
+        // Not while an id it needs is missing too: the retry would fail on that.
+        assert!(missing_choice(def("apps_rollout"), &json!({ "service": "svc_1" })).is_none());
         assert!(missing_choice(def("apps_list_services"), &json!({})).is_none());
     }
 }

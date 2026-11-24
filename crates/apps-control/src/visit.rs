@@ -132,8 +132,47 @@ impl Apps {
         let (user, login) = self.db(move |s| s.take_visit_ticket(&hash, &sid, &e, now, &b)).await.ok()??;
         let token = format!("rls_{}", crate::model::random(32));
         let (hash, sid, e) = (crate::public::token_hash(&token), service.to_string(), env.to_string());
+        let (who, how, _) = described(&user, &login);
         self.db(move |s| s.put_visit_session(&hash, &sid, &e, &user, &login, now + SESSION_S * 1000)).await.ok()?;
+        let (sid, e) = (service.to_string(), env.to_string());
+        let _ = self.db(move |s| s.add_event("visit.admitted", &sid, &e, None, &serde_json::json!({ "who": who, "how": how }))).await;
         Some(token)
+    }
+
+    /// `GET …/environments/{env}/visitors`: who's signed in to it now (Cloudflare Access's
+    /// sessions), newest first: `[{id, who, how, entry?, since, until}]`, `who` a provider's
+    /// verified email or a roll person's id, `how` `github`, `google`, `sso` or `roll`.
+    pub async fn visitors(self: &Arc<Self>, service: &str, env: &str) -> Result<serde_json::Value> {
+        self.service_env(service, env).await?;
+        let (sid, e, now) = (service.to_string(), env.to_string(), code_sql::now_ms());
+        let rows = self.db(move |s| s.visit_sessions(&sid, &e, now)).await?;
+        Ok(serde_json::Value::Array(
+            rows.into_iter()
+                .map(|(hash, user, login, since, until)| {
+                    let (who, how, entry) = described(&user, login.as_deref().unwrap_or(""));
+                    serde_json::json!({ "id": &hash[..16.min(hash.len())], "who": who, "how": how, "entry": entry, "since": since, "until": until })
+                })
+                .collect(),
+        ))
+    }
+
+    /// `DELETE …/environments/{env}/visitors/{id}`: that session ends now (on the owner, where
+    /// every request of the environment's is checked).
+    pub async fn sign_out_visitor(self: &Arc<Self>, service: &str, env: &str, id: &str) -> Result<()> {
+        self.service_env(service, env).await?;
+        if id.len() != 16 || !id.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) {
+            return Err(Error::NotFound(format!("no visitor session {id}")));
+        }
+        let (sid, e, i) = (service.to_string(), env.to_string(), id.to_string());
+        let gone = self.db(move |s| s.end_visit_session(&sid, &e, &i)).await?;
+        if gone.is_empty() {
+            return Err(Error::NotFound(format!("no visitor session {id}")));
+        }
+        let mut cache = self.visits.lock();
+        for h in &gone {
+            cache.remove(h);
+        }
+        Ok(())
     }
 
     /// Whether `user` may (still) open `service`'s project: yes where nothing says (no
@@ -176,6 +215,26 @@ impl Apps {
     /// A visitor a provider vouched for, coming back with the request [`Apps::sso_start`] signed:
     /// the URL that opens their session on the environment's host (a one-use ticket, as a roll
     /// sign-in's), or why not, in words for them.
+    /// Whether the provider that signed `user` in (`sso:<provider>:<subject>`) still vouches for
+    /// `email`: for an organisation's own (`sso:sso:<connection>:<sub>`), its connection still
+    /// there and answering for the email's domain; GitHub and Google aren't asked.
+    fn still_vouched(&self, user: &str, email: &str) -> bool {
+        match user.strip_prefix("sso:sso:").and_then(|r| r.split_once(':')) {
+            Some((connection, _)) => self.visitor_sign_in.get().is_some_and(|s| s.vouches(connection, email)),
+            None => true,
+        }
+    }
+
+    /// Whether `request` is one [`Apps::sso_start`] signed and still good: what a public visit
+    /// start checks before it costs anything.
+    pub async fn visit_request_ok(self: &Arc<Self>, request: &str) -> bool {
+        let Some((body, mac)) = request.split_once('.') else { return false };
+        let Some(text) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(body).ok().and_then(|b| String::from_utf8(b).ok()) else { return false };
+        let parts: Vec<&str> = text.split('\n').collect();
+        let Ok(key) = self.sso_key().await else { return false };
+        parts.len() == 6 && crate::public::same(&crate::challenge::mac(&key, &parts), mac) && parts[2].parse::<i64>().is_ok_and(|u| u >= code_sql::now_ms())
+    }
+
     pub async fn admit_visitor(self: &Arc<Self>, request: &str, who: &crate::integrations::SsoVisitor) -> std::result::Result<String, String> {
         let broken = || "This sign-in link isn't one. Open the page again.".to_string();
         let (body, mac) = request.split_once('.').ok_or_else(broken)?;
@@ -195,7 +254,25 @@ impl Apps {
         if sso.provider != who.provider {
             return Err(broken());
         }
-        let Some(entry) = sso.admits(&who.email, &who.orgs, who.hosted_domain.as_deref()).map(str::to_string) else {
+        let Some(entry) = sso.admits(&who.email, &who.orgs, who.hosted_domain.as_deref(), &who.groups).map(str::to_string) else {
+            // In its log (who tried, never a token), once in ten minutes a person.
+            let now = code_sql::now_ms();
+            let fresh = {
+                let mut seen = self.visit_denials.lock();
+                if seen.len() >= 10_000 {
+                    seen.retain(|_, t| now - *t < 600_000);
+                }
+                let key = format!("{service}/{env}/{}", who.email);
+                let fresh = seen.get(&key).is_none_or(|t| now - t >= 600_000);
+                if fresh {
+                    seen.insert(key, now);
+                }
+                fresh
+            };
+            if fresh {
+                let (sid, e, d) = (service.to_string(), env.to_string(), serde_json::json!({ "who": who.email, "how": who.provider }));
+                let _ = self.db(move |s| s.add_event("visit.denied", &sid, &e, None, &d)).await;
+            }
             return Err(format!("{} isn't let in to this site. Sign in with an account it allows, or ask its owner.", who.email));
         };
         // The person by the provider's own id; what let them in, to check again while it lasts.
@@ -318,9 +395,12 @@ impl Apps {
         // Their account went, they may no longer open the project, or the roll login that let
         // them in ended (they signed out, or revoked it): the session ends now. A visitor a
         // provider signed in: while what let them in is still in the environment's `sso.allow`.
-        let sso = login.as_deref().and_then(|l| l.strip_prefix("sso:")).map(|r| r.split_once(' ').unwrap_or((r, "")));
+        // `sso:<entry> <email>`: a group's entry can hold spaces, an email can't.
+        let sso = login.as_deref().and_then(|l| l.strip_prefix("sso:")).map(|r| r.rsplit_once(' ').unwrap_or((r, "")));
         let still = match sso {
-            Some((entry, _)) => self.access(service, env).await.ok().flatten().and_then(|a| a.sso).is_some_and(|s| s.allow.iter().any(|a| a == entry)),
+            // And the provider still vouches for them: an organisation's SSO connection removed,
+            // or its domain no longer its, ends its visitors' sessions too.
+            Some((entry, email)) => self.access(service, env).await.ok().flatten().and_then(|a| a.sso).is_some_and(|s| s.allow.iter().any(|a| a == entry)) && self.still_vouched(&user, email),
             None => self.may_open(service, &user).await && self.login_live(&user, login.as_deref()).await,
         };
         if !still {
@@ -335,6 +415,19 @@ impl Apps {
         let shown = sso.map(|(_, email)| email.to_string()).filter(|e| !e.is_empty()).unwrap_or_else(|| user.clone());
         cache.insert(hash, Seen { env: key, until, generation, checked: now, user: user.clone(), shown: shown.clone() });
         Some((user, shown))
+    }
+}
+
+
+/// Who a session is (`user`, the `login` that let them in): what's shown, how they signed in,
+/// and the `access.sso` entry that let a provider's visitor in.
+fn described(user: &str, login: &str) -> (String, String, Option<String>) {
+    match login.strip_prefix("sso:").and_then(|r| r.rsplit_once(' ')) {
+        Some((entry, email)) => {
+            let how = user.strip_prefix("sso:").and_then(|r| r.split(':').next()).unwrap_or("sso");
+            (email.to_string(), how.to_string(), Some(entry.to_string()))
+        }
+        None => (user.to_string(), "roll".to_string(), None),
     }
 }
 

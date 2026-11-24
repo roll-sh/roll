@@ -1238,7 +1238,7 @@ deterministic (#396).
 1. **Search from the browser** (landed in #358 after six reviews, its policy enforced in the
    engine on the parsed request: per-cluster CORS, browser keys with rate limits and their own body
    cap, a Browser search section and the site-search guide's browser page; what remains: RAG's
-   chat limits for browser keys (item 11); keys derived without a call to roll (Algolia's
+   chat limits for browser keys (item 11); keys derived without a call to roll (in progress; Algolia's
    `generateSecuredApiKey`, Typesense's `generateScopedSearchKey`, Meilisearch's tenant tokens: a
    SaaS signs a short-lived key per end customer from one parent key, where today it's 20 browser
    keys a cluster and one control-plane call each); browser search on previews (a branch keeps the
@@ -1268,13 +1268,16 @@ deterministic (#396).
    (AWS OpenSearch Migration Assistant's capture and replay): a copy is one point in time today, so
    writes made during the copy are lost unless the client double-writes. Offline, with no route
    to the old cluster: its snapshots restore on roll from the bucket they're in (item 9, #652).
+   In progress (`feature/search-import-saas`): Algolia, Typesense and Meilisearch as migration
+   sources (records, settings mapped where they map, synonyms onto synonyms sets, rules and
+   curations onto query rules, everything that doesn't map listed with its reason).
 3. **One memory account per request** (landed: Painless per execution in #591, af195cbbe, after
    four reviews: each execution holds at most `--search-script-memory-mb`, and once-per-document
    scripts charge the `request` breaker; the node-wide body budget in #601; ES|QL and aggregations
    in #549, ab50f8507, after five reviews: pages, groups, remote states and kept results charged to
    the request breaker as built, under a node budget no tenant setting can raise
-   (`--search-request-memory-max`). In progress: both PRs' review follow-ups
-   (`fix/search-painless-memory-2`, `fix/search-esql-breaker-2`); Elasticsearch charges every request's
+   (`--search-request-memory-max`); both PRs' review follow-ups landed in #824 and #795 (and #894,
+   a failing sort script stops at its first failure). Elasticsearch charges every request's
    memory to its circuit breakers, ES|QL's blocks included, and Elastic Cloud's per-deployment
    limits hold because of it). roll serves many tenants per node, so a request whose memory the
    breakers don't see is a way for one tenant to stop everyone's searches. Today's reviews found
@@ -1285,11 +1288,12 @@ deterministic (#396).
    page of rows charged to the request breaker as it is built and released when dropped,
    `circuit_breaking_exception` past the limit, and a node-level limit no tenant setting can
    raise. Time has its own cap (#530, landed: one limit per request, by-query scans and internal pagers included). Rule: charge what a structure costs as it is
-   built, never a multiple of the bytes it came from. Also left: `_bulk`'s own preparation (`bulk_ahead`
-   parses each source into a tree) is charged only as the body's `inflight_requests`, for
-   clients' bulks and connector syncs' alike (#318's pages are text until then). The
-   remote-reindex budget (`roll.reindex.remote.memory`) is a child of #549's node budget; connector
-   pages should become one too, so a node has one memory account for its background egress.
+   built, never a multiple of the bytes it came from. `_bulk`'s documents prepared ahead
+   (`bulk_ahead`) are charged to the `request` breaker while held since #937: when there's no
+   room, preparing ahead stops rather than the request, and no trip is counted. Connector pages
+   are held on the cluster's `request` breaker (a child of the node's budget), as remote reindex's
+   budget is a child of it, so every background copy is in the node's one account. What's left
+   is the sweep of item 4: any structure a review finds built outside a breaker.
 4. **A sweep for the bug classes the 2026-11-19 reviews kept finding** (first pass landed in #434, the follow-up in #492; what
    today's reviews still find is resource accounting, item 3). Four
    independent security reviews (connectors #318, cross-cluster search #347 and its gaps #389,
@@ -1430,7 +1434,10 @@ deterministic (#396).
    the restore: segments Lucene 8 wrote (Elasticsearch 7.x indices never merged since), data streams themselves (their backing indices restore), `sparse_vector`
    and `rank_vectors` values and nested dense vectors that Elasticsearch 9 left out of `_source`,
    `_status` file counts from the shard snapshots, and resuming after a takeover from the shard
-   reached rather than from the start of each index.
+   reached rather than from the start of each index. In progress (`fix/search-snapshot-followups`):
+   a snapshot DELETE waits for running snapshots that build on it, as Elasticsearch does, a cap on
+   repository generations, and unreferenced chunks of failed snapshots removed by the next
+   snapshot of their shard.
 10. **Relevance tuning by MCP and Terraform**: `/v1/search` serves synonyms sets, query rulesets
    (and `_test`), writing an index's settings and `_explain` (the routes table), and `roll search`
    has `synonyms`, `rules`, `indices settings` and `explain` and makes `read` and `append` keys on
@@ -1468,13 +1475,16 @@ deterministic (#396).
    outages, expired logins and maintenance redirects can't empty (it's skipped when most documents
    weren't refreshed); the limits with node ceilings; unverified-domain limits per owner and site
    on a node; and `roll search crawler import` for an
-   Open Crawler YAML file. Left: domain verification (phase 2: higher limits, the
-   `/v1/search/site-verifications` routes), the `crawl-test` route, its MCP tool and CLI, and the
-   dashboard's URL box and "crawl a site" empty state; then extraction rules (CSS selectors on the
+   Open Crawler YAML file. In review: phase 2 (#888, round 3 plus a merge of main: site
+   verification per cluster, a DNS TXT record proving a domain and a well-known file proving one
+   origin, with the owner's token shared across their clusters; `crawl-test` with a 75 s deadline,
+   its MCP tool and CLI; the dashboard's URL box and "crawl a site" empty state; the fleet's own
+   names as blocked hosts). After it: a verification token derived from the owner and the site
+   (HMAC), so a published record keeps working after its last row goes; then extraction rules (CSS selectors on the
    arena DOM), incremental crawls with `If-Modified-Since`, and the docs preset (phase 3).
    Charset detection beyond UTF-8, fetching several origins at once, per-site politeness by
    address rather than name, fleet-wide per-owner limits, and seeding `roll.crawler.blocked_hosts`
-   with the fleet's own names are open too.
+   are open too.
 14. **Semantic search on OpenSearch-flavor clusters** (design in
    [opensearch-neural.md](opensearch-neural.md); AWS OpenSearch neural search):
    `neural`, `neural_sparse` and `agentic` are names only (`meta/aliases.rs`); ML Commons
@@ -1711,7 +1721,9 @@ deterministic (#396).
    the cluster's `owner`), so a member of a project whose canvas holds a cluster gets nothing from
    `/v1/search` or the dashboard's Search pages, and `remotes::may_link` compares owners; clusters
    on a project should follow the member's role through `Workspace::trusts`, as secrets and apps
-   do. A member already gets trust in a cluster through its project home (search is one of
+   do. In review: #808 (round 7 plus a merge of main: a member's role in a cluster's project,
+   hand-overs recorded durably, a home moved only by its cluster's owner, roll secrets links never
+   rekeyed to a cluster that took a freed name later). A member already gets trust in a cluster through its project home (search is one of
    roll-workspace's home kinds, and a cluster made through a project gets that project as its home),
    so roll secrets' links work for members; search's own API is what's left.
 27. **Fleet takeover after a SIGKILL**: the fleet test's longest search stall (11.1 s at a

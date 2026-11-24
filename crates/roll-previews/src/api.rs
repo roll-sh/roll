@@ -522,8 +522,13 @@ async fn notes(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<serd
 async fn note_crop(AxState(e): S, Path((id, note)): Path<(String, String)>) -> crate::Result<Response> {
     check_id(&id)?;
     e.store.row(&id)?;
-    let png = e.store.note_crop(&id, &note)?.ok_or_else(|| Error::NotFound("no picture of that note's element yet".into()))?;
-    Ok(([(axum::http::header::CONTENT_TYPE, "image/png"), (axum::http::header::CACHE_CONTROL, "private, max-age=3600")], png).into_response())
+    let (png, seen) = e.store.note_crop(&id, &note)?.ok_or_else(|| Error::NotFound("no picture of that note's element yet".into()))?;
+    let mut resp = ([(axum::http::header::CONTENT_TYPE, "image/png"), (axum::http::header::CACHE_CONTROL, "private, max-age=3600")], png).into_response();
+    // Taken as its reviewer saw it: how (`390x844, after 2 steps`).
+    if let Some(v) = seen.and_then(|s| axum::http::HeaderValue::from_str(&s).ok()) {
+        resp.headers_mut().insert(axum::http::HeaderName::from_static("x-roll-crop-as"), v);
+    }
+    Ok(resp)
 }
 
 /// Resolve a note left on the preview's page (its review's id): the page stops listing it.
@@ -678,7 +683,7 @@ async fn screenshot_link(AxState(e): S, Path(id): Path<String>, Query(q): Query<
             return Ok(None);
         }
         if let Some(n) = &note {
-            return e.store.note_crop(&id, n);
+            return Ok(e.store.note_crop(&id, n)?.map(|(png, _)| png));
         }
         if variant.is_none() {
             return Ok(e.store.screenshot(&id)?.map(|(_, png)| png));
