@@ -6155,6 +6155,39 @@ async fn roll_signs_an_apps_instance_a_token_for_an_hour_at_most() {
     assert!(!audit.to_string().contains(tokens[0].as_str()), "never the token");
 }
 
+/// A preview's own service (roll previews' `roll.toml` services) gets roll's word under a subject of
+/// its own, never an app's, in the preview's environment; a fork's preview (untrusted) gets nothing,
+/// decided here from the environment's own flag; each is audited as the preview's service, never
+/// the token.
+#[tokio::test]
+async fn a_previews_service_gets_a_token_of_its_own_and_a_forks_none() {
+    let api = Api::new().await;
+    for (slug, trusted) in [("pv-vetted1", true), ("pv-fork1", false)] {
+        api.ok(Method::POST, "/environments", Some(json!({ "slug": slug, "base": "production", "trusted": trusted }))).await;
+    }
+    let (s, p) = (api.secrets.clone(), api.project.clone());
+    let (vetted, fork) = tokio::task::spawn_blocking(move || {
+        let sub = |preview: &str| roll_secrets::Subject::Preview { project: p.clone(), preview: preview.into(), service: "web".into() };
+        let hour = std::time::Duration::from_secs(3600);
+        (s.issue(sub("pv_vetted1"), "sts.amazonaws.com", 2 * hour), s.issue(sub("pv_fork1"), "sts.amazonaws.com", hour))
+    })
+    .await
+    .unwrap();
+    assert!(matches!(fork, Err(roll_secrets::Error::Forbidden(_))), "{fork:?}");
+    let token = vetted.unwrap();
+    let jwks = api.ok(Method::GET, "/v1/secrets/oidc/jwks", None).await;
+    let (_, claims, signed) = roll_token(&jwks, &token);
+    assert!(signed);
+    let sub = format!("roll-previews:{}:pv_vetted1:web", api.project);
+    assert_eq!(claims["sub"], json!(sub));
+    assert_eq!((claims["environment"].clone(), claims["preview"].clone(), claims["preview_id"].clone()), (json!("pv-vetted1"), json!(true), json!("pv_vetted1")));
+    assert_eq!(claims["exp"].as_i64().unwrap() - claims["iat"].as_i64().unwrap(), 3600, "an hour at most");
+    assert!(matches!(roll_secrets::Subject::parse(&sub), Some(roll_secrets::Subject::Preview { .. })));
+    let audit = api.ok(Method::GET, "/audit", None).await;
+    assert!(audit.as_array().unwrap().iter().any(|a| a["action"] == "oidc.issue" && a["actor"] == "preview:pv_vetted1:web"), "{audit}");
+    assert!(!audit.to_string().contains(token.as_str()), "never the token");
+}
+
 #[tokio::test]
 async fn the_issuers_key_rotates_published_a_day_before_it_signs_and_retires_after_its_tokens() {
     use roll_secrets::issuer::{PUBLISH_AHEAD_MS, RETIRE_AFTER_MS};

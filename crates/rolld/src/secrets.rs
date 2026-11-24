@@ -1727,9 +1727,10 @@ impl apps_control::integrations::SecretSource for ForApps {
     async fn issue(&self, project: &str, service: &str, env: &str, aud: &str, ttl: std::time::Duration) -> anyhow::Result<Option<String>> {
         let (secrets, ws) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting: try again in a moment"))?;
         let subject = roll_secrets::Subject::App { project: project.to_string(), service: service.to_string(), env: env.to_string() };
-        let aud = aud.to_string();
+        let (aud, service) = (aud.to_string(), service.to_string());
         tokio::task::spawn_blocking(move || {
-            let roll_secrets::Subject::App { project, service, .. } = &subject;
+            let project = subject.project().to_string();
+            let (project, service) = (&project, &service);
             let p = ws.get(roll_workspace::Scope::All, project).map_err(|e| anyhow::anyhow!("{e}"))?;
             if !ws.trusts(&p, roll_workspace::Kind::Service, service) {
                 anyhow::bail!("project {project} doesn't stand for {service}, so roll signs no token for it");
