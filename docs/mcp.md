@@ -1436,12 +1436,13 @@ gaps are in how results read and how roll is distributed):
 From a 2026-11-24 gap review (every tool run as an agent would against a fresh rolld with
 `mcp-sweep.py --report`, 1,161 calls, plus probes with scoped tokens):
 
-1. **A refused member hears what would let them (this PR).** A viewer's agent read "your role
-   in project … can't write secrets there", and `access_request_access` then said "its owner
-   changes its rules instead", though no token's rules reach past a role. The refusal now names
-   the weakest role that may and that a project admin changes roles; a person's token says the
-   same. When members' time-boxed elevation (docs/members-v1-1.md, D13–D17) is built, both name
-   its request instead.
+1. **The rest of the fixed sets as choices (this PR).** A second look found 24 more arguments
+   whose values were a fixed set but read as text, in descriptions that didn't say "a, b or c":
+   workspace resource kinds (the prose named 6 of 10), apps' link kinds (8 of 9, no `service`),
+   notification kinds (6 of 8, no Teams or Google Chat), drain formats, private network kinds,
+   Redis eviction policies, presign methods, binding destinations, secrets' `type`, tasks' message
+   and run states, preview states and screenshot diffs, vulnerability severities. A test now fails
+   on any argument described only as its values, so the next one is a choice from the start.
 2. **Paging is the products'.** No list route takes a cursor (approvals take `limit` only). History
    and logs are all capped (a `LIMIT`, the latest N, or a retention window), so nothing grows
    without bound there; the lists of things people make are whole (buckets, queues, topics,
@@ -1523,7 +1524,7 @@ From a 2026-11-24 gap review (every tool run as an agent would against a fresh r
    stateless and search mode (`?tools=search`) covers clients that can't take the list; "remember this browser"; a preset that reveals development's values without asking
    (#354); a connection-level `?project=` (only a token's rules bound a project; a default that
    some tools can't honour would look like a boundary).
-15. **Landed 2026-11-23 and 24:** a missing required choice asked for in a form, as a missing id is (#912); tool arguments with a fixed set as JSON Schema `enum`, checked before the call; three proses were short of their route's set (#910); refusals that say why: search's error objects, token rules' resources, axum's body rejections; a cut answer naming its tool's filters; the sweep's `--report` (#907, from the 2026-11-24 gap review); `workspace.event` (#817); MCP Apps views that refresh themselves (#820); `roll_find`, any resource by name, part of its id or a pasted dashboard link (#821), its page table (#845) and search mode (#849); `ship_from_chat` (#826); review fixes for #814–#826 (#832: lookups held by `agents_ask`, the inspector on `roll_find`, approvals only from the gate); lists answered as tables (#838: 20+ rows about 40% smaller); the ship prompts quote first (#840); `secrets_list_saas`'s eleven vendors (#843); the field test reading named body types, 46 fields mapped or explained (#854), and object arguments naming every key (#862); `previews_fetch` on roll previews #852 (#859); review fixes for #838–#868 (#871); `roll_find` links matches (#864) and reads Postgres and streams links, which now carry their selection (#878); `previews_tables` (#883); a browser step's typed text redacted from the audit (#887); `previews_try` and `previews_try_screenshot`, an agent driving a preview's page (#892); `respond_to_leaked_secret` checks for a rotation roll already started (#891).
+15. **Landed 2026-11-23 and 24:** a refused member hears the weakest role that may and who changes roles (#914); lockdown withholds guests' notes and the leak prompt says when a report rotates (#917); a missing required choice asked for in a form, as a missing id is (#912); tool arguments with a fixed set as JSON Schema `enum`, checked before the call; three proses were short of their route's set (#910); refusals that say why: search's error objects, token rules' resources, axum's body rejections; a cut answer naming its tool's filters; the sweep's `--report` (#907, from the 2026-11-24 gap review); `workspace.event` (#817); MCP Apps views that refresh themselves (#820); `roll_find`, any resource by name, part of its id or a pasted dashboard link (#821), its page table (#845) and search mode (#849); `ship_from_chat` (#826); review fixes for #814–#826 (#832: lookups held by `agents_ask`, the inspector on `roll_find`, approvals only from the gate); lists answered as tables (#838: 20+ rows about 40% smaller); the ship prompts quote first (#840); `secrets_list_saas`'s eleven vendors (#843); the field test reading named body types, 46 fields mapped or explained (#854), and object arguments naming every key (#862); `previews_fetch` on roll previews #852 (#859); review fixes for #838–#868 (#871); `roll_find` links matches (#864) and reads Postgres and streams links, which now carry their selection (#878); `previews_tables` (#883); a browser step's typed text redacted from the audit (#887); `previews_try` and `previews_try_screenshot`, an agent driving a preview's page (#892); `respond_to_leaked_secret` checks for a rotation roll already started (#891).
 16. **Landed 2026-11-22 morning:** operator policy for agent connections: `agents_ask` and
    `mcp_lockdown` / `mcp_read_only` (#678), and `oauth_clients`, the OAuth clients that may connect,
    checked at consent, at every token and on every request, nothing revoked (#680). SQL sessions name who sent them (`application_name`: `roll tok_…`, so `postgres_activity` tells
