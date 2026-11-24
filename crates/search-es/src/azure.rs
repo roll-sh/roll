@@ -374,6 +374,17 @@ impl Client {
         }
     }
 
+    /// Deletes the blob at `key` and its snapshots only at version `etag`: whether it's gone
+    /// (`false`: it changed).
+    pub async fn delete_if(&self, key: &str, etag: &str) -> Result<bool, Error> {
+        let r = self.send(Kind::Write, reqwest::Method::DELETE, key, &[], &[("x-ms-delete-snapshots", "include".into()), ("if-match", etag.to_string())], Bytes::new(), Some(REQUEST_MAX)).await?;
+        match r.status().as_u16() {
+            200..=299 | 404 => Ok(true),
+            412 => Ok(false),
+            _ => Err(self.fail(r).await),
+        }
+    }
+
     /// Deletes the blob at `key` and its snapshots (none there is fine).
     pub async fn delete(&self, key: &str) -> Result<(), Error> {
         let r = self.send(Kind::Write, reqwest::Method::DELETE, key, &[], &[("x-ms-delete-snapshots", "include".into())], Bytes::new(), Some(REQUEST_MAX)).await?;
@@ -385,12 +396,33 @@ impl Client {
 
     /// Every blob under `prefix`, as `(key, size)`, bounded as [`crate::s3::Client::list`]'s.
     pub async fn list(&self, prefix: &str) -> Result<Vec<(String, u64)>, Error> {
-        const PAGE_MAX: usize = 8 << 20;
         let mut out = Vec::new();
+        self.list_while(prefix, &mut |k, size| {
+            out.push((k.to_string(), size));
+            true
+        })
+        .await?;
+        Ok(out)
+    }
+
+    /// Every object under `prefix` in key order, handed to `f` until it answers `false`;
+    /// whether it did. Bounded as [`Self::list`] is.
+    pub async fn list_while(&self, prefix: &str, f: &mut (dyn FnMut(&str, u64) -> bool + Send)) -> Result<bool, Error> {
+        self.list_blobs(prefix, false, f).await
+    }
+
+    /// [`Self::list_while`], with blobs whose blocks are staged but not yet committed (an
+    /// upload in progress) when `uncommitted`.
+    pub async fn list_blobs(&self, prefix: &str, uncommitted: bool, f: &mut (dyn FnMut(&str, u64) -> bool + Send)) -> Result<bool, Error> {
+        const PAGE_MAX: usize = 8 << 20;
+        let mut count = 0usize;
         let mut key_bytes = 0usize;
         let mut marker = String::new();
         for _ in 0..LIST_PAGES_MAX {
             let mut q = vec![("restype", "container"), ("comp", "list"), ("prefix", prefix), ("maxresults", "5000")];
+            if uncommitted {
+                q.push(("include", "uncommittedblobs"));
+            }
             if !marker.is_empty() {
                 q.push(("marker", marker.as_str()));
             }
@@ -405,16 +437,19 @@ impl Client {
                 let Some(name) = elements(item, "Name").next().map(xml_unescape) else { continue };
                 let size = elements(item, "Content-Length").next().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
                 key_bytes += name.len();
-                if out.len() >= LIST_ENTRIES_MAX || key_bytes > LIST_KEY_BYTES_MAX {
+                if count >= LIST_ENTRIES_MAX || key_bytes > LIST_KEY_BYTES_MAX {
                     return Err(err("TooLarge", format!("the listing of [{prefix}] holds more than [{LIST_ENTRIES_MAX}] objects or [{LIST_KEY_BYTES_MAX}] bytes of keys")));
                 }
                 if name.starts_with(prefix) {
-                    out.push((name, size));
+                    count += 1;
+                    if !f(&name, size) {
+                        return Ok(true);
+                    }
                 }
             }
             let next = elements(&page, "NextMarker").next().map(xml_unescape).unwrap_or_default();
             if next.is_empty() || next == marker {
-                return Ok(out);
+                return Ok(false);
             }
             marker = next;
         }

@@ -546,6 +546,7 @@ impl Engine {
         let what = match page {
             None => "its pages look".to_string(),
             Some("") => "its first page looks".to_string(),
+            Some(p) if p.starts_with("group:") => "the pages changed the same way look".to_string(),
             Some(p) => format!("{p} looks"),
         };
         self.store.log(id, &format!("{by} accepted how {what} at {}", short(&head)))?;

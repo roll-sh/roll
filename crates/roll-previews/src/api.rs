@@ -378,11 +378,18 @@ struct AcceptBody {
     head: Option<String>,
     /// One page only (`visual_review.pages[].path`: `""` the first page). Left out: every page.
     path: Option<String>,
+    /// Every page changed the same way (`visual_review.pages[].group`).
+    group: Option<String>,
 }
 
 async fn accept_visual(AxState(e): S, Path(id): Path<String>, who: Option<axum::Extension<roll_auth::SignedIn>>, grant: Option<axum::Extension<roll_auth::Grant>>, b: Bytes) -> crate::Result<Json<Preview>> {
     check_id(&id)?;
-    let AcceptBody { head: seen, path } = if b.is_empty() { AcceptBody::default() } else { body::<AcceptBody>(&b)? };
+    let AcceptBody { head: seen, path, group } = if b.is_empty() { AcceptBody::default() } else { body::<AcceptBody>(&b)? };
+    let path = match (path, group) {
+        (Some(_), Some(_)) => return Err(Error::BadRequest("a page or a group, not both".into())),
+        (None, Some(g)) => Some(format!("group:{g}")),
+        (p, None) => p,
+    };
     // The person behind a token too: their own token doesn't let an author accept their change.
     let aliases = aliases_of(&e, who.as_ref().map(|u| &u.0)).await?;
     // A signed-in person who can write to the change's repo in roll code (an admin can).

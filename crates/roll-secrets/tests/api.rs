@@ -1962,6 +1962,42 @@ async fn protected_environments_take_change_requests_that_another_principal_appr
     }
 }
 
+/// An open request behind 200 newer ones still lists under `state=open`, and paging with `next`
+/// reaches every request once.
+#[tokio::test]
+async fn an_open_request_behind_200_others_still_lists_and_pages_cover_them_all() {
+    let api = Api::new().await;
+    api.set("production", "KEY", "old").await;
+    api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true, "approvals": 1 }))).await;
+    let r = api.ok(Method::POST, "/environments/production/requests", Some(json!({ "message": "rotate", "ops": [{ "op": "set", "key": "KEY", "value": "new" }] }))).await;
+    let open = r["id"].as_str().unwrap().to_string();
+    let id = open.clone();
+    api.db
+        .write(move |c| {
+            for n in 1..=204i64 {
+                c.execute("INSERT INTO requests (id, project_id, env_id, path, message, by, at, base_seq, state, ops, items, reviews, applied_seq, action) SELECT ?, project_id, env_id, path, message, by, at + ?, base_seq, 'applied', ops, items, reviews, 1, action FROM requests WHERE id = ?", code_sql::params![format!("req_applied{n:03}"), n, id.as_str()])?;
+            }
+            Ok::<_, code_sql::Error>(())
+        })
+        .unwrap();
+
+    let listed = api.ok(Method::GET, "/environments/production/requests?state=open", None).await;
+    assert_eq!(listed.as_array().unwrap().iter().map(|r| r["id"].as_str().unwrap()).collect::<Vec<_>>(), [open.as_str()]);
+
+    let (mut seen, mut before) = (Vec::new(), String::new());
+    loop {
+        let page = api.ok(Method::GET, &format!("/environments/production/requests?limit=50{before}"), None).await;
+        seen.extend(page["requests"].as_array().unwrap().iter().map(|r| r["id"].as_str().unwrap().to_string()));
+        match page["next"].as_str() {
+            Some(next) => before = format!("&before={next}"),
+            None => break,
+        }
+    }
+    assert_eq!(seen.len(), 205);
+    assert_eq!(seen.iter().collect::<std::collections::BTreeSet<_>>().len(), 205, "each request once");
+    assert_eq!(seen.last(), Some(&open), "newest first");
+}
+
 #[tokio::test]
 async fn a_token_reaches_only_its_environments_folders_and_actions() {
     let api = Api::new().await;
@@ -3506,6 +3542,47 @@ async fn a_saas_rotators_credential_is_replaced_in_place_and_the_next_rotation_u
     assert!(expiring(&api.ok(Method::GET, "/health", None).await).is_empty());
     let audit = api.ok(Method::GET, "/audit", None).await;
     assert!(audit.to_string().contains("changed SaaS rotator gl-ops's credential expiry") && !audit.to_string().contains("fake-gitlab-admin-2"), "{audit}");
+}
+
+/// The 38th review's item 4: replacing a registration's credential makes it the replacer's. Its
+/// links act at the replacer's rights from then on: the old maker's removal no longer stops them,
+/// and the replacer's does. A rename keeps the maker.
+#[tokio::test]
+async fn a_saas_credential_replacement_moves_the_maker_to_whoever_replaced_it() {
+    let api = Api::new().await;
+    let p = api.project.clone();
+    for (handle, email) in [("cat", "cat@example.com"), ("bob", "bob@example.com")] {
+        let (_, inv) = api.call(Method::POST, &format!("/v1/workspace/projects/{p}/invites"), Some(json!({ "email": email, "role": "admin" }))).await;
+        let token = inv["url"].as_str().unwrap().split("token=").nth(1).unwrap().to_string();
+        assert_eq!(api.signed_in(handle, false, Method::POST, &format!("/v1/workspace/invites/{token}/accept"), None).await.0, StatusCode::OK);
+    }
+    let target = json!({ "host": "gitlab.example.com", "project": "acme/web", "scopes": ["read_api"], "access_level": 20, "expires_days": 90 });
+    let (s, r) = api.signed_in("cat", false, Method::POST, &format!("/v1/secrets/projects/{p}/saas"), Some(json!({ "name": "gl", "vendor": "gitlab", "target": target, "credential": "fake-gitlab-admin" }))).await;
+    assert_eq!(s, StatusCode::CREATED, "{r}");
+    api.ok(Method::PUT, "/environments/production/secrets/GITLAB_TOKEN", Some(json!({ "link": { "kind": "saas", "ref": r["id"], "field": "secret", "mode": "managed", "options": { "rotate_days": 60 } } }))).await;
+    let at = format!("/v1/secrets/projects/{p}/saas/{}", r["id"].as_str().unwrap());
+    let rotate = || api.call(Method::POST, "/environments/production/secrets/GITLAB_TOKEN/rotate", None);
+    let last_admin = || api.sent.10.gitlab_admins.lock().unwrap().last().cloned().unwrap();
+
+    // Bob swaps in his own credential: the registration is his now, and a rename keeps it so.
+    let (s, b) = api.signed_in("bob", false, Method::PATCH, &at, Some(json!({ "credential": "fake-gitlab-admin-2" }))).await;
+    assert!(s.is_success() && b["created_by"] == "usr_bob", "{s} {b}");
+    let renamed = api.ok(Method::PATCH, &at, Some(json!({ "name": "gl-ops" }))).await;
+    assert_eq!(renamed["created_by"], "usr_bob", "{renamed}");
+    let audit = api.ok(Method::GET, "/audit", None).await.to_string();
+    assert!(audit.contains("maker moved from usr_cat to usr_bob") && !audit.contains("fake-gitlab-admin-2"), "{audit}");
+
+    // Cat leaves: nothing of hers acts here any more, and Bob's credential keeps rotating.
+    assert_eq!(api.call(Method::DELETE, &format!("/v1/workspace/projects/{p}/members/usr_cat"), None).await.0, StatusCode::NO_CONTENT);
+    let (s, e) = rotate().await;
+    assert!(s.is_success(), "{s} {e}");
+    assert_eq!(last_admin(), "fake-gitlab-admin-2");
+    // Bob leaves: his credential stops acting through roll at once.
+    let issued = api.values("production", "/").await["values"]["GITLAB_TOKEN"].clone();
+    assert_eq!(api.call(Method::DELETE, &format!("/v1/workspace/projects/{p}/members/usr_bob"), None).await.0, StatusCode::NO_CONTENT);
+    let (s, e) = rotate().await;
+    assert!(!s.is_success() && e.to_string().contains("usr_bob"), "{s} {e}");
+    assert_eq!(api.values("production", "/").await["values"]["GITLAB_TOKEN"], issued, "the old value stands");
 }
 
 #[tokio::test]

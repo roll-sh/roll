@@ -769,7 +769,10 @@ async fn preview_notes_are_slack_threads_both_ways() {
     let text = posted["text"].as_str().unwrap();
     assert_eq!(posted["channel"], "C9");
     assert!(text.contains("<https://web-pr1.preview.test/checkout|/checkout> · `button.pay`") && text.contains("> The button is cut off") && !text.contains("<sub>"), "{text}");
-    let thread_ts: String = w.a.code.db.sql().query_row("SELECT thread_ts FROM chat_notes WHERE note = ?", [note_id.as_str()], |r| r.get(0)).unwrap();
+    // The thread's binding is written just after the post returns: waited for, not raced.
+    let bound = || w.a.code.db.sql().query_row("SELECT thread_ts FROM chat_notes WHERE note = ?", [note_id.as_str()], |r| r.get::<_, String>(0)).ok();
+    until("the note's thread bound", || bound().is_some()).await;
+    let thread_ts = bound().unwrap();
 
     // A reply in the thread from someone the install allows: the note's reply, with their name.
     let reply = json!({ "type": "event_callback", "team_id": "T1", "event_id": "EvN1", "event_time": 1, "event": {

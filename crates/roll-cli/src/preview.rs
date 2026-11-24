@@ -110,10 +110,13 @@ pub enum Preview {
     /// page only. A push asks again about the pages it changes.
     Accept {
         preview: String,
-        #[arg(long, conflicts_with = "first")]
+        #[arg(long, conflicts_with_all = ["first", "group"])]
         page: Option<String>,
-        #[arg(long)]
+        #[arg(long, conflicts_with = "group")]
         first: bool,
+        /// Every page changed the same way (`visual_review.pages[].group`).
+        #[arg(long)]
+        group: Option<String>,
     },
     /// Save its screenshot (a PNG) to --out: the first page, --page another of `github.pages`,
     /// --phone at a phone's width, --base the default branch's it was compared with, --previous
@@ -1034,11 +1037,12 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
             std::fs::write(&out, &png).map_err(|e| anyhow::anyhow!("writing {}: {e}", out.display()))?;
             json!({ "saved": out.display().to_string(), "bytes": png.len() })
         }
-        Preview::Accept { preview, page, first } => {
-            let body = match (page, first) {
-                (Some(p), _) => json!({ "path": p }),
-                (None, true) => json!({ "path": "" }),
-                (None, false) => json!({}),
+        Preview::Accept { preview, page, first, group } => {
+            let body = match (page, first, group) {
+                (_, _, Some(g)) => json!({ "group": g }),
+                (Some(p), _, None) => json!({ "path": p }),
+                (None, true, None) => json!({ "path": "" }),
+                (None, false, None) => json!({}),
             };
             api.post(&format!("/v1/previews/{preview}/visual/accept"), body).await?
         }

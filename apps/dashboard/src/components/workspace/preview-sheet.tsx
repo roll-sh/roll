@@ -420,9 +420,20 @@ export function PreviewSheet({
             )}
             {p.visual_review && p.visual_review.state === "changed" && p.visual_review.pages.length > 1 && (
               <ul className="mt-1 space-y-0.5 text-[11.5px]" aria-label="Pages to review">
-                {p.visual_review.pages.map((pg) => (
+                {p.visual_review.pages.map((pg, i, all) => (
                   <li key={pg.path} className="flex min-w-0 items-center gap-2">
                     <span className="truncate font-mono text-[11px] text-muted">{pageLabel(pg.path)}</span>
+                    {pg.group && all.findIndex((x) => x.group === pg.group) === i && !pg.by && (
+                      <button
+                        type="button"
+                        disabled={busy !== null || gone}
+                        title="These pages changed the same way (Percy's grouped diffs): accept them together"
+                        onClick={() => run(`accept:group:${pg.group}`, () => previewsApi.acceptVisual(p.id, p.visual_review?.head, undefined, pg.group ?? undefined))}
+                        className="shrink-0 rounded px-1.5 text-[11px] text-accent hover:underline disabled:opacity-40"
+                      >
+                        {busy === `accept:group:${pg.group}` ? "Accepting…" : `Accept the ${all.filter((x) => x.group === pg.group).length} changed the same way`}
+                      </button>
+                    )}
                     <span className="shrink-0 font-mono text-[11px] tabular-nums text-subtle">{Math.max(pg.percent, 0.1).toFixed(1)}%</span>
                     {pg.unstable && <span className="shrink-0 text-subtle" title="Two captures a second apart differ: the difference may be only that">moves by itself</span>}
                     {pg.by ? (
