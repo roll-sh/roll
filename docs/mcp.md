@@ -1290,6 +1290,7 @@ previews are listed once those products are on.
 | `apps_list_variables` | An environment's variables, values masked. | `GET /v1/apps/services/{service}/environments/{env}/variables` |
 | `apps_set_variables` | Set or unset an environment's variables, or copy some from another (`copy_from` with `copy`; reveal on that environment too). `seal` hides values for good, `files` keeps some as files in the instances, `runtime_only` keeps some out of builds. Production is a "deploy" action. | `PATCH /v1/apps/services/{service}/environments/{env}/variables` |
 | `apps_diff_environments` | How an environment differs from another: variables missing, extra or different (names only; `differ` needs reveal on both) and settings with the body that matches each. | `GET /v1/apps/services/{service}/environments/{env}/diff` |
+| `apps_fetch` | One of an environment's pages as roll reads it, past its gate (to check what was just deployed): status, a few headers, the body as text. | `GET /v1/apps/services/{service}/environments/{env}/fetch` |
 | `apps_metrics` | CPU, memory and requests of an environment, and each instance's own last hour (`by_instance`). | `GET /v1/apps/services/{service}/environments/{env}/metrics` |
 | `apps_quote` | What a service would cost at most, before making it, from its run settings. | `POST /v1/apps/quote` |
 | `apps_plan` | How roll would build and run a repo, before making a service (a dry run). | `POST /v1/apps/plan` |
