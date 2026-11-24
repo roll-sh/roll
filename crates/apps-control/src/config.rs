@@ -76,6 +76,9 @@ fn apply_one(c: &AppConfig, build: &Build, run: &Run) -> Result<(Build, Run)> {
     if c.spa.is_some() {
         b.spa = c.spa;
     }
+    if c.output.is_some() {
+        b.output.clone_from(&c.output);
+    }
     if c.packages.is_some() {
         b.packages.clone_from(&c.packages);
     }
