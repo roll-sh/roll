@@ -20,20 +20,24 @@ pub fn render(v: &Value) -> String {
 }
 
 /// The text cut to fit a client's limit ([`cut`]'s): a table at the end of its last whole row, so
-/// no row's last value looks whole when it isn't (`svc_123` cut to `svc_12`).
-pub fn fit(text: String) -> String {
+/// no row's last value looks whole when it isn't (`svc_123` cut to `svc_12`). `takes` is what the
+/// tool can narrow its answer with ([`crate::tools::Tool::narrowing`]), so the note names those
+/// arguments, or says there are none, instead of sending the model to look for a page cursor.
+pub fn fit(text: String, takes: Option<&[&str]>) -> String {
     let shown = visible(&text);
     if shown.len() <= MAX_TEXT {
         return shown;
     }
     // Compact JSON has no line breaks of its own (they're escaped): only a table's rows end in one.
     match shown.as_bytes()[..MAX_TEXT].iter().rposition(|b| *b == b'\n').filter(|i| *i > MAX_TEXT / 2) {
-        Some(end) => format!(
-            "{}\n… (cut at {} KiB of {} bytes, after a whole row: ask for less, as most list tools take a limit, a filter or a page cursor; the structured content has all of it)",
-            &shown[..end],
-            MAX_TEXT >> 10,
-            shown.len()
-        ),
+        Some(end) => {
+            let less = match takes {
+                None => "ask for less, as most list tools take a limit, a filter or a page cursor".to_string(),
+                Some([]) => "this tool takes no filter or page cursor".to_string(),
+                Some(args) => format!("ask for less with this tool's {}", args.join(", ")),
+            };
+            format!("{}\n… (cut at {} KiB of {} bytes, after a whole row: {less}; the structured content has all of it)", &shown[..end], MAX_TEXT >> 10, shown.len())
+        }
         None => cut(text, true),
     }
 }
@@ -138,9 +142,12 @@ mod tests {
         assert!(render(&json!({ "a\nb": 1, "items": rows })).starts_with("\"a\\nb\": 1\n"));
         // A long table is cut after a whole row.
         let rows: Vec<Value> = (0..20_000).map(|i| json!({ "id": format!("svc_{i:06}"), "n": i })).collect();
-        let long = fit(render(&json!(rows)));
+        let long = fit(render(&json!(rows)), Some(&["project", "limit"]));
         let last = long.lines().rev().nth(1).unwrap();
         assert!(long.len() < MAX_TEXT + 300 && last.starts_with("svc_") && last.split('\t').next().unwrap().len() == 10, "{last}");
+        // The note names what this tool narrows with, or that it has nothing to narrow with.
+        assert!(long.ends_with("ask for less with this tool's project, limit; the structured content has all of it)"), "{}", &long[long.len() - 200..]);
+        assert!(fit(render(&json!(rows)), Some(&[])).contains("this tool takes no filter or page cursor"));
         // One row, two lists, or anything that isn't shorter stays JSON.
         for v in [json!([{ "id": "a" }]), json!({ "a": [{ "x": 1 }, { "x": 2 }], "b": [{ "y": 1 }, { "y": 2 }] }), json!({ "id": "x" }), json!([1, 2, 3])] {
             assert_eq!(render(&v), serde_json::to_string(&v).unwrap(), "{v}");
