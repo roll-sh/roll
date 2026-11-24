@@ -892,6 +892,12 @@ RESHAPED=$(api GET "/v1/previews/$PV" | jq_ "' | '.join('%s %s' % (c['path'], c.
 # The feedback button driven in a real browser (Playwright's image, which the run built by now):
 # in through the preview's link, an element picked and a note written; what it opens roll with
 # names the page, the element and the note. Nothing else drives the page's toolbar end to end.
+# An agent's run on the page (roll MCP's previews_try): a step taken in a browser, the text after
+# it and its picture by the run's id.
+TRY=$(api POST "/v1/previews/$PV/try" '{"service":"web","path":"/","steps":[{"press":"Tab"}]}')
+TRY_SAID=$(echo "$TRY" | jq_ "'%s %s' % (d['status'], 'preview of change 1' in d['text'])")
+[ "$TRY_SAID" = "200 True" ] || { echo "an agent's run should answer the page's status and text: ${TRY:0:300}"; exit 1; }
+curl -sf "http://$API/v1/previews/$PV/try/$(echo "$TRY" | jq_ "d['run']")/screenshot" -o "$HOME_DIR/try.png" && head -c 8 "$HOME_DIR/try.png" | od -An -c | grep -q "P   N   G" || { echo "the run's picture should be a PNG"; exit 1; }
 FB_LINK=$(api GET "/v1/previews/$PV" | jq_ "[x for x in d['services'] if x['name'] == 'web'][0]['share_url']")
 FB_SAID=$(docker run --rm --name roll-previews-fbtest --network host -e LINK="$FB_LINK" -v "$ROOT/scripts/preview-cost/feedback-check.js:/w/check.js:ro" roll-previews-shot:1.64.1 sh -c 'NODE_PATH=$(npm root -g) node /w/check.js' 2>&1 | tail -1)
 case "$FB_SAID" in "/ · "*"a"*" · a live note") ;; *) echo "the page's feedback button should open roll with the page, the element and the note: $FB_SAID"; exit 1;; esac

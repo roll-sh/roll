@@ -678,6 +678,19 @@ pub trait Issuer: Send + Sync {
     async fn issue(&self, project: &str, repo: &str, preview: &str, service: &str, aud: &str, ttl: std::time::Duration) -> anyhow::Result<Option<String>>;
 }
 
+/// An agent's run on a service's page (`POST …/try`), as the browser saw it: its picture, the
+/// page's status, the step that found nothing, its visible text and what went wrong on the way.
+/// Serialised (its PNG as base64) when it's taken on the node a roll apps instance runs on.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct Tried {
+    #[serde(with = "png_b64::opt")]
+    pub png: Option<Vec<u8>>,
+    pub status: u16,
+    pub step_failed: Option<String>,
+    pub text: String,
+    pub errors: Vec<String>,
+}
+
 pub trait ShellIo: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
 impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> ShellIo for T {}
 
@@ -905,6 +918,11 @@ pub trait Apps: Send + Sync {
     /// own network namespace, so any port it listens on is reachable, published or not. `None`
     /// where this backend has none here (roll apps' services: roll apps' own tunnel).
     async fn forward(&self, _preview: &str, _service: &str, _port: u16) -> anyhow::Result<Option<Box<dyn ShellIo>>> {
+        Ok(None)
+    }
+    /// `path` of the service in a browser, `steps` taken on it (a page state's steps), in the
+    /// service's network (`…/try`). `None` where this backend can't.
+    async fn try_page(&self, _preview: &str, _service: &str, _path: &str, _steps: &[crate::settings::Step]) -> anyhow::Result<Option<Tried>> {
         Ok(None)
     }
     /// `path` of the service, read through roll's own way in, `GET` or `HEAD`: the runtime's own
