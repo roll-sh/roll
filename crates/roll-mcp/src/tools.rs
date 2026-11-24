@@ -1274,7 +1274,7 @@ static TOOLS: &[Tool] = &[
     t("secrets_compare", "Compare environments", "Which keys differ between two environments (missing, or a different value by fingerprint; never values).", "secrets", "GET", "/v1/secrets/projects/{project}/compare", &[SECRET_PROJECT, qreq("from", "Environment"), qreq("to", "Environment"), q("path", Ty::Str, "Folder")]),
     t("secrets_rotate", "Rotate a secret", "Make a new value for a secret and switch to it: a generated one, or a managed link's (a database user's password, a cloud key) made where it lives.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/rotate", &[SECRET_PROJECT, ENV, req("name", "Secret name"), q("path", Ty::Str, "Folder")]).open_world().destructive(),
     t("secrets_promote", "Promote secrets", "Copy an environment's secrets into this one (all, or some keys). Into a protected environment it opens a change request for a person instead.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/promote", &[SECRET_PROJECT, ENV, qreq("from", "The environment to copy from"), b("keys", Ty::Arr, "Only these keys"), b("path", Ty::Str, "Folder"), b("message", Ty::Str, "Why")]),
-    t("secrets_list_requests", "Change requests", "An environment's change requests (proposed changes waiting on review).", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/requests", &[SECRET_PROJECT, ENV, q("state", Ty::Str, "open, approved, rejected, applied, closed or stale")]),
+    t("secrets_list_requests", "Change requests", "An environment's change requests (proposed changes waiting on review), newest first. With limit or before, the answer is {requests, next}: pass next as before for the page after.", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/requests", &[SECRET_PROJECT, ENV, q("state", Ty::Choice(&["open", "approved", "rejected", "applied", "closed", "stale"]), "Only requests in this state"), q("limit", Ty::Int, "At most this many (1-200)"), q("before", Ty::Str, "The page after: the last page's next")]),
     t("secrets_get_request", "Get a change request", "One change request on a protected environment: what it changes (keys, fingerprints, never values), who asked, its reviews and whether its approvals are met.", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/requests/{id}", &[SECRET_PROJECT, ENV, req("id", "Request id")]),
     t("secrets_apply_request", "Apply an approved change request", "Apply a change request whose approvals are met, as one change. Applying one that isn't approved (bypass) is a person's: not here.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/requests/{id}/apply", &[SECRET_PROJECT, ENV, req("id", "Request id")]),
     t("secrets_close_request", "Close a change request", "Withdraw a change request without applying it.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/requests/{id}/close", &[SECRET_PROJECT, ENV, req("id", "Request id")]),
@@ -1756,6 +1756,7 @@ static TOOLS: &[Tool] = &[
             b("max_bytes", Ty::Int, "At most this much branched data"),
             b("max_usd_month", Ty::Num, "New previews wait once the month's cost reaches it (0: no cap)"),
             b("feedback", Ty::Bool, "A feedback button on its pages for people who came in through roll"),
+            b("note_mail", Ty::Bool, "Mail about notes: a new note to the change's author, a reply or a resolve to the note's author"),
             b("flags", Ty::Arr, "[{name, options}]: feature flags a reviewer may set for their own view from the page's toolbar (sent as x-roll-flags)"),
             b("warm", Ty::Bool, "Wake the services as soon as a new head is deployed"),
             b("crons", Ty::Bool, "Scheduled work (roll apps' crons, scheduled commands and calls) runs in previews too; off by default: deployed, schedule off"),
@@ -1820,8 +1821,6 @@ mod tests {
         const OPEN: &[(&str, &str)] = &[
             // Change names too (`create_token`), not only allow, deny or ask.
             ("access_audit_log", "decision"),
-            // Its route gains a cursor and its states with it (roll secrets).
-            ("secrets_list_requests", "state"),
         ];
         let word = |w: &str| !w.is_empty() && w.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "_-".contains(c));
         let mut prose = Vec::new();
