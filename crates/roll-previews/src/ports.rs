@@ -69,6 +69,17 @@ pub trait Brancher: Send + Sync {
         Ok(None)
     }
 
+    /// Whether [`Self::restore`] can put a branch back: restore points keep only these products'.
+    fn restores(&self) -> bool {
+        false
+    }
+
+    /// Put `branch` back as `point` (a [`Self::snapshot`] of it) left it, in place where the
+    /// product can (its ref and credentials kept). `None` where it can't.
+    async fn restore(&self, _parent: &str, _branch: &str, _kept: Option<&str>, _point: &str, _name: &str, _mode: Mode) -> anyhow::Result<Option<Branched>> {
+        Ok(None)
+    }
+
     /// Delete a [`Brancher::snapshot`] of branch `from` named `name`. By default as a branch of
     /// `parent` (Postgres: a branch of the project); a product whose branch guard checks the
     /// direct parent checks `from` instead.

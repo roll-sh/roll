@@ -609,6 +609,36 @@ api PUT "/v1/previews/projects/$PRJ/settings" '{"access":"link"}' >/dev/null
 QUERY=$(api GET "/v1/previews/$PV" | jq_ "[x for x in d['services'] if x['name'] == 'web'][0]['share_url'].split('/?')[1]")
 curl -sS -o /dev/null -L -c "$JAR" -b "$JAR" -H "Host: $HOST" "http://$API/?$QUERY" --max-time 120
 
+say "a restore point (roll preview points): saved, a table made after it, put back"
+# A restore point (roll preview points): a table made after it is gone once it's put back, on
+# the same DATABASE_URL (pg-control's reset from the point: same endpoint and role).
+psql_app() { docker run --rm --name roll-previews-psqltest --network host postgres:18-alpine psql "$APP_DB" -Atc "$1" 2>&1 | head -1; }
+POINT=$(api POST "/v1/previews/$PV/restore-points" '{"label":"before the live check"}' | jq_ "d['id']")
+case "$POINT" in rp_*) ;; *) echo "a restore point should be saved: $POINT"; exit 1;; esac
+ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview points "$PV" | grep -q "$POINT" || { echo "roll preview points should list $POINT"; exit 1; }
+psql_app "CREATE TABLE after_the_point (id int)" >/dev/null
+TR0=$(now_ms)
+api POST "/v1/previews/$PV/restore-points/$POINT/restore" >/dev/null
+# Put back: the line is looked for in the whole activity (the services' lines come after it),
+# and the preview settled, ready or asleep (its services slept for it; a visit wakes them).
+PUT_BACK=""
+for _ in $(seq 1 240); do
+  api GET "/v1/previews/$PV/activity" | jq_ "any('back as restore point' in a['message'] for a in d)" | grep -q True && case "$(api GET "/v1/previews/$PV" | jq_ "d['state']")" in ready|sleeping) true;; *) false;; esac && PUT_BACK=yes && break
+  sleep 0.5
+done
+RESTORE_MS=$(( $(now_ms) - TR0 ))
+[ -n "$PUT_BACK" ] || { echo "the restore point should be put back and the preview settled (ready or asleep)"; api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d[:12]]"; exit 1; }
+RESTORED=$(psql_app "SELECT coalesce(to_regclass('public.after_the_point')::text, 'gone') || ' ' || (SELECT email FROM users WHERE id = 1)")
+[ "$RESTORED" = "gone $APP_MASKED" ] || { echo "putting the point back should drop what came after it, still masked, on the same DATABASE_URL: $RESTORED"; api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d[:8]]"; exit 1; }
+api DELETE "/v1/previews/$PV/restore-points/$POINT" >/dev/null
+# Its services slept while the data went back: a visit wakes them, on the same DATABASE_URL.
+for _ in $(seq 1 120); do
+  AFTER_DB=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/env.txt" | sed -n 's/^DATABASE_URL=//p' | sed 's#host.docker.internal#127.0.0.1#')
+  [ -n "$AFTER_DB" ] && break
+  sleep 0.5
+done
+[ "$AFTER_DB" = "$APP_DB" ] || { echo "the service should come back on the same DATABASE_URL after a restore point: ${AFTER_DB%%@*}…"; exit 1; }
+
 say "sleep it"
 api POST "/v1/previews/$PV/sleep" >/dev/null
 for _ in $(seq 1 60); do
@@ -1223,6 +1253,7 @@ cat <<EOF
 | The migration's risks the preview names | ${RISKS:-} |
 | The teardown as the preview went (its exit code, with the branch's URL) / runs | 3 / $TEARDOWN |
 | The service's Postgres role / its WAL read / users.email as it reads it | $(echo "$APP_DB" | sed -E 's#^postgres://([^:]+):.*#\1#') / refused / $APP_MASKED |
+| A restore point put back (a table made after it gone, same DATABASE_URL, still masked) | $RESTORE_MS ms |
 | Postgres: the parent's data directory / the branch's (a full copy on this disk) | ${PG_PARENT_KB} KiB / ${PG_BRANCH_KB} KiB |
 | First visit (cold start of the service container, image cached) | $((T3 - T2)) ms |
 | Next visit (warm) | $((T5 - T4)) ms |
