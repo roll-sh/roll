@@ -379,7 +379,7 @@ const PROMPTS: &[Prompt] = &[
                 "Review preview {}. Call previews_wait first. If it failed, read previews_logs (the deploy's first) and \
                  tell me why. If it's awaiting_approval, a writer has to approve-run its head first: say so and stop. Once \
                  it's ready: previews_get for what it branched and its schema_changes (flag a dropped table or column, \
-                 or a NOT NULL column with no default on a table that has rows; previews_data on a table it changed, if you \
+                 or a NOT NULL column with no default on a table that has rows; previews_tables on a table it changed, if you \
                  have it, for what the rows hold now); previews_errors for errors in it; \
                  previews_routes for routes slower than in main's preview (call out a p95 more than 20% slower, and \
                  open one of its slow traces with previews_get_trace if you have it); previews_screenshot with diff=base \
