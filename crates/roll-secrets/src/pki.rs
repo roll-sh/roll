@@ -24,8 +24,12 @@
 //!   `pending` (it signs nothing) until `…/cas/{id}/chain` installs the certificate its parent
 //!   signed. That certificate must carry the CA's key, be a CA's (`keyCertSign`, `cRLSign`), be
 //!   valid now and chain to a self-signed root; the CA's policy narrows to the name constraints the
-//!   chain actually has. Every certificate it issues comes with the chain (`ca_chain`), and lives
-//!   no longer than the intermediate does. CRLs and OCSP stay roll's.
+//!   chain actually has. A certificate without a critical `nameConstraints` within the CA's domains
+//!   (in its own certificate or one between it and the root) is refused, since a signer that dropped
+//!   the CSR's would make roll's key a CA for every name under the root; `unconstrained: true` takes
+//!   it for a root that constrains elsewhere, and the CA says so. Every certificate it issues comes
+//!   with the chain (`ca_chain`), and lives no longer than the intermediate does. CRLs and OCSP stay
+//!   roll's.
 
 use crate::access::{Action, Caller, Scope};
 use crate::crypto::Keyring;
@@ -103,6 +107,9 @@ pub struct Ca {
     /// self-signed root.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ca_chain: Option<String>,
+    /// An active intermediate whose certificate carries no name constraints within its domains,
+    /// installed with `unconstrained: true`: its root constrains it elsewhere, or nothing does.
+    pub unconstrained: bool,
     #[serde(flatten)]
     pub policy: Policy,
     pub created_at: i64,
@@ -127,6 +134,10 @@ pub struct Chain {
     pub certificate: String,
     #[serde(default)]
     pub chain: Option<String>,
+    /// Take a certificate with no name constraints within the CA's domains (an admin's call, for a
+    /// root that constrains it elsewhere). Asked again at every install, renewals too.
+    #[serde(default)]
+    pub unconstrained: bool,
 }
 
 const FIELDS: &[Field] = &[
@@ -403,6 +414,8 @@ struct Checked {
     issuer: String,
     /// When it ends (unix seconds).
     end: i64,
+    /// Whether a certificate below the root limits it to the CA's domains.
+    constrained: bool,
 }
 
 /// The DER of each certificate in `pem` (more than [`CHAIN_MAX`] is refused).
@@ -500,6 +513,19 @@ fn check_chain(req: &Chain, key: &[u8], policy: &mut Policy) -> Result<Checked> 
         current = p;
     }
     // Name constraints apply from every CA below the root (a trust anchor's are its own business).
+    let constrained = std::iter::once(&cert).chain(path[..path.len() - 1].iter().map(|&i| &pool[i])).any(|c| constraint(c, &policy.domains).is_ok());
+    if !constrained && !req.unconstrained {
+        let why = constraint(&cert, &policy.domains).err().unwrap_or_default();
+        return Err(Error::BadRequest(format!(
+            "the certificate {why}, so roll's key would be a CA for any name under your root. Have it signed with the CSR's name constraints \
+             (critical, permitting {}): AWS Private CA copies them with the SubordinateCACertificate_PathLen0_CSRPassthrough/V1 template \
+             (or …_APIPassthrough/V1 with them in the API passthrough), and the plain subordinate templates drop them; openssl ca drops them \
+             unless its config has copy_extensions = copy, or nameConstraints = critical,{} in the extension section. For a root that \
+             constrains this CA elsewhere, install it with unconstrained: true",
+            policy.domains.join(", "),
+            policy.domains.iter().map(|d| format!("permitted;DNS:{d}")).collect::<Vec<_>>().join(",")
+        )));
+    }
     narrow(policy, &cert, "the certificate")?;
     for &i in &path[..path.len() - 1] {
         narrow(policy, &pool[i], &format!("{}", pool[i].subject()))?;
@@ -509,7 +535,40 @@ fn check_chain(req: &Chain, key: &[u8], policy: &mut Policy) -> Result<Checked> 
         parents: path.iter().map(|&i| pem_of(pool[i].as_raw())).collect(),
         issuer: cert.issuer().to_string(),
         end: cert.validity().not_after.timestamp(),
+        constrained,
     })
+}
+
+/// A DNS name constraint's domain: no leading or trailing dot, lowercase (`""` is every name).
+fn dns_base(n: &str) -> String {
+    n.trim_start_matches('.').trim_end_matches('.').to_ascii_lowercase()
+}
+
+/// `name` is `d` or under it (`""` takes every name).
+fn under(name: &str, d: &str) -> bool {
+    d.is_empty() || name == d || name.ends_with(&format!(".{d}"))
+}
+
+/// Whether a certificate limits what it signs to `domains`: a critical `nameConstraints` whose
+/// permitted DNS subtrees are each within one of them. Otherwise why not, for the refusal.
+fn constraint(c: &x509_parser::certificate::X509Certificate<'_>, domains: &[String]) -> std::result::Result<(), String> {
+    use x509_parser::extensions::GeneralName;
+    let nc = match c.name_constraints() {
+        Ok(Some(nc)) => nc,
+        Ok(None) => return Err("has no name constraints: its signer dropped the ones the CSR asked for".into()),
+        Err(_) => return Err("has name constraints that don't parse".into()),
+    };
+    if !nc.critical {
+        return Err("has name constraints that aren't critical: a client that doesn't read them would ignore them".into());
+    }
+    let dns: Vec<String> = nc.value.permitted_subtrees.iter().flatten().filter_map(|s| if let GeneralName::DNSName(d) = &s.base { Some(dns_base(d)) } else { None }).collect();
+    if dns.is_empty() {
+        return Err("permits no DNS names in particular (its name constraints have no permitted DNS subtrees)".into());
+    }
+    match dns.iter().find(|p| p.is_empty() || !domains.iter().any(|d| under(p, d))) {
+        Some(p) => Err(format!("permits {}, outside the CA's domains ({})", if p.is_empty() { "every DNS name" } else { p }, domains.join(", "))),
+        None => Ok(()),
+    }
 }
 
 /// `policy` narrowed to a certificate's name constraints: DNS names within both, IP addresses
@@ -522,12 +581,10 @@ fn narrow(policy: &mut Policy, c: &x509_parser::certificate::X509Certificate<'_>
         Ok(None) => return Ok(()),
         Err(_) => return Err(Error::BadRequest(format!("{whose} has name constraints that don't parse"))),
     };
-    let base = |n: &str| n.trim_start_matches('.').trim_end_matches('.').to_ascii_lowercase();
-    let under = |name: &str, d: &str| d.is_empty() || name == d || name.ends_with(&format!(".{d}"));
     let (mut dns, mut ips) = (vec![], vec![]);
     for s in nc.permitted_subtrees.iter().flatten() {
         match &s.base {
-            GeneralName::DNSName(d) => dns.push(base(d)),
+            GeneralName::DNSName(d) => dns.push(dns_base(d)),
             GeneralName::IPAddress(ip) => ips.push(ip.to_vec()),
             GeneralName::DirectoryName(_) => {
                 return Err(Error::BadRequest(format!("{whose} limits subject names (directoryName): roll's certificates are named for their DNS name, so clients would reject them; constrain DNS names and IP addresses only")));
@@ -558,7 +615,7 @@ fn narrow(policy: &mut Policy, c: &x509_parser::certificate::X509Certificate<'_>
     for s in nc.excluded_subtrees.iter().flatten() {
         match &s.base {
             GeneralName::DNSName(e) => {
-                let e = base(e);
+                let e = dns_base(e);
                 if let Some(d) = policy.domains.iter().find(|d| under(&e, d) && !under(d, &e)) {
                     return Err(Error::BadRequest(format!("{whose} excludes {e}, inside {d}: a CA's policy can't leave part of a domain out; have it signed without that exclusion, or make the CA for narrower domains")));
                 }
@@ -737,16 +794,17 @@ impl Secrets {
     pub fn cas(&self, project: &str, caller: &Caller) -> Result<Vec<Ca>> {
         caller.need(Action::Read, &Scope::project(project))?;
         self.project(project)?;
-        type Row = (String, String, String, String, i64, String, Option<String>, Option<String>);
+        type Row = (String, String, String, String, i64, String, Option<String>, Option<String>, Option<i64>);
         self.db.read(|c| {
-            Ok(c.query::<Row>("SELECT id, name, certificate, policy, created_at, created_by, csr, chain FROM cas WHERE project_id = ? ORDER BY name", [project], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?))
+            Ok(c.query::<Row>("SELECT id, name, certificate, policy, created_at, created_by, csr, chain, unconstrained FROM cas WHERE project_id = ? ORDER BY name", [project], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?))
             })?
             .into_iter()
-            .filter_map(|(id, name, certificate, policy, created_at, created_by, csr, chain)| {
+            .filter_map(|(id, name, certificate, policy, created_at, created_by, csr, chain, unconstrained)| {
                 let ca_chain = chain.map(|p| format!("{certificate}{p}"));
                 let status = if certificate.is_empty() { "pending" } else { "active" };
-                Some(Ca { id, name, certificate, status, intermediate: csr.is_some() || ca_chain.is_some(), csr, ca_chain, policy: serde_json::from_str(&policy).ok()?, created_at, created_by })
+                let unconstrained = unconstrained.unwrap_or(0) != 0;
+                Some(Ca { id, name, certificate, status, intermediate: csr.is_some() || ca_chain.is_some(), csr, ca_chain, unconstrained, policy: serde_json::from_str(&policy).ok()?, created_at, created_by })
             })
             .collect())
         })
@@ -789,7 +847,7 @@ impl Secrets {
         let sealed = dek.seal(&aad(project, &id), &Value::new(key.serialize_pem()));
         let at = self.db.now_ms()?;
         let status = if n.intermediate { "pending" } else { "active" };
-        let ca = Ca { id: id.clone(), name: n.name, certificate, status, intermediate: n.intermediate, csr, ca_chain: None, policy, created_at: at, created_by: caller.made_by().to_string() };
+        let ca = Ca { id: id.clone(), name: n.name, certificate, status, intermediate: n.intermediate, csr, ca_chain: None, unconstrained: false, policy, created_at: at, created_by: caller.made_by().to_string() };
         self.db.write(|c| {
             if c.query_row("SELECT 1 FROM cas WHERE project_id = ? AND name = ?", [project, &ca.name], |_| Ok(())).optional()?.is_some() {
                 return Err(Error::Conflict("exists", format!("a CA named {} exists", ca.name)));
@@ -809,7 +867,8 @@ impl Secrets {
     /// carries the CA's key, is a CA's (`keyCertSign`, `cRLSign`), is valid now, and chains to a
     /// self-signed root through certificates that are CAs, valid now and allow the path's length.
     /// The CA's policy narrows to the name constraints of the certificate and of each issuer below
-    /// the root. Audited.
+    /// the root, and one of them must limit it to the CA's domains unless `unconstrained` says the
+    /// root constrains it elsewhere (asked again at every renewal). Audited.
     pub fn install_chain(&self, project: &str, id: &str, req: Chain, caller: &Caller) -> Result<Ca> {
         caller.need(Action::Admin, &Scope::project(project))?;
         let dek = self.project(project)?;
@@ -825,12 +884,16 @@ impl Secrets {
         let key = rcgen::KeyPair::from_pem(dek.open(&aad(project, id), &key)?.expose()).map_err(|e| Error::Internal(format!("the CA's key: {e}")))?;
         let checked = check_chain(&req, key.public_key_raw(), &mut policy)?;
         let at = self.db.now_ms()?;
-        let summary = format!("installed {name}'s certificate, signed by {} until {}; it signs for {}", checked.issuer, chrono_day(checked.end * 1000), policy.domains.join(", "));
+        let loose = if checked.constrained { "" } else { "; its certificate has no name constraints within those domains (unconstrained: true)" };
+        let summary = format!("installed {name}'s certificate, signed by {} until {}; it signs for {}{loose}", checked.issuer, chrono_day(checked.end * 1000), policy.domains.join(", "));
         let policy_json = serde_json::to_string(&policy).expect("JSON");
         self.db.write(|c| {
             // Whatever installed a certificate in between, this one replaces it only if the CA is
             // the one that was read.
-            let n = c.execute("UPDATE cas SET certificate = ?, chain = ?, csr = NULL, policy = ? WHERE id = ? AND project_id = ? AND certificate = ?", params![checked.certificate, checked.parents, policy_json, id, project, before])?;
+            let n = c.execute(
+                "UPDATE cas SET certificate = ?, chain = ?, csr = NULL, policy = ?, unconstrained = ? WHERE id = ? AND project_id = ? AND certificate = ?",
+                params![checked.certificate, checked.parents, policy_json, i64::from(!checked.constrained), id, project, before],
+            )?;
             if n == 0 {
                 return Err(Error::Conflict("changed", format!("{name} changed while its certificate was checked: try again")));
             }
