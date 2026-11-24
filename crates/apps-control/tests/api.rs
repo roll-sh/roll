@@ -2517,6 +2517,29 @@ async fn traffic_unusual_for_the_hour_is_an_anomaly() {
     assert!(events("alert.resolved").await.iter().any(|e| e["data"]["alert"] == "alert.anomaly"));
 }
 
+/// Right-sizing advice (Cloud Run's recommender): memory near its limit is one to raise, a warm
+/// instance idle most of the week one to let sleep (with the month's saving), each with the body
+/// that acts on it; nothing before there's an hour to read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_environments_week_says_what_to_change() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80, "min_instances": 1, "memory_mb": 512})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    assert_eq!(call(&w.api, "GET", &format!("{env}/advice"), None).await.1["advice"], json!([]), "nothing to read yet");
+    let now = code_sql::now_ms() / 60_000;
+    let minute = |m: i64, requests: i64| apps_control::store::MinuteRow { minute: m, requests, instances: 1, memory_bytes: 470 << 20, cpu: 1.0, ..Default::default() };
+    w.apps.store.put_minutes(&id, "production", &(1..=180).map(|i| minute(now - i, if i % 20 == 0 { 3 } else { 0 })).collect::<Vec<_>>()).unwrap();
+    let (st, a) = call(&w.api, "GET", &format!("{env}/advice"), None).await;
+    let kinds: Vec<&str> = a["advice"].as_array().unwrap().iter().map(|x| x["kind"].as_str().unwrap()).collect();
+    assert_eq!((st, kinds.clone()), (StatusCode::OK, vec!["memory", "min_instances"]), "{a}");
+    assert_eq!(a["advice"][0]["set"], json!({"run": {"memory_mb": 768}}), "{a}");
+    assert!(a["advice"][1]["saving_usd_month"].as_f64() > Some(0.0), "{a}");
+    // Its body acts on it.
+    assert_eq!(call(&w.api, "PUT", &env, Some(a["advice"][1]["set"].clone())).await.0, StatusCode::OK);
+    assert_eq!(call(&w.api, "GET", &env, None).await.1["run"]["min_instances"], 0);
+}
+
 /// Attack mode: on by itself once a minute's requests reach its threshold (said as
 /// `attack.mode`), every visitor without a pass then gets the challenge page while a rule that
 /// denies still denies; on and off by hand with `challenge_until`.

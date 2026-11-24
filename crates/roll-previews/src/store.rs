@@ -2139,6 +2139,7 @@ impl Store {
                 against,
                 unstable: report.unstable,
                 step: report.step,
+                step_ms: report.step_ms,
             })
             .collect())
     }
