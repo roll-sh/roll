@@ -302,6 +302,24 @@ that comes back with the visit's cookie and no sign-in's, whatever went wrong, i
 account is made, no session is issued, no identity is linked, and nothing is recorded as a
 sign-in. Google's `hd` (the Workspace domain) goes with the email. `Accounts::visit_url` builds the start's URL for a product.
 
+A visitor from an organisation with an SSO connection (`provider` `sso`, roll apps' `provider:
+"sso"`) starts at `GET /v1/accounts/sso/visit?r=<request>` (public): a page of roll's asks their
+work email, and `&email=` picks the connection that answers for its verified domain (no
+connection, throttled, a request the product didn't sign or that expired (`VisitGate::plausible`,
+asked before anything is counted or written), or the provider not answering: the page again,
+saying so). Visits count in buckets of their own (`sso-visit:` an email's and a connection's, 30
+an address in ten minutes), never a sign-in's, so a flood of them can't lock a company's people
+out of roll. Then it's that
+connection's flow (the same throttles, state, PKCE, nonce and ID token checks, a verified email in
+the connection's domains, Google's `hd`) with the visit's cookie and `intent` `visit`, and the
+callback hands the gate a `Visitor` of provider `sso`, subject `<connection>:<sub>`, and `groups`:
+the ID token's `groups` claim (strings, lower case, at most 200). The callback takes the state
+bound to either of the browser's cookies (a sign-in's or a visit's). No account is made or
+linked, and a connection's `enforce` doesn't apply: a visit isn't a sign-in to roll.
+`Accounts::sso_vouches(connection, email)` says whether a connection still answers for an
+email's domain: roll apps asks it at each visitor session's recheck.
+`flows.rs::a_visitor_signs_in_through_their_organisations_sso`.
+
 ### SSO (a company's OpenID Connect provider)
 
 Okta, Entra ID, Google Workspace, JumpCloud or any OpenID Connect provider signs people in, chosen
@@ -751,6 +769,7 @@ type MfaRequired = { status: "mfa_required"; methods: ("totp" | "recovery")[]; c
 | `POST /v1/accounts/oauth/{provider}/start` | `{intent?: "signin" \| "link", invite?, return_to?}` | `{url}` and `Set-Cookie` (the browser cookie); 400 `{code: "invite_invalid"}`; 404 provider not configured; `link` needs a session (401) |
 | `GET /v1/accounts/oauth/{provider}/callback` | query `code`, `state` (or `error`) | 303 to the dashboard, see above |
 | `GET /v1/accounts/oauth/{provider}/visit` | query `r` (a product's request), `orgs=1`? | 303 to the provider, with the browser-binding cookie; see "Visitors" |
+| `GET /v1/accounts/sso/visit` | query `r` (a product's request), `email`? | without `email` (or one no connection answers for): 200, a page asking for it; else 303 to the connection's provider, with the browser-binding cookie; see "Visitors" |
 | `POST /v1/accounts/sso/start` | `{email, invite?, return_to?}`, or `{intent: "link"}` with a session (csrf) | `{url}` and `Set-Cookie` (the browser cookie); 400 `{code: "no_sso"}` when no connection answers for the email's (verified) domain, `throttled`, `provider` |
 | `GET /v1/accounts/sso/{id}/callback` | query `code`, `state` (or `error`) | 303 to the dashboard; `?error=` `unverified_email`, `domain`, `not_invited`, `link_required`, `linked_elsewhere`, `link_email`, `state` or `provider` |
 | `POST /v1/accounts/signin/passkey/options` | | `{id, publicKey}` for `navigator.credentials.get`: with a session owing a second factor, that person's passkeys; without, any (throttled per address); 503 `{code: "passkeys_off"}` |

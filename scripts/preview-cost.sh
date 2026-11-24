@@ -685,7 +685,8 @@ if [ -n "$PG_BRANCH" ]; then
   PLANTED=$(docker run --rm --name roll-previews-psqltest --network host postgres:18-alpine psql "$APP_DB2" -Atc "CREATE FUNCTION public.pg_get_indexdef(oid) RETURNS text LANGUAGE plpgsql AS \$f\$ BEGIN EXECUTE 'ALTER ROLE $APP_ROLE SUPERUSER'; RETURN 'x'; END \$f\$; ALTER DATABASE main SET search_path = public, pg_catalog" 2>&1 | tail -1 || true)
   [ "$PLANTED" = "ALTER DATABASE" ] || { echo "the hostile function should have been planted: $PLANTED (env.txt: $(echo "$ENV_TXT" | head -c 300))"; exit 1; }
   # A note left open across the push: the next head's screenshot run crops its element.
-  api POST "/v1/code/changes/$CHG/reviews" "{\"verdict\":\"comment\",\"body\":\"**Feedback on the preview** · [\`/\`](http://x/) · \`body\`\\n\\nThe whole page\"}" >/dev/null
+  # Left in Safari on a phone after a click: its crop is taken as the reviewer saw it.
+  api POST "/v1/code/changes/$CHG/reviews" "{\"verdict\":\"comment\",\"body\":\"**Feedback on the preview** · [\`/\`](http://x/) · \`body\`\\n\\nThe whole page\\n\\n<sub>390x844 viewport · Safari 18 on iOS · roll preview</sub>\\n\\n<details><summary>On the page: 1 step</summary>\\n\\nWhat they did:\\n\\n1. \`2s before · click body\`\\n\\n</details>\"}" >/dev/null
   api POST "/v1/code/changes/$CHG/revise" '{"base":"main","message":"New page, again","files":{"index.html":{"content":"preview of change 1, again"},'"$OPENAPI_CHG"'}}' >/dev/null
   SCHEMA=""
   for _ in $(seq 1 120); do
@@ -1094,6 +1095,13 @@ done
 curl -sS -o "$HOME_DIR/crop.png" "http://$API/v1/previews/$PV/notes/$CROP_NOTE/crop"
 CROP=$(head -c 8 "$HOME_DIR/crop.png" | od -An -tx1 | tr -d ' \n')
 [ "$CROP" = 89504e470d0a1a0a ] || { echo "the note's crop should be a PNG: $CROP"; exit 1; }
+# Taken as its reviewer saw it: in their engine (WebKit, the other browsers' run), at their
+# phone's viewport, after their click.
+CROP_AS=$(curl -sS -D - -o /dev/null "http://$API/v1/previews/$PV/notes/$CROP_NOTE/crop" | tr -d '\r' | sed -n 's/^x-roll-crop-as: //Ip')
+[ "$CROP_AS" = "WebKit, 390x844, after 1 step" ] || { echo "the note's crop should be taken as its reviewer saw it: '$CROP_AS'"; exit 1; }
+# And it is (not only said): a crop of the whole page at a phone's width, not the desktop's 1280.
+CROP_W=$(python3 -c "import struct,sys; b=open(sys.argv[1],'rb').read(); print(struct.unpack('>I', b[16:20])[0] if b[:4]==b'\x89PNG' else 0)" "$HOME_DIR/crop.png")
+[ "$CROP_W" -gt 0 ] && [ "$CROP_W" -lt 1280 ] || { echo "the note's crop should be at the reviewer's phone width, not the desktop's: $CROP_W px"; exit 1; }
 
 say "[skip preview] in the title removes the preview; without it, a new one comes"
 api PATCH "/v1/code/changes/$CHG" '{"title":"New page [skip preview]"}' >/dev/null

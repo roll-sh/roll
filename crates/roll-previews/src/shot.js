@@ -729,20 +729,35 @@ const tryIt = async (sessionId) => {
     }
   } catch {}
   fs.writeFileSync(process.env.OUT + ".pages.json", JSON.stringify(pages));
-  // The open notes' elements ($CROPS: [{note, path, selector}], checked by roll), each found by
-  // its selector in roll's world on its page at the desktop width, scrolled into view and cropped
-  // with a margin, to $OUT.crop.<n>.png; which note each is to $OUT.crops.json. A selector that
-  // finds nothing, or nothing visible, is left out. Best effort, as the pages are.
+  // The open notes' elements ($CROPS: [{note, path, selector, width?, height?, steps?}], checked
+  // by roll), each found by its selector in roll's world on its page, scrolled into view and
+  // cropped with a margin, to $OUT.crop.<n>.png; which note each is to $OUT.crops.json. As its
+  // reviewer saw it when the note says: at their viewport (a phone's emulated as one), after
+  // their clicks and keys on the page (a state's steps, 10 s at most; the first that finds
+  // nothing ends them); else at the desktop width. A selector that finds nothing, or nothing
+  // visible, is left out. Best effort, as the pages are.
   const crops = [];
   try {
-    const asked = JSON.parse(process.env.CROPS || "[]").filter((c) => c && typeof c.note === "string" && typeof c.path === "string" && typeof c.selector === "string").slice(0, 10);
-    await send("Emulation.clearDeviceMetricsOverride", {}, sessionId);
+    // Another engine's (a Safari or Firefox reviewer's) are the other browsers' run's.
+    const asked = JSON.parse(process.env.CROPS || "[]").filter((c) => c && typeof c.note === "string" && typeof c.path === "string" && typeof c.selector === "string" && !c.browser).slice(0, 10);
     for (const c of asked) {
       if (!/^\/(?!\/)[^\s#"'`\\]{0,199}$/.test(c.path)) continue;
+      const w = Number.isInteger(c.width) && c.width >= 320 && c.width <= 2560 ? c.width : null;
+      const h = Number.isInteger(c.height) && c.height >= 320 && c.height <= 2000 ? c.height : 900;
+      if (w) await send("Emulation.setDeviceMetricsOverride", { width: w, height: h, deviceScaleFactor: 1, mobile: w < 600 }, sessionId);
+      else await send("Emulation.clearDeviceMetricsOverride", {}, sessionId);
       const done = once("Page.loadEventFired");
       await send("Page.navigate", { url: new URL(c.path, process.env.URL).href }, sessionId);
       await Promise.race([done, sleep(10000)]);
       await sleep(300);
+      if (Array.isArray(c.steps) && c.steps.length) {
+        const until = Date.now() + 10000;
+        for (const s of c.steps.slice(0, 10)) {
+          if (Date.now() > until || (await step(sessionId, s || {}, until))) break;
+          await sleep(150);
+        }
+        await sleep(300);
+      }
       await still(sessionId);
       const r = await Promise.race([
         check(
@@ -769,6 +784,7 @@ const tryIt = async (sessionId) => {
       fs.writeFileSync(`${process.env.OUT}.crop.${crops.length}.png`, Buffer.from(shot.data, "base64"));
       crops.push({ note: c.note, n: crops.length });
     }
+    await send("Emulation.clearDeviceMetricsOverride", {}, sessionId).catch(() => null);
   } catch {}
   fs.writeFileSync(process.env.OUT + ".crops.json", JSON.stringify(crops));
   await sleep(200);

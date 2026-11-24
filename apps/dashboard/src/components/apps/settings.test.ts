@@ -51,6 +51,14 @@ describe("the settings form", () => {
     expect(formOf({ ...svc, run: { ...svc.run, schedule_scale: patch.run?.schedule_scale ?? undefined } }).floors).toBe("mon 08:00..fri 18:00=3 Europe/Berlin\nsat 10:00..sat 14:00=3 Europe/Berlin\nmon 00:00..mon 06:00=1");
   });
 
+  it("keeps a route's objective when the service's own is edited", () => {
+    const routes = [{ route: "/api/checkout", method: "POST", objective: 99.95, latency_ms: 800 }];
+    const withSlo = { ...svc, run: { ...svc.run, slo: { objective: 99.9, routes } } };
+    const f = formOf(withSlo);
+    expect(f.sloRoutes).toBe("POST /api/checkout 99.95% p95 < 800ms");
+    expect(patchOf(withSlo, { ...f, sloObjective: "99.5" }).run?.slo).toEqual({ objective: 99.5, routes });
+  });
+
   it("keeps what was edited when the service changes under the form", () => {
     const base = formOf(svc);
     const edited = { ...base, build: "pnpm build:prod" };

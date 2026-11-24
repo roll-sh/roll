@@ -1066,6 +1066,7 @@ impl Engine {
         // is the preview's first URL and its path): what each note is about, as a picture.
         let crops = self.crops_wanted(r).await;
         let stories = storybook.as_ref().filter(|(svc, _)| *svc == first.name).map(|(_, at)| at.clone());
+        let opts_crops = crops.clone();
         let opts = crate::ports::ShotOptions { pages: first_paths, hide: hide.clone(), openapi, endpoints, states, browsers, crops, stories, modes };
         let started = std::time::Instant::now();
         // The page's words are its code's: what it was given is masked before they're kept (and
@@ -1105,7 +1106,9 @@ impl Engine {
                 let stories: Vec<String> = pages.iter().filter(|p| p.path.starts_with("story:")).map(|p| p.path.clone()).collect();
                 let wanted: Vec<String> = entries.iter().cloned().chain(width_keys.iter().cloned()).chain(own_keys.iter().filter(|k| took(k)).cloned()).chain(stories).collect();
                 for (note, png) in &shot.crops {
-                    if let Err(e) = self.store.set_note_crop(&r.id, note, png) {
+                    // How it was taken: as its reviewer saw it, when the note said.
+                    let seen = opts_crops.iter().find(|c| c.note == *note).and_then(|c| crate::notes::Seen { width: c.width, height: c.height, steps: c.steps.clone(), browser: c.browser.clone() }.label());
+                    if let Err(e) = self.store.set_note_crop(&r.id, note, png, seen.as_deref()) {
                         warn!(preview = %r.id, error = %e, "previews: keeping a note's crop");
                     }
                 }
@@ -1170,7 +1173,7 @@ impl Engine {
             .into_iter()
             .filter(|n| !n.crop && crate::settings::page_path_ok(&n.path) && crate::settings::selector_ok(&n.selector))
             .take(crate::store::CROPS_PER_RUN)
-            .map(|n| crate::ports::CropAsk { note: n.id, path: n.path, selector: n.selector })
+            .map(|n| crate::ports::CropAsk { note: n.id, path: n.path, selector: n.selector, width: n.seen.width, height: n.seen.height, steps: n.seen.steps, browser: n.seen.browser })
             .collect()
     }
 

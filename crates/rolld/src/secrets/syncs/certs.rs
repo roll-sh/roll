@@ -4,15 +4,19 @@
 //! - `aws-acm`: `ImportCertificate`, again with the ARN it answered the first time. Signed in as a
 //!   project AWS role (`…/aws-roles`), assumed for each push: no AWS key is kept for the sync.
 //! - `azure-keyvault-cert`: a Key Vault certificate imported as PEM, a new version each time. Signed
-//!   in as a service principal, as `azure-key-vault` is.
+//!   in as `azure-key-vault` is: a federated credential trusting roll's issuer, or a client secret.
 //! - `cloudflare-cert`: a zone's custom certificate, made once and `PATCH`ed after.
+//!
+//! A sync deleted with `remove=true` deletes what it pushed there first: ACM's
+//! `DeleteCertificate` (which keeps a certificate something still serves), the Key Vault
+//! certificate (only one roll created), the Cloudflare custom certificate.
 //!
 //! Hosts are AWS's, the vault's and Cloudflare's own, built from names checked as names (a region,
 //! a vault, a zone id), never a URL a tenant gives. The private key goes only into the request body
 //! over TLS: errors carry the target and the platform's status and error code, never the answer's
 //! message (it may quote the request).
 
-use super::platforms::{Http, cf_codes, credential, credential_keys, ident, key_field};
+use super::platforms::{AZURE_INSTEAD, Http, aws_call, aws_endpoint, aws_region, azure_auth, azure_token, cf_codes, credential, credential_keys, ident, key_field};
 use super::{bad, block_on, target};
 use base64::Engine as _;
 use roll_secrets::syncs::{Certificate, Push, Resources, SyncField, SyncTarget};
@@ -44,7 +48,7 @@ fn remote_id(what: &str, v: Option<&str>) -> Result<String> {
 /// An AWS region's name (`us-east-1`).
 fn region(r: Option<String>) -> Result<String> {
     let r = r.unwrap_or_default();
-    if !ident(&r, 32, "-") || r.chars().any(|c| c.is_ascii_uppercase()) || r.starts_with('-') {
+    if !aws_region(&r) {
         return Err(bad("region is an AWS region (us-east-1)"));
     }
     Ok(r)
@@ -68,21 +72,19 @@ impl Acm {
         }
         Ok((region(r)?, role))
     }
+
+    /// An ACM call in `region` (AWS JSON 1.1), signed with the push's role session.
+    fn request(&self, region: &str, session: &roll_secrets::aws::Session, amz_target: &str, body: &[u8]) -> Result<reqwest::RequestBuilder> {
+        let base = self.1.clone().unwrap_or_else(|| format!("https://acm.{region}.amazonaws.com"));
+        let (url, host) = aws_endpoint(&base)?;
+        let signer = (session.access_key_id.expose(), session.secret_access_key.expose(), Some(session.session_token.expose()));
+        Ok(aws_call(self.0.guarded(), &url, &host, region, "acm", amz_target, body, signer))
+    }
 }
 
-/// The `Authorization` of an AWS JSON 1.1 call signed with a session (SigV4, the session's token
-/// signed too).
-fn sigv4_session(host: &str, region: &str, service: &str, amz_target: &str, amz_date: &str, body: &[u8], s: &roll_secrets::aws::Session) -> String {
-    use sha2::{Digest, Sha256};
-    let payload: String = Sha256::digest(body).iter().map(|b| format!("{b:02x}")).collect();
-    let signed = "content-type;host;x-amz-date;x-amz-security-token;x-amz-target";
-    let token = s.session_token.expose();
-    let canonical = format!("POST\n/\n\ncontent-type:application/x-amz-json-1.1\nhost:{host}\nx-amz-date:{amz_date}\nx-amz-security-token:{token}\nx-amz-target:{amz_target}\n\n{signed}\n{payload}");
-    let date = &amz_date[..8];
-    let scope = format!("{date}/{region}/{service}/aws4_request");
-    let sts = s3_proto::sigv4::string_to_sign(amz_date, &scope, &canonical);
-    let sig = s3_proto::sigv4::sign(&s3_proto::sigv4::signing_key(s.secret_access_key.expose(), date, region, service), &sts);
-    format!("AWS4-HMAC-SHA256 Credential={}/{scope}, SignedHeaders={signed}, Signature={sig}", s.access_key_id.expose())
+/// An ACM error's `__type` without its namespace; never the message.
+fn acm_error(v: &Json) -> String {
+    v["__type"].as_str().unwrap_or_default().rsplit('#').next().unwrap_or_default().to_string()
 }
 
 impl SyncTarget for Acm {
@@ -114,12 +116,6 @@ impl SyncTarget for Acm {
     fn push_certificate(&self, t: &Json, p: &Push<'_>, c: &Certificate, remote: Option<&str>) -> Result<String> {
         let (region, _) = self.target(t)?;
         let session = p.aws.ok_or_else(|| bad("an aws-acm sync signs in as the project's AWS role"))?;
-        let base = self.1.clone().unwrap_or_else(|| format!("https://acm.{region}.amazonaws.com"));
-        let url = url::Url::parse(&format!("{base}/")).map_err(|e| Error::Internal(e.to_string()))?;
-        let host = match url.port() {
-            Some(port) => format!("{}:{port}", url.host_str().unwrap_or_default()),
-            None => url.host_str().unwrap_or_default().to_string(),
-        };
         let what = format!("aws-acm {region}");
         let b64 = |s: &str| base64::engine::general_purpose::STANDARD.encode(s);
         let import = |arn: Option<&str>| {
@@ -133,32 +129,37 @@ impl SyncTarget for Acm {
                 None => body["Tags"] = json!([{ "Key": ACM_TAG.0, "Value": ACM_TAG.1 }, { "Key": "roll-sync", "Value": p.sync }]),
             }
             let body = Zeroizing::new(serde_json::to_vec(&body).expect("JSON"));
-            let amz_date = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
-            let amz_target = "CertificateManager.ImportCertificate";
-            let auth = sigv4_session(&host, &region, "acm", amz_target, &amz_date, &body, session);
-            self.0
-                .guarded()
-                .post(url.clone())
-                .header("content-type", "application/x-amz-json-1.1")
-                .header("x-amz-date", amz_date)
-                .header("x-amz-security-token", session.session_token.expose())
-                .header("x-amz-target", amz_target)
-                .header("authorization", auth)
-                .body(body.to_vec())
+            self.request(&region, session, "CertificateManager.ImportCertificate", &body)
         };
-        // `__type` without its namespace; never the message.
-        let kind = |v: &Json| v["__type"].as_str().unwrap_or_default().rsplit('#').next().unwrap_or_default().to_string();
         block_on(async {
-            let (mut status, mut v) = self.0.send(import(remote), &what).await?;
+            let (mut status, mut v) = self.0.send(import(remote)?, &what).await?;
             // Deleted at AWS (nothing uses it then: ACM refuses to delete a certificate in use):
             // import it as a new one.
-            if remote.is_some() && kind(&v) == "ResourceNotFoundException" {
-                (status, v) = self.0.send(import(None), &what).await?;
+            if remote.is_some() && acm_error(&v) == "ResourceNotFoundException" {
+                (status, v) = self.0.send(import(None)?, &what).await?;
             }
             if !status.is_success() {
-                return Err(Error::Link(format!("{what}: {status} {}", kind(&v))));
+                return Err(Error::Link(format!("{what}: {status} {}", acm_error(&v))));
             }
             remote_id(&what, v["CertificateArn"].as_str())
+        })
+    }
+    fn remove_certificate(&self, t: &Json, p: &Push<'_>, arn: &str) -> Result<()> {
+        let (region, _) = self.target(t)?;
+        let session = p.aws.ok_or_else(|| bad("an aws-acm sync signs in as the project's AWS role"))?;
+        let what = format!("aws-acm {region}");
+        let body = serde_json::to_vec(&json!({ "CertificateArn": arn })).expect("JSON");
+        block_on(async {
+            let (status, v) = self.0.send(self.request(&region, session, "CertificateManager.DeleteCertificate", &body)?, &what).await?;
+            match acm_error(&v).as_str() {
+                _ if status.is_success() => Ok(()),
+                "ResourceNotFoundException" => Ok(()),
+                "ResourceInUseException" => Err(Error::Conflict(
+                    "in_use",
+                    format!("{what}: ACM won't delete {arn} while something serves it (a load balancer, CloudFront or API Gateway): move them to another certificate, then delete the sync again; it's kept until then"),
+                )),
+                e => Err(Error::Link(format!("{what}: deleting {arn}: {status} {e}"))),
+            }
         })
     }
 }
@@ -189,14 +190,17 @@ struct KvTarget {
     name: String,
     tenant: String,
     client_id: String,
-    secret_key: String,
+    /// The key holding the client secret, or (`Err`) a federated credential.
+    auth: std::result::Result<String, roll_secrets::clouds::Account>,
 }
+
+const AKV_SCOPE: &str = "https://vault.azure.net/.default";
 
 const AKV_API: &str = "api-version=7.4";
 
 impl KeyVaultCert {
     fn target(&self, t: &Json) -> Result<KvTarget> {
-        let fields = [("vault", true), ("certificate", true), ("tenant_id", true), ("client_id", true), ("client_secret_key", true)];
+        let fields = [("vault", true), ("certificate", true), ("tenant_id", true), ("client_id", true), ("client_secret_key", false)];
         let [vault, name, tenant, client, secret] = target("azure-keyvault-cert", t, fields)?;
         let vault = vault.unwrap_or_default();
         if !(3..=24).contains(&vault.len()) || !ident(&vault, 24, "-") || !vault.starts_with(|c: char| c.is_ascii_alphabetic()) {
@@ -214,8 +218,25 @@ impl KeyVaultCert {
         if !ident(&client_id, 64, "-") {
             return Err(bad("client_id is an app registration's client id"));
         }
-        Ok(KvTarget { vault, name, tenant, client_id, secret_key: key_field("azure-keyvault-cert", "client_secret_key", secret)? })
+        let auth = azure_auth("azure-keyvault-cert", &tenant, &client_id, secret, AKV_SCOPE.into())?;
+        Ok(KvTarget { vault, name, tenant, client_id, auth })
     }
+
+    /// The vault's base URL.
+    fn vault(&self, t: &KvTarget) -> String {
+        self.1.vault.clone().unwrap_or_else(|| format!("https://{}.vault.azure.net", t.vault))
+    }
+
+    /// A token for the vault: the federated one for this push, or the target's service principal
+    /// signed in with its stored secret.
+    async fn login(&self, t: &KvTarget, p: &Push<'_>, what: &str) -> Result<Zeroizing<String>> {
+        azure_token(&self.0, self.0.guarded(), &self.1.login, p, &t.tenant, &t.client_id, t.auth.as_ref().ok().map(String::as_str), AKV_SCOPE, what).await
+    }
+}
+
+/// A Key Vault error's code; never the message.
+fn akv_code(v: &Json) -> String {
+    v["error"]["code"].as_str().unwrap_or_default().to_string()
 }
 
 impl SyncTarget for KeyVaultCert {
@@ -231,7 +252,7 @@ impl SyncTarget for KeyVaultCert {
             SyncField { name: "certificate", label: "Certificate name", required: true, placeholder: "api-tls" },
             SyncField { name: "tenant_id", label: "Tenant id", required: true, placeholder: "contoso.onmicrosoft.com" },
             SyncField { name: "client_id", label: "App registration's client id", required: true, placeholder: "00000000-0000-0000-0000-000000000000" },
-            SyncField { name: "client_secret_key", label: "Key holding its client secret", required: true, placeholder: "AZURE_SYNC_CLIENT_SECRET" },
+            SyncField { name: "client_secret_key", label: "Key holding its client secret (none: a federated credential)", required: false, placeholder: "AZURE_SYNC_CLIENT_SECRET" },
         ];
         F
     }
@@ -241,6 +262,12 @@ impl SyncTarget for KeyVaultCert {
     fn credentials(&self, t: &Json) -> Vec<String> {
         credential_keys(t, &["client_secret_key"])
     }
+    fn federation(&self, t: &Json) -> Option<roll_secrets::clouds::Account> {
+        self.target(t).ok()?.auth.err()
+    }
+    fn stored_cloud_key(&self, t: &Json) -> Option<&'static str> {
+        self.target(t).ok()?.auth.ok().map(|_| AZURE_INSTEAD)
+    }
     fn check(&self, _: &str, _: &Resources, t: &Json) -> Result<()> {
         self.target(t).map(|_| ())
     }
@@ -249,27 +276,15 @@ impl SyncTarget for KeyVaultCert {
     }
     fn push_certificate(&self, t: &Json, p: &Push<'_>, c: &Certificate, _: Option<&str>) -> Result<String> {
         let t = self.target(t)?;
-        let secret = credential(p, &t.secret_key)?;
         let what = format!("azure-keyvault-cert {}/{}", t.vault, t.name);
-        let vault = self.1.vault.clone().unwrap_or_else(|| format!("https://{}.vault.azure.net", t.vault));
-        let code_of = |v: &Json| v["error"]["code"].as_str().unwrap_or_default().to_string();
+        let vault = self.vault(&t);
+        let code_of = akv_code;
         let mut pem = full_chain(c);
         pem.push_str(c.private_key.expose().trim());
         pem.push('\n');
         let client = self.0.guarded();
         block_on(async {
-            let form = Zeroizing::new(format!(
-                "grant_type=client_credentials&client_id={}&client_secret={}&scope={}",
-                urlencoding::encode(&t.client_id),
-                urlencoding::encode(secret),
-                urlencoding::encode("https://vault.azure.net/.default")
-            ));
-            let login = client.post(format!("{}/{}/oauth2/v2.0/token", self.1.login, t.tenant)).header("content-type", "application/x-www-form-urlencoded").body(form.to_string());
-            let (status, v) = self.0.send(login, &what).await?;
-            let token = match v["access_token"].as_str() {
-                Some(tok) if status.is_success() => Zeroizing::new(tok.to_string()),
-                _ => return Err(Error::Link(format!("{what}: signing in: {status} {}", v["error"].as_str().unwrap_or_default()))),
-            };
+            let token = self.login(&t, p, &what).await?;
             let at = format!("{vault}/certificates/{}", t.name);
             let (status, got) = self.0.send(client.get(format!("{at}?{AKV_API}")).bearer_auth(token.as_str()), &what).await?;
             if status.is_success() && got["tags"]["managed-by"] != "roll-secrets" {
@@ -290,6 +305,32 @@ impl SyncTarget for KeyVaultCert {
                 return Err(Error::Link(format!("{what}: importing: {status} {}", code_of(&v))));
             }
             remote_id(&what, v["id"].as_str())
+        })
+    }
+    /// The certificate and every version of it (the vault keeps it soft-deleted for its retention
+    /// days, where it has soft delete on), and only one roll created.
+    fn remove_certificate(&self, t: &Json, p: &Push<'_>, _: &str) -> Result<()> {
+        let t = self.target(t)?;
+        let what = format!("azure-keyvault-cert {}/{}", t.vault, t.name);
+        let at = format!("{}/certificates/{}?{AKV_API}", self.vault(&t), t.name);
+        let client = self.0.guarded();
+        block_on(async {
+            let token = self.login(&t, p, &what).await?;
+            let (status, got) = self.0.send(client.get(&at).bearer_auth(token.as_str()), &what).await?;
+            if status == reqwest::StatusCode::NOT_FOUND {
+                return Ok(());
+            }
+            if !status.is_success() {
+                return Err(Error::Link(format!("{what}: reading it: {status} {}", akv_code(&got))));
+            }
+            if got["tags"]["managed-by"] != "roll-secrets" {
+                return Err(Error::Link(format!("{what}: roll didn't create it (no managed-by=roll-secrets tag): roll never deletes it")));
+            }
+            let (status, v) = self.0.send(client.delete(&at).bearer_auth(token.as_str()), &what).await?;
+            if !status.is_success() && status != reqwest::StatusCode::NOT_FOUND {
+                return Err(Error::Link(format!("{what}: deleting it: {status} {}", akv_code(&v))));
+            }
+            Ok(())
         })
     }
 }
@@ -369,6 +410,22 @@ impl SyncTarget for CloudflareCert {
             remote_id(&what, v["result"]["id"].as_str())
         })
     }
+    fn remove_certificate(&self, t: &Json, p: &Push<'_>, id: &str) -> Result<()> {
+        let (zone, token_key) = self.target(t)?;
+        let token = credential(p, &token_key)?;
+        let what = format!("cloudflare-cert {zone}");
+        if !ident(id, 64, "-") {
+            return Err(Error::Link(format!("{what}: {id} isn't a custom certificate's id")));
+        }
+        let at = format!("{}/client/v4/zones/{zone}/custom_certificates/{id}", self.1);
+        block_on(async {
+            let (status, v) = self.0.send(self.0.client().delete(at).bearer_auth(token), &what).await?;
+            if !status.is_success() && status != reqwest::StatusCode::NOT_FOUND {
+                return Err(Error::Link(format!("{what}: deleting {id}: {status} {}", cf_codes(&v))));
+            }
+            Ok(())
+        })
+    }
 }
 
 #[cfg(test)]
@@ -403,8 +460,18 @@ mod tests {
                 let req = s3_proto::sigv4::Request { method: method.as_str(), path: uri.path(), query: uri.query().unwrap_or(""), headers: &hs };
                 let hash: String = Sha256::digest(&body).iter().map(|b| format!("{b:02x}")).collect();
                 let verified = s3_proto::sigv4::authenticate_service(&req, chrono::Utc::now().timestamp(), "acm", &hash, |ak| (ak == "ASIAFAKE").then(|| "fake-session-secret".to_string()));
-                if !matches!(verified, Ok(Some(_))) || headers.get("x-amz-security-token").and_then(|t| t.to_str().ok()) != Some("fake-session-token") || target != "CertificateManager.ImportCertificate" {
+                if !matches!(verified, Ok(Some(_))) || headers.get("x-amz-security-token").and_then(|t| t.to_str().ok()) != Some("fake-session-token") {
                     return (StatusCode::FORBIDDEN, axum::Json(json!({ "__type": "InvalidSignatureException" })));
+                }
+                if target == "CertificateManager.DeleteCertificate" {
+                    // A load balancer still serves fake-1.
+                    return match asked["CertificateArn"].as_str() {
+                        Some(arn) if arn.ends_with("/fake-1") => (StatusCode::BAD_REQUEST, axum::Json(json!({ "__type": "com.amazonaws.acm#ResourceInUseException" }))),
+                        _ => (StatusCode::OK, axum::Json(json!({}))),
+                    };
+                }
+                if target != "CertificateManager.ImportCertificate" {
+                    return (StatusCode::BAD_REQUEST, axum::Json(json!({ "__type": "InvalidAction" })));
                 }
                 return match asked["CertificateArn"].as_str() {
                     Some(arn) if arn.ends_with("/gone") => (StatusCode::BAD_REQUEST, axum::Json(json!({ "__type": "com.amazonaws.acm#ResourceNotFoundException" }))),
@@ -443,6 +510,7 @@ mod tests {
                         (StatusCode::OK, axum::Json(json!({ "success": true, "result": { "id": format!("cf-cert-{made}") } })))
                     }
                     ("PATCH", "/cf-cert-1") => (StatusCode::OK, axum::Json(json!({ "success": true, "result": { "id": "cf-cert-1" } }))),
+                    ("DELETE", "/cf-cert-1") => (StatusCode::OK, axum::Json(json!({ "success": true, "result": { "id": "cf-cert-1" } }))),
                     _ => (StatusCode::NOT_FOUND, axum::Json(json!({ "success": false, "errors": [{ "code": 1003 }] }))),
                 };
             }
@@ -462,8 +530,8 @@ mod tests {
         Certificate { key: "TLS_CERT".into(), certificate: pem("CERTIFICATE", format!("fake-leaf-{n}")), private_key: pem("PRIVATE KEY", format!("fake-key-{n}")), chain: pem("CERTIFICATE", "fake-ca".into()) }
     }
 
-    /// Check `target`, then push the `n`th certificate with `credentials` and `remote`, on a
-    /// blocking thread as the store does.
+    /// Check `target`, then push the `n`th certificate with `credentials` and `remote` (or, with
+    /// `n` 0, remove `remote`), on a blocking thread as the store does.
     async fn push(t: Arc<dyn SyncTarget>, target: Json, n: u32, credentials: &[(&str, &str)], remote: Option<String>) -> Result<String> {
         let credentials: BTreeMap<String, Value> = credentials.iter().map(|(k, v)| (k.to_string(), Value::new(v.to_string()))).collect();
         tokio::task::spawn_blocking(move || {
@@ -471,8 +539,11 @@ mod tests {
             let session = roll_secrets::aws::Session { access_key_id: Value::new("ASIAFAKE"), secret_access_key: Value::new("fake-session-secret"), session_token: Value::new("fake-session-token"), expires_at: 0 };
             let aws = t.aws_role(&target).map(|_| &session);
             let values = BTreeMap::new();
-            let p = Push { sync: "syn_1", project: "prj_1", resources: &BTreeSet::new(), environment: "production", path: "/", digest: "d", at: 0, values: &values, changed: &[], removed: &[], secret: None, credentials: &credentials, aws };
-            t.push_certificate(&target, &p, &cert(n), remote.as_deref())
+            let p = Push { sync: "syn_1", project: "prj_1", resources: &BTreeSet::new(), environment: "production", path: "/", digest: "d", at: 0, values: &values, changed: &[], removed: &[], secret: None, credentials: &credentials, aws, cloud_token: None };
+            match n {
+                0 => t.remove_certificate(&target, &p, remote.as_deref().unwrap_or_default()).map(|()| String::new()),
+                n => t.push_certificate(&target, &p, &cert(n), remote.as_deref()),
+            }
         })
         .await
         .unwrap()
@@ -498,7 +569,13 @@ mod tests {
         assert!(decode(&seen[1].2["PrivateKey"]).contains("fake-key-2") && decode(&seen[1].2["CertificateChain"]).contains("fake-ca"));
         // Deleted at AWS: imported as a new certificate.
         let gone = "arn:aws:acm:us-east-1:123456789012:certificate/gone".to_string();
-        assert_eq!(push(acm(), t, 3, &[], Some(gone)).await.unwrap(), "arn:aws:acm:us-east-1:123456789012:certificate/fake-2");
+        assert_eq!(push(acm(), t.clone(), 3, &[], Some(gone)).await.unwrap(), "arn:aws:acm:us-east-1:123456789012:certificate/fake-2");
+        // Removing one a load balancer still serves is refused as in use (the store keeps the sync).
+        let e = push(acm(), t.clone(), 0, &[], Some(arn)).await.unwrap_err();
+        assert!(matches!(&e, Error::Conflict("in_use", m) if m.contains("move them to another certificate")), "{e}");
+        push(acm(), t, 0, &[], Some("arn:aws:acm:us-east-1:123456789012:certificate/fake-2".into())).await.unwrap();
+        let last = m.seen.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(last.2, json!({ "CertificateArn": "arn:aws:acm:us-east-1:123456789012:certificate/fake-2" }));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -532,6 +609,10 @@ mod tests {
         let at = "/client/v4/zones/023e105f4ecef8ad9ca31a8372d0c353/custom_certificates";
         assert_eq!(route, [("POST", at), ("PATCH", &*format!("{at}/cf-cert-1"))]);
         assert!(seen[1].2["certificate"].as_str().unwrap().contains("fake-leaf-2") && seen[1].2["private_key"].as_str().unwrap().contains("fake-key-2") && seen[1].2["bundle_method"] == "force");
+        // remove=true deletes it by its id.
+        push(cf(), t.clone(), 0, &creds, Some("cf-cert-1".into())).await.unwrap();
+        let last = m.seen.lock().unwrap().last().cloned().unwrap();
+        assert_eq!((last.0.as_str(), last.1.as_str()), ("DELETE", &*format!("{at}/cf-cert-1")));
         // A wrong token: the error names Cloudflare's code, never the key.
         let e = push(cf(), t, 3, &[("CLOUDFLARE_API_TOKEN", "wrong")], None).await.unwrap_err().to_string();
         assert!(e.contains("10000") && !e.contains("fake-key"), "{e}");

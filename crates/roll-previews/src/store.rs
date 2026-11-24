@@ -88,6 +88,18 @@ CREATE TABLE IF NOT EXISTS shares (
     revoked INTEGER NOT NULL DEFAULT 0,
     opened_day INTEGER
 ) WITHOUT ROWID;
+-- Mail about notes still to send (`Engine::tend_tells`): claimed by `next_at`, dropped once sent.
+CREATE TABLE IF NOT EXISTS note_tells (
+    id TEXT PRIMARY KEY,
+    preview_id TEXT NOT NULL,
+    review_id TEXT NOT NULL,
+    to_handle TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    text TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_at INTEGER NOT NULL,
+    UNIQUE (review_id, to_handle)
+);
 -- The notes guests left through a share link (their reviews on the change).
 CREATE TABLE IF NOT EXISTS guest_notes (
     preview_id TEXT NOT NULL,
@@ -472,6 +484,18 @@ fn hook_row(r: &code_sql::Row<'_>) -> code_sql::Result<Hook> {
 /// How many people [`Store::visitors`] names.
 pub const VISITORS: usize = 8;
 
+/// Mail about a note still to send ([`Store::claim_tells`]).
+#[derive(Clone, Debug)]
+pub struct Tell {
+    pub id: String,
+    pub preview: String,
+    /// Their roll handle.
+    pub to: String,
+    pub subject: String,
+    pub text: String,
+    pub attempts: i64,
+}
+
 /// A live share link, as [`Store::share_live`] finds it.
 #[derive(Clone, Debug)]
 pub struct LiveShare {
@@ -838,6 +862,10 @@ impl Store {
         }
         // Who a share link is for, and whether its visitors may leave notes (as guests).
         // What a page's change against the baseline is (`visual::compare`'s signature).
+        // How a note's crop was taken, when as its reviewer saw it.
+        if !db.has_column("note_crops", "seen")? {
+            db.add_column("note_crops", "seen", "TEXT")?;
+        }
         if !db.has_column("page_shots", "base_sig")? {
             db.add_column("page_shots", "base_sig", "TEXT")?;
         }
@@ -1387,7 +1415,7 @@ impl Store {
             if let Some((project, change, head)) = gone {
                 emit(c, now, "deleted", &project, id, change.as_deref(), &serde_json::json!({ "head": head }))?;
             }
-            for t in ["resources", "services", "pinned", "pinned_data", "restore_points", "shares", "guest_notes", "visit_tickets", "visit_sessions", "visits", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "runtime_facts", "gone_pushes", "previews"] {
+            for t in ["resources", "services", "pinned", "pinned_data", "restore_points", "shares", "guest_notes", "note_tells", "visit_tickets", "visit_sessions", "visits", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "runtime_facts", "gone_pushes", "previews"] {
                 let col = if t == "previews" { "id" } else { "preview_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
             }
@@ -2930,7 +2958,7 @@ impl Store {
 
     /// Keep a note's crop (a PNG of at most [`CROP_MAX`] bytes; a bigger one is dropped), at
     /// most [`CROPS_KEPT`] a preview (the oldest go).
-    pub fn set_note_crop(&self, id: &str, note: &str, png: &[u8]) -> Result<()> {
+    pub fn set_note_crop(&self, id: &str, note: &str, png: &[u8], seen: Option<&str>) -> Result<()> {
         if png.len() > CROP_MAX || !png.starts_with(b"\x89PNG") {
             return Ok(());
         }
@@ -2939,8 +2967,8 @@ impl Store {
         let b64 = base64::engine::general_purpose::STANDARD.encode(png);
         self.db.write(|c| {
             c.execute(
-                "INSERT INTO note_crops (preview_id, note_id, png, at) VALUES (?, ?, ?, ?) ON CONFLICT (preview_id, note_id) DO UPDATE SET png = excluded.png, at = excluded.at",
-                params![id, note, b64, now],
+                "INSERT INTO note_crops (preview_id, note_id, png, at, seen) VALUES (?, ?, ?, ?, ?) ON CONFLICT (preview_id, note_id) DO UPDATE SET png = excluded.png, at = excluded.at, seen = excluded.seen",
+                params![id, note, b64, now, seen],
             )?;
             c.execute(
                 "DELETE FROM note_crops WHERE preview_id = ? AND note_id NOT IN (SELECT note_id FROM note_crops WHERE preview_id = ? ORDER BY at DESC, note_id LIMIT ?)",
@@ -2950,15 +2978,16 @@ impl Store {
         })
     }
 
-    /// The notes of `id` that have a crop.
-    pub fn cropped_notes(&self, id: &str) -> Result<std::collections::HashSet<String>> {
-        Ok(self.db.read(|c| c.query("SELECT note_id FROM note_crops WHERE preview_id = ?", [id], |r| r.get(0)))?.into_iter().collect())
+    /// The notes of `id` that have a crop, with how each was taken when as its reviewer saw it.
+    pub fn cropped_notes(&self, id: &str) -> Result<std::collections::HashMap<String, Option<String>>> {
+        Ok(self.db.read(|c| c.query("SELECT note_id, seen FROM note_crops WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?))))?.into_iter().collect())
     }
 
-    pub fn note_crop(&self, id: &str, note: &str) -> Result<Option<Vec<u8>>> {
+    /// A note's crop, and how it was taken when as its reviewer saw it.
+    pub fn note_crop(&self, id: &str, note: &str) -> Result<Option<(Vec<u8>, Option<String>)>> {
         use base64::Engine as _;
-        let row: Option<String> = self.db.read(|c| c.query_row("SELECT png FROM note_crops WHERE preview_id = ? AND note_id = ?", [id, note], |r| r.get(0)).optional())?;
-        Ok(row.and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok()))
+        let row: Option<(String, Option<String>)> = self.db.read(|c| c.query_row("SELECT png, seen FROM note_crops WHERE preview_id = ? AND note_id = ?", [id, note], |r| Ok((r.get(0)?, r.get(1)?))).optional())?;
+        Ok(row.and_then(|(b64, seen)| base64::engine::general_purpose::STANDARD.decode(b64).ok().map(|png| (png, seen))))
     }
 
     // ── git_pulls: the pull request a Git URL service's preview is of (roll apps' `GitPull`) ──
@@ -3184,6 +3213,50 @@ impl Store {
             )
             .optional()
         })?)
+    }
+
+    /// Mail to send about review `review` (once per review and person).
+    pub fn add_tell(&self, id: &str, review: &str, to: &str, subject: &str, text: &str) -> Result<()> {
+        let now = self.now_ms()?;
+        self.db.write(|c| {
+            c.execute(
+                "INSERT INTO note_tells (id, preview_id, review_id, to_handle, subject, text, next_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                params![format!("tel_{}", &new_token()[..12]), id, review, to, subject, text, now],
+            )
+            .map(drop)
+        })?;
+        Ok(())
+    }
+
+    /// Up to `n` tells that are due, each claimed for `hold` ms (another node doesn't send it
+    /// meanwhile).
+    pub fn claim_tells(&self, n: usize, hold: i64) -> Result<Vec<Tell>> {
+        let now = self.now_ms()?;
+        self.db.write(|c| {
+            let due: Vec<Tell> = c.query(
+                "SELECT id, preview_id, to_handle, subject, text, attempts FROM note_tells WHERE next_at <= ? ORDER BY next_at LIMIT ?",
+                params![now, n as i64],
+                |r| Ok(Tell { id: r.get(0)?, preview: r.get(1)?, to: r.get(2)?, subject: r.get(3)?, text: r.get(4)?, attempts: r.get(5)? }),
+            )?;
+            for d in &due {
+                c.execute("UPDATE note_tells SET next_at = ? WHERE id = ?", params![now + hold, d.id])?;
+            }
+            Ok::<_, Error>(due)
+        })
+    }
+
+    /// The mail about a preview's notes still to send: `(to, attempts)`.
+    pub fn pending_tells(&self, id: &str) -> Result<Vec<(String, i64)>> {
+        Ok(self.db.read(|c| c.query("SELECT to_handle, attempts FROM note_tells WHERE preview_id = ? ORDER BY to_handle", [id], |r| Ok((r.get(0)?, r.get(1)?))))?)
+    }
+
+    /// A tell sent (or nobody to tell): gone. Not sent: tried again at `next_at`, or given up.
+    pub fn tell_done(&self, id: &str, retry_at: Option<i64>) -> Result<()> {
+        self.db.write(|c| match retry_at {
+            None => c.execute("DELETE FROM note_tells WHERE id = ?", [id]).map(drop),
+            Some(at) => c.execute("UPDATE note_tells SET attempts = attempts + 1, next_at = ? WHERE id = ?", params![at, id]).map(drop),
+        })?;
+        Ok(())
     }
 
     /// How many notes guests left through share link `share` since `since`.

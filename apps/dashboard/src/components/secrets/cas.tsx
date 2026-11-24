@@ -108,6 +108,12 @@ export function Cas() {
                 <span className="font-mono text-[12px]">{c.name}</span>
                 <span className="min-w-0 truncate font-mono text-[11.5px] text-subtle">{c.domains.join(", ")}{c.allow_ip ? " · IPs" : ""}</span>
                 <span className="text-[11px] text-subtle">up to {c.max_days} days</span>
+                {c.status === "pending" && <span className="text-[11px] text-muted">pending its signed certificate</span>}
+                {c.unconstrained && (
+                  <span className="rounded-md border border-line-2 px-1.5 text-[10.5px] text-danger" title="Its certificate has no name constraints within its domains (installed with unconstrained: true): only your root limits what it may sign">
+                    no name constraints
+                  </span>
+                )}
                 <span className="ml-auto text-[11px] text-subtle">
                   made {ago(c.created_at)} · <ActorMark who={c.created_by} />
                 </span>

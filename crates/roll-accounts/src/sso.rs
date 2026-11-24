@@ -45,6 +45,8 @@ const FAILURE_TTL: Duration = Duration::from_secs(60);
 /// Sign-ins one address may start in ten minutes, and one connection in a minute.
 const STARTS_PER_EMAIL: i64 = 10;
 const STARTS_PER_CONNECTION: i64 = 600;
+/// Visits one address may start in ten minutes (a visit's start is public).
+const VISITS_PER_ADDRESS: i64 = 30;
 
 /// Domains anyone can have an address at: never a company's to claim.
 const PUBLIC_MAIL: &[&str] = &[
@@ -248,6 +250,12 @@ impl Accounts {
     /// Whether connection `id` is gone for sure (a failed lookup isn't): its groups go then.
     pub fn sso_connection_gone(&self, id: &str) -> bool {
         matches!(self.sso_connection(id), Err(Error::NotFound(_)))
+    }
+
+    /// Whether connection `id` still answers for `email`'s domain (it's there, and the domain is
+    /// one it verified): a visitor it signed in keeps their session only while it does.
+    pub fn sso_vouches(&self, id: &str, email: &str) -> bool {
+        self.sso_connection(id).is_ok_and(|c| c.verified.iter().any(|d| d == domain_of(email)))
     }
 
     /// Whether connection `id`'s provider keeps groups over SCIM now (looked up every time).
@@ -561,12 +569,49 @@ impl Accounts {
         })
         .await?;
         let (email, link_user) = email;
+        let intent = if link_user.is_some() { "link" } else { "signin" };
+        self.sso_authorize(conn, &email, intent, link_user, invite_id, return_to).await
+    }
+
+    /// A visitor's sign-in (roll apps' `access.sso` with `provider: "sso"`) through the connection
+    /// that answers for `email`: no account of roll's comes of it, and the callback hands
+    /// `request` to the [`crate::oauth::VisitGate`] untouched.
+    pub(crate) async fn sso_visit_start(self: &Arc<Self>, email: &str, request: &str, ip: Option<String>) -> Result<crate::oauth::Started> {
+        if request.is_empty() || request.len() > 2048 || !request.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.~".contains(&b)) {
+            return Err(Error::BadRequest("r is the product's request, as it gave it".into(), None));
+        }
+        // Anyone can call this: a request the product didn't make (or that ran out) costs
+        // nothing, and visits count apart from sign-ins to roll, so a flood of them can't lock a
+        // company's people out of roll itself.
+        let gate = self.visit_gate().ok_or_else(|| Error::NotFound("nothing here takes visitors' sign-ins".into()))?;
+        if !gate.plausible(request).await {
+            return Err(Error::BadRequest("This sign-in link expired. Open the page again.".into(), Some("state")));
+        }
+        let email = email.to_string();
+        let (conn, email) = blocking(self, move |a| {
+            let email = normalize_email(&email)?;
+            let conn = a.sso_for(&email)?.ok_or_else(|| Error::BadRequest("no SSO connection answers for that email's domain".into(), Some("no_sso")))?;
+            let by_ip = match &ip {
+                Some(ip) => a.attempt(&format!("sso-visit-ip:{ip}"), VISITS_PER_ADDRESS, 10 * 60_000)?,
+                None => true,
+            };
+            if !by_ip || !a.attempt(&format!("sso-visit:{email}"), STARTS_PER_EMAIL, 10 * 60_000)? || !a.attempt(&format!("sso-visit:{}", conn.id), STARTS_PER_CONNECTION, 60_000)? {
+                return Err(Error::BadRequest("too many sign-ins started; wait a few minutes".into(), Some("throttled")));
+            }
+            Ok((conn, email))
+        })
+        .await?;
+        self.sso_authorize(conn, &email, "visit", None, None, request.to_string()).await
+    }
+
+    /// The state kept for the callback, and the provider's authorize URL.
+    async fn sso_authorize(self: &Arc<Self>, conn: Connection, email: &str, intent: &'static str, link_user: Option<String>, invite_id: Option<String>, return_to: String) -> Result<crate::oauth::Started> {
         let ep = self.discover(&conn.issuer).await.map_err(|e| {
             tracing::info!(connection = %conn.id, error = %e, "accounts: an SSO provider didn't answer");
             Error::BadRequest(format!("{} didn't answer; try again in a minute", conn.name), Some("provider"))
         })?;
         let (state, verifier, nonce, browser) = (hex::encode(random::<32>()), b64url(&random::<32>()), hex::encode(random::<16>()), hex::encode(random::<32>()));
-        let (provider, intent) = (format!("sso:{}", conn.id), if link_user.is_some() { "link" } else { "signin" });
+        let provider = format!("sso:{}", conn.id);
         let (s2, v2, n2, b2) = (sha256_hex(&state), verifier.clone(), nonce.clone(), sha256_hex(&browser));
         blocking(self, move |a| {
             let now = a.db.now_ms()?;
@@ -590,15 +635,16 @@ impl Accounts {
             .append_pair("nonce", &nonce)
             .append_pair("code_challenge", &b64url(&Sha256::digest(verifier.as_bytes())))
             .append_pair("code_challenge_method", "S256")
-            .append_pair("login_hint", &email);
+            .append_pair("login_hint", email);
         Ok(crate::oauth::Started { url: url.into(), browser })
     }
 
     /// Finish a sign-in: the state, the code traded, the ID token checked, then the person.
-    pub(crate) async fn sso_callback(self: &Arc<Self>, id: &str, code: &str, state: &str, browser: Option<String>) -> Result<Finished> {
+    pub(crate) async fn sso_callback(self: &Arc<Self>, id: &str, code: &str, state: &str, browsers: [Option<String>; 2]) -> Result<Finished> {
         let (id2, state2) = (id.to_string(), state.to_string());
         let (st, conn, secret) = blocking(self, move |a| {
-            let st = a.take_state_named(&format!("sso:{id2}"), &state2, browser.as_deref())?;
+            // Bound to whichever of the browser's cookies began it: a sign-in to roll's or a visit's.
+            let st = a.take_state_any(&format!("sso:{id2}"), &state2, &browsers)?;
             let conn = a.sso_connection(&id2)?;
             let sealed = a.db.read(|c| c.query_row("SELECT client_secret FROM sso_connections WHERE id = ?", [id2.as_str()], |r| r.get::<_, String>(0)))?;
             let secret = a.sso_sealer()?.open(&id2, &sealed).ok_or_else(|| Error::Internal("the SSO client secret doesn't open (ROLL_SECRET_KEY changed?)".into()))?;
@@ -652,6 +698,17 @@ impl Accounts {
         let subject = jwt.str("sub").filter(|s| !s.is_empty() && s.len() <= 255).ok_or_else(|| failed("no subject"))?.to_string();
         // The provider's session, for its back-channel logout to end this one by.
         let sid = jwt.str("sid").filter(|s| !s.is_empty() && s.len() <= 255).map(str::to_string);
+        // A visitor (roll apps' `access.sso`): what the provider vouched for goes to the product's
+        // gate, and no account of roll's is touched.
+        if st.intent == "visit" {
+            let gate = self.visit_gate().ok_or_else(|| Error::NotFound("nothing here takes visitors' sign-ins".into()))?;
+            let groups = jwt.claims.get("groups").and_then(Value::as_array).map(|g| g.iter().filter_map(Value::as_str).filter(|g| !g.is_empty() && g.len() <= 256).take(200).map(str::to_lowercase).collect()).unwrap_or_default();
+            let who = crate::oauth::Visitor { provider: "sso".into(), subject: format!("{id}:{subject}"), login: email.clone(), email, orgs: Vec::new(), hosted_domain: None, groups };
+            return match gate.admit(&st.return_to, &who).await {
+                Ok(to) => Ok(Finished::Visit { to }),
+                Err(why) => Err(Error::Forbidden(why, "visit_denied")),
+            };
+        }
         let name = jwt.str("name").map(|n| n.chars().filter(|c| !c.is_control()).take(100).collect::<String>());
         let id = id.to_string();
         let finished = blocking(self, move |a| a.sso_finish(&id, st, &email, &subject, name.as_deref())).await?;

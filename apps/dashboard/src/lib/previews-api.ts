@@ -461,6 +461,8 @@ export interface PreviewSettings {
   data_at?: string | null;
   /** A feedback button on its pages for people who came in through roll (link access, or a team session). */
   feedback: boolean;
+  /** Mail about notes: a new one to the change's author, a reply or a resolve to the note's. */
+  note_mail: boolean;
   /** Feature flags a reviewer sets for their own view from the page's toolbar. */
   flags?: { name: string; options: string[] }[];
   /** Variables for a family of branches: a branch glob → `{name: value}`, over `env`. */
@@ -552,12 +554,14 @@ export async function qrUrl(id: string, service?: string): Promise<string> {
 
 /** A picture of a note's element, as a screenshot run cropped it (an object URL; revoke it when
  * done), or `null` while it has none. */
-export async function noteCropUrl(id: string, note: string): Promise<string | null> {
+/** A note's crop as an object URL, and how it was taken when as its reviewer saw it
+ * (`390x844, after 2 steps`). */
+export async function noteCropUrl(id: string, note: string): Promise<{ url: string; as: string | null } | null> {
   const res = await fetch(`${ROLL_API}${one(id)}/notes/${encodeURIComponent(note)}/crop`, withSession({ headers: apiHeaders(), cache: "no-store" }));
   onApiStatus(res.status);
   if (res.status === 404) return null;
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`.trim());
-  return URL.createObjectURL(await res.blob());
+  return { url: URL.createObjectURL(await res.blob()), as: res.headers.get("x-roll-crop-as") };
 }
 
 export async function screenshotUrl(id: string, previous = false, phone = false, base = false, page?: string, diff?: "base" | "previous"): Promise<string> {

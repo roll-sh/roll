@@ -10,7 +10,8 @@
 //! A certificate kind ([`SyncTarget::certificate`]: `aws-acm`, `azure-keyvault-cert`,
 //! `cloudflare-cert`) pushes one managed `pki` key's certificate, private key and chain instead of
 //! values, on issue and on every rotation, and keeps what the target calls it (`remote_id`: an ARN,
-//! a certificate's id) so a renewal replaces the same one.
+//! a certificate's id) so a renewal replaces the same one. Deleting the sync leaves it there (with
+//! its private key, valid until the leaf ends) unless `remove=true` deletes it at the target first.
 
 use crate::access::{Action, Caller, Everything, Scope};
 use crate::read::Resolver;
@@ -97,6 +98,8 @@ pub struct Push<'a> {
     pub credentials: &'a BTreeMap<String, Value>,
     /// A session of the project's AWS role [`SyncTarget::aws_role`] named, for this push only.
     pub aws: Option<&'a crate::aws::Session>,
+    /// An access token from the cloud [`SyncTarget::federation`] named, for this push only.
+    pub cloud_token: Option<&'a Value>,
 }
 
 /// What a certificate kind pushes: a managed `pki` key's current credential, PEM. Its `Debug`
@@ -167,12 +170,34 @@ pub trait SyncTarget: Send + Sync {
         let _ = target;
         None
     }
+    /// The cloud a push signs in to with roll's issuer (workload identity federation for Google,
+    /// a federated credential for Azure): roll signs a token whose subject is the sync's own
+    /// ([`crate::issuer::sync_subject`]) and exchanges it for each push ([`Push::cloud_token`]), so
+    /// no cloud key is kept for the sync.
+    fn federation(&self, target: &Json) -> Option<crate::clouds::Account> {
+        let _ = target;
+        None
+    }
+    /// A target that signs in to a cloud with a key stored in roll ([`SyncTarget::credentials`])
+    /// where it could sign in without one: what to use instead, for health (`stored_cloud_key`).
+    fn stored_cloud_key(&self, target: &Json) -> Option<&'static str> {
+        let _ = target;
+        None
+    }
     /// Push a certificate. `remote`: what the target called it after the last push (`None` the
     /// first time, or after it was deleted there). Answers what it's called now, kept for the next.
     /// Errors name the target and the platform's status, never the key or the certificate.
     fn push_certificate(&self, target: &Json, push: &Push<'_>, cert: &Certificate, remote: Option<&str>) -> Result<String> {
         let _ = (target, push, cert, remote);
         Err(Error::BadRequest(format!("{} syncs don't push certificates", self.kind())))
+    }
+    /// Delete what [`SyncTarget::push_certificate`] called `remote` at the target, for a sync
+    /// deleted with `remove=true` (`push` carries credentials and the AWS session only). Already
+    /// gone is done. A target that keeps it because something still serves it answers
+    /// [`Error::Conflict`]. Errors as for a push: never the key.
+    fn remove_certificate(&self, target: &Json, push: &Push<'_>, remote: &str) -> Result<()> {
+        let _ = (target, push, remote);
+        Err(Error::BadRequest(format!("{} syncs leave what they pushed at the target", self.kind())))
     }
 }
 
@@ -228,6 +253,10 @@ pub struct SecretSync {
     /// Key Vault certificate's latest version, a Cloudflare custom certificate's id).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_id: Option<String>,
+    /// A sync that signs in with roll's issuer ([`SyncTarget::federation`]): the subject its
+    /// cloud's trust names.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
     /// Only in the answer that made it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signing_secret: Option<String>,
@@ -312,6 +341,7 @@ fn row(r: &code_sql::Row<'_>) -> code_sql::Result<Row> {
             paused_at: r.get(16)?,
             paused_why: r.get(17)?,
             remote_id: r.get(18)?,
+            subject: None,
             signing_secret: None,
         },
         project: r.get(15)?,
@@ -380,7 +410,7 @@ impl Secrets {
         caller.need(Action::Read, &Scope::project(project))?;
         self.project(project)?;
         let rows = self.db.read(|c| c.query(&format!("SELECT {COLUMNS} FROM syncs s JOIN environments e ON e.id = s.env_id AND e.forgotten_at IS NULL WHERE s.project_id = ? ORDER BY s.created_at"), [project], row))?;
-        Ok(rows.into_iter().map(|r| masked(r.info)).filter(|s| caller.allows(Action::Read, &Scope::at(project, &s.environment, &s.path))).collect())
+        Ok(rows.into_iter().map(|r| self.shown(project, masked(r.info))).filter(|s| caller.allows(Action::Read, &Scope::at(project, &s.environment, &s.path))).collect())
     }
 
     /// What `create_sync` with `n` would push, without creating it or calling the platform: the
@@ -470,6 +500,13 @@ impl Secrets {
         if target.certificate() {
             self.certificate_key(project, &n.environment, &path, &keys, Some(&prefix), &n.kind, caller)?;
         }
+        let federation = target.federation(&n.target);
+        if target.aws_role(&n.target).is_some() || federation.is_some() {
+            self.keyless_environment(project, &n.environment, &n.kind)?;
+        }
+        if let Some(account) = &federation {
+            self.check_sync_trust(project, account)?;
+        }
         for k in target.credentials(&n.target) {
             names::key(&k)?;
             if keys.as_ref().is_some_and(|ks| ks.contains(&k)) {
@@ -503,7 +540,7 @@ impl Secrets {
             )?;
             audit::record(c, self.keys()?, project, caller, "sync.create", Some(&n.environment), Some(&path), keys.as_deref().unwrap_or_default(), &format!("created {} sync {id}", n.kind), now)
         })?;
-        Ok(masked(SecretSync {
+        Ok(self.shown(project, masked(SecretSync {
             id,
             environment: n.environment,
             path,
@@ -522,8 +559,9 @@ impl Secrets {
             paused_at: None,
             paused_why: None,
             remote_id: None,
+            subject: None,
             signing_secret: secret.map(|s| s.expose().to_string()),
-        }))
+        })))
     }
 
     fn sync_row(&self, project: &str, id: &str) -> Result<Row> {
@@ -532,8 +570,11 @@ impl Secrets {
             .ok_or_else(|| Error::NotFound(format!("no sync {id}")))
     }
 
-    /// Delete a sync. What it pushed stays at the target.
-    pub fn delete_sync(&self, project: &str, id: &str, caller: &Caller) -> Result<()> {
+    /// Delete a sync. What it pushed stays at the target, unless `remove` (certificate kinds only):
+    /// then the certificate it pushed is deleted there first, as the sync's maker, outside any
+    /// write and while the sync is held from pushes. The sync goes only once that succeeded;
+    /// otherwise it stays with the target's error.
+    pub fn delete_sync(&self, project: &str, id: &str, remove: bool, caller: &Caller) -> Result<()> {
         caller.need(Action::Read, &Scope::project(project))?;
         self.project(project)?;
         let r = self.sync_row(project, id)?;
@@ -541,11 +582,75 @@ impl Secrets {
         if !caller.allows(Action::Admin, &scope) {
             caller.need(self.sync_needs(&r.info.kind), &scope)?;
         }
+        let certificate = self.syncs.get(&r.info.kind).is_ok_and(|t| t.certificate());
+        if remove && !certificate {
+            return Err(Error::BadRequest(format!("remove=true is for certificate syncs: a {} sync leaves what it pushed at the target", r.info.kind)));
+        }
+        let what = match (&r.info.remote_id, remove) {
+            (Some(remote), true) => {
+                let hold = self.db.now_ms()? + HOLD_MS;
+                let now = self.db.now_ms()?;
+                let held = self.db.write(|c| c.execute("UPDATE syncs SET running_until = ? WHERE id = ? AND running_until <= ?", params![hold, id, now]))?;
+                if held != 1 {
+                    return Err(Error::Conflict("running", format!("sync {id} is being pushed right now: try again in a moment")));
+                }
+                if let Err(e) = self.remove_pushed(&r, remote) {
+                    self.db.write(|c| c.execute("UPDATE syncs SET status = 'error', error = ?, running_until = 0 WHERE id = ? AND running_until = ?", params![clip(format!("removing {remote}: {e}")), id, hold]))?;
+                    return Err(e);
+                }
+                format!(" and removed {remote} from the target")
+            }
+            (Some(remote), false) => format!("; {remote} stays at the target"),
+            (None, _) => String::new(),
+        };
         let now = self.db.now_ms()?;
         self.db.write(|c| {
             c.execute("DELETE FROM syncs WHERE id = ?", [id])?;
-            audit::record(c, self.keys()?, project, caller, "sync.delete", Some(&r.info.environment), Some(&r.info.path), &[], &format!("deleted {} sync {id}", r.info.kind), now)
+            audit::record(c, self.keys()?, project, caller, "sync.delete", Some(&r.info.environment), Some(&r.info.path), &[], &format!("deleted {} sync {id}{what}", r.info.kind), now)
         })
+    }
+
+    /// Delete a certificate sync's `remote` at its target, as its maker: the platform credentials
+    /// and AWS session a push would have, nothing else.
+    fn remove_pushed(&self, r: &Row, remote: &str) -> Result<()> {
+        let (project, env, path) = (r.project.as_str(), r.info.environment.as_str(), r.info.path.as_str());
+        let target = self.syncs.get(&r.info.kind)?.clone();
+        let caller = self.sync_caller(r)?;
+        caller.need(Action::Reveal, &Scope::at(project, env, path))?;
+        let dek = self.project(project)?;
+        let resources = self.members(project)?;
+        target.check(project, &resources, &r.info.target)?;
+        let creds = target.credentials(&r.info.target);
+        let credentials = match creds.is_empty() {
+            true => BTreeMap::new(),
+            false => {
+                let all: Vec<_> = self.view(project, env, path, &caller, false, Action::Reveal)?.into_iter().filter(|e| e.row.owner.is_empty()).collect();
+                let mut resolver = Resolver::new(self, project, env, &dek, &caller, true, &caller.principal)?;
+                resolver.no_dynamic = true;
+                let credentials = sync_credentials(&mut resolver, &all, &creds, r)?;
+                resolver.finish(env)?;
+                credentials
+            }
+        };
+        let (session, cloud_token) = self.sign_in(&*target, r)?;
+        let values = BTreeMap::new();
+        let push = Push {
+            sync: &r.info.id,
+            project,
+            resources: &resources,
+            environment: env,
+            path,
+            digest: "",
+            at: self.db.now_ms()?,
+            values: &values,
+            changed: &[],
+            removed: &[],
+            secret: None,
+            credentials: &credentials,
+            aws: session.as_ref(),
+            cloud_token: cloud_token.as_ref(),
+        };
+        target.remove_certificate(&r.info.target, &push, remote)
     }
 
     /// Pause or resume a sync (`PATCH …/syncs/{id}`). Resuming marks it due: what changed while it
@@ -577,7 +682,7 @@ impl Secrets {
             };
             audit::record(c, self.keys()?, project, caller, "sync.update", Some(&r.info.environment), Some(&r.info.path), &[], &format!("{what} {} sync {id}", r.info.kind), now)
         })?;
-        Ok(masked(self.sync_row(project, id)?.info))
+        Ok(self.shown(project, masked(self.sync_row(project, id)?.info)))
     }
 
     /// Push every key now, whatever the digest says. 409 `running` while another push holds it.
@@ -591,7 +696,7 @@ impl Secrets {
         }
         let hold = self.claim_sync(id, r.info.last_digest.as_deref())?.ok_or_else(|| Error::Conflict("running", format!("sync {id} is being pushed right now")))?;
         self.push_sync(r, hold, None, true);
-        Ok(self.sync_row(project, id)?.info)
+        Ok(self.shown(project, self.sync_row(project, id)?.info))
     }
 
     /// Claim a sync for one push: `Some(hold)` when this caller won it.
@@ -820,20 +925,7 @@ impl Secrets {
             resolver.finish(env)?;
             return Ok(Outcome { digest, state, keys: vec![], summary: String::new(), problems, remote: None });
         }
-        // The platform's own credentials, from this environment and folder.
-        let mut credentials = BTreeMap::new();
-        for k in &creds {
-            let e = all.iter().find(|e| e.row.key == *k).ok_or_else(|| Error::BadRequest(format!("{k} (the {} sync's credential) isn't set in {env}:{path}", r.info.kind)))?;
-            match resolver.entry(e) {
-                (v, None) if !v.expose().is_empty() => credentials.insert(k.clone(), v),
-                (_, None) => {
-                    return Err(Error::BadRequest(format!("{k} (the {} sync's credential) is empty in {env}:{path}", r.info.kind)));
-                }
-                (_, Some(p)) => {
-                    return Err(Error::BadRequest(format!("{k} (the {} sync's credential): {p}", r.info.kind)));
-                }
-            };
-        }
+        let credentials = sync_credentials(&mut resolver, &all, &creds, r)?;
         // Dynamic links are refused, so nothing is issued; record anything that was.
         resolver.finish(env)?;
         let secret = r.sealed.as_ref().map(|ct| dek.open(&secret_aad(project, &r.info.id), ct)).transpose()?;
@@ -843,10 +935,7 @@ impl Secrets {
             true => Some(self.certificate_parts(project, env, path, r, &entries, &dek)?),
             false => None,
         };
-        let session = match target.aws_role(&r.info.target) {
-            Some(role) => Some(self.sync_aws_session(project, &role, &r.info.id)?),
-            None => None,
-        };
+        let (session, cloud_token) = self.sign_in(&*target, r)?;
         let now = self.db.now_ms()?;
         let push = Push {
             sync: &r.info.id,
@@ -862,6 +951,7 @@ impl Secrets {
             secret: secret.as_ref(),
             credentials: &credentials,
             aws: session.as_ref(),
+            cloud_token: cloud_token.as_ref(),
         };
         let remote = match &cert {
             Some(cert) => Some(target.push_certificate(&r.info.target, &push, cert, r.info.remote_id.as_deref())?),
@@ -879,6 +969,38 @@ impl Secrets {
         // The audit log names roll's keys, not the target's names.
         let keys = changed.iter().chain(&removed).map(|n| n.strip_prefix(r.info.prefix.as_str()).unwrap_or(n).to_string()).collect();
         Ok(Outcome { digest, state, keys, summary, problems, remote })
+    }
+
+    /// A sync as the API shows it: a federated one's subject.
+    fn shown(&self, project: &str, mut s: SecretSync) -> SecretSync {
+        if self.syncs.get(&s.kind).is_ok_and(|t| t.federation(&s.target).is_some()) {
+            s.subject = Some(crate::issuer::sync_subject(project, &s.id));
+        }
+        s
+    }
+
+    /// What a sync signs in to its cloud with for one push (or delete), when it keeps no key: its
+    /// AWS role's session, or the cloud's token for roll's issuer's. Both only in memory.
+    fn sign_in(&self, target: &dyn SyncTarget, r: &Row) -> Result<(Option<crate::aws::Session>, Option<Value>)> {
+        let (project, env) = (r.project.as_str(), r.info.environment.as_str());
+        let (role, federation) = (target.aws_role(&r.info.target), target.federation(&r.info.target));
+        if role.is_some() || federation.is_some() {
+            self.keyless_environment(project, env, &r.info.kind)?;
+        }
+        let session = role.map(|role| self.sync_aws_session(project, &role, &r.info.id)).transpose()?;
+        let token = federation.map(|account| self.sync_cloud_token(project, &r.info.id, &account)).transpose()?;
+        Ok((session, token))
+    }
+
+    /// A sync that signs in as the project (its AWS role, or roll's issuer for its own subject)
+    /// pushes from an environment that isn't an untrusted one: code nobody vetted never acts as
+    /// the project in a customer's cloud. Asked on create and before every push.
+    fn keyless_environment(&self, project: &str, slug: &str, kind: &str) -> Result<()> {
+        let env = self.db.read(|c| envs::by_slug(c, project, slug))?;
+        if env.kind == envs::Kind::Ephemeral && !env.trusted {
+            return Err(Error::BadRequest(format!("{slug} is an untrusted environment: a {kind} sync signing in as the project (a role or roll's issuer) would act in your cloud for code nobody vetted; use a stored key there")));
+        }
+        Ok(())
     }
 
     /// A certificate kind's sync, on create and preview: it names one key of its own folder, linked
@@ -917,6 +1039,25 @@ impl Secrets {
         let chain = part("ca_chain").or_else(|_| part("ca"))?;
         Ok(Certificate { key: key.clone(), certificate, private_key, chain })
     }
+}
+
+/// The platform's own credentials a sync names, from its environment and folder.
+fn sync_credentials(resolver: &mut Resolver<'_>, all: &[crate::read::Entry], creds: &[String], r: &Row) -> Result<BTreeMap<String, Value>> {
+    let (env, path) = (&r.info.environment, &r.info.path);
+    let mut credentials = BTreeMap::new();
+    for k in creds {
+        let e = all.iter().find(|e| e.row.key == *k).ok_or_else(|| Error::BadRequest(format!("{k} (the {} sync's credential) isn't set in {env}:{path}", r.info.kind)))?;
+        match resolver.entry(e) {
+            (v, None) if !v.expose().is_empty() => credentials.insert(k.clone(), v),
+            (_, None) => {
+                return Err(Error::BadRequest(format!("{k} (the {} sync's credential) is empty in {env}:{path}", r.info.kind)));
+            }
+            (_, Some(p)) => {
+                return Err(Error::BadRequest(format!("{k} (the {} sync's credential): {p}", r.info.kind)));
+            }
+        };
+    }
+    Ok(credentials)
 }
 
 /// A key a certificate sync pushes: the folder's own, linked `managed` to a project CA.

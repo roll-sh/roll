@@ -287,6 +287,10 @@ pub enum AppsCmd {
         /// The build command, over the detected one.
         #[arg(long)]
         build_command: Option<String>,
+        /// Where a static build's files are (`dist`, `out`, `public`): served as a static site;
+        /// `none` goes back to detecting it.
+        #[arg(long, value_name = "DIR")]
+        output: Option<String>,
         /// The start command baked into the image at the build (`--start` runs over it, no
         /// rebuild).
         #[arg(long)]
@@ -374,7 +378,8 @@ pub enum AppsCmd {
         /// A cron service's failed run is tried again this many times (0–5), after a backoff.
         #[arg(long)]
         retries: Option<u8>,
-        /// A volume, `<mount>:<size in GB>` (`/data:5`); `none` removes it.
+        /// A volume, `<mount>:<size in GB>` (`/data:5`), `:shared` after it for every instance to
+        /// mount (many instances, overlapping deploys); `none` removes it.
         #[arg(long)]
         volume: Option<String>,
         /// Deploy a push only when it touches these paths (comma-separated, gitignore-style);
@@ -3235,7 +3240,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, alert_cpu, alert_metric, alert_anomaly, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, build_timeout, build_size, submodules, submodule_repos, lfs, otel, rollout, rollout_step, rollout_errors, rollout_manual, rollout_checks, overlap, h2c, health_grpc, scale, public, drain, cpu_target, busy_cpu, memory_target, latency_target, oidc_audience, push, restart, restart_tries, affinity, tcp, udp, rollback_on_crash, rebuild_on_base, block_on, queue, alert_capacity, alert_route, skew_protection, rollout_slo_burn, rollout_p95, floor, floor_timezone, set } => {
+        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, output, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, alert_cpu, alert_metric, alert_anomaly, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, build_timeout, build_size, submodules, submodule_repos, lfs, otel, rollout, rollout_step, rollout_errors, rollout_manual, rollout_checks, overlap, h2c, health_grpc, scale, public, drain, cpu_target, busy_cpu, memory_target, latency_target, oidc_audience, push, restart, restart_tries, affinity, tcp, udp, rollback_on_crash, rebuild_on_base, block_on, queue, alert_capacity, alert_route, skew_protection, rollout_slo_burn, rollout_p95, floor, floor_timezone, set } => {
             let svc = service(api, &target).await?;
             // The service's rollout with what was given replaced (the API takes it whole).
             let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() || rollout_manual.is_some() || rollout_checks.is_some() || overlap.is_some() || rollout_slo_burn.is_some() || rollout_p95.is_some() {
@@ -3280,9 +3285,15 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 None => None,
                 Some("none") => Some(Value::Null),
                 Some(v) => {
-                    let (mount, size) = v.rsplit_once(':').ok_or_else(|| anyhow::anyhow!("--volume is <mount>:<size in GB>, like /data:5"))?;
+                    // `:shared` after it: every instance mounts it.
+                    let (v, shared) = v.strip_suffix(":shared").map_or((v, false), |v| (v, true));
+                    let (mount, size) = v.rsplit_once(':').ok_or_else(|| anyhow::anyhow!("--volume is <mount>:<size in GB>[:shared], like /data:5"))?;
                     let size: u32 = size.parse().map_err(|_| anyhow::anyhow!("--volume's size is a whole number of GB"))?;
-                    Some(json!({ "mount": mount, "size_gb": size }))
+                    let mut vol = json!({ "mount": mount, "size_gb": size });
+                    if shared {
+                        vol["shared"] = json!(true);
+                    }
+                    Some(vol)
                 }
             };
             // `none` is a text setting's default (null in the PATCH).
@@ -3346,7 +3357,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                     build.insert("packages".into(), json!(names));
                 }
             }
-            for (k, v) in [("builder", builder.map(Value::from)), ("dockerfile", text(dockerfile)), ("target", text(stage)), ("install", text(install)), ("build", text(build_command)), ("start", text(build_start))] {
+            for (k, v) in [("builder", builder.map(Value::from)), ("dockerfile", text(dockerfile)), ("target", text(stage)), ("install", text(install)), ("build", text(build_command)), ("output", text(output)), ("start", text(build_start))] {
                 if let Some(v) = v {
                     build.insert(k.into(), v);
                 }

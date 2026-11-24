@@ -1,7 +1,7 @@
 import { Trash2 } from "lucide-react";
 import { useReducedMotion } from "@roll/brand";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { appsApi, SERVICE_NAME, type Build, type Environment, type MetricAlert, type RouteAlert, type Prices, type PushState, type Reset, type Run, type Service, type ServicePatch, type Source } from "@/lib/apps-api";
+import { appsApi, SERVICE_NAME, type Build, type Environment, type MetricAlert, type RouteAlert, type RouteSlo, type Prices, type PushState, type Reset, type Run, type Service, type ServicePatch, type Source } from "@/lib/apps-api";
 import { Field, Segmented } from "../redis/shared";
 import { btn, Confirm, danger, input, Panel, panel, primary } from "../ui";
 import { Link } from "@/components/link";
@@ -32,6 +32,7 @@ interface Form {
   target: string;
   install: string;
   build: string;
+  output: string;
   buildStart: string;
   /** Watch paths, comma-separated. */
   watch: string;
@@ -76,6 +77,7 @@ interface Form {
   alertErrors: string;
   alertP95: string;
   sloObjective: string;
+  sloRoutes: string;
   metricsPath: string;
   /** `name: pattern`, one a line. */
   logMetrics: string;
@@ -128,6 +130,7 @@ interface Form {
   sleepAfter: string;
   volumeMount: string;
   volumeSize: string;
+  volumeShared: boolean;
   /** Hours between scheduled backups ("" the default, a day; 0 by hand only). */
   backupEvery: string;
   /** Backups kept ("" the default, seven). */
@@ -159,6 +162,7 @@ export function formOf(s: Service): Form {
     target: str(s.build.target),
     install: str(s.build.install),
     build: str(s.build.build),
+    output: s.build.output ?? "",
     buildStart: str(s.build.start),
     watch: (s.build.watch ?? []).join(", "),
     packages: (s.build.packages ?? []).join(" "),
@@ -198,6 +202,7 @@ export function formOf(s: Service): Form {
     alertErrors: str(s.run.alerts?.error_pct),
     alertP95: str(s.run.alerts?.p95_ms),
     sloObjective: str(s.run.slo?.objective),
+    sloRoutes: (s.run.slo?.routes ?? []).map(routeSloLine).join("\n"),
     metricsPath: s.run.metrics ? (s.run.metrics.path ?? "/metrics") : "",
     logMetrics: (s.run.log_metrics ?? []).map((m) => `${m.name}: ${m.pattern}`).join("\n"),
     metricsPort: str(s.run.metrics?.port),
@@ -243,6 +248,7 @@ export function formOf(s: Service): Form {
     sleepAfter: str(s.run.sleep_after_s),
     volumeMount: s.run.volume?.mount ?? "",
     volumeSize: str(s.run.volume?.size_gb),
+    volumeShared: !!s.run.volume?.shared,
     backupEvery: str(s.run.volume?.backups?.every_hours),
     backupKeep: str(s.run.volume?.backups?.keep),
   };
@@ -270,6 +276,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   if (f.target !== before.target) build.target = text(f.target);
   if (f.install !== before.install) build.install = text(f.install);
   if (f.build !== before.build) build.build = text(f.build);
+  if (f.output !== before.output) build.output = text(f.output);
   if (f.buildStart !== before.buildStart) build.start = text(f.buildStart);
   if (f.watch !== before.watch) {
     const list = f.watch.split(/[,\n]/).map((p) => p.trim()).filter(Boolean);
@@ -338,8 +345,10 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   if (f.logMetrics !== before.logMetrics) run.log_metrics = logMetrics(f.logMetrics);
   if (f.metricsPath !== before.metricsPath || f.metricsPort !== before.metricsPort)
     run.metrics = f.metricsPath.trim() ? { path: f.metricsPath.trim(), ...(num(f.metricsPort) ? { port: Number(f.metricsPort) } : {}) } : null;
-  if (f.sloObjective !== before.sloObjective || f.sloLatency !== before.sloLatency || f.sloWindow !== before.sloWindow)
-    run.slo = f.sloObjective.trim() ? { objective: Number(f.sloObjective), ...(num(f.sloLatency) ? { latency_ms: Number(f.sloLatency) } : {}), ...(num(f.sloWindow) ? { window_days: Number(f.sloWindow) } : {}) } : null;
+  if (f.sloObjective !== before.sloObjective || f.sloLatency !== before.sloLatency || f.sloWindow !== before.sloWindow || f.sloRoutes !== before.sloRoutes) {
+    const routes = routeSlos(f.sloRoutes);
+    run.slo = f.sloObjective.trim() ? { objective: Number(f.sloObjective), ...(num(f.sloLatency) ? { latency_ms: Number(f.sloLatency) } : {}), ...(num(f.sloWindow) ? { window_days: Number(f.sloWindow) } : {}), ...(routes.length ? { routes } : {}) } : null;
+  }
   if (f.rolloutSteps !== before.rolloutSteps || f.rolloutStep !== before.rolloutStep || f.rolloutErrors !== before.rolloutErrors || f.rolloutManual !== before.rolloutManual || f.rolloutChecks !== before.rolloutChecks || f.rolloutOverlap !== before.rolloutOverlap)
     run.rollout = {
       steps: f.rolloutOverlap ? (rolloutSteps(f.rolloutSteps) ?? []) : [],
@@ -378,10 +387,10 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   }
   if (f.suspendAfter !== before.suspendAfter) run.suspend_after_s = num(f.suspendAfter);
   if (f.sleepAfter !== before.sleepAfter) run.sleep_after_s = num(f.sleepAfter);
-  if (f.volumeMount !== before.volumeMount || f.volumeSize !== before.volumeSize || f.backupEvery !== before.backupEvery || f.backupKeep !== before.backupKeep) {
+  if (f.volumeMount !== before.volumeMount || f.volumeSize !== before.volumeSize || f.volumeShared !== before.volumeShared || f.backupEvery !== before.backupEvery || f.backupKeep !== before.backupKeep) {
     // Unset both: the default schedule; one set takes the default for the other.
     const backups = f.backupEvery.trim() || f.backupKeep.trim() ? { every_hours: f.backupEvery.trim() ? Number(f.backupEvery) : 24, keep: f.backupKeep.trim() ? Number(f.backupKeep) : 7 } : undefined;
-    run.volume = f.volumeMount.trim() ? { mount: f.volumeMount.trim(), size_gb: Number(f.volumeSize) || 1, ...(backups ? { backups } : {}) } : null;
+    run.volume = f.volumeMount.trim() ? { mount: f.volumeMount.trim(), size_gb: Number(f.volumeSize) || 1, ...(f.volumeShared ? { shared: true } : {}), ...(backups ? { backups } : {}) } : null;
   }
   if (Object.keys(run).length) patch.run = run;
   return patch;
@@ -427,6 +436,25 @@ export function floorRules(text: string): Floor[] {
     else rules.push({ windows: [{ from, to }], min_instances: n, ...(timezone ? { timezone } : {}) });
   }
   return rules;
+}
+
+/** A route's objective as Settings writes it: `POST /api/checkout 99.9% p95 < 800ms`. */
+export function routeSloLine(r: RouteSlo): string {
+  return `${r.method ? `${r.method} ` : ""}${r.route} ${r.objective}%${r.latency_ms ? ` p95 < ${r.latency_ms}ms` : ""}`;
+}
+
+/** Lines of `[METHOD] /route N%` with an optional `p95 < Nms`, as `slo.routes` (a line it can't
+ *  read goes as its route with no objective, for the API to refuse whole, never dropped). */
+export function routeSlos(text: string): RouteSlo[] {
+  return text
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .map((l) => {
+      const m = /^(?:([A-Za-z]+)\s+)?(\/\S*)\s+([\d.]+)\s*%(?:\s+p95\s*<\s*(\d+)\s*ms)?$/.exec(l);
+      if (!m) return { route: l, objective: 0 };
+      return { route: m[2], ...(m[1] ? { method: m[1].toUpperCase() } : {}), objective: Number(m[3]), ...(m[4] ? { latency_ms: Number(m[4]) } : {}) };
+    });
 }
 
 /** A route alert as Settings writes it: `POST /api/checkout 5xx >= 2% p95 >= 800ms`. */
@@ -607,6 +635,9 @@ export function SettingsTab({
                 {t("install", "detected")}
               </Field>
               <Field label="Build command">{t("build", "detected")}</Field>
+              <Field label="Output directory" hint="a static build's files (dist, out, public): served as a static site">
+                {t("output", "detected")}
+              </Field>
               <Field label="Image's start command" hint="baked into the image at the build">
                 {t("buildStart", "detected")}
               </Field>
@@ -746,9 +777,17 @@ export function SettingsTab({
                 )}
               </>
             )}
-            <Field label="Volume mount" hint="optional; one instance at most">
+            <Field label="Volume mount" hint={form.volumeShared ? "optional; every instance mounts it" : "optional; one instance at most, unless shared"}>
               {t("volumeMount", "/data")}
             </Field>
+            {form.volumeMount.trim() && (
+              <Field label="Instances that mount it" hint="shared: many instances and overlapping deploys write it at once (no SQLite)">
+                <select value={form.volumeShared ? "all" : "one"} onChange={(e) => set("volumeShared", e.target.value === "all")} className={`${input} w-full`}>
+                  <option value="one">One (the old stops before the new starts)</option>
+                  <option value="all">Every instance (shared)</option>
+                </select>
+              </Field>
+            )}
             {form.volumeMount.trim() && (
               <Field label="Volume size (GB)" hint="what it's billed and planned at; a host without disk quotas doesn't stop it growing past">
                 {t("volumeSize", "1")}
@@ -932,6 +971,9 @@ export function SettingsTab({
                     </Field>
                     <Field label="Objective: window (days)" hint="1–60; empty: 28">
                       {t("sloWindow", "28")}
+                    </Field>
+                    <Field label="Objectives for one route" hint="[method] /route n%, and p95 < n ms, one a line (at most 5); each burns on its own">
+                      <textarea value={form.sloRoutes} onChange={(e) => set("sloRoutes", e.target.value)} rows={2} placeholder="POST /api/checkout 99.95% p95 < 800ms" className={`${input} w-full font-mono text-[12px]`} spellCheck={false} />
                     </Field>
                   </>
                 )}

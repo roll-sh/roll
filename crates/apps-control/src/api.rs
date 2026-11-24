@@ -125,6 +125,8 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/routes"), get(routes))
         .route(&format!("{env}/analytics"), get(analytics))
         .route(&format!("{env}/visit"), post(visit))
+        .route(&format!("{env}/visitors"), get(visitors))
+        .route(&format!("{env}/visitors/{{visitor}}"), axum::routing::delete(sign_out_visitor))
         .route(&format!("{env}/fetch"), get(fetch_page))
         .route(&format!("{env}/vitals"), get(vitals))
         .route(&format!("{env}/app-metrics"), get(app_metrics))
@@ -1530,6 +1532,16 @@ struct VisitBody {
 
 /// A signed-in person's one-use way into a sign-in-gated environment (roll's dashboard asks
 /// for it as them, then sends the browser there). A token isn't a person: only a session gets one.
+async fn visitors(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
+    ok(apps.visitors(&id, &env).await?)
+}
+
+async fn sign_out_visitor(State(apps): S, Path((id, env, visitor)): Path<(String, String, String)>, ext: Extensions) -> R {
+    apps.sign_out_visitor(&id, &env, &visitor).await?;
+    apps.audit("visitor.signed_out", &id, &env, actor(&ext), json!({ "session": visitor })).await;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
 async fn visit(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, Json(b): Json<VisitBody>) -> R {
     let Some(user) = ext.get::<roll_auth::SignedIn>() else {
         return Err(Error::Forbidden("signing in to an environment is for a person signed in to roll, not a token".into()));

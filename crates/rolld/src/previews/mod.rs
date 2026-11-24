@@ -62,6 +62,16 @@ impl roll_previews::ports::Visitors for AccountsVisitors {
         self.accounts.session_live(user, session).unwrap_or(false) && self.maker_reaches(user, project)
     }
 
+    /// To the person's own address (roll's accounts), while they may open the project's previews.
+    fn mail(&self, handle: &str, project: &str, subject: &str, text: &str) -> anyhow::Result<bool> {
+        let Some(user) = self.accounts.user_by_handle(handle)? else { return Ok(false) };
+        if !self.accounts.mail_available() || !self.maker_reaches(&user, project) {
+            return Ok(false);
+        }
+        tokio::runtime::Handle::current().block_on(self.accounts.mail_user(&user, subject, text))?;
+        Ok(true)
+    }
+
     /// A share link's maker: an account that still signs in (not disabled or deleted) and is an
     /// admin or still has a role that reveals the project's previews.
     fn maker_reaches(&self, user: &str, project: &str) -> bool {
