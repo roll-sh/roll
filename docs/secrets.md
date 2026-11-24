@@ -4001,6 +4001,8 @@ through roll's server) and imported as one change:
 DOPPLER_TOKEN=dp.st…  roll secrets import --from doppler --source shop/prd -e production
 VAULT_ADDR=https://vault.example VAULT_TOKEN=hvs…  roll secrets import --from vault --source secret/shop -e production
 INFISICAL_TOKEN=…  roll secrets import --from infisical --source <workspace id>/prod/api -e production
+DOPPLER_TOKEN=dp.st…  roll secrets import --from doppler --source shop --all-environments --create-environments --dry-run
+INFISICAL_TOKEN=…  roll secrets import --from infisical --source <workspace id> --all-environments --recursive --map prod=production
 VAULT_ADDR=… VAULT_TOKEN=…  roll secrets import --from vault --source secret/shop --recursive -e production
 roll secrets import --from aws --source prod/shop/ -e production      # your aws CLI's profile or SSO
 ```
@@ -4068,6 +4070,51 @@ Doppler config, a Vault path, an Infisical environment) into its roll environmen
 each, reported per environment. The dashboard's import dialog shows these commands, since a browser
 can't call the other manager's API. Doppler's own `DOPPLER_*` keys are left out; numbers and booleans come in as their text. Hosts
 come from the managers' own settings (`DOPPLER_API_HOST`, `VAULT_ADDR`, `INFISICAL_API_URL`).
+
+#### Doppler and Infisical: structure, references and comments
+
+Doppler and Infisical come in with their structure, not only their values:
+
+| | Doppler | Infisical |
+| --- | --- | --- |
+| Reads | `GET /v3/configs/config/secrets` (each key's `raw` value and `note`; dynamic and Doppler's managed secrets left out) | `GET /api/v3/secrets/raw` with `expandSecretReferences=false` per folder, `GET /api/v2/folders`, `GET /api/v2/secret-imports` |
+| Environments | `--all-environments`: every config `GET /v3/configs` lists | `--all-environments`: every environment the project lists (`GET /api/v1/projects/{id}`; older servers' `/api/v1/workspace/{id}`) |
+| Folders | none (a config is flat) | the source's folder; `--recursive`: every folder under it, each into its own folder under `--path` (8 levels, 2,000 folders at most). Without it, the folders under it are reported as left out. |
+| Comments | a key's note → its comment | a key's comment → its comment |
+| Imports | none | secret imports → folder imports ("Imports"), in reverse order (Infisical's bottom-most import wins, roll's first). A replication (it copies values), and an import of an environment or folder that isn't imported in this run, are reported and left out. |
+
+- **Environments.** `--all-environments` puts each into the `--map` entry naming it, else into the
+  roll environment of its own name, lowercased with `_` as `-` (`dev_api` → `dev-api`). A roll
+  environment that doesn't exist stops the import before anything is written, naming it, unless
+  `--create-environments` creates it. With `--map` or `--all-environments`, `--source` is the
+  project alone (Doppler's project, Infisical's workspace id).
+- **References stay references.** Values are read raw, so a value that follows another key still
+  follows it in roll, instead of being a copy of what it computes to today:
+
+  | Doppler | Infisical | roll |
+  | --- | --- | --- |
+  | `${KEY}` | `${KEY}` | `${KEY}` (the same folder) |
+  | `${CONFIG.KEY}`, or `${PROJECT.CONFIG.KEY}` naming this project | `${env.KEY}`, `${env.folder.sub.KEY}` | `${target.KEY}` or `${target.folder.KEY}`: the roll environment that config or environment goes into in this run, and the folder where it lands under `--path` |
+  | `${PROJECT.CONFIG.KEY}` of another project | `${@project.env.KEY}` | none: roll references stay in their project |
+
+  A reference roll can't hold (another project, an environment not imported in this run, a folder
+  outside the imported one, a `$` right before it) is never dropped: that key comes in as the value
+  it computes to today (Doppler's `computed`, Infisical's expanded value), and the import names the
+  key and the reason, never the value. Text roll would read as a reference is written `$${…}`, so
+  it stays text. A reference into another environment needs `reveal` there, as any does.
+- **Read before written.** Every environment and folder is read before anything is written. A key
+  the token can't read (Doppler's `restricted`, Infisical's hidden values) stops it, naming the
+  key; Infisical's personal overrides are left out. Each answer is read up to 16 MiB, with no
+  redirects, so a token never goes to another host, self-hosted Infisical included. At most 50
+  environments and 10,000 keys at once.
+- **Writes.** Each folder is one change through the same import as a file, so a protected
+  environment refuses it, or opens a change request with `--request`. Folder imports are added
+  after the folder's own (never replacing them), and on a protected environment only an admin sets
+  them.
+- **`--dry-run`** prints the tree: each environment and where it goes (`(new)`, or missing), each
+  folder with its key names, which keys become references and to what, which come in as their
+  current value and why, each folder import, and what's left out. Names only, never a value. It
+  writes nothing and creates no environment.
 
 ```
 infisical export --env=prod --format=json > prod.json   &&  roll secrets import prod.json -e production
