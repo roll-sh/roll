@@ -3264,8 +3264,30 @@ impl Store {
         Ok(self.db.read(|c| c.query_row("SELECT COUNT(*) FROM guest_notes WHERE preview_id = ? AND share_id = ? AND at > ?", params![id, share, since], |r| r.get::<_, i64>(0)))? as usize)
     }
 
-    pub fn add_guest_note(&self, id: &str, share: &str, review: &str, at: i64) -> Result<()> {
-        self.db.write(|c| c.execute("INSERT INTO guest_notes (preview_id, share_id, review_id, at) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING", params![id, share, review, at]).map(drop))?;
+    /// A place in share link `share`'s hour of guest notes (at most `per_hour`), counted and taken
+    /// in one write: its id until the note's review is known ([`Store::fill_guest_slot`]).
+    pub fn take_guest_slot(&self, id: &str, share: &str, per_hour: usize) -> Result<Option<String>> {
+        let now = self.now_ms()?;
+        let slot = format!("slot_{}", &new_token()[..12]);
+        self.db.write(|c| {
+            let n: i64 = c.query_row("SELECT COUNT(*) FROM guest_notes WHERE preview_id = ? AND share_id = ? AND at > ?", params![id, share, now - 3_600_000], |r| r.get(0))?;
+            if n as usize >= per_hour {
+                return Ok::<_, Error>(None);
+            }
+            c.execute("INSERT INTO guest_notes (preview_id, share_id, review_id, at) VALUES (?, ?, ?, ?)", params![id, share, slot, now])?;
+            Ok(Some(slot.clone()))
+        })
+    }
+
+    /// The note was made: its slot names its review.
+    pub fn fill_guest_slot(&self, id: &str, slot: &str, review: &str) -> Result<()> {
+        self.db.write(|c| c.execute("UPDATE guest_notes SET review_id = ? WHERE preview_id = ? AND review_id = ?", params![review, id, slot]).map(drop))?;
+        Ok(())
+    }
+
+    /// The note wasn't made: its slot goes back.
+    pub fn drop_guest_slot(&self, id: &str, slot: &str) -> Result<()> {
+        self.db.write(|c| c.execute("DELETE FROM guest_notes WHERE preview_id = ? AND review_id = ?", params![id, slot]).map(drop))?;
         Ok(())
     }
 

@@ -762,13 +762,14 @@ async fn preview_notes_are_slack_threads_both_ways() {
     };
 
     // A note on the page: a message in the channel, its thread bound to the note.
-    let note = review("**Feedback on the preview** · [`/checkout`](https://web-pr1.preview.test/checkout) · `button.pay`\n\nThe button is cut off\n\n<sub>1280x800 · roll preview pv_1</sub>".into()).await;
+    let note = review("**Feedback on the preview** · [`/checkout`](https://evil.example/phish) · `button.pay`\n\nThe button is cut off <!channel>\n\n<sub>1280x800 · roll preview pv_1</sub>".into()).await;
     let note_id = note["id"].as_str().unwrap().to_string();
     until("the note in Slack", || posts().len() == 1).await;
     let posted = &posts()[0];
     let text = posted["text"].as_str().unwrap();
     assert_eq!(posted["channel"], "C9");
-    assert!(text.contains("<https://web-pr1.preview.test/checkout|/checkout> · `button.pay`") && text.contains("> The button is cut off") && !text.contains("<sub>"), "{text}");
+    assert!(text.contains("`/checkout` · `button.pay`") && text.contains("> The button is cut off &lt;!channel&gt;") && !text.contains("<sub>"), "{text}");
+    assert!(!text.contains("evil.example") && !text.contains("<!channel>"), "the note's own link isn't taken, nor can it ping a channel: {text}");
     // The thread's binding is written just after the post returns: waited for, not raced.
     let bound = || w.a.code.db.sql().query_row("SELECT thread_ts FROM chat_notes WHERE note = ?", [note_id.as_str()], |r| r.get::<_, String>(0)).ok();
     until("the note's thread bound", || bound().is_some()).await;

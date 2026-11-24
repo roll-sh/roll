@@ -526,6 +526,7 @@ fn preview_settled(v: &Value) -> bool {
 
 /// A job that ended (roll apps' `succeeded`, `failed`, `skipped`, `timed_out`, `canceled`):
 /// anything but `running`.
+/// A job's or a cron run's status (they share their states): over once it isn't running.
 fn job_over(v: &Value) -> bool {
     v["status"].as_str().is_some_and(|s| s != "running")
 }
@@ -1557,9 +1558,19 @@ static TOOLS: &[Tool] = &[
     t("apps_analytics", "Web analytics", "An environment's page views and visitors from its access log (no script, no cookie) over the last minutes (default 1440): top pages, referring sites, countries and a series.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/analytics", &[SERVICE, ENV, q("minutes", Ty::Int, "How far back (default 1440)")]),
     t("apps_list_cron_runs", "Cron runs", "A cron service's runs, newest first.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/runs", &[SERVICE, ENV]),
     t("apps_get_cron_run", "Get a cron run", "One cron run: its status, exit code, start and end.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/runs/{run}", &[SERVICE, ENV, req("run", "Run id")]),
+    t(
+        "apps_wait_cron_run",
+        "Wait for a cron run to finish",
+        "A cron run once it ends (succeeded, failed, skipped, timed out or canceled), with its exit code. A client that runs MCP tasks gets a task that waits as long as it takes; otherwise this answers the status now (call again to keep waiting).",
+        "apps",
+        "GET",
+        "/v1/apps/services/{service}/environments/{env}/runs/{run}",
+        &[SERVICE, ENV, req("run", "Run id (apps_run_cron's)")],
+    )
+    .until(job_over),
     t("apps_cron_run_logs", "A cron run's logs", "A cron run's output (its lines in the environment's log).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/runs/{run}/logs", &[SERVICE, ENV, req("run", "Run id"), q("tail", Ty::Int, "Last lines")]),
     t("apps_cancel_cron_run", "Cancel a cron run", "Stop a running cron run (production is a \"deploy\" action).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/runs/{run}/cancel", &[SERVICE, ENV, req("run", "Run id")]),
-    t("apps_run_cron", "Run a cron now", "Run a cron service's job now (in production this is a deploy action).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/runs", &[SERVICE, ENV]),
+    t("apps_run_cron", "Run a cron now", "Run a cron service's job now (in production this is a deploy action); apps_wait_cron_run follows the run it answers to its end.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/runs", &[SERVICE, ENV]),
     t("apps_signing", "Image signing rule", "A project's signing keys (cosign public keys) and whether its image services must be signed by one of them to deploy.", "apps", "GET", "/v1/apps/projects/{project}/signing", &[req("project", "Workspace project")]),
     t(
         "apps_set_signing",

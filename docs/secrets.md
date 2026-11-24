@@ -1552,7 +1552,8 @@ gives one Twilio key. Each rotation is `rotation.succeeded` on the events feed, 
 the vendor refuses is `rotation.failed` (and `rotation_failing` in health), as for every managed key.
 
 **Keys a vendor ends by itself rotate before that.** GitLab ends each token after `expires_days`,
-Databricks after `lifetime_days`, and Entra a password after Microsoft's two years. A link to one
+Databricks after `lifetime_days`, SonarQube after `expires_days` when one is set, and Entra a
+password after Microsoft's two years. A link to one
 of those needs `rotate_days`, at most the lifetime less 14 days (half the lifetime below 28 days),
 refused at link time otherwise (`gitlab ends these keys after 90 days: set rotate_days (at most
 76)…`). The margin is health's `expiring` window: a rotation on schedule (a weekly `rotate_window`'s
@@ -1599,7 +1600,9 @@ instead of at the first rotation:
 - Datadog: one page of the API keys, or of the credential's user's application keys;
 - Cloudflare: the template token (read as each rotation will);
 - Databricks: the identity's tokens (`GET /api/2.0/token/list`);
-- Confluent: one page of the owner's API keys.
+- Confluent: one page of the owner's API keys;
+- SonarQube: the credential's user's tokens (`GET /api/user_tokens/search`);
+- Jenkins: `GET /whoami/api/json`, which must name `user` (Jenkins answers it for anyone).
 
 | `vendor` | `target` | `credential` | Issue | Revoke |
 | --- | --- | --- | --- | --- |
@@ -1614,6 +1617,8 @@ instead of at the first rotation:
 | `cloudflare` | `{account_id?, template}` (no `account_id`: the user's tokens) | an API token that may manage API tokens (`API Tokens Write` on the user or the account) | `GET https://api.cloudflare.com/client/v4/{user\|accounts/{account_id}}/tokens/{template}`, then `POST …/tokens {name, policies, condition?}` with the template's policies (permission groups by id) and condition (Bearer) → `result.id`, `result.value` | `DELETE …/tokens/{id}` |
 | `databricks` | `{host: "dbc-a1b2c3d4-e5f6.cloud.databricks.com", lifetime_days?: 1-730 (default 90)}` | a personal access token of the identity whose tokens rotate (a service principal's, ideally) | `POST https://{host}/api/2.0/token/create {comment, lifetime_seconds}` (Bearer) → `token_value`, `token_info.token_id` | `POST /api/2.0/token/delete {token_id}` |
 | `confluent` | `{owner: "sa-…" \| "u-…", resource?: "lkc-…", environment?: "env-…"}` (no `resource`: a Cloud API key) | a Cloud API key as `KEY:SECRET` that may manage `owner`'s keys (OrganizationAdmin, or AccountAdmin of the owner) | `POST https://api.confluent.cloud/iam/v2/api-keys {spec: {display_name, owner: {id}, resource?: {id, environment?}}}` (basic auth) → `id` (the key), `spec.secret` | `DELETE …/api-keys/{id}` |
+| `sonarqube` | `{host?: "sonarcloud.io" \| a SonarQube Server's host, kind?: "user" (default) \| "global_analysis" \| "project_analysis", project?: the project's key (project_analysis only), expires_days?: 1-730}` (analysis tokens on a Server only) | a user token of the user whose tokens rotate (for analysis tokens, one who may run analysis there) | `POST https://{host}/api/user_tokens/generate`, form `name, type, projectKey?, expirationDate?` (the token as basic auth's login) → `token` (`id` is the name roll gave it) | `POST …/api/user_tokens/revoke`, form `name` |
+| `jenkins` | `{host: "ci.example.com", user}` | an API token of `user` (Jenkins lets only a user make their own) | `GET https://{host}/crumbIssuer/api/json` (none on a 404), then `POST https://{host}/user/{user}/descriptorByName/jenkins.security.ApiTokenProperty/generateNewToken`, form `newTokenName`, with the crumb (basic auth `user:token`) → `data.tokenUuid`, `data.tokenValue`; then `GET /whoami/api/json` with the new token, which must name `user` | the crumb, then `POST …/ApiTokenProperty/revoke`, form `tokenUuid` |
 
 - **Auth0 has no grace period.** `rotate-secret` replaces the app's secret at once: the old one
   stops working the moment roll rotates, whatever `grace_minutes` says, so services must pick up
@@ -1657,11 +1662,26 @@ instead of at the first rotation:
 - **Confluent: link `CONFLUENT_API_KEY` to `id` and `CONFLUENT_API_SECRET` to `secret`.** They
   share one key, and a new one can take a moment to work on a cluster: keep `grace_minutes` above
   a few minutes.
+- **SonarQube revokes by name.** Each token gets a name of its own (the key's label and a random
+  suffix), which is its `id`. User tokens rotate on SonarQube Cloud (`sonarcloud.io`, the default
+  `host`) and on a SonarQube Server; global and project analysis tokens on a Server only. Tokens
+  are the credential's user's. With `expires_days`, each token ends after that many days (as that
+  day starts in UTC; a server may cap it lower), so a link's `rotate_days` is at most
+  `expires_days` less 14; without it, a token lives until revoked unless the server's maximum
+  lifetime ends it. `host` is a hostname (no IP literal, no port).
+- **Jenkins: a new token is checked before it's kept.** roll signs in with the new token
+  (`whoami` must name `user`) before it stores it, so the old one is revoked after
+  `grace_minutes` only once its replacement is known to work. A new token that doesn't sign in is
+  revoked at once, and the rotation fails with the old token in place (`rotation.failed` for a
+  scheduled one). Every POST carries the controller's CSRF crumb when it issues one. The
+  credential is an API token, not a password: Jenkins exempts requests signed with an API token
+  from its session-bound crumb check. `host` is a hostname (no IP literal, no port; a controller
+  under a path prefix isn't supported yet).
 
 Requests go out from rolld's guarded client, as a rotator's calls do: HTTPS to a public address, no
 redirects, a 15-second timeout, at most 64 KiB of answer. The hosts are the vendors' own, except
-Okta's and Auth0's tenant domains, a self-managed GitLab's host and a Databricks workspace's host,
-which must be hostnames (no IP literal, no port) and then pass the same guard; Datadog's site must be one of its documented ones. The credential is sealed with the project's data key, bound to the registration's
+Okta's and Auth0's tenant domains, a self-managed GitLab's host, a Databricks workspace's host, a
+SonarQube Server's host and a Jenkins controller's host, which must be hostnames (no IP literal, no port) and then pass the same guard; Datadog's site must be one of its documented ones. The credential is sealed with the project's data key, bound to the registration's
 id, vendor and target, so a row pointed at another host no longer opens; it's never answered,
 logged or audited, and the list shows the vendor and target only. A vendor's answer is never part
 of an error: errors name the vendor, the step and the status (`okta answered 401 issuing a key`).
@@ -6346,7 +6366,7 @@ isn't in the workspace is 404.
 | `POST /environments/{env}/rollback` | `{to?: seq, at?: ms, message?, bypass?}` | 201 `Applied` |
 | `GET /compare?from=&to=&path=` | | `Compare` |
 | `POST /environments/{env}/promote?from=` | `{path?, keys?, message?}` | 201 `Applied` |
-| `GET /environments/{env}/requests?state=&limit=&before=` | | `Request[]`, newest first (200 at most); with `limit` (1-200) or `before`: `{requests: Request[], next?}`, `next` the next page's `before` while more may follow (`state` filters in SQL, folder reach after it: a page is read again, 10 times at most, until it's full) |
+| `GET /environments/{env}/requests?state=&limit=&before=` | | `Request[]`, newest first (200 at most); with `limit` (1-200) or `before`: `{requests: Request[], next?}`, `next` the next page's `before` while more may follow (`state` filters in SQL, one of `Request.state`'s or a 400, folder reach after it: a page is read again, 10 times at most, until it's full) |
 | `POST /environments/{env}/requests` | `Batch` | 201 `Request` |
 | `GET /environments/{env}/requests/{id}` | | `Request` |
 | `GET /environments/{env}/requests/{id}/values` | | `RequestValue[]` (`reveal`; audited: the value now and the one proposed) |
@@ -6576,7 +6596,7 @@ type ProjectFindings = { project: string; project_name: string; findings: Findin
 type Finding = { issue: "decoy_used" | "production_unprotected" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "unplaced" | "operator_made" | "stored_cloud_key" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string; decoy?: Decoy }; // decoy: on decoy_used only (an admin's session's or the operator's), the key's Decoy
 type Rotation = { environment: string; path: string; keys: string[]; kind: string; ref: string; name: string; rotate_days: number | null; rotate_window: string | null; grace_minutes: number; issued_at: number | null; next_due: number | null; last_error: string | null; failed_at: number | null };
 type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
-type SaasRotator = { id: string; name: string; vendor: "sendgrid" | "twilio" | "okta" | "entra" | "auth0" | "gitlab" | "openai" | "datadog" | "cloudflare" | "databricks" | "confluent"; target: Record<string, unknown>; credential_expires_at?: number; created_at: number; created_by: string };
+type SaasRotator = { id: string; name: string; vendor: "sendgrid" | "twilio" | "okta" | "entra" | "auth0" | "gitlab" | "openai" | "datadog" | "cloudflare" | "databricks" | "confluent" | "sonarqube" | "jenkins"; target: Record<string, unknown>; credential_expires_at?: number; created_at: number; created_by: string };
 // PATCH …/saas/{id}: the vendor and target stay. `credential_expires_at`: absent keeps it (a new
 // credential drops the old one's), null clears it, ms in the future sets it.
 type SaasRotatorChange = { name?: string; credential?: string; credential_expires_at?: number | null };
