@@ -7417,6 +7417,7 @@ dependencies = [
  "roll-previews",
  "roll-secrets",
  "roll-secrets-chain",
+ "roll-secrets-ref",
  "roll-workspace",
  "rustls-pemfile",
  "rustyline",

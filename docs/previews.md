@@ -1457,6 +1457,24 @@ egress included, removed with each connection. `a_shell_in_a_previews_service_is
 live preview's container through `roll preview shell` and reads its `ROLL_PREVIEW` back, puts a
 file in with `roll preview cp` and brings it back, and reads the service through `roll preview
 forward` (no relay left after).
+An agent drives a page too (GitHub Copilot's coding agent with Playwright; roll MCP's
+`previews_try` and `previews_try_screenshot`): `POST …/try` `{service?, path, steps}` loads the
+service's page in a browser in its network (locked down as a screenshot is) and takes the steps,
+a page state's (`click`, `type`, `press`, `wait`; 10 at most, 15 s), stateless: nothing is held
+between calls, so an agent sends the whole way to a state each time. It answers `{run, status,
+step_failed?, text, errors}`: the page's status, the step that found nothing ("click #nope:
+nothing matched"), its visible text after the steps (its own line breaks kept, cut at 40,000
+characters) and what went wrong on the way (uncaught errors, failed requests, 20 at most), masked
+as its logs are. Its picture is `GET …/try/{run}/screenshot` (`image/png`, kept 5 minutes on the
+preview's holder; another preview's id gets a 404), asked for only when the text isn't enough.
+Two runs at a time per preview (a third is a 409), each taking one of the node's screenshot
+slots; typed text is never kept or said by previews. Both are `reveal` (its clicks can change the
+preview's own data). A roll apps service's runs in its instance's network on the node that runs
+it, as its screenshot does (a signed hop on a fleet; a 409 where roll apps can't be joined,
+Fargate). Checked in the screenshot image (a click changed "0 items" to "1 item", a missing selector named, a failed request listed)
+and live in `scripts/preview-cost.sh` and, on roll apps, `scripts/preview-apps.sh`.
+`an_agents_run_on_a_page_answers_what_it_showed_masked`, `a_runs_answer_is_bounded`,
+`an_apps_instance_is_screenshotted_on_its_services_holder`.
 A data branch can be looked at from the sheet too (Neon's Tables, Supabase's table editor): a
 Postgres branch's "Tables" lists the tables its own role can read (with about how many rows), and
 one's first 50 rows, cells as text cut at 200 characters (`…/data/{kind:parent}?table=`). It's
@@ -1665,6 +1683,17 @@ land on the change.
   decides a flag (a flags SDK's override hook); a visitor without the toolbar gets the app's own
   choices. roll MCP's `previews_set_rules` takes `flags` (an agent that adds a flag to the code
   offers it on the toolbar too). `a_reviewers_flags_reach_the_service_as_a_header`.
+- A note says what the reviewer did before it (Jam's user actions, the light part of Netlify's
+  recordings): the page's script keeps the last 20 clicks (by a selector), inputs ("type 11
+  characters in #coupon": how many, never what), choices, form submits, Enter and Escape, and page
+  changes (the address looked at twice a second; none of the page's own functions wrapped), each
+  with how long before the note; roll's own toolbar and the element picked for the note aren't
+  steps. They go with the errors and requests in the note's folded "On the page" block ("What
+  they did:", numbered), only if the person keeps them (`fb_steps`; checked in Chromium). The
+  page's toolbar is also driven in a browser by `scripts/preview-cost.sh` (in through the
+  preview's link, an element picked, a note posted): #861's Flags form came before the note's in
+  the toolbar's markup and the note's lookup took it, so picking an element opened the wrong
+  form until this fixed it (`form.card`).
 - A note or an error becomes a fix to make (Vercel Comments' "Create issue", Netlify's drawer):
   the note's sheet (opened from its Reply or Resolve) and each error group on the sheet's Errors
   tab have "Make a work item". It's made in the preview's repo as the person looking (roll code's
@@ -1802,6 +1831,8 @@ previews in it), the operator and admins see every project.
 | `GET /v1/previews/{id}/files?service=&path=` | | `application/x-tar`: what's at `path` (absolute) in the running `roll.toml` service, started if it sleeps (`docker cp`), `x-roll-service` naming it; 404 before any of the answer when nothing is there; said in the activity ("ana copied /app/out.csv out of web"). Admin, as the shell is (it reads anything the service keeps); a roll apps service's is 409 (roll apps' own `…/files` on `pv-`). Runs on the preview's holder |
 | `GET /v1/previews/{id}/forward?service=&port=` | WebSocket | one TCP connection to `port` in the running `roll.toml` service, any port it listens on (a debugger's, an admin's), published or not: a relay (busybox `nc`, `alpine:3.20`, 32 MiB, no capabilities) in the service's network namespace, removed with the connection; binary both ways, an empty message a half-close, as roll apps' tunnel (`roll preview forward`). The service is held awake while connections are open; at most 32 a preview (409); said in the activity once an hour per person, service and port. Admin; a roll apps service's is 409 (roll apps' own tunnel). Runs on the preview's holder (roll-cluster forwards the upgrade) |
 | `GET /v1/previews/{id}/fetch?path=&service=&head=` | `{service, path, url, status, headers: {content-type?, location?, cache-control?, content-length?}, body: string \| null, truncated}` | one page of a `roll.toml` service read through roll's own way in (no link token or share link), `GET` or `HEAD` (`head=true`); its text masked as its logs are, `null` when not text, cut at 256 KiB (`truncated`); `url` never carries a token; a roll apps service's page through roll apps' proxy as a link visitor (a team-access one's answers its 401); `reveal` (roll MCP's `previews_fetch`; `roll preview fetch`) |
+| `POST /v1/previews/{id}/try` | `{service?, path, steps}` (a page state's steps, 10 at most) | `{run, status, step_failed?, text, errors}`: the page in a browser after the steps, masked; two at a time per preview (409); `reveal` (roll MCP's `previews_try`) |
+| `GET /v1/previews/{id}/try/{run}/screenshot` | | `image/png`, the run's picture, kept 5 minutes; `reveal` (roll MCP's `previews_try_screenshot`) |
 | `GET /v1/previews/{id}/data/{resource}?table=` | | `{tables: [{name, rows}]}` (its tables, as its own role sees them, at most 200) or, with `table`, `{table, columns, rows: (string \| null)[][], more}` (the first 50 rows, cells cut at 200 characters); `resource` is `kind:parent`; read as the branch's own role, read-only, 5 s at most; 409 for a branch not ready or masked yet and for a kind with no way to show it yet (Postgres only for now); `reveal` |
 | `POST /v1/previews/{id}/otlp/{token}/v1/traces` | OTLP/HTTP traces: protobuf or JSON (`Content-Type`), gzip or not, at most 8 MiB | `{"partialSuccess": {}}`; 404 for anything but the preview's own token (derived from its id with the store's key, as its SMTP password is). Public in rolld's gate: the token in the path is the credential. A service gets it as `OTEL_EXPORTER_OTLP_ENDPOINT` when the project's `traces` is on. Spans are kept on the preview's holder, in memory: its newest 20,000, for 6 hours |
 | `GET /v1/previews/{id}/traces?minutes=` | | `{ minutes, traces: [{ trace, name, service, start_ms, ms, spans, error }] }`: its recent traces (5 to 360 minutes, 60 by default), newest first, at most 100, the root span's name masked as logs are |
@@ -1909,7 +1940,7 @@ type Settings = {
   max_usd_month: number;              // 0: no cap; once the month's cost reaches it, new previews wait
   secrets: { base: string; allow_production: boolean };      // "development", false
   env: Record<string, string>;        // overrides every service gets
-  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[]; hide: string[]; budget: { load_ms: number; bytes: number }; openapi?: string; endpoints?: string[]; states?: {name, page, steps}[]; storybook?: string /* "web" or "web:/storybook/" */; browsers?: ("firefox" | "webkit" | "webkit-phone")[] };   // all true but screenshot; pages, hide: []; budget 0s (none); openapi: the first service's OpenAPI JSON path, compared with main's; endpoints: up to 5 GET paths timed against main's
+  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[]; hide: string[]; budget: { load_ms: number; bytes: number }; openapi?: string; endpoints?: string[]; states?: {name, page, steps}[]; modes?: {name: string; color_scheme?: "dark" | "light"; locale?: string; timezone?: string}[]; storybook?: string /* "web" or "web:/storybook/" */; browsers?: ("firefox" | "webkit" | "webkit-phone")[] };   // all true but screenshot; pages, hide: []; budget 0s (none); openapi: the first service's OpenAPI JSON path, compared with main's; endpoints: up to 5 GET paths timed against main's
   access: "link" | "team" | "public"; // "link": a preview's URLs need its link; "team": a person signed in to roll who may open the project
   visual_review: "off" | "check" | "required";   // the roll/visual review; required also blocks landing in roll ("off")
   feedback: boolean;                  // a feedback button on its pages for people who came in through roll (true)
@@ -2095,6 +2126,18 @@ type Settings = {
     `total` `number` → `string`"). The shapes stay with the comparison: a preview's
     `page_speed` doesn't carry them (live: the change's `/openapi.json` loses
     `paths./users/{id}`).
+    Its modes too (Chromatic's Modes): with `github.modes` (up to 3, each a name and at least one
+    of a `color_scheme`, `dark` or `light`; a `locale`, `de-DE`, for the page's `Intl` formatting
+    and sent as `Accept-Language` (`navigator.language` stays the browser's); and a `timezone`,
+    `Europe/Berlin`), the first page is taken again in each, emulated by the browser
+    (`prefers-color-scheme`, the locale and the time zone), the emulation undone after (checked in
+    the screenshot image: black in `mode:dark` and white at the width after it, GMT+9 then UTC, a
+    German date order).
+    Each is a page of its own (`mode:dark`, "Views" on the sheet, labelled "dark mode"), compared
+    with main's same mode and reviewed like a page. The sheet's picture route takes every kind of
+    page key a run keeps (`page=` a path, `@768`, `state:`, `browser:`, `mode:` or `story:`; it
+    took only paths and widths before, so a state's, another browser's or a story's picture didn't
+    load). `the_first_page_in_each_mode_is_a_page_of_its_own`.
     Its Storybook's stories too (Chromatic's stories): with `github.storybook` (`web`, or
     `web:/storybook/` when the service serves it under a path: a static build or `storybook
     dev`), that service's run reads Storybook's index (`index.json`, Storybook 7 and later;
@@ -2604,8 +2647,8 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **A workload identity for `roll.toml` services, in review** (Vercel's OIDC federation): roll apps' `pv-`
-   instances have one; runtime services don't.
+1. **Agents driving the preview in a browser, in review** (GitHub Copilot's Playwright): `POST
+   …/try`, stateless steps and their picture (roll MCP's `previews_try`), roll apps services' too.
 2. **Restore points for a preview's data** (Neon's snapshots): save the branches now, put them back
    after a test run.
 3. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
@@ -2618,6 +2661,12 @@ Ranked by what a person notices first. Done so far:
 5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
 6. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-24, morning, later: a note says what the reviewer did before it, and the note's form works again after #861 (#879, the toolbar now driven in a browser live).
+
+Landed 2026-11-24, morning: screenshot modes (#877: dark, a language, a time zone), and the sheet's pictures of every page kind.
+
+Landed 2026-11-24, early morning: OIDC tokens for a preview's own services (#865, roll secrets' `Subject::Preview`), a roll apps service's page read through roll (#870), a fork's preview and its code's words marked outside for roll MCP's lockdown (#873).
 
 Landed 2026-11-24, later: feature flags a reviewer sets for their own view (#861: the toolbar's Flags, `x-roll-flags`).
 

@@ -2785,6 +2785,43 @@
         "x-roll-action": "write"
       }
     },
+    "/v1/apps/services/{id}/environments/{env}/fetch": {
+      "get": {
+        "description": "Answers `{ status, url, headers: { content-type?, content-length?, location?, cache-control?, x-roll-by? }, body: string /* text, at most 256 KiB */, truncated }`: one of its pages (`path`, default `/`) read through its own proxy past its gates (sign-in, password, token, allow list, firewall), as roll's scheduled calls go; `head` a HEAD; `deployment` that deployment's own answer; 30 s at most (503 past it); on the environment's owner.",
+        "operationId": "getServicesIdEnvironmentsEnvFetch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`{ status, url, headers: { content-type?, content-length?, location?, cache-control?, x-roll-by? }, body: string /* text, at most 256 KiB */, truncated }`: one of its pages (`path`, default `/`) read through its own proxy past its gates (sign-in, password, token, allow list, firewall), as roll's scheduled calls go; `head` a HEAD; `deployment` that deployment's own answer; 30 s at most (503 past it); on the environment's owner"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Get fetch",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "reveal"
+      }
+    },
     "/v1/apps/services/{id}/environments/{env}/files": {
       "get": {
         "description": "Answers `application/x-tar`: what's at the absolute `path` in the instance (a shell's, or `instance`), `X-Roll-Instance` naming it; 400 for a relative path, 409 when the runtime couldn't copy.",
@@ -5029,7 +5066,7 @@
               }
             }
           },
-          "description": "`{ to }`"
+          "description": "`{ to, state }` (`state`: the SHA-256 the environment's host sent with its redirect, `?state=`: the ticket opens only in the browser holding that state's cookie; 400 without it)"
         },
         "responses": {
           "200": {

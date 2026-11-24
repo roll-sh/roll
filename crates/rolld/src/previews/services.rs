@@ -599,6 +599,13 @@ impl super::fleet::Shoot for AppsShots {
         drop(at.hold);
         shot.map(Some)
     }
+
+    async fn try_page(&self, service: &str, env: &str, path: &str, steps: &[roll_previews::settings::Step]) -> anyhow::Result<Option<roll_previews::ports::Tried>> {
+        let Some(at) = self.reach.reach(service, env).await? else { return Ok(None) };
+        let tried = self.runtime.try_in(&at.container, at.port, path, steps).await;
+        drop(at.hold);
+        tried.map(Some)
+    }
 }
 
 /// Where a roll apps instance can be screenshotted (roll apps' `Apps::reachable`): its container
@@ -894,6 +901,14 @@ impl roll_previews::ports::Apps for Services {
             return Ok(None);
         }
         self.runtime.forward(preview, service, port).await
+    }
+
+    /// A `roll.toml` service's page in a browser, its steps taken (roll apps' services: next).
+    async fn try_page(&self, preview: &str, service: &str, path: &str, steps: &[roll_previews::settings::Step]) -> anyhow::Result<Option<roll_previews::ports::Tried>> {
+        let Some((id, env)) = self.apps.find(preview, service).await? else { return self.runtime.try_page(preview, service, path, steps).await };
+        // A roll apps instance: run where it runs, as its screenshot is.
+        let Some(shots) = &self.shots else { return Ok(None) };
+        super::fleet::try_page(self.fleet.as_ref(), shots.as_ref(), &id, &env, path, steps).await
     }
 
     /// A `roll.toml` service's page, read through the runtime (roll apps' services answer at their

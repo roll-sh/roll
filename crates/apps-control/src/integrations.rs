@@ -349,6 +349,8 @@ pub struct SsoVisitor {
     pub email: String,
     /// GitHub organisations they're a member of (lower case), when the sign-in read them.
     pub orgs: Vec<String>,
+    /// Google's `hd`: the Workspace domain the account belongs to (none for a consumer account).
+    pub hosted_domain: Option<String>,
 }
 
 /// A model that reads a failed deployment (rolld: the owner of the service's roll code repo's

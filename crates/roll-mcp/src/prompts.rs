@@ -113,7 +113,9 @@ const PROMPTS: &[Prompt] = &[
                  now (people, and admins' count) and their MCP connections (clients), tokens and identities, where it \
                  flows (syncs, shares, imports, leases, placeholders), the services that read it (services), copies \
                  in agents' sandboxes (sandboxes), who read it lately (readers), and people who revealed it and have \
-                 lost access since (knew: the strongest reason to rotate). Give me a plan before doing anything: \
+                 lost access since (knew: the strongest reason to rotate). A managed key reported leaked may already \
+                 be rotating by itself: check secrets_list_rotations (a rotation via leak) before planning one, and if \
+                 it has, don't rotate it again; see it finished, then go on to what reads it. Give me a plan before doing anything: \
                  rotate it with secrets_rotate (a managed link rotates where it lives; a key from another provider \
                  is rotated there first and then stored with secrets_set), redeploy each of reach's services with \
                  apps_redeploy whatever its last deploy (production may ask a person), drop or recreate the \
@@ -379,11 +381,14 @@ const PROMPTS: &[Prompt] = &[
                 "Review preview {}. Call previews_wait first. If it failed, read previews_logs (the deploy's first) and \
                  tell me why. If it's awaiting_approval, a writer has to approve-run its head first: say so and stop. Once \
                  it's ready: previews_get for what it branched and its schema_changes (flag a dropped table or column, \
-                 or a NOT NULL column with no default on a table that has rows); previews_errors for errors in it; \
+                 or a NOT NULL column with no default on a table that has rows; previews_tables on a table it changed, if you \
+                 have it, for what the rows hold now); previews_errors for errors in it; \
                  previews_routes for routes slower than in main's preview (call out a p95 more than 20% slower, and \
                  open one of its slow traces with previews_get_trace if you have it); previews_screenshot with diff=base \
                  on the pages the change touches, and look at each image; previews_fetch on those pages (and the API \
-                 paths it changed) for their status and what they answer, if you have it; previews_list_notes for what people left on \
+                 paths it changed) for their status and what they answer, if you have it; previews_try on a flow the \
+                 change touches (its steps: click, type, press, wait), with previews_try_screenshot only when the text \
+                 isn't enough, if you have it; previews_list_notes for what people left on \
                  its pages. Tell me whether it's ready to land, with the evidence for each problem. Don't resolve \
                  notes, refresh, reset or delete the preview without asking me.",
                 a("preview")

@@ -282,7 +282,14 @@ pub struct Access {
     pub password_hash: Option<String>,
     /// People a provider vouches for, who needn't be roll's ([`Sso`]).
     pub sso: Option<Sso>,
+    /// Paths whose CORS preflights (`OPTIONS` with `Access-Control-Request-Method`) go to the app
+    /// past the gate (Vercel's OPTIONS Allowlist): a preflight carries no credentials, so a page on
+    /// another of the owner's sites can then call the API with its own.
+    pub preflight: Vec<String>,
 }
+
+/// The most `access.preflight` paths.
+pub const MAX_PREFLIGHT: usize = 20;
 
 /// Signing visitors in through GitHub or Google (Cloud Run's IAP, Cloudflare Access): anyone whose
 /// verified email, email domain or GitHub organisation is in `allow`, account of roll's or not
@@ -331,12 +338,17 @@ impl Sso {
         self.allow.iter().any(|a| a.starts_with("org:"))
     }
 
-    /// The entry that lets someone in (their verified email, lower case, and organisations).
-    pub fn admits(&self, email: &str, orgs: &[String]) -> Option<&str> {
+    /// The entry that lets someone in (their verified email, lower case, organisations, and
+    /// Google's `hd`). With Google, a domain's entry also needs the account to be that
+    /// Workspace domain's (`hd`): a consumer account made with a work address isn't.
+    pub fn admits(&self, email: &str, orgs: &[String], hosted_domain: Option<&str>) -> Option<&str> {
         let domain = email.rsplit_once('@').map(|(_, d)| d)?;
         self.allow.iter().map(String::as_str).find(|a| match a.strip_prefix("org:") {
             Some(org) => orgs.iter().any(|o| o == org),
-            None => a.strip_prefix('@').map_or(*a == email, |d| d == domain),
+            None => match a.strip_prefix('@') {
+                Some(d) => d == domain && (self.provider != "google" || hosted_domain.is_some_and(|h| h.eq_ignore_ascii_case(d))),
+                None => *a == email,
+            },
         })
     }
 }
@@ -1856,6 +1868,9 @@ pub struct Environment {
     /// Visitors a provider signs in (`access.sso`): its provider and who it lets in.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sso: Option<Sso>,
+    /// Paths whose CORS preflights reach the app past its gate (`access.preflight`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub preflight: Vec<String>,
     /// Visitors may type its password (`access.password`; never returned).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub password: bool,

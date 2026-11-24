@@ -504,6 +504,37 @@ async fn a_secret_value_its_pages_serve_is_named_on_its_record() {
     assert!(said.len() == 1 && said[0].contains("STRIPE_KEY in /assets/app.js") && !said[0].contains("sk_test"), "{said:?}");
 }
 
+/// An agent's run on a page (`POST …/try`): what it showed, masked as logs are, its picture
+/// behind its run's id for a while (another preview's id gets nothing), a bad step refused.
+#[tokio::test]
+async fn an_agents_run_on_a_page_answers_what_it_showed_masked() {
+    use tower::ServiceExt;
+    let e = env(json!({ "enabled": true }));
+    e.secrets.values.lock().push(("STRIPE_KEY".into(), "sk_test_51Hx9abc".into()));
+    e.code.open(change("chg_try", 4));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_try").unwrap().unwrap();
+    *e.apps.tried.lock() = Some(roll_previews::ports::Tried { png: Some(b"\x89PNG...".to_vec()), status: 200, step_failed: None, text: "Cart\nkey sk_test_51Hx9abc".into(), errors: vec!["TypeError".into()] });
+    let call = |req: axum::http::Request<axum::body::Body>| {
+        let router = roll_previews::api::router(e.engine.clone());
+        async move {
+            let resp = router.oneshot(req).await.unwrap();
+            (resp.status(), axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap())
+        }
+    };
+    let post = |body: serde_json::Value| axum::http::Request::post(format!("/v1/previews/{}/try", p.id)).header("content-type", "application/json").body(axum::body::Body::from(body.to_string())).unwrap();
+    let (status, body) = call(post(json!({ "path": "/cart", "steps": [{ "click": "#add" }, { "press": "Enter" }] }))).await;
+    assert_eq!(status, 200);
+    let run: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!((run["status"].clone(), run["text"].clone(), run["errors"].clone()), (json!(200), json!("Cart\nkey ***"), json!(["TypeError"])));
+    let picture = |id: &str| axum::http::Request::get(format!("/v1/previews/{id}/try/{}/screenshot", run["run"].as_str().unwrap())).body(axum::body::Body::empty()).unwrap();
+    let (status, png) = call(picture(&p.id)).await;
+    assert!(status == 200 && png.starts_with(b"\x89PNG"));
+    assert_eq!(call(picture("pv_other00000")).await.0, 404, "another preview's id gets nothing");
+    assert!(call(post(json!({ "path": "/", "steps": [{ "eval": "alert(1)" }] }))).await.0.is_client_error(), "a step it doesn't know");
+    assert_eq!(call(post(json!({ "path": "//evil.example", "steps": [] }))).await.0, 400, "a path of its own");
+}
+
 /// A fork's preview is marked `outside`, and so are its error groups and its logs (its traces,
 /// spans and routes too): its title and what its code wrote are text from people who can't push,
 /// which roll MCP's lockdown keeps from a model; a trusted preview isn't.
@@ -1984,6 +2015,33 @@ async fn a_service_that_didnt_change_keeps_its_pages() {
     e.engine.pass().await.unwrap();
     taken(&e.apps, "web", web_before + 1).await;
     assert_eq!(runs("web"), web_before + 1, "after a reset its pages are taken again");
+}
+
+/// The first page in the project's modes (`github.modes`: dark, another language): each a page of
+/// its own (`mode:<name>`), kept and served by the sheet's picture route, as a state's page is.
+#[tokio::test]
+async fn the_first_page_in_each_mode_is_a_page_of_its_own() {
+    use tower::ServiceExt;
+    let e = env(json!({ "enabled": true, "github": { "screenshot": true, "modes": [{ "name": "dark", "color_scheme": "dark" }], "states": [{ "name": "tab", "page": "/", "steps": [{ "press": "Tab" }] }] } }));
+    let mut png = Vec::new();
+    image::RgbaImage::new(4, 4).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    *e.apps.shot.lock() = Some(png);
+    e.code.open(change("chg_md", 3));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_md").unwrap().unwrap();
+    let pages = |e: &Env| e.engine.store.preview(&p.id).unwrap().pages.iter().map(|x| x.path.clone()).collect::<Vec<_>>();
+    for _ in 0..3000 {
+        if pages(&e).contains(&"mode:dark".to_string()) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(pages(&e).contains(&"mode:dark".to_string()), "{:?}", pages(&e));
+    for key in ["mode:dark", "state:tab"] {
+        let req = axum::http::Request::get(format!("/v1/previews/{}/screenshot?page={key}", p.id)).body(axum::body::Body::empty()).unwrap();
+        let resp = roll_previews::api::router(e.engine.clone()).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200, "the sheet's picture of {key}");
+    }
 }
 
 /// A Storybook another service serves (`github.storybook`): its stories are pages of their own

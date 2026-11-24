@@ -286,6 +286,51 @@ pub struct GithubRule {
     /// main's and reviewed like a page (`story:<id>`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storybook: Option<String>,
+    /// The first page in more modes (Chromatic's Modes): a dark color scheme, another language,
+    /// another time zone, each a page of its own (`mode:<name>`), compared with main's and reviewed
+    /// like a page. Up to 3.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modes: Vec<ModeRule>,
+}
+
+/// A mode the first page is taken in (`github.modes`): at least one of a color scheme (`dark`,
+/// `light`), a language (`de-DE`) and a time zone (`Europe/Berlin`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModeRule {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_scheme: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locale: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+}
+
+impl ModeRule {
+    fn ok(&self) -> bool {
+        let name = (1..=20).contains(&self.name.len()) && self.name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+        let scheme = self.color_scheme.as_deref().is_none_or(|c| c == "dark" || c == "light");
+        let locale = self.locale.as_deref().is_none_or(|l| (2..=35).contains(&l.len()) && l.split('-').all(|p| (1..=8).contains(&p.len()) && p.bytes().all(|b| b.is_ascii_alphanumeric())));
+        let tz = self.timezone.as_deref().is_none_or(|t| (1..=40).contains(&t.len()) && t.split('/').all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'+'))));
+        name && scheme && locale && tz && (self.color_scheme.is_some() || self.locale.is_some() || self.timezone.is_some())
+    }
+}
+
+/// A mode's page entry (`mode:dark`).
+pub fn mode_entry(e: &str) -> Option<&str> {
+    e.strip_prefix("mode:").filter(|n| (1..=20).contains(&n.len()) && n.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'))
+}
+
+/// A key a screenshot run's page is kept under: a path (or `svc:/path`), `@<width>`,
+/// `state:<name>`, `browser:<name>`, `mode:<name>` or `story:<id>`.
+pub fn page_key_ok(p: &str) -> bool {
+    page_entry(p).is_some()
+        || width_entry(p).is_some()
+        || state_entry(p).is_some()
+        || mode_entry(p).is_some()
+        || p.strip_prefix("browser:").is_some_and(|b| BROWSERS.contains(&b))
+        || p.strip_prefix("story:").is_some_and(story_id_ok)
 }
 
 /// The most stories a Storybook's run takes (`github.storybook`).
@@ -500,7 +545,7 @@ impl Default for SecretsRule {
 
 impl Default for GithubRule {
     fn default() -> Self {
-        GithubRule { comment: true, status: true, deployment: true, screenshot: false, baseline: true, pages: Vec::new(), hide: Vec::new(), budget: Budget::default(), visual_threshold: 0.0, widths: Vec::new(), openapi: None, endpoints: Vec::new(), states: Vec::new(), browsers: Vec::new(), storybook: None }
+        GithubRule { comment: true, status: true, deployment: true, screenshot: false, baseline: true, pages: Vec::new(), hide: Vec::new(), budget: Budget::default(), visual_threshold: 0.0, widths: Vec::new(), openapi: None, endpoints: Vec::new(), states: Vec::new(), browsers: Vec::new(), storybook: None, modes: Vec::new() }
     }
 }
 
@@ -745,6 +790,10 @@ impl Settings {
         if br.iter().enumerate().any(|(i, b)| !BROWSERS.contains(&b.as_str()) || br[..i].contains(b)) {
             return bad(format!("github.browsers: some of {}, each once (Chromium always takes the screenshot)", BROWSERS.join(", ")));
         }
+        let modes = &self.github.modes;
+        if modes.len() > 3 || modes.iter().enumerate().any(|(i, m)| !m.ok() || modes[..i].iter().any(|n| n.name == m.name)) {
+            return bad("github.modes: up to 3, each a name (a-z, 0-9, -) and a color_scheme (dark or light), a locale (de-DE) or a timezone (Europe/Berlin)".into());
+        }
         if self.github.storybook.as_deref().is_some_and(|s| storybook_entry(s).is_none()) {
             return bad("github.storybook: the name of the service that serves Storybook (web), and the path it's under when not / (web:/storybook/, ending in /)".into());
         }
@@ -834,6 +883,10 @@ mod tests {
         assert!(storybook_entry("web:/sb").is_none() && storybook_entry("Web").is_none() && storybook_entry("web:/a b/").is_none(), "a service, and a path ending in /");
         assert!(Settings::default().patched(&serde_json::json!({ "github": { "storybook": "web:/x" } })).is_err());
         assert!(story_id_ok("components-button--primary") && !story_id_ok("button") && !story_id_ok("../x--y") && !story_id_ok("a--"), "Storybook's ids");
+        let modes = |m: serde_json::Value| Settings::default().patched(&serde_json::json!({ "github": { "modes": m } })).is_ok();
+        assert!(modes(serde_json::json!([{ "name": "dark", "color_scheme": "dark" }, { "name": "de", "locale": "de-DE", "timezone": "Europe/Berlin" }])));
+        assert!(!modes(serde_json::json!([{ "name": "none" }])) && !modes(serde_json::json!([{ "name": "x", "color_scheme": "blue" }])) && !modes(serde_json::json!([{ "name": "x", "timezone": "../etc" }])), "a mode changes something real");
+        assert!(page_key_ok("state:tab") && page_key_ok("mode:dark") && page_key_ok("browser:firefox") && page_key_ok("story:a--b") && !page_key_ok("browser:chrome") && !page_key_ok("mode:"), "every kind of page key");
     }
 
     #[test]

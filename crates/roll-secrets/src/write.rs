@@ -616,7 +616,10 @@ pub(crate) fn apply(c: &Conn<'_>, dek: &Dek, mac: &crate::Keyring, env: &EnvRow,
                         (None, _) if link_now.as_ref().is_some_and(|l| l.mode == Mode::Managed) => {
                             return Err(Error::Internal(format!("{}: the managed credential wasn't issued", item.key)));
                         }
-                        (None, _) => Some(Value::default()),
+                        // Without a value a set only changes a key that's here: a wrong name, path
+                        // or type would otherwise make an empty one that shadows the real value.
+                        (None, None) => return Err(Error::BadRequest(format!("{}: a new secret needs a value", item.key))),
+                        (None, Some(_)) => Some(Value::default()),
                     },
                 };
                 let fp = match (&link_now, &stored_value) {

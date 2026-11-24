@@ -31,7 +31,7 @@ const DAY_MS: i64 = 86_400_000;
 /// A project's rows by `project_id`, gone at the purge (its registries wait for revocations:
 /// [`REGISTRIES`]).
 const DATA: &[&str] = &[
-    "secrets", "versions", "changes", "requests", "audit", "audit_heads", "required", "shares", "value_requests", "syncs", "audit_sinks", "notices", "identities", "identity_logins", "transit_keys", "oidc_issued", "placeholders", "key_hosts", "validity", "backup_schedules", "event_marks",
+    "secrets", "versions", "changes", "requests", "audit", "audit_heads", "required", "shares", "value_requests", "syncs", "audit_sinks", "notices", "identities", "identity_logins", "transit_keys", "oidc_issued", "placeholders", "key_hosts", "validity", "backup_schedules", "event_marks", "leak_rotations",
 ];
 
 /// Gone at the delete itself: links that hand something out to whoever holds them, and logins

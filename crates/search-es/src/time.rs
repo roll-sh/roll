@@ -1960,6 +1960,11 @@ pub async fn at<F: std::future::Future>(now: i64, f: F) -> F::Output {
     CLOCK.scope(now, f).await
 }
 
+/// [`at`] for a synchronous `f`.
+pub fn at_sync<R>(now: i64, f: impl FnOnce() -> R) -> R {
+    CLOCK.sync_scope(now, f)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

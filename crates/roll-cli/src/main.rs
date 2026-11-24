@@ -24,6 +24,7 @@ mod mask;
 mod secret_refs;
 mod fallback;
 mod managers;
+mod import_tree;
 mod secrets;
 mod apps;
 mod aws_login;

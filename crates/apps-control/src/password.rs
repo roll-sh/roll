@@ -98,7 +98,7 @@ impl Apps {
         let Some(k) = self.pass_key().await else { return StatusCode::SERVICE_UNAVAILABLE.into_response() };
         let until = now / 1000 + DAYS * 86_400;
         let secure = if self.cfg.scheme == "https" { "; Secure" } else { "" };
-        let c = format!("{}={until}.{}; Path=/; Max-Age={}; HttpOnly; SameSite=Lax{secure}", cookie(env), session_mac(&k, service, env, until, hash), DAYS * 86_400);
+        let c = format!("{}={until}.{}; Path=/; Max-Age={}; HttpOnly; SameSite=Lax{secure}", crate::public::host_only(self, cookie(env)), session_mac(&k, service, env, until, hash), DAYS * 86_400);
         let mut r = StatusCode::SEE_OTHER.into_response();
         let h = r.headers_mut();
         if let (Ok(l), Ok(c)) = (HeaderValue::from_str(&to), HeaderValue::from_str(&c)) {

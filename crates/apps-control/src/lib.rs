@@ -17,6 +17,7 @@ pub mod challenge;
 pub mod bots;
 pub mod attacks;
 pub mod attack_mode;
+pub mod visitor_token;
 pub mod backups;
 pub mod browser;
 pub mod moving;
@@ -433,6 +434,11 @@ pub struct Apps {
     pub(crate) edge_noted: Mutex<std::collections::HashSet<String>>,
     /// Crawlers' addresses checked against their operators' DNS ([`bots`]).
     pub(crate) bots_verified: bots::Verified,
+    /// Projects' keys for their visitors' tokens, and the tokens made ([`visitor_token`]).
+    pub(crate) visitor_keys: Mutex<HashMap<String, (Vec<u8>, String)>>,
+    pub(crate) visitor_tokens: Mutex<HashMap<String, (String, i64)>>,
+    /// The key visitors' sign-in requests are signed with, once read ([`visit`]).
+    pub(crate) sso_key: Mutex<Option<Vec<u8>>>,
     /// Password tries per environment and client, in the last ten minutes ([`password`]).
     pub(crate) password_tries: Mutex<HashMap<password::Client, (i64, u32)>>,
     /// Shells open over HTTP (the dashboard's terminal), by id.
@@ -753,6 +759,9 @@ impl Apps {
             edge_key: Mutex::new(None),
             edge_noted: Mutex::new(Default::default()),
             bots_verified: Default::default(),
+            visitor_keys: Mutex::new(HashMap::new()),
+            visitor_tokens: Mutex::new(HashMap::new()),
+            sso_key: Mutex::new(None),
             password_tries: Mutex::new(HashMap::new()),
             looping: Mutex::new(std::collections::HashSet::new()),
             metric_streaks: Mutex::new(std::collections::HashMap::new()),
@@ -1822,6 +1831,7 @@ impl Apps {
         let gate = self.access(&r.service, &r.name).await?;
         let (private, signed_in, password) = (gate.is_some(), gate.as_ref().is_some_and(|a| a.signed_in), gate.as_ref().is_some_and(|a| a.password_hash.is_some()));
         let sso = gate.as_ref().and_then(|a| a.sso.clone());
+        let preflight = gate.as_ref().map(|a| a.preflight.clone()).unwrap_or_default();
         let (sid, e) = (r.service.clone(), r.name.clone());
         let waiting_for_ci = self.db(move |s| s.ci_waits()).await?.into_iter().find(|(w, _)| w.service == sid && w.env == e).map(|(w, _)| w.sha);
         let (sid, e) = (r.service.clone(), r.name.clone());
@@ -1852,6 +1862,7 @@ impl Apps {
             private,
             signed_in,
             sso,
+            preflight,
             password,
             next_run_at,
             schedules: self.schedule_states(&svc, &r).await,
@@ -2042,7 +2053,7 @@ impl Apps {
     pub async fn put_environment_by(self: &Arc<Self>, service: &str, env: &str, body: Value, by: Option<String>) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "redirects", "checks", "heartbeats", "split", "mirror", "snippets", "config", "freeze", "pause_schedule", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host", "log_retention_days", "approvals", "badge", "closed_by", "data", "scheduled", "attack_mode", "challenge_until"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "redirects", "checks", "heartbeats", "split", "mirror", "snippets", "config", "freeze", "pause_schedule", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host", "log_retention_days", "approvals", "badge", "closed_by", "data", "scheduled", "attack_mode", "challenge_until", "preflight"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -2066,6 +2077,19 @@ impl Apps {
             None => None,
             Some(Value::Bool(b)) => Some(*b),
             Some(_) => return Err(Error::BadRequest("paused is a boolean".into())),
+        };
+        // CORS preflights to these paths reach the app past its gate (Vercel's OPTIONS Allowlist);
+        // on its own, so setting it never resends the access's secrets.
+        let preflight: Option<Vec<String>> = match o.get("preflight") {
+            None => None,
+            Some(Value::Null) => Some(Vec::new()),
+            Some(v) => {
+                let p: Vec<String> = serde_json::from_value(v.clone()).map_err(|_| Error::BadRequest("preflight is paths (/api/*), or null".into()))?;
+                if p.len() > crate::model::MAX_PREFLIGHT || p.iter().any(|x| !x.starts_with('/') || x.len() > 512 || x.strip_suffix('*').unwrap_or(x).contains('*')) {
+                    return Err(Error::BadRequest(format!("preflight is at most {} paths, each starting with / (`*` only at its end)", crate::model::MAX_PREFLIGHT)));
+                }
+                Some(p)
+            }
         };
         // Attack mode: when it goes on by itself, and on by hand until a time (null: off).
         let attack_mode: Option<Option<crate::attack_mode::AttackMode>> = match o.get("attack_mode") {
@@ -2382,7 +2406,10 @@ impl Apps {
                     Some(Value::String(h)) if h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()) => Some(h.to_ascii_lowercase()),
                     Some(_) => return Err(Error::BadRequest("access.bypass_sha256 is a SHA-256 in hex".into())),
                 };
-                Some(Some(Access { token_hash: token.map(crate::public::token_hash), bypass_hash: bypass, signed_in, password_hash: password, sso }))
+                // A new way in keeps the paths whose preflights pass (`preflight`, set on its own).
+                let (sid, e) = (service.to_string(), env.to_string());
+                let preflight = self.db(move |s| s.access(&sid, &e)).await.ok().flatten().map(|a| a.preflight).unwrap_or_default();
+                Some(Some(Access { token_hash: token.map(crate::public::token_hash), bypass_hash: bypass, signed_in, password_hash: password, sso, preflight }))
             }
             Some(_) => return Err(Error::BadRequest("access is {token?, signed_in?, password?, sso?, bypass_sha256?} or null".into())),
         };
@@ -2741,6 +2768,13 @@ impl Apps {
             let (sid, e, a) = (service.to_string(), env.to_string(), access.clone());
             self.db(move |s| s.set_access(&sid, &e, a.as_ref())).await?;
             self.set_access_cache(service, env, Some(access));
+        }
+        if let Some(paths) = preflight {
+            let (sid, e) = (service.to_string(), env.to_string());
+            if !self.db(move |s| s.set_preflight(&sid, &e, &paths)).await? {
+                return Err(Error::Conflict("preflight is for an environment with a gate (access): it has none".into()));
+            }
+            self.set_access_cache(service, env, None);
         }
         let mut new_urls = Vec::new();
         if let Some((beats, tokens)) = heartbeats {

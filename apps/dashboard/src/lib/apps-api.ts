@@ -613,6 +613,8 @@ export interface EnvironmentPut {
   attack_mode?: { per_minute: number; minutes?: number } | null;
   /** Attack mode on by hand until then (unix ms, within 24 hours); null ends it. */
   challenge_until?: number | null;
+  /** Paths whose CORS preflights reach the app past its gate; null: none. */
+  preflight?: string[] | null;
   /** false: its schedules don't run (deploys and runs still do). */
   scheduled?: boolean;
   /** Data of its own: a branch of each Postgres and Redis database it links (admin); null goes back. */
@@ -774,6 +776,8 @@ export interface Environment extends EnvironmentSummary {
   signed_in?: boolean;
   /** People GitHub or Google vouches for get in, by domain, email or GitHub organisation. */
   sso?: Sso;
+  /** Paths whose CORS preflights reach the app past its gate. */
+  preflight?: string[];
   /** Visitors may type its password (`access.password`, never returned). */
   password?: boolean;
   /** What its code may reach: roll and the listed hosts (`roll`), or anything (`open`). */
@@ -1635,7 +1639,7 @@ export const appsApi = {
   disconnectGitHub: (id: string) => call<Service>("DELETE", `${svc(id)}/github`),
   putEnvironment: (id: string, e: string, body: EnvironmentPut) => call<Environment>("PUT", env(id, e), body),
   /** A one-use way into a sign-in-gated environment, as the signed-in person: the URL to go on to. */
-  visit: (id: string, e: string, to: string) => call<{ url: string }>("POST", `${env(id, e)}/visit`, { to }),
+  visit: (id: string, e: string, to: string, state: string) => call<{ url: string }>("POST", `${env(id, e)}/visit`, { to, state }),
   removeEnvironment: (id: string, e: string) => call<null>("DELETE", env(id, e)),
 
   deploy: (id: string, e: string, body: NewDeploy = {}) => call<Deployment>("POST", `${env(id, e)}/deploys`, body),

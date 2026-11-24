@@ -27,6 +27,8 @@ pub struct Entry {
     pub key: String,
     pub value: String,
     pub secret: bool,
+    /// What the source says about it (Doppler's note, Infisical's comment): the key's comment.
+    pub comment: String,
 }
 
 /// What a source gives, by folder under the import's path (`""` is the path itself).
@@ -48,7 +50,7 @@ impl Tree {
     }
 
     fn folders(self) -> Folders {
-        self.0.into_iter().map(|(f, keys)| (f, keys.into_iter().map(|(key, (_, value, secret))| Entry { key, value, secret }).collect())).collect()
+        self.0.into_iter().map(|(f, keys)| (f, keys.into_iter().map(|(key, (_, value, secret))| Entry { key, value, secret, comment: String::new() }).collect())).collect()
     }
 }
 

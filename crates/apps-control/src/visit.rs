@@ -16,6 +16,8 @@ use std::sync::Arc;
 
 /// Where a ticket comes back to on the environment's own host.
 pub const PATH: &str = "/__roll/visit";
+/// Where a visitor signs out of the environment (Cloudflare Access's `/cdn-cgi/access/logout`).
+pub const LOGOUT: &str = "/__roll/logout";
 /// How long a ticket is good for, and a session.
 const TICKET_MS: i64 = 60_000;
 pub const SESSION_S: i64 = 12 * 3600;
@@ -29,7 +31,8 @@ pub(crate) struct Seen {
     until: i64,
     /// The access generation it was read under: a change to any environment's access reads it again.
     generation: u64,
-    /// Who they are to the app ([`Apps::visitor`]).
+    /// Who they are: the person's id and what the app is shown ([`Apps::visitor`]).
+    user: String,
     shown: String,
     /// When its person was last asked about.
     checked: i64,
@@ -38,6 +41,25 @@ pub(crate) struct Seen {
 /// The session cookie's name in an environment.
 pub fn cookie(env: &str) -> String {
     format!("roll_visit_{env}")
+}
+
+/// The cookie that binds a sign-in to the browser it began in: set where roll sends someone off
+/// to sign in, its SHA-256 carried to the ticket, and asked for where the ticket comes back (a
+/// ticket's link handed to someone else opens nothing for them).
+pub fn state_cookie(env: &str) -> String {
+    format!("roll_visit_state_{env}")
+}
+
+/// A new state: the cookie's value and the SHA-256 the ticket is bound to.
+pub fn new_state() -> (String, String) {
+    let v = crate::model::random(32);
+    let h = crate::public::token_hash(&v);
+    (v, h)
+}
+
+/// Whether `s` reads as a state's SHA-256.
+fn a_binding(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// A path to send someone back to on the same site: one leading slash, no backslash (browsers
@@ -64,7 +86,10 @@ impl Apps {
     /// `POST …/environments/{env}/visit {to}`, as a person signed in to roll: a one-use ticket
     /// to `to` (a URL at one of the environment's names), as the URL that opens it. Only an
     /// environment that lets people in by signing in gives one.
-    pub async fn visit_ticket(self: &Arc<Self>, service: &str, env: &str, user: &str, login: &str, to: &str) -> Result<String> {
+    pub async fn visit_ticket(self: &Arc<Self>, service: &str, env: &str, user: &str, login: &str, to: &str, binding: &str) -> Result<String> {
+        if !a_binding(binding) {
+            return Err(Error::BadRequest("state is the one the environment's page sent here with: open the page again".into()));
+        }
         // A person's own roll login, whose end ends what it opens (never a token on their behalf).
         if !login.starts_with("ses_") {
             return Err(Error::Forbidden("signing in to an environment is for a person signed in to roll, not a token".into()));
@@ -86,7 +111,8 @@ impl Apps {
         let token = format!("rlv_{}", crate::model::random(32));
         let (hash, sid, e, u, l) = (crate::public::token_hash(&token), service.to_string(), env.to_string(), user.to_string(), login.to_string());
         let until = code_sql::now_ms() + TICKET_MS;
-        self.db(move |s| s.put_visit_ticket(&hash, &sid, &e, &u, &l, until)).await?;
+        let b = binding.to_ascii_lowercase();
+        self.db(move |s| s.put_visit_ticket(&hash, &sid, &e, &u, &l, until, &b)).await?;
         let mut path = url.path().to_string();
         if let Some(q) = url.query() {
             path = format!("{path}?{q}");
@@ -99,10 +125,11 @@ impl Apps {
 
     /// A ticket brought back to the environment: the session it opens (the cookie's value), or
     /// none (used, expired, another environment's).
-    pub(crate) async fn open_visit(self: &Arc<Self>, service: &str, env: &str, ticket: &str) -> Option<String> {
-        let (hash, sid, e) = (crate::public::token_hash(ticket), service.to_string(), env.to_string());
+    /// `state`: the state cookie the browser bringing it holds.
+    pub(crate) async fn open_visit(self: &Arc<Self>, service: &str, env: &str, ticket: &str, state: &str) -> Option<String> {
+        let (hash, sid, e, b) = (crate::public::token_hash(ticket), service.to_string(), env.to_string(), crate::public::token_hash(state));
         let now = code_sql::now_ms();
-        let (user, login) = self.db(move |s| s.take_visit_ticket(&hash, &sid, &e, now)).await.ok()??;
+        let (user, login) = self.db(move |s| s.take_visit_ticket(&hash, &sid, &e, now, &b)).await.ok()??;
         let token = format!("rls_{}", crate::model::random(32));
         let (hash, sid, e) = (crate::public::token_hash(&token), service.to_string(), env.to_string());
         self.db(move |s| s.put_visit_session(&hash, &sid, &e, &user, &login, now + SESSION_S * 1000)).await.ok()?;
@@ -121,18 +148,27 @@ impl Apps {
 
     /// The key a visitor's sign-in request is signed with, made once and shared by every node.
     async fn sso_key(self: &Arc<Self>) -> Result<Vec<u8>> {
+        if let Some(k) = self.sso_key.lock().clone() {
+            return Ok(k);
+        }
         let v = crate::model::random(32);
-        Ok(self.db(move |s| s.state_or("visit_sso_key", &v)).await?.into_bytes())
+        let k = self.db(move |s| s.state_or("visit_sso_key", &v)).await?.into_bytes();
+        *self.sso_key.lock() = Some(k.clone());
+        Ok(k)
     }
 
     /// Where a visitor with no session goes to sign in through `access.sso`'s provider: roll's
     /// sign-in with a request signed for this environment, host and page, for ten minutes.
-    pub(crate) async fn sso_start(self: &Arc<Self>, service: &str, env: &str, sso: &crate::model::Sso, host: &str, to: &str) -> Option<String> {
+    /// `binding`: the SHA-256 of the state cookie set on the way out ([`state_cookie`]).
+    pub(crate) async fn sso_start(self: &Arc<Self>, service: &str, env: &str, sso: &crate::model::Sso, host: &str, to: &str, binding: &str) -> Option<String> {
         let start = self.visitor_sign_in.get()?.clone();
         let key = self.sso_key().await.ok()?;
         let until = (code_sql::now_ms() + 600_000).to_string();
         let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
-        let parts = [service, env, until.as_str(), host, to];
+        // A page whose address is long goes back to its path, else the start (the request's room
+        // at roll-accounts is 2048).
+        let to = if to.len() <= 1024 { to } else { to.split('?').next().filter(|p| p.len() <= 1024).unwrap_or("/") };
+        let parts = [service, env, until.as_str(), host, to, binding];
         let request = format!("{}.{}", b64.encode(parts.join("\n")), crate::challenge::mac(&key, &parts));
         start.start_url(&sso.provider, &request, sso.orgs())
     }
@@ -145,7 +181,7 @@ impl Apps {
         let (body, mac) = request.split_once('.').ok_or_else(broken)?;
         let text = String::from_utf8(base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(body).map_err(|_| broken())?).map_err(|_| broken())?;
         let parts: Vec<&str> = text.split('\n').collect();
-        let [service, env, until, host, to] = parts[..] else { return Err(broken()) };
+        let [service, env, until, host, to, binding] = parts[..] else { return Err(broken()) };
         let key = self.sso_key().await.map_err(|_| broken())?;
         if !crate::public::same(&crate::challenge::mac(&key, &parts), mac) {
             return Err(broken());
@@ -153,20 +189,53 @@ impl Apps {
         if until.parse::<i64>().map_or(true, |u| u < code_sql::now_ms()) {
             return Err("The sign-in took too long. Open the page again.".into());
         }
-        let Some(sso) = self.access(service, env).await.ok().flatten().and_then(|a| a.sso) else { return Err("This site no longer lets people in by signing in this way.".into()) };
+        // Read now, not this node's copy: on a fleet the change may have been made on another.
+        let (sid, e) = (service.to_string(), env.to_string());
+        let Some(sso) = self.db(move |s| s.access(&sid, &e)).await.ok().flatten().and_then(|a| a.sso) else { return Err("This site no longer lets people in by signing in this way.".into()) };
         if sso.provider != who.provider {
             return Err(broken());
         }
-        let Some(entry) = sso.admits(&who.email, &who.orgs).map(str::to_string) else {
+        let Some(entry) = sso.admits(&who.email, &who.orgs, who.hosted_domain.as_deref()).map(str::to_string) else {
             return Err(format!("{} isn't let in to this site. Sign in with an account it allows, or ask its owner.", who.email));
         };
         // The person by the provider's own id; what let them in, to check again while it lasts.
         let token = format!("rlv_{}", crate::model::random(32));
         let (hash, sid, e, u, l) = (crate::public::token_hash(&token), service.to_string(), env.to_string(), format!("sso:{}:{}", who.provider, who.subject), format!("sso:{entry} {}", who.email));
         let expires = code_sql::now_ms() + TICKET_MS;
-        self.db(move |s| s.put_visit_ticket(&hash, &sid, &e, &u, &l, expires)).await.map_err(|_| broken())?;
+        let b = binding.to_string();
+        self.db(move |s| s.put_visit_ticket(&hash, &sid, &e, &u, &l, expires, &b)).await.map_err(|_| broken())?;
         let q = |v: &str| percent_encoding::utf8_percent_encode(v, percent_encoding::NON_ALPHANUMERIC).to_string();
         Ok(format!("{}{PATH}?ticket={token}&to={}", self.origin(host), q(&local_path(to))))
+    }
+
+    /// `GET …/environments/{env}/fetch?path=&head=&deployment=`: one of its pages as roll's own
+    /// call reads it (past its gates; run on the owner): `{status, url, headers, body, truncated}`,
+    /// the body as text, at most 256 KiB.
+    pub async fn fetch_page(self: &Arc<Self>, service: &str, env: &str, path: &str, head: bool, deployment: Option<&str>) -> Result<serde_json::Value> {
+        if !path.starts_with('/') || path.starts_with("//") || path.len() > 2048 || path.bytes().any(|b| b.is_ascii_control()) {
+            return Err(Error::BadRequest("path is a path on the environment (/…), at most 2048 characters".into()));
+        }
+        if let Some(d) = deployment {
+            self.deployment(service, env, d).await?;
+        }
+        let (sid, e) = (service.to_string(), env.to_string());
+        let row = self.db(move |s| s.environment(&sid, &e)).await?;
+        let host = format!("{}.{}", row.slug, self.cfg.domain);
+        let (status, headers, body, truncated) = crate::public::call_fetch(self.clone(), service, env, &host, path, head, deployment, 256 * 1024).await.map_err(Error::Unavailable)?;
+        let mut shown = serde_json::Map::new();
+        for h in ["content-type", "content-length", "location", "cache-control", "x-roll-by"] {
+            if let Some(v) = headers.get(h).and_then(|v| v.to_str().ok()) {
+                shown.insert(h.into(), serde_json::json!(v));
+            }
+        }
+        Ok(serde_json::json!({ "status": status, "url": format!("{}{path}", self.origin(&host)), "headers": shown, "body": String::from_utf8_lossy(&body), "truncated": truncated }))
+    }
+
+    /// A visitor signing out: their session (`token`) ends on every node at its next look.
+    pub(crate) async fn end_visit(self: &Arc<Self>, token: &str) {
+        let hash = crate::public::token_hash(token);
+        self.visits.lock().remove(&hash);
+        let _ = self.db(move |s| s.delete_visit_session(&hash)).await;
     }
 
     /// Whether the roll login a session came from is still live (no [`crate::integrations::Visitors`]:
@@ -191,9 +260,9 @@ impl Apps {
     /// Whose session `token` is in the environment, while it lasts and its person may still open
     /// the project (remembered on this node for `visitor_recheck`, and never past the
     /// environment's access changing).
-    /// The answer is who they are to the app (`x-roll-visitor`): a provider's visitor's email, or a
-    /// roll person's user id.
-    pub(crate) async fn visitor(self: &Arc<Self>, service: &str, env: &str, token: &str) -> Option<String> {
+    /// The answer is who they are: their id (`usr_…`, or `sso:<provider>:<subject>`) and what the
+    /// app is shown (`x-roll-visitor`): a provider's visitor's email, or a roll person's id.
+    pub(crate) async fn visitor(self: &Arc<Self>, service: &str, env: &str, token: &str) -> Option<(String, String)> {
         let hash = crate::public::token_hash(token);
         let key = crate::env_key(service, env);
         let generation = self.access_gen.load(std::sync::atomic::Ordering::SeqCst);
@@ -204,7 +273,7 @@ impl Apps {
             && s.generation == generation
             && s.checked > fresh
         {
-            return (s.until > now).then_some(s.shown);
+            return (s.until > now).then_some((s.user, s.shown));
         }
         let (h, sid, e) = (hash.clone(), service.to_string(), env.to_string());
         let (user, until, login) = self.db(move |s| s.visit_session(&h, &sid, &e)).await.ok()??;
@@ -229,8 +298,8 @@ impl Apps {
             cache.clear();
         }
         let shown = sso.map(|(_, email)| email.to_string()).filter(|e| !e.is_empty()).unwrap_or_else(|| user.clone());
-        cache.insert(hash, Seen { env: key, until, generation, checked: now, shown: shown.clone() });
-        Some(shown)
+        cache.insert(hash, Seen { env: key, until, generation, checked: now, user: user.clone(), shown: shown.clone() });
+        Some((user, shown))
     }
 }
 
