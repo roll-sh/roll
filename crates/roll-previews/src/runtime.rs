@@ -1582,7 +1582,6 @@ impl IntoResponse for Unavailable {
     }
 }
 
-#[async_trait]
 impl Runtime {
     /// A running service's container and port, started if it sleeps: where a browser run joins
     /// its network (a screenshot, an agent's run). `None` off Docker or for a service it doesn't run.
@@ -1638,6 +1637,7 @@ impl Runtime {
     }
 }
 
+#[async_trait]
 impl Apps for Runtime {
     async fn deploy(&self, t: &Target) -> anyhow::Result<Option<String>> {
         // Whatever runs serves an older revision (or older URLs): the next request starts the
