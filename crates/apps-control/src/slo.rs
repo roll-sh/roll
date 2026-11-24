@@ -74,7 +74,7 @@ mod tests {
 
     #[test]
     fn a_budget_burns_by_the_share_that_failed() {
-        let slo = Slo { objective: 99.0, latency_ms: Some(300), window_days: 28 };
+        let slo = Slo { objective: 99.0, latency_ms: Some(300), window_days: 28, routes: Vec::new() };
         let row = |minute: i64, requests: i64, errors: i64, p95: f64| MinuteRow { minute, requests, errors, p95_ms: p95, ..Default::default() };
         // 1% may fail: 1% failing burns at 1, 20% at 20.
         assert!((availability(&[row(0, 100, 1, 0.0)]).burn(99.0) - 1.0).abs() < 1e-9);

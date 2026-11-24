@@ -593,6 +593,26 @@ CREATE TABLE IF NOT EXISTS metrics_hourly (
     over_capacity INTEGER NOT NULL,
     PRIMARY KEY (service, env, hour)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS route_metrics (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    route TEXT NOT NULL,
+    minute INTEGER NOT NULL,
+    requests INTEGER NOT NULL,
+    errors INTEGER NOT NULL,
+    p95_ms REAL NOT NULL,
+    PRIMARY KEY (service, env, route, minute)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS route_metrics_hourly (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    route TEXT NOT NULL,
+    hour INTEGER NOT NULL,
+    requests INTEGER NOT NULL,
+    errors INTEGER NOT NULL,
+    p95_ms REAL NOT NULL,
+    PRIMARY KEY (service, env, route, hour)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS usage (
     service TEXT NOT NULL,
     env TEXT NOT NULL,
@@ -807,6 +827,9 @@ pub struct MinuteRow {
     /// Requests that found every instance busy at `max_instances`.
     pub over_capacity: i64,
 }
+
+/// A visitor's session: `(hash, user, login, created_at, expires_at)`.
+pub type VisitSession = (String, String, Option<String>, Option<i64>, i64);
 
 /// A service's use in one environment: its id, name, the environment, whether it's a preview.
 pub type ServiceUsage = (String, String, String, bool, UsageAdd);
@@ -1163,6 +1186,7 @@ impl Store {
         // The roll login (`ses_…`) a ticket and a visit session came from: its end ends them.
         db.add_column("visit_tickets", "login", "TEXT")?;
         db.add_column("visit_sessions", "login", "TEXT")?;
+        db.add_column("visit_sessions", "created_at", "INTEGER")?;
         db.add_column("environments", "routes", "TEXT")?;
         db.add_column("environments", "redirects", "TEXT")?;
         db.add_column("environments", "checks", "TEXT")?;
@@ -3460,7 +3484,8 @@ impl Store {
     }
 
     pub fn put_visit_session(&self, hash: &str, service: &str, env: &str, user: &str, login: &str, expires_at: i64) -> Result<()> {
-        self.db.execute("INSERT INTO visit_sessions (hash, service, env, user_id, login, expires_at) VALUES (?, ?, ?, ?, ?, ?)", params![hash, service, env, user, login, expires_at])?;
+        let now = self.now()?;
+        self.db.execute("INSERT INTO visit_sessions (hash, service, env, user_id, login, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", params![hash, service, env, user, login, expires_at, now])?;
         Ok(())
     }
 
@@ -3471,6 +3496,26 @@ impl Store {
             .db
             .query_row("SELECT user_id, expires_at, login FROM visit_sessions WHERE hash = ? AND service = ? AND env = ?", params![hash, service, env], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
             .optional()?)
+    }
+
+    /// An environment's sessions still going, newest first (at most 500).
+    pub fn visit_sessions(&self, service: &str, env: &str, now: i64) -> Result<Vec<VisitSession>> {
+        Ok(self.db.query(
+            "SELECT hash, user_id, login, created_at, expires_at FROM visit_sessions WHERE service = ? AND env = ? AND expires_at > ? ORDER BY created_at DESC LIMIT 500",
+            params![service, env, now],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )?)
+    }
+
+    /// End the environment's session whose hash starts with `id` (16 hex characters): the
+    /// hashes ended.
+    pub fn end_visit_session(&self, service: &str, env: &str, id: &str) -> Result<Vec<String>> {
+        let pattern = format!("{id}%");
+        self.db.write(|c| {
+            let gone: Vec<String> = c.query("SELECT hash FROM visit_sessions WHERE service = ? AND env = ? AND hash LIKE ?", params![service, env, pattern], |r| r.get(0))?;
+            c.execute("DELETE FROM visit_sessions WHERE service = ? AND env = ? AND hash LIKE ?", params![service, env, pattern])?;
+            Ok(gone)
+        })
     }
 
     pub fn delete_visit_session(&self, hash: &str) -> Result<()> {
@@ -3624,8 +3669,55 @@ impl Store {
             )?;
             c.execute("DELETE FROM metrics WHERE minute < ?", [before_minute])?;
             c.execute("DELETE FROM metrics_hourly WHERE hour < ?", [before_minute / 60 - HOURS_KEPT])?;
+            // Routes' own minutes, the same way.
+            c.execute(
+                "INSERT INTO route_metrics_hourly (service, env, route, hour, requests, errors, p95_ms) \
+                 SELECT service, env, route, minute / 60, SUM(requests), SUM(errors), MAX(p95_ms) FROM route_metrics WHERE minute < ? GROUP BY service, env, route, minute / 60 \
+                 ON CONFLICT (service, env, route, hour) DO UPDATE SET requests = route_metrics_hourly.requests + excluded.requests, errors = route_metrics_hourly.errors + excluded.errors, \
+                 p95_ms = CASE WHEN excluded.p95_ms > route_metrics_hourly.p95_ms THEN excluded.p95_ms ELSE route_metrics_hourly.p95_ms END",
+                [before_minute],
+            )?;
+            c.execute("DELETE FROM route_metrics WHERE minute < ?", [before_minute])?;
+            c.execute("DELETE FROM route_metrics_hourly WHERE hour < ?", [before_minute / 60 - HOURS_KEPT])?;
             Ok(())
         })
+    }
+
+    /// Routes' minutes (`route` its label: `POST /api/checkout`), added to what a minute has (a
+    /// minute written again, as a shutdown writes the current one, keeps both halves; its p95
+    /// the higher).
+    pub fn put_route_minutes(&self, service: &str, env: &str, rows: &[(String, MinuteRow)]) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        self.db.write(|c| {
+            for (route, m) in rows {
+                c.execute(
+                    "INSERT INTO route_metrics (service, env, route, minute, requests, errors, p95_ms) VALUES (?, ?, ?, ?, ?, ?, ?) \
+                     ON CONFLICT (service, env, route, minute) DO UPDATE SET requests = route_metrics.requests + excluded.requests, errors = route_metrics.errors + excluded.errors, \
+                     p95_ms = CASE WHEN excluded.p95_ms > route_metrics.p95_ms THEN excluded.p95_ms ELSE route_metrics.p95_ms END",
+                    params![service, env, route, m.minute, m.requests, m.errors, m.p95_ms],
+                )?;
+            }
+            Ok(())
+        })
+    }
+
+    /// One route's minutes since `since_minute`, and its hours before the first of them (as
+    /// rows whose `minute` is the hour's first): what its objective is judged on.
+    pub fn route_minutes(&self, service: &str, env: &str, route: &str, since_minute: i64) -> Result<(Vec<MinuteRow>, Vec<MinuteRow>)> {
+        fn row(minute: i64, r: &code_sql::Row<'_>) -> code_sql::Result<MinuteRow> {
+            Ok(MinuteRow { minute, requests: r.get(1)?, errors: r.get(2)?, p95_ms: r.get(3)?, ..Default::default() })
+        }
+        let minutes = self.db.query("SELECT minute, requests, errors, p95_ms FROM route_metrics WHERE service = ? AND env = ? AND route = ? AND minute >= ? ORDER BY minute", params![service, env, route, since_minute], |r| row(r.get(0)?, r))?;
+        let first = minutes.first().map_or(i64::MAX, |m: &MinuteRow| m.minute);
+        let hours = self
+            .db
+            .query("SELECT hour, requests, errors, p95_ms FROM route_metrics_hourly WHERE service = ? AND env = ? AND route = ? AND hour >= ? ORDER BY hour", params![service, env, route, since_minute / 60], |r| row(r.get::<_, i64>(0)? * 60, r))?
+            .into_iter()
+            .filter(|h| h.minute + 60 <= first)
+            .collect();
+        Ok((minutes, hours))
     }
 
     /// An environment's hourly rollups since `since_hour`, as rows whose `minute` is the hour's
