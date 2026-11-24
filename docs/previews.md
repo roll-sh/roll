@@ -1909,7 +1909,7 @@ type Settings = {
   max_usd_month: number;              // 0: no cap; once the month's cost reaches it, new previews wait
   secrets: { base: string; allow_production: boolean };      // "development", false
   env: Record<string, string>;        // overrides every service gets
-  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[]; hide: string[]; budget: { load_ms: number; bytes: number }; openapi?: string; endpoints?: string[]; states?: {name, page, steps}[]; storybook?: string /* "web" or "web:/storybook/" */; browsers?: ("firefox" | "webkit" | "webkit-phone")[] };   // all true but screenshot; pages, hide: []; budget 0s (none); openapi: the first service's OpenAPI JSON path, compared with main's; endpoints: up to 5 GET paths timed against main's
+  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[]; hide: string[]; budget: { load_ms: number; bytes: number }; openapi?: string; endpoints?: string[]; states?: {name, page, steps}[]; modes?: {name: string; color_scheme?: "dark" | "light"; locale?: string; timezone?: string}[]; storybook?: string /* "web" or "web:/storybook/" */; browsers?: ("firefox" | "webkit" | "webkit-phone")[] };   // all true but screenshot; pages, hide: []; budget 0s (none); openapi: the first service's OpenAPI JSON path, compared with main's; endpoints: up to 5 GET paths timed against main's
   access: "link" | "team" | "public"; // "link": a preview's URLs need its link; "team": a person signed in to roll who may open the project
   visual_review: "off" | "check" | "required";   // the roll/visual review; required also blocks landing in roll ("off")
   feedback: boolean;                  // a feedback button on its pages for people who came in through roll (true)
@@ -2095,6 +2095,18 @@ type Settings = {
     `total` `number` → `string`"). The shapes stay with the comparison: a preview's
     `page_speed` doesn't carry them (live: the change's `/openapi.json` loses
     `paths./users/{id}`).
+    Its modes too (Chromatic's Modes): with `github.modes` (up to 3, each a name and at least one
+    of a `color_scheme`, `dark` or `light`; a `locale`, `de-DE`, for the page's `Intl` formatting
+    and sent as `Accept-Language` (`navigator.language` stays the browser's); and a `timezone`,
+    `Europe/Berlin`), the first page is taken again in each, emulated by the browser
+    (`prefers-color-scheme`, the locale and the time zone), the emulation undone after (checked in
+    the screenshot image: black in `mode:dark` and white at the width after it, GMT+9 then UTC, a
+    German date order).
+    Each is a page of its own (`mode:dark`, "Views" on the sheet, labelled "dark mode"), compared
+    with main's same mode and reviewed like a page. The sheet's picture route takes every kind of
+    page key a run keeps (`page=` a path, `@768`, `state:`, `browser:`, `mode:` or `story:`; it
+    took only paths and widths before, so a state's, another browser's or a story's picture didn't
+    load). `the_first_page_in_each_mode_is_a_page_of_its_own`.
     Its Storybook's stories too (Chromatic's stories): with `github.storybook` (`web`, or
     `web:/storybook/` when the service serves it under a path: a static build or `storybook
     dev`), that service's run reads Storybook's index (`index.json`, Storybook 7 and later;
@@ -2604,20 +2616,26 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **A workload identity for `roll.toml` services, in review** (Vercel's OIDC federation): roll apps' `pv-`
-   instances have one; runtime services don't.
-2. **Restore points for a preview's data** (Neon's snapshots): save the branches now, put them back
+1. **Screenshot modes, in review** (Chromatic's Modes): the first page in a dark color scheme,
+   another language or time zone, each a page compared and reviewed (`github.modes`).
+2. **A recording with a feedback note** (Netlify's drawer, Jam): what the reviewer did before it
+   went wrong, inputs masked.
+3. **Agents driving the preview in a browser** (GitHub Copilot's Playwright): a session an agent
+   steps through, with roll MCP.
+4. **Restore points for a preview's data** (Neon's snapshots): save the branches now, put them back
    after a test run.
-3. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
+5. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
    (3.3 s in its log) and its masking, which needs that compute up: pg-control's to shorten.
-4. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+6. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+7. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-6. **Watch: pg-control's recovery to a time seconds old** (unowned).
+8. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-24, early morning: OIDC tokens for a preview's own services (#865, roll secrets' `Subject::Preview`), a roll apps service's page read through roll (#870), a fork's preview and its code's words marked outside for roll MCP's lockdown (#873).
 
 Landed 2026-11-24, later: feature flags a reviewer sets for their own view (#861: the toolbar's Flags, `x-roll-flags`).
 

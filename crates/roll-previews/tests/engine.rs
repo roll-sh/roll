@@ -1986,6 +1986,33 @@ async fn a_service_that_didnt_change_keeps_its_pages() {
     assert_eq!(runs("web"), web_before + 1, "after a reset its pages are taken again");
 }
 
+/// The first page in the project's modes (`github.modes`: dark, another language): each a page of
+/// its own (`mode:<name>`), kept and served by the sheet's picture route, as a state's page is.
+#[tokio::test]
+async fn the_first_page_in_each_mode_is_a_page_of_its_own() {
+    use tower::ServiceExt;
+    let e = env(json!({ "enabled": true, "github": { "screenshot": true, "modes": [{ "name": "dark", "color_scheme": "dark" }], "states": [{ "name": "tab", "page": "/", "steps": [{ "press": "Tab" }] }] } }));
+    let mut png = Vec::new();
+    image::RgbaImage::new(4, 4).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    *e.apps.shot.lock() = Some(png);
+    e.code.open(change("chg_md", 3));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_md").unwrap().unwrap();
+    let pages = |e: &Env| e.engine.store.preview(&p.id).unwrap().pages.iter().map(|x| x.path.clone()).collect::<Vec<_>>();
+    for _ in 0..3000 {
+        if pages(&e).contains(&"mode:dark".to_string()) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(pages(&e).contains(&"mode:dark".to_string()), "{:?}", pages(&e));
+    for key in ["mode:dark", "state:tab"] {
+        let req = axum::http::Request::get(format!("/v1/previews/{}/screenshot?page={key}", p.id)).body(axum::body::Body::empty()).unwrap();
+        let resp = roll_previews::api::router(e.engine.clone()).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200, "the sheet's picture of {key}");
+    }
+}
+
 /// A Storybook another service serves (`github.storybook`): its stories are pages of their own
 /// (`story:<id>`), kept with the rest of that service's pages while it runs what it ran.
 #[tokio::test]

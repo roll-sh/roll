@@ -383,6 +383,8 @@ pub struct ShotOptions {
     /// Where the service serves Storybook (`/`, `/storybook/`; `github.storybook`): its stories
     /// are taken too, each a page (`story:<id>`).
     pub stories: Option<String>,
+    /// The first page's modes (`github.modes`): `mode:<name>` in `pages`.
+    pub modes: Vec<crate::settings::ModeRule>,
 }
 
 /// One more page of a [`Shot`]: its path, its PNG, and what went wrong while it loaded.
