@@ -1962,6 +1962,42 @@ async fn protected_environments_take_change_requests_that_another_principal_appr
     }
 }
 
+/// An open request behind 200 newer ones still lists under `state=open`, and paging with `next`
+/// reaches every request once.
+#[tokio::test]
+async fn an_open_request_behind_200_others_still_lists_and_pages_cover_them_all() {
+    let api = Api::new().await;
+    api.set("production", "KEY", "old").await;
+    api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true, "approvals": 1 }))).await;
+    let r = api.ok(Method::POST, "/environments/production/requests", Some(json!({ "message": "rotate", "ops": [{ "op": "set", "key": "KEY", "value": "new" }] }))).await;
+    let open = r["id"].as_str().unwrap().to_string();
+    let id = open.clone();
+    api.db
+        .write(move |c| {
+            for n in 1..=204i64 {
+                c.execute("INSERT INTO requests (id, project_id, env_id, path, message, by, at, base_seq, state, ops, items, reviews, applied_seq, action) SELECT ?, project_id, env_id, path, message, by, at + ?, base_seq, 'applied', ops, items, reviews, 1, action FROM requests WHERE id = ?", code_sql::params![format!("req_applied{n:03}"), n, id.as_str()])?;
+            }
+            Ok::<_, code_sql::Error>(())
+        })
+        .unwrap();
+
+    let listed = api.ok(Method::GET, "/environments/production/requests?state=open", None).await;
+    assert_eq!(listed.as_array().unwrap().iter().map(|r| r["id"].as_str().unwrap()).collect::<Vec<_>>(), [open.as_str()]);
+
+    let (mut seen, mut before) = (Vec::new(), String::new());
+    loop {
+        let page = api.ok(Method::GET, &format!("/environments/production/requests?limit=50{before}"), None).await;
+        seen.extend(page["requests"].as_array().unwrap().iter().map(|r| r["id"].as_str().unwrap().to_string()));
+        match page["next"].as_str() {
+            Some(next) => before = format!("&before={next}"),
+            None => break,
+        }
+    }
+    assert_eq!(seen.len(), 205);
+    assert_eq!(seen.iter().collect::<std::collections::BTreeSet<_>>().len(), 205, "each request once");
+    assert_eq!(seen.last(), Some(&open), "newest first");
+}
+
 #[tokio::test]
 async fn a_token_reaches_only_its_environments_folders_and_actions() {
     let api = Api::new().await;

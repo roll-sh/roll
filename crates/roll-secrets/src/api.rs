@@ -1106,7 +1106,11 @@ async fn import_dotenv(State(s): S, Who(c): Who, Path((project, env)): Path<(Str
 }
 
 async fn requests(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, Query(q): Q) -> crate::Result<Response> {
-    Ok(ok(blocking(s, move |s| s.requests(&project, &env, q.get("state").map(String::as_str), &c)).await?))
+    let limit = int(&q, "limit")?;
+    let paged = limit.is_some() || q.contains_key("before");
+    let page = blocking(s, move |s| s.requests(&project, &env, q.get("state").map(String::as_str), q.get("before").map(String::as_str), limit, &c)).await?;
+    // Without `limit` or `before`, the array it answered before paging.
+    Ok(if paged { ok(page) } else { ok(page.requests) })
 }
 
 async fn open_request(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {

@@ -41,6 +41,16 @@ describe("the settings form", () => {
     expect(patchOf(withRoutes, { ...f, alertRoutes: "get /users/:id 5xx > 10%\n/oops" }).run?.alerts?.routes).toEqual([{ route: "/users/:id", method: "GET", error_pct: 10 }, { route: "/oops" }]);
   });
 
+  it("writes floors by the clock as lines, a rule's windows together", () => {
+    const f = formOf(svc);
+    const patch = patchOf(svc, { ...f, floors: "mon 08:00..fri 18:00=3 Europe/Berlin\nsat 10:00..sat 14:00=3 Europe/Berlin\nmon 00:00..mon 06:00=1" });
+    expect(patch.run?.schedule_scale).toEqual([
+      { windows: [{ from: "mon 08:00", to: "fri 18:00" }, { from: "sat 10:00", to: "sat 14:00" }], min_instances: 3, timezone: "Europe/Berlin" },
+      { windows: [{ from: "mon 00:00", to: "mon 06:00" }], min_instances: 1 },
+    ]);
+    expect(formOf({ ...svc, run: { ...svc.run, schedule_scale: patch.run?.schedule_scale ?? undefined } }).floors).toBe("mon 08:00..fri 18:00=3 Europe/Berlin\nsat 10:00..sat 14:00=3 Europe/Berlin\nmon 00:00..mon 06:00=1");
+  });
+
   it("keeps what was edited when the service changes under the form", () => {
     const base = formOf(svc);
     const edited = { ...base, build: "pnpm build:prod" };

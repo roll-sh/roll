@@ -184,6 +184,9 @@ export function secretsApi(project: string) {
     promote: (to: string, from: string, body: { path?: string; keys?: string[]; message?: string }) => req<Applied>("POST", `${E(to)}/promote${qs({ from })}`, body),
 
     requests: (env: string, state?: RequestState) => req<ChangeRequest[]>("GET", `${E(env)}/requests${qs({ state })}`),
+    /** A page of requests, newest first; `next` is the following page's `before`. */
+    requestsPage: (env: string, q: { state?: RequestState; limit?: number; before?: string }) =>
+      req<{ requests: ChangeRequest[]; next?: string }>("GET", `${E(env)}/requests${qs(q)}`),
     openRequest: (env: string, b: Batch) => req<ChangeRequest>("POST", `${E(env)}/requests`, b),
     /** When each key of a folder was last read and changed, and which are stale. */
     insights: (env: string, path = "/") => req<Insights>("GET", `${E(env)}/insights${qs({ path })}`),

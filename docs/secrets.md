@@ -6198,7 +6198,7 @@ isn't in the workspace is 404.
 | `POST /environments/{env}/rollback` | `{to?: seq, at?: ms, message?, bypass?}` | 201 `Applied` |
 | `GET /compare?from=&to=&path=` | | `Compare` |
 | `POST /environments/{env}/promote?from=` | `{path?, keys?, message?}` | 201 `Applied` |
-| `GET /environments/{env}/requests?state=` | | `Request[]` |
+| `GET /environments/{env}/requests?state=&limit=&before=` | | `Request[]`, newest first (200 at most); with `limit` (1-200) or `before`: `{requests: Request[], next?}`, `next` the next page's `before` while more may follow (`state` filters in SQL, folder reach after it: a page is read again, 10 times at most, until it's full) |
 | `POST /environments/{env}/requests` | `Batch` | 201 `Request` |
 | `GET /environments/{env}/requests/{id}` | | `Request` |
 | `GET /environments/{env}/requests/{id}/values` | | `RequestValue[]` (`reveal`; audited: the value now and the one proposed) |
