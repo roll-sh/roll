@@ -332,22 +332,34 @@ AES-256-GCM under a key derived from the deployment's `ROLL_SECRET_KEY` (rolld; 
 reads the same variable), a fresh nonce per value and the value's kind as associated data. They
 travel sealed through cluster states, snapshots and branches, and are opened only to send a
 request or to answer that secret's own read API; a node with another key refuses to open them
-without naming either. With no key they are stored as given, as Elasticsearch does without
-`xpack.watcher.encrypt_sensitive_data`. ES|QL data sources still refuse S3 secrets, as
+without naming either. With no key they are refused, unless the node opts in for local
+development (`--search-allow-unsealed-secrets`): then they are stored as given, as Elasticsearch
+does without `xpack.watcher.encrypt_sensitive_data`. ES|QL data sources still refuse S3 secrets, as
 Elasticsearch does without cluster state encryption. Users' passwords are hashes and API keys
 are kept as hashes, never sealed.
 
 A cluster's own admin password, which roll's control plane keeps in its catalog
 (`search_clusters.password`), is sealed in the same way and bound to its row: the associated
 data is `search_cluster_password:<cluster id>`. It is opened only as the row is read, to give
-the node the cluster's credentials and to return the password once, on create and on
-rotation. A branch or a rotation seals a password under its own row's id; a restore keeps
-the cluster's id and so its seal. A row written in the clear (before the deployment had a key)
-is sealed and rewritten the first time it's read. A sealed password that the node can't open
-fails that read: the error names the cluster, but neither the value nor the key. With no
-`ROLL_SECRET_KEY` (local development), passwords are stored as given, like every secret that
-search keeps. `Debug` output of a cluster, a node's credentials and a presented
-`Authorization` header prints `<redacted>` in place of the secret.
+the node the cluster's credentials and to return the password once, on create and on rotation. A
+branch or a rotation seals a password under its own row's id; a restore keeps the cluster's id
+and so its seal. It can't be a hash: it's revealed to the cluster's people (`POST
+/v1/search/clusters/{id}/password`), given to the node in the cluster's spec, and roll calls the
+cluster with it. A password is never stored in the clear. With no `ROLL_SECRET_KEY`, a single
+node seals passwords under a key of its own, made once at `<home>/search/key` (48 random
+characters, mode 0600) and read back on later starts (it goes wherever `search.db` goes, backups
+included: the catalog's passwords don't open without it); once the node is given
+`ROLL_SECRET_KEY`, that key only opens what it sealed, and the catalog seals those passwords
+again with the deployment's key as it opens. A fleet, whose catalog is the shared system
+database, refuses to start search without `ROLL_SECRET_KEY`, since every node opens every
+cluster's password. Rows an earlier version wrote in the clear are sealed as the catalog opens,
+in one write that leaves nothing of them behind (`code_sql::Db::write_erasing`: on SQLite the
+freed pages are zeroed and the WAL is checkpointed and truncated; on Postgres it's an ordinary
+write, and the old row versions go when vacuum reuses their pages). A row an older node writes
+in the clear later is sealed the same way the first time it's read. A sealed password that the
+node can't open fails that read: the error names the cluster, but neither the value nor the key.
+`Debug` output of a cluster, a node's credentials and a presented `Authorization` header prints
+`<redacted>` in place of the secret.
 
 ## Client addresses and IP allowlists
 
