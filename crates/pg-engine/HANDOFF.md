@@ -15376,6 +15376,123 @@ failed: all passed.
 Not this round's: roll's `VACUUM (VERBOSE)` sends none of PostgreSQL's INFO lines (agent 205's
 note, still open).
 
+## Short write transactions, round 17: a range read's run goes on between newer versions; the L0 merge gated again (agent 306)
+
+BENCH.md "Short write transactions, round 17" has the counts. Plain dist builds (`tools/dist.sh`):
+**b1** = `ad12b41b5`, **n2** = b1 + this round's commit (`2a39fc0e0`'s code), **n3** = n2 + round 15's L0
+merge (`~/.cache/a305/patches/l0-merge-3f0f6d320.patch`). Harness `~/.cache/a306/bench` (305's
+`cycle.sh`, a controlled probe `probe.sh`, 300's bulk script), the in-process probe
+`~/.cache/a306/patches/a306_probe.rs` (a `storage` unit test kept out of the tree).
+
+**Where a newer entry's cost went.** A range read of a big table (a 100-row or 1,000-row `BETWEEN` of
+pgbench_accounts) fetches its rows by a merging scan of the table's key range (`fetch_dense_ref` ->
+`Scan::fill_batch_with`). In process (verify build, a table in L1, raw range reads through
+`fill_batch` as `fetch_dense_ref` makes them), a 1,000-row read cost 227 k user instructions with no
+newer version in its range and 452 k with ten in an L0 file (+22 k each), 630 k with a hundred. Three
+causes, by size:
+
+- `Block::run_rows` (the rows of a block a run at a time, by reference, the key made in a fixed
+  buffer) was taken only when no other source had a head in the range and the block lay wholly inside
+  the range: any L0 or memtable entry ahead in the range sent every row before it through
+  `run_into`'s row-at-a-time loop (a `BlockPos` key decoded per row), and so did the range's last
+  block on every read;
+- each newer entry cost three rounds of `Scan::position` / `Merge::min` (the newer row, the version
+  it replaced, the run going on again), each re-ranking the sources, copying the bound and decoding
+  keys again (`Cursor::head` alone ~11 calls an entry);
+- `zip_rows` (260's) took over whenever both heads' blocks lay inside the range, at about twice a
+  run's cost a row, for sources that don't take turns.
+
+**What changed** (one commit, `storage/mod.rs`, `storage/sst.rs`):
+
+- `Block::run_rows` takes a stop key: another source's head (`bound`) or, in a block the range ends
+  in, the end. It is checked at the byte where the last key made first differs from it (a key
+  sharing more than that with the one before is below it too; sharing exactly that much, its byte
+  there decides), so a bounded run costs about what an unbounded one does. Two instances
+  (`run_rows_to::<STOP>`): the stop-free loop is the one before.
+- After a run stops with two sources ranked, `Scan::overlay` takes the other source's head where
+  `position` would: a newer version of the next row (or a row only it has) is pushed, the key's
+  older versions on both sides passed, and the two ranked again without `Merge::min`'s full pass; an
+  older version of the row just taken is passed the same way. A deletion, a version newer than the
+  snapshot, an out-of-line value, range deletions or a dead-range hint being looked for leave it to
+  `position`.
+- `zip_rows` is tried only while the rows come fewer than `ZIP_RUN` (8) at a time from one source
+  (from the last run's length, or a zip's rows per side change).
+- A run starts from the head just pushed (not decoded again) when the runs before were long or no
+  other source has a head; a block with derived values (an index's entries) goes a row at a time, as
+  `run_rows` takes none of them; `Cursor::head`'s end check is the inline word compare.
+
+Results and their order are the merge's as before. A first form of `overlay` stepped the run's
+source past its head even when that head was another key, losing rows; the new range checks in the
+storage tests found it (below), the measured build is the fixed one.
+
+Test: `storage::tests::check_at` (every store test's reads against the model) also reads five ranges
+whose ends fall inside blocks, batched by 2 and 64 rows, against the model (the old checks read only
+whole ranges, so neither a run's stop at the end nor `overlay` was reached). Ranges of one 8-byte test
+key and the next are left out: `hot::covering` takes such a range for a whole relation's, keeps it
+after a few scans trimmed to the gc horizon, and these snapshots are unpinned.
+
+**Measured** (BENCH "Short write transactions, round 17"; user instructions a read):
+
+- In process (verify build, a306_probe, b0 -> new): 1,000-row read with 10 newer versions in an L0
+  file 452 k -> 266 k, with 100 630 k -> 522 k, with none 227 k -> 220 k; 100-row with 10 82 k -> 67 k,
+  none 40.0 k -> 33.7 k; the same with the versions in the memtable 455 k -> 268 k, 737 k -> 580 k.
+  Same rows and the same hash of keys and values in every case.
+- Server, controlled (lane B, two pairs b1 -> n2, `probe.sh`: 64 fixed ranges, then 10 and then 100
+  rows of each updated and left in the memtable): 100-row read none 326.3 k -> 319.0 k (-2.3%), 10
+  362.3 k -> 348.8 k (-3.7%), 100 515.7 k -> 498.5 k (-3.3%); 1,000-row none 2.243 M -> 2.095 M (-6.6%),
+  10 2.358 M -> 2.137 M (-9.4%), 100 2.621 M -> 2.402 M (-8.4%); select-only level (40.0 k / 40.2 k).
+  The second pair agrees within 0.1%.
+- Across the write cycle (lane A, `cycle.sh`: 34 rounds of 7,040 TPC-B transactions at 32 clients,
+  each read for 2 s after each, labelled by L0's file count; two pairs b1 -> n2): 100-row 343.4 k ->
+  332.2 k (-3.3%) and 341.5 k -> 333.3 k (-2.4%); 1,000-row 2.347 M -> 2.156 M (-8.2%) and 2.340 M ->
+  2.159 M (-7.7%); select-only 47.8 k -> 47.2 k and 46.8 k -> 47.2 k (level).
+- The bulk script (lane C, one pair): COPY in, UPDATE of half the rows and the four scans after it
+  level or better (-0.0% to -0.9%), row checks equal.
+- TPC-H SF1 (lane C, one pair): q01 7.389 -> 7.375 G user instructions a run (-0.2%), q06 5.148 ->
+  5.009 G (-2.7%), hashes equal.
+- On the PGO build (`run_rows` is two out-of-line instances now where the base inlined it, so gated
+  there too): `tools/dist-pgo.sh` of n2, and the base built with n2's profile (`--profdata`; its three
+  changed storage functions without data, 0.95% of the hot counts). One probe pair (lane B): 100-row
+  -3.9% / -4.4% / -2.2% (none / 10 / 100 newer a range), 1,000-row -9.8% / -12.7% / -10.4%,
+  select-only level; TPC-H q01 +0.1%, q06 -3.1%.
+
+All pairs ran with 3.9-6.0 foreign cores on their lane's 8 CPUs (lanes A-C were busy all day): the
+gates are on user instructions; cycles and tps are readings.
+
+What is left of a newer entry: at the server a 1,000-row read's row costs ~2.1 k instructions all
+told; a newer version in its range now ~3-4 k (it was ~11 k at 10 in a 1,000-row range), the
+interruption itself (`overlay`, `position` once, a run set up again; `run_rows` is a call of its own
+now, both instances out of line in the dist build). Going further means the run taking the other
+source's entry inside its loop (a run with an overlay list: the memtable's entries of the range
+copied once, the L0 block's entries decoded beside the run), not built.
+
+**The L0 merge, gated again: still not landed** (`~/.cache/a305/patches/l0-merge-3f0f6d320.patch`, as
+round 15 / 16 left it, applied on n2 as n3). One cycle pair n2 -> n3 (lane A, 3.9 foreign cores; 27
+flushes each, 8 compactions -> 9 L0 merges + 3 compactions): select-only 48.4 k -> 46.7 k (-3.6%),
+but the 100-row read 330.0 k -> 338.5 k (+2.6%) and the 1,000-row 2.152 M -> 2.220 M (+3.2%) (round
+16: +2.9% / +4.3% without this round's commit). The gate (every read level or better in every pair)
+fails in the first pair, so the write side wasn't measured again (round 15: -10.6% to -14.9% a TPC-B
+transaction). Why: with the merge L0 holds one or two files most of the cycle whose entries cover
+the whole table (by L0 files in n3's samples: 1 file 13, 2 files 18 of 34), so a read meets
+newer entries in almost every sample; each still costs about one and a half to two of the read's rows.
+It would land once a newer entry costs about what a row costs (the overlay list above).
+
+**Not done: item 3 of the brief** (the flush thread's remainder): the bloom bits a compaction sets
+again for keys the adopted file holds (`SstWriter::copied_bloom`: the compaction's per-entry path,
+`Compacted::entry`, doesn't know which input an entry came from; ~1.5% of the flush thread by round
+16's estimate), clean blocks derived when a file is opened after a restart, VACUUM's rewrite
+(`reclaim_one`) copying unchanged blocks.
+
+Verification: `tools/quick-check.sh` with `QC_CHECKED=1` and `QC_TESTS="crash_ctids big_tables
+parallel_scan heap_order_scan pk_clustered stored_filters"` on `2a39fc0e0` (on `ad12b41b5`): 28 test
+binaries, clippy 16 warnings, none new in a changed file, 433 tests in 24 binaries (the lib's unit
+tests with the new range checks, big_tables, crash_ctids, crash_bulk, the storage binaries,
+parallel_scan, pk_clustered, golden, wire among them), the same 433 built `--profile
+verify-checked`, `crash_random` seeds 1-3 x 2 rounds and `power_cut_at_every_point`, regress 51,148 /
+51,150 (0 newly differing), isolation 1,647 / 1,648, pg_dump_tap 14,609. The same again, all green with
+the same counts, on `4eb441a0b` (the commit on `acdb8df70`); the head since takes in no change to
+`storage/` (exec, txn, session/ddl, tests).
+
 ## Short write transactions, round 16: a small table's UPDATE scan leaves out the rows its filter rejects (agent 305)
 
 BENCH.md "A scan's workers: one rule for small reads; a small table's UPDATE scan" has the counts.

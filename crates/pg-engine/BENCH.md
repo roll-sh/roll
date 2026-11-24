@@ -344,6 +344,111 @@ Per query peaks in the 22 (MB, `bench --mem-cgroup`): q01 357-360, q02-q09 368-3
 q11 467, q12 389-395, q13 448-456, q14 448-456, q15 421-425, q16 415-420, q17-q22 380-420 (q18 410-420).
 `MIMALLOC_PURGE_DELAY=0` on pgbench -i: peak 634.7, end 34.2 MB (default: 674-726, end 174-202).
 
+## Short write transactions, round 17: a range read's run between newer versions; the L0 merge again (2026-11-24, agent 306)
+
+HANDOFF "Short write transactions, round 17" has what changed. Plain dist builds (`tools/dist.sh`):
+**b1** = `ad12b41b5`, **n2** = b1 + the round's commit (`2a39fc0e0`), **n3** = n2 + round 15's L0 merge
+(`3f0f6d320`'s patch). Harness `~/.cache/a306/bench` (305's `cycle.sh` and `cyc.py`; `probe.sh`; 300's
+bulk script as `bulk.sh`), TPC-H `~/.cache/a306/tpch` (294's: SF1 loaded by b1, a 2 GB cache, a warm-up,
+3 runs a query in one `perf stat` window over the engine's cgroup). One pair a `tools/lane.sh` hold;
+lanes A-C carried 1.1-6.0 foreign cores of their 8 CPUs in every hold (over the 1.0 rule in most):
+the gates are on user instructions, cycles are readings.
+
+### In process (verify build, `~/.cache/a306/patches/a306_probe.rs`)
+
+A 400,000-row table compacted into L1 (17-byte keys, 112-byte values), a sparse L0 file of other rows'
+versions; n rows of each of 64 ranges updated (evenly spread) into an L0 file or left in the memtable;
+2,000 raw range reads through `fill_batch` (as `fetch_dense_ref` reads them), user instructions a read
+counted on the thread (`perf_event_open`). b0 = the base, new = the round's code. Same rows and the same
+hash of keys and values in every case.
+
+| range, newer versions | L0 b0 | L0 new | memtable b0 | memtable new |
+|---|---|---|---|---|
+| 100 rows, none | 40,049 | 33,668 | | |
+| 100 rows, 10 | 82,180 | 67,276 | 85,813 | 71,450 |
+| 100 rows, 100 | 203,996 | 201,622 | 283,908 | 256,328 |
+| 1,000 rows, none | 227,441 | 219,503 | | |
+| 1,000 rows, 10 | 451,586 | 266,235 | 454,828 | 267,813 |
+| 1,000 rows, 100 | 629,628 | 522,225 | 737,306 | 579,871 |
+
+### The controlled probe at the server (lane B, b1 -> n2, user instructions a read, `-M prepared`, 8 clients)
+
+`pgbench -i -s 32`, CHECKPOINT; 64 fixed 100-row ranges (`aid 1 + 50000 j`) and 64 fixed 1,000-row ranges
+(`aid 25001 + 50000 j`); then 10 rows of each updated (one statement a row position, autocommit), then
+90 more (100 in all), all in the memtable (CHECKPOINT writes out only frozen memtables, so an L0 file
+can't be placed this way: the cycle below has those). 3 s of each read a phase.
+
+| read | pair 2 (n2 first) | pair 3 (b1 first) |
+|---|---|---|
+| 100-row, none | 326,322 -> 318,952 (-2.3%) | 326,755 -> 319,571 (-2.2%) |
+| 100-row, 10 a range | 362,348 -> 348,800 (-3.7%) | 361,917 -> 348,958 (-3.6%) |
+| 100-row, 100 a range | 515,715 -> 498,502 (-3.3%) | 515,648 -> 498,469 (-3.3%) |
+| 1,000-row, none | 2,243,136 -> 2,095,222 (-6.6%) | 2,243,438 -> 2,096,068 (-6.6%) |
+| 1,000-row, 10 a range | 2,357,711 -> 2,136,844 (-9.4%) | 2,357,310 -> 2,136,944 (-9.3%) |
+| 1,000-row, 100 a range | 2,620,891 -> 2,401,888 (-8.4%) | 2,620,816 -> 2,402,260 (-8.3%) |
+| select-only, after the updates | 40,032 -> 40,234 / 40,050 -> 40,034 | 40,035 -> 40,260 / 40,085 -> 40,056 |
+
+(Select-only right after the load reads 49-56 k in either build: the cgroup's count takes in the
+load's last compaction.) Pair 1 ran a first form of `Scan::overlay` that lost rows (found by the new
+storage range checks) and is left out.
+
+### Across the write cycle (lane A, `cycle.sh`, user instructions a read; by L0 file count at the sample)
+
+34 rounds of 7,040 TPC-B transactions at 32 clients after `pgbench -i -s 32`, each followed by 2 s of
+each read at 8 clients. 26 flushes and 7 compactions in each run.
+
+| read | pair 1 (b1 first) | pair 2 (n2 first) |
+|---|---|---|
+| select-only | 47,759 -> 47,166 | 46,843 -> 47,173 |
+| 100-row BETWEEN | 343,449 -> 332,186 (-3.3%) | 341,459 -> 333,250 (-2.4%) |
+| ... 0 / 1 / 2 / 3 L0 files | 332.4 / 337.6 / 348.7 / 352.1 k -> 323.1 / 327.4 / 340.8 / 339.4 k | 331.4 / 336.4 / 350.2 / 351.2 k -> 323.1 / 328.1 / 334.4 / 350.1 k |
+| 1,000-row BETWEEN | 2,346,973 -> 2,155,607 (-8.2%) | 2,339,819 -> 2,159,446 (-7.7%) |
+| ... 0 / 3 L0 files | 2,290 / 2,402 k -> 2,119 / 2,197 k | 2,279 / 2,396 k -> 2,118 / 2,195 k |
+
+### The bulk script's steps (lane C, one pair b1 -> n2, G user instructions of the step and its background work)
+
+| step | b1 | n2 |
+|---|---|---|
+| COPY in (1M rows) | 6.462 | 6.461 |
+| UPDATE half the rows | 10.052 | 10.051 |
+| count(*), sum(c) after it | 0.837 | 0.830 |
+| the same again | 0.805 | 0.798 |
+| count(*) | 0.561 | 0.554 |
+| sum(a), sequential scan | 0.765 | 0.758 |
+
+Row checks equal. Lane C at 4.1 foreign cores.
+
+### TPC-H SF1 (lane C, one pair b1 -> n2, G user instructions a run)
+
+| query | b1 | n2 |
+|---|---|---|
+| q01 | 7.389 | 7.375 (-0.2%) |
+| q06 | 5.148 | 5.009 (-2.7%) |
+
+Hashes equal. Lane C at 1.1 / 1.5 foreign cores.
+
+### On the PGO build (pb1 = b1 built with pn2's profile; pn2 = `tools/dist-pgo.sh` of n2)
+
+| read | pb1 -> pn2 (lane B, probe, 4.8 foreign cores) |
+|---|---|
+| 100-row, none / 10 / 100 a range | 266,245 -> 255,854 (-3.9%) / 295,950 -> 282,896 (-4.4%) / 407,269 -> 398,293 (-2.2%) |
+| 1,000-row, none / 10 / 100 a range | 1,821,448 -> 1,642,540 (-9.8%) / 1,929,029 -> 1,684,395 (-12.7%) / 2,135,598 -> 1,913,551 (-10.4%) |
+| select-only, after the updates | 31,443 -> 31,585 / 31,639 -> 31,499 |
+| TPC-H q01 / q06 (lane C, G a run) | 7.369 -> 7.376 (+0.1%) / 5.099 -> 4.942 (-3.1%) |
+
+### The L0 merge on n2 (lane A, one cycle pair n2 -> n3)
+
+27 flushes each; n2 8 compactions, n3 9 L0 merges and 3 compactions. Samples by L0 files: n2 10 / 9 / 9
+/ 6 at 0 / 1 / 2 / 3 files, n3 2 / 13 / 18 / 1.
+
+| read | n2 | n3 |
+|---|---|---|
+| select-only | 48,404 | 46,652 (-3.6%) |
+| 100-row BETWEEN | 330,028 | 338,539 (+2.6%) |
+| 1,000-row BETWEEN | 2,151,666 | 2,220,029 (+3.2%) |
+
+Lane A at 3.9 foreign cores. The reads fail the gate (level or better in every pair): not landed.
+
 ## Memory, round 1: the footprint table, parallel index builds in maintenance_work_mem (2026-11-23, agent 302)
 
 HANDOFF "Memory, round 1" has what changed and why. Harness `~/.cache/a302/mem.sh`: one server in
