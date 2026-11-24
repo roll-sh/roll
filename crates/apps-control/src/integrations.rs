@@ -343,6 +343,11 @@ pub trait VisitorSignIn: Send + Sync {
     /// Where a visitor's browser goes to sign in with `provider` for apps' signed `request`
     /// (`orgs`: GitHub reads their organisations too). None: that provider isn't set up here.
     fn start_url(&self, provider: &str, request: &str, orgs: bool) -> Option<String>;
+    /// Whether the organisation SSO `connection` still answers for `email`'s domain (it's
+    /// there, and the domain is still one it verified): read on every session recheck.
+    fn vouches(&self, _connection: &str, _email: &str) -> bool {
+        false
+    }
 }
 
 /// Someone a provider vouched for, coming back to [`crate::Apps::admit_visitor`].
@@ -356,6 +361,8 @@ pub struct SsoVisitor {
     pub orgs: Vec<String>,
     /// Google's `hd`: the Workspace domain the account belongs to (none for a consumer account).
     pub hosted_domain: Option<String>,
+    /// The groups an organisation's provider named (provider `sso`), lower case.
+    pub groups: Vec<String>,
 }
 
 /// A model that reads a failed deployment (rolld: the owner of the service's roll code repo's

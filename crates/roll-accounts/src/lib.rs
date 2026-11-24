@@ -591,9 +591,13 @@ impl Accounts {
     /// Where a visitor's browser starts signing in with `provider` for a product's `request`
     /// (`orgs`: GitHub reads their organisations too). None: that provider isn't set up.
     pub fn visit_url(&self, provider: &str, request: &str, orgs: bool) -> Option<String> {
+        let q = |v: &str| percent_encoding::utf8_percent_encode(v, percent_encoding::NON_ALPHANUMERIC).to_string();
+        // An organisation's own SSO: the visitor's email picks the connection (`sso_visit`).
+        if provider == "sso" {
+            return Some(format!("{}/v1/accounts/sso/visit?r={}", self.config.api_url.trim_end_matches('/'), q(request)));
+        }
         let p = Provider::parse(provider)?;
         self.config.provider(p)?;
-        let q = |v: &str| percent_encoding::utf8_percent_encode(v, percent_encoding::NON_ALPHANUMERIC).to_string();
         Some(format!("{}/v1/accounts/oauth/{}/visit?r={}{}", self.config.api_url.trim_end_matches('/'), p.as_str(), q(request), if orgs { "&orgs=1" } else { "" }))
     }
 
