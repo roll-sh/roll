@@ -2742,21 +2742,20 @@ Ranked by what a person notices first. Done so far:
    crops the note's element at the reviewer's viewport after their clicks and keys. Next for it:
    in their browser's engine (WebKit for Safari, through the browsers run), and their typing
    where the button can say what without saying the value (a field's length, a choice's index).
-2. **A note's people told by mail, in review** (Vercel's comment notifications): a new note to
-   the change's author, a reply or a resolve to the note's, through roll's accounts (`note_mail`).
-3. **Restore points for the products that only copy** (Redis, search, NoSQL, streams): a point
+2. **Restore points for the products that only copy** (Redis, search, NoSQL, streams): a point
    is kept only where the product puts a branch back in place, keeping its id (their delete
    guards check it); each needs its control plane's reset `from`, as pg-control's.
-4. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
+3. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
    (3.3 s in its log) and its masking, which needs that compute up: pg-control's to shorten.
-5. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+4. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-6. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-7. **Watch: pg-control's recovery to a time seconds old** (unowned).
+6. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
 
 
 
