@@ -452,8 +452,11 @@ async fn a_search_cluster_links_only_while_its_owner_is_in_its_home_project() {
     ws.execute("DELETE FROM members WHERE project_id = ?1 AND user_id = 'usr_ex'", [&p.id]).unwrap();
     let a = r.http.get(format!("{}/v1/secrets/projects/{}/environments/production/values?path=/", r.api, p.id)).bearer_auth(TOKEN).send().await.unwrap();
     let (status, body) = (a.status(), a.text().await.unwrap());
+    // Resolved to nothing, with the refusal (never the value) as the key's problem.
+    let v: Value = serde_json::from_str(&body).unwrap_or_default();
+    let problem = v["problems"].as_array().into_iter().flatten().find(|p| p["key"] == "ELASTICSEARCH_URL").map(|p| p["problem"].to_string()).unwrap_or_default();
+    assert!(status.is_success() && v["values"]["ELASTICSEARCH_URL"].as_str() == Some("") && problem.contains("isn't in the project"), "{status} {body}");
     assert!(!body.contains(&url), "{status} {body}");
-    assert!(!status.is_success() || serde_json::from_str::<Value>(&body).unwrap()["values"]["ELASTICSEARCH_URL"].is_null(), "{status} {body}");
     let link = json!({ "ops": [{ "op": "set", "key": "ELASTICSEARCH_URL_2", "link": { "kind": "search", "ref": id, "field": "url", "mode": "live" } }] });
     let a = r.http.post(format!("{}/v1/secrets/projects/{}/environments/production/changes", r.api, p.id)).bearer_auth(TOKEN).json(&link).send().await.unwrap();
     let (status, body) = (a.status(), a.text().await.unwrap());
