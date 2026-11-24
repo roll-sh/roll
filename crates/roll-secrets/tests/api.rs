@@ -150,6 +150,8 @@ struct FakeKeyVendors {
     made: std::sync::atomic::AtomicU32,
     bodies: Mutex<Vec<Value>>,
     refuse: std::sync::atomic::AtomicBool,
+    /// The admin credential each GitLab request came with.
+    gitlab_admins: Mutex<Vec<String>>,
 }
 
 const GITLAB_TOKENS: &str = "https://gitlab.example.com/api/v4/projects/acme%2Fweb/access_tokens";
@@ -170,7 +172,8 @@ impl FakeKeyVendors {
         use std::sync::atomic::Ordering::Relaxed;
         let header = |name: &str| headers.iter().find(|(k, _)| *k == name).map(|(_, v)| v.expose().to_string()).unwrap_or_default();
         let (vendor, rest, authorized) = if let Some(rest) = url.strip_prefix(GITLAB_TOKENS) {
-            ("gitlab", rest, header("private-token") == "fake-gitlab-admin")
+            self.gitlab_admins.lock().unwrap().push(header("private-token"));
+            ("gitlab", rest, ["fake-gitlab-admin", "fake-gitlab-admin-2"].contains(&header("private-token").as_str()))
         } else if let Some(rest) = url.strip_prefix(OPENAI_ACCOUNTS) {
             ("openai", rest, header("authorization") == "Bearer fake-openai-admin")
         } else if let Some(rest) = url.strip_prefix(CLOUDFLARE_TOKENS) {
@@ -3209,6 +3212,42 @@ async fn keys_a_vendor_ends_rotate_before_that_and_health_warns_of_them_and_of_t
     let expiring: Vec<(&str, &str)> = health.as_array().unwrap().iter().filter(|f| f["issue"] == "expiring").map(|f| (f["environment"].as_str().unwrap(), f["key"].as_str().unwrap())).collect();
     assert_eq!(expiring, [("", "gl"), ("production", "GITLAB_SHORT")], "{health}");
     assert!(!health.to_string().contains("fake-gitlab"), "{health}");
+}
+
+#[tokio::test]
+async fn a_saas_rotators_credential_is_replaced_in_place_and_the_next_rotation_uses_it() {
+    let api = Api::new().await;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+    let day = 86_400_000;
+    let target = json!({ "host": "gitlab.example.com", "project": "acme/web", "scopes": ["read_api"], "access_level": 20, "expires_days": 90 });
+    let r = key_vendor(&api, "gitlab", target, "fake-gitlab-admin", "GITLAB_TOKEN", json!({ "rotate_days": 60 })).await;
+    let at = format!("/saas/{}", r["id"].as_str().unwrap());
+    let last_admin = || api.sent.10.gitlab_admins.lock().unwrap().last().cloned().unwrap();
+    let expiring = |health: &Value| -> Vec<String> { health.as_array().unwrap().iter().filter(|f| f["issue"] == "expiring" && f["environment"] == "").map(|f| f["key"].as_str().unwrap().to_string()).collect() };
+
+    // A credential the vendor refuses changes nothing: the old one stays, dated as it was.
+    let (s, e) = api.call(Method::PATCH, &at, Some(json!({ "credential": "fake-gitlab-wrong", "credential_expires_at": now + 10 * day, "name": "gl-ops" }))).await;
+    assert!(s == StatusCode::BAD_REQUEST && e.to_string().contains("gitlab answered 401") && !e.to_string().contains("fake-gitlab-wrong"), "{e}");
+    let kept = &api.ok(Method::GET, "/saas", None).await[0];
+    assert!(kept["name"] == "gitlab" && kept.get("credential_expires_at").is_none(), "{kept}");
+    api.ok(Method::POST, "/environments/production/secrets/GITLAB_TOKEN/rotate", None).await;
+    assert_eq!(last_admin(), "fake-gitlab-admin");
+
+    // A good one is checked, swapped in place (the link stays), and the next rotation uses it.
+    let patched = api.ok(Method::PATCH, &at, Some(json!({ "credential": "fake-gitlab-admin-2", "credential_expires_at": now + 10 * day, "name": "gl-ops" }))).await;
+    assert!(patched["id"] == r["id"] && patched["name"] == "gl-ops" && patched["credential_expires_at"] == now + 10 * day && !patched.to_string().contains("fake-gitlab-admin"), "{patched}");
+    assert_eq!(expiring(&api.ok(Method::GET, "/health", None).await), ["gl-ops"], "health warns of the new credential's end");
+    api.ok(Method::POST, "/environments/production/secrets/GITLAB_TOKEN/rotate", None).await;
+    assert_eq!((last_admin().as_str(), api.values("production", "/").await["values"]["GITLAB_TOKEN"].clone()), ("fake-gitlab-admin-2", json!("fake-gitlab-token-3")));
+    // Retired keys are revoked through the new credential too.
+    end_grace(&api).await;
+    assert_eq!((api.sent.10.live.lock().unwrap().clone(), last_admin()), (vec!["3".to_string()], "fake-gitlab-admin-2".to_string()));
+
+    // Moving the date moves health; audited, never with the credential.
+    api.ok(Method::PATCH, &at, Some(json!({ "credential_expires_at": now + 100 * day }))).await;
+    assert!(expiring(&api.ok(Method::GET, "/health", None).await).is_empty());
+    let audit = api.ok(Method::GET, "/audit", None).await;
+    assert!(audit.to_string().contains("changed SaaS rotator gl-ops's credential expiry") && !audit.to_string().contains("fake-gitlab-admin-2"), "{audit}");
 }
 
 #[tokio::test]
