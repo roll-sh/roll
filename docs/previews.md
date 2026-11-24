@@ -1469,10 +1469,12 @@ as its logs are. Its picture is `GET …/try/{run}/screenshot` (`image/png`, kep
 preview's holder; another preview's id gets a 404), asked for only when the text isn't enough.
 Two runs at a time per preview (a third is a 409), each taking one of the node's screenshot
 slots; typed text is never kept or said by previews. Both are `reveal` (its clicks can change the
-preview's own data). A roll apps service's comes next (a 409 now). Checked in the screenshot
-image (a click changed "0 items" to "1 item", a missing selector named, a failed request listed)
-and live in `scripts/preview-cost.sh`. `an_agents_run_on_a_page_answers_what_it_showed_masked`,
-`a_runs_answer_is_bounded`.
+preview's own data). A roll apps service's runs in its instance's network on the node that runs
+it, as its screenshot does (a signed hop on a fleet; a 409 where roll apps can't be joined,
+Fargate). Checked in the screenshot image (a click changed "0 items" to "1 item", a missing selector named, a failed request listed)
+and live in `scripts/preview-cost.sh` and, on roll apps, `scripts/preview-apps.sh`.
+`an_agents_run_on_a_page_answers_what_it_showed_masked`, `a_runs_answer_is_bounded`,
+`an_apps_instance_is_screenshotted_on_its_services_holder`.
 A data branch can be looked at from the sheet too (Neon's Tables, Supabase's table editor): a
 Postgres branch's "Tables" lists the tables its own role can read (with about how many rows), and
 one's first 50 rows, cells as text cut at 200 characters (`…/data/{kind:parent}?table=`). It's
@@ -2646,7 +2648,7 @@ Ranked by what a person notices first. Done so far:
   logs that say when lines were missed and stop with a hidden tab).
 
 1. **Agents driving the preview in a browser, in review** (GitHub Copilot's Playwright): `POST
-   …/try`, stateless steps and their picture (roll MCP's `previews_try`); roll apps services next.
+   …/try`, stateless steps and their picture (roll MCP's `previews_try`), roll apps services' too.
 2. **Restore points for a preview's data** (Neon's snapshots): save the branches now, put them back
    after a test run.
 3. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no

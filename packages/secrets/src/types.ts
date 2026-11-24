@@ -456,13 +456,15 @@ export type Sync = {
   /** When a cut-off paused it, and why: it pushes nothing until an admin resumes it. */
   paused_at: number | null;
   paused_why: string | null;
+  /** A certificate kind's: what the target calls what it pushed (an ACM ARN, a Key Vault certificate's latest version, a Cloudflare custom certificate's id). */
+  remote_id?: string;
 };
 /** What a sync would push before it exists (`POST …/syncs/preview`): names only. */
 export type SyncPreview = { names: string[]; credentials: string[]; missing_credentials: string[]; unknown_keys: string[] };
 export type NewSync = { environment: string; path?: string; kind: string; target: Record<string, unknown>; keys?: string[]; prefix?: string };
 export type SyncField = { name: string; label: string; required: boolean; placeholder: string };
-/** A kind the server registered: its target's fields, whether pushes carry values, whether it has a signing secret. */
-export type SyncKind = { kind: string; label: string; values: boolean; signed: boolean; fields: SyncField[] };
+/** A kind the server registered: its target's fields, whether pushes carry values, whether it has a signing secret, whether it pushes one managed `pki` key's certificate (named alone in `keys`). */
+export type SyncKind = { kind: string; label: string; values: boolean; signed: boolean; certificate: boolean; fields: SyncField[] };
 /** `resealed`: "all", or how many projects still need the previous key (null without a key); `links`, `syncs`: the kinds registered. */
 /** `customer_managed`: projects whose data key a customer's own KMS key wraps too. */
 /** `issuer_pulled`: issuer keys an emergency rotation pulled from the JWKS in the last 30 days. */

@@ -894,6 +894,18 @@ async fn check_access(apps: &Arc<Apps>, service: &str, env: &str, req: &mut Requ
     {
         return None;
     }
+    // Another service of the project with roll's token for this environment (`access.callers`;
+    // Cloud Run's invoker): in as that service, which the app is told. A token that doesn't
+    // check out is turned away, whatever else the request carries.
+    if let Some(token) = req.headers().get("x-roll-caller").and_then(|v| v.to_str().ok()).map(str::to_string) {
+        return match apps.caller_admits(service, env, &access.callers, &token).await {
+            Some(who) => {
+                req.extensions_mut().insert(VisitorIs(who, None));
+                None
+            }
+            None => Some(denied(apps, service, env).await),
+        };
+    }
     // An automation (CI's end-to-end tests) with the project's bypass secret: no cookie, no
     // redirect. The header is roll's, so it never reaches the app (`x-roll-*` is stripped).
     if let (Some(bypass), Some(given)) = (&access.bypass_hash, req.headers().get("x-roll-preview-bypass").and_then(|v| v.to_str().ok()))

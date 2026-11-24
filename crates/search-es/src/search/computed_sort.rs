@@ -58,21 +58,23 @@ impl ComputedSort for ScriptKey {
 struct ScriptLeaf {
     leaf: Leaf,
     kind: &'static str,
-    /// The search fails with the first error; later ones aren't parked.
+    /// The search fails with the first error: the script runs no more after it.
     deferred: bool,
 }
 
 impl ScriptLeaf {
     fn defer(&mut self, e: crate::error::EsError) -> SortVal {
-        if !std::mem::replace(&mut self.deferred, true) {
-            defer(e);
-        }
+        self.deferred = true;
+        defer(e);
         SortVal::Null
     }
 }
 
 impl SegmentComputedSort for ScriptLeaf {
     fn value(&mut self, doc: u32, score: f32) -> SortVal {
+        if self.deferred {
+            return SortVal::Null;
+        }
         let score = if score.is_nan() { 0.0 } else { f64::from(score) };
         if self.kind == "number" {
             return match self.leaf.run_f64(doc, score) {
@@ -184,19 +186,21 @@ impl ComputedSort for RuntimeKey {
 struct RuntimeLeaf {
     leaf: super::runtime::EvalLeaf,
     reverse: bool,
-    /// The search fails with the first error; later ones aren't parked.
+    /// The search fails with the first error: the field is read no more after it.
     deferred: bool,
 }
 
 impl SegmentComputedSort for RuntimeLeaf {
     fn value(&mut self, doc: u32, _score: f32) -> SortVal {
         use super::runtime::RtValue as V;
+        if self.deferred {
+            return SortVal::Null;
+        }
         let vals = match self.leaf.values(doc) {
             Ok(v) => v,
             Err(e) => {
-                if !std::mem::replace(&mut self.deferred, true) {
-                    defer(e);
-                }
+                self.deferred = true;
+                defer(e);
                 return SortVal::Null;
             }
         };
