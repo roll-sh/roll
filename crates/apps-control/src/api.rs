@@ -1518,6 +1518,10 @@ async fn vitals(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q
 #[derive(Deserialize)]
 struct VisitBody {
     to: String,
+    /// The SHA-256 the environment's host gave the browser it sent here (`state`): the ticket
+    /// opens only in that browser.
+    #[serde(default)]
+    state: Option<String>,
 }
 
 /// A signed-in person's one-use way into a sign-in-gated environment (roll's dashboard asks
@@ -1526,7 +1530,7 @@ async fn visit(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Ext
     let Some(user) = ext.get::<roll_auth::SignedIn>() else {
         return Err(Error::Forbidden("signing in to an environment is for a person signed in to roll, not a token".into()));
     };
-    ok(json!({ "url": apps.visit_ticket(&id, &env, &user.user, &user.session, &b.to).await? }))
+    ok(json!({ "url": apps.visit_ticket(&id, &env, &user.user, &user.session, &b.to, b.state.as_deref().unwrap_or("")).await? }))
 }
 
 async fn trace(State(apps): S, Path((id, env, trace)): Path<(String, String, String)>) -> R {

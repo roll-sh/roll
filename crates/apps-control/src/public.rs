@@ -867,19 +867,44 @@ async fn check_access(apps: &Arc<Apps>, service: &str, env: &str, req: &mut Requ
         // A ticket from roll's dashboard (or a provider's sign-in), coming back: the session it opens.
         if req.uri().path() == crate::visit::PATH {
             let query = req.uri().query().unwrap_or("").to_string();
-            return Some(land_visit(apps, service, env, &query).await);
+            let state = take_cookie(req, &host_only(apps, crate::visit::state_cookie(env)));
+            return Some(land_visit(apps, service, env, &query, state).await);
         }
-        let name = crate::visit::cookie(env);
+        let name = host_only(apps, crate::visit::cookie(env));
+        // Signing out: the session ends, its cookie goes, and they're told (not sent to sign in
+        // again at once).
+        if req.uri().path() == crate::visit::LOGOUT {
+            if let Some(t) = take_cookie(req, &name) {
+                apps.end_visit(&t).await;
+            }
+            let secure = if apps.cfg.scheme == "https" { "; Secure" } else { "" };
+            let mut r = page(StatusCode::OK, "Signed out", "You're signed out of this site. Open it again to sign in.");
+            if let Ok(c) = HeaderValue::from_str(&format!("{name}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{secure}")) {
+                r.headers_mut().append(header::SET_COOKIE, c);
+            }
+            return Some(r);
+        }
         if let Some(t) = take_cookie(req, &name)
-            && let Some(who) = apps.visitor(service, env, &t).await
+            && let Some((user, who)) = apps.visitor(service, env, &t).await
         {
             // In: the environment's shared token (a link they also came in by) stays roll's. The
             // app is told who (`x-roll-visitor`, set after every client's `x-roll-*` is gone).
-            take_cookie(req, &format!("roll_access_{env}"));
-            req.extensions_mut().insert(VisitorIs(who));
+            take_cookie(req, &host_only(apps, format!("roll_access_{env}")));
+            // And a token it can check (`visitor_token`), for the name the visitor asked (no port,
+            // no trailing dot).
+            let raw = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("");
+            let host = match raw.rsplit_once(':') {
+                Some((h, p)) if p.bytes().all(|b| b.is_ascii_digit()) => h,
+                _ => raw,
+            }
+            .trim_end_matches('.')
+            .to_ascii_lowercase();
+            let jwt = apps.visitor_jwt(service, env, &format!("{}://{host}", apps.cfg.scheme), &user, &who).await;
+            req.extensions_mut().insert(VisitorIs(who, jwt));
             return None;
         }
-        if access.token_hash.is_none() {
+        // No other way in: signing in. With a password too, its page and session come first.
+        if access.token_hash.is_none() && access.password_hash.is_none() {
             return Some(match &access.sso {
                 Some(sso) => sso_sign_in(apps, service, env, sso, req).await,
                 None => sign_in(apps, service, env, req),
@@ -888,10 +913,10 @@ async fn check_access(apps: &Arc<Apps>, service: &str, env: &str, req: &mut Requ
     }
     // A password ([`crate::password`]): its session, or its page's POST.
     if let Some(ph) = access.password_hash.clone() {
-        if let Some(v) = take_cookie(req, &crate::password::cookie(env))
+        if let Some(v) = take_cookie(req, &host_only(apps, crate::password::cookie(env)))
             && apps.password_session_ok(service, env, &ph, &v).await
         {
-            take_cookie(req, &format!("roll_access_{env}"));
+            take_cookie(req, &host_only(apps, format!("roll_access_{env}")));
             return None;
         }
         if req.uri().path() == crate::password::PATH && req.method() == axum::http::Method::POST {
@@ -916,7 +941,7 @@ async fn check_access(apps: &Arc<Apps>, service: &str, env: &str, req: &mut Requ
         }
         return Some(denied(apps, service, env).await);
     };
-    let name = format!("roll_access_{env}");
+    let name = host_only(apps, format!("roll_access_{env}"));
     let query = req.uri().query().unwrap_or("").to_string();
     let mut token = None;
     let mut rest = Vec::new();
@@ -990,22 +1015,41 @@ fn sign_in(apps: &Arc<Apps>, service: &str, env: &str, req: &Request) -> Respons
     let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("");
     let back = format!("{}://{host}{}", apps.cfg.scheme, req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/"));
     let q = |v: &str| percent_encoding::utf8_percent_encode(v, percent_encoding::NON_ALPHANUMERIC).to_string();
-    let url = format!("{web}/dashboard/apps/visit?service={}&env={}&to={}", q(service), q(env), q(&back));
+    // The browser this began in: its ticket opens only there.
+    let (state, binding) = crate::visit::new_state();
+    let url = format!("{web}/dashboard/apps/visit?service={}&env={}&to={}&state={binding}", q(service), q(env), q(&back));
     let page_load = matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD)
         && req.headers().get(header::ACCEPT).and_then(|a| a.to_str().ok()).is_some_and(|a| a.contains("text/html"));
-    if page_load && let Ok(l) = HeaderValue::from_str(&url) {
+    let mut r = if page_load && let Ok(l) = HeaderValue::from_str(&url) {
         let mut r = StatusCode::FOUND.into_response();
         r.headers_mut().insert(header::LOCATION, l);
         r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-        return r;
+        r
+    } else {
+        page(StatusCode::UNAUTHORIZED, "Sign in to open this", &format!("This environment lets in people signed in to roll who can open its project. <a href=\"{}\">Sign in</a>.", escape(&url)))
+    };
+    set_state_cookie(apps, env, &state, &mut r);
+    r
+}
+
+/// The state cookie ([`crate::visit::state_cookie`]) on a response that sends someone to sign in.
+fn set_state_cookie(apps: &Arc<Apps>, env: &str, state: &str, r: &mut Response) {
+    let secure = if apps.cfg.scheme == "https" { "; Secure" } else { "" };
+    if let Ok(c) = HeaderValue::from_str(&format!("{}={state}; Path=/; HttpOnly; SameSite=Lax; Max-Age=600{secure}", host_only(apps, crate::visit::state_cookie(env)))) {
+        r.headers_mut().append(header::SET_COOKIE, c);
     }
-    page(StatusCode::UNAUTHORIZED, "Sign in to open this", &format!("This environment lets in people signed in to roll who can open its project. <a href=\"{}\">Sign in</a>.", escape(&url)))
+}
+
+/// A gate cookie's name: on HTTPS with `__Host-`, so another site under the same domain (another
+/// tenant's app on `up.roll.site`) can't set one for this host.
+pub(crate) fn host_only(apps: &Apps, name: String) -> String {
+    if apps.cfg.scheme == "https" { format!("__Host-{name}") } else { name }
 }
 
 /// Who a sign-in-gated environment's session is ([`Apps::visitor`]): a provider's visitor's
 /// email, or a roll person's user id, told to the app as `x-roll-visitor`.
 #[derive(Clone)]
-struct VisitorIs(String);
+struct VisitorIs(String, Option<String>);
 
 /// A visitor with no session of an environment that lets a provider sign people in
 /// (`access.sso`): a page load goes to roll's sign-in with that provider, which sends them back
@@ -1020,12 +1064,19 @@ fn sso_sign_in(apps: &Arc<Apps>, service: &str, env: &str, sso: &crate::model::S
     let to = crate::visit::local_path(req.uri().path_and_query().map_or("/", |p| p.as_str()));
     let page_load = matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD) && req.headers().get(header::ACCEPT).and_then(|a| a.to_str().ok()).is_some_and(|a| a.contains("text/html"));
     let (apps, service, env, sso) = (apps.clone(), service.to_string(), env.to_string(), sso.clone());
-    async move { sso_redirect(&apps, &service, &env, &sso, &host, &to, page_load).await }
+    async move {
+        // The browser this began in: its ticket opens only there.
+        let (state, binding) = crate::visit::new_state();
+        let mut r = sso_redirect(&apps, &service, &env, &sso, &host, &to, page_load, &binding).await;
+        set_state_cookie(&apps, &env, &state, &mut r);
+        r
+    }
 }
 
-async fn sso_redirect(apps: &Arc<Apps>, service: &str, env: &str, sso: &crate::model::Sso, host: &str, to: &str, page_load: bool) -> Response {
+#[allow(clippy::too_many_arguments)]
+async fn sso_redirect(apps: &Arc<Apps>, service: &str, env: &str, sso: &crate::model::Sso, host: &str, to: &str, page_load: bool, binding: &str) -> Response {
     let who = if sso.provider == "github" { "GitHub" } else { "Google" };
-    match apps.sso_start(service, env, sso, host, to).await {
+    match apps.sso_start(service, env, sso, host, to, binding).await {
         Some(url) if page_load => match HeaderValue::from_str(&url) {
             Ok(l) => {
                 let mut r = StatusCode::FOUND.into_response();
@@ -1042,7 +1093,7 @@ async fn sso_redirect(apps: &Arc<Apps>, service: &str, env: &str, sso: &crate::m
 
 /// `/__roll/visit?ticket=…&to=…` on the environment's own host: the ticket traded for a session
 /// cookie (host-only, 12 hours), then on to `to` on the same site.
-async fn land_visit(apps: &Arc<Apps>, service: &str, env: &str, query: &str) -> Response {
+async fn land_visit(apps: &Arc<Apps>, service: &str, env: &str, query: &str, state: Option<String>) -> Response {
     let mut ticket = None;
     let mut to = "/".to_string();
     for pair in query.split('&') {
@@ -1055,18 +1106,22 @@ async fn land_visit(apps: &Arc<Apps>, service: &str, env: &str, query: &str) -> 
     }
     // Where it goes, checked before the ticket is used.
     let Ok(location) = HeaderValue::from_str(&to) else { return page(StatusCode::BAD_REQUEST, "Bad address", "This sign-in link isn't one.") };
-    let Some(session) = (match ticket {
-        Some(t) => apps.open_visit(service, env, &t).await,
-        None => None,
+    let Some(session) = (match (ticket, state) {
+        (Some(t), Some(s)) => apps.open_visit(service, env, &t, &s).await,
+        _ => None,
     }) else {
-        return page(StatusCode::UNAUTHORIZED, "This sign-in link has expired", "Open the page again: roll signs you in and sends you back.");
+        return page(StatusCode::UNAUTHORIZED, "This sign-in link has expired", "Open the page again: roll signs you in and sends you back. (A sign-in link only works in the browser it began in.)");
     };
     let secure = if apps.cfg.scheme == "https" { "; Secure" } else { "" };
-    let cookie = format!("{}={session}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}{secure}", crate::visit::cookie(env), crate::visit::SESSION_S);
+    let cookie = format!("{}={session}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}{secure}", host_only(apps, crate::visit::cookie(env)), crate::visit::SESSION_S);
     let mut r = StatusCode::FOUND.into_response();
     let Ok(c) = HeaderValue::from_str(&cookie) else { return page(StatusCode::INTERNAL_SERVER_ERROR, "Try again", "The sign-in couldn't be finished.") };
     r.headers_mut().insert(header::LOCATION, location);
     r.headers_mut().insert(header::SET_COOKIE, c);
+    // The state is used up.
+    if let Ok(c) = HeaderValue::from_str(&format!("{}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{secure}", host_only(apps, crate::visit::state_cookie(env)))) {
+        r.headers_mut().append(header::SET_COOKIE, c);
+    }
     r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     r
 }
@@ -1558,7 +1613,7 @@ pub(crate) async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment:
 async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&str>, mut req: Request) -> Response {
     let began = Instant::now();
     // Came in through roll: the private environment's access cookie (checked just below).
-    let cookie = format!("roll_access_{env}=");
+    let cookie = format!("{}=", host_only(&apps, format!("roll_access_{env}")));
     let via_link = env.starts_with("pv-") && req.headers().get_all(header::COOKIE).iter().filter_map(|v| v.to_str().ok()).any(|v| v.split(';').any(|c| c.trim().starts_with(&cookie)));
     // Its allow list first (deployment URLs too: they're public), before anything wakes.
     let gate = match apps.gate(&apps.live(service, env)).await {
@@ -1598,7 +1653,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         }
         let until = code_sql::now_ms() / 1000 + crate::challenge::PASS_S;
         let secure = if apps.cfg.scheme == "https" { "; Secure" } else { "" };
-        let cookie = format!("{}={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}{secure}", crate::challenge::cookie(env), crate::challenge::pass(key, &net, until), crate::challenge::PASS_S);
+        let cookie = format!("{}={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}{secure}", host_only(&apps, crate::challenge::cookie(env)), crate::challenge::pass(key, &net, until), crate::challenge::PASS_S);
         let mut r = StatusCode::NO_CONTENT.into_response();
         if let Ok(c) = HeaderValue::from_str(&cookie) {
             r.headers_mut().insert(header::SET_COOKIE, c);
@@ -1635,7 +1690,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
             crate::live::Verdict::Challenge => {
                 let key = gate.challenge_key.clone().unwrap_or_default();
                 let net = crate::challenge::network(crate::live::client_ip(client.as_deref()));
-                let passed = take_cookie(&mut req, &crate::challenge::cookie(env)).is_some_and(|c| crate::challenge::passes(&key, &net, code_sql::now_ms() / 1000, &c));
+                let passed = take_cookie(&mut req, &host_only(&apps, crate::challenge::cookie(env))).is_some_and(|c| crate::challenge::passes(&key, &net, code_sql::now_ms() / 1000, &c));
                 if !passed {
                     let to = crate::visit::local_path(req.uri().path_and_query().map_or("/", |p| p.as_str()));
                     let mut r = (StatusCode::FORBIDDEN, [(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-store")], crate::challenge::page(&crate::challenge::seed(&key, &net, code_sql::now_ms()), &to)).into_response();
@@ -1683,6 +1738,13 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     // site's rewrite (a header only roll sets) was let in by the site, by the project's own rule.
     // A site's rewrite was let in by the site; roll's own scheduled call by roll.
     let rewritten = req.headers().contains_key(VIA_SITE);
+    // The key its visitors' tokens are signed with, public, on any of its hosts.
+    if req.uri().path() == crate::visitor_token::JWKS_PATH && req.method() == axum::http::Method::GET {
+        return match apps.visitor_jwks(service, env).await {
+            Some(k) => ([(header::CONTENT_TYPE, "application/json"), (header::CACHE_CONTROL, "public, max-age=300")], k.to_string()).into_response(),
+            None => page(StatusCode::SERVICE_UNAVAILABLE, "Unavailable", "Try again in a few seconds."),
+        };
+    }
     if !rewritten && !ours && let Some(turned_away) = check_access(&apps, service, env, &mut req).await {
         // The access link's own redirect is a way in, not a refusal.
         return match turned_away.status() {
@@ -2024,8 +2086,13 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         req.headers_mut().remove(k);
     }
     // Who a sign-in let in (`access.signed_in` or `access.sso`): roll's to say.
-    if let Some(v) = req.extensions().get::<VisitorIs>().and_then(|v| HeaderValue::from_str(&v.0).ok()) {
-        req.headers_mut().insert(HeaderName::from_static("x-roll-visitor"), v);
+    if let Some(v) = req.extensions().get::<VisitorIs>().cloned() {
+        if let Ok(who) = HeaderValue::from_str(&v.0) {
+            req.headers_mut().insert(HeaderName::from_static("x-roll-visitor"), who);
+        }
+        if let Some(jwt) = v.1.and_then(|t| HeaderValue::from_str(&t).ok()) {
+            req.headers_mut().insert(HeaderName::from_static("x-roll-visitor-jwt"), jwt);
+        }
     }
     let h = req.headers_mut();
     if let Some(host) = host {

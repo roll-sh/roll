@@ -331,12 +331,17 @@ impl Sso {
         self.allow.iter().any(|a| a.starts_with("org:"))
     }
 
-    /// The entry that lets someone in (their verified email, lower case, and organisations).
-    pub fn admits(&self, email: &str, orgs: &[String]) -> Option<&str> {
+    /// The entry that lets someone in (their verified email, lower case, organisations, and
+    /// Google's `hd`). With Google, a domain's entry also needs the account to be that
+    /// Workspace domain's (`hd`): a consumer account made with a work address isn't.
+    pub fn admits(&self, email: &str, orgs: &[String], hosted_domain: Option<&str>) -> Option<&str> {
         let domain = email.rsplit_once('@').map(|(_, d)| d)?;
         self.allow.iter().map(String::as_str).find(|a| match a.strip_prefix("org:") {
             Some(org) => orgs.iter().any(|o| o == org),
-            None => a.strip_prefix('@').map_or(*a == email, |d| d == domain),
+            None => match a.strip_prefix('@') {
+                Some(d) => d == domain && (self.provider != "google" || hosted_domain.is_some_and(|h| h.eq_ignore_ascii_case(d))),
+                None => *a == email,
+            },
         })
     }
 }
