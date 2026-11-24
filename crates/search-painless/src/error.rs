@@ -98,6 +98,16 @@ impl std::fmt::Display for ScriptError {
 impl std::error::Error for ScriptError {}
 
 impl ScriptError {
+    /// Whether `on_script_error: continue` must not swallow this failure. Elasticsearch 9.5.5
+    /// skips the document for anything a script throws, `painless_error`, `painless_explain_error`
+    /// and a stack overflow included (checked on the reference image), so this is only what
+    /// isn't the script's: roll's memory breaker refusing what the script keeps (the only 429 a
+    /// script fails with, see [`crate::Host::script_memory`]) and the search's cancellation or
+    /// timeout.
+    pub fn uncatchable(&self) -> bool {
+        self.status == 429 || matches!(self.cause_type.as_str(), "task_cancelled_exception" | "time_exceeded_exception")
+    }
+
     /// The `caused_by` object.
     pub fn cause_json(&self) -> Json {
         let mut m = Map::new();

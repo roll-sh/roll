@@ -1175,7 +1175,7 @@ impl code_control::SecretEnv for EndpointKeys {
     async fn for_owner(&self, _: &str, _: &str, _: &str, _: &str, _: code_control::Asker<'_>) -> anyhow::Result<code_control::Revealed> {
         anyhow::bail!("not in this test")
     }
-    async fn leaks(&self, _: &str, _: Vec<String>) -> anyhow::Result<Vec<(usize, String, String, String)>> {
+    async fn leaks(&self, _: &str, _: Vec<String>) -> anyhow::Result<Vec<code_control::FoundLeak>> {
         Ok(Vec::new())
     }
     async fn bind_machine_key(&self, owner: &str, machine: &str, reference: &str, _: &code_control::SecretsAsker) -> code_control::Result<String> {

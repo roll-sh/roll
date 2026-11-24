@@ -112,7 +112,14 @@ impl Code {
         }
     }
 
-    /// Post a plain message where approvals go (the daily list of tokens about to expire).
+    /// The roll code owner (id) and platform of chat install `install`: whose it is to post
+    /// through on someone's behalf (roll secrets' notifications go only through a person's own).
+    pub fn chat_install_owner(&self, install: &str) -> Result<Option<(String, &'static str)>, String> {
+        Ok(install_by_id(self, install).map_err(|e| e.to_string())?.map(|i| (i.owner_id, i.platform.as_str())))
+    }
+
+    /// Post a plain message to a channel: where approvals go (the daily list of tokens about to
+    /// expire), or a person's notification (roll secrets' events).
     pub async fn post_access_notice(&self, install: &str, channel: &str, text: &str) -> Result<(), String> {
         let i = self.install(install)?;
         match i.platform {

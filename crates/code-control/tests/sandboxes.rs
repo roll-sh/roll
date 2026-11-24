@@ -571,7 +571,7 @@ impl code_control::SecretEnv for Reveals {
         }
         Err(code_control::Refused(format!("{by} may no longer reveal development")).into())
     }
-    async fn leaks(&self, _: &str, _: Vec<String>) -> anyhow::Result<Vec<(usize, String, String, String)>> {
+    async fn leaks(&self, _: &str, _: Vec<String>) -> anyhow::Result<Vec<code_control::FoundLeak>> {
         Ok(vec![])
     }
 }

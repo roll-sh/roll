@@ -118,7 +118,7 @@ impl Secrets {
                 return Ok((Arc::new(OcspResponse::try_later().to_der().map_err(|e| Error::Internal(e.to_string()))?), false));
             }
         }
-        let (ca_pem, ca_key, _) = self.pki()?.open(id).map_err(|_| Error::NotFound(format!("no CA {id}")))?;
+        let crate::pki::Opened { certificate: ca_pem, key: ca_key, .. } = self.pki()?.open(id).map_err(|_| Error::NotFound(format!("no CA {id}")))?;
         let (_, pem) = x509_parser::pem::parse_x509_pem(ca_pem.as_bytes()).map_err(|_| Error::Internal("the CA's certificate doesn't parse".into()))?;
         let ca = x509_cert::Certificate::from_der(&pem.contents).map_err(|_| Error::Internal("the CA's certificate doesn't parse".into()))?;
         let name = ca.tbs_certificate.subject.to_der().map_err(|e| Error::Internal(e.to_string()))?;

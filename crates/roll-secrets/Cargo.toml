@@ -37,7 +37,8 @@ thiserror.workspace = true
 time.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-x509-parser.workspace = true
+# `verify`: an intermediate CA's chain is checked when it's installed (pki.rs).
+x509-parser = { workspace = true, features = ["verify"] }
 x509-cert.workspace = true
 x509-ocsp.workspace = true
 der.workspace = true
@@ -53,4 +54,3 @@ tower.workspace = true
 # The interception CA's name constraints, as a TLS client checks them (intercept.rs).
 rustls-pki-types.workspace = true
 rustls-webpki.workspace = true
-x509-parser = { workspace = true, features = ["verify"] }

@@ -212,6 +212,8 @@ Blocker   = {kind: "state" | "draft" | "untrusted" | "checks" | "needs_approval"
                    /* more may come: show unknown kinds by message */,
              message,
              key?: string, environments?: string[] /* secret_leak, secret_missing: the roll secrets key and where */,
+             rotate?: {environment, folder}[] /* secret_leak: where a person may rotate the key with roll secrets' rotate route, as themselves (a managed
+                                                credential, in a project whose leaks.rotate is off); absent when none (docs/secrets.md "When a value leaks") */,
              path?: string, line?: number, fingerprint?: string /* secret_unstored: where (1-based line) and what .roll/secrets-allow names to keep it */,
              validity?: {fingerprint, result: "live" | "invalid" | "unknown", account?: string, checked_at?: number, rotator?: "aws-iam" | "github-app"}
                /* secret_unstored, with the project's roll secrets validity checks on: whether it works, as its provider answered (a live one is listed first); docs/secrets.md "Is it live?" */}

@@ -101,6 +101,7 @@ async fn fake_providers(seen: Arc<Mutex<Seen>>) -> String {
     let app = Router::new()
         .route("/token", post(token))
         .route("/user", get(|State(s): State<S>| async move { Json(json!({ "id": 42, "login": s.seen.lock().unwrap().github_login.clone().unwrap_or_else(|| "Ada-L".into()), "name": "Ada Lovelace" })) }))
+        .route("/user/orgs", get(|| async { Json(json!([{ "login": "Roll-sh" }, { "login": "acme" }])) }))
         .route(
             "/user/emails",
             get(|| async { Json(json!([{ "email": "ada@old.example", "primary": false, "verified": true }, { "email": "ada@example.com", "primary": true, "verified": true }])) }),
@@ -344,6 +345,50 @@ async fn github_and_google_sign_in() {
     let state: String = url::Url::parse(started.json["url"].as_str().unwrap()).unwrap().query_pairs().find(|(k, _)| k == "state").unwrap().1.into_owned();
     let a = env.call(&mut Browser::default(), Method::GET, &format!("/v1/accounts/oauth/github/callback?code={state}&state={state}"), None).await;
     assert_eq!(location(&a), "https://roll.test/signin?error=state");
+}
+
+/// A visitor's sign-in (roll apps' `access.sso`): straight to the provider (GitHub asking for
+/// organisations when told), back through the callback to the product's gate with the verified
+/// email and organisations, and on to where the gate says, with no account or session of roll's;
+/// a refusal is roll's own page, in the gate's words.
+#[tokio::test]
+async fn a_visitor_signs_in_for_a_product_without_an_account() {
+    struct Gate(Mutex<Vec<(String, String, Vec<String>)>>);
+    #[async_trait::async_trait]
+    impl roll_accounts::VisitGate for Gate {
+        async fn admit(&self, request: &str, who: &roll_accounts::Visitor) -> Result<String, String> {
+            self.0.lock().unwrap().push((request.to_string(), who.email.clone(), who.orgs.clone()));
+            match request {
+                "ok-req" => Ok("https://wiki.apps.test/__roll/visit?ticket=t".into()),
+                _ => Err(format!("{} isn't let in <here>", who.email)),
+            }
+        }
+    }
+    let env = Env::new().await;
+    let gate = Arc::new(Gate(Mutex::new(Vec::new())));
+    env.accounts.set_visit_gate(gate.clone());
+    assert_eq!(env.accounts.visit_url("github", "ok-req", true).as_deref(), Some(format!("{API}/v1/accounts/oauth/github/visit?r=ok%2Dreq&orgs=1").as_str()));
+    let visit = |r: &'static str| {
+        let env = &env;
+        async move {
+            let mut b = Browser::default();
+            let a = env.call(&mut b, Method::GET, &format!("/v1/accounts/oauth/github/visit?r={r}&orgs=1"), None).await;
+            assert_eq!(a.status, StatusCode::SEE_OTHER);
+            let url = url::Url::parse(location(&a)).unwrap();
+            let q: HashMap<String, String> = url.query_pairs().into_owned().collect();
+            assert_eq!(q["scope"], "read:user user:email read:org");
+            let state = q["state"].clone();
+            env.seen.lock().unwrap().challenge.insert(state.clone(), q["code_challenge"].clone());
+            let done = env.call(&mut b, Method::GET, &format!("/v1/accounts/oauth/github/callback?code={state}&state={state}"), None).await;
+            (done, b)
+        }
+    };
+    let (a, b) = visit("ok-req").await;
+    assert_eq!((a.status, location(&a)), (StatusCode::SEE_OTHER, "https://wiki.apps.test/__roll/visit?ticket=t"));
+    assert!(b.cookies.is_empty(), "no session of roll's, and the sign-in's own cookie gone: {:?}", b.cookies);
+    assert_eq!(gate.0.lock().unwrap()[0], ("ok-req".into(), "ada@example.com".into(), vec!["roll-sh".into(), "acme".into()]));
+    let (a, _) = visit("no-req").await;
+    assert_eq!((a.status, a.headers.get(header::LOCATION)), (StatusCode::FORBIDDEN, None), "roll's page, not the dashboard's sign-in");
 }
 
 #[tokio::test]

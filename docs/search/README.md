@@ -1455,13 +1455,24 @@ deterministic (#396).
    with no `inference_id` fails, because its default (`.elser-2-elasticsearch`) answers as a
    cluster without ML nodes, the first error anyone copying Elasticsearch's docs hits; and no
    screen is named Discover.
-13. **A web crawler for site search** (phase 1 in progress on `feat/search-crawler`: the
-   `roll_web_crawler` connector on #318's runner, in its gate; design in [crawler.md](crawler.md); Elastic Open Crawler,
-   Algolia Crawler, DocSearch, Meilisearch's docs-scraper): connectors (#318) sync Postgres and S3;
-   getting a website in is the customer's job. A native connector roll runs (`roll_web_crawler`,
-   on #318's runner) taking Open Crawler's config, fields and ids, fetching through
-   `roll_net::PublicOnly` with redirects checked hop by hop, robots.txt always honoured, domain
-   verification for more than small crawls, and a purge that a site outage can't empty.
+13. **A web crawler for site search** (design in [crawler.md](crawler.md); Elastic Open Crawler,
+   Algolia Crawler, DocSearch, Meilisearch's docs-scraper). Phase 1 landed: a native connector roll
+   runs (`roll_web_crawler`, on #318's runner) taking Open Crawler's config, fields and ids;
+   robots.txt (RFC 9309, token `roll-crawler`) always honoured; sitemaps; crawl rules with Open
+   Crawler's semantics on the linear-time `regex` crate; canonical URLs, robots meta,
+   `rel=nofollow`, `data-elastic-include`/`-exclude`; fetching through roll's one egress check (`egress.rs`) with
+   redirects checked hop by hop and the credential bound to one origin; pages parsed by
+   `html5ever` into a DOM charged to the request breaker and capped at 512 levels; a purge that
+   outages, expired logins and maintenance redirects can't empty (it's skipped when most documents
+   weren't refreshed); the limits with node ceilings; unverified-domain limits per owner and site
+   on a node; and `roll search crawler import` for an
+   Open Crawler YAML file. Left: domain verification (phase 2: higher limits, the
+   `/v1/search/site-verifications` routes), the `crawl-test` route, its MCP tool and CLI, and the
+   dashboard's URL box and "crawl a site" empty state; then extraction rules (CSS selectors on the
+   arena DOM), incremental crawls with `If-Modified-Since`, and the docs preset (phase 3).
+   Charset detection beyond UTF-8, fetching several origins at once, per-site politeness by
+   address rather than name, fleet-wide per-owner limits, and seeding `roll.crawler.blocked_hosts`
+   with the fleet's own names are open too.
 14. **Semantic search on OpenSearch-flavor clusters** (design in
    [opensearch-neural.md](opensearch-neural.md); AWS OpenSearch neural search):
    `neural`, `neural_sparse` and `agentic` are names only (`meta/aliases.rs`); ML Commons
@@ -1710,8 +1721,7 @@ deterministic (#396).
    (main at d9aecc990), ranked; each test goes in `test:search`, not the merge gate (all landed, each
    failing against its guarded line: (1) with the egress fix in #771, 0d6daf6cc; (2), (3), (4), (7)
    and (8) in #768, 1c2b5e62c; (5), (6), (9), (10), (11) and the unused e2e file's removal in
-   #833, f47d36793, which also found that a drain leaves a running connector sync `in_progress` for
-   5 minutes on the next owner, not yet fixed; `persist.rs`'s memory-budget flake fixed in
+   #833, f47d36793, whose three fleet findings are fixed in #853 (below); `persist.rs`'s memory-budget flake fixed in
    #766, 9641a1bd6: the test no longer races a second commit, 60 of 60 under load):
    (1) connectors refusing private addresses: every `connectors.rs` cluster sets
    `allow_private_hosts`, so deleting the check fails nothing (now
@@ -1760,18 +1770,21 @@ deterministic (#396).
    take over a second, and the test still lost 1 run in 10 (at host loads 63-81; the old build
    passed 10 of 10 there, but at loads 18-50). The suite's minimum (108) holds on a rerun, and
    that load is much harsher than CI's.
-   **Found by the fleet tests (2026-11-23)**: a connector sync running when its cluster's owner
-   drains isn't stopped or settled by the unload (`Node::unload_with` cancels tasks, not
-   `connector_syncs`), so the next owner reads the job `in_progress` with a fresh `last_seen` and
-   marks it `error` only after `STALE_MS` (5 minutes): "Syncing…" in the dashboard and no new sync
-   for that connector until then. `due_jobs_run_once_on_the_next_owner` covers the watch, not the
-   sync, until the unload settles it. And a migration copy the drain stops
-   reports `"canceled": "by user request"` (the unload's cancel), though nobody asked. And ILM
-   doesn't advance on a `search-control` node (a fleet node, no drain; `poll_interval` 1s): an
-   index under a policy whose `hot` phase has `min_age` 0 stays at `new/complete/complete` (15 s
-   checked, though `ilm_run::next_due` says due at once), and a document on its write alias
-   doesn't roll it over (10 s). `ilm_run`'s unit tests call `run` directly, so the node's scheduler
-   path is uncovered; the drain test leaves ILM out until it moves.
+   **Found by the fleet tests (2026-11-23), fixed in #853**: (a) ILM didn't
+   advance on a node. The job scheduler (`opensearch/jobs.rs`) ran the other jobs first, then
+   read ILM's due time again with the clock: an index to move on is due "now", so once the other
+   jobs took a millisecond it was past the run's `now`, never due, and the task looped at once
+   (unit tests ran within one millisecond). The lifecycles' due times are now read at the run's
+   instant (`time::at_sync`), and `sync::run_due` no longer saves the cluster state when it has
+   nothing to settle (it saved it on every scheduler run, which is what took the millisecond).
+   `cluster.rs`'s `ilm_rolls_an_index_over_on_its_own`: `hot` with `min_age` 0 entered by itself,
+   then a rollover after one document. (b) A drain didn't settle a running connector sync: the
+   next owner read it `in_progress` and called it abandoned only after `STALE_MS` (5 minutes).
+   An unload now records it `suspended` (`sync::suspend`, Elastic's connector service on
+   shutdown) and the next load resumes it at once:
+   `a_drain_hands_a_running_sync_to_the_next_owner`. (c) A migration copy a drain stopped said
+   `"canceled": "by user request"`; a handover's cancel now says "the node handed the cluster
+   over" (`search_server::HANDED_OVER`, asserted in `esql_and_a_migration_work_across_nodes`).
 29. **Security**: landed in #632 (53a45bd36), a fix for a bypass a #358 review found: a role's document level
    security filter was evaluated with the request's own `runtime_mappings` in scope, so a runtime
    field could shadow the field the filter tests. Security filters (roles, API keys' role

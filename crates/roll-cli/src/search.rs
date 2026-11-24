@@ -49,6 +49,24 @@ pub enum Search {
     /// Inference endpoints: the models `semantic_text` fields embed with, rerankers, completions.
     #[command(subcommand)]
     Inference(Inference),
+    /// Web crawlers: `roll_web_crawler` connectors that crawl a site into an index.
+    #[command(subcommand)]
+    Crawler(Crawler),
+}
+
+#[derive(Subcommand)]
+pub enum Crawler {
+    /// Make or update a crawler from an Elastic Open Crawler YAML config (`crawler.yml`):
+    /// domains, seed and sitemap URLs, crawl rules and limits; a domain's `auth` goes in the
+    /// connector's sealed fields. Lists every key it drops.
+    Import {
+        cluster: String,
+        /// The Open Crawler config file.
+        file: String,
+        /// The connector's id (default: from `output_index`).
+        #[arg(long)]
+        connector: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -118,7 +136,7 @@ async fn inference_task(api: &Api, cluster: &Value, id: &str) -> anyhow::Result<
 }
 
 /// One REST request through the console route; the parsed body of a 2xx, else its reason.
-async fn es_request(api: &Api, cluster: &Value, method: &str, path: &str, body: Option<Value>) -> anyhow::Result<Value> {
+pub(crate) async fn es_request(api: &Api, cluster: &Value, method: &str, path: &str, body: Option<Value>) -> anyhow::Result<Value> {
     let r = api.post(&format!("/v1/search/clusters/{}/request", s(&cluster["id"])), json!({ "method": method, "path": path, "body": body })).await?;
     let status = r["status"].as_u64().unwrap_or(0);
     let v: Value = serde_json::from_str(r["body"].as_str().unwrap_or("null")).unwrap_or(Value::Null);
@@ -573,7 +591,7 @@ fn key_time(ms: i64) -> String {
     chrono::DateTime::from_timestamp_millis(ms).map_or_else(|| ms.to_string(), |t| t.format("%Y-%m-%d %H:%M").to_string())
 }
 
-async fn find(api: &Api, key: &str) -> anyhow::Result<Value> {
+pub(crate) async fn find(api: &Api, key: &str) -> anyhow::Result<Value> {
     api.get(&format!("/v1/search/clusters/{}", urlencoding::encode(key))).await.with_context(|| format!("no search cluster {key}"))
 }
 
@@ -656,6 +674,7 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
                 Docs::Delete { cluster, index, id, refresh: r } => index_call(api, as_json, Method::DELETE, &cluster, &index, &doc(&id), (refresh(r), None)).await,
             };
         }
+        Search::Crawler(Crawler::Import { cluster, file, connector }) => return crate::search_crawler::import(api, as_json, &cluster, &file, connector.as_deref()).await,
         Search::Inference(cmd) => match cmd {
             Inference::List { cluster } => {
                 let c = find(api, &cluster).await?;

@@ -1,5 +1,6 @@
 import { DotField, HorizonMark } from "@roll/brand";
 import { Check, Copy, Eye, EyeOff, GitBranch, Moon, Play, Plus, Power, Trash2 } from "lucide-react";
+import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
@@ -39,7 +40,15 @@ export function Databases() {
   const [health, setHealth] = useState<Health | null>(null);
   const [offline, setOffline] = useState(false);
   const [projects, setProjects] = useState<Project[] | null>(null);
-  const [projectId, setProjectId] = useState<string | null>(null);
+  // The project in the address (`?project=`), so a link to it (roll MCP's `roll_find` gives one)
+  // opens it, and picking one keeps the address in step without a history entry each time.
+  const navigate = useNavigate();
+  const linked = (useSearch({ strict: false }) as { project?: string }).project;
+  const [projectId, setProjectIdState] = useState<string | null>(linked ?? null);
+  const setProjectId = (id: string | null) => {
+    setProjectIdState(id);
+    void navigate({ href: id ? `/dashboard/databases?project=${encodeURIComponent(id)}` : "/dashboard/databases", replace: true, resetScroll: false });
+  };
   const [branchId, setBranchId] = useState<string | null>(null);
   const [usage, setUsage] = useState<Usage | null>(null);
   const [busy, setBusy] = useState<string | null>(null);

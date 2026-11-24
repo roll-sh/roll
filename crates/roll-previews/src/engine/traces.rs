@@ -265,6 +265,67 @@ impl Engine {
         ]))
     }
 
+    /// `ROLL_OIDC_URL` and `ROLL_OIDC_AUDIENCE` for `service` of a trusted preview whose project
+    /// names audiences (`oidc_audiences`), when the issuer is here: its address is the service's
+    /// own (a key-derived token, masked in what the preview shows).
+    pub(super) fn oidc_vars(&self, r: &crate::store::Row, s: &crate::Settings, service: &str) -> Result<Option<Vec<(&'static str, String)>>> {
+        let (Some(addr), Some(aud)) = (&self.cfg.otlp, s.oidc_audiences.first()) else { return Ok(None) };
+        if !r.trusted || self.issuer.get().is_none() {
+            return Ok(None);
+        }
+        let token = self.store.oidc_token(&r.id, service)?;
+        self.add_masks(&r.id, vec![token.clone()]);
+        Ok(Some(vec![("ROLL_OIDC_URL", format!("http://{addr}/v1/previews/{}/oidc/{token}", r.id)), ("ROLL_OIDC_AUDIENCE", aud.clone())]))
+    }
+
+    /// `GET …/{id}/oidc/{token}?aud=`: a token of roll's issuer for the service whose address this
+    /// is, for `aud` (the first of the project's `oidc_audiences` when not given; one it doesn't
+    /// name is a 403), an hour long, answered again for a minute. A fork's preview gets nothing
+    /// (roll secrets refuses it). The token is masked in what the preview shows from then on.
+    pub async fn oidc(&self, id: &str, token: &str, aud: Option<&str>) -> Result<crate::OidcToken> {
+        let gone = || Error::NotFound("no such address".into());
+        let r = self.store.row(id).map_err(|_| gone())?;
+        if r.desired != crate::Desired::Active {
+            return Err(gone());
+        }
+        let services = self.store.services(id)?;
+        let mut found = None;
+        for svc in &services {
+            if crate::runtime::same(&self.store.oidc_token(id, &svc.name)?, token) {
+                found = Some(svc.clone());
+            }
+        }
+        let svc = found.ok_or_else(gone)?;
+        let s = self.store.settings(&r.project_id)?;
+        let aud = match aud {
+            Some(a) => a.to_string(),
+            None => s.oidc_audiences.first().cloned().ok_or_else(|| Error::Forbidden("the project names no audience for its previews (oidc_audiences)".into()))?,
+        };
+        if !s.oidc_audiences.contains(&aud) {
+            return Err(Error::Forbidden(format!("{aud} isn't an audience the project's previews may have tokens for (oidc_audiences)")));
+        }
+        let key = (id.to_string(), svc.name.clone(), aud.clone());
+        let now = self.store.now_ms()?;
+        if let Some((at, t)) = self.oidc_issued.lock().get(&key)
+            && now - at < 60_000
+        {
+            return Ok(t.clone());
+        }
+        let issuer = self.issuer.get().ok_or_else(|| Error::Conflict("roll's issuer isn't on this server".into()))?;
+        let ttl = std::time::Duration::from_secs(3600);
+        let token = match issuer.issue(&r.project_id, &svc.repo, id, &svc.name, &aud, ttl).await {
+            Ok(Some(t)) => t,
+            Ok(None) => return Err(Error::Conflict("roll's issuer isn't on this server (rolld needs its public URL)".into())),
+            Err(e) => return Err(Error::Forbidden(format!("{e:#}"))),
+        };
+        self.add_masks(id, vec![token.clone()]);
+        let t = crate::OidcToken { token, expires_at: now / 1000 + ttl.as_secs() as i64 };
+        let mut issued = self.oidc_issued.lock();
+        issued.retain(|_, (at, _)| now - *at < 60_000);
+        issued.insert(key, (now, t.clone()));
+        Ok(t)
+    }
+
     /// Whether `token` is a live preview's intake token (else a 404, as nothing is there): checked
     /// before a request's body is read.
     pub fn check_trace_token(&self, id: &str, token: &str) -> Result<()> {

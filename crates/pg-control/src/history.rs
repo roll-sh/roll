@@ -377,10 +377,18 @@ impl Control {
     /// starts a new one from the parent's state. The parent never stops serving, as for
     /// [`Control::create_branch`].
     /// With `schema_only` the fresh copy is emptied of every row before it's swapped in.
-    pub async fn reset_branch(self: &Arc<Self>, project_id: &str, branch_id: &str, schema_only: bool) -> Result<Branch> {
+    /// With `from`, another branch of the project is copied instead of the parent (a preview's
+    /// restore point: a branch made of this one earlier).
+    pub async fn reset_branch(self: &Arc<Self>, project_id: &str, branch_id: &str, schema_only: bool, from: Option<&str>) -> Result<Branch> {
         let project = self.project_or_404(project_id)?;
         let branch = self.branch_in(project_id, branch_id)?;
-        let parent_id = branch.parent_id.clone().ok_or_else(|| ControlError::Invalid("the root branch has no parent to reset from".into()))?;
+        let parent_id = match from {
+            Some(from) => self.branch_in(project_id, from)?.id,
+            None => branch.parent_id.clone().ok_or_else(|| ControlError::Invalid("the root branch has no parent to reset from".into()))?,
+        };
+        if parent_id == branch.id {
+            return Err(ControlError::Invalid("a branch can't be reset from itself".into()));
+        }
         let parent = self.branch_in(project_id, &parent_id)?;
         let ep = self.store.endpoint_for_branch(&branch.id)?.ok_or_else(|| ControlError::NotFound("primary endpoint".into()))?;
         let parent_ep = self.store.endpoint_for_branch(&parent.id)?.ok_or_else(|| ControlError::NotFound("parent endpoint".into()))?;

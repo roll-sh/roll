@@ -845,6 +845,16 @@ impl Runtime {
     /// they came in through roll ([`ThroughRoll`]: the link's cookie, or a team session), the
     /// preview is a change's, the rules have `feedback` on and roll's dashboard is known. The
     /// note is posted there, by whoever is signed in to roll, as them.
+    /// The project's flags a reviewer may set (`flags`).
+    fn flags_of(&self, preview: &str) -> Vec<crate::settings::FlagRule> {
+        self.store.row(preview).ok().and_then(|r| self.store.settings(&r.project_id).ok()).map(|s| s.flags).unwrap_or_default()
+    }
+
+    /// A reviewer's cookie as the services' header, by the project's rule.
+    fn flags_header(&self, preview: &str, cookie: &str) -> Option<String> {
+        crate::settings::flags_header(&self.flags_of(preview), cookie)
+    }
+
     fn feedback_target(&self, preview: &str, req: &Request) -> Option<String> {
         let web = self.cfg.dashboard.as_deref()?;
         req.extensions().get::<ThroughRoll>()?;
@@ -1284,8 +1294,15 @@ fn add_feedback(resp: Response) -> Response {
 }
 
 /// The feedback button's script, sending notes to `target` (the preview in roll's dashboard).
-fn feedback_script(target: &str) -> Response {
-    let js = include_str!("feedback.js").replace("__ROLL_TARGET__", &serde_json::to_string(target).unwrap_or_else(|_| "\"\"".into()));
+/// The toolbar's cookie: a reviewer's own flags (`name:value|…`).
+const FLAGS_COOKIE: &str = "roll_flags";
+/// The header the services get them in (`name=value,…`).
+const FLAGS_HEADER: HeaderName = HeaderName::from_static("x-roll-flags");
+
+fn feedback_script(target: &str, flags: &[crate::settings::FlagRule]) -> Response {
+    let js = include_str!("feedback.js")
+        .replace("__ROLL_TARGET__", &serde_json::to_string(target).unwrap_or_else(|_| "\"\"".into()))
+        .replace("__ROLL_FLAGS__", &serde_json::to_string(flags).unwrap_or_else(|_| "[]".into()));
     ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8"), (header::CACHE_CONTROL, "private, max-age=300")], js).into_response()
 }
 
@@ -1295,6 +1312,26 @@ pub const SCREENSHOT_MAX: usize = 2 << 20;
 /// pages'), each at most this, and everything it writes: every PNG it can take, in base64, and
 /// those lines.
 const SHOT_REPORT_MAX: usize = 4 << 20;
+/// An agent's run (`…/try`), at most.
+const TRY_FOR: Duration = Duration::from_secs(60);
+
+/// What a run said (its PNG's base64 on the first line, then `{status, step_failed, text,
+/// errors}`), bounded: the page is the preview's code, so only a PNG within the cap, a status, one
+/// printable line for the step, its text (line breaks kept, cut) and 20 printable lines of errors.
+fn tried(out: &str) -> crate::ports::Tried {
+    use base64::Engine as _;
+    let (b64, said) = out.split_once('\n').unwrap_or((out, ""));
+    let png = base64::engine::general_purpose::STANDARD.decode(b64.trim()).ok().filter(|p| p.starts_with(b"\x89PNG") && p.len() <= SCREENSHOT_MAX);
+    let said: serde_json::Value = serde_json::from_str(said.trim()).unwrap_or_default();
+    let line = |s: &str, n: usize| s.chars().filter(|c| !c.is_control()).take(n).collect::<String>();
+    crate::ports::Tried {
+        png,
+        status: said["status"].as_u64().unwrap_or(0).min(999) as u16,
+        step_failed: said["step_failed"].as_str().map(|s| line(s, 200)),
+        text: said["text"].as_str().unwrap_or("").chars().filter(|c| !c.is_control() || *c == '\n').take(40_000).collect(),
+        errors: said["errors"].as_array().into_iter().flatten().filter_map(|e| e.as_str().map(|e| line(e, 300))).take(20).collect(),
+    }
+}
 /// The line of what a run's pages served (`$OUT.bodies.json`: 8 MiB as base64, and JSON).
 const BODIES_LINE_MAX: usize = 12 << 20;
 
@@ -1545,6 +1582,61 @@ impl IntoResponse for Unavailable {
     }
 }
 
+impl Runtime {
+    /// A running service's container and port, started if it sleeps: where a browser run joins
+    /// its network (a screenshot, an agent's run). `None` off Docker or for a service it doesn't run.
+    async fn running_target(&self, preview: &str, service: &str) -> anyhow::Result<Option<(String, u16)>> {
+        if self.iso.name() != "docker" {
+            return Ok(None);
+        }
+        let Some(host) = self.store.services(preview)?.into_iter().find(|s| s.name == service).map(|s| s.host) else { return Ok(None) };
+        let me = self.me.upgrade().ok_or_else(|| anyhow::anyhow!("the preview runtime is stopping"))?;
+        match me.ready(preview, service, self.cfg.wait).await {
+            Ok(_) => {}
+            Err(Unavailable::Failed(e)) => anyhow::bail!("the service didn't start: {e}"),
+            Err(_) => anyhow::bail!("the service didn't start in time"),
+        }
+        let name = container_name(&host);
+        // The service's own port, as its container says (`sh.roll.code.port`: with `egress: roll`
+        // it's on a network of its own and publishes nothing), else the one the runtime published
+        // (a container made before the label), never whatever else its image exposes.
+        let said = code_preview::docker::docker(&["inspect", "-f", &format!("{{{{index .Config.Labels \"{}.port\"}}}} {{{{range $p, $_ := .HostConfig.PortBindings}}}}{{{{$p}}}} {{{{end}}}}", code_preview::docker::LABEL), &name]).await?;
+        let port = said.split_whitespace().find_map(|p| p.split('/').next().and_then(|p| p.parse::<u16>().ok())).ok_or_else(|| anyhow::anyhow!("the service says no port"))?;
+        Ok(Some((name, port)))
+    }
+
+    /// An agent's run (`…/try`) in container `name`'s network, locked down as a screenshot is: the
+    /// page at `path`, `steps` taken, then what the browser saw ([`tried`]).
+    pub async fn try_in(&self, name: &str, port: u16, path: &str, steps: &[crate::settings::Step]) -> anyhow::Result<crate::ports::Tried> {
+        if code_preview::docker::docker(&["image", "inspect", "--format", "{{.Id}}", &self.cfg.screenshot_image]).await.is_err() {
+            code_preview::docker::docker(&["pull", "--quiet", &self.cfg.screenshot_image]).await?;
+        }
+        // Two may run at once for one preview: each a container of its own.
+        let shot = format!("roll-previews-try-{}", crate::new_id().trim_start_matches("pv_"));
+        let mut args = shot_args(&shot, name, port);
+        args.extend(["--env".into(), format!("TRY={}", serde_json::to_string(&serde_json::json!({ "path": path, "steps": steps }))?)]);
+        args.extend([
+            self.cfg.screenshot_image.clone(),
+            "sh".into(),
+            "-c".into(),
+            format!("{} >/dev/null 2>&1; (base64 -w0 /tmp/s.png 2>/dev/null || true) && echo && (cat /tmp/s.png.try.json 2>/dev/null || true)", self.cfg.screenshot_command),
+        ]);
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = match tokio::time::timeout(TRY_FOR, docker_with_input(&argv, Vec::new(), SCREENSHOT_MAX * 4 / 3 + SHOT_REPORT_MAX)).await {
+            Ok(Ok(out)) => out,
+            Ok(Err(e)) => {
+                code_preview::docker::remove(&shot).await;
+                return Err(e);
+            }
+            Err(_) => {
+                code_preview::docker::remove(&shot).await;
+                anyhow::bail!("the run took over {} s", TRY_FOR.as_secs());
+            }
+        };
+        Ok(tried(&out))
+    }
+}
+
 #[async_trait]
 impl Apps for Runtime {
     async fn deploy(&self, t: &Target) -> anyhow::Result<Option<String>> {
@@ -1646,7 +1738,7 @@ impl Apps for Runtime {
         Ok(true)
     }
 
-    async fn fetch(&self, preview: &str, service: &str, path: &str, head: bool) -> anyhow::Result<Option<crate::ports::Fetched>> {
+    async fn fetch(&self, preview: &str, service: &str, _url: &str, _access: Option<&str>, path: &str, head: bool) -> anyhow::Result<Option<crate::ports::Fetched>> {
         use futures::StreamExt;
         let me = self.me.upgrade().ok_or_else(|| anyhow::anyhow!("the preview runtime is stopping"))?;
         let host = self.store.service_host(preview, service)?.ok_or_else(|| anyhow::anyhow!("no service {service}"))?;
@@ -1785,23 +1877,13 @@ impl Apps for Runtime {
         Ok(Some((status, first)))
     }
 
+    async fn try_page(&self, preview: &str, service: &str, path: &str, steps: &[crate::settings::Step]) -> anyhow::Result<Option<crate::ports::Tried>> {
+        let Some((name, port)) = self.running_target(preview, service).await? else { return Ok(None) };
+        self.try_in(&name, port, path, steps).await.map(Some)
+    }
+
     async fn screenshot(&self, preview: &str, service: &str, opts: &crate::ports::ShotOptions) -> anyhow::Result<Option<crate::ports::Shot>> {
-        if self.iso.name() != "docker" {
-            return Ok(None);
-        }
-        let Some(host) = self.store.services(preview)?.into_iter().find(|s| s.name == service).map(|s| s.host) else { return Ok(None) };
-        let me = self.me.upgrade().ok_or_else(|| anyhow::anyhow!("the preview runtime is stopping"))?;
-        match me.ready(preview, service, self.cfg.wait).await {
-            Ok(_) => {}
-            Err(Unavailable::Failed(e)) => anyhow::bail!("the service didn't start: {e}"),
-            Err(_) => anyhow::bail!("the service didn't start in time"),
-        }
-        let name = container_name(&host);
-        // The service's own port, as its container says (`sh.roll.code.port`: with `egress: roll`
-        // it's on a network of its own and publishes nothing), else the one the runtime published
-        // (a container made before the label), never whatever else its image exposes.
-        let said = code_preview::docker::docker(&["inspect", "-f", &format!("{{{{index .Config.Labels \"{}.port\"}}}} {{{{range $p, $_ := .HostConfig.PortBindings}}}}{{{{$p}}}} {{{{end}}}}", code_preview::docker::LABEL), &name]).await?;
-        let port = said.split_whitespace().find_map(|p| p.split('/').next().and_then(|p| p.parse::<u16>().ok())).ok_or_else(|| anyhow::anyhow!("the service says no port"))?;
+        let Some((name, port)) = self.running_target(preview, service).await? else { return Ok(None) };
         self.screenshot_in(&name, port, opts).await.map(Some)
     }
 
@@ -1876,7 +1958,7 @@ impl Runtime {
         let pages: Vec<&String> = opts
             .pages
             .iter()
-            .filter(|p| crate::settings::page_path_ok(p) || crate::settings::width_entry(p).is_some() || crate::settings::state_entry(p).is_some())
+            .filter(|p| crate::settings::page_path_ok(p) || crate::settings::width_entry(p).is_some() || crate::settings::state_entry(p).is_some() || crate::settings::mode_entry(p).is_some())
             .take(crate::settings::MAX_PAGES)
             .collect();
         args.extend(["--env".into(), format!("PAGES={}", serde_json::to_string(&pages)?)]);
@@ -1894,6 +1976,11 @@ impl Runtime {
                 .collect();
         if !states.is_empty() {
             args.extend(["--env".into(), format!("STATES={}", serde_json::to_string(&states)?)]);
+        }
+        // Each mode's emulation, by name (`shot.js` takes the first page in it).
+        let modes: std::collections::BTreeMap<&str, &crate::settings::ModeRule> = opts.modes.iter().map(|m| (m.name.as_str(), m)).collect();
+        if !modes.is_empty() {
+            args.extend(["--env".into(), format!("MODES={}", serde_json::to_string(&modes)?)]);
         }
         let endpoints: Vec<&String> = opts.endpoints.iter().filter(|p| crate::settings::page_path_ok(p)).take(crate::settings::MAX_ENDPOINTS).collect();
         if !endpoints.is_empty() {
@@ -2466,10 +2553,17 @@ async fn serve(rt: Arc<Runtime>, preview: String, service: String, mut req: Requ
     let target = rt.feedback_target(&preview, &req);
     // The link's token is roll's: the app never sees it, whichever way they came in.
     take_cookies(&mut req, &format!("roll_access_{preview}"));
+    // A reviewer's own flags (the toolbar's cookie): what the project's rule names, as a header,
+    // and only that (a header a visitor sent is dropped).
+    let chosen = take_cookies(&mut req, FLAGS_COOKIE).pop();
+    req.headers_mut().remove(FLAGS_HEADER);
+    if let Some(h) = chosen.and_then(|c| rt.flags_header(&preview, &c)).and_then(|h| HeaderValue::from_str(&h).ok()) {
+        req.headers_mut().insert(FLAGS_HEADER, h);
+    }
     if req.uri().path() == FEEDBACK_PATH
         && let Some(t) = &target
     {
-        return feedback_script(t);
+        return feedback_script(t, &rt.flags_of(&preview));
     }
     if req.uri().path() == FEEDBACK_NOTES_PATH && target.is_some() {
         let path = req.uri().query().unwrap_or("").split('&').filter_map(|kv| kv.split_once('=')).find(|(k, _)| *k == "path").map(|(_, v)| percent_decode(v)).unwrap_or_default();
@@ -2805,11 +2899,71 @@ mod tests {
             }
         });
         // Link access (the default): a visitor without the token gets a 401; roll reads the page.
-        let page = rt.fetch(&row.id, "web", "/cart", false).await.unwrap().unwrap();
+        let page = rt.fetch(&row.id, "web", "", None, "/cart", false).await.unwrap().unwrap();
         assert_eq!((page.status, String::from_utf8_lossy(&page.body).to_string(), page.truncated), (200, "<h1>Cart</h1>".to_string(), false));
         assert!(page.headers.iter().any(|(k, v)| k == "content-type" && v == "text/html") && !page.headers.iter().any(|(k, _)| k == "set-cookie"), "{:?}", page.headers);
-        let big = rt.fetch(&row.id, "web", "/big", false).await.unwrap().unwrap();
+        let big = rt.fetch(&row.id, "web", "", None, "/big", false).await.unwrap().unwrap();
         assert_eq!((big.body.len(), big.truncated), (crate::ports::FETCH_MAX, true));
+    }
+
+    /// A reviewer's flags (the toolbar's cookie) reach the service as `x-roll-flags`, only what
+    /// the project's rule names; the cookie never does, nor a header a visitor sent.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reviewers_flags_reach_the_service_as_a_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&code_sql::Target::Sqlite(dir.path().join("p.db")), Default::default()).unwrap());
+        let new = crate::store::New {
+            project_id: "prj_1".into(),
+            key: "pr1".into(),
+            project_name: "shop".into(),
+            repo: "acme/web".into(),
+            change_id: Some("chg_1".into()),
+            branch: None,
+            number: Some(1),
+            title: "t".into(),
+            github_pr: Some(1),
+            head: "cs_1".into(),
+            trusted: true,
+            state: crate::State::Ready,
+            expires_at: None,
+            created_by: "roll".into(),
+        };
+        let (row, _) = store.create(&new).unwrap();
+        store.want_service(&row.id, "web", "acme/web", "cs_1", 512, &|h| format!("http://{h}.preview.test")).unwrap();
+        let flags = vec![crate::settings::FlagRule { name: "new-checkout".into(), options: vec!["off".into(), "on".into()] }];
+        store.put_settings("prj_1", &crate::Settings { access: crate::settings::Access::Public, flags, ..Default::default() }).unwrap();
+        let rt = Runtime::new(RuntimeConfig { domain: "preview.test".into(), ..RuntimeConfig::default() }, Arc::new(code_preview::docker::Docker), Arc::new(NoTrees), store);
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        rt.pretend_running(&row.id, "web", upstream.local_addr().unwrap());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut s, _)) = upstream.accept().await else { return };
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let n = s.read(&mut buf).await.unwrap_or(0);
+                    let head = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
+                    let flags = head.lines().find_map(|l| l.strip_prefix("x-roll-flags: ")).unwrap_or("none").trim().to_string();
+                    let body = format!("flags {flags} cookie {}", head.contains("roll_flags"));
+                    let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await;
+                });
+            }
+        });
+        let app = axum::Router::new().fallback(|| async { "api" }).layer(axum::middleware::from_fn_with_state(rt.clone(), route));
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        let get = |headers: &str| {
+            let req = format!("GET / HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\n{headers}Connection: close\r\n\r\n");
+            async move {
+                let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+                s.write_all(req.as_bytes()).await.unwrap();
+                let mut out = String::new();
+                s.read_to_string(&mut out).await.unwrap();
+                out
+            }
+        };
+        assert!(get("Cookie: a=1; roll_flags=new-checkout:on|theme:dark\r\n").await.ends_with("flags new-checkout=on cookie false"));
+        assert!(get("x-roll-flags: theme=dark\r\n").await.ends_with("flags none cookie false"), "a visitor's own header is dropped");
     }
 
     /// Skew protection: a request naming an earlier push (its header, `?dpl=`, or the cookie its
@@ -2917,6 +3071,19 @@ mod tests {
         let got: Vec<(String, u32)> = story_shots(said, pngs.iter().map(|s| s.as_str())).into_iter().map(|p| (p.path, p.errors)).collect();
         assert_eq!(got, [("story:button--primary".to_string(), 2), ("story:card--full".to_string(), 0)]);
         assert!(story_shots("not json", [png.as_str()].into_iter()).is_empty());
+    }
+
+    /// A run's answer is the preview's code's: a PNG only within the cap, one printable line for
+    /// the step, the text's own line breaks kept, 20 lines of errors.
+    #[test]
+    fn a_runs_answer_is_bounded() {
+        use base64::Engine as _;
+        let png = base64::engine::general_purpose::STANDARD.encode(b"\x89PNG\r\n\x1a\n...");
+        let errors: Vec<String> = (0..30).map(|i| format!("e{i}\u{1b}[31m")).collect();
+        let said = serde_json::json!({ "status": 404, "step_failed": "click #x:\nnothing", "text": "Cart\nTotal 3\u{7}", "errors": errors });
+        let t = tried(&format!("{png}\n{said}"));
+        assert!(t.png.is_some() && t.status == 404 && t.step_failed.as_deref() == Some("click #x:nothing") && t.text == "Cart\nTotal 3" && t.errors.len() == 20 && t.errors[0] == "e0[31m", "{t:?}");
+        assert!(tried(&format!("bm90IGEgcG5n\n{said}")).png.is_none(), "not a PNG");
     }
 
     #[test]

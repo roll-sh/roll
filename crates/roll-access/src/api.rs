@@ -1446,7 +1446,9 @@ async fn feedback(State(a): S, ext: Extensions, Json(f): Json<Feedback>) -> crat
         return Err(Error::BadRequest("task (1-500 characters) and actual (1-2,000) are required; expected up to 2,000; tool is a tool's name (a-z, 0-9, _; up to 64)".into()));
     }
     let data = json!({
-        "grant": grant, "name": name, "tool": f.tool, "title": f.task.trim(), "text": f.actual.trim(),
+        // `connection`, not `name`: the token's name is a person's, and lockdown withholds an
+        // outside record's `name` (a fork's route and span names).
+        "grant": grant, "connection": name, "tool": f.tool, "title": f.task.trim(), "text": f.actual.trim(),
         "description": f.expected.as_deref().map(str::trim), "outside": true,
     });
     let seq = blocking(a, move |a| {

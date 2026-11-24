@@ -53,9 +53,6 @@ mod unix {
     const TTL: Duration = Duration::from_secs(300);
     /// How long one read may take to drain what it's given before the mount moves on.
     const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
-    /// After a read's pipe closes, the pause before the next open: a reader that has the values but
-    /// hasn't yet seen the end must see it, not the next read's copy.
-    const GAP: Duration = Duration::from_millis(50);
 
     pub async fn run(api: &Api, args: &AtArgs, m: Mount) -> anyhow::Result<()> {
         // A reader that goes away mid-write is an error to log, not the end of the mount.
@@ -75,14 +72,14 @@ mod unix {
         }
         drop(first);
         ignore_in_git(&target);
-        let pipe = Pipe::make(&target, stale)?;
+        let mut pipe = Pipe::make(&target, stale)?;
         let format = match m.format {
             Format::Dotenv => "dotenv",
             Format::Json => "json",
         };
         eprintln!("roll secrets mount: {} serves {f} of {} as {format}; each read gets the current values. Ctrl-C removes it.", target.display(), at.label.as_deref().unwrap_or(&project));
         let ended = tokio::select! {
-            r = serve(&store, &f, &pipe, m.format) => r,
+            r = serve(&store, &f, &mut pipe, m.format) => r,
             why = refusal(&mut refusals) => Err(anyhow::anyhow!("{why}")),
             r = stop_signal() => r,
         };
@@ -105,8 +102,9 @@ mod unix {
         Ok(dir.join(name))
     }
 
-    /// The pipe a mount made, by its device and inode, and the file that says so (under
-    /// `$XDG_STATE_HOME/roll/mounts`, holding the mount's pid).
+    /// The pipe a mount serves at its path, by its device and inode (a new one for each reader:
+    /// `Pipe::swap`), and the file that says this mount made it (under `$XDG_STATE_HOME/roll/mounts`,
+    /// holding the mount's pid).
     struct Pipe {
         path: PathBuf,
         id: (u64, u64),
@@ -120,6 +118,16 @@ mod unix {
 
     fn record_of(id: (u64, u64)) -> Option<PathBuf> {
         records().map(|d| d.join(format!("{}-{}", id.0, id.1)))
+    }
+
+    /// A named pipe (0600) at `p`, by its device and inode; an error if anything is there.
+    fn mkfifo(p: &Path) -> anyhow::Result<(u64, u64)> {
+        use std::os::unix::ffi::OsStrExt;
+        let c = std::ffi::CString::new(p.as_os_str().as_bytes()).context("a path with a NUL byte")?;
+        if unsafe { libc::mkfifo(c.as_ptr(), 0o600) } != 0 {
+            return Err(std::io::Error::last_os_error()).with_context(|| format!("making the pipe {}", p.display()));
+        }
+        Ok(id_of(&std::fs::symlink_metadata(p)?))
     }
 
     fn id_of(m: &std::fs::Metadata) -> (u64, u64) {
@@ -156,7 +164,6 @@ mod unix {
     impl Pipe {
         /// `mkfifo` (0600) at `target`, after removing the pipe an ended mount left there.
         fn make(target: &Path, stale: Option<(u64, u64)>) -> anyhow::Result<Pipe> {
-            use std::os::unix::ffi::OsStrExt;
             if let Some(old) = stale {
                 // Only the very pipe that was checked.
                 if std::fs::symlink_metadata(target).is_ok_and(|m| id_of(&m) == old) {
@@ -166,19 +173,50 @@ mod unix {
                     let _ = std::fs::remove_file(r);
                 }
             }
-            let c = std::ffi::CString::new(target.as_os_str().as_bytes()).context("a path with a NUL byte")?;
-            if unsafe { libc::mkfifo(c.as_ptr(), 0o600) } != 0 {
-                return Err(std::io::Error::last_os_error()).with_context(|| format!("making the pipe {}", target.display()));
-            }
-            let id = id_of(&std::fs::symlink_metadata(target)?);
+            let id = mkfifo(target)?;
             let record = record_of(id).filter(|r| {
-                let made = r.parent().is_some_and(|d| std::fs::create_dir_all(d).is_ok()) && std::fs::write(r, format!("{}\n", std::process::id())).is_ok();
+                let made = r.parent().is_some_and(|d| std::fs::create_dir_all(d).is_ok()) && note(r);
                 if !made {
                     eprintln!("roll secrets mount: couldn't note the pipe in {} (a later mount won't take it over if this one is killed)", r.display());
                 }
                 made
             });
             Ok(Pipe { path: target.to_path_buf(), id, record })
+        }
+
+        /// Puts a new pipe at the path, so the reader that has just opened this one is the only one
+        /// it ever has.
+        ///
+        /// A reader sees the end of its copy only when it reads while no writer holds its pipe. If
+        /// the next read were served by opening the same pipe again, that open would succeed at once
+        /// while a slow reader still held it (one that hasn't read the end yet), and that reader would
+        /// get the next copy appended to its own. Nothing tells a writer that a reader has gone: an
+        /// open for writing without blocking succeeds while any reader holds the pipe, and is itself
+        /// a writer that a new reader waiting in `open` takes for its own (an empty read); waiting
+        /// for the reader to close before closing deadlocks, as it closes only after the end. So the
+        /// old pipe leaves the path the moment its reader has it: made under a temporary name next to
+        /// the path, then renamed over it (atomic on Linux and macOS). Nobody can open the old pipe
+        /// again, so its reader gets one copy and the end once this mount closes it, however late it
+        /// reads.
+        fn swap(&mut self) -> anyhow::Result<()> {
+            let name = self.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let tmp = self.path.with_file_name(format!(".{name}.roll-mount-{}", std::process::id()));
+            let id = mkfifo(&tmp)?;
+            // Never rename over something that took the pipe's place.
+            if !std::fs::symlink_metadata(&self.path).is_ok_and(|m| self.ours(&m)) {
+                let _ = std::fs::remove_file(&tmp);
+                bail!("{} isn't the pipe this mount made any more", self.path.display());
+            }
+            if let Err(e) = std::fs::rename(&tmp, &self.path) {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e).with_context(|| format!("putting a new pipe at {}", self.path.display()));
+            }
+            self.id = id;
+            if let Some(old) = self.record.take() {
+                self.record = record_of(id).filter(|r| note(r));
+                let _ = std::fs::remove_file(old);
+            }
+            Ok(())
         }
 
         /// Whether `target` is still this pipe.
@@ -214,11 +252,17 @@ mod unix {
         }
     }
 
+    /// This process's pid, in a mount's record.
+    fn note(r: &Path) -> bool {
+        std::fs::write(r, format!("{}\n", std::process::id())).is_ok()
+    }
+
     /// One open, one copy of the current values, until a read is refused.
-    async fn serve(store: &Arc<Store>, f: &Folder, pipe: &Pipe, format: Format) -> anyhow::Result<()> {
+    async fn serve(store: &Arc<Store>, f: &Folder, pipe: &mut Pipe, format: Format) -> anyhow::Result<()> {
         use tokio::io::AsyncWriteExt;
         loop {
             let file = pipe.next_reader().await?;
+            pipe.swap()?;
             let text = match tokio::time::timeout(READ_TIMEOUT, store.read(f)).await {
                 Ok(Ok(r)) if r.problems.is_empty() => render(&r.values, format),
                 Ok(Ok(r)) => {
@@ -246,8 +290,6 @@ mod unix {
                 Ok(Err(e)) => eprintln!("roll secrets mount: a reader went away before it read everything ({e})"),
                 Err(_) => eprintln!("roll secrets mount: a reader didn't read everything in {} s; closed it", WRITE_TIMEOUT.as_secs()),
             }
-            drop(w);
-            tokio::time::sleep(GAP).await;
         }
     }
 

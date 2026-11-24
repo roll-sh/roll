@@ -214,6 +214,10 @@ export function NewServiceSheet({
   const portN = port.trim() ? Number(port) : undefined;
   const portOk = portN === undefined || (Number.isInteger(portN) && portN > 0 && portN < 65536);
   const parsed = useMemo(() => parseEnv(env), [env]);
+  // What its `.env.example` names that isn't set yet (a database it links sets its own URL).
+  const expects = from === "repo" && plan?.key === planKey ? (plan.plan?.variables ?? []) : [];
+  const linkedUrls = new Set([...(links.size || make.size ? ["DATABASE_URL", "REDIS_URL"] : [])]);
+  const unset = expects.filter((n) => !(n in parsed.vars) && !linkedUrls.has(n));
   const scheduleOk = kind !== "cron" || schedule.trim().split(/\s+/).length === 5;
   const healthOk = !health.trim() || health.trim().startsWith("/");
   const ready = !!source && gitOk && SERVICE_NAME.test(name) && portOk && healthOk && scheduleOk && parsed.errors.length === 0 && !busy;
@@ -513,6 +517,17 @@ export function NewServiceSheet({
               className={`${field} h-auto resize-y py-1.5 font-mono ${parsed.errors.length ? "border-danger/60" : ""}`}
             />
             {parsed.errors.length > 0 && <p className="mt-1 text-[11px] text-danger">Line {parsed.errors.join(", ")} isn't KEY=value.</p>}
+            {unset.length > 0 && (
+              <div className="mt-2 flex flex-wrap items-center gap-2 text-[11.5px] text-muted">
+                <span className="min-w-0 flex-1">
+                  Its example file expects <span className="font-mono text-fg">{unset.slice(0, 8).join(", ")}</span>
+                  {unset.length > 8 ? ` and ${unset.length - 8} more` : ""}: set them now, or the first deploy may crash without them.
+                </span>
+                <button type="button" className="rounded-md px-2 py-1 text-[11.5px] text-accent hover:bg-white/[0.05]" onClick={() => setEnv((e) => [e.trimEnd(), ...unset.map((n) => `${n}=`)].filter(Boolean).join("\n"))}>
+                  Add them
+                </button>
+              </div>
+            )}
             {from === "repo" && <PlanView state={!repo ? null : plan?.key === planKey ? plan : {}} />}
           </>
         )}

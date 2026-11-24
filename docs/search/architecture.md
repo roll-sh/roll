@@ -659,7 +659,16 @@ both with Elasticsearch 9.5.5's shapes, validation and state machines
   supervisor task runs each sync as a task of its own: however it ends (a panic included) the
   slot and the node's permit are freed, a job it left unfinished is settled (`error`, or
   `canceled` when it was canceling), and the scheduler is woken, so no bug can pin a cluster or
-  strand a job.
+  strand a job. When the cluster unloads (a drain or another handover, an unload, a delete),
+  `sync::suspend` stops its running syncs and records their jobs `suspended` (the connector's
+  `last_sync_status` too), as Elastic's connector service does when it shuts down mid-sync
+  (Elasticsearch's state machine has `in_progress → suspended → in_progress`). A suspended job
+  waits like a pending one: the cluster's `wake_at` is now, and whichever node loads it next
+  runs it again at once, not after the 5-minute stale check. The run starts over: an incremental
+  sync from the connector's `sync_cursor` (the last completed sync's), a full sync from the
+  beginning, and the suspended run's counters are dropped. A forced unload (a lost lease, failed
+  storage) writes nothing: its syncs stop, and the next owner finds their jobs stale as before.
+  The memory budget never evicts a cluster while a sync runs, as for running tasks.
 - **On a branch, and connectors from before.** Some connectors wait to be made the cluster's
   own (`sync::waits_for_adoption`): none of their jobs becomes due or starts, and their
   schedules make none. They are the connectors a branch inherited (`branch::inherited_connector`,
@@ -875,6 +884,47 @@ both with Elasticsearch 9.5.5's shapes, validation and state machines
   bind the same way as inference keys (#134): the value is revealed as the caller, written
   sealed, and a `search-connector` sync of roll secrets pushes it again on rotation.
 
+## Web crawler
+
+A website gets in through a native connector whose `service_type` is `roll_web_crawler`
+(`search-es` `xpack/entsearch/sync/crawler/`; the design is [crawler.md](crawler.md)). A crawl is a
+full sync on the connector runner above, so jobs, schedules, slots, cancel, counters, sealed
+credentials and branches' adoption all apply unchanged; the crawler adds:
+
+- **Configuration**: the simple fields (`urls`, `sitemap_urls`, limits, `auth_origin` and the
+  sealed `auth_header` or basic auth) in `configuration`, and a JSON subset of Open Crawler's
+  config (domains, seed and sitemap URLs, crawl rules, `exclude_tags`, limits) in
+  `filtering.advanced_snippet`, validated against the node's ceilings (`roll.crawler.limits.<key>`)
+  when the draft is validated and again when a crawl starts. `roll search crawler import` turns an
+  Open Crawler YAML file into both.
+- **A crawl**: robots.txt of every domain (RFC 9309, token `roll-crawler`), sitemaps (two index
+  levels, gzip), then a breadth-first frontier by depth bounded by `url_queue_size_limit`, with a
+  visited set of 64-bit hashes. Each URL, and each redirect hop, is checked against the domains,
+  the URL limits, `roll.crawler.blocked_hosts`, the crawl rules and robots.txt before it is fetched.
+- **Fetching** (`fetch.rs`): through roll's one egress check (`egress.rs`: its resolver, deny
+  lists and readiness gate, as connectors and reindex use), no proxy, no
+  automatic redirects, the credential only on requests to exactly `auth_origin` over https and never
+  after a hop to another origin, bodies capped at 10 MiB of decompressed bytes, headers at 64 KiB,
+  10 s connect and socket and 60 s request timeouts racing the job's cancel, one request at a time
+  per origin spaced by the larger of `Crawl-delay` and `roll.crawler.min_request_interval`, and
+  every byte counted against `roll.connectors.max_bytes_per_second`.
+- **Pages** (`html.rs`): `html5ever` builds an arena DOM charged per node and text run to the
+  request breaker as it is built (a page over the breaker is one failed document), failed as soon
+  as it nests more than 512 elements deep, parsed off the async workers against a deadline, and
+  read without recursion; nothing in a page runs. Documents keep Open Crawler's fields and ids.
+- **Purge**: only a full crawl that ends `completed` deletes, and only for proof that a page is
+  gone; errors and outage-like signs (redirects, non-HTML bodies, empty pages, a robots.txt that
+  disallows everything) keep a document for three full crawls in a row and a week, and a crawl
+  that didn't refresh most of the index or of an origin, or whose re-checked redirects mostly led
+  to one URL, deletes nothing there (`force_purge` lifts this once). Deciding whether URLs may be
+  fetched has a 30-second budget a crawl.
+- **Unverified domains** (all of them until domain verification lands): 1,000 URLs a crawl, a
+  second between requests to one site across every crawl on the node, 4 crawls a day per connector
+  and per owner and site, a site being a registrable domain by the public suffix list
+  (`crawler/hosts.rs`, node memory outside cluster state; verification moves it to roll's
+  catalogue, fleet-wide) (`roll.crawler.unverified.*`). `roll.crawler.enabled`
+  turns crawlers off on a node.
+
 ## On the fleet (roll cloud)
 
 Search runs on the same rolld fleet as every other product (docs/cloud/README.md): no image,
@@ -883,7 +933,10 @@ applies: every cluster is this node's.
 
 - **Ownership**: a cluster is served by the holder of the lease `search:cluster:<id>`, taken from
   rolld's roll-cluster handle. A cluster is loaded only under a guard of that lease and unloaded
-  when the guard's tenure ends (a handoff, a drain, the lease lost). An owner gives an idle
+  when the guard's tenure ends (a handoff, a drain, the lease lost): its running tasks stop as
+  cancelled with the reason "the node handed the cluster over" (a migration's copy shows it as
+  its `canceled`), and its connector syncs as `suspended` for the next owner to resume
+  ([Connectors](#connectors)). An owner gives an idle
   cluster's lease up (`Cluster::release_if_idle`) once it has unloaded, so a sleeping cluster
   belongs to nobody and costs no node anything.
 - **Requests**: the Elasticsearch REST listener and the edge's `<cluster>.search.<region>.<domain>`

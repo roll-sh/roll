@@ -18,6 +18,12 @@ export interface Prices {
   stored_gb_month: number;
 }
 
+/** Signing visitors in through a provider (`access.sso`): `@acme.com`, `ada@acme.com`, `org:acme` (GitHub). */
+export interface Sso {
+  provider: "github" | "google";
+  allow: string[];
+}
+
 /** What a service would cost at most (`POST /v1/apps/quote`), in US dollars at roll's prices. */
 export interface Quote {
   instance_hour: number;
@@ -203,6 +209,8 @@ export interface Run {
   push?: Push[];
   /** Containers beside each instance, in its network namespace (a web service's or a worker's); at most 4. */
   sidecars?: Sidecar[];
+  /** Floors by the clock: in any of a rule's weekly windows (as a freeze's, in its timezone), its min_instances is the floor when higher; at most 10. */
+  schedule_scale?: { windows: { from: string; to: string }[]; timezone?: string; min_instances: number }[];
 }
 
 /** A container beside each instance: `name` a-z, 0-9 and - (unique, at most 20); its image pinned with each deployment. */
@@ -427,7 +435,12 @@ export interface FirewallRule {
   query?: FieldMatch;
   /** Kinds of client from roll's managed lists; any of them matches. */
   bots?: BotKind[];
+  /** Kinds of attack from roll's managed patterns; any of them matches. */
+  attacks?: AttackKind[];
 }
+
+/** Probes for left-out files and scanners' user agents, `../` in any encoding, SQL injection, script in the request, and Log4Shell/Shellshock/shell in a parameter: read on the request line and the user agent, referer and cookies, never a body. */
+export type AttackKind = "scanners" | "traversal" | "sqli" | "xss" | "rce";
 
 /** `ai` crawlers and assistants' fetchers, `search` engines, link `preview`s, HTTP `tools` and headless browsers; `verified`: a crawler its operator's DNS vouches for; `spoofed`: one claiming such a crawler's name from elsewhere. */
 export type BotKind = "ai" | "search" | "preview" | "tools" | "verified" | "spoofed";
@@ -472,6 +485,7 @@ export function parseFirewall(text: string): FirewallRule[] {
         else if (t.startsWith("query=")) rule.query = field(t.slice(6));
         else if (t.startsWith("key=")) rule.key = t.slice(4);
         else if (t.startsWith("bots=")) rule.bots = t.slice(5).split(",").filter(Boolean) as BotKind[];
+        else if (t.startsWith("attacks=")) rule.attacks = t.slice(8).split(",").filter(Boolean) as AttackKind[];
         else if (t.startsWith("/")) rule.path = t;
       }
       return rule;
@@ -494,6 +508,7 @@ export function formatFirewall(rules: FirewallRule[]): string {
         field("query", r.query),
         r.key ? `key=${r.key}` : undefined,
         r.bots?.length ? `bots=${r.bots.join(",")}` : undefined,
+        r.attacks?.length ? `attacks=${r.attacks.join(",")}` : undefined,
         // Last: it takes the rest of the line.
         r.user_agent ? `ua=${r.user_agent}` : undefined,
       ]
@@ -596,6 +611,12 @@ export interface EnvironmentDiff {
 }
 
 export interface EnvironmentPut {
+  /** Attack mode by itself: once a minute's requests reach per_minute, a challenge for every visitor without a pass for minutes; null: never by itself. */
+  attack_mode?: { per_minute: number; minutes?: number } | null;
+  /** Attack mode on by hand until then (unix ms, within 24 hours); null ends it. */
+  challenge_until?: number | null;
+  /** Paths whose CORS preflights reach the app past its gate; null: none. */
+  preflight?: string[] | null;
   /** false: its schedules don't run (deploys and runs still do). */
   scheduled?: boolean;
   /** Data of its own: a branch of each Postgres and Redis database it links (admin); null goes back. */
@@ -607,7 +628,7 @@ export interface EnvironmentPut {
   /** Private: visitors need `?roll_access=<token>` once; null makes it public again. */
   /** `signed_in`: people signed in to roll who can open the project get in (alone, or with a token). */
   /** Who gets in: a link's token, people signed in to roll, or a password visitors type (8–200; replaces the whole of access). */
-  access?: { token?: string; signed_in?: boolean; password?: string; bypass_sha256?: string } | null;
+  access?: { token?: string; signed_in?: boolean; password?: string; sso?: Sso; callers?: string[]; bypass_sha256?: string } | null;
   /** Creating it: start with this environment's variables. */
   variables_from?: string;
   wait_for_ci?: boolean;
@@ -755,6 +776,12 @@ export interface Environment extends EnvironmentSummary {
   report?: boolean;
   /** People signed in to roll who can open its project get in. */
   signed_in?: boolean;
+  /** People GitHub or Google vouches for get in, by domain, email or GitHub organisation. */
+  sso?: Sso;
+  /** Paths whose CORS preflights reach the app past its gate. */
+  preflight?: string[];
+  /** Other services of the project let in with roll's token for this environment. */
+  callers?: string[];
   /** Visitors may type its password (`access.password`, never returned). */
   password?: boolean;
   /** What its code may reach: roll and the listed hosts (`roll`), or anything (`open`). */
@@ -795,6 +822,10 @@ export interface Environment extends EnvironmentSummary {
   firewall?: FirewallRule[];
   /** Requests each rule matched in the last 24 hours, in their order. */
   firewall_hits?: number[];
+  /** When attack mode goes on by itself. */
+  attack_mode?: { per_minute: number; minutes: number };
+  /** Attack mode is on until then (unix ms). */
+  challenge_until?: number;
   /** Headers its answers carry. */
   headers?: HeaderRule[];
   /** Paths another service of the project answers. */
@@ -859,6 +890,8 @@ export interface Plan {
   spa?: boolean;
   /** Datastores the code has client libraries for (New service offers to make and link them). */
   uses?: ("postgres" | "redis")[];
+  /** The variables its `.env.example` (or `.env.sample`, `.env.template`, `.env.dist`, `example.env`) names: asked for before the first deploy. */
+  variables?: string[];
   /** A static site's function directories (`netlify/functions`, `api`) the `functions` builder runs. */
   functions?: string[];
   /** A static site's edge functions: run before its files on their paths by its `-fn` service. */
@@ -1316,6 +1349,11 @@ export interface NotifyTarget {
 
 export type NotifyEvent =
   | "alert.anomaly"
+  | "attack.mode"
+  | "deploy.started"
+  | "scale.out"
+  | "scale.in"
+  | "instance.crashed"
   | "deploy.failed"
   | "deploy.base_updated"
   | "rollout.waiting"
@@ -1566,7 +1604,7 @@ export const appsApi = {
 
   links: (id: string) => call<Link[]>("GET", `${svc(id)}/links`),
   /** `all`: every kind of event (its timeline), not only what people changed. */
-  activity: (id: string, all = false) => call<AppEvent[]>("GET", `${svc(id)}/activity${qs({ all: all || undefined })}`),
+  activity: (id: string, all = false, before?: number) => call<AppEvent[]>("GET", `${svc(id)}/activity${qs({ all: all || undefined, before })}`),
   link: (id: string, kind: LinkKind, ref: string, prefix?: string) =>
     call<Link>("PUT", `${svc(id)}/links/${kind}/${enc(ref)}`, prefix ? { prefix } : {}),
   unlink: (id: string, kind: LinkKind, ref: string) => call<null>("DELETE", `${svc(id)}/links/${kind}/${enc(ref)}`),
@@ -1611,7 +1649,7 @@ export const appsApi = {
   disconnectGitHub: (id: string) => call<Service>("DELETE", `${svc(id)}/github`),
   putEnvironment: (id: string, e: string, body: EnvironmentPut) => call<Environment>("PUT", env(id, e), body),
   /** A one-use way into a sign-in-gated environment, as the signed-in person: the URL to go on to. */
-  visit: (id: string, e: string, to: string) => call<{ url: string }>("POST", `${env(id, e)}/visit`, { to }),
+  visit: (id: string, e: string, to: string, state: string) => call<{ url: string }>("POST", `${env(id, e)}/visit`, { to, state }),
   removeEnvironment: (id: string, e: string) => call<null>("DELETE", env(id, e)),
 
   deploy: (id: string, e: string, body: NewDeploy = {}) => call<Deployment>("POST", `${env(id, e)}/deploys`, body),
@@ -1802,6 +1840,8 @@ export interface AccessLine {
   request_id?: string;
   cold?: boolean;
   waited_ms?: number;
+  /** With traces on, the proxy's span's trace: its waterfall opens from the line. */
+  trace?: string;
   /** An answer roll gave itself, before any instance, and why. */
   by?: "allow_list" | "firewall" | "rate_limit" | "private" | "maintenance" | "wake" | "capped" | "paused" | "not_deployed" | "moving" | "unavailable";
 }

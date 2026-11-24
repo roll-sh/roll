@@ -16,6 +16,15 @@ provider "roll" {
 resource "roll_secrets_environment" "production" {
   slug      = "production"
   protected = true
+  approvals = 1                 # left out: roll's (1 when protected) or the dashboard's
+  approvers = ["role:owner"]    # left out: whoever the dashboard named
+}
+
+# Changes to /payments in staging (and every folder under it) need an approval.
+resource "roll_secrets_folder_policy" "payments" {
+  environment = "staging"
+  path        = "/payments"
+  approvals   = 1
 }
 
 resource "roll_secret" "stripe" {
@@ -109,6 +118,16 @@ resource "roll_secrets_aws_user" "legacy" {
   name = "legacy"
   role = roll_secrets_aws_role.deploy.id   # an external_id role
   user = "legacy-ci"
+}
+
+# A vendor's own keys, issued and revoked by roll with a credential it keeps sealed.
+resource "roll_secrets_saas_rotator" "gitlab" {
+  name                  = "gitlab"
+  vendor                = "gitlab"
+  target                = jsonencode({ project = "acme/web", scopes = ["read_api"], expires_days = 90 })
+  credential_wo         = var.gitlab_admin_token   # an ephemeral variable: never in the state
+  credential_wo_version = 1                        # bump it to replace the credential in place
+  credential_expires_at = "2027-03-31T00:00:00Z"   # health warns two weeks before
 }
 
 resource "roll_secrets_cloud_account" "gcp" {

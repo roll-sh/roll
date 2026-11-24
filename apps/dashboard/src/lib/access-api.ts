@@ -177,7 +177,8 @@ export type Alert = {
   finding?: string;
   why?: string;
   fix?: string;
-  /** agent_feedback: what it was doing, what happened, what it expected. */
+  /** agent_feedback: the connection that sent it, what it was doing, what happened, what it expected. */
+  connection?: string | null;
   title?: string;
   text?: string;
   description?: string | null;
@@ -198,7 +199,7 @@ export function describeAlert(a: Alert): { text: string; grant: string | null } 
     case "checkup_finding":
       return { text: `"${a.name}": ${a.why}.`, grant };
     case "agent_feedback":
-      return { text: `Feedback from ${a.name ? `"${a.name}"` : "an agent"}${a.tool ? ` on ${a.tool}` : ""}: ${a.title} — ${a.text}${a.description ? ` (expected: ${a.description})` : ""}`, grant };
+      return { text: `Feedback from ${a.connection ? `"${a.connection}"` : "an agent"}${a.tool ? ` on ${a.tool}` : ""}: ${a.title} — ${a.text}${a.description ? ` (expected: ${a.description})` : ""}`, grant };
     default:
       return { text: a.kind, grant };
   }

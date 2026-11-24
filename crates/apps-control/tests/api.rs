@@ -473,6 +473,16 @@ async fn traces_sent_by_instances_read_back() {
     let proxy = spans.iter().find(|s| s["service"] == "roll" && s["name"] == "GET /items/:id").unwrap_or_else(|| panic!("{one}"));
     assert_eq!((proxy["parent"].as_str(), proxy["span"].as_str()), (Some("00f067aa0ba902b7"), seen.split('-').nth(2)), "{one}");
     assert!(spans.iter().any(|s| s["name"] == "roll wake" && s["parent"] == proxy["span"]), "a cold start's wait: {one}");
+    // Its access line names the trace (the line opens its waterfall).
+    let mut access = Vec::new();
+    for _ in 0..50 {
+        access = w.apps.logs.follow(&format!("http:{id}/production"), 50).0.into_iter().map(|l| l.text).collect::<Vec<_>>();
+        if access.iter().any(|l| l.contains(&format!("\"trace\":\"{client_trace}\""))) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(access.iter().any(|l| l.contains(&format!("\"trace\":\"{client_trace}\""))), "the access line carries its trace: {access:?}");
     // Logs into the environment's own log (its level and trace id readable there), metrics as
     // series: a counter's rate a second.
     let logs = json!({ "resourceLogs": [{ "resource": { "attributes": [{ "key": "service.name", "value": { "stringValue": "api" } }] }, "scopeLogs": [{ "logRecords": [
@@ -634,6 +644,118 @@ async fn web_vitals_from_visitors_read_back_as_p75s() {
     assert_eq!(req("POST", "/__roll/vitals", "*/*", Some(json!({"path": "/", "lcp": 1}).to_string())).await.0, StatusCode::OK, "off, the path is the app's own");
 }
 
+/// Signing visitors in through a provider (`access.sso`; Cloud Run's IAP, Cloudflare Access): a
+/// page load with no session goes to roll's sign-in with GitHub carrying a request signed for this
+/// environment and page; whoever the provider vouches for and `allow` names (a domain, an email,
+/// a GitHub organisation) gets a one-use ticket to it and a session; anyone else is refused in
+/// words, and so is a request tampered with; taking them out of `allow` ends their session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_provider_signs_visitors_in_by_their_domain_or_organisation() {
+    let w = world_with(|c| c.visitor_recheck = Duration::ZERO).await;
+    struct Start;
+    impl apps_control::integrations::VisitorSignIn for Start {
+        fn start_url(&self, provider: &str, request: &str, orgs: bool) -> Option<String> {
+            Some(format!("https://api.roll.test/v1/accounts/oauth/{provider}/visit?r={request}{}", if orgs { "&orgs=1" } else { "" }))
+        }
+    }
+    let (svc, _) = image_service(&w, "wiki", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let h = host(&svc["environments"][0]["url"]);
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    let sso = json!({"access": {"sso": {"provider": "github", "allow": ["@Acme.com", "org:roll-sh"]}}});
+    assert_eq!(call(&w.api, "PUT", &env, Some(sso.clone())).await.0, StatusCode::CONFLICT, "no sign-in on this node yet");
+    w.apps.set_visitor_sign_in(Arc::new(Start));
+    assert_eq!(call(&w.api, "PUT", &env, Some(json!({"access": {"sso": {"provider": "google", "allow": ["org:roll-sh"]}}}))).await.0, StatusCode::BAD_REQUEST, "organisations are GitHub's");
+    let (st, e) = call(&w.api, "PUT", &env, Some(sso)).await;
+    assert_eq!((st, &e["sso"]["allow"]), (StatusCode::OK, &json!(["@acme.com", "org:roll-sh"])), "{e}");
+    let get = |path: String, cookie: Option<String>| {
+        let mut r = Request::builder().uri(path).header("host", h.clone()).header("accept", "text/html");
+        if let Some(c) = cookie {
+            r = r.header("cookie", c);
+        }
+        let public = w.public.clone();
+        async move {
+            let resp = public.oneshot(r.body(Body::empty()).unwrap()).await.unwrap();
+            (resp.status(), resp.headers().clone())
+        }
+    };
+    let (st, hd) = get("/pages/home?x=1".into(), None).await;
+    let start = hd["location"].to_str().unwrap().to_string();
+    let state = hd["set-cookie"].to_str().unwrap().split(';').next().unwrap().to_string();
+    assert!(st == StatusCode::FOUND && start.starts_with("https://api.roll.test/v1/accounts/oauth/github/visit?r=") && start.ends_with("&orgs=1"), "{start}");
+    let request = start.split("r=").nth(1).unwrap().trim_end_matches("&orgs=1").to_string();
+    let who = |email: &str, orgs: &[&str]| apps_control::integrations::SsoVisitor { provider: "github".into(), subject: "7".into(), email: email.into(), orgs: orgs.iter().map(|o| o.to_string()).collect(), hosted_domain: None };
+    // Turned away: someone else, a tampered request, another provider's sign-in.
+    let no = w.apps.admit_visitor(&request, &who("eve@evil.example", &["other"])).await.unwrap_err();
+    assert!(no.contains("eve@evil.example"), "{no}");
+    let mut forged = request.clone();
+    forged.replace_range(0..2, "AA");
+    assert!(w.apps.admit_visitor(&forged, &who("ann@acme.com", &[])).await.is_err());
+    assert!(w.apps.admit_visitor(&request, &apps_control::integrations::SsoVisitor { provider: "google".into(), ..who("ann@acme.com", &[]) }).await.is_err());
+    // A member of the organisation, whatever their email: a ticket back to the page they wanted.
+    assert!(w.apps.admit_visitor(&request, &who("bob@elsewhere.example", &["roll-sh"])).await.is_ok());
+    let back = w.apps.admit_visitor(&request, &who("ann@acme.com", &[])).await.unwrap();
+    let path = back.split_once(&h).map(|(_, p)| p.to_string()).unwrap_or_else(|| panic!("on the environment's host: {back}"));
+    let path = path.trim_start_matches(|c: char| c == ':' || c.is_ascii_digit()).to_string();
+    let (st, hd) = get(path.clone(), Some(state.clone())).await;
+    assert_eq!((st, hd["location"].to_str().unwrap()), (StatusCode::FOUND, "/pages/home?x=1"));
+    let session = hd["set-cookie"].to_str().unwrap().split(';').next().unwrap().to_string();
+    assert_eq!(get("/".into(), Some(session.clone())).await.0, StatusCode::OK, "in with the session");
+    // The app is told who, and nothing a visitor sends can say otherwise.
+    let seen = w.public.clone().oneshot(Request::get("/").header("host", h.as_str()).header("cookie", session.as_str()).header("x-roll-visitor", "ceo@acme.com").body(Body::empty()).unwrap()).await.unwrap();
+    let seen: Value = serde_json::from_slice(&seen.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(seen["visitor"], "ann@acme.com", "{seen}");
+    // And a token it can check against the key its hosts serve, for the origin asked.
+    let jwks = w.public.clone().oneshot(Request::get("/__roll/jwks.json").header("host", h.as_str()).body(Body::empty()).unwrap()).await.unwrap();
+    let jwks: Value = serde_json::from_slice(&jwks.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let jwt = seen["visitor_jwt"].as_str().unwrap_or_else(|| panic!("{seen}"));
+    {
+        use base64::Engine;
+        use p256::ecdsa::signature::Verifier;
+        let d = |s: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(s).unwrap();
+        let k = &jwks["keys"][0];
+        let point = p256::EncodedPoint::from_affine_coordinates(d(k["x"].as_str().unwrap()).as_slice().into(), d(k["y"].as_str().unwrap()).as_slice().into(), false);
+        let (input, sig) = jwt.rsplit_once('.').unwrap();
+        assert!(p256::ecdsa::VerifyingKey::from_encoded_point(&point).unwrap().verify(input.as_bytes(), &p256::ecdsa::Signature::from_slice(&d(sig)).unwrap()).is_ok());
+        let claims: Value = serde_json::from_slice(&d(input.split('.').nth(1).unwrap())).unwrap();
+        assert_eq!((claims["email"].as_str(), claims["aud"].as_str(), claims["sub"].as_str()), (Some("ann@acme.com"), Some(format!("http://{h}").as_str()), Some("sso:github:7")), "{claims}");
+    }
+    // Signing out: the session ends and its cookie goes.
+    let (st, hd) = get("/__roll/logout".into(), Some(session.clone())).await;
+    assert!(st == StatusCode::OK && hd["set-cookie"].to_str().unwrap().contains("Max-Age=0"));
+    assert_eq!(get("/".into(), Some(session.clone())).await.0, StatusCode::FOUND, "signed out");
+    assert_eq!(get(path, Some(state.clone())).await.0, StatusCode::UNAUTHORIZED, "a ticket opens one session");
+    // Bob's ticket, its link handed to another browser: nothing.
+    let bob = w.apps.admit_visitor(&request, &who("bob@elsewhere.example", &["roll-sh"])).await.unwrap();
+    let bob = bob.split_once(&h).map(|(_, p)| p.trim_start_matches(|c: char| c == ':' || c.is_ascii_digit()).to_string()).unwrap();
+    assert_eq!(get(bob, None).await.0, StatusCode::UNAUTHORIZED, "only in the browser it began in");
+    // With Google, a domain's entry needs the account to be that Workspace domain's.
+    let g = apps_control::model::Sso { provider: "google".into(), allow: vec!["@acme.com".into()] };
+    assert_eq!((g.admits("ann@acme.com", &[], None), g.admits("ann@acme.com", &[], Some("acme.com"))), (None, Some("@acme.com")));
+    // `@acme.com` gone from allow: Ann's session ends.
+    call(&w.api, "PUT", &env, Some(json!({"access": {"sso": {"provider": "github", "allow": ["org:roll-sh"]}}}))).await;
+    assert_eq!(get("/".into(), Some(session)).await.0, StatusCode::FOUND, "back to signing in");
+    // CORS preflights to the paths it names reach the app past the gate; nothing else does.
+    let (st, e) = call(&w.api, "PUT", &env, Some(json!({"preflight": ["/api/*"]}))).await;
+    assert_eq!((st, &e["preflight"]), (StatusCode::OK, &json!(["/api/*"])), "{e}");
+    let options = |path: &'static str, preflight: bool| {
+        let mut r = Request::builder().method("OPTIONS").uri(path).header("host", h.as_str()).header("origin", "https://app.acme.com");
+        if preflight {
+            r = r.header("access-control-request-method", "POST");
+        }
+        let public = w.public.clone();
+        async move { public.oneshot(r.body(Body::empty()).unwrap()).await.unwrap().status() }
+    };
+    assert_eq!(options("/api/orders", true).await, StatusCode::OK, "to the app");
+    assert_eq!(options("/admin", true).await, StatusCode::UNAUTHORIZED, "another path meets the gate");
+    assert_eq!(options("/api/orders", false).await, StatusCode::UNAUTHORIZED, "an OPTIONS that isn't a preflight meets the gate");
+    // Its owner reads a page past the gate (an agent checking what it deployed).
+    let (st, page) = call(&w.api, "GET", &format!("{env}/fetch?path=/pages/home%3Fx%3D1"), None).await;
+    let body: Value = serde_json::from_str(page["body"].as_str().unwrap_or("")).unwrap_or(Value::Null);
+    assert_eq!((st, page["status"].as_u64(), &body["path"], &page["truncated"]), (StatusCode::OK, Some(200), &json!("/pages/home"), &json!(false)), "{page}");
+    assert_eq!(call(&w.api, "GET", &format!("{env}/fetch?path=//evil.example/"), None).await.0, StatusCode::BAD_REQUEST);
+}
+
 /// Signing in to an environment: a page load with no session goes to roll's dashboard; a person
 /// signed in there gets a one-use ticket to a page at one of the environment's names (a token
 /// gets none); the ticket opens a host-only session, which the app never sees; changing the
@@ -682,11 +804,17 @@ async fn a_signed_in_person_gets_into_a_gated_environment() {
     assert_eq!(st, StatusCode::FOUND);
     let to = format!("http://{h}/dash?x=1");
     let q = |v: &str| percent_encoding::utf8_percent_encode(v, percent_encoding::NON_ALPHANUMERIC).to_string();
-    assert_eq!(hd["location"].to_str().unwrap(), format!("https://roll.test/dashboard/apps/visit?service={}&env=production&to={}", q(&id), q(&to)));
+    let location = hd["location"].to_str().unwrap().to_string();
+    let (head, binding) = location.split_once("&state=").unwrap();
+    assert_eq!(head, format!("https://roll.test/dashboard/apps/visit?service={}&env=production&to={}", q(&id), q(&to)));
+    // The browser this began in holds the state whose SHA-256 the ticket is bound to.
+    let state = hd["set-cookie"].to_str().unwrap().split(';').next().unwrap().to_string();
+    assert!(state.starts_with("roll_visit_state_production=") && binding.len() == 64, "{state} {binding}");
+    let binding = binding.to_string();
     assert_eq!(get("/api".into(), None, false).await.0, StatusCode::UNAUTHORIZED, "an API call isn't sent to sign in");
     // A ticket, for a person only, to the environment's own names only.
     let ask = |user: Option<&str>, to: String| {
-        let mut req = Request::builder().method("POST").uri(format!("{env}/visit")).header("content-type", "application/json").body(Body::from(json!({ "to": to }).to_string())).unwrap();
+        let mut req = Request::builder().method("POST").uri(format!("{env}/visit")).header("content-type", "application/json").body(Body::from(json!({ "to": to, "state": binding }).to_string())).unwrap();
         if let Some(u) = user {
             req.extensions_mut().insert(roll_auth::SignedIn { user: u.into(), handle: "ada".into(), admin: true, code_owner: None, session: "ses_1".into() });
         }
@@ -704,16 +832,20 @@ async fn a_signed_in_person_gets_into_a_gated_environment() {
     let origin = svc["environments"][0]["url"].as_str().unwrap().trim_end_matches('/').to_string();
     let (_, t) = ask(Some("usr_ada"), format!("https://{h}:9999/dash?x=1")).await;
     assert!(t["url"].as_str().unwrap().starts_with(&format!("{origin}/__roll/visit?ticket=")), "{t} vs {origin}");
+    // Its link handed to another browser (one without the state) opens nothing.
+    let (_, t) = ask(Some("usr_ada"), to.clone()).await;
+    let url = t["url"].as_str().unwrap();
+    assert_eq!(get(url[url.find("/__roll/visit").unwrap()..].to_string(), None, true).await.0, StatusCode::UNAUTHORIZED, "only in the browser it began in");
     let (st, t) = ask(Some("usr_ada"), to.clone()).await;
     assert_eq!(st, StatusCode::OK, "{t}");
     let url = t["url"].as_str().unwrap();
     let path = &url[url.find("/__roll/visit").unwrap()..];
-    let (st, hd, _) = get(path.to_string(), None, true).await;
+    let (st, hd, _) = get(path.to_string(), Some(state.clone()), true).await;
     assert_eq!((st, hd["location"].to_str().unwrap()), (StatusCode::FOUND, "/dash?x=1"));
     let set = hd["set-cookie"].to_str().unwrap().to_string();
     assert!(set.contains("HttpOnly") && set.contains("Max-Age=43200"), "{set}");
     let session = set.split(';').next().unwrap().to_string();
-    assert_eq!(get(path.to_string(), None, true).await.0, StatusCode::UNAUTHORIZED, "a ticket opens once");
+    assert_eq!(get(path.to_string(), Some(state.clone()), true).await.0, StatusCode::UNAUTHORIZED, "a ticket opens once");
     let (st, _, body) = get("/dash".into(), Some(format!("{session}; theirs=1; roll_access_production=a-shared-token")), true).await;
     assert_eq!((st, body["cookie"].as_str()), (StatusCode::OK, Some("theirs=1")), "the app never sees roll's cookie: {body}");
     assert_eq!(ask(Some("usr_bob"), to.clone()).await.0, StatusCode::FORBIDDEN, "someone who can't open the project gets no ticket");
@@ -725,7 +857,7 @@ async fn a_signed_in_person_gets_into_a_gated_environment() {
     // New access, new sign-in.
     let (_, t) = ask(Some("usr_ada"), to.clone()).await;
     let url = t["url"].as_str().unwrap();
-    let (_, hd, _) = get(url[url.find("/__roll/visit").unwrap()..].to_string(), None, true).await;
+    let (_, hd, _) = get(url[url.find("/__roll/visit").unwrap()..].to_string(), Some(state.clone()), true).await;
     let session = hd["set-cookie"].to_str().unwrap().split(';').next().unwrap().to_string();
     assert_eq!(get("/dash".into(), Some(session.clone()), true).await.0, StatusCode::OK);
     // The roll login that let them in ends (signed out, or revoked): so does the session.
@@ -734,7 +866,7 @@ async fn a_signed_in_person_gets_into_a_gated_environment() {
     allowed.1.store(true, std::sync::atomic::Ordering::SeqCst);
     let (_, t) = ask(Some("usr_ada"), to.clone()).await;
     let url = t["url"].as_str().unwrap();
-    let (_, hd, _) = get(url[url.find("/__roll/visit").unwrap()..].to_string(), None, true).await;
+    let (_, hd, _) = get(url[url.find("/__roll/visit").unwrap()..].to_string(), Some(state.clone()), true).await;
     let session = hd["set-cookie"].to_str().unwrap().split(';').next().unwrap().to_string();
     call(&w.api, "PUT", &env, Some(json!({"access": {"signed_in": true}}))).await;
     assert_eq!(get("/dash".into(), Some(session), true).await.0, StatusCode::FOUND);
@@ -2093,6 +2225,10 @@ async fn changes_are_an_audit_trail_without_values() {
     let kinds: Vec<&str> = all.as_array().unwrap().iter().map(|e| e["kind"].as_str().unwrap()).collect();
     assert!(kinds.contains(&"deploy.active") && kinds.contains(&"audit.settings"), "{kinds:?}");
     assert!(!all.to_string().contains("sk-s3cr3t"));
+    // The next page back: older than the one before it, none of what came first.
+    let newest = all[0]["seq"].as_i64().unwrap();
+    let (_, back) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/activity?all=1&before={newest}"), None).await;
+    assert!(back.as_array().unwrap().iter().all(|e| e["seq"].as_i64() < Some(newest)) && back.as_array().unwrap().len() == all.as_array().unwrap().len() - 1, "{back}");
 }
 
 /// An environment's own redirects (Vercel's project redirects) on any service: exact paths and
@@ -2375,6 +2511,42 @@ async fn traffic_unusual_for_the_hour_is_an_anomaly() {
     w.apps.store.put_minutes(&id, "production", &(1..=10).map(|i| minute(now - i, 100)).collect::<Vec<_>>()).unwrap();
     w.apps.judge_alerts(&live).await;
     assert!(events("alert.resolved").await.iter().any(|e| e["data"]["alert"] == "alert.anomaly"));
+}
+
+/// Attack mode: on by itself once a minute's requests reach its threshold (said as
+/// `attack.mode`), every visitor without a pass then gets the challenge page while a rule that
+/// denies still denies; on and off by hand with `challenge_until`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_flood_turns_attack_mode_on_until_it_ends() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "shop", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    let h = host(&call(&w.api, "GET", &base, None).await.1["url"]);
+    let get = |path: &'static str| {
+        let (public, h) = (w.public.clone(), h.clone());
+        async move { public.oneshot(Request::get(path).header("host", h.as_str()).body(Body::empty()).unwrap()).await.unwrap().status() }
+    };
+    assert_eq!(call(&w.api, "PUT", &base, Some(json!({"attack_mode": {"per_minute": 5}}))).await.0, StatusCode::BAD_REQUEST, "at least 10 a minute");
+    assert_eq!(call(&w.api, "PUT", &base, Some(json!({"challenge_until": code_sql::now_ms() + 48 * 3_600_000}))).await.0, StatusCode::BAD_REQUEST, "a day ahead at most");
+    let (st, e) = call(&w.api, "PUT", &base, Some(json!({"attack_mode": {"per_minute": 100, "minutes": 10}, "firewall": [{"action": "deny", "path": "/admin/*"}]}))).await;
+    assert_eq!((st, &e["attack_mode"]), (StatusCode::OK, &json!({"per_minute": 100, "minutes": 10})), "{e}");
+    assert_eq!(get("/").await, StatusCode::OK, "off until a flood");
+    // A minute of 150 requests: on by itself, for ten minutes.
+    let now = code_sql::now_ms() / 60_000;
+    w.apps.store.put_minutes(&id, "production", &[apps_control::store::MinuteRow { minute: now - 1, requests: 150, instances: 1, ..Default::default() }]).unwrap();
+    w.apps.judge_alerts(&w.apps.live(&id, "production")).await;
+    let e = call(&w.api, "GET", &base, None).await.1;
+    let until = e["challenge_until"].as_i64().unwrap_or_else(|| panic!("{e}"));
+    assert!((until - code_sql::now_ms() - 600_000).abs() < 60_000, "{e}");
+    let said = call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1;
+    assert!(said["events"].as_array().unwrap().iter().any(|x| x["kind"] == "attack.mode" && x["data"]["requests"] == 150), "{said}");
+    assert_eq!(get("/").await, StatusCode::FORBIDDEN, "the challenge page");
+    assert_eq!(get("/admin/x").await, StatusCode::FORBIDDEN, "a deny still denies");
+    // Ended by hand.
+    assert_eq!(call(&w.api, "PUT", &base, Some(json!({"challenge_until": null}))).await.0, StatusCode::OK);
+    assert_eq!(get("/").await, StatusCode::OK);
+    assert!(call(&w.api, "GET", &base, None).await.1.get("challenge_until").is_none());
 }
 
 /// Five minutes of 5xx answers past the alert's share make one `alert.errors` event; more of the
@@ -4978,6 +5150,13 @@ async fn a_request_naming_an_earlier_deployment_goes_to_it() {
     let (st, d3) = call(&w.api, "POST", &format!("{base}/deploys/{first}/rollback"), Some(json!({}))).await;
     assert!(st.is_success(), "{d3}");
     let d3 = settled(&w, &id, "production", d3["id"].as_str().unwrap()).await;
+    // Once its proxy answers from it (a moment after the store says it's live).
+    for _ in 0..100 {
+        if ask("/", &[("sec-fetch-dest", "document")]).await.0 == d3["id"] {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     assert_eq!(ask("/api", &[("x-deployment-id", "nb_0a1b2c3d")]).await.0, d3["id"], "{d3}");
 }
 
@@ -5364,6 +5543,16 @@ async fn a_crashing_worker_restarts_and_its_crash_loop_is_one_event() {
     let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await;
     assert_eq!(env["crash_loop"]["crashes"], 3, "{env}");
     assert!(env["crash_loop"]["last_error"].as_str().unwrap().contains("137"), "{env}");
+    // Each crash is an event of its own too, with its reason (not only the loop).
+    let mut crashed = Vec::new();
+    for _ in 0..100 {
+        crashed = call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1["events"].as_array().unwrap().iter().filter(|e| e["kind"] == "instance.crashed").cloned().collect();
+        if crashed.len() >= 3 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(crashed.len() >= 3 && crashed[0]["data"]["reason"].as_str().unwrap_or("").contains("137"), "{crashed:?}");
     let mut sent = Vec::new();
     for _ in 0..100 {
         sent = got.lock().iter().filter(|b| b["type"] == "crash_loop").cloned().collect();
@@ -6466,6 +6655,16 @@ async fn a_web_service_scales_on_its_latency() {
     let (_, log) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/logs?tail=50"), None).await;
     assert!(scaled, "a second instance for its p95: {log}");
     assert!(log.to_string().contains("scaled out: p95 at"), "{log}");
+    // An event, with from, to and why (Render's scaling events).
+    let mut out = Value::Null;
+    for _ in 0..100 {
+        out = call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1["events"].as_array().unwrap().iter().find(|e| e["kind"] == "scale.out").cloned().unwrap_or(Value::Null);
+        if !out.is_null() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(out["data"]["to"].as_u64() > out["data"]["from"].as_u64() && out["data"]["reason"].as_str().unwrap_or("").starts_with("p95 at"), "{out}");
 }
 
 /// `run.cpu_target` and `run.memory_target`: a web service whose instances stay over the target
@@ -6935,6 +7134,12 @@ async fn firewall_rules_decide_in_order() {
     assert_eq!(ask("66.249.66.1:5000", "/", &gb).await, StatusCode::OK, "a verified crawler passes a challenge");
     assert_eq!(ask("66.249.66.1:5000", "/", &[("user-agent", "Mozilla/5.0 (compatible; Amazonbot/0.1)")]).await, StatusCode::FORBIDDEN, "an AI crawler gets the page");
     assert_eq!(ask("198.51.100.1:5000", "/", &gb).await, StatusCode::FORBIDDEN, "a claimed one gets the page");
+    // Managed attack patterns, in any encoding; an ordinary request goes on.
+    call(&w.api, "PUT", &base, Some(json!({"firewall": [{"action": "deny", "attacks": ["traversal", "sqli", "scanners"]}]}))).await;
+    assert_eq!(req("GET", "/download?file=%252e%252e%252fetc%252fpasswd", "curl").await, StatusCode::FORBIDDEN, "double-encoded ../");
+    assert_eq!(req("GET", "/items?id=1%27%20UNION%20SELECT%20password", "curl").await, StatusCode::FORBIDDEN);
+    assert_eq!(req("GET", "/.env", "curl").await, StatusCode::FORBIDDEN);
+    assert_eq!(req("GET", "/items?id=12&sort=name", "curl").await, StatusCode::OK);
     // A rule tried before it blocks: `log` counts and goes on; each rule's last 24 hours.
     call(&w.api, "PUT", &base, Some(json!({"firewall": [{"action": "log", "path": "/wp-*"}, {"action": "deny", "path": "/wp-admin/*"}]}))).await;
     assert_eq!(req("GET", "/wp-login.php", "curl").await, StatusCode::OK, "logged, let in");
@@ -9065,6 +9270,51 @@ impl apps_control::integrations::SecretSource for FakeIssuer {
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(Some(format!("jwt.roll-apps:{project}:{service}:{env}.{aud}")))
     }
+    async fn verify_issued(&self, token: &str, aud: &str) -> Option<String> {
+        let (sub, for_aud) = token.strip_prefix("jwt.")?.split_once('.')?;
+        (for_aud == aud).then(|| sub.to_string())
+    }
+}
+
+/// Another service of the project calls a gated one (`access.callers`; Cloud Run's invoker): with
+/// roll's token for this environment as `x-roll-caller`, the services it names get in and the app
+/// is told which; another service, another environment, a token for another audience, or none
+/// stays out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn another_service_calls_a_gated_one_with_rolls_token() {
+    let issuer = Arc::new(FakeIssuer::default());
+    let i2 = issuer.clone();
+    let w = world_full(|_| {}, false, move |d| d.secrets = i2).await;
+    let (api, _) = image_service(&w, "api", json!({"port": 80})).await;
+    let (web, _) = image_service(&w, "web", json!({"port": 80})).await;
+    let (other, _) = image_service(&w, "other", json!({"port": 80})).await;
+    let (api, web, other) = (api["id"].as_str().unwrap().to_string(), web["id"].as_str().unwrap().to_string(), other["id"].as_str().unwrap().to_string());
+    let base = format!("/v1/apps/services/{api}/environments/production");
+    let (st, e) = call(&w.api, "PUT", &base, Some(json!({"access": {"callers": ["web"]}}))).await;
+    assert_eq!((st, &e["callers"]), (StatusCode::OK, &json!(["web"])), "{e}");
+    let h = host(&e["url"]);
+    let aud = format!("roll-apps:{api}/production");
+    let token = |svc: &str, env: &str, aud: &str| format!("jwt.roll-apps:{}:{svc}:{env}.{aud}", w.project);
+    let ask = |t: Option<String>| {
+        let (public, h) = (w.public.clone(), h.clone());
+        async move {
+            let mut r = Request::get("/orders").header("host", h.as_str());
+            if let Some(t) = t {
+                r = r.header("x-roll-caller", t);
+            }
+            let resp = public.oneshot(r.body(Body::empty()).unwrap()).await.unwrap();
+            let st = resp.status();
+            (st, serde_json::from_slice::<Value>(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap_or(Value::Null))
+        }
+    };
+    let (st, seen) = ask(Some(token(&web, "production", &aud))).await;
+    assert_eq!((st, seen["visitor"].as_str()), (StatusCode::OK, Some(format!("roll-apps:{}:{web}:production", w.project).as_str())), "{seen}");
+    assert_eq!(ask(Some(token(&other, "production", &aud))).await.0, StatusCode::UNAUTHORIZED, "a service it doesn't name");
+    assert_eq!(ask(Some(token(&web, "production", "roll-apps:svc_else/production"))).await.0, StatusCode::UNAUTHORIZED, "a token for another environment");
+    assert_eq!(ask(None).await.0, StatusCode::UNAUTHORIZED, "nobody else");
+    call(&w.api, "PUT", &base, Some(json!({"access": {"callers": ["web/staging"]}}))).await;
+    assert_eq!(ask(Some(token(&web, "production", &aud))).await.0, StatusCode::UNAUTHORIZED, "its production isn't its staging");
+    assert_eq!(call(&w.api, "PUT", &base, Some(json!({"access": {"callers": ["Bad Name"]}}))).await.0, StatusCode::BAD_REQUEST);
 }
 
 /// Instances' OIDC tokens (Vercel's OIDC federation): with `run.oidc_audiences`, each instance has

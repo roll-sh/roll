@@ -1646,6 +1646,51 @@ roll runs the syncs of Elastic-managed (`is_native: true`) `postgresql` and `s3`
 - Access control syncs fail (neither service syncs permissions on Elastic either). A job's
   `indexed_document_volume` is in MiB, as Elastic's connectors report it.
 
+### The web crawler (`roll_web_crawler`)
+
+Elasticsearch 9.x has no crawler (Elastic's hosted one was discontinued in 9.0), so the reference
+is Elastic Open Crawler: its config's shape, crawl rules, robots directives, canonical URLs,
+document fields and ids (the hex SHA-1 of the normalised URL), so an Open Crawler index can be
+taken over by roll's crawler. Where roll's differs ([crawler.md](crawler.md)):
+
+- **robots.txt** is read for the product token `roll-crawler`, not `Elastic-Crawler`: a site's
+  `Elastic-Crawler` group doesn't apply (the job's `metadata.robots_elastic_crawler_group_ignored`
+  names the origins that have one and no `roll-crawler` group). A 429 for robots.txt disallows the
+  origin for the crawl, as a 5xx does; redirects are followed up to 5 times, to other origins too.
+- **The purge** deletes a document only for proof the page is gone (a 404 or 410, `noindex`, a URL
+  now excluded by the crawl's domains, rules or robots.txt). Errors (5xx, other 4xx, timeouts,
+  network errors, a robots.txt that's unreadable or disallows the whole site) and what may only be
+  an outage (a redirect off the crawl, onto a URL it already has or onto a new one, a body that
+  isn't HTML, an empty page) keep it, until it has gone unrefreshed through three full crawls in
+  a row, the last keeping it, and it's a week old. A crawl that didn't refresh more than half the index's documents, or whose re-checked
+  redirects mostly led to one URL, deletes nothing (`metadata.purge_skipped`), and nothing of an
+  origin most of whose documents weren't refreshed, so an outage, an expired login redirecting to
+  SSO, or a maintenance page can't empty the index. `force_purge` lifts the guards once. Open
+  Crawler deletes anything that doesn't answer 200.
+- **Canonical URLs** are honoured only once the crawl has fetched the canonical URL and indexed it
+  as itself; until then a page is stored under its own URL. Open Crawler stores a page under its
+  canonical URL at once.
+- **Deep pages**: a page nesting more than 512 elements deep is a failed document.
+- **Limits** keep Open Crawler's names and defaults, except `max_unique_url_count` (10,000, not
+  100,000) and `max_duration` (6 hours, not 24), and each has a node ceiling: a value over it fails
+  validation. A connector holds at most 1,000 crawl rules across its domains. Until domain
+  verification lands every domain is unverified: at most 1,000 URLs a crawl, a second between
+  requests to one site across every crawl on the node, and 4 crawls a day per connector and per
+  owner and site on the node. A crawl fetches one URL at a time (`threads_per_crawl` doesn't
+  apply).
+- **Credentials** are the connector's sealed `auth_header` or basic auth, sent only to
+  `auth_origin` over https, never after a redirect to another origin; one per connector.
+  `http_auth_allowed`, proxies and `domains[].auth` in the snippet aren't taken (the CLI import
+  moves `auth` to the sealed fields).
+- **Not yet**: extraction rules (a snippet with any fails validation), XPath, incremental crawls
+  (an incremental job fails), binary content extraction (only `text/html` and
+  `application/xhtml+xml` are indexed), `data-elastic-name` and `meta.elastic` beyond 100 fields a
+  page, and `full_html` is the page as served, not Jsoup's re-serialisation. Pages are decoded as
+  UTF-8 (a page in another charset reads with replacement characters).
+- **URLs** are normalised with the WHATWG URL parser plus RFC 3986's percent-encoding rules, where
+  Open Crawler uses Addressable's `normalize!`: IDNs, case, default ports, dot segments and
+  percent-encoding agree; `links` and `url` hold the normalised URL rather than the link as written.
+
 ## Per area
 
 `roll` = baseline tests roll passes, `ES` = tests passing on Elasticsearch 9.5.5. The most
@@ -1917,12 +1962,24 @@ the rest are skipped by the tests' own prerequisites.
   (doc-values buffers, a segment's fielddata) doesn't count. A document's `_source` is parsed
   once per document, as Elasticsearch's `SourceLookup` does, so changes persist across reads.
   It's charged, but left out of the limit. So a script can churn through temporaries far beyond
-  the limit, as long as it doesn't keep them. Freeing data the execution didn't make (`params`,
-  `_source`, an earlier document's leftovers) never lets it grow the thread by more than the
-  limit: such frees can offset what it allocates, but never take its balance below zero. A
-  script run inside another one counts against the caller once it ends. That covers a runtime
-  field another script reads, up to 5 levels deep. While it runs, it also has an account of its
-  own, so one thread holds at most about six times the limit, plus the document's `_source`. Past the limit roll answers like that guard: a
+  the limit, as long as it doesn't keep them. Freeing data the execution didn't make never
+  lets it grow the thread by more than the limit. That covers `params` and an earlier
+  document's leftovers. Such frees can offset what it
+  allocates, but never take its balance below zero. A script run inside another one counts
+  against the caller once it ends. That covers a runtime field another script reads, up to 5
+  levels deep. While it runs, it also has an account of its own, and it reads its own copy of
+  `_source`. So one thread holds at most about six times the limit plus the document's
+  `_source`, counting each nesting level. What a runtime field is charged to the script
+  reading it leaves out the part of the document's `_source` it keeps. That part is measured as
+  what dropping the `_source` didn't free, so data the field took out of the `_source` can go
+  uncharged up to one document's `_source` per field. A lenient runtime field
+  (`on_script_error: continue`) skips the documents its script fails on. That includes this
+  limit's `painless_error`, as Elasticsearch 9.5.5 skips a document for any failure there, a
+  `painless_error` or a stack overflow too. Only failures that aren't the script's stop the
+  request: the breaker refusing what the field keeps (429), even when the script also failed
+  on that document, and a cancelled or timed-out search. After such a failure no script of the
+  search runs again in that segment, a runtime field's or a sort key's (`top_hits` included). Past the limit roll
+  answers like that guard: a
   `script_exception` caused by an uncatchable `painless_error`, `script allocation limit
   exceeded: allocation of [N] bytes brings the running total to [T] bytes, over the limit of
   [L] bytes`, without a script portion. Both guards apply in every context (`_execute`,

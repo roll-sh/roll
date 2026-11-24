@@ -875,7 +875,7 @@ impl Control {
             let node = node.clone();
             Box::pin(async move {
                 match node.upgrade() {
-                    Some(n) => n.unload(&name).await,
+                    Some(n) => n.hand_over(&name).await,
                     None => true,
                 }
             })

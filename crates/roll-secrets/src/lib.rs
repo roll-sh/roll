@@ -66,6 +66,7 @@ pub mod reach;
 pub mod cutoff;
 pub mod refs;
 mod notices;
+pub mod notifications;
 mod purge;
 mod requests;
 mod required;
@@ -108,6 +109,7 @@ pub use shares::{NewShare, Peek, Share};
 pub use value_requests::{Answer, NewValueRequest, ValuePeek, ValueRequest};
 pub use sweep::{Lease, Swept};
 pub use sinks::{Deliver, NewSink, Sink};
+pub use notifications::{Channel, NewNotification, Notification, Notifier};
 pub use syncs::{NewSync, Push, SecretSync, SyncField, SyncKind, SyncTarget, Syncs};
 pub use write::{Applied, Batch, Change, ItemDiff, Op, Promote, Rollback, SecretType, Written};
 
@@ -479,6 +481,8 @@ pub struct Secrets {
     delete_window_days: std::sync::atomic::AtomicU32,
     /// Hours the purge waits for an audit sink behind on a closed project (deleted.rs).
     purge_sink_grace_hours: std::sync::atomic::AtomicU32,
+    /// Where people's notifications go, once rolld says (notifications.rs).
+    notifier: std::sync::OnceLock<Arc<dyn notifications::Notifier>>,
 }
 
 impl std::fmt::Debug for Secrets {
@@ -517,6 +521,8 @@ impl Secrets {
         // Who set the notify URL: it's announced to only while they may manage the project.
         db.add_column("environments", "notify_by", "TEXT")?;
         db.add_column("syncs", "checked_at", "INTEGER")?;
+        // What a certificate sync's target calls what it pushed (syncs.rs).
+        db.add_column("syncs", "remote_id", "TEXT")?;
         // Syncs a change marked due (checked_at NULL), found every couple of seconds (syncs.rs).
         db.ensure_schema("CREATE INDEX IF NOT EXISTS syncs_due ON syncs (retry_at) WHERE checked_at IS NULL;")?;
         db.add_column("leases", "path", "TEXT")?;
@@ -532,6 +538,7 @@ impl Secrets {
         db.add_column("audit", "event", "TEXT")?;
         db.add_column("audit", "event_data", "TEXT")?;
         db.ensure_schema(events::SCHEMA)?;
+        db.ensure_schema(notifications::SCHEMA)?;
         // A feed filtered by kind reads an index range, not every event since its cursor (#793 made
         // every write an event).
         db.migrate("secrets-audit-event-kinds", |c| c.execute_batch("CREATE INDEX IF NOT EXISTS audit_event_kinds ON audit (project_id, event, seq) WHERE event IS NOT NULL"))?;
@@ -607,6 +614,15 @@ impl Secrets {
             Ok(())
         })?;
         db.add_column("projects", "validity_checks", "INTEGER")?;
+        // What a leaked managed key does (leaks.rs): `managed` rotates it, `off` (NULL) reports it.
+        db.add_column("projects", "leak_rotate", "TEXT")?;
+        db.ensure_schema(leaks::SCHEMA)?;
+        // The key a leak rotation was found by (at most one an hour per key), and a rotation
+        // request's leaked credential and what applying it did instead of rotating.
+        db.add_column("leak_rotations", "path", "TEXT")?;
+        db.add_column("leak_rotations", "key", "TEXT")?;
+        db.add_column("requests", "credential", "TEXT")?;
+        db.add_column("requests", "outcome", "TEXT")?;
         db.ensure_schema(alerts::SCHEMA)?;
         db.ensure_schema(decoys::SCHEMA)?;
         db.ensure_schema(intercept::SCHEMA)?;
@@ -618,8 +634,12 @@ impl Secrets {
         db.ensure_schema(placeholders::SCHEMA)?;
         db.ensure_schema(rotators::SCHEMA)?;
         db.ensure_schema(saas::SCHEMA)?;
+        db.add_column("saas_rotators", "credential_expires_at", "INTEGER")?;
         db.ensure_schema(transit::SCHEMA)?;
         db.ensure_schema(pki::SCHEMA)?;
+        // An intermediate CA (pki.rs): its CSR while it's pending, then the certificates above it.
+        db.add_column("cas", "csr", "TEXT")?;
+        db.add_column("cas", "chain", "TEXT")?;
         // ACME on a CA (acme.rs): whether its bindings' names are pre-authorized.
         db.ensure_schema(acme::SCHEMA)?;
         db.add_column("cas", "acme_preauthorize", "INTEGER")?;
@@ -764,7 +784,7 @@ impl Secrets {
         if let (Some(github), Ok(keys)) = (&opts.github, &opts.keyring) {
             links.register(Arc::new(github_app::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), github: github.clone() }));
         }
-        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, gateway_links: opts.gateways, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, directory: opts.directory, github: opts.github, oidc: Default::default(), logins: Default::default(), answers: Default::default(), reads_per_minute: read::READS_PER_MINUTE.into(), code_refs: Default::default(), reach_holders: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, aws_server_id: Default::default(), crls, live_fps: Default::default(), issuer_keys: Default::default(), issuer_rotate_days: issuer::ROTATE_DAYS.into(), audit_keys: Default::default(), audit_rotate_days: audit_key::ROTATE_DAYS.into(), digests: Default::default(), counters: Default::default(), acme: Default::default(), recorder: Default::default(), validity: Default::default(), bound_hosts: Default::default(), uses: Default::default(), delete_window_days: deleted::WINDOW_DAYS.into(), purge_sink_grace_hours: deleted::SINK_GRACE_HOURS.into() })
+        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, gateway_links: opts.gateways, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, directory: opts.directory, github: opts.github, oidc: Default::default(), logins: Default::default(), answers: Default::default(), reads_per_minute: read::READS_PER_MINUTE.into(), code_refs: Default::default(), reach_holders: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, aws_server_id: Default::default(), crls, live_fps: Default::default(), issuer_keys: Default::default(), issuer_rotate_days: issuer::ROTATE_DAYS.into(), audit_keys: Default::default(), audit_rotate_days: audit_key::ROTATE_DAYS.into(), digests: Default::default(), counters: Default::default(), acme: Default::default(), recorder: Default::default(), validity: Default::default(), bound_hosts: Default::default(), uses: Default::default(), delete_window_days: deleted::WINDOW_DAYS.into(), purge_sink_grace_hours: deleted::SINK_GRACE_HOURS.into(), notifier: Default::default() })
     }
 
     pub fn links(&self) -> &Links {

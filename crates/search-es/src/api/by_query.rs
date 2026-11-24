@@ -413,6 +413,8 @@ pub struct Live {
     /// A reindex from remote's place in the node's limits, held until the run ends, wherever it
     /// runs (the request, or its background run).
     slot: parking_lot::Mutex<Option<super::remote::RemoteSlot>>,
+    /// Why the task was cancelled, when not through `_tasks/_cancel` ([`Live::set_reason`]).
+    reason: std::sync::OnceLock<String>,
 }
 
 /// A slice's share of a rate.
@@ -432,6 +434,7 @@ impl Live {
             children: parking_lot::Mutex::new(Vec::new()),
             cancelled,
             slot: parking_lot::Mutex::new(None),
+            reason: std::sync::OnceLock::new(),
         })
     }
 
@@ -451,6 +454,20 @@ impl Live {
             k.rethrottle(per_slice(rps, kids.len()));
         }
         self.changed.notify_waiters();
+    }
+
+    /// Records why the task is being cancelled (the node unloading its cluster), before its flag
+    /// is set: the run reports it as its `canceled` reason. The first reason given stays, and a
+    /// run already cancelled (a client's `_cancel` of it or of its parent) keeps its own.
+    pub fn set_reason(&self, reason: &str) {
+        if !self.is_cancelled() {
+            let _ = self.reason.set(reason.to_string());
+        }
+    }
+
+    /// The `canceled` reason a cancelled run reports (`BulkByScrollTask.Status.reasonCancelled`).
+    fn canceled_reason(&self) -> String {
+        self.reason.get().map_or_else(|| crate::tasks::USER_CANCEL_REASON.to_string(), Clone::clone)
     }
 
     fn is_cancelled(&self) -> bool {
@@ -829,7 +846,7 @@ fn touch(touched: &mut Vec<String>, uuid: &str) {
 /// `AbstractAsyncBulkByScrollAction` checks its task before failing (the same holds for a later
 /// batch's search, handled in each loop).
 fn cancelled_before_start(live: &Arc<Live>) -> Status {
-    let s = Status { slice_id: live.slice_id, canceled: Some("by user request".into()), ..Default::default() };
+    let s = Status { slice_id: live.slice_id, canceled: Some(live.canceled_reason()), ..Default::default() };
     publish(live, &s, &Throttle::new(live.clone()));
     s
 }
@@ -952,9 +969,9 @@ enum Stop {
 
 impl Stop {
     /// The task's `canceled` reason (`BulkByScrollTask.Status.reasonCancelled`).
-    fn reason(&self, max: std::time::Duration) -> String {
+    fn reason(&self, live: &Live, max: std::time::Duration) -> String {
         match self {
-            Stop::Cancelled => "by user request".into(),
+            Stop::Cancelled => live.canceled_reason(),
             Stop::Deadline => format!("ran longer than [{}] allows ({}s)", super::remote::MAX_DURATION, max.as_secs()),
         }
     }
@@ -994,7 +1011,7 @@ async fn reindex_remote(ctx: &Ctx<'_>, plan: &ReindexPlan, req: &super::by_query
     let mut src = match until_stopped(live, deadline, super::remote::RemoteSource::open(client, req, remote, max_docs)).await {
         Err(Stop::Cancelled) => return Ok((cancelled_before_start(live), Vec::new())),
         Err(stop) => {
-            let s = Status { canceled: Some(stop.reason(node.max_duration)), ..Default::default() };
+            let s = Status { canceled: Some(stop.reason(live, node.max_duration)), ..Default::default() };
             return Ok((s, Vec::new()));
         }
         Ok(r) => r?,
@@ -1016,7 +1033,7 @@ async fn reindex_remote(ctx: &Ctx<'_>, plan: &ReindexPlan, req: &super::by_query
             };
             let page = match page {
                 Err(stop) => {
-                    s.canceled = Some(stop.reason(node.max_duration));
+                    s.canceled = Some(stop.reason(live, node.max_duration));
                     // The task shows why it stopped (`BulkByScrollTask.Status.reasonCancelled`).
                     publish(live, &s, &throttle);
                     return Ok(());
@@ -1045,7 +1062,7 @@ async fn reindex_remote(ctx: &Ctx<'_>, plan: &ReindexPlan, req: &super::by_query
                 // A cancel (also the node unloading the cluster) stops between documents: nothing
                 // is written into a cluster being unloaded.
                 if live.is_cancelled() {
-                    s.canceled = Some(Stop::Cancelled.reason(node.max_duration));
+                    s.canceled = Some(Stop::Cancelled.reason(live, node.max_duration));
                     publish(live, &s, &throttle);
                     return Ok(());
                 }
@@ -1141,7 +1158,7 @@ pub async fn delete_by_query(ctx: &Ctx<'_>) -> EsResult<Reply> {
                 let mut stop = false;
                 loop {
                     if !throttle.wait().await {
-                        s.canceled = Some("by user request".into());
+                        s.canceled = Some(live.canceled_reason());
                         // The task shows why it stopped (`BulkByScrollTask.Status.reasonCancelled`).
                         publish(&live, &s, &throttle);
                         break;
@@ -1149,7 +1166,7 @@ pub async fn delete_by_query(ctx: &Ctx<'_>) -> EsResult<Reply> {
                     let batch = match scanner.next_batch(opts.batch as usize) {
                         Ok(b) => b,
                         Err(_) if live.is_cancelled() => {
-                            s.canceled = Some("by user request".into());
+                            s.canceled = Some(live.canceled_reason());
                             publish(&live, &s, &throttle);
                             break;
                         }
@@ -1233,7 +1250,7 @@ pub async fn update_by_query(ctx: &Ctx<'_>) -> EsResult<Reply> {
                 let mut stop = false;
                 loop {
                     if !throttle.wait().await {
-                        s.canceled = Some("by user request".into());
+                        s.canceled = Some(live.canceled_reason());
                         // The task shows why it stopped (`BulkByScrollTask.Status.reasonCancelled`).
                         publish(&live, &s, &throttle);
                         break;
@@ -1241,7 +1258,7 @@ pub async fn update_by_query(ctx: &Ctx<'_>) -> EsResult<Reply> {
                     let batch = match scanner.next_batch(opts.batch as usize) {
                         Ok(b) => b,
                         Err(_) if live.is_cancelled() => {
-                            s.canceled = Some("by user request".into());
+                            s.canceled = Some(live.canceled_reason());
                             publish(&live, &s, &throttle);
                             break;
                         }
@@ -1577,7 +1594,7 @@ pub async fn reindex(ctx: &Ctx<'_>) -> EsResult<Reply> {
                         let mut stop = false;
                 loop {
                             if !throttle.wait().await {
-                                s.canceled = Some("by user request".into());
+                                s.canceled = Some(live.canceled_reason());
                                 // The task shows why it stopped (`BulkByScrollTask.Status.reasonCancelled`).
                                 publish(&live, &s, &throttle);
                                 break;
@@ -1585,7 +1602,7 @@ pub async fn reindex(ctx: &Ctx<'_>) -> EsResult<Reply> {
                             let docs = match scanner.next_batch(batch as usize) {
                                 Ok(d) => d,
                                 Err(_) if live.is_cancelled() => {
-                                    s.canceled = Some("by user request".into());
+                                    s.canceled = Some(live.canceled_reason());
                                     publish(&live, &s, &throttle);
                                     break;
                                 }

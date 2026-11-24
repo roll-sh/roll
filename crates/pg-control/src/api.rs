@@ -297,13 +297,17 @@ struct ResetBody {
     /// Empty every user table after the reset (a structure-only branch).
     #[serde(default)]
     schema_only: bool,
+    /// Another branch of the project (id or name) to copy instead of the parent.
+    #[serde(default)]
+    from: Option<String>,
 }
 
-/// Back to the parent's current state, same endpoint and connection string.
+/// Back to the parent's current state (or `from`'s), same endpoint and connection string.
 async fn reset_branch(State(c): State<AppState>, Path((id, branch)): Path<(String, String)>, body: Option<Json<ResetBody>>) -> ApiResult<Value> {
     let started = std::time::Instant::now();
     let branch = c.branch_in(&id, &branch)?;
-    let branch = c.reset_branch(&id, &branch.id, body.is_some_and(|Json(b)| b.schema_only)).await?;
+    let Json(body) = body.unwrap_or_default();
+    let branch = c.reset_branch(&id, &branch.id, body.schema_only, body.from.as_deref()).await?;
     Ok(Json(json!({ "branch": branch, "took_ms": started.elapsed().as_millis() as u64 })))
 }
 

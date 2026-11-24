@@ -1467,6 +1467,7 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/secrets/projects/{project}/saas", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/saas", "secrets", ADMIN, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/saas/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    row("PATCH", "/v1/secrets/projects/{project}/saas/{id}", "secrets", ADMIN, one(&["project"], "project")),
     // Lists only the keys the caller's grant reaches (`Grants::reaches_key`, each key's name as
     // its index), so a rule limited to some keys sees those.
     row("GET", "/v1/secrets/projects/{project}/transit", "secrets", R, one(&["project"], "project")).filters_index(),
@@ -1488,6 +1489,7 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/secrets/projects/{project}/cas", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/cas", "secrets", ADMIN, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/cas/{id}/sign", "secrets", W, one(&["project"], "project")),
+    row("PUT", "/v1/secrets/projects/{project}/cas/{id}/chain", "secrets", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/secrets/projects/{project}/cas/{id}/certificates", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/cas/{id}/revoke", "secrets", W, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/cas/{id}", "secrets", ADMIN, one(&["project"], "project")),
@@ -1565,6 +1567,11 @@ static ROWS: &[Row] = &[
     // asks the caller's `Grant` for each event's environment (and for `environment=`'s), so a token
     // limited to some environments reads only theirs.
     row("GET", "/v1/secrets/projects/{project}/events", "secrets", R, one(&["project"], "project")).filters_itself(),
+    // A person's own notifications of those events (docs/secrets.md, "Being told"): whoever may read
+    // the project may be told of what they read; secrets asks their rights again for every event
+    // it sends, and lists or deletes only their own (all of the project's for its admins).
+    row("*", "/v1/secrets/projects/{project}/notifications", "secrets", R, one(&["project"], "project")),
+    row("*", "/v1/secrets/projects/{project}/notifications/", "secrets", R, one(&["project"], "project")),
     // Checking the audit log's chain answers where it breaks, never what a row says.
     row("GET", "/v1/secrets/projects/{project}/audit/verify", "secrets", R, one(&["project"], "project")),
     row("*", "/v1/secrets/projects/{project}/audit/sinks", "secrets", ADMIN, one(&["project"], "project")).reveals(&["secret"]),
@@ -1737,6 +1744,8 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/apps/import", "apps", R, Tgt::AnyGrant).lends(Lend::Each(apps_repo)),
     row("GET", "/v1/apps/projects/{project}/services", "apps", R, one(&["project"], "project")),
     row("GET", "/v1/apps/services/{id}/environments/{env}/variables/values", "apps", REVEAL, one(PG, "service")).env(EnvFrom::Param("env")),
+    // A page past the environment's gates: what its visitors' data shows.
+    row("GET", "/v1/apps/services/{id}/environments/{env}/fetch", "apps", REVEAL, one(PG, "service")).env(EnvFrom::Param("env")),
     // A static site's forms: what people sent through them is theirs to see only with reveal.
     row("GET", "/v1/apps/services/{id}/environments/{env}/forms", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
     row("GET", "/v1/apps/services/{id}/environments/{env}/forms/{form}/submissions", "apps", REVEAL, one(PG, "service")).env(EnvFrom::Param("env")),
@@ -1785,6 +1794,8 @@ static ROWS: &[Row] = &[
     row("DELETE", "/v1/previews/{id}", "previews", D, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     row("*", "/v1/previews/{id}/", "previews", M, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     row("POST", "/v1/previews/{id}/reset", "previews", D, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // Putting a restore point back replaces the data the preview has now, as a reset does.
+    row("POST", "/v1/previews/{id}/restore-points/{point}/restore", "previews", D, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     // A share link lets someone outside the team in, its token only in the answer: reveal, as the
     // bypass secret is. Listing (no tokens) is read and revoking one is delete, by the prefix.
     row("POST", "/v1/previews/{id}/shares", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
@@ -1817,6 +1828,13 @@ static ROWS: &[Row] = &[
     // visitors see, which can be copies of production's people (masked or not): reveal, as its
     // mail is.
     row("GET", "/v1/previews/{id}/fetch", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // An agent's run on a page (roll MCP's `previews_try`): what the page shows, as a visitor
+    // through roll sees it; its clicks can change the preview's own data: reveal.
+    row("POST", "/v1/previews/{id}/try", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    row("GET", "/v1/previews/{id}/try/{run}/screenshot", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // A look at a preview's data branch (its tables, a table's first rows): copies of
+    // production's (masked or not): reveal.
+    row("GET", "/v1/previews/{id}/data/{resource}", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     row("PUT", "/v1/previews/{id}/files", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     // The mail a preview's services sent, caught and never delivered (previews-next): it can hold
     // copies of production's people, so reveal, as the preview's env is.

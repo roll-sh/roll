@@ -1748,6 +1748,12 @@ impl Apps {
         };
         let log = &log;
         let mut plan_json = serde_json::to_value(&plan)?;
+        // What the repo's `.env.example` names and the environment doesn't set: said before the
+        // build, rather than found as a crash after it.
+        let unset: Vec<&String> = plan.variables.iter().filter(|n| !build_env.iter().any(|(k, _)| k == *n) && !runtime_only.contains(*n)).collect();
+        if !unset.is_empty() {
+            log.line(format!("the repo expects variables this environment doesn't set: {} (its example file names them)", unset.iter().map(|n| n.as_str()).collect::<Vec<_>>().join(", ")));
+        }
         // The images it builds on, to watch for their fixes (`watch_bases`).
         let base_text = if plan.provider == apps_build::Provider::Dockerfile { std::fs::read_to_string(context.join(&dockerfile)).unwrap_or_default() } else { plan.dockerfile.clone() };
         let bases = apps_build::base_images(&base_text);
@@ -1799,6 +1805,10 @@ impl Apps {
             }
             None => None,
         };
+        // Its build begins (Vercel's `deployment.created`, Netlify's "deploy started"): webhooks and
+        // chat can say "building…".
+        let (sid, en, did, data) = (svc.id.clone(), d.environment.clone(), d.id.clone(), json!({ "revision": d.revision, "trigger": d.trigger, "reused": reused.is_some() }));
+        let _ = self.db(move |s| s.add_event("deploy.started", &sid, &en, Some(&did), &data)).await;
         let (reused_from, began) = (reused.as_ref().map(|(from, _)| from.clone()), code_sql::now_ms());
         let image = if let Some((from, image)) = reused {
             log.line(format!("{from} was built from the same source, settings and build variables: its image goes on, no build"));
@@ -2319,6 +2329,21 @@ impl Apps {
         });
     }
 
+    /// Its instances' events since the last tick: scaling (with why) and crashes (with their
+    /// reason).
+    async fn record_notes(self: &Arc<Self>, l: &crate::live::EnvLive) {
+        let live = l.template().map(|t| t.deployment.clone());
+        for n in l.take_notes() {
+            // A new deployment's instance failing its start is its deploy's failure (said as
+            // `deploy.failed`), not an instance of what's live crashing.
+            if n.kind == "instance.crashed" && live.as_deref() != Some(n.deployment.as_str()) {
+                continue;
+            }
+            let (sid, e) = (l.service.clone(), l.env.clone());
+            let _ = self.db(move |s| s.add_event(n.kind, &sid, &e, Some(&n.deployment), &n.data)).await;
+        }
+    }
+
     /// An environment that went into a crash loop gets one event for it (until it leaves it).
     async fn note_crash_loop(self: &Arc<Self>, l: &crate::live::EnvLive) {
         let key = format!("{}/{}", l.service, l.env);
@@ -2383,6 +2408,9 @@ impl Apps {
         let Ok(all) = self.db(move |s| s.minutes(&sid, &e, now - back)).await else { return };
         let all: Vec<_> = all.into_iter().filter(|r| r.minute < now).collect();
         let rows: Vec<_> = all.iter().filter(|r| r.minute >= now - 5).cloned().collect();
+        if let Some(last) = rows.iter().filter(|r| r.minute == now - 1).map(|r| r.requests).next() {
+            self.judge_attack(&l.service, &l.env, &tpl.deployment, last).await;
+        }
         let mut firing: Vec<(&'static str, serde_json::Value)> = Vec::new();
         if a.memory_pct > 0 && rows.len() >= 5 {
             let share = |r: &crate::store::MinuteRow| r.memory_bytes as f64 / r.instances.max(1) as f64 / (limit_mb as f64 * 1048576.0) * 100.0;
@@ -2546,6 +2574,7 @@ impl Apps {
             // Each environment's tick on its own task: one waiting for a cold start to finish
             // doesn't hold up the others.
             for l in self.lives().into_iter().filter(|l| self.owns(&l.service)) {
+                self.record_notes(&l).await;
                 self.note_crash_loop(&l).await;
                 if l.ticking.swap(true, Ordering::SeqCst) {
                     continue;

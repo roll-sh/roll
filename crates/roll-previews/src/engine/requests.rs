@@ -62,6 +62,11 @@ impl Engine {
         }
         self.store.resolve_note(id, note, by)?;
         self.store.log(id, &format!("{by} resolved a note on its page"))?;
+        // Said on the change too: its pull request and the note's Slack thread hear it. Best
+        // effort: the page has it resolved either way.
+        if let Err(e) = self.source.note_resolved(change, note, by).await {
+            tracing::warn!(preview = %id, error = %e, "previews: saying a note was resolved on its change");
+        }
         Ok(())
     }
 
@@ -559,6 +564,29 @@ impl Engine {
         self.store.log(id, &format!("{by} accepted its regressions against main at {}", short(&r.head)))?;
         self.report(r.clone()).await;
         self.store.view(self.store.row(id)?)
+    }
+
+    /// `GET …/{id}/data/{resource}?table=`: a look at a data branch from the sheet (Neon's Tables,
+    /// Supabase's table editor): its tables, or a table's first rows, read as the branch's own
+    /// role and read-only, so its masks hold. Only a branch that's ready and masked with today's
+    /// rules, as `connect` gives.
+    pub async fn browse(&self, id: &str, resource: &str, table: Option<&str>) -> Result<crate::Browse> {
+        let r = self.store.row(id)?;
+        if r.desired == Desired::Deleted {
+            return Err(Error::Conflict("the preview is being deleted".into()));
+        }
+        let s = self.store.settings(&r.project_id)?;
+        let res = self.store.resources(id)?.into_iter().find(|x| format!("{}:{}", x.kind.as_str(), x.parent) == resource).ok_or_else(|| Error::NotFound(format!("the preview has no data branch {resource}")))?;
+        let Some(branch) = res.r#ref.clone() else { return Err(Error::Conflict("it isn't branched yet".into())) };
+        if res.state != ResourceState::Ready || self.store.mask_digest(id, res.kind, &res.parent)?.unwrap_or_default() != mask_digest(&s, &res) {
+            return Err(Error::Conflict("it's being made or masked: look again in a moment".into()));
+        }
+        let b = self.brancher(res.kind).map_err(|e| Error::Conflict(format!("{e:#}")))?;
+        match b.browse(&res.parent, &branch, table).await {
+            Ok(Some(v)) => Ok(v),
+            Ok(None) => Err(Error::Conflict(format!("a {} branch can't be looked at here yet: connect to it (roll preview connect)", res.kind.as_str()))),
+            Err(e) => Err(Error::Conflict(format!("{e:#}"))),
+        }
     }
 
     /// Each data branch's connection, as the preview's services get it (Neon's connection

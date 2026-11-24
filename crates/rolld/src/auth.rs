@@ -49,6 +49,7 @@ pub const RULES: &[Rule] = &[
     // It (and the 404s of products that are off) is merged in front of the gate in main.rs.
     Rule { route: "/v1/info", access: Access::Public("version, node and products on, for the dashboard before sign-in") },
     Rule { route: "/v1/previews/hooks", access: Access::Public("previews' deploy hooks: the secret in the URL (`rlb_`, a hash kept); anything but a live hook is a 404") },
+    Rule { route: "/v1/previews/{id}/oidc", access: Access::Public("roll's word for a preview's own service (its OIDC token): the address is the service's own (derived per preview and service, masked in what it shows); anything but a live trusted preview's is a 404 or 403") },
     Rule { route: "/v1/previews/{id}/otlp", access: Access::Public("a preview's OpenTelemetry intake: its services' SDKs post spans with the token in the path (derived per preview, masked in what it shows); anything but a live preview's token is a 404") },
     Rule { route: "/v1/previews/{id}/screenshot.png", access: Access::Public("a public preview's screenshot behind a signed, expiring link (GitHub fetches the pull request comment's image anonymously)") },
     // roll code has owners and tokens of its own (docs/code/http-api.md "Auth"): public repos and

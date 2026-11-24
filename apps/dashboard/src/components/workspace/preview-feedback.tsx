@@ -15,15 +15,18 @@ export interface PreviewFeedback {
    * the note only if the person keeps it. */
   errors?: string[];
   requests?: string[];
+  /** What the reviewer did before the note, oldest first (`12s before · click button.pay`): no
+   * value they typed. */
+  steps?: string[];
   /** The browser it was left in (`Chrome 131 on macOS`). */
   browser?: string;
 }
 
 /** The page's own words, kept to one inert line each. */
-function contextList(raw: string | null): string[] {
+function contextList(raw: string | null, most = 5): string[] {
   try {
     const v: unknown = JSON.parse(raw ?? "[]");
-    return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string").slice(-5).map((x) => x.replace(/[`\r\n]/g, "").slice(0, 200)).filter(Boolean) : [];
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string").slice(-most).map((x) => x.replace(/[`\r\n]/g, "").slice(0, 200)).filter(Boolean) : [];
   } catch {
     return [];
   }
@@ -48,9 +51,15 @@ export function browserOf(ua: string): string | undefined {
 
 const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
 
-/** How much went wrong on the page: `1 error, 2 failed requests`. */
+/** What happened on the page: `3 steps, 1 error, 2 failed requests`. */
 export function contextSummary(f: PreviewFeedback): string {
-  return [f.errors?.length ? plural(f.errors.length, "error") : "", f.requests?.length ? plural(f.requests.length, "failed request") : ""].filter(Boolean).join(", ");
+  return [
+    f.steps?.length ? plural(f.steps.length, "step") : "",
+    f.errors?.length ? plural(f.errors.length, "error") : "",
+    f.requests?.length ? plural(f.requests.length, "failed request") : "",
+  ]
+    .filter(Boolean)
+    .join(", ");
 }
 
 /** The feedback from `?fb_path=…&fb_selector=…&fb_note=…` (the button opens roll with it), or
@@ -66,6 +75,7 @@ export function feedbackFrom(query: string): PreviewFeedback | undefined {
     viewport: s("fb_viewport") || undefined,
     note: s("fb_note"),
     errors: contextList(params.get("fb_errors")),
+    steps: contextList(params.get("fb_steps"), 20),
     requests: contextList(params.get("fb_requests")),
     browser: browserOf(s("fb_ua").slice(0, 300)),
   };
@@ -108,8 +118,10 @@ export function feedbackBody(p: Preview, f: PreviewFeedback, note: string, withC
   const body = `**Feedback on the preview** · ${where}${selector ? ` · \`${selector}\`` : ""}\n\n${note.trim().slice(0, 4000)}\n\n<sub>${meta}</sub>`;
   const summary = contextSummary(f);
   if (!withContext || !summary) return body;
+  const did = (f.steps ?? []).map((x, i) => `${i + 1}. \`${x}\``);
   const lines = [...(f.errors ?? []).map((e) => `- error: \`${e}\``), ...(f.requests ?? []).map((r) => `- \`${r}\``)];
-  return `${body}\n\n<details><summary>On the page: ${summary}</summary>\n\n${lines.join("\n")}\n\n</details>`;
+  const parts = [did.length ? `What they did:\n\n${did.join("\n")}` : "", lines.join("\n")].filter(Boolean);
+  return `${body}\n\n<details><summary>On the page: ${summary}</summary>\n\n${parts.join("\n\n")}\n\n</details>`;
 }
 
 /** The note the preview page's button sent, to post on the change as a comment review. */
@@ -172,10 +184,10 @@ export function FeedbackForm({ preview: p, feedback: f, onPosted }: { preview: P
         <div className="space-y-1 text-[11.5px]">
           <label className="flex items-center gap-2 text-soft">
             <input type="checkbox" checked={withContext} onChange={(e) => setWithContext(e.target.checked)} className="accent-accent" />
-            Include what went wrong on the page ({summary})
+            Include what happened on the page ({summary})
           </label>
           <ul className={`ml-5 space-y-0.5 font-mono text-[10.5px] break-words ${withContext ? "text-subtle" : "text-subtle/50 line-through"}`}>
-            {[...(f.errors ?? []), ...(f.requests ?? [])].map((x) => (
+            {[...(f.steps ?? []), ...(f.errors ?? []), ...(f.requests ?? [])].map((x) => (
               <li key={x}>{x}</li>
             ))}
           </ul>

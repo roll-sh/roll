@@ -11,6 +11,34 @@ use serde_json::{Value, json};
 /// secrets: every route 404s) gives its previews no environment and nothing to resolve.
 pub struct Secrets(pub Api);
 
+/// roll secrets' issuer for a preview's own services (in process: no route signs a token), only
+/// for a repo the preview's project stands for (`Workspace::trusts`, as roll apps' services are
+/// asked); roll secrets refuses a fork's preview itself.
+pub struct PreviewIssuer {
+    pub secrets: Arc<roll_secrets::Secrets>,
+    pub workspace: Arc<roll_workspace::Workspace>,
+}
+
+#[async_trait::async_trait]
+impl roll_previews::ports::Issuer for PreviewIssuer {
+    async fn issue(&self, project: &str, repo: &str, preview: &str, service: &str, aud: &str, ttl: std::time::Duration) -> anyhow::Result<Option<String>> {
+        let (secrets, ws) = (self.secrets.clone(), self.workspace.clone());
+        let subject = roll_secrets::Subject::Preview { project: project.to_string(), preview: preview.to_string(), service: service.to_string() };
+        let (project, repo, aud) = (project.to_string(), repo.to_string(), aud.to_string());
+        tokio::task::spawn_blocking(move || {
+            let p = ws.get(roll_workspace::Scope::All, &project).map_err(|e| anyhow::anyhow!("{e}"))?;
+            if !ws.trusts(&p, roll_workspace::Kind::Repo, &repo) {
+                anyhow::bail!("project {project} doesn't stand for {repo}, so roll signs no token for its previews");
+            }
+            if !secrets.issues() {
+                return Ok(None);
+            }
+            Ok(Some(secrets.issue(subject, &aud, ttl)?))
+        })
+        .await?
+    }
+}
+
 /// Who may name an environment's keys in previews' rules: roll secrets' own answer for the
 /// request's caller (as roll apps asks it).
 pub struct SecretsReveal(pub Arc<roll_secrets::Secrets>);
