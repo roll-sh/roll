@@ -117,6 +117,7 @@ DELETE /v1/secrets/projects/{project}/cas/{id}                                 a
 PATCH /v1/secrets/projects/{project}/cas/{id}/acme                             an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/cas/{id}/acme/eab                          an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/cas/{id}/acme/eab/{eab}                  an outside integration's setup: an admin's, with its credentials
+PUT /v1/secrets/projects/{project}/cas/{id}/chain                              a person's call: installing a CA chain
 POST /v1/secrets/projects/{project}/cas/{id}/revoke                            an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/cas/{id}/sign                              an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/cloud-accounts                             an outside integration's setup: an admin's, with its credentials

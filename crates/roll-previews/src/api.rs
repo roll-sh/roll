@@ -718,7 +718,26 @@ struct ErrorsQuery {
 async fn errors(AxState(e): S, Path(id): Path<String>, Query(q): Query<ErrorsQuery>) -> crate::Result<Json<Value>> {
     check_id(&id)?;
     let minutes = crate::engine::error_span(q.minutes.unwrap_or(60));
-    Ok(Json(json!({ "minutes": minutes, "groups": e.errors(&id, minutes).await? })))
+    let mut v = json!({ "minutes": minutes, "groups": e.errors(&id, minutes).await? });
+    mark_outside(&e, &id, &mut v, Some("groups"));
+    Ok(Json(v))
+}
+
+/// A fork's preview's words (its code wrote them: errors, log lines, spans, routes) marked as
+/// outside text, which roll MCP's lockdown keeps from a model: each object of `v`'s list `key`,
+/// or `v` itself.
+fn mark_outside(e: &crate::Engine, id: &str, v: &mut Value, key: Option<&str>) {
+    if !e.store.row(id).is_ok_and(|r| !r.trusted) {
+        return;
+    }
+    match key {
+        Some(k) => {
+            for o in v[k].as_array_mut().into_iter().flatten().filter(|o| o.is_object()) {
+                o["outside"] = json!(true);
+            }
+        }
+        None => v["outside"] = json!(true),
+    }
 }
 
 /// How many errors its services wrote in the span (`{minutes, count}`): a list's rows, with
@@ -851,17 +870,23 @@ struct TracesQuery {
 
 async fn traces(AxState(e): S, Path(id): Path<String>, Query(q): Query<TracesQuery>) -> crate::Result<Json<Value>> {
     check_id(&id)?;
-    Ok(Json(e.traces(&id, q.minutes.unwrap_or(60)).await?))
+    let mut v = e.traces(&id, q.minutes.unwrap_or(60)).await?;
+    mark_outside(&e, &id, &mut v, Some("traces"));
+    Ok(Json(v))
 }
 
 async fn routes(AxState(e): S, Path(id): Path<String>, Query(q): Query<TracesQuery>) -> crate::Result<Json<Value>> {
     check_id(&id)?;
-    Ok(Json(e.routes(&id, q.minutes.unwrap_or(60)).await?))
+    let mut v = e.routes(&id, q.minutes.unwrap_or(60)).await?;
+    mark_outside(&e, &id, &mut v, Some("routes"));
+    Ok(Json(v))
 }
 
 async fn trace(AxState(e): S, Path((id, t)): Path<(String, String)>) -> crate::Result<Json<Value>> {
     check_id(&id)?;
-    Ok(Json(e.trace(&id, &t).await?))
+    let mut v = e.trace(&id, &t).await?;
+    mark_outside(&e, &id, &mut v, Some("spans"));
+    Ok(Json(v))
 }
 
 #[derive(serde::Deserialize)]
@@ -1052,7 +1077,9 @@ async fn logs(AxState(e): S, Path(id): Path<String>, Query(q): Query<LogsQuery>)
     let lines = q.lines.unwrap_or(200).clamp(1, 2000);
     if !matches!(q.follow.as_deref(), Some("1" | "true" | "yes")) {
         let (service, lines) = e.logs(&id, q.service.as_deref(), lines).await?;
-        return Ok(Json(json!({ "service": service, "lines": lines })).into_response());
+        let mut v = json!({ "service": service, "lines": lines });
+        mark_outside(&e, &id, &mut v, None);
+        return Ok(Json(v).into_response());
     }
     use axum::response::sse::{Event, KeepAlive, Sse};
     let (service, rx) = e.follow(&id, q.service.as_deref(), lines).await?;

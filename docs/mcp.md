@@ -159,7 +159,8 @@ through the gate as the caller. Those lists are quiet: one that would ask a pers
 `ask` rules, or the policy's `agents_ask`) is skipped, not put to them, and the audit log has each
 as `roll_find:<tool>`. The operator's inspector sees `roll_find`'s own call and answer, and hidden
 text in names is made visible as in every answer. `?tools=` and `exclude_tools=` pick or drop it. Matches come exact first, then by
-prefix, then by part, at most 25. Each says its kind, id, name and `read: {tool, arguments}`, the
+prefix, then by part, at most 25. Its text writes each name and id as a JSON string, so a name someone
+else chose can't pass for another line. Each says its kind, id, name and `read: {tool, arguments}`, the
 ordinary tool that goes on from it, and, where the kind has a dashboard page, its `url` there (on
 the dashboard's address, `web_url`) to give a person, as Linear's and GitHub's results link theirs.
 A match's `url` pasted back into `roll_find` is the same read (a test holds every kind to it). A list that refused or failed is in `skipped`. A link is
@@ -392,9 +393,14 @@ How it works:
   - its changes from forks (`!trusted`);
   - reviews and review comments whose author can't push: from GitHub by the same
     association, and from roll's own API when the caller may comment but not write (a public
-    repo's reader).
-- In lockdown, every result has the `title`, `body`, `description`, `message` and `text` of those
-  records replaced with a notice, wherever they sit in the answer.
+    repo's reader);
+  - roll previews' fork previews (`!trusted`): the preview, its error groups, traces and spans,
+    route times and logs.
+- In lockdown, every result has the `title`, `body`, `description`, `message`, `text`, `line`,
+  `lines` (each line, so the list keeps its shape), `sample` and `name` of those records replaced
+  with a notice, wherever they sit in the answer: a fork's code chooses its log lines, error
+  samples and route and span names as much as its title. (An `agent_feedback` alert names its
+  connection in `connection`, a person's choice, which stays.)
 - A tool whose answer anyone outside can write names those fields itself (`Tool::outside`):
   `apps_form_submissions` withholds every submission's `fields`, since anyone can submit a site's
   form, and so do `apps_events` and `apps_activity` (a `form.submitted` event names the fields the
@@ -747,8 +753,10 @@ alone, as at the gate.
   list answer is about 40% smaller than pretty-printed). A list of objects (the answer, or its one
   list beside `key: value` lines for its other fields) is a tab-separated table instead, whose
   header names each column once: a plain string as itself, `null` empty, anything else (an empty or
-  quoted string, one with a tab or a line break, a list, an object) as compact JSON, so a cell never
-  spills. Whichever of the two is shorter is sent; on the sweep's recorded answers a list of 20 or
+  quoted string, one with any control character, a line or paragraph separator or a character a
+  person can't see; a list, an object) as JSON, keys too, so a cell never spills or passes for
+  another row (a fork's preview title can't fake one). A table past the cut ends after its last
+  whole row, so no id looks whole when it isn't. Whichever of the two is shorter is sent; on the sweep's recorded answers a list of 20 or
   more rows came out about 40% smaller (the audit log 53%, apps' usage 74%), and rows with big nested
   fields gain little. `structuredContent` stays the exact JSON for clients that read it. The text is
   cut at 48 KiB (inline in Claude Code, which moves an answer past 50,000 characters or
@@ -1678,9 +1686,13 @@ credential in a tool's arguments, where roll makes one instead). Both are lines 
 contract (apps, workspace, previews, queues, secrets) and fails on a body field or query parameter
 the route's tool doesn't take and no line explains, as `no-tool.txt` does for routes. A body the
 contract names by type (`EnvironmentPut`, `NewService`, `Settings`, `SetSecret`) is read from its
-`type X = { … }` (comments out, `;` or `,` between fields), and a route two tools share
+`type X = …` (comments out, `;` or `,` between fields; `Omit<X, "a">`, `Patch<X>`, `A & B` and
+every alternative of `A | B` written out, `apps_plan`'s three kinds of source and
+`secrets_ensure_environment`'s `Omit<NewEnvironment, "slug"> & {replace?}` among them), and a body
+named by a type the contract doesn't define fails the test rather than check nothing, and a route two tools share
 (`secrets_set` and `secrets_link`) counts a field once either takes it. An object argument's
-description names every key the contract gives it (a firewall rule's `attacks`, added by apps #860,
+description names every key the contract writes out for it (a named type such as `Run`, ~50 keys,
+is described by where it's shown instead) (a firewall rule's `attacks`, added by apps #860,
 was the one it found), so a key a product adds inside an object isn't one agents never hear of. Until 2026-11-24 named
 bodies weren't read at all, so 46 fields had gone unchecked; that pass added apps environments'
 `checks`, `pause_schedule`, `approvals`, `split`, `mirror`, `snippets`, `badge` and

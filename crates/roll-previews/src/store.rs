@@ -3331,6 +3331,7 @@ impl Store {
             head: r.head,
             reaches: settings.egress_for(r.trusted),
             trusted: r.trusted,
+            outside: !r.trusted,
             desired: r.desired,
             state: r.state,
             error: r.error,
