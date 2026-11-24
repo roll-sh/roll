@@ -1949,8 +1949,9 @@ async fn create_sync(State(s): S, Who(c): Who, Path(project): Path<String>, b: B
     Ok(secret_response(created(blocking(s, move |s| s.create_sync(&project, n, &c)).await?)))
 }
 
-async fn delete_sync(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
-    blocking(s, move |s| s.delete_sync(&project, &id, &c)).await?;
+async fn delete_sync(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>, Query(q): Q) -> crate::Result<StatusCode> {
+    let remove = flag(&q, "remove", false);
+    blocking(s, move |s| s.delete_sync(&project, &id, remove, &c)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

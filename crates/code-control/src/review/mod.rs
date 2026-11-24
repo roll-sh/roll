@@ -774,6 +774,11 @@ impl Code {
                 self.deliver_comment(r, c, t, cm);
             }
         }
+        // A preview's note or a reply to one: its backend tells whoever it concerns.
+        let backend = self.previews.read().clone();
+        if let Some(b) = backend {
+            b.reviewed(c, &review).await;
+        }
         self.emit_change(&self.change_or_404(&c.id)?);
         review.threads = Some(threads);
         Ok(review)

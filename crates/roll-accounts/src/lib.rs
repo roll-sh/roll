@@ -833,6 +833,11 @@ impl Accounts {
 
     // ── users ──
 
+    /// The account a roll handle names (`usr_…`), if any.
+    pub fn user_by_handle(&self, handle: &str) -> Result<Option<String>> {
+        Ok(self.db.read(|c| c.query_row("SELECT id FROM users WHERE handle = ?", [handle], |r| r.get(0)).optional())?)
+    }
+
     pub fn user(&self, id: &str) -> Result<User> {
         self.db.read(|c| load_user(c, id))?.ok_or_else(|| Error::NotFound(format!("no user {id}")))
     }

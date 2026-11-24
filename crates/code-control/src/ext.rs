@@ -26,6 +26,11 @@ pub trait PreviewBackend: Send + Sync {
     /// `by` (someone who can write to the change's repo: the caller checked) asks `action` of the
     /// change's preview (`@roll preview …`): what was done, said for the answer. Backends without
     /// one can't.
+    /// A review was just made on `change` and stored (its event sent): a preview's notes and
+    /// their replies are reviews, so the backend can tell people about them. Best effort: nothing
+    /// waits on it, and it never fails the review.
+    async fn reviewed(&self, _change: &Change, _review: &crate::review::Review) {}
+
     async fn act(&self, _change: &Change, _action: PreviewAction, _by: &str) -> anyhow::Result<String> {
         anyhow::bail!("this change's previews can't be acted on from a comment")
     }
