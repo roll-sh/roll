@@ -397,6 +397,23 @@ KEY_MINT=$(curl -s -o /dev/null -w '%{http_code}' -XPOST -H "Authorization: ApiK
 APP_WAL=$(docker run --rm --name roll-previews-psqltest --network host postgres:18-alpine psql "$APP_DB" -Atc "SELECT length(pg_read_binary_file('pg_wal/' || pg_walfile_name(pg_current_wal_lsn())))" 2>&1 | head -1 || true)
 case "$APP_WAL" in *"permission denied"*) ;; *) echo "the branch's role should be refused the WAL: $APP_WAL"; exit 1;; esac
 APP_MASKED=$(docker run --rm --name roll-previews-psqltest --network host postgres:18-alpine psql "$APP_DB" -Atc "SELECT email FROM users WHERE id = 1" 2>&1 | head -1 || true)
+# A restore point (roll preview points): a table made after it is gone once it's put back, on
+# the same DATABASE_URL (pg-control's reset from the point: same endpoint and role).
+psql_app() { docker run --rm --name roll-previews-psqltest --network host postgres:18-alpine psql "$APP_DB" -Atc "$1" 2>&1 | head -1; }
+POINT=$(api POST "/v1/previews/$PV/restore-points" '{"label":"before the live check"}' | jq_ "d['id']")
+case "$POINT" in rp_*) ;; *) echo "a restore point should be saved: $POINT"; exit 1;; esac
+ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview points "$PV" | grep -q "$POINT" || { echo "roll preview points should list $POINT"; exit 1; }
+psql_app "CREATE TABLE after_the_point (id int)" >/dev/null
+TR0=$(now_ms)
+api POST "/v1/previews/$PV/restore-points/$POINT/restore" >/dev/null
+for _ in $(seq 1 240); do
+  api GET "/v1/previews/$PV/activity" | jq_ "any('back as restore point' in a['message'] for a in d[:10])" | grep -q True && [ "$(api GET "/v1/previews/$PV" | jq_ "d['state']")" = ready ] && break
+  sleep 0.5
+done
+RESTORE_MS=$(( $(now_ms) - TR0 ))
+RESTORED=$(psql_app "SELECT coalesce(to_regclass('public.after_the_point')::text, 'gone') || ' ' || (SELECT email FROM users WHERE id = 1)")
+[ "$RESTORED" = "gone $APP_MASKED" ] || { echo "putting the point back should drop what came after it, still masked, on the same DATABASE_URL: $RESTORED"; api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d[:8]]"; exit 1; }
+api DELETE "/v1/previews/$PV/restore-points/$POINT" >/dev/null
 # Logs are pushed: a request made while following shows up on the stream.
 FOLLOW="$HOME_DIR/follow.txt"
 curl -sN --max-time 20 "http://$API/v1/previews/$PV/logs?follow=1&lines=1" >"$FOLLOW" &
@@ -1223,6 +1240,7 @@ cat <<EOF
 | The migration's risks the preview names | ${RISKS:-} |
 | The teardown as the preview went (its exit code, with the branch's URL) / runs | 3 / $TEARDOWN |
 | The service's Postgres role / its WAL read / users.email as it reads it | $(echo "$APP_DB" | sed -E 's#^postgres://([^:]+):.*#\1#') / refused / $APP_MASKED |
+| A restore point put back (a table made after it gone, same DATABASE_URL, still masked) | $RESTORE_MS ms |
 | Postgres: the parent's data directory / the branch's (a full copy on this disk) | ${PG_PARENT_KB} KiB / ${PG_BRANCH_KB} KiB |
 | First visit (cold start of the service container, image cached) | $((T3 - T2)) ms |
 | Next visit (warm) | $((T5 - T4)) ms |
