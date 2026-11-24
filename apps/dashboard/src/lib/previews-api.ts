@@ -611,6 +611,12 @@ export const previewsApi = {
   wake: (id: string) => call<Preview>("POST", `${one(id)}/wake`),
   /** Re-branches every resource, or the ones named (`"<kind>:<parent>"`). */
   reset: (id: string, resources?: string[]) => call<Preview>("POST", `${one(id)}/reset`, resources?.length ? { resources } : {}),
+  /** Its restore points (its Postgres data saved, to put back later), oldest first, and how many it may keep. */
+  restorePoints: (id: string) => call<{ points: RestorePoint[]; max: number }>("GET", `${one(id)}/restore-points`),
+  savePoint: (id: string, label: string) => call<RestorePoint>("POST", `${one(id)}/restore-points`, { label }),
+  /** Puts the data back as the point left it (its next converge; the services sleep meanwhile, no seed). */
+  restorePoint: (id: string, point: string) => call<Preview>("POST", `${one(id)}/restore-points/${encodeURIComponent(point)}/restore`),
+  deletePoint: (id: string, point: string) => call<null>("DELETE", `${one(id)}/restore-points/${encodeURIComponent(point)}`),
   /** Its latest requests through roll, newest first (roll's runtime; a roll apps instance's are roll apps'). */
   requests: (id: string) => call<{ requests: RequestLine[] }>("GET", `${one(id)}/requests`),
   /** What its running services use right now (cores of CPU, resident memory, the memory each runs with). */
@@ -720,6 +726,15 @@ export async function followLogs(id: string, service: string, lines: number, onL
 /** A preview's shell's screen: base64 chunks, the scrollback first, then `onClosed`. */
 export function followShell(id: string, sh: string, opts: ScreenHandlers): () => void {
   return followScreen(`${ROLL_API}${one(id)}/shell/sessions/${encodeURIComponent(sh)}/screen`, () => apiHeaders() ?? {}, opts);
+}
+
+/** A restore point: the preview's data saved at `at` (ms), `data` naming what it holds (`<kind>:<parent>`). */
+export interface RestorePoint {
+  id: string;
+  label: string;
+  by: string;
+  at: number;
+  data: string[];
 }
 
 /** A resource as the reset body and the settings name it. */
