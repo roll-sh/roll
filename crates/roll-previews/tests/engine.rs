@@ -504,6 +504,37 @@ async fn a_secret_value_its_pages_serve_is_named_on_its_record() {
     assert!(said.len() == 1 && said[0].contains("STRIPE_KEY in /assets/app.js") && !said[0].contains("sk_test"), "{said:?}");
 }
 
+/// An agent's run on a page (`POST …/try`): what it showed, masked as logs are, its picture
+/// behind its run's id for a while (another preview's id gets nothing), a bad step refused.
+#[tokio::test]
+async fn an_agents_run_on_a_page_answers_what_it_showed_masked() {
+    use tower::ServiceExt;
+    let e = env(json!({ "enabled": true }));
+    e.secrets.values.lock().push(("STRIPE_KEY".into(), "sk_test_51Hx9abc".into()));
+    e.code.open(change("chg_try", 4));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_try").unwrap().unwrap();
+    *e.apps.tried.lock() = Some(roll_previews::ports::Tried { png: Some(b"\x89PNG...".to_vec()), status: 200, step_failed: None, text: "Cart\nkey sk_test_51Hx9abc".into(), errors: vec!["TypeError".into()] });
+    let call = |req: axum::http::Request<axum::body::Body>| {
+        let router = roll_previews::api::router(e.engine.clone());
+        async move {
+            let resp = router.oneshot(req).await.unwrap();
+            (resp.status(), axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap())
+        }
+    };
+    let post = |body: serde_json::Value| axum::http::Request::post(format!("/v1/previews/{}/try", p.id)).header("content-type", "application/json").body(axum::body::Body::from(body.to_string())).unwrap();
+    let (status, body) = call(post(json!({ "path": "/cart", "steps": [{ "click": "#add" }, { "press": "Enter" }] }))).await;
+    assert_eq!(status, 200);
+    let run: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!((run["status"].clone(), run["text"].clone(), run["errors"].clone()), (json!(200), json!("Cart\nkey ***"), json!(["TypeError"])));
+    let picture = |id: &str| axum::http::Request::get(format!("/v1/previews/{id}/try/{}/screenshot", run["run"].as_str().unwrap())).body(axum::body::Body::empty()).unwrap();
+    let (status, png) = call(picture(&p.id)).await;
+    assert!(status == 200 && png.starts_with(b"\x89PNG"));
+    assert_eq!(call(picture("pv_other00000")).await.0, 404, "another preview's id gets nothing");
+    assert!(call(post(json!({ "path": "/", "steps": [{ "eval": "alert(1)" }] }))).await.0.is_client_error(), "a step it doesn't know");
+    assert_eq!(call(post(json!({ "path": "//evil.example", "steps": [] }))).await.0, 400, "a path of its own");
+}
+
 /// A fork's preview is marked `outside`, and so are its error groups and its logs (its traces,
 /// spans and routes too): its title and what its code wrote are text from people who can't push,
 /// which roll MCP's lockdown keeps from a model; a trusted preview isn't.
