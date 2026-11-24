@@ -7,10 +7,12 @@
 //!   serves itself, redirects only within it, and covers that origin alone. Controlling one host
 //!   or port of a domain proves nothing about its others.
 //!
-//! A crawl whose every origin its owner verified gets the verified limits. Verifications, like
-//! each owner's crawls of unverified sites, are kept by the host outside any cluster's state
-//! ([`Sites`]: `search-control`'s catalogue, shared by the fleet), so no new cluster or connector
-//! starts them over.
+//! A crawl whose every origin its cluster verified gets the verified limits. Verifications are
+//! each cluster's (its owner's token, the same in all their clusters, so one published record
+//! proves the site for each in one step); they're kept by the host outside the cluster's state
+//! ([`Sites`]: `search-control`'s catalogue, shared by the fleet), with each owner's crawls of
+//! unverified sites, so no connector starts them over and no tenant writes one through the
+//! cluster's API.
 
 use super::fetch::Fetcher;
 use super::hosts::site_of;
@@ -31,9 +33,10 @@ const FILE_BYTES: usize = 4 << 10;
 /// haven't verified, counted across the fleet.
 #[async_trait::async_trait]
 pub trait Sites: Send + Sync {
-    /// Of `origins` (a crawl's, `scheme://host[:port]`), those `owner` has verified, by the
-    /// origin's file or its domain's DNS record (and whose last check still holds).
-    async fn verified(&self, owner: &str, origins: &[String]) -> Vec<String>;
+    /// Of `origins` (a crawl's, `scheme://host[:port]`), those cluster `cluster` (its catalogue
+    /// id) has verified, by the origin's file or its domain's DNS record (and whose last check
+    /// still holds).
+    async fn verified(&self, cluster: &str, origins: &[String]) -> Vec<String>;
     /// Records a crawl of the unverified `sites` by `owner` at `now_ms`, or (recording nothing)
     /// the first that had `per_day` crawls by that owner in 24 hours and when the next may
     /// start. `Err`: the record couldn't be read or written.
@@ -100,41 +103,65 @@ pub fn covers(kind: Kind, key: &str, origin: &str) -> bool {
     }
 }
 
+/// A check's outcome.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Checked {
+    /// The token is published.
+    Proven,
+    /// It isn't, and why: a failed check.
+    Failed(String),
+    /// Nothing was asked (the site's request turn was too far off): neither a pass nor a failure.
+    NotChecked(String),
+}
+
 /// Checks that `token` is published for verification `key` of `kind`: a TXT record on the
 /// domain, or the origin's file (read through the crawler's own fetch path and egress check,
-/// each request in the site's turn `floor` apart, redirects followed only within the origin).
-pub async fn check(egress: &Egress, kind: Kind, key: &str, token: &str, floor: Duration) -> Result<(), String> {
+/// never from a host of `blocked`, each request in the site's turn `floor` apart, redirects
+/// followed only within the origin). What a failure says is coarse (`unreachable`, not the
+/// file), so a check can't be used to tell how a port answers.
+pub async fn check(egress: &Egress, blocked: &[String], kind: Kind, key: &str, token: &str, floor: Duration) -> Checked {
     if kind == Kind::Domain {
         return match txt_has(key, token).await {
-            true => Ok(()),
-            false => Err(format!("no TXT record {TXT_PREFIX}<token> on [{key}] (DNS changes can take a while to be seen)")),
+            true => Checked::Proven,
+            false => Checked::Failed(format!("no TXT record {TXT_PREFIX}<token> on [{key}] (DNS changes can take a while to be seen)")),
         };
     }
-    let file = Link::parse(&format!("{key}{FILE}"), None).ok_or_else(|| format!("[{key}] isn't an origin"))?;
-    let fetcher = Fetcher::new(egress.clone(), None)?;
+    let Some(file) = Link::parse(&format!("{key}{FILE}"), None) else { return Checked::Failed(format!("[{key}] isn't an origin")) };
+    if super::is_blocked(&file, blocked) {
+        return Checked::Failed(format!("[{key}] is a host the crawler never fetches"));
+    }
+    let fetcher = match Fetcher::new(egress.clone(), None) {
+        Ok(f) => f,
+        Err(e) => return Checked::NotChecked(e),
+    };
     let mut at = file.clone();
     for _ in 0..=REDIRECTS {
         if at.origin() != key {
-            return Err(format!("the file redirected to [{}], another origin: a token another origin serves proves nothing about [{key}]", at.as_str()));
+            return Checked::Failed(format!("the file redirected to [{}], another origin: a token another origin serves proves nothing about [{key}]", at.as_str()));
         }
-        super::polite_turn(&at, floor).await?;
-        let resp = fetcher.get(&at, false, FILE_BYTES).await.map_err(|f| format!("reading [{}] failed: {}", at.as_str(), f.class()))?;
+        if let Err(why) = super::polite_turn(&at, floor, std::time::Instant::now() + super::TURN_WAIT).await {
+            return Checked::NotChecked(why);
+        }
+        let resp = match fetcher.get(&at, false, FILE_BYTES).await {
+            Ok(r) => r,
+            Err(f) => return Checked::Failed(format!("[{}] is {}", at.as_str(), f.shown())),
+        };
         match resp.status {
             200..=299 => {
                 let body = String::from_utf8_lossy(&resp.body);
                 return match body.lines().any(|l| l.trim() == token) {
-                    true => Ok(()),
-                    false => Err(format!("[{}] doesn't hold the token", at.as_str())),
+                    true => Checked::Proven,
+                    false => Checked::Failed(format!("[{}] doesn't hold the token", at.as_str())),
                 };
             }
             300..=399 => match resp.location.as_deref().and_then(|l| Link::parse(l, Some(at.url()))) {
                 Some(next) => at = next,
-                None => return Err(format!("[{}] redirected nowhere", at.as_str())),
+                None => return Checked::Failed(format!("[{}] isn't the file", at.as_str())),
             },
-            s => return Err(format!("[{}] answered {s}", at.as_str())),
+            _ => return Checked::Failed(format!("[{}] isn't the file", at.as_str())),
         }
     }
-    Err(format!("[{}] redirected more than {REDIRECTS} times", file.as_str()))
+    Checked::Failed(format!("[{}] redirected more than {REDIRECTS} times", file.as_str()))
 }
 
 /// Whether a TXT record on `domain` is `roll-site-verification=<token>`.
@@ -155,4 +182,26 @@ async fn txt_has(domain: &str, token: &str) -> bool {
         RData::TXT(t) => t.txt_data.iter().map(|p| String::from_utf8_lossy(p).into_owned()).collect::<String>().trim() == want,
         _ => false,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What a verification covers (H1): an origin's file covers that origin alone, a domain's
+    /// record every origin on it; a URL is its origin exactly; an address is no domain.
+    #[test]
+    fn origins_and_domains() {
+        let egress = Egress::of(|_| None, false).unwrap();
+        assert_eq!(target("https://EXAMPLE.com:443/x", &egress), Ok((Kind::Origin, "https://example.com".to_string())));
+        assert_eq!(target("docs.example.com", &egress), Ok((Kind::Domain, "example.com".to_string())));
+        assert!(target("http://a.example.com/", &egress).is_err(), "an origin is verified over https");
+        assert!(target("203.0.113.7", &egress).is_err(), "an address has no DNS records");
+        assert!(target("example.com:8443", &egress).is_err(), "a port names an origin, not a domain");
+        assert!(covers(Kind::Origin, "https://a.example.com", "https://a.example.com"));
+        assert!(!covers(Kind::Origin, "https://a.example.com", "https://b.example.com"));
+        assert!(!covers(Kind::Origin, "https://a.example.com", "https://a.example.com:8443"));
+        assert!(covers(Kind::Domain, "example.com", "http://x.example.com:8080"));
+        assert!(!covers(Kind::Domain, "example.com", "https://example.org"));
+    }
 }

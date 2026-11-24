@@ -5008,42 +5008,74 @@ async fn crawler_sites_verified_for_higher_limits() {
     e.crawler(None, &id, "by-name", &format!("{by_name}/")).await;
     let j = e.crawl(None, &id, "by-name").await;
     assert_eq!(limited(&j), (Some("completed"), Some("unverified_domain_max_unique_url_count"), Some(2)), "{j}");
-    let (s, v) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/site-verifications"), Some(json!({"domain": "127.0.0.1"}))).await;
-    assert_eq!(s, 400, "an address has no DNS to verify a domain by: {v}");
+
+    // crawl-test and checks make roll send requests: 10 a minute per owner, then 429.
+    let mut answers = Vec::new();
+    for _ in 0..11 {
+        let (s, _) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/crawl-test"), Some(json!({"url": site.url("/")}))).await;
+        answers.push(s);
+    }
+    assert_eq!(answers.last(), Some(&429), "{answers:?}");
 }
 
 fn verify_file() -> &'static str {
     "/.well-known/roll-site-verification.txt"
 }
 
-/// Verifications are an owner's: one owner's verified origin gives another owner's crawls of it
-/// nothing.
+/// Verifications are each cluster's: the owner's other cluster isn't verified until it checks,
+/// and then passes at once with the token already published (the token is the owner's); another
+/// owner gets a token of their own and nothing from the first owner's rows.
 #[tokio::test]
-async fn crawler_verifications_are_the_owners() {
+async fn crawler_verifications_are_each_clusters() {
     use reqwest::Method;
     let site = six_page_site().await;
     let e = crawler_env(&[]).await;
-    let alice = e.ok_as(Some("alice"), Method::POST, "/v1/search/clusters", Some(json!({"name": "alice-crawl"}))).await["id"].as_str().unwrap().to_string();
-    let bob = e.ok_as(Some("bob"), Method::POST, "/v1/search/clusters", Some(json!({"name": "bob-crawl"}))).await["id"].as_str().unwrap().to_string();
-    let v = e.ok_as(Some("alice"), Method::POST, &format!("/v1/search/clusters/{alice}/site-verifications"), Some(json!({"origin": site.url("/")}))).await;
-    site.set(verify_file(), 200, &[], v["file"]["content"].as_str().unwrap());
-    let path = format!("/v1/search/clusters/{alice}/site-verifications/{}/check", urlencoding::encode(v["site"].as_str().unwrap()));
-    assert_eq!(e.ok_as(Some("alice"), Method::POST, &path, Some(json!({}))).await["status"], "verified");
-    let theirs = e.ok_as(Some("bob"), Method::GET, &format!("/v1/search/clusters/{bob}/site-verifications"), None).await;
-    assert_eq!(theirs["verifications"], json!([]), "bob doesn't see alice's");
+    let made = |who: &'static str, name: &'static str| {
+        let e = &e;
+        async move { e.ok_as(Some(who), Method::POST, "/v1/search/clusters", Some(json!({"name": name}))).await["id"].as_str().unwrap().to_string() }
+    };
+    let (x, y, bob) = (made("alice", "alice-x").await, made("alice", "alice-y").await, made("bob", "bob-crawl").await);
+    let start = |who: &'static str, id: String| {
+        let (e, origin) = (&e, site.url("/"));
+        async move { e.ok_as(Some(who), Method::POST, &format!("/v1/search/clusters/{id}/site-verifications"), Some(json!({"origin": origin}))).await }
+    };
+    let check = |who: &'static str, id: String, v: Value| {
+        let e = &e;
+        async move { e.ok_as(Some(who), Method::POST, &format!("/v1/search/clusters/{id}/site-verifications/{}/check", urlencoding::encode(v["site"].as_str().unwrap())), Some(json!({}))).await }
+    };
+    let crawled = |who: &'static str, id: String| {
+        let (e, url) = (&e, site.url("/"));
+        async move {
+            e.crawler(Some(who), &id, "site", &url).await;
+            limited(&e.crawl(Some(who), &id, "site").await).1.map(str::to_string)
+        }
+    };
+    let on_x = start("alice", x.clone()).await;
+    let token = on_x["file"]["content"].as_str().unwrap().to_string();
+    site.set(verify_file(), 200, &[], &token);
+    assert_eq!(check("alice", x.clone(), on_x).await["status"], "verified");
+    assert_eq!(crawled("alice", x.clone()).await, None, "x is verified");
 
-    for (who, id, want) in [("alice", &alice, None), ("bob", &bob, Some("unverified_domain_max_unique_url_count"))] {
-        e.crawler(Some(who), id, "site", &site.url("/")).await;
-        let j = e.crawl(Some(who), id, "site").await;
-        assert_eq!(limited(&j).1, want, "{who}: {j}");
-    }
+    // y: not verified by x's row; one check with the same token, and it is.
+    assert_eq!(crawled("alice", y.clone()).await.as_deref(), Some("unverified_domain_max_unique_url_count"));
+    let on_y = start("alice", y.clone()).await;
+    assert_eq!(on_y["file"]["content"].as_str(), Some(token.as_str()), "the owner's token: {on_y}");
+    assert_eq!(check("alice", y.clone(), on_y).await["status"], "verified");
+    assert_eq!(crawled("alice", y.clone()).await, None, "y is verified now");
+
+    // bob: nothing of alice's, and a token of his own.
+    let theirs = e.ok_as(Some("bob"), Method::GET, &format!("/v1/search/clusters/{bob}/site-verifications"), None).await;
+    assert_eq!(theirs["verifications"], json!([]));
+    assert_eq!(crawled("bob", bob.clone()).await.as_deref(), Some("unverified_domain_max_unique_url_count"));
+    assert_ne!(start("bob", bob).await["file"]["content"].as_str(), Some(token.as_str()));
 }
 
 /// The daily limit of unverified crawls is the owner's, kept in the catalogue: a second connector
-/// of the same site doesn't buy another crawl.
+/// of the same site doesn't buy another crawl, and its refusal spends nothing (the same
+/// connector crawls another site next).
 #[tokio::test]
 async fn crawler_daily_limit_is_the_owners_across_connectors() {
-    let site = six_page_site().await;
+    let (site, second) = (six_page_site().await, six_page_site().await);
     let e = crawler_env(&[("roll.crawler.unverified.max_crawls_per_day", "1")]).await;
     let id = e.post("/v1/search/clusters", json!({"name": "crawl"})).await["id"].as_str().unwrap().to_string();
     e.crawler(None, &id, "one", &site.url("/")).await;
@@ -5051,4 +5083,7 @@ async fn crawler_daily_limit_is_the_owners_across_connectors() {
     assert_eq!(e.crawl(None, &id, "one").await["status"], "completed");
     let j = e.crawl(None, &id, "two").await;
     assert!(j["status"] == "error" && j["error"].as_str().is_some_and(|m| m.contains("at most 1 times in 24 hours by one owner")), "{j}");
+    e.crawler(None, &id, "two", &second.url("/")).await;
+    let j = e.crawl(None, &id, "two").await;
+    assert_eq!(j["status"], "completed", "the refused crawl spent none of the connector's count: {j}");
 }

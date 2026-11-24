@@ -132,6 +132,15 @@ impl Failure {
             Failure::Refused => "refused",
         }
     }
+
+    /// What a person who chose the URL is told: a timeout and a network failure are both
+    /// `unreachable`, so the answer can't tell a filtered port from a closed one.
+    pub fn shown(self) -> &'static str {
+        match self {
+            Failure::Timeout | Failure::Network => "unreachable",
+            f => f.class(),
+        }
+    }
 }
 
 /// A response, its body read.

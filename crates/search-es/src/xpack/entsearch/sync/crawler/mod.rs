@@ -114,18 +114,17 @@ pub fn unverified_floor<'a>(setting: impl Fn(&str) -> Option<&'a str>) -> Durati
     Duration::from_millis(ms(MIN_REQUEST_INTERVAL, 500).max(ms(UNVERIFIED_MIN_INTERVAL, 1000)))
 }
 
-/// How long a `crawl-test` or verification check waits for a site's request turn.
-const TURN_WAIT: Duration = Duration::from_secs(10);
+/// The longest a `crawl-test` or verification check waits for one request turn.
+pub(crate) const TURN_WAIT: Duration = Duration::from_secs(10);
 
 /// Waits for `link`'s site's request turn on this node, `floor` after the last request to it
-/// (crawls, `crawl-test` and verification checks share the turns, `hosts::turn`); `Err` when it
-/// wouldn't come within [`TURN_WAIT`].
-pub(crate) async fn polite_turn(link: &Link, floor: Duration) -> Result<(), String> {
+/// (crawls, `crawl-test` and verification checks share the turns, `hosts::turn`); `Err` (sending
+/// nothing) when it wouldn't come by `until`.
+pub(crate) async fn polite_turn(link: &Link, floor: Duration, until: Instant) -> Result<(), String> {
     let site = hosts::site_of(link);
-    let until = Instant::now() + TURN_WAIT;
     while let Some(at) = hosts::turn(&site, floor) {
         if at > until {
-            return Err(format!("[{site}] is busy: its next request turn is more than {}s away; try again shortly", TURN_WAIT.as_secs()));
+            return Err(format!("[{site}] is busy: its next request turn is too far off; try again shortly"));
         }
         tokio::time::sleep_until(at.into()).await;
     }
@@ -235,18 +234,18 @@ pub async fn sync(cid: &str, v: &Values, sink: &mut Sink<'_>, full: bool, cursor
     let auth = auth(v, egress.allow_private()).map_err(Stop::Failed)?;
     let auth_origin = auth.as_ref().map(|a| a.origin.clone());
     let fetcher = Fetcher::new(egress.clone(), auth).map_err(Stop::Failed)?;
-    // An owner's verified origins get the verified limits, and a crawl gets them only when every
+    // A cluster's verified origins get the verified limits, and a crawl gets them only when every
     // origin it covers is verified: by the file on that origin, or by DNS on its domain
-    // (`verify`). Verifications and the daily count of unverified crawls (per site) are the host's
-    // (`ClusterConfig::sites`: the fleet's catalogue); without one, nothing is verified and the
-    // count is the node's.
+    // (`verify`). Verifications (the cluster's) and the daily count of unverified crawls (the
+    // owner's, per site) are the host's (`ClusterConfig::sites`: the fleet's catalogue); without
+    // one, nothing is verified and the count is the node's.
     let owner = cluster.config.owner.clone().unwrap_or_else(|| "(no owner)".to_string());
     let mut origins: Vec<String> = plan.domains.iter().map(|d| d.origin.clone()).collect();
     origins.sort();
     origins.dedup();
-    let verified = match &cluster.config.sites {
-        Some(host) => host.verified(&owner, &origins).await,
-        None => Vec::new(),
+    let verified = match (&cluster.config.sites, &cluster.config.catalog_id) {
+        (Some(host), Some(id)) => host.verified(id, &origins).await,
+        _ => Vec::new(),
     };
     let unverified_origins: Vec<String> = origins.iter().filter(|o| !verified.contains(o)).cloned().collect();
     let all_verified = unverified_origins.is_empty() && !origins.is_empty();
@@ -443,11 +442,22 @@ impl ToLink for String {
 /// roll itself, by name as well as by address. Reindex's probe name (`roll-reindex-probe.…`,
 /// where a cluster wildcard leads) isn't a host anyone crawls and is left out.
 fn blocked_hosts(cluster: &Cluster) -> Vec<String> {
+    blocked_hosts_of(|k| cluster.config.node_setting(k))
+}
+
+/// [`blocked_hosts`] from node settings (`setting(key)`), for callers without a cluster.
+pub fn blocked_hosts_of<'a>(setting: impl Fn(&str) -> Option<&'a str>) -> Vec<String> {
     [BLOCKED_HOSTS, FLEET_NAMES, crate::egress::DENY_NAMES, crate::egress::OLD_DENY_NAMES]
         .iter()
-        .filter_map(|k| cluster.config.node_setting(k))
+        .filter_map(|k| setting(k))
         .flat_map(|b| b.split(',').map(|h| h.trim().trim_start_matches('.').trim_end_matches('.').to_ascii_lowercase()).filter(|h| !h.is_empty() && !h.starts_with("roll-reindex-probe.")).collect::<Vec<_>>())
         .collect()
+}
+
+/// Whether `link`'s host is one of `blocked` or a name under one.
+pub fn is_blocked(link: &Link, blocked: &[String]) -> bool {
+    let host = plain_host(link);
+    blocked.iter().any(|b| host == *b || host.ends_with(&format!(".{b}")))
 }
 
 /// Whether `link` may be fetched by a crawl of `plan`: its limits, domains, blocked hosts and
@@ -458,8 +468,7 @@ fn decide(plan: &Plan, fetcher: &Fetcher, blocked: &[String], robots: &HashMap<S
         return Verdict::Limit;
     }
     let Some(domain) = plan.domain(link) else { return Verdict::OutOfDomain };
-    let host = plain_host(link);
-    if fetcher.refused(link) || blocked.iter().any(|b| host == *b || host.ends_with(&format!(".{b}"))) {
+    if fetcher.refused(link) || is_blocked(link, blocked) {
         return Verdict::Blocked;
     }
     if domain.rule_for(link).is_some_and(|r| !r.allow) {

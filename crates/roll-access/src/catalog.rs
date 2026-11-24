@@ -1390,15 +1390,15 @@ static ROWS: &[Row] = &[
     row("PUT", "/v1/search/clusters/{id}/query_rules/{ruleset}", "search", W, one(PG, "cluster")),
     row("DELETE", "/v1/search/clusters/{id}/query_rules/{ruleset}", "search", W, one(PG, "cluster")),
     row("POST", "/v1/search/clusters/{id}/query_rules/{ruleset}/test", "search", R, one(PG, "cluster")),
-    // The web crawler's verified domains and origins are the cluster owner's, shared by every
-    // one of its clusters, so they're decided on search as a whole (the owner's), not on the
-    // cluster in the path: a grant on one cluster can't drop what all the others' crawls rely
-    // on. Starting, checking or dropping one changes the limits the owner's crawls get: write.
-    // The token it answers is meant to be published (DNS or the origin), not a credential.
-    row("GET", "/v1/search/clusters/{id}/site-verifications", "search", R, Tgt::Product),
-    row("POST", "/v1/search/clusters/{id}/site-verifications", "search", W, Tgt::Product),
-    row("DELETE", "/v1/search/clusters/{id}/site-verifications/{site}", "search", W, Tgt::Product),
-    row("POST", "/v1/search/clusters/{id}/site-verifications/{site}/check", "search", W, Tgt::Product),
+    // The web crawler's verified domains and origins are each cluster's own (the token is its
+    // owner's, shared by their clusters, but a verification and its limits aren't), so a grant
+    // on one cluster reaches that cluster's alone. Starting, checking or dropping one changes the
+    // limits its crawls get: write. The token it answers is meant to be published (DNS or the
+    // origin), not a credential.
+    row("GET", "/v1/search/clusters/{id}/site-verifications", "search", R, one(PG, "cluster")),
+    row("POST", "/v1/search/clusters/{id}/site-verifications", "search", W, one(PG, "cluster")),
+    row("DELETE", "/v1/search/clusters/{id}/site-verifications/{site}", "search", W, one(PG, "cluster")),
+    row("POST", "/v1/search/clusters/{id}/site-verifications/{site}/check", "search", W, one(PG, "cluster")),
     // `crawl-test` stores nothing, but it makes roll send requests to a site: write.
     row("POST", "/v1/search/clusters/{id}/crawl-test", "search", W, one(PG, "cluster")),
     // ── secrets (feature/roll-secrets, docs/secrets.md) ──

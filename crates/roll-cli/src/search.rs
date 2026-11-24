@@ -87,7 +87,7 @@ pub enum Crawler {
         #[arg(long)]
         check: bool,
     },
-    /// The domains and origins the cluster's owner verified, or started verifying.
+    /// The domains and origins the cluster verified, or started verifying.
     Sites { cluster: String },
 }
 

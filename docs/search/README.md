@@ -1460,10 +1460,10 @@ deterministic (#396).
    connector roll runs (`roll_web_crawler`, on #318's runner) taking Open Crawler's config, fields
    and ids, robots.txt always honoured, fetching through roll's one egress check with redirects
    checked hop by hop and the credential bound to one origin, a purge that outages can't empty,
-   and `roll search crawler import`; then site verification per owner (a domain by a DNS TXT
-   record, covering every origin on it, or one origin by the well-known file it serves; re-checked
-   every 30 days with retries, the verified limits, and the daily count of unverified crawls in
-   the fleet's catalogue), `crawl-test` (one URL through the crawler's path, storing nothing,
+   and `roll search crawler import`; then site verification per cluster with the owner's token (a
+   domain by a DNS TXT record, covering every origin on it, or one origin by the well-known file
+   it serves; re-checked every 30 days with retries, the verified limits, and the owner's daily
+   count of unverified crawls in the fleet's catalogue), `crawl-test` (one URL through the crawler's path, storing nothing,
    rate-limited per owner) with its MCP tools and `roll search crawler test`/`verify`/`sites`, the
    dashboard's "crawl a site" box in the Connectors tab, and every product's names blocked
    (`roll.crawler.fleet_names`). Left

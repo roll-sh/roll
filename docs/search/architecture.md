@@ -891,11 +891,12 @@ credentials and branches' adoption all apply unchanged; the crawler adds:
   that didn't refresh most of the index or of an origin, or whose re-checked redirects mostly led
   to one URL, deletes nothing there (`force_purge` lifts this once). Deciding whether URLs may be
   fetched has a 30-second budget a crawl.
-- **Sites**: an owner verifies a domain (registrable, by the public suffix list) with a DNS TXT
+- **Sites**: a cluster verifies a domain (registrable, by the public suffix list) with a DNS TXT
   record, covering every origin on it, or one origin with the well-known file it serves itself
-  (`crawler/verify.rs`, through the crawler's fetch path), kept in search-control's catalogue
-  (`sites.rs`; `site_verifications`, re-checked every 30 days with retries before a lapse), which
-  clusters read through `ClusterConfig::sites`. A crawl whose origins are all verified gets its own
+  (`crawler/verify.rs`, through the crawler's fetch path), with its owner's token for the site,
+  kept in search-control's catalogue (`sites.rs`; `crawler_sites`, re-checked every 30 days with
+  retries before a lapse, gone with the cluster), which clusters read through
+  `ClusterConfig::sites`. A crawl whose origins are all verified gets its own
   `max_unique_url_count` and the node's request interval; otherwise 1,000 URLs, a second between
   requests to one site across every crawl on the node, and 4 crawls a day per connector and per
   owner and site, counted in the catalogue (`site_crawls`) so the fleet shares the count

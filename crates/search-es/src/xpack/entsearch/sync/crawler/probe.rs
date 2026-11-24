@@ -21,6 +21,11 @@ use std::time::{Duration, Instant};
 
 /// The most an answer holds: the body and links are cut to fit.
 pub const MAX_ANSWER: usize = 1 << 20;
+/// How long one test may take, every request and wait included.
+const TIME: Duration = Duration::from_secs(75);
+/// Origins whose robots.txt is read besides the URL's own and its redirects': links on the
+/// others are shown as `robots_not_read`.
+const MORE_ROBOTS: usize = 5;
 const BODY_SHOWN: usize = 64 << 10;
 const LINKS_SHOWN: usize = 200;
 
@@ -46,6 +51,7 @@ pub async fn test(cluster: &Cluster, connector: Option<&str>, url: &str) -> Resu
         return Err(format!("web crawlers are turned off on this node ({})", super::ENABLED));
     }
     let floor = super::unverified_floor(|k| cluster.config.node_setting(k));
+    let deadline = Instant::now() + TIME;
     let egress = crate::egress::Egress::of_cluster(cluster, super::super::ALLOW_PRIVATE);
     let link = Link::parse(url, None).ok_or_else(|| format!("[{url}] isn't an http or https URL"))?;
     let (fields, advanced, values) = match connector {
@@ -75,9 +81,9 @@ pub async fn test(cluster: &Cluster, connector: Option<&str>, url: &str) -> Resu
     answer.insert("url".into(), link.as_str().into());
 
     // robots.txt of the URL's origin, when the URL is on the crawl.
-    let mut robots = Robotses { fetcher: &fetcher, blocked: &blocked, auth_origin: auth_origin.as_deref(), floor, got: HashMap::new() };
+    let mut robots = Robotses { fetcher: &fetcher, blocked: &blocked, auth_origin: auth_origin.as_deref(), floor, deadline, more: MORE_ROBOTS, got: HashMap::new() };
     if let Some(d) = plan.domain(&link) {
-        let read = robots.load(&plan, &link).await?;
+        let read = robots.load(&plan, &link, true).await?;
         let r = &robots.got[&d.origin];
         answer.insert("robots".into(), obj! { "origin" => d.origin.clone(), "read" => read, "allows" => r.allows(&link.request_uri()), "crawl_delay" => r.crawl_delay.map_or(Value::Null, Value::from) });
     }
@@ -95,11 +101,12 @@ pub async fn test(cluster: &Cluster, connector: Option<&str>, url: &str) -> Resu
     let max = plan.limits.usize(L::ResponseSize);
     let (mut at, mut clean, mut hops) = (link.clone(), true, Vec::new());
     let resp = loop {
-        super::polite_turn(&at, floor).await?;
-        let r = match fetcher.get(&at, clean, max).await {
+        super::polite_turn(&at, floor, deadline.min(Instant::now() + super::TURN_WAIT)).await?;
+        let got = tokio::time::timeout_at(deadline.into(), fetcher.get(&at, clean, max)).await.map_err(|_| out_of_time())?;
+        let r = match got {
             Ok(r) => r,
             Err(f) => {
-                answer.insert("error".into(), format!("fetching [{}] failed: {}", at.as_str(), f.class()).into());
+                answer.insert("error".into(), format!("fetching [{}] failed: {}", at.as_str(), f.shown()).into());
                 answer.insert("redirects".into(), Value::Arr(hops));
                 return Ok(Value::Obj(answer));
             }
@@ -113,7 +120,7 @@ pub async fn test(cluster: &Cluster, connector: Option<&str>, url: &str) -> Resu
             break r;
         };
         // A hop to another of the crawl's origins is decided with that origin's robots.txt.
-        robots.load(&plan, &next).await?;
+        robots.load(&plan, &next, true).await?;
         let nv = decide(&plan, &fetcher, &blocked, &robots.got, &next);
         hops.push(obj! { "from" => at.as_str(), "status" => r.status as i64, "to" => next.as_str(), "verdict" => nv.as_str() });
         if nv != Verdict::Allowed {
@@ -140,14 +147,15 @@ pub async fn test(cluster: &Cluster, connector: Option<&str>, url: &str) -> Resu
     let text = String::from_utf8_lossy(&resp.body).into_owned();
     let tags = plan.domain(&at).map(|d| d.exclude_tags.clone()).unwrap_or_default();
     let (page_url, limits, full_html) = (at.clone(), plan.limits.clone(), plan.full_html);
-    let deadline = Instant::now() + super::PAGE_PARSE_TIME;
+    let parse_by = Instant::now() + super::PAGE_PARSE_TIME;
     let parsed = tokio::task::spawn_blocking(move || {
-        let r = html::read_page(&text, held, &page_url, &tags, &limits, deadline);
+        let r = html::read_page(&text, held, &page_url, &tags, &limits, parse_by);
         (r, text)
     })
     .await
     .map_err(|_| "parsing the page stopped on an internal error".to_string())?;
-    let (page, _held) = match parsed.0 {
+    let (result, text) = parsed;
+    let (mut page, held) = match result {
         Ok(p) => p,
         Err(why) => {
             answer.insert("indexed".into(), false.into());
@@ -160,14 +168,12 @@ pub async fn test(cluster: &Cluster, connector: Option<&str>, url: &str) -> Resu
     if let Some(c) = &page.canonical {
         answer.insert("canonical".into(), c.as_str().into());
     }
-    let mut links: Vec<Value> = Vec::new();
-    if !page.nofollow {
-        for l in page.follow.iter().take(LINKS_SHOWN) {
-            robots.load(&plan, l).await?;
-            links.push(obj! { "url" => l.as_str(), "verdict" => decide(&plan, &fetcher, &blocked, &robots.got, l).as_str() });
-        }
+    let mut follow = std::mem::take(&mut page.follow);
+    if page.nofollow {
+        follow.clear();
     }
-    let more = page.follow.len().saturating_sub(LINKS_SHOWN);
+    let more = follow.len().saturating_sub(LINKS_SHOWN);
+    follow.truncate(LINKS_SHOWN);
     let indexed = !page.noindex && !(page.title.is_empty() && page.body.is_empty());
     answer.insert("indexed".into(), indexed.into());
     if page.noindex {
@@ -175,7 +181,7 @@ pub async fn test(cluster: &Cluster, connector: Option<&str>, url: &str) -> Resu
     } else if !indexed {
         answer.insert("reason".into(), "the page has no title and no text".into());
     }
-    let mut doc = super::document(&at, None, page, full_html.then_some(parsed.1), &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+    let mut doc = super::document(&at, None, page, full_html.then_some(text), &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
     // What's shown is cut to fit the answer; what a crawl indexes isn't.
     for k in ["body", "full_html"] {
         if let Some(Value::Str(s)) = doc.get_mut(k)
@@ -190,6 +196,18 @@ pub async fn test(cluster: &Cluster, connector: Option<&str>, url: &str) -> Resu
         }
     }
     answer.insert("document".into(), Value::Obj(doc));
+    // The page is done with: its memory and charge go before the links wait on robots.txt.
+    drop((held, resp));
+
+    // Each link's verdict. robots.txt is read for the URL's origin and its redirects', and for
+    // [`MORE_ROBOTS`] more; a link on another of the crawl's origins is `robots_not_read`.
+    let mut links: Vec<Value> = Vec::new();
+    for l in &follow {
+        let read = robots.load(&plan, l, false).await?;
+        let v = decide(&plan, &fetcher, &blocked, &robots.got, l);
+        let shown = if v == Verdict::Allowed && read == "not read" { "robots_not_read" } else { v.as_str() };
+        links.push(obj! { "url" => l.as_str(), "verdict" => shown });
+    }
     answer.insert("links".into(), Value::Arr(links));
     if more > 0 {
         answer.insert("links_not_shown".into(), (more as i64).into());
@@ -207,17 +225,28 @@ struct Robotses<'a> {
     blocked: &'a [String],
     auth_origin: Option<&'a str>,
     floor: Duration,
+    /// The test's end: nothing is waited for or fetched past it.
+    deadline: Instant,
+    /// Origins not yet read that may still be (beyond the ones the test must read).
+    more: usize,
     got: HashMap<String, Robots>,
 }
 
 impl Robotses<'_> {
-    /// Reads the robots.txt of `link`'s origin when it is one of `plan`'s and not read yet; what
-    /// was found: `ok`, `missing` (a 4xx: everything allowed), `unreachable` (nothing is), or
-    /// `read` (before).
-    async fn load(&mut self, plan: &Plan, link: &Link) -> Result<&'static str, String> {
+    /// Reads the robots.txt of `link`'s origin when it is one of `plan`'s and not read yet
+    /// (`must`: the URL's and its redirects'; else only while [`Self::more`] lasts); what was
+    /// found: `ok`, `missing` (a 4xx: everything allowed), `unreachable` (nothing is), `read`
+    /// (before), or `not read`.
+    async fn load(&mut self, plan: &Plan, link: &Link, must: bool) -> Result<&'static str, String> {
         let Some(d) = plan.domain(link) else { return Ok("off the crawl") };
         if self.got.contains_key(&d.origin) {
             return Ok("read");
+        }
+        if !must {
+            if self.more == 0 || Instant::now() >= self.deadline {
+                return Ok("not read");
+            }
+            self.more -= 1;
         }
         let (r, read) = self.fetch(&d.origin).await?;
         self.got.insert(d.origin.clone(), r);
@@ -230,15 +259,13 @@ impl Robotses<'_> {
         let Some(mut at) = Link::parse(&format!("{origin}/robots.txt"), None) else { return Ok((Robots::unreachable(), "unreachable")) };
         let site = super::hosts::site_of(&at);
         let mut clean = true;
-        let started = Instant::now();
         for _ in 0..=5 {
-            let host = super::plain_host(&at);
-            let blocked = self.fetcher.refused(&at) || self.blocked.iter().any(|b| host == *b || host.ends_with(&format!(".{b}")));
-            if blocked || super::hosts::site_of(&at) != site || started.elapsed() > Duration::from_secs(60) {
+            if self.fetcher.refused(&at) || super::is_blocked(&at, self.blocked) || super::hosts::site_of(&at) != site {
                 break;
             }
-            super::polite_turn(&at, self.floor).await?;
-            let Ok(resp) = self.fetcher.get(&at, clean, super::robots::MAX_BYTES).await else { break };
+            super::polite_turn(&at, self.floor, self.deadline.min(Instant::now() + super::TURN_WAIT)).await?;
+            let got = tokio::time::timeout_at(self.deadline.into(), self.fetcher.get(&at, clean, super::robots::MAX_BYTES)).await.map_err(|_| out_of_time())?;
+            let Ok(resp) = got else { break };
             if (300..400).contains(&resp.status) {
                 let Some(next) = resp.location.as_deref().and_then(|l| Link::parse(l, Some(at.url()))) else { break };
                 clean &= self.auth_origin == Some(at.origin().as_str());
@@ -255,4 +282,8 @@ impl Robotses<'_> {
         }
         Ok((Robots::unreachable(), "unreachable"))
     }
+}
+
+fn out_of_time() -> String {
+    format!("the test ran out of time ({}s); a smaller plan, or a URL nearer its site's root, takes less", TIME.as_secs())
 }

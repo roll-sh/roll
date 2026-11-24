@@ -14,6 +14,7 @@ const VERDICTS: Record<string, string> = {
   robots_disallowed: "is disallowed by robots.txt",
   robots_unreachable: "can't be crawled: robots.txt couldn't be read",
   origin_skipped: "is skipped for this crawl",
+  robots_not_read: "wasn't checked against its origin's robots.txt (a test reads only a few)",
 };
 
 const say = (v: string) => VERDICTS[v.replace(/^redirected_/, "")] ?? v.replace(/_/g, " ");
@@ -104,8 +105,9 @@ export function CrawlSite({ cluster, onCreated }: { cluster: SearchCluster; onCr
     if (v) setVerification(v);
   };
 
-  const skipped = result?.links?.filter((l) => l.verdict !== "allowed") ?? [];
-  const queued = (result?.links?.length ?? 0) - skipped.length;
+  const unread = result?.links?.filter((l) => l.verdict === "robots_not_read").length ?? 0;
+  const skipped = result?.links?.filter((l) => l.verdict !== "allowed" && l.verdict !== "robots_not_read") ?? [];
+  const queued = (result?.links?.length ?? 0) - skipped.length - unread;
   const body = result?.document?.body ?? "";
 
   return (
@@ -160,6 +162,7 @@ export function CrawlSite({ cluster, onCreated }: { cluster: SearchCluster; onCr
             <p className="text-[12px] text-muted">
               {queued} link{queued === 1 ? "" : "s"} would be queued
               {skipped.length > 0 && <>, {skipped.length} skipped</>}
+              {unread > 0 && <>, {unread} on origins whose robots.txt the test didn't read</>}
               {result.links_not_shown ? <> ({result.links_not_shown} more not shown)</> : null}
             </p>
           )}

@@ -33,6 +33,7 @@ fn served(args: &Args) -> Vec<(&'static str, Option<String>)> {
         ("nosql-domain", args.nosql.nosql_domain.clone()),
         ("nosql-alternator-domain", args.nosql.nosql_alternator_domain.clone()),
         ("queues-advertise-host", args.queues.advertise_host.clone()),
+        ("queues-keeper-tls-name", args.queues.keeper_tls_name.clone()),
         ("search-domain", args.search.search_domain.clone()),
         ("search-public-url", args.search.search_public_url.clone()),
     ]
@@ -83,6 +84,8 @@ mod tests {
         "cdn-origin-secret",
         "queues-vhost-publish-rate", // "vhost", a rate
         "queues-vhost-publish-bytes-rate",
+        "addr-file", // where rolld writes its listeners' addresses
+        "nosql-cluster-name", // what NoSQL clients are told the cluster is called
     ];
 
     /// Every argument that names a host is either one roll serves (and its value reaches the
@@ -90,7 +93,7 @@ mod tests {
     #[test]
     fn every_served_name_argument_is_a_fleet_name() {
         let cmd = Args::command();
-        let named = |l: &str| ["domain", "url", "host", "advertise", "endpoint", "origin"].iter().any(|w| l.contains(w));
+        let named = |l: &str| ["domain", "url", "host", "advertise", "endpoint", "origin", "site", "name", "addr", "relay"].iter().any(|w| l.contains(w));
         let longs: Vec<String> = cmd.get_arguments().filter_map(|a| a.get_long()).filter(|l| named(l)).map(str::to_string).collect();
         let args = Args::parse_from(["rolld"]);
         let known: Vec<&str> = served(&args).iter().map(|(f, _)| *f).collect();
