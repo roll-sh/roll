@@ -971,9 +971,7 @@ impl Runtime {
             && let Some(crate::store::LiveShare { ends, .. }) = self.share_live(preview, &t).await
         {
             let t = t.as_str();
-            if let Ok(e) = self.engine() {
-                e.share_followed(preview, t);
-            }
+            crate::visit::share_followed(&self.store, preview, t);
             let now = self.store.now_ms().unwrap_or(ends);
             let left = ((ends - now) / 1000).max(1);
             return Some(self.enter(req, "roll_share", &share_cookie, t, left));
@@ -1051,7 +1049,7 @@ impl Runtime {
 
     /// Share link `token` of `preview`, if it's live ([`Engine::share_visit`]).
     async fn share_live(&self, preview: &str, token: &str) -> Option<crate::store::LiveShare> {
-        self.engine().ok()?.share_visit(preview, token, self.cfg.visitor_recheck).await
+        crate::visit::share_visit(&self.store, self.engine().ok().as_ref(), preview, token, self.cfg.visitor_recheck).await
     }
 
     /// Whether `token` is a live session in `preview` whose person may still open the project
