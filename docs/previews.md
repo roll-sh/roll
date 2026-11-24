@@ -1884,7 +1884,7 @@ previews in it), the operator and admins see every project.
 | `DELETE /v1/previews/{id}/restore-points/{point}` | | 204 |
 | `GET /v1/previews/{id}/screenshot` | | `image/png`: the first service's page at the preview's head (404 when it has none); `?previous=1` the one before, `?view=phone` at a phone's width, `?base=1` the default branch's preview's, `?page=/pricing` another of `github.pages`, `?diff=base` or `?diff=previous` where it differs from that one or the one before (the page faded, changed pixels marked red) |
 | `GET /v1/previews/{id}/screenshot.png?exp=&sig=` | | `image/png` behind a signed, expiring link, without credentials (403 otherwise): the pull request comment's image; `&diff=base` under its own signature, the diff against main |
-| `GET`/`POST /v1/previews/{id}/shares` | `{hours, label?, notes?}` (1–720 hours; `label` who it's for, one line of 60 characters at most; `notes` its visitors may leave notes as guests) for a new one | `Share[]` (never a token), or 201 `Share` with `url`, the only time the link is shown; 409 for a public preview or past 20 live ones. A link works only while its maker (the person, or the person behind the token, that made it; not the operator's) may still open the project's previews: an account that still signs in, with a role that reveals a preview. Asked again at most every few minutes while it's used; one whose maker may not ends at once ("ada's share link ended: …" in the activity). `visit::tests::a_signed_in_person_gets_into_a_team_preview` |
+| `GET`/`POST /v1/previews/{id}/shares` | `{hours, label?, notes?}` (1–720 hours; `label` who it's for, one line of 60 characters at most; `notes` its visitors may leave notes as guests) for a new one | `Share[]` (never a token), or 201 `Share` with `url`, the only time the link is shown; 409 for a public preview, one roll apps serves (its proxy takes the preview's own link, `share_url`), or past 20 live ones. A link works only while its maker (the person, or the person behind the token, that made it; not the operator's) may still open the project's previews: an account that still signs in, with a role that reveals a preview. Asked again at most every few minutes while it's used; one whose maker may not ends at once ("ada's share link ended: …" in the activity). `visit::tests::a_signed_in_person_gets_into_a_team_preview` |
 | `DELETE /v1/previews/{id}/shares/{share}` | | 204: the link stops at the visitor's next request |
 | `GET`/`PUT /v1/previews/{id}/env` | `{vars: {NAME: value \| null}}` (`null` removes; at most 100, 32 KiB each; a value may be `roll://ENV[/folder]/KEY`) | `{vars}`: the preview's own variables; its services redeploy with them. 403 for a reference to an environment other than the base without the caller's reveal on its folder; 400 for a malformed one or a look-alike |
 | `POST /v1/previews/{id}/approve` | `{head}` (the head looked at) | `Preview`: that head of a fork's pull request on a Git URL service runs (`pull.approved_head`); the next push waits again. 409 when the preview moved on to another head or isn't a fork's pull request. Admin in the permissions catalogue, and no MCP tool: letting outside code run with the project's data is a person's call |
@@ -2743,23 +2743,32 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **A note in its reviewer's engine, in review** (Jam's recordings): a Safari or Firefox
-   reviewer's note cropped in WebKit or Firefox through the other browsers' run. Next for it:
-   their typing where the button can say what without the value (a field's length, a choice's
-   index).
-2. **Restore points for the products that only copy** (Redis, search, NoSQL, streams): a point
+1. **The fifth review's security fixes, in review** (#943): a share link's cookie kept from the
+   app, outside readers' notes never mailed, replayed or posted raw to Slack, try and fetch of a
+   fork's preview outside, the guest limit taken atomically, guests unable to link.
+2. **roll apps on par, in review**: roll apps' feedback button is previews' own script (a note
+   carries the page's errors and the reviewer's steps there too), and a share link on a preview
+   roll apps serves is a 409 that says why, not a link that answers 401.
+3. **Share links on roll apps** (with roll apps' thread): a port in roll apps' access check that
+   asks previews whether a `roll_share` token is a live link of the environment's preview (its
+   maker still reaching the project), and guests' notes through roll apps' host.
+4. **`note_mail` in the dashboard's rules**: the setting is in the API and roll MCP, not the page.
+5. **`roll preview try`**: an agent's page drive (`…/try`) from the CLI, as `roll preview fetch`.
+6. **A note in its reviewer's engine, typing**: their typing where the button can say what
+   without the value (a field's length, a choice's index).
+7. **Restore points for the products that only copy** (Redis, search, NoSQL, streams): a point
    is kept only where the product puts a branch back in place, keeping its id (their delete
    guards check it); each needs its control plane's reset `from`, as pg-control's.
-3. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
+8. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
    (3.3 s in its log) and its masking, which needs that compute up: pg-control's to shorten.
-4. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+9. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+10. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-6. **Watch: pg-control's recovery to a time seconds old** (unowned).
+11. **Watch: pg-control's recovery to a time seconds old** (unowned).
 
 
 
@@ -2768,6 +2777,8 @@ Ranked by what a person notices first. Done so far:
 
 
 
+
+Landed 2026-11-24, night: a note's element cropped in its reviewer's engine (#938: WebKit for Safari and iOS, Firefox; their viewport, after their clicks).
 
 Landed 2026-11-24, evening, later: a note's element cropped as its reviewer saw it (#932: their viewport, after their clicks).
 

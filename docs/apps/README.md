@@ -1161,8 +1161,10 @@ about the page (Vercel's comment pins): `GET /__roll/feedback.json?path=<pathnam
 host and for the same visitors, answered from roll previews through a port
 (`integrations::FeedbackNotes`, `Apps::set_feedback_notes`) as previews' own proxy answers it:
 `no-store`, the latest 200, a 404 where previews isn't on the node and a 502 when it fails (the
-button then shows no list). The script and the tagger are roll previews', copied
-(`assets/feedback.js`, `feedback.rs`, equal to #28's) until one copy serves both.
+button then shows no list). The script is roll previews' own (`roll-previews/src/feedback.js`),
+so a note carries what went wrong on the page and what the reviewer did before it, as on roll
+previews' proxy; share links' guests and a reviewer's flags are previews' proxy's only. The tagger
+is a copy of previews' (`feedback.rs`).
 
 ### Permissions and MCP
 
