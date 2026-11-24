@@ -3373,10 +3373,22 @@ npx prisma migrate dev                            # in another: reads .env as us
   so each reader has a pipe of its own: one that reads slowly still gets exactly one copy, never the
   next read's appended to it. Nothing is written anywhere else: no temporary file, no value in a log, an error or
   a command line.
+- **Several readers.** The mount always has a writer waiting on the pipe at the path, so a reader's
+  open never waits, and each reader is served on its own. Readers that open while others are being
+  served (two apps `turbo dev` or `concurrently` starts in one directory, Next.js's workers) each
+  get a whole copy. Two opens at the same instant (before the mount has woken and put the next pipe
+  in place) still share one pipe, and then each gets part of one copy, or one gets all of it and
+  the other nothing: a named pipe can't tell its readers apart, and Linux shows no count of a pipe's
+  readers. Tools that read `.env` at the very same instant are better run with
+  `roll run -- <command>`.
 - The values come from the local agent's cache ("A local agent"): the folder's digest is followed,
-  so a change reaches the next read without logging in again. A folder with a key that doesn't
-  resolve doesn't start; one that stops resolving gives a read a `#` comment naming the keys
-  (dotenv) or nothing (json), never part of the folder.
+  so a change reaches the next read without logging in again. Reads are answered from memory for
+  `--ttl` (`ROLL_CACHE_TTL`, 5 minutes by default; 0 asks roll at every read) after roll last
+  confirmed the folder. A folder with a key that doesn't resolve doesn't start.
+- **A read with no values.** A folder that stops resolving, or no answer from roll past the TTL
+  (offline, a 5xx), gives that read `# roll secrets mount: <why>; no values this read` (dotenv) or
+  `{}` (json), never part of the folder, and the mount prints the same line on stderr. A tool
+  that starts with an empty environment has the reason in its `.env`.
 - It logs in as every `roll secrets` command does. Once roll refuses it (a 401 after logging in
   again, a 403 or a 404 for the folder: the token revoked, the environment deleted) it removes the
   pipe and exits non-zero with roll's refusal. Ctrl-C, SIGTERM and SIGHUP remove it too.
