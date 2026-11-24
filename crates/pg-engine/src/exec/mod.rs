@@ -459,6 +459,9 @@ pub struct ExecCtx<'a> {
     /// snapshot each was opened for (another plan at the id's address, or another snapshot,
     /// opens its own).
     subplan_trees: RefCell<HashMap<usize, KeptSubplan>>,
+    /// Correlated scalar and EXISTS SubPlans' rows by their parameters' values, for the
+    /// plan and snapshot each was made for (`memo_rows`).
+    subplan_memo: RefCell<HashMap<usize, SubplanMemo>>,
     pub ctes: RefCell<HashMap<usize, Rc<RefCell<nodes::CteState>>>>,
     pub work: RefCell<HashMap<usize, Rc<Vec<Row>>>>,
     /// Shared with child contexts: a COMMIT inside a procedure starts a new transaction time.
@@ -831,6 +834,87 @@ pub struct Kept {
     enrs: Vec<Rc<Enr>>,
 }
 
+/// A correlated SubPlan's rows by its parameters' values (`ExecCtx::memo_rows`): None when
+/// its plan can't be remembered so.
+struct SubplanMemo {
+    plan: Arc<Plan>,
+    snap: Rc<crate::txn::Snap>,
+    rows: Option<HashMap<Vec<Value>, Rc<Vec<Row>>>>,
+    /// Its lookups and how many found their values.
+    asked: u32,
+    found: u32,
+}
+
+/// The most parameter values a SubPlan's memo keeps (each with the one or two rows a scalar
+/// or EXISTS sub-select reads).
+const SUBPLAN_MEMO_KEYS: usize = 1 << 14;
+/// A memo that found fewer than one in `SUBPLAN_MEMO_RARE` of its first `SUBPLAN_MEMO_TRY`
+/// lookups is dropped: the parameters seldom repeat (TPC-H q20's part and supplier), and
+/// keeping each run's rows costs more than it saves.
+const SUBPLAN_MEMO_TRY: u32 = 1024;
+const SUBPLAN_MEMO_RARE: u32 = 8;
+
+/// Whether a SubPlan's plan reads the same rows for the same parameter values all through a
+/// statement under one snapshot, and does nothing else a client could tell from running it
+/// once: only these nodes (no row locks, sampling, catalog, foreign or function scans, CTEs
+/// or writes), built-in aggregates, and expressions of built-in, non-volatile functions and
+/// operators (no sub-select, domain check, user function: one could raise a NOTICE each run).
+fn memo_safe(p: &Plan) -> bool {
+    use crate::sql::plan::Access;
+    let mut es: Vec<&Expr> = Vec::new();
+    match p {
+        Plan::One | Plan::Empty { .. } | Plan::Values { .. } | Plan::Barrier { .. } | Plan::Filter { .. }
+        | Plan::Project { .. } | Plan::Sort { .. } | Plan::Limit { .. } | Plan::Join { .. } | Plan::Append { .. }
+        | Plan::SetOp { .. } => {}
+        Plan::Agg { aggs, .. } => {
+            if aggs.iter().any(|a| a.user.is_some() || !a.order_by.is_empty() || !a.direct.is_empty()) {
+                return false;
+            }
+        }
+        Plan::Scan(sc) => {
+            if sc.sample.is_some() || sc.mark.is_some() || sc.current_of.is_some() || sc.sys || sc.fdw.is_some() {
+                return false;
+            }
+            if let Some((_, b)) = &sc.index {
+                es.extend(b.eq.iter().chain(&b.any));
+                es.extend(b.lower.iter().chain(&b.upper).map(|x| &x.0));
+            }
+            if let Access::Index { quals, .. } = &sc.access {
+                es.extend(quals.iter().map(|q| &q.expr));
+            }
+            es.extend(&sc.phv_quals);
+            es.extend(sc.excl.iter().flat_map(|e| e.iter()));
+        }
+        _ => return false,
+    }
+    crate::sql::explain::node_exprs(p, &mut es);
+    es.iter().all(|e| memo_expr(e)) && crate::sql::explain::plan_inputs(p).into_iter().all(|c| memo_safe(c))
+}
+
+/// `memo_safe`'s expressions.
+fn memo_expr(e: &Expr) -> bool {
+    // (Built-in functions have oids below FirstNormalObjectId.)
+    let builtin = |d: &crate::sql::func::FuncDef| d.oid < 16384 && d.volatility != 'v';
+    let plain = |t: &DataType| {
+        matches!(
+            t,
+            DataType::Bool | DataType::Int2 | DataType::Int4 | DataType::Int8 | DataType::Oid | DataType::Numeric(_)
+                | DataType::Float4 | DataType::Float8 | DataType::Text | DataType::Varchar(_) | DataType::Date
+        )
+    };
+    let mut ok = true;
+    e.walk(&mut |x| match x {
+        Expr::Const(..) | Expr::Col(..) | Expr::Outer(..) | Expr::Param(..) | Expr::And(_) | Expr::Or(_)
+        | Expr::Not(_) | Expr::IsNull(..) | Expr::BoolTest(..) | Expr::Case { .. } | Expr::CaseTest(_)
+        | Expr::Coalesce(..) | Expr::Agg(..) | Expr::Relabel(..) => {}
+        Expr::Call(d, ..) | Expr::IsDistinct(.., d) | Expr::MinMax(.., d) | Expr::NullIf(_, _, d, _) => ok &= builtin(d),
+        Expr::InList(_, items, _) => ok &= items.iter().all(|(_, d)| builtin(d)),
+        Expr::Cast(_, from, to, _) => ok &= plain(from) && plain(to),
+        _ => ok = false,
+    });
+    ok
+}
+
 /// A correlated SubPlan's tree between its runs (`ExecCtx::subplan_trees`).
 struct KeptSubplan {
     plan: Arc<Plan>,
@@ -955,6 +1039,7 @@ impl<'a> ExecCtx<'a> {
             subq_cache: RefCell::new(HashMap::default()),
             enclosing_cache: RefCell::new(HashMap::default()),
             subplan_trees: RefCell::new(HashMap::default()),
+            subplan_memo: RefCell::new(HashMap::default()),
             ctes: RefCell::new(HashMap::default()),
             work: RefCell::new(HashMap::default()),
             txn_time: Rc::new(Cell::new(txn_time)),
@@ -1090,6 +1175,7 @@ impl<'a> ExecCtx<'a> {
             subq_cache: RefCell::new(HashMap::default()),
             enclosing_cache: RefCell::new(HashMap::default()),
             subplan_trees: RefCell::new(HashMap::default()),
+            subplan_memo: RefCell::new(HashMap::default()),
             ctes: RefCell::new(HashMap::default()),
             work: RefCell::new(HashMap::default()),
             txn_time: self.txn_time.clone(),
@@ -1526,7 +1612,71 @@ impl<'a> ExecCtx<'a> {
             self.subq_cache.borrow_mut().insert(s.id, rows.clone());
             return Ok(rows);
         }
+        if let Some(rows) = self.memo_rows(s, row, limit)? {
+            return Ok(rows);
+        }
         Ok(Rc::new(self.run_with_params(s, row, limit)?))
+    }
+
+    /// A correlated scalar or EXISTS SubPlan of the statement's own query level, run once
+    /// for each set of its parameters' values and its rows remembered for the statement (its
+    /// snapshot): a SubPlan in a join's filter runs for every joined row, many with the same
+    /// values (TPC-H q17's average for each part, once a lineitem row of it). Only for plans
+    /// that read the same rows for the same values (`memo_safe`), parameters of types whose
+    /// equal values are the same value, and not under EXPLAIN ANALYZE (it counts each run's
+    /// loops, as PostgreSQL's SubPlan reruns its plan). None: not remembered, run it.
+    fn memo_rows(&self, s: &Subquery, row: &[Value], limit: Option<usize>) -> Result<Option<Rc<Vec<Row>>>> {
+        if !matches!(s.kind, SubqueryKind::Scalar | SubqueryKind::Exists)
+            || limit.is_none()
+            || s.func.is_some()
+            || s.call.is_some()
+            || !self.outer.borrow().is_empty()
+            || self.instrumented()
+        {
+            return Ok(None);
+        }
+        let Some(snap) = self.snapshot().filter(|_| self.temp_cleanup.active()) else {
+            return Ok(None);
+        };
+        {
+            let mut memo = self.subplan_memo.borrow_mut();
+            let fresh = memo.get(&s.id).is_none_or(|m| !Arc::ptr_eq(&m.plan, &s.plan) || !Rc::ptr_eq(&m.snap, &snap));
+            if fresh {
+                let exact = |e: &Expr| {
+                    matches!(e.ty(), DataType::Bool | DataType::Int2 | DataType::Int4 | DataType::Int8 | DataType::Oid | DataType::Date)
+                };
+                let ok = s.params.iter().all(exact) && !s.plan.writes() && memo_safe(&s.plan);
+                memo.insert(s.id, SubplanMemo { plan: s.plan.clone(), snap, rows: ok.then(HashMap::default), asked: 0, found: 0 });
+            }
+            if memo.get(&s.id).is_some_and(|m| m.rows.is_none()) {
+                return Ok(None);
+            }
+        }
+        let mut params = Vec::with_capacity(s.params.len());
+        for p in &s.params {
+            params.push(eval(p, row, self)?);
+        }
+        let keep = {
+            let mut memo = self.subplan_memo.borrow_mut();
+            let Some(m) = memo.get_mut(&s.id) else { return Ok(None) };
+            m.asked = m.asked.saturating_add(1);
+            if let Some(r) = m.rows.as_ref().and_then(|rows| rows.get(&params)) {
+                m.found = m.found.saturating_add(1);
+                return Ok(Some(r.clone()));
+            }
+            if m.rows.is_some() && m.asked >= SUBPLAN_MEMO_TRY && m.found.saturating_mul(SUBPLAN_MEMO_RARE) < m.asked {
+                m.rows = None;
+            }
+            m.rows.as_ref().is_some_and(|r| r.len() < SUBPLAN_MEMO_KEYS)
+        };
+        if !keep {
+            return Ok(Some(Rc::new(self.with_outer(Rc::new(params), || self.subplan_rows(s, limit))?)));
+        }
+        let rows = Rc::new(self.with_outer(Rc::new(params.clone()), || self.subplan_rows(s, limit))?);
+        if let Some(m) = self.subplan_memo.borrow_mut().get_mut(&s.id).and_then(|m| m.rows.as_mut()) {
+            m.insert(params, rows.clone());
+        }
+        Ok(Some(rows))
     }
 
     /// The rows of subquery `s` (its parameters, if any, evaluated over `row`).

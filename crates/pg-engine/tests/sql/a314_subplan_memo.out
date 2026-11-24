@@ -1,0 +1,88 @@
+> CREATE TABLE a314_p (k int PRIMARY KEY, brand text)
+-- CREATE TABLE
+
+> CREATE TABLE a314_l (k int, q int, price numeric)
+-- CREATE TABLE
+
+> INSERT INTO a314_p SELECT g, 'b' || (g % 3) FROM generate_series(1, 30) g
+-- INSERT 0 30
+
+> INSERT INTO a314_l SELECT g % 30 + 1, g % 17, g * 1.5 FROM generate_series(1, 600) g
+-- INSERT 0 600
+
+> INSERT INTO a314_l VALUES (NULL, 4, 1), (NULL, 9, 2)
+-- INSERT 0 2
+
+> CREATE INDEX a314_l_k ON a314_l (k)
+-- CREATE INDEX
+
+> ANALYZE a314_p, a314_l
+-- ANALYZE
+
+> SELECT round(sum(l.price) / 7.0, 4) AS avg_yearly, count(*) FROM a314_l l JOIN a314_p p ON p.k = l.k
+> WHERE p.brand = 'b1' AND l.q < (SELECT 0.5 * avg(q) FROM a314_l WHERE k = p.k)
+avg_yearly:numeric | count:int8
+3327.4286 | 52
+-- SELECT 1
+
+> SELECT l.k, count(*), sum((SELECT max(x.price) FROM a314_l x WHERE x.k = l.k AND x.q < l.q))
+> FROM a314_l l WHERE l.k <= 4 OR l.k IS NULL GROUP BY l.k ORDER BY l.k
+k:int4 | count:int8 | sum:numeric
+1 | 20 | 16290.0
+2 | 20 | 14833.5
+3 | 20 | 14412.0
+4 | 20 | 13810.5
+NULL | 2 | NULL
+-- SELECT 5
+
+> SELECT count(*) FROM a314_l l WHERE l.q > 15 OR EXISTS (SELECT 1 FROM a314_l x WHERE x.k = l.k AND x.q = 16 AND x.price > 800)
+count:int8
+107
+-- SELECT 1
+
+> CREATE TABLE a314_d (k int, v int)
+-- CREATE TABLE
+
+> INSERT INTO a314_d VALUES (1, 1), (2, 2), (2, 3)
+-- INSERT 0 3
+
+> SELECT l.k, (SELECT v FROM a314_d d WHERE d.k = l.k) FROM (VALUES (1), (1), (3), (1)) l(k)
+k:int4 | v:int4
+1 | 1
+1 | 1
+1 | 1
+3 | NULL
+-- SELECT 4
+
+> SELECT l.k, (SELECT v FROM a314_d d WHERE d.k = l.k) FROM (VALUES (1), (1), (2)) l(k)
+ERROR 21000: more than one row returned by a subquery used as an expression
+
+> CREATE FUNCTION a314_f(int) RETURNS int STABLE LANGUAGE plpgsql AS $$ BEGIN RAISE NOTICE 'run %', $1; RETURN $1 * 2; END $$
+-- CREATE FUNCTION
+
+> SELECT l.k, (SELECT a314_f(d.v) FROM a314_d d WHERE d.k = l.k AND d.v < 3) FROM (VALUES (1), (1), (2), (2)) l(k)
+NOTICE 00000: run 1
+CONTEXT: PL/pgSQL function a314_f(integer) line 1 at RAISE
+NOTICE 00000: run 1
+CONTEXT: PL/pgSQL function a314_f(integer) line 1 at RAISE
+NOTICE 00000: run 2
+CONTEXT: PL/pgSQL function a314_f(integer) line 1 at RAISE
+NOTICE 00000: run 2
+CONTEXT: PL/pgSQL function a314_f(integer) line 1 at RAISE
+k:int4 | a314_f:int4
+1 | 2
+1 | 2
+2 | 4
+2 | 4
+-- SELECT 4
+
+> UPDATE a314_l u SET q = (SELECT max(q) FROM a314_l x WHERE x.k = u.k) + 100 WHERE u.k <= 2
+-- UPDATE 40
+
+> SELECT k, min(q), max(q), count(*) FROM a314_l WHERE k <= 3 GROUP BY k ORDER BY k
+k:int4 | min:int4 | max:int4 | count:int8
+1 | 116 | 116 | 20
+2 | 116 | 116 | 20
+3 | 0 | 16 | 20
+-- SELECT 3
+
