@@ -5190,19 +5190,22 @@ async fn crawler_verifications_are_each_clusters() {
 }
 
 /// The daily limit of unverified crawls is the owner's, kept in the catalogue: a second connector
-/// of the same site doesn't buy another crawl, and its refusal spends nothing (the same
-/// connector crawls another site next).
+/// doesn't buy another crawl of a site, and a refusal spends nothing. Connector `two` covers a
+/// fresh site and the exhausted one (the fresh one counted first); after its refusal, a crawl of
+/// the fresh site alone runs, so neither the owner's count of it nor the connector's was spent.
 #[tokio::test]
 async fn crawler_daily_limit_is_the_owners_across_connectors() {
-    let (site, second) = (six_page_site().await, six_page_site().await);
+    let (a, b) = (six_page_site().await, six_page_site().await);
+    // Sites are counted in order of their names (`127.0.0.1:<port>`): `fresh` is checked first.
+    let (fresh, spent) = if a.base < b.base { (a, b) } else { (b, a) };
     let e = crawler_env(&[("roll.crawler.unverified.max_crawls_per_day", "1")]).await;
     let id = e.post("/v1/search/clusters", json!({"name": "crawl"})).await["id"].as_str().unwrap().to_string();
-    e.crawler(None, &id, "one", &site.url("/")).await;
-    e.crawler(None, &id, "two", &site.url("/")).await;
+    e.crawler(None, &id, "one", &spent.url("/")).await;
     assert_eq!(e.crawl(None, &id, "one").await["status"], "completed");
+    e.crawler(None, &id, "two", &format!("{},{}", fresh.url("/"), spent.url("/"))).await;
     let j = e.crawl(None, &id, "two").await;
     assert!(j["status"] == "error" && j["error"].as_str().is_some_and(|m| m.contains("at most 1 times in 24 hours by one owner")), "{j}");
-    e.crawler(None, &id, "two", &second.url("/")).await;
+    e.crawler(None, &id, "two", &fresh.url("/")).await;
     let j = e.crawl(None, &id, "two").await;
-    assert_eq!(j["status"], "completed", "the refused crawl spent none of the connector's count: {j}");
+    assert_eq!(j["status"], "completed", "the refused crawl spent none of the owner's or the connector's count: {j}");
 }

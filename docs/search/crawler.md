@@ -224,12 +224,17 @@ A verification is re-checked every 30 days (claimed in the catalogue first, so o
 checks it; the claim is kept apart from the result, so a node that dies mid-check only delays it).
 A failed re-check is retried after 1 hour, 6 hours and a day before the verification lapses to the
 unverified limits, and a lapsed one is re-checked daily for a week, so a short outage costs
-nothing. A check that couldn't be made (the site's request turn more than 10 s away) is neither:
-a re-check is tried again in 5 minutes, a check someone asked for answers 429. Pending
-verifications (never proven) are dropped after 7 days, and an owner can have at most 100 pending
-across their clusters (409 past that). A host the crawler never fetches (`blocked_hosts`, the
-fleet's names) can't be verified, and a check says only that the file is `unreachable`, isn't the
-file, or doesn't hold the token, so it tells nothing about how a port answers.
+nothing. A check that couldn't be made (the site's request turn too far off: 10 s for a check
+someone asked for, which then answers 429; 60 s for a re-check) is neither a pass nor a failure.
+A re-check is tried again in 5 minutes, until its last check is a day past the 30-day interval;
+from then on, one that can't be made counts as failed, so a site that never gives a turn can't
+keep a verification. Pending verifications (never proven) are dropped after 7 days; a cluster
+can have at most 20 pending, and an owner 100 across their clusters (409 past either). A cluster
+that is deleted or being deleted can't start one. A host the crawler never fetches
+(`blocked_hosts`, the fleet's names) can't be verified, and a check says only that the file is
+`unreachable` (a timeout, a network failure and a refused address alike), isn't the file, or
+doesn't hold the token, so it tells nothing about how a port answers or which names lead to a
+private or fleet address.
 
 Verifications, like each owner's crawls of unverified sites (the daily limit), are kept in roll's
 catalogue (`search-control`: SQLite, or the fleet's shared Postgres), not in a cluster's state,
@@ -412,7 +417,9 @@ robots.txt reading, verdicts, redirects, credential rules and parsing) and answe
 robots.txt is read for the URL's origin and each redirect's, and for at most 5 more of the
 crawl's origins its links lead to; a link on another is shown as `robots_not_read`. One test takes
 75 s at most, waits and requests included, and the page's memory is let go before the links are
-decided. A failed fetch says `unreachable` for a timeout and a network failure alike. The
+decided; a link whose origin's robots.txt can't be read in time is `robots_not_read` too, and the
+page's parse is held to the test's deadline. A failed fetch says `unreachable` for a timeout, a
+network failure and a refused address alike (`too_large` stays: the page answered). The
 credential is used only by the fetch's rules above, and never appears in the answer. The answer
 is capped at 1 MiB (the body shown is cut at 64 KiB). It is a tool in roll's MCP
 (`search_crawl_test`) and `roll search crawler test <cluster> <url> [--connector <id>]`. The

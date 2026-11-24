@@ -1049,25 +1049,35 @@ impl Store {
     /// Cluster `cluster`'s verification of `site` (a domain or an origin, of `kind`): a new one
     /// (pending), or the one it has. Its token is `owner`'s for the site, the one their other
     /// clusters have when they have one (so a record published once proves it everywhere), else
-    /// `token`. `None`: the owner has [`MAX_PENDING`] pending already, across their clusters.
-    /// Their pending rows older than [`PENDING_FOR`] are dropped first.
-    pub async fn start_verification(&self, cluster: &str, owner: &str, site: &str, kind: &str, token: &str, now: i64) -> anyhow::Result<Option<SiteVerification>> {
+    /// `token`. Refused past [`MAX_PENDING_PER_CLUSTER`] pending in the cluster or
+    /// [`MAX_PENDING`] across the owner's clusters, and for a cluster that's deleted or being
+    /// deleted (checked in the same write, so a start can't outlive a delete's sweep of its rows).
+    /// The owner's pending rows older than [`PENDING_FOR`] are dropped first.
+    pub async fn start_verification(&self, cluster: &str, owner: &str, site: &str, kind: &str, token: &str, now: i64) -> anyhow::Result<Started> {
         Ok(self.db.write(|x| {
+            let live: Option<i64> = x.query_row("SELECT 1 FROM search_clusters WHERE id = ?1 AND deleted_at IS NULL AND deleting = 0", params![cluster], |r| r.get(0)).optional()?;
+            if live.is_none() {
+                return Ok::<_, code_sql::Error>(Started::Gone);
+            }
             x.execute("DELETE FROM search_crawler_sites WHERE owner = ?1 AND status = 'pending' AND created_at < ?2", params![owner, now - PENDING_FOR])?;
-            let had = x.query_row(&format!("SELECT {VERIFY_COLS} FROM search_crawler_sites WHERE cluster_id = ?1 AND site = ?2"), params![cluster, site], verification_row).optional()?;
-            if had.is_some() {
-                return Ok::<_, code_sql::Error>(had);
+            if let Some(v) = x.query_row(&format!("SELECT {VERIFY_COLS} FROM search_crawler_sites WHERE cluster_id = ?1 AND site = ?2"), params![cluster, site], verification_row).optional()? {
+                return Ok(Started::Row(v));
+            }
+            let here: i64 = x.query_row("SELECT COUNT(*) FROM search_crawler_sites WHERE cluster_id = ?1 AND status = 'pending'", params![cluster], |r| r.get(0))?;
+            if here >= MAX_PENDING_PER_CLUSTER {
+                return Ok(Started::Full(MAX_PENDING_PER_CLUSTER, "in this cluster"));
             }
             let pending: i64 = x.query_row("SELECT COUNT(*) FROM search_crawler_sites WHERE owner = ?1 AND status = 'pending'", params![owner], |r| r.get(0))?;
             if pending >= MAX_PENDING {
-                return Ok(None);
+                return Ok(Started::Full(MAX_PENDING, "across the owner's clusters"));
             }
             let theirs: Option<String> = x.query_row("SELECT token FROM search_crawler_sites WHERE owner = ?1 AND site = ?2 LIMIT 1", params![owner, site], |r| r.get(0)).optional()?;
             x.execute(
                 "INSERT INTO search_crawler_sites (cluster_id, site, owner, kind, token, status, created_at) VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?6) ON CONFLICT (cluster_id, site) DO NOTHING",
                 params![cluster, site, owner, kind, theirs.as_deref().unwrap_or(token), now],
             )?;
-            x.query_row(&format!("SELECT {VERIFY_COLS} FROM search_crawler_sites WHERE cluster_id = ?1 AND site = ?2"), params![cluster, site], verification_row).optional()
+            let v = x.query_row(&format!("SELECT {VERIFY_COLS} FROM search_crawler_sites WHERE cluster_id = ?1 AND site = ?2"), params![cluster, site], verification_row)?;
+            Ok(Started::Row(v))
         })?)
     }
 
@@ -1898,6 +1908,20 @@ pub const DEFER_FOR: i64 = 5 * 60_000;
 /// how many one owner may have pending.
 pub const PENDING_FOR: i64 = 7 * DAY;
 pub const MAX_PENDING: i64 = 100;
+pub const MAX_PENDING_PER_CLUSTER: i64 = 20;
+/// A busy re-check is deferred until this long past its due interval, then counted as failed, so a
+/// site that never gives a turn can't keep a verification forever.
+pub const DEFER_UNTIL: i64 = RECHECK_AFTER + DAY;
+
+/// What [`Store::start_verification`] did.
+#[derive(Debug)]
+pub enum Started {
+    Row(SiteVerification),
+    /// Too many pending: the cap, and where it's counted.
+    Full(i64, &'static str),
+    /// The cluster is deleted or being deleted.
+    Gone,
+}
 const HOUR: i64 = 3_600_000;
 const DAY: i64 = 24 * HOUR;
 

@@ -14,7 +14,7 @@
 //! each owner gets [`PROBES_PER_MINUTE`] of them on a node.
 
 use crate::control::{Control, ControlError, Result};
-use crate::store::{DEFER_FOR, MAX_PENDING, PENDING_FOR, SearchCluster, SiteVerification, Store};
+use crate::store::{DEFER_FOR, DEFER_UNTIL, PENDING_FOR, SearchCluster, SiteVerification, Started, Store};
 use search_es::egress::Egress;
 use search_es::xpack::entsearch::sync::crawler::{self, verify};
 use serde_json::{Value, json};
@@ -124,8 +124,9 @@ impl Control {
 
     /// Starts verifying `text` for cluster `c`, a domain or (`origin`) a URL's origin: what to
     /// publish (the owner's token for the site, so one their other clusters published already
-    /// works at once). 409 past [`MAX_PENDING`] pending ones of the owner's. A host the crawler
-    /// never fetches (blocked, or the fleet's own) can't be verified.
+    /// works at once). 409 past the pending caps (`store::MAX_PENDING_PER_CLUSTER` in the
+    /// cluster, `store::MAX_PENDING` across the owner's). A host the crawler never fetches
+    /// (blocked, or the fleet's own) can't be verified.
     pub async fn start_site_verification(&self, c: &SearchCluster, text: &str, origin: bool) -> Result<Value> {
         let (kind, key) = verify::target(text, &egress(self)).map_err(ControlError::Invalid)?;
         match (kind, origin) {
@@ -145,8 +146,9 @@ impl Control {
         getrandom::fill(&mut bytes).map_err(|e| ControlError::Internal(anyhow::anyhow!("os randomness: {e}")))?;
         let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
         match self.store.start_verification(&c.id, &owner_of(c), &key, kind.as_str(), &token, crate::meter::now_ms()).await? {
-            Some(v) => Ok(shown(&v)),
-            None => Err(ControlError::Conflict(format!("{MAX_PENDING} verifications are pending already: check or delete some (pending ones are dropped after {} days)", PENDING_FOR / 86_400_000))),
+            Started::Row(v) => Ok(shown(&v)),
+            Started::Full(cap, place) => Err(ControlError::Conflict(format!("{cap} verifications are pending {place} already: check or delete some (pending ones are dropped after {} days)", PENDING_FOR / 86_400_000))),
+            Started::Gone => Err(ControlError::NotFound(format!("cluster [{}] is deleted", c.name))),
         }
     }
 
@@ -156,7 +158,7 @@ impl Control {
         crawlers_on(self)?;
         let v = self.store.verification(&c.id, site).await?.ok_or_else(|| ControlError::NotFound(format!("no verification of [{site}]: start one first")))?;
         take_probe(&owner_of(c))?;
-        if let verify::Checked::NotChecked(why) = self.check_site(&v).await? {
+        if let verify::Checked::NotChecked(why) = self.check_site(&v, false).await? {
             return Err(ControlError::Busy(why));
         }
         let v = self.store.verification(&c.id, site).await?.ok_or_else(|| ControlError::NotFound(format!("no verification of [{site}]")))?;
@@ -171,12 +173,12 @@ impl Control {
     }
 
     /// Checks `v` and records a pass or a failure; a check that couldn't be made is recorded
-    /// by neither (the caller decides).
-    async fn check_site(&self, v: &SiteVerification) -> Result<verify::Checked> {
+    /// by neither (the caller decides). `background`: a re-check, which waits longer for a turn.
+    async fn check_site(&self, v: &SiteVerification, background: bool) -> Result<verify::Checked> {
         let kind = verify::Kind::parse(&v.kind).ok_or_else(|| ControlError::Internal(anyhow::anyhow!("verification [{}] has kind [{}]", v.site, v.kind)))?;
         let floor = crawler::unverified_floor(|k| setting(self, k));
         let blocked = crawler::blocked_hosts_of(|k| setting(self, k));
-        let checked = verify::check(&egress(self), &blocked, kind, &v.site, &v.token, floor).await;
+        let checked = verify::check(&egress(self), &blocked, kind, &v.site, &v.token, floor, background).await;
         let now = crate::meter::now_ms();
         match &checked {
             verify::Checked::Proven => self.store.record_check(&v.cluster_id, &v.site, Ok(()), now).await?,
@@ -200,7 +202,8 @@ impl Control {
     /// Re-checks verifications that are due (`store::after_check`), every [`RECHECK_EVERY`]:
     /// each is claimed in the catalogue just before it is checked, so on a fleet one node checks
     /// it; one that couldn't be made (a busy site) is tried again in [`DEFER_FOR`], not counted
-    /// as a failure. Nothing is checked while crawlers are off on the node.
+    /// as a failure until the last check is [`DEFER_UNTIL`] old. Nothing is checked while
+    /// crawlers are off on the node.
     pub(crate) fn start_site_rechecks(self: &Arc<Self>) {
         let me = Arc::downgrade(self);
         tokio::spawn(async move {
@@ -227,8 +230,16 @@ impl Control {
                             continue;
                         }
                     }
-                    let outcome = match c.check_site(&v).await {
-                        Ok(verify::Checked::NotChecked(_)) => c.store.defer_check(&v.cluster_id, &v.site, crate::meter::now_ms() + DEFER_FOR).await.map_err(ControlError::from),
+                    let outcome = match c.check_site(&v, true).await {
+                        // Deferred, but not forever: once the last check is a day past its
+                        // interval, a check that can't be made counts as failed.
+                        Ok(verify::Checked::NotChecked(why)) => {
+                            let now = crate::meter::now_ms();
+                            match now - v.checked_at.unwrap_or(v.created_at) > DEFER_UNTIL {
+                                true => c.store.record_check(&v.cluster_id, &v.site, Err(&why), now).await.map_err(ControlError::from),
+                                false => c.store.defer_check(&v.cluster_id, &v.site, now + DEFER_FOR).await.map_err(ControlError::from),
+                            }
+                        }
                         Ok(_) => Ok(()),
                         Err(e) => Err(e),
                     };

@@ -147,7 +147,7 @@ pub async fn test(cluster: &Cluster, connector: Option<&str>, url: &str) -> Resu
     let text = String::from_utf8_lossy(&resp.body).into_owned();
     let tags = plan.domain(&at).map(|d| d.exclude_tags.clone()).unwrap_or_default();
     let (page_url, limits, full_html) = (at.clone(), plan.limits.clone(), plan.full_html);
-    let parse_by = Instant::now() + super::PAGE_PARSE_TIME;
+    let parse_by = deadline.min(Instant::now() + super::PAGE_PARSE_TIME);
     let parsed = tokio::task::spawn_blocking(move || {
         let r = html::read_page(&text, held, &page_url, &tags, &limits, parse_by);
         (r, text)
@@ -203,7 +203,9 @@ pub async fn test(cluster: &Cluster, connector: Option<&str>, url: &str) -> Resu
     // [`MORE_ROBOTS`] more; a link on another of the crawl's origins is `robots_not_read`.
     let mut links: Vec<Value> = Vec::new();
     for l in &follow {
-        let read = robots.load(&plan, l, false).await?;
+        // A link's robots.txt that can't be read in time (a busy site, the deadline) leaves the
+        // link unread; the document stays in the answer.
+        let read = robots.load(&plan, l, false).await.unwrap_or("not read");
         let v = decide(&plan, &fetcher, &blocked, &robots.got, l);
         let shown = if v == Verdict::Allowed && read == "not read" { "robots_not_read" } else { v.as_str() };
         links.push(obj! { "url" => l.as_str(), "verdict" => shown });

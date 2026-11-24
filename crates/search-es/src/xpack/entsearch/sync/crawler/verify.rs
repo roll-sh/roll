@@ -28,6 +28,9 @@ pub const TXT_PREFIX: &str = "roll-site-verification=";
 const REDIRECTS: usize = 5;
 /// The most of the file read.
 const FILE_BYTES: usize = 4 << 10;
+/// How long a background re-check waits for the site's request turn (nobody waits on it; a
+/// check someone asked for waits [`super::TURN_WAIT`]).
+const BACKGROUND_TURN_WAIT: Duration = Duration::from_secs(60);
 
 /// What the host keeps for crawls: owners' verifications, and owners' crawls of sites they
 /// haven't verified, counted across the fleet.
@@ -117,9 +120,11 @@ pub enum Checked {
 /// Checks that `token` is published for verification `key` of `kind`: a TXT record on the
 /// domain, or the origin's file (read through the crawler's own fetch path and egress check,
 /// never from a host of `blocked`, each request in the site's turn `floor` apart, redirects
-/// followed only within the origin). What a failure says is coarse (`unreachable`, not the
-/// file), so a check can't be used to tell how a port answers.
-pub async fn check(egress: &Egress, blocked: &[String], kind: Kind, key: &str, token: &str, floor: Duration) -> Checked {
+/// followed only within the origin; `background`: a re-check, which waits longer for a turn).
+/// What a failure says is coarse (`unreachable`, not the file), so a check can't be used to tell
+/// how a port answers, or which names lead to a refused address.
+pub async fn check(egress: &Egress, blocked: &[String], kind: Kind, key: &str, token: &str, floor: Duration, background: bool) -> Checked {
+    let turn_wait = if background { BACKGROUND_TURN_WAIT } else { super::TURN_WAIT };
     if kind == Kind::Domain {
         return match txt_has(key, token).await {
             true => Checked::Proven,
@@ -139,11 +144,13 @@ pub async fn check(egress: &Egress, blocked: &[String], kind: Kind, key: &str, t
         if at.origin() != key {
             return Checked::Failed(format!("the file redirected to [{}], another origin: a token another origin serves proves nothing about [{key}]", at.as_str()));
         }
-        if let Err(why) = super::polite_turn(&at, floor, std::time::Instant::now() + super::TURN_WAIT).await {
+        if let Err(why) = super::polite_turn(&at, floor, std::time::Instant::now() + turn_wait).await {
             return Checked::NotChecked(why);
         }
         let resp = match fetcher.get(&at, false, FILE_BYTES).await {
             Ok(r) => r,
+            // Too large is an answer, but not the file; every other failure is `unreachable`.
+            Err(super::fetch::Failure::TooLarge) => return Checked::Failed(format!("[{}] isn't the file", at.as_str())),
             Err(f) => return Checked::Failed(format!("[{}] is {}", at.as_str(), f.shown())),
         };
         match resp.status {
