@@ -1103,7 +1103,7 @@ pub(crate) fn host_only(apps: &Apps, name: String) -> String {
 /// A query parameter's value, decoded (the last, when it's there more than once).
 fn query_value(req: &Request, param: &str) -> Option<String> {
     let prefix = format!("{param}=");
-    req.uri().query()?.split('&').filter_map(|p| p.strip_prefix(prefix.as_str())).last().map(|v| percent_encoding::percent_decode_str(v).decode_utf8_lossy().into_owned())
+    req.uri().query()?.split('&').rev().find_map(|p| p.strip_prefix(prefix.as_str())).map(|v| percent_encoding::percent_decode_str(v).decode_utf8_lossy().into_owned())
 }
 
 /// The way in through a link (`?<param>=<token>`): its cookie set (host-only; for `max_age`
