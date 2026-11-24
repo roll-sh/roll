@@ -194,6 +194,11 @@ function SyncRow({ sync: s, kind, onChanged, onError }: { sync: Sync; kind?: Syn
           </button>
         )}
       </div>
+      {s.subject && (
+        <p className="mt-0.5 truncate pl-6 font-mono text-[10.5px] text-subtle" title="The subject your cloud's trust names: roll's issuer signs a token for it at each push, and no cloud key is kept">
+          trust subject {s.subject}
+        </p>
+      )}
       {s.remote_id && <p className="mt-0.5 truncate pl-6 font-mono text-[10.5px] text-subtle" title="What the target calls the certificate: each renewal replaces it">{s.remote_id}</p>}
       {s.status === "error" && s.error && <p className="mt-1 pl-6 text-[11.5px] break-words text-danger">{s.error}</p>}
       <p className="mt-0.5 pl-6 text-[10.5px] text-faint">

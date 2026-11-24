@@ -1694,8 +1694,8 @@ impl EnvLive {
             return Ok(Prepared { made: Vec::new(), took: Duration::ZERO, hold: None });
         }
         let mut hold = None;
-        if run.volume.is_some() || !run.rollout.overlap {
-            // One volume, or one runner: the old ones let go first, finishing their work.
+        if run.one_writer() || !run.rollout.overlap {
+            // One writer of its volume, or one runner: the old ones let go first, finishing their work.
             hold = Some(self.wake.clone().lock_owned().await);
             let old: Vec<Arc<Inst>> = self.insts.lock().drain(..).collect();
             if !old.is_empty() {
@@ -2059,7 +2059,7 @@ impl EnvLive {
             let tpl = self.template().ok_or("nothing is deployed here")?;
             let inst = self.instances().into_iter().find(|i| i.name == name).ok_or_else(|| format!("no instance {name} here"))?;
             let replace = tpl.run.kind == RunType::Web
-                && tpl.run.volume.is_none()
+                && !tpl.run.one_writer()
                 && inst.awake()
                 && inst.deployment == tpl.deployment
                 && self.canary.lock().is_none()
@@ -3011,7 +3011,7 @@ mod tests {
     async fn a_volume_rollout_never_starts_the_old_deployment_on_the_volume() {
         let fake = Fake::new();
         let live = live(&fake);
-        let run = Run { volume: Some(crate::model::Volume { mount: "/data".into(), size_gb: 1, backups: None }), min_instances: 1, ..Run::default() };
+        let run = Run { volume: Some(crate::model::Volume { mount: "/data".into(), size_gb: 1, backups: None, shared: false }), min_instances: 1, ..Run::default() };
         let old = template_of("dep_aaaaaaaaaaaa", run.clone(), &[]);
         let prepared = live.prepare(&old, None).await.unwrap();
         live.commit(old, prepared).await;

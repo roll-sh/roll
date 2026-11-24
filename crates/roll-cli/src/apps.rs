@@ -374,7 +374,8 @@ pub enum AppsCmd {
         /// A cron service's failed run is tried again this many times (0–5), after a backoff.
         #[arg(long)]
         retries: Option<u8>,
-        /// A volume, `<mount>:<size in GB>` (`/data:5`); `none` removes it.
+        /// A volume, `<mount>:<size in GB>` (`/data:5`), `:shared` after it for every instance to
+        /// mount (many instances, overlapping deploys); `none` removes it.
         #[arg(long)]
         volume: Option<String>,
         /// Deploy a push only when it touches these paths (comma-separated, gitignore-style);
@@ -3280,9 +3281,15 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 None => None,
                 Some("none") => Some(Value::Null),
                 Some(v) => {
-                    let (mount, size) = v.rsplit_once(':').ok_or_else(|| anyhow::anyhow!("--volume is <mount>:<size in GB>, like /data:5"))?;
+                    // `:shared` after it: every instance mounts it.
+                    let (v, shared) = v.strip_suffix(":shared").map_or((v, false), |v| (v, true));
+                    let (mount, size) = v.rsplit_once(':').ok_or_else(|| anyhow::anyhow!("--volume is <mount>:<size in GB>[:shared], like /data:5"))?;
                     let size: u32 = size.parse().map_err(|_| anyhow::anyhow!("--volume's size is a whole number of GB"))?;
-                    Some(json!({ "mount": mount, "size_gb": size }))
+                    let mut vol = json!({ "mount": mount, "size_gb": size });
+                    if shared {
+                        vol["shared"] = json!(true);
+                    }
+                    Some(vol)
                 }
             };
             // `none` is a text setting's default (null in the PATCH).
