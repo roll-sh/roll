@@ -179,8 +179,12 @@ A tool that has roll reach an address the caller chose says so with MCP's `openW
 (`Tool::open_world`): publishing a task to a URL, a topic's endpoints, schedules and retries that
 deliver, running the app's own functions, adding or testing a notification or a log drain, a
 service from a Git URL or an image and its deploys, a sandbox (a public image, the internet by
-default) and the commands run in it, and a managed secret's rotation at its vendor.
-Every other tool's domain is roll's own (`false`). Search mode's `roll_run` is open-world when any
+default) and the commands run in it, a managed secret's rotation at its vendor or a public
+certificate's renewal at its CA, a plan or an import read from a public Git URL, a custom or
+preview domain's DNS check, and search's crawl tests and site checks.
+Every other tool's domain is roll's own (`false`). A tool that takes an outside address (`url`,
+`origin`, `domain`, `host`, `git`…) is open-world or names in a test why it reaches
+nothing (a filter, a stored setting). Search mode's `roll_run` is open-world when any
 tool it may run is; `roll_run_read` never is.
 
 ### Inspector
@@ -371,6 +375,9 @@ throwaway home. It then calls every tool through
 5. As a client that fills in forms, it leaves out each id a read tool needs (the form must offer
    the fixture's) and each required choice whose other arguments it has (the form must offer
    exactly the tool's set).
+6. It sends `mcp-protocol-version: 2025-11-25`, as a current client does, so answers about one
+   resource carry their dashboard link (`resource_link`); each link, pasted into `roll_find`,
+   must read back as a resource the connection has, and some tool must have answered one.
 
 A 5xx, an argument the route rejects (unknown, missing, or of a type it can't parse), or an empty 404
 (no route answers the path) fails it. That's what the unit tests can't see:
@@ -722,7 +729,7 @@ alone, as at the gate.
       or a status message. There's one input request per approval, keyed by the approval's id, so
       a client shows it once however often the task waits again. Once a person decides, it runs.
     - **Waiting tools:** a tool that waits for something up to a request's limit (`tasks_wait_run`'s
-      run, `access_wait_approval`'s decision, `apps_wait_deploy`'s deploy, `apps_wait_job`'s job) waits on as a task. Its answer is checked (a tool's
+      run, `access_wait_approval`'s decision, `apps_wait_deploy`'s deploy, `apps_wait_job`'s job, `apps_wait_cron_run`'s run) waits on as a task. Its answer is checked (a tool's
       `until`), and while it says the wait isn't over the task asks again every 2 s, so it waits
       as long as it takes. Such a call becomes a task as soon as its first answer isn't final.
     - **Polling:** `tasks/get` answers from any node, with the result inline once `completed` (a
@@ -1167,6 +1174,11 @@ previews are listed once those products are on.
 | `search_put_query_ruleset` | Create a query ruleset or replace its rules (destructive). | `PUT /v1/search/clusters/{cluster}/query_rules/{ruleset}` |
 | `search_delete_query_ruleset` | Delete a query ruleset. | `DELETE /v1/search/clusters/{cluster}/query_rules/{ruleset}` |
 | `search_test_query_ruleset` | Which of a ruleset's rules match these criteria. | `POST /v1/search/clusters/{cluster}/query_rules/{ruleset}/test` |
+| `search_crawl_test` | One URL through the web crawler's path, storing nothing but sending real requests (10 a minute per owner): what would be indexed and why anything would be skipped (write). | `POST /v1/search/clusters/{cluster}/crawl-test` |
+| `search_list_site_verifications` | The domains and origins the cluster verified for its web crawlers (each cluster's own; the token is the owner's). | `GET /v1/search/clusters/{cluster}/site-verifications` |
+| `search_verify_site` | Start verifying a domain (DNS TXT: every origin on it) or one origin (its well-known file, served by itself: that origin alone). | `POST /v1/search/clusters/{cluster}/site-verifications` |
+| `search_check_site_verification` | Check a site's token now: verified, or why not. | `POST /v1/search/clusters/{cluster}/site-verifications/{site}/check` |
+| `search_delete_site_verification` | Drop a site's verification. | `DELETE /v1/search/clusters/{cluster}/site-verifications/{site}` |
 | `search_refresh` | Make what was just indexed searchable now. | `POST /v1/search/clusters/{cluster}/indices/{index}/refresh` |
 | `search_analyze` | The tokens an index's analyzer makes of some text (read). | `POST /v1/search/clusters/{cluster}/indices/{index}/analyze` |
 | `search_add_document` | Index a document under a new id. | `POST /v1/search/clusters/{cluster}/indices/{index}/docs` |
@@ -1218,6 +1230,8 @@ previews are listed once those products are on.
 | `secrets_list_ssh_cas` | A project's SSH CAs (public keys, principals, limits; never a private key; adding one is admin). | `GET /v1/secrets/projects/{project}/ssh-cas` |
 | `secrets_totp` | The current one-time code from a secret holding an authenticator seed (a reveal; never the seed). | `GET /v1/secrets/projects/{project}/environments/{env}/secrets/{name}/totp` |
 | `secrets_list_saas` | A project's rotators for third-party API keys: vendor and the account each rotates for (never a credential). | `GET /v1/secrets/projects/{project}/saas` |
+| `secrets_list_public_certs` | A project's certificates from public ACME CAs: names, CA, DNS provider, status, end and next renewal (never a credential or key). | `GET /v1/secrets/projects/{project}/public-certs` |
+| `secrets_renew_public_cert` | Order a new public certificate now; linked keys rotate to it once the CA issues it. | `POST /v1/secrets/projects/{project}/public-certs/{id}/renew` |
 | `secrets_list_kubernetes` | The Kubernetes clusters a project issues service-account tokens for: names and API servers (never a token). | `GET /v1/secrets/projects/{project}/kubernetes` |
 | `secrets_list_github_apps` | A project's GitHub Apps for short-lived installation tokens (ids, repositories, permissions; never the private key; adding one is admin). | `GET /v1/secrets/projects/{project}/github-apps` |
 | `secrets_list_directories` | A project's LDAP and Active Directory servers: URL, flavor, bind DN, managed accounts, groups, gateway (never the bind password; adding one is admin). | `GET /v1/secrets/projects/{project}/directories` |
@@ -1345,6 +1359,7 @@ previews are listed once those products are on.
 | `apps_list_links` | What a service is linked to. | `GET /v1/apps/services/{service}/links` |
 | `apps_list_cron_runs` | A cron service's runs. | `GET …/environments/{env}/runs` |
 | `apps_get_cron_run` | One cron run: status, exit code, times. | `GET /v1/apps/services/{id}/environments/{env}/runs/{run}` |
+| `apps_wait_cron_run` | A cron run once it ends: a task that waits as long as it takes for a client that runs tasks, its status now for any other. | `GET /v1/apps/services/{id}/environments/{env}/runs/{run}` |
 | `apps_cron_run_logs` | A cron run's output (read: its lines are in the environment's log). | `GET /v1/apps/services/{id}/environments/{env}/runs/{run}/logs` |
 | `apps_cancel_cron_run` | Stop a running cron run (production: deploy). | `POST /v1/apps/services/{id}/environments/{env}/runs/{run}/cancel` |
 | `apps_run_cron` | Run a cron job now (deploy in production). | `POST …/environments/{env}/runs` |
@@ -1384,6 +1399,8 @@ previews are listed once those products are on.
 | `apps_form_submissions` | What people sent through a form, newest first (reveal; every read audited). | `GET /v1/apps/services/{id}/environments/{env}/forms/{form}/submissions` |
 | `apps_delete_form_submission` | Delete one submission for good. | `DELETE /v1/apps/services/{id}/environments/{env}/forms/{form}/submissions/{sub}` |
 | `apps_rollback` | Roll an environment back to an earlier deploy, with the variables it went live with. | `POST /v1/apps/services/{service}/environments/{env}/deploys/{deploy}/rollback` |
+| `apps_pin_deploy` | Keep a deployment from pruning, so rolling back to it stays instant. | `POST /v1/apps/services/{service}/environments/{env}/deploys/{deploy}/pin` |
+| `apps_unpin_deploy` | Let a pinned deployment be pruned again. | `DELETE /v1/apps/services/{service}/environments/{env}/deploys/{deploy}/pin` |
 | `apps_rollback_previous` | Put back the deploy that was live before this one. | `POST /v1/apps/services/{service}/environments/{env}/rollback` |
 | `apps_logs` | Recent logs of a service's environment, or with `http` its requests (filter by `status`, `min_ms`). | `GET /v1/apps/services/{service}/environments/{env}/logs` |
 | `apps_list_domains` | An environment's domains. | `GET /v1/apps/services/{service}/environments/{env}/domains` |
@@ -1453,15 +1470,12 @@ gaps are in how results read and how roll is distributed):
 From a 2026-11-24 gap review (every tool run as an agent would against a fresh rolld with
 `mcp-sweep.py --report`, 1,161 calls, plus probes with scoped tokens):
 
-1. **Choice forms checked live, and the cost of a call measured (this PR).** The sweep now leaves
-   out each required choice it can (a role, a rollout's action, how long an access request lasts)
-   as a form-filling client and expects the tool's exact set offered; #912 and #940 were unit
-   tests only. Measured on a debug build with every product on (2026-11-24): a tool call through
-   `/v1/mcp` costs 3.3 ms over its route (5.4 against 2.1 ms at the median), and `tools/list` grows
-   with what it answers: 141 ms for all 517 tools (436 KB), 39 ms in search mode (12 KB), 15 ms
-   for one product. Release builds cut that several times, and a client lists once per
-   connection, so nothing is cached: a cache would have to key on a grant, which roll looks up on
-   every request.
+1. **Open-world marks, kept by a test (this PR).** Two siblings' new tools missed MCP's
+   `openWorldHint` (search's crawl test, secrets' certificate renewal, both fixed before landing),
+   and so had three of apps' on main: `apps_plan` (reads a public Git URL), `apps_verify_domain`
+   and `apps_verify_preview_domain` (a domain's DNS). Marked; and a tool taking an outside address
+   (`url`, `origin`, `domain`, `host`, `git`…) is now open-world or says why it
+   reaches nothing (`REACHES_NOTHING`), so the next one fails a test instead of a review.
 2. **Paging is the products'.** No list route takes a cursor (approvals take `limit` only). History
    and logs are all capped (a `LIMIT`, the latest N, or a retention window), so nothing grows
    without bound there; the lists of things people make are whole (buckets, queues, topics,
@@ -1472,7 +1486,9 @@ From a 2026-11-24 gap review (every tool run as an agent would against a fresh r
    mapped in #901. roll apps' `apps_fetch` (#890) is read by `debug_failing_service` and
    `ship_from_chat`. roll previews' share `label` and guest `notes` (#911, on main): mapped onto
    `previews_share` in #911 itself, on this thread's suggestion; guests' notes are outside text,
-   marked by roll previews (#916, gating) and withheld in lockdown (`note`, `selector`). roll
+   marked by roll previews (#916, #943: outside readers' notes too, and a fork's try and fetch)
+   and withheld in lockdown (#917, #940, #944). After previews #955 lands, `previews_try`'s
+   steps name its `{choose: [selector, n]}` (the route takes it already). roll
    secrets' leak rotation rules (#909): `respond_to_leaked_secret` says when a report rotates by
    itself. roll secrets' requests cursor (#927): mapped in #933.
 4. **After #808 (roll search on members) lands:** `Tool::within_session`'s comment (a create that names a project is held within the person's session now; listing stays as it is) and the members sentence in "With a scoped token" naming search. Waiting on its merge commit.
@@ -1540,7 +1556,7 @@ From a 2026-11-24 gap review (every tool run as an agent would against a fresh r
    stateless and search mode (`?tools=search`) covers clients that can't take the list; "remember this browser"; a preset that reveals development's values without asking
    (#354); a connection-level `?project=` (only a token's rules bound a project; a default that
    some tools can't honour would look like a boundary).
-15. **Landed 2026-11-23 and 24:** lockdown withholds a fork page's console errors and header values (#944); fixes from a review of #907–#933: lockdown withholds a guest's path and name, `unknown` severity, empty optional choices, choice forms after ids (#940); `secrets_list_requests` pages (`limit`, `before`; roll secrets #927) and its `state` is a choice (#933); a deploy's and a change's answers link to their pages (#931); an answer about one resource links to its dashboard page (`resource_link`, #928); 24 more fixed sets as choices, and a test that keeps values out of prose (#920); a refused member hears the weakest role that may and who changes roles (#914); lockdown withholds guests' notes and the leak prompt says when a report rotates (#917); a missing required choice asked for in a form, as a missing id is (#912); tool arguments with a fixed set as JSON Schema `enum`, checked before the call; three proses were short of their route's set (#910); refusals that say why: search's error objects, token rules' resources, axum's body rejections; a cut answer naming its tool's filters; the sweep's `--report` (#907, from the 2026-11-24 gap review); `workspace.event` (#817); MCP Apps views that refresh themselves (#820); `roll_find`, any resource by name, part of its id or a pasted dashboard link (#821), its page table (#845) and search mode (#849); `ship_from_chat` (#826); review fixes for #814–#826 (#832: lookups held by `agents_ask`, the inspector on `roll_find`, approvals only from the gate); lists answered as tables (#838: 20+ rows about 40% smaller); the ship prompts quote first (#840); `secrets_list_saas`'s eleven vendors (#843); the field test reading named body types, 46 fields mapped or explained (#854), and object arguments naming every key (#862); `previews_fetch` on roll previews #852 (#859); review fixes for #838–#868 (#871); `roll_find` links matches (#864) and reads Postgres and streams links, which now carry their selection (#878); `previews_tables` (#883); a browser step's typed text redacted from the audit (#887); `previews_try` and `previews_try_screenshot`, an agent driving a preview's page (#892); `respond_to_leaked_secret` checks for a rotation roll already started (#891).
+15. **Landed 2026-11-23 and 24:** `secrets_list_saas` names SonarQube and Jenkins (#961); roll search #888 (site verification per cluster, crawl tests) mapped by its thread; `apps_wait_cron_run`, a cron run started now followed to its end; every route that answers 202 has a wait but a secrets environment delete that becomes a change request (#958); the sweep reads back every dashboard link it's answered (#951); the sweep checks choice forms live (15 tools), and a call's cost measured: 3.3 ms over its route and `tools/list` 141 ms for 517 tools in a debug build, 6.5 ms at p50 in release as "Toolsets" records, so nothing is cached (#946); lockdown withholds a fork page's console errors and header values (#944); fixes from a review of #907–#933: lockdown withholds a guest's path and name, `unknown` severity, empty optional choices, choice forms after ids (#940); `secrets_list_requests` pages (`limit`, `before`; roll secrets #927) and its `state` is a choice (#933); a deploy's and a change's answers link to their pages (#931); an answer about one resource links to its dashboard page (`resource_link`, #928); 24 more fixed sets as choices, and a test that keeps values out of prose (#920); a refused member hears the weakest role that may and who changes roles (#914); lockdown withholds guests' notes and the leak prompt says when a report rotates (#917); a missing required choice asked for in a form, as a missing id is (#912); tool arguments with a fixed set as JSON Schema `enum`, checked before the call; three proses were short of their route's set (#910); refusals that say why: search's error objects, token rules' resources, axum's body rejections; a cut answer naming its tool's filters; the sweep's `--report` (#907, from the 2026-11-24 gap review); `workspace.event` (#817); MCP Apps views that refresh themselves (#820); `roll_find`, any resource by name, part of its id or a pasted dashboard link (#821), its page table (#845) and search mode (#849); `ship_from_chat` (#826); review fixes for #814–#826 (#832: lookups held by `agents_ask`, the inspector on `roll_find`, approvals only from the gate); lists answered as tables (#838: 20+ rows about 40% smaller); the ship prompts quote first (#840); `secrets_list_saas`'s eleven vendors (#843); the field test reading named body types, 46 fields mapped or explained (#854), and object arguments naming every key (#862); `previews_fetch` on roll previews #852 (#859); review fixes for #838–#868 (#871); `roll_find` links matches (#864) and reads Postgres and streams links, which now carry their selection (#878); `previews_tables` (#883); a browser step's typed text redacted from the audit (#887); `previews_try` and `previews_try_screenshot`, an agent driving a preview's page (#892); `respond_to_leaked_secret` checks for a rotation roll already started (#891).
 16. **Landed 2026-11-22 morning:** operator policy for agent connections: `agents_ask` and
    `mcp_lockdown` / `mcp_read_only` (#678), and `oauth_clients`, the OAuth clients that may connect,
    checked at consent, at every token and on every request, nothing revoked (#680). SQL sessions name who sent them (`application_name`: `roll tok_…`, so `postgres_activity` tells
@@ -1713,9 +1729,12 @@ From a 2026-11-24 gap review (every tool run as an agent would against a fresh r
    (`examples/basic-host` v2.0.4: `users-live/host-shot.mjs`, with its one-line patch declaring
    the extension) and the stand-in; Claude.ai or ChatGPT need a public HTTPS rolld and the user's
    account.
-35. **More tools that wait:** `apps_wait_deploy`, `apps_wait_job`, `tasks_wait_run` and, since
-   2026-11-20, `previews_wait` (until a preview is ready, failed, sleeping, going or waiting on a
-   person's `approve-run`). Rechecked on main (05:50): Postgres
+35. **More tools that wait:** `apps_wait_deploy`, `apps_wait_job`, `tasks_wait_run`,
+   `previews_wait` (until a preview is ready, failed, sleeping, going or waiting on a person's
+   `approve-run`) and, since 2026-11-24, `apps_wait_cron_run` (a cron run started now). Rechecked
+   2026-11-24 over every route that answers 202: each has a wait, but for secrets' environment
+   delete, whose 202 is a change request for people to review (`secrets_get_request` reads it;
+   no wait, since a review can take days). Rechecked on main (05:50): Postgres
    branch backups and restores answer once done (nothing to wait on); search's reindexes are
    Elasticsearch's own `_tasks` behind the operator's request route. Branch backups and search reindexes
    can use `until` once their routes answer a state to wait on (search's reindex is an

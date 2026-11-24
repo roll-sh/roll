@@ -295,15 +295,19 @@ async fn note_reply(code: &Arc<Code>, client: &Client, token: &str, install: &In
     }
 }
 
-/// A preview note as a Slack message: the page (linked to the preview), the element, the note.
-fn note_text(by: &str, path: &str, selector: &str, link: Option<&str>, note: &str) -> String {
-    let page = match link {
-        Some(url) => format!("<{url}|{path}>"),
-        None => format!("`{path}`"),
-    };
-    let on = if selector.is_empty() { String::new() } else { format!(" · `{selector}`") };
-    let quoted: Vec<String> = note.lines().map(|l| format!("> {l}")).collect();
-    format!("*{by}* left a note on the preview · {page}{on}\n{}\nReplies here are the note's replies.", quoted.join("\n"))
+/// Slack's control characters escaped (its docs: `&`, `<`, `>`): a note's words can't mention a
+/// channel (`<!channel>`) or hide a link (`<https://…|…>`).
+fn slack_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+/// A preview note as a Slack message: who, the page, the element, the note, all as text (the
+/// note's own link isn't taken: its body could point anywhere).
+fn note_text(by: &str, path: &str, selector: &str, note: &str) -> String {
+    let on = if selector.is_empty() { String::new() } else { format!(" · `{}`", slack_escape(selector)) };
+    let quoted: Vec<String> = note.lines().map(|l| format!("> {}", slack_escape(l))).collect();
+    let guests = if by.starts_with("guest:") { "\nIt came through a share link: replies here are shown to its guests." } else { "" };
+    format!("*{}* left a note on the preview · `{}`{on}\n{}\nReplies here are the note's replies.{guests}", slack_escape(by), slack_escape(path), quoted.join("\n"))
 }
 
 fn bound(code: &Code, install: &Install, channel: &str, thread_ts: Option<&str>) -> Option<super::Binding> {
@@ -735,8 +739,7 @@ async fn note_step(ctx: &mut StepContext, client: &Client, token: &str, install:
         if matches!(super::note_thread(&code, &install.id, review), Ok(Some(_))) {
             return skipped;
         }
-        let link = preview_note::link(body);
-        let text = note_text(by, &path, &selector, link.as_deref(), &note);
+        let text = note_text(by, &path, &selector, &note);
         match post(Message { channel, text, blocks: None, thread_ts: None }).await {
             Ok(p) => {
                 if let Err(e) = super::bind_note(&code, &ctx.owner().id, &install.id, &p.channel, &p.ts, review, change, ctx.automation(), ctx.run_as.as_deref()) {
@@ -752,7 +755,7 @@ async fn note_step(ctx: &mut StepContext, client: &Client, token: &str, install:
             return skipped;
         }
         let Ok(Some(b)) = super::note_thread(&code, &install.id, &note) else { return skipped };
-        match post(Message { channel: b.channel.clone(), text: format!("*{by}*: {reply}"), blocks: None, thread_ts: Some(b.thread_ts.clone()) }).await {
+        match post(Message { channel: b.channel.clone(), text: format!("*{}*: {}", slack_escape(by), slack_escape(&reply)), blocks: None, thread_ts: Some(b.thread_ts.clone()) }).await {
             Ok(p) => json!({ "posted": true, "channel": p.channel, "ts": p.ts, "note": note }),
             Err(e) => return outcome(e),
         }

@@ -38,6 +38,7 @@ mod storage_events;
 mod streams;
 mod tasks;
 mod secrets;
+mod served_names;
 mod workspace;
 
 use products::{Product, Products};
@@ -484,7 +485,7 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
 
     // roll search: same object storage; the Elasticsearch REST listener and `/v1/search`.
     let search = match on.on(Product::Search) {
-        true => Some(search::Search::start(&home, &args.search, &storage, &args.public_host, &args.node, &cluster, args.code.cluster.system_database.as_deref(), args.db_budget()?.search, edge::Public::of(&args).as_ref(), args.secret_key().as_deref().map(String::as_str), !auth.enforcing()).await?),
+        true => Some(search::Search::start(&home, &args.search, &storage, &args.public_host, &args.node, &cluster, args.code.cluster.system_database.as_deref(), args.db_budget()?.search, edge::Public::of(&args).as_ref(), args.secret_key().as_deref().map(String::as_str), !auth.enforcing(), &served_names::fleet_names(&args)).await?),
         false => None,
     };
 

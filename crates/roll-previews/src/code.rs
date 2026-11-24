@@ -374,7 +374,7 @@ impl Source for CodeSource {
             .reviews(change)?
             .into_iter()
             .filter(|r| !r.dismissed && r.verdict == code_control::review::Verdict::Comment)
-            .map(|r| crate::notes::Comment { id: r.id, body: r.body, by: r.reviewer.name, at: r.created_at });
+            .map(|r| crate::notes::Comment { id: r.id, body: r.body, by: r.reviewer.name, at: r.created_at, outside: r.outside });
         Ok(crate::notes::thread(comments))
     }
 
@@ -493,9 +493,11 @@ impl Backend {
 impl PreviewBackend for Backend {
     async fn reviewed(&self, change: &code_control::model::Change, review: &code_control::review::Review) {
         let Some(engine) = self.engine.get().and_then(Weak::upgrade) else { return };
+        // A mirrored pull request's author is a GitHub login, not a roll handle (GitHub tells them).
+        let change_author = if change.github_pr.is_some() { "" } else { change.author.as_str() };
         // A reply's note: whose it is.
         let note_author = code_control::review::preview_note::parse_reply(&review.body).and_then(|(note, _)| self.source.code.db.review(&note).ok().flatten()).map(|n| n.reviewer.name);
-        if let Err(e) = engine.tell_on_review(&change.id, &review.id, &review.reviewer.name, &review.body, &change.author, note_author.as_deref()) {
+        if let Err(e) = engine.tell_on_review(&change.id, &review.id, &review.reviewer.name, &review.body, change_author, note_author.as_deref(), review.outside) {
             tracing::warn!(change = %change.id, error = %e, "previews: queueing mail about a note");
         }
         self.inner.reviewed(change, review).await;
