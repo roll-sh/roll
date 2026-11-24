@@ -757,7 +757,7 @@ impl Secrets {
         let caller = Secrets::acme_caller(&format!("acme:{}", live.id), &req.ip);
         let principal = caller.principal.clone();
         let signed = self.sign_read(&live.project, req.ca, csr, names, None, "acme", &principal, |c, s, at| {
-            let chain = format!("{}{}", s.certificate, s.ca);
+            let chain = format!("{}{}", s.certificate, s.ca_chain);
             c.execute(
                 "INSERT INTO acme_certs (ca_id, serial, account_id, binding_id, order_id, chain, not_after) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 params![req.ca, s.serial, a.id, live.id, id, chain, s.not_after],

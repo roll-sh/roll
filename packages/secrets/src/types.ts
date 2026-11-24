@@ -492,8 +492,13 @@ export type TransitKey = { id: string; name: string; latest_version: number; min
 /** A certificate a CA signed for a CSR (`POST …/cas/{id}/sign`): the device keeps its key. */
 /** A certificate a CA signed and that hasn't expired (`GET …/cas/{id}/certificates`). */
 export type CaCertificate = { serial: string; names: string[]; source: "csr" | "link" | "acme"; not_after: number; issued_at: number; issued_by: string; revoked_at?: number };
-export type SignedCertificate = { certificate: string; ca: string; serial: string; names: string[]; not_after: number };
-export type Ca = { id: string; name: string; certificate: string; domains: string[]; allow_ip: boolean; max_days: number; created_at: number; created_by: string };
+/** `ca_chain`: the CA's certificate and, for an intermediate, every one above it up to the root (PEM). */
+export type SignedCertificate = { certificate: string; ca: string; ca_chain: string; serial: string; names: string[]; not_after: number };
+/**
+ * A project's CA. An intermediate (`intermediate: true`) is `pending` (no `certificate`, signs nothing) with a `csr` for the
+ * customer's root to sign, then `active` once `PUT …/cas/{id}/chain` installs it, with `ca_chain` up to the root.
+ */
+export type Ca = { id: string; name: string; certificate: string; status: "active" | "pending"; intermediate: boolean; csr?: string; ca_chain?: string; domains: string[]; allow_ip: boolean; max_days: number; created_at: number; created_by: string };
 /** An ACME External Account Binding on a CA: what an account made with it may order (`names`: each takes every name under it; none: the CA's whole policy). */
 export type AcmeBinding = { id: string; label: string; names: string[] | null; expires_at: number | null; created_at: number; created_by: string; revoked_at: number | null; revoked_by: string | null; used_at: number | null; accounts: number };
 /** A CA's ACME directory, whether its bindings' names are pre-authorized (no challenge), the challenges it validates and its bindings (`GET …/cas/{id}/acme`). */

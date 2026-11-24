@@ -1663,7 +1663,7 @@ impl Apps for Runtime {
         Ok(true)
     }
 
-    async fn fetch(&self, preview: &str, service: &str, path: &str, head: bool) -> anyhow::Result<Option<crate::ports::Fetched>> {
+    async fn fetch(&self, preview: &str, service: &str, _url: &str, _access: Option<&str>, path: &str, head: bool) -> anyhow::Result<Option<crate::ports::Fetched>> {
         use futures::StreamExt;
         let me = self.me.upgrade().ok_or_else(|| anyhow::anyhow!("the preview runtime is stopping"))?;
         let host = self.store.service_host(preview, service)?.ok_or_else(|| anyhow::anyhow!("no service {service}"))?;
@@ -2829,10 +2829,10 @@ mod tests {
             }
         });
         // Link access (the default): a visitor without the token gets a 401; roll reads the page.
-        let page = rt.fetch(&row.id, "web", "/cart", false).await.unwrap().unwrap();
+        let page = rt.fetch(&row.id, "web", "", None, "/cart", false).await.unwrap().unwrap();
         assert_eq!((page.status, String::from_utf8_lossy(&page.body).to_string(), page.truncated), (200, "<h1>Cart</h1>".to_string(), false));
         assert!(page.headers.iter().any(|(k, v)| k == "content-type" && v == "text/html") && !page.headers.iter().any(|(k, _)| k == "set-cookie"), "{:?}", page.headers);
-        let big = rt.fetch(&row.id, "web", "/big", false).await.unwrap().unwrap();
+        let big = rt.fetch(&row.id, "web", "", None, "/big", false).await.unwrap().unwrap();
         assert_eq!((big.body.len(), big.truncated), (crate::ports::FETCH_MAX, true));
     }
 

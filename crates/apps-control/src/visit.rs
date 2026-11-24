@@ -11,6 +11,7 @@
 //! project ([`crate::integrations::Visitors`], asked every `visitor_recheck`) ends at once.
 
 use crate::{Apps, Error, Result};
+use base64::Engine;
 use std::sync::Arc;
 
 /// Where a ticket comes back to on the environment's own host.
@@ -117,6 +118,56 @@ impl Apps {
         tokio::task::spawn_blocking(move || v.may_open(&user, &svc.project)).await.unwrap_or(false)
     }
 
+    /// The key a visitor's sign-in request is signed with, made once and shared by every node.
+    async fn sso_key(self: &Arc<Self>) -> Result<Vec<u8>> {
+        let v = crate::model::random(32);
+        Ok(self.db(move |s| s.state_or("visit_sso_key", &v)).await?.into_bytes())
+    }
+
+    /// Where a visitor with no session goes to sign in through `access.sso`'s provider: roll's
+    /// sign-in with a request signed for this environment, host and page, for ten minutes.
+    pub(crate) async fn sso_start(self: &Arc<Self>, service: &str, env: &str, sso: &crate::model::Sso, host: &str, to: &str) -> Option<String> {
+        let start = self.visitor_sign_in.get()?.clone();
+        let key = self.sso_key().await.ok()?;
+        let until = (code_sql::now_ms() + 600_000).to_string();
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let parts = [service, env, until.as_str(), host, to];
+        let request = format!("{}.{}", b64.encode(parts.join("\n")), crate::challenge::mac(&key, &parts));
+        start.start_url(&sso.provider, &request, sso.orgs())
+    }
+
+    /// A visitor a provider vouched for, coming back with the request [`Apps::sso_start`] signed:
+    /// the URL that opens their session on the environment's host (a one-use ticket, as a roll
+    /// sign-in's), or why not, in words for them.
+    pub async fn admit_visitor(self: &Arc<Self>, request: &str, who: &crate::integrations::SsoVisitor) -> std::result::Result<String, String> {
+        let broken = || "This sign-in link isn't one. Open the page again.".to_string();
+        let (body, mac) = request.split_once('.').ok_or_else(broken)?;
+        let text = String::from_utf8(base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(body).map_err(|_| broken())?).map_err(|_| broken())?;
+        let parts: Vec<&str> = text.split('\n').collect();
+        let [service, env, until, host, to] = parts[..] else { return Err(broken()) };
+        let key = self.sso_key().await.map_err(|_| broken())?;
+        if !crate::public::same(&crate::challenge::mac(&key, &parts), mac) {
+            return Err(broken());
+        }
+        if until.parse::<i64>().map_or(true, |u| u < code_sql::now_ms()) {
+            return Err("The sign-in took too long. Open the page again.".into());
+        }
+        let Some(sso) = self.access(service, env).await.ok().flatten().and_then(|a| a.sso) else { return Err("This site no longer lets people in by signing in this way.".into()) };
+        if sso.provider != who.provider {
+            return Err(broken());
+        }
+        let Some(entry) = sso.admits(&who.email, &who.orgs).map(str::to_string) else {
+            return Err(format!("{} isn't let in to this site. Sign in with an account it allows, or ask its owner.", who.email));
+        };
+        // The person by the provider's own id; what let them in, to check again while it lasts.
+        let token = format!("rlv_{}", crate::model::random(32));
+        let (hash, sid, e, u, l) = (crate::public::token_hash(&token), service.to_string(), env.to_string(), format!("sso:{}:{}", who.provider, who.subject), format!("sso:{entry}"));
+        let expires = code_sql::now_ms() + TICKET_MS;
+        self.db(move |s| s.put_visit_ticket(&hash, &sid, &e, &u, &l, expires)).await.map_err(|_| broken())?;
+        let q = |v: &str| percent_encoding::utf8_percent_encode(v, percent_encoding::NON_ALPHANUMERIC).to_string();
+        Ok(format!("{}{PATH}?ticket={token}&to={}", self.origin(host), q(&local_path(to))))
+    }
+
     /// Whether the roll login a session came from is still live (no [`crate::integrations::Visitors`]:
     /// nothing to ask; a session from before logins were kept: no).
     async fn login_live(self: &Arc<Self>, user: &str, login: Option<&str>) -> bool {
@@ -158,8 +209,13 @@ impl Apps {
             return None;
         }
         // Their account went, they may no longer open the project, or the roll login that let
-        // them in ended (they signed out, or revoked it): the session ends now.
-        if !self.may_open(service, &user).await || !self.login_live(&user, login.as_deref()).await {
+        // them in ended (they signed out, or revoked it): the session ends now. A visitor a
+        // provider signed in: while what let them in is still in the environment's `sso.allow`.
+        let still = match login.as_deref().and_then(|l| l.strip_prefix("sso:")) {
+            Some(entry) => self.access(service, env).await.ok().flatten().and_then(|a| a.sso).is_some_and(|s| s.allow.iter().any(|a| a == entry)),
+            None => self.may_open(service, &user).await && self.login_live(&user, login.as_deref()).await,
+        };
+        if !still {
             self.visits.lock().remove(&hash);
             let _ = self.db(move |s| s.delete_visit_session(&hash)).await;
             return None;

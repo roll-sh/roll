@@ -18,6 +18,12 @@ export interface Prices {
   stored_gb_month: number;
 }
 
+/** Signing visitors in through a provider (`access.sso`): `@acme.com`, `ada@acme.com`, `org:acme` (GitHub). */
+export interface Sso {
+  provider: "github" | "google";
+  allow: string[];
+}
+
 /** What a service would cost at most (`POST /v1/apps/quote`), in US dollars at roll's prices. */
 export interface Quote {
   instance_hour: number;
@@ -618,7 +624,7 @@ export interface EnvironmentPut {
   /** Private: visitors need `?roll_access=<token>` once; null makes it public again. */
   /** `signed_in`: people signed in to roll who can open the project get in (alone, or with a token). */
   /** Who gets in: a link's token, people signed in to roll, or a password visitors type (8–200; replaces the whole of access). */
-  access?: { token?: string; signed_in?: boolean; password?: string; bypass_sha256?: string } | null;
+  access?: { token?: string; signed_in?: boolean; password?: string; sso?: Sso; bypass_sha256?: string } | null;
   /** Creating it: start with this environment's variables. */
   variables_from?: string;
   wait_for_ci?: boolean;
@@ -766,6 +772,8 @@ export interface Environment extends EnvironmentSummary {
   report?: boolean;
   /** People signed in to roll who can open its project get in. */
   signed_in?: boolean;
+  /** People GitHub or Google vouches for get in, by domain, email or GitHub organisation. */
+  sso?: Sso;
   /** Visitors may type its password (`access.password`, never returned). */
   password?: boolean;
   /** What its code may reach: roll and the listed hosts (`roll`), or anything (`open`). */
