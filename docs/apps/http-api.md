@@ -601,6 +601,7 @@ type Environment = EnvironmentSummary & {
   pause_schedule?: { windows: { from: string; to: string }[]; timezone?: string }; // as the PUT's
   schedules?: { name: string; next_run_at: number | null; last: { job: string; status: RunStatus; started_at: number } | null; last_call?: { at: number; status?: number; ms: number; error?: string } /* a path schedule's last call */ }[]; // run.schedules as they stand: next due (none paused, in a preview or undeployed) and the job each last started
   crash_loop: { crashes: number; last_at: number; last_error: string } | null; // 3+ crashes in 10 minutes
+  last_cold_start?: { at: number; ms: number; runtime_ms: number /* the container up */; app_ms: number /* then the app until it answered */ }; // on the node serving it
   canary: { deployment: string; share: number; waiting?: true } | null; // a gradual rollout under way: the percent of requests the new deployment takes; waiting: a manual rollout's step passed and it waits for a person
   run: { [field: string]: number }; // its own run settings over the service's ({}: the service's)
   hook: boolean;              // it has a deploy hook
@@ -687,6 +688,7 @@ type Deployment = {
   finished_at: number | null;
   /** Milliseconds from the deploy's start to its first healthy answer. */
   ready_ms: number | null;
+  image_bytes?: number;       // its image's size, where the runtime says (a deploy's log adds a hint past 1 GB)
 };
 type SloIndicator = { total: number /* requests, or minutes with requests */; bad: number; sli: number | null /* percent that met it */; budget_left: number | null };
 type SloReport = { slo: { objective: number; latency_ms?: number; window_days: number } | null; availability?: SloIndicator; latency?: SloIndicator | null; burning?: { indicator: "availability" | "latency"; burn_rate: number; window: "1h" | "6h" } | null };

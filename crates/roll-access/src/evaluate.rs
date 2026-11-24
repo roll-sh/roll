@@ -534,7 +534,17 @@ fn refuse_session(scope: &Scope, target: &Target, action: Action, about: &str) -
     };
     match project {
         Some(p) if !roll_auth::roles::names_project(scope, &p) => (StatusCode::NOT_FOUND, axum::Json(json!({ "error": format!("no project {p}") }))).into_response(),
-        Some(p) => deny(StatusCode::FORBIDDEN, "forbidden", format!("your role in project {p} can't {action} {about} there"), json!({ "needs": { "product": about, "action": action, "resource": p } })),
+        Some(p) => {
+            // What would: the weakest role that may, and who changes roles (no token's rules can).
+            use roll_auth::roles::Role;
+            let would = match roll_auth::roles::weakest_allowed(about, action) {
+                Some(Role::Owner) => ": only its owner may".to_string(),
+                Some(Role::Developer) if about != "workspace" => ": a developer may, in the environments their role reaches; a project admin changes members' roles".to_string(),
+                Some(r) => format!(": {} {} may; a project admin changes members' roles", if r == Role::Admin { "an" } else { "a" }, r.as_str()),
+                None => String::new(),
+            };
+            deny(StatusCode::FORBIDDEN, "forbidden", format!("your role in project {p} can't {action} {about} there{would}"), json!({ "needs": { "product": about, "action": action, "resource": p } }))
+        }
         None => deny(StatusCode::FORBIDDEN, "forbidden", format!("your roles can't {action} {about}"), json!({ "needs": { "product": about, "action": action } })),
     }
 }

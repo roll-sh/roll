@@ -1156,6 +1156,7 @@ async fn an_image_service_scales_to_zero_and_wakes_on_the_first_request() {
     let (svc, d) = image_service(&w, "web", json!({"port": 80})).await;
     assert_eq!(d["status"], "active", "{d}");
     assert!(d["image"].as_str().unwrap().contains("@sha256:"), "pinned by digest: {d}");
+    assert_eq!(d["image_bytes"], 48 << 20, "its image's size: {d}");
     let id = svc["id"].as_str().unwrap();
     let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await;
     assert_eq!(env["state"], "stopped", "health-checked at deploy, then back to zero: {env}");
@@ -1169,6 +1170,9 @@ async fn an_image_service_scales_to_zero_and_wakes_on_the_first_request() {
     assert!(!body["forwarded_host"].as_str().unwrap().is_empty());
     let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await;
     assert_eq!(env["state"], "running");
+    // The cold start, in parts: the container up, then the app until it answered.
+    let cold = &env["last_cold_start"];
+    assert!(cold["ms"].as_u64() == Some(cold["runtime_ms"].as_u64().unwrap() + cold["app_ms"].as_u64().unwrap()) || cold["ms"].as_u64().unwrap().abs_diff(cold["runtime_ms"].as_u64().unwrap() + cold["app_ms"].as_u64().unwrap()) <= 1, "{env}");
     // Idle: suspended, then stopped by the reaper; nothing metered while asleep.
     let live = w.apps.live(id, "production");
     live.backdate(Duration::from_secs(31));

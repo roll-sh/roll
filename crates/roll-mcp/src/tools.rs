@@ -38,6 +38,9 @@ pub enum Ty {
     Num,
     /// More than one shape (`true`, `false` or an object): no `type` in the schema.
     Any,
+    /// A string that is one of these, exactly the set the route takes: published as the schema's
+    /// `enum` (a client checks it, a model picks from it) and refused before the call otherwise.
+    Choice(&'static [&'static str]),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -223,7 +226,7 @@ impl Tool {
         let mut required = Vec::new();
         for p in self.params {
             let ty = match p.ty {
-                Ty::Str => "string",
+                Ty::Str | Ty::Choice(_) => "string",
                 Ty::Int => "integer",
                 Ty::Bool => "boolean",
                 Ty::Obj => "object",
@@ -231,7 +234,10 @@ impl Tool {
                 Ty::Num => "number",
                 Ty::Any => "",
             };
-            let schema = if ty.is_empty() { json!({ "description": p.desc }) } else { json!({ "type": ty, "description": p.desc }) };
+            let mut schema = if ty.is_empty() { json!({ "description": p.desc }) } else { json!({ "type": ty, "description": p.desc }) };
+            if let Ty::Choice(values) = p.ty {
+                schema["enum"] = json!(values);
+            }
             props.insert(p.name.into(), schema);
             if p.required {
                 required.push(p.name);
@@ -302,6 +308,11 @@ impl Tool {
                 }
                 continue;
             };
+            if let Ty::Choice(values) = p.ty
+                && !v.as_str().is_some_and(|s| values.contains(&s))
+            {
+                return Err(format!("{}: {} is one of {} (not {v})", self.name, p.name, values.join(", ")));
+            }
             match p.at {
                 At::Path => {
                     let s = as_text(v);
@@ -731,15 +742,15 @@ static TOOLS: &[Tool] = &[
         "/v1/access/requests",
         &[
             breq("product", Ty::Str, "The product, e.g. postgres, apps, secrets"),
-            breq("action", Ty::Str, "read, write, delete, reveal, deploy or admin"),
+            breq("action", Ty::Choice(&["read", "write", "delete", "reveal", "deploy", "admin"]), "The action asked for"),
             b("resource", Ty::Str, "One resource's id (every resource of the product when left out)"),
             b("environment", Ty::Str, "Only in this environment"),
             b("path", Ty::Str, "Only under this folder"),
-            breq("for", Ty::Str, "15m, 1h, 8h or 1d"),
+            breq("for", Ty::Choice(&["15m", "1h", "8h", "1d"]), "For how long"),
             breq("reason", Ty::Str, "Why: the person deciding reads it"),
         ],
     ),
-    t("access_list_approvals", "List approvals", "Approvals, newest first: pending ones wait for the operator.", "access", "GET", "/v1/access/approvals", &[q("state", Ty::Str, "pending, approved, denied, used"), q("grant", Ty::Str, "Only this token's or connection's approvals (its id)"), q("limit", Ty::Int, "At most this many, newest first (default 100, up to 500)")]),
+    t("access_list_approvals", "List approvals", "Approvals, newest first: pending ones wait for the operator.", "access", "GET", "/v1/access/approvals", &[q("state", Ty::Choice(&["pending", "approved", "denied", "expired", "used"]), "Only approvals in this state"), q("grant", Ty::Str, "Only this token's or connection's approvals (its id)"), q("limit", Ty::Int, "At most this many, newest first (default 100, up to 500)")]),
     t("access_audit_log", "Audit log", "Every request made with a token and every MCP tool call, newest first.", "access", "GET", "/v1/access/audit", &[q("grant", Ty::Str, "Only this token (tok_…)"), q("product", Ty::Str, "Only this product"), q("decision", Ty::Str, "allow, deny or ask"), q("limit", Ty::Int, "At most (default 100)")]),
     t("access_activity", "Agent activity: tools, connections, days", "How agents used roll's MCP server lately (default 7 days, up to 30): per tool its calls, refused and failed calls, average, median, 95th percentile and longest duration and last call; per connection; per day. Answers \"which tools fail\" and \"which agent is busiest\". A person's are their own connections'.", "access", "GET", "/v1/access/activity", &[q("days", Ty::Int, "Days back, 1-30 (default 7)")]),
     t(
@@ -782,7 +793,7 @@ static TOOLS: &[Tool] = &[
         "workspace",
         "POST",
         "/v1/workspace/projects/{id}/invites",
-        &[WS, breq("email", Ty::Str, "Their email address"), breq("role", Ty::Str, "viewer, developer, admin or owner"), b("environments", Ty::Arr, "A developer's environments, where the role applies in full (default: every environment that isn't protected)")],
+        &[WS, breq("email", Ty::Str, "Their email address"), breq("role", Ty::Choice(&["viewer", "developer", "admin", "owner"]), "Their role in the project"), b("environments", Ty::Arr, "A developer's environments, where the role applies in full (default: every environment that isn't protected)")],
     ),
     t(
         "workspace_set_member_role",
@@ -791,7 +802,7 @@ static TOOLS: &[Tool] = &[
         "workspace",
         "PATCH",
         "/v1/workspace/projects/{id}/members/{user}",
-        &[WS, req("user", "The member (usr_…)"), b("role", Ty::Str, "viewer, developer, admin or owner"), b("environments", Ty::Arr, "A developer's environments (null: the default)")],
+        &[WS, req("user", "The member (usr_…)"), b("role", Ty::Choice(&["viewer", "developer", "admin", "owner"]), "Their role in the project"), b("environments", Ty::Arr, "A developer's environments (null: the default)")],
     )
     .destructive(),
     t("workspace_remove_member", "Remove a member", "Take a person out of a project: their session and tokens stop reaching it at once, and their tokens confined to it are revoked. The last owner can't be removed.", "workspace", "DELETE", "/v1/workspace/projects/{id}/members/{user}", &[WS, req("user", "The member (usr_…)")]).destructive(),
@@ -805,7 +816,7 @@ static TOOLS: &[Tool] = &[
         "workspace",
         "PUT",
         "/v1/workspace/projects/{id}/groups/{group}",
-        &[WS, req("group", "The group (grp_…)"), breq("role", Ty::Str, "viewer, developer or admin"), b("environments", Ty::Arr, "A developer role's environments (default: every environment that isn't protected)")],
+        &[WS, req("group", "The group (grp_…)"), breq("role", Ty::Choice(&["viewer", "developer", "admin"]), "The group's role in the project"), b("environments", Ty::Arr, "A developer role's environments (default: every environment that isn't protected)")],
     )
     .destructive(),
     t("workspace_remove_group_role", "Take a group's role away", "Take a group's role on a project away: its members keep only their own roles (and other groups'), at once.", "workspace", "DELETE", "/v1/workspace/projects/{id}/groups/{group}", &[WS, req("group", "The group (grp_…)")]).destructive(),
@@ -971,7 +982,7 @@ static TOOLS: &[Tool] = &[
     t("nosql_list_databases", "List NoSQL databases", "ScyllaDB/Cassandra-compatible databases.", "nosql", "GET", "/v1/nosql/databases", &[]),
     t("nosql_overview", "roll NoSQL here", "What roll NoSQL offers here: the dialects (ScyllaDB, Cassandra) and their versions, and the CQL and other endpoints.", "nosql", "GET", "/v1/nosql", &[]),
     t("nosql_get_database", "Get a NoSQL database", "A database's settings and endpoints (credentials need reveal).", "nosql", "GET", "/v1/nosql/databases/{database}", &[NOSQL]),
-    t("nosql_create_database", "Create a NoSQL database", "A new database.", "nosql", "POST", "/v1/nosql/databases", &[breq("name", Ty::Str, "Database name"), b("dialect", Ty::Str, "scylla or cassandra"), IN_PROJECT]),
+    t("nosql_create_database", "Create a NoSQL database", "A new database.", "nosql", "POST", "/v1/nosql/databases", &[breq("name", Ty::Str, "Database name"), b("dialect", Ty::Choice(&["scylla", "cassandra"]), "Which database it behaves as"), IN_PROJECT]),
     t("nosql_delete_database", "Delete a NoSQL database", "Delete a database and its data. Irreversible.", "nosql", "DELETE", "/v1/nosql/databases/{database}", &[NOSQL]),
     t("nosql_create_branch", "Branch a NoSQL database", "A branch database, now or at a point in time.", "nosql", "POST", "/v1/nosql/databases/{database}/branches", &[NOSQL, breq("name", Ty::Str, "Branch name"), b("at", Ty::Str, "Point in time"), b("schema_only", Ty::Bool, "Schema without data")]),
     t("nosql_cql", "Run CQL", "Run a CQL statement. SELECT reads; DROP and TRUNCATE delete; the rest write.", "nosql", "POST", "/v1/nosql/databases/{database}/cql", &[NOSQL, breq("query", Ty::Str, "CQL"), b("keyspace", Ty::Str, "Keyspace"), b("page_state", Ty::Str, "From the last page")]),
@@ -1008,14 +1019,14 @@ static TOOLS: &[Tool] = &[
     t("queues_suspend_vhost", "Suspend a virtual host", "Scale a virtual host to zero now: its queues keep their messages, and a client connecting wakes it.", "queues", "POST", "/v1/queues/vhosts/{vhost}/suspend", &[VHOST]),
     t("queues_wake_vhost", "Wake a virtual host", "Start a suspended virtual host now, before a client connects.", "queues", "POST", "/v1/queues/vhosts/{vhost}/wake", &[VHOST]),
     t("queues_list_queues", "List queues", "A virtual host's queues with message counts.", "queues", "GET", "/v1/queues/vhosts/{vhost}/queues", &[VHOST]),
-    t("queues_declare_queue", "Declare a queue", "Create a queue.", "queues", "POST", "/v1/queues/vhosts/{vhost}/queues", &[VHOST, breq("name", Ty::Str, "Queue name"), b("type", Ty::Str, "classic, quorum or stream"), b("durable", Ty::Bool, "Durable")]),
+    t("queues_declare_queue", "Declare a queue", "Create a queue.", "queues", "POST", "/v1/queues/vhosts/{vhost}/queues", &[VHOST, breq("name", Ty::Str, "Queue name"), b("type", Ty::Choice(&["classic", "quorum", "stream"]), "Queue type"), b("durable", Ty::Bool, "Durable")]),
     t("queues_delete_queue", "Delete a queue", "Delete a queue and its messages.", "queues", "DELETE", "/v1/queues/vhosts/{vhost}/queues/{queue}", &[VHOST, QUEUE]),
     t("queues_purge_queue", "Purge a queue", "Drop every message in a queue.", "queues", "POST", "/v1/queues/vhosts/{vhost}/queues/{queue}/purge", &[VHOST, QUEUE]),
     t("queues_get_queue", "Get a queue", "One queue: its messages (ready and unacknowledged), consumers and their prefetch, arguments, and the dead-letter queues it feeds. Start here when a queue is backing up and messages are piling up.", "queues", "GET", "/v1/queues/vhosts/{vhost}/queues/{queue}", &[VHOST, QUEUE]),
     t("queues_queue_rates", "One queue's rates", "A queue's publish, deliver and acknowledge rates and depth over the last seconds (5-300, default 300), as points.", "queues", "GET", "/v1/queues/vhosts/{vhost}/queues/{queue}/rates", &[VHOST, QUEUE, q("seconds", Ty::Int, "How far back, 5-300 (default 300)")]),
     t("queues_list_exchanges", "List exchanges", "A virtual host's exchanges, their types and arguments.", "queues", "GET", "/v1/queues/vhosts/{vhost}/exchanges", &[VHOST]),
     t("queues_list_bindings", "List bindings", "A virtual host's bindings: which exchange routes to which queue by which key. Why a message went nowhere.", "queues", "GET", "/v1/queues/vhosts/{vhost}/bindings", &[VHOST]),
-    t("queues_declare_exchange", "Declare an exchange", "Make an exchange in a virtual host (idempotent: the same declaration again is a no-op, a different one a 409; amq.* names are reserved). Bind queues to it with queues_bind: a fanout or topic exchange bound to several queues is SNS-style fan-out.", "queues", "POST", "/v1/queues/vhosts/{vhost}/exchanges", &[VHOST, breq("name", Ty::Str, "Exchange name"), breq("type", Ty::Str, "direct, fanout, topic, headers or x-delayed-message"), b("durable", Ty::Bool, "Survive a restart (default true)"), b("auto_delete", Ty::Bool, "Go once nothing is bound to it"), b("internal", Ty::Bool, "Only other exchanges publish to it"), b("arguments", Ty::Obj, "e.g. alternate-exchange, x-delayed-type")]),
+    t("queues_declare_exchange", "Declare an exchange", "Make an exchange in a virtual host (idempotent: the same declaration again is a no-op, a different one a 409; amq.* names are reserved). Bind queues to it with queues_bind: a fanout or topic exchange bound to several queues is SNS-style fan-out.", "queues", "POST", "/v1/queues/vhosts/{vhost}/exchanges", &[VHOST, breq("name", Ty::Str, "Exchange name"), breq("type", Ty::Choice(&["direct", "fanout", "topic", "headers", "x-consistent-hash", "x-random", "x-local-random", "x-message-deduplication", "x-delayed-message"]), "Exchange type (x-delayed-message needs an x-delayed-type argument)"), b("durable", Ty::Bool, "Survive a restart (default true)"), b("auto_delete", Ty::Bool, "Go once nothing is bound to it"), b("internal", Ty::Bool, "Only other exchanges publish to it"), b("arguments", Ty::Obj, "e.g. alternate-exchange, x-delayed-type")]),
     t("queues_delete_exchange", "Delete an exchange", "Delete an exchange and its bindings (the amq.* ones can't be).", "queues", "DELETE", "/v1/queues/vhosts/{vhost}/exchanges/{exchange}", &[VHOST, req("exchange", "Exchange name")]),
     t("queues_bind", "Bind a queue to an exchange", "Route an exchange's messages to a queue (or another exchange) by a binding key: a no-op if the binding exists. queues_list_bindings shows them.", "queues", "POST", "/v1/queues/vhosts/{vhost}/bindings", &[VHOST, breq("source", Ty::Str, "The exchange messages come from"), breq("destination", Ty::Str, "The queue (or exchange) they go to"), b("destination_type", Ty::Str, "queue (default) or exchange"), b("routing_key", Ty::Str, "The binding key, e.g. order.# for a topic exchange"), b("arguments", Ty::Obj, "e.g. x-match for a headers exchange")]),
     t("queues_unbind", "Remove a binding", "Stop routing an exchange's messages to a queue by that key (the same fields as queues_bind; no error if there was none).", "queues", "DELETE", "/v1/queues/vhosts/{vhost}/bindings", &[VHOST, breq("source", Ty::Str, "The exchange messages come from"), breq("destination", Ty::Str, "The queue (or exchange) they go to"), b("destination_type", Ty::Str, "queue (default) or exchange"), b("routing_key", Ty::Str, "The binding key, e.g. order.# for a topic exchange"), b("arguments", Ty::Obj, "e.g. x-match for a headers exchange")]),
@@ -1034,7 +1045,7 @@ static TOOLS: &[Tool] = &[
         "queues",
         "PUT",
         "/v1/queues/policies/{vhost}/{name}",
-        &[VHOST, req("name", "Policy name"), breq("pattern", Ty::Str, "Regex of names it applies to"), breq("definition", Ty::Obj, "e.g. {\"message-ttl\": 60000, \"dead-letter-exchange\": \"dlx\"}"), b("apply_to", Ty::Str, "queues, exchanges or all"), b("priority", Ty::Int, "Higher wins")],
+        &[VHOST, req("name", "Policy name"), breq("pattern", Ty::Str, "Regex of names it applies to"), breq("definition", Ty::Obj, "e.g. {\"message-ttl\": 60000, \"dead-letter-exchange\": \"dlx\"}"), b("apply_to", Ty::Choice(&["all", "queues", "exchanges", "classic_queues", "quorum_queues", "streams"]), "What it applies to"), b("priority", Ty::Int, "Higher wins")],
     ),
     t("queues_delete_policy", "Delete a policy", "Delete a policy.", "queues", "DELETE", "/v1/queues/policies/{vhost}/{name}", &[VHOST, req("name", "Policy name")]),
     t("queues_rates", "Message rates", "Publish, deliver and ack rates over the last minutes.", "queues", "GET", "/v1/queues/rates", &[q("seconds", Ty::Int, "How far back, 5–3600 (300)")]),
@@ -1129,7 +1140,7 @@ static TOOLS: &[Tool] = &[
         "search",
         "POST",
         "/v1/search/clusters",
-        &[breq("name", Ty::Str, "Name"), b("flavor", Ty::Str, "elasticsearch or opensearch"), b("parent", Ty::Str, "Branch this cluster"), b("at", Ty::Int, "Unix seconds to branch at"), IN_PROJECT],
+        &[breq("name", Ty::Str, "Name"), b("flavor", Ty::Choice(&["elasticsearch", "opensearch"]), "Which API it speaks"), b("parent", Ty::Str, "Branch this cluster"), b("at", Ty::Int, "Unix seconds to branch at"), IN_PROJECT],
     ),
     t("search_list_branches", "List a cluster's branches", "A search cluster's copy-on-write branches: names, when each was taken, and their state.", "search", "GET", "/v1/search/clusters/{cluster}/branches", &[req("cluster", "Cluster id or name")]),
     t("search_list_remotes", "List a cluster's remotes", "The clusters this one searches across (cross-cluster search, alias:index): each remote's alias, cluster, the cross-cluster key's id and whether it still connects (never the key). Linking one is the cluster admin's.", "search", "GET", "/v1/search/clusters/{cluster}/remotes", &[req("cluster", "Cluster id or name")]),
@@ -1140,13 +1151,13 @@ static TOOLS: &[Tool] = &[
     t("search_revoke_browser_key", "Revoke a browser key", "Revoke one of a cluster's browser keys at once: pages shipping it stop getting answers (on a deleted cluster the revoke is applied by its restore).", "search", "DELETE", "/v1/search/clusters/{cluster}/browser-keys/{key}", &[req("cluster", "Cluster id or name"), req("key", "Browser key id (from search_list_browser_keys)")]),
     t("search_list_inference_secrets", "Inference endpoints keyed by a roll secret", "A cluster's inference endpoints whose API key comes from a roll secret, with the project and key each follows (a rotated value reaches the endpoint within seconds; never the value), and the projects whose secrets it could use.", "search", "GET", "/v1/search/clusters/{cluster}/inference/secrets", &[req("cluster", "Cluster id or name")]),
     t("search_branch_cluster", "Branch a search cluster", "A copy-on-write branch of a cluster, now or at a time within its history.", "search", "POST", "/v1/search/clusters/{cluster}/branches", &[req("cluster", "Cluster id or name"), breq("name", Ty::Str, "Branch name"), b("at", Ty::Int, "Unix seconds")]),
-    t("search_update_cluster", "Update a search cluster", "Change a cluster's settings: idle_timeout_s (0: always loaded), max_in_flight, max_body_mb at once; flavor or destructive_requires_name put it to sleep to reload once no request runs; ip_allowlist replaces the networks its endpoint answers (up to 64 CIDRs, each a string or {cidr, description}; [] answers everyone; this API isn't filtered by it).", "search", "PATCH", "/v1/search/clusters/{cluster}", &[req("cluster", "Cluster id or name"), b("idle_timeout_s", Ty::Int, "Seconds idle before it sleeps (0: never)"), b("max_in_flight", Ty::Int, "Requests at once"), b("max_body_mb", Ty::Int, "Largest request body"), b("destructive_requires_name", Ty::Bool, "Refuse wildcard deletes"), b("flavor", Ty::Str, "elasticsearch or opensearch"), b("ip_allowlist", Ty::Arr, "CIDRs its endpoint answers (strings or {cidr, description})")]),
+    t("search_update_cluster", "Update a search cluster", "Change a cluster's settings: idle_timeout_s (0: always loaded), max_in_flight, max_body_mb at once; flavor or destructive_requires_name put it to sleep to reload once no request runs; ip_allowlist replaces the networks its endpoint answers (up to 64 CIDRs, each a string or {cidr, description}; [] answers everyone; this API isn't filtered by it).", "search", "PATCH", "/v1/search/clusters/{cluster}", &[req("cluster", "Cluster id or name"), b("idle_timeout_s", Ty::Int, "Seconds idle before it sleeps (0: never)"), b("max_in_flight", Ty::Int, "Requests at once"), b("max_body_mb", Ty::Int, "Largest request body"), b("destructive_requires_name", Ty::Bool, "Refuse wildcard deletes"), b("flavor", Ty::Choice(&["elasticsearch", "opensearch"]), "Which API it speaks"), b("ip_allowlist", Ty::Arr, "CIDRs its endpoint answers (strings or {cidr, description})")]),
     t("search_delete_cluster", "Delete a search cluster", "Delete a cluster and its indices (its branches keep working). It's kept for the deployment's restore window (7 days by default) and search_restore_cluster brings it back until then.", "search", "DELETE", "/v1/search/clusters/{cluster}", &[req("cluster", "Cluster id or name")]),
     t("search_restore_cluster", "Restore a deleted search cluster", "Bring a deleted cluster back as it was (data, snapshots, settings, password, API keys) within its restore window, by its id (search_list_clusters with deleted=true). Its name, or name if that's taken.", "search", "POST", "/v1/search/clusters/{cluster}/restore", &[req("cluster", "The deleted cluster's id"), b("name", Ty::Str, "Another name, if its own is taken")]).undoable(),
-    t("search_cluster_metrics", "Search cluster metrics", "A cluster's request rate, latency (p50, p95, p99), and 2xx/4xx/5xx/429 answers by kind of request, over range 1h (default), 24h or 14d.", "search", "GET", "/v1/search/clusters/{cluster}/metrics", &[req("cluster", "Cluster id or name"), q("range", Ty::Str, "1h, 24h or 14d")]),
+    t("search_cluster_metrics", "Search cluster metrics", "A cluster's request rate, latency (p50, p95, p99), and 2xx/4xx/5xx/429 answers by kind of request, over range 1h (default), 24h or 14d.", "search", "GET", "/v1/search/clusters/{cluster}/metrics", &[req("cluster", "Cluster id or name"), q("range", Ty::Choice(&["1h", "24h", "14d"]), "How far back")]),
     t("search_slowlog", "Search slow log", "A cluster's slowest recent requests: what ran, on which index, and how long it took.", "search", "GET", "/v1/search/clusters/{cluster}/slowlog", &[req("cluster", "Cluster id or name")]),
     t("search_audit", "Search audit log", "A cluster's security audit log, newest first: failed logins, access denials and changes to users, roles, role mappings and API keys (granted access and successful logins too when the cluster records them), in Elasticsearch's or OpenSearch's event names (authentication_failed, access_denied, security_config_change, …). Never a secret or a request body.", "search", "GET", "/v1/search/clusters/{cluster}/audit", &[req("cluster", "Cluster id or name"), q("from", Ty::Int, "From (Unix ms, inclusive)"), q("to", Ty::Int, "To (Unix ms, exclusive)"), q("event", Ty::Str, "Event names or categories, comma-separated"), q("size", Ty::Int, "Entries (default 100)")]),
-    t("search_analytics", "Search analytics", "What a cluster's users search for, over range 24h (default), 7d or 30d: top queries, queries that found nothing, and click-through, for one index or all. Only indices with index.roll.analytics.enabled record it.", "search", "GET", "/v1/search/clusters/{cluster}/analytics", &[req("cluster", "Cluster id or name"), q("index", Ty::Str, "One index (default: all)"), q("range", Ty::Str, "24h, 7d or 30d")]).outside(&["query"]),
+    t("search_analytics", "Search analytics", "What a cluster's users search for, over range 24h (default), 7d or 30d: top queries, queries that found nothing, and click-through, for one index or all. Only indices with index.roll.analytics.enabled record it.", "search", "GET", "/v1/search/clusters/{cluster}/analytics", &[req("cluster", "Cluster id or name"), q("index", Ty::Str, "One index (default: all)"), q("range", Ty::Choice(&["24h", "7d", "30d"]), "How far back")]).outside(&["query"]),
     t("search_suggestions", "Query suggestions", "An index's query suggestions built from its search analytics: its settings (index.roll.suggestions.*), its last build (when, how many, any error) and its heaviest suggestions.", "search", "GET", "/v1/search/clusters/{cluster}/indices/{index}/suggestions", &[req("cluster", "Cluster id or name"), req("index", "Index whose analytics the suggestions come from")]).outside(&["query"]),
     t("search_rebuild_suggestions", "Rebuild query suggestions", "Rebuild an index's suggestions index from its search analytics now (it is rebuilt on its schedule anyway); the alias moves to the new build at once. Needs index.roll.analytics.enabled and index.roll.suggestions.enabled.", "search", "POST", "/v1/search/clusters/{cluster}/indices/{index}/suggestions/rebuild", &[req("cluster", "Cluster id or name"), req("index", "Index whose analytics the suggestions come from")]),
     t("search_usage", "Search usage", "A cluster's metering and cost, against the same workload on Elastic Cloud and Amazon OpenSearch.", "search", "GET", "/v1/search/clusters/{cluster}/usage", &[req("cluster", "Cluster id or name"), q("days", Ty::Int, "Days back (default 30)")]),
@@ -1226,7 +1237,7 @@ static TOOLS: &[Tool] = &[
     t("secrets_set", "Set a secret", "Create or change a secret's value. Give if_version (the version you read) so a change someone made meanwhile isn't overwritten: then it's a 409 stale, and you read it again.", "secrets", "PUT", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}", &[SECRET_PROJECT, ENV, req("name", "Secret name"), b("value", Ty::Str, "The value. Leave it out to change only an existing secret's comment, tags, type or expiry, so the value never passes through you (a new key needs one: 400)"), q("path", Ty::Str, "Folder"), b("if_version", Ty::Int, "Only if it's still this version (0: only if it doesn't exist)"), b("comment", Ty::Str, "What it is, shown beside it"), b("tags", Ty::Arr, "Tags (replace its tags)"), b("type", Ty::Str, "shared (default) or personal (only yours, over the shared one)"), b("message", Ty::Str, "The change's message, in its history"), bnull("expires_at", Ty::Int, "When it expires (Unix ms; the health check flags it before); clear it for never")]),
     t("secrets_import", "Import a .env file", "Write a .env file's keys (or JSON: {\"KEY\": \"value\"} or [{key, value, comment?}]) into an environment as one change: only new keys unless overwrite, and replace makes the folder match the file (its other own keys are deleted). On a protected environment it opens a change request instead (request: true asks for one anywhere).", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/import", &[SECRET_PROJECT, ENV, b("dotenv", Ty::Str, "A .env file's text"), b("json", Ty::Obj, "Or the keys as JSON"), b("path", Ty::Str, "Folder (default /)"), b("overwrite", Ty::Bool, "Replace keys that exist"), b("replace", Ty::Bool, "Also delete the folder's keys the file lacks"), b("message", Ty::Str, "Why, for the change's history"), b("request", Ty::Bool, "Open a change request instead of writing"), b("if_seq", Ty::Int, "Only if the environment's last change is still this one")]).destructive(),
     t("secrets_rollback", "Roll back an environment", "Put an environment's values back as they were at a change (to: its seq, from secrets_changes) or a time (at: Unix ms), as one new change: what's there now is replaced. On a protected environment it opens a change request.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/rollback", &[SECRET_PROJECT, ENV, b("to", Ty::Int, "The change (seq) to go back to"), b("at", Ty::Int, "Or a time, Unix ms"), b("message", Ty::Str, "Why")]).destructive(),
-    t("secrets_create_environment", "Add an environment", "A new environment in a project (staging, a preview's): slug, optional name, base (an environment it inherits from), labels, and for an ephemeral one ttl_minutes. Making one is the project admin's.", "secrets", "POST", "/v1/secrets/projects/{project}/environments", &[SECRET_PROJECT, breq("slug", Ty::Str, "Short name (staging, pr-42)"), b("name", Ty::Str, "Display name"), b("kind", Ty::Str, "standard or ephemeral"), b("base", Ty::Str, "Environment it inherits from"), b("labels", Ty::Obj, "Labels, {key: value}"), b("ttl_minutes", Ty::Int, "An ephemeral one ends after this"), b("expires_at", Ty::Int, "Or an ephemeral one ends then (Unix ms)"), b("secrets", Ty::Arr, "An ephemeral one's overrides, made in the same call: [{op: set|delete, key, value?, comment?, tags?, type?}]"), b("trusted", Ty::Bool, "An ephemeral one may read a protected base (needs admin on it)")]),
+    t("secrets_create_environment", "Add an environment", "A new environment in a project (staging, a preview's): slug, optional name, base (an environment it inherits from), labels, and for an ephemeral one ttl_minutes. Making one is the project admin's.", "secrets", "POST", "/v1/secrets/projects/{project}/environments", &[SECRET_PROJECT, breq("slug", Ty::Str, "Short name (staging, pr-42)"), b("name", Ty::Str, "Display name"), b("kind", Ty::Choice(&["standard", "ephemeral"]), "ephemeral: a preview's, storing only overrides of its base (with labels and an expiry)"), b("base", Ty::Str, "Environment it inherits from"), b("labels", Ty::Obj, "Labels, {key: value}"), b("ttl_minutes", Ty::Int, "An ephemeral one ends after this"), b("expires_at", Ty::Int, "Or an ephemeral one ends then (Unix ms)"), b("secrets", Ty::Arr, "An ephemeral one's overrides, made in the same call: [{op: set|delete, key, value?, comment?, tags?, type?}]"), b("trusted", Ty::Bool, "An ephemeral one may read a protected base (needs admin on it)")]),
     t("secrets_link_targets", "List what keys can link to", "The project's resources a key can be linked to (a database, a bucket, a stream…) and each one's fields, for secrets_link.", "secrets", "GET", "/v1/secrets/projects/{project}/links", &[SECRET_PROJECT]),
     t("secrets_link", "Link a key to a resource", "Make a key read its value from a project resource instead of holding one: link {kind, ref, field, mode} from secrets_link_targets (mode: live reads it on every resolve, managed issues and stores one, dynamic issues one per resolve and revokes it when its lease ends). link: null unlinks.", "secrets", "PUT", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}", &[SECRET_PROJECT, ENV, req("name", "Secret name"), breq("link", Ty::Obj, "{kind, ref, field, mode, options?}, or null"), q("path", Ty::Str, "Folder"), b("if_version", Ty::Int, "Only if it's still this version")]),
     t("secrets_delete", "Delete a secret", "Delete a secret (if_version: only if it's still the version you read).", "secrets", "DELETE", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}", &[SECRET_PROJECT, ENV, req("name", "Secret name"), q("path", Ty::Str, "Folder"), q("if_version", Ty::Int, "Only if it's still this version"), q("type", Ty::Str, "personal: your own override instead of the shared value")]),
@@ -1257,7 +1268,7 @@ static TOOLS: &[Tool] = &[
     t("secrets_compare", "Compare environments", "Which keys differ between two environments (missing, or a different value by fingerprint; never values).", "secrets", "GET", "/v1/secrets/projects/{project}/compare", &[SECRET_PROJECT, qreq("from", "Environment"), qreq("to", "Environment"), q("path", Ty::Str, "Folder")]),
     t("secrets_rotate", "Rotate a secret", "Make a new value for a secret and switch to it: a generated one, or a managed link's (a database user's password, a cloud key) made where it lives.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/rotate", &[SECRET_PROJECT, ENV, req("name", "Secret name"), q("path", Ty::Str, "Folder")]).open_world().destructive(),
     t("secrets_promote", "Promote secrets", "Copy an environment's secrets into this one (all, or some keys). Into a protected environment it opens a change request for a person instead.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/promote", &[SECRET_PROJECT, ENV, qreq("from", "The environment to copy from"), b("keys", Ty::Arr, "Only these keys"), b("path", Ty::Str, "Folder"), b("message", Ty::Str, "Why")]),
-    t("secrets_list_requests", "Change requests", "An environment's change requests (proposed changes waiting on review).", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/requests", &[SECRET_PROJECT, ENV, q("state", Ty::Str, "open, applied or closed")]),
+    t("secrets_list_requests", "Change requests", "An environment's change requests (proposed changes waiting on review).", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/requests", &[SECRET_PROJECT, ENV, q("state", Ty::Str, "open, approved, rejected, applied, closed or stale")]),
     t("secrets_get_request", "Get a change request", "One change request on a protected environment: what it changes (keys, fingerprints, never values), who asked, its reviews and whether its approvals are met.", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/requests/{id}", &[SECRET_PROJECT, ENV, req("id", "Request id")]),
     t("secrets_apply_request", "Apply an approved change request", "Apply a change request whose approvals are met, as one change. Applying one that isn't approved (bypass) is a person's: not here.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/requests/{id}/apply", &[SECRET_PROJECT, ENV, req("id", "Request id")]),
     t("secrets_close_request", "Close a change request", "Withdraw a change request without applying it.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/requests/{id}/close", &[SECRET_PROJECT, ENV, req("id", "Request id")]),
@@ -1413,7 +1424,7 @@ static TOOLS: &[Tool] = &[
         "apps",
         "POST",
         "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/rollout",
-        &[SERVICE, ENV, req("deploy", "Deploy id (the canary's deployment)"), breq("action", Ty::Str, "advance, all or abort")],
+        &[SERVICE, ENV, req("deploy", "Deploy id (the canary's deployment)"), breq("action", Ty::Choice(&["advance", "all", "abort"]), "What to do with it")],
     ),
     t("apps_sleep", "Sleep", "Stop an environment's instances until a request or apps_wake wakes them.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/sleep", &[SERVICE, ENV]),
     t("apps_wake", "Wake", "Start a sleeping environment's instances.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/wake", &[SERVICE, ENV]),
@@ -1529,7 +1540,7 @@ static TOOLS: &[Tool] = &[
     t("apps_route_stats", "Route stats", "An environment's routes from its access log over the last minutes (5-60, default 60): requests, 5xx and 4xx errors, p50/p95/max latency per route (ids folded as :id), the busiest, most failing and slowest 50 of each. Start here when a service is slow or failing.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/routes", &[SERVICE, ENV, q("minutes", Ty::Int, "How far back, 5-60 (default 60)")]),
     t("apps_errors", "Errors: why a service is failing", "An environment's errors over the last minutes (5-10080, default 1440), grouped (the same error once, with its count, first and last seen and a sample), the most frequent first, at most 50. Start here when a service is failing or erroring.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/errors", &[SERVICE, ENV, q("minutes", Ty::Int, "How far back, 5-10080 (default 1440)")]),
     t("apps_push_status", "Stream push status", "An environment's run.push rules as they stand: each one's lag (records not yet delivered), delivered and dead-lettered counts, the last delivery, and failing_since and last_error when it's failing, or why nothing is delivered (off). Why a pushed stream is behind.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/push", &[SERVICE, ENV]),
-    t("apps_set_error_state", "Resolve, mute or reopen an error", "Triage an error group (its fingerprint from apps_errors): resolved goes quiet until it's seen again, which reopens it as a regression naming the deploy it came back in; muted stays quiet; open reopens it.", "apps", "PATCH", "/v1/apps/services/{service}/environments/{env}/errors/{fingerprint}", &[SERVICE, ENV, req("fingerprint", "The error group's fingerprint"), breq("state", Ty::Str, "open, resolved or muted")]),
+    t("apps_set_error_state", "Resolve, mute or reopen an error", "Triage an error group (its fingerprint from apps_errors): resolved goes quiet until it's seen again, which reopens it as a regression naming the deploy it came back in; muted stays quiet; open reopens it.", "apps", "PATCH", "/v1/apps/services/{service}/environments/{env}/errors/{fingerprint}", &[SERVICE, ENV, req("fingerprint", "The error group's fingerprint"), breq("state", Ty::Choice(&["open", "resolved", "muted"]), "The error's new state")]),
     t("apps_rotate_config", "Rotate the runtime config's address", "Give an environment's runtime config a new read token (a leaked ROLL_CONFIG_URL): the old address reads until a deploy made after the rotation is live, so redeploy to finish it. 409 while the last rotation's old address still reads.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/config/rotate", &[SERVICE, ENV]).destructive(),
     t("apps_traces", "Traces of slow requests", "An environment's recent traces (traces on), newest first, at most 100: each one's root span, service, duration, span count and whether any span failed; min_ms keeps the slow ones. apps_get_trace has one's spans.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/traces", &[SERVICE, ENV, q("minutes", Ty::Int, "How far back (default 60)"), q("min_ms", Ty::Int, "Only traces at least this slow")]),
     t("apps_get_trace", "Get a trace", "One trace by its id (from apps_traces): its spans in start order, from the last week.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/traces/{trace}", &[SERVICE, ENV, req("trace", "Trace id")]),
@@ -1593,8 +1604,8 @@ static TOOLS: &[Tool] = &[
     t("apps_status_page", "The project's public status page", "A project's public status page: its title, its public URL and what it shows (which services' checks and heartbeats, names and up or down only). 404 without one; making one is a person's choice, in the dashboard.", "apps", "GET", "/v1/apps/projects/{project}/status-page", &[req("project", "Workspace project")]),
     t("apps_remove_status_page", "Take down the status page", "Take a project's public status page down: its address answers nothing after, and its incidents go with it. Making or changing one stays a person's (it makes the project's service names public; admin, no tool).", "apps", "DELETE", "/v1/apps/projects/{project}/status-page", &[req("project", "Workspace project")]).destructive(),
     t("apps_list_incidents", "Status page incidents", "The last 90 days' incidents on a project's status page and the open ones, newest first: title, state, whether roll opened it, and its updates.", "apps", "GET", "/v1/apps/projects/{project}/status-page/incidents", &[req("project", "Workspace project")]),
-    t("apps_create_incident", "Post an incident on the status page", "Post an incident on a project's public status page: anyone can read its title and text, so write for the public and never put a credential, an internal address or a customer's data in it (roll refuses credentials). States: investigating (default), identified, monitoring, resolved.", "apps", "POST", "/v1/apps/projects/{project}/status-page/incidents", &[req("project", "Workspace project"), breq("title", Ty::Str, "1-120 characters, public"), breq("text", Ty::Str, "1-2000 characters, public"), b("state", Ty::Str, "investigating, identified, monitoring or resolved")]).published(),
-    t("apps_update_incident", "Update an incident on the status page", "Add a public update to a status page incident (resolved closes it). Anyone can read it.", "apps", "POST", "/v1/apps/projects/{project}/status-page/incidents/{incident}/updates", &[req("project", "Workspace project"), req("incident", "Incident id"), breq("state", Ty::Str, "investigating, identified, monitoring or resolved"), breq("text", Ty::Str, "1-2000 characters, public")]).published(),
+    t("apps_create_incident", "Post an incident on the status page", "Post an incident on a project's public status page: anyone can read its title and text, so write for the public and never put a credential, an internal address or a customer's data in it (roll refuses credentials). States: investigating (default), identified, monitoring, resolved.", "apps", "POST", "/v1/apps/projects/{project}/status-page/incidents", &[req("project", "Workspace project"), breq("title", Ty::Str, "1-120 characters, public"), breq("text", Ty::Str, "1-2000 characters, public"), b("state", Ty::Choice(&["investigating", "identified", "monitoring", "resolved"]), "Where it stands")]).published(),
+    t("apps_update_incident", "Update an incident on the status page", "Add a public update to a status page incident (resolved closes it). Anyone can read it.", "apps", "POST", "/v1/apps/projects/{project}/status-page/incidents/{incident}/updates", &[req("project", "Workspace project"), req("incident", "Incident id"), breq("state", Ty::Choice(&["investigating", "identified", "monitoring", "resolved"]), "Where it stands"), breq("text", Ty::Str, "1-2000 characters, public")]).published(),
     t("apps_environment_slo", "SLO and error budget", "An environment's objective against its window: per indicator (availability, latency) the total, the failures, the share that met it and the error budget left (1 untouched, below 0 spent), and whether it's burning now.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/slo", &[SERVICE, ENV]),
     t("apps_list_forms", "List a site's forms", "A static site's forms with their submission counts and the last one's time (never what people sent; apps_form_submissions reads that).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/forms", &[SERVICE, ENV]),
     t("apps_form_submissions", "Read form submissions", "What people sent through a site's form, newest first: each submission's id, time and fields. People's own data: every read is audited.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/forms/{form}/submissions", &[SERVICE, ENV, req("form", "Form name"), q("limit", Ty::Int, "At most (1-200, default 50)"), q("before", Ty::Str, "A submission's id: the page after it")]).outside(&["fields"]),
@@ -1613,7 +1624,7 @@ static TOOLS: &[Tool] = &[
         q("before", Ty::Int, "Older lines: before this time (unix ms)"),
         q("instance", Ty::Str, "Only this instance's"),
         q("deployment", Ty::Str, "Only this deploy's"),
-        q("stream", Ty::Str, "stdout, stderr, build or system"),
+        q("stream", Ty::Choice(&["stdout", "stderr", "system", "http", "build"]), "Only this stream"),
         q("level", Ty::Str, "Only lines at this level or worse (debug, info, warn, error, fatal); a line that says none isn't kept"),
         q("where", Ty::Str, "Only lines whose JSON or logfmt fields say all these terms: level:error user_id:42, key:*, -key:value, a.b:x (at most 10)"),
         q("by", Ty::Str, "With http: only answers roll gave itself, for this reason (or any)"),
@@ -1779,6 +1790,17 @@ mod tests {
         assert_eq!(super::nearest("zebra", names), None);
         let all: Vec<&str> = super::all().iter().map(|t| t.name).collect();
         assert_eq!(super::nearest("apps_list_service", all.iter().copied()), Some("apps_list_services"));
+    }
+
+    /// An argument with a fixed set of values publishes it as `enum`, and a value outside the set is
+    /// refused before any call, naming the set.
+    #[test]
+    fn a_choice_is_published_and_checked() {
+        let t = super::all().iter().find(|t| t.name == "apps_rollout").unwrap();
+        assert_eq!(t.build_definition()["inputSchema"]["properties"]["action"]["enum"], serde_json::json!(["advance", "all", "abort"]));
+        let call = |action: &str| t.request(&serde_json::json!({ "service": "svc_1", "env": "production", "deploy": "dpl_1", "action": action }));
+        assert_eq!(call("go").err().unwrap(), "apps_rollout: action is one of advance, all, abort (not \"go\")");
+        assert!(call("abort").is_ok());
     }
 
     use super::*;

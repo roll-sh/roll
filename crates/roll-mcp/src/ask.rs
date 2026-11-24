@@ -49,9 +49,21 @@ pub fn source(product: &str, param: &str) -> Option<Source> {
 pub fn missing(def: &Value, args: &Value) -> Option<(String, Source)> {
     let product = def["_meta"]["roll/product"].as_str()?;
     def["inputSchema"]["required"].as_array()?.iter().filter_map(Value::as_str).find_map(|p| {
-        let blank = args.get(p).is_none_or(|v| v.is_null() || v.as_str().is_some_and(str::is_empty));
-        if blank { source_at(product, p, def["_meta"]["roll/route"].as_str().unwrap_or("")).map(|s| (p.to_string(), s)) } else { None }
+        if blank(args, p) { source_at(product, p, def["_meta"]["roll/route"].as_str().unwrap_or("")).map(|s| (p.to_string(), s)) } else { None }
     })
+}
+
+/// The first argument a tool requires that `args` lacks and that has a fixed set of values (its
+/// schema's `enum`: a role, a rollout's action): the person picks one as they pick an id.
+pub fn missing_choice(def: &Value, args: &Value) -> Option<(String, Vec<String>)> {
+    def["inputSchema"]["required"].as_array()?.iter().filter_map(Value::as_str).find_map(|p| {
+        let values = def["inputSchema"]["properties"][p]["enum"].as_array().filter(|_| blank(args, p))?;
+        Some((p.to_string(), values.iter().filter_map(Value::as_str).map(str::to_string).collect()))
+    })
+}
+
+fn blank(args: &Value, param: &str) -> bool {
+    args.get(param).is_none_or(|v| v.is_null() || v.as_str().is_some_and(str::is_empty))
 }
 
 /// As [`source`], for a tool whose route (`GET /v1/tasks/runs/{id}`) says what an ambiguous name
@@ -139,5 +151,10 @@ mod tests {
         // Tasks' `id` is what its route names.
         assert_eq!(missed("tasks_cancel_run", json!({})), Some(("id".into(), "tasks_list_runs")));
         assert_eq!(missed("tasks_retry_message", json!({})), Some(("id".into(), "tasks_list_messages")));
+        // A required argument with a fixed set offers the set; one that's given offers nothing.
+        let choice = missing_choice(def("apps_rollout"), &json!({ "service": "svc_1", "env": "production", "deploy": "dpl_1" }));
+        assert_eq!(choice, Some(("action".into(), vec!["advance".into(), "all".into(), "abort".into()])));
+        assert!(missing_choice(def("apps_rollout"), &json!({ "action": "all" })).is_none());
+        assert!(missing_choice(def("apps_list_services"), &json!({})).is_none());
     }
 }

@@ -1203,6 +1203,11 @@ async fn request_access(State(a): S, ext: Extensions, Json(r): Json<AccessReques
     // does): one with "ask for anything else", or a rule that asks.
     let asks = grant.ask_otherwise || grant.rules.0.iter().any(|r| r.actions.values().any(|e| *e == roll_auth::scope::Effect::Ask));
     if !asks {
+        // A person's token acts within their roles: its rules can't reach past them, so the way on
+        // is a role, not the token.
+        if grant.user.is_some() {
+            return Err(Error::Forbidden("a person's token never asks for more: it acts within your roles, so a project admin gives a role that may".into()));
+        }
         return Err(Error::Forbidden("this token was made never to ask a person: its owner changes its rules instead".into()));
     }
     if request_duration(&r.for_).is_none() {
