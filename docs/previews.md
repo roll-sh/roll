@@ -1635,6 +1635,16 @@ land on the change.
   team session, through roll), from the change's feedback reviews (`roll_previews::notes` reads back the shape the
   dashboard posts and nothing else; dismissed ones don't show), the latest 50. Each note says
   who and when, and outlines its element on hover; all of it is text, never HTML.
+- A reviewer sets the project's feature flags for their own view (Vercel's Flags Explorer): with
+  `flags` (`[{name, options}]`, at most 20, each name and option 1-60 letters, digits, `-`, `_` or
+  `.`), the page's toolbar gets "Flags": each flag a choice (the app's own, or one of its
+  options), applied to this browser only by reloading with a cookie (`roll_flags`). The preview's
+  proxy turns it into the header the services read, `x-roll-flags: new-checkout=on,theme=dark`,
+  only what the project's rule names with one of its options; the cookie never reaches the
+  services, and an `x-roll-flags` a visitor sends is dropped. The app reads the header where it
+  decides a flag (a flags SDK's override hook); a visitor without the toolbar gets the app's own
+  choices. roll MCP's `previews_set_rules` takes `flags` (an agent that adds a flag to the code
+  offers it on the toolbar too). `a_reviewers_flags_reach_the_service_as_a_header`.
 - A note or an error becomes a fix to make (Vercel Comments' "Create issue", Netlify's drawer):
   the note's sheet (opened from its Reply or Resolve) and each error group on the sheet's Errors
   tab have "Make a work item". It's made in the preview's repo as the person looking (roll code's
@@ -1882,6 +1892,7 @@ type Settings = {
   access: "link" | "team" | "public"; // "link": a preview's URLs need its link; "team": a person signed in to roll who may open the project
   visual_review: "off" | "check" | "required";   // the roll/visual review; required also blocks landing in roll ("off")
   feedback: boolean;                  // a feedback button on its pages for people who came in through roll (true)
+  flags?: {name: string; options: string[]}[]; // feature flags a reviewer sets for their own view from that button's toolbar (x-roll-flags)
   egress: "open" | "roll";            // what its services' code may reach: anything ("open"), or only roll's products on a network with no route out (see "Egress")
   egress_hosts?: string[];            // with "roll" (or egress_forks "roll", for forks): hosts outside roll still reachable through its egress proxy (api.stripe.com, *.sentry.io; at most 20)
   egress_forks: "roll" | "open";      // what a fork's preview reaches when egress is "open" (default "roll")
@@ -2571,24 +2582,24 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **A preview's data from the sheet, in review** (Neon's Tables, Supabase's table editor): a branch's tables
-   read as the branch's own role (so masks hold), a few rows a page.
-2. **Feature flags on a preview** (Vercel's Flags Explorer): per-preview values, and a reviewer's
+1. **Feature flags on a preview, in review** (Vercel's Flags Explorer): per-preview values, and a reviewer's
    own override from the page's toolbar.
-3. **Restore points for a preview's data** (Neon's snapshots): save the branches now, put them back
+2. **Restore points for a preview's data** (Neon's snapshots): save the branches now, put them back
    after a test run.
-4. **A workload identity for `roll.toml` services** (Vercel's OIDC federation): roll apps' `pv-`
+3. **A workload identity for `roll.toml` services** (Vercel's OIDC federation): roll apps' `pv-`
    instances have one; runtime services don't.
-5. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
+4. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
    (3.3 s in its log) and its masking, which needs that compute up: pg-control's to shorten.
-6. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+5. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-7. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+6. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-8. **Watch: pg-control's recovery to a time seconds old** (unowned).
+7. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-24: a data branch looked at from the sheet (#858: its tables and first rows, as the branch's own role; live, `public.users` masked).
 
 Landed 2026-11-23, after midnight: a page read through roll for agents (#852: `GET …/fetch`, `roll preview fetch`; roll MCP maps it as `previews_fetch`).
 
