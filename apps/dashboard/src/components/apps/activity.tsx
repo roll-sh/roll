@@ -65,6 +65,12 @@ export function describe(e: AppEvent): string {
       return `saw a job fail${where}${d.exit_code != null ? ` (exit ${String(d.exit_code)})` : ""}`;
     case "alert.metric":
       return `alerted: ${String(d.metric ?? "a metric")} at ${String(d.value ?? "")} (${d.above != null ? `above ${String(d.above)}` : `below ${String(d.below ?? "")}`} for ${String(d.minutes ?? "")} minutes)${where}`;
+    case "alert.route": {
+      const route = `${d.method ? `${String(d.method)} ` : ""}${String(d.route ?? "")}`;
+      return d.kind === "latency"
+        ? `alerted: ${route} at p95 ${String(d.value ?? "")} ms (the alert is at ${String(d.threshold ?? "")} ms)${where}`
+        : `alerted: ${route} answered ${String(d.value ?? "")}% 5xx (the alert is at ${String(d.threshold ?? "")}%)${where}`;
+    }
     case "alert.memory":
     case "alert.cpu":
     case "alert.errors":
@@ -85,6 +91,7 @@ export function describe(e: AppEvent): string {
     case "error.new":
       return `saw a new error${where}: ${String(d.name ?? "an error")}`;
     case "alert.resolved":
+      if (d.alert === "alert.route") return `cleared the ${d.method ? `${String(d.method)} ` : ""}${String(d.route ?? "")} ${d.kind === "latency" ? "latency" : "5xx"} alert${where}`;
       return `cleared the ${String(d.alert ?? "alert.").slice(6)} alert${where}`;
     case "domain.active":
       return `put ${String(d.hostname)} live${where}`;

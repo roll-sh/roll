@@ -2146,6 +2146,7 @@ type Settings = {
     next push each accepted page that looks exactly as it did (the first page at both widths,
     each other page) keeps its acceptance, as Chromatic carries accepted baselines forward, so
     only the pages the push changed are asked about again.
+<<<<<<< HEAD
     Pages changed the same way are grouped (Percy's grouped diffs: one header change shows on
     every page, width, browser, state and story): each other page's change against the
     baseline's is the area that differs, as it was and as it is, each an 8 × 8 average hash with
@@ -2156,6 +2157,18 @@ type Settings = {
     transaction. The first page joins its group by its desktop picture (its signature on the
     screenshot's row).
     `the_same_change_on_two_pages_has_one_signature`, `pages_changed_the_same_way_are_accepted_together`.
+||||||| e2b7039823
+=======
+    Pages changed the same way are grouped (Percy's grouped diffs: one header change shows on
+    every page, width, browser, state and story): each other page's change against the
+    baseline's is the area that differs, as it was and as it is, each an 8 × 8 average hash with
+    its brightness, digested to 12 hex characters (`visual::compare`, in the same pass as the
+    percent). Pages under review that share one carry it (`visual_review.pages[].group`, only
+    when two or more do); the sheet offers "Accept the 4 changed the same way" on the first of
+    them, and `…/visual/accept {group}` (`roll preview accept --group`) accepts them in one
+    transaction. The first page isn't grouped (it's compared on its own, at both widths).
+    `the_same_change_on_two_pages_has_one_signature`, `pages_changed_the_same_way_are_accepted_together`.
+>>>>>>> origin/main
     A project can set a visual threshold (`github.visual_threshold`, a percent up to 50, as
     Chromatic's `diffThreshold` and Percy's sensitivity): a page that differs from the
     baseline's by less doesn't count as changed for the review, and a push that moves a page by
@@ -2718,34 +2731,44 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Grouped visual changes, in review** (Percy's grouped diffs): pages changed the same way
+<<<<<<< HEAD
+1. **Interaction to next paint, in review** (Vercel's Speed Insights): a page state's clicks and
+   typing timed to the next paint (`step_ms`) beside main's same state, said on the sheet when
+   past 200 ms and half again main's. Visitors' own numbers (field data from the toolbar's
+   script) next.
+=======
+2. **Grouped visual changes, in review** (Percy's grouped diffs): pages changed the same way
    against main's share a group (`visual::compare`'s signature), accepted together (`…/visual/accept
    {group}`, the sheet's "Accept the N changed the same way", `roll preview accept --group`).
-   The first page in them too.
-2. **A note that shows what the reviewer saw** (Jam's recordings, Netlify's markup): today a
+   The first page joins them next.
+>>>>>>> origin/main
+3. **A note that shows what the reviewer saw** (Jam's recordings, Netlify's markup): today a
    note carries a selector, the last steps, errors and failed requests, and roll's own browser
    crops the element later at desktop width; a phone-only or Safari-only bug has no picture.
    The question is what a visitor's own capture can be trusted for (the page's code could forge
    it): a short replay with inputs masked and a size cap, labelled as the reviewer's.
-3. **A note's author told of replies and its resolve** (Vercel's notifications): GitHub tells a
+4. **A note's author told of replies and its resolve** (Vercel's notifications): GitHub tells a
    mirrored pull request's people; a roll-only change's reviewer hears nothing. Where it lands
    (roll's notices, email through accounts, a Slack DM through chat ops) is the question.
-4. **Restore points for the products that only copy** (Redis, search, NoSQL, streams): a point
+5. **Restore points for the products that only copy** (Redis, search, NoSQL, streams): a point
    is kept only where the product puts a branch back in place, keeping its id (their delete
    guards check it); each needs its control plane's reset `from`, as pg-control's.
-5. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
+6. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
    (3.3 s in its log) and its masking, which needs that compute up: pg-control's to shorten.
-6. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+7. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-7. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+8. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-8. **Watch: pg-control's recovery to a time seconds old** (unowned).
+9. **Watch: pg-control's recovery to a time seconds old** (unowned).
 
 
 
+
+
+Landed 2026-11-24, afternoon, later: guests' notes outside the team's for MCP's lockdown (#916), and pages changed the same way grouped and accepted together (#919; the first page in them with this change).
 
 Landed 2026-11-24, afternoon: a page state's steps timed to the next paint (#915, INP in the lab, against main's).
 

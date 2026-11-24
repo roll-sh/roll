@@ -1961,6 +1961,7 @@ impl Store {
             let (a, b) = (b64e.decode(a?).ok()?, b64e.decode(b?).ok()?);
             crate::visual::changed(&b, &a).map(|f| (f * 10_000.0).round() as i64)
         };
+<<<<<<< HEAD
         // Each page against the baseline's at the same path, with what the change is (pages
         // changed the same way are grouped for review); the first page too, at desktop width.
         let compared = |a: &String, b: Option<&String>| -> Option<(i64, Option<String>)> {
@@ -1980,6 +1981,27 @@ impl Store {
                 None => (path.clone(), None, None),
             })
             .collect();
+||||||| e2b7039823
+        let (change, phone) = (bp(Some(&ours.png), Some(&theirs.png)), bp(ours.phone.as_ref(), theirs.phone.as_ref()));
+        // The other pages, each against the baseline's page at the same path.
+        let page_bps: Vec<(String, Option<i64>)> = ours.pages.iter().map(|(path, png)| (path.clone(), bp(Some(png), theirs.pages.get(path)))).collect();
+=======
+        let (change, phone) = (bp(Some(&ours.png), Some(&theirs.png)), bp(ours.phone.as_ref(), theirs.phone.as_ref()));
+        // The other pages, each against the baseline's page at the same path, with what the
+        // change is (pages changed the same way are grouped for review).
+        let compared = |a: &String, b: Option<&String>| -> Option<(i64, Option<String>)> {
+            let (a, b) = (b64e.decode(a).ok()?, b64e.decode(b?).ok()?);
+            crate::visual::compare(&b, &a).map(|(f, sig)| ((f * 10_000.0).round() as i64, sig))
+        };
+        let page_bps: Vec<(String, Option<i64>, Option<String>)> = ours
+            .pages
+            .iter()
+            .map(|(path, png)| match compared(png, theirs.pages.get(path)) {
+                Some((bp, sig)) => (path.clone(), Some(bp), sig),
+                None => (path.clone(), None, None),
+            })
+            .collect();
+>>>>>>> origin/main
         // Each other page's checks against main's page at the same path.
         let report = |m: &std::collections::BTreeMap<String, String>, p: &str| m.get(p).and_then(|r| serde_json::from_str::<crate::PageReport>(r).ok());
         let page_against: Vec<(String, Option<String>)> = ours
@@ -2182,6 +2204,7 @@ impl Store {
             let others: Vec<String> = c.query("SELECT path FROM page_shots WHERE preview_id = ?", [id], |r| r.get(0))?;
             let pages: Vec<String> = match page {
                 None => std::iter::once(String::new()).chain(others).collect(),
+<<<<<<< HEAD
                 // Every page changed the same way (its group: a signature's first 12 characters).
                 Some(p) if p.starts_with("group:") => {
                     let g = &p["group:".len()..];
@@ -2198,6 +2221,21 @@ impl Store {
                     }
                     these
                 }
+||||||| e2b7039823
+=======
+                // Every page changed the same way (its group: a signature's first 12 characters).
+                Some(p) if p.starts_with("group:") => {
+                    let g = &p["group:".len()..];
+                    if g.len() != 12 || !g.bytes().all(|b| b.is_ascii_hexdigit()) {
+                        return Err(Error::BadRequest("a group is 12 hex characters (visual_review.pages[].group)".into()));
+                    }
+                    let these: Vec<String> = c.query("SELECT path FROM page_shots WHERE preview_id = ? AND base_sig = ?", params![id, g], |r| r.get(0))?;
+                    if these.is_empty() {
+                        return Err(Error::NotFound(format!("no pages changed as group {g}")));
+                    }
+                    these
+                }
+>>>>>>> origin/main
                 Some(p) if p.is_empty() || others.iter().any(|o| o == p) => vec![p.to_string()],
                 Some(p) => return Err(Error::NotFound(format!("the preview has no screenshot of {p:?}"))),
             };
@@ -2262,9 +2300,18 @@ impl Store {
             .map(|(path, percent)| {
                 let a = accepted(path);
                 let unstable = if path.is_empty() { first_unstable } else { pages.iter().any(|p| p.path == *path && p.unstable) };
+<<<<<<< HEAD
                 // Its group, when another page under review shares it.
                 let group = sig_of(path).filter(|g| changed.iter().filter(|(q, _)| sig_of(q).as_ref() == Some(g)).count() > 1);
                 crate::PageReview { path: path.clone(), percent: *percent, by: a.as_ref().map(|(by, _)| by.clone()), at: a.map(|(_, at)| at), unstable, group }
+||||||| e2b7039823
+                crate::PageReview { path: path.clone(), percent: *percent, by: a.as_ref().map(|(by, _)| by.clone()), at: a.map(|(_, at)| at), unstable }
+=======
+                // Its group, when another page under review shares it.
+                let sig = pages.iter().find(|p| p.path == *path).and_then(|p| p.base_group.clone());
+                let group = sig.filter(|g| changed.iter().filter(|(q, _)| pages.iter().any(|p| p.path == *q && p.base_group.as_ref() == Some(g))).count() > 1);
+                crate::PageReview { path: path.clone(), percent: *percent, by: a.as_ref().map(|(by, _)| by.clone()), at: a.map(|(_, at)| at), unstable, group }
+>>>>>>> origin/main
             })
             .collect();
         let percent = changed.iter().map(|(_, p)| *p).fold(0.0_f64, f64::max);
