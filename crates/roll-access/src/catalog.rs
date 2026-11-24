@@ -1468,6 +1468,11 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/secrets/projects/{project}/saas", "secrets", ADMIN, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/saas/{id}", "secrets", ADMIN, one(&["project"], "project")),
     row("PATCH", "/v1/secrets/projects/{project}/saas/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    row("GET", "/v1/secrets/projects/{project}/public-certs", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/public-certs", "secrets", ADMIN, one(&["project"], "project")),
+    row("PATCH", "/v1/secrets/projects/{project}/public-certs/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/public-certs/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/public-certs/{id}/renew", "secrets", W, one(&["project"], "project")),
     // Lists only the keys the caller's grant reaches (`Grants::reaches_key`, each key's name as
     // its index), so a rule limited to some keys sees those.
     row("GET", "/v1/secrets/projects/{project}/transit", "secrets", R, one(&["project"], "project")).filters_index(),

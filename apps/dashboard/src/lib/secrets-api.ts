@@ -7,7 +7,7 @@
  * revealed value for as long as it's shown and no longer.
  */
 
-import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, HeldValues, ValuesDelta, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Hosts, PlaceholderRecord, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Totp, Share, NewShare, ValueRequest, NewValueRequest, NewToken, AuditEntry, AuditFilter, AuditVerification, AuditFormat, EventsQuery, EventPage, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, SaasRotator, NewSaasRotator, SaasRotatorChange, AwsRole, Finding, ProjectFindings, SyncPreview, FileDiff, OutsideDatabase, Directory, NewDirectory, SnowflakeAccount, NewSnowflakeAccount, AtlasProject, NewAtlasProject, AwsUser, CloudAccount, NewCloudAccount, KubernetesCluster, NewKubernetesCluster, SignedCertificate, CaCertificate, Ca, AcmeSettings, NewAcmeKey, SshCa, HostCertificate, UserCertificate, TransitKey, TransitPublicKey, Rotation, FolderPolicy, Reach, GitHubApp, SinkFormat, Gateway, MadeGateway, NewDecoy, CutOff, CutOffRequest, ValidityProbe, CheckedCredential, LeakRotate, DeletedProject, Recovered, EnvironmentDeletion, EnvironmentDeleted, RecoveredEnvironment } from "@roll/secrets/types";
+import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, HeldValues, ValuesDelta, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Hosts, PlaceholderRecord, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Totp, Share, NewShare, ValueRequest, NewValueRequest, NewToken, AuditEntry, AuditFilter, AuditVerification, AuditFormat, EventsQuery, EventPage, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, SaasRotator, NewSaasRotator, SaasRotatorChange, PublicCert, NewPublicCert, PublicCertChange, AwsRole, Finding, ProjectFindings, SyncPreview, FileDiff, OutsideDatabase, Directory, NewDirectory, SnowflakeAccount, NewSnowflakeAccount, AtlasProject, NewAtlasProject, AwsUser, CloudAccount, NewCloudAccount, KubernetesCluster, NewKubernetesCluster, SignedCertificate, CaCertificate, Ca, AcmeSettings, NewAcmeKey, SshCa, HostCertificate, UserCertificate, TransitKey, TransitPublicKey, Rotation, FolderPolicy, Reach, GitHubApp, SinkFormat, Gateway, MadeGateway, NewDecoy, CutOff, CutOffRequest, ValidityProbe, CheckedCredential, LeakRotate, DeletedProject, Recovered, EnvironmentDeletion, EnvironmentDeleted, RecoveredEnvironment } from "@roll/secrets/types";
 import type { Grant } from "./access-api";
 import { withSession } from "./code-token";
 import { grantFor, tokenOf } from "./secrets-tokens";
@@ -349,6 +349,13 @@ export function secretsApi(project: string) {
     /** Checked with the vendor first; the answer never holds the credential. */
     updateSaasRotator: (id: string, ch: SaasRotatorChange) => req<SaasRotator>("PATCH", `${P}/saas/${enc(id)}`, ch),
     deleteSaasRotator: (id: string) => req<null>("DELETE", `${P}/saas/${enc(id)}`),
+    publicCerts: () => req<PublicCert[]>("GET", `${P}/public-certs`),
+    /** The DNS credential is checked first; the certificate comes from the background job (`status`). */
+    addPublicCert: (c: NewPublicCert) => req<PublicCert>("POST", `${P}/public-certs`, c),
+    updatePublicCert: (id: string, ch: PublicCertChange) => req<PublicCert>("PATCH", `${P}/public-certs/${enc(id)}`, ch),
+    /** 202: ordered in the background; linked keys rotate once it's issued. */
+    renewPublicCert: (id: string) => req<PublicCert>("POST", `${P}/public-certs/${enc(id)}/renew`),
+    deletePublicCert: (id: string) => req<null>("DELETE", `${P}/public-certs/${enc(id)}`),
   };
 }
 

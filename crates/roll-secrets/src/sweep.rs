@@ -312,7 +312,7 @@ impl Secrets {
     /// Rotate a managed link's credential (with every secret that shares it), or a live link's
     /// resource credential. A rotation doesn't need approval on a protected environment.
     pub fn rotate(&self, project: &str, slug: &str, path: &str, key: &str, caller: &Caller) -> Result<Applied> {
-        let out = self.rotate_now(project, slug, path, key, caller, false);
+        let out = self.rotate_now(project, slug, path, key, caller, false, false);
         if out.is_ok() {
             self.note_rotation(project, slug, path, key, None, false);
         }
@@ -324,7 +324,7 @@ impl Secrets {
     /// is the sweeper's, at once); `rotation.succeeded` says `via: leak`. Its caller checks the
     /// environment's approvals first: a rotation itself never asks for them.
     pub(crate) fn rotate_leaked(&self, project: &str, slug: &str, path: &str, key: &str, caller: &Caller) -> Result<Applied> {
-        let out = self.rotate_now(project, slug, path, key, caller, true);
+        let out = self.rotate_now(project, slug, path, key, caller, true, false);
         match &out {
             Ok(_) => self.note_rotation(project, slug, path, key, None, true),
             Err(e) => self.note_rotation(project, slug, path, key, Some(&e.to_string()), true),
@@ -335,7 +335,7 @@ impl Secrets {
     /// A scheduled or leaked key's rotation's failure, kept on the key for health
     /// (`rotation_failing`) until one succeeds; `None` clears it. A scheduled one is an event as a
     /// failing run starts, a leak's every time (`via: leak`).
-    fn note_rotation(&self, project: &str, slug: &str, path: &str, key: &str, failure: Option<&str>, leak: bool) {
+    pub(crate) fn note_rotation(&self, project: &str, slug: &str, path: &str, key: &str, failure: Option<&str>, leak: bool) {
         crate::metrics::Counters::add(if failure.is_some() { &self.counters.rotation_failures } else { &self.counters.rotations }, 1);
         let now = self.db.now_ms().unwrap_or_default();
         let failure = failure.map(|f| f.chars().take(300).collect::<String>());
@@ -369,7 +369,21 @@ impl Secrets {
         }
     }
 
-    fn rotate_now(&self, project: &str, slug: &str, path: &str, key: &str, caller: &Caller, leak: bool) -> Result<Applied> {
+    /// A key linked to a public certificate takes the certificate its registration now holds
+    /// (public_certs.rs: the background job, once it renewed).
+    pub(crate) fn rotate_stored(&self, project: &str, slug: &str, path: &str, key: &str) -> Result<Applied> {
+        let out = self.rotate_now(project, slug, path, key, &Caller::consumer(ROTATION), false, true);
+        if out.is_ok() {
+            self.note_rotation(project, slug, path, key, None, false);
+        }
+        out
+    }
+
+    /// `stored`: take what the provider holds now (a public certificate the job renewed). Without
+    /// it, a public certificate's key asks for a renewal instead: ordering one is slow, so the
+    /// background job does it, and rotates the key once it's in.
+    #[allow(clippy::too_many_arguments)]
+    fn rotate_now(&self, project: &str, slug: &str, path: &str, key: &str, caller: &Caller, leak: bool, stored: bool) -> Result<Applied> {
         let path = names::path(path)?;
         caller.need(Action::Write, &Scope::at(project, slug, &path))?;
         let dek = self.project(project)?;
@@ -403,6 +417,11 @@ impl Secrets {
                 Ok(Applied { change: None, items: vec![], warnings: vec![], request: None })
             }
             Mode::Dynamic => Err(Error::BadRequest(format!("{key} is dynamic: every resolve issues a fresh credential"))),
+            Mode::Managed if link.kind == crate::public_certs::KIND && !stored => {
+                self.request_renewal(project, &link.r#ref, caller)?;
+                let name = provider.name(&link.r#ref).unwrap_or_else(|| link.r#ref.clone());
+                Ok(Applied { change: None, items: vec![], warnings: vec![format!("roll is ordering a new certificate for {name}: {key} gets it once the CA issues it (rotation.succeeded), within minutes")], request: None })
+            }
             Mode::Managed => {
                 let cred = self.links.credential(&link).unwrap_or("default").to_string();
                 let old = state.as_ref().and_then(|s| s.get("credential")).and_then(Json::as_str).map(String::from);

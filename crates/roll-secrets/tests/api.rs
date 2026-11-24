@@ -7999,3 +7999,148 @@ async fn a_rotation_now_is_rotation_succeeded_with_the_keys_new_version() {
     assert_eq!((&done["key"], &done["data"]["version"], &done["data"]["scheduled"]), (&json!("AWS_SECRET_ACCESS_KEY"), &json!(2), &json!(false)), "{done}");
     assert!(!events.to_string().contains("sk-2"));
 }
+
+/// A public ACME CA and DNS provider, as rolld's client answers: certificates signed by a root of
+/// its own, an account made once (with the EAB it was given), names under `roll-fake.test` only,
+/// and `unproven.…` names never proven.
+struct FakeCa {
+    root: rcgen::CertificateParams,
+    root_key: rcgen::KeyPair,
+    root_pem: String,
+    orders: Mutex<Vec<(Vec<String>, bool)>>,
+}
+
+impl FakeCa {
+    fn new() -> FakeCa {
+        let root_key = rcgen::KeyPair::generate().unwrap();
+        let mut root = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        root.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        root.distinguished_name.push(rcgen::DnType::CommonName, "roll fake public root");
+        let root_pem = root.self_signed(&root_key).unwrap().pem();
+        FakeCa { root, root_key, root_pem, orders: Mutex::default() }
+    }
+}
+
+impl roll_secrets::public_certs::PublicCa for FakeCa {
+    fn allows(&self, directory: &str) -> bool {
+        roll_secrets::public_certs::PUBLIC_CAS.contains(&directory)
+    }
+
+    fn check(&self, _: roll_secrets::public_certs::DnsProvider, credential: &Secret, names: &[String]) -> Result<(), String> {
+        if credential.expose() != "fake-cf-dns-token" {
+            return Err("Cloudflare: find zone: HTTP 401".into());
+        }
+        match names.iter().find(|n| !n.ends_with("roll-fake.test")) {
+            Some(n) => Err(format!("Cloudflare: no zone for {n} (does the token see it?)")),
+            None => Ok(()),
+        }
+    }
+
+    fn order(&self, o: roll_secrets::public_certs::Order<'_>) -> Result<roll_secrets::public_certs::Ordered, String> {
+        self.orders.lock().unwrap().push((o.names.to_vec(), o.account.is_some()));
+        assert_eq!(o.credential.expose(), "fake-cf-dns-token");
+        if let Some(n) = o.names.iter().find(|n| n.starts_with("unproven.")) {
+            return Err(format!("the CA refused: unauthorized No TXT record found at _acme-challenge.{n}"));
+        }
+        let account = match o.account {
+            Some(a) => {
+                assert_eq!(a.expose(), r#"{"fake":"account"}"#, "the account made on the first order");
+                None
+            }
+            None => {
+                let (kid, key) = o.eab.expect("EAB for a new account");
+                assert_eq!((kid, key.expose()), ("kid-roll-fake", "cm9sbC1mYWtlLWhtYWM"));
+                Some(Secret::new(r#"{"fake":"account"}"#.to_string()))
+            }
+        };
+        let key = rcgen::KeyPair::generate().unwrap();
+        let mut p = rcgen::CertificateParams::new(o.names.to_vec()).unwrap();
+        let now = time::OffsetDateTime::now_utc();
+        (p.not_before, p.not_after) = (now - time::Duration::hours(1), now + time::Duration::days(90));
+        let leaf = p.signed_by(&key, &rcgen::Issuer::from_params(&self.root, &self.root_key)).unwrap();
+        Ok(roll_secrets::public_certs::Ordered { chain: Secret::new(format!("{}{}", leaf.pem(), self.root_pem)), private_key: Secret::new(key.serialize_pem()), account })
+    }
+}
+
+#[tokio::test]
+async fn public_certificates_are_ordered_in_the_background_renewed_and_a_failed_renewal_is_rotation_failed() {
+    let api = Api::new().await;
+    let ca = Arc::new(FakeCa::new());
+    api.secrets.set_public_ca(ca.clone());
+    let le = roll_secrets::public_certs::PUBLIC_CAS[0];
+    let new = |domains: Value, token: &str| json!({ "name": "web", "directory_url": le, "domains": domains, "dns_provider": "cloudflare", "dns_credential": token, "eab_kid": "kid-roll-fake", "eab_hmac_key": "cm9sbC1mYWtlLWhtYWM" });
+    // Refused before anything is kept: a CA roll doesn't know, a name the token can't edit.
+    let mut other = new(json!(["www.roll-fake.test"]), "fake-cf-dns-token");
+    other["directory_url"] = json!("https://acme.attacker.example/directory");
+    assert_eq!(api.call(Method::POST, "/public-certs", Some(other)).await.0, StatusCode::BAD_REQUEST);
+    let (s, e) = api.call(Method::POST, "/public-certs", Some(new(json!(["www.example.org"]), "fake-cf-dns-token"))).await;
+    assert!(s == StatusCode::BAD_REQUEST && e.to_string().contains("no zone for www.example.org"), "{e}");
+    let cert = api.ok(Method::POST, "/public-certs", Some(new(json!(["www.roll-fake.test", "*.roll-fake.test"]), "fake-cf-dns-token"))).await;
+    let id = cert["id"].as_str().unwrap().to_string();
+    assert_eq!((cert["status"].as_str(), ca.orders.lock().unwrap().len()), (Some("pending"), 0), "nothing ordered in the request: {cert}");
+    assert!(!cert.to_string().contains("fake-cf-dns-token") && !cert.to_string().contains("cm9sbC1mYWtl"), "{cert}");
+    let link = |field: &str| json!({ "link": { "kind": "public_cert", "ref": id, "field": field, "mode": "managed" } });
+    let (s, e) = api.call(Method::PUT, "/environments/production/secrets/TLS_CERT", Some(link("certificate"))).await;
+    assert!(s == StatusCode::CONFLICT && e.to_string().contains("not_issued"), "not issued yet: {s} {e}");
+
+    // The background job orders it (a new account, with the EAB), and the key links to it.
+    let sweep = || {
+        let s = api.secrets.clone();
+        async move { tokio::task::spawn_blocking(move || s.sweep_public_certs().unwrap()).await.unwrap() }
+    };
+    sweep().await;
+    let listed = api.ok(Method::GET, "/public-certs", None).await;
+    assert_eq!(listed[0]["status"], "issued", "{listed}");
+    let days = (listed[0]["renews_at"].as_i64().unwrap() - listed[0]["issued_at"].as_i64().unwrap()) / 86_400_000;
+    assert_eq!(days, 60, "two thirds of 90 days");
+    for (key, field) in [("TLS_CERT", "certificate"), ("TLS_KEY", "private_key"), ("TLS_CA_CHAIN", "ca_chain"), ("TLS_FULLCHAIN", "fullchain")] {
+        api.ok(Method::PUT, &format!("/environments/production/secrets/{key}"), Some(link(field))).await;
+    }
+    let (s, _) = api.call(Method::PUT, "/environments/staging/secrets/TLS_CERT", Some(json!({ "link": { "kind": "public_cert", "ref": id, "field": "certificate", "mode": "managed", "options": { "rotate_days": 30 } } }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "the registration renews, not the link");
+    let v = api.values("production", "/").await["values"].clone();
+    assert_eq!(v["TLS_CA_CHAIN"], ca.root_pem.as_str(), "chains to the CA's root");
+    assert_eq!(v["TLS_FULLCHAIN"].as_str().unwrap(), format!("{}{}", v["TLS_CERT"].as_str().unwrap(), ca.root_pem));
+    assert!(v["TLS_KEY"].as_str().unwrap().contains("PRIVATE KEY"));
+    let first = v["TLS_CERT"].as_str().unwrap().to_string();
+    let listed = api.ok(Method::GET, "/public-certs", None).await;
+    assert!(!listed.to_string().contains("PRIVATE KEY"), "the key only through the reveal routes: {listed}");
+    let health = api.ok(Method::GET, "/health", None).await;
+    assert!(!health.to_string().contains("TLS_CERT"), "nothing to say yet: {health}");
+
+    // Renewal at rotate_days: the job orders again (the same account) and every linked key rotates.
+    let start = api.ok(Method::GET, "/events?latest=1", None).await["next"].as_i64().unwrap();
+    let p = api.project.clone();
+    api.db.write(move |c| c.execute("UPDATE public_certs SET issued_at = issued_at - 61 * 86400000 WHERE project_id = ?", [p.as_str()])).unwrap();
+    sweep().await;
+    let v = api.values("production", "/").await["values"].clone();
+    assert_ne!(v["TLS_CERT"].as_str().unwrap(), first, "renewed");
+    assert_eq!(*ca.orders.lock().unwrap().last().unwrap(), (vec!["www.roll-fake.test".to_string(), "*.roll-fake.test".to_string()], true));
+    let events = api.ok(Method::GET, &format!("/events?after={start}&kinds=rotation.succeeded"), None).await;
+    assert_eq!(events["events"].as_array().unwrap().len(), 1, "one credential, four keys: {events}");
+    assert_eq!(events["events"][0]["data"]["sharing"].as_array().unwrap().len(), 4, "{events}");
+
+    // A key's rotation asks for a new certificate; the job brings it.
+    let r = api.ok(Method::POST, "/environments/production/secrets/TLS_KEY/rotate", None).await;
+    assert!(r["warnings"][0].as_str().unwrap().contains("ordering a new certificate"), "{r}");
+    let before = api.values("production", "/").await["values"]["TLS_KEY"].clone();
+    sweep().await;
+    assert_ne!(api.values("production", "/").await["values"]["TLS_KEY"], before);
+
+    // A name the DNS records don't prove: the renewal fails, as rotation.failed on its keys and in
+    // health, and the certificate in use stays.
+    let in_use = api.values("production", "/").await["values"]["TLS_CERT"].clone();
+    let start = api.ok(Method::GET, "/events?latest=1", None).await["next"].as_i64().unwrap();
+    let changed = api.ok(Method::PATCH, &format!("/public-certs/{id}"), Some(json!({ "domains": ["www.roll-fake.test", "unproven.roll-fake.test"] }))).await;
+    assert_eq!(changed["renews_at"].as_i64(), Some(0), "due at once: {changed}");
+    sweep().await;
+    let events = api.ok(Method::GET, &format!("/events?after={start}&kinds=rotation.failed"), None).await;
+    assert_eq!(events["events"].as_array().unwrap().len(), 4, "{events}");
+    assert!(events.to_string().contains("No TXT record found at _acme-challenge.unproven.roll-fake.test"), "{events}");
+    let health = api.ok(Method::GET, "/health", None).await;
+    assert!(health.as_array().unwrap().iter().any(|f| f["issue"] == "rotation_failing" && f["key"] == "TLS_CERT"), "{health}");
+    assert_eq!(api.ok(Method::GET, "/public-certs", None).await[0]["status"], "failing");
+    assert_eq!(api.values("production", "/").await["values"]["TLS_CERT"], in_use);
+    // Linked keys hold it.
+    assert_eq!(api.call(Method::DELETE, &format!("/public-certs/{id}"), None).await.0, StatusCode::CONFLICT);
+}

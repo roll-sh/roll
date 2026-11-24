@@ -1194,6 +1194,8 @@ previews are listed once those products are on.
 | `secrets_list_ssh_cas` | A project's SSH CAs (public keys, principals, limits; never a private key; adding one is admin). | `GET /v1/secrets/projects/{project}/ssh-cas` |
 | `secrets_totp` | The current one-time code from a secret holding an authenticator seed (a reveal; never the seed). | `GET /v1/secrets/projects/{project}/environments/{env}/secrets/{name}/totp` |
 | `secrets_list_saas` | A project's rotators for third-party API keys: vendor and the account each rotates for (never a credential). | `GET /v1/secrets/projects/{project}/saas` |
+| `secrets_list_public_certs` | A project's certificates from public ACME CAs: names, CA, DNS provider, status, end and next renewal (never a credential or key). | `GET /v1/secrets/projects/{project}/public-certs` |
+| `secrets_renew_public_cert` | Order a new public certificate now; linked keys rotate to it once the CA issues it. | `POST /v1/secrets/projects/{project}/public-certs/{id}/renew` |
 | `secrets_list_kubernetes` | The Kubernetes clusters a project issues service-account tokens for: names and API servers (never a token). | `GET /v1/secrets/projects/{project}/kubernetes` |
 | `secrets_list_github_apps` | A project's GitHub Apps for short-lived installation tokens (ids, repositories, permissions; never the private key; adding one is admin). | `GET /v1/secrets/projects/{project}/github-apps` |
 | `secrets_list_directories` | A project's LDAP and Active Directory servers: URL, flavor, bind DN, managed accounts, groups, gateway (never the bind password; adding one is admin). | `GET /v1/secrets/projects/{project}/directories` |

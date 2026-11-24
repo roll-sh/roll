@@ -553,6 +553,12 @@ export type SaasRotator = { id: string; name: string; vendor: SaasVendor; target
 export type NewSaasRotator = { name: string; vendor: SaasVendor; target: Record<string, unknown>; credential: string; credential_expires_at?: number };
 /** `PATCH …/saas/{id}`: a new `credential` is checked with the vendor before it replaces the old one (linked keys keep working); `credential_expires_at: null` clears the date, and a new credential without one has none. */
 export type SaasRotatorChange = { name?: string; credential?: string; credential_expires_at?: number | null };
+/** A certificate from a public ACME CA, renewed by roll; keys link to it (`public_cert`, managed). Never a credential, the EAB key or the private key. `status`: `pending` until the first order, `failing` while the last one failed (`last_error`). `renews_at`: when the next renewal is due (0 once one was asked for: it is ordered now). */
+export type PublicCert = { id: string; name: string; directory_url: string; domains: string[]; dns_provider: "cloudflare"; eab_kid?: string; rotate_days?: number; status: "pending" | "issued" | "failing"; serial?: string; not_after?: number; issued_at?: number; renews_at?: number; last_error?: string; failed_at?: number; created_at: number; created_by: string };
+/** `directory_url`: Let's Encrypt (production or staging), ZeroSSL, Google Trust Services, or one the operator allows; `dns_credential`: the DNS provider's API token (Cloudflare: Zone DNS edit on the names' zones); `eab_*`: External Account Binding, for CAs that ask (ZeroSSL, Google); `rotate_days`: default two thirds of the certificate's lifetime, at most the lifetime less 14 days. */
+export type NewPublicCert = { name: string; directory_url: string; domains: string[]; dns_provider: "cloudflare"; dns_credential: string; eab_kid?: string; eab_hmac_key?: string; rotate_days?: number };
+/** New `domains` or a new `dns_credential` order a new certificate at once; `rotate_days: null` goes back to the default. */
+export type PublicCertChange = { name?: string; domains?: string[]; dns_credential?: string; rotate_days?: number | null };
 /** A Kubernetes cluster whose service accounts get short-lived tokens per lease (dynamic `kubernetes` links); the admin token and the CA stay sealed. */
 export type KubernetesCluster = { id: string; name: string; api_url: string; has_ca: boolean; created_at: number; created_by: string };
 /** `token`: a service account token that may create tokens; `ca_pem`: the cluster's CA, when it isn't publicly trusted. */

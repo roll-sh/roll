@@ -26,6 +26,7 @@ pub mod gateway;
 mod github;
 
 mod outside;
+mod public_ca;
 mod relay;
 mod syncs;
 
@@ -482,6 +483,9 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
     tell_decoys(&access, secrets.clone());
     // ACME's http-01 and dns-01 checks: public addresses only, as webhooks.
     secrets.set_acme_checks(Arc::new(acme::Checks::new(allow_private)));
+    // Publicly trusted certificates: the edge's ACME client, over a guarded client, dns-01 through
+    // the project's DNS provider credential.
+    secrets.set_public_ca(Arc::new(public_ca::RollPublicCa::new(allow_private, &args.edge.cloudflare_api)?));
     // A member removed, demoted or gone (docs/members.md), or narrowed by a group change (one
     // `group.lost` per person, naming the projects, docs/members-v1-1.md): their shared folders, one-time
     // shares and leases end once they no longer hold what those need.
@@ -507,6 +511,9 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
     // rows), and deliveries outside it (notices, syncs, sinks), so a slow platform holds up neither.
     sweeper(secrets.clone(), "local", Secrets::sweep_local);
     sweeper(secrets.clone(), "outbound", Secrets::sweep_outbound);
+    // Public certificates' orders wait on DNS and the CA (minutes): a task of their own, often, so a
+    // new one or a renewal asked for starts within seconds.
+    sweeper_every(secrets.clone(), "public-certs", Secrets::sweep_public_certs, 5);
     // Syncs a change marked due, within seconds rather than at the next 30 s sweep.
     let s = secrets.clone();
     tokio::spawn(async move {
@@ -567,8 +574,12 @@ fn issuer_url(args: &crate::Args) -> String {
 }
 
 fn sweeper(s: Arc<Secrets>, what: &'static str, pass: fn(&Secrets) -> roll_secrets::Result<roll_secrets::Swept>) {
+    sweeper_every(s, what, pass, 30)
+}
+
+fn sweeper_every(s: Arc<Secrets>, what: &'static str, pass: fn(&Secrets) -> roll_secrets::Result<roll_secrets::Swept>, seconds: u64) {
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(seconds));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tick.tick().await;

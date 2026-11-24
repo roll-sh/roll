@@ -2888,6 +2888,85 @@ lego --server https://api.roll.example/v1/secrets/acme/ca_example/directory --ea
 Clients that check revocation (and TLS to the directory) trust rolld's public address as any HTTPS
 client does; the certificates themselves chain to the CA's certificate (`roll secrets cas cert NAME`).
 
+### Publicly trusted certificates
+
+A project's own CAs are for its own clients. Endpoints that browsers and other people reach need a
+certificate from a public CA, so roll is also an ACME client, as Vault 2.0's PKI External CA and
+Infisical are. It gets certificates from Let's Encrypt, ZeroSSL or Google Trust Services, proves
+the names with dns-01, renews them, and keys link to the result.
+- **The ACME client is the edge's.** roll apps' edge already orders its own certificates and custom
+  domains' certificates from Let's Encrypt (`roll_edge::acme`). roll secrets orders through the same
+  code (`roll_edge::acme::order`). The only difference is the HTTP client: rolld's guarded one
+  (public addresses only, no redirects, no proxy, at most 1 MiB per answer).
+  roll has no DNS product of its own, so names are proven through the project's DNS provider:
+  Cloudflare for now.
+- `POST …/public-certs {name, directory_url, domains, dns_provider: "cloudflare", dns_credential,
+  eab_kid?, eab_hmac_key?, rotate_days?}` (admin). `directory_url` is one of
+  Let's Encrypt's (`https://acme-v02.api.letsencrypt.org/directory`, staging
+  `https://acme-staging-v02.api.letsencrypt.org/directory`), ZeroSSL's
+  (`https://acme.zerossl.com/v2/DV90`) or Google Trust Services' (`https://dv.acme-v02.api.pki.goog/directory`,
+  test `https://dv.acme-v02.test-api.pki.goog/directory`). The operator allows others with
+  `ROLL_SECRETS_ACME_ALLOW` (comma-separated HTTPS directory URLs).
+  - `domains` are DNS names (1 to 100), including wildcards (`*.example.com`) because dns-01 can
+    prove them. A provider that couldn't prove a wildcard would refuse one.
+  - `dns_credential` is a Cloudflare API token with Zone DNS edit on the names' zones. It's checked
+    before it's kept: the token must see a zone for every name, or the request is a 400 naming the
+    name.
+  - `eab_kid` and `eab_hmac_key` (base64url) are the External Account Binding that ZeroSSL and
+    Google ask for.
+  - The answer is `status: "pending"`. Nothing is ordered during the request.
+- **Orders run in the background.** ACME orders are slow: DNS has to spread
+  (`ROLL_SECRETS_ACME_PROPAGATION_S`, 20 s unless set), then the CA checks. So a job orders, every
+  5 seconds on each node. It claims a due certificate in a write, so only one node orders it, and
+  orders outside any transaction.
+  - It writes an `_acme-challenge` TXT record per name, asks the CA, takes the records down again,
+    and keeps the certificate, its chain and its key sealed with the project's data key.
+  - The project has one ACME account per CA. It's made on the first order (with the EAB, where
+    given) and kept sealed.
+  - A failed order is `status: "failing"` with `last_error` (the CA's problem, or the DNS
+    provider's step and status, never a credential). It's tried again after an hour, or at once when
+    the certificate is changed or renewed.
+  - What the CA signed must name exactly the domains asked for; anything else is refused.
+- **Keys link to it** as the managed link kind `public_cert` (`{kind: "public_cert", ref: "pcr_…",
+  field, mode: "managed"}`, or the dashboard's Link a resource), once it's issued (before that, a
+  409 `not_issued`).
+  - The fields are `certificate` (`TLS_CERT`), `private_key` (`TLS_KEY`, masked), `ca_chain`
+    (`TLS_CA_CHAIN`, the CA's certificates above the leaf) and `fullchain` (`TLS_FULLCHAIN`, the leaf
+    then the chain, as nginx and HAProxy take it).
+  - Every key and environment linked to one registration gets the same certificate. Each key's
+    `expires_at` is the certificate's end, so health's `expiring` and `expired` see it.
+- **Renewal is the registration's.** It renews `rotate_days` after a certificate was issued: by
+  default two thirds of the certificate's lifetime (60 days of Let's Encrypt's 90). It's never later
+  than the lifetime less 14 days, or half the lifetime below 28 days, which is the rule SaaS keys
+  follow. A `rotate_days` over that is a 400 once a certificate's lifetime is known; before the
+  first certificate it's taken as at most that. A link can't set `rotate_days` or `rotate_window`
+  of its own.
+  - Once the new certificate is in, every linked key rotates to it through the managed-link path:
+    a new version, `rotation.succeeded` on the events feed, syncs pushing it on. A key a node didn't
+    reach (it stopped halfway) is rotated on the next pass.
+  - A renewal that fails is `rotation.failed` on every linked key, and health's `rotation_failing`,
+    until one works. The certificate in use keeps working until it ends.
+  - `POST …/public-certs/{id}/renew` (`write`; `secrets_renew_public_cert` over MCP) and a linked
+    key's rotation (`POST …/secrets/{KEY}/rotate`, or the rotation after a leak of its private key)
+    ask for a new certificate now. They answer at once (202, or `warnings` on the key's rotation),
+    and the key changes when the job has the certificate.
+- `PATCH …/public-certs/{id} {name?, domains?, dns_credential?, rotate_days?}` (admin). New domains or a
+  new credential are checked as adding them is, then order a new certificate at once. The CA and the
+  DNS provider never change in place: a new one is another registration. `DELETE` is refused while a
+  key links to it. Its certificates stay valid until they end.
+- **Never answered or logged:** the DNS credential, the EAB key, the account's key and the
+  certificate's private key. The list shows the CA, names, status, serial and dates. The private key
+  reaches people only through a linked key's own reveal routes, and the audit log names the
+  registration, the serial and the end (`public_cert.add`, `.update`, `.renew`, `.issued`,
+  `.failed`, `.delete`).
+- Ordering acts for whoever registered it, as they are now: a registration made by someone who may no
+  longer manage the project stops ordering (`last_error` says so) until an admin registers it again.
+- Checked with Pebble, Let's Encrypt's test CA, and its DNS server, through the edge's own Cloudflare
+  stand-in (`crates/rolld/tests/secrets.rs`, `pnpm test:secrets --docker`). The certificate chains to
+  Pebble's root, a renewal replaces it, and a name the DNS records don't prove fails as
+  `rotation.failed`.
+- Not yet: Route 53 and other DNS providers, and ACME Renewal Information (RFC 9773).
+
 ### SSH certificates
 
 A project's own SSH CA, as Vault's SSH engine signs them: short-lived user certificates instead of
@@ -6153,6 +6232,11 @@ isn't in the workspace is 404.
 | `POST /saas` | `{name, vendor, target, credential, credential_expires_at?}` (`credential_expires_at`: when the credential ends at the vendor, ms, in the future) | 201 `SaasRotator` (`admin`; never the credential; `credential_expires_at` when given) |
 | `DELETE /saas/{id}` | | 204; 409 while a key links to it or a retired key waits (`admin`) |
 | `PATCH /saas/{id}` | `SaasRotatorChange` | `SaasRotator` (`admin`; a new `credential` is checked with the vendor first, read only, and a refused one is a 400 that changes nothing; never the credential) |
+| `GET /public-certs` | | `PublicCert[]` (`read` on the project; never a credential, the EAB key or the private key) |
+| `POST /public-certs` | `NewPublicCert` | 201 `PublicCert`, `status: "pending"` (`admin`; the DNS credential is checked first, read only: each name's zone; the order is the background job's) |
+| `PATCH /public-certs/{id}` | `PublicCertChange` | `PublicCert` (`admin`; new `domains` or `dns_credential`, checked as adding one checks it, order a new certificate at once; `rotate_days` over the current certificate's lifetime less 14 days is a 400) |
+| `POST /public-certs/{id}/renew` | | 202 `PublicCert` (`write`; ordered in the background, linked keys rotate once it's issued) |
+| `DELETE /public-certs/{id}` | | 204; 409 while a key links to it (`admin`) |
 | `GET /outside-databases` | | `OutsideDatabase[]` (`read` on the project; never the URL) |
 | `POST /outside-databases` | `{name, url, roles?: [a, b], group?, ca?, gateway?}` | 201 `OutsideDatabase` (`admin`; connects and checks the roles first: 400 with the server's reason) |
 | `DELETE /outside-databases/{id}` | | 204; 409 while a key links to it or a retired password waits (`admin`) |
@@ -6314,6 +6398,9 @@ type SaasRotator = { id: string; name: string; vendor: "sendgrid" | "twilio" | "
 // PATCH …/saas/{id}: the vendor and target stay. `credential_expires_at`: absent keeps it (a new
 // credential drops the old one's), null clears it, ms in the future sets it.
 type SaasRotatorChange = { name?: string; credential?: string; credential_expires_at?: number | null };
+type PublicCert = { id: string; name: string; directory_url: string; domains: string[]; dns_provider: "cloudflare"; eab_kid?: string; rotate_days?: number; status: "pending" | "issued" | "failing"; serial?: string; not_after?: number; issued_at?: number; renews_at?: number; last_error?: string; failed_at?: number; created_at: number; created_by: string };
+type NewPublicCert = { name: string; directory_url: string; domains: string[]; dns_provider: "cloudflare"; dns_credential: string; eab_kid?: string; eab_hmac_key?: string /* base64url */; rotate_days?: number };
+type PublicCertChange = { name?: string; domains?: string[]; dns_credential?: string; rotate_days?: number | null /* null: the default */ };
 type KubernetesCluster = { id: string; name: string; api_url: string; has_ca: boolean; created_at: number; created_by: string };
 type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
 type NewValueRequest = { keys: string[]; note?: string; ttl_minutes?: number /* 5–43200, default 10080 */; answers?: number /* 1–10, default 1 */ };

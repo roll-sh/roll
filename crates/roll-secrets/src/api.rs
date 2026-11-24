@@ -121,6 +121,9 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/rotators/{{id}}/rotate-secret"), post(rotate_rotator_secret))
         .route(&format!("{P}/saas"), get(saas_rotators).post(add_saas_rotator))
         .route(&format!("{P}/saas/{{id}}"), axum::routing::delete(delete_saas_rotator).patch(update_saas_rotator))
+        .route(&format!("{P}/public-certs"), get(public_certs).post(add_public_cert))
+        .route(&format!("{P}/public-certs/{{id}}"), axum::routing::delete(delete_public_cert).patch(update_public_cert))
+        .route(&format!("{P}/public-certs/{{id}}/renew"), post(renew_public_cert))
         .route(&format!("{P}/transit"), get(transit_keys).post(add_transit_key))
         .route(&format!("{P}/transit/{{name}}"), axum::routing::patch(config_transit_key).delete(delete_transit_key))
         .route(&format!("{P}/transit/{{name}}/rotate"), post(rotate_transit_key))
@@ -1554,6 +1557,29 @@ async fn update_saas_rotator(State(s): S, Who(c): Who, Path((project, id)): Path
 
 async fn delete_saas_rotator(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
     blocking(s, move |s| s.delete_saas_rotator(&project, &id, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn public_certs(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.public_certs(&project, &c)).await?))
+}
+
+async fn add_public_cert(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let n: crate::public_certs::NewPublicCert = body(&b)?;
+    Ok(created(blocking(s, move |s| s.add_public_cert(&project, n, &c)).await?))
+}
+
+async fn update_public_cert(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let ch: crate::public_certs::PublicCertChange = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.update_public_cert(&project, &id, ch, &c)).await?))
+}
+
+async fn renew_public_cert(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<Response> {
+    Ok((StatusCode::ACCEPTED, Json(blocking(s, move |s| s.renew_public_cert(&project, &id, &c)).await?)).into_response())
+}
+
+async fn delete_public_cert(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.delete_public_cert(&project, &id, &c)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

@@ -51,6 +51,7 @@ pub mod names;
 pub mod transit;
 pub mod ocsp;
 pub mod pki;
+pub mod public_certs;
 pub mod intercept;
 pub mod placeholders;
 pub mod proxy;
@@ -479,6 +480,8 @@ pub struct Secrets {
     delete_window_days: std::sync::atomic::AtomicU32,
     /// Hours the purge waits for an audit sink behind on a closed project (deleted.rs).
     purge_sink_grace_hours: std::sync::atomic::AtomicU32,
+    /// rolld's ACME client for publicly trusted certificates (public_certs.rs), once it says.
+    public_ca: std::sync::OnceLock<Arc<dyn public_certs::PublicCa>>,
 }
 
 impl std::fmt::Debug for Secrets {
@@ -631,6 +634,7 @@ impl Secrets {
         db.ensure_schema(acme::SCHEMA)?;
         db.add_column("cas", "acme_preauthorize", "INTEGER")?;
         db.ensure_schema(ssh::SCHEMA)?;
+        db.ensure_schema(public_certs::SCHEMA)?;
         db.ensure_schema(aws::SCHEMA)?;
         // An audit sink's format and its SIEM's token, sealed (sinks.rs): absent is roll's own.
         db.add_column("audit_sinks", "format", "TEXT")?;
@@ -738,6 +742,8 @@ impl Secrets {
         if let Ok(keys) = &opts.keyring {
             links.register(Arc::new(pki::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), public_api: public_api.clone(), crls: crls.clone() }));
             links.register(Arc::new(ssh::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone() }));
+            // What the background job ordered from a public CA (it orders once rolld sets its client).
+            links.register(Arc::new(public_certs::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone() }));
         }
         db.ensure_schema(outside::SCHEMA)?;
         db.ensure_schema(backup_schedule::SCHEMA)?;
@@ -771,7 +777,7 @@ impl Secrets {
         if let (Some(github), Ok(keys)) = (&opts.github, &opts.keyring) {
             links.register(Arc::new(github_app::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), github: github.clone() }));
         }
-        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, gateway_links: opts.gateways, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, directory: opts.directory, github: opts.github, oidc: Default::default(), logins: Default::default(), answers: Default::default(), reads_per_minute: read::READS_PER_MINUTE.into(), code_refs: Default::default(), reach_holders: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, aws_server_id: Default::default(), crls, live_fps: Default::default(), issuer_keys: Default::default(), issuer_rotate_days: issuer::ROTATE_DAYS.into(), audit_keys: Default::default(), audit_rotate_days: audit_key::ROTATE_DAYS.into(), digests: Default::default(), counters: Default::default(), acme: Default::default(), recorder: Default::default(), validity: Default::default(), bound_hosts: Default::default(), uses: Default::default(), delete_window_days: deleted::WINDOW_DAYS.into(), purge_sink_grace_hours: deleted::SINK_GRACE_HOURS.into() })
+        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, gateway_links: opts.gateways, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, directory: opts.directory, github: opts.github, oidc: Default::default(), logins: Default::default(), answers: Default::default(), reads_per_minute: read::READS_PER_MINUTE.into(), code_refs: Default::default(), reach_holders: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, aws_server_id: Default::default(), crls, live_fps: Default::default(), issuer_keys: Default::default(), issuer_rotate_days: issuer::ROTATE_DAYS.into(), audit_keys: Default::default(), audit_rotate_days: audit_key::ROTATE_DAYS.into(), digests: Default::default(), counters: Default::default(), acme: Default::default(), recorder: Default::default(), validity: Default::default(), bound_hosts: Default::default(), uses: Default::default(), delete_window_days: deleted::WINDOW_DAYS.into(), purge_sink_grace_hours: deleted::SINK_GRACE_HOURS.into(), public_ca: Default::default() })
     }
 
     pub fn links(&self) -> &Links {

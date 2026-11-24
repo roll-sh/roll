@@ -40,7 +40,7 @@ const AT_DELETE: &[&str] = &["shares", "value_requests", "identity_logins"];
 
 /// Registries of the project's own resources (rotators…): a lease's revocation reads them. A
 /// gateway's token is revoked when its row goes.
-const REGISTRIES: &[&str] = &["rotators", "saas_rotators", "outside_dbs", "directories", "snowflake_accounts", "atlas_projects", "aws_users", "aws_roles", "cloud_accounts", "kubernetes_clusters", "cas", "ca_certs", "ssh_cas", "github_apps", "gateways"];
+const REGISTRIES: &[&str] = &["rotators", "saas_rotators", "public_certs", "public_cert_accounts", "outside_dbs", "directories", "snowflake_accounts", "atlas_projects", "aws_users", "aws_roles", "cloud_accounts", "kubernetes_clusters", "cas", "ca_certs", "ssh_cas", "github_apps", "gateways"];
 
 /// SQL: the project in column `col` isn't deleted (in its window or after). Background work that
 /// would act for a project (syncs, rotations, reminders, backups) waits on it.
@@ -83,6 +83,7 @@ struct Held {
 const REGISTERED: &[(&str, &str, &str)] = &[
     ("rotators", "rotator", "rotators"),
     ("saas_rotators", "SaaS rotator", "SaaS rotators"),
+    ("public_certs", "public certificate", "public certificates"),
     ("outside_dbs", "outside database", "outside databases"),
     ("directories", "directory", "directories"),
     ("snowflake_accounts", "Snowflake account", "Snowflake accounts"),

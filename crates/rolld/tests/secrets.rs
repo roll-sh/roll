@@ -737,3 +737,241 @@ async fn sign_in(r: &Rolld, outbox: &std::path::Path) -> String {
     assert_eq!(verify.status(), 200);
     verify.headers()["set-cookie"].to_str().unwrap().split(';').next().unwrap().to_string()
 }
+
+/// Publicly trusted certificates end to end (docs/secrets.md, "Publicly trusted certificates"):
+/// rolld orders from Pebble (Let's Encrypt's test CA, with External Account Binding required),
+/// proving names over dns-01 through a stand-in for Cloudflare's DNS API that writes the records
+/// into pebble-challtestsrv, the DNS server Pebble asks. Names under `unproven-acme.test` get
+/// records nobody serves. Needs Docker: `ROLL_SECRETS_DOCKER=1` (`pnpm test:secrets --docker`).
+mod public_certs {
+    use super::*;
+    use axum::Json;
+    use axum::extract::{Path, Query, State};
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    const PEBBLE: &str = "ghcr.io/letsencrypt/pebble:2.10.1@sha256:ddf230642b1a584f519f32e347de1b05a6e4c1f6c35c1863b33effeab5f78199";
+    const CHALLTESTSRV: &str = "ghcr.io/letsencrypt/pebble-challtestsrv:2.10.1@sha256:12ce21884def456bcf9786542113949e1f19dc7738d2c70e156c2d0c38a1405b";
+    /// Pebble's own test key for `kid-1` (test/config/pebble-config-external-account-bindings.json).
+    const EAB_KEY: &str = "zWNDZM6eQGHWpSRTPal5eIUYFTu7EajVIoguysqZ9wG44nMEtx3MUAsUDkMTQ12W";
+    const DNS_TOKEN: &str = "fake-cf-dns-token-roll-e2e";
+
+    fn docker(args: &[&str]) -> Result<String, String> {
+        let out = Command::new("docker").args(args).output().map_err(|e| e.to_string())?;
+        match out.status.success() {
+            true => Ok(String::from_utf8_lossy(&out.stdout).trim().to_string()),
+            false => Err(format!("docker {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr))),
+        }
+    }
+
+    fn published(container: &str, port: &str) -> u16 {
+        let p = docker(&["port", container, port]).unwrap();
+        p.lines().next().and_then(|l| l.rsplit(':').next()).and_then(|p| p.parse().ok()).unwrap_or_else(|| panic!("{container} {port}: {p}"))
+    }
+
+    fn logs(container: &str) -> String {
+        Command::new("docker").args(["logs", container]).output().map(|o| format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))).unwrap_or_default()
+    }
+
+    /// The containers and network this test started, removed by name however it ends.
+    struct Started {
+        ca: String,
+        dns: String,
+        network: String,
+    }
+
+    impl Drop for Started {
+        fn drop(&mut self) {
+            let _ = docker(&["rm", "-f", &self.ca, &self.dns]);
+            let _ = docker(&["network", "rm", &self.network]);
+        }
+    }
+
+    /// Cloudflare's DNS API, as much as the ACME client uses.
+    #[derive(Clone)]
+    struct FakeCloudflare {
+        management: String,
+        records: Arc<Mutex<HashMap<String, String>>>,
+        http: reqwest::Client,
+    }
+
+    const ZONES: &[(&str, &str)] = &[("roll-acme.test", "zone-proven"), ("unproven-acme.test", "zone-unproven")];
+
+    fn authorized(h: &axum::http::HeaderMap) -> bool {
+        h.get("authorization").and_then(|v| v.to_str().ok()) == Some(&format!("Bearer {DNS_TOKEN}"))
+    }
+
+    async fn zones(State(_): State<FakeCloudflare>, h: axum::http::HeaderMap, Query(q): Query<HashMap<String, String>>) -> (axum::http::StatusCode, Json<Value>) {
+        if !authorized(&h) {
+            return (axum::http::StatusCode::UNAUTHORIZED, Json(json!({ "success": false, "errors": [{ "code": 10000, "message": "Authentication error" }], "result": null })));
+        }
+        let name = q.get("name").cloned().unwrap_or_default();
+        let found: Vec<Value> = ZONES.iter().filter(|(n, _)| *n == name).map(|(n, id)| json!({ "id": id, "name": n })).collect();
+        (axum::http::StatusCode::OK, Json(json!({ "success": true, "errors": [], "result": found })))
+    }
+
+    async fn create(State(cf): State<FakeCloudflare>, h: axum::http::HeaderMap, Path(zone): Path<String>, Json(body): Json<Value>) -> Json<Value> {
+        assert!(authorized(&h));
+        let host = format!("{}.", body["name"].as_str().unwrap());
+        // The unproven zone takes the record and serves nothing: Pebble finds no TXT record.
+        if zone == "zone-proven" {
+            cf.http.post(format!("{}/set-txt", cf.management)).json(&json!({ "host": host, "value": body["content"] })).send().await.unwrap().error_for_status().unwrap();
+        }
+        let id = format!("rec{}", cf.records.lock().unwrap().len() + 1);
+        cf.records.lock().unwrap().insert(id.clone(), host);
+        Json(json!({ "success": true, "errors": [], "result": { "id": id } }))
+    }
+
+    async fn remove(State(cf): State<FakeCloudflare>, Path((_zone, id)): Path<(String, String)>) -> Json<Value> {
+        if let Some(host) = cf.records.lock().unwrap().remove(&id) {
+            let (http, url) = (cf.http.clone(), format!("{}/clear-txt", cf.management));
+            tokio::spawn(async move { http.post(url).json(&json!({ "host": host })).send().await });
+        }
+        Json(json!({ "success": true, "errors": [], "result": { "id": id } }))
+    }
+
+    /// PEM certificates, in order.
+    fn ders(pem: &str) -> Vec<Vec<u8>> {
+        x509_parser::pem::Pem::iter_from_buffer(pem.as_bytes()).map(|p| p.unwrap().contents).collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn public_certificates_come_from_pebble_over_dns01_renew_and_an_unproven_name_is_rotation_failed() {
+        if !std::env::var("ROLL_SECRETS_DOCKER").is_ok_and(|v| v == "1") || docker(&["info"]).is_err() {
+            eprintln!("public certificates: skipped (Pebble runs in Docker; ROLL_SECRETS_DOCKER=1 runs it)");
+            return;
+        }
+        for image in [PEBBLE, CHALLTESTSRV] {
+            if docker(&["image", "inspect", image]).is_err() {
+                docker(&["pull", "-q", image]).unwrap();
+            }
+        }
+        let pid = std::process::id();
+        let started = Started { ca: format!("roll-secrets-acme-{pid}-pebble"), dns: format!("roll-secrets-acme-{pid}-dns"), network: format!("roll-secrets-acme-{pid}") };
+        docker(&["network", "create", &started.network]).unwrap();
+        docker(&["run", "-d", "--name", &started.dns, "--network", &started.network, "-p", "127.0.0.1::8055", CHALLTESTSRV, "-defaultIPv6", "", "-defaultIPv4", "127.0.0.1"]).unwrap();
+        let dns_addr = format!("{}:8053", started.dns);
+        docker(&[
+            "run", "-d", "--name", &started.ca, "--network", &started.network, "-p", "127.0.0.1::14000", "-p", "127.0.0.1::15000",
+            "-e", "PEBBLE_VA_NOSLEEP=1", "-e", "PEBBLE_WFE_NONCEREJECT=0", "-e", "PEBBLE_AUTHZREUSE=0",
+            PEBBLE, "-config", "test/config/pebble-config-external-account-bindings.json", "-dnsserver", &dns_addr,
+        ])
+        .unwrap();
+        let home = Arc::new(tempfile::tempdir().unwrap());
+        let ca_file = home.path().join("pebble.minica.pem");
+        docker(&["cp", &format!("{}:/test/certs/pebble.minica.pem", started.ca), ca_file.to_str().unwrap()]).unwrap();
+        let directory = format!("https://localhost:{}/dir", published(&started.ca, "14000/tcp"));
+        let management = format!("http://127.0.0.1:{}", published(&started.dns, "8055/tcp"));
+        for i in 0.. {
+            if logs(&started.ca).contains("Listening on") && logs(&started.dns).contains("management server") {
+                break;
+            }
+            assert!(i < 200, "Pebble didn't come up: {}", logs(&started.ca));
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let fake = FakeCloudflare { management, records: Arc::default(), http: reqwest::Client::new() };
+        let api = axum::Router::new()
+            .route("/zones", axum::routing::get(zones))
+            .route("/zones/{zone}/dns_records", axum::routing::post(create))
+            .route("/zones/{zone}/dns_records/{id}", axum::routing::delete(remove))
+            .with_state(fake.clone());
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let cf_url = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, api).await });
+
+        let env = [
+            ("ROLL_SECRETS_ACME_ALLOW", directory.as_str()),
+            ("ROLL_SECRETS_ACME_CA_FILE", ca_file.to_str().unwrap()),
+            ("ROLL_SECRETS_ACME_PROPAGATION_S", "0"),
+            ("ROLL_CLOUDFLARE_API", cf_url.as_str()),
+            // Pebble and the stand-in are on loopback.
+            ("ROLL_CODE_WEBHOOK_ALLOW_PRIVATE", "1"),
+        ];
+        let r = Rolld::start_in(home.clone(), "search", false, &env, "/v1/info").await;
+        let p = Project::new(&r).await;
+        let base = format!("/v1/secrets/projects/{}/public-certs", p.id);
+        let new = json!({ "name": "web", "directory_url": directory, "domains": ["www.roll-acme.test", "*.roll-acme.test"], "dns_provider": "cloudflare", "dns_credential": DNS_TOKEN, "eab_kid": "kid-1", "eab_hmac_key": EAB_KEY });
+        let cert = r.post(&base, new).await;
+        assert_eq!(cert["status"], "pending", "{cert}");
+        let id = cert["id"].as_str().unwrap().to_string();
+        // The background job orders it (every 5 seconds).
+        let wait_for = |want: &'static str, serial: Option<String>| {
+            let (r, base) = (&r, base.clone());
+            async move {
+                for _ in 0..240 {
+                    let l = r.get(&base).await;
+                    if l[0]["status"] == want && (serial.is_none() || l[0]["serial"].as_str() != serial.as_deref()) {
+                        return l[0].clone();
+                    }
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+                panic!("public certificate never {want}: {}", r.get(&base).await);
+            }
+        };
+        let issued = wait_for("issued", None).await;
+        let keys = [("TLS_CERT", "certificate", "managed"), ("TLS_KEY", "private_key", "managed"), ("TLS_CA_CHAIN", "ca_chain", "managed")];
+        let ops: Vec<Value> = keys.iter().map(|(key, field, mode)| json!({ "op": "set", "key": key, "link": { "kind": "public_cert", "ref": id, "field": field, "mode": mode } })).collect();
+        r.post(&format!("/v1/secrets/projects/{}/environments/production/changes", p.id), json!({ "ops": ops })).await;
+
+        // The certificate names what was asked, carries the key, and chains to Pebble's root.
+        let (leaf_pem, chain_pem) = (p.value("TLS_CERT").await, p.value("TLS_CA_CHAIN").await);
+        let leaf_der = &ders(&leaf_pem)[0];
+        let (_, leaf) = x509_parser::parse_x509_certificate(leaf_der).unwrap();
+        let mut names: Vec<&str> = leaf
+            .subject_alternative_name()
+            .unwrap()
+            .unwrap()
+            .value
+            .general_names
+            .iter()
+            .filter_map(|n| match n {
+                x509_parser::extensions::GeneralName::DNSName(d) => Some(*d),
+                _ => None,
+            })
+            .collect();
+        names.sort();
+        assert_eq!(names, ["*.roll-acme.test", "www.roll-acme.test"]);
+        let key = p.value("TLS_KEY").await;
+        let pair = rcgen::KeyPair::from_pem(&key).unwrap();
+        assert_eq!(leaf.public_key().subject_public_key.data.as_ref(), rcgen::PublicKeyData::der_bytes(&pair), "the key is the certificate's");
+        let root_pem = reqwest::Client::builder().add_root_certificate(reqwest::Certificate::from_pem(&std::fs::read(&ca_file).unwrap()).unwrap()).build().unwrap()
+            .get(format!("https://localhost:{}/roots/0", published(&started.ca, "15000/tcp"))).send().await.unwrap().text().await.unwrap();
+        let mut path: Vec<Vec<u8>> = vec![leaf_der.clone()];
+        path.extend(ders(&chain_pem));
+        path.extend(ders(&root_pem));
+        for pair in path.windows(2) {
+            let (_, child) = x509_parser::parse_x509_certificate(&pair[0]).unwrap();
+            let (_, parent) = x509_parser::parse_x509_certificate(&pair[1]).unwrap();
+            child.verify_signature(Some(parent.public_key())).expect("signed by the next one up");
+        }
+        let listed = r.get(&base).await.to_string();
+        assert!(!listed.contains(DNS_TOKEN) && !listed.contains(EAB_KEY) && !listed.contains("PRIVATE KEY"), "{listed}");
+        assert!(fake.records.lock().unwrap().is_empty(), "the challenge records are taken down");
+
+        // A renewal (the same account): a new certificate, and the linked keys rotate to it.
+        r.post(&format!("{base}/{id}/renew"), json!({})).await;
+        wait_for("issued", issued["serial"].as_str().map(String::from)).await;
+        for _ in 0..40 {
+            if p.value("TLS_CERT").await != leaf_pem {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        assert_ne!(p.value("TLS_CERT").await, leaf_pem, "the key got the renewed certificate");
+        assert_ne!(p.value("TLS_KEY").await, key);
+
+        // A name the records don't prove: the renewal fails as rotation.failed, and the
+        // certificate in use stays.
+        let events = format!("/v1/secrets/projects/{}/events", p.id);
+        let start = r.get(&format!("{events}?latest=1")).await["next"].as_i64().unwrap();
+        let in_use = p.value("TLS_CERT").await;
+        r.call(reqwest::Method::PATCH, &format!("{base}/{id}"), Some(json!({ "domains": ["www.roll-acme.test", "www.unproven-acme.test"] }))).await;
+        let failing = wait_for("failing", None).await;
+        assert!(failing["last_error"].as_str().unwrap().contains("unproven-acme.test"), "{failing}");
+        let failed = r.get(&format!("{events}?after={start}&kinds=rotation.failed")).await;
+        assert_eq!(failed["events"].as_array().unwrap().len(), 3, "{failed}");
+        assert_eq!(p.value("TLS_CERT").await, in_use);
+        drop(r);
+        drop(started);
+    }
+}
