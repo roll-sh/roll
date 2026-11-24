@@ -276,8 +276,11 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
     `{budget: {project, project_name, percent, spent_usd_month, max_usd_month}, dashboard_url}`,
     once per level per month and budget (raising the budget alerts afresh). It's recorded after it's queued, so a
     crash repeats one rather than losing it, and every live preview's activity says so.
-  - `max_bytes` (10 GiB by default) is a cap on the bytes a preview's branches own. A preview
-    over the cap goes to sleep with `error`, and resetting it brings it back under.
+  - `max_bytes` (10 GiB by default) is a cap on the bytes a preview's branches and its earlier
+    pushes' copies own. A preview over the cap goes to sleep with `error` and stays asleep: a
+    wake (`POST …/wake`, the sheet) is a 409 and a visit doesn't start it (roll apps' services
+    included, which a visit to roll apps wouldn't ask previews about), until resetting it
+    brings it back under or the cap is raised. `a_preview_over_its_size_cap_stays_asleep`.
 
 ### Converging
 
@@ -2773,9 +2776,9 @@ comments, Render and Railway, Neon, Chromatic and Percy, Signadot, Jam.
    Content-Security-Policy on its pages (its own hosts only). Next for it: roll apps' proxy the
    same for a fork's services there, and a `data_forks` rule (a fork's data `schema` unless the
    project says otherwise), as `egress_forks` is for its server.
-2. **The `max_bytes` cap holds**: a preview put to sleep over its cap is woken again by `wake`
-   (`requests.rs`) or a visit until the next pass; refuse both until a reset, and test the cap
-   (no test names it).
+2. **The `max_bytes` cap holds, in review**: a wake and a visit's start refuse a preview over its
+   cap (its earlier pushes' copies counted, as converge counts them). Next for it: a visit to a
+   roll apps service of a capped preview (roll apps wakes it itself).
 3. **Signed in to the app**: pages, states, crops, endpoint timings and `try` all start from a
    fresh browser, so a page behind the app's own login screenshots its login page (Percy and
    Chromatic capture with a saved login). A `github.login` step list (its password a `roll://`
