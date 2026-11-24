@@ -1,5 +1,6 @@
 import { DotField, HorizonMark } from "@roll/brand";
 import { Check, Copy, KeyRound, Pause, Play, Plus, Send, Trash2 } from "lucide-react";
+import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   formatBytes,
@@ -80,7 +81,14 @@ export function Streams() {
   const [info, setInfo] = useState<KafkaInfo | null>(null);
   const [offline, setOffline] = useState(false);
   const [list, setList] = useState<StreamInfo[] | null>(null);
-  const [streamId, setStreamId] = useState<string | null>(null);
+  // The stream in the address (`?stream=`), as the databases page keeps its project.
+  const navigate = useNavigate();
+  const linked = (useSearch({ strict: false }) as { stream?: string }).stream;
+  const [streamId, setStreamIdState] = useState<string | null>(linked ?? null);
+  const setStreamId = (id: string | null) => {
+    setStreamIdState(id);
+    void navigate({ href: id ? `/dashboard/streams?stream=${encodeURIComponent(id)}` : "/dashboard/streams", replace: true, resetScroll: false });
+  };
   const [detail, setDetail] = useState<StreamDetail | null>(null);
   const [topicName, setTopicName] = useState<string | null>(null);
   const [usage, setUsage] = useState<StreamUsage | null>(null);
