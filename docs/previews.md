@@ -1665,6 +1665,17 @@ land on the change.
   decides a flag (a flags SDK's override hook); a visitor without the toolbar gets the app's own
   choices. roll MCP's `previews_set_rules` takes `flags` (an agent that adds a flag to the code
   offers it on the toolbar too). `a_reviewers_flags_reach_the_service_as_a_header`.
+- A note says what the reviewer did before it (Jam's user actions, the light part of Netlify's
+  recordings): the page's script keeps the last 20 clicks (by a selector), inputs ("type 11
+  characters in #coupon": how many, never what), choices, form submits, Enter and Escape, and page
+  changes (the address looked at twice a second; none of the page's own functions wrapped), each
+  with how long before the note; roll's own toolbar and the element picked for the note aren't
+  steps. They go with the errors and requests in the note's folded "On the page" block ("What
+  they did:", numbered), only if the person keeps them (`fb_steps`; checked in Chromium). The
+  page's toolbar is also driven in a browser by `scripts/preview-cost.sh` (in through the
+  preview's link, an element picked, a note posted): #861's Flags form came before the note's in
+  the toolbar's markup and the note's lookup took it, so picking an element opened the wrong
+  form until this fixed it (`form.card`).
 - A note or an error becomes a fix to make (Vercel Comments' "Create issue", Netlify's drawer):
   the note's sheet (opened from its Reply or Resolve) and each error group on the sheet's Errors
   tab have "Make a work item". It's made in the preview's repo as the person looking (roll code's
