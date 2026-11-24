@@ -2779,7 +2779,7 @@ TLS certificates for services (mTLS between them), with no CA to run.
 
 #### Getting certificates where TLS terminates
 
-A managed `pki` key's certificate can go where TLS terminates (a load balancer, a CDN), as
+A managed `pki` or `public_cert` key's certificate can go where TLS terminates (a load balancer, a CDN), as
 Infisical syncs its certificates to ACM, Key Vault and Cloudflare: a **certificate sync** ("Syncs")
 pushes the key's current certificate, its private key and `ca_chain` on issue and again on every
 rotation (the rotation is a change of the folder, so the sync is due within seconds), retried every 5
@@ -2789,7 +2789,7 @@ listener or a hostname keeps serving it; what the target calls it is the sync's 
 - `POST …/syncs {environment, path?, kind, target, keys: ["TLS_CERT"]}` (`roll secrets syncs add
   aws-acm --target region=us-east-1 --target role=certs --keys TLS_CERT`, the Syncs tab's
   Certificates group; `syncs ls` shows `remote_id`). `keys` names one key of that folder, its own (not imported
-  or inherited), linked `managed` to one of the project's CAs: any other key, more than one, a
+  or inherited), linked `managed` to one of the project's CAs or public certificates: any other key, more than one, a
   `prefix` or a dynamic link is refused when the sync is made, and checked again before each push.
   Which field the key links doesn't matter: the push takes every part of its credential.
 - **Who.** Making one needs `admin` on the folder, as any sync, and `reveal` too: it sends a
@@ -2986,7 +2986,8 @@ the names with dns-01, renews them, and keys link to the result.
   first certificate it's taken as at most that. A link can't set `rotate_days` or `rotate_window`
   of its own.
   - Once the new certificate is in, every linked key rotates to it through the managed-link path:
-    a new version, `rotation.succeeded` on the events feed, syncs pushing it on. A key a node didn't
+    a new version, `rotation.succeeded` on the events feed, and syncs pushing it on, a certificate
+    sync to ACM, Key Vault or Cloudflare included ("Getting certificates where TLS terminates"). A key a node didn't
     reach (it stopped halfway) is rotated on the next pass.
   - A renewal that fails is `rotation.failed` on every linked key, and health's `rotation_failing`,
     until one works. The certificate in use keeps working until it ends.
@@ -4648,7 +4649,7 @@ they change: GitHub Actions secrets, GitLab CI/CD variables, Azure DevOps variab
 Railway, Heroku, DigitalOcean App Platform, CircleCI, Bitbucket Pipelines, Terraform Cloud, Cloudflare Workers, AWS Parameter Store and Secrets Manager, Google Secret Manager, Azure Key Vault, a Kubernetes Secret, an endpoint
 of the team's own, or a deploy hook that only hears that something changed; also Cloudflare Pages,
 Supabase Edge Functions, Azure App Configuration and a HashiCorp Vault (or OpenBao) KV secret.
-A certificate kind pushes a `pki` key's certificate, private key and chain where TLS terminates
+A certificate kind pushes a `pki` or `public_cert` key's certificate, private key and chain where TLS terminates
 instead: AWS Certificate Manager, an Azure Key Vault certificate or a Cloudflare custom certificate
 ("Getting certificates where TLS terminates").
 Infisical's "secret syncs" are the reference. roll secrets stays the source of truth: a sync never reads from its

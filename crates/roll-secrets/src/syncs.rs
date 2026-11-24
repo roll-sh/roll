@@ -882,7 +882,7 @@ impl Secrets {
     }
 
     /// A certificate kind's sync, on create and preview: it names one key of its own folder, linked
-    /// `managed` to a project CA, with no prefix; its maker may reveal it; and its environment isn't
+    /// `managed` to a project CA or a public certificate, with no prefix; its maker may reveal it; and its environment isn't
     /// an untrusted one (code nobody vetted never sends a private key out of roll).
     #[allow(clippy::too_many_arguments)]
     fn certificate_key(&self, project: &str, slug: &str, path: &str, keys: &Option<Vec<String>>, prefix: Option<&str>, kind: &str, caller: &Caller) -> Result<()> {
@@ -919,11 +919,12 @@ impl Secrets {
     }
 }
 
-/// A key a certificate sync pushes: the folder's own, linked `managed` to a project CA.
+/// A key a certificate sync pushes: the folder's own, linked `managed` to a project CA or to a
+/// publicly trusted certificate (each renewal is a rotation, so it's pushed again).
 fn managed_pki(e: &crate::read::Entry, kind: &str) -> Result<()> {
-    let ok = e.source == crate::read::Source::Own && e.row.link.as_ref().is_some_and(|l| l.kind == crate::pki::KIND && l.mode == crate::links::Mode::Managed);
+    let ok = e.source == crate::read::Source::Own && e.row.link.as_ref().is_some_and(|l| (l.kind == crate::pki::KIND || l.kind == crate::public_certs::KIND) && l.mode == crate::links::Mode::Managed);
     if !ok {
-        return Err(Error::BadRequest(format!("a {kind} sync pushes a key of its own folder linked managed to a project CA (pki): {} isn't one", e.row.key)));
+        return Err(Error::BadRequest(format!("a {kind} sync pushes a key of its own folder linked managed to a project CA (pki) or a public certificate (public_cert): {} isn't one", e.row.key)));
     }
     Ok(())
 }

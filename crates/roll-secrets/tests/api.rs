@@ -8202,6 +8202,12 @@ async fn public_certificates_are_ordered_in_the_background_renewed_and_a_failed_
     let health = api.ok(Method::GET, "/health", None).await;
     assert!(!health.to_string().contains("TLS_CERT"), "nothing to say yet: {health}");
 
+    // A certificate sync (#898) pushes it where TLS terminates, and again on each renewal.
+    *api.sts.pinned.lock().unwrap() = Some(format!("roll-secrets:{}", api.project));
+    api.ok(Method::POST, "/aws-roles", Some(json!({ "name": "certs", "role_arn": "arn:aws:iam::123456789012:role/roll" }))).await;
+    api.ok(Method::POST, "/syncs", Some(json!({ "environment": "production", "kind": "fake-cert", "target": { "role": "certs" }, "keys": ["TLS_CERT"] }))).await;
+    assert_eq!(api.secrets.sweep_due_syncs().unwrap(), (1, 0));
+
     // Renewal at rotate_days: the job orders again (the same account) and every linked key rotates.
     let start = api.ok(Method::GET, "/events?latest=1", None).await["next"].as_i64().unwrap();
     let p = api.project.clone();
@@ -8213,6 +8219,9 @@ async fn public_certificates_are_ordered_in_the_background_renewed_and_a_failed_
     let events = api.ok(Method::GET, &format!("/events?after={start}&kinds=rotation.succeeded"), None).await;
     assert_eq!(events["events"].as_array().unwrap().len(), 1, "one credential, four keys: {events}");
     assert_eq!(events["events"][0]["data"]["sharing"].as_array().unwrap().len(), 4, "{events}");
+    assert_eq!(api.secrets.sweep_due_syncs().unwrap(), (1, 0));
+    let pushed = api.certs.pushes.lock().unwrap().clone();
+    assert_eq!((pushed.len(), pushed[1].0.as_str(), pushed[1].3.as_deref()), (2, v["TLS_CERT"].as_str().unwrap(), Some("arn:fake:1")), "the renewed certificate, to the same target");
 
     // A key's rotation asks for a new certificate; the job brings it.
     let r = api.ok(Method::POST, "/environments/production/secrets/TLS_KEY/rotate", None).await;
