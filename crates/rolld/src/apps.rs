@@ -1068,7 +1068,7 @@ pub struct AppsVisitGate(pub Arc<apps_control::Apps>);
 #[async_trait::async_trait]
 impl roll_accounts::VisitGate for AppsVisitGate {
     async fn admit(&self, request: &str, who: &roll_accounts::Visitor) -> Result<String, String> {
-        let v = apps_control::integrations::SsoVisitor { provider: who.provider.clone(), subject: who.subject.clone(), email: who.email.clone(), orgs: who.orgs.clone() };
+        let v = apps_control::integrations::SsoVisitor { provider: who.provider.clone(), subject: who.subject.clone(), email: who.email.clone(), orgs: who.orgs.clone(), hosted_domain: who.hosted_domain.clone() };
         self.0.admit_visitor(request, &v).await
     }
 }

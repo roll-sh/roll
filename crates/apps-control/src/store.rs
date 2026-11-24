@@ -1078,6 +1078,8 @@ impl Store {
         db.add_column("env_access", "password_hash", "TEXT")?;
         // Visitors a provider signs in (`access.sso`), as JSON.
         db.add_column("env_access", "sso", "TEXT")?;
+        // The browser a ticket is for: the SHA-256 of the state cookie set where it began.
+        db.add_column("visit_tickets", "binding", "TEXT")?;
         // Bytes answered a minute (what egress is billed by), for Metrics.
         db.add_column("metrics", "egress_bytes", "INTEGER NOT NULL DEFAULT 0")?;
         // Requests past every instance's concurrency at max_instances a minute (saturation).
@@ -3397,22 +3399,28 @@ impl Store {
     // ── signed-in visitors ──
 
     /// A ticket for `user`, asked for by their roll login `login` (`ses_…`).
-    pub fn put_visit_ticket(&self, hash: &str, service: &str, env: &str, user: &str, login: &str, expires_at: i64) -> Result<()> {
-        self.db.execute("INSERT INTO visit_tickets (hash, service, env, user_id, login, expires_at) VALUES (?, ?, ?, ?, ?, ?)", params![hash, service, env, user, login, expires_at])?;
+    #[allow(clippy::too_many_arguments)]
+    pub fn put_visit_ticket(&self, hash: &str, service: &str, env: &str, user: &str, login: &str, expires_at: i64, binding: &str) -> Result<()> {
+        self.db.execute("INSERT INTO visit_tickets (hash, service, env, user_id, login, expires_at, binding) VALUES (?, ?, ?, ?, ?, ?, ?)", params![hash, service, env, user, login, expires_at, binding])?;
         Ok(())
     }
 
     /// A ticket used: its person and their roll login, if it was this environment's and still
     /// good. It goes either way.
-    pub fn take_visit_ticket(&self, hash: &str, service: &str, env: &str, now: i64) -> Result<Option<(String, String)>> {
+    /// `binding`: the SHA-256 of the state cookie the browser bringing it holds; a ticket made
+    /// for another browser (or before tickets were bound) opens nothing.
+    pub fn take_visit_ticket(&self, hash: &str, service: &str, env: &str, now: i64, binding: &str) -> Result<Option<(String, String)>> {
         let h = hash.to_string();
-        let (s, e) = (service.to_string(), env.to_string());
+        let (s, e, b) = (service.to_string(), env.to_string(), binding.to_string());
         self.db.write(move |c| {
-            let row: Option<(String, String, String, Option<String>, i64)> =
-                c.query_row("SELECT service, env, user_id, login, expires_at FROM visit_tickets WHERE hash = ?", [&h], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))).optional()?;
+            type Row = (String, String, String, Option<String>, i64, Option<String>);
+            let row: Option<Row> =
+                c.query_row("SELECT service, env, user_id, login, expires_at, binding FROM visit_tickets WHERE hash = ?", [&h], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))).optional()?;
             c.execute("DELETE FROM visit_tickets WHERE hash = ? OR expires_at < ?", params![h, now])?;
             // One made before logins were kept has none: it opens nothing.
-            Ok(row.filter(|(rs, re, _, l, exp)| *rs == s && *re == e && *exp >= now && l.is_some()).map(|(_, _, u, l, _)| (u, l.unwrap_or_default())))
+            Ok(row
+                .filter(|(rs, re, _, l, exp, bound)| *rs == s && *re == e && *exp >= now && l.is_some() && bound.as_deref().is_some_and(|x| !b.is_empty() && crate::public::same(x, &b)))
+                .map(|(_, _, u, l, _, _)| (u, l.unwrap_or_default())))
         })
     }
 
@@ -4509,6 +4517,19 @@ impl Store {
     /// Set `key` only when it isn't set: whether this call set it (one wins, on any node).
     pub fn claim_state(&self, key: &str, value: &str) -> Result<bool> {
         Ok(self.db.write(|c| c.execute("INSERT INTO state (key, value) VALUES (?, ?) ON CONFLICT (key) DO NOTHING", [key, value]))? == 1)
+    }
+
+    /// `key`'s value changed by `f` in one write (read and written together: nothing changes it
+    /// in between); `f` answering None changes nothing. The new value, if it changed. `f` may run
+    /// more than once.
+    pub fn update_state(&self, key: &str, mut f: impl FnMut(Option<&str>) -> Option<String>) -> Result<Option<String>> {
+        self.db.write(|c| {
+            let old = c.query_row("SELECT value FROM state WHERE key = ?", [key], |r| r.get::<_, String>(0)).optional()?;
+            let Some(new) = f(old.as_deref()) else { return Ok(None) };
+            c.execute("DELETE FROM state WHERE key = ?", [key])?;
+            c.execute("INSERT INTO state (key, value) VALUES (?, ?)", [key, new.as_str()])?;
+            Ok(Some(new))
+        })
     }
 
     /// `key`'s value, if it has one.

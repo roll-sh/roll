@@ -375,7 +375,7 @@ async fn oauth_visit(State(a): S, Path(p): Path<String>, Query(q): Query<VisitSt
     let started = blocking(&a, move |a| a.oauth_visit_start(p, &q.r, orgs)).await?;
     let mut resp = (StatusCode::SEE_OTHER, [(header::LOCATION, HeaderValue::from_str(&started.url).map_err(|e| Error::Internal(e.to_string()))?)]).into_response();
     resp.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    Ok(with_cookies(resp, [cookie(&a, a.config.oauth_cookie(), &started.browser, 10 * 60_000)]))
+    Ok(with_cookies(resp, [cookie(&a, a.config.visit_cookie(), &started.browser, 10 * 60_000)]))
 }
 
 #[derive(Deserialize)]
@@ -387,14 +387,19 @@ struct Callback {
 
 async fn oauth_callback(State(a): S, me: Me, ip: Ip, Path(p): Path<String>, Query(q): Query<Callback>, headers: HeaderMap) -> Response {
     let who = Who::of(ip, &headers).person(me);
+    // A visitor's sign-in (its own cookie, and no sign-in to roll under way): its failures are
+    // roll's page for them, whatever happened.
+    let visit = roll_auth::cookie(&headers, a.config.visit_cookie()).map(str::to_string);
+    let signin = roll_auth::cookie(&headers, a.config.oauth_cookie()).map(str::to_string);
+    let fallback = if visit.is_some() && signin.is_none() { crate::oauth::VISIT_BACK } else { "/signin" };
     // No provider, or no code (the person said no at the provider): no sign-in happened to record.
-    let Some(p) = Provider::parse(&p) else { return finish_redirect(&a, &headers, Err(Error::NotFound("no such provider".into())), "/signin".into(), false, "", &who).await };
+    let Some(p) = Provider::parse(&p) else { return finish_redirect(&a, &headers, Err(Error::NotFound("no such provider".into())), fallback.into(), false, "", &who).await };
     let (Some(code), Some(state)) = (q.code, q.state) else {
         let _ = q.error;
-        return finish_redirect(&a, &headers, Err(Error::BadRequest("the provider".into(), Some("provider"))), "/signin".into(), false, "", &who).await;
+        return finish_redirect(&a, &headers, Err(Error::BadRequest("the provider".into(), Some("provider"))), fallback.into(), false, "", &who).await;
     };
-    let browser = roll_auth::cookie(&headers, a.config.oauth_cookie()).map(str::to_string);
-    let (done, back) = a.oauth_callback(p, &code, &state, browser).await;
+    let (done, back) = a.oauth_callback(p, &code, &state, [signin, visit]).await;
+    let back = if done.is_err() && back == "/signin" { fallback.to_string() } else { back };
     finish_redirect(&a, &headers, done, back, false, p.as_str(), &who).await
 }
 
@@ -431,7 +436,7 @@ async fn finish_redirect(a: &Arc<Accounts>, headers: &HeaderMap, done: Result<Fi
     let web = a.config.web_url.clone();
     let redirect = |to: String, cookies: Vec<HeaderValue>| {
         let mut resp = (StatusCode::SEE_OTHER, [(header::LOCATION, HeaderValue::from_str(&to).unwrap_or(HeaderValue::from_static("/")))]).into_response();
-        resp.headers_mut().append(header::SET_COOKIE, cookie(a, a.config.oauth_cookie(), "", 0));
+        resp.headers_mut().append(header::SET_COOKIE, cookie(a, if visit { a.config.visit_cookie() } else { a.config.oauth_cookie() }, "", 0));
         with_cookies(resp, cookies)
     };
     let fail = |back: &str, code: &str| {
@@ -449,7 +454,7 @@ async fn finish_redirect(a: &Arc<Accounts>, headers: &HeaderMap, done: Result<Fi
             let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
             let page = format!("<!doctype html><meta charset=utf-8><meta name=viewport content=\"width=device-width\"><title>Not allowed</title><body style=\"font:15px system-ui;max-width:32rem;margin:15vh auto;padding:0 1rem\"><h1 style=\"font-size:20px\">You can't open this</h1><p>{}</p>", esc(&why));
             let mut resp = (StatusCode::FORBIDDEN, [(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-store")], page).into_response();
-            resp.headers_mut().append(header::SET_COOKIE, cookie(a, a.config.oauth_cookie(), "", 0));
+            resp.headers_mut().append(header::SET_COOKIE, cookie(a, a.config.visit_cookie(), "", 0));
             resp
         }
         Err(e) => fail(&back, e.redirect_code()),

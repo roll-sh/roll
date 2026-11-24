@@ -17,6 +17,7 @@ pub mod challenge;
 pub mod bots;
 pub mod attacks;
 pub mod attack_mode;
+pub mod visitor_token;
 pub mod backups;
 pub mod browser;
 pub mod moving;
@@ -433,6 +434,11 @@ pub struct Apps {
     pub(crate) edge_noted: Mutex<std::collections::HashSet<String>>,
     /// Crawlers' addresses checked against their operators' DNS ([`bots`]).
     pub(crate) bots_verified: bots::Verified,
+    /// Projects' keys for their visitors' tokens, and the tokens made ([`visitor_token`]).
+    pub(crate) visitor_keys: Mutex<HashMap<String, (Vec<u8>, String)>>,
+    pub(crate) visitor_tokens: Mutex<HashMap<String, (String, i64)>>,
+    /// The key visitors' sign-in requests are signed with, once read ([`visit`]).
+    pub(crate) sso_key: Mutex<Option<Vec<u8>>>,
     /// Password tries per environment and client, in the last ten minutes ([`password`]).
     pub(crate) password_tries: Mutex<HashMap<password::Client, (i64, u32)>>,
     /// Shells open over HTTP (the dashboard's terminal), by id.
@@ -753,6 +759,9 @@ impl Apps {
             edge_key: Mutex::new(None),
             edge_noted: Mutex::new(Default::default()),
             bots_verified: Default::default(),
+            visitor_keys: Mutex::new(HashMap::new()),
+            visitor_tokens: Mutex::new(HashMap::new()),
+            sso_key: Mutex::new(None),
             password_tries: Mutex::new(HashMap::new()),
             looping: Mutex::new(std::collections::HashSet::new()),
             metric_streaks: Mutex::new(std::collections::HashMap::new()),

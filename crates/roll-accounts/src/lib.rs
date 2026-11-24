@@ -370,6 +370,12 @@ impl Config {
         if self.secure() { "__Host-roll_oauth" } else { "roll_oauth" }
     }
 
+    /// A visitor's sign-in's own browser-binding cookie: a visit and a sign-in to roll in two
+    /// tabs don't undo each other, and a callback knows a visit before it reads its state.
+    pub(crate) fn visit_cookie(&self) -> &'static str {
+        if self.secure() { "__Host-roll_visit_oauth" } else { "roll_visit_oauth" }
+    }
+
     pub(crate) fn provider(&self, p: Provider) -> Option<&ProviderConfig> {
         match p {
             Provider::Github => self.github.as_ref(),
