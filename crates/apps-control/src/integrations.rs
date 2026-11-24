@@ -188,6 +188,11 @@ pub trait SecretSource: Send + Sync {
     async fn issue(&self, _project: &str, _service: &str, _env: &str, _aud: &str, _ttl: std::time::Duration) -> anyhow::Result<Option<String>> {
         Ok(None)
     }
+    /// A token of roll's issuer, checked (its signature against roll's keys, `iss`, `aud`, its
+    /// times): its `sub`. None: it isn't one, or there's no issuer here.
+    async fn verify_issued(&self, _token: &str, _aud: &str) -> Option<String> {
+        None
+    }
     /// Bind `reference` (a `roll://` of another environment) to `who`, who writes it into
     /// `service`'s variables: refused unless they may reveal it there now. What to keep beside it
     /// (roll secrets' maker: who chose it, never a credential).

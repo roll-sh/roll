@@ -452,7 +452,7 @@ type EnvironmentPut = {
    *  person may still open the project (a disabled account is turned away). null: public again. */
   /** `bypass_sha256`: the SHA-256 (hex) of an automation's secret (CI's end-to-end tests): a
    *  request with `X-Roll-Preview-Bypass: <secret>` goes in with no cookie or redirect. */
-  access?: { token?: string; signed_in?: boolean; password?: string /* 8–200: visitors type it on roll's page (its argon2id hash only kept; a session cookie for 7 days, ended by a new password; 10 tries a client every 10 minutes) */; sso?: { provider: "github" | "google"; allow: string[] /* 1–100: "@acme.com" (a domain's people), "ada@acme.com" (one person), "org:acme" (a GitHub organisation's members; github only); kept in lower case */ } /* people the provider vouches for, roll's or not (409 on a node without roll's accounts) */; bypass_sha256?: string } | null;
+  access?: { token?: string; signed_in?: boolean; password?: string /* 8–200: visitors type it on roll's page (its argon2id hash only kept; a session cookie for 7 days, ended by a new password; 10 tries a client every 10 minutes) */; sso?: { provider: "github" | "google"; allow: string[] /* 1–100: "@acme.com" (a domain's people), "ada@acme.com" (one person), "org:acme" (a GitHub organisation's members; github only); kept in lower case */ } /* people the provider vouches for, roll's or not (409 on a node without roll's accounts) */; callers?: string[] /* other services of the project, by name or id (`/env` for one environment), let in with roll's OIDC token for audience `roll-apps:<service id>/<env>` as `x-roll-caller`; alone, a gate only they pass; at most 20 */; bypass_sha256?: string } | null;
   /** Creating it: start with this environment's variables, except its sealed ones (ignored when it exists). */
   variables_from?: string;
   /** A push deploys only once its commit's checks pass (statuses other than roll apps' own):
@@ -583,6 +583,7 @@ type Environment = EnvironmentSummary & {
   signed_in?: true;          // people signed in to roll who can open its project get in (access.signed_in)
   sso?: { provider: "github" | "google"; allow: string[] }; // people GitHub or Google vouches for, by domain, email or GitHub organisation, get in (access.sso)
   preflight?: string[];       // paths whose CORS preflights reach the app past its gate
+  callers?: string[];         // other services of the project let in with roll's token (access.callers)
   password?: true;           // visitors may type its password (access.password; never returned)
   next_run_at: number | null; // a cron service's next scheduled run, once deployed
   volume_used?: { bytes: number; at: number }; // how full its volume was when last measured (hourly, on its owner), when it has one
