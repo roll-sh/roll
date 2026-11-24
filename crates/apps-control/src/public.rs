@@ -503,6 +503,35 @@ pub(crate) async fn call_check(apps: Arc<Apps>, service: &str, env: &str, host: 
     .map_err(|_| format!("it didn't answer within {} s", timeout.as_secs()))
 }
 
+/// A page of an environment read for its owner's API (`GET …/fetch`; Vercel MCP's
+/// `web_fetch_vercel_url`): through its own proxy, as `host` asks, past its gates as a schedule's
+/// call goes (an agent checking what it deployed behind a sign-in), with `deployment` that
+/// deployment's own answer. The status, the headers worth reading, and at most `max` bytes.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn call_fetch(apps: Arc<Apps>, service: &str, env: &str, host: &str, path: &str, head: bool, deployment: Option<&str>, max: usize) -> std::result::Result<(u16, axum::http::HeaderMap, Vec<u8>, bool), String> {
+    let method = if head { axum::http::Method::HEAD } else { axum::http::Method::GET };
+    let mut req = Request::builder().method(method).uri(path).header(header::HOST, host).header(header::USER_AGENT, "roll-fetch/1.0").header(header::ACCEPT, "text/html,*/*").body(Body::empty()).map_err(|e| e.to_string())?;
+    req.extensions_mut().insert(Scheduled);
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let r = proxy(apps, service, env, deployment, req).await;
+        let (status, headers) = (r.status().as_u16(), r.headers().clone());
+        let mut body = r.into_body().into_data_stream();
+        let (mut out, mut cut) = (Vec::new(), false);
+        use futures::StreamExt;
+        while let Some(Ok(chunk)) = body.next().await {
+            let room = max.saturating_sub(out.len());
+            out.extend_from_slice(&chunk[..chunk.len().min(room)]);
+            if chunk.len() > room {
+                cut = true;
+                break;
+            }
+        }
+        (status, headers, out, cut)
+    })
+    .await
+    .map_err(|_| "it didn't answer within 30 s".to_string())
+}
+
 /// The owner's route for public traffic another node sends it ([`serve`]).
 const INTERNAL: &str = "/internal/apps/public";
 /// On it: the service, environment and deployment (`<service>/<env>[/<deployment>]`), and the
@@ -856,6 +885,15 @@ async fn check_access(apps: &Arc<Apps>, service: &str, env: &str, req: &mut Requ
         Ok(None) => return None,
         Err(_) => return Some(page(StatusCode::SERVICE_UNAVAILABLE, "Unavailable", "This environment's access couldn't be checked. Try again in a few seconds.")),
     };
+    // A CORS preflight to a path `access.preflight` names: to the app (it carries no credentials;
+    // the request it clears still meets the gate).
+    if req.method() == axum::http::Method::OPTIONS
+        && req.headers().contains_key(header::ACCESS_CONTROL_REQUEST_METHOD)
+        && !access.preflight.is_empty()
+        && access.preflight.iter().any(|p| crate::model::path_matches(p, &crate::model::normal_path(req.uri().path())))
+    {
+        return None;
+    }
     // An automation (CI's end-to-end tests) with the project's bypass secret: no cookie, no
     // redirect. The header is roll's, so it never reaches the app (`x-roll-*` is stripped).
     if let (Some(bypass), Some(given)) = (&access.bypass_hash, req.headers().get("x-roll-preview-bypass").and_then(|v| v.to_str().ok()))
