@@ -1706,7 +1706,20 @@ static TOOLS: &[Tool] = &[
     t("previews_restore", "Put a preview's data back", "Put a restore point's data back in the preview, replacing what's there now: the services sleep meanwhile, the seed doesn't run again, and each branch keeps its endpoint. It can take minutes: follow it with previews_wait, not a fixed wait.", "previews", "POST", "/v1/previews/{id}/restore-points/{point}/restore", &[req("id", "Preview id"), req("point", "Restore point id (rp_…, from previews_list_saved_data)")]),
     t("previews_delete_saved_data", "Delete a restore point", "Delete one of a preview's restore points (its saved data goes).", "previews", "DELETE", "/v1/previews/{id}/restore-points/{point}", &[req("id", "Preview id"), req("point", "Restore point id")]),
     t("previews_tables", "A preview's tables", "What a preview's data branch holds, read as the branch's own role, read-only: its tables with row counts (at most 200), or with table, that table's columns and first 50 rows (cells cut at 200 characters; more says there are others). For checking what a change's migration or seed did. resource is kind:parent as previews_get lists its branches (Postgres for now; a branch not ready or masked yet answers 409). It shows copies of production's data, masked: reveal.", "previews", "GET", "/v1/previews/{id}/data/{resource}", &[req("id", "Preview id"), req("resource", "The branched resource, kind:parent (postgres:prj_…)"), q("table", Ty::Str, "A table: its first rows (schema.table or table)")]),
-    t("previews_share", "Share a preview", "A link for someone outside the team to open a preview for some hours (its token is in this answer only; anyone with the link gets in).", "previews", "POST", "/v1/previews/{id}/shares", &[req("id", "Preview id"), breq("hours", Ty::Int, "How long the link works")]),
+    t(
+        "previews_share",
+        "Share a preview",
+        "A link for someone outside the team to open a preview for some hours (its token is in this answer only; anyone with the link gets in). With notes, its visitors may leave notes on the pages as guests.",
+        "previews",
+        "POST",
+        "/v1/previews/{id}/shares",
+        &[
+            req("id", "Preview id"),
+            breq("hours", Ty::Int, "How long the link works"),
+            b("label", Ty::Str, "Who the link is for, one line (at most 60 characters)"),
+            b("notes", Ty::Bool, "Its visitors may leave notes on the preview's pages as guests (10 an hour per link)"),
+        ],
+    ),
     t("previews_revoke_share", "Revoke a share link", "Stop a preview's share link at once (who it's shared with: previews_list_shares).", "previews", "DELETE", "/v1/previews/{id}/shares/{share}", &[req("id", "Preview id"), req("share", "Share id")]),
     t("previews_settings", "Preview settings", "A project's preview rules: which branches get one, how long they live, private or not, budgets (previews_set_rules changes the operational ones; an admin's).", "previews", "GET", "/v1/previews/projects/{project}/settings", &[req("project", "Workspace project")]),
     t(
