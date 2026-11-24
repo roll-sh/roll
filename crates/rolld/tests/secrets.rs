@@ -531,6 +531,12 @@ async fn a_search_link_by_name_is_never_rekeyed_to_a_cluster_that_took_the_name_
         tokio::time::sleep(Duration::from_millis(200)).await;
     };
     r.call(reqwest::Method::PUT, &format!("/v1/workspace/projects/{project}/resources/search/{taken}"), Some(json!({ "x": 0, "y": 0 }))).await;
+    // A control the pass does rekey: at home in the project, linked long before. Its name sorts
+    // after "logs", and the pass takes a project's names in order, so once it reads by id the
+    // pass has decided the link under test.
+    let control = r.post("/v1/search/clusters", json!({ "name": "zz" })).await["id"].as_str().unwrap().to_string();
+    p.link("search", &control, &[("ZZ_URL", "url", "live")]).await;
+    r.call(reqwest::Method::PUT, &format!("/v1/workspace/projects/{project}/homes/search/{control}"), None).await;
     drop(p);
     drop(r);
     let open = |path: std::path::PathBuf| {
@@ -542,37 +548,46 @@ async fn a_search_link_by_name_is_never_rekeyed_to_a_cluster_that_took_the_name_
     // Stopped: the link names "logs", as an old one did, and was last written long after the
     // cluster now called that was made (only trust decides). The project is a person's, and the
     // cluster is one of its developers' own.
-    let n = secrets.execute("UPDATE secrets SET link = replace(link, ?1, '\"ref\":\"logs\"'), updated_at = 9999999999999 WHERE project_id = ?2", [format!("\"ref\":\"{first}\""), project.clone()]).unwrap();
+    let n = secrets.execute("UPDATE secrets SET link = replace(link, ?1, '\"ref\":\"logs\"'), updated_at = 9999999999999 WHERE project_id = ?2 AND key = 'ELASTICSEARCH_URL'", [format!("\"ref\":\"{first}\""), project.clone()]).unwrap();
     assert_eq!(n, 1);
     ws.execute("UPDATE projects SET owner = 'usr_ada' WHERE id = ?1", [&project]).unwrap();
     for (user, role) in [("usr_ada", "owner"), ("usr_dev", "developer")] {
         ws.execute("INSERT INTO members (project_id, user_id, role, environments, added_by, added_at) VALUES (?1, ?2, ?3, NULL, 'operator', 0)", [project.as_str(), user, role]).unwrap();
     }
     search.execute("UPDATE search_clusters SET owner = 'usr_dev' WHERE id = ?1", [&taken]).unwrap();
-    let link_ref = || secrets.query_row("SELECT link FROM secrets WHERE project_id = ?1", [&project], |r| r.get::<_, String>(0)).unwrap();
-    // A start's pass over the links, through the line it logs for a link it leaves by name.
-    let refused = |r: &Rolld| {
+    let link_ref = || secrets.query_row("SELECT link FROM secrets WHERE project_id = ?1 AND key = 'ELASTICSEARCH_URL'", [&project], |r| r.get::<_, String>(0)).unwrap();
+    let control_ref = || secrets.query_row("SELECT link FROM secrets WHERE project_id = ?1 AND key = 'ZZ_URL'", [&project], |r| r.get::<_, String>(0)).unwrap();
+    // Before each start, the control names its cluster by name again.
+    let control_by_name = || {
+        let n = secrets.execute("UPDATE secrets SET link = replace(link, ?1, '\"ref\":\"zz\"'), updated_at = 9999999999999 WHERE project_id = ?2 AND key = 'ZZ_URL'", [format!("\"ref\":\"{control}\""), project.clone()]).unwrap();
+        assert_eq!(n, 1);
+    };
+    // The start's pass over the links, through the control it rekeys after the link under test.
+    let decided = || {
         let started = Instant::now();
-        while !std::fs::read_to_string(&r.started.stderr).unwrap_or_default().contains("a roll secrets search link by a name that now names a cluster") {
-            assert!(started.elapsed() < Duration::from_secs(30), "the start's pass never decided the link");
+        while !control_ref().contains(&format!("\"ref\":\"{control}\"")) {
+            assert!(started.elapsed() < Duration::from_secs(30), "the start's pass never kept the control by id: {}", control_ref());
             std::thread::sleep(Duration::from_millis(100));
         }
     };
+    control_by_name();
     let r = Rolld::start_in(home.clone(), "search", false, &[], "/v1/info").await;
-    refused(&r);
+    decided();
     assert!(link_ref().contains("\"ref\":\"logs\""), "not rekeyed to a cluster the project doesn't trust: {}", link_ref());
     // At home in the project (trusted), but made after the link's last write.
     r.call(reqwest::Method::PUT, &format!("/v1/workspace/projects/{project}/homes/search/{taken}"), None).await;
     drop(r);
-    secrets.execute("UPDATE secrets SET updated_at = 1000 WHERE project_id = ?1", [&project]).unwrap();
+    secrets.execute("UPDATE secrets SET updated_at = 1000 WHERE project_id = ?1 AND key = 'ELASTICSEARCH_URL'", [&project]).unwrap();
+    control_by_name();
     let r = Rolld::start_in(home.clone(), "search", false, &[], "/v1/info").await;
-    refused(&r);
+    decided();
     assert!(link_ref().contains("\"ref\":\"logs\""), "not rekeyed to a cluster made after the link: {}", link_ref());
     drop(r);
     // Made before it, but restored after it.
     search.execute("UPDATE search_clusters SET created_at = 0, restored_at = 2 WHERE id = ?1", [&taken]).unwrap();
-    let r = Rolld::start_in(home.clone(), "search", false, &[], "/v1/info").await;
-    refused(&r);
+    control_by_name();
+    let _r = Rolld::start_in(home.clone(), "search", false, &[], "/v1/info").await;
+    decided();
     assert!(link_ref().contains("\"ref\":\"logs\""), "not rekeyed to a cluster restored after the link: {}", link_ref());
 }
 
