@@ -286,7 +286,13 @@ pub struct Access {
     /// past the gate (Vercel's OPTIONS Allowlist): a preflight carries no credentials, so a page on
     /// another of the owner's sites can then call the API with its own.
     pub preflight: Vec<String>,
+    /// Other services of the project let in with roll's own token for them (Cloud Run's invoker,
+    /// [`Access::callers`] entries: `api`, `api/production`, or an id): `x-roll-caller`.
+    pub callers: Vec<String>,
 }
+
+/// The most `access.callers` entries.
+pub const MAX_CALLERS: usize = 20;
 
 /// The most `access.preflight` paths.
 pub const MAX_PREFLIGHT: usize = 20;
@@ -1871,6 +1877,9 @@ pub struct Environment {
     /// Paths whose CORS preflights reach the app past its gate (`access.preflight`).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub preflight: Vec<String>,
+    /// Other services of the project let in with roll's token for them (`access.callers`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub callers: Vec<String>,
     /// Visitors may type its password (`access.password`; never returned).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub password: bool,

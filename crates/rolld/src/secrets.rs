@@ -1724,6 +1724,23 @@ impl apps_control::integrations::SecretSource for ForApps {
     /// isn't an untrusted preview (`Secrets::issue` refuses one: where `resolve` gives a fork's
     /// preview a narrowed read, it gets no token at all). None where the issuer isn't (no public
     /// URL).
+    /// roll-oidc's one verifier, with roll's own keys pinned (in process, never fetched).
+    async fn verify_issued(&self, token: &str, aud: &str) -> Option<String> {
+        let (secrets, _) = self.0.get().cloned()?;
+        let (token, aud) = (token.to_string(), aud.to_string());
+        tokio::task::spawn_blocking(move || {
+            let issuer = secrets.oidc_discovery().ok()?.get("issuer")?.as_str()?.to_string();
+            let jwks = secrets.oidc_jwks().ok()?.to_string();
+            let jwt = roll_oidc::Jwt::parse(&token).ok()?;
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64;
+            roll_oidc::Keys::default().verify(None, Some(&jwks), &jwt, &issuer, &aud, now).ok()?;
+            jwt.str("sub").map(str::to_string)
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
     async fn issue(&self, project: &str, service: &str, env: &str, aud: &str, ttl: std::time::Duration) -> anyhow::Result<Option<String>> {
         let (secrets, ws) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting: try again in a moment"))?;
         let subject = roll_secrets::Subject::App { project: project.to_string(), service: service.to_string(), env: env.to_string() };
