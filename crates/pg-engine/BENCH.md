@@ -416,6 +416,108 @@ with nothing spilled too, and cost +4.0% / +5.9% at 256 MB (4.583 / 3.582 G), so
 by c2. Foreign load was 2.9-6.8 cores by lane.sh. Instruction counts repeat within 0.3%.
 pgbench -i at scale 32 (default 64 MB, lane A): primary keys 2.61 s (head) and 2.62 s (c2).
 
+## The shipped build: the PGO recipe's training (2026-11-23, agent 304)
+
+HANDOFF "The shipped build" has what changed. Three builds of the same code (`ff72a4b50`'s; the
+candidate changes only tools and docs): **plain** (`tools/dist.sh`), **pgo-old** (the training
+before this change, `tools/dist-pgo.sh --profdata` of its merged profile) and **pgo-new** (this
+change's training, `dist-pgo.sh --raw`). Both PGO builds come from one instrumented build and one
+bench client; only the training differs. Harness `~/.cache/a304/h/pair.sh`: a fresh server
+container per arm on the lane's server CPUs (8 GiB), the client on its client CPUs, user
+instructions of the server's cgroup (`perf stat -a -G`, a window per item). Lane A for point
+selects and TPC-B, lane C for the bulk script and TPC-H; one pair a `tools/lane.sh` hold. The
+lanes carried 1-3 foreign cores on the server CPUs (lane.sh: 4-7 over the lane's 8; other
+tenants' unpinned `bun` / `turbo` builds), so instructions only: cycles were not read. Two PGO
+builds of one commit differ by ~0.9% (1.9% on q01 / q15): one build of each recipe here.
+
+### Summary
+
+| workload | pgo-old | pgo-new | plain | new vs old | new vs plain |
+|---|---|---|---|---|---|
+| TPC-H, the 22, SF1, 2 GB cache (G) | 86.70 | 87.10 / 87.14 | 95.14 | +0.48% | -8.4% |
+| point select, 8 clients, extended binary (per select) | 30,070 | 29,955 / 29,953 | 38,277 | -0.4% | -21.7% |
+| TPC-B-like, scale 32, 8 clients, 40,000 transactions (per transaction) | 437,814 / 439,626 | 443,571 / 440,269 / 444,079 | 519,213 | +1.1% | -14.6% |
+| bulk: COPY 1M rows into `bulkp` (primary key + secondary index) (G) | 30.79 | 31.30 / 27.72 | 41.50 | -4.1% (noisy) | -28.9% |
+| bulk: COPY 1M rows into `bulks` (secondary index: the sink) (G) | 18.45 | 18.07 / 18.06 | 20.57 | -2.1% | -12.2% |
+| bulk: the ten other steps together (G) | 38.57 | 38.74 / 38.78 | 44.47 | +0.5% | -12.9% |
+
+Every TPC-H hash, the bulk script's row checks and its ctid hash equal across the three. VmHWM
+after TPC-H 1,676,772 / 1,676,892 / 1,678,344 kB. Each bulk step's window runs through the
+background work the step leaves (until the server uses under 20 ms CPU a second for 3 s), so
+`copy_pk`'s varies with how much compaction falls in it (27.72 / 31.30 G for one binary). TPC-B
+by fixed time (10 s) was dropped as a measure: instructions per transaction followed the
+throughput a run reached under the lane's load (404 k at ~57 k transactions, 445-452 k at ~70 k,
+both binaries: old 417,268 / 403,802 / 451,983, new 456,644 / 422,895 / 445,343 / 404,294; plain
+494,660), hence the fixed 40,000 transactions.
+
+### TPC-H by query (G user instructions; pgo-new the median of its two runs)
+
+| query | pgo-old | pgo-new | plain | new vs old | new vs plain |
+|---|---|---|---|---|---|
+| q01 | 7.230 | 7.349 | 7.389 | +1.64% | -0.54% |
+| q02 | 2.253 | 2.235 | 2.636 | -0.79% | -15.22% |
+| q03 | 3.673 | 3.680 | 4.146 | +0.20% | -11.23% |
+| q04 | 1.581 | 1.591 | 1.719 | +0.65% | -7.43% |
+| q05 | 2.743 | 2.749 | 3.124 | +0.20% | -12.02% |
+| q06 | 5.047 | 5.024 | 5.146 | -0.46% | -2.37% |
+| q07 | 2.997 | 2.992 | 3.498 | -0.16% | -14.46% |
+| q08 | 1.211 | 1.210 | 1.412 | -0.15% | -14.36% |
+| q09 | 6.801 | 6.818 | 7.827 | +0.25% | -12.89% |
+| q10 | 7.019 | 7.073 | 7.473 | +0.78% | -5.35% |
+| q11 | 0.732 | 0.719 | 0.836 | -1.86% | -14.05% |
+| q12 | 5.923 | 5.956 | 5.981 | +0.54% | -0.43% |
+| q13 | 3.641 | 3.623 | 4.128 | -0.50% | -12.23% |
+| q14 | 1.201 | 1.194 | 1.390 | -0.57% | -14.11% |
+| q15 | 4.652 | 4.669 | 4.699 | +0.35% | -0.64% |
+| q16 | 2.476 | 2.549 | 2.967 | +2.93% | -14.09% |
+| q17 | 4.613 | 4.651 | 5.281 | +0.83% | -11.92% |
+| q18 | 14.601 | 14.630 | 16.246 | +0.20% | -9.94% |
+| q19 | 0.435 | 0.438 | 0.476 | +0.77% | -8.01% |
+| q20 | 1.112 | 1.125 | 1.373 | +1.18% | -18.02% |
+| q21 | 6.211 | 6.296 | 6.767 | +1.36% | -6.96% |
+| q22 | 0.547 | 0.549 | 0.628 | +0.41% | -12.53% |
+
+### The bulk script by step (G user instructions)
+
+| step | pgo-old | pgo-new | plain |
+|---|---|---|---|
+| copy_in (bare table) | 5.878 | 5.864 / 5.893 | 6.483 |
+| create_index | 4.170 | 4.198 / 4.195 | 4.405 |
+| create_unique_index | 3.097 | 3.098 / 3.098 | 3.385 |
+| copy_out | 2.481 | 2.511 / 2.511 | 3.085 |
+| insert_select | 4.347 | 4.389 / 4.389 | 5.068 |
+| update_half | 9.834 | 9.830 / 9.836 | 11.754 |
+| delete_quarter | 6.690 | 6.759 / 6.759 | 7.742 |
+| vacuum | 1.303 | 1.310 / 1.315 | 1.714 |
+| analyze | 0.422 | 0.421 / 0.425 | 0.468 |
+| count_after | 0.348 | 0.355 / 0.355 | 0.367 |
+| copy_pk (into `bulkp`) | 30.786 | 31.300 / 27.721 | 41.502 |
+| copy_sx (into `bulks`) | 18.445 | 18.067 / 18.057 | 20.570 |
+
+### The training's classes (`pgo-hotcov.py`)
+
+Total counts per class and the equal-weight multiplier (`dist-pgo: profile counts`), old ->
+new: bulk 3.59 G x19 -> 11.14 G x6 (the indexed COPYs and pgbench's scale-32 load), short
+1.25 G x54 -> 3.44 G x20 (tpcb-like and UPDATE at scale 32), regress 0.98 G x69 -> 1.88 G x36
+(34 files by name hash instead of 29), point 1.30 -> 1.77 G, range 0.74 -> 1.55 G, catalog
+2.28 -> 2.30 G, startup 0.38 G both, tpch 67.4 -> 67.1 G x1. Share of each class's counts in the
+merged profile's hot blocks:
+
+| class | old classes, old merge | new classes, old profile | new classes, new profile |
+|---|---|---|---|
+| bulk | 99.83% | 95.53% | 99.76% |
+| catalog | 98.35% | 98.37% | 98.17% |
+| point | 99.80% | 99.85% | 99.82% |
+| range | 99.65% | 99.42% | 99.71% |
+| regress | 97.14% | 92.46% | 96.93% |
+| short | 98.11% | 97.79% | 98.64% |
+| startup | 99.74% | 99.74% | 99.67% |
+| tpch | 99.38% | 99.38% | 99.33% |
+
+The regress class's 31.7 G that agent 294 saw from `2a0f67b0d` on is 0.98 G at this commit (its
+29 files alone in a clean data directory: 0.94 G, `~/.cache/a304/regress-probe.sh`; with the
+catalog class's 1,500 tables present the same files count the same, e.g. catalog_static 118.69 M).
+
 ## Analytic CPU, round 13: q09's rows over the lookup stages, unique probes (2026-11-22, agent 294)
 
 HANDOFF "Analytic CPU, round 13" has what changed. Plain dist builds (`tools/dist.sh`): **b0**
@@ -5778,6 +5880,8 @@ Dropped patches with their numbers: `~/.cache/a226/patches/dropped-c4-narrow-lan
 | q16 | 0.98 | 0.41 | `Value` comparisons of count(distinct)'s sort |
 
 ## Profile-guided build (2026-11-12, agent 225)
+
+**Since 2026-11-23 the PGO build is the shipped build** (agent 304): "The shipped build" in HANDOFF and above has the recipe as it is now (one command, class checks, the staleness line, the write path in the training, `QC_PGO`).
 
 `crates/pg-engine/tools/dist-pgo.sh` builds roll-engine profile-guided: the `dist` profile plus
 LLVM's profile of a training run (`tools/pgo-train.sh`), generated in the build. HANDOFF.md
