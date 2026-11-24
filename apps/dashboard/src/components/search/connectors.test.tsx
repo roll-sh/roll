@@ -5,7 +5,11 @@ import type { SearchCluster } from "@/lib/search-api";
 import { ConnectorsTab } from "./connectors";
 
 const esJson = vi.hoisted(() => vi.fn());
-vi.mock("@/lib/search-api", async (orig) => ({ ...(await orig<typeof import("@/lib/search-api")>()), esJson }));
+const crawlTest = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/search-api", async (orig) => {
+  const real = await orig<typeof import("@/lib/search-api")>();
+  return { ...real, esJson, searchApi: { ...real.searchApi, crawlTest } };
+});
 
 const cluster = { id: "c1", name: "shop", url: "https://shop.search.example", flavor: "elasticsearch" } as unknown as SearchCluster;
 const PASSWORD = "pg-password-never-shown";
@@ -56,4 +60,37 @@ it("opens a Postgres connector in the console, never shows its password, and fol
   expect(within(row).queryByText("Syncing…")).not.toBeInTheDocument();
   expect(within(row).getByText("340")).toBeInTheDocument();
   expect(container).not.toHaveTextContent(PASSWORD);
+});
+
+it("tests a URL from the empty state, then makes it a crawler and starts its first crawl", async () => {
+  const user = userEvent.setup();
+  esJson.mockImplementation(async (_id: string, method: string, path: string) => {
+    if (method === "GET") return { results: [] };
+    if (method === "PUT" || method === "POST") return {};
+    throw new Error(`unexpected ${method} ${path}`);
+  });
+  crawlTest.mockResolvedValue({
+    url: "https://docs.example.com/",
+    verdict: "allowed",
+    robots: { origin: "https://docs.example.com", read: "missing", allows: true, crawl_delay: null },
+    status: 200,
+    indexed: true,
+    document: { title: "Docs home", body: "Welcome to the docs" },
+    links: [
+      { url: "https://docs.example.com/a", verdict: "allowed" },
+      { url: "https://docs.example.com/private", verdict: "robots_disallowed" },
+    ],
+  });
+  render(<ConnectorsTab cluster={cluster} onOpenConsole={vi.fn()} />);
+
+  await user.type(await screen.findByRole("textbox", { name: /site url/i }), "https://docs.example.com/");
+  await user.click(screen.getByRole("button", { name: /^test$/i }));
+  expect(crawlTest).toHaveBeenCalledWith("c1", "https://docs.example.com/");
+  expect(await screen.findByText("Docs home")).toBeInTheDocument();
+  expect(screen.getByText(/1 link would be queued, 1 skipped/)).toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: /crawl into content-docs-example-com/i }));
+  expect(esJson).toHaveBeenCalledWith("c1", "PUT", "/_connector/docs-example-com", { index_name: "content-docs-example-com", is_native: true, service_type: "roll_web_crawler", name: "docs-example-com" });
+  expect(esJson).toHaveBeenCalledWith("c1", "PUT", "/_connector/docs-example-com/_configuration", { values: { urls: "https://docs.example.com/" } });
+  expect(esJson).toHaveBeenCalledWith("c1", "POST", "/_connector/_sync_job", { id: "docs-example-com", job_type: "full", trigger_method: "on_demand" });
 });

@@ -67,6 +67,27 @@ pub enum Crawler {
         #[arg(long)]
         connector: Option<String>,
     },
+    /// Test one URL through the crawler's path, writing nothing: robots.txt and the rule that
+    /// decides it, the redirects, what would be indexed and which links would be queued.
+    Test {
+        cluster: String,
+        url: String,
+        /// Use this `roll_web_crawler` connector's configuration (default: a crawl of the URL's site).
+        #[arg(long)]
+        connector: Option<String>,
+    },
+    /// Verify a site (its registrable domain) for the crawler's higher limits: prints the DNS
+    /// TXT record or file to publish; `--check` then checks it.
+    Verify {
+        cluster: String,
+        /// A domain or URL of the site.
+        domain: String,
+        /// Check for the token now, instead of starting.
+        #[arg(long)]
+        check: bool,
+    },
+    /// The sites the cluster's owner verified, or started verifying.
+    Sites { cluster: String },
 }
 
 #[derive(Subcommand)]
@@ -675,6 +696,9 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
             };
         }
         Search::Crawler(Crawler::Import { cluster, file, connector }) => return crate::search_crawler::import(api, as_json, &cluster, &file, connector.as_deref()).await,
+        Search::Crawler(Crawler::Test { cluster, url, connector }) => return crate::search_crawler::test(api, as_json, &cluster, &url, connector.as_deref()).await,
+        Search::Crawler(Crawler::Verify { cluster, domain, check }) => return crate::search_crawler::verify(api, as_json, &cluster, &domain, check).await,
+        Search::Crawler(Crawler::Sites { cluster }) => return crate::search_crawler::sites(api, as_json, &cluster).await,
         Search::Inference(cmd) => match cmd {
             Inference::List { cluster } => {
                 let c = find(api, &cluster).await?;

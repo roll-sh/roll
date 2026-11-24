@@ -4834,3 +4834,131 @@ async fn a_migration_is_bounded() {
     let again = e.post("/v1/search/clusters/dst/migrate", json!({ "source": source, "indices": [{ "index": "c" }] })).await;
     assert!(again["indices"][0]["task"].is_string(), "{again}");
 }
+
+/// A site on loopback for the web crawler: fixed answers by path, the rest 404.
+struct FakeSite {
+    base: String,
+    routes: Arc<parking_lot::Mutex<std::collections::HashMap<String, (u16, Vec<(String, String)>, String)>>>,
+}
+
+impl FakeSite {
+    async fn start() -> FakeSite {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let routes: Arc<parking_lot::Mutex<std::collections::HashMap<String, (u16, Vec<(String, String)>, String)>>> = Arc::default();
+        let r = routes.clone();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let r = r.clone();
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    while !buf.windows(4).any(|w| w == b"\r\n\r\n") && buf.len() < 65536 {
+                        match sock.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        }
+                    }
+                    let head = String::from_utf8_lossy(&buf).into_owned();
+                    let target = head.split_whitespace().nth(1).unwrap_or("/").to_string();
+                    let (status, headers, body) = r.lock().get(&target).cloned().unwrap_or((404, vec![], "no".into()));
+                    let mut out = format!("HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n", body.len());
+                    for (k, v) in headers {
+                        out.push_str(&format!("{k}: {v}\r\n"));
+                    }
+                    out.push_str("\r\n");
+                    out.push_str(&body);
+                    let _ = sock.write_all(out.as_bytes()).await;
+                });
+            }
+        });
+        FakeSite { base, routes }
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("{}{path}", self.base)
+    }
+
+    fn set(&self, path: &str, status: u16, headers: &[(&str, &str)], body: &str) {
+        self.routes.lock().insert(path.into(), (status, headers.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(), body.into()));
+    }
+
+    fn page(&self, path: &str, html: &str) {
+        self.set(path, 200, &[("Content-Type", "text/html")], html);
+    }
+}
+
+/// The web crawler's sites (docs/search/crawler.md, "Domain verification"): `crawl-test` answers
+/// what a crawl would do with a URL, writing nothing; an unverified site is crawled within the
+/// unverified limits; its owner verifies it with the well-known file (a redirect to another site
+/// holding the token proves nothing), and the next crawl gets the higher limits.
+#[tokio::test]
+async fn crawler_sites_verified_for_higher_limits() {
+    let (site, other) = (FakeSite::start().await, FakeSite::start().await);
+    let links: String = (1..=5).map(|i| format!(r#"<a href="/p{i}">{i}</a>"#)).collect();
+    site.page("/", &format!("<title>Home</title><p>home</p>{links}"));
+    for i in 1..=5 {
+        site.page(&format!("/p{i}"), &format!("<title>Page {i}</title><p>page {i}</p>"));
+    }
+    let e = env_with(|c| {
+        for (k, v) in [
+            ("roll.connectors.allow_private_hosts", "true"),
+            ("roll.connectors.max_docs_per_second", "100000"),
+            ("roll.crawler.min_request_interval", "1ms"),
+            ("roll.crawler.unverified.min_request_interval", "1ms"),
+            ("roll.crawler.unverified.max_unique_url_count", "2"),
+        ] {
+            c.node_settings.push((k.into(), v.into()));
+        }
+    })
+    .await;
+    let id = e.post("/v1/search/clusters", json!({"name": "crawl"})).await["id"].as_str().unwrap().to_string();
+
+    // crawl-test: what the URL would give, and nothing written.
+    let t = e.post(&format!("/v1/search/clusters/{id}/crawl-test"), json!({"url": site.url("/")})).await;
+    assert_eq!((t["verdict"].as_str(), t["indexed"].as_bool(), t["document"]["title"].as_str()), (Some("allowed"), Some(true), Some("Home")), "{t}");
+    assert_eq!(t["links"].as_array().map(|l| l.iter().filter(|x| x["verdict"] == "allowed").count()), Some(5), "{t}");
+    let r = e.post(&format!("/v1/search/clusters/{id}/request"), json!({"method": "GET", "path": "/_cat/indices?format=json"})).await;
+    assert_eq!(body(&r), json!([]), "crawl-test writes nothing");
+
+    // The first crawl: unverified, so 2 URLs at most.
+    let es = |method: &str, path: &str, b: Value| json!({"method": method, "path": path, "body": b});
+    e.post(&format!("/v1/search/clusters/{id}/request"), es("PUT", "/_connector/site", json!({"index_name": "content-site", "is_native": true, "service_type": "roll_web_crawler"}))).await;
+    e.post(&format!("/v1/search/clusters/{id}/request"), es("PUT", "/_connector/site/_configuration", json!({"values": {"urls": site.url("/")}}))).await;
+    let crawl = || async {
+        let r = e.post(&format!("/v1/search/clusters/{id}/request"), es("POST", "/_connector/_sync_job", json!({"id": "site", "job_type": "full"}))).await;
+        let job = body(&r)["id"].as_str().unwrap().to_string();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        loop {
+            let j = body(&e.post(&format!("/v1/search/clusters/{id}/request"), json!({"method": "GET", "path": format!("/_connector/_sync_job/{job}")})).await);
+            if matches!(j["status"].as_str(), Some("completed" | "error" | "canceled")) {
+                return j;
+            }
+            assert!(std::time::Instant::now() < deadline, "{j}");
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    };
+    let j = crawl().await;
+    assert_eq!((j["status"].as_str(), j["metadata"]["limit_reached"].as_str(), j["indexed_document_count"].as_i64()), (Some("completed"), Some("unverified_domain_max_unique_url_count"), Some(2)), "{j}");
+
+    // Verification: the token, then the file. A redirect to another site holding it is refused.
+    let v = e.post(&format!("/v1/search/clusters/{id}/site-verifications"), json!({"domain": site.url("/")})).await;
+    let (name, token) = (v["site"].as_str().unwrap().to_string(), v["file"]["content"].as_str().unwrap().to_string());
+    assert_eq!(v["status"], "pending", "{v}");
+    other.set("/.well-known/roll-site-verification.txt", 200, &[], &token);
+    site.set("/.well-known/roll-site-verification.txt", 302, &[("Location", &other.url("/.well-known/roll-site-verification.txt"))], "");
+    let path = format!("/v1/search/clusters/{id}/site-verifications/{}/check", urlencoding::encode(&name));
+    let v = e.post(&path, json!({})).await;
+    assert!(v["status"] == "pending" && v["error"].as_str().is_some_and(|e| e.contains("off the site")), "{v}");
+    site.set("/.well-known/roll-site-verification.txt", 200, &[], &format!("{token}\n"));
+    let v = e.post(&path, json!({})).await;
+    assert_eq!((v["status"].as_str(), v["proof"].as_str()), (Some("verified"), Some("file")), "{v}");
+    let list = e.get(&format!("/v1/search/clusters/{id}/site-verifications")).await;
+    assert_eq!(list["verifications"][0]["site"].as_str(), Some(name.as_str()));
+
+    // The next crawl: verified, so every page.
+    let j = crawl().await;
+    assert_eq!((j["status"].as_str(), j["metadata"]["limit_reached"].clone(), j["indexed_document_count"].as_i64()), (Some("completed"), Value::Null, Some(6)), "{j}");
+    assert_eq!(j["metadata"]["verified_sites"][0].as_str(), Some(name.as_str()), "{j}");
+}

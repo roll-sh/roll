@@ -34,6 +34,13 @@
 //!   list of top queries and of queries with no results. A slot is replaced when its time comes
 //!   round again; an index whose analytics go off or that is deleted loses its rows.
 //!
+//! - `site_verifications`: one row per owner and site (registrable domain) the owner asked to
+//!   verify for the web crawler: its token, how it was proven and when it was last checked
+//!   (docs/search/crawler.md, "Domain verification"). An owner is the clusters' (`owner`, or
+//!   `(no owner)` for the operator's), so every cluster and connector of theirs shares them.
+//! - `site_crawls`: when each owner crawled each site it hasn't verified, for the daily limit of
+//!   unverified sites, counted across the fleet (rows older than a day are dropped as it's read).
+//!
 //! A cluster's password is sealed in its row under the deployment's key ([`Store::seal_passwords`]:
 //! rolld's `ROLL_SECRET_KEY`), bound to the cluster's id, and opened as the row is read. A row
 //! still holding one in the clear (written before sealing) is sealed as it's read. Without a key
@@ -564,6 +571,12 @@ impl Store {
         db.ensure_schema(
             "CREATE TABLE IF NOT EXISTS search_remotes (cluster_id TEXT NOT NULL, alias TEXT NOT NULL, target_id TEXT NOT NULL, key_id TEXT NOT NULL, credentials TEXT NOT NULL, minted INTEGER NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (cluster_id, alias))",
         )?;
+        // The web crawler's verified sites and unverified crawls (`crate::sites`).
+        db.ensure_schema(
+            "CREATE TABLE IF NOT EXISTS search_site_verifications (owner TEXT NOT NULL, site TEXT NOT NULL, token TEXT NOT NULL, origin TEXT NOT NULL, status TEXT NOT NULL, proof TEXT, error TEXT, created_at INTEGER NOT NULL, verified_at INTEGER, checked_at INTEGER, PRIMARY KEY (owner, site))",
+        )?;
+        db.ensure_schema("CREATE TABLE IF NOT EXISTS search_site_crawls (owner TEXT NOT NULL, site TEXT NOT NULL, at INTEGER NOT NULL)")?;
+        db.ensure_schema("CREATE INDEX IF NOT EXISTS search_site_crawls_by ON search_site_crawls (owner, site, at)")?;
         // Catalogs written before `code-sql` lack nothing but may lack the index on parents
         // (created above); their extra columns (`seq`) and tables (`search_tombstones`) are unused.
         Ok(Self { db, sealer: OnceLock::new() })
@@ -986,6 +999,88 @@ impl Store {
     pub async fn forget_revoke(&self, id: &str, credential: &str) -> anyhow::Result<()> {
         self.db.write(|x| x.execute("DELETE FROM search_revokes WHERE cluster_id = ?1 AND credential = ?2", params![id, credential]))?;
         Ok(())
+    }
+
+    /// Owner `owner`'s verification of `site`: a new one with `token` (pending), or the one it
+    /// has (its token kept, so a record published once keeps working).
+    pub async fn start_verification(&self, owner: &str, site: &str, origin: &str, token: &str, now: i64) -> anyhow::Result<SiteVerification> {
+        Ok(self.db.write(|x| {
+            x.execute(
+                "INSERT INTO search_site_verifications (owner, site, token, origin, status, created_at) VALUES (?1, ?2, ?3, ?4, 'pending', ?5) ON CONFLICT (owner, site) DO NOTHING",
+                params![owner, site, token, origin, now],
+            )?;
+            x.query_row(&format!("SELECT {VERIFY_COLS} FROM search_site_verifications WHERE owner = ?1 AND site = ?2"), params![owner, site], verification_row)
+        })?)
+    }
+
+    pub async fn verification(&self, owner: &str, site: &str) -> anyhow::Result<Option<SiteVerification>> {
+        Ok(self.db.read(|x| x.query_row(&format!("SELECT {VERIFY_COLS} FROM search_site_verifications WHERE owner = ?1 AND site = ?2"), params![owner, site], verification_row).optional())?)
+    }
+
+    pub async fn verifications(&self, owner: &str) -> anyhow::Result<Vec<SiteVerification>> {
+        Ok(self.db.read(|x| x.query(&format!("SELECT {VERIFY_COLS} FROM search_site_verifications WHERE owner = ?1 ORDER BY site"), params![owner], verification_row))?)
+    }
+
+    /// A check's outcome: `proof` when it held (verified now), else `error` (a verified site
+    /// whose check fails is unverified again).
+    pub async fn record_check(&self, owner: &str, site: &str, proof: Option<&str>, error: Option<&str>, now: i64) -> anyhow::Result<()> {
+        self.db.write(|x| match proof {
+            Some(p) => x.execute(
+                "UPDATE search_site_verifications SET status = 'verified', proof = ?3, error = NULL, verified_at = COALESCE(verified_at, ?4), checked_at = ?4 WHERE owner = ?1 AND site = ?2",
+                params![owner, site, p, now],
+            ),
+            None => x.execute(
+                "UPDATE search_site_verifications SET status = CASE WHEN status = 'verified' THEN 'lapsed' ELSE status END, error = ?3, verified_at = CASE WHEN status = 'verified' THEN NULL ELSE verified_at END, checked_at = ?4 WHERE owner = ?1 AND site = ?2",
+                params![owner, site, error.unwrap_or_default(), now],
+            ),
+        })?;
+        Ok(())
+    }
+
+    pub async fn delete_verification(&self, owner: &str, site: &str) -> anyhow::Result<bool> {
+        Ok(self.db.write(|x| x.execute("DELETE FROM search_site_verifications WHERE owner = ?1 AND site = ?2", params![owner, site]))? > 0)
+    }
+
+    /// Of `sites`, those `owner` has verified.
+    pub async fn verified_sites(&self, owner: &str, sites: &[String]) -> anyhow::Result<Vec<String>> {
+        let all: Vec<String> = self.db.read(|x| x.query("SELECT site FROM search_site_verifications WHERE owner = ?1 AND status = 'verified'", params![owner], |r| r.get(0)))?;
+        Ok(sites.iter().filter(|s| all.contains(s)).cloned().collect())
+    }
+
+    /// Verified sites last checked before `before`, claimed for a re-check (their `checked_at`
+    /// moves to `now` in the same write, so two nodes don't both re-check one): at most `max`.
+    pub async fn claim_rechecks(&self, before: i64, now: i64, max: i64) -> anyhow::Result<Vec<SiteVerification>> {
+        Ok(self.db.write(|x| {
+            let due: Vec<SiteVerification> = x.query(
+                &format!("SELECT {VERIFY_COLS} FROM search_site_verifications WHERE status = 'verified' AND (checked_at IS NULL OR checked_at < ?1) ORDER BY checked_at LIMIT ?2"),
+                params![before, max],
+                verification_row,
+            )?;
+            for v in &due {
+                x.execute("UPDATE search_site_verifications SET checked_at = ?3 WHERE owner = ?1 AND site = ?2", params![v.owner, v.site, now])?;
+            }
+            Ok::<_, code_sql::Error>(due)
+        })?)
+    }
+
+    /// Records a crawl of the unverified `sites` by `owner` at `now`, unless one of them already
+    /// had `per_day` in the 24 hours before: then nothing is recorded, and the answer names it and
+    /// when the next may start. One write, so two nodes can't both take the last crawl.
+    pub async fn record_site_crawl(&self, owner: &str, sites: &[String], per_day: u64, now: i64) -> anyhow::Result<Option<(String, i64)>> {
+        const DAY_MS: i64 = 86_400_000;
+        Ok(self.db.write(|x| {
+            x.execute("DELETE FROM search_site_crawls WHERE at <= ?1", params![now - DAY_MS])?;
+            for site in sites {
+                let (n, first): (i64, Option<i64>) = x.query_row("SELECT COUNT(*), MIN(at) FROM search_site_crawls WHERE owner = ?1 AND site = ?2", params![owner, site], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                if n as u64 >= per_day {
+                    return Ok::<_, code_sql::Error>(Some((site.clone(), first.unwrap_or(now) + DAY_MS)));
+                }
+            }
+            for site in sites {
+                x.execute("INSERT INTO search_site_crawls (owner, site, at) VALUES (?1, ?2, ?3)", params![owner, site, now])?;
+            }
+            Ok(None)
+        })?)
     }
 
     /// Deletes a cluster's rows.
@@ -1683,4 +1778,40 @@ mod tests {
         assert_eq!(integrate(&[(0, 1), (20, 100)], 10), 10.0);
         assert_eq!(integrate(&[(5, 1)], 3), 0.0);
     }
+}
+
+/// An owner's verification of a site, for the web crawler.
+#[derive(Clone, Debug, Serialize)]
+pub struct SiteVerification {
+    pub owner: String,
+    pub site: String,
+    pub token: String,
+    /// Where its file is read from (`https://<site>`, or a local test site's origin).
+    pub origin: String,
+    /// `pending`, `verified`, or `lapsed` (verified once, then a re-check failed).
+    pub status: String,
+    /// `dns` or `file`, once verified.
+    pub proof: Option<String>,
+    /// Why the last check failed.
+    pub error: Option<String>,
+    pub created_at: i64,
+    pub verified_at: Option<i64>,
+    pub checked_at: Option<i64>,
+}
+
+const VERIFY_COLS: &str = "owner, site, token, origin, status, proof, error, created_at, verified_at, checked_at";
+
+fn verification_row(r: &Row) -> code_sql::Result<SiteVerification> {
+    Ok(SiteVerification {
+        owner: r.get(0)?,
+        site: r.get(1)?,
+        token: r.get(2)?,
+        origin: r.get(3)?,
+        status: r.get(4)?,
+        proof: r.get(5)?,
+        error: r.get(6)?,
+        created_at: r.get(7)?,
+        verified_at: r.get(8)?,
+        checked_at: r.get(9)?,
+    })
 }

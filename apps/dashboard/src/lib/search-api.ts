@@ -279,6 +279,39 @@ export interface SearchKeyInfo {
   role_descriptors?: Record<string, unknown>;
 }
 
+/** One URL through the web crawler's path (`POST …/crawl-test`): what a crawl would do with it. */
+export interface CrawlTest {
+  url: string;
+  /** `allowed`, or why the URL would be skipped (`crawl_rule`, `robots_disallowed`, `out_of_domain`…). */
+  verdict: string;
+  rule?: string;
+  robots?: { origin: string; read: "ok" | "missing" | "unreachable"; allows: boolean; crawl_delay: number | null };
+  redirects?: { from: string; status: number; to: string; verdict: string }[];
+  status?: number;
+  content_type?: string;
+  error?: string;
+  indexed?: boolean;
+  reason?: string;
+  noindex?: boolean;
+  nofollow?: boolean;
+  canonical?: string;
+  document?: { id?: string; url?: string; title?: string; body?: string; meta_description?: string; headings?: string[] };
+  links?: { url: string; verdict: string }[];
+  links_not_shown?: number;
+}
+
+/** A site the cluster's owner verified (or started verifying) for the crawler's higher limits. */
+export interface SiteVerification {
+  site: string;
+  status: "pending" | "verified" | "lapsed";
+  proof: "dns" | "file" | null;
+  error: string | null;
+  verified_at: number | null;
+  checked_at: number | null;
+  dns: { name: string; type: "TXT"; value: string };
+  file: { url: string; content: string };
+}
+
 /** The role `access: "data"` keys carry (search-control's `link_role`). */
 export const DATA_ROLE = "roll_link";
 
@@ -315,6 +348,11 @@ export const searchApi = {
   browserKeys: (id: string) => call<{ keys: BrowserKey[] }>("GET", `${cl(id)}/browser-keys`),
   createBrowserKey: (id: string, k: BrowserKeyRequest) => call<NewBrowserKey>("POST", `${cl(id)}/browser-keys`, k),
   revokeBrowserKey: (id: string, key: string) => call<null>("DELETE", `${cl(id)}/browser-keys/${encodeURIComponent(key)}`),
+  /** One URL through the web crawler's path, writing nothing (with a connector's configuration, or none). */
+  crawlTest: (id: string, url: string, connector?: string) => call<CrawlTest>("POST", `${cl(id)}/crawl-test`, { url, connector }),
+  siteVerifications: (id: string) => call<{ verifications: SiteVerification[] }>("GET", `${cl(id)}/site-verifications`),
+  verifySite: (id: string, domain: string) => call<SiteVerification>("POST", `${cl(id)}/site-verifications`, { domain }),
+  checkSite: (id: string, site: string) => call<SiteVerification>("POST", `${cl(id)}/site-verifications/${encodeURIComponent(site)}/check`, {}),
   /** The remote clusters roll holds credentials for (never wakes the cluster, never the key). */
   remotes: (id: string) => call<{ remotes: RemoteLink[] }>("GET", `${cl(id)}/remotes`),
   /** Links another of the person's clusters as remote `alias` (roll makes its cross-cluster key). */

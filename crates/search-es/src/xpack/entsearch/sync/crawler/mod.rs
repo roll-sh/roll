@@ -10,9 +10,11 @@ pub mod config;
 pub mod fetch;
 pub mod hosts;
 pub mod html;
+pub mod probe;
 pub mod robots;
 pub mod sitemap;
 pub mod url;
+pub mod verify;
 
 use self::config::{Ceilings, Fields, L, Plan};
 use self::fetch::{Auth, Fetcher};
@@ -99,7 +101,7 @@ fn number(cluster: &Cluster, key: &str, default: u64) -> u64 {
 
 /// Why a URL isn't fetched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Verdict {
+pub(crate) enum Verdict {
     Allowed,
     OutOfDomain,
     /// Over `max_url_length`, `max_url_segments` or `max_url_params`.
@@ -190,8 +192,7 @@ pub async fn sync(cid: &str, v: &Values, sink: &mut Sink<'_>, full: bool, cursor
     if !full {
         return Err(Stop::Failed("roll's web crawler runs full crawls only; incremental crawls come later".into()));
     }
-    let int = |k: &str| -> Result<Option<i64>, String> { v.text(k).map(|s| s.parse::<i64>().map_err(|_| format!("the connector's [{k}] isn't a number"))).transpose() };
-    let fields = Fields { urls: v.list("urls"), sitemap_urls: v.list("sitemap_urls"), sitemap_discovery: v.bool("sitemap_discovery", true), max_crawl_depth: int("max_crawl_depth")?, max_unique_url_count: int("max_unique_url_count")? };
+    let fields = fields_of(v)?;
     // Building the rules' DFAs is CPU work: off the async workers.
     let (ceil, advanced) = (ceilings(cluster), advanced.cloned());
     let plan = tokio::task::spawn_blocking(move || config::plan(&fields, advanced.as_ref(), &ceil))
@@ -201,34 +202,62 @@ pub async fn sync(cid: &str, v: &Values, sink: &mut Sink<'_>, full: bool, cursor
     let auth = auth(v, egress.allow_private()).map_err(Stop::Failed)?;
     let auth_origin = auth.as_ref().map(|a| a.origin.clone());
     let fetcher = Fetcher::new(egress.clone(), auth).map_err(Stop::Failed)?;
-    // Unverified domains' limits (domain verification comes later: every domain is unverified).
-    let unverified = number(cluster, UNVERIFIED_MAX_URLS, 1000);
-    let asked = plan.limits.get(L::UniqueUrls);
-    let (budget, budget_name) = if unverified < asked { (unverified, "unverified_domain_max_unique_url_count") } else { (asked, "max_unique_url_count") };
-    let floor = interval(cluster, MIN_REQUEST_INTERVAL, 500).max(interval(cluster, UNVERIFIED_MIN_INTERVAL, 1000));
-    let per_day = number(cluster, UNVERIFIED_CRAWLS_PER_DAY, 4);
-    // The same limit per owner and site across the node, whatever connector or cluster asks
-    // (a node without owners counts every cluster as one owner), checked before either count
-    // is spent.
+    // An owner's sites: verified ones get the verified limits; a crawl gets them only when every
+    // site it covers is verified. Verifications and the daily count of unverified crawls are the
+    // host's (`ClusterConfig::sites`: the fleet's catalogue); without one, every site is
+    // unverified and the count is the node's.
     let owner = cluster.config.owner.clone().unwrap_or_else(|| "(no owner)".to_string());
     let mut sites: Vec<String> = plan.domains.iter().filter_map(|d| Link::parse(&format!("{}/", d.origin), None)).map(|l| hosts::site_of(&l)).collect();
     sites.sort();
     sites.dedup();
+    let verified = match &cluster.config.sites {
+        Some(host) => host.verified(&owner, &sites).await,
+        None => Vec::new(),
+    };
+    let unverified_sites: Vec<String> = sites.iter().filter(|s| !verified.contains(s)).cloned().collect();
+    let all_verified = unverified_sites.is_empty() && !sites.is_empty();
+    let unverified = number(cluster, UNVERIFIED_MAX_URLS, 1000);
+    let asked = plan.limits.get(L::UniqueUrls);
+    let (budget, budget_name) = if !all_verified && unverified < asked { (unverified, "unverified_domain_max_unique_url_count") } else { (asked, "max_unique_url_count") };
+    let floor = match all_verified {
+        true => interval(cluster, MIN_REQUEST_INTERVAL, 500),
+        false => interval(cluster, MIN_REQUEST_INTERVAL, 500).max(interval(cluster, UNVERIFIED_MIN_INTERVAL, 1000)),
+    };
+    let per_day = number(cluster, UNVERIFIED_CRAWLS_PER_DAY, 4);
     let refused = |site: String, next: i64| {
         Stop::Failed(format!(
-            "an unverified site is crawled at most {per_day} times in 24 hours by one owner ({UNVERIFIED_CRAWLS_PER_DAY}): [{site}] can be crawled again after {}",
+            "an unverified site is crawled at most {per_day} times in 24 hours by one owner ({UNVERIFIED_CRAWLS_PER_DAY}): [{site}] can be crawled again after {} (verify it to crawl it on a schedule)",
             chrono::DateTime::from_timestamp_millis(next).unwrap_or_default().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
         ))
     };
-    let now = crate::time::now_millis();
-    if let Err((site, next)) = hosts::check_crawl(&owner, &sites, per_day, now) {
-        return Err(refused(site, next));
+    if !unverified_sites.is_empty() {
+        let now = crate::time::now_millis();
+        match &cluster.config.sites {
+            // Counted fleet-wide in the host's catalogue, in one write.
+            Some(host) => {
+                count_crawl(cluster, cid, per_day).await?;
+                match host.record_crawl(&owner, &unverified_sites, per_day, now).await {
+                    Ok(None) => {}
+                    Ok(Some((site, next))) => return Err(refused(site, next)),
+                    Err(e) => return Err(Stop::Failed(format!("the crawl can't be recorded: {e}"))),
+                }
+            }
+            // The node's count: checked before either count is spent.
+            None => {
+                if let Err((site, next)) = hosts::check_crawl(&owner, &unverified_sites, per_day, now) {
+                    return Err(refused(site, next));
+                }
+                count_crawl(cluster, cid, per_day).await?;
+                if let Err((site, next)) = hosts::record_crawl(&owner, &unverified_sites, per_day, now) {
+                    return Err(refused(site, next));
+                }
+            }
+        }
     }
-    count_crawl(cluster, cid, per_day).await?;
-    if let Err((site, next)) = hosts::record_crawl(&owner, &sites, per_day, now) {
-        return Err(refused(site, next));
-    }
-    let blocked = cluster.config.node_setting(BLOCKED_HOSTS).map(|b| b.split(',').map(|h| h.trim().trim_start_matches('.').trim_end_matches('.').to_ascii_lowercase()).filter(|h| !h.is_empty()).collect()).unwrap_or_default();
+    let strs = |v: &[String]| Value::Arr(v.iter().cloned().map(Value::from).collect());
+    sink.counters.metadata.insert("verified_sites".into(), strs(&verified));
+    sink.counters.metadata.insert("unverified_sites".into(), strs(&unverified_sites));
+    let blocked = blocked_hosts(cluster);
     let index = sink.index.clone();
     let before = doc_count(cluster, &index).await;
     let started_ms = crate::time::now_millis();
@@ -281,6 +310,12 @@ pub async fn sync(cid: &str, v: &Values, sink: &mut Sink<'_>, full: bool, cursor
         c.sink.counters.metadata.insert("force_purge_reset_error".into(), super::capped(format!("[{FORCE_PURGE}] couldn't be turned off again, so the next full crawl forces its purge too: {e}")).into());
     }
     result
+}
+
+/// The simple fields of a crawler's configuration.
+fn fields_of(v: &Values) -> Result<Fields, String> {
+    let int = |k: &str| -> Result<Option<i64>, String> { v.text(k).map(|s| s.parse::<i64>().map_err(|_| format!("the connector's [{k}] isn't a number"))).transpose() };
+    Ok(Fields { urls: v.list("urls"), sitemap_urls: v.list("sitemap_urls"), sitemap_discovery: v.bool("sitemap_discovery", true), max_crawl_depth: int("max_crawl_depth")?, max_unique_url_count: int("max_unique_url_count")? })
 }
 
 /// The credential and its origin, from the sealed fields.
@@ -354,6 +389,49 @@ impl ToLink for String {
 }
 
 /// A host as it is compared with `roll.crawler.blocked_hosts`: lowercase, no trailing dot.
+/// The hosts no crawl fetches from: `roll.crawler.blocked_hosts`, and the names the node
+/// serves (`roll.egress.deny_names`, which rolld fills with the fleet's own public names), so a
+/// crawl never fetches roll itself, by name as well as by address.
+fn blocked_hosts(cluster: &Cluster) -> Vec<String> {
+    [BLOCKED_HOSTS, crate::egress::DENY_NAMES]
+        .iter()
+        .filter_map(|k| cluster.config.node_setting(k))
+        .flat_map(|b| b.split(',').map(|h| h.trim().trim_start_matches('.').trim_end_matches('.').to_ascii_lowercase()).filter(|h| !h.is_empty()).collect::<Vec<_>>())
+        .collect()
+}
+
+/// Whether `link` may be fetched by a crawl of `plan`: its limits, domains, blocked hosts and
+/// address, crawl rules and the origin's robots.txt (when read), in that order.
+fn decide(plan: &Plan, fetcher: &Fetcher, blocked: &[String], robots: &HashMap<String, Robots>, link: &Link) -> Verdict {
+    let limits = &plan.limits;
+    if link.as_str().len() > limits.usize(L::UrlLength) || link.segments() > limits.usize(L::UrlSegments) || link.params() > limits.usize(L::UrlParams) {
+        return Verdict::Limit;
+    }
+    let Some(domain) = plan.domain(link) else { return Verdict::OutOfDomain };
+    let host = plain_host(link);
+    if fetcher.refused(link) || blocked.iter().any(|b| host == *b || host.ends_with(&format!(".{b}"))) {
+        return Verdict::Blocked;
+    }
+    if domain.rule_for(link).is_some_and(|r| !r.allow) {
+        return Verdict::RuleDenied;
+    }
+    match robots.get(&domain.origin) {
+        Some(r) if r.unreachable_origin() => Verdict::RobotsUnreachable,
+        Some(r) if !r.allows(&link.request_uri()) => Verdict::RobotsDisallowed,
+        _ => Verdict::Allowed,
+    }
+}
+
+/// What an answer for robots.txt that isn't a redirect means (RFC 9309 section 2.3.1).
+fn robots_of(resp: &fetch::Response) -> Robots {
+    match resp.status {
+        200..=299 => Robots::parse(&String::from_utf8_lossy(&resp.body)),
+        429 => Robots::unreachable(),
+        400..=499 => Robots::allow_all(),
+        _ => Robots::unreachable(),
+    }
+}
+
 fn plain_host(link: &Link) -> String {
     link.url().host_str().unwrap_or_default().trim_end_matches('.').to_ascii_lowercase()
 }
@@ -455,26 +533,10 @@ impl Crawl<'_, '_> {
     }
 
     fn verdict(&self, link: &Link) -> Verdict {
-        let limits = &self.plan.limits;
-        if link.as_str().len() > limits.usize(L::UrlLength) || link.segments() > limits.usize(L::UrlSegments) || link.params() > limits.usize(L::UrlParams) {
-            return Verdict::Limit;
-        }
-        let Some(domain) = self.plan.domain(link) else { return Verdict::OutOfDomain };
-        let host = plain_host(link);
-        if self.fetcher.refused(link) || self.blocked.iter().any(|b| host == *b || host.ends_with(&format!(".{b}"))) {
-            return Verdict::Blocked;
-        }
-        if self.skipped_origins.contains(&domain.origin) {
+        if self.plan.domain(link).is_some_and(|d| self.skipped_origins.contains(&d.origin)) {
             return Verdict::OriginSkipped;
         }
-        if domain.rule_for(link).is_some_and(|r| !r.allow) {
-            return Verdict::RuleDenied;
-        }
-        match self.robots.get(&domain.origin) {
-            Some(r) if r.unreachable_origin() => Verdict::RobotsUnreachable,
-            Some(r) if !r.allows(&link.request_uri()) => Verdict::RobotsDisallowed,
-            _ => Verdict::Allowed,
-        }
+        decide(&self.plan, &self.fetcher, &self.blocked, &self.robots, link)
     }
 
     /// Whether the crawl's own configuration leaves `link` out: not on its domains, over its URL
@@ -654,20 +716,17 @@ impl Crawl<'_, '_> {
                 // Too large: what was read can't be trusted to be whole, so nothing is allowed.
                 Some(Err(_)) => return Ok(Robots::unreachable()),
             };
-            return Ok(match resp.status {
-                200..=299 => Robots::parse(&String::from_utf8_lossy(&resp.body)),
-                300..=399 => match resp.location.as_deref().and_then(|l| Link::parse(l, Some(at.url()))) {
+            if (300..400).contains(&resp.status) {
+                match resp.location.as_deref().and_then(|l| Link::parse(l, Some(at.url()))) {
                     Some(next) => {
                         clean &= self.on_auth_origin(&at);
                         at = next;
                         continue;
                     }
-                    None => Robots::unreachable(),
-                },
-                429 => Robots::unreachable(),
-                400..=499 => Robots::allow_all(),
-                _ => Robots::unreachable(),
-            });
+                    None => return Ok(Robots::unreachable()),
+                }
+            }
+            return Ok(robots_of(&resp));
         }
         Ok(Robots::unreachable())
     }

@@ -215,3 +215,94 @@ pub async fn import(api: &Api, as_json: bool, cluster: &str, file: &str, connect
     println!("crawl it   roll search request {cluster} POST /_connector/_sync_job '{{\"id\":\"{}\",\"job_type\":\"full\"}}'", plan.connector);
     Ok(())
 }
+
+fn cluster_path(c: &Value, rest: &str) -> String {
+    format!("/v1/search/clusters/{}/{rest}", urlencoding::encode(&s(&c["id"])))
+}
+
+/// `roll search crawler test`: one URL through the crawler's path.
+pub async fn test(api: &Api, as_json: bool, cluster: &str, url: &str, connector: Option<&str>) -> anyhow::Result<()> {
+    let c = find(api, cluster).await?;
+    let v = api.post(&cluster_path(&c, "crawl-test"), json!({ "url": url, "connector": connector })).await?;
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        return Ok(());
+    }
+    println!("url        {}", s(&v["url"]));
+    if v["robots"].is_object() {
+        println!("robots     {} ({}): {}", s(&v["robots"]["origin"]), s(&v["robots"]["read"]), if v["robots"]["allows"].as_bool() == Some(true) { "allowed" } else { "disallowed" });
+    }
+    let rule = v["rule"].as_str().map(|r| format!(" (rule: {r})")).unwrap_or_default();
+    println!("verdict    {}{rule}", s(&v["verdict"]));
+    for h in v["redirects"].as_array().into_iter().flatten() {
+        println!("redirect   {} {} -> {} ({})", h["status"], s(&h["from"]), s(&h["to"]), s(&h["verdict"]));
+    }
+    if let Some(st) = v["status"].as_i64() {
+        println!("status     {st} {}", s(&v["content_type"]));
+    }
+    if let Some(e) = v["error"].as_str() {
+        println!("error      {e}");
+    }
+    if let Some(indexed) = v["indexed"].as_bool() {
+        let why = v["reason"].as_str().map(|r| format!(": {r}")).unwrap_or_default();
+        println!("indexed    {}{why}", if indexed { "yes" } else { "no" });
+    }
+    if let Some(d) = v["document"].as_object() {
+        for k in ["id", "url", "title", "meta_description"] {
+            if let Some(x) = d.get(k).and_then(Value::as_str) {
+                println!("  {k:<14} {x}");
+            }
+        }
+        if let Some(b) = d.get("body").and_then(Value::as_str) {
+            let short: String = b.chars().take(200).collect();
+            println!("  {:<14} {short}{}", "body", if b.chars().count() > 200 { "…" } else { "" });
+        }
+    }
+    let links = v["links"].as_array().cloned().unwrap_or_default();
+    if !links.is_empty() {
+        let queued = links.iter().filter(|l| l["verdict"].as_str() == Some("allowed")).count();
+        println!("links      {} ({queued} would be queued)", links.len());
+        for l in links.iter().filter(|l| l["verdict"].as_str() != Some("allowed")).take(20) {
+            println!("  skipped  {} ({})", s(&l["url"]), s(&l["verdict"]));
+        }
+    }
+    Ok(())
+}
+
+/// `roll search crawler verify`: starts verifying a site (what to publish), or checks it.
+pub async fn verify(api: &Api, as_json: bool, cluster: &str, domain: &str, check: bool) -> anyhow::Result<()> {
+    let c = find(api, cluster).await?;
+    let mut v = api.post(&cluster_path(&c, "site-verifications"), json!({ "domain": domain })).await?;
+    if check {
+        let site = urlencoding::encode(&s(&v["site"])).into_owned();
+        v = api.post(&cluster_path(&c, &format!("site-verifications/{site}/check")), json!({})).await?;
+    }
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        return Ok(());
+    }
+    println!("site       {}\nstatus     {}", s(&v["site"]), s(&v["status"]));
+    if let Some(e) = v["error"].as_str().filter(|_| v["status"] != "verified") {
+        println!("error      {e}");
+    }
+    if v["status"] != "verified" {
+        println!("publish    a DNS TXT record on {}: {}", s(&v["dns"]["name"]), s(&v["dns"]["value"]));
+        println!("   or      the file {} holding {}", s(&v["file"]["url"]), s(&v["file"]["content"]));
+        println!("then       roll search crawler verify {cluster} {} --check", s(&v["site"]));
+    }
+    Ok(())
+}
+
+/// `roll search crawler sites`: the owner's verifications.
+pub async fn sites(api: &Api, as_json: bool, cluster: &str) -> anyhow::Result<()> {
+    let c = find(api, cluster).await?;
+    let v = api.get(&cluster_path(&c, "site-verifications")).await?;
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        return Ok(());
+    }
+    for x in v["verifications"].as_array().into_iter().flatten() {
+        println!("{:<32} {:<9} {}", s(&x["site"]), s(&x["status"]), x["proof"].as_str().unwrap_or("-"));
+    }
+    Ok(())
+}

@@ -1,8 +1,9 @@
-import { Play, Plus, Square } from "lucide-react";
+import { Globe, Play, Plus, Square } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { esJson, formatCount, type SearchCluster } from "@/lib/search-api";
 import { POLL_MS } from "../redis/shared";
 import { ago, btn, ErrorNote, Panel } from "../ui";
+import { CrawlSite } from "./crawl-site";
 import { Empty, errText, LoadError, useLoad } from "./relevance-shared";
 
 /** The connectors roll runs syncs for (Elastic-managed ones of these services). */
@@ -77,6 +78,7 @@ export function ConnectorsTab({ cluster, onOpenConsole }: { cluster: SearchClust
   const { value: rows, error, reload } = useLoad(load);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [crawling, setCrawling] = useState(false);
   const syncing = rows?.some((r) => r.job && ACTIVE.includes(r.job.status)) ?? false;
 
   // Poll while a sync runs, so its counts move.
@@ -106,10 +108,33 @@ export function ConnectorsTab({ cluster, onOpenConsole }: { cluster: SearchClust
     </button>
   );
 
+  const crawled = () => {
+    setCrawling(false);
+    reload();
+  };
+
   return (
     <>
       <ErrorNote error={actionError} />
-      <Panel title="Connectors" aside={rows && rows.length > 0 && createButton}>
+      {crawling && rows && rows.length > 0 && (
+        <Panel title="Crawl a site">
+          <CrawlSite cluster={cluster} onCreated={crawled} />
+        </Panel>
+      )}
+      <Panel
+        title="Connectors"
+        aside={
+          rows &&
+          rows.length > 0 && (
+            <div className="flex gap-2">
+              <button onClick={() => setCrawling((x) => !x)} className={btn}>
+                <Globe className="size-3.5" /> Crawl a site
+              </button>
+              {createButton}
+            </div>
+          )
+        }
+      >
         {error ? (
           <LoadError error={error} onRetry={reload} />
         ) : !rows ? (
@@ -117,11 +142,14 @@ export function ConnectorsTab({ cluster, onOpenConsole }: { cluster: SearchClust
             <span className="shimmer">Loading connectors…</span>
           </p>
         ) : rows.length === 0 ? (
-          <Empty title="No connectors yet" action={createButton}>
-            A connector keeps an index in step with a PostgreSQL database or an S3 bucket. roll runs the syncs of Elastic-managed
-            (<span className="font-mono text-fg">is_native</span>) <span className="font-mono text-fg">postgresql</span> and{" "}
-            <span className="font-mono text-fg">s3</span> connectors, on demand or on their schedule.
-          </Empty>
+          <>
+            <Empty title="Crawl a site" action={createButton}>
+              Point roll at a site: it reads robots.txt and the sitemaps, crawls the pages and keeps an index of them in step. Test a URL
+              first to see what would be indexed. A connector can also keep an index in step with a PostgreSQL database or an S3 bucket
+              (<span className="font-mono text-fg">postgresql</span>, <span className="font-mono text-fg">s3</span>).
+            </Empty>
+            <CrawlSite cluster={cluster} onCreated={crawled} />
+          </>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full min-w-[760px] text-[13px]">

@@ -1131,6 +1131,11 @@ previews are listed once those products are on.
 | `search_put_query_ruleset` | Create a query ruleset or replace its rules (destructive). | `PUT /v1/search/clusters/{cluster}/query_rules/{ruleset}` |
 | `search_delete_query_ruleset` | Delete a query ruleset. | `DELETE /v1/search/clusters/{cluster}/query_rules/{ruleset}` |
 | `search_test_query_ruleset` | Which of a ruleset's rules match these criteria. | `POST /v1/search/clusters/{cluster}/query_rules/{ruleset}/test` |
+| `search_crawl_test` | One URL through the web crawler's path, writing nothing: what would be indexed and why anything would be skipped (read). | `POST /v1/search/clusters/{cluster}/crawl-test` |
+| `search_list_site_verifications` | The sites the cluster's owner verified for the web crawler. | `GET /v1/search/clusters/{cluster}/site-verifications` |
+| `search_verify_site` | Start verifying a site: the token to publish (DNS TXT or the well-known file). | `POST /v1/search/clusters/{cluster}/site-verifications` |
+| `search_check_site_verification` | Check a site's token now: verified, or why not. | `POST /v1/search/clusters/{cluster}/site-verifications/{site}/check` |
+| `search_delete_site_verification` | Drop a site's verification. | `DELETE /v1/search/clusters/{cluster}/site-verifications/{site}` |
 | `search_refresh` | Make what was just indexed searchable now. | `POST /v1/search/clusters/{cluster}/indices/{index}/refresh` |
 | `search_analyze` | The tokens an index's analyzer makes of some text (read). | `POST /v1/search/clusters/{cluster}/indices/{index}/analyze` |
 | `search_add_document` | Index a document under a new id. | `POST /v1/search/clusters/{cluster}/indices/{index}/docs` |

@@ -828,6 +828,7 @@ impl Control {
                 max_analysis_bytes: cfg.max_analysis_bytes,
                 default_repository: cfg.default_repository.clone(),
                 links: Some(links.clone()),
+                sites: Some(Arc::new(crate::sites::CatalogSites { store: store.clone() })),
                 audit: cfg.audit.clone(),
                 embedder: cfg.embed.clone().map(search_server::embed::EmbedPool::new),
                 secret_refs: Some(search_es::secret_refs::Resolver(secret_refs.clone())),
@@ -860,6 +861,7 @@ impl Control {
         control.start_purges();
         control.start_always_on();
         control.start_job_wakes();
+        control.start_site_rechecks();
         Ok(control)
     }
 

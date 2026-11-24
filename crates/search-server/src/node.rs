@@ -162,6 +162,10 @@ pub struct NodeConfig {
     /// Reaches other roll search clusters as remote clusters (`search_es::remote::links`; the
     /// control plane's); `None`: remotes reach only the node itself.
     pub links: Option<Arc<dyn search_es::remote::links::Links>>,
+    /// Owners' verified sites and crawls of unverified ones, for the web crawler
+    /// (`search_es` `crawler::verify::Sites`; the control plane's catalogue); `None`: every site
+    /// is unverified and crawls are counted on the node.
+    pub sites: Option<Arc<dyn search_es::xpack::entsearch::sync::crawler::verify::Sites>>,
     /// How long and how much each cluster's audit log keeps ([`crate::audit`]).
     pub audit: crate::audit::AuditConfig,
     /// The embedding pool every cluster's E5 inference endpoints run on ([`crate::embed`]);
@@ -203,6 +207,7 @@ impl Default for NodeConfig {
             unsealed_secrets: false,
             default_repository: None,
             links: None,
+            sites: None,
             audit: crate::audit::AuditConfig::default(),
             embedder: None,
             secret_refs: None,
@@ -1359,6 +1364,7 @@ impl Node {
         cfg.sealer = self.cfg.sealer.clone();
         cfg.unsealed_secrets = self.cfg.unsealed_secrets;
         cfg.links = self.cfg.links.clone();
+        cfg.sites = self.cfg.sites.clone();
         cfg.embedder = self.cfg.embedder.clone().map(|p| p as Arc<dyn search_es::xpack::inference::local::Embedder>);
         cfg.catalog_id = spec.catalog_id.clone();
         cfg.owner = spec.owner.clone();
