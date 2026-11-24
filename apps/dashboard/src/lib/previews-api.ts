@@ -454,6 +454,8 @@ export interface PreviewSettings {
   data_at?: string | null;
   /** A feedback button on its pages for people who came in through roll (link access, or a team session). */
   feedback: boolean;
+  /** Feature flags a reviewer sets for their own view from the page's toolbar. */
+  flags?: { name: string; options: string[] }[];
   /** Variables for a family of branches: a branch glob → `{name: value}`, over `env`. */
   env_for: Record<string, Record<string, string>>;
   /** Wake the change's services as soon as a new head is deployed (a warm first visit). */
