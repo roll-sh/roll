@@ -1,10 +1,13 @@
 // roll previews' feedback button (docs/previews.md, "Feedback on the preview page"). The preview's
 // proxy adds it to the pages of people who came in through roll. It holds no credential: it picks
-// an element, takes a note, and opens roll, where the signed-in person posts it on the change.
+// an element, takes a note, and opens roll, where the signed-in person posts it on the change. A
+// share link's guest (the link takes notes) posts it from here instead, with a name, through the
+// preview's own host (`/__roll/notes`, the link's cookie); they see only their link's notes.
 (() => {
   if (window.__rollFeedback) return;
   window.__rollFeedback = true;
   const TARGET = __ROLL_TARGET__;
+  const GUEST = __ROLL_GUEST__;
   // The project's flags a reviewer sets for their own view (Vercel's Flags Explorer): kept in a
   // cookie of this browser's, which roll's proxy turns into the services' `x-roll-flags`.
   const FLAGS = __ROLL_FLAGS__;
@@ -72,8 +75,8 @@
  box-shadow:0 12px 32px rgba(0,0,0,.45);display:grid;gap:8px}
 .muted{color:#8f8f8f;font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px}
-textarea{width:100%;min-height:72px;resize:vertical;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,.14);
- background:#000;color:#ededed}
+textarea,input.name{width:100%;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,.14);background:#000;color:#ededed}
+textarea{min-height:72px;resize:vertical}
 .row{display:flex;gap:6px;justify-content:flex-end}
 .resolve{height:22px;padding:0 8px;border-radius:6px;border:1px solid rgba(255,255,255,.14);background:transparent;color:#8f8f8f;cursor:pointer;font-size:11px}
 .resolve:hover{color:#ededed}
@@ -98,12 +101,21 @@ textarea{width:100%;min-height:72px;resize:vertical;padding:8px;border-radius:8p
 <div class="bar"><button class="count flagbtn" type="button" hidden aria-label="Flags for your view">Flags</button><button class="count" type="button" hidden aria-label="Feedback on this page"></button><button class="btn" type="button" aria-label="Leave feedback on this page"><span class="dot"></span>Feedback</button></div>
 <form class="card" hidden>
   <div class="muted">On <code class="where"></code></div>
+  <input class="name" placeholder="Your name" aria-label="Your name" maxlength="40" hidden>
   <textarea placeholder="What should change here?" aria-label="Your feedback" required maxlength="4000"></textarea>
+  <div class="muted said" hidden></div>
   <div class="row"><button type="button" class="cancel">Cancel</button><button type="submit" class="go">Post in roll</button></div>
 </form>`;
   const $ = (s) => root.querySelector(s);
   const btn = $(".btn"), form = $("form.card"), box = $(".box"), note = $("textarea"), where = $(".where"), count = $(".count:not(.flagbtn)"), list = $("div.list");
   let picking = false, picked = null;
+  const name = $("input.name"), said = $(".said");
+  if (GUEST) {
+    name.hidden = false;
+    name.required = true;
+    try { name.value = localStorage.getItem("roll_guest_name") || ""; } catch {}
+    form.querySelector(".go").textContent = "Send";
+  }
   // Flags: each a select (the app's own choice, or one of its options); applied for this
   // browser only, by reloading with the cookie set.
   const flagBtn = $(".flagbtn"), flagForm = $(".flags");
@@ -179,6 +191,7 @@ textarea{width:100%;min-height:72px;resize:vertical;padding:8px;border-radius:8p
   const reset = () => {
     stop();
     picked = null;
+    said.hidden = true;
     form.hidden = true;
     btn.hidden = false;
     box.style.display = "none";
@@ -210,6 +223,30 @@ textarea{width:100%;min-height:72px;resize:vertical;padding:8px;border-radius:8p
   form.addEventListener("submit", (e) => {
     e.preventDefault();
     if (!picked || !note.value.trim()) return;
+    const ctx = {
+      steps: steps.map(([t, what]) => `${Math.max(0, Math.round((Date.now() - t) / 1000))}s before · ${what}`),
+      errors,
+      requests: [...failed.values()].slice(-5),
+    };
+    if (GUEST) {
+      try { localStorage.setItem("roll_guest_name", name.value.trim()); } catch {}
+      const go = form.querySelector(".go");
+      go.disabled = true;
+      fetch("/__roll/notes", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: name.value.trim(), path: location.pathname, selector: picked.selector, viewport: `${innerWidth}x${innerHeight}`, note: note.value.trim(), ...ctx }),
+      })
+        .then(async (r) => {
+          if (!r.ok) throw new Error((await r.text()).slice(0, 200) || `${r.status}`);
+          reset();
+          load();
+        })
+        .catch((err) => { said.hidden = false; said.textContent = `Not sent: ${err.message}`; })
+        .finally(() => { go.disabled = false; });
+      return;
+    }
     // The path only: a query can hold a token (a sign-in callback, a reset link), and the note
     // may end up on a public pull request.
     const q = new URLSearchParams({
@@ -269,7 +306,7 @@ textarea{width:100%;min-height:72px;resize:vertical;padding:8px;border-radius:8p
           b.addEventListener("click", () => window.open(`${TARGET}&${new URLSearchParams({ [key]: String(n.id || "") })}`, "_blank", "noopener"));
           return b;
         };
-        if (n.id) {
+        if (n.id && !GUEST) {
           const acts = document.createElement("div");
           acts.className = "acts";
           acts.append(act("Reply", "fb_reply"), act("Resolve", "fb_resolve"));
@@ -286,10 +323,12 @@ textarea{width:100%;min-height:72px;resize:vertical;padding:8px;border-radius:8p
     );
   };
   count.addEventListener("click", () => { list.hidden = !list.hidden; });
-  fetch(`/__roll/feedback.json?path=${encodeURIComponent(location.pathname)}`, { credentials: "same-origin" })
-    .then((r) => (r.ok ? r.json() : []))
-    .then((notes) => Array.isArray(notes) && show(notes))
-    .catch(() => {});
+  const load = () =>
+    fetch(`/__roll/feedback.json?path=${encodeURIComponent(location.pathname)}`, { credentials: "same-origin" })
+      .then((r) => (r.ok ? r.json() : []))
+      .then((notes) => Array.isArray(notes) && show(notes))
+      .catch(() => {});
+  load();
   const mount = () => document.body && !host.isConnected && document.body.appendChild(host);
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", mount);
   else mount();

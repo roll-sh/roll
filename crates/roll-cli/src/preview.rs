@@ -134,11 +134,16 @@ pub enum Preview {
         diff: Option<String>,
     },
     /// A link for someone outside the team, open for --hours (24 unless said; at most 720); the
-    /// link is printed once. --list shows them, --revoke ends one.
+    /// link is printed once. --label says who it's for; with --notes its visitors may leave notes
+    /// on the pages (as guests, with a name). --list shows them, --revoke ends one.
     Share {
         preview: String,
         #[arg(long, default_value_t = 24, conflicts_with_all = ["list", "revoke"])]
         hours: u32,
+        #[arg(long, default_value = "", conflicts_with_all = ["list", "revoke"])]
+        label: String,
+        #[arg(long, conflicts_with_all = ["list", "revoke"])]
+        notes: bool,
         #[arg(long)]
         list: bool,
         #[arg(long)]
@@ -1038,7 +1043,7 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
             api.post(&format!("/v1/previews/{preview}/visual/accept"), body).await?
         }
         Preview::Keep { preview, hours, release } => api.post(&format!("/v1/previews/{preview}/keep"), json!({ "hours": if release { 0 } else { hours } })).await?,
-        Preview::Share { preview, hours, list, revoke } => {
+        Preview::Share { preview, hours, label, notes, list, revoke } => {
             let path = format!("/v1/previews/{preview}/shares");
             let v = match (list, revoke) {
                 (_, Some(sid)) => {
@@ -1046,7 +1051,7 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
                     json!({ "revoked": sid })
                 }
                 (true, None) => api.get(&path).await?,
-                (false, None) => api.post(&path, json!({ "hours": hours })).await?,
+                (false, None) => api.post(&path, json!({ "hours": hours, "label": label, "notes": notes })).await?,
             };
             if !as_json {
                 match (&v["url"], v.as_array()) {
@@ -1057,7 +1062,9 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
                     (_, Some(list)) if !list.is_empty() => {
                         for x in list {
                             let state = if x["revoked"] == true { "revoked" } else { "open" };
-                            println!("{}  {state}  until {}  by {}", s(&x["id"]), until_utc(x["expires_at"].as_i64().unwrap_or(0)), s(&x["created_by"]));
+                            let label = s(&x["label"]);
+                            let extra = [if label.is_empty() { String::new() } else { format!("  \"{label}\"") }, if x["notes"] == true { "  takes notes".into() } else { String::new() }].concat();
+                            println!("{}  {state}  until {}  by {}{extra}", s(&x["id"]), until_utc(x["expires_at"].as_i64().unwrap_or(0)), s(&x["created_by"]));
                         }
                     }
                     (_, Some(_)) => println!("no share links"),

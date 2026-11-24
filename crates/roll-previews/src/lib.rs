@@ -1088,6 +1088,10 @@ pub struct Share {
     pub created_by: String,
     pub created_at: i64,
     pub revoked: bool,
+    /// Who it's for, as its maker wrote it (`""`: not said).
+    pub label: String,
+    /// Its visitors may leave notes on the preview's pages (as `guest:<name>`).
+    pub notes: bool,
 }
 
 /// How much a preview's page changed between the screenshots of two heads.
