@@ -223,6 +223,12 @@ comrak = { version = "0.56", default-features = false }
 ammonia = "4"
 # roll storage (S3-compatible object storage).
 quick-xml = "0.41"
+# roll search's web crawler parses pages with the WHATWG algorithm (`xpack/entsearch/sync/crawler/html.rs`).
+html5ever = "0.40"
+# roll search's web crawler: a URL's site (registrable domain) for per-site crawl limits.
+psl = "2"
+# Crawl rules as fully built DFAs (`search-es` `xpack/entsearch/sync/crawler/config.rs`).
+regex-automata = "0.4"
 crc-fast = "1"
 httpdate = "1"
 ipnet = "2"
