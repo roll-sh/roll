@@ -2501,19 +2501,19 @@ async fn a_notes_people_are_told_by_mail() {
 
 /// A guest's note through a share link that takes notes: on the change as `guest:<name>`, its
 /// words inert for a pull request, the link's label said; a link that takes none refuses; ten an
-/// hour per link; a guest sees only their link's notes. No share link where roll apps serves it.
+/// hour per link; a guest sees only their link's notes.
 #[tokio::test]
 async fn a_share_links_guest_leaves_notes_as_a_guest() {
     let e = env(json!({ "enabled": true }));
     e.code.open(change("chg_g", 5));
     e.engine.pass().await.unwrap();
     let p = e.engine.store.row_by_change("chg_g").unwrap().unwrap();
-    let live = async |notes: bool, label: &str| {
-        let (_, url) = e.engine.share(&p.id, 2, "ada", None, label, notes).await.unwrap();
+    let live = |notes: bool, label: &str| {
+        let (_, url) = e.engine.share(&p.id, 2, "ada", None, label, notes).unwrap();
         let token = url.split("roll_share=").nth(1).unwrap().to_string();
         e.engine.store.share_live(&p.id, &token).unwrap().unwrap()
     };
-    let (open, closed) = (live(true, "Acme's review").await, live(false, "").await);
+    let (open, closed) = (live(true, "Acme's review"), live(false, ""));
     let note = roll_previews::notes::GuestNote { name: "Ada <script>".into(), path: "/pricing".into(), selector: "button.buy".into(), note: "Ping @team ![x](https://t.example/p.gif) <b>here</b>".into(), viewport: "390x844".into(), ..Default::default() };
     e.engine.guest_note(&p.id, &open, &note).await.unwrap();
     let (change, body, by, outside) = e.code.comments.lock()[0].clone();
@@ -2534,9 +2534,6 @@ async fn a_share_links_guest_leaves_notes_as_a_guest() {
     let seen: Vec<String> = e.engine.guest_notes_of(&p.id, &open.id, "/pricing").await.unwrap().into_iter().map(|n| n.id).collect();
     assert_eq!(seen, ["rv_c1"]);
     assert!(e.engine.guest_notes_of(&p.id, &closed.id, "/pricing").await.unwrap().is_empty());
-    // None where roll apps serves the preview: its proxy would turn the link's visitors away.
-    *e.apps.catalog.lock() = Some(vec![roll_previews::ports::CatalogService { name: "web".into(), repo: Some("acme/web".into()), root: String::new(), memory_mb: 512 }]);
-    assert!(matches!(e.engine.share(&p.id, 2, "ada", None, "", false).await, Err(roll_previews::Error::Conflict(_))));
 }
 
 /// A start's dynamic credentials (roll secrets' leases) live as long as it runs: renewed near

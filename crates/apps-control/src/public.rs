@@ -913,6 +913,30 @@ async fn check_access(apps: &Arc<Apps>, service: &str, env: &str, req: &mut Requ
     {
         return None;
     }
+    // A roll previews share link (someone outside the team, until it ends) on a preview's
+    // environment: asked of previews at every request, so a revoked one stops at once. Its cookie
+    // never reaches the app, and its guest is no visitor session (`…/visitors` is people's).
+    if env.starts_with("pv-")
+        && let Some(shares) = apps.preview_shares()
+    {
+        let name = host_only(apps, format!("roll_share_{env}"));
+        if let Some(t) = take_cookie(req, &name)
+            && let Some(s) = shares.live(env, &t, false).await
+        {
+            take_cookie(req, &host_only(apps, format!("roll_access_{env}")));
+            req.extensions_mut().insert(ShareGuest { token: t, notes: s.notes });
+            return None;
+        }
+        if let Some(t) = query_value(req, "roll_share")
+            && let Some(s) = shares.live(env, &t, true).await
+        {
+            let left = ((s.ends_ms - code_sql::now_ms()) / 1000).max(1);
+            return Some(match enter(apps, req, "roll_share", &name, &t, Some(left)) {
+                Some(r) => r,
+                None => denied(apps, service, env).await,
+            });
+        }
+    }
     if access.signed_in || access.sso.is_some() {
         // A ticket from roll's dashboard (or a provider's sign-in), coming back: the session it opens.
         if req.uri().path() == crate::visit::PATH {
@@ -992,34 +1016,14 @@ async fn check_access(apps: &Arc<Apps>, service: &str, env: &str, req: &mut Requ
         return Some(denied(apps, service, env).await);
     };
     let name = host_only(apps, format!("roll_access_{env}"));
-    let query = req.uri().query().unwrap_or("").to_string();
-    let mut token = None;
-    let mut rest = Vec::new();
-    for pair in query.split('&').filter(|p| !p.is_empty()) {
-        match pair.strip_prefix("roll_access=") {
-            Some(v) => token = Some(percent_encoding::percent_decode_str(v).decode_utf8_lossy().into_owned()),
-            None => rest.push(pair),
-        }
-    }
-    if let Some(t) = token {
+    if let Some(t) = query_value(req, "roll_access") {
         if !same(&token_hash(&t), &hash) {
             return Some(denied(apps, service, env).await);
         }
-        // One leading slash, and no backslash (browsers read `/\host` as `//host`): the
-        // redirect never leaves the site.
-        let path = format!("/{}", req.uri().path().replace('\\', "%5C").trim_start_matches('/'));
-        let location = if rest.is_empty() { path.to_string() } else { format!("{path}?{}", rest.join("&")) };
-        let secure = if apps.cfg.scheme == "https" { "; Secure" } else { "" };
-        let cookie = format!("{name}={t}; Path=/; HttpOnly; SameSite=Lax{secure}");
-        let mut r = StatusCode::FOUND.into_response();
-        let h = r.headers_mut();
-        if let (Ok(l), Ok(c)) = (HeaderValue::from_str(&location), HeaderValue::from_str(&cookie)) {
-            h.insert(header::LOCATION, l);
-            h.insert(header::SET_COOKIE, c);
-            h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-            return Some(r);
-        }
-        return Some(denied(apps, service, env).await);
+        return Some(match enter(apps, req, "roll_access", &name, &t, None) {
+            Some(r) => r,
+            None => denied(apps, service, env).await,
+        });
     }
     // Every Cookie header, minus ours; ours must match.
     let mut ok = false;
@@ -1094,6 +1098,41 @@ fn set_state_cookie(apps: &Arc<Apps>, env: &str, state: &str, r: &mut Response) 
 /// tenant's app on `up.roll.site`) can't set one for this host.
 pub(crate) fn host_only(apps: &Apps, name: String) -> String {
     if apps.cfg.scheme == "https" { format!("__Host-{name}") } else { name }
+}
+
+/// A query parameter's value, decoded (the last, when it's there more than once).
+fn query_value(req: &Request, param: &str) -> Option<String> {
+    let prefix = format!("{param}=");
+    req.uri().query()?.split('&').filter_map(|p| p.strip_prefix(prefix.as_str())).last().map(|v| percent_encoding::percent_decode_str(v).decode_utf8_lossy().into_owned())
+}
+
+/// The way in through a link (`?<param>=<token>`): its cookie set (host-only; for `max_age`
+/// seconds, else the browser's session), and on to the same address without the token. One
+/// leading slash, and no backslash (browsers read `/\host` as `//host`): the redirect never
+/// leaves the site. `None` when the token can't be a cookie.
+fn enter(apps: &Apps, req: &Request, param: &str, cookie: &str, token: &str, max_age: Option<i64>) -> Option<Response> {
+    let prefix = format!("{param}=");
+    let rest: Vec<&str> = req.uri().query().unwrap_or("").split('&').filter(|p| !p.is_empty() && !p.starts_with(prefix.as_str())).collect();
+    let path = format!("/{}", req.uri().path().replace('\\', "%5C").trim_start_matches('/'));
+    let location = if rest.is_empty() { path } else { format!("{path}?{}", rest.join("&")) };
+    let secure = if apps.cfg.scheme == "https" { "; Secure" } else { "" };
+    let age = max_age.map(|s| format!("; Max-Age={s}")).unwrap_or_default();
+    let set = format!("{cookie}={token}; Path=/; HttpOnly; SameSite=Lax{age}{secure}");
+    let (Ok(l), Ok(c)) = (HeaderValue::from_str(&location), HeaderValue::from_str(&set)) else { return None };
+    let mut r = StatusCode::FOUND.into_response();
+    let h = r.headers_mut();
+    h.insert(header::LOCATION, l);
+    h.insert(header::SET_COOKIE, c);
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Some(r)
+}
+
+/// A roll previews share link's guest ([`crate::integrations::PreviewShares`]): their link,
+/// to ask previews again about their notes, and whether it takes any.
+#[derive(Clone)]
+struct ShareGuest {
+    token: String,
+    notes: bool,
 }
 
 /// Who a sign-in-gated environment's session is ([`Apps::visitor`]): a provider's visitor's
@@ -1831,14 +1870,27 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     }
     // roll previews' feedback button: its script from the preview's own host, and a page load
     // (a browser's document, else a GET asking for HTML) gets the tag.
-    let target = if via_link { apps.feedback_target(service, env).await } else { None };
+    // A share link's guest gets it when their link takes notes, and posts from the page.
+    let guest = req.extensions().get::<ShareGuest>().cloned();
+    let target = if via_link || guest.as_ref().is_some_and(|g| g.notes) { apps.feedback_target(service, env).await } else { None };
     if let Some(t) = &target
         && req.uri().path() == crate::feedback::PATH
     {
-        return crate::feedback::script(t);
+        return crate::feedback::script(t, guest.is_some());
     }
     if target.is_some() && req.uri().path() == crate::feedback::NOTES {
-        return crate::feedback::notes(apps.feedback_notes(), env, req.uri().query()).await;
+        return match &guest {
+            Some(g) => crate::feedback::guest_notes(apps.preview_shares(), env, &g.token, req.uri().query()).await,
+            None => crate::feedback::notes(apps.feedback_notes(), env, req.uri().query()).await,
+        };
+    }
+    if target.is_some()
+        && let Some(g) = &guest
+        && req.uri().path() == crate::feedback::GUEST_NOTE
+        && req.method() == axum::http::Method::POST
+    {
+        let token = g.token.clone();
+        return crate::feedback::guest_note(apps.preview_shares(), env, &token, req).await;
     }
     let page_load = req.method() == axum::http::Method::GET
         && match req.headers().get("sec-fetch-dest").and_then(|v| v.to_str().ok()) {

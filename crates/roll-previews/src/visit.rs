@@ -68,6 +68,46 @@ impl Engine {
         self.visitors.get().is_none_or(|v| v.maker_reaches(user, project))
     }
 
+    /// Share link `token` of `preview`, if it's live: not revoked or past, and its maker may still
+    /// open the project's previews, asked again (off the async workers: it reads roll's accounts)
+    /// once last asked `recheck` ago. One whose maker may not ends now, said in the preview's
+    /// activity. Every request through a link asks (previews' proxy, and roll apps' for the
+    /// previews it serves), so a revoked one stops at once.
+    pub async fn share_visit(self: &std::sync::Arc<Self>, preview: &str, token: &str, recheck: std::time::Duration) -> Option<crate::store::LiveShare> {
+        let live = self.store.share_live(preview, token).ok().flatten()?;
+        let (share, maker_checked) = (live.id.clone(), live.maker_checked);
+        let Some(maker) = live.maker.clone() else { return Some(live) };
+        let now = self.store.now_ms().ok()?;
+        if maker_checked > now - recheck.as_millis() as i64 {
+            return Some(live);
+        }
+        let project = self.store.row(preview).ok()?.project_id;
+        let e = self.clone();
+        let reaches = tokio::task::spawn_blocking(move || e.maker_reaches(&maker, &project)).await.unwrap_or(false);
+        if reaches {
+            let _ = self.store.share_maker_checked(&share, now);
+            return Some(live);
+        }
+        let by = self.store.shares(preview).ok().and_then(|all| all.into_iter().find(|s| s.id == share)).map(|s| s.created_by).unwrap_or_default();
+        if self.store.revoke_share(preview, &share).is_ok() {
+            let _ = self.store.log(preview, &format!("{by}'s share link ended: they may no longer open the project's previews"));
+        }
+        None
+    }
+
+    /// Share link `token` of `preview` was followed: who did isn't known (nobody signed in), only
+    /// that it was, once a day.
+    pub fn share_followed(&self, preview: &str, token: &str) {
+        if let Ok(now) = self.store.now_ms() {
+            let _ = self.store.share_opened(preview, token, now.div_euclid(86_400_000), now);
+        }
+    }
+
+    /// The preview a roll apps environment (`pv-<id>`) is.
+    pub fn preview_of_env(env: &str) -> Option<String> {
+        env.strip_prefix("pv-").filter(|id| !id.is_empty()).map(|id| format!("pv_{id}"))
+    }
+
     /// `POST /v1/previews/{id}/visit {to}`, as a person signed in to roll (`session`, their roll
     /// session): a one-use ticket to `to` (a URL at one of the preview's own hosts), as the URL
     /// that opens it. Only a preview whose project has team access gives one. The URL is the
@@ -349,7 +389,7 @@ mod tests {
         assert_eq!(visit("/hello", "application/json", Some(&session)).await.0, 401);
         assert_ne!(store.access(&id).unwrap().unwrap().token, token, "leaving link access replaces the link's token");
         // Share links and the CI bypass still open it.
-        let (_, link) = engine.share(&id, 1, "ada", Some("usr_ada"), "", false).await.unwrap();
+        let (_, link) = engine.share(&id, 1, "ada", Some("usr_ada"), "", false).unwrap();
         let link = link.strip_prefix(&format!("http://{host}")).unwrap();
         let (status, _, cookie, _) = visit(link, "text/html", None).await;
         assert_eq!(status, 302);
