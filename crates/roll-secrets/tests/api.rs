@@ -8211,7 +8211,7 @@ async fn public_certificates_are_ordered_in_the_background_renewed_and_a_failed_
     // Renewal at rotate_days: the job orders again (the same account) and every linked key rotates.
     let start = api.ok(Method::GET, "/events?latest=1", None).await["next"].as_i64().unwrap();
     let p = api.project.clone();
-    api.db.write(move |c| c.execute("UPDATE public_certs SET issued_at = issued_at - 61 * 86400000 WHERE project_id = ?", [p.as_str()])).unwrap();
+    api.db.write(move |c| c.execute("UPDATE public_certs SET issued_at = issued_at - ? WHERE project_id = ?", code_sql::params![61 * 86_400_000i64, p])).unwrap();
     sweep().await;
     let v = api.values("production", "/").await["values"].clone();
     assert_ne!(v["TLS_CERT"].as_str().unwrap(), first, "renewed");
