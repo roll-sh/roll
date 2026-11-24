@@ -2821,11 +2821,22 @@ mod tests {
         assert!(raw("GET /__roll/feedback.js HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nConnection: close\r\n\r\n".into()).await.starts_with("HTTP/1.1 401"));
         // A share link: in through its token (a cookie of its own, only for its life), out once
         // it's revoked.
-        let (share, stoken) = rt.store.create_share(&row.id, rt.store.now_ms().unwrap() + 3_600_000, "ada", None).unwrap();
+        let (share, stoken) = rt.store.create_share(&row.id, rt.store.now_ms().unwrap() + 3_600_000, "ada", None, "", false).unwrap();
         let entered = raw(format!("GET /hello?roll_share={stoken} HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nConnection: close\r\n\r\n")).await;
         assert!(entered.starts_with("HTTP/1.1 302") && entered.contains(&format!("roll_share_{}={stoken}", row.id)) && entered.contains("Max-Age=3"), "{entered}");
         let with_share = format!("GET /hello HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nCookie: roll_share_{}={stoken}\r\nConnection: close\r\n\r\n", row.id);
         assert!(raw(with_share.clone()).await.ends_with("service saw /hello"));
+        assert!(!raw(format!("GET /__roll/feedback.js HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nCookie: roll_share_{}={stoken}\r\nConnection: close\r\n\r\n", row.id)).await.contains("GUEST"), "a link that takes no notes gives no button");
+        // A link that takes notes: its guest gets the button in its own mode (posting from the
+        // page), and a note only from the page's own origin.
+        let (_, gtoken) = rt.store.create_share(&row.id, rt.store.now_ms().unwrap() + 3_600_000, "ada", None, "Acme's review", true).unwrap();
+        let guest_script = raw(format!("GET /__roll/feedback.js HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nCookie: roll_share_{}={gtoken}\r\nConnection: close\r\n\r\n", row.id)).await;
+        assert!(guest_script.contains("const GUEST = true;"), "{guest_script}");
+        let post = |origin: &str| {
+            let body = r#"{"name":"Ada","path":"/","note":"Too small"}"#;
+            format!("POST /__roll/notes HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nOrigin: {origin}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nCookie: roll_share_{}={gtoken}\r\nConnection: close\r\n\r\n{body}", body.len(), row.id)
+        };
+        assert!(raw(post("https://evil.example")).await.starts_with("HTTP/1.1 403"), "another site's page posts nothing");
         rt.store.revoke_share(&row.id, &share.id).unwrap();
         assert!(raw(with_share).await.starts_with("HTTP/1.1 401"), "revoked: out at once");
         // The notes already left on a page: for the same visitors only.

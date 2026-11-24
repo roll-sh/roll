@@ -3695,12 +3695,12 @@ mod tests {
         let (row, _) = store.create(&new("chg_share")).unwrap();
         let id = row.id.as_str();
         let now = store.now_ms().unwrap();
-        let (share, token) = store.create_share(id, now + 3_600_000, "ada", None).unwrap();
+        let (share, token) = store.create_share(id, now + 3_600_000, "ada", None, "", false).unwrap();
         assert!(token.starts_with("rps_") && share.id.starts_with("shr_"));
         assert_eq!(store.share_ends(id, &token).unwrap(), Some(now + 3_600_000));
         assert_eq!(store.share_ends("pv_other", &token).unwrap(), None, "another preview");
         assert_eq!(store.share_ends(id, "rps_guess").unwrap(), None);
-        let (_, ended) = store.create_share(id, now - 1, "ada", None).unwrap();
+        let (_, ended) = store.create_share(id, now - 1, "ada", None, "", false).unwrap();
         assert_eq!(store.share_ends(id, &ended).unwrap(), None, "past its end");
         store.revoke_share(id, &share.id).unwrap();
         assert_eq!(store.share_ends(id, &token).unwrap(), None, "revoked");
