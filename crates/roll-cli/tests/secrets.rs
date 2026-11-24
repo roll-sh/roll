@@ -71,12 +71,15 @@ async fn gate(axum::extract::State(tokens): axum::extract::State<Tokens>, mut re
 }
 
 /// The digest route's requests, and whether it fails (503) for now: what `roll run --watch` polls.
-/// And the values route's reads (`roll secrets agent` reads values only when the digest moved).
+/// And the values route's reads (`roll secrets agent` reads values only when the digest moved),
+/// how long each takes to answer (ms), and whether they fail (503) for now.
 #[derive(Default)]
 struct Polls {
     failing: std::sync::atomic::AtomicBool,
     asked: std::sync::atomic::AtomicUsize,
     reads: std::sync::atomic::AtomicUsize,
+    values_slow: std::sync::atomic::AtomicU64,
+    values_down: std::sync::atomic::AtomicBool,
 }
 
 async fn flaky_digest(axum::extract::State(p): axum::extract::State<Arc<Polls>>, req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
@@ -90,6 +93,10 @@ async fn flaky_digest(axum::extract::State(p): axum::extract::State<Arc<Polls>>,
     }
     if req.uri().path().ends_with("/values") {
         p.reads.fetch_add(1, Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(p.values_slow.load(Ordering::SeqCst))).await;
+        if p.values_down.load(Ordering::SeqCst) {
+            return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
     }
     next.run(req).await
 }
@@ -965,30 +972,21 @@ async fn a_revoked_logins_local_agent_answers_a_refusal_within_one_poll() {
     assert!(body.contains("refused the agent's login") && !body.contains("fake-"), "{body}");
 }
 
-/// `roll secrets mount .env`: a named pipe (0600), never a file, that each read gets the current
-/// values from, a change included, and that's gone once roll refuses the login. The repo's
-/// `.gitignore` gains it. No value is logged.
+/// `roll secrets mount` of shop's production at `env_file` with `token`, once it serves, and its
+/// stderr so far (still collected, by the task returned).
 #[cfg(unix)]
-#[tokio::test]
-async fn a_mounted_env_is_a_pipe_that_follows_changes_and_goes_with_the_login() {
-    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+async fn mount(s: &Server, token: &str, env_file: &std::path::Path, more: &[&str]) -> (tokio::process::Child, Arc<std::sync::Mutex<String>>, tokio::task::JoinHandle<()>) {
     use tokio::io::AsyncBufReadExt;
-    let s = start().await;
-    let at = ["secrets", "-p", "shop", "-e", "production"];
-    ok(&s.api, &[], &[&at[..], &["set", "GREETING=fake one"]].concat(), None).await;
-    let token = ok(&s.api, &[], &["secrets", "-p", "shop", "tokens", "create", "mount", "--for-env", "production"], None).await.trim().to_string();
-    let work = s._dir.path().join("app");
-    std::fs::create_dir_all(&work).unwrap();
-    assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(&work).status().unwrap().success());
-    let env_file = work.join(".env");
     let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_roll"))
-        .args([&at[..], &["mount", env_file.to_str().unwrap()]].concat())
+        .args(["secrets", "-p", "shop", "-e", "production", "mount", env_file.to_str().unwrap()])
+        .args(more)
         .env("ROLL_API_URL", &s.api)
-        .env("ROLL_TOKEN", &token)
+        .env("ROLL_TOKEN", token)
         .env("XDG_STATE_HOME", s._dir.path().join("state"))
         .env_remove("ROLL_PROJECT")
         .env_remove("ROLL_ENV")
         .env_remove("ROLL_ADMIN_TOKEN")
+        .env_remove("ROLL_CACHE_TTL")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -1014,16 +1012,39 @@ async fn a_mounted_env_is_a_pipe_that_follows_changes_and_goes_with_the_login() 
             kept.lock().unwrap().push_str(&format!("{line}\n"));
         }
     });
+    (child, log, logging)
+}
+
+/// A read of a mounted pipe in a thread of its own, with a deadline: an open of a pipe nobody serves
+/// blocks.
+#[cfg(unix)]
+fn read_pipe(path: &std::path::Path) -> impl std::future::Future<Output = String> + use<> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let path = path.to_path_buf();
+    std::thread::spawn(move || tx.send(std::fs::read_to_string(path).unwrap()));
+    async move { tokio::time::timeout(std::time::Duration::from_secs(10), rx).await.expect("the pipe answers").unwrap() }
+}
+
+/// `roll secrets mount .env`: a named pipe (0600), never a file, that each read gets the current
+/// values from, a change included, and that's gone once roll refuses the login. The repo's
+/// `.gitignore` gains it. No value is logged.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_mounted_env_is_a_pipe_that_follows_changes_and_goes_with_the_login() {
+    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+    let s = start().await;
+    let at = ["secrets", "-p", "shop", "-e", "production"];
+    ok(&s.api, &[], &[&at[..], &["set", "GREETING=fake one"]].concat(), None).await;
+    let token = ok(&s.api, &[], &["secrets", "-p", "shop", "tokens", "create", "mount", "--for-env", "production"], None).await.trim().to_string();
+    let work = s._dir.path().join("app");
+    std::fs::create_dir_all(&work).unwrap();
+    assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(&work).status().unwrap().success());
+    let env_file = work.join(".env");
+    let (mut child, log, logging) = mount(&s, &token, &env_file, &[]).await;
     let meta = std::fs::symlink_metadata(&env_file).unwrap();
     assert!(meta.file_type().is_fifo() && meta.permissions().mode() & 0o777 == 0o600);
     assert!(std::fs::read_to_string(work.join(".gitignore")).unwrap().lines().any(|l| l == "/.env"));
-    // A read in a thread of its own, with a deadline: an open of a pipe nobody serves blocks.
-    let read = || {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let path = env_file.clone();
-        std::thread::spawn(move || tx.send(std::fs::read_to_string(path).unwrap()));
-        async move { tokio::time::timeout(std::time::Duration::from_secs(10), rx).await.expect("the pipe answers").unwrap() }
-    };
+    let read = || read_pipe(&env_file);
     assert_eq!(read().await, "GREETING=\"fake one\"\n");
     // A reader that holds the pipe open a while before it reads (a loaded machine) still gets one
     // copy, not the next open's appended to it.
@@ -1061,6 +1082,44 @@ async fn a_mounted_env_is_a_pipe_that_follows_changes_and_goes_with_the_login() 
     let log = log.lock().unwrap().clone();
     assert!(!status.success() && log.contains("refused") && !log.contains("fake"), "{log}");
     assert!(std::fs::symlink_metadata(&env_file).is_err(), "the pipe is removed");
+}
+
+/// Readers that open a mounted `.env` together, while roll is slow to answer (two apps `turbo dev`
+/// starts in one directory), each get a whole copy, not part of one shared copy. A read roll doesn't
+/// answer (`--ttl 0`: no copy kept) gets a line that says why, never values.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_mounts_readers_each_get_a_whole_copy_and_a_read_roll_doesnt_answer_says_so() {
+    use std::sync::atomic::Ordering;
+    let s = start().await;
+    let at = ["secrets", "-p", "shop", "-e", "production"];
+    let keys: Vec<String> = (0..40).map(|i| format!("KEY_{i:02}=fake-value-{i:02}")).collect();
+    ok(&s.api, &[], &[&at[..], &["set"], &keys.iter().map(String::as_str).collect::<Vec<_>>()[..]].concat(), None).await;
+    let whole: String = keys.iter().map(|k| format!("{k}\n")).collect();
+    let token = ok(&s.api, &[], &["secrets", "-p", "shop", "tokens", "create", "mount", "--for-env", "production"], None).await.trim().to_string();
+    let env_file = s._dir.path().join(".env");
+    let (_child, log, _logging) = mount(&s, &token, &env_file, &["--ttl", "0"]).await;
+    // Each read takes 300 ms at roll; the others open while the first is being served.
+    s.polls.values_slow.store(300, Ordering::SeqCst);
+    let mut reads = Vec::new();
+    for _ in 0..4 {
+        reads.push(read_pipe(&env_file));
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    for text in futures::future::join_all(reads).await {
+        assert_eq!(text, whole, "{}", log.lock().unwrap());
+    }
+    s.polls.values_slow.store(0, Ordering::SeqCst);
+    s.polls.values_down.store(true, Ordering::SeqCst);
+    let text = read_pipe(&env_file).await;
+    assert!(text.starts_with("# roll secrets mount: reading production:/") && text.ends_with("; no values this read\n") && text.lines().count() == 1 && !text.contains("fake"), "{text}");
+    // The mount says so on stderr too.
+    let started = std::time::Instant::now();
+    while !log.lock().unwrap().contains("; no values this read") {
+        assert!(started.elapsed() < std::time::Duration::from_secs(10), "{}", log.lock().unwrap());
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(!log.lock().unwrap().contains("fake"), "{}", log.lock().unwrap());
 }
 
 /// `envs rm` says what a delete would do before it's confirmed, and what the server did: a
