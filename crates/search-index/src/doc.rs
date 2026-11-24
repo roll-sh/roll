@@ -28,6 +28,34 @@ impl IndexableDoc {
         IndexableDoc { id: id.into(), ..Default::default() }
     }
 
+    /// What this document holds in memory: its vectors' capacities and every value's bytes
+    /// (a `Bytes` that shares another buffer is counted in full, so this errs high). What a
+    /// caller charges a breaker for a document it keeps (`_bulk`'s documents prepared ahead).
+    pub fn heap_bytes(&self) -> usize {
+        use std::mem::size_of;
+        let fields: usize = self.fields.iter().map(|f| match f {
+            IndexableField::Text { values, .. } => values.capacity() * size_of::<String>() + values.iter().map(String::capacity).sum::<usize>(),
+            IndexableField::Tokens { tokens, .. } => tokens.capacity() * size_of::<PreToken>() + tokens.iter().map(|t| t.term.len() + t.payload.as_ref().map_or(0, Bytes::len)).sum::<usize>(),
+            IndexableField::Term { term, .. } => term.len(),
+            IndexableField::Point { packed, .. } => packed.capacity(),
+            IndexableField::DocValue { value, .. } => match value {
+                DocValue::Binary(b) | DocValue::Sorted(b) | DocValue::SortedSet(b) => b.len(),
+                DocValue::Numeric(_) | DocValue::SortedNumeric(_) => 0,
+            },
+            IndexableField::Vector { value, .. } => value.len(),
+            IndexableField::Suggest { key, payload, .. } => key.len() + payload.len(),
+        }).sum();
+        let stored: usize = self.stored.iter().map(|s| match &s.value {
+            OwnedStoredValue::Str(v) => v.capacity(),
+            OwnedStoredValue::Bytes(v) => v.capacity(),
+            _ => 0,
+        }).sum();
+        size_of::<IndexableDoc>() + self.id.len() + self.fields.capacity() * size_of::<IndexableField>() + fields
+            + self.stored.capacity() * size_of::<StoredField>() + stored
+            + self.nested.iter().map(IndexableDoc::heap_bytes).sum::<usize>()
+            + (self.nested.capacity() - self.nested.len()) * size_of::<IndexableDoc>()
+    }
+
     /// Adds analyzed text.
     pub fn text(mut self, field: u32, analyzer: &Analyzer, value: impl Into<String>) -> Self {
         self.fields.push(IndexableField::Text { field, analyzer: analyzer.clone(), values: vec![value.into()] });
