@@ -508,6 +508,8 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
                 redis.as_ref().map(|r| r.control.clone()),
                 apps_secrets.clone(),
                 products_api.clone(),
+                // apps' search links read and issue as roll secrets' do (`SearchGuard`).
+                search.as_ref().map(|s| std::sync::Arc::new(secrets::SearchGuard { workspace: workspace.clone(), search: s.control.clone() })),
                 !auth.enforcing(),
             )
             .await?,

@@ -426,11 +426,12 @@ async fn a_workspace_delete_asks_roll_secrets_first_and_keeps_the_secrets_for_it
 
 /// A search cluster a person owns links only from the project it's at home in, while they're in
 /// it: owned by someone outside the project and homed there (set up in the stores, as a home made
-/// before homes handed clusters over could be), nothing links it, and a link made while they were
-/// in stops resolving once they leave. The refusal never carries the value.
+/// before homes handed clusters over could be), nothing links it (roll secrets' links nor roll
+/// apps'), and a link made while they were in stops resolving once they leave. The refusal never
+/// carries the value.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_search_cluster_links_only_while_its_owner_is_in_its_home_project() {
-    let r = Rolld::start("search", false).await;
+    let r = Rolld::start("apps,search", false).await;
     let p = Project::new(&r).await;
     let sc = r.post("/v1/search/clusters", json!({ "name": "theirs" })).await;
     let id = sc["id"].as_str().unwrap().to_string();
@@ -461,6 +462,14 @@ async fn a_search_cluster_links_only_while_its_owner_is_in_its_home_project() {
     let a = r.http.post(format!("{}/v1/secrets/projects/{}/environments/production/changes", r.api, p.id)).bearer_auth(TOKEN).json(&link).send().await.unwrap();
     let (status, body) = (a.status(), a.text().await.unwrap());
     assert!(status == 403 && !body.contains(&url), "{status} {body}");
+    // Nor does a roll apps service of the project link it (its links read and issue through the
+    // same provider).
+    let svc = r.post("/v1/apps/services", json!({ "project": p.id, "name": "web", "source": { "kind": "upload" } })).await;
+    let svc = svc["id"].as_str().unwrap();
+    r.call(reqwest::Method::PUT, &format!("/v1/apps/services/{svc}/environments/production"), Some(json!({}))).await;
+    let a = r.http.put(format!("{}/v1/apps/services/{svc}/links/search/{id}", r.api)).bearer_auth(TOKEN).json(&json!({})).send().await.unwrap();
+    let (status, body) = (a.status(), a.text().await.unwrap());
+    assert!(!status.is_success() && !body.contains(&url), "an apps link: {status} {body}");
 }
 
 /// roll apps shows a service's values from roll secrets only as roll secrets would show them to

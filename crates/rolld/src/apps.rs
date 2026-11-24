@@ -416,6 +416,9 @@ struct RollResources {
     /// rolld's own API as roll previews' branch adapters call it (on a fleet each call reaches
     /// the data's owner): an environment's own data (`data: "branch"`). None in tests.
     branches: Option<Arc<crate::previews::Api>>,
+    /// What a search link reads and issues through: a cluster owned by someone outside the
+    /// project it's at home in isn't linked (roll secrets' `SearchGuard`). None in tests.
+    search_guard: Option<Arc<crate::secrets::SearchGuard>>,
 }
 
 impl RollResources {
@@ -442,7 +445,7 @@ impl RollResources {
     /// provider.
     async fn provided(&self, kind: LinkKind, r#ref: &str, label: Option<String>, options: apps_control::integrations::LinkOptions) -> anyhow::Result<Option<Provided>> {
         use roll_secrets::links::{Link, Mode};
-        let Some(p) = crate::secrets::link_provider(&self.products, kind.as_str()) else { return Ok(None) };
+        let Some(p) = crate::secrets::link_provider(&self.products, kind.as_str(), self.search_guard.clone()) else { return Ok(None) };
         let r = r#ref.to_string();
         blocking(move || {
             let fields = p.fields_for(&r);
@@ -765,7 +768,8 @@ impl Resources for RollResources {
                 None => self.tasks_call(axum::http::Method::DELETE, path, None).await.map(|_| ()),
             };
         }
-        let Some(p) = crate::secrets::link_provider(&self.products, kind.as_str()) else { return Ok(()) };
+        // Ending a credential always works: no guard.
+        let Some(p) = crate::secrets::link_provider(&self.products, kind.as_str(), None) else { return Ok(()) };
         let handles: Vec<serde_json::Value> = serde_json::from_str(kept).unwrap_or_default();
         let r = r#ref.to_string();
         // Each is tried: one that fails doesn't leave the rest alive.
@@ -820,6 +824,7 @@ pub async fn start(
     redis: Option<Arc<redis_control::Control>>,
     secrets: crate::secrets::ForApps,
     products: crate::secrets::Api,
+    search_guard: Option<Arc<crate::secrets::SearchGuard>>,
     open: bool,
 ) -> anyhow::Result<AppsNode> {
     let a = &args.apps;
@@ -930,6 +935,7 @@ pub async fn start(
             },
             products,
             branches: Some(Arc::new(crate::previews::Api::new(args.api))),
+            search_guard,
         }),
         resolver: Arc::new(Doh::new(&a.doh)),
         tls: domain_tls(args, single)?,
@@ -1083,7 +1089,7 @@ mod tests {
         ] });
         let st = http.post(format!("{base}/v1/streams/{sid}/topics/orders/records")).json(&sent).send().await.unwrap().status();
         assert!(st.is_success(), "{st}");
-        let r = RollResources { postgres: None, redis: None, api: (base.clone(), None, http.clone()), products: crate::secrets::Api::default(), branches: None };
+        let r = RollResources { postgres: None, redis: None, api: (base.clone(), None, http.clone()), products: crate::secrets::Api::default(), branches: None, search_guard: None };
         let got = r.read_group(&sid, "orders", "web", "c1", 1000, 10).await.unwrap();
         assert_eq!(got.len(), 2, "{got:?}");
         let first = got.iter().find(|x| x.partition == 0).unwrap();
@@ -1129,7 +1135,7 @@ mod tests {
             );
         let products = crate::secrets::Api::default();
         products.set(router);
-        let r = RollResources { postgres: None, redis: None, api: (String::new(), None, reqwest::Client::new()), products, branches: None };
+        let r = RollResources { postgres: None, redis: None, api: (String::new(), None, reqwest::Client::new()), products, branches: None, search_guard: None };
         let m = r.link(LinkKind::Bucket, "photos", "svc_a", &Default::default()).await.unwrap().expect("credentials of its own");
         // Only what it issued is kept with the link: the rest is read at each deploy.
         assert_eq!(m.vars.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(), ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"]);
@@ -1168,7 +1174,7 @@ mod tests {
             }));
         let products = crate::secrets::Api::default();
         products.set(router);
-        let r = RollResources { postgres: None, redis: None, api: (String::new(), None, reqwest::Client::new()), products, branches: None };
+        let r = RollResources { postgres: None, redis: None, api: (String::new(), None, reqwest::Client::new()), products, branches: None, search_guard: None };
         let m = r.link(LinkKind::Queue, "orders", "svc_a", &Default::default()).await.unwrap().expect("a user of its own");
         let url = &m.vars.iter().find(|(k, _)| k == "AMQP_URL").expect("AMQP_URL").1;
         assert!(url.starts_with("amqp://roll-") && url.ends_with("@127.0.0.1:5672/orders") && !url.contains("admin"), "{url}");
@@ -1205,7 +1211,7 @@ mod tests {
         tokio::spawn(axum::serve(listener, router.clone()).into_future());
         let products = crate::secrets::Api::default();
         products.set(router);
-        let r = RollResources { postgres: None, redis: None, api: (base.clone(), None, reqwest::Client::new()), products, branches: None };
+        let r = RollResources { postgres: None, redis: None, api: (base.clone(), None, reqwest::Client::new()), products, branches: None, search_guard: None };
         let m = r.link(LinkKind::Tasks, "shop", "svc_a", &Default::default()).await.unwrap().expect("a key of its own");
         assert_eq!(m.vars, [("ROLL_TASKS_TOKEN".to_string(), "rtk_own".to_string())]);
         let vars: std::collections::BTreeMap<String, String> = r.link_vars_as(LinkKind::Tasks, "shop", &m.vars).await.unwrap().into_iter().collect();

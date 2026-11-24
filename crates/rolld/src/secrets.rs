@@ -586,8 +586,10 @@ fn sweeper(s: Arc<Secrets>, what: &'static str, pass: fn(&Secrets) -> roll_secre
 
 /// The provider for a kind roll apps links with credentials of its own (a bucket's key, a
 /// stream's or a NoSQL database's), over rolld's own API: issued and revoked as roll secrets'
-/// managed links are (`apps::RollResources`).
-pub fn link_provider(api: &Api, kind: &str) -> Option<Arc<dyn LinkProvider>> {
+/// managed links are (`apps::RollResources`). `search`: the guard a search link reads and issues
+/// through ([`SearchGuard`]); only revoking goes without it, since ending a credential always
+/// works.
+pub fn link_provider(api: &Api, kind: &str, search: Option<Arc<SearchGuard>>) -> Option<Arc<dyn LinkProvider>> {
     match kind {
         "bucket" => Some(Arc::new(Bucket(api.clone()))),
         "stream" => Some(Arc::new(Stream(api.clone()))),
@@ -596,7 +598,7 @@ pub fn link_provider(api: &Api, kind: &str) -> Option<Arc<dyn LinkProvider>> {
         "queue" => Some(Arc::new(Queue(api.clone()))),
         // A data-only key of the cluster's own (`ELASTICSEARCH_API_KEY`, or an OpenSearch-flavor
         // cluster's internal user), never its password.
-        "search" => Some(Arc::new(Search(api.clone(), Default::default(), None))),
+        "search" => Some(Arc::new(Search(api.clone(), Default::default(), search))),
         _ => None,
     }
 }
