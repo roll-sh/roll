@@ -282,7 +282,14 @@ pub struct Access {
     pub password_hash: Option<String>,
     /// People a provider vouches for, who needn't be roll's ([`Sso`]).
     pub sso: Option<Sso>,
+    /// Paths whose CORS preflights (`OPTIONS` with `Access-Control-Request-Method`) go to the app
+    /// past the gate (Vercel's OPTIONS Allowlist): a preflight carries no credentials, so a page on
+    /// another of the owner's sites can then call the API with its own.
+    pub preflight: Vec<String>,
 }
+
+/// The most `access.preflight` paths.
+pub const MAX_PREFLIGHT: usize = 20;
 
 /// Signing visitors in through GitHub or Google (Cloud Run's IAP, Cloudflare Access): anyone whose
 /// verified email, email domain or GitHub organisation is in `allow`, account of roll's or not
@@ -1861,6 +1868,9 @@ pub struct Environment {
     /// Visitors a provider signs in (`access.sso`): its provider and who it lets in.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sso: Option<Sso>,
+    /// Paths whose CORS preflights reach the app past its gate (`access.preflight`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub preflight: Vec<String>,
     /// Visitors may type its password (`access.password`; never returned).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub password: bool,

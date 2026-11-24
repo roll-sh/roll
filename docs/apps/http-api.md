@@ -133,6 +133,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/environments/{env}/app-metrics?minutes=` | | `{ minutes, step_minutes, series: { name, kind: "gauge" \| "sum" \| "histogram", unit, attrs: {key, value}[], shows: "value" \| "per_second" \| "mean", points: [ms, number][] }[], cut }`: what the app's OpenTelemetry SDK sent as metrics (5–10,080 minutes, default 60), each series (a name and its attributes; at most 50, the busiest first) at most 60 points: a gauge's last value, a cumulative counter's rate a second, a histogram's mean | read |
 | `GET /v1/apps/services/{id}/environments/{env}/vitals?minutes=` | | `{ minutes, samples, metrics: { lcp?, inp?, cls?, fcp?, ttfb?: { p75, rating: "good" \| "needs-improvement" \| "poor", samples } }, routes: { route, samples, metrics }[], cut }`: what visitors' browsers measured with `vitals: true` (the last 60–10,080 minutes, default 1,440), p75s rated by web.dev's thresholds, overall and for the 20 routes with the most page loads | read |
 | `GET /v1/apps/services/{id}/environments/{env}/analytics?minutes=` | | `Analytics` (the last 60–10,080 minutes, default 1,440): visitors and page views from the access log, no script or cookie | read |
+| `GET /v1/apps/services/{id}/environments/{env}/fetch?path=&head=&deployment=` | | `{ status, url, headers: { content-type?, content-length?, location?, cache-control?, x-roll-by? }, body: string /* text, at most 256 KiB */, truncated }`: one of its pages (`path`, default `/`) read through its own proxy past its gates (sign-in, password, token, allow list, firewall), as roll's scheduled calls go; `head` a HEAD; `deployment` that deployment's own answer; 30 s at most (503 past it); on the environment's owner | reveal |
 | `POST /v1/apps/services/{id}/environments/{env}/visit` | `{ to, state }` (`state`: the SHA-256 the environment's host sent with its redirect, `?state=`: the ticket opens only in the browser holding that state's cookie; 400 without it) | `{ url }`: a one-use ticket (a minute) into a sign-in-gated environment for the person signed in, as the URL that opens `to` (a URL at one of its names: its generated hostname or an active custom domain; 400 otherwise, and for an environment without `access.signed_in`); the dashboard's `/dashboard/apps/visit` asks for it and goes on | a person signed in only (403 for a token); rolld's gate lets in only admins until roll apps serves users |
 | `GET /v1/apps/services/{id}/environments/{env}/traces?minutes=&min_ms=` | | `{ minutes, traces: TraceSummary[], cut }`: recent traces (5–10,080 minutes, default 60), newest first, at most 100; `min_ms` keeps the slower ones | read |
 | `GET /v1/apps/services/{id}/environments/{env}/traces/{trace}` | | `{ trace, spans: Span[] }` in start order (the last week's); 404 when none | read |
@@ -528,6 +529,12 @@ type EnvironmentPut = {
   attack_mode?: { per_minute: number; minutes?: number } | null;
   /** Attack mode on by hand until then (unix ms, within the next 24 hours); null ends it now. */
   challenge_until?: number | null;
+  /** Paths (`/api/*`, at most 20, `*` only at the end) whose CORS preflights (`OPTIONS` with
+   *  `Access-Control-Request-Method`) reach the app past the environment's gate (Vercel's OPTIONS
+   *  Allowlist), so a page on another of its sites can call it with its own credentials; the request
+   *  the preflight clears still meets the gate. Kept when `access` changes; 409 for an environment
+   *  without a gate; null: none. */
+  preflight?: string[] | null;
   /** Its own HTML instead of roll's pages, each at most 64 KiB (400 past it or empty); null goes back
    *  to roll's, a field left out stays. */
   pages?: { error?: string | null; maintenance?: string | null };
@@ -575,6 +582,7 @@ type Environment = EnvironmentSummary & {
   private: boolean;          // its hostnames answer only visitors with its access token, or who signed in
   signed_in?: true;          // people signed in to roll who can open its project get in (access.signed_in)
   sso?: { provider: "github" | "google"; allow: string[] }; // people GitHub or Google vouches for, by domain, email or GitHub organisation, get in (access.sso)
+  preflight?: string[];       // paths whose CORS preflights reach the app past its gate
   password?: true;           // visitors may type its password (access.password; never returned)
   next_run_at: number | null; // a cron service's next scheduled run, once deployed
   volume_used?: { bytes: number; at: number }; // how full its volume was when last measured (hourly, on its owner), when it has one
