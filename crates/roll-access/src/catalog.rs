@@ -1567,6 +1567,11 @@ static ROWS: &[Row] = &[
     // asks the caller's `Grant` for each event's environment (and for `environment=`'s), so a token
     // limited to some environments reads only theirs.
     row("GET", "/v1/secrets/projects/{project}/events", "secrets", R, one(&["project"], "project")).filters_itself(),
+    // A person's own notifications of those events (docs/secrets.md, "Being told"): whoever may read
+    // the project may be told of what they read; secrets asks their rights again for every event
+    // it sends, and lists or deletes only their own (all of the project's for its admins).
+    row("*", "/v1/secrets/projects/{project}/notifications", "secrets", R, one(&["project"], "project")),
+    row("*", "/v1/secrets/projects/{project}/notifications/", "secrets", R, one(&["project"], "project")),
     // Checking the audit log's chain answers where it breaks, never what a row says.
     row("GET", "/v1/secrets/projects/{project}/audit/verify", "secrets", R, one(&["project"], "project")),
     row("*", "/v1/secrets/projects/{project}/audit/sinks", "secrets", ADMIN, one(&["project"], "project")).reveals(&["secret"]),

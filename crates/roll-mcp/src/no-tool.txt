@@ -141,6 +141,8 @@ PUT /v1/secrets/projects/{project}/environments/{env}/secrets/{name}/hosts     a
 POST /v1/secrets/projects/{project}/environments/{env}/secrets/{name}/purge    a person's call (a secret's history gone for good)
 POST /v1/secrets/projects/{project}/environments/{env}/values/delta             a runtime client's read: a watcher's delta since the values it holds (secrets_get_values reads them)
 GET /v1/secrets/projects/{project}/events                                      an MCP Events feed (secrets.event), mapped by roll MCP's feed table
+* /v1/secrets/projects/{project}/notifications                                 a person's own notification settings
+DELETE /v1/secrets/projects/{project}/notifications/{id}                       a person's own notification settings
 POST /v1/secrets/projects/{project}/gateways                                   an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/gateways/{id}                            an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/github-apps                                an outside integration's setup: an admin's, with its credentials
