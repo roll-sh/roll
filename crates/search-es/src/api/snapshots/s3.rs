@@ -344,10 +344,6 @@ impl Bucket {
         }
     }
 
-    fn shard_dir(&self, index_uuid: &str, shard: u32) -> String {
-        format!("{}indices/{index_uuid}/{shard}/", self.prefix)
-    }
-
     fn shard_file(&self, snapshot: &str, index_uuid: &str, shard: u32) -> String {
         format!("{}{}", self.prefix, shard_file_key(snapshot, index_uuid, shard))
     }
