@@ -6640,6 +6640,34 @@ adds roll-access's grant lookup or the accounts' and workspace's.
 
 ## Next
 
+**State, 2026-11-24 06:10.** The thirty-sixth review is done: #830 (99cb3b05e; Cloudflare, Databricks, Confluent) and #825 (the fresh-project production test) landed.
+
+The thirty-seventh product review (2026-11-23, cold, read only, against efafbcac6) found one live bug, low-medium: an environment's deletion preview named every roll-access token on the server whose rule was "every project, environment `<slug>`". Landed since, each with main's CI green, most after a check of the merged tree:
+- #847 (4d73111dd): items 1 and 9. The preview names only tokens that reach the project, judged as reach does (one shared `token_actions`) and narrowed before resolving. A sandbox copying from a deleted, recoverable project keeps its values.
+- #836 (a8a5eb3b4): item 2. An agents machine's `roll://` key is sent as refused only on a refusal; anything else retries with backoff.
+- #844 (c0af796a8): item 3. The events cursor moves to the head past filtered rows (an index on kinds), and a folder-scoped reader sees a change across folders, trimmed to its folders.
+- #881 (3f5aaf25b): item 4. With `leaks.rotate: managed`, a leaked managed key rotates at once without grace, once per credential. A change request opens instead where approvals are needed. With `off`, the event says `rotatable` and roll code offers a Rotate button.
+- #872 (c6dcb2ae7): item 5a. A CA can be an intermediate under the customer's own root (CSR, then `PUT …/cas/{id}/chain`), with name constraints narrowed and leaves carrying the chain.
+- #857 (528cae7d6): item 6. Vendor-side expiry is tracked (GitLab, Databricks, Entra), `rotate_days` must beat it, and Health warns on a registration's own `credential_expires_at`.
+- #850 (63a7ff4a3): item 7. `roll secrets mount .env` is a FIFO served from the CLI, never a file on disk.
+- #856 (c4afb6c56): item 8, first half. An Events tab in the dashboard, live, with kind and environment filters sent to the server.
+- #876 (9f3c36324): item 10. Doppler's references stay references, and Infisical and Doppler bring whole projects with folders, comments and a dry run.
+- #867 (fa9400fe0): item 11. `PATCH …/saas/{id}` replaces a registration's credential in place, plus Terraform's `roll_secrets_saas_rotator` (`credential_wo`), `roll_secrets_folder_policy`, and approvals on environments.
+
+With other threads:
+- previews' #865 (8d0ddeda7): `Subject::Preview`, roll's issuer for a trusted preview's own services, reviewed here (preview subjects need an ephemeral environment);
+- search's #808 (in flight): creates naming a project are held to the person's session in roll-access's shared evaluator, and our search link refuses a cluster whose owner isn't in its home project;
+- roll workspace's events feed #813 (8b2470590) for roll MCP's `workspace.event`.
+
+In flight:
+- item 5b, certificate syncs to ACM, Key Vault and Cloudflare;
+- a value-less set never creating a secret (roll MCP's finding);
+- `roll secrets mount` serving one copy per open, however slow the reader.
+
+Left:
+- item 5c, an ACME client for public CAs;
+- item 8's second half, "notify me" by Slack or email.
+
 **State, 2026-11-23 16:50.** The thirty-fifth review is done: item 6B (#763, 5583dfbfd; `Reference::parse` moved into `crates/roll-secrets-ref`, so agent-proto, the `roll` binary and the gateway don't link roll-secrets) and 6C (#794, dbb4d65af; a refused upstream key fails closed without trying another key of that provider) landed. Also #778, the 05:20 entry below.
 
 The thirty-sixth product review (2026-11-23, cold, read only, against 5430a1b0d) found no live security bug. Its top items were seams where the night's fixes meet each other:
