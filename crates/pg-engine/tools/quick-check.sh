@@ -17,7 +17,9 @@
 #   tests    golden, wire, wire_waits, the binaries the diff maps to, and the lib's unit tests when
 #            a changed source file has some
 #   crash    when storage, WAL or commit paths changed: crash_random seeds 1-3 x 2 rounds, then
-#            one power cut case (power_cut_at_every_point, built `--features powerloss`)
+#            one power cut case (power_cut_at_every_point, built `--features powerloss`); with
+#            QC_PGO also tools/crash-binary.py against <QC_PGO>/roll-engine (seed 1, 7 rounds:
+#            SIGKILLs of the shipped binary under concurrent writes, ~1-2 min)
 #   checked  with QC_CHECKED=1: the tests step's binaries again, built `--profile verify-checked`
 #            (debug assertions and overflow checks, as the train's checked stage). Use it when the
 #            change touches code with debug_assert!/assert!s, arithmetic that may overflow, or
@@ -48,12 +50,14 @@
 #              build"). regress, iso and dump run against <dir>/roll-engine itself, and the crash
 #              step runs whatever changed, its crash_random binaries built `--profile dist` with
 #              the shipped flags and <dir>/roll-engine.profdata (as verification-train.sh's
-#              TRAIN_PGO_PROFDATA): two fat-LTO builds, about an hour more. The profile does not
-#              apply to them: a test build compiles pg_engine under another crate id (its
-#              dev-dependencies' features change cargo's metadata hash), so none of its functions
-#              match the profile's names; the crash line's staleness (tools/pgo-stale.py) shows it
-#              (~95% of the hot counts "under another crate id"). The crash step checks the dist
-#              profile with the shipped flags, not the PGO code layout
+#              TRAIN_PGO_PROFDATA): two fat-LTO builds, about an hour more; then crash-binary.py
+#              kills <dir>/roll-engine itself. pg_engine has one crate id in roll-engine and in
+#              test builds (Cargo.toml's build-dependencies note), so the profile applies to
+#              crash_random: the crash line's staleness (tools/pgo-stale.py) says how much does
+#              not, and the step fails when more than 1% of the hot counts are "under another
+#              crate id" (a dev-dependency's features changed cargo's metadata hash again; it was
+#              95.5% before agent 307). The power cut build has its own crate id (the powerloss
+#              feature): it checks the dist profile with the shipped flags, not the PGO layout
 set -u
 export PATH="$HOME/.cargo/bin:$PATH"
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
@@ -240,7 +244,13 @@ if [ $CRASH = 1 ]; then
     | artifacts "${PGOCFG:+@pgo}" >>"$D/bins"
   cat "$D/build-crash.log" >>"$D/build.log"
   STALE=
-  [ -z "$PGOCFG" ] || STALE="; $(python3 -I "$TOOLS/pgo-stale.py" "$QC_PGO/roll-engine.profdata" "$D/build-crash.log" | head -1)"
+  if [ -n "$PGOCFG" ]; then
+    STALE=$(python3 -I "$TOOLS/pgo-stale.py" "$QC_PGO/roll-engine.profdata" "$D/build-crash.log" | head -1)
+    RENAMED=$(echo "$STALE" | sed -n 's/.* under another crate id (\([0-9.]*\)%).*/\1/p')
+    python3 -I -c 'import sys; sys.exit(float(sys.argv[1] or 100) > 1)' "$RENAMED" ||
+      fail crash "$t" "crash_random's pg_engine has another crate id than roll-engine's: ${RENAMED:-?}% of the profile's hot counts miss it (a dev-dependency's features? Cargo.toml's build-dependencies note): $STALE"
+    STALE="; $STALE"
+  fi
   # The power cut build compiles the engine again (a feature): alongside the tests.
   ( crash_build setsid cargo test -p pg-engine --no-run --message-format=json-render-diagnostics \
     --features powerloss --test crash_random >"$D/build-power.json" 2>"$D/build-power.log" ) &
@@ -315,7 +325,13 @@ if [ $CRASH = 1 ]; then
   [ -n "$(bin crash_random@power)" ] || fail crash "$t" "powerloss build: $(grep -m1 -E '^error' "$D/build-power.log")"
   run crash_random@power --exact power_cut_at_every_point >>"$D/crash.log" 2>&1 ||
     fail crash "$t" "power_cut_at_every_point: $(grep 'panicked' "$D/crash.log" | tail -1)"
-  line crash ok "$t" "seeds 1-3 x 2 rounds, power_cut_at_every_point${CR#crash_random}${STALE:-}"
+  BIN=
+  if [ -n "$PGOCFG" ]; then
+    python3 -I "$TOOLS/crash-binary.py" "$QC_PGO/roll-engine" --seed 1 >"$D/crash-binary.log" 2>&1 ||
+      fail crash "$t" "crash-binary.py: $(grep -m1 -A1 'FAILED' "$D/crash-binary.log" | tr '\n' ' ') (log: $D/crash-binary.log)"
+    BIN=", crash-binary.py seed 1 ($(tail -1 "$D/crash-binary.log" | sed 's/^crash-binary: //'))"
+  fi
+  line crash ok "$t" "seeds 1-3 x 2 rounds, power_cut_at_every_point${CR#crash_random}$BIN${STALE:-}"
 fi
 if [ -n "${QC_CHECKED:-}" ]; then
   t=$(now); : >"$D/checked.log"

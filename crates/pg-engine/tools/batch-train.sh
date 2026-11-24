@@ -166,7 +166,7 @@ flakes() {
 # tests as TRAIN_TESTS entries (<binary>::<test>, or a whole binary that died; train-why.py retry).
 failing() {
   f=$(awk '$2 ~ /^[0-9]+$/ && $2 != 0 && $1 != "head" && $1 != "done" && $1 != "engine-bin" {print $1}' "$TD/status" |
-    sed 's/^power-cut$/power/; s/^crash-power.*/power/; s/^isolation$/iso/' | sort -u | paste -sd, -)
+    sed 's/^power-cut$/power/; s/^crash-power.*/power/; s/^crash-binary$/crash/; s/^isolation$/iso/' | sort -u | paste -sd, -)
   grep -q '^done ' "$TD/status" || f="${f:+$f,}unfinished"
   echo "$f"
 }

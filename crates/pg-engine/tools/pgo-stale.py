@@ -11,8 +11,9 @@ flow change detected (hash mismatch) <symbol> ... up to <n> count discarded") an
 it never ran. A function the profile does not know ("no profile data available for function") is
 new since then, or the profile names it differently: Rust symbols carry each crate's
 disambiguator (`Cs<hash>_`, from cargo's -C metadata), which changes with the crate's or its
-dependencies' features (a test build's dev-dependencies do that), and then no function of that
-crate matches. So a hot function counts as lost when it mismatched, or when the build has no data
+dependencies' features (a test build's dev-dependencies can do that: crates/pg-engine/Cargo.toml's
+build-dependencies note), and then no function of that crate matches. The share of the hot counts
+lost that way alone is printed in parentheses after "under another crate id". So a hot function counts as lost when it mismatched, or when the build has no data
 for a function of the same name up to crate disambiguators.
 
 The profile's hot functions are those with a counter at or above LLVM's hot cutoff (the count at
@@ -72,10 +73,11 @@ def main():
     hs = changed + renamed
     lost = sum(hot[s] for s in hs)
     share = 100 * lost / hot_total if hot_total else 0.0
+    rshare = 100 * sum(hot[s] for s in renamed) / hot_total if hot_total else 0.0
     line = (f'profile staleness: {len(hs)} of {len(hot)} hot functions without profile data in this build '
-            f'({len(changed)} changed, {len(renamed)} under another crate id; {share:.2f}% of the hot functions\' '
-            f'counts); {len(stale)} changed functions in all, {len(new)} without data; profile {total} counts, '
-            f'{ran} functions ran')
+            f'({len(changed)} changed, {len(renamed)} under another crate id ({rshare:.2f}%); {share:.2f}% of the hot '
+            f'functions\' counts); {len(stale)} changed functions in all, {len(new)} without data; profile {total} '
+            f'counts, {ran} functions ran')
     if share > warn:
         line = f'WARNING: {line}. Past {warn:g}%: the profile is stale, train again (tools/dist-pgo.sh without --profdata)'
     print(line)

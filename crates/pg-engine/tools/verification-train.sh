@@ -46,9 +46,12 @@
 #   TRAIN_NO_CHECKOUT=1  test the checkout as it is; otherwise it checks out origin's head when
 #                  the checkout has no uncommitted changes
 #   TRAIN_ENGINE_BIN=<roll-engine>  regress, isolation and pg_dump_tap against that binary (a PGO
-#                  build, HANDOFF "Profile-guided build"); TRAIN_PGO_PROFDATA=<.profdata> builds
-#                  crash_random for crash and power with `--profile dist`, -Cprofile-use of it
-#                  and tools/dist-flags.sh's flags (as the shipped binary is built)
+#                  build, HANDOFF "Profile-guided build"), and with the crash stage
+#                  tools/crash-binary.py SIGKILLs that binary under concurrent writes (seeds 1-3,
+#                  7 rounds each: status line crash-binary, log crash-binary.log; ~4 min);
+#                  TRAIN_PGO_PROFDATA=<.profdata> builds crash_random for crash and power with
+#                  `--profile dist`, -Cprofile-use of it and tools/dist-flags.sh's flags (as the
+#                  shipped binary is built)
 set -u
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 TOOLS=$ROOT/crates/pg-engine/tools
@@ -214,6 +217,13 @@ lane1() {
   if want crash; then
     CRASH_SEEDS=$SEEDS CRASH_ROUNDS=4 run crash_random >"$D/crash.log" 2>&1; rc=$?
     st crash "$rc$([ $rc = 0 ] || echo " $(python3 -I "$TOOLS/train-why.py" panic "$D/crash.log" crash_random "$D/crash.fails")")"
+  fi
+  if want crash && [ -n "${TRAIN_ENGINE_BIN:-}" ]; then
+    rc=0; : >"$D/crash-binary.log"
+    for seed in 1 2 3; do
+      python3 -I "$TOOLS/crash-binary.py" "$TRAIN_ENGINE_BIN" --seed $seed >>"$D/crash-binary.log" 2>&1 || { rc=1; break; }
+    done
+    st crash-binary "$rc $([ $rc = 0 ] && echo "seeds 1-3 x 7 rounds" || grep -m1 'FAILED' "$D/crash-binary.log" | cut -c1-300)"
   fi
   if [ $POWER = 1 ]; then
     run crash_random@power power_cut >"$D/power-cut.log" 2>&1; rc=$?

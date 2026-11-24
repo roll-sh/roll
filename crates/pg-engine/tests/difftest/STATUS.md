@@ -504,6 +504,16 @@ all of it (round 9's seeds too with `GUARD_SEEDS`).
    isolation and pg_dump_tap. `TRAIN_STAGES` and `TRAIN_TESTS` run a part (the batch train's
    re-runs).
 
+The shipped (PGO) binary (agent 307): `tools/crash-binary.py <roll-engine>` SIGKILLs a binary
+given by path under concurrent writes (TPC-B with checked balances and acknowledged commits, kills
+in flushes, compactions, CREATE INDEX, COPY, CHECKPOINT and a fast shutdown) and checks it after
+each restart, in 1-2 minutes. quick-check runs it (seed 1) with `QC_PGO`, the train (seeds 1-3,
+status line `crash-binary`) with `TRAIN_ENGINE_BIN`. The test builds' pg_engine now has the
+binary's crate id, so `QC_PGO` / `TRAIN_PGO_PROFDATA`'s crash_random carries the profile;
+quick-check fails when more than 1% of its hot counts are "under another crate id". The power
+cut builds (`--features powerloss`) have their own crate id: they test the dist profile with the
+shipped flags (HANDOFF "The shipped binary's crash test").
+
 What each tier leaves out: quick-check runs no test binary the path map doesn't name, no
 debug-assertion build unless `QC_CHECKED=1` (then its own tests, built `--profile verify-checked`), no crash or power stage unless storage, WAL or commit paths changed (and
 then 6 crash runs of the train's 360), and no difftest guard. The train has no plain debug

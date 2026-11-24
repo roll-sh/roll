@@ -21211,3 +21211,209 @@ directory: its premise (above) was wrong.
    code passed it (1.86%); what that costs in speed was not measured. The shipped command trains
    afresh, so the warning only concerns `--profdata` reuse.
 5. BOLT (agent 225, 236): not in the toolchain.
+
+## The shipped binary's crash test, and the profile in test builds (agent 307, 2026-11-24)
+
+**Found first: DDL that waited for a writer's transaction read the table as it was before the
+wait, and a table rewrite lost that writer's committed row.** This needs no crash. The binary
+crash test below found it in its create-index round: on agent 303's baseline dist binary, seed
+1, round 4, index `hx_r4` was built by CREATE INDEX while 8 writers ran. It was marked valid and
+had 5 fewer entries than its table (30,965 against 30,970). The missing rows were one in-flight
+transaction per writer. Two sessions reproduce it every time (`~/.cache/a307/scripts/ddl-det.py`):
+session 1 runs `BEGIN; INSERT`, session 2's DDL waits for its table lock, then session 1
+commits. On a table of 1,000 rows plus the writer's:
+- CREATE INDEX, CREATE UNIQUE INDEX and ALTER TABLE ADD PRIMARY KEY: the new index lacks the
+  row (1,000 entries through it, 1,001 rows by a sequential scan).
+- CLUSTER, ALTER TABLE ... ALTER COLUMN TYPE, and ADD COLUMN with a volatile default (the
+  rewrites): **the committed row is gone**. The table has 1,000 rows, although the writer's
+  COMMIT had been acknowledged.
+- REINDEX TABLE and VACUUM FULL were right.
+
+The cause: the statement's READ COMMITTED snapshot is taken when the statement starts
+(`Txn::begin_statement`), before the lock wait, and the build or rewrite read the table through
+that snapshot. PostgreSQL reads after the lock: its index build reads with SnapshotAny and its
+rewrite (ATRewriteTable) with GetLatestSnapshot, so both include the row.
+
+The fix is in `Txn::lock_relation`. When a relation lock of SHARE or stronger is granted (the
+modes that conflict with writers' RowExclusiveLock), it refreshes the READ COMMITTED snapshot
+(`refresh_read_committed_snapshot`, which `partition.rs`' DETACH already called after its wait).
+So every DDL path (serial and parallel index builds, access-method builds, rewrites,
+validations) reads what the transactions it waited for committed. A writer's commit is visible
+before its locks are released (`Txn::commit`: `commit_grouped` returns, then `release_locks`),
+so the refreshed snapshot includes it.
+
+On the fixed plain dist build (`41de1d3d1`), the same script gives 1,001 rows through every
+index for all eight DDL. The isolation spec `roll-ddl-reads-waited-writes` (6 permutations, run
+against PostgreSQL 18.6 live, as the engine's other specs are) covers it.
+
+**Not fixed: the same in REPEATABLE READ and SERIALIZABLE** (same script with `RR=1`). A row
+another session commits after the transaction's snapshot is missing from an index the
+transaction builds afterwards (CREATE INDEX, CREATE UNIQUE INDEX, ADD PRIMARY KEY). It is lost
+by a rewrite the transaction makes afterwards (CLUSTER, ALTER COLUMN TYPE, ADD COLUMN with a
+volatile default: 1,000 rows of 1,001). This needs no lock wait. PostgreSQL's reads above ignore
+the transaction snapshot. A transaction snapshot can't be moved for the rest of the transaction,
+so the fix is different:
+- each build and rewrite path reads the newest committed rows plus the transaction's own writes
+  (`Txn::scan_latest`);
+- the commit's write-write check (`strict`, against `start_ts`) must not then fail the
+  rewrite's writes.
+This is left for whoever owns DDL ("Left", 1).
+
+**1. `tools/crash-binary.py`: a crash test of any roll-engine binary.** It takes the binary by
+path, so it runs against the plain dist build and the PGO build alike. It needs only python3: it
+has its own wire client (trust authentication, simple query protocol and COPY), so nothing has
+to be built. Its docstring is the reference. In brief:
+- It starts the server on a fresh directory and loads a TPC-B-like schema: accounts with a
+  primary key, a unique `code` and an index on `bid`; tellers; branches; history keyed by the
+  client's transaction id, with an index on `aid`; and `bulk`, with primary key (batch, n) and
+  an index on payload.
+- Each round, 8 writers run TPC-B transactions. Each is one message from BEGIN to COMMIT, and
+  1 in 16 ends in ROLLBACK. A churn connection inserts 20,000-row batches with INSERT ... SELECT
+  and deletes older batches.
+- Once a seeded number of transactions (100-999) has been acknowledged, the round's action runs
+  and the server is SIGKILLed **by the pid it was started with**. The kill comes at a seeded
+  point, which depends on the round's kind:
+
+  | Kind | When the kill comes |
+  |---|---|
+  | `tpcb` | a seeded time into the writes |
+  | `file` | 0-3 ms after the nth new .sst / .wal / .tmp file appears: a flush, compaction or WAL rotation that has started writing |
+  | `create-index` | during CREATE INDEX |
+  | `copy` | during COPY of 150,000 rows |
+  | `vacuum` | 0-2 ms after the first file VACUUM writes: the table's files written again |
+  | `checkpoint` | 0-2 ms after the first file CHECKPOINT writes |
+  | `close` | during a fast shutdown (SIGINT) |
+
+- After each kill it restarts the server and checks:
+  - every acknowledged transaction is in history, with the values the client sent;
+  - no rolled-back transaction is there, and none that an earlier recovery left out;
+  - every balance equals the sum of its history rows' deltas (atomicity), and the four sums are
+    equal;
+  - each bulk batch has all its rows or none: all when its INSERT or COPY was acknowledged,
+    none when its DELETE was;
+  - every index returns what a sequential scan does (count and md5 in the index's key order,
+    the plan checked to read that index);
+  - primary and unique keys have no duplicates;
+  - an index whose CREATE INDEX was in flight is absent, or present, valid and in agreement
+    with the table.
+- The next round writes on from that state. At the end the server shuts down cleanly, starts
+  again and is checked once more.
+- A failure prints the seed and round, keeps the data directory and server log, and exits 1.
+- The default (7 rounds, each kind once in a seeded order) takes 1-2 minutes. Options:
+  `--rounds`, `--seed`, `--set NAME=VALUE` (the server's `-c`), and `CRASH_CPUS`.
+
+```sh
+crates/pg-engine/tools/crash-binary.py <dir>/roll-engine --seed 1          # alone: 7 rounds
+crates/pg-engine/tools/crash-binary.py <dir>/roll-engine --seed 11 --rounds 21
+```
+
+Where it runs:
+- quick-check's crash step runs it with `QC_PGO` (seed 1, against `<QC_PGO>/roll-engine`).
+- `verification-train.sh` runs it in lane 1 with `TRAIN_ENGINE_BIN`: seeds 1-3, status line
+  `crash-binary`, mapped to the crash stage for the batch train's re-runs.
+
+Results on the plain dist build `41de1d3d1` (`293715ba`):
+- Seeds 1-3 x 7 rounds and seed 11 x 21 rounds: all green.
+- 42 kills, restarts of 0.01-0.48 s (median 0.15). At the kills, 326 COMMITs were in flight;
+  recovery kept 43 and left out 283, every one whole or absent.
+- Wall time was 84-92 s per default run, and 522 s for the 21 rounds, on CPUs 0-5/18-23 shared
+  with the PGO build.
+
+Results on the PGO build (`dist-pgo.sh --out` of `41de1d3d1`, binary `38bddff7`, profile staleness
+0.00%; 5,068 s: client reused, instrumented build 2,331 s, training 653 s, optimised 2,080 s):
+- Seeds 1-3 x 7 rounds: all green, at the same kill points as on plain dist (a seed fixes them).
+- Restarts took 0.05-0.80 s (median 0.14). At the kills, 157 COMMITs were in flight; recovery
+  kept 19 and left out 138.
+- Every file-triggered kill (VACUUM, CHECKPOINT, nth new file: 9 of 9) hit its file.
+- Wall time was 101-129 s per run at load ~75 on CPUs 0-5/18-23 (35-90 s on a quieter machine).
+- Seed 11 x 21 rounds: green in 322 s.
+- quick-check with `QC_PGO` on `53982ad81` (the same Rust code) was green in 5,243 s:
+  - clippy 16 warnings, none new;
+  - 579 tests passed in 61 binaries (every one: Cargo.toml changed);
+  - crash: crash_random seeds 1-3 x 2 and power_cut_at_every_point (both PGO builds), and
+    crash-binary.py seed 1 green in 35 s;
+  - regress 51,148 / 51,150 units, 0 newly differing;
+  - isolation 1,647 / 1,648;
+  - pg_dump_tap 14,609 passed, 0 failed.
+- The new spec against QC's PostgreSQL 18.6 isolation reference matched 6 / 6 permutations with
+  this binary, and 0 / 6 with agent 303's baseline (PostgreSQL: 11 rows through the new index,
+  the baseline 10).
+
+A control with `--set synchronous_commit=off` passed too (seed 5). That is expected:
+- An asynchronous commit is in the WAL file before it is acknowledged (`Store::commit_async`);
+  only its fsync is deferred.
+- A SIGKILL keeps the page cache, so only a power cut loses such a commit (item 3).
+The test's detection power was shown by the DDL bug above.
+
+**2. The profile now applies to test builds.** Agent 304 found that a test build compiled
+pg_engine under another crate id than roll-engine, so 95.5% of the profile's hot counts matched
+no function in crash_random.
+
+*What exactly differed.* Compare cargo's unit graph of the binary build with crash_random's
+(`__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS=nightly cargo build --profile dist -p pg-engine
+--bin roll-engine -Zunstable-options --unit-graph`, and the same for `cargo test ... --test
+crash_random --no-run`; `~/.cache/a307/scripts/ugdiff.py` and `ugclosure.py`). Two dependencies
+got features only in the test build, through feature unification with dev-dependencies:
+- **libmimalloc-sys** got `extended` (and `cty`) from pg-engine's own dev-dependency, which
+  existed for one unit test's `mi_good_size` (`storage/cache.rs`).
+- **syn**, the proc-macros' copy, got `visit-mut` from tokio-postgres -> async-trait.
+
+Cargo's `-C metadata` hashes every dependency's metadata, so both changes reached pg_engine's
+crate id, and every Rust symbol carries that id.
+
+*The fix changes what is built, not what ships:*
+- The dev-dependency is gone. The unit test declares `mi_good_size` itself and links mimalloc's
+  C library through the `mimalloc` crate (`extern crate mimalloc as _`). The feature only
+  declared extern functions and changed nothing in the C build.
+- pg-engine has a build-dependency on syn with `visit-mut` (workspace syn,
+  `default-features = false`), with no build script, so nothing more is compiled. Cargo's
+  resolver gives the host syn that feature in every build. That syn only builds proc-macros,
+  whose output is the same.
+
+*Checks:*
+- The pg_engine unit's whole dependency closure (packages, features, profiles, dependencies)
+  was identical in the binary build and in crash_random's and golden's test builds after the
+  fix, and different before.
+- On the PGO build: crash_random built with its profile (quick-check's crash step) lacks profile
+  data for 3 of the 2,867 hot functions, all "under another crate id" (0.03% of the hot
+  counts; agent 304's measurement was 2,790 functions, 95.5%). The 3 are std generics
+  (`str::Pattern::is_contained_in`, `String`'s `fmt::Write` and `Display`) instantiated in the
+  test crate.
+- Against regressions, quick-check with `QC_PGO` now fails when more than 1% of the hot counts
+  are "under another crate id". `pgo-stale.py` prints that share in parentheses.
+- The `@power` build (the `powerloss` feature) keeps a crate id of its own by design.
+
+**3. Power cuts against the binary: not possible.** The fault injection is
+`storage/powerloss.rs`, behind the `powerloss` feature (`ROLL_POWERLOSS`). It records, inside the
+process, what each write, fsync, create, rename and unlink made durable, and rebuilds the
+directory as a power cut would leave it. The shipped binary has none of it compiled in, so no
+part of it runs against that binary.
+
+What crash-binary.py tests at the binary level is process death at any point, including
+mid-file during flushes, compactions, checkpoints, COPY and index builds. That death keeps the
+page cache.
+
+Two alternatives were considered and left out of scope, as the brief allows:
+- A fault-injecting block device (dm-flakey, dm-log-writes) needs root.
+- An LD_PRELOAD shim would have to model per-file and per-directory fsync coverage as
+  powerloss.rs does, which is not trivial.
+
+So `power_cut_at_every_point`, `power_cut_keeps_a_prefix_of_concurrent_commits` and
+`CRASH_POWER=1 crash_random` run only on builds with the feature. In quick-check with `QC_PGO`
+and the train with `TRAIN_PGO_PROFDATA`, that is a dist build with the shipped flags and the
+profile, under its own crate id (the dist profile without the PGO layout).
+
+What PGO changes is code layout and inlining, not the order of the store's writes, fsyncs and
+renames, which the program's logic fixes. The power-cut exposure that only the dist-profile run
+covers is therefore a miscompile or undefined behaviour that appears with the PGO layout.
+
+**Measured**: no performance change was made. Times and restart figures are above.
+
+**Dropped**: nothing measured and dropped.
+
+**Left**:
+1. The REPEATABLE READ / SERIALIZABLE half of the DDL bug above. Index builds and rewrites
+   inside a transaction-snapshot transaction miss rows committed after its snapshot, and the
+   rewrites lose those rows.
+2. A packaging step that runs `dist-pgo.sh --out` and ships the binary (agent 304's item 1).
+3. Binary-level power cuts need root (a device-mapper target) or an LD_PRELOAD shim (item 3).
