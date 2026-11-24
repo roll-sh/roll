@@ -65,6 +65,10 @@ export function describe(e: AppEvent): string {
       return `saw a job fail${where}${d.exit_code != null ? ` (exit ${String(d.exit_code)})` : ""}`;
     case "alert.metric":
       return `alerted: ${String(d.metric ?? "a metric")} at ${String(d.value ?? "")} (${d.above != null ? `above ${String(d.above)}` : `below ${String(d.below ?? "")}`} for ${String(d.minutes ?? "")} minutes)${where}`;
+    case "visit.admitted":
+      return `let ${String(d.who ?? "someone")} in (${String(d.how ?? "roll")})${where}`;
+    case "visit.denied":
+      return `turned ${String(d.who ?? "someone")} away (${String(d.how ?? "a provider")} vouched for them; access doesn't let them in)${where}`;
     case "alert.route": {
       const route = `${d.method ? `${String(d.method)} ` : ""}${String(d.route ?? "")}`;
       return d.kind === "latency"

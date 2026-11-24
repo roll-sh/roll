@@ -655,7 +655,7 @@ const HOP: [&str; 9] = ["connection", "keep-alive", "proxy-connection", "transfe
 /// and in the access log as `external`.
 async fn proxy_external(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, service: &str, env: &str, url: String, req: Request) -> Response {
     let began = Instant::now();
-    let access = Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen: Seen::of(&req), span: None, deployment: Default::default() };
+    let access = Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen: Seen::of(&req), span: None, deployment: Default::default(), live: live.clone() };
     let request_id = req.headers().get("x-request-id").and_then(|v| v.to_str().ok()).map(|v| v.chars().take(64).collect::<String>()).unwrap_or_else(|| crate::model::random(16));
     let done = |status: u16, bytes: u64| {
         live.meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, status, bytes);
@@ -1217,7 +1217,7 @@ async fn serve_site(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, tpl: &cr
     let key = tpl.site.clone().unwrap_or_default();
     // Who sent a form (its limit is per sender), before the access line takes what was seen.
     let client = req.seen.ip.clone();
-    let access = Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen: req.seen, span: None, deployment: Default::default() };
+    let access = Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen: req.seen, span: None, deployment: Default::default(), live: live.clone() };
     let request_id = req.request_id.as_deref().map(|v| v.chars().take(64).collect()).unwrap_or_else(|| crate::model::random(16));
     let done = |status: u16, bytes: u64| {
         live.meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, status, bytes);
@@ -1622,7 +1622,7 @@ pub(crate) async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment:
         // 5xx alert for an environment its owner stopped.
         let metered = if matches!(by, "paused" | "maintenance") { 0 } else { status };
         apps.live(service, env).meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, metered, 0);
-        Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen, span: None, deployment: Default::default() }.write_by(status, began, by);
+        Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen, span: None, deployment: Default::default(), live: apps.live(service, env) }.write_by(status, began, by);
     }
     let mut r = their_page(&apps, service, env, r).await;
     // A preview's answers (and a deployment's own URL, a copy of what's live) are never indexed,
@@ -1999,7 +1999,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
             let bytes = r.headers().get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()?.parse::<u64>().ok()).unwrap_or(0);
             let bytes = if head { 0 } else { bytes };
             live.meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, r.status().as_u16(), bytes);
-            Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen: Seen::of(&req), span: None, deployment: Default::default() }.write_cached(r.status().as_u16(), began, bytes);
+            Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen: Seen::of(&req), span: None, deployment: Default::default(), live: live.clone() }.write_cached(r.status().as_u16(), began, bytes);
         };
         match hit {
             Some(crate::resp_cache::Hit::Fresh(r)) => {
@@ -2094,7 +2094,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     // The access line's method and path (no query: it can carry tokens), and with traces on
     // the proxy's own span in the request's trace (the wait, a wake, the answer).
     let span = gate.traces.then(|| ProxySpan::start(&apps, service, env, req.headers()));
-    let access = Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen: Seen::of(&req), span, deployment: Default::default() };
+    let access = Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen: Seen::of(&req), span, deployment: Default::default(), live: live.clone() };
     let mirrored = req.headers().contains_key(MIRROR);
     // A custom domain sent to another of the app's ports: that port's address on the same
     // instance (published from the deploy after the domain's port was set; until then, a 502).
@@ -2436,6 +2436,8 @@ struct Access {
     /// The deployment whose instance answered, once a lease names it (a canary's or the live
     /// one's): its line says it, so metrics split by deployment.
     deployment: parking_lot::Mutex<Option<String>>,
+    /// Its environment: a request to a route its objective names is counted there.
+    live: Arc<crate::live::EnvLive>,
 }
 
 /// The proxy's own span in a request's trace (traces on, Cloud Run's): it continues the
@@ -2619,8 +2621,25 @@ fn by(why: &'static str, mut r: Response) -> Response {
 }
 
 impl Access {
+    /// A request to a route the environment's objective names (`slo.routes`): counted in that
+    /// route's minute, as the line about it is written.
+    fn count_route(&self, status: u16, began: Instant) {
+        let Some(tpl) = self.live.template() else { return };
+        let Some(slo) = tpl.run.slo.as_ref().filter(|s| !s.routes.is_empty()) else { return };
+        let route = crate::traffic::route_of(&self.seen.path);
+        let (now, ms) = (code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0);
+        let mut meter = self.live.route_meter.lock();
+        for r in &slo.routes {
+            let r = r.route();
+            if r.matches(&self.seen.method, &route) {
+                meter.request(now, r.label(), ms, status);
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn write(&self, status: u16, began: Instant, bytes: u64, instance: &str, request_id: &str, cold: bool, waited_ms: u64) {
+        self.count_route(status, began);
         let s = &self.seen;
         let mut line = serde_json::json!({
             "method": s.method, "path": s.path, "status": status, "ms": began.elapsed().as_millis() as u64,
@@ -2643,6 +2662,7 @@ impl Access {
 
     /// An answer from the cache: no instance saw it, its bytes still went out.
     fn write_cached(&self, status: u16, began: Instant, bytes: u64) {
+        self.count_route(status, began);
         let s = &self.seen;
         let mut line = serde_json::json!({
             "method": s.method, "path": s.path, "status": status, "ms": began.elapsed().as_millis() as u64,
@@ -2654,6 +2674,7 @@ impl Access {
 
     /// An answer roll gave itself (no instance saw the request).
     fn write_by(&self, status: u16, began: Instant, by: &str) {
+        self.count_route(status, began);
         let s = &self.seen;
         let mut line = serde_json::json!({
             "method": s.method, "path": s.path, "status": status, "ms": began.elapsed().as_millis() as u64,

@@ -349,6 +349,9 @@ pub struct Apps {
     access_gen: std::sync::atomic::AtomicU64,
     /// Signed-in visitors' sessions this node has looked up, by their hash.
     visits: Mutex<HashMap<String, visit::Seen>>,
+    /// When each turned-away visitor's `visit.denied` was last recorded (service, environment,
+    /// email): at most one in ten minutes each.
+    visit_denials: Mutex<HashMap<String, i64>>,
     /// Web Vitals beacons kept this minute, by environment: (minute, count).
     pub(crate) vitals_seen: Mutex<HashMap<String, (i64, u32)>>,
     /// Custom events taken this minute, per environment ([`track`]).
@@ -719,6 +722,7 @@ impl Apps {
             access: Mutex::new(HashMap::new()),
             access_gen: std::sync::atomic::AtomicU64::new(0),
             visits: Mutex::new(HashMap::new()),
+            visit_denials: Mutex::new(HashMap::new()),
             vitals_seen: Mutex::new(HashMap::new()),
             events_seen: Mutex::new(HashMap::new()),
             forms_seen: Mutex::new(HashMap::new()),
@@ -4557,7 +4561,8 @@ impl Apps {
         let minutes: Vec<_> = minutes.into_iter().filter(|r| r.minute < now_min).collect();
         // Hours only before the first minute kept (a rolled-up hour isn't counted twice).
         let first = minutes.first().map_or(now_min, |r| r.minute);
-        let hours: Vec<_> = hours.into_iter().filter(|h| (h.minute + 1) * 60 <= first).collect();
+        // (An hour's row says its first minute: it ends 60 minutes on.)
+        let hours: Vec<_> = hours.into_iter().filter(|h| h.minute + 60 <= first).collect();
         let show = |t: crate::slo::Tally| json!({ "total": t.total, "bad": t.bad, "sli": (t.total > 0).then(|| 100.0 * (t.total - t.bad) as f64 / t.total as f64), "budget_left": t.budget_left(slo.objective) });
         let avail = crate::slo::availability(&minutes);
         let avail = crate::slo::Tally { total: avail.total + crate::slo::availability(&hours).total, bad: avail.bad + crate::slo::availability(&hours).bad };
@@ -4566,7 +4571,22 @@ impl Apps {
             show(crate::slo::Tally { total: m.total + h.total, bad: m.bad + h.bad })
         });
         let burning = crate::slo::burning(&slo, &minutes, now_min).map(|(i, rate, w)| json!({ "indicator": i, "burn_rate": (rate * 10.0).round() / 10.0, "window": w }));
-        Ok(json!({ "slo": slo, "availability": show(avail), "latency": latency, "burning": burning }))
+        // Each route's own objective, on its own minutes (and hours before them).
+        let mut routes = Vec::new();
+        for r in &slo.routes {
+            let (sid, e, label) = (service.to_string(), env.to_string(), r.route().label());
+            let (minutes, hours) = self.db(move |s| s.route_minutes(&sid, &e, &label, since)).await?;
+            let minutes: Vec<_> = minutes.into_iter().filter(|m| m.minute < now_min).collect();
+            let show = |t: crate::slo::Tally| json!({ "total": t.total, "bad": t.bad, "sli": (t.total > 0).then(|| 100.0 * (t.total - t.bad) as f64 / t.total as f64), "budget_left": t.budget_left(r.objective) });
+            let (am, ah) = (crate::slo::availability(&minutes), crate::slo::availability(&hours));
+            let latency = r.latency_ms.map(|ms| {
+                let (m, h) = (crate::slo::latency(&minutes, ms, 1), crate::slo::latency(&hours, ms, 60));
+                show(crate::slo::Tally { total: m.total + h.total, bad: m.bad + h.bad })
+            });
+            let burning = crate::slo::burning(&r.slo(slo.window_days), &minutes, now_min).map(|(i, rate, w)| json!({ "indicator": i, "burn_rate": (rate * 10.0).round() / 10.0, "window": w }));
+            routes.push(json!({ "route": r.route, "method": r.method, "objective": r.objective, "latency_ms": r.latency_ms, "availability": show(crate::slo::Tally { total: am.total + ah.total, bad: am.bad + ah.bad }), "latency": latency, "burning": burning }));
+        }
+        Ok(json!({ "slo": slo, "availability": show(avail), "latency": latency, "burning": burning, "routes": routes }))
     }
 
     /// Pause or resume an environment (`PUT … {paused}`, its pause schedule): at once on its
@@ -4701,13 +4721,15 @@ impl Apps {
         let now = code_sql::now_ms();
         for l in self.lives() {
             let minutes = l.meter.lock().take(now, all);
-            if minutes.is_empty() {
+            let routes = l.route_meter.lock().take(now, all);
+            if minutes.is_empty() && routes.is_empty() {
                 continue;
             }
             let (svc, env) = (l.service.clone(), l.env.clone());
             let _ = self
                 .db(move |s| {
                     s.put_minutes(&svc, &env, &minutes.iter().map(|m| m.row()).collect::<Vec<_>>())?;
+                    s.put_route_minutes(&svc, &env, &routes)?;
                     for m in &minutes {
                         s.add_usage(&svc, &env, m.minute / 60, &m.usage())?;
                     }

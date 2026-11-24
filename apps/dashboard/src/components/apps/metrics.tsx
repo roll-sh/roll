@@ -364,6 +364,28 @@ function Budget({ r }: { r: SloReport }) {
         {row("Availability", r.availability)}
         {row("Latency", r.latency)}
       </ul>
+      {(r.routes ?? []).map((o) => {
+        const name = `${o.method ? `${o.method} ` : ""}${o.route}`;
+        return (
+          <div key={name} className="border-t border-line">
+            <div className="flex flex-wrap items-center gap-x-3 px-4 pt-2.5 text-[12px]">
+              <span className="font-mono text-fg">{name}</span>
+              <span className="text-subtle">
+                {o.objective}%{o.latency_ms ? `, p95 under ${o.latency_ms} ms` : ""}
+              </span>
+              {o.burning && (
+                <span className="ml-auto text-danger">
+                  burning {o.burning.burn_rate}× over the last {o.burning.window === "1h" ? "hour" : "six hours"} ({o.burning.indicator})
+                </span>
+              )}
+            </div>
+            <ul className="divide-y divide-line">
+              {row("Availability", o.availability)}
+              {row("Latency", o.latency)}
+            </ul>
+          </div>
+        );
+      })}
     </section>
   );
 }
