@@ -1755,9 +1755,9 @@ land on the change.
   (the page, linked to the preview, the element, the note quoted) and binds its thread to the
   note (`chat_notes`). A message in that thread, from someone the Slack install allows, becomes
   the note's reply on the change, signed "— Ada, in Slack" (the person's Slack name), made as
-  the automation through roll's API; a reply made on the page goes into the thread, and
-  resolving the note says so there. What came from Slack is never posted back to it, and a
-  note is posted once. The note's format is roll code's (`code_control::review::preview_note`,
+  the automation through roll's API, and a reply made on the page goes into the thread. What
+  came from Slack is never posted back to it, and a note is posted once. Resolving a note isn't
+  said in its thread yet (a resolve is roll previews' own record, not a review event). The note's format is roll code's (`code_control::review::preview_note`,
   read back by `roll_previews::notes`). `preview_notes_are_slack_threads_both_ways`.
 - Previews deployed on roll apps go through apps' own proxy, which adds it for its link
   visitors only: under team access (apps' `signed_in` environments) they get none yet.

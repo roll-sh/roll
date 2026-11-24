@@ -209,7 +209,7 @@ export const CHATOPS_TEMPLATES: AutomationTemplate[] = [
   {
     id: "slack-preview-notes",
     title: "Preview notes as Slack threads",
-    description: "A note left on a change's preview becomes a message in a channel; replies in its thread are the note's replies, and replies and resolving on the page show in the thread (roll previews).",
+    description: "A note left on a change's preview becomes a message in a channel; replies in its thread are the note's replies, and replies on the page show in the thread (roll previews).",
     trigger: "code",
     steps: ["slack.note"],
     integration: "slack",

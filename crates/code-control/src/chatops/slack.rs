@@ -577,7 +577,7 @@ impl StepKind for SlackStep {
             ),
             Kind::Note => (
                 "Preview notes in Slack",
-                "On a change's review event: a note left on its preview's pages becomes a message in the channel, replies in its thread become the note's replies, and replies and resolving on the page show in the thread. Other reviews are left alone.",
+                "On a change's review event: a note left on its preview's pages becomes a message in the channel, replies in its thread become the note's replies, and replies on the page show in the thread. Other reviews are left alone.",
                 &["posted", "channel", "ts", "note"],
             ),
         };
@@ -718,8 +718,7 @@ impl StepKind for SlackStep {
 }
 
 /// `slack.note` on a review event (`ev`): a new note is posted to `channel` and its thread bound
-/// to it; a reply made on the page goes into the note's thread, and so does resolving it (its
-/// review dismissed). Each is posted once.
+/// to it; a reply made on the page goes into the note's thread. Each is posted once.
 async fn note_step(ctx: &mut StepContext, client: &Client, token: &str, install: &Install, channel: String, ev: &Value) -> StepOutcome {
     use crate::review::preview_note;
     let code = ctx.code.clone();
@@ -732,34 +731,24 @@ async fn note_step(ctx: &mut StepContext, client: &Client, token: &str, install:
     }
     let post = |m: Message| async move { client.post_message(token, &m).await };
     let out = if let Some((path, selector, note)) = preview_note::parse(body) {
-        if ev["dismissed"] == true {
-            // Resolved on the page: said in its thread, once.
-            let Ok(Some(b)) = super::note_thread(&code, &install.id, review) else { return skipped };
-            let who = ev["dismissed_by"].as_str().unwrap_or("someone");
-            match post(Message { channel: b.channel.clone(), text: format!("Resolved by *{who}*."), blocks: None, thread_ts: Some(b.thread_ts.clone()) }).await {
-                Ok(p) => json!({ "posted": true, "channel": p.channel, "ts": p.ts, "note": review }),
-                Err(e) => return outcome(e),
-            }
-        } else {
-            // Posted once per note, whatever else makes its review event again.
-            if matches!(super::note_thread(&code, &install.id, review), Ok(Some(_))) {
-                return skipped;
-            }
-            let link = preview_note::link(body);
-            let text = note_text(by, &path, &selector, link.as_deref(), &note);
-            match post(Message { channel, text, blocks: None, thread_ts: None }).await {
-                Ok(p) => {
-                    if let Err(e) = super::bind_note(&code, &ctx.owner().id, &install.id, &p.channel, &p.ts, review, change, ctx.automation(), ctx.run_as.as_deref()) {
-                        return StepOutcome::Retry(e.to_string());
-                    }
-                    json!({ "posted": true, "channel": p.channel, "ts": p.ts, "note": review })
+        // Posted once per note, whatever else makes its review event again.
+        if matches!(super::note_thread(&code, &install.id, review), Ok(Some(_))) {
+            return skipped;
+        }
+        let link = preview_note::link(body);
+        let text = note_text(by, &path, &selector, link.as_deref(), &note);
+        match post(Message { channel, text, blocks: None, thread_ts: None }).await {
+            Ok(p) => {
+                if let Err(e) = super::bind_note(&code, &ctx.owner().id, &install.id, &p.channel, &p.ts, review, change, ctx.automation(), ctx.run_as.as_deref()) {
+                    return StepOutcome::Retry(e.to_string());
                 }
-                Err(e) => return outcome(e),
+                json!({ "posted": true, "channel": p.channel, "ts": p.ts, "note": review })
             }
+            Err(e) => return outcome(e),
         }
     } else if let Some((note, reply)) = preview_note::parse_reply(body) {
         // What came from the thread isn't posted back to it.
-        if reply.ends_with(FROM_SLACK) || ev["dismissed"] == true {
+        if reply.ends_with(FROM_SLACK) {
             return skipped;
         }
         let Ok(Some(b)) = super::note_thread(&code, &install.id, &note) else { return skipped };

@@ -737,7 +737,7 @@ async fn discord_interactions_are_verified_and_reach_the_inbox() {
 /// Preview notes as Slack threads (`slack.note`, Vercel's comments in Slack): a note left on a
 /// preview's page is posted to the channel; a reply in its thread is the note's reply on the
 /// change, signed with the person's name and never posted back; a reply on the page goes into
-/// the thread, and so does resolving the note.
+/// the thread.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn preview_notes_are_slack_threads_both_ways() {
     let w = world().await;
@@ -788,12 +788,9 @@ async fn preview_notes_are_slack_threads_both_ways() {
     }
     assert_eq!(replies, [format!("**Reply on the preview** · `{note_id}`\n\nFixed at 768px?\n\n— Ada, in Slack")]);
 
-    // A reply on the page goes into the thread; resolving the note is said there too.
+    // A reply on the page goes into the thread.
     review(format!("**Reply on the preview** · `{note_id}`\n\nWhich browser?")).await;
     until("the page's reply in the thread", || posts().iter().any(|p| p["text"].as_str().is_some_and(|t| t.ends_with("Which browser?")))).await;
-    let (s, v) = w.a.req("POST", &format!("/v1/code/changes/{change}/reviews/{note_id}/dismiss"), Some(json!({ "reason": "fixed" })), admin).await;
-    assert!(s.is_success(), "{v}");
-    until("the resolution in the thread", || posts().iter().any(|p| p["text"].as_str().is_some_and(|t| t.starts_with("Resolved by")))).await;
     let all = posts();
     let in_thread: Vec<&str> = all[1..].iter().map(|p| p["thread_ts"].as_str().unwrap_or_default()).collect();
     assert!(in_thread.iter().all(|t| *t == thread_ts), "{in_thread:?}");
