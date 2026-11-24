@@ -481,7 +481,7 @@ async fn a_search_link_made_by_name_is_kept_by_id_at_the_next_start() {
     let p = Project::new(&r).await;
     let project = p.id.clone();
     let sc = r.post("/v1/search/clusters", json!({ "name": "named" })).await;
-    let (id, url) = (sc["id"].as_str().unwrap().to_string(), sc["url"].as_str().unwrap().to_string());
+    let id = sc["id"].as_str().unwrap().to_string();
     p.link("search", &id, &[("ELASTICSEARCH_URL", "url", "live")]).await;
     drop(p);
     drop(r);
@@ -492,10 +492,13 @@ async fn a_search_link_made_by_name_is_kept_by_id_at_the_next_start() {
     drop(db);
     let r = Rolld::start_in(home.clone(), "search", false, &[], "/v1/info").await;
     let p = Project { rolld: &r, id: project };
+    // Its address on this start (a new port).
+    let url = r.get(&format!("/v1/search/clusters/{id}")).await["url"].as_str().unwrap().to_string();
     let started = Instant::now();
     loop {
         let v = r.get(&format!("/v1/secrets/projects/{}/environments/production/values?path=/", p.id)).await;
         if v["values"]["ELASTICSEARCH_URL"].as_str() == Some(url.as_str()) {
+            assert_eq!(v["links"][0]["ref"], json!(id), "kept by its id: {v}");
             break;
         }
         assert!(started.elapsed() < Duration::from_secs(30), "the link by name never read again: {v}");
