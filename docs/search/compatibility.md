@@ -2177,12 +2177,15 @@ the rest are skipped by the tests' own prerequisites.
   a snapshot: when `index.latest` can't be moved after it, the snapshot stays (readers find it
   past `index.latest`, or from the newest `index-N` listed when the generation it names is
   gone) and the request answers with a warning, as Elasticsearch only logs it; once
-  `index.latest` lags 8 generations, nothing more is committed until it moves.
+  `index.latest` lags 8 generations, the next commit first moves it to the newest generation,
+  and when that fails too nothing more is committed until it moves.
   `index.latest` is only ever replaced at the version roll read: another roll writer's written
   meanwhile is moved on from (or, when it's already past, built on this snapshot), and someone
-  else's takes roll's `index-N` and the snapshot's uploads back out and fails it instead of
-  being overwritten; otherwise a snapshot that fails deletes what it uploaded only once the
-  repository data shows it isn't there;
+  else's takes roll's `index-N` back out (a delete conditional on what roll wrote) and fails it
+  instead of being overwritten. A snapshot that fails deletes its own shard files once the
+  repository data shows it isn't there; its chunks, named by segment and so possibly uploaded
+  by a snapshot taken at the same time, are left to `_cleanup`, which keeps every generation
+  readers may start from;
   `_cleanup` deletes what no snapshot references, and only objects of the names roll writes
   (`index-N` from 1, `tests-<uuid>`, its shard files and chunks under `indices/`; nothing when
   the bucket holds no repository data), and aborts only its own dangling uploads,

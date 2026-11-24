@@ -2283,6 +2283,8 @@ struct MockBucket {
     fail_latest: Arc<std::sync::atomic::AtomicBool>,
     /// What another writer puts in `index.latest` just before the next write of it lands.
     latest_race: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+    /// The next new `index-N` write says it arrived (the first), then waits for the second.
+    hold_index: Arc<std::sync::Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>>,
 }
 
 /// A multipart upload in a [`MockBucket`]: its key and parts by number.
@@ -2410,6 +2412,11 @@ impl MockBucket {
             "PUT" if dropped => tagged(StatusCode::OK, m.etag("", &body), Vec::new()),
             "PUT" if m.fail_latest.load(Relaxed) && key.ends_with("/index.latest") => StatusCode::FORBIDDEN.into_response(),
             "PUT" => {
+                let held = if key.rsplit('/').next().is_some_and(|f| f.starts_with("index-")) && header("if-none-match").is_some() { m.hold_index.lock().unwrap().take() } else { None };
+                if let Some((arrived, release)) = held {
+                    arrived.notify_one();
+                    release.notified().await;
+                }
                 let mut objects = m.objects.lock().unwrap();
                 if key.ends_with("/index.latest")
                     && let Some(other) = m.latest_race.lock().unwrap().take()
@@ -2435,7 +2442,13 @@ impl MockBucket {
                 StatusCode::NO_CONTENT.into_response()
             }
             "DELETE" => {
-                m.objects.lock().unwrap().remove(&key);
+                let mut objects = m.objects.lock().unwrap();
+                if let Some(want) = header("if-match")
+                    && objects.get(&key).is_some_and(|v| m.etag(&key, v) != want)
+                {
+                    return StatusCode::PRECONDITION_FAILED.into_response();
+                }
+                objects.remove(&key);
                 StatusCode::NO_CONTENT.into_response()
             }
             _ => StatusCode::METHOD_NOT_ALLOWED.into_response(),
@@ -3225,6 +3238,10 @@ async fn an_s3_repository_bounds_and_checks_what_a_bucket_holds() {
     // writer's newer one, written meanwhile, built on it: it stays. Elasticsearch's, written
     // meanwhile: roll's `index-N` and everything the snapshot uploaded go again.
     let newest = || bucket.keys("prod/roll/index-").iter().filter_map(|k| k.rsplit('-').next()?.parse::<i64>().ok()).max().unwrap();
+    // Another roll writer's older one (their writes landing out of order): moved on from.
+    *bucket.latest_race.lock().unwrap() = Some(b"1".to_vec());
+    expect("behind another writer", es(reqwest::Method::PUT, "/_snapshot/backup/behind?wait_for_completion=true", Some(json!({"indices": "docs"}))).await, 200, "SUCCESS");
+    assert_eq!(object("prod/roll/index.latest"), newest().to_string().into_bytes());
     let next = newest() + 1;
     *bucket.latest_race.lock().unwrap() = Some((next + 1).to_string().into_bytes());
     expect("passed by another writer", es(reqwest::Method::PUT, "/_snapshot/backup/passed?wait_for_completion=true", Some(json!({"indices": "docs"}))).await, 200, "SUCCESS");
@@ -3234,20 +3251,42 @@ async fn an_s3_repository_bounds_and_checks_what_a_bucket_holds() {
     let before = bucket.keys("prod/");
     *bucket.latest_race.lock().unwrap() = Some(7i64.to_be_bytes().to_vec());
     expect("taken by Elasticsearch", es(reqwest::Method::PUT, "/_snapshot/backup/taken?wait_for_completion=true", Some(json!({"indices": "docs"}))).await, 500, "isn't roll's any more");
-    assert_eq!(bucket.keys("prod/"), before, "the rolled back snapshot left nothing");
+    // Its `index-N` and shard files went (the delete conditional on what it wrote); chunks are
+    // left to `_cleanup`.
+    let left: Vec<String> = bucket.keys("prod/").into_iter().filter(|k| !before.contains(k)).collect();
+    assert!(left.iter().all(|k| k.ends_with(".gz")), "{left:?}");
     put("prod/roll/index.latest".into(), next.to_string().into_bytes());
     // An `index.latest` that can't be written after `index-N` leaves each snapshot listed with
-    // every file it needs, and the generations readers start from in place.
+    // every file it needs, and the generations readers start from in place; once the store
+    // takes it again, the next commit moves it.
     bucket.fail_latest.store(true, std::sync::atomic::Ordering::Relaxed);
-    for name in ["late1", "late2", "late3"] {
-        let (s, v) = e.es(&u, &p, reqwest::Method::PUT, &format!("/_snapshot/backup/{name}?wait_for_completion=true"), Some(json!({"indices": "docs"}))).await;
+    for n in 1..=8 {
+        let (s, v) = e.es(&u, &p, reqwest::Method::PUT, &format!("/_snapshot/backup/late{n}?wait_for_completion=true"), Some(json!({"indices": "docs"}))).await;
         expect("committed without index.latest", (s, v), 200, "SUCCESS");
     }
     bucket.fail_latest.store(false, std::sync::atomic::Ordering::Relaxed);
+    expect("caught up", es(reqwest::Method::PUT, "/_snapshot/backup/caught-up?wait_for_completion=true", Some(json!({"indices": "docs"}))).await, 200, "SUCCESS");
+    assert_eq!(object("prod/roll/index.latest"), newest().to_string().into_bytes());
     let (_, v) = es(reqwest::Method::GET, "/_snapshot/backup/_all", None).await;
     let listed: Vec<&str> = v["snapshots"].as_array().into_iter().flatten().filter_map(|s| s["snapshot"].as_str()).collect();
-    assert!(["passed", "late1", "late2", "late3"].iter().all(|n| listed.contains(n)) && !listed.contains(&"taken"), "{listed:?}");
+    assert!(["behind", "passed", "late1", "late8", "caught-up"].iter().all(|n| listed.contains(n)) && !listed.contains(&"taken"), "{listed:?}");
     expect("restored", e.es(&u, &p, reqwest::Method::POST, "/_snapshot/backup/late1/_restore?wait_for_completion=true", Some(json!({"rename_pattern": "docs", "rename_replacement": "late"}))).await, 200, "late");
+    // Two snapshots of one index taken at once upload its new segment under the same keys: one
+    // failing after the other committed leaves the committed one whole.
+    assert_eq!(es(reqwest::Method::PUT, "/docs/_doc/fresh?refresh=true", Some(json!({"n": 2}))).await.0, 201);
+    let (arrived, release) = (Arc::new(tokio::sync::Notify::new()), Arc::new(tokio::sync::Notify::new()));
+    *bucket.hold_index.lock().unwrap() = Some((arrived.clone(), release.clone()));
+    let first = es(reqwest::Method::PUT, "/_snapshot/backup/first?wait_for_completion=true", Some(json!({"indices": "docs"})));
+    let second = async {
+        arrived.notified().await;
+        let r = es(reqwest::Method::PUT, "/_snapshot/backup/second?wait_for_completion=true", Some(json!({"indices": "docs"}))).await;
+        release.notify_one();
+        r
+    };
+    let (first, second) = tokio::join!(first, second);
+    expect("committed while the other waited", second, 200, "SUCCESS");
+    expect("refused after the other committed", first, 500, "concurrent modification");
+    expect("the committed one restores", e.es(&u, &p, reqwest::Method::POST, "/_snapshot/backup/second/_restore?wait_for_completion=true", Some(json!({"rename_pattern": "docs", "rename_replacement": "second"}))).await, 200, "second");
     // Another program's upload in parts under `indices/` makes a location someone else's.
     bucket.uploads.lock().unwrap().insert("es-upload".into(), ("parts/roll/indices/Xq/0/__e".into(), Default::default()));
     let parts = json!({"type": "s3", "settings": {"bucket": "backups", "base_path": "parts", "endpoint": endpoint, "path_style_access": true}});

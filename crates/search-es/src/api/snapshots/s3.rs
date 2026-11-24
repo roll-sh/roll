@@ -171,13 +171,18 @@ pub(super) async fn verify(cluster: &crate::Cluster, name: &str, r: &Repository)
 pub(super) enum Written {
     /// Committed, with a warning to answer when `index.latest` couldn't be moved.
     Committed(Option<String>),
-    /// Never committed: the location became someone else's, and roll's `index-N` went again.
-    RolledBack(EsError),
+    /// Never committed: the location became someone else's; roll's `index-N` went again when
+    /// `removed`.
+    RolledBack { removed: bool, error: EsError },
 }
+
+/// The highest generation roll reads or writes: far past any repository's, and far enough from
+/// `i64::MAX` that the next one can't overflow.
+const GENERATION_MAX: i64 = 1 << 62;
 
 /// A generation as roll writes it in `index.latest` (decimal), `None` for anything else.
 fn generation_in(b: &[u8]) -> Option<i64> {
-    std::str::from_utf8(b).ok().and_then(|t| t.trim().parse::<i64>().ok()).filter(|g| *g >= 0)
+    std::str::from_utf8(b).ok().and_then(|t| t.trim().parse::<i64>().ok()).filter(|g| (0..=GENERATION_MAX).contains(g))
 }
 
 /// What a repository's prefix holds ([`Bucket::contents`]).
@@ -214,7 +219,7 @@ fn roll_key(rel: &str) -> bool {
     let digits = |s: &str| !s.is_empty() && s.len() <= 19 && s.bytes().all(|b| b.is_ascii_digit());
     // Roll's generations start at 1: `index-0` is Elasticsearch's first.
     if let Some(g) = rel.strip_prefix("index-") {
-        return digits(g) && g.parse::<i64>().is_ok_and(|g| g > 0);
+        return digits(g) && g.parse::<i64>().is_ok_and(|g| (1..=GENERATION_MAX).contains(&g));
     }
     if let Some(u) = rel.strip_prefix("tests-") {
         return valid_uuid(u);
@@ -508,7 +513,8 @@ impl Bucket {
             }
         }
         for _ in 0..PROBES {
-            match self.data_at(generation + 1).await? {
+            let Some(next) = generation.checked_add(1).filter(|g| *g <= GENERATION_MAX) else { break };
+            match self.data_at(next).await? {
                 Some(d) => {
                     generation += 1;
                     found = Some(d);
@@ -527,8 +533,9 @@ impl Bucket {
     /// only logs it), and the generation two back goes only once it moved. When it changed
     /// meanwhile, it's read again: another roll writer's behind this one is moved on from; one at
     /// or past it built on it (committed); someone else's (Elasticsearch finishing its first
-    /// snapshot here) takes roll's `index-N` back out ([`Written::RolledBack`]). Once
-    /// `index.latest` lags half the generations readers probe past it, nothing more is committed.
+    /// snapshot here) takes roll's `index-N` back out ([`Written::RolledBack`]). An
+    /// `index.latest` lagging half the generations readers probe past it is first moved to the
+    /// generation just read; failing that, nothing more is committed.
     async fn write_data(&self, data: &RepositoryData, previous: i64) -> EsResult<Written> {
         if data.generation != previous + 1 {
             return Err(EsError::internal(format!("[{}] repository generation [{}] doesn't follow [{previous}]", self.name, data.generation)));
@@ -552,16 +559,23 @@ impl Bucket {
                 None => return Err(self.foreign(&format!("[{latest_key}] isn't roll's"))),
             },
         };
+        // Lagging half the generations readers probe past it: moved to the generation just read
+        // first (its `index-N` is there), or nothing more is committed.
+        let mut tag = latest.map(|(_, t)| t);
         if previous - at >= PROBES / 2 {
-            return Err(failed(
-                &self.name,
-                format!("[{latest_key}] has stayed at generation [{at}] while the repository reached [{previous}]: writing it keeps failing (the store must take conditional writes), and nothing more is committed until it moves"),
-            ));
+            match self.store.put_if(&latest_key, Bytes::from(previous.to_string()), tag.as_deref()).await {
+                Ok(Some(t)) => tag = Some(t),
+                _ => {
+                    return Err(failed(
+                        &self.name,
+                        format!("[{latest_key}] has stayed at generation [{at}] while the repository reached [{previous}]: writing it keeps failing (the store must take conditional writes), and nothing more is committed until it moves"),
+                    ));
+                }
+            }
         }
         let generation = data.generation;
         let key = format!("{}index-{generation}", self.prefix);
         let Some(written) = self.store.put_if(&key, body, None).await.map_err(|e| self.fail("writing the repository data", e))? else { return Err(concurrent()) };
-        let mut tag = latest.map(|(_, t)| t);
         let (mut moved, mut passed, mut warning) = (false, false, None);
         let could_not = |why: String| format!("[{}] generation [{generation}] is committed, but [{latest_key}] couldn't be moved to it ({why}); readers find it all the same", self.name);
         for _ in 0..4 {
@@ -587,8 +601,10 @@ impl Bucket {
                             break;
                         }
                         None => {
-                            let _ = self.store.delete_if(&key, &written).await;
-                            return Ok(Written::RolledBack(self.foreign(&format!("[{latest_key}] isn't roll's any more"))));
+                            // Without a version to delete it at (a GCS answer without its
+                            // generation), it stays: nothing reads it there any more.
+                            let removed = !written.is_empty() && self.store.delete_if(&key, &written).await.unwrap_or(false);
+                            return Ok(Written::RolledBack { removed, error: self.foreign(&format!("[{latest_key}] isn't roll's any more")) });
                         }
                     },
                 },
@@ -817,6 +833,10 @@ impl Bucket {
     /// Every object under `indices/` that no snapshot of `data` references, older repository
     /// data and test objects (`_cleanup`): `(bytes, objects)` deleted.
     async fn cleanup(&self, data: &RepositoryData) -> EsResult<(u64, u64)> {
+        // Generations readers may still start from stay: those from `index.latest` (it may lag)
+        // and the one before the newest.
+        let latest = self.store.get(&format!("{}index.latest", self.prefix), 64).await.map_err(|e| self.fail("reading index.latest", e))?;
+        let oldest_kept = latest.as_deref().and_then(generation_in).unwrap_or(0).min(data.generation - 1);
         let mut referenced: HashSet<String> = HashSet::new();
         for s in &data.snapshots {
             for (uuid, shards) in recorded_indices(s) {
@@ -838,7 +858,7 @@ impl Bucket {
                 continue;
             }
             let stale = match rel.strip_prefix("index-").and_then(|g| g.parse::<i64>().ok()) {
-                Some(g) => g + 1 < data.generation,
+                Some(g) => g < oldest_kept,
                 None => rel.starts_with("tests-") || !referenced.contains(&key),
             };
             if stale && self.store.delete(&key).await.is_ok() {
@@ -1141,7 +1161,7 @@ pub(super) async fn commit_with<R>(ctx: &Ctx<'_>, name: &str, r: &Repository, f:
     {
         match bucket.write_data(&after, before.as_ref().map_or(0, |b| b.generation)).await? {
             Written::Committed(warning) => ctx.warn_all(warning),
-            Written::RolledBack(e) => return Err(e),
+            Written::RolledBack { error, .. } => return Err(error),
         }
         store_copy(ctx.cluster, r, Some((*after).clone())).await?;
     }
@@ -1167,8 +1187,8 @@ where
     let _taking = ctx.cluster.snapshot_data.taking(uuid);
     let mut uploaded = Vec::new();
     let mut committed = false;
-    // Its `index-N` taken back out (the location someone else's now): nothing can reference
-    // what it uploaded.
+    // Its `index-N` taken back out (the location someone else's now): nothing references its
+    // shard files.
     let mut rolled_back = false;
     let result = async {
         let mut exported: HashSet<String> = HashSet::new();
@@ -1195,9 +1215,9 @@ where
                     committed = true;
                     ctx.warn_all(warning);
                 }
-                Written::RolledBack(e) => {
-                    rolled_back = true;
-                    return Err(e);
+                Written::RolledBack { removed, error } => {
+                    rolled_back = removed;
+                    return Err(error);
                 }
             }
             store_copy(ctx.cluster, r, Some((*after).clone())).await?;
@@ -1214,8 +1234,12 @@ where
     }
     // Uploads go only when the snapshot isn't in the bucket's data (a commit that failed after
     // its `index-N` landed, or a read that can't tell, keeps them).
+    // Only its own shard files go: a chunk's key is its segment's, which a snapshot taken at the
+    // same time may have uploaded too and committed; `_cleanup` deletes chunks nothing references.
     if result.is_err() && !committed && (rolled_back || !recorded(ctx, repo, r, uuid).await) {
-        bucket.delete_keys(&uploaded).await;
+        let own = format!("/snap-{uuid}.json");
+        let shard_files: Vec<String> = uploaded.into_iter().filter(|k| k.ends_with(&own)).collect();
+        bucket.delete_keys(&shard_files).await;
     }
     result
 }

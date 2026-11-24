@@ -536,9 +536,11 @@ allowlist (a preview's branch included); change it like any setting.
   `index-N` is the commit and `index.latest` moves after it only from the version read
   (`put_if`; changed meanwhile, it's read again: another roll writer's behind is moved on from,
   one past it built on it, someone else's takes `index-N` back out with a conditional delete and
-  the snapshot's uploads go; a failed move is a warning, the generation two back goes only after
-  a move, and an `index.latest` 8 generations behind stops commits); a failed snapshot otherwise
-  deletes its uploads only when the data shows it isn't recorded; `_cleanup` deletes, and aborts uploads of, only
+  its shard files go; a failed move is a warning, the generation two back goes only after a
+  move, and an `index.latest` 8 generations behind is moved to the generation read before a
+  commit, or stops commits); a failed snapshot deletes only its own shard files, when the data
+  shows it isn't recorded (chunks are named by segment and may be another snapshot's: they go
+  with `_cleanup`); `_cleanup` deletes, and aborts uploads of, only
   keys of roll's own shapes, nothing without repository data. A restore creates each index from Elasticsearch's index
   metadata as `PUT <index>` would (no templates), then a task reads each shard's Lucene files
   through `search-lucene` on a blocking thread (ranged reads in 8 MiB windows across a file's
