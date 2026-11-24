@@ -117,6 +117,8 @@ pub struct Database {
     pub moved: Mutex<HashMap<Vec<u8>, u64>>,
     /// Writes to tables structures are derived from, logged as they commit (`watch`).
     pub watch: watch::Watch,
+    /// Indexes whose entries older snapshots can't read (`IndexSince`).
+    pub index_since: IndexSince,
     /// Big tables' measures, for VACUUM to skip those nothing changed since (`unchanged`).
     pub unchanged: unchanged::Unchanged,
     /// Its MultiXactIds (`multixact`): PostgreSQL's are the cluster's; a database's own here,
@@ -318,6 +320,7 @@ impl Database {
             ssi: Default::default(),
             moved: Mutex::new(HashMap::new()),
             watch: Default::default(),
+            index_since: Default::default(),
             unchanged: Default::default(),
             multis: Mutex::new(multis),
             seqs: Mutex::new(Default::default()),
@@ -618,6 +621,8 @@ impl Database {
             loads: Vec::new(),
             held: None,
             loading: None,
+            ddl_reads: None,
+            latest_reads: None,
         })
     }
 
@@ -1274,6 +1279,66 @@ pub struct TxnState {
     /// A COPY's rows held until its multi-insert batch is placed in the heap's model
     /// (`hold_rows`): its table and the rows' keys and stored bytes, without their TIDs.
     held: Option<(u32, Vec<(Vec<u8>, Vec<u8>)>)>,
+    /// What DDL that read the newest committed rows left for the rest of the transaction
+    /// (`DdlReads`).
+    ddl_reads: Option<Box<DdlReads>>,
+    /// A DDL statement reading the newest committed rows (`begin_latest_reads`): the
+    /// snapshot it set aside, given back at its end.
+    latest_reads: Option<Box<(u64, Option<SnapshotPin>)>>,
+}
+
+/// DDL reads a table as PostgreSQL's index builds (SnapshotAny: every tuple not dead to all,
+/// `heapam_index_build_range_scan`) and rewrites (GetLatestSnapshot: `ATRewriteTable`,
+/// `heapam_relation_copy_data`) do, whatever the isolation level: the newest committed rows
+/// and the transaction's own, not its snapshot's. What that leaves a REPEATABLE READ or
+/// SERIALIZABLE transaction:
+#[derive(Default)]
+struct DdlReads {
+    /// Tables it rewrote from their newest rows under a lock no writer shares (`adopt_latest`):
+    /// key range, the time read, the savepoint depth. Their rows as it sees them are its
+    /// own writes from then on, so the commit's write-write check of keys there starts at
+    /// that time, not at the transaction's snapshot (the writes it carried over aren't
+    /// conflicts).
+    adopted: Vec<(Vec<u8>, Vec<u8>, u64, usize)>,
+    /// Indexes built from rows its snapshot doesn't see (or without rows it does): index oid,
+    /// the time read, the savepoint depth. Its snapshot doesn't use them (as an index whose
+    /// pg_index.indcheckxmin is set isn't, by a snapshot older than the index's row).
+    stale: Vec<(u32, u64, usize)>,
+    /// Indexes it gave new entry ranges (a new index, or new ids): older snapshots read no
+    /// entries there, so once it commits they don't use them (`IndexSince`). Oid, depth.
+    fresh: Vec<(u32, usize)>,
+    /// Pins of the `adopted` times, which its later statements read those tables at.
+    pins: Vec<SnapshotPin>,
+}
+
+/// Indexes whose entries were all made by a commit (a new index, or an index with new
+/// entry ids), with that commit's time: a snapshot older than it reads none of them, so
+/// the planner doesn't use the index for it (PostgreSQL's old snapshots read a new index
+/// as its heap's tuples have their own visibility; roll's entries are versions of their
+/// own). Kept while a snapshot older than the time may exist.
+#[derive(Default)]
+pub struct IndexSince {
+    /// The newest time here: a snapshot at or after it uses every index.
+    max: AtomicU64,
+    map: Mutex<HashMap<u32, u64>>,
+}
+
+impl IndexSince {
+    /// Whether a snapshot at `ts` reads index `oid`'s entries.
+    pub fn usable(&self, oid: u32, ts: u64) -> bool {
+        self.max.load(Ordering::Acquire) <= ts || self.map.lock().get(&oid).is_none_or(|&t| t <= ts)
+    }
+
+    /// `oids` committed at `ts` (under the commit lock, before the catalog naming them is
+    /// published); what no snapshot needs any more (`horizon`: the oldest one) goes.
+    fn committed(&self, oids: &[u32], ts: u64, horizon: u64) {
+        let mut m = self.map.lock();
+        m.retain(|_, t| *t > horizon);
+        for &o in oids {
+            m.insert(o, ts);
+        }
+        self.max.fetch_max(ts, Ordering::AcqRel);
+    }
 }
 
 struct Loading {
@@ -1532,6 +1597,161 @@ impl TxnState {
             self.snapshot_ts = pin.ts;
             self._pin = Some(pin);
         }
+    }
+
+    /// A DDL statement (index builds, rewrites, their validations, ANALYZE) reads the newest
+    /// committed rows from here to `end_latest_reads`, in every isolation level, and again
+    /// after each lock of SHARE or stronger it is granted (`lock_relation`): what
+    /// PostgreSQL's builds (SnapshotAny) and rewrites and checks (GetLatestSnapshot) read,
+    /// not the transaction's snapshot (a REPEATABLE READ one's left rows committed after it
+    /// out of the index, and lost them in a rewrite). False: one is running already.
+    pub fn begin_latest_reads(&mut self) -> bool {
+        if self.latest_reads.is_some() {
+            return false;
+        }
+        self.latest_reads = Some(Box::new((self.snapshot_ts, self._pin.take())));
+        let pin = self.pin_visible();
+        self.snapshot_ts = pin.ts;
+        self._pin = Some(pin);
+        true
+    }
+
+    /// The snapshot `begin_latest_reads` set aside is the transaction's (the statement's)
+    /// again.
+    pub fn end_latest_reads(&mut self) {
+        if let Some(b) = self.latest_reads.take() {
+            let (ts, pin) = *b;
+            self.snapshot_ts = ts;
+            self._pin = pin;
+        }
+    }
+
+    /// `begin_latest_reads` is running: reads see what committed since (`lock_relation`).
+    fn refresh_latest_reads(&mut self) {
+        if self.latest_reads.is_some() && self.db.store.visible_ts() != self.snapshot_ts {
+            let pin = self.pin_visible();
+            self.snapshot_ts = pin.ts;
+            self._pin = Some(pin);
+        }
+    }
+
+    /// The snapshot the transaction's statements read at, outside `begin_latest_reads`.
+    pub fn statement_snapshot_ts(&self) -> u64 {
+        self.latest_reads.as_ref().map_or(self.snapshot_ts, |b| b.0)
+    }
+
+    /// The table range [start, end) is rewritten from its newest rows (read in
+    /// `begin_latest_reads`, under a lock no writer shares, held to the end): in a REPEATABLE
+    /// READ or SERIALIZABLE transaction whose snapshot misses changes there, the rows it
+    /// sees there from now on are the rewrite's (its own writes, after its range deletion),
+    /// and the commit checks its writes there against what committed after now, not after
+    /// its snapshot: the rewrite carries the newer rows over, they don't conflict with it
+    /// (PostgreSQL's rewrite in such a transaction neither fails nor sees the old rows
+    /// afterwards). Its own writes there from before are checked now. True: it does miss
+    /// changes there (the caller hides the rows only its snapshot sees).
+    pub fn adopt_latest(&mut self, start: &[u8], end: &[u8]) -> Result<bool> {
+        if !self.isolation.txn_snapshot() || self.prepared {
+            return Ok(false);
+        }
+        let ts = self.snapshot_ts;
+        if let Some(d) = &self.ddl_reads
+            && d.adopted.iter().any(|(s, e, _, _)| s.as_slice() <= start && e.as_slice() >= end)
+        {
+            return Ok(true);
+        }
+        if self.latest_reads.is_none() || !self.db.store.changed_since(start, end, self.start_ts) {
+            return Ok(false);
+        }
+        // (What it wrote there before the lock: changed since its snapshot by another
+        // transaction, it was written from an older version.)
+        for (k, _) in self.writes_in(start, end)? {
+            if !crate::storage::rdel::is_marker(&k)
+                && !multixact::is_state_key(&k)
+                && self.db.store.latest_version_ts(&k)?.is_some_and(|t| t > self.start_ts)
+            {
+                return Err(Error::new(code::SERIALIZATION_FAILURE, "could not serialize access due to concurrent update"));
+            }
+        }
+        let depth = self.savepoints.len();
+        let pin = self.pin_at(ts);
+        let d = self.ddl_reads.get_or_insert_with(Default::default);
+        d.adopted.push((start.to_vec(), end.to_vec(), ts, depth));
+        d.pins.push(pin);
+        Ok(true)
+    }
+
+    /// The time after which a commit to `key` conflicts with this transaction's write of it
+    /// (REPEATABLE READ / SERIALIZABLE): its snapshot's, or a rewrite's (`adopt_latest`).
+    pub(crate) fn conflict_since(&self, key: &[u8]) -> u64 {
+        self.ddl_reads
+            .as_ref()
+            .and_then(|d| d.adopted.iter().find(|(s, e, _, _)| s.as_slice() <= key && key < e.as_slice()))
+            .map_or(self.start_ts, |a| a.2.max(self.start_ts))
+    }
+
+    /// Whether [start, end) was rewritten from its newest rows (`adopt_latest`).
+    pub fn adopted(&self, start: &[u8], end: &[u8]) -> bool {
+        self.ddl_reads
+            .as_ref()
+            .is_some_and(|d| d.adopted.iter().any(|(s, e, _, _)| s.as_slice() <= start && e.as_slice() >= end))
+    }
+
+    /// Whether the rows in [start, end) as the transaction's statements see them differ from
+    /// the newest ones (read in `begin_latest_reads`; both with its own writes).
+    pub fn snapshot_misses(&self, start: &[u8], end: &[u8]) -> Result<bool> {
+        let (old, new) = (self.statement_snapshot_ts(), self.snapshot_ts);
+        if old == new || self.adopted(start, end) || !self.db.store.changed_since(start, end, old) {
+            return Ok(false);
+        }
+        let mut a = self.scan_at(start, end, old);
+        let mut b = self.scan_at(start, end, new);
+        loop {
+            match (a.next().transpose()?, b.next().transpose()?) {
+                (None, None) => return Ok(false),
+                (x, y) if x != y => return Ok(true),
+                _ => {}
+            }
+        }
+    }
+
+    /// An index was built (its entries written) in `begin_latest_reads`: `fresh`, all its
+    /// entries are new (older snapshots read none); `stale`, its table's rows as the
+    /// transaction's statements see them aren't those it was built from (`snapshot_misses`).
+    pub fn note_index_built(&mut self, oid: u32, fresh: bool, stale: bool) {
+        if !fresh && !stale {
+            return;
+        }
+        let (ts, depth) = (self.snapshot_ts, self.savepoints.len());
+        let d = self.ddl_reads.get_or_insert_with(Default::default);
+        if fresh {
+            d.fresh.push((oid, depth));
+        }
+        if stale {
+            d.stale.push((oid, ts, depth));
+        }
+    }
+
+    /// Whether a snapshot at `ts` of this transaction reads index `oid` (the planner leaves
+    /// out one it doesn't: `IndexSince`, `DdlReads::stale`).
+    pub fn index_usable(&self, oid: u32, ts: u64) -> bool {
+        if let Some(d) = &self.ddl_reads
+            && d.stale.iter().any(|&(o, t, _)| o == oid && ts < t)
+        {
+            return false;
+        }
+        self.db.index_since.usable(oid, ts)
+    }
+
+    /// Whether the snapshot its next statement reads at uses every index (`index_usable`):
+    /// plans made otherwise leave some out, and plans made by snapshots that use them aren't
+    /// its to run, so the plans kept across statements and sessions (`session::litplan`)
+    /// are neither kept nor reused then.
+    pub fn reads_every_index(&self) -> bool {
+        let ts = match self.isolation.txn_snapshot() && self.snapshot_fixed {
+            true => self.statement_snapshot_ts(),
+            false => self.db.store.visible_ts(),
+        };
+        self.ddl_reads.as_ref().is_none_or(|d| d.stale.is_empty()) && self.db.index_since.max.load(Ordering::Acquire) <= ts
     }
 
     /// Its own (virtual) transaction lock, which others waiting for it wait on: held by a
@@ -3733,6 +3953,7 @@ impl TxnState {
         // an index built from that missed their rows, a rewrite dropped them.
         if got && mode >= LockMode::Share {
             self.refresh_read_committed_snapshot();
+            self.refresh_latest_reads();
         }
         Ok(got)
     }
@@ -3917,8 +4138,14 @@ impl TxnState {
             self.catalog_base = None;
             self.catalog_base_cat = None;
         }
-        // Locks taken after the savepoint are released, as Postgres does for subtransactions.
+        // Locks taken after the savepoint are released, as Postgres does for subtransactions:
+        // what DDL read under them goes too (`DdlReads`).
         self.release_locks_above(i, journal_len);
+        if let Some(d) = &mut self.ddl_reads {
+            d.adopted.retain(|a| a.3 <= i);
+            d.stale.retain(|a| a.2 <= i);
+            d.fresh.retain(|a| a.1 <= i);
+        }
         // The aborted subtransactions' statistics counts (levels i+2 and deeper).
         for nest in (i + 2..=self.savepoints.len() + 1).rev() {
             self.pgstat.end_subxact(nest, false);
@@ -3996,6 +4223,11 @@ impl TxnState {
         }
         for d in self.new_storage.values_mut() {
             *d = (*d).min(i);
+        }
+        if let Some(d) = &mut self.ddl_reads {
+            d.adopted.iter_mut().for_each(|a| a.3 = a.3.min(i));
+            d.stale.iter_mut().for_each(|a| a.2 = a.2.min(i));
+            d.fresh.iter_mut().for_each(|a| a.1 = a.1.min(i));
         }
         Ok(())
     }
@@ -4132,6 +4364,21 @@ impl TxnState {
         let base = self.catalog_base;
         let base_cat = self.catalog_base_cat.take();
         let start = self.start_ts;
+        // (Tables it rewrote from their newest rows: their keys' check starts then,
+        // `adopt_latest`; and the indexes older snapshots can't use, `IndexSince`.)
+        let ddl_reads = self.ddl_reads.take();
+        let adopted: Vec<(Vec<u8>, Vec<u8>, u64)> = ddl_reads
+            .as_ref()
+            .map(|d| d.adopted.iter().map(|(s, e, t, _)| (s.clone(), e.clone(), *t)).collect())
+            .unwrap_or_default();
+        let since = |k: &[u8]| -> u64 {
+            adopted
+                .iter()
+                .find(|(s, e, _)| s.as_slice() <= k && k < e.as_slice())
+                .map_or(start, |&(_, _, t)| t.max(start))
+        };
+        let fresh: Vec<u32> = ddl_reads.as_ref().map(|d| d.fresh.iter().map(|&(o, _)| o).collect()).unwrap_or_default();
+        let horizon = if fresh.is_empty() { 0 } else { self.db.store.gc_horizon() };
         // (A prepared transaction checked its writes when it prepared; its row locks kept
         // them since.)
         let strict = self.isolation.txn_snapshot() && !self.prepared;
@@ -4202,7 +4449,7 @@ impl TxnState {
             }
             if strict {
                 for k in &keys {
-                    if store.latest_version_ts(k)?.is_some_and(|ts| ts > start) {
+                    if store.latest_version_ts(k)?.is_some_and(|ts| ts > since(k)) {
                         return Err(Error::new(
                             code::SERIALIZATION_FAILURE,
                             "could not serialize access due to concurrent update",
@@ -4236,7 +4483,11 @@ impl TxnState {
         let publish = self.publish;
         // A new catalog is published under the commit lock, with the data (`check` may have
         // merged it onto the current one).
+        let index_since = &self.db.index_since;
         let publish_catalog = |ts| {
+            if !fresh.is_empty() {
+                index_since.committed(&fresh, ts, horizon);
+            }
             if let Some(c) = catalog.borrow_mut().take() {
                 if !publish {
                     db2.last_local.fetch_max(c.version, Ordering::AcqRel);
@@ -4248,7 +4499,7 @@ impl TxnState {
             // (A snapshot transaction's conflict check, key by key as they are written.)
             let store_watch = &self.db.watch;
             let each = |store: &Store, k: &[u8]| -> Result<()> {
-                if strict && !crate::storage::rdel::is_marker(k) && store.latest_version_ts(k)?.is_some_and(|ts| ts > start) {
+                if strict && !crate::storage::rdel::is_marker(k) && store.latest_version_ts(k)?.is_some_and(|ts| ts > since(k)) {
                     return Err(Error::new(
                         code::SERIALIZATION_FAILURE,
                         "could not serialize access due to concurrent update",
@@ -4302,6 +4553,12 @@ impl TxnState {
             crate::repl::log::committed(&self.db.log, lsn);
         }
         self.finish_xid(result.is_ok());
+        // (Again for a commit that published no catalog, where `publish_catalog` didn't run.)
+        if let Ok(ts) = &result
+            && !fresh.is_empty()
+        {
+            self.db.index_since.committed(&fresh, *ts, horizon);
+        }
         if let Ok(ts) = &result {
             for (table, load) in self.loads.drain(..) {
                 self.db.unchanged.keep(&self.db.store, table, load.measured(*ts));

@@ -532,6 +532,18 @@ fn rel_size(t: &Table, ctx: &ExecCtx) -> (RelSize, f64) {
     (size, frac)
 }
 
+/// Whether the statement's snapshot reads index `oid`'s entries: not one older than the
+/// commit that made them all, nor its own transaction's when the index was built from rows
+/// its snapshot doesn't see (`Txn::index_usable`; get_relation_info leaves out an index whose
+/// pg_index.indcheckxmin makes it unsafe for the snapshot).
+fn index_readable(ctx: &ExecCtx, oid: u32) -> bool {
+    let Ok(txn) = ctx.txn.try_borrow() else {
+        return true;
+    };
+    let ts = ctx.snapshot().map_or_else(|| txn.snapshot_ts(), |s| s.ts());
+    txn.index_usable(oid, ts)
+}
+
 fn index_infos(ctx: &ExecCtx, t: &Arc<Table>, rel_tuples: f64) -> Vec<IndexInfo> {
     if let Some(st) = syscat::stand_in_of(t) {
         return syscat::sys_index_infos(st, rel_tuples);
@@ -544,7 +556,7 @@ fn index_infos(ctx: &ExecCtx, t: &Arc<Table>, rel_tuples: f64) -> Vec<IndexInfo>
     let mut out = Vec::new();
     for b in &bound {
         let ix = b.index.clone();
-        if !ix.valid {
+        if !ix.valid || !index_readable(ctx, ix.oid) {
             continue;
         }
         let am = match ix.method.as_str() {
@@ -2305,6 +2317,7 @@ impl<'c, 'a> Planner<'c, 'a> {
             .chain(t.pkey_index.and_then(|p| self.cat.index(p)))
             .any(|ix| {
                 ix.valid
+                    && index_readable(self.ctx, ix.oid)
                     && ix.method == "btree"
                     && ix.predicate.is_none()
                     && ix.columns.first().is_some_and(|c| {

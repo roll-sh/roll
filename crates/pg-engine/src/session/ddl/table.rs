@@ -3714,7 +3714,8 @@ impl Ddl<'_, '_> {
         let progress = super::idxprogress::IndexProgress::start(self, t, ix, blocks);
         if let Some(r) = crate::ext::index_am::routine_by_name(&self.cat, &ix.method) {
             progress.scanning();
-            return self.build_am_index(r, t, ix, &bix);
+            self.build_am_index(r, t, ix, &bix)?;
+            return self.note_index_built(t, ix);
         }
         // (The rows scanned that have entries: the blocks done, then the tuples sorted.)
         let mut entries = 0u64;
@@ -3875,7 +3876,29 @@ impl Ddl<'_, '_> {
         }
         let counted = par_counted.or_else(|| measured.is_none().then_some((rows, entries as usize)));
         let prebuilt = model_keys.and_then(|(w, keys)| crate::exec::sizing::btree_from_build(t, &bix, keys, w, &ctx.sess.db));
+        self.note_index_built(t, ix)?;
         self.index_built_from(t, ix, measured, counted, prebuilt)
+    }
+
+    /// An index's entries were made from the rows the statement reads (the newest ones:
+    /// `Txn::begin_latest_reads`): older snapshots, and this transaction's own when its
+    /// snapshot doesn't see those rows, don't use it (`Txn::note_index_built`).
+    pub(super) fn note_index_built(&self, t: &Table, ix: &Index) -> Result<()> {
+        let fresh = !self.base.indexes.get(&ix.oid).is_some_and(|b| b.id == ix.id);
+        let stale = {
+            let txn = self.ctx.txn.borrow();
+            let start = crate::storage::keys::index_prefix(t.oid, 0);
+            txn.isolation.txn_snapshot() && txn.snapshot_misses(&start, &crate::storage::keys::prefix_end(&start))?
+        };
+        self.ctx.txn.borrow_mut().note_index_built(ix.oid, fresh, stale);
+        Ok(())
+    }
+
+    /// A rewrite of `t`'s rows from the newest ones (`Txn::adopt_latest`): true when the
+    /// transaction's snapshot misses changes to them (it sees the rewrite's rows only).
+    pub(super) fn adopt_latest(&self, t: &Table) -> Result<bool> {
+        let start = crate::storage::keys::index_prefix(t.oid, 0);
+        self.ctx.txn.borrow_mut().adopt_latest(&start, &crate::exec::toast::table_end(t.oid))
     }
 
     pub(super) fn duplicate_key(&self, t: &Table, bix: &BoundIndex, vals: &[Value], name: &str) -> Error {
@@ -3921,6 +3944,11 @@ impl Ddl<'_, '_> {
         new: &Table,
         f: impl Fn(Row) -> Result<Row>,
     ) -> Result<()> {
+        // (Its range deletion hides every row the transaction's snapshot saw.)
+        self.adopt_latest(old)?;
+        if new.oid != old.oid {
+            self.adopt_latest(new)?;
+        }
         let rows = self.table_rows(old)?;
         // The rows keep their places in the heap (a rewrite Postgres does too happens at the
         // end of the ALTER TABLE).
@@ -4014,6 +4042,12 @@ impl Ddl<'_, '_> {
         crate::exec::sizing::in_heap_order(new, &mut rows, self.ctx);
         // (The models stay as they are, the rows' keys aside: nothing moves in the heap.)
         let saved = crate::exec::sizing::detach(old, &self.ctx.sess.db);
+        // (A snapshot missing changes to the rows read: none it sees stays, not just those
+        // read now.)
+        if self.adopt_latest(new)? {
+            let end = crate::exec::toast::table_end(new.oid);
+            self.ctx.txn.borrow_mut().delete_range(start.clone(), end)?;
+        }
         let keys: Vec<Vec<u8>> = self
             .ctx
             .txn
@@ -4417,6 +4451,16 @@ impl Ddl<'_, '_> {
         Ok(())
     }
 
+    /// `rewrite_heap_rows` of the newest rows; where the transaction's snapshot misses
+    /// changes to them, every row and index entry written again (`rewrite`), so the rows it
+    /// sees afterwards are the rewrite's (`adopt_latest`).
+    fn rewrite_rows_latest(&mut self, t: &Table) -> Result<()> {
+        if self.adopt_latest(t)? {
+            return self.rewrite(t, t, Ok);
+        }
+        self.rewrite_heap_rows(t)
+    }
+
     fn rewrite_heap_rows(&self, t: &Table) -> Result<()> {
         let mut rows = self.table_rows(t)?;
         crate::exec::sizing::in_heap_order(t, &mut rows, self.ctx);
@@ -4710,14 +4754,14 @@ impl Ddl<'_, '_> {
                 }
                 self.cat.rewrite_heap(&mut t, false);
                 self.set_frozen_xid(&t.clone(), xmin);
-                self.rewrite_heap_rows(&t)?;
+                self.rewrite_rows_latest(&t)?;
                 self.reindexed(&t)?;
             } else if let Some(c) = self.cat.tables.get(&oid).cloned() {
                 let mut c = (*c).clone();
                 self.cat.add_toast(&mut c);
                 self.cat.rewrite_heap(&mut c, false);
                 self.set_frozen_xid(&c, xmin);
-                self.rewrite_heap_rows(&c)?;
+                self.rewrite_rows_latest(&c)?;
                 self.reindexed(&c)?;
                 self.cat.put_table(c);
             }

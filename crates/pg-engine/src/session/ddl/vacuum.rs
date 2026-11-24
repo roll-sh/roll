@@ -1580,6 +1580,8 @@ impl Ddl<'_, '_> {
                     .map(|r| r.and_then(|(k, v)| Ok((k, crate::exec::scan::row_xmin(&v)?))))
                     .collect::<Result<_>>()?
             };
+            // (Its range deletion hides every row the transaction's snapshot saw.)
+            self.adopt_latest(t)?;
             crate::exec::dml::truncate(t, self.ctx)?;
             let xid = self.ctx.txn.borrow_mut().cur_xid();
             let (rows, kept): (Vec<crate::exec::Row>, Vec<u64>) =

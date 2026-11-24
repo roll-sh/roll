@@ -349,7 +349,7 @@ impl crate::txn::TxnState {
         }
         if self.isolation.txn_snapshot() {
             for k in self.writes_in(&[], ALL_END)?.keys().filter(|k| k.as_slice() != super::CATALOG_KEY && !crate::storage::rdel::is_marker(k)) {
-                if self.db.store.latest_version_ts(k)?.is_some_and(|ts| ts > self.start_ts) {
+                if self.db.store.latest_version_ts(k)?.is_some_and(|ts| ts > self.conflict_since(k)) {
                     return Err(Error::new(
                         code::SERIALIZATION_FAILURE,
                         "could not serialize access due to concurrent update",

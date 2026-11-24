@@ -161,7 +161,10 @@ pub fn execute(ctx: &ExecCtx, node: &NodeEnum, sql: &str) -> Result<String> {
     let evt = event_trigger::begin(ctx, node)?;
     let mut d = Ddl::new(ctx, sql);
     let am_before = d.am_index_storage();
-    let tag = match d.run(node).and_then(|t| d.rebuild_renewed_am_indexes(&am_before).map(|_| t)) {
+    let latest = LatestReads::begin(ctx, node);
+    let tag = d.run(node).and_then(|t| d.rebuild_renewed_am_indexes(&am_before).map(|_| t));
+    drop(latest);
+    let tag = match tag {
         Ok(t) => t,
         Err(e) => {
             if let Some(b) = evt {
@@ -174,6 +177,33 @@ pub fn execute(ctx: &ExecCtx, node: &NodeEnum, sql: &str) -> Result<String> {
         event_trigger::finish(ctx, b, node)?;
     }
     Ok(tag)
+}
+
+/// A statement that builds indexes, rewrites tables or checks their rows reads what
+/// PostgreSQL's do (`Txn::begin_latest_reads`): the newest committed rows, as its index builds
+/// (SnapshotAny), rewrites and validations (GetLatestSnapshot) and ANALYZE's sample
+/// (acquire_sample_rows) read them, also in a REPEATABLE READ or SERIALIZABLE transaction.
+struct LatestReads<'c, 'a>(Option<&'c ExecCtx<'a>>);
+
+impl<'c, 'a> LatestReads<'c, 'a> {
+    fn begin(ctx: &'c ExecCtx<'a>, node: &NodeEnum) -> Self {
+        use NodeEnum as N;
+        let reads = match node {
+            N::IndexStmt(_) | N::ReindexStmt(_) | N::ClusterStmt(_) | N::VacuumStmt(_) | N::AlterTableStmt(_) | N::AlterDomainStmt(_) => true,
+            // (CREATE TABLE ... PARTITION OF checks the default partition's rows.)
+            N::CreateStmt(c) => c.partbound.is_some(),
+            _ => false,
+        };
+        LatestReads((reads && ctx.txn.borrow_mut().begin_latest_reads()).then_some(ctx))
+    }
+}
+
+impl Drop for LatestReads<'_, '_> {
+    fn drop(&mut self) {
+        if let Some(ctx) = self.0 {
+            ctx.txn.borrow_mut().end_latest_reads();
+        }
+    }
 }
 
 /// `execute`, for a statement whose `$n` (with these types) are the context's parameters.

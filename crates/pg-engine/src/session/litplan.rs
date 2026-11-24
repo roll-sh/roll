@@ -235,12 +235,18 @@ impl Session {
     /// The plan kept for `p`'s template that fits it now, with the values of its parameters
     /// (not while auto_explain may show the plan: it has the literals as parameters).
     pub(super) fn lit_plan_for(&mut self, p: &Prepared, params: &[Value]) -> Option<(Arc<BoundQuery>, Vec<Value>)> {
-        if !params.is_empty() || p.lit.is_none() || self.state.settings.borrow().module_loaded("auto_explain") {
+        if !params.is_empty() || p.lit.is_none() || self.state.settings.borrow().module_loaded("auto_explain") || !self.reads_every_index() {
             return None;
         }
         let r = self.lit_plan(p);
         self.lit_plans.uses += r.is_some() as u64;
         r
+    }
+
+    /// Whether the transaction's next statement reads every index (`Txn::reads_every_index`):
+    /// else its plans aren't kept, nor kept plans run.
+    fn reads_every_index(&self) -> bool {
+        self.txn.as_ref().is_none_or(|t| t.try_borrow().is_ok_and(|t| t.reads_every_index()))
     }
 
     /// How many queries ran with a plan kept for their template.
@@ -354,7 +360,7 @@ impl Session {
         if planned.procs.folded {
             return;
         }
-        if self.state.settings.borrow().module_loaded("auto_explain") {
+        if self.state.settings.borrow().module_loaded("auto_explain") || !self.reads_every_index() {
             return;
         }
         // (Not the first time the session sees the template: a query sent once isn't bound
@@ -562,6 +568,9 @@ impl Session {
     /// What a plan kept now may be shared under (`SHARED`): None in a session with
     /// temporary objects, which its plans may name where another session's would name its own.
     fn shared_env(&self, env: &Env) -> Option<SharedEnv> {
+        if !self.reads_every_index() {
+            return None;
+        }
         let cat = self.txn.as_ref()?.borrow().next_catalog();
         if cat.schema_oid(&self.state.temp_schema()).is_ok() {
             return None;

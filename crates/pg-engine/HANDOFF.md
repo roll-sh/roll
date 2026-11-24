@@ -21696,3 +21696,99 @@ covers is therefore a miscompile or undefined behaviour that appears with the PG
    rewrites lose those rows.
 2. A packaging step that runs `dist-pgo.sh --out` and ships the binary (agent 304's item 1).
 3. Binary-level power cuts need root (a device-mapper target) or an LD_PRELOAD shim (item 3).
+
+## DDL in REPEATABLE READ / SERIALIZABLE reads the newest rows (agent 310, 2026-11-24)
+
+**The bug (agent 307's "Left" 1, and more).** Index builds and table rewrites read the table
+through the transaction's snapshot. In a REPEATABLE READ or SERIALIZABLE transaction (and an
+autocommit statement under `default_transaction_isolation = 'repeatable read'`) another
+session's commit after that snapshot was invisible to them. Against PostgreSQL 18.6 (own
+`a310-pg`; probes `~/.cache/a310/scripts/probe.py`, `probe2.py`; 1,000-row table, the change
+committed after the transaction's first SELECT):
+- CREATE INDEX, CREATE UNIQUE INDEX, ADD PRIMARY KEY / UNIQUE: the committed index lacked an
+  inserted row; a row updated in the indexed column kept its old key, so the index missed it
+  (999 of 1,000); a duplicate committed after the snapshot passed a unique build.
+- ALTER COLUMN TYPE, ADD COLUMN with a volatile default, CLUSTER: **an inserted row was lost**
+  (1,000 of 1,001), **a deleted row came back** (1,000 against PostgreSQL's 999); with a primary
+  key keying the rows, an updated row went back to its old value; an UPDATE after the rewrite
+  started from the old value (8 where PostgreSQL gives 108).
+- SET UNLOGGED / SET LOGGED: the commit failed with 40001 after another session's UPDATE (it
+  restamped every row read at the snapshot).
+- **Found on the way: a snapshot older than another session's CREATE INDEX read nothing through
+  that index** (0 rows of 1,000, any isolation level whose snapshot predates the commit: an RR
+  transaction, a cursor, a long statement). roll's index entries are versions of their own,
+  committed with the index; PostgreSQL's old snapshot reads the new index because its heap
+  tuples carry their own visibility.
+
+**The fix.**
+- `ddl::execute` runs CREATE INDEX, REINDEX, CLUSTER, VACUUM / ANALYZE, ALTER TABLE, ALTER
+  DOMAIN and CREATE TABLE ... PARTITION OF inside `Txn::begin_latest_reads` /
+  `end_latest_reads`: the statement reads the newest committed rows plus its own, and again after
+  every SHARE-or-stronger lock it is granted (`lock_relation`), in every isolation level. That
+  is what PostgreSQL's builds (SnapshotAny, `heapam_index_build_range_scan`), rewrites and
+  validations (GetLatestSnapshot: `ATRewriteTable`, `validateCheckConstraint`,
+  `RI_Initial_Check`, `check_default_partition_contents`) and ANALYZE (`acquire_sample_rows`)
+  read. The transaction's snapshot is given back at the statement's end. Every path under it
+  (serial and parallel builds, access-method builds, the measuring passes, validations) follows
+  without its own change.
+- A rewrite (`rewrite`, `relayout`, CLUSTER's copy, the queued ALTER TABLE rewrites) first calls
+  `Txn::adopt_latest` for the table's key range: when the transaction's snapshot misses changes
+  there, its own earlier writes there are checked against what committed since its snapshot
+  (40001 now), and from then on the commit's write-write check of keys there starts at the
+  rewrite's read time (`conflict_since`, also in PREPARE's check). This is sound because the rows
+  it sees there afterwards are all the rewrite's own: `rewrite` and CLUSTER range-delete the table
+  first, `relayout` does too in that case, and the in-place restamp (SET LOGGED / UNLOGGED,
+  `rewrite_heap_rows`) becomes a full `rewrite` in that case. Without a change since the
+  snapshot nothing differs from before.
+- Indexes and snapshots: `Txn::note_index_built` records an index whose entries are all new (a
+  new oid, or new entry ids) for the commit, which puts it in `Database::index_since` with the
+  commit time (under the commit lock, before the catalog naming it is published; pruned below
+  the store's GC horizon). It also records, when the transaction's own rows differ from those it
+  was built from (`snapshot_misses`: `changed_since`, then a compare of both scans), that its
+  own snapshot can't read it. The planner (`paths::index_readable`) leaves out an index a
+  snapshot can't read, as PostgreSQL's get_relation_info leaves out an index whose
+  `indcheckxmin` makes it unsafe. Kept literal plans (`litplan`: per session and the shared
+  ones) are neither kept nor reused while the next statement's snapshot can't read some index
+  (`Txn::reads_every_index`), so a plan made with the index can't reach an older snapshot, and
+  one made without it doesn't stick.
+
+**Checks.**
+- `~/.cache/a307/scripts/ddl-det.py` (copy in `~/.cache/a310/scripts`): READ COMMITTED and
+  `RR=1`, 1,001 rows through every index for all eight DDL (before: RR 1,000 for six).
+- probe.py: 120 cases (REPEATABLE READ and SERIALIZABLE x insert / delete / update /
+  key update / duplicate x nine DDL; old snapshots x six DDL). Every row count equals
+  PostgreSQL 18.6's except the differences below. probe2.py: lost update after CREATE INDEX
+  (40001, as PostgreSQL), UPDATE after a rewrite (108), a deleted row after a rewrite, own
+  writes before a rewrite, ROLLBACK TO / RELEASE of a savepoint around a rewrite, keyed-table
+  rewrites, a unique build over its own delete, point lookups and a prepared statement of an
+  old snapshot, a cursor: all as PostgreSQL.
+- Isolation spec `roll-ddl-snapshot-reads-latest` (15 permutations): 15 / 15 against
+  PostgreSQL 18.6 live; 3 / 15 with the base binary. With it, `roll-ddl-reads-waited-writes`,
+  `roll-ddl-after-lock-waits`, `roll-concurrent-create` and `roll-detach-finalize-snapshots`:
+  43 / 43.
+- `tools/crash-binary.py`, verify builds: seeds 1, 2 (before the plan-cache change) and 3
+  (after): green.
+
+**Measured**: no benchmark. The per-statement snapshot (`begin_statement`) is unchanged; a
+simple query's kept-plan lookup gains a borrow and two atomic loads (`reads_every_index`), the
+planner a borrow and one atomic load per index, a REPEATABLE READ commit's check one empty-Vec
+lookup per key: predicted well under 0.1% of a point select.
+
+**Differences from PostgreSQL left (results, not lost rows):**
+1. CLUSTER inside a REPEATABLE READ transaction: afterwards that transaction sees the rows
+   committed after its snapshot (PostgreSQL's copy keeps each tuple's xmin, so it still sees
+   its snapshot). roll's copy is the transaction's own writes. Committed results are the same.
+2. Plans: the transaction that built an index from rows its snapshot doesn't see, and every
+   snapshot older than an index's commit, plan without that index (PostgreSQL uses it; its
+   `indcheckxmin` stays false). Results are the same. `pg_index.indcheckxmin` stays false.
+3. ALTER TABLE rewrites seen from an older snapshot: roll's old snapshot still reads the rows
+   (MVCC-safe); PostgreSQL's reads an empty table (documented as not MVCC-safe). Not changed.
+4. Extended-protocol bindings (`ParamPlans`) and named prepared statements are not gated: a
+   generic plan made while an index was skipped is kept until the catalog or sizes change
+   (slower, not wrong: a session's snapshots only move forward, except SET TRANSACTION
+   SNAPSHOT of an older one, which could run a plan made with an index its snapshot predates).
+5. COMMIT PREPARED does not carry `DdlReads`: an index created in a prepared transaction isn't
+   put in `index_since`, so a snapshot older than the COMMIT PREPARED reads nothing through it.
+
+**Left**: the wider audit (TRUNCATE, REFRESH MATERIALIZED VIEW, CREATE TABLE AS, COPY TO, ATTACH /
+DETACH validation, constraint validation, ANALYZE) is the next candidate (`cand/a310-2`).
