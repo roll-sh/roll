@@ -688,7 +688,10 @@ route goes on as it did.
   never an environment named `production`, protected or not. It only narrows, so a token can
   carry it too.
 - A project the session's rules don't name is a 404 (as the workspace answers); one they do is a
-  403 that names what the role lacks. A list it can't see whole is filtered; a session never asks.
+  403 that names what the role lacks, the weakest role that may (`roles::weakest_allowed`), and
+  that a project admin changes roles. A list it can't see whole is filtered; a session never asks,
+  and neither does a person's token that wasn't made to: its rules can't reach past their roles,
+  so its refusal points at a role, not at the token's rules.
 - Session requests aren't access-log rows (they aren't a token's), allowed or refused: a refused
   session request leaves no audit row either, only its answer. Membership changes are
   (`product=workspace`: `member.invite`, `member.accept`, `member.role`, `member.remove`,
