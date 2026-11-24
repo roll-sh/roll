@@ -25,12 +25,12 @@ pub const KINDS: &[Kind] = &[
     Kind { kind: "project", list: "workspace_list_projects", read: "workspace_get_project", param: "id", id: &["id"], page: Some("/dashboard/projects/{}") },
     Kind { kind: "service", list: "apps_list_services", read: "apps_get_service", param: "service", id: &["id"], page: Some("/dashboard/apps/{}") },
     Kind { kind: "repo", list: "code_list_repos", read: "code_list_changes", param: "repo", id: &["full_name"], page: Some("/dashboard/code/{}") },
-    Kind { kind: "postgres", list: "postgres_list_projects", read: "postgres_get_project", param: "project", id: &["id"], page: None },
+    Kind { kind: "postgres", list: "postgres_list_projects", read: "postgres_get_project", param: "project", id: &["id"], page: Some("/dashboard/databases?project={}") },
     Kind { kind: "redis", list: "redis_list_databases", read: "redis_get_database", param: "database", id: &["id"], page: Some("/dashboard/redis/{}") },
     Kind { kind: "nosql", list: "nosql_list_databases", read: "nosql_get_database", param: "database", id: &["id"], page: Some("/dashboard/nosql/{}") },
     Kind { kind: "search", list: "search_list_clusters", read: "search_get_cluster", param: "cluster", id: &["id"], page: Some("/dashboard/search/{}") },
     Kind { kind: "bucket", list: "storage_list_buckets", read: "storage_get_bucket", param: "bucket", id: &["name"], page: Some("/dashboard/storage/{}") },
-    Kind { kind: "stream", list: "streams_list", read: "streams_get", param: "stream", id: &["id"], page: None },
+    Kind { kind: "stream", list: "streams_list", read: "streams_get", param: "stream", id: &["id"], page: Some("/dashboard/streams?stream={}") },
     Kind { kind: "vhost", list: "queues_list_vhosts", read: "queues_list_queues", param: "vhost", id: &["name"], page: Some("/dashboard/queues/queues?vhost={}") },
     Kind { kind: "function", list: "tasks_list_functions", read: "tasks_get_function", param: "id", id: &["id"], page: None },
     Kind { kind: "task queue", list: "tasks_list_queues", read: "tasks_get_queue", param: "name", id: &["name"], page: None },
@@ -79,6 +79,9 @@ pub static PAGES: &[Page] = &[
     Page { path: "/dashboard/access/audit", exact: true, kind: "token", read: "access_get_token", args: |_, q| Some(json!({ "id": q.get("grant")? })), shape: "/dashboard/access/audit?grant=<id>", not: &[] },
     Page { path: "/dashboard/access/approvals", exact: true, kind: "approval", read: "access_wait_approval", args: |_, q| Some(json!({ "approval_id": q.get("id")?, "wait": 0 })), shape: "/dashboard/access/approvals?id=<id>", not: &[] },
     Page { path: "/dashboard/queues/queues/", exact: false, kind: "queue", read: "queues_get_queue", args: |s, _| (s.len() >= 2).then(|| json!({ "vhost": s[0], "queue": s[1] })), shape: "/dashboard/queues/queues/<vhost>/<queue>", not: &[] },
+    // Postgres and streams keep their selection in the query (`?project=`, `?stream=`).
+    Page { path: "/dashboard/databases", exact: true, kind: "postgres", read: "postgres_get_project", args: |_, q| Some(json!({ "project": q.get("project")? })), shape: "/dashboard/databases?project=<id>", not: &[] },
+    Page { path: "/dashboard/streams", exact: true, kind: "stream", read: "streams_get", args: |_, q| Some(json!({ "stream": q.get("stream")? })), shape: "/dashboard/streams?stream=<id>", not: &[] },
     Page { path: "/dashboard/queues/queues", exact: true, kind: "vhost", read: "queues_list_queues", args: |_, q| Some(json!({ "vhost": q.get("vhost")? })), shape: "/dashboard/queues/queues?vhost=<vhost>", not: &[] },
 ];
 
