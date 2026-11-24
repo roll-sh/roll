@@ -83,7 +83,7 @@ fn azure_scope() -> String {
 pub const AZURE_AUDIENCE: &str = "api://AzureADTokenExchange";
 
 impl Account {
-    fn kind(&self) -> &'static str {
+    pub(crate) fn kind(&self) -> &'static str {
         match self {
             Account::Gcp { .. } => GCP,
             Account::Azure { .. } => AZURE,
@@ -98,7 +98,7 @@ impl Account {
         }
     }
 
-    fn check(&self) -> Result<()> {
+    pub fn check(&self) -> Result<()> {
         let fine = |s: &str, extra: &str| !s.is_empty() && s.len() <= 256 && s.chars().all(|c| c.is_ascii_alphanumeric() || extra.contains(c));
         let ok = match self {
             Account::Gcp { audience, service_account } => {
@@ -117,7 +117,7 @@ impl Account {
         }
     }
 
-    fn label(&self) -> String {
+    pub(crate) fn label(&self) -> String {
         match self {
             Account::Gcp { service_account, .. } => service_account.clone(),
             Account::Azure { client_id, tenant, .. } => format!("{client_id} in {tenant}"),
@@ -147,10 +147,25 @@ const FIELDS: &[Field] = &[Field { field: "access_token", label: "Access token",
 /// A token from `issuer` for `project`, exchanged at the account's cloud.
 fn exchange(c: &Clouds, db: &Db, keys: &crate::crypto::Keyring, project: &str, account: &Account, lifetime: u32) -> std::result::Result<(Value, i64), String> {
     let jwt = crate::issuer::Issuer { url: c.issuer.clone() }.sign(db, keys, project, account.audience()).map_err(|e| e.to_string())?;
+    exchange_jwt(c, &jwt, account, lifetime)
+}
+
+/// Roll's token `jwt`, exchanged at the account's cloud for its own access token.
+fn exchange_jwt(c: &Clouds, jwt: &Value, account: &Account, lifetime: u32) -> std::result::Result<(Value, i64), String> {
     match account {
-        Account::Gcp { audience, service_account } => c.tokens.gcp(audience, service_account, &jwt, lifetime),
-        Account::Azure { tenant, client_id, scope } => c.tokens.azure(tenant, client_id, scope, &jwt),
+        Account::Gcp { audience, service_account } => c.tokens.gcp(audience, service_account, jwt, lifetime),
+        Account::Azure { tenant, client_id, scope } => c.tokens.azure(tenant, client_id, scope, jwt),
     }
+}
+
+/// A token for one push of sync `sync` (`sub` [`crate::issuer::sync_subject`]), exchanged at the
+/// account's cloud.
+fn exchange_for_sync(c: &Clouds, db: &Db, keys: &crate::crypto::Keyring, project: &str, sync: &str, account: &Account) -> std::result::Result<(Value, i64), String> {
+    let sub = crate::issuer::sync_subject(project, sync);
+    let extra = json!({ "project": project, "sync": sync });
+    let jwt = crate::issuer::Issuer { url: c.issuer.clone() }.sign_for(db, keys, &sub, account.audience(), crate::issuer::TOKEN_SECONDS, extra).map_err(|e| e.to_string())?;
+    // A push is seconds: the shortest lifetime Google gives that still covers a slow one.
+    exchange_jwt(c, &jwt, account, 900)
 }
 
 pub(crate) struct Provider {
@@ -293,6 +308,40 @@ impl Secrets {
             audit::record(c, self.keys()?, project, caller, "cloud_account.add", None, None, &[], &format!("added {} account {} ({})", a.account.kind(), a.name, a.account.label()), now)
         })?;
         Ok(a)
+    }
+
+    /// roll's issuer and its keys, for a sync that signs in with `account` (syncs.rs).
+    fn sync_clouds(&self, account: &Account) -> Result<(Clouds, &crate::crypto::Keyring)> {
+        account.check()?;
+        let clouds = self.clouds.clone().ok_or_else(|| Error::BadRequest(format!("a {} sync without a stored key needs roll's issuer, which isn't on this server (rolld needs its public URL)", account.kind())))?;
+        Ok((clouds, self.keys()?))
+    }
+
+    /// An access token from `account`'s cloud for one push of sync `sync`: roll's issuer signs a
+    /// token for the sync's own subject, the cloud exchanges it. The token is the push's alone: it's
+    /// kept in memory for that push and never stored, logged or audited.
+    pub(crate) fn sync_cloud_token(&self, project: &str, sync: &str, account: &Account) -> Result<Value> {
+        let (clouds, keys) = self.sync_clouds(account)?;
+        exchange_for_sync(&clouds, &self.db, keys, project, sync, account).map(|(token, _)| token).map_err(|why| {
+            Error::Link(format!("{} didn't give roll a token for this sync: {why} (its trust names issuer {} and subject {})", account.label(), clouds.issuer, crate::issuer::sync_subject(project, sync)))
+        })
+    }
+
+    /// On making a sync that signs in with `account`: its trust refuses a made-up project's sync,
+    /// so it can't be one that takes any of roll's tokens (a tenant pointing a sync at another
+    /// customer's loose trust). The sync's own subject is trusted after it's made, once its id is
+    /// known; only a definite refusal proves anything, and nothing is made without one.
+    pub(crate) fn check_sync_trust(&self, project: &str, account: &Account) -> Result<()> {
+        let (clouds, keys) = self.sync_clouds(account)?;
+        let decoy = format!("prj_probe_{}", names::new_id("p", 12));
+        match exchange_for_sync(&clouds, &self.db, keys, &decoy, &names::new_id("syn", 16), account) {
+            Ok(_) => Err(Error::BadRequest(format!(
+                "{}'s trust takes any of roll's syncs: pin the subject to roll-secrets:{project}:sync:<this sync's id> (GCP: the provider's attribute condition or the service account's principal; Azure: the federated credential's subject), so roll acts for this sync and nobody else's",
+                account.label()
+            ))),
+            Err(why) if !denied(&why) => Err(Error::BadRequest(format!("couldn't tell whether {} refuses other projects' tokens ({why}): try again", account.label()))),
+            Err(_) => Ok(()),
+        }
     }
 
     /// Delete an account no key links to.
